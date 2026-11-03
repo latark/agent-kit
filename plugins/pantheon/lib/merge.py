@@ -7,10 +7,13 @@ PR ядра защит (Д3) агенты не сливают: его слива
   pantheon merge request <N> -R <owner/repo>   заявка: STATE/merge-queue/<owner>__<repo>__<N>.json (папка 0700,
                                                 файл 0600) с head SHA PR сейчас. Репозиторий — из [merge_repos]
                                                 metis-pantheon (policy.toml); шлюз проверяется сразу (кроме CI в работе)
+  pantheon merge request <N1> <N2> … -R <owner/repo>   пачка (metis-0668, до MAX_BATCH PR одного репозитория):
+                                                по заявке на каждый PR с полем batch — номера в порядке слияния;
+                                                шлюз не пройден хоть у одного — заявок нет ни на один
   pantheon merge run [--click]   проход по заявкам: зовёт его тик (из окна Claude Code — отказ, guard ролям тоже не даёт);
                                  --click — щелчок по уведомлению запасного пути: владелец у Mac
   pantheon merge status          заявки: репозиторий#N, SHA, возраст, отметки
-  pantheon merge cancel <N> -R <owner/repo>    снять заявку
+  pantheon merge cancel <N> -R <owner/repo>    снять заявку (из пачки — вместе со всей пачкой)
 
 Проход по каждой заявке (одна заявка — одно применение):
   1. Старше REQUEST_TTL (24 ч) — снята.
@@ -38,6 +41,13 @@ PR ядра защит (Д3) агенты не сливают: его слива
      launchd не в сессии владельца) — запасной путь: уведомление один раз, щелчок по нему запускает
      `pantheon merge run --click` от имени владельца, и окно Touch ID показывается уже оттуда. Заявку сняли или
      заменили, пока окно открыто, — проход её не трогает: ни согласия, ни слияния, ни записи обратно.
+
+Пачка (metis-0668, process_batch) — одно окно на все её PR: в тексте — сначала задетое ядро всех и число файлов, затем
+каждый PR с SHA и вердиктом шлюза по порядку, заголовки последними. До окна пункты 1–3 — у каждого: неполна (одну заявку сняли или заменили) или
+шлюз не пройден хоть у одного — сняты все с тревогой, ждёт один — ждут все. После пальца — по очереди, каждый как
+одна заявка в п. 4 (шлюз заново под замком, строка согласия, `gh pr merge --match-head-commit` своего SHA). Не слит
+один (шлюз, сбой gh, заявку сняли) — следующие не трогаются: ни согласия, ни слияния; их заявки сняты, тревога
+с итогом по каждому. Отказ, время вышло, уведомление — сразу на всю пачку.
 
 Управляемые настройки guard (metis-0710, «да» владельца 02.11 21:57). Тот же проход, под тем же замком: файл
 P.MANAGED (/Library/…/managed-settings.json) не совпал с managed-settings.json проверенного дерева guard
@@ -103,7 +113,12 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
-USAGE = "pantheon merge request|cancel <N> -R <owner/repo> | run [--click] | status"
+MAX_BATCH = 5                        # PR в одной пачке: их номера, SHA и ядро — в окне не длиннее 400 знаков
+# вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
+BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
+BILLING_SHORT = "CI: лимит, тесты ✓"
+USAGE = ("pantheon merge request <N> [<N2> …] -R <owner/repo> | cancel <N> -R <owner/repo> | run [--click] | "
+         "status")
 
 
 def set_core(mod):
@@ -211,7 +226,34 @@ def read_req(p):
         return None
     if os.path.basename(p) != os.path.basename(req_file(data["repo"], data["pr"])):
         return None
+    if "batch" in data and not valid_batch(data["batch"], data["pr"]):
+        return None
     return data
+
+
+def valid_batch(batch, pr):
+    """Пачка заявки (metis-0668): список номеров PR одного репозитория в порядке слияния, от 2 до MAX_BATCH, без
+    повторов, с номером самой заявки."""
+    return isinstance(batch, list) and 2 <= len(batch) <= MAX_BATCH and pr in batch \
+        and all(type(n) is int and PR_RE.fullmatch(str(n)) for n in batch) and len(set(batch)) == len(batch)
+
+
+def batch_key(req):
+    """Чья пачка: (репозиторий, номера по порядку, время постановки) или None — заявка одна. Заявки одной пачки
+    ставятся одним `merge request` под одним замком: ключ у них общий, у заявок другой постановки — свой."""
+    return (req["repo"], tuple(req["batch"]), req["created"]) if req.get("batch") else None
+
+
+def batch_members(req):
+    """Заявки пачки req в очереди сейчас, по порядку слияния: только с тем же ключом (batch_key). Звать под замком
+    merge-queue."""
+    out = []
+    for n in req["batch"]:
+        p = req_file(req["repo"], n)
+        cur = read_req(p) if os.path.lexists(p) else None
+        if cur and batch_key(cur) == batch_key(req):
+            out.append(cur)
+    return out
 
 
 def write_req(req):
@@ -718,8 +760,7 @@ def gate(repo, pr, sha, view):
         ids = ci_billing_ids(runs, required)
         if ci_billing(runs, required, ci_notes_fetch(repo, ids), ci_jobs_fetch(repo, ids)):
             if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
-                return "ok", (f"argus ×{len(latest)} ✓, CI не запускался (лимит минут GitHub Actions) — засчитан "
-                              f"местный прогон тестов на {sha[:12]}{warn}")
+                return "ok", f"argus ×{len(latest)} ✓, {BILLING_OK}{sha[:12]}{warn}"
             return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
                             f"(FULL_TESTS) на {sha[:12]} нет")
     if state != "ok":
@@ -781,6 +822,41 @@ def window_text(req, view, why, paths):
     title = " ".join(str(view.get("title") or "").split())[:60]
     return (f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}), файлов {len(set(paths))}, {hit}. {why}. "
             f"Заголовок: «{title}»")[:400]
+
+
+def nums(reqs):
+    """«#7, #8» — номера PR заявок."""
+    return ", ".join("#%d" % r["pr"] for r in reqs)
+
+
+def batch_window_text(reqs, views, whys, paths):
+    """Текст окна пачки (metis-0668): сначала задетые файлы ядра всех PR и число файлов — их владелец и
+    подтверждает, затем номер, SHA и вердикт шлюза каждого PR в порядке слияния (его пишет проход, не автор PR),
+    заголовки авторов — последними, в кавычках и коротко. Не длиннее 400 знаков — предел помощника окна. Ядро и
+    номера с SHA всех PR влезают при MAX_BATCH PR и любых вердиктах (argus-263a Б1): ядру — место за вычетом номеров
+    и коротких вердиктов, вердиктам — что осталось, поровну, вердикт запасного пути — коротко (BILLING_SHORT)."""
+    n = len(reqs)
+    head = f"Слить по очереди {n} PR {reqs[0]['repo']}, отказ шлюза у одного останавливает следующие."
+    every = [x for p in paths for x in p]
+    core = [x for x in dict.fromkeys(every) if is_core(x)]
+    pre = [f"#{r['pr']} {r['sha'][:7]}" for r in reqs]
+    fixed = len(" Вердикты: .") + sum(len(x) + 3 for x in pre)   # «#N sha7 » и «; » у каждого
+    room = max(400 - len(head) - fixed - n * len(f"argus ×2 ✓, {BILLING_SHORT}") - 40, 60)
+    shown, size = [], 0
+    for x in core:
+        if shown and size + len(x) > room:
+            break
+        shown.append(x)
+        size += len(x) + 2
+    more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
+    hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
+    top = f"{head} Файлов {len(set(every))}, {hit}."
+    per = min(48, max((400 - len(top) - fixed) // n, 0))
+    short = [re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, " ".join(str(w).split()))[:per]
+             for w in whys]
+    items = "; ".join(f"{x} {w}".rstrip() for x, w in zip(pre, short))
+    titles = "; ".join(f"#{r['pr']} «{' '.join(str(v.get('title') or '').split())[:40]}»" for r, v in zip(reqs, views))
+    return f"{top} Вердикты: {items}. Заголовки: {titles}"[:400]
 
 
 def ask(text):
@@ -1019,39 +1095,78 @@ def parse_target(args):
     return repo, int(rest[0])
 
 
+def parse_targets(args):
+    """<N> [<N2> …] -R <owner/repo>, -R в любом месте → (repo, [номера по порядку]) или None. Номеров от 1 до
+    MAX_BATCH, без повторов."""
+    if args.count("-R") != 1:
+        return None
+    i = args.index("-R")
+    repo = args[i + 1].lower() if i + 1 < len(args) else ""
+    rest = [a for j, a in enumerate(args) if j not in (i, i + 1)]
+    if not 1 <= len(rest) <= MAX_BATCH or not all(PR_RE.fullmatch(a) for a in rest) or len(set(rest)) != len(rest) \
+            or not REPO_RE.fullmatch(repo):
+        return None
+    return repo, [int(a) for a in rest]
+
+
 def cmd_request(args):
-    target = parse_target(args)
+    """Заявка на один PR или пачку (metis-0668: одно окно Touch ID на все). Пачка ставится целиком или никак: шлюз
+    не пройден хоть у одного — заявок нет ни на один."""
+    target = parse_targets(args)
     if not target:
         err(USAGE)
         return 2
-    repo, pr = target
+    repo, prs = target
     if repo not in allowed_repos():
         err(f"pantheon merge request: {repo} не из [merge_repos] {MERGE_DIRECTION} в policy.toml — заявки нет")
         return 2
-    view = pr_view(repo, pr)
-    if view is None:
-        err(f"pantheon merge request: gh pr view {pr} -R {repo} не ответил — заявки нет")
-        return 1
-    sha = str(view.get("headRefOid") or "").lower()
-    if not SHA_RE.fullmatch(sha):
-        err("pantheon merge request: у PR нет head SHA — заявки нет")
-        return 1
-    state, why = gate(repo, pr, sha, view)
-    if state == "fail":
-        err(f"pantheon merge request: шлюз не пройден — {why}. Заявки нет")
+    heads, bad, waits = {}, [], []
+    for pr in prs:
+        view = pr_view(repo, pr)
+        if view is None:
+            err(f"pantheon merge request: gh pr view {pr} -R {repo} не ответил — заявки нет")
+            return 1
+        sha = str(view.get("headRefOid") or "").lower()
+        if not SHA_RE.fullmatch(sha):
+            err(f"pantheon merge request: у PR #{pr} нет head SHA — заявки нет")
+            return 1
+        state, why = gate(repo, pr, sha, view)
+        if state == "fail":
+            bad.append(f"#{pr}: {why}" if len(prs) > 1 else why)
+        elif state != "ok":
+            waits.append(why.lower() if len(prs) == 1 else f"#{pr}: {why}")
+        heads[pr] = sha
+    if bad:
+        err(f"pantheon merge request: шлюз не пройден — {'; '.join(bad)}. Заявки нет"
+            + (" ни на один PR пачки" if len(prs) > 1 else ""))
         return 1
     who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец").split())[:40]
-    req = {"repo": repo, "pr": pr, "sha": sha, "by": who, "created": int(P.now())}
+    created = int(P.now())
+    reqs = [{"repo": repo, "pr": pr, "sha": heads[pr], "by": who, "created": created} for pr in prs]
+    if len(prs) > 1:
+        for req in reqs:
+            req["batch"] = list(prs)
     with P.lock("merge-queue"):
-        old = read_req(req_file(repo, pr)) if os.path.lexists(req_file(repo, pr)) else None
-        if old and old["sha"] == sha:
-            print(f"заявка {repo}#{pr} ({sha[:7]}) уже стоит")
+        olds = [read_req(req_file(repo, pr)) if os.path.lexists(req_file(repo, pr)) else None for pr in prs]
+        if all(o and o["sha"] == heads[o["pr"]] and o.get("batch") == r.get("batch") for o, r in zip(olds, reqs)) \
+                and len({o["created"] for o in olds}) == 1:
+            what = f"заявка {repo}#{prs[0]} ({heads[prs[0]][:7]})" if len(prs) == 1 else \
+                f"пачка {repo} {', '.join(f'#{n}' for n in prs)}"
+            print(f"{what} уже стоит")
             return 0
-        write_req(req)
-    log(req, "request")
-    print(f"Заявка {repo}#{pr} ({sha[:7]}) поставлена. Окно Touch ID покажет плановый проход, когда вы у Mac"
-          + ("" if state == "ok" else f" и {why.lower()} закончатся") + f"; без ответа за {REQUEST_TTL // 3600} ч "
-          "заявка гаснет.")
+        for req in reqs:
+            write_req(req)
+    for req in reqs:
+        log(req, "request", batch=",".join(map(str, prs)) if len(prs) > 1 else None)
+    later = ("" if not waits else f" и {'; '.join(waits)} закончатся" if len(prs) == 1
+             else f", а у PR закончится ожидание ({'; '.join(waits)})")
+    if len(prs) == 1:
+        print(f"Заявка {repo}#{prs[0]} ({heads[prs[0]][:7]}) поставлена. Окно Touch ID покажет плановый проход, когда вы "
+              f"у Mac{later}; без ответа за {REQUEST_TTL // 3600} ч заявка гаснет.")
+    else:
+        print(f"Пачка {repo}: {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} поставлена. Одно окно Touch ID на все "
+              f"покажет плановый проход, когда вы у Mac{later}; сливает по очереди, отказ одного останавливает "
+              f"следующие; без ответа за {REQUEST_TTL // 3600} ч пачка гаснет.")
     return 0
 
 
@@ -1072,6 +1187,36 @@ def check_all(req):
     if bad:
         return "fail", f"{bad} — номер поднимает workflow release после слияния (metis-0512)", view, None
     return "ok", why, view, paths
+
+
+def finger(req, rc=0):
+    """После пальца — одна заявка: (слит ли, текст итога). Окно было открыто до двух минут, а у пачки перед этой
+    заявкой ещё шли слияния прежних: отмена, новый «вернуть», новый коммит или правка [merge_repos] за это время — не
+    сливать. Сверка шлюза, строка согласия и снятие заявки — под замком merge-queue, как у request и cancel; слияние —
+    `gh pr merge --match-head-commit` того SHA, что в заявке."""
+    with P.lock("merge-queue"):
+        if not same_req(req):
+            return False, gone(req, rc)
+        state, why, _, _ = check_all(req)
+        if state != "ok":
+            os.remove(req_file(req["repo"], req["pr"]))
+            bad = f"после пальца условия изменились — {why}"
+        else:
+            bad = None
+            approve(req)
+            os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
+    if bad:
+        log(req, "gate-after")
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: не слито, заявка снята — {bad}",
+                "pantheon-merge")
+        return False, f"снята: {bad}"
+    code, out = gh_merge(req)
+    log(req, "merged" if code == 0 else "merge-failed", rc=code)
+    if code != 0:
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
+                "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
+        return False, f"палец есть, gh pr merge упал ({code})"
+    return True, "слит"
 
 
 def process(req, click):
@@ -1097,31 +1242,7 @@ def process(req, click):
         return "ждёт: помощника окна нет"
     log(req, "window", rc=rc, click=click)
     if rc == 0:
-        # окно было открыто до двух минут: отмена, новый «вернуть», новый коммит или правка [merge_repos] за это
-        # время — не сливать. Сверка и снятие заявки — под замком merge-queue, как у request и cancel
-        with P.lock("merge-queue"):
-            if not same_req(req):
-                return gone(req, rc)
-            state, why, _, _ = check_all(req)
-            if state != "ok":
-                os.remove(req_file(req["repo"], req["pr"]))
-                bad = f"после пальца условия изменились — {why}"
-            else:
-                bad = None
-                approve(req)
-                os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
-        if bad:
-            log(req, "gate-after")
-            P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: не слито, заявка снята — {bad}",
-                    "pantheon-merge")
-            return f"снята: {bad}"
-        code, out = gh_merge(req)
-        log(req, "merged" if code == 0 else "merge-failed", rc=code)
-        if code != 0:
-            P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
-                    "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
-            return f"палец есть, gh pr merge упал ({code})"
-        return "слит"
+        return finger(req, rc)[1]
     if rc == 1:
         return drop(req, "refused", "вы отказали")
     if rc == 3:
@@ -1144,6 +1265,98 @@ def process(req, click):
     return drop(req, "no-window", f"окно Touch ID не показано (код {rc})", warn=True)
 
 
+def drop_batch(reqs, event, why, warn=False):
+    """Снять все заявки пачки (каждую — только если в очереди та же, drop) и одной тревогой, если warn."""
+    out = [(r, drop(r, event, why)) for r in reqs]
+    if warn:
+        P.alert(f"слияние пачки {reqs[0]['repo']} {nums(reqs)} по Touch ID: заявки сняты — {why}", "pantheon-merge")
+    return out
+
+
+def process_batch(reqs, click):
+    """Пачка заявок одной постановки (metis-0668) → [(заявка, итог)] по каждой. Как process, но окно одно на всю
+    пачку: в нём ядро всех PR и список PR с SHA и вердиктами шлюза. До окна: пачка в очереди неполна (одну сняли или заменили), шлюз
+    не пройден хоть у одного — сняты все с тревогой; ждёт хоть один — ждут все. После пальца — по очереди, каждый
+    через finger (шлюз заново, строка согласия, gh pr merge --match-head-commit своего SHA); не слит один — следующие
+    не трогаются: ни согласия, ни слияния, заявки сняты (палец был на всю пачку — нужна новая заявка)."""
+    t, batch = P.now(), reqs[0]["batch"]
+    if len(reqs) != len(batch):
+        have = {r["pr"] for r in reqs}
+        miss = ", ".join("#%d" % n for n in batch if n not in have)
+        return drop_batch(reqs, "batch-broken", f"пачка неполна: заявку на {miss} сняли или заменили", warn=True)
+    if t - reqs[0]["created"] > REQUEST_TTL:
+        return drop_batch(reqs, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
+    if not click and max(r.get("wait_until", 0) for r in reqs) > t:
+        return [(r, "ждёт: окно закрыто без ответа, повтор позже") for r in reqs]
+    if not click and any(r.get("notified") for r in reqs):
+        return [(r, "ждёт щелчка по уведомлению") for r in reqs]
+    views, whys, paths, waits = [], [], [], []
+    for r in reqs:
+        state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
+        if state == "fail":
+            return drop_batch(reqs, "gate", f"#{r['pr']}: {why}", warn=True)
+        if state == "wait":
+            waits.append(f"#{r['pr']}: {why}")
+        views.append(view)
+        whys.append(why)
+        paths.append(files or [])
+    if waits:
+        return [(r, "ждёт: " + "; ".join(waits)) for r in reqs]
+    if not click and P.idle_sec() > PRESENT_SEC:
+        return [(r, "ждёт: вас нет у Mac") for r in reqs]
+    text = batch_window_text(reqs, views, whys, paths)
+    rc = ask(text)
+    if rc is None:
+        P.alert_once("merge-helper", "1", "слияние по Touch ID: помощник окна не собран (swiftc) — заявки ждут; "
+                     "собрать: pantheon install", "pantheon-merge")
+        return [(r, "ждёт: помощника окна нет") for r in reqs]
+    for r in reqs:
+        log(r, "window", rc=rc, click=click, batch=",".join(map(str, batch)))
+    if rc == 0:
+        out, merged, untouched, stop = [], [], [], None
+        for r in reqs:
+            if stop:
+                untouched.append(r)
+                out.append((r, drop(r, "batch-stopped", f"не слит: пачка остановлена на {stop}")))
+                continue
+            ok, res = finger(r, rc)
+            out.append((r, res))
+            if ok:
+                merged.append(r)
+            else:
+                stop = f"#{r['pr']} ({res})"
+        if untouched:
+            P.alert(f"слияние пачки {reqs[0]['repo']} по Touch ID остановлено на {stop}. Слиты: "
+                    f"{nums(merged) or 'ни один'}; не тронуты — согласия и слияния нет, заявки сняты, нужна новая: "
+                    f"{nums(untouched)}", "pantheon-merge")
+        return out
+    if rc == 1:
+        return drop_batch(reqs, "refused", "вы отказали")
+    if rc == 3:
+        out = []
+        for r in reqs:
+            r["wait_until"] = int(t + RETRY_SEC)
+            out.append((r, "окно закрыто без ответа — повтор позже" if keep(r) else gone(r, rc)))
+        return out
+    if rc == 2 and not click:
+        with P.lock("merge-queue"):
+            still = all(same_req(r) for r in reqs)
+        if not still:   # сняли или заменили, пока помощник пробовал окно, — и уведомления нет
+            return [(r, gone(r, rc)) for r in reqs]
+        if fallback_notify(reqs[0], text):
+            out = []
+            for r in reqs:
+                r["notified"] = int(t)
+                if keep(r):
+                    log(r, "notified")
+                    out.append((r, "окно из прохода не показать — уведомление, ждёт щелчка"))
+                else:
+                    out.append((r, gone(r, rc)))
+            return out
+        return drop_batch(reqs, "no-window", "окно Touch ID не показать и уведомление не ушло", warn=True)
+    return drop_batch(reqs, "no-window", f"окно Touch ID не показано (код {rc})", warn=True)
+
+
 def cmd_run(click=False):
     # переменная есть, пусть и пустая, — окно Claude Code: сливает только проход или щелчок владельца
     if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
@@ -1158,26 +1371,35 @@ def cmd_run(click=False):
         if not got:
             print("pantheon merge run: идёт другой проход")
             return 0
-        rc = 0
+        rc, seen = 0, set()
         for f in sorted(os.listdir(r)) if _real_dir(r) else []:
             p = os.path.join(r, f)
-            if not FILE_RE.fullmatch(f):
+            # заявку пачки уже разобрали с её первой — её файла может и не быть (слита, снята): не «битая» (argus-263a)
+            if not FILE_RE.fullmatch(f) or f in seen:
                 continue
             with P.lock("merge-queue"):
                 req = read_req(p)
                 if req is None:
                     with contextlib.suppress(OSError):
                         os.remove(p)
+                # пачка (metis-0668) — вся сразу, по порядку слияния, когда встретилась первая её заявка
+                group = batch_members(req) if req is not None and req.get("batch") else [req]
             if req is None:
                 print(f"{f}: битая заявка — удалена")
                 continue
+            seen.update(os.path.basename(req_file(g["repo"], g["pr"])) for g in group)
             try:
-                print(f"{req['repo']}#{req['pr']}: {process(req, click)}")
+                if req.get("batch"):
+                    for g, res in process_batch(group, click):
+                        print(f"{g['repo']}#{g['pr']}: {res}")
+                else:
+                    print(f"{req['repo']}#{req['pr']}: {process(req, click)}")
             except Exception as e:  # одна заявка не останавливает другие; сбойная снимается — окно не повторяется
                 rc = 1
-                with contextlib.suppress(Exception):
-                    drop(req, "error", f"сбой прохода ({type(e).__name__}: {e})", warn=True)
-                print(f"{req['repo']}#{req['pr']}: сбой ({type(e).__name__}) — заявка снята")
+                for g in group:
+                    with contextlib.suppress(Exception):
+                        drop(g, "error", f"сбой прохода ({type(e).__name__}: {e})", warn=True)
+                    print(f"{g['repo']}#{g['pr']}: сбой ({type(e).__name__}) — заявка снята")
         try:   # управляемые настройки guard (metis-0710) — тем же проходом, под тем же замком
             print(f"управляемые настройки guard: {managed_pass()}")
         except Exception as e:  # сбой не роняет проход; тревога — с причиной, повтор — следующим проходом
@@ -1204,6 +1426,8 @@ def cmd_status():
             req = read_req(os.path.join(r, f)) if FILE_RE.fullmatch(f) else None
             if req:
                 marks = (" уведомление" if req.get("notified") else "") + (" повтор позже" if req.get("wait_until", 0) > t else "")
+                if req.get("batch"):
+                    marks += " пачка " + ",".join("#%d" % n for n in req["batch"])
                 rows.append(f"{req['repo']}#{req['pr']}\t{req['sha'][:12]}\t{int((t - req['created']) // 60)} мин\t"
                             f"{req.get('by', '?')}{marks}")
     print("\n".join(rows) if rows else "заявок нет")
@@ -1222,9 +1446,14 @@ def cmd_cancel(args):
             print(f"заявки {repo}#{pr} нет")
             return 0
         req = read_req(p) or {"repo": repo, "pr": pr, "sha": None}
+        # пачка (metis-0668) без одной заявки не сливается: снимаются и остальные заявки той же постановки
+        rest = [m for m in batch_members(req) if m["pr"] != pr] if req.get("batch") else []
         os.remove(p)
-    log(req, "cancelled")
-    print(f"заявка {repo}#{pr} снята")
+        for m in rest:
+            os.remove(req_file(m["repo"], m["pr"]))
+    for m in [req] + rest:
+        log(m, "cancelled")
+    print(f"заявка {repo}#{pr} снята" + (f", с ней — вся пачка: {nums(rest)}" if rest else ""))
     return 0
 
 

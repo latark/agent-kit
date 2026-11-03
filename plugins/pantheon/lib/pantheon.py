@@ -48,7 +48,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
                                         надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
-                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA;
+                                        `request N1 N2 … -R repo` — пачка: одно окно, сливает по очереди (metis-0668)
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
