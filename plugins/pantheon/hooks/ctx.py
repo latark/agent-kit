@@ -1225,8 +1225,9 @@ def after_compact_blocks(role, ev, source, room):
 
 SUB_LIVE = 600            # субагент живой, если его транскрипт менялся не раньше, с
 DEFER_SLACK = 5           # граница сжатия засчитывается не раньше отметки минус столько, с
-DEFER_MAX = 900           # отметка старше — снимается без вставки, с
-BOUNDARY_TAIL = 1000000   # хвост транскрипта основной сессии, где ищется граница, байт
+DEFER_MAX = 900           # отметка без найденной границы старше — снимается без вставки, с
+DEFER_DEAD = 86400        # отметка с границей, которую сессия так и не забрала (умерла), снимается чисткой, с
+BOUNDARY_TAIL = 1000000   # без смещения в отметке граница ищется в этом хвосте транскрипта, байт
 
 
 def defer_path(sid):
@@ -1258,16 +1259,28 @@ def defer_compact(ev, role):
         t = old.get("t") if isinstance(old, dict) else None
         if isinstance(t, (int, float)) and time.time() - t <= DEFER_MAX:
             return
-        save_json(p, {"session_id": ev.get("session_id"), "t": time.time(), "role": role})
+        tp = ev.get("transcript_path") or ""
+        try:
+            off = os.path.getsize(tp) if tp else None  # граница пишется после хука — искать её дальше этого места
+        except OSError:
+            off = None
+        save_json(p, {"session_id": ev.get("session_id"), "t": time.time(), "role": role, "tp": tp, "off": off})
         hook_log("start", "сжатие при живых субагентах: вставка отложена до границы в транскрипте (%s)"
                  % ev.get("session_id"))
     except OSError as e:
         hook_log("start", "отметка отложенной вставки не записана, вставки не будет: %s" % e)
 
 
-def compact_boundary_since(path, since):
-    """Есть ли в хвосте транскрипта (≤ BOUNDARY_TAIL байт) граница сжатия не раньше since. Сбой чтения — OSError."""
-    for raw in reversed(tail_lines(path, BOUNDARY_TAIL, strict=True)):
+def compact_boundary_since(path, since, off=None):
+    """Есть ли в транскрипте граница сжатия не раньше since: после смещения off (размер транскрипта в момент
+    отметки), а без него — в хвосте ≤ BOUNDARY_TAIL байт. Сбой чтения — OSError."""
+    if isinstance(off, int) and not isinstance(off, bool) and off >= 0:
+        with open(path, "rb") as f:
+            f.seek(off)
+            lines = f.read().splitlines()
+    else:
+        lines = tail_lines(path, BOUNDARY_TAIL, strict=True)
+    for raw in reversed(lines):
         if b"compact_boundary" not in raw:
             continue
         try:
@@ -1281,8 +1294,9 @@ def compact_boundary_since(path, since):
 
 def deferred_compact(ev, cmd, room):
     """Отложенная вставка после сжатия: список блоков или []. Только событие основной сессии (без agent_id) и только
-    при отметке этой сессии. Граница найдена — отметка снимается и выдаются те же блоки, что дал бы SessionStart;
-    нет — отметка остаётся до DEFER_MAX. Любой сбой — без вставки, причина в журнале хуков."""
+    при отметке этой сессии. Граница найдена — отметка снимается и выдаются те же блоки, что дал бы SessionStart,
+    сколько бы времени ни прошло; нет — отметка остаётся до DEFER_MAX. Любой сбой — без вставки, причина в журнале
+    хуков."""
     if ev.get("agent_id") or ctx_off():
         return []
     sid = ev.get("session_id")
@@ -1298,12 +1312,11 @@ def deferred_compact(ev, cmd, room):
             os.remove(p)  # битую отметку не просрочить — снимаем сразу
             hook_log(cmd, "отметка отложенной вставки не читается, снята: %s" % e)
             return []
-        if time.time() - t > DEFER_MAX:
-            os.remove(p)
-            hook_log(cmd, "отложенная вставка просрочена, снята без вставки (%s)" % sid)
-            return []
-        transcript = ev.get("transcript_path") or ""
-        if not transcript or not compact_boundary_since(transcript, t - DEFER_SLACK):
+        transcript = ev.get("transcript_path") or m.get("tp") or ""
+        if not transcript or not compact_boundary_since(transcript, t - DEFER_SLACK, m.get("off")):
+            if time.time() - t > DEFER_MAX:
+                os.remove(p)
+                hook_log(cmd, "границы сжатия нет %d мин, отметка снята без вставки (%s)" % (DEFER_MAX // 60, sid))
             return []
         os.remove(p)  # снята этим вызовом — значит, выдаёт он один (clock, deferred и maint-post могут идти разом)
         return after_compact_blocks(m.get("role") or session_role(ev), ev, "compact", room)
@@ -1798,8 +1811,9 @@ def cmd_deferred(ev):
 
 
 def sweep_deferred():
-    """Снять отметки любых сессий старше DEFER_MAX: отметка умершей сессии иначе заставляла бы каждую сессию
-    запускать python на каждом PostToolUse (проверка оболочкой в hooks.json смотрит только наличие файла)."""
+    """Снять отметки любых сессий старше DEFER_MAX, у которых граница сжатия так и не появилась (и любые старше
+    DEFER_DEAD): отметка умершей сессии иначе заставляла бы каждую сессию запускать python на каждом PostToolUse
+    (проверка оболочкой в hooks.json смотрит только наличие файла). Отметку с границей забирает сама сессия."""
     d = os.path.join(CTX, "deferred")
     try:
         names = os.listdir(d)
@@ -1808,9 +1822,21 @@ def sweep_deferred():
     for n in names:
         p = os.path.join(d, n)
         try:
-            if n.endswith(".json") and time.time() - os.path.getmtime(p) > DEFER_MAX:
-                os.remove(p)
-                hook_log("deferred", "просроченная отметка снята: %s" % n)
+            if not n.endswith(".json"):
+                continue
+            age = time.time() - os.path.getmtime(p)
+            if age <= DEFER_MAX:
+                continue
+            if age <= DEFER_DEAD:
+                try:
+                    m = load_json(p)
+                    if (isinstance(m, dict) and m.get("tp")
+                            and compact_boundary_since(m["tp"], float(m.get("t", 0)) - DEFER_SLACK, m.get("off"))):
+                        continue  # граница есть — вставку заберёт сама сессия на своём шаге
+                except (OSError, ValueError, TypeError):
+                    pass
+            os.remove(p)
+            hook_log("deferred", "просроченная отметка снята: %s" % n)
         except OSError:
             pass
 

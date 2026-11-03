@@ -926,7 +926,9 @@ r = run("start", ms)
 check("живой субагент (транскрипт 9 мин назад) → без текста HANDOFF, отметка записана",
       "СЛИВА" not in r.stdout and r.returncode == 0 and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 mk = json.load(open(defer_mark("s-ms"))) if os.path.exists(defer_mark("s-ms")) else {}
-check("отметка: session_id и время", mk.get("session_id") == "s-ms" and abs(mk.get("t", 0) - t_mark) < 30, mk)
+check("отметка: session_id, время, транскрипт и его размер в момент хука",
+      mk.get("session_id") == "s-ms" and abs(mk.get("t", 0) - t_mark) < 30 and mk.get("tp") == ms["transcript_path"]
+      and mk.get("off") == os.path.getsize(ms["transcript_path"]), mk)
 r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash"))
 check("maint-post без границы в транскрипте → ничего, отметка цела",
       r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
@@ -952,6 +954,9 @@ append(ms["transcript_path"], boundary(t_mark + 1))
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read", agent_id="a1", agent_type="dev-opus"))
 check("deferred субагента (agent_id) → ничего, отметка цела",
       r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"), PANTHEON_CTX_OFF="1")
+check("deferred при PANTHEON_CTX_OFF=1 → ничего, отметка цела",
+      r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
 check("deferred основной сессии после границы → файл передачи дел (PostToolUse), отметка снята",
       "СЛИВА" in ctx_text(r) and json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
@@ -959,14 +964,22 @@ check("deferred основной сессии после границы → фа
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
 check("повторный deferred → ничего (выдано один раз)", r.stdout.strip() == "" and r.returncode == 0, r.stdout)
 old_mark, new_mark = defer_mark("s-dead"), defer_mark("s-alive")
-for pth, age in ((old_mark, 1000), (new_mark, 100)):
+held_mark, dead_mark = defer_mark("s-held"), defer_mark("s-gone")
+tr_held = transcript("s-held", [user("x", "s-held-1", now - 2000)])
+off_held = os.path.getsize(tr_held)
+append(tr_held, boundary(time.time() - 990))
+for pth, age, tp, off in ((old_mark, 1000, tr_held, off_held + 10 ** 6), (new_mark, 100, "", None),
+                          (held_mark, 1000, tr_held, off_held), (dead_mark, 90000, tr_held, off_held)):
     with open(pth, "w") as fh:
-        json.dump({"session_id": os.path.basename(pth)[:-5], "t": time.time() - age, "role": ""}, fh)
+        json.dump({"session_id": os.path.basename(pth)[:-5], "t": time.time() - age, "role": "", "tp": tp, "off": off}, fh)
     os.utime(pth, (time.time() - age, time.time() - age))
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
-check("deferred любой сессии снимает чужие отметки старше 15 мин, свежие не трогает",
-      r.returncode == 0 and not os.path.exists(old_mark) and os.path.exists(new_mark), r.stdout + r.stderr)
-os.remove(new_mark)
+check("deferred любой сессии снимает чужие отметки старше 15 мин без границы и старше суток, свежие и с границей "
+      "не трогает", r.returncode == 0 and not os.path.exists(old_mark) and os.path.exists(new_mark)
+      and os.path.exists(held_mark) and not os.path.exists(dead_mark), r.stdout + r.stderr)
+for pth in (old_mark, new_mark, held_mark, dead_mark):
+    if os.path.exists(pth):
+        os.remove(pth)
 
 # непросроченная отметка не сдвигается следующим сжатием субагента; сжатие без живых субагентов её снимает
 live_sub("s-ms", age=0)
@@ -980,13 +993,31 @@ r = run("start", ms)
 check("сжатие без живых субагентов при стоящей отметке → вставка сразу, отметка снята",
       "СЛИВА" in ctx_text(r) and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 
-# просроченная и битая отметки
-with open(defer_mark("s-ms"), "w") as fh:
-    json.dump({"session_id": "s-ms", "t": time.time() - 1000, "role": ""}, fh)
-append(ms["transcript_path"], boundary(time.time()))
+# старая отметка: с границей — вставка, сколько бы ни прошло; без границы — снята без вставки
+def put_mark(age, off):
+    with open(defer_mark("s-ms"), "w") as fh:
+        json.dump({"session_id": "s-ms", "t": time.time() - age, "role": "", "tp": ms["transcript_path"], "off": off}, fh)
+
+
+put_mark(1000, os.path.getsize(ms["transcript_path"]))
+append(ms["transcript_path"], boundary(time.time() - 995))
 r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x"))
-check("отметка старше 15 мин → снята без вставки (и при новой границе)",
+check("граница записана, первый шаг через 16 мин → вставка, отметка снята (П1)",
+      "СЛИВА" in ctx_text(r) and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+put_mark(1000, os.path.getsize(ms["transcript_path"]))
+r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x"))
+check("отметка старше 15 мин без новой границы (старые границы до смещения не в счёт) → снята без вставки",
       "СЛИВА" not in r.stdout and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+put_mark(100, os.path.getsize(ms["transcript_path"]))
+append(ms["transcript_path"], boundary(time.time()))
+b0 = os.path.getsize(ms["transcript_path"])
+with open(ms["transcript_path"], "a") as fh:
+    for i in range(1300):
+        fh.write(json.dumps({"type": "attachment", "n": i, "pad": "я" * 500}, ensure_ascii=False) + "\n")
+r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x"))
+check("после границы больше 1 МБ записей → граница найдена от смещения, вставка (П2)",
+      os.path.getsize(ms["transcript_path"]) - b0 > 10 ** 6
+      and "СЛИВА" in ctx_text(r) and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 with open(defer_mark("s-ms"), "w") as fh:
     fh.write("{не json")
 r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x"))
@@ -1211,7 +1242,10 @@ check("hooks.json: с папкой push запускается ctx.py push (че
 with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
     sh = [h["command"] for m in json.load(fh)["hooks"]["PostToolUse"] for h in m["hooks"]
           if h["command"].endswith("ctx.py\" deferred; done")]
-check("hooks.json: одна запись PostToolUse для ctx.py deferred, без matcher", len(sh) == 1, sh)
+shm = [m for m in json.load(open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")))
+       ["hooks"]["PostToolUse"] if any(h["command"].endswith("ctx.py\" deferred; done") for h in m["hooks"])]
+check("hooks.json: одна запись PostToolUse для ctx.py deferred, без matcher",
+      len(sh) == 1 and len(shm) == 1 and "matcher" not in shm[0], shm)
 sh = sh[0] if sh else "exit 1"
 DEFD = os.path.join(state, "ctx", "deferred")
 shutil.rmtree(DEFD, ignore_errors=True)
