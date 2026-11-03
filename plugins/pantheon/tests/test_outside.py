@@ -2099,6 +2099,97 @@ os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
 os.remove(O.root("runs", "20261102-101010-dddddd.json"))
 os.remove(O.root("runs", "20261102-101010-a1a1a1.json"))
 
+# сторож (metis-0723): running дольше срока при живом заходе — снять; queued с заявкой дольше срока — одна тревога
+_alerts = []
+_pa = P.alert
+P.alert = lambda text, who="pantheon": _alerts.append(text)
+HOLD = ("import fcntl,os,subprocess,sys,time;"
+        "fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_APPEND);fcntl.flock(fd,fcntl.LOCK_EX);"
+        "k=subprocess.Popen(['sleep','300'],start_new_session=True,stdin=-3,stdout=-3,stderr=-3);print(k.pid,flush=True);time.sleep(300)")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    time.sleep(0.05)
+    try:
+        return os.waitpid(pid, os.WNOHANG) == (0, 0)
+    except ChildProcessError:
+        return True
+
+
+def holder_start():
+    os.makedirs(P.path("locks"), exist_ok=True)
+    h = subprocess.Popen([sys.executable, "-I", "-c", HOLD, P.path("locks", "outside-run.lock")],
+                         stdout=subprocess.PIPE, text=True)
+    return h, int(h.stdout.readline())
+
+
+def age_runs(rid, age):
+    fp = O.root("runs", rid + ".json")
+    os.utime(fp, (time.time() - age, time.time() - age))
+
+
+WQ, WR, WF, WL = ("20261102-111111-" + x for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd"))
+put_result(WQ, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)
+with open(os.path.join(qa, WQ + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WF, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED - 600)    # срок не прошёл
+with open(os.path.join(qa, WF + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WL, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)    # без заявки — не дело сторожа
+check("сторож: queued с заявкой дольше срока — due, моложе срока и без заявки — нет",
+      O._watch_due() == [("queued", qa, WQ)], O._watch_due())
+check("сторож: queued — одна тревога, итог не тронут",
+      O.watchdog() == 1 and len(_alerts) == 1 and WQ in _alerts[0] and O.load_result(qa, WQ).get("state") == "queued", _alerts)
+check("сторож: после тревоги queued не повод тику", not O._watch_due())
+check("сторож: повторные проходы (в том числе cmd_run) тревоги не повторяют",
+      O.watchdog() == 0 and run_pass() == 0 and len(_alerts) == 1, _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test", "sha": "a" * 40})
+_h0 = O._run_holder
+h, kid = holder_start()
+O._run_holder = lambda: h.pid
+O.watchdog()
+check("сторож: running в пределах срока при живом заходе — не тронут",
+      O.load_result(qa, WR).get("state") == "running" and alive(h.pid) and alive(kid) and len(_alerts) == 1)
+age_runs(WR, O.WATCH_RUNNING + 60)
+check("сторож: running дольше срока — due", O._watch_due() == [("running", qa, WR)], O._watch_due())
+n = O.watchdog()
+h.wait(timeout=10)
+rs = O.load_result(qa, WR)
+check("сторож: running дольше срока при живом заходе → failed «сторож: дольше», заход и его группа убиты",
+      n == 1 and rs.get("state") == "failed" and "сторож: дольше" in rs.get("why", "") and not alive(h.pid) and not alive(kid)
+      and set(rs) == {"id", "kind", "state", "why", "updated"}, (n, rs))
+check("сторож: на снятие одна тревога, status видит итог", len(_alerts) == 2 and WR in _alerts[1]
+      and P.read_json(O.root("runs", WR + ".json"), {}).get("state") == "failed", _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test"})
+age_runs(WR, O.WATCH_RUNNING + 60)
+O.watchdog()
+check("сторож: захода нет (замок свободен) — running не снимает, его чинит recover_results",
+      O.load_result(qa, WR).get("state") == "running" and len(_alerts) == 2)
+h, kid = holder_start()
+O._run_holder = lambda: None
+O.watchdog()
+O.watchdog()
+check("сторож: замок держит не определить — тревога раз, процесс не тронут, итог тот же",
+      len(_alerts) == 3 and alive(h.pid) and O.load_result(qa, WR).get("state") == "running", _alerts)
+O._run_holder = _h0
+if MAC:
+    check("_run_holder: lsof находит держателя замка", O._run_holder() == h.pid, O._run_holder())
+h.kill()
+h.wait()
+os.kill(kid, 9)
+P.alert = _pa
+for x in (WQ, WR, WF, WL):
+    for ext in ("result.json", "req.json"):
+        if os.path.exists(os.path.join(qa, f"{x}.{ext}")):
+            os.remove(os.path.join(qa, f"{x}.{ext}"))
+    for ext in ("json", "alerted"):
+        if os.path.exists(O.root("runs", f"{x}.{ext}")):
+            os.remove(O.root("runs", f"{x}.{ext}"))
+
 # «принять» раньше кэша PR: журнал не считается просмотренным, пока кэш не обновили (Б1, argus 2-й круг)
 _cp = os.path.join(STATE, "autoclose-prs.json")
 _saved = open(_cp).read() if os.path.exists(_cp) else None
