@@ -30,11 +30,15 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   токеном (`--task ID`; example.com не открывает le.com). Адрес — печатные ASCII без «\\», «хост:порт» без %, [], @.
   Адрес вкладки сверяется после /open (нет поля url — отказ), в итоге read и после eval; чужой — about:blank и отказ.
   reads.toml правит владелец: зона ~/.claude/pantheon/ ролям закрыта.
-- eval — только изолированный мир демона (переменные страницы не видны); выражение с побочным действием (нажатие,
-  отправка, сброс и шаги полей формы, запросы, загрузка ресурса, cookie и хранилища, присваивание, переход, вызов через
-  prototype/call/apply, обращение к свойству по строке) — отказ (eval_bad: EVAL_DENY, EVAL_COMPUTED). `new` — только
-  URL, URLSearchParams, Date, Set, Map, RegExp и Intl.* (EVAL_NEW): new Audio, new FontFace, new Image и прочие
-  конструкторы с адресом выходят в сеть. Это защита от ошибки агента и указаний со страницы, а не от намеренного
+- eval — только изолированный мир демона (переменные страницы не видны) и только чтение, по списку разрешённого
+  (решение владельца 03.11): любой вызов `.имя(` или `имя(` — отказ «вызов <имя> нет в списке разрешённого
+  (EVAL_CALLS)», если имени нет в EVAL_CALLS (querySelector, getAttribute, map, filter, trim, JSON.stringify и прочие
+  методы чтения; без объекта — только EVAL_GLOBALS: Number, String, parseInt…). Вызов без имени (`?.(`, `)(` не у
+  стрелки), тег шаблона, \\u и комментарий вне строки — отказ. Свойства без вызова (textContent, href, value) — можно.
+  Ещё отказ: cookie и хранилища, присваивание, переход, call/apply/prototype, обращение к свойству по строке
+  (EVAL_DENY, EVAL_COMPUTED), функция по ссылке в map/replace и переназначение имени из списка (EVAL_REBIND).
+  `new` — только URL, URLSearchParams, Date, Set, Map, RegExp и Intl.* (EVAL_NEW): new Audio, new FontFace, new Image
+  и прочие конструкторы с адресом выходят в сеть. Это защита от ошибки агента и указаний со страницы, а не от намеренного
   обхода (как guard, README guard): обход — правка роли, не шаблона.
 - Сырые /cmd, /events, /console и /close демона наружу не выходят, и сам проход их не зовёт: только /health, /open,
   /eval.
@@ -105,46 +109,201 @@ HTTP_TIMEOUT = 60
 READ_MAX = 4 * 1024 * 1024
 FINAL = ("done", "failed", "refused")
 
-# eval без побочных действий: шаблон ловит ошибку агента и указание со страницы, не намеренный обход (README guard).
-# Классы E1–E7 модели угроз (drafts/0760-threat-model.md); обфускация сверх этого — остаток, шаблон не наращивать.
-# E6 (Б3 круга 2): загрузка ресурса — .load( (FontFace, media), addModule (worklet), fetchLater. E7 (Д3): форма не
-# меняется — .reset(, .stepUp(, .stepDown(, .requestClose(, .add( нового элемента в select
+# eval — только чтение, по списку разрешённого (решение владельца 03.11, круг 4 PR #290): любой вызов — отказ, если
+# имени нет в EVAL_CALLS. Классы E1–E9 модели угроз (drafts/0760-threat-model.md). Шаблон ловит ошибку агента и
+# указание со страницы, не намеренный обход (README guard): обфускация сверх этого — остаток, шаблон не наращивать.
+EVAL_CALLS = frozenset((
+    "querySelector", "querySelectorAll", "getAttribute", "hasAttribute", "closest", "matches", "getComputedStyle",
+    "getBoundingClientRect", "getElementById", "getElementsByTagName", "getElementsByClassName", "getElementsByName",
+    "map", "filter", "slice", "join", "trim", "includes", "startsWith", "endsWith", "split", "replace", "toLowerCase",
+    "toUpperCase", "indexOf", "find", "some", "every", "reduce", "keys", "values", "entries", "from", "get", "has",
+    "test", "exec", "match", "format", "toString", "toFixed", "parseInt", "parseFloat", "Number", "String", "Boolean",
+    "stringify", "encodeURIComponent"))
+EVAL_GLOBALS = frozenset(("getComputedStyle", "parseInt", "parseFloat", "Number", "String", "Boolean",
+                          "encodeURIComponent"))     # без объекта перед именем можно звать только эти
+EVAL_CALLBACK = {"map": 0, "filter": 0, "find": 0, "some": 0, "every": 0, "reduce": 0, "from": 1}  # аргумент-функция
+EVAL_KEYWORDS = frozenset(("if", "for", "while", "switch", "catch", "function", "return", "typeof", "void", "await",
+                           "async", "in", "of", "instanceof", "else", "do", "case", "yield"))
+# Кроме вызовов (их проверяет eval_calls): имена-ссылки на побочные действия и секреты, навигация, присваивание
 EVAL_DENY = re.compile(r"""(?x)
-    \.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|remove|removeChild|append|appendChild|prepend|
-          replaceChild|replaceWith|replaceChildren|insertBefore|insertAdjacent\w*|before|after|setAttribute\w*|
-          removeAttribute\w*|toggleAttribute|setItem|removeItem|assign|reload|open|write|writeln|showModal|close|
-          play|pause|setRangeText|setSelectionRange|execCommand|sendBeacon|postMessage|pushState|replaceState|
-          defineProperty|defineProperties|setPrototypeOf|set|on[a-z]+|
-          load|addModule|reset|stepUp|stepDown|requestClose)\s*\(
-  | \.\s*add\s*\(\s*(?:new\b|document\s*\.\s*createElement\b)
-  | \.\s*(?:click|submit|requestSubmit|call|apply|bind)\b
-  | (?<![\w$.])(?:open|close|print|alert|confirm|prompt|stop|focus|blur|postMessage|scroll|scrollTo|scrollBy|moveTo|
-          moveBy|resizeTo|resizeBy)\s*\(
-  | \b(?:fetch|fetchLater|XMLHttpRequest|WebSocket|EventSource|eval|Function|import|setTimeout|setInterval|requestAnimationFrame|
-          requestIdleCallback|queueMicrotask|Worker|SharedWorker|Reflect|BroadcastChannel|MessageChannel|
-          RTCPeerConnection|WebTransport|opener|prototype|constructor|__proto__|history|navigation)\b
+    \.\s*(?:click|submit|requestSubmit|call|apply|bind)\b
+  | \b(?:fetch|fetchLater|XMLHttpRequest|WebSocket|EventSource|eval|Function|import|setTimeout|setInterval|
+          requestAnimationFrame|requestIdleCallback|queueMicrotask|Worker|SharedWorker|Reflect|BroadcastChannel|
+          MessageChannel|RTCPeerConnection|WebTransport|opener|prototype|constructor|__proto__|history|navigation|
+          Symbol)\b
   | \b(?:cookie|cookieStore|localStorage|sessionStorage|indexedDB|caches|serviceWorker|credentials|clipboard)\b
+  | \b(?:classList|relList|part|sandbox)\s*\.\s*replace\b
   | \bwith\s*\(
   | \blocation\b(?!\s*\.\s*(?:href|origin|protocol|host|hostname|port|pathname|search|hash)\b)
   | (?:\.\s*[\w$]+|\])\s*(?:\*\*|<<|>>>?|\?\?|\|\||&&|[-+*/%&|^])?=(?![=>])
   | (?:\+\+|--)\s*[\w$.\[\]]*[.\]]|[.\]][\w$]*\s*(?:\+\+|--)
 """)
-# E4: обращение к свойству по строке (globalThis['fe'+'tch']) — на остове выражения, где строки вырезаны: селектор
-# 'input[name="x"]' внутри строки не мешает. Отказ — «[» сразу после имени, «)» или «]» (доступ к свойству, а не
-# литерал массива ['h1', 'h2']) со строкой внутри
-EVAL_STRINGS = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\$]|\\.|\$(?!\{))*`""")
+# E4: обращение к свойству по строке (globalThis['fe'+'tch']) — на остове, где строки пустые: «[» сразу после имени,
+# «)» или «]» (доступ к свойству, а не литерал массива ['h1', 'h2']) со строкой внутри
 EVAL_COMPUTED = re.compile(r"[\w$)\]]\s*\[[^\[\]]*(?:''|\"\"|``)")
-# E6 (Б3): `new` — только по списку; new Audio(url), new FontFace(…, 'url(…)'), new Image, new Option и прочие — отказ.
-# На остове: «.new-badge» в строке селектора не мешает
+# E6: `new` — только по списку; new Audio(url), new FontFace(…, 'url(…)'), new Image, new Option — отказ. На остове
 EVAL_NEW = re.compile(r"(?<![\w$.])new\b(?!\s*(?:URL|URLSearchParams|Date|Set|Map|RegExp|Intl\s*\.\s*[A-Za-z]+)"
                       r"(?![\w$]|\s*\.))\s*[\w$.]*")
+# E8: имя из списка нельзя переназначить — иначе `const Number = open; Number(url)`, `({get: open}).get(url)`,
+# `{toString: open} + ''`. Объявление, параметр стрелки, разбор, присваивание, ключ со ссылкой (а не вызовом)
+_N = "|".join(sorted(EVAL_CALLS | {"valueOf", "toJSON", "then", "handleEvent"}, key=len, reverse=True))
+EVAL_REBIND = re.compile(rf"""(?x)
+    \b(?:const|let|var|function|class)\s*\*?\s*(?:{_N})(?![\w$])
+  | (?<![\w$.])(?:{_N})\s*(?:=>|=(?![=>]))
+  | \(\s*(?:[\w$]+\s*,\s*)*(?:{_N})\s*(?:,\s*[\w$]+\s*)*\)\s*=>
+  | [{{,]\s*(?:[\w$]+\s*:\s*)?(?:{_N})\s*(?=[,}}])
+  | (?<![\w$.?])(?:{_N})\s*:\s*[A-Za-z_$][\w$.]*\s*(?=[,}}])
+""")
+EVAL_CALL = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*\(|\?\.\s*\(|[)\]}]\s*\(")
+EVAL_FUNC = re.compile(r"\s*(?:async\b\s*)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)")
+EVAL_REF = re.compile(r"\s*[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*\s*")
+
+
+def eval_skeleton(expr):
+    """(остов, ошибка). Остов — выражение без текста строк: '…' → '', "…" → "", у шаблона `…${x}…` остаётся код
+    вставок: `(x)`. Ошибка — вызов тега шаблона (fetch`url`), \\u вне строки (f\\u0065tch, document.\\u0063ookie) или
+    комментарий вне строки (fetch/**/(…)): так имя вызова прячется от проверки."""
+    out = []
+
+    def code(i, inner):
+        depth = 0
+        while i < len(expr):
+            c = expr[i]
+            if c in "'\"":
+                j = i + 1
+                while j < len(expr) and expr[j] not in (c, "\n"):
+                    j += 2 if expr[j] == "\\" else 1
+                out.append(c * 2)
+                i = j + 1
+            elif c == "`":
+                prev = "".join(out).rstrip()[-1:]
+                if prev and (prev.isalnum() or prev in "_$)]"):
+                    raise ValueError(f"вызов тега шаблона «…{prev}`» — только по имени из EVAL_CALLS")
+                out.append("`")
+                i = template(i + 1)
+            elif c == "\\":
+                if expr[i + 1:i + 2] == "u":
+                    raise ValueError("\\u вне строки — имя спрятано экранированием")
+                out.append(expr[i:i + 2])
+                i += 2
+            elif c == "/" and expr[i + 1:i + 2] in ("/", "*"):
+                raise ValueError("комментарий вне строки — нельзя: прячет вызов")
+            else:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    if inner and depth == 0:
+                        return i + 1
+                    depth -= 1
+                out.append(c)
+                i += 1
+        return i
+
+    def template(i):
+        first = True
+        while i < len(expr):
+            c = expr[i]
+            if c == "\\":
+                i += 2
+            elif c == "`":
+                out.append("`")
+                return i + 1
+            elif expr.startswith("${", i):
+                out.append("(" if first else ",(")
+                first = False
+                i = code(i + 2, True)
+                out.append(")")
+            else:
+                i += 1
+        return i
+
+    try:
+        code(0, False)
+    except ValueError as e:
+        return "".join(out), str(e)
+    return "".join(out), None
+
+
+def _pair(s, i, step):
+    """Индекс парной скобки к s[i] («(» вперёд при step=1, «)» назад при step=-1) или None."""
+    depth = 0
+    while 0 <= i < len(s):
+        depth += {"(": step, ")": -step}.get(s[i], 0)
+        if depth == 0:
+            return i
+        i += step
+    return None
+
+
+def _args(s, o, c):
+    """Аргументы верхнего уровня вызова со скобками s[o] и s[c]."""
+    out, depth, start = [], 0, o + 1
+    for k in range(o + 1, c):
+        ch = s[k]
+        depth += 1 if ch in "([{" else -1 if ch in ")]}" else 0
+        if ch == "," and depth == 0:
+            out.append(s[start:k])
+            start = k + 1
+    last = s[start:c]
+    return out + [last] if out or last.strip() else out
+
+
+def eval_calls(skel):
+    """Причина отказа по вызовам на остове или None. Вызов — `.имя(`, `имя(`, `?.(`, `)(`, `](`, `}(`: имя — только из
+    EVAL_CALLS (без объекта — только EVAL_GLOBALS, stringify — только JSON.stringify), `)(` — только у стрелки или
+    function, остальное без имени — отказ. Функция-аргумент map/filter/find/some/every/reduce (у from — второй) —
+    стрелка, function или имя из EVAL_GLOBALS (window.find('x') — отказ); второй аргумент replace и JSON.stringify —
+    не ссылка на функцию (`.replace(re, open)`)."""
+    for m in EVAL_CALL.finditer(skel):
+        o = m.end() - 1
+        c = _pair(skel, o, 1)
+        name = m.group(1)
+        if name is None:
+            if m.group(0)[0] == ")":
+                b = _pair(skel, m.start(), -1)
+                if b is not None and EVAL_FUNC.match(skel[b + 1:m.start()]):
+                    continue
+            return f"вызов без имени «{skel[max(0, m.start() - 20):m.end()].strip()}» — только .имя( из EVAL_CALLS"
+        before = skel[:m.start(1)]
+        if (name in EVAL_KEYWORDS or re.search(r"(?<![\w$.])new\s*(?:Intl\s*\.\s*)?$", before)
+                or re.search(r"\bfunction\s*\*?\s*$", before)
+                or (c is not None and skel[c + 1:].lstrip().startswith("{"))):
+            continue                          # не вызов: слово языка, new (EVAL_NEW), объявление функции или метода
+        if name not in EVAL_CALLS:
+            return f"вызов {name} нет в списке разрешённого (EVAL_CALLS)"
+        if (not re.search(r"\.\s*$", before) and name not in EVAL_GLOBALS) or (
+                name == "stringify" and not re.search(r"(?<![\w$.])JSON\s*\.\s*$", before)):
+            return (f"вызов {name} так нет в списке разрешённого (EVAL_CALLS): без объекта — только "
+                    + ", ".join(sorted(EVAL_GLOBALS)) + "; stringify — только JSON.stringify")
+        args = _args(skel, o, c) if c is not None else []
+        if name in EVAL_CALLBACK:
+            k = EVAL_CALLBACK[name]
+            a = args[k] if len(args) > k else None
+            if (a is None and k == 0) or (a is not None and not EVAL_FUNC.match(a) and a.strip() not in EVAL_GLOBALS):
+                return (f"{name}: аргумент-функция «{(a or '').strip()[:30]}» — только стрелка (x => …), function "
+                        "или " + ", ".join(sorted(EVAL_GLOBALS)))
+        elif (name in ("replace", "stringify") and len(args) > 1 and EVAL_REF.fullmatch(args[1])
+              and args[1].strip() not in EVAL_GLOBALS | {"null", "undefined"}):
+            return f"{name}: функция по ссылке «{args[1].strip()[:30]}» — только стрелка (x => …) или значение"
+    return None
 
 
 def eval_bad(expr):
-    """Что в выражении eval — побочное действие или секрет (EVAL_DENY, EVAL_COMPUTED, EVAL_NEW), или None."""
-    skel = EVAL_STRINGS.sub(lambda s: s.group(0)[0] * 2, expr)
-    m = EVAL_DENY.search(expr) or EVAL_COMPUTED.search(skel) or EVAL_NEW.search(skel)
-    return m.group(0).strip() if m else None
+    """Причина отказа eval или None: побочное действие или секрет (EVAL_DENY), прятки имени (eval_skeleton),
+    обращение по строке (EVAL_COMPUTED), `new` вне списка (EVAL_NEW), переназначение имени из списка (EVAL_REBIND),
+    вызов вне EVAL_CALLS (eval_calls)."""
+    m = EVAL_DENY.search(expr)
+    if m:
+        return f"побочное действие или секрет «{m.group(0).strip()[:40]}»"
+    skel, why = eval_skeleton(expr)
+    if why:
+        return why
+    for rx, what in ((EVAL_COMPUTED, "обращение к свойству по строке"), (EVAL_NEW, "new вне списка (EVAL_NEW)"),
+                     (EVAL_REBIND, "имя из списка разрешённого переназначено")):
+        m = rx.search(skel)
+        if m:
+            return f"{what} «{m.group(0).strip()[:40]}»"
+    return eval_calls(skel)
 
 
 class Refuse(Exception):
@@ -525,8 +684,7 @@ def execute(req, win, domains):
                         f"пароль демона у прохода {'есть' if tok else 'НЕТ'}"), ""
     bad = eval_bad(req["expr"]) if op == "eval" else None
     if bad:
-        raise Refuse(f"eval с побочным действием или секретом («{bad[:40]}») — только чтение страницы; нажатия, ввод и "
-                     "отправка — metis-0765")
+        raise Refuse(f"eval: {bad} — только чтение страницы; нажатия, ввод и отправка — metis-0765")
     url = req.get("url")
     host = None
     if url:

