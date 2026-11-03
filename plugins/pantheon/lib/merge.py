@@ -653,16 +653,17 @@ def ci_jobs_fetch(repo, ids):
 
 
 def ci_state(rollup, required=(), runs=None, optional=()):
-    """(ok|wait|fail, текст) по ci_verdict. Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет.
-    Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
+    """(ok|wait|fail, текст, предупреждения о красных необязательных) по ci_verdict. Проверок нет — wait: они ещё не
+    встали; по 24 ч заявка всё равно гаснет. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait:
+    сбой gh не снимает заявку."""
     if required and runs is None:
-        return "wait", "запуски Actions на head PR не получены"
-    state, why, _ = ci_verdict(rollup, required, runs, optional)
+        return "wait", "запуски Actions на head PR не получены", []
+    state, why, notes = ci_verdict(rollup, required, runs, optional)
     if state == "empty":
-        return "wait", "проверок GitHub пока нет"
+        return "wait", "проверок GitHub пока нет", notes
     if state == "ok":
-        return "ok", f"CI ✓ ({len(rollup)})"
-    return state, why
+        return "ok", f"CI ✓ ({len(rollup)})", notes
+    return state, why, notes
 
 
 # --- шлюз -----------------------------------------------------------------------------------------------------------
@@ -697,7 +698,9 @@ def gate(repo, pr, sha, view):
         return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
-    state, why = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
+    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
+    # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
+    warn = "".join(f"; {n}" for n in notes)
     if state == "fail":
         # CI не запускался из-за лимита минут или оплаты (metis-0655): вместо CI засчитывается запись тестов на этот
         # SHA с командой полного набора FULL_TESTS (full_tests_record), как в шлюзе guard (_billing_problem); нет
@@ -706,12 +709,12 @@ def gate(repo, pr, sha, view):
         if ci_billing(runs, required, ci_notes_fetch(repo, ids), ci_jobs_fetch(repo, ids)):
             if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
                 return "ok", (f"argus ×{len(latest)} ✓, CI не запускался (лимит минут GitHub Actions) — засчитан "
-                              f"местный прогон тестов на {sha[:12]}")
+                              f"местный прогон тестов на {sha[:12]}{warn}")
             return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
                             f"(FULL_TESTS) на {sha[:12]} нет")
     if state != "ok":
         return state, why
-    return "ok", f"argus ×{len(latest)} ✓, CI ✓"
+    return "ok", f"argus ×{len(latest)} ✓, CI ✓{warn}"
 
 
 # --- помощник Touch ID ----------------------------------------------------------------------------------------------
