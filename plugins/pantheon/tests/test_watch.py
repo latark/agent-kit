@@ -7,6 +7,7 @@ COST-04, TOOL-04 на временных папках. Claude Code подмен�
 список из файла, остальные вызовы пишутся в журнал (запуски не настоящие).
 """
 import hashlib
+import re
 import json
 import shutil
 import os
@@ -66,6 +67,9 @@ elif a[:1] == ["rm"] and a[1:2] and a[1] in os.environ.get("FAKE_RM_REFUSE", "")
 elif a[:1] == ["--bg"] and os.environ.get("FAKE_BG_SLEEP"):
     import time
     time.sleep(float(os.environ["FAKE_BG_SLEEP"]))
+elif "--resume" in a and os.environ.get("FAKE_RESUME_RC"):
+    print("resume: failed", file=sys.stderr)
+    sys.exit(int(os.environ["FAKE_RESUME_RC"]))
 elif "--resume" in a:
     print(os.environ.get("FAKE_RESUME_OUT", "backgrounded"))
 else:
@@ -2021,6 +2025,94 @@ def test_status_long_and_swap_keep():
     rows = [json.loads(ln) for ln in open(e.st("swap.jsonl"))]
     check(len(rows) == 2 and rows[-1].get("working") == 1, f"замеры swap 15 дней: {rows}")
     check("работают сессий: 1" in e.alerts() and "claude attach" in e.alerts(), "тревога swap")
+
+
+def _now_env(name, head, turn_ago=600, mtime_ago=0, state="working", pid=None, e=None):
+    """metis-0707: STATUS.md с разделом «Сейчас» (head — заголовок целиком, None — раздела нет); окно name с транскриптом,
+    записанным turn_ago секунд назад (None — транскрипта нет), mtime файла — mtime_ago секунд назад."""
+    e = e or Env()
+    e.direction(name)
+    p = os.path.join(e.pantheon, "directions", name, "STATUS.md")
+    open(p, "w").write("# STATUS\n\n" + (head + "\n\n- шаг\n" if head else "- шаг\n"))
+    os.utime(p, (T0 - mtime_ago, T0 - mtime_ago))
+    a = bg(name, state, "%08x-1111" % (abs(hash(name)) % 16**8), pid=pid)
+    e.now_agents = getattr(e, "now_agents", []) + [a]
+    e.agents(e.now_agents)
+    if turn_ago is not None:
+        transcript(e, a, 20_000, T0 - turn_ago)
+    return e
+
+
+def _stamp(ago, minutes=None):
+    s = time.strftime("%d.%m %H:%M", time.localtime(T0 - ago))
+    return s[:-1] + minutes if minutes else s
+
+
+def test_stale_now_0707():
+    """metis-0707: «Сейчас» в STATUS.md окна, у которого были ходы за последние 6 ч, старше 6 ч — тревога; свежий,
+    без хода, без раздела — нет; без даты в заголовке — по mtime файла; «Мx» читается; напоминание роли."""
+    H = 3600
+    def alerted(e):
+        return "раздел «Сейчас» не обновлялся" in e.alerts()
+    e = _now_env("sn-fresh", f"## Сейчас ({_stamp(5 * H + 3000)})")
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: «Сейчас» 5 ч 50 мин — тревога на свежий")
+    e = _now_env("sn-old", f"## Сейчас ({_stamp(6 * H + 600)})")
+    e.run("watch", t=T0)
+    check(alerted(e) and "sn-old" in e.alerts(), f"0707: «Сейчас» 6 ч 10 мин — нет тревоги: {e.alerts()}")
+    e.run("watch", t=T0 + 300)
+    check(e.alerts().count("раздел «Сейчас» не обновлялся") == 1, "0707: тревога повторилась в следующем проходе")
+    e = _now_env("sn-notr", f"## Сейчас ({_stamp(8 * H + 600)})", turn_ago=None)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: нет транскрипта (ходов нет) — тревога")
+    e = _now_env("sn-idle", f"## Сейчас ({_stamp(9 * H)})", turn_ago=7 * H)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: старый «Сейчас», а ходов за 6 ч нет — тревога")
+    e = _now_env("sn-nodate", "## Сейчас", mtime_ago=7 * H)
+    e.run("watch", t=T0)
+    check(alerted(e), "0707: заголовок без даты, mtime 7 ч — нет тревоги")
+    e = _now_env("sn-nodate", "## Сейчас", mtime_ago=2 * H)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: заголовок без даты, mtime 2 ч — тревога")
+    e = _now_env("sn-none", None, mtime_ago=9 * H)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: раздела «Сейчас» нет — тревога")
+    e = _now_env("sn-x", f"## Сейчас ({_stamp(7 * H, 'x')})")
+    e.run("watch", t=T0)
+    check(alerted(e), "0707: заголовок «ЧЧ:Мx» старше 6 ч — нет тревоги")
+    # напоминание роли: простаивающая живая сессия получает строку один раз; работающая — только тревога
+    e = _now_env("sn-push", f"## Сейчас ({_stamp(7 * H)})", state="done", pid=4242)
+    e.run("watch", t=T0)
+    first = [c for c in e.calls() if c[:1] == ["respawn"]]
+    e.run("watch", t=T0 + 300)
+    again = [c for c in e.calls() if c[:1] == ["respawn"]]
+    check(alerted(e) and len(first) == 1 and len(again) == 1, f"0707: напоминание простаивающей: {first} {again}")
+    e = _now_env("sn-busy", f"## Сейчас ({_stamp(7 * H)})", state="working", pid=4243)
+    e.run("watch", t=T0)
+    check(alerted(e) and not [c for c in e.calls() if c[:1] == ["respawn"]], "0707: работающей — только тревога")
+
+
+def test_stale_now_push_fail_0707():
+    """metis-0707 (argus-277, Б и Д): напоминание не доставлено (respawn, код 1) — отметка пишется всё равно: за 3 прохода
+    один respawn и одна тревога; сбой проверки одного направления не обрывает следующие."""
+    H = 3600
+    e = _now_env("sn-fail", f"## Сейчас ({_stamp(7 * H)})", state="done", pid=4244)
+    for i in range(3):
+        e.run("watch", t=T0 + 300 * i, extra={"FAKE_RESPAWN_RC": "1", "FAKE_RESUME_RC": "1"})
+    n = len([c for c in e.calls() if c[:1] == ["respawn"]])
+    a = e.alerts().count("напоминание про «Сейчас» не доставлено (код 1)")
+    check(n == 1 and a == 1, f"0707: отказ напоминания, 3 прохода: respawn {n}, тревог {a}")
+    # Д: исключение в stale_now первого направления (непрочитанная отметка) не мешает второму
+    e = _now_env("sn-boom", f"## Сейчас ({_stamp(7 * H)})", state="done", pid=4245)
+    _now_env("sn-next", f"## Сейчас ({_stamp(7 * H)})", state="working", pid=4246, e=e)
+    safe = re.sub(r"[^\w.-]", "_", "watch-now-push-sn-boom")[:60]
+    mark = os.path.join(e.st("once"), f"{safe}-{hashlib.sha1(b'watch-now-push-sn-boom').hexdigest()[:8]}")
+    os.makedirs(e.st("once"), exist_ok=True)
+    open(mark, "wb").write(b"\xff\xfe\xfa")
+    r = e.run("watch", t=T0)
+    al = e.alerts()
+    check("sn-boom: проверка «Сейчас» упала" in al and "STATUS.md sn-next: раздел «Сейчас» не обновлялся" in al,
+          f"0707: сбой одного направления обрывает следующее: rc={r.returncode} {al[-500:]}")
 
 
 def test_culprits_wired_0568():
