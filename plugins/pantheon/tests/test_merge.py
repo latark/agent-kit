@@ -37,6 +37,7 @@ FULL_TESTS_CMD = ("pantheon review test -- heavy python3.14 -I plugins/pantheon/
 PR = 7
 SHA = "abcdef1" + "0" * 33
 SHA2 = "1234567" + "f" * 33
+SHA3 = "9abcdef" + "e" * 33
 TITLE = "guard: шлюз по Touch ID"
 
 # gh: view — из rec/gh-view.json (нет файла — код 1), merge — код из rec/gh-merge-rc; argv — в rec/gh-argv.jsonl
@@ -46,8 +47,25 @@ rec = os.environ["FAKE_REC"]
 with open(os.path.join(rec, "gh-argv.jsonl"), "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:], "env": sorted(k for k in os.environ if k.startswith("GH_")),
                          "keys": sorted(os.environ)}) + "\n")
+def one(name, n):
+    # ответ на PR n (пачка, metis-0668): файл rec/<имя>-<n>.<расш>, если есть, иначе общий rec/<имя>.<расш>
+    stem, ext = os.path.splitext(name)
+    p = os.path.join(rec, f"{stem}-{n}{ext}")
+    return p if os.path.exists(p) else os.path.join(rec, name)
+
+
+def view_by_sha(sha):
+    # ответ gh pr view того PR, чей head — sha: файлы rec/gh-view-<n>.json пачки, иначе общий rec/gh-view.json
+    for f in sorted(os.listdir(rec)):
+        if f.startswith("gh-view-") and f.endswith(".json"):
+            v = json.load(open(os.path.join(rec, f)))
+            if v.get("headRefOid") == sha:
+                return v
+    return json.load(open(os.path.join(rec, "gh-view.json")))
+
+
 if sys.argv[1:3] == ["pr", "view"]:
-    p = os.path.join(rec, "gh-view.json")
+    p = one("gh-view.json", sys.argv[3])
     if not os.path.exists(p):
         sys.exit(1)
     # как настоящий gh: только поля из --json (pr_view без baseRefName не получит его и из файла, argus М41)
@@ -59,7 +77,7 @@ if sys.argv[1:3] == ["pr", "view"]:
     print(json.dumps({k: x for k, x in v.items() if k in want}) if isinstance(v, dict) and want else raw)
     sys.exit(0)
 if sys.argv[1:3] == ["pr", "merge"]:
-    p = os.path.join(rec, "gh-merge-rc")
+    p = one("gh-merge-rc", sys.argv[3])
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" in sys.argv[2]):
     # запуски Actions (metis-0633): по rollup из gh-view.json, событие — поле "event" записи (по умолчанию
@@ -67,12 +85,13 @@ if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" i
     # форка, metis-0649); с gh-runs-fail — сбой, gh-runs-total — total_count запусков
     if os.path.exists(os.path.join(rec, "gh-runs-fail")):
         sys.exit(1)
-    v = json.load(open(os.path.join(rec, "gh-view.json")))
+    import re
+    v = view_by_sha(re.search(r"[0-9a-f]{40}", sys.argv[2]).group(0))
     sha, runs, checks = v.get("headRefOid"), [], []
     for i, c in enumerate(v.get("statusCheckRollup") or []):
         if isinstance(c, dict) and "context" not in c:
             runs.append({"name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
-                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [7])],
+                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [v.get("_pr", 7)])],
                          "head_repository": {"full_name": c.get("head_repo", "latark/agent-kit")},
                          "head_branch": c.get("head_branch", "main")})
             checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
@@ -103,7 +122,7 @@ if sys.argv[1] == "api" and "/actions/jobs/" in sys.argv[2]:
                                                               "steps": [{"name": "Set up job"}]}))
     sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
-    p = os.path.join(rec, "gh-files.jsonl")
+    p = one("gh-files.jsonl", sys.argv[2].split("/pulls/")[1].split("/")[0])
     if not os.path.exists(p):
         sys.exit(1)
     print(open(p).read(), end="")
@@ -125,8 +144,13 @@ sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 
 # Тестовая обвязка прохода: подмены — атрибутом merge.TEST в её процессе (из окружения launchd его не включить),
 # переменные для прохода — из MERGE_TEST, который читает только обвязка
+# attrs — подмены атрибутов модулей в процессе обвязки (metis-0710): "p" — pantheon (MANAGED), "m" — merge
+# (OSASCRIPT, ROOT_OWNER, MANAGED_WAIT); /Library и настоящий osascript тесты не трогают
 HARNESS = ("import json, os, sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); "
-           "m.TEST = json.loads(os.environ.pop('MERGE_TEST')); sys.exit(p.main(sys.argv[1:]))" % LIBDIR)
+           "m.TEST = json.loads(os.environ.pop('MERGE_TEST')); "
+           "[setattr(mod, k, v) for mod, key in ((p, 'p'), (m, 'm')) "
+           "for k, v in (m.TEST.get('attrs') or {}).get(key, {}).items()]; "
+           "sys.exit(p.main(sys.argv[1:]))" % LIBDIR)
 
 FAILS = []
 
@@ -189,14 +213,14 @@ class Box:
         env.update(extra or {})
         return {k: v for k, v in env.items() if v is not None}
 
-    def cli(self, args, t=T0, extra=None, evil=None):
+    def cli(self, args, t=T0, extra=None, evil=None, attrs=None):
         env = self.env(t, extra)
         if args[:2] == ["merge", "run"]:
             # проход — через обвязку HARNESS: подмены (поддельный gh в PATH, часы, простой, журнал уведомлений) —
             # только атрибутом merge.TEST в её процессе (metis-0303). evil — то, что дописало бы в окружение
             # прохода launchd (launchctl setenv): проход его не берёт
             cmd = [PY311, "-I", "-c", HARNESS] + args
-            env = dict(env, **(evil or {}), MERGE_TEST=json.dumps({"env": env}))
+            env = dict(env, **(evil or {}), MERGE_TEST=json.dumps({"env": env, "attrs": attrs or {}}))
         else:
             cmd = [PY311, "-I", RUN_PY] + args
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
@@ -206,21 +230,24 @@ class Box:
     def request(self, pr=PR, repo=REPO, t=T0):
         return self.cli(["merge", "request", str(pr), "-R", repo], t=t)
 
-    def run(self, t=T0, click=False, extra=None, evil=None):
-        return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil)
+    def run(self, t=T0, click=False, extra=None, evil=None, attrs=None):
+        return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil, attrs=attrs)
 
     def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main",
-             head=None):
+             head=None, pr=None):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
-        len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.)."""
+        len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.); pr —
+        ответ только этого PR (пачка, metis-0668), иначе общий для всех."""
+        sfx = "" if pr is None else f"-{pr}"
         files = FILES if files is None else files
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
-        with open(os.path.join(self.rec, "gh-view.json"), "w") as fh:
+        with open(os.path.join(self.rec, f"gh-view{sfx}.json"), "w") as fh:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
+                       **({} if pr is None else {"_pr": pr}),
                        **({} if base is None else {"baseRefName": base}),
                        "statusCheckRollup": ci("SUCCESS", "SUCCESS") if checks is None else checks,
                        "changedFiles": len(recs) if count is None else count, **(head or {})}, fh)
-        with open(os.path.join(self.rec, "gh-files.jsonl"), "w") as fh:
+        with open(os.path.join(self.rec, f"gh-files{sfx}.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
 
     def set(self, name, value):
@@ -243,10 +270,10 @@ class Box:
         with open(os.path.join(d, "records.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self.records))
 
-    def gate_ok(self, sha):
+    def gate_ok(self, sha, pr=PR):
         self.add("tests", sha=sha, who="")
-        self.add("accept", sha=sha, sid="s1", aid="a1")
-        self.add("accept", sha=sha, sid="s2", aid="a2")
+        self.add("accept", sha=sha, pr=pr, sid="s1", aid="a1")
+        self.add("accept", sha=sha, pr=pr, sid="s2", aid="a2")
 
     def calls(self, name):
         p = os.path.join(self.rec, name + "-argv.jsonl")
@@ -1449,6 +1476,520 @@ def test_env_home_link():
     check("HOME-ссылка: в команде щелчка HOME и bin/pantheon — realpath (current разрешён), не через ссылку",
           f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words and f"PANTHEON_PYTHON={PY311}" in words
           and not any(link in w for w in words), cmd or r.stderr)
+
+
+# --- управляемые настройки guard по Touch ID (metis-0710) ------------------------------------------------------------
+
+# окно прав администратора: argv — в rec/osascript-argv.jsonl; режим — rec/osascript-mode: ok (по умолчанию) —
+# скрипт root через /bin/sh -c, как do shell script; cancel — «Отменить» (-128); sleep — ответа нет; swap — после
+# сверки проходом проверенный файл подменили, затем скрипт root
+FAKE_OSASCRIPT = r"""
+import json, os, shutil, subprocess, sys, time
+rec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[0]))), "rec")
+with open(os.path.join(rec, "osascript-argv.jsonl"), "a") as fh:
+    fh.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
+p = os.path.join(rec, "osascript-mode")
+mode = open(p).read().strip() if os.path.exists(p) else "ok"
+if mode == "cancel":
+    sys.stderr.write("0:150: execution error: User canceled. (-128)\n")
+    sys.exit(1)
+if mode == "sleep":
+    time.sleep(30)
+    sys.exit(0)
+if mode == "lie":   # окно ответило «да», а файл не поставлен
+    sys.exit(0)
+script = sys.argv[-2]
+if mode == "swap":
+    with open(open(os.path.join(rec, "managed-src")).read(), "w") as fh:
+        fh.write('{"evil": true}\n')
+if not os.path.exists("/usr/sbin/chown"):   # Linux CI: chown не в /usr/sbin
+    script = script.replace("/usr/sbin/chown", shutil.which("chown"))
+sys.exit(subprocess.run(["/bin/sh", "-c", script]).returncode)
+"""
+M_NEW = b'{"hooks": {"PreToolUse": []}, "v": "new"}\n'
+M_OLD = b'{"hooks": {}, "v": "old"}\n'
+M_VER = "0.5.99"
+
+
+def managed_box(installed=M_OLD):
+    """Коробка с проверенным деревом guard (installed_plugins.json и verified.json с его хешем), файлом «/Library»
+    во временной папке и поддельным osascript; installed=None — файла нет."""
+    b = Box()
+    tree = os.path.join(b.home, ".claude", "plugins", "cache", "agent-kit", "guard", M_VER)
+    os.makedirs(os.path.join(tree, ".claude-plugin"))
+    with open(os.path.join(tree, ".claude-plugin", "plugin.json"), "w") as fh:
+        json.dump({"name": "guard", "version": M_VER}, fh)
+    with open(os.path.join(tree, "managed-settings.json"), "wb") as fh:
+        fh.write(M_NEW)
+    with open(os.path.join(b.home, ".claude", "plugins", "installed_plugins.json"), "w") as fh:
+        json.dump({"plugins": {"guard@agent-kit": [{"scope": "user", "installPath": tree}]}}, fh)
+    b.tree = tree
+    mverify(b)
+    os.makedirs(os.path.join(b.pantheon, "directions", "metis-pantheon", "tasks"))
+    b.msrc = os.path.join(tree, "managed-settings.json")
+    b.set("managed-src", b.msrc)
+    b.mdest = os.path.join(b.tmp, "Library", "ClaudeCode", "managed-settings.json")
+    os.makedirs(os.path.dirname(b.mdest))
+    if installed is not None:
+        with open(b.mdest, "wb") as fh:
+            fh.write(installed)
+    b.osa = script(os.path.join(b.bin, "osascript-fake"), FAKE_OSASCRIPT)
+    b.mattrs = {"p": {"MANAGED": b.mdest},
+                "m": {"OSASCRIPT": b.osa, "ROOT_OWNER": f"{os.getuid()}:{os.getgid()}", "MANAGED_WAIT": 3}}
+    return b
+
+
+def mverify(b, version=M_VER):
+    """verified.json: дерево b.tree проверено (хеш считает сам pantheon)."""
+    code = ("import sys; sys.path.insert(0, %r); import pantheon as p; print(p._tree_hash(%r))"
+            % (LIBDIR, os.path.realpath(b.tree)))
+    r = subprocess.run([PY311, "-I", "-c", code], env=b.env(T0), capture_output=True, text=True, timeout=60)
+    os.makedirs(os.path.join(b.state, "plugins"), exist_ok=True)
+    with open(os.path.join(b.state, "plugins", "verified.json"), "w") as fh:
+        json.dump({"guard": {"hash": r.stdout.strip(), "path": b.tree, "version": version}}, fh)
+
+
+def mrun(b, t=T0, extra=None):
+    return b.run(t=t, extra=extra, attrs=b.mattrs)
+
+
+def mstate(b):
+    p = os.path.join(b.state, "managed-update.json")
+    return json.load(open(p)) if os.path.exists(p) else {}
+
+
+def mcards(b):
+    """Карточки направления защит: [(путь, текст)]."""
+    d = os.path.join(b.pantheon, "directions", "metis-pantheon", "tasks")
+    return [(os.path.join(d, f), open(os.path.join(d, f), encoding="utf-8").read()) for f in sorted(os.listdir(d))
+            if f.endswith(".md")]
+
+
+def mdest(b):
+    return open(b.mdest, "rb").read() if os.path.exists(b.mdest) else None
+
+
+def mkick(b, t=T0):
+    """Тик: merge_kick с файлом «/Library» коробки → (результат, строки dryrun.log этого вызова)."""
+    code = ("import sys; sys.path.insert(0, %r); import pantheon as p; p.MANAGED = %r; p.merge_kick()"
+            % (LIBDIR, b.mdest))
+    r = subprocess.run([PY311, "-I", "-c", code], env=b.env(t, {"PANTHEON_DRYRUN": "1"}), capture_output=True,
+                       text=True, timeout=60)
+    p = os.path.join(b.state, "dryrun.log")
+    log = open(p).read() if os.path.exists(p) else ""
+    if os.path.exists(p):
+        os.remove(p)
+    return r, log
+
+
+def test_managed_finger_installs():
+    b = managed_box()
+    r, log = mkick(b)
+    check("управляемые: отстали от проверенной версии — тик запускает проход", "merge-run" in log, r.stderr + log)
+    r = mrun(b)
+    wins = b.calls("osascript")
+    st = mstate(b)
+    check("управляемые: одно окно прав администратора с текстом «Обновить управляемые настройки guard до версии X»",
+          len(wins) == 1 and wins[0]["argv"][-1] == f"Обновить управляемые настройки guard до версии {M_VER}"
+          and "with administrator privileges" in " ".join(wins[0]["argv"]), (wins, b.outs[-1]))
+    check("управляемые: касание → файл поставлен (временная папка вместо /Library), 644, версия записана",
+          r.returncode == 0 and mdest(b) == M_NEW and oct(os.stat(b.mdest).st_mode & 0o777) == "0o644"
+          and st.get("installed", {}).get("version") == M_VER
+          and st["installed"].get("sha") == hashlib.sha256(M_NEW).hexdigest() and not mcards(b)
+          and "pantheon-managed" not in b.alerts(), (b.outs[-1], st, b.alerts()))
+    check("управляемые: временных файлов рядом не осталось",
+          os.listdir(os.path.dirname(b.mdest)) == ["managed-settings.json"], os.listdir(os.path.dirname(b.mdest)))
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: после установки совпадают — тик прохода не запускает, окна больше нет",
+          "merge-run" not in log and len(b.calls("osascript")) == 1, (log, b.calls("osascript")))
+
+
+def test_managed_same_version_no_window():
+    b = managed_box(installed=M_NEW)
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: версия совпадает — тик не запускает проход, окна и карточки нет",
+          "merge-run" not in log and not b.calls("osascript") and not mcards(b) and mdest(b) == M_NEW,
+          (log, b.calls("osascript"), b.outs[-1]))
+    b = managed_box(installed=None)
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: файла в /Library нет — не отставание: окна нет (первый раз ставит владелец)",
+          "merge-run" not in log and not b.calls("osascript") and mdest(b) is None, (log, b.outs[-1]))
+
+
+def test_managed_refused_card_and_retry():
+    b = managed_box()
+    b.set("osascript-mode", "cancel")
+    mrun(b)
+    cards = mcards(b)
+    st = mstate(b)
+    text = cards[0][1] if cards else ""
+    check("управляемые: отказ → файл не тронут, карточка «Руками» (Кому — владелец, без вопроса) с командой sudo install",
+          mdest(b) == M_OLD and len(cards) == 1 and "owner: owner" in text and "question" not in text
+          and "sudo install -m 644 -o root -g wheel" in text and b.msrc in text and st.get("result") == "refused"
+          and st.get("asked") == T0, (b.outs[-1], cards, st))
+    check("управляемые: отказ → тревога с причиной и командой",
+          "pantheon-managed" in b.alerts() and "sudo install" in b.alerts() and "вы отменили окно" in b.alerts(),
+          b.alerts())
+    mrun(b, t=T0 + 3600)
+    r, log = mkick(b, t=T0 + 3600)
+    check("управляемые: раньше 6 ч — окна нет, тик прохода не запускает",
+          len(b.calls("osascript")) == 1 and "merge-run" not in log, (b.calls("osascript"), log))
+    mrun(b, t=T0 + 6 * 3600 + 1)
+    check("управляемые: через 6 ч — окно снова, вторая карточка не заводится",
+          len(b.calls("osascript")) == 2 and len(mcards(b)) == 1 and mstate(b).get("asked") == T0 + 6 * 3600 + 1,
+          (b.calls("osascript"), mcards(b)))
+    # владелец поставил командой из карточки: тик видит совпадение, закрывает карточку и пишет версию
+    with open(b.mdest, "wb") as fh:
+        fh.write(M_NEW)
+    r, log = mkick(b, t=T0 + 7 * 3600)
+    card = mcards(b)[0][1]
+    check("управляемые: поставили командой — карточка закрыта, версия записана, прохода нет",
+          "status: done" in card and mstate(b).get("installed", {}).get("version") == M_VER and "merge-run" not in log,
+          (card, mstate(b), r.stderr))
+
+
+def test_managed_timeout_card():
+    b = managed_box()
+    b.set("osascript-mode", "sleep")
+    mrun(b)
+    st = mstate(b)
+    check("управляемые: касания нет (время вышло) → файл не тронут, карточка и тревога, повтор позже",
+          mdest(b) == M_OLD and len(mcards(b)) == 1 and st.get("result") == "timeout"
+          and "pantheon-managed" in b.alerts() and "ждало касания" in b.alerts(), (b.outs[-1], st, b.alerts()))
+    b = managed_box()
+    b.set("osascript-mode", "lie")
+    mrun(b)
+    st = mstate(b)
+    check("управляемые: окно ответило «да», а файл не тот — версия не записана, карточка и тревога",
+          mdest(b) == M_OLD and "installed" not in st and st.get("result") == "после касания файл не тот"
+          and len(mcards(b)) == 1, (b.outs[-1], st))
+
+
+def test_managed_swapped_source():
+    b = managed_box()
+    b.set("osascript-mode", "swap")
+    mrun(b)
+    check("управляемые: проверенный файл подменили после сверки — root не ставит (sha256), карточка и тревога",
+          mdest(b) == M_OLD and len(mcards(b)) == 1 and "код 65" in str(mstate(b).get("result")),
+          (b.outs[-1], mstate(b)))
+
+
+def test_managed_new_version_replaces_card():
+    b = managed_box()
+    b.set("osascript-mode", "cancel")
+    mrun(b)
+    first = mcards(b)[0][0] if mcards(b) else ""
+    with open(b.msrc, "wb") as fh:   # выпуск guard: новый проверенный файл, новая версия
+        fh.write(b'{"hooks": {}, "v": "newer"}\n')
+    with open(os.path.join(b.tree, ".claude-plugin", "plugin.json"), "w") as fh:
+        json.dump({"name": "guard", "version": "0.5.100"}, fh)
+    mverify(b, "0.5.100")
+    mrun(b, t=T0 + 60)
+    cards = dict(mcards(b))
+    check("управляемые: новая версия — окно сразу, не через 6 ч; карточка прошлой версии закрыта, заведена новая",
+          len(b.calls("osascript")) == 2 and len(cards) == 2 and "status: done" in cards.get(first, "")
+          and any("0.5.100" in t and "status: done" not in t for t in cards.values()), (b.calls("osascript"), cards))
+
+
+def test_managed_no_osascript_and_no_record():
+    b = managed_box()
+    b.mattrs["m"]["OSASCRIPT"] = os.path.join(b.bin, "нет-такого")
+    mrun(b)
+    check("управляемые: окно не показать (нет osascript) — файл не тронут, карточка и тревога с причиной",
+          mdest(b) == M_OLD and len(mcards(b)) == 1 and "no-window (FileNotFoundError)" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = managed_box()
+    os.remove(os.path.join(b.state, "plugins", "verified.json"))
+    once = os.path.join(b.state, "once")
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: guard не проверен (нет записи verified.json) — ни окна, ни карточки, ни тревоги о дереве",
+          "merge-run" not in log and not b.calls("osascript") and not mcards(b) and mdest(b) == M_OLD
+          and not any(f.startswith("plugins-unverified") for f in (os.listdir(once) if os.path.isdir(once) else []))
+          and "не проверено" not in b.alerts(),
+          (log, b.alerts()))
+
+
+def test_managed_owner_away():
+    b = managed_box()
+    mrun(b, extra={"PANTHEON_FAKE_IDLE": "100000"})
+    check("управляемые: вас нет у Mac — окна и карточки нет, попытка не засчитана",
+          not b.calls("osascript") and not mcards(b) and not mstate(b).get("asked") and mdest(b) == M_OLD,
+          (b.outs[-1], mstate(b)))
+
+
+# --- пачка: одно окно на несколько PR (metis-0668) ----------------------------------------------------------------------
+
+BATCH_SHA = {7: SHA, 8: SHA2, 9: SHA3}
+
+
+def merge_argv(pr):
+    return ["pr", "merge", str(pr), "-R", REPO, "--match-head-commit", BATCH_SHA[pr], "--merge"]
+
+
+def batch_box(prs=(7, 8)):
+    """Коробка с PR prs: у каждого свой head (BATCH_SHA), свой ответ gh и пройденный шлюз на своём SHA."""
+    b = Box()
+    for pr in prs:
+        b.view(BATCH_SHA[pr], pr=pr, title=f"PR {pr}", files=["README.md", CORE_FILE] if pr == 7 else ["docs.md"])
+        if pr != PR:
+            b.gate_ok(BATCH_SHA[pr], pr=pr)
+    return b
+
+
+def request_batch(b, prs=(7, 8)):
+    return b.cli(["merge", "request"] + [str(n) for n in prs] + ["-R", REPO])
+
+
+def test_batch_one_window_merges_all():
+    b = batch_box()
+    r = request_batch(b)
+    r7, r8 = b.req(7), b.req(8)
+    check("пачка: заявка на каждый PR, batch — номера по порядку, время одно, SHA — head каждого",
+          r.returncode == 0 and r7 and r8 and r7["batch"] == r8["batch"] == [7, 8] and r7["created"] == r8["created"]
+          and r7["sha"] == SHA and r8["sha"] == SHA2 and "Пачка" in r.stdout, b.outs[-1])
+    check("пачка: окна и слияния нет до прохода", not b.windows() and not b.merges())
+    b.run()
+    w = b.windows()
+    text = w[0][0] if w else ""
+    check("пачка: одно окно на оба PR — номер, SHA и вердикт каждого, ядро, заголовки последними, не длиннее 400",
+          len(w) == 1 and f"#7 {SHA[:7]} argus ×2 ✓, CI ✓; #8 {SHA2[:7]} argus ×2 ✓, CI ✓." in text
+          and f"ядро: {CORE_FILE}" in text and text.index("ядро") < text.index("Заголовки: #7 «PR 7»; #8 «PR 8»")
+          and len(text) <= 400, w)
+    check("пачка: оба слиты по очереди, каждый с --match-head-commit своего head",
+          b.merges() == [merge_argv(7), merge_argv(8)], b.merges())
+    lines = b.approve_lines()
+    check("пачка: строка согласия на каждый PR и его SHA",
+          len(lines) == 2 and lines[0].endswith(f"merge-approve {REPO}#7 {SHA}")
+          and lines[1].endswith(f"merge-approve {REPO}#8 {SHA2}"), lines)
+    ok7, out7 = guard_approves(b, REPO, 7, SHA)
+    ok8, out8 = guard_approves(b, REPO, 8, SHA2)
+    check("пачка: шлюз guard принимает согласие на оба", ok7 and ok8, out7 + out8)
+    check("пачка: итог по каждому PR, заявки сняты",
+          f"{REPO}#7: слит" in b.outs[-1] and f"{REPO}#8: слит" in b.outs[-1] and b.req(7) is None and b.req(8) is None,
+          b.outs[-1])
+    b.run()
+    check("пачка: одно применение — второй проход окна не показывает", len(b.windows()) == 1 and len(b.merges()) == 2)
+
+
+def test_batch_second_gate_fails_after_finger():
+    """Второй PR пачки после пальца не прошёл шлюз: первый слит, второй и третий — нет, итог по каждому."""
+    rej = {"v": 1, "kind": "reject", "repo": [REPO], "pr": 8, "sha": SHA2,
+           "by": {"agent_type": "argus", "agent_id": "a9", "session_id": "s9"},
+           "checklist": {"opened": "x", "ran": "y", "unchecked": "z"}}
+    body = "open(os.path.join(state, 'merge-gate', 'records.jsonl'), 'a').write(%r)" % (json.dumps(rej) + "\n")
+    b = batch_box((7, 8, 9))
+    r = request_batch(b, (7, 8, 9))
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    out = b.outs[-1]
+    check("отказ шлюза у #8 после пальца: окно одно, слит только #7",
+          r.returncode == 0 and len(b.windows()) == 1 and b.merges() == [merge_argv(7)], (out, b.merges()))
+    check("отказ шлюза у #8: согласие только на #7, заявки #8 и #9 сняты",
+          len(b.approve_lines()) == 1 and f"{REPO}#7 {SHA}" in b.approve_lines()[0]
+          and b.req(8) is None and b.req(9) is None, (b.approve_lines(), out))
+    check("отказ шлюза у #8: итог по каждому — слит, снята (почему), не тронут",
+          f"{REPO}#7: слит" in out and f"{REPO}#8: снята: после пальца условия изменились" in out
+          and f"{REPO}#9: снята: не слит: пачка остановлена на #8" in out, out)
+    check("отказ шлюза у #8: тревога с итогом — где остановлено, кто слит, кто не тронут",
+          "остановлено на #8" in b.alerts() and "Слиты: #7" in b.alerts() and "не тронуты" in b.alerts()
+          and "#9" in b.alerts(), b.alerts())
+    check("отказ шлюза у #8: журнал #9 — batch-stopped", "batch-stopped" in b.log(), b.log())
+
+
+def test_batch_merge_fails_stops_rest():
+    b = batch_box()
+    request_batch(b)
+    b.set("gh-merge-rc-7", 1)
+    b.run()
+    check("gh pr merge упал на #7: #8 не сливается и согласия на него нет",
+          b.merges() == [merge_argv(7)] and len(b.approve_lines()) == 1 and b.req(8) is None
+          and f"{REPO}#8: снята: не слит: пачка остановлена на #7" in b.outs[-1], (b.merges(), b.outs[-1]))
+
+
+def test_batch_request_all_or_nothing():
+    b = batch_box((7,))
+    b.view(SHA2, pr=8, title="PR 8", files=["docs.md"])   # у #8 нет ни тестов, ни «принять»
+    r = request_batch(b)
+    check("пачка: шлюз не пройден у #8 → заявок нет ни на один, в отказе — номер",
+          r.returncode != 0 and b.req(7) is None and b.req(8) is None and "#8" in r.stderr
+          and "ни на один" in r.stderr, r.stderr)
+    for args, name in (([7, 7], "повтор номера"), ([7, 8, 9, 10, 11, 12], "больше MAX_BATCH")):
+        r = b.cli(["merge", "request"] + [str(n) for n in args] + ["-R", REPO])
+        check(f"пачка: {name} → вызов не тот, заявок нет", r.returncode == 2 and b.req(7) is None, r.stderr)
+
+
+def test_batch_repeat_and_status_cancel():
+    b = batch_box()
+    request_batch(b)
+    r = request_batch(b)
+    check("пачка: повтор той же пачки — «уже стоит», время не сменилось",
+          r.returncode == 0 and "уже стоит" in r.stdout and b.req(7)["created"] == T0, r.stdout)
+    r = b.cli(["merge", "status"])
+    check("status: у заявок пачки — её номера", r.stdout.count("пачка #7,#8") == 2, r.stdout)
+    r = b.cli(["merge", "cancel", "8", "-R", REPO])
+    check("cancel одного PR пачки снимает всю пачку", r.returncode == 0 and b.req(7) is None and b.req(8) is None
+          and "вся пачка: #7" in r.stdout, r.stdout)
+
+
+def test_batch_broken_before_window():
+    b = batch_box()
+    request_batch(b)
+    os.remove(b.req_path(8))
+    b.run()
+    check("пачка неполна (заявку #8 удалили) → окна нет, #7 снята с тревогой",
+          not b.windows() and not b.merges() and b.req(7) is None and "неполна" in b.alerts() and "#8" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.request(pr=8, t=T0 + 5)   # одиночная заявка на #8 заменила заявку пачки
+    b.run(t=T0 + 10)
+    check("заявку #8 пачки заменили одиночной → #7 снята (пачка неполна), одиночная #8 слита своим окном",
+          b.merges() == [merge_argv(8)] and b.req(7) is None and len(b.windows()) == 1
+          and b.windows()[0][0].startswith(f"Слить {REPO}#8"), (b.outs[-1], b.merges()))
+
+
+def test_batch_gate_before_window():
+    b = batch_box()
+    request_batch(b)
+    b.view(SHA2, pr=8, draft=True, title="PR 8", files=["docs.md"])
+    b.run()
+    check("шлюз до окна: #8 стал черновиком → окна нет, сняты обе с тревогой «#8»",
+          not b.windows() and not b.merges() and b.req(7) is None and b.req(8) is None
+          and "#8: PR — черновик" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.view(SHA2, pr=8, checks=ci("SUCCESS", "PENDING"), title="PR 8", files=["docs.md"])
+    b.run()
+    check("CI #8 идёт → окна нет, ждут обе", not b.windows() and b.req(7) and b.req(8)
+          and f"{REPO}#7: ждёт: #8: проверки GitHub ещё идут" in b.outs[-1], b.outs[-1])
+    b.view(SHA2, pr=8, title="PR 8", files=["docs.md"])
+    b.run()
+    check("CI #8 зелёный → одно окно, слиты обе", len(b.windows()) == 1 and b.merges() == [merge_argv(7), merge_argv(8)],
+          b.outs[-1])
+
+
+def test_batch_refusal_timeout_fallback():
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 1)
+    b.run()
+    check("пачка: «Не сливать» → слияния нет, сняты обе", len(b.windows()) == 1 and not b.merges()
+          and b.req(7) is None and b.req(8) is None and not b.approve_lines(), b.outs[-1])
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 3)
+    b.run()
+    check("пачка: окно без ответа → ждут обе с повтором", not b.merges() and b.req(7).get("wait_until")
+          and b.req(8).get("wait_until"), b.outs[-1])
+    b.set("touchid-rc", 0)
+    b.run(t=T0 + 60)
+    check("пачка: повтор не раньше 10 минут", len(b.windows()) == 1, b.windows())
+    b.run(t=T0 + 601)
+    check("пачка: через 10 минут — окно снова, слиты обе", len(b.windows()) == 2
+          and b.merges() == [merge_argv(7), merge_argv(8)], b.outs[-1])
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 2)
+    b.run()
+    note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
+    check("пачка: окно не показать → одно уведомление на пачку, обе ждут щелчка",
+          note.count("merge run --click") == 1 and b.req(7).get("notified") and b.req(8).get("notified")
+          and not b.merges(), (note, b.outs[-1]))
+    b.set("touchid-rc", 0)
+    b.run(click=True)
+    check("пачка: щелчок → одно окно, слиты обе", len(b.windows()) == 2
+          and b.merges() == [merge_argv(7), merge_argv(8)], b.outs[-1])
+
+
+def test_batch_bad_field():
+    b = Box()
+    b.request()
+    p = b.req_path()
+    d = json.load(open(p))
+    d["batch"] = [8, 9]   # своего номера в пачке нет
+    json.dump(d, open(p, "w"))
+    b.run()
+    check("заявка с пачкой без своего номера — битая, удалена, окна нет", b.req() is None and not b.windows()
+          and "битая заявка" in b.outs[-1], b.outs[-1])
+
+
+def test_batch_seen_and_ttl():
+    """metis-0703 (argus-263a Д): заявки пачки, разобранные с её первой, проход не разбирает второй раз (seen) и не
+    зовёт «битыми»; пачка старше REQUEST_TTL снимается целиком без окна."""
+    b = batch_box()
+    request_batch(b)
+    b.run()
+    check("пачка слита: строки «битая заявка» про её вторую заявку нет", b.merges() == [merge_argv(7), merge_argv(8)]
+          and "битая" not in b.outs[-1], b.outs[-1])
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 3)
+    b.run(click=True)
+    check("щелчок, окно без ответа: одно окно на пачку за проход — вторую заявку не разбирают заново",
+          len(b.windows()) == 1 and b.req(7) and b.req(8), (b.windows(), b.outs[-1]))
+    b = batch_box()
+    request_batch(b)
+    b.run(t=T0 + 24 * 3600 + 1)
+    check("пачка старше 24 ч: окна и слияния нет, сняты обе, тревога «24 ч»",
+          not b.windows() and not b.merges() and b.req(7) is None and b.req(8) is None and "24 ч" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.run(t=T0 + 24 * 3600 - 60)
+    check("пачка до 24 ч — слита", b.merges() == [merge_argv(7), merge_argv(8)], b.outs[-1])
+
+
+def test_batch_max_fallback_window_core():
+    """argus-263a Б1: MAX_BATCH PR, CI у всех идёт запасным путём (лимит минут) — вердикты длинные, а список ядра и
+    число файлов в окне всё равно есть: владелец видит, что сливает ядро."""
+    prs = (7, 8, 9, 10, 11)
+    shas = {pr: "%07d" % pr + "c" * 33 for pr in prs}
+    core = {7: CORE_FILE, 8: "plugins/pantheon/lib/merge.py", 9: "plugins/guard/hooks/protect_config.py",
+            10: ".claude-plugin/marketplace.json", 11: "plugins/pantheon/hooks/hooks.json"}
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    b = Box()
+    for pr in prs:
+        b.view(shas[pr], pr=pr, title=f"PR {pr}", files=["README.md", core[pr]])
+        b.gate_ok(shas[pr], pr=pr)
+    r = request_batch(b, prs)
+    for pr in prs:   # лимит минут — уже после постановки, как в test_ci_billing
+        b.view(shas[pr], pr=pr, title=f"Длинный заголовок PR {pr} " * 4, files=["README.md", core[pr]],
+               checks=blocked)
+    b.view(SHA, checks=blocked)   # аннотации и job поддельный gh берёт из общего ответа
+    b.set("touchid-rc", 1)   # окно и есть проверка; сливать не нужно
+    b.run()
+    w = b.windows()
+    text = w[0][0] if w else ""
+    check("MAX_BATCH PR, запасной путь: пачка поставлена, окно одно, вердикт запасного пути в нём",
+          r.returncode == 0 and len(w) == 1 and "лимит" in text, (r.stdout + r.stderr, w, b.outs[-1]))
+    check("MAX_BATCH PR, запасной путь: в окне ядро и число файлов, номер и SHA каждого PR, не длиннее 400",
+          "ядро: " in text and CORE_FILE in text and "Файлов 6" in text and len(text) <= 400
+          and all(f"#{pr} {shas[pr][:7]}" in text for pr in prs), text)
+    check("MAX_BATCH PR, запасной путь: ядро — до вердиктов", "ядро: " in text and "лимит" in text
+          and text.index("ядро: ") < text.index("лимит"), text)
+    check("MAX_BATCH PR, запасной путь: вердикт каждого — коротко и целиком",
+          all(f"#{pr} {shas[pr][:7]} argus ×2 ✓, CI: лимит, тесты ✓" in text for pr in prs), text)
+    # вердикты длинные и не запасного пути: короче делит их место поровну — номер и SHA последнего PR не обрезаны
+    code = ("import importlib.util, json, sys\n"
+            "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m)\n"
+            "reqs = [{'repo': %r, 'pr': 1000 + i, 'sha': '%%07d' %% i + 'c' * 33} for i in range(m.MAX_BATCH)]\n"
+            "paths = [[c] for c in m.CORE_FILES[:m.MAX_BATCH]]\n"
+            "print(json.dumps(m.batch_window_text(reqs, [{'title': 'T' * 99}] * len(reqs), ['слово ' * 60] * len(reqs), "
+            "paths)))" % (os.path.join(LIBDIR, "merge.py"), REPO))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    try:
+        text = json.loads(r.stdout)
+    except ValueError:
+        text = ""
+    check("MAX_BATCH PR, длинные вердикты: ядро, номер и SHA каждого PR в окне, не длиннее 400",
+          "ядро: " in text and CORE_FILE in text and len(text) <= 400
+          and all(f"#{1000 + i} {'%07d' % i}" in text for i in range(5)), text or r.stderr)
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

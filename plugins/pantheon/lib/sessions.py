@@ -434,6 +434,9 @@ def start(rest):
     и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке).
     Красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» — только предупреждение
     (строка в stderr, тревога раз в день, red в замере): запуск не откладывается ([sb-simplify] п. 5, metis-0523).
+    Код 4 — пропуск, не сбой: у --from tick проигранная гонка за имя (блокировка занята другим процессом — start-busy, или под
+    блокировкой уже стоит живая копия с id — start-skip, строки в start.log); у owner/zeus, вкладки без id, --restart и
+    подложенной записи блокировки — код 1 (metis-0717).
     Разовый запуск (--at) исполняется по правилам планового прохода, слово при постановке не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
@@ -522,15 +525,22 @@ def start(rest):
     # проверка и запуск — под блокировкой имени: тик и Зевс не запустят две копии одновременно
     with P.lock("start-" + name, block=False) as got:
         if not got:
+            if origin == "tick" and P.LOCK_CONTENDED == "start-" + name:
+                # metis-0717: плановый проход проверил снимок и пошёл запускать, а имя уже поднимает другой процесс —
+                # он проиграл гонку, это пропуск (код 4, как у resume_session), а не сбой; подложенная запись замка
+                # (LOCK_CONTENDED не выставлен) по-прежнему код 1
+                P.start_log(f"start-busy\t{name}\t{origin}")
+                print(f"pantheon start: {name} — пропуск, другой процесс уже поднимает", file=sys.stderr)
+                return P.SKIPPED
             print(f"pantheon start: {name} — блокировка имени не взята: уже запускается другой командой или запись блокировки "
                   f"подложена (строка выше)", file=sys.stderr)
             return 1
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win,
-                              over_cap=over)
+                              over_cap=over, race_skip=(origin == "tick"))
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start", extra_env=None, again=None, over_cap=False):
+                   cmd="pantheon start", extra_env=None, again=None, over_cap=False, race_skip=False):
     agents = P.agents_all()
     if not dry:  # metis-0261 А: слово владельца, потолок и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word, over_cap)
@@ -556,6 +566,11 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
                 P.start_log(f"dead-blocked\t{name}\t{a['id']}\tнет процесса и вопроса — заменяется новой")
     if live and not dry and (not restart or any(not a.get("id") for a in live)):
         print(f"{cmd}: {copies_message(name, live, again)}", file=sys.stderr)
+        if race_skip and not restart and all(a.get("id") for a in live):
+            # metis-0717: плановый проход видел имя свободным (снимок до блокировки), под блокировкой его уже держат —
+            # проигранная гонка, пропуск (код 4), а не сбой; вкладка терминала (без id) и --restart — как раньше
+            P.start_log(f"start-skip\t{name}\t{origin}\tуже работает")
+            return P.skipped("уже работает")
         return 1
     stopped = []
     if live and not dry:

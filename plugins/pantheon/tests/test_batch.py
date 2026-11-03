@@ -48,7 +48,10 @@ open(os.path.join(home, "directions.toml"), "w", encoding="utf-8").write(
 base = {"project": "Пантеон", "direction": "metis-pantheon", "owner": "metis-pantheon", "created": "2026-11-03",
         "updated": "2026-11-03T12:00:00", "schema_version": 1}
 card(os.path.join(tdir, "metis-0900.md"), {"type": "story", "id": "metis-0900", "title": '"П9 Пачка"',
-                                           "status": "doing", **base})
+                                           "status": "doing", **base}, "## Готово, когда\n\n- [ ] пачка слита, тесты зелёные")
+STUB = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+card(os.path.join(tdir, "metis-0909.md"), {"type": "story", "id": "metis-0909", "title": '"Пачка-заглушка"',
+                                           "status": "doing", **base}, "## Готово, когда\n\n- [ ]  " + STUB.replace(" ", "  ", 1))
 card(os.path.join(tdir, "metis-0901.md"), {"type": "task", "id": "metis-0901", "title": '"Первая"', "status": "doing",
                                            "parent": "metis-0900", **base})
 card(os.path.join(tdir, "metis-0902.md"), {"type": "task", "id": "metis-0902", "title": '"Вторая"', "status": "todo",
@@ -105,6 +108,12 @@ for bad in ([], ["start"], ["go", "metis-0900"], ["start", "../x"], ["start", "m
     check(f"разбор: batch {' '.join(bad) or '(пусто)'} → код 2", r.returncode == 2, r.stderr[-200:])
 r = cli(repo, "batch", "start", "metis-0901")
 check("start на задаче, не пачке → код 1, «нет»", r.returncode == 1 and "нет" in r.stderr, r.stderr)
+for sub in (["start"], ["pr", "--dry-run"]):  # metis-0766: story без проверяемых пунктов — отказ с номером, ветки нет
+    r = cli(repo, "batch", sub[0], "metis-0909", *sub[1:])
+    check(f"{sub[0]} у story только с заглушкой → код 1, «нет критериев» с номером story, gh не зван",
+          r.returncode == 1 and "нет критериев" in r.stderr and "metis-0909" in r.stderr and not gh_calls(), r.stderr)
+check("start у story-заглушки ветку не создал",
+      subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/batch/metis-0909"], cwd=repo).returncode != 0)
 
 # start
 r = cli(repo, "batch", "start", "metis-0900")
@@ -182,6 +191,25 @@ check("тело без слова «часть» (и из заголовка з�
       not AC.is_part(body) and "ч. работы" in body, body)
 check("autoclose по телу закрывает только metis-0901",
       AC.closing_ids("batch/metis-0900", body) == ["metis-0900", "metis-0901"], str(AC.closing_ids("batch/metis-0900", body)))
+
+# metis-0767: Closes только задачам с отмеченными «Готово, когда»; [ ] и заглушка — «не целиком», в stderr «неотмечено N»
+HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+for n, dw in (("0905", "- [x] сделано\n- [ ] ещё не сделано\n- [ ] и это"), ("0906", "- [x] раз\n- [x] два"), ("0907", "- [ ] " + HINT)):
+    card(os.path.join(tdir, f"metis-{n}.md"), {"type": "task", "id": f"metis-{n}", "title": f'"Карточка {n}"', "status": "doing",
+                                               "parent": "metis-0900", **base}, "## Готово, когда\n\n" + dw + "\n")
+    open(os.path.join(wt, f"{n}.txt"), "w").write(n)
+    git(wt, "add", f"{n}.txt")
+    git(wt, "commit", "-q", "-m", f"metis-{n}: работа")
+r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
+body = r.stdout.split("\n\n", 1)[1]
+check("«Готово, когда» с [ ] → не в Closes, в строке «Не целиком, остаются открытыми»",
+      "Closes metis-0901, metis-0906\n" in body and "metis-0905" not in body.split("Closes", 1)[1]
+      and "Не целиком, остаются открытыми: metis-0902; metis-0905; metis-0907" in body, body)
+check("все [x] → в Closes", "metis-0906" in body.split("Closes", 1)[1], body)
+check("заглушка DONE_WHEN_HINT → не в Closes", "metis-0907" not in body.split("Closes", 1)[1], body)
+check("stderr: «metis-0905: неотмечено 2 — отметь пункты в карточке или оставь открытой»",
+      "metis-0905: неотмечено 2 — отметь пункты в карточке или оставь открытой" in r.stderr and "metis-0907: неотмечено 1" in r.stderr
+      and "metis-0906" not in r.stderr, r.stderr)
 
 # GH_REPO не доходит до gh
 open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho \"[$GH_REPO]\" >> '{ghlog}.env'\n")

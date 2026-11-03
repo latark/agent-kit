@@ -38,6 +38,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         permissions.deny mcp__<сервер> вне их «оставить» (metis-0238)
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
+  pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
+                                        (по умолчанию 7) — в archive/ГГГГ-ММ.md без потерь; check следит за board.md
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (lib/night.py)
@@ -48,7 +50,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
                                         надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
-                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA;
+                                        `request N1 N2 … -R repo` — пачка: одно окно, сливает по очереди (metis-0668)
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
@@ -76,7 +79,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
                     --text|--body "текст" | --body-file ПУТЬ
                     --from слово владельца|отчёт|ревью|остаток|план|по ходу --source ID|ПУТЬ#якорь   откуда задача (metis-0502)
-                    --done-when "пункт" …]   пункты раздела «Готово, когда» (повторяемый); без него в теле — раздел с подсказкой
+                    --done-when "пункт" …]   пункты раздела «Готово, когда» (повторяемый); без него в теле — раздел с подсказкой;
+                    у --type story пункт обязателен (--done-when или раздел в --body), иначе отказ (metis-0766)
                     текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
                     без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
                     неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
@@ -250,6 +254,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -391,9 +396,15 @@ def hq_mark(sub, fname, text):
         return False
 
 
+LOCK_CONTENDED = None  # имя замка, который в последний раз не взят потому, что его держит другой процесс (metis-0717)
+
+
 @contextlib.contextmanager
 def lock(name, block=True):
-    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята."""
+    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята.
+    Не взята из-за чужого владельца (а не подложенной записи или отказа в праве) — LOCK_CONTENDED == name."""
+    global LOCK_CONTENDED
+    LOCK_CONTENDED = None
     shared = hq_lock_name(name)
     try:
         if shared:
@@ -443,6 +454,7 @@ def lock(name, block=True):
             got = True
         except BlockingIOError:
             got = False
+            LOCK_CONTENDED = name
     try:
         yield got
     finally:
@@ -851,12 +863,18 @@ def notify(text, title="Пантеон", target=None, group=None):
         args = [tn, "-title", title, "-message", text, "-open", target or board_url()]
         if group:
             args += ["-group", "pantheon-" + re.sub(r"[^\w.-]", "_", group)[:60]]
-        r = subprocess.run(args, capture_output=True, timeout=15)
-        if r.returncode == 0:
-            return
+        try:
+            r = subprocess.run(args, capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return
+        except subprocess.TimeoutExpired:  # зависший notifier не обрывает проход (metis-0709): пробуем osascript
+            pass
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
-                   capture_output=True, timeout=10)
+    try:
+        subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
+                       capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired:  # и он завис — уведомление потеряно, проход идёт дальше
+        pass
 
 
 # --- состояние Mac: пробуждение, питание, простой, лимит ------------------------
@@ -4818,9 +4836,10 @@ MERGE_REQUEST_CMDS = ["pantheon merge request *", "pantheon merge status", "pant
 
 
 def merge_kick():
-    """Заявки на слияние по Touch ID (metis-0285) — отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт."""
+    """Заявки на слияние по Touch ID (metis-0285) и отставшие управляемые настройки guard (metis-0710) — отдельным
+    процессом: окно ждёт пальца до двух минут, тик не ждёт."""
     try:
-        if not merge_mod().pending() or locked("merge-run"):
+        if not (merge_mod().pending() or merge_mod().managed_check()) or locked("merge-run"):
             return
         if os.environ.get("PANTHEON_DRYRUN") == "1":
             with open(path("dryrun.log"), "a") as fh:
@@ -5300,36 +5319,119 @@ def board_registry(T):
     return projects, marks, T.project_registry(dirs)
 
 
+BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+BOARD_NOTIFY_WAIT = 20.0  # с ждать блокировку notify: занята дольше — проход идёт без уведомлений, а не до таймаута
+BOARD_AUTO_MIN = 8.0  # с: осталось меньше — сводку board-auto.md этого прохода пропускаем, соберёт следующий
+
+
+class BoardClock:
+    """Время частей прохода доски (metis-0709): одна строка «доска-время: …» в журнале задания. Бюджет — сколько секунд
+    у прохода до предела задания: необязательное (ожидание блокировки, сводка) не берётся, если бюджет вышел."""
+
+    def __init__(self, budget):
+        self.t0, self.budget, self.parts, self.skipped, self.cur = time.monotonic(), budget, [], [], None
+
+    def left(self):
+        return self.budget - (time.monotonic() - self.t0)
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        t = time.monotonic()
+        try:
+            yield
+        except BaseException:
+            self.cur = name  # прервали (SIGTERM, сбой) — строка назовёт часть
+            raise
+        finally:
+            self.parts.append((name, time.monotonic() - t))
+
+    def line(self):
+        out = " · ".join(f"{n} {d:.1f}" for n, d in self.parts)
+        if self.cur:
+            out += f" · прервано в «{self.cur}»"
+        if self.skipped:
+            out += " · пропущено: " + ", ".join(self.skipped)
+        return f"доска-время: {out} · итого {time.monotonic() - self.t0:.1f} с"
+
+
+@contextlib.contextmanager
+def lock_wait(name, wait):
+    """lock(name) с ожиданием не дольше wait секунд: не взяли — False, без зависания."""
+    end = time.monotonic() + wait
+    while True:
+        with lock(name, block=False) as got:
+            if got:
+                yield True
+                return
+        if time.monotonic() >= end:
+            yield False
+            return
+        time.sleep(0.2)
+
+
 def board():
-    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой."""
+    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой.
+    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET, SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
+    clock = BoardClock(BOARD_BUDGET)
+    def on_term(*_):
+        raise SystemExit(143)
+    try:
+        old = signal.signal(signal.SIGTERM, on_term)
+    except ValueError:  # не главный поток
+        old = None
+    try:
+        return _board(clock)
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGTERM, old)
+        print(clock.line())
+
+
+def _board(clock):
     T = tasks_mod()
     sched = load_schedule()
     primary = not sched.get("primary_host") or sched.get("primary_host") == host()
     with lock("board", block=False) as got:
         if not got:
             return 0
-        projects, marks, registry = board_registry(T)
-        status_lines = board_status_sync(T) if primary else []
+        with clock.phase("реестр"):
+            projects, marks, registry = board_registry(T)
+        with clock.phase("статусы"):
+            status_lines = board_status_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
-        with lock("notify"):
-            pol = notify_policy(sched)
+        with clock.phase("блокировка-notify"):
+            nl = lock_wait("notify", min(BOARD_NOTIFY_WAIT, max(clock.left(), 0)))
+            held = nl.__enter__()
+        try:
+            if not held:
+                clock.skipped.append("уведомления (блокировка notify занята)")
+            pol = notify_policy(sched) if held else None
             night_end = "08:00"
             with contextlib.suppress(Exception):
                 night_end = night_mod().config()[1]["end"]
-            lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
-                                 night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
-                                 alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
-                                                                                            policy=pol),
-                                 primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
-                                 **board_links())
-            pol.save()
-        once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
-        for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
-            fp = os.path.join(once_dir, f)
-            if now() - os.path.getmtime(fp) > 90 * 86400:
-                os.remove(fp)
+            with clock.phase("карточки"):
+                lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                                     night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
+                                     alert=lambda k, v, text, who="board", note=None: alert_once(
+                                         k, v, text, who, note if held else None, policy=pol),
+                                     primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
+                                     **board_links())
+            if pol is not None:
+                pol.save()
+        finally:
+            nl.__exit__(None, None, None)
+        with clock.phase("очистка"):
+            once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
+            for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
+                fp = os.path.join(once_dir, f)
+                if now() - os.path.getmtime(fp) > 90 * 86400:
+                    os.remove(fp)
         if primary:
-            board_auto_sync(T)
+            if clock.left() < BOARD_AUTO_MIN:
+                clock.skipped.append("сводка board-auto (бюджет)")
+            else:
+                with clock.phase("сводка"):
+                    board_auto_sync(T)
     for ln in status_lines + lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
@@ -5458,6 +5560,92 @@ def board_auto_fp():
     return hashlib.sha1(repr(_fp_board_auto()).encode("utf-8", "replace")).hexdigest()
 
 
+def boardmerged_mod():
+    """lib/boardmerged.py — задачи при слитом PR, не закрытые (metis-0768)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardmerged", os.path.join(LIB, "boardmerged.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_merged_open(T, t):
+    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768).
+    Сбой — пусто: сводка важнее."""
+    try:
+        return boardmerged_mod().merged_open(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+                                             t, T, autoclose_mod(), autoclose_repo_dirs(),
+                                             autoclose_mod().open_pr_tasks(path("autoclose.json")) or ())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def boardmd_mod():
+    """lib/boardmd.py — проверка и архив board.md (metis-0769)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardmd", os.path.join(LIB, "boardmd.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+BOARD_MD_KEYS = ("size", "updated", "dates")
+
+
+def board_md_check(quiet):
+    """board.md (metis-0769): «Сейчас» длиннее предела, «Обновлено» старше суток, прошедшие сроки «По датам». Тик (quiet) —
+    одна тревога на вид проверки; руками — предупреждения. Файла нет — молча."""
+    p = os.path.join(PANTHEON, "board.md")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            found = {k: (v, text) for k, v, text in boardmd_mod().problems(fh.read(), now())}
+    except OSError:
+        found = {}
+    for k in BOARD_MD_KEYS:
+        if k in found:
+            if quiet:
+                alert_once(f"check-board-md-{k}", found[k][0], found[k][1], "check")
+            else:
+                print(f"предупреждение · {found[k][1]}")
+        else:
+            clear_once(f"check-board-md-{k}")
+
+
+def board_archive(rest):
+    """`pantheon board archive [--days N]` (metis-0769): датированные блоки «Сейчас» и «Сессии и хозяйство» старше N дней
+    (по умолчанию 7) — в ~/ai/pantheon/archive/ГГГГ-ММ.md; без потерь: сначала дописывается архив, потом board.md
+    заменяется целиком. Нечего переносить — файлы не тронуты."""
+    M, days = boardmd_mod(), None
+    args = list(rest)
+    if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
+        days = int(args[1])
+    elif not args:
+        days = M.DEFAULT_DAYS
+    if days is None:
+        print("pantheon board archive [--days N]  (N — целое число дней)", file=sys.stderr)
+        return 2
+    board = os.path.join(PANTHEON, "board.md")
+    if not os.path.exists(board):
+        print("board.md нет — нечего переносить")
+        return 0
+    with lock("pantheon-git"):
+        with open(board, encoding="utf-8") as fh:
+            text = fh.read()
+        kept, moved = M.split(text, now(), days)
+        n = sum(len(v) for v in moved.values())
+        if not n:
+            print(f"board.md: блоков старше {days} дн. нет")
+            return 0
+        os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
+        stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
+        for key, ls in sorted(moved.items()):
+            with open(os.path.join(PANTHEON, "archive", f"{key}.md"), "a", encoding="utf-8") as fh:
+                fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
+        write_atomic(board, kept)
+    print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
+    return 0
+
+
 def board_auto_sync(T):
     """Автоблок доски — отдельный файл board-auto.md (metis-0397): PR, пачки, неделя, STATUS.md, ответы владельца.
     board.md не пишет: только сверяет строку встраивания ![[board-auto]] вверху (нет — тревога). Удачная сборка
@@ -5468,6 +5656,7 @@ def board_auto_sync(T):
         fp, t = board_auto_fp(), now()
         data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
                          owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
+        data["merged_open"] = board_merged_open(T, t)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
@@ -5662,7 +5851,7 @@ def autoclose_cmd(rest):
         return 0
     A = autoclose_mod()
     errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env(),
-                     core=merge_mod().is_core)
+                     core=merge_mod().is_core, sandbox=lambda r, p, left=None: A.sandbox_core(r, p, run_env(), left=left))
     autoclose_alerts(sorted(repo_dirs), errors)
     for k, v in sorted(errors.items()):
         print(f"автозакрытие · {k}: {v}", file=sys.stderr)
@@ -6047,6 +6236,8 @@ def check(paths=None, quiet=False):
                     print(f"внимание · {dname}: без «Кто делает» (mode) открытых задач {c['no_mode']} — "
                           "список и правка: pantheon task migrate-mode --dry-run, затем без --dry-run")
     board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
+    if not paths:
+        board_md_check(quiet)  # board.md: размер «Сейчас», дата «Обновлено», сроки «По датам» (metis-0769)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
         if off:
@@ -6620,6 +6811,8 @@ def main(argv):
         return view(quiet="--quiet" in rest)
     if cmd == "commit":
         return commit()
+    if cmd == "board" and rest[:1] == ["archive"]:
+        return board_archive(rest[1:])
     if cmd == "board":
         return board()
     if cmd == "sync-answers":

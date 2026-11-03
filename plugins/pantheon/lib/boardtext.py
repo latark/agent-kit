@@ -25,6 +25,8 @@
 - «Ждёт вас» и «Руками» (metis-0402 п. 4) — карточки задач с «Кому» = Владелец, не закрытые: с вопросом (question или
   ждёт человека) — «Ждёт вас», остальные — «Руками»; только id. Текстовые строки этих разделов в board.md блок не
   читает: пункт без карточки сюда не попадёт — заведите карточку (`pantheon task new --owner owner`);
+- «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
+  карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K», не больше MAX_MERGED строк;
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
 - ответы владельца — журнал owner-log: выбор в окне вопросов или в чате на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
   галочкой на карточке (board.jsonl), за сутки — [id], время и буква варианта (или да/нет). Блок — сводка для глаз, а не
@@ -51,6 +53,7 @@ DAY = 86400
 WATCH_GAP = 10 * 60          # входы менялись, а сборки нет столько — тревога
 BLOCK_MAX = 1200             # знаков во всём файле
 MAX_PR, MAX_BATCH, MAX_STATUS, MAX_DECISION, MAX_IDS = 8, 3, 6, 5, 3
+MAX_MERGED = 5  # строк «PR слит, задача открыта» (metis-0768)
 MAX_OWNER = 10  # id карточек владельца в строке «Ждёт вас» / «Руками»
 REVIEW_RE = re.compile(r"review-([1-9]\d{0,5})-argus(?:-?([a-z]?)(\d*))?\.md")
 VERDICT_RE = re.compile(r"Вердикт\**\s*:\s*\**\s*([А-Яа-яЁё]+)")
@@ -300,6 +303,13 @@ def pr_line(p, revs):
             + (", ".join(parts) if parts else "ревью нет") + f" · {who}")
 
 
+def _merged_ok(r):
+    """Строка merged_open (lib/boardmerged.py): id, номер PR, дни, статус, неотмечено — каждое по своему шаблону."""
+    ints = lambda *v: all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in v)
+    return isinstance(r, (tuple, list)) and len(r) == 5 and _ok(ID_RE, r[0]) and ints(r[1], r[2], r[4]) \
+        and r[3] in ("doing", "review")
+
+
 def lines(data):
     """Строки блока без штампа (в порядке важности: неделя, PR, пачки, STATUS, ответы владельца)."""
     out = []
@@ -322,6 +332,11 @@ def lines(data):
         out += [pr_line(p, data.get("reviews") or {}) for p in prs[:MAX_PR]]
         if len(prs) > MAX_PR:
             out.append(f"- …и ещё PR: {len(prs) - MAX_PR}.")
+    merged = [r for r in data.get("merged_open") or [] if _merged_ok(r)]
+    for tid, num, days, st, left in merged[:MAX_MERGED]:
+        out.append(f"- {tid}: PR #{num} слит {days} дн. назад, задача {st}, неотмечено {left}")
+    if len(merged) > MAX_MERGED:
+        out.append(f"- …и ещё слитых PR с открытой задачей: {len(merged) - MAX_MERGED}.")
     for sid, work, closed, total in data.get("batches") or []:
         out.append(f"- Пачка {sid}: " + ", ".join(f"{i} ({STATUS_RU.get(s, s)})" for i, s in work)
                    + f"; закрыто {closed} из {total}.")

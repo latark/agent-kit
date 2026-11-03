@@ -13,6 +13,9 @@ import stat
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import mkroot  # noqa: E402  (metis-0729)
+
 # Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
 SUB_TIMEOUT = 60
 # Сроки внутри хука (metis-0719): под той же нагрузкой хук порой не укладывался в DEADLINE 8 с, а git в нём — в
@@ -3422,13 +3425,14 @@ def t_carry_gate(h):
     finally:
         git(p, "replace", "-d", s["out"])
     # сбой git (122-a11-1) и старый git без флага (unknown option): diff --raw не отвечает — ни переноса, ни снятия
-    # «вернуть»; с git.slow — diff --raw дольше таймаута 3 с
+    # «вернуть». Медленный git (таймаут) — в t_carry_r4_gate и t_prod_timeouts: ветка git.slow с sleep 9 здесь
+    # была мёртвой (файл git.slow никто не создавал, а при срезе 20 с у хука sleep 9 таймаута и не дал бы, metis-0730)
     wrap = h.j("gitwrap")
     os.makedirs(wrap, exist_ok=True)
     with open(os.path.join(wrap, "git"), "w") as fh:
         fh.write('#!/bin/sh\ncase "$*" in *--raw*)\n'
-                 '  [ -f "$HOME/git.fail" ] && { echo "error: unknown option no-relative" >&2; exit 129; }\n'
-                 '  [ -f "$HOME/git.slow" ] && exec sleep 9;;\nesac\n'
+                 '  [ -f "$HOME/git.fail" ] && { echo "error: unknown option no-relative" >&2; exit 129; };;\n'
+                 'esac\n'
                  f'exec {shutil.which("git")} "$@"\n')
     os.chmod(os.path.join(wrap, "git"), 0o755)
     env = {"PATH": wrap + os.pathsep + h.j("bin") + os.pathsep + os.environ["PATH"]}
@@ -4354,6 +4358,74 @@ def t_test_floors(h):
     check(f"сроки в процессе теста: git в _git_bytes ждёт до {HOOK_SUB_TIMEOUT} с, а не 3", got == b"medlenno\n", got)
 
 
+def prod_timeouts(sources):
+    """Боевые сроки по тексту кода (AST), без ожидания и без GUARD_TEST_* (metis-0730). sources: {имя файла: текст}.
+    → список нарушений. Правила: DEADLINE в guard.py, guard_rules.py, taint.py ровно 8 с; в merge_gate.py каждый
+    timeout= у subprocess.run — число 3 (вызовы git) или GH_TIMEOUT, и GH_TIMEOUT = 6; все они меньше DEADLINE, иначе
+    хук гаснет по сроку раньше, чем успевает отказать сам. Мало найденных мест — тоже нарушение (разбор не пустой)."""
+    import ast
+    bad = []
+
+    def consts(tree):
+        return {n.targets[0].id: n.value.value for n in tree.body
+                if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, ast.Constant)}
+
+    for name in ("guard.py", "guard_rules.py", "taint.py"):
+        got = consts(ast.parse(sources[name])).get("DEADLINE")
+        if got != 8:
+            bad.append(f"{name}: DEADLINE = {got!r}, боевой 8")
+    tree = ast.parse(sources["merge_gate.py"])
+    gh = consts(tree).get("GH_TIMEOUT")
+    if gh != 6:
+        bad.append(f"merge_gate.py: GH_TIMEOUT = {gh!r}, боевой 6")
+    lits = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run" \
+                and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess":
+            for kw in n.keywords:
+                if kw.arg != "timeout":
+                    continue
+                if isinstance(kw.value, ast.Constant):
+                    lits.append(kw.value.value)
+                    if kw.value.value != 3:
+                        bad.append(f"merge_gate.py:{n.lineno}: timeout={kw.value.value!r}, боевой 3")
+                elif not (isinstance(kw.value, ast.Name) and kw.value.id == "GH_TIMEOUT"):
+                    bad.append(f"merge_gate.py:{n.lineno}: timeout не число и не GH_TIMEOUT")
+    if len(lits) < 3:
+        bad.append(f"merge_gate.py: числовых timeout у subprocess.run {len(lits)}, ждали 3")
+    return bad
+
+
+def t_prod_timeouts(h):
+    """Боевые сроки хука (metis-0730, долг argus #281): тесты идут с поднятыми GUARD_TEST_DEADLINE и
+    GUARD_TEST_SUB_TIMEOUT, поэтому timeout 4–19 с вместо боевых 3 с и DEADLINE 15 вместо 8 они не заметили бы.
+    Читаем значения из кода, ничего не ждём. Мутанты — на копиях текста в самом случае."""
+    hooks = os.path.dirname(GUARD)
+    sources = {}
+    for n in ("guard.py", "guard_rules.py", "taint.py", "merge_gate.py"):
+        with open(os.path.join(hooks, n), encoding="utf-8") as fh:
+            sources[n] = fh.read()
+    got = prod_timeouts(sources)
+    check("боевые сроки: DEADLINE 8 с, timeout git 3 с, GH_TIMEOUT 6 с — как в коде", got == [], got)
+    check("боевые сроки: поднятые сроки теста выше боевых (иначе поднимать нечего)",
+          HOOK_DEADLINE > 8 and HOOK_SUB_TIMEOUT > 3, (HOOK_DEADLINE, HOOK_SUB_TIMEOUT))
+    for what, name, old, new in (
+            ("timeout git 3 → 15", "merge_gate.py", "capture_output=True, text=True, timeout=3, env=_git_env())",
+             "capture_output=True, text=True, timeout=15, env=_git_env())"),
+            ("timeout _git_bytes 3 → 20", "merge_gate.py", "capture_output=True, timeout=3, env=env)",
+             "capture_output=True, timeout=20, env=env)"),
+            ("GH_TIMEOUT 6 → 9", "merge_gate.py", "GH_TIMEOUT = 6", "GH_TIMEOUT = 9"),
+            ("DEADLINE guard.py 8 → 15", "guard.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
+            ("DEADLINE guard_rules.py 8 → 15", "guard_rules.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
+            ("DEADLINE taint.py 8 → 15", "taint.py", "DEADLINE = 8 ", "DEADLINE = 15 ")):
+        if old not in sources[name]:
+            check(f"боевые сроки, мутант «{what}»: место найдено в {name}", False, old)
+            continue
+        mutated = dict(sources, **{name: sources[name].replace(old, new, 1)})
+        check(f"боевые сроки, мутант «{what}» — случай краснеет", prod_timeouts(mutated) != [], what)
+
+
 def t_ci_fork_billing(h):
     """Долг argus #248 (проба probe_fb.py): лимит минут у PR из форка. Запуски форка без номера PR засчитываются по
     репозиторию и ветке head (metis-0649) и на запасном пути: запись полного набора есть — пропуск без роли со строкой
@@ -4632,7 +4704,7 @@ def t_owner_api_merge(h):
                h.pre("gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", role=None, pdir="projects/tg-read"), True)
 
 
-CASES = [t_test_floors, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+CASES = [t_test_floors, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
@@ -4651,7 +4723,8 @@ def main():
     # ~/.ssh, cwd без .git и $HOME с .git становились «внутри временных папок» — gh-out их пропускал. На macOS
     # mkdtemp даёт /var/folders/…, вне /tmp; на Linux берём /var/tmp (его нет в TEMP_ROOTS)
     base = None if not os.path.realpath(tempfile.gettempdir()).startswith(("/tmp", "/private/tmp")) else "/var/tmp"
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="merge-gate-test-", dir=base))
+    # в окне роли под песочницей git init в TMPDIR падает (код 128) — mkroot берёт папку, где он работает (metis-0729)
+    tmp = os.path.realpath(mkroot("merge-gate-test-", first=base))
     try:
         h = Home(tmp)
         only = set(sys.argv[1:])

@@ -223,19 +223,19 @@ def head(p):
     return {ln.split(":", 1)[0]: ln.split(":", 1)[1].strip() for ln in read(p).split("---")[1].splitlines() if ":" in ln}
 
 
-sid, sp = new("Пачка", "--type", "story")
+sid, sp = new("Пачка", "--type", "story", "--done-when", "пункт")
 t1, p1 = new("Через claim", "--parent", sid, "--mode", "single")
 t2, p2 = new("Через worktree", "--parent", sid, "--mode", "single")
 t3, p3 = new("Через PR", "--mode", "single")
-s2, sp2 = new("Пачка готова", "--type", "story")
+s2, sp2 = new("Пачка готова", "--type", "story", "--done-when", "пункт")
 t4, p4 = new("Последняя задача", "--parent", s2, "--mode", "single", "--status", "done")
 t5, p5 = new("PR частью", "--mode", "single")
 t6, p6 = new("Чужое направление", "--mode", "single", direction="example-site")
-s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "story")
+s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "story", "--done-when", "пункт")
 t7, p7 = new("Готовая задача приёмки", "--parent", s3, "--mode", "single", "--status", "done")
-s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story")
+s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story", "--done-when", "пункт")
 t8, p8 = new("Готовая задача очереди", "--parent", s4, "--mode", "single", "--status", "done")
-s5, sp5 = new("Пачка в работе руками", "--type", "story", "--status", "doing")  # doing не проходом (metis-0412)
+s5, sp5 = new("Пачка в работе руками", "--type", "story", "--done-when", "пункт", "--status", "doing")  # doing не проходом (metis-0412)
 t9, p9 = new("Задача пачки в работе", "--parent", s5, "--mode", "single", "--status", "doing")
 ASK = ('question: "Принять итоги ночи?"\noptions: ["А — принять итоги, все проверки зелёные", '
        '"Б — вернуть на доработку, нужен ещё круг"]\nrecommend: "А — проверки зелёные"\n')

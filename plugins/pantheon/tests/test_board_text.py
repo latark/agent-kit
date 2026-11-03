@@ -345,7 +345,7 @@ check("7. карточка «Кому = Владелец» с вопросом �
       f"**Ждёт вас** (1): {q_id}." in got and f"**Руками** (1): {d_id}." in got and x_id not in got, r.stdout + r.stderr + got)
 check("7. текстовая строка «Ждёт вас» в board.md без карточки в сводку не попала, заголовок карточки — тоже",
       "metis-0999" not in got and "ИГНОР" not in got and "домен" not in got, got)
-sid = new("Пачка", "--type", "story")
+sid = new("Пачка", "--type", "story", "--done-when", "пункт")
 story_file = [p for p in glob.glob(os.path.join(home, "directions", "*", "tasks", "*.md")) if sid in os.path.basename(p)][0]
 story_before = read(story_file)
 k_id = new("Задача пачки", "--parent", sid, "--status", "doing")

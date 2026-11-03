@@ -88,11 +88,11 @@ def main():
     ids = {}
     for pl in places:
         ids[pl] = new(env, "metis-pantheon", "--title", f"Задача {pl}", "--batch", f"ночь-18.10 · {pl}", "--mode", "single")
-    foreign, _ = new(env, "athena-shop", "--type", "story", "--title", "ночь-18.10")  # то же имя в чужом направлении
+    foreign, _ = new(env, "athena-shop", "--type", "story", "--done-when", "пункт", "--title", "ночь-18.10")  # то же имя в чужом направлении
     other = new(env, "athena-shop", "--title", "Чужая", "--batch", "ночь-18.10 · 2", "--mode", "single")
     plain = new(env, "metis-pantheon", "--title", "Без места", "--batch", "просто так", "--mode", "single")
     pre = new(env, "metis-pantheon", "--title", "Уже в пачке", "--batch", "ночь-18.10 · 9", "--mode", "single")
-    st, _ = new(env, "metis-pantheon", "--type", "story", "--title", "Своя")
+    st, _ = new(env, "metis-pantheon", "--type", "story", "--done-when", "пункт", "--title", "Своя")
     assert run(env, "task", "attach", pre[0], st).returncode == 0
 
     before = snapshot(home)

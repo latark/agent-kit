@@ -75,7 +75,7 @@ def head(home, rel):
 
 
 def story_checks(env, home):
-    sid, srel = new(env, "--type", "story", "--title", "Пачка вечера", "--estimate", "1 % недели",
+    sid, srel = new(env, "--type", "story", "--done-when", "пункт", "--title", "Пачка вечера", "--estimate", "1 % недели",
                     "--night", "2026-10-19")
     check("task new --type story: карточка type story", head(home, srel).get("type") == "story", head(home, srel))
     a, arel = new(env, "--title", "Первая", "--estimate", "0,2 % недели", "--touches", "plugins/pantheon/lib/", "--mode", "self")
@@ -95,7 +95,7 @@ def story_checks(env, home):
     check("attach: строка в журнал пачки", f"прикреплена задача {a}" in sjournal)
     r = run(env, "task", "attach", a, sid, t=T0 + 30)
     check("attach в ту же пачку — отказ", r.returncode != 0 and "уже в пачке" in r.stderr, r.stderr[-200:])
-    s2, s2rel = new(env, "--type", "story", "--title", "Другая пачка")
+    s2, s2rel = new(env, "--type", "story", "--done-when", "пункт", "--title", "Другая пачка")
     r = run(env, "task", "attach", c, s2, t=T0 + 40)
     check("attach в другую пачку: «была в», строка в журнал прежней",
           r.returncode == 0 and f"была в {sid}" in r.stdout and head(home, crel).get("parent") == s2

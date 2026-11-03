@@ -675,9 +675,16 @@ _DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECAS
 _DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
 
 
+def _is_stub(text):
+    """Текст пункта — заглушка шаблона (DONE_WHEN_HINT), с любыми пробелами внутри и по краям (metis-0711). Единственное
+    место сравнения: unchecked_criteria, criteria_count, no_criteria и split узнают заглушку одинаково."""
+    return " ".join(str(text).split()) == DONE_WHEN_HINT
+
+
 def done_criteria(body):
     """Пункты «Готово, когда» в теле → [(отмечен, текст)]. Раздел — строка «## Готово, когда» или «Готово, когда:», дальше
-    чек-лист; кончается заголовком или любой строкой не из списка. Подсказка-заглушка считается пунктом."""
+    чек-лист; кончается заголовком или любой строкой не из списка. Подсказка-заглушка считается пунктом: её отсекают
+    те, кто считает (_is_stub) — unchecked_criteria, criteria_count, no_criteria, split (metis-0712, metis-0711)."""
     out, on = [], False
     for ln in (body or "").split("\n"):
         if not on:
@@ -692,11 +699,11 @@ def done_criteria(body):
 
 
 def unchecked_criteria(head, body):
-    """Число неотмеченных пунктов «Готово, когда»; заглушка шаблона DONE_WHEN_HINT (строго по тексту) не пункт, metis-0712;
+    """Число неотмеченных пунктов «Готово, когда»; заглушка шаблона (_is_stub, с любыми пробелами) не пункт, metis-0712;
     0 — у задач, созданных до CRITERIA_FROM. Одна функция для autoclose и `task set status=done`."""
     if str(head.get("created") or "") < CRITERIA_FROM:
         return 0
-    return sum(1 for done, text in done_criteria(body) if not done and text != DONE_WHEN_HINT)
+    return sum(1 for done, text in done_criteria(body) if not done and not _is_stub(text))
 
 
 def done_when_section(items):
@@ -714,9 +721,10 @@ def check_source(pantheon, tid, source):
             raise ValueError(f"source {source}: нет такой задачи")
 
 
-def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, **fields):
+def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, need_story_criteria=False, **fields):
     """kind — task или story (пачка, metis-0069). done_when — пункты «Готово, когда» (metis-0502): критерии пишет автор при
-    создании; раздел есть всегда, без пунктов — с подсказкой."""
+    создании; раздел есть всегда, без пунктов — с подсказкой. need_story_criteria (CLI `task new`, metis-0766): story без
+    проверяемого пункта — отказ, заглушка DONE_WHEN_HINT пачку не закроет."""
     if kind not in WORK_TYPES:
         raise ValueError(f"тип {kind!r} — только {', '.join(WORK_TYPES)}")
     if not DIRECTION_RE.fullmatch(str(direction)):
@@ -729,6 +737,11 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         check_source(pantheon, None, fields["source"])
     if done_when and (done_criteria(escape_desc(text)) or DONE_WHEN_HEAD in escape_desc(text).split("\n")):
         raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
+    if need_story_criteria and kind == "story" and not (
+            [x for x in (done_when or []) if str(x).strip()]
+            or [x for _, x in done_criteria(escape_desc(text)) if not _is_stub(x)]):
+        raise ValueError("у пачки (story) нет проверяемых пунктов «Готово, когда»: добавьте --done-when \"пункт\" "
+                         "(повторяемый) или раздел «## Готово, когда» с «- [ ] пункт» в --body; заглушка пачку не закроет (metis-0766)")
     project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
@@ -850,7 +863,7 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
                          "верните direction задачи в направление её папки")
     if not str(title or "").strip():
         raise ValueError("нужен --title: название остатка")
-    items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and x != DONE_WHEN_HINT]
+    items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and not _is_stub(x)]
     fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
     fields.update({k: v for k, v in (("mode", mode), ("mode_why", mode_why)) if v})  # у исходной в пачке нет режима — задаётся здесь
     fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
@@ -1125,7 +1138,7 @@ def direction_summary(tasks, names=()):
         c = out.setdefault(str(h.get("direction")), blank())
         c["open"] += 1
         c["no_pack"] += not in_pack(h, tasks)
-        c["no_criteria"] += not [x for _, x in done_criteria(b) if x != DONE_WHEN_HINT]
+        c["no_criteria"] += not [x for _, x in done_criteria(b) if not _is_stub(x)]
         if h.get("mode") in (None, ""):
             c["no_mode"] += 1
             c["no_mode_ids"].append(tid)
@@ -1472,7 +1485,7 @@ def outcomes(tasks):
 def criteria_count(body):
     """«N из M» отмеченных пунктов «Готово, когда» (metis-0506); только заглушка-подсказка — «не заданы»; раздела нет — None."""
     items = done_criteria(body)
-    real = [ok for ok, text in items if text != DONE_WHEN_HINT]
+    real = [ok for ok, text in items if not _is_stub(text)]
     if real:
         return f"{sum(real)} из {len(real)}"
     return "не заданы" if items else None

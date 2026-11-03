@@ -833,8 +833,11 @@ remote, cwd не репозиторий или без remote, журнал пр�
       "/Library/Application Support/ClaudeCode/managed-settings.json"
 
 Файл — `managed-settings.json` рядом с этим README: запреты (ключи в Связке, `.env`, разрушительный git,
-`rm -rf`, terminal-notifier) и хук guard из клона маркетплейса. Обновить — та же команда после обновления
-маркетплейса. Проверка: в папке с `.claude/settings.json`, где разрешено `Bash(git clean *)`, команда
+`rm -rf`, terminal-notifier) и хук guard из клона маркетплейса. Обновляет плановый проход сам (metis-0710): файл
+отстал от проверенной версии guard — при вас у Mac системное окно прав администратора «Обновить управляемые
+настройки guard до версии X» (Touch ID или пароль), после касания файл поставлен. Отказ или окно без касания —
+карточка «Руками» с готовой командой `sudo install …` и тревога; окно на ту же версию снова — не раньше чем через
+6 ч. Подробно — шапка `plugins/pantheon/lib/merge.py`. Руками — та же команда, что выше. Проверка: в папке с `.claude/settings.json`, где разрешено `Bash(git clean *)`, команда
 `git clean -n` всё равно получает отказ.
 
 С metis-0571 хук в этом файле — `/bin/sh …/hooks/python.sh …/hooks/guard.py --managed`: запускатель

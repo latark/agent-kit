@@ -77,6 +77,7 @@ STALE_STATUS_DAYS = 2        # STATUS.md направления с задаче�
 AUTO_RM_AFTER = 2 * 3600     # уборка (metis-0250): закончила ход или остановлена дольше — claude rm
 AUTO_RM_RETRY = 86400        # rm отказал (неотправленная работа в worktree) — следующая попытка через сутки
 STATUS_MAX_LINES = 200       # STATUS.md длиннее — тревога (STATE-14)
+STALE_NOW_HOURS = 6          # раздел «Сейчас» в STATUS.md окна, у которого были ходы, старше — тревога и напоминание (metis-0707)
 SWAP_ALERT_GB = 4.0          # swap выше — тревога с открытыми подключениями (COMM-13); `pantheon status` — тот же порог
 SWAP_KEEP_DAYS = 15          # замеры swap: R-two-directions смотрит «две недели ниже порога»
 WORKTREE_DAYS = 3            # копия .claude/worktrees/* без живой сессии дольше — «забытая», тревога координатору
@@ -104,6 +105,11 @@ RESPAWN_IDLE_MIN = 15        # перезапуск после обновлен�
                              # и worktree окна — окно свободно (лид может ждать тесты; metis-0181)
 UNPAUSE_TEXT = ("[Пантеон: пауза по нагрузке снята] Тебя останавливали из-за лимита или памяти. Прочитай STATUS.md и "
                 "продолжай со следующего шага. Это не ответ владельца и не согласие.")
+STALE_NOW_TEXT = ("[Пантеон: «Сейчас» в STATUS.md устарел] Раздел «Сейчас» в STATUS.md направления не обновлялся "
+                  "больше {hours} ч, а ты работаешь. Обнови его по фактам (слитые PR, закрытые и взятые задачи) и "
+                  "продолжай. Это не ответ владельца и не согласие.")
+NOW_HEAD = re.compile(r"^##[ \t]+Сейчас\b(.*)$", re.M)
+NOW_STAMP = re.compile(r"\(\s*(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d)([\dxXхХ]|\d)\s*\)")
 
 
 def defaults():
@@ -289,7 +295,7 @@ def _watch(dry=False):
     checks = [("снимок", lambda: snapshot(agents, t)),
               ("метка перезапуска", lambda: maint_expire(t)),
               ("сессии", lambda: sessions(agents, doms, t)),
-              ("STATUS.md", lambda: status_files(doms, t)),
+              ("STATUS.md", lambda: status_files(doms, t, agents, reg)),
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
@@ -619,9 +625,87 @@ def hestia_reap(agents, t):
                         "claude --resume", "watch")
 
 
-def status_files(doms, t):
+def now_section_time(text, mtime, t):
+    """Когда обновлён раздел «Сейчас» STATUS.md (metis-0707): время из заголовка «## Сейчас (ДД.ММ ЧЧ:ММ)» (минуты
+    «Мx» — последняя из возможных, чтобы не тревожить зря); заголовок есть, а даты в нём нет — mtime файла; раздела
+    нет — None (нечего считать устаревшим). Год — текущий, дата из будущего — прошлого года."""
+    m = NOW_HEAD.search(text)
+    if not m:
+        return None
+    d = NOW_STAMP.search(m.group(1))
+    if not d:
+        return mtime
+    day, mon, hh, m10, m1 = d.groups()
+    mm = int(m10) * 10 + (int(m1) if m1.isdigit() else 9)
+    now = datetime.fromtimestamp(t)
+    try:
+        stamp = datetime(now.year, int(mon), int(day), int(hh), mm)
+        if stamp.timestamp() > t + 86400:
+            stamp = stamp.replace(year=now.year - 1)
+    except ValueError:
+        return mtime  # дата не календарная — как заголовок без даты
+    return stamp.timestamp()
+
+
+def window_turned_since(name, agents, registry, since):
+    """У окна name были ходы после since: транскрипт (иначе updatedAt из state.json) любого держателя имени новее."""
+    for a in holders(name, agents, registry):
+        if not a.get("sessionId"):
+            continue
+        last = None
+        tp = P.transcript_path(a)
+        if tp:
+            with contextlib.suppress(OSError):
+                last = os.path.getmtime(tp)
+        if last is None:
+            last = awake().parse_time(awake().session_state(a).get("updatedAt"))
+        if last is not None and last >= since:
+            return True
+    return False
+
+
+def stale_now(name, text, mtime, agents, registry, t):
+    """Раздел «Сейчас» окна, которое работает, старше STALE_NOW_HOURS (metis-0707): тревога один раз на заголовок и
+    сутки и напоминание роли (STALE_NOW_TEXT) — простаивающей живой сессии, тоже раз на заголовок и сутки; работающей
+    или ждущей вас напоминание не шлём: тревога есть. Окно без ходов за срок и обновлённый «Сейчас» — отметки снимаем."""
+    key, push, fail = f"watch-now-{name}", f"watch-now-push-{name}", f"watch-now-fail-{name}"
+    stamp = now_section_time(text, mtime, t)
+    limit = STALE_NOW_HOURS * 3600
+    if stamp is None or t - stamp <= limit or not window_turned_since(name, agents, registry, t - limit):
+        P.clear_once(key)
+        P.clear_once(push)
+        P.clear_once(fail)
+        return
+    head = NOW_HEAD.search(text).group(0).strip()
+    value = f"{today(t)}-{head}"
+    hours = (t - stamp) / 3600
+    P.alert_once(key, value, f"STATUS.md {name}: раздел «Сейчас» не обновлялся {hours:.0f} ч ({head}), а окно работает "
+                 "— обновить по фактам", "watch")
+    hold = holders(name, agents, registry)
+    poke = nudge_target(hold)
+    try:
+        if poke is None or open(P.once_path(push)).read() == value:
+            return
+    except OSError:
+        if poke is None:
+            return
+    if recheck(name, True, nudge=True)():
+        return  # будить сейчас нельзя (пауза, лимит, не главный Mac) — напомним в следующем проходе
+    rc = P.resume_session(name, poke, STALE_NOW_TEXT.format(hours=STALE_NOW_HOURS), "stale-now",
+                          recheck=recheck(name, True, nudge=True))[0]
+    if rc in (P.NO_WINDOW, P.SKIPPED):
+        return
+    # отметка и при неудаче: иначе каждый проход заново будит роль и шлёт новую тревогу (не чаще раза на заголовок и сутки)
+    os.makedirs(P.path("once"), exist_ok=True)
+    open(P.once_path(push), "w").write(value)
+    if rc != 0:
+        P.alert_once(fail, value, f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
+
+
+def status_files(doms, t, agents=(), registry=()):
     """STATUS.md направления: с задачей «В работе» давно не обновлялся — состояние могло потеряться; длиннее 200 строк
-    — координатору перенести закрытое в archive/ (STATE-14)."""
+    — координатору перенести закрытое в archive/ (STATE-14); «Сейчас» старше STALE_NOW_HOURS у работающего окна —
+    тревога и напоминание роли (metis-0707)."""
     doing = set()
     with contextlib.suppress(Exception):
         doing = {h.get("direction") for _, h, _ in P.tasks_mod().load_tasks(P.PANTHEON).values()
@@ -630,9 +714,15 @@ def status_files(doms, t):
         p = os.path.join(P.PANTHEON, "directions", name, "STATUS.md")
         try:
             st = os.stat(p)
-            n = sum(1 for _ in open(p, encoding="utf-8", errors="replace"))
+            text = open(p, encoding="utf-8", errors="replace").read()
+            n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         except OSError:
             continue
+        try:
+            stale_now(name, text, st.st_mtime, agents, registry, t)
+        except Exception as ex:  # сбой одного направления (таймаут resume_session и т. п.) не обрывает остальные
+            P.alert_once(f"watch-now-err-{name}", today(t), f"STATUS.md {name}: проверка «Сейчас» упала: "
+                         f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
         age = (t - st.st_mtime) / 86400
         if name in doing and age > STALE_STATUS_DAYS:
             P.alert_once(f"watch-status-{name}", today(t),
@@ -1192,6 +1282,9 @@ def pauses_clear(agents, registry, t):
                 P.alert(f"{name} после паузы не продолжена: {why}", "watch")
                 continue
             got = resume_or_start(name, agents, UNPAUSE_TEXT, origin="tick", only_resume=True, auto=True)
+            if got == P.SKIPPED:  # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — не сбой
+                P.alert(f"{name} после паузы: пропуск — {P.SKIP_WHY}", "watch")
+                continue
             P.alert(f"{name} после паузы: " + ("продолжена" if got == 0 else f"не поднялась, код {got}"), "watch")
 
 
@@ -1629,7 +1722,8 @@ def oneshots(agents, registry, doms, t):
     Запись гасится до запуска, повторный проход её не повторит. Пока нельзя (шлюз недели и ночи, сессия занята, одна
     за проход) — ждёт до срока; после срока гаснет с тревогой. Пачка ночи, изменённая после фиксации вечером, не запускается.
     Закрытый недельный запор — запись ждёт до срока (не гасится). Код возврата запуска ≠0: запись уже погашена
-    (повтора нет), владельцу — уведомление «не вышел»."""
+    (повтора нет), владельцу — уведомление «не вышел». Пропуск под блокировкой имени (код 4, metis-0708) — не сбой:
+    запись снова ждёт до срока."""
     N = P.night_mod()
     del ONESHOT_STARTED[:]
     started = False
@@ -1670,6 +1764,13 @@ def oneshots(agents, registry, doms, t):
             rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
         else:
             rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
+        if rc == P.SKIPPED:
+            # metis-0708: под блокировкой имени «не надо» (окно уже работает, его поднимает другой процесс) — задание не
+            # передано, но это не сбой: запись снова ждёт до срока, без уведомления «не вышел»
+            why = f"пропуск — {P.SKIP_WHY}"
+            N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
+            P.alert(f"разовый запуск {oid} ждёт: {why} (срок {P.stamp(float(it['expires']))[11:]})", "watch")
+            continue
         # красная память запуск больше не откладывает ([sb-simplify] п. 5): pantheon start только предупреждает
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
         N.oneshot_update(oid, t, result=res)
@@ -2030,10 +2131,23 @@ def autostart(agents, registry, doms, t, dry=False):
                     f"перезапуск с новой целью не вышел, код {rc}"), "watch")
         elif poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
             rc = P.resume_session(d, poke, task, "tick", recheck=recheck(d, True, nudge=True))[0]
-            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
-                                    f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
+        if rc == P.SKIPPED:  # у смены цели (swap) пропуск разобран выше
+            # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — окно между проходом и подъёмом
+            # получило ввод (уже работает), его остановили или поднимает другой процесс. Не запускали: не сбой и не
+            # успех — без тревоги и счётчика (строка resume-skip — в start.log). Раньше это шло «код 4» и сбоем:
+            # 02.11 «сбой 2 из 3» у работавшего metis-pantheon и пауза 2 ч, третий пропуск остановил бы самозапуск
+            say(f"{d}: пропуск — {P.SKIP_WHY}")
+            s["pending"] = False
+            P.write_json(P.path("autostart.json"), st)
+            if not poke:
+                running.append(d)  # имя держат или поднимают — место занято
+            continue
+        if poke:
+            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
+                                    f"передать задание не вышло, код {rc}"), "watch")
+        elif not swap:
             P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
                                                                                f"не вышло, код {rc}"), "watch")
         # красная память запуск не откладывает ([sb-simplify] п. 5, metis-0523): pantheon start только предупреждает
@@ -2197,6 +2311,8 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     if P.live_copies(name, agents, registry=registry):
         return "уже работает — не трогаю (перезапуск — ответ на «перезапустить»)"
     rc = resume_or_start(name, agents, text, origin="tick")
+    if rc == P.SKIPPED:  # metis-0708: под блокировкой имени «не надо» (уже работает, поднимает другой) — не сбой
+        return f"пропуск: {P.SKIP_WHY}"
     if rc == 0:
         awake().RESUMED.append(name)
         ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
