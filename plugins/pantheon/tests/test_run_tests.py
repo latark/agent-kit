@@ -760,6 +760,30 @@ try:
           R.window_roots("/r", ["pantheon/test_board.py"]) == ("/r", None, None))
 finally:
     R.fs_probe = real_probe
+# window_plan: решение для файлов, зависящих от окна (metis-0773), пробы подставлены
+WL = ["pantheon/test_roles.py", "guard/test_merge_gate.py", "pantheon/test_outside.py", "pantheon/test_board.py"]
+okp, no_bind = (lambda b: None), (lambda: "EPERM bind")
+pl = R.window_plan("/r", WL, probe=okp, bind=lambda: None)
+check("window_plan вне окна: корень прежний, пропускаемых нет, причины и строки нет — набор идёт как раньше",
+      pl == ("/r", set(), "", None), pl)
+check("WINDOW_NOT_TMP и WINDOW_BIND — подмножества существующих файлов",
+      R.WINDOW_NOT_TMP <= R.WINDOW_FS and R.WINDOW_BIND and R.WINDOW_BIND <= R.WINDOW_FS | {"pantheon/test_outside.py"})
+pl = R.window_plan("/r", WL, probe=okp, bind=no_bind)
+check("window_plan: bind закрыт — пропущен только WINDOW_BIND, корень прежний",
+      pl[0] == "/r" and pl[1] == R.WINDOW_BIND and "EPERM bind" in pl[2], pl)
+pl = R.window_plan("/r", ["pantheon/test_roles.py", "pantheon/test_board.py"], probe=okp, bind=no_bind)
+check("window_plan: файлов WINDOW_BIND в наборе нет — bind не проверяется, пропусков нет", pl[1] == set(), pl)
+pl = R.window_plan("/r", WL, probe=lambda b: "EPERM" if b == "/r" else None, bind=lambda: None)
+if os.path.isdir(os.path.join("/tmp", f"claude-{os.getuid()}")):
+    check("window_plan: корень закрыт, запасной открыт — запасной корень, пропущен только WINDOW_NOT_TMP",
+          pl[0] != "/r" and pl[0].startswith(os.path.join("/tmp", f"claude-{os.getuid()}", "run-tests-"))
+          and pl[1] == R.WINDOW_NOT_TMP and "/tmp" in pl[2] and "EPERM" in pl[3], pl)
+    shutil.rmtree(pl[0], True)
+else:
+    print("пропущено: нет /tmp/claude-<uid> — случай запасного корня")
+pl = R.window_plan("/r", WL, probe=lambda b: "EPERM", bind=no_bind)
+check("window_plan: закрыто везде — корня нет, пропущены WINDOW_FS и WINDOW_BIND, причины обе",
+      pl[0] is None and pl[1] == R.WINDOW_FS | R.WINDOW_BIND and "EPERM" in pl[2] and "порт" in pl[2], pl)
 sd = tempfile.mkdtemp(prefix="stubs-")
 check("make_stubs: на macOS заглушек нет", R.make_stubs(sd, "darwin", which=lambda c: None) == (None, []))
 check("make_stubs: на Linux все команды есть — заглушек нет", R.make_stubs(sd, "linux", which=lambda c: "/x") == (None, []))
