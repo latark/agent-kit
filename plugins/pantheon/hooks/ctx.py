@@ -30,7 +30,7 @@
                      session_id и транскриптом основной сессии. Если у сессии есть субагент, чей транскрипт
                      <папка транскрипта>/<sid>/subagents/agent-*.jsonl менялся за 10 мин, вставка только-после-сжатия
                      (файл состояния, у штаба сводка прохода и доска) не делается, а ставится отметка
-                     <STATE>/ctx/deferred/<sid>.json. Её доставляют clock и maint-post основной сессии (без agent_id),
+                     <STATE>/ctx/deferred/<sid>.json. Её доставляют deferred, clock и maint-post основной сессии (без agent_id),
                      когда в хвосте её транскрипта есть compact_boundary не раньше отметки минус 5 с; отметка старше
                      15 мин снимается без вставки.
   ctx.py clock       UserPromptSubmit (в том числе сообщения других сессий): та же строка часов в контекст ролей
@@ -46,6 +46,8 @@
                      сессии из её списка, которая ещё не сохранилась, — один раз указание сохраниться и
                      выполнить `pantheon saved`. Без метки python не запускается (проверка оболочкой в hooks.json).
                      При запуске — и отложенная вставка после сжатия, как у clock (metis-0788).
+  ctx.py deferred    PostToolUse: отложенная вставка после сжатия (metis-0788), доставка в пределах хода. Python
+                     запускается, только когда в <STATE>/ctx/deferred/ есть отметка (проверка оболочкой в hooks.json).
   ctx.py maint-pre   PreToolUse там же: сохранившаяся сессия (кроме Зевса) новых шагов не делает — пропуск только
                      SendMessage, `pantheon saved` и `pantheon restart --status`.
   ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
@@ -1218,8 +1220,8 @@ def after_compact_blocks(role, ev, source, room):
 # --- сжатие при живых субагентах (metis-0788) ------------------------------------
 # SessionStart:compact сжатия субагента приходит без agent_id, с session_id и транскриптом основной сессии (зонд СБ
 # 04.11, Claude Code 2.1.317), а compact_boundary пишется после хука. Пока у сессии есть живые субагенты, вставка
-# после сжатия откладывается: отметка <STATE>/ctx/deferred/<sid>.json, а доставку делают clock (UserPromptSubmit)
-# и maint-post (PostToolUse) основной сессии, когда в её транскрипте появилась граница сжатия.
+# после сжатия откладывается: отметка <STATE>/ctx/deferred/<sid>.json, а доставку делают clock (UserPromptSubmit),
+# deferred и maint-post (PostToolUse) основной сессии, когда в её транскрипте появилась граница сжатия.
 
 SUB_LIVE = 600            # субагент живой, если его транскрипт менялся не раньше, с
 DEFER_SLACK = 5           # граница сжатия засчитывается не раньше отметки минус столько, с
@@ -1303,7 +1305,7 @@ def deferred_compact(ev, cmd, room):
         transcript = ev.get("transcript_path") or ""
         if not transcript or not compact_boundary_since(transcript, t - DEFER_SLACK):
             return []
-        os.remove(p)  # снята этим вызовом — значит, выдаёт он один (clock и maint-post могут идти разом)
+        os.remove(p)  # снята этим вызовом — значит, выдаёт он один (clock, deferred и maint-post могут идти разом)
         return after_compact_blocks(m.get("role") or session_role(ev), ev, "compact", room)
     except Exception as e:  # хук не роняет сессию
         hook_log(cmd, "отложенная вставка не выдана: %s: %s" % (type(e).__name__, e))
@@ -1787,6 +1789,32 @@ def cmd_maint_post(ev):
     return 0
 
 
+def cmd_deferred(ev):
+    """PostToolUse: отложенная вставка после сжатия (metis-0788). hooks.json зовёт её, только когда в
+    <STATE>/ctx/deferred/ есть отметка, — доставка в пределах хода, а не со следующим сообщением владельца."""
+    emit("PostToolUse", deferred_compact(ev, "deferred", INJECT_MAX))
+    sweep_deferred()
+    return 0
+
+
+def sweep_deferred():
+    """Снять отметки любых сессий старше DEFER_MAX: отметка умершей сессии иначе заставляла бы каждую сессию
+    запускать python на каждом PostToolUse (проверка оболочкой в hooks.json смотрит только наличие файла)."""
+    d = os.path.join(CTX, "deferred")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        p = os.path.join(d, n)
+        try:
+            if n.endswith(".json") and time.time() - os.path.getmtime(p) > DEFER_MAX:
+                os.remove(p)
+                hook_log("deferred", "просроченная отметка снята: %s" % n)
+        except OSError:
+            pass
+
+
 def cmd_maint_pre(ev):
     """PreToolUse: сессия отметилась «сохранилась» — новых шагов нет до `pantheon restart --go`. Пропуск: SendMessage
     (отчёт Зевсу), `pantheon saved` и `pantheon restart --status`. Зевса не держим: он ведёт перезапуск."""
@@ -1970,11 +1998,11 @@ def cmd_state_len(ev):
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start, "clock": cmd_clock,
-          "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post,
+          "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post, "deferred": cmd_deferred,
           "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query,
           "state-len": cmd_state_len}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | answer | stop | start | clock | rewake | dir-added | maint-post | maint-pre | push | qmd-query | state-len",
+        print("ctx.py: owner-log | answer | stop | start | clock | rewake | dir-added | maint-post | deferred | maint-pre | push | qmd-query | state-len",
               file=sys.stderr)
         return 0
     try:

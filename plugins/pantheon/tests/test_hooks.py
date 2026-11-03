@@ -944,6 +944,29 @@ check("maint-post основной сессии после новой грани
       and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash"))
 check("повторный maint-post → ничего (выдано один раз)", r.stdout.strip() == "", r.stdout)
+# deferred — своя запись PostToolUse (без метки техперезапуска): доставка в пределах хода
+live_sub("s-ms", age=0)
+t_mark = time.time()
+r = run("start", ms)
+append(ms["transcript_path"], boundary(t_mark + 1))
+r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read", agent_id="a1", agent_type="dev-opus"))
+check("deferred субагента (agent_id) → ничего, отметка цела",
+      r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
+check("deferred основной сессии после границы → файл передачи дел (PostToolUse), отметка снята",
+      "СЛИВА" in ctx_text(r) and json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+      and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
+check("повторный deferred → ничего (выдано один раз)", r.stdout.strip() == "" and r.returncode == 0, r.stdout)
+old_mark, new_mark = defer_mark("s-dead"), defer_mark("s-alive")
+for pth, age in ((old_mark, 1000), (new_mark, 100)):
+    with open(pth, "w") as fh:
+        json.dump({"session_id": os.path.basename(pth)[:-5], "t": time.time() - age, "role": ""}, fh)
+    os.utime(pth, (time.time() - age, time.time() - age))
+r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
+check("deferred любой сессии снимает чужие отметки старше 15 мин, свежие не трогает",
+      r.returncode == 0 and not os.path.exists(old_mark) and os.path.exists(new_mark), r.stdout + r.stderr)
+os.remove(new_mark)
 
 # непросроченная отметка не сдвигается следующим сжатием субагента; сжатие без живых субагентов её снимает
 live_sub("s-ms", age=0)
@@ -1184,6 +1207,27 @@ os.makedirs(PUSHD)
 r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
 check("hooks.json: с папкой push запускается ctx.py push (через hooks/python.sh)",
       r.stdout.strip() == f"PYTHON-STARTED {FAKE_ROOT}/hooks/ctx.py push", r.stdout + r.stderr)
+# отложенная вставка после сжатия: python только при отметке в <STATE>/ctx/deferred/ (metis-0788)
+with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
+    sh = [h["command"] for m in json.load(fh)["hooks"]["PostToolUse"] for h in m["hooks"]
+          if h["command"].endswith("ctx.py\" deferred; done")]
+check("hooks.json: одна запись PostToolUse для ctx.py deferred, без matcher", len(sh) == 1, sh)
+sh = sh[0] if sh else "exit 1"
+DEFD = os.path.join(state, "ctx", "deferred")
+shutil.rmtree(DEFD, ignore_errors=True)
+r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: без папки deferred python не запускается", r.stdout.strip() == "" and r.returncode == 0,
+      r.stdout + r.stderr)
+os.makedirs(DEFD)
+open(os.path.join(DEFD, "x.tmp"), "w").close()
+r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: папка deferred без отметок .json → python не запускается",
+      r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
+open(os.path.join(DEFD, "s-x.json"), "w").close()
+r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: с отметкой запускается ctx.py deferred (через hooks/python.sh) один раз",
+      r.stdout.strip() == f"PYTHON-STARTED {FAKE_ROOT}/hooks/ctx.py deferred", r.stdout + r.stderr)
+shutil.rmtree(DEFD)
 
 shutil.rmtree(tmp)
 # 15.10: в UserPromptSubmit основной сессии с --agent нет agent_type — роль берётся из записи SessionStart
