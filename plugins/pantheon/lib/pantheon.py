@@ -4649,7 +4649,7 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
   <array><string>{tick}</string></array>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Standard</string>
   <key>AbandonProcessGroup</key><true/>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>{path}</string></dict>

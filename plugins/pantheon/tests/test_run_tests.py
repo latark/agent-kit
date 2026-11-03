@@ -522,8 +522,9 @@ check("stale_tests: в карте нет хеша файла — устарел"
       R.stale_tests(sitems, sm))
 check("test_hash: sha256 содержимого; нет файла — None",
       R.test_hash(sdir, "alpha/test_a.py") == OK2H and R.test_hash(sdir, "alpha/test_zzz.py") is None)
-# много устаревших — карта устарела целиком: весь набор с причиной (порог STALE_FULL)
-many = {f"test_{i}.py": OK2 + f"# {i}\n" for i in range(R.STALE_FULL)}
+# много устаревших (metis-0782): весь набор не из-за них — идут все устаревшие и затронутый, без «карта устарела»
+N_STALE = 9
+many = {f"test_{i}.py": OK2 + f"# {i}\n" for i in range(N_STALE + 3)}
 mdir = mkplugin(many, "alpha")
 mrepo2 = os.path.dirname(mdir)
 put(os.path.join(mdir, "lib", "z.py"), "Z = 1\n")
@@ -532,17 +533,20 @@ git(mrepo2, "add", "-A")
 git(mrepo2, "commit", "-q", "-m", "база")
 put(os.path.join(mdir, "lib", "z.py"), "Z = 2\n")
 mlabels = sorted(f"alpha/{f}" for f in many)
-mm2 = mkmap(mlabels, {os.path.relpath(os.path.join(mdir, "lib", "z.py"), mrepo2): [mlabels[0]]},
-            hashes={lb: "старый" for lb in mlabels})
+zrel = os.path.relpath(os.path.join(mdir, "lib", "z.py"), mrepo2)
+mm2 = mkmap(mlabels, {zrel: [mlabels[-1]]},
+            hashes={lb: ("старый" if i < N_STALE else R.test_hash(mdir, lb)) for i, lb in enumerate(mlabels)})
 r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
-check(f"устаревшая карта: {R.STALE_FULL} файлов изменены — весь набор, причина «карта устарела»",
-      r.returncode == 0 and "карта устарела" in r.stdout and f"файлов {R.STALE_FULL}, ok {R.STALE_FULL}" in r.stdout, r.stdout)
-mm3 = mkmap(mlabels, {os.path.relpath(os.path.join(mdir, "lib", "z.py"), mrepo2): [mlabels[0]]},
-            hashes={lb: ("старый" if i < R.STALE_FULL - 1 else R.test_hash(mdir, lb)) for i, lb in enumerate(mlabels)})
-r = run_aff("--affected", "--base", "main", mdir, mapf=mm3)
-check("устаревшая карта: на один меньше порога — не «карта устарела», а идут устаревшие и затронутый",
+check(f"устаревшая карта: {N_STALE} из {len(mlabels)} файлов изменены — идут они и затронутый, не весь набор",
       r.returncode == 0 and "карта устарела" not in r.stdout and "изменены после сборки карты" in r.stdout
-      and f"тестов {R.STALE_FULL - 1} из {R.STALE_FULL}" in r.stdout, r.stdout)
+      and f"тестов {N_STALE + 1} из {len(mlabels)}" in r.stdout
+      and f"файлов {N_STALE + 1}, ok {N_STALE + 1}" in r.stdout, r.stdout)
+# устаревшая карта + новый файл вне карты: весь набор одной строкой с причиной и именем файла
+put(os.path.join(mdir, "lib", "brand_new.py"), "B = 1\n")
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+check("устаревшая карта + файл вне карты: весь набор, одна строка с причиной и файлом",
+      r.returncode == 0 and "brand_new.py — нет в карте" in r.stdout and "весь набор" in r.stdout
+      and r.stdout.count("run-tests: затронутое") == 1 and f"файлов {len(mlabels)}, ok {len(mlabels)}" in r.stdout, r.stdout)
 
 # --- affected-map.py: карта по прогону в копии с метками ---
 MAPPER = os.path.join(PLUGIN, "scripts", "affected-map.py")

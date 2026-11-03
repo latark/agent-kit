@@ -26,8 +26,9 @@ background, файл ×3 дольше, metis-0728); в начале прогон
 Файлы тестов, которых карта не знает (новые после её сборки) или которые при сборке упали (broken), идут всегда.
 Карта хранит sha256 каждого файла тестов (hashes): файл, изменённый после сборки (хеш другой), мог начать задевать новые
 файлы — его связи не верны, и он идёт при любом изменении (в выводе: «изменены после сборки карты»); таких файлов
-STALE_FULL и больше — карта устарела целиком, весь набор с причиной. Так правка теста после сборки не пропускает нужные
-тесты из-за старой карты; карту пересобирают, когда таких файлов набралось.
+сколько бы их ни было, они идут все, а не весь набор (metis-0782). Так правка теста после сборки не пропускает нужные
+тесты из-за старой карты. Весь набор — только там, где без него нельзя, и одной строкой с причиной: общий файл (FULL),
+изменённый файл вне карты (его зависимых не знаем; в строке — до 5 таких файлов), карта не читается, ошибка git.
 Тесты плагинов, которых нет в аргументах, не идут. Изменений нет или ни один не ведёт к тестам — код 3 и строка
 «нечего гонять», а не пустой зелёный. Ошибка git (нет базы, не репозиторий, мелкий клон без merge-base) — весь
 набор и причина строкой: при сомнении раннер гоняет всё, а не ничего.
@@ -71,7 +72,7 @@ import time
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
 # Медленные файлы: идут первыми (по убыванию предела), предел — свой, с. metis-0634: пределы — по 31 полному прогону
-# прохода outside 30.10–01.11 (-j 3, процесс тика ProcessType Background, Mac под нагрузкой): 1.5 × наибольшего
+# прохода outside 30.10–01.11 (-j 3, тогда процесс тика шёл с ProcessType Background (с metis-0728 — Standard), Mac под нагрузкой): 1.5 × наибольшего
 # зелёного времени файла с округлением вверх до минуты, не меньше 180 с. Прежние (3 × последовательного замера 27.10)
 # давали таймауты: test_merge_gate — 19 из 33 прогонов, test_watch — 10 из 31, test_read — 9 из 31.
 # В комментарии — медиана и наибольшее зелёное время в тех прогонах, с.
@@ -86,12 +87,15 @@ SLOW = {
     # 600 ≈ 2.3 × 259 — во столько раз test_merge_gate под нагрузкой 03.11 дольше своей медианы (1051 / 458)
     "pantheon/test_read.py": 600,
     "guard/test_shell_diff.py": 600,  # 254 / 390
+    # test_merge: 86 / 171 в прежних прогонах; замер 03.11 (metis-0783) на одном воркере при load 30-150: 143 с чистого
+    # времени тестов, 386 с с очередью heavy. Время — ~200 запусков python3.11 с загрузкой pantheon (по 0.3-1 с под
+    # нагрузкой); снов и git нет, ускорять нечем без потери изоляции. 600 ≈ 3.5 × 171, как у test_read
+    "pantheon/test_merge.py": 600,
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
     "pantheon/test_setup.py": 480,  # 109 / 303
     "pantheon/test_start.py": 480,  # 136 / 289
     "pantheon/test_board.py": 360,  # 98 / 235
     "pantheon/test_sync_quarantine.py": 360,  # 120 / 231
-    "pantheon/test_merge.py": 300,  # 86 / 171
     "pantheon/test_hooks.py": 300,  # 64 / 163
     "pantheon/test_executors.py": 240,  # 69 / 158
     "pantheon/test_tick.py": 240,  # 56 / 160
@@ -126,9 +130,8 @@ PLATFORM = os.environ.get("RUN_TESTS_PLATFORM") or sys.platform
 # Карта для --affected (metis-0451): строит scripts/affected-map.py прогоном всех тестов, правится только им.
 MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "affected-map.json")
 MAP_VERSION = 2
-# Карта старше файла тестов (правка после сборки): связи этого файла по карте неверны, файл идёт всегда. Столько файлов
-# и больше — карта устарела целиком: весь набор с причиной в выводе.
-STALE_FULL = 8
+# Карта старше файла тестов (правка после сборки): связи этого файла по карте неверны, файл идёт всегда (metis-0782:
+# сколько бы таких ни было — весь набор не из-за них).
 # Общие файлы: их правка гонит весь набор, что бы ни говорила карта (их грузит почти каждый тест или они меняют
 # сам выбор тестов).
 FULL = frozenset({
@@ -400,9 +403,10 @@ QOS_PROBE = (
 
 
 def launch_cmd(py, f, platform=None, exists=os.path.exists):
-    """Команда запуска одного файла. На macOS с taskpolicy — через `taskpolicy -c utility`: плановый проход идёт
-    из launchd с ProcessType Background, и без этого весь набор сидит в QoS background на E-ядрах (файл ×3 дольше,
-    metis-0728). На Linux и без taskpolicy — как раньше."""
+    """Команда запуска одного файла. На macOS с taskpolicy — через `taskpolicy -c utility`: тик шёл
+    из launchd с ProcessType Background и без этого весь набор сидел в QoS background на E-ядрах (файл ×3 дольше,
+    metis-0728). Тик теперь Standard, но на уже установленной машине plist старый до ручного `pantheon install`,
+    поэтому taskpolicy остаётся. На Linux и без taskpolicy — как раньше."""
     cmd = [py, "-I", os.path.join("tests", f)]
     if (sys.platform if platform is None else platform) == "darwin" and exists(TASKPOLICY):
         return [TASKPOLICY, "-c", "utility", *cmd]
@@ -537,16 +541,11 @@ def pick_affected(items, dirs, base, map_path=None):
         print(f"{head}: {why} — весь набор", flush=True)
         return items, 0
     stale = stale_tests(items, amap)
-    if len(stale) >= STALE_FULL:
-        print(f"{head}: карта устарела — {len(stale)} файлов тестов изменены после её сборки (порог {STALE_FULL}): "
-              f"{', '.join(stale[:3])}{' …' if len(stale) > 3 else ''} — весь набор; пересобрать: affected-map.py",
-              flush=True)
-        return items, 0
     chosen, unknown, always = select(changed, root, items, amap, stale)
     if unknown:
-        path, why = unknown[0]
-        more = f" и ещё {len(unknown) - 1}" if len(unknown) > 1 else ""
-        print(f"{head}: изменено {len(changed)}, {path} — {why}{more} — весь набор", flush=True)
+        paths = ", ".join(f"{p} — {w}" for p, w in unknown[:5])
+        more = f" и ещё {len(unknown) - 5}" if len(unknown) > 5 else ""
+        print(f"{head}: изменено {len(changed)}, {paths}{more} — весь набор", flush=True)
         return items, 0
     if not chosen:
         print(f"{head}: изменено {len(changed)}, ни один не проверяется тестами по карте — нечего гонять "
