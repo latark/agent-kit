@@ -48,7 +48,10 @@ open(os.path.join(home, "directions.toml"), "w", encoding="utf-8").write(
 base = {"project": "Пантеон", "direction": "metis-pantheon", "owner": "metis-pantheon", "created": "2026-11-03",
         "updated": "2026-11-03T12:00:00", "schema_version": 1}
 card(os.path.join(tdir, "metis-0900.md"), {"type": "story", "id": "metis-0900", "title": '"П9 Пачка"',
-                                           "status": "doing", **base})
+                                           "status": "doing", **base}, "## Готово, когда\n\n- [ ] пачка слита, тесты зелёные")
+STUB = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+card(os.path.join(tdir, "metis-0909.md"), {"type": "story", "id": "metis-0909", "title": '"Пачка-заглушка"',
+                                           "status": "doing", **base}, "## Готово, когда\n\n- [ ]  " + STUB.replace(" ", "  ", 1))
 card(os.path.join(tdir, "metis-0901.md"), {"type": "task", "id": "metis-0901", "title": '"Первая"', "status": "doing",
                                            "parent": "metis-0900", **base})
 card(os.path.join(tdir, "metis-0902.md"), {"type": "task", "id": "metis-0902", "title": '"Вторая"', "status": "todo",
@@ -105,6 +108,12 @@ for bad in ([], ["start"], ["go", "metis-0900"], ["start", "../x"], ["start", "m
     check(f"разбор: batch {' '.join(bad) or '(пусто)'} → код 2", r.returncode == 2, r.stderr[-200:])
 r = cli(repo, "batch", "start", "metis-0901")
 check("start на задаче, не пачке → код 1, «нет»", r.returncode == 1 and "нет" in r.stderr, r.stderr)
+for sub in (["start"], ["pr", "--dry-run"]):  # metis-0766: story без проверяемых пунктов — отказ с номером, ветки нет
+    r = cli(repo, "batch", sub[0], "metis-0909", *sub[1:])
+    check(f"{sub[0]} у story только с заглушкой → код 1, «нет критериев» с номером story, gh не зван",
+          r.returncode == 1 and "нет критериев" in r.stderr and "metis-0909" in r.stderr and not gh_calls(), r.stderr)
+check("start у story-заглушки ветку не создал",
+      subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/batch/metis-0909"], cwd=repo).returncode != 0)
 
 # start
 r = cli(repo, "batch", "start", "metis-0900")

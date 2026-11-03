@@ -52,8 +52,15 @@ check("story без пунктов → отказ, код не 0, подсказ
       r.returncode != 0 and "--done-when" in r.stderr and not cards(), r.stdout + r.stderr)
 r = new("--type", "story", "--title", "Пачка с заглушкой в теле", "--text", f"## Готово, когда\n\n- [ ] {HINT}")
 check("story с заглушкой в теле → отказ", r.returncode != 0 and not cards(), r.stdout + r.stderr)
+r = new("--type", "story", "--title", "Пачка с заглушкой в два пробела", "--text",
+        "## Готово, когда\n\n- [ ] " + HINT.replace(" ", "  ", 1))
+check("story с заглушкой с лишним пробелом → отказ (общий _is_stub, argus #291)", r.returncode != 0 and not cards(),
+      r.stdout + r.stderr)
 r = new("--type", "story", "--title", "Пачка с пунктом", "--text", "цель", "--done-when", "тест зелёный")
 check("story с --done-when → создана", r.returncode == 0 and len(cards()) == 1, r.stdout + r.stderr)
+body = open(os.path.join(home, "directions", "metis-pantheon", "tasks", cards()[0]), encoding="utf-8").read() if cards() else ""
+check("story с --done-when → в «Готово, когда» переданный пункт, заглушки нет",
+      "- [ ] тест зелёный" in body and HINT not in body, body[-400:])
 r = new("--type", "story", "--title", "Пачка с разделом в теле", "--text", "цель\n\n## Готово, когда\n\n- [ ] тест зелёный")
 check("story с разделом «Готово, когда» в --body → создана", r.returncode == 0 and len(cards()) == 2, r.stdout + r.stderr)
 r = new("--title", "Обычная задача без пунктов", "--text", "цель")

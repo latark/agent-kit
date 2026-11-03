@@ -739,7 +739,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
     if need_story_criteria and kind == "story" and not (
             [x for x in (done_when or []) if str(x).strip()]
-            or [x for _, x in done_criteria(escape_desc(text)) if x != DONE_WHEN_HINT]):
+            or [x for _, x in done_criteria(escape_desc(text)) if not _is_stub(x)]):
         raise ValueError("у пачки (story) нет проверяемых пунктов «Готово, когда»: добавьте --done-when \"пункт\" "
                          "(повторяемый) или раздел «## Готово, когда» с «- [ ] пункт» в --body; заглушка пачку не закроет (metis-0766)")
     project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml

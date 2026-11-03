@@ -98,7 +98,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
 (лимит серверов держит проход) в папке копии; окружение с нуля (HOME, PATH с node из nvm, TMPDIR — своя временная
-папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT. Профиль:
+папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT. Сторож тишины (metis-0770): лог прогона не
+растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
+гасится SIGKILL, итог failed «тишина N с, последний вывод: <строка>», в журнал — запись test-silent; считающий без
+вывода прогон не гасится. CPU не узнать (ps не ответил) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
 всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
 на чтение, на запись нет; STATE/outside/env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
@@ -142,7 +145,8 @@ tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и по�
 метки), map (sha256 affected-map.json HEAD). Шлюз guard её засчитывает как полный набор (merge_gate.py не менялся).
 Остаток: test_hash раннера читает файл тестов целиком, без предела размера (и по ссылке) — файл-гигант в плагине растит
 память прохода; ссылки и размеры файлов дозапуск не проверяет.
-Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl.
+Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl (в том числе
+test-silent — прогон погашен сторожем тишины, test-silent-nocpu — лог молчит, а CPU дерева не узнать).
 """
 import contextlib
 import errno

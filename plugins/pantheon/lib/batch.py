@@ -36,6 +36,9 @@ def _story(sid):
     tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
     if sid not in tasks or tasks[sid][1].get("type") != "story":
         return None, f"пачки {sid} нет (нужна карточка type: story)"
+    if not [x for _, x in T.done_criteria(tasks[sid][2]) if not T._is_stub(x)]:
+        return None, (f"у пачки {sid} нет критериев «Готово, когда» (только заглушка или раздела нет) — впиши проверяемые "
+                      f"пункты в карточку story (pantheon task set {sid} --body-file …), заглушка пачку не закроет (metis-0766)")
     return tasks, None
 
 
