@@ -292,7 +292,7 @@
   строкой в журнале. На новом выпуске смотрит и последний завершённый прогон tests на main (`gh run list`, metis-0587):
   `failure` — одна тревога на коммит со ссылкой на прогон, выпуск не стопорится; нет прогонов, `startup_failure`
   (Actions не стартовали) или сбой gh — не тревога, строка в журнале раз в день. Тесты идут до слияния — workflow tests в GitHub Actions на каждый PR в main (затронутое по карте, ubuntu-24.04,
-  Python 3.14, все три плагина, плюс тесты скриптов выпуска; полный набор на macOS — после слияния и вручную); локального прогона тестов новой версии, порога свопа и давления памяти у планового прохода больше нет (п. 8
+  Python 3.14, все три плагина, плюс тесты скриптов выпуска; полный набор на GitHub не гоняется: он идёт локально через `pantheon outside test`, запись FULL_TESTS; macOS в Actions выключен, metis-0688); локального прогона тестов новой версии, порога свопа и давления памяти у планового прохода больше нет (п. 8
   страницы упрощения 27.10): выпуск встаёт на первом плановом проходе после коммита «выпуск: …». За проход ставятся
   все плагины с выпуском. Установка не удалась — тревога одна на версию, следующий проход пробует снова. Встало не
   то, что выпущено (другая версия или хеш дерева), — критическая тревога. Журнал — `~/.local/state/pantheon/plugins/`.
@@ -579,7 +579,7 @@
 
 ## Проверки
 
-    heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools  # все сразу; на main после слияния — и CI (macOS)
+    heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools  # все сразу; полный набор — только локально (outside test), на GitHub PR гонят лишь затронутое на Linux
     heavy python3 -I plugins/pantheon/scripts/run-tests.py --affected plugins/guard plugins/pantheon plugins/project-tools  # во время правки
     heavy python3 -I plugins/pantheon/scripts/affected-map.py plugins/guard plugins/pantheon plugins/project-tools  # карта заново
     python3 -I plugins/guard/tests/test_guard.py      # карта прав ~/ai/pantheon, domain, привилегии, protect-config, режимы
