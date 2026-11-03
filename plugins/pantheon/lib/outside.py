@@ -99,9 +99,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
 (лимит серверов держит проход) в папке копии; окружение с нуля (HOME, PATH с node из nvm, TMPDIR — своя временная
 папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT. Сторож тишины (metis-0770): лог прогона не
-растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
-гасится SIGKILL, итог failed «тишина N с, последний вывод: <строка>», в журнал — запись test-silent; считающий без
-вывода прогон не гасится. CPU не узнать (ps не ответил) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
+растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
+sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
+гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
+вывода прогон не гасится. CPU не узнать (ни libproc, ни ps) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
 всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
 на чтение, на запись нет; STATE/outside/env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
@@ -149,6 +150,7 @@ tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и по�
 test-silent — прогон погашен сторожем тишины, test-silent-nocpu — лог молчит, а CPU дерева не узнать).
 """
 import contextlib
+import ctypes
 import errno
 import glob
 import hashlib
@@ -161,6 +163,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -856,9 +859,61 @@ def _cpu_secs(text):
         return None
 
 
-def tree_cpu(pid):
-    """Сумма CPU-секунд группы pid и её потомков (в своих группах тоже) по ps или None: ps недоступен (песочница) —
-    тогда судим только по тишине лога (metis-0770). Ушедшие за время опроса процессы счёт занижают — не страшно."""
+LIBPROC = "/usr/lib/libproc.dylib"   # macOS: дерево и CPU без ps (metis-0770); нет файла — запасной путь по ps
+
+
+def _libproc():
+    """(libproc, секунд в тике mach) или None: не macOS или библиотеки нет. ri_user_time и ri_system_time —
+    в тиках mach_absolute_time (на Apple Silicon тик ≠ нс: 125/3 нс), поэтому множитель — mach_timebase_info."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        lib = ctypes.CDLL(LIBPROC)
+        tb = (ctypes.c_uint32 * 2)()
+        if ctypes.CDLL(None).mach_timebase_info(tb) != 0 or not tb[1]:
+            return None
+        return lib, tb[0] / tb[1] / 1e9
+    except (OSError, AttributeError):
+        return None
+
+
+def _lp_pids(fn, arg):
+    """[pid] из proc_listpgrppids или proc_listchildpids (они возвращают число pid, а не байт); сбой — []."""
+    n = 256
+    while True:
+        buf = (ctypes.c_int * n)()
+        got = fn(int(arg), buf, ctypes.sizeof(buf))
+        if got < 0:
+            return []
+        if got < n or n >= 1 << 16:
+            return [p for p in buf[:min(got, n)] if p > 0]
+        n *= 4                       # буфер полон — список мог не влезть, берём больше
+
+
+def _tree_cpu_libproc(pid):
+    """CPU-секунды группы pid и её потомков по libproc (proc_listpgrppids, proc_listchildpids, proc_pid_rusage
+    rusage_info_v0: ri_user_time + ri_system_time) или None: не macOS, группы нет или ни одного ответа."""
+    lp = _libproc()
+    if lp is None:
+        return None
+    lib, scale = lp
+    seen, todo = set(), _lp_pids(lib.proc_listpgrppids, pid)
+    while todo:                      # то же дерево, что _tree: члены группы и все их потомки в любых группах
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo.extend(_lp_pids(lib.proc_listchildpids, p))
+    buf = ctypes.create_string_buffer(256)   # rusage_info_v0 — 96 байт: uuid[16], ri_user_time, ri_system_time, …
+    total, got = 0, False
+    for p in seen:
+        if lib.proc_pid_rusage(p, 0, buf) == 0:
+            user, sys_ = struct.unpack_from("2Q", buf, 16)
+            total, got = total + user + sys_, True
+    return total * scale if got else None
+
+
+def _tree_cpu_ps(pid):
+    """CPU-секунды группы pid и её потомков по ps (Linux; на macOS — если libproc не ответил) или None."""
     table = ps_table()
     pids = _tree(pid, table) if table else set()
     if not pids:
@@ -877,6 +932,15 @@ def tree_cpu(pid):
     return total if seen else None
 
 
+def tree_cpu(pid):
+    """Сумма CPU-секунд группы pid и её потомков (в своих группах тоже) или None — CPU не узнать, тогда судим только
+    по тишине лога и не гасим (metis-0770). На macOS — libproc: setuid /bin/ps под sandbox-exec не запускается, и
+    сторож в прогоне под песочницей иначе не гасил бы никогда; ps — запасной путь (Linux, нет libproc). Ушедшие за
+    время опроса процессы счёт занижают — не страшно."""
+    cpu = _tree_cpu_libproc(pid)
+    return cpu if cpu is not None else _tree_cpu_ps(pid)
+
+
 def last_line(log):
     """Последняя непустая строка лога (до 200 знаков) или ''."""
     for ln in reversed(tail(log).splitlines()):
@@ -889,7 +953,7 @@ def wait_proc(proc, timeout, tick=None, idle_log=None):
     """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
     «стопа» своей заявки — tick() вернул True — группа гаснет, ждём её конца (metis-0606, 0614). Тесты идут в своём
     проходе и серверы не смотрят. TimeoutExpired — как у proc.wait.
-    idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с И прирост CPU-времени дерева (user+sys по ps)
+    idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с И прирост CPU-времени дерева (user+sys, tree_cpu: libproc или ps)
     за окно меньше IDLE_CPU от окна → SIGKILL группе и её потомкам, исключение Silent. Считающий без вывода (под
     нагрузкой «0 % CPU» по ps — не зависание) не гасится; CPU не узнать — не гасим, предупреждение в журнал."""
     deadline = time.monotonic() + timeout
@@ -919,14 +983,14 @@ def wait_proc(proc, timeout, tick=None, idle_log=None):
                 if base[1] is None and now - grew >= IDLE_TIMEOUT and not warned:
                     warned = True    # CPU не узнать — не гасим, только предупреждение (раз за прогон)
                     log_event(kind="test-silent-nocpu", log=idle_log,
-                              why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (ps) — не гашу")
+                              why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (libproc, ps) — не гашу")
             elif now - grew >= IDLE_TIMEOUT and now - base[0] >= IDLE_TIMEOUT / 2:
                 cpu = tree_cpu(proc.pid)
                 if cpu is None:      # CPU не узнать — не гасим, только предупреждение (раз за прогон)
                     if not warned:
                         warned = True
                         log_event(kind="test-silent-nocpu", log=idle_log,
-                                  why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (ps) — не гашу")
+                                  why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (libproc, ps) — не гашу")
                 elif (cpu - base[1]) < IDLE_CPU * (now - base[0]):
                     last = last_line(idle_log)
                     extra = strays(proc.pid)

@@ -5,7 +5,10 @@
 Временный репозиторий, sandbox-exec подменён заглушкой, IDLE_TIMEOUT — 2 с. Проверяет: молчащий `sleep` гасится
 SIGKILL по тишине (state=failed, why «тишина … последний вывод: …», причина и в логе прогона, и в outside.jsonl,
 процесса нет); процесс, пишущий строку раз в 0,5 с, не гасится (его останавливает только общий TEST_TIMEOUT);
-молчащий, но считающий (busy loop без вывода) — не гасится; CPU не узнать (ps пуст) — не гасим, предупреждение в журнал; разбор времени ps.
+молчащий, но считающий (busy loop без вывода) — не гасится; CPU не узнать (нет ни libproc, ни ps) — не гасим,
+предупреждение в журнал; разбор времени ps. Без ps (под sandbox-exec setuid /bin/ps не запускается, а тест идёт
+и через `pantheon outside test`) на macOS CPU дерева — по libproc: молчащий sleep гасится и при O.PS, которого
+нет, а время дерева совпадает с process_time ребёнка (единицы тиков mach).
 """
 import atexit
 import json
@@ -16,6 +19,7 @@ import sys
 import tempfile
 import time
 
+MAC = sys.platform == "darwin"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from _py311 import PY311  # noqa: E402,F401
@@ -115,11 +119,51 @@ res, dt = run("echo busy; " + SPIN, timeout=5)
 check("молчит, но жжёт CPU — не гасится по тишине",
       res.get("state") == "done" and "тишина" not in res.get("why", ""), res)
 
-_ps = O.ps_table
-O.ps_table = lambda: {}
+NO_PS = os.path.join(_ROOT, "нет-ps")   # как под sandbox-exec: ps не запустить (OSError)
+_ps, _lp = O.PS, O.LIBPROC
+O.PS = NO_PS
+if MAC:
+    res, dt = run("echo nops-lp; sleep 31339")
+    check("без ps молчащий sleep гасится по тишине: CPU дерева по libproc",
+          res.get("state") == "failed" and "тишина" in res.get("why", "") and "nops-lp" in res["why"] and dt < 5,
+          (res, dt, [e for e in events() if e.get("kind") == "test-silent-nocpu"]))
+    # ребёнок ждёт, а считает внук в своей сессии (как задача turbo): дерево — и потомки в чужих группах
+    _burn = ("import time\nt = time.process_time()\nwhile time.process_time() - t < 0.6: pass\n"
+             "print(time.process_time(), flush=True)\ntime.sleep(60)")
+    _kid = subprocess.Popen([sys.executable, "-I", "-c",
+                             "import subprocess, sys, time\n"
+                             f"b = subprocess.Popen([sys.executable, '-I', '-c', {_burn!r}], stdout=subprocess.PIPE,"
+                             " text=True, start_new_session=True)\n"
+                             "print(b.stdout.readline().strip(), b.pid, flush=True)\ntime.sleep(60)"],
+                            stdout=subprocess.PIPE, text=True, start_new_session=True)
+    _line = (_kid.stdout.readline().split() + ["0", "0"])[:2]
+    _own = float(_line[0])
+    _cpu = O.tree_cpu(_kid.pid)
+    for _p in (int(_line[1]), _kid.pid):
+        if _p:
+            try:
+                os.kill(_p, 9)
+            except OSError:
+                pass
+    _kid.wait()
+    check("без ps tree_cpu по libproc: время дерева с внуком в своей сессии, в секундах (как его process_time)",
+          _cpu is not None and _own >= 0.6 and _own - 0.05 <= _cpu <= _own + 0.5, (_cpu, _own))
+else:
+    print("пропущено: нужен macOS — без ps CPU дерева по libproc")
+O.LIBPROC = NO_PS
+try:
+    _ps_ok = subprocess.run([_ps, "-o", "pid=", "-p", str(os.getpid())], capture_output=True).returncode == 0
+except OSError:
+    _ps_ok = False
+if _ps_ok:
+    O.PS = _ps
+    check("без libproc (Linux) tree_cpu — по ps", O.tree_cpu(os.getpgid(0)) is not None)
+    O.PS = NO_PS
+else:
+    print("пропущено: ps не запускается (песочница) — запасной путь tree_cpu по ps")
 res, dt = run("echo nops; sleep 31338", timeout=7)
-O.ps_table = _ps
-check("ps недоступен, CPU не узнать — не гасим, только предупреждение в журнале",
+O.PS, O.LIBPROC = _ps, _lp
+check("ни libproc, ни ps — CPU не узнать — не гасим, только предупреждение в журнале",
       res.get("state") == "done" and "дольше" in res.get("why", "") and "тишина" not in res.get("why", "")
       and any(e.get("kind") == "test-silent-nocpu" for e in events()), (res, events()))
 check("tree_cpu узнаёт время процессов дерева (иначе тест «считает» ничего не доказывает)",
