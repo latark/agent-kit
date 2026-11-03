@@ -791,6 +791,20 @@ def test_new_order_goal():
         check(g.endswith(P.NEW_ORDER_GOAL), f"{name} без условия о новом поручении: {g!r}")
     check("перехожу к" in P.NEW_ORDER_GOAL and "пришедшее в сессию после её начала" in P.NEW_ORDER_GOAL,
           f"условие о новом поручении: {P.NEW_ORDER_GOAL!r}")
+    # metis-0714: задачу, которую сессия перевела в «ждёт», Stop-хук цели не требует; doing и todo — в цели
+    for name in ("TASK_GOAL", "COORDINATOR_GOAL"):
+        g = getattr(P, name)
+        check(g.endswith(P.WAITING_GOAL + P.NEW_ORDER_GOAL), f"{name} без условия о задаче в «ждёт»: {g!r}")
+    w = P.WAITING_GOAL
+    # строки, которым цель верит, — те же, что печатает `task set` (lib/tasks.py; поведение — test_task_keep.py)
+    T = P.tasks_mod()
+    check("«ждёт» (waiting)" in w and f"«<id>: {T.GOAL_OUT}»" in w and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
+          and "в работе (doing) и в очереди (todo) — в цели" in w
+          and "Верь последней такой строке по этой задаче" in w, f"условие о задаче в «ждёт»: {w!r}")
+    # argus-280a (Д1): плановый проход возвращает задачу в doing без строки в транскрипте — «снята» верна на момент записи
+    check(f"«Снята» верна на момент записи: если позже по задаче есть «{T.GOAL_IN.split()[0]}»" in w
+          and "статус вернулся в работу (doing) или очередь (todo) — задача снова в цели" in w,
+          f"условие о задаче в «ждёт» без «снята верна на момент записи»: {w!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())

@@ -403,6 +403,16 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(P.PANTHEON, P.now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
+            if head.get("status") == "waiting":  # metis-0714: строка для проверяющей модели цели окна (WAITING_GOAL)
+                print(f"{tid}: {T.GOAL_OUT} — ждёт " + ("ответа владельца на вопрос" if head.get("waiting_on") == "human"
+                                                       else f"задачу {head.get('waiting_on')}")
+                      if T.goal_released(head, T.load_tasks(P.PANTHEON, T.WORK_TYPES))
+                      else f"{tid}: {T.GOAL_IN} — «ждёт» снимает задачу с цели, только если waiting_on=human с question "
+                           f"или waiting_on=<id другой задачи>, которая есть, не done/dropped и, если сама ждёт, "
+                           f"снята с цели")
+            if {"status", "waiting_on", "question"} & set(changes):  # metis-0714 (argus-280b): «снята» у ждущих её — отменить
+                for did, blk, st in T.goal_held_dependents(tid, T.load_tasks(P.PANTHEON, T.WORK_TYPES)):
+                    print(f"{did}: {T.GOAL_IN} — блокер {blk} {st}" + ("" if blk == tid else f", цепочка до {tid}"))
             if changes.get("status") == "doing" and head.get("status") == "doing":
                 _warn_overlap(T, tid)
             if changes.get("status") in ("done", "dropped"):
