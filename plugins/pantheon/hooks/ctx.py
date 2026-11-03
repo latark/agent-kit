@@ -1294,6 +1294,21 @@ def compact_boundary_since(path, since, off=None):
     return False
 
 
+def claim_mark(p):
+    """Забрать отметку: True — только у одного из одновременных вызовов. os.remove на APFS не исключителен (один файл
+    успешно удаляют несколько процессов разом), rename в своё имя — исключителен; хвост .claim не попадает под *.json."""
+    q = "%s.%d.claim" % (p, os.getpid())
+    try:
+        os.rename(p, q)
+    except FileNotFoundError:
+        return False
+    try:
+        os.remove(q)
+    except OSError:
+        pass
+    return True
+
+
 def deferred_compact(ev, cmd, room):
     """Отложенная вставка после сжатия: список блоков или []. Только событие основной сессии (без agent_id) и только
     при отметке этой сессии. Граница найдена — отметка снимается и выдаются те же блоки, что дал бы SessionStart,
@@ -1311,16 +1326,16 @@ def deferred_compact(ev, cmd, room):
                 m = json.load(f)
             t = float(m["t"])
         except (OSError, ValueError, TypeError, KeyError) as e:
-            os.remove(p)  # битую отметку не просрочить — снимаем сразу
-            hook_log(cmd, "отметка отложенной вставки не читается, снята: %s" % e)
+            if claim_mark(p):  # битую отметку не просрочить — снимаем сразу
+                hook_log(cmd, "отметка отложенной вставки не читается, снята: %s" % e)
             return []
         transcript = ev.get("transcript_path") or m.get("tp") or ""
         if not transcript or not compact_boundary_since(transcript, t - DEFER_SLACK, m.get("off")):
-            if time.time() - t > DEFER_MAX:
-                os.remove(p)
+            if time.time() - t > DEFER_MAX and claim_mark(p):
                 hook_log(cmd, "границы сжатия нет %d мин, отметка снята без вставки (%s)" % (DEFER_MAX // 60, sid))
             return []
-        os.remove(p)  # снята этим вызовом — значит, выдаёт он один (clock, deferred и maint-post могут идти разом)
+        if not claim_mark(p):  # забрал другой вызов (clock, deferred и maint-post идут разом) — выдаёт он
+            return []
         ev = dict(ev, transcript_path=transcript)  # файл состояния ищется по тому же транскрипту
         return after_compact_blocks(m.get("role") or session_role(ev), ev, "compact", room)
     except Exception as e:  # хук не роняет сессию
@@ -1838,8 +1853,8 @@ def sweep_deferred():
                         continue  # граница есть — вставку заберёт сама сессия на своём шаге
                 except (OSError, ValueError, TypeError):
                     pass
-            os.remove(p)
-            hook_log("deferred", "просроченная отметка снята: %s" % n)
+            if claim_mark(p):
+                hook_log("deferred", "просроченная отметка снята: %s" % n)
         except OSError:
             pass
 
