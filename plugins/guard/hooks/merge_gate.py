@@ -86,17 +86,19 @@ run-tests.py в своей worktree без heavy; на основном пути
 
 import ast
 import glob
-import hashlib
 import json
 import os
 import posixpath
 import re
 import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime
 
-G = None  # модуль guard_rules.py: присваивает он сам при загрузке
+# модуль guard_rules.py: его _mg() присваивает G при первом обращении к этому модулю (metis-0330: merge_gate грузится
+# лениво). Прямой `import merge_gate` после `import guard_rules` (тесты, pantheon) берёт загруженный guard_rules сразу
+G = sys.modules.get("guard_rules")
 
 MERGE_CLOSED = ("слияние делает лид направления (hephaestus-*, apollo-* субагентом) или главная сессия его "
                 "координатора. Вместо него отправь свою ветку, открой PR (gh pr create) и в отчёте лиду напиши, что "
@@ -1486,33 +1488,16 @@ def _has_workflows(repo, sha):
     return False if "(HTTP 404)" in (r.stderr or "") else None
 
 
-class Allow:
-    """Пропуск с предупреждениями (красная необязательная проверка CI, metis-0633, 0650). Ложь, как None: проверки
-    по-прежнему пишут `if why:`, а предупреждения едут возвратом до guard_rules.main (check_push → check_roles →
-    main) и печатаются строкой systemMessage только в ответе того события, которое их дало. Изменяемого состояния
-    модуля нет: демон хуков (metis-0330) проверит много событий в одном процессе, и чужое предупреждение в ответ не
-    попадёт."""
-    __slots__ = ("notes",)
-
-    def __init__(self, notes):
-        self.notes = tuple(notes)
-
-    def __bool__(self):
-        return False
-
-    def __repr__(self):
-        return f"Allow({list(self.notes)!r})"
-
-
 def allow(notes):
-    """None без предупреждений, иначе Allow(notes)."""
-    notes = tuple(notes)
-    return Allow(notes) if notes else None
+    """None без предупреждений, иначе Allow(notes) — пропуск с предупреждениями (metis-0633, 0650). Класс Allow живёт
+    в guard_rules.py (metis-0330): этот модуль грузится по первому обращению, а guard_rules сверяет isinstance со
+    своим классом."""
+    return G.allow(notes)
 
 
 def notes_of(result):
     """Предупреждения пропуска: notes у Allow, у отказа (строка) и None — пусто."""
-    return result.notes if isinstance(result, Allow) else ()
+    return G.notes_of(result)
 
 
 CI_WATCH = ("ждать — командой вне хука, не моделью: `gh pr checks {pr} -R {repo} --watch` (Bash не в фоне, timeout "
@@ -1801,6 +1786,7 @@ def _fingerprint(gd, base, head):
     if plugins is None:
         return None, f"plugin.json на {head[:12]} не разобрать (не JSON, два ключа, version не строкой, не файл)"
     rows = sorted((e for e in entries if not PLUGIN_JSON_RE.fullmatch(e[5])), key=lambda e: e[5])
+    import hashlib  # по первому обращению: отпечаток нужен только шлюзу слияния (metis-0330)
     h = hashlib.sha256(b"carry-v3\0" + b"".join(b" ".join(e[:5]) + b"\0" + e[5] + b"\0" for e in rows) + b"\0"
                        + "\0".join(plugins).encode("utf-8"))
     return h.hexdigest(), mb

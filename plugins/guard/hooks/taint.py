@@ -45,13 +45,23 @@ import signal
 import sys
 import time
 
-HOME = os.path.expanduser("~")
-OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
-STATE = os.path.join(HOME, ".local", "state", "tg-taint")
-AI_HOME = os.path.join(HOME, "ai")
-CLAUDE = os.path.join(HOME, ".claude")
-FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
-READ_DUMPS = os.path.join(HOME, ".local", "state", "pantheon", "read")   # заявки pantheon read (metis-0508)
+
+
+def configure():
+    """Контекст вызова (metis-0330): HOME и пути от него, выключатель OFF (GUARD_OFF) — из os.environ, здесь, а не в
+    строках модуля. Зовётся при загрузке (последней строкой файла) и заново, когда процесс судит событие другого
+    вызова с другим окружением (guard.set_context, демон хуков). TMPDIR и остальное окружение правила читают в момент
+    проверки. Правила берут эти имена как глобальные модуля при вызове: копию `from taint import HOME` не делать."""
+    global HOME, OFF, STATE, AI_HOME, CLAUDE, FAIL_LOG, READ_DUMPS
+    HOME = os.path.expanduser("~")
+    OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
+    STATE = os.path.join(HOME, ".local", "state", "tg-taint")
+    AI_HOME = os.path.join(HOME, "ai")
+    CLAUDE = os.path.join(HOME, ".claude")
+    FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+    READ_DUMPS = os.path.join(HOME, ".local", "state", "pantheon", "read")   # заявки pantheon read (metis-0508)
+
+
 READ_DUMPS_RX = r"\.local/state/pantheon/read(?:/|$|[\s'\";|&])"
 DEADLINE = 8          # с, раньше таймаута хука 10 с
 KEEP_DAYS = 7         # флаги и списки путей старше — удаляются при записи нового
@@ -609,6 +619,8 @@ def run_hook():
             os._exit(code)
     os._exit(code)
 
+
+configure()  # контекст вызова — при загрузке; заново — guard.set_context
 
 if __name__ == "__main__":
     run_hook()
