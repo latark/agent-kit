@@ -780,6 +780,85 @@ else:
 pl = R.window_plan("/r", WL, probe=lambda b: "EPERM", bind=no_bind)
 check("window_plan: закрыто везде — корня нет, пропущены WINDOW_FS и WINDOW_BIND, причины обе",
       pl[0] is None and pl[1] == R.WINDOW_FS | R.WINDOW_BIND and "EPERM" in pl[2] and "порт" in pl[2], pl)
+# fs_probe на настоящих папках и подставленном внешнем вызове (metis-0773, ревью r1)
+import contextlib, io
+fp = tempfile.mkdtemp(prefix="fsp-")
+check("fs_probe: папка с записью — None", R.fs_probe(fp) is None, R.fs_probe(fp))
+ro = tempfile.mkdtemp(prefix="fsp-ro-")
+os.chmod(ro, 0o555)
+if os.access(ro, os.W_OK):
+    print("пропущено: запись в chmod 555 разрешена (root) — случай папки без записи")
+else:
+    check("fs_probe: папка без записи (chmod 555) — причина названа", "PermissionError" in (R.fs_probe(ro) or ""), R.fs_probe(ro))
+os.chmod(ro, 0o755)
+real_makedirs, real_path = os.makedirs, os.environ["PATH"]
+def deny_agents(path, *a, **k):
+    if path.endswith(os.path.join(".claude", "agents")):
+        raise PermissionError(1, "Operation not permitted")
+    return real_makedirs(path, *a, **k)
+try:
+    os.makedirs = deny_agents
+    check("fs_probe: `.claude/agents` создать нельзя — причина названа",
+          "PermissionError" in (R.fs_probe(fp) or ""), R.fs_probe(fp))
+finally:
+    os.makedirs = real_makedirs
+for rc, want in ((1, "init не вышел"), (0, None)):
+    gd = tempfile.mkdtemp(prefix="fakegit-")
+    with open(os.path.join(gd, "git"), "w") as fh:
+        fh.write(f"#!/bin/sh\necho нет записи >&2\nexit {rc}\n")
+    os.chmod(os.path.join(gd, "git"), 0o755)
+    os.environ["PATH"] = gd + os.pathsep + real_path
+    try:
+        got = R.fs_probe(fp)
+    finally:
+        os.environ["PATH"] = real_path
+    check(f"fs_probe: init выходит с кодом {rc} — " + ("причина названа" if want else "None"),
+          (want in (got or "")) if want else got is None, got)
+check("fs_probe: пробная папка за собой убрана", not os.listdir(fp), os.listdir(fp))
+
+# main(): корень, строки skip, код выхода при подставленных пробах (metis-0773, ревью r1: Б и Д)
+OKF = "print('ok a')\nprint('1 из 1')\n"
+def main_with(files, fs=None, bind=None):
+    saved = R.fs_probe, R.bind_probe
+    R.fs_probe, R.bind_probe = fs or (lambda b: None), bind or (lambda: None)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = R.main([mkplugin(files, "pantheon"), "-j", "2"])
+    finally:
+        R.fs_probe, R.bind_probe = saved
+    return rc, buf.getvalue()
+WF = {"test_outside.py": OKF, "test_board.py": OKF}
+rc, out = main_with(WF)
+check("main: пробы проходят — код 0, ни skip, ни строки про окно", rc == 0 and "skip " not in out and "годится" not in out
+      and "файлов 2, ok 2, FAIL 0;" in out, (rc, out))
+rc, out = main_with(WF, bind=lambda: "EPERM bind")
+check("main: bind закрыт — код 3, skip с причиной, строка «для записи полного набора не годится»",
+      rc == 3 and re.search(r"^skip pantheon/test_outside\.py · пропущено: .*EPERM bind", out, re.M)
+      and "пропущены файлы окна — для записи полного набора не годится" in out
+      and "файлов 1, ok 1, FAIL 0, пропущено 1;" in out, (rc, out))
+rc, out = main_with(dict(WF, **{"test_board.py": "print('ok a')\nraise SystemExit(1)\n"}), bind=lambda: "EPERM bind")
+check("main: пропуск окна и FAIL — код 1, а не 3", rc == 1 and "FAIL pantheon/test_board.py" in out, (rc, out))
+rc, out = main_with({"test_outside.py": OKF}, bind=lambda: "EPERM bind")
+check("main: пропущены все файлы окна — код 3, а не зелёный 0", rc == 3 and "для записи полного набора не годится" in out, (rc, out))
+ALT = os.path.join("/tmp", f"claude-{os.getuid()}")
+ALTR = os.path.join(ALT, "run-tests-")  # TMPDIR сам может лежать под ALT: различаем по префиксу запасного корня
+HOME_IN = ("import os\nok = {neg}os.environ['HOME'].startswith({alt!r})\nprint('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
+           "print('1 из 1' if ok else '0 из 1')\nraise SystemExit(0 if ok else 1)\n")
+if os.path.isdir(ALT):
+    alt_fs = lambda b: None if b == ALT else "EPERM fs"
+    rc, out = main_with({"test_roles.py": HOME_IN.format(neg="", alt=ALTR), "test_board.py": HOME_IN.format(neg="not ", alt=ALTR)},
+                        fs=alt_fs)
+    check("main: корень закрыт, запасной открыт — файл WINDOW_FS идёт с HOME в запасном корне, прочие в обычном; код 0",
+          rc == 0 and "ok   pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
+          and "run-tests: окно режет запись" in out, (rc, out))
+else:
+    print("пропущено: нет /tmp/claude-<uid> — случай запасного корня в main")
+rc, out = main_with({"test_roles.py": OKF, "test_board.py": OKF}, fs=lambda b: "EPERM fs")
+check("main: запись закрыта везде — WINDOW_FS пропущен, board идёт, код 3",
+      rc == 3 and "skip pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
+      and "файлов 1, ok 1, FAIL 0, пропущено 1;" in out, (rc, out))
+
 sd = tempfile.mkdtemp(prefix="stubs-")
 check("make_stubs: на macOS заглушек нет", R.make_stubs(sd, "darwin", which=lambda c: None) == (None, []))
 check("make_stubs: на Linux все команды есть — заглушек нет", R.make_stubs(sd, "linux", which=lambda c: "/x") == (None, []))
