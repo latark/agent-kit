@@ -391,9 +391,15 @@ def hq_mark(sub, fname, text):
         return False
 
 
+LOCK_CONTENDED = None  # имя замка, который в последний раз не взят потому, что его держит другой процесс (metis-0717)
+
+
 @contextlib.contextmanager
 def lock(name, block=True):
-    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята."""
+    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята.
+    Не взята из-за чужого владельца (а не подложенной записи или отказа в праве) — LOCK_CONTENDED == name."""
+    global LOCK_CONTENDED
+    LOCK_CONTENDED = None
     shared = hq_lock_name(name)
     try:
         if shared:
@@ -443,6 +449,7 @@ def lock(name, block=True):
             got = True
         except BlockingIOError:
             got = False
+            LOCK_CONTENDED = name
     try:
         yield got
     finally:
