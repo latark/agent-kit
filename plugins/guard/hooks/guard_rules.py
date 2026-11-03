@@ -111,6 +111,13 @@ attribution, cdp, nextjs) при сбое пропускают к остальн
 строка статуса показывает число сбоев за сутки.
 
 Выключить одно правило: GUARD_OFF=dev-server,nextjs (через запятую) в env settings.json.
+
+Контекст вызова (metis-0330): режим (--strict, --managed), GUARD_OFF, HOME и все пути от него, TEMP_ROOTS (TMPDIR)
+считает одна функция configure() — при загрузке и заново, когда процесс судит другой вызов (guard.set_context:
+sys.argv и os.environ вызова, затем configure() guard, guard_rules и taint). При загрузке модуля argv и окружение
+больше нигде не читаются — это проверяет tests/test_context.py (разбор AST и сверка решений с новым процессом).
+Принцип F1 для будущего демона хуков: демон только ускоряет. Любая его ошибка — медленный путь (новый процесс
+python.sh guard.py) с теми же правилами; «пропустить при сбое демона» и «отказать во всём при сбое демона» запрещены.
 """
 
 import fnmatch
@@ -118,17 +125,55 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 import time
 import tomllib
 
-OFF ={r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
-HOME = os.path.expanduser("~")
-MODE = "strict" if "--strict" in sys.argv[1:] else "managed" if "--managed" in sys.argv[1:] else "plugin"
-FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+# subprocess (git, ps, lsof), ipaddress и merge_gate.py грузятся по первому обращению — внутри функций, которым они
+# нужны (metis-0330): обычный вызов их не трогает, а импорт стоил 5–10 мс на каждый вызов инструмента.
+
 MANAGED_FILE = "/Library/Application Support/ClaudeCode/managed-settings.json"
-MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
+
+
+def configure():
+    """Контекст вызова (metis-0330): всё, что зависит от аргументов и окружения процесса, — здесь, а не в строках
+    модуля. Режим MODE (--strict, --managed, без аргумента — plugin), выключенные правила OFF (GUARD_OFF), HOME и все
+    пути от него, временные корни TEMP_ROOTS (TMPDIR). Считается из sys.argv и os.environ: при загрузке модуля (вызов —
+    последней строкой файла, когда всё определено) и заново, когда процесс решает событие другого вызова (демон хуков,
+    guard.set_context: он ставит sys.argv и os.environ вызова и зовёт configure каждого модуля guard). Правила читают
+    эти имена при вызове как глобальные этого модуля; merge_gate.py и protect_config.py — через G. Копию через
+    `from guard_rules import HOME` делать нельзя: она не обновится (тест test_context.py это ищет). Остальное
+    окружение (PANTHEON_ROLE, PANTHEON_WINDOW, CLAUDE_PROJECT_DIR…) правила читают из os.environ в момент проверки.
+    Демон только ускоряет: любая его ошибка — медленный путь с теми же правилами (принцип F1, README guard)."""
+    global OFF, HOME, MODE, FAIL_LOG, MARKET_GUARD, CDP_DAEMON, TG_SCRIPT, TG_TESTS, STATE_DIR, OWNER_LOG, \
+        DOMAINS_FILE, LEGACY_DOMAINS_FILE, POLICY_FILE, AI_HOME, PANTHEON, PANTHEON_VIEW, TEMP_ROOTS, CDP_TOKEN_DIR, \
+        HESTIA_CONSENT_DIR, PROTECTED
+    argv = sys.argv[1:]
+    OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
+    HOME = os.path.expanduser("~")
+    MODE = "strict" if "--strict" in argv else "managed" if "--managed" in argv else "plugin"
+    FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+    MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks",
+                                "guard.py")
+    CDP_DAEMON = os.path.join(HOME, ".claude", "tools", "cdp-daemon.mjs")  # правило cdp
+    TG_SCRIPT = os.path.join(HOME, "projects", "other", "tg-read", "tg_read.py")  # tg-secret
+    TG_TESTS = os.path.join(HOME, "projects", "other", "tg-read", "tests")
+    # карта прав (domain, pantheon-acl, private …)
+    STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
+    OWNER_LOG = os.path.join(STATE_DIR, "owner-log")  # журналы ваших слов: пишут хук и тик, ни одна сессия Claude
+    DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
+    LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
+    POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+    AI_HOME = os.path.join(HOME, "ai")  # рабочие папки системы: pantheon, pantheon-view, knowledge (переезд 14.10)
+    PANTHEON = os.path.realpath(os.path.join(AI_HOME, "pantheon"))
+    PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
+    TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
+    CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке; cdp-role
+    HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")  # метки «да» окна hestia
+    PROTECTED = protect_config.protected()
+    # разбор Bash кэширован по (команда, папка), а раскрывает ~, $HOME и $TMPDIR — другой контекст, разбор заново
+    _ANALYSIS.clear()
+    _READS.clear()
 
 
 DEADLINE = 8       # с: таймаут хука PreToolUse и PostToolUse — 10 с, а таймаут Claude Code пропускает вызов
@@ -145,6 +190,35 @@ class HookFailure(Exception):
 
 class HookTimeout(BaseException):
     """Свой срок DEADLINE вышел. Не Exception: проверки с `except Exception` его не проглотят и не пойдут дальше."""
+
+
+class Allow:
+    """Пропуск с предупреждениями (красная необязательная проверка CI, metis-0633, 0650). Ложь, как None: проверки
+    по-прежнему пишут `if why:`, а предупреждения едут возвратом до main (check_push → check_roles → main) и
+    печатаются строкой systemMessage только в ответе того события, которое их дало. Изменяемого состояния модуля нет:
+    демон хуков (metis-0330) проверит много событий в одном процессе, и чужое предупреждение в ответ не попадёт.
+    Живёт здесь, а не в merge_gate.py (он грузится по первому обращению): merge_gate.allow и notes_of зовут эти."""
+    __slots__ = ("notes",)
+
+    def __init__(self, notes):
+        self.notes = tuple(notes)
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return f"Allow({list(self.notes)!r})"
+
+
+def allow(notes):
+    """None без предупреждений, иначе Allow(notes)."""
+    notes = tuple(notes)
+    return Allow(notes) if notes else None
+
+
+def notes_of(result):
+    """Предупреждения пропуска: notes у Allow, у отказа (строка) и None — пусто."""
+    return result.notes if isinstance(result, Allow) else ()
 
 
 def log_failure(where, e):
@@ -244,7 +318,7 @@ def check_attribution(cmd):
 # --- cdp ----------------------------------------------------------------------
 
 CODE_EXT = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py", ".sh", ".zsh", ".bash")
-CDP_DAEMON = os.path.join(HOME, ".claude", "tools", "cdp-daemon.mjs")
+# CDP_DAEMON — путь демона от HOME: в configure() (контекст вызова)
 
 
 def new_texts(tool_input):
@@ -279,7 +353,7 @@ KEYCHAIN_CMD = re.compile(
     re.S,
 )
 KEYCHAIN_CODE = re.compile(r"find-generic-password|SecItemCopyMatching|keyring\.get_password|StringSession")
-TG_SCRIPT = os.path.join(HOME, "projects", "other", "tg-read", "tg_read.py")
+# TG_SCRIPT — от HOME: в configure()
 TG_SECRET_REASON = (
     "Ключ сессии tg-read в Связке ключей даёт полный доступ к Telegram пользователя; читать его "
     "можно только самому ~/projects/other/tg-read/tg_read.py, где действует белый список «только "
@@ -293,7 +367,7 @@ TG_SECRET_REASON = (
 # который импортирует tg_read или загружает tg_read.py как модуль, не запускаем и не пишем (кроме тестов
 # tg-read): и то и другое ловится по тексту, регулярным выражением, — защита от ошибки и от внедрённых
 # указаний, а не замок. Обычный запуск (tg_read.py команда, uv run … tg_read.py) и тесты проходят.
-TG_TESTS = os.path.join(HOME, "projects", "other", "tg-read", "tests")
+# TG_TESTS — от HOME: в configure()
 TG_CODE_EXT = CODE_EXT + (".pyw", ".ipynb")  # и блокноты: NotebookEdit кладёт код в new_source
 # Python в позиции команды: в начале, после ; && || | ( $( `, после VAR=… и env/exec/sudo, с путём или без
 PY_CMD = re.compile(
@@ -537,6 +611,7 @@ def next_root(path):
 
 
 def dev_server_dirs():
+    import subprocess
     try:
         ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=3).stdout
     except (OSError, subprocess.SubprocessError):
@@ -633,15 +708,8 @@ def check_nextjs(event):
 import stat
 import unicodedata
 
-STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
-OWNER_LOG = os.path.join(STATE_DIR, "owner-log")  # журналы ваших слов: пишут хук и тик, ни одна сессия Claude
-DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
-LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
-POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
-AI_HOME = os.path.join(HOME, "ai")  # рабочие папки системы: pantheon, pantheon-view, knowledge (переезд 14.10)
-PANTHEON = os.path.realpath(os.path.join(AI_HOME, "pantheon"))
-PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
-TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
+# STATE_DIR, OWNER_LOG, DOMAINS_FILE, LEGACY_DOMAINS_FILE, POLICY_FILE, AI_HOME, PANTHEON, PANTHEON_VIEW (от HOME) и
+# TEMP_ROOTS (TMPDIR, /tmp, /private/tmp, /dev/null) — в configure(): контекст вызова, metis-0330
 PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku", "hestia"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
@@ -2569,7 +2637,7 @@ CDP_TEXT_CMDS = {
 CDP_TEXT_HINT = ("\nСлова о демоне в тексте коммита, PR или задачи проходят, если это одна простая команда (без &&, |, "
                  "$(…), 2>&1 и слов вроде X=… или env перед git, gh, pantheon), а текст стоит в -m/--body/--text/--note или в файле .md через "
                  "-F/--body-file; заголовок задачи — через --title.")
-CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке
+# CDP_TOKEN_DIR (папка пароля демона в ~/.config) — в configure()
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
                        re.I)
@@ -2769,11 +2837,7 @@ def check_private(event, tool, tool_input):
             "wiki/, inbox/.")
 
 
-try:
-    import ipaddress as _ip
-    FAKE_IP_NET = _ip.ip_network("198.18.0.0/15")
-except Exception:  # noqa: BLE001
-    FAKE_IP_NET = ()
+FAKE_IP_NET = "198.18.0.0/15"  # сеть прокси с подменой адресов; ipaddress грузится в _local_url (metis-0330)
 
 
 def _local_url(url):
@@ -2797,13 +2861,14 @@ def _local_url(url):
         infos = socket.getaddrinfo(host, None)
     except (OSError, UnicodeError):
         return True  # не разрешается отсюда — не знаем, куда уйдёт: отказ (сбой — закрыто)
+    fake = ipaddress.ip_network(FAKE_IP_NET)
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0].split("%")[0])
         except ValueError:
             return True
         ip = getattr(ip, "ipv4_mapped", None) or ip
-        if ip in FAKE_IP_NET:
+        if ip in fake:
             continue  # прокси с подменой адресов отдают имена через 198.18.0.0/15 — настоящий адрес отсюда не виден
         if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
             return True
@@ -2976,6 +3041,7 @@ def _git_sub(texts):
 
 
 def _git_out(d, *args):
+    import subprocess
     r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=3)
     return r.stdout.strip() if r.returncode == 0 else None
 
@@ -3037,9 +3103,17 @@ def push_problem(texts, cwd, moved):
 # managed-settings.json это ядро защит, которое агенты не сливают (Д3). Модули берут общие помощники отсюда через G.
 # Хуки плагина запускают guard без -I, тесты — с -I (папки скрипта нет в sys.path), поэтому путь — явно. Модуль,
 # загруженный через importlib без записи в sys.modules (тесты), видят через _Globals.
+# merge_gate.py грузится по первому обращению (_mg, metis-0330): обычному вызову инструмента шлюз слияния не нужен,
+# а импорт с hashlib, ast и subprocess стоил ~5 мс. Его имена, которые раньше шли сюда через `from merge_gate import`,
+# отдаёт __getattr__ модуля (guard_rules.merge_problem, guard_rules.merge_gate — снаружи, тестам); внутри модуля —
+# только через _mg().
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import merge_gate  # noqa: E402
 import protect_config  # noqa: E402
+
+# пропавший merge_gate.py — сбой загрузки, как когда он грузился сразу: сломанная установка останавливает всё
+# (guard.py: «сбой загрузки guard»). Ошибка внутри файла видна при первом обращении — отказом того вызова (run_hook)
+if not os.path.isfile(os.path.join(os.path.dirname(os.path.realpath(__file__)), "merge_gate.py")):
+    raise ImportError("guard: нет merge_gate.py рядом с guard_rules.py")
 
 
 class _Globals:
@@ -3051,13 +3125,29 @@ class _Globals:
             raise AttributeError(k) from None
 
 
-merge_gate.G = protect_config.G = sys.modules.get(__name__) or _Globals()
-from merge_gate import (MERGE_CLOSED, MERGE_LEADS, MERGE_INTERNAL, MERGE_PRODUCT, MERGE_PROTECT,  # noqa: E402,F401
-                        MERGE_OWNER, MERGE_AMBIGUOUS, CORE_FILES, merge_problem, _merge_args, _merge_repo_ok,
-                        _str_list, _repo_arg, _remote_id, _repo_tail, _git_remotes, _gh_resolved, _merge_domains,
-                        _merge_owner, read_records, review_problem)
+_SELF = sys.modules.get(__name__) or _Globals()
+protect_config.G = _SELF
 from protect_config import SETTINGS_NAMES, _settings_file, check_protect_config  # noqa: E402,F401
-PROTECTED = protect_config.protected()
+MERGE_GATE_NAMES = frozenset({
+    "MERGE_CLOSED", "MERGE_LEADS", "MERGE_INTERNAL", "MERGE_PRODUCT", "MERGE_PROTECT", "MERGE_OWNER", "MERGE_AMBIGUOUS",
+    "CORE_FILES", "merge_problem", "_merge_args", "_merge_repo_ok", "_str_list", "_repo_arg", "_remote_id", "_repo_tail",
+    "_git_remotes", "_gh_resolved", "_merge_domains", "_merge_owner", "read_records", "review_problem"})
+
+
+def _mg():
+    """Модуль merge_gate.py, загруженный при первом обращении; его G — этот модуль (как раньше при загрузке)."""
+    import merge_gate
+    merge_gate.G = _SELF
+    return merge_gate
+
+
+def __getattr__(name):
+    """Имена merge_gate.py, которые этот модуль раньше отдавал сам (`from merge_gate import …`), и сам merge_gate."""
+    if name == "merge_gate":
+        return _mg()
+    if name in MERGE_GATE_NAMES:
+        return getattr(_mg(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 ARGUS_GIT_BAN = {"commit", "merge", "rebase", "cherry-pick", "am", "revert", "pull", "commit-tree"}
 
 
@@ -3180,7 +3270,7 @@ def check_owner_merge(event, tool_input):
             if said or any("merge" in (a or "").casefold() for a in texts):
                 return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть "
                         "merge: не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. "
-                        f"{merge_gate.OWNER_CI}")
+                        f"{_mg().OWNER_CI}")
             continue
         if _gh_alias_merge(texts):
             return GH_ALIAS_MERGE
@@ -3196,13 +3286,13 @@ def check_owner_merge(event, tool_input):
             # оказаться флагом записи (`gh api …/merge $F`) и merge есть в словах этой gh, кроме --jq/--template (Д1
             # argus #257: слово merge в соседней команде строки и `.mergeable` в фильтре — не слияние)
             if not _gh_api_writes(["" if a is None else a for a in api]):
-                if merge_gate.api_loose(api) and merge_gate.api_says_merge(api):
+                if _mg().api_loose(api) and _mg().api_says_merge(api):
                     return ("Правило push: gh api — слово не вычислить (переменная, $(…)), а в команде есть merge: не "
-                            "понять, слияние ли это. Пиши адрес и флаги словами. " + merge_gate.OWNER_CI)
+                            "понять, слияние ли это. Пиши адрес и флаги словами. " + _mg().OWNER_CI)
                 continue
-            got = merge_gate.api_merge_args(api)
+            got = _mg().api_merge_args(api)
             if isinstance(got, str):
-                return f"Правило push: gh api с записью — {got}. {merge_gate.OWNER_CI}"
+                return f"Правило push: gh api с записью — {got}. {_mg().OWNER_CI}"
             if got is not None:
                 jobs.append(("gh api …/pulls/N/merge", got))
         for what, args in jobs:
@@ -3210,12 +3300,12 @@ def check_owner_merge(event, tool_input):
             if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
                 return (f"Правило push: {what} — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
                         f"GH_CONFIG_DIR в окружении: они уводят gh от репозитория, на котором сверен CI. "
-                        f"{merge_gate.OWNER_CI}")
-            why = merge_gate.owner_ci_problem(cwd, moved, args)
+                        f"{_mg().OWNER_CI}")
+            why = _mg().owner_ci_problem(cwd, moved, args)
             if why:
                 return f"Правило push: {what} — {why}"
-            notes.extend(merge_gate.notes_of(why))
-    return merge_gate.allow(notes)
+            notes.extend(notes_of(why))
+    return allow(notes)
 
 
 def check_push(event, tool, tool_input):
@@ -3253,14 +3343,14 @@ def check_push(event, tool, tool_input):
             extra = _gh_pre_extra(texts[:q])
             if extra:
                 return (f"Правило push: gh pr merge — флаг {extra} перед pr: до pr — только -R/--repo. Форма: "
-                        f"{merge_gate.MERGE_CMD}.")
-            why = merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
+                        f"{_mg().MERGE_CMD}.")
+            why = _mg().merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
             if why:
                 return f"Правило push: gh pr merge — {why}"
-            notes.extend(merge_gate.notes_of(why))
+            notes.extend(notes_of(why))
             continue
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
-            why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
+            why = _mg().review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
             if why:
                 return f"Правило push (шлюз слияния): {why}"
             continue
@@ -3286,7 +3376,7 @@ def check_push(event, tool, tool_input):
             if why:
                 return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
                         "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
-    return merge_gate.allow(notes)
+    return allow(notes)
 
 
 def check_terminal(event, tool, tool_input):
@@ -3604,7 +3694,7 @@ def check_hq_gh(event, tool, tool_input):
         if not repos:
             return (f"{head}: укажи репозиторий явно — gh pr {texts[i]}{'' if texts[i] == 'list' else ' N'} -R "
                     f"<owner/repo> из [merge_repos] policy.toml; без -R gh взял бы репозиторий папки, а его не проверить.{tail}")
-        bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
+        bad = [r for r in repos if not _mg()._merge_repo_ok(r, allowed)]
         if bad:
             known = "" if allowed else " (список [merge_repos] пуст или policy.toml не прочиталась)"
             return f"{head}: -R {bad[0] or '<не вычислить>'} нет в [merge_repos] policy.toml{known}.{tail}"
@@ -3726,7 +3816,7 @@ HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("
 # Остаток: защита от ошибки, не от намеренной подмены .git/config (модель угроз README guard).
 HESTIA_GIT_NET = {"push"}
 HESTIA_GH_WRITE = {("pr", "create"), ("pr", "edit")}
-HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")
+# HESTIA_CONSENT_DIR (<STATE_DIR>/hestia-consent) — в configure()
 HESTIA_CONSENT_TTL = 2 * 3600
 HESTIA_TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 HESTIA_REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -3931,7 +4021,7 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
     mr = load_policy().get("merge_repos")
     mine = mr.get(direction) if isinstance(mr, dict) else None
     allowed = {r.strip().lower() for r in (mine if isinstance(mine, list) else ()) if isinstance(r, str) and r.strip()}
-    bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
+    bad = [r for r in repos if not _mg()._merge_repo_ok(r, allowed)]
     if bad:
         return f"-R {bad[0]} нет среди [merge_repos] {whose} ({direction or 'не задано'})"
     return None
@@ -4178,7 +4268,7 @@ def strict_window(check, event, tool, tool_input):
 
 
 def check_roles(event, tool, tool_input):
-    """Правила ролей по очереди: первый отказ — его текст. Иначе None или merge_gate.Allow — пропуск с
+    """Правила ролей по очереди: первый отказ — его текст. Иначе None или Allow — пропуск с
     предупреждениями шлюза слияния этого события (metis-0650); отказ следующего правила их отбрасывает."""
     notes = []
     for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
@@ -4188,8 +4278,8 @@ def check_roles(event, tool, tool_input):
             reason = check(event, tool, tool_input)
             if reason:
                 return reason
-            notes.extend(merge_gate.notes_of(reason))
-    return merge_gate.allow(notes)
+            notes.extend(notes_of(reason))
+    return allow(notes)
 
 
 def strict(check, event, tool, tool_input):
@@ -4245,9 +4335,10 @@ def main(raw=None):
         # запись журнала запора слияния (P1-4): только хук плагина и без проверки управляемых настроек — они
         # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего.
         # Сбой записи — код 2: команда уже выполнена, Claude Code только показывает причину агенту (metis-0094)
-        if MODE == "plugin" and "push" not in OFF:
+        # merge_gate.record судит только Bash: остальные инструменты — без загрузки merge_gate.py (metis-0330)
+        if MODE == "plugin" and "push" not in OFF and event.get("tool_name") == "Bash":
             try:
-                merge_gate.record(event)
+                _mg().record(event)
             except Exception as e:
                 log_failure("record", e)
                 raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
@@ -4283,7 +4374,7 @@ def main(raw=None):
                 reason = hard(check_tg_secret_file, tool_input)
         if not reason and (tool == "Bash" or tool in EDIT_TOOLS or tool in READ_TOOLS):
             reason = strict(check_roles, event, tool, tool_input)
-            notes = merge_gate.notes_of(reason)
+            notes = notes_of(reason)
         if not reason and "pantheon-acl" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_pantheon, event, tool, tool_input)
         if not reason and "protect-config" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
@@ -4356,3 +4447,6 @@ def run_hook(raw=None):
             sys.stderr.flush()
     finally:
         os._exit(code)
+
+
+configure()  # контекст вызова — последним, когда определено всё, что он зовёт (protect_config.protected)

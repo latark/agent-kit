@@ -21,8 +21,9 @@
      обновлял STRICT_FRESH (10 мин) — хук плагина снова проверяет сам.
 Сбой этого решения (метку не прочесть, не записать) — не молчать: полная проверка, как раньше.
 
-Сбой загрузки правил (нет guard_rules.py или merge_gate.py, ошибка в модуле) — код 2 с причиной, на Stop — 0
-(metis-0094), строка в ~/.local/state/pantheon/logs/guard-failures.log. Свой срок DEADLINE — и на чтение события и
+Сбой загрузки правил (нет guard_rules.py, protect_config.py или merge_gate.py, ошибка в модуле) — код 2 с причиной, на
+Stop — 0 (metis-0094), строка в ~/.local/state/pantheon/logs/guard-failures.log. merge_gate.py грузится при первом
+обращении (metis-0330): ошибка внутри него — отказ того вызова, которому он нужен. Контекст вызова — configure(). Свой срок DEADLINE — и на чтение события и
 загрузку. На Python старше 3.11 (управляемые настройки и окна, собранные раньше, зовут голый python3) вход
 перезапускается запускателем hooks/python.sh (metis-0571); файл поэтому разбирается и старым Python.
 """
@@ -46,15 +47,37 @@ if sys.version_info < (3, 11) and __name__ == "__main__":
     _me = os.path.realpath(__file__)
     os.execv("/bin/sh", ["/bin/sh", os.path.join(os.path.dirname(_me), "python.sh"), _me] + sys.argv[1:])
 
-HOME = os.path.expanduser("~")
-STATE = os.path.join(HOME, ".local", "state", "pantheon")
-FAIL_LOG = os.path.join(STATE, "logs", "guard-failures.log")
-STRICT_DIR = os.path.join(STATE, "guard-strict")  # метки строгого guard: <session_id> → строки «окно\tинструмент»
+
+
+def configure():
+    """Контекст вызова (metis-0330): HOME и пути от него — из os.environ здесь, а не в строках модуля (STRICT_DIR —
+    метки строгого guard: <session_id> → строки «окно\tинструмент»). Заново — set_context."""
+    global HOME, STATE, FAIL_LOG, STRICT_DIR, MARKET_GUARD
+    HOME = os.path.expanduser("~")
+    STATE = os.path.join(HOME, ".local", "state", "pantheon")
+    FAIL_LOG = os.path.join(STATE, "logs", "guard-failures.log")
+    STRICT_DIR = os.path.join(STATE, "guard-strict")
+    MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks",
+                                "guard.py")
+
+
+def set_context(argv, environ):
+    """Контекст другого вызова в этом процессе (демон хуков, тест test_context): sys.argv — этот файл и argv,
+    os.environ — ровно environ, затем configure() входа и загруженных guard_rules и taint. Их имена берутся при
+    проверке из глобальных модулей, поэтому решение — как у нового процесса с этими argv и окружением."""
+    sys.argv = [os.path.realpath(__file__)] + list(argv)
+    os.environ.clear()
+    os.environ.update(environ)
+    configure()
+    for name in ("guard_rules", "taint"):
+        if name in sys.modules:
+            sys.modules[name].configure()
+
+
 STRICT_TTL = 2 * 86400  # с: старше — метка удаляется при создании новой (сессия окна её пересоздаст сама)
 STRICT_FRESH = 600  # с: метка глушит хук плагина, только если строгий guard обновлял её за это время (жив в сессии)
 # те же, что в guard_rules.py (тест test_entry сверяет): управляемые настройки, клон маркетплейса, инструменты окна
-MANAGED_FILE = "/Library/Application Support/ClaudeCode/managed-settings.json"
-MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
+MANAGED_FILE = "/Library/Application Support/ClaudeCode/managed-settings.json"  # MARKET_GUARD — в configure()
 WINDOW_ONLY_TOOLS = frozenset({"Agent", "Task", "Skill"})
 DEADLINE = 8  # с, как в guard_rules.py: таймаут хука — 10 с, а таймаут Claude Code пропускает вызов
 SESSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]{7,127}")
@@ -215,6 +238,8 @@ def run(argv):
         os._exit(_stop(event))
     guard_rules.run_hook(raw)
 
+
+configure()
 
 if __name__ == "__main__":
     run(sys.argv[1:])

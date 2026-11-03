@@ -118,7 +118,8 @@ try:
     known, fw, old = os.path.join(tmp, "known"), os.path.join(tmp, "fw"), os.path.join(tmp, "old")
     os.makedirs(known)
     os.makedirs(fw)
-    open(os.path.join(tmp, "s.py"), "w").close()  # скрипт на месте (cwd=tmp): запускатель проверяет его до exec
+    with open(os.path.join(tmp, "s.py"), "w") as fh:  # скрипт на месте (cwd=tmp): запускатель проверяет его до exec
+        fh.write("pass\n")
     fake(old, "python3", "exit 1")  # python3 из PATH старше 3.11: проверка версии не проходит
     iso = isolated(known, fw)
     pre_ev = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}})
@@ -215,7 +216,8 @@ try:
     # файл есть, но не читается (chmod 0): Python тоже вышел бы с кодом 2 — ветка `! [ -r ]` запускателя
     noread = os.path.join(tmp, "noread", "ctx.py")
     os.makedirs(os.path.dirname(noread))
-    open(noread, "w").close()
+    with open(noread, "w") as fh:  # не пустой: проверяется ветка «не читается», а не «пустой»
+        fh.write("pass\n")
     os.chmod(noread, 0)
     if os.geteuid() != 0:  # root читает и файл без прав — проверка там не о том
         r = launch([noread], real, json.dumps({"hook_event_name": "Stop"}))
@@ -223,10 +225,33 @@ try:
               r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
         r = launch([noread, "maint-pre"], real, pre_ev)
         check("файл скрипта без прав чтения → PreToolUse: код 2 с причиной",
-              r.returncode == 2 and "файла скрипта нет или он не читается" in r.stderr
+              r.returncode == 2 and "файла скрипта нет, он пустой или не читается" in r.stderr
               and "Permission denied" not in r.stderr,
               (r.returncode, r.stdout, r.stderr))
     os.chmod(noread, 0o600)
+    # argus C1 (metis-0330): пустой .py проходил -f/-r, и Python выполнял его молча с кодом 0 — проверки не было
+    empty = os.path.join(tmp, "empty", "guard.py")
+    os.makedirs(os.path.dirname(empty))
+    open(empty, "w").close()
+    n0 = len(log_lines())
+    r = launch([empty, "--strict"], real, pre_ev)
+    check("пустой файл скрипта → PreToolUse: код 2 с причиной, как нет файла",
+          r.returncode == 2 and "файла скрипта нет, он пустой или не читается" in r.stderr and r.stdout == "",
+          (r.returncode, r.stdout, r.stderr))
+    r = launch([empty], real, json.dumps({"hook_event_name": "Stop"}))
+    check("пустой файл скрипта → Stop: код 0 без вывода и строка no-script в журнале",
+          r.returncode == 0 and r.stdout == "" and r.stderr == ""
+          and log_lines()[n0:] and log_lines()[-1].endswith("\tlauncher\tother\tno-script guard.py"),
+          (r.returncode, r.stderr, log_lines()[n0:]))
+    # argus D2 (metis-0330): журнал недоступен — след остаётся строкой в stderr, а не пропадает молча
+    home_file = os.path.join(tmp, "home-is-a-file")
+    open(home_file, "w").close()
+    for home, what in ((home_file, "HOME — файл, журнал не пишется"), ("", "HOME пуст")):
+        r = subprocess.run(["/bin/sh", LAUNCHER, gone], input=json.dumps({"hook_event_name": "Stop"}),
+                           env={"PATH": real, "HOME": home}, capture_output=True, text=True, timeout=60, cwd=tmp)
+        check(f"нет файла скрипта, {what} → Stop: код 0 и причина в stderr (журнал недоступен)",
+              r.returncode == 0 and r.stdout == "" and "no-script guard.py" in r.stderr
+              and "записать не удалось" in r.stderr, (r.returncode, r.stdout, r.stderr))
     n0 = len(log_lines())
     r = launch(["x.py"], old, json.dumps({"hook_event_name": "Stop"}), iso)
     check("нет 3.11+ → строка launcher no-python в журнале",

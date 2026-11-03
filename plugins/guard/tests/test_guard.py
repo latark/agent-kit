@@ -886,7 +886,7 @@ def failure_checks(home, env, cases):
         check(f"PreToolUse, {label} — код 2 и причина", blocked(r, "сбой проверки"), r)
     # merge_gate.py в PreToolUse: gh pr merge координатора — сбой запора не пропускает
     r, _ = hook(None, role="domain-coordinator", ti={"command": "gh pr merge 5 --match-head-commit " + "a" * 40},
-                penv={"GUARD_SHIM_BOOM": "merge_problem"})
+                penv={"GUARD_SHIM_BOOM": "merge_gate.merge_problem"})  # правила зовут его через _mg() (metis-0330)
     check("PreToolUse, merge_gate.py (gh pr merge) — код 2", blocked(r, "сбой проверки прав"), r)
     # окно (hq-telegram, chiron): и в окне штаба, и в вашей сессии без роли — блок (раньше у вас — пропуск)
     for label, penv in (("окно штаба", {"PANTHEON_ROLE": "hq"}), ("ваша сессия", {})):
@@ -916,7 +916,9 @@ def failure_checks(home, env, cases):
           and "Traceback" not in r.stderr and '"block"' not in r.stdout, r)
     # сбой загрузки самого guard (рядом нет merge_gate.py; нет модуля правил guard_rules.py у входа guard.py,
     # metis-0148) — тоже код 2 с причиной, на Stop — 0; запуск как у хука
-    for what, files in (("нет merge_gate.py", (GUARD, RULES)), ("нет guard_rules.py", (GUARD,))):
+    pc = os.path.join(os.path.dirname(RULES), "protect_config.py")
+    for what, files in (("нет merge_gate.py", (GUARD, RULES, pc)), ("нет protect_config.py", (GUARD, RULES)),
+                        ("нет guard_rules.py", (GUARD,))):
         lone = tempfile.mkdtemp(prefix="guard-lone-")
         for f in files:
             shutil.copy(f, lone)
