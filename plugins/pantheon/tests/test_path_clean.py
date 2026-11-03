@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """metis-0342: окно, запущенное из сессии на старой версии, не берёт pantheon из старого кэша.
+metis-0772: первым в PATH окна — current/bin (ссылка), а не bin версии из кэша: после обновления окно берёт heavy
+новой версии, а не старый без очереди мест.
 
 Запуск: python3 -I plugins/pantheon/tests/test_path_clean.py  (код выхода 0 — все прошли)
 Проверка выполняется подпроцессом pantheon.py тем же Python.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,10 +67,26 @@ with tempfile.TemporaryDirectory(prefix="pathclean-") as home_raw:
     # run_env: запущена старая версия (PLUGIN = 0.11.57), установлена 0.11.59, в PATH окна bin старого кэша
     env["PATH"] = ":".join([old, "/usr/bin", newer])
     renv = run({"plugin": os.path.join(cache, "pantheon", "0.11.57")}, env, CODE2).split(":")
-    check("run_env: первым bin установленной версии", renv[0] == inst, renv)
+    cur_bin = os.path.join(home, ".local", "share", "pantheon", "current", "bin")
+    check("run_env: первым bin установленной версии — ссылкой current/bin", renv[0] == cur_bin
+          and os.path.realpath(renv[0]) == inst, renv)
     check("run_env: bin запущенной старой версии нет", old not in renv, renv)
     check("run_env: bin неустановленной новой версии нет", newer not in renv, renv)
     check("run_env сохраняет /usr/bin", "/usr/bin" in renv)
+    # metis-0772: окно собрано при установленной 0.11.59, потом поставили 0.11.61 (CURRENT переключён). heavy из PATH
+    # окна — уже новой версии: иначе прогон идёт старым heavy мимо общей очереди мест
+    for v in ("0.11.59", "0.11.61"):
+        with open(os.path.join(b("pantheon", v), "heavy"), "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(os.path.join(b("pantheon", v), "heavy"), 0o755)
+    cur = os.path.join(home, ".local", "share", "pantheon", "current")
+    win_path = run({"plugin": os.path.join(cache, "pantheon", "0.11.57")}, env, CODE2)
+    os.symlink(os.path.join(cache, "pantheon", "0.11.61"), cur + ".new")
+    os.replace(cur + ".new", cur)
+    heavy = shutil.which("heavy", path=win_path)
+    check("heavy из PATH окна после обновления — установленной версии, как current/bin/heavy",
+          heavy is not None and os.path.realpath(heavy) == os.path.realpath(os.path.join(cur, "bin", "heavy")),
+          f"{heavy} != {os.path.join(newer, 'heavy')}")
     # без ссылки CURRENT эталон — запущенная версия
     os.unlink(os.path.join(home, ".local", "share", "pantheon", "current"))
     renv = run({"plugin": os.path.join(cache, "pantheon", "0.11.61")}, env, CODE2).split(":")

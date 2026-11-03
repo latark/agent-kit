@@ -593,8 +593,11 @@ def run_env():
     env = dict(os.environ)
     if env.get("PATH"):
         env["PATH"] = clean_path(env["PATH"])
-    extra = [os.path.join(installed_plugin_dir(), "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
-             os.path.join(HOME, ".local", "bin")]
+    # первым — current/bin ссылкой, а не bin версии из кэша (metis-0772): окно живёт дольше версии и наследует этот PATH
+    # (и демон claude тоже), а bin версии остался бы старым после обновления — heavy без очереди мест, старый pantheon
+    own_bin = os.path.join(CURRENT, "bin") if os.path.isdir(os.path.join(CURRENT, "bin")) else \
+        os.path.join(installed_plugin_dir(), "bin")
+    extra = [own_bin, os.path.dirname(sys.executable), "/opt/homebrew/bin", os.path.join(HOME, ".local", "bin")]
     nvm = nvm_bin()
     if nvm and nvm not in (env.get("PATH") or "").split(":"):
         extra.insert(1, nvm)
