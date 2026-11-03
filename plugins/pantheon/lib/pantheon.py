@@ -98,6 +98,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
                     ready в stderr предупреждает, если touches готовой задачи пересекаются с открытым PR (metis-0667)
+  pantheon task batch-suggest [--direction D] [--json] [--apply]   (metis-0595) открытые задачи без пачки → «в существующую
+                    пачку», «новая пачка из N задач», «дубли — объединить?»: общие файлы, похожесть, ссылки, общий PR; без
+                    модели. Ничего не меняет; --apply прикрепляет только «уверенно» в существующую пачку
+  pantheon batch-suggest run [--force]  плановая сводка раз в 3–4 суток → Доска/Пачки-предложения.md (задача расписания)
   pantheon task overlap ID   перед раздачей (metis-0665): touches задачи против живых (doing, review) задач её
                     направления и файлов открытых PR его репозиториев ([merge_repos] policy.toml; gh, не ответил — кэш
                     планового прохода, нет и его — строка «не проверено»); пересечение — выбор с командами: очередь
@@ -684,7 +688,7 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
-                    "archive"}
+                    "archive", "batch-suggest"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -760,6 +764,8 @@ def parse_command(cmd):
             return None  # install (claude mcp add уровня пользователя) и прочее — только руками
         if argv[1] == "plugins" and (argv[2:3] != ["update"] or any(a != "--quiet" for a in argv[3:])):
             return None
+        if argv[1] == "batch-suggest" and argv[2:] != ["run"]:
+            return None  # задача прохода — только `batch-suggest run`; --force и task batch-suggest --apply — руками
         if argv[1] == "read" and argv[2:] != ["run"]:
             return None  # заявку подаёт окно, а не задача прохода; проход — только `read run`
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
@@ -5513,6 +5519,61 @@ def board_auto_watch(t, sched):
                    "смотреть задачу board: pantheon jobs, alerts.md", "pantheon-tick")
 
 
+def batchsuggest_mod():
+    """lib/batchsuggest.py — раскладка открытых задач по пачкам без модели (metis-0595)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_batchsuggest", os.path.join(LIB, "batchsuggest.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+BATCH_SUGGEST_EVERY = 3 * 86400  # задача расписания раз в 3,5 суток (every = 5040); команда сама не чаще раза в 3 суток
+
+
+def batch_suggest_run(rest):
+    """pantheon batch-suggest run [--force] — плановая сводка (metis-0595): предложения по пачкам для всех направлений
+    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Ничего не меняет в задачах. Раньше чем через
+    BATCH_SUGGEST_EVERY после прошлого прохода — пропуск (--force снимает). Тревога — одна строка, и только если среди
+    предложений есть ещё не виденные (ключи в STATE/batch-suggest.json)."""
+    if rest not in ([], ["run"], ["run", "--force"]):
+        print("использование: pantheon batch-suggest run [--force]", file=sys.stderr)
+        return 2
+    t, st = now(), read_json(path("batch-suggest.json"), {})
+    st = st if isinstance(st, dict) else {}
+    last = st.get("last")
+    if rest[-1:] != ["--force"] and isinstance(last, (int, float)) and 0 <= t - last < BATCH_SUGGEST_EVERY:
+        print(f"batch-suggest: прошлый проход {stamp(last)}, следующий не раньше {stamp(last + BATCH_SUGGEST_EVERY)}")
+        return 0
+    T, B = tasks_mod(), batchsuggest_mod()
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    dirs = sorted({h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
+    results = [B.suggest(tasks, d) for d in dirs]
+    results = [r for r in results if r["joins"] or r["groups"] or r["duplicates"]]
+    keys = sorted(k for r in results for k in B.keys(r))
+    seen = st.get("seen") if isinstance(st.get("seen"), list) else None
+    fresh = [k for k in keys if seen is None or k not in seen]
+    body = "\n\n".join(B.render(r) for r in results) or "Предложений нет."
+    text = ("# Пачки: предложения\n\nСчитает плановый проход без модели, раз в 3–4 суток (`pantheon task batch-suggest`). "
+            "Ничего не меняет: пачку ставит координатор — `pantheon task set ID parent=ПАЧКА` (для новой пачки сначала "
+            "`pantheon task new --type story`). «Уверенно» прикрепляет `pantheon task batch-suggest --apply`.\n\n"
+            f"Проход: {stamp(t)}\n\n```\n{body}\n```\n")
+    os.makedirs(STATE, exist_ok=True)
+    write_atomic(path("batch-suggest.md"), text)
+    if os.path.isdir(BOARD):
+        pp = os.path.join(BOARD, "Пачки-предложения.md")
+        old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+        if old.split("Проход:")[-1].split("\n", 1)[-1] != text.split("Проход:")[-1].split("\n", 1)[-1]:
+            write_atomic(pp, text)  # время прохода само файл не меняет: пишется только при новом составе
+    write_json(path("batch-suggest.json"), {"last": t, "seen": keys})
+    if fresh:
+        n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
+        alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
+              f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
+    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}")
+    return 0
+
+
 def autoclose_mod():
     """lib/autoclose.py — закрытие задач при слиянии их PR (metis-0308)."""
     import importlib.util
@@ -6562,6 +6623,8 @@ def main(argv):
         return sync_answers()
     if cmd == "autoclose":
         return autoclose_cmd(rest)
+    if cmd == "batch-suggest":
+        return batch_suggest_run(rest)
     if cmd == "status":
         return status()
     if cmd == "check":
