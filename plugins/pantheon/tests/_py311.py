@@ -17,3 +17,34 @@ if sys.version_info < (3, 11):
 # notify: временный PANTHEON_STATE или HOME тоже уводят уведомление в файл.
 os.environ["PANTHEON_TEST"] = "1"
 PY311 = sys.executable
+
+
+def mkroot(prefix):
+    """Корневая временная папка теста, где git умеет создавать репозитории (metis-0715).
+
+    Под `heavy` в окне роли TMPDIR — кэш песочницы, а песочница запрещает там запись в `.git/hooks` и `.git/config`
+    (защита от подмены хуков): `git init` падает, тест видит «нет такой папки». Свой TMPDIR роли
+    (`/tmp/claude-<uid>`) такой защиты не имеет. Берём TMPDIR, если в нём `.git/hooks` создаётся; иначе — первую
+    папку из запасных, где создаётся; ни одной — TMPDIR как был (тест упадёт на своём месте, а не здесь)."""
+    import tempfile
+    uid = os.getuid()
+    for base in (os.environ.get("TMPDIR"), "/tmp/claude-%d" % uid, "/private/tmp/claude-%d" % uid):
+        if not base or not os.path.isdir(base):
+            continue
+        try:
+            probe = tempfile.mkdtemp(prefix="gitprobe-", dir=base)
+        except OSError:
+            continue
+        try:
+            os.makedirs(os.path.join(probe, ".git", "hooks"))
+            with open(os.path.join(probe, ".git", "config"), "w"):
+                pass
+            ok = True
+        except OSError:
+            ok = False
+        finally:
+            import shutil
+            shutil.rmtree(probe, ignore_errors=True)
+        if ok:
+            return tempfile.mkdtemp(prefix=prefix, dir=base)
+    return tempfile.mkdtemp(prefix=prefix)
