@@ -114,10 +114,14 @@ def main():
         order = os.path.join(tmp, "order")
         env = {"PATH": os.environ["PATH"], "HOME": state, "PANTHEON_STATE": state}
         procs = []
-        for name in ("A", "B", "C"):
+        for i, name in enumerate(("A", "B", "C"), 1):
             procs.append(subprocess.Popen([sys.executable, "-I", HEAVY, "/bin/sh", "-c", f"echo {name} >> {order}; sleep 1"],
                                           env=env, stderr=subprocess.DEVNULL))
-            time.sleep(0.5)
+            # metis-0759: ждём появления билета этой команды (до 30 с), а не фиксированную паузу: под нагрузкой
+            # запуск python дольше пол-секунды, и порядок прихода держится только пока билет предыдущей уже лежит
+            deadline = time.time() + 30
+            while len(left()) < i and time.time() < deadline:
+                time.sleep(0.05)
         check("трое пришли — три билета", len(left()) == 3, str(left()))
         for fd in holds:  # оба места свободны сразу: без очереди выиграл бы тот, чей опрос случился раньше
             fcntl.flock(fd, fcntl.LOCK_UN)
