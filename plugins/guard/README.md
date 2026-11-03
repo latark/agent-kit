@@ -215,7 +215,10 @@ answer и плановый проход, это скрипты, guard их не 
   `pantheon start <имя>`, это заявка на следующий проход. Действует и для субагентов окна: `PANTHEON_ROLE` у них тот же.
   Не закрыты metis-pantheon (agent-kit), направления с `coordinator = false` и всё в `~/ai`. В проекте открыты
   `README.md` и `AGENTS.md` в корне и `.git`. Bash правило не судит: `cat` и `grep` закрывает песочница окна —
-  `denyRead` содержимого папки и `allowRead` тех же исключений. Модель угроз — `drafts/0771-threat-model.md`.
+  `denyRead` содержимого папки и `allowRead` тех же исключений. Коллекции qmd этих папок закрывает хук qmd-query
+  плагина pantheon (metis-0778). Принятый остаток: `git status` проекта из окна Пританея не идёт — git читает рабочие
+  файлы, а их закрывает песочница. Решение Зевса 03.11, вариант А: штабу хватает `git log` и `gh pr view/checks`,
+  отдельной команды вне песочницы нет. Модель угроз — `drafts/0771-threat-model.md`.
 - **tg-role (metis-0267, guard 0.5.12).** В окне любой роли (`PANTHEON_ROLE` задан, вместе с её субагентами) отказ на
   Bash `tg_read.py history|search|unread|context|download` и на сокет `tg-readd.sock`: выгрузка личного чата — через
   `pantheon read request`. `posts`, `status`, `chats`, `folders`, `verify` и `split` можно. Процесс без `PANTHEON_ROLE`

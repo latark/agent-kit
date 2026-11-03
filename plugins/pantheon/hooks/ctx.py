@@ -1676,7 +1676,8 @@ QMD_HOW = ("Ищи по смыслу в своей коллекции: searches=
 QMD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,30}")
 # Штабу закрыты коллекции с чужим текстом и сырыми выгрузками: у штаба личное и действия наружу, чужой текст в его окне —
 # путь внедрения. Вопросы по ним — координатору направления поручением. Какие коллекции — [hq].closed_collections
-# policy.toml (hq_policy), в коде их нет.
+# policy.toml (hq_policy), в коде их нет; сверх них закрыты коллекции папок проектов направлений
+# (hq_project_collections, metis-0778).
 QMD_HQ_CLOSED_WHY = "Пританею коллекция %s закрыта — вопрос передай координатору направления поручением"
 
 
@@ -1722,10 +1723,79 @@ def hq_policy(path=None):
     return out
 
 
-def _qmd_hq_closed():
-    """(закрытые штабу коллекции, None) или (None, что не так): [hq] не разобрать — штабу qmd закрыт целиком."""
+# --- metis-0771/0778: проекты направлений закрыты окну штаба ------------------------------------------------------
+# Папки проектов — работа координаторов направлений. Их закрывают песочница окна (pantheon.py, hq build), правило
+# guard hq-projects (Read/Grep/Glob) и хук qmd-query: коллекция qmd, чья папка внутри такого проекта или содержит его,
+# штабу закрыта сама, без строки в [hq].closed_collections — новое направление закрыто сразу. Открыты ~/ai (коллекции
+# pantheon и knowledge), папки metis-pantheon и направлений, которые ведёт сам Пританей (coordinator = false).
+HQ_OWN_DIRECTION = "metis-pantheon"
+
+
+def _within(p, root):
+    return p == root or p.startswith(root.rstrip("/") + "/")
+
+
+def hq_led_names(path=None):
+    """Направления с `coordinator = false` в directions.toml — их ведёт Пританей. Реестр не прочитать — пусто."""
     try:
-        return set(hq_policy()["closed_collections"]), None
+        with open(path or os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            import tomllib
+            reg = tomllib.load(fh)
+    except (OSError, ValueError):
+        return []
+    return [d["name"] for d in reg.get("direction") or []
+            if isinstance(d, dict) and isinstance(d.get("name"), str) and d.get("coordinator") is False]
+
+
+def hq_project_dirs(doms, led, home=None, ai_home=None):
+    """Настоящие пути папок проектов, закрытых штабу. Не закрыты: metis-pantheon и `led`; папки в ~/ai или содержащие
+    ~/ai либо открытую папку (~/projects у направления закрыл бы agent-kit); вне HOME, сам HOME и скрытые папки
+    (~/.claude, ~/.local — окно штаба живёт ими). То же считает guard hq_project_roots."""
+    home = os.path.realpath(home or HOME)
+    real = lambda xs: [os.path.realpath(os.path.expanduser(x)) for x in xs or [] if isinstance(x, str)]  # noqa: E731
+    opened = ([os.path.realpath(ai_home or os.path.join(HOME, "ai"))] + real(doms.get(HQ_OWN_DIRECTION))
+              + [p for n in led for p in real(doms.get(n))])
+    out = []
+    for name in sorted(doms):
+        if not isinstance(doms[name], list):
+            continue
+        out += [p for p in real(doms[name]) if p not in out and p != home and _within(p, home)
+                and not p[len(home.rstrip("/")) + 1:].startswith(".")
+                and not any(_within(p, o) or _within(o, p) for o in opened)]
+    return out
+
+
+def hq_project_collections(path=None):
+    """metis-0778: коллекции ~/ai/pantheon/qmd.toml, чья папка внутри закрытого штабу проекта или содержит его.
+    Файла нет — пусто; не прочитать или не TOML — ValueError (штабу qmd закрыт целиком, как при битом [hq])."""
+    try:
+        fh = open(path or os.path.join(PANTHEON, "qmd.toml"), "rb")
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise ValueError("qmd.toml не прочитать (%s)" % type(e).__name__)
+    with fh:
+        import tomllib
+        try:
+            reg = tomllib.load(fh)
+        except (OSError, ValueError) as e:
+            raise ValueError("qmd.toml не разобрать (%s)" % type(e).__name__)
+    proj = hq_project_dirs(domains(), hq_led_names())
+    out = []
+    for c in reg.get("collection") or []:
+        if not isinstance(c, dict) or not isinstance(c.get("name"), str) or not isinstance(c.get("path"), str):
+            continue
+        p = os.path.realpath(os.path.expanduser(c["path"]))
+        if any(_within(p, d) or _within(d, p) for d in proj):
+            out.append(c["name"].strip())
+    return out
+
+
+def _qmd_hq_closed():
+    """(закрытые штабу коллекции, None) или (None, что не так): [hq] или qmd.toml не разобрать — штабу qmd закрыт
+    целиком. Закрыты [hq].closed_collections и коллекции проектов направлений (hq_project_collections)."""
+    try:
+        return set(hq_policy()["closed_collections"]) | set(hq_project_collections()), None
     except ValueError as e:
         hook_log("qmd-query", "[hq] policy.toml: %s" % e)
         return None, str(e)
@@ -1773,9 +1843,11 @@ def _qmd_why(ev):
     closed = set()
     if hq and (tool.endswith("__query") or tool.endswith("__get") or tool.endswith("__multi_get")):
         closed, err = _qmd_hq_closed()
-        if closed is None:  # битый [hq] — не «пусто»: какие коллекции закрыты, не знаем, поэтому закрыто всё
-            return ("Пританею qmd закрыт, пока не исправят раздел [hq] ~/.claude/pantheon/policy.toml (%s; правит "
-                    "metis-pantheon) — вопрос передай координатору направления поручением" % err)
+        if closed is None:  # битый [hq] или qmd.toml — не «пусто»: какие коллекции закрыты, не знаем, закрыто всё
+            where = ("~/ai/pantheon/qmd.toml" if err.startswith("qmd.toml")
+                     else "раздел [hq] ~/.claude/pantheon/policy.toml")
+            return ("Пританею qmd закрыт, пока не исправят %s (%s; правит metis-pantheon) — вопрос передай "
+                    "координатору направления поручением" % (where, err))
     if tool.endswith("__query"):
         colls = ti.get("collections")
         if ti.get("query") or not ti.get("searches"):

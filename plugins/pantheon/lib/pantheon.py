@@ -2279,33 +2279,13 @@ def write_window(out_dir, name, data):
     return True
 
 
-HQ_OWN_DIRECTION = "metis-pantheon"  # metis-0771: папки этого направления (agent-kit) окну hq открыты
-
-
-def _hq_closable(p):
-    """Папку проекта закрываем, только если она внутри HOME и не в скрытой папке (~/.claude, ~/.local — окно штаба
-    живёт ими) и не сам HOME."""
-    home = os.path.realpath(HOME)
-    if not p.startswith(home.rstrip("/") + "/"):
-        return False
-    return not p[len(home.rstrip("/")) + 1:].startswith(".")
-
-
 def hq_project_dirs(domains, reg=None):
     """metis-0771: папки проектов направлений, закрытые окну hq (настоящие пути). Не закрыты metis-pantheon,
     направления с coordinator = false (их ведёт Пританей), папки в ~/ai или содержащие ~/ai либо открытую папку
-    (~/projects у направления закрыл бы agent-kit) и папки вне HOME или в скрытых (_hq_closable). То же считает guard hq_project_roots — правило Read/Grep/Glob."""
-    led = hq_led(reg)
-    real = lambda xs: [os.path.realpath(os.path.expanduser(x)) for x in xs or [] if isinstance(x, str)]  # noqa: E731
-    within = lambda p, r: p == r or p.startswith(r.rstrip("/") + "/")  # noqa: E731
-    opened = [os.path.realpath(AI_HOME)] + real(domains.get(HQ_OWN_DIRECTION)) + [p for n in led for p in real(domains.get(n))]
-    out = []
-    for name in sorted(domains):
-        if not isinstance(domains[name], list):
-            continue
-        out += [p for p in real(domains[name]) if p not in out and not any(within(p, o) or within(o, p) for o in opened)
-                and _hq_closable(p)]
-    return out
+    (~/projects у направления закрыл бы agent-kit) и папки вне HOME или в скрытых. То же считает guard
+    hq_project_roots — правило Read/Grep/Glob."""
+    # Счёт — в hooks/ctx.py: тем же списком хук qmd-query закрывает штабу коллекции этих папок (metis-0778)
+    return ctx_mod().hq_project_dirs(domains, list(hq_led(reg)), HOME, AI_HOME)
 
 
 def _deny_forms(paths):
