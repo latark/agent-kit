@@ -868,6 +868,145 @@ check("сжатие у штаба: тревоги первыми, затем н�
       out.index("третья тревога") < out.index("СЛОВО-ДОСКИ") and len(out) <= 10000
       and out.rstrip().endswith("(часы Mac)"), len(out))
 
+# --- сжатие при живых субагентах (metis-0788) ------------------------------------------
+# SessionStart:compact сжатия субагента приходит без agent_id, с session_id и транскриптом основной сессии: пока
+# у сессии есть живой субагент, вставка откладывается до границы сжатия в транскрипте основной.
+
+
+def ctx_text(r):
+    try:
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    except (ValueError, KeyError):
+        return ""
+
+
+def defer_mark(sid):
+    return os.path.join(state, "ctx", "deferred", sid + ".json")
+
+
+def live_sub(sid, age=0, name="agent-a1.jsonl"):
+    """Транскрипт субагента сессии sid (папка транскриптов tests — home/tr), изменённый age секунд назад."""
+    p = os.path.join(home, "tr", sid, "subagents", name)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "a").close()
+    os.utime(p, (time.time() - age, time.time() - age))
+    return p
+
+
+def boundary(t):
+    return {"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "timestamp": iso(t),
+            "compactMetadata": {"trigger": "auto"}}
+
+
+hsub = os.path.join(pantheon, "handoff", "sub-test", "HANDOFF.md")
+os.makedirs(os.path.dirname(hsub))
+open(hsub, "w").write("# Передача дел\n\nКодовое слово: СЛИВА\n")
+
+
+def sub_session(sid):
+    tp = transcript(sid, [user("сохрани дела", sid + "-1", now - 300),
+                          assistant(now - 280, 0, [("Write", {"file_path": hsub, "content": "x"})])])
+    return {"session_id": sid, "transcript_path": tp, "source": "compact"}
+
+
+ms = sub_session("s-ms")
+r = run("start", ms)
+check("сжатие без субагентов (папки subagents нет) → файл передачи дел как раньше", "СЛИВА" in ctx_text(r),
+      r.stdout + r.stderr)
+live_sub("s-ms", age=660)
+r = run("start", ms)
+check("субагент молчит 11 мин (не живой) → вставка сразу, отметки нет",
+      "СЛИВА" in ctx_text(r) and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+live_sub("s-ms", age=0, name="agent-a1.meta.json")
+r = run("start", ms)
+check("свежий файл субагента не .jsonl — не в счёт, вставка сразу", "СЛИВА" in ctx_text(r), r.stdout)
+live_sub("s-ms", age=540)
+t_mark = time.time()
+r = run("start", ms)
+check("живой субагент (транскрипт 9 мин назад) → без текста HANDOFF, отметка записана",
+      "СЛИВА" not in r.stdout and r.returncode == 0 and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+mk = json.load(open(defer_mark("s-ms"))) if os.path.exists(defer_mark("s-ms")) else {}
+check("отметка: session_id и время", mk.get("session_id") == "s-ms" and abs(mk.get("t", 0) - t_mark) < 30, mk)
+r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash"))
+check("maint-post без границы в транскрипте → ничего, отметка цела",
+      r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+append(ms["transcript_path"], boundary(t_mark - 60))
+r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash"))
+check("граница старше отметки (−60 с) — не та, ничего, отметка цела",
+      r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+append(ms["transcript_path"], boundary(t_mark + 1))
+r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash", agent_id="a1", agent_type="dev-opus"))
+check("maint-post субагента (agent_id) → ничего, отметка цела",
+      r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash"))
+check("maint-post основной сессии после новой границы → файл передачи дел (PostToolUse), отметка снята",
+      "СЛИВА" in ctx_text(r) and json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+      and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+r = run("maint-post", dict(ms, hook_event_name="PostToolUse", tool_name="Bash"))
+check("повторный maint-post → ничего (выдано один раз)", r.stdout.strip() == "", r.stdout)
+
+# непросроченная отметка не сдвигается следующим сжатием субагента; сжатие без живых субагентов её снимает
+live_sub("s-ms", age=0)
+with open(defer_mark("s-ms"), "w") as fh:
+    json.dump({"session_id": "s-ms", "t": time.time() - 100, "role": ""}, fh)
+r = run("start", ms)
+check("второе сжатие при живом субагенте не сдвигает непросроченную отметку",
+      abs(json.load(open(defer_mark("s-ms")))["t"] - (time.time() - 100)) < 30, open(defer_mark("s-ms")).read())
+os.utime(live_sub("s-ms"), (now - 3600, now - 3600))
+r = run("start", ms)
+check("сжатие без живых субагентов при стоящей отметке → вставка сразу, отметка снята",
+      "СЛИВА" in ctx_text(r) and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+
+# просроченная и битая отметки
+with open(defer_mark("s-ms"), "w") as fh:
+    json.dump({"session_id": "s-ms", "t": time.time() - 1000, "role": ""}, fh)
+append(ms["transcript_path"], boundary(time.time()))
+r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x"))
+check("отметка старше 15 мин → снята без вставки (и при новой границе)",
+      "СЛИВА" not in r.stdout and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
+with open(defer_mark("s-ms"), "w") as fh:
+    fh.write("{не json")
+r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x"))
+hl = open(HLOG, encoding="utf-8").read() if os.path.exists(HLOG) else ""
+check("битая отметка → без вставки, код 0, снята, причина в журнале хуков",
+      r.returncode == 0 and "СЛИВА" not in r.stdout and not os.path.exists(defer_mark("s-ms"))
+      and "отметка отложенной вставки не читается" in hl, r.stdout + r.stderr + hl[-300:])
+with open(defer_mark("s-ms"), "w") as fh:
+    json.dump({"session_id": "s-ms", "t": time.time(), "role": ""}, fh)
+r = run("clock", dict(ms, hook_event_name="UserPromptSubmit", prompt="x", transcript_path=os.path.join(home, "tr", "нет.jsonl")))
+hl = open(HLOG, encoding="utf-8").read() if os.path.exists(HLOG) else ""
+check("транскрипт не читается → без вставки, код 0, отметка цела, причина в журнале хуков",
+      r.returncode == 0 and r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms"))
+      and "отложенная вставка не выдана: FileNotFoundError" in hl, r.stdout + r.stderr + hl[-300:])
+os.remove(defer_mark("s-ms"))
+
+# штаб: без доски и сводки прохода в окне субагента; доставка — UserPromptSubmit вместе с часами
+auto_md = os.path.join(pantheon, "board-auto.md")
+open(auto_md, "w").write("# Сводка прохода\n\nСЛОВО-СВОДКИ\n")
+live_sub("s-hqs", age=0)
+t_mark = time.time()
+out = ctx_text(run("start", dict(hq_start, source="compact")))
+check("сжатие у штаба при живом субагенте → без доски и сводки прохода",
+      "СЛОВО-ДОСКИ" not in out and "СЛОВО-СВОДКИ" not in out and os.path.exists(defer_mark("s-hqs")), out[:300])
+hq_prompt = dict(hq_start, hook_event_name="UserPromptSubmit", prompt="x")
+del hq_prompt["source"], hq_prompt["agent_type"]
+r = run("clock", dict(hq_prompt, agent_id="a2", agent_type="dev-opus"), PANTHEON_ROLE="hq")
+check("clock субагента (agent_id) → ничего, отметка цела",
+      r.stdout.strip() == "" and os.path.exists(defer_mark("s-hqs")), r.stdout)
+r = run("clock", hq_prompt, PANTHEON_ROLE="hq")
+check("clock без границы → только часы, отметка цела",
+      ctx_text(r).startswith("Сейчас: ") and "СЛОВО-ДОСКИ" not in r.stdout and os.path.exists(defer_mark("s-hqs")),
+      r.stdout)
+append(hqprev, boundary(t_mark + 1))
+r = run("clock", hq_prompt, PANTHEON_ROLE="hq")
+out = ctx_text(r)
+check("clock после границы → сводка прохода, доска и часы последней строкой одним JSON (UserPromptSubmit), отметка снята",
+      out.index("СЛОВО-СВОДКИ") < out.index("СЛОВО-ДОСКИ") and out.rstrip().endswith("(часы Mac)") and len(out) <= 10000
+      and json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+      and not os.path.exists(defer_mark("s-hqs")), r.stdout[:300])
+os.remove(auto_md)
+shutil.rmtree(os.path.join(home, "tr", "s-hqs"))
+
 # --- /add-dir у штаба (SEC-26) ------------------------------------------------------
 r = run("dir-added", {"hook_event_name": "DirectoryAdded", "agent_type": "hq", "directory": home + "/projects/alpha",
                       "source": "slash_command"})
