@@ -1498,6 +1498,10 @@ if mode == "sleep":
     sys.exit(0)
 if mode == "lie":   # окно ответило «да», а файл не поставлен
     sys.exit(0)
+if mode == "die":   # окно закрыли «Отменить», а проход в ту же минуту оборвали (срок тика) — SIGKILL родителю
+    import signal
+    os.kill(os.getppid(), signal.SIGKILL)
+    sys.exit(1)
 script = sys.argv[-2]
 if mode == "swap":
     with open(open(os.path.join(rec, "managed-src")).read(), "w") as fh:
@@ -1711,6 +1715,49 @@ def test_managed_no_osascript_and_no_record():
           and not any(f.startswith("plugins-unverified") for f in (os.listdir(once) if os.path.isdir(once) else []))
           and "не проверено" not in b.alerts(),
           (log, b.alerts()))
+
+
+def test_managed_once_per_version_after_crash():
+    """metis-0710 п. 3: на одну версию окно не чаще раза в MANAGED_RETRY — и когда проход оборвали сразу после окна
+    (ревью argus-274b, Д1: asked писался после ответа окна, и оборванный проход показывал окно каждую минуту)."""
+    b = managed_box()
+    b.set("osascript-mode", "cancel")
+    mrun(b)
+    mrun(b, t=T0 + 60)
+    check("управляемые: два прохода подряд на одну версию — окно один раз",
+          len(b.calls("osascript")) == 1 and len(mcards(b)) == 1, (b.calls("osascript"), mcards(b)))
+    b = managed_box()
+    b.set("osascript-mode", "die")
+    r = mrun(b)
+    st = mstate(b)
+    check("управляемые: проход оборван после окна — попытка уже засчитана (asked до окна), файл не тронут",
+          r.returncode != 0 and len(b.calls("osascript")) == 1 and st.get("asked") == T0
+          and st.get("sha") == hashlib.sha256(M_NEW).hexdigest() and mdest(b) == M_OLD, (r.returncode, st))
+    b.set("osascript-mode", "cancel")
+    mrun(b, t=T0 + 60)
+    r, log = mkick(b, t=T0 + 120)
+    check("управляемые: после оборванного прохода — окна снова нет раньше 6 ч, тик прохода не запускает",
+          len(b.calls("osascript")) == 1 and "merge-run" not in log, (b.calls("osascript"), log))
+    mrun(b, t=T0 + 6 * 3600 + 1)
+    check("управляемые: после оборванного прохода через 6 ч — окно снова, карточка «Руками»",
+          len(b.calls("osascript")) == 2 and len(mcards(b)) == 1 and mstate(b).get("result") == "refused",
+          (b.calls("osascript"), mcards(b), mstate(b)))
+
+
+def test_managed_tree_changed_after_verify():
+    """metis-0710 п. 4: дерево guard изменили после записи в verified.json (хеш не совпал) — его managed-settings.json
+    не ставится: окна нет, файл в /Library не тронут, карточки нет. Ловит мутант installed_dir(checked=False)."""
+    b = managed_box()
+    with open(b.msrc, "wb") as fh:   # правка проверенного дерева мимо выпуска и accept
+        fh.write(b'{"hooks": {}, "v": "tampered"}\n')
+    later = os.stat(b.msrc).st_mtime + 5
+    os.utime(b.msrc, (later, later))
+    os.utime(b.tree, (later, later))
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: дерево изменено после verified.json — окна нет, файл не тронут, карточки нет",
+          not b.calls("osascript") and mdest(b) == M_OLD and not mcards(b) and "merge-run" not in log
+          and not mstate(b).get("asked"), (b.calls("osascript"), mdest(b), log, mstate(b)))
 
 
 def test_managed_owner_away():
