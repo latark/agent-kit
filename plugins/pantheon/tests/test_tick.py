@@ -89,9 +89,9 @@ max_delay = 180
 def main():
     results = []
 
-    def check(name, cond):
+    def check(name, cond, detail=None):
         results.append(cond)
-        print(("ok   " if cond else "FAIL ") + name)
+        print(("ok   " if cond else "FAIL ") + name + ("" if cond or detail is None else f"\n     {detail!r}"))
 
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, SCHED)
