@@ -1402,6 +1402,8 @@ def main():
     wt = wt_old
     for i, c in enumerate(("pantheon outside test", "pantheon outside test --wait 0",
                            "pantheon outside test --script lint --wait 590", "pantheon outside serve --wait 120",
+                           "pantheon outside test --sha abc1234 --wait 590",   # metis-0779: другой коммит, не worktree
+                           "pantheon outside test --wait 590 --sha abc1234",
                            "pantheon outside status 20261028-010101-abcdef")):
         transcript(("Edit", {"file_path": "a.txt"}, False), ("Bash", {"command": c}, False))
         r = stop(f"dev-7{i}")

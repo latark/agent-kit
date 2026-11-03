@@ -2467,6 +2467,22 @@ qs, rs, res = sha_request(CPR, "красный")
 check("0779: --sha красный: код 1, записи нет, копия снята", res.get("state") == "done" and res.get("code") == 1
       and res.get("record") is False and not tests_for(CPR) and not os.path.exists(test_work(rs)), res)
 
+# установка зависимостей (lifecycle-скрипты пакета) сдвинула HEAD копии или правит дерево — ни прогона, ни записи
+_prep = O.prepare
+for label, spoil in (("сдвинула HEAD копии на другой зелёный коммит",
+                      lambda w: git(w, "checkout", "-q", "--detach", HEADE)),
+                     ("правит отслеживаемый файл копии", lambda w: _touch(w, "t.py", GREEN))):
+    O.prepare = lambda d, rid, _spoil=spoil, **kw: (_prep(d, rid, **kw), _spoil(str(d)))[0]
+    n_e, c0 = len(tests_for(HEADE)), len(calls())
+    try:
+        qs, rs, res = sha_request(CPG, label)
+    finally:
+        O.prepare = _prep
+    check(f"0779: установка {label} — failed, прогона и записи нет, копия снята", res.get("state") == "failed"
+          and "прогона и записи нет" in res.get("why", "") and res.get("sha") == CPG
+          and not [c for c in calls()[c0:] if "t.py" in " ".join(c["cmd"])]
+          and len(tests_for(HEADE)) == n_e and not os.path.exists(test_work(rs)), res)
+
 # неверный и чужой SHA — отказ на месте, заявки нет
 for bad, label in (("deadbeef1", "коммита нет в копии"), ("xyz;rm", "не по образцу"), (CPG[:5], "короче 7 знаков")):
     _q = os.path.join(CACHE, "athena-x", "outside")

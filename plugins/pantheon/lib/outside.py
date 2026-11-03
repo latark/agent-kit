@@ -55,7 +55,8 @@
     папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
     <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
   - тест на коммите (test --sha, metis-0779, run_test_at) — такая же копия <work>/test-<ID>: полное дерево, вместе с
-    .claude/ проекта; зависимости — `<pm> install` под профилем с heavy, дальше run_test в копии. Копия снимается после
+    .claude/ проекта; зависимости — `<pm> install` под профилем с heavy, дальше run_test в копии (HEAD копии не SHA
+    заявки или дерево не чистое после установки — ни прогона, ни записи). Копия снимается после
     прогона (reap, git worktree remove), брошенная (проход упал) — следующим проходом тестов под его замком. Запись
     tests — на полный SHA, cwd — копия; бывший head открытого PR (stale_head) — отказ, как у test без --sha. Заявка
     несёт pin: true; дубли (drop_dupes) её не снимают;
@@ -1397,10 +1398,19 @@ def new_log(rid):
 
 # --- тесты --------------------------------------------------------------------------------------------------------
 
-def run_test(rid, d, script, window, qdir, roots, record=True, src=None):
+def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. src — папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по
-    ней live_test находит идущую заявку."""
+    ней live_test находит идущую заявку. expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей
+    сдвинула HEAD или правит дерево) — ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда."""
+    if expect:
+        sha, clean = head_state(d)
+        if sha != expect or not clean:
+            why = (f"копия {d} после установки зависимостей — не чистый коммит {expect[:12]} (HEAD {(sha or '?')[:12]}, "
+                   f"чистое: {'да' if clean else 'нет'}) — прогона и записи нет")
+            log_event(id=rid, kind="refused", window=window, dir=d, sha=expect, why=why)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": expect, "why": why,
+                                           **({"src": src} if src else {})})
     record = record and not script
     res = record and tree_record(rid, d, window, qdir)   # metis-0732: зелёный полный набор на этом дереве уже есть
     if res:
@@ -1538,7 +1548,7 @@ def run_test_at(rid, d, req, window, qdir, roots):
         if code not in (None, 0):
             log = root("runs", rid + ".log")
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
-        return run_test(rid, w, script, window, qdir, roots, record=not script, src=d)
+        return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha)
     finally:
         reap(work)
         remove_work(common, work)
