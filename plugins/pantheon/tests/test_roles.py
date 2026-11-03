@@ -322,6 +322,10 @@ def main():
         miss = [x for x in selfcheck if x not in flat.get(f, "")]
         check(f"{f}: часть selfcheck — тела шести пунктов, «сделано (доказательство)», «не применимо (почему)»"
               + (f" (нет: {miss})" if miss else ""), not miss)
+    # проверка мутантом в dev.part (metis-0785): «убит», а не «покраснел»
+    for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
+        check(f"{f}: dev.part — новый тест проверен мутантом, «тест его убил» (metis-0785)",
+              "сломай проверяемое правило (мутант) и убедись, что тест его убил." in flat.get(f, ""))
     # доработка после /clear (metis-0602): новому исполнителю — отчёт прежнего, не с нуля
     brief = ("Доработка после /clear или перезапуска: прежнего исполнителя не продолжить (SendMessage: No transcript "
              "found) — новому дай его отчёт, а не начинай с нуля")
