@@ -411,7 +411,15 @@
   `![[board-auto]]` (Obsidian встраивает сводку в доску); нет её — тревога. Плановый проход сверяет свежесть: входы менялись, а
   удачной сборки нет 10 мин от первой правки после сборки (новые правки счёт не сбрасывают) — одна тревога «входы
   менялись» на расхождение. После сжатия и `/clear` хук `start` подкладывает сводку
-  Пританею. `pantheon archive` (плановая задача, по шаблону `name = "archive"`, `command = "pantheon archive"`, `every = 1440`,
+  Пританею. В сводку идёт и «PR слит, задача открыта» (metis-0768, `lib/boardmerged.py`): задача doing/review, чей PR
+  (номер из журнала карточки или «Closes» в теле) слит больше суток назад по кэшу `autoclose fetch`, — строка «metis-XXXX:
+  PR #N слит D дн. назад, задача doing, неотмечено K», до 5 строк; новых запросов к gh нет, PR с «часть» и задачи с открытым PR
+  не считаются. `pantheon check` следит за `board.md` (metis-0769, `lib/boardmd.py`): раздел «Сейчас» длиннее 9 000 знаков,
+  «Обновлено ДД.ММ ЧЧ:ММ» старше суток (или нет совсем), пункты «По датам» с прошедшей датой (по последней дате срока) — на
+  тике тревоги `check-board-md-*`, руками предупреждения. `pantheon board archive [--days N]` (по умолчанию 7) переносит
+  датированные блоки («- ДД.ММ …» с отступными продолжениями) из «Сейчас» и «Сессии и хозяйство» в `archive/ГГГГ-ММ.md`:
+  сначала дописывается архив, потом `board.md` заменяется целиком; перенесённое и оставшееся дают исходные строки.
+  `pantheon archive` (плановая задача, по шаблону `name = "archive"`, `command = "pantheon archive"`, `every = 1440`,
   `class = "light"`, `hosts = "primary"`) переносит из длинных STATUS.md разделы `## ` с датой старше суток в
   `archive/STATUS-ГГГГ-ММ.md`; файл длиннее 9 000 знаков, где резать нечего (строки без даты), — тревога, не режет.
 - `plugins/pantheon/lib/boardstatus.py` — статусы задач и пачек в шаг с работой (metis-0397, п. 7–8): проход доски
@@ -629,6 +637,7 @@
     python3 -I plugins/guard/tests/test_shell_diff.py # разбор Bash против настоящих zsh и bash
     python3 -I plugins/pantheon/tests/test_board.py   # задачи и доска владельца
     python3 -I plugins/pantheon/tests/test_board_text.py   # сводка доски board-auto.md, тревога свежести, archive STATUS
+    python3 -I plugins/pantheon/tests/test_board_md.py     # «PR слит, задача открыта», проверка и archive board.md
     python3 -I plugins/pantheon/tests/test_board_status.py # статусы задач и пачек по worktree, PR и составу
     python3 -I plugins/pantheon/tests/test_config_check.py   # правила карантина правок ~/.claude (SEC-15)
     bash plugins/pantheon/tests/test_sync_quarantine.sh ~/.claude/sync.sh "$(readlink ~/.local/bin/pantheon)" "$PWD/plugins/pantheon"

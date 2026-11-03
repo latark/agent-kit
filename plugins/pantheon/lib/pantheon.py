@@ -38,6 +38,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         permissions.deny mcp__<сервер> вне их «оставить» (metis-0238)
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
+  pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
+                                        (по умолчанию 7) — в archive/ГГГГ-ММ.md без потерь; check следит за board.md
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (lib/night.py)
@@ -5458,6 +5460,92 @@ def board_auto_fp():
     return hashlib.sha1(repr(_fp_board_auto()).encode("utf-8", "replace")).hexdigest()
 
 
+def boardmerged_mod():
+    """lib/boardmerged.py — задачи при слитом PR, не закрытые (metis-0768)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardmerged", os.path.join(LIB, "boardmerged.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_merged_open(T, t):
+    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768).
+    Сбой — пусто: сводка важнее."""
+    try:
+        return boardmerged_mod().merged_open(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+                                             t, T, autoclose_mod(), autoclose_repo_dirs(),
+                                             autoclose_mod().open_pr_tasks(path("autoclose.json")) or ())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def boardmd_mod():
+    """lib/boardmd.py — проверка и архив board.md (metis-0769)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardmd", os.path.join(LIB, "boardmd.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+BOARD_MD_KEYS = ("size", "updated", "dates")
+
+
+def board_md_check(quiet):
+    """board.md (metis-0769): «Сейчас» длиннее предела, «Обновлено» старше суток, прошедшие сроки «По датам». Тик (quiet) —
+    одна тревога на вид проверки; руками — предупреждения. Файла нет — молча."""
+    p = os.path.join(PANTHEON, "board.md")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            found = {k: (v, text) for k, v, text in boardmd_mod().problems(fh.read(), now())}
+    except OSError:
+        found = {}
+    for k in BOARD_MD_KEYS:
+        if k in found:
+            if quiet:
+                alert_once(f"check-board-md-{k}", found[k][0], found[k][1], "check")
+            else:
+                print(f"предупреждение · {found[k][1]}")
+        else:
+            clear_once(f"check-board-md-{k}")
+
+
+def board_archive(rest):
+    """`pantheon board archive [--days N]` (metis-0769): датированные блоки «Сейчас» и «Сессии и хозяйство» старше N дней
+    (по умолчанию 7) — в ~/ai/pantheon/archive/ГГГГ-ММ.md; без потерь: сначала дописывается архив, потом board.md
+    заменяется целиком. Нечего переносить — файлы не тронуты."""
+    M, days = boardmd_mod(), None
+    args = list(rest)
+    if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
+        days = int(args[1])
+    elif not args:
+        days = M.DEFAULT_DAYS
+    if days is None:
+        print("pantheon board archive [--days N]  (N — целое число дней)", file=sys.stderr)
+        return 2
+    board = os.path.join(PANTHEON, "board.md")
+    if not os.path.exists(board):
+        print("board.md нет — нечего переносить")
+        return 0
+    with lock("pantheon-git"):
+        with open(board, encoding="utf-8") as fh:
+            text = fh.read()
+        kept, moved = M.split(text, now(), days)
+        n = sum(len(v) for v in moved.values())
+        if not n:
+            print(f"board.md: блоков старше {days} дн. нет")
+            return 0
+        os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
+        stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
+        for key, ls in sorted(moved.items()):
+            with open(os.path.join(PANTHEON, "archive", f"{key}.md"), "a", encoding="utf-8") as fh:
+                fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
+        write_atomic(board, kept)
+    print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
+    return 0
+
+
 def board_auto_sync(T):
     """Автоблок доски — отдельный файл board-auto.md (metis-0397): PR, пачки, неделя, STATUS.md, ответы владельца.
     board.md не пишет: только сверяет строку встраивания ![[board-auto]] вверху (нет — тревога). Удачная сборка
@@ -5468,6 +5556,7 @@ def board_auto_sync(T):
         fp, t = board_auto_fp(), now()
         data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
                          owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
+        data["merged_open"] = board_merged_open(T, t)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
@@ -6047,6 +6136,8 @@ def check(paths=None, quiet=False):
                     print(f"внимание · {dname}: без «Кто делает» (mode) открытых задач {c['no_mode']} — "
                           "список и правка: pantheon task migrate-mode --dry-run, затем без --dry-run")
     board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
+    if not paths:
+        board_md_check(quiet)  # board.md: размер «Сейчас», дата «Обновлено», сроки «По датам» (metis-0769)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
         if off:
@@ -6620,6 +6711,8 @@ def main(argv):
         return view(quiet="--quiet" in rest)
     if cmd == "commit":
         return commit()
+    if cmd == "board" and rest[:1] == ["archive"]:
+        return board_archive(rest[1:])
     if cmd == "board":
         return board()
     if cmd == "sync-answers":
