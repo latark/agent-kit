@@ -145,6 +145,7 @@ WINDOW_FS = {
 # Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate
 # уходит в /var/tmp, а он в окне закрыт). В окне, где запасной корень нужен, они пропускаются строкой.
 WINDOW_NOT_TMP = {"guard/test_merge_gate.py"}
+WINDOW_SKIP_CODE = 3  # тот же код, что «все файлы пропущены»: зелёного 0 нет
 # Файлы, чьи случаи поднимают серверы на локальных портах: в окне без bind пропускаются строкой.
 WINDOW_BIND = {"pantheon/test_outside.py"}
 # Команды macOS, которых нет на Linux: заглушка с выводом, при котором код идёт обычным путём.
@@ -683,6 +684,7 @@ def main(argv):
         return 3
     par, ser = order(items)
     total_files = len(par) + len(ser)
+    window_skipped = 0
     cpus, load = os.cpu_count(), load1()
     n = opts["jobs"] or workers(cpus, load)
     print(f"run-tests: {total_files} файлов, воркеров {n} (ядер {cpus}, load1 "
@@ -713,6 +715,8 @@ def main(argv):
         par = [x for x in par if x[1] not in drop]
         ser = [x for x in ser if x[1] not in drop]
         skipped = skipped + [(lb, fskip) for lb in gone]
+        window_skipped = len(gone)
+        total_files = len(par) + len(ser)  # как SKIP_NOT_MAC: пропущенные в «готово N из M» и в сверке итога не входят
 
     def on_signal(signum, _frame):
         if state["spawning"]:  # Popen ещё не вернул процесс — гасим его сразу после того, как он записан
@@ -775,7 +779,7 @@ def main(argv):
             signal.signal(s, h)
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(froot or root, ignore_errors=True)
-    return summary(done, total_files, n, time.monotonic() - t_all, len(skipped))
+    return summary(done, total_files, n, time.monotonic() - t_all, len(skipped), window_skipped)
 
 
 def report(job, log_dir):
@@ -797,7 +801,7 @@ def not_ok(out, limit=NOT_OK_MAX):
     return lines[:half] + [f"… пропущено {len(lines) - 2 * half} строк …"] + lines[-half:], len(lines)
 
 
-def summary(done, total_files, n, sec, skipped=0):
+def summary(done, total_files, n, sec, skipped=0, window_skipped=0):
     bad = [j for j in done if not j.ok]
     for j in bad:
         lines, total = not_ok(j.out)
@@ -814,7 +818,12 @@ def summary(done, total_files, n, sec, skipped=0):
     skip = f", пропущено {skipped}" if skipped else ""
     print(f"итого: файлов {total_files}, ok {len(done) - len(bad)}, FAIL {len(bad)}{skip}; проверок {checks_sum}; "
           f"{sec:.0f} с, воркеров {n}", flush=True)
-    return 1 if bad or len(done) != total_files else 0
+    if bad or len(done) != total_files:
+        return 1
+    if window_skipped:  # зелёный прогон без файлов окна не полный набор: код 0 шлюз принял бы за FULL_TESTS (metis-0773)
+        print("run-tests: пропущены файлы окна — для записи полного набора не годится (код 3)", flush=True)
+        return WINDOW_SKIP_CODE
+    return 0
 
 
 if __name__ == "__main__":
