@@ -34,6 +34,11 @@ COLUMNS = ["Входящие", HUMAN_WAIT, "Очередь", "В работе", 
 OWNER_TARGETS = {"Входящие": ("inbox", None), "Очередь": ("todo", None), "В работе": ("doing", None),
                  HUMAN_WAIT: ("waiting", "human"), "Готово": ("done", None), "Отменено": ("dropped", None)}
 ID_RE = re.compile(r"[a-z][a-z0-9]{1,11}-\d{3,}")
+# metis-0714, вариант А координатора (argus-280b): «ждёт» снимает задачу с цели окна (/goal), только если она ждёт владельца
+# с вопросом или другую задачу, которая её правда держит (goal_released); блокер, названный сессией самой («agent», «ревью»), задачу в цели оставляет, как doing.
+# `task set` печатает одну из двух строк, а WAITING_GOAL в lib/sessions.py велит проверяющей модели верить только ей.
+GOAL_OUT = "снята с цели окна"
+GOAL_IN = "остаётся в цели окна"
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DATETIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?")
 # поле → (тип, обязательно ли для task); типы: str, int, date, datetime, list
@@ -413,6 +418,50 @@ def _opt_cut(o):
     return bool(_OPT_CUT.search(o)) or any(not o[:m.start()].rstrip()[-1:].isdigit() for m in _OPT_DOLLAR.finditer(o))
 _OPT_RISKY = re.compile(r"[₽$€]|\bруб|деньг|оплат|платеж|платёж|списан|необратим|удал|безвозврат", re.I)
 
+
+def goal_released(head, tasks=None):
+    """Уходит ли задача из цели окна (metis-0714): «ждёт» (waiting) владельца с вопросом — waiting_on=human и непустой
+    question — или другую задачу, которая её правда держит. tasks — хранилище {id: (путь, шапка, тело)} из load_tasks
+    (WORK_TYPES); без него «ждёт задачу» цель не отпускает. Блокер должен быть в хранилище и не done/dropped; блокер
+    сам в «ждёт» держит, только если goal_released верно и для него. Цепочка идёт по посещённым: своя задача, цикл
+    (c1↔c2), несуществующий id (metis-9999, чужое athena-0042) — задача в цели. Любое другое «ждёт», doing, todo — в цели."""
+    head = head or {}
+    tasks = tasks or {}
+    seen = set()
+    while head.get("status") == "waiting":
+        on = str(head.get("waiting_on") or "").strip()
+        if on == "human":
+            return bool(str(head.get("question") or "").strip())
+        seen.add(head.get("id"))
+        if not ID_RE.fullmatch(on) or on in seen or on not in tasks:
+            return False
+        head = tasks[on][1] or {}
+        if head.get("status") in ("done", "dropped") or head.get("status") not in STATUSES:
+            return False
+        if head.get("status") != "waiting":
+            return True
+    return False
+
+
+def goal_held_dependents(tid, tasks):
+    """Задачи в «ждёт», чья цепочка waiting_on проходит через tid и которых цель теперь держит (metis-0714, argus-280b):
+    [(id, её блокер, статус блокера)]. `task set` по tid печатает про каждую строку GOAL_IN — иначе последней строкой о
+    задаче остаётся старое «снята с цели окна», хотя блокер уже done/dropped или сам ждёт без основания."""
+    tasks = tasks or {}
+    out = []
+    for did in sorted(tasks):
+        head = tasks[did][1] or {}
+        if did == tid or head.get("status") != "waiting":
+            continue
+        on, seen = str(head.get("waiting_on") or "").strip(), {did}
+        while on != tid and on in tasks and on not in seen:
+            seen.add(on)
+            nxt = tasks[on][1] or {}
+            on = str(nxt.get("waiting_on") or "").strip() if nxt.get("status") == "waiting" else ""
+        if on == tid and not goal_released(head, tasks):
+            blk = str(head.get("waiting_on") or "").strip()
+            out.append((did, blk, (tasks[blk][1] or {}).get("status")))
+    return out
 
 def option_warns(head):
     """Предупреждения по тексту options: пустые скобки, обрезанная сумма, «(совет)» в варианте про деньги или необратимое
