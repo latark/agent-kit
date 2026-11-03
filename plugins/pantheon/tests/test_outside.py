@@ -849,17 +849,20 @@ def kill_all_servers():
 
 # порт, занятый слушателем на 0.0.0.0 (чужой http.server, dev-сервер), не свободен: на macOS bind с SO_REUSEADDR
 # на 127.0.0.1 при этом удавался, сервер «поднимался» на чужом порту (metis-0592)
-_wild = socket.socket()
-_wild.bind(("0.0.0.0", 0))
-_wild.listen()
-_wp = _wild.getsockname()[1]
-check("порт под слушателем на 0.0.0.0 не свободен", not O.port_free(_wp))
-_wild.close()
-_lo = socket.socket()
-_lo.bind(("127.0.0.1", 0))
-_lo.listen()
-check("порт под слушателем на 127.0.0.1 не свободен", not O.port_free(_lo.getsockname()[1]))
-_lo.close()
+try:
+    _wild = socket.socket()
+    _wild.bind(("0.0.0.0", 0))
+    _wild.listen()
+    _wp = _wild.getsockname()[1]
+    check("порт под слушателем на 0.0.0.0 не свободен", not O.port_free(_wp))
+    _wild.close()
+    _lo = socket.socket()
+    _lo.bind(("127.0.0.1", 0))
+    _lo.listen()
+    check("порт под слушателем на 127.0.0.1 не свободен", not O.port_free(_lo.getsockname()[1]))
+    _lo.close()
+except PermissionError as e:  # окно роли: bind на локальный порт закрыт песочницей (metis-0773)
+    print(f"пропущено: окно не даёт занять локальный порт ({e}) — случаи «порт под слушателем не свободен»")
 
 # ряд портов: не 3000, не 3100–3199 (разработчики), не 3200 (показ владельцу) — 30.10 landing взял PORT=3200
 check("ряд портов сервера по умолчанию — 4300–4399, без портов владельца",
