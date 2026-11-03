@@ -87,12 +87,15 @@ SLOW = {
     # 600 ≈ 2.3 × 259 — во столько раз test_merge_gate под нагрузкой 03.11 дольше своей медианы (1051 / 458)
     "pantheon/test_read.py": 600,
     "guard/test_shell_diff.py": 600,  # 254 / 390
+    # test_merge: 86 / 171 в прежних прогонах; замер 03.11 (metis-0783) на одном воркере при load 30-150: 143 с чистого
+    # времени тестов, 386 с с очередью heavy. Время — ~200 запусков python3.11 с загрузкой pantheon (по 0.3-1 с под
+    # нагрузкой); снов и git нет, ускорять нечем без потери изоляции. 600 ≈ 3.5 × 171, как у test_read
+    "pantheon/test_merge.py": 600,
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
     "pantheon/test_setup.py": 480,  # 109 / 303
     "pantheon/test_start.py": 480,  # 136 / 289
     "pantheon/test_board.py": 360,  # 98 / 235
     "pantheon/test_sync_quarantine.py": 360,  # 120 / 231
-    "pantheon/test_merge.py": 300,  # 86 / 171
     "pantheon/test_hooks.py": 300,  # 64 / 163
     "pantheon/test_executors.py": 240,  # 69 / 158
     "pantheon/test_tick.py": 240,  # 56 / 160
