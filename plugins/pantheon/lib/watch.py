@@ -300,6 +300,7 @@ def _watch(dry=False):
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
+              ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
               ("разовые запуски", lambda: oneshots(agents, reg, doms, t)),
               # после разовых (они чистят ONESHOT_STARTED), до самозапуска: поднятое здесь самозапуск не тронет
               ("окна по вашему ответу", lambda: word_launch(agents, reg, doms, t)),

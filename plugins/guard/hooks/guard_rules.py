@@ -34,6 +34,9 @@ PostToolUse (Bash:
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron (только в окне штаба,
                  PANTHEON_ROLE=hq, P0-2) и mnemo-brain (SEC-11); hq и chiron закрыты лишь ключи — отказ на явный путь
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
+  hq-projects  — окну штаба (PANTHEON_ROLE=hq) Read, Grep, Glob папок проектов направлений из domains.json — отказ
+                 с именем координатора: поручение в inbox и `pantheon start <имя>` (metis-0771); открыты agent-kit,
+                 направления с coordinator = false, ~/ai, README.md, AGENTS.md и .git проекта; Bash — песочница окна;
   hq-telegram  — окну штаба (PANTHEON_ROLE=hq) Telegram закрыт: субагент tg-reader, навык telegram-read, скрипт
                  tg-read и демон tg-readd в Bash (P0-1, metis-0060);
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
@@ -101,8 +104,8 @@ hooks/__pycache__ (.pyc), а не компилируется на каждый �
   В окне роли хук плагина молчит и на том инструменте, который в этой же сессии уже проверил строгий guard (метка
   сессии, шапка guard.py). Управляемая и строгая копии проверяют всегда.
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
-исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, hq-projects, cdp-role, push, terminal,
+hq-telegram, hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -3466,6 +3469,62 @@ def check_hq_telegram(event, tool, tool_input):
     return None
 
 
+# hq-projects (metis-0771, слово владельца 03.11 19:17 «кодом, а не правилом»): окно Пританея (PANTHEON_ROLE=hq —
+# главная сессия и её субагенты, или agent_type hq) не читает папки проектов направлений: работа направления — его
+# координатору. Read, Grep, Glob внутри папки проекта или обход папки выше неё — отказ с именем направления. Карта —
+# domains.json; не закрыты metis-pantheon (agent-kit), направления с coordinator = false (их ведёт Пританей) и папки
+# в ~/ai или содержащие ~/ai либо открытую папку. Открыты README.md и AGENTS.md в корне проекта и .git (git log).
+# Bash здесь не судим: cat и grep закрывает песочница окна (sandbox_build, denyRead), правило — подсказка инструментам.
+HQ_OWN_DIRECTION = "metis-pantheon"
+HQ_PROJECT_OPEN = {"readme.md", "agents.md"}
+
+
+def _hq_led_names():
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            reg = tomllib.load(fh)
+    except (OSError, ValueError):
+        return set()
+    return {d["name"] for d in reg.get("direction") or []
+            if isinstance(d, dict) and isinstance(d.get("name"), str) and d.get("coordinator") is False}
+
+
+def hq_project_roots(domains=None):
+    """Закрытые окну hq папки проектов → [(настоящий путь, направление)]."""
+    doms = (load_domains() if domains is None else domains).get("domains") or {}
+    led = _hq_led_names()
+    folders = lambda n: _norm([x for x in doms.get(n) or [] if isinstance(x, str)])  # noqa: E731
+    home = os.path.realpath(HOME)  # вне HOME и скрытые папки (~/.claude, ~/.local) не закрываем: окно ими живёт
+    opened = [os.path.realpath(AI_HOME)] + folders(HQ_OWN_DIRECTION) + [p for n in led for p in folders(n)]
+    out = []
+    for name in sorted(doms):
+        if not isinstance(doms[name], list):
+            continue
+        out += [(p, name) for p in folders(name) if not any(_inside(p, [o]) or _inside(o, [p]) for o in opened)
+                and _inside(p, [home]) and p != home and not _rel(p, home).startswith(".")]
+    return out
+
+
+def check_hq_projects(event, tool, tool_input):
+    if tool not in ("Read", "NotebookRead", "Grep", "Glob") or not (window_role() == "hq"
+                                                                   or event.get("agent_type") == "hq"):
+        return None
+    roots = hq_project_roots()
+    for p, whole in read_paths(event, tool, tool_input):
+        for root, name in roots:
+            if _inside(p, [root]):
+                rel = _rel(p, root)
+                if rel in HQ_PROJECT_OPEN or rel == ".git" or rel.startswith(".git/") or (rel == "." and not whole):
+                    continue
+            elif not (whole and _inside(root, [p])):
+                continue
+            return (f"Правило hq-projects: {p} — папка проекта направления {name}; это работа {name}, а не Пританея "
+                    f"(metis-0771). Поручение — файлом в ~/ai/pantheon/directions/{name}/inbox/, затем "
+                    f"`pantheon start {name}` (заявка: окно поднимется на следующем проходе). Открыты README.md и "
+                    "AGENTS.md в корне проекта и .git (git log).")
+    return None
+
+
 # hq-gh (metis-0247, ревью argus-69b, решение Метиды и Зевса 19.10). Окну штаба gh pr view/checks/list/edit выпущены
 # мимо песочницы (pantheon HQ_GH), а у Зевса личное: без сужения он вынес бы личное в описание PR любого репозитория
 # (gh pr edit -R чужой --body-file ~/ai/knowledge/me/…) и принёс бы в окно чужой текст из веба (gh pr view -R чужой
@@ -4181,7 +4240,8 @@ def check_roles(event, tool, tool_input):
     """Правила ролей по очереди: первый отказ — его текст. Иначе None или merge_gate.Allow — пропуск с
     предупреждениями шлюза слияния этого события (metis-0650); отказ следующего правила их отбрасывает."""
     notes = []
-    for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
+    for rule, check in (("private", check_private), ("hq-projects", check_hq_projects), ("cdp-role", check_cdp_role),
+                        ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role),
                         ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env), ("hestia", check_hestia)):
         if rule not in OFF:

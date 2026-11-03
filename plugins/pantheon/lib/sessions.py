@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -23,7 +24,7 @@ __all__ = [
     "state_files", "fresh_text", "fresh_target", "fresh_start", "_fresh_start", "copies_message", "name_holders",
     "_holder_text", "wait_name_free", "check_new_name", "start_at", "start", "_start_session", "OWNER_WORD_WINDOW",
     "OWNER_HEAD", "owner_word_heads", "owner_spoke_recently", "owner_spoke_before", "CAPACITY_SESSIONS_DONE",
-    "capacity_probe", "capacity_log", "NO_WORD_WHY",
+    "capacity_probe", "capacity_log", "NO_WORD_WHY", "START_REQ", "START_REQ_KEYS", "start_request", "take_start_requests",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
     "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake",
 ]
@@ -425,6 +426,95 @@ def start_at(rest, origin, dry):
     return 0
 
 
+# metis-0771 (слово владельца 03.11 19:17): `pantheon start <направление>` без других слов в окне Пританея — заявка.
+# Пританей не делает работу направления сам, а поднимает окно координатора: заявка — строка JSON в
+# STATE/hq-rw/start-req/<имя>.req (окну hq туда можно писать), плановый проход вне окна (take_start_requests) проверяет её
+# и ставит разовый запуск — его исполняет oneshots по своим правилам (занятость, недельный шлюз, один за проход).
+# С поручением или флагами — прежний путь: запуск сразу, только по вашему слову в owner-log (start_gate).
+START_REQ = "start-req"
+START_REQ_KEYS = {"target", "time", "by"}
+START_REQ_MAX = 4096
+
+
+def _start_req_problem(target, doms):
+    """Имя для заявки: только направление из реестра (domains.json), не то, что ведёт Пританей. → причина или None."""
+    if not P.SESSION_NAME.fullmatch(target or "") or target not in doms:
+        return f"«{target}» нет в реестре направлений (domains.json)"
+    if target in P.hq_led():
+        return P.hq_led_why(target)
+    return None
+
+
+def start_request(target, dry=False):
+    """Заявка окна Пританея на запуск окна координатора → 0 (принята), START_REFUSED (имя не из реестра), 1 (не записана)."""
+    bad = _start_req_problem(target, P.read_json(P.path("domains.json"), {}).get("domains") or {})
+    if bad:
+        print(f"pantheon start: заявка не принята — {bad}", file=sys.stderr)
+        return START_REFUSED
+    if dry:
+        print(f"pantheon start: заявка на {target} была бы принята (--dry-run)")
+        return 0
+    line = json.dumps({"target": target, "time": P.stamp(P.now()), "by": "zeus"}, ensure_ascii=False) + "\n"
+    if not P.hq_mark(START_REQ, target + ".req", line):
+        return 1
+    print(f"pantheon start: заявка принята, окно {target} поднимется на следующем проходе")
+    return 0
+
+
+def _start_req_read(dfd, fname):
+    """Содержимое заявки или причина отказа: только обычный файл владельца, одна ссылка, не больше START_REQ_MAX."""
+    try:
+        fd = os.open(fname, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    except OSError as e:
+        return None, f"не открыть ({e.strerror})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid() or st.st_size > START_REQ_MAX:
+            return None, f"не обычный файл, ссылок {st.st_nlink}, владелец {st.st_uid} или больше {START_REQ_MAX} байт"
+        return os.read(fd, START_REQ_MAX + 1), None
+    finally:
+        os.close(fd)
+
+
+def take_start_requests(doms, t):
+    """Плановый проход (вне окна): заявки Зевса → разовые запуски. Файл заявки снимается всегда; подложенный (ссылка,
+    лишние ключи, чужое имя, не из реестра) — тревога без запуска. → [(имя, id разового запуска или причина)]."""
+    try:
+        dfd = os.open(P.path(P.HQ_RW, START_REQ), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    out = []
+    try:
+        for fname in sorted(os.listdir(dfd)):
+            if not fname.endswith(".req"):
+                continue
+            target = fname[:-4]
+            data, bad = _start_req_read(dfd, fname)
+            with contextlib.suppress(OSError):
+                os.unlink(fname, dir_fd=dfd)
+            bad = bad or _start_req_problem(target, doms)
+            if not bad:
+                try:
+                    items = [json.loads(x) for x in data.decode().splitlines() if x.strip()]
+                except (ValueError, UnicodeDecodeError):
+                    items = None
+                if not items or any(not isinstance(x, dict) or set(x) - START_REQ_KEYS or x.get("target") != target
+                                    or x.get("by") != "zeus" for x in items):
+                    bad = "не по образцу: строки JSON с ключами target, time, by, имя — как у файла"
+            if bad:
+                P.alert(f"заявка Зевса на запуск {target} отклонена: {bad}", "watch")
+                out.append((target, bad))
+                continue
+            text = (f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по "
+                    "нему.")
+            oid = P.night_mod().oneshot_add(target, t, text, "zeus-request", t=t)
+            P.alert(f"заявка Зевса: окно {target} — разовый запуск {oid} на этом проходе", "watch")
+            out.append((target, oid))
+    finally:
+        os.close(dfd)
+    return out
+
+
 def start(rest):
     """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]
     pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение] | --at-list | --at-cancel <id>   разовый запуск
@@ -463,6 +553,8 @@ def start(rest):
         print(start.__doc__, file=sys.stderr)
         return 2
     target, rest = rest[0], rest[1:]
+    if role == "hq" and target not in ("zeus", "workshop") and not rest:
+        return start_request(target, dry)  # metis-0771: из окна Пританея — заявка, окно поднимет плановый проход
     if target == "zeus":
         if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
             code, why = start_gate(target, origin, None)
