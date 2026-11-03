@@ -249,11 +249,76 @@ def _path_ok(path):
             and not any(ord(c) < 32 or c in "\x7f\x85\u2028\u2029" for c in path))
 
 
-def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None):
+_GATE = []
+
+
+def load_gate():
+    """Шлюз слияния guard (merge_gate.py) — единственный источник признака «ядро» (metis-0686): рядом в репозитории
+    (plugins/guard/hooks) или в клоне маркетплейса. Нет файла или не загрузился — None (вызывающий считает ядром)."""
+    if _GATE:
+        return _GATE[0]
+    import importlib.util
+    import sys
+    home = os.environ.get("HOME") or ""
+    for d in (os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "guard", "hooks"),
+              os.path.join(home, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks")):
+        f = os.path.join(d, "merge_gate.py")
+        if not os.path.isfile(f):
+            continue
+        saved = list(sys.path)
+        try:
+            sys.path.insert(0, d)
+            spec = importlib.util.spec_from_file_location("merge_gate_for_board", f)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception:  # noqa: BLE001 — любой сбой загрузки шлюза: не ядро по пути не значит «не ядро»
+            continue
+        finally:
+            sys.path[:] = saved
+        _GATE.append(mod)
+        return mod
+    return None
+
+
+def sandbox_core(repo, p, env=None, gate=None):
+    """Открытый PR (строка gh pr list с files, headRefOid, baseRefOid, baseRefName) правит pantheon.py → задевает ли он
+    сборку окон — тем же sandbox_build_changes, что шлюз guard (metis-0404, 0686). Не получить файлы, шлюз или
+    разобрать — True, как у шлюза: ядро. Файла pantheon.py в PR нет — False без запросов."""
+    gate = gate or load_gate()
+    if gate is None:
+        return True
+    want = gate.SANDBOX_BUILD_FILE
+    paths = [str(f.get("path") or "").strip("/").casefold() for f in p.get("files") or [] if isinstance(f, dict)]
+    if want not in paths:
+        return False
+    if not any(isinstance(f, dict) and f.get("path") == want for f in p.get("files") or []):
+        return True  # другой регистр, как у шлюза
+    head, base = (str(p.get(k) or "").lower() for k in ("headRefOid", "baseRefOid"))
+    sha_re = re.compile(r"[0-9a-f]{40}")
+    if not sha_re.fullmatch(head) or not sha_re.fullmatch(base):
+        return True
+    mb = (gh_text(["api", f"repos/{repo}/compare/{base}...{head}", "--jq", ".merge_base_commit.sha"], env) or "").strip()
+    tip = gate._base_tip(repo, str(p.get("baseRefName") or ""))
+    if not sha_re.fullmatch(mb) or tip is None:
+        return True
+
+    def blob(ref):
+        return gh_text(["api", f"repos/{repo}/contents/{want}?ref={ref}", "-H", "Accept: application/vnd.github.raw"], env)
+
+    old, new = blob(mb), blob(head)
+    tips = [blob(r) for r in dict.fromkeys((base, tip)) if r != mb]
+    if old is None or new is None or any(t is None for t in tips):
+        return True
+    got = gate.sandbox_build_changes(old, new, *tips)
+    return got is None or bool(got)
+
+
+def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None, sandbox=None):
     """Сетевой проход: gh по репозиториям → кэш cache_file. Только он зовёт gh; лёгкий тик (run) читает кэш.
     budget — секунд на весь проход: на каждый вызов gh остаётся не больше, чем осталось; не успел — ошибка по репозиторию.
     core — путь → ядро ли (merge.is_core): открытые PR в кэше (open_prs) несут пометку «задето ядро» для автоблока
-    board.md (metis-0397). → ошибки по репозиториям {repo: текст}."""
+    board.md (metis-0397); sandbox — (repo, строка PR) → задевает ли PR сборку окон в pantheon.py (sandbox_core, metis-0686):
+    зовётся, только если по путям не ядро. → ошибки по репозиториям {repo: текст}."""
     end = time.monotonic() + budget
 
     def left():
@@ -288,7 +353,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
         merged[repo] = rows
         if left() > 1:
             o, _ = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIMIT), "--json",
-                            "number,headRefName,headRefOid,body,files"], env, timeout=min(90, left()))
+                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files"], env, timeout=min(90, left()))
             if isinstance(o, list):
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
                 # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
@@ -299,8 +364,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
                                    "closes": closing_ids(p.get("headRefName"), p.get("body")),
                                    "part": is_part(p.get("body")),
-                                   "core": bool(core) and any(core(f.get("path") or "") for f in p.get("files") or []
-                                                              if isinstance(f, dict))}
+                                   "core": open_core(repo, p, core, sandbox)}
                                   for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
     old_heads = former_heads(load_state(cache_file), open_prs)
     save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "open_prs": open_prs, "errors": errors,
@@ -332,6 +396,13 @@ def former_heads(prev, open_prs):
         if keep:
             out[repo] = dict(list(keep.items())[-OLD_HEADS_KEEP:])
     return out
+
+
+def open_core(repo, p, core, sandbox):
+    """Задето ли ядро открытым PR: по путям (core) или сборкой окон в pantheon.py (sandbox)."""
+    if core and any(core(f.get("path") or "") for f in p.get("files") or [] if isinstance(f, dict)):
+        return True
+    return bool(sandbox) and bool(sandbox(repo, p))
 
 
 def journal_has(path, T, needle):
