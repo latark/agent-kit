@@ -610,6 +610,11 @@ os.makedirs(HQ_TMP)
 win_env = dict(base_env, PANTHEON_TMP=HQ_TMP, PANTHEON_ROLE="charon")
 r = subprocess.run([PY311, "-I", RUN_PY, "browser", "read", AVITO, "--wait", "0"],
                    env=win_env, capture_output=True, text=True, timeout=60)
+rbad = subprocess.run([PY311, "-I", RUN_PY, "browser", "click", "#agree"], env=win_env, capture_output=True,
+                      text=True, timeout=60)
+last = (rbad.stdout + rbad.stderr).strip().splitlines()[-1:]
+check("CLI click без --task: код 2, причина последней строкой", rbad.returncode == 2 and last
+      and last[0].startswith("pantheon browser: ") and "--task" in last[0], (rbad.returncode, last))
 qd = os.path.join(CACHES, "hq", "browser")
 reqs = [n for n in os.listdir(qd)] if os.path.isdir(qd) else []
 check("CLI из окна: заявка в кэше окна (hq/browser), код 0", r.returncode == 0 and len(reqs) == 1

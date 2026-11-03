@@ -888,7 +888,7 @@ def cmd_request(args):
     try:
         req, wait = parse(args)
     except (ValueError, Refuse) as e:
-        err(f"pantheon browser: {e}\n{USAGE}")
+        err(f"{USAGE}\npantheon browser: {e}")       # причина — последней строкой
         return 2
     rid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
     req.update(id=rid, t=P.now(), by=os.environ.get("PANTHEON_ROLE") or os.environ.get("PANTHEON_SESSION") or "")
