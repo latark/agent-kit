@@ -95,7 +95,7 @@ def alive(pat):
     return subprocess.run(["pgrep", "-f", pat], capture_output=True).returncode == 0
 
 
-SPIN = "python3 -c 'import time; t=time.time()\nwhile time.time()-t<30: pass'"
+SPIN = "python3 -c 'while True: pass'"   # одна строка: .pantheon-verify читается построчно
 
 res, dt = run("echo started-ok; sleep 31337")
 log = open(res["log"]).read() if res.get("log") else ""
