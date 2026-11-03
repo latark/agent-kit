@@ -64,7 +64,7 @@ ex = ex or []
 check("в примере есть --text, --mode и --mode-why", all(f in ex for f in ("--text", "--mode", "--mode-why")), ex)
 
 # пачка, в которую заводим задачу из примера
-r = pan("task", "new", "--direction", "alpha", "--type", "story", "--title", "Пачка: выгрузка отчётов без падений",
+r = pan("task", "new", "--direction", "alpha", "--type", "story", "--done-when", "пункт", "--title", "Пачка: выгрузка отчётов без падений",
         "--text", "Пачка для проверки примера.", "--estimate", "5")
 check("пачка заведена", r.returncode == 0 and "alpha-0001" in r.stdout, r.stdout + r.stderr)
 

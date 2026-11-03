@@ -183,6 +183,25 @@ check("тело без слова «часть» (и из заголовка з�
 check("autoclose по телу закрывает только metis-0901",
       AC.closing_ids("batch/metis-0900", body) == ["metis-0900", "metis-0901"], str(AC.closing_ids("batch/metis-0900", body)))
 
+# metis-0767: Closes только задачам с отмеченными «Готово, когда»; [ ] и заглушка — «не целиком», в stderr «неотмечено N»
+HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+for n, dw in (("0905", "- [x] сделано\n- [ ] ещё не сделано\n- [ ] и это"), ("0906", "- [x] раз\n- [x] два"), ("0907", "- [ ] " + HINT)):
+    card(os.path.join(tdir, f"metis-{n}.md"), {"type": "task", "id": f"metis-{n}", "title": f'"Карточка {n}"', "status": "doing",
+                                               "parent": "metis-0900", **base}, "## Готово, когда\n\n" + dw + "\n")
+    open(os.path.join(wt, f"{n}.txt"), "w").write(n)
+    git(wt, "add", f"{n}.txt")
+    git(wt, "commit", "-q", "-m", f"metis-{n}: работа")
+r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
+body = r.stdout.split("\n\n", 1)[1]
+check("«Готово, когда» с [ ] → не в Closes, в строке «Не целиком, остаются открытыми»",
+      "Closes metis-0901, metis-0906\n" in body and "metis-0905" not in body.split("Closes", 1)[1]
+      and "Не целиком, остаются открытыми: metis-0902; metis-0905; metis-0907" in body, body)
+check("все [x] → в Closes", "metis-0906" in body.split("Closes", 1)[1], body)
+check("заглушка DONE_WHEN_HINT → не в Closes", "metis-0907" not in body.split("Closes", 1)[1], body)
+check("stderr: «metis-0905: неотмечено 2 — отметь пункты в карточке или оставь открытой»",
+      "metis-0905: неотмечено 2 — отметь пункты в карточке или оставь открытой" in r.stderr and "metis-0907: неотмечено 1" in r.stderr
+      and "metis-0906" not in r.stderr, r.stderr)
+
 # GH_REPO не доходит до gh
 open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho \"[$GH_REPO]\" >> '{ghlog}.env'\n")
 cli(wt, "batch", "pr", "metis-0900")
