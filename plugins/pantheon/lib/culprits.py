@@ -28,9 +28,16 @@
       процесс в удалённой worktree или копии с закрытыми задачами, language server без живого родителя-claude (по
       цепочке ppid до launchd — только запускалки LAUNCHERS по точному имени или другой language server), сироту
       (ppid 1) в песочнице окна (~/Library/Caches/pantheon-sandbox; записи кэша убирает дежурный, sandbox_sweep).
-      Отказ закрытый (проверка безопасности 04.11): чьё — только по cwd из lsof, не по командной строке (cwd не
-      прочитан — не гасим); выше по цепочке ppid живая claude или сессия из `claude agents` — не гасим; цепочку не
-      пройти до launchd — не гасим; список сессий не прочитан — проход пропущен с кодом 3. Не трогает claude,
+      Отказ закрытый (проверка безопасности 04.11, два круга): вид — по исполняемому файлу или скрипту node
+      (exec_kind), а не по слову в строке; чьё — только по cwd из lsof (cwd не прочитан — не гасим); выше по цепочке
+      ppid живая claude, сессия из `claude agents` или задача launchd — не гасим; цепочку не пройти до launchd — не
+      гасим; сам процесс — задача launchd (`launchctl list`) — не гасим; сирота в песочнице окна, у которого есть
+      живая сессия, — не гасим; language server прямо под launchd — только в удалённой копии или копии с закрытыми
+      задачами. `claude agents` (строго: код 0 и разобранный список) или `launchctl list` не прочитаны — проход
+      пропущен с кодом 3.
+      Остаток (модель угроз guard): процесс Пантеона может подделать свою командную строку и cwd, а окно песочницы
+      узнаём по имени сессии, её файлу settings/run/<имя>.json и `claude -p --agent <роль>` для окон job-*;
+      сессию, которой нет ни в `claude agents`, ни в этих признаках, reap --auto не видит. Граница — песочница окна. Не трогает claude,
       процессы из пакетов /Applications/*.app (браузеры, редакторы, приложения) и всё вне папок Пантеона. Каждое
       гашение — строка «погашено: что, чьё, почему, МБ» в alerts.md. Коды: 0 — нечего или погашено; 1 — что-то не
       погашено; 2 — --auto не один; 3 — список процессов или сессий не прочитан. Строка для schedule.toml:
@@ -522,6 +529,78 @@ def consent_pids():
 USAGE = "pantheon reap [--apply] [--pid N …] | --auto — без --apply и --auto только показать"
 
 
+AUTO_KINDS = {"vitest": "vitest", "next": "next", "next-server": "next", "tsx": "tsx", "pnpm": "pnpm"}
+PY_RE = re.compile(r"^[Pp]ython(?:\d+(?:\.\d+)*)?$")
+
+
+def exec_kind(args):
+    """Вид для reap --auto по исполняемому файлу, как lsp_name: basename argv[0] — python с кодом multiprocessing,
+    language server, node, vitest, next-server, tsx, pnpm. Слово в остальных аргументах (`SCREEN -dmS next`,
+    `tmux new -s pnpm`) вида не даёт: None."""
+    toks = args.split()
+    if not toks:
+        return None
+    base = os.path.basename(toks[0])
+    if PY_RE.match(base) and MP_RE.search(args):
+        return "python-mp"  # сирота ли (ppid 1) — решает owner
+    if lsp_name(args):
+        return "lsp"
+    if NODE_RE.match(base):
+        return "node"  # подпись строки «погашено» — по kind_of; вид здесь решает только «наш ли процесс»
+    return AUTO_KINDS.get(base)
+
+
+def agents_strict():
+    """`claude agents --json --all` строго, для reap --auto: код выхода 0 и stdout, который разбирается в список
+    (пустой и из пробелов не разбирается) → список после reconcile_agents; иначе None. P.agents_all мягче: пустой
+    вывод там — пустой список, а для гашения это значит «живых сессий нет»."""
+    try:
+        r = subprocess.run([P.claude_bin(), "agents", "--json", "--all"], env=P.claude_env(), capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None
+    data = data.get("agents") if isinstance(data, dict) else data
+    return P.reconcile_agents(data) if isinstance(data, list) else None
+
+
+def launchd_pids():
+    """pid задач launchd пользователя (`launchctl list`, первая колонка) — их reap --auto не трогает; None — не
+    прочитать (код не 0, нет launchctl). Тесты кладут поддельный launchctl первым в PATH."""
+    try:
+        r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return {int(m.group(1)) for m in (re.match(r"(\d+)\s", ln) for ln in r.stdout.splitlines()) if m}
+
+
+def live_windows(ctx, table):
+    """Окна песочницы (папки ~/Library/Caches/pantheon-sandbox/<окно>), у которых есть живая сессия: имя сессии из
+    `claude agents`, её окно из settings/run/<имя>.json (PANTHEON_WINDOW) и job-<роль> живого `claude -p --agent
+    <роль>` из ps."""
+    wins = set()
+    for name in ctx["sessions"].values():
+        if not isinstance(name, str) or not re.fullmatch(r"[\w.-]+", name):
+            continue
+        wins.add(name)
+        w = ((P.read_json(P.path("settings", "run", name + ".json"), {}) or {}).get("env") or {}).get("PANTHEON_WINDOW")
+        if isinstance(w, str):
+            wins.add(w)
+    for q in table.values():
+        a = str(q.get("args") or "")
+        m = re.search(r"\s--agent[=\s]+(\S+)", a) if claude_like(a) else None
+        if m:
+            wins.add("job-" + m.group(1))
+    return wins
+
+
 def _chain(p, table):
     """Предки процесса по ppid до launchd (без него) — [процесс]; None — цепочку не пройти до launchd: родителя нет в
     списке ps, петля, ppid не число. Тогда доказать брошенность нечем — не гасим."""
@@ -537,8 +616,9 @@ def _chain(p, table):
 
 def _held(chain, ctx):
     """Процесс держит живой хозяин → True (не гасить): предок — claude (исполняемый claude или node с cli.js Claude
-    Code) или сессия из `claude agents`; цепочки нет (_chain → None) — тоже True."""
-    return chain is None or any(q["pid"] in ctx["sessions"] or claude_like(str(q.get("args") or "")) for q in chain)
+    Code), сессия из `claude agents` или задача launchd; цепочки нет (_chain → None) — тоже True."""
+    return chain is None or any(q["pid"] in ctx["sessions"] or q["pid"] in ctx.get("launchd", ())
+                                or claude_like(str(q.get("args") or "")) for q in chain)
 
 
 def _lsp_orphan(chain):
@@ -566,18 +646,23 @@ def auto_verdict(p, ctx, table):
     a = p["args"]
     if p["kind"] == "claude" or claude_like(a) or APP_RE.search(a):  # возраст отсекает candidates(AUTO_MINUTES)
         return None
+    kind = exec_kind(a)
+    if kind is None or p["pid"] in ctx.get("launchd", ()):
+        return None
+    p = dict(p, kind=kind)
     chain = _chain(p, table)
     if _held(chain, ctx):
         return None
     who, verdict, why = owner(dict(p, args=""), ctx)  # args пусты — place_owner решает только по cwd
     if p["kind"] == "lsp":
-        if verdict not in ("ask", "abandoned"):
-            return None
+        if verdict not in ("ask", "abandoned") or (not chain and verdict != "abandoned"):
+            return None  # прямо под launchd — только в брошенной копии: одного ppid 1 мало
         lwhy = _lsp_orphan(chain)
         return (f"ничей language server, {who}", lwhy) if lwhy else None
     if verdict == "abandoned":
         return who, why
-    if verdict == "ask" and why == SANDBOX_WHY and p.get("ppid") == 1:
+    win = os.path.relpath(_real(p["cwd"]), _real(sandbox_root())).split(os.sep)[0] if why == SANDBOX_WHY else None
+    if verdict == "ask" and why == SANDBOX_WHY and p.get("ppid") == 1 and win not in ctx.get("windows", ()):
         return who, "сирота (ppid 1) в песочнице окна, родитель умер"
     return None
 
@@ -590,7 +675,7 @@ def reap_auto():
     """pantheon reap --auto — задача планового прохода раз в 30 мин (metis-0617): гасит брошенное по auto_verdict без
     красной зоны и без вопроса. Каждое гашение — строка «погашено: что, чьё, почему, МБ» в alerts.md (одинаковые
     процессы одного владельца с той же причиной — одной строкой). Коды: 0 — нечего или всё погашено; 1 — что-то не
-    погашено; 3 — список процессов или сессий не прочитан (ничего не гасим)."""
+    погашено; 3 — список процессов, сессий или задач launchd не прочитан (ничего не гасим)."""
     raw = ps_all()
     if raw is None:
         print("pantheon reap --auto: список процессов не прочитан (ps) — гасить нечего", file=sys.stderr)
@@ -598,14 +683,21 @@ def reap_auto():
     table = {q["pid"]: q for q in raw}
     procs = collect(raw)
     try:
-        agents = P.agents_all()
+        agents = agents_strict()
     except Exception as ex:  # noqa: BLE001 — любой сбой: без списка сессий не гасим
         agents = f"{type(ex).__name__}: {ex}"
     if not isinstance(agents, list):
         print("pantheon reap --auto: список сессий (claude agents) не прочитан — без него не гашу, проход пропущен"
               + (f" ({agents})" if isinstance(agents, str) else ""), file=sys.stderr)
         return 3
+    jobs = launchd_pids()
+    if jobs is None:
+        print("pantheon reap --auto: список задач launchd (launchctl list) не прочитан — без него не гашу, проход "
+              "пропущен", file=sys.stderr)
+        return 3
     ctx = context(agents)
+    ctx["launchd"] = jobs
+    ctx["windows"] = live_windows(ctx, table)
     todo = []
     for p in candidates(procs, hours=AUTO_MINUTES / 60):
         v = auto_verdict(p, ctx, table)
