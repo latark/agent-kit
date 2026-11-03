@@ -57,6 +57,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
+  pantheon browser health|open|read|eval|click|type|submit|status|run   браузер владельца для роли charon без
+                                        пароля и порта (lib/browser.py, metis-0760): заявка из окна → проход вне
+                                        окна; чтение — сайты reads.toml, submit — после «да» владельца
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -1189,6 +1192,10 @@ def tick():
                        "pantheon-tick")
         merge_kick()
         outside_kick()
+        try:
+            browser_mod().kick()  # браузер владельца для ролей вне окна (lib/browser.py, metis-0760)
+        except Exception as e:  # сбой браузера не должен останавливать тик
+            alert_once("browser-kick", type(e).__name__, f"браузер ролей: {type(e).__name__}: {e}", "pantheon-tick")
         probes_tick(t)
         try:
             roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
@@ -2048,7 +2055,7 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # (CTX-09); веба через него не больше, чем через prometheus и лидов. clio зовут Зевс и mnemo-brain (роль clio).
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
-HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "Explore"]
+HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "charon", "Explore"]
 # dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
 # «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor. palamedes — исполнитель без кода
 # (metis-0224): тексты, юридический разбор, синтез; веба и Bash у него нет, пишет только свой черновик.
@@ -5218,6 +5225,21 @@ def outside_mod():
         _OUTSIDE.set_core(sys.modules[__name__])
     return _OUTSIDE
 
+_BROWSER = None
+
+
+def browser_mod():
+    """lib/browser.py — браузер владельца для ролей без пароля и порта (metis-0760)."""
+    global _BROWSER
+    if _BROWSER is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_browser", os.path.join(LIB, "browser.py"))
+        _BROWSER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_BROWSER)
+        _BROWSER.set_core(sys.modules[__name__])
+    return _BROWSER
+
+
 _MMV = None
 
 
@@ -6697,6 +6719,8 @@ def main(argv):
         return merge_mod().main(rest)
     if cmd == "outside":
         return outside_mod().main(rest)
+    if cmd == "browser":
+        return browser_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
     if cmd == "probes":

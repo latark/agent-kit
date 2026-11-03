@@ -114,6 +114,9 @@ mcp = ["qmd"]
 mcp = ["claude_ai_Claude_Docs"]
 [role.hestia]
 mcp = []
+# браузер владельца — только `pantheon browser` (metis-0760), MCP нет
+[role.charon]
+mcp = []
 # главные сессии: то же, что окно (их --agent — эти роли)
 [role.hq]
 mcp = ["qmd", "claude_ai_Claude_Docs"]
