@@ -20,7 +20,8 @@
   номер, head, задачи, задето ли ядро); ядро — сливает владелец, не ядро — «принять» Зевса;
 - вердикты argus — directions/*/review-<N>-argus*.md: «Вердикт: …» и head из начала файла; у каждой дорожки (a, b, без
   буквы) — самый свежий файл; вердикт на другом head помечен «старый head»;
-- пачки — карточки type story не done/dropped с задачами в doing, review или waiting (только id и счёт);
+- пачки — карточки type story не done/dropped с задачами в doing, review или waiting (только id, счёт и номер PR пачки
+  из поля pr — metis-0757);
 - неделя — целые проценты снимка лимита (их даёт вызывающий);
 - «Ждёт вас» и «Руками» (metis-0402 п. 4) — карточки задач с «Кому» = Владелец, не закрытые: с вопросом (question или
   ждёт человека) — «Ждёт вас», остальные — «Руками»; только id. Текстовые строки этих разделов в board.md блок не
@@ -164,9 +165,12 @@ def reviews(pantheon):
     return out
 
 
+STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE
+
+
 def batches(tasks):
-    """Пачки в работе: [(id, [(id задачи, статус)], закрыто, всего)]. tasks — load_tasks: id → (путь, шапка, …).
-    Заголовок пачки — свободный текст, в блок не идёт."""
+    """Пачки в работе: [(id, [(id задачи, статус)], закрыто, всего, номер PR пачки или None)]. tasks — load_tasks:
+    id → (путь, шапка, …). Заголовок пачки — свободный текст, в блок не идёт; из поля pr — только номер."""
     kids = {}
     for tid, rec in tasks.items():
         h = rec[1]
@@ -179,9 +183,10 @@ def batches(tasks):
             continue
         ks = sorted(kids.get(sid) or [])
         work = [(i, s) for i, s in ks if s in WORK and _ok(ID_RE, i)]
+        m = STORY_PR_RE.fullmatch(h["pr"]) if isinstance(h.get("pr"), str) else None
         if work:
             out.append((h.get("priority", 2) if isinstance(h.get("priority"), int) else 2, sid,
-                        work, sum(1 for _, s in ks if s in ("done", "dropped")), len(ks)))
+                        work, sum(1 for _, s in ks if s in ("done", "dropped")), len(ks), int(m.group(1)) if m else None))
     out.sort()
     return [x[1:] for x in out[:MAX_BATCH]]
 
@@ -337,9 +342,10 @@ def lines(data):
         out.append(f"- {tid}: PR #{num} слит {days} дн. назад, задача {st}, неотмечено {left}")
     if len(merged) > MAX_MERGED:
         out.append(f"- …и ещё слитых PR с открытой задачей: {len(merged) - MAX_MERGED}.")
-    for sid, work, closed, total in data.get("batches") or []:
-        out.append(f"- Пачка {sid}: " + ", ".join(f"{i} ({STATUS_RU.get(s, s)})" for i, s in work)
-                   + f"; закрыто {closed} из {total}.")
+    for sid, work, closed, total, *pr in data.get("batches") or []:
+        num = pr[0] if pr and isinstance(pr[0], int) and not isinstance(pr[0], bool) else None
+        out.append(f"- Пачка {sid}" + (f" (PR #{num})" if num else "") + ": "
+                   + ", ".join(f"{i} ({STATUS_RU.get(s, s)})" for i, s in work) + f"; закрыто {closed} из {total}.")
     st = data.get("statuses") or []
     if st:
         out.append("- STATUS правлены: " + ", ".join(f"{n} {hm(mt)}" for n, mt in st) + ".")

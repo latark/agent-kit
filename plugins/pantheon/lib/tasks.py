@@ -73,6 +73,9 @@ FIELDS = {
     # откуда задача взялась (metis-0502): from — одно из FROM_VALUES, source — на что ссылается («metis-0400» или путь
     # отчёта/ревью с #якорем); у остатка source — исходная задача. Старые задачи без from читаются как раньше
     "from": ("str", False), "source": ("str", False),
+    # ветка и PR пачки (story, metis-0757): ставят `pantheon batch start` (branch — batch/<id>) и `pantheon batch pr`
+    # (pr — «владелец/репозиторий#N», STORY_PR_RE); карточка пачки и board-auto показывают PR пачки
+    "branch": ("str", False), "pr": ("str", False),
 }
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
@@ -514,6 +517,10 @@ def check_head(head):
         errs.append("source ссылается на саму задачу")
     if head.get("source") and not head.get("from"):
         errs.append("source без from — не сказано, чем является ссылка (слово владельца · отчёт · ревью · остаток · план · по ходу)")
+    if head.get("pr") is not None and not STORY_PR_RE.fullmatch(str(head["pr"])):
+        errs.append(f"pr «{head['pr']}» — нужен вид «владелец/репозиторий#N»")
+    if head.get("branch") is not None and not BRANCH_RE.fullmatch(str(head["branch"])):
+        errs.append(f"branch «{head['branch']}» — имя ветки git без пробелов, до 200 знаков")
     if head.get("mode") is not None and head.get("mode") not in MODES:
         errs.append(f"mode «{head.get('mode')}» — не из {', '.join(MODES)}")
     if head.get("mode") == "parallel" and not head.get("touches"):
@@ -1493,6 +1500,15 @@ def criteria_count(body):
 
 GH_REPO = r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}"
 _SHA = r"[0-9a-f]{7,40}"
+# поле pr пачки (metis-0757): «latark/agent-kit#290»; branch — имя ветки без пробелов и управляющих знаков
+STORY_PR_RE = re.compile(r"(" + GH_REPO + r")#(\d{1,6})")
+BRANCH_RE = re.compile(r"[\w][\w./-]{0,199}")
+
+
+def story_pr(head):
+    """PR пачки из поля pr → (репозиторий, номер) или None."""
+    m = STORY_PR_RE.fullmatch(str(head.get("pr") or ""))
+    return (m.group(1), int(m.group(2))) if m else None
 # PR в строке журнала: «PR #163 (latark/agent-kit)», «latark/agent-kit#163», «github.com/latark/agent-kit/pull/163», «PR #163»
 _PR_EXPLICIT = re.compile(r"\bPR\s*#?(\d{1,6})\s*\((" + GH_REPO + r")\)|(?<![\w/.-])(" + GH_REPO + r")#(\d{1,6})\b"
                           r"|github\.com/(" + GH_REPO + r")/pull/(\d{1,6})\b")
@@ -1777,6 +1793,11 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     child_links = kw.pop("child_links", None) or {}  # {id задачи: work_links} — список PR задач пачки ([zeus-pr-link])
     card, text = render_card(head, body, src_rel, t, **kw)
     inf = story_info(head.get("id"), tasks)
+    spr = story_pr(head)
+    # состояние PR пачки — из кэша gh (pr_index по ветке batch/<id>: номер пачки в имени ветки); нет в кэше — без пометки
+    sstate = next((v for r, n, v in (child_links.get(head.get("id")) or ([], []))[0] if spr and (r, n) == (spr[0].lower(), spr[1])),
+                  None)
+    spr_url = f"https://github.com/{spr[0]}/pull/{spr[1]}" if spr else None
     over = over_budget(inf)
     for k in ("Пачка", "Порядок", "Режим", "Режим почему", "Зависит от", "Области", "Пересечения"):
         card.pop(k, None)
@@ -1789,14 +1810,20 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
                  "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
                  "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
-                 "Пересечения": cross_l or None, "Области не указаны": unknown, "Тип": "пачка"})
+                 "Пересечения": cross_l or None, "Области не указаны": unknown,
+                 "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or "")) else None,
+                 "PR пачки": spr_url, "Тип": "пачка"})
     summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
                + (f"\n> **Цепочка одному исполнителю:** {' → '.join(lk(i) for i in inf['chain'])}" if inf["chain"] else "")
                + (f"\n> **Параллельно:** {', '.join(lk(i) for i in inf['parallel'])}" if inf["parallel"] else "")
                + (f"\n> **Пересечения по файлам:** {'; '.join(cross_l)}" if inf["cross"] else "")
-               + (f"\n> **Области не указаны:** {unknown}" if unknown else ""))
+               + (f"\n> **Области не указаны:** {unknown}" if unknown else "")
+               + (f"\n> **PR пачки:** [PR #{spr[1]}]({spr_url}) · {spr[0]}"
+                  + {True: " · слит", False: " · открыт", None: ""}[sstate]
+                  + (f" · ветка `{card['Ветка']}`" if card.get("Ветка") else "") if spr
+                  else f"\n> **Ветка пачки:** `{card['Ветка']}` · PR ещё нет" if card.get("Ветка") else ""))
     rows = []
     cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
@@ -2179,13 +2206,14 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
               "Когда", "Бюджет", "Сумма оценок", "Закрыто", "Цепочка", "Параллельно", "Области не указаны",
-              "Тип", "id", "tags"]
+              "Ветка", "PR пачки", "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
               "Вопрос задан": "datetime", "Откуда": "text", "Из чего": "text", "Критерии": "text", "Хвост": "multitext", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
+              "Ветка": "text", "PR пачки": "text",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
