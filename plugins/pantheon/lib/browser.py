@@ -26,8 +26,9 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
   нет — 15 сайтов решения 15.10 и forms.yandex.ru, DEFAULT_DOMAINS). Другой сайт — если его хост есть в словах
-  владельца за 24 ч (решение 03.11, owner_said: журнал owner-log/*.md всех окон, его пишет хук; строка «вопрос:» ответа,
-  задачи, сообщения, страницы и доска — не слова владельца; ivan@mail.ru и путь адреса — не хост), первое чтение окном
+  владельца за 24 ч (решение 03.11, owner_said: журнал owner-log/*.md всех окон, его пишет хук; из ответа окном вопросов
+  и в чате — только «заметка:» и «дословно:», а вопрос, метка варианта, принятая подсказка Claude, задачи, сообщения,
+  страницы и доска — не слова владельца; ivan@mail.ru, путь адреса, README.md и 0.5.52 — не хост), первое чтение окном
   сайта за 6 ч — уведомление «<окно> читает <сайт> — по вашим словам ЧЧ:ММ». Или по задаче: «да» владельца
   окном вопросов (или ответом в чате; галочка на доске — нет) на вопрос «[ID] …» за 7 дней, где этот хост стоит целым
   токеном (`--task ID`; example.com не открывает le.com). Адрес — печатные ASCII без «\\», «хост:порт» без %, [], @.
@@ -43,6 +44,12 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   `new` — только URL, URLSearchParams, Date, Set, Map, RegExp и Intl.* (EVAL_NEW): new Audio, new FontFace, new Image
   и прочие конструкторы с адресом выходят в сеть. Это защита от ошибки агента и указаний со страницы, а не от намеренного
   обхода (как guard, README guard): обход — правка роли, не шаблона.
+- Принятый риск владельца 03.11 22:06 (metis-0760, ответ metis-0760-eval2, decisions.md): дыры разбора eval не чиним.
+  Известные обходы списка (оба argus круга 4): конструктор по ссылке `(Map => new Map(u))(Audio)`, второй аргумент
+  replace/stringify `(0, open)`, replace с одним аргументом (Location.replace, CSSStyleSheet.replace), имя по
+  собранной строке `document[['coo','kie'].join('')]`, перенос строки с `{`, async/of/yield/await, запятая в `)(`,
+  имя не из ASCII, литерал регулярного выражения. Взамен — переключатель владельца: `eval = false` в reads.toml
+  запрещает eval («eval запрещён настройкой …»), health, open и read работают; ключа или файла нет — eval разрешён.
 - Сырые /cmd, /events, /console и /close демона наружу не выходят, и сам проход их не зовёт: только /health, /open,
   /eval.
 - Демон не отвечает — проход уведомляет владельца (кто, что, какой сайт, задача; «нажмите Разрешить») и запускает его
@@ -347,19 +354,23 @@ def daemon_log():
 
 
 def load_config():
-    """(domains, windows): из reads.toml владельца, без файла — по умолчанию. Битый файл — Fail: список не угадываем."""
+    """(domains, windows, eval_on): из reads.toml владельца, без файла — по умолчанию (eval разрешён). Битый файл или
+    `eval` не true/false — Fail: список и переключатель не угадываем."""
     try:
         with open(config_path(), "rb") as fh:
             data = tomllib.load(fh)
     except FileNotFoundError:
-        return DEFAULT_DOMAINS, DEFAULT_WINDOWS
+        return DEFAULT_DOMAINS, DEFAULT_WINDOWS, True
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise Fail(f"reads.toml не читается ({type(e).__name__}: {e}) — список сайтов неизвестен")
     doms, wins = data.get("domains", list(DEFAULT_DOMAINS)), data.get("windows", list(DEFAULT_WINDOWS))
     if not (isinstance(doms, list) and all(isinstance(d, str) and d.strip() for d in doms)
             and isinstance(wins, list) and all(isinstance(w, str) and WINDOW_RE.fullmatch(w) for w in wins)):
         raise Fail("reads.toml: domains и windows — списки строк")
-    return tuple(d.strip().lower().strip(".") for d in doms), tuple(wins)
+    eval_on = data.get("eval", True)
+    if not isinstance(eval_on, bool):
+        raise Fail("reads.toml: eval — true (разрешён) или false (запрещён)")
+    return tuple(d.strip().lower().strip(".") for d in doms), tuple(wins), eval_on
 
 
 def window_cache():
@@ -445,30 +456,55 @@ def listed(host, domains):
 # хост — целый токен; после «@» — нет: ivan@mail.ru — почта, а не сайт mail.ru (C2, C7)
 HOST_TOKEN = re.compile(r"(?<![\w.@-])[\w-]+(?:\.[\w-]+)+(?![\w@-]|\.[\w-])")
 URL_TOKEN = re.compile(r"https?://[^\s<>\"'`]+", re.I)
+# токен без схемы с таким хвостом — имя файла или версия, а не сайт: «поправь README.md», «версия 0.5.52» (Д1, C8).
+# Сайт с таким хвостом (bun.sh) владелец называет адресом https://…
+NOT_HOST_TAIL = re.compile(r"\d+|0x[0-9a-f]*|md|py|toml|json|jsonl|sh|txt|yaml|yml|js|ts|tmpl|log|csv")
 
 
 def question_hosts(q):
     """Хосты в тексте — из адресов http(s) (хост адреса, а не его путь) и целые токены вне адресов (C2): «example.com»
-    не открывает le.com, «ivan@mail.ru» не открывает mail.ru (C7); www. снимается."""
+    не открывает le.com, «ivan@mail.ru» не открывает mail.ru (C7); токен с хвостом файла или числом (README.md,
+    0.5.52) — не хост (NOT_HOST_TAIL); www. снимается."""
     out = set()
     for u in URL_TOKEN.findall(q or ""):
         with contextlib.suppress(ValueError):
             h = urlsplit(u).hostname
             if h and "." in h:
                 out.add(site_word(h.lower().rstrip(".")))
-    return out | {site_word(h.lower()) for h in HOST_TOKEN.findall(URL_TOKEN.sub(" ", q or ""))}
+    return out | {site_word(h.lower()) for h in HOST_TOKEN.findall(URL_TOKEN.sub(" ", q or ""))
+                  if not NOT_HOST_TAIL.fullmatch(h.rsplit(".", 1)[-1].lower())}
 
 
 OWNER_WORDS_TTL = 24 * 3600                   # сайт вне списка — по словам владельца за 24 ч (решение 03.11, C8)
 OWNER_LOG_TAIL = 512 * 1024
 OWNER_ENTRY = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", re.M)
+# пометка записи owner-log → что в ней набрал владелец (C8, Б4, Д2). Формат пишут ctx.py (cmd_owner_log, cmd_answer)
+# и answers.py (chat_record); его не меняем. Весь текст — набранный ввод (без пометки) и свой текст в окне вопросов.
+# В ответе окном вопросов и в ответе в чате «вопрос:», «ответ:», «вариант:» — вопрос и метка варианта, их пишет
+# модель; владелец набрал только «заметка:» (окно) и «дословно:» (чат) — последнее поле записи, до её конца.
+# «принята подсказка Claude» — текст подсказки модели; любая другая пометка — тоже не слова владельца.
+OWNER_PLAIN = ("", "окно вопросов, свой текст")
+OWNER_FIELD = {"окно вопросов": "заметка:", "ответ в чате": "дословно:", "ответ в чате не распознан": "дословно:"}
+
+
+def owner_text(note, body):
+    """Что владелец набрал сам в записи owner-log с пометкой note (заголовок после времени) — по OWNER_FIELD."""
+    note = note.strip().removeprefix("·").strip()
+    if note in OWNER_PLAIN:
+        return body
+    field = OWNER_FIELD.get(note)
+    lines = body.split("\n")
+    # строки до поля — вопрос и варианты одной строкой каждая (хук сводит их к одной), так что первое поле — настоящее
+    k = next((i for i, ln in enumerate(lines) if field and ln.startswith(field)), None)
+    return "" if k is None else "\n".join([lines[k][len(field):]] + lines[k + 1:])
 
 
 def owner_said(site):
     """Время последней записи владельца за OWNER_WORDS_TTL, где есть этот сайт (question_hosts), или None (C8).
-    Слова владельца — только журнал owner-log/*.md (все окна): его пишет хук, роли туда не пишут. У записи с пометкой
-    хука (ответ окном вопросов, ответ в чате) строка «вопрос: …» — текст Зевса, не владельца: не считается. Текст задач,
-    сообщений, страниц и board.jsonl (галочка доски) — не слова владельца."""
+    Слова владельца — только журнал owner-log/*.md (все окна): его пишет хук, роли туда не пишут. Из записи берётся
+    только набранное владельцем (owner_text): у ответа окном вопросов и в чате — «заметка:» и «дословно:», а не вопрос
+    и метка варианта (их пишет модель); принятая подсказка Claude — не слова владельца. Текст задач, сообщений,
+    страниц и board.jsonl (галочка доски) — не слова владельца."""
     best, since = None, P.now() - OWNER_WORDS_TTL
     try:
         names = sorted(os.listdir(P.path("owner-log")))
@@ -493,9 +529,7 @@ def owner_said(site):
             if t < since or t > P.now() + 60 or (best is not None and t <= best):
                 continue
             body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
-            if m.group(2).strip():
-                body = "\n".join(ln for ln in body.split("\n") if not ln.lstrip().startswith("вопрос:"))
-            if site in question_hosts(body):
+            if site in question_hosts(owner_text(m.group(2), body)):
                 best = t
     return best
 
@@ -744,10 +778,13 @@ def check_req(req):
         raise Refuse(f"{op}: нужен адрес или --here")
 
 
-def execute(req, win, domains):
+def execute(req, win, domains, eval_on=True):
     """Заявка → (state, text, why). Refuse/Fail поднимаются наружу."""
     check_req(req)
     op, b, task = req["op"], req["browser"], req.get("task")
+    if op == "eval" and not eval_on:
+        raise Refuse(f"eval запрещён настройкой eval = false в {config_path()} — её меняет владелец; health, open и "
+                     "read работают")
     if op == "health":
         st = health(b)
         if st is None:
@@ -802,12 +839,12 @@ def handle(text, win, cfg):
     try:
         if isinstance(cfg, Exception):
             raise cfg
-        domains, windows = cfg
+        domains, windows, eval_on = cfg
         if win is not None and win not in windows:
             raise Refuse(f"окну {win} браузер не дан (reads.toml: windows = {list(windows)}) — задачей Харону через Зевса")
         if isinstance(req, dict) and isinstance(req.get("t"), (int, float)) and P.now() - req["t"] > REQ_TTL:
             raise Fail(f"заявка старше {REQ_TTL // 60} мин — подайте заново")
-        state, out, why = execute(req, win, domains)
+        state, out, why = execute(req, win, domains, eval_on)
         res.update(state=state, code=0, text=out[:TEXT_MAX + 20000], why=why)
     except Refuse as e:
         res.update(state="refused", code=1, why=str(e))

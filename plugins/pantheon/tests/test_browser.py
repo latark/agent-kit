@@ -133,7 +133,7 @@ def req(op, **kw):
 
 
 def run(r, win=None, cfg=None):
-    return B.handle(json.dumps(r), win, cfg or (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS))
+    return B.handle(json.dumps(r), win, cfg or (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
 
 
 def answer(t, q, a):
@@ -314,6 +314,51 @@ check("[C7] question_hosts: почта ivan@mail.ru не даёт mail.ru, пу�
 answer(T0 - 60, "[q-zeus] Открыть zeus-said.org?", "Другое")
 res = run(req("read", url="https://zeus-said.org/"), win="hq")
 check("[C8] хост только в строке «вопрос:» ответа (текст Зевса, не владельца) — отказ", res["state"] == "refused", res)
+# Б4, Д2: текст модели внутри записи owner-log — метка варианта («ответ:», «вариант:») и принятая подсказка Claude;
+# владелец набрал только «заметка:» (окно вопросов), «дословно:» (ответ в чате) и ввод без пометки
+said_cases = (
+    ("label-said.org", " · окно вопросов", "вопрос: [q-l] Что делать?\nответ: Нет — не открывать label-said.org", False),
+    ("chat-said.org", " · ответ в чате",
+     "вопрос: [q-c] Формат?\nответ: А — сводка по chat-said.org\nвариант: А\nдословно: а", False),
+    ("var-said.org", " · ответ в чате", "вопрос: [q-v] Формат?\nответ: А — сводка\nвариант: var-said.org\nдословно: а",
+     False),
+    ("sugg-said.org", " · принята подсказка Claude", "открой sugg-said.org и прочитай цены", False),
+    ("odd-said.org", " · пометка, которой хук не пишет", "odd-said.org", False),
+    ("note-said.org", " · окно вопросов", "вопрос: [q-n] Что делать?\nответ: Да\nзаметка: и глянь\nnote-said.org", True),
+    ("verb-said.org", " · ответ в чате",
+     "вопрос: [q-d] Формат?\nответ: А — сводка\nвариант: А\nдословно: а, и verb-said.org", True),
+    ("none-said.org", " · ответ в чате не распознан",
+     "вопрос: [q-u] Формат?\nпричина: ответ не похож на выбор\nдословно: смотри none-said.org", True),
+    ("free-said.org", " · окно вопросов, свой текст", "лучше открой free-said.org", True),
+)
+for h, note, body, ok in said_cases:
+    D.pages[f"https://{h}/"] = {"title": h, "text": f"страница {h}", "links": []}
+    owner_says(T0 - 60, body, note=note)
+    res = run(req("read", url=f"https://{h}/"), win="hq")
+    check(f"[C8] {h} в записи «{note[3:]}» ({'набрал владелец' if ok else 'текст модели'}) — "
+          f"{'чтение' if ok else 'отказ'}", res["state"] == ("done" if ok else "refused"), res)
+D.pages["https://future-said.org/"] = {"title": "f", "text": "страница future-said.org", "links": []}
+owner_says(T0 + 3600, "открой future-said.org")
+res = run(req("read", url="https://future-said.org/"), win="hq")
+check("[C8] запись владельца «через час» (время в будущем, больше 60 с) — не засчитывается, отказ",
+      res["state"] == "refused", res)
+src = {n: open(os.path.join(os.path.dirname(LIB), *n.split("/")), encoding="utf-8").read()
+       for n in ("hooks/ctx.py", "lib/answers.py")}
+marks = ('ANSWER_NOTE = "окно вопросов"', 'ANSWER_FREE_NOTE = "окно вопросов, свой текст"',
+         'note = "принята подсказка Claude"', 'CHAT_NOTE = "ответ в чате"', 'CHAT_NONE_NOTE = "ответ в чате не распознан"',
+         '"вопрос: %s\\nответ: %s" % (qq,', 'line += "\\nзаметка: "', '\\nвариант: %s\\nдословно: %s"',
+         '"вопрос: %s\\nпричина: %s\\nдословно: %s"')
+check("[C8] пометки и поля owner-log, на которые опирается owner_text, — те же в ctx.py и answers.py",
+      all(any(m in s for s in src.values()) for m in marks), [m for m in marks if not any(m in s for s in src.values())])
+# Д1: имя файла и версия — не хост
+check("[C8] question_hosts: «поправь README.md», «версия 0.5.52», «run.py» — не хосты; адрес https://bun.sh — хост",
+      B.question_hosts("поправь README.md и run.py, версия 0.5.52; https://bun.sh/x, docs.example.org") ==
+      {"bun.sh", "docs.example.org"}, B.question_hosts("поправь README.md и run.py, версия 0.5.52; https://bun.sh/x, "
+                                                         "docs.example.org"))
+owner_says(T0 - 60, "поправь README.md")
+D.pages["https://readme.md/"] = {"title": "r", "text": "страница readme.md", "links": []}
+res = run(req("read", url="https://readme.md/"), win="hq")
+check("[C8] «поправь README.md» в словах владельца — сайт readme.md не разрешён, отказ", res["state"] == "refused", res)
 tdir = os.path.join(PAN, "directions", "metis-pantheon", "tasks")
 os.makedirs(tdir, exist_ok=True)
 with open(os.path.join(tdir, "metis-0997.md"), "w", encoding="utf-8") as fh:
@@ -451,7 +496,8 @@ READS = os.path.join(HOME, ".claude", "pantheon", "reads.toml")
 with open(READS, "w") as fh:
     fh.write('domains = ["example.com"]\nwindows = ["hq", "charon-x"]\n')
 cfg = B.load_config()
-check("reads.toml: свой список сайтов и окон", cfg == (("example.com",), ("hq", "charon-x")), cfg)
+check("reads.toml: свой список сайтов и окон, без ключа eval — eval разрешён",
+      cfg == (("example.com",), ("hq", "charon-x"), True), cfg)
 res = run(req("read", url="https://example.com/a"), "charon-x", cfg)
 check("сайт из reads.toml — можно, окно из windows — можно", res["state"] == "done", res)
 res = run(req("read", url=AVITO), "hq", cfg)
@@ -466,6 +512,32 @@ try:
 except B.Fail as e:
     got = str(e)
 check("битый reads.toml — сбой, а не список по умолчанию", got and "не читается" in got, got)
+os.remove(READS)
+# переключатель eval (решение владельца 03.11 22:06): reads.toml владельца, окну роли на запись закрыт
+check("[E10] reads.toml нет — eval разрешён", B.load_config() == (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True),
+      B.load_config())
+D.tab = AVITO
+for val, on in (("true", True), ("false", False)):
+    with open(READS, "w") as fh:
+        fh.write(f'domains = ["avito.ru"]\neval = {val}\n')
+    cfg = B.load_config()
+    check(f"[E10] eval = {val} в reads.toml — переключатель {on}", cfg[2] is on, cfg)
+    res = run(req("eval", url=AVITO, expr="document.title"), "hq", cfg)
+    want = res["state"] == "done" if on else (res["state"] == "refused" and "eval запрещён настройкой" in res["why"]
+                                               and "reads.toml" in res["why"])
+    check(f"[E10] eval = {val}: eval {'выполняется' if on else 'отказ «eval запрещён настройкой … reads.toml»'}",
+          want, res)
+    for op in ("health", "read"):
+        res = run(req(op, url=AVITO) if op == "read" else req(op), "hq", cfg)
+        check(f"[E10] eval = {val}: {op} работает", res["state"] == "done", res)
+with open(READS, "w") as fh:
+    fh.write('eval = "no"\n')
+try:
+    B.load_config()
+    got = None
+except B.Fail as e:
+    got = str(e)
+check("[E10] eval не true/false — сбой, а не догадка", got and "true" in got, got)
 os.remove(READS)
 
 res = run(req("read", url=AVITO, t=P.now() - 400))
