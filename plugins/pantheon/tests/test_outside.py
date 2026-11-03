@@ -496,80 +496,10 @@ commit(B, {".pantheon-verify": "true\n"}, "ослабил проверку")
 git(B, "update-ref", "refs/remotes/origin/main", base)
 check("команда: .pantheon-verify из origin/main, правка ветки не действует", O.command(B, "test")[1] == "python3 t.py")
 
-# --- 2. тесты после «принять» -------------------------------------------------------------------------------------
-before = len(calls())
-accept(C3)
-check("тик: есть новое «принять» — проход нужен", O.pending())
-res = O.auto_pass()
-check("принять C3 (HEAD клона): один прогон", len(res) == 1 and res[0].get("code") == 0, res)
-recs = tests_for(C3)
-check("запись tests принята настоящим шлюзом guard", len(recs) == 1, gate_records())
-r0 = recs[0] if recs else {}
-check("запись: repo по remote, pr null, by = проход",
-      r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside", r0)
-check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == os.path.realpath(APP), r0)
-c = calls()[before:]
-check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
-      len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
-env = c[0]["env"] if c else {}
-check("окружение с нуля: нет GH_TOKEN, есть CI=1 и свой TMPDIR",
-      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT) and env.get("HOME") == os.path.realpath(HOME), sorted(env))
-check("тик: «принять» разобрано — прохода нет", not O.pending())
-check("повтор прохода — без второго прогона", O.auto_pass() == [] and len(tests_for(C3)) == 1)
-
-# коммит не на HEAD: временный worktree, зависимости, уборка
-before = len(calls())
-accept(C1)
-res = O.auto_pass()
-check("принять C1 (не HEAD): тесты прошли, запись есть", len(res) == 1 and len(tests_for(C1)) == 1, res)
-c = calls()[before:]
-wt = os.path.join(HOME, "Library", "Caches", "pantheon-outside", "wt")
-check("временный worktree вне STATE, сначала npm ci, потом тест",
-      len(c) == 2 and c[0]["cmd"] == ["npm", "ci"] and c[1]["cwd"].startswith(os.path.realpath(wt)), [x["cmd"] for x in c])
-check("временный worktree снят", not os.listdir(wt) and "pantheon-outside" not in git(APP, "worktree", "list"))
-check("клон не тронут: HEAD = C3", git(APP, "rev-parse", "HEAD") == C3)
-
-# красные тесты
-accept(C2)
-res = O.auto_pass()
-check("принять C2 (красный): записи нет", len(tests_for(C2)) == 0 and res and res[0].get("code") == 1, res)
-check("красный: тревога со ссылкой на журнал", f"{REPO}@{C2[:12]}" in alerts() and "pantheon outside status" in alerts())
-check("красный: хвост журнала в итоге", "тест упал" in (res[0].get("tail") or "") if res else False, res)
-
-# не берутся: чужой agent_type, старое, нет копии, уже есть tests
-accept(C1[:-1] + ("0" if C1[-1] != "0" else "1"), who="dev-opus")
-accept("e" * 40, age=2 * 86400)
-accept("f" * 40, repo="latark/nowhere")
-todo = O.auto_todo()
-check("не argus и старше суток — не берутся; нет копии — берётся", todo == [("latark/nowhere", "f" * 40)], todo)
-res = O.auto_pass()
-check("нет копии: тревога, записи нет", "нет копии latark/nowhere" in alerts() and not tests_for("f" * 40), res)
-
-# грязное дерево клона на HEAD: копия не годится, worktree на коммите — чистый
+# --- 2. без автопрогонов (решение владельца 03.11) -------------------------------------------------------------
 C4 = commit(APP, {"t.py": GREEN + "# c4\n"}, "c4")
-with open(os.path.join(APP, "t.py"), "a") as fh:
-    fh.write("raise SystemExit(0)  # правка без коммита\n")
-accept(C4)
-before = len(calls())
-O.auto_pass()
-c = calls()[before:]
-check("грязный клон: тест идёт во временном worktree", c and c[-1]["cwd"] != os.path.realpath(APP) and len(tests_for(C4)) == 1,
-      [x["cwd"] for x in c])
-git(APP, "checkout", "--", "t.py")
-
-# команда портит дерево — записи нет
 C5 = commit(APP, {"t.py": "open('junk.txt', 'w').write('x')\n"}, "c5 пачкает")
-accept(C5)
-res = O.auto_pass()
-check("команда изменила дерево: записи нет, причина названа",
-      not tests_for(C5) and "изменила HEAD или дерево" in (res[0].get("why") or ""), res)
-os.remove(os.path.join(APP, "junk.txt"))
-
-# пустая команда в .pantheon-verify — записи нет
 C6 = commit(APP, {".pantheon-verify": "true\n"}, "c6 пустая проверка")
-accept(C6)
-res = O.auto_pass()
-check("пустая команда (true): записи нет", not tests_for(C6) and "ничего не проверяет" in (res[0].get("why") or ""), res)
 C7 = commit(APP, {".pantheon-verify": "heavy python3 t.py\n", "t.py": GREEN}, "c7")
 
 # --- 3. заявка роли из окна -------------------------------------------------------------------------------------
@@ -1357,36 +1287,6 @@ check("head_state не заходит в подмодуль: clean-фильтр 
 subprocess.run(["git", "-C", SUPER, "status", "--porcelain"], capture_output=True)
 check("проба честная: голый git status фильтр подмодуля исполняет", os.path.exists(_smark))
 
-# 7. тесты после «принять»: worktree роли, чей .git-файл ведёт не в <клон>/.git/worktrees/<имя>, не берётся — его git
-# исполнил бы конфиг, который пишет роль; берётся временный worktree прохода
-_S = C1   # не HEAD клона: иначе find_checkout возьмёт сам клон
-WT7 = os.path.join(_wtd, "wt7")
-git(APP, "worktree", "add", "-q", "--detach", WT7, _S)
-_fc = O.find_checkout(REPO, _S)
-check("find_checkout: настоящий worktree клона реестра — Repo с gitdir клона",
-      isinstance(_fc[0], O.Repo) and _fc[0].clone == os.path.realpath(APP)
-      and _fc[0].gitdir.startswith(os.path.join(os.path.realpath(APP), ".git", "worktrees") + "/")
-      and isinstance(_fc[1], O.Repo), _fc)
-_EG = os.path.join(_ROOT, "evil-gitdir", "wt7")
-_real_gd = open(os.path.join(WT7, ".git")).read().split(":", 1)[1].strip()
-shutil.copytree(_real_gd, _EG)
-with open(os.path.join(_EG, "commondir"), "w") as fh:
-    fh.write(os.path.join(os.path.realpath(APP), ".git") + "\n")
-_saved7 = open(os.path.join(WT7, ".git")).read()
-with open(os.path.join(WT7, ".git"), "w") as fh:
-    fh.write(f"gitdir: {_EG}\n")
-check("проба честная: git по подложенному gitdir видит тот же HEAD и чистое дерево",
-      O.head_state(os.path.realpath(WT7)) == (_S, True), O.head_state(os.path.realpath(WT7)))
-_fc = O.find_checkout(REPO, _S)
-check("find_checkout: .git-файл worktree ведёт в gitdir роли — копия не берётся, только клон для временного worktree",
-      _fc[0] is None and _fc[1] == os.path.realpath(APP), _fc)
-with open(os.path.join(WT7, ".git"), "w") as fh:
-    fh.write(_saved7)
-git(APP, "worktree", "remove", "--force", WT7)
-shutil.rmtree(WT7, ignore_errors=True)
-shutil.rmtree(os.path.dirname(_EG), ignore_errors=True)
-git(APP, "worktree", "prune")
-
 for _p in (FAKE1, EVILB):
     shutil.rmtree(_p, ignore_errors=True)
 for _p in (FAKE2, FAKE3):
@@ -1761,103 +1661,7 @@ got = json.loads(r.stdout) if r.returncode == 0 else None
 check("guard: `pantheon outside serve` — не dev-сервер (pnpm dev — да)", got and got[0] is None and got[1], r.stdout + r.stderr)
 check("guard: `pantheon outside test` — не привилегированная команда", got and got[2] == [], got)
 
-# --- 5b. заявки раньше автопрогонов (metis-0716) -------------------------------------------------------------------
-class Sim:
-    """Подмена очереди и прогонов: порядок событий в журнале ev; hook срабатывает в каждом автопрогоне (заявка
-    «подана во время него»)."""
-
-    def __init__(self, todo, queue=(), hook=None):
-        self.todo, self.queue, self.hook, self.ev = list(todo), list(queue), hook, []
-
-    def run(self, runner):
-        names = ("requests", "handle", "run_auto", "auto_todo", "auto_due", "waiting_keys", "_queued_ids")
-        saved = {n: getattr(O, n) for n in names}
-
-        def requests(kinds=(), limit=None, taken=None):
-            q, self.queue = self.queue[:limit], self.queue[limit:] if limit else []
-            return [("", "test", "qd", "w", r, {}) for r in q]
-
-        def run_auto(repo, sha):
-            self.ev.append("auto:" + sha[0])
-            self.todo.remove((repo, sha))
-            if self.hook:
-                self.hook(self)
-            return {"state": "done"}
-
-        O.requests, O.run_auto = requests, run_auto
-        O.handle = lambda qdir, window, rid, req: self.ev.append("req:" + rid)
-        O.auto_todo = lambda recs=None, t=None: list(self.todo)
-        O.auto_due = lambda: bool(self.todo)
-        O.waiting_keys = lambda: {("o/r", "z" * 40)}
-        O._queued_ids = lambda kinds=(): [(r, "test") for r in self.queue]
-        try:
-            runner()
-        finally:
-            for n, f in saved.items():
-                setattr(O, n, f)
-        return self.ev
-
-
-def old_order():
-    """Порядок до metis-0716: очередь читается раз, затем все автопрогоны подряд."""
-    for _t, _k, qdir, window, rid, req in O.requests(("test",)):
-        O.handle(qdir, window, rid, req)
-    if O.auto_due():
-        O.auto_pass()
-
-
-def push_r1(s):
-    s.queue.append("R1")
-
-
-T3 = [("o/r", c * 40) for c in "abc"]
-sim = Sim(T3, hook=push_r1)
-sim.run(O.run_test_queue)
-check("заявка, поданная во время автопрогона, идёт следующей, остальные автопрогоны ждут",
-      sim.ev == ["auto:a", "req:R1"] and len(sim.todo) == 2, sim.ev)
-sim = Sim(T3, hook=push_r1)
-sim.run(old_order)
-check("мутант: старый порядок — заявка уходит за все автопрогоны (тест выше красный)",
-      sim.ev != ["auto:a", "req:R1"], sim.ev)
-sim = Sim(T3, queue=["R0"])
-sim.run(O.run_test_queue)
-check("заявка в очереди с начала: сначала она, потом один автопрогон", sim.ev == ["req:R0", "auto:a"], sim.ev)
-sim = Sim(T3, queue=["R0"])
-sim.run(old_order)
-check("мутант: старый порядок при заявке — три автопрогона за заход", sim.ev == ["req:R0", "auto:a", "auto:b", "auto:c"],
-      sim.ev)
-sim = Sim(T3)
-sim.run(O.run_test_queue)
-check("заявок нет: автопрогоны идут подряд, очередь читается между ними", sim.ev == ["auto:a", "auto:b", "auto:c"], sim.ev)
-
-# ждущая заявка на тот же (repo, sha): автопрогон не дублируется; пропущенное не «просмотрено»
-HEADA = git(APP, "rev-parse", "HEAD")
-rc, q, rid = role_request("athena-x", APP, "test")
-time.sleep(1.1)   # id заявки начинается со времени: role_request берёт последнюю по имени
-rc2, q2, rid2 = role_request("athena-x", APP, "test", "--script", "lint")
-keys = O.waiting_keys()
-check("ждущая заявка test даёт ключ (repo, HEAD), заявка не снята; с --script ключа нет",
-      keys == {(REPO.lower(), HEADA)} and os.path.isfile(os.path.join(q, rid + ".req.json")), (keys, HEADA))
-ran = []
-_ra, _at = O.run_auto, O.auto_todo
-O.run_auto = lambda repo, sha: ran.append((repo, sha)) or {"state": "done"}
-O.auto_todo = lambda recs=None, t=None: [(REPO, HEADA), (REPO, "b" * 40)]
-mt = P.read_json(O.root("auto.json"), {}).get("mtime", "нет")
-O.auto_pass(skip=keys)
-O.run_auto, O.auto_todo = _ra, _at
-check("автопрогон на (repo, sha) ждущей заявки пропущен, соседний взят", ran == [(REPO, "b" * 40)], ran)
-check("пропущенное не помечено просмотренным (mtime журнала в auto.json не менялся)",
-      P.read_json(O.root("auto.json"), {}).get("mtime", "нет") == mt)
-for r_, d_ in ((rid, q), (rid2, q2)):
-    os.remove(os.path.join(d_, r_ + ".req.json"))
-check("ключей ждущих заявок больше нет", O.waiting_keys() == set())
-
-# автопрогон на ключе ждущей заявки не идёт (мутант skip=() в run_test_queue краснит этот тест)
-sim = Sim([("o/r", "z" * 40), ("o/r", "a" * 40)])
-sim.run(O.run_test_queue)
-check("run_test_queue: ключ ждущей заявки пропущен (skip=waiting_keys), соседний взят",
-      sim.ev == ["auto:a"] and ("o/r", "z" * 40) in sim.todo, sim.ev)
-
+# --- 5b. заявки по одной (metis-0716); автопрогонов нет (03.11) ---------------------------------------------------
 # заявки по одной: убитый заход не теряет остальные (2а), неснимаемая заявка не крутит заход
 _h = O.handle
 got = []
@@ -1923,10 +1727,8 @@ mkreq(qa, "20261102-130003-aaaaac", EARLY)
 mkreq(qb, "20261102-130004-bbbbbb", EARLY)
 _h, _got = O.handle, []
 O.handle = lambda qdir, window, rid, req: _got.append(rid[-6:])
-_ad = O.auto_due
-O.auto_due = lambda: False
 O.run_test_queue()
-O.handle, O.auto_due = _h, _ad
+O.handle = _h
 check("run_test_queue: круг между окнами сквозь заходы limit=1 — a1, b, a2, a3",
       _got == ["aaaaaa", "bbbbbb", "aaaaab", "aaaaac"], _got)
 
@@ -1953,12 +1755,12 @@ P.write_json(O.root("runs", "20261102-101010-a1a1a1.json"), {"id": "20261102-101
 put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=900)
 put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
 P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
-_sv = (O._queued_ids, O.auto_due, O._stale)
-O._queued_ids, O.auto_due, O._stale = (lambda kinds=(): []), (lambda: False), (lambda t=None: [])
+_sv = (O._queued_ids, O.overdue_accepts, O._stale)
+O._queued_ids, O.overdue_accepts, O._stale = (lambda kinds=(): []), (lambda *a, **k: []), (lambda t=None: [])
 check("тик: одни итоги-зомби (queued без заявки, running в runs/) — дело проходу тестов", O.pending_test() is True)
 with P.lock("outside-run", block=False):
     check("тик: заход жив (замок взят) — зомби не повод для pending_test", O.pending_test() is False)
-O._queued_ids, O.auto_due, O._stale = _sv
+O._queued_ids, O.overdue_accepts, O._stale = _sv
 with P.lock("outside-run", block=False):
     check("тик: заход жив (замок взят) — зомби не повод", not O._zombies())
 O.recover_results()
@@ -1979,7 +1781,7 @@ check("serve (queued и running) проход тестов не трогает",
       and st["ffffff"].get("state") == "running", (st["eeeeee"], st["ffffff"]))
 check("старая запись runs/ без qdir: итог в очереди окна тоже стал failed (status не врёт running)",
       st["a1a1a1"].get("state") == "failed" and "прерван" in st["a1a1a1"].get("why", ""), st["a1a1a1"])
-check("автопрогон running только в runs/ → failed",
+check("running только в runs/ (без итога в очереди) → failed",
       P.read_json(O.root("runs", "20261102-101010-a0a0a0.json"), {}).get("state") == "failed")
 O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test"})
 check("cmd_run (замок свободен) чинит зомби сам",
@@ -1992,71 +1794,64 @@ os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
 os.remove(O.root("runs", "20261102-101010-dddddd.json"))
 os.remove(O.root("runs", "20261102-101010-a1a1a1.json"))
 
-# «принять» раньше кэша PR: журнал не считается просмотренным, пока кэш не обновили (Б1, argus 2-й круг)
+# --- тревога дежурному: «принять» argus без tests дольше часа; автопрогонов нет (решение владельца 03.11) ---------
 _cp = os.path.join(STATE, "autoclose-prs.json")
 _saved = open(_cp).read() if os.path.exists(_cp) else None
-LATE = "4" * 40
-accept(LATE, repo="latark/hh-late")
-c = json.load(open(_cp))
-c["open_prs"]["latark/hh-late"] = []          # кэш, снятый до коммита: head в нём ещё нет
-c["fetched"] = time.time() - 400
-json.dump(c, open(_cp, "w"))
-O.auto_pass()
-check("head «принять» ещё нет в кэше: автопрогона нет, журнал просмотрен (mtime записан)",
-      not [k for k in O.auto_todo() if k[0] == "latark/hh-late"] and not O.auto_due())
-c["open_prs"]["latark/hh-late"] = [{"number": 7, "head": LATE}]
-c["fetched"] = time.time()                    # кэш обновили, head в нём
-json.dump(c, open(_cp, "w"))
-check("кэш обновили с этим head: тик видит дело (pending_test), автопрогон в списке",
-      O.pending_test() and ("latark/hh-late", LATE) in O.auto_todo())
-ran = []
-_ra = O.run_auto
-O.run_auto = lambda repo, sha: ran.append((repo, sha)) or {"state": "done"}
-O.auto_pass()
-O.run_auto = _ra
-check("следующий проход запускает автопрогон на этот head", ("latark/hh-late", LATE) in ran, ran)
-check("после этого дела нет", not O.auto_due())
-# «принять» на закрытый PR (кэш свежее «принять», head нет) тик не будит при каждом обновлении кэша
-OLD2 = "5" * 40
-accept(OLD2, repo="latark/hh-gone", age=3600)
-c = json.load(open(_cp))
-c["open_prs"]["latark/hh-gone"] = []
-c["fetched"] = time.time()
-json.dump(c, open(_cp, "w"))
-O.auto_pass()
-c["fetched"] = time.time() + 1
-json.dump(c, open(_cp, "w"))
-check("head нет в свежем кэше (PR закрыт): обновление кэша проход не будит", not O.auto_due())
-if _saved is not None:
-    with open(_cp, "w") as fh:
-        fh.write(_saved)
-else:
+if os.path.exists(_cp):
     os.remove(_cp)
+HEADA = commit(APP, {"t.py": GREEN + "# al-run\n"}, "al-run")   # коммит без записи tests
+accept(HEADA, repo="latark/al-run", age=7200)
+n0, pend0 = len(calls()), O.pending_test()
+run_pass()
+O.run_test_queue()
+check("проход без заявки тесты не запускает, даже при «принять» старше часа на открытом head: прогонов нет, записи нет",
+      len(calls()) == n0 and not tests_for(HEADA), (len(calls()) - n0, tests_for(HEADA)))
+for _n in ("auto_pass", "auto_todo", "run_auto", "auto_due", "early_todo", "heads_due", "find_checkout", "waiting_keys"):
+    check(f"автопрогонов нет: O.{_n} удалена", not hasattr(O, _n))
+a_ = P.read_json(O.root("auto.json"), {})
+check("«принять» старше часа + открытый head → дело для тика и одна тревога с repo@sha12 и номером PR",
+      pend0 and O.pending_test() is False and a_.get("alerted", {}).get(f"latark/al-run@{HEADA}")
+      and alerts().count(f"latark/al-run@{HEADA[:12]}") == 1 and "(PR #100)" in alerts(), (pend0, alerts()[-300:]))
+run_pass()
+run_pass()
+check("повторные проходы: тревога на (repo, sha) одна", alerts().count(f"latark/al-run@{HEADA[:12]}") == 1, alerts()[-400:])
+check("после тревоги тик не будится", not O.pending_test())
 
-# автопрогон только на head открытого PR
-_cp = os.path.join(STATE, "autoclose-prs.json")
-_saved = open(_cp).read() if os.path.exists(_cp) else None
-OLDSHA, NEWSHA = "1" * 40, "2" * 40
-accept(OLDSHA, repo="latark/hh-old")
-accept(NEWSHA, repo="latark/hh-new")
+AL = {c: c * 40 for c in "abcdefg"}
+accept(AL["a"], repo="latark/al-new", age=1800)
+check("«принять» 30 мин назад (<1 ч): ни дела, ни тревоги",
+      O.overdue_accepts() == [] and O.alert_overdue() == 0 and AL["a"][:12] not in alerts() and not O.pending_test())
+accept(AL["b"], repo="latark/al-tests", age=7200)
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/al-tests"], "pr": None, "sha": AL["b"],
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}) + "\n")
+accept(AL["c"], repo="latark/al-dev", who="dev-opus", age=7200)
+accept(AL["d"], repo="latark/al-old", age=2 * 86400)
+check("есть запись tests, «принять» не от argus, старше суток: тревоги нет",
+      O.overdue_accepts() == [] and O.alert_overdue() == 0 and not any(AL[c][:12] in alerts() for c in "bcd"))
+accept(AL["e"], repo="latark/al-moved", age=7200)
 os.remove(_cp)
-open_pr("latark/hh-new", NEWSHA)
-open_pr("latark/hh-old", "3" * 40)   # PR ушёл вперёд: head уже другой
-todo = [k for k in O.auto_todo() if k[0].startswith("latark/hh-")]
-check("автопрогон: «принять» на старом head PR пропущено, на текущем — берётся", todo == [("latark/hh-new", NEWSHA)], todo)
-c = json.load(open(_cp))
-c["errors"] = {"latark/hh-new": "gh не ответил"}
-json.dump(c, open(_cp, "w"))
-check("gh не ответил по репозиторию: автопрогон пропущен", [k for k in O.auto_todo() if k[0] == "latark/hh-new"] == [])
-c["errors"] = {}
-c["fetched"] = time.time() - 2 * 3600
-json.dump(c, open(_cp, "w"))
-check("кэш PR старше часа: автопрогонов нет", [k for k in O.auto_todo() if k[0].startswith("latark/hh-")] == [])
+open_pr("latark/al-moved", AL["f"])      # PR ушёл вперёд: «принять» было на другой head
+check("head уже не открыт у PR: тревоги нет", O.overdue_accepts() == [] and O.alert_overdue() == 0)
 os.remove(_cp)
-check("кэша PR нет: автопрогонов нет", O.auto_todo() == [])
+accept(AL["g"], repo="latark/al-nocache", age=7200)
+os.remove(_cp)
+check("кэша открытых PR нет: журнал не читается, тревоги нет", O.overdue_accepts() == [] and not O.pending_test())
+accept(AL["g"], repo="latark/al-stale", age=7200)
+c_ = json.load(open(_cp))
+c_["fetched"] = time.time() - 2 * 3600
+json.dump(c_, open(_cp, "w"))
+check("кэш старше часа (gh не ответил): тревоги нет", O.overdue_accepts() == [])
+c_["fetched"] = time.time()
+c_["errors"] = {"latark/al-stale": "gh не ответил"}
+json.dump(c_, open(_cp, "w"))
+check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
 if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)
+elif os.path.exists(_cp):
+    os.remove(_cp)
 
 # --- 5c. перед стартом заявки test: устаревший head и дубли (metis-0726) -------------------------------------------
 _cp = os.path.join(STATE, "autoclose-prs.json")
@@ -2205,33 +2000,7 @@ git(APP, "worktree", "remove", "--force", os.path.realpath(WT2))
 P.write_json(os.path.join(STATE, "domains.json"),
              {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
 
-# auto_pass: метка кэша читается до open_heads — кэш, обновлённый посреди прохода, не считается просмотренным
-T0 = NOW - 100   # «принять» ниже — от NOW (начало теста): позже кэша
-put_cache(prs={"latark/hh-mid": []}, fetched=T0)
-accept("6" * 40, repo="latark/hh-mid", age=50)   # «принять» после кэша T0, head в кэше нет
-c = json.load(open(_cp))
-c["open_prs"]["latark/hh-mid"] = []
-c["fetched"] = T0
-json.dump(c, open(_cp, "w"))
-_oh = O.open_heads
-
-
-def _bump(t=None):
-    out = _oh(t)
-    c2 = json.load(open(_cp))
-    c2["fetched"] = T0 + 80          # fetch переписал кэш посреди прохода
-    json.dump(c2, open(_cp, "w"))
-    return out
-
-
-O.open_heads = _bump
-O.auto_pass()
-O.open_heads = _oh
-a = P.read_json(O.root("auto.json"), {})
-check("0726: auto_pass — missed и heads_seen = метка кэша до open_heads (новый кэш будит тик)",
-      a.get("missed") == T0 and a.get("heads_seen") == T0 and O.auto_due(), (a.get("missed"), a.get("heads_seen"), T0))
-
-# --- 5d. запись по дереву (metis-0732) и ранние прогоны (metis-0733) ------------------------------------------------
+# --- 5d. запись по дереву (metis-0732) ------------------------------------------------
 KIT = os.path.join(HOME, "projects", "kit")
 os.makedirs(KIT)
 git(KIT, "init", "-q", "-b", "main")
@@ -2255,7 +2024,8 @@ def kit_request():
     return O.load_result(qkit, rid) or {}
 
 
-os.remove(_cp)
+if os.path.exists(_cp):
+    os.remove(_cp)
 n1 = len(calls())
 res = kit_request()
 rk1 = tests_for(K1)
@@ -2350,56 +2120,6 @@ res = kit_request()
 check("0732: запись прохода с другой cmd на том же дереве — прогон, а не перенос",
       len(calls()) == n1 + 1 and res.get("record") and not res.get("by_tree") and "уже есть" not in res.get("note", ""), res)
 
-# 0733: ранний прогон — head открытого PR из кэша, только у репозитория с полным набором
-K7 = commit(KIT, {"t.py": GREEN + "# k7\n"}, "k7")
-put_cache(prs={"latark/kit": [{"number": 9, "head": K7}], "latark/app": [{"number": 5, "head": "7" * 40}]})
-todo = O.auto_todo()
-check("0733: head открытого PR в кэше — в списке автопрогонов без «принять»; репозиторий без FULL_TESTS — нет",
-      ("latark/kit", K7) in todo and not [k for k in todo if k[0] == "latark/app"], todo)
-check("0733: тик видит дело (heads_due)", O.heads_due() and O.auto_due())
-accept("7" * 40, repo="latark/app")
-put_cache(prs={"latark/kit": [{"number": 9, "head": K7}], "latark/app": [{"number": 5, "head": "7" * 40}]})
-todo = O.auto_todo()
-check("0733: «принять»-ные — раньше ранних", todo.index(("latark/app", "7" * 40)) < todo.index(("latark/kit", K7)), todo)
-a = P.read_json(O.root("auto.json"), {})
-a.setdefault("done", {})["latark/app@" + "7" * 40] = {"state": "done", "record": True}
-P.write_json(O.root("auto.json"), a)
-al0 = alerts()
-res = O.auto_pass()
-ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K7}", {})
-check("0733: ранний прогон идёт, пишет запись, в auto.json — early",
-      [r.get("auto") for r in res] == [f"latark/kit@{K7}"] and tests_for(K7) and ent.get("early") is True, (res, ent))
-check("0733: после прохода кэш просмотрен (heads_seen), дела нет", not O.heads_due() and not O.auto_due())
-put_cache(prs={"latark/kit": [{"number": 9, "head": K2}]})   # head с записью tests, но не из done
-check("0733: новый кэш будит тик (auto_due); head с записью не гоняется, после прохода кэш просмотрен",
-      O.heads_due() and O.auto_due() and O.auto_pass() == [] and not O.heads_due() and not O.auto_due())
-K8 = commit(KIT, {"t.py": RED}, "k8 red")
-put_cache(prs={"latark/kit": [{"number": 9, "head": K8}]})
-res = O.auto_pass()
-ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K8}", {})
-check("0733: ранний красный — без тревоги, в done early без записи",
-      res and res[0].get("code") == 1 and ent.get("early") and not ent.get("record") and alerts() == al0, (res, ent))
-check("0733: ранний красный второй раз сам не идёт", ("latark/kit", K8) not in O.auto_todo())
-accept(K8, repo="latark/kit")
-put_cache(prs={"latark/kit": [{"number": 9, "head": K8}]})
-check("0733: после «принять» ранний красный идёт ещё раз", O.auto_todo() == [("latark/kit", K8)], O.auto_todo())
-res = O.auto_pass()
-ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K8}", {})
-check("0733: прогон после «принять» — уже не early, красный даёт тревогу",
-      res and not ent.get("early") and alerts() != al0 and "latark/kit@" + K8[:12] in alerts(), ent)
-check("0733: красный после «принять» больше не повторяется", ("latark/kit", K8) not in O.auto_todo())
-# совместимость: старый auto.json без heads_seen и early читается, кэш без old_heads — тоже
-a = P.read_json(O.root("auto.json"), {})
-P.write_json(O.root("auto.json"), {"mtime": a.get("mtime"), "done": {k: {x: y for x, y in v.items() if x != "early"}
-                                                                         for k, v in a.get("done", {}).items()}})
-K9 = commit(KIT, {"t.py": GREEN + "# k9\n"}, "k9")
-with open(_cp, "w") as fh:
-    json.dump({"fetched": time.time(), "open_prs": {"latark/kit": [{"number": 9, "head": K9}]}, "errors": {}}, fh)
-check("0733: старый auto.json (без heads_seen, early) и кэш без old_heads — ранний прогон в списке, тик будится",
-      O.auto_due() and ("latark/kit", K9) in O.auto_todo() and O.stale_head(KIT, K9) is None)
-del M.FULL_TESTS["kit"]
-check("0733: репозиторий без FULL_TESTS — ранних прогонов нет", ("latark/kit", K9) not in O.auto_todo()
-      and not O.heads_due())
 if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)
