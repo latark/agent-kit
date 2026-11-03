@@ -132,8 +132,11 @@ def main():
     tmp_dw1 = [x for x in sa1["sandbox"]["filesystem"]["denyWrite"] if x.startswith(tasks + "/")]
     check("окно направления: 4000 новых чужих сессий в CLAUDE_TMP — denyWrite тот же, что до них (не O(n))",
           r.returncode == 0 and tmp_dw == tmp_dw1 and 0 < len(tmp_dw) < 40)
-    wr_closed = lambda w, p: any(glob_re(x, sandbox=True).fullmatch(p) for x in w["sandbox"]["filesystem"]["denyWrite"])  # noqa: E731
-    inside = lambda n: [os.path.join(tasks, n, "x.sock"), os.path.join(tasks, n, "s1", "scratchpad", "f.txt")]  # noqa: E731
+    def wr_closed(w, p):
+        return any(glob_re(x, sandbox=True).fullmatch(p) for x in w["sandbox"]["filesystem"]["denyWrite"])
+
+    def inside(n):
+        return [os.path.join(tasks, n, "x.sock"), os.path.join(tasks, n, "s1", "scratchpad", "f.txt")]
     check("окно направления: запись в папки чужих сессий закрыта — общий префикс имени, префикс своего, «q[x», "
           "мастерская, штаб, новые после сборки",
           all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", "-private-tmp-x01999"]
