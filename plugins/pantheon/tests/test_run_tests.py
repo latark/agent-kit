@@ -735,6 +735,31 @@ check("SKIP_NOT_MAC — ровно test_setup: остальное пропуск
       set(R.SKIP_NOT_MAC) == {"pantheon/test_setup.py"}, sorted(R.SKIP_NOT_MAC))
 check("SKIP_NOT_MAC — только существующие файлы, у каждого есть причина",
       not missing and all(why for why, _ in R.SKIP_NOT_MAC.values()), missing)
+# --- окно роли (metis-0773): файлы WINDOW_FS идут в запасной корень или пропускаются строкой ---
+wmiss = [lb for lb in R.WINDOW_FS if not os.path.exists(
+    os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("WINDOW_FS — только существующие файлы", not wmiss and R.WINDOW_FS, wmiss)
+real_probe = R.fs_probe
+try:
+    R.fs_probe = lambda base: None
+    check("window_roots: запись есть — корень прежний, строки нет",
+          R.window_roots("/r", ["pantheon/test_roles.py"]) == ("/r", None, None))
+    R.fs_probe = lambda base: "EPERM" if base == "/r" else None
+    wr_alt = os.path.join("/tmp", f"claude-{os.getuid()}")
+    if os.path.isdir(wr_alt):
+        wr = R.window_roots("/r", ["pantheon/test_roles.py"])
+        check("window_roots: под корнем нельзя, в /tmp/claude-<uid> можно — запасной корень и строка",
+              wr[0].startswith(os.path.join(wr_alt, "run-tests-")) and wr[1] is None and "EPERM" in wr[2], wr)
+        shutil.rmtree(wr[0], True)
+    else:
+        print("пропущено: нет /tmp/claude-<uid> — случай запасного корня")
+    R.fs_probe = lambda base: "EPERM"
+    wr = R.window_roots("/r", ["pantheon/test_roles.py"])
+    check("window_roots: нигде нельзя — корня нет, причина названа", wr[0] is None and "EPERM" in wr[1], wr)
+    check("window_roots: нет файлов WINDOW_FS — проба не нужна",
+          R.window_roots("/r", ["pantheon/test_board.py"]) == ("/r", None, None))
+finally:
+    R.fs_probe = real_probe
 sd = tempfile.mkdtemp(prefix="stubs-")
 check("make_stubs: на macOS заглушек нет", R.make_stubs(sd, "darwin", which=lambda c: None) == (None, []))
 check("make_stubs: на Linux все команды есть — заглушек нет", R.make_stubs(sd, "linux", which=lambda c: "/x") == (None, []))

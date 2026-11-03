@@ -65,6 +65,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -124,6 +125,28 @@ NO_SUMMARY = frozenset({
 SKIP_NOT_MAC = {
     "pantheon/test_setup.py": ("установщик pantheon-setup поддерживает только macOS", None),
 }
+# Окно роли (metis-0773): песочница режет запись `.claude/agents` и `.git/{config,hooks}` под папкой tmp кэша окна
+# (PANTHEON_TMP), где TMPDIR раннера. Эти файлы строят в своих временных папках поддельный HOME с ролями и репозитории
+# `git init`, поэтому в окне падали на пустом месте. Им раннер даёт корень в /tmp/claude-<uid> (там запись есть, сокетов
+# нет — файлам они не нужны); нет и там — строка `skip … пропущено: …`. Остальные файлы идут как раньше. Проба — на
+# деле: те же `mkdir .claude/agents` и `git init`, а не угадывание окна по переменной.
+WINDOW_FS = {
+    "guard/test_guard.py", "guard/test_merge_gate.py", "guard/test_drafts.py", "project-tools/test_project_tools.py",
+    "pantheon/test_read.py", "pantheon/test_setup.py", "pantheon/test_start.py", "pantheon/test_sync_quarantine.py",
+    "pantheon/test_executors.py", "pantheon/test_tick.py", "pantheon/test_watch.py", "pantheon/test_agent_allowlist.py",
+    "pantheon/test_baseline.py", "pantheon/test_batch.py", "pantheon/test_check_traces.py",
+    "pantheon/test_config_check.py", "pantheon/test_coord_switch.py", "pantheon/test_direction.py",
+    "pantheon/test_grants.py", "pantheon/test_outside_rerun.py", "pantheon/test_outside.py",
+    "pantheon/test_private_conf.py", "pantheon/test_plugin_map.py", "pantheon/test_review.py",
+    "pantheon/test_role_apply.py", "pantheon/test_roles.py", "pantheon/test_sandbox_size.py",
+    "pantheon/test_run_tests.py", "pantheon/test_window_ports.py", "pantheon/test_traces.py",
+    "pantheon/test_workshop_sockets.py", "pantheon/test_tick_skip.py",
+}
+# Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate
+# уходит в /var/tmp, а он в окне закрыт). В окне, где запасной корень нужен, они пропускаются строкой.
+WINDOW_NOT_TMP = {"guard/test_merge_gate.py"}
+# Файлы, чьи случаи поднимают серверы на локальных портах: в окне без bind пропускаются строкой.
+WINDOW_BIND = {"pantheon/test_outside.py"}
 # Команды macOS, которых нет на Linux: заглушка с выводом, при котором код идёт обычным путём.
 STUBS = {"ioreg": "exit 0", "pmset": 'echo "Now drawing from AC Power"', "scutil": "echo linux-host"}
 PLATFORM = os.environ.get("RUN_TESTS_PLATFORM") or sys.platform
@@ -432,6 +455,42 @@ def qos_line(py, env, platform=None, exists=os.path.exists):
     return f"run-tests: QoS (доля CPU) · раннер: {own} · файл ({'taskpolicy -c utility' if cmd else 'без taskpolicy'}): {job}"
 
 
+def fs_probe(base):
+    """Можно ли под base создать `.claude/agents` и репозиторий (`.git/config`, `.git/hooks`) → причина или None."""
+    d = None
+    try:
+        d = tempfile.mkdtemp(prefix="probe-", dir=base)
+        os.makedirs(os.path.join(d, "h", ".claude", "agents"))
+        exe = shutil.which("git")
+        if not exe:  # git на PATH нет — проверять нечем, файлы идут как есть
+            return None
+        r = subprocess.run([exe, "init", "-q", os.path.join(d, "repo")], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
+        if r.returncode:
+            return f"git init не вышел ({r.stderr.strip()[-80:]})"
+        return None
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"{type(e).__name__}: {str(e)[-80:]}"
+    finally:
+        if d:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def window_roots(root, labels):
+    """(корень для файлов WINDOW_FS, причина пропуска или None, строка для вывода или None)."""
+    if not any(lb in WINDOW_FS for lb in labels):
+        return root, None, None
+    bad = fs_probe(root)
+    if not bad:
+        return root, None, None
+    alt = os.path.join("/tmp", f"claude-{os.getuid()}")
+    alt_bad = fs_probe(alt) if os.path.isdir(alt) else "папки нет"
+    if not alt_bad:
+        return (tempfile.mkdtemp(prefix="run-tests-", dir=alt), None,
+                f"run-tests: окно режет запись под {root} ({bad}) — файлы WINDOW_FS идут в {alt}")
+    return None, f"окно режет запись `.claude/agents` и `.git/config`: {bad}; {alt}: {alt_bad}", None
+
+
 class Job:
     def __init__(self, pdir, label, py, root, env0, timeout, seq):
         self.pdir, self.label, self.timeout = pdir, label, timeout
@@ -611,6 +670,27 @@ def main(argv):
         env0["PATH"] = stubs + os.pathsep + env0.get("PATH", "")
         print(f"run-tests: не macOS — заглушки команд в PATH файлов: {', '.join(stubbed)}", flush=True)
     state = {"spawning": False, "pending": None}
+    froot, fskip, fline = window_roots(root, [lb for _, lb in par + ser])
+    if fline:
+        print(fline, flush=True)
+    if froot != root:  # корень запасной (или его нет): файлам вне /tmp тут не место
+        fskip = fskip or ("окно режет `.git/config` под tmp кэша окна, а файлу нужен репозиторий вне /tmp "
+                          "(guard считает /tmp временной папкой)")
+    drop = WINDOW_FS if froot is None else WINDOW_NOT_TMP
+    if WINDOW_BIND & {lb for _, lb in par + ser}:
+        try:
+            with socket.socket() as probe_sock:
+                probe_sock.bind(("127.0.0.1", 0))
+        except OSError as e:
+            drop = drop | WINDOW_BIND
+            fskip = (fskip + "; " if fskip else "") + f"окно не даёт занять локальный порт ({e})"
+    if fskip:
+        gone = sorted({lb for _, lb in par + ser} & drop)
+        for lb in gone:
+            print(f"skip {lb} · пропущено: {fskip}", flush=True)
+        par = [x for x in par if x[1] not in drop]
+        ser = [x for x in ser if x[1] not in drop]
+        skipped = skipped + [(lb, fskip) for lb in gone]
 
     def on_signal(signum, _frame):
         if state["spawning"]:  # Popen ещё не вернул процесс — гасим его сразу после того, как он записан
@@ -630,7 +710,7 @@ def main(argv):
                 seq += 1
                 state["spawning"] = True
                 try:
-                    job = Job(pdir, label, sys.executable, root, env0,
+                    job = Job(pdir, label, sys.executable, froot if label in WINDOW_FS else root, env0,
                               opts["timeout"] or SLOW.get(label) or TIMEOUT, seq)
                     running.append(job)
                 finally:
@@ -660,6 +740,7 @@ def main(argv):
             job.fh.close()
         n_killed, running = len(running), []
         shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(froot or root, ignore_errors=True)
         print(f"run-tests: прерван сигналом {e.signum} — погашено файлов: {n_killed}, "
               f"готово {len(done)} из {total_files}", flush=True)
         return 128 + e.signum
@@ -671,6 +752,7 @@ def main(argv):
         for s, h in old.items():
             signal.signal(s, h)
         shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(froot or root, ignore_errors=True)
     return summary(done, total_files, n, time.monotonic() - t_all, len(skipped))
 
 
