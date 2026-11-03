@@ -313,10 +313,10 @@ DENY = {
     "[E8] ": ("window.find('x')", "['https://evil.example/'].map(open)", "Array.from([1], open)",
               "JSON.stringify({}, open)", "'a'.replace(/a/, alert)", "const Number = open; Number('x')",
               "(Number => Number('x'))(open)", "({get: open}).get('x')", "'' + {toString: open}", "map(x => x)",
-              "stringify({})"),
+              "stringify({})", "x.stringify({})"),
     "[E9] ": ("f\\u0065tch('https://evil.example/')", "new \\u0041udio('https://evil.example/')",
               "document.\\u0063ookie", "open/**/('x')", "open // x\n('x')", "fetch`https://evil.example/`",
-              "x?.('a')", "(0, document.body.remove)()", "a[0]('x')", "`${open('x')}`"),
+              "x?.('a')", "document.body.animate`x`", "(0, document.body.remove)()", "a[0]('x')", "`${open('x')}`"),
 }
 for mark, exprs in DENY.items():
     for expr in exprs:
