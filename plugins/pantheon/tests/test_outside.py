@@ -189,7 +189,7 @@ if tail == ["run", "devtree"]:
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "s = socket.socket(); s.bind(('127.0.0.1', int(os.environ['PORT']))); s.listen(64)\n"
             "while True:\n    s.accept()[0].close()\n")
-    # cwd="/": сирота по папке копии её не достаёт — гасит только обход потомков (strays), мутант без него красный
+    # cwd="/": сирота по папке копии её не достаёт — гасит только обход потомков (strays), мутант без него убит
     kid = subprocess.Popen([sys.executable, "-c", task], start_new_session=True, cwd="/")
     with open(%r, "a") as fh:
         fh.write(f"{os.getpid()} {kid.pid}\n")

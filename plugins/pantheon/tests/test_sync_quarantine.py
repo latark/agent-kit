@@ -554,7 +554,7 @@ shutil.rmtree(r_bot_net.origin)
 check("коммит выпуска, объект родителя не догрузить (origin недоступен) — флаги", r_bot_net.flags() != [],
       r_bot_net.flags())
 # мутант «всегда пропускать»: сценарии «отличается на байт» и «не слит» проходят без флагов — значит, тесты выше
-# на мутанте красные (их условие `!= []` не выполняется)
+# его убивают (их условие `!= []` не выполняется)
 mut = os.path.join(ROOT, "config-check-mutant.py")
 src = open(CHECK, encoding="utf-8").read()
 assert "def is_released(path, data):\n" in src
@@ -572,7 +572,7 @@ for tag, a, b in (("parents вместо parents[1:]", "parents[1:]", "parents")
     with open(mp, "w", encoding="utf-8") as fh:
         fh.write(msrc)
     probe = r_dir1 if "parents" in tag else r_evil
-    check(f"мутант «{tag}»: сценарий проходит без флагов (тест красный)", probe.flags(mp) == [], probe.flags(mp))
+    check(f"мутант «{tag}»: сценарий проходит без флагов (мутант убит)", probe.flags(mp) == [], probe.flags(mp))
 
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)

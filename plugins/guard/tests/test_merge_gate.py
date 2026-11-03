@@ -1353,7 +1353,7 @@ def t_opus_not_core(h):
            rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
     merge_case("не ядро: «вернуть» другого argus и «принять» на Sonnet — «вернуть» в силе", h.pre(cmd, pdir=kit),
                False, "«вернуть» (reject)")
-    # ядро: тот же Sonnet-«принять» — отказ (мутант: условие «не ядро» всегда истинно — эти случаи покраснеют)
+    # ядро: тот же Sonnet-«принять» — отказ (мутант: условие «не ядро» всегда истинно — эти случаи его убьют)
     for label, files in (("ядро (merge_gate.py)", ["README.md", "plugins/guard/hooks/merge_gate.py"]),
                          ("ядро (роли)", ["plugins/pantheon/roles/argus.tmpl"]),
                          ("ядро (.github)", [".github/workflows/release.yml"]),
@@ -4423,7 +4423,7 @@ def t_prod_timeouts(h):
             check(f"боевые сроки, мутант «{what}»: место найдено в {name}", False, old)
             continue
         mutated = dict(sources, **{name: sources[name].replace(old, new, 1)})
-        check(f"боевые сроки, мутант «{what}» — случай краснеет", prod_timeouts(mutated) != [], what)
+        check(f"боевые сроки, мутант «{what}» убит", prod_timeouts(mutated) != [], what)
 
 
 def t_ci_fork_billing(h):
