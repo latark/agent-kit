@@ -13,6 +13,8 @@
  * Канарейка: 1 вызов из PANTHEON_HOOKD_CANARY (по умолчанию 100; 0 — выключена) идёт обоими путями. Отдаётся решение
  * медленного пути; разошлись код, stdout или stderr — строка «время<TAB>canary-diff<TAB><хеш события FNV-1a 64>
  * <TAB>slow=<код>:<решение><TAB>daemon=<код>:<решение>» в тот же журнал.
+ * Каждый read и write сокета — в пределах срока (сокет неблокирующий): демон, который завис и не читает запрос,
+ * держит вызов не дольше 300 мс + 8,5 с (причина send), а не до таймаута хука.
  * Протокол — шапка hooks/daemon.py. Без зависимостей: cc -O2 -o client hookd-client.c. */
 #include <errno.h>
 #include <fcntl.h>
@@ -95,6 +97,9 @@ static void log_line(const char *what) {
 }
 
 /* --- ввод-вывод со сроком ------------------------------------------------------------------------------------- */
+/* Сокет демона после connect — O_NONBLOCK: после poll write берёт столько, сколько влезло в буфер, и не ждёт. Блокирующий
+ * write писал бы весь остаток и ждал демон, который завис и не читает, мимо срока (argus, PR 307): буфер AF_UNIX на
+ * macOS — около 8 КБ, и stdin больше него держал вызов до таймаута хука 10 с. EAGAIN — снова poll до срока. */
 static int wait_fd(int fd, short ev, long long deadline) {
     for (;;) {
         long long left = deadline - now_ms();
@@ -343,6 +348,7 @@ static const char *ask_daemon(const char *sock, result_t *r, char *why_buf, size
         close(s); free(h.p);
         return e == ENOENT ? "no-socket" : e == ECONNREFUSED ? "refused" : "connect";
     }
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);  /* срок держат poll и запись кусками, а не блокирующий write */
     char line[256];
     if (read_line(s, line, sizeof line, now_ms() + ACK_MS) != 0) { close(s); free(h.p); return "no-ack"; }
     if (strcmp(line, "A") != 0) { close(s); free(h.p); return reason_of(line, why_buf, why_cap); }

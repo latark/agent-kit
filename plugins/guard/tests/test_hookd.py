@@ -263,6 +263,12 @@ def b_ack_hang(c):
     time.sleep(10)
 
 
+def b_ack_noread(c):
+    """«Принят» и завис: запрос не читает, сокет держит дольше срока клиента (буфер AF_UNIX на macOS ~8 КБ)."""
+    c.sendall(b"A\n")
+    time.sleep(15)
+
+
 def b_allow(c):
     c.sendall(b"A\n")
     read_request(c)
@@ -700,6 +706,20 @@ def test_failures(root, client):
         fake.close()
     check("отказ: «принят», но решения нет 8,5 с → медленный путь, причина no-reply (ждали 8,5 с, не больше 10)",
           got == ref and reasons(home) == ["no-reply"] and 8.4 < t_got - t_ref < 9.8 + t_ref,
+          (got == ref, fb_lines(home), round(t_got, 2), round(t_ref, 2)))
+    # «принят», а запрос около 1 МиБ демон не читает: запись в сокет не держит вызов сверх срока (F1, argus PR 307)
+    home = os.path.join(root, "fsend")
+    os.makedirs(home)
+    d = install(home, client)
+    fake = Fake(os.path.join(d, "hookd.sock"), b_ack_noread)
+    padded = dict(ev, pad="x" * (1024 * 1024))
+    try:
+        ref, t_ref = slow(["--strict"], padded, base_env(home), work)
+        got, t_got = wrap(["--strict"], padded, base_env(home), work)
+    finally:
+        fake.close()
+    check("отказ: «принят», демон не читает stdin 1 МиБ → медленный путь, причина send, весь вызов меньше 9,8 с",
+          got == ref and '"deny"' in ref[1] and reasons(home) == ["send"] and t_got < 9.8,
           (got == ref, fb_lines(home), round(t_got, 2), round(t_ref, 2)))
     # путь сокета длиннее sun_path
     home = os.path.join(root, "L" * (110 - len(root)))
