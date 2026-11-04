@@ -366,5 +366,37 @@ r = cli(["board"], NOW + 60)
 got = read(os.path.join(home, "board-auto.md"))
 check("0768. e2e: задача done → строки на доске нет", tid not in got, r.stdout + r.stderr + got)
 
+# metis-0792: OSError при дописывании архива или замене board.md откатывает дописанное. append2 — второй архив не открылся
+# на дописывание (первый уже дописан), write — замена board.md упала
+FAIL = ("import os, sys; sys.path.insert(0, %r); import pantheon as p, builtins\n"
+        "what = sys.argv[1]\n"
+        "if what == 'write':\n"
+        "    def boom(*a): raise OSError(28, 'нет места')\n"
+        "    p.write_atomic = boom\n"
+        "else:\n"
+        "    n = []\n"
+        "    def opener(f, mode='r', *a, **k):\n"
+        "        if mode == 'a' and os.sep + 'archive' + os.sep in str(f):\n"
+        "            n.append(1)\n"
+        "            if len(n) == 2: raise OSError(28, 'нет места')\n"
+        "        return builtins.open(f, mode, *a, **k)\n"
+        "    p.open = opener\n"
+        "sys.exit(p.board_archive([]))\n" % LIB)
+for what in ("write", "append2"):
+    for existed in (True, False):
+        shutil.rmtree(arch, ignore_errors=True)
+        if existed:
+            write(a10, "старый архив 10\n")
+            write(a09, "старый архив 09\n")
+        write(bm, SRC)
+        r = subprocess.run([PY311, "-I", "-c", FAIL, what], env=dict(env, PANTHEON_NOW=str(NOW)), capture_output=True,
+                           text=True, timeout=300)
+        left = sorted(os.listdir(arch)) if os.path.isdir(arch) else []
+        check(f"0792. board archive: OSError ({what}), архивы {'были' if existed else 'не было'} → код 1, причина в stderr, "
+              "board.md цел, архивы как были",
+              r.returncode == 1 and "OSError" in r.stderr and read(bm) == SRC
+              and (text_of(a10) == "старый архив 10\n" and text_of(a09) == "старый архив 09\n" if existed else left == []),
+              (r.returncode, r.stderr[-300:], left))
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

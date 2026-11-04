@@ -578,6 +578,18 @@ def test_former_heads():
         c = A.load_state(cf)
         check("fetch: новый head PR — прошлый в old_heads кэша", c.get("old_heads") == {"a/b": {h("1"): 1}}
               and c["open_prs"]["a/b"][0]["head"] == h("2"), c.get("old_heads"))
+        # metis-0799: признак форка (isCrossRepository) — в кэше как cross; gh его не дал — считается форком
+        write_gh(gh, "a/b", "merged", [dict(pr(5, "batch/metis-0750", "", T0), isCrossRepository=False),
+                                       dict(pr(6, "batch/metis-0750", "", T0), isCrossRepository=True), pr(7, "batch/metis-0750", "", T0)])
+        write_gh(gh, "a/b", "open", [{"number": 8, "headRefName": "batch/metis-0751", "headRefOid": h("3"), "body": "",
+                                      "files": [], "isCrossRepository": False},
+                                     {"number": 9, "headRefName": "batch/metis-0751", "headRefOid": h("4"), "body": "",
+                                      "files": [], "isCrossRepository": True}])
+        A.fetch(cf, os.path.join(state, "s.json"), T0 + 1200, ["a/b"], env=dict(env))
+        c = A.load_state(cf)
+        check("fetch: cross в кэше — False только у PR из самого репозитория (слитые и открытые)",
+              [r.get("cross") for r in c["merged"]["a/b"]] == [False, True, True]
+              and [r.get("cross") for r in c["open_prs"]["a/b"]] == [False, True], (c["merged"], c["open_prs"]))
     finally:
         shutil.rmtree(tmp, True)
 
