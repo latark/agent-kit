@@ -16,7 +16,8 @@
                                          отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
-                                         адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120)
+                                         адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
+                                         --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    погасить сервер раньше срока (из любого окна) и дождаться итога (20 с)
                                          тест, ещё лежащий заявкой в очереди своего окна, снимается: итог stopped; идущий тест
@@ -34,7 +35,9 @@
     правки в копию не попадают. Зависимости — `<pm> install --frozen-lockfile` (npm ci) под профилем, без heavy;
   - монорепо (workspaces в package.json или pnpm-workspace.yaml): PORT получает одно приложение — --app ИМЯ (имя
     пакета или папки), его скрипт идёт в папке приложения; одно приложение со скриптом — берётся само; `--app .` —
-    корневой скрипт; иначе отказ со списком. turbo.json проекта не правится;
+    корневой скрипт; иначе отказ со списком. turbo.json проекта не правится. Не монорепо: --app ПАПКА — папка внутри
+    корня копии с собственным package.json (корневой не нужен, metis-0790): скрипт, установка зависимостей и cwd — там;
+    «..», абсолютный путь и ссылка наружу — отказ;
   - порт — из ряда 4300–4399, не 3000, 3100–3199 (разработчики) и 3200–3299 (показ владельцу, прежний ряд);
   - не больше MAX_SERVERS (2) серверов сразу; давление памяти критичное — отказ любому, предупреждение — второму;
     отказ сразу, с причиной и кодом 75, без очереди heavy. У каждого сервера лимит памяти SERVER_MEM_MB (4 ГБ,
@@ -187,7 +190,7 @@ ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 SCRIPT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,59}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHORT_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
-# --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт
+# --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт; не монорепо — папка внутри корня
 APP_RE = re.compile(r"\.|@?[A-Za-z0-9][A-Za-z0-9._-]{0,80}(/[A-Za-z0-9][A-Za-z0-9._-]{0,80})?")
 KINDS = ("test", "serve")
 FINAL = ("done", "failed", "serving", "stopped")
@@ -587,16 +590,43 @@ def _scripts(pkg):
     return s if isinstance(s, dict) else {}
 
 
+def app_dir(d, app):
+    """--app как папка внутри корня копии d (не монорепо, metis-0790) → (реальный путь, None) или (None, причина).
+    Папка и её package.json — внутри realpath(d): ни «..», ни абсолютного пути, ни ссылки наружу."""
+    root = os.path.realpath(d)
+    if os.path.isabs(app) or ".." in app.split("/"):
+        return None, f"--app {app}: путь выходит за корень копии"
+    p = os.path.realpath(os.path.join(root, app))
+    if not inside(p, [root]) or p == root:
+        return None, f"--app {app}: папка вне корня копии (ссылка наружу или «..»)"
+    if not os.path.isdir(p):
+        return None, f"--app {app}: папка не монорепо (нет workspaces в package.json и pnpm-workspace.yaml), и папки {app} в репозитории нет"
+    pj = os.path.realpath(os.path.join(p, "package.json"))
+    if not inside(pj, [root]) or _pkg(p) is None:
+        return None, f"--app {app}: в папке {app} нет package.json (или он ведёт за корень копии) — серверу нечего запускать"
+    return p, None
+
+
 def serve_command(d, script=None, app=None):
     """Команда сервера в папке d → (argv, строка для журнала, папка запуска) или (None, причина, None).
     Монорепо: PORT получает одно приложение (metis-0614: в BA turbo пускал все, landing брал PORT, web — 3000) —
-    --app или единственное приложение со скриптом; `--app .` — корневой скрипт."""
+    --app или единственное приложение со скриптом; `--app .` — корневой скрипт. Не монорепо: --app ПАПКА внутри
+    корня с собственным package.json — скрипт и папка запуска там (metis-0790), корневой package.json не нужен."""
     name = script or "dev"
     pkg = _pkg(d)
+    ws = workspaces(d, pkg)
+    if app and app != "." and not ws:
+        p, why = app_dir(d, app)
+        if not p:
+            return None, why, None
+        apkg = _pkg(p)
+        if name not in _scripts(apkg):
+            return None, f"в package.json папки {app} нет скрипта «{name}»", None
+        pm = package_manager(p, apkg)
+        return [pm, "run", name], f"{pm} run {name}  (приложение {app})", p
     if pkg is None:
         return None, "в папке нет package.json — серверу нечего запускать", None
     pm = package_manager(d, pkg)
-    ws = workspaces(d, pkg)
     if app == "." or (not app and not ws):
         if name not in _scripts(pkg):
             return None, f"в package.json папки нет скрипта «{name}»", None
@@ -1937,7 +1967,9 @@ def run_serve(rid, d, req, window, qdir):
         if not argv:
             raise RuntimeError(line)
         base["cmd"] = line
-        code = prepare(work, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
+        # не монорепо с --app ПАПКА: зависимости ставятся в папке приложения (metis-0790); монорепо — в корне
+        inst = cwd if app and app != "." and not workspaces(work, _pkg(work)) else work
+        code = prepare(inst, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
         if rid in stop_requests():
             raise Cancelled
         if code not in (None, 0):

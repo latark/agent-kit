@@ -1145,6 +1145,60 @@ check("--app у не-монорепо: отказ", state(q, rid) == "failed"
 rc, _, _ = role_request("athena-x", MONO, "serve", "--app", "../x")
 check("--app не по образцу: код 2", rc == 2)
 
+# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (alexbroker: site/)
+SUB = os.path.join(HOME, "projects", "subapp")
+os.makedirs(SUB)
+git(SUB, "init", "-q", "-b", "main")
+git(SUB, "remote", "add", "origin", "https://github.com/latark/subapp.git")
+commit(SUB, {"site/package.json": json.dumps({"name": "site", "scripts": {"dev": "next dev"}}),
+             "site/pnpm-lock.yaml": "", "empty/readme.txt": "x", ".gitignore": "node_modules/\n"}, "s1")
+os.symlink(os.path.join(HOME, "projects"), os.path.join(SUB, "out"))   # ссылка наружу корня
+git(SUB, "add", "out")
+git(SUB, "commit", "-q", "-m", "s2")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/subapp"],
+                          "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+kill_all_servers()
+before = len(calls())
+rc, q, rid = role_request("athena-x", SUB, "serve", "--app", "site")
+serve_pass()
+res = O.load_result(q, rid) or {}
+c = calls()[before:]
+_site = os.path.join(work_of(rid), "site")
+check("0790: --app site без корневого package.json — сервер в site/ (скрипт и cwd)",
+      res.get("state") == "serving" and c and c[-1]["cwd"] == _site and c[-1]["cmd"][-3:] == ["pnpm", "run", "dev"]
+      and c[-1]["env"].get("PORT") == str(res.get("port")), (res, [(x["cmd"], x["cwd"]) for x in c]))
+check("0790: зависимости ставятся в site/, а не в корне копии",
+      c and c[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"] and c[0]["cwd"] == _site, c[:1])
+kill_all_servers()
+rc, q, rid = role_request("athena-x", SUB, "serve")
+serve_pass()
+check("0790: без --app и без корневого package.json — прежний отказ",
+      state(q, rid) == "failed" and "нет package.json" in (O.load_result(q, rid) or {}).get("why", ""))
+for _bad, _why in (("out", "вне корня"), ("empty", "нет package.json"), ("nope", "не монорепо")):
+    rc, q, rid = role_request("athena-x", SUB, "serve", "--app", _bad)
+    serve_pass()
+    check(f"0790: --app {_bad}: отказ ({_why})", state(q, rid) == "failed"
+          and _why in (O.load_result(q, rid) or {}).get("why", ""), O.load_result(q, rid))
+rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "../x")
+check("0790: --app ../x: код 2", rc == 2)
+rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "/etc")
+check("0790: --app абсолютный путь: код 2", rc == 2)
+_sw = os.path.realpath(tempfile.mkdtemp(prefix="sw-"))
+_sx = os.path.realpath(tempfile.mkdtemp(prefix="sx-"))
+os.makedirs(os.path.join(_sw, "site"))
+json.dump({"scripts": {"dev": "x"}}, open(os.path.join(_sw, "site", "package.json"), "w"))
+json.dump({"scripts": {"dev": "x"}}, open(os.path.join(_sx, "package.json"), "w"))
+os.symlink(_sx, os.path.join(_sw, "ext"))            # папка-ссылка наружу, с package.json
+os.makedirs(os.path.join(_sw, "pk"))
+os.symlink(os.path.join(_sx, "package.json"), os.path.join(_sw, "pk", "package.json"))   # package.json-ссылка наружу
+check("0790: serve_command(site) — папка site", O.serve_command(_sw, None, "site")[2] == os.path.join(_sw, "site"))
+check("0790: serve_command(абсолютный) — отказ", O.serve_command(_sw, None, "/etc")[0] is None)
+check("0790: serve_command(..) — отказ", O.serve_command(_sw, None, "../x")[0] is None
+      and O.serve_command(_sw, None, "site/../../x")[0] is None)
+check("0790: serve_command(ссылка-папка наружу) — отказ", O.serve_command(_sw, None, "ext")[0] is None)
+check("0790: serve_command(package.json-ссылка наружу) — отказ", O.serve_command(_sw, None, "pk")[0] is None)
+
 # разбор workspaces и выбор приложения — без запуска
 _ws = os.path.realpath(tempfile.mkdtemp(prefix="ws-"))
 for rel, pj in {"package.json": {"name": "r"}, "apps/a/package.json": {"name": "a", "scripts": {"dev": "x"}},
