@@ -2602,6 +2602,71 @@ check("0779: обычная заявка и --sha на той же папке �
       and not (O.load_result(q1, r1) or {}).get("dup") and (O.load_result(qa, r0) or {}).get("state") == "done",
       (O.load_result(q1, r1), O.load_result(qa, r0)))
 
+# metis-0796 Д2: заявка --sha и обычная на одном SHA из одной папки не сцепляются в обе стороны (у --sha своя копия,
+# у обычной — дерево папки): HEAD папки — на CPG, обе заявки получают свой ID
+git(APP, "switch", "-q", "--detach", CPG)
+_q = os.path.join(CACHE, "athena-x", "outside")
+
+
+def reqs():
+    return {n for n in os.listdir(_q) if n.endswith(".req.json")}
+
+
+for first, second, label in ((("--sha", CPG), (), "--sha, затем обычная"), ((), ("--sha", CPG), "обычная, затем --sha")):
+    before = reqs()
+    new_request("athena-x", APP, "test", *first)
+    mid = reqs()
+    rc, _, _ = role_request("athena-x", APP, "test", *second)
+    check(f"0796: {label} на одном SHA и папке — две заявки, не одна", rc == 0 and len(mid - before) == 1
+          and len(reqs() - before) == 2, (rc, before, mid, reqs()))
+    run_pass()
+# две обычные на одном HEAD по-прежнему сцеплены (live_test не сломан)
+new_request("athena-x", APP, "test")
+before = reqs()
+role_request("athena-x", APP, "test")
+check("0796: две обычные на одном HEAD — вторая не плодит заявку", reqs() == before, (before, reqs()))
+run_pass()
+git(APP, "switch", "-q", "main")
+
+# metis-0796 Д1: refs/replace в клоне подменяет содержимое копии при том же HEAD и чистом status — копия идёт с
+# --no-replace-objects: красный CPR остаётся красным, записи tests нет
+def _blob(text):
+    return subprocess.run(["git", "-C", APP, "hash-object", "-w", "--stdin"], input=text, text=True,
+                          capture_output=True, check=True).stdout.strip()
+
+
+git(APP, "replace", _blob(RED), _blob(GREEN))
+try:
+    n_r = len(tests_for(CPR))
+    qs, rs, res = sha_request(CPR, "refs/replace в клоне")
+finally:
+    git(APP, "replace", "-d", _blob(RED))
+check("0796: refs/replace в клоне — копия с настоящим деревом, красный код 1, записи tests нет",
+      res.get("state") == "done" and res.get("code") == 1 and res.get("record") is False
+      and len(tests_for(CPR)) == n_r, res)
+
+# metis-0796 Д3: копия оказалась worktree другого клона (trusted_clone подменён) — отказ, прогона и записи нет
+_tc = O.trusted_clone
+
+
+def _other_clone(w, *a, **kw):
+    r = _tc(w, *a, **kw)
+    if os.path.basename(str(w)).startswith("test-"):
+        return r[0], os.path.join(HOME, "elsewhere", ".git"), r[2]
+    return r
+
+
+O.trusted_clone = _other_clone
+try:
+    c0, n_g = len(calls()), len(tests_for(CPG))
+    qs, rs, res = sha_request(CPG, "копия — worktree другого клона")
+finally:
+    O.trusted_clone = _tc
+check("0796: копия — worktree другого клона — failed «не worktree клона», прогона и записи нет, копия снята",
+      res.get("state") == "failed" and "не worktree клона" in res.get("why", "")
+      and not [c for c in calls()[c0:] if "t.py" in " ".join(c["cmd"])] and len(tests_for(CPG)) == n_g
+      and not os.path.exists(test_work(rs)), res)
+
 # брошенная копия упавшего прохода — снимает следующий проход тестов; чужие имена в work не трогает
 _orph = test_work("20261104-010101-abcdef")
 _keep = os.path.join(os.path.dirname(_orph), "test-not-an-id")
