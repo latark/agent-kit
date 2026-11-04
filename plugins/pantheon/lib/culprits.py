@@ -26,17 +26,21 @@
   pantheon reap --auto   (metis-0617) задача планового прохода раз в 30 мин, без красной зоны и без вопроса: гасит
       только точно брошенное старше AUTO_MINUTES (auto_verdict) — сироту multiprocessing (ppid 1) в папках Пантеона,
       процесс в удалённой worktree или копии с закрытыми задачами, language server без живого родителя-claude (по
-      цепочке ppid до launchd — только запускалки LAUNCHERS по точному имени или другой language server), сироту
+      цепочке ppid до launchd — только запускалки LAUNCHERS по точному имени или другой language server; сервер и его
+      дети — одной семьёй, _lsp_family: щадим одного — щадим всех), сироту
       (ppid 1) в песочнице окна (~/Library/Caches/pantheon-sandbox; записи кэша убирает дежурный, sandbox_sweep).
       Отказ закрытый (проверка безопасности 04.11, два круга): вид — по исполняемому файлу или скрипту node
       (exec_kind), а не по слову в строке; чьё — только по cwd из lsof (cwd не прочитан — не гасим); выше по цепочке
-      ppid живая claude, сессия из `claude agents` или задача launchd — не гасим; цепочку не пройти до launchd — не
-      гасим; сам процесс — задача launchd (`launchctl list`) — не гасим; сирота в песочнице окна, у которого есть
+      ppid живая claude, сессия из `claude agents`, задача launchd или идущая проверка вне окна (`run.py outside`,
+      outside_like) — не гасим; другой процесс той же группы (pgid) под живым хозяином — не гасим (сирота прогона
+      outside); цепочку не пройти до launchd — не гасим; сам процесс — задача launchd (`launchctl list`) — не гасим;
+      сирота в песочнице окна, у которого есть
       живая сессия, — не гасим; language server прямо под launchd — только в удалённой копии или копии с закрытыми
       задачами. `claude agents` (строго: код 0 и разобранный список) или `launchctl list` не прочитаны — проход
       пропущен с кодом 3.
       Остаток (модель угроз guard): процесс Пантеона может подделать свою командную строку и cwd, а окно песочницы
-      узнаём по имени сессии, её файлу settings/run/<имя>.json и `claude -p --agent <роль>` для окон job-*;
+      узнаём по имени сессии (из `claude agents`, реестра имён ~/.claude/sessions и `--name` claude; zeus → hq), её
+      файлу settings/run/<имя>.json, `--settings` claude и `claude -p --agent <роль>` для окон job-*;
       сессию, которой нет ни в `claude agents`, ни в этих признаках, reap --auto не видит. Граница — песочница окна. Не трогает claude,
       процессы из пакетов /Applications/*.app (браузеры, редакторы, приложения) и всё вне папок Пантеона. Каждое
       гашение — строка «погашено: что, чьё, почему, МБ» в alerts.md. Коды: 0 — нечего или погашено; 1 — что-то не
@@ -44,8 +48,8 @@
       name = "reap", command = "pantheon reap --auto",
       every = 30, class = "light", hosts = "all", timeout = 300, notify = false.
 
-Подмены для тестов: PANTHEON_FAKE_PROCS — список процессов JSON ([{pid, ppid, age (с), rss (КБ), args, cwd, mem и cmprs
-(МБ, необязательно)}]); PANTHEON_FAKE_LOAD — нагрузка; PANTHEON_FAKE_KILL_LOG — файл, куда пишется «pid сигнал»
+Подмены для тестов: PANTHEON_FAKE_PROCS — список процессов JSON ([{pid, ppid, pgid, age (с), rss (КБ), args, cwd, mem и
+cmprs (МБ, необязательно)}]); PANTHEON_FAKE_LOAD — нагрузка; PANTHEON_FAKE_KILL_LOG — файл, куда пишется «pid сигнал»
 вместо настоящего kill. Под подменой свопа или давления (PANTHEON_FAKE_SWAP, PANTHEON_FAKE_PRESSURE) настоящие ps и
 нагрузка Mac не читаются: иначе тесты видели бы процессы и load владельца.
 """
@@ -92,6 +96,10 @@ APP_RE = re.compile(r"(?:^|[\s/])Applications/[^/]+\.app/Contents/")
 # Родители language server, через которые цепочка идёт дальше вверх: короткоживущие запускалки по точному имени
 # исполняемого файла. Не node: долгоживущий node (сервер, редактор, claude) — живой хозяин, а не запускалка
 LAUNCHERS = {"sh", "bash", "zsh", "dash", "env", "npm", "npx", "pnpm"}
+PY_RE = re.compile(r"^[Pp]ython(?:\d+(?:\.\d+)*)?$")
+# окно сессии, запущенной без файла settings/run/<имя>.json: Зевс — `--settings settings/hq.json` (sessions.py: start
+# zeus и свежий старт fresh_target), а его окно песочницы — hq (metis-0805, Д1)
+SESSION_WINDOW = {"zeus": "hq"}
 
 
 def lsp_name(args):
@@ -117,6 +125,16 @@ def claude_like(args):
     """Процесс claude: исполняемый файл claude или node с cli.js пакета Claude Code."""
     toks = args.split()
     return bool(toks) and (os.path.basename(toks[0]) == "claude" or bool(CLAUDE_CLI_RE.search(args)))
+
+
+def outside_like(args):
+    """Идущая проверка вне окна: python …/run.py outside … (`pantheon outside test|serve`, проход `outside run`) —
+    держатель, как claude: её тесты и сервер идут в копии роли, в том числе закрытой задачи (metis-0805, Д3)."""
+    toks = args.split()
+    if not toks or not PY_RE.match(os.path.basename(toks[0])):
+        return False
+    rest = [t for t in toks[1:] if not t.startswith("-")]
+    return len(rest) >= 2 and os.path.basename(rest[0]) == "run.py" and rest[1] == "outside"
 
 
 def _faked():
@@ -213,32 +231,34 @@ def label(p):
 
 
 def ps_all():
-    """Все процессы — [dict(pid, ppid, age, rss КБ, args, cwd, mem и cmprs МБ или None)]; None — не прочитать."""
+    """Все процессы — [dict(pid, ppid, pgid, age, rss КБ, args, cwd, mem и cmprs МБ или None)]; None — не прочитать."""
     raw = os.environ.get("PANTHEON_FAKE_PROCS")
     if raw is not None:
         try:
             lst = json.loads(raw) if raw.strip() else []
         except ValueError:
             return None
-        procs = [dict(pid=int(x["pid"]), ppid=x.get("ppid"), age=float(x.get("age") or 0), rss=int(x.get("rss") or 0),
+        procs = [dict(pid=int(x["pid"]), ppid=x.get("ppid"), pgid=x.get("pgid"), age=float(x.get("age") or 0),
+                      rss=int(x.get("rss") or 0),
                       args=str(x.get("args") or ""), cwd=x.get("cwd"), mem=x.get("mem"), cmprs=x.get("cmprs"))
                  for x in lst]
     elif _faked():
         return []
     else:
         try:
-            r = subprocess.run(["ps", "-axww", "-o", "pid=,ppid=,etime=,rss=,args="], capture_output=True, text=True,
-                               timeout=20)
+            r = subprocess.run(["ps", "-axww", "-o", "pid=,ppid=,pgid=,etime=,rss=,args="], capture_output=True,
+                               text=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired):
             return None
         if r.returncode != 0:
             return None
         procs = []
         for ln in r.stdout.splitlines():
-            m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(.*)$", ln)
-            if m and _etime(m.group(3)) is not None:
-                procs.append(dict(pid=int(m.group(1)), ppid=int(m.group(2)), age=_etime(m.group(3)),
-                                  rss=int(m.group(4)), args=m.group(5).strip(), cwd=None, mem=None, cmprs=None))
+            m = re.match(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(.*)$", ln)
+            if m and _etime(m.group(4)) is not None:
+                procs.append(dict(pid=int(m.group(1)), ppid=int(m.group(2)), pgid=int(m.group(3)),
+                                  age=_etime(m.group(4)), rss=int(m.group(5)), args=m.group(6).strip(), cwd=None,
+                                  mem=None, cmprs=None))
     return procs
 
 
@@ -530,7 +550,6 @@ USAGE = "pantheon reap [--apply] [--pid N …] | --auto — без --apply и --
 
 
 AUTO_KINDS = {"vitest": "vitest", "next": "next", "next-server": "next", "tsx": "tsx", "pnpm": "pnpm"}
-PY_RE = re.compile(r"^[Pp]ython(?:\d+(?:\.\d+)*)?$")
 
 
 def exec_kind(args):
@@ -581,23 +600,46 @@ def launchd_pids():
     return {int(m.group(1)) for m in (re.match(r"(\d+)\s", ln) for ln in r.stdout.splitlines()) if m}
 
 
+def _run_window(path):
+    """PANTHEON_WINDOW файла запуска settings/run/<имя>.json или None."""
+    w = ((P.read_json(path, {}) or {}).get("env") or {}).get("PANTHEON_WINDOW")
+    return w if isinstance(w, str) else None
+
+
 def live_windows(ctx, table):
-    """Окна песочницы (папки ~/Library/Caches/pantheon-sandbox/<окно>), у которых есть живая сессия: имя сессии из
-    `claude agents`, её окно из settings/run/<имя>.json (PANTHEON_WINDOW) и job-<роль> живого `claude -p --agent
-    <роль>` из ps."""
-    wins = set()
-    for name in ctx["sessions"].values():
+    """Окна песочницы (папки ~/Library/Caches/pantheon-sandbox/<окно>), у которых есть живая сессия. Имя живой
+    сессии — из `claude agents`, из реестра имён ~/.claude/sessions (живой pid: интерактивная вкладка, которой нет в
+    `claude agents`) и `--name` живого claude из ps; окно имени — само имя, PANTHEON_WINDOW его settings/run/<имя>.json
+    и SESSION_WINDOW (zeus → hq: файла запуска у Зевса нет, metis-0805). У живого claude из ps ещё `--settings` (окно
+    settings/<окно>.json или PANTHEON_WINDOW файла settings/run/<имя>.json) и job-<роль> по `--agent <роль>`."""
+    wins, names = set(), list(ctx["sessions"].values())
+    with contextlib.suppress(Exception):
+        names += [r.get("name") for r in P.sessions_registry()]
+    settings = _real(P.path("settings"))
+    for q in table.values():
+        a = str(q.get("args") or "")
+        if not claude_like(a):
+            continue
+        m = re.search(r"\s--agent[=\s]+(\S+)", a)
+        if m:
+            wins.add("job-" + m.group(1))
+        m = re.search(r"\s--name[=\s]+(\S+)", a)
+        if m:
+            names.append(m.group(1))
+        m = re.search(r"\s--settings[=\s]+(\S+\.json)(?=\s|$)", a)
+        if m:
+            f = _real(m.group(1))
+            if os.path.dirname(f) == settings:
+                wins.add(os.path.basename(f)[:-5])
+            elif os.path.dirname(f) == os.path.join(settings, "run"):
+                wins.add(_run_window(f) or "")
+    for name in names:
         if not isinstance(name, str) or not re.fullmatch(r"[\w.-]+", name):
             continue
         wins.add(name)
-        w = ((P.read_json(P.path("settings", "run", name + ".json"), {}) or {}).get("env") or {}).get("PANTHEON_WINDOW")
-        if isinstance(w, str):
-            wins.add(w)
-    for q in table.values():
-        a = str(q.get("args") or "")
-        m = re.search(r"\s--agent[=\s]+(\S+)", a) if claude_like(a) else None
-        if m:
-            wins.add("job-" + m.group(1))
+        wins.add(SESSION_WINDOW.get(name) or "")
+        wins.add(_run_window(P.path("settings", "run", name + ".json")) or "")
+    wins.discard("")
     return wins
 
 
@@ -614,11 +656,27 @@ def _chain(p, table):
     return out
 
 
+def _holder(q, ctx):
+    """Живой хозяин: claude (исполняемый claude или node с cli.js Claude Code), идущая проверка вне окна
+    (outside_like), сессия из `claude agents` или задача launchd."""
+    a = str(q.get("args") or "")
+    return q["pid"] in ctx["sessions"] or q["pid"] in ctx.get("launchd", ()) or claude_like(a) or outside_like(a)
+
+
 def _held(chain, ctx):
-    """Процесс держит живой хозяин → True (не гасить): предок — claude (исполняемый claude или node с cli.js Claude
-    Code), сессия из `claude agents` или задача launchd; цепочки нет (_chain → None) — тоже True."""
-    return chain is None or any(q["pid"] in ctx["sessions"] or q["pid"] in ctx.get("launchd", ())
-                                or claude_like(str(q.get("args") or "")) for q in chain)
+    """Процесс держит живой хозяин → True (не гасить): предок — _holder; цепочки нет (_chain → None) — тоже True."""
+    return chain is None or any(_holder(q, ctx) for q in chain)
+
+
+def _group_held(p, ctx, table):
+    """Группа процессов p (pgid) жива → True: другой её процесс — хозяин или под хозяином (_held его цепочки). Сирота
+    с ppid 1 остаётся в группе прогона: outside test и serve ставят группу каждому прогону (start_new_session), и
+    ребёнок, ушедший к launchd, пока прогон идёт, не брошен (metis-0805, Д3). pgid нет или он 0–1 — False."""
+    g = p.get("pgid")
+    if not isinstance(g, int) or g <= 1:
+        return False
+    return any(q.get("pgid") == g and q["pid"] != p["pid"] and (_holder(q, ctx) or _held(_chain(q, table), ctx))
+               for q in table.values())
 
 
 def _lsp_orphan(chain):
@@ -633,8 +691,40 @@ def _lsp_orphan(chain):
     return "language server без живого родителя-claude"
 
 
+def _lsp_family(p, chain, table):
+    """Language server и решаемые вместе с ним (metis-0805, Д2): корень — самый верхний предок в цепочке, о котором
+    решает reap (exec_kind: другой language server, pnpm), иначе сам p; семья — корень и все language server под ним.
+    Запускалки sh, env, npm в семью не входят: reap их не гасит, они уходят сами вместе с ребёнком."""
+    root = next((q for q in reversed(chain) if exec_kind(str(q.get("args") or ""))), p)
+    fam = [root]
+    for q in table.values():
+        if q is root or exec_kind(str(q.get("args") or "")) != "lsp":
+            continue
+        pid, seen = q.get("ppid"), {q["pid"]}
+        while isinstance(pid, int) and pid > 1 and pid not in seen and pid in table:
+            if pid == root["pid"]:
+                fam.append(q)
+                break
+            seen.add(pid)
+            pid = table[pid].get("ppid")
+    return fam
+
+
 def auto_verdict(p, ctx, table):
-    """reap --auto: → (чей, почему) — гасить; None — не трогать. Только точно брошенное и только старше AUTO_MINUTES:
+    """reap --auto: _auto_one; language server — только вместе с семьёй (_lsp_family, metis-0805 Д2): кого-то из неё
+    reap щадит (моложе AUTO_MINUTES, прямо под launchd в живой копии, хозяин жив) — не гасим никого. Иначе родителя
+    щадили бы, а ребёнка гасили: typescript-language-server прямо под launchd в живой копии жив, его tsserver погашен."""
+    v = _auto_one(p, ctx, table)
+    if v is None or exec_kind(p["args"]) != "lsp":
+        return v
+    for q in _lsp_family(p, _chain(p, table) or [], table):
+        if q is not p and (q["age"] < AUTO_MINUTES * 60 or _auto_one(q, ctx, table) is None):
+            return None
+    return v
+
+
+def _auto_one(p, ctx, table):
+    """reap --auto, один процесс: → (чей, почему) — гасить; None — не трогать. Только точно брошенное и только старше AUTO_MINUTES:
       - сирота multiprocessing (ppid 1) в папках Пантеона;
       - процесс (не claude) в удалённой worktree или в копии, где все задачи ветки закрыты;
       - language server (pyright-langserver, typescript-language-server, tsserver) без живого родителя-claude;
@@ -642,7 +732,8 @@ def auto_verdict(p, ctx, table):
     Никогда: claude, процессы из пакетов приложений (/Applications/*.app — браузеры, редакторы), всё вне папок
     Пантеона. Отказ закрытый: чьё — только по cwd (lsof), а не по командной строке, которую процесс пишет сам (cwd
     нет — place_owner скажет «чужое»); сам процесс — живая сессия — не гасим (place_owner); выше по цепочке ppid
-    живая claude или сессия, или цепочка не прослежена до launchd — не гасим (_held)."""
+    живая claude, сессия или идущая проверка вне окна, или цепочка не прослежена до launchd — не гасим (_held); другой
+    процесс той же группы под живым хозяином — не гасим (_group_held)."""
     a = p["args"]
     if p["kind"] == "claude" or claude_like(a) or APP_RE.search(a):  # возраст отсекает candidates(AUTO_MINUTES)
         return None
@@ -651,7 +742,7 @@ def auto_verdict(p, ctx, table):
         return None
     p = dict(p, kind=kind)
     chain = _chain(p, table)
-    if _held(chain, ctx):
+    if _held(chain, ctx) or _group_held(p, ctx, table):
         return None
     who, verdict, why = owner(dict(p, args=""), ctx)  # args пусты — place_owner решает только по cwd
     if p["kind"] == "lsp":

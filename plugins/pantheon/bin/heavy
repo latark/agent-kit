@@ -19,6 +19,7 @@ locks/heavy-queue/ (имя — время прихода и pid) и держит
 при ссылке на месте папки. Чужое в папке, что не обычный файл (FIFO, папка), пропускается. Ждущая команда раз в опрос
 обновляет время своего билета; билет живого владельца, не обновлённый дольше TICKET_STALE (120 с), — застывший
 (процесс остановлен, SIGSTOP или Ctrl-Z): очередь его обходит, но не удаляет — оживший владелец встанет первым.
+Возраст считается от прошлого опроса ждущего, а не от «сейчас»: после сна Mac голова очереди не застывает (metis-0805).
 `heavy --status` считает только живые билеты. Сервер (--server): за жетон сервера очереди нет (ждёт опросом), а за
 два места, как у любой команды, — по порядку прихода.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
@@ -45,10 +46,11 @@ TICKET_GRACE = 5  # с: билет только создан, блокировк
 TICKET_STALE = 120  # с: живой билет не обновлялся дольше — владелец остановлен, очередь его обходит (metis-0659)
 
 
-def probe(dfd, name):
+def probe(dfd, name, now=None):
     """Состояние билета name в папке очереди: "live" — владелец жив и ждёт; "frozen" — владелец жив, но билет не
     обновлялся дольше TICKET_STALE (остановлен); "young" — только создан, блокировка ещё не взята; "dead" — владелец
-    умер, блокировка снята системой; None — не обычный файл или не открыть (FIFO не открываем вслепую и не ждём)."""
+    умер, блокировка снята системой; None — не обычный файл или не открыть (FIFO не открываем вслепую и не ждём).
+    now — от какого времени считать возраст (по умолчанию — сейчас; Ticket.ahead — время своего прошлого опроса)."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dfd)
     except OSError:
@@ -57,14 +59,14 @@ def probe(dfd, name):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None
-        age = time.time() - st.st_mtime
+        age = (time.time() if now is None else now) - st.st_mtime
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return "frozen" if age > TICKET_STALE else "live"
         except OSError:
             return None
-        return "dead" if st.st_size > 0 or age > TICKET_GRACE else "young"
+        return "dead" if st.st_size > 0 or time.time() - st.st_mtime > TICKET_GRACE else "young"
     except OSError:
         return None
     finally:
@@ -79,6 +81,7 @@ class Ticket:
 
     def __init__(self):
         self.fd = self.dfd = self.name = None
+        self.prev = self.last = time.time()  # время прошлого и последнего своего опроса (touch)
         qdir = os.path.join(LOCKS, QUEUE)
         try:
             os.makedirs(qdir, exist_ok=True)
@@ -95,7 +98,10 @@ class Ticket:
     def ahead(self):
         """Есть ли перед нами живой билет. Билеты умерших владельцев убирает. Застывший билет (владелец остановлен)
         обходит, не удаляя. Не обычный файл в папке (FIFO, устройство, папка, ссылка) пропускает: не открывает
-        вслепую, не ждёт и не удаляет."""
+        вслепую, не ждёт и не удаляет. Возраст чужого билета — от своего прошлого опроса, а не от «сейчас»: после сна
+        Mac дольше TICKET_STALE не обновлялся ни один билет, и голову очереди обходил бы тот, кто проснулся первым
+        (metis-0805). Сон — пауза и в своём опросе, поэтому он в возраст не идёт; остановленный владелец отстаёт от
+        своих же опросов ждущего и через TICKET_STALE застывает, как раньше."""
         if self.fd is None:
             return False
         try:
@@ -105,7 +111,7 @@ class Ticket:
         for name in names:
             if name >= self.name:
                 break
-            got = probe(self.dfd, name)
+            got = probe(self.dfd, name, self.prev)
             if got in ("live", "young"):
                 return True
             if got == "dead":
@@ -115,6 +121,7 @@ class Ticket:
 
     def touch(self):
         """Ждём дальше: время билета — сейчас. Остановленный владелец его не обновит, и очередь пойдёт мимо."""
+        self.prev, self.last = self.last, time.time()
         if self.fd is None:
             return
         try:
