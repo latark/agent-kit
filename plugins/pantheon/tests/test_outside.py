@@ -1626,6 +1626,33 @@ for _p in _kid:
 alien.kill()
 alien.wait()
 
+# --- ps не запустить (sandbox-exec): strays и kill_group идут по libproc (metis-0786) ---
+if not MAC:
+    print("пропущено: нужен macOS — strays и kill_group без ps (libproc)")
+else:
+    _ps_keep = O.PS
+    O.PS = os.path.join(_ROOT, "нет-ps-0786")
+    _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
+                            "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
+                            start_new_session=True)
+    TEST_PROCS.append(_par)
+    _kid2 = []
+    for _ in range(40):
+        time.sleep(0.1)
+        _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
+        if _kid2:
+            break
+    _st = O.strays(_par.pid)
+    _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
+    check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
+          and _me_row[2] > 0, _me_row)
+    check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
+    O.kill_group(_par.pid)
+    time.sleep(0.3)
+    check("без ps: kill_group гасит и главу, и потомка в своей группе",
+          _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
+    O.PS = _ps_keep
+
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
 TEST_PROCS.append(leader)
 time.sleep(0.3)

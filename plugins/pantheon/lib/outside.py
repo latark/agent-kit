@@ -718,8 +718,39 @@ def tail(log):
 PS = "/bin/ps"   # setuid: под sandbox-exec не запускается — test_outside, идущий через `outside test`, ставит свой
 
 
+def _ps_table_libproc():
+    """{pid: (ppid, pgid, rss в КБ)} по libproc (proc_listallpids, proc_pidinfo PROC_PIDTBSDINFO и PROC_PIDTASKINFO)
+    или None: не macOS, библиотеки нет или список процессов не получен."""
+    lp = _libproc()
+    if lp is None:
+        return None
+    lib = lp[0]
+    n = lib.proc_listallpids(None, 0)
+    if n <= 0:
+        return None
+    buf = (ctypes.c_int * (n + 256))()
+    got = lib.proc_listallpids(buf, ctypes.sizeof(buf))   # число pid, а не байт
+    if got <= 0:
+        return None
+    table = {}
+    for p in buf[:min(got, len(buf))]:
+        if p <= 0:
+            continue
+        b = _BSDInfo()
+        if lib.proc_pidinfo(p, 3, ctypes.c_uint64(0), ctypes.byref(b), ctypes.sizeof(b)) != ctypes.sizeof(b):
+            continue                 # ушёл за время обхода или чужой
+        t = (ctypes.c_uint64 * 12)()   # proc_taskinfo: pti_virtual_size, pti_resident_size, ...
+        ok = lib.proc_pidinfo(p, 4, ctypes.c_uint64(0), ctypes.byref(t), ctypes.sizeof(t)) == ctypes.sizeof(t)
+        table[p] = (b.ppid, b.pgid, t[1] // 1024 if ok else 0)
+    return table or None
+
+
 def ps_table():
-    """{pid: (ppid, pgid, rss в КБ)} всех процессов по ps; сбой — {}."""
+    """{pid: (ppid, pgid, rss в КБ)} всех процессов: на macOS по libproc (setuid /bin/ps под sandbox-exec не
+    запускается, и strays() иначе вернул бы [] — metis-0786), ps — запасной путь (Linux, нет libproc); сбой — {}."""
+    table = _ps_table_libproc()
+    if table is not None:
+        return table
     try:
         out = subprocess.run([PS, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
                              timeout=10).stdout
@@ -889,6 +920,15 @@ def _libproc():
         return lib, tb[0] / tb[1] / 1e9
     except (OSError, AttributeError):
         return None
+
+
+class _BSDInfo(ctypes.Structure):
+    """struct proc_bsdinfo (sys/proc_info.h), PROC_PIDTBSDINFO = 3."""
+    _fields_ = [(n, ctypes.c_uint32) for n in ("flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid",
+                                               "rgid", "svuid", "svgid", "rfu")] + \
+               [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + \
+               [(n, ctypes.c_uint32) for n in ("nfiles", "pgid", "pjobc", "tdev", "tpgid")] + \
+               [("nice", ctypes.c_int32), ("start", ctypes.c_uint64), ("ustart", ctypes.c_uint64)]
 
 
 def _lp_pids(fn, arg):
