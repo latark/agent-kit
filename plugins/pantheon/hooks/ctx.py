@@ -30,11 +30,14 @@
                      session_id и транскриптом основной сессии. Если у сессии есть субагент, чей транскрипт
                      <папка транскрипта>/<sid>/subagents/agent-*.jsonl менялся за 10 мин, вставка только-после-сжатия
                      (файл состояния, у штаба сводка прохода и доска) не делается, а ставится отметка
-                     <STATE>/ctx/deferred/<sid>.json с путём транскрипта и его размером в момент хука. Её доставляют
-                     deferred, clock и maint-post основной сессии (без agent_id), когда в транскрипте после этого места
-                     есть compact_boundary не раньше отметки минус 5 с, — сколько бы времени ни прошло. Отметка без
+                     <STATE>/ctx/deferred/<CLAUDE_PID>.<sid>.json с путём транскрипта и его размером в момент хука.
+                     Её доставляют deferred, clock и maint-post основной сессии (без agent_id), когда в транскрипте
+                     после этого места есть compact_boundary не раньше отметки минус 5 с, — сколько бы времени ни прошло. Отметка без
                      границы старше 15 мин снимается без вставки; отметку с границей, которую сессия так и не забрала
-                     (умерла), чистка deferred снимает через сутки.
+                     (умерла), чистка снимает через сутки, а отметку умершего процесса — сразу. Чистку зовут start и
+                     deferred; start снимает и отметки других сессий своего процесса (/clear, /resume — metis-0793).
+                     Отметку забирает ровно один хук: rename в своё имя (os.remove на APFS не исключителен), со
+                     сверкой байтов — только что записанная новая отметка вместо старой не снимается.
   ctx.py clock       UserPromptSubmit (в том числе сообщения других сессий): та же строка часов в контекст ролей
                      Пантеона (hq, domain-coordinator, workshop; не субагентам и не вне окон ролей). Модель
                      оценивает время на глаз и ошибается на час; PANTHEON_NOW подменяет часы для тестов. Перед
@@ -49,7 +52,9 @@
                      выполнить `pantheon saved`. Без метки python не запускается (проверка оболочкой в hooks.json).
                      При запуске — и отложенная вставка после сжатия, как у clock (metis-0788).
   ctx.py deferred    PostToolUse: отложенная вставка после сжатия (metis-0788), доставка в пределах хода. Python
-                     запускается, только когда в <STATE>/ctx/deferred/ есть отметка (проверка оболочкой в hooks.json).
+                     запускается, только когда в <STATE>/ctx/deferred/ есть отметка своего процесса
+                     (<CLAUDE_PID>.*.json, проверка оболочкой в hooks.json, metis-0793): отметка другой или умершей
+                     сессии остальным python на каждом инструменте не стоит.
   ctx.py maint-pre   PreToolUse там же: сохранившаяся сессия (кроме Зевса) новых шагов не делает — пропуск только
                      SendMessage, `pantheon saved` и `pantheon restart --status`.
   ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
@@ -177,15 +182,26 @@ def load_json(path):
 
 
 class locked:
-    """Блокировка файла-замка: хуки разных сессий пишут одни файлы."""
+    """Блокировка файла-замка: хуки разных сессий пишут одни файлы. Замок взят, только если под этим именем всё ещё
+    тот файл, который заперт: чистка prune_records удаляет старый замок, держа его, и ждавший на удалённом файле
+    иначе вошёл бы одновременно с тем, кто создал новый (двойной захват, metis-0793)."""
 
     def __init__(self, path):
         self.path = path + ".lock"
 
     def __enter__(self):
         private_dir(os.path.dirname(self.path))
-        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        while True:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+            try:
+                st, cur = os.fstat(self.fd), os.stat(self.path)
+                if (st.st_dev, st.st_ino) == (cur.st_dev, cur.st_ino):
+                    break
+            except FileNotFoundError:
+                pass
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
         try:
             os.utime(self.path)
         except OSError:
@@ -789,13 +805,34 @@ def prune_records():
             try:
                 if n.startswith(".") or n.endswith(".lock") or n.startswith("hq-seen") or not os.path.isfile(p):
                     continue
-                if os.path.getmtime(p) < old:
-                    os.remove(p)
-                    if os.path.exists(p + ".lock") and os.path.getmtime(p + ".lock") < old:
-                        os.remove(p + ".lock")
+                if os.path.getmtime(p) >= old:
+                    continue
+                if os.path.exists(p + ".lock"):
+                    # metis-0793: писатели файла берут тот же замок — проверка срока и удаление одним шагом, а замок
+                    # удаляется, пока он у нас: ждавший на нём войдёт только через новый (locked сверяет файл)
+                    with locked(p):
+                        if os.path.getmtime(p) < old:
+                            os.remove(p)
+                            os.remove(p + ".lock")
+                else:
+                    prune_unlocked(p, os.path.join(root, ".%s.%d.prune" % (n, os.getpid())), old)
             except OSError:
                 pass
     open(mark, "w").close()
+
+
+def prune_unlocked(p, q, old):
+    """Файл без замка снимается переименованием в своё имя q: если его успели переписать после проверки срока
+    (свежий), он возвращается на место, а не удаляется (metis-0793, как гонка снятия отметки с записью новой)."""
+    os.rename(p, q)
+    if os.path.getmtime(q) < old:
+        os.remove(q)
+        return
+    try:
+        os.link(q, p)  # без перезаписи: новее нашего мог появиться ещё один
+    except FileExistsError:
+        pass
+    os.remove(q)
 
 
 # --- журнал ваших слов (COMM-10) -----------------------------------------------
@@ -1222,8 +1259,10 @@ def after_compact_blocks(role, ev, source, room):
 # --- сжатие при живых субагентах (metis-0788) ------------------------------------
 # SessionStart:compact сжатия субагента приходит без agent_id, с session_id и транскриптом основной сессии (зонд СБ
 # 04.11, Claude Code 2.1.317), а compact_boundary пишется после хука. Пока у сессии есть живые субагенты, вставка
-# после сжатия откладывается: отметка <STATE>/ctx/deferred/<sid>.json, а доставку делают clock (UserPromptSubmit),
-# deferred и maint-post (PostToolUse) основной сессии, когда в её транскрипте появилась граница сжатия.
+# после сжатия откладывается: отметка <STATE>/ctx/deferred/<CLAUDE_PID>.<sid>.json, а доставку делают clock
+# (UserPromptSubmit), deferred и maint-post (PostToolUse) основной сессии, когда в её транскрипте появилась граница
+# сжатия. PID процесса в имени (metis-0793) — чтобы оболочка в hooks.json запускала python только у сессии со своей
+# отметкой: чужая и умершая отметка остальным сессиям хода не дорожают.
 
 SUB_LIVE = 600            # субагент живой, если его транскрипт менялся не раньше, с
 DEFER_SLACK = 5           # граница сжатия засчитывается не раньше отметки минус столько, с
@@ -1232,8 +1271,14 @@ DEFER_DEAD = 86400        # отметка с границей, которую �
 BOUNDARY_TAIL = 1000000   # без смещения в отметке граница ищется в этом хвосте транскрипта, байт
 
 
+def defer_pid():
+    """PID процесса Claude Code для имени отметки; так же его берёт оболочка в hooks.json (не число — nopid)."""
+    pid = os.environ.get("CLAUDE_PID") or ""
+    return pid if re.fullmatch(r"[0-9]+", pid) else "nopid"
+
+
 def defer_path(sid):
-    return os.path.join(CTX, "deferred", re.sub(r"[^\w-]", "", sid or "") + ".json")
+    return os.path.join(CTX, "deferred", "%s.%s.json" % (defer_pid(), re.sub(r"[^\w-]", "", sid or "")))
 
 
 def live_subagents(transcript, sid):
@@ -1294,6 +1339,35 @@ def compact_boundary_since(path, since, off=None):
     return False
 
 
+def claim_mark(p, seen=None):
+    """Забрать отметку: True — только у одного из одновременных вызовов. os.remove на APFS не исключителен (один файл
+    успешно удаляют несколько процессов разом), rename в своё имя — исключителен; хвост .claim не попадает под *.json.
+    seen — байты отметки, по которым вызов решил её снять: если под именем уже другая (её только что записало новое
+    сжатие — гонка снятия старой с записью новой, metis-0793 Д4), она возвращается на место, а вызов получает False."""
+    q = "%s.%d.claim" % (p, os.getpid())
+    try:
+        os.rename(p, q)
+    except FileNotFoundError:
+        return False
+    other = False
+    if seen is not None:
+        try:
+            with open(q, "rb") as f:
+                other = f.read() != seen
+        except OSError:
+            pass
+    if other:
+        try:
+            os.link(q, p)  # без перезаписи: если тем временем легла ещё новее — остаётся она
+        except OSError:
+            pass
+    try:
+        os.remove(q)
+    except OSError:
+        pass
+    return not other
+
+
 def deferred_compact(ev, cmd, room):
     """Отложенная вставка после сжатия: список блоков или []. Только событие основной сессии (без agent_id) и только
     при отметке этой сессии. Граница найдена — отметка снимается и выдаются те же блоки, что дал бы SessionStart,
@@ -1307,20 +1381,24 @@ def deferred_compact(ev, cmd, room):
         return []
     try:
         try:
-            with open(p) as f:
-                m = json.load(f)
+            with open(p, "rb") as f:
+                raw = f.read()
+        except FileNotFoundError:
+            return []  # её только что забрал другой вызов
+        try:
+            m = json.loads(raw)
             t = float(m["t"])
-        except (OSError, ValueError, TypeError, KeyError) as e:
-            os.remove(p)  # битую отметку не просрочить — снимаем сразу
-            hook_log(cmd, "отметка отложенной вставки не читается, снята: %s" % e)
+        except (ValueError, TypeError, KeyError) as e:
+            if claim_mark(p, raw):  # битую отметку не просрочить — снимаем сразу
+                hook_log(cmd, "отметка отложенной вставки не читается, снята: %s" % e)
             return []
         transcript = ev.get("transcript_path") or m.get("tp") or ""
         if not transcript or not compact_boundary_since(transcript, t - DEFER_SLACK, m.get("off")):
-            if time.time() - t > DEFER_MAX:
-                os.remove(p)
+            if time.time() - t > DEFER_MAX and claim_mark(p, raw):
                 hook_log(cmd, "границы сжатия нет %d мин, отметка снята без вставки (%s)" % (DEFER_MAX // 60, sid))
             return []
-        os.remove(p)  # снята этим вызовом — значит, выдаёт он один (clock, deferred и maint-post могут идти разом)
+        if not claim_mark(p, raw):  # забрал другой вызов (clock, deferred и maint-post идут разом) — выдаёт он
+            return []
         ev = dict(ev, transcript_path=transcript)  # файл состояния ищется по тому же транскрипту
         return after_compact_blocks(m.get("role") or session_role(ev), ev, "compact", room)
     except Exception as e:  # хук не роняет сессию
@@ -1346,11 +1424,12 @@ def cmd_start(ev):
                 source = None
             else:
                 try:
-                    os.remove(defer_path(ev.get("session_id")))  # вставка сейчас — отложенная больше не нужна
-                except FileNotFoundError:
-                    pass
+                    claim_mark(defer_path(ev.get("session_id")))  # вставка сейчас — отложенная больше не нужна
                 except OSError as e:
                     hook_log("start", "отметка отложенной вставки не снята: %s" % e)
+    if not automation():
+        drop_moved_marks(ev.get("session_id"))
+        sweep_deferred()
     out = hq_news(commit=not automation()) if role == "hq" else []  # тревоги — первыми: короче и важнее доски
     clock = clock_line(ev)
     reserve = len(clock) + 2 if clock else 0  # строка часов идёт последней и в предел не режется
@@ -1807,16 +1886,55 @@ def cmd_maint_post(ev):
 
 def cmd_deferred(ev):
     """PostToolUse: отложенная вставка после сжатия (metis-0788). hooks.json зовёт её, только когда в
-    <STATE>/ctx/deferred/ есть отметка, — доставка в пределах хода, а не со следующим сообщением владельца."""
+    <STATE>/ctx/deferred/ есть отметка этого процесса (<CLAUDE_PID>.*.json, metis-0793), — доставка в пределах хода,
+    а не со следующим сообщением владельца."""
     emit("PostToolUse", deferred_compact(ev, "deferred", INJECT_MAX))
     sweep_deferred()
     return 0
 
 
+def pid_dead(pid):
+    """Процесса с этим PID нет. Не число, нет прав на сигнал или другой сбой — считаем живым."""
+    if not re.fullmatch(r"[0-9]+", pid or ""):
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, ValueError, OverflowError):
+        return False
+    return False
+
+
+def drop_moved_marks(sid):
+    """SessionStart основной сессии: отметки этого процесса для других сессий снимаются — процесс от них ушёл (/clear,
+    /resume), их вставку уже никто не заберёт, а оболочка в hooks.json запускала бы python до суток (metis-0793)."""
+    pid, sid = defer_pid(), re.sub(r"[^\w-]", "", sid or "")
+    d = os.path.join(CTX, "deferred")
+    if pid == "nopid" or not sid:
+        return
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        if not n.startswith(pid + ".") or not n.endswith(".json") or n == "%s.%s.json" % (pid, sid):
+            continue
+        p = os.path.join(d, n)
+        try:
+            with open(p, "rb") as f:
+                raw = f.read()
+            if claim_mark(p, raw):
+                hook_log("start", "отметка прошлой сессии этого процесса снята: %s" % n)
+        except OSError:
+            pass
+
+
 def sweep_deferred():
-    """Снять отметки любых сессий старше DEFER_MAX, у которых граница сжатия так и не появилась (и любые старше
-    DEFER_DEAD): отметка умершей сессии иначе заставляла бы каждую сессию запускать python на каждом PostToolUse
-    (проверка оболочкой в hooks.json смотрит только наличие файла). Отметку с границей забирает сама сессия."""
+    """Снять отметки любых сессий: процесса из имени отметки нет — сразу; старше DEFER_MAX, у которых граница сжатия
+    так и не появилась, и любые старше DEFER_DEAD. Отметку с границей забирает сама сессия. Чужая отметка хук уже не
+    держит (оболочка в hooks.json смотрит только свою, metis-0793) — чистка нужна, чтобы файлы не копились; её зовут
+    SessionStart и deferred. Снятие сверяет байты (claim_mark): только что записанная новая отметка не теряется."""
     d = os.path.join(CTX, "deferred")
     try:
         names = os.listdir(d)
@@ -1827,19 +1945,22 @@ def sweep_deferred():
         try:
             if not n.endswith(".json"):
                 continue
+            with open(p, "rb") as f:
+                raw = f.read()
             age = time.time() - os.path.getmtime(p)
-            if age <= DEFER_MAX:
-                continue
-            if age <= DEFER_DEAD:
-                try:
-                    m = load_json(p)
-                    if (isinstance(m, dict) and m.get("tp")
-                            and compact_boundary_since(m["tp"], float(m.get("t", 0)) - DEFER_SLACK, m.get("off"))):
-                        continue  # граница есть — вставку заберёт сама сессия на своём шаге
-                except (OSError, ValueError, TypeError):
-                    pass
-            os.remove(p)
-            hook_log("deferred", "просроченная отметка снята: %s" % n)
+            if not pid_dead(n.split(".", 1)[0]):
+                if age <= DEFER_MAX:
+                    continue
+                if age <= DEFER_DEAD:
+                    try:
+                        m = json.loads(raw)
+                        if (isinstance(m, dict) and m.get("tp")
+                                and compact_boundary_since(m["tp"], float(m.get("t", 0)) - DEFER_SLACK, m.get("off"))):
+                            continue  # граница есть — вставку заберёт сама сессия на своём шаге
+                    except (OSError, ValueError, TypeError):
+                        pass
+            if claim_mark(p, raw):
+                hook_log("deferred", "просроченная отметка снята: %s" % n)
         except OSError:
             pass
 

@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "for f in \"${PANTHEON_STATE:-$HOME/.local/state/pantheon}\"/ctx/deferred/*.json; do [ -e \"$f\" ] || exit 0; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" deferred; done",
+            "command": "case \"$CLAUDE_PID\" in ''|*[!0-9]*) p=nopid ;; *) p=$CLAUDE_PID ;; esac; for f in \"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/ctx/deferred/$p\".*.json; do [ -e \"$f\" ] || exit 0; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" deferred; done",
             "timeout": 10
           }
         ]

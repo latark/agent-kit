@@ -881,7 +881,7 @@ def ctx_text(r):
 
 
 def defer_mark(sid):
-    return os.path.join(state, "ctx", "deferred", sid + ".json")
+    return os.path.join(state, "ctx", "deferred", "%s.%s.json" % (BASE["CLAUDE_PID"], sid))
 
 
 def live_sub(sid, age=0, name="agent-a1.jsonl"):
@@ -965,6 +965,7 @@ check("deferred основной сессии после границы (тра�
       and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
 check("повторный deferred → ничего (выдано один раз)", r.stdout.strip() == "" and r.returncode == 0, r.stdout)
+# одновременная выдача (Д-A), отметка по PID (Д1) и гонки снятия (Д4) — test_ctx_deferred.py (metis-0793)
 old_mark, new_mark = defer_mark("s-dead"), defer_mark("s-alive")
 held_mark, dead_mark = defer_mark("s-held"), defer_mark("s-gone")
 tr_held = transcript("s-held", [user("x", "s-held-1", now - 2000)])
@@ -1259,7 +1260,7 @@ open(os.path.join(DEFD, "x.tmp"), "w").close()
 r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
 check("hooks.json: папка deferred без отметок .json → python не запускается",
       r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
-open(os.path.join(DEFD, "s-x.json"), "w").close()
+open(os.path.join(DEFD, "%s.s-x.json" % BASE["CLAUDE_PID"]), "w").close()
 r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
 check("hooks.json: с отметкой запускается ctx.py deferred (через hooks/python.sh) один раз",
       r.stdout.strip() == f"PYTHON-STARTED {FAKE_ROOT}/hooks/ctx.py deferred", r.stdout + r.stderr)
