@@ -107,7 +107,7 @@ def unit():
           T.work_links(H("athena-0001", direction="athena"), j2, {}, repos))
     check("work_links: PR из кэша, но репозиторий не своего направления — не берём",
           T.work_links(H("metis-0010", direction="athena"), "", idx, repos) == ([], []))
-    bad_oid = A.pr_index({"merged": {R: [{"number": 3, "headRefName": "metis-0040", "body": "", "oid": "zz; rm"}]}})
+    bad_oid = A.pr_index({"merged": {R: [{"number": 3, "headRefName": "metis-0040", "body": "", "oid": "zz; rm", "cross": False}]}})
     check("pr_index: oid не hex — коммита нет", bad_oid == {"metis-0040": [{"repo": R, "number": 3, "sha": "", "merged": True, "branch": "metis-0040"}]}, bad_oid)
     check("work_links: направление без репозиториев — пусто", T.work_links(H("x-0001", direction="x"), j, idx, repos) == ([], []))
     check("work_links: коммит дважды (полный и короткий) — один раз",
