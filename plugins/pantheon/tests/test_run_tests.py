@@ -954,27 +954,49 @@ check("Linux: все файлы пропущены — код 3 «нечего �
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
 
-# --- metis-0728: файлы тестов идут через taskpolicy -c utility (macOS и есть бинарь), иначе как раньше ---
+# --- metis-0647: файл тестов — в классе раннера; RUN_TESTS_QOS=utility на macOS с taskpolicy — `taskpolicy -c utility` ---
 TP = R.TASKPOLICY
+T = ["py", "-I", os.path.join("tests", "test_x.py")]
+U = {"RUN_TESTS_QOS": "utility"}
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP, {})
+check("macOS, taskpolicy есть, без RUN_TESTS_QOS: файл в классе раннера, без taskpolicy", c == T, c)
+for val in ("", "default", "UTILITY", "background"):
+    c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP, {"RUN_TESTS_QOS": val})
+    check(f"RUN_TESTS_QOS={val!r} — не utility: без taskpolicy", c == T, c)
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP, U)
+check("RUN_TESTS_QOS=utility, macOS и taskpolicy есть: команда начинается с taskpolicy -c utility",
+      c[:3] == [TP, "-c", "utility"] and c[3:] == T, c)
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: False, U)
+check("RUN_TESTS_QOS=utility, macOS без taskpolicy: команда как раньше", c == T, c)
+c = R.launch_cmd("py", "test_x.py", "linux", lambda p: True, U)
+check("RUN_TESTS_QOS=utility, Linux: taskpolicy нет, даже если бинарь есть", c == T, c)
+_qos = os.environ.pop("RUN_TESTS_QOS", None)
 c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP)
-check("macOS и taskpolicy есть: команда начинается с taskpolicy -c utility",
-      c[:3] == [TP, "-c", "utility"] and c[3:] == ["py", "-I", os.path.join("tests", "test_x.py")], c)
-c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: False)
-check("macOS без taskpolicy: команда как раньше", c == ["py", "-I", os.path.join("tests", "test_x.py")], c)
-c = R.launch_cmd("py", "test_x.py", "linux", lambda p: True)
-check("Linux: taskpolicy нет, даже если бинарь есть", "taskpolicy" not in " ".join(c) and c[0] == "py", c)
+check("без env= берёт окружение процесса: переменной нет — без taskpolicy", c == T, c)
+os.environ["RUN_TESTS_QOS"] = "utility"
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP)
+check("без env= берёт окружение процесса: RUN_TESTS_QOS=utility — taskpolicy", c[:3] == [TP, "-c", "utility"], c)
+os.environ.pop("RUN_TESTS_QOS")
 check("не macOS — строки QoS нет", R.qos_line(sys.executable, dict(os.environ), "linux") is None)
 if sys.platform == "darwin" and os.path.exists(TP):
     q = R.qos_line(sys.executable, dict(os.environ))
-    check("macOS: строка QoS называет класс и для раннера, и для файла",
-          q and "раннер:" in q and "файл (taskpolicy -c utility):" in q and "проба не удалась" not in q
-          and "utility" in q.split("файл (")[1], q)
+    check("macOS: строка QoS называет класс и для раннера, и для файла (класс раннера)",
+          q and "раннер:" in q and "файл (класс раннера):" in q and "проба не удалась" not in q, q)
+    os.environ["RUN_TESTS_QOS"] = "utility"
+    try:
+        q = R.qos_line(sys.executable, dict(os.environ))
+    finally:
+        os.environ.pop("RUN_TESTS_QOS")
+    check("macOS, RUN_TESTS_QOS=utility: файл пробы — через taskpolicy -c utility и в классе utility",
+          q and "файл (taskpolicy -c utility):" in q and "utility" in q.split("файл (")[1].split("):")[1], q)
     pl = mkplugin({"test_q.py": "import os\nprint('ok q', os.environ.get('RUN_TESTS_RUNNER'))\nprint('1/1')\n"}, "qq")
     r = run([pl])
     check("прогон печатает QoS-строку, а файлу виден RUN_TESTS_RUNNER=1",
           "run-tests: QoS (доля CPU)" in r.stdout and "ok   qq/test_q.py" in r.stdout, r.stdout)
 else:
     print("пропущено: нужен macOS — живая проба QoS")
+if _qos is not None:
+    os.environ["RUN_TESTS_QOS"] = _qos
 
 # настоящая карта: test_merge_gate читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его выбрать (#288)
 real_map = json.load(open(os.path.join(PLUGIN, "scripts", "affected-map.json"), encoding="utf-8"))

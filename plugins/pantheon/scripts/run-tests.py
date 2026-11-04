@@ -11,8 +11,10 @@
                   ok/FAIL); метки нет среди файлов папок — код 2 без прогона. Дозапуск прохода outside (metis-0735):
                   упавшие в прошлом полном прогоне и затронутые диффом; с --affected — отказ
 
-На macOS с /usr/sbin/taskpolicy каждый файл идёт через `taskpolicy -c utility` (launchd держит плановый проход в QoS
-background, файл ×3 дольше, metis-0728); в начале прогона печатается строка «QoS (доля CPU)» — проба раннера и файла.
+Файл тестов идёт в классе QoS раннера (metis-0647): `taskpolicy -c utility` из окна роли опускал его из default вдвое
+(test_merge_gate 241–255 с против 115–122 с), а клемп launchd плановому проходу изнутри не снять. RUN_TESTS_QOS=utility
+на macOS возвращает `taskpolicy -c utility` для каждого файла (metis-0728). В начале прогона печатается строка
+«QoS (доля CPU)» — проба раннера и файла.
 Файлам виден RUN_TESTS_RUNNER=1 (test_shell_diff по нему берёт пул из двух процессов).
 
 Только затронутое — для агента во время правки и для PR; полный набор — без ключа (на main, в шлюзе и перед
@@ -418,6 +420,8 @@ def _killpg(pid, sig=signal.SIGKILL):
 
 
 TASKPOLICY = "/usr/sbin/taskpolicy"
+# RUN_TESTS_QOS=utility — файлы тестов через `taskpolicy -c utility`, как до metis-0647; без неё — в классе раннера
+QOS_ENV = "RUN_TESTS_QOS"
 # Проба QoS: сколько тиков CPU процесс провёл в каждом классе (proc_pid_rusage, rusage_info_v4, ri_cpu_time_qos_*).
 QOS_PROBE = (
     "import ctypes, struct, os\n"
@@ -431,20 +435,27 @@ QOS_PROBE = (
     "print(' '.join(f'{k} {100 * c // t}%' for k, c in zip(n, v) if c) or 'нет данных')\n")
 
 
-def launch_cmd(py, f, platform=None, exists=os.path.exists):
-    """Команда запуска одного файла. На macOS с taskpolicy — через `taskpolicy -c utility`: тик шёл
-    из launchd с ProcessType Background и без этого весь набор сидел в QoS background на E-ядрах (файл ×3 дольше,
-    metis-0728). Тик теперь Standard, но на уже установленной машине plist старый до ручного `pantheon install`,
-    поэтому taskpolicy остаётся. На Linux и без taskpolicy — как раньше."""
-    cmd = [py, "-I", os.path.join("tests", f)]
+def qos_prefix(platform=None, exists=os.path.exists, env=None):
+    """Чем опустить класс файла тестов: `taskpolicy -c utility` только по RUN_TESTS_QOS=utility на macOS с taskpolicy,
+    иначе ничего — файл идёт в классе раннера (metis-0647). Клемп launchd (ProcessType Background или Standard) из
+    процесса не снять, а из окна роли `-c utility` сам опускал файл из default: test_merge_gate 241–255 с против
+    115–122 с без него (замер 04.11, load 17–24)."""
+    if (os.environ if env is None else env).get(QOS_ENV) != "utility":
+        return []
     if (sys.platform if platform is None else platform) == "darwin" and exists(TASKPOLICY):
-        return [TASKPOLICY, "-c", "utility", *cmd]
-    return cmd
+        return [TASKPOLICY, "-c", "utility"]
+    return []
+
+
+def launch_cmd(py, f, platform=None, exists=os.path.exists, env=None):
+    """Команда запуска одного файла: `py -I tests/<f>`, с RUN_TESTS_QOS=utility на macOS — через
+    `taskpolicy -c utility` (qos_prefix)."""
+    return [*qos_prefix(platform, exists, env), py, "-I", os.path.join("tests", f)]
 
 
 def qos_line(py, env, platform=None, exists=os.path.exists):
     """Строка-самопроверка для лога: в каком классе QoS идёт CPU у раннера и у пробного процесса, запущенного так же,
-    как файлы тестов. «файл: utility …» — клемп launchd снят; «файл: background …» — не снят."""
+    как файлы тестов (qos_prefix). «раннер: utility …» в плановом проходе — клемп launchd (ProcessType Standard)."""
     if (sys.platform if platform is None else platform) != "darwin":
         return None
     def probe(cmd):
@@ -456,9 +467,9 @@ def qos_line(py, env, platform=None, exists=os.path.exists):
         except (OSError, subprocess.SubprocessError) as e:
             return f"проба не удалась ({type(e).__name__})"
     own = probe([py, "-I", "-c", QOS_PROBE])
-    cmd = [TASKPOLICY, "-c", "utility"] if exists(TASKPOLICY) else []
+    cmd = qos_prefix(platform, exists)
     job = probe(cmd + [py, "-I", "-c", QOS_PROBE])
-    return f"run-tests: QoS (доля CPU) · раннер: {own} · файл ({'taskpolicy -c utility' if cmd else 'без taskpolicy'}): {job}"
+    return f"run-tests: QoS (доля CPU) · раннер: {own} · файл ({'taskpolicy -c utility' if cmd else 'класс раннера'}): {job}"
 
 
 def fs_probe(base):
