@@ -881,7 +881,7 @@ def ctx_text(r):
 
 
 def defer_mark(sid):
-    return os.path.join(state, "ctx", "deferred", sid + ".json")
+    return os.path.join(state, "ctx", "deferred", "%s.%s.json" % (BASE["CLAUDE_PID"], sid))
 
 
 def live_sub(sid, age=0, name="agent-a1.jsonl"):
@@ -957,7 +957,6 @@ check("deferred субагента (agent_id) → ничего, отметка �
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"), PANTHEON_CTX_OFF="1")
 check("deferred при PANTHEON_CTX_OFF=1 → ничего, отметка цела",
       r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
-mark_saved = open(defer_mark("s-ms"), "rb").read()
 r = run("deferred", {k: v for k, v in dict(ms, hook_event_name="PostToolUse", tool_name="Read").items()
                      if k != "transcript_path"})
 check("deferred основной сессии после границы (транскрипт — из отметки, в событии его нет) → файл передачи дел "
@@ -966,22 +965,7 @@ check("deferred основной сессии после границы (тра�
       and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
 check("повторный deferred → ничего (выдано один раз)", r.stdout.strip() == "" and r.returncode == 0, r.stdout)
-race_bad = []
-for _ in range(25):  # argus A, Д-A: os.remove на APFS не исключителен — выдача должна быть ровно одна
-    with open(defer_mark("s-ms"), "wb") as f:
-        f.write(mark_saved)
-    ps = [subprocess.Popen([PY, "-I", HOOK, c], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=BASE, text=True)
-          for c in ("deferred", "deferred", "clock", "maint-post", "deferred", "clock")]
-    for pr in ps:
-        pr.stdin.write(json.dumps(dict(ms, hook_event_name="PostToolUse", tool_name="Read")))
-        pr.stdin.close()
-    n = sum("СЛИВА" in (pr.stdout.read() or "") for pr in ps)
-    for pr in ps:
-        pr.wait(60)
-    if n != 1 or os.path.exists(defer_mark("s-ms")):
-        race_bad.append(n)
-check("6 одновременных deferred/clock/maint-post × 25 → выдача ровно одна, отметка снята, хвостов .claim нет",
-      not race_bad and not [x for x in os.listdir(os.path.dirname(defer_mark("s-ms"))) if ".claim" in x], race_bad)
+# одновременная выдача (Д-A), отметка по PID (Д1) и гонки снятия (Д4) — test_ctx_deferred.py (metis-0793)
 old_mark, new_mark = defer_mark("s-dead"), defer_mark("s-alive")
 held_mark, dead_mark = defer_mark("s-held"), defer_mark("s-gone")
 tr_held = transcript("s-held", [user("x", "s-held-1", now - 2000)])
@@ -1276,7 +1260,7 @@ open(os.path.join(DEFD, "x.tmp"), "w").close()
 r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
 check("hooks.json: папка deferred без отметок .json → python не запускается",
       r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
-open(os.path.join(DEFD, "s-x.json"), "w").close()
+open(os.path.join(DEFD, "%s.s-x.json" % BASE["CLAUDE_PID"]), "w").close()
 r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
 check("hooks.json: с отметкой запускается ctx.py deferred (через hooks/python.sh) один раз",
       r.stdout.strip() == f"PYTHON-STARTED {FAKE_ROOT}/hooks/ctx.py deferred", r.stdout + r.stderr)
