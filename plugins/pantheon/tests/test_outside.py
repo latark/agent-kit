@@ -2552,9 +2552,12 @@ check("0779: tree_record(sha=) — запись на этот SHA по дере�
 for bad, label in (("deadbeef1", "коммита нет в копии"), ("xyz;rm", "не по образцу"), (CPG[:5], "короче 7 знаков")):
     _q = os.path.join(CACHE, "athena-x", "outside")
     before = set(os.listdir(_q))
-    rc, _, _ = role_request("athena-x", APP, "test", "--sha", bad)
-    check(f"0779: --sha {label}: код 2, заявки нет",
-          rc == 2 and not [n for n in set(os.listdir(_q)) - before if n.endswith(".req.json")], rc)
+    _e = io.StringIO()
+    with contextlib.redirect_stderr(_e):
+        rc, _, _ = role_request("athena-x", APP, "test", "--sha", bad)
+    check(f"0779: --sha {label}: код 2, заявки нет, причина — не коммит этой копии",
+          rc == 2 and "не коммит этой копии" in _e.getvalue()
+          and not [n for n in set(os.listdir(_q)) - before if n.endswith(".req.json")], (rc, _e.getvalue()))
 # заявка в обход CLI с коммитом, которого нет в клоне: проход отказывает, копии нет, прогона нет
 c0 = len(calls())
 one_request.n += 1
