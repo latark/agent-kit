@@ -91,6 +91,7 @@ import os
 import posixpath
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -1940,6 +1941,115 @@ def _who(rec):
             f"запись {rec.get('time') if isinstance(rec.get('time'), str) else '?'}")
 
 
+def argus_verdicts(records, repo, pr):
+    """Вердикты argus («принять», «вернуть») на PR repo#pr — на любом head, по порядку записи."""
+    return [r for r in records if r["kind"] in ("accept", "reject") and r["by"].get("agent_type") == "argus"
+            and r["pr"] == pr and repo in [x.lower() for x in r["repo"]]]
+
+
+def head_verdicts(verdicts, sha):
+    """Вердикты на head sha: (latest — рецензент → его последний вердикт на sha, порядок по первой записи; direct —
+    «принять» из latest, записанные после отсечки _floor; cut — пары («принять» до отсечки, «вернуть» отсечки)).
+    Прямое «принять» на sha — тоже только после отсечки (argus-b r2): откат force-push на head, принятый до
+    «вернуть». Общее для шлюза (gate_problem) и push в принятый PR (accepted_push_problem, metis-0794)."""
+    latest = {}
+    for r in verdicts:
+        if r["sha"] == sha:
+            latest[_reviewer(r)] = r
+    floor = _floor(verdicts)
+    pos = {id(r): i for i, r in enumerate(verdicts)}
+    cut = [(r, verdicts[floor]) for r in latest.values() if r["kind"] == "accept" and pos[id(r)] <= floor]
+    direct = [r for r in latest.values() if r["kind"] == "accept" and pos[id(r)] > floor]
+    return latest, direct, cut
+
+
+# --- push в принятый PR (metis-0794, «да» владельца 04.11 13:00) ------------------------------------------------
+# Новый коммит в ветке PR сжигает вердикты argus на прошлом head и требует нового круга. Если на текущем head PR
+# «принять» уже столько, сколько нужно для слияния, а «вернуть» нет, долг ревью (Д, С) в этот PR не тянут: он идёт
+# задачей, а PR — к слиянию (roles/_ref/merge-rounds.md, «Находки ревью: Б, Д, С»). Счёт — как у шлюза и итога
+# `pantheon review status`: последний вердикт каждого рецензента на head (head_verdicts), «принять» с перечнем (Б6),
+# в PR ядра — только на Opus (opus_problem) и их CORE_ACCEPTS, вне ядра — одно. Ядро ли — _core_problem шлюза; файлы
+# не получены или сборку окон не проверить — считаем ядром (нужно больше «принять», реже отказ). Push пропускается:
+# нет записей «принять» на вершине ветки, ветка remote по адресу (не имени), PR не открыт, не та ветка, другой head,
+# конфликт с base, отправляется тот же коммит, в новых коммитах строка «Б: <причина>» (правка блокера от argus или
+# владельца, красные тесты), сбой git или gh. Модель угроз — ошибка агента, не обход (README guard).
+CORE_ACCEPTS = 2  # «принять» argus на Opus в PR ядра — как MIN_ACCEPTS шлюза владельца (pantheon/lib/merge.py)
+PUSH_REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")  # имя remote, а не адрес
+PUSH_BLOCKER_RE = re.compile(r"^Б[0-9]*:[ \t]*\S", re.M)  # «Б: …», «Б1: …» — новый коммит правит блокер
+PUSH_GH_MARGIN = 0.5  # с сверх GH_TIMEOUT: меньше осталось до срока хука — gh не зовём (fail-open, а не отказ по сроку)
+PUSH_VIEW_FIELDS = "headRefOid,headRefName,baseRefOid,baseRefName,changedFiles,state,mergeable"
+
+
+def _gh_fits():
+    """Успеет ли ещё один gh до своего срока хука (таймер ITIMER_REAL guard_rules.set_deadline): нет таймера — да."""
+    try:
+        left = signal.getitimer(signal.ITIMER_REAL)[0]
+    except (AttributeError, OSError, ValueError):
+        return True
+    return not left or left > GH_TIMEOUT + PUSH_GH_MARGIN
+
+
+def push_accepts(records, repo, pr, sha, core):
+    """Сколько «принять» argus засчитано на head sha PR repo#pr для слияния; 0 — есть «вернуть» в силе на sha (последний
+    вердикт рецензента) или «принять» нет. core — PR ядра: «принять» не на Opus выбывает, как в шлюзе (weak)."""
+    verdicts = argus_verdicts(records, repo, pr)
+    if core:
+        verdicts = [r for r in verdicts if not (r["kind"] == "accept" and checklist_ok(r) and opus_problem(r))]
+    latest, direct, _ = head_verdicts(verdicts, sha)
+    if any(r["kind"] == "reject" for r in latest.values()):
+        return 0
+    return sum(1 for r in direct if checklist_ok(r))
+
+
+def accepted_push_problem(d, remote, pairs):
+    """Текст отказа push в принятый PR или None (metis-0794). d — папка git, remote — имя remote из команды или
+    @{push}, pairs — [(что отправляется, ветка назначения)] (guard_rules._push_parse)."""
+    if not remote or not PUSH_REMOTE_RE.fullmatch(remote):
+        return None
+    records = read_records()
+    if not records:
+        return None
+    url = (_git(d, "remote", "get-url", remote) or "").strip()
+    repo = _repo_tail(_remote_id(url)) if url else ""
+    if not REPO_RE.fullmatch(repo):
+        return None
+    for src, dst in pairs:
+        tip = (_git(d, "rev-parse", "--verify", "-q", f"refs/remotes/{remote}/{dst}^{{commit}}") or "").strip().lower()
+        prs = sorted({r["pr"] for r in records if r["kind"] == "accept" and r["sha"] == tip
+                      and r["by"].get("agent_type") == "argus" and repo in [x.lower() for x in r["repo"]]})
+        if not SHA_RE.fullmatch(tip) or not prs:
+            continue
+        new = (_git(d, "rev-parse", "--verify", "-q", f"{src}^{{commit}}") or "").strip().lower()
+        if not SHA_RE.fullmatch(new) or new == tip:
+            continue
+        msgs = _git(d, "log", "--format=%B", f"{tip}..{new}")
+        if msgs is None or PUSH_BLOCKER_RE.search(msgs):
+            continue
+        for pr in prs[:2]:
+            if not _gh_fits():
+                return None
+            got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", PUSH_VIEW_FIELDS])
+            view = got[0] if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else None
+            if view is None or str(view.get("state") or "").upper() != "OPEN" or view.get("headRefName") != dst \
+                    or str(view.get("headRefOid") or "").lower() != tip \
+                    or str(view.get("mergeable") or "").upper() == "CONFLICTING":
+                continue
+            n, need = push_accepts(records, repo, pr, tip, True), CORE_ACCEPTS
+            if n < need and push_accepts(records, repo, pr, tip, False) >= 1 \
+                    and _gh_fits() \
+                    and _core_problem(repo, pr, tip, view, _pr_files(repo, pr)) is None:
+                n, need = push_accepts(records, repo, pr, tip, False), 1
+            if n >= need:
+                return (f"Правило push: PR {repo}#{pr} уже принят на {tip[:12]} — «принять» argus {n} (нужно {need}), "
+                        "«вернуть» нет. Новый коммит в ветке сожжёт эти вердикты и потребует нового круга ревью. Долг "
+                        "ревью (Д, С) в принятый PR не тянут: заведи задачу `pantheon task new … --from ревью`, а PR "
+                        "веди к слиянию (ядро — `pantheon merge request " + str(pr) + "`, иначе gh pr merge через "
+                        "шлюз). Правка блокера (Б от argus или владельца, красные тесты) — строка «Б: <причина>» в "
+                        "сообщении нового коммита, тогда push пройдёт; «вернуть» argus на этот head тоже снимает "
+                        "остановку.")
+    return None
+
+
 def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=None):
     """Запор (P1-4): то, что проверено, — ровно то, что сливается. Текст отказа, None или Allow — пропуск с
     предупреждениями CI (metis-0650)."""
@@ -1974,12 +2084,12 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
                 f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --wait 120`). {advice}")
 
-    def mine(r, kinds, who, any_sha=False):
-        return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr
-                and (any_sha or r["sha"] == sha) and repo in [x.lower() for x in r["repo"]])
+    def mine(r, kinds, who):
+        return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr and r["sha"] == sha
+                and repo in [x.lower() for x in r["repo"]])
 
     # вердикты argus на PR — на любом head (metis-0415): «вернуть» привязано к PR, «принять» переносится по отпечатку
-    pr_verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus", any_sha=True)]
+    pr_verdicts = argus_verdicts(records, repo, pr)
     seen_view = []
     seen_files = []
 
@@ -2020,15 +2130,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 "другого argus на тот же коммит, на коммит с тем же кодом, что у «вернуть» (и на сливаемый), или с "
                 "другой merge-base «вернуть» не перекрывает; код не посчитан — тоже."
                 + why_fp() + f" {advice}")
-    latest = {}  # рецензент (session_id, agent_id) → его последний вердикт на sha; порядок — по первой записи
-    for r in verdicts:
-        if r["sha"] == sha:
-            latest[_reviewer(r)] = r
-    # прямое «принять» на sha — тоже только после отсечки (argus-b r2): откат force-push на head, принятый до «вернуть»
-    floor = _floor(verdicts)
-    pos = {id(r): i for i, r in enumerate(verdicts)}
-    cut = [(r, verdicts[floor]) for r in latest.values() if r["kind"] == "accept" and pos[id(r)] <= floor]
-    direct = [r for r in latest.values() if r["kind"] == "accept" and pos[id(r)] > floor]
+    latest, direct, cut = head_verdicts(verdicts, sha)
     carried = [] if direct else _carried(verdicts, sha, fp, cut)
     if not direct and not carried:
         fs = fp(sha) if weak else None
