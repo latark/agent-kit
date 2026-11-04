@@ -246,8 +246,8 @@ def main():
         me.touch()  # следующий опрос: голова так и не обновилась — она остановлена, а не спала
         check("голова не обновилась и после сна — застыла, ждущий её обходит", me.ahead() is False, str(left()))
         r = run(state, "--status")
-        check("--status: билеты старше TICKET_STALE от «сейчас» не в счёте", "очередь на места" not in r.stdout,
-              repr(r.stdout))
+        check("--status: застывшая голова не в счёте, ждущий (обновил билет) — в счёте",
+              "очередь на места: 1\n" in r.stdout, repr(r.stdout))
         me.drop()
         head.drop()
         check("билеты сна убраны", left() == [], str(left()))
