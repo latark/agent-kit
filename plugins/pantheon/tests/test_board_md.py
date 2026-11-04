@@ -261,6 +261,94 @@ os.remove(bm)
 r = cli(["board", "archive"])
 check("board archive без board.md → код 0, сообщение", r.returncode == 0 and "board.md нет" in r.stdout, r.stdout + r.stderr)
 
+# 0780: board.md правят руками без замка — правка между чтением и записью не теряется. Обвязка в процессе pantheon:
+# when=split — правка во время разбора (до записи архива), when=archive — сразу после открытия архива на дописывание
+# (до замены board.md). Каждый how меняет только одну часть отметки: grow — размер (время возвращено), touch — время,
+# swap — inode (замена через rename, тот же размер и время), delete — файл удалён (archive не создаёт его заново)
+SWAP = ("- 03.11 свежее", "- 03.11 свежак")   # тот же размер в байтах
+assert len(SWAP[0].encode()) == len(SWAP[1].encode())
+RACE = ("import os, sys; sys.path.insert(0, %r); import pantheon as p\n"
+        "when, how = sys.argv[1], sys.argv[2]\n"
+        "bm = os.path.join(p.PANTHEON, 'board.md')\n"
+        "done = []\n"
+        "def edit():\n"
+        "    if done:\n"
+        "        return\n"
+        "    done.append(1)\n"
+        "    st = os.stat(bm)\n"
+        "    if how == 'grow':\n"
+        "        with open(bm, 'a', encoding='utf-8') as fh:\n"
+        "            fh.write('- 04.11 правка Зевса\\n')\n"
+        "        os.utime(bm, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+        "    elif how == 'delete':\n"
+        "        os.remove(bm)\n"
+        "    elif how == 'touch':\n"
+        "        os.utime(bm, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))\n"
+        "    else:\n"
+        "        tmp = bm + '.new'\n"
+        "        with open(bm, encoding='utf-8') as fh:\n"
+        "            text = fh.read()\n"
+        "        with open(tmp, 'w', encoding='utf-8') as fh:\n"
+        "            fh.write(text.replace(SWAP[0], SWAP[1]))\n"
+        "        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+        "        os.replace(tmp, bm)\n"
+        "SWAP = %r\n"
+        "M = p.boardmd_mod()\n"
+        "if when == 'split':\n"
+        "    real = M.split\n"
+        "    def split(*a):\n"
+        "        edit(); return real(*a)\n"
+        "    M.split = split\n"
+        "else:\n"
+        "    import builtins\n"
+        "    def opener(f, mode='r', *a, **k):\n"
+        "        fh = builtins.open(f, mode, *a, **k)\n"
+        "        if mode == 'a' and os.sep + 'archive' + os.sep in str(f):\n"
+        "            edit()\n"
+        "        return fh\n"
+        "    p.open = opener\n"
+        "p.boardmd_mod = lambda: M\n"
+        "sys.exit(p.board_archive([]))\n" % (LIB, SWAP))
+
+
+def race(when, how):
+    return subprocess.run([PY311, "-I", "-c", RACE, when, how], env=dict(env, PANTHEON_NOW=str(NOW)), capture_output=True,
+                          text=True, timeout=300)
+
+
+arch = os.path.join(home, "archive")
+EDITED = {"grow": SRC + "- 04.11 правка Зевса\n", "touch": SRC, "swap": SRC.replace(*SWAP), "delete": None}
+
+
+def text_of(p):
+    return read(p) if os.path.exists(p) else None
+
+
+for when in ("split", "archive"):
+    for how in ("grow", "touch", "swap", "delete"):
+        shutil.rmtree(arch, ignore_errors=True)
+        write(bm, SRC)
+        r = race(when, how)
+        got = text_of(bm)
+        check(f"0780. board archive: board.md изменён ({when}, {how}) → код 1, «board.md изменился, повтори», "
+              "board.md с правкой цел, " + ("архив не создан" if when == "split" else "дописанное в архив удалено"),
+              r.returncode == 1 and "board.md изменился, повтори" in r.stderr and got == EDITED[how]
+              and (not os.path.exists(arch) if when == "split" else os.listdir(arch) == []),
+              (r.returncode, r.stdout, r.stderr, (got or "")[-60:], os.listdir(arch) if os.path.isdir(arch) else None))
+# архив уже был: дописанное откатывается до прежнего размера
+write(a10, "старый архив 10\n")
+write(a09, "старый архив 09\n")
+write(bm, SRC)
+r = race("archive", "grow")
+check("0780. board archive: правка после дописывания в существующий архив → архив откатан до прежнего текста",
+      r.returncode == 1 and text_of(a10) == "старый архив 10\n" and text_of(a09) == "старый архив 09\n"
+      and read(bm) == EDITED["grow"], (r.returncode, r.stderr, text_of(a10), text_of(a09)))
+write(bm, SRC)
+r = cli(["board", "archive"])
+check("0780. board archive: без правки — переносит как раньше (сверка не мешает)",
+      r.returncode == 0 and "- 20.10 старое A" not in read(bm) and "- 20.10 старое A" in (text_of(a10) or ""),
+      r.stdout + r.stderr)
+
 # board-auto из кэша и карточек
 write(bm, board())
 new = cli(["task", "new", "--direction", "metis-pantheon", "--title", "Висит", "--text", "тело", "--mode", "single",

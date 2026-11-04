@@ -735,6 +735,135 @@ check("SKIP_NOT_MAC — ровно test_setup: остальное пропуск
       set(R.SKIP_NOT_MAC) == {"pantheon/test_setup.py"}, sorted(R.SKIP_NOT_MAC))
 check("SKIP_NOT_MAC — только существующие файлы, у каждого есть причина",
       not missing and all(why for why, _ in R.SKIP_NOT_MAC.values()), missing)
+# --- окно роли (metis-0773): файлы WINDOW_FS идут в запасной корень или пропускаются строкой ---
+wmiss = [lb for lb in R.WINDOW_FS if not os.path.exists(
+    os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("WINDOW_FS — только существующие файлы", not wmiss and R.WINDOW_FS, wmiss)
+real_probe = R.fs_probe
+try:
+    R.fs_probe = lambda base: None
+    check("window_roots: запись есть — корень прежний, строки нет",
+          R.window_roots("/r", ["pantheon/test_roles.py"]) == ("/r", None, None))
+    R.fs_probe = lambda base: "EPERM" if base == "/r" else None
+    wr_alt = os.path.join("/tmp", f"claude-{os.getuid()}")
+    if os.path.isdir(wr_alt):
+        wr = R.window_roots("/r", ["pantheon/test_roles.py"])
+        check("window_roots: под корнем нельзя, в /tmp/claude-<uid> можно — запасной корень и строка",
+              wr[0].startswith(os.path.join(wr_alt, "run-tests-")) and wr[1] is None and "EPERM" in wr[2], wr)
+        shutil.rmtree(wr[0], True)
+    else:
+        print("пропущено: нет /tmp/claude-<uid> — случай запасного корня")
+    R.fs_probe = lambda base: "EPERM"
+    wr = R.window_roots("/r", ["pantheon/test_roles.py"])
+    check("window_roots: нигде нельзя — корня нет, причина названа", wr[0] is None and "EPERM" in wr[1], wr)
+    check("window_roots: нет файлов WINDOW_FS — проба не нужна",
+          R.window_roots("/r", ["pantheon/test_board.py"]) == ("/r", None, None))
+finally:
+    R.fs_probe = real_probe
+# window_plan: решение для файлов, зависящих от окна (metis-0773), пробы подставлены
+WL = ["pantheon/test_roles.py", "guard/test_merge_gate.py", "pantheon/test_outside.py", "pantheon/test_board.py"]
+okp, no_bind = (lambda b: None), (lambda: "EPERM bind")
+pl = R.window_plan("/r", WL, probe=okp, bind=lambda: None)
+check("window_plan вне окна: корень прежний, пропускаемых нет, причины и строки нет — набор идёт как раньше",
+      pl == ("/r", set(), "", None), pl)
+check("WINDOW_NOT_TMP и WINDOW_BIND — подмножества существующих файлов",
+      R.WINDOW_NOT_TMP <= R.WINDOW_FS and R.WINDOW_BIND and R.WINDOW_BIND <= R.WINDOW_FS | {"pantheon/test_outside.py"})
+pl = R.window_plan("/r", WL, probe=okp, bind=no_bind)
+check("window_plan: bind закрыт — пропущен только WINDOW_BIND, корень прежний",
+      pl[0] == "/r" and pl[1] == R.WINDOW_BIND and "EPERM bind" in pl[2], pl)
+pl = R.window_plan("/r", ["pantheon/test_roles.py", "pantheon/test_board.py"], probe=okp, bind=no_bind)
+check("window_plan: файлов WINDOW_BIND в наборе нет — bind не проверяется, пропусков нет", pl[1] == set(), pl)
+pl = R.window_plan("/r", WL, probe=lambda b: "EPERM" if b == "/r" else None, bind=lambda: None)
+if os.path.isdir(os.path.join("/tmp", f"claude-{os.getuid()}")):
+    check("window_plan: корень закрыт, запасной открыт — запасной корень, пропущен только WINDOW_NOT_TMP",
+          pl[0] != "/r" and pl[0].startswith(os.path.join("/tmp", f"claude-{os.getuid()}", "run-tests-"))
+          and pl[1] == R.WINDOW_NOT_TMP and "/tmp" in pl[2] and "EPERM" in pl[3], pl)
+    shutil.rmtree(pl[0], True)
+else:
+    print("пропущено: нет /tmp/claude-<uid> — случай запасного корня")
+pl = R.window_plan("/r", WL, probe=lambda b: "EPERM", bind=no_bind)
+check("window_plan: закрыто везде — корня нет, пропущены WINDOW_FS и WINDOW_BIND, причины обе",
+      pl[0] is None and pl[1] == R.WINDOW_FS | R.WINDOW_BIND and "EPERM" in pl[2] and "порт" in pl[2], pl)
+# fs_probe на настоящих папках и подставленном внешнем вызове (metis-0773, ревью r1)
+import contextlib, io
+fp = tempfile.mkdtemp(prefix="fsp-")
+check("fs_probe: папка с записью — None", R.fs_probe(fp) is None, R.fs_probe(fp))
+ro = tempfile.mkdtemp(prefix="fsp-ro-")
+os.chmod(ro, 0o555)
+if os.access(ro, os.W_OK):
+    print("пропущено: запись в chmod 555 разрешена (root) — случай папки без записи")
+else:
+    check("fs_probe: папка без записи (chmod 555) — причина названа", "PermissionError" in (R.fs_probe(ro) or ""), R.fs_probe(ro))
+os.chmod(ro, 0o755)
+real_makedirs, real_path = os.makedirs, os.environ["PATH"]
+def deny_agents(path, *a, **k):
+    if path.endswith(os.path.join(".claude", "agents")):
+        raise PermissionError(1, "Operation not permitted")
+    return real_makedirs(path, *a, **k)
+try:
+    os.makedirs = deny_agents
+    check("fs_probe: `.claude/agents` создать нельзя — причина названа",
+          "PermissionError" in (R.fs_probe(fp) or ""), R.fs_probe(fp))
+finally:
+    os.makedirs = real_makedirs
+for rc, want in ((1, "init не вышел"), (0, None)):
+    gd = tempfile.mkdtemp(prefix="fakegit-")
+    with open(os.path.join(gd, "git"), "w") as fh:
+        fh.write(f"#!/bin/sh\necho нет записи >&2\nexit {rc}\n")
+    os.chmod(os.path.join(gd, "git"), 0o755)
+    os.environ["PATH"] = gd + os.pathsep + real_path
+    try:
+        got = R.fs_probe(fp)
+    finally:
+        os.environ["PATH"] = real_path
+    check(f"fs_probe: init выходит с кодом {rc} — " + ("причина названа" if want else "None"),
+          (want in (got or "")) if want else got is None, got)
+check("fs_probe: пробная папка за собой убрана", not os.listdir(fp), os.listdir(fp))
+
+# main(): корень, строки skip, код выхода при подставленных пробах (metis-0773, ревью r1: Б и Д)
+OKF = "print('ok a')\nprint('1 из 1')\n"
+def main_with(files, fs=None, bind=None):
+    saved = R.fs_probe, R.bind_probe
+    R.fs_probe, R.bind_probe = fs or (lambda b: None), bind or (lambda: None)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = R.main([mkplugin(files, "pantheon"), "-j", "2"])
+    finally:
+        R.fs_probe, R.bind_probe = saved
+    return rc, buf.getvalue()
+WF = {"test_outside.py": OKF, "test_board.py": OKF}
+rc, out = main_with(WF)
+check("WINDOW_SKIP_CODE отличен от 3 и 0", R.WINDOW_SKIP_CODE not in (0, 1, 3))
+check("main: пробы проходят — код 0, ни skip, ни строки про окно", rc == 0 and "skip " not in out and "годится" not in out
+      and "файлов 2, ok 2, FAIL 0;" in out, (rc, out))
+rc, out = main_with(WF, bind=lambda: "EPERM bind")
+check("main: bind закрыт — код 4, skip с причиной, строка «для записи полного набора не годится»",
+      rc == 4 and re.search(r"^skip pantheon/test_outside\.py · пропущено: .*EPERM bind", out, re.M)
+      and "пропущены файлы окна — для записи полного набора не годится" in out
+      and "файлов 1, ok 1, FAIL 0, пропущено 1;" in out, (rc, out))
+rc, out = main_with(dict(WF, **{"test_board.py": "print('ok a')\nraise SystemExit(1)\n"}), bind=lambda: "EPERM bind")
+check("main: пропуск окна и FAIL — код 1, а не 4", rc == 1 and "FAIL pantheon/test_board.py" in out, (rc, out))
+rc, out = main_with({"test_outside.py": OKF}, bind=lambda: "EPERM bind")
+check("main: пропущены все файлы окна — код 4 (не 3 «нечего гонять»), а не зелёный 0", rc == 4 and "для записи полного набора не годится" in out, (rc, out))
+ALT = os.path.join("/tmp", f"claude-{os.getuid()}")
+ALTR = os.path.join(ALT, "run-tests-")  # TMPDIR сам может лежать под ALT: различаем по префиксу запасного корня
+HOME_IN = ("import os\nok = {neg}os.environ['HOME'].startswith({alt!r})\nprint('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
+           "print('1 из 1' if ok else '0 из 1')\nraise SystemExit(0 if ok else 1)\n")
+if os.path.isdir(ALT):
+    alt_fs = lambda b: None if b == ALT else "EPERM fs"
+    rc, out = main_with({"test_roles.py": HOME_IN.format(neg="", alt=ALTR), "test_board.py": HOME_IN.format(neg="not ", alt=ALTR)},
+                        fs=alt_fs)
+    check("main: корень закрыт, запасной открыт — файл WINDOW_FS идёт с HOME в запасном корне, прочие в обычном; код 0",
+          rc == 0 and "ok   pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
+          and "run-tests: окно режет запись" in out, (rc, out))
+else:
+    print("пропущено: нет /tmp/claude-<uid> — случай запасного корня в main")
+rc, out = main_with({"test_roles.py": OKF, "test_board.py": OKF}, fs=lambda b: "EPERM fs")
+check("main: запись закрыта везде — WINDOW_FS пропущен, board идёт, код 4",
+      rc == 4 and "skip pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
+      and "файлов 1, ok 1, FAIL 0, пропущено 1;" in out, (rc, out))
+
 sd = tempfile.mkdtemp(prefix="stubs-")
 check("make_stubs: на macOS заглушек нет", R.make_stubs(sd, "darwin", which=lambda c: None) == (None, []))
 check("make_stubs: на Linux все команды есть — заглушек нет", R.make_stubs(sd, "linux", which=lambda c: "/x") == (None, []))

@@ -8,6 +8,10 @@ Closes в теле — только задачам пачки, чей номер
 Задача с неотмеченным пунктом «Готово, когда» или заглушкой (metis-0767) тоже без Closes: слитый PR оставил бы её в
 review, а не в done; в stderr — «<id>: неотмечено N», строка тела «Не целиком, остаются открытыми».
 Шлюз guard не трогается: PR пачки он проверяет как любой другой.
+Карточка пачки помнит ветку и PR (поля branch и pr, tasks.FIELDS): start пишет branch, pr — branch и pr
+(«владелец/репозиторий#N» по ссылке, которую печатает gh). По ним карточка пачки и board-auto показывают PR пачки.
+После слияния задачи закрывает плановый проход по Closes; саму пачку (story) он не трогает — её статус идёт по составу
+(lib/boardstatus.py).
 
 P — модуль pantheon: его ставит загрузчик pantheon._attach до выполнения этого файла.
 """
@@ -58,6 +62,21 @@ def branch_ids(cwd):
     if r.returncode != 0:
         return None
     return set(ID_IN.findall(r.stdout)), set(PART_ID.findall(r.stdout))
+
+
+PR_URL = re.compile(r"github\.com/([A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100})/pull/(\d{1,6})\b")
+
+
+def _remember(sid, changes, what):
+    """Поля branch/pr карточки пачки. Не записалось — предупреждение, а не провал: ветка и PR уже есть."""
+    T = P.tasks_mod()
+    try:
+        head = T.load_tasks(P.PANTHEON, T.WORK_TYPES)[sid][1]
+        changes = {k: v for k, v in changes.items() if head.get(k) != v}
+        if changes:
+            T.task_set(P.PANTHEON, P.now(), sid, changes, note=what, actor="pantheon batch")
+    except (KeyError, ValueError, OSError) as e:
+        print(f"pantheon batch: карточка {sid} не обновлена ({', '.join(changes)}): {e}", file=sys.stderr)
 
 
 def _plain(text):
@@ -129,6 +148,7 @@ def _start(sid, cwd):
     if a.returncode != 0:
         print(f"pantheon batch start: git worktree add не прошёл: {a.stderr.strip()[:300]}", file=sys.stderr)
         return 1
+    _remember(sid, {"branch": br}, f"ветка пачки {br}")
     print(f"ветка {br} от origin/{BASE}, копия {wt}\nзадачи пачки — коммитами или слияниями в неё, узкие тесты; "
           f"PR — pantheon batch pr {sid}")
     return 0
@@ -159,7 +179,16 @@ def _pr(sid, tasks, cwd, dry):
         argv = ["gh", "pr", "edit", num, "--title", title, "--body", body]
     else:
         argv = ["gh", "pr", "create", "--base", BASE, "--head", br, "--title", title, "--body", body]
-    return subprocess.run(argv, cwd=cwd, env=env).returncode
+    r = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
+    print(r.stdout, end="")
+    if r.returncode != 0:
+        return r.returncode
+    m = PR_URL.search(r.stdout or "")
+    if m and (not num.isdigit() or m.group(2) == num):
+        _remember(sid, {"branch": br, "pr": f"{m.group(1)}#{m.group(2)}"}, f"PR пачки {m.group(1)}#{m.group(2)}")
+    else:
+        print(f"pantheon batch pr: gh не вернул ссылку PR — поле pr пачки {sid} не записано", file=sys.stderr)
+    return 0
 
 
 def batch_cmd(args, cwd=None):

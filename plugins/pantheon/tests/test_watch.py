@@ -3390,6 +3390,49 @@ def test_start_lost_race_skip_0717():
     check(r.stdout.strip() == "None", f"0717: LOCK_CONTENDED пережил следующий lock(): {r.stdout!r} {r.stderr[-300:]}")
 
 
+def test_watch_lost_race_no_alert_0717():
+    """metis-0717 п. 2: проигранная гонка за имя глазами дежурного. Самозапуск видит имя свободным (снимок пуст) и зовёт
+    `pantheon start --from tick`, а под блокировкой имени уже стоит живая копия (start-skip) или замок держит другой
+    процесс (start-busy). Код 4 — пропуск: в alerts нет «не вышло, код 1» (и никакого «не вышло»), счётчика сбоев нет."""
+    def env(name):
+        e = Env()
+        e.direction(name)
+        e.task(name[:2] + "-0001", name)
+        e.run("watch", t=T0)
+        e.board(name[:2] + "-0001", T0 + 10)
+        e.agents([])
+        return e
+    # живая копия под блокировкой: снимок прохода пуст, свежий claude agents у pantheon start её видит
+    e = env("lr-dir")
+    e.run("watch", t=T0 + 120, extra=_next_agents(e, [bg("lr-dir", "working", "7170bbbb-1", pid=49)]))
+    st = json.load(open(e.st("autostart.json"))).get("lr-dir", {})
+    check("\tstart-skip\tlr-dir\ttick\tуже работает" in _start_log(e),
+          f"0717 п.2: гонка не дошла до pantheon start под блокировкой: {_start_log(e)!r} {e.calls()}")
+    check("не вышло, код 1" not in e.alerts() and "не вышло" not in e.alerts() and "сбой" not in e.alerts(),
+          f"0717 п.2: проигранная гонка (живая копия) — тревога в alerts: {e.alerts()}")
+    check(not st.get("fails") and not st.get("pending"), f"0717 п.2: проигранная гонка засчитана сбоем: {st}")
+    # замок имени держит другой процесс
+    e2 = env("lb-dir")
+    lk = e2.st("hq-rw", "locks")
+    os.makedirs(lk, exist_ok=True)
+    holder = subprocess.Popen([PY311, "-I", "-c",
+                               "import fcntl,os,sys,time\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT,0o600)\n"
+                               "fcntl.flock(fd,fcntl.LOCK_EX)\nprint('ok',flush=True)\ntime.sleep(60)",
+                               os.path.join(lk, "start-lb-dir.lock")], stdout=subprocess.PIPE, text=True)
+    try:
+        check(holder.stdout.readline().strip() == "ok", "0717 п.2: держатель замка не взял замок")
+        e2.run("watch", t=T0 + 120)
+    finally:
+        holder.kill()
+        holder.wait()
+    st = json.load(open(e2.st("autostart.json"))).get("lb-dir", {})
+    check("\tstart-busy\tlb-dir\ttick" in _start_log(e2),
+          f"0717 п.2: гонка за замок не дошла до pantheon start: {_start_log(e2)!r} {e2.calls()}")
+    check("не вышло, код 1" not in e2.alerts() and "не вышло" not in e2.alerts() and "сбой" not in e2.alerts(),
+          f"0717 п.2: проигранная гонка (замок) — тревога в alerts: {e2.alerts()}")
+    check(not st.get("fails") and not st.get("pending"), f"0717 п.2: гонка за замок засчитана сбоем: {st}")
+
+
 def _next_agents(e, lst):
     """FAKE_AGENTS_NEXT: свежий claude agents под блокировкой имени (повторная проверка) видит lst."""
     p = os.path.join(e.tmp, "agents-next.json")
@@ -3420,6 +3463,12 @@ def test_skip_not_failure_other_paths_0708():
           f"0708: разовый запуск после пропуска погашен: {rec}")
     check("не вышел" not in e.sent() and f"oneshot-{oid}" not in e.queued(),
           f"0708: уведомление «не вышел» о пропуске: {e.sent()!r} {e.queued()}")
+    # тот же пропуск ещё два прохода подряд — тревога «ждёт: пропуск» не повторяется (одна строка, а не строка на проход)
+    for dt in (690, 705):
+        e.run("watch", t=T0 + dt, extra=_next_agents(e, held))
+    n_wait = e.alerts().count(f"разовый запуск {oid} ждёт: пропуск")
+    check(n_wait == 1 and not _resumed(e, "5ee70010-1") and not _oneshot_rec(e, oid).get("done_at"),
+          f"0708: тревога «разовый запуск … ждёт: пропуск» {n_wait} раз за 3 прохода: {e.alerts()} {_oneshot_rec(e, oid)}")
     e.run("watch", t=T0 + 720)                                 # окно свободно — запись исполняется
     check(_resumed(e, "5ee70010-1") and _oneshot_rec(e, oid).get("done_at"),
           f"0708: разовый запуск после пропуска не пошёл: {e.calls()} {_oneshot_rec(e, oid)}")

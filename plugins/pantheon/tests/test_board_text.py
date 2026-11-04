@@ -143,7 +143,17 @@ tasks = {"metis-0380": ("", {"type": "story", "id": "metis-0380", "title": EVIL,
          "metis-0301": ("", {"type": "task", "id": "metis-0301", "status": "todo", "parent": "metis-0300"})}
 bt = B.batches(tasks)
 check("2. пачки: только с задачами в работе, без заголовка; закрыто k из n",
-      bt == [("metis-0380", [("metis-0384", "review"), ("metis-0393", "doing")], 1, 4)], bt)
+      bt == [("metis-0380", [("metis-0384", "review"), ("metis-0393", "doing")], 1, 4, None)], bt)
+# поле pr пачки (metis-0757): в блок — только номер; поле не по шаблону (чужой текст) — без номера
+tasks["metis-0380"][1]["pr"] = "latark/agent-kit#290"
+bt = B.batches(tasks)
+check("2. пачка с полем pr: номер PR пачки в кортеже и в строке блока «Пачка metis-0380 (PR #290)»",
+      bt and bt[0][4] == 290 and "- Пачка metis-0380 (PR #290): " in B.render(dict(
+          B.collect(pan, os.path.join(ROOT, "u", "state"), tasks, T0, 5), prs=[]), T0), bt)
+tasks["metis-0380"][1]["pr"] = "x/" + EVIL + "#7"
+bt = B.batches(tasks)
+check("2. pr пачки не по шаблону — номера нет", bt and bt[0][4] is None, bt)
+del tasks["metis-0380"][1]["pr"]
 write(os.path.join(d, "STATUS.md"), "x\n01:40 " + EVIL + "\n", T0 - 60)
 write(os.path.join(pan, "directions", "old-dir", "STATUS.md"), "x\n", T0 - 2 * 86400)
 write(os.path.join(pan, "directions", "bad dir", "STATUS.md"), "x\n", T0 - 60)

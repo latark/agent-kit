@@ -387,6 +387,89 @@ def test_open_core_sandbox_build():
         A.gh_text, A.base_tip = real_text, real_tip
 
 
+def test_board_line_core():
+    """metis-0686 п. 3: PR с правкой функции из замыкания sandbox_build проходит весь путь доски — fetch (признак шлюза)
+    → кэш autoclose-prs.json → boardtext.open_prs → pr_line: в строке «ядро → сливает владелец», слов «не ядро» нет.
+    Соседний PR с правкой другой функции pantheon.py — «не ядро»."""
+    import hashlib
+    import boardtext as B
+    gate = A.load_gate()
+    src = open(CLI, encoding="utf-8").read()
+    in_closure = src.replace("    try:\n        with open(policy_path, \"rb\") as fh:",
+                             "    _x = 1\n    try:\n        with open(policy_path, \"rb\") as fh:", 1)
+    outside = src.replace("def autoclose_cmd(rest):\n", "def autoclose_cmd(rest):\n    _y = 1\n", 1)
+    check("0686 п.3: пробы правок отличаются от исходника", in_closure != src and outside != src)
+
+    def sha(n):
+        return hashlib.sha1(str(n).encode()).hexdigest()
+    base, mb, tip, h_core, h_plain = sha("b"), sha("m"), sha("t"), sha("h1"), sha("h2")
+    by_ref = {h_core: in_closure, h_plain: outside}
+
+    def fake_text(args, env=None, timeout=90):
+        if "compare" in args[1]:
+            return mb + "\n"
+        return by_ref.get(args[1].rsplit("ref=", 1)[1], src)
+    pp = "plugins/pantheon/lib/pantheon.py"
+    tmp, home, state, gh, env = make()
+    real_text, real_tip = A.gh_text, A.base_tip
+    A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
+    try:
+        write_gh(gh, "latark/agent-kit", "open", [
+            {"number": 249, "headRefName": "metis-0686-x", "body": "", "headRefOid": h_core, "baseRefOid": base,
+             "baseRefName": "main", "files": [{"path": pp}]},
+            {"number": 250, "headRefName": "metis-0687-y", "body": "", "headRefOid": h_plain, "baseRefOid": base,
+             "baseRefName": "main", "files": [{"path": pp}]}])
+        cache = os.path.join(state, "autoclose-prs.json")
+        os.makedirs(state, exist_ok=True)
+        errs = A.fetch(cache, os.path.join(state, "s.json"), T0, ["latark/agent-kit"], env=dict(env),
+                       core=lambda path: False,
+                       sandbox=lambda r, p, left=None: A.sandbox_core(r, p, env, gate=gate, left=left))
+        rows = {p["number"]: p for p in B.open_prs(cache) or []}
+        line = B.pr_line(rows[249], {}) if 249 in rows else ""
+        plain = B.pr_line(rows[250], {}) if 250 in rows else ""
+        check("0686 п.3: строка доски PR с правкой замыкания sandbox_build — «ядро → сливает владелец», без «не ядро»",
+              not errs and "ядро → сливает владелец" in line and "не ядро" not in line, f"{errs} {line!r}")
+        check("0686 п.3: строка доски PR с правкой другой функции pantheon.py — «не ядро»",
+              "не ядро → «принять» Зевса" in plain, plain)
+    finally:
+        A.gh_text, A.base_tip = real_text, real_tip
+        shutil.rmtree(tmp, True)
+
+
+def test_stub_four_consumers():
+    """metis-0711, Д ревью #272: заглушку шаблона одинаково узнают все четыре, кто считает пункты «Готово, когда»:
+    unchecked_criteria (закрытие и autoclose), criteria_count, no_criteria (direction_summary) и task_split (остаток). Та же
+    заглушка с двойным пробелом, табуляцией и пробелами по краям — для всех «нет критериев»; рядом с настоящим пунктом —
+    для всех один пункт."""
+    tmp, home, state, gh, env = make()
+    try:
+        hint = T.DONE_WHEN_HINT
+        stubs = {"дословно": hint, "двойной пробел": hint.replace(" ", "  ", 1),
+                 "табуляция внутри": hint.replace(" ", "\t", 2), "пробелы по краям": "  " + hint + " "}
+        for n, (name, stub) in enumerate(sorted(stubs.items())):
+            tid = f"demo-02{n:02d}"
+            p = put(home, "demo", tid, status="todo", created="2026-10-27", body="Готово, когда:\n- [ ] " + stub + "\n")
+            head, body = T.read(p)
+            tasks = {tid: (p, head, body)}
+            got = {"unchecked_criteria": T.unchecked_criteria(head, body), "criteria_count": T.criteria_count(body),
+                   "no_criteria": T.direction_summary(tasks)["demo"]["no_criteria"]}
+            nid, np_ = T.task_split(home, T0, tid, "Остаток " + name)
+            got["split"] = [x for _, x in T.done_criteria(T.read(np_)[1])]
+            want = {"unchecked_criteria": 0, "criteria_count": "не заданы", "no_criteria": 1, "split": [hint]}
+            check(f"0711: заглушка ({name}) — все четыре: нет критериев", got == want, f"{got}")
+        p = put(home, "demo", "demo-0299", status="todo", created="2026-10-27",
+                body="Готово, когда:\n- [ ] " + hint.replace(" ", "  ", 1) + "\n- [ ] настоящий\n")
+        head, body = T.read(p)
+        got = {"unchecked_criteria": T.unchecked_criteria(head, body), "criteria_count": T.criteria_count(body),
+               "no_criteria": T.direction_summary({"demo-0299": (p, head, body)})["demo"]["no_criteria"]}
+        nid, np_ = T.task_split(home, T0, "demo-0299", "Остаток с пунктом")
+        got["split"] = [x for _, x in T.done_criteria(T.read(np_)[1])]
+        check("0711: заглушка рядом с настоящим пунктом — все четыре видят один пункт",
+              got == {"unchecked_criteria": 1, "criteria_count": "0 из 1", "no_criteria": 0, "split": ["настоящий"]}, f"{got}")
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def test_core_budget_and_rename():
     """metis-0711: признак ядра в бюджете fetch (Д1), переименование pantheon.py (Д2), gh вершины ветки — из PANTHEON_GH (С1)."""
     import hashlib
@@ -834,6 +917,8 @@ def main():
     test_reopen_and_eviction()
     test_mutants()
     test_open_core_sandbox_build()
+    test_board_line_core()
+    test_stub_four_consumers()
     test_fetch_budget()
     test_former_heads()
     test_core_budget_and_rename()

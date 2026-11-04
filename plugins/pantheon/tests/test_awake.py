@@ -579,6 +579,31 @@ def test_wake_waiting():
     check(not e.calls, f"разбудил не ждущую: {e.calls}")
 
 
+def test_wake_waiting_owner_elsewhere_0708():
+    """metis-0708: ждущее окно будят задачей, которую оно может взять. 02.11 21:23 окно metis-pantheon подняли с
+    «возьми metis-0272», а её вела другая сессия (owner agent-kit-47) — окно отказалось и встало без работы. Задача на
+    другой сессии — мимо: берётся следующая своя (owner — само направление, его команда dev-*/argus-* или пусто); своих
+    нет — окно не будят вовсе."""
+    e = Env()
+    e.agent("hermes-site", "blocked", needs="waiting for your answer")
+    e.task("hermes-site", "чужая", owner="agent-kit-47", priority=1)
+    own = e.task("hermes-site", "своя команды", owner="dev-opus", priority=2)
+    AW.wake_waiting(e.agents_list, [], DOMS, MON)
+    check(e.calls == [("hermes-site", f"[Пантеон: есть задача без блокера] возьми {own} из очереди", "wake-waiting")],
+          f"0708: ждущему окну передана задача другой сессии: {e.calls}")
+    e2 = Env()
+    e2.agent("hermes-site", "blocked", needs="waiting for your answer")
+    e2.task("hermes-site", "чужая", owner="agent-kit-47")
+    e2.task("hermes-site", "чужая Зевса", owner="zeus")
+    AW.wake_waiting(e2.agents_list, [], DOMS, MON)
+    check(not e2.calls, f"0708: окно разбудили, хотя своих задач нет: {e2.calls}")
+    e3 = Env()
+    e3.agent("hermes-site", "blocked", needs="waiting for your answer")
+    mine = e3.task("hermes-site", "своя", owner="hermes-site")
+    AW.wake_waiting(e3.agents_list, [], DOMS, MON)
+    check(len(e3.calls) == 1 and mine in e3.calls[0][1], f"0708: своя задача (owner = направление) не передана: {e3.calls}")
+
+
 def test_skipped_no_alert():
     # metis-0291: код «пропуск» (SKIPPED) — не сбой: ни тревоги, ни засчитанной попытки (limit_resume и wake_waiting)
     e = Env()

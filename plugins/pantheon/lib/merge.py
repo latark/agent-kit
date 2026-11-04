@@ -55,7 +55,8 @@ P.MANAGED (/Library/…/managed-settings.json) не совпал с managed-sett
 administrator privileges: Touch ID или пароль) «Обновить управляемые настройки guard до версии X». После касания root
 копирует файл рядом, сверяет sha256 с прочитанным проходом и переносит на место (root:wheel, 644). Отказ или
 MANAGED_WAIT без касания — карточка «Руками» с командой sudo install и тревога; окно на ту же версию — не чаще
-MANAGED_RETRY (STATE/managed-update.json). Файл совпал (по касанию или командой) — тик закрывает карточку. Файла в
+MANAGED_RETRY (STATE/managed-update.json; попытка пишется до окна, и оборванный после окна проход её не теряет).
+Файл совпал (по касанию или командой) — тик закрывает карточку. Файла в
 /Library нет — не отставание: первый раз его ставит владелец. Тик зовёт проход и без заявок, когда отстали
 (managed_check).
 Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Помощник — только STATE/bin/pantheon-touchid с
@@ -1050,6 +1051,9 @@ def managed_pass():
     path_, data, version = src
     sha = hashlib.sha256(data).hexdigest()
     st = _mstate()
+    # попытка засчитана до окна (ревью argus-274b, Д1): проход оборвали после окна (срок тика, сбой карточки) — следующий
+    # не покажет окно на ту же версию раньше MANAGED_RETRY, а не каждую минуту
+    P.write_json(P.path(MANAGED_STATE), dict(st, sha=sha, version=version, asked=int(P.now()), result="окно показано"))
     res = ask_root(root_script(path_, P.MANAGED, sha), f"Обновить управляемые настройки guard до версии {version}")
     if res == "ok":
         try:

@@ -82,6 +82,7 @@ open(os.path.join(bindir, "gh"), "w").write(
     "#!/bin/sh\n"
     f"for a in \"$@\"; do printf '%s\\0' \"$a\"; done >> '{ghlog}'; printf '\\001' >> '{ghlog}'\n"
     f"if [ \"$1 $2\" = 'pr list' ]; then cat '{openpr}' 2>/dev/null; exit 0; fi\n"
+    "if [ \"$1 $2\" = 'pr edit' ]; then echo https://github.com/x/y/pull/$3; exit 0; fi\n"
     "echo https://github.com/x/y/pull/9\n")
 os.chmod(os.path.join(bindir, "gh"), 0o755)
 
@@ -122,6 +123,22 @@ check("start: код 0, копия создана", r.returncode == 0 and os.pat
 check("start: ветка batch/metis-0900 от origin/main",
       os.path.isdir(wt) and git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "batch/metis-0900"
       and git(wt, "rev-parse", "HEAD") == main_sha)
+sys.path.insert(0, LIB)
+import tasks as T  # noqa: E402
+
+
+def story_head():
+    return T.read(os.path.join(tdir, "metis-0900.md"))[0]
+
+
+def story_body():
+    return T.read(os.path.join(tdir, "metis-0900.md"))[1]
+
+
+check("start: в карточке пачки branch = batch/metis-0900, pr нет, строка в журнале",
+      story_head().get("branch") == "batch/metis-0900" and not story_head().get("pr")
+      and "ветка пачки batch/metis-0900" in story_body(), str(story_head()))
+check("start: шапка пачки с branch проходит проверку", T.check_head(story_head())[0] == [], T.check_head(story_head()))
 r = cli(repo, "batch", "start", "metis-0900")
 check("start повторно → код 1, «уже есть»", r.returncode == 1 and "уже есть" in r.stderr, r.stderr)
 r = cli(wt, "batch", "start", "metis-0900")
@@ -169,6 +186,9 @@ check("влитая ветка metis-0902-… засчитана: Closes на о
       bool(create) and create[0][7].startswith("Пачка metis-0900") and create[0][8] == "--body"
       and "Closes metis-0901, metis-0902" in create[0][9] and "не вошли" not in create[0][9].lower(), str(create))
 check("pr: ссылка gh в выводе", "pull/9" in r.stdout, r.stdout)
+check("pr: в карточке пачки pr = x/y#9 и branch, строка «PR пачки» в журнале",
+      story_head().get("pr") == "x/y#9" and story_head().get("branch") == "batch/metis-0900"
+      and "PR пачки x/y#9" in story_body() and T.check_head(story_head())[0] == [], str(story_head()))
 
 # PR уже открыт — повтор обновляет его тело, второго не создаёт
 os.remove(ghlog)
@@ -178,6 +198,7 @@ calls = gh_calls()
 check("повтор при открытом PR → gh pr edit 17 с новым телом, create нет",
       r.returncode == 0 and any(c[:3] == ["pr", "edit", "17"] and "Closes metis-0901, metis-0902" in c[-1] for c in calls)
       and not any(c[:2] == ["pr", "create"] for c in calls), str(calls))
+check("повтор: pr пачки — открытый PR 17 (x/y#17)", story_head().get("pr") == "x/y#17", str(story_head()))
 
 # коммит «часть <id>» — задача сделана не вся: Closes ей нет, в теле нет слова «часть» (autoclose снял бы весь PR)
 open(os.path.join(wt, "d.txt"), "w").write("d\n")
@@ -213,9 +234,45 @@ check("stderr: «metis-0905: неотмечено 2 — отметь пункт�
 
 # GH_REPO не доходит до gh
 open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho \"[$GH_REPO]\" >> '{ghlog}.env'\n")
-cli(wt, "batch", "pr", "metis-0900")
+r = cli(wt, "batch", "pr", "metis-0900")
 check("pr: GH_REPO из окружения до gh не доходит",
       os.path.exists(ghlog + ".env") and set(open(ghlog + ".env").read().split()) == {"[]"})
+check("gh не вернул ссылку PR — код 0, предупреждение, прежнее pr пачки цело",
+      r.returncode == 0 and "поле pr пачки metis-0900 не записано" in r.stderr and story_head().get("pr") == "x/y#17",
+      r.stderr + str(story_head()))
+open(os.path.join(bindir, "gh"), "w").write("#!/bin/sh\nexit 1\n")
+r = cli(wt, "batch", "pr", "metis-0900")
+check("gh упал — его код, pr пачки не тронуто", r.returncode == 1 and story_head().get("pr") == "x/y#17", r.stderr)
+
+# карточка пачки: PR пачки (ссылка, состояние из кэша gh) и ветка
+tk = T.load_tasks(home, T.WORK_TYPES)
+c, b = T.render_story_card(tk["metis-0900"][1], tk["metis-0900"][2], "x.md", 0, tk,
+                           child_links={"metis-0900": ([("x/y", 17, False)], [])})
+check("карточка пачки: свойства «Ветка» и «PR пачки» (ссылка на GitHub)",
+      c.get("Ветка") == "batch/metis-0900" and c.get("PR пачки") == "https://github.com/x/y/pull/17", str(c))
+check("карточка пачки: строка «PR пачки: [PR #17](…) · x/y · открыт · ветка `batch/metis-0900`»",
+      "> **PR пачки:** [PR #17](https://github.com/x/y/pull/17) · x/y · открыт · ветка `batch/metis-0900`" in b, b)
+h0 = dict(tk["metis-0900"][1], pr=None)
+c, b = T.render_story_card(h0, "", "x.md", 0, tk)
+check("карточка пачки без PR: «Ветка пачки: … · PR ещё нет», свойства «PR пачки» нет",
+      c.get("PR пачки") is None and "> **Ветка пачки:** `batch/metis-0900` · PR ещё нет" in b, b)
+check("шапка: pr и branch не по шаблону — ошибки проверки",
+      any("pr «" in e for e in T.check_head(dict(story_head(), pr="evil text"))[0])
+      and any("branch «" in e for e in T.check_head(dict(story_head(), branch="a b"))[0]))
+
+# слитый PR пачки: плановый проход закрывает задачи из Closes, «не вошли» — открыты, саму пачку (id в ветке) не трогает
+for i in ("metis-0901", "metis-0902"):
+    T.task_set(home, 1, i, {"status": "review"}, actor="тест")
+body_merge = ("Пачка metis-0900: x\n\nЗадачи пачки:\n- metis-0901 · в ветке · a\n- metis-0902 · не вошла · b\n\n"
+              "Не вошли в ветку (коммитов с их номером нет), после слияния остаются открытыми: metis-0902\n\nCloses metis-0901\n")
+log, errs = [], {}
+ok = AC.close_pr(home, 2, "x/y", {"number": 17, "headRefName": "batch/metis-0900", "body": body_merge,
+                                  "mergedAt": "2026-11-03T12:00:00Z", "oid": "abcdef1"},
+                 {"metis-pantheon"}, T, None, log, errs)
+tk = T.load_tasks(home, T.WORK_TYPES)
+check("слит PR пачки: metis-0901 done, metis-0902 открыта (review), пачка metis-0900 статус не сменила",
+      ok and not errs and tk["metis-0901"][1]["status"] == "done" and tk["metis-0902"][1]["status"] == "review"
+      and tk["metis-0900"][1]["status"] == "doing", f"{log} {errs}")
 
 r = subprocess.run([PY311, "-I", RUN_PY, "help"], env=env, capture_output=True, text=True)
 check("справка называет batch start|pr", "batch start|pr" in r.stdout)

@@ -1767,9 +1767,12 @@ def oneshots(agents, registry, doms, t):
         if rc == P.SKIPPED:
             # metis-0708: под блокировкой имени «не надо» (окно уже работает, его поднимает другой процесс) — задание не
             # передано, но это не сбой: запись снова ждёт до срока, без уведомления «не вышел»
+            # тревога — только при смене причины ожидания, как у ожидания выше: тот же пропуск каждый проход (окно
+            # занято, пока запись ждёт срока) — одна строка в alerts, а не строка на проход (metis-0708, ревью argus)
             why = f"пропуск — {P.SKIP_WHY}"
             N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
-            P.alert(f"разовый запуск {oid} ждёт: {why} (срок {P.stamp(float(it['expires']))[11:]})", "watch")
+            if why != it.get("wait"):
+                P.alert(f"разовый запуск {oid} ждёт: {why} (срок {P.stamp(float(it['expires']))[11:]})", "watch")
             continue
         # красная память запуск больше не откладывает ([sb-simplify] п. 5): pantheon start только предупреждает
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
