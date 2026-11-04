@@ -17,6 +17,7 @@ hooks/hookd.sh, сборка hooks/hookd-build.sh, шаблон службы lau
 - сборка: SRC в hookd.sh — SHA-256 исходника клиента; несовпадение — метка .failed, без сборки;
 - служба: шаблон plist — сокет 0600 в ~/.cache/pantheon/hookd, без KeepAlive, ThrottleInterval 1–2 с.
 """
+import ast
 import hashlib
 import json
 import os
@@ -857,6 +858,24 @@ def test_copy_daemon(root, client):
     stop(p3)
 
 
+def test_log_home(root, client):
+    """Журнал откатов — только $HOME окружения вызова: клиент без аргументов (usage) пишет в подменённый HOME.
+    Повод — строки usage в настоящем журнале от прогрева клиента без env (bench.py до правки)."""
+    home = os.path.join(root, "lh")
+    os.makedirs(home)
+    r = subprocess.run([client], input=b"", capture_output=True, env=base_env(home), timeout=SUB_TIMEOUT)
+    check("клиент без аргументов — код 2, причина usage в журнале подменённого HOME",
+          r.returncode == 2 and reasons(home) == ["usage"], (r.returncode, r.stderr[-200:], fb_lines(home)))
+    with open(os.path.join(PLUGIN, "scripts", "bench.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    calls = [n for f in tree.body if isinstance(f, ast.FunctionDef) and f.name in ("main_hookd", "run_hookd")
+             for n in ast.walk(f) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr in ("run", "Popen") and getattr(n.func.value, "id", "") == "subprocess"]
+    check("bench.py --hookd: каждый запуск подпроцесса — с env временного HOME, журнал настоящего HOME не трогает",
+          len(calls) >= 4 and all(any(k.arg == "env" for k in c.keywords) for c in calls),
+          [(c.lineno, [k.arg for k in c.keywords]) for c in calls])
+
+
 def test_canary(root, client, sock):
     work = os.path.join(root, "work")
     ev = deny_event(work)
@@ -922,6 +941,7 @@ def main():
             test_copy_daemon(root, client)
             test_canary(root, client, sock)
             test_supply(root, client)
+            test_log_home(root, client)
             test_background_build(root)
             # демон убит SIGKILL: сокет остался, слушателя нет — медленный путь
             stop(p)

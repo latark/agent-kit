@@ -151,7 +151,9 @@ def main_hookd(a):
                            text=True, timeout=300)
         if r.returncode != 0:
             sys.exit(f"bench: клиент не собран: {r.stderr.strip()[-300:]}")
-        subprocess.run([r.stdout.strip()], input=b"", capture_output=True, timeout=30)  # первая проверка файла macOS
+        # первая проверка нового файла macOS (~0,4 с) — не в замере. Только с env временного HOME: клиент без
+        # аргументов пишет «usage» в журнал откатов $HOME, и без env он попал бы в настоящий
+        subprocess.run([r.stdout.strip()], input=b"", capture_output=True, env=env, timeout=30)
         sock = os.path.join(home, ".cache", "pantheon", "hookd", "hookd.sock")
         if len(sock) > 103:
             sys.exit(f"bench: путь сокета длиннее 103 байт ({sock}) — задай TMPDIR короче")
