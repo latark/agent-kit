@@ -391,7 +391,9 @@ def inside(p, roots):
 
 # git вне песочницы в папках, которые пишет роль: ни монитора файлов, ни хуков, ни сети, ни подмодулей (metis-0614).
 # -c перекрывает значения из конфига репозитория; фильтры и include так не снять — их отсекает unsafe_config.
-GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+# --no-replace-objects (и GIT_NO_REPLACE_OBJECTS в окружении, как у шлюза) — refs/replace в клоне не подменяют содержимое
+# копии при том же HEAD и чистом status (metis-0796, Д1); attributes и alternates клона на дерево копии не влияют
+GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
             "-c", "submodule.recurse=false")
 
 
@@ -410,6 +412,7 @@ def checked(d, clone, common, gitdir):
 def git(d, *args, timeout=30):
     """Вывод git в папке d (без GIT_* окружения, с GIT_SAFE; Repo — через проверенный gitdir); None — сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     loc = ["-C", d] + ([f"--git-dir={d.gitdir}", f"--work-tree={d}"] if isinstance(d, Repo) else [])
     try:
         r = subprocess.run(["git", *loc, *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout,
@@ -1447,6 +1450,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         ({"full_why": full_why} if full_why else {})
     if src:
         extra["src"] = src
+    if expect:   # test --sha: итог running несёт pin, live_test не сцепляет с ним обычную заявку (metis-0796)
+        extra["pin"] = True
     save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
                             **({"script": script} if script else {}), **extra})
     log, fd = new_log(rid)
@@ -1533,7 +1538,7 @@ def run_test_at(rid, d, req, window, qdir, roots):
     запись tests на полный SHA. Копия снимается всегда; бывший head открытого PR — отказ, как у test без --sha."""
     script, common = req.get("script"), d.common
     ref = req.get("sha")
-    base = {"kind": "test", "src": d, **({"script": script} if script else {})}
+    base = {"kind": "test", "src": d, "pin": True, **({"script": script} if script else {})}
 
     def fail(why, **kw):
         log_event(id=rid, kind="refused", window=window, dir=d, why=why)
@@ -1692,7 +1697,8 @@ def trusted_clone(d):
 def git_env():
     """Окружение git копии: только конфиг клона — ни системного, ни ~/.gitconfig, ни GIT_* тика, без вопросов."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+               GIT_NO_REPLACE_OBJECTS="1")
     return env
 
 
@@ -2897,7 +2903,7 @@ def cmd_request(kind, args):
             head, _clean = head_state(d)
         if head:
             req["sha"] = head
-            prev = live_test(d, head, f.get("--script"))
+            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")))
             if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
                 print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
                 if not wait:
@@ -2933,7 +2939,7 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app", "script") if req.get(k)}}, ensure_ascii=False,
+                     **{k: req[k] for k in ("sha", "app", "script", "pin") if req.get(k)}}, ensure_ascii=False,
                     indent=1))
         finally:
             os.close(dfd)
@@ -2952,8 +2958,9 @@ def cmd_request(kind, args):
     return wait_result(q, rid, wait)
 
 
-def live_test(d, sha, script=None):
-    """(папка заявок, ID) живой заявки test на этот head и эту папку или None: в очереди (лежит .req.json) или идёт
+def live_test(d, sha, script=None, pin=False):
+    """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
+    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json) или идёт
     (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
     d = os.path.realpath(d)
     now = P.now()
@@ -2972,7 +2979,7 @@ def live_test(d, sha, script=None):
                 except ValueError:
                     continue
                 if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
-                        or res.get("script") != script:
+                        or res.get("script") != script or bool(res.get("pin")) != pin:
                     continue
                 where = res.get("src") or res.get("dir")
                 if not isinstance(where, str) or os.path.realpath(where) != d:
