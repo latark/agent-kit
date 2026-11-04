@@ -23,7 +23,9 @@ background, файл ×3 дольше, metis-0728); в начале прогон
   - сам tests/test_*.py одной из папок — он сам; удалённый файл тестов — ничего;
   - есть в карте — его файлы тестов; пустой список — файл не задел ни один тест (AGENTS.md);
   - иначе (новый файл, карты нет или она другой версии) — весь набор: неизвестное гоняет всё.
-Файлы тестов, которых карта не знает (новые после её сборки) или которые при сборке упали (broken), идут всегда.
+Файлы тестов, которых карта не знает (новые после её сборки), которые при сборке упали (broken) или читают дерево
+(readers: линтеры словаря и путей открывают десятки файлов, ничего из них не запуская, metis-0791), идут всегда — при
+любой правке, но в files их связей нет, и правка, например, bin/heavy не тянет их как зависимых.
 Карта хранит sha256 каждого файла тестов (hashes): файл, изменённый после сборки (хеш другой), мог начать задевать новые
 файлы — его связи не верны, и он идёт при любом изменении (в выводе: «изменены после сборки карты»); таких файлов
 сколько бы их ни было, они идут все, а не весь набор (metis-0782). Так правка теста после сборки не пропускает нужные
@@ -154,7 +156,7 @@ STUBS = {"ioreg": "exit 0", "pmset": 'echo "Now drawing from AC Power"', "scutil
 PLATFORM = os.environ.get("RUN_TESTS_PLATFORM") or sys.platform
 # Карта для --affected (metis-0451): строит scripts/affected-map.py прогоном всех тестов, правится только им.
 MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "affected-map.json")
-MAP_VERSION = 2
+MAP_VERSION = 3  # 3 — readers (metis-0791): старый раннер новую карту не берёт и гонит всё, а не теряет их
 # Карта старше файла тестов (правка после сборки): связи этого файла по карте неверны, файл идёт всегда (metis-0782:
 # сколько бы таких ни было — весь набор не из-за них).
 # Общие файлы: их правка гонит весь набор, что бы ни говорила карта (их грузит почти каждый тест или они меняют
@@ -247,7 +249,8 @@ def changed_files(pdir, base):
 
 
 def load_map(path=None):
-    """(карта {"tests": {метка}, "always": {метка}, "files": {путь: {метка}}} или None, почему None)."""
+    """(карта {"tests": {метка}, "always": {метка}, "files": {путь: {метка}}} или None, почему None). always —
+    упавшие при сборке (broken) и читающие дерево (readers, metis-0791): их связей в files нет, идут при любой правке."""
     path = MAP if path is None else path
     try:
         with open(path, encoding="utf-8") as fh:
@@ -257,7 +260,8 @@ def load_map(path=None):
         tests = list(raw["tests"])
         files = {k: {tests[i] for i in v} for k, v in raw["files"].items()}
         hashes = {k: str(v) for k, v in raw["hashes"].items()}
-        return {"tests": set(tests), "always": set(raw.get("broken") or ()), "files": files, "hashes": hashes}, None
+        always = set(raw.get("broken") or ()) | set(raw.get("readers") or ())
+        return {"tests": set(tests), "always": always, "files": files, "hashes": hashes}, None
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as e:
         return None, f"карту {os.path.basename(path)} не прочесть — {type(e).__name__}: {e}"
 
@@ -645,7 +649,8 @@ def pick_affected(items, dirs, base, map_path=None):
         print(f"{head}: изменено {len(changed)}, ни один не проверяется тестами по карте — нечего гонять "
               f"({', '.join(changed[:5])}{' …' if len(changed) > 5 else ''})")
         return None, 3
-    extra = f", из них всегда (карта их не знает или они упали при сборке): {', '.join(always)}" if always else ""
+    extra = (f", из них всегда (карта их не знает, упали при её сборке или читают дерево): {', '.join(always)}"
+             if always else "")
     if stale:
         extra += f"; изменены после сборки карты, идут всегда (пересобрать: affected-map.py): {', '.join(stale)}"
     print(f"{head}: изменено {len(changed)}, тестов {len(chosen)} из {len(items)}{extra}", flush=True)

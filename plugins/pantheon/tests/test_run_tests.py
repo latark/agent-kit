@@ -314,11 +314,11 @@ check("карта: AGENTS.md не задевает ни один тест", amap
       amap["files"].get("AGENTS.md"))
 
 
-def mkmap(tests, files, broken=(), version=2, hashes=None):
+def mkmap(tests, files, broken=(), version=3, hashes=None, readers=()):
     p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
     idx = {lb: i for i, lb in enumerate(tests)}
     with open(p, "w") as fh:
-        json.dump({"version": version, "tests": list(tests), "broken": list(broken),
+        json.dump({"version": version, "tests": list(tests), "broken": list(broken), "readers": list(readers),
                    "hashes": {lb: "0" for lb in tests} if hashes is None else hashes,
                    "files": {k: [idx[x] for x in v] for k, v in files.items()}}, fh)
     return p
@@ -359,11 +359,20 @@ check("select: новый файл тестов (карта не знает) и 
 sel = R.select(["README.md"], "/r", ITEMS, AM2)
 check("select: ничего не задето — «всегда» (не из карты, упавшие при сборке) всё равно идут",
       sel == ([ITEMS[1], ITEMS[2]], [], ["alpha/test_y.py", "beta/test_b.py"]), sel)
-for body, why in (("{", "JSONDecodeError"), ('{"version": 3, "tests": [], "files": {}}', "версии 3"),
+# metis-0791: читающий дерево (readers) — всегда, даже когда правка (README) ни одного теста не задела; его связей в
+# files нет, поэтому правка файла, который он только читал, не тянет других
+AM3, _ = R.load_map(mkmap(MT[:3], {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": []},
+                          readers=["beta/test_b.py"]))
+sel = R.select(["README.md"], "/r", ITEMS, AM3)
+check("select: readers идут при любой правке, в том числе README", sel == ([ITEMS[2]], [], ["beta/test_b.py"]), sel)
+sel = R.select(["plugins/alpha/lib/x.py"], "/r", ITEMS, AM3)
+check("select: правка x.py — его тест и readers, test_y — нет", sel == ([ITEMS[0], ITEMS[2]], [], ["beta/test_b.py"]),
+      sel)
+for body, why in (("{", "JSONDecodeError"), ('{"version": 2, "tests": [], "files": {}}', "версии 2"),
                   ('{"version": 1, "tests": [], "files": {}}', "версии 1"),
-                  ('{"version": 2, "hashes": {}, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
-                  ('{"version": 2, "tests": [], "files": {}}', "KeyError"),
-                  ('{"version": 2, "files": {}}', "KeyError"), ("[]", "AttributeError")):
+                  ('{"version": 3, "hashes": {}, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
+                  ('{"version": 3, "tests": [], "files": {}}', "KeyError"),
+                  ('{"version": 3, "files": {}}', "KeyError"), ("[]", "AttributeError")):
     p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
     with open(p, "w") as fh:
         fh.write(body)
@@ -610,6 +619,23 @@ put(os.path.join(ma, "lib", "twin_b.sh"), TWIN)
 put(os.path.join(ma, "tests", "test_twin.py"), HDR + "a, b = (open(os.path.join(P, 'lib', f)).read() for f in "
     "('twin_a.sh', 'twin_b.sh'))\nassert a == b, 'копии разошлись'\nsubprocess.run(['/bin/sh', os.path.join(P, "
     "'lib', 'twin_a.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+# metis-0791: текст `python -c` в папке плагина (первая строка — путь папки) и rmtree временной папки с lib/ (open с
+# dir_fd хук видел от текущей папки) не связывают тест с файлами плагина
+put(os.path.join(ma, "tests", "test_cscript.py"), HDR + "subprocess.run([sys.executable, '-I', '-c', '\\nimport os\\n"
+    "x = 1\\n'], cwd=P, check=True)\n" + OK2)
+put(os.path.join(ma, "tests", "test_rmtree.py"), HDR + "t = tempfile.mkdtemp()\nos.makedirs(os.path.join(t, 'lib', "
+    "'tree'))\nopen(os.path.join(t, 'lib', 'x.py'), 'w').close()\nos.chdir(P)\nshutil.rmtree(t)\n" + OK2)
+# читает дерево: открывает 21 файл из трёх папок, ничего из них не запуская; s.sh запускает — эта связь остаётся
+READ_DIRS = ("docs/a", "docs/b", "docs/c")
+for sub in READ_DIRS:
+    for i in range(7):
+        put(os.path.join(ma, sub, f"f{i}.md"), f"{sub} {i}\n")
+put(os.path.join(ma, "tests", "test_reader.py"), HDR + "for sub in " + repr(READ_DIRS) + ":\n    for f in "
+    "sorted(os.listdir(os.path.join(P, sub))):\n        open(os.path.join(P, sub, f)).read()\n"
+    "subprocess.run(['/bin/sh', os.path.join(P, 'lib', 's.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+# читает меньше порога (20 файлов, metis-0791): обычный тест, связи со всеми прочитанными
+put(os.path.join(ma, "tests", "test_fewreads.py"), HDR + "for sub in " + repr(READ_DIRS[:2]) + ":\n    for f in "
+    "sorted(os.listdir(os.path.join(P, sub))):\n        open(os.path.join(P, sub, f)).read()\n" + OK2)
 put(os.path.join(ma, "tests", "test_fail.py"), "import sys\nprint('ok   a')\nsys.exit(1)\n")
 git(mrepo, "init", "-q", "-b", "main")
 git(mrepo, "add", "-A")
@@ -625,20 +651,33 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/data.txt", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/front.py", {"alpha/test_lazy.py"}),
                    ("plugins/alpha/lib/lazy.py", {"alpha/test_lazy.py"}),
-                   ("plugins/alpha/lib/s.sh", {"alpha/test_sh.py"}),
                    ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py"}),
                    ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
                    ("plugins/alpha/lib/twin_b.sh", {"alpha/test_twin.py"}),
+                   # s.sh запускает и test_reader: запуск у читающего дерево остаётся связью
+                   ("plugins/alpha/lib/s.sh", {"alpha/test_sh.py", "alpha/test_reader.py"}),
+                   ("plugins/alpha/docs/a/f0.md", {"alpha/test_fewreads.py"}),
+                   ("plugins/alpha/docs/c/f6.md", set()),
                    ("AGENTS.md", set())):
     check(f"affected-map: {path} → {sorted(want) or 'ничего'}", F.get(path) == want, (F.get(path), why))
-check("affected-map: version 2, hashes — sha256 каждого файла тестов", mm.get("hashes") and all(
+# metis-0791: ни `python -c` с переводом строки, ни rmtree временной папки с lib/ не связывают тест с файлами плагина
+for lb in ("alpha/test_cscript.py", "alpha/test_rmtree.py"):
+    got = sorted(p for p, v in F.items() if lb in v and not p.startswith("plugins/alpha/tests/"))
+    check(f"affected-map: {lb} не задевает файлов плагина", got == [], got)
+with open(mout, encoding="utf-8") as fh:
+    RAW = json.load(fh)
+check("affected-map: readers — только читающий дерево (21 файл из 3 папок), test_fewreads (14 из 2) — нет",
+      RAW.get("readers") == ["alpha/test_reader.py"], RAW.get("readers"))
+check("affected-map: readers идут всегда (load_map)", "alpha/test_reader.py" in mm["always"], mm["always"])
+check("affected-map: version 3, hashes — sha256 каждого файла тестов", RAW.get("version") == 3 and mm.get("hashes") and all(
     mm["hashes"].get(lb) == hashlib.sha256(open(os.path.join(ma, "tests", lb.split("/")[1]), "rb").read()).hexdigest()
     for lb in mm["tests"]), mm.get("hashes"))
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
-    "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py"} and mm["always"] == {"alpha/test_fail.py"}, mm)
+    "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py", "alpha/test_cscript.py", "alpha/test_rmtree.py",
+    "alpha/test_reader.py", "alpha/test_fewreads.py"} and RAW.get("broken") == ["alpha/test_fail.py"], mm)
 with open(os.path.join(ma, "lib", "x.py")) as fh:
     check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')
 r = subprocess.run([sys.executable, "-I", MAPPER, "--out", mout, mkplugin({"test_a.py": OK2})], env=GENV,

@@ -129,7 +129,7 @@ def make_map():
     fl = {f"plugins/kit/lib/{x}.txt": [i] for i, x in enumerate(NAMES)}
     fl.update({"plugins/kit/bin/heavy": [0], "plugins/kit/tests/_h.py": [0], "tools/run-tests.py": [],
                "tools/affected-map.json": [], ".pantheon-verify": [], "README.md": []})
-    return json.dumps({"version": 2, "head": "x", "python": "3", "tests": LABELS, "broken": [],
+    return json.dumps({"version": 3, "head": "x", "python": "3", "tests": LABELS, "broken": [],
                        "hashes": {lb: h(x) for lb, x in zip(LABELS, NAMES)}, "files": fl}, indent=1)
 
 
