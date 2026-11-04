@@ -58,19 +58,28 @@ tasks = store(H("metis-0750", type="story", title="Пачка П5", status="doin
               H("metis-0773", parent="metis-0749", status="done", mode="single"),
               H("metis-0780", status="done"))
 cache = {"merged": {R: [{"number": 294, "headRefName": "batch/metis-0750", "body": "Closes metis-0688, metis-0773 и 0780",
-                         "mergedAt": "2026-11-04T04:24:00Z", "oid": "a" * 40},
-                        {"number": 250, "headRefName": "metis-0750-old", "body": "", "oid": "b" * 40}]},
-         "open_prs": {R: [{"number": 300, "branch": "batch/metis-0751", "closes": ["metis-0751"], "part": False}]}}
+                         "mergedAt": "2026-11-04T04:24:00Z", "oid": "a" * 40, "cross": False},
+                        {"number": 250, "headRefName": "metis-0750-old", "body": "", "oid": "b" * 40, "cross": False},
+                        {"number": 296, "headRefName": "batch/metis-0750", "body": "Closes metis-0689", "oid": "c" * 40,
+                         "cross": True},
+                        {"number": 297, "headRefName": "batch/metis-0750", "body": "Closes metis-0689", "oid": "d" * 40}]},
+         "open_prs": {R: [{"number": 300, "branch": "batch/metis-0751", "closes": ["metis-0751"], "part": False,
+                           "cross": False},
+                          {"number": 305, "branch": "batch/metis-0750", "closes": ["metis-0750"], "part": False,
+                           "cross": True}]}}
 idx = A.pr_index(cache)
 check("0799: pr_index хранит ветку PR (слитый — headRefName, открытый — branch)",
       idx["metis-0750"][0]["branch"] == "batch/metis-0750" and idx["metis-0751"][0]["branch"] == "batch/metis-0751", idx)
 bp = T.batch_pr("metis-0750", idx, [R])
 check("0799: batch_pr — PR с ветки batch/<id>, слит, закрытые им задачи без самой пачки; ветка metis-0750-old — не PR пачки",
       bp == (R, 294, True, ["metis-0688", "metis-0773", "metis-0780"]), bp)
+check("0799: PR из форка (cross) и строка кэша без cross — ветки в pr_index нет, ссылка на PR остаётся",
+      [x["branch"] for x in idx["metis-0689"]] == ["", ""] and [x["number"] for x in idx["metis-0689"]] == [296, 297],
+      idx.get("metis-0689"))
 check("0799: batch_pr — репозиторий не направления пачки не берём", T.batch_pr("metis-0750", idx, ["latark/other"]) is None)
 check("0799: batch_pr — открытый PR пачки (ветка из open_prs)", T.batch_pr("metis-0751", idx, None)[:3] == (R, 300, False))
 idx2 = A.pr_index({"merged": cache["merged"], "open_prs": {R: [{"number": 310, "branch": "batch/metis-0750",
-                                                                "closes": ["metis-0750"], "part": False}]}})
+                                                                "closes": ["metis-0750"], "part": False, "cross": False}]}})
 check("0799: batch_pr — открытый PR пачки важнее слитого", T.batch_pr("metis-0750", idx2, [R])[:3] == (R, 310, False))
 check("0799: batch_pr — пустой и битый индекс без трассировки",
       T.batch_pr("metis-0750", None) is None and T.batch_pr("metis-0750", {"x": [5, {"branch": "batch/metis-0750"}]}) is None)
@@ -95,7 +104,7 @@ check("0799: «Вне состава» — свойство карточки (п
 cp = os.path.join(ROOT, "prs.json")
 with open(cp, "w", encoding="utf-8") as fh:
     json.dump(cache, fh)
-check("0799: board-auto — номер PR пачки по ветке batch/<id> из кэша (слитый и открытый)",
+check("0799: board-auto — номер PR пачки по ветке batch/<id> из кэша (слитый и открытый); форк и строка без cross — нет",
       B.batch_branch_prs(cp) == {"metis-0750": 294, "metis-0751": 300}, B.batch_branch_prs(cp))
 bt = B.batches(store(H("metis-0750", type="story", status="doing"), H("metis-0689", parent="metis-0750", status="doing")),
                B.batch_branch_prs(cp))

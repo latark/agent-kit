@@ -173,7 +173,8 @@ BATCH_HEAD_RE = re.compile(r"batch/([a-z][a-z0-9]{1,11}-\d{3,})")  # ветка 
 
 def batch_branch_prs(cache_path):
     """{id пачки: номер PR} по ветке batch/<id> из кэша autoclose fetch (metis-0799): PR пачки, открытый не через
-    `pantheon batch pr`, поля pr не ставит. Открытый важнее слитого, из нескольких — больший номер; нет кэша — {}."""
+    `pantheon batch pr`, поля pr не ставит. Открытый важнее слитого, из нескольких — больший номер; нет кэша — {}.
+    PR из форка и строка кэша без поля cross (isCrossRepository) — не PR пачки: ветку batch/<id> форк назовёт как угодно."""
     try:
         with open(cache_path, encoding="utf-8") as fh:
             st = json.load(fh)
@@ -187,7 +188,7 @@ def batch_branch_prs(cache_path):
                 n = p.get("number") if isinstance(p, dict) else None
                 m = BATCH_HEAD_RE.fullmatch(p.get(branch_key) or "") if isinstance(p, dict) and isinstance(
                     p.get(branch_key), str) else None
-                if m and isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                if m and isinstance(n, int) and not isinstance(n, bool) and n > 0 and p.get("cross") is False:  # не форк
                     best[m.group(1)] = max(best.get(m.group(1), (-1, 0)), (rank, n))
     return {sid: n for sid, (_, n) in best.items()}
 

@@ -6232,8 +6232,8 @@ def batch_outside(T, tasks, cache):
         by_repo = cache.get(key) if isinstance(cache.get(key), dict) else {}
         for repo, prs in sorted(by_repo.items()):
             for pr in prs if isinstance(prs, list) else []:
-                if not isinstance(pr, dict) or not isinstance(pr.get(branch_key), str):
-                    continue
+                if not isinstance(pr, dict) or not isinstance(pr.get(branch_key), str) or pr.get("cross") is not False:
+                    continue  # PR из форка или строка кэша без cross — не PR пачки
                 m = re.fullmatch(re.escape(T.BATCH_BRANCH) + r"(\S+)", pr[branch_key])
                 sh = (tasks.get(m.group(1)) or (None, {}, ""))[1] if m else {}
                 if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):

@@ -214,7 +214,8 @@ def pr_index(cache):
     """PR задач по кэшу fetch (metis-0501 [zeus-pr-link]) → {id: [{"repo", "number", "sha", "merged", "branch"}]}: слитые — по
     ветке и «Closes» (и с «часть»: PR всё равно её), открытые — по closes. Карточка задачи берёт отсюда ссылки на GitHub;
     упоминания в журнале дополняет tasks.work_links. branch — ветка PR (headRefName слитого, branch открытого): по ней
-    карточка пачки находит PR с ветки batch/<id> без поля pr (metis-0799, tasks.batch_pr)."""
+    карточка пачки находит PR с ветки batch/<id> без поля pr (metis-0799, tasks.batch_pr); у PR из форка
+    (isCrossRepository, поле cross кэша) и у строки кэша без поля cross branch пуст."""
     out = {}
     cache = cache if isinstance(cache, dict) else {}
     for key, merged in (("merged", True), ("open_prs", False)):
@@ -231,7 +232,9 @@ def pr_index(cache):
                     ids = [i for i in pr.get("closes") or [] if isinstance(i, str)] if isinstance(pr.get("closes"), list) else []
                 sha = str(pr.get("oid") or "") if merged else ""
                 branch = pr.get("headRefName") if merged else pr.get("branch")
-                branch = branch if isinstance(branch, str) else ""
+                # ветку для PR пачки (batch/<id>) — только у PR из самого репозитория: форк назовёт ветку как угодно;
+                # строка кэша без cross (до metis-0799) — тоже не PR пачки, кэш пересоберёт следующий fetch
+                branch = branch if isinstance(branch, str) and pr.get("cross") is False else ""
                 for tid in ids:
                     out.setdefault(tid, []).append({"repo": repo, "number": pr["number"],
                                                     "sha": sha if re.fullmatch(r"[0-9a-f]{7,40}", sha) else "",
@@ -377,7 +380,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             errors[repo] = "не хватило времени прохода"
             continue
         data, err = gh_json(["pr", "list", "--repo", repo, "--state", "merged", "--limit", str(LIMIT), "--json",
-                             "number,headRefName,body,mergedAt,mergeCommit,files"], env, timeout=min(90, left()))
+                             "number,headRefName,body,mergedAt,mergeCommit,files,isCrossRepository"], env, timeout=min(90, left()))
         if err or not isinstance(data, list):
             errors[repo] = err or "ответ gh — не список"
             continue
@@ -386,7 +389,8 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             if not isinstance(pr, dict):
                 continue
             row = {"number": pr.get("number"), "headRefName": pr.get("headRefName") or "", "body": (pr.get("body") or "")[:4000],
-                   "mergedAt": pr.get("mergedAt"), "oid": ((pr.get("mergeCommit") or {}).get("oid") or "")}
+                   "mergedAt": pr.get("mergedAt"), "oid": ((pr.get("mergeCommit") or {}).get("oid") or ""),
+                   "cross": pr.get("isCrossRepository") is not False}  # PR из форка (или gh не сказал) — не PR пачки
             files = [f.get("path", "") for f in pr.get("files") or [] if isinstance(f, dict)]
             if f"{repo}#{pr.get('number')}" not in done and any(x.endswith(".claude-plugin/plugin.json") for x in files):
                 if left() <= 1:
@@ -398,12 +402,13 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
         merged[repo] = rows
         if left() > 1:
             o, _ = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIMIT), "--json",
-                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files"], env, timeout=min(90, left()))
+                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files,isCrossRepository"], env, timeout=min(90, left()))
             if isinstance(o, list):
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
                 # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
                 open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
                                    "branch": str(p.get("headRefName") or "")[:200],
+                                   "cross": p.get("isCrossRepository") is not False,
                                    "files": [f.get("path") for f in p.get("files") or []
                                              if isinstance(f, dict) and _path_ok(f.get("path"))],
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
