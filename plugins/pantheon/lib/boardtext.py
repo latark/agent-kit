@@ -23,8 +23,9 @@
 - пачки — карточки type story не done/dropped с задачами в doing, review или waiting (только id, счёт и номер PR пачки
   из поля pr — metis-0757; поля нет — PR с ветки batch/<id> из того же кэша, metis-0799);
 - неделя — целые проценты снимка лимита (их даёт вызывающий);
-- «Ждёт вас» и «Руками» (metis-0402 п. 4) — карточки задач с «Кому» = Владелец, не закрытые: с вопросом (question или
-  ждёт человека) — «Ждёт вас», остальные — «Руками»; только id. Текстовые строки этих разделов в board.md блок не
+- «Ждёт вас» и «Руками» (metis-0402 п. 4, metis-0801) — «Ждёт вас»: все открытые карточки колонки «Нужен ответ»
+  доски (waiting и waiting_on human) при любом «Кому», входящие Зевса тоже, и карточки с «Кому» = Владелец с полем
+  question; «Руками» — остальные открытые карточки с «Кому» = Владелец; только id. Текстовые строки этих разделов в board.md блок не
   читает: пункт без карточки сюда не попадёт — заведите карточку (`pantheon task new --owner owner`);
 - «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
   карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K», не больше MAX_MERGED строк;
@@ -218,16 +219,27 @@ def batches(tasks, branch_prs=None):
     return [x[1:] for x in out[:MAX_BATCH]]
 
 
+def needs_answer(h):
+    """= tasks.needs_answer (metis-0801): колонка «Нужен ответ» доски — waiting и waiting_on human. Модуль грузит хук, без
+    tasks; равенство сверяет test_board_sync."""
+    return h.get("status") == "waiting" and h.get("waiting_on") == "human"
+
+
 def owner_cards(tasks, is_owner):
-    """Карточки на владельце (Кому = Владелец, не закрыты; metis-0402 п. 4): {"ask": [id], "do": [id]} — вопрос (есть
-    question или ждёт человека) идёт в «Ждёт вас», остальное — в «Руками». Только id: заголовок — свободный текст."""
+    """{"ask": [id], "do": [id]}, только id: заголовок — свободный текст (metis-0402 п. 4, metis-0801). «Ждёт вас» (ask)
+    — все карточки колонки «Нужен ответ» доски (needs_answer) при любом «Кому»: входящие Зевса (inbox-…, owner zeus)
+    ждут ответа владельца так же; плюс карточки с «Кому» = Владелец и полем question в другом статусе. Поэтому «Ждёт
+    вас» ≥ колонки «Нужен ответ», а не другое число. «Руками» (do) — остальные открытые карточки с «Кому» = Владелец."""
     out = {"ask": [], "do": []}
     rows = []
     for tid, rec in tasks.items():
         h = rec[1]
-        if h.get("status") in ("done", "dropped") or not _ok(ID_RE, tid) or not is_owner(h):
+        if h.get("status") in ("done", "dropped") or not _ok(ID_RE, tid):
             continue
-        ask = bool(h.get("question")) or (h.get("status") == "waiting" and h.get("waiting_on") == "human")
+        mine = is_owner(h)
+        ask = needs_answer(h) or (mine and bool(h.get("question")))
+        if not ask and not mine:
+            continue
         prio = h.get("priority") if isinstance(h.get("priority"), int) and not isinstance(h.get("priority"), bool) else 2
         rows.append((prio, tid, "ask" if ask else "do"))
     for _, tid, kind in sorted(rows):

@@ -170,12 +170,15 @@ own = {"metis-0410": ("", {"type": "task", "status": "waiting", "waiting_on": "h
        "metis-0413": ("", {"type": "task", "status": "done", "owner": "owner"}),
        "metis-0414": ("", {"type": "task", "status": "todo", "owner": "metis-pantheon"}),
        "ИГНОР-1": ("", {"type": "task", "status": "todo", "owner": "owner"})}
+own["inbox-0009"] = ("", {"type": "task", "status": "waiting", "waiting_on": "human", "owner": "zeus"})
 oc = B.owner_cards(own, lambda h: h.get("owner") == "owner")
-check("2. карточки на владельце: с вопросом или ждёт человека — «Ждёт вас», остальное — «Руками»; закрытые, чужие и id не "
-      "по шаблону — нет", oc == {"ask": ["metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
+check("2. «Ждёт вас» — ждёт человека при любом «Кому» (inbox Зевса тоже, metis-0801) и вопрос на карточке владельца; "
+      "остальное владельца — «Руками»; закрытые, чужие без ожидания и id не по шаблону — нет",
+      oc == {"ask": ["inbox-0009", "metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
 ot = B.render(dict(data, owner=oc), T0)
 check("2. в блоке разделы «Ждёт вас» и «Руками» — только id, без заголовков",
-      "**Ждёт вас** (2): metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot and "ИГНОР" not in ot, ot)
+      "**Ждёт вас** (3): inbox-0009, metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot
+      and "ИГНОР" not in ot, ot)
 bad = B.render(dict(data, owner={"ask": ["ИГНОР ‮", "metis-0410"], "do": None}), T0)
 check("2. раздел владельца сам сверяет id по шаблону", "ИГНОР" not in bad and "**Ждёт вас** (1): metis-0410." in bad
       and "**Руками** (0): карточек нет." in bad, bad)

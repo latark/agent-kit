@@ -130,5 +130,37 @@ for base, nm in ((T.PULT_FILE, "Пульт"), (T.BASE_FILE, "Доска")):
     check(f"0800: {nm}.base — колонка суммы подписана как оценки против бюджета, не прогресс",
           "formula.sum_budget:\n    displayName: Оценки / бюджет (не прогресс)" in base, base[:0])
 
+# --- metis-0801: одно определение «Нужен ответ»; вопросы внутри пачки ------------------------------------------------
+W = dict(status="waiting", waiting_on="human")
+qa = store(H("athena-0075", type="story", status="doing", direction="athena-brokerassistant"),
+           H("athena-0120", parent="athena-0075", mode="single", **W),
+           H("athena-0121", parent="athena-0075", mode="single", **W),
+           H("athena-0123", type="story", parent="athena-0075", status="todo"),
+           H("athena-0122", parent="athena-0123", mode="single", **W),
+           H("athena-0124", parent="athena-0075", mode="single", status="waiting", waiting_on="metis-0001"),
+           H("athena-0125", parent="athena-0075", mode="single", status="todo", question="Какой вариант?"),
+           H("athena-0126", parent="athena-0075", mode="single", status="done", waiting_on="human"))
+check("0801: needs_answer — waiting и waiting_on human, и только они",
+      [i for i in sorted(qa) if T.needs_answer(qa[i][1])] == ["athena-0120", "athena-0121", "athena-0122"])
+check("0801: board-auto (boardtext.needs_answer) — то же определение, что у доски",
+      all(B.needs_answer(qa[i][1]) == T.needs_answer(qa[i][1]) for i in qa))
+check("0801: колонка «Нужен ответ» доски — по needs_answer",
+      [i for i in sorted(qa) if T.label_of(qa[i][1]) == T.HUMAN_WAIT] == ["athena-0120", "athena-0121", "athena-0122"])
+c, body = card("athena-0075", qa)
+check("0801: «Вопросов» пачки — вопросы внутри неё, с вложенной пачкой (athena-0075 → 3); в сводке — список",
+      c["Вопросов"] == 3 and "**Нужен ответ владельца внутри пачки:** 3 — [[athena-0120 x|athena-0120]], "
+      "[[athena-0121 x|athena-0121]], [[athena-0122 x|athena-0122]]" in body, (c.get("Вопросов"), body[:900]))
+check("0801: пачка без вопросов — «Вопросов» нет", card("athena-0123", store(H("athena-0123", type="story")))[0]["Вопросов"] is None)
+check("0801: «Вопросов» — число в свойствах и в виде «Пачки» обеих баз",
+      T.PROP_TYPES.get("Вопросов") == "number" and "Вопросов" in T.CARD_ORDER
+      and "note.Вопросов" in T.PULT_FILE and "note.Вопросов" in T.BASE_FILE)
+qa["athena-0075"][1].update(W)
+pc = T.project_counts(qa, T0, ["athena-brokerassistant", "metis-pantheon"])
+check("0801: «Ждёт вас» заметки проекта = колонка «Нужен ответ», пачки тоже (3 задачи + пачка = 4)", pc["Ждёт вас"] == 4, pc)
+check("0801: на Пульте колонка «Ждёт вас» подписана «Нужен ответ»", "note.Ждёт вас:\n    displayName: Нужен ответ" in T.PULT_FILE)
+oc = B.owner_cards(qa, lambda h: False)
+check("0801: board-auto «Ждёт вас» — все карточки «Нужен ответ» при любом «Кому» (пачка тоже)",
+      oc["ask"] == ["athena-0075", "athena-0120", "athena-0121", "athena-0122"] and oc["do"] == [], oc)
+
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)

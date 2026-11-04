@@ -1668,6 +1668,23 @@ def over_budget(inf):
 NO_ESTIMATES = "оценок нет"
 
 
+def story_asks(sid, tasks):
+    """Карточки внутри пачки, которые ждут ответа владельца (needs_answer, колонка «Нужен ответ»), — с вложенными пачками
+    (metis-0801): сама пачка не в «Нужен ответ», а вопрос в её составе на Пульте не был виден. → [id] по порядку."""
+    out, seen, todo = [], {sid}, list(story_children(sid, tasks))
+    while todo:
+        i = todo.pop(0)
+        if i in seen:
+            continue
+        seen.add(i)
+        h = tasks[i][1]
+        if needs_answer(h):
+            out.append(i)
+        if h.get("type") == "story":
+            todo += story_children(i, tasks)
+    return sorted(out)
+
+
 def sum_text(inf):
     """«Сумма оценок» пачки: сумма оценок детей в процентах недели — расход против бюджета, а не доля сделанного
     (metis-0800). Ни у одного ребёнка нет оценки — «оценок нет», а не «0 %»: ноль читался как «прогресс 0 %»."""
@@ -1831,6 +1848,7 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     spr = story_pr(head) or (bpr[:2] if bpr else None)
     bpr = bpr if bpr and (bpr[0].lower(), bpr[1]) == (spr[0].lower(), spr[1]) else None
     # закрытые PR пачки задачи с другим parent: в состав (он — по parent) не входят, но их видно (metis-0799)
+    asks = story_asks(head.get("id"), tasks)
     outside = [i for i in (bpr[3] if bpr else []) if i not in inf["ids"] and i in tasks and tasks[i][1].get("type") == "task"]
     # состояние PR пачки — из кэша gh (pr_index по ветке batch/<id>: номер пачки в имени ветки); нет в кэше — без пометки
     sstate = bpr[2] if bpr else next((v for r, n, v in (child_links.get(head.get("id")) or ([], []))[0]
@@ -1851,10 +1869,12 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
                  "Пересечения": cross_l or None, "Области не указаны": unknown,
                  "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or ""))
                  else BATCH_BRANCH + head["id"] if bpr and BRANCH_RE.fullmatch(BATCH_BRANCH + str(head.get("id"))) else None,
+                 "Вопросов": len(asks) or None,
                  "PR пачки": spr_url, "Вне состава": [lk(i) for i in outside] or None, "Тип": "пачка"})
     summary = ("> **Пачка:** " + (NO_ESTIMATES if sum_text(inf) == NO_ESTIMATES else f"сумма оценок {sum_text(inf)}")
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
+               + (f"\n> **Нужен ответ владельца внутри пачки:** {len(asks)} — {', '.join(lk(i) for i in asks)}" if asks else "")
                + (f"\n> **Цепочка одному исполнителю:** {' → '.join(lk(i) for i in inf['chain'])}" if inf["chain"] else "")
                + (f"\n> **Параллельно:** {', '.join(lk(i) for i in inf['parallel'])}" if inf["parallel"] else "")
                + (f"\n> **Пересечения по файлам:** {'; '.join(cross_l)}" if inf["cross"] else "")
@@ -1913,6 +1933,8 @@ def project_counts(tasks, t, directions):
     for tid, (_, h, _) in tasks.items():
         if h.get("direction") not in directions or h.get("status") in ("done", "dropped"):
             continue
+        if h.get("type") in ("task", "story"):  # «Ждёт вас» = колонка «Нужен ответ» доски, пачки тоже (metis-0801)
+            c["Ждёт вас"] += needs_answer(h)
         if h.get("type") == "story":
             c["Пачек"] += 1
             continue
@@ -1920,7 +1942,6 @@ def project_counts(tasks, t, directions):
             continue
         c["Открыто"] += 1
         c["В работе"] += h.get("status") == "doing"
-        c["Ждёт вас"] += h.get("status") == "waiting" and h.get("waiting_on") == "human"
         c["Просрочено"] += overdue(h, t)
         c["Пересечений"] += tid in cross
     return {k: int(v) for k, v in c.items()}
@@ -1980,7 +2001,7 @@ def render_project_note(p, reg, tasks, t, roles=None):
     body = (f"\n> Заметку пишет плановый проход по `directions.toml` и задачам. Не правьте её: счётчики сверяет "
             f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {coord}"
             + (f" · **Цель:** {head['Цель']}" if head["Цель"] else "")
-            + f"\n\nОткрыто {c['Открыто']} · в работе {c['В работе']} · ждёт вас {c['Ждёт вас']} · просрочено "
+            + f"\n\nОткрыто {c['Открыто']} · в работе {c['В работе']} · нужен ответ {c['Ждёт вас']} · просрочено "
               f"{c['Просрочено']} · с пересечениями {c['Пересечений']} · пачек {c['Пачек']}\n\n"
               f"## Пачки проекта\n\n![[Пульт.base#Пачки проекта]]\n")
     return join(head, body, PROJECT_ORDER)
@@ -2084,6 +2105,8 @@ properties:
     displayName: Карточка
   formula.sum_budget:
     displayName: Оценки / бюджет (не прогресс)
+  note.Ждёт вас:
+    displayName: Нужен ответ
   note.id:
     displayName: №
   formula.mode_view:
@@ -2141,6 +2164,7 @@ views:
     order:
       - file.name
       - note.Закрыто
+      - note.Вопросов
       - formula.sum_budget
       - note.Цепочка
   - type: table
@@ -2247,14 +2271,14 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
               "Когда", "Бюджет", "Сумма оценок", "Закрыто", "Цепочка", "Параллельно", "Области не указаны",
-              "Ветка", "PR пачки", "Вне состава", "Тип", "id", "tags"]
+              "Вопросов", "Ветка", "PR пачки", "Вне состава", "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
               "Вопрос задан": "datetime", "Откуда": "text", "Из чего": "text", "Критерии": "text", "Хвост": "multitext", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
-              "Ветка": "text", "PR пачки": "text", "Вне состава": "multitext",
+              "Вопросов": "number", "Ветка": "text", "PR пачки": "text", "Вне состава": "multitext",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
@@ -2298,9 +2322,16 @@ def norm_label(x):
     return HUMAN_WAIT if x == OLD_HUMAN_WAIT else x
 
 
+def needs_answer(head):
+    """Ждёт ответа владельца — колонка «Нужен ответ» доски: waiting и waiting_on human (metis-0801). Одно определение
+    для колонки, счётчика «Нужен ответ» заметки проекта на Пульте, «Вопросов» пачки и «Нужен ответ» board-auto
+    (boardtext.owner_cards — копия, модуль без tasks; равенство сверяет тест)."""
+    return head.get("status") == "waiting" and head.get("waiting_on") == "human"
+
+
 def label_of(head):
     st = head.get("status")
-    if st == "waiting" and head.get("waiting_on") == "human":
+    if needs_answer(head):
         return HUMAN_WAIT
     return LABELS.get(st, st)
 
@@ -2878,7 +2909,7 @@ views:
         direction: ASC
       - property: formula.prio_rank
         direction: ASC
-    order: [file.name, note.Закрыто, formula.sum_budget, note.Цепочка]
+    order: [file.name, note.Закрыто, note.Вопросов, formula.sum_budget, note.Цепочка]
   - type: table
     name: Итоги пачек
     filters:
@@ -2965,8 +2996,9 @@ VIEW_HELP = {
                      "принять; готовые и отменённые не показываются.",
     "Доска": "Задачи по статусам, готовые — за 7 дней; заявки ролей друг другу здесь не показаны (они в «Все задачи»). "
              "Что делать: смотреть, что движется; сменить статус — перетащить карточку.",
-    "Пачки": "Пачки (наборы задач на ночь) по статусам, с суммой оценок против бюджета; готовые — 7 дней. Что делать: "
-             "следить за бюджетом и пересечениями по файлам.",
+    "Пачки": "Пачки (наборы задач на ночь) по статусам; готовые — 7 дней. «Закрыто N из M» — сделанное, «Вопросов» — "
+             "задачи пачки, ждущие вашего ответа, «Оценки / бюджет» — сумма оценок против бюджета, не прогресс. Что "
+             "делать: ответить на вопросы внутри пачки, следить за бюджетом и пересечениями по файлам.",
     "Итоги пачек": "Задачи из пачек, которые дошли до проверки, готовы или ждут приёмки, по пачкам. Что делать: принять "
                    "результат ночи.",
     "Все задачи": "Вообще все задачи и пачки, включая готовые, по проектам. Что делать: искать то, чего нет в других видах.",
