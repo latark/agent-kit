@@ -630,7 +630,7 @@
   (отдельное число в итоге), команд ioreg, pmset, scutil файлы тестов получают как заглушки. `--only МЕТКИ`
   (metis-0735) — только названные файлы («pantheon/test_a.py,guard/test_b.py»); метки нет среди файлов — код 2 без
   прогона, вместе с `--affected` — отказ. Его гонит дозапуск outside. Файл тестов идёт в классе QoS раннера
-  (metis-0647): `taskpolicy -c utility` из окна опускал его вдвое (test_merge_gate 241–255 с против 115–122 с), вернуть
+  (metis-0647): `taskpolicy -c utility` из окна опускал его вдвое (test_merge_gate 221–255 с против 115–122 с), вернуть
   его — `RUN_TESTS_QOS=utility`. Плановый проход launchd держит в utility (ProcessType Standard), это изнутри не
   снять; строка «QoS (доля CPU)» в начале прогона показывает класс раннера и файла. Подробности — в шапке скрипта.
 - `plugins/pantheon/scripts/affected-map.py` — строит карту для `--affected` прогоном всех тестов: каждый файл тестов

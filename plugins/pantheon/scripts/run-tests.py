@@ -12,7 +12,7 @@
                   упавшие в прошлом полном прогоне и затронутые диффом; с --affected — отказ
 
 Файл тестов идёт в классе QoS раннера (metis-0647): `taskpolicy -c utility` из окна роли опускал его из default вдвое
-(test_merge_gate 241–255 с против 115–122 с), а клемп launchd плановому проходу изнутри не снять. RUN_TESTS_QOS=utility
+(test_merge_gate 221–255 с против 115–122 с), а клемп launchd плановому проходу изнутри не снять. RUN_TESTS_QOS=utility
 на macOS возвращает `taskpolicy -c utility` для каждого файла (metis-0728). В начале прогона печатается строка
 «QoS (доля CPU)» — проба раннера и файла.
 Файлам виден RUN_TESTS_RUNNER=1 (test_shell_diff по нему берёт пул из двух процессов).
@@ -438,8 +438,8 @@ QOS_PROBE = (
 def qos_prefix(platform=None, exists=os.path.exists, env=None):
     """Чем опустить класс файла тестов: `taskpolicy -c utility` только по RUN_TESTS_QOS=utility на macOS с taskpolicy,
     иначе ничего — файл идёт в классе раннера (metis-0647). Клемп launchd (ProcessType Background или Standard) из
-    процесса не снять, а из окна роли `-c utility` сам опускал файл из default: test_merge_gate 241–255 с против
-    115–122 с без него (замер 04.11, load 17–24)."""
+    процесса не снять, а из окна роли `-c utility` сам опускал файл из default: test_merge_gate 221–255 с против
+    115–122 с без него (замер 04.11, load1 4–17)."""
     if (os.environ if env is None else env).get(QOS_ENV) != "utility":
         return []
     if (sys.platform if platform is None else platform) == "darwin" and exists(TASKPOLICY):
