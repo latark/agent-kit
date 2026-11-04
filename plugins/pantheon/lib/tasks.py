@@ -728,6 +728,22 @@ def check_source(pantheon, tid, source):
             raise ValueError(f"source {source}: нет такой задачи")
 
 
+def parent_problem(tasks, tid, par):
+    """parent — только id пачки (type story), иначе карточка выпадает из всех пачек и видов (metis-0802). → текст отказа
+    или None; пустой parent — None (открепить можно)."""
+    if not par:
+        return None
+    if par == tid:
+        return f"parent {par} — сама карточка"
+    if par not in tasks:
+        return f"parent {par}: нет такой пачки"
+    kind = tasks[par][1].get("type")
+    if kind != "story":
+        return (f"parent {par} — не пачка (type {kind}): parent — только id карточки type story, иначе задача не видна "
+                "ни в одной пачке; связь с задачей — source или depends_on")
+    return None
+
+
 def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, need_story_criteria=False, **fields):
     """kind — task или story (пачка, metis-0069). done_when — пункты «Готово, когда» (metis-0502): критерии пишет автор при
     создании; раздел есть всегда, без пунктов — с подсказкой. need_story_criteria (CLI `task new`, metis-0766): story без
@@ -742,6 +758,10 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
     if fields.get("source"):
         check_source(pantheon, None, fields["source"])
+    if fields.get("parent"):
+        bad = parent_problem(load_tasks(pantheon, WORK_TYPES), None, fields["parent"])
+        if bad:
+            raise ValueError(bad)
     if done_when and (done_criteria(escape_desc(text)) or DONE_WHEN_HEAD in escape_desc(text).split("\n")):
         raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
     if need_story_criteria and kind == "story" and not (
@@ -836,6 +856,10 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
     if changes.get("depends_on"):
         check_depends(tasks, tid, changes["depends_on"])
+    if changes.get("parent"):  # прежний неверный parent не мешает другим правкам — его показывает check (metis-0802)
+        bad = parent_problem(tasks, tid, changes["parent"])
+        if bad:
+            raise ValueError(f"{tid}: {bad}")
     # в пачку — только с решённым режимом; и снять или сделать «не решено» режим у задачи пачки нельзя (metis-0505)
     par = changes.get("parent", tasks[tid][1].get("parent")) if "parent" in changes or "mode" in changes else None
     mode = changes["mode"] if "mode" in changes else tasks[tid][1].get("mode")
@@ -872,6 +896,8 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
         raise ValueError("нужен --title: название остатка")
     items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and not _is_stub(x)]
     fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
+    if parent_problem(tasks, tid, fields.get("parent")):  # неверный parent исходной в остаток не переносим (metis-0802)
+        fields.pop("parent")
     fields.update({k: v for k, v in (("mode", mode), ("mode_why", mode_why)) if v})  # у исходной в пачке нет режима — задаётся здесь
     fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
     desc = text if text else f"Остаток задачи {tid} «{h0.get('title')}»."
@@ -1064,7 +1090,8 @@ def extra_attention(head, body, tasks, t, night_end="08:00", open_prs=None):
 
 def board_problems(tasks, t, night_end="08:00", open_prs=None):
     """Сверка по всем задачам → (ошибки, предупреждения), каждое — (id, текст). Ошибки: задача пачки без mode;
-    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention и хвосты в журнале без задачи (tail_lines)."""
+    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention, открытая карточка
+    с parent не на пачку (metis-0802) и хвосты в журнале без задачи (tail_lines)."""
     errs, warns = [], []
     for tid, (_, h, b) in sorted(tasks.items()):
         if h.get("type") == "task" and in_pack(h, tasks) and not mode_decided(h):
@@ -1076,6 +1103,9 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
                 if not h.get(k):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
         warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
+        bad = parent_problem(tasks, tid, h.get("parent")) if h.get("status") not in ("done", "dropped") else None
+        if bad:  # metis-0802: задача с parent не на пачку не видна ни в одной пачке
+            warns.append((tid, f"{bad}; поправить — pantheon task attach {tid} <пачка> или task set {tid} parent="))
     warns += [(tid, f"хвост в журнале без задачи: {ln}") for tid, ln in tail_lines(tasks, t)]  # metis-0504, не блок
     warns += pack_title_warns(tasks)  # metis-0505
     return errs, warns

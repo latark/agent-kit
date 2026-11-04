@@ -162,5 +162,59 @@ oc = B.owner_cards(qa, lambda h: False)
 check("0801: board-auto «Ждёт вас» — все карточки «Нужен ответ» при любом «Кому» (пачка тоже)",
       oc["ask"] == ["athena-0075", "athena-0120", "athena-0121", "athena-0122"] and oc["do"] == [], oc)
 
+# --- metis-0802: parent — только пачка ----------------------------------------------------------------------------
+PH = os.path.join(ROOT, "pantheon")
+os.makedirs(os.path.join(PH, "directions", "metis-pantheon", "tasks"))
+sid, _ = T.task_new(PH, T0, "metis-pantheon", "Пачка", kind="story")
+plain, _ = T.task_new(PH, T0, "metis-pantheon", "Обычная задача")
+
+
+def refused(fn):
+    try:
+        fn()
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+err = refused(lambda: T.task_new(PH, T0, "metis-pantheon", "Ребёнок задачи", parent=plain, mode="single"))
+check("0802: task new с parent на обычную задачу — отказ с понятным текстом, файла нет",
+      err and f"parent {plain} — не пачка (type task)" in err
+      and len(T.load_tasks(PH, T.WORK_TYPES)) == 2, err)
+err = refused(lambda: T.task_new(PH, T0, "metis-pantheon", "Ребёнок пустоты", parent="metis-9999", mode="single"))
+check("0802: task new с parent на несуществующий id — отказ", err and "нет такой пачки" in err, err)
+kid, _ = T.task_new(PH, T0, "metis-pantheon", "Ребёнок пачки", parent=sid, mode="single")
+check("0802: task new с parent на пачку — как прежде", T.load_tasks(PH, T.WORK_TYPES)[kid][1].get("parent") == sid)
+err = refused(lambda: T.task_set(PH, T0, kid, {"parent": plain}))
+check("0802: task set parent= на обычную задачу — отказ, parent прежний",
+      err and "не пачка" in err and T.load_tasks(PH, T.WORK_TYPES)[kid][1].get("parent") == sid, err)
+err = refused(lambda: T.task_set(PH, T0, kid, {"parent": kid}))
+check("0802: task set parent= на саму себя — отказ", err and "сама карточка" in err, err)
+T.task_set(PH, T0, kid, {"parent": None})
+check("0802: task set parent= (пусто) — открепить можно", not T.load_tasks(PH, T.WORK_TYPES)[kid][1].get("parent"))
+goal, _ = T.task_new(PH, T0, "metis-pantheon", "Пачка пачек", kind="story")
+T.task_set(PH, T0, sid, {"parent": goal, "mode": "single"})
+check("0802: parent пачки на пачку (пачка пачек) — можно", T.load_tasks(PH, T.WORK_TYPES)[sid][1].get("parent") == goal)
+bad = store(H("metis-0194"), H("metis-0199", parent="metis-0194"), H("metis-0211", parent="metis-0006"),
+            H("metis-0212", parent="metis-0194", status="done"), H("metis-0300", type="story"),
+            H("metis-0301", parent="metis-0300", mode="single"))
+for i, (pp, h, b0) in bad.items():
+    bad[i] = (pp, dict(h, closed="2026-11-01") if h.get("status") == "done" else h, b0)
+w = [x for x in T.board_problems(bad, T0)[1] if "не пачка" in x[1] or "нет такой пачки" in x[1]]
+check("0802: check — открытые карточки с parent не на пачку и на несуществующий id; закрытые и в пачке — нет",
+      [x[0] for x in w] == ["metis-0199", "metis-0211"] and "pantheon task attach metis-0199" in w[0][1], w)
+T.task_set(PH, T0, plain, {"parent": None, "status": "doing"})
+raw = T.load_tasks(PH, T.WORK_TYPES)[kid][0]
+with open(raw, encoding="utf-8") as fh:
+    txt = fh.read()
+with open(raw, "w", encoding="utf-8") as fh:
+    fh.write(txt.replace("type: task\n", f"type: task\nparent: {plain}\n", 1))
+T.task_set(PH, T0, kid, {"status": "doing"})
+check("0802: прежний неверный parent другим правкам не мешает (его показывает check)",
+      T.load_tasks(PH, T.WORK_TYPES)[kid][1].get("status") == "doing")
+rest, _ = T.task_split(PH, T0, kid, "Остаток", done_when=["пункт"])
+check("0802: остаток задачи с неверным parent — без parent (не переносим ошибку)",
+      not T.load_tasks(PH, T.WORK_TYPES)[rest][1].get("parent"))
+
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)
