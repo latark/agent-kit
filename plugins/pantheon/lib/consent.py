@@ -14,7 +14,7 @@ from datetime import datetime
 
 __all__ = [
     "HESTIA_CONSENT_DAYS", "APPROVALS", "APPROVALS_HEAD", "CONSENT_ID", "CONSENT_MAX", "CONSENT_REAP_Q",
-    "CONSENT_ANSWER", "CONSENT_YES", "CONSENT_NO", "consent_is_yes", "consent", "approvals_load", "toml_str",
+    "CONSENT_ANSWER", "CONSENT_YES", "CONSENT_NO", "consent_is_yes", "ConsentLogError", "consent_found", "consent", "approvals_load", "toml_str",
     "approve",
 ]
 
@@ -67,33 +67,21 @@ def consent_is_yes(body):
     return bool(CONSENT_YES.match(text)) and not CONSENT_NO.search(ans)
 
 
-def consent(rest):
-    if not rest or not CONSENT_ID.fullmatch(rest[0]):
-        print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
-        return 2
-    qid, days = rest[0], 7.0
-    if "--days" in rest:
-        try:
-            days = min(30.0, max(0.1, float(rest[rest.index("--days") + 1])))
-        except (IndexError, ValueError):
-            print("pantheon consent: --days — число дней", file=sys.stderr)
-            return 2
-    hestia = os.environ.get("PANTHEON_ROLE") == "hestia"
-    if hestia:
-        days = min(days, HESTIA_CONSENT_DAYS)
-        # окно Гестии одно на задачу (wake hestia --task): согласие — только на id этой задачи (metis-0562)
-        if not CONSENT_ID.fullmatch(os.environ.get("PANTHEON_TASK") or "") or qid != os.environ["PANTHEON_TASK"]:
-            print(f"pantheon consent: из окна hestia — только по своей задаче ({os.environ.get('PANTHEON_TASK') or 'не задана'}), "
-                  f"не по {qid}", file=sys.stderr)
-            return 2
+class ConsentLogError(Exception):
+    """Журнал ответов владельца не читается: ответ проверить нельзя (код 3 у consent)."""
+
+
+def consent_found(qid, days):
+    """Ответы владельца на вопрос «[qid] …» за days дней из owner-log/zeus.md и board.jsonl: (found, mentions,
+    unclear), found — [(время, заголовок, «вопрос: …\nответ: …»)] по времени. Журнал не читается — ConsentLogError.
+    Общая часть pantheon consent и pantheon browser (metis-0760)."""
     try:
         with open(P.path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
     except FileNotFoundError:
         text = ""
     except (OSError, UnicodeDecodeError) as e:
-        print(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
-        return 3
+        raise ConsentLogError(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя")
     word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
     # ответ — выбор в окне вопросов (пометка «окно вопросов», хук answer) или однозначный выбор варианта сообщением прямо
     # после вопроса Зевса с вариантами (пометка «ответ в чате», хук owner-log; lib/answers.py). Пометки ставит хук, ввод
@@ -122,8 +110,7 @@ def consent(rest):
     except FileNotFoundError:
         board_lines = []
     except (OSError, UnicodeDecodeError) as e:
-        print(f"pantheon consent: журнал доски не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
-        return 3
+        raise ConsentLogError(f"pantheon consent: журнал доски не читается ({e}) — ответ проверить нельзя")
     for line in board_lines:
         try:
             rec = json.loads(line)
@@ -139,6 +126,33 @@ def consent(rest):
                       "сообщения людям, удаление — не по галочке, только окном вопросов или ответом в чате)",
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
+    return found, mentions, unclear
+
+
+def consent(rest):
+    if not rest or not CONSENT_ID.fullmatch(rest[0]):
+        print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
+        return 2
+    qid, days = rest[0], 7.0
+    if "--days" in rest:
+        try:
+            days = min(30.0, max(0.1, float(rest[rest.index("--days") + 1])))
+        except (IndexError, ValueError):
+            print("pantheon consent: --days — число дней", file=sys.stderr)
+            return 2
+    hestia = os.environ.get("PANTHEON_ROLE") == "hestia"
+    if hestia:
+        days = min(days, HESTIA_CONSENT_DAYS)
+        # окно Гестии одно на задачу (wake hestia --task): согласие — только на id этой задачи (metis-0562)
+        if not CONSENT_ID.fullmatch(os.environ.get("PANTHEON_TASK") or "") or qid != os.environ["PANTHEON_TASK"]:
+            print(f"pantheon consent: из окна hestia — только по своей задаче ({os.environ.get('PANTHEON_TASK') or 'не задана'}), "
+                  f"не по {qid}", file=sys.stderr)
+            return 2
+    try:
+        found, mentions, unclear = consent_found(qid, days)
+    except ConsentLogError as e:
+        print(e, file=sys.stderr)
+        return 3
     # решает последний ответ на каждый вопрос: позднее «нет» на тот же вопрос отменяет прежнее «да» (metis-0656)
     final = {}
     for _, head, body in found:
