@@ -3,7 +3,7 @@
 #   /bin/sh hookd-install.sh --print        plist на stdout, ничего не ставит (тесты, будущий плановый проход)
 #   /bin/sh hookd-install.sh                собрать клиент, папка сокета 0700, plist в ~/Library/LaunchAgents, bootstrap
 #   /bin/sh hookd-install.sh --uninstall    bootout и удалить plist
-# Ставит служба владелец своей командой из терминала (README guard, «Демон хуков»), роли — нет: ~/Library/LaunchAgents
+# Службу ставит владелец своей командой из терминала (README guard, «Демон хуков»), роли — нет: ~/Library/LaunchAgents
 # и ~/.cache/pantheon/hookd закрыты protect-config. Дерево — то, где лежит этот скрипт: зовите его из проверенного
 # дерева guard (~/.claude/plugins/cache/agent-kit/guard/<версия>/scripts/), а не из рабочей копии.
 # Внимание: тик Пантеона (services_sync) снимает любой pantheon.svc.*, которого нет в schedule.toml, — пока он не

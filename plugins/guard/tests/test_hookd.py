@@ -103,6 +103,7 @@ def install(home, client, sock=None):
             os.link(client, dst)  # тот же файл: macOS проверяет новый исполняемый файл при первом запуске (~0,4 с)
         except OSError:
             shutil.copy2(client, dst)
+        shutil.copyfile(client + ".sum", dst + ".sum")  # метка SHA-256: без неё оболочка клиент не запустит
     if sock:
         try:
             os.unlink(os.path.join(d, "hookd.sock"))
@@ -399,6 +400,8 @@ def test_wrapper_no_client(root):
             with open(c, "wb") as fh:
                 fh.write(b"\xcf\xfa\xed\xfe\x00\x01garbage(\n")
             os.chmod(c, 0o755)
+            with open(c + ".sum", "w") as fh:  # метка совпала — мусор доходит до запуска и даёт 126
+                fh.write(hashlib.sha256(open(c, "rb").read()).hexdigest() + "\n")
         ref, _ = slow(["--strict"], ev, base_env(home), work)
         got, _ = wrap(["--strict"], ev, base_env(home), work)
         # мусор с +x: /bin/sh сам пишет «cannot execute binary file» в stderr перед медленным путём
@@ -452,6 +455,91 @@ def build_client(root):
     check("в дереве плагина собранного клиента нет", not [f for f in os.listdir(HOOKS) if f.startswith("client")],
           os.listdir(HOOKS))
     return path if ok else None
+
+
+def test_supply(root, client):
+    """Находка проверки безопасности: сборку зовёт хук с окружением окна, клиент обходит все решения guard.
+    Поддельные cc, sha256 и прочие команды первыми в PATH, CPATH с заголовком #error, CFLAGS, SDKROOT — сборка их не
+    берёт. Подменённый клиент (или клиент без метки .sum) оболочка не запускает: медленный путь, причина client-sum."""
+    work = os.path.join(root, "work")
+    fake = os.path.join(root, "fk")
+    inc = os.path.join(fake, "inc")
+    os.makedirs(inc)
+    mark = os.path.join(fake, "called")
+    for tool in ("cc", "clang", "gcc", "sha256", "sha256sum", "shasum", "uname", "env", "xcrun", "head", "cut", "sed",
+                 "mv", "chmod", "find", "mkdir", "rm", "tail", "xcode-select", "ld"):
+        p = os.path.join(fake, tool)
+        with open(p, "w") as fh:
+            fh.write(f"#!/bin/sh\necho {tool} >>{mark}\nexit 0\n")
+        os.chmod(p, 0o755)
+    with open(os.path.join(inc, "stdio.h"), "w") as fh:
+        fh.write("#error поддельный заголовок из CPATH\n")
+    home = os.path.join(root, "sup")
+    os.makedirs(home)
+    env = dict(base_env(home), PATH=fake + ":" + os.environ.get("PATH", "/usr/bin:/bin"), CPATH=inc,
+               C_INCLUDE_PATH=inc, CFLAGS="-DGUARD_FAKE=1 -include /nonexistent.h", SDKROOT=fake,
+               CCC_OVERRIDE_OPTIONS="#^-DX", COMPILER_PATH=fake, LIBRARY_PATH=fake)
+    r = subprocess.run(["/bin/sh", BUILD, "--force"], env=env, capture_output=True, text=True, timeout=300)
+    c = os.path.join(hookd_dir(home), "bin", "client-" + src_hash())
+    sum_ok = os.path.exists(c) and os.path.exists(c + ".sum") and \
+        open(c + ".sum").read().strip() == hashlib.sha256(open(c, "rb").read()).hexdigest()
+    check("сборка с поддельными cc, sha256 и прочими первыми в PATH, CPATH, CFLAGS, SDKROOT: подделки не вызваны, "
+          "клиент собран, метка .sum — его SHA-256",
+          r.returncode == 0 and not os.path.exists(mark) and sum_ok,
+          (r.returncode, r.stderr[-400:], open(mark).read() if os.path.exists(mark) else ""))
+    if sum_ok:
+        ev = deny_event(work)
+        ref, _ = slow(["--strict"], ev, base_env(home), work)
+        got, _ = wrap(["--strict"], ev, base_env(home), work)
+        check("клиент, собранный в подменённом окружении, работает: ответ медленного пути, откат — только no-socket",
+              got == ref and reasons(home) == ["no-socket"], (got, ref, fb_lines(home)))
+    # подмена клиента: «пропустить» на всё; метка .failed — фоновая пересборка не идёт
+    for name, setup in (("клиент подменён (метка — от настоящего)", "swap"), ("метки .sum нет", "nosum"),
+                        ("метка пустая", "empty")):
+        home = os.path.join(root, "sw" + setup[:2])
+        os.makedirs(home)
+        d = install(home, client)
+        c = os.path.join(d, "bin", "client-" + src_hash())
+        open(c + ".failed", "w").write("проба\n")
+        if setup == "swap":
+            os.unlink(c)
+            with open(c, "w") as fh:
+                fh.write("#!/bin/sh\ncat >/dev/null\nexit 0\n")
+            os.chmod(c, 0o755)
+        elif setup == "nosum":
+            os.unlink(c + ".sum")
+        else:
+            open(c + ".sum", "w").close()
+        ev = deny_event(work)
+        ref, _ = slow(["--strict"], ev, base_env(home), work)
+        got, _ = wrap(["--strict"], ev, base_env(home), work)
+        check(f"оболочка: {name} → клиент не запущен, отказ медленного пути, причина client-sum",
+              got == ref and '"deny"' in ref[1] and reasons(home) == ["client-sum"], (got, ref, fb_lines(home)))
+    # без метки .failed — пересборка в фоне возвращает настоящий клиент
+    home = os.path.join(root, "swre")
+    os.makedirs(home)
+    d = install(home, client)
+    c = os.path.join(d, "bin", "client-" + src_hash())
+    os.unlink(c)
+    with open(c, "w") as fh:
+        fh.write("#!/bin/sh\ncat >/dev/null\nexit 0\n")
+    os.chmod(c, 0o755)
+    ev = deny_event(work)
+    ref, _ = slow(["--strict"], ev, base_env(home), work)
+    got, _ = wrap(["--strict"], ev, base_env(home), work)
+    end = time.monotonic() + 120
+
+    def healed():
+        with open(c, "rb") as fh:
+            body = fh.read()
+        with open(c + ".sum") as fh:
+            label = fh.read().strip()
+        return not body.startswith(b"#!") and hashlib.sha256(body).hexdigest() == label
+
+    while time.monotonic() < end and (os.path.exists(c + ".lock") or not healed()):
+        time.sleep(0.1)
+    check("подменённый клиент без .failed → медленный путь (client-sum) и пересборка в фоне вернула настоящий",
+          got == ref and reasons(home) == ["client-sum"] and healed(), (got == ref, fb_lines(home)))
 
 
 def test_background_build(root):
@@ -833,6 +921,7 @@ def main():
             test_failures(root, client)
             test_copy_daemon(root, client)
             test_canary(root, client, sock)
+            test_supply(root, client)
             test_background_build(root)
             # демон убит SIGKILL: сокет остался, слушателя нет — медленный путь
             stop(p)
