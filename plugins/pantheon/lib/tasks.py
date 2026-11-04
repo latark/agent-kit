@@ -1665,6 +1665,15 @@ def over_budget(inf):
     return inf["budget"] is not None and inf["sum"] > inf["budget"] + 1e-9
 
 
+NO_ESTIMATES = "оценок нет"
+
+
+def sum_text(inf):
+    """«Сумма оценок» пачки: сумма оценок детей в процентах недели — расход против бюджета, а не доля сделанного
+    (metis-0800). Ни у одного ребёнка нет оценки — «оценок нет», а не «0 %»: ноль читался как «прогресс 0 %»."""
+    return NO_ESTIMATES if len(inf["no_estimate"]) == len(inf["ids"]) else pct_text(inf["sum"])
+
+
 BATCH_BRANCH = "batch/"  # ветка пачки — batch/<story-id> (AGENTS.md, pantheon batch pr)
 
 
@@ -1697,7 +1706,7 @@ def story_text(sid, tasks):
         h = tasks[i][1]
         lines.append(f"{n}. {i} · {label_of(h)} · {h.get('estimate') or 'без оценки'} · "
                      f"{MODE_VIEW.get(h.get('mode')) or 'кто делает: ' + MODE_UNSET} · {one_line(h.get('title'))}")
-    lines.append(f"сумма {pct_text(inf['sum'])}"
+    lines.append((NO_ESTIMATES if sum_text(inf) == NO_ESTIMATES else f"сумма {sum_text(inf)}")
                  + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " (бюджет не задан)")
                  + (" — больше бюджета" if over_budget(inf) else "")
                  + (f"; без оценки: {', '.join(inf['no_estimate'])}" if inf["no_estimate"] else ""))
@@ -1835,14 +1844,14 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
                  "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
                  "Бюджет": head.get("estimate") if inf["budget"] is not None else None,
-                 "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
+                 "Сумма оценок": sum_text(inf) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
                  "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
                  "Пересечения": cross_l or None, "Области не указаны": unknown,
                  "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or ""))
                  else BATCH_BRANCH + head["id"] if bpr and BRANCH_RE.fullmatch(BATCH_BRANCH + str(head.get("id"))) else None,
                  "PR пачки": spr_url, "Вне состава": [lk(i) for i in outside] or None, "Тип": "пачка"})
-    summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
+    summary = ("> **Пачка:** " + (NO_ESTIMATES if sum_text(inf) == NO_ESTIMATES else f"сумма оценок {sum_text(inf)}")
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
                + (f"\n> **Цепочка одному исполнителю:** {' → '.join(lk(i) for i in inf['chain'])}" if inf["chain"] else "")
@@ -2073,7 +2082,7 @@ properties:
   file.name:
     displayName: Карточка
   formula.sum_budget:
-    displayName: Сумма / бюджет
+    displayName: Оценки / бюджет (не прогресс)
   note.id:
     displayName: №
   formula.mode_view:
@@ -2792,7 +2801,7 @@ properties:
   formula.accept_view:
     displayName: Приёмка
   formula.sum_budget:
-    displayName: Сумма / бюджет
+    displayName: Оценки / бюджет (не прогресс)
   note.id:
     displayName: №
   formula.status_view:

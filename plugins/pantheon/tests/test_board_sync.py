@@ -102,5 +102,24 @@ bt = B.batches(store(H("metis-0750", type="story", status="doing"), H("metis-068
 check("0799: board-auto — пачка без поля pr получает номер PR с ветки", bt and bt[0][4] == 294, bt)
 check("0799: board-auto — кэша нет или битый: {}", B.batch_branch_prs(os.path.join(ROOT, "нет.json")) == {})
 
+# --- metis-0800: «оценок нет» вместо «0 %»; подпись вида «Пачки» ------------------------------------------------
+tk = store(H("s-1", type="story", title="П", status="doing"), H("t-1", parent="s-1", status="done", mode="single"),
+           H("t-2", parent="s-1", mode="single"))
+c, body = card("s-1", tk)
+check("0800: у детей нет оценок — «Сумма оценок» «оценок нет», а не «0 %»; и в сводке карточки",
+      c["Сумма оценок"] == "оценок нет" and "**Пачка:** оценок нет" in body and "0 %" not in body, (c["Сумма оценок"], body[:200]))
+check("0800: task show пачки без оценок — «оценок нет»", "оценок нет" in T.story_text("s-1", tk) and "сумма 0 %"
+      not in T.story_text("s-1", tk), T.story_text("s-1", tk))
+tk["t-2"][1]["estimate"] = "0 % недели"
+c, body = card("s-1", tk)
+check("0800: оценка есть хоть у одного (даже 0 %) — число", c["Сумма оценок"] == "0 %" and "сумма оценок 0 %" in body,
+      c["Сумма оценок"])
+tk["t-1"][1]["estimate"] = "1,5 % недели"
+check("0800: сумма оценок считается как прежде", card("s-1", tk)[0]["Сумма оценок"] == "1,5 %")
+check("0800: пачка без детей — «оценок нет»", card("s-9", store(H("s-9", type="story")))[0]["Сумма оценок"] == "оценок нет")
+for base, nm in ((T.PULT_FILE, "Пульт"), (T.BASE_FILE, "Доска")):
+    check(f"0800: {nm}.base — колонка суммы подписана как оценки против бюджета, не прогресс",
+          "formula.sum_budget:\n    displayName: Оценки / бюджет (не прогресс)" in base, base[:0])
+
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)
