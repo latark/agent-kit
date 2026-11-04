@@ -1230,6 +1230,15 @@ def main():
         ("protect-config: координатор не пишет .mcp.json", "deny", br, "domain-coordinator", False, W(os.path.join(home, br, ".mcp.json"))),
         ("protect-config: субагент Метиды не правит инструмент ~/.claude/tools", "deny", ak, "hephaestus-pantheon", True, W(os.path.join(home, ".claude/tools/x.mjs"))),
         ("protect-config: штаб не правит ~/.claude.json (MCP)", "deny", ".", "hq", False, E(os.path.join(home, ".claude.json"))),
+        # демон хуков guard (metis-0330): клиент, сокет и служба launchd — защита, роли их не правят
+        ("protect-config: субагент Метиды не подменяет клиент демона хуков", "deny", ak, "hephaestus-pantheon", True,
+         W(os.path.join(home, ".cache/pantheon/hookd/bin/client-0123456789abcdef"))),
+        ("protect-config: координатор не удаляет сокет демона хуков", "deny", br, "domain-coordinator", False,
+         B("rm ~/.cache/pantheon/hookd/hookd.sock")),
+        ("protect-config: штаб не ставит службу pantheon.svc.hookd", "deny", ".", "hq", False,
+         W(os.path.join(home, "Library/LaunchAgents/pantheon.svc.hookd.plist"))),
+        ("protect-config: ваша сессия собирает клиент демона хуков", "allow", ".", "", False,
+         W(os.path.join(home, ".cache/pantheon/hookd/bin/client-0123456789abcdef"))),
         # --- проектные роли <репо>/.claude/agents (metis-0057) ---
         ("protect-config: Write в <репо>/.claude/agents/x.md — отказ", "deny", br, "dev-sonnet", True,
          W(os.path.join(home, br, ".claude/agents/hephaestus-x.md"))),

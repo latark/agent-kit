@@ -150,8 +150,11 @@ def configure():
     Демон только ускоряет: любая его ошибка — медленный путь с теми же правилами (принцип F1, README guard)."""
     global OFF, HOME, MODE, FAIL_LOG, MARKET_GUARD, CDP_DAEMON, TG_SCRIPT, TG_TESTS, STATE_DIR, OWNER_LOG, \
         DOMAINS_FILE, LEGACY_DOMAINS_FILE, POLICY_FILE, AI_HOME, PANTHEON, PANTHEON_VIEW, TEMP_ROOTS, CDP_TOKEN_DIR, \
-        HESTIA_CONSENT_DIR, PROTECTED
+        HESTIA_CONSENT_DIR, PROTECTED, EVENT_NAME
     argv = sys.argv[1:]
+    # событие прошлого вызова (долг С2 argus, metis-0330): с ним сбой нового вызова в том же процессе судился бы как
+    # сбой на Stop — код 0 вместо отказа
+    EVENT_NAME = None
     OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
     HOME = os.path.expanduser("~")
     MODE = "strict" if "--strict" in argv else "managed" if "--managed" in argv else "plugin"
