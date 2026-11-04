@@ -211,9 +211,10 @@ def save_state(p, st):
 
 
 def pr_index(cache):
-    """PR задач по кэшу fetch (metis-0501 [zeus-pr-link]) → {id: [{"repo", "number", "sha", "merged"}]}: слитые — по
+    """PR задач по кэшу fetch (metis-0501 [zeus-pr-link]) → {id: [{"repo", "number", "sha", "merged", "branch"}]}: слитые — по
     ветке и «Closes» (и с «часть»: PR всё равно её), открытые — по closes. Карточка задачи берёт отсюда ссылки на GitHub;
-    упоминания в журнале дополняет tasks.work_links."""
+    упоминания в журнале дополняет tasks.work_links. branch — ветка PR (headRefName слитого, branch открытого): по ней
+    карточка пачки находит PR с ветки batch/<id> без поля pr (metis-0799, tasks.batch_pr)."""
     out = {}
     cache = cache if isinstance(cache, dict) else {}
     for key, merged in (("merged", True), ("open_prs", False)):
@@ -229,10 +230,12 @@ def pr_index(cache):
                 else:
                     ids = [i for i in pr.get("closes") or [] if isinstance(i, str)] if isinstance(pr.get("closes"), list) else []
                 sha = str(pr.get("oid") or "") if merged else ""
+                branch = pr.get("headRefName") if merged else pr.get("branch")
+                branch = branch if isinstance(branch, str) else ""
                 for tid in ids:
                     out.setdefault(tid, []).append({"repo": repo, "number": pr["number"],
                                                     "sha": sha if re.fullmatch(r"[0-9a-f]{7,40}", sha) else "",
-                                                    "merged": merged})
+                                                    "merged": merged, "branch": branch})
     return out
 
 

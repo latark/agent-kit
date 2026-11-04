@@ -1665,6 +1665,30 @@ def over_budget(inf):
     return inf["budget"] is not None and inf["sum"] > inf["budget"] + 1e-9
 
 
+BATCH_BRANCH = "batch/"  # ветка пачки — batch/<story-id> (AGENTS.md, pantheon batch pr)
+
+
+def batch_pr(sid, idx, own=None):
+    """PR пачки по её ветке batch/<sid> из кэша gh (metis-0799): поле pr пишет `pantheon batch pr`, но PR, открытый
+    иначе, его не ставит, и пачка оставалась без PR. idx — autoclose.pr_index (запись с branch), own — репозитории
+    направления пачки (в нижнем регистре; None — любые). → (репозиторий, номер, слит, [id задач, которые PR закрывает,
+    кроме самой пачки]) или None. Открытый PR важнее слитого, из нескольких — с большим номером."""
+    found = {}
+    for tid, rows in (idx or {}).items():
+        for x in rows if isinstance(rows, list) else []:
+            if not isinstance(x, dict) or x.get("branch") != BATCH_BRANCH + str(sid) or not isinstance(x.get("repo"), str):
+                continue
+            repo = x["repo"].lower()
+            if own is not None and repo not in own:
+                continue
+            found.setdefault((repo, x.get("number"), bool(x.get("merged"))), set()).add(tid)
+    keys = [k for k in found if isinstance(k[1], int) and not isinstance(k[1], bool)]
+    if not keys:
+        return None
+    key = max(keys, key=lambda k: (not k[2], k[1]))
+    return key[0], key[1], key[2], sorted(found[key] - {sid})
+
+
 def story_text(sid, tasks):
     """Состав пачки строками — для pantheon task show."""
     inf = story_info(sid, tasks)
@@ -1791,12 +1815,16 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     «Пачки проекта»."""
     names = kw.get("names") or {}
     child_links = kw.pop("child_links", None) or {}  # {id задачи: work_links} — список PR задач пачки ([zeus-pr-link])
+    bpr = kw.pop("batch_pr", None)  # batch_pr: PR с ветки batch/<id> по кэшу gh — когда поля pr нет (metis-0799)
     card, text = render_card(head, body, src_rel, t, **kw)
     inf = story_info(head.get("id"), tasks)
-    spr = story_pr(head)
+    spr = story_pr(head) or (bpr[:2] if bpr else None)
+    bpr = bpr if bpr and (bpr[0].lower(), bpr[1]) == (spr[0].lower(), spr[1]) else None
+    # закрытые PR пачки задачи с другим parent: в состав (он — по parent) не входят, но их видно (metis-0799)
+    outside = [i for i in (bpr[3] if bpr else []) if i not in inf["ids"] and i in tasks and tasks[i][1].get("type") == "task"]
     # состояние PR пачки — из кэша gh (pr_index по ветке batch/<id>: номер пачки в имени ветки); нет в кэше — без пометки
-    sstate = next((v for r, n, v in (child_links.get(head.get("id")) or ([], []))[0] if spr and (r, n) == (spr[0].lower(), spr[1])),
-                  None)
+    sstate = bpr[2] if bpr else next((v for r, n, v in (child_links.get(head.get("id")) or ([], []))[0]
+                                      if spr and (r, n) == (spr[0].lower(), spr[1])), None)
     spr_url = f"https://github.com/{spr[0]}/pull/{spr[1]}" if spr else None
     over = over_budget(inf)
     for k in ("Пачка", "Порядок", "Режим", "Режим почему", "Зависит от", "Области", "Пересечения"):
@@ -1811,8 +1839,9 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
                  "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
                  "Пересечения": cross_l or None, "Области не указаны": unknown,
-                 "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or "")) else None,
-                 "PR пачки": spr_url, "Тип": "пачка"})
+                 "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or ""))
+                 else BATCH_BRANCH + head["id"] if bpr and BRANCH_RE.fullmatch(BATCH_BRANCH + str(head.get("id"))) else None,
+                 "PR пачки": spr_url, "Вне состава": [lk(i) for i in outside] or None, "Тип": "пачка"})
     summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
@@ -1823,7 +1852,9 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
                + (f"\n> **PR пачки:** [PR #{spr[1]}]({spr_url}) · {spr[0]}"
                   + {True: " · слит", False: " · открыт", None: ""}[sstate]
                   + (f" · ветка `{card['Ветка']}`" if card.get("Ветка") else "") if spr
-                  else f"\n> **Ветка пачки:** `{card['Ветка']}` · PR ещё нет" if card.get("Ветка") else ""))
+                  else f"\n> **Ветка пачки:** `{card['Ветка']}` · PR ещё нет" if card.get("Ветка") else "")
+               + (f"\n> **PR пачки закрыл и задачи вне её состава** (их parent — другая пачка или пусто): "
+                  f"{', '.join(lk(i) for i in outside)}" if outside else ""))
     rows = []
     cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
@@ -2206,14 +2237,14 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
               "Когда", "Бюджет", "Сумма оценок", "Закрыто", "Цепочка", "Параллельно", "Области не указаны",
-              "Ветка", "PR пачки", "Тип", "id", "tags"]
+              "Ветка", "PR пачки", "Вне состава", "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
               "Вопрос задан": "datetime", "Откуда": "text", "Из чего": "text", "Критерии": "text", "Хвост": "multitext", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
-              "Ветка": "text", "PR пачки": "text",
+              "Ветка": "text", "PR пачки": "text", "Вне состава": "multitext",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
@@ -3776,7 +3807,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             if h.get("type") == "story":
                 pn = next((project_note_name(pr) for pr, r in registry.items() if h.get("direction") in r["directions"]),
                           None)
-                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, child_links=wl, **kw)
+                own = [r.lower() for r in (repos or {}).get(h.get("direction")) or [] if isinstance(r, str)]
+                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, child_links=wl,
+                                                batch_pr=batch_pr(cid, pr_index, own) if repos else None, **kw)
             else:
                 card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs,
                                                                           outs, wl.get(cid), tails), **kw)

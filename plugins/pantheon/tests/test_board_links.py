@@ -89,7 +89,7 @@ def unit():
     idx = A.pr_index(cache)
     check("pr_index: слитый — по Closes-списку с коммитом, открытый — по closes",
           [x["number"] for x in idx.get("metis-0011", [])] == [163] and idx["metis-0010"][0]["sha"].startswith("1a1f77a")
-          and idx["metis-0012"] == [{"repo": R, "number": 190, "sha": "", "merged": False}], idx)
+          and idx["metis-0012"] == [{"repo": R, "number": 190, "sha": "", "merged": False, "branch": ""}], idx)
     check("pr_index: кэш неверной формы — пусто без трассировки",
           A.pr_index({"merged": {R: [{"number": "x"}, 5, {"number": 1, "body": 5}]}, "open_prs": {R: [{"number": 2, "closes": 5}]}}) == {}
           and A.pr_index(None) == {} and A.pr_index({"merged": []}) == {})
@@ -108,7 +108,7 @@ def unit():
     check("work_links: PR из кэша, но репозиторий не своего направления — не берём",
           T.work_links(H("metis-0010", direction="athena"), "", idx, repos) == ([], []))
     bad_oid = A.pr_index({"merged": {R: [{"number": 3, "headRefName": "metis-0040", "body": "", "oid": "zz; rm"}]}})
-    check("pr_index: oid не hex — коммита нет", bad_oid == {"metis-0040": [{"repo": R, "number": 3, "sha": "", "merged": True}]}, bad_oid)
+    check("pr_index: oid не hex — коммита нет", bad_oid == {"metis-0040": [{"repo": R, "number": 3, "sha": "", "merged": True, "branch": "metis-0040"}]}, bad_oid)
     check("work_links: направление без репозиториев — пусто", T.work_links(H("x-0001", direction="x"), j, idx, repos) == ([], []))
     check("work_links: коммит дважды (полный и короткий) — один раз",
           wl(H("metis-0010"), journal("PR #163 слит, squash 1a1f77a")) == ([(R, 163, True)], [(R, "1a1f77a")]),
