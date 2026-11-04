@@ -284,12 +284,23 @@
   `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
 - `plugins/pantheon/lib/culprits.py` — виновники памяти (metis-0568). В красной зоне — своп выше порога, давление
   памяти от «предупреждения» или нагрузка выше 4 на ядро — дежурный пишет в `alerts.md` одну строку на эпизод (перерыв меньше
-  часа — тот же эпизод). В строке таблица «процесс → чей → память → возраст»: claude, node, tsx, next, vitest, pnpm
+  часа — тот же эпизод), а пока зона держится — повтор раз в 6 ч (metis-0617: своп выше порога держится сутками, и до
+  правки 30.10 строки не было вовсе). В строке таблица «процесс → чей → память → возраст»: claude, node, tsx, next, vitest, pnpm
   старше 2 ч и сироты Python multiprocessing (resource_tracker, spawn_main с ppid 1). Сам дежурный ничего не гасит.
   `pantheon reap` показывает тот же список с вердиктом. `pantheon reap --apply` гасит только брошенное: копию
   удалили, задачи ветки закрыты или это сирота multiprocessing в папках Пантеона. Об остальном своём печатает вопрос
   «[id] …» для окна вопросов Зевса. `--apply --pid N …` гасит своё по «да», а в окне Гестии — только при метке
   `pantheon consent <id>`. Чужое (вне worktree, папок направлений, Пантеона и состояния) и claude не гасит никогда.
+  `pantheon reap --auto` (metis-0617) — задача планового прохода раз в 30 мин, без красной зоны и без вопроса: гасит
+  брошенное старше 30 мин — сирот multiprocessing (ppid 1) в папках Пантеона, процессы удалённых worktree и копий с
+  закрытыми задачами, language server (pyright-langserver, typescript-language-server, tsserver — по исполняемому
+  файлу, а не по слову в команде), у которого вверх по цепочке до launchd только запускалки (sh, zsh, env, npm, npx,
+  pnpm) и нет живого claude, и сирот (ppid 1) в песочнице окна `~/Library/Caches/pantheon-sandbox`. Отказ закрытый:
+  чьё — только по cwd (lsof), cwd не прочитан — не гасит; выше по цепочке живая claude или сессия из `claude agents`,
+  или цепочку не проследить — не гасит; список сессий не прочитан — проход пропущен с кодом 3. Не трогает claude,
+  процессы из пакетов `/Applications/*.app` и всё вне папок Пантеона. Каждое гашение — строка «погашено: что, чьё, почему, МБ» в `alerts.md`. Плановый проход пускает только
+  `reap --auto` (не `--apply` и не `--pid`). Строка для `schedule.toml`: `name = "reap"`, `command = "pantheon reap
+  --auto"`, `every = 30`, `class = "light"`, `hosts = "all"`, `timeout = 300`, `notify = false`.
 - Службы (с 0.11.0, SCHED-05): `[[service]]` в `schedule.toml` — постоянный процесс, своя задача launchd
   `pantheon.svc.<имя>` с KeepAlive, запуск через `pantheon service-run <имя>` (команда — только `pantheon …`
   или скрипт плагина). Плановый проход сверяет launchd с расписанием; `pantheon jobs pause|resume|disable|enable <служба>` действует
@@ -525,7 +536,7 @@
   по пути `~/.claude/plugins/marketplaces/agent-kit/plugins/pantheon/roles/_ref/<имя>.md` и читает его Read, когда
   порядок нужен. В сборку ролей файлы не входят; тест `test_roles.py` проверяет, что каждый файл назван в роли, а имя в
   роли — существующий файл, и сверяет правила по тексту роли вместе с файлом.
-- `plugins/pantheon/bin/heavy` — тяжёлые команды через общую блокировку: два места, `--server` — один долгий процесс (MEM-03). Места получают по порядку прихода (очередь билетов `locks/heavy-queue`, metis-0659); за жетон сервера очереди нет. Окна ролей пишут из `STATE` только в `STATE/locks/heavy-queue` — папку билетов очереди; не во весь `locks`, ссылку на месте папки сборка не даёт.
+- `plugins/pantheon/bin/heavy` — тяжёлые команды через общую блокировку: два места, `--server` — один долгий процесс (MEM-03). Места получают по порядку прихода (очередь билетов `locks/heavy-queue`, metis-0659): билет умершего убирается, билет остановленного (SIGSTOP, не обновлялся дольше 120 с) очередь обходит; `heavy --status` считает только живые билеты. За жетон сервера очереди нет. Окна ролей пишут из `STATE` только в `STATE/locks/heavy-queue` — папку билетов очереди; не во весь `locks`, ссылку на месте папки сборка не даёт.
 - `plugins/pantheon/lib/browser.py` — браузер владельца для ролей без пароля и порта демона (metis-0760, путь В):
   `pantheon browser health|open|read|eval|status` — только чтение. Окно кладёт заявку в `browser/` своего кэша,
   демон с паролем зовёт проход вне окна (`pantheon browser run`, его запускает плановый проход, пока есть заявки). Окна —
@@ -690,7 +701,7 @@
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: заявки на тесты, тревога о «принять» без tests, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
-    python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод, чей процесс, pantheon reap
+    python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод и повтор, чей процесс, reap и reap --auto
     python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: плановый проход пишет probes.json, окно читает свежий, старый/битый — как раньше
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: сверка выпуска, установка, коды

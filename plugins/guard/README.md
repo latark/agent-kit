@@ -928,3 +928,4 @@ head, как в `pantheon review status`, а «принять» до «верн�
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
     python3 -I tests/test_context.py      # контекст вызова: configure(), set_context против нового процесса
     python3 -I scripts/bench.py -n 20     # замер холодного вызова хуков: медиана и p95 в мс (не тест; --out, --hooks)
+    python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось
