@@ -331,7 +331,7 @@ def path(*parts):
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
 HQ_RW = "hq-rw"
 HEAVY_QUEUE = "heavy-queue"  # папка билетов очереди heavy в STATE/locks (metis-0659)
-HQ_RW_DIRS = ("locks", "autostart-reset")
+HQ_RW_DIRS = ("locks", "autostart-reset", "start-req")  # start-req — заявки Зевса на запуск (metis-0771)
 HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
 # errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
 HQ_BAD_ERRNO = {errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR, errno.EMLINK, errno.EOPNOTSUPP}
@@ -2307,6 +2307,33 @@ def write_window(out_dir, name, data):
     return True
 
 
+def hq_project_dirs(domains, reg=None):
+    """metis-0771: папки проектов направлений, закрытые окну hq (настоящие пути). Не закрыты metis-pantheon,
+    направления с coordinator = false (их ведёт Пританей), папки в ~/ai или PANTHEON или содержащие их либо открытую
+    папку (~/projects у направления закрыл бы agent-kit) и папки вне HOME или в скрытых. То же считает guard
+    hq_project_roots — правило Read/Grep/Glob."""
+    # Счёт — в hooks/ctx.py: тем же списком хук qmd-query закрывает штабу коллекции этих папок (metis-0778)
+    return ctx_mod().hq_project_dirs(domains, list(hq_led(reg)), HOME, AI_HOME, PANTHEON)
+
+
+def _allow_blocked(a, denies):
+    """metis-0771: allowRead `a` открыл бы закрытое — запрет из `denies` закрывает `a` или папку выше либо лежит внутри
+    `a`. Шаблоны (*, ?, [) — через fnmatch: его «*» шире, чем у песочницы, поэтому сомнение — в пользу запрета."""
+    for x in denies:
+        x = x[:-3] if x.endswith("/**") else x
+        if any(c in x for c in "*?["):
+            up = a
+            while up not in ("/", ""):
+                if fnmatch.fnmatchcase(up, x):
+                    return True
+                up = os.path.dirname(up)
+            if fnmatch.fnmatchcase(x, a + "/*"):
+                return True
+        elif a == x or a.startswith(x.rstrip("/") + "/") or x.startswith(a + "/"):
+            return True
+    return False
+
+
 def _deny_forms(paths):
     """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
     out = []
@@ -2917,6 +2944,17 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                   file=sys.stderr)
     fsys = hq["sandbox"]["filesystem"]
     fsys["denyRead"] += _deny_forms(closed) + _deny_forms(files)
+    # metis-0771: папки проектов направлений — работа их координаторов. Закрыто содержимое («P/*», «P/*/**»), а не сама
+    # папка: `git -C P log` идёт. Открыты .git, README.md и AGENTS.md в корне (allowRead сильнее denyRead) — только если
+    # ни один прежний запрет чтения (closed_dirs, личное, ключ в .git/config) не лежит внутри них и не закрывает их или
+    # папку выше: иначе allowRead открыл бы закрытое. Read/Grep/Glob — guard hq-projects (правило Read исключений не
+    # знает: deny сильнее allow). Модель угроз — drafts/0771-threat-model.md
+    proj = hq_project_dirs(domains)
+    deny_real = [os.path.realpath(os.path.expanduser(x)) for x in fsys["denyRead"]]
+    fsys["denyRead"] += [p + tail for p in proj for tail in ("/*", "/*/**")]
+    allow = [a for p in proj for a in (p + "/.git", p + "/README.md", p + "/AGENTS.md") if not _allow_blocked(a, deny_real)]
+    if allow:
+        fsys.setdefault("allowRead", []).extend(allow)
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])

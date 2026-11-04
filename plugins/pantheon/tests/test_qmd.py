@@ -321,6 +321,66 @@ def test_hook():
           not hook({"server": "qmd", "uri": "qmd://corpus/x.md"}, rr, "domain-coordinator"))
 
     test_hook_policy(vec)
+    test_hook_projects(vec)
+
+
+def test_hook_projects(vec):
+    """metis-0778 (строка 8 модели угроз 0771): коллекция qmd, чья папка внутри проекта направления или содержит его,
+    штабу закрыта сама, без [hq].closed_collections. Открыты ~/ai (pantheon, knowledge), metis-pantheon и
+    направления, которые ведёт Пританей (coordinator = false). Битый qmd.toml — штабу qmd закрыт целиком."""
+    h = tempfile.mkdtemp(prefix="qmd-proj-")
+    proj = os.path.join(h, "projects")
+    for d in ("broker", "broker/docs", "agent-kit", "solo"):
+        os.makedirs(os.path.join(proj, d))
+    for d in (".claude/pantheon", "ai/pantheon", "ai/knowledge", ".local/state/pantheon", ".hidden/proj"):
+        os.makedirs(os.path.join(h, d), exist_ok=True)
+    with open(os.path.join(h, ".claude", "pantheon", "policy.toml"), "w") as fh:
+        fh.write('[hq]\nclosed_dirs = []\nclosed_collections = []\n')
+    with open(os.path.join(h, ".local", "state", "pantheon", "domains.json"), "w") as fh:
+        json.dump({"domains": {"athena-broker": [os.path.join(proj, "broker")],
+                               "metis-pantheon": [os.path.join(proj, "agent-kit")],
+                               "mnemo-brain": [os.path.join(h, "ai", "knowledge")],
+                               "solo-led": [os.path.join(proj, "solo")],
+                               "hidden-dir": [os.path.join(h, ".hidden", "proj")]}}, fh)
+    with open(os.path.join(h, "ai", "pantheon", "directions.toml"), "w") as fh:
+        fh.write('[[direction]]\nname = "athena-broker"\n[[direction]]\nname = "solo-led"\ncoordinator = false\n')
+    colls = {"pantheon": "~/ai/pantheon", "knowledge": "~/ai/knowledge", "broker": "~/projects/broker",
+             "brokerdocs": "~/projects/broker/docs", "wide": "~/projects", "agentkit": "~/projects/agent-kit",
+             "solo": "~/projects/solo", "hidden": "~/.hidden/proj"}
+    qmd_toml = os.path.join(h, "ai", "pantheon", "qmd.toml")
+    with open(qmd_toml, "w") as fh:
+        fh.write("".join(f'[[collection]]\nname = "{n}"\npath = "{p}"\n' for n, p in colls.items()))
+    q = {"searches": vec, "rerank": False}
+    g, m = "mcp__qmd__get", "mcp__qmd__multi_get"
+    out = hook({**q, "collections": ["broker"]}, window="hq", home=h, raw=True)
+    check("0778: штаб — query по коллекции проекта направления — отказ с причиной",
+          '"deny"' in out and "broker" in out and "координатору направления" in out, out)
+    check("0778: штаб (помощник, agent_type hq) — query по коллекции проекта — отказ",
+          hook({**q, "collections": ["broker"]}, role="hq", home=h))
+    check("0778: штаб — get и multi_get qmd://broker/… — отказ",
+          hook({"file": "qmd://broker/a.md"}, g, "hq", home=h)
+          and hook({"pattern": "qmd://broker/*.md"}, m, window="hq", home=h))
+    check("0778: коллекция внутри проекта — отказ", hook({**q, "collections": ["brokerdocs"]}, window="hq", home=h))
+    check("0778: коллекция, содержащая проект (~/projects), — отказ",
+          hook({**q, "collections": ["wide"]}, window="hq", home=h))
+    for name in ("pantheon", "knowledge"):
+        check(f"0778: штаб — коллекция {name} (~/ai) открыта",
+              hq_open(hook({**q, "collections": [name]}, window="hq", home=h))
+              and hq_open(hook({"file": f"qmd://{name}/a.md"}, g, window="hq", home=h)))
+    check("0778: штаб — коллекция agent-kit (metis-pantheon) открыта",
+          hq_open(hook({**q, "collections": ["agentkit"]}, window="hq", home=h)))
+    check("0778: штаб — коллекция направления, которое ведёт Пританей, открыта",
+          hq_open(hook({**q, "collections": ["solo"]}, window="hq", home=h)))
+    check("0778: штаб — коллекция папки направления в скрытой папке (~/.claude и т. п.) не закрывается",
+          hq_open(hook({**q, "collections": ["hidden"]}, window="hq", home=h)))
+    check("0778: координатору коллекция проекта открыта",
+          not hook({**q, "collections": ["broker"]}, role="domain-coordinator", home=h))
+    with open(qmd_toml, "w") as fh:
+        fh.write('[[collection]\nname = "broker"\n')
+    out = hook({**q, "collections": ["pantheon"]}, window="hq", home=h, raw=True)
+    check("0778: qmd.toml не TOML — штабу qmd закрыт целиком с причиной, координатору открыт",
+          '"deny"' in out and "qmd.toml" in out
+          and not hook({**q, "collections": ["pantheon"]}, role="domain-coordinator", home=h), out)
 
 
 def test_hook_policy(vec):

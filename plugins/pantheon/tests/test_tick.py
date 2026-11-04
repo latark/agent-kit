@@ -89,9 +89,9 @@ max_delay = 180
 def main():
     results = []
 
-    def check(name, cond):
+    def check(name, cond, detail=None):
         results.append(cond)
-        print(("ok   " if cond else "FAIL ") + name)
+        print(("ok   " if cond else "FAIL ") + name + ("" if cond or detail is None else f"\n     {detail!r}"))
 
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, SCHED)
@@ -340,6 +340,7 @@ def main():
     with open(os.path.join(home, "directions.toml"), "a") as fh:
         fh.write('sandbox_write = ["~/.ssh"]\n'
                  '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/ai/knowledge"]\n'
+                 '[[direction]]\nname = "solo-led"\nfolders = ["~/projects/solo"]\ncoordinator = false\n'
                  '[[direction]]\nname = "zz"\nfolders = ["~/ai/pantheon", "~/projects", "~/projects/zz", "~/.claude", '
                  '"~/projects/ln"]\n')
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
@@ -529,10 +530,10 @@ def main():
     sw_hq = hb["filesystem"]["allowWrite"]
     st_real = os.path.realpath(state)
     hq_rw = os.path.join(st_real, "hq-rw")
-    check("окно штаба (metis-0523, ревью безопасности): из STATE пишет только hq-rw/locks и hq-rw/autostart-reset — "
+    check("окно штаба (metis-0523, ревью безопасности): из STATE пишет только hq-rw/locks, hq-rw/autostart-reset и hq-rw/start-req (metis-0771) — "
           "настоящими путями; сама hq-rw, замки прохода (locks/), stopped/, owner-log/, autostart.json закрыты",
           [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
-          == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset")]
+          == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset"), os.path.join(hq_rw, "start-req")]
           # окно направления пишет в STATE только папку очереди heavy («да» владельца 02.11, metis-0659)
           and [x for x in sa["sandbox"]["filesystem"]["allowWrite"] if x.startswith(st_real + "/")]
           == [os.path.join(st_real, "locks", "heavy-queue")])
@@ -560,6 +561,18 @@ def main():
                                 "gh pr comment", "gh pr review", "gh pr diff", "gh pr status"))
                   or x in ("gh", "gh *", "gh pr", "gh pr *") for x in hb["excludedCommands"]))
     corp = "lecture-notes"
+    # metis-0771: папки проектов направлений закрыты окну штаба (Bash — песочница), открыты .git, README.md, AGENTS.md
+    hdr, har = hb["filesystem"]["denyRead"], hb["filesystem"].get("allowRead") or []
+    br = real("projects/br")
+    check("окно штаба: папка проекта направления (athena-shop) закрыта содержимым, не сама папка (metis-0771)",
+          br + "/*" in hdr and br + "/*/**" in hdr and br not in hdr and "Read(/" + br + "/**)" not in str(hq), hdr[-12:])
+    check("окно штаба: в проекте открыты .git (git log), README.md и AGENTS.md — allowRead (metis-0771)",
+          all(br + x in har for x in ("/.git", "/README.md", "/AGENTS.md")), har)
+    check("окно штаба: ~/ai (directions, knowledge, pantheon), agent-kit, coordinator = false, ~/projects и скрытые "
+          "папки не закрыты (metis-0771)",
+          real("projects") + "/*" not in hdr and real("ai/knowledge") + "/*" not in hdr
+          and real("projects/solo") + "/*" not in hdr and real(".claude") + "/*" not in hdr
+          and real("pantheon") + "/*" not in hdr, [x for x in hdr if x.endswith("/*")])
     check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in (f"~/projects/{corp}", "~/.cache/qmd",
                                                            f"~/.cache/{corp}", f"~/.claude/projects/*{corp}*"))

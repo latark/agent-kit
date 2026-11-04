@@ -122,8 +122,11 @@ def main():
     check("чужие выводы в /tmp/claude-<uid> (сессии, мусор тестов) закрыты песочницей и правилом Read",
           all(sb_closed(p) and rd_closed(p) for p in others))
     ours = [os.path.join(tasks, n, "s", "tasks", "b1.output") for n in mine]
-    check("свои выводы штаба и его worktree открыты и песочницей, и правилом Read; allowRead нет",
-          all(not sb_closed(p) and not rd_closed(p) for p in ours) and "allowRead" not in fs2)
+    br = os.path.realpath(os.path.join(tmp, "projects", "br"))
+    check("свои выводы штаба и его worktree открыты и песочницей, и правилом Read; в allowRead — только .git, "
+          "README.md и AGENTS.md проекта направления (metis-0771)",
+          all(not sb_closed(p) and not rd_closed(p) for p in ours)
+          and fs2.get("allowRead") == [br + "/.git", br + "/README.md", br + "/AGENTS.md"])
     # корень CLAUDE_TMP — $TMPDIR песочницы: heredoc zsh ($TMPPREFIX=$TMPDIR/zsh), mktemp, tempfile (argus 15.10)
     roots = [os.path.join(tasks, n) for n in ("zshAbC123", "tmp.Xy12ab", "tmpk3j_x9", "guard-test-x.log", "a.txt")]
     roots += [os.path.join(tasks, n, "f.txt") for n in ("tmp.Zeus1", "tmpk3j_x9", "tmp")]  # mktemp -d, mkdtemp
@@ -187,6 +190,13 @@ def main():
     check("[hq] исправлен — окно штаба пересобрано по новому разделу",
           "~/projects/law-feed/outbox" in hq4["sandbox"]["filesystem"]["denyRead"]
           and "~/projects/law-feed/inbox" not in hq4["sandbox"]["filesystem"]["denyRead"])
+    # metis-0771: allowRead сильнее denyRead — исключения проекта не открывают то, что закрыто целиком
+    for closed in ('"~/projects/br"', '"~/projects/b*"', '"~/projects"'):
+        open(pol, "w").write(HQ_SECTION.replace('"~/projects/law-feed/cache"', closed))
+        r = build(env)
+        hq5 = json.load(open(hq_path))["sandbox"]["filesystem"]
+        check(f"0771: closed_dirs {closed} закрывает проект — его .git, README.md, AGENTS.md в allowRead нет",
+              r.returncode == 0 and "allowRead" not in hq5 and closed.strip('"') in hq5["denyRead"])
 
     # предохранитель: песочница направления больше предела — файл не переписан, одна тревога; вернулась в предел —
     # пересобран и тревога снова возможна

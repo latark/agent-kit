@@ -158,7 +158,7 @@ send-keys и т. п. — ввод от имени владельца), попо�
 
 **Любой сбой — выход 2 с причиной в stderr, во всех трёх режимах и в вашей сессии тоже** (metis-0094, guard 0.5.5).
 Сбой — событие не JSON или не объект, исключение в проверке прав (domain, pantheon-acl, protect-config, private,
-cdp-role, push, terminal, hq-telegram, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок 8 с (таймаут хука —
+hq-projects, cdp-role, push, terminal, hq-telegram, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок 8 с (таймаут хука —
 10 с, а таймаут Claude Code вызов пропускает). Код 2 Claude Code понимает как блок на любой версии. Второй слой
 (guard 0.5.6, metis-0094) — `"onFailure": "block"` у обработчиков PreToolUse guard и pantheon в hooks.json (Claude
 Code 2.1.295+): таймаут, выход не 0 и не 2 или незапуск хука тоже блокируют вызов (проверено вживую на 2.1.301). У
@@ -229,6 +229,16 @@ answer и плановый проход, это скрипты, guard их не 
   у Зевса личное и действия наружу, а переписка и каналы — чужой текст. Вопросы по Telegram-каналам — Фемиде
   (направление источников) через поручение. Рядом то же закрывают хук qmd-query плагина pantheon (коллекции из
   `[hq].closed_collections` policy.toml) и песочница окна (папки из `[hq].closed_dirs`).
+- **hq-projects (metis-0771).** Окно Пританея не читает папки проектов направлений: это работа их координаторов.
+  Отказ получают Read, Grep и Glob внутри папки проекта из `domains.json`, а Grep и Glob — ещё и на папке выше неё.
+  Отказ назван по направлению: поручение кладётся в `~/ai/pantheon/directions/<имя>/inbox/`, окно поднимает
+  `pantheon start <имя>`, это заявка на следующий проход. Действует и для субагентов окна: `PANTHEON_ROLE` у них тот же.
+  Не закрыты metis-pantheon (agent-kit), направления с `coordinator = false` и всё в `~/ai`. В проекте открыты
+  `README.md` и `AGENTS.md` в корне и `.git`. Bash правило не судит: `cat` и `grep` закрывает песочница окна —
+  `denyRead` содержимого папки и `allowRead` тех же исключений. Коллекции qmd этих папок закрывает хук qmd-query
+  плагина pantheon (metis-0778). Принятый остаток: `git status` проекта из окна Пританея не идёт — git читает рабочие
+  файлы, а их закрывает песочница. Решение Зевса 03.11, вариант А: Пританею хватает `git log` и `gh pr view/checks`,
+  отдельной команды вне песочницы нет. Модель угроз — `drafts/0771-threat-model.md`.
 - **tg-role (metis-0267, guard 0.5.12).** В окне любой роли (`PANTHEON_ROLE` задан, вместе с её субагентами) отказ на
   Bash `tg_read.py history|search|unread|context|download` и на сокет `tg-readd.sock`: выгрузка личного чата — через
   `pantheon read request`. `posts`, `status`, `chats`, `folders`, `verify` и `split` можно. Процесс без `PANTHEON_ROLE`
