@@ -16,8 +16,11 @@ heavy-cmd-2.lock. Свободного места нет — команда жд
 locks/heavy-queue/ (имя — время прихода и pid) и держит на нём flock, пока жива; берёт место, только когда перед ней нет
 живого билета. Билеты умерших (блокировка снята системой, в том числе после kill -9) следующий в очереди убирает сам. Папку
 билетов создать или писать в неё нельзя (песочница) — билета нет, команда ждёт опросом мест, как раньше; так же
-при ссылке на месте папки. Чужое в папке, что не обычный файл (FIFO, папка), пропускается. Сервер (--server): за жетон
-сервера очереди нет (ждёт опросом), а за два места, как у любой команды, — по порядку прихода.
+при ссылке на месте папки. Чужое в папке, что не обычный файл (FIFO, папка), пропускается. Ждущая команда раз в опрос
+обновляет время своего билета; билет живого владельца, не обновлённый дольше TICKET_STALE (120 с), — застывший
+(процесс остановлен, SIGSTOP или Ctrl-Z): очередь его обходит, но не удаляет — оживший владелец встанет первым.
+`heavy --status` считает только живые билеты. Сервер (--server): за жетон сервера очереди нет (ждёт опросом), а за
+два места, как у любой команды, — по порядку прихода.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
@@ -38,7 +41,34 @@ WAIT_EXIT = 75
 POLL = 0.5  # с между опросами мест
 
 QUEUE = "heavy-queue"  # папка билетов очереди на два места (metis-0659)
-TICKET_GRACE = 5  # с: билет только создан, блокировка на нём ещё не взят — не считаем умершим
+TICKET_GRACE = 5  # с: билет только создан, блокировка на нём ещё не взята — не считаем умершим
+TICKET_STALE = 120  # с: живой билет не обновлялся дольше — владелец остановлен, очередь его обходит (metis-0659)
+
+
+def probe(dfd, name):
+    """Состояние билета name в папке очереди: "live" — владелец жив и ждёт; "frozen" — владелец жив, но билет не
+    обновлялся дольше TICKET_STALE (остановлен); "young" — только создан, блокировка ещё не взята; "dead" — владелец
+    умер, блокировка снята системой; None — не обычный файл или не открыть (FIFO не открываем вслепую и не ждём)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        age = time.time() - st.st_mtime
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "frozen" if age > TICKET_STALE else "live"
+        except OSError:
+            return None
+        return "dead" if st.st_size > 0 or age > TICKET_GRACE else "young"
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 class Ticket:
@@ -63,8 +93,9 @@ class Ticket:
             self.drop()
 
     def ahead(self):
-        """Есть ли перед нами живой билет. Билеты умерших владельцев убирает. Не обычный файл в папке (FIFO,
-        устройство, папка, ссылка) пропускает: не открывает вслепую, не ждёт и не удаляет."""
+        """Есть ли перед нами живой билет. Билеты умерших владельцев убирает. Застывший билет (владелец остановлен)
+        обходит, не удаляя. Не обычный файл в папке (FIFO, устройство, папка, ссылка) пропускает: не открывает
+        вслепую, не ждёт и не удаляет."""
         if self.fd is None:
             return False
         try:
@@ -74,31 +105,23 @@ class Ticket:
         for name in names:
             if name >= self.name:
                 break
-            try:
-                fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=self.dfd)
-            except OSError:
-                continue
-            try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return True  # владелец жив и держит блокировку
-                except OSError:
-                    continue
-                # блокировка свободна: владелец умер — или билет только создан
-                if st.st_size > 0 or time.time() - st.st_mtime > TICKET_GRACE:
-                    with contextlib.suppress(OSError):
-                        os.unlink(name, dir_fd=self.dfd)
-                else:
-                    return True
-            except OSError:
-                pass
-            finally:
-                os.close(fd)
+            got = probe(self.dfd, name)
+            if got in ("live", "young"):
+                return True
+            if got == "dead":
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=self.dfd)
         return False
+
+    def touch(self):
+        """Ждём дальше: время билета — сейчас. Остановленный владелец его не обновит, и очередь пойдёт мимо."""
+        if self.fd is None:
+            return
+        try:
+            os.utime(self.fd)
+        except OSError:  # смена времени запрещена (песочница) — та же запись pid тоже обновляет время файла
+            with contextlib.suppress(OSError):
+                os.pwrite(self.fd, f"{os.getpid()}\n".encode(), 0)
 
     def drop(self):
         if self.fd is not None:
@@ -126,10 +149,17 @@ def try_slot(names=SLOTS):
 
 
 def queue_len():
+    """Сколько живых билетов в очереди: умершие и застывшие не в счёт, папку не меняем."""
     try:
-        return len(os.listdir(os.path.join(LOCKS, QUEUE)))
+        dfd = os.open(os.path.join(LOCKS, QUEUE), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return 0
+    try:
+        return sum(1 for name in os.listdir(dfd) if probe(dfd, name) in ("live", "young"))
+    except OSError:
+        return 0
+    finally:
+        os.close(dfd)
 
 
 def status():
@@ -197,6 +227,8 @@ def main(argv):
                     print(f"heavy: {what} — жду ({int(waited // 60)} мин)", file=sys.stderr)
                 time.sleep(POLL)
                 waited += POLL
+                if ticket:
+                    ticket.touch()
                 fd = None if ticket and ticket.ahead() else try_slot(names)[0]
         finally:
             if ticket:

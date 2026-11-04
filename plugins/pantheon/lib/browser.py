@@ -52,6 +52,10 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   запрещает eval («eval запрещён настройкой …»), health, open и read работают; ключа или файла нет — eval разрешён.
 - Сырые /cmd, /events, /console и /close демона наружу не выходят, и сам проход их не зовёт: только /health, /open,
   /eval.
+- Своя вкладка на окно (metis-0774): заявка из окна идёт в /open и /eval с полем session = имя окна — демон заводит
+  этому окну отдельную вкладку (первый /open), чужие окна страницу не уводят. Сессия владельца — без поля, общая
+  вкладка. Вкладку проход не закрывает (/close-tab не зовёт): простаивающую демон закрывает сам через 6 ч, предел —
+  12 вкладок (429 — отказ с текстом демона). Старый демон поле молча игнорирует (работает общая вкладка), откат не нужен.
 - Демон не отвечает — проход уведомляет владельца (кто, что, какой сайт, задача; «нажмите Разрешить») и запускает его
   (`node cdp-daemon.mjs <браузер>`); повтор запуска не раньше чем через 10 мин. Первое обращение по задаче и сайту за
   6 ч — тоже уведомление.
@@ -668,20 +672,44 @@ def ensure_daemon(browser, why):
                f"{START_COOLDOWN // 60} мин")
 
 
-def here_url(browser):
+SESSION_RE = re.compile(r"[\w.@:-]{1,64}")      # как tabKey в демоне: иначе он ответит 400
+
+
+def session_of(win):
+    """Поле session для демона: имя окна — своя вкладка у окна (metis-0774); сессия владельца (win None) — без поля,
+    общая вкладка, как раньше. Имя, которое демон не примет, — отказ, а не молчаливый переход в общую вкладку."""
+    if win is None:
+        return None
+    if not SESSION_RE.fullmatch(win):
+        raise Fail(f"имя окна {win!r} не годится для session демона (до 64 знаков из букв, цифр и ._@:-)")
+    return win
+
+
+def with_session(body, win):
+    sid = session_of(win)
+    return body if sid is None else {**body, "session": sid}
+
+
+def here_url(browser, win=None):
     st = call(browser, "/health")
-    url = ((st or {}).get("work") or {}).get("url") if isinstance(st, dict) else None
+    sid = session_of(win)
+    if sid is not None and isinstance(st, dict) and "sessions" in st:
+        # демон со вкладками сессий: адрес — своей вкладки окна; её нет — вкладка пуста (общую не подставляем)
+        mine = next((x for x in st["sessions"] if isinstance(x, dict) and x.get("session") == sid), None)
+        url = (mine or {}).get("url")
+    else:   # сессия владельца или старый демон (поля session не знает, одна общая вкладка)
+        url = ((st or {}).get("work") or {}).get("url") if isinstance(st, dict) else None
     if not url or url == "about:blank":
         raise Refuse("рабочая вкладка пуста — сначала pantheon browser open URL")
     return url
 
 
-def blank(browser):
+def blank(browser, win=None):
     with contextlib.suppress(Fail):
-        call(browser, "/open", {"url": "about:blank", "console": False})
+        call(browser, "/open", with_session({"url": "about:blank", "console": False}, win))
 
 
-def page_check(browser, url, domains, task, what):
+def page_check(browser, url, domains, task, what, win=None):
     """Адрес вкладки, который сообщил демон или страница (A4–A7): его нет, он не разбирается или сайт не из списка —
     вкладка about:blank и отказ. Запрошенный адрес вместо него не подставляем. → хост."""
     host = None
@@ -692,22 +720,22 @@ def page_check(browser, url, domains, task, what):
     except Refuse:
         ok = False
     if not ok:
-        blank(browser)
+        blank(browser, win)
         shown = host or (url[:200] if isinstance(url, str) and url else "адрес неизвестен (демон его не дал)")
         raise Refuse(f"{what}: {shown} — сайта нет в списке чтения или адрес не проверить; вкладка закрыта (about:blank)")
     return host
 
 
-def navigate(browser, url, domains, task):
-    out = call(browser, "/open", {"url": url, "console": False})
+def navigate(browser, url, domains, task, win=None):
+    out = call(browser, "/open", with_session({"url": url, "console": False}, win))
     if not isinstance(out, dict) or out.get("error"):
         raise Fail(f"переход не удался: {(out or {}).get('error') if isinstance(out, dict) else out}")
-    page_check(browser, out.get("url"), domains, task, "переход увёл на")
+    page_check(browser, out.get("url"), domains, task, "переход увёл на", win)
     return out
 
 
-def evaluate(browser, expr):
-    out = call(browser, "/eval", {"expr": expr, "target": "work"})
+def evaluate(browser, expr, win=None):
+    out = call(browser, "/eval", with_session({"expr": expr, "target": "work"}, win))
     if isinstance(out, dict) and set(out) == {"error"}:
         raise Fail(f"ошибка JS: {str(out['error'])[:500]}")
     return out
@@ -807,24 +835,24 @@ def execute(req, win, domains, eval_on=True):
                      + (f", задача {task}" if task else ""))
     if url:
         seen_notice(win, op, host, task, why)
-        out = navigate(b, url, domains, task)
+        out = navigate(b, url, domains, task, win)
         if op == "open":
             return "done", f"открыто: {out.get('title') or ''} — {out.get('url') or url}" + (
                 " (загрузка не дождалась load)" if out.get("timedOut") else ""), ""
     else:
-        host = page_check(b, here_url(b), domains, task, "во вкладке")
+        host = page_check(b, here_url(b, win), domains, task, "во вкладке", win)
         seen_notice(win, op, host, task, allowed(host, domains, task))
     if op == "read":
-        out = evaluate(b, READ_JS)
+        out = evaluate(b, READ_JS, win)
         if not isinstance(out, dict):
             raise Fail("страница не отдала текст")
-        page_check(b, out.get("url"), domains, task, "при чтении страница на")   # A5: адрес — тот, с которого текст
+        page_check(b, out.get("url"), domains, task, "при чтении страница на", win)   # A5: адрес — тот, с которого текст
         links = "\n".join(f"- {t or '(без текста)'} — {h}" for t, h in (out.get("links") or [])
                           if isinstance(h, str))
         return "done", f"{out.get('title') or ''} — {out.get('url') or ''}\n\n{out.get('text') or ''}\n\nСсылки:\n{links}", ""
     if op == "eval":
-        out = evaluate(b, req["expr"])
-        page_check(b, here_url(b), domains, task, "после eval вкладка на")   # A6: переход скриптом до или во время
+        out = evaluate(b, req["expr"], win)
+        page_check(b, here_url(b, win), domains, task, "после eval вкладка на", win)   # A6: переход скриптом до или во время
         return "done", out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, indent=1), ""
 
 

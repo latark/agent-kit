@@ -2599,7 +2599,10 @@ def check_pantheon(event, tool, tool_input):
 #            песочницы нет, пароль закрыт denyRead.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
 #            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
-#            нет. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
+#            нет. Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
+#            вне ядра — одно, «вернуть» нет), — отказ и ролям, и сессии без роли (metis-0794, push_accepted →
+#            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; строка «Б: <причина>» в новом
+#            коммите и любой сбой проверки — пропуск. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
 #            команде, или её лид (metis-0054, guard 0.5.2): субагент hephaestus-<short> или apollo-<short>, где short —
 #            имя направления папки запуска (domains.json) после первого «-», как собирает pantheon roles build; дальше
 #            лид проверяется как координатор (личное, Метида, защиты). Лид чужого направления, сессия без
@@ -3054,6 +3057,13 @@ def _git_out(d, *args):
 
 def push_problem(texts, cwd, moved):
     """Почему эта отправка ролям нельзя, или None."""
+    got = _push_parse(texts, cwd, moved)
+    return got if isinstance(got, str) else None
+
+
+def _push_parse(texts, cwd, moved):
+    """Разбор git push: текст — почему отправка ролям нельзя (push_problem); None — это не push; иначе (папка git,
+    remote или None, [(что отправляется, ветка назначения)]) — для push_accepted (metis-0794)."""
     parsed = _git_sub(texts)
     if parsed is None:
         return "аргументы git не разобрать"
@@ -3081,12 +3091,13 @@ def push_problem(texts, cwd, moved):
         current = _git_out(d, "symbolic-ref", "--short", "HEAD")
         if not current:
             return "не понять текущую ветку — назови её явно: git push origin <ветка>"
-    dests = []
+    pairs, remote = [], pos[0] if pos else None
     if not pos[1:]:
-        dests.append(current)
+        pairs.append(("HEAD", current))
         up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}")
         if up and "/" in up:
-            dests.append(up.split("/", 1)[1])
+            pairs.append(("HEAD", up.split("/", 1)[1]))
+            remote = remote or up.split("/", 1)[0]
     for spec in pos[1:]:
         if spec.startswith("+"):
             return f"принудительная отправка ({spec})"
@@ -3096,12 +3107,28 @@ def push_problem(texts, cwd, moved):
         dst = dst if ":" in spec else src
         if not dst:
             return f"refspec «{spec}»"
-        dests.append(current if dst in ("HEAD", "@") else dst)
-    for x in dests:
+        pairs.append((src, current if dst in ("HEAD", "@") else dst))
+    out = []
+    for src, x in pairs:
         name = re.sub(r"^refs/heads/", "", x or "")
         if not name or name in PROTECTED_BRANCHES or "*" in name:
             return f"отправка в {name or 'неизвестную ветку'}"
-    return None
+        out.append((src, name))
+    return d, remote, out
+
+
+def push_accepted(texts, cwd, moved):
+    """Push в ветку открытого PR, который argus уже принял на текущем head (metis-0794): новый коммит сжёг бы
+    вердикты и потребовал нового круга, а долг ревью в принятый PR не тянут (merge-rounds.md, «Находки ревью»).
+    Текст отказа или None. Не разобрать, нет записей, нет сети, любой сбой — None: push идёт как раньше (защита от
+    ошибки агента, а не от обхода — README guard). Судит merge_gate.accepted_push_problem."""
+    got = _push_parse(texts, cwd, moved)
+    if not isinstance(got, tuple):
+        return None
+    try:
+        return _mg().accepted_push_problem(*got)
+    except Exception:  # fail-open: сбой проверки не останавливает push; срок хука — HookTimeout (BaseException), не он
+        return None
 
 
 # --- запор слияния и protect-config: ядро защит (Д3, guard 0.5.4) -----------------------------------------
@@ -3259,7 +3286,8 @@ GH_ALIAS_MERGE = ("Правило push: gh alias со словом merge — а�
 def check_owner_merge(event, tool_input):
     """Сессия без роли (окно владельца): из правил push — только CI перед слиянием PR (решение владельца 01.11,
     metis-0633, merge_gate.owner_ci_problem): gh pr merge и gh api с записью на …/pulls/N/merge — те же проверки
-    (metis-0663, merge_gate.api_merge_args). Остальное в этой сессии не судим. Слово merge ищется в словах gh после
+    (metis-0663, merge_gate.api_merge_args) и git push в принятый PR (push_accepted, metis-0794). Остальное в этой
+    сессии не судим. Слово merge ищется в словах gh после
     разбора bash, а не в сыром тексте: `gh pr mer''ge` слова merge в тексте не содержит (фоновая проверка 02.11);
     сырой текст — только для отказа, когда подкоманду gh не вычислить. У gh api — только слова этой gh, кроме фильтров
     вывода (`--jq .merged`), и только когда невычислимое слово может оказаться флагом записи (Д1 argus #257)."""
@@ -3270,6 +3298,11 @@ def check_owner_merge(event, tool_input):
     said = "merge" in cmd.casefold()
     notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
+        if name == "git":  # push в принятый PR (metis-0794) — и окнам без роли, как ролям
+            why = push_accepted(texts, cwd, moved)
+            if why:
+                return why
+            continue
         if name != "gh":
             continue
         if _gh_parse(texts)[0]:
@@ -3382,6 +3415,9 @@ def check_push(event, tool, tool_input):
             if why:
                 return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
                         "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
+            why = push_accepted(texts, cwd, moved) if name == "git" else None
+            if why:
+                return why
     return allow(notes)
 
 

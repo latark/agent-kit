@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""Отложенная вставка после сжатия (hooks/ctx.py, metis-0788 → долги metis-0793) и двойной захват в чистке записей:
+
+- вставку выдаёт ровно один из одновременных хуков (clock, deferred, maint-post): отметка забирается rename в своё
+  имя, а не os.remove — на APFS один файл успешно удаляют несколько процессов разом (Д-A);
+- оболочка из hooks.json запускает python только при отметке своего процесса (<CLAUDE_PID>.<sid>.json, Д1);
+- снятие старой отметки не уносит только что записанную новую (Д4: deferred_compact, sweep_deferred);
+- prune_records (ctx.py, бывшая строка 791) не ломает замок: удаление файла и его замка — под самим замком, а locked
+  после захвата сверяет, что запер файл под этим именем.
+
+Запуск: python3 -I plugins/pantheon/tests/test_ctx_deferred.py  (код выхода 0 — все прошли)
+"""
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+
+HOOK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "ctx.py")
+HOOKS_JSON = os.path.join(os.path.dirname(HOOK), "hooks.json")
+PY = os.environ.get("CTX_TEST_PYTHON") or sys.executable
+tmp = os.path.realpath(tempfile.mkdtemp(prefix="ctx-deferred-test-"))
+results = []
+
+
+def check(name, ok, info=None):
+    results.append(bool(ok))
+    print(("ok  " if ok else "FAIL") + " " + name + ("" if ok or not info else "\n     " + str(info)[:600]))
+
+
+home = tmp
+pantheon, state = os.path.join(home, "ai", "pantheon"), os.path.join(home, ".local", "state", "pantheon")
+for d in (pantheon, state, os.path.join(home, "tr")):
+    os.makedirs(d, exist_ok=True)
+PID = str(os.getpid())
+BASE = {"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pantheon, "PANTHEON_VIEW": os.path.join(home, "v"),
+        "PANTHEON_STATE": state, "CLAUDE_PID": PID, "CLAUDE_CODE_ENTRYPOINT": "cli", "TZ": "Europe/Moscow",
+        "TMPDIR": tmp}
+os.environ.update(BASE)  # модуль ctx в этом процессе берёт папки из окружения при загрузке
+spec = importlib.util.spec_from_file_location("ctx_under_test", HOOK)
+ctx = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ctx)
+DEFD = os.path.join(state, "ctx", "deferred")
+HLOG = os.path.join(state, "logs", "ctx-hooks.log")
+
+
+def run(cmd, ev, **env):
+    e = dict(BASE)
+    for k, v in env.items():
+        if v is None:
+            e.pop(k, None)
+        else:
+            e[k] = v
+    return subprocess.run([PY, "-I", HOOK, cmd], input=json.dumps(ev), env=e, capture_output=True, text=True, timeout=60)
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def boundary(t):
+    return {"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "timestamp": iso(t)}
+
+
+def append(p, d):
+    with open(p, "a") as fh:
+        fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+
+def mark_of(sid, pid=PID):
+    return os.path.join(DEFD, "%s.%s.json" % (pid, sid))
+
+
+def live_sub(tp, sid):
+    p = os.path.join(os.path.dirname(tp), sid, "subagents", "agent-a1.jsonl")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "a").close()
+    os.utime(p)
+
+
+def ctx_text(out):
+    try:
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    except (ValueError, KeyError, TypeError):
+        return ""
+
+
+hand = os.path.join(pantheon, "handoff", "race", "HANDOFF.md")
+os.makedirs(os.path.dirname(hand))
+open(hand, "w").write("# Передача дел\n\nКодовое слово: СЛИВА\n")
+
+
+def session(sid):
+    """Сессия без роли с файлом передачи дел в транскрипте — его и выдаёт вставка после сжатия."""
+    tp = os.path.join(home, "tr", sid + ".jsonl")
+    now = time.time()
+    with open(tp, "w") as fh:
+        for d in ({"type": "user", "isSidechain": False, "promptId": sid + "-1", "timestamp": iso(now - 300),
+                   "message": {"role": "user", "content": "сохрани дела"}, "origin": {"kind": "human"}},
+                  {"type": "assistant", "isSidechain": False, "timestamp": iso(now - 280),
+                   "message": {"role": "assistant", "content": [
+                       {"type": "tool_use", "name": "Write", "input": {"file_path": hand, "content": "x"}}]}}):
+            fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+    return {"session_id": sid, "transcript_path": tp, "source": "compact"}
+
+
+# --- Д1: отметка с PID процесса, оболочка из hooks.json смотрит только свою -------------------------------------
+ms = session("s-race")
+live_sub(ms["transcript_path"], "s-race")
+r = run("start", ms)
+check("сжатие при живом субагенте → отметка <CLAUDE_PID>.<sid>.json", os.path.exists(mark_of("s-race")),
+      sorted(os.listdir(DEFD)) if os.path.isdir(DEFD) else r.stderr)
+append(ms["transcript_path"], boundary(time.time() + 1))
+mark_saved = open(mark_of("s-race"), "rb").read() if os.path.exists(mark_of("s-race")) else b"{}"
+
+with open(HOOKS_JSON) as fh:
+    sh = [h["command"] for m in json.load(fh)["hooks"]["PostToolUse"] for h in m["hooks"]
+          if h["command"].endswith("ctx.py\" deferred; done")]
+sh = sh[0] if len(sh) == 1 else "echo PYTHON-STARTED"
+FAKE_ROOT = os.path.join(home, "fake-plugin")  # корень плагина, где hooks/python.sh — заглушка вместо python
+os.makedirs(os.path.join(FAKE_ROOT, "hooks"))
+with open(os.path.join(FAKE_ROOT, "hooks", "python.sh"), "w") as fh:
+    fh.write('#!/bin/sh\necho "PYTHON-STARTED $*"\n')
+
+
+def shell(pid):
+    e = dict(BASE, CLAUDE_PLUGIN_ROOT=FAKE_ROOT, PATH="/usr/bin:/bin")
+    if pid is None:
+        e.pop("CLAUDE_PID")
+    else:
+        e["CLAUDE_PID"] = pid
+    r = subprocess.run(["sh", "-c", sh], input="{}", env=e, capture_output=True, text=True, timeout=30)
+    return r.stdout.strip(), r.returncode
+
+
+started = "PYTHON-STARTED %s/hooks/ctx.py deferred" % FAKE_ROOT
+check("оболочка: отметка этого процесса (её записал start) → python запускается один раз",
+      shell(PID) == (started, 0), shell(PID))
+check("оболочка: отметка только другого процесса → python не запускается (Д1)", shell("1") == ("", 0), shell("1"))
+check("оболочка: CLAUDE_PID не число → ищет nopid.*, чужую отметку не видит", shell("12a") == ("", 0), shell("12a"))
+open(mark_of("x", "nopid"), "w").close()
+check("оболочка: без CLAUDE_PID → своя отметка nopid.* запускает python", shell(None) == (started, 0), shell(None))
+check("оболочка: CLAUDE_PID не число → тоже nopid.*", shell("12a") == (started, 0), shell("12a"))
+os.remove(mark_of("x", "nopid"))
+open(mark_of("x", PID + "0"), "w").close()
+check("оболочка: PID-префикс другого процесса (<pid>0) не совпадает со своим", shell("1") == ("", 0)
+      and sorted(os.listdir(DEFD)) == sorted([os.path.basename(mark_of("s-race")), os.path.basename(mark_of("x", PID + "0"))]),
+      os.listdir(DEFD))
+os.remove(mark_of("x", PID + "0"))
+check("python: defer_path берёт PID так же, как оболочка (не число → nopid)",
+      os.path.basename(ctx.defer_path("s/x")) == "%s.sx.json" % PID, ctx.defer_path("s/x"))
+
+# --- Д-A: ровно одна выдача при одновременных хуках --------------------------------------------------------------
+# модель APFS: os.remove не исключителен — удаление файла, который уже удалил другой, тоже «успешно»
+real_remove = os.remove
+
+
+def apfs_remove(p, *a, **kw):
+    try:
+        real_remove(p, *a, **kw)
+    except FileNotFoundError:
+        pass
+
+
+os.makedirs(DEFD, exist_ok=True)
+pm = os.path.join(DEFD, "model.json")
+open(pm, "w").write("{}")
+os.remove = apfs_remove
+try:
+    got = [ctx.claim_mark(pm), ctx.claim_mark(pm)]
+finally:
+    os.remove = real_remove
+check("claim_mark: при неисключительном remove (как на APFS) забирает ровно один из двух вызовов",
+      got == [True, False] and not os.path.exists(pm), got)
+
+# гонка процессов: каждый грузит ctx.py и читает событие заранее, потом все разом стартуют по файлу-флагу
+RUNNER = os.path.join(tmp, "race_runner.py")
+with open(RUNNER, "w") as fh:
+    fh.write("""import importlib.util, os, sys, time
+hook, cmd, go = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("ctx_race", hook)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+ev = m.read_event()
+fn = {"deferred": m.cmd_deferred, "clock": m.cmd_clock, "maint-post": m.cmd_maint_post}[cmd]
+open(go + "." + str(os.getpid()), "w").close()
+while not os.path.exists(go):
+    time.sleep(0.0002)
+sys.exit(fn(ev))
+""")
+race_bad, rounds = [], 25
+cmds = ("deferred", "deferred", "clock", "maint-post", "deferred", "clock")
+for i in range(rounds):
+    with open(mark_of("s-race"), "wb") as fh:
+        fh.write(mark_saved)
+    go = os.path.join(tmp, "go-%d" % i)
+    ps = [subprocess.Popen([PY, "-I", RUNNER, HOOK, c, go], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, env=BASE, text=True) for c in cmds]
+    for pr in ps:
+        pr.stdin.write(json.dumps(dict(ms, hook_event_name="PostToolUse", tool_name="Read", prompt="x")))
+        pr.stdin.close()
+        pr.stdin = None  # communicate иначе пишет в закрытый поток
+    deadline = time.time() + 30
+    while time.time() < deadline and sum(n.startswith("go-%d." % i) for n in os.listdir(tmp)) < len(ps):
+        time.sleep(0.005)
+    open(go, "w").close()
+    outs = [pr.communicate(timeout=60)[0] for pr in ps]
+    n = sum("СЛИВА" in o for o in outs)
+    if n != 1 or os.path.exists(mark_of("s-race")):
+        race_bad.append(n)
+check("гонка: 6 одновременных deferred/clock/maint-post × %d → выдача ровно одна, отметка снята, хвостов .claim нет"
+      % rounds, not race_bad and not [x for x in os.listdir(DEFD) if ".claim" in x], race_bad)
+
+# --- Д4: снятие старой отметки не уносит только что записанную новую ----------------------------------------------
+fresh = json.dumps({"session_id": "s-d4", "t": time.time(), "role": "", "tp": "", "off": None}).encode()
+p4 = mark_of("s-d4")
+with open(p4, "wb") as fh:
+    fh.write(fresh)
+check("claim_mark(seen=байты старой): под именем уже другая отметка → False, новая на месте",
+      ctx.claim_mark(p4, b'{"t": 1}') is False and open(p4, "rb").read() == fresh
+      and not [x for x in os.listdir(DEFD) if ".claim" in x], os.listdir(DEFD))
+check("claim_mark(seen=те же байты) → True, отметка снята", ctx.claim_mark(p4, fresh) and not os.path.exists(p4))
+
+
+def stale(p, age=1000):
+    with open(p, "w") as fh:
+        json.dump({"session_id": "s-d4", "t": time.time() - age, "role": "", "tp": "", "off": None}, fh)
+    os.utime(p, (time.time() - age, time.time() - age))
+
+
+def rewrite_then(real, p):
+    """Обёртка шага проверки: перед ответом новое сжатие записывает свежую отметку (как defer_compact)."""
+    def f(*a, **kw):
+        ctx.save_json(p, json.loads(fresh))
+        return real(*a, **kw)
+    return f
+
+
+stale(p4)
+real_dead = ctx.pid_dead
+ctx.pid_dead = rewrite_then(real_dead, p4)
+try:
+    ctx.sweep_deferred()
+finally:
+    ctx.pid_dead = real_dead
+check("sweep_deferred: просроченную отметку подменила свежая между чтением и снятием → свежая цела (Д4)",
+      os.path.exists(p4) and json.load(open(p4))["t"] > time.time() - 60, os.listdir(DEFD))
+real_cb = ctx.compact_boundary_since
+for why, ev4 in (("границы нет, срок вышел", session("s-d4")), ("граница есть, выдача", dict(ms, session_id="s-d4"))):
+    stale(p4)
+    ctx.compact_boundary_since = rewrite_then(real_cb, p4)
+    try:
+        out = ctx.deferred_compact(ev4, "deferred", 9000)
+    finally:
+        ctx.compact_boundary_since = real_cb
+    check("deferred_compact (%s): старую отметку подменила свежая до снятия → без вставки, свежая цела (Д4)" % why,
+          out == [] and os.path.exists(p4) and json.load(open(p4))["t"] > time.time() - 60, os.listdir(DEFD))
+stale(p4)
+ctx.sweep_deferred()
+check("sweep_deferred без подмены: просроченная без границы снята", not os.path.exists(p4), os.listdir(DEFD))
+
+# --- отметка умершего процесса и прошлой сессии этого процесса --------------------------------------------------
+dead = subprocess.Popen([PY, "-I", "-c", "pass"])
+dead.wait()
+for p in (mark_of("s-gone", str(dead.pid)), mark_of("s-old"), mark_of("s-other", "1")):
+    with open(p, "w") as fh:
+        json.dump({"session_id": "x", "t": time.time(), "role": ""}, fh)
+r = run("start", {"session_id": "s-new", "transcript_path": os.path.join(home, "tr", "s-new.jsonl"), "source": "clear"})
+left = sorted(os.listdir(DEFD))
+check("start: свежая отметка умершего процесса снята сразу", os.path.basename(mark_of("s-gone", str(dead.pid))) not in left,
+      left)
+check("start: отметка прошлой сессии этого процесса (/clear) снята, живого чужого процесса — цела",
+      os.path.basename(mark_of("s-old")) not in left and os.path.basename(mark_of("s-other", "1")) in left, left)
+os.remove(mark_of("s-other", "1"))
+with open(mark_of("s-new"), "w") as fh:
+    json.dump({"session_id": "s-new", "t": time.time(), "role": ""}, fh)
+run("start", {"session_id": "s-new", "transcript_path": os.path.join(home, "tr", "s-new.jsonl"), "source": "resume"})
+check("start той же сессии свою свежую отметку не снимает", os.path.exists(mark_of("s-new")), os.listdir(DEFD))
+r = run("start", {"session_id": "s-new2", "transcript_path": os.path.join(home, "tr", "s-new.jsonl"), "source": "clear"},
+        CLAUDE_CODE_ENTRYPOINT="sdk-cli")
+check("start в claude -p (sdk) отметки процесса не трогает", os.path.exists(mark_of("s-new")), os.listdir(DEFD))
+shutil.rmtree(DEFD)
+
+# --- ctx.py:791 prune_records: двойной захват замка -------------------------------------------------------------
+CTXD = os.path.join(state, "ctx")
+old_t = time.time() - 40 * 86400
+
+
+def prep(name, with_lock=True):
+    p = os.path.join(CTXD, name)
+    open(p, "w").write("{}")
+    os.utime(p, (old_t, old_t))
+    if with_lock:
+        open(p + ".lock", "w").close()
+        os.utime(p + ".lock", (old_t, old_t))
+    try:
+        os.remove(os.path.join(CTXD, ".pruned"))
+    except FileNotFoundError:
+        pass
+    return p
+
+
+p = prep("proc-race.json")
+inside, peak, bad_ino, lk = [0], [0], [], threading.Lock()
+
+
+def holder(entered):
+    with ctx.locked(p) as L:
+        with lk:
+            inside[0] += 1
+            peak[0] = max(peak[0], inside[0])
+        entered.set()
+        try:
+            if os.fstat(L.fd).st_ino != os.stat(L.path).st_ino:
+                bad_ino.append("замок под именем — не тот, что заперт")
+        except FileNotFoundError:
+            bad_ino.append("замка под именем нет")
+        time.sleep(0.4)
+        with lk:
+            inside[0] -= 1
+
+
+threads = []
+
+
+def remove_racing(path, *a, **kw):
+    """Чистка удаляет замок: в этот момент хук A пытается войти, а сразу после удаления — хук B."""
+    if path == p + ".lock":
+        ea, eb = threading.Event(), threading.Event()
+        ta = threading.Thread(target=holder, args=(ea,))
+        ta.start()
+        ea.wait(0.3)  # старая чистка замок не держит — A входит; новая держит — A ждёт на нём
+        real_remove(path, *a, **kw)
+        tb = threading.Thread(target=holder, args=(eb,))
+        tb.start()
+        eb.wait(0.2)
+        threads.extend([ta, tb])
+        return None
+    return real_remove(path, *a, **kw)
+
+
+os.remove = remove_racing
+try:
+    ctx.prune_records()
+finally:
+    os.remove = real_remove
+for t in threads:
+    t.join(10)
+check("prune_records: замок удаляется под самим замком — два хука в нём разом не оказываются (ctx.py:791)",
+      len(threads) == 2 and peak[0] == 1 and not bad_ino, (len(threads), peak[0], bad_ino))
+check("prune_records: старый файл с замком снят", not os.path.exists(p), os.listdir(CTXD))
+
+p = prep("proc-fresh.json")
+ctx.save_json(p, {"x": 1})
+ctx.prune_records()
+check("prune_records: свежий файл не трогается, его замок тоже", os.path.exists(p) and os.path.exists(p + ".lock"))
+pm = prep("mark-old", with_lock=False)
+pf = os.path.join(CTXD, "mark-fresh")
+open(pf, "w").write("1")
+q = os.path.join(CTXD, ".mark-fresh.claim")
+ctx.prune_unlocked(pf, q, old_t + 86400)  # файл переписан после проверки срока — он свежий
+check("prune_unlocked: файл переписали после проверки срока → возвращён на место, не удалён",
+      os.path.exists(pf) and open(pf).read() == "1" and not os.path.exists(q), os.listdir(CTXD))
+ctx.prune_records()
+check("prune_records: старый файл без замка снят, хвостов .prune нет",
+      not os.path.exists(pm) and not [x for x in os.listdir(CTXD) if x.endswith(".prune")], os.listdir(CTXD))
+
+shutil.rmtree(tmp, ignore_errors=True)
+print("%d/%d" % (sum(results), len(results)))
+sys.exit(0 if all(results) else 1)

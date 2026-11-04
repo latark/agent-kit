@@ -21,10 +21,11 @@
 - вердикты argus — directions/*/review-<N>-argus*.md: «Вердикт: …» и head из начала файла; у каждой дорожки (a, b, без
   буквы) — самый свежий файл; вердикт на другом head помечен «старый head»;
 - пачки — карточки type story не done/dropped с задачами в doing, review или waiting (только id, счёт и номер PR пачки
-  из поля pr — metis-0757);
+  из поля pr — metis-0757; поля нет — PR с ветки batch/<id> из того же кэша, metis-0799);
 - неделя — целые проценты снимка лимита (их даёт вызывающий);
-- «Ждёт вас» и «Руками» (metis-0402 п. 4) — карточки задач с «Кому» = Владелец, не закрытые: с вопросом (question или
-  ждёт человека) — «Ждёт вас», остальные — «Руками»; только id. Текстовые строки этих разделов в board.md блок не
+- «Ждёт вас» и «Руками» (metis-0402 п. 4, metis-0801) — «Ждёт вас»: все открытые карточки колонки «Нужен ответ»
+  доски (waiting и waiting_on human) при любом «Кому», входящие Зевса тоже, и карточки с «Кому» = Владелец с полем
+  question; «Руками» — остальные открытые карточки с «Кому» = Владелец; только id. Текстовые строки этих разделов в board.md блок не
   читает: пункт без карточки сюда не попадёт — заведите карточку (`pantheon task new --owner owner`);
 - «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
   карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K», не больше MAX_MERGED строк;
@@ -165,12 +166,38 @@ def reviews(pantheon):
     return out
 
 
-STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE
+STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE (boardtext грузится без tasks — общий импорт нельзя; равенство держит test_board_text)
 
 
-def batches(tasks):
+BATCH_HEAD_RE = re.compile(r"batch/([a-z][a-z0-9]{1,11}-\d{3,})")  # ветка пачки batch/<story-id> (tasks.BATCH_BRANCH)
+
+
+def batch_branch_prs(cache_path):
+    """{id пачки: номер PR} по ветке batch/<id> из кэша autoclose fetch (metis-0799): PR пачки, открытый не через
+    `pantheon batch pr`, поля pr не ставит. Открытый важнее слитого, из нескольких — больший номер; нет кэша — {}.
+    PR из форка и строка кэша без поля cross (isCrossRepository) — не PR пачки: ветку batch/<id> форк назовёт как угодно."""
+    try:
+        with open(cache_path, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    best = {}
+    for key, branch_key, rank in (("merged", "headRefName", 0), ("open_prs", "branch", 1)):
+        by_repo = st.get(key) if isinstance(st, dict) and isinstance(st.get(key), dict) else {}
+        for prs in by_repo.values():
+            for p in prs if isinstance(prs, list) else []:
+                n = p.get("number") if isinstance(p, dict) else None
+                m = BATCH_HEAD_RE.fullmatch(p.get(branch_key) or "") if isinstance(p, dict) and isinstance(
+                    p.get(branch_key), str) else None
+                if m and isinstance(n, int) and not isinstance(n, bool) and n > 0 and p.get("cross") is False:  # не форк
+                    best[m.group(1)] = max(best.get(m.group(1), (-1, 0)), (rank, n))
+    return {sid: n for sid, (_, n) in best.items()}
+
+
+def batches(tasks, branch_prs=None):
     """Пачки в работе: [(id, [(id задачи, статус)], закрыто, всего, номер PR пачки или None)]. tasks — load_tasks:
-    id → (путь, шапка, …). Заголовок пачки — свободный текст, в блок не идёт; из поля pr — только номер."""
+    id → (путь, шапка, …). Заголовок пачки — свободный текст, в блок не идёт; из поля pr — только номер, нет поля —
+    номер PR с ветки batch/<id> (branch_prs — batch_branch_prs, metis-0799)."""
     kids = {}
     for tid, rec in tasks.items():
         h = rec[1]
@@ -186,21 +213,33 @@ def batches(tasks):
         m = STORY_PR_RE.fullmatch(h["pr"]) if isinstance(h.get("pr"), str) else None
         if work:
             out.append((h.get("priority", 2) if isinstance(h.get("priority"), int) else 2, sid,
-                        work, sum(1 for _, s in ks if s in ("done", "dropped")), len(ks), int(m.group(1)) if m else None))
+                        work, sum(1 for _, s in ks if s in ("done", "dropped")), len(ks),
+                        int(m.group(1)) if m else (branch_prs or {}).get(sid)))
     out.sort()
     return [x[1:] for x in out[:MAX_BATCH]]
 
 
+def needs_answer(h):
+    """= tasks.needs_answer (metis-0801): колонка «Нужен ответ» доски — waiting и waiting_on human. Модуль грузит хук, без
+    tasks; равенство сверяет test_board_sync."""
+    return h.get("status") == "waiting" and h.get("waiting_on") == "human"
+
+
 def owner_cards(tasks, is_owner):
-    """Карточки на владельце (Кому = Владелец, не закрыты; metis-0402 п. 4): {"ask": [id], "do": [id]} — вопрос (есть
-    question или ждёт человека) идёт в «Ждёт вас», остальное — в «Руками». Только id: заголовок — свободный текст."""
+    """{"ask": [id], "do": [id]}, только id: заголовок — свободный текст (metis-0402 п. 4, metis-0801). «Ждёт вас» (ask)
+    — все карточки колонки «Нужен ответ» доски (needs_answer) при любом «Кому»: входящие Зевса (inbox-…, owner zeus)
+    ждут ответа владельца так же; плюс карточки с «Кому» = Владелец и полем question в другом статусе. Поэтому «Ждёт
+    вас» ≥ колонки «Нужен ответ», а не другое число. «Руками» (do) — остальные открытые карточки с «Кому» = Владелец."""
     out = {"ask": [], "do": []}
     rows = []
     for tid, rec in tasks.items():
         h = rec[1]
-        if h.get("status") in ("done", "dropped") or not _ok(ID_RE, tid) or not is_owner(h):
+        if h.get("status") in ("done", "dropped") or not _ok(ID_RE, tid):
             continue
-        ask = bool(h.get("question")) or (h.get("status") == "waiting" and h.get("waiting_on") == "human")
+        mine = is_owner(h)
+        ask = needs_answer(h) or (mine and bool(h.get("question")))
+        if not ask and not mine:
+            continue
         prio = h.get("priority") if isinstance(h.get("priority"), int) and not isinstance(h.get("priority"), bool) else 2
         rows.append((prio, tid, "ask" if ask else "do"))
     for _, tid, kind in sorted(rows):
@@ -283,7 +322,7 @@ def collect(pantheon, state, tasks, t, week=None, owner=None):
     zeus_md, board_jsonl = owner_log(state)
     files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
         + sum(1 for p in (cache, zeus_md, board_jsonl) if os.path.isfile(p))
-    return {"prs": open_prs(cache), "reviews": reviews(pantheon), "batches": batches(tasks), "week": week,
+    return {"prs": open_prs(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache)), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
             "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
             "owner": owner_cards(tasks, owner) if owner else None}
