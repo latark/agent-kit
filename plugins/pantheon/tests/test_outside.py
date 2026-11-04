@@ -2416,6 +2416,206 @@ if _saved is not None:
 elif os.path.exists(_cp):
     os.remove(_cp)
 
+# --- 5e. test --sha (metis-0779): проверка на коммите PR в своей копии прохода, а не в worktree окна ----------------
+# окно не переключит свою worktree на ветку PR, если там другой .claude/ проекта (запись закрыта) — копия прохода
+# на этом коммите, полное дерево вместе с .claude/; запись tests — на этот SHA, копия снимается
+_saved_e = open(_cp).read() if os.path.exists(_cp) else None
+if os.path.exists(_cp):
+    os.remove(_cp)
+HEADE = git(APP, "rev-parse", "HEAD")
+git(APP, "switch", "-q", "-c", "pr-0779")
+# тест проходит, только если в дереве есть .claude/skills проекта: копия — полное дерево коммита, а не HEAD папки
+CPG = commit(APP, {".claude/skills/s/SKILL.md": "навык\n",
+                   "t.py": "import os, sys; sys.exit(0 if os.path.isfile('.claude/skills/s/SKILL.md') else 4)\n"},
+             "pr: .claude/skills")
+CPR = commit(APP, {"t.py": RED}, "pr: red")
+git(APP, "switch", "-q", "main")
+check("0779: HEAD папки — не коммит PR, .claude/skills в папке нет",
+      git(APP, "rev-parse", "HEAD") == HEADE and not os.path.exists(os.path.join(APP, ".claude", "skills")))
+
+
+def test_work(rid):
+    return os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work", "test-" + rid)
+
+
+def sha_request(sha, label):
+    """Заявка роли test --sha → (код CLI, папка, ID, итог прохода)."""
+    q2, rid2 = new_request("athena-x", APP, "test", "--sha", sha)
+    req2 = json.load(open(os.path.join(q2, rid2 + ".req.json")))
+    check(f"0779: {label}: заявка несёт полный SHA и pin", req2.get("pin") is True and sha_full(req2.get("sha")), req2)
+    run_pass()
+    return q2, rid2, O.load_result(q2, rid2) or {}
+
+
+def sha_full(s):
+    return isinstance(s, str) and len(s) == 40
+
+
+n0 = len(tests_for(CPG))
+c0 = len(calls())
+qs, rs, res = sha_request(CPG[:10], "зелёный")
+ran = [c for c in calls()[c0:] if "t.py" in " ".join(c["cmd"])]
+rec = tests_for(CPG)
+check("0779: --sha: прогон в копии test-<ID> на этом коммите (.claude/skills на месте), код 0, запись на полный SHA",
+      res.get("state") == "done" and res.get("code") == 0 and res.get("record") is True and res.get("sha") == CPG
+      and res.get("src") == APP and res.get("dir") == test_work(rs) and ran and ran[-1]["cwd"] == test_work(rs)
+      and len(rec) == n0 + 1 and rec[-1]["cwd"] == test_work(rs) and rec[-1]["repo"] == ["latark/app"],
+      (res, ran[-1:] and ran[-1]["cwd"], rec[-1:]))
+check("0779: --sha: копия снята (папка и worktree клона), HEAD и дерево папки не тронуты",
+      not os.path.exists(test_work(rs)) and "test-" + rs not in worktrees()
+      and git(APP, "rev-parse", "HEAD") == HEADE and O.head_state(APP) == (HEADE, True), worktrees())
+check("0779: --sha: зависимости копии ставит проход (package.json без node_modules)",
+      any(c["cwd"] == test_work(rs) and c["cmd"][1:2] in (["ci"], ["install"]) for c in calls()[c0:]))
+qs, rs, res = sha_request(CPR, "красный")
+check("0779: --sha красный: код 1, записи нет, копия снята", res.get("state") == "done" and res.get("code") == 1
+      and res.get("record") is False and not tests_for(CPR) and not os.path.exists(test_work(rs)), res)
+
+# установка зависимостей (lifecycle-скрипты пакета) сдвинула HEAD копии или правит дерево — ни прогона, ни записи
+_prep = O.prepare
+for label, spoil in (("сдвинула HEAD копии на другой зелёный коммит",
+                      lambda w: git(w, "checkout", "-q", "--detach", HEADE)),
+                     ("правит отслеживаемый файл копии", lambda w: _touch(w, "t.py", GREEN))):
+    O.prepare = lambda d, rid, _spoil=spoil, **kw: (_prep(d, rid, **kw), _spoil(str(d)))[0]
+    n_e, c0 = len(tests_for(HEADE)), len(calls())
+    try:
+        qs, rs, res = sha_request(CPG, label)
+    finally:
+        O.prepare = _prep
+    check(f"0779: установка {label} — failed, прогона и записи нет, копия снята", res.get("state") == "failed"
+          and "прогона и записи нет" in res.get("why", "") and res.get("sha") == CPG
+          and not [c for c in calls()[c0:] if "t.py" in " ".join(c["cmd"])]
+          and len(tests_for(HEADE)) == n_e and not os.path.exists(test_work(rs)), res)
+
+# HEAD копии сдвинулся уже после первой проверки — перед прогоном (между tree_record и чтением HEAD) или во время
+# прогона: запись только на коммит заявки, на сдвинутый HEAD — никогда
+_tr, _wp = O.tree_record, O.wait_proc
+
+
+def _move_head(d):
+    git(str(d), "checkout", "-q", "--detach", HEADE)
+
+
+for label, attr, fake in (
+        ("перед прогоном", "tree_record", lambda rid, d, *a, **kw: (_move_head(d), _tr(rid, d, *a, **kw))[1]),
+        # wait_proc зовёт и установка (prepare) — HEAD двигаем только в прогоне теста (у него idle_log)
+        ("во время прогона", "wait_proc",
+         lambda proc, *a, **kw: (kw.get("idle_log") and _move_head(_cwd_of[0]), _wp(proc, *a, **kw))[1])):
+    _cwd_of = [None]
+    _rt = O.run_test
+    O.run_test = lambda rid, d, *a, **kw: (_cwd_of.__setitem__(0, str(d)), _rt(rid, d, *a, **kw))[1]
+    setattr(O, attr, fake)
+    n_e, n_g = len(tests_for(HEADE)), len(tests_for(CPG))
+    try:
+        qs, rs, res = sha_request(CPG, f"HEAD сдвинут {label}")
+    finally:
+        O.tree_record, O.wait_proc, O.run_test = _tr, _wp, _rt
+    check(f"0779: HEAD копии сдвинут {label} — записи нет ни на сдвинутый HEAD, ни на SHA заявки",
+          res.get("record") is not True and len(tests_for(HEADE)) == n_e and len(tests_for(CPG)) == n_g
+          and res.get("sha") == CPG and not os.path.exists(test_work(rs)), res)
+
+# остатки установки (фоновый процесс с cwd в копии) гаснут до прогона, а не только при уборке копии
+_bg = []
+
+
+def _prep_bg(d, rid, **kw):
+    code = _prep(d, rid, **kw)
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=str(d), start_new_session=True)
+    TEST_PROCS.append(p)
+    _bg.append(p)
+    return code
+
+
+_seen = []
+_rt = O.run_test
+O.prepare = _prep_bg
+O.run_test = lambda *a, **kw: (_seen.append(_bg[-1].poll() is not None or not still_alive(_bg[-1].pid, 0)),
+                               _rt(*a, **kw))[1]
+try:
+    qs, rs, res = sha_request(CPG, "остатки установки")
+finally:
+    O.prepare, O.run_test = _prep, _rt
+check_mac("0779: процесс установки с cwd в копии погашен до прогона теста (reap после prepare)",
+          _seen == [True] and res.get("code") == 0, (_seen, res))
+
+# tree_record копии — на коммите заявки, HEAD папки не читается: перенос по дереву на SHA, а не на HEAD
+git(KIT, "switch", "-q", "-c", "pr-0779")
+KA = commit(KIT, {"t.py": GREEN + "# ka\n"}, "ka")
+kit_request()   # зелёный полный набор на KA — запись с деревом
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "ka другое сообщение")
+KB = git(KIT, "rev-parse", "HEAD")
+git(KIT, "switch", "-q", "main")
+c0 = len(calls())
+res = O.tree_record("20261104-020202-c0c0c0", KIT, "metis-k", None, sha=KB)
+rkb = tests_for(KB)
+check("0779: tree_record(sha=) — запись на этот SHA по дереву, без прогона, HEAD папки другой",
+      git(KIT, "rev-parse", "HEAD") != KB and (res or {}).get("by_tree") == KA and (res or {}).get("sha") == KB
+      and len(rkb) == 1 and rkb[0].get("by_tree") == KA and len(calls()) == c0, (res, rkb))
+
+# неверный и чужой SHA — отказ на месте, заявки нет
+for bad, label in (("deadbeef1", "коммита нет в копии"), ("xyz;rm", "не по образцу"), (CPG[:5], "короче 7 знаков")):
+    _q = os.path.join(CACHE, "athena-x", "outside")
+    before = set(os.listdir(_q))
+    _e = io.StringIO()
+    with contextlib.redirect_stderr(_e):
+        rc, _, _ = role_request("athena-x", APP, "test", "--sha", bad)
+    check(f"0779: --sha {label}: код 2, заявки нет, причина — не коммит этой копии",
+          rc == 2 and "не коммит этой копии" in _e.getvalue()
+          and not [n for n in set(os.listdir(_q)) - before if n.endswith(".req.json")], (rc, _e.getvalue()))
+# заявка в обход CLI с коммитом, которого нет в клоне: проход отказывает, копии нет, прогона нет
+c0 = len(calls())
+one_request.n += 1
+rid_x = f"20261104-0{one_request.n:05d}-e0e0e0"
+with open(os.path.join(qa, rid_x + ".req.json"), "w") as fh:
+    json.dump({"v": 1, "id": rid_x, "kind": "test", "dir": APP, "sha": "deadbeef1", "pin": True,
+               "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+run_pass()
+res = O.load_result(qa, rid_x) or {}
+check("0779: pin на коммит не из клона — failed «git fetch», копии и прогона нет", res.get("state") == "failed"
+      and "git fetch" in res.get("why", "") and len(calls()) == c0 and not os.path.exists(test_work(rid_x)), res)
+check("0779: pin — только true и только у test с коммитом",
+      O.check_request({"v": 1, "id": "x", "kind": "serve", "dir": APP, "sha": CPG, "pin": True}, "x")
+      and O.check_request({"v": 1, "id": "x", "kind": "test", "dir": APP, "sha": CPG, "pin": 1}, "x")
+      and O.check_request({"v": 1, "id": "x", "kind": "test", "dir": APP, "pin": True}, "x")
+      and not O.check_request({"v": 1, "id": "x", "kind": "test", "dir": APP, "sha": CPG, "pin": True}, "x"))
+
+# бывший head открытого PR — отказ без копии, как у test без --sha (metis-0726)
+put_cache(old_heads={"latark/app": {CPG: 5}}, prs={"latark/app": [{"number": 5, "head": NEWH}]})
+c0 = len(calls())
+qs, rs, res = sha_request(CPG, "устаревший head")
+check("0779: --sha на бывший head PR — failed «head устарел», прогона нет", res.get("state") == "failed"
+      and "head устарел" in res.get("why", "") and len(calls()) == c0 and not os.path.exists(test_work(rs)), res)
+os.remove(_cp)
+
+# тот же SHA ещё в очереди — второй заявки нет (live_test, metis-0706)
+q1, r1 = new_request("athena-x", APP, "test", "--sha", CPR[:12])
+_q = os.path.join(CACHE, "athena-x", "outside")
+before = {n for n in os.listdir(_q) if n.endswith(".req.json")}
+rc, _, _ = role_request("athena-x", APP, "test", "--sha", CPR)
+check("0779: --sha тот же коммит в очереди — новой заявки нет, код 0",
+      rc == 0 and {n for n in os.listdir(_q) if n.endswith(".req.json")} == before, rc)
+# заявка без --sha на ту же папку не снимает ждущую --sha как дубль (тест не на HEAD папки)
+r0 = one_request()   # ID 20261103-… — раньше r1 (время сейчас): идёт первой и зовёт drop_dupes при ждущей r1
+check("0779: обычная заявка в очереди раньше --sha", r0 < r1, (r0, r1))
+run_pass()
+check("0779: обычная заявка и --sha на той же папке — обе прогнаны, --sha не снята как дубль",
+      (O.load_result(q1, r1) or {}).get("sha") == CPR and (O.load_result(q1, r1) or {}).get("state") == "done"
+      and not (O.load_result(q1, r1) or {}).get("dup") and (O.load_result(qa, r0) or {}).get("state") == "done",
+      (O.load_result(q1, r1), O.load_result(qa, r0)))
+
+# брошенная копия упавшего прохода — снимает следующий проход тестов; чужие имена в work не трогает
+_orph = test_work("20261104-010101-abcdef")
+_keep = os.path.join(os.path.dirname(_orph), "test-not-an-id")
+os.makedirs(_orph)
+os.makedirs(_keep)
+run_pass()
+check("0779: брошенная копия test-<ID> снята проходом тестов, test-<не ID> не тронута",
+      not os.path.exists(_orph) and os.path.isdir(_keep))
+shutil.rmtree(_keep, ignore_errors=True)
+
+if _saved_e is not None:
+    with open(_cp, "w") as fh:
+        fh.write(_saved_e)
+
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()
 _left = [p for p in fake_pids() if still_alive(p)]
