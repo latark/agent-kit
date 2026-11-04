@@ -1501,7 +1501,7 @@ def criteria_count(body):
 GH_REPO = r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}"
 _SHA = r"[0-9a-f]{7,40}"
 # поле pr пачки (metis-0757): «latark/agent-kit#290»; branch — имя ветки без пробелов и управляющих знаков
-STORY_PR_RE = re.compile(r"(" + GH_REPO + r")#(\d{1,6})")
+STORY_PR_RE = re.compile(r"(" + GH_REPO + r")#([1-9]\d{0,5})")  # как boardtext.STORY_PR_RE (тот грузится без tasks); #0 нет
 BRANCH_RE = re.compile(r"[\w][\w./-]{0,199}")
 
 

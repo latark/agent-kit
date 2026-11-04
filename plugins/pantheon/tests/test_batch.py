@@ -240,6 +240,13 @@ check("pr: GH_REPO из окружения до gh не доходит",
 check("gh не вернул ссылку PR — код 0, предупреждение, прежнее pr пачки цело",
       r.returncode == 0 and "поле pr пачки metis-0900 не записано" in r.stderr and story_head().get("pr") == "x/y#17",
       r.stderr + str(story_head()))
+# metis-0792: открыт PR 17, а gh edit вернул ссылку на другой PR (25) — pr пачки не перезаписывается
+open(os.path.join(bindir, "gh"), "w").write(
+    "#!/bin/sh\nif [ \"$1 $2\" = 'pr list' ]; then echo 17; exit 0; fi\necho https://github.com/x/y/pull/25\n")
+r = cli(wt, "batch", "pr", "metis-0900")
+check("gh вернул ссылку с другим номером PR — код 0, предупреждение, pr пачки прежнее x/y#17",
+      r.returncode == 0 and "поле pr пачки metis-0900 не записано" in r.stderr and story_head().get("pr") == "x/y#17",
+      r.stderr + str(story_head()))
 open(os.path.join(bindir, "gh"), "w").write("#!/bin/sh\nexit 1\n")
 r = cli(wt, "batch", "pr", "metis-0900")
 check("gh упал — его код, pr пачки не тронуто", r.returncode == 1 and story_head().get("pr") == "x/y#17", r.stderr)

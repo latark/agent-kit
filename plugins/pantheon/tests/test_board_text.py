@@ -365,5 +365,15 @@ got = read(home_auto)
 check("7б. … а задача сразу в составе пачки в сводке: «Пачка … (в работе); закрыто 0 из 1»",
       f"Пачка {sid}: {k_id} (в работе); закрыто 0 из 1." in got, r.stdout + r.stderr + got)
 
+# metis-0792: STORY_PR_RE в boardtext и tasks — одно правило (boardtext грузится без tasks, общий импорт нельзя)
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import tasks as _T  # noqa: E402
+for pr, ok in (("latark/agent-kit#290", True), ("x/y#1", True), ("x/y#999999", True), ("x/y#0", False), ("x/y#00", False),
+               ("x/y#1000000", False), ("x/y#", False), ("x/y#12a", False), ("xy#5", False), ("x/y#05", False)):
+    b, t = bool(B.STORY_PR_RE.fullmatch(pr)), bool(_T.STORY_PR_RE.fullmatch(pr))
+    check(f"STORY_PR_RE: {pr!r} — boardtext и tasks дают {ok}", b == t == ok, (b, t))
+check("STORY_PR_RE: номер PR — последняя группа у обоих",
+      B.STORY_PR_RE.fullmatch("o/r#42").group(B.STORY_PR_RE.groups) == _T.STORY_PR_RE.fullmatch("o/r#42").group(_T.STORY_PR_RE.groups) == "42")
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

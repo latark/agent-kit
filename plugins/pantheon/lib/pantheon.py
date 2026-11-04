@@ -5726,19 +5726,30 @@ def board_archive(rest):
         os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
         stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
         undo = {}   # архив → размер до дописывания (None — файла не было)
-        for key, ls in sorted(moved.items()):
-            ap = os.path.join(PANTHEON, "archive", f"{key}.md")
-            undo[ap] = os.path.getsize(ap) if os.path.exists(ap) else None
-            with open(ap, "a", encoding="utf-8") as fh:
-                fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
-        if _board_changed(board, seen):
-            for ap, size in undo.items():
-                if size is None:
-                    os.remove(ap)
-                else:
-                    os.truncate(ap, size)
+        done = False
+        try:
+            for key, ls in sorted(moved.items()):
+                ap = os.path.join(PANTHEON, "archive", f"{key}.md")
+                undo[ap] = os.path.getsize(ap) if os.path.exists(ap) else None
+                with open(ap, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
+            if _board_changed(board, seen):
+                return 1
+            write_atomic(board, kept)
+            done = True
+        except OSError as e:   # metis-0792: сбой дописывания или замены — архив откатывается, board.md цел
+            print(f"pantheon board archive: {type(e).__name__}: {e} — архив откатан, board.md не тронут", file=sys.stderr)
             return 1
-        write_atomic(board, kept)
+        finally:
+            if not done:
+                for ap, size in undo.items():
+                    try:
+                        if size is None:
+                            os.remove(ap)
+                        else:
+                            os.truncate(ap, size)
+                    except OSError:
+                        pass
     print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
     return 0
 

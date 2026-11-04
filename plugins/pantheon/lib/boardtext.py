@@ -165,7 +165,7 @@ def reviews(pantheon):
     return out
 
 
-STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE
+STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE (boardtext грузится без tasks — общий импорт нельзя; равенство держит test_board_text)
 
 
 def batches(tasks):

@@ -84,9 +84,10 @@ with tempfile.TemporaryDirectory(prefix="pathclean-") as home_raw:
     os.symlink(os.path.join(cache, "pantheon", "0.11.61"), cur + ".new")
     os.replace(cur + ".new", cur)
     heavy = shutil.which("heavy", path=win_path)
+    want_heavy = os.path.join(cur, "bin", "heavy")
     check("heavy из PATH окна после обновления — установленной версии, как current/bin/heavy",
-          heavy is not None and os.path.realpath(heavy) == os.path.realpath(os.path.join(cur, "bin", "heavy")),
-          f"{heavy} != {os.path.join(newer, 'heavy')}")
+          heavy is not None and os.path.realpath(heavy) == os.path.realpath(want_heavy),
+          f"{heavy} != {os.path.realpath(want_heavy)}")
     # без ссылки CURRENT эталон — запущенная версия
     os.unlink(os.path.join(home, ".local", "share", "pantheon", "current"))
     renv = run({"plugin": os.path.join(cache, "pantheon", "0.11.61")}, env, CODE2).split(":")
