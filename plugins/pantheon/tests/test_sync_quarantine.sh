@@ -8,7 +8,7 @@ T=$(mktemp -d "${TMPDIR:-/tmp}/sync-quarantine.XXXX")
 export HOME="$T" GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$T/.local/bin" "$T/.local/share/pantheon" "$T/ai/pantheon/directions/metis-pantheon/tasks" "$T/.local/state/pantheon/owner-log"
 ln -s "$PANTHEON_BIN" "$T/.local/bin/pantheon";ln -s "$PLUGIN" "$T/.local/share/pantheon/current"
-printf '[[direction]]\nname = "metis-pantheon"\nproject = "Пантеон"\nfolders = ["~/projects/agent-kit"]\n' > "$T/ai/pantheon/directions.toml"
+printf '[[direction]]\nname = "metis-pantheon"\nproject = "Пантеон"\nfolders = ["~/ai/agent-kit"]\n' > "$T/ai/pantheon/directions.toml"
 git init -q --bare "$T/origin.git"; git clone -q "$T/origin.git" "$T/.claude" 2>/dev/null
 cd "$T/.claude"; git config user.name A; git config user.email a@a
 mkdir -p hooks projects/p/memory

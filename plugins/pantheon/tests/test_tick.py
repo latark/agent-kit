@@ -218,17 +218,17 @@ def main():
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, "")
     open(os.path.join(home, "directions.toml"), "w").write(
-        '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br", "~/projects/agent-kit"]\n'
-        '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
+        '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br", "~/ai/agent-kit"]\n'
+        '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/ai/agent-kit"]\n')
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
-    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
+    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/ai/agent-kit"]\n')
     # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
-          dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
+          dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/ai/agent-kit"])
 
     # зарезервированные имена окон: hq, workshop, job-* — не направления (metis-0163)
     rtmp = tempfile.mkdtemp(prefix="tick-test-")
@@ -387,18 +387,18 @@ def main():
     check("песочница: git push/fetch/pull мимо песочницы у каждого направления, и без SSH-remote (metis-0064)",
           all("git push *" in w["sandbox"]["excludedCommands"] and "git push" in w["sandbox"]["excludedCommands"]
               for w in (sa, sm, sn, sz)))
-    # мастерская: тот же сетевой git — только при SSH-remote в ~/projects/workshop; здесь его нет
+    # мастерская: тот же сетевой git — только при SSH-remote в ~/ai/workshop; здесь его нет
     check("песочница: у мастерской без SSH-remote сетевого git мимо песочницы нет",
           not any(x.startswith("git ") for x in sw["sandbox"]["excludedCommands"]))
-    # metis-0141 п. 3: репозиторий с SSH-remote в подпапке ~/projects/workshop → сетевой git мимо песочницы есть;
+    # metis-0141 п. 3: репозиторий с SSH-remote в подпапке ~/ai/workshop → сетевой git мимо песочницы есть;
     # убрали репозиторий — снова нет (сборка настоящая, окно workshop пересобирается)
-    wr = os.path.join(tmp, "projects", "workshop", "t1")
+    wr = os.path.join(tmp, "ai", "workshop", "t1")
     os.makedirs(wr, exist_ok=True)
     subprocess.run(["git", "init", "-q", wr], check=True)
     subprocess.run(["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], check=True)
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     swx = load("workshop")["sandbox"]["excludedCommands"]
-    check("песочница: у мастерской при SSH-remote в ~/projects/workshop git push/fetch/pull мимо песочницы",
+    check("песочница: у мастерской при SSH-remote в ~/ai/workshop git push/fetch/pull мимо песочницы",
           all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *")))
     # ссылка на месте папки очереди — запись не даём (иначе она ушла бы по ссылке)
     os.rmdir(hq)

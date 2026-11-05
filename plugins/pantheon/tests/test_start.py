@@ -541,9 +541,9 @@ def main():
     check("start workshop: имя задачи по образцу", r.returncode == 2)
     r = run("start", "workshop", "avito-scan", "--from", "tick")
     c = calls()[-1]
-    check("start workshop: daedalus-<задача> в ~/projects/workshop/<задача>, поручение по умолчанию",
+    check("start workshop: daedalus-<задача> в ~/ai/workshop/<задача>, поручение по умолчанию",
           r.returncode == 0 and c["argv"][2:5] == ["workshop", "--name", "daedalus-avito-scan"]
-          and c["cwd"] == os.path.join(tmp, "projects", "workshop", "avito-scan")
+          and c["cwd"] == os.path.join(tmp, "ai", "workshop", "avito-scan")
           and c["argv"][-1].startswith("[Пантеон: поручение от tick] Прочитай ~/ai/pantheon/workshop/avito-scan.md"))
     r = run("start", "zeus", "--dry-run")
     check("start zeus: интерактивная сессия hq с окном hq.json (без --bg)",

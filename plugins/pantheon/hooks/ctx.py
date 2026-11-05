@@ -625,7 +625,7 @@ def workshop_task(ev):
     if title.startswith("daedalus-"):
         return safe_name(title[len("daedalus-"):])
     pdir = project_dir(ev)
-    root = os.path.join(HOME, "projects", "workshop")
+    root = os.path.join(HOME, "ai", "workshop")   # WORKSHOP_DIR в lib/pantheon.py (metis-0899)
     if pdir and inside(pdir, root) and _key(pdir) != _key(root):
         return safe_name(os.path.relpath(os.path.realpath(pdir), os.path.realpath(root)).split(os.sep)[0])
     return safe_name(title) or None
