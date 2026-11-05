@@ -297,8 +297,8 @@ def test_init():
 
 
 def test_init_life():
-    """~/ai/life/<x> (metis-0899, Зевс 06.11): один git на ~/ai/life, его init создаёт один раз; у подпапки своего .git
-    нет, её AGENTS.md — коммитом в ~/ai/life, только этот файл; доверие к ~/ai/life наследуют подпапки."""
+    """~/ai/life/<x> (metis-0899, Зевс 06.11): ~/ai/life — простая папка без .git, у каждой области свой git
+    (то же, что для ~/projects/<x>); доверие нужно на самой области, «Да» на ~/ai/life не наследуется."""
     import time
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="direction-life-test-"))
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
@@ -307,7 +307,7 @@ def test_init_life():
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
     run = lambda *a: subprocess.run([PY311, "-I", RUN_PY, "direction", *a], env=env, capture_output=True, text=True)
-    git = lambda *a: subprocess.run(["git", "-C", life, *a], env=env, capture_output=True, text=True).stdout.strip()
+    git = lambda d, *a: subprocess.run(["git", "-C", d, *a], env=env, capture_output=True, text=True).stdout.strip()
     reg = os.path.join(home, "directions.toml")
     setreg = lambda folders: write(
         reg, f'[[direction]]\nname = "nike-career"\nproject = "career"\nfolders = {json.dumps(folders)}\n'
@@ -323,45 +323,49 @@ def test_init_life():
         for i, n in enumerate(("nike-career", "peitho-english"))))
     career, english = os.path.join(life, "career"), os.path.join(life, "english")
 
+    # init двух областей: у каждой свой .git и свой коммит, у ~/ai/life .git нет
     setreg(["~/ai/life/career"])
     r = run("init", "nike-career")
-    check("init ~/ai/life/<x>: ~/ai/life создан с git, у подпапки своего .git нет, AGENTS.md — коммитом в ~/ai/life",
-          r.returncode == 0 and "создано ~/ai/life/career: git init ~/ai/life, AGENTS.md, коммит ~/ai/life" in r.stdout
-          and os.path.isdir(os.path.join(life, ".git")) and os.listdir(career) == ["AGENTS.md"]
-          and git("ls-files") == "career/AGENTS.md" and git("log", "-1", "--format=%s")
-          == "career/AGENTS.md (pantheon direction init)" and git("status", "--porcelain") == "")
-    # в индексе общего git чужое — второй init его не коммитит и git заново не создаёт
-    write(os.path.join(life, "finances", "a.md"), "чужое\n")
-    subprocess.run(["git", "-C", life, "add", "finances/a.md"], env=env, check=True)
+    check("init ~/ai/life/career: ~/ai/life создан простой папкой, у области свой git, AGENTS.md и коммит",
+          r.returncode == 0 and "создано ~/ai/life/career: git init, AGENTS.md, коммит" in r.stdout
+          and os.path.isdir(os.path.join(career, ".git")) and not os.path.lexists(os.path.join(life, ".git"))
+          and git(career, "ls-files") == "AGENTS.md" and git(career, "log", "-1", "--format=%s") == "AGENTS.md (pantheon direction init)"
+          and git(career, "status", "--porcelain") == "" and git(career, "symbolic-ref", "--short", "HEAD") == "main")
     r = run("init", "peitho-english")
-    check("второе направление: git ~/ai/life не пересоздан, коммит только своего AGENTS.md, чужое в индексе осталось",
-          r.returncode == 0 and "создано ~/ai/life/english: AGENTS.md, коммит ~/ai/life" in r.stdout
-          and "git init" not in r.stdout and git("rev-list", "--count", "HEAD") == "2"
-          and git("show", "--name-only", "--format=", "HEAD") == "english/AGENTS.md"
-          and git("diff", "--cached", "--name-only") == "finances/a.md" and not os.path.lexists(os.path.join(english, ".git")))
+    check("init ~/ai/life/english: свой .git, коммитов в каждой области по одному, у ~/ai/life .git по-прежнему нет",
+          r.returncode == 0 and "создано ~/ai/life/english: git init, AGENTS.md, коммит" in r.stdout
+          and os.path.isdir(os.path.join(english, ".git")) and not os.path.lexists(os.path.join(life, ".git"))
+          and git(english, "rev-list", "--count", "HEAD") == "1" and git(career, "rev-list", "--count", "HEAD") == "1"
+          and git(english, "ls-files") == "AGENTS.md"
+          and git(life, "rev-parse", "--show-toplevel") != life)   # git из ~/ai/life не видит областей как одного репозитория
     r = run("init", "peitho-english")
     check("повтор: «есть, пропущено», коммитов столько же",
-          r.returncode == 0 and "есть, пропущено ~/ai/life/english" in r.stdout and git("rev-list", "--count", "HEAD") == "2")
-    # прерванный запуск: AGENTS.md есть, коммита нет — доделано коммитом
-    os.makedirs(os.path.join(life, "health"))
-    write(os.path.join(life, "health", "AGENTS.md"), "# health\n")
+          r.returncode == 0 and "есть, пропущено ~/ai/life/english" in r.stdout and git(english, "rev-list", "--count", "HEAD") == "1")
+    # прерванный запуск: git init есть, коммита нет — доделано, как в ~/projects
+    health = os.path.join(life, "health")
+    os.makedirs(health)
+    subprocess.run(["git", "-C", health, "init", "-q", "-b", "main"], env=env, check=True)
+    write(os.path.join(health, "AGENTS.md"), "# health\n")
     setreg(["~/ai/life/health"])
     r = run("init", "nike-career")
-    check("подпапка только с AGENTS.md без коммита — доделано: коммит в ~/ai/life",
-          r.returncode == 0 and "доделано ~/ai/life/health: коммит ~/ai/life" in r.stdout
-          and git("show", "--name-only", "--format=", "HEAD") == "health/AGENTS.md")
-    # подпапка со своим .git (перенесённый репозиторий) — чужое, не трогаем
-    os.makedirs(os.path.join(life, "own", ".git"))
+    check("область с git и AGENTS.md без коммита — доделано коммитом в ней самой",
+          r.returncode == 0 and "доделано ~/ai/life/health: коммит" in r.stdout
+          and git(health, "ls-files") == "AGENTS.md" and not os.path.lexists(os.path.join(life, ".git")))
+    # перенесённый репозиторий с чужим коммитом — не трогаем
+    own = os.path.join(life, "own")
+    os.makedirs(own)
+    subprocess.run(["git", "-C", own, "init", "-q", "-b", "main"], env=env, check=True)
+    subprocess.run(["git", "-C", own, "commit", "-q", "--allow-empty", "-m", "чужой"], env=env, check=True)
     setreg(["~/ai/life/own"])
     r = run("init", "nike-career")
-    check("подпапка со своим .git — не тронута", r.returncode == 0 and "не пуста" in r.stdout
-          and os.listdir(os.path.join(life, "own")) == [".git"])
+    check("область с чужим коммитом — не тронута", r.returncode == 0 and "не пуста" in r.stdout
+          and git(own, "rev-list", "--count", "HEAD") == "1" and os.listdir(own) == [".git"])
     setreg(["~/ai/life/a/b"])
     r = run("init", "nike-career")
     check("глубже ~/ai/life/<x> — отказ, код 1", r.returncode == 1 and "вне ~/projects и ~/ai/life" in r.stdout
           and not os.path.lexists(os.path.join(life, "a")))
 
-    # ~/ai/life — ссылка в сторону; .git ~/ai/life — файл: отказ, ничего не создано
+    # ~/ai/life — ссылка в сторону или файл: отказ, ничего не создано
     tmp2 = os.path.realpath(tempfile.mkdtemp(prefix="direction-life2-"))
     for x in (".gitconfig", "ai/pantheon/directions.toml", "ai/pantheon/decisions.md", "state/owner-log/board.jsonl"):
         write(os.path.join(tmp2, x), open(os.path.join(tmp, x), encoding="utf-8").read())
@@ -372,17 +376,18 @@ def test_init_life():
     check("~/ai/life — ссылка: отказ, код 1, ничего не создано",
           r.returncode == 1 and "вне ~/projects" in r.stdout and os.listdir(os.path.join(tmp2, "aside")) == [])
     os.remove(os.path.join(tmp2, "ai", "life"))
-    write(os.path.join(tmp2, "ai", "life", ".git"), "gitdir: /elsewhere\n")
+    write(os.path.join(tmp2, "ai", "life"), "файл\n")
     r = subprocess.run([PY311, "-I", RUN_PY, "direction", "init", "peitho-english"], env=env2, capture_output=True, text=True)
-    check("~/ai/life/.git — файл: отказ, код 1, подпапка не создана",
-          r.returncode == 1 and "общий git" in r.stdout and not os.path.lexists(os.path.join(tmp2, "ai", "life", "english")))
+    check("~/ai/life — файл: отказ, код 1, файл цел",
+          r.returncode == 1 and "есть, но не папка" in r.stdout and open(os.path.join(tmp2, "ai", "life"), encoding="utf-8").read() == "файл\n")
 
-    # доверие: «Да» на ~/ai/life наследует подпапка без своего git (правило watch.trusted)
+    # доверие: «Да» на ~/ai/life области не хватает, нужно «Да» на самой области
     write(os.path.join(tmp, ".claude.json"), json.dumps({"projects": {life: {"hasTrustDialogAccepted": True}}}))
-    check("check: доверие к ~/ai/life/english — от «Да» на ~/ai/life",
+    check("check: «Да» только на ~/ai/life — доверие к области не готово",
+          "НЕТ     доверие к ~/ai/life/english" in run("check", "peitho-english").stdout)
+    write(os.path.join(tmp, ".claude.json"), json.dumps({"projects": {english: {"hasTrustDialogAccepted": True}}}))
+    check("check: «Да» на ~/ai/life/english — доверие готово",
           "готово  доверие к ~/ai/life/english" in run("check", "peitho-english").stdout)
-    write(os.path.join(tmp, ".claude.json"), json.dumps({"projects": {}}))
-    check("check: без «Да» на ~/ai/life — не готово", "НЕТ     доверие к ~/ai/life/english" in run("check", "peitho-english").stdout)
 
 
 if __name__ == "__main__":

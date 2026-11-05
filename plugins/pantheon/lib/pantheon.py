@@ -28,8 +28,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
-                                        коммит; без remote. ~/ai/life/<имя> — без своего git: AGENTS.md
-                                        коммитом в общий git ~/ai/life (его init создаёт один раз)
+                                        коммит; без remote. ~/ai/life/<имя> — то же, свой git у каждой
+                                        области; сам ~/ai/life — простая папка без .git
   pantheon migrate-paths <перенос>… [--dry-run]   после переноса папки: старые пути → новые во всех текстовых
                                         файлах ~/ai, ~/.claude и кода agent-kit, папки истории ~/.claude/projects
                                         и записи projects в ~/.claude.json под новый ключ; переносы: agent-kit,
@@ -2168,7 +2168,7 @@ def domains_build(if_changed=False):
 # ~/projects/<x> и ~/ai/life/<x> (личное владельца, metis-0899); ~/ai/knowledge, мастерская ~/ai/workshop и код
 # Пантеона ~/ai/agent-kit (папка metis-pantheon) — и сам корень. Остальное в ~/ai (pantheon, pantheon-view) — нет
 WORKSHOP_DIR = "~/ai/workshop"   # мастерская Дедала: ~/ai/workshop/<задача> (metis-0899; до переноса — в ~/projects)
-LIFE_DIR = "~/ai/life"   # области жизни владельца: один git на всё, подпапка на направление (Зевс 06.11, metis-0899)
+LIFE_DIR = "~/ai/life"   # области жизни владельца: простая папка без .git, у каждой области свой git (Зевс 06.11, metis-0899)
 AGENT_KIT_DIR = "~/ai/agent-kit"   # рабочая копия agent-kit (metis-0899; до переноса — в ~/projects)
 SANDBOX_ROOTS = ["~/projects", LIFE_DIR, "~/ai/knowledge", WORKSHOP_DIR, AGENT_KIT_DIR]
 SANDBOX_STRICT = 2
@@ -4815,8 +4815,7 @@ def direction_check(name):
             + ("" if here else "; Codex на этом Mac нет — не блокирует") + "): сверх Codex молча обрезает")
         longest = max((n for _, _, n in found), default=0)
         add(longest <= CLAUDE_LINES, f"Claude: CLAUDE.md с импортами до {CLAUDE_LINES} строк (сейчас {longest})")
-    # доверие — по правилу Claude Code (watch.trusted): папка без своего git наследует «Да» родителя, поэтому у
-    # ~/ai/life/<x> хватает одного «Да» на ~/ai/life (metis-0899)
+    # доверие — по правилу Claude Code (watch.trusted): у каждой области свой git, «Да» нужно на ней самой
     add(watch_mod().trusted(launch),
         f"доверие к {launch.replace(HOME, '~')} — владелец, одна интерактивная сессия (без него claude --bg не стартует)")
     remote = ""
@@ -4850,8 +4849,8 @@ def direction_check(name):
 # песочница не дают писать в ~/projects/<новое>. Ворота — те же, что у check (ваша галочка в журнале доски). Создаёт
 # только ровно ~/projects/<x> или ~/ai/life/<x>; существующие папки не трогает, ссылки и «..» — отказ; сначала
 # проверяет все папки записи, потом создаёт. Повтор доделывает прерванный запуск и ничего не меняет у готового.
-# ~/ai/life — один git на все области жизни (Зевс 06.11, metis-0899): у подпапки своего .git нет, её AGENTS.md
-# коммитится в ~/ai/life; сам git там init создаёт один раз, у готового — только коммит этого файла.
+# ~/ai/life — простая папка без .git (Зевс 06.11, metis-0899): у каждой области свой git, init делает то же, что для
+# ~/projects/<x>; ~/ai/life при необходимости создаётся как простая папка.
 INIT_OWN = {".git", "AGENTS.md"}   # что оставляет init: папка только с этим — начатая им, её можно доделать
 INIT_COMMIT = "AGENTS.md (pantheon direction init)"
 
@@ -4861,16 +4860,15 @@ def _git_env():
     return {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
 
 
-def _init_own(p, area="projects"):
+def _init_own(p):
     """Папка пуста или в ней только то, что оставляет init: .git — папка, AGENTS.md — обычный файл, без ссылок; у
     репозитория нет remote и нет коммитов, кроме одного своего (INIT_COMMIT). Пустой клон с remote или чужой коммит —
-    чужое, не трогаем. git — с явным --git-dir: сломанный .git не уведёт его в репозиторий выше. Подпапка ~/ai/life
-    (area «life») — без своего .git: в ней только AGENTS.md или ничего."""
+    чужое, не трогаем. git — с явным --git-dir: сломанный .git не уведёт его в репозиторий выше."""
     try:
         names = os.listdir(p)
     except OSError:
         return False
-    if not set(names) <= (INIT_OWN - {".git"} if area == "life" else INIT_OWN):
+    if not set(names) <= INIT_OWN:
         return False
     git, agents = os.path.join(p, ".git"), os.path.join(p, "AGENTS.md")
     if os.path.lexists(agents) and (os.path.islink(agents) or not os.path.isfile(agents)):
@@ -4936,7 +4934,7 @@ def direction_init(name):
         elif os.path.isdir(p):
             if not a:
                 plan.append((p, "skip", a))
-            elif _init_own(p, a):
+            elif _init_own(p):
                 plan.append((p, "resume", a))
             else:
                 plan.append((p, "busy", a))
@@ -4947,12 +4945,9 @@ def direction_init(name):
         else:
             bad.append(f"{short(p)}: вне ~/projects и {LIFE_DIR} — не создаю (новая папка — только ~/projects/<имя> "
                        f"или {LIFE_DIR}/<имя>)")
-    life, life_git = roots["life"][0], os.path.join(roots["life"][0], ".git")
-    if any(a == "life" and kind in ("create", "resume") for _, kind, a in plan):
-        if os.path.lexists(life) and not os.path.isdir(life):
-            bad.append(f"{short(life)}: есть, но не папка — не трогаю")
-        elif os.path.lexists(life_git) and (os.path.islink(life_git) or not os.path.isdir(life_git)):
-            bad.append(f"{short(life_git)}: ссылка или не папка — общий git областей жизни не трогаю")
+    life = roots["life"][0]
+    if any(a == "life" and kind == "create" for _, kind, a in plan) and os.path.lexists(life) and not os.path.isdir(life):
+        bad.append(f"{short(life)}: есть, но не папка — не трогаю")
     if bad:
         for x in bad:
             print("отказ   " + x)
@@ -4981,7 +4976,7 @@ def direction_init(name):
         if p != launch:
             print(f"создано {short(p)}" if kind == "create" else f"есть, пропущено {short(p)}")
             continue
-        done, err = _init_launch(p, name, d, life if a == "life" else None)
+        done, err = _init_launch(p, name, d)
         if kind == "create":
             print(f"создано {short(p)}" + (": " + ", ".join(done) if done else ""))
         elif done:
@@ -4994,20 +4989,16 @@ def direction_init(name):
     return rc
 
 
-def _init_launch(p, name, d, shared=None):
-    """Папка запуска: git init, стартовый AGENTS.md, первый коммит — только недостающее. shared — общий git выше
-    (~/ai/life): init — в нём и один раз, коммит — только AGENTS.md этой папки. → ([что сделано], ошибка)."""
+def _init_launch(p, name, d):
+    """Папка запуска: git init, стартовый AGENTS.md, первый коммит — только недостающее. → ([что сделано], ошибка)."""
     env = _git_env()
-    repo = shared or p
-    git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, env=env)
-    rel = os.path.relpath(os.path.join(p, "AGENTS.md"), repo)
-    where = " " + LIFE_DIR if shared else ""
+    git = lambda *a: subprocess.run(["git", "-C", p, *a], capture_output=True, text=True, env=env)
     done = []
-    if not os.path.lexists(os.path.join(repo, ".git")):
+    if not os.path.lexists(os.path.join(p, ".git")):
         r = git("init", "-q", "-b", "main")
         if r.returncode:
-            return done, f"git init{where}: " + (r.stderr.strip() or f"код {r.returncode}")
-        done.append("git init" + where)
+            return done, "git init: " + (r.stderr.strip() or f"код {r.returncode}")
+        done.append("git init")
     agents = os.path.join(p, "AGENTS.md")
     if not os.path.lexists(agents):
         text = (f"# {d.get('project') or os.path.basename(p)}\n\n"
@@ -5021,23 +5012,21 @@ def _init_launch(p, name, d, shared=None):
         except OSError as e:
             return done, f"AGENTS.md: {e.strerror or e}"
         done.append("AGENTS.md")
-    # в общем git — есть ли в HEAD именно этот файл; в своём — есть ли HEAD вообще
-    if git("cat-file", "-e", f"HEAD:{rel}").returncode if shared else git("rev-parse", "--verify", "-q", "HEAD").returncode:
-        r = git("add", "--", rel)
+    if git("rev-parse", "--verify", "-q", "HEAD").returncode:
+        r = git("add", "--", "AGENTS.md")
         if r.returncode == 0:
-            # «-- путь»: в общем git уходит только этот файл, чужое из индекса остаётся как было
-            r = git("commit", "-q", "-m", f"{os.path.dirname(rel)}/{INIT_COMMIT}" if shared else INIT_COMMIT, "--", rel)
+            r = git("commit", "-q", "-m", INIT_COMMIT, "--", "AGENTS.md")
         if r.returncode:
             return done, "git commit: " + ((r.stderr or r.stdout).strip() or f"код {r.returncode}") + \
                 " — повтор `pantheon direction init` доделает"
-        done.append("коммит" + where)
+        done.append("коммит")
     return done, ""
 
 
 def direction(rest):
     """pantheon direction check <имя> — что готово у нового направления (навык new-direction).
     pantheon direction init <имя>  — папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный коммит;
-                                     без remote. ~/ai/life/<имя> — без своего git: AGENTS.md коммитом в ~/ai/life."""
+                                     без remote. ~/ai/life/<имя> — то же, свой git у каждой области."""
     if len(rest) != 2 or rest[0] not in ("check", "init"):
         print(direction.__doc__, file=sys.stderr)
         return 2

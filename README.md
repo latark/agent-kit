@@ -581,8 +581,8 @@
   переноса, кроме тех же исключений; код выхода `pantheon check` оно не меняет.
 - Мастерская — `~/ai/workshop/<задача>` (`WORKSHOP_DIR` в `lib/pantheon.py`, metis-0899); окна ролей пишут в
   `SANDBOX_ROOTS`: подпапки `~/projects` и `~/ai/life`, а также `~/ai/knowledge`, `~/ai/workshop`, `~/ai/agent-kit`.
-  `pantheon direction init` заводит папку в `~/projects/<имя>` (свой git) или в `~/ai/life/<имя>`: там один общий git
-  `~/ai/life` — создаётся при первом направлении, подпапка получает только AGENTS.md, коммит — только этого файла.
+  `pantheon direction init` заводит папку в `~/projects/<имя>` или в `~/ai/life/<имя>`: в обоих случаях свой git
+  (`git init`, main, AGENTS.md, локальный коммит). Сам `~/ai/life` — простая папка без `.git`, создаётся при первом направлении.
 - `board_drift` в `plugins/pantheon/lib/pantheon.py` — проверка доски в `pantheon check` (metis-0441): три
   расхождения, видимые в Obsidian. Статус задачи против PR (кэш `autoclose-prs.json`): PR открыт и закрывает задачу (`closes`, не «часть»), а задача todo/done; PR слит
   (закрывающий, не «часть»), а задача doing/review. Вопрос владельцу отвечен (окно вопросов, ответ в чате или галочка, как у
