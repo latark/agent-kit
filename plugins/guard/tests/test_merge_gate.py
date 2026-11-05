@@ -27,6 +27,10 @@ SUB_TIMEOUT = 60
 HOOK_DEADLINE = 40
 HOOK_SUB_TIMEOUT = 20
 SLOW_GIT = 50  # с: «медленный git» дольше и HOOK_SUB_TIMEOUT, и HOOK_DEADLINE
+# бюджет сверки отпечатков в хуке (metis-0696, «А: запас только в тестах»): боевые 4 с под нагрузкой Mac r6 не
+# укладывал. Меньше HOOK_SUB_TIMEOUT: один зависший git (r4 шлюз) исчерпывает бюджет, и хук отказывает сам
+# раньше HOOK_DEADLINE
+HOOK_CARRY_BUDGET = 15
 import tempfile
 import time
 import uuid
@@ -271,7 +275,8 @@ class Home:
     def env(self, pdir):
         return {"HOME": self.root, "PATH": self.j("bin") + os.pathsep + os.environ["PATH"],
                 "CLAUDE_PROJECT_DIR": self.j(pdir), "TMPDIR": "/nonexistent-tmp",
-                "GUARD_TEST_DEADLINE": str(HOOK_DEADLINE), "GUARD_TEST_SUB_TIMEOUT": str(HOOK_SUB_TIMEOUT)}
+                "GUARD_TEST_DEADLINE": str(HOOK_DEADLINE), "GUARD_TEST_SUB_TIMEOUT": str(HOOK_SUB_TIMEOUT),
+                "GUARD_TEST_CARRY_BUDGET": str(HOOK_CARRY_BUDGET)}
 
     def hook(self, event, pdir, mode=(), extra_env=None):
         return subprocess.run([sys.executable, "-I", CACHED, GUARD, *mode], input=json.dumps(event), capture_output=True,
@@ -4579,6 +4584,39 @@ def t_test_floors(h):
     check(f"сроки в процессе теста: git в _git_bytes ждёт до {HOOK_SUB_TIMEOUT} с, а не 3", got == b"medlenno\n", got)
 
 
+
+def t_carry_budget(h):
+    """Бюджет сверки (metis-0696): без GUARD_TEST_CARRY_BUDGET — боевые 4 с; мусор, ноль, меньше 4 — тоже 4; больше —
+    поднят, но не выше CARRY_BUDGET_MAX. _Prints берёт бюджет из переменной: через 10 с сверки при 15 — считает дальше,
+    без переменной — останавливается со словами «дольше 4 с»."""
+    mg = _load_merge_gate("merge_gate_budget")
+    check("бюджет сверки: боевой CARRY_BUDGET — 4 с, предел — больше 4", mg.CARRY_BUDGET == 4 < mg.CARRY_BUDGET_MAX,
+          (mg.CARRY_BUDGET, mg.CARRY_BUDGET_MAX))
+    check("бюджет сверки: тест ставит хуку GUARD_TEST_CARRY_BUDGET больше 4 и не выше предела",
+          h.env("projects/tg-read").get(mg.CARRY_BUDGET_ENV) == str(HOOK_CARRY_BUDGET)
+          and 4 < HOOK_CARRY_BUDGET <= mg.CARRY_BUDGET_MAX, HOOK_CARRY_BUDGET)
+    for raw, want in ((None, 4), ("", 4), (" ", 4), ("x", 4), ("15с", 4), ("nan", 4), ("0", 4), ("-20", 4),
+                      ("3", 4), ("4", 4), ("15", 15), ("4.5", 4.5), ("1e9", mg.CARRY_BUDGET_MAX),
+                      ("inf", mg.CARRY_BUDGET_MAX)):
+        with _Env(GUARD_TEST_CARRY_BUDGET=raw):
+            got = mg._carry_budget()
+        check(f"бюджет сверки: GUARD_TEST_CARRY_BUDGET={raw!r} — {want} с", got == want, got)
+    saved = mg._fingerprint
+    mg._fingerprint = lambda gd, base, head: ("отпечаток", "")
+    try:
+        for raw, want in (("15", ("отпечаток", "")), (None, None)):
+            with _Env(GUARD_TEST_CARRY_BUDGET=raw):
+                p = mg._Prints(h.root, "latark/agent-kit", OLD, [], lambda: {})
+            p.ready, p.gd, p.base, p.t0 = True, h.root, BASE, time.monotonic() - 10
+            got = p(OLD)
+            check(f"бюджет сверки: _Prints, 10 с прошло, переменная {raw!r} — {want!r}", got == want, (got, p.why))
+            if raw is None:
+                check("бюджет сверки: без переменной — причина «дольше 4 с»", any("дольше 4 с" in w for w in p.why),
+                      p.why)
+    finally:
+        mg._fingerprint = saved
+
+
 def prod_timeouts(sources):
     """Боевые сроки по тексту кода (AST), без ожидания и без GUARD_TEST_* (metis-0730). sources: {имя файла: текст}.
     → список нарушений. Правила: DEADLINE в guard.py, guard_rules.py, taint.py ровно 8 с; в merge_gate.py каждый
@@ -4925,7 +4963,7 @@ def t_owner_api_merge(h):
                h.pre("gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", role=None, pdir="projects/tg-read"), True)
 
 
-CASES = [t_test_floors, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_review_format, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,

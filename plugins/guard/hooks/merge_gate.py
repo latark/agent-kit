@@ -45,8 +45,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    каждого reject PR, кроме reject, снятого accept с перечнем того же рецензента на том же head (_floor, _carried,
    #134 п.2, argus-b r2): иначе откат к коду, принятому до reject (force-push на старый head после снятия reject
    правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
-   CARRY_BUDGET секунд, у git — таймаут 3 с. Нет отпечатка — нет переноса: папка слияния не клон репозитория PR,
-   shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
+   CARRY_BUDGET секунд (запас только в тесте — GUARD_TEST_CARRY_BUDGET), у git — таймаут 3 с. Нет отпечатка — нет
+   переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py по AST — metis-0404), casefold;
@@ -1761,6 +1761,12 @@ def owner_approved(repo, pr, sha, now=None):
 # история — не переходит
 CARRY_HEADS = 8  # сколько прошлых head с вердиктами сверять (кроме нового); старые — без отпечатка
 CARRY_BUDGET = 4  # с на все отпечатки одного шлюза: дальше — без отпечатка (таймаут хука 10 с, ещё gh pr view и CI)
+# запас только в тестах (metis-0696, решение владельца 06.11 «А: запас только в тестах»): под нагрузкой Mac сверка
+# в test_merge_gate (r6) не укладывалась в 4 с. GUARD_TEST_CARRY_BUDGET=<с> ставит только тест, как
+# GUARD_TEST_DEADLINE у загрузчика tests/_cached_main.py; бюджет только растёт и не выше CARRY_BUDGET_MAX, чтобы
+# опечатка не повесила хук. Пусто, не число, не больше 4 — боевые CARRY_BUDGET
+CARRY_BUDGET_ENV = "GUARD_TEST_CARRY_BUDGET"
+CARRY_BUDGET_MAX = 30
 PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")
 # дифф без pathspec и без текста: от конфига git (diff.*, core.abbrev, атрибуты, diff.submodule) вывод не зависит,
 # orderFile меняет только порядок строк — сортировка в Python (threat-134-carry п.2)
@@ -1967,6 +1973,15 @@ def _carried(verdicts, sha, fp, cut=None):
     return out
 
 
+def _carry_budget():
+    """Бюджет сверки, с: CARRY_BUDGET, в тесте — GUARD_TEST_CARRY_BUDGET (больше 4, не выше CARRY_BUDGET_MAX)."""
+    try:
+        v = float(os.environ.get(CARRY_BUDGET_ENV, ""))
+    except ValueError:
+        return CARRY_BUDGET
+    return min(v, CARRY_BUDGET_MAX) if v > CARRY_BUDGET else CARRY_BUDGET  # nan > 4 — False
+
+
 class _Prints:
     """Отпечатки head для одного шлюза: git папки и base PR — один раз, отпечаток — по запросу и только для
     _carry_heads; why — почему чего-то не посчитали (для текста отказа)."""
@@ -1975,7 +1990,7 @@ class _Prints:
         self.cwd, self.repo, self.sha, self.view = cwd, repo, sha, view
         self.allowed = _carry_heads(verdicts, sha)
         self.memo, self.why, self.gd, self.base, self.ready = {}, [], None, None, False
-        self.t0 = time.monotonic()
+        self.t0, self.budget = time.monotonic(), _carry_budget()
 
     def _note(self, why):
         if why and why not in self.why:
@@ -1997,8 +2012,8 @@ class _Prints:
                 self._note(why)
         if not self.gd:
             return None
-        if head not in self.memo and time.monotonic() - self.t0 > CARRY_BUDGET:
-            self._note(f"сверка дольше {CARRY_BUDGET} с — остановлена (таймаут хука 10 с)")
+        if head not in self.memo and time.monotonic() - self.t0 > self.budget:
+            self._note(f"сверка дольше {self.budget:g} с — остановлена (таймаут хука 10 с)")
             return None
         if head not in self.memo:
             got = _fingerprint(self.gd, self.base, head)
