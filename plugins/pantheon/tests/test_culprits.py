@@ -493,11 +493,17 @@ def test_auto_lsp_family():
     e.proc(346, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=345)
     e.proc(347, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=346)
     e.proc(348, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=346)
+    # metis-0815 (мутант M7c: корень — ближний предок, reversed(chain) → chain): pnpm (ppid 1) → language server →
+    # tsserver в живой копии — корень семьи pnpm, а не ближний language server; никого не гасим
+    e.proc(350, "/usr/local/bin/pnpm exec typescript-language-server --stdio", e.wt_live, age=m, ppid=1)
+    e.proc(351, "node /usr/local/bin/typescript-language-server --stdio", e.wt_live, age=m, ppid=350)
+    e.proc(352, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.wt_live, age=m, ppid=351)
     r = e.reap("--auto")
     k = e.killed()
     want = {346, 347, 348}
     check(r.returncode == 0 and set(k) == want, f"Д2: семья language server — вместе; гасится только ничья старше "
           f"срока {sorted(want)}: {sorted(k)}; лишнее {sorted(set(k) - want)} {r.stderr[-300:]}")
+    check(not {350, 351, 352} & set(k), f"metis-0815: pnpm → language server → tsserver в живой копии — никого: {sorted(k)}")
 
 
 def test_outside_like():
