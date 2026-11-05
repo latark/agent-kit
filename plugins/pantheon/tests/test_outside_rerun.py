@@ -458,8 +458,8 @@ CAUSES = ("run-tests: 5 файлов\n"
           "FAIL report --out вне $TMPDIR — код 2\n"
           "FAIL kit/test_zz.py · 1 с · проверок 1 · код 1\n"
           "\n===== kit/test_d.py · код 1 · строки не ok: 2 =====\n"
-          "пропущено: sandbox-exec нет — Operation not permitted\n"
           "FAIL сумма " + "х" * 300 + "\n"
+          "пропущено: sandbox-exec нет — Operation not permitted\n"
           "----- последние 2 строк -----\nPermissionError: хвост после списка не в счёт\n"
           "\nмедленные: …\nитого: файлов 5, ok 1, FAIL 4; проверок 9; 600 с, воркеров 2\n")
 rc = O.run_causes(CAUSES)

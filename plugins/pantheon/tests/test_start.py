@@ -1305,7 +1305,7 @@ def main():
     os.unlink(qpath)
     r = run("domains", "build")  # metis-0683: папку билетов очереди создаёт сборка — роль в песочнице её не создаст
     check("domains build: папка билетов очереди heavy-queue создана", r.returncode == 0 and os.path.isdir(qpath)
-          and not os.path.islink(qpath), r.stderr[-300:])
+          and not os.path.islink(qpath))
 
     # dev-stop-verify (DONE-02): код проекта не запускает, смотрит транскрипт разработчика
     repo = os.path.join(tmp, "projects", "br", "wt")
