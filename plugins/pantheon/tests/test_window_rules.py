@@ -95,6 +95,18 @@ def main():
               rs.get("autoMode") == {"allow": w.coordinator_auto_allow(["a-org/app"])}, rs.get("autoMode"))
         rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [])
         check("role_settings без auto_allow: autoMode нет", "autoMode" not in rs, rs.get("autoMode"))
+        # metis-0841: окно направления пишет .claude/agents своих папок (текст судит guard), прочие — закрыто
+        proj, own, cache = os.path.join(tmp, "projects/app"), os.path.join(tmp, "own"), os.path.join(tmp, "cache")
+        dw = lambda rs: rs["sandbox"]["filesystem"]["denyWrite"]  # noqa: E731
+        rs = p.role_settings([proj], own, [], cache, False, [])
+        check("role_settings: без own_agents .claude/agents папки окна закрыта песочницей",
+              {proj + "/.claude/agents", proj + "/**/.claude/agents"} <= set(dw(rs)), dw(rs))
+        rs = p.role_settings([proj], own, [], cache, False, [], own_agents=True)
+        check("role_settings own_agents: .claude/agents папки направления открыта, .git/config и .git/hooks — нет",
+              not {proj + "/.claude/agents", proj + "/**/.claude/agents"} & set(dw(rs))
+              and {proj + "/.git/config", proj + "/**/.git/hooks"} <= set(dw(rs)), dw(rs))
+        check("role_settings own_agents: своя папка роли и кэш — .claude/agents закрыта",
+              {own + "/.claude/agents", cache + "/**/.claude/agents"} <= set(dw(rs)), dw(rs))
         # хуки окна на Python — через hooks/python.sh рядом со скриптом (metis-0571); его нет — прежняя форма
         hd = os.path.join(tmp, "plug dir", "hooks")
         os.makedirs(hd)
