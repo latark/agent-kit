@@ -669,6 +669,29 @@ def test_pantheon_wake_fresh_sees_limited():
     check("свежей сессией" in buf.getvalue(), f"нет свежего старта в выводе: {buf.getvalue()!r}")
 
 
+def test_pantheon_wake_fresh_busy_skip_0241():
+    # metis-0241, ветвь fresh_start: имя уже поднимает другой процесс (замок start-<имя> занят, fresh-busy) — пропуск:
+    # код 0, «пропуск: имя — причина», ни «поднимаю», ни тревоги «не поднялась (код …)»
+    e = Env()
+    e.task("hermes-site")
+    e.limited("hermes-site")
+    e.now(at(2026, 10, 19, 8, 0) + 60)
+    saved = (P.fresh_reason, P.state_files)
+    P.fresh_reason = lambda a, t=None: "контекст большой"
+    P.state_files = lambda n: []
+    buf, err = io.StringIO(), io.StringIO()
+    try:
+        with P.lock("start-hermes-site", block=False) as held, contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(err):
+            rc = P._wake(False) if held else "замок не взят"
+    finally:
+        P.fresh_reason, P.state_files = saved
+    out = buf.getvalue()
+    check(rc == 0 and "пропуск: hermes-site — другой процесс уже поднимает" in out and "поднимаю" not in out
+          and "не поднялась" not in err.getvalue() and "не поднялась" not in alerts_text(e) and not e.calls,
+          f"fresh-busy: код {rc!r}, вывод {out!r}, stderr {err.getvalue()!r}, тревоги {alerts_text(e)!r}, вызовы {e.calls}")
+
+
 def test_wake_waiting_blockers():
     # все задачи с «владелец: id» в STATUS.md — молчит
     e = Env()
@@ -823,13 +846,18 @@ def test_new_order_goal():
     w = P.WAITING_GOAL
     # строки, которым цель верит, — те же, что печатает `task set` (lib/tasks.py; поведение — test_task_keep.py)
     T = P.tasks_mod()
-    check("«ждёт» (waiting)" in w and f"«<id>: {T.GOAL_OUT}»" in w and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
+    check("ждёт ответа владельца на вопрос или другую задачу" in w and f"«<id>: {T.GOAL_OUT}»" in w
+          and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
           and "в работе (doing) и в очереди (todo) — в цели" in w
           and "Верь последней такой строке по этой задаче" in w, f"условие о задаче в «ждёт»: {w!r}")
-    # argus-280a (Д1): плановый проход возвращает задачу в doing без строки в транскрипте — «снята» верна на момент записи
-    check(f"«Снята» верна на момент записи: если позже по задаче есть «{T.GOAL_IN.split()[0]}»" in w
-          and "статус вернулся в работу (doing) или очередь (todo) — задача снова в цели" in w,
-          f"условие о задаче в «ждёт» без «снята верна на момент записи»: {w!r}")
+    # metis-0738 (argus-280a, Д1): блокер закрыла другая сессия, плановый проход, владелец на доске — строка GOAL_IN
+    # уходит не в транскрипт ждущей. «Снята» засчитывается только свежей, проверка — `pantheon task goal <id>`
+    check("`pantheon task goal <id>`" in w and "«Снята» засчитывается, только если напечатана в том же ходе, что и "
+          "последний отчёт сессии" in w and "более ранняя «снята» устарела" in w,
+          f"условие цели без свежей «снята» и task goal: {w!r}")
+    # metis-0725: задачу, которую ведёт другая сессия, цель не держит, даже в поручении и в чек-листе эпика
+    check("её ведёт другая сессия (owner — не это окно и не его команда), даже если она в поручении, в чек-листе эпика"
+          in w, f"условие цели без owner другой сессии: {w!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())
