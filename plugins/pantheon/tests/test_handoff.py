@@ -588,6 +588,90 @@ try:
 except H.Refuse as e:
     got = e.channel
 check("deploy с незакоммиченными правками → только «да»", got == "yes", got)
+g(MAIN, "reset", "-q", "--hard")
+
+
+def refused(fn, *a):
+    try:
+        fn(*a)
+        return None
+    except H.Refuse as e:
+        return e.channel, str(e)
+
+
+# --- git у владельца вне песочницы: config роли не исполняется (находка фоновой проверки безопасности) ------------
+for text, bad in [
+        ('[core]\n\tbare = false\n\thooksPath = .husky\n[remote "origin"]\n\turl = x\n[branch "main"]\n\tremote = o\n',
+         None),
+        ('# [filter "x"]\n; clean = y\n[user]\n\tname = t\n', None),
+        ('[filter "lfs"]\n\tclean = git-lfs clean -- %f\n', "filter.clean"),
+        ('[diff "x"]\n textconv = cat', "diff.textconv"),
+        ("[core] pager = less", "core.pager"),
+        ("[Core]\n\tSSHCommand = ssh -i x", "core.sshcommand"),
+        ("[core]\n\tworktree = /tmp", "core.worktree"),
+        ("[include]\n\tpath = ../x", "include.path"),
+        ('[includeIf "gitdir:~/"]\n\tpath = x', "includeif.path"),
+        ('[merge "m"]\n\tdriver = x', "merge.driver"),
+        ("[filter.evil]\n\tsmudge = x", "filter.evil.smudge")]:
+    check(f"git_config_bad: {text[:30]!r} → {bad}", H.git_config_bad(text) == bad, H.git_config_bad(text))
+check("git_config_bad: непонятная секция → опасно", (H.git_config_bad("[core\n\tpager = x") or "").startswith(
+    "непонятная"), H.git_config_bad("[core\n\tpager = x"))
+
+PWN = os.path.join(_ROOT, "pwned")
+g(MAIN, "config", "filter.evil.clean", f"touch {PWN}")
+with open(os.path.join(MAIN, ".gitattributes"), "w") as fh:
+    fh.write("* filter=evil\n")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("git config с filter → отказ до git, фильтр не исполнен", r and r[0] == "bad" and "filter.evil.clean" in r[1]
+      and not os.path.exists(PWN), (r, os.path.exists(PWN)))
+os.unlink(os.path.join(MAIN, ".gitattributes"))
+g(MAIN, "config", "--remove-section", "filter.evil")
+CW = os.path.join(MAIN, ".git", "worktrees", "repo-wt", "config.worktree")
+with open(CW, "w") as fh:
+    fh.write(f"[core]\n\tpager = touch {PWN}\n")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check("config.worktree worktree с core.pager → отказ", r and r[0] == "bad" and "core.pager" in r[1], r)
+os.unlink(CW)
+DOTGIT = os.path.join(WT, ".git")
+with open(DOTGIT, encoding="utf-8") as fh:
+    dotgit = fh.read()
+EVIL = os.path.join(HOME, "projects", "evil-gitdir")
+shutil.copytree(os.path.join(MAIN, ".git", "worktrees", "repo-wt"), EVIL)
+with open(os.path.join(EVIL, "config.worktree"), "w") as fh:
+    fh.write(f'[diff "x"]\n\ttextconv = touch {PWN}\n')
+with open(DOTGIT, "w") as fh:
+    fh.write(f"gitdir: {EVIL}\n")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check(".git worktree указывает на чужой gitdir с diff-драйвером → отказ", r and r[0] == "bad" and "diff" in r[1], r)
+with open(DOTGIT, "w") as fh:
+    fh.write(dotgit)
+shutil.rmtree(EVIL)
+with open(os.path.join(HOME, ".gitconfig"), "w") as fh:
+    fh.write("[user]\n\tname = Global\n")
+r = refused(H.git, ["config", "--get", "user.name"], MAIN)
+check("глобальный ~/.gitconfig git у владельца не читает (GIT_CONFIG_GLOBAL=/dev/null)", r is not None, r)
+os.unlink(os.path.join(HOME, ".gitconfig"))
+check("подпапка без .git → отказ до git", refused(H.check_repo, os.path.join(MAIN, "nope")) is not None)
+
+# --- deploy: ровно показанные байты, чистое дерево с неотслеживаемыми, не worktree --------------------------------
+r = refused(H.facts_deploy, "~/projects/repo-wt")
+check("deploy из worktree → отказ", r and r[0] == "bad" and "worktree" in r[1], r)
+with open(os.path.join(MAIN, "untracked.txt"), "w") as fh:
+    fh.write("x")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("deploy: неотслеживаемый файл → только «да»", r and r[0] == "yes", r)
+os.unlink(os.path.join(MAIN, "untracked.txt"))
+EVILM = os.path.join(_ROOT, "evil-ran")
+facts = H.facts_deploy("~/projects/repo")
+with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
+    fh.write(f'touch "{EVILM}"\n')
+H.exec_deploy({"id": "20261105-000000-aaaaaa"}, facts)
+check("deploy.sh подменён после сверки хеша → исполнены показанные байты, а не файл с диска",
+      os.path.exists(marker) and not os.path.exists(EVILM), (os.path.exists(marker), os.path.exists(EVILM)))
+g(MAIN, "checkout", "-q", "--", "deploy.sh")
+os.unlink(marker)
+r = refused(H.exec_deploy, {"id": "20261105-000000-bbbbbb"}, dict(facts, bytes=b"touch x\n"))
+check("deploy: байты не того хеша → отказ без запуска", r and "не те" in r[1], r)
 check("CDP_PORTS = browser.BROWSERS", H.CDP_PORTS == P.browser_mod().BROWSERS, (H.CDP_PORTS,
                                                                                   P.browser_mod().BROWSERS))
 

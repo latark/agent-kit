@@ -39,6 +39,10 @@
      окно пишет само), вне окна — STATE/handoff/queue. Кто просит — имя окна по месту папки заявки (не из текста) и
      роль со слов заявки. Текст окна собирает describe() из живых фактов: путь, ветка и HEAD worktree, хеш deploy.sh,
      порт демона. Факты не те (грязное дерево, коммит только здесь, ссылка, путь вне ~/projects) — отказ сразу.
+     git у владельца идёт вне песочницы, поэтому до него config и config.worktree репозитория читаются как текст:
+     filter, diff, merge, include, includeIf, credential, gpg, core.pager, core.sshCommand и т. п. — отказ (check_repo);
+     глобальный и системный config выключены. deploy — только основная копия (не worktree, не .claude/, не кэш окна),
+     дерево чистое вместе с неотслеживаемыми; исполняются ровно те байты deploy.sh, чей хеш показан (bash -s).
   2. Проход (тик, вне окна): заявка старше REQ_TTL — снята. Текст собирается заново; не равен тексту заявки — снята
      («изменилось с заявки — новая заявка»). Владелец не у Mac (простой больше PRESENT_SEC) — ждёт.
   3. Окно Touch ID — помощник слияния (merge.ask, lib/touchid.swift; merge.py не правится). Текст окна — ровно этот
@@ -332,10 +336,83 @@ def touch_refusal(kind, target, why=""):
 
 # --- факты действия: текст окна собирается из них, а не из слов роли --------------------------------------------------
 
+# git идёт у владельца, вне песочницы, на репозитории, которым управляет роль: локальный config или config.worktree с
+# фильтром, diff-драйвером, pager, sshCommand или include исполнил бы код роли ещё до окна Touch ID. Поэтому до любого
+# git config читается как текст (без git), репозиторий с такими ключами — отказ; глобальный и системный config выключены.
+GIT_BAD_SECTIONS = {"filter", "diff", "include", "includeif", "merge", "credential", "gpg"}
+GIT_BAD_CORE = {"pager", "sshcommand", "askpass", "editor", "gitproxy", "worktree"}
+SECTION_RX = re.compile(r'\[\s*([A-Za-z0-9][A-Za-z0-9.-]*)\s*(?:"(?:[^"\\\n]|\\.)*")?\s*\]')
+
+
+def git_config_bad(text):
+    """Опасный ключ в тексте git config → его имя («filter.lfs.clean»), иначе None. Разбор текста: git не вызывается."""
+    sec = ""
+    for raw in str(text).splitlines():
+        ln = raw.strip()
+        while ln.startswith("["):
+            m = SECTION_RX.match(ln)
+            if not m:
+                return "непонятная секция " + ln[:40]
+            sec, ln = m.group(1).lower(), ln[m.end():].strip()
+        if not ln or ln[0] in "#;":
+            continue
+        km = re.match(r"[A-Za-z][A-Za-z0-9-]*", ln)
+        key = km.group(0).lower() if km else ln[:20]
+        top = sec.split(".")[0]
+        if top in GIT_BAD_SECTIONS or (top == "core" and key in GIT_BAD_CORE):
+            return f"{sec}.{key}"
+    return None
+
+
+def git_dirs(p):
+    """(git-dir, common-dir) корня репозитория p — по .git и commondir как текст, без git; иначе Refuse."""
+    dot = os.path.join(p, ".git")
+    try:
+        st = os.lstat(dot)
+    except OSError:
+        raise Refuse("bad", "цель — корень git-репозитория (в ней нет .git)") from None
+    if stat.S_ISDIR(st.st_mode):
+        gd = dot
+    elif stat.S_ISREG(st.st_mode):
+        m = re.fullmatch(r"gitdir: *(\S[^\n]*?)\s*", read_file(dot, 4096) or "")
+        if not m:
+            raise Refuse("bad", ".git — не строка gitdir")
+        gd = os.path.realpath(os.path.join(p, m.group(1)))
+    else:
+        raise Refuse("bad", ".git — ссылка")
+    common = gd
+    if os.path.lexists(os.path.join(gd, "commondir")):
+        cd = read_file(os.path.join(gd, "commondir"), 4096)
+        if cd is None or not cd.strip():
+            raise Refuse("bad", "commondir не читается")
+        common = os.path.realpath(os.path.join(gd, cd.strip()))
+    return gd, common
+
+
+def check_repo(p):
+    """Отказ до любого git: в config, config.worktree репозитория p опасный ключ или файл не прочесть как свой."""
+    gd, common = git_dirs(p)
+    for f in dict.fromkeys((os.path.join(common, "config"), os.path.join(common, "config.worktree"),
+                            os.path.join(gd, "config"), os.path.join(gd, "config.worktree"))):
+        if not os.path.lexists(f):
+            continue
+        text = read_file(f, 1024 * 1024)
+        if text is None:
+            raise Refuse("bad", f"{os.path.basename(f)} репозитория — не обычный свой файл")
+        bad = git_config_bad(text)
+        if bad:
+            raise Refuse("bad", f"в git config репозитория ключ {bad} — git с ним у владельца не запускаю")
+    return gd, common
+
+
 def git(args, cwd, timeout=30):
-    env = {"HOME": home(), "PATH": SAFE_PATH, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "LANG": "C"}
-    r = subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
-                       capture_output=True, text=True, timeout=timeout, env=env)
+    check_repo(cwd)
+    env = {"HOME": home(), "PATH": SAFE_PATH, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat",
+           "LANG": "C"}
+    r = subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                        "-c", "core.pager=cat", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                       env=env)
     if r.returncode != 0:
         raise Refuse("bad", f"git {args[0]}: {(r.stderr or r.stdout).strip()[:160]}")
     return r.stdout.strip()
@@ -382,23 +459,24 @@ def facts_worktree(target):
 
 
 def facts_deploy(target):
+    """Выкладка: основная копия (не worktree, не .claude/ и не кэш окна), дерево чистое вместе с неотслеживаемыми,
+    deploy.sh — обычный файл; его байты читаются один раз и исполняются ровно они (exec_deploy, bash -s)."""
     p = inside_projects(target)
+    gd, common = check_repo(p)
+    if gd != common or "/.claude/" in p + "/" or p.startswith(caches() + "/"):
+        raise Refuse("bad", "deploy — только из основной копии репозитория, не из worktree и не из папки окна роли")
     if os.path.realpath(git(["rev-parse", "--show-toplevel"], p)) != p:
         raise Refuse("bad", "цель — корень репозитория с deploy.sh")
     script = os.path.join(p, "deploy.sh")
-    try:
-        st = os.lstat(script)
-    except OSError:
-        raise Refuse("bad", "в корне репозитория нет deploy.sh") from None
-    if not stat.S_ISREG(st.st_mode):
-        raise Refuse("bad", "deploy.sh — не обычный файл")
-    if git(["status", "--porcelain", "--untracked-files=no"], p):
-        raise Refuse("yes", "в репозитории незакоммиченные правки — выкладка только с чистого коммита")
-    with open(script, "rb") as fh:
-        digest = hashlib.sha256(fh.read()).hexdigest()
+    data = read_file(script, 1024 * 1024, raw=True)
+    if data is None:
+        raise Refuse("bad", "в корне репозитория нет deploy.sh обычным своим файлом")
+    if git(["status", "--porcelain", "--untracked-files=all"], p):
+        raise Refuse("yes", "в репозитории незакоммиченные или неотслеживаемые файлы — выкладка только с чистого коммита")
+    digest = hashlib.sha256(data).hexdigest()
     head = git(["rev-parse", "HEAD"], p)
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"], p)
-    return {"path": p, "head": head, "script": digest,
+    return {"path": p, "head": head, "script": digest, "bytes": data,
             "desc": f"выложить {tilde(p)}: deploy.sh {digest[:12]}, ветка {branch}, HEAD {head[:7]}"}
 
 
@@ -451,9 +529,13 @@ def exec_deploy(req, facts):
     os.makedirs(state("handoff", "runs"), mode=0o700, exist_ok=True)
     out = state("handoff", "runs", f"{req['id']}.log")
     env = {"HOME": home(), "PATH": (P.run_env()["PATH"] if P is not None else SAFE_PATH), "LANG": "en_US.UTF-8"}
+    data = facts["bytes"]
+    if hashlib.sha256(data).hexdigest() != facts["script"]:
+        raise Refuse("bad", "байты deploy.sh не те, что показаны")
     with open(out, "a", encoding="utf-8") as fh:
-        r = subprocess.run(["/bin/bash", os.path.join(p, "deploy.sh")], cwd=p, stdin=subprocess.DEVNULL, stdout=fh,
-                           stderr=subprocess.STDOUT, timeout=DEPLOY_TIMEOUT, env=env)
+        # ровно показанные байты через stdin (bash -s), а не файл с диска: его могли сменить после сверки хеша
+        r = subprocess.run(["/bin/bash", "-s"], input=data, cwd=p, stdout=fh, stderr=subprocess.STDOUT,
+                           timeout=DEPLOY_TIMEOUT, env=env)
     if r.returncode != 0:
         raise Refuse("bad", f"deploy.sh упал с кодом {r.returncode}, журнал {tilde(out)}")
     return f"deploy.sh прошёл, журнал {tilde(out)}"
@@ -517,8 +599,8 @@ def queue_dirs():
     return out
 
 
-def read_file(path, limit=REQ_MAX):
-    """Обычный свой файл без ссылок → текст; иначе None."""
+def read_file(path, limit=REQ_MAX, raw=False):
+    """Обычный свой файл без ссылок → текст (raw — байты); иначе None."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
@@ -527,7 +609,8 @@ def read_file(path, limit=REQ_MAX):
         st = os.fstat(fh.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1 or st.st_size > limit:
             return None
-        return fh.read(limit + 1).decode("utf-8", "replace")
+        data = fh.read(limit + 1)
+        return data if raw else data.decode("utf-8", "replace")
 
 
 def load_req(path):
