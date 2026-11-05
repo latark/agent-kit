@@ -352,7 +352,7 @@
   срочно чинить не нужно. Посмотреть, что встало, — `plugins/journal.log` и `plugins/unchecked.json` (только для разбора,
   решений по нему нет). Дальше одно из двух: дождаться следующего выпуска, который пройдёт сверку сам, или,
   если вы уверены в установленном дереве, — `pantheon plugins accept <плагин>`.
-- `plugins/pantheon/lib/qmd.py` — общий поиск qmd (шаг 1.5): `pantheon qmd config|update|embed|serve|install|status`.
+- `plugins/pantheon/lib/qmd.py` — общий поиск qmd (шаг 1.5): `pantheon qmd config|update|embed|serve|install|status|where` (where — пути и заголовки без текста, metis-0856).
   Коллекции — `~/ai/pantheon/qmd.toml` (только Пританей); `~/.config/qmd/index.yml` пересобирается из него перед каждым
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181
   (с `socket = 8181` в её `[[service]]` — по требованию: qmd поднимается первым запросом, гаснет после простоя);

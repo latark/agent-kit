@@ -16,6 +16,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
+  pantheon qmd where "вопрос" [--collection X]   где лежит (metis-0856): коллекция | путь | заголовок | направление-хозяин,
+                                        без текста документов; для окна Пританея — по коллекциям проектов направлений
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): ставит
                                         выпуск, если запись в releases.json каталога совпала с ним (версия и дерево);
                                         тесты — в GitHub Actions до слияния, локального прогона нет (п. 8, 27.10);
@@ -3033,7 +3035,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
                "pantheon jobs *", "pantheon domains build", "pantheon roles build", "pantheon stop *",
                "pantheon resume *", "pantheon pause *", "pantheon restart *", "pantheon saved *", "pantheon who",
-               "pantheon agents", "sessync find", "sessync find *"]
+               "pantheon agents", "sessync find", "sessync find *", "pantheon qmd where *"]
+# `pantheon qmd where` (metis-0856, «да» владельца 05.11 19:47): поиск «где лежит» по коллекциям проектов идёт по HTTP
+# в местную службу qmd (127.0.0.1, порт из qmd.toml), а у песочницы штаба сети нет — поэтому мимо песочницы. Команда
+# печатает только коллекцию, путь, заголовок и хозяина, без текста; закрытые [hq].closed_collections не отдаёт.
 # `sessync find` (metis-0566, решение владельца 27.10): поиск прошлых разговоров читает транскрипты ~/.claude/projects, а
 # окну штаба они закрыты — поэтому только эта команда и только здесь, мимо песочницы; вывод проходит маску ключей в самом
 # sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
