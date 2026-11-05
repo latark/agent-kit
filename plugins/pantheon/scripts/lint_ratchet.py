@@ -12,6 +12,8 @@
   --init          записать базу впервые; есть база — отказ (поднять базу — только ручной правкой файла, она видна в диффе)
 
 Файлы — все *.py из `git ls-files` и новые вне .gitignore. Правила (пороги — константы ниже, не в базе):
+  0. Сначала обычный `ruff check .` по ruff.toml репозитория (кроме --init): ошибка — отказ. Так ruff идёт и в
+     run-tests.py, то есть в .pantheon-verify и на запасном пути слияния, а не только в CI.
   1. Файл длиннее OLD_MAX строк не растёт против базы. Новый файл (его нет в базе) — не длиннее NEW_MAX строк.
   2. Сложность функций — ruff C901 (McCabe > 15), PLR0915 (операторов > 50), PLR0912 (ветвей > 12) с этими порогами
      только здесь: основной ruff.toml их не включает, иначе старый код краснеет. Ruff зовётся с --isolated и
@@ -135,6 +137,19 @@ def run_ruff(cmd, root, files):
         rel = os.path.relpath(os.path.realpath(it["filename"]), real)
         res.append((rel, it["code"], it["location"]["row"], int(m.group(1))))
     return res
+
+
+def run_lint(cmd, root):
+    """Обычный `ruff check .` по ruff.toml репозитория → [«файл:строка: КОД сообщение»]."""
+    r = subprocess.run(cmd + ["check", "--no-cache", "--exit-zero", "--output-format", "json", "."], cwd=root,
+                       capture_output=True, text=True)
+    try:
+        items = json.loads(r.stdout)
+    except ValueError:
+        raise Fatal(f"ruff check . не дал JSON (код {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
+    real = os.path.realpath(root)
+    return [f"{os.path.relpath(os.path.realpath(it['filename']), real)}:{it['location']['row']}: {it.get('code')} "
+            f"{it.get('message')}" for it in items]
 
 
 def def_names(tree):
@@ -581,13 +596,15 @@ def run(opts):
     path = opts["baseline"]
     if opts["mode"] == "init" and os.path.exists(path):
         raise Fatal(f"база {path} уже есть: опустить — --update, поднять — только ручной правкой файла")
-    cur = scan(opts["root"], ruff_command(opts["root"], opts["ruff"]))
+    ruff = ruff_command(opts["root"], opts["ruff"])
+    cur = scan(opts["root"], ruff)
     if opts["mode"] == "init":
         save(path, cur)
         print(f"храповик: база записана — {path}")
         return 0
     base = load(path)
-    fails = check(base, cur)
+    fails = [f"ruff: {x}. Что делать: поправь (подробно — ruff check . версии из {RUFF_REQ}); намеренный приём — "
+             "`# noqa: КОД` с причиной" for x in run_lint(ruff, opts["root"])] + check(base, cur)
     for f in fails:
         print(f)
     if fails:

@@ -32,6 +32,15 @@ if os.environ.get("STUB_BAD"):
     print("boom")
     sys.exit(2)
 out = []
+if "--isolated" not in sys.argv:  # обычный ruff check . — ошибки по меткам «# lint КОД» во всех .py папки
+    for d, _, names in os.walk("."):
+        for n in sorted(x for x in names if x.endswith(".py")):
+            for i, line in enumerate(open(os.path.join(d, n), encoding="utf-8"), 1):
+                for code in re.findall(r"#\s*lint\s+(\w+)", line):
+                    out.append({"code": code, "filename": os.path.abspath(os.path.join(d, n)),
+                                "location": {"row": i, "column": 1}, "message": "stub lint"})
+    print(json.dumps(out))
+    sys.exit(0)
 for f in [a for a in sys.argv[1:] if a.endswith(".py")]:
     for i, line in enumerate(open(f, encoding="utf-8"), 1):
         m = re.search(r"#\s*cx\s+(.*)$", line)
@@ -271,6 +280,20 @@ def t_backrefs():
     check("новая обратная ссылка solo.G = <gr> — новый цикл, код 1", r.returncode == 1 and "solo.py" in r.last, r.stdout)
 
 
+def t_lint():
+    """Обычный `ruff check .` по ruff.toml репозитория — до правил храповика: ошибка — отказ последней строкой."""
+    root = started({"a.py": "x = 1\n", "b.py": "y = 1\n"})
+    write(root, {"a.py": "import os  # lint F401\nx = 1\n", "b.py": None})
+    r = run(root)
+    check("ruff check . нашёл ошибку — код 1, «ruff: a.py:1: F401» и «что делать» последней строкой",
+          r.returncode == 1 and "ruff: a.py:1: F401" in r.last and "Что делать" in r.last, r.stdout)
+    r = run(root, "--update")
+    check("--update при ошибке ruff — отказ, база та же (удалённый b.py в ней остался)",
+          r.returncode == 1 and "b.py" in base(root)["files"], r.stdout)
+    write(root, {"a.py": "x = 1\n"})
+    check("ошибку поправили — код 0", run(root).returncode == 0)
+
+
 def t_backref_counts():
     """Число обращений P. (pantheon/lib) и G. (guard/hooks) по файлу и в сумме не растёт."""
     lib = "plugins/pantheon/lib/"
@@ -400,7 +423,7 @@ def t_real_ruff():
 
 def main():
     for t in (t_clean, t_sizes, t_sizes_lower, t_complexity, t_complexity_lower, t_move, t_cycles, t_edges, t_backrefs,
-              t_backref_counts, t_fatal, t_run_tests, t_real_baseline, t_real_ruff):
+              t_backref_counts, t_lint, t_fatal, t_run_tests, t_real_baseline, t_real_ruff):
         t()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)
