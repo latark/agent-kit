@@ -6,8 +6,9 @@
 ведёт вкладку, а свой JS прохода (DL_START_JS, DL_CHUNK_JS, DL_DROP_JS) выполняет настоящий node с заглушками
 fetch, Cache Storage и FileReader — так проверяется и сам JS, а не только Python. Нет node — строка «пропущено».
 Проверяется:
-- карантин: метка com.apple.quarantine на файле (macOS), не поставилась — сбой и файла нет; .dmg, .app, .command,
-  .sh и прочее из DL_EXEC_EXT — с хвостом .download;
+- карантин: метка com.apple.quarantine на файле (macOS), не поставилась — сбой и файла нет; расширение не из белого
+  списка данных DL_DATA_EXT (.dmg, .applescript, .mobileconfig, .py, без расширения) — с хвостом .download и строкой
+  в итоге, .pdf и .xlsx — как есть;
 - путь: файл в <направление задачи>/inbox/<сайт или --to>/, байт в байт, права 0644 (без исполняемого бита), sha256
   в итоге, имя в .gitignore папки; вкладка — своя (session окна), переход на главную сайта, /cmd не зовётся, тело
   в кэше сайта удалено; недокачанное — вне inbox и убрано;
@@ -284,9 +285,9 @@ res = run(req(ZIP))
 check("тот же файл ещё раз — «уже был», второго файла нет",
       res["state"] == "done" and "уже был" in res["text"] and tree(os.path.join(INBOX, SITE)) == [".gitignore", "Сделки 3 кв.zip"],
       (res, tree(INBOX)))
-serve(ZIP, body(1000, "другой"), disp="attachment; filename*=UTF-8''%D0%A1%D0%B4%D0%B5%D0%BB%D0%BA%D0%B8%203%20%D0%BA%D0%B2.zip")
+serve(ZIP, body(len(DATA), "другой"), disp="attachment; filename*=UTF-8''%D0%A1%D0%B4%D0%B5%D0%BB%D0%BA%D0%B8%203%20%D0%BA%D0%B2.zip")
 res = run(req(ZIP))
-check("другой файл с тем же именем — «(2)», первый не перезаписан",
+check("другой файл того же размера с тем же именем — «(2)» (сверка по sha256), первый не перезаписан",
       res["state"] == "done" and os.path.isfile(os.path.join(INBOX, SITE, "Сделки 3 кв (2).zip"))
       and open(want, "rb").read() == DATA, tree(INBOX))
 
@@ -302,7 +303,11 @@ serve(DMG, body(5000, "dmg"), type="application/octet-stream")
 res = run(req(DMG, to="rosreestr"))
 check("файл .dmg (macOS монтирует и запускает) — с хвостом .download",
       res["state"] == "done" and os.path.isfile(os.path.join(INBOX, "rosreestr", "Setup.dmg.download"))
-      and not os.path.exists(os.path.join(INBOX, "rosreestr", "Setup.dmg")), (res, tree(INBOX)))
+      and not os.path.exists(os.path.join(INBOX, "rosreestr", "Setup.dmg"))
+      and "сохранён с хвостом .download" in res["text"], (res, tree(INBOX)))
+check("файл .pdf из белого списка — как есть, без строки о хвосте",
+      "хвост" not in run(req(PDF, to="rosreestr2"))["text"]
+      and os.path.isfile(os.path.join(INBOX, "rosreestr2", "opisanie.pdf")), tree(INBOX))
 
 # --- согласие ----------------------------------------------------------------------------------------------------------
 OTHER = "https://data.example.org/f.zip"
@@ -442,18 +447,27 @@ for argv in (["download", ZIP], ["download", "--task", "athena-0205"], ["downloa
 
 # --- имя файла -------------------------------------------------------------------------------------------------------------
 for disp, url, want_name in (
-        ('attachment; filename="../../.ssh/authorized_keys"', ZIP, "authorized_keys"),
-        ('attachment; filename=".bashrc"', ZIP, "bashrc"),
+        ('attachment; filename="../../.ssh/authorized_keys"', ZIP, "authorized_keys.download"),
+        ('attachment; filename=".bashrc"', ZIP, "bashrc.download"),
         ("attachment; filename=\"" + "Отчёт.pdf".encode().decode("latin-1") + "\"", ZIP, "Отчёт.pdf"),
         ("", "https://a.ru/dir/%2E%2E%2Fx.zip", "x.zip"),
-        ("", "https://a.ru/", "download"),
-        ('attachment; filename="a‮gpj.exe"', ZIP, "a_gpj.exe"),
+        ("", "https://a.ru/", "file.download"),
+        ('attachment; filename="a‮gpj.exe"', ZIP, "a_gpj.exe.download"),
         ('attachment; filename="-rf $HOME;.zip"', ZIP, "rf _HOME_.zip"),
         ("attachment; filename*=UTF-8''%E2%80%AE%00x.zip", ZIP, "__x.zip"),
         ('attachment; filename="run.COMMAND"', ZIP, "run.COMMAND.download"),
         ("", "https://a.ru/install.sh", "install.sh.download"),
         ('attachment; filename="Viewer.app"', ZIP, "Viewer.app.download"),
-        ('attachment; filename="data.app.zip"', ZIP, "data.app.zip")):
+        ('attachment; filename="data.app.zip"', ZIP, "data.app.zip"),
+        ('attachment; filename="disk.dmg"', ZIP, "disk.dmg.download"),
+        ('attachment; filename="run.applescript"', ZIP, "run.applescript.download"),
+        ('attachment; filename="vpn.mobileconfig"', ZIP, "vpn.mobileconfig.download"),
+        ("", "https://a.ru/tool.py", "tool.py.download"),
+        ("", "https://a.ru/x.img", "x.img.download"),
+        ('attachment; filename="Описание.PDF"', ZIP, "Описание.PDF"),
+        ("", "https://a.ru/deals.xlsx", "deals.xlsx"),
+        ('attachment; filename="a.7z"', ZIP, "a.7z"),
+        ('attachment; filename="x.download"', ZIP, "x.download.download")):
     got = B.dl_name(disp, url)
     check(f"имя: {disp or url!r:.50} → {want_name!r}", got == want_name, got)
 long = B.dl_safe("я" * 300 + ".zip")

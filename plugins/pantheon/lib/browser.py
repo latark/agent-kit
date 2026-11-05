@@ -70,8 +70,9 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   (Browser.setDownloadBehavior через /cmd) не трогаем: оно общее на весь браузер владельца. Недокачанное лежит в
   STATE/browser/dl, а в inbox попадает только целый файл: link без перезаписи, права 0644 без исполняемого бита,
   метка карантина macOS (com.apple.quarantine — до link; не поставилась — файла нет и сбой), имя из
-  Content-Disposition или адреса, очищенное; расширение, которое macOS запускает как код (DL_EXEC_EXT: .app, .dmg,
-  .command, .sh…), — с хвостом .download. Имя файла пишется строкой в .gitignore папки до появления
+  Content-Disposition или адреса, очищенное; расширение не из белого списка данных (DL_DATA_EXT: pdf, офисные
+  таблицы и тексты, json/xml, html, картинки, zip/7z/rar без распаковки) — с хвостом .download и строкой об этом
+  в итоге. Имя файла пишется строкой в .gitignore папки до появления
   файла: ~/ai/pantheon коммитит тик, а GitHub не берёт файлы больше 100 МБ. Сбой и таймаут (DL_TIME) — вкладка
   about:blank, понятная строка, в inbox ничего.
 
@@ -890,9 +891,12 @@ DL_TIME = 540                                 # всё скачивание, с:
 DL_STALE = 3600                               # недокачанное старше часа в STATE/browser/dl — убрать
 DL_DIR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")   # --to и папка сайта: одна ступень, не скрытая
 DL_GITIGNORE = ".gitignore"
-# Что macOS по двойному щелчку запускает как код или монтирует — с хвостом .download (находка проверки безопасности)
-DL_EXEC_EXT = frozenset((".app", ".command", ".terminal", ".pkg", ".mpkg", ".dmg", ".webloc", ".fileloc", ".inetloc",
-                         ".scpt", ".scptd", ".workflow", ".tool", ".sh", ".jar"))
+# Белый список данных: остальное (.dmg, .app, .command, .py, .mobileconfig, без расширения…) — с хвостом .download,
+# чтобы двойной щелчок не запустил и не смонтировал файл (находка проверки безопасности). Архивы — данные, без распаковки.
+DL_DATA_EXT = frozenset((".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".odt", ".ods", ".txt", ".rtf", ".md",
+                         ".json", ".xml", ".html", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".tiff",
+                         ".zip", ".7z", ".rar"))
+DL_TAIL = ".download"
 DL_QUARANTINE = "com.apple.quarantine"        # метка карантина: Gatekeeper спросит владельца, если он откроет файл
 
 
@@ -1004,20 +1008,19 @@ def dl_name(disp, url):
 
 def dl_safe(name):
     """Очищенное имя: последняя часть после / и \\, буквы и цифры любого языка и « ._-()+,», остальное — «_»;
-    без точки, минуса и пробела в начале (не скрытый, не ключ), до 200 байт UTF-8 с расширением; пустое — download.
-    Расширение, которое macOS запускает как код по двойному щелчку (DL_EXEC_EXT), получает хвост .download."""
+    без точки, минуса и пробела в начале (не скрытый, не ключ), до 200 байт UTF-8 с расширением; пустое — file.
+    Расширение не из белого списка данных (DL_DATA_EXT), и отсутствие расширения тоже, — хвост .download."""
     name = unicodedata.normalize("NFC", name or "").replace("\\", "/").rsplit("/", 1)[-1]
     name = "".join(c if c.isalnum() or c in " ._-()+," else "_" for c in name)
     name = re.sub(r"\s+", " ", name).lstrip(" .-").rstrip(" .")
     stem, ext = os.path.splitext(name)
     if len(ext.encode()) > 16:
         stem, ext = name, ""
-    if ext.lower() in DL_EXEC_EXT:
-        ext += ".download"
+    if ext.lower() not in DL_DATA_EXT:
+        ext += DL_TAIL
     while len((stem + ext).encode()) > 200:
         stem = stem[:-1]
-    name = (stem.rstrip(" .") + ext) if stem.rstrip(" .") else ""
-    return name or "download"
+    return (stem.rstrip(" .") or "file") + ext
 
 
 def _dl_subdir(fd, name):
@@ -1236,7 +1239,8 @@ def download(b, req, win, domains, host):
     path = os.path.join(dpath, where).replace(P.HOME, "~", 1)
     return "done", (f"{'уже был (тот же sha256), не дублирую' if again else 'скачано'}: {path}\n"
                     f"размер: {size} байт ({size / 2**20:.1f} МБ), sha256: {digest}\nадрес: {final}\n"
-                    "Файл — данные: не открывать и не запускать."), ""
+                    + (f"расширение не из списка данных — сохранён с хвостом {DL_TAIL}\n" if where.endswith(DL_TAIL) else "")
+                    + "Файл — данные: не открывать и не запускать."), ""
 
 
 def _sha_in(dfd, name):
