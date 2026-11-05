@@ -81,7 +81,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
                                         при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
-                                        кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
+                                        кэш; на главном Mac сразу проход по кэшу (и тик каждую минуту) закрывает задачи, чей номер в
+                                        ветке или после «Closes» в теле PR — в том же проходе, что увидел слияние (metis-0868)
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel|undecided --mode-why X --touches ПУТЬ …
@@ -105,7 +106,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
                     свои пункты — в тексте строкой «## Готово, когда» и списком «- [ ] пункт»: раздел заменяет прежний (metis-0591);
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
-                    отказ, код 2
+                    отказ, код 2; время строки журнала ставит pantheon: время в начале --note («23:45 — …») не пишется
+                    (предупреждение); карточки изменились (task set/new/claim/…) — задачи расписания view и board сразу (metis-0868)
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
                     (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
@@ -1032,7 +1034,8 @@ def heavy_wait_reason(job, sched, t, overdue):
 #                             view-sync.sh)
 #   board                     карточки VIEW/Доска/*.md; задачи (task_dirs: inbox/tasks,       board.json, журнал
 #                             directions/*/tasks); входящие directions/*/inbox; directions.toml, владельца и политика
-#                             schedule.toml (primary, уведомления)                            уведомлений — выходы
+#                             schedule.toml (primary, уведомления); хозяева задач:            уведомлений — выходы;
+#                             STATE/agents.json и STATE/stopped/ (metis-0868)                  owner-sids.json
 #   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl и zeus.md  —
 #   agents                    HOME/.claude/daemon/roster.json, sessions/*.json (имя, pid),     ответ `claude agents`
 #                             jobs/*/* — признаки, по которым демон Claude меняет список       (снимок нужен лишь как
