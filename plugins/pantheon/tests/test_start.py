@@ -1303,6 +1303,9 @@ def main():
           r.returncode == 0 and all(os.path.exists(os.path.join(locks, n + ".lock"))
                                     for n in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server")))
     os.unlink(qpath)
+    r = run("domains", "build")  # metis-0683: папку билетов очереди создаёт сборка — роль в песочнице её не создаст
+    check("domains build: папка билетов очереди heavy-queue создана", r.returncode == 0 and os.path.isdir(qpath)
+          and not os.path.islink(qpath), r.stderr[-300:])
 
     # dev-stop-verify (DONE-02): код проекта не запускает, смотрит транскрипт разработчика
     repo = os.path.join(tmp, "projects", "br", "wt")

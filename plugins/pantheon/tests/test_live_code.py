@@ -124,6 +124,11 @@ check("install: current → проверенный кэш установленн
 link = os.path.join(h, ".local", "bin", "pantheon")
 check("install: ~/.local/bin/pantheon идёт через current в установленную",
       os.path.realpath(link) == os.path.realpath(os.path.join(cache, "bin", "pantheon")), os.path.realpath(link))
+hlocks = os.path.join(h, "state", "locks")  # metis-0683: места и папку очереди heavy роль в песочнице сама не создаст
+check("install: места heavy и папка билетов heavy-queue созданы",
+      os.path.isdir(os.path.join(hlocks, "heavy-queue")) and not os.path.islink(os.path.join(hlocks, "heavy-queue"))
+      and all(os.path.isfile(os.path.join(hlocks, n + ".lock")) for n in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server")),
+      os.listdir(hlocks) if os.path.isdir(hlocks) else "нет locks")
 r = run(h, "install")
 check("install повторно: та же ссылка, без хвостов current.new-*",
       r.returncode == 0 and os.path.realpath(cur) == os.path.realpath(cache)

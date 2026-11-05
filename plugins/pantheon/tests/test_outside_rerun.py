@@ -7,7 +7,8 @@
 заглушкой, которая пишет команду и исполняет её. Проверяет: красный полный прогон пишет список упавших в full.jsonl
 (не в журнал шлюза); следующий HEAD той же ветки гонит `--only` упавших и затронутых диффом; опора — полный прогон, а не
 дозапуск; зелёный дозапуск пишет запись tests с cmd полного набора и rerun_of/files/map, шлюз guard её читает; каждое
-условие «весь набор вместо дозапуска»; разбор вывода run-tests (run_failed).
+условие «весь набор вместо дозапуска»; разбор вывода run-tests (run_failed); причина красного по файлу в full.jsonl
+(run_causes) и тревога, если красных полных прогонов за сутки больше 30 % (red_share, alert_red_share; metis-0696).
 """
 import atexit
 import contextlib
@@ -183,6 +184,9 @@ check("красный полный: строка full.jsonl — упавший k
       and e1.get("code") == 1 and e1.get("sha") == C1 and "rerun_of" not in e1 and e1.get("cmd") == r1.get("cmd")
       and e1.get("env") == O.run_env(r1["cmd"]) and e1.get("tree") == git("rev-parse", f"{C1}^{{tree}}"), e1)
 check("красный полный: в журнал шлюза не пишется", not tests_for(C1))
+check("красный полный: причина по файлу в full.jsonl — провал, «код 1», первая строка не ok (metis-0696)",
+      e1.get("causes") == {"kit/test_a.py": {"kind": "провал", "why": "код 1", "line": "FAIL a"}}
+      and "cause" not in e1, e1.get("causes"))
 with open(r1["log"]) as fh:
     LOG1 = fh.read()
 check("run_failed: настоящий вывод run-tests — ok b–e, FAIL a",
@@ -441,6 +445,117 @@ check("run_failed: FAIL в итоге больше FAIL-строк при сош
 check("run_failed: один файл и ok, и FAIL — None",
       O.run_failed(GOOD.replace("FAIL kit/test_b.py · 0.1", "FAIL kit/test_a.py · 0.1")) is None)
 check("run_failed: пусто — None", O.run_failed("") is None)
+
+# --- 7. run_causes: причина красного по файлу (metis-0696) ----------------------------------------------------------
+CAUSES = ("run-tests: 5 файлов\n"
+          "FAIL kit/test_a.py · 600.0 с · проверок 3 · таймаут\n"
+          "FAIL kit/test_b.py · 1.0 с · проверок 0 · сигнал 9\n"
+          "FAIL kit/test_c.py · 1.0 с · проверок 2 · код 1\n"
+          "FAIL kit/test_d.py · 1.0 с · проверок 2 · код 1\n"
+          "ok   kit/test_e.py · 1.0 с · проверок 2\n"
+          "\n===== kit/test_c.py · код 1 · строки не ok: 3 =====\n"
+          "пропущено: проба под песочницей — sandbox-exec: Operation not permitted\n"
+          "FAIL report --out вне $TMPDIR — код 2\n"
+          "FAIL kit/test_zz.py · 1 с · проверок 1 · код 1\n"
+          "\n===== kit/test_d.py · код 1 · строки не ok: 2 =====\n"
+          "пропущено: sandbox-exec нет — Operation not permitted\n"
+          "FAIL сумма " + "х" * 300 + "\n"
+          "----- последние 2 строк -----\nPermissionError: хвост после списка не в счёт\n"
+          "\nмедленные: …\nитого: файлов 5, ok 1, FAIL 4; проверок 9; 600 с, воркеров 2\n")
+rc = O.run_causes(CAUSES)
+check("run_causes: таймаут и сигнал — по строке FAIL раннера",
+      rc.get("kit/test_a.py") == {"kind": "таймаут", "why": "таймаут", "line": ""}
+      and rc.get("kit/test_b.py") == {"kind": "сигнал", "why": "сигнал 9", "line": ""}, rc)
+check("run_causes: отказ песочницы в строках не ok — «среда», первая строка не ok — строка пропуска",
+      rc.get("kit/test_c.py", {}).get("kind") == "среда" and rc["kit/test_c.py"]["why"] == "код 1"
+      and rc["kit/test_c.py"]["line"].startswith("пропущено"), rc.get("kit/test_c.py"))
+check("run_causes: «Operation not permitted» только в строке пропуска и PermissionError после «-----» — провал, "
+      "строка до CAUSE_LINE знаков", rc.get("kit/test_d.py", {}).get("kind") == "провал"
+      and len(rc["kit/test_d.py"]["line"]) == O.CAUSE_LINE, rc.get("kit/test_d.py"))
+check("run_causes: строки FAIL из хвоста упавшего — не файлы раннера; ok — не причина",
+      sorted(rc) == ["kit/test_a.py", "kit/test_b.py", "kit/test_c.py", "kit/test_d.py"], sorted(rc))
+check("run_causes: пусто — {}", O.run_causes("") == {})
+
+# --- 8. доля красных полных прогонов за сутки: тревога с разбивкой (metis-0696) ---------------------------------------
+NOW = time.time()
+
+
+def ent(ago, code, failed=None, causes=None):
+    e = {"rid": f"r{ago}", "repo": REPOS, "code": code, "failed": failed,
+         "time": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(NOW - ago))}
+    if causes is not None:
+        e["causes"] = causes
+    return e
+
+
+MG = "guard/test_merge_gate.py"
+RED = [ent(60, 1, [MG], {MG: {"kind": "провал", "why": "код 1", "line": "FAIL r6"}}),
+       ent(120, 1, [MG, "pantheon/test_read.py"], {MG: {"kind": "таймаут"}, "pantheon/test_read.py": {"kind": "таймаут"}}),
+       ent(180, -9, None)]
+GREEN = [ent(240, 0, []), ent(300, 0, [])]
+OLD = [ent(O.RED_WINDOW + 60, 1, [MG], {MG: {"kind": "провал"}})] * 5
+total, red, kinds, files_ = O.red_share(RED + GREEN + OLD, t=NOW)
+check("red_share: только за сутки, красный — код не 0, причины по видам и файлам",
+      (total, red) == (5, 3) and kinds == {"провал": 1, "таймаут": 2, "итог не разобран": 1}
+      and files_ == {MG: {"провал": 1, "таймаут": 1}, "pantheon/test_read.py": {"таймаут": 1}}, (total, red, kinds, files_))
+check("red_share: запись без causes (до metis-0696) — «причина не записана»",
+      O.red_share([ent(10, 1, [MG])], t=NOW)[2] == {"причина не записана": 1})
+ALERTS = os.path.join(HOME, "ai", "pantheon", "alerts.md")
+
+
+def alerts_text():
+    try:
+        with open(ALERTS) as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+_rf_full = O.read_full
+try:
+    for name, rows, want in (("3 из 3 — меньше RED_MIN_RUNS, тревоги нет", RED, False),
+                             ("1 из 4 (25 %) — не выше порога, тревоги нет", RED[:1] + GREEN + [ent(360, 0, [])], False),
+                             ("красные старше суток не в счёт", OLD + GREEN, False),
+                             ("3 из 10 — ровно 30 %, не выше порога", RED[:2] + [ent(30, 1, [MG])]
+                              + [ent(400 + i, 0, []) for i in range(7)], False)):
+        O.read_full = lambda rows=rows: rows
+        a0 = alerts_text()
+        check(f"тревога по доле: {name}", O.alert_red_share(t=NOW) is want and alerts_text() == a0, alerts_text()[len(a0):])
+    O.read_full = lambda: RED + GREEN
+    a0 = alerts_text()
+    got = O.alert_red_share(t=NOW)
+    new = alerts_text()[len(a0):]
+    check("тревога по доле: 3 из 5 (60 %) — строка в alerts.md с долей, видами причин и файлами",
+          got is True and "pantheon-outside" in new and "3 из 5 (60 %" in new and "таймаут 2" in new
+          and "итог не разобран 1" in new and f"{MG} — " in new and "pantheon/test_read.py — таймаут 1" in new, new)
+    a1 = alerts_text()
+    check("тревога по доле: в те же сутки повтора нет", O.alert_red_share(t=NOW) is True and alerts_text() == a1)
+    O.read_full = lambda: RED[:2] + GREEN
+    check("тревога по доле: 2 из 4 — RED_MIN_RUNS прогонов хватает, доля выше порога",
+          O.alert_red_share(t=NOW) is True and alerts_text() == a1)
+    # проход тестов зовёт подсчёт после очереди; сбой подсчёта не роняет проход и виден в журнале
+    calls_ = []
+    saved = {k: getattr(O, k) for k in ("watchdog", "recover_results", "drop_test_work", "alert_overdue",
+                                        "run_test_queue", "prune", "alert_red_share")}
+    for k in saved:
+        setattr(O, k, lambda *a, k=k, **kw: calls_.append(k))
+    try:
+        rc1 = O.cmd_run()
+
+        def boom(*_a, **_k):
+            raise ValueError("сломано")
+        O.alert_red_share = boom
+        rc2 = O.cmd_run()
+    finally:
+        for k, v in saved.items():
+            setattr(O, k, v)
+    ev = os.path.join(STATE, "logs", "outside.jsonl")
+    evs = open(ev).read() if os.path.exists(ev) else ""
+    check("cmd_run: подсчёт доли красных после очереди тестов; сбой — код 0 и запись red-share-error",
+          rc1 == 0 and rc2 == 0 and calls_.index("alert_red_share") > calls_.index("run_test_queue")
+          and '"red-share-error"' in evs and "сломано" in evs, (calls_, evs[-300:]))
+finally:
+    O.read_full = _rf_full
 
 print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
