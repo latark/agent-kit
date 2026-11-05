@@ -22,7 +22,9 @@
 # Без доступа служба безопасна: демон отвечает «F perm», и вызов идёт медленным путём с правами окна (metis-0811 ч. 1).
 # Папку hooks pantheon-hookd берёт не из аргументов, а из ~/.cache/pantheon/hookd/bin/pantheon-hookd.hooks (0600) —
 # его пишет установка: так разрешение macOS не достаётся чужому коду, запущенному через pantheon-hookd (шапка
-# hooks/hookd-svc.c). --check сверяет этот файл с деревом, откуда зван.
+# hooks/hookd-svc.c). --check сверяет этот файл с деревом, откуда зван. Ставит скрипт только из проверенного дерева
+# ~/.claude/plugins/cache/agent-kit/guard/<версия>/ (HOME — из окружения, сверка по realpath); из рабочей копии и
+# любой другой папки — код 1 и причина: её правят агенты, а служба исполняет её с доступом к папкам владельца.
 #
 # Внимание: плановый проход Пантеона (services_sync) снимает любой pantheon.svc.*, которого нет в schedule.toml, —
 # пока он не знает hookd, поставленная вручную служба проживёт до ближайшего прохода. Установка плановым проходом —
@@ -147,6 +149,20 @@ case "${1:-}" in
         ;;
     "") ;;
     *) echo "hookd-install: неизвестный ключ $1 (--print, --check, --uninstall)" >&2; exit 64 ;;
+esac
+# ставить — только из проверенного дерева guard: pantheon-hookd исполняет закреплённую папку hooks с доступом к
+# папкам владельца, а рабочую копию и /tmp правят агенты (вторая находка проверки безопасности 05.11)
+cache=$(cd "$HOME" && pwd -P)/.claude/plugins/cache/agent-kit/guard || { echo "hookd-install: HOME не открывается" >&2; exit 1; }
+ver=
+case $h in
+    "$cache"/*/hooks) ver=${h#"$cache"/}; ver=${ver%/hooks} ;;
+esac
+case $ver in
+    ''|*/*)
+        echo "hookd-install: ставить только из проверенного дерева guard ~/.claude/plugins/cache/agent-kit/guard/<версия>/," >&2
+        echo "а не из $h: служба исполняет эту папку с доступом к вашим папкам, а рабочие копии правят агенты" >&2
+        exit 1
+        ;;
 esac
 sock=$top/hookd.sock
 [ ${#sock} -lt 104 ] || { echo "hookd-install: путь сокета длиннее 103 байт: $sock" >&2; exit 1; }

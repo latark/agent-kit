@@ -19,6 +19,8 @@
  * - папку hooks — из файла pantheon-hookd.hooks рядом. Его пишет hookd-install.sh из терминала владельца: свой, не
  *   ссылка, не открыт группе и прочим, путь абсолютный и канонический. Папка bin и папка hooks — свои и тоже не
  *   открыты на запись другим. Папку ~/.cache/pantheon/hookd роли не правят (protect-config, F7);
+ * - папка hooks — только из проверенного дерева guard ~/.claude/plugins/cache/agent-kit/guard/<версия>/hooks
+ *   (вторая находка 05.11): рабочую копию и /tmp правят агенты, их код под этим разрешением не запустится;
  * - окружение ребёнка — только HOME и PATH: PYTHON*, DYLD_*, BASH_FUNC_* и прочее от того, кто запустил, не доходят;
  * - итог пробы — всегда в ~/.cache/pantheon/hookd/probe/result.json.
  * Что-то не так — код 78 и причина, ничего не запускается.
@@ -44,6 +46,7 @@
 #define MAX_FDS 8
 #define TAIL "/.cache/pantheon/hookd/bin/pantheon-hookd"
 #define CHILD_PATH "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+#define CACHE "/.claude/plugins/cache/agent-kit/guard/"
 
 static volatile pid_t child = 0;
 
@@ -95,6 +98,12 @@ int main(int argc, char **argv) {
     if (hooks[got - 1] == '\n') hooks[--got] = 0;
     if (hooks[0] != '/' || strchr(hooks, '\n') || !realpath(hooks, real) || strcmp(real, hooks) != 0)
         return fail(78, "в pantheon-hookd.hooks не канонический абсолютный путь", hooks);
+    char cache[PATH_MAX];
+    snprintf(cache, sizeof cache, "%s" CACHE, home);
+    size_t lc = strlen(cache);
+    const char *sl = strncmp(hooks, cache, lc) == 0 ? strchr(hooks + lc, '/') : NULL;
+    if (!sl || strcmp(sl, "/hooks") != 0) /* путь канонический: «//» и «..» в нём нет */
+        return fail(78, "папка hooks не из проверенного дерева guard ~" CACHE "<версия>/hooks", hooks);
     char py[PATH_MAX + 16], dm[PATH_MAX + 16], out[PATH_MAX + 64], envhome[PATH_MAX + 8];
     snprintf(py, sizeof py, "%s/python.sh", hooks);
     snprintf(dm, sizeof dm, "%s/daemon.py", hooks);

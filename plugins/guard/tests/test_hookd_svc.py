@@ -12,12 +12,14 @@
   «время<TAB>ok<TAB>число» — перед выходом по простою, по stale и раз в FLUSH_EVERY;
 - hookd-build.sh --svc: собирает pantheon-hookd с метками .sum и .src, тот же исходник — без пересборки, правка — заново;
 - pantheon-hookd: папку hooks и файл итога из аргументов не берёт (64), чужой python.sh не запускает: нет
-  pantheon-hookd.hooks, он открыт другим или ссылка, путь не канонический, папка hooks открыта всем, копия файла вне
+  pantheon-hookd.hooks, он открыт другим или ссылка, путь не канонический, папка hooks не из кэша guard
+  (~/.claude/plugins/cache/agent-kit/guard/<версия>/hooks) или открыта всем, копия файла вне
   ~/.cache/pantheon/hookd/bin — код 78 (confused deputy, находка 05.11); окружение ребёнка — только HOME и PATH;
   вне launchd — 1 и причина; код ребёнка и SIGTERM (ребёнку, код 143) передаются; Python-ребёнок приписан ему;
-- hookd-install.sh: установка — plist с pantheon-hookd первым, проба под «launchd», таблица доступа, задание пробы
-  снято; --check — в порядке (код 0), нет доступа (код 1, команда «Файлы и папки», перезапуск службы), старая
-  установка, нет службы, проба без итога, canary-diff, папка демона открыта окну.
+- hookd-install.sh: установка из рабочей копии — отказ (код 1), из кэша — plist с pantheon-hookd первым, проба под
+  «launchd», таблица доступа, задание пробы снято; --check — в порядке (код 0), нет доступа (код 1, команда
+  «Файлы и папки», перезапуск службы), старая установка, нет службы, проба без итога, canary-diff, папка демона
+  открыта окну.
 """
 import json
 import os
@@ -349,8 +351,23 @@ def pin_hooks(svc, path, mode=0o600):
     os.chmod(p, mode)
 
 
-def fake_hooks(root, name, script, mode=0o755):
-    d = os.path.join(root, name)
+def guard_cache(home):
+    return os.path.join(home, ".claude", "plugins", "cache", "agent-kit", "guard")
+
+
+def cached(home, ver):
+    """Папка hooks проверенного дерева guard: <HOME>/.claude/plugins/cache/agent-kit/guard/<ver>/hooks."""
+    return os.path.join(guard_cache(home), ver, "hooks")
+
+
+def cache_tree(home, ver="9.9.9"):
+    """Копия плагина в проверенное дерево подменённого HOME; путь к её папке hooks (realpath)."""
+    dst = os.path.dirname(cached(home, ver))
+    shutil.copytree(PLUGIN, dst, ignore=shutil.ignore_patterns("__pycache__", "tests"))
+    return os.path.realpath(os.path.join(dst, "hooks"))
+
+
+def fake_hooks(d, script, mode=0o755):
     os.makedirs(d)
     with open(os.path.join(d, "python.sh"), "w") as fh:
         fh.write(script)
@@ -362,9 +379,10 @@ def fake_hooks(root, name, script, mode=0o755):
 def test_wrapper(root, svc):
     home = svc_home(svc)
     real_home = os.path.realpath(home)
-    hooks_real = os.path.realpath(HOOKS)
+    hooks_real = cache_tree(home)
     marker = os.path.join(root, "evil-ran")
-    evil = fake_hooks(root, "evil", f'echo ran >> "{marker}"\nexit 0\n')
+    bad = f'echo ran >> "{marker}"\nexit 0\n'
+    evil = fake_hooks(cached(home, "evil"), bad)  # в проверенном дереве: отказ — только от проверки своего случая
 
     def run(argv, **kw):
         return subprocess.run(argv, env=env_for(home, **kw), capture_output=True, text=True, timeout=30)
@@ -396,9 +414,18 @@ def test_wrapper(root, svc):
     os.symlink(other, svc + ".hooks")
     refused("pantheon-hookd.hooks — ссылка — код 78, чужой python.sh не запущен", run([svc, "--tcc-probe"]), 78,
             "pantheon-hookd.hooks")
-    pin_hooks(svc, os.path.join(evil, "..", "evil"))
+    pin_hooks(svc, os.path.join(evil, "..", "hooks"))
     refused("в pantheon-hookd.hooks путь с «..» — код 78", run([svc, "--tcc-probe"]), 78, "не канонический")
-    open_dir = fake_hooks(root, "evil-open", f'echo ran >> "{marker}"\nexit 0\n', mode=0o777)
+    # только проверенное дерево guard: рабочую копию и /tmp правят агенты (вторая находка 05.11)
+    for where, path in (("рабочая копия (папка вне кэша плагинов)", os.path.join(root, "wt", "hooks")),
+                        ("кэш guard без версии", os.path.join(guard_cache(home), "hooks")),
+                        ("кэш guard, лишняя папка в версии", cached(home, os.path.join("a", "b"))),
+                        ("кэш guard, папка не hooks", os.path.join(guard_cache(home), "1", "hooks2")),
+                        ("кэш guard2 (имя с тем же началом)", os.path.join(guard_cache(home) + "2", "hooks"))):
+        pin_hooks(svc, fake_hooks(path, bad))
+        refused(f"папка hooks — {where} — код 78, её python.sh не запущен", run([svc, "--tcc-probe"]), 78,
+                "не из проверенного дерева guard")
+    open_dir = fake_hooks(cached(home, "open"), bad, mode=0o777)
     pin_hooks(svc, open_dir)
     refused("папка hooks открыта на запись всем — код 78, её python.sh не запущен", run([svc, "--tcc-probe"]), 78,
             "открыты на запись другим")
@@ -419,7 +446,7 @@ def test_wrapper(root, svc):
             run([copy, "--tcc-probe"]), 78, "запущен не из")
     # ребёнок: окружение только HOME и PATH, итог пробы — свой путь, код и сигнал передаются
     out = os.path.join(root, "child.txt")
-    fake = fake_hooks(root, "fakehooks", f'{{ env; echo "ARGS $1 $2 $3"; }} > "{out}"\n'
+    fake = fake_hooks(cached(home, "fake"), f'{{ env; echo "ARGS $1 $2 $3"; }} > "{out}"\n'
                       'case $2 in --tcc-probe) ;; *) exit 99 ;; esac\n'
                       '[ -f "$HOME/sleep-please" ] && exec /bin/sleep 30\nexit 7\n')
     pin_hooks(svc, fake)
@@ -511,11 +538,11 @@ def fake_launchctl(root):
     return p
 
 
-def inst(home, lctl, *args, **kw):
+def inst(home, lctl, *args, script=INSTALL, **kw):
     d = os.path.join(home, "lctl")
     os.makedirs(d, exist_ok=True)
     env = env_for(home, **{"PANTHEON_HOOKD_LAUNCHCTL": lctl, "FAKE_LCTL_DIR": d, "PANTHEON_HOOKD_PROBE_WAIT": "30", **kw})
-    r = subprocess.run(["/bin/sh", INSTALL, *args], env=env, capture_output=True, text=True, timeout=300)
+    r = subprocess.run(["/bin/sh", script, *args], env=env, capture_output=True, text=True, timeout=300)
     calls = open(os.path.join(d, "calls.log")).read().splitlines() if os.path.exists(os.path.join(d, "calls.log")) else []
     return r.returncode, r.stdout, r.stderr, calls
 
@@ -548,9 +575,25 @@ def test_install(root, svc_built):
     home = os.path.join(root, "in")
     for d in ("Desktop", "Documents", "Downloads", os.path.join("Library", "Mobile Documents")):
         os.makedirs(os.path.join(home, d))
-    code, out, err, calls = inst(home, lctl)
     svc = os.path.join(TH.hookd_dir(home), "bin", "pantheon-hookd")
     plist = os.path.join(home, "Library", "LaunchAgents", "pantheon.svc.hookd.plist")
+    # ставить — только из проверенного дерева guard (вторая находка 05.11): рабочая копия — отказ
+    code, out, err, calls = inst(home, lctl)
+    check("установка из рабочей копии — код 1, «ставить только из проверенного дерева», ничего не поставлено",
+          code == 1 and "ставить только из проверенного дерева guard" in err and not os.path.exists(plist)
+          and not os.path.exists(svc + ".hooks") and not calls, (code, out[-300:], err[-300:], calls))
+    deep = cache_tree(home, os.path.join("x", "y"))
+    code, out, err, calls = inst(home, lctl, script=os.path.join(os.path.dirname(deep), "scripts", "hookd-install.sh"))
+    check("установка из кэша guard, но версия — две папки (x/y) — код 1, ничего не поставлено",
+          code == 1 and "ставить только из проверенного дерева guard" in err and not os.path.exists(plist)
+          and not calls, (code, out[-300:], err[-300:], calls))
+    hooks_c = cache_tree(home)
+    sc = os.path.join(os.path.dirname(hooks_c), "scripts", "hookd-install.sh")
+
+    def ins(*a, **k):
+        return inst(home, lctl, *a, script=sc, **k)
+
+    code, out, err, calls = ins()
     pl = plistlib.load(open(plist, "rb")) if os.path.exists(plist) else {}
     check("установка: код 0, plist службы — один pantheon-hookd, без папки hooks в аргументах",
           code == 0 and pl.get("ProgramArguments") == [svc] and os.access(svc, os.X_OK),
@@ -558,7 +601,7 @@ def test_install(root, svc_built):
     pin = svc + ".hooks"
     pin_text = open(pin).read() if os.path.exists(pin) else ""
     check("установка: pantheon-hookd.hooks — папка hooks этого дерева, файл 0600",
-          pin_text == os.path.realpath(HOOKS) + "\n" and stat.S_IMODE(os.lstat(pin).st_mode) == 0o600,
+          pin_text == hooks_c + "\n" and stat.S_IMODE(os.lstat(pin).st_mode) == 0o600,
           (pin_text, oct(os.lstat(pin).st_mode) if os.path.exists(pin) else None))
     probe_pl = os.path.join(home, "lctl", "plist-pantheon.hookd.probe")
     ppl = plistlib.load(open(probe_pl, "rb")) if os.path.exists(probe_pl) else {}
@@ -571,14 +614,14 @@ def test_install(root, svc_built):
           and not os.path.exists(os.path.join(TH.hookd_dir(home), "probe", "probe.plist")), (calls, ppl))
     check("установка: таблица доступа — все четыре папки «есть», ответственный — pantheon-hookd",
           "итог: доступ ко всем папкам есть" in out and out.count(" есть") >= 4 and svc in out, out[-900:])
-    code, out, err, _ = inst(home, lctl, "--check")
+    code, out, err, _ = ins("--check")
     check("--check: служба загружена, доступ есть, окон нет, вызовов нет — код 0, «всё в порядке»",
           code == 0 and last_line(out) == "hookd-install --check: всё в порядке" and "загружена" in out
           and "вызовов нет" in out, (code, out[-900:], err[-300:]))
     st_before = os.stat(plist).st_mtime_ns
     os.chmod(os.path.join(home, "Documents"), 0)
     try:
-        code, out, err, _ = inst(home, lctl, "--check")
+        code, out, err, _ = ins("--check")
     finally:
         os.chmod(os.path.join(home, "Documents"), 0o700)
     uid = os.getuid()
@@ -593,10 +636,10 @@ def test_install(root, svc_built):
     other = os.path.realpath(os.path.join(root, "work"))
     with open(pin, "w") as fh:
         fh.write(other + "\n")
-    code, out, err, _ = inst(home, lctl, "--check", PANTHEON_HOOKD_PROBE_WAIT="1")
+    code, out, err, _ = ins("--check", PANTHEON_HOOKD_PROBE_WAIT="1")
     check("--check: pantheon-hookd.hooks указывает на другое дерево — код 1, «служба другого дерева» и оба пути",
           code == 1 and "служба другого дерева" in last_line(out) and other in out
-          and os.path.realpath(HOOKS) in out, (code, out[-900:]))
+          and hooks_c in out, (code, out[-900:]))
     with open(pin, "w") as fh:
         fh.write(pin_text)
     # canary-diff и окно с записью в папку демона
@@ -608,26 +651,26 @@ def test_install(root, svc_built):
     os.makedirs(sdir)
     with open(os.path.join(sdir, "athena-x.json"), "w") as fh:
         json.dump({"sandbox": {"filesystem": {"allowWrite": [os.path.join(home, ".cache")]}}}, fh)
-    code, out, err, _ = inst(home, lctl, "--check")
+    code, out, err, _ = ins("--check")
     check("--check: canary-diff за сутки и окно с записью в ~/.cache — код 1, оба названы",
           code == 1 and "тревога: canary-diff 1" in out and "athena-x.json: allowWrite" in out
           and "canary-diff" in last_line(out) and "папка демона открыта окнам" in last_line(out), (code, out[-1200:]))
     os.remove(os.path.join(logs, "hookd-fallback.log"))
     shutil.rmtree(sdir)
     # проба без итога (задание не запустилось): срок вышел — код 1 и причина
-    code, out, err, _ = inst(home, lctl, "--check", FAKE_NORUN="1", PANTHEON_HOOKD_PROBE_WAIT="1")
+    code, out, err, _ = ins("--check", FAKE_NORUN="1", PANTHEON_HOOKD_PROBE_WAIT="1")
     check("--check: проба без итога за срок — код 1, «итога нет за 1 с»",
           code == 1 and "итога нет за 1 с" in out and "проба доступа не прошла" in last_line(out), (code, out[-600:]))
     # старая установка: /bin/sh первым
     pl["ProgramArguments"] = ["/bin/sh", os.path.join(HOOKS, "python.sh"), os.path.join(HOOKS, "daemon.py")]
     with open(plist, "wb") as fh:
         plistlib.dump(pl, fh)
-    code, out, err, _ = inst(home, lctl, "--check")
+    code, out, err, _ = ins("--check")
     check("--check: служба старой установки (/bin/sh первым) — код 1, «переставить»",
           code == 1 and "старой командой" in out and "служба старой установки" in last_line(out), (code, out[-600:]))
     # служба не поставлена
-    code, out, err, _ = inst(home, lctl, "--uninstall")
-    code, out, err, _ = inst(home, lctl, "--check")
+    code, out, err, _ = ins("--uninstall")
+    code, out, err, _ = ins("--check")
     check("--check: службы нет — код 1, «не поставлена» и команда установки",
           code == 1 and "не поставлена" in out and "служба не поставлена" in last_line(out), (code, out[-600:]))
     # проба шла не через pantheon-hookd (ответственный — другой процесс): находка
