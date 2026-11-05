@@ -283,7 +283,7 @@ def main():
     # pantheon task overlap»; у лида уложилась в прежний потолок, лидов потолок не поднят)
     # metis-0653: +~450 — TaskStop после отчёта субагента (merge.part) и «ждать на переднем плане» (persist.part)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 31200 and len(raw_texts["hephaestus-demo.md"]) <= 25100)  # metis-0859: +~1150 (triage.part)
+          len(raw_texts["domain-coordinator.md"]) <= 31400 and len(raw_texts["hephaestus-demo.md"]) <= 25300)  # metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
