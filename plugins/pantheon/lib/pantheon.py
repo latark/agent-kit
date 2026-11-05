@@ -296,6 +296,10 @@ LABEL = "pantheon.tick"
 # её `pantheon install` и успешная установка в plugins-update (_plugin_install); установки нет — копия, из которой
 # запущен install (рабочая копия при разработке).
 CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
+# Папка демона хуков guard (metis-0330, metis-0845): сокет, собранный клиент, pantheon-hookd службы. Окнам ролей — ни
+# записи, ни сокета (GRANT_NO_WRITE, denyWrite каждого окна); службу ставит плановый проход (_hookd_sync)
+HOOKD_HOME = "~/.cache/pantheon/hookd"
+HOOKD_DIR = os.path.join(HOME, ".cache", "pantheon", "hookd")
 TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
 # plugins update (metis-0573): локального прогона тестов нет, остались две сетевые команды claude. По журналу
 # logs/plugins-update.log последние 12 проходов — 11–27 с на всё; потолки с запасом в разы, а не 300/600 с
@@ -1252,6 +1256,11 @@ def tick():
         except Exception as e:  # сбой служб не должен останавливать задачи тика
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
+        try:
+            hookd_stats_tick(t)  # доля откатов и canary-diff демона хуков раз в сутки (F9, metis-0845)
+        except Exception as e:  # сбой сводки не должен останавливать тик
+            alert_once("hookd-stats-tick", type(e).__name__, f"демон хуков: сводка упала ({type(e).__name__}: {e})",
+                       "pantheon-tick")
         merge_kick()
         outside_kick()
         try:
@@ -1346,6 +1355,14 @@ SVC_SOCKET = """  <key>Sockets</key>
     <key>SockFamily</key><string>IPv4</string>
   </dict></dict>"""
 SVC_IDLE_MIN = 30
+# Служба демона хуков guard (metis-0845): [[service]] с name = "hookd" — без command. Её plist, pantheon-hookd и
+# закрепление дерева (pantheon-hookd.hooks) ставит не SVC_TMPL, а установщик guard scripts/hookd-install.sh из
+# проверенного дерева (installed_dir) — _hookd_sync. Сокет Unix держит launchd, демон выходит сам после простоя:
+# «загружена, процесса нет» — ожидание запроса (как служба по требованию). command, socket и idle_min у неё не читаются
+HOOKD_SVC = "hookd"
+HOOKD_INSTALL_TIMEOUT = 180  # сборка клиента cc и plutil — секунды; запас на холодный кэш компилятора
+HOOKD_RETRY = 3600           # не поставилась из того же дерева guard — повтор через час, а не на каждом проходе
+HOOKD_STATS_EVERY = 86400    # hookd-stats (F9) — раз в сутки
 
 
 def svc_socket(svc):
@@ -1367,6 +1384,8 @@ def svc_idle(svc):
 
 
 def svc_on_demand(svc):
+    if svc.get("name") == HOOKD_SVC:
+        return True
     with contextlib.suppress(ValueError):
         return svc_socket(svc) is not None
     return False
@@ -1389,6 +1408,8 @@ def service_wanted(svc, sched, st=None):
         return False, "пауза"
     if svc.get("hosts", "all") == "primary" and host() != sched.get("primary_host"):
         return False, "не этот Mac"
+    if svc.get("name") == HOOKD_SVC:
+        return True, ""  # ставит установщик guard, команды нет (_hookd_sync)
     if parse_service_command(svc.get("command")) is None:
         return False, "команда не разрешена"
     try:
@@ -1485,6 +1506,151 @@ def _svc_path():
                      "/usr/bin:/bin:/usr/sbin:/sbin"])
 
 
+def hookd_installer(tree):
+    return os.path.join(tree, "scripts", "hookd-install.sh")
+
+
+def _hookd_env():
+    """Окружение установщика и сводки guard: только HOME и PATH — окружение тика задаёт launchd, а его меняет
+    launchctl setenv; установщик сам зовёт команды по абсолютным путям."""
+    return {"HOME": HOME, "PATH": os.environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"}
+
+
+def _read_text(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _last_line(*texts):
+    """Последняя непустая строка первого текста, где она есть (причина сбоя — последней строкой)."""
+    for t in texts:
+        lines = [x.strip() for x in (t or "").splitlines() if x.strip()]
+        if lines:
+            return lines[-1][:200]
+    return ""
+
+
+def _hookd_sync():
+    """Служба hookd нужна: поставить или переставить её установщиком guard из проверенного дерева (metis-0845).
+    Ничего не делает и launchd не трогает, если всё совпало: pantheon-hookd.hooks называет папку hooks этого дерева
+    (после выпуска guard там прежняя версия — демон отвечал бы «F stale» на каждый вызов), plist — ровно то, что даёт
+    `hookd-install.sh --print`, служба загружена. Иначе — `hookd-install.sh --no-probe`: окна macOS о доступе к папкам
+    из фона не всплывают, проход не ждёт. pantheon-hookd поставлен впервые или пересобран (метка .sum другая) — тревога
+    «проверьте доступ» с командой --check. Сбой — тревога с последней строкой вывода; повтор из того же дерева — через
+    HOOKD_RETRY. Нет проверенного дерева guard или в нём нет установщика — тревога, служба не трогается."""
+    tree = installed_dir("guard")
+    if not tree:
+        alert_once("svc-hookd", "no-guard", "служба hookd: нет проверенного дерева guard — не ставлю и не переставляю "
+                   "(pantheon plugins accept guard, README agent-kit «Живой код»)", "pantheon-tick")
+        return
+    ver, inst = os.path.basename(tree), hookd_installer(tree)
+    if not os.path.isfile(inst):
+        alert_once("svc-hookd", f"no-installer {tree}", f"служба hookd: в guard {ver} нет scripts/hookd-install.sh — "
+                   "служба не ставится до выпуска guard с установщиком", "pantheon-tick")
+        return
+    hooks = os.path.join(tree, "hooks")
+    svc_bin = os.path.join(HOOKD_DIR, "bin", "pantheon-hookd")
+    pin = (_read_text(svc_bin + ".hooks") or "").strip()
+    plist = _svc_plist(HOOKD_SVC)
+    try:
+        r = subprocess.run(["/bin/sh", inst, "--print"], capture_output=True, text=True, timeout=30, env=_hookd_env(),
+                           stdin=subprocess.DEVNULL)
+        printed = r.stdout if r.returncode == 0 and r.stdout else None
+    except (OSError, subprocess.SubprocessError):
+        printed = None
+    if pin == hooks and printed is not None and _read_text(plist) == printed and svc_running(HOOKD_SVC) is not None:
+        clear_once("svc-hookd")
+        return
+    st = read_json(path("svc-hookd.json"))
+    st = st if isinstance(st, dict) else {}
+    with contextlib.suppress(TypeError, ValueError):
+        if st.get("failed_tree") == tree and 0 <= now() - float(st.get("failed_at") or 0) < HOOKD_RETRY:
+            return
+    before = _read_text(svc_bin + ".sum")
+    try:
+        r = subprocess.run(["/bin/sh", inst, "--no-probe"], capture_output=True, text=True,
+                           timeout=HOOKD_INSTALL_TIMEOUT, env=_hookd_env(), stdin=subprocess.DEVNULL)
+        code, why = r.returncode, _last_line(r.stderr, r.stdout)
+    except subprocess.TimeoutExpired:
+        code, why = "timeout", f"не уложился в {HOOKD_INSTALL_TIMEOUT} с"
+    except OSError as e:
+        code, why = type(e).__name__, str(e)
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        with open(path("dryrun.log"), "a") as fh:
+            fh.write(f"{int(now())} svc-hookd-install {ver} {code}\n")
+        if code == 0:  # мнимое состояние launchd — как у _launchctl bootstrap
+            dry = read_json(path("svc-dry.json"))
+            dry[HOOKD_SVC] = 0
+            write_json(path("svc-dry.json"), dry)
+    if code != 0:
+        st.update(failed_tree=tree, failed_at=now(), failed_code=code)
+        write_json(path("svc-hookd.json"), st)
+        alert_once("svc-hookd", f"{tree} {code}", f"служба hookd: установка из guard {ver} не прошла (код {code}): "
+                   f"{why or 'без вывода'}; повтор через час или руками: /bin/sh {inst.replace(HOME, '~')}",
+                   "pantheon-tick", note="Демон хуков не поставлен")
+        return
+    write_json(path("svc-hookd.json"), {"tree": tree, "at": now(), "from": pin or None})
+    clear_once("svc-hookd")
+    after = _read_text(svc_bin + ".sum")
+    if after != before:
+        # pantheon-hookd новый — macOS спросит доступ к папкам заново; пробы из фона нет, спросит команда владельца
+        alert_once("svc-hookd-tcc", (after or "").strip()[:16], f"служба hookd поставлена из guard {ver}, "
+                   f"pantheon-hookd {'пересобран' if before else 'поставлен впервые'}: доступ к Рабочему столу, "
+                   f"Документам, Загрузкам и iCloud Drive не проверен — в терминале: /bin/sh {inst.replace(HOME, '~')} "
+                   "--check", "pantheon-tick", note="Демон хуков: проверьте доступ к папкам")
+
+
+def hookd_stats_tick(t):
+    """Сводка демона хуков (F9) раз в сутки, пока служба стоит (есть её plist): `hookd-stats.py --json` из проверенного
+    дерева guard. Код 3 — за сутки есть canary-diff (демон решил не так, как медленный путь): тревога раз в день с
+    уведомлением — в тихие часы оно ждёт утреннего итога. Другой код, таймаут, нет файла, не JSON — тревога «сводка не
+    прошла», тик не падает. Время запуска пишется до вызова: сбой не повторяется на каждом проходе."""
+    if not os.path.exists(_svc_plist(HOOKD_SVC)):
+        return
+    st = read_json(path("hookd-stats.json"))
+    st = st if isinstance(st, dict) else {}
+    last = st.get("at")
+    if isinstance(last, (int, float)) and 0 <= t - last < HOOKD_STATS_EVERY:
+        return
+    write_json(path("hookd-stats.json"), {**st, "at": t})
+    tree = installed_dir("guard")
+    launcher = os.path.join(tree, "hooks", "python.sh") if tree else ""
+    script = os.path.join(tree, "scripts", "hookd-stats.py") if tree else ""
+    data, out, err = None, "", ""
+    if not (tree and os.path.isfile(launcher) and os.path.isfile(script)):
+        code = "нет hookd-stats.py в проверенном дереве guard"
+    else:
+        try:
+            r = subprocess.run(["/bin/sh", launcher, script, "--json"], capture_output=True, text=True, timeout=120,
+                               env=_hookd_env(), stdin=subprocess.DEVNULL)
+            code, out, err = r.returncode, r.stdout, r.stderr
+        except subprocess.TimeoutExpired:
+            code = "timeout"
+        except OSError as e:
+            code = type(e).__name__
+    if code in (0, 3):
+        with contextlib.suppress(ValueError, IndexError):
+            data = json.loads(out.strip().splitlines()[-1])
+        if not isinstance(data, dict):
+            code, data = f"{code}, вывод не JSON", None
+    write_json(path("hookd-stats.json"), {"at": t, "code": code, "stats": data})
+    if code == 3:
+        clear_once("hookd-stats-fail")
+        alert_once("hookd-canary", stamp(t)[:10], f"демон хуков: canary-diff {data.get('canary_diff')} за сутки — "
+                   "демон решил не так, как медленный путь guard; разбор: ~/.local/state/pantheon/logs/hookd-fallback.log "
+                   "и hookd-install.sh --check (README guard, «Демон хуков»)", "pantheon-tick",
+                   note="Демон хуков: решения расходятся с guard (canary-diff)")
+    elif code == 0:
+        clear_once("hookd-stats-fail")
+    else:
+        why = _last_line(err, out)
+        alert_once("hookd-stats-fail", str(code), f"демон хуков: сводка hookd-stats не прошла (код {code})"
+                   + (f": {why}" if why else ""), "pantheon-tick")
+
+
 def services_sync(sched, only=None):
     """Сверить задачи launchd служб с расписанием. only — одна служба (пульт: пауза снимает её сразу). Тик и пульт
     сверяют под одной блокировкой — иначе двойной bootstrap и ложная тревога."""
@@ -1515,6 +1681,9 @@ def _services_sync(sched, only):
                 _launchctl("bootout", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)
             with contextlib.suppress(FileNotFoundError):
                 os.remove(plist)
+            continue
+        if name == HOOKD_SVC:
+            _hookd_sync()
             continue
         port = svc_socket(want[name])
         launch = SVC_KEEPALIVE if port is None else SVC_SOCKET.format(port=port)
@@ -2246,9 +2415,11 @@ def sandbox_size(data):
 GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
 GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesystem", "allowWrite"),
               "domains": ("sandbox", "network", "allowedDomains")}
-# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON)
+# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON) и в папку
+# демона хуков guard (HOOKD_DIR, metis-0845): окно с записью туда подменило бы клиент с его меткой — «пропустить» на всё.
+# Папка выше тоже не даётся: grant write = ["~/.cache"] отклоняется целиком, как ["~"]
 GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
-                  "~/.bashrc", "~/.profile", STATE, PANTHEON)
+                  "~/.bashrc", "~/.profile", HOOKD_HOME, STATE, PANTHEON)
 GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
 
 
@@ -2384,6 +2555,11 @@ def _allow_blocked(a, denies):
     return False
 
 
+def _under(p, top):
+    """p — та же папка, что top, или внутри неё (оба — настоящие абсолютные пути)."""
+    return p == top or p.startswith(top.rstrip("/") + "/")
+
+
 def _deny_forms(paths):
     """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
     out = []
@@ -2454,8 +2630,11 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
     # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже
+    # папка демона хуков (HOOKD_DIR, metis-0845) — каждому окну: allowWrite выше неё (sandbox_write ~/.cache) её не
+    # откроет, запрет сильнее разрешения (проверка F7 — hookd-check.py windows)
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks", "/.claude/agents", "/**/.claude/agents")]
+    deny_write += _deny_forms([HOOKD_HOME])
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
@@ -2812,7 +2991,12 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             print(f"песочница {name}: вне ~/projects и ~/ai/knowledge, ссылка или нет папки — только через Write/Edit: "
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
-        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
+        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
+        hookd = [r for r in write if _under(r, os.path.realpath(HOOKD_DIR))]
+        if hookd:  # папка демона хуков и всё в ней — никому (metis-0845); папка выше остаётся, её режет denyWrite
+            print(f"песочница {name}: sandbox_write в папку демона хуков не даётся: {hookd}", file=sys.stderr)
+            write = [r for r in write if r not in hookd]
+        write += memory
         write += [queue] if queue else []  # в песочницу (Bash), не в правила Edit/Write
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
