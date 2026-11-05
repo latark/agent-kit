@@ -1613,8 +1613,7 @@ def main():
             'f=$(mktemp -p "$TMPDIR"); echo x > $f', 'f=$(mktemp -p $TMPDIR); echo x > $f',
             'f=$(mktemp -p "${TMPDIR}"); echo x > $f', 'f=$(mktemp -d -p "$TMPDIR"); echo x > $f/a',
             'f=$(mktemp -p "$TMPDIR" -t foo); echo x > $f', 'f=$(mktemp -t foo -p "$TMPDIR"); echo x > $f')],
-        # metis-0823: неразобранная цель вне зон pantheon-acl — можно (раньше отказ «цель не разобрать»)
-        *[(f"mktemp: {c!r} — цель не разобрать, но вне зон, можно", "allow", br, "dev-sonnet", True, B(c)) for c in (
+        *[(f"mktemp: {c!r} — не в $TMPDIR, цель не разобрать", "deny", br, "dev-sonnet", True, B(c)) for c in (
             'f=$(mktemp); echo x > $f', 'f=$(mktemp -d); echo x > $f/a', 'f=$(mktemp -t foo); echo x > $f')],
         # metis-0823 (находки №3, №6): неразобранная цель проходит, только если её буквальная часть — в $TMPDIR, кэше
         # окна или своей worktree; эту папку правила судят как обычную цель
