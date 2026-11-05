@@ -341,14 +341,14 @@ def test_static(root):
     lst = ((pl.get("Sockets") or {}).get("Listeners") or {})
     hooks_real = os.path.realpath(HOOKS)
     check("hookd-install.sh --print: plist без меток @…@, сокет 0600 в ~/.cache/pantheon/hookd, без KeepAlive, "
-          "ThrottleInterval 1–2 с, демон этого дерева",
+          "ThrottleInterval 1–2 с, первый процесс pantheon-hookd (папка hooks этого дерева)",
           r.returncode == 0 and b"@" not in r.stdout.replace(b"<?xml", b"")
           and pl.get("Label") == "pantheon.svc.hookd"
           and lst.get("SockPathName") == os.path.join(home, SOCK_REL) and lst.get("SockPathMode") == 0o600
           and lst.get("SockFamily") == "Unix" and lst.get("SockType") == "stream"
           and "KeepAlive" not in pl and "RunAtLoad" not in pl and 1 <= pl.get("ThrottleInterval", 0) <= 2
-          and pl.get("ProgramArguments") == ["/bin/sh", os.path.join(hooks_real, "python.sh"),
-                                             os.path.join(hooks_real, "daemon.py")],
+          and pl.get("ProgramArguments") == [os.path.join(home, ".cache", "pantheon", "hookd", "bin", "pantheon-hookd"),
+                                             hooks_real],
           (r.returncode, r.stderr[-300:], pl))
     check("hookd-install.sh --print ничего не ставит: ~/Library в подменённом HOME не создан",
           not os.path.exists(os.path.join(home, "Library")), os.listdir(home))

@@ -261,13 +261,63 @@ FNV-1a 64 и оба решения (`slow=<код>:<deny|ask|allow>`, `daemon=�
 
 **Службу ставит владелец своей командой; роли её не ставят.** Шаблон — `launchd/pantheon.svc.hookd.plist.in`:
 - сокет `Sockets` 0600: первое соединение запускает демон, после 30 минут простоя он выходит сам;
-- без KeepAlive, ThrottleInterval 2 с.
+- без KeepAlive, ThrottleInterval 2 с;
+- первый процесс службы — `~/.cache/pantheon/hookd/bin/pantheon-hookd`, а не `/bin/sh` (почему — ниже).
 
 Команды из проверенного дерева guard:
 
     /bin/sh ~/.claude/plugins/cache/agent-kit/guard/<версия>/scripts/hookd-install.sh            # поставить
+    /bin/sh …/scripts/hookd-install.sh --check                                                    # проверить, ничего не меняя
     /bin/sh …/scripts/hookd-install.sh --print                                                    # только показать plist
     /bin/sh …/scripts/hookd-install.sh --uninstall                                                # снять
+
+#### Доступ к папкам: macOS спросит один раз (решение владельца 04.11, metis-0811)
+
+**При установке macOS спросит, можно ли службе читать Рабочий стол, Документы, Загрузки и iCloud Drive.** Ответьте
+«Разрешить». Без доступа служба безопасна, но медленнее: на вызовах с путями в этих папках демон отвечает «F perm», и
+вызов идёт медленным путём с правами окна.
+
+Как это устроено:
+- macOS спрашивает про ответственный процесс — первый процесс задания launchd. Поэтому первым идёт маленькая
+  программа `pantheon-hookd` (`hooks/hookd-svc.c`, около 110 строк C), а Python — её ребёнок. Окно macOS называет
+  `pantheon-hookd`, и разрешение достаётся ей;
+- путь `pantheon-hookd` не меняется, пересобирается она только при правке исходника (`hookd-build.sh --svc`, метки
+  `.sum` и `.src` рядом). Обновление Python разрешение не сбрасывает. Если бы первым шёл Python, разрешение было бы
+  у `…/Cellar/python@3.14/<версия>/…/Python.app` с версией в пути и слетало бы при каждом `brew upgrade`;
+- сразу после установки скрипт ставит разовое задание launchd `pantheon.hookd.probe` (шаблон
+  `launchd/pantheon.hookd.probe.plist.in`) с тем же `pantheon-hookd`. Оно один раз заглядывает в каждую папку
+  (`daemon.py --tcc-probe`), поэтому окна macOS появляются сейчас, пока вы у терминала, а не из фона в случайный миг.
+  Скрипт ждёт ответа до 5 минут, снимает задание и печатает таблицу: где доступ есть, где нет.
+
+**Отказали — разрешить можно потом.** Окно macOS второй раз не появится: отказ записан. Тогда:
+1. `/bin/sh …/scripts/hookd-install.sh --check` — покажет, к каким папкам доступа нет, и напечатает команды ниже.
+2. Открыть «Конфиденциальность и безопасность → Файлы и папки»:
+   `open "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"`.
+   Найти `pantheon-hookd` и включить нужные папки. Если его нет в списке — «Полный доступ к диску»
+   (`…?Privacy_AllFiles`), кнопка «+», ⌘⇧G и путь `~/.cache/pantheon/hookd/bin/pantheon-hookd`.
+3. Перезапустить службу: `launchctl kickstart -k gui/$(id -u)/pantheon.svc.hookd`.
+4. Снова `--check`: в таблице везде «есть».
+
+`tccutil reset` здесь не подходит. Он сбрасывает ответ по идентификатору пакета `.app`, а у `pantheon-hookd` его нет.
+`tccutil reset SystemPolicyDocumentsFolder` без идентификатора сбросил бы ответы всем программам Mac.
+
+**Что ещё показывает `--check`.** Он ничего не ставит и не правит и кончается строкой итога; код 0 — всё в порядке:
+- служба поставлена, загружена и запускает `pantheon-hookd`. Если первым стоит `/bin/sh`, служба поставлена старой
+  командой: её нужно переставить;
+- доступ к папкам — той же пробой под launchd, а не правами терминала;
+- окна ролей не пишут в `~/.cache/pantheon/hookd` и не открывают его сокет (F7, `scripts/hookd-check.py windows`).
+  Проверяются готовые настройки окон `~/.local/state/pantheon/settings/*.json` и `run/*.json` — с разрешениями
+  `grants.toml` и `sandbox_write` политики. Окно с записью туда подменило бы клиент вместе с его меткой;
+- доля откатов на медленный путь за сутки и тревога `canary-diff` (F9, `scripts/hookd-stats.py`, ниже).
+
+**Доля откатов за сутки (F9).** Демон сам считает свои решения: строка «время, `ok`, число» в
+`~/.local/state/pantheon/logs/hookd-calls.log` раз в минуту и перед выходом. Вызовов всего = решения демона + строки
+журнала откатов; двойной отказ и `canary-diff` считаются отдельно. Плановый проход или вы:
+
+    /bin/sh <дерево guard>/hooks/python.sh <дерево guard>/scripts/hookd-stats.py [--hours 24] [--json]
+
+Код 3 и строка «тревога: canary-diff …» последней — демон решил не так, как медленный путь: флаг `PANTHEON_HOOKD=1`
+снять до разбора. Плановый проход эту команду пока не зовёт.
 
 Ограничения:
 - плановый проход (services_sync) снимает каждый `pantheon.svc.*`, которого нет в `schedule.toml`. Поставленная
@@ -993,7 +1043,8 @@ head, как в `pantheon review status`, а «принять» до «верн�
 - `~/.local/state/pantheon/guard-strict/<session_id>` — метка строгого guard окна (окно и инструменты, без текста
   команд): по ней хук плагина той же сессии молчит (metis-0148);
 - `~/.local/state/pantheon/logs/hookd-fallback.log` — откаты демона хуков на медленный путь и расхождения канарейки
-  (время, причина, хеш события; без текста); `~/.cache/pantheon/hookd/` — сокет и собранный клиент демона хуков;
+  (время, причина, хеш события; без текста); `hookd-calls.log` рядом — сколько решений отдал демон (время и число);
+  `~/.cache/pantheon/hookd/` — сокет, собранный клиент, `bin/pantheon-hookd` службы и `probe/` пробы доступа;
 - `~/.local/state/tg-taint/<session_id>` — флаг tg-taint (время и источник, без текста), `<session_id>.dumps` — пути
   выгрузок из `-o`, `--files-dir`, `--out-dir` этой сессии;
 - выключить правило: `GUARD_OFF=dev-server,nextjs` в `env` файла settings.json (`push` выключает и запись журнала шлюза слияния).
@@ -1011,6 +1062,9 @@ head, как в `pantheon review status`, а «принять» до «верн�
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
     python3 -I tests/test_context.py      # контекст вызова: configure(), set_context против нового процесса
     python3 -I tests/test_hookd.py        # демон хуков: сверка решений с медленным путём, откаты, канарейка, сборка
+    python3 -I tests/test_hookd_svc.py    # служба: pantheon-hookd, проба доступа, --fd, счёт решений, установка и --check
+    python3 -I tests/test_hookd_check.py  # таблица доступа и подсказки; окна не пишут в папку демона (F7)
+    python3 -I tests/test_hookd_stats.py  # доля откатов за сутки и тревога canary-diff (F9)
     python3 -I scripts/bench.py -n 20     # замер холодного вызова хуков: медиана и p95 в мс (не тест; --out, --hooks)
     python3 -I scripts/bench.py --hookd   # холодный guard против пути через демон, вперемешку (не тест)
     python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось; владелец пула PID 1 — не выход
