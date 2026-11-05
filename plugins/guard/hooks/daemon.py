@@ -29,8 +29,8 @@ os.environ.clear() и меняет глобальные имена модуле�
 или мусор, big — запрос больше MAX_REQ, encoding — шапка или событие не UTF-8 (медленный путь разберёт его сам),
 locale — локаль вызова не UTF-8 (медленный путь читает событие в своей кодировке), tree — клиент из другого дерева
 плагина, version — другая версия плагина, event — событие не PreToolUse (демон судит только его; остальное — медленный
-путь), cwd — папку вызова не открыть, perm — внуку отказано в доступе к файлу (EPERM, EACCES; ниже), killed — внук не
-уложился или убит, error — любой другой сбой. Команд управления нет.
+путь), cwd — папку вызова не открыть, perm — внуку отказано в доступе к файлу (EPERM, EACCES; ниже), spawn — правило
+запускает программу (git, gh; ниже), killed — внук не уложился или убит, error — любой другой сбой. Команд управления нет.
 
 Отказ доступа — «F perm», а не решение (решение владельца 04.11, Д-A2). Правила guard на ошибке чтения пути идут
 дальше: realpath без strict молча оставляет симлинк нераскрытым, os.path.exists и isfile отвечают «нет», open в
@@ -40,6 +40,15 @@ locale — локаль вызова не UTF-8 (медленный путь ч�
 или EACCES — выход внука кодом PERM_EXIT, ответ «F perm» и медленный путь с правами окна. Папку вызова внук тоже
 пробует прочесть (scandir) до решения: git и gh во внуке в закрытой папке ответили бы иначе. Ловушка — на уровне os,
 а не в отдельных местах guard_rules: новый код правил под неё попадает сам.
+
+Подпроцесс — «F spawn», а не решение (решение лида 05.11, argus #311 Б1). trap_perm ловит отказ доступа, только когда
+внук сам зовёт os или open. Программа, которую правило запускает (git и gh шлюза слияния и push в принятый PR), получает
+EPERM от TCC у себя: код не 0, правило читает это как «нет данных» и пропускает то, что медленный путь запретил бы. gh под
+launchd вдобавок не видит связки ключей окна. Поэтому во внуке все входы запуска программ обёрнуты (trap_spawn):
+subprocess.Popen, _posixsubprocess.fork_exec, os.fork, forkpty, posix_spawn(p), system, popen, exec* и spawn*. Первый
+же вызов — выход внука кодом SPAWN_EXIT до запуска программы, ответ «F spawn» и медленный путь. Угадывать такие события
+по тексту команды нельзя: правило зовёт git там, где текст этого не выдаёт. Правила без подпроцессов (Read, Write,
+Edit, разбор команды Bash) демон решает сам.
 
 Устаревшие правила: при каждом соединении демон сверяет файлы hooks/*.py и .claude-plugin/plugin.json по mtime,
 размеру и inode (и их список) с тем, что загрузил. Разошлось — «F stale» и выход: launchd поднимет свежий демон по
@@ -68,6 +77,12 @@ PERM_EXIT = 98  # код внука: отказ доступа к файлу (tr
 PERM_ERRNO = frozenset((errno.EPERM, errno.EACCES))
 # функции os, которыми guard читает пути; os.path (realpath, exists, isfile, isdir) берёт их из os в момент вызова
 PERM_OS = ("stat", "lstat", "open", "listdir", "scandir", "readlink", "getcwd")
+SPAWN_EXIT = 97  # код внука: правило запускает программу (trap_spawn) — «F spawn»
+# входы os и posix, которыми запускают программу или копию процесса; exec*, spawn* и popen из os.py зовут их же, но
+# обёрнуты сами — на случай, если их тело когда-нибудь возьмёт posix напрямую
+SPAWN_OS = ("fork", "forkpty", "posix_spawn", "posix_spawnp", "system", "popen", "execv", "execve", "execl", "execle",
+            "execlp", "execlpe", "execvp", "execvpe", "spawnv", "spawnve", "spawnl", "spawnle", "spawnlp", "spawnlpe",
+            "spawnvp", "spawnvpe")
 
 
 def trap_perm(on_perm):
@@ -95,6 +110,36 @@ def trap_perm(on_perm):
             if fn in s:
                 s.add(w)
     builtins.open = io.open = wrap(builtins.open)
+
+
+def trap_spawn(on_spawn):
+    """Внук: любой запуск программы или fork — сразу on_spawn() (выход SPAWN_EXIT), до того как программа запустится.
+    subprocess.run, check_output, call и asyncio идут через Popen.__init__; Popen внутри зовёт _fork_exec или
+    os.posix_spawn — обёрнуты и они, на случай вызова мимо __init__."""
+    import posix
+    import subprocess
+
+    def stop(*_a, **_kw):
+        on_spawn()
+        raise OSError(errno.EPERM, "hookd: запуск программы во внуке демона")  # on_spawn не вернётся; на всякий случай
+
+    for mod in {os, posix}:
+        for name in SPAWN_OS:
+            fn = getattr(mod, name, None)
+            if fn is None:
+                continue
+            setattr(mod, name, stop)
+            for s in (os.supports_dir_fd, os.supports_fd, os.supports_follow_symlinks, os.supports_effective_ids):
+                if fn in s:
+                    s.add(stop)
+    subprocess.Popen.__init__ = stop
+    if hasattr(subprocess, "_fork_exec"):
+        subprocess._fork_exec = stop
+    try:
+        import _posixsubprocess
+        _posixsubprocess.fork_exec = stop
+    except ImportError:
+        pass
 
 
 def log(msg):
@@ -264,8 +309,7 @@ class Daemon:
     def serve(self, conn):
         """Ребёнок на соединение. Не возвращается."""
         # SIG_IGN у родителя (loop) наследуется. На macOS waitpid ребёнка при SIG_IGN ждёт выхода внука и даёт ECHILD
-        # — «F error» на каждый вызов. На Linux так же, и ещё subprocess во внуке (git, gh шлюза слияния) при ECHILD
-        # получает код 0 вместо настоящего — правило решило бы мягче. Тест test_hookd: внук зовёт подпроцесс с кодом 1
+        # — «F error» на каждый вызов. На Linux так же. Подпроцессов внук не запускает (trap_spawn — «F spawn»)
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         try:
             if peer_uid(conn) != self.uid:
@@ -351,6 +395,7 @@ class Daemon:
                 sys.stdout = open(1, "w", encoding="utf-8", closefd=False)
                 sys.stderr = open(2, "w", encoding="utf-8", errors="backslashreplace", closefd=False)
                 trap_perm(lambda: os._exit(PERM_EXIT))
+                trap_spawn(lambda: os._exit(SPAWN_EXIT))
                 with os.scandir(".") as it:  # папка вызова не читается (TCC, права) — «F perm»
                     next(it, None)
                 os.umask(hdr["umask"])  # файлы журналов и меток — с правами, как у медленного пути
@@ -383,6 +428,8 @@ class Daemon:
             raise Refuse("killed")
         if code == PERM_EXIT:
             raise Refuse("perm")
+        if code == SPAWN_EXIT:
+            raise Refuse("spawn")
         if code == 99:
             raise Refuse("error")
         return code, bytes(bufs[o_r]), bytes(bufs[e_r])

@@ -9,6 +9,8 @@ hooks/hookd.sh, сборка hooks/hookd-build.sh, шаблон службы lau
   медленный путь с тем же stdin и строка причины; клиента нет — он собирается в фоне в кэш вне дерева плагина;
 - сверка решений: события и контексты test_context (хук плагина, --managed, --strict, роль hestia, агент dev-opus, два
   HOME, TMPDIR, GUARD_OFF) медленным путём и через демон — код, stdout, stderr и файлы в HOME совпадают, откатов нет;
+- подпроцесс во внуке (git и gh push в принятый PR, шлюз слияния; subprocess, fork, posix_spawn, exec, system) —
+  «F spawn» до запуска программы и медленный путь; Read, Write и Bash без подпроцессов демон решает сам;
 - строгий guard не теряет отказов: демон загружен без --strict, режим берётся из argv каждого вызова (находка спайка);
 - отказы демона и клиента (фальшивые серверы, нет сокета, права папки, отказ «F <причина>», зависание, обрыв, большой
   запрос, чужая версия, чужое дерево, чужой uid, кодировка, локаль, убитый внук, устаревшие правила) — тот же ответ, что
@@ -707,7 +709,9 @@ def _equivalence(w, jobs, client, sock, call_umask, daemon_umask):
     check(f"демон: файлы и папки, которые guard пишет в HOME и TMPDIR (метки strict, журналы), и их права при umask "
           f"вызова {oct(call_umask)} (у демона {oct(daemon_umask)}) — те же, что у медленного пути",
           got_files == want_files, sorted(set(got_files) ^ set(want_files))[:10])
-    check("демон: ни одного отката — все вызовы решил демон", not logs, logs[:5])
+    rs = [ln.split("\t")[1] for ln in logs if "\t" in ln]
+    print(f"     сверка: {len(jobs) - len(rs)} вызовов решил демон, {rs.count('spawn')} — медленным путём (spawn)")
+    check("демон: ни одного отката (и spawn нет) — все вызовы решил демон", not logs, logs[:5])
     check("оболочка без флага — те же решения и файлы", off == want and off_files == want_files,
           [(n, a, b) for (n, *_), a, b in zip(jobs, want, off) if a != b][:2])
     d = {n: dec(r) for (n, *_), r in zip(jobs, got)}
@@ -724,9 +728,10 @@ def _equivalence(w, jobs, client, sock, call_umask, daemon_umask):
 
 
 def test_push_accepted(root, client, sock):
-    """Д-B3-2: push в принятый PR (metis-0794) через демон. Случаи test_push_accepted (настоящий git, поддельный gh в
-    PATH вызова, записи argus в HOME) идут медленным путём и через демон: ответы те же, проверки случаев проходят,
-    откатов нет. gh и git зовёт внук демона — с PATH и HOME вызова."""
+    """Д-B3-2: push в принятый PR (metis-0794) через клиент. Случаи test_push_accepted (настоящий git, поддельный gh в
+    PATH вызова, записи argus в HOME) идут медленным путём и через клиент: ответы те же, проверки случаев проходят.
+    Правило зовёт git и gh — внук демона их не запускает: такой вызов уходит на медленный путь с причиной spawn (решение
+    лида 05.11, argus #311 Б1). Другие причины отката — ошибка."""
     import test_push_accepted as tpa
     tm = tpa.tm
     base = tpa.mkroot("pa", first=root)
@@ -735,14 +740,17 @@ def test_push_accepted(root, client, sock):
         return
     h = tm.Home(base)
     install(h.root, client, sock)
-    calls, verdicts = {}, {}
+    calls, verdicts, how = {}, {}, []
 
     def hook_via(via):
         def hook(event, pdir, mode=(), extra_env=None):
             env = dict(h.env(pdir), **(extra_env or {}))
             raw = json.dumps(event).encode()
+            n = len(fb_lines(h.root))
             res = (slow if via == "slow" else wrap)(list(mode), None, env, h.j(pdir), raw=raw)[0]
             calls[via].append(res)
+            if via == "hookd":
+                how.append(",".join(ln.split("\t")[1] for ln in fb_lines(h.root)[n:]) or "daemon")
             return subprocess.CompletedProcess([], res[0], res[1], res[2])
         return hook
 
@@ -755,21 +763,26 @@ def test_push_accepted(root, client, sock):
             for case in tpa.CASES:
                 h.reset()
                 case(h)
-        fb = fb_lines(h.root)
     finally:
         tpa.check = old_check
         shutil.rmtree(base, ignore_errors=True)
     bad = [n for n, ok in verdicts["hookd"] if not ok]
-    check(f"push в принятый PR через демон: все {len(verdicts['hookd'])} проверок test_push_accepted прошли",
+    check(f"push в принятый PR через клиент: все {len(verdicts['hookd'])} проверок test_push_accepted прошли",
           verdicts["hookd"] and not bad and verdicts["hookd"] == verdicts["slow"], bad[:3])
     def norm(res):  # коммиты каждого прохода новые (время в коммите) — SHA в тексте отказа разные
         return tuple(re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", x) if isinstance(x, str) else x for x in res)
 
     diff = [(i, a, b) for i, (a, b) in enumerate(zip(calls["slow"], calls["hookd"])) if norm(a) != norm(b)]
-    check(f"push в принятый PR: {len(calls['hookd'])} ответов демона — как у медленного пути (код, stdout, stderr), "
-          "есть отказы, откатов нет",
-          len(calls["slow"]) == len(calls["hookd"]) and not diff and any(dec(r) == "deny" for r in calls["hookd"])
-          and not fb, (diff[:2], fb[:3]))
+    n_spawn, n_daemon = how.count("spawn"), how.count("daemon")
+    print(f"     push в принятый PR через клиент: {n_spawn} вызовов — медленным путём (spawn), {n_daemon} — демоном")
+    check(f"push в принятый PR: {len(calls['hookd'])} ответов через клиент — как у медленного пути (код, stdout, "
+          "stderr), есть отказы",
+          len(calls["slow"]) == len(calls["hookd"]) and not diff and any(dec(r) == "deny" for r in calls["hookd"]),
+          diff[:2])
+    spawned = [dec(r) for r, w in zip(calls["hookd"], how) if w == "spawn"]
+    check("push в принятый PR: правило зовёт git и gh — откат только spawn, и в нём есть отказы медленного пути",
+          len(how) == len(calls["hookd"]) and set(how) <= {"spawn", "daemon"} and "deny" in spawned,
+          (sorted(set(how)), spawned.count("deny")))
 
 
 def test_strict_sequence(root, client, sock):
@@ -1065,10 +1078,90 @@ def test_perm(root, client, sock):
           got == ref and dec(got) == "deny" and reasons(home) == ["perm"], (got, ref, fb_lines(home)))
 
 
+def test_spawn(root, client, sock):
+    """Решение лида 05.11 (argus #311 Б1): правило, которое запускает программу (git и gh push в принятый PR, шлюз
+    слияния), идёт медленным путём — «F spawn». Программа под службой launchd получает EPERM от TCC сама: trap_perm
+    этого не видит, правило читает код не 0 как «нет данных» и пропускает. Проба P2 argus: демон в песочнице без чтения
+    данных репозитория, `git -C <repo> push` в принятый PR из другой папки — медленный путь отказывает. Read и Write без
+    подпроцессов демон решает сам, без отката: иначе ускорение пропало бы."""
+    import test_push_accepted as tpa
+    tm = tpa.tm
+    base = tpa.mkroot("sp", first=root)
+    if len(base) + len("/") + len(SOCK_REL) > 103:
+        print(f"пропущено: spawn — путь сокета в {base} длиннее 103 байт")
+        return
+    h = tm.Home(base)
+    try:
+        h.reset()
+        s = tpa.Push(h)
+        s.pr(tpa.NON_CORE)
+        s.accepts(1, checklist=dict(tm.CHECKLIST, ran="модель: claude-sonnet-4-5, тесты 10 из 10"))
+        cwd, env = h.j("ai/pantheon"), h.env(tpa.KIT)
+        ev = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+              "tool_input": {"command": f"git -C {s.p} push origin {tpa.BRANCH}"}, "cwd": cwd,
+              "session_id": "s-coord", "tool_use_id": "toolu_sp1", "agent_type": "domain-coordinator"}
+        hdr = {"argv": [], "cwd": cwd, "env": env, "hooks": HOOKS, "version": plugin_version(), "umask": 0o22}
+        body = json.dumps(ev).encode()
+        install(h.root, client, sock)
+        ref, _ = slow([], ev, env, cwd)
+        got_raw = raw_call(sock, hdr, body, timeout=30)
+        got, _ = wrap([], ev, env, cwd)
+        check("spawn: push в принятый PR (правило зовёт git и gh) → демон «F spawn»", got_raw == "F spawn", got_raw)
+        check("spawn: тот же push через клиент → отказ медленного пути, причина spawn",
+              got == ref and dec(ref) == "deny" and tpa.HINT in ref[1] and reasons(h.root) == ["spawn"],
+              (got, ref, fb_lines(h.root)))
+        # без подпроцессов: Read, Write, Edit и Bash без git через тот же демон — без отката
+        work = os.path.join(root, "work")
+        plain = [dict(deny_event(work), tool_name="Read", tool_input={"file_path": os.path.join(work, "a.txt")}),
+                 dict(deny_event(work), tool_name="Write",
+                      tool_input={"file_path": os.path.join(work, "b.txt"), "content": "x"}),
+                 dict(deny_event(work), tool_name="Edit",
+                      tool_input={"file_path": os.path.join(work, "a.txt"), "old_string": "a", "new_string": "b"}),
+                 dict(deny_event(work), tool_input={"command": "ls -la"})]
+        n = len(fb_lines(h.root))
+        pr = [(wrap([], e, env, work)[0], slow([], e, env, work)[0]) for e in plain]
+        check(f"spawn: {len(plain)} вызова без подпроцессов (Read, Write, Edit, Bash ls) — решил демон, откатов нет, "
+              "ответы как у медленного пути",
+              all(a == b for a, b in pr) and fb_lines(h.root)[n:] == [], (pr, fb_lines(h.root)[n:]))
+        # P2 argus: демон в песочнице без чтения данных репозитория (как служба launchd без доступа TCC)
+        sbx = "/usr/bin/sandbox-exec"
+        probe = subprocess.run([sbx, "-p", "(version 1)(allow default)", "/usr/bin/true"], capture_output=True,
+                               timeout=SUB_TIMEOUT) if os.path.exists(sbx) else None
+        if probe is None or probe.returncode != 0:
+            print("пропущено: spawn под песочницей — sandbox-exec нет или вложенная песочница запрещена")
+            return
+        prof = '(version 1)(allow default)(deny file-read-data (subpath "%s"))' % os.path.realpath(s.p)
+        dhome = os.path.join(root, "spd")
+        os.makedirs(dhome)
+        sock2 = os.path.join(root, "sp.sock")
+        log = open(os.path.join(root, "sp-daemon.log"), "ab")
+        p = subprocess.Popen([sbx, "-p", prof, "/bin/sh", LAUNCHER, DAEMON, "--socket", sock2, "--idle", "300"],
+                             env=base_env(dhome), stdout=log, stderr=log)
+        PROCS.append(p)
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not os.path.exists(sock2) and p.poll() is None:
+            time.sleep(0.02)
+        install(h.root, client, sock2)
+        n = len(fb_lines(h.root))
+        try:
+            got_raw = raw_call(sock2, hdr, body, timeout=30)
+            got, _ = wrap([], ev, env, cwd)
+        finally:
+            stop(p)
+        check("spawn: проба P2 — демон в песочнице без чтения данных репозитория → «F spawn», а не «X 0» (пропуск)",
+              got_raw == "F spawn", got_raw)
+        check("spawn: проба P2 через клиент → отказ медленного пути, причина spawn",
+              got == ref and dec(got) == "deny" and fb_lines(h.root)[n:] and
+              [ln.split("\t")[1] for ln in fb_lines(h.root)[n:]] == ["spawn"], (got, ref, fb_lines(h.root)[n:]))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def patched_copy(root, name):
     """Копия плагина guard для проб демона: guard.run убивает себя (KILLME), выходит кодом 99 (EXIT99), печатает
-    часовой пояс процесса (PROBE-TZ: time.tzname, time.timezone, strftime %z) или код подпроцесса `sh -c 'exit 1'`
-    (PROBE-SUB). Подмена — после входа `if __name__ == "__main__"`: медленный путь копии её не видит, только демон."""
+    часовой пояс процесса (PROBE-TZ: time.tzname, time.timezone, strftime %z) или запускает программу способом <вид>,
+    которая создаёт файл <метка> (`echo PROBE-SPAWN <вид> <метка>`, SPAWN_KINDS). Подмена — после входа
+    `if __name__ == "__main__"`: медленный путь копии её не видит, только демон."""
     copy = os.path.join(root, name)
     shutil.copytree(PLUGIN, copy, ignore=shutil.ignore_patterns("__pycache__", "tests"))
     with open(os.path.join(copy, "hooks", "guard.py"), "a", encoding="utf-8") as fh:
@@ -1078,11 +1171,62 @@ def patched_copy(root, name):
                  "    if raw and b'PROBE-TZ' in raw:\n"
                  "        print(json.dumps([list(time.tzname), time.timezone, time.strftime('%z')]), flush=True)\n"
                  "        os._exit(0)\n"
-                 "    if raw and b'PROBE-SUB' in raw:\n        import subprocess\n"
-                 "        print(subprocess.run(['/bin/sh', '-c', 'exit 1']).returncode, flush=True)\n"
+                 "    if raw and b'PROBE-SPAWN' in raw:\n"
+                 "        _, _, kind, mark = json.loads(raw)['tool_input']['command'].split()\n"
+                 "        _spawn_probe(kind, mark)\n"
+                 "        print('ran', flush=True)\n"
                  "        os._exit(0)\n"
-                 "    return _run0(argv, raw)\n")
+                 "    return _run0(argv, raw)\n" + SPAWN_PROBE)
     return copy
+
+
+# виды запуска программы во внуке — всё, чем правила могли бы её запустить (trap_spawn в daemon.py). Каждый создаёт
+# файл-метку: метки нет — программа не запустилась. popen-init: Popen берёт fileno() у stdin до запуска — метка
+# «.fileno» значит, что Popen.__init__ начал работу (ловушка стоит ниже, чем нужно)
+SPAWN_KINDS = ("run", "check_output", "popen-init", "os.system", "os.popen", "os.fork", "pty.fork", "os.posix_spawn",
+               "os.posix_spawnp", "os.execv", "os.spawnv", "posix.fork", "posix.system", "multiprocessing")
+SPAWN_PROBE = """
+
+def _spawn_probe(kind, mark):
+    import subprocess
+    touch = ["/usr/bin/touch", mark]
+    if kind == "run":
+        subprocess.run(touch, capture_output=True)
+    elif kind == "check_output":
+        subprocess.check_output(touch)
+    elif kind == "popen-init":
+        class In:
+            def fileno(self):
+                open(mark + ".fileno", "w").close()
+                return 0
+        subprocess.Popen(touch, stdin=In()).wait()
+    elif kind == "os.system":
+        os.system("/usr/bin/touch " + mark)
+    elif kind == "os.popen":
+        os.popen("/usr/bin/touch " + mark).read()
+    elif kind in ("os.fork", "posix.fork", "pty.fork"):
+        import posix
+        import pty
+        pid = {"os.fork": os.fork, "posix.fork": posix.fork, "pty.fork": lambda: pty.fork()[0]}[kind]()
+        if pid == 0:
+            open(mark, "w").close()
+            os._exit(0)
+        os.waitpid(pid, 0)
+    elif kind == "os.posix_spawn":
+        os.waitpid(os.posix_spawn(touch[0], touch, dict(os.environ)), 0)
+    elif kind == "os.posix_spawnp":
+        os.waitpid(os.posix_spawnp("touch", touch, dict(os.environ, PATH="/usr/bin")), 0)
+    elif kind == "os.execv":
+        os.execv(touch[0], touch)
+    elif kind == "os.spawnv":
+        os.spawnv(os.P_WAIT, touch[0], touch)
+    elif kind == "posix.system":
+        import posix
+        posix.system("/usr/bin/touch " + mark)
+    elif kind == "multiprocessing":
+        import multiprocessing.util
+        os.waitpid(multiprocessing.util.spawnv_passfds(touch[0].encode(), touch, []), 0)
+"""
 
 
 TZ_PRINT = "import json, time; print(json.dumps([list(time.tzname), time.timezone, time.strftime('%z')]))"
@@ -1134,14 +1278,29 @@ def test_copy_daemon(root, client):
                           timeout=SUB_TIMEOUT).stdout
     check(f"демон: TZ вызова ({tz}) ≠ TZ демона — time.tzname, time.timezone и %z внука как у нового процесса",
           got == (0, want, "") and want != mine and not fb_lines(home), (got, want, mine, fb_lines(home)))
-    # SIGCHLD (Д-A1, Д-B3-1): у демона SIG_IGN; ребёнок и внук — SIG_DFL: код подпроцесса внука настоящий, waitpid
-    # ребёнка не ECHILD
+    # подпроцесс во внуке (решение лида 05.11, argus #311 Б1): любой способ запуска — «F spawn» до запуска программы
+    marks = os.path.join(root, "cpsp")
+    os.makedirs(marks)
+    bad = []
+    for kind in SPAWN_KINDS:
+        mark = os.path.join(marks, kind)
+        got = raw_call(sock, hdr, json.dumps(dict(ev, tool_input={"command": f"echo PROBE-SPAWN {kind} {mark}"}))
+                       .encode())
+        time.sleep(0.05)  # метку пишет потомок внука — у него было бы время
+        if got != "F spawn" or os.path.exists(mark) or os.path.exists(mark + ".fileno"):
+            bad.append((kind, got, os.path.exists(mark), os.path.exists(mark + ".fileno")))
+    check(f"демон: внук запускает программу ({len(SPAWN_KINDS)} способов: subprocess, os.system, popen, fork, pty, "
+          "posix_spawn, exec, spawn, posix, multiprocessing) → «F spawn», программа не запустилась", not bad, bad)
+    # через клиент: медленный путь копии (у неё PROBE-SPAWN — обычная команда) с тем же ответом, причина spawn
     home = os.path.join(root, "cpsc")
     os.makedirs(home)
     install(home, client, sock)
-    got, _ = wrap(["--strict"], dict(ev, tool_input={"command": "echo PROBE-SUB"}), base_env(home), work, hooks=chooks)
-    check("демон: внук зовёт подпроцесс `sh -c 'exit 1'` — код 1, решение от демона (не откат error)",
-          got == (0, "1\n", "") and not fb_lines(home), (got, fb_lines(home)))
+    sev = dict(ev, tool_input={"command": f"echo PROBE-SPAWN run {os.path.join(marks, 'client')}"})
+    ref, _ = slow(["--strict"], sev, base_env(home), work, hooks=chooks)
+    got, _ = wrap(["--strict"], sev, base_env(home), work, hooks=chooks)
+    check("клиент: внук запускает программу → медленный путь с тем же ответом, причина spawn; программа не запущена",
+          got == ref and reasons(home) == ["spawn"] and not os.path.exists(os.path.join(marks, "client")),
+          (got, ref, fb_lines(home)))
     # чужое дерево: клиент основного дерева на сокете демона копии
     home = os.path.join(root, "cptr")
     os.makedirs(home)
@@ -1290,6 +1449,7 @@ def main():
             test_flag_off(root, client)
             test_equivalence(root, client, sock)
             test_push_accepted(root, client, sock)
+            test_spawn(root, client, sock)
             test_strict_sequence(root, client, sock)
             test_failures(root, client)
             test_double_failure(root, client)
