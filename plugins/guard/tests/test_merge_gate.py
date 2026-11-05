@@ -643,6 +643,27 @@ def t_not_simple(h):
     check("путь с basename pantheon — запись есть", [r["kind"] for r in h.read()] == ["accept"], h.read())
 
 
+def t_review_format(h):
+    """metis-0823: отказ «только простой командой» называет знаки и где они; если они только в кавычках — даёт
+    готовую команду с заменой, и она проходит; у test — объясняет, что запись берёт HEAD папки события."""
+    sha = h.sha["tg-read"]
+    bad = f"pantheon review accept latark/tg-read 3 {sha}" + CL.replace("merge_gate.py, README", "merge_gate.py; README > x | y")
+    d, why = h.pre(bad, role="argus", agent_id="a1")
+    check("формат: знаки в кавычках — отказ с готовой командой",
+          d == "deny" and "внутри кавычек" in why and "Готовая команда:" in why, why)
+    fixed = why.split("Готовая команда:\n", 1)[-1].strip()
+    check("формат: готовая команда — без знаков, текст заменён",
+          fixed.startswith("pantheon review accept") and not re.search(r"[;|&<>]", fixed) and "merge_gate.py, README → x / y" in fixed,
+          fixed)
+    d, why2 = h.pre(fixed, role="argus", agent_id="a1")
+    check("формат: готовая команда проходит", d == "allow", why2)
+    d, why = h.pre(f"pantheon review accept latark/tg-read 3 {sha}{CL} > /dev/null", role="argus", agent_id="a1")
+    check("формат: знак снаружи кавычек — отказ без готовой команды",
+          d == "deny" and "снаружи кавычек" in why and "Готовая команда" not in why, why)
+    d, why = h.pre("cd x && pantheon review test -- true", role="dev-opus", agent_id="d1")
+    check("формат: test с cd — отказ объясняет HEAD папки", d == "deny" and "HEAD папки" in why, why)
+
+
 def t_failure(h):
     sha = h.sha["tg-read"]
     # с ответом словарём, как у успешной: отсекает имя события, а не отсутствие tool_response
@@ -4905,7 +4926,7 @@ def t_owner_api_merge(h):
 
 
 CASES = [t_test_floors, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
-         t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
+         t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_review_format, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
