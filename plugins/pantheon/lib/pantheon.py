@@ -66,6 +66,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
                                         отправка и удаление — Touch ID или «да» на каждую; оплата и важные формы — нет
+  pantheon handoff route|touch|status|cancel|run   отказ роли → кто умеет (lib/handoff.py, metis-0832, 0775): route —
+                                        подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
+                                        белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
+                                        Touch ID с этим действием целиком → исполнение один раз по sha256 текста
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -81,7 +85,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
                                         при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
-                                        кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
+                                        кэш; на главном Mac сразу проход по кэшу (и плановый проход каждую минуту) закрывает задачи, чей номер в
+                                        ветке или после «Closes» в теле PR — в том же проходе, что увидел слияние (metis-0868)
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel|undecided --mode-why X --touches ПУТЬ …
@@ -105,7 +110,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
                     свои пункты — в тексте строкой «## Готово, когда» и списком «- [ ] пункт»: раздел заменяет прежний (metis-0591);
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
-                    отказ, код 2
+                    отказ, код 2; время строки журнала ставит pantheon: время в начале --note («23:45 — …») не пишется
+                    (предупреждение); карточки изменились (task set/new/claim/…) — задачи расписания view и board сразу (metis-0868)
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
                     (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
@@ -273,6 +279,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -1034,7 +1041,8 @@ def heavy_wait_reason(job, sched, t, overdue):
 #                             view-sync.sh)
 #   board                     карточки VIEW/Доска/*.md; задачи (task_dirs: inbox/tasks,       board.json, журнал
 #                             directions/*/tasks); входящие directions/*/inbox; directions.toml, владельца и политика
-#                             schedule.toml (primary, уведомления)                            уведомлений — выходы
+#                             schedule.toml (primary, уведомления); хозяева задач:            уведомлений — выходы;
+#                             STATE/agents.json и STATE/stopped/ (metis-0868)                  owner-sids.json
 #   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl и zeus.md  —
 #   agents                    HOME/.claude/daemon/roster.json, sessions/*.json (имя, pid),     ответ `claude agents`
 #                             jobs/*/* — признаки, по которым демон Claude меняет список       (снимок нужен лишь как
@@ -1102,6 +1110,7 @@ def _fp_board_inputs():
     out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
     out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
     out += _fp_files([os.path.join(PANTHEON, "board.md")])  # строка встраивания ![[board-auto]] (metis-0397)
+    out += _fp_files([path("agents.json")]) + _fp_dir(path("stopped"), 1)  # хозяева задач (metis-0868)
     out += _fp_board_auto()
     try:  # следы работы для статусов (metis-0397, п. 7): записи worktree и живые копии, PR, закрывающие задачи
         S = boardstatus_mod()
@@ -1172,6 +1181,63 @@ def launch(name, t):
     subprocess.Popen([sys.executable, "-I", os.path.join(LIB, "run.py"), "run-job", name],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env=run_env(), cwd=HOME)
+
+
+REFRESH_ARGV = (("view", "--quiet"), ("board",))  # задачи расписания, которые рисуют карточки: копия Obsidian и доска
+
+
+def refresh_kick():
+    """После правки карточки (pantheon task …, автозакрытие) — копия Obsidian и доска сразу, без отдельной команды и без
+    ожидания тика (metis-0868, п. 4): те же задачи расписания (`pantheon view --quiet`, `pantheon board`) отдельным
+    процессом через launch, под их замками job-<имя>. Уже идёт или пауза — не трогаем: следующий тик увидит новый
+    отпечаток входов. Окно роли (песочница не даёт писать в STATE) — тихо пропускаем: догонит тик через минуту.
+    Тест или проба на временной папке (notify_offscreen) — только с PANTHEON_REFRESH=1; PANTHEON_REFRESH=0 — выключено.
+    → имена запущенных задач."""
+    flag = os.environ.get("PANTHEON_REFRESH")
+    if flag == "0" or (flag != "1" and notify_offscreen()) or os.path.exists(path("paused")):
+        return []
+    try:
+        sched = load_schedule()
+        with lock("refresh-kick", block=False) as got:  # проба записи в STATE: из окна роли — PermissionError
+            if not got:
+                return []
+    except (OSError, ValueError):
+        return []
+    me, primary, out = host(), sched.get("primary_host"), []
+    for job in sched.get("job") or []:
+        argv = parse_command(job.get("command"))
+        if not argv or os.path.basename(argv[0]) != "pantheon" or tuple(argv[1:]) not in REFRESH_ARGV:
+            continue
+        st = job_state(job["name"])
+        if job.get("enabled") is False or st.get("disabled") or st.get("paused"):
+            continue
+        if job.get("hosts", "all") == "primary" and (not primary or me != primary):
+            continue
+        if lock_held("job-" + job["name"]):
+            continue
+        launch(job["name"], now())
+        out.append(job["name"])
+    return out
+
+
+def card_now():
+    """Время записи в карточку (metis-0868, п. 5) — часы системы. PANTHEON_NOW («сейчас» синтетических проб) берётся,
+    только если хранилище задач не настоящее (временный PANTHEON_HOME): агент не проставит в журнал настоящей
+    карточки своё время переменной окружения. Настоящее — ~/ai/pantheon домашней папки из учётной записи, а не из
+    HOME (тесты подменяют HOME); PANTHEON_TEST здесь не в счёт — его может поставить и агент."""
+    if os.environ.get("PANTHEON_NOW") and real_store():
+        return time.time()
+    return now()
+
+
+def real_store():
+    """PANTHEON — настоящее хранилище задач владельца (~/ai/pantheon его учётной записи)."""
+    import pwd
+    try:
+        owner_home = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return True
+    return PANTHEON == os.path.realpath(os.path.join(owner_home, "ai", "pantheon"))
 
 
 def job_cap_hold(name, argv, st, t, memo=None):
@@ -1272,6 +1338,7 @@ def tick():
                        "pantheon-tick")
         merge_kick()
         outside_kick()
+        handoff_kick()
         try:
             browser_mod().kick()  # браузер владельца для ролей вне окна (lib/browser.py, metis-0760)
         except Exception as e:  # сбой браузера не должен останавливать тик
@@ -3308,7 +3375,7 @@ def roster_changed_at():
         return None
 
 
-def session_started(a):
+def session_started(a, t=None):
     """Когда нынешний процесс взял сессию a, в с, или 0 (metis-0864, ревью argus #332 Д2). claude agents пишет startedAt
     из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: hermes-alex
     7c48114d без процесса — startedAt = createdAt state.json; zeus 7853263b с процессом после respawn — время respawn,
@@ -3317,12 +3384,16 @@ def session_started(a):
     startedAt записи, startedAt воркера этой сессии в реестре демона (roster.json: время выдачи процесса, respawn тоже)
     и записи реестра имён с её jobId или sessionId. Позже нынешнего процесса там времени нет: каждую из этих записей
     пишет выдача процесса этой сессии, старая запись — раньше. Реестр демона — через roster_safe: ключи сокетов не
-    читаются (metis-0871)."""
+    читаются (metis-0871). Значения не конечные (nan, inf: startedAt 1e400 читается как inf) и позже t (по умолчанию
+    now()) отбрасываются (ревью argus #337)."""
+    t = now() if t is None else t
+
     def ms(v):
         try:
-            return float(v) / 1000
+            x = float(v) / 1000
         except (TypeError, ValueError):
             return 0.0
+        return x if math.isfinite(x) and x <= t else 0.0
     best = ms(a.get("startedAt"))
     short, sid = str(a.get("id") or ""), a.get("sessionId")
     w = (roster_safe() or {}).get("workers") or {}
@@ -5294,6 +5365,24 @@ def merge_kick():
                    "pantheon-tick")
 
 
+def handoff_kick():
+    """Отказ роли → Touch ID владельца на одно действие из белого списка (metis-0832, 0775, lib/handoff.py) —
+    отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт. Без заявок и строк журнала в кэшах окон — нет."""
+    try:
+        if locked("handoff-run") or not handoff_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} handoff-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "handoff", "run"], env=outside_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой прохода не должен останавливать тик
+        alert_once("handoff-kick", type(e).__name__, f"Touch ID действий роли: проход не запущен ({type(e).__name__}: "
+                   f"{e})", "pantheon-tick")
+
+
 def outside_kick():
     """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
     тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
@@ -5682,6 +5771,21 @@ def outside_mod():
         _OUTSIDE.set_core(sys.modules[__name__])
     return _OUTSIDE
 
+_HANDOFF = None
+
+
+def handoff_mod():
+    """lib/handoff.py — отказ роли → способный исполнитель, Touch ID на одно действие (metis-0832, 0775)."""
+    global _HANDOFF
+    if _HANDOFF is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_handoff", os.path.join(LIB, "handoff.py"))
+        _HANDOFF = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_HANDOFF)
+        _HANDOFF.set_core(sys.modules[__name__])
+    return _HANDOFF
+
+
 _BROWSER = None
 
 
@@ -5858,6 +5962,8 @@ def _board(clock):
             projects, marks, registry = board_registry(T)
         with clock.phase("статусы"):
             status_lines = board_status_sync(T) if primary else []
+        with clock.phase("хозяева"):
+            status_lines += board_owner_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with clock.phase("блокировка-notify"):
             nl = lock_wait("notify", min(BOARD_NOTIFY_WAIT, max(clock.left(), 0)))
@@ -5907,7 +6013,9 @@ def board_links():
         out["tails"] = {}
     try:
         out["repos"] = metrics_ctx().repos
-        out["pr_index"] = autoclose_mod().pr_index(read_json(path("autoclose-prs.json"), {}))
+        cache, A = read_json(path("autoclose-prs.json"), {}), autoclose_mod()
+        out["pr_index"] = A.pr_index(cache)
+        out["batch_prs"] = A.batch_prs(cache)  # PR пачки — одно правило с board-auto и check (metis-0810)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -5995,6 +6103,100 @@ def board_status_sync(T):
                    + ". Решить руками — pantheon task set ID status=…", "board")
     else:
         clear_once("board-story-hold")
+    return out
+
+
+AGENTS_FRESH = 30 * 60  # снимок сессий (STATE/agents.json) старше — о хозяевах задач ничего не утверждаем
+OWNER_SIDS_KEEP = 30 * 86400  # sessionId, которого не видно дольше, из памяти имён уходит
+ALERT_IDS = 12  # номеров задач в одной строке тревоги
+
+
+def _ids_text(ids):
+    ids = sorted(ids)
+    return ", ".join(ids[:ALERT_IDS]) + (f" и ещё {len(ids) - ALERT_IDS}" if len(ids) > ALERT_IDS else "")
+
+
+def board_owner_sync(T):
+    """Хозяин задачи и следы работы (metis-0868, п. 2–3), проход доски на главном Mac, после сверки статусов:
+    (1) сессию переименовали — owner открытых карточек за ней: имя ищется по sessionId (память имён STATE/owner-sids.json,
+    снимок `pantheon agents` и реестр ~/.claude/sessions), а не по прежнему имени; (2) owner — сессия, которой нет среди
+    окон, остановленная, или её остановил владелец — тревога «задача без хозяина» с командой передачи; (3) задача doing
+    без ветки, worktree и PR с её номером и без правки дольше STALE_DOING_HOURS — тревога. Снимок сессий старше
+    AGENTS_FRESH — (1) и (2) пропускаются: о живых окнах ничего не знаем. Сбой — тревога, проход доски идёт дальше.
+    → строки для вывода."""
+    out = []
+    try:
+        S = boardstatus_mod()
+        t = now()
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        directions = set(board_domains()) | {str(d.get("name")) for d in T.load_directions(PANTHEON) or [] if d.get("name")}
+        snap = read_json(path("agents.json"), None)
+        fresh = isinstance(snap, dict) and isinstance(snap.get("time"), (int, float)) and 0 <= t - snap["time"] < AGENTS_FRESH
+        orphans = None
+        if fresh:
+            agents = [a for a in snap.get("agents") or [] if isinstance(a, dict)]
+            seen = {a.get("sessionId") for a in agents}
+            agents += [dict(r, state=None) for r in sessions_registry() if r.get("sessionId") not in seen]
+            mem = read_json(path("owner-sids.json"), {})
+            mem = mem if isinstance(mem, dict) else {}
+            known = {k: v.get("name") for k, v in mem.items() if isinstance(v, dict) and isinstance(v.get("name"), str)}
+            renames, names = S.owner_renames(tasks, agents, known, directions)
+            for tid, old, new, sid in renames:
+
+                def same_owner(h, old=old, tid=tid):  # owner сменили между планом и записью — не трогаем
+                    if h.get("owner") != old:
+                        raise ValueError(f"{tid}: owner уже {h.get('owner')}")
+                try:
+                    T.task_set(PANTHEON, t, tid, {"owner": new}, actor="плановый проход", precheck=same_owner,
+                               note=f"owner: сессию {old} переименовали в {new} (sessionId {sid[:8]})")
+                    out.append(f"хозяин · {tid}: {old} → {new} (сессию переименовали)")
+                except ValueError as e:
+                    out.append(f"хозяин · {tid}: не переименован ({e})")
+            now_sids = {a.get("sessionId") for a in agents}
+            mem = {sid: {"name": n, "seen": t if sid in now_sids else (mem.get(sid) or {}).get("seen", t)}
+                   for sid, n in names.items()}
+            write_json(path("owner-sids.json"), {k: v for k, v in mem.items()
+                                                 if isinstance(v["seen"], (int, float)) and t - v["seen"] < OWNER_SIDS_KEEP})
+            if renames:
+                tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+            stopped = set(os.listdir(path("stopped"))) if os.path.isdir(path("stopped")) else set()
+            orphans = S.orphan_owners(tasks, agents, directions, stopped)
+        cache = read_json(path("autoclose-prs.json"), {})
+        open_ids = {i for prs in ((cache.get("open_prs") if isinstance(cache, dict) else None) or {}).values()
+                    if isinstance(prs, list) for p in prs if isinstance(p, dict)
+                    for i in (p.get("ids") or []) + (p.get("closes") or []) if isinstance(i, str)}
+        stale = S.stale_doing(tasks, board_domains(), open_ids, t, T.ts_of)
+    except Exception as e:  # noqa: BLE001 — сбой сверки хозяев не ломает проход доски
+        alert_once("board-owners", type(e).__name__, f"доска: сверка хозяев задач упала ({type(e).__name__}: {e})", "board")
+        return out
+    clear_once("board-owners")
+    if orphans:
+        groups = {}
+        for tid, (owner, why) in orphans.items():
+            d = tasks[tid][1].get("direction")
+            groups.setdefault((owner, why, S.handover(owner, d, directions)), []).append(tid)
+        parts = []
+        for (owner, why, to), ids in sorted(groups.items()):
+            ids = sorted(ids)
+            cmd = (f"pantheon task set {ids[0]} owner={to}" if len(ids) == 1
+                   else f"for id in {' '.join(ids[:ALERT_IDS])}; do pantheon task set $id owner={to}; done")
+            more = (f" (первые {ALERT_IDS}; остальные — тем же циклом, список — pantheon task ready --owner {owner})"
+                    if len(ids) > ALERT_IDS else "")  # строка тревоги — не сотни номеров
+            parts.append(f"owner {owner} — {why}: {_ids_text(ids)}. Передать: {cmd}{more}")
+        alert_once("board-orphan-owner", "|".join(sorted(f"{k}:{v[0]}" for k, v in orphans.items())),
+                   "доска: задача без хозяина — " + "; ".join(parts), "board")
+    elif orphans is not None:
+        clear_once("board-orphan-owner")
+    if stale:
+        alert_once("board-doing-stale", ",".join(sorted(stale)),
+                   f"доска: задача в работе (doing) без ветки, worktree и PR дольше {S.STALE_DOING_HOURS} ч — "
+                   + "; ".join(f"{tid} ({stale[tid]} ч без правки, owner {tasks[tid][1].get('owner')})"
+                               for tid in sorted(stale)[:ALERT_IDS])
+                   + (f" и ещё {len(stale) - ALERT_IDS}" if len(stale) > ALERT_IDS else "")
+                   + ". Работа идёт — ветка с номером задачи (git worktree add … <id>-…); нет — вернуть в очередь: "
+                   + f"pantheon task set {sorted(stale)[0]} status=todo", "board")
+    else:
+        clear_once("board-doing-stale")
     return out
 
 
@@ -6095,7 +6297,8 @@ def board_archive(rest):
     board.md правят и руками (Зевс, владелец) без замка pantheon-git, поэтому перед записью архива и перед заменой
     board.md сверяются inode, mtime и размер с прочитанными (metis-0780): изменился — отказ «board.md изменился,
     повтори», код 1, board.md не тронут, дописанное в архив откатывается. Остаток — правка в те же доли секунды
-    между последней сверкой и заменой."""
+    между последней сверкой и заменой. Сбой дописывания или замены (OSError) — строка «… — архив откатан, board.md не
+    тронут», без трассировки; откат сам не удался — «архив НЕ откатан (архив: причина)», код 1 (metis-0810)."""
     M, days = boardmd_mod(), None
     args = list(rest)
     if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
@@ -6124,6 +6327,30 @@ def board_archive(rest):
         stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
         undo = {}   # архив → размер до дописывания (None — файла не было)
         done = False
+
+        def rollback():
+            """Дописанное в архивы — обратно; → [«архив: причина»] того, что откатить не вышло (metis-0810)."""
+            bad = []
+            for ap, size in undo.items():
+                try:
+                    if size is None:
+                        os.remove(ap)
+                    else:
+                        os.truncate(ap, size)
+                except FileNotFoundError:
+                    if size is not None:
+                        bad.append(f"{os.path.relpath(ap, PANTHEON)}: файла нет")
+                except OSError as e:
+                    bad.append(f"{os.path.relpath(ap, PANTHEON)}: {type(e).__name__}: {e}")
+            undo.clear()
+            return bad
+
+        def undone(bad):
+            """Итог отката честно: откатан — так и пишем; нет — что осталось в каком архиве, код 1."""
+            if bad:
+                return ("архив НЕ откатан (" + "; ".join(bad) + ") — в нём строки, которые остались и в board.md: "
+                        "убрать их из архива руками")
+            return "архив откатан"
         try:
             for key, ls in sorted(moved.items()):
                 ap = os.path.join(PANTHEON, "archive", f"{key}.md")
@@ -6131,22 +6358,21 @@ def board_archive(rest):
                 with open(ap, "a", encoding="utf-8") as fh:
                     fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
             if _board_changed(board, seen):
+                bad = rollback()
+                if bad:
+                    print(f"pantheon board archive: {undone(bad)}", file=sys.stderr)
                 return 1
             write_atomic(board, kept)
             done = True
         except OSError as e:   # metis-0792: сбой дописывания или замены — архив откатывается, board.md цел
-            print(f"pantheon board archive: {type(e).__name__}: {e} — архив откатан, board.md не тронут", file=sys.stderr)
+            print(f"pantheon board archive: {type(e).__name__}: {e} — {undone(rollback())}, board.md не тронут",
+                  file=sys.stderr)
             return 1
         finally:
-            if not done:
-                for ap, size in undo.items():
-                    try:
-                        if size is None:
-                            os.remove(ap)
-                        else:
-                            os.truncate(ap, size)
-                    except OSError:
-                        pass
+            if not done:   # иной сбой (не OSError): откат и честная строка, трассировка уйдёт выше
+                bad = rollback()
+                if bad:
+                    print(f"pantheon board archive: {undone(bad)}", file=sys.stderr)
     print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
     return 0
 
@@ -6159,8 +6385,10 @@ def board_auto_sync(T):
     try:
         B = boardtext_mod()
         fp, t = board_auto_fp(), now()
-        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
-                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        data = B.collect(PANTHEON, STATE, tasks, t, board_week(),
+                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE,
+                         own_of=batch_own_of(tasks, metrics_ctx().repos))
         data["merged_open"] = board_merged_open(T, t)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
@@ -6327,8 +6555,14 @@ def autoclose_off_reason(t, repo_dirs=None):
     return None
 
 
-def autoclose_tick(t):
-    """Лёгкий тик: слитые PR из кэша прохода `pantheon autoclose fetch` → закрытие задач. В сеть не ходит."""
+AUTOCLOSE_RUN_WAIT = 30  # с: проход fetch ждёт замок прохода по кэшу, пока его держит тик
+
+
+def autoclose_tick(t, wait=0):
+    """Проход по кэшу `pantheon autoclose fetch`: слитые PR → закрытие задач. В сеть не ходит. Зовут его тик (каждую
+    минуту) и сам fetch сразу после записи кэша (metis-0868, п. 1): задача закрывается в том же проходе, что увидел
+    слияние, а не на следующем круге. Замок autoclose-run — один проход за раз: тик и fetch не пишут одну задачу
+    дважды; wait — сколько секунд ждать замок (тик не ждёт). Карточки изменились — view и доска сразу (refresh_kick)."""
     A, T = autoclose_mod(), tasks_mod()
     repo_dirs = autoclose_repo_dirs()
     if not repo_dirs:
@@ -6338,12 +6572,17 @@ def autoclose_tick(t):
         alert_once("autoclose-off", off, off, "pantheon-tick")
     else:
         clear_once("autoclose-off")
-    log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
-                        actual_for=lambda tid: autoclose_actual(T, tid))
+    with lock_wait("autoclose-run", wait) as got:
+        if not got:
+            return
+        log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
+                            actual_for=lambda tid: autoclose_actual(T, tid))
     for ln in log:
         print(f"автозакрытие · {ln}")
     if log or errors:
         autoclose_alerts(sorted(repo_dirs), errors)
+    if log:
+        refresh_kick()
 
 
 def autoclose_cmd(rest):
@@ -6360,6 +6599,13 @@ def autoclose_cmd(rest):
     autoclose_alerts(sorted(repo_dirs), errors)
     for k, v in sorted(errors.items()):
         print(f"автозакрытие · {k}: {v}", file=sys.stderr)
+    try:
+        primary = load_schedule().get("primary_host")
+    except (OSError, ValueError) as e:  # расписание не читается — закроет тик, когда его починят (тревогу даёт он же)
+        print(f"автозакрытие · проход по кэшу пропущен: schedule.toml не читается ({e})", file=sys.stderr)
+        return 0
+    if not primary or host() == primary:  # как у тика: задачи (общий результат) правит один Mac
+        autoclose_tick(now(), wait=AUTOCLOSE_RUN_WAIT)
     return 0
 
 
@@ -6603,7 +6849,7 @@ def board_drift(T, tasks, cache, inbox):
                 if h.get("status") in ("doing", "review") and tid not in open_ids \
                         and not (mts and (T.ts_of(h.get("updated")) or 0) > mts):
                     out.append((tid, f"статус {h['status']}, а PR {repo}#{pr.get('number')} уже слит"))
-    out += batch_outside(T, tasks, cache)
+    out += batch_outside(T, tasks, cache, metrics_ctx().repos)
     for tid, (_, h, _) in sorted(tasks.items()):
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             since = T.ts_of(h.get("question_at")) or T.ts_of(h.get("created")) or 0
@@ -6620,38 +6866,45 @@ def board_drift(T, tasks, cache, inbox):
     return out
 
 
-def batch_outside(T, tasks, cache):
-    """PR пачки (ветка batch/<id>) закрыл задачу, у которой parent — не эта пачка (metis-0799): состав пачки считается
-    по parent, поэтому сделанное в её ветке ложится в чужую пачку или никуда, и карточка пачки показывает «1 из 13».
-    Только открытые пачки (не done/dropped) и PR без «часть»; parent не правим — его решает координатор. → [(id, текст)]."""
+def batch_own_of(tasks, repos):
+    """id пачки → репозитории её направления в нижнем регистре (autoclose.batch_pick, metis-0810): repos —
+    [merge_repos] policy.toml (направление → [репозиторий]); его нет, он пуст или у направления пачки нет строки —
+    None (любые), как у board-auto до правила (argus #341 Д1)."""
+    if not isinstance(repos, dict) or not repos:
+        return lambda sid: None
+
+    def own(sid):
+        mine = repos.get((tasks.get(sid) or (None, {}, ""))[1].get("direction"))
+        return [r.lower() for r in mine if isinstance(r, str)] if isinstance(mine, list) else None
+    return own
+
+
+def batch_outside(T, tasks, cache, repos=None):
+    """PR пачки (autoclose.batch_prs — одно правило с карточкой и board-auto, metis-0810) закрыл задачу, у которой parent
+    — не эта пачка (metis-0799): состав пачки считается по parent, поэтому сделанное в её ветке ложится в чужую пачку
+    или никуда, и карточка пачки показывает «1 из 13». Только открытые пачки (не done/dropped), PR из репозиториев
+    направления пачки (repos — [merge_repos]; нет — любые); PR с «часть» задач не закрывает. parent не правим — его
+    решает координатор: attach или поле пачки keep_outside — задачи, оставленные вне её состава (предупреждения о них
+    нет). → [(id, текст)]."""
     A, out, seen = autoclose_mod(), [], set()
-    for key, branch_key in (("merged", "headRefName"), ("open_prs", "branch")):
-        by_repo = cache.get(key) if isinstance(cache.get(key), dict) else {}
-        for repo, prs in sorted(by_repo.items()):
-            for pr in prs if isinstance(prs, list) else []:
-                if not isinstance(pr, dict) or not isinstance(pr.get(branch_key), str) or pr.get("cross") is not False:
-                    continue  # PR из форка или строка кэша без cross — не PR пачки
-                m = re.fullmatch(re.escape(T.BATCH_BRANCH) + r"(\S+)", pr[branch_key])
-                sh = (tasks.get(m.group(1)) or (None, {}, ""))[1] if m else {}
-                if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):
+    own_of = batch_own_of(tasks, repos)
+    for sid, rows in sorted(A.batch_prs(cache).items()):
+        sh = (tasks.get(sid) or (None, {}, ""))[1]
+        if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):
+            continue
+        own, keep = own_of(sid), set(sh.get("keep_outside") or [])
+        for repo, num, _, ids in rows:
+            if own is not None and repo not in own:
+                continue
+            for tid in ids:
+                h = (tasks.get(tid) or (None, {}, ""))[1]
+                if h.get("type") != "task" or h.get("parent") == sid or tid in keep or (tid, sid) in seen:
                     continue
-                if key == "merged":
-                    if not isinstance(pr.get("body"), (str, type(None))) or A.is_part(pr.get("body")):
-                        continue
-                    ids = A.closing_ids(pr[branch_key], pr.get("body"))
-                else:
-                    if pr.get("part") or not isinstance(pr.get("closes"), list):
-                        continue
-                    ids = [i for i in pr["closes"] if isinstance(i, str)]
-                sid = m.group(1)
-                for tid in ids:
-                    h = (tasks.get(tid) or (None, {}, ""))[1]
-                    if h.get("type") != "task" or h.get("parent") == sid or (tid, sid) in seen:
-                        continue
-                    seen.add((tid, sid))
-                    out.append((tid, f"PR пачки {sid} ({repo}#{pr.get('number')}, ветка {pr[branch_key]}) закрывает задачу, "
-                                     f"а её parent — {h.get('parent') or 'пусто'}: в составе {sid} её нет; "
-                                     f"parent решает координатор (pantheon task attach {tid} {sid} или оставить)"))
+                seen.add((tid, sid))
+                out.append((tid, f"PR пачки {sid} ({repo}#{num}, ветка {T.BATCH_BRANCH}{sid}) закрывает задачу, "
+                                 f"а её parent — {h.get('parent') or 'пусто'}: в составе {sid} её нет; "
+                                 f"parent решает координатор (pantheon task attach {tid} {sid} или оставить вне пачки: "
+                                 f"pantheon task set {sid} keep_outside=…,{tid})"))
     return out
 
 
@@ -6753,7 +7006,13 @@ def check(paths=None, quiet=False):
                  + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
-                    for i, ln in T.part_stalled(tasks_now, now())])
+                    for i, ln in T.part_stalled(tasks_now, now())]
+                 # metis-0615: «часть» без неотмеченных пунктов — остаток не записан; сразу, не через сутки
+                 + [("часть-пусто", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
+                     f"{i}: «{ln[:140]}»") for i, ln in T.part_no_items(tasks_now)]
+                 # metis-0868 п. 5: время строки журнала ставит код; строка «из будущего» дописана руками на глаз
+                 + [("время", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
+                     f"{i}: строка журнала позже часов системы — «{ln[:140]}»") for i, ln in T.journal_future(tasks_now, now())])
         stall = T.stalled(tasks_now, now())  # metis-0583: doing/review без записи в журнале дольше 2 суток — без тревоги
         # metis-0572: расхождения доски («ответил, а waiting», «PR слит, а задача открыта») — в Хвосты.md и на карточку
         off = [("доска", k, f"{k}: {text}") for k, text in board_drift(T, tasks_now, read_json(path("autoclose-prs.json"), {}),
@@ -6889,12 +7148,16 @@ TAIL_SHOWN = 12
 TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
-             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
+             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)",
+             "время": "строка журнала задачи позже часов системы — дописана руками, время на глаз (записи — через "
+                      "pantheon task set --note, время ставит код)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
 TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review (записать ход, закрыть или вернуть в очередь)",
-                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)"})
+                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)",
+                                     "часть-пусто": "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет (вписать "
+                                                    "пункт остатка или закрыть задачу)"})
 TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
-             "доска": "доска"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
 
 
 def tails_by_task(items):
@@ -6919,7 +7182,7 @@ def tails_board(items):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
             "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
             + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
@@ -7438,6 +7701,8 @@ def main(argv):
         return outside_mod().main(rest)
     if cmd == "browser":
         return browser_mod().main(rest)
+    if cmd == "handoff":
+        return handoff_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
     if cmd == "probes":

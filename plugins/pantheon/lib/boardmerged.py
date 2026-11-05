@@ -11,6 +11,11 @@ DAY = 86400
 MIN_DAYS = 1  # слит минимум столько полных суток назад — иначе тик autoclose ещё сам закроет
 
 
+def _in_direction(f, direction, repo_dirs):
+    """PR f = (время, репозиторий, PR) из репозитория направления задачи; без repo_dirs — любой."""
+    return not repo_dirs or direction in repo_dirs.get(f[1], ())
+
+
 def merged_open(tasks, cache, t, T, A, repo_dirs=None, open_ids=()):
     """tasks — T.load_tasks, cache — содержимое autoclose-prs.json, t — «сейчас». repo_dirs — {репозиторий: {направления}}
     (пусто или None — без привязки к направлению). open_ids — задачи с открытым PR (работа ещё идёт). → список
@@ -33,11 +38,11 @@ def merged_open(tasks, cache, t, T, A, repo_dirs=None, open_ids=()):
     for tid, (_, head, body) in sorted(tasks.items()):
         if head.get("type") != "task" or head.get("status") not in ("doing", "review") or tid in open_ids:
             continue
-        mine = lambda f: not repo_dirs or head.get("direction") in repo_dirs.get(f[1], ())  # PR из репозитория её направления
-        found = [f for f in by_close.get(tid, []) if mine(f)]
+        d = head.get("direction")
+        found = [f for f in by_close.get(tid, []) if _in_direction(f, d, repo_dirs)]
         for x in T._journal(body):
             for n in A.JOURNAL_PR_RE.findall(x[2]):
-                found += [f for f in by_num.get(int(n), []) if mine(f)]
+                found += [f for f in by_num.get(int(n), []) if _in_direction(f, d, repo_dirs)]
         found = [f for f in found if f[0] <= t]
         if not found:
             continue

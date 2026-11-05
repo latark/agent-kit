@@ -282,8 +282,10 @@ def main():
     # модель угроз, «решение внесено, только когда оно в роли»; дубли сжаты) и metis-0665 (+100 — строка «перед раздачей —
     # pantheon task overlap»; у лида уложилась в прежний потолок, лидов потолок не поднят)
     # metis-0653: +~450 — TaskStop после отчёта субагента (merge.part) и «ждать на переднем плане» (persist.part)
+    # metis-0832: +~430 — раздел handoff.part «отказ — передай тому, кто умеет; владельцу только «да/нет»» (с [person]:
+    # координатор 31546, лид 24367)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 31400 and len(raw_texts["hephaestus-demo.md"]) <= 25300)  # metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 31800 and len(raw_texts["hephaestus-demo.md"]) <= 25800)  # metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -657,12 +659,17 @@ def main():
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
     # metis-0583: автозакрытие закрывает задачу по «Closes <id>» в теле PR — правило у тех, кто открывает и сливает PR
     closes_rule = ("Тело PR называет каждую задачу, которую он закрывает: `Closes <id>` или списком `Closes metis-0522, "
-                   "metis-0534 и 0535`. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
+                   "metis-0534 и 0535`. Это правило — для PR в любом репозитории направления (agent-kit, BA, сайт): автозакрытие читает тела PR всех репозиториев из [merge_repos]. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
                    "тоже (metis-0583). Слово «часть» в теле — все задачи PR остаются открытыми; если частичная только одна — отдельный "
                    "PR или без Closes и без её номера в имени ветки.")
     miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md") if closes_rule not in flat.get(f, "")]
     check("лиды и координатор: тело PR — «Closes <id>» списком, «часть» оставляет открытыми все задачи PR (metis-0583)"
           + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
+            if "в любом репозитории направления" not in flat.get(f, "")]
+    check("лиды и координатор: правило Closes — для PR в любом репозитории направления" + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md") if "`Closes <id>` каждой задачи" not in flat.get(f, "")]
+    check("разработчики: ветка с номером задачи и `Closes <id>` каждой задачи в коммите" + (f" (нет у: {miss})" if miss else ""), not miss)
     # сама роль (без приклеенного _ref) несёт строку-ссылку: без неё правило Closes роль не увидит (argus #241 круг 2, Б1)
     miss_raw = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
                 if "Тело PR: `Closes <id>, …` — подробности в `_ref/merge-rounds.md`" not in raw_texts.get(f, "")]
@@ -685,11 +692,12 @@ def main():
           and "вопрос о карточке сверх лимита — с id задачи-причины" in flat.get("hq.md", ""))
     # потолок владельца (metis-0444, metis-0588): отказ start/wake не повторять и не обходить; владельцу — --over-cap
     # его командой или поднять потолок; Гестию потолок не держит
-    check("hq: отказ start/wake «недельный потолок владельца» — не повторять и не обходить, владельцу --over-cap "
-          "или поднять потолок, Гестию будить можно (metis-0588)",
+    # metis-0832: владельцу — вопрос «да/нет», а не команда для его терминала
+    check("hq: отказ start/wake «недельный потолок владельца» — не повторять и не обходить, владельцу вопрос «да/нет» "
+          "(подождать или поднять потолок) без команды для терминала, Гестию будить можно (metis-0588, 0832)",
           "`pantheon start` или `pantheon wake` отказали кодом 2 с причиной «недельный потолок владельца…» — не повторяй и "
-          "не обходи (`--over-cap` тебе не дан); владельцу одной строкой: запуск сверх потолка — его командой из его "
-          "терминала с `--over-cap`, или поднять потолок. Гестию будить можно: потолок её не держит;"
+          "не обходи (`--over-cap` тебе не дан); владельцу — вопрос «да/нет» в окне вопросов: подождать недели или "
+          "поднять потолок; команду для его терминала не пиши. Гестию будить можно: потолок её не держит;"
           in flat.get("hq.md", ""))
     argus_md = texts.get("argus.md", "")
     check("argus: в файле роли effort: high и model: opus; знает, что вне ядра его зовут с medium, а шлюз сверяет "

