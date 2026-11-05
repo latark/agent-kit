@@ -552,7 +552,8 @@ try:
     ev = os.path.join(STATE, "logs", "outside.jsonl")
     evs = open(ev).read() if os.path.exists(ev) else ""
     check("cmd_run: подсчёт доли красных после очереди тестов; сбой — код 0 и запись red-share-error",
-          rc1 == 0 and rc2 == 0 and calls_.index("alert_red_share") > calls_.index("run_test_queue")
+          rc1 == 0 and rc2 == 0 and "alert_red_share" in calls_
+          and calls_.index("alert_red_share") > calls_.index("run_test_queue")
           and '"red-share-error"' in evs and "сломано" in evs, (calls_, evs[-300:]))
 finally:
     O.read_full = _rf_full
