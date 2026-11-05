@@ -1728,7 +1728,7 @@ def test_window_queue_xdg():
     last = (r.stderr.strip().splitlines() or [""])[-1]
     check("XDG_CACHE_HOME вне кэшей окон — не окно: STATE закрыт — код 1, причина последней строкой, без трассировки",
           r.returncode == 1 and rid is None and "заявку не записать" in last and "PermissionError" in last
-          and "Traceback" not in r.stderr and not os.path.exists(os.path.join(b.home, ".cache", "read")),
+          and "перезапустить" in last and "Traceback" not in r.stderr and not os.path.exists(os.path.join(b.home, ".cache", "read")),
           (r.returncode, r.stdout, r.stderr[-600:]))
 
 
