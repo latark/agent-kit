@@ -494,6 +494,8 @@ answer и плановый проход, это скрипты, guard их не 
 - Write, Edit, MultiEdit и NotebookEdit в память (`~/.claude/agent-memory`, `~/.claude/projects/*/memory`),
   `CLAUDE.md`, `AGENTS.md`, `~/.claude/tools|skills|agents|commands|hooks|rules`, настройки `~/.claude/settings*.json`,
   `sync.sh`, `~/ai/knowledge`, сам флаг. То же — Bash-запись туда (`>`, `>>`, `tee`, `cp`, `mv`, `sed -i`, `rm`).
+  Перенаправление в другой дескриптор (`2>&1`, `>&2`) и в `/dev/null` (`2>/dev/null`, `&>/dev/null`) записью не
+  считается (metis-0869).
 
 Отказ guard важнее: Claude Code сводит решения всех хуков PreToolUse как deny > defer > ask > allow
 ([hooks](https://code.claude.com/docs/en/hooks)). taint никогда не отвечает allow.
