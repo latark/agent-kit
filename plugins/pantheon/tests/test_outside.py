@@ -2569,7 +2569,8 @@ for label, spoil in (("сдвинула HEAD копии на другой зел
 
 # HEAD копии сдвинулся уже после первой проверки — перед прогоном (между tree_record и чтением HEAD) или во время
 # прогона: запись только на коммит заявки, на сдвинутый HEAD — никогда
-_tr, _wp = O.tree_record, O.wait_proc
+_tr, _wp, _rt = O.tree_record, O.wait_proc, O.run_test
+_cwd_of = [None]  # папка прогона для подмены wait_proc; вне цикла, чтобы лямбды не держали переменную цикла (B023)
 
 
 def _move_head(d):
@@ -2581,8 +2582,7 @@ for label, attr, fake in (
         # wait_proc зовёт и установка (prepare) — HEAD двигаем только в прогоне теста (у него idle_log)
         ("во время прогона", "wait_proc",
          lambda proc, *a, **kw: (kw.get("idle_log") and _move_head(_cwd_of[0]), _wp(proc, *a, **kw))[1])):
-    _cwd_of = [None]
-    _rt = O.run_test
+    _cwd_of[0] = None
     O.run_test = lambda rid, d, *a, **kw: (_cwd_of.__setitem__(0, str(d)), _rt(rid, d, *a, **kw))[1]
     setattr(O, attr, fake)
     n_e, n_g = len(tests_for(HEADE)), len(tests_for(CPG))
