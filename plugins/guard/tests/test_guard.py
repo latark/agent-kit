@@ -1257,6 +1257,15 @@ def main():
          W(os.path.join(home, "Library/LaunchAgents/pantheon.svc.hookd.plist"))),
         ("protect-config: ваша сессия собирает клиент демона хуков", "allow", ".", "", False,
          W(os.path.join(home, ".cache/pantheon/hookd/bin/client-0123456789abcdef"))),
+        # служба под TCC (metis-0811 ч. 2): pantheon-hookd, его метки и папка пробы — так же закрыты ролям (F7)
+        ("protect-config: разработчик не подменяет pantheon-hookd (Bash cp)", "deny", br, "dev-opus", True,
+         B("cp /tmp/x ~/.cache/pantheon/hookd/bin/pantheon-hookd")),
+        ("protect-config: субагент Метиды не правит метку .sum pantheon-hookd", "deny", ak, "hephaestus-pantheon", True,
+         E(os.path.join(home, ".cache/pantheon/hookd/bin/pantheon-hookd.sum"))),
+        ("protect-config: координатор не пишет итог пробы доступа", "deny", br, "domain-coordinator", False,
+         W(os.path.join(home, ".cache/pantheon/hookd/probe/result.json"))),
+        ("protect-config: штаб не ставит задание пробы в LaunchAgents", "deny", ".", "hq", False,
+         W(os.path.join(home, "Library/LaunchAgents/pantheon.hookd.probe.plist"))),
         # --- проектные роли <репо>/.claude/agents (metis-0057) ---
         ("protect-config: Write в <репо>/.claude/agents/x.md — отказ", "deny", br, "dev-sonnet", True,
          W(os.path.join(home, br, ".claude/agents/hephaestus-x.md"))),

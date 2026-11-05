@@ -286,6 +286,26 @@ def cli():
     check("ответ gh об ошибке с переводами строк и ESC — в одну строку, своих строк не вставил",
           r.returncode == 0 and line and "HTTP 502 - задача metis-0001 (вставка)" in line[0] and "\x1b" not in r.stdout
           and not any(ln.startswith("- задача metis-0001") for ln in r.stdout.splitlines()), r.stdout)
+    # metis-0808: репозиторий в errors кэша — строки прежние, подпись времени из stale[repo], а не нынешнего fetched
+    from datetime import datetime as _dt
+    cache["errors"] = {"latark/agent-kit": "HTTP 401"}
+    cache["stale"] = {"latark/agent-kit": T0 - 7200}
+    open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("кэш: репозиторий в errors — «от» время последнего успеха (stale), не fetched",
+          f"из кэша планового прохода от {_dt.fromtimestamp(T0 - 7200).strftime('%d.%m %H:%M')}" in r.stdout
+          and f"от {_dt.fromtimestamp(T0 - 600).strftime('%d.%m %H:%M')}" not in r.stdout and "PR #248" in r.stdout, r.stdout)
+    cache["stale"] = {"latark/agent-kit": 0}
+    open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("кэш: в errors и stale 0 — «данных по репозиторию нет», проверь вручную, PR из кэша не берём",
+          "данных по репозиторию нет" in r.stdout and "gh pr list -R latark/agent-kit" in r.stdout
+          and "из кэша планового прохода от" not in r.stdout and f"PR #248 latark/agent-kit (ветка ci-billing-0655, metis-0655): {GATE}" not in r.stdout, r.stdout)
+    cache.pop("errors"); cache.pop("stale")
+    open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("кэш без errors — по-прежнему «от» fetched",
+          f"от {_dt.fromtimestamp(T0 - 600).strftime('%d.%m %H:%M')}" in r.stdout, r.stdout)
     open(os.path.join(state, "autoclose-prs.json"), "w").write("[1, 2]")
     r = pan(env, "task", "overlap", "metis-0001")
     check("gh упал, кэш не словарь — как нет кэша: строка «кэша … нет», код 0",

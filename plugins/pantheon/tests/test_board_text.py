@@ -378,5 +378,34 @@ for pr, ok in (("latark/agent-kit#290", True), ("x/y#1", True), ("x/y#999999", T
 check("STORY_PR_RE: номер PR — последняя группа у обоих",
       B.STORY_PR_RE.fullmatch("o/r#42").group(B.STORY_PR_RE.groups) == _T.STORY_PR_RE.fullmatch("o/r#42").group(_T.STORY_PR_RE.groups) == "42")
 
+# metis-0808: gh не ответил по репозиторию — «PR: данные от HH:MM, gh недоступен», а не «Открытых PR нет»
+_c = os.path.join(ROOT, "stale-cache.json")
+_row = {"number": 306, "head": "a" * 12, "ids": ["metis-0808"], "core": False}
+write(_c, json.dumps({"fetched": T0, "merged": {}, "open": {}, "open_prs": {"latark/agent-kit": [_row]},
+                      "errors": {"latark/agent-kit": "HTTP 401", "latark/agent-kit#5": "x"}, "stale": {"latark/agent-kit": T0 - 3600}}))
+_d = {"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)}
+_l = B.lines(_d)
+check("0808: pr_stale - репозитории из errors без «#N», время последнего успеха",
+      B.pr_stale(_c) == [("latark/agent-kit", T0 - 3600)], B.pr_stale(_c))
+check("0808: прежний PR в блоке и строка «данные от HH:MM, gh недоступен»",
+      any(x.startswith("- PR #306") for x in _l) and f"- PR: данные от {B.hm(T0 - 3600)}, gh недоступен (agent-kit)." in _l, _l)
+write(_c, json.dumps({"fetched": T0, "merged": {}, "open": {}, "open_prs": {}, "errors": {"latark/agent-kit": "TLS"},
+                      "stale": {"latark/agent-kit": T0 - 600}}))
+_l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
+check("0808: PR нет, но gh недоступен - «Открытых PR нет» не пишем", "- Открытых PR нет." not in _l
+      and any("gh недоступен (agent-kit)" in x and "данные от" in x for x in _l), _l)
+write(_c, json.dumps({"fetched": T0, "open_prs": {}, "errors": {"latark/agent-kit": "TLS"}, "stale": {"latark/agent-kit": 0}}))
+_l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
+check("0808: прежних данных не было - «gh недоступен, данных нет»", "- PR: gh недоступен (agent-kit), данных нет." in _l, _l)
+write(_c, json.dumps({"fetched": T0, "open_prs": {}, "errors": {}, "stale": {}}))
+_l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
+check("0808: ошибок нет - по-прежнему «Открытых PR нет»", "- Открытых PR нет." in _l and not any("недоступен" in x for x in _l), _l)
+_l = B.lines({"prs": [], "pr_stale": [("evil/\u202e<x>", 5)]})
+check("0808: имя репозитория не по шаблону в блок не идёт", "- Открытых PR нет." in _l and not any("evil" in x for x in _l), _l)
+_l = B.lines({"prs": [], "pr_stale": [("o/a", T0 - 7200), ("o/b", T0 - 600)]})
+check("0808: два сбойных репозитория - время самого давнего успеха", f"- PR: данные от {B.hm(T0 - 7200)}, gh недоступен (a, b)." in _l, _l)
+check("0808: pr_stale - нет файла и мусор дают пусто", B.pr_stale(os.path.join(ROOT, "nope.json")) == []
+      and B.pr_stale(write(os.path.join(ROOT, "junk.json"), "[1]")) == [])
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

@@ -411,6 +411,111 @@ def test_auto_kills_only_abandoned():
           f"нечего гасить — код 0, без строк: {r.stdout}")
 
 
+def test_auto_zeus_window_without_run_file():
+    """metis-0805, Д1: окно Зевса — сессия zeus, песочница hq, запуск с settings/hq.json, файла run/zeus.json нет.
+    Сирота (ppid 1) в песочнице hq при живом Зевсе не гасится: окно — по имени (zeus → hq), по --settings и --name
+    живого claude из ps, по реестру имён ~/.claude/sessions. Без живого Зевса — гасится (проверка чувствительна)."""
+    m = 40 * 60
+    for how in ("agents", "settings", "name", "registry", "run-settings", "none"):
+        e = Env()
+        sb = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox", "hq", "tmp")
+        os.makedirs(sb)
+        e.proc(263, "node /x/node_modules/.bin/vitest run", sb, age=m, ppid=1)
+        if how == "agents":
+            json.dump([{"id": "s9002", "name": "zeus", "pid": 9002, "kind": "background", "state": "working"}],
+                      open(e.agents_file, "w"))
+        elif how == "settings":
+            e.proc(310, f"claude --agent hq --settings {e.state}/settings/hq.json", e.pantheon, age=m, ppid=1)
+        elif how == "name":
+            e.proc(310, "/Users/x/.local/bin/claude --name zeus", e.pantheon, age=m, ppid=1)
+        elif how == "registry":
+            os.makedirs(os.path.join(e.home, ".claude", "sessions"))
+            json.dump({"pid": os.getpid(), "name": "zeus", "kind": "interactive", "cwd": e.pantheon},
+                      open(os.path.join(e.home, ".claude", "sessions", f"{os.getpid()}.json"), "w"))
+        elif how == "run-settings":  # файл запуска другого имени, окно в нём — hq
+            os.makedirs(os.path.join(e.state, "settings", "run"))
+            json.dump({"env": {"PANTHEON_WINDOW": "hq"}}, open(os.path.join(e.state, "settings", "run", "x.json"), "w"))
+            e.proc(310, f"claude --settings {e.state}/settings/run/x.json", e.pantheon, age=m, ppid=1)
+        check(not os.path.exists(os.path.join(e.state, "settings", "run", "zeus.json")), "файла run/zeus.json нет")
+        r = e.reap("--auto")
+        k = e.killed()
+        if how == "none":
+            check(set(k) == {263}, f"Д1: живого Зевса нет — сирота в песочнице hq гасится: {sorted(k)} {r.stdout[-300:]}")
+        else:
+            check(r.returncode == 0 and not k, f"Д1: живой Зевс ({how}) — сирота в песочнице hq не гасится: "
+                  f"{sorted(k)} {r.returncode} {r.stderr[-300:]}")
+
+
+def test_auto_outside_holds():
+    """metis-0805, Д3: `run.py outside` (идущий outside test, serve, проход outside run) — держатель, как claude. Его
+    дети в копии закрытой задачи не гасятся, и сирота с ppid 1 в группе его прогона (pgid) — тоже. Сирота из группы,
+    где живых хозяев нет, и ребёнок другого python-скрипта со словом outside — гасятся."""
+    m = 40 * 60
+    e = Env()
+    py = "/Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+    e.proc(320, f"{py} -I /c/pantheon/0.11.211/bin/../lib/run.py outside run", "/", age=m, ppid=1)
+    e.proc(321, f"{py} /c/pantheon/bin/heavy /usr/bin/sandbox-exec -f /s/profile.sb pnpm test", e.wt_closed, age=m,
+           ppid=320)
+    e.procs[-1]["pgid"] = 321
+    e.proc(322, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=321)     # ребёнок прогона
+    e.procs[-1]["pgid"] = 321
+    e.proc(323, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=1)       # ушёл к launchd, группа жива
+    e.procs[-1]["pgid"] = 321
+    e.proc(324, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=1)       # группы нет — брошен
+    e.procs[-1]["pgid"] = 999
+    e.proc(330, "node /x/node_modules/.bin/tsx g.ts", e.wt_closed, age=m, ppid=1)         # группа без хозяина
+    e.procs[-1]["pgid"] = 330
+    e.proc(331, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=1)
+    e.procs[-1]["pgid"] = 330
+    e.proc(326, "python3 /x/tool.py outside run", "/", age=m, ppid=1)                     # не run.py — не держатель
+    e.proc(327, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=326)
+    e.proc(328, f"{py} -I /p/lib/run.py outside serve --wait 120", "/", age=m, ppid=1)    # serve — тоже держатель
+    e.proc(329, "node /x/node_modules/.bin/next dev", e.wt_closed, age=m, ppid=328)
+    r = e.reap("--auto")
+    k = e.killed()
+    want = {324, 330, 331, 327}
+    check(r.returncode == 0 and set(k) == want, f"Д3: держатель outside — дети и группа прогона не гасятся, гасится "
+          f"{sorted(want)}: {sorted(k)}; лишнее {sorted(set(k) - want)} {r.stderr[-300:]}")
+
+
+def test_auto_lsp_family():
+    """metis-0805, Д2: language server под щадимым родителем не гасится отдельно — решение за семью вместе.
+    typescript-language-server прямо под launchd в живой копии жив — его tsserver тоже; молодой tsserver под ничьим
+    сервером — родителя не гасим, пока ребёнок моложе AUTO_MINUTES. Ничья семья старше срока — гасится вся."""
+    m = 40 * 60
+    e = Env()
+    e.proc(340, "node /usr/local/bin/typescript-language-server --stdio", e.wt_live, age=m, ppid=1)
+    e.proc(341, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.wt_live, age=m, ppid=340)
+    e.proc(342, "/bin/sh /usr/local/bin/lsp-wrap.sh", "/x", age=m, ppid=1)
+    e.proc(343, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=342)
+    e.proc(344, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=5 * 60, ppid=343)
+    e.proc(345, "/bin/sh /usr/local/bin/lsp-wrap.sh", "/x", age=m, ppid=1)
+    e.proc(346, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=345)
+    e.proc(347, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=346)
+    e.proc(348, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=346)
+    r = e.reap("--auto")
+    k = e.killed()
+    want = {346, 347, 348}
+    check(r.returncode == 0 and set(k) == want, f"Д2: семья language server — вместе; гасится только ничья старше "
+          f"срока {sorted(want)}: {sorted(k)}; лишнее {sorted(set(k) - want)} {r.stderr[-300:]}")
+
+
+def test_outside_like():
+    code = ("import importlib.util, json, sys\n"
+            "spec = importlib.util.spec_from_file_location('c', sys.argv[1]); m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "cases = ['/F/Python.app/Contents/MacOS/Python -I /c/bin/../lib/run.py outside test --wait 590',"
+            " 'python3.14 -I /p/lib/run.py outside serve', 'python3 /p/lib/run.py outside', 'python3 /p/lib/run.py reap',"
+            " 'python3 /x/tool.py outside run', 'node /p/lib/run.py outside test', 'sh -c python3 run.py outside',"
+            " 'python3 -I /p/lib/run.py', '']\n"
+            "print(json.dumps([m.outside_like(a) for a in cases]))\n")
+    r = subprocess.run([PY311, "-I", "-c", code, os.path.join(ROOT, "lib", "culprits.py")], capture_output=True,
+                       text=True, timeout=30)
+    got = json.loads(r.stdout or "null")
+    check(got == [True, True, True, False, False, False, False, False, False],
+          f"outside_like — python …/run.py outside, по исполняемому файлу: {got} {r.stderr[-300:]}")
+
+
 def test_auto_usage_and_errors():
     e = Env()
     auto_set(e)

@@ -283,7 +283,7 @@ def main():
     # pantheon task overlap»; у лида уложилась в прежний потолок, лидов потолок не поднят)
     # metis-0653: +~450 — TaskStop после отчёта субагента (merge.part) и «ждать на переднем плане» (persist.part)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 31200 and len(raw_texts["hephaestus-demo.md"]) <= 23900)
+          len(raw_texts["domain-coordinator.md"]) <= 31400 and len(raw_texts["hephaestus-demo.md"]) <= 25300)  # metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -345,6 +345,17 @@ def main():
         ok = not miss and t.find(first) < t.find(then)
         check(f"{f}: сам открывает отчёт до вызова argus, три значения пункта, нет строки — возврат"
               + (f" (нет: {miss})" if miss else ""), ok)
+    # разбор провала (metis-0859): шаг во всех лидах, строка причины у argus
+    for f in ("hephaestus-demo.md", "apollo-demo.md"):
+        t = " ".join(flat.get(f, "").split())
+        miss = [x for x in ("## Разбор провала", "провал: <класс> — <довод>", "непонятная задача", "неверный подход",
+                            "не хватило контекста", "трудная логика", "один раз на задачу", "Третий возврат argus")
+                if x not in t]
+        check(f"{f}: шаг «Разбор провала» с четырьмя классами и действиями (metis-0859)"
+              + (f" (нет: {miss})" if miss else ""), not miss)
+    check("argus: в «вернуть» строка «Причина (предположительно)» с четырьмя классами (metis-0859)",
+          "Причина (предположительно): непонятная задача | неверный подход | не хватило контекста | трудная логика"
+          in " ".join(flat.get("argus.md", "").split()))
     check("argus: правила «нет строки самопроверки — вернуть» нет (отчёт до argus не доходит)",
           "нет строки самопроверки" not in flat.get("argus.md", "")
           and "без строки «Самопроверка:»" not in flat.get("argus.md", ""))

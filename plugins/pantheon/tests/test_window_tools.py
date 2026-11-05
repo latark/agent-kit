@@ -71,5 +71,42 @@ with tempfile.TemporaryDirectory(prefix="wintools-") as raw:
     check("heavy вне окна: TMPDIR не тронут", heavy_tmpdir(home, None) == "/sandbox-tmp")
     check("heavy: папки PANTHEON_TMP нет — TMPDIR не тронут", heavy_tmpdir(home, os.path.join(home, "nope")) == "/sandbox-tmp")
 
+# metis-0569: окно без nvm в PATH — heavy находит pnpm сама и не падает FileNotFoundError
+def heavy_run(home, args, state=None):
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "PANTHEON_STATE": state or os.path.join(home, "state")}
+    return subprocess.run([sys.executable, "-I", HEAVY, *args], env=env, capture_output=True, text=True, timeout=60)
+
+
+with tempfile.TemporaryDirectory(prefix="wintools-") as raw:
+    home = os.path.realpath(raw)
+    bins = {v: os.path.join(home, ".nvm", "versions", "node", v, "bin") for v in ("v20.1.0", "v22.9.0")}
+    for v, b in bins.items():
+        os.makedirs(b)
+    pnpm = os.path.join(bins["v22.9.0"], "pnpm")
+    with open(pnpm, "w") as fh:
+        fh.write('#!/bin/sh\necho "pnpm-ok $1"; echo "$PATH" | cut -d: -f1\n')
+    os.chmod(pnpm, 0o755)
+    r = heavy_run(home, ["pnpm", "run"])  # без мест блокировки
+    check("pnpm только в nvm (alias нет): найден, код 0", r.returncode == 0 and "pnpm-ok run" in r.stdout, r.stderr + r.stdout)
+    check("папка pnpm первой в PATH команды (shebang env node)", r.stdout.splitlines()[-1:] == [bins["v22.9.0"]], r.stdout)
+    locks = os.path.join(home, "state", "locks")
+    os.makedirs(locks)
+    for n in ("heavy-cmd-1", "heavy-cmd-2"):
+        open(os.path.join(locks, n + ".lock"), "w").close()
+    r = heavy_run(home, ["pnpm", "run"])
+    check("то же с местами блокировки", r.returncode == 0 and "pnpm-ok run" in r.stdout, r.stderr + r.stdout)
+    os.makedirs(os.path.join(home, ".nvm", "alias"))
+    with open(os.path.join(home, ".nvm", "alias", "default"), "w") as fh:
+        fh.write("20\n")
+    r = heavy_run(home, ["pnpm", "x"])
+    check("pnpm есть не в версии по умолчанию — всё равно найден", r.returncode == 0 and "pnpm-ok x" in r.stdout, r.stderr)
+    r = heavy_run(home, ["nosuchtool-xyz", "x"])
+    check("команды нет нигде — код 127, строка без трейсбэка, места не заняты",
+          r.returncode == 127 and "не найдена" in r.stderr and "Traceback" not in r.stderr and "жду" not in r.stderr, r.stderr)
+    r = heavy_run(home, ["echo", "hi"])
+    check("команда из PATH идёт как раньше", r.returncode == 0 and r.stdout.strip() == "hi", r.stderr)
+    r = heavy_run(home, ["/bin/sh", "-c", "exit 3"])
+    check("код выхода команды сохраняется", r.returncode == 3)
+
 print(f"\n{len(done) - len(fails)} из {len(done)} прошли")  # итог с числом: его требует run-tests.py
 sys.exit(1 if fails else 0)
