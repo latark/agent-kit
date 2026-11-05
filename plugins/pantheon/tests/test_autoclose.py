@@ -1043,6 +1043,38 @@ def test_lists_and_checked():
         shutil.rmtree(tmp, True)
 
 
+def test_review_without_closes():
+    """metis-0615 п. 3 (случай athena-0184, PR BA #38): открытый PR без Closes и без id в ветке ставит review задачам
+    doing/waiting, названным в ветке или теле (ids); todo по упоминанию не трогает. PR с Closes ставит review и задаче в
+    waiting; waiting владельца (waiting_on human) остаётся в «Нужен ответ»; «часть» — никому."""
+    tmp, home, state, gh, env = make()
+    try:
+        R = "latark/agent-kit"
+        ps = {i: put(home, "metis-pantheon", i, status=st, **kw) for i, st, kw in (
+            ("metis-0101", "waiting", {"waiting_on": "talos"}), ("metis-0102", "doing", {}), ("metis-0103", "todo", {}),
+            ("metis-0104", "waiting", {"waiting_on": "human"}), ("metis-0105", "waiting", {"waiting_on": "talos"}),
+            ("metis-0106", "doing", {}), ("metis-0107", "todo", {}))}
+        rows = [{"number": 38, "closes": [], "ids": ["metis-0101", "metis-0102", "metis-0103", "metis-0104"], "part": False},
+                {"number": 39, "closes": ["metis-0105", "metis-0107"], "ids": ["metis-0105", "metis-0106", "metis-0107"],
+                 "part": False},
+                {"number": 40, "closes": [], "ids": ["metis-0106"], "part": True}]
+        log, errs = [], {}
+        for row in rows:
+            A.review_pr(home, T0, R, row, {"metis-pantheon"}, T, log, errs)
+        st = {i: T.read(p)[0].get("status") for i, p in ps.items()}
+        check("0615: PR без Closes — waiting и doing из ветки/тела → review, строка в журнале",
+              st["metis-0101"] == "review" and st["metis-0102"] == "review"
+              and "PR #38 (latark/agent-kit) " + A.REVIEW_MARK in text(ps["metis-0101"]), (st, errs))
+        check("0615: PR без Closes — todo по упоминанию не трогает, waiting владельца (human) тоже",
+              st["metis-0103"] == "todo" and st["metis-0104"] == "waiting", st)
+        check("0615: PR с Closes — review и у waiting; упоминание рядом с Closes не в счёт; todo по Closes — review",
+              st["metis-0105"] == "review" and st["metis-0106"] == "doing" and st["metis-0107"] == "review", st)
+        check("0615: waiting → review снимает waiting_on", T.read(ps["metis-0101"])[0].get("waiting_on") is None)
+        check("0615: PR «часть» без Closes review не ставит", st["metis-0106"] == "doing" and not errs, (st, errs))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_lists_and_checked()
     test_unit()
@@ -1065,6 +1097,7 @@ def main():
     test_batch_needs_mode()
     test_off_warning()
     test_check()
+    test_review_without_closes()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

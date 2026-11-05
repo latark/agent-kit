@@ -319,6 +319,29 @@ def main():
           len(lines_with(home2, "слит с «часть»")) == 1 and "metis-0002" in lines_with(home2, "слит с «часть»")[0]
           and "слит с «часть»" in read(bp), alerts_of(home2))
 
+    # metis-0615 п. 5: «часть» без неотмеченных пунктов — строка в Хвосты.md сразу, а не молчание
+    empty = "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет** — metis-0002"
+    check("0615: часть-PR, а пунктов остатка нет (одна заглушка) — строка в Хвосты.md и «Хвост» карточки, без тревоги",
+          empty in read(bp) and "PR слит с «часть», остаток не записан" in str(
+              json.loads(read(os.path.join(state2, "tails.json"))).get("metis-0002"))
+          and not lines_with(home2, "неотмеченных пунктов"), read(bp))
+
+    def pni(crit, status="doing", note_line=note):
+        body = ("Готово, когда:\n" + "".join(f"- [{'x' if ok else ' '}] {x}\n" for ok, x in crit)
+                + "\n## Журнал\n\n- 2026-10-24 11:00 — плановый проход: " + note_line + "\n")
+        return T.part_no_items({"x-0001": ("p", {"id": "x-0001", "type": "task", "status": status}, body)})
+    check("0615: part_no_items — без пунктов, все отмечены, одна заглушка → строка; сразу, без 24 ч",
+          pni([]) and pni([(True, "а")]) and pni([(False, T.DONE_WHEN_HINT)])
+          and pni([])[0] == ("x-0001", "- 2026-10-24 11:00 — плановый проход: " + note))
+    check("0615: part_no_items — есть неотмеченный пункт, задача закрыта, «часть» не было — нет",
+          not pni([(False, "остаток")]) and not pni([(True, "а"), (False, "б")]) and not pni([], status="done")
+          and not pni([], note_line="PR #5 (r) слит, закрыта"))
+    run(env2, "task", "set", "metis-0002", "--note", "остаток впишу пунктом", t=T0 + 62)
+    pt_text = read(pt).replace(T.DONE_WHEN_HINT, "второй шаг остатка")
+    put(pt, pt_text, age_h=0)
+    run(env2, "check", "--quiet", t=T0 + 64)
+    check("0615: пункт остатка вписан — строки «часть … пунктов нет» в Хвосты.md больше нет", empty not in read(bp), read(bp))
+
     # metis-0583: застой doing/review — без записи в журнале дольше 2 суток; в Хвосты.md, без тревоги
     def stl(lines, status="doing", updated="2026-10-20T10:00:00"):
         body = "\n## Журнал\n\n" + "".join(f"- 2026-10-{d} {h} — {a}: {x}\n" for d, h, a, x in lines)

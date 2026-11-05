@@ -21,6 +21,9 @@ LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 sys.path.insert(0, LIB)
 import tasks as T  # noqa: E402
 import autoclose as A  # noqa: E402
+import subprocess  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # noqa: E402 — pantheon.batch_outside только на Python 3.11+
 
 spec = importlib.util.spec_from_file_location("boardtext", os.path.join(LIB, "boardtext.py"))
 B = importlib.util.module_from_spec(spec)
@@ -70,19 +73,21 @@ cache = {"merged": {R: [{"number": 294, "headRefName": "batch/metis-0750", "body
 idx = A.pr_index(cache)
 check("0799: pr_index хранит ветку PR (слитый — headRefName, открытый — branch)",
       idx["metis-0750"][0]["branch"] == "batch/metis-0750" and idx["metis-0751"][0]["branch"] == "batch/metis-0751", idx)
-bp = T.batch_pr("metis-0750", idx, [R])
+bprs = A.batch_prs(cache)
+bp = T.batch_pr("metis-0750", bprs, [R])
 check("0799: batch_pr — PR с ветки batch/<id>, слит, закрытые им задачи без самой пачки; ветка metis-0750-old — не PR пачки",
       bp == (R, 294, True, ["metis-0688", "metis-0773", "metis-0780"]), bp)
 check("0799: PR из форка (cross) и строка кэша без cross — ветки в pr_index нет, ссылка на PR остаётся",
       [x["branch"] for x in idx["metis-0689"]] == ["", ""] and [x["number"] for x in idx["metis-0689"]] == [296, 297],
       idx.get("metis-0689"))
-check("0799: batch_pr — репозиторий не направления пачки не берём", T.batch_pr("metis-0750", idx, ["latark/other"]) is None)
-check("0799: batch_pr — открытый PR пачки (ветка из open_prs)", T.batch_pr("metis-0751", idx, None)[:3] == (R, 300, False))
-idx2 = A.pr_index({"merged": cache["merged"], "open_prs": {R: [{"number": 310, "branch": "batch/metis-0750",
-                                                                "closes": ["metis-0750"], "part": False, "cross": False}]}})
-check("0799: batch_pr — открытый PR пачки важнее слитого", T.batch_pr("metis-0750", idx2, [R])[:3] == (R, 310, False))
+check("0799: batch_pr — репозиторий не направления пачки не берём", T.batch_pr("metis-0750", bprs, ["latark/other"]) is None)
+check("0799: batch_pr — открытый PR пачки (ветка из open_prs)", T.batch_pr("metis-0751", bprs, None)[:3] == (R, 300, False))
+bprs2 = A.batch_prs({"merged": cache["merged"], "open_prs": {R: [{"number": 310, "branch": "batch/metis-0750",
+                                                                  "closes": ["metis-0750"], "part": False, "cross": False}]}})
+check("0799: batch_pr — открытый PR пачки важнее слитого", T.batch_pr("metis-0750", bprs2, [R])[:3] == (R, 310, False))
 check("0799: batch_pr — пустой и битый индекс без трассировки",
-      T.batch_pr("metis-0750", None) is None and T.batch_pr("metis-0750", {"x": [5, {"branch": "batch/metis-0750"}]}) is None)
+      T.batch_pr("metis-0750", None) is None and T.batch_pr("metis-0750", {"metis-0750": [5, ("x",), None]}) is None
+      and T.batch_pr("metis-0750", {"metis-0750": 5}) is None and T.batch_pr("metis-0750", [1]) is None)
 c, body = card("metis-0750", tasks, batch_pr=bp)
 check("0799: карточка пачки без поля pr — «PR пачки» по ветке batch/<id>, ветка и «слит»",
       c["PR пачки"] == f"https://github.com/{R}/pull/294" and c["Ветка"] == "batch/metis-0750"
@@ -239,6 +244,114 @@ check("0826: board_sync - Сводка: раздел «Слито, ждёт пр
 T.board_sync(P8, board8, os.path.join(ROOT, "st8b.json"), os.path.join(ROOT, "log8"), T0 + 9, pr_index={}, repos={"metis-pantheon": [R]})
 check("0826: board_sync - без слитого PR в индексе раздела нет",
       "Слито, ждёт приёмки" not in open(os.path.join(board8, "Сводка.md"), encoding="utf-8").read())
+
+# --- metis-0810: одно правило «PR пачки» для карточки (tasks.batch_pr), board-auto (boardtext.batch_branch_prs) и check
+# (pantheon.batch_outside): ветка batch/<id>, не форк, номер > 0, «часть» — PR пачки без закрытых задач, репозитории
+# направления пачки (own); открытый важнее слитого --------------------------------------------------------------------
+RO, RB = "latark/other", "latark/ba"
+tk10 = store(H("metis-0760", type="story", status="doing"),
+             H("metis-0761", type="story", status="doing", direction="athena-brokerassistant"),
+             H("metis-0762", parent="metis-0760", status="doing", mode="single"),
+             H("metis-0763", status="done"), H("metis-0764", status="done"), H("metis-0765", status="done"),
+             H("metis-0766", status="done"))
+
+
+def mpr(n, branch, body, **kw):
+    return dict({"number": n, "headRefName": branch, "body": body, "mergedAt": "2026-11-04T04:24:00Z", "oid": "f" * 40,
+                 "cross": False}, **kw)
+
+
+cache10 = {"merged": {R: [mpr(900, "batch/metis-0760", "Closes metis-0762"),
+                          mpr(400, "batch/metis-0760", "Closes metis-0762, metis-0763"),
+                          mpr(402, "batch/metis-0760", "Closes metis-0764\nчасть: остальное позже"),
+                          mpr(403, "batch/metis-0760", "Closes metis-0765", cross=True),
+                          {k: v for k, v in mpr(406, "batch/metis-0760", "Closes metis-0765").items() if k != "cross"},
+                          mpr(True, "batch/metis-0760", "Closes metis-0765"), mpr(0, "batch/metis-0760", "Closes metis-0765"),
+                          mpr(410, "batch/metis-0761", "Closes metis-0766")]},
+           "open_prs": {R: [{"number": 401, "branch": "batch/metis-0760", "closes": ["metis-0760", "metis-0763"],
+                             "part": False, "cross": False}],
+                        RO: [{"number": 500, "branch": "batch/metis-0760", "closes": ["metis-0765"], "part": False,
+                              "cross": False}]}}
+repos10 = {"metis-pantheon": [R], "athena-brokerassistant": ["Latark/BA"]}
+own10 = {sid: [r.lower() for r in repos10.get(tk10[sid][1]["direction"]) or []] for sid in ("metis-0760", "metis-0761")}
+cp10 = os.path.join(ROOT, "prs10.json")
+with open(cp10, "w", encoding="utf-8") as fh:
+    json.dump(cache10, fh)
+card10 = {sid: T.batch_pr(sid, A.batch_prs(cache10), own10[sid]) for sid in own10}
+board10 = B.batch_branch_prs(cp10, lambda sid: own10.get(sid))
+CHK = ("import json, sys; sys.path.insert(0, sys.argv[1]); import pantheon as p, tasks as T\n"
+       "d = json.load(open(sys.argv[2], encoding='utf-8'))\n"
+       "tk = {i: ('', h, '') for i, h in d['tasks'].items()}\n"
+       "print(json.dumps(p.batch_outside(T, tk, d['cache'], d.get('repos'))))\n")
+
+
+def outside_check(tasks_, cache_, repos_):
+    f = os.path.join(ROOT, "chk10.json")
+    with open(f, "w", encoding="utf-8") as fh:
+        json.dump({"tasks": {i: h for i, (_, h, _b) in tasks_.items()}, "cache": cache_, "repos": repos_}, fh)
+    env10 = {"PATH": os.environ["PATH"], "HOME": ROOT, "PANTHEON_HOME": os.path.join(ROOT, "pan10"),
+             "PANTHEON_STATE": os.path.join(ROOT, "st10"), "PANTHEON_VIEW": os.path.join(ROOT, "view10"), "TMPDIR": ROOT}
+    r = subprocess.run([PY311, "-I", "-c", CHK, LIB, f], env=env10, capture_output=True, text=True, timeout=120)
+    return json.loads(r.stdout) if r.returncode == 0 else ("сбой", r.stderr[-600:])
+
+
+chk10 = outside_check(tk10, cache10, repos10)
+c10, _ = card("metis-0760", tk10, batch_pr=card10["metis-0760"])
+check("0810: у пачки слитый (#900, больший номер) и открытый (#401) PR — открытый важнее: карточка и board-auto (мутант M11)",
+      card10["metis-0760"][:3] == (R, 401, False) and board10.get("metis-0760") == 401, (card10, board10))
+check("0810: одно правило — номер PR пачки у карточки и board-auto совпадает; репозиторий не направления (#500 latark/other, "
+      "#410 у пачки athena) — ни там, ни там",
+      {s: (card10[s] or (0, None))[1] for s in own10} == {s: board10.get(s) for s in own10} == {"metis-0760": 401,
+                                                                                              "metis-0761": None},
+      (card10, board10))
+check("0810: одно правило — «вне состава» карточки и строки check совпадают: только metis-0763; «часть» (#402), форк "
+      "(#403), строка без cross (#406), номер True и 0, чужой репозиторий (#500) задач не закрывают",
+      isinstance(chk10, list) and sorted({x[0] for x in chk10}) == ["metis-0763"]
+      and c10["Вне состава"] == ["[[metis-0763 x|metis-0763]]"] and all("latark/agent-kit#" in x[1] for x in chk10), (chk10, c10))
+chk_any = outside_check(tk10, cache10, None)
+check("0810: без [merge_repos] check берёт любые репозитории (как board-auto без own): тогда и #500 и #410",
+      isinstance(chk_any, list) and sorted({x[0] for x in chk_any}) == ["metis-0763", "metis-0765", "metis-0766"], chk_any)
+tk10["metis-0760"][1]["keep_outside"] = ["metis-0763"]
+check("0810: решение координатора — keep_outside у пачки снимает предупреждение check о задаче",
+      outside_check(tk10, cache10, repos10) == [], outside_check(tk10, cache10, repos10))
+del tk10["metis-0760"][1]["keep_outside"]
+check("0810: pr_index и batch_prs — PR с «часть» в индексе остаётся (ссылка у задачи), а PR пачки по нему задач не закрывает",
+      any(x["number"] == 402 for x in A.pr_index(cache10).get("metis-0764", []))
+      and [r for r in A.batch_prs(cache10)["metis-0760"] if r[1] == 402][0][3] == [])
+
+# --- metis-0810: board-auto (boardtext.batches) — поле pr важнее ветки (мутант M25 argus B) --------------------------
+bt10 = B.batches(store(H("metis-0760", type="story", status="doing", pr=f"{R}#77"),
+                       H("metis-0762", parent="metis-0760", status="doing")), {"metis-0760": 401})
+bt11 = B.batches(store(H("metis-0760", type="story", status="doing", pr="мусор"),
+                       H("metis-0762", parent="metis-0760", status="doing")), {"metis-0760": 401})
+check("0810: board-auto — поле pr пачки важнее PR с ветки; поле не по шаблону — номер с ветки",
+      bt10 and bt10[0][4] == 77 and bt11 and bt11[0][4] == 401, (bt10, bt11))
+
+# --- metis-0810: keep_outside — поле пачки, только id задач; цикл пачек через parent ---------------------------------
+s10a, _ = T.task_new(PH, T0, "metis-pantheon", "Пачка А", kind="story")
+s10b, _ = T.task_new(PH, T0, "metis-pantheon", "Пачка Б", kind="story")
+s10c, _ = T.task_new(PH, T0, "metis-pantheon", "Пачка В", kind="story")
+t10, _ = T.task_new(PH, T0, "metis-pantheon", "Задача вне пачки")
+T.task_set(PH, T0, s10a, {"keep_outside": [t10]})
+check("0810: keep_outside у пачки — пишется списком", T.load_tasks(PH, T.WORK_TYPES)[s10a][1].get("keep_outside") == [t10])
+err = refused(lambda: T.task_set(PH, T0, t10, {"keep_outside": [t10]}))
+check("0810: keep_outside у обычной задачи — отказ", err and "поле пачки" in err, err)
+err = refused(lambda: T.task_set(PH, T0, s10a, {"keep_outside": [s10b]}))
+check("0810: keep_outside с id пачки — отказ «не задача»", err and "не задача" in err, err)
+T.task_set(PH, T0, s10b, {"parent": s10a, "mode": "single"})
+err = refused(lambda: T.task_set(PH, T0, s10a, {"parent": s10b, "mode": "single"}))
+check("0810: цикл пачек A.parent=B при B.parent=A — отказ с кругом, parent прежний",
+      err and "цикл" in err and f"{s10a} → {s10b} → {s10a}" in err
+      and not T.load_tasks(PH, T.WORK_TYPES)[s10a][1].get("parent"), err)
+T.task_set(PH, T0, s10c, {"parent": s10b, "mode": "single"})
+err = refused(lambda: T.task_set(PH, T0, s10a, {"parent": s10c, "mode": "single"}))
+check("0810: цикл через три пачки (A → В → Б → A) — отказ", err and f"{s10a} → {s10c} → {s10b} → {s10a}" in err, err)
+cyc = store(H("metis-0770", type="story", status="doing", parent="metis-0771"),
+            H("metis-0771", type="story", status="doing", parent="metis-0770"),
+            H("metis-0772", type="story", status="doing", parent="metis-0770"))
+w = [x for x in T.board_problems(cyc, T0)[1] if "цикл" in x[1]]
+check("0810: check — пачки в цикле (правка руками мимо task set): предупреждение у обеих; ребёнок цикла — нет",
+      sorted(x[0] for x in w) == ["metis-0770", "metis-0771"], w)
 
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)
