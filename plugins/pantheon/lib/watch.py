@@ -188,11 +188,12 @@ LIVE_SUBAGENT_GRACE = 120      # с после старта процесса: ж
 def live_subagents(a, t):
     """Живые субагенты окна по subagents/*.meta.json (metis-0864): без «finished», журнал писался после старта нынешнего
     процесса (+ LIVE_SUBAGENT_GRACE) и не раньше LIVE_SUBAGENT_MAX назад. Субагенты, оборванные перезапуском, остаются
-    без «finished» навсегда, но их журнал старше старта процесса. → отсортированные имена."""
+    без «finished» навсегда, но их журнал старше старта процесса. Старт — P.session_started (Д2 ревью #332): startedAt
+    claude agents без видимого процесса — createdAt задания, он старше прошлых перезапусков. → отсортированные имена."""
     tp = P.transcript_path(a)
     if not tp:
         return []
-    started = float(a.get("startedAt") or 0) / 1000
+    started = P.session_started(a)
     out = []
     try:
         it = os.scandir(os.path.join(tp[:-len(".jsonl")], "subagents"))
@@ -218,8 +219,8 @@ def live_subagents(a, t):
 def live_work(a, t):
     """Почему окно сейчас нельзя поднимать заново (claude respawn обрывает его ход и субагентов), или None (metis-0864).
     05.11 окно metis-pantheon четыре раза ждало вашего «да» на команду, а возобновление ждущих (wake-waiting) раз в час
-    перезапускало его: вопрос пропадал, субагенты гибли. Работа окна — ждёт разрешения или ответа на вопрос (последний
-    tool_use без tool_result), живые субагенты и фоновые задачи (claude agents, inFlight из state.json, meta.json
+    перезапускало его: вопрос пропадал, субагенты гибли. Работа окна — ждёт разрешения или ответа на вопрос (tool_use
+    последнего ответа без tool_result, pending_tool), живые субагенты и фоновые задачи (claude agents, inFlight из state.json, meta.json
     субагентов). Процесса нет (noProcess) — обрывать нечего."""
     if a.get("noProcess"):
         return None
@@ -415,19 +416,30 @@ def clean_why(v):
 
 
 def pending_tool(a):
-    """Чего ждёт сессия по её журналу: последний tool_use без tool_result → «Инструмент → цель» или None."""
+    """Чего ждёт сессия по её журналу: tool_use последнего ответа (message assistant) без tool_result → «Инструмент →
+    цель» или None. Открытым считается только tool_use последнего ответа (ревью argus #332 Д1): tool_use-сирота
+    раньше в хвосте (оборванный ход, после которого сессия жила дальше) — не работа, иначе окно числилось бы занятым
+    навсегда. Один ответ — записи журнала с одним message.id (параллельные вызовы Claude Code пишет по записи на блок);
+    без id запись — отдельный ответ. Записи боковой ветки (isSidechain) не в счёт."""
     tp = P.transcript_path(a)
     if not tp:
         return None
     try:
         C = P.ctx_mod()
-        used, results, order = {}, set(), []
-        for d in C.entries(C.tail_lines(tp, 1_000_000)):
-            items = (d.get("message") or {}).get("content")
+        used, results, order, last = {}, set(), [], None
+        for n, d in enumerate(C.entries(C.tail_lines(tp, 1_000_000))):
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            items = msg.get("content")
+            if msg.get("role") == "assistant" and not d.get("isSidechain"):
+                mid = msg.get("id") or ("entry", n)
+                if mid != last:  # новый ответ: tool_use прежних ответов уже не «ход не закончен»
+                    used, order, last = {}, [], mid
+            elif msg.get("role") == "assistant":
+                continue
             for x in items if isinstance(items, list) else []:
                 if not isinstance(x, dict):
                     continue
-                if x.get("type") == "tool_use" and x.get("id"):
+                if x.get("type") == "tool_use" and x.get("id") and msg.get("role") == "assistant":
                     used[x["id"]] = x
                     order.append(x["id"])
                 elif x.get("type") == "tool_result":
