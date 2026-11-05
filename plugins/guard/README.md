@@ -24,7 +24,18 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; хуки 
   в managed-settings.json: Claude Code вливает их в denyRead песочницы (тест — `test_canaries.py`).
 - **Grep Пританея по `.git`** держит только песочница.
 - **Задачи чужого направления** (решение 28.10, п. 4). Роль может вести задачи другого направления через `pantheon task`: проверка `task_targets` снята. Доску и owner-log пишет только плановый проход, «да» владельца — только owner-log.
-- **Ключи демона Claude Code** (решение 28.10, metis-0287). `~/.claude/daemon` (roster.json, control.key) окнам ролей открыт: с ключами PTY можно напечатать текст в фоновую сессию, в том числе в окно Пританея, и owner-log может принять его за ввод владельца. Только намеренно или по внедрённой просьбе; владелец счёл риск малым.
+- **Ключи демона Claude Code** (решение 28.10, metis-0287). `~/.claude/daemon` (roster.json, control.key) окнам ролей открыт песочницей: с ключами PTY можно напечатать текст в фоновую сессию, в том числе в окно Пританея, и owner-log может принять его за ввод владельца. Только намеренно или по внедрённой просьбе; владелец счёл риск малым.
+  С 06.11 (metis-0871, «да» владельца) правило daemon-roster не даёт ролям, субагентам и главной сессии окна роли
+  прочитать `roster.json` целиком по ошибке: 06.11 dev-opus при сверке вывел записи с ключами rvAuth и ptyAuth в
+  транскрипт. Отказ — Read и Grep по файлу (Grep — и по папке `daemon`). Bash — по схеме metis-0823: в тексте команды
+  есть `roster.json` и слово `daemon`, и имя файла стоит среди слов команды или в файле входного перенаправления, код
+  идёт интерпретатору из stdin (`python3 - <<EOF`, `bash <<EOF`) или команду не разобрать. Текст сообщений (`git
+  commit -m` и `-F -`, `gh pr --body`, `pantheon task --note`, `echo`) и шаблон поиска (`grep -rn daemon/roster.json
+  plugins/`) путём не считаются. Нужные поля без ключей печатает `pantheon roster`: JSON с updatedAt и у каждого
+  воркера id, pid, startedAt. Код Пантеона читает файл только через `P.roster_safe()`. Остаток: Grep по папке выше
+  (`~/.claude`, `~`), имя глобом (`daemon/*.json`), путь из `$(…)` и чтение своим скриптом правило не ловит — это
+  намеренный обход, граница — песочница.
+  `control.key` и сессии владельца без роли правило не трогает.
 - **Edit/Write песочница не держит.** Их судят protect-config (профили оболочки, `~/.ssh`, настройки git, LaunchAgents,
   `~/.claude.json`, `~/.local/bin`, защиты в `~/.claude`), pantheon-acl, private и domain (остальное в `~/.*` и
   `~/Library`). Сессии владельца без роли domain не ограничивает.
@@ -108,7 +119,7 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; хуки 
 
 guard ловит **ошибки агента**: запись чужой памяти ролей и Edit/Write в `~/.*` и `~/Library` мимо protect-config (domain), правку чужого файла Пританея, файла задачи
 мимо `pantheon task` и доски или журнала ваших слов любой сессией Claude (pantheon-acl), пульт (кроме запуска окон), `pantheon approve` и `pantheon merge run` ролью, правку защит не той ролью (protect-config), чтение ключей
-(tg-secret; ролям из демона tg-readd — только `status` и `kickstart`), пометки об авторстве Claude; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
+(tg-secret; ролям из демона tg-readd — только `status` и `kickstart`; реестр демона Claude Code `roster.json` целиком — daemon-roster, поля без ключей — `pantheon roster`), пометки об авторстве Claude; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
 ключи git-crypt, журнал Пританея — только hq, chiron в окне Пританея и mnemo-brain; ключи — никому из ролей; обход папки выше
 (metis-0823): поиск — `grep -r`, `rg`, `ag`, `ack`, Grep, `find -exec` — отказ, только если внутри `me/` или журнал и они не
 исключены (`--exclude-dir=me`, `rg -g '!me'`, Grep с glob `!me/**`, журнал — `--exclude-dir=owner-log`), ключ git-crypt поиск

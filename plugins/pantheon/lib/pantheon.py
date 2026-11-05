@@ -164,6 +164,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
+  pantheon roster                       реестр демона Claude Code без ключей сокетов: JSON с updatedAt и у каждого воркера
+                                        id, pid, startedAt; сам файл агентам закрыт (guard daemon-roster, metis-0871)
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
@@ -3330,23 +3332,58 @@ def agents_all():
     return reconcile_agents(data) if isinstance(data, list) else data
 
 
-def daemon_workers():
-    """Процессы фоновых сессий из реестра демона Claude Code ~/.claude/daemon/roster.json: короткий id → pid. Читаем
-    только pid (в записи есть и жетоны — их не берём). None — реестра нет или он не читается: тогда о процессах
-    ничего не утверждаем."""
-    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
-    if not isinstance(d, dict) or not isinstance(d.get("workers"), dict):
+ROSTER_WORKER_FIELDS = ("pid", "startedAt")  # из записи воркера; ключи сокетов (rvAuth, ptyAuth …) — нет
+
+
+def roster_safe():
+    """Реестр демона Claude Code ~/.claude/daemon/roster.json без ключей (metis-0871): {"updatedAt": …, "workers":
+    {короткий id: {"pid": …, "startedAt": …}}}. В записях воркеров лежат ключи локальных сокетов демона (rvAuth,
+    ptyAuth): их не берём — только поля из ROSTER_WORKER_FIELDS и только числа и строки. Это единственное место, где
+    Пантеон читает файл; агентам guard его целиком не даёт (правило daemon-roster), нужные поля — `pantheon roster`.
+    None — реестра нет или он не объект; workers None — поле не объект (о процессах тогда ничего не утверждаем)."""
+    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), False)  # нет или битый — False, не {}
+    if not isinstance(d, dict):
         return None
-    return {str(k): w.get("pid") for k, w in d["workers"].items() if isinstance(w, dict)}
+
+    def scalar(v):
+        return v if isinstance(v, (int, float, str)) and not isinstance(v, bool) else None
+    w = d.get("workers")
+    workers = {str(k): {f: scalar(v.get(f)) for f in ROSTER_WORKER_FIELDS} for k, v in w.items()
+               if isinstance(v, dict)} if isinstance(w, dict) else None
+    return {"updatedAt": scalar(d.get("updatedAt")), "workers": workers}
+
+
+def roster_cmd(rest):
+    """pantheon roster — реестр демона без ключей (roster_safe) одним JSON в stdout. Реестра нет или он не читается —
+    причина последней строкой в stderr, код 1."""
+    if rest:
+        print("pantheon roster: аргументов нет — печатает updatedAt и у каждого воркера id, pid, startedAt",
+              file=sys.stderr)
+        return 2
+    r = roster_safe()
+    if r is None:
+        print("pantheon roster: реестра демона нет или он не читается (~/.claude/daemon/roster.json)", file=sys.stderr)
+        return 1
+    print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
+    return 0
+
+
+def daemon_workers():
+    """Процессы фоновых сессий из реестра демона Claude Code: короткий id → pid (roster_safe — без ключей). None —
+    реестра нет или он не читается: тогда о процессах ничего не утверждаем."""
+    r = roster_safe()
+    if r is None or r["workers"] is None:
+        return None
+    return {k: w["pid"] for k, w in r["workers"].items()}
 
 
 def roster_changed_at():
     """Когда демон последний раз переписал реестр (updatedAt roster.json, мс → с) или None. Демон пишет его при смене
     воркеров (старт, respawn, самоперезапуск), а не по таймеру: свежая правка — процесс мог только что смениться."""
-    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
+    r = roster_safe()
     try:
-        return float(d.get("updatedAt")) / 1000
-    except (AttributeError, TypeError, ValueError):
+        return float(r["updatedAt"]) / 1000
+    except (TypeError, ValueError):
         return None
 
 
@@ -3358,8 +3395,9 @@ def session_started(a, t=None):
     окна с песочницей, reconcile_agents (1)), startedAt старше прошлых перезапусков. Поэтому — самое позднее из
     startedAt записи, startedAt воркера этой сессии в реестре демона (roster.json: время выдачи процесса, respawn тоже)
     и записи реестра имён с её jobId или sessionId. Позже нынешнего процесса там времени нет: каждую из этих записей
-    пишет выдача процесса этой сессии, старая запись — раньше. Ключи жетонов не читаются. Значения не конечные
-    (nan, inf: startedAt 1e400 читается как inf) и позже t (по умолчанию now()) отбрасываются (ревью argus #337)."""
+    пишет выдача процесса этой сессии, старая запись — раньше. Реестр демона — через roster_safe: ключи сокетов не
+    читаются (metis-0871). Значения не конечные (nan, inf: startedAt 1e400 читается как inf) и позже t (по умолчанию
+    now()) отбрасываются (ревью argus #337)."""
     t = now() if t is None else t
 
     def ms(v):
@@ -3370,10 +3408,9 @@ def session_started(a, t=None):
         return x if math.isfinite(x) and x <= t else 0.0
     best = ms(a.get("startedAt"))
     short, sid = str(a.get("id") or ""), a.get("sessionId")
-    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
-    w = d.get("workers") if isinstance(d, dict) else None
-    if short and isinstance(w, dict) and isinstance(w.get(short), dict):
-        best = max(best, ms(w[short].get("startedAt")))
+    w = (roster_safe() or {}).get("workers") or {}
+    if short and short in w:
+        best = max(best, ms(w[short]["startedAt"]))
     sd = os.path.join(HOME, ".claude", "sessions")
     with contextlib.suppress(OSError):
         for f in os.listdir(sd):
@@ -7658,6 +7695,8 @@ def main(argv):
         return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
         return watch_cmd(cmd, rest)
+    if cmd == "roster":
+        return roster_cmd(rest)
     if cmd == "usage":
         return usage_report(rest)
     if cmd == "metrics":
