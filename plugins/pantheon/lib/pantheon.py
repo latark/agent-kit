@@ -271,6 +271,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -3271,7 +3272,7 @@ def roster_changed_at():
         return None
 
 
-def session_started(a):
+def session_started(a, t=None):
     """Когда нынешний процесс взял сессию a, в с, или 0 (metis-0864, ревью argus #332 Д2). claude agents пишет startedAt
     из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: hermes-alex
     7c48114d без процесса — startedAt = createdAt state.json; zeus 7853263b с процессом после respawn — время respawn,
@@ -3279,12 +3280,16 @@ def session_started(a):
     окна с песочницей, reconcile_agents (1)), startedAt старше прошлых перезапусков. Поэтому — самое позднее из
     startedAt записи, startedAt воркера этой сессии в реестре демона (roster.json: время выдачи процесса, respawn тоже)
     и записи реестра имён с её jobId или sessionId. Позже нынешнего процесса там времени нет: каждую из этих записей
-    пишет выдача процесса этой сессии, старая запись — раньше. Ключи жетонов не читаются."""
+    пишет выдача процесса этой сессии, старая запись — раньше. Ключи жетонов не читаются. Значения не конечные
+    (nan, inf: startedAt 1e400 читается как inf) и позже t (по умолчанию now()) отбрасываются (ревью argus #337)."""
+    t = now() if t is None else t
+
     def ms(v):
         try:
-            return float(v) / 1000
+            x = float(v) / 1000
         except (TypeError, ValueError):
             return 0.0
+        return x if math.isfinite(x) and x <= t else 0.0
     best = ms(a.get("startedAt"))
     short, sid = str(a.get("id") or ""), a.get("sessionId")
     d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)

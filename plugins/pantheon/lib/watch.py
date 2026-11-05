@@ -193,7 +193,7 @@ def live_subagents(a, t):
     tp = P.transcript_path(a)
     if not tp:
         return []
-    started = P.session_started(a)
+    started = P.session_started(a, t)
     out = []
     try:
         it = os.scandir(os.path.join(tp[:-len(".jsonl")], "subagents"))
@@ -420,7 +420,7 @@ def pending_tool(a):
     цель» или None. Открытым считается только tool_use последнего ответа (ревью argus #332 Д1): tool_use-сирота
     раньше в хвосте (оборванный ход, после которого сессия жила дальше) — не работа, иначе окно числилось бы занятым
     навсегда. Один ответ — записи журнала с одним message.id (параллельные вызовы Claude Code пишет по записи на блок);
-    без id запись — отдельный ответ. Записи боковой ветки (isSidechain) не в счёт."""
+    без id запись — отдельный ответ. Ответом считается только запись type=assistant с model ≠ <synthetic>. Записи боковой ветки (isSidechain) не в счёт."""
     tp = P.transcript_path(a)
     if not tp:
         return None
@@ -430,6 +430,8 @@ def pending_tool(a):
         for n, d in enumerate(C.entries(C.tail_lines(tp, 1_000_000))):
             msg = d.get("message") if isinstance(d.get("message"), dict) else {}
             items = msg.get("content")
+            if msg.get("role") == "assistant" and (d.get("type") != "assistant" or msg.get("model") == "<synthetic>"):
+                continue  # ревью argus #337: ответ — только type=assistant; <synthetic> (ошибка API, прерывание) не ответ
             if msg.get("role") == "assistant" and not d.get("isSidechain"):
                 mid = msg.get("id") or ("entry", n)
                 if mid != last:  # новый ответ: tool_use прежних ответов уже не «ход не закончен»

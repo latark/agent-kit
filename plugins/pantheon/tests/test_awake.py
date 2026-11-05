@@ -1524,6 +1524,48 @@ def test_inbox_hq_led_skipped():
         check("hermes-site" not in alerts_text(ib.e), f"тревога о направлении без координатора: {alerts_text(ib.e)!r}")
 
 
+def test_pending_tool_only_real_answers_0872():
+    """metis-0872 (долг argus #337): новым ответом считается только запись type=assistant с model ≠ <synthetic>.
+    Запись api-request-blob и синтетический ответ (ошибка API, прерывание) не сбрасывают открытый tool_use."""
+    use = {"type": "assistant", "message": {"id": "m1", "role": "assistant", "model": "claude-x", "content": [
+        {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "gh pr checks 1"}}]}}
+    blob = {"type": "api-request-blob", "message": {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "x"}]}}
+    synth = {"type": "assistant", "message": {"id": "m3", "role": "assistant", "model": "<synthetic>",
+                                              "content": [{"type": "text", "text": "No response requested."}]}}
+    real = {"type": "assistant", "message": {"id": "m4", "role": "assistant", "model": "claude-x",
+                                             "content": [{"type": "text", "text": "готово"}]}}
+    for what, tail, want in (("api-request-blob", [blob], "Bash → gh pr checks 1"),
+                             ("synthetic", [synth], "Bash → gh pr checks 1"),
+                             ("настоящий ответ", [real], None)):
+        e = Env()
+        a = e.agent("hermes-site", "blocked")
+        _transcript(e, a, [use, *tail])
+        got = W.pending_tool(a)
+        check(got == want, f"0872: {what}: pending_tool={got!r}, ждали {want!r}")
+
+
+def test_session_started_finite_and_not_future_0872():
+    """metis-0872 (долг argus #337): startedAt 1e400 → inf делал все субагенты мёртвыми; значения не isfinite и позже
+    t отбрасываются, остаётся лучшее из годных."""
+    for what, v, want in (("inf", "1e400", 0.0), ("nan", "nan", 0.0), ("-inf", "-1e400", 0.0),
+                          ("будущее", (MON + 500) * 1000, 0.0), ("годное", (MON - 50) * 1000, MON - 50),
+                          ("ровно t", MON * 1000, MON)):
+        e = Env()
+        a = e.agent("hermes-site", "working")
+        a["startedAt"] = v
+        got = P.session_started(a, MON)
+        check(got == want, f"0872: {what}: session_started={got!r}, ждали {want!r}")
+    # реестр демона: плохое значение не затирает годное из startedAt записи
+    e = Env()
+    a = e.agent("hermes-site", "working")
+    a["startedAt"] = (MON - 70) * 1000
+    os.makedirs(os.path.join(e.home, ".claude", "daemon"), exist_ok=True)
+    json.dump({"workers": {a["id"]: {"startedAt": "1e400"}}}, open(os.path.join(e.home, ".claude", "daemon", "roster.json"), "w"))
+    got = P.session_started(a, MON)
+    check(got == MON - 70, f"0872: inf из roster.json затёр годное: {got!r}")
+    check(P.session_started(a) == MON - 70, "0872: t по умолчанию (now()) сломал годное значение")
+
+
 # --- крючки в дежурном -------------------------------------------------------------------
 
 def test_watch_hooks_wired():
