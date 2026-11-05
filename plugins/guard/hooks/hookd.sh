@@ -17,7 +17,7 @@
 # Клиента этой версии нет — сборка в фоне, этот вызов идёт медленным путём; неудачная сборка оставляет метку
 # client-$SRC.failed, и фон больше не запускается (повтор — hookd-build.sh --force).
 # Обработчик не guard — медленный путь python.sh <обработчик>.py: демон пока судит только guard.
-SRC=92af9c3f39d76aeb
+SRC=20b3b8bcb1e6b06e
 
 h=${0%/*}
 case $h in
@@ -40,10 +40,14 @@ if [ -n "${HOME:-}" ]; then
     if [ -f "$c" ] && [ -x "$c" ]; then
         want= have=
         { IFS= read -r want <"$c.sum"; } 2>/dev/null
+        # как sum() в hookd-build.sh: /sbin/sha256 (macOS 14+), sha256sum (Linux), shasum (macOS старше 14)
         if [ -x /sbin/sha256 ]; then
             have=$(/sbin/sha256 -q "$c" 2>/dev/null)
         elif [ -x /usr/bin/sha256sum ]; then
             have=$(/usr/bin/sha256sum "$c" 2>/dev/null)
+            have=${have%% *}
+        elif [ -x /usr/bin/shasum ]; then
+            have=$(/usr/bin/shasum -a 256 "$c" 2>/dev/null)
             have=${have%% *}
         fi
         if [ ${#have} -eq 64 ] && [ "$have" = "$want" ]; then
@@ -59,8 +63,10 @@ if [ -n "${HOME:-}" ]; then
     else
         why=no-client
     fi
-    if [ "$why" != client-exec ]; then
-        if ! [ -e "$c.failed" ] && ! [ -e "$c.lock" ]; then
+    if [ "$why" != client-exec ] && ! [ -e "$c.failed" ]; then
+        # замок сборки старше 2 мин брошен (сборку убили SIGKILL): hookd-build.sh снимает его сам — без этой проверки
+        # фон не запускался бы никогда, и все вызовы шли бы медленным путём
+        if ! [ -e "$c.lock" ] || [ -n "$(/usr/bin/find "$c.lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
             /bin/sh "$h/hookd-build.sh" </dev/null >/dev/null 2>&1 &
         fi
     fi

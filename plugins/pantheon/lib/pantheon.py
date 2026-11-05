@@ -16,6 +16,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
+  pantheon qmd where "вопрос" [--collection X]   где лежит (metis-0856): коллекция | путь | заголовок | направление-хозяин,
+                                        без текста документов; для окна Пританея — по коллекциям проектов направлений
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): ставит
                                         выпуск, если запись в releases.json каталога совпала с ним (версия и дерево);
                                         тесты — в GitHub Actions до слияния, локального прогона нет (п. 8, 27.10);
@@ -74,6 +76,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         шапка, name = папка, description ≤ 1024, ссылки на файлы (metis-0258); directions.toml: coordinator не true/false — ошибка,
                                         у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
                                         тревога об открытом координаторе)
+  pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
+                                        и размеры берёт с холста; в расписании — command =
+                                        "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
+                                        при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
@@ -113,6 +119,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     пачку», «новая пачка из N задач», «дубли — объединить?»: общие файлы, похожесть, ссылки, общий PR; без
                     модели. Ничего не меняет; --apply прикрепляет только «уверенно» в существующую пачку
   pantheon batch-suggest run [--force]  плановая сводка раз в 3–4 суток → Доска/Пачки-предложения.md (задача расписания)
+  pantheon task failures [--days 7]   (metis-0859) сводка по классам: счётчики строк журнала «провал: <класс> — <довод>»
+                    за N дней (непонятная задача, неверный подход, не хватило контекста, трудная логика, прочее) и id задач
   pantheon task overlap ID   перед раздачей (metis-0665): touches задачи против живых (doing, review) задач её
                     направления и файлов открытых PR его репозиториев ([merge_repos] policy.toml; gh, не ответил — кэш
                     планового прохода, нет и его — строка «не проверено»); пересечение — выбор с командами: очередь
@@ -161,7 +169,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
-  pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
+  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel   технический перезапуск всех сессий
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
@@ -475,6 +483,33 @@ def lock(name, block=True):
 def locked(name):
     with lock(name, block=False) as got:
         return not got
+
+
+def lock_held(name):
+    """Держит ли кто замок name — для показа (metis-0266). Файл замка открывается только на чтение и проверяется
+    LOCK_SH|LOCK_NB: чужой LOCK_EX отказывает, создавать и писать ничего не нужно, так что окно с песочницей, куда в
+    STATE/locks не пишут (pantheon jobs), не падает с PermissionError. → True — держат; False — свободен или файла нет
+    (замок не брали); None — не знаю: файл не читается, подложена ссылка (O_NOFOLLOW) или это не обычный файл."""
+    p = path(HQ_RW, "locks", name + ".lock") if hq_lock_name(name) else path("locks", name + ".lock")
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def read_json(p, default=None):
@@ -1077,6 +1112,7 @@ def _fp_board_auto():
     правки; открытые PR и неделя — по содержимому кэша и целым процентам (fetch и строка статуса пишут их часто)."""
     B = boardtext_mod()
     return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
+                                                        ("pr_stale", B.pr_stale(path("autoclose-prs.json"))),
                                                         ("week", board_week())]
 
 
@@ -1690,15 +1726,24 @@ def status():
     lines.append(f"сбоев guard за сутки: {n_fail}")
     if n_fail:
         warn.append("сбои guard")
-    plug = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "managed-settings.json")
+    # сверка — с проверенным деревом guard (verified.json), как у прохода (merge.managed_source), а не с клоном маркетплейса:
+    # клон впереди выпуска, и status показывал «отстали» там, где проход ничего не покажет (metis-0718)
     if not os.path.exists(MANAGED):
         lines.append("управляемые настройки: НЕ установлены (README guard, sudo)")
         warn.append("управляемые настройки")
-    elif open(MANAGED, "rb").read() != (open(plug, "rb").read() if os.path.exists(plug) else b""):
-        lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
-        warn.append("управляемые настройки")
     else:
-        lines.append("управляемые настройки: установлены, совпадают с guard")
+        try:
+            src = merge_mod().managed_source()
+        except Exception:  # noqa: BLE001 — сбой разбора не ломает экран
+            src = None
+        if src is None:
+            lines.append("управляемые настройки: проверенного дерева guard нет — сверить не с чем (pantheon plugins accept)")
+            warn.append("управляемые настройки")
+        elif open(MANAGED, "rb").read() != src[1]:
+            lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
+            warn.append("управляемые настройки")
+        else:
+            lines.append("управляемые настройки: установлены, совпадают с guard")
     section("Защиты", lines)
 
     # синхронизация ~/.claude
@@ -2991,7 +3036,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
                "pantheon jobs *", "pantheon domains build", "pantheon roles build", "pantheon stop *",
                "pantheon resume *", "pantheon pause *", "pantheon restart *", "pantheon saved *", "pantheon who",
-               "pantheon agents", "sessync find", "sessync find *"]
+               "pantheon agents", "sessync find", "sessync find *", "pantheon qmd where *"]
+# `pantheon qmd where` (metis-0856, «да» владельца 05.11 19:47): поиск «где лежит» по коллекциям проектов идёт по HTTP
+# в местную службу qmd (127.0.0.1, порт из qmd.toml), а у песочницы штаба сети нет — поэтому мимо песочницы. Команда
+# печатает только коллекцию, путь, заголовок и хозяина, без текста; закрытые [hq].closed_collections не отдаёт.
 # `sessync find` (metis-0566, решение владельца 27.10): поиск прошлых разговоров читает транскрипты ~/.claude/projects, а
 # окну штаба они закрыты — поэтому только эта команда и только здесь, мимо песочницы; вывод проходит маску ключей в самом
 # sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
@@ -4305,6 +4353,85 @@ def who_is_who_alert(**kw):
     return line
 
 
+# --- холст «Кто есть кто.canvas» строится кодом (metis-0825, lib/whocanvas.py) ---------------------
+_WHOCANVAS = None
+
+
+def whocanvas_mod():
+    global _WHOCANVAS
+    if _WHOCANVAS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_whocanvas", os.path.join(LIB, "whocanvas.py"))
+        _WHOCANVAS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_WHOCANVAS)
+    return _WHOCANVAS
+
+
+def who_canvas_inputs(agents=None, reg_path=None):
+    """(роли {имя: файл}, направления [{name, short}], статусы задач {id: статус}) для пересборки холста."""
+    W, T = whocanvas_mod(), tasks_mod()
+    agents = agents or AGENTS
+    roles = {}
+    if os.path.isdir(PLUGIN_ROLES):  # шаблоны плагина, ещё не собранные в agents, минус отложенные
+        roles.update({f[:-5]: os.path.join(PLUGIN_ROLES, f) for f in os.listdir(PLUGIN_ROLES)
+                      if f.endswith(".tmpl") and f[:-5] not in ROLES_DEFERRED
+                      and os.path.isfile(os.path.join(PLUGIN_ROLES, f))})
+    if os.path.isdir(agents):
+        roles.update({f[:-3]: os.path.join(agents, f) for f in os.listdir(agents)
+                      if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))})
+    with open(reg_path or os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+        reg = tomllib.load(fh)
+    dirs = [{"name": d["name"], "short": str(d.get("short") or "")} for d in reg.get("direction") or []
+            if isinstance(d.get("name"), str)]
+    want, statuses = set(W.task_refs()), {}
+    for fp in T.task_files(PANTHEON):
+        tid = os.path.basename(fp)[:-3]
+        if tid in want:
+            try:
+                statuses[tid] = str((T.read(fp)[0] or {}).get("status") or "")
+            except (T.HeaderError, OSError, UnicodeDecodeError):
+                pass
+    return roles, dirs, statuses
+
+
+def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None):
+    """Пересобрать холст, если изменились роли, реестр или статус задач из карточек. 'written' | 'same' | 'unchanged' |
+    'skip' (нет ни холста, ни памятки, ни реестра — вести нечего)."""
+    canvas = os.path.join(PANTHEON, whocanvas_mod().CANVAS_NAME)
+    reg_path = reg_path or os.path.join(PANTHEON, "directions.toml")
+    if not os.path.isfile(reg_path) or not (os.path.exists(canvas) or os.path.isfile(os.path.join(PANTHEON, WHO_MEMO))):
+        return "skip"
+    roles, dirs, statuses = who_canvas_inputs(agents, reg_path)
+    return whocanvas_mod().sync(canvas, path("who-canvas.json"), roles, dirs, statuses, force=force,
+                                manual_out=manual_out)
+
+
+def who_canvas_cmd(rest):
+    """pantheon who-canvas [--force] — зовёт scripts/who-canvas.sh из расписания (every = 5, hosts = primary; самой
+    команды нет в TICK_SUBCOMMANDS, parse_command пускает только скрипт плагина): пересборка только при смене
+    входов (отпечаток в STATE/who-canvas.json), так что обычный проход ничего не пишет. Холст не читается или сбой —
+    тревога, файл не затирается, код 1. В тик не вшито: tick() входит в сборку окон (ядро, metis-0404)."""
+    if [a for a in rest if a != "--force"]:
+        print("использование: pantheon who-canvas [--force]", file=sys.stderr)
+        return 2
+    try:
+        manual = []
+        got = who_canvas_sync(force="--force" in rest, manual_out=manual)
+    except Exception as e:
+        msg = f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})"
+        alert_once("who-canvas", type(e).__name__, msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
+    clear_once("who-canvas")
+    for nid in manual:  # правка руками (текст, цвет, подпись группы): один раз на состояние карточки
+        alert_once("who-canvas-manual-" + nid, "1",
+                   f"Кто есть кто.canvas: карточка {nid} правлена руками, код её не обновляет; "
+                   "чтобы вернуть автосборку — удалите карточку", "pantheon")
+    if got == "written":
+        print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
+    return 0
+
+
 def roles_newest():
     files = [os.path.join(PANTHEON, "directions.toml")]
     for d in (AGENTS, PARTS, PLUGIN_ROLES, PLUGIN_PARTS):
@@ -5036,6 +5163,11 @@ def metrics_on_close(T, tid):
         return
     try:
         metrics_mod().record(metrics_ctx(), T.load_tasks(PANTHEON, T.WORK_TYPES), tid)
+    except PermissionError:
+        # metis-0820: так всегда в окне роли (песочница). «предупреждение · … PermissionError» роли читали как сбой
+        # task set и заводили задачи (hermes-0018, 05.11), хотя статус записан, а строку пишет плановый проход (sync)
+        print(f"учёт {tid}: окно роли в metrics/ не пишет — строку учёта допишет плановый проход доски. Статус задачи "
+              f"записан, это не сбой", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 — учёт не должен ломать закрытие задачи
         print(f"предупреждение · учёт {tid} не записан ({type(e).__name__}): допишет плановый проход доски",
               file=sys.stderr)
@@ -6902,6 +7034,7 @@ def _attach(name):
     return m
 
 
+_attach("review_rules")   # правило вердиктов argus — ядро защит (metis-0858); review.py берёт его через P
 _attach("review")
 _attach("plugins")
 _attach("taskcli")
@@ -6971,6 +7104,8 @@ def main(argv):
         return sync_answers()
     if cmd == "autoclose":
         return autoclose_cmd(rest)
+    if cmd == "who-canvas":
+        return who_canvas_cmd(rest)
     if cmd == "batch-suggest":
         return batch_suggest_run(rest)
     if cmd == "status":

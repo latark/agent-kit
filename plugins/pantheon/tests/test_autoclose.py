@@ -549,6 +549,102 @@ def test_fetch_budget():
         shutil.rmtree(tmp, True)
 
 
+def test_fetch_keeps_rows_on_error():
+    """metis-0808: ошибка gh по репозиторию (401, TLS, EOF, время) оставляет его прежние слитые и открытые PR, а в кэше —
+    stale[repo] со временем последнего успеха; один завислый репозиторий не съедает проход; давний успех идёт первым."""
+    tmp, home, state, gh, env = make()
+    try:
+        cf, sf = os.path.join(state, "p.json"), os.path.join(state, "s.json")
+        repos = ["a/b", "c/d"]
+        for r in repos:
+            write_gh(gh, r, "merged", [pr(5, "metis-0808", "Closes metis-0808", T0)])
+            write_gh(gh, r, "open", [{"number": 9, "headRefName": "x", "headRefOid": "1" * 40, "body": "Closes metis-0809", "files": []}])
+        check("fetch: чистый проход — ошибок нет, stale пусто, repo_ok по обоим",
+              A.fetch(cf, sf, T0, repos, env=dict(env)) == {} and A.load_state(cf).get("stale") == {}
+              and A.load_state(cf).get("repo_ok") == {"a/b": T0, "c/d": T0})
+        good = os.path.join(gh, "gh")
+        ok_text = open(good).read()
+
+        def gh_script(body):
+            open(good, "w").write(ok_text.replace('if [ "$1 $2" = "pr list" ]; then', body + '\nif [ "$1 $2" = "pr list" ]; then', 1))
+        # 401 по всем репозиториям
+        gh_script('echo "HTTP 401: Bad credentials" >&2; exit 1')
+        errs = A.fetch(cf, sf, T0 + 600, repos, env=dict(env))
+        c = A.load_state(cf)
+        check("401 по всем репозиториям: ошибки на обоих, прежние merged и open_prs на месте",
+              sorted(errs) == repos and all("401" in v for v in errs.values())
+              and [r["number"] for r in c["merged"]["a/b"]] == [5] and c["open_prs"]["c/d"][0]["number"] == 9
+              and c["open"]["a/b"] == ["metis-0809"], (errs, c))
+        check("401: stale[repo] — время последнего успеха, не нынешнего прохода", c["stale"] == {"a/b": T0, "c/d": T0}
+              and c["fetched"] == T0 + 600 and c["repo_ok"] == {"a/b": T0, "c/d": T0}, c)
+        idx = A.pr_index(c)
+        check("401: pr_index (ссылки карточек, пачки) прежний", sorted((x["repo"], x["number"]) for x in idx.get("metis-0808", [])) == [("a/b", 5), ("c/d", 5)]
+              and sorted((x["repo"], x["number"]) for x in idx.get("metis-0809", [])) == [("a/b", 9), ("c/d", 9)], idx)
+        errs = A.fetch(cf, sf, T0 + 1200, repos, env=dict(env))
+        check("второй сбой подряд: stale не сдвигается к нынешнему проходу", A.load_state(cf)["stale"] == {"a/b": T0, "c/d": T0})
+        # сбой только открытых PR: слитые свежие, открытые прежние
+        write_gh(gh, "a/b", "merged", [pr(5, "metis-0808", "Closes metis-0808", T0), pr(6, "x", "", T0)])
+        gh_script('case "$*" in *"--state open"*) echo "TLS handshake timeout" >&2; exit 1;; esac')
+        errs = A.fetch(cf, sf, T0 + 1800, repos, env=dict(env))
+        c = A.load_state(cf)
+        check("сбой только открытых PR: слитые новые, открытые прежние, ошибка и stale по репозиторию",
+              [r["number"] for r in c["merged"]["a/b"]] == [5, 6] and c["open_prs"]["a/b"][0]["number"] == 9
+              and "открытые PR" in errs.get("a/b", "") and c["stale"].get("a/b") == T0, (errs, c["stale"]))
+        # починилось: stale и ошибки уходят, repo_ok обновлён
+        open(good, "w").write(ok_text)
+        write_gh(gh, "a/b", "open", [])
+        errs = A.fetch(cf, sf, T0 + 2400, repos, env=dict(env))
+        c = A.load_state(cf)
+        check("gh снова отвечает: ошибок и stale нет, открытых PR у a/b нет (честный ноль), repo_ok обновлён",
+              errs == {} and c["stale"] == {} and c["open_prs"]["a/b"] == [] and c["repo_ok"] == {"a/b": T0 + 2400, "c/d": T0 + 2400}, c)
+        # репозиторий без прошлых строк и сбой: пусто, stale = 0 (данных нет)
+        gh_script('echo "EOF" >&2; exit 1')
+        errs = A.fetch(cf, sf, T0 + 3000, ["n/e"], env=dict(env))
+        c = A.load_state(cf)
+        check("новый репозиторий + сбой: строк нет, stale 0 (данных нет)", c["merged"] == {} and c["stale"] == {"n/e": 0}, c)
+        open(good, "w").write(ok_text)
+        # зависший gh: бюджет на репозиторий, второй не голодает
+        A.save_state(cf, {"fetched": T0, "merged": {r: [{"number": 5}] for r in repos}, "open_prs": {}, "repo_ok": {r: T0 for r in repos}})
+        open(os.path.join(gh, "sleep"), "w").write("5")
+        open(os.path.join(gh, "calls.log"), "w").close()
+        t0 = time.monotonic()
+        errs = A.fetch(cf, sf, T0 + 3600, repos, env=dict(env), budget=60, repo_budget=1.5)
+        el = time.monotonic() - t0
+        calls = open(os.path.join(gh, "calls.log")).read()
+        check("завислый gh: на репозиторий не больше repo_budget, оба репозитория опрошены, прежние строки целы",
+              el < 8 and "--repo a/b" in calls and "--repo c/d" in calls and sorted(errs) == repos
+              and A.load_state(cf)["merged"]["c/d"] == [{"number": 5}], f"{el:.1f} c {errs}")
+        os.remove(os.path.join(gh, "sleep"))
+        # порядок: давний успех идёт первым
+        A.save_state(cf, {"fetched": T0, "merged": {}, "open_prs": {}, "repo_ok": {"a/b": T0 + 50, "c/d": T0 + 10}})
+        open(os.path.join(gh, "calls.log"), "w").close()
+        A.fetch(cf, sf, T0 + 4000, repos, env=dict(env))
+        first = [ln for ln in open(os.path.join(gh, "calls.log")).read().splitlines() if ln.startswith("pr list")]
+        check("порядок обхода: репозиторий с самым давним успехом первым", "--repo c/d" in first[0], first[:2])
+        # Б1: кэш до metis-0808 (нет repo_ok): два сбоя подряд не сдвигают «данные от» к fetched
+        A.save_state(cf, {"fetched": T0, "merged": {"a/b": [{"number": 5}]}, "open_prs": {}})
+        e2 = dict(env, PANTHEON_GH="/nonexistent/gh")
+        A.fetch(cf, sf, T0 + 600, ["a/b"], env=e2)
+        c1 = A.load_state(cf)
+        A.fetch(cf, sf, T0 + 1200, ["a/b"], env=e2)
+        c2 = A.load_state(cf)
+        check("старый кэш без repo_ok и два сбоя подряд: stale остаётся T0, repo_ok запомнен",
+              c1["stale"] == {"a/b": T0} and c2["stale"] == {"a/b": T0} and c2["repo_ok"] == {"a/b": T0}
+              and c2["merged"]["a/b"] == [{"number": 5}], (c1, c2))
+        A.save_state(cf, {"fetched": T0, "merged": {}, "open_prs": {}})
+        A.fetch(cf, sf, T0 + 600, ["a/b"], env=e2)
+        check("старый кэш без строк репозитория и сбой: stale 0, repo_ok не выдуман",
+              A.load_state(cf)["stale"] == {"a/b": 0} and "a/b" not in A.load_state(cf)["repo_ok"], A.load_state(cf))
+        # бюджет прохода кончился: репозиторий не потерял строки
+        A.save_state(cf, {"fetched": T0, "merged": {"a/b": [{"number": 5}]}, "open_prs": {}, "repo_ok": {"a/b": T0}})
+        errs = A.fetch(cf, sf, T0 + 4500, ["a/b"], env=dict(env), budget=0)
+        c = A.load_state(cf)
+        check("не хватило времени прохода: прежние строки остаются", errs == {"a/b": "не хватило времени прохода"}
+              and c["merged"]["a/b"] == [{"number": 5}] and c["stale"] == {"a/b": T0}, c)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def test_former_heads():
     """metis-0726: кэш помнит бывшие head ещё открытых PR — по ним outside снимает заявку test на устаревший head."""
     h = lambda c: c * 40  # noqa: E731
@@ -932,6 +1028,7 @@ def main():
     test_board_line_core()
     test_stub_four_consumers()
     test_fetch_budget()
+    test_fetch_keeps_rows_on_error()
     test_former_heads()
     test_core_budget_and_rename()
     test_batch_needs_mode()

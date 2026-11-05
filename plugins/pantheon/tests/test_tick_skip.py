@@ -199,7 +199,20 @@ muts = [["view", os.path.join(e.pan, "notes", "a.md")],
         ["b-wt-live", os.path.join(ROOT, "fps-copy", ".git")],
         ["b-closes", os.path.join(e.state, "autoclose-prs.json"),
          json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False,
-                                                        "closes": ["metis-0600"]}]}, "checked": 1})]]
+                                                        "closes": ["metis-0600"]}]}, "checked": 1})],
+        # metis-0808: сбой gh по репозиторию и время последнего успеха меняют отпечаток (строка «данные от HH:MM» в board-auto)
+        ["b-errors", os.path.join(e.state, "autoclose-prs.json"),
+         json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False,
+                                                        "closes": ["metis-0600"]}]}, "checked": 1,
+                     "errors": {"latark/agent-kit": "HTTP 401"}, "stale": {"latark/agent-kit": 100}})],
+        ["b-stale", os.path.join(e.state, "autoclose-prs.json"),
+         json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False,
+                                                        "closes": ["metis-0600"]}]}, "checked": 1,
+                     "errors": {"latark/agent-kit": "HTTP 401"}, "stale": {"latark/agent-kit": 200}})],
+        ["b-pr-error", os.path.join(e.state, "autoclose-prs.json"),
+         json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False,
+                                                        "closes": ["metis-0600"]}]}, "checked": 1,
+                     "errors": {"latark/agent-kit": "HTTP 401", "latark/agent-kit#5": "diff"}, "stale": {"latark/agent-kit": 200}})]]
 r = subprocess.run([PY311, "-I", "-c", probe, json.dumps(muts)],
                    env={"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
                         "PANTHEON_VIEW": os.path.join(ROOT, "view"), "TMPDIR": ROOT},
@@ -221,6 +234,9 @@ for k, what in [("b-domains", "новый репозиторий направл�
                 ("b-wt-head", "новая запись worktree (HEAD)"), ("b-wt-live", "появившаяся папка копии worktree"),
                 ("b-closes", "PR в кэше стал закрывать задачу")]:
     check(f"6. {what} меняет отпечаток board", "board" in rows.get(k, []), rows)
+check("6. 0808: появилась ошибка gh по репозиторию (errors) - отпечаток board другой", "board" in rows.get("b-errors", []), rows)
+check("6. 0808: сменилось только время последнего успеха (stale) - отпечаток board другой", "board" in rows.get("b-stale", []), rows)
+check("6. 0808: ошибка по PR (ключ с «#») блок не меняет - отпечаток тот же", "board" not in rows.get("b-pr-error", ["board"]), rows)
 check("6. отпечаток только у задач таблицы (pantheon view без --quiet — нет)", rows.get("none") == ["other"], rows)
 
 print(f"\n{sum(results)}/{len(results)}")

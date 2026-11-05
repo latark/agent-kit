@@ -127,6 +127,23 @@ def open_prs(cache_path):
     return sorted(out, key=lambda p: (p["repo"], p["number"]))
 
 
+def pr_stale(cache_path):
+    """Репозитории, по которым gh не ответил в последнем fetch (errors без «#N»), → [(репозиторий, время последнего
+    успешного ответа или None)] (metis-0808): строки их PR в кэше — прежние, блок говорит об этом, а не «Открытых PR нет»."""
+    try:
+        with open(cache_path, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    errs = st.get("errors") if isinstance(st, dict) and isinstance(st.get("errors"), dict) else {}
+    stale = st.get("stale") if isinstance(st, dict) and isinstance(st.get("stale"), dict) else {}
+    out = []
+    for repo in sorted(r for r in errs if isinstance(r, str) and "#" not in r):
+        ts = stale.get(repo)
+        out.append((repo, ts if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0 else None))
+    return out
+
+
 def cache_broken(cache_path):
     """Кэш PR есть, но не JSON-объект (оборван, испорчен) — сломанный вход: тревога у тика. Нет файла или нет ключа
     open_prs (fetch ещё не прошёл после выпуска) — не сбой."""
@@ -322,7 +339,7 @@ def collect(pantheon, state, tasks, t, week=None, owner=None):
     zeus_md, board_jsonl = owner_log(state)
     files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
         + sum(1 for p in (cache, zeus_md, board_jsonl) if os.path.isfile(p))
-    return {"prs": open_prs(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache)), "week": week,
+    return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache)), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
             "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
             "owner": owner_cards(tasks, owner) if owner else None}
@@ -354,6 +371,18 @@ def _merged_ok(r):
         and r[3] in ("doing", "review")
 
 
+def pr_stale_line(stale):
+    """Строка «PR: данные от HH:MM, gh недоступен (репозитории)» (metis-0808); сбоя нет — пустая. Время — самого давнего
+    успеха среди сбойных; ни у одного прежних данных нет — «данных нет»."""
+    items = [(r, ts) for r, ts in stale or [] if _ok(NAME_RE, str(r).rsplit("/", 1)[-1])] if isinstance(stale, (list, tuple)) else []
+    if not items:
+        return ""
+    names = ", ".join(r.rsplit("/", 1)[-1] for r, _ in items[:MAX_IDS]) + (f" и ещё {len(items) - MAX_IDS}" if len(items) > MAX_IDS else "")
+    seen = [ts for _, ts in items if isinstance(ts, (int, float)) and not isinstance(ts, bool)]
+    return f"- PR: данные от {hm(min(seen))}, gh недоступен ({names})." if seen \
+        else f"- PR: gh недоступен ({names}), данных нет."
+
+
 def lines(data):
     """Строки блока без штампа (в порядке важности: неделя, PR, пачки, STATUS, ответы владельца)."""
     out = []
@@ -370,12 +399,18 @@ def lines(data):
         out.append("- PR: кэш открытых PR не читается — список PR неизвестен.")
     elif prs is None:
         out.append("- PR: кэша открытых PR нет — задача autoclose-fetch ещё не прошла.")
+    stale = pr_stale_line(data.get("pr_stale"))
+    if prs is None:
+        pass
     elif not prs:
-        out.append("- Открытых PR нет.")
+        out.append(stale or "- Открытых PR нет.")
+        stale = ""
     else:
         out += [pr_line(p, data.get("reviews") or {}) for p in prs[:MAX_PR]]
         if len(prs) > MAX_PR:
             out.append(f"- …и ещё PR: {len(prs) - MAX_PR}.")
+    if stale and prs is not None:
+        out.append(stale)
     merged = [r for r in data.get("merged_open") or [] if _merged_ok(r)]
     for tid, num, days, st, left in merged[:MAX_MERGED]:
         out.append(f"- {tid}: PR #{num} слит {days} дн. назад, задача {st}, неотмечено {left}")

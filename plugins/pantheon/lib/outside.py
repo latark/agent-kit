@@ -14,6 +14,12 @@
                                          та же проверка на коммите SHA (7–40 знаков, есть в клоне) в своей копии, а не
                                          в этой папке: ветку PR не переключить в worktree окна, если .claude/ проекта
                                          отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA
+  pantheon outside test [--sha SHA] --affected [--base REF] [--wait С]
+                                         узкий набор (metis-0734): run-tests.py из .pantheon-verify с `--affected --base
+                                         <merge-base REF и коммита>` (REF — по умолчанию origin/main, вершина берётся
+                                         при заявке). Запись tests — с этой командой, files и map: шлюз guard на
+                                         запасном пути засчитывает её только PR вне ядра защит. История копии
+                                         подменена (shallow, info/grafts, refs/replace) — гонится полный набор
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
@@ -231,7 +237,7 @@ SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sb
 RESERVED_ENV = {"HOME", "PATH", "TMPDIR", "PORT", "CI", "LANG", "SHELL", "USER", "LOGNAME", "PWD"}
 RESERVED_ENV_PREFIX = ("PANTHEON_", "DYLD_", "LD_")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--wait С] | "
+USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--serve]")
 
@@ -1156,7 +1162,8 @@ def append_tests(repos, sha, cwd, line, window, rid, by_tree=None, rerun=None):
     """Строка tests в журнал шлюза — формат записи хука guard (merge_gate.record), by — проход. Сверх него — дерево
     коммита (tree) и скрытые входы прогона (env, run_env): по ним зелёный полный набор переносится на коммит с тем же
     деревом (tree_record, metis-0732); by_tree — коммит, чей прогон перенесён (запись без своего прогона); rerun —
-    {rerun_of, files, map} зелёного дозапуска после красного полного набора (metis-0735, rerun_plan)."""
+    {rerun_of, files, map} зелёного дозапуска после красного полного набора (metis-0735, rerun_plan) или {files, map}
+    узкого прогона (test --affected, metis-0734)."""
     d = os.path.dirname(records_file())
     if os.path.islink(d):
         raise OSError("merge-gate — ссылка")
@@ -1171,7 +1178,8 @@ def append_tests(repos, sha, cwd, line, window, rid, by_tree=None, rerun=None):
     if by_tree:
         rec["by_tree"] = by_tree
     if rerun:
-        rec.update(rerun_of=rerun["rerun_of"], files=list(rerun["files"]), map=rerun["map"])
+        rec.update({k: rerun[k] for k in ("rerun_of", "files", "map") if k in rerun})
+        rec["files"] = list(rerun["files"])
     fd = os.open(records_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         os.write(fd, (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
@@ -1446,6 +1454,45 @@ def rerun_plan(d, sha, argv, line, repos):
                                 + shlex.quote(",".join(files))]}, None
 
 
+def narrow_history_problem(d):
+    """Подменённая история папки d → почему узкий набор нельзя, иначе None. run-tests --affected считает изменённые
+    файлы git'ом в песочнице, без защит шлюза: shallow, info/grafts или refs/replace сдвинут дифф. Тогда гонится
+    полный набор (как _carry_git шлюза guard, только дёшево)."""
+    if (git(d, "rev-parse", "--is-shallow-repository") or "").strip() != "false":
+        return "неполная история (shallow) или git не ответил"
+    grafts = (git(d, "rev-parse", "--git-path", "info/grafts") or "").strip()
+    if not grafts:
+        return "git не ответил на --git-path info/grafts"
+    if os.path.lexists(os.path.join(d, grafts)):
+        return "в git есть info/grafts — история подменена"
+    replace = git(d, "for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/")
+    if replace is None or replace.strip():
+        return "в git есть refs/replace (или git не ответил) — содержимое коммитов подменено"
+    return None
+
+
+def narrow_plan(d, sha, argv, line, base):
+    """Узкий набор заявки test --affected (metis-0734) → (план или None, почему нельзя). План — {argv, line, mb, map,
+    mp}: команда проверки проекта (run-tests.py с папками плагинов, как у дозапуска — runner_args) с `--affected --base
+    <merge-base вершины base и sha>` — так раннер берёт дифф ровно от неё, а шлюз guard сверяет её с merge-base head и
+    base PR; line — она же для записи (хвост-комментарий строки — после ключей); map — sha256 карты affected-map.json
+    рядом с раннером в дереве папки (оно чистое, прогон его не меняет). Карты нет, merge-base не одна — нельзя."""
+    parsed = runner_args(argv[2]) if argv[:2] == ["/bin/sh", "-c"] and len(argv) == 3 else None
+    if not parsed:
+        return None, "--affected — только у проверки run-tests.py с папками плагинов (.pantheon-verify)"
+    mbs = (git(d, "merge-base", "--all", base, sha) or "").split()
+    if len(mbs) != 1 or not SHA_RE.fullmatch(mbs[0]):
+        return None, f"merge-base {base[:12]} и {sha[:12]} не одна или не посчитана — сделай git fetch"
+    mp = os.path.join(os.path.dirname(parsed[0]), "affected-map.json")
+    try:
+        with open(os.path.join(d, mp), "rb") as fh:
+            mhash = hashlib.sha256(fh.read()).hexdigest()
+    except OSError as e:
+        return None, f"карту {mp} не прочесть ({e}) — узкий набор не выбрать; полный — без --affected"
+    cmd = re.sub(r"\s+#.*\Z", "", argv[2], flags=re.S) + f" --affected --base {mbs[0]}"
+    return {"argv": argv[:2] + [cmd], "line": cmd + line[len(argv[2]):], "mb": mbs[0], "map": mhash, "mp": mp}, None
+
+
 # --- итоги --------------------------------------------------------------------------------------------------------
 
 def save_result(qdir, rid, res):
@@ -1473,11 +1520,14 @@ def new_log(rid):
 
 # --- тесты --------------------------------------------------------------------------------------------------------
 
-def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None):
+def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
-    проекта: с --script записи нет. src — папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по
-    ней live_test находит идущую заявку. expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей
-    сдвинула HEAD или правит дерево) — ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда."""
+    проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
+    (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
+    подменена (narrow_history_problem: shallow, info/grafts, refs/replace) — полный набор с narrow_why. src —
+    папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по ней live_test находит идущую заявку.
+    expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей сдвинула HEAD или правит дерево) —
+    ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда."""
     def off(sha, clean):
         """Копия ушла с коммита заявки (expect) → итог failed; иначе None."""
         if not expect or (sha == expect and clean):
@@ -1508,6 +1558,13 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     argv, line = command(d, "test", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": line})
+    narrow, narrow_why = None, (narrow_history_problem(d) if base else None)
+    if base and not narrow_why:
+        narrow, why = narrow_plan(d, sha, argv, line, base)
+        if not narrow:
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "base": base,
+                                           "why": f"узкий набор (--affected): {why}"})
+        argv, line = narrow["argv"], narrow["line"]
     repos0 = remotes(d) if record else []
     full = bool(repos0) and any(P.merge_mod().full_tests_record(r, {"cmd": line}) for r in repos0)
     plan, full_why = None, None
@@ -1522,6 +1579,10 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         extra["src"] = src
     if expect:   # test --sha: итог running несёт pin, live_test не сцепляет с ним обычную заявку (metis-0796)
         extra["pin"] = True
+    if narrow:   # узкий набор: live_test сцепляет только заявки с той же базой
+        extra["base"] = base
+    if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
+        extra["narrow_why"] = narrow_why
     save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
                             **({"script": script} if script else {}), **extra})
     log, fd = new_log(rid)
@@ -1557,15 +1618,21 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     sha2, clean2 = head_state(d)
     res = {"state": "done", "kind": "test", "sha": sha, "code": code, "cmd": line, "dir": d, "log": log,
            "tail": tail(log), "record": False, **extra}
-    got = run_failed(log_text(log)) if full else None
+    got = run_failed(log_text(log)) if full or narrow else None
     if plan:
         res["note"] = (f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: файлов "
                        f"{len(plan['files'])}" + ("" if plan["ancestor"] else
                                                    "; прошлый head не предок HEAD — дифф двух коммитов как есть"))
+    if narrow:
+        res["note"] = f"узкий набор (--affected) от merge-base {narrow['mb'][:12]}" + (
+            f": файлов {len(got[0]) + len(got[1])}" if got else "")
     if timed_out:
         res["why"] = f"тесты дольше {TEST_TIMEOUT} с — остановлены"
     elif sha2 != sha or not clean2:
         res["why"] = f"команда изменила HEAD или дерево (стало {sha2 or '?'}, чистое: {'да' if clean2 else 'нет'}) — записи нет"
+    elif narrow and code == 3:
+        res["why"] = ("узкий набор: по карте гонять нечего (код 3) — записи tests нет; для шлюза — полный набор, "
+                      "test без --affected")
     elif code == 0 and not record:
         res["note"] = "запись tests для шлюза — только у проверки проекта (без --script)"
     elif code == 0:
@@ -1577,9 +1644,12 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         elif plan and (not got or got[1] or got[0] != plan["files"]):
             res["why"] = (f"дозапуск: вывод run-tests не сошёлся со списком файлов ({len(plan['files'])}) — "
                           "записи tests нет")
+        elif narrow and (not got or got[1] or not got[0]):
+            res["why"] = "узкий набор: итог run-tests не разобран — записи tests нет"
         else:
             try:
-                append_tests(repos, sha, d, line, window, rid, rerun=plan)
+                append_tests(repos, sha, d, line, window, rid,
+                             rerun=plan or (narrow and {"files": got[0], "map": narrow["map"]}))
                 res["record"] = True
             except OSError as e:
                 res["why"] = f"запись tests не сделана: {e}"
@@ -1635,7 +1705,8 @@ def run_test_at(rid, d, req, window, qdir, roots):
         if code not in (None, 0):
             log = root("runs", rid + ".log")
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
-        return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha)
+        return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha,
+                        base=req.get("base"))
     finally:
         reap(work)
         remove_work(common, work)
@@ -2350,6 +2421,10 @@ def check_request(req, rid):
     pin = req.get("pin")
     if pin is not None and (pin is not True or req["kind"] != "test" or sha is None):
         return "pin — только true, у заявки test с коммитом (test --sha)"
+    base = req.get("base")
+    if base is not None and not (isinstance(base, str) and SHA_RE.fullmatch(base) and req["kind"] == "test"
+                                 and s is None):
+        return "base — коммит из 40 знаков 0-9a-f, у заявки test без --script (test --affected)"
     app = req.get("app")
     if app is not None and not (isinstance(app, str) and APP_RE.fullmatch(app)):
         return "имя приложения не по образцу (имя пакета, @scope/имя, папка или «.»)"
@@ -2394,7 +2469,8 @@ def handle(qdir, window, rid, req):
     res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
     if res:
         return res
-    return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"))
+    return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"),
+                    base=req.get("base"))
 
 
 # --- перед стартом заявки test (metis-0726) ------------------------------------------------------------------------
@@ -2468,6 +2544,7 @@ def drop_dupes(qdir, rid, req, d, sha, window=None):
     repos, me, n = set(remotes(d)), os.path.realpath(d), 0
     for q2, w2, rid2, req2 in _queued_tests():
         if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None) \
+                or req2.get("base") != req.get("base") \
                 or req2.get("pin"):   # test --sha идёт на своём коммите, а не на HEAD папки (metis-0779)
             continue
         d2, _roots = resolve_dir(req2["dir"], w2)
@@ -2930,10 +3007,13 @@ def cmd_run_serve(once=False):
 
 # --- команды роли -------------------------------------------------------------------------------------------------
 
-def _flags(args, allowed):
+def _flags(args, allowed, bools=()):
     out, i = {}, 0
     while i < len(args):
         a = args[i]
+        if a in bools:
+            out[a], i = True, i + 1
+            continue
         if a not in allowed or i + 1 >= len(args):
             return None
         out[a] = args[i + 1]
@@ -2942,7 +3022,8 @@ def _flags(args, allowed):
 
 
 def cmd_request(kind, args):
-    f = _flags(args, {"--script", "--wait", "--sha"} | ({"--minutes", "--app"} if kind == "serve" else set()))
+    f = _flags(args, {"--script", "--wait", "--sha"} | ({"--minutes", "--app"} if kind == "serve" else {"--base"}),
+               {"--affected"} if kind == "test" else ())
     if f is None:
         err(f"pantheon outside: {USAGE}")
         return 2
@@ -2961,6 +3042,16 @@ def cmd_request(kind, args):
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
+    if f.get("--base") and not f.get("--affected"):
+        err("pantheon outside: --base — только с --affected")
+        return 2
+    if f.get("--affected"):   # metis-0734: вершина базы — здесь, merge-base с коммитом прогона считает проход
+        ref = f.get("--base") or "origin/main"
+        tip = "" if ref.startswith("-") else (git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip()
+        if not SHA_RE.fullmatch(tip.lower()):
+            err(f"pantheon outside: --base {ref} — не коммит этой копии (нет — сделай git fetch)")
+            return 2
+        req["base"] = tip.lower()
     if kind == "test":   # metis-0706: коммит при заявке — по нему видно, что такой же тест уже ждёт или идёт
         if f.get("--sha"):   # metis-0779: тест на этом коммите в своей копии прохода, полный SHA — здесь же
             ref = f["--sha"].lower()
@@ -2975,7 +3066,7 @@ def cmd_request(kind, args):
             head, _clean = head_state(d)
         if head:
             req["sha"] = head
-            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")))
+            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")), base=req.get("base"))
             if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
                 print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
                 if not wait:
@@ -3011,7 +3102,7 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app", "script", "pin") if req.get(k)}}, ensure_ascii=False,
+                     **{k: req[k] for k in ("sha", "app", "script", "pin", "base") if req.get(k)}}, ensure_ascii=False,
                     indent=1))
         finally:
             os.close(dfd)
@@ -3030,7 +3121,7 @@ def cmd_request(kind, args):
     return wait_result(q, rid, wait)
 
 
-def live_test(d, sha, script=None, pin=False):
+def live_test(d, sha, script=None, pin=False, base=None):
     """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
     metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json) или идёт
     (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
@@ -3051,7 +3142,7 @@ def live_test(d, sha, script=None, pin=False):
                 except ValueError:
                     continue
                 if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
-                        or res.get("script") != script or bool(res.get("pin")) != pin:
+                        or res.get("script") != script or bool(res.get("pin")) != pin or res.get("base") != base:
                     continue
                 where = res.get("src") or res.get("dir")
                 if not isinstance(where, str) or os.path.realpath(where) != d:
@@ -3096,6 +3187,8 @@ def show(res):
         print(f"дозапуск после красного полного набора {res['rerun_of']}: {', '.join(res.get('files') or [])}")
     if res.get("full_why"):
         print(f"полный набор, а не дозапуск: {res['full_why']}")
+    if res.get("narrow_why"):
+        print(f"полный набор, а не узкий (--affected): {res['narrow_why']}")
     if res.get("record"):
         print("запись tests для шлюза слияния сделана")
     if res.get("why"):

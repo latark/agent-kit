@@ -216,5 +216,29 @@ rest, _ = T.task_split(PH, T0, kid, "Остаток", done_when=["пункт"])
 check("0802: остаток задачи с неверным parent — без parent (не переносим ошибку)",
       not T.load_tasks(PH, T.WORK_TYPES)[rest][1].get("parent"))
 
+# --- metis-0826: board_sync целиком - «PR #N слит ДД.ММ» во «Внимании» карточки и раздел «Слито, ждёт приёмки» в Сводке --------
+P8 = os.path.join(ROOT, "pan8")
+for d in ("directions/metis-pantheon/tasks", "inbox/tasks"):
+    os.makedirs(os.path.join(P8, d))
+tid8, _ = T.task_new(P8, T0, "metis-pantheon", "Слитая задача", done_when=["а", "б"], created_note=None)
+T.task_set(P8, T0 + 1, tid8, {"status": "review"}, note="PR #77 слит")
+cache8 = {"merged": {R: [{"number": 77, "headRefName": "x-" + tid8, "body": f"Closes {tid8}", "oid": "e" * 40, "cross": False,
+                          "mergedAt": "2026-11-03T10:00:00Z"}]}}
+idx8 = A.pr_index(cache8)
+board8 = os.path.join(ROOT, "view8", "Доска")
+T.board_sync(P8, board8, os.path.join(ROOT, "st8.json"), os.path.join(ROOT, "log8"), T0 + 5, pr_index=idx8,
+             repos={"metis-pantheon": [R]})
+cards8 = [f for f in os.listdir(board8) if f.startswith(tid8)]
+ctext = open(os.path.join(board8, cards8[0]), encoding="utf-8").read() if cards8 else ""
+day8 = A.merged_day("2026-11-03T10:00:00Z")
+check("0826: board_sync - карточка в review: «PR #77 слит ДД.ММ, ждёт пунктов Готово, когда: 2 из 2» с датой слияния",
+      f"PR #77 слит {day8[8:10]}.{day8[5:7]}, ждёт пунктов Готово, когда: 2 из 2" in ctext, ctext[:900])
+summ = open(os.path.join(board8, "Сводка.md"), encoding="utf-8").read()
+check("0826: board_sync - Сводка: раздел «Слито, ждёт приёмки (1)» со ссылкой на карточку и счётчик",
+      "## 🔵 Слито, ждёт приёмки (1)" in summ and "🔵 Слито, ждёт приёмки: 1" in summ and "PR #77 слит" in summ, summ[summ.find("Слито, ждёт приёмки (") - 40:][:400])
+T.board_sync(P8, board8, os.path.join(ROOT, "st8b.json"), os.path.join(ROOT, "log8"), T0 + 9, pr_index={}, repos={"metis-pantheon": [R]})
+check("0826: board_sync - без слитого PR в индексе раздела нет",
+      "Слито, ждёт приёмки" not in open(os.path.join(board8, "Сводка.md"), encoding="utf-8").read())
+
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)

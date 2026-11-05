@@ -5,6 +5,7 @@
 
 Запуск: python3 -I plugins/guard/tests/test_merge_gate.py   (код 0 — все прошли)
 """
+import hashlib
 import json
 import os
 import re
@@ -2332,6 +2333,205 @@ def t_ci_billing_unit(h):
     got = mg._billing_problem("o/x", 7, sha)[0] or ""
     check("_billing_problem: репозиторий без записи в FULL_TESTS — отказ «запасного пути нет», без шаблона",
           "запасного пути у репозитория нет" in got and "pantheon review test" not in got, got)
+
+
+# узкая запись прохода outside (metis-0734): FULL_TESTS без heavy + `--affected --base <SHA>`, files и map
+NARROW_FULL = ("python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon "
+               "plugins/project-tools")
+NARROW_MAP = "plugins/pantheon/scripts/affected-map.json"
+NARROW_MAP_BYTES = b'{"version": 1, "tests": {}}\n'
+NARROW_MAP_HASH = hashlib.sha256(NARROW_MAP_BYTES).hexdigest()
+
+
+def narrow_rec(sha, base, mp=NARROW_MAP_HASH, files=("guard/test_merge_gate.py", "pantheon/test_outside.py"),
+               repo="latark/agent-kit", cmd=None):
+    """Запись tests, как её пишет `pantheon outside test --affected` (append_tests с files и map)."""
+    return dict(rec("tests", repo, None, sha, ""), files=list(files), map=mp,
+                cmd=cmd or f"{NARROW_FULL} --affected --base {base}  # .pantheon-verify ветки (HEAD)")
+
+
+def narrow_history(h):
+    """Коммиты без рабочего дерева в клоне agent-kit от init S: H — head PR с картой, M — main ушёл вперёд, X — другая
+    ветка, Hn — head без карты, H2 — карта другая, A/B и CA/CB — перекрёстные слияния (две merge-base)."""
+    kit, s = h.j("projects/agent-kit"), h.sha["agent-kit"]
+    m = {"S": s}
+    m["H"] = plumb(kit, [s], {NARROW_MAP: ("100644", NARROW_MAP_BYTES), "x.py": ("100644", b"x = 1\n")}, "head")
+    m["M"] = plumb(kit, [s], {"y.py": ("100644", b"y = 1\n")}, "main advanced")
+    m["X"] = plumb(kit, [s], {"z.py": ("100644", b"z = 1\n")}, "other branch")
+    m["Hn"] = plumb(kit, [s], {"x.py": ("100644", b"x = 2\n")}, "head without map")
+    m["H2"] = plumb(kit, [m["H"]], {NARROW_MAP: ("100644", b"{}\n")}, "map changed")
+    m["A"] = plumb(kit, [s], {NARROW_MAP: ("100644", NARROW_MAP_BYTES), "a.py": ("100644", b"a\n")}, "A")
+    m["B"] = plumb(kit, [s], {"b.py": ("100644", b"b\n")}, "B")
+    m["CA"] = plumb(kit, [m["A"], m["B"]], {"b.py": ("100644", b"b\n")}, "CA")
+    m["CB"] = plumb(kit, [m["B"], m["A"]], {NARROW_MAP: ("100644", NARROW_MAP_BYTES), "a.py": ("100644", b"a\n")},
+                    "CB")
+    return m
+
+
+def t_narrow_gate_unit(h):
+    """metis-0734: narrow_tests_record (схема записи), _narrow_problem (база = merge-base head и base PR, карта из
+    дерева head) и _billing_problem с узкой записью — напрямую."""
+    mg = _load_merge_gate("merge_gate_narrow_unit")
+    m, kit, repo = narrow_history(h), h.j("projects/agent-kit"), "latark/agent-kit"
+    S, H = m["S"], m["H"]
+    good = narrow_rec(H, S)
+    check("narrow_tests_record: запись outside --affected → (база, карта)",
+          mg.narrow_tests_record(repo, good) == (S, NARROW_MAP_HASH), mg.narrow_tests_record(repo, good))
+    rt = f"pantheon review test -- heavy {NARROW_FULL} --affected --base {S}"
+    check("narrow_tests_record: та же команда через pantheon review test с heavy → годится",
+          mg.narrow_tests_record(repo, narrow_rec(H, S, cmd=rt)) == (S, NARROW_MAP_HASH))
+    check("narrow_tests_record: ключи в другом месте команды → годится",
+          mg.narrow_tests_record(repo, narrow_rec(H, S, cmd=NARROW_FULL.replace(
+              "-j 3", f"-j 3 --base {S} --affected"))) == (S, NARROW_MAP_HASH))
+    check("narrow_tests_record: репозиторий в другом регистре → годится",
+          mg.narrow_tests_record("Latark/Agent-Kit", good) == (S, NARROW_MAP_HASH))
+    bad = {
+        "без --affected": dict(good, cmd=f"{NARROW_FULL} --base {S}"),
+        "два --affected": dict(good, cmd=f"{NARROW_FULL} --affected --affected --base {S}"),
+        "без --base": dict(good, cmd=f"{NARROW_FULL} --affected"),
+        "два --base": dict(good, cmd=f"{NARROW_FULL} --affected --base {S} --base {S}"),
+        "--base в конце без значения": dict(good, cmd=f"{NARROW_FULL} --affected --base"),
+        "--base origin/main (ref, а не SHA)": dict(good, cmd=f"{NARROW_FULL} --affected --base origin/main"),
+        "--base короткий SHA": dict(good, cmd=f"{NARROW_FULL} --affected --base {S[:12]}"),
+        "--base=SHA одним словом": dict(good, cmd=f"{NARROW_FULL} --affected --base={S}"),
+        "--base SHA заглавными": dict(good, cmd=f"{NARROW_FULL} --affected --base {S.upper()}"),
+        "ещё --only": dict(good, cmd=f"{NARROW_FULL} --affected --base {S} --only guard/test_x.py"),
+        "без плагина project-tools": dict(good, cmd=f"{NARROW_FULL[:-len(' plugins/project-tools')]} --affected "
+                                                     f"--base {S}"),
+        "&& true после": dict(good, cmd=f"{NARROW_FULL} --affected --base {S} && true"),
+        "кавычка не закрыта": dict(good, cmd=f"{NARROW_FULL} --affected --base {S} '"),
+        "files пустой": dict(good, files=[]),
+        "files нет": {k: v for k, v in good.items() if k != "files"},
+        "files строкой": dict(good, files="guard/test_merge_gate.py"),
+        "files с числом": dict(good, files=["guard/test_merge_gate.py", 1]),
+        "map нет": {k: v for k, v in good.items() if k != "map"},
+        "map короткий": dict(good, map=NARROW_MAP_HASH[:63]),
+        "map заглавными": dict(good, map=NARROW_MAP_HASH.upper()),
+        "map не строка": dict(good, map=1),
+        "cmd не строка": dict(good, cmd=None),
+        "не словарь": [good],
+    }
+    for name, r in bad.items():
+        check(f"narrow_tests_record: {name} → None", mg.narrow_tests_record(repo, r) is None,
+              mg.narrow_tests_record(repo, r))
+    check("narrow_tests_record: репозиторий без FULL_TESTS → None", mg.narrow_tests_record("latark/tg-read", good) is None)
+    check("narrow_tests_record: полный набор — не узкая запись",
+          mg.narrow_tests_record(repo, dict(full_rec(repo, H), files=["a"], map=NARROW_MAP_HASH)) is None)
+    check("full_tests_record: узкая запись — не полный набор", mg.full_tests_record(repo, good) is False)
+    check("narrow_map_path: карта рядом с run-tests.py FULL_TESTS", mg.narrow_map_path(repo) == NARROW_MAP,
+          mg.narrow_map_path(repo))
+    check("narrow_map_path: репозиторий без FULL_TESTS → None", mg.narrow_map_path("latark/tg-read") is None)
+
+    def np(sha=H, base_oid=S, base=S, mp=NARROW_MAP_HASH, cwd=kit):
+        return mg._narrow_problem(cwd, repo, sha, base_oid, base, mp)
+
+    check("_narrow_problem: база = merge-base, карта из дерева head → None", np() is None, np())
+    check("_narrow_problem: main ушёл вперёд (base PR — M), база — прежняя merge-base → None",
+          np(base_oid=m["M"]) is None, np(base_oid=m["M"]))
+    for name, kw, want in (
+            ("база — коммит другой ветки, а не merge-base", dict(base=m["X"]), "узкий набор посчитан от"),
+            ("база — сам head", dict(base=H), "узкий набор посчитан от"),
+            ("база — вершина main, а merge-base старше", dict(base_oid=m["M"], base=m["M"]), "узкий набор посчитан от"),
+            ("карта в записи не та", dict(mp="0" * 64), "карта в записи не та"),
+            ("карта в дереве head другая", dict(sha=m["H2"]), "карта в записи не та"),
+            ("карты нет в дереве head", dict(sha=m["Hn"]), "нет в дереве head"),
+            ("head нет в git папки", dict(sha="d" * 40), "коммита head"),
+            ("base PR нет в git папки", dict(base_oid="e" * 40), "коммита base PR"),
+            ("base PR пустой", dict(base_oid=""), "коммита base PR"),
+            ("папка слияния — не клон agent-kit", dict(cwd=h.j("projects/tg-read")), "не клон"),
+            ("перекрёстные слияния: merge-base не одна", dict(sha=m["CA"], base_oid=m["CB"], base=m["A"]), "не одна")):
+        got = np(**kw) or ""
+        check(f"_narrow_problem: {name} → «{want}»", want in got, got)
+    full = mg.FULL_TESTS["agent-kit"]
+    mg.FULL_TESTS["agent-kit"] = "pytest"
+    try:
+        got = np() or ""
+        check("_narrow_problem: у FULL_TESTS нет run-tests.py — карты нет → отказ", "affected-map.json нет" in got, got)
+    finally:
+        mg.FULL_TESTS["agent-kit"] = full
+
+    def bp(recs, narrow=kit, base_oid=S, sha=H):
+        mg.read_records = lambda: recs
+        return mg._billing_problem(repo, 7, sha, narrow, base_oid)
+
+    why, notes = bp([good])
+    check("_billing_problem: PR вне ядра, узкая запись годится → пропуск со строкой «узкий прогон»",
+          why is None and len(notes) == 1 and "засчитан местный узкий прогон" in notes[0] and "файлов 2" in notes[0],
+          (why, notes))
+    why, notes = bp([good], narrow=None)
+    check("_billing_problem: PR ядра (narrow None), узкая запись → отказ «задевает ядро», команда FULL_TESTS",
+          bool(why) and "PR задевает ядро защит — засчитывается только полный набор" in why
+          and "pantheon review test -- heavy" in why and not notes, why)
+    why, _ = bp([dict(good, map="0" * 64)])
+    check("_billing_problem: узкая запись с чужой картой → отказ с причиной и подсказкой outside --affected",
+          bool(why) and "Узкая запись есть, но не засчитана: карта в записи не та" in why
+          and "pantheon outside test --affected --wait 590" in why, why)
+    why, _ = bp([narrow_rec(m["X"], S)])
+    check("_billing_problem: узкая запись на другом head → отказ (не на этом SHA), подсказка outside --affected",
+          bool(why) and "не засчитана" not in why and "pantheon outside test --affected" in why, why)
+    why, _ = bp([narrow_rec(H, S, repo="latark/tg-read")])
+    check("_billing_problem: узкая запись другого репозитория → отказ", bool(why) and "не засчитана" not in why, why)
+    why, notes = bp([dict(good, map="0" * 64), good])
+    check("_billing_problem: одна узкая не годится, другая годится → пропуск", why is None and notes, (why, notes))
+    why, notes = bp([full_rec(repo, H)], narrow=None)
+    check("_billing_problem: полный набор у PR ядра → пропуск, как раньше",
+          why is None and "запись полного набора" in notes[0], (why, notes))
+    why, _ = bp([])
+    check("_billing_problem: записей нет, PR вне ядра → подсказка outside --affected без «не засчитана»",
+          bool(why) and "pantheon outside test --affected" in why and "не засчитана" not in why, why)
+    why, _ = bp([], narrow=None)
+    check("_billing_problem: записей нет, PR ядра → без подсказки --affected", bool(why) and "--affected" not in why, why)
+    why, _ = bp([narrow_rec(H, m["X"])], base_oid=m["M"])
+    check("_billing_problem: база записи не merge-base → отказ «посчитан от» и «git fetch»",
+          bool(why) and "узкий набор посчитан от" in why and "git fetch" in why, why)
+
+
+def t_narrow_gate(h):
+    """metis-0734: шлюз на запасном пути (CI без минут, ответ PR #222) пускает роль по узкой записи
+    `pantheon outside test --affected` на head PR вне ядра; ядро (и с Touch ID), другой head, база не merge-base с
+    main, чужая карта, путь без роли — отказ."""
+    m, kit = narrow_history(h), "projects/agent-kit"
+    H, S = m["H"], m["S"]
+    cmd = f"gh pr merge 7 --match-head-commit {H}"
+    runs = _saved(222, "runs")
+
+    def view(files):
+        h.runs["agent-kit"] = _runs_on(runs, H, 222)
+        h.gh(files, head=H)
+        h.ci(_saved(222)["statusCheckRollup"], name="agent-kit", head=H, baseRefOid=m["M"], baseRefName="main")
+        _notes_on(h, runs)
+
+    view(["README.md", "plugins/pantheon/lib/tasks.py"])
+    h.seed(rec("accept", "latark/agent-kit", 7, H))
+    h.seed(narrow_rec(m["X"], S))
+    merge_case("вне ядра, узкая запись только на другом head — отказ «нет записи тестов»", h.pre(cmd, pdir=kit), False,
+               "нет записи тестов на latark/agent-kit@")
+    h.seed(rec("tests", "latark/agent-kit", None, H, "dev-opus"))
+    merge_case("вне ядра, на head запись не полного и не узкого набора — отказ с подсказкой outside --affected",
+               h.pre(cmd, pdir=kit), False, "PR не задевает ядро — годится и узкий прогон: из корня чистой копии на "
+               "этом коммите `pantheon outside test --affected --wait 590`")
+    h.seed(narrow_rec(H, m["X"]))
+    merge_case("вне ядра, база записи — не merge-base head и main — отказ", h.pre(cmd, pdir=kit), False,
+               "узкий набор посчитан от")
+    h.seed(narrow_rec(H, S, mp="1" * 64))
+    merge_case("вне ядра, карта в записи не та — отказ", h.pre(cmd, pdir=kit), False, "карта в записи не та")
+    shutil.rmtree(os.path.dirname(h.records))
+    h.seed(rec("accept", "latark/agent-kit", 7, H), narrow_rec(H, S))
+    r = _hook_out(h, cmd, kit)
+    msg = json.loads(r.stdout).get("systemMessage", "") if r.stdout.strip() else ""
+    check("вне ядра, узкая запись на head от merge-base, карта head — пропуск со строкой «узкий прогон»",
+          decision(r)[0] == "allow" and "засчитан местный узкий прогон" in msg, r.stdout + r.stderr)
+    view(["README.md", "plugins/guard/hooks/merge_gate.py"])
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {H}")
+    merge_case("ядро с Touch ID, узкая запись — отказ «только полный набор»", h.pre(cmd, pdir=kit), False,
+               "PR задевает ядро защит — засчитывается только полный набор")
+    h.seed(full_rec("latark/agent-kit", H))
+    merge_case("ядро с Touch ID, есть и полный набор — пропуск", h.pre(cmd, pdir=kit), True)
+    shutil.rmtree(os.path.dirname(h.records))
+    view(["README.md", "plugins/pantheon/lib/tasks.py"])
+    h.seed(rec("accept", "latark/agent-kit", 7, H), narrow_rec(H, S))
+    merge_case("без роли (путь владельца) узкая запись не в счёт — отказ", h.pre(cmd, role=None, pdir=kit), False,
+               "не запускался: лимит минут")
 
 
 def t_ci_verdict_unit(h):
@@ -4710,6 +4910,7 @@ CASES = [t_test_floors, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
          t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
+         t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 
