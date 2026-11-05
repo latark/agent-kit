@@ -834,6 +834,12 @@ def main():
     talos_real = read(os.path.join(out_real, "talos.md"))
     check("talos: dev-сервер — pantheon outside serve --wait 120, гасит stop",
           "pantheon outside serve --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    # metis-0900: ожидание владельца в окне роли — строка Зевсу до действия (external.part)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "workshop.md", "hq.md"):
+        text = " ".join(read(os.path.join(out_real, f)).split())
+        check(f"{f}: перед подтверждением владельца в окне — строка Зевсу «[id] жду вас в окне <роль>: <что>» (metis-0900)",
+              "сначала строка Зевсу «[id] жду вас в окне <роль>: <что>», потом действие" in text
+              and "Окну Зевса не нужно" in text)
 
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1
