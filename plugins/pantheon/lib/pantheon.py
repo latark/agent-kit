@@ -2632,15 +2632,20 @@ def agents_window(data, allowed, deny, script):
     return data
 
 
-def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None):
+def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
+                  own_agents=False):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
-    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже
+    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже.
+    # own_agents (metis-0841, «да» владельца 05.11 16:09): окно направления правит роли своего проекта — в папках
+    # folders песочница .claude/agents не закрывает, их текст судит guard protect-config (ключи tools, hooks и т. п.)
     # папка демона хуков (HOOKD_DIR, metis-0845) — каждому окну: allowWrite выше неё (sandbox_write ~/.cache) её не
     # откроет, запрет сильнее разрешения (проверка F7 — hookd-check.py windows)
+    agents = ("/.claude/agents", "/**/.claude/agents")
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
-        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks", "/.claude/agents", "/**/.claude/agents")]
+        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + (
+        () if own_agents and r in folders else agents)]
     deny_write += _deny_forms([HOOKD_HOME])
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
@@ -3009,7 +3014,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         ok = [r for r in real if r]
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
-                             guard, auto_allow)
+                             guard, auto_allow, own_agents=direction)
         if direction:
             data["sandbox"]["excludedCommands"] += GH_PR_WRITE
         if name == "metis-pantheon":
