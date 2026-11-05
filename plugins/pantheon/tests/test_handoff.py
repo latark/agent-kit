@@ -974,8 +974,9 @@ for word in ("Харон", "Гести", "pantheon outside", "pantheon read", "p
     check(f"handoff.part называет «{word}»", word in part)
 with open(os.path.join(ROLES, "hq.tmpl"), encoding="utf-8") as fh:
     hq = fh.read()
-check("hq: перезапуск Зевса — «да/нет» и Гестия, а не команда владельцу", "«Перезапустить Зевса?»" in hq
-      and "pantheon wake hestia" in hq, "")
+_step5 = hq[hq.index("Себя: допиши"):hq.index("## Прямые разговоры")]
+check("hq: перезапуск Зевса — «да/нет» владельцу, без команды и без Гестии (guard ей pantheon start запрещает)",
+      "«Перезапустить Зевса?»" in _step5 and "pantheon start" not in _step5 and "wake hestia" not in _step5, _step5)
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
