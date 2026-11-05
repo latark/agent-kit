@@ -16,7 +16,8 @@
                                          отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
-                                         адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120)
+                                         адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
+                                         --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    погасить сервер раньше срока (из любого окна) и дождаться итога (20 с)
                                          тест, ещё лежащий заявкой в очереди своего окна, снимается: итог stopped; идущий тест
@@ -34,7 +35,9 @@
     правки в копию не попадают. Зависимости — `<pm> install --frozen-lockfile` (npm ci) под профилем, без heavy;
   - монорепо (workspaces в package.json или pnpm-workspace.yaml): PORT получает одно приложение — --app ИМЯ (имя
     пакета или папки), его скрипт идёт в папке приложения; одно приложение со скриптом — берётся само; `--app .` —
-    корневой скрипт; иначе отказ со списком. turbo.json проекта не правится;
+    корневой скрипт; иначе отказ со списком. turbo.json проекта не правится. Не монорепо: --app ПАПКА — папка внутри
+    корня копии с собственным package.json (корневой не нужен, metis-0790): скрипт, установка зависимостей и cwd — там;
+    «..», абсолютный путь и ссылка наружу — отказ;
   - порт — из ряда 4300–4399, не 3000, 3100–3199 (разработчики) и 3200–3299 (показ владельцу, прежний ряд);
   - не больше MAX_SERVERS (2) серверов сразу; давление памяти критичное — отказ любому, предупреждение — второму;
     отказ сразу, с причиной и кодом 75, без очереди heavy. У каждого сервера лимит памяти SERVER_MEM_MB (4 ГБ,
@@ -187,7 +190,7 @@ ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 SCRIPT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,59}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHORT_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
-# --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт
+# --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт; не монорепо — папка внутри корня
 APP_RE = re.compile(r"\.|@?[A-Za-z0-9][A-Za-z0-9._-]{0,80}(/[A-Za-z0-9][A-Za-z0-9._-]{0,80})?")
 KINDS = ("test", "serve")
 FINAL = ("done", "failed", "serving", "stopped")
@@ -391,7 +394,9 @@ def inside(p, roots):
 
 # git вне песочницы в папках, которые пишет роль: ни монитора файлов, ни хуков, ни сети, ни подмодулей (metis-0614).
 # -c перекрывает значения из конфига репозитория; фильтры и include так не снять — их отсекает unsafe_config.
-GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+# --no-replace-objects (и GIT_NO_REPLACE_OBJECTS в окружении, как у шлюза) — refs/replace в клоне не подменяют содержимое
+# копии при том же HEAD и чистом status (metis-0796, Д1); attributes и alternates клона на дерево копии не влияют
+GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
             "-c", "submodule.recurse=false")
 
 
@@ -410,6 +415,7 @@ def checked(d, clone, common, gitdir):
 def git(d, *args, timeout=30):
     """Вывод git в папке d (без GIT_* окружения, с GIT_SAFE; Repo — через проверенный gitdir); None — сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     loc = ["-C", d] + ([f"--git-dir={d.gitdir}", f"--work-tree={d}"] if isinstance(d, Repo) else [])
     try:
         r = subprocess.run(["git", *loc, *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout,
@@ -584,16 +590,43 @@ def _scripts(pkg):
     return s if isinstance(s, dict) else {}
 
 
+def app_dir(d, app):
+    """--app как папка внутри корня копии d (не монорепо, metis-0790) → (реальный путь, None) или (None, причина).
+    Папка и её package.json — внутри realpath(d): ни «..», ни абсолютного пути, ни ссылки наружу."""
+    root = os.path.realpath(d)
+    if os.path.isabs(app) or ".." in app.split("/"):
+        return None, f"--app {app}: путь выходит за корень копии"
+    p = os.path.realpath(os.path.join(root, app))
+    if not inside(p, [root]) or p == root:
+        return None, f"--app {app}: папка вне корня копии (ссылка наружу или «..»)"
+    if not os.path.isdir(p):
+        return None, f"--app {app}: папка не монорепо (нет workspaces в package.json и pnpm-workspace.yaml), и папки {app} в репозитории нет"
+    pj = os.path.realpath(os.path.join(p, "package.json"))
+    if not inside(pj, [root]) or _pkg(p) is None:
+        return None, f"--app {app}: в папке {app} нет package.json (или он ведёт за корень копии) — серверу нечего запускать"
+    return p, None
+
+
 def serve_command(d, script=None, app=None):
     """Команда сервера в папке d → (argv, строка для журнала, папка запуска) или (None, причина, None).
     Монорепо: PORT получает одно приложение (metis-0614: в BA turbo пускал все, landing брал PORT, web — 3000) —
-    --app или единственное приложение со скриптом; `--app .` — корневой скрипт."""
+    --app или единственное приложение со скриптом; `--app .` — корневой скрипт. Не монорепо: --app ПАПКА внутри
+    корня с собственным package.json — скрипт и папка запуска там (metis-0790), корневой package.json не нужен."""
     name = script or "dev"
     pkg = _pkg(d)
+    ws = workspaces(d, pkg)
+    if app and app != "." and not ws:
+        p, why = app_dir(d, app)
+        if not p:
+            return None, why, None
+        apkg = _pkg(p)
+        if name not in _scripts(apkg):
+            return None, f"в package.json папки {app} нет скрипта «{name}»", None
+        pm = package_manager(p, apkg)
+        return [pm, "run", name], f"{pm} run {name}  (приложение {app})", p
     if pkg is None:
         return None, "в папке нет package.json — серверу нечего запускать", None
     pm = package_manager(d, pkg)
-    ws = workspaces(d, pkg)
     if app == "." or (not app and not ws):
         if name not in _scripts(pkg):
             return None, f"в package.json папки нет скрипта «{name}»", None
@@ -715,8 +748,39 @@ def tail(log):
 PS = "/bin/ps"   # setuid: под sandbox-exec не запускается — test_outside, идущий через `outside test`, ставит свой
 
 
+def _ps_table_libproc():
+    """{pid: (ppid, pgid, rss в КБ)} по libproc (proc_listallpids, proc_pidinfo PROC_PIDTBSDINFO и PROC_PIDTASKINFO)
+    или None: не macOS, библиотеки нет или список процессов не получен."""
+    lp = _libproc()
+    if lp is None:
+        return None
+    lib = lp[0]
+    n = lib.proc_listallpids(None, 0)
+    if n <= 0:
+        return None
+    buf = (ctypes.c_int * (n + 256))()
+    got = lib.proc_listallpids(buf, ctypes.sizeof(buf))   # число pid, а не байт
+    if got <= 0:
+        return None
+    table = {}
+    for p in buf[:min(got, len(buf))]:
+        if p <= 0:
+            continue
+        b = _BSDInfo()
+        if lib.proc_pidinfo(p, 3, ctypes.c_uint64(0), ctypes.byref(b), ctypes.sizeof(b)) != ctypes.sizeof(b):
+            continue                 # ушёл за время обхода или чужой
+        t = (ctypes.c_uint64 * 12)()   # proc_taskinfo: pti_virtual_size, pti_resident_size, ...
+        ok = lib.proc_pidinfo(p, 4, ctypes.c_uint64(0), ctypes.byref(t), ctypes.sizeof(t)) == ctypes.sizeof(t)
+        table[p] = (b.ppid, b.pgid, t[1] // 1024 if ok else 0)
+    return table or None
+
+
 def ps_table():
-    """{pid: (ppid, pgid, rss в КБ)} всех процессов по ps; сбой — {}."""
+    """{pid: (ppid, pgid, rss в КБ)} всех процессов: на macOS по libproc (setuid /bin/ps под sandbox-exec не
+    запускается, и strays() иначе вернул бы [] — metis-0786), ps — запасной путь (Linux, нет libproc); сбой — {}."""
+    table = _ps_table_libproc()
+    if table is not None:
+        return table
     try:
         out = subprocess.run([PS, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
                              timeout=10).stdout
@@ -886,6 +950,15 @@ def _libproc():
         return lib, tb[0] / tb[1] / 1e9
     except (OSError, AttributeError):
         return None
+
+
+class _BSDInfo(ctypes.Structure):
+    """struct proc_bsdinfo (sys/proc_info.h), PROC_PIDTBSDINFO = 3."""
+    _fields_ = [(n, ctypes.c_uint32) for n in ("flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid",
+                                               "rgid", "svuid", "svgid", "rfu")] + \
+               [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + \
+               [(n, ctypes.c_uint32) for n in ("nfiles", "pgid", "pjobc", "tdev", "tpgid")] + \
+               [("nice", ctypes.c_int32), ("start", ctypes.c_uint64), ("ustart", ctypes.c_uint64)]
 
 
 def _lp_pids(fn, arg):
@@ -1447,6 +1520,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         ({"full_why": full_why} if full_why else {})
     if src:
         extra["src"] = src
+    if expect:   # test --sha: итог running несёт pin, live_test не сцепляет с ним обычную заявку (metis-0796)
+        extra["pin"] = True
     save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
                             **({"script": script} if script else {}), **extra})
     log, fd = new_log(rid)
@@ -1533,7 +1608,7 @@ def run_test_at(rid, d, req, window, qdir, roots):
     запись tests на полный SHA. Копия снимается всегда; бывший head открытого PR — отказ, как у test без --sha."""
     script, common = req.get("script"), d.common
     ref = req.get("sha")
-    base = {"kind": "test", "src": d, **({"script": script} if script else {})}
+    base = {"kind": "test", "src": d, "pin": True, **({"script": script} if script else {})}
 
     def fail(why, **kw):
         log_event(id=rid, kind="refused", window=window, dir=d, why=why)
@@ -1692,7 +1767,8 @@ def trusted_clone(d):
 def git_env():
     """Окружение git копии: только конфиг клона — ни системного, ни ~/.gitconfig, ни GIT_* тика, без вопросов."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+               GIT_NO_REPLACE_OBJECTS="1")
     return env
 
 
@@ -1931,7 +2007,9 @@ def run_serve(rid, d, req, window, qdir):
         if not argv:
             raise RuntimeError(line)
         base["cmd"] = line
-        code = prepare(work, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
+        # не монорепо с --app ПАПКА: зависимости ставятся в папке приложения (metis-0790); монорепо — в корне
+        inst = cwd if app and app != "." and not workspaces(work, _pkg(work)) else work
+        code = prepare(inst, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
         if rid in stop_requests():
             raise Cancelled
         if code not in (None, 0):
@@ -2897,7 +2975,7 @@ def cmd_request(kind, args):
             head, _clean = head_state(d)
         if head:
             req["sha"] = head
-            prev = live_test(d, head, f.get("--script"))
+            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")))
             if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
                 print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
                 if not wait:
@@ -2933,7 +3011,7 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app", "script") if req.get(k)}}, ensure_ascii=False,
+                     **{k: req[k] for k in ("sha", "app", "script", "pin") if req.get(k)}}, ensure_ascii=False,
                     indent=1))
         finally:
             os.close(dfd)
@@ -2952,8 +3030,9 @@ def cmd_request(kind, args):
     return wait_result(q, rid, wait)
 
 
-def live_test(d, sha, script=None):
-    """(папка заявок, ID) живой заявки test на этот head и эту папку или None: в очереди (лежит .req.json) или идёт
+def live_test(d, sha, script=None, pin=False):
+    """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
+    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json) или идёт
     (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
     d = os.path.realpath(d)
     now = P.now()
@@ -2972,7 +3051,7 @@ def live_test(d, sha, script=None):
                 except ValueError:
                     continue
                 if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
-                        or res.get("script") != script:
+                        or res.get("script") != script or bool(res.get("pin")) != pin:
                     continue
                 where = res.get("src") or res.get("dir")
                 if not isinstance(where, str) or os.path.realpath(where) != d:

@@ -170,12 +170,15 @@ own = {"metis-0410": ("", {"type": "task", "status": "waiting", "waiting_on": "h
        "metis-0413": ("", {"type": "task", "status": "done", "owner": "owner"}),
        "metis-0414": ("", {"type": "task", "status": "todo", "owner": "metis-pantheon"}),
        "ИГНОР-1": ("", {"type": "task", "status": "todo", "owner": "owner"})}
+own["inbox-0009"] = ("", {"type": "task", "status": "waiting", "waiting_on": "human", "owner": "zeus"})
 oc = B.owner_cards(own, lambda h: h.get("owner") == "owner")
-check("2. карточки на владельце: с вопросом или ждёт человека — «Ждёт вас», остальное — «Руками»; закрытые, чужие и id не "
-      "по шаблону — нет", oc == {"ask": ["metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
+check("2. «Ждёт вас» — ждёт человека при любом «Кому» (inbox Зевса тоже, metis-0801) и вопрос на карточке владельца; "
+      "остальное владельца — «Руками»; закрытые, чужие без ожидания и id не по шаблону — нет",
+      oc == {"ask": ["inbox-0009", "metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
 ot = B.render(dict(data, owner=oc), T0)
 check("2. в блоке разделы «Ждёт вас» и «Руками» — только id, без заголовков",
-      "**Ждёт вас** (2): metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot and "ИГНОР" not in ot, ot)
+      "**Ждёт вас** (3): inbox-0009, metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot
+      and "ИГНОР" not in ot, ot)
 bad = B.render(dict(data, owner={"ask": ["ИГНОР ‮", "metis-0410"], "do": None}), T0)
 check("2. раздел владельца сам сверяет id по шаблону", "ИГНОР" not in bad and "**Ждёт вас** (1): metis-0410." in bad
       and "**Руками** (0): карточек нет." in bad, bad)
@@ -364,6 +367,16 @@ r = cli(["board"], T0 + 3120)
 got = read(home_auto)
 check("7б. … а задача сразу в составе пачки в сводке: «Пачка … (в работе); закрыто 0 из 1»",
       f"Пачка {sid}: {k_id} (в работе); закрыто 0 из 1." in got, r.stdout + r.stderr + got)
+
+# metis-0792: STORY_PR_RE в boardtext и tasks — одно правило (boardtext грузится без tasks, общий импорт нельзя)
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import tasks as _T  # noqa: E402
+for pr, ok in (("latark/agent-kit#290", True), ("x/y#1", True), ("x/y#999999", True), ("x/y#0", False), ("x/y#00", False),
+               ("x/y#1000000", False), ("x/y#", False), ("x/y#12a", False), ("xy#5", False), ("x/y#05", False)):
+    b, t = bool(B.STORY_PR_RE.fullmatch(pr)), bool(_T.STORY_PR_RE.fullmatch(pr))
+    check(f"STORY_PR_RE: {pr!r} — boardtext и tasks дают {ok}", b == t == ok, (b, t))
+check("STORY_PR_RE: номер PR — последняя группа у обоих",
+      B.STORY_PR_RE.fullmatch("o/r#42").group(B.STORY_PR_RE.groups) == _T.STORY_PR_RE.fullmatch("o/r#42").group(_T.STORY_PR_RE.groups) == "42")
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

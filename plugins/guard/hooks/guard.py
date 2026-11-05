@@ -205,8 +205,9 @@ def _stop(event):
     return 0 if event is not None and event.get("hook_event_name") == "Stop" else 2
 
 
-def run(argv):
-    """Вход хука. Не возвращается: молчание — код 0, иначе guard_rules.run_hook (свой код и причина)."""
+def run(argv, raw=None):
+    """Вход хука. Не возвращается: молчание — код 0, иначе guard_rules.run_hook (свой код и причина). raw — байты
+    события, уже прочитанные демоном хуков (hooks/daemon.py); None — прочитать stdin."""
     mode, event = mode_of(argv), None
 
     def out_of_time(signum, frame):
@@ -217,7 +218,8 @@ def run(argv):
 
     signal.signal(signal.SIGALRM, out_of_time)
     signal.setitimer(signal.ITIMER_REAL, DEADLINE)
-    raw = sys.stdin.buffer.read()
+    if raw is None:
+        raw = sys.stdin.buffer.read()
     event = parse(raw)
     if event is not None:
         try:

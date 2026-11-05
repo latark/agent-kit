@@ -103,6 +103,32 @@ check("1. пачка done или todo при задаче doing — отметк
       and S.plan(story("doing", "todo", "done"), {}) == ([], {}))
 check("1. задача другой пачки и пачка-заметка (type stage) состав не меняют",
       S.story_target("metis-0500", dict(story("todo", "todo"), **dict([task("metis-0599", "doing", parent="metis-0600")]))) is None)
+# metis-0803: пачка пачек — вложенные пачки (parent или batch) в составе наравне с задачами
+def goal(st, *kids):
+    out = dict([task("metis-0430", st, "story")])
+    for i, (how, k) in enumerate(kids, 1):
+        tid, (p, h, b) = task(f"metis-04{30 + i}", k, "story", parent="metis-0430" if how == "parent" else None)
+        if how == "batch":
+            h["batch"] = "metis-0430"
+        out[tid] = (p, h, b)
+    return out
+
+
+check("1. пачка пачек: все вложенные пачки (parent и batch) done или dropped → done (metis-0430, metis-0803)",
+      S.story_target("metis-0430", goal("todo", ("parent", "done"), ("batch", "done"), ("parent", "dropped"))) == "done")
+check("1. пачка пачек: вложенная пачка в работе или на приёмке → doing",
+      S.story_target("metis-0430", goal("todo", ("parent", "doing"), ("batch", "done"))) == "doing"
+      and S.story_target("metis-0430", goal("todo", ("batch", "review"))) == "doing")
+check("1. пачка пачек: вложенная пачка ещё в очереди — как есть; задача и пачка вместе — по обеим",
+      S.story_target("metis-0430", goal("todo", ("parent", "done"), ("batch", "todo"))) is None
+      and S.story_target("metis-0430", dict(goal("todo", ("parent", "done")), **dict([task("metis-0439", "todo",
+                                                                                        parent="metis-0430")]))) is None)
+check("1. пачка с batch = сама себе в состав не входит",
+      S.story_want("metis-0430", {"metis-0430": ("", {"type": "story", "id": "metis-0430", "status": "done",
+                                                    "batch": "metis-0430"}, "")}) is None)
+check("1. задача с batch = пачка (не story) в состав по batch не входит — как в tasks.story_children",
+      S.story_want("metis-0430", dict(goal("todo"), **{"metis-0438": ("", {"type": "task", "status": "done",
+                                                                        "batch": "metis-0430"}, "")})) is None)
 
 
 def story_with(st, extra=None, body="", *kids):

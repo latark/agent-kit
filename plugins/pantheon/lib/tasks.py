@@ -728,6 +728,22 @@ def check_source(pantheon, tid, source):
             raise ValueError(f"source {source}: нет такой задачи")
 
 
+def parent_problem(tasks, tid, par):
+    """parent — только id пачки (type story), иначе карточка выпадает из всех пачек и видов (metis-0802). → текст отказа
+    или None; пустой parent — None (открепить можно)."""
+    if not par:
+        return None
+    if par == tid:
+        return f"parent {par} — сама карточка"
+    if par not in tasks:
+        return f"parent {par}: нет такой пачки"
+    kind = tasks[par][1].get("type")
+    if kind != "story":
+        return (f"parent {par} — не пачка (type {kind}): parent — только id карточки type story, иначе задача не видна "
+                "ни в одной пачке; связь с задачей — source или depends_on")
+    return None
+
+
 def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, need_story_criteria=False, **fields):
     """kind — task или story (пачка, metis-0069). done_when — пункты «Готово, когда» (metis-0502): критерии пишет автор при
     создании; раздел есть всегда, без пунктов — с подсказкой. need_story_criteria (CLI `task new`, metis-0766): story без
@@ -742,6 +758,10 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
     if fields.get("source"):
         check_source(pantheon, None, fields["source"])
+    if fields.get("parent"):
+        bad = parent_problem(load_tasks(pantheon, WORK_TYPES), None, fields["parent"])
+        if bad:
+            raise ValueError(bad)
     if done_when and (done_criteria(escape_desc(text)) or DONE_WHEN_HEAD in escape_desc(text).split("\n")):
         raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
     if need_story_criteria and kind == "story" and not (
@@ -836,6 +856,10 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
     if changes.get("depends_on"):
         check_depends(tasks, tid, changes["depends_on"])
+    if changes.get("parent"):  # прежний неверный parent не мешает другим правкам — его показывает check (metis-0802)
+        bad = parent_problem(tasks, tid, changes["parent"])
+        if bad:
+            raise ValueError(f"{tid}: {bad}")
     # в пачку — только с решённым режимом; и снять или сделать «не решено» режим у задачи пачки нельзя (metis-0505)
     par = changes.get("parent", tasks[tid][1].get("parent")) if "parent" in changes or "mode" in changes else None
     mode = changes["mode"] if "mode" in changes else tasks[tid][1].get("mode")
@@ -872,6 +896,8 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
         raise ValueError("нужен --title: название остатка")
     items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and not _is_stub(x)]
     fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
+    if parent_problem(tasks, tid, fields.get("parent")):  # неверный parent исходной в остаток не переносим (metis-0802)
+        fields.pop("parent")
     fields.update({k: v for k, v in (("mode", mode), ("mode_why", mode_why)) if v})  # у исходной в пачке нет режима — задаётся здесь
     fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
     desc = text if text else f"Остаток задачи {tid} «{h0.get('title')}»."
@@ -1064,7 +1090,8 @@ def extra_attention(head, body, tasks, t, night_end="08:00", open_prs=None):
 
 def board_problems(tasks, t, night_end="08:00", open_prs=None):
     """Сверка по всем задачам → (ошибки, предупреждения), каждое — (id, текст). Ошибки: задача пачки без mode;
-    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention и хвосты в журнале без задачи (tail_lines)."""
+    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention, открытая карточка
+    с parent не на пачку (metis-0802) и хвосты в журнале без задачи (tail_lines)."""
     errs, warns = [], []
     for tid, (_, h, b) in sorted(tasks.items()):
         if h.get("type") == "task" and in_pack(h, tasks) and not mode_decided(h):
@@ -1076,6 +1103,9 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
                 if not h.get(k):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
         warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
+        bad = parent_problem(tasks, tid, h.get("parent")) if h.get("status") not in ("done", "dropped") else None
+        if bad:  # metis-0802: задача с parent не на пачку не видна ни в одной пачке
+            warns.append((tid, f"{bad}; поправить — pantheon task attach {tid} <пачка> или task set {tid} parent="))
     warns += [(tid, f"хвост в журнале без задачи: {ln}") for tid, ln in tail_lines(tasks, t)]  # metis-0504, не блок
     warns += pack_title_warns(tasks)  # metis-0505
     return errs, warns
@@ -1501,7 +1531,7 @@ def criteria_count(body):
 GH_REPO = r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}"
 _SHA = r"[0-9a-f]{7,40}"
 # поле pr пачки (metis-0757): «latark/agent-kit#290»; branch — имя ветки без пробелов и управляющих знаков
-STORY_PR_RE = re.compile(r"(" + GH_REPO + r")#(\d{1,6})")
+STORY_PR_RE = re.compile(r"(" + GH_REPO + r")#([1-9]\d{0,5})")  # как boardtext.STORY_PR_RE (тот грузится без tasks); #0 нет
 BRANCH_RE = re.compile(r"[\w][\w./-]{0,199}")
 
 
@@ -1665,6 +1695,57 @@ def over_budget(inf):
     return inf["budget"] is not None and inf["sum"] > inf["budget"] + 1e-9
 
 
+NO_ESTIMATES = "оценок нет"
+
+
+def story_asks(sid, tasks):
+    """Карточки внутри пачки, которые ждут ответа владельца (needs_answer, колонка «Нужен ответ»), — с вложенными пачками
+    (metis-0801): сама пачка не в «Нужен ответ», а вопрос в её составе на Пульте не был виден. → [id] по порядку."""
+    out, seen, todo = [], {sid}, list(story_children(sid, tasks))
+    while todo:
+        i = todo.pop(0)
+        if i in seen:
+            continue
+        seen.add(i)
+        h = tasks[i][1]
+        if needs_answer(h):
+            out.append(i)
+        if h.get("type") == "story":
+            todo += story_children(i, tasks)
+    return sorted(out)
+
+
+def sum_text(inf):
+    """«Сумма оценок» пачки: сумма оценок детей в процентах недели — расход против бюджета, а не доля сделанного
+    (metis-0800). Ни у одного ребёнка нет оценки — «оценок нет», а не «0 %»: ноль читался как «прогресс 0 %»."""
+    return NO_ESTIMATES if len(inf["no_estimate"]) == len(inf["ids"]) else pct_text(inf["sum"])
+
+
+BATCH_BRANCH = "batch/"  # ветка пачки — batch/<story-id> (AGENTS.md, pantheon batch pr)
+
+
+def batch_pr(sid, idx, own=None):
+    """PR пачки по её ветке batch/<sid> из кэша gh (metis-0799): поле pr пишет `pantheon batch pr`, но PR, открытый
+    иначе, его не ставит, и пачка оставалась без PR. idx — autoclose.pr_index (запись с branch), own — репозитории
+    направления пачки (в нижнем регистре; None — любые); у PR из форка pr_index ветку не пишет — он сюда не попадает.
+    → (репозиторий, номер, слит, [id задач, которые PR закрывает,
+    кроме самой пачки]) или None. Открытый PR важнее слитого, из нескольких — с большим номером."""
+    found = {}
+    for tid, rows in (idx or {}).items():
+        for x in rows if isinstance(rows, list) else []:
+            if not isinstance(x, dict) or x.get("branch") != BATCH_BRANCH + str(sid) or not isinstance(x.get("repo"), str):
+                continue
+            repo = x["repo"].lower()
+            if own is not None and repo not in own:
+                continue
+            found.setdefault((repo, x.get("number"), bool(x.get("merged"))), set()).add(tid)
+    keys = [k for k in found if isinstance(k[1], int) and not isinstance(k[1], bool)]
+    if not keys:
+        return None
+    key = max(keys, key=lambda k: (not k[2], k[1]))
+    return key[0], key[1], key[2], sorted(found[key] - {sid})
+
+
 def story_text(sid, tasks):
     """Состав пачки строками — для pantheon task show."""
     inf = story_info(sid, tasks)
@@ -1673,7 +1754,7 @@ def story_text(sid, tasks):
         h = tasks[i][1]
         lines.append(f"{n}. {i} · {label_of(h)} · {h.get('estimate') or 'без оценки'} · "
                      f"{MODE_VIEW.get(h.get('mode')) or 'кто делает: ' + MODE_UNSET} · {one_line(h.get('title'))}")
-    lines.append(f"сумма {pct_text(inf['sum'])}"
+    lines.append((NO_ESTIMATES if sum_text(inf) == NO_ESTIMATES else f"сумма {sum_text(inf)}")
                  + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " (бюджет не задан)")
                  + (" — больше бюджета" if over_budget(inf) else "")
                  + (f"; без оценки: {', '.join(inf['no_estimate'])}" if inf["no_estimate"] else ""))
@@ -1791,12 +1872,17 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     «Пачки проекта»."""
     names = kw.get("names") or {}
     child_links = kw.pop("child_links", None) or {}  # {id задачи: work_links} — список PR задач пачки ([zeus-pr-link])
+    bpr = kw.pop("batch_pr", None)  # batch_pr: PR с ветки batch/<id> по кэшу gh — когда поля pr нет (metis-0799)
     card, text = render_card(head, body, src_rel, t, **kw)
     inf = story_info(head.get("id"), tasks)
-    spr = story_pr(head)
+    spr = story_pr(head) or (bpr[:2] if bpr else None)
+    bpr = bpr if bpr and (bpr[0].lower(), bpr[1]) == (spr[0].lower(), spr[1]) else None
+    # закрытые PR пачки задачи с другим parent: в состав (он — по parent) не входят, но их видно (metis-0799)
+    asks = story_asks(head.get("id"), tasks)
+    outside = [i for i in (bpr[3] if bpr else []) if i not in inf["ids"] and i in tasks and tasks[i][1].get("type") == "task"]
     # состояние PR пачки — из кэша gh (pr_index по ветке batch/<id>: номер пачки в имени ветки); нет в кэше — без пометки
-    sstate = next((v for r, n, v in (child_links.get(head.get("id")) or ([], []))[0] if spr and (r, n) == (spr[0].lower(), spr[1])),
-                  None)
+    sstate = bpr[2] if bpr else next((v for r, n, v in (child_links.get(head.get("id")) or ([], []))[0]
+                                      if spr and (r, n) == (spr[0].lower(), spr[1])), None)
     spr_url = f"https://github.com/{spr[0]}/pull/{spr[1]}" if spr else None
     over = over_budget(inf)
     for k in ("Пачка", "Порядок", "Режим", "Режим почему", "Зависит от", "Области", "Пересечения"):
@@ -1807,15 +1893,18 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
                  "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
                  "Бюджет": head.get("estimate") if inf["budget"] is not None else None,
-                 "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
+                 "Сумма оценок": sum_text(inf) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
                  "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
                  "Пересечения": cross_l or None, "Области не указаны": unknown,
-                 "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or "")) else None,
-                 "PR пачки": spr_url, "Тип": "пачка"})
-    summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
+                 "Ветка": head.get("branch") if BRANCH_RE.fullmatch(str(head.get("branch") or ""))
+                 else BATCH_BRANCH + head["id"] if bpr and BRANCH_RE.fullmatch(BATCH_BRANCH + str(head.get("id"))) else None,
+                 "Вопросов": len(asks) or None,
+                 "PR пачки": spr_url, "Вне состава": [lk(i) for i in outside] or None, "Тип": "пачка"})
+    summary = ("> **Пачка:** " + (NO_ESTIMATES if sum_text(inf) == NO_ESTIMATES else f"сумма оценок {sum_text(inf)}")
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
+               + (f"\n> **Нужен ответ владельца внутри пачки:** {len(asks)} — {', '.join(lk(i) for i in asks)}" if asks else "")
                + (f"\n> **Цепочка одному исполнителю:** {' → '.join(lk(i) for i in inf['chain'])}" if inf["chain"] else "")
                + (f"\n> **Параллельно:** {', '.join(lk(i) for i in inf['parallel'])}" if inf["parallel"] else "")
                + (f"\n> **Пересечения по файлам:** {'; '.join(cross_l)}" if inf["cross"] else "")
@@ -1823,7 +1912,9 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
                + (f"\n> **PR пачки:** [PR #{spr[1]}]({spr_url}) · {spr[0]}"
                   + {True: " · слит", False: " · открыт", None: ""}[sstate]
                   + (f" · ветка `{card['Ветка']}`" if card.get("Ветка") else "") if spr
-                  else f"\n> **Ветка пачки:** `{card['Ветка']}` · PR ещё нет" if card.get("Ветка") else ""))
+                  else f"\n> **Ветка пачки:** `{card['Ветка']}` · PR ещё нет" if card.get("Ветка") else "")
+               + (f"\n> **PR пачки закрыл и задачи вне её состава** (их parent — другая пачка или пусто): "
+                  f"{', '.join(lk(i) for i in outside)}" if outside else ""))
     rows = []
     cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
@@ -1872,6 +1963,8 @@ def project_counts(tasks, t, directions):
     for tid, (_, h, _) in tasks.items():
         if h.get("direction") not in directions or h.get("status") in ("done", "dropped"):
             continue
+        if h.get("type") in ("task", "story"):  # «Ждёт вас» = колонка «Нужен ответ» доски, пачки тоже (metis-0801)
+            c["Ждёт вас"] += needs_answer(h)
         if h.get("type") == "story":
             c["Пачек"] += 1
             continue
@@ -1879,7 +1972,6 @@ def project_counts(tasks, t, directions):
             continue
         c["Открыто"] += 1
         c["В работе"] += h.get("status") == "doing"
-        c["Ждёт вас"] += h.get("status") == "waiting" and h.get("waiting_on") == "human"
         c["Просрочено"] += overdue(h, t)
         c["Пересечений"] += tid in cross
     return {k: int(v) for k, v in c.items()}
@@ -1939,7 +2031,7 @@ def render_project_note(p, reg, tasks, t, roles=None):
     body = (f"\n> Заметку пишет плановый проход по `directions.toml` и задачам. Не правьте её: счётчики сверяет "
             f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {coord}"
             + (f" · **Цель:** {head['Цель']}" if head["Цель"] else "")
-            + f"\n\nОткрыто {c['Открыто']} · в работе {c['В работе']} · ждёт вас {c['Ждёт вас']} · просрочено "
+            + f"\n\nОткрыто {c['Открыто']} · в работе {c['В работе']} · нужен ответ {c['Ждёт вас']} · просрочено "
               f"{c['Просрочено']} · с пересечениями {c['Пересечений']} · пачек {c['Пачек']}\n\n"
               f"## Пачки проекта\n\n![[Пульт.base#Пачки проекта]]\n")
     return join(head, body, PROJECT_ORDER)
@@ -2042,7 +2134,9 @@ properties:
   file.name:
     displayName: Карточка
   formula.sum_budget:
-    displayName: Сумма / бюджет
+    displayName: Оценки / бюджет (не прогресс)
+  note.Ждёт вас:
+    displayName: Нужен ответ
   note.id:
     displayName: №
   formula.mode_view:
@@ -2100,6 +2194,7 @@ views:
     order:
       - file.name
       - note.Закрыто
+      - note.Вопросов
       - formula.sum_budget
       - note.Цепочка
   - type: table
@@ -2206,14 +2301,14 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
               "Когда", "Бюджет", "Сумма оценок", "Закрыто", "Цепочка", "Параллельно", "Области не указаны",
-              "Ветка", "PR пачки", "Тип", "id", "tags"]
+              "Вопросов", "Ветка", "PR пачки", "Вне состава", "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
               "Вопрос задан": "datetime", "Откуда": "text", "Из чего": "text", "Критерии": "text", "Хвост": "multitext", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
-              "Ветка": "text", "PR пачки": "text",
+              "Вопросов": "number", "Ветка": "text", "PR пачки": "text", "Вне состава": "multitext",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
@@ -2257,9 +2352,16 @@ def norm_label(x):
     return HUMAN_WAIT if x == OLD_HUMAN_WAIT else x
 
 
+def needs_answer(head):
+    """Ждёт ответа владельца — колонка «Нужен ответ» доски: waiting и waiting_on human (metis-0801). Одно определение
+    для колонки, счётчика «Нужен ответ» заметки проекта на Пульте, «Вопросов» пачки и «Нужен ответ» board-auto
+    (boardtext.owner_cards — копия, модуль без tasks; равенство сверяет тест)."""
+    return head.get("status") == "waiting" and head.get("waiting_on") == "human"
+
+
 def label_of(head):
     st = head.get("status")
-    if st == "waiting" and head.get("waiting_on") == "human":
+    if needs_answer(head):
         return HUMAN_WAIT
     return LABELS.get(st, st)
 
@@ -2761,7 +2863,7 @@ properties:
   formula.accept_view:
     displayName: Приёмка
   formula.sum_budget:
-    displayName: Сумма / бюджет
+    displayName: Оценки / бюджет (не прогресс)
   note.id:
     displayName: №
   formula.status_view:
@@ -2837,7 +2939,7 @@ views:
         direction: ASC
       - property: formula.prio_rank
         direction: ASC
-    order: [file.name, note.Закрыто, formula.sum_budget, note.Цепочка]
+    order: [file.name, note.Закрыто, note.Вопросов, formula.sum_budget, note.Цепочка]
   - type: table
     name: Итоги пачек
     filters:
@@ -2924,8 +3026,9 @@ VIEW_HELP = {
                      "принять; готовые и отменённые не показываются.",
     "Доска": "Задачи по статусам, готовые — за 7 дней; заявки ролей друг другу здесь не показаны (они в «Все задачи»). "
              "Что делать: смотреть, что движется; сменить статус — перетащить карточку.",
-    "Пачки": "Пачки (наборы задач на ночь) по статусам, с суммой оценок против бюджета; готовые — 7 дней. Что делать: "
-             "следить за бюджетом и пересечениями по файлам.",
+    "Пачки": "Пачки (наборы задач на ночь) по статусам; готовые — 7 дней. «Закрыто N из M» — сделанное, «Вопросов» — "
+             "задачи пачки, ждущие вашего ответа, «Оценки / бюджет» — сумма оценок против бюджета, не прогресс. Что "
+             "делать: ответить на вопросы внутри пачки, следить за бюджетом и пересечениями по файлам.",
     "Итоги пачек": "Задачи из пачек, которые дошли до проверки, готовы или ждут приёмки, по пачкам. Что делать: принять "
                    "результат ночи.",
     "Все задачи": "Вообще все задачи и пачки, включая готовые, по проектам. Что делать: искать то, чего нет в других видах.",
@@ -3776,7 +3879,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             if h.get("type") == "story":
                 pn = next((project_note_name(pr) for pr, r in registry.items() if h.get("direction") in r["directions"]),
                           None)
-                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, child_links=wl, **kw)
+                own = [r.lower() for r in (repos or {}).get(h.get("direction")) or [] if isinstance(r, str)]
+                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, child_links=wl,
+                                                batch_pr=batch_pr(cid, pr_index, own) if repos else None, **kw)
             else:
                 card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs,
                                                                           outs, wl.get(cid), tails), **kw)

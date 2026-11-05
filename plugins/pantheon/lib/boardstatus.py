@@ -8,7 +8,8 @@
   - задача todo с открытым PR, который её закрывает (номер в ветке или «Closes» в теле), — review ставит автозакрытие
     (lib/autoclose.py, run); не вышло (PR из репозитория чужого направления) — та же тревога;
   - пачка (story) — по составу: есть задача doing или review → doing («В работе»; из inbox, todo и done), все задачи
-    done или dropped → done («Готово»; из inbox, todo, doing). Пачку в waiting (ждёт человека), review (приёмка — её
+    done или dropped → done («Готово»; из inbox, todo, doing). Пачка пачек (metis-0803) — так же: вложенная пачка
+    (parent или batch = id) в составе наравне с задачами, по своему статусу. Пачку в waiting (ждёт человека), review (приёмка — её
     закрывает человек, а не состав) и dropped, пачку без задач и смешанный состав без работы — не трогаем. Пачку с
     открытым вопросом владельцу (question, options, requested) не двигаем вовсе — done стёр бы вопрос (tasks.task_set),
     — а тревожим. Сдвиг пачки — строка в её журнал; проход уже ставил этот статус, а пачку вернули руками (закрыли,
@@ -41,8 +42,11 @@ def last_story_move(body):
 
 
 def story_want(sid, tasks):
-    """Статус, которого требует состав пачки, без оглядки на её текущий статус: doing, done или None."""
-    kids = [h.get("status") for _, h, _ in tasks.values() if h.get("parent") == sid and h.get("type") == "task"]
+    """Статус, которого требует состав пачки, без оглядки на её текущий статус: doing, done или None. Состав — как у
+    tasks.story_children: задачи и пачки с parent = sid и пачки с batch = sid (пачка пачек, metis-0803); вложенная
+    пачка считается по своему статусу, как задача."""
+    kids = [h.get("status") for tid, (_, h, _) in tasks.items() if tid != sid and (
+        h.get("parent") == sid and h.get("type") in ("task", "story") or h.get("type") == "story" and h.get("batch") == sid)]
     if not kids:
         return None
     if any(k in ("doing", "review") for k in kids):

@@ -69,9 +69,29 @@ BASE = {"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pantheon, "PA
 # запас 2 с; отказные сценарии ждут срок целиком, поэтому каждая секунда здесь — 5 с файла
 
 
-def run(ev):
-    return subprocess.run([PY, "-I", HOOK, "owner-log"], input=json.dumps(ev), env=dict(BASE),
-                          capture_output=True, text=True, timeout=60)
+def run(ev, **env):
+    return subprocess.run([PY, "-I", HOOK, "owner-log"], input=json.dumps(ev), env=dict(BASE, **env),
+                          capture_output=True, text=True, timeout=120)
+
+
+STARTED = "в событии нет поля source"  # строка журнала хуков: хук прочёл событие и сейчас запомнит размер транскрипта
+
+
+def started_count():
+    return read(os.path.join(state, "logs", "ctx-hooks.log")).count(STARTED)
+
+
+def wait_started(before, limit=60):
+    """metis-0612: ждём, пока хук дойдёт до ожидания записи, а не фиксированные 0,3–0,4 с. Хук запоминает размер
+    транскрипта (mark) сразу после строки STARTED и ищет запись от mark − 2 МБ. Под нагрузкой (load 14–170) запуск
+    python дольше 0,4 с: запись и 3 МБ после неё ложились раньше mark, запись оказывалась дальше 2 МБ от него, и
+    проверка падала, хотя хук исправен. Предел — limit секунд; не дождались — False, проверка покажет причину."""
+    deadline = time.time() + limit
+    while started_count() <= before:
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def iso(t):
@@ -134,10 +154,10 @@ def scenario(name, text, kind="human", record_text=None, turn=True, enqueue=True
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "работаю"}]}})
     ev = {"session_id": "s-" + name, "transcript_path": tr, "hook_event_name": "UserPromptSubmit",
           "agent_type": "hq", "prompt": text, "prompt_id": turn_id}  # promptId — у идущего хода
-    holder = {}
+    holder, before = {}, started_count()
     th = threading.Thread(target=lambda: holder.update(r=run(ev)))
     th.start()
-    time.sleep(0.3)
+    holder["started"] = wait_started(before)
     if enqueue:
         append(tr, queue_op("enqueue", time.time(), text))
     time.sleep(delay)  # ход доходит до конца, не забрав ввод вложением
@@ -150,7 +170,7 @@ def scenario(name, text, kind="human", record_text=None, turn=True, enqueue=True
                           ensure_ascii=False) + "\n"
         with open(tr, "a", encoding="utf-8") as fh:
             fh.write(body + (filler(grow) if grow else ""))  # одной записью: хук видит либо ничего, либо всё
-    th.join(40)
+    th.join(150)  # хук сам кончается по сроку ожидания; под нагрузкой его запуск и чтение — десятки секунд
     return holder.get("r")
 
 
@@ -244,17 +264,21 @@ TYPED = "обычный ввод: после записи дописали 3 М�
 tr = os.path.join(home, "tr", "typed.jsonl")
 append(tr, {"type": "assistant", "isSidechain": False, "timestamp": iso(time.time() - 5),
             "message": {"role": "assistant", "content": [{"type": "text", "text": "готово"}]}})
-holder = {}
+holder, before = {}, started_count()
 ev = {"session_id": "s-typed", "transcript_path": tr, "hook_event_name": "UserPromptSubmit", "agent_type": "hq",
       "prompt": TYPED, "prompt_id": "p-typed"}
-th = threading.Thread(target=lambda: holder.update(r=run(ev)))
+# срок ожидания записи — 30 с, а не 1 с общего BASE: под нагрузкой между запуском хука и записью теста проходят
+# секунды. Исправный хук находит запись на ближайшем опросе (0,3 с) и выходит сразу; долго ждёт только сломанный
+th = threading.Thread(target=lambda: holder.update(r=run(ev, PANTHEON_CONFIRM_WAIT="30")))
 th.start()
-time.sleep(0.4)
+went = wait_started(before)
 with open(tr, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(user(TYPED, "p-typed", time.time()), ensure_ascii=False) + "\n" + filler(3000000))
-th.join(40)
+th.join(150)
 check("обычная запись ввода, после которой транскрипт вырос на 3 МБ → в подлинник",
-      TYPED in read(os.path.join(LOG, "zeus.md")))
+      TYPED in read(os.path.join(LOG, "zeus.md")),
+      "хук %s до записи; журнал хуков: %s" % ("дошёл до ожидания" if went else "не дошёл за 60 с",
+                                             " | ".join(hook_lines("p-typed"))))
 
 print("%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

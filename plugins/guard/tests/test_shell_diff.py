@@ -28,7 +28,10 @@ _ROOT = tempfile.mkdtemp(prefix="shell_diff-root-")
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _orphan_pool import process_pool  # noqa: E402 — воркеры гаснут вместе с родителем (metis-0618)
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 CACHED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cached_main.py")  # guard из .pyc (metis-0544)
@@ -196,12 +199,13 @@ def check(cmd):
 
 def run_all(all_cases):
     """Процессы, а в песочнице окна (ProcessPoolExecutor → os.sysconf("SC_SEM_NSEMS_MAX") → PermissionError) —
-    потоки: работа — подпроцессы оболочек и guard, так что результат тот же, меняется только способ раздачи."""
+    потоки: работа — подпроцессы оболочек и guard, так что результат тот же, меняется только способ раздачи.
+    Воркеры пула гаснут сами, если файл убили (таймаут прогона, SIGKILL): сироты guard-_9i3yizq, metis-0618."""
     workers = max(2, (os.cpu_count() or 4) - 1)
     if os.environ.get("RUN_TESTS_RUNNER"):  # запущен run-tests: он уже гоняет несколько файлов параллельно (metis-0728)
         workers = 2
     try:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        with process_pool(workers) as pool:
             return list(pool.map(check, all_cases, chunksize=8))
     except (PermissionError, OSError):
         with ThreadPoolExecutor(max_workers=workers) as pool:

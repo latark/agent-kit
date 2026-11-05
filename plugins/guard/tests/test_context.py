@@ -14,7 +14,8 @@ configure() модуля и пересчитывается заново — guar
   (set_context в родителе — контекст меняется много раз подряд; и в ребёнке — как будущий демон): код, stdout и
   stderr совпадают. Набор различает контексты — проверено: GUARD_OFF, HOME и TMPDIR меняют решения, а строгий guard
   отказывает там, где хук плагина при управляемых настройках молчит (дыра прототипа: MODE из argv при загрузке);
-- кэш разбора Bash (по команде и папке) сбрасывается при смене контекста: `~` раскрывается от нового HOME.
+- кэш разбора Bash (по команде и папке) сбрасывается при смене контекста: `~` раскрывается от нового HOME;
+- событие прошлого вызова (guard_rules.EVENT_NAME) set_context сбрасывает (долг С2 argus).
 """
 import ast
 import json
@@ -387,6 +388,19 @@ def test_cache(py, w):
           ok, (got, want, r.stderr[-300:]))
 
 
+def test_event_name(py, w):
+    """Долг С2 argus: событие прошлого вызова не переживает set_context — иначе сбой нового вызова в том же процессе
+    судился бы как сбой на Stop (код 0 вместо отказа)."""
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import guard, guard_rules as g\n"
+            "g.EVENT_NAME = 'Stop'\n"
+            "guard.set_context(['--strict'], {'HOME': sys.argv[2], 'PATH': '/usr/bin:/bin'})\n"
+            "print(repr(g.EVENT_NAME))")
+    r = subprocess.run([py, "-I", "-c", code, HOOKS, w.ha], capture_output=True, text=True, timeout=SUB_TIMEOUT,
+                       env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": w.ha})
+    check("set_context сбрасывает guard_rules.EVENT_NAME прошлого вызова (долг С2)", r.stdout.strip() == "None",
+          (r.stdout, r.stderr[-300:]))
+
+
 def main():
     test_ast()
     py = python_of()
@@ -399,6 +413,7 @@ def main():
             test_values(py, w)
             test_decisions(py, w)
             test_cache(py, w)
+            test_event_name(py, w)
         finally:
             shutil.rmtree(root, ignore_errors=True)
     print(f"\n{sum(results)} из {len(results)} прошли")

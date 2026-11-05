@@ -1,12 +1,12 @@
 {
   "plugins": {
     "guard": {
-      "tree": "b83e219d671b94c47d12bb16d6c1a8f829c5865bf16893342a6b34ba726d62d4",
-      "version": "0.5.58"
+      "tree": "3c2bf9294b082990788652fe3f028779ea77b75df7ec3a7726c76ad3001108ca",
+      "version": "0.5.60"
     },
     "pantheon": {
-      "tree": "eca4430ec40bcca16f2da335fd1298cf0cc470018e11764d7f8e789d05cb8116",
-      "version": "0.11.211"
+      "tree": "e8146cf05f8a8a8eb135c8075b197e22373baaff2d1346ef916eced53007f579",
+      "version": "0.11.213"
     },
     "project-tools": {
       "tree": "7d2ae07428f9a2fbfdc6d1803b258337ed0583ccdb072b62808f93e85aef7660",

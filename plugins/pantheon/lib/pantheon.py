@@ -169,6 +169,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
                                         папках Пантеона) и печатает вопрос «[id] …» об остальном своём; --pid — после
                                         «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
+  pantheon reap --auto                  плановый проход раз в 30 мин (metis-0617): гасит только брошенное старше
+                                        30 мин — сироты multiprocessing и сироты в песочнице окна, процессы удалённых
+                                        worktree и закрытых задач, language server без живого claude; строка
+                                        «погашено: …» в alerts.md
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
@@ -708,7 +712,7 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
-                    "archive", "batch-suggest"}
+                    "archive", "batch-suggest", "reap"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -788,6 +792,8 @@ def parse_command(cmd):
             return None  # задача прохода — только `batch-suggest run`; --force и task batch-suggest --apply — руками
         if argv[1] == "read" and argv[2:] != ["run"]:
             return None  # заявку подаёт окно, а не задача прохода; проход — только `read run`
+        if argv[1] == "reap" and argv[2:] != ["--auto"]:
+            return None  # проход гасит только брошенное (`reap --auto`, metis-0617); --apply и --pid — руками и Гестия
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
@@ -5726,19 +5732,30 @@ def board_archive(rest):
         os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
         stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
         undo = {}   # архив → размер до дописывания (None — файла не было)
-        for key, ls in sorted(moved.items()):
-            ap = os.path.join(PANTHEON, "archive", f"{key}.md")
-            undo[ap] = os.path.getsize(ap) if os.path.exists(ap) else None
-            with open(ap, "a", encoding="utf-8") as fh:
-                fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
-        if _board_changed(board, seen):
-            for ap, size in undo.items():
-                if size is None:
-                    os.remove(ap)
-                else:
-                    os.truncate(ap, size)
+        done = False
+        try:
+            for key, ls in sorted(moved.items()):
+                ap = os.path.join(PANTHEON, "archive", f"{key}.md")
+                undo[ap] = os.path.getsize(ap) if os.path.exists(ap) else None
+                with open(ap, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
+            if _board_changed(board, seen):
+                return 1
+            write_atomic(board, kept)
+            done = True
+        except OSError as e:   # metis-0792: сбой дописывания или замены — архив откатывается, board.md цел
+            print(f"pantheon board archive: {type(e).__name__}: {e} — архив откатан, board.md не тронут", file=sys.stderr)
             return 1
-        write_atomic(board, kept)
+        finally:
+            if not done:
+                for ap, size in undo.items():
+                    try:
+                        if size is None:
+                            os.remove(ap)
+                        else:
+                            os.truncate(ap, size)
+                    except OSError:
+                        pass
     print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
     return 0
 
@@ -6195,6 +6212,7 @@ def board_drift(T, tasks, cache, inbox):
                 if h.get("status") in ("doing", "review") and tid not in open_ids \
                         and not (mts and (T.ts_of(h.get("updated")) or 0) > mts):
                     out.append((tid, f"статус {h['status']}, а PR {repo}#{pr.get('number')} уже слит"))
+    out += batch_outside(T, tasks, cache)
     for tid, (_, h, _) in sorted(tasks.items()):
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             since = T.ts_of(h.get("question_at")) or T.ts_of(h.get("created")) or 0
@@ -6208,6 +6226,41 @@ def board_drift(T, tasks, cache, inbox):
         if same or archived:
             out.append((f"{it['direction']}/inbox/{it['file']}", "записка обработана ("
                         + (f"задача {same[0]}" if same else "лежит в inbox/done") + "), а она ещё во «Входящих»"))
+    return out
+
+
+def batch_outside(T, tasks, cache):
+    """PR пачки (ветка batch/<id>) закрыл задачу, у которой parent — не эта пачка (metis-0799): состав пачки считается
+    по parent, поэтому сделанное в её ветке ложится в чужую пачку или никуда, и карточка пачки показывает «1 из 13».
+    Только открытые пачки (не done/dropped) и PR без «часть»; parent не правим — его решает координатор. → [(id, текст)]."""
+    A, out, seen = autoclose_mod(), [], set()
+    for key, branch_key in (("merged", "headRefName"), ("open_prs", "branch")):
+        by_repo = cache.get(key) if isinstance(cache.get(key), dict) else {}
+        for repo, prs in sorted(by_repo.items()):
+            for pr in prs if isinstance(prs, list) else []:
+                if not isinstance(pr, dict) or not isinstance(pr.get(branch_key), str) or pr.get("cross") is not False:
+                    continue  # PR из форка или строка кэша без cross — не PR пачки
+                m = re.fullmatch(re.escape(T.BATCH_BRANCH) + r"(\S+)", pr[branch_key])
+                sh = (tasks.get(m.group(1)) or (None, {}, ""))[1] if m else {}
+                if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):
+                    continue
+                if key == "merged":
+                    if not isinstance(pr.get("body"), (str, type(None))) or A.is_part(pr.get("body")):
+                        continue
+                    ids = A.closing_ids(pr[branch_key], pr.get("body"))
+                else:
+                    if pr.get("part") or not isinstance(pr.get("closes"), list):
+                        continue
+                    ids = [i for i in pr["closes"] if isinstance(i, str)]
+                sid = m.group(1)
+                for tid in ids:
+                    h = (tasks.get(tid) or (None, {}, ""))[1]
+                    if h.get("type") != "task" or h.get("parent") == sid or (tid, sid) in seen:
+                        continue
+                    seen.add((tid, sid))
+                    out.append((tid, f"PR пачки {sid} ({repo}#{pr.get('number')}, ветка {pr[branch_key]}) закрывает задачу, "
+                                     f"а её parent — {h.get('parent') or 'пусто'}: в составе {sid} её нет; "
+                                     f"parent решает координатор (pantheon task attach {tid} {sid} или оставить)"))
     return out
 
 
