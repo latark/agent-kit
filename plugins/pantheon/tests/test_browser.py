@@ -83,6 +83,7 @@ class Daemon:
         self.eval_goes = None         # A6: выражение eval уводит вкладку сюда
         self.sessions_mode = False    # metis-0774: демон со вкладками сессий; False — старый, поле session игнорирует
         self.stabs = {}               # вкладки сессий: имя → адрес
+        self.limit429 = False         # metis-0812: предел вкладок — /open новой сессии → 429 с советом демона
 
     def transport(self, port, method, path, body=None, token=None, timeout=60):
         self.calls.append((port, method, path, body, token))
@@ -105,6 +106,8 @@ class Daemon:
             if expr == B.READ_JS:
                 return 200, json.dumps({"url": self.stabs[sid], **self.pages.get(self.stabs[sid], {})})
             return 200, json.dumps({"value": "ок:" + expr[:40]})
+        if path == "/open" and self.limit429 and sid is not None and sid not in self.stabs:
+            return 429, "слишком много вкладок (12): закройте лишние — POST /close-tab {session}"
         if path == "/open":
             url = self.redirect.get(body["url"], body["url"])
             if sid is not None:
@@ -734,15 +737,34 @@ check("[S3] увод на чужой сайт: about:blank тоже с session �
       res["state"] == "refused" and len(bl) == 2 and bl[1][3] == {"url": "about:blank", "console": False, "session": "hq"}
       and D.tab == "about:blank" and D.stabs == {"hq": "about:blank"}, (res, bl))
 
+def _refused(name):
+    try:
+        B.session_of(name)
+    except B.Fail:
+        return True
+    return False
+
+
 for bad in ("окно с пробелом", "x" * 65, ""):
     try:
         B.session_of(bad)
         check(f"[S4] session_of({bad[:12]!r}) — отказ", False)
     except B.Fail:
         check(f"[S4] session_of({bad[:12]!r}) — отказ", True)
+check("[S4] session_of: кириллица без пробела — отказ (демон принимает только ASCII)",
+      all(_refused(n) for n in ("окно", "athenaа", "hq\u00e9", "x\u0663")))
 check("[S4] session_of: имена окон — как есть, None — None",
       B.session_of("hq") == "hq" and B.session_of("athena-brokerassistant") == "athena-brokerassistant"
       and B.session_of(None) is None)
+
+# metis-0812: 429 (предел вкладок) — окно получает понятный отказ без совета «POST /close-tab», который ему не выполнить
+D.sessions_mode, D.tab, D.stabs, D.limit429 = True, "about:blank", {}, True
+D.calls.clear()
+res = run(req("read", url=AVITO), win="hq")
+check("[S6] 429 от демона: отказ с понятным текстом, без «/close-tab»; состояние не done",
+      res["state"] != "done" and "слишком много вкладок" in str(res.get("why", "")) and "close-tab" not in str(res.get("why", "")),
+      res)
+D.limit429 = False
 
 # старый демон: поля session не знает, игнорирует; /health без sessions — адрес общей вкладки
 D.sessions_mode, D.tab, D.stabs = False, "about:blank", {}
