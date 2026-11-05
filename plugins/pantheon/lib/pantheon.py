@@ -81,7 +81,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
                                         при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
-                                        кэш; на главном Mac сразу проход по кэшу (и тик каждую минуту) закрывает задачи, чей номер в
+                                        кэш; на главном Mac сразу проход по кэшу (и плановый проход каждую минуту) закрывает задачи, чей номер в
                                         ветке или после «Closes» в теле PR — в том же проходе, что увидел слияние (metis-0868)
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
