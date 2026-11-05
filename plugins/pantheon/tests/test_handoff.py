@@ -541,6 +541,8 @@ for name, target, prep, channel in [
     if prep == "mkdir":
         g(WT, "reset", "-q", "--hard", "origin/main")
 g(WT, "reset", "-q", "--hard", "origin/main")
+r = refused(H.facts_worktree, "~/projects/repo")
+check("worktree-remove: основная копия → отказ с причиной «основная копия»", r and "основная копия" in r[1], r)
 
 # собственный gitdir worktree: заперта, обратная ссылка, commondir, место gitdir (находка безопасности, круг 2, п. 4)
 with open(os.path.join(GD, "locked"), "w") as fh:
@@ -664,8 +666,8 @@ for name, extra, want in [
         ("core.sshCommand", f"[core]\n\tsshCommand = touch {PWN}\n", "core.sshcommand"),
         ("строка не по формату", "[core\n\tpager = x\n", "git config"),
         ("ключ в старом виде [a.b]", f"[diff.evil]\n\ttextconv = touch {PWN}\n", "diff.evil.textconv")]:
-    with open(PWN + ".inc", "w") as fh:
-        fh.write(f'[filter "evil"]\n\tclean = touch {PWN}\n')
+    with open(PWN + ".inc", "w") as fh:   # с --includes git прочёл бы его и упал на строке не по формату
+        fh.write(f'[filter "evil"\n\tclean = touch {PWN}\n')
     with open(CONF, "wb") as fh:
         fh.write((extra.encode("utf-8") + conf0) if name.startswith("BOM") else (conf0 + extra.encode("utf-8")))
     r = refused(H.facts_deploy, "~/projects/repo")
@@ -899,6 +901,17 @@ with open(H.log_path(), "a", encoding="utf-8") as fh:
 rows, _ = boardtext.handoffs(STATE, time.time())
 check("доска: вид не из словаря и мусор не показываются", all(r[0] in boardtext.HANDOFF_TO for r in rows), rows)
 check("доска: старше суток не считается", boardtext.handoffs(STATE, time.time() + 2 * 86400) == ([], {}))
+# время строки округлено и может обогнать часы читателя на доли секунды; дальше минуты вперёд — не считается
+SKEW = os.path.join(_ROOT, "skew-state")
+os.makedirs(os.path.join(SKEW, "logs"))
+NOW = 1_800_000_000.0
+with open(boardtext.handoff_log(SKEW), "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"t": NOW + 0.0004, "source": "sandbox", "kind": "browser", "outcome": "handed"}) + "\n")
+    fh.write(json.dumps({"t": NOW + 30, "source": "sandbox", "kind": "outside", "outcome": "handed"}) + "\n")
+    fh.write(json.dumps({"t": NOW + 600, "source": "sandbox", "kind": "telegram", "outcome": "handed"}) + "\n")
+rows_skew, _ = boardtext.handoffs(SKEW, NOW)
+check("доска: строка чуть «из будущего» (округление, сдвиг часов до минуты) считается, дальше — нет",
+      sorted(r[0] for r in rows_skew) == ["browser", "outside"], rows_skew)
 check("словари доски = словари handoff (SEC-13)", set(boardtext.HANDOFF_TO) == set(H.ROUTE_KEYS)
       and boardtext.HANDOFF_OUT == H.OUTCOME_RU and boardtext.HANDOFF_SRC == H.SOURCE_RU,
       (set(boardtext.HANDOFF_TO) ^ set(H.ROUTE_KEYS)))
