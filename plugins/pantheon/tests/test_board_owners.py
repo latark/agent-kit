@@ -345,6 +345,15 @@ al = [x for x in r.stdout.splitlines() if "строка журнала зада�
 check("e2e 5. строка журнала позже часов системы — тревога хвоста «время» в pantheon check, с id и строкой",
       len(al) == 1 and f"{tB}: строка журнала позже часов системы — «- " in al[0] and "дописал руками на глаз" in al[0],
       r.stdout + r.stderr)
+many = [new(f"Задача ушедшей сессии {i}", T3 + 40, "--status", "todo", "--owner", "dev-many")[0] for i in range(14)]
+snapshot(T3 + 50, agent("aaaa1111-0000", "dev-renamed"))
+r = cli(["board"], T3 + 50)
+al = [x for x in orphan_alert(r.stdout) if "owner dev-many" in x]
+check("e2e 2. много задач у одного хозяина — в тревоге 12 номеров и цикл на 12, остальное числом и командой списка",
+      len(al) == 1 and f"{', '.join(sorted(many)[:12])} и ещё 2" in al[0]
+      and f"for id in {' '.join(sorted(many)[:12])}; do" in al[0] and sorted(many)[12] not in al[0]
+      and "pantheon task ready --owner dev-many" in al[0], r.stdout)
+
 probe = f"""
 import sys
 sys.path.insert(0, {LIB!r})

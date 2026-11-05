@@ -6065,8 +6065,10 @@ def board_owner_sync(T):
         for (owner, why, to), ids in sorted(groups.items()):
             ids = sorted(ids)
             cmd = (f"pantheon task set {ids[0]} owner={to}" if len(ids) == 1
-                   else f"for id in {' '.join(ids)}; do pantheon task set $id owner={to}; done")
-            parts.append(f"owner {owner} — {why}: {_ids_text(ids)}. Передать: {cmd}")
+                   else f"for id in {' '.join(ids[:ALERT_IDS])}; do pantheon task set $id owner={to}; done")
+            more = (f" (первые {ALERT_IDS}; остальные — тем же циклом, список — pantheon task ready --owner {owner})"
+                    if len(ids) > ALERT_IDS else "")  # строка тревоги — не сотни номеров
+            parts.append(f"owner {owner} — {why}: {_ids_text(ids)}. Передать: {cmd}{more}")
         alert_once("board-orphan-owner", "|".join(sorted(f"{k}:{v[0]}" for k, v in orphans.items())),
                    "доска: задача без хозяина — " + "; ".join(parts), "board")
     elif orphans is not None:
