@@ -8,7 +8,9 @@
 - команда heavy: пока перед ней живой билет, свободное место она не занимает (код 75 по HEAVY_WAIT_MAX, без запуска);
   владелец билета умер или снял его — идёт, свой билет убирает; порядок двух ждущих — по приходу;
 - папку билетов создать нельзя — ждёт и идёт опросом мест, как раньше;
-- билет только создан (пустой, свежий, блокировки ещё нет) — впереди и не удаляется; пустой старый — убирается;
+- билет только создан (пустой, свежий, блокировки ещё нет) — впереди и не удаляется; пустой старый и пустой с
+  временем из будущего дальше TICKET_GRACE — убираются (metis-0683);
+- --server: за жетон сервера билета нет — ждущий жетона сервер обычную команду не держит, за места — по приходу;
 - ждущая команда обновляет время билета; остановленная (SIGSTOP) с билетом старше TICKET_STALE очередь не держит,
   а её билет остаётся; `heavy --status` считает только живые билеты;
 - после сна Mac дольше TICKET_STALE голова очереди не застывает: возраст — от прошлого опроса ждущего (metis-0805).
@@ -95,6 +97,18 @@ def main():
         os.utime(young, (old, old))
         check("пустой билет старше TICKET_GRACE — умерший: убран, очередь не держит",
               not d.ahead() and not os.path.exists(young), str(left()))
+        # metis-0683 Д2: пустой незапертый файл со временем из будущего (часы назад, touch -t) — не «только создан»
+        open(young, "w").close()
+        future = time.time() + H.TICKET_GRACE + 3600
+        os.utime(young, (future, future))
+        check("пустой билет с mtime из будущего — умерший: убран, очередь не держит",
+              not d.ahead() and not os.path.exists(young), str(left()))
+        open(young, "w").close()
+        near = time.time() + H.TICKET_GRACE - 3  # чуть впереди часов (разные часы ФС) — ещё в пределе grace
+        os.utime(young, (near, near))
+        check("пустой билет чуть из будущего, в пределе TICKET_GRACE — держит очередь и не удалён",
+              d.ahead() and os.path.exists(young), str(left()))
+        os.unlink(young)
         d.drop()
 
         # команда heavy: перед ней живой билет — места свободны, но она ждёт
@@ -284,16 +298,18 @@ def main():
         # ссылка на месте папки очереди: heavy идёт и вне песочницы — в цели ничего не трогает
         victim = os.path.join(tmp, "victim")
         os.makedirs(victim)
-        for n, data in (("secret.txt", "SECRET=1\n"), ("00000000000000000000-1", "1\n")):
+        # «-secret.txt» сортируется раньше цифр: Ticket.ahead, пойди он по ссылке, дошёл бы до него до своего имени
+        # (metis-0683: «secret.txt» шёл после билетов и половина проверки была мёртвой); не .env — его запрещает профиль
+        for n, data in (("-secret.txt", "SECRET=1\n"), ("00000000000000000000-1", "1\n")):
             with open(os.path.join(victim, n), "w") as f:
                 f.write(data)
         os.symlink(victim, qdir)
         r = run(state, "/bin/sh", "-c", "echo ran", wait_max=5)
         check("ссылка на месте папки очереди: команда выполнилась", r.returncode == 0 and "ran" in r.stdout,
               f"{r.returncode} {r.stderr!r}")
-        check("ссылка на папку: файлы цели целы, secret.txt на месте",
-              sorted(os.listdir(victim)) == ["00000000000000000000-1", "secret.txt"]
-              and open(os.path.join(victim, "secret.txt")).read() == "SECRET=1\n", str(sorted(os.listdir(victim))))
+        check("ссылка на папку: файлы цели целы, -secret.txt на месте",
+              sorted(os.listdir(victim)) == ["-secret.txt", "00000000000000000000-1"]
+              and open(os.path.join(victim, "-secret.txt")).read() == "SECRET=1\n", str(sorted(os.listdir(victim))))
         t = H.Ticket()
         check("Ticket по ссылке на папку: билета нет", t.fd is None and not t.ahead())
         t.drop()
@@ -308,6 +324,29 @@ def main():
         r = run(state, "--server", "/bin/sh", "-c", "echo ran", wait_max=5)
         check("--server при пустой очереди идёт, билетов не осталось", r.returncode == 0 and "ran" in r.stdout
               and left() == [], f"{r.returncode} {r.stderr!r} {left()}")
+        # metis-0683: за жетон сервера очереди нет — сервер, ждущий жетона, билета не кладёт и обычную команду,
+        # пришедшую после него, не держит (мутант «билет на любое ожидание» здесь краснеет)
+        sfd = os.open(os.path.join(locks, "heavy-server.lock"), os.O_RDONLY)
+        fcntl.flock(sfd, fcntl.LOCK_EX)
+        sp = subprocess.Popen([sys.executable, "-I", HEAVY, "--server", "/bin/sh", "-c", "echo srv"],
+                              env=dict(env, HEAVY_WAIT_MAX="60"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+        try:
+            first = sp.stderr.readline()  # «… сервер уже запущен другой ролью — жду (0 мин)»: сервер уже в ожидании
+            check("--server ждёт жетона и билета в очереди не держит", "сервер уже запущен" in first and left() == [],
+                  f"{first!r} {left()}")
+            r = run(state, "/bin/sh", "-c", "echo ran", wait_max=3)
+            check("ждущий жетона сервер не держит обычную команду, пришедшую после", r.returncode == 0
+                  and "ran" in r.stdout, f"{r.returncode} {r.stderr!r} {left()}")
+            fcntl.flock(sfd, fcntl.LOCK_UN)
+            out, _ = sp.communicate(timeout=30)
+            check("жетон освободился — сервер пошёл, билетов не осталось", sp.returncode == 0 and "srv" in out
+                  and left() == [], f"{sp.returncode} {out!r} {left()}")
+        finally:
+            os.close(sfd)
+            if sp.poll() is None:
+                sp.kill()  # SIGKILL
+                sp.communicate()
         print(f"({time.time() - t0:.0f} с)")
     finally:
         shutil.rmtree(tmp, True)

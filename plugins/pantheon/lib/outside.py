@@ -150,7 +150,12 @@ env и той же командой засчитывается новому HEAD
 (команда — FULL_TESTS, дерево чистое, HEAD тот же, без таймаута) проход пишет строкой в STATE/outside/full.jsonl:
   {"v": 1, "time", "rid": id заявки, "repo": [owner/repo], "sha", "tree", "branch": ветка папки или null, "dir",
    "cmd", "env", "code", "failed": [«плагин/test_x.py»] или null — итог run-tests не разобран (run_failed),
-   у дозапуска ещё "rerun_of", "files", "map"}.
+   у красного ещё "causes": {метка: {"kind", "why", "line"}} — причина по файлу (run_causes, metis-0696; kind —
+   таймаут, сигнал, среда или провал; why — из строки FAIL раннера; line — первая строка не ok из хвоста файла), а
+   при "failed": null — "cause" (итог не разобран, код); у дозапуска ещё "rerun_of", "files", "map"}.
+Тревога по доле красных (metis-0696, alert_red_share): за сутки (RED_WINDOW) в full.jsonl больше RED_SHARE (30 %)
+красных прогонов, и всего их не меньше RED_MIN_RUNS — P.alert_daily «outside-red-share», не чаще раза в сутки, с
+разбивкой: по видам причин и по файлам (самые частые). Прогоны без "causes" (до этой правки) — «причина не записана».
 Красный прогон в журнал шлюза не идёт: там любая запись kind tests — «тесты прошли», поэтому список упавших — здесь.
 Следующая заявка полного набора на той же ветке гонит не весь набор, а `<команда> --only <файлы>`: упавшие в последнем
 полном прогоне ветки и затронутые диффом его коммит → HEAD (`git diff` двух коммитов: предок или после rebase — как
@@ -226,6 +231,9 @@ RESIDENT_MAX = 3600                 # с: проход серверов живё
 AUTO_TTL = 24 * 3600                # «принять» старше суток дежурному уже не напоминается
 ALERT_AFTER = 3600                  # с: «принять» без записи tests дольше этого — тревога дежурному (03.11)
 RERUN_MAX_AGE = 24 * 3600          # с: опора дозапуска (полный прогон) старше суток — весь набор (metis-0735)
+RED_WINDOW = 24 * 3600              # с: окно доли красных полных прогонов (metis-0696)
+RED_SHARE = 0.3                     # доля красных за окно выше — тревога с разбивкой по причинам
+RED_MIN_RUNS = 4                    # прогонов за окно меньше — доля не показательна (1 из 1 — ещё не 100 %), тревоги нет
 RESULT_TTL = 24 * 3600              # итоги <ID>.result.json и брошенные <ID>.stop в папках заявок — сутки
 WAIT_MAX = 590
 TAIL_LINES, TAIL_CHARS = 40, 4000
@@ -1338,6 +1346,47 @@ def run_failed(text):
     return sorted(ok), sorted(fail)
 
 
+# строка FAIL раннера: «FAIL плагин/test_x.py · 12.3 с · проверок 4 · код 1» (причина — после последнего поля);
+# хвост упавшего: «===== плагин/test_x.py · причина · строки не ok: N =====»
+FAIL_LINE_RE = re.compile(r"FAIL\s+([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · [\d.]+ с · проверок \d+ · (.+?)\s*$")
+BLOCK_RE = re.compile(r"===== ([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · ")
+BLOCK_END = ("===== ", "----- последние", "медленные: ", "итого: ")
+# отказ песочницы или прав в строках упавшего — причина «среда», а не провал кода (34 из 77 красных 02.11 — «report
+# --out вне $TMPDIR», metis-0696)
+ENV_RE = re.compile(r"Operation not permitted|PermissionError|\bEPERM\b|\bEACCES\b|Read-only file system|"
+                    r"sandbox-exec|вне \$TMPDIR")
+SKIP_RE = re.compile(r"(?i)(пропущено|skip)\b")  # строка пропуска («пропущено: sandbox-exec нет») — не причина
+CAUSE_LINE = 200                    # знаков первой строки не ok в причине
+
+
+def run_causes(text):
+    """Вывод run-tests.py → {метка упавшего файла: {"kind", "why", "line"}} (metis-0696). why — причина из строки FAIL
+    раннера («таймаут», «код 1», «сигнал 9»); line — первая строка не ok из хвоста файла («===== …», до CAUSE_LINE
+    знаков) или ""; kind — «таймаут», «сигнал» (файл убит), «среда» (в строках не ok — отказ песочницы или прав:
+    ENV_RE, кроме строк пропуска SKIP_RE), иначе «провал». Строки FAIL — только до первого хвоста, как у run_failed: в хвостах свои ok/FAIL."""
+    out, blocks, cur, tails = {}, {}, None, False
+    for ln in text.splitlines():
+        if ln.startswith(BLOCK_END):
+            tails = tails or ln.startswith("===== ")
+            m = BLOCK_RE.match(ln)
+            cur = m[1] if m else None
+            if cur:
+                blocks.setdefault(cur, [])
+        elif not tails:
+            m = FAIL_LINE_RE.match(ln)
+            if m:
+                out[m[1]] = {"why": m[2], "line": ""}
+        elif cur and ln.strip():
+            blocks[cur].append(ln.strip())
+    for label, c in out.items():
+        rows = blocks.get(label) or []
+        c["line"] = rows[0][:CAUSE_LINE] if rows else ""
+        why = c["why"]
+        c["kind"] = ("таймаут" if why == "таймаут" else "сигнал" if why.startswith("сигнал")
+                     else "среда" if any(ENV_RE.search(x) and not SKIP_RE.match(x) for x in rows) else "провал")
+    return out
+
+
 def log_text(log):
     try:
         fd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW)
@@ -1628,7 +1677,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     sha2, clean2 = head_state(d)
     res = {"state": "done", "kind": "test", "sha": sha, "code": code, "cmd": line, "dir": d, "log": log,
            "tail": tail(log), "record": False, **extra}
-    got = run_failed(log_text(log)) if full or narrow else None
+    text = log_text(log) if full or narrow else ""
+    got = run_failed(text) if full or narrow else None
     if plan:
         res["note"] = (f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: файлов "
                        f"{len(plan['files'])}" + ("" if plan["ancestor"] else
@@ -1667,6 +1717,11 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         # журнал полных прогонов: опора следующего дозапуска (только запись без rerun_of) и след самих дозапусков
         entry = {"rid": rid, "repo": repos0, "sha": sha, "tree": tree_of(d, sha), "branch": branch_of(d), "dir": d,
                  "cmd": line, "env": run_env(line), "code": code, "failed": got[1] if got else None}
+        if got and got[1]:     # причина красного по файлу (metis-0696)
+            causes = run_causes(text)
+            entry["causes"] = {lb: causes.get(lb) or {"kind": "провал", "why": "", "line": ""} for lb in got[1]}
+        elif not got and code != 0:
+            entry["cause"] = f"итог run-tests не разобран (код {code})"
         if plan:
             entry.update(rerun_of=plan["rerun_of"], files=plan["files"], map=plan["map"])
         try:
@@ -2668,6 +2723,56 @@ def alert_overdue(t=None):
     return len(todo)
 
 
+# --- доля красных полных прогонов за сутки: тревога (metis-0696) ----------------------------------------------------
+
+def red_share(entries=None, t=None):
+    """Полные прогоны прохода (full.jsonl, с дозапусками) за RED_WINDOW → (всего, красных, {вид причины: число файлов},
+    {метка: {вид: число}}). Красный — код не 0. Вид — kind из causes; без causes при списке упавших — «причина не
+    записана» (записи до metis-0696); итог не разобран — «итог не разобран» без файла."""
+    t = P.now() if t is None else t
+    entries = read_full() if entries is None else entries
+    total = red = 0
+    kinds, files = {}, {}
+    for e in entries:
+        at = _epoch(e)
+        if at is None or not 0 <= t - at <= RED_WINDOW:
+            continue
+        total += 1
+        if e.get("code") == 0:
+            continue
+        red += 1
+        failed = e.get("failed") if isinstance(e.get("failed"), list) else None
+        causes = e.get("causes") if isinstance(e.get("causes"), dict) else {}
+        if not failed:
+            kinds["итог не разобран"] = kinds.get("итог не разобран", 0) + 1
+            continue
+        for lb in failed:
+            c = causes.get(lb)
+            k = str(c.get("kind") or "провал") if isinstance(c, dict) else "причина не записана"
+            kinds[k] = kinds.get(k, 0) + 1
+            per = files.setdefault(str(lb), {})
+            per[k] = per.get(k, 0) + 1
+    return total, red, kinds, files
+
+
+def alert_red_share(t=None):
+    """Тревога дежурному, если доля красных полных прогонов за сутки больше RED_SHARE (и прогонов не меньше
+    RED_MIN_RUNS): не чаще раза в сутки (P.alert_daily), с разбивкой по видам причин и по файлам. → True, если доля
+    выше порога (сама тревога в окне суток могла уже быть)."""
+    total, red, kinds, files = red_share(t=t)
+    if total < RED_MIN_RUNS or red <= RED_SHARE * total:
+        return False
+    by_kind = ", ".join(f"{k} {n}" for k, n in sorted(kinds.items(), key=lambda x: (-x[1], x[0])))
+    top = sorted(files.items(), key=lambda x: (-sum(x[1].values()), x[0]))[:5]
+    by_file = "; ".join(f"{lb} — " + ", ".join(f"{k} {n}" for k, n in sorted(v.items(), key=lambda x: (-x[1], x[0])))
+                        for lb, v in top)
+    P.alert_daily("outside-red-share",
+                  f"красных полных прогонов прохода за сутки {red} из {total} ({100 * red // total} %, порог "
+                  f"{int(RED_SHARE * 100)} %). Причины: {by_kind or '—'}" + (f". Файлы: {by_file}" if by_file else "")
+                  + ". Журнал — STATE/outside/full.jsonl (causes), выводы — runs/<rid>.log", "pantheon-outside")
+    return True
+
+
 def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
     """Свежий worktree без node_modules: зависимости ставит `<pm> install --frozen-lockfile` под тем же профилем.
     → код установки; None — ставить нечего (нет package.json или node_modules уже есть), -1 — не запустилась или
@@ -2966,6 +3071,10 @@ def cmd_run():
         drop_test_work()   # копии test --sha упавшего прохода (metis-0779): под замком прогона на них нет
         alert_overdue()
         run_test_queue()
+        try:
+            alert_red_share()
+        except Exception as e:   # сбой подсчёта не роняет проход, но виден в журнале
+            log_event(kind="red-share-error", why=f"{type(e).__name__}: {e}")
         prune()
     return 0
 
