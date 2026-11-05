@@ -112,6 +112,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     пропущен; id в пометке — как в окне вопросов (бывает без дефиса). Пустые --option не варианты;
                     пустой --body/--body-file в task set — отказ, код 2; вопрос с текстом без --why/вариантов — предупреждение
   pantheon task show ID
+  pantheon task goal ID [ID …]   строка цели окна по задаче на эту минуту (metis-0725, metis-0738): «<id>: снята с цели
+                    окна — почему» (закрыта, во входящих, ведёт другая сессия — owner не окно PANTHEON_SESSION и не его
+                    команда, «ждёт» владельца с вопросом или задачу-блокер) или «<id>: остаётся в цели окна — почему»;
+                    нет задачи — код 1. task set owner=… из окна печатает ту же строку
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
                     ready в stderr предупреждает, если touches готовой задачи пересекаются с открытым PR (metis-0667)
   pantheon task batch-suggest [--direction D] [--json] [--apply]   (metis-0595) открытые задачи без пачки → «в существующую
