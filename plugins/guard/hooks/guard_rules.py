@@ -1518,20 +1518,20 @@ _ZSH_OPT_GLOB = re.compile(r"[\^#~!@+()|<>]")
 
 
 class _Unres(str):
-    """UNRESOLVED с папками, куда идёт неразобранная цель (metis-0823): буквальная часть слова до первой подстановки —
-    `"$TMPDIR/$f.log"` пишет в $TMPDIR, `out/$n` — в <папка>/out. base None — папку не вычислить: слово начинается с
-    подстановки (`"$f.bak"`, `"$R/x"` — значение может быть любым путём), после подстановки есть «..»
-    (`out/$(x)/../../.claude/x` уходит из out) или папка команды неизвестна. text — слово без подстановок: по нему
-    судят, называет ли цель зону или настройки репозитория."""
+    """UNRESOLVED с папкой, куда идёт неразобранная цель (metis-0823). Подстановка — только в последней части пути:
+    `"$TMPDIR/$f.log"` пишет в $TMPDIR, `out/file-$(date).txt` — в <папка>/out. base None — папку не вычислить:
+    слово начинается с подстановки (`"$f.bak"`, `"$R/x"`), после подстановки есть «/» (`out/$(x)/../../.claude`,
+    `out/$(x)//.git/hooks`) или папка команды неизвестна. text — слово без подстановок после os.path.normpath
+    (повторные слеши и «.» убраны): по нему судят слова настроек репозитория."""
     base = None
     text = ""
 
 
 def _unres(st, lit):
     u = _Unres(UNRESOLVED)
-    u.text = lit.replace(_DYN, "")
     pre, rest = lit.split(_DYN, 1)
-    if pre and ".." not in rest.replace(_DYN, "/").split("/"):
+    if pre and "/" not in rest:
+        u.text = os.path.normpath(pre + rest.replace(_DYN, ""))
         d = pre.rsplit("/", 1)[0] + "/" if "/" in pre else ""
         if d.startswith("/"):
             u.base = (os.path.realpath(d),)
@@ -2363,7 +2363,7 @@ def unresolved_dirs(event, tool, tool_input, zones, words=None):
     ($PANTHEON_TMP, ~/Library/Caches/pantheon-sandbox) или своей worktree (репозиторий папки события); иначе None —
     отказ, как до 0823. Папки правило затем судит как обычные цели: `.claude/hooks/$f` в своей worktree — отказ
     protect-config. Разрешённый корень, равный зоне правила, её предку или потомку, не считается (~/ai/pantheon — сам
-    репозиторий). Отказ и тогда, когда слово цели без подстановок называет зону или слово настроек (words).
+    репозиторий). Отказ и тогда, когда слово цели без подстановок называет настройки репозитория (words).
     Путь в значении подстановки (`"$TMPDIR/$f"` с f=../..) — намеренный обход, граница — песочница."""
     if tool != "Bash":
         return None
@@ -2373,12 +2373,8 @@ def unresolved_dirs(event, tool, tool_input, zones, words=None):
     found = _UNRES.get((cmd, cwd)) or [(None, "")]
     if any(b is None for b, _ in found):
         return None
-    homes = {HOME, os.path.realpath(HOME)}
-    frags = {_key(f) for z in zones for f in {z} | {z[len(h) + 1:] for h in homes if _inside(z, [h]) and _key(z) != _key(h)}
-             if f}
-    for _, text in found:
-        if any(f in _key(text) for f in frags) or (words and words.search(text)):
-            return None
+    if words and any(words.search(text) for _, text in found):
+        return None
     bases = [b for b, _ in found]
     roots = [r for r in TEMP_ROOTS if r != os.path.realpath("/dev/null")]
     roots += [os.path.realpath(p) for p in (os.environ.get("PANTHEON_TMP"),

@@ -1621,6 +1621,7 @@ def main():
         *[(f"0823 неразобранная цель в $TMPDIR, кэше окна, worktree: {n} — можно", "allow", br, "dev-sonnet", True, B(c))
           for n, c in (
             ("цикл в $TMPDIR", 'for f in a b; do echo x > "$TMPDIR/$f.log"; done'),
+            ("$TMPDIR/out-$(date).txt", 'echo x > "$TMPDIR/out-$(date +%s).txt"'),
             ("/tmp и $(date)", 'echo x > "/tmp/run-$(date +%s).log"'),
             ("кэш окна", 'echo x > ~/Library/Caches/pantheon-sandbox/w/tmp/"$(date +%s).log"'),
             ("подпапка своей worktree", 'for f in $(ls); do echo x > "out/$f.log"; done'),
@@ -1635,10 +1636,15 @@ def main():
             ("чужой проект", 'echo x > ~/projects/other/x/"$(date +%s).md"'),
             ("{…}: явная цель рядом с $TMPDIR судится", 'echo x > {~/.claude/settings.json,"$TMPDIR/$F"}'),
             ("protect-config: .claude/hooks своей worktree", 'for f in $(ls); do echo x > ".claude/hooks/$f"; done'),
-            # вторая фоновая проверка: «..» после подстановки, зона и слово настроек в слове цели
+            # фоновые проверки 2 и 3: подстановка — только в последней части пути; литеральная часть — после normpath
             ("«..» после подстановки уходит из папки", 'echo x > "out/$(date +%s)/../../../../projects/other/y/a.md"'),
-            ("зона в слове цели после подстановки", 'echo x > "$TMPDIR/$(date +%s)/ai/pantheon/board.md"'),
-            ("protect-config: слово настроек после подстановки", 'echo x > "out/$(date +%s).claude/settings.json"'))],
+            ("зона после подстановки", 'echo x > "$TMPDIR/$(date +%s)/ai/pantheon/board.md"'),
+            ("«/» после подстановки: tmp/$(x)/../../.claude", 'echo x > "tmp/$(date +%s)/../../.claude"'),
+            ("«//» после подстановки: tmp/$(x)//.git/hooks", 'echo x > "tmp/$(date +%s)//.git/hooks"'),
+            ("protect-config: a//.claude/settings…", 'echo x > "a//.claude/settings$(date +%s).json"'),
+            ("protect-config: a/./.claude/hooks/…", 'echo x > "a/./.claude/hooks/$(date +%s)"'),
+            ("protect-config: .claude//settings — повторный слеш", 'echo x > "a/.claude//settings$(date +%s).json"'),
+            ("protect-config: слово настроек в последней части", 'echo x > "out/$(date +%s).mcp.json"'))],
         # корень репозитория, равный зоне или над ней, — не «своя worktree»: ~/.claude сам репозиторий
         ("0823 неразобранная цель: корень-зона ~/.claude — отказ", "deny", ".claude", "dev-sonnet", True,
          B('for f in $(ls); do echo x > "skills/$f.md"; done')),
