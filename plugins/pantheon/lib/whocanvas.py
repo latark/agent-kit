@@ -227,8 +227,18 @@ def _grow(g, dy, nodes):
     g["height"] += dy
 
 
-def build(current, roles, directions, statuses, catalog=None):
-    """Новый холст {'nodes', 'edges'} по текущему (словарь JSON Canvas или None) и входным данным."""
+def _hash(text, color):
+    return hashlib.sha256(f"{text}\0{color or ''}".encode()).hexdigest()[:16]
+
+
+def build(current, roles, directions, statuses, catalog=None, hashes=None, report=None):
+    """Новый холст {'nodes', 'edges'} по текущему (словарь JSON Canvas или None) и входным данным.
+    hashes — {id: хеш текста и цвета (у группы — подписи и цвета), записанных кодом в прошлый раз}: узел, у которого
+    сейчас другое, правили руками — его текст, цвет и подпись остаются. Нет записи (первая сборка) — пишет код.
+    report (словарь) получает 'hashes' (что записано сейчас) и 'manual' (id узлов, правленных руками)."""
+    hashes = hashes or {}
+    report = report if report is not None else {}
+    report["hashes"], report["manual"] = {}, []
     cur_nodes = {n["id"]: n for n in (current or {}).get("nodes", []) if isinstance(n, dict) and "id" in n}
     known = {"you", "legend", *GROUPS, *[e["id"] for e in (catalog if catalog is not None else CATALOG)]}
     want = desired(roles, directions, statuses, catalog)
@@ -243,6 +253,12 @@ def build(current, roles, directions, statuses, catalog=None):
     for gid, (label, color, x, y, w, h) in GROUPS.items():
         old = cur_nodes.get(gid)
         if old and _geom(old) and old.get("type") == "group":
+            if gid in hashes and hashes[gid] != _hash(old.get("label"), old.get("color")):
+                g = dict(old)  # подпись или цвет группы правили руками
+                report["manual"].append(gid)
+                report["hashes"][gid] = hashes[gid]
+                nodes.append(g)
+                continue
             g = dict(old, label=label)
         else:
             g = {"id": gid, "type": "group", "x": x, "y": y, "width": w, "height": h, "label": label}
@@ -250,6 +266,7 @@ def build(current, roles, directions, statuses, catalog=None):
             g["color"] = color
         else:
             g.pop("color", None)
+        report["hashes"][gid] = _hash(label, color)
         nodes.append(g)
     for nid, n in cur_nodes.items():  # группы, которых код не знает (добавил владелец), остаются со связями
         if n.get("type") == "group" and nid not in GROUPS:
@@ -262,6 +279,13 @@ def build(current, roles, directions, statuses, catalog=None):
     for n in rest:
         if n["id"] in texts:
             _, _, text, w, h, color = texts[n["id"]]
+            nid = n["id"]
+            if nid in hashes and hashes[nid] != _hash(n.get("text"), n.get("color")):
+                placed.append(dict(n))  # текст или цвет правили руками — код карточку не обновляет
+                report["manual"].append(nid)
+                report["hashes"][nid] = hashes[nid]
+                continue
+            report["hashes"][nid] = _hash(text, color)
             m = dict(n, type="text", text=text)  # место, размер и порядок полей — как на холсте
             if not _geom(n):
                 m.update(x=0, y=0, width=w, height=h)
@@ -279,6 +303,7 @@ def build(current, roles, directions, statuses, catalog=None):
     for nid, gid, text, w, h, color in want:
         if nid in have:
             continue
+        report["hashes"][nid] = _hash(text, color)
         m = {"id": nid, "type": "text", "text": text, "x": 0, "y": 0, "width": w, "height": h}
         if color:
             m["color"] = color
@@ -330,9 +355,11 @@ def signature(roles, directions, statuses, catalog=None):
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force=False):
+def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force=False, manual_out=None):
     """Пересобирает холст, если изменился отпечаток входов (или force). Возвращает 'written' | 'same' | 'unchanged'.
-    roles — {имя: путь файла роли}; в отпечаток идёт и время правки файла (описание новой роли без каталога)."""
+    roles — {имя: путь файла роли}; в отпечаток идёт и время правки файла (описание новой роли без каталога).
+    В файл отпечатка пишутся и хеши текста и цвета каждого узла кода: узел, правленный руками, не обновляется, его id
+    попадает в manual_out (список). Удалённая карточка собирается заново."""
     stamped = {}
     for r, p in roles.items():
         try:
@@ -342,9 +369,12 @@ def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force
     sig = signature(stamped, directions, statuses, catalog)
     try:
         with open(sig_path, encoding="utf-8") as fh:
-            old = json.load(fh).get("sig")
+            saved = json.load(fh)
+        old, prev = saved.get("sig"), saved.get("hashes")
+        if not isinstance(prev, dict):
+            prev = {}
     except (OSError, ValueError, AttributeError):
-        old = None
+        old, prev = None, {}
     if old == sig and not force and os.path.exists(canvas_path):
         return "unchanged"
     try:
@@ -355,7 +385,10 @@ def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force
     except FileNotFoundError:
         current = None
     # холст есть, но не читается — не затираем: ошибку видит вызывающий (тревога тика)
-    text = render(build(current, roles, directions, statuses, catalog))
+    report = {}
+    text = render(build(current, roles, directions, statuses, catalog, prev, report))
+    if manual_out is not None:
+        manual_out.extend(report["manual"])
     result = "same"
     try:
         same = open(canvas_path, encoding="utf-8").read() == text
@@ -370,5 +403,5 @@ def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force
         result = "written"
     os.makedirs(os.path.dirname(sig_path), exist_ok=True)
     with open(sig_path, "w", encoding="utf-8") as fh:
-        json.dump({"sig": sig}, fh)
+        json.dump({"sig": sig, "hashes": report["hashes"]}, fh)
     return result

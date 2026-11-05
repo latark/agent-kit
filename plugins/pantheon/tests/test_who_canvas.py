@@ -326,5 +326,67 @@ r = subprocess.run([os.path.join(PLUGIN, "scripts", "who-canvas.sh"), "--bad"], 
 check("10. скрипт передаёт аргументы команде: неверный аргумент → код 2 и справка", r.returncode == 2 and "использование" in r.stderr,
       (r.returncode, r.stdout, r.stderr))
 
+# --- 11. ручная правка текста, цвета и подписи группы не затирается ---
+canvas3 = os.path.join(ROOT, "pan3", W.CANVAS_NAME)
+sig3 = os.path.join(ROOT, "state3", "who-canvas.json")
+W.sync(canvas3, sig3, rl, dirs, st)
+data = json.load(open(canvas3, encoding="utf-8"))
+dn = byid(data)
+dn["zeus"]["text"] = "МОЙ ТЕКСТ"
+dn["athena"]["color"] = "1"
+dn["top"]["label"] = "МОЯ ПОДПИСЬ"
+dn["argus"]["text"] = "ещё моё"
+write(canvas3, json.dumps(data, ensure_ascii=False, indent="\t"))
+man = []
+rl3 = dict(rl, iris="")
+check("11. вход изменился: правленные руками текст, цвет и подпись группы остаются, остальное пересобрано",
+      W.sync(canvas3, sig3, rl3, dirs, st, manual_out=man) == "written", man)
+d3 = byid(json.load(open(canvas3, encoding="utf-8")))
+check("11. текст zeus, цвет athena, подпись top — как у владельца; id названы в manual_out; iris добавлен",
+      d3["zeus"]["text"] == "МОЙ ТЕКСТ" and d3["athena"]["color"] == "1" and d3["top"]["label"] == "МОЯ ПОДПИСЬ"
+      and sorted(man) == ["argus", "athena", "top", "zeus"] and "iris" in d3, (man, d3["top"]["label"]))
+# повторно, без новых правок: manual всё ещё названы, цвет athena держится
+man2 = []
+W.sync(canvas3, sig3, dict(rl3, momus=""), dirs, st, manual_out=man2)
+d3b = byid(json.load(open(canvas3, encoding="utf-8")))
+check("11. правка живёт и через следующую пересборку", d3b["zeus"]["text"] == "МОЙ ТЕКСТ" and "momus" in d3b
+      and sorted(man2) == ["argus", "athena", "top", "zeus"])
+# удалённая карточка собирается заново и снова под автосборкой
+data = json.load(open(canvas3, encoding="utf-8"))
+data["nodes"] = [n for n in data["nodes"] if n["id"] != "zeus"]
+write(canvas3, json.dumps(data, ensure_ascii=False, indent="\t"))
+man3 = []
+W.sync(canvas3, sig3, dict(rl3, momus="", talos2=""), dirs, st, manual_out=man3)
+d3c = byid(json.load(open(canvas3, encoding="utf-8")))
+check("11. удалённая карточка собирается заново кодом и больше не в manual",
+      d3c["zeus"]["text"].startswith("## Зевс") and "zeus" not in man3, (d3c["zeus"]["text"], man3))
+# первая сборка: записи хеша нет — код пишет поверх чужого текста
+canvas4 = os.path.join(ROOT, "pan4", W.CANVAS_NAME)
+data = json.load(open(canvas3, encoding="utf-8"))
+byid(data)["zeus"]["text"] = "старый холст"
+write(canvas4, json.dumps(data, ensure_ascii=False, indent="\t"))
+man4 = []
+W.sync(canvas4, os.path.join(ROOT, "state4", "who-canvas.json"), rl, dirs, st, manual_out=man4)
+check("11. нет записи хеша (первая сборка) → текст пишет код, manual пуст",
+      byid(json.load(open(canvas4, encoding="utf-8")))["zeus"]["text"].startswith("## Зевс") and man4 == [])
+# команда: тревога один раз
+cvp = os.path.join(home, W.CANVAS_NAME)
+shutil.rmtree(state, True)
+if os.path.exists(cvp):
+    os.remove(cvp)
+write(os.path.join(home, "Кто есть кто.md"), "памятка\n")
+subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True, timeout=120)
+cd = json.load(open(cvp, encoding="utf-8"))
+byid(cd)["argus"]["text"] = "РУКАМИ"
+write(cvp, json.dumps(cd, ensure_ascii=False, indent="\t"))
+write(os.path.join(tmp, ".claude", "agents", "momus.md"), "---\nname: momus\ndescription: Мом.\n---\n")
+for _ in range(2):
+    subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True, timeout=120)
+    write(os.path.join(tmp, ".claude", "agents", "momus.md"), "---\nname: momus\ndescription: Мом %d.\n---\n" % _)
+al = open(os.path.join(home, "alerts.md"), encoding="utf-8").read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
+check("11. pantheon who-canvas: тревога «карточка argus правлена руками» — один раз, текст держится",
+      al.count("карточка argus правлена руками, код её не обновляет") == 1
+      and "удалите карточку" in al and byid(json.load(open(cvp, encoding="utf-8")))["argus"]["text"] == "РУКАМИ", al[-400:])
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
