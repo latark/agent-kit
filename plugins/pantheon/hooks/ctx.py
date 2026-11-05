@@ -1293,7 +1293,7 @@ def adopt_marks(sid):
     тот же, CLAUDE_PID новый, старый может ещё жить) или со стоянки parked.<sid>.json (/resume после /clear в том же
     процессе, отметка умершего процесса). Переносит rename: вставку выдаёт ровно один хук, старый процесс свою
     отметку больше не найдёт. Своя отметка уже есть — остаётся она, перенесённая снимается. Отметки других sid не
-    трогает."""
+    трогает. Сбой ФС при переносе — строка в журнале хуков, отметка остаётся, где была, SessionStart идёт дальше."""
     sid = re.sub(r"[^\w-]", "", sid or "")
     d = os.path.join(CTX, "deferred")
     if not sid:
@@ -1313,7 +1313,11 @@ def adopt_marks(sid):
                 raw = f.read()
         except OSError:
             continue
-        got = move_mark(p, raw, own)
+        try:
+            got = move_mark(p, raw, own)
+        except OSError as e:  # не ENOENT (папка только для чтения, длинное имя .claim): SessionStart выдаёт своё дальше
+            hook_log("start", "отметка %s не перенесена в продолженную сессию: %s" % (n, e))
+            continue
         if got is not None:
             hook_log("start", ("отметка отложенной вставки перенесена в продолженную сессию: %s → %s" if got else
                                "отметка %s снята: у продолженной сессии уже есть своя %s") % (n, os.path.basename(own)))

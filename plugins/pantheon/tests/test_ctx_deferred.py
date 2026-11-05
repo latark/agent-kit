@@ -402,6 +402,68 @@ ctx.sweep_deferred()
 check("стоянка: просроченная без границы снята, свежая цела", ls() == ["parked.s-p-new.json"], ls())
 shutil.rmtree(DEFD)
 
+# перенос (park и adopt) идёт link, а не копией: inode и время записи те же — срок отметки не продлевается
+dead = subprocess.Popen([PY, "-I", "-c", "pass"])
+dead.wait()
+os.makedirs(DEFD, exist_ok=True)
+p = mark_of("s-mt", str(dead.pid))
+with open(p, "w") as fh:
+    json.dump({"session_id": "s-mt", "t": time.time() - 300, "tp": "", "off": None}, fh)
+os.utime(p, (time.time() - 300, time.time() - 300))
+st0 = os.stat(p)
+ctx.sweep_deferred()
+pk = mark_of("s-mt", "parked")
+st1 = os.stat(pk) if os.path.exists(pk) else None
+check("стоянка (park): inode и mtime отметки те же, что до переноса",
+      st1 is not None and (st1.st_ino, st1.st_mtime_ns) == (st0.st_ino, st0.st_mtime_ns),
+      (ls(), st0, st1))
+ctx.adopt_marks("s-mt")
+st2 = os.stat(mark_of("s-mt")) if os.path.exists(mark_of("s-mt")) else None
+check("продолжение (adopt): inode и mtime отметки те же, что до переноса, стоянка пуста",
+      st2 is not None and (st2.st_ino, st2.st_mtime_ns) == (st0.st_ino, st0.st_mtime_ns) and ls() == ["%s.s-mt.json" % PID],
+      (ls(), st0, st2))
+shutil.rmtree(DEFD)
+
+
+# сбой ФС при переносе (не ENOENT) не роняет SessionStart: вставка после сжатия, часы и чистка выдаются (Б1 круга 1)
+def hlog_has(s):
+    try:
+        with open(HLOG, encoding="utf-8") as fh:
+            return s in fh.read()
+    except OSError:
+        return False
+
+
+os.makedirs(DEFD, exist_ok=True)
+ev_ro = session("s-ro")
+pk = mark_of("s-ro", "parked")
+body = b'{"session_id": "s-ro", "t": %f}' % time.time()
+with open(pk, "wb") as fh:
+    fh.write(body)
+os.chmod(DEFD, 0o555)
+try:
+    r = run("start", ev_ro)
+finally:
+    os.chmod(DEFD, 0o755)
+check("deferred только для чтения + отметка этого sid на стоянке: SessionStart:compact выдаёт вставку, код 0",
+      r.returncode == 0 and "СЛИВА" in ctx_text(r.stdout), (r.returncode, r.stdout[:200], r.stderr[-300:]))
+check("deferred только для чтения: отметка не потеряна (байты те же), сбой переноса — в журнале хуков",
+      ls() == ["parked.s-ro.json"] and open(pk, "rb").read() == body and hlog_has("parked.s-ro.json не перенесена"),
+      ls())
+os.remove(pk)
+
+ev_ln = session("s-long")
+n = "9" * (255 - len(".s-long.json") - 2) + ".s-long.json"  # своё имя влезает в NAME_MAX, имя .claim — нет
+pl = os.path.join(DEFD, n)
+with open(pl, "wb") as fh:
+    fh.write(b'{"session_id": "s-long", "t": %f}' % time.time())
+r = run("start", ev_ln)
+check("имя .claim длиннее NAME_MAX: SessionStart:compact выдаёт вставку, код 0",
+      r.returncode == 0 and "СЛИВА" in ctx_text(r.stdout), (r.returncode, r.stdout[:200], r.stderr[-300:]))
+check("имя .claim длиннее NAME_MAX: отметка на месте, сбой переноса — в журнале хуков",
+      ls() == [n] and hlog_has("%s не перенесена" % n), ls())
+shutil.rmtree(DEFD)
+
 # --- ctx.py:791 prune_records: двойной захват замка -------------------------------------------------------------
 CTXD = os.path.join(state, "ctx")
 old_t = time.time() - 40 * 86400
