@@ -145,6 +145,14 @@ send-keys и т. п. — ввод от имени владельца), попо�
 - **protect-config** защищает и саму папку `<репо>/.claude` как цель записи (`cp -R x <репо>/.claude/`, `mv`, `tar -C`, `rsync`):
   в неё можно положить settings.json и agents. Вложенное (`.claude/worktrees/…`) правилом не закрыто. С guard 0.5.10 (metis-0177):
   - `hooks/`, `skills/` и `commands/` проекта (`<репо>/.claude/…`, и в worktree) закрыты, как `agents/`;
+  - с metis-0841 («да» владельца 05.11) `skills/`, `commands/` и `agents/` проекта в папках своего направления
+    (domains.json) правят координатор (`domain-coordinator`, главная сессия) и лиды направления (`hephaestus-<коротко>`,
+    `apollo-<коротко>`). Отказ, если новый текст даёт права или запускает код без вопроса: во frontmatter навыка и
+    команды `allowed-tools`, `hooks`, `model`, `context`, у роли `tools`, `disallowedTools`, `permissionMode`, `hooks`,
+    `mcpServers` (без регистра, «-» и «_»), строка `!`команда``. Судится текст после Write, Edit, MultiEdit; из Bash —
+    только `cat > файл <<'EOF'` (и `>>`), `cp`/`mv` одного файла, `mkdir`, `rm`; текст не вычислить — отказ.
+    `hooks/`, settings, `.mcp.json`, `.git`, `.claude` как цель дерева и чужие проекты — как раньше. Песочница окна
+    направления (`pantheon domains build`) не закрывает `.claude/agents` в его папках. После taint запись — как раньше;
   - закрыта и цель выше `.claude` — сам репозиторий или папка над репозиториями, если туда ложится дерево с любыми именами:
     распаковка (`tar -x`, `unzip`, `ditto -x`), `cp -R`/`-a`, `ditto`, `scp -r`, `rsync -r`/`-a` или с источником `папка/`;
     `git clone` в `<репо>/.claude` тоже закрыт;
