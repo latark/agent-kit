@@ -1832,8 +1832,17 @@ if MAC:
     if len(_ps_own) < 20 or not _lp:
         print("пропущено: ps не запустить в этой среде — сверка libproc с ps вне песочницы")
     else:
-        _miss = [p for p in map(int, _ps_own) if p not in _lp]
-        check("0804: libproc видит свои процессы — потеря не больше 5% + 5 (зомби, гонка)",
+        def _alive0804(p):
+            try:
+                os.kill(p, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+        # под нагрузкой (pr353-red-1) процессы рождаются и гаснут между ps и libproc: потеря — только у ещё живых
+        _miss = [p for p in map(int, _ps_own) if p not in _lp and _alive0804(p)]
+        check("0804: libproc видит свои процессы — потеря живых не больше 5% + 5 (зомби, гонка)",
               len(_miss) <= 5 + len(_ps_own) // 20, (len(_miss), len(_ps_own), _miss[:10]))
 
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
@@ -3105,10 +3114,18 @@ O.save_result(q, rid_4, {"state": "stopped", "kind": "test", "sha": SD})
 O.drop_orphan_stops()
 check("T4: тест закончен — метка-сирота убрана", not os.path.exists(_m4))
 
-# T3b из CLI: чужая заявка — «не из этого окна», код 1
-rc, out = say("metis-y", "stop", rid, "--wait", "0")
-check("T3b CLI: stop заявки другого окна — «не из этого окна», код 1, метки нет",
+# T3b из CLI: заявка другого окна, итог которой виден в STATE (идёт) — «не из этого окна», код 1, метки нет;
+# снятая из окна (итог только в его папке, T2) другому окну не видна вовсе — «нет такой заявки», код 1
+rid_3 = "20261106-000003-0873cc"
+O.save_result(q, rid_3, {"state": "running", "kind": "test", "sha": SD})
+rc, out = say("metis-y", "stop", rid_3, "--wait", "0")
+check("T3b CLI: stop идущей заявки другого окна — «не из этого окна», код 1, метки нет",
       rc == 1 and "не из этого окна" in out
+      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid_3 + ".stop")), (rc, out))
+O.save_result(q, rid_3, {"state": "stopped", "kind": "test", "sha": SD})
+rc, out = say("metis-y", "stop", rid, "--wait", "0")
+check("T3b CLI: stop снятой в другом окне — «нет такой заявки», код 1, метки нет",
+      rc == 1 and "нет такой заявки" in out
       and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
 
 # T6a: коммит в папке во время прогона — проход снимает сам (superseded), записи нет
@@ -3128,6 +3145,9 @@ check("T6a superseded_head_moved_running: HEAD ушёл — stopped «superseded
 s_mode("red")
 qa, ra = new_request("athena-x", APP, "test")
 SF = commit(APP, {"t.py": S_TPY + "# f\n"}, "0873 f")
+# ID заявки — секунда и случайный хвост: в одну секунду новая могла встать раньше старой и снять её «дублем»
+# (pr353-red-1) — новая заявка в следующей секунде
+wait_for(lambda: time.strftime("%Y%m%d-%H%M%S") > ra[:15], 3)
 qb, rb = new_request("athena-x", APP, "test")
 run_pass()
 resa, resb = O.load_result(qa, ra) or {}, O.load_result(qb, rb) or {}
@@ -3159,6 +3179,10 @@ finally:
 time.sleep(3)
 check("T7b pin_not_superseded_by_other_qdir: новая заявка --sha из другого qdir — старая идёт",
       up and rcs == 0 and state(qx, rx) == "running" and all(pid_alive(p, 0) for p in pids), (up, rcs, state(qx, rx)))
+# заявка терминала на PY убрана: иначе новая заявка окна на тот же коммит сцепляется с ней (pr353-red-1)
+for _n in os.listdir(O.root("queue")):
+    if _n.endswith(".req.json"):
+        os.remove(os.path.join(O.root("queue"), _n))
 qy, ry = new_request("athena-x", APP, "test", "--sha", PY)
 ok = s_stopped(qx, rx, 15)
 res = O.load_result(qx, rx) or {}
