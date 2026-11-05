@@ -836,6 +836,22 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     return tid, path
 
 
+# Время в начале строки журнала, которую передал агент (--note «23:45 — сделал»): строку журнала датирует код
+# (now_iso, часы системы), а своё время агента читалось бы как время записи — 05.11 оно уходило вперёд на 2 ч
+# (metis-0868, п. 5). Убирается только время с разделителем после него («ЧЧ:ММ —», «ГГГГ-ММ-ДД ЧЧ:ММ:», «05.11 23:30 ·»):
+# «15:00 созвон» — содержание, а не отметка, и остаётся.
+NOTE_STAMP_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?|\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\s+\d{1,2}:\d{2}"
+                           r"|\d{1,2}:\d{2}(?::\d{2})?)\s*(?:—|–|-|:|·|\|)\s+")
+
+
+def note_stamp(note):
+    """→ (строка без времени в начале, снятое время или None). После снятия пусто — строка как есть."""
+    m = NOTE_STAMP_RE.match(str(note or ""))
+    if not m or not str(note)[m.end():].strip():
+        return note, None
+    return str(note)[m.end():], m.group(1)
+
+
 def append_log(body, line):
     if "## Журнал" not in body:
         body = body.rstrip("\n") + "\n\n## Журнал\n"
@@ -1056,6 +1072,7 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
             body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: критерии «{DONE_WHEN}» изменены "
                                     f"(было пунктов {len(crit_was)}, стало {len(crit_now)})")
     if note:
+        note = note_stamp(note)[0]  # время записи — от кода, не от агента (metis-0868, п. 5)
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write_task(path, head, body)
     return path, head
@@ -4168,6 +4185,22 @@ def _journal(body):
         jm = JOURNAL_LINE_RE.match(ln)
         if jm:
             out.append((ts_of(jm.group(1).replace(" ", "T") + ":00"), jm.group(2).strip(), jm.group(3), ln.strip()))
+    return out
+
+
+JOURNAL_FUTURE_SLACK = 10 * 60  # с: часы Mac и правка руками расходятся на минуты, а не на часы
+
+
+def journal_future(tasks, t, slack=JOURNAL_FUTURE_SLACK):
+    """Строки журнала открытых задач со временем позже «сейчас» больше чем на slack (metis-0868, п. 5): время строки
+    ставит код, а такую дописали руками и время проставили на глаз. → [(id, строка)]."""
+    out = []
+    for tid, (_, h, body) in sorted(tasks.items()):
+        if h.get("status") in ("done", "dropped"):
+            continue
+        for ts, _, _, ln in _journal(body):
+            if ts is not None and ts > t + slack:
+                out.append((tid, ln))
     return out
 
 
