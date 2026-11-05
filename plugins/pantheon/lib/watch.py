@@ -2831,7 +2831,16 @@ def maint_path():
     return P.path("maintenance.json")
 
 
+def hq_saved_clear():
+    """Метки окна штаба в STATE/hq-rw/saved снимаем вместе с остальными метками saved (metis-0577)."""
+    with contextlib.suppress(OSError):
+        for f in os.listdir(P.path(P.HQ_RW, "saved")):
+            with contextlib.suppress(OSError):
+                os.remove(P.path(P.HQ_RW, "saved", f))
+
+
 def maint_clear():
+    hq_saved_clear()
     with contextlib.suppress(FileNotFoundError):
         os.remove(maint_path())
     with contextlib.suppress(FileNotFoundError):
@@ -3016,6 +3025,7 @@ def plugins_respawn(agents, doms, t):
                 for f in os.listdir(respawn_path("respawn-ok")):
                     with contextlib.suppress(OSError):
                         os.remove(respawn_path("respawn-ok", f))
+            hq_saved_clear()
 
 
 def saved_agent(name, mine, sid, warn=True):
@@ -3040,8 +3050,8 @@ def saved_sid(name):
     или перезапуск после плагинов (STATE/plugins/respawn-ok/<имя>.json); None — метки или id в ней нет."""
     if not P.SESSION_NAME.fullmatch(str(name)):
         return None
-    for p in (P.path("maintenance", name + ".json"), respawn_path("respawn-ok", name + ".json")):
-        rec = P.read_json(p, {})
+    for rec in (P.read_json(P.path("maintenance", name + ".json"), {}),
+                P.read_json(respawn_path("respawn-ok", name + ".json"), {}), hq_saved(name)):
         sid = rec.get("sessionId") if isinstance(rec, dict) else None
         if isinstance(sid, str) and re.fullmatch(r"[0-9a-f-]{8,64}", sid):
             return sid
@@ -3080,6 +3090,9 @@ def restart(rest, who):
                 saved[f[:-5]] = P.read_json(P.path("maintenance", f), {})
             elif f.endswith(".done"):
                 done_marks.add(f[:-5])
+    for n in m.get("sessions") or []:  # окно штаба пишет метку в STATE/hq-rw/saved (metis-0577)
+        if n not in saved and hq_saved(n).get("time"):
+            saved[n] = hq_saved(n)
     if rest[:1] == ["--done"]:  # metis-0338: перезапуск закончен — метку снять (рядом с --cancel: тот отменяет)
         return restart_close(m, done_marks, who, "по команде --done")
     if rest[:1] == ["--status"] or not rest:
@@ -3177,6 +3190,17 @@ def restart_close(m, done_marks, who, how):
     return 0
 
 
+SAVED_NAME = re.compile(r"zeus[a-z0-9-]{0,36}")
+
+
+def hq_saved(name):
+    """metis-0577: метка `pantheon saved` окна штаба из STATE/hq-rw/saved (пишет само окно — только Зевс); {} — нет."""
+    if not SAVED_NAME.fullmatch(str(name)):
+        return {}
+    rec = P.read_json(P.path(P.HQ_RW, "saved", name + ".json"), {})
+    return rec if isinstance(rec, dict) else {}
+
+
 def _write_mark(name, p, rec):
     """Запись pantheon saved. Не записалась (PermissionError: песочница окна не пускает в STATE/maintenance и
     STATE/plugins, metis-0577) — строка в stderr и False, без трассировки. Зевс (zeus*) — интерактивная сессия владельца:
@@ -3188,9 +3212,16 @@ def _write_mark(name, p, rec):
         return True
     except OSError as e:
         owner = name.startswith("zeus")
+        kept = None
+        if owner and SAVED_NAME.fullmatch(name):  # metis-0577: окно штаба пишет только в STATE/hq-rw — метка там
+            try:
+                P.hq_put("saved", name + ".json", json.dumps(rec, ensure_ascii=False) + "\n")
+                kept = P.tilde(P.path(P.HQ_RW, "saved", name + ".json"))
+            except OSError:
+                pass
         print(f"pantheon saved: метка {P.tilde(p)} не записана — {type(e).__name__}: {e.strerror or e}"
               + (f"\n{name}: его перезапуск ведёт владелец (pantheon start zeus --restart), метка ему не нужна — "
-                 "команда считается выполненной" if owner else
+                 "команда считается выполненной" + (f"; копия записана в {kept}" if kept else "") if owner else
                  "\nокно не может писать в состояние Пантеона: метку поставит тот, кто вне песочницы"),
               file=P.sys.stderr)
         return False
