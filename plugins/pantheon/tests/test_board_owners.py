@@ -345,6 +345,23 @@ al = [x for x in r.stdout.splitlines() if "строка журнала зада�
 check("e2e 5. строка журнала позже часов системы — тревога хвоста «время» в pantheon check, с id и строкой",
       len(al) == 1 and f"{tB}: строка журнала позже часов системы — «- " in al[0] and "дописал руками на глаз" in al[0],
       r.stdout + r.stderr)
+probe = f"""
+import sys
+sys.path.insert(0, {LIB!r})
+import pantheon as p
+class Broken:
+    def owner_renames(self, *a):
+        raise RuntimeError("проба")
+    def __getattr__(self, name):
+        raise RuntimeError("проба")
+p.boardstatus_mod = lambda: Broken()
+print("строк:", len(p.board_owner_sync(p.tasks_mod())))
+"""
+r = subprocess.run([PY311, "-I", "-c", probe], env=dict(env, PANTHEON_NOW=str(T3 + 30)), capture_output=True, text=True,
+                   timeout=120)
+check("сбой: сверка хозяев упала → тревога с причиной, проход доски не падает",
+      r.returncode == 0 and "сверка хозяев задач упала (RuntimeError: проба)" in r.stdout and "строк: 0" in r.stdout,
+      r.stdout + r.stderr)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
