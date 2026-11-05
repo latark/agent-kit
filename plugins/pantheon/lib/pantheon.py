@@ -60,9 +60,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
-  pantheon browser health|open|read|eval|status|run   браузер владельца для роли charon без
-                                        пароля и порта (lib/browser.py, metis-0760): заявка из окна → проход вне
-                                        окна; только чтение — сайты reads.toml; click, type, submit — metis-0765
+  pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
+                                        charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
+                                        проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
+                                        отправка и удаление — Touch ID или «да» на каждую; оплата и важные формы — нет
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl

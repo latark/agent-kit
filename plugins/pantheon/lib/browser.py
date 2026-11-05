@@ -13,15 +13,27 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   pantheon browser open URL [--task ID]                  открыть адрес в рабочей вкладке демона
   pantheon browser read (URL|--here) [--task ID]         текст страницы и ссылки (до 200 КБ)
   pantheon browser eval (URL|--here) EXPR [--task ID]    выражение JS в изолированном мире, без побочных действий
+  pantheon browser allow САЙТ ДЕЙСТВИЯ --task ID --why Т поручение: click,type,submit,delete на сайте (metis-0765)
+  pantheon browser click СЕЛЕКТОР --task ID              флажок, переключатель, label к ним, ссылка того же сайта
+  pantheon browser type СЕЛЕКТОР ТЕКСТ --task ID         ввод в текстовое поле или textarea
+  pantheon browser submit СЕЛЕКТОР --task ID             отправка формы: Touch ID или «да» владельца на каждую
+  pantheon browser delete СЕЛЕКТОР --task ID             удаление: один элемент — Touch ID или «да», пачка — «да»
   pantheon browser status [ID]                           итог заявки или последние итоги
   pantheon browser run                                   проход вне окна: только тик, не окно Claude Code
 
-  Общие ключи: --browser comet (по умолчанию) или chrome; --wait С — ждать итога до С секунд (по умолчанию 120, до 590;
-  0 — не ждать). Код выхода: 0 — сделано, 1 — отказ или сбой (причина в последней строке), 2 — неверный вызов,
-  75 — итога за --wait нет (pantheon browser status ID).
+  Общие ключи: --browser comet (по умолчанию) или chrome; --wait С — ждать итога до С секунд (по умолчанию 120, у
+  allow, submit и delete — 300: окно Touch ID ждёт пальца до 120 с; до 590; 0 — не ждать). Код выхода: 0 — сделано,
+  1 — отказ или сбой (причина в последней строке), 2 — неверный вызов, 75 — итога за --wait нет (pantheon browser
+  status ID).
 
-  Только чтение. Нажатия, ввод и отправка формы (click, type, submit) вынесены в metis-0765: эти команды — отказ
-  «вынесено в metis-0765», код 2 (решение Метиды 03.11, круг 3 PR #290).
+  Действия (metis-0765, решение владельца 05.11; правила и модель угроз — plugins/pantheon/docs/charon/README.md):
+  click, type, submit и delete — во вкладке, которую открыл open, только по поручению (allow: задача, сайт, список
+  действий; одно «да» владельца окном вопросов или Touch ID, срок 24 ч). Каждая отправка и каждое удаление — своё
+  согласие: Touch ID в момент действия или «да» на вопрос с кодом, который выдал проход (код привязан к сайту, пути
+  и запросу адреса, селектору и отпечатку полей формы в момент вопроса; одно «да» — одна отправка). Удаление пачки —
+  только «да». Оплата и важная форма (вход, пароль, смена почты или телефона, договор, торги, перевод, удаление
+  аккаунта, госкабинеты) — отказ всегда: только владелец сам (classify, PAY_*, IMPORTANT_*). Нажатие — вид только по
+  тегу, без интерактивных предков (click_kind); прокрутка мгновенная, точка сверяется перед нажатием (point_js).
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
@@ -50,8 +62,9 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   собранной строке `document[['coo','kie'].join('')]`, перенос строки с `{`, async/of/yield/await, запятая в `)(`,
   имя не из ASCII, литерал регулярного выражения. Взамен — переключатель владельца: `eval = false` в reads.toml
   запрещает eval («eval запрещён настройкой …»), health, open и read работают; ключа или файла нет — eval разрешён.
-- Сырые /cmd, /events, /console и /close демона наружу не выходят, и сам проход их не зовёт: только /health, /open,
-  /eval.
+- Сырые /cmd, /events, /console и /close демона наружу не выходят. Проход зовёт /health, /open, /eval и /cmd — только
+  с Input.dispatchMouseEvent и Input.insertText (CMD_ALLOWED, для click, type, submit, delete); /events, /console и
+  /close — нет.
 - Своя вкладка на окно (metis-0774): заявка из окна идёт в /open и /eval с полем session = имя окна — демон заводит
   этому окну отдельную вкладку (первый /open), чужие окна страницу не уводят. Сессия владельца — без поля, общая
   вкладка. Вкладку проход не закрывает (/close-tab не зовёт): простаивающую демон закрывает сам через 6 ч, предел —
@@ -70,6 +83,7 @@ STATE/logs/browser.jsonl. Проход запускает тик (kick), пок�
 """
 import contextlib
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -103,14 +117,14 @@ DEFAULT_DOMAINS = (
     "forms.yandex.ru",                        # формы владельца (metis-0760, «Готово, когда» шага В)
 )                                             # решение владельца 15.10 (BROW-09): 15 сайтов чтения + forms.yandex.ru
 DEFAULT_WINDOWS = ("hq",)
-OPS = ("health", "open", "read", "eval")
-MOVED = ("click", "type", "submit")           # нажатия, ввод и отправка — metis-0765 (круг 3 PR #290: только чтение)
-MOVED_WHY = "вынесено в metis-0765: нажатия, ввод и отправка формы; здесь только чтение — health, open, read, eval"
+ACTS = ("click", "type", "submit", "delete")   # действия на странице — только по поручению (metis-0765)
+OPS = ("health", "open", "read", "eval", "allow") + ACTS
 ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
-LIMITS = {"url": 2000, "expr": 4000}
+LIMITS = {"url": 2000, "expr": 4000, "selector": 500, "text": 4000, "why": 200, "site": 300, "actions": 60}
 WAIT_DEFAULT, WAIT_MAX = 120, 590
+WAIT_ACT = 300                                # allow, submit, delete: окно Touch ID ждёт пальца до 120 с
 REQ_TTL = 300                                 # заявка старше 5 мин — сбой: роль уже не ждёт
 REQ_MAX = 32 * 1024
 TEXT_MAX = 200_000                            # текст страницы в итоге
@@ -780,12 +794,559 @@ def seen_notice(win, op, host, task, why=None):
                  + (f" — {title}" if title else ""))
 
 
+# --- действия: поручение, нажатие, ввод, отправка, удаление (metis-0765) -------------------------------------------
+# Решение владельца 05.11 (карточка metis-0765): оплата — только владелец руками; важная форма — только владелец сам
+# («да» и Touch ID не действуют); обычная форма — «да» или Touch ID на каждую отправку; удаление одного элемента — так
+# же, пачки — только «да»; одно разрешение на всё поручение (allow). Правила и модель угроз — docs/charon/README.md.
+
+ACT_WORDS = {"click": "нажатия", "type": "ввод", "submit": "отправка форм", "delete": "удаление"}
+MANDATE_TTL = 24 * 3600                       # поручение живёт сутки от согласия
+ASK_TTL = 24 * 3600                           # код вопроса на отправку — сутки
+TOUCH_CANCEL = "Отказать"                     # надпись кнопки отказа в окне Touch ID (у слияния — «Не сливать»)
+CMD_ALLOWED = ("Input.dispatchMouseEvent", "Input.insertText")   # единственные команды /cmd демона из прохода
+CODE_RE = re.compile(r"[0-9a-f]{6}")
+
+# F1: оплата — поле карты, платёжный сайт или путь, надпись оплаты (у цели и у кнопок, заголовков, полей её формы)
+PAY_HOSTS = ("yoomoney.ru", "yookassa.ru", "money.yandex.ru", "pay.yandex.ru", "qiwi.com", "paypal.com", "stripe.com",
+             "cloudpayments.ru", "robokassa.ru", "robokassa.com", "unitpay.ru", "payanyway.ru", "paymaster.ru",
+             "nspk.ru", "sberbank.ru", "online.sberbank.ru", "tbank.ru", "tinkoff.ru", "alfabank.ru", "vtb.ru",
+             "raiffeisen.ru", "gazprombank.ru", "payture.com", "best2pay.net", "uniteller.ru", "platron.ru",
+             "payselection.net", "pay.google.com")
+PAY_HOST_PREFIX = re.compile(r"(?:pay|pays|payment|payments|checkout|billing|3ds|acs|oplata)[.-]")
+PAY_PATH = re.compile(r"/(?:pay|payment|payments|checkout|billing|oplata|purchase)(?:[/?#._-]|$)", re.I)
+PAY_FIELD = re.compile(r"card.?(?:num|no\b|number)|cardnumber|\bcc-?(?:num|number|csc|exp)|\bcvv|\bcvc|\bcsc\b|"
+                       r"card.?(?:code|holder)|номер\s+карт|срок\s+действ|держател|\bexp(?:iry|iration)?.?date", re.I)
+PAY_WORDS = re.compile(r"оплат|оплач|заплат|купить|покупк|оформить\s+(?:заказ|подписк)|пополнить|продвин|продвиж|"
+                       r"подключить\s+(?:тариф|услуг|пакет)|\bpay\b|\bbuy\b|checkout|place\s+order|top.?up|purchase",
+                       re.I)
+# F2: важная форма — вход и пароль, смена контактов, договор и подпись, торги, перевод, удаление аккаунта, госкабинеты
+IMPORTANT_HOSTS = ("gosuslugi.ru", "nalog.gov.ru", "nalog.ru", "sfr.gov.ru", "pfr.gov.ru", "rosreestr.gov.ru",
+                   "rosreestr.ru", "my.arbitr.ru", "mos.ru", "fssp.gov.ru", "zakupki.gov.ru", "torgi.gov.ru",
+                   "fedresurs.ru", "sberbank-ast.ru", "roseltorg.ru", "fabrikant.ru", "rts-tender.ru", "lot-online.ru",
+                   "etpgpb.ru", "b2b-center.ru", "m-ets.ru")
+IMPORTANT_HOST_PREFIX = re.compile(r"(?:id|login|auth|oauth|sso|passport|account|accounts|signin|esia|lk)[.-]")
+IMPORTANT_PATH = re.compile(r"/(?:login|logon|signin|sign-in|sign_in|auth|oauth|sso|register|registration|signup|"
+                            r"sign-up|password|passwd|reset|recover|restore|security|2fa|otp|verify|verification)"
+                            r"(?:[/?#._-]|$)|/(?:account|profile|settings)/(?:delete|remove|close|security|password|"
+                            r"email|phone|contacts)", re.I)
+IMPORTANT_AUTO = ("current-password", "new-password", "one-time-code")
+IMPORTANT_FIELD = re.compile(r"passw|пароль|\botp\b|one.?time|sms.?code|код\s+из\s+смс|код\s+подтвержд|\b2fa\b|totp|"
+                             r"verification.?code", re.I)
+IMPORTANT_WORDS = re.compile(r"""(?ix)
+    \bвойти\b|\bвход\b|log\s?in\b|sign\s?in\b|авториз|регистрац|зарегистр|sign\s?up\b|парол|password
+  | (?:смен|измен|привяз|отвяз|change\b|update\b)\w*\s+(?:\w+\s+)?(?:почт|e-?mail|телефон|номер|phone|парол|password)
+  | договор|контракт|оферт|подписа|подпис[ьи]\b|\bэцп\b|электронн\w*\s+подпис|sign\s+(?:contract|document)
+  | заявк\w*\s+на\s+участие|подать\s+заявк|(?<![а-яё])торг|аукцион|(?<![а-яё])ставк|задат|\bbid\b
+  | перевест|перевод\w*\s+(?:денег|средств|на\s+карт|по\s+номер)|вывод\s+средств|вывести\s+(?:деньги|средства)
+  | withdraw|transfer
+  | удал\w*\s+(?:аккаунт|профил|учётн|учетн|кабинет)|delete\s+(?:my\s+)?account|close\s+account
+  | закры\w*\s+(?:сч[её]т|аккаунт|профил)
+  | доверенн|расторг|отказ\w*\s+от\b|жалоб|\bиск\b|исков|заявлени|декларац|кредит|займ|ипотек|залог
+  | подтверд\w*\s+(?:сделк|операци|перевод|платеж|платёж)
+""")
+# F3: удаление — надпись или атрибуты цели; пачка — «все», «выбранные», число от 2 или два отмеченных флажка и больше
+DELETE_WORDS = re.compile(r"удал|(?<![а-яё])стереть|очист|уничтож|delete|remove|erase|trash|\bdel\b", re.I)
+BATCH_WORDS = re.compile(r"\bвс[её]\b|\bвсех\b|выбранн|отмеченн|\ball\b|selected|checked|"
+                         r"(?<![\w.,:/-])(?:[2-9]|[1-9]\d+)(?![\w.,:/-])", re.I)
+
+# K: вид нажатия — только по тегу. Интерактивный — тег из списка, роль виджета, onclick или contenteditable
+INTERACTIVE_TAGS = ("a", "button", "input", "select", "option", "textarea", "label", "summary")
+WIDGET_ROLES = frozenset(("button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "option", "switch",
+                          "checkbox", "radio", "treeitem", "combobox", "textbox", "searchbox", "slider", "spinbutton"))
+TEXT_TYPES = ("", "text", "search", "email", "tel", "url", "number")
+
+# Факты страницы для прохода: цель, её предки, поля и кнопки формы. Классифицирует Python (тяжёлые регулярки в
+# странице вешают вкладку). Прокрутка мгновенная: плавная (CSS scroll-behavior) сдвинула бы точку после замера (K4)
+FACTS_JS = r"""/*charon-facts*/(() => { const S = %s; const e = document.querySelector(S); if (!e) return null;
+e.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); %s
+const r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+const p = document.elementFromPoint(x, y), hit = !!p && (p === e || e.contains(p));
+const at = (n, k) => (n.getAttribute(k) || '');
+const lab = n => String(n.innerText || n.value || at(n, 'aria-label') || at(n, 'title') || '').trim().slice(0, 200);
+const inter = n => /^(A|BUTTON|INPUT|SELECT|OPTION|TEXTAREA|LABEL|SUMMARY)$/.test(n.tagName) || n.hasAttribute('role')
+  || n.hasAttribute('onclick') || n.hasAttribute('contenteditable');
+const info = n => { const c = n.tagName === 'LABEL' ? n.control : null; return { tag: n.tagName.toLowerCase(),
+  type: at(n, 'type').toLowerCase(), role: at(n, 'role').toLowerCase(),
+  href: n.tagName === 'A' && n.hasAttribute('href') ? n.href : '', onclick: n.hasAttribute('onclick'),
+  target: at(n, 'target').toLowerCase(), download: n.hasAttribute('download'), ce: n.hasAttribute('contenteditable'),
+  ctag: c ? c.tagName.toLowerCase() : '', ctype: c ? at(c, 'type').toLowerCase() : '', label: inter(n) ? lab(n) : '',
+  attrs: [at(n, 'aria-label'), at(n, 'title'), at(n, 'value'), at(n, 'id'), at(n, 'name'), at(n, 'class')]
+    .join(' ').slice(0, 300) }; };
+const chain = []; for (let n = hit ? p : e; n && n.nodeType === 1 && chain.length < 40; n = n.parentElement) chain.push(info(n));
+const f = (e.form && e.form.tagName === 'FORM') ? e.form : e.closest('form');
+const flab = n => String((n.labels && n.labels[0] && n.labels[0].innerText) || at(n, 'aria-label') || at(n, 'placeholder')
+  || '').trim().slice(0, 80);
+const nodes = f ? [...f.elements, ...f.querySelectorAll('[contenteditable]')]
+  : [...document.querySelectorAll('input,select,textarea,[contenteditable]')].filter(n => !n.closest('form') && !n.form);
+const fields = nodes.filter(n => /^(INPUT|SELECT|TEXTAREA)$/.test(n.tagName) || n.hasAttribute('contenteditable'))
+  .filter(n => at(n, 'type').toLowerCase() !== 'hidden').slice(0, 300).map(n => {
+  const tag = n.tagName.toLowerCase(), type = at(n, 'type').toLowerCase(); let value = '';
+  if (tag === 'select') value = [...n.selectedOptions].map(o => o.value).join('|');
+  else if (tag === 'input' && (type === 'checkbox' || type === 'radio')) value = n.checked ? 'on' : '';
+  else if (tag === 'input' || tag === 'textarea') value = type === 'password' ? '' : String(n.value);
+  else value = String(n.innerText || '');
+  return { tag, type, name: at(n, 'name') || at(n, 'id'), label: flab(n), auto: at(n, 'autocomplete').toLowerCase(),
+    value: value.slice(0, 2000), checked: !!n.checked }; });
+const buttons = f ? [...f.querySelectorAll('button,input[type=submit],input[type=button],input[type=image],[role=button]')]
+  .slice(0, 50).map(lab) : [];
+const heads = f ? [...f.querySelectorAll('legend,h1,h2,h3')].slice(0, 5).map(n => String(n.innerText).trim().slice(0, 120)) : [];
+return { url: location.href, x, y, w: r.width, h: r.height, hit, chain, el: info(e), elabel: lab(e),
+  focused: document.activeElement === e, fields, buttons, heads,
+  form: f ? { action: new URL(at(f, 'action') || location.href, location.href).href,
+              label: [at(f, 'aria-label'), at(f, 'id'), at(f, 'name')].join(' ').slice(0, 200) } : null }; })()"""
+# Перед нажатием (K4): рамка цели та же и точка всё ещё попадает в неё
+POINT_JS = r"""/*charon-point*/(() => { const S = %s; const e = document.querySelector(S); if (!e) return null;
+const r = e.getBoundingClientRect(), p = document.elementFromPoint(%r, %r);
+return { url: location.href, x: r.left + r.width / 2, y: r.top + r.height / 2, hit: !!p && (p === e || e.contains(p)) }; })()"""
+
+
+def facts_js(selector, focus=False):
+    return FACTS_JS % (json.dumps(selector), "e.focus();" if focus else "")
+
+
+def point_js(selector, x, y):
+    return POINT_JS % (json.dumps(selector), float(x), float(y))
+
+
+def url_key(url):
+    """Сайт, путь и запрос адреса (без фрагмента) — к ним привязан код вопроса (C10)."""
+    u = urlsplit(url)
+    return site_word((u.hostname or "").lower().rstrip(".")) + (u.path or "/") + (f"?{u.query}" if u.query else "")
+
+
+def interactive(n):
+    tag = n.get("tag")
+    return bool((tag in INTERACTIVE_TAGS and not (tag == "a" and not n.get("href"))
+                 and not (tag == "input" and n.get("type") == "hidden"))
+                or n.get("role") in WIDGET_ROLES or n.get("onclick") or n.get("ce"))
+
+
+def desc(n):
+    return ((n.get("tag") or "?") + (f"[type={n['type']}]" if n.get("type") else "")
+            + (f"[role={n['role']}]" if n.get("role") else "") + ("[onclick]" if n.get("onclick") else ""))
+
+
+def target_of(facts):
+    """Цель нажатия: ближайший интерактивный элемент от точки нажатия вверх (K1) → (индекс в цепочке или None, узел).
+    Нет такого — сам элемент селектора."""
+    chain = facts.get("chain") or []
+    i = next((k for k, n in enumerate(chain) if isinstance(n, dict) and interactive(n)), None)
+    if i is not None:
+        return i, chain[i]
+    el = dict(facts.get("el") or {})
+    el["label"] = el.get("label") or facts.get("elabel") or ""
+    return None, el
+
+
+def click_kind(facts, host):
+    """(вид, причина отказа): вид — только по тегу (K2): input checkbox или radio, label к ним, ссылка того же сайта
+    (K5); ARIA-роль вид не расширяет; интерактивный предок выше цели — отказ (K3); нет интерактивного — отказ (K6)."""
+    chain = facts.get("chain") or []
+    i, n = target_of(facts)
+    if i is None:
+        return None, "под точкой нажатия нет флажка, переключателя или ссылки (обработчик на div?) — это submit"
+    tag, typ, role = n.get("tag"), n.get("type") or "", n.get("role") or ""
+    if tag == "input" and typ in ("checkbox", "radio") and role in ("", typ, "switch") and not n.get("onclick"):
+        kind = typ
+    elif (tag == "label" and not role and not n.get("onclick") and n.get("ctag") == "input"
+          and n.get("ctype") in ("checkbox", "radio")):
+        kind = n["ctype"]
+    elif (tag == "a" and role in ("", "link") and not n.get("onclick") and (n.get("target") or "") in ("", "_self")
+          and not n.get("download")):
+        if not same_site(n.get("href"), host):
+            return None, f"ссылка ведёт не на {site_word(host)} ({str(n.get('href'))[:120]})"
+        kind = "link"
+    else:
+        return None, (f"вид «{desc(n)}» — не флажок, переключатель, label к ним или ссылка того же сайта (вид — по тегу,"
+                      " роль его не расширяет) — это submit")
+    for a in chain[i + 1:]:
+        if isinstance(a, dict) and interactive(a) and not (
+                a.get("tag") == "label" and tag == "input" and not a.get("role") and not a.get("onclick")):
+            return None, f"{desc(n)} вложен в {desc(a)} — нажатие дойдёт до него; это submit"
+    return kind, None
+
+
+def same_site(href, host):
+    """K5: ссылка http(s) на тот же сайт, что у страницы (www. не в счёт); javascript:, чужой хост — нет."""
+    try:
+        return isinstance(href, str) and site_word(url_host(href)) == site_word(host)
+    except Refuse:
+        return False
+
+
+def _host_hit(u, hosts, prefix):
+    try:
+        h = url_host(u)
+    except Refuse:
+        return False
+    return listed(h, hosts) or bool(prefix.match(site_word(h)))
+
+
+def _path_of(u):
+    with contextlib.suppress(ValueError):
+        return urlsplit(u).path or "/"
+    return "/"
+
+
+def classify(facts, op):
+    """Вид формы → (вид, причина): pay (оплата), important (важная), delete-batch, delete, ordinary. Порядок — оплата,
+    важная, удаление, обычная (F1–F3). Слова — у цели (надпись и атрибуты), а в форме ещё у её кнопок, заголовков,
+    имени и подписей полей; поля — формы цели, без формы — поля страницы вне форм."""
+    fields = [f for f in facts.get("fields") or [] if isinstance(f, dict)]
+    form = facts.get("form") if isinstance(facts.get("form"), dict) else None
+    _, btn = target_of(facts)
+    own = " ".join(str(btn.get(k) or "") for k in ("label", "attrs"))
+    texts = [own]
+    if form:
+        texts += [str(x) for x in (facts.get("buttons") or []) + (facts.get("heads") or [])] + [str(form.get("label") or "")]
+        texts += [str(f.get("label") or "") for f in fields]
+    text = " | ".join(texts)
+    urls = [u for u in (facts.get("url"), (form or {}).get("action")) if isinstance(u, str) and u]
+    for f in fields:
+        name = f"{f.get('name') or ''} {f.get('label') or ''}"
+        if str(f.get("auto") or "").startswith("cc-") or PAY_FIELD.search(name):
+            return "pay", f"поле карты «{name.strip()[:60]}»"
+    for u in urls:
+        if _host_hit(u, PAY_HOSTS, PAY_HOST_PREFIX) or PAY_PATH.search(_path_of(u)):
+            return "pay", f"платёжный адрес {u[:120]}"
+    m = PAY_WORDS.search(text)
+    if m:
+        return "pay", f"надпись «{m.group(0)}»"
+    for f in fields:
+        name = f"{f.get('name') or ''} {f.get('label') or ''}"
+        if f.get("type") == "password" or f.get("auto") in IMPORTANT_AUTO or IMPORTANT_FIELD.search(name):
+            return "important", f"поле «{name.strip()[:60] or f.get('type')}» — пароль или код"
+    for u in urls:
+        if _host_hit(u, IMPORTANT_HOSTS, IMPORTANT_HOST_PREFIX) or IMPORTANT_PATH.search(_path_of(u)):
+            return "important", f"адрес входа, кабинета или госсайта {u[:120]}"
+    m = IMPORTANT_WORDS.search(text)
+    if m:
+        return "important", f"надпись «{m.group(0).strip()}»"
+    if op == "delete" or DELETE_WORDS.search(own):
+        checked = sum(1 for f in fields if f.get("type") == "checkbox" and f.get("checked"))
+        if checked >= 2 or BATCH_WORDS.search(own):
+            return "delete-batch", f"пачка: отмечено {checked}" if checked >= 2 else "пачка: надпись"
+        return "delete", "удаление одного элемента"
+    return "ordinary", "обычная форма"
+
+
+def form_digest(facts):
+    """Отпечаток формы (C5, C11): поля формы цели (без скрытых и паролей), адрес отправки и надпись кнопки."""
+    _, btn = target_of(facts)
+    data = {"fields": [[f.get(k) for k in ("tag", "type", "name", "value", "checked")]
+                       for f in facts.get("fields") or [] if isinstance(f, dict)],
+            "action": (facts.get("form") or {}).get("action") if isinstance(facts.get("form"), dict) else None,
+            "button": btn.get("label")}
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def form_summary(facts, room=250):
+    """Поля формы для окна Touch ID и вопроса: «подпись=значение; …», отметки — «✓»."""
+    out = []
+    for f in facts.get("fields") or []:
+        if not isinstance(f, dict):
+            continue
+        name = " ".join(str(f.get("label") or f.get("name") or f.get("type") or "поле").split())[:40]
+        if f.get("type") in ("checkbox", "radio"):
+            if f.get("checked"):
+                out.append(f"{name} ✓")
+        elif f.get("value"):
+            out.append(f"{name}={' '.join(str(f['value']).split())[:80]}")
+    text = "; ".join(out) or "полей нет"
+    return text if len(text) <= room else text[:room - 1] + "…"
+
+
+# --- поручения и коды вопросов: STATE/browser, пишет только проход --------------------------------------------------
+
+def _store(kind):
+    return root(kind)
+
+
+def _load_all(kind):
+    out = []
+    d = _store(kind)
+    with contextlib.suppress(OSError):
+        for name in sorted(os.listdir(d)):
+            if name.endswith(".json"):
+                rec = P.read_json(os.path.join(d, name), {})
+                if isinstance(rec, dict) and rec:
+                    out.append((name, rec))
+    return out
+
+
+def _save(kind, name, rec):
+    os.makedirs(_store(kind), exist_ok=True)
+    P.write_json(os.path.join(_store(kind), name), rec)
+
+
+def _prune(kind, ttl):
+    for name, rec in _load_all(kind):
+        t = rec.get("until") or rec.get("issued") or 0
+        if isinstance(t, (int, float)) and P.now() - t > ttl:
+            with contextlib.suppress(OSError):
+                os.unlink(os.path.join(_store(kind), name))
+
+
+def parse_actions(text):
+    acts = [a.strip() for a in str(text or "").split(",") if a.strip()]
+    bad = [a for a in acts if a not in ACTS]
+    if not acts or bad:
+        raise Refuse(f"действия — через запятую из {', '.join(ACTS)}" + (f"; не знаю: {', '.join(bad)}" if bad else ""))
+    return [a for a in ACTS if a in acts]
+
+
+def mandate_head(task, site, acts):
+    return f"[{task}] Поручение Харону на {site}: {', '.join(ACT_WORDS[a] for a in acts)}."
+
+
+def mandate_question(task, site, acts, why):
+    return (f"{mandate_head(task, site, acts)} Цель: {' '.join(str(why).split())[:200]}. Каждая отправка формы и каждое "
+            "удаление — отдельный вопрос или Touch ID; оплата и важные формы — только вы")
+
+
+def mandate_for(task, host, op):
+    """Действующее поручение на задачу и сайт вкладки с этим действием (M1–M3) или None."""
+    for _, rec in _load_all("mandates"):
+        if (rec.get("task") == task and isinstance(rec.get("site"), str) and listed(host, (rec["site"],))
+                and op in (rec.get("actions") or []) and isinstance(rec.get("until"), (int, float))
+                and rec["until"] > P.now()):
+            return rec
+    return None
+
+
+def touch(text):
+    """Окно Touch ID помощником слияния (merge_mod().helper(), lib/touchid.swift) → (код, причина): 0 — палец, 1 —
+    отказ, 2 — окно не показать, 3 — время вышло; None — окна не было: владельца нет у Mac (простой больше PRESENT_SEC
+    слияния) или помощник не собран."""
+    M = P.merge_mod()
+    if P.idle_sec() > M.PRESENT_SEC:
+        return None, f"владельца нет у Mac (простой больше {M.PRESENT_SEC // 60} мин)"
+    h = M.helper()
+    if not h:
+        return None, "помощник Touch ID не собран"
+    try:
+        rc = subprocess.run([h, text[:400], str(M.WINDOW_WAIT), TOUCH_CANCEL], stdin=subprocess.DEVNULL,
+                            capture_output=True, timeout=M.WINDOW_WAIT + 60).returncode
+    except (OSError, subprocess.SubprocessError):
+        rc = 2
+    return rc, {0: "палец", 1: "владелец отказал в окне Touch ID", 2: "окно Touch ID не показать",
+                3: "окно Touch ID закрыто без ответа"}.get(rc, f"помощник Touch ID вернул {rc}")
+
+
+def do_allow(req, win, domains):
+    """Поручение (M1–M3): «да» окном вопросов на вопрос, который начинается ровно с mandate_head (не старше
+    MANDATE_TTL), или Touch ID; иначе отказ с текстом вопроса."""
+    task, why = req["task"], req["why"]
+    raw = req["site"].strip().lower()
+    host = url_host(raw if "://" in raw else f"https://{raw}/")
+    site, acts = site_word(host), parse_actions(req["actions"])
+    if not allowed(host, domains, task):
+        raise Refuse(f"сайта {site} нет в списке чтения, в ваших словах за 24 ч и в «да» по задаче {task} — поручение "
+                     "только на сайт, который можно читать")
+    if _host_hit(f"https://{host}/", PAY_HOSTS, PAY_HOST_PREFIX):
+        raise Refuse(f"{site} — платёжный сайт: оплата — только владелец руками, поручения нет")
+    if _host_hit(f"https://{host}/", IMPORTANT_HOSTS, IMPORTANT_HOST_PREFIX):
+        raise Refuse(f"{site} — сайт входа, кабинета или госсайт: важные формы — только владелец сам, поручения нет")
+    have = [r for _, r in _load_all("mandates") if r.get("task") == task and r.get("site") == site
+            and set(acts) <= set(r.get("actions") or []) and (r.get("until") or 0) > P.now()]
+    if have:
+        return "done", f"поручение на {site} ({', '.join(acts)}) по {task} уже есть до {P.stamp(have[0]['until'])}", ""
+    name = re.sub(r"[^a-z0-9.-]", "_", f"{task}__{site}__{'-'.join(acts)}") + ".json"
+    head = mandate_head(task, site, acts)
+    t = owner_yes(task, lambda q: q.startswith(head))
+    if t is not None and P.now() - t < MANDATE_TTL:
+        _save("mandates", name, {"task": task, "site": site, "actions": acts, "from": t, "until": t + MANDATE_TTL,
+                                 "by": "да", "window": win, "why": why})
+        return "done", (f"поручение на {site} ({', '.join(acts)}) по {task} — по «да» владельца {P.stamp(t)}, до "
+                        f"{P.stamp(t + MANDATE_TTL)}"), ""
+    rc, what = touch(f"Харон ({win or 'ваша сессия'}), задача {task}: поручение на {site} — "
+                     f"{', '.join(ACT_WORDS[a] for a in acts)}. Цель: «{' '.join(why.split())[:150]}»")
+    if rc == 0:
+        _save("mandates", name, {"task": task, "site": site, "actions": acts, "from": P.now(),
+                                 "until": P.now() + MANDATE_TTL, "by": "Touch ID", "window": win, "why": why})
+        return "done", (f"поручение на {site} ({', '.join(acts)}) по {task} — по Touch ID, до "
+                        f"{P.stamp(P.now() + MANDATE_TTL)}"), ""
+    if rc == 1:
+        raise Refuse(f"поручения нет: {what} — не повторяй без нового слова владельца")
+    raise Refuse(f"поручения нет ({what}). Попроси Зевса спросить окном вопросов: «{mandate_question(task, site, acts, why)}»"
+                 " с вариантами «Да — разрешить» / «Нет»; после «да» повтори allow")
+
+
+def ask_head(kind, task, key, code, count=0):
+    what = {"ordinary": "Отправить форму на", "delete": "Удалить на",
+            "delete-batch": f"Удалить пачку{f' ({count})' if count else ''} на"}[kind]
+    return f"[{task}] {what} {key[:150]}? Код {code}."
+
+
+def ask_question(rec):
+    return f"{rec['head']} Кнопка «{rec['label'][:60]}». Поля: «{rec['summary']}»"
+
+
+def approve(b, win, task, sel, facts, kind):
+    """Согласие на одну отправку или удаление (C3–C6, C10, C11, T1–T3) → (как, время). Сначала «да» на вопрос с кодом
+    этой отправки (код выдан раньше, сайт, путь, селектор, вид и отпечаток формы те же, не использован; ответ после
+    выдачи кода); код помечается использованным. Иначе (кроме пачки) — Touch ID. Иначе — код и отказ с вопросом."""
+    key, dig = url_key(facts["url"]), form_digest(facts)
+    _, btn = target_of(facts)
+    label = " ".join(str(btn.get("label") or "").split())[:60]
+    _prune("asks", 2 * ASK_TTL)
+    mine = [(n, r) for n, r in _load_all("asks") if r.get("task") == task and r.get("browser") == b
+            and r.get("key") == key and r.get("selector") == sel and r.get("kind") == kind and not r.get("used")
+            and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
+    stale = False
+    for name, rec in sorted(mine, key=lambda x: -x[1]["issued"]):
+        t = owner_yes(task, lambda q, h=rec["head"]: q.startswith(h))
+        if t is None or t + 1 < rec["issued"]:
+            continue
+        if rec.get("digest") != dig:
+            stale = True                              # C5, C11: форма не та, что в момент вопроса
+            continue
+        rec["used"] = P.now()                         # C6: одно «да» — одна отправка; до нажатия
+        _save("asks", name, rec)
+        return "да", t
+    if kind != "delete-batch":
+        what = {"ordinary": "отправить форму", "delete": "удалить элемент"}[kind]
+        rc, why = touch(f"Харон ({win or 'ваша сессия'}), задача {task}: {what} на {key[:100]}. Кнопка «{label[:40]}». "
+                        f"Поля: «{form_summary(facts, 200)}»")
+        if rc == 0:
+            return "Touch ID", P.now()
+        if rc == 1:
+            raise Refuse(f"{why} — {what} не сделано; не повторяй без нового слова владельца")
+    else:
+        why = "удаление пачки — только «да» владельца, Touch ID не действует"
+    same = next((r for _, r in mine if r.get("digest") == dig), None)
+    if same is None:
+        code = secrets.token_hex(3)
+        count = sum(1 for f in facts.get("fields") or [] if isinstance(f, dict) and f.get("type") == "checkbox"
+                    and f.get("checked")) if kind == "delete-batch" else 0
+        same = {"code": code, "task": task, "browser": b, "window": win, "key": key, "selector": sel, "kind": kind,
+                "digest": dig, "issued": P.now(), "used": None, "label": label,
+                "summary": form_summary(facts), "head": ask_head(kind, task, key, code, count if count >= 2 else 0)}
+        _save("asks", code + ".json", same)
+    raise Refuse(("форма изменилась после вопроса — прежнее «да» не действует. " if stale else "")
+                 + f"согласия нет ({why}). Попроси Зевса спросить окном вопросов: «{ask_question(same)}» с вариантами "
+                 f"«Да — {'отправить' if kind == 'ordinary' else 'удалить'}» / «Нет»; после «да» повтори ту же команду, "
+                 "форму не меняй")
+
+
+def cmd(browser, method, params, win=None):
+    """/cmd демона — только CMD_ALLOWED (нажатие мышью и ввод текста)."""
+    if method not in CMD_ALLOWED:
+        raise Fail(f"/cmd {method} — не из CMD_ALLOWED")
+    out = call(browser, "/cmd", with_session({"method": method, "params": params, "target": "work"}, win))
+    if isinstance(out, dict) and out.get("error"):
+        raise Fail(f"{method}: {str(out['error'])[:300]}")
+    return out
+
+
+def page_facts(b, sel, win, focus=False):
+    facts = evaluate(b, facts_js(sel, focus), win)
+    if not isinstance(facts, dict):
+        raise Refuse(f"элемента {sel} на странице нет")
+    if not facts.get("w") or not facts.get("h"):
+        raise Refuse(f"элемент {sel} не виден (нулевой размер)")
+    if not isinstance(facts.get("url"), str):
+        raise Refuse("страница не сказала свой адрес — действие не сделано")
+    return facts
+
+
+def point_ok(b, sel, facts, win):
+    """K4: перед нажатием рамка цели та же (сдвиг не больше 1 px), точка внутри неё, адрес тот же."""
+    pt = evaluate(b, point_js(sel, facts["x"], facts["y"]), win)
+    if not isinstance(pt, dict) or pt.get("hit") is not True:
+        raise Refuse(f"{sel}: точку нажатия закрыл другой элемент — нажатия нет")
+    if abs(float(pt.get("x") or 0) - facts["x"]) > 1 or abs(float(pt.get("y") or 0) - facts["y"]) > 1:
+        raise Refuse(f"{sel}: элемент сдвинулся после замера (прокрутка, анимация) — нажатия нет")
+    if pt.get("url") != facts["url"]:
+        raise Refuse(f"{sel}: страница сменилась после замера — нажатия нет")
+
+
+def mouse_click(b, x, y, win):
+    for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
+        params = {"type": kind, "x": x, "y": y}
+        if kind != "mouseMoved":
+            params.update({"button": "left", "clickCount": 1})
+        cmd(b, "Input.dispatchMouseEvent", params, win)
+
+
+def after_click(b, domains, task, win):
+    """Куда привело нажатие: чужой сайт — about:blank и отказ (A7)."""
+    time.sleep(1)
+    url = here_url(b, win)
+    page_check(b, url, domains, task, "нажатие увело на", win)
+    return url
+
+
+def do_act(req, win, domains):
+    """click, type, submit, delete во вкладке окна: поручение, вид формы, затем по своим правилам."""
+    op, b, task, sel = req["op"], req["browser"], req["task"], req["selector"]
+    ensure_daemon(b, f"Харон ({win or 'ваша сессия'}): {op} по задаче {task}")
+    host = page_check(b, here_url(b, win), domains, task, "во вкладке", win)
+    site = site_word(host)
+    if not mandate_for(task, host, op):
+        raise Refuse(f"{op}: поручения на {site} с действием «{ACT_WORDS[op]}» по задаче {task} нет — сначала "
+                     f"pantheon browser allow {site} {op} --task {task} --why «цель» (одно разрешение на поручение)")
+    seen_notice(win, op, host, task)
+    facts = page_facts(b, sel, win, focus=(op == "type"))
+    fhost = page_check(b, facts["url"], domains, task, "при замере страница на", win)
+    if site_word(fhost) != site:
+        raise Refuse(f"{op}: страница ушла с {site} на {site_word(fhost)} — действия нет")
+    cls, why = classify(facts, op)
+    if cls == "pay":
+        raise Refuse(f"{op} {sel}: оплата ({why}) — только владелец руками; «да» и Touch ID её не разрешают")
+    if cls == "important":
+        raise Refuse(f"{op} {sel}: важная форма ({why}) — только владелец сам; «да» и Touch ID её не разрешают")
+    if op == "type":
+        el = facts.get("el") or {}
+        tag, typ, role = el.get("tag"), el.get("type") or "", el.get("role") or ""
+        if not ((tag == "input" and typ in TEXT_TYPES and role in ("", "textbox", "searchbox", "combobox"))
+                or (tag == "textarea" and role in ("", "textbox"))):
+            raise Refuse(f"type {sel}: «{desc(el)}» — не текстовое поле или textarea; ввод не сделан")
+        if tag == "input" and re.search(r"[\r\n]", req["text"]):
+            raise Refuse(f"type {sel}: перевод строки в поле input отправил бы форму — ввод не сделан")
+        if facts.get("focused") is not True:
+            raise Refuse(f"поле {sel} не принимает фокус — ввод не сделан")
+        cmd(b, "Input.insertText", {"text": req["text"]}, win)
+        return "done", f"введено в {sel} на {site}: {len(req['text'])} знаков", ""
+    if facts.get("hit") is not True:
+        raise Refuse(f"{op} {sel}: точку нажатия закрыл другой элемент — нажатия нет")
+    if op == "click":
+        kind, why = click_kind(facts, host)
+        if why:
+            raise Refuse(f"click {sel}: {why} (pantheon browser submit — с согласием владельца на каждую отправку)")
+        point_ok(b, sel, facts, win)
+        mouse_click(b, facts["x"], facts["y"], win)
+        return "done", f"нажато {sel} ({kind}) на {site}; теперь {after_click(b, domains, task, win)}", ""
+    kind = cls if cls.startswith("delete") else "ordinary"
+    action = (facts.get("form") or {}).get("action") if isinstance(facts.get("form"), dict) else None
+    if action is not None:                        # C13: форма уходит на другой сайт — не по этому поручению
+        try:
+            to = site_word(url_host(action))
+        except Refuse:
+            raise Refuse(f"{op} {sel}: адрес отправки формы не проверить ({str(action)[:120]}) — отправки нет")
+        if to != site:
+            raise Refuse(f"{op} {sel}: форма уходит на {to}, а поручение на {site} — отправки нет")
+    need = "delete" if kind.startswith("delete") else "submit"
+    if need != op and not mandate_for(task, host, need):
+        raise Refuse(f"{op} {sel}: это {'удаление' if need == 'delete' else 'отправка формы'} ({why}), а в поручении на "
+                     f"{site} «{ACT_WORDS[need]}» нет — pantheon browser allow {site} {need} --task {task}")
+    how, t = approve(b, win, task, sel, facts, kind)
+    if how == "Touch ID":                         # T2: пока окно ждало пальца, страница могла смениться
+        again = page_facts(b, sel, win)
+        if url_key(again["url"]) != url_key(facts["url"]) or form_digest(again) != form_digest(facts):
+            raise Refuse(f"{op} {sel}: страница или форма изменились, пока ждало окно Touch ID — нажатия нет")
+        facts = again
+    point_ok(b, sel, facts, win)
+    mouse_click(b, facts["x"], facts["y"], win)
+    what = "удалено" if kind.startswith("delete") else "отправлено"
+    return "done", (f"{what} ({sel}) на {site} по {'«да» владельца ' + P.stamp(t) if how == 'да' else 'Touch ID'}; "
+                    f"теперь {after_click(b, domains, task, win)}"), ""
+
+
 # --- выполнение заявки --------------------------------------------------------------------------------------------
 
 def check_req(req):
     """Поля заявки: типы и длины; Refuse — неверная заявка."""
-    if isinstance(req, dict) and req.get("op") in MOVED:
-        raise Refuse(f"{req['op']}: {MOVED_WHY}")
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("op") not in OPS:
         raise Refuse("заявка не того вида")
     if req.get("browser") not in BROWSERS:
@@ -804,6 +1365,16 @@ def check_req(req):
         raise Refuse("open: нужен адрес")
     if op in ("read", "eval") and not (req.get("url") or req.get("here")):
         raise Refuse(f"{op}: нужен адрес или --here")
+    if op in ACTS + ("allow",) and not task:
+        raise Refuse(f"{op}: нужен --task ID — действия только по поручению на задачу")
+    if op == "allow" and not (req.get("site") and req.get("actions") and req.get("why")):
+        raise Refuse("allow: нужны САЙТ, ДЕЙСТВИЯ (click,type,submit,delete) и --why «цель поручения»")
+    if op == "allow":
+        parse_actions(req["actions"])
+    if op in ACTS and not req.get("selector"):
+        raise Refuse(f"{op}: нужен селектор")
+    if op == "type" and not isinstance(req.get("text"), str):
+        raise Refuse("type: нужен текст")
 
 
 def execute(req, win, domains, eval_on=True):
@@ -820,9 +1391,14 @@ def execute(req, win, domains, eval_on=True):
         tok = os.path.isfile(token_path())
         return "done", (f"{b}: демон отвечает, браузер {'подключён' if st.get('connected') else 'НЕ подключён'}; "
                         f"пароль демона у прохода {'есть' if tok else 'НЕТ'}"), ""
+    if op == "allow":
+        return do_allow(req, win, domains)
+    if op in ACTS:
+        return do_act(req, win, domains)
     bad = eval_bad(req["expr"]) if op == "eval" else None
     if bad:
-        raise Refuse(f"eval: {bad} — только чтение страницы; нажатия, ввод и отправка — metis-0765")
+        raise Refuse(f"eval: {bad} — только чтение страницы; нажатия, ввод и отправка — click, type, submit, delete "
+                     "по поручению (allow)")
     url = req.get("url")
     host = None
     if url:
@@ -980,16 +1556,21 @@ USAGE = """pantheon browser health|open|read|eval|status [--browser comet|chrome
   open URL                       открыть адрес (сайты reads.toml или «да» владельца по --task)
   read URL | read --here          текст и ссылки страницы
   eval URL EXPR | eval --here EXPR   выражение JS без побочных действий
+  allow САЙТ ДЕЙСТВИЯ --task ID --why Т   поручение на сайт: click,type,submit,delete (одно «да» или Touch ID)
+  click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта
+  type СЕЛЕКТОР ТЕКСТ --task ID  ввод в текстовое поле
+  submit СЕЛЕКТОР --task ID      отправка формы: Touch ID или «да» на каждую
+  delete СЕЛЕКТОР --task ID      удаление: один элемент — Touch ID или «да», пачка — только «да»
   status [ID]                    итог заявки
-  click, type, submit            вынесено в metis-0765 (нажатия, ввод, отправка формы) — отказ, код 2"""
+  Оплата и важные формы (вход, пароль, договор, торги, перевод) — только владелец сам: отказ всегда"""
 
 
 def parse(args):
     """argv → заявка (dict) и wait; ValueError — неверный вызов."""
-    opts, pos, i = {"browser": "comet", "wait": WAIT_DEFAULT, "task": None, "here": False}, [], 0
+    opts, pos, i = {"browser": "comet", "wait": None, "task": None, "here": False, "why": None}, [], 0
     while i < len(args):
         a = args[i]
-        if a in ("--browser", "--wait", "--task"):
+        if a in ("--browser", "--wait", "--task", "--why"):
             if i + 1 >= len(args):
                 raise ValueError(f"{a}: нет значения")
             opts[a[2:]] = args[i + 1]
@@ -1000,11 +1581,11 @@ def parse(args):
         else:
             pos.append(a)
         i += 1
-    if pos and pos[0] in MOVED:
-        raise ValueError(f"{pos[0]}: {MOVED_WHY}")
     if not pos or pos[0] not in OPS:
         raise ValueError("нет действия")
     op, rest = pos[0], pos[1:]
+    if opts["wait"] is None:
+        opts["wait"] = WAIT_ACT if op in ("allow", "submit", "delete") else WAIT_DEFAULT
     try:
         wait = int(opts["wait"])
     except ValueError:
@@ -1012,8 +1593,11 @@ def parse(args):
     if not 0 <= wait <= WAIT_MAX:
         raise ValueError(f"--wait — от 0 до {WAIT_MAX}")
     req = {"v": 1, "op": op, "browser": opts["browser"], "task": opts["task"], "here": opts["here"]}
+    if opts["why"] is not None:
+        req["why"] = opts["why"]
     need = {"health": [], "open": ["url"], "read": [] if opts["here"] else ["url"],
-            "eval": ["expr"] if opts["here"] else ["url", "expr"]}[op]
+            "eval": ["expr"] if opts["here"] else ["url", "expr"], "allow": ["site", "actions"],
+            "click": ["selector"], "type": ["selector", "text"], "submit": ["selector"], "delete": ["selector"]}[op]
     if len(rest) != len(need):
         raise ValueError(f"{op}: ждём {' '.join(n.upper() for n in need) or 'без аргументов'}")
     req.update(zip(need, rest))
