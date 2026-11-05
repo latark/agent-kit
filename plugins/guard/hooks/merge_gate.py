@@ -2197,6 +2197,147 @@ def accepted_push_problem(d, remote, pairs):
     return None
 
 
+# metis-0863: PR продукта из одних тестов — talos не нужен (живого приложения он не меняет), тесты и argus остаются.
+# Шаблоны — только из ~/.claude/pantheon/policy.toml, раздел [merge_test_only."owner/repo"]: tests — шаблоны тестовых
+# файлов, build — пути сборки (необязательно); из head PR правило ничего не читает. Раздела нет — правило выключено.
+# Строго (модель угроз — README guard): каждый файл PR по шаблону tests (регистр учитывается), не в build и не из
+# TEST_ONLY_NEVER (конфиги раннера, package.json, tsconfig, CI и точечные файлы, снапшоты, фикстуры); status
+# added/modified без previous_filename; режим на head 100644/100755 (git diff --raw от merge-base: симлинк и подмодуль —
+# talos); ни один файл вне шаблона на head не упоминает имя теста (git grep — импорт из прод-кода); base PR — ветка по
+# умолчанию; список файлов полон и head PR — сливаемый SHA (_core_problem). Любой сбой gh или git — talos нужен.
+TEST_ONLY_MODES = (b"100644", b"100755")
+TEST_ONLY_NEVER_DIRS = ("__snapshots__", "__fixtures__", "fixtures", "__mocks__")
+TEST_ONLY_NEVER_NAMES = ("package.json", "package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock",
+                         "bun.lockb", "jsconfig.json", "deno.json", "makefile", "dockerfile", "pyproject.toml",
+                         "conftest.py", "pytest.ini", "tox.ini", "setup.cfg")
+TEST_ONLY_NEVER_RE = re.compile(r"tsconfig.*\.json|.*\.config\.[^/]*|.*\.setup\.[^/]*|setuptests\.[^/]*|.*\.snap")
+
+
+def _glob_re(pat):
+    """Шаблон пути → регулярка: ** — любые папки, * и ? — внутри одной части пути; регистр учитывается."""
+    out, i = [], 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pat.startswith("**", i):
+            out.append(".*")
+            i += 2
+        else:
+            out.append({"*": "[^/]*", "?": "[^/]"}.get(pat[i], re.escape(pat[i])))
+            i += 1
+    return re.compile("".join(out))
+
+
+def _test_only_rules(policy, repo):
+    """[merge_test_only."owner/repo"] policy.toml → (шаблоны tests, шаблоны build) или None: раздела нет или он кривой."""
+    sect = policy.get("merge_test_only") if isinstance(policy, dict) else None
+    if not isinstance(sect, dict):
+        return None
+    got = [v for k, v in sect.items() if isinstance(k, str) and k.strip().lower() == repo]
+    if len(got) != 1 or not isinstance(got[0], dict):
+        return None
+    tests, build = _str_list(got[0].get("tests")), got[0].get("build", [])
+    if tests is None or (build != [] and _str_list(build) is None):
+        return None
+    return [_glob_re(t.strip()) for t in tests], [_glob_re(b.strip().rstrip("/")) for b in build]
+
+
+def _test_path_ok(path, tests, build):
+    """Путь PR — тестовый файл: по шаблону tests, не в пути сборки и не конфиг, снапшот, фикстура, точечный файл."""
+    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path:
+        return False
+    parts = path.split("/")
+    low = [p.casefold() for p in parts]
+    if any(p in ("", ".", "..") or p.startswith(".") or p in TEST_ONLY_NEVER_DIRS for p in low):
+        return False
+    if low[-1] in TEST_ONLY_NEVER_NAMES or TEST_ONLY_NEVER_RE.fullmatch(low[-1]):
+        return False
+    if any(b.fullmatch("/".join(parts[:i])) for b in build for i in range(1, len(parts) + 1)):
+        return False
+    return any(t.fullmatch(path) for t in tests)
+
+
+def _git_grep_files(gd, sha, words):
+    """Файлы коммита sha, где есть хоть одно из слов (git grep -F, регистр учитывается) → список; None — сбой."""
+    args = [a for w in words for a in ("-e", w)]
+    try:
+        r = subprocess.run(["git", "-C", gd, "--git-dir=" + gd, "--no-replace-objects", "grep", "-l", "-z", "-F", "-I",
+                            *args, sha, "--"], capture_output=True, timeout=3,
+                           env=dict(_git_env(), GIT_NO_REPLACE_OBJECTS="1"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 1 and not r.stdout:
+        return []
+    if r.returncode != 0:
+        return None
+    pre = (sha + ":").encode()
+    out = [x for x in r.stdout.split(b"\0") if x]
+    if not all(x.startswith(pre) for x in out):
+        return None
+    return [x[len(pre):].decode("utf-8", "replace") for x in out]
+
+
+def _test_only(policy, repo, pr, sha, pr_view, pr_files, cwd):
+    """metis-0863: None — PR только из тестовых файлов по [merge_test_only], talos не нужен; иначе — почему нужен."""
+    rules = _test_only_rules(policy, repo)
+    if rules is None:
+        return f"раздела [merge_test_only.\"{repo}\"] с непустым tests в policy.toml нет"
+    tests, build = rules
+    view = pr_view()
+    if view is None:
+        return "gh pr view не ответил"
+    files = pr_files()
+    why = _core_problem(repo, pr, sha, view, files, cwd)
+    if why:
+        return why
+    for f in files:
+        name = f.get("filename")
+        if f.get("status") not in ("added", "modified") or f.get("previous_filename") is not None:
+            return f"{name} — {f.get('status')}: годятся только добавленные и изменённые файлы без переименования"
+        if not _test_path_ok(name, tests, build):
+            return f"{name} — не тестовый файл по шаблонам tests, в пути сборки или конфиг, снапшот, фикстура"
+    if not _gh_fits():
+        return "ветку по умолчанию не успеть спросить у gh до срока хука"
+    got = _gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
+    ref = got[0].get("defaultBranchRef") if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) \
+        else None
+    default = ref.get("name") if isinstance(ref, dict) else None
+    if not isinstance(default, str) or not default or view.get("baseRefName") != default:
+        return f"base PR ({view.get('baseRefName')}) — не ветка по умолчанию ({default}) или gh её не дал"
+    gd, why = _carry_git(cwd, repo, view.get("baseRefOid"))
+    if gd is None:
+        return why
+    mbs = _git_bytes(gd, "merge-base", "--all", str(view.get("baseRefOid")).lower(), sha)
+    mbs = mbs.split() if mbs is not None else []
+    if len(mbs) != 1:
+        return f"у {sha[:12]} и base PR нет единственной merge-base в git папки (сделай git fetch)"
+    raw = _git_bytes(gd, "diff", "--raw", "--no-renames", "--no-abbrev", "-z", mbs[0].decode("ascii", "replace"), sha)
+    items = raw.split(b"\0") if raw is not None else None
+    if not items or items[-1] != b"" or len(items) % 2 != 1:
+        return "git diff --raw не ответил"
+    modes = {}
+    for meta, path in zip(items[0:-1:2], items[1:-1:2]):
+        bits = meta.split()
+        if not meta.startswith(b":") or len(bits) < 5:
+            return "git diff --raw не разобрать"
+        modes[path.decode("utf-8", "replace")] = bits[1]
+    if set(modes) != {f.get("filename") for f in files}:
+        return "файлы git diff от merge-base не совпали с файлами PR"
+    odd = sorted(p for p, m in modes.items() if m not in TEST_ONLY_MODES)
+    if odd:
+        return f"{odd[0]} на head — не обычный файл (режим {modes[odd[0]].decode('ascii', 'replace')}: симлинк, " \
+               "подмодуль или удалён)"
+    stems = sorted({posixpath.basename(p).rsplit(".", 1)[0] for p in modes})
+    users = _git_grep_files(gd, sha, stems)
+    if users is None:
+        return "git grep по именам тестов не ответил"
+    used = sorted(p for p in users if not any(t.fullmatch(p) for t in tests))
+    if used:
+        return f"{used[0]} (не тест) упоминает тестовый файл — импорт из кода продукта"
+    return None
+
+
 def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=None):
     """Запор (P1-4): то, что проверено, — ровно то, что сливается. Текст отказа, None или Allow — пропуск с
     предупреждениями CI (metis-0650)."""
@@ -2311,9 +2452,12 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"рецензентов {repo}#{pr}@{sha[:12]} — и сливающий. {advice}")
     if advice == MERGE_PRODUCT:
         if not any(mine(r, ("talos",), "talos") for r in records):
-            return (f"продукт — нет проверки talos на {repo}#{pr}@{sha[:12]}: позови talos, он проверит живое "
-                    f"приложение и запишет `pantheon review talos {repo} {pr} {sha}` (talos не переносится "
-                    f"с прошлого head). {advice}")
+            only = _test_only(policy, repo, pr, sha, pr_view, pr_files, cwd)
+            if only is not None:
+                return (f"продукт — нет проверки talos на {repo}#{pr}@{sha[:12]}: позови talos, он проверит живое "
+                        f"приложение и запишет `pantheon review talos {repo} {pr} {sha}` (talos не переносится "
+                        f"с прошлого head). Без talos — только PR из одних тестов по [merge_test_only] policy.toml "
+                        f"(metis-0863), а здесь: {only}. {advice}")
         if not _alert_ok(repo, pr):
             return (f"продукт — нет строки «что ушло» в ~/ai/pantheon/alerts.md со ссылкой {repo}#{pr} и словом "
                     f"«откат»: `pantheon alert \"{repo}#{pr}: что ушло; откат: <команда>\"`. {advice}")

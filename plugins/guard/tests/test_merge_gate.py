@@ -124,6 +124,7 @@ class Home:
         # pr view N -R owner/repo … — $HOME/gh.view.<repo> ($5), с gh.ci.fail — сбой; один вызов на шлюз (metis-0297).
         # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
         # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой, с gh.api.fail1 — сбой один раз (файл убирается)
+        # repo view owner/<repo> --json defaultBranchRef — $HOME/gh.repo.<repo> (metis-0863), нет файла — сбой
         # api repos/o/<repo>/git/ref/heads/<ветка> — $HOME/gh.ref.<repo> (вершина base, metis-0404 Б1), нет файла — сбой
         # api repos/o/<repo>/actions/runs?head_sha=… и …/commits/<sha>/check-runs — $HOME/gh.runs.<repo> и
         # gh.checkruns.<repo> (rest_runs по rollup, metis-0633), нет файла — сбой
@@ -136,6 +137,7 @@ class Home:
                      '[ -f "$HOME/gh.wf.fail.$ref" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }; '
                      '[ -f "$HOME/gh.wf.$ref" ] && { cat "$HOME/gh.wf.$ref"; exit 0; }; '
                      'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
+                     '"repo view "*) r="$HOME/gh.repo.$(basename "$3")"; [ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
                      '*/git/ref/heads/*) r="$HOME/gh.ref.$(basename "${2%%/git/ref/*}")"; '
                      '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
                      '*/actions/jobs/*) r="$HOME/gh.jobs.$(basename "$2")"; [ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
@@ -164,7 +166,7 @@ class Home:
         shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
             if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.ref.",
-                             "gh.runs.", "gh.checkruns.", "gh.notes.", "gh.jobs.")):
+                             "gh.runs.", "gh.checkruns.", "gh.notes.", "gh.jobs.", "gh.repo.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
         self.runs = {}  # ответы REST запусков Actions (имя → (runs, check-runs) или "fail"); без записи — rest_runs
@@ -4925,6 +4927,142 @@ def t_owner_api_merge(h):
                h.pre("gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", role=None, pdir="projects/tg-read"), True)
 
 
+def _tree_commit(p, parent, changes):
+    """Коммит от parent без рабочего дерева (ветка и HEAD папки не двигаются): changes — путь → текст,
+    (режим, текст) или None (удалить)."""
+    idx = os.path.join(p, ".git", "index-0863")
+    env = dict(os.environ, GIT_INDEX_FILE=idx)
+
+    def g(*a, inp=None):
+        return subprocess.run(["git", "-C", p, "-c", "user.name=t", "-c", "user.email=t@example.com", *a], input=inp,
+                              capture_output=True, text=True, env=env, check=True).stdout.strip()
+
+    g("read-tree", parent)
+    for path, val in changes.items():
+        if val is None:
+            g("update-index", "--force-remove", path)
+            continue
+        mode, text = val if isinstance(val, tuple) else ("100644", val)
+        g("update-index", "--add", "--cacheinfo", f"{mode},{g('hash-object', '-w', '--stdin', inp=text)},{path}")
+    tree = g("write-tree")
+    os.remove(idx)
+    return g("commit-tree", tree, "-p", parent, "-m", "c")
+
+
+TEST_ONLY_SECTION = ('\n[merge_test_only."latark/broker"]\ntests = ["**/*.check.ts", "tests/**"]\n'
+                     'build = ["dist"]\n')
+
+
+def t_test_only(h):
+    """metis-0863: PR продукта из одних тестов по [merge_test_only] policy.toml — без talos; иначе talos нужен."""
+    p, pol = h.j("projects/broker"), h.j(".claude/pantheon/policy.toml")
+    with open(pol) as fh:
+        orig = fh.read()
+    b0 = _tree_commit(p, h.sha["broker"], {"src/app.ts": "export const x = 1\n", "src/a.check.ts": "t1\n",
+                                           "src/b.check.ts": "t\n"})
+    b_imp = _tree_commit(p, b0, {"src/app.ts": "import { y } from './c.check'\n"})
+
+    def case(name, changes, rest, allow, why="", base=None, section=True, count=None, head=None, base_ref="main",
+             default="main", fail=None):
+        with open(pol, "w") as fh:
+            fh.write(orig + (TEST_ONLY_SECTION if section else ""))
+        h.reset()
+        sha = _tree_commit(p, base or b0, changes)
+        h.ci(GREEN, name="broker", head=head or sha, baseRefOid=base or b0, baseRefName=base_ref,
+             changedFiles=len(rest) if count is None else count)
+        with open(h.j("gh.files"), "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in rest))
+        if default is not None:
+            with open(h.j("gh.repo.broker"), "w") as fh:
+                json.dump({"defaultBranchRef": {"name": default}}, fh)
+        if fail:
+            open(h.j(fail), "w").close()
+        h.seed(rec("tests", "latark/broker", None, sha, "dev-opus"), rec("accept", "latark/broker", 5, sha))
+        h.alert("2026-10-15 20:01 · athena-shop · latark/broker#5 ушло: тест; откат: git revert abc")
+        got = h.pre(f"gh pr merge 5 --match-head-commit {sha}", pdir="projects/broker")
+        if allow:
+            merge_case(name, got, True)
+        else:
+            merge_case(name, got, False, "нет проверки talos")
+            check(name + " — причина", why in got[1], got[1])
+
+    def mod(path):
+        return {"filename": path, "status": "modified"}
+
+    def add(path):
+        return {"filename": path, "status": "added"}
+
+    try:
+        case("только a.check.ts, раздел есть — без talos", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], True)
+        case("новый тест и tests/** — без talos", {"src/c.check.ts": "t\n", "tests/e2e/flow.ts": "t\n"},
+             [add("src/c.check.ts"), add("tests/e2e/flow.ts")], True)
+        case("раздела нет — talos нужен", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], False, "раздела",
+             section=False)
+        case("переименование теста — talos нужен", {"src/a.check.ts": None, "src/z.check.ts": "t1\n"},
+             [{"filename": "src/z.check.ts", "status": "renamed", "previous_filename": "src/a.check.ts"}], False,
+             "renamed")
+        case("REST: removed (git — правка) — talos нужен", {"src/a.check.ts": "t2\n"},
+             [{"filename": "src/a.check.ts", "status": "removed"}], False, "removed")
+        case("тест удалён — talos нужен", {"src/b.check.ts": None}, [{"filename": "src/b.check.ts", "status": "removed"}],
+             False, "removed")
+        case("симлинк под шаблоном — talos нужен", {"src/a.check.ts": ("120000", "app.ts")}, [mod("src/a.check.ts")],
+             False, "режим 120000")
+        case("подмодуль под шаблоном — talos нужен", {"src/s.check.ts": ("160000", "")}, [add("src/s.check.ts")],
+             False, "режим 160000")
+        case("файл в пути сборки — talos нужен", {"dist/x.check.ts": "t\n"}, [add("dist/x.check.ts")], False,
+             "пути сборки")
+        case("код продукта импортирует тест — talos нужен", {"src/c.check.ts": "export const y = 2\n"},
+             [add("src/c.check.ts")], False, "src/app.ts (не тест)", base=b_imp)
+        case("конфиг раннера под шаблоном — talos нужен", {"tests/vitest.config.ts": "x\n"},
+             [add("tests/vitest.config.ts")], False, "конфиг")
+        case("package.json под шаблоном — talos нужен", {"tests/package.json": "{}\n"}, [add("tests/package.json")],
+             False, "конфиг")
+        case("снапшот — talos нужен", {"tests/__snapshots__/a.check.ts.snap": "x\n"},
+             [add("tests/__snapshots__/a.check.ts.snap")], False, "снапшот")
+        case("фикстура — talos нужен", {"tests/fixtures/data.json": "{}\n"}, [add("tests/fixtures/data.json")], False,
+             "фикстура")
+        case("CI под шаблоном — talos нужен", {"tests/.github/workflows/x.yml": "x\n"},
+             [add("tests/.github/workflows/x.yml")], False, "конфиг")
+        case("код продукта в PR — talos нужен", {"src/a.check.ts": "t2\n", "src/app.ts": "y\n"},
+             [mod("src/a.check.ts"), mod("src/app.ts")], False, "src/app.ts — не тестовый")
+        case("регистр учитывается — talos нужен", {"src/A.CHECK.TS": "t\n"}, [add("src/A.CHECK.TS")], False,
+             "не тестовый")
+        case("PR добавил файл шаблонов — talos нужен", {"src/a.check.ts": "t2\n", ".pantheon/test-only.toml":
+                                                         TEST_ONLY_SECTION}, [mod("src/a.check.ts"),
+                                                                              add(".pantheon/test-only.toml")],
+             False, "раздела", section=False)
+        case("неполный список файлов — talos нужен", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], False,
+             "неполон", count=2)
+        case("REST не совпал с git — talos нужен", {"src/a.check.ts": "t2\n", "src/app.ts": "y\n"},
+             [mod("src/a.check.ts")], False, "не совпали")
+        case("head PR ≠ sha — talos нужен", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], False,
+             "другом коммите", head=b0)
+        case("base не ветка по умолчанию — talos нужен", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], False,
+             "не ветка по умолчанию", default="trunk")
+        case("сбой gh repo view — talos нужен", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], False,
+             "не ветка по умолчанию", default=None)
+        case("сбой gh api файлов — talos нужен", {"src/a.check.ts": "t2\n"}, [mod("src/a.check.ts")], False,
+             "не получен", fail="gh.api.fail")
+        # сбой git grep (поиск импорта) — talos нужен: в процессе, подменой одного вызова
+        mg = _load_merge_gate("merge_gate_test_only")
+        sha = _tree_commit(p, b0, {"src/a.check.ts": "t3\n"})
+        view = {"headRefOid": sha, "baseRefOid": b0, "baseRefName": "main", "changedFiles": 1}
+        mg._gh_json = lambda args: [{"defaultBranchRef": {"name": "main"}}]
+        rules = {"merge_test_only": {"latark/broker": {"tests": ["**/*.check.ts"]}}}
+
+        def run():
+            return mg._test_only(rules, "latark/broker", 5, sha, lambda: view, lambda: [mod("src/a.check.ts")], p)
+
+        check("в процессе: только тест — talos не нужен", run() is None, run())
+        grep = mg._git_grep_files
+        check("git grep несуществующего коммита — сбой (None)", grep(os.path.join(p, ".git"), "0" * 40, ["x"]) is None)
+        mg._git_grep_files = lambda *a: None
+        check("сбой git grep — talos нужен", "git grep" in (run() or ""), run())
+    finally:
+        with open(pol, "w") as fh:
+            fh.write(orig)
+
+
 CASES = [t_test_floors, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_review_format, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
@@ -4933,7 +5071,7 @@ CASES = [t_test_floors, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify,
          t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
+         t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox, t_test_only]
 
 # случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;
 # вне ядра те же записи проходят — это проверяют отдельные места в самих случаях (h.core = False; h.reset())

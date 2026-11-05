@@ -48,6 +48,12 @@ themis-library = ["~/projects/lecture-notes", "~/projects/law-feed"]
 athena-shop = ["~/projects/shopKeeperApp"]
 hermes-site = ["~/projects/sitebuilder"]
 
+# PR продукта только из тестов сливается без talos (metis-0863): репозиторий → шаблоны тестов (регистр учитывается)
+# и пути сборки. Раздела нет — talos нужен всегда. Условия и что остаётся вне правила — README guard, шлюз слияния п. 6.
+# [merge_test_only."owner/shopKeeperApp"]
+# tests = ["**/*.check.ts", "tests/**"]
+# build = ["dist"]
+
 # Репозитории, которые направление сливает (owner/repo на github.com) — и свои, и чужие через -R / --repo.
 # С guard 0.5.4 строка нужна каждому сливающему направлению: без неё шлюз слияния закрывает слияние и без -R.
 # Пример: сессия направления стоит в law-feed, а сливает и PR lecture-notes. -R на репозиторий защит — это
