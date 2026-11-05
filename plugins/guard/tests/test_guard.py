@@ -1644,7 +1644,11 @@ def main():
             ("protect-config: a//.claude/settings…", 'echo x > "a//.claude/settings$(date +%s).json"'),
             ("protect-config: a/./.claude/hooks/…", 'echo x > "a/./.claude/hooks/$(date +%s)"'),
             ("protect-config: .claude//settings — повторный слеш", 'echo x > "a/.claude//settings$(date +%s).json"'),
-            ("protect-config: слово настроек в последней части", 'echo x > "out/$(date +%s).mcp.json"'))],
+            ("protect-config: слово настроек в последней части", 'echo x > "out/$(date +%s).mcp.json"'),
+            # четвёртая проверка: шаблон в литеральной части, зона в слове цели
+            ("шаблон .cl*de в литеральной части", "echo x > .cl*de/hooks-$(date +%s)"),
+            ("шаблон [.]claude в литеральной части", "echo x > [.]claude/settings$(date +%s).json"),
+            ("зона в слове цели внутри $TMPDIR", 'echo x > "$TMPDIR/ai/pantheon/b-$(date +%s).md"'))],
         # корень репозитория, равный зоне или над ней, — не «своя worktree»: ~/.claude сам репозиторий
         ("0823 неразобранная цель: корень-зона ~/.claude — отказ", "deny", ".claude", "dev-sonnet", True,
          B('for f in $(ls); do echo x > "skills/$f.md"; done')),

@@ -1521,16 +1521,17 @@ class _Unres(str):
     """UNRESOLVED с папкой, куда идёт неразобранная цель (metis-0823). Подстановка — только в последней части пути:
     `"$TMPDIR/$f.log"` пишет в $TMPDIR, `out/file-$(date).txt` — в <папка>/out. base None — папку не вычислить:
     слово начинается с подстановки (`"$f.bak"`, `"$R/x"`), после подстановки есть «/» (`out/$(x)/../../.claude`,
-    `out/$(x)//.git/hooks`) или папка команды неизвестна. text — слово без подстановок после os.path.normpath
+    `out/$(x)//.git/hooks`), в литеральной части шаблон (`.cl*de/$(x)`, `[.]claude/…`) или папка команды
+    неизвестна. text — слово без подстановок после os.path.normpath
     (повторные слеши и «.» убраны): по нему судят слова настроек репозитория."""
     base = None
     text = ""
 
 
-def _unres(st, lit):
+def _unres(st, lit, mask):
     u = _Unres(UNRESOLVED)
     pre, rest = lit.split(_DYN, 1)
-    if pre and "/" not in rest:
+    if pre and "/" not in rest and not _globby(pre, mask[:len(pre)]):
         u.text = os.path.normpath(pre + rest.replace(_DYN, ""))
         d = pre.rsplit("/", 1)[0] + "/" if "/" in pre else ""
         if d.startswith("/"):
@@ -1550,13 +1551,13 @@ def _targets(st, w):
     for blit, bmask in _braces(w.lit, w.mask):
         for plit, pmask in _params(st, blit, bmask):
             if _DYN in plit:
-                out.append(_unres(st, plit))  # остальные варианты {a,b} судятся дальше
+                out.append(_unres(st, plit, pmask))  # остальные варианты {a,b} судятся дальше
                 continue
             if st.opts and any(_ZSH_OPT_GLOB.match(c) and m in "uv" for c, m in zip(plit[1:], pmask[1:])):
                 return [UNRESOLVED]
             for lit, mask in _split(st, plit, pmask):
                 if _DYN in lit:
-                    out.append(_unres(st, lit))
+                    out.append(_unres(st, lit, mask))
                     continue
                 out += _paths(st, lit, mask)
                 if len(lit) > 1 and lit.endswith("}") and mask[-1] == "u":
@@ -2363,7 +2364,7 @@ def unresolved_dirs(event, tool, tool_input, zones, words=None):
     ($PANTHEON_TMP, ~/Library/Caches/pantheon-sandbox) или своей worktree (репозиторий папки события); иначе None —
     отказ, как до 0823. Папки правило затем судит как обычные цели: `.claude/hooks/$f` в своей worktree — отказ
     protect-config. Разрешённый корень, равный зоне правила, её предку или потомку, не считается (~/ai/pantheon — сам
-    репозиторий). Отказ и тогда, когда слово цели без подстановок называет настройки репозитория (words).
+    репозиторий). Отказ и тогда, когда слово цели без подстановок называет зону или настройки репозитория (words).
     Путь в значении подстановки (`"$TMPDIR/$f"` с f=../..) — намеренный обход, граница — песочница."""
     if tool != "Bash":
         return None
@@ -2373,6 +2374,11 @@ def unresolved_dirs(event, tool, tool_input, zones, words=None):
     found = _UNRES.get((cmd, cwd)) or [(None, "")]
     if any(b is None for b, _ in found):
         return None
+    homes = {HOME, os.path.realpath(HOME)}
+    frags = {_key(f) for z in zones for f in [z] + [z[len(h) + 1:] for h in homes if _inside(z, [h]) and _key(z) != _key(h)]
+             if f}
+    if any(f in _key(text) for _, text in found for f in frags):
+        return None  # страховка: слово цели называет зону (`$TMPDIR/ai/pantheon/x-$(d)`)
     if words and any(words.search(text) for _, text in found):
         return None
     bases = [b for b, _ in found]
