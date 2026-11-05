@@ -53,7 +53,7 @@ OWN_ITEMS = {"skills", "commands", "agents"}
 # (без регистра, «-» и «_»), значение не начинается с { [ & * ! ? % @ `; с отступом пробелами — значение ключа выше;
 # пустая или «# комментарий» — можно; любая другая — отказ
 SAFE_KEYS = {"skills": {"name", "description", "argumenthint", "whentouse", "disablemodelinvocation", "userinvocable",
-                        "version", "license"},
+                        "version", "license", "compatibility", "metadata"},
              "agents": {"name", "description", "model", "color", "effort", "maxturns"}}
 SAFE_KEYS["commands"] = SAFE_KEYS["skills"]
 FM_LINE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]+(.*))?", re.ASCII)
@@ -648,7 +648,7 @@ def check_protect_config(event, tool, tool_input):
                     f"даёт права, запускает код без вопроса или подменяет роль Пантеона: "
                     f"{problem[0].replace(G.HOME, '~')} — {problem[1]}. Во frontmatter навыка и команды можно только "
                     "name, description, argument-hint, when_to_use, disable-model-invocation, user-invocable, version, "
-                    "license, у роли — name, description, model, color, effort, maxTurns, простыми строками «ключ: "
+                    "license, compatibility, metadata, у роли — name, description, model, color, effort, maxTurns, простыми строками «ключ: "
                     "значение». Остальное (allowed-tools, hooks, tools, permissionMode…), строки !`…` и ```!, роль с "
                     "именем роли Пантеона правит только metis-pantheon после «да» владельца — опиши правку файлом в "
                     "~/ai/pantheon/directions/metis-pantheon/inbox/.")

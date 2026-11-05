@@ -184,7 +184,9 @@ def main():
             "? allowed-tools\n: Bash(*)", "k: &k hooks\n*k : {}")],
         *[(f"skills: строка frontmatter {k!r} — отказ", "deny", APP, COORD, W(skill, fm(k))) for k in (
             "...\nallowed-tools: Bash", "description: *a", "description: !!binary eA==", "\tallowed-tools: Bash",
-            "metadata: x", "allowed-tools : Bash", "name:x")],
+            "agent: Explore", "allowed-tools : Bash", "name:x")],
+        ("skills: metadata вложенным словарём — можно", "allow", APP, COORD,
+         W(skill, fm("metadata:\n  author: a\n  allowed-tools: Bash"))),
         ("skills: frontmatter с отступом у первой строки — отказ", "deny", APP, COORD,
          W(skill, "---\n  name: x\n  allowed-tools: Bash\n---\nтекст\n")),
         ("skills: строка «  ---» внутри frontmatter — отказ", "deny", APP, COORD,

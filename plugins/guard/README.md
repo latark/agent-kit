@@ -149,7 +149,7 @@ send-keys и т. п. — ввод от имени владельца), попо�
     (domains.json) правят координатор (`domain-coordinator`, главная сессия) и лиды направления (`hephaestus-<коротко>`,
     `apollo-<коротко>`). Frontmatter судится классом (ревью #347): каждая строка у левого края — «ключ: значение»
     с ключом из списка разрешённых (без регистра, «-» и «_»): у навыка и команды `name`, `description`,
-    `argument-hint`, `when_to_use`, `disable-model-invocation`, `user-invocable`, `version`, `license`, у роли `name`,
+    `argument-hint`, `when_to_use`, `disable-model-invocation`, `user-invocable`, `version`, `license`, `compatibility`, `metadata`, у роли `name`,
     `description`, `model`, `color`, `effort`, `maxTurns`. Значение не начинается с `{ [ & * ! ? % @` и обратной
     кавычки; строки с отступом пробелами — значение ключа выше. Остальное — отказ: `allowed-tools`, `hooks`, `tools`,
     `permissionMode` и любые формы YAML мимо простого ключа (`!!str k`, `&a k`, `"k"`, `? k`, `*k`, `...`). Отказ и
