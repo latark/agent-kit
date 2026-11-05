@@ -73,6 +73,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         шапка, name = папка, description ≤ 1024, ссылки на файлы (metis-0258); directions.toml: coordinator не true/false — ошибка,
                                         у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
                                         тревога об открытом координаторе)
+  pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
+                                        и размеры берёт с холста; в расписании — command =
+                                        "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
+                                        при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
@@ -4313,6 +4317,85 @@ def who_is_who_alert(**kw):
     return line
 
 
+# --- холст «Кто есть кто.canvas» строится кодом (metis-0825, lib/whocanvas.py) ---------------------
+_WHOCANVAS = None
+
+
+def whocanvas_mod():
+    global _WHOCANVAS
+    if _WHOCANVAS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_whocanvas", os.path.join(LIB, "whocanvas.py"))
+        _WHOCANVAS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_WHOCANVAS)
+    return _WHOCANVAS
+
+
+def who_canvas_inputs(agents=None, reg_path=None):
+    """(роли {имя: файл}, направления [{name, short}], статусы задач {id: статус}) для пересборки холста."""
+    W, T = whocanvas_mod(), tasks_mod()
+    agents = agents or AGENTS
+    roles = {}
+    if os.path.isdir(PLUGIN_ROLES):  # шаблоны плагина, ещё не собранные в agents, минус отложенные
+        roles.update({f[:-5]: os.path.join(PLUGIN_ROLES, f) for f in os.listdir(PLUGIN_ROLES)
+                      if f.endswith(".tmpl") and f[:-5] not in ROLES_DEFERRED
+                      and os.path.isfile(os.path.join(PLUGIN_ROLES, f))})
+    if os.path.isdir(agents):
+        roles.update({f[:-3]: os.path.join(agents, f) for f in os.listdir(agents)
+                      if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))})
+    with open(reg_path or os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+        reg = tomllib.load(fh)
+    dirs = [{"name": d["name"], "short": str(d.get("short") or "")} for d in reg.get("direction") or []
+            if isinstance(d.get("name"), str)]
+    want, statuses = set(W.task_refs()), {}
+    for fp in T.task_files(PANTHEON):
+        tid = os.path.basename(fp)[:-3]
+        if tid in want:
+            try:
+                statuses[tid] = str((T.read(fp)[0] or {}).get("status") or "")
+            except (T.HeaderError, OSError, UnicodeDecodeError):
+                pass
+    return roles, dirs, statuses
+
+
+def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None):
+    """Пересобрать холст, если изменились роли, реестр или статус задач из карточек. 'written' | 'same' | 'unchanged' |
+    'skip' (нет ни холста, ни памятки, ни реестра — вести нечего)."""
+    canvas = os.path.join(PANTHEON, whocanvas_mod().CANVAS_NAME)
+    reg_path = reg_path or os.path.join(PANTHEON, "directions.toml")
+    if not os.path.isfile(reg_path) or not (os.path.exists(canvas) or os.path.isfile(os.path.join(PANTHEON, WHO_MEMO))):
+        return "skip"
+    roles, dirs, statuses = who_canvas_inputs(agents, reg_path)
+    return whocanvas_mod().sync(canvas, path("who-canvas.json"), roles, dirs, statuses, force=force,
+                                manual_out=manual_out)
+
+
+def who_canvas_cmd(rest):
+    """pantheon who-canvas [--force] — зовёт scripts/who-canvas.sh из расписания (every = 5, hosts = primary; самой
+    команды нет в TICK_SUBCOMMANDS, parse_command пускает только скрипт плагина): пересборка только при смене
+    входов (отпечаток в STATE/who-canvas.json), так что обычный проход ничего не пишет. Холст не читается или сбой —
+    тревога, файл не затирается, код 1. В тик не вшито: tick() входит в сборку окон (ядро, metis-0404)."""
+    if [a for a in rest if a != "--force"]:
+        print("использование: pantheon who-canvas [--force]", file=sys.stderr)
+        return 2
+    try:
+        manual = []
+        got = who_canvas_sync(force="--force" in rest, manual_out=manual)
+    except Exception as e:
+        msg = f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})"
+        alert_once("who-canvas", type(e).__name__, msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
+    clear_once("who-canvas")
+    for nid in manual:  # правка руками (текст, цвет, подпись группы): один раз на состояние карточки
+        alert_once("who-canvas-manual-" + nid, "1",
+                   f"Кто есть кто.canvas: карточка {nid} правлена руками, код её не обновляет; "
+                   "чтобы вернуть автосборку — удалите карточку", "pantheon")
+    if got == "written":
+        print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
+    return 0
+
+
 def roles_newest():
     files = [os.path.join(PANTHEON, "directions.toml")]
     for d in (AGENTS, PARTS, PLUGIN_ROLES, PLUGIN_PARTS):
@@ -6984,6 +7067,8 @@ def main(argv):
         return sync_answers()
     if cmd == "autoclose":
         return autoclose_cmd(rest)
+    if cmd == "who-canvas":
+        return who_canvas_cmd(rest)
     if cmd == "batch-suggest":
         return batch_suggest_run(rest)
     if cmd == "status":
