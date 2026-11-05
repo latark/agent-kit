@@ -3975,8 +3975,10 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _, rows = _summary(tasks, t, inbox, names, long_ids, accept=accept)
     if policy is not None:
         # digest_day прежнего board.json (до 0.11.15) — политике: в день обновления второго утреннего не будет
-        since_day = now_iso(t - 86400)[:10]  # закрыто за сутки: done с датой closed со вчерашнего дня (metis-0851)
-        done_n = sum(1 for _, h, _ in tasks.values() if h.get("status") == "done" and str(h.get("closed") or "") >= since_day)
+        # закрыто с прошлой сводки (digest_t), не старше суток (metis-0851); closed — дата, поэтому сравнение по дню,
+        # а задачи, уже посчитанные прошлой сводкой, политика вычитает сама — каждая в одной сводке
+        since_day = now_iso(policy.done_since())[:10]
+        done_n = [i for i, (_, h, _) in tasks.items() if h.get("status") == "done" and str(h.get("closed") or "") >= since_day]
         policy.run((len(rows["wait"]), len(rows["overdue"]), len(rows["inbox"])),
                    lambda tid: card_url(vault, names.get(tid, "Сводка")), card_url(vault, "Сводка"),
                    legacy_digest_day=state.pop("digest_day", None), done=done_n)

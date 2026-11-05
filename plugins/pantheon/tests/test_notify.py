@@ -495,7 +495,7 @@ def review_case():
 
 
 def done_digest_case():
-    """metis-0851: в утренней сводке — «Закрыто за сутки: N» (done с closed со вчерашнего дня); N=0 и done_digest = false — без строки."""
+    """metis-0851: в утренней сводке — «Закрыто за сутки: N» (done в окне с прошлой сводки, не старше суток; каждая задача — в одной сводке); N=0 и done_digest = false — без строки."""
     def mk(sched, closed_days):
         w = make(sched)
         for i, d in enumerate(closed_days):
@@ -516,6 +516,35 @@ def done_digest_case():
     check("закрыто за сутки: N=0 — строки нет, дайджеста нет", not b)
     c = mk('\n[notify]\ndone_digest = false\n', [19, 20])
     check("done_digest = false — строки нет", not any("Закрыто за сутки" in x for x in c))
+    d = mk('\n[notify]\ndone_digest = "false"\n', [19, 20])  # не bool — значение отброшено, остаётся по умолчанию (включено)
+    check("done_digest не bool — как по умолчанию, строка есть", len(d) == 1 and "Закрыто за сутки: 2." in d[0])
+
+    def mk_two(first, second):
+        """Сводка 19-го утром (закрыта first), затем сводка 20-го (добавлена second); возвращает тексты сводок обоих дней."""
+        w = make("")
+        def add(d, i):
+            r = run(w, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", f"Сделано {d}-{i}",
+                    "--status", "done", "--project", "Пантеон", t=at(d, 12))
+            assert r.returncode == 0, r.stderr
+            f = src(w, r.stdout.split()[0])
+            txt = open(f, encoding="utf-8").read().replace("\nupdated:", f"\nclosed: 2026-10-{d:02d}\nupdated:", 1)
+            open(f, "w", encoding="utf-8").write(txt)
+        for i in range(first):
+            add(19, i)
+        board(w, at(19, 7, 1), idle=0)
+        sent(w)
+        board(w, at(19, 9), idle=0)
+        day1 = [x[1] for x in sent(w) if x[3] == "digest"]
+        for i in range(second):
+            add(20, i)
+        board(w, at(20, 7, 1), idle=0)
+        sent(w)
+        board(w, at(20, 9), idle=0)
+        return day1, [x[1] for x in sent(w) if x[3] == "digest"]
+    d1, d2 = mk_two(1, 0)
+    check("закрыта до утренней сводки → только в одной сводке", len(d1) == 1 and "Закрыто за сутки: 1." in d1[0] and not d2)
+    d1, d2 = mk_two(1, 1)
+    check("вторая сводка считает только новые закрытия", len(d2) == 1 and "Закрыто за сутки: 1." in d2[0])
 
 
 def main():
