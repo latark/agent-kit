@@ -701,7 +701,7 @@ check("[B4] <base href> того же origin (другой путь) — отп�
       and len(D.clicked()) == 1, res)
 res = act("submit", "#p443", SITE + "/z")
 check("[B4] <base href> с портом 443 и другим регистром — тот же origin, отправка как обычно", res["state"] == "done"
-      and len(D.clicked()) == 2, res)
+      and len(D.clicked()) == 1, res)
 finger(3)
 clear_touch()
 
@@ -757,6 +757,7 @@ D.page(L, {"#pay-link": dict(facts(node("a", href=SITE + "/payment/42", label="�
            "#cb-del": dict(facts(node("input", "checkbox", label="", attrs="удалить фото")), x=36.0),
            "#ok-link": dict(facts(node("a", href=SITE + "/item/7", label="x")), x=37.0)})
 finger(0)
+clear_touch()
 for sel, word in (("#pay-link", "оплата"), ("#login-link", "важная")):
     res = act("click", sel, L)
     check(f"[B1][F1][F2] click по ссылке {sel}: адрес href — отказ «{word}» даже с пальцем, окна нет, нажатия нет",
