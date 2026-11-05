@@ -171,14 +171,17 @@ def test_tick():
         rf = pan(env, T0, "autoclose", "fetch")
         check("fetch: код 0, gh спрошен, кэш записан", rf.returncode == 0 and os.path.exists(os.path.join(gh, "calls.log"))
               and os.path.exists(os.path.join(state, "autoclose-prs.json")), rf.stdout + rf.stderr)
-        check("fetch ничего не закрывает", T.read(pa)[0].get("status") == "doing")
+        ha = T.read(pa)[0]
+        # metis-0868: закрытие — в том же проходе, сразу после fetch, а не на следующем тике
+        check("fetch: слитый PR с metis-0001 в ветке закрывает задачу в том же проходе", ha.get("status") == "done",
+              rf.stdout + rf.stderr + text(pa)[:400])
+        fetched = {p: text(p) for p in (pa, pb, pc, pd)}
         os.remove(os.path.join(gh, "calls.log"))
         r = pan(env, T0, "tick")
         check("лёгкий тик не зовёт gh", not os.path.exists(os.path.join(gh, "calls.log")), text(os.path.join(gh, "calls.log"))
               if os.path.exists(os.path.join(gh, "calls.log")) else "")
-        ha = T.read(pa)[0]
-        check("тик: слитый PR с metis-0001 в ветке закрывает задачу", ha.get("status") == "done" and r.returncode == 0,
-              r.stdout + r.stderr + text(pa)[:400])
+        check("тик после fetch: закрывать уже нечего, задачи не изменились",
+              r.returncode == 0 and {p: text(p) for p in (pa, pb, pc, pd)} == fetched, r.stdout + r.stderr)
         check("closed — день слияния", ha.get("closed") == day(merged_at), str(ha.get("closed")))
         check("release: PR → коммит", ha.get("release") == "PR #7 → abcdef0", str(ha.get("release")))
         check("actual: из metrics/tasks.jsonl", ha.get("actual") == "$1.50 · 450k токенов · 2.1 ч", str(ha.get("actual")))
@@ -204,6 +207,33 @@ def test_tick():
         st = json.load(open(os.path.join(state, "autoclose.json")))
         check("отметки обработанных PR в STATE", set(st["done"]) == {"latark/agent-kit#7", "latark/agent-kit#8", "latark/agent-kit#10", "acme/site#3"},
               str(st.get("done")))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_fetch_same_pass_primary_only():
+    """metis-0868, п. 1: fetch закрывает в том же проходе только на главном Mac (как тик); карточки закрыты — view
+    и доска сразу (задачи расписания), а не через минуту."""
+    tmp, home, state, gh, env = make()
+    try:
+        open(os.path.join(home, "schedule.toml"), "w").write(
+            'primary_host = "mac-a"\n\n[[job]]\nname = "view"\ncommand = "pantheon view --quiet"\nevery = "tick"\n')
+        a, pa, _ = new(env, home, T0 - 7200, "metis-pantheon", "Ядро", "--status", "doing", "--next", "x")
+        write_gh(gh, "latark/agent-kit", "merged", [pr(7, "feature", "Closes metis-0001", T0 - 3600)])
+        rb = pan(dict(env, PANTHEON_HOST="mac-b", PANTHEON_REFRESH="1"), T0, "autoclose", "fetch")
+        dry = os.path.join(state, "dryrun.log")
+        check("fetch не на главном Mac: кэш записан, задача не закрыта (закрывает главный)",
+              rb.returncode == 0 and T.read(pa)[0].get("status") == "doing" and not os.path.exists(dry), rb.stdout + rb.stderr)
+        ra = pan(dict(env, PANTHEON_REFRESH="1"), T0 + 60, "autoclose", "fetch")
+        check("fetch на главном Mac: закрыта в том же проходе, строка «автозакрытие ·» в выводе",
+              ra.returncode == 0 and T.read(pa)[0].get("status") == "done" and f"автозакрытие · {a}" in ra.stdout,
+              ra.stdout + ra.stderr)
+        check("… и копия Obsidian сразу: задача view запущена", os.path.exists(dry) and text(dry).split()[1:] == ["view"],
+              text(dry) if os.path.exists(dry) else "нет dryrun.log")
+        open(os.path.join(home, "schedule.toml"), "w").write("primary_host = [не toml\n")
+        rc = pan(env, T0 + 120, "autoclose", "fetch")
+        check("schedule.toml не читается — fetch не падает, проход по кэшу пропущен с причиной",
+              rc.returncode == 0 and "проход по кэшу пропущен: schedule.toml не читается" in rc.stderr, rc.stdout + rc.stderr)
     finally:
         shutil.rmtree(tmp, True)
 
@@ -1020,6 +1050,7 @@ def main():
     test_attention_on_card()
     test_close_criteria()
     test_tick()
+    test_fetch_same_pass_primary_only()
     test_old_and_errors()
     test_rules()
     test_reopen_and_eviction()

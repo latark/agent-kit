@@ -557,7 +557,7 @@ def _task_cmd(rest):
             sid = T.task_detach(P.PANTHEON, P.card_now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
         elif sub == "ready":
-            rows = T.ready(P.PANTHEON, P.card_now(), opt("--direction"), opt("--owner"))
+            rows = T.ready(P.PANTHEON, P.now(), opt("--direction"), opt("--owner"))
             for tid, h in rows:
                 print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")
             try:  # сверка — подсказка в stderr: список задач и код выхода она не меняет
@@ -580,7 +580,7 @@ def _task_cmd(rest):
             print("\n".join(lines) if lines else f"{args[0]}: пересечений с живыми задачами направления и открытыми PR нет")
         elif sub == "failures":  # metis-0859: сводка классов провалов из журналов задач
             days = int(opt("--days") or 7)
-            res = T.failure_counts(T.load_tasks(P.PANTHEON, T.WORK_TYPES), P.card_now(), days)
+            res = T.failure_counts(T.load_tasks(P.PANTHEON, T.WORK_TYPES), P.now(), days)
             print(f"Провалы за {days} дн. по классам (строки «провал: <класс> — …» в журналах):")
             for c, ids in res.items():
                 print(f"  {c}: {len(ids)}" + (f" ({', '.join(sorted(set(ids)))})" if ids else ""))
