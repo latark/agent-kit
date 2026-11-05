@@ -302,6 +302,9 @@ def test_asks():
         ("Bash >/dev/null и > в CLAUDE.md", "Bash", {"command": "ls >/dev/null; echo x >CLAUDE.md"}),
         ("Bash >&2/файл (не дескриптор)", "Bash", {"command": "ls >&2/CLAUDE.md"}),
         ("Bash >/dev/null.d/файл (не /dev/null)", "Bash", {"command": "ls >/dev/null.d/CLAUDE.md"}),
+        ("Bash >&1'.txt' (склейка в имя файла)", "Bash", {"command": "cat CLAUDE.md >&1'.txt'"}),
+        ("Bash >/dev/null\"x\" (склейка в имя файла)", "Bash", {"command": "cat CLAUDE.md >/dev/null\"x\""}),
+        ("Bash 2>&1\"b\" (склейка в имя файла)", "Bash", {"command": "cat CLAUDE.md 2>&1\"b\""}),
         ("Write во флаг tg-taint", "Write", {"file_path": os.path.join(home, ".local/state/tg-taint/s1")}),
     ]
     for name, tool, ti in asks:
@@ -336,6 +339,12 @@ def test_reads_pass():
         ("Bash cat 2>>/dev/null", "Bash", {"command": "cat AGENTS.md 2>>/dev/null"}),
         ("Bash cat >& /dev/null", "Bash", {"command": "cat AGENTS.md >& /dev/null"}),
         ("Bash cat >&- и 3>&2-", "Bash", {"command": "cat AGENTS.md >&- 3>&2-"}),
+        ("Bash 2>&1|head", "Bash", {"command": "cat CLAUDE.md 2>&1|head"}),
+        ("Bash >/dev/null;ls", "Bash", {"command": "cat CLAUDE.md >/dev/null;ls"}),
+        ("Bash (… 2>/dev/null)", "Bash", {"command": "(cat CLAUDE.md 2>/dev/null)"}),
+        ("Bash 2>/dev/null&", "Bash", {"command": "cat CLAUDE.md 2>/dev/null&"}),
+        ("Bash >/dev/null<файл", "Bash", {"command": "cat CLAUDE.md >/dev/null<in"}),
+        ("Bash 2>&1>/dev/null", "Bash", {"command": "cat CLAUDE.md 2>&1>/dev/null"}),
         ("Bash tg_read в файл", "Bash", {"command": f"{T} history Чат -o /tmp/x.md"}),
         ("Write файла проекта", "Write", {"file_path": os.path.join(h, "projects/app/src/a.ts")}),
         ("Write в $TMPDIR", "Write", {"file_path": os.path.join(_ROOT, "draft.md")}),

@@ -98,8 +98,9 @@ SCRIPT_NET_RX = (r"(?i)urllib|requests|http\.client|httpx|aiohttp|socket|smtplib
                  r"axios|XMLHttpRequest|net/http|Net::HTTP|LWP|https?://")
 WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "time", "nice", "timeout", "gtimeout", "xargs", "exec",
             "caffeinate", "heavy", "then", "do", "else", "if", "while", "until", "!", "{", "stdbuf"}
-# Перенаправление в другой дескриптор (2>&1, >&2, >&-) и в /dev/null — не запись в файл (metis-0869)
-NO_FILE_REDIR_RX = r">>?(?:&?\s*/dev/null|&(?:\d+-?|-))(?![\w/.-])"
+# Перенаправление в другой дескриптор (2>&1, >&2, >&-) и в /dev/null — не запись в файл (metis-0869). Цель — только
+# до конца строки, пробела или метасимвола: >&1'.txt' и >/dev/null"x" шелл склеивает в имя файла
+NO_FILE_REDIR_RX = r">>?(?:&?\s*/dev/null|&(?:\d+-?|-))(?=$|[\s;&|()<>])"
 BASH_WRITE_RX = (r">|\btee\b|\b(?:cp|mv|install|ln|rsync|ditto|dd|touch|truncate|rm|unlink|patch)\b|"
                  r"\b(?:sed|gsed|perl)\s+(?:-\w+\s+)*-\w*i")
 DURABLE_TEXT_RX = (
