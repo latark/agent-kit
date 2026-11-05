@@ -30,6 +30,8 @@
 - «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
   карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K», не больше MAX_MERGED строк;
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
+- отказы ролей за сутки (metis-0832) — журнал STATE/logs/handoff.jsonl (lib/handoff.py): источник, вид → кому передано
+  и итоги, только из словарей HANDOFF_*; заявка Touch ID — одна, по последнему итогу;
 - ответы владельца — журнал owner-log: выбор в окне вопросов или в чате на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
   галочкой на карточке (board.jsonl), за сутки — [id], время и буква варианта (или да/нет). Блок — сводка для глаз, а не
   согласие: согласие проверяет только `pantheon consent <id>`.
@@ -322,6 +324,71 @@ def decisions(zeus_md, board_jsonl, t):
     return out[:MAX_DECISION]
 
 
+# журнал отказов ролей (metis-0832, lib/handoff.py): только перечислимые значения — вид, кому, итог, источник.
+# Словари = handoff.ROUTE_KEYS, OUTCOME_RU и SOURCE_RU (boardtext грузится без handoff; равенство держит test_handoff)
+HANDOFF_TO = {"payment": "оплата → владелец руками", "important-form": "важная форма → владелец руками",
+              "guard": "защиты → шлюз слияния", "batch-delete": "удаление пачки → «да» словами",
+              "touch": "белый список → Touch ID", "browser": "браузер → Харон", "telegram": "Telegram → read",
+              "outside": "тесты и серверы → outside", "hestia": "окна и процессы → Гестия", "ask": "прочее → «да» через Зевса"}
+HANDOFF_OUT = {"handed": "передано", "waiting": "ждёт Touch ID", "done": "сделано", "failed": "не вышло",
+               "declined": "отклонено", "owner": "только владелец", "yes": "только «да»", "merge": "только шлюз",
+               "refused": "отказ", "dropped": "снято"}
+HANDOFF_SRC = {"sandbox": "песочница", "classifier": "классификатор", "nocmd": "нет команды", "guard": "guard",
+               "role": "роль"}
+HANDOFF_TAIL = 256 * 1024
+MAX_HANDOFF = 4
+
+
+def handoff_log(state):
+    return os.path.join(state, "logs", "handoff.jsonl")
+
+
+def handoffs(state, t):
+    """Отказы за сутки: [(вид, всего, {итог: n})] по убыванию числа и {источник: n}. Строки заявок Touch ID (у них
+    id) складываются в одну по последнему итогу заявки: «ждёт» и «сделано» одной заявки — одно действие."""
+    raw = _read(handoff_log(state))
+    if not raw:
+        return [], {}
+    raw = raw[-HANDOFF_TAIL:]
+    last, plain, src = {}, [], {}
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+            ts = float(e.get("t"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(e, dict) or not 0 <= t - ts <= DAY or e.get("kind") not in HANDOFF_TO \
+                or e.get("outcome") not in HANDOFF_OUT:
+            continue
+        rid = e.get("id")
+        one = isinstance(rid, str) and re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", rid)
+        if (not one or rid not in last) and e.get("source") in HANDOFF_SRC:
+            src[e["source"]] = src.get(e["source"], 0) + 1     # заявка — один отказ, сколько бы строк ни дала
+        if one:
+            last[rid] = e
+        else:
+            plain.append(e)
+    groups = {}
+    for e in plain + list(last.values()):
+        g = groups.setdefault(e["kind"], {})
+        g[e["outcome"]] = g.get(e["outcome"], 0) + 1
+    rows = sorted(((k, sum(v.values()), v) for k, v in groups.items()), key=lambda r: (-r[1], r[0]))
+    return rows, src
+
+
+def handoff_line(rows, src):
+    """«- Отказы за сутки (песочница 2, классификатор 1): браузер → Харон ×2 — передано 2; …»."""
+    rows = [r for r in rows or [] if r[0] in HANDOFF_TO]
+    if not rows:
+        return None
+    s_ = ", ".join(f"{HANDOFF_SRC[k]} {n}" for k, n in sorted((src or {}).items()) if k in HANDOFF_SRC)
+    parts = [f"{HANDOFF_TO[k]} ×{n} — " + ", ".join(f"{HANDOFF_OUT[o]} {c}" for o, c in sorted(v.items())
+                                                 if o in HANDOFF_OUT) for k, n, v in rows[:MAX_HANDOFF]]
+    more = f"; и ещё видов: {len(rows) - MAX_HANDOFF}" if len(rows) > MAX_HANDOFF else ""
+    return f"- Отказы за сутки ({s_}): " + "; ".join(parts) + more + "." if s_ else \
+        "- Отказы за сутки: " + "; ".join(parts) + more + "."
+
+
 def owner_log(state):
     return [os.path.join(state, "owner-log", "zeus.md"), os.path.join(state, "owner-log", "board.jsonl")]
 
@@ -329,7 +396,8 @@ def owner_log(state):
 def watch_files(pantheon, state):
     """Файлы входов для отпечатка свежести (без задач и кэша PR — их отпечаток по содержимому даёт вызывающий):
     ревью, STATUS.md, decisions.md, журнал владельца (у него — только размер и время правки)."""
-    return review_files(pantheon) + status_files(pantheon) + [os.path.join(pantheon, "decisions.md")] + owner_log(state)
+    return review_files(pantheon) + status_files(pantheon) + [os.path.join(pantheon, "decisions.md")] + owner_log(state) \
+        + [handoff_log(state)]
 
 
 def collect(pantheon, state, tasks, t, week=None, owner=None):
@@ -342,7 +410,7 @@ def collect(pantheon, state, tasks, t, week=None, owner=None):
     return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache)), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
             "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
-            "owner": owner_cards(tasks, owner) if owner else None}
+            "owner": owner_cards(tasks, owner) if owner else None, "handoffs": handoffs(state, t)}
 
 
 # --- блок -------------------------------------------------------------------------------------------------------
@@ -425,6 +493,10 @@ def lines(data):
         out.append("- STATUS правлены: " + ", ".join(f"{n} {hm(mt)}" for n, mt in st) + ".")
     for ts, qid, var, src in data.get("decisions") or []:
         out.append(f"- Ответ владельца [{qid}] {hm(ts)} ({src}): " + (var or "ответ дан") + ".")
+    ho = data.get("handoffs")
+    line = handoff_line(*ho) if isinstance(ho, (tuple, list)) and len(ho) == 2 else None
+    if line:
+        out.append(line)
     return [clean(x) for x in out]
 
 
