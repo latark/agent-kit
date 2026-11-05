@@ -245,6 +245,21 @@ for jname in ("zeus.md", "board.jsonl"):
     os.rename(jp + ".bak", jp)
     check("0162: %s не читается → код 3 и «ответ проверить нельзя», не «ответа нет»" % jname,
           cr.returncode == 3 and "ответ проверить нельзя" in cr.stderr and not cr.stdout, cr.stdout + cr.stderr)
+# metis-0820: чтение закрыто (как песочница окна роли, Errno 1/13) — код 3 и подсказка: consent отдельным вызовом Bash,
+# не в цепочке (`cat …; pantheon consent <id>` идёт в песочнице, 05.11 athena-0309)
+zp = os.path.join(LOG, "zeus.md")
+zmode = os.stat(zp).st_mode & 0o777
+os.chmod(zp, 0)
+try:
+    if not os.access(zp, os.R_OK):  # root читает и без прав — проверять нечем
+        cr = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-0032"], env=dict(BASE), capture_output=True,
+                            text=True, timeout=30)
+        check("0820: zeus.md закрыт для чтения → код 3 и подсказка «отдельным вызовом Bash» с id",
+              cr.returncode == 3 and "ответ проверить нельзя" in cr.stderr
+              and "запусти `pantheon consent metis-0032` отдельным вызовом Bash" in cr.stderr and not cr.stdout,
+              cr.stdout + cr.stderr)
+finally:
+    os.chmod(zp, zmode)
 cr = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-0032"], env=dict(BASE), capture_output=True, text=True, timeout=30)
 check("0162: журнал на месте → по-прежнему ответ (код 0)", cr.returncode == 0, cr.stdout + cr.stderr)
 # metis-0562: роль hestia — найденный ответ ставит метку для guard (сеть, push, запись в PR); без ответа и вне роли меток нет

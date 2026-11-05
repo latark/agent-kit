@@ -5035,6 +5035,11 @@ def metrics_on_close(T, tid):
         return
     try:
         metrics_mod().record(metrics_ctx(), T.load_tasks(PANTHEON, T.WORK_TYPES), tid)
+    except PermissionError:
+        # metis-0820: так всегда в окне роли (песочница). «предупреждение · … PermissionError» роли читали как сбой
+        # task set и заводили задачи (hermes-0018, 05.11), хотя статус записан, а строку пишет плановый проход (sync)
+        print(f"учёт {tid}: окно роли в metrics/ не пишет — строку учёта допишет плановый проход доски. Статус задачи "
+              f"записан, это не сбой", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 — учёт не должен ломать закрытие задачи
         print(f"предупреждение · учёт {tid} не записан ({type(e).__name__}): допишет плановый проход доски",
               file=sys.stderr)

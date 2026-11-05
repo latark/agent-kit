@@ -1425,6 +1425,8 @@ def test_word_launch_0523():
     e = Env()
     e.direction("wl-dir")
     e.direction("wl-two")
+    os.makedirs(os.path.join(e.pantheon, "directions", "metis-pantheon", "tasks"), exist_ok=True)
+    e.task("metis-0523", "metis-pantheon")  # id вопроса — задача: в тексте запуска ссылка на её карточку (metis-0820)
     _zeus_answer(e, T0 - 600, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")  # до включения прохода
     e.run("watch", t=T0)
     check(not _bgs(e), f"0523: запись до включения прохода подняла окно: {e.calls()}")
@@ -1476,6 +1478,26 @@ def test_word_launch_0523():
                                                                    ("metis-0533", "запустить", "nosuch-dir"),
                                                                    ("metis-0533", "запустить", "wl-two", "сейчас"))]
     check(bad == [2, 2, 2], f"0523: launch-question без отказа: {bad}")
+
+
+def test_word_launch_question_id_not_task_0820():
+    """metis-0820: id вопроса без карточки задачи (05.11: [hermes-review-1], [zeus-wake-0511]). Текст запуска не ссылается
+    на «pantheon task show <id>» и прямо говорит, что задачи с этим id нет: иначе он входил в цель окна (/goal) и проверка
+    цели держала окно по кругу. Так и у «запустить», и у «перезапустить» (pantheon start --restart)."""
+    e = Env()
+    e.direction("nq-dir")
+    e.direction("nq-two")
+    e.run("watch", t=T0)
+    _zeus_answer(e, T0 + 10, "[nq-review-1] Запустить nq-dir?", "Да — запустить nq-dir")
+    e.agents([bg("nq-two", "working", "nqnqnqnq-1", pid=None)])
+    _zeus_answer(e, T0 + 11, "[nq-wake-0511] Перезапустить nq-two?", "Да — перезапустить nq-two")
+    e.run("watch", t=T0 + 60, extra={"FAKE_STOP_MARK": "1"})
+    texts = {who: [c[-1] for c in _bgs(e, who)] for who in ("nq-dir", "nq-two")}
+    check(len(texts["nq-dir"]) == 1 and len(texts["nq-two"]) == 1, f"0820: окна не подняты: {e.calls()}")
+    for who, qid in (("nq-dir", "nq-review-1"), ("nq-two", "nq-wake-0511")):
+        text = texts[who][0] if texts[who] else ""
+        check("task show" not in text and f"[{qid}] — номер вопроса, а не задачи" in text
+              and f"в цель окна задача {qid} не входит" in text, f"0820: {who}: текст запуска {text!r}")
 
 
 def test_word_launch_return_restart_0523():
