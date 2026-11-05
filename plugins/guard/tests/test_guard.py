@@ -1635,6 +1635,7 @@ def main():
             ("чужой проект", 'echo x > ~/projects/other/x/"$(date +%s).md"'),
             ("{…}: явная цель рядом с $TMPDIR судится", 'echo x > {~/.claude/settings.json,"$TMPDIR/$F"}'),
             ("protect-config: .claude/hooks своей worktree", 'for f in $(ls); do echo x > ".claude/hooks/$f"; done'),
+            ("protect-config: папка .claude своей worktree судится", 'echo x > ".claude/notes-$(date +%s).md"'),
             # фоновые проверки 2 и 3: подстановка — только в последней части пути; литеральная часть — после normpath
             ("«..» после подстановки уходит из папки", 'echo x > "out/$(date +%s)/../../../../projects/other/y/a.md"'),
             ("зона после подстановки", 'echo x > "$TMPDIR/$(date +%s)/ai/pantheon/board.md"'),
