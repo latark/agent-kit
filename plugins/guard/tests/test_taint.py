@@ -5,7 +5,8 @@
 Проверяет: когда флаг ставится и когда нет (-o -, -o ФАЙЛ, без -o, status, --quota, tg-reader), ask на каждый класс
 действий наружу, чтение без вопроса, снятие на сообщении владельца (и не на уведомлении, чужой сессии, source
 не user), deny guard
-важнее ask, флаг одной сессии не трогает другую, bypassPermissions — deny, сбой — по правилу события.
+важнее ask, флаг одной сессии не трогает другую, bypassPermissions — deny, сбой — по правилу события; в исходниках
+guard нет готовой шапки выгрузки (чтение исходника не заражает сессию, metis-0864).
 """
 import json
 import os
@@ -31,7 +32,10 @@ SHIM = os.path.join(HERE, "_guard_shim.py")
 PY = sys.executable
 
 T = "~/projects/other/tg-read/tg_read.py"
-SIG = "Переписка — строго между строками «<<<TG-0123456789ab» и «TG-0123456789ab>>>»."
+# Шапка выгрузки собирается из частей: готовая строка в исходнике ставила флаг сессии, которая читала этот файл
+# (`sed -n 1,80p test_taint.py` в субагенте — флаг на окно metis-pantheon и вопросы владельцу часами, metis-0864).
+TAG = "TG-" + "0123456789ab"
+SIG = "Переписка — строго между строками «<<<" + TAG + "» и «" + TAG + ">>>»."
 
 failed = 0
 total = 0
@@ -496,9 +500,35 @@ def test_read_requests():
         check(f"заявки read: флаг не ставит {name}", rc == 0 and not flag(h), err[-200:])
 
 
+def test_no_signature_in_sources():
+    """Ни один текстовый файл плагина не несёт готовую шапку выгрузки: агент, который читает исходники guard
+    (cat, sed, Read), иначе заражает свою сессию, и окно роли часами ждёт «да» на gh и запись в STATUS (metis-0864)."""
+    import importlib.util
+    import re
+    spec = importlib.util.spec_from_file_location("taint_rx", TAINT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rx = re.compile(mod.DUMP_SIGNATURE_RX)
+    root = os.path.dirname(HERE)
+    hits, seen = [], 0
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in ("__pycache__", ".git")]
+        for f in files:
+            p = os.path.join(d, f)
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            seen += 1
+            if rx.search(text):
+                hits.append(os.path.relpath(p, root))
+    check("исходники guard без готовой шапки выгрузки tg_read", seen > 10 and not hits, f"{seen} файлов: {hits}")
+
+
 if __name__ == "__main__":
     for t in (test_sets, test_not_sets, test_read_requests, test_asks, test_reads_pass, test_bypass_and_deny_wins,
-              test_clear_and_sessions, test_failures, test_hooks_json):
+              test_clear_and_sessions, test_failures, test_hooks_json, test_no_signature_in_sources):
         t()
     print(f"\n{total - failed} из {total} прошли")
     sys.exit(1 if failed else 0)
