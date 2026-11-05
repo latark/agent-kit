@@ -446,6 +446,32 @@ def goal_released(head, tasks=None):
     return False
 
 
+def goal_state(head, tasks=None, window=None, elsewhere=None):
+    """Строка цели окна по задаче на эту минуту (metis-0725, metis-0738): (снята ли, почему). Её печатает
+    `pantheon task goal`, а WAITING_GOAL велит проверяющей модели цели верить свежей такой строке. Снята: закрыта
+    (done, dropped), вернули во входящие, ведёт другая сессия — elsewhere(head, window) даёт owner, если задачу ведёт
+    не окно window и не его команда (watch.owner_elsewhere), — или «ждёт» по goal_released. Окно не названо — owner не
+    сверяется. Остальное — в цели: в работе, в очереди, на проверке, «ждёт» без основания или с закрытым блокером."""
+    head = head or {}
+    tasks = tasks or {}
+    st = head.get("status")
+    if st in ("done", "dropped"):
+        return True, f"закрыта ({st})"
+    o = elsewhere(head, window) if window and elsewhere else None
+    if o:
+        return True, f"ведёт {o}"
+    if st == "inbox":
+        return True, "вернули во входящие"
+    if st == "waiting":
+        on = str(head.get("waiting_on") or "").strip()
+        if goal_released(head, tasks):
+            return True, "ждёт ответа владельца на вопрос" if on == "human" else f"ждёт задачу {on}"
+        if on in tasks and on != head.get("id"):
+            return False, f"блокер {on} {(tasks[on][1] or {}).get('status')}"
+        return False, "«ждёт» без вопроса владельцу и без задачи, которая её держит"
+    return False, LABELS[st].lower() if st in LABELS else f"статус {st or 'не указан'}"
+
+
 def goal_held_dependents(tid, tasks):
     """Задачи в «ждёт», чья цепочка waiting_on проходит через tid и которых цель теперь держит (metis-0714, argus-280b):
     [(id, её блокер, статус блокера)]. `task set` по tid печатает про каждую строку GOAL_IN — иначе последней строкой о
