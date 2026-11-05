@@ -2400,6 +2400,49 @@ def _mk_wt_files(d, n):
         open(os.path.join(d, f"f{i}"), "w").close()
 
 
+def test_worktree_node_modules_0616():
+    """Сквозной (metis-0616): дежурный убирает слитую чистую копию с 6000 файлами в node_modules и .next (больше
+    WALK_LIMIT); копию со ссылкой наружу внутри node_modules не убирает и тревожит; копию с 6000 файлами вне
+    зависимостей оставляет с тревогой «обход длиннее лимита»."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    target = os.path.join(e.tmp, "outside-data")
+    os.makedirs(target)
+    open(os.path.join(target, "keep.txt"), "w").write("x")
+    old = T0 - 3 * 86400
+    wts = {}
+    for n in ("w-clean", "w-link", "w-wide"):
+        wts[n] = os.path.join(folder, ".claude", "worktrees", n)
+        g("worktree", "add", "-q", "-b", n, wts[n])
+    for n in ("w-clean", "w-link"):
+        w = wts[n]
+        _mk_wt_files(os.path.join(w, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
+        _mk_wt_files(os.path.join(w, ".next", "cache"), 3000)
+        os.symlink(os.path.join(w, "node_modules", ".pnpm", "x"), os.path.join(w, "node_modules", "inner"))
+    os.symlink(target, os.path.join(wts["w-link"], "node_modules", ".pnpm", "x", "node_modules", "out"))
+    _mk_wt_files(os.path.join(wts["w-wide"], "src"), 6000)
+    for n, w in wts.items():  # git status чист: зависимости и сборка в исключениях копии
+        ex = subprocess.run(["git", "-C", w, "rev-parse", "--git-path", "info/exclude"], capture_output=True,
+                            text=True).stdout.strip()
+        ex = ex if os.path.isabs(ex) else os.path.join(w, ex)
+        os.makedirs(os.path.dirname(ex), exist_ok=True)
+        open(ex, "a").write("node_modules\n.next\nsrc\n")
+        check(g("status", "--porcelain", cwd=w).stdout.strip() == "", f"{n}: копия не чистая для git")
+        os.utime(w, (old, old))
+    e.run("watch", t=T0)
+    check(not os.path.exists(wts["w-clean"]), "слитая чистая копия с 6000 файлами в node_modules не убрана за проход")
+    check(os.path.exists(wts["w-link"]) and os.path.exists(os.path.join(target, "keep.txt")),
+          "копия со ссылкой наружу в node_modules убрана или цель тронута")
+    check("w-link" in e.alerts() and "ссылки наружу" in e.alerts(), "нет тревоги о ссылке наружу в node_modules")
+    check(os.path.exists(wts["w-wide"]) and "w-wide" in e.alerts() and "обход длиннее лимита" in e.alerts(),
+          "копия с 6000 файлами вне зависимостей убрана или нет тревоги о лимите")
+
+
 def test_outward_links_skips_node_modules_0616():
     """Копия с 6000 файлами в node_modules/.next не «небезопасна» по WALK_LIMIT; ссылка наружу на любой глубине
     node_modules (в том числе .pnpm/x/node_modules/y) находится; зависимости больше DEPS_LIMIT — None («не знаю»);
