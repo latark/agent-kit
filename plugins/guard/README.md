@@ -259,7 +259,15 @@ FNV-1a 64 и оба решения (`slow=<код>:<deny|ask|allow>`, `daemon=�
 Файл блокировки сборки `client-<SRC>.lock` старше 2 минут считается брошенным (сборку убили): оболочка снова запускает
 фон, и `hookd-build.sh` снимает этот файл сам.
 
-**Службу ставит владелец своей командой; роли её не ставят.** Шаблон — `launchd/pantheon.svc.hookd.plist.in`:
+**Службу ставит владелец своей командой или плановый проход Пантеона; роли её не ставят.** Плановый проход
+(services_sync, metis-0845) ставит её, если в `schedule.toml` есть `[[service]]` с `name = "hookd"` (без `command`:
+службу ставит этот скрипт, а не `pantheon service-run`). Он зовёт `hookd-install.sh --no-probe` из проверенного дерева
+guard, когда служба не стоит, не загружена, plist не тот, что даёт `--print`, или `pantheon-hookd.hooks` называет
+другое дерево — после выпуска guard служба переходит на новую версию на ближайшем проходе, а не отвечает «F stale».
+Всё совпало — launchd не трогается. Проба доступа из фона не идёт: после первой установки и после пересборки
+`pantheon-hookd` проход пишет тревогу «проверьте доступ» с командой `--check`. Раз в сутки, пока служба стоит, он
+зовёт `scripts/hookd-stats.py --json`; код 3 (canary-diff) — тревога в утренний итог. Записи нет, она выключена или на
+паузе — проход службу снимает. Шаблон — `launchd/pantheon.svc.hookd.plist.in`:
 - сокет `Sockets` 0600: первое соединение запускает демон, после 30 минут простоя он выходит сам;
 - без KeepAlive, ThrottleInterval 2 с;
 - первый процесс службы — `~/.cache/pantheon/hookd/bin/pantheon-hookd`, а не `/bin/sh` (почему — ниже).
@@ -267,6 +275,7 @@ FNV-1a 64 и оба решения (`slow=<код>:<deny|ask|allow>`, `daemon=�
 Команды из проверенного дерева guard:
 
     /bin/sh ~/.claude/plugins/cache/agent-kit/guard/<версия>/scripts/hookd-install.sh            # поставить
+    /bin/sh …/scripts/hookd-install.sh --no-probe                                                 # поставить без пробы доступа
     /bin/sh …/scripts/hookd-install.sh --check                                                    # проверить, ничего не меняя
     /bin/sh …/scripts/hookd-install.sh --print                                                    # только показать plist
     /bin/sh …/scripts/hookd-install.sh --uninstall                                                # снять

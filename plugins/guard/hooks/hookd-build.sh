@@ -75,7 +75,7 @@ if [ -n "$svc" ]; then
     /usr/bin/xcode-select -p >/dev/null 2>&1 || { echo "hookd-build: нет инструментов командной строки Xcode (xcode-select -p)" >&2; exit 1; }
     [ -x /usr/bin/cc ] || { echo "hookd-build: нет компилятора /usr/bin/cc" >&2; exit 1; }
     lock=$bin.lock
-    /bin/rm -rf "$lock" 2>/dev/null  # собирает только hookd-install.sh из терминала владельца, не фон хука
+    /bin/rm -rf "$lock" 2>/dev/null  # собирает только hookd-install.sh (терминал владельца или плановый проход Пантеона), не фон хука
     /bin/mkdir "$lock" || { echo "hookd-build: папка $lock не создаётся" >&2; exit 1; }
     trap '/bin/rm -rf "$lock" 2>/dev/null' EXIT
     cd "$h" && /usr/bin/env -i HOME="$HOME" PATH="$PATH" TMPDIR="$lock" /usr/bin/cc -O2 \
