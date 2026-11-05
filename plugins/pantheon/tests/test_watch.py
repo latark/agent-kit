@@ -3642,6 +3642,48 @@ def test_plugins_respawn_live_subagent_0181():
           f"0181: нет строки в тревогах: {e.alerts()}")
 
 
+def sub_meta(tp, n, mtime, finished=False):
+    """meta.json субагента рядом с его журналом (Claude Code ставит "finished": true по его концу)."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.meta.json")
+    json.dump({"agentType": "dev-opus", "name": f"dev-{n}", **({"finished": True} if finished else {})}, open(f, "w"))
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_plugins_respawn_quiet_subagent_0864():
+    """metis-0864: субагент без «finished» в meta.json, затихший 20 мин назад (ждёт тесты), — живой: окно после выпуска
+    не перезапускается, причина видна в строке «ждёт». Субагент закончил («finished») — перезапуск. Оборванный прошлым
+    перезапуском (журнал старше старта процесса) и затихший дольше LIVE_SUBAGENT_MAX — мёртвые, окно не держат."""
+    e, a, tp = respawn_env("rq-dir", "abab0864-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    subagent(tp, T0 - 1200, n="q1")
+    sub_meta(tp, "q1", T0 - 1200)
+    e.run("watch", t=T0)
+    check(not respawned(e, "abab0864") and "rq-dir (живые субагенты: dev-q1)" in e.alerts(),
+          f"0864: тихий живой субагент — окно перезапущено или причины нет: {e.calls()} {e.alerts()[-400:]}")
+    sub_meta(tp, "q1", T0 - 1200, finished=True)
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "abab0864"), f"0864: субагент закончил — окно не перезапущено: {e.calls()}")
+    # оборванный прошлым перезапуском: журнал и meta — до старта нынешнего процесса
+    e, a, tp = respawn_env("rd-dir", "cdcd0864-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    subagent(tp, T0 - 7210, n="d1")
+    sub_meta(tp, "d1", T0 - 7210)
+    e.run("watch", t=T0)
+    check(respawned(e, "cdcd0864"), f"0864: субагент, оборванный прошлым перезапуском, держит окно: {e.calls()}")
+    e, a, tp = respawn_env("rs2-dir", "efef0864-1")
+    a["startedAt"] = (T0 - 5 * 3600) * 1000
+    e.agents([a])
+    subagent(tp, T0 - 4 * 3600, n="s1")
+    sub_meta(tp, "s1", T0 - 4 * 3600)
+    e.run("watch", t=T0)
+    check(respawned(e, "efef0864"), f"0864: субагент молчит 4 ч (больше LIVE_SUBAGENT_MAX) — держит окно: {e.calls()}")
+
+
 def test_plugins_respawn_idle_free_0181():
     """metis-0181: idle, транскрипт и субагенты старше 15 мин, worktree нет — перезапуск. Свежая worktree лида в папке
     направления держит окно; поднятое после установки и Зевс — не кандидаты."""

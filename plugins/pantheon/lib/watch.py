@@ -181,6 +181,65 @@ def idle_holder(a):
     return True
 
 
+LIVE_SUBAGENT_MAX = 3 * 3600   # субагент без записи журнала дольше — мёртв (metis-0864): ожидание outside test — до 2 ч
+LIVE_SUBAGENT_GRACE = 120      # с после старта процесса: журналы, закрытые прежним процессом при его снятии, — до этого
+
+
+def live_subagents(a, t):
+    """Живые субагенты окна по subagents/*.meta.json (metis-0864): без «finished», журнал писался после старта нынешнего
+    процесса (+ LIVE_SUBAGENT_GRACE) и не раньше LIVE_SUBAGENT_MAX назад. Субагенты, оборванные перезапуском, остаются
+    без «finished» навсегда, но их журнал старше старта процесса. Старт — P.session_started (Д2 ревью #332): startedAt
+    claude agents без видимого процесса — createdAt задания, он старше прошлых перезапусков. → отсортированные имена."""
+    tp = P.transcript_path(a)
+    if not tp:
+        return []
+    started = P.session_started(a, t)
+    out = []
+    try:
+        it = os.scandir(os.path.join(tp[:-len(".jsonl")], "subagents"))
+    except OSError:
+        return []
+    with it:
+        for e in it:
+            if not (e.name.startswith("agent-") and e.name.endswith(".meta.json")):
+                continue
+            meta = P.read_json(e.path, {})
+            if not isinstance(meta, dict) or meta.get("finished"):
+                continue
+            mt = 0.0
+            for f in (e.path, e.path[:-len(".meta.json")] + ".jsonl"):
+                with contextlib.suppress(OSError):
+                    mt = max(mt, os.path.getmtime(f))
+            if mt <= started + LIVE_SUBAGENT_GRACE or t - mt > LIVE_SUBAGENT_MAX:
+                continue
+            out.append(clean_why(meta.get("name") or e.name[len("agent-"):-len(".meta.json")])[:40])
+    return sorted(out)
+
+
+def live_work(a, t):
+    """Почему окно сейчас нельзя поднимать заново (claude respawn обрывает его ход и субагентов), или None (metis-0864).
+    05.11 окно metis-pantheon четыре раза ждало вашего «да» на команду, а возобновление ждущих (wake-waiting) раз в час
+    перезапускало его: вопрос пропадал, субагенты гибли. Работа окна — ждёт разрешения или ответа на вопрос (tool_use
+    последнего ответа без tool_result, pending_tool), живые субагенты и фоновые задачи (claude agents, inFlight из state.json, meta.json
+    субагентов). Процесса нет (noProcess) — обрывать нечего."""
+    if a.get("noProcess"):
+        return None
+    if "permission" in str(a.get("waitingFor") or "").lower():
+        return "ждёт разрешения"
+    tool = pending_tool(a)
+    if tool:
+        return f"ход не закончен: {tool}"
+    if a.get("subagents") or a.get("backgroundTasks"):
+        return "субагенты или фоновые задачи (claude agents)"
+    fl = awake().session_state(a).get("inFlight")
+    if isinstance(fl, dict) and (fl.get("tasks") or fl.get("queued")):
+        return f"фоновые задачи: {fl.get('tasks') or 0}, в очереди {fl.get('queued') or 0}"
+    names = live_subagents(a, t)
+    if names:
+        return "живые субагенты: " + ", ".join(names[:5]) + (f" и ещё {len(names) - 5}" if len(names) > 5 else "")
+    return None
+
+
 def nudge_target(hold):
     """Кому передать задание вместо «уже работает»: все держатели имени простаивают → самый новый из них; хоть один
     работает, ждёт вас или открыт во вкладке → None."""
@@ -357,19 +416,32 @@ def clean_why(v):
 
 
 def pending_tool(a):
-    """Чего ждёт сессия по её журналу: последний tool_use без tool_result → «Инструмент → цель» или None."""
+    """Чего ждёт сессия по её журналу: tool_use последнего ответа (message assistant) без tool_result → «Инструмент →
+    цель» или None. Открытым считается только tool_use последнего ответа (ревью argus #332 Д1): tool_use-сирота
+    раньше в хвосте (оборванный ход, после которого сессия жила дальше) — не работа, иначе окно числилось бы занятым
+    навсегда. Один ответ — записи журнала с одним message.id (параллельные вызовы Claude Code пишет по записи на блок);
+    без id запись — отдельный ответ. Ответом считается только запись type=assistant с model ≠ <synthetic>. Записи боковой ветки (isSidechain) не в счёт."""
     tp = P.transcript_path(a)
     if not tp:
         return None
     try:
         C = P.ctx_mod()
-        used, results, order = {}, set(), []
-        for d in C.entries(C.tail_lines(tp, 1_000_000)):
-            items = (d.get("message") or {}).get("content")
+        used, results, order, last = {}, set(), [], None
+        for n, d in enumerate(C.entries(C.tail_lines(tp, 1_000_000))):
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            items = msg.get("content")
+            if msg.get("role") == "assistant" and (d.get("type") != "assistant" or msg.get("model") == "<synthetic>"):
+                continue  # ревью argus #337: ответ — только type=assistant; <synthetic> (ошибка API, прерывание) не ответ
+            if msg.get("role") == "assistant" and not d.get("isSidechain"):
+                mid = msg.get("id") or ("entry", n)
+                if mid != last:  # новый ответ: tool_use прежних ответов уже не «ход не закончен»
+                    used, order, last = {}, [], mid
+            elif msg.get("role") == "assistant":
+                continue
             for x in items if isinstance(items, list) else []:
                 if not isinstance(x, dict):
                     continue
-                if x.get("type") == "tool_use" and x.get("id"):
+                if x.get("type") == "tool_use" and x.get("id") and msg.get("role") == "assistant":
                     used[x["id"]] = x
                     order.append(x["id"])
                 elif x.get("type") == "tool_result":
@@ -2784,7 +2856,9 @@ def maint_expire(t):
 # `pantheon plugins update` ставит plugins/respawn.json {"since", "plugins", "done"}; тик перезапускает окна Пантеона,
 # поднятые раньше since, — только свободные. «Простаивает» ≠ «свободно»: координатор idle, пока ждёт фоновых лидов, а
 # claude agents субагентов не показывает. Свободно = idle_holder и одно из: метка «можно» (pantheon saved) новее since
-# или RESPAWN_IDLE_MIN минут без записи транскрипта, журналов субагентов и worktree окна. Занятое ждёт следующего прохода.
+# или RESPAWN_IDLE_MIN минут без записи транскрипта, журналов субагентов и worktree окна; живой субагент по meta.json
+# (watch.live_subagents, metis-0864) держит окно и при метке «можно». Занятое ждёт следующего прохода, выпуски за это
+# время копятся в одной отметке respawn.json — окно перезапускается один раз.
 
 WT_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", ".turbo", ".cache", "dist", "build"}
 
@@ -2848,6 +2922,9 @@ def respawn_busy(a, doms, since, t):
     """Почему окно a сейчас нельзя перезапустить, или None — свободно."""
     if not idle_holder(a):
         return "занято"
+    subs = live_subagents(a, t)  # metis-0864: тихий субагент (ждёт тесты) не пишет журнал — простой его не видит
+    if subs:
+        return "живые субагенты: " + ", ".join(subs[:5])
     ok = P.read_json(respawn_path("respawn-ok", str(a.get("name")) + ".json"), {})
     # metis-0499: метка с id сессии — «можно» только ей; другая живая копия с тем же именем ждёт простоя
     if isinstance(ok, dict) and float(ok.get("t") or 0) > since and ok.get("sessionId") in (None, a.get("sessionId")):

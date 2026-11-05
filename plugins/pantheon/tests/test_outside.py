@@ -65,6 +65,19 @@ _atexit.register(_kill_servers)  # раньше rmtree: atexit идёт с ко�
 TEST_PROCS = []   # процессы, которые тест порождает сам в своих сессиях (сирота, «чужой», sleep)
 
 
+class _Gk:
+    """Процесс-внук, известный только по pid: в TEST_PROCS ради последнего рубежа (SIGKILL), как Popen."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def kill(self):
+        os.kill(self.pid, 9)
+
+    def wait(self, timeout=None):
+        pass
+
+
 def fake_pids():
     """Номера всех процессов заглушки sandbox-exec и задач «turbo» за прогон (пишут сами при старте)."""
     try:
@@ -1180,6 +1193,29 @@ for _bad, _why in (("out", "вне корня"), ("empty", "нет package.json"
     serve_pass()
     check(f"0790: --app {_bad}: отказ ({_why})", state(q, rid) == "failed"
           and _why in (O.load_result(q, rid) or {}).get("why", ""), O.load_result(q, rid))
+# metis-0804 (argus #302, мутант m8 «без app != "."»): --app . в репозитории с корневым package.json без workspaces —
+# корневой скрипт, папка запуска и установка зависимостей — корень копии, а не приложение-подпапка
+ROOTP = os.path.join(HOME, "projects", "rootpkg")
+os.makedirs(ROOTP)
+git(ROOTP, "init", "-q", "-b", "main")
+git(ROOTP, "remote", "add", "origin", "https://github.com/latark/rootpkg.git")
+commit(ROOTP, {"package.json": json.dumps({"name": "rootpkg", "scripts": {"dev": "next dev"}}),
+               "pnpm-lock.yaml": "", ".gitignore": "node_modules/\n"}, "r1")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/subapp", "~/projects/rootpkg"],
+                          "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+kill_all_servers()
+before = len(calls())
+rc, q, rid = role_request("athena-x", ROOTP, "serve", "--app", ".")
+serve_pass()
+res = O.load_result(q, rid) or {}
+c = calls()[before:]
+check("0804: --app . без монорепо, с корневым package.json — корневой скрипт в корне копии",
+      res.get("state") == "serving" and c and c[-1]["cwd"] == work_of(rid) and c[-1]["cmd"][-3:] == ["pnpm", "run", "dev"],
+      (res, [(x["cmd"], x["cwd"]) for x in c]))
+check("0804: --app . без монорепо — зависимости ставятся в корне копии",
+      c and c[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"] and c[0]["cwd"] == work_of(rid), c[:1])
+kill_all_servers()
 rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "../x")
 check("0790: --app ../x: код 2", rc == 2)
 rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "/etc")
@@ -1686,26 +1722,103 @@ if not MAC:
 else:
     _ps_keep = O.PS
     O.PS = os.path.join(_ROOT, "нет-ps-0786")
-    _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
-                            "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
-                            start_new_session=True)
-    TEST_PROCS.append(_par)
-    _kid2 = []
-    for _ in range(40):
-        time.sleep(0.1)
-        _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
-        if _kid2:
-            break
-    _st = O.strays(_par.pid)
-    _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
-    check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
-          and _me_row[2] > 0, _me_row)
-    check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
-    O.kill_group(_par.pid)
-    time.sleep(0.3)
-    check("без ps: kill_group гасит и главу, и потомка в своей группе",
-          _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
-    O.PS = _ps_keep
+    try:
+        _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
+                                "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
+                                start_new_session=True)
+        TEST_PROCS.append(_par)
+        _kid2 = []
+        for _ in range(40):
+            time.sleep(0.1)
+            _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
+            if _kid2:
+                break
+        TEST_PROCS.extend(_kid2 and [_Gk(p) for p in _kid2] or [])
+        _st = O.strays(_par.pid)
+        _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
+        check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
+              and _me_row[2] > 0, _me_row)
+        check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
+        O.kill_group(_par.pid)
+        time.sleep(0.3)
+        check("без ps: kill_group гасит и главу, и потомка в своей группе",
+              _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
+    finally:   # O.PS возвращается и при исключении (metis-0804)
+        O.PS = _ps_keep
+
+# --- ps_table (metis-0804, долги argus #300): откат на ps, полнота таблицы, повтор с большим буфером ----------------
+# ложная libproc в O._libproc (работает на любой ОС) и ps-шим в O.PS
+
+
+class _FakeLib:
+    """proc_listallpids / proc_pidinfo как в libproc: listall(None, 0) — число pid, listall(buf, байт) — сколько
+    записано (не больше, чем влезло); pidinfo заполняет struct по byref."""
+
+    def __init__(self, count, query=None, info_ok=True, fill=None):
+        self.count, self.query, self.info_ok, self.fill = count, query, info_ok, fill
+
+    def proc_listallpids(self, buf, size):
+        if buf is None:
+            return self.count if self.query is None else self.query
+        if self.fill is not None:
+            return self.fill
+        n = min(self.count, size // 4)
+        for i in range(n):
+            buf[i] = 1000 + i
+        return n
+
+    def proc_pidinfo(self, p, flavor, _arg, ref, size):
+        if not self.info_ok:
+            return 0
+        obj = ref._obj
+        if flavor == 3:
+            obj.ppid, obj.pgid = 1, p
+        else:
+            obj[1] = 2048 * 1024
+        return size
+
+
+_ps_sh = os.path.join(_ROOT, "ps-0804.sh")
+with open(_ps_sh, "w") as fh:
+    fh.write("#!/bin/sh\nprintf '  11 1 11 100\\n  12 11 11 200\\n'\n")
+os.chmod(_ps_sh, 0o755)
+_ps_keep, _lp_keep = O.PS, O._libproc
+O.PS = _ps_sh
+try:
+    for _label, _lib in (("proc_listallpids вернула 0", _FakeLib(0)), ("proc_listallpids вернула -1", _FakeLib(-1)),
+                         ("заполнение списка вернуло -1", _FakeLib(5, fill=-1)),
+                         ("список есть, а pidinfo не ответила ни на один pid (пустая таблица)", _FakeLib(5, info_ok=False))):
+        O._libproc = lambda _l=_lib: (_l, 1e-9)
+        _t = O.ps_table()
+        check(f"0804: {_label} — таблица по ps, а не пустая", _t == {11: (1, 11, 100), 12: (11, 11, 200)}, _t)
+    O._libproc = lambda: None
+    check("0804: libproc нет — таблица по ps", O.ps_table() == {11: (1, 11, 100), 12: (11, 11, 200)})
+    # полнота: все 450 процессов в таблице (буфер размером в pid, а не в байтах — мутант терял 189 из 450)
+    O._libproc = lambda: (_FakeLib(450), 1e-9)
+    _t = O.ps_table()
+    check("0804: libproc отдала 450 процессов — в таблице все 450", sorted(_t) == list(range(1000, 1450))
+          and _t[1000] == (1, 1000, 2048), (len(_t), sorted(_t)[:3]))
+    # буфер оказался полон (процессы появились между вызовами): повтор с большим — ничего не потеряно
+    O._libproc = lambda: (_FakeLib(900, query=10), 1e-9)
+    _t = O.ps_table()
+    check("0804: буфер полон — повтор с большим, все 900 процессов в таблице", sorted(_t) == list(range(1000, 1900)),
+          len(_t))
+finally:
+    O.PS, O._libproc = _ps_keep, _lp_keep
+# живая сверка (macOS, ps запускается): свои процессы по ps есть в таблице libproc, с допуском на гонку и зомби
+if MAC:
+    try:
+        _ps_own = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True, text=True,
+                                 timeout=10).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        _ps_own = []
+    _lp = O._ps_table_libproc()
+    if len(_ps_own) < 20 or not _lp:
+        print("пропущено: ps не запустить в этой среде — сверка libproc с ps вне песочницы")
+    else:
+        _miss = [p for p in map(int, _ps_own) if p not in _lp]
+        check("0804: libproc видит свои процессы — потеря не больше 5% + 5 (зомби, гонка)",
+              len(_miss) <= 5 + len(_ps_own) // 20, (len(_miss), len(_ps_own), _miss[:10]))
 
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
 TEST_PROCS.append(leader)
@@ -2569,7 +2682,8 @@ for label, spoil in (("сдвинула HEAD копии на другой зел
 
 # HEAD копии сдвинулся уже после первой проверки — перед прогоном (между tree_record и чтением HEAD) или во время
 # прогона: запись только на коммит заявки, на сдвинутый HEAD — никогда
-_tr, _wp = O.tree_record, O.wait_proc
+_tr, _wp, _rt = O.tree_record, O.wait_proc, O.run_test
+_cwd_of = [None]  # папка прогона для подмены wait_proc; вне цикла, чтобы лямбды не держали переменную цикла (B023)
 
 
 def _move_head(d):
@@ -2581,8 +2695,7 @@ for label, attr, fake in (
         # wait_proc зовёт и установка (prepare) — HEAD двигаем только в прогоне теста (у него idle_log)
         ("во время прогона", "wait_proc",
          lambda proc, *a, **kw: (kw.get("idle_log") and _move_head(_cwd_of[0]), _wp(proc, *a, **kw))[1])):
-    _cwd_of = [None]
-    _rt = O.run_test
+    _cwd_of[0] = None
     O.run_test = lambda rid, d, *a, **kw: (_cwd_of.__setitem__(0, str(d)), _rt(rid, d, *a, **kw))[1]
     setattr(O, attr, fake)
     n_e, n_g = len(tests_for(HEADE)), len(tests_for(CPG))
@@ -2707,6 +2820,50 @@ before = reqs()
 role_request("athena-x", APP, "test")
 check("0796: две обычные на одном HEAD — вторая не плодит заявку", reqs() == before, (before, reqs()))
 run_pass()
+
+# metis-0798 Д1: итог running заявки --sha несёт pin, и обычная заявка при нём не сцепляется (мутант «pin убран из
+# running» в run_test, outside.py: extra["pin"] = True)
+_runs, _save0 = [], O.save_result
+
+
+def _save_spy(qdir, rid, res):
+    if res.get("state") == "running":
+        _runs.append((qdir, rid, dict(res)))
+    return _save0(qdir, rid, res)
+
+
+O.save_result = _save_spy
+try:
+    q_pin, r_pin = new_request("athena-x", APP, "test", "--sha", CPG)
+    run_pass()
+finally:
+    O.save_result = _save0
+_run_pin = [r for r in _runs if r[1] == r_pin]
+check("0798: итог running заявки --sha несёт pin: true", bool(_run_pin) and all(r[2].get("pin") is True for r in _run_pin),
+      _runs)
+_fake = "20261103-099999-feedfa"
+_res_pin = {**_run_pin[-1][2], "id": _fake, "src": APP, "updated": P.stamp()}
+with open(os.path.join(q_pin, _fake + ".result.json"), "w") as fh:
+    json.dump(_res_pin, fh)
+before = reqs()
+rc, _, _ = role_request("athena-x", APP, "test")
+check("0798: обычная заявка при running --sha на том же SHA — новая заявка, не сцепление",
+      rc == 0 and len(reqs() - before) == 1, (rc, before, reqs()))
+before = reqs()
+role_request("athena-x", APP, "test", "--sha", CPG)
+check("0798: --sha при running --sha на том же SHA — сцеплена, новой заявки нет", reqs() == before, (before, reqs()))
+# и обратно: running обычной заявки не сцепляет --sha
+with open(os.path.join(q_pin, _fake + ".result.json"), "w") as fh:
+    json.dump({k: v for k, v in _res_pin.items() if k != "pin"}, fh)
+before = reqs()
+role_request("athena-x", APP, "test", "--sha", CPG)
+check("0798: --sha при running обычной на том же SHA — новая заявка", len(reqs() - before) == 1, (before, reqs()))
+os.remove(os.path.join(q_pin, _fake + ".result.json"))
+for _n in reqs():   # ждущие заявки этого блока снимаем: дальше блоки считают очередь сами
+    try:
+        os.remove(os.path.join(_q, _n))
+    except OSError:
+        pass
 git(APP, "switch", "-q", "main")
 
 # metis-0796 Д1: refs/replace в клоне подменяет содержимое копии при том же HEAD и чистом status — копия идёт с

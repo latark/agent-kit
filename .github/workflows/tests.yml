@@ -12,8 +12,12 @@
 #   - на push в main и по расписанию тесты не запускаются: прогона после слияния нет, красный main ловит
 #     локальный полный набор.
 # ruff (metis-0265) — первый шаг job affected, на каждый PR: правила — ruff.toml, версия и хеши колёс —
-# .github/ruff-requirements.txt. Не отдельным job: шлюз guard считает job на PR вне REQUIRED_CHECKS и OPTIONAL_CHECKS
-# ошибкой (Д1 argus #235), а внутри affected красный ruff и так держит обязательную проверку.
+# .github/ruff-requirements.txt. Вторым шагом — храповик (metis-0854, plugins/pantheon/scripts/lint_ratchet.py):
+# размер файлов, сложность функций и циклы импорта не растут против plugins/pantheon/scripts/lint-baseline.json
+# (режим — plugins/pantheon/scripts/lint-ratchet-mode: warn — предупреждение с кодом 0, fail — отказ); ruff —
+# с PATH, нет его — красный (run-tests.py зовёт храповик и сам, но без ruff пропускает). Не отдельным job: шлюз guard
+# считает job на PR вне REQUIRED_CHECKS и OPTIONAL_CHECKS ошибкой (Д1 argus #235), а внутри affected красный ruff и
+# так держит обязательную проверку.
 # Права — только чтение; сторонних Action, кроме actions/checkout и actions/setup-python по полному SHA, нет.
 name: tests
 
@@ -46,6 +50,8 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt
           ruff check .
+      - name: Храповик размера, сложности и импортов (база — plugins/pantheon/scripts/lint-baseline.json; metis-0854)
+        run: python3 -I plugins/pantheon/scripts/lint_ratchet.py
       - name: Тесты скриптов выпуска
         run: python3 -I .github/scripts/test_release.py
       - name: Затронутые тесты guard, pantheon и project-tools
