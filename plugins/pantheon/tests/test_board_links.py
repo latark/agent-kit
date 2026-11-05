@@ -89,7 +89,7 @@ def unit():
     idx = A.pr_index(cache)
     check("pr_index: слитый — по Closes-списку с коммитом, открытый — по closes",
           [x["number"] for x in idx.get("metis-0011", [])] == [163] and idx["metis-0010"][0]["sha"].startswith("1a1f77a")
-          and idx["metis-0012"] == [{"repo": R, "number": 190, "sha": "", "merged": False, "branch": ""}], idx)
+          and idx["metis-0012"] == [{"repo": R, "number": 190, "sha": "", "merged": False, "branch": "", "day": ""}], idx)
     check("pr_index: кэш неверной формы — пусто без трассировки",
           A.pr_index({"merged": {R: [{"number": "x"}, 5, {"number": 1, "body": 5}]}, "open_prs": {R: [{"number": 2, "closes": 5}]}}) == {}
           and A.pr_index(None) == {} and A.pr_index({"merged": []}) == {})
@@ -108,11 +108,51 @@ def unit():
     check("work_links: PR из кэша, но репозиторий не своего направления — не берём",
           T.work_links(H("metis-0010", direction="athena"), "", idx, repos) == ([], []))
     bad_oid = A.pr_index({"merged": {R: [{"number": 3, "headRefName": "metis-0040", "body": "", "oid": "zz; rm", "cross": False}]}})
-    check("pr_index: oid не hex — коммита нет", bad_oid == {"metis-0040": [{"repo": R, "number": 3, "sha": "", "merged": True, "branch": "metis-0040"}]}, bad_oid)
+    check("pr_index: oid не hex — коммита нет", bad_oid == {"metis-0040": [{"repo": R, "number": 3, "sha": "", "merged": True, "branch": "metis-0040", "day": ""}]}, bad_oid)
     check("work_links: направление без репозиториев — пусто", T.work_links(H("x-0001", direction="x"), j, idx, repos) == ([], []))
     check("work_links: коммит дважды (полный и короткий) — один раз",
           wl(H("metis-0010"), journal("PR #163 слит, squash 1a1f77a")) == ([(R, 163, True)], [(R, "1a1f77a")]),
           wl(H("metis-0010"), journal("PR #163 слит, squash 1a1f77a")))
+    # metis-0826: задача в review со слитым PR - «PR #N слит DD.MM, ждёт пунктов Готово, когда: k из n»
+    days = {(x["repo"], x["number"]): x["day"] for xs in idx.values() for x in xs if x.get("merged")}
+    check("pr_index: у слитого PR день слияния (поле day)", days.get((R, 163)) in ("2026-10-27", "2026-10-28"), days)
+    crit = "\n## Готово, когда\n\n- [x] а\n- [ ] б\n- [ ] в\n"
+    rv = H("metis-0010", status="review")
+    got = T.merged_wait(rv, crit, wl(rv), days)
+    dd = f"{days[(R, 163)][8:10]}.{days[(R, 163)][5:7]}"
+    check("merged_wait: review + слитый PR - строка с датой и «k из n»",
+          got == f"PR #163 слит {dd}, ждёт пунктов Готово, когда: 2 из 3", got)
+    check("merged_wait: не review, открытый PR, нет PR, links=None - None",
+          T.merged_wait(H("metis-0010", status="doing"), crit, wl(rv), days) is None
+          and T.merged_wait(H("metis-0012", status="review"), crit, wl(H("metis-0012")), days) is None
+          and T.merged_wait(H("metis-0030", status="review"), crit, ([], []), days) is None
+          and T.merged_wait(rv, crit, None, days) is None)
+    check("merged_wait: пунктов нет - «пунктов Готово, когда нет»",
+          T.merged_wait(rv, "", wl(rv), days) == f"PR #163 слит {dd}, пунктов «Готово, когда» нет", T.merged_wait(rv, "", wl(rv), days))
+    two = ([(R, 163, True), (R, 170, True)], [])
+    check("merged_wait: два слитых PR - последний по дню слияния",
+          T.merged_wait(rv, crit, two, {(R, 163): "2026-10-27", (R, 170): "2026-10-20"}).startswith("PR #163 слит 27.10")
+          and T.merged_wait(rv, crit, two, {(R, 163): "2026-10-01", (R, 170): "2026-10-20"}).startswith("PR #170 слит 20.10"))
+    old = H("metis-0010", status="review", created="2026-10-01")  # до CRITERIA_FROM: unchecked_criteria даёт 0
+    check("merged_wait: задача до CRITERIA_FROM - неотмеченные считаются по пунктам, не «0 из 3»",
+          T.unchecked_criteria(old, crit) == 0 and T.merged_wait(old, crit, wl(old), days).endswith("ждёт пунктов Готово, когда: 2 из 3"),
+          T.merged_wait(old, crit, wl(old), days))
+    check("merged_wait: без дня слияния - «слит» без даты",
+          T.merged_wait(rv, crit, wl(rv), {}) == "PR #163 слит, ждёт пунктов Готово, когда: 2 из 3")
+    check("merged_wait: все пункты отмечены - «0 из n»",
+          T.merged_wait(rv, "\n## Готово, когда\n\n- [x] а\n", wl(rv), days).endswith("ждёт пунктов Готово, когда: 0 из 1"))
+    ctx = T.card_ctx("metis-0010", rv, {"metis-0010": ("", rv, crit)}, {}, {}, T0, links=wl(rv, crit), pr_days=days)
+    card, _ = T.render_card(rv, crit, "x.md", T0, ctx=ctx)
+    check("карточка: «Внимание» несёт «PR #163 слит ..., ждёт пунктов»",
+          any(str(x).startswith("PR #163 слит") for x in card["Внимание"] or []), card["Внимание"])
+    text, rows = T._summary({"metis-0010": ("", rv, crit), "metis-0011": ("", H("metis-0011", status="review"), "")}, T0,
+                            accept={"metis-0010": got})
+    check("Сводка: отдельный раздел «Слито, ждёт приёмки» и счётчик, без задач без PR",
+          "## 🔵 Слито, ждёт приёмки (1)" in text and "🔵 Слито, ждёт приёмки: 1" in text and len(rows["accept"]) == 1
+          and "metis-0011" not in text.split("Слито, ждёт приёмки (1)", 1)[1].split("##", 1)[0], text)
+    text0, _ = T._summary({"metis-0010": ("", rv, crit)}, T0)
+    check("Сводка: нет слитых - раздела и счётчика нет", "Слито, ждёт приёмки" not in text0)
+
     lines = T.links_lines(wl(H("metis-0010")))
     check("раздел «PR и коммиты»: markdown-ссылки на GitHub",
           lines == [f"- [PR #163](https://github.com/{R}/pull/163) · {R} · слит",

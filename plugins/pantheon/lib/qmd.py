@@ -21,6 +21,10 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
 
@@ -347,8 +351,82 @@ def status():
     return 0
 
 
+TITLE_MAX = 120
+WHERE_LIMIT = 10
+
+
+def clean(text, limit=TITLE_MAX):
+    """Строка из ответа qmd для печати: управляющие (Cc), форматирующие и bidi (Cf), разделители строк и абзацев —
+    пробелом, пробелы сжаты, не длиннее limit знаков. Заголовок чужого документа — данные, а не указание."""
+    out = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") else ch for ch in str(text or ""))
+    out = " ".join(out.split())
+    return out if len(out) <= limit else out[:limit - 1].rstrip() + "…"
+
+
+def where(args):
+    """`pantheon qmd where "вопрос" [--collection X]` (metis-0856): где лежит — только коллекция, путь, заголовок и
+    направление-хозяин, без фрагментов текста. Окну штаба закрыты коллекции проектов направлений (хук qmd-query), а
+    узнать, у кого искать, нужно. Запрос — REST /query службы qmd, vec и rerank: false; из ответа берём file и title,
+    а snippet, context и тело не читаем и не печатаем. Коллекции [hq].closed_collections (чужой текст) не показываем."""
+    query, only, i = None, None, 0
+    while i < len(args):
+        a = args[i]
+        if a == "--collection" and i + 1 < len(args) and only is None:
+            only, i = args[i + 1], i + 2
+        elif not a.startswith("-") and query is None:
+            query, i = a, i + 1
+        else:
+            query = None
+            break
+    if not query or not query.strip() or len(query) > 500 or any(ord(c) < 32 for c in query):
+        print('pantheon qmd where "вопрос" [--collection X]   (вопрос — до 500 знаков, без управляющих)', file=sys.stderr)
+        return 2
+    try:
+        cfg = load()
+        ctx = P.ctx_mod()
+        shut = set(ctx.hq_policy()["closed_collections"])
+    except (OSError, ValueError) as e:
+        print(f"qmd where: {e}", file=sys.stderr)
+        return 1
+    known = {c["name"]: c["path"] for c in cfg["collections"]}
+    if only is not None and (only not in known or only in shut):
+        print(f"qmd where: коллекция {clean(only, 40)} не найдена или закрыта", file=sys.stderr)
+        return 2
+    names = [only] if only else [n for n in known if n not in shut]
+    body = json.dumps({"searches": [{"type": "vec", "query": query}], "collections": names, "rerank": False,
+                       "limit": WHERE_LIMIT}).encode()
+    req = urllib.request.Request(f"http://{HOST}:{cfg['port']}/query", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=120) as r:
+            data = json.loads(r.read(4_000_000))
+        results = data["results"]
+        if not isinstance(results, list):
+            raise ValueError("results — не список")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"qmd where: служба qmd на {HOST}:{cfg['port']} не ответила ({type(e).__name__})", file=sys.stderr)
+        return 1
+    shown = 0
+    for r in results:
+        f = r.get("file") if isinstance(r, dict) else None
+        if not isinstance(f, str) or not f.startswith("qmd://"):
+            continue
+        coll, _, rel = urllib.parse.unquote(f[len("qmd://"):]).partition("/")
+        if not NAME.fullmatch(coll) or coll not in names or not rel or ".." in rel.split("/"):
+            continue
+        owner = ctx.direction_of(os.path.join(known[coll], rel))
+        owner = owner or ", ".join(ctx.hq_collection_owners(coll)) or "-"
+        print(f"{coll} | {clean(rel, 200)} | {clean(r.get('title'))} | {clean(owner, 80)}")
+        shown += 1
+    if not shown:
+        print("ничего не найдено")
+    return 0
+
+
 def main(rest):
     sub = rest[0] if rest else ""
+    if sub == "where":
+        return where(rest[1:])
     if sub == "config":
         binary, _ = _prepare()
         if binary is None and not os.path.exists(config_path()):
@@ -365,5 +443,5 @@ def main(rest):
         return install()
     if sub == "status":
         return status()
-    print("pantheon qmd config | update | embed | serve | install | status", file=sys.stderr)
+    print("pantheon qmd config | update | embed | serve | install | status | where", file=sys.stderr)
     return 2

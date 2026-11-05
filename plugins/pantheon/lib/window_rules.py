@@ -36,6 +36,7 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
               "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
+              "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
 CORE_TEXT = ("any path under " + ", ".join(f"`{d}/`" for d in CORE_DIR) + ", or one of the files "

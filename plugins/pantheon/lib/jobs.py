@@ -127,8 +127,11 @@ def run_job(name):
 def next_run(job, st, t):
     if job.get("enabled") is False or st.get("disabled") or st.get("paused"):
         return "—"
-    if P.locked("job-" + job["name"]):
+    held = P.lock_held("job-" + job["name"])  # metis-0266: показ замок не пишет (в песочнице окна STATE/locks только читается)
+    if held:
         return "идёт"
+    if held is None:
+        return "не знаю (блокировка не читается)"
     if st.get("waiting"):
         return "ждёт условий"
     if st.get("last_start") is None:
@@ -159,11 +162,12 @@ def jobs_show():
     for job in sched.get("job") or []:
         st = P.job_state(job["name"])
         every = "каждый плановый проход" if job.get("every", "tick") == "tick" else f"{job['every']} мин"
+        held = False
         if job.get("enabled") is False or st.get("disabled"):
             state = "выключена"
         elif st.get("paused"):
             state = f"пауза{': ' + st['paused_reason'] if st.get('paused_reason') else ''}"
-        elif P.locked("job-" + job["name"]):
+        elif (held := P.lock_held("job-" + job["name"])):
             state = "идёт"
         elif P.parse_command(job.get("command")) is None:
             state = "команда не разрешена — пропускается"
@@ -175,6 +179,8 @@ def jobs_show():
             state = f"упала, код {st['last_rc']}"
         else:
             state = "ок"
+        if held is None:  # metis-0266: замок не прочитан — «идёт» или нет, не знаем; остальное состояние выше верно
+            state += " · идёт ли сейчас — не знаю (блокировка не читается)"
         if st.get("lease_until"):
             state += f" · аренда до {P.stamp(st['lease_until'])[:10]}"
         last = P.ago(st.get("last_start")) if st.get("last_start") else "—"

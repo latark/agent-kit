@@ -12,6 +12,10 @@
                                            launch_activate_socket «Listeners»), первое соединение запускает демон
   python.sh daemon.py --socket <путь>    — сокет создаёт сам, когда правила загружены (0600; тесты и замер
                                            bench.py --hookd); при выходе убирает
+  python.sh daemon.py --fd <n> [--fd …]  — слушающие сокеты уже открыты под этими номерами: их передаёт исполняемый
+                                           файл службы pantheon-hookd (hooks/hookd-svc.c), он берёт их у launchd
+  python.sh daemon.py --tcc-probe <файл> — не демон: пробует прочесть Desktop, Documents, Downloads и iCloud Drive и
+                                           пишет итог в файл JSON (hookd-install.sh, запрос разрешения TCC; ниже)
   [--idle <с>]                           — простой до выхода (по умолчанию 1800 с; launchd поднимет снова)
   [--uid <n>]                            — ожидаемый uid пира, по умолчанию свой (только для проб отказа «peer»)
 
@@ -53,6 +57,20 @@ Edit, разбор команды Bash) демон решает сам.
 Устаревшие правила: при каждом соединении демон сверяет файлы hooks/*.py и .claude-plugin/plugin.json по mtime,
 размеру и inode (и их список) с тем, что загрузил. Разошлось — «F stale» и выход: launchd поднимет свежий демон по
 следующему соединению, а этот вызов идёт медленным путём. Версия плагина из plugin.json едет и в протоколе.
+
+Счёт решений (F9, metis-0811). Откаты клиент пишет в hookd-fallback.log, а решения демона — нигде: без них долю
+откатов не посчитать. Ребёнок, отправив «X …», пишет один байт в канал родителя (неблокирующий: занят — байт теряется,
+вызов не ждёт). Родитель копит счёт и не чаще раза в FLUSH_EVERY с, а также перед выходом, дописывает строку
+«время<TAB>ok<TAB>число» в ~/.local/state/pantheon/logs/hookd-calls.log. Пока счёт не записан, select ждёт не дольше
+остатка FLUSH_EVERY: строка приходит и в тишине после решения. Выход — по простою, stale и SIGTERM (launchctl bootout,
+kickstart -k): обработчик SIGTERM только ставит флаг и будит select байтом в свой канал (signal.set_wakeup_fd), а
+счёт пишет сам цикл — запись не прерывается посередине. Долю за сутки считает scripts/hookd-stats.py.
+
+Проба TCC (--tcc-probe, решение владельца 04.11). hookd-install.sh запускает её разовым заданием launchd через тот же
+pantheon-hookd, что и службу: окна macOS «разрешить доступ» появляются при установке, а не из фона в случайный миг, и
+разрешение достаётся тому же ответственному процессу, что у демона. В файле — итог по каждой папке (ok, denied,
+missing, error <errno>) и путь ответственного процесса (responsibility_get_pid_responsible_for_pid): им macOS
+называет того, кого спрашивает. Правила guard проба не грузит.
 """
 import errno
 import json
@@ -83,6 +101,11 @@ SPAWN_EXIT = 97  # код внука: правило запускает прог
 SPAWN_OS = ("fork", "forkpty", "posix_spawn", "posix_spawnp", "system", "popen", "execv", "execve", "execl", "execle",
             "execlp", "execlpe", "execvp", "execvpe", "spawnv", "spawnve", "spawnl", "spawnle", "spawnlp", "spawnlpe",
             "spawnvp", "spawnvpe")
+CALLS_LOG = "hookd-calls.log"  # счёт решений демона в ~/.local/state/pantheon/logs (F9)
+FLUSH_EVERY = 60  # с между строками счёта
+# папки под TCC «Файлы и папки», к которым проба просит доступ: имя в итоге → путь от HOME
+TCC_DIRS = (("Desktop", "Desktop"), ("Documents", "Documents"), ("Downloads", "Downloads"),
+            ("iCloud Drive", os.path.join("Library", "Mobile Documents")))
 
 
 def trap_perm(on_perm):
@@ -237,6 +260,11 @@ class Daemon:
         self.own_path = self.own_ino = None  # сокет, созданный самим демоном (--socket): убрать при выходе
         self.idle = idle
         self.uid = os.getuid() if uid is None else uid
+        self.count_r = self.count_w = None  # канал «решение отправлено» от детей (F9)
+        self.ok = 0  # решений с прошлой строки счёта
+        self.wake_r = self.wake_w = None  # канал signal.set_wakeup_fd: SIGTERM будит select
+        self.term = False  # пришёл SIGTERM: записать счёт и выйти
+        self.flushed = time.monotonic()
         self.hooks = os.path.dirname(os.path.realpath(__file__))
         self.root = os.path.dirname(self.hooks)
         self.version = plugin_version(self.root)
@@ -270,16 +298,73 @@ class Daemon:
             except OSError:
                 pass
 
+    def flush(self):
+        """Строка счёта решений в hookd-calls.log (если было что считать). Сбой записи — строка в журнал демона."""
+        n, self.ok, self.flushed = self.ok, 0, time.monotonic()
+        if not n:
+            return
+        try:
+            home = os.environ.get("HOME") or ""
+            if not home:
+                raise OSError("HOME пуст")
+            d = os.path.join(home, ".local", "state", "pantheon", "logs")
+            os.makedirs(d, exist_ok=True)
+            fd = os.open(os.path.join(d, CALLS_LOG), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o644)
+            try:
+                os.write(fd, f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\tok\t{n}\n".encode())
+            finally:
+                os.close(fd)
+        except OSError as e:
+            log(f"счёт решений ({n}) не записан в {CALLS_LOG}: {e}")
+
+    def drain(self):
+        try:
+            self.ok += len(os.read(self.count_r, 65536))
+        except OSError:  # BlockingIOError — ложное пробуждение
+            pass
+
+    def exit(self, why):
+        log(why)
+        self.flush()
+        self.cleanup()
+        os._exit(0)
+
+    def on_term(self, _sig, _frame):
+        self.term = True  # выход — в цикле: select разбудит байт в wake_r
+
     def loop(self):
         signal.signal(signal.SIGCHLD, signal.SIG_IGN)  # дети не становятся зомби
+        self.count_r, self.count_w = os.pipe()
+        self.wake_r, self.wake_w = os.pipe()
+        for fd in (self.count_r, self.count_w, self.wake_r, self.wake_w):
+            os.set_blocking(fd, False)
+        signal.set_wakeup_fd(self.wake_w)
+        signal.signal(signal.SIGTERM, self.on_term)
         log(f"готов: {self.hooks} версия {self.version or '?'}")
+        last = time.monotonic()  # последнее соединение или байт счёта: от него считается простой
         while True:
-            ready, _, _ = select.select(self.listeners, [], [], self.idle)
-            if not ready:
-                log("простой — выход")
-                self.cleanup()
-                os._exit(0)
+            now = time.monotonic()
+            wait = self.idle - (now - last)
+            if self.ok:  # счёт не записан: проснуться к сроку строки, а не ждать соединения или простоя
+                wait = min(wait, FLUSH_EVERY - (now - self.flushed))
+            ready, _, _ = select.select(self.listeners + [self.count_r, self.wake_r], [], [], max(wait, 0))
+            if self.term:
+                self.drain()
+                self.exit("SIGTERM — выход")
+            if self.wake_r in ready:
+                try:
+                    os.read(self.wake_r, 4096)
+                except OSError:
+                    pass
+                ready.remove(self.wake_r)
+            if ready:
+                last = time.monotonic()
+            elif time.monotonic() - last >= self.idle:
+                self.exit("простой — выход")
             for lst in ready:
+                if lst == self.count_r:
+                    self.drain()
+                    continue
                 try:
                     conn, _ = lst.accept()
                 except (BlockingIOError, InterruptedError, ConnectionAbortedError):
@@ -291,9 +376,8 @@ class Daemon:
                     except OSError:
                         pass
                     conn.close()
-                    log("правила изменились (stale) — выход")
-                    self.cleanup()
-                    os._exit(0)
+                    self.drain()
+                    self.exit("правила изменились (stale) — выход")
                 try:
                     pid = os.fork()
                 except OSError as e:
@@ -301,10 +385,16 @@ class Daemon:
                     conn.close()
                     continue
                 if pid == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    signal.set_wakeup_fd(-1)
                     for x in self.listeners:
                         x.close()
+                    for fd in (self.count_r, self.wake_r, self.wake_w):
+                        os.close(fd)
                     self.serve(conn)
                 conn.close()
+            if self.ok and time.monotonic() - self.flushed >= FLUSH_EVERY:
+                self.flush()
 
     def serve(self, conn):
         """Ребёнок на соединение. Не возвращается."""
@@ -320,6 +410,10 @@ class Daemon:
             conn.settimeout(None)
             code, out, err = self.decide(hdr, raw)
             conn.sendall(f"X {code} {len(out)} {len(err)}\n".encode() + out + err)
+            try:  # счёт решений (F9): канал неблокирующий — занят, байт теряется, вызов не ждёт
+                os.write(self.count_w, b".")
+            except (OSError, TypeError):
+                pass
         except Refuse as e:
             self.refuse(conn, str(e))
         except Exception as e:
@@ -384,6 +478,8 @@ class Daemon:
             try:
                 os.close(o_r)
                 os.close(e_r)
+                if self.count_w is not None:  # счёт решений пишет ребёнок, а не внук
+                    os.close(self.count_w)
                 null = os.open(os.devnull, os.O_RDONLY)
                 os.dup2(null, 0)
                 os.dup2(o_w, 1)
@@ -458,8 +554,81 @@ def bind_own(path):
     return srv
 
 
+def responsible_path():
+    """Путь исполняемого файла процесса, которому macOS приписывает доступ этого (ответственный процесс TCC)."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        import ctypes
+        lib = ctypes.CDLL(None)
+        fn = lib.responsibility_get_pid_responsible_for_pid
+        fn.argtypes, fn.restype = [ctypes.c_int], ctypes.c_int
+        pid = fn(os.getpid())
+        proc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        buf = ctypes.create_string_buffer(4096)
+        if pid <= 0 or proc.proc_pidpath(pid, buf, 4096) <= 0:
+            return ""
+        return buf.value.decode("utf-8", "replace")
+    except (OSError, AttributeError, ValueError):
+        return ""
+
+
+def tcc_probe(out):
+    """Проба доступа к папкам TCC_DIRS (запрос разрешения при установке, --check). Итог — JSON в out; код 0, сбой
+    записи — 1 с причиной."""
+    home = os.environ.get("HOME") or ""
+    dirs = {}
+    for name, rel in TCC_DIRS:
+        p = os.path.join(home, rel)
+        try:
+            with os.scandir(p) as it:  # чтение списка — то, что спрашивает macOS; stat папки не спрашивает
+                next(it, None)
+            dirs[name] = "ok"
+        except FileNotFoundError:
+            dirs[name] = "missing"
+        except OSError as e:
+            dirs[name] = "denied" if e.errno in PERM_ERRNO else f"error {e.errno}"
+    res = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "pid": os.getpid(), "home": home,
+           "responsible": responsible_path(), "dirs": dirs}
+    try:
+        with open(out + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(res, fh, ensure_ascii=False)
+        os.replace(out + ".tmp", out)
+    except OSError as e:
+        sys.stderr.write(f"hookd: итог пробы не записан в {out}: {e}\n")
+        os._exit(1)
+    os._exit(0)
+
+
+def listening(s):
+    """Сокет слушает. Linux отвечает SO_ACCEPTCONN; macOS его не знает (ENOPROTOOPT) — там слушающий сокет Unix тот,
+    что привязан к пути и ни с кем не соединён (socketpair и соединения — с собеседником, непривязанный — без пути)."""
+    try:
+        return bool(s.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+    except (OSError, AttributeError):
+        pass
+    try:
+        s.getpeername()
+        return False
+    except OSError:
+        return bool(s.getsockname())
+
+
+def fd_sockets(fds):
+    """Слушающие сокеты Unix под номерами fds (их передал pantheon-hookd). Не сокет, не Unix или не слушает — OSError."""
+    out = []
+    for n in fds:
+        s = socket.socket(fileno=n)
+        if s.family != socket.AF_UNIX or s.type != socket.SOCK_STREAM or not listening(s):
+            raise OSError(f"--fd {n}: не слушающий сокет Unix")
+        s.set_inheritable(False)
+        s.setblocking(False)
+        out.append(s)
+    return out
+
+
 def main(argv):
-    sock, idle, uid = None, IDLE_DEFAULT, None
+    sock, idle, uid, fds, probe = None, IDLE_DEFAULT, None, [], None
     it = iter(argv)
     try:
         for a in it:
@@ -469,15 +638,29 @@ def main(argv):
                 idle = float(next(it))
             elif a == "--uid":
                 uid = int(next(it))
+            elif a == "--fd":
+                fds.append(int(next(it)))
+                if fds[-1] < 3:
+                    raise ValueError(f"--fd {fds[-1]}")
+            elif a == "--tcc-probe":
+                probe = next(it)
             else:
                 raise ValueError(a)
+        if (sock and fds) or (probe and (sock or fds)):
+            raise ValueError("--socket, --fd и --tcc-probe — порознь")
     except (StopIteration, ValueError) as e:
-        sys.stderr.write(f"hookd: плохие аргументы ({e}); нужно: daemon.py [--socket <путь>] [--idle <с>]\n")
+        e = e or "у последнего ключа нет значения"
+        sys.stderr.write(f"hookd: плохие аргументы ({e}); нужно: daemon.py [--socket <путь> | --fd <n>…] [--idle <с>]"
+                         " или daemon.py --tcc-probe <файл>\n")
         os._exit(64)
+    if probe:
+        tcc_probe(probe)
     # launchd: сокет взять сразу — иначе служба считается сломанной; соединения ждут в очереди, пока грузятся правила.
     # --socket: сокет появляется только у готового демона — тесты и замер ждут его файл
     listeners = None
-    if not sock:
+    if fds:
+        listeners = take_sockets(lambda: fd_sockets(fds))
+    elif not sock:
         listeners = take_sockets(launchd_sockets)
     try:
         d = Daemon(idle=idle, uid=uid)

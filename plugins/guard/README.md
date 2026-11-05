@@ -261,13 +261,72 @@ FNV-1a 64 и оба решения (`slow=<код>:<deny|ask|allow>`, `daemon=�
 
 **Службу ставит владелец своей командой; роли её не ставят.** Шаблон — `launchd/pantheon.svc.hookd.plist.in`:
 - сокет `Sockets` 0600: первое соединение запускает демон, после 30 минут простоя он выходит сам;
-- без KeepAlive, ThrottleInterval 2 с.
+- без KeepAlive, ThrottleInterval 2 с;
+- первый процесс службы — `~/.cache/pantheon/hookd/bin/pantheon-hookd`, а не `/bin/sh` (почему — ниже).
 
 Команды из проверенного дерева guard:
 
     /bin/sh ~/.claude/plugins/cache/agent-kit/guard/<версия>/scripts/hookd-install.sh            # поставить
+    /bin/sh …/scripts/hookd-install.sh --check                                                    # проверить, ничего не меняя
     /bin/sh …/scripts/hookd-install.sh --print                                                    # только показать plist
     /bin/sh …/scripts/hookd-install.sh --uninstall                                                # снять
+
+#### Доступ к папкам: macOS спросит один раз (решение владельца 04.11, metis-0811)
+
+**При установке macOS спросит, можно ли службе читать Рабочий стол, Документы, Загрузки и iCloud Drive.** Ответьте
+«Разрешить». Без доступа служба безопасна, но медленнее: на вызовах с путями в этих папках демон отвечает «F perm», и
+вызов идёт медленным путём с правами окна.
+
+Как это устроено:
+- macOS спрашивает про ответственный процесс — первый процесс задания launchd. Поэтому первым идёт маленькая
+  программа `pantheon-hookd` (`hooks/hookd-svc.c`, около 160 строк C), а Python — её ребёнок. Окно macOS называет
+  `pantheon-hookd`, и разрешение достаётся ей;
+- путь `pantheon-hookd` не меняется, пересобирается она только при правке исходника (`hookd-build.sh --svc`, метки
+  `.sum` и `.src` рядом). Обновление Python разрешение не сбрасывает. Если бы первым шёл Python, разрешение было бы
+  у `…/Cellar/python@3.14/<версия>/…/Python.app` с версией в пути и слетало бы при каждом `brew upgrade`;
+- модель угроз: чужой код под этим разрешением не запустить. Из аргументов и окружения `pantheon-hookd` ничего не
+  берёт: папку hooks — из файла `pantheon-hookd.hooks` рядом (пишет установка, свой, 0600, не ссылка), итог пробы —
+  только в `~/.cache/pantheon/hookd/probe/`, ребёнку — только HOME и PATH. Папка hooks — только из проверенного
+  дерева `~/.claude/plugins/cache/agent-kit/guard/<версия>/hooks`: рабочую копию и `/tmp` правят агенты. Поэтому
+  установка из рабочей копии отказывает (код 1), обхода для разработки нет — тесты ставят копию плагина в кэш
+  подменённого HOME. Копия файла в другом месте, папка вне кэша, открытые другим папка или файл — отказ с кодом 78,
+  ничего не запускается. В сам процесс код не внедрить: сборка ставит сегмент `__RESTRICT` и подписывает файл ad-hoc
+  с hardened runtime (`codesign -o runtime`), поэтому dyld не берёт `DYLD_INSERT_LIBRARIES` и прочие `DYLD_*`; подпись
+  не прошла — файла службы нет (Б1 argus #320);
+- сразу после установки скрипт ставит разовое задание launchd `pantheon.hookd.probe` (шаблон
+  `launchd/pantheon.hookd.probe.plist.in`) с тем же `pantheon-hookd`. Оно один раз заглядывает в каждую папку
+  (`daemon.py --tcc-probe`), поэтому окна macOS появляются сейчас, пока вы у терминала, а не из фона в случайный миг.
+  Скрипт ждёт ответа до 5 минут, снимает задание и печатает таблицу: где доступ есть, где нет.
+
+**Отказали — разрешить можно потом.** Окно macOS второй раз не появится: отказ записан. Тогда:
+1. `/bin/sh …/scripts/hookd-install.sh --check` — покажет, к каким папкам доступа нет, и напечатает команды ниже.
+2. Открыть «Конфиденциальность и безопасность → Файлы и папки»:
+   `open "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"`.
+   Найти `pantheon-hookd` и включить нужные папки. Если его нет в списке — «Полный доступ к диску»
+   (`…?Privacy_AllFiles`), значок «+», ⌘⇧G и путь `~/.cache/pantheon/hookd/bin/pantheon-hookd`.
+3. Перезапустить службу: `launchctl kickstart -k gui/$(id -u)/pantheon.svc.hookd`.
+4. Снова `--check`: в таблице везде «есть».
+
+`tccutil reset` здесь не подходит. Он сбрасывает ответ по идентификатору пакета `.app`, а у `pantheon-hookd` его нет.
+`tccutil reset SystemPolicyDocumentsFolder` без идентификатора сбросил бы ответы всем программам Mac.
+
+**Что ещё показывает `--check`.** Он ничего не ставит и не правит и кончается строкой итога; код 0 — всё в порядке:
+- служба поставлена, загружена и запускает `pantheon-hookd`. Если первым стоит `/bin/sh`, служба поставлена старой
+  командой: её нужно переставить. Если `pantheon-hookd.hooks` называет другое дерево guard — тоже переставить;
+- доступ к папкам — той же пробой под launchd, а не правами терминала;
+- окна ролей не пишут в `~/.cache/pantheon/hookd` и не открывают его сокет (F7, `scripts/hookd-check.py windows`).
+  Проверяются готовые настройки окон `~/.local/state/pantheon/settings/*.json` и `run/*.json` — с разрешениями
+  `grants.toml` и `sandbox_write` политики. Окно с записью туда подменило бы клиент вместе с его меткой;
+- доля откатов на медленный путь за сутки и тревога `canary-diff` (F9, `scripts/hookd-stats.py`, ниже).
+
+**Доля откатов за сутки (F9).** Демон сам считает свои решения: строка «время, `ok`, число» в
+`~/.local/state/pantheon/logs/hookd-calls.log` раз в минуту и перед выходом. Вызовов всего = решения демона + строки
+журнала откатов; двойной отказ и `canary-diff` считаются отдельно. Плановый проход или вы:
+
+    /bin/sh <дерево guard>/hooks/python.sh <дерево guard>/scripts/hookd-stats.py [--hours 24] [--json]
+
+Код 3 и строка «тревога: canary-diff …» последней — демон решил не так, как медленный путь: флаг `PANTHEON_HOOKD=1`
+снять до разбора. Плановый проход эту команду пока не зовёт.
 
 Ограничения:
 - плановый проход (services_sync) снимает каждый `pantheon.svc.*`, которого нет в `schedule.toml`. Поставленная
@@ -595,7 +654,10 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
    (решение владельца 30.10) — ещё журнал ваших слов и регистрация хуков Пантеона `plugins/pantheon/hooks/ctx.py` и
    `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID `plugins/pantheon/lib/merge.py`, карта плагинов и MCP
    `plugins/pantheon/lib/plugin_map.py` и `plugins/pantheon/plugins-by-role.toml`; соседние файлы тех же папок — не
-   ядро. Проверяются и новый путь, и `previous_filename`, так что вынос
+   ядро. С metis-0858 (решение владельца 05.11) — ещё то, что ядро берёт из других файлов: правило вердиктов argus
+   `plugins/pantheon/lib/review_rules.py` (его зовёт merge.py) и разбор ваших ответов `plugins/pantheon/lib/answers.py`
+   (его грузит ctx.py); `tests/test_core_deps.py` по AST ищет такие зависимости ядра и краснеет на источнике вне ядра.
+   Проверяются и новый путь, и `previous_filename`, так что вынос
    файла из guard тоже виден. С metis-0404 в ядре и сборка окон в `plugins/pantheon/lib/pantheon.py`, но не весь файл:
    шлюз берёт старый и новый pantheon.py из папки слияния (base и head PR, одна merge-base) и сравнивает по AST
    функции `sandbox_build`, `domains_build`, `run_settings` и всё, что они транзитивно зовут и читают в этом файле,
@@ -777,6 +839,21 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
       репозитория нет строки в `FULL_TESTS` — запасного пути нет, отказ. Тот же разбор — у слияния по Touch ID
       (`plugins/pantheon/lib/merge.py`): запись тестов там нужна всегда, а при лимите — запись именно полного набора.
       На пути ролей с зелёным CI команда записи не сверяется, как и раньше: там тесты проверяет CI.
+      **Узкая запись для PR вне ядра (metis-0734, «да» владельца 05.11).** На пути ролей PR, который не задевает ядро
+      защит, проходит и по записи затронутых тестов. Её делает `pantheon outside test --affected --wait 590` из чистой
+      копии на head PR. Проход гонит полный набор с `--affected --base <SHA>`, где SHA — merge-base коммита и вершины
+      origin/main на момент заявки. Запись несёт эту команду, `files` (прогнанные файлы тестов) и `map` (sha256 карты
+      `affected-map.json`) — те же поля, что у дозапуска metis-0735. Шлюз (`narrow_tests_record`, `_narrow_problem`)
+      засчитывает её, только если всё сходится:
+      - запись на head PR и этого репозитория;
+      - база в команде — единственная merge-base head и base PR в git папки слияния. Иначе отказ «узкий набор посчитан
+        от …»: сделать `git fetch` и повторить узкий прогон или прогнать полный;
+      - `map` равен sha256 карты в дереве head.
+      Если раннер ушёл в весь набор из-за общего файла, запись всё равно узкая и считается как сейчас — для PR вне ядра.
+      Если в копии подменена история (shallow, `info/grafts`, `refs/replace`), проход сразу гонит полный набор и пишет
+      полную запись: дифф раннера считает git в песочнице, без защит шлюза.
+      PR ядра (и с Touch ID), слияние без роли и `merge.py` засчитывают только полный набор. Узкая запись `pantheon
+      review test` с `--base origin/main` (подсказка `NARROW_TESTS`) на запасном пути не годится: база там не SHA.
    3. Аварийный — терминал владельца. `gh pr merge` в его собственном терминале, вне Claude Code, guard не видит и не
       проверяет.
 
@@ -993,7 +1070,8 @@ head, как в `pantheon review status`, а «принять» до «верн�
 - `~/.local/state/pantheon/guard-strict/<session_id>` — метка строгого guard окна (окно и инструменты, без текста
   команд): по ней хук плагина той же сессии молчит (metis-0148);
 - `~/.local/state/pantheon/logs/hookd-fallback.log` — откаты демона хуков на медленный путь и расхождения канарейки
-  (время, причина, хеш события; без текста); `~/.cache/pantheon/hookd/` — сокет и собранный клиент демона хуков;
+  (время, причина, хеш события; без текста); `hookd-calls.log` рядом — сколько решений отдал демон (время и число);
+  `~/.cache/pantheon/hookd/` — сокет, собранный клиент, `bin/pantheon-hookd` службы и `probe/` пробы доступа;
 - `~/.local/state/tg-taint/<session_id>` — флаг tg-taint (время и источник, без текста), `<session_id>.dumps` — пути
   выгрузок из `-o`, `--files-dir`, `--out-dir` этой сессии;
 - выключить правило: `GUARD_OFF=dev-server,nextjs` в `env` файла settings.json (`push` выключает и запись журнала шлюза слияния).
@@ -1011,6 +1089,9 @@ head, как в `pantheon review status`, а «принять» до «верн�
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
     python3 -I tests/test_context.py      # контекст вызова: configure(), set_context против нового процесса
     python3 -I tests/test_hookd.py        # демон хуков: сверка решений с медленным путём, откаты, канарейка, сборка
+    python3 -I tests/test_hookd_svc.py    # служба: pantheon-hookd, проба доступа, --fd, счёт решений, установка и --check
+    python3 -I tests/test_hookd_check.py  # таблица доступа и подсказки; окна не пишут в папку демона (F7)
+    python3 -I tests/test_hookd_stats.py  # доля откатов за сутки и тревога canary-diff (F9)
     python3 -I scripts/bench.py -n 20     # замер холодного вызова хуков: медиана и p95 в мс (не тест; --out, --hooks)
     python3 -I scripts/bench.py --hookd   # холодный guard против пути через демон, вперемешку (не тест)
     python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось; владелец пула PID 1 — не выход
