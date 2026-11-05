@@ -1,8 +1,8 @@
 {
   "plugins": {
     "guard": {
-      "tree": "79c1100dc575d08835a35fdc988b0d24296b190e40c651edb2c4da481ca02c40",
-      "version": "0.5.68"
+      "tree": "c57cdc8bb3e2804e6e828de124ce223282cdb5d1896385ebe52acd8e06cd6c25",
+      "version": "0.5.69"
     },
     "pantheon": {
       "tree": "3df547947ca1aad51222965c65c2f9642aa8153de550f6e729c6d2d8444126e3",
