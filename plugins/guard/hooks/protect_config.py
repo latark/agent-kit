@@ -44,16 +44,29 @@ PROJECT_ITEMS = {"hooks", "skills", "commands"}
 
 # metis-0841 («да» владельца 05.11 16:04 и 16:09): координатор и лид направления правят навыки, команды и роли
 # проекта в папках своего направления (domains.json, его собирают из directions.toml). Отказ, если новый текст даёт
-# права или запускает код без вопроса: ключи frontmatter ниже (без регистра, «-» и «_») или строка `!`команда``
-# (её выполняют при загрузке навыка). Текст записи не разобрать — тоже отказ. .claude/hooks, settings, .mcp.json,
-# .git и сама .claude как цель — защита и в своём направлении
+# права или запускает код без вопроса: строка frontmatter вне класса ниже или динамическая команда навыка (её
+# выполняют при загрузке). Текст записи не разобрать — тоже отказ. .claude/hooks, settings, .mcp.json, .git и сама
+# .claude как цель — защита и в своём направлении
 OWN_ITEMS = {"skills", "commands", "agents"}
-RISKY_KEYS = {"skills": {"allowedtools", "hooks", "model", "context"},
-              "commands": {"allowedtools", "hooks", "model", "context"},
-              "agents": {"tools", "disallowedtools", "permissionmode", "hooks", "mcpservers"}}
-DYN_COMMAND = re.compile(r"!\s*`")
-# ключ YAML в строке frontmatter: в начале строки (и пункта «- »), после «{» или «,»; в кавычках тоже
-FM_KEY = re.compile(r"""(?:^|[{,])\s*(?:-\s+)?["']?([A-Za-z_][\w-]*)["']?\s*:""")
+# Ревью #347 (Б2): frontmatter судим классом, а не списком запретных ключей — у YAML много форм ключа («!!str k»,
+# «&a k», «"k"», «? k», алиас «*k»). Строка frontmatter у левого края — только «ключ: значение», ключ из списка ниже
+# (без регистра, «-» и «_»), значение не начинается с { [ & * ! ? % @ `; с отступом пробелами — значение ключа выше;
+# пустая или «# комментарий» — можно; любая другая — отказ
+SAFE_KEYS = {"skills": {"name", "description", "argumenthint", "whentouse", "disablemodelinvocation", "userinvocable",
+                        "version", "license"},
+             "agents": {"name", "description", "model", "color", "effort", "maxturns"}}
+SAFE_KEYS["commands"] = SAFE_KEYS["skills"]
+FM_LINE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]+(.*))?", re.ASCII)
+VALUE_BAD_START = set("{[&*!?%@`")
+# имя роли проекта: простое слово (кавычки можно); иначе — не разобрать, отказ
+ROLE_NAME = re.compile(r"""(["']?)([A-Za-z0-9_.-]+)\1(?:\s+#.*)?""", re.ASCII)
+# Ревью #347 (Б3): роль проекта берётся раньше ~/.claude/agents — с именем роли Пантеона она подменяет её (шлюз
+# узнаёт argus по agent_type, taint — tg-reader). Роли Пантеона: G.is_pantheon_role, роли ниже вне его списка и
+# собранные ~/.claude/agents/<имя>.md
+PANTHEON_AGENTS = {"tg-reader"}
+ROLES_DIR = os.path.join(".claude", "agents")  # от HOME: собранные роли (тест подменяет — песочница окна её закрывает)
+# динамическая команда навыка: строка !`…` и блок ```! (Claude Code ищет «```!» в любом месте текста); ~~~! — тоже
+DYN_COMMAND = re.compile(r"!\s*`|```!|~~~!")
 TEXT_LIMIT = 1 << 20  # больше — текст не разбираем, отказ
 
 
@@ -122,7 +135,8 @@ def _edit_text(tool, tool_input, p):
 
 
 def _bash_texts(cmd, cwd, paths):
-    """Новый текст каждого пути из paths после команды Bash: {путь: текст или None — файла не будет (rm, mkdir)}.
+    """Новый текст каждого пути из paths после команды Bash: {путь: текст или None — файла не будет (rm, mkdir)};
+    у cp и mv в папку — путь файла в ней.
     Разбираются только простые формы одной командой: `cat > файл <<'EOF'` (и >>), `cp|mv [-fnvpi] файл цель`,
     `rm`, `rmdir`, `mkdir`; остальное (sed -i, tee, цепочки, подстановки) — None: текст не разобрать, отказ."""
     if MKDIR_ONLY.match(cmd):
@@ -163,10 +177,15 @@ def _bash_texts(cmd, cwd, paths):
         src = G._expand(ops[0], cwd)
         # _expand даёт realpath — ссылку смотрим по пути до раскрытия последнего звена
         raw = os.path.join(cwd, os.path.expanduser(ops[0].replace("${HOME}", G.HOME).replace("$HOME", G.HOME)))
-        if name == "mv" and os.path.islink(raw.rstrip("/")):
-            return None  # ссылка переедет ссылкой: текст потом поменяют мимо проверки
+        if name == "mv" and (os.path.islink(raw.rstrip("/")) or _nlink(raw.rstrip("/")) > 1):
+            return None  # ссылка (и жёсткая, ревью #347 Б4) переедет ссылкой: текст потом поменяют мимо проверки
         text = _read_text(src) if os.path.isfile(src) else None
-        return None if text is None else {p: text for p in paths}
+        if text is None:
+            return None
+        # цель — папка (`mv a/argus.md .claude/agents/`): файл ляжет в неё под именем источника — его и судим
+        into = ops[1].endswith("/") or os.path.isdir(G._expand(ops[1], cwd))
+        base = os.path.basename(ops[0].rstrip("/"))
+        return {(os.path.join(p, base) if into else p): text for p in paths}
     if name == "cat" and args in ([], ["-"]):
         docs = [(r, w) for r, w in redirs if r.op in ("<<", "<<-")]
         outs = [(r, w) for r, w in redirs if r.op in (">", ">|", ">!", ">>")]
@@ -185,23 +204,65 @@ def _bash_texts(cmd, cwd, paths):
     return None
 
 
-def _text_risk(text, kinds):
-    """Что в тексте даёт права или запускает код: ключ frontmatter из RISKY_KEYS или `!`команда``; иначе None.
-    Frontmatter — от первой непустой строки «---» до строки «---» или «...»; без конца — весь текст."""
-    m = DYN_COMMAND.search(text)
-    if m:
-        return "строка динамической команды !`…` (её выполняют при загрузке навыка)"
+def _nlink(p):
+    """Число жёстких ссылок файла (без перехода по ссылке); нет файла — 0."""
+    try:
+        return os.lstat(p).st_nlink
+    except OSError:
+        return 0
+
+
+def _pantheon_role(name):
+    """Имя (без регистра) — роль Пантеона: роль проекта с ним подменит её (ревью #347, Б3)."""
+    n = name.casefold()
+    return bool(n) and (G.is_pantheon_role(n) or n in PANTHEON_AGENTS
+                        or os.path.isfile(os.path.join(G.HOME, ROLES_DIR, n + ".md")))
+
+
+def _text_risk(text, kinds, path=""):
+    """Что в тексте даёт права, запускает код или подменяет роль Пантеона; иначе None.
+    Динамическая команда (DYN_COMMAND) — в любом месте текста. Frontmatter — от первой непустой строки «---» до
+    строки «---»; без конца — весь текст; каждая его строка — по классу SAFE_KEYS (см. выше). У роли (agents) имя
+    файла и name — не роль Пантеона."""
+    if DYN_COMMAND.search(text):
+        return "динамическая команда !`…` или блок ```! (их выполняют при загрузке навыка)"
+    agent = "agents" in kinds
+    stem = os.path.basename(path)
+    stem = stem[:-3] if stem.casefold().endswith(".md") else stem
+    if agent and _pantheon_role(stem):
+        return f"имя файла роли «{stem}» — роль Пантеона: роль проекта подменила бы её"
     lines = text.lstrip(chr(0xFEFF)).splitlines()
     i = next((n for n, x in enumerate(lines) if x.strip()), len(lines))
     if i >= len(lines) or lines[i].strip() != "---":
         return None
-    risky = set().union(*(RISKY_KEYS[k] for k in kinds))
+    safe = set.intersection(*(SAFE_KEYS[k] for k in kinds))
+    top = False  # был ключ у левого края: строки с отступом — его значение
     for line in lines[i + 1:]:
-        if line.strip() in ("---", "..."):
+        if line.rstrip() == "---":
             break
-        for key in FM_KEY.findall(line):
-            if re.sub(r"[-_]", "", key.lower()) in risky:
-                return f"во frontmatter ключ «{key}» (права или запуск кода без вопроса)"
+        if not line.strip() or line.startswith("#"):
+            continue
+        shown = line.strip()[:60]
+        if line.startswith(" "):
+            if not top or line.strip() in ("---", "..."):
+                return f"строка frontmatter «{shown}» с отступом не под ключом (форма YAML не из простых)"
+            continue
+        m = FM_LINE.fullmatch(line)
+        if not m:
+            return f"строка frontmatter «{shown}» — не «ключ: значение» (форма YAML не из простых)"
+        key, value = m.group(1), (m.group(2) or "").strip()
+        norm = re.sub(r"[-_]", "", key.lower())
+        if norm not in safe:
+            return f"во frontmatter ключ «{key}» не из разрешённых (права или запуск кода без вопроса)"
+        if value[:1] in VALUE_BAD_START:
+            return f"во frontmatter значение «{shown}» начинается с {value[:1]} (тег, якорь, алиас или вложение YAML)"
+        if agent and norm == "name":
+            m = ROLE_NAME.fullmatch(value)
+            if not m:
+                return f"во frontmatter name роли «{shown}» не разобрать — нужно простое имя"
+            if _pantheon_role(m.group(2)):
+                return f"name роли «{m.group(2)}» — роль Пантеона: роль проекта подменила бы её"
+        top = True
     return None
 
 
@@ -218,8 +279,8 @@ def own_text_problem(event, tool, tool_input, paths, own):
         bad = next((p for p in paths if texts[p] is None), None)
         if bad:
             return bad, "новый текст файла не вычислить (NotebookEdit или old_string не найден)"
-    for p in paths:
-        why = texts.get(p) and _text_risk(texts[p], _own_kinds(p, own) or OWN_ITEMS)
+    for p, text in texts.items():
+        why = text is not None and _text_risk(text, _own_kinds(p, own) or OWN_ITEMS, p)
         if why:
             return p, why
     return None
@@ -584,10 +645,13 @@ def check_protect_config(event, tool, tool_input):
         problem = own_text_problem(event, tool, tool_input, opened, own)
         if problem:
             return (f"Правило protect-config: роль «{role}» правит навыки, команды и роли своего проекта, но не то, что "
-                    f"даёт права или запускает код без вопроса: {problem[0].replace(G.HOME, '~')} — {problem[1]}. "
-                    "allowed-tools, hooks, model, context у навыка и команды, tools, disallowedTools, permissionMode, "
-                    "hooks, mcpServers у роли и строки !`…` правит только metis-pantheon после «да» владельца — опиши "
-                    "правку файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
+                    f"даёт права, запускает код без вопроса или подменяет роль Пантеона: "
+                    f"{problem[0].replace(G.HOME, '~')} — {problem[1]}. Во frontmatter навыка и команды можно только "
+                    "name, description, argument-hint, when_to_use, disable-model-invocation, user-invocable, version, "
+                    "license, у роли — name, description, model, color, effort, maxTurns, простыми строками «ключ: "
+                    "значение». Остальное (allowed-tools, hooks, tools, permissionMode…), строки !`…` и ```!, роль с "
+                    "именем роли Пантеона правит только metis-pantheon после «да» владельца — опиши правку файлом в "
+                    "~/ai/pantheon/directions/metis-pantheon/inbox/.")
         return None
     if not bad:
         return None

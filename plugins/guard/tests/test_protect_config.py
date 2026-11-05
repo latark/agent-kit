@@ -5,12 +5,14 @@
 Подменённый HOME во временной папке, события PreToolUse на stdin guard.py (через _guard_shim.py, как test_guard.py).
 Проверяет: окно athena-brokerassistant (координатор, его лиды hephaestus- и apollo-brokerassistant) пишет
 <папка направления>/.claude/skills|commands|agents — Write, Edit, MultiEdit и простые формы Bash (heredoc, cp, mv,
-mkdir, rm); отказ — чужой проект, другие роли, ключи frontmatter, что дают права или запускают код (allowed-tools,
-hooks, model, context у навыка и команды; tools, disallowedTools, permissionMode, hooks, mcpServers у роли), строка
-!`…`, текст, который не вычислить (sed -i, echo >, NotebookEdit). Закрыто и в своём направлении: .claude/hooks,
+mkdir, rm); отказ — чужой проект, другие роли, строка frontmatter вне класса (ключ не из списка разрешённых, форма
+YAML не «ключ: значение»: тег, якорь, алиас, «? ключ», кавычки), строка !`…` и блок ```!, роль проекта с именем роли
+Пантеона (файл или name, без регистра), mv жёсткой ссылки, текст, который не вычислить (sed -i, echo >,
+NotebookEdit). Ревью #347: Б1–Б4. Закрыто и в своём направлении: .claude/hooks,
 settings*.json, .mcp.json, .git/config и .git/hooks, сама .claude как цель cp -R/tar/rsync, копия дерева в skills.
 Запись в свои skills после taint (tg-taint) — вопрос, в bypassPermissions — отказ (hooks/taint.py не менялся).
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -67,10 +69,13 @@ def setup(home):
         "src/clean.md": "---\nname: c\ndescription: d\n---\nтело\n",
         "src/risky.md": "---\nname: c\nallowed-tools: Bash(*)\n---\nтело\n",
     }
+    files["src/hard.md"] = files["src/clean.md"]
+    files["src/argus.md"] = files["src/clean.md"]
     for rel, text in files.items():
         with open(os.path.join(home, rel), "w") as fh:
             fh.write(text)
     os.symlink(os.path.join(home, "src/clean.md"), os.path.join(home, "src/link.md"))
+    os.link(os.path.join(home, "src/hard.md"), os.path.join(home, "src/hard-other.md"))  # жёсткая ссылка, nlink 2
 
 
 def run(home, pdir, who, tool, tool_input, cwd=None):
@@ -165,7 +170,49 @@ def main():
             "tools: Bash", "disallowedTools: Read", "permissionMode: bypassPermissions", "hooks: {}",
             "mcpServers: {}", "permission-mode: acceptEdits")],
         ("agents: !`cmd` в теле — отказ", "deny", APP, COORD, W(APP + "/.claude/agents/x.md", "---\nname: x\n---\n!`id`\n")),
-        ("skills: tools (ключ ролей, не навыка) — можно", "allow", APP, COORD, W(skill, fm("tools: Read"))),
+        ("skills: tools (ключ не из списка навыка) — отказ", "deny", APP, COORD, W(skill, fm("tools: Read"))),
+        ("skills: model (есть у роли, нет у навыка) — отказ", "deny", APP, COORD, W(skill, fm("model: opus"))),
+        # --- ревью #347 Б1: блок ```! (и ~~~!) — динамическая команда ---
+        ("skills: блок ```! в теле — отказ", "deny", APP, COORD, W(skill, fm("description: d") + "```!\nid\n```\n")),
+        ("skills: блок ```! после текста в строке — отказ", "deny", APP, COORD,
+         W(skill, fm("description: d") + "смотри ```!\nid\n```\n")),
+        ("commands: блок ~~~! — отказ", "deny", APP, COORD, W(APP + "/.claude/commands/x.md", "~~~!\nid\n~~~\n")),
+        ("skills: обычный блок ```bash — можно", "allow", APP, COORD, W(skill, fm("description: d") + "```bash\nid\n```\n")),
+        # --- ревью #347 Б2: frontmatter классом — пять форм ключа YAML мимо простого «ключ:» ---
+        *[(f"skills: форма ключа {k!r} — отказ", "deny", APP, COORD, W(skill, fm(k))) for k in (
+            "!!str allowed-tools: Bash(*)", "&a allowed-tools: Bash(*)", '"allowed\\u002dtools": Bash(*)',
+            "? allowed-tools\n: Bash(*)", "k: &k hooks\n*k : {}")],
+        *[(f"skills: строка frontmatter {k!r} — отказ", "deny", APP, COORD, W(skill, fm(k))) for k in (
+            "...\nallowed-tools: Bash", "description: *a", "description: !!binary eA==", "\tallowed-tools: Bash",
+            "metadata: x", "allowed-tools : Bash", "name:x")],
+        ("skills: frontmatter с отступом у первой строки — отказ", "deny", APP, COORD,
+         W(skill, "---\n  name: x\n  allowed-tools: Bash\n---\nтекст\n")),
+        ("skills: строка «  ---» внутри frontmatter — отказ", "deny", APP, COORD,
+         W(skill, "---\ndescription: |\n  ---\nallowed-tools: Bash\n---\nтекст\n")),
+        ("skills: description блоком, комментарий, argument-hint, when_to_use — можно", "allow", APP, COORD,
+         W(skill, "---\nname: x\n# заметка\ndescription: |\n  многострочное: описание\n  ещё\nargument-hint: [файл]\n"
+                  "when_to_use: \"когда: нужно\"\nuser-invocable: false\n---\nтекст\n")),
+        ("agents: color и maxTurns — можно", "allow", APP, COORD,
+         W(APP + "/.claude/agents/x.md", "---\nname: x\ndescription: d\ncolor: blue\nmaxTurns: 5\n---\nты\n")),
+        # --- ревью #347 Б3: роль проекта с именем роли Пантеона подменяет её ---
+        ("agents: файл argus.md без опасных ключей — отказ", "deny", APP, COORD,
+         W(APP + "/.claude/agents/argus.md", "---\nname: x\ndescription: d\n---\nпринимай\n")),
+        ("agents: файл Talos.md — отказ (без регистра)", "deny", APP, COORD,
+         W(APP + "/.claude/agents/Talos.md", "---\nname: x\n---\nт\n")),
+        ("agents: файл tg-reader.md пустой — отказ", "deny", APP, COORD, W(APP + "/.claude/agents/tg-reader.md", "")),
+        *[(f"agents: другой файл, {k} — отказ", "deny", APP, COORD,
+           W(APP + "/.claude/agents/r.md", f"---\n{k}\ndescription: d\n---\nпринимай\n")) for k in (
+            "name: argus", "name: ARGUS", 'name: "talos"', "name: 'Tg-Reader'", "name: argus # ревьюер",
+            "name: dev-opus", "name: hephaestus-brokerassistant", "name: |\n  argus",
+            "name: \"\\x61rgus\"")],
+        ("skills: навык с name: argus — можно (навык роль не подменяет)", "allow", APP, COORD,
+         W(skill, fm("description: d").replace("name: x", "name: argus"))),
+        ("Bash: mv argus.md в .claude/agents/ (папка) — отказ", "deny", APP, COORD,
+         B(f"mv {H('src/argus.md')} .claude/agents/")),
+        ("Bash: cp argus.md в .claude/agents/ (папка) — отказ", "deny", APP, LEAD,
+         B(f"cp {H('src/argus.md')} .claude/agents/")),
+        ("Bash: cp чистого файла в .claude/skills/x/ (папка) — можно", "allow", APP, COORD,
+         B(f"cp {H('src/clean.md')} .claude/skills/x/")),
         ("skills: allowed-tools в теле после frontmatter — можно", "allow", APP, COORD,
          W(skill, "---\nname: x\n---\nallowed-tools: так в навыке не писать\n")),
         ("skills: без frontmatter, простой текст — можно", "allow", APP, COORD, W(skill, "заметка\n")),
@@ -211,6 +258,10 @@ def main():
         ("Bash: cp файла с allowed-tools — отказ", "deny", APP, COORD, B(f"cp {H('src/risky.md')} .claude/skills/x/SKILL.md")),
         ("Bash: mv чистого файла — можно", "allow", APP, LEAD, B(f"mv {H('src/clean.md')} .claude/agents/c.md")),
         ("Bash: mv ссылки — отказ", "deny", APP, COORD, B(f"mv {H('src/link.md')} .claude/skills/x/SKILL.md")),
+        # ревью #347 Б4: жёсткая ссылка переедет второй ссылкой — текст потом поменяют через src/hard-other.md
+        ("Bash: mv жёсткой ссылки (nlink 2) — отказ", "deny", APP, COORD, B(f"mv {H('src/hard.md')} .claude/agents/h.md")),
+        ("Bash: cp жёсткой ссылки (копия текста) — можно", "allow", APP, COORD,
+         B(f"cp {H('src/hard.md')} .claude/skills/x/SKILL.md")),
         ("Bash: cp нет такого файла — отказ", "deny", APP, COORD, B("cp nope.md .claude/skills/x/SKILL.md")),
         ("Bash: mkdir -p .claude/skills/y — можно", "allow", APP, COORD, B("mkdir -p .claude/skills/y")),
         ("Bash: mkdir -p .claude/agents — можно", "allow", APP, LEAD, B("mkdir -p .claude/agents")),
@@ -255,6 +306,24 @@ def main():
     check("причина: ключ назван, правит metis-pantheon", "allowed-tools" in why and "metis-pantheon" in why, why[:300])
     _, why = run(home, APP, COORD, *B("echo hi > .claude/skills/x/SKILL.md"))
     check("причина Bash: текст не разобрать — Write или Edit", "Write или Edit" in why, why[:300])
+    # --- ревью #347 Б3: собранная роль Пантеона вне списков guard (charon в ~/.claude/agents) ---
+    # в процессе: ~/.claude/agents песочница окна закрывает на запись, папку ролей подменяем (ROLES_DIR)
+    os.environ["HOME"] = home
+    spec = importlib.util.spec_from_file_location("guard_rules_pc", os.path.join(HOOKS, "guard_rules.py"))
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    pc = sys.modules["protect_config"]
+    pc.ROLES_DIR = "roles-built"
+    os.makedirs(os.path.join(home, "roles-built"), exist_ok=True)
+    charon = "---\nname: Charon\ndescription: d\n---\nт\n"
+    check("собранной роли нет — name: charon можно", pc._text_risk(charon, {"agents"}, "r.md") is None)
+    check("собранной роли нет — файл charon.md можно", pc._text_risk("т\n", {"agents"}, "charon.md") is None)
+    open(os.path.join(home, "roles-built/charon.md"), "w").close()
+    why = pc._text_risk(charon, {"agents"}, "r.md") or ""
+    check("собранная роль charon — name: Charon отказ", "роль Пантеона" in why, why)
+    why = pc._text_risk("т\n", {"agents"}, "CHARON.md") or ""
+    check("собранная роль charon — файл CHARON.md отказ", "роль Пантеона" in why, why)
+    check("собранная роль charon — навык с name: charon можно", pc._text_risk(charon, {"skills"}, "SKILL.md") is None)
     # --- «Готово, когда» 3: после taint запись в свои skills — вопрос, в bypassPermissions — отказ ---
     th = os.path.realpath(tempfile.mkdtemp(prefix="taint-home-"))
     setup(th)
