@@ -1,0 +1,1481 @@
+{
+ "about": "База храповика (metis-0854): только опускается через --update; поднять — ручной правкой с причиной в PR. Пороги и правила — в plugins/pantheon/scripts/lint_ratchet.py.",
+ "cycles": [
+  [
+   "plugins/guard/hooks/guard_rules.py",
+   "plugins/guard/hooks/merge_gate.py",
+   "plugins/guard/hooks/protect_config.py"
+  ],
+  [
+   "plugins/pantheon/lib/archive.py",
+   "plugins/pantheon/lib/awake.py",
+   "plugins/pantheon/lib/batch.py",
+   "plugins/pantheon/lib/browser.py",
+   "plugins/pantheon/lib/consent.py",
+   "plugins/pantheon/lib/culprits.py",
+   "plugins/pantheon/lib/instructions.py",
+   "plugins/pantheon/lib/jobs.py",
+   "plugins/pantheon/lib/merge.py",
+   "plugins/pantheon/lib/night.py",
+   "plugins/pantheon/lib/outside.py",
+   "plugins/pantheon/lib/pantheon.py",
+   "plugins/pantheon/lib/plugins.py",
+   "plugins/pantheon/lib/qmd.py",
+   "plugins/pantheon/lib/quarantine.py",
+   "plugins/pantheon/lib/read.py",
+   "plugins/pantheon/lib/review.py",
+   "plugins/pantheon/lib/rolecmd.py",
+   "plugins/pantheon/lib/sessions.py",
+   "plugins/pantheon/lib/taskcli.py",
+   "plugins/pantheon/lib/watch.py"
+  ]
+ ],
+ "files": {
+  ".github/scripts/release.py": {
+   "lines": 251
+  },
+  ".github/scripts/test_release.py": {
+   "PLR0915": {
+    "t_workflows": 78
+   },
+   "lines": 697
+  },
+  "plugins/guard/hooks/daemon.py": {
+   "PLR0912": {
+    "Daemon.decide": 13
+   },
+   "PLR0915": {
+    "Daemon.decide": 58
+   },
+   "lines": 506
+  },
+  "plugins/guard/hooks/guard.py": {
+   "lines": 247
+  },
+  "plugins/guard/hooks/guard_rules.py": {
+   "C901": {
+    "_Lexer.dollar": 19,
+    "_Lexer.run": 26,
+    "_analyze": 21,
+    "_dispatch": 203,
+    "_gh_out_problem": 32,
+    "_hq_gh_args": 29,
+    "_params": 17,
+    "_push_parse": 19,
+    "_run": 19,
+    "check_corpus_role": 16,
+    "check_hestia": 33,
+    "check_owner_merge": 17,
+    "check_pantheon": 18,
+    "check_push": 23,
+    "main": 28,
+    "pantheon_allowed": 17
+   },
+   "PLR0912": {
+    "_Lexer.dollar": 21,
+    "_Lexer.run": 27,
+    "_analyze": 24,
+    "_braces": 15,
+    "_cdp_text_only": 14,
+    "_dispatch": 212,
+    "_gh_out_problem": 34,
+    "_hq_gh_args": 28,
+    "_params": 17,
+    "_push_parse": 18,
+    "_run": 20,
+    "check_cdp_role": 13,
+    "check_corpus_role": 15,
+    "check_hestia": 32,
+    "check_owner_merge": 16,
+    "check_pantheon": 17,
+    "check_private": 14,
+    "check_push": 22,
+    "main": 28,
+    "pantheon_allowed": 16
+   },
+   "PLR0915": {
+    "_Lexer.dollar": 55,
+    "_Lexer.run": 94,
+    "_dispatch": 369,
+    "_gh_out_problem": 58,
+    "_params": 60,
+    "check_hestia": 57,
+    "main": 63
+   },
+   "lines": 4551
+  },
+  "plugins/guard/hooks/merge_gate.py": {
+   "C901": {
+    "_merge_args": 24,
+    "api_merge_args": 19,
+    "gate_problem": 31,
+    "merge_problem": 30
+   },
+   "PLR0912": {
+    "_merge_args": 23,
+    "_program_at": 14,
+    "api_merge_args": 18,
+    "ci_verdict": 14,
+    "gate_problem": 24,
+    "merge_problem": 30,
+    "record": 16,
+    "verdict_parse": 13
+   },
+   "PLR0915": {
+    "gate_problem": 64,
+    "merge_problem": 72
+   },
+   "backrefs": 28,
+   "lines": 2517
+  },
+  "plugins/guard/hooks/protect_config.py": {
+   "PLR0912": {
+    "_unpack_dests": 16
+   },
+   "backrefs": 43,
+   "lines": 368
+  },
+  "plugins/guard/hooks/taint.py": {
+   "lines": 626
+  },
+  "plugins/guard/scripts/bench.py": {
+   "lines": 236
+  },
+  "plugins/guard/tests/_cached_main.py": {
+   "lines": 61
+  },
+  "plugins/guard/tests/_ctx_runner.py": {
+   "lines": 102
+  },
+  "plugins/guard/tests/_guard_shim.py": {
+   "lines": 103
+  },
+  "plugins/guard/tests/_orphan_pool.py": {
+   "lines": 41
+  },
+  "plugins/guard/tests/_py311.py": {
+   "lines": 33
+  },
+  "plugins/guard/tests/test_canaries.py": {
+   "lines": 75
+  },
+  "plugins/guard/tests/test_context.py": {
+   "lines": 424
+  },
+  "plugins/guard/tests/test_drafts.py": {
+   "PLR0915": {
+    "main": 70
+   },
+   "lines": 248
+  },
+  "plugins/guard/tests/test_entry.py": {
+   "lines": 312
+  },
+  "plugins/guard/tests/test_guard.py": {
+   "PLR0915": {
+    "failure_checks": 56,
+    "hestia_consent_checks": 52,
+    "main": 168,
+    "merge_security_checks": 109
+   },
+   "lines": 2375
+  },
+  "plugins/guard/tests/test_hookd.py": {
+   "PLR0915": {
+    "test_copy_daemon": 87,
+    "test_failures": 75,
+    "test_perm": 60,
+    "test_spawn": 54,
+    "test_supply": 62
+   },
+   "lines": 1485
+  },
+  "plugins/guard/tests/test_hooks_json.py": {
+   "lines": 334
+  },
+  "plugins/guard/tests/test_hq_projects.py": {
+   "lines": 108
+  },
+  "plugins/guard/tests/test_hq_sessync.py": {
+   "lines": 95
+  },
+  "plugins/guard/tests/test_merge_gate.py": {
+   "C901": {
+    "t_gh_out": 16,
+    "t_hq_gh": 23
+   },
+   "PLR0912": {
+    "t_gh_out": 13,
+    "t_gh_out_private": 14,
+    "t_hq_gh": 19
+   },
+   "PLR0915": {
+    "kit_history": 56,
+    "t_carry_gate": 91,
+    "t_carry_r2": 81,
+    "t_carry_r4": 58,
+    "t_carry_unit": 89,
+    "t_ci": 140,
+    "t_ci_billing": 81,
+    "t_ci_billing_unit": 59,
+    "t_ci_required": 202,
+    "t_ci_verdict_unit": 126,
+    "t_gh_out": 97,
+    "t_gh_out_private": 67,
+    "t_hq_gh": 91,
+    "t_opus_transcript": 95
+   },
+   "lines": 4744
+  },
+  "plugins/guard/tests/test_misc.py": {
+   "lines": 71
+  },
+  "plugins/guard/tests/test_pool_orphans.py": {
+   "lines": 150
+  },
+  "plugins/guard/tests/test_push_accepted.py": {
+   "lines": 271
+  },
+  "plugins/guard/tests/test_shell_diff.py": {
+   "lines": 235
+  },
+  "plugins/guard/tests/test_taint.py": {
+   "PLR0915": {
+    "test_sets": 58
+   },
+   "lines": 504
+  },
+  "plugins/guard/tests/test_tg_self.py": {
+   "lines": 84
+  },
+  "plugins/pantheon/hooks/agents.py": {
+   "lines": 190
+  },
+  "plugins/pantheon/hooks/ctx.py": {
+   "C901": {
+    "cmd_owner_log": 27
+   },
+   "PLR0912": {
+    "_qmd_why": 13,
+    "cmd_owner_log": 28,
+    "previous_assistant_text": 13
+   },
+   "PLR0915": {
+    "cmd_owner_log": 74
+   },
+   "lines": 2240
+  },
+  "plugins/pantheon/hooks/dev-stop-verify.py": {
+   "PLR0912": {
+    "last_runs": 14
+   },
+   "lines": 227
+  },
+  "plugins/pantheon/hooks/text-stop-verify.py": {
+   "PLR0912": {
+    "problems": 14
+   },
+   "lines": 219
+  },
+  "plugins/pantheon/lib/answers.py": {
+   "PLR0912": {
+    "pick": 13
+   },
+   "lines": 243
+  },
+  "plugins/pantheon/lib/archive.py": {
+   "C901": {
+    "archive": 18
+   },
+   "PLR0912": {
+    "archive": 19
+   },
+   "PLR0915": {
+    "archive": 58
+   },
+   "backrefs": 54,
+   "lines": 226
+  },
+  "plugins/pantheon/lib/autoclose.py": {
+   "PLR0912": {
+    "close_checked": 13
+   },
+   "lines": 625
+  },
+  "plugins/pantheon/lib/awake.py": {
+   "C901": {
+    "inbox_wake": 28
+   },
+   "PLR0912": {
+    "inbox_wake": 28
+   },
+   "PLR0915": {
+    "inbox_wake": 104
+   },
+   "backrefs": 80,
+   "lines": 747
+  },
+  "plugins/pantheon/lib/batch.py": {
+   "backrefs": 8,
+   "lines": 207
+  },
+  "plugins/pantheon/lib/batchsuggest.py": {
+   "lines": 374
+  },
+  "plugins/pantheon/lib/boardmd.py": {
+   "lines": 147
+  },
+  "plugins/pantheon/lib/boardmerged.py": {
+   "lines": 53
+  },
+  "plugins/pantheon/lib/boardstatus.py": {
+   "C901": {
+    "plan": 18
+   },
+   "PLR0912": {
+    "plan": 19
+   },
+   "lines": 177
+  },
+  "plugins/pantheon/lib/boardtext.py": {
+   "lines": 436
+  },
+  "plugins/pantheon/lib/browser.py": {
+   "C901": {
+    "eval_skeleton": 19
+   },
+   "PLR0915": {
+    "eval_skeleton": 51
+   },
+   "backrefs": 37,
+   "lines": 1115
+  },
+  "plugins/pantheon/lib/consent.py": {
+   "C901": {
+    "consent": 17
+   },
+   "PLR0912": {
+    "consent": 16
+   },
+   "backrefs": 11,
+   "lines": 250
+  },
+  "plugins/pantheon/lib/culprits.py": {
+   "C901": {
+    "place_owner": 17,
+    "reap": 26
+   },
+   "PLR0912": {
+    "place_owner": 18,
+    "reap": 28
+   },
+   "PLR0915": {
+    "reap": 62
+   },
+   "backrefs": 33,
+   "lines": 903
+  },
+  "plugins/pantheon/lib/executors.py": {
+   "PLR0912": {
+    "_exec_locked": 13
+   },
+   "PLR0915": {
+    "_exec_locked": 56
+   },
+   "lines": 914
+  },
+  "plugins/pantheon/lib/instructions.py": {
+   "C901": {
+    "instructions_check": 19
+   },
+   "PLR0912": {
+    "instructions_check": 19
+   },
+   "backrefs": 13,
+   "lines": 86
+  },
+  "plugins/pantheon/lib/jobs.py": {
+   "C901": {
+    "jobs_show": 19
+   },
+   "PLR0912": {
+    "jobs_show": 20,
+    "run_job": 16
+   },
+   "PLR0915": {
+    "jobs_show": 53,
+    "run_job": 65
+   },
+   "backrefs": 77,
+   "lines": 204
+  },
+  "plugins/pantheon/lib/merge.py": {
+   "C901": {
+    "process": 16,
+    "process_batch": 25
+   },
+   "PLR0912": {
+    "ci_verdict": 14,
+    "cmd_request": 15,
+    "cmd_run": 13,
+    "gate": 14,
+    "process": 15,
+    "process_batch": 26
+   },
+   "PLR0915": {
+    "process_batch": 54
+   },
+   "backrefs": 79,
+   "lines": 1479
+  },
+  "plugins/pantheon/lib/metrics.py": {
+   "C901": {
+    "usage_for": 20
+   },
+   "PLR0912": {
+    "usage_for": 20
+   },
+   "PLR0915": {
+    "usage_for": 73
+   },
+   "lines": 910
+  },
+  "plugins/pantheon/lib/mmv.py": {
+   "lines": 184
+  },
+  "plugins/pantheon/lib/night.py": {
+   "PLR0912": {
+    "cap_read": 13,
+    "gate": 13
+   },
+   "backrefs": 95,
+   "lines": 1348
+  },
+  "plugins/pantheon/lib/notify.py": {
+   "C901": {
+    "Policy._ping_decisions": 17
+   },
+   "PLR0912": {
+    "Policy._ping_decisions": 17,
+    "Policy.decisions": 13
+   },
+   "lines": 456
+  },
+  "plugins/pantheon/lib/ondemand.py": {
+   "lines": 220
+  },
+  "plugins/pantheon/lib/outside.py": {
+   "C901": {
+    "cmd_request": 22,
+    "rerun_plan": 19,
+    "run_serve": 28,
+    "run_test": 28
+   },
+   "PLR0912": {
+    "cmd_request": 24,
+    "cmd_stop": 13,
+    "requests": 13,
+    "rerun_plan": 18,
+    "run_serve": 26,
+    "run_test": 27,
+    "wait_proc": 14,
+    "workspaces": 13
+   },
+   "PLR0915": {
+    "cmd_request": 70,
+    "run_serve": 97,
+    "run_test": 90
+   },
+   "backrefs": 68,
+   "lines": 3257
+  },
+  "plugins/pantheon/lib/pantheon.py": {
+   "C901": {
+    "_role_apply": 18,
+    "board_drift": 17,
+    "check": 39,
+    "direction_init": 27,
+    "main": 63,
+    "parse_command": 20,
+    "roles_build": 38,
+    "sandbox_build": 34,
+    "status": 43,
+    "tick": 26,
+    "unwrap_rule": 17
+   },
+   "PLR0912": {
+    "_role_apply": 18,
+    "_services_sync": 16,
+    "board_archive": 15,
+    "board_drift": 16,
+    "check": 44,
+    "check_coordinators": 14,
+    "direction_init": 27,
+    "domains_build": 13,
+    "lock": 14,
+    "main": 62,
+    "parse_command": 19,
+    "roles_build": 37,
+    "sandbox_build": 22,
+    "status": 45,
+    "tick": 26,
+    "unwrap_rule": 16
+   },
+   "PLR0915": {
+    "_role_apply": 59,
+    "_services_sync": 53,
+    "check": 110,
+    "direction_init": 69,
+    "domains_build": 54,
+    "lock": 51,
+    "main": 90,
+    "roles_build": 103,
+    "sandbox_build": 163,
+    "status": 161,
+    "tick": 82
+   },
+   "lines": 7072
+  },
+  "plugins/pantheon/lib/pconfig.py": {
+   "lines": 106
+  },
+  "plugins/pantheon/lib/platform_macos.py": {
+   "lines": 85
+  },
+  "plugins/pantheon/lib/plugin_map.py": {
+   "PLR0912": {
+    "load": 13
+   },
+   "lines": 131
+  },
+  "plugins/pantheon/lib/plugins.py": {
+   "backrefs": 76,
+   "lines": 351
+  },
+  "plugins/pantheon/lib/qmd.py": {
+   "C901": {
+    "load": 18
+   },
+   "PLR0912": {
+    "load": 17
+   },
+   "backrefs": 18,
+   "lines": 369
+  },
+  "plugins/pantheon/lib/quarantine.py": {
+   "C901": {
+    "sync_answers": 30
+   },
+   "PLR0912": {
+    "sync_answers": 29
+   },
+   "PLR0915": {
+    "sync_answers": 91
+   },
+   "backrefs": 11,
+   "lines": 132
+  },
+  "plugins/pantheon/lib/read.py": {
+   "C901": {
+    "process": 19,
+    "read_parts": 24,
+    "resolve_all": 17,
+    "take_one": 16
+   },
+   "PLR0912": {
+    "process": 18,
+    "read_parts": 25,
+    "resolve_all": 16,
+    "take_one": 17
+   },
+   "PLR0915": {
+    "read_parts": 97,
+    "resolve_all": 55
+   },
+   "backrefs": 48,
+   "lines": 1909
+  },
+  "plugins/pantheon/lib/review.py": {
+   "C901": {
+    "review_cmd": 41,
+    "review_report": 16
+   },
+   "PLR0912": {
+    "review_cmd": 42,
+    "review_report": 17
+   },
+   "PLR0915": {
+    "review_cmd": 101
+   },
+   "backrefs": 19,
+   "lines": 489
+  },
+  "plugins/pantheon/lib/rolecmd.py": {
+   "backrefs": 15,
+   "lines": 78
+  },
+  "plugins/pantheon/lib/run.py": {
+   "lines": 16
+  },
+  "plugins/pantheon/lib/sessions.py": {
+   "C901": {
+    "_start_session": 17,
+    "_wake": 18,
+    "start": 24
+   },
+   "PLR0912": {
+    "_start_session": 16,
+    "_wake": 19,
+    "start": 23,
+    "wake_lead": 13
+   },
+   "PLR0915": {
+    "_start_session": 51,
+    "_wake": 59,
+    "start": 66
+   },
+   "backrefs": 200,
+   "lines": 1105
+  },
+  "plugins/pantheon/lib/setup.py": {
+   "C901": {
+    "step_backup": 21
+   },
+   "PLR0912": {
+    "step_backup": 22
+   },
+   "PLR0915": {
+    "step_backup": 67
+   },
+   "lines": 558
+  },
+  "plugins/pantheon/lib/skills_lint.py": {
+   "C901": {
+    "lint_file": 16
+   },
+   "PLR0912": {
+    "lint_file": 15
+   },
+   "lines": 116
+  },
+  "plugins/pantheon/lib/statelen.py": {
+   "lines": 33
+  },
+  "plugins/pantheon/lib/taskcli.py": {
+   "C901": {
+    "task_cmd": 66
+   },
+   "PLR0912": {
+    "task_cmd": 67
+   },
+   "PLR0915": {
+    "task_cmd": 172
+   },
+   "backrefs": 50,
+   "lines": 522
+  },
+  "plugins/pantheon/lib/tasks.py": {
+   "C901": {
+    "_scalar": 20,
+    "_sync_bookmarks": 16,
+    "_task_set_locked": 23,
+    "board_sync": 68,
+    "check_head": 30,
+    "plan_batch": 18,
+    "render_card": 25,
+    "task_new": 18
+   },
+   "PLR0912": {
+    "_scalar": 20,
+    "_sync_bookmarks": 15,
+    "_sync_projects": 13,
+    "_task_set_locked": 22,
+    "board_sync": 72,
+    "check_head": 29,
+    "plan_batch": 18,
+    "render_card": 25,
+    "split": 14,
+    "task_new": 17
+   },
+   "PLR0915": {
+    "_task_set_locked": 51,
+    "board_sync": 255,
+    "check_head": 65,
+    "render_card": 75,
+    "task_new": 52
+   },
+   "lines": 4368
+  },
+  "plugins/pantheon/lib/traces.py": {
+   "lines": 114
+  },
+  "plugins/pantheon/lib/watch.py": {
+   "C901": {
+    "autostart": 65,
+    "oneshots": 18,
+    "restart": 19,
+    "worktrees": 22
+   },
+   "PLR0912": {
+    "_prune_state": 13,
+    "autostart": 71,
+    "infra_check": 16,
+    "oneshots": 19,
+    "owner_logs": 14,
+    "pause": 13,
+    "restart": 19,
+    "sandbox_clean": 15,
+    "worktrees": 21
+   },
+   "PLR0915": {
+    "autostart": 178,
+    "infra_check": 66,
+    "oneshots": 55,
+    "owner_logs": 58,
+    "restart": 65,
+    "worktrees": 63
+   },
+   "backrefs": 544,
+   "lines": 3452
+  },
+  "plugins/pantheon/lib/window_rules.py": {
+   "lines": 105
+  },
+  "plugins/pantheon/scripts/affected-map.py": {
+   "C901": {
+    "main": 22
+   },
+   "PLR0912": {
+    "main": 23
+   },
+   "PLR0915": {
+    "main": 97
+   },
+   "lines": 439
+  },
+  "plugins/pantheon/scripts/baseline.py": {
+   "C901": {
+    "build": 22,
+    "parse_transcript": 33
+   },
+   "PLR0912": {
+    "build": 21,
+    "parse_transcript": 29
+   },
+   "PLR0915": {
+    "build": 52,
+    "parse_transcript": 87
+   },
+   "lines": 666
+  },
+  "plugins/pantheon/scripts/check-traces.py": {
+   "PLR0912": {
+    "main": 15
+   },
+   "lines": 87
+  },
+  "plugins/pantheon/scripts/config-check.py": {
+   "C901": {
+    "check_settings": 19,
+    "who_changed": 16
+   },
+   "PLR0912": {
+    "check_settings": 18,
+    "who_changed": 15
+   },
+   "lines": 660
+  },
+  "plugins/pantheon/scripts/decision-map-check.py": {
+   "C901": {
+    "main": 27
+   },
+   "PLR0912": {
+    "main": 25
+   },
+   "PLR0915": {
+    "main": 52
+   },
+   "lines": 129
+  },
+  "plugins/pantheon/scripts/effort.py": {
+   "lines": 67
+  },
+  "plugins/pantheon/scripts/limits_collect.py": {
+   "lines": 44
+  },
+  "plugins/pantheon/scripts/limits_sim.py": {
+   "lines": 70
+  },
+  "plugins/pantheon/scripts/lint_ratchet.py": {
+   "lines": 624
+  },
+  "plugins/pantheon/scripts/run-tests.py": {
+   "C901": {
+    "main": 32
+   },
+   "PLR0912": {
+    "main": 32,
+    "parse": 16
+   },
+   "PLR0915": {
+    "main": 103
+   },
+   "lines": 889
+  },
+  "plugins/pantheon/scripts/usage.py": {
+   "C901": {
+    "main": 24
+   },
+   "PLR0912": {
+    "main": 24
+   },
+   "PLR0915": {
+    "main": 95
+   },
+   "lines": 178
+  },
+  "plugins/pantheon/tests/_py311.py": {
+   "lines": 50
+  },
+  "plugins/pantheon/tests/test_agent_allowlist.py": {
+   "PLR0915": {
+    "main": 121
+   },
+   "lines": 320
+  },
+  "plugins/pantheon/tests/test_argus_misses.py": {
+   "PLR0915": {
+    "run_all": 56
+   },
+   "lines": 132
+  },
+  "plugins/pantheon/tests/test_autoclose.py": {
+   "PLR0915": {
+    "test_close_criteria": 81,
+    "test_core_budget_and_rename": 52,
+    "test_lists_and_checked": 55
+   },
+   "lines": 945
+  },
+  "plugins/pantheon/tests/test_awake.py": {
+   "PLR0915": {
+    "test_inbox_gates": 61
+   },
+   "lines": 1294
+  },
+  "plugins/pantheon/tests/test_baseline.py": {
+   "lines": 332
+  },
+  "plugins/pantheon/tests/test_batch.py": {
+   "lines": 288
+  },
+  "plugins/pantheon/tests/test_batch_suggest.py": {
+   "lines": 277
+  },
+  "plugins/pantheon/tests/test_board.py": {
+   "PLR0915": {
+    "board_extra": 144,
+    "main": 425
+   },
+   "lines": 1186
+  },
+  "plugins/pantheon/tests/test_board_drift.py": {
+   "lines": 281
+  },
+  "plugins/pantheon/tests/test_board_links.py": {
+   "PLR0915": {
+    "unit": 54
+   },
+   "lines": 231
+  },
+  "plugins/pantheon/tests/test_board_md.py": {
+   "lines": 402
+  },
+  "plugins/pantheon/tests/test_board_metrics.py": {
+   "lines": 145
+  },
+  "plugins/pantheon/tests/test_board_status.py": {
+   "lines": 417
+  },
+  "plugins/pantheon/tests/test_board_sync.py": {
+   "lines": 220
+  },
+  "plugins/pantheon/tests/test_board_text.py": {
+   "lines": 382
+  },
+  "plugins/pantheon/tests/test_board_time.py": {
+   "lines": 97
+  },
+  "plugins/pantheon/tests/test_board_view.py": {
+   "PLR0912": {
+    "bookmark_checks": 13
+   },
+   "PLR0915": {
+    "base_checks": 55,
+    "bookmark_checks": 136
+   },
+   "lines": 509
+  },
+  "plugins/pantheon/tests/test_browser.py": {
+   "C901": {
+    "Daemon.transport": 16
+   },
+   "PLR0912": {
+    "Daemon.transport": 16
+   },
+   "lines": 760
+  },
+  "plugins/pantheon/tests/test_card_link.py": {
+   "lines": 94
+  },
+  "plugins/pantheon/tests/test_chat_answer.py": {
+   "lines": 611
+  },
+  "plugins/pantheon/tests/test_check_skills.py": {
+   "PLR0915": {
+    "main": 86
+   },
+   "lines": 186
+  },
+  "plugins/pantheon/tests/test_check_traces.py": {
+   "lines": 100
+  },
+  "plugins/pantheon/tests/test_commit_push.py": {
+   "lines": 98
+  },
+  "plugins/pantheon/tests/test_config_check.py": {
+   "lines": 127
+  },
+  "plugins/pantheon/tests/test_coord_switch.py": {
+   "PLR0915": {
+    "cli_tests": 114
+   },
+   "lines": 345
+  },
+  "plugins/pantheon/tests/test_ctx_clock.py": {
+   "lines": 78
+  },
+  "plugins/pantheon/tests/test_ctx_deferred.py": {
+   "lines": 375
+  },
+  "plugins/pantheon/tests/test_culprits.py": {
+   "PLR0915": {
+    "auto_set": 69
+   },
+   "lines": 632
+  },
+  "plugins/pantheon/tests/test_direction.py": {
+   "PLR0915": {
+    "main": 71,
+    "test_init": 104
+   },
+   "lines": 299
+  },
+  "plugins/pantheon/tests/test_executor_field.py": {
+   "lines": 63
+  },
+  "plugins/pantheon/tests/test_executors.py": {
+   "C901": {
+    "tests": 27
+   },
+   "PLR0912": {
+    "tests": 17
+   },
+   "PLR0915": {
+    "tests": 330
+   },
+   "lines": 723
+  },
+  "plugins/pantheon/tests/test_glossary.py": {
+   "PLR0912": {
+    "collect": 15
+   },
+   "PLR0915": {
+    "main": 68
+   },
+   "lines": 265
+  },
+  "plugins/pantheon/tests/test_grants.py": {
+   "PLR0915": {
+    "main": 65
+   },
+   "lines": 174
+  },
+  "plugins/pantheon/tests/test_heavy_queue.py": {
+   "C901": {
+    "main": 19
+   },
+   "PLR0912": {
+    "main": 20
+   },
+   "PLR0915": {
+    "main": 193
+   },
+   "lines": 319
+  },
+  "plugins/pantheon/tests/test_hooks.py": {
+   "lines": 1287
+  },
+  "plugins/pantheon/tests/test_instructions.py": {
+   "PLR0915": {
+    "main": 52
+   },
+   "lines": 105
+  },
+  "plugins/pantheon/tests/test_lint_ratchet.py": {
+   "lines": 409
+  },
+  "plugins/pantheon/tests/test_live_code.py": {
+   "lines": 396
+  },
+  "plugins/pantheon/tests/test_merge.py": {
+   "PLR0915": {
+    "test_ci_billing": 67,
+    "test_ci_required_names": 59,
+    "test_env_python": 78
+   },
+   "lines": 2051
+  },
+  "plugins/pantheon/tests/test_metrics.py": {
+   "PLR0915": {
+    "cli": 51,
+    "unit": 83
+   },
+   "lines": 591
+  },
+  "plugins/pantheon/tests/test_migrate_batches.py": {
+   "PLR0915": {
+    "main": 51
+   },
+   "lines": 148
+  },
+  "plugins/pantheon/tests/test_mmv.py": {
+   "lines": 192
+  },
+  "plugins/pantheon/tests/test_night.py": {
+   "PLR0915": {
+    "test_probe_stale_snapshot_0459": 71
+   },
+   "lines": 1098
+  },
+  "plugins/pantheon/tests/test_notify.py": {
+   "PLR0915": {
+    "review_case": 65
+   },
+   "lines": 506
+  },
+  "plugins/pantheon/tests/test_notify_hang.py": {
+   "lines": 66
+  },
+  "plugins/pantheon/tests/test_notify_offscreen.py": {
+   "lines": 125
+  },
+  "plugins/pantheon/tests/test_outside.py": {
+   "lines": 2772
+  },
+  "plugins/pantheon/tests/test_outside_idle.py": {
+   "lines": 176
+  },
+  "plugins/pantheon/tests/test_outside_rerun.py": {
+   "lines": 446
+  },
+  "plugins/pantheon/tests/test_owner_cap.py": {
+   "lines": 484
+  },
+  "plugins/pantheon/tests/test_owner_log_gap.py": {
+   "lines": 286
+  },
+  "plugins/pantheon/tests/test_owner_log_midturn.py": {
+   "lines": 407
+  },
+  "plugins/pantheon/tests/test_path_clean.py": {
+   "lines": 96
+  },
+  "plugins/pantheon/tests/test_plugin_map.py": {
+   "lines": 483
+  },
+  "plugins/pantheon/tests/test_plugins_update.py": {
+   "C901": {
+    "main": 27
+   },
+   "PLR0912": {
+    "main": 27
+   },
+   "PLR0915": {
+    "main": 298
+   },
+   "lines": 620
+  },
+  "plugins/pantheon/tests/test_private_conf.py": {
+   "lines": 145
+  },
+  "plugins/pantheon/tests/test_probes.py": {
+   "lines": 208
+  },
+  "plugins/pantheon/tests/test_project_registry.py": {
+   "PLR0915": {
+    "main": 75
+   },
+   "lines": 221
+  },
+  "plugins/pantheon/tests/test_pyfind.py": {
+   "lines": 176
+  },
+  "plugins/pantheon/tests/test_qmd.py": {
+   "lines": 520
+  },
+  "plugins/pantheon/tests/test_read.py": {
+   "PLR0915": {
+    "test_full_flow": 51,
+    "test_parts_stop_conditions": 51
+   },
+   "lines": 1999
+  },
+  "plugins/pantheon/tests/test_review.py": {
+   "PLR0915": {
+    "report_tests": 108,
+    "run_all": 163
+   },
+   "lines": 465
+  },
+  "plugins/pantheon/tests/test_role_apply.py": {
+   "C901": {
+    "main": 18
+   },
+   "PLR0915": {
+    "main": 178
+   },
+   "lines": 350
+  },
+  "plugins/pantheon/tests/test_roles.py": {
+   "C901": {
+    "main": 33
+   },
+   "PLR0912": {
+    "main": 29
+   },
+   "PLR0915": {
+    "main": 268
+   },
+   "lines": 824
+  },
+  "plugins/pantheon/tests/test_roles_harness.py": {
+   "lines": 111
+  },
+  "plugins/pantheon/tests/test_run_tests.py": {
+   "lines": 1009
+  },
+  "plugins/pantheon/tests/test_sandbox_size.py": {
+   "PLR0915": {
+    "main": 97
+   },
+   "lines": 226
+  },
+  "plugins/pantheon/tests/test_schema_example.py": {
+   "lines": 98
+  },
+  "plugins/pantheon/tests/test_setup.py": {
+   "PLR0915": {
+    "main": 200
+   },
+   "lines": 544
+  },
+  "plugins/pantheon/tests/test_start.py": {
+   "C901": {
+    "main": 38
+   },
+   "PLR0912": {
+    "main": 17
+   },
+   "PLR0915": {
+    "main": 892
+   },
+   "lines": 1462
+  },
+  "plugins/pantheon/tests/test_start_request.py": {
+   "lines": 120
+  },
+  "plugins/pantheon/tests/test_story.py": {
+   "PLR0915": {
+    "unit_checks": 77
+   },
+   "lines": 309
+  },
+  "plugins/pantheon/tests/test_story_callouts.py": {
+   "lines": 74
+  },
+  "plugins/pantheon/tests/test_story_criteria.py": {
+   "lines": 70
+  },
+  "plugins/pantheon/tests/test_story_links.py": {
+   "lines": 171
+  },
+  "plugins/pantheon/tests/test_structure.py": {
+   "PLR0915": {
+    "test_cli": 61
+   },
+   "lines": 320
+  },
+  "plugins/pantheon/tests/test_svc_ondemand.py": {
+   "C901": {
+    "test_proxy_inproc": 20
+   },
+   "PLR0915": {
+    "test_proxy": 56,
+    "test_proxy_inproc": 117
+   },
+   "lines": 640
+  },
+  "plugins/pantheon/tests/test_sync_quarantine.py": {
+   "lines": 578
+  },
+  "plugins/pantheon/tests/test_tail_alerts.py": {
+   "PLR0915": {
+    "main": 130
+   },
+   "lines": 358
+  },
+  "plugins/pantheon/tests/test_task_keep.py": {
+   "PLR0915": {
+    "main": 299
+   },
+   "lines": 592
+  },
+  "plugins/pantheon/tests/test_task_origin.py": {
+   "PLR0915": {
+    "split_checks": 62
+   },
+   "lines": 284
+  },
+  "plugins/pantheon/tests/test_task_overlap.py": {
+   "PLR0915": {
+    "cli": 97
+   },
+   "lines": 409
+  },
+  "plugins/pantheon/tests/test_template.py": {
+   "lines": 41
+  },
+  "plugins/pantheon/tests/test_text_executor.py": {
+   "PLR0915": {
+    "hook_tests": 84
+   },
+   "lines": 294
+  },
+  "plugins/pantheon/tests/test_tick.py": {
+   "C901": {
+    "main": 17
+   },
+   "PLR0915": {
+    "main": 404
+   },
+   "lines": 861
+  },
+  "plugins/pantheon/tests/test_tick_plist.py": {
+   "lines": 54
+  },
+  "plugins/pantheon/tests/test_tick_skip.py": {
+   "lines": 227
+  },
+  "plugins/pantheon/tests/test_tmp_rules.py": {
+   "lines": 165
+  },
+  "plugins/pantheon/tests/test_traces.py": {
+   "lines": 172
+  },
+  "plugins/pantheon/tests/test_usage.py": {
+   "lines": 96
+  },
+  "plugins/pantheon/tests/test_usage_ro.py": {
+   "lines": 150
+  },
+  "plugins/pantheon/tests/test_view_help.py": {
+   "lines": 124
+  },
+  "plugins/pantheon/tests/test_watch.py": {
+   "PLR0915": {
+    "test_autostart_goal_released_on_handover_0631": 99,
+    "test_infra_check_managed_mode": 56,
+    "test_session_waits_reaches_you": 56,
+    "test_who_is_who_memo": 68,
+    "test_zeus_clean_0136": 83
+   },
+   "lines": 4468
+  },
+  "plugins/pantheon/tests/test_window_ports.py": {
+   "lines": 78
+  },
+  "plugins/pantheon/tests/test_window_rules.py": {
+   "PLR0915": {
+    "main": 58
+   },
+   "lines": 147
+  },
+  "plugins/pantheon/tests/test_window_tools.py": {
+   "lines": 75
+  },
+  "plugins/pantheon/tests/test_workshop_sockets.py": {
+   "lines": 164
+  },
+  "plugins/project-tools/lib/project_tools.py": {
+   "C901": {
+    "make_plan": 41
+   },
+   "PLR0912": {
+    "make_plan": 42
+   },
+   "PLR0915": {
+    "make_plan": 148
+   },
+   "lines": 806
+  },
+  "plugins/project-tools/tests/test_project_tools.py": {
+   "lines": 463
+  }
+ },
+ "imports": {
+  "plugins/guard/hooks/daemon.py": [
+   "plugins/guard/hooks/guard.py",
+   "plugins/guard/hooks/guard_rules.py"
+  ],
+  "plugins/guard/hooks/guard.py": [
+   "plugins/guard/hooks/guard_rules.py"
+  ],
+  "plugins/guard/hooks/guard_rules.py": [
+   "plugins/guard/hooks/merge_gate.py",
+   "plugins/guard/hooks/protect_config.py"
+  ],
+  "plugins/guard/hooks/merge_gate.py": [
+   "plugins/guard/hooks/guard_rules.py"
+  ],
+  "plugins/guard/hooks/protect_config.py": [
+   "plugins/guard/hooks/guard_rules.py"
+  ],
+  "plugins/pantheon/hooks/ctx.py": [
+   "plugins/pantheon/lib/answers.py",
+   "plugins/pantheon/lib/statelen.py"
+  ],
+  "plugins/pantheon/lib/archive.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/autoclose.py": [
+   "plugins/guard/hooks/merge_gate.py"
+  ],
+  "plugins/pantheon/lib/awake.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/batch.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/browser.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/consent.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/culprits.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/executors.py": [
+   "plugins/pantheon/lib/pconfig.py"
+  ],
+  "plugins/pantheon/lib/instructions.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/jobs.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/merge.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/metrics.py": [
+   "plugins/pantheon/scripts/usage.py"
+  ],
+  "plugins/pantheon/lib/night.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/outside.py": [
+   "plugins/pantheon/lib/pantheon.py",
+   "plugins/pantheon/scripts/run-tests.py"
+  ],
+  "plugins/pantheon/lib/pantheon.py": [
+   "plugins/pantheon/hooks/ctx.py",
+   "plugins/pantheon/lib/answers.py",
+   "plugins/pantheon/lib/archive.py",
+   "plugins/pantheon/lib/autoclose.py",
+   "plugins/pantheon/lib/awake.py",
+   "plugins/pantheon/lib/batch.py",
+   "plugins/pantheon/lib/batchsuggest.py",
+   "plugins/pantheon/lib/boardmd.py",
+   "plugins/pantheon/lib/boardmerged.py",
+   "plugins/pantheon/lib/boardstatus.py",
+   "plugins/pantheon/lib/boardtext.py",
+   "plugins/pantheon/lib/browser.py",
+   "plugins/pantheon/lib/consent.py",
+   "plugins/pantheon/lib/culprits.py",
+   "plugins/pantheon/lib/executors.py",
+   "plugins/pantheon/lib/instructions.py",
+   "plugins/pantheon/lib/jobs.py",
+   "plugins/pantheon/lib/merge.py",
+   "plugins/pantheon/lib/metrics.py",
+   "plugins/pantheon/lib/mmv.py",
+   "plugins/pantheon/lib/night.py",
+   "plugins/pantheon/lib/notify.py",
+   "plugins/pantheon/lib/outside.py",
+   "plugins/pantheon/lib/plugin_map.py",
+   "plugins/pantheon/lib/plugins.py",
+   "plugins/pantheon/lib/qmd.py",
+   "plugins/pantheon/lib/quarantine.py",
+   "plugins/pantheon/lib/read.py",
+   "plugins/pantheon/lib/review.py",
+   "plugins/pantheon/lib/rolecmd.py",
+   "plugins/pantheon/lib/sessions.py",
+   "plugins/pantheon/lib/skills_lint.py",
+   "plugins/pantheon/lib/statelen.py",
+   "plugins/pantheon/lib/taskcli.py",
+   "plugins/pantheon/lib/tasks.py",
+   "plugins/pantheon/lib/traces.py",
+   "plugins/pantheon/lib/watch.py",
+   "plugins/pantheon/lib/window_rules.py"
+  ],
+  "plugins/pantheon/lib/plugins.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/qmd.py": [
+   "plugins/pantheon/lib/ondemand.py",
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/quarantine.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/read.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/review.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/rolecmd.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/run.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/sessions.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/taskcli.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/watch.py": [
+   "plugins/pantheon/lib/pantheon.py",
+   "plugins/pantheon/lib/pconfig.py"
+  ],
+  "plugins/pantheon/scripts/affected-map.py": [
+   "plugins/pantheon/scripts/run-tests.py"
+  ],
+  "plugins/pantheon/scripts/baseline.py": [
+   "plugins/pantheon/scripts/usage.py"
+  ]
+ },
+ "version": 1
+}

@@ -62,6 +62,10 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и последняя строка — файлов,
 ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
+Храповик (metis-0854): перед тестами — scripts/lint_ratchet.py по репозиторию первой папки (кроме --only), так
+его держит и запасной путь слияния (запись полного набора на head PR). Красный — код 1 и его причина последней
+строкой после итога; нет ruff закреплённой версии (код 2) — строка «skip lint_ratchet · пропущено» и код тестов;
+папка не в репозитории с храповиком (временные плагины тестов раннера) — без строки.
 Только stdlib.
 """
 import hashlib
@@ -843,5 +847,43 @@ def summary(done, total_files, n, sec, skipped=0, window_skipped=0):
     return 0
 
 
+RATCHET = os.path.join("plugins", "pantheon", "scripts", "lint_ratchet.py")
+RATCHET_TIMEOUT = 300
+
+
+def ratchet(dirs):
+    """Храповик по репозиторию первой папки: (код, строки вывода) или None — папка не в репозитории с храповиком."""
+    try:
+        root = _git(dirs[0], "rev-parse", "--show-toplevel").strip()
+    except (GitError, OSError):
+        return None
+    script = os.path.join(root, RATCHET)
+    if not os.path.isfile(script):
+        return None
+    try:
+        r = subprocess.run([sys.executable, "-I", script, "--root", root], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=RATCHET_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 1, [f"храповик не уложился в {RATCHET_TIMEOUT} с"]
+    return r.returncode, (r.stdout + r.stderr).strip().splitlines() or [f"храповик: код {r.returncode} без вывода"]
+
+
+def run_all(argv):
+    """main и храповик до него (не для --only): красный храповик — код 1 и причина последней строкой после итога."""
+    opts = parse(argv)
+    res = ratchet(opts["dirs"]) if opts["dirs"] and opts["only"] is None else None
+    if res is not None:
+        rc, lines = res
+        if rc == 2:
+            print(f"skip lint_ratchet · пропущено: {lines[-1]}", flush=True)
+        else:
+            print("\n".join(lines), flush=True)
+    code = main(argv)
+    if res is None or res[0] in (0, 2) or code >= 128:
+        return code
+    print(f"run-tests: храповик красный — {res[1][-1]}", flush=True)
+    return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(run_all(sys.argv[1:]))

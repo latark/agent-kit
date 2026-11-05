@@ -540,8 +540,12 @@ def t_workflows(wfdir=WORKFLOWS):
           "`ruff check .` (без `|| true`, --exit-zero и других флагов)",
           lr == ["python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt",
                  "ruff check ."], asteps)
-    ar = [ln for _, lines in asteps[1:] for ln in lines]
-    check("tests.yml: affected — после ruff тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
+    # metis-0854: вторым шагом — храповик, ровно одна команда без флагов (--update и || true прятали бы рост)
+    rt = asteps[1][1] if len(asteps) > 1 else []
+    check("tests.yml: affected — вторым шагом храповик: ровно `python3 -I plugins/pantheon/scripts/lint_ratchet.py`",
+          rt == ["python3 -I plugins/pantheon/scripts/lint_ratchet.py"], asteps)
+    ar = [ln for _, lines in asteps[2:] for ln in lines]
+    check("tests.yml: affected — после ruff и храповика тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
           "остальные коды — job красный (строки run целиком, без комментариев и лишних ветвей)",
           ar == ["python3 -I .github/scripts/test_release.py", "python3 --version", "code=0", call,
                  'if [ "$code" -eq 3 ]; then', 'echo "нечего гонять: изменения не задевают тесты"', "code=0", "fi",
@@ -553,7 +557,7 @@ def t_workflows(wfdir=WORKFLOWS):
     req = open(os.path.join(WORKFLOWS, "..", "ruff-requirements.txt"), encoding="utf-8").read()
     check("ruff-requirements.txt: ruff==<точная версия> и хеши sha256 колёс",
           re.search(r"^ruff==\d+\.\d+\.\d+ \\$", req, re.M) and len(re.findall(r"--hash=sha256:[0-9a-f]{64}", req)) >= 1, req)
-    check("tests.yml: ${{ }} не в run (инъекция)", not any("${{" in ln for ln in ar + fr + lr), ar + fr + lr)
+    check("tests.yml: ${{ }} не в run (инъекция)", not any("${{" in ln for ln in ar + fr + lr + rt), ar + fr + lr + rt)
 
 
 def t_workflows_on_bad_copies():
@@ -618,6 +622,13 @@ def t_workflows_on_bad_copies():
          "tests.yml: affected — первым шагом ruff"),
         ("шага ruff нет в affected", dict(tests=ins(real, "          ruff check .\n", "")),
          "tests.yml: affected — первым шагом ruff"),
+        ("храповик с || true", dict(tests=ins(real, "lint_ratchet.py\n", "lint_ratchet.py || true\n")),
+         "tests.yml: affected — вторым шагом храповик"),
+        ("храповик с --update", dict(tests=ins(real, "lint_ratchet.py\n", "lint_ratchet.py --update\n")),
+         "tests.yml: affected — вторым шагом храповик"),
+        ("шага храповика нет в affected",
+         dict(tests=ins(real, "        run: python3 -I plugins/pantheon/scripts/lint_ratchet.py\n", "        run: echo\n")),
+         "tests.yml: affected — вторым шагом храповик"),
         ("ruff отдельным job lint (шлюз guard его не знает)",
          dict(tests=ins(real, "  affected:\n", "  lint:\n    if: github.event_name == 'pull_request'\n"
                                               "    runs-on: ubuntu-24.04\n    steps:\n      - run: ruff check .\n\n"
