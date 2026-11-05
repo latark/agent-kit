@@ -1053,8 +1053,12 @@ def test_review_without_closes():
         ps = {i: put(home, "metis-pantheon", i, status=st, **kw) for i, st, kw in (
             ("metis-0101", "waiting", {"waiting_on": "talos"}), ("metis-0102", "doing", {}), ("metis-0103", "todo", {}),
             ("metis-0104", "waiting", {"waiting_on": "human"}), ("metis-0105", "waiting", {"waiting_on": "talos"}),
-            ("metis-0106", "doing", {}), ("metis-0107", "todo", {}))}
-        rows = [{"number": 38, "closes": [], "ids": ["metis-0101", "metis-0102", "metis-0103", "metis-0104"], "part": False},
+            ("metis-0106", "doing", {}), ("metis-0107", "todo", {}), ("metis-0108", "doing", {}),
+            ("metis-0109", "waiting", {"waiting_on": "talos"}))}
+        # ветка без префикса id (как BA #38 …-0184): номера 0101–0104 в ветке, 0108 и 0109 — только упоминание в теле
+        # («после metis-0108», «зависит от metis-0109», argus #341 Б1)
+        rows = [{"number": 38, "closes": [], "branch": "fix-0101-0102-0103-0104",
+                 "ids": ["metis-0101", "metis-0102", "metis-0103", "metis-0104", "metis-0108", "metis-0109"], "part": False},
                 {"number": 39, "closes": ["metis-0105", "metis-0107"], "ids": ["metis-0105", "metis-0106", "metis-0107"],
                  "part": False},
                 {"number": 40, "closes": [], "ids": ["metis-0106"], "part": True}]
@@ -1069,7 +1073,17 @@ def test_review_without_closes():
               st["metis-0103"] == "todo" and st["metis-0104"] == "waiting", st)
         check("0615: PR с Closes — review и у waiting; упоминание рядом с Closes не в счёт; todo по Closes — review",
               st["metis-0105"] == "review" and st["metis-0106"] == "doing" and st["metis-0107"] == "review", st)
-        check("0615: waiting → review снимает waiting_on", T.read(ps["metis-0101"])[0].get("waiting_on") is None)
+        check("0615: waiting → review снимает waiting_on, прежний — в строке журнала",
+              T.read(ps["metis-0101"])[0].get("waiting_on") is None and "; был waiting_on talos" in text(ps["metis-0101"]),
+              text(ps["metis-0101"])[-300:])
+        check("0615 (argus #341 Б1): PR без Closes — задача только упомянута в теле («после Y»), номера нет в ветке: "
+              "doing и waiting не трогаются, waiting_on цел",
+              st["metis-0108"] == "doing" and st["metis-0109"] == "waiting"
+              and T.read(ps["metis-0109"])[0].get("waiting_on") == "talos", st)
+        check("0615: branch_named — номер числом в имени ветки; соседний номер (0274 при ветке …-0275), ветки нет — нет",
+              A.branch_named("landing-claims-0275", ["athena-0274", "athena-0275", "athena-275", 7]) == ["athena-0275",
+                                                                                                      "athena-275"]
+              and A.branch_named(None, ["athena-0275"]) == [] and A.branch_named("x-02750", ["athena-0275"]) == [])
         check("0615: PR «часть» без Closes review не ставит", st["metis-0106"] == "doing" and not errs, (st, errs))
     finally:
         shutil.rmtree(tmp, True)

@@ -6756,12 +6756,15 @@ def board_drift(T, tasks, cache, inbox):
 
 def batch_own_of(tasks, repos):
     """id пачки → репозитории её направления в нижнем регистре (autoclose.batch_pick, metis-0810): repos —
-    [merge_repos] policy.toml (направление → [репозиторий]); его нет или он пуст — None (любые), как у board-auto
-    до правила."""
+    [merge_repos] policy.toml (направление → [репозиторий]); его нет, он пуст или у направления пачки нет строки —
+    None (любые), как у board-auto до правила (argus #341 Д1)."""
     if not isinstance(repos, dict) or not repos:
         return lambda sid: None
-    return lambda sid: [r.lower() for r in repos.get((tasks.get(sid) or (None, {}, ""))[1].get("direction")) or []
-                        if isinstance(r, str)]
+
+    def own(sid):
+        mine = repos.get((tasks.get(sid) or (None, {}, ""))[1].get("direction"))
+        return [r.lower() for r in mine if isinstance(r, str)] if isinstance(mine, list) else None
+    return own
 
 
 def batch_outside(T, tasks, cache, repos=None):

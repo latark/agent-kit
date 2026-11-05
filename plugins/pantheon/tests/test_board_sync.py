@@ -311,6 +311,10 @@ check("0810: одно правило — «вне состава» карточ�
 chk_any = outside_check(tk10, cache10, None)
 check("0810: без [merge_repos] check берёт любые репозитории (как board-auto без own): тогда и #500 и #410",
       isinstance(chk_any, list) and sorted({x[0] for x in chk_any}) == ["metis-0763", "metis-0765", "metis-0766"], chk_any)
+chk_norow = outside_check(tk10, cache10, {"metis-pantheon": [R]})
+check("0810 (argus #341 Д1): у направления пачки нет строки в [merge_repos] — её PR из любых репозиториев (#410 athena), "
+      "у пачки со строкой — только свои (#500 нет)",
+      isinstance(chk_norow, list) and sorted({x[0] for x in chk_norow}) == ["metis-0763", "metis-0766"], chk_norow)
 tk10["metis-0760"][1]["keep_outside"] = ["metis-0763"]
 check("0810: решение координатора — keep_outside у пачки снимает предупреждение check о задаче",
       outside_check(tk10, cache10, repos10) == [], outside_check(tk10, cache10, repos10))

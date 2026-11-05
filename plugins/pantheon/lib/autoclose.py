@@ -583,21 +583,31 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
 
 REVIEW_FROM = ("todo", "doing", "waiting")   # открытый PR с Closes ставит review из этих статусов
 REVIEW_FROM_MENTION = ("doing", "waiting")   # PR без Closes — только начатую работу: todo по упоминанию не трогаем
+BRANCH_NUM_RE = re.compile(r"(?<!\d)\d{3,}(?!\d)")   # номер задачи в имени ветки без префикса: landing-claims-0275
+
+
+def branch_named(branch, ids):
+    """PR без Closes (metis-0615, argus #341 Б1): из id тела — только те, чей номер есть в имени ветки (BA #38: ветка
+    …-0184 и athena-0184 в теле). Простое упоминание («после metis-0201», «зависит от athena-0274» в PR ветки …-0275)
+    задачу не трогает. Номера сравниваются числом: 0184 и 184 — один."""
+    nums = {int(x) for x in BRANCH_NUM_RE.findall(branch)} if isinstance(branch, str) else set()
+    return [i for i in ids if isinstance(i, str) and (m := re.search(r"-(\d+)$", i)) and int(m.group(1)) in nums]
 
 
 def review_pr(pantheon, t, repo, pr, dirs, T, log, errors):
     """Открытый PR, который закрывает задачу (id в ветке или «Closes» в теле, без «часть»), → задача todo/doing/waiting
-    его направления в review (metis-0397, п. 7). PR без Closes и без id в ветке (closes пуст) — задачи, названные в
-    ветке или теле (ids, find_ids), но только doing/waiting (metis-0615, случай athena-0184 и PR BA #38: задача в waiting
-    с открытым PR висела мимо review). waiting владельца (waiting_on human, колонка «Нужен ответ») не трогаем: вопрос не
-    теряется. Строка REVIEW_MARK в журнале: этим PR уже ставили — второй раз не трогаем (владелец вернул задачу —
+    его направления в review (metis-0397, п. 7). PR без Closes и без id в ветке (closes пуст) — задачи из тела (ids),
+    чей номер есть в имени ветки (branch_named), и только doing/waiting (metis-0615, случай athena-0184 и PR BA #38: задача
+    в waiting с открытым PR висела мимо review); простое упоминание в теле не в счёт. waiting владельца (waiting_on human,
+    колонка «Нужен ответ») не трогаем: вопрос не теряется; прежний waiting_on — в строке журнала (task_set его стирает).
+    Строка REVIEW_MARK в журнале: этим PR уже ставили — второй раз не трогаем (владелец вернул задачу —
     тревога у прохода доски, lib/boardstatus.py)."""
     n = pr.get("number")
     if not isinstance(n, int) or pr.get("part") or not isinstance(pr.get("closes"), list):
         return
     ids, allowed = [i for i in pr["closes"] if isinstance(i, str)], REVIEW_FROM
     if not ids:
-        ids = [i for i in pr.get("ids") or [] if isinstance(i, str)] if isinstance(pr.get("ids"), list) else []
+        ids = branch_named(pr.get("branch"), pr["ids"]) if isinstance(pr.get("ids"), list) else []
         allowed = REVIEW_FROM_MENTION
     if not ids:
         return
@@ -612,7 +622,9 @@ def review_pr(pantheon, t, repo, pr, dirs, T, log, errors):
         if journal_has(path, T, note):
             continue
         try:
-            T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
+            was = head.get("waiting_on") if head.get("status") == "waiting" else None
+            T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход",
+                       note=note + (f"; был waiting_on {was}" if was else ""))
             log.append(f"{tid}: review — открыт PR #{n} ({repo})")
         except ValueError as e:
             errors[f"{repo}#{n}"] = f"{tid}: {e}"
