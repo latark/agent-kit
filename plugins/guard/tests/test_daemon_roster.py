@@ -91,6 +91,7 @@ deny = [
     ("файл входного перенаправления", B(f"head -c 400 < ~/.claude/{DAEMON}/{NAME}"), {}),
     ("python3 - <<EOF с кодом", B(f"python3 - <<'EOF'\nprint(open('/x/.claude/{DAEMON}/{NAME}').read())\nEOF"), {}),
     ("bash <<EOF с командой", B(f"bash <<'EOF'\ncat ~/.claude/{DAEMON}/{NAME}\nEOF"), {}),
+    ("echo команды в sh через конвейер", B(f"echo 'cat ~/.claude/{DAEMON}/{NAME}' | sh"), {}),
     ("команду не разобрать", B(f"cat \"~/.claude/{DAEMON}/{NAME}"), {}),
 ]
 for name, (tool, ti), kw in deny:
