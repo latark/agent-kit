@@ -37,7 +37,8 @@ PostToolUse (Bash:
                  PANTHEON_ROLE=hq, P0-2) и mnemo-brain (SEC-11); hq и chiron закрыты лишь ключи — отказ на явный путь
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
                  остальным обход папки выше — отказ, только если читает me/ или журнал (grep -r без --exclude-dir=me)
-                 или копирует личное (tar, rsync, cp); список имён (find, fd, ls, Glob) — можно (metis-0823);
+                 или копирует личное (tar, rsync, cp); список имён (find, fd, rg --files, ls, Glob) — можно, если его
+                 вывод не уходит в конвейер или $(…) (metis-0823);
   hq-projects  — окну штаба (PANTHEON_ROLE=hq) Read, Grep, Glob папок проектов направлений из domains.json — отказ
                  с именем координатора: поручение в inbox и `pantheon start <имя>` (metis-0771); открыты agent-kit,
                  направления с coordinator = false, ~/ai, README.md, AGENTS.md и .git проекта; Bash — песочница окна;
@@ -187,6 +188,7 @@ def configure():
     _READS.clear()
     _CWDS.clear()
     _UNRES.clear()
+    _FED.clear()
 
 
 DEADLINE = 8       # с: таймаут хука PreToolUse и PostToolUse — 10 с, а таймаут Claude Code пропускает вызов
@@ -1262,6 +1264,8 @@ class _State:
             if os.environ.get(name):
                 self.vars[name] = {os.environ[name]}
         self.out, self.cmds = [], []
+        self.fed = set()     # индексы st.cmds, чей вывод уходит дальше: в конвейер или в $(…), `…`, <(…) (metis-0823)
+        self.in_sub = 0      # глубина подстановок: внутри $(…) вывод любой команды кто-то читает
         self.reads = []      # цели входного перенаправления `<` и `$(< …)`: что команда читает из файла
         self.links = {}      # ln -s в этой команде: путь ссылки → куда ведёт
         self.opaque = False  # source/. — дальше переменные и папка неизвестны
@@ -2251,7 +2255,11 @@ def _analyze(lex, st, depth):
         else:
             cur.append(t)
     segs.append((cur, prev))
-    for items, prev in segs:
+    for si, (items, prev) in enumerate(segs):
+        # metis-0823 (Б1 ревью #330): дальше в строке есть «|» — вывод этой команды может уйти в конвейер. Без учёта
+        # скобок и групп: `{ find …; } | xargs cat` тоже конвейер, лишний отказ на `find …; ls | head` безвреден
+        feeds = st.in_sub > 0 or any(p in ("|", "|&") for _, p in segs[si + 1:])
+        first = len(st.cmds)
         words, stdin, k = [], None, 0
         while k < len(items):
             t = items[k]
@@ -2292,8 +2300,14 @@ def _analyze(lex, st, depth):
             _run(words, st, stdin, piped, depth)  # служебное слово могло быть и операндом: rm -rf done
         for c in cmds:
             _run(c, st, stdin, piped, depth)
-    for sub in lex.inner:
-        _analyze(sub, st, depth + 1)
+        if feeds:
+            st.fed.update(range(first, len(st.cmds)))
+    st.in_sub += 1
+    try:
+        for sub in lex.inner:
+            _analyze(sub, st, depth + 1)
+    finally:
+        st.in_sub -= 1
 
 
 def _analyze_string(text, st, depth):
@@ -2308,6 +2322,7 @@ _ANALYSIS = {}
 _READS = {}
 _CWDS = {}  # папки, где идут команды строки (событие и каждый cd); None — папку не вычислить
 _UNRES = {}  # metis-0823: папки каждой неразобранной цели записи (_Unres.base); None — папку не вычислить
+_FED = {}  # metis-0823: индексы команд разбора, чей вывод уходит дальше (конвейер, подстановка)
 
 
 def bash_analysis(cmd, cwd):
@@ -2334,11 +2349,13 @@ def bash_analysis(cmd, cwd):
         _READS[(cmd, cwd)] = sorted(set(st.reads))
         _CWDS[(cmd, cwd)] = list(st.cwds)
         _UNRES[(cmd, cwd)] = [(getattr(p, "base", None), getattr(p, "text", "")) for p in st.out if p == UNRESOLVED]
+        _FED[(cmd, cwd)] = frozenset(st.fed)
     except (_ParseError, RecursionError, ValueError, OSError):
         res = [UNRESOLVED], []
         _READS[(cmd, cwd)] = [UNRESOLVED]
         _CWDS[(cmd, cwd)] = [None]
         _UNRES[(cmd, cwd)] = [(None, "")]
+        _FED[(cmd, cwd)] = frozenset()
     _ANALYSIS[(cmd, cwd)] = res
     return res
 
@@ -2357,6 +2374,12 @@ def bash_cwds(cmd, cwd):
     """Папки, где могут идти команды строки: папка события и каждая цель cd; None — папку не вычислить."""
     bash_analysis(cmd, cwd)
     return _CWDS.get((cmd, cwd), [None])
+
+
+def bash_fed(cmd, cwd):
+    """Индексы команд bash_analysis(cmd, cwd)[1], чей вывод уходит дальше: в конвейер или в подстановку (metis-0823)."""
+    bash_analysis(cmd, cwd)
+    return _FED.get((cmd, cwd), frozenset())
 
 
 def unresolved_dirs(event, tool, tool_input, zones, words=None):
@@ -2679,7 +2702,9 @@ def check_pantheon(event, tool, tool_input):
 #            поиск (grep -r, rg, Grep, find -exec) — отказ, только если внутри me/ или журнал и они не исключены
 #            (--exclude-dir=me, rg -g '!me', glob «!me/**»): ключ git-crypt — двоичный, поиск его не выводит;
 #            копирование (tar, zip, rsync, cp, ditto) — отказ, если внутри любое личное; список имён (find, fd,
-#            ls, Glob) — можно. Слова-текст (echo, git commit -m, pantheon task --note) и шаблон поиска — не пути.
+#            rg --files, ls, Glob) — можно, если вывод никуда не уходит: в конвейере (| xargs, | while read) или в
+#            $(…), `…`, <(…) — отказ, как до 0823 (bash_fed). Слова-текст (echo, git commit -m, pantheon task
+#            --note) и шаблон поиска — не пути.
 #   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs, пароль
 #            ~/.config/cdp-daemon/token): никому из ролей (CDP_READERS и CDP_ACTORS пусты, metis-0227). /close —
 #            никому из ролей: демон общий для всех сессий. Bash — только подключение (metis-0823, _cdp_connects):
@@ -2721,7 +2746,8 @@ RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "
              "ditto", "qmd"}
 # metis-0823: обход папки выше личной — отказ, только если команда читает содержимое личного. Поиск (SEARCHERS) —
 # только me/ и журнал Пританея внутри и не исключённые (--exclude-dir=me, rg -g '!me'): ключ git-crypt — двоичный
-# файл, поиск его не выводит. Список имён (find и fd без -exec, ls, Glob) — не чтение, проходит. Копирование (tar,
+# файл, поиск его не выводит. Список имён (find и fd без -exec, rg --files, ls, Glob) — не чтение, проходит, пока
+# его вывод не уходит в конвейер или подстановку. Копирование (tar,
 # zip, rsync, cp, ditto) и find -exec / fd -x — как раньше: любой личный путь внутри
 SEARCHERS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "qmd"}
 FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir", "-x", "--exec", "-X", "--exec-batch"}
@@ -2902,7 +2928,7 @@ def _prose(name, texts):
 
 def _search_pattern_at(name, texts):
     """Индекс шаблона поиска у grep, rg, ag, ack — первое слово без флага, если шаблона нет в -e/-f: это не путь."""
-    if name not in SEARCHERS or name == "qmd":
+    if name not in SEARCHERS or name == "qmd" or _rg_files(name, texts):
         return None
     i = 0
     while i < len(texts):
@@ -2983,15 +3009,30 @@ def _grep_recursive(texts):
     return False
 
 
-def _walk_reads(name, texts, root, priv, content):
-    """Обход root командой name читает личное (metis-0823). content None — как было: любой обход предка."""
+def _rg_files(name, texts):
+    """rg --files: список имён без шаблона поиска (metis-0823)."""
+    if name != "rg":
+        return False
+    for x in texts:
+        if x == "--":
+            return False
+        if x == "--files":
+            return True
+    return False
+
+
+def _walk_reads(name, texts, root, priv, content, fed=False):
+    """Обход root командой name читает личное (metis-0823). content None — как было: любой обход предка. fed —
+    вывод команды уходит дальше (конвейер, $(…), `…`, <(…), while read): список имён тогда — как раньше, отказ."""
     inner = [x for x in priv if _inside(x, [root])]
     if not inner or name not in RECURSIVE:
         return False
     if content is None:
         return True
-    if name in ("find", "fd") and not any(x in FIND_EXEC for x in texts if x):
-        return False
+    if (name in ("find", "fd") and not any(x in FIND_EXEC for x in texts if x)) or _rg_files(name, texts):
+        # список имён (find, fd без -exec, rg --files) — не чтение, пока имена никто не читает: `| xargs grep`,
+        # `grep … $(find …)`, `| while read f; do cat` — читают файлы по списку (Б1 ревью #330)
+        return fed
     if name in SEARCHERS or name in ("find", "fd"):  # find -exec, fd -x — как поиск: что запустят, обычно grep
         if name in ("grep", "egrep", "fgrep") and not _grep_recursive(texts):
             return False
@@ -3012,7 +3053,8 @@ def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=F
     if content is not None:  # metis-0823: cd ../.. — от папки прошлого cd, как считает разбор
         cwds = list(dict.fromkeys([cwd] + [d for d in bash_cwds(cmd, cwd) if d]))
     hits = [d for d in cwds if _inside(d, priv) and cmds]
-    for name, texts in cmds:
+    fed = bash_fed(cmd, cwd)
+    for ci, (name, texts) in enumerate(cmds):
         skip = (_prose(name, texts) | {_search_pattern_at(name, texts)}) if content is not None else ()
         words = [name] + [x for i, x in enumerate(texts) if x and i not in skip]
         if values:
@@ -3023,7 +3065,8 @@ def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=F
                 continue
             for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
                 p = _expand(w, d)
-                if _inside(p, priv) or (ancestor and _walk_reads(name, texts, p, priv, content)) or reaches(p):
+                if _inside(p, priv) or (ancestor and _walk_reads(name, texts, p, priv, content, ci in fed)) or \
+                        reaches(p):
                     hits.append(p)
     hits += [p for p in write_targets(event, "Bash", tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     # metis-0247: файл после `<` разбор не держит среди слов — без этого `gh pr edit --body-file - < личное`
@@ -3096,7 +3139,8 @@ def check_private(event, tool, tool_input):
             f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал Пританея — только hq, chiron (в окне Пританея) и "
             "mnemo-brain. Поиск по папке выше — исключи личное: grep -r --exclude-dir=me, rg -g '!me', Grep с glob "
             "«!me/**» (журнал — --exclude-dir=owner-log) или сузь путь: raw/, wiki/, inbox/. Список имён (find, fd, "
-            "ls, Glob) по папке выше проходит.")
+            "rg --files, ls, Glob) по папке выше проходит, если его вывод никуда не уходит: find в конвейере "
+            "(| xargs, | while read) или в $(…) — отказ.")
 
 
 FAKE_IP_NET = "198.18.0.0/15"  # сеть прокси с подменой адресов; ipaddress грузится в _local_url (metis-0330)

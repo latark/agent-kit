@@ -20,7 +20,9 @@ claude-config: коммит в обход sync.sh отправил бы прав
 Файлы с известными именами (curl -O, wget без -r и -m, patch, rsync одного файла) в корне репозитория — можно.
 С metis-0194 закрыты дыры ревью #35: rsync с «.», «папка/.» и -R, wget -r/-m, git checkout/restore поверх .claude, 7z -o.
 С metis-0823 неразобранная цель Bash ($(…), переменная) проходит, только если её буквальная часть лежит в $TMPDIR,
-кэше окна или своей worktree (G.unresolved_dirs); эта папка судится как обычная цель.
+кэше окна или своей worktree (G.unresolved_dirs); эта папка судится как обычная цель. Папка-основа .git и папка
+с настройками репозитория (корень, вложенный проект) — отказ: имя из подстановки может оказаться config, .mcp.json
+(_unres_risky).
 """
 
 import os
@@ -95,6 +97,17 @@ CLONE_OPT_ARG = {"-o", "--origin", "-b", "--branch", "-u", "--upload-pack", "--r
 # цель и его settings, agents, hooks, skills, commands; .mcp.json; .git/hooks и .git/config. «.claude/worktrees/…» — нет
 PROTECTED_WORDS = re.compile(r"\.claude(?:/(?:settings|agents|hooks|skills|commands)|/?(?![\w./-]))|\.mcp\.json|"
                              r"\.git/(?:hooks|config)", re.I)
+
+
+def _unres_risky(d):
+    """metis-0823 (Б2 ревью #330): неразобранное имя в папке d может стать защищённым файлом прямо в ней —
+    `.git/$(echo config)`, `./$(echo .mcp.json)`. Такая папка: .git или папка, где прямо лежат настройки репозитория
+    (.git, .claude, .mcp.json: корень репозитория, вложенный проект). Подпапки worktree (out/, src/), $TMPDIR и кэш
+    окна — нет. Папку, где прямо лежит путь из protected() (~/.claude, ~), unresolved_dirs уже не пускает: корни,
+    над зонами, он отбрасывает."""
+    if G._key(os.path.basename(d)) == ".git":
+        return True
+    return any(os.path.lexists(os.path.join(d, x)) for x in (".git", ".claude", ".mcp.json"))
 
 
 def _repo_or_above(t):
@@ -355,6 +368,9 @@ def check_protect_config(event, tool, tool_input):
     dirs = G.unresolved_dirs(event, tool, tool_input, protected(), PROTECTED_WORDS) if G.UNRESOLVED in targets else []
     if dirs is None:
         return G.UNRESOLVED_REASON + G.UNRESOLVED_SAFE
+    if any(_unres_risky(d) for d in dirs):
+        return (G.UNRESOLVED_REASON + G.UNRESOLVED_SAFE + " Корень репозитория, .git и папка с защитами — тоже отказ: "
+                "имя из подстановки может оказаться .mcp.json или config. Пиши в подпапку (`out/$f`) или в $TMPDIR.")
     targets = [p for p in targets if p != G.UNRESOLVED] + dirs
     prot = protected()
     mk = tool == "Bash" and bool(MKDIR_ONLY.match(tool_input.get("command") or ""))

@@ -101,6 +101,10 @@ def setup(home):
     os.makedirs(os.path.join(home, "ai/knowledge/raw"), exist_ok=True)
     open(os.path.join(home, "ai/knowledge/me/finance.md"), "w").close()
     os.makedirs(os.path.join(home, "projects/shopKeeperApp/.claude/worktrees/agent-1"), exist_ok=True)
+    # metis-0823 (Б2 ревью #330): вложенные проекты — свой .claude и свой .mcp.json без .git
+    os.makedirs(os.path.join(home, "projects/shopKeeperApp/web/.claude"), exist_ok=True)
+    os.makedirs(os.path.join(home, "projects/shopKeeperApp/docs"), exist_ok=True)
+    open(os.path.join(home, "projects/shopKeeperApp/docs/.mcp.json"), "w").close()
     open(os.path.join(home, ".claude/pantheon/policy.toml"), "w").write(
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
         'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n'
@@ -1605,6 +1609,24 @@ def main():
              ("Grep", {"pattern": "налог", "path": os.path.join(home, "ai", "knowledge"), "glob": "*.md"})),
             ("Glob в me/", br, "prometheus", ("Glob", {"pattern": "me/*.md", "path": os.path.join(home, "ai", "knowledge")})),
         )],
+        # Б1 ревью #330: список имён, чей вывод уходит дальше (конвейер, $(…), `…`, <(…), while read), — отказ, как до 0823
+        *[(f"0823 private: список имён читают дальше: {n} — отказ", "deny", br, "argus", True, B(c)) for n, c in (
+            ("find | xargs grep", f"find {home}/ai/knowledge -name '*.md' | xargs grep налог"),
+            ("find | xargs cat", f"find {home}/ai/knowledge -name '*.md' | xargs cat"),
+            ("find -print0 | xargs -0 grep -l", f"find {home}/ai/knowledge -name '*.md' -print0 | xargs -0 grep -l налог"),
+            ("grep $(find)", f"grep налог $(find {home}/ai/knowledge -name '*.md')"),
+            ("find | while read; cat", f"find {home}/ai/knowledge -name '*.md' | while read f; do cat \"$f\"; done"),
+            ("fd | xargs grep", f"fd md {home}/ai/knowledge | xargs grep налог"),
+            ("rg --files | xargs rg", f"rg --files {home}/ai/knowledge | xargs rg налог"),
+            ("for f in `find`", f"for f in `find {home}/ai/knowledge -name '*.md'`; do cat $f; done"),
+            ("while read < <(find)", f"while read f; do cat \"$f\"; done < <(find {home}/ai/knowledge -name '*.md')"),
+            ("{ find; } | xargs cat", f"{{ find {home}/ai/knowledge -name '*.md'; }} | xargs cat"),
+            ("find |& xargs cat", f"find {home}/ai/knowledge -name '*.md' |& xargs cat"))],
+        *[(f"0823 private: список имён без чтения: {n} — можно", "allow", br, "argus", True, B(c)) for n, c in (
+            ("rg --files", f"rg --files {home}/ai/knowledge"),
+            ("rg --files -g", f"rg --files {home}/ai/knowledge -g '*.md'"),
+            ("find > /dev/null; echo", f"find {home}/ai/knowledge -name '*.md' > /dev/null; echo done"),
+            ("find && echo", f"find {home}/ai/knowledge -name '*.md' && echo ok"))],
         # --- cdp-role (SEC-13, BROW-06, SEC-21) ---
         ("cdp: координатор вызывает демон — отказ", "deny", br, "domain-coordinator", False,
          B("curl -s 127.0.0.1:9333/health")),
@@ -1658,6 +1680,23 @@ def main():
             ("шаблон .cl*de в литеральной части", "echo x > .cl*de/hooks-$(date +%s)"),
             ("шаблон [.]claude в литеральной части", "echo x > [.]claude/settings$(date +%s).json"),
             ("зона в слове цели внутри $TMPDIR", 'echo x > "$TMPDIR/ai/pantheon/b-$(date +%s).md"'))],
+        # Б2 ревью #330: папка-основа .git, корень репозитория или папка с защищённым путём — отказ protect-config
+        *[(f"0823 неразобранное имя рядом с защитами: {n} — отказ", "deny", d, "dev-sonnet", True, B(c)) for n, d, c in (
+            (".git/$(echo config)", br, 'cp x ".git/$(echo config)"'),
+            (".git/$f в цикле", br, 'for f in $(ls); do echo x > ".git/$f"; done'),
+            (".git/$f в agent-kit", ak, 'for f in $(ls); do echo x > ".git/$f"; done'),
+            ("./$(echo .mcp.json)", br, 'echo x > "./$(echo .mcp.json)"'),
+            ("cp -R x ./$F", br, 'cp -R x "./$F"'),
+            ("./$f.bak", br, 'ls | while read f; do cp "$f" "./$f.bak"; done'),
+            ("корень без ./", br, 'echo x > "notes-$(date +%s).md"'),
+            ("корень agent-kit (только .git)", ak, 'echo x > "./$F"'),
+            ("вложенный проект с .claude", br, 'echo x > "web/$F"'),
+            ("вложенный проект с .mcp.json", br, 'echo x > "docs/$F"'))],
+        *[(f"0823 неразобранное имя в подпапке и $TMPDIR: {n} — можно", "allow", br, "dev-sonnet", True, B(c)) for n, c in (
+            ("out/$F", 'echo x > "out/$F"'),
+            ("cp -R x out/$F", 'cp -R x "out/$F"'),
+            ("src/sub/$(date)", 'echo x > "src/sub/$(date +%s).log"'),
+            ("$TMPDIR/$f", 'echo x > "$TMPDIR/$f"'))],
         # корень репозитория, равный зоне или над ней, — не «своя worktree»: ~/.claude сам репозиторий
         ("0823 неразобранная цель: корень-зона ~/.claude — отказ", "deny", ".claude", "dev-sonnet", True,
          B('for f in $(ls); do echo x > "skills/$f.md"; done')),
