@@ -357,7 +357,7 @@ def handoffs(state, t):
             ts = float(e.get("t"))
         except (ValueError, TypeError, AttributeError):
             continue
-        if not isinstance(e, dict) or not 0 <= t - ts <= DAY or e.get("kind") not in HANDOFF_TO \
+        if not isinstance(e, dict) or not -60 <= t - ts <= DAY or e.get("kind") not in HANDOFF_TO \
                 or e.get("outcome") not in HANDOFF_OUT:
             continue
         rid = e.get("id")

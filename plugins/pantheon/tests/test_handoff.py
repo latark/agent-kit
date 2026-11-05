@@ -208,7 +208,7 @@ for text, src in [("sandbox-exec: Operation not permitted", "sandbox"), ("listen
                   ("pantheon: неизвестная команда «zap»", "nocmd"),
                   ("AssertionError: 1 != 2", None), ("SyntaxError: invalid syntax", None), ("", None),
                   ("exit code 1\nFAIL test_x", None)]:
-    check(f"источник отказа: «{text[:40]}» → {src}", H.refusal_source(text) == src, H.refusal_source(text))
+    check(f"источник отказа: {text[:40]!r} → {src}", H.refusal_source(text) == src, H.refusal_source(text))
 
 # ===================================================================================================================
 # [N1–N6] где Touch ID не действует
@@ -498,16 +498,25 @@ g(MAIN, "remote", "add", "origin", ORIGIN)
 g(MAIN, "push", "-q", "origin", "main")
 g(MAIN, "worktree", "add", "-q", "-b", "feat", WT, "origin/main")
 
+def refused(fn, *a):
+    try:
+        fn(*a)
+        return None
+    except H.Refuse as e:
+        return e.channel, str(e)
+
+
+GD = os.path.join(MAIN, ".git", "worktrees", "repo-wt")
 f = H.facts_worktree("~/projects/repo-wt")
-check("worktree чистая и отправленная → факты: путь, ветка, HEAD, где есть",
-      f["path"] == WT and "ветка feat" in f["desc"] and "origin/main" in f["desc"], f)
+check("worktree отправленная → факты: путь, ветка, HEAD, где есть",
+      f["path"] == WT and "ветка feat" in f["desc"] and "origin/main" in f["desc"] and f["gd"] == GD, f)
 for name, target, prep, channel in [
         ("основная копия", "~/projects/repo", None, "bad"),
         ("подпапка worktree", "~/projects/repo-wt/sub", "mkdir", "bad"),
         ("вне ~/projects", _ROOT, None, "bad"),
         ("относительный путь", "projects/repo-wt", None, "bad"),
         ("ссылка на worktree", "~/projects/link-wt", "link", "bad"),
-        ("незакоммиченный файл", "~/projects/repo-wt", "dirty", "yes"),
+        ("незакоммиченный файл: до вопроса status не идёт", "~/projects/repo-wt", "dirty", None),
         ("коммит только в ней", "~/projects/repo-wt", "commit", "yes")]:
     if prep == "mkdir":
         os.makedirs(os.path.join(WT, "sub"), exist_ok=True)
@@ -526,15 +535,63 @@ for name, target, prep, channel in [
             fh.write("x")
         g(WT, "add", "-A")
         g(WT, "commit", "-qm", "own")
-    try:
-        H.facts_worktree(target)
-        got = None
-    except H.Refuse as e:
-        got = e.channel
-    check(f"worktree-remove: {name} → отказ {channel}", got == channel, got)
+    r = refused(H.facts_worktree, target)
+    check(f"worktree-remove: {name} → {('отказ ' + channel) if channel else 'факты'}",
+          (r and r[0]) == channel if channel else r is None, r)
     if prep == "mkdir":
         g(WT, "reset", "-q", "--hard", "origin/main")
 g(WT, "reset", "-q", "--hard", "origin/main")
+
+# собственный gitdir worktree: заперта, обратная ссылка, commondir, место gitdir (находка безопасности, круг 2, п. 4)
+with open(os.path.join(GD, "locked"), "w") as fh:
+    fh.write("x")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check("worktree заперта (git worktree lock) → только «да»", r and r[0] == "yes" and "заперта" in r[1], r)
+os.unlink(os.path.join(GD, "locked"))
+with open(os.path.join(GD, "gitdir"), encoding="utf-8") as fh:
+    backlink = fh.read()
+with open(os.path.join(GD, "gitdir"), "w") as fh:
+    fh.write(os.path.join(MAIN, ".git") + "\n")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check("gitdir worktree указывает не на неё → отказ", r and r[0] == "bad" and "обратно" in r[1], r)
+with open(os.path.join(GD, "gitdir"), "w") as fh:
+    fh.write(backlink)
+with open(os.path.join(GD, "commondir"), encoding="utf-8") as fh:
+    commondir = fh.read()
+with open(os.path.join(GD, "commondir"), "w") as fh:
+    fh.write(ORIGIN + "\n")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check("commondir worktree ведёт в чужой репозиторий → отказ", r and r[0] == "bad", r)
+with open(os.path.join(GD, "commondir"), "w") as fh:
+    fh.write(commondir)
+DOTGIT = os.path.join(WT, ".git")
+with open(DOTGIT, encoding="utf-8") as fh:
+    dotgit = fh.read()
+EVIL = os.path.join(HOME, "projects", "evil-gitdir")
+shutil.copytree(GD, EVIL)
+with open(os.path.join(EVIL, "commondir"), "w") as fh:
+    fh.write(os.path.join(MAIN, ".git") + "\n")
+with open(os.path.join(EVIL, "gitdir"), "w") as fh:
+    fh.write(DOTGIT + "\n")
+with open(DOTGIT, "w") as fh:
+    fh.write(f"gitdir: {EVIL}\n")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check(".git worktree указывает на gitdir вне .git/worktrees → отказ", r and r[0] == "bad" and "не в" in r[1], r)
+PWN = os.path.join(_ROOT, "pwned")
+with open(os.path.join(EVIL, "config.worktree"), "w") as fh:
+    fh.write(f'[diff "x"]\n\ttextconv = touch {PWN}\n')
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check("чужой gitdir с diff-драйвером в config.worktree → отказ по белому списку", r and r[0] == "bad" and
+      "diff.x.textconv" in r[1], r)
+with open(DOTGIT, "w") as fh:
+    fh.write(dotgit)
+shutil.rmtree(EVIL)
+CW = os.path.join(GD, "config.worktree")
+with open(CW, "w") as fh:
+    fh.write(f"[core]\n\tpager = touch {PWN}\n")
+r = refused(H.facts_worktree, "~/projects/repo-wt")
+check("config.worktree самой worktree с core.pager → отказ", r and r[0] == "bad" and "core.pager" in r[1], r)
+os.unlink(CW)
 
 reset()
 clear_log()
@@ -542,10 +599,12 @@ rc, rid, out = touch("worktree-remove", "~/projects/repo-wt", "--task", "metis-0
 check("заявка worktree-remove: код 0, текст окна с путём, веткой и HEAD", rc == 0 and rid and
       "Удалить worktree ~/projects/repo-wt (ветка feat" in out, out)
 run()
-check("[0775] палец → worktree удалена git-ом, без сообщения в окне роли", not os.path.exists(WT) and
-      result(qdir(), rid)["state"] == "done" and "repo-wt" not in g(MAIN, "worktree", "list"), result(qdir(), rid))
+check("[0775] палец → worktree и её gitdir удалены, git её не видит, без сообщения в окне роли",
+      not os.path.exists(WT) and not os.path.exists(GD) and result(qdir(), rid)["state"] == "done"
+      and "repo-wt" not in g(MAIN, "worktree", "list"), result(qdir(), rid))
 
-# грязная после заявки → после пальца снято, worktree цела
+# грязная после заявки → status после пальца, до удаления: worktree цела
+g(MAIN, "worktree", "prune")
 g(MAIN, "worktree", "add", "-q", "-B", "feat", WT, "origin/main")
 reset()
 rc, rid, _ = touch("worktree-remove", "~/projects/repo-wt", "--task", "metis-0775")
@@ -558,18 +617,79 @@ def dirty_wt():
 
 ANSWER["during"] = dirty_wt
 run()
-check("worktree стала грязной, пока окно было открыто → снято, worktree цела", os.path.isdir(WT) and
-      os.path.exists(os.path.join(WT, "late.txt")) and result(qdir(), rid)["state"] == "dropped", result(qdir(), rid))
+check("worktree стала грязной, пока окно было открыто → не удалена, итог «своё»", os.path.isdir(WT) and
+      os.path.exists(os.path.join(WT, "late.txt")) and result(qdir(), rid)["state"] == "failed"
+      and "своё" in result(qdir(), rid)["note"], result(qdir(), rid))
+os.unlink(os.path.join(WT, "late.txt"))
+facts_wt = H.facts_worktree("~/projects/repo-wt")
+with open(os.path.join(GD, "locked"), "w") as fh:
+    fh.write("x")
+r = refused(H.exec_worktree, {"id": "20261105-000000-cccccc"}, facts_wt)
+check("заперли после фактов → исполнитель перепроверяет gitdir и не удаляет", r and r[0] == "yes" and
+      os.path.isdir(WT), r)
+os.unlink(os.path.join(GD, "locked"))
+with open(CW, "w") as fh:
+    fh.write(f"[core]\n\tpager = touch {PWN}\n")
+r = refused(H.exec_worktree, {"id": "20261105-000000-dddddd"}, facts_wt)
+check("config.worktree появился после фактов → исполнитель отказывает, worktree цела", r and r[0] == "bad" and
+      os.path.isdir(WT) and not os.path.exists(PWN), r)
+os.unlink(CW)
 
-# deploy.sh
+# --- git у владельца вне песочницы: config роли не исполняется (круг 2: частный GIT_DIR и белый список) -------------
+with open(os.path.join(HOME, ".gitconfig"), "w") as fh:
+    fh.write("[user]\n\tname = Global\n")
+g(MAIN, "config", "user.name", "Role")
+with H.private_git(MAIN) as pg:
+    r_glob = refused(H.run_git, ["config", "--get", "user.name"], pg["env"], pg["dir"])
+    hooks = H.run_git(["config", "--get", "core.hooksPath"], pg["env"], pg["dir"]).strip()
+    fsm = H.run_git(["config", "--get", "core.fsmonitor"], pg["env"], pg["dir"]).strip()
+    tmpd = pg["dir"]
+check("git у владельца не читает ни ~/.gitconfig, ни config роли (частный GIT_DIR)", r_glob is not None, r_glob)
+check("защитные ключи заданы через GIT_CONFIG_COUNT: hooksPath=/dev/null, fsmonitor=false",
+      hooks == b"/dev/null" and fsm == b"false", (hooks, fsm))
+check("частный GIT_DIR убран после работы", not os.path.exists(tmpd), tmpd)
+os.unlink(os.path.join(HOME, ".gitconfig"))
+g(MAIN, "config", "--unset", "user.name")
+
+CONF = os.path.join(MAIN, ".git", "config")
+with open(CONF, "rb") as fh:
+    conf0 = fh.read()
+with open(os.path.join(MAIN, ".gitattributes"), "w") as fh:
+    fh.write("* filter=evil diff=evil\n")
+for name, extra, want in [
+        ("filter", f'[filter "evil"]\n\tclean = touch {PWN}\n', "filter.evil.clean"),
+        ("BOM и filter", f'﻿[filter "evil"]\n\tsmudge = touch {PWN}\n', "filter.evil.smudge"),
+        ("include", f"[include]\n\tpath = {PWN}.inc\n", "include.path"),
+        ("includeIf", f'[includeIf "gitdir:/"]\n\tpath = {PWN}.inc\n', "includeif.gitdir:/.path"),
+        ("core.sshCommand", f"[core]\n\tsshCommand = touch {PWN}\n", "core.sshcommand"),
+        ("строка не по формату", "[core\n\tpager = x\n", "git config"),
+        ("ключ в старом виде [a.b]", f"[diff.evil]\n\ttextconv = touch {PWN}\n", "diff.evil.textconv")]:
+    with open(PWN + ".inc", "w") as fh:
+        fh.write(f'[filter "evil"]\n\tclean = touch {PWN}\n')
+    with open(CONF, "wb") as fh:
+        fh.write((extra.encode("utf-8") + conf0) if name.startswith("BOM") else (conf0 + extra.encode("utf-8")))
+    r = refused(H.facts_deploy, "~/projects/repo")
+    check(f"config роли: {name} → отказ до любого git с config роли, ничего не исполнено",
+          r and r[0] == "bad" and want in r[1] and not os.path.exists(PWN), (r, os.path.exists(PWN)))
+with open(CONF, "wb") as fh:
+    fh.write(conf0)
+os.unlink(os.path.join(MAIN, ".gitattributes"))
+os.unlink(PWN + ".inc")
+os.symlink(CONF, os.path.join(MAIN, ".git", "config.worktree"))
+r = refused(H.facts_deploy, "~/projects/repo")
+check("config.worktree — ссылка → отказ", r and r[0] == "bad", r)
+os.unlink(os.path.join(MAIN, ".git", "config.worktree"))
+
+# --- deploy.sh: байты из коммита, bash -s, дерево до и после ------------------------------------------------------
 marker = os.path.join(MAIN, ".deployed-marker")
 reset()
 rc, rid, out = touch("deploy", "~/projects/repo", "--task", "metis-0775")
-check("заявка deploy: текст с хешем deploy.sh и HEAD", rc == 0 and "deploy.sh " in out and "HEAD " in out, out)
+check("заявка deploy: текст с хешем deploy.sh из коммита и HEAD", rc == 0 and "deploy.sh " in out and "из коммита" in out
+      and "HEAD " in out, out)
 run()
 check("[0775] палец → deploy.sh исполнен один раз, журнал в STATE/handoff/runs", os.path.exists(marker) and
-      result(qdir(), rid)["state"] == "done" and os.path.exists(os.path.join(STATE, "handoff", "runs", f"{rid}.log")),
-      result(qdir(), rid))
+      result(qdir(), rid)["state"] == "done" and os.path.exists(os.path.join(STATE, "handoff", "runs", f"{rid}.log"))
+      and "изменилось" not in result(qdir(), rid)["note"], result(qdir(), rid))
 os.unlink(marker)
 reset()
 rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0775")
@@ -579,99 +699,67 @@ g(MAIN, "commit", "-qam", "deploy changed")
 run()
 check("deploy.sh сменился после заявки → снято без окна и без запуска", not ASKED and not os.path.exists(marker)
       and result(qdir(), rid)["state"] == "dropped", result(qdir(), rid))
-with open(os.path.join(MAIN, "dirty.txt"), "w") as fh:
-    fh.write("x")
-g(MAIN, "add", "dirty.txt")
-try:
-    H.facts_deploy("~/projects/repo")
-    got = None
-except H.Refuse as e:
-    got = e.channel
-check("deploy с незакоммиченными правками → только «да»", got == "yes", got)
-g(MAIN, "reset", "-q", "--hard")
 
-
-def refused(fn, *a):
-    try:
-        fn(*a)
-        return None
-    except H.Refuse as e:
-        return e.channel, str(e)
-
-
-# --- git у владельца вне песочницы: config роли не исполняется (находка фоновой проверки безопасности) ------------
-for text, bad in [
-        ('[core]\n\tbare = false\n\thooksPath = .husky\n[remote "origin"]\n\turl = x\n[branch "main"]\n\tremote = o\n',
-         None),
-        ('# [filter "x"]\n; clean = y\n[user]\n\tname = t\n', None),
-        ('[filter "lfs"]\n\tclean = git-lfs clean -- %f\n', "filter.clean"),
-        ('[diff "x"]\n textconv = cat', "diff.textconv"),
-        ("[core] pager = less", "core.pager"),
-        ("[Core]\n\tSSHCommand = ssh -i x", "core.sshcommand"),
-        ("[core]\n\tworktree = /tmp", "core.worktree"),
-        ("[include]\n\tpath = ../x", "include.path"),
-        ('[includeIf "gitdir:~/"]\n\tpath = x', "includeif.path"),
-        ('[merge "m"]\n\tdriver = x', "merge.driver"),
-        ("[filter.evil]\n\tsmudge = x", "filter.evil.smudge")]:
-    check(f"git_config_bad: {text[:30]!r} → {bad}", H.git_config_bad(text) == bad, H.git_config_bad(text))
-check("git_config_bad: непонятная секция → опасно", (H.git_config_bad("[core\n\tpager = x") or "").startswith(
-    "непонятная"), H.git_config_bad("[core\n\tpager = x"))
-
-PWN = os.path.join(_ROOT, "pwned")
-g(MAIN, "config", "filter.evil.clean", f"touch {PWN}")
-with open(os.path.join(MAIN, ".gitattributes"), "w") as fh:
-    fh.write("* filter=evil\n")
-r = refused(H.facts_deploy, "~/projects/repo")
-check("git config с filter → отказ до git, фильтр не исполнен", r and r[0] == "bad" and "filter.evil.clean" in r[1]
-      and not os.path.exists(PWN), (r, os.path.exists(PWN)))
-os.unlink(os.path.join(MAIN, ".gitattributes"))
-g(MAIN, "config", "--remove-section", "filter.evil")
-CW = os.path.join(MAIN, ".git", "worktrees", "repo-wt", "config.worktree")
-with open(CW, "w") as fh:
-    fh.write(f"[core]\n\tpager = touch {PWN}\n")
-r = refused(H.facts_worktree, "~/projects/repo-wt")
-check("config.worktree worktree с core.pager → отказ", r and r[0] == "bad" and "core.pager" in r[1], r)
-os.unlink(CW)
-DOTGIT = os.path.join(WT, ".git")
-with open(DOTGIT, encoding="utf-8") as fh:
-    dotgit = fh.read()
-EVIL = os.path.join(HOME, "projects", "evil-gitdir")
-shutil.copytree(os.path.join(MAIN, ".git", "worktrees", "repo-wt"), EVIL)
-with open(os.path.join(EVIL, "config.worktree"), "w") as fh:
-    fh.write(f'[diff "x"]\n\ttextconv = touch {PWN}\n')
-with open(DOTGIT, "w") as fh:
-    fh.write(f"gitdir: {EVIL}\n")
-r = refused(H.facts_worktree, "~/projects/repo-wt")
-check(".git worktree указывает на чужой gitdir с diff-драйвером → отказ", r and r[0] == "bad" and "diff" in r[1], r)
-with open(DOTGIT, "w") as fh:
-    fh.write(dotgit)
-shutil.rmtree(EVIL)
-with open(os.path.join(HOME, ".gitconfig"), "w") as fh:
-    fh.write("[user]\n\tname = Global\n")
-r = refused(H.git, ["config", "--get", "user.name"], MAIN)
-check("глобальный ~/.gitconfig git у владельца не читает (GIT_CONFIG_GLOBAL=/dev/null)", r is not None, r)
-os.unlink(os.path.join(HOME, ".gitconfig"))
-check("подпапка без .git → отказ до git", refused(H.check_repo, os.path.join(MAIN, "nope")) is not None)
-
-# --- deploy: ровно показанные байты, чистое дерево с неотслеживаемыми, не worktree --------------------------------
 r = refused(H.facts_deploy, "~/projects/repo-wt")
 check("deploy из worktree → отказ", r and r[0] == "bad" and "worktree" in r[1], r)
-with open(os.path.join(MAIN, "untracked.txt"), "w") as fh:
-    fh.write("x")
-r = refused(H.facts_deploy, "~/projects/repo")
-check("deploy: неотслеживаемый файл → только «да»", r and r[0] == "yes", r)
-os.unlink(os.path.join(MAIN, "untracked.txt"))
+COMMITTED = H.facts_deploy("~/projects/repo")
 EVILM = os.path.join(_ROOT, "evil-ran")
-facts = H.facts_deploy("~/projects/repo")
 with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
     fh.write(f'touch "{EVILM}"\n')
-H.exec_deploy({"id": "20261105-000000-aaaaaa"}, facts)
-check("deploy.sh подменён после сверки хеша → исполнены показанные байты, а не файл с диска",
+facts = H.facts_deploy("~/projects/repo")
+check("факты deploy: байты из коммита HEAD, а не файл с диска", facts["script"] == COMMITTED["script"] and
+      b"evil-ran" not in facts["bytes"], facts["desc"])
+r = refused(H.exec_deploy, {"id": "20261105-000000-eeeeee"}, facts)
+check("deploy: правка в дереве после пальца → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker)
+      and not os.path.exists(EVILM), r)
+real_dirty = H.dirty
+H.dirty = lambda g_, work: None   # гонка: дерево сменилось между проверкой и запуском
+try:
+    H.exec_deploy({"id": "20261105-000000-aaaaaa"}, facts)
+finally:
+    H.dirty = real_dirty
+check("deploy.sh подменён на диске → исполнены байты из коммита (bash -s), а не файл",
       os.path.exists(marker) and not os.path.exists(EVILM), (os.path.exists(marker), os.path.exists(EVILM)))
 g(MAIN, "checkout", "-q", "--", "deploy.sh")
 os.unlink(marker)
 r = refused(H.exec_deploy, {"id": "20261105-000000-bbbbbb"}, dict(facts, bytes=b"touch x\n"))
 check("deploy: байты не того хеша → отказ без запуска", r and "не те" in r[1], r)
+with open(os.path.join(MAIN, "untracked.txt"), "w") as fh:
+    fh.write("x")
+r = refused(H.exec_deploy, {"id": "20261105-000000-ffffff"}, facts)
+check("deploy: неотслеживаемый файл → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker), r)
+os.unlink(os.path.join(MAIN, "untracked.txt"))
+with open(os.path.join(MAIN, "dirty.txt"), "w") as fh:
+    fh.write("x")
+g(MAIN, "add", "dirty.txt")
+reset()
+rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0775")
+run()
+check("deploy с незакоммиченными правками → после пальца отказ, deploy.sh не исполнен", not os.path.exists(marker)
+      and result(qdir(), rid)["state"] == "failed", result(qdir(), rid))
+g(MAIN, "reset", "-q", "--hard")
+with open(os.path.join(MAIN, ".gitmodules"), "w") as fh:
+    fh.write('[submodule "s"]\n\tpath = s\n\turl = x\n')
+g(MAIN, "add", ".gitmodules")
+g(MAIN, "commit", "-qm", "modules")
+r = refused(H.exec_deploy, {"id": "20261105-000000-111111"}, H.facts_deploy("~/projects/repo"))
+check("deploy: в репозитории .gitmodules → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker), r)
+g(MAIN, "rm", "-q", ".gitmodules")
+g(MAIN, "commit", "-qm", "no modules")
+with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
+    fh.write('echo x > "$PWD/after.txt"\n')
+g(MAIN, "commit", "-qam", "deploy leaves a file")
+note = H.exec_deploy({"id": "20261105-000000-222222"}, H.facts_deploy("~/projects/repo"))
+check("deploy оставил файл в дереве → итог говорит об этом", "дерево изменилось" in note and "after.txt" in note, note)
+os.unlink(os.path.join(MAIN, "after.txt"))
+os.symlink("deploy.sh", os.path.join(MAIN, "deploy-link.sh"))
+g(MAIN, "rm", "-q", "deploy.sh")
+os.rename(os.path.join(MAIN, "deploy-link.sh"), os.path.join(MAIN, "deploy.sh"))
+g(MAIN, "add", "deploy.sh")
+g(MAIN, "commit", "-qm", "deploy is a link")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("deploy.sh в коммите — ссылка → отказ", r and r[0] == "bad" and "обычным файлом" in r[1], r)
+check("за весь раздел ни один драйвер, фильтр или pager роли не исполнен", not os.path.exists(PWN))
 check("CDP_PORTS = browser.BROWSERS", H.CDP_PORTS == P.browser_mod().BROWSERS, (H.CDP_PORTS,
                                                                                   P.browser_mod().BROWSERS))
 
