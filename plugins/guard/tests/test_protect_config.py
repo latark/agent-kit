@@ -226,7 +226,8 @@ def main():
         ("Bash: tar -xf -C .claude/skills — отказ", "deny", APP, COORD, B("tar -xf a.tar -C .claude/skills")),
         ("Bash: git checkout -- .claude/skills/x/SKILL.md — отказ", "deny", APP, COORD,
          B("git checkout -- .claude/skills/x/SKILL.md")),
-        ("Bash: путь через $(…) в skills — отказ", "deny", APP, COORD,
+        # неразобранную цель с 0823 первым режет domain/pantheon-acl: нужен отказ, правило — любое guard
+        ("Bash: путь через $(…) в skills — отказ (любым правилом guard)", "deny", APP, COORD,
          B("cat > .claude/skills/$(echo x)/SKILL.md <<'EOF'\nтекст\nEOF")),
         # --- закрыто и в своём направлении ---
         ("свой проект: .claude/hooks/x.sh — отказ", "deny", APP, COORD, W(APP + "/.claude/hooks/x.sh", "echo")),
@@ -247,7 +248,7 @@ def main():
     for case in cases:
         name, want, pdir, who, (tool, ti) = case[:5]
         got, why = run(home, pdir, who, tool, ti, *case[5:])
-        ok = got == want and (want == "allow" or "protect-config" in why)
+        ok = got == want and (want == "allow" or "protect-config" in why or "любым правилом" in name and "Правило" in why)
         check(name, ok, f"{got}: {why[:300]}")
     # причина отказа своего направления называет, что не так, и кто правит
     _, why = run(home, APP, COORD, *W(skill, fm("allowed-tools: Bash")))

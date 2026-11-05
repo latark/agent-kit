@@ -161,7 +161,9 @@ def _bash_texts(cmd, cwd, paths):
         if len(ops) != 2 or not all(re.fullmatch(r"-[fnvpi]+", x) for x in flags):
             return None
         src = G._expand(ops[0], cwd)
-        if name == "mv" and os.path.islink(src):
+        # _expand даёт realpath — ссылку смотрим по пути до раскрытия последнего звена
+        raw = os.path.join(cwd, os.path.expanduser(ops[0].replace("${HOME}", G.HOME).replace("$HOME", G.HOME)))
+        if name == "mv" and os.path.islink(raw.rstrip("/")):
             return None  # ссылка переедет ссылкой: текст потом поменяют мимо проверки
         text = _read_text(src) if os.path.isfile(src) else None
         return None if text is None else {p: text for p in paths}
