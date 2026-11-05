@@ -401,6 +401,8 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                 dst[repo] = old[repo]
         errors[repo] = errors_text
         stale[repo] = prev_at(repo)
+        if stale[repo] > 0:  # кэш до metis-0808 без repo_ok: время фиксируем, чтобы следующий сбой не сдвинул его к fetched
+            repo_ok.setdefault(repo, stale[repo])
 
     done = load_state(state_file).get("done")
     done = done if isinstance(done, dict) else {}

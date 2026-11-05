@@ -1608,8 +1608,8 @@ def merged_wait(head, body, links, pr_days=None):
         return None
     day, n = max(got)
     dd = f" {day[8:10]}.{day[5:7]}" if re.fullmatch(r"\d{4}-\d\d-\d\d", day) else ""
-    total = sum(1 for _, text in done_criteria(body) if not _is_stub(text))
-    left = unchecked_criteria(head, body)
+    crit = [done for done, text in done_criteria(body) if not _is_stub(text)]
+    total, left = len(crit), crit.count(False)  # не unchecked_criteria: у задач до CRITERIA_FROM она даёт 0, а total считает пункты
     return f"PR #{n} слит{dd}, " + (f"ждёт пунктов Готово, когда: {left} из {total}" if total else "пунктов «Готово, когда» нет")
 
 
@@ -3179,7 +3179,7 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None, accept
         if overdue(h, t):
             rows["overdue"].append(f"{name} · срок {h['due']}")
         if tid in (accept or {}) and h.get("status") == "review":
-            rows["accept"].append(f"{name} · {_plain(accept[tid])}")
+            rows["accept"].append(f"{name} · {one_line(accept[tid])}")
         if h.get("status") == "doing":
             rows["doing"].append(f"{name} · {_plain(h.get('owner')) or '—'}")
         if h.get("status") == "done" and (h.get("updated") or "") >= now_iso(t - 86400):

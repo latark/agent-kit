@@ -621,6 +621,20 @@ def test_fetch_keeps_rows_on_error():
         A.fetch(cf, sf, T0 + 4000, repos, env=dict(env))
         first = [ln for ln in open(os.path.join(gh, "calls.log")).read().splitlines() if ln.startswith("pr list")]
         check("порядок обхода: репозиторий с самым давним успехом первым", "--repo c/d" in first[0], first[:2])
+        # Б1: кэш до metis-0808 (нет repo_ok): два сбоя подряд не сдвигают «данные от» к fetched
+        A.save_state(cf, {"fetched": T0, "merged": {"a/b": [{"number": 5}]}, "open_prs": {}})
+        e2 = dict(env, PANTHEON_GH="/nonexistent/gh")
+        A.fetch(cf, sf, T0 + 600, ["a/b"], env=e2)
+        c1 = A.load_state(cf)
+        A.fetch(cf, sf, T0 + 1200, ["a/b"], env=e2)
+        c2 = A.load_state(cf)
+        check("старый кэш без repo_ok и два сбоя подряд: stale остаётся T0, repo_ok запомнен",
+              c1["stale"] == {"a/b": T0} and c2["stale"] == {"a/b": T0} and c2["repo_ok"] == {"a/b": T0}
+              and c2["merged"]["a/b"] == [{"number": 5}], (c1, c2))
+        A.save_state(cf, {"fetched": T0, "merged": {}, "open_prs": {}})
+        A.fetch(cf, sf, T0 + 600, ["a/b"], env=e2)
+        check("старый кэш без строк репозитория и сбой: stale 0, repo_ok не выдуман",
+              A.load_state(cf)["stale"] == {"a/b": 0} and "a/b" not in A.load_state(cf)["repo_ok"], A.load_state(cf))
         # бюджет прохода кончился: репозиторий не потерял строки
         A.save_state(cf, {"fetched": T0, "merged": {"a/b": [{"number": 5}]}, "open_prs": {}, "repo_ok": {"a/b": T0}})
         errs = A.fetch(cf, sf, T0 + 4500, ["a/b"], env=dict(env), budget=0)

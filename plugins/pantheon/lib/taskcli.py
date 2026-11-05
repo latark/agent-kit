@@ -189,7 +189,16 @@ def overlap_open_prs(direction):
             notes.append(f"{repo}: gh не ответил ({why}), кэша планового прохода нет — проверь вручную: "
                          f"gh pr list -R {repo} --state open --json number,headRefName,files")
             continue
-        when = P.datetime.fromtimestamp(fetched).strftime("%d.%m %H:%M")
+        errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
+        stale = cache.get("stale") if isinstance(cache.get("stale"), dict) else {}
+        at = fetched
+        if repo.lower() in errs:  # metis-0808: по репозиторию строки прежние, время — последнего успеха, не нынешнего прохода
+            at = stale.get(repo.lower(), fetched)
+            if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+                notes.append(f"{repo}: gh не ответил ({why}), в кэше планового прохода данных по репозиторию нет — "
+                             f"проверь вручную: gh pr list -R {repo} --state open --json number,headRefName,files")
+                continue
+        when = P.datetime.fromtimestamp(at).strftime("%d.%m %H:%M")
         nofiles = [r.get("number") for r in rows if isinstance(r, dict) and not isinstance(r.get("files"), list)]
         notes.append(f"{repo}: gh не ответил ({why}) — открытые PR из кэша планового прохода от {when}"
                      + (f"; без списка файлов: {', '.join('#' + str(n) for n in nofiles)}" if nofiles else ""))

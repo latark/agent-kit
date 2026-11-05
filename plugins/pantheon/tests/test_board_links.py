@@ -133,6 +133,10 @@ def unit():
     check("merged_wait: два слитых PR - последний по дню слияния",
           T.merged_wait(rv, crit, two, {(R, 163): "2026-10-27", (R, 170): "2026-10-20"}).startswith("PR #163 слит 27.10")
           and T.merged_wait(rv, crit, two, {(R, 163): "2026-10-01", (R, 170): "2026-10-20"}).startswith("PR #170 слит 20.10"))
+    old = H("metis-0010", status="review", created="2026-10-01")  # до CRITERIA_FROM: unchecked_criteria даёт 0
+    check("merged_wait: задача до CRITERIA_FROM - неотмеченные считаются по пунктам, не «0 из 3»",
+          T.unchecked_criteria(old, crit) == 0 and T.merged_wait(old, crit, wl(old), days).endswith("ждёт пунктов Готово, когда: 2 из 3"),
+          T.merged_wait(old, crit, wl(old), days))
     check("merged_wait: без дня слияния - «слит» без даты",
           T.merged_wait(rv, crit, wl(rv), {}) == "PR #163 слит, ждёт пунктов Готово, когда: 2 из 3")
     check("merged_wait: все пункты отмечены - «0 из n»",
