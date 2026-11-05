@@ -176,6 +176,28 @@ def desired(roles, directions, statuses, catalog=None):
     return out
 
 
+def collect_roles(roles, statuses, catalog=None):
+    """Единый список ролей для любого вывода (холст, таблица в «Кто есть кто.md», реестр в system.md — metis-0828):
+    [{'name', 'kind', 'description', 'present', 'task'}], по порядку каталога, затем прочие роли по имени.
+    kind: 'catalog' (запись каталога; name — id карточки), 'auto' (роль без записи), 'planned' (роли нет, есть planned).
+    description — первая фраза description из файла роли ('' — файла нет); task — открытая задача записи или None."""
+    catalog = CATALOG if catalog is None else catalog
+    out, covered = [], set(IGNORED)
+    for e in catalog:
+        names = sorted(r for r in roles if e["role"] and fnmatch.fnmatchcase(r, e["role"]))
+        covered.update(names)
+        if e["role"] is not None and not names and not e["planned"]:
+            continue
+        refs = [m.group(2) for m in COND.finditer(e["text"]) if m.group(1) == "task"] + ([e["planned"]] if e["planned"] and not names else [])
+        task = next((t for t in refs if _open(t, statuses)), None)
+        out.append(dict(name=e["id"], kind="catalog" if names or e["role"] is None else "planned",
+                        description=role_blurb(roles[names[0]]) if names and roles[names[0]] else "",
+                        present=bool(names) or e["role"] is None, task=task, roles=names))
+    for r in sorted(set(roles) - covered):
+        out.append(dict(name=r, kind="auto", description=role_blurb(roles[r]), present=True, task=None, roles=[r]))
+    return out
+
+
 def _overlap(a, b, margin=0):
     return not (a[0] + a[2] + margin <= b[0] or b[0] + b[2] + margin <= a[0]
                 or a[1] + a[3] + margin <= b[1] or b[1] + b[3] + margin <= a[1])

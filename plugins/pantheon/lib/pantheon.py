@@ -74,7 +74,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
                                         тревога об открытом координаторе)
   pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
-                                        и размеры берёт с холста, тик делает то же при смене ролей (metis-0825)
+                                        и размеры берёт с холста; задача расписания (every = 5), пишет только при смене
+                                        входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
@@ -1237,7 +1238,6 @@ def tick():
             except Exception as e:  # сбой проверки не должен останавливать тик
                 alert_once("board-auto-watch", type(e).__name__, f"board-auto.md: проверка свежести упала "
                            f"({type(e).__name__}: {e})", "pantheon-tick")
-            who_canvas_tick()  # холст «Кто есть кто» по ролям, реестру и задачам (metis-0825)
             try:
                 autoclose_tick(t)
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
@@ -4358,18 +4358,24 @@ def who_canvas_sync(force=False, agents=None, reg_path=None):
     return whocanvas_mod().sync(canvas, path("who-canvas.json"), roles, dirs, statuses, force=force)
 
 
-def who_canvas_tick():
-    """Лёгкий тик: пересборка только при смене входов (отпечаток в STATE/who-canvas.json). Сбой — тревога, не падение."""
+def who_canvas_cmd(rest):
+    """pantheon who-canvas [--force] — задача расписания (every = 5, hosts = primary): пересборка только при смене
+    входов (отпечаток в STATE/who-canvas.json), так что обычный проход ничего не пишет. Холст не читается или сбой —
+    тревога, файл не затирается, код 1. В тик не вшито: tick() входит в сборку окон (ядро, metis-0404)."""
+    if [a for a in rest if a != "--force"]:
+        print("использование: pantheon who-canvas [--force]", file=sys.stderr)
+        return 2
     try:
-        got = who_canvas_sync()
-    except Exception as e:  # холст не читается или сбой — не затираем его, а зовём человека; тик не падает
-        alert_once("who-canvas", type(e).__name__, f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})",
-                   "pantheon-tick")
-        return "error"
+        got = who_canvas_sync(force="--force" in rest)
+    except Exception as e:
+        msg = f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})"
+        alert_once("who-canvas", type(e).__name__, msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
     clear_once("who-canvas")
     if got == "written":
-        print("Кто есть кто.canvas: пересобран по ролям и задачам")
-    return got
+        print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
+    return 0
 
 
 def roles_newest():
@@ -7039,7 +7045,7 @@ def main(argv):
     if cmd == "autoclose":
         return autoclose_cmd(rest)
     if cmd == "who-canvas":
-        return 0 if who_canvas_sync(force="--force" in rest) != "skip" else 1
+        return who_canvas_cmd(rest)
     if cmd == "batch-suggest":
         return batch_suggest_run(rest)
     if cmd == "status":

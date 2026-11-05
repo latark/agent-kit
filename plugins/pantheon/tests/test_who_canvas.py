@@ -195,11 +195,18 @@ check("7. статус задачи сменился (закрыта) → пер
       and "metis-0760" not in open(canvas, encoding="utf-8").read())
 write(agent, "---\nname: x\ndescription: Другое описание.\n---\n")
 os.utime(agent, (1, 1))
-check("7. описание роли без каталога изменилось → пересборка",
-      W.sync(canvas, sig, rl2, dirs, st) == "written" and "Другое описание" in open(canvas, encoding="utf-8").read())
+check("7. описание роли без каталога изменилось (имена и статусы те же) → пересборка",
+      W.sync(canvas, sig, dict(rl2, charon=""), dirs, dict(st, **{"metis-0760": "done"})) == "written" and "Другое описание" in open(canvas, encoding="utf-8").read())
 before = open(canvas, encoding="utf-8").read()
 check("7. force пересобирает при тех же входах; текст тот же → 'same', файл не переписан",
-      W.sync(canvas, sig, rl2, dirs, st, force=True) == "same" and open(canvas, encoding="utf-8").read() == before)
+      W.sync(canvas, sig, dict(rl2, charon=""), dirs, dict(st, **{"metis-0760": "done"}), force=True) == "same" and open(canvas, encoding="utf-8").read() == before)
+write(canvas, "[]")
+try:
+    W.sync(canvas, sig, dict(rl2, new=""), dirs, st)
+    raised0 = False
+except ValueError:
+    raised0 = True
+check("7. файл — JSON, но не холст → ValueError, файл не затёрт", raised0 and open(canvas, encoding="utf-8").read() == "[]")
 write(canvas, "{не json")
 try:
     W.sync(canvas, sig, dict(rl2, new=""), dirs, st)
@@ -208,7 +215,8 @@ except ValueError:
     raised = True
 check("7. холст не читается → ValueError, файл не затёрт", raised and open(canvas, encoding="utf-8").read() == "{не json")
 
-# --- 8. тик и CLI pantheon.py на временных папках --------------------------------------------------------------
+# --- 9. состав ролей для .md (metis-0828) ---
+# --- 8. CLI pantheon.py на временных папках --------------------------------------------------------------
 tmp = os.path.join(ROOT, "home")
 home = os.path.join(tmp, "ai", "pantheon")
 state = os.path.join(tmp, "state")
@@ -221,37 +229,61 @@ write(os.path.join(home, "Кто есть кто.md"), "памятка\n")
 write(os.path.join(home, "directions", "metis-pantheon", "tasks", "metis-0760.md"),
       "---\ntype: task\nid: metis-0760\ntitle: t\nstatus: review\nproject: P\ndirection: metis-pantheon\n"
       "created: 2026-11-01\nupdated: 2026-11-01T10:00:00\nschema_version: 1\n---\n\n# t\n")
+write(os.path.join(home, "directions", "metis-pantheon", "tasks", "metis-0001.md"),
+      "---\ntype: task\nid: metis-0001\ntitle: t\nstatus: todo\nproject: P\ndirection: metis-pantheon\n"
+      "created: 2026-11-01\nupdated: 2026-11-01T10:00:00\nschema_version: 1\n---\n\n# t\n")  # на неё холст не ссылается
 env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
        "PANTHEON_PLUGIN_ROLES": plug}
+cv_path = os.path.join(home, W.CANVAS_NAME)
 probe = f"""
 import sys
 sys.path.insert(0, {os.path.join(PLUGIN, "lib")!r})
 import pantheon as p
 import inspect
-print("tick-calls:", "who_canvas_tick()" in inspect.getsource(p.tick))
-print("1:", p.who_canvas_tick())
-print("2:", p.who_canvas_tick())
+print("statuses:", sorted(p.who_canvas_inputs()[2].items()))
+print("1:", p.who_canvas_cmd([]))
+import os as _o
+_m = _o.stat({cv_path!r}).st_mtime_ns if _o.path.exists({cv_path!r}) else 0
+print("2:", p.who_canvas_cmd([]))
+print("same-mtime:", _m == (_o.stat({cv_path!r}).st_mtime_ns if _o.path.exists({cv_path!r}) else 0))
 """
 r = subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True, timeout=120)
 cv = os.path.join(home, W.CANVAS_NAME)
 got = json.load(open(cv, encoding="utf-8")) if os.path.exists(cv) else {"nodes": []}
-check("8. тик собирает холст из ~/.claude/agents, реестра и задач; второй раз ничего не делает; tick зовёт сборку",
-      "tick-calls: True" in r.stdout and "1: written" in r.stdout and "2: unchanged" in r.stdout
+check("8. pantheon who-canvas собирает холст из ~/.claude/agents, реестра и задач; второй раз файл не трогает",
+      "1: 0" in r.stdout and "2: 0" in r.stdout
+      and "statuses: [('metis-0760', 'review')]" in r.stdout
       and {"zeus", "argus", "charon", "athena"} <= set(byid(got)) and "[[metis-0760]]" in byid(got)["charon"]["text"],
       r.stdout + r.stderr)
 write(cv, "{нет")
 write(os.path.join(tmp, ".claude", "agents", "iris.md"), "---\nname: iris\ndescription: Ирида.\n---\n")  # вход изменился
 r = subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True, timeout=120)
 alerts = os.path.join(home, "alerts.md")
-check("8. битый холст: тик не падает, файл не затёрт, тревога записана",
-      r.returncode == 0 and open(cv, encoding="utf-8").read() == "{нет" and "1: error" in r.stdout and "2: error" in r.stdout
+check("8. битый холст: команда код 1, файл не затёрт, тревога записана",
+      r.returncode == 0 and open(cv, encoding="utf-8").read() == "{нет" and "1: 1" in r.stdout and "2: 1" in r.stdout
       and os.path.exists(alerts) and "Кто есть кто.canvas" in open(alerts, encoding="utf-8").read(), r.stdout + r.stderr)
 os.remove(cv)
 os.remove(os.path.join(home, "Кто есть кто.md"))
 shutil.rmtree(state, True)
 r = subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True, timeout=120)
-check("8. нет ни холста, ни памятки → ничего не создаём", not os.path.exists(cv) and "1: skip" in r.stdout,
+check("8. нет ни холста, ни памятки → ничего не создаём", not os.path.exists(cv) and "1: 0" in r.stdout,
       r.stdout + r.stderr)
 
+cr = W.collect_roles(dict(roles, newbie=new_role), st2, cat)
+crn = {x["name"]: x for x in cr}
+check("9. collect_roles: все роли в списке, новая — kind auto с описанием, лиды и dev сведены в запись каталога",
+      crn["newbie"]["kind"] == "auto" and crn["newbie"]["description"] == "Новичок Пантеона."
+      and crn["heph"]["roles"] == ["hephaestus", "hephaestus-site"] and "codex-dev" not in crn
+      and crn["devs"]["roles"] == ["dev-haiku", "dev-opus", "dev-sonnet"], crn.get("newbie"))
+check("9. collect_roles: planned без роли — kind planned, present False, задача открыта; роль есть — present True, task None",
+      crn["ghost"]["kind"] == "planned" and not crn["ghost"]["present"] and crn["ghost"]["task"] == "metis-9999"
+      and crn["tick"]["present"] and crn["charon"]["task"] == "metis-0765")
+cr2 = {x["name"]: x for x in W.collect_roles(dict(roles, ghost=""), st2, cat)}
+check("9. collect_roles: роль появилась → ghost present, без задачи; закрытая задача Харона не возвращается",
+      cr2["ghost"]["present"] and cr2["ghost"]["task"] is None
+      and {x["name"]: x for x in W.collect_roles(roles, {"metis-0760": "done", "metis-0765": "done"})}["charon"]["task"] is None)
+check("9. collect_roles: роли нет и planned нет → записи нет",
+      "argus" not in {x["name"] for x in W.collect_roles({r: "" for r in ALL if r != "argus"}, st2, cat)}
+      and "argus" in crn)
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
