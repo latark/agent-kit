@@ -3194,11 +3194,34 @@ SAVED_NAME = re.compile(r"zeus[a-z0-9-]{0,36}")
 
 
 def hq_saved(name):
-    """metis-0577: метка `pantheon saved` окна штаба из STATE/hq-rw/saved (пишет само окно — только Зевс); {} — нет."""
+    """metis-0577: метка `pantheon saved` окна штаба из STATE/hq-rw/saved (пишет само окно — только Зевс); {} — нет.
+    Папку пишет окно, а читает проход вне песочницы: ссылка, FIFO, чужой или большой файл — не читаем (O_NOFOLLOW|O_NONBLOCK,
+    обычный файл, одна ссылка, наш владелец, читаем не больше 64 КБ — длиннее не разбирается как JSON); поля проверяем по типу, а не доверяем."""
     if not SAVED_NAME.fullmatch(str(name)):
         return {}
-    rec = P.read_json(P.path(P.HQ_RW, "saved", name + ".json"), {})
-    return rec if isinstance(rec, dict) else {}
+    try:
+        fd = os.open(P.path(P.HQ_RW, "saved", name + ".json"), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+            return {}
+        raw = os.read(fd, 65537)
+        rec = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    finally:
+        os.close(fd)
+    if not isinstance(rec, dict):
+        return {}
+    out = {}
+    for k in ("time", "state", "by"):
+        if isinstance(rec.get(k), str):
+            out[k] = rec[k][:300]
+    if isinstance(rec.get("sessionId"), str) and re.fullmatch(r"[0-9a-f-]{8,64}", rec["sessionId"]):
+        out["sessionId"] = rec["sessionId"]
+    return out
 
 
 def _write_mark(name, p, rec):

@@ -78,6 +78,43 @@ try:
     r = run(env, "saved", "--by", "zeus", "--state", "S", **own)
     check("ссылка на месте метки: цель не тронута, код 0", r.returncode == 0 and open(victim).read() == "keep\n", r)
     os.remove(mark)
+    # подложенное окном: FIFO, чужие типы полей, плохой sid, большой файл, жёсткая ссылка, мусор — метку не принимаем
+    code = (f"import sys;sys.path.insert(0,{LIB!r});import pantheon as P;w=P.watch_mod();"
+            "print(repr(w.hq_saved('zeus')), w.saved_sid('zeus'))")
+
+    def probe():
+        return subprocess.run([sys.executable, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=20)
+    if os.path.lexists(mark):
+        os.remove(mark)
+    os.mkfifo(mark)
+    r = probe()
+    check("FIFO на месте метки: не виснем, метки нет", r.returncode == 0 and r.stdout.startswith("{} None"), r)
+    os.remove(mark)
+    os.symlink(os.path.join(tmp, "victim"), mark)
+    open(os.path.join(tmp, "victim"), "w").write(json.dumps({"time": "t", "sessionId": SID}))
+    r = probe()
+    check("ссылка на месте метки: не читаем", r.stdout.startswith("{} None"), r)
+    os.remove(mark)
+    for what, body in (("типы полей", {"time": 5, "state": ["x"], "by": {}, "sessionId": 7}),
+                       ("плохой sid", {"time": "t", "sessionId": "../../etc; rm"})):
+        open(mark, "w").write(json.dumps(body))
+        r = probe()
+        check(f"{what}: чужие значения не проходят", r.returncode == 0 and "'time': 5" not in r.stdout and "sessionId" not in r.stdout
+              and r.stdout.strip().endswith("None"), r)
+    open(mark, "w").write(json.dumps({"time": "t", "state": "s" * 70000}))
+    r = probe()
+    check("большой файл: не читаем", r.stdout.startswith("{} None"), r)
+    open(mark, "w").write("[1, 2]")
+    r = probe()
+    check("не объект: не читаем", r.stdout.startswith("{} None"), r)
+    open(mark, "w").write(json.dumps({"time": "t", "state": "s", "sessionId": SID}))
+    os.link(mark, os.path.join(tmp, "hard"))
+    r = probe()
+    check("жёсткая ссылка: не читаем", r.stdout.startswith("{} None"), r)
+    os.remove(os.path.join(tmp, "hard"))
+    r = probe()
+    check("нормальная метка читается", SID in r.stdout and "'time': 't'" in r.stdout, r)
+    os.remove(mark)
     # restart --done снимает метку
     r = run(env, "saved", "--by", "zeus", "--state", "S", **own)
     check("метка есть до restart --done", os.path.exists(mark), r)
