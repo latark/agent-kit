@@ -1261,7 +1261,7 @@ def approve(b, win, task, sel, facts, kind):
             and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
     stale = False
     for name, rec in sorted(mine, key=lambda x: -x[1]["issued"]):
-        t = owner_yes(task, lambda q, w=ask_question(rec): same_question(q, w))
+        t = owner_yes(task, lambda q, w=ask_question(rec): same_question(q, w))  # noqa: B008 — вопрос этой записи, привязан в цикле
         if t is None or t + 1 < rec["issued"]:
             continue
         if rec.get("digest") != dig:
