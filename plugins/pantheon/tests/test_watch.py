@@ -4479,7 +4479,7 @@ def test_jobs_show_read_only_locks_0266():
         check(r.returncode == 0 and "Traceback" not in r.stderr and "jb-a" in r.stdout and "jb-b" in r.stdout,
               f"0266: jobs при замках без записи: {r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}")
         row_b = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-b")]
-        check(row_b and "идёт ли сейчас — не знаю" in row_b[0] and "не знаю (замок" in row_b[0],
+        check(row_b and "идёт ли сейчас — не знаю" in row_b[0] and "не знаю (блокировка" in row_b[0],
               f"0266: нечитаемый замок — не «не знаю» в состоянии и в «дальше»: {row_b}")
         row_a = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-a")]
         check(row_a and "идёт" not in row_a[0] and "не знаю" not in row_a[0],

@@ -131,7 +131,7 @@ def next_run(job, st, t):
     if held:
         return "идёт"
     if held is None:
-        return "не знаю (замок не читается)"
+        return "не знаю (блокировка не читается)"
     if st.get("waiting"):
         return "ждёт условий"
     if st.get("last_start") is None:
@@ -180,7 +180,7 @@ def jobs_show():
         else:
             state = "ок"
         if held is None:  # metis-0266: замок не прочитан — «идёт» или нет, не знаем; остальное состояние выше верно
-            state += " · идёт ли сейчас — не знаю (замок не читается)"
+            state += " · идёт ли сейчас — не знаю (блокировка не читается)"
         if st.get("lease_until"):
             state += f" · аренда до {P.stamp(st['lease_until'])[:10]}"
         last = P.ago(st.get("last_start")) if st.get("last_start") else "—"
