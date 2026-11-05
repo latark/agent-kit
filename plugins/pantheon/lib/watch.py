@@ -2288,9 +2288,28 @@ def word_launch(agents, registry, doms, t):
         P.write_json(sp, st)  # после каждого поручения: проход могут оборвать, повтора запуска быть не должно
 
 
+def _word_task_exists(qid):
+    """Есть ли задача с id вопроса. Журнал не читается — да (как раньше): ссылка на карточку лишней не бывает."""
+    try:
+        T = P.tasks_mod()
+        return qid in T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    except Exception:  # noqa: BLE001 — сбой чтения доски не должен ронять запуск по ответу
+        return True
+
+
+def word_text(qid, ts, ans):
+    """Текст запуска по ответу. metis-0820: id вопроса — не всегда задача (hermes-review-1, zeus-wake-0511). Ссылка
+    «pantheon task show <id>» без карточки входила в цель окна (/goal + TASK_GOAL), задачу с цели снять было нечем —
+    проверка цели держала окно по кругу. Без карточки — ни ссылки, ни задачи в цели: так и сказано в тексте."""
+    head = f"[Пантеон: запуск по ответу владельца в окне вопросов {ts}, [{qid}] — «{ans[:80]}»] Продолжай работу; "
+    if _word_task_exists(qid):
+        return head + f"поручение и контекст — pantheon task show {qid}, свои входящие и STATUS.md."
+    return head + (f"поручение и контекст — свои входящие и STATUS.md. [{qid}] — номер вопроса, а не задачи: карточки "
+                   f"с ним нет, в цель окна задача {qid} не входит.")
+
+
 def _word_do(verb, name, qid, ts, ans, agents, registry):
-    text = (f"[Пантеон: запуск по ответу владельца в окне вопросов {ts}, [{qid}] — «{ans[:80]}»] "
-            f"Продолжай работу; поручение и контекст — pantheon task show {qid}, свои входящие и STATUS.md.")
+    text = word_text(qid, ts, ans)
     if verb == "вернуть":  # как pantheon resume: метка, имя в «остановить всё», сброс самозапуска — затем подъём
         _word_unstop(name)
     if os.path.exists(P.path("stopped", name)):

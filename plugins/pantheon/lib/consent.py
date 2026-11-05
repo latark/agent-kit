@@ -80,6 +80,13 @@ def consent_found(qid, days):
             text = fh.read()
     except FileNotFoundError:
         text = ""
+    except PermissionError as e:
+        # metis-0820: окно роли закрывает zeus.md для чтения (защита), а `pantheon consent *` выходит из песочницы,
+        # только если строка — одна эта команда: в цепочке (`cat …; pantheon consent <id>`, `&&`, `|`) она идёт в
+        # песочнице и получает Errno 1 (05.11, athena-0309)
+        raise ConsentLogError(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя. Команда шла в "
+                              f"песочнице окна: запусти `pantheon consent {qid}` отдельным вызовом Bash, без `;`, `&&`, "
+                              f"`|` и других команд в той же строке")
     except (OSError, UnicodeDecodeError) as e:
         raise ConsentLogError(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя")
     word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
