@@ -16,6 +16,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
+  pantheon qmd where "вопрос" [--collection X]   где лежит (metis-0856): коллекция | путь | заголовок | направление-хозяин,
+                                        без текста документов; для окна Пританея — по коллекциям проектов направлений
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): ставит
                                         выпуск, если запись в releases.json каталога совпала с ним (версия и дерево);
                                         тесты — в GitHub Actions до слияния, локального прогона нет (п. 8, 27.10);

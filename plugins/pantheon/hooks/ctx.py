@@ -2108,6 +2108,47 @@ def hq_project_collections(path=None):
     return out
 
 
+def hq_collection_owners(name, path=None):
+    """Направления-хозяева коллекции проекта: те, чья закрытая штабу папка содержит папку коллекции; нет таких —
+    чьи папки лежат внутри неё (коллекция шире проекта, ~/projects). Не проектная коллекция или qmd.toml не прочитать —
+    пусто (подсказка, а не защита: закрывает hq_project_collections)."""
+    try:
+        with open(path or os.path.join(PANTHEON, "qmd.toml"), "rb") as fh:
+            import tomllib
+            reg = tomllib.load(fh)
+        doms = domains()
+        proj = hq_project_dirs(doms, hq_led_names())
+    except (OSError, ValueError):
+        return []
+    cp = next((os.path.realpath(os.path.expanduser(c["path"])) for c in reg.get("collection") or []
+               if isinstance(c, dict) and isinstance(c.get("path"), str) and str(c.get("name")).strip() == name), None)
+    if cp is None:
+        return []
+    inside, around = [], []
+    for d in sorted(doms):
+        for f in doms[d] if isinstance(doms[d], list) else []:
+            if not isinstance(f, str):
+                continue
+            f = os.path.realpath(os.path.expanduser(f))
+            if f in proj:
+                if _within(cp, f) and d not in inside:
+                    inside.append(d)
+                elif _within(f, cp) and d not in around:
+                    around.append(d)
+    return inside or around
+
+
+def qmd_owner_hint(name):
+    """«alexbroker — направление hermes-alex: поручи `pantheon task new --direction hermes-alex …`» или ''."""
+    owners = [o for o in hq_collection_owners(name) if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", o)]
+    if not owners:
+        return ""
+    who = ", ".join(owners)
+    return ("%s — направление %s: поручи `pantheon task new --direction %s --title \"<вопрос>\" --text \"<что найти>\"`; "
+            "где лежит — `pantheon qmd where \"<вопрос>\" --collection %s` (пути и заголовки, без текста)"
+            % (name, who, owners[0], name))
+
+
 def _qmd_hq_closed():
     """(закрытые штабу коллекции, None) или (None, что не так): [hq] или qmd.toml не разобрать — штабу qmd закрыт
     целиком. Закрыты [hq].closed_collections и коллекции проектов направлений (hq_project_collections)."""
@@ -2178,6 +2219,9 @@ def _qmd_why(ev):
         elif hq and any(not isinstance(c, str) or c.strip() in closed for c in colls):
             bad = next((c.strip() for c in colls if isinstance(c, str) and c.strip() in closed), "(не строка)")
             why = QMD_HQ_CLOSED_WHY % bad
+            hint = qmd_owner_hint(bad)
+            if hint:
+                why += ". " + hint
     elif hq and tool == "ReadMcpResourceTool":
         # ресурс qmd://… сервер ищет без схемы и по окончанию пути во всех коллекциях: «pantheon/x.md» найдёт и
         # corpus/my-pantheon/x.md (ревью argus 15.10) — штабу ресурсы qmd закрыты целиком, get даёт то же по точному адресу
@@ -2189,6 +2233,11 @@ def _qmd_why(ev):
         if not all(_qmd_hq_target_ok(x, closed) for x in items):
             why = ("Пританею — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и закрытых "
                    "Пританею коллекций (вопрос по ним — координатору направления поручением)")
+            for x in items:
+                c = x.strip()[len("qmd://"):].split("/", 1)[0] if x.strip().startswith("qmd://") else ""
+                if c in closed and qmd_owner_hint(c):
+                    why += ". " + qmd_owner_hint(c)
+                    break
     return why
 
 
