@@ -360,7 +360,9 @@ def path(*parts):
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
 HQ_RW = "hq-rw"
 HEAVY_QUEUE = "heavy-queue"  # папка билетов очереди heavy в STATE/locks (metis-0659)
-HQ_RW_DIRS = ("locks", "autostart-reset", "start-req")  # start-req — заявки Зевса на запуск (metis-0771)
+# start-req — заявки Зевса на запуск (metis-0771); saved — метка `pantheon saved --by zeus*`, когда в STATE/maintenance и
+# STATE/plugins окно писать не может (metis-0577)
+HQ_RW_DIRS = ("locks", "autostart-reset", "start-req", "saved")
 HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
 # errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
 HQ_BAD_ERRNO = {errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR, errno.EMLINK, errno.EOPNOTSUPP}
@@ -426,6 +428,16 @@ def hq_mark(sub, fname, text):
     except OSError as e:
         print(f"pantheon: метка {sub}/{fname} не записана — {e}", file=sys.stderr)
         return False
+
+
+def hq_put(sub, fname, text):
+    """Файл STATE/hq-rw/<sub>/<fname> с этим текстом (перезапись, проверки как у hq_open). UnsafeFile/OSError — наружу."""
+    fd = hq_open(sub, fname)
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
 
 
 LOCK_CONTENDED = None  # имя замка, который в последний раз не взят потому, что его держит другой процесс (metis-0717)
