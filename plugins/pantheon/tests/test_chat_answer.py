@@ -536,6 +536,110 @@ check("хук: цитата варианта с условием → «отве�
       "· ответ в чате не распознан\n" in log and "· ответ в чате\n" not in log and consent("metis-0843").returncode == 1,
       log)
 
+# metis-0843 ч.2: `pantheon consent bind <id> --log-at <время>` — прямое слово владельца в окне Зевса без вопроса с [id]
+BIND = os.path.join(state, "consent-bind.jsonl")
+
+
+def bind(*args, **env):
+    return subprocess.run([PY311, "-I", RUN_PY, "consent", "bind", *args], env=dict(BASE, **env), capture_output=True,
+                          text=True, timeout=60)
+
+
+def ago(sec):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - sec))
+
+
+fresh()
+if os.path.exists(BIND):
+    os.remove(BIND)
+tr = Tr("bind")
+tr.say("Правило «ни прокси» мешает.").end_turn()
+tr.owner("убери это правило", "p-bind")
+hook(tr, "убери это правило", "p-bind")
+heads = [ln[3:].split(" · ")[0] for ln in zeus().splitlines() if ln.startswith("## ")]
+at = heads[0] if heads else "нет"
+check("bind: хук записал ваше слово строкой без пометки", zeus().startswith(f"## {at}\nубери это правило\n"), zeus())
+HQ = {"PANTHEON_ROLE": "hq"}
+for name, env in (("терминал без роли", {}), ("окно Метиды", {"PANTHEON_ROLE": "metis-pantheon"}),
+                  ("окно Гестии", {"PANTHEON_ROLE": "hestia", "PANTHEON_TASK": "metis-0850"})):
+    br = bind("metis-0850", "--log-at", at, **env)
+    check(f"bind: из окна не Зевса ({name}) → код 2, связки нет",
+          br.returncode == 2 and "только в окне Зевса" in br.stderr and not os.path.exists(BIND), br.stdout + br.stderr)
+for args in (("metis-0850", "--log-at", at, "--text", "да"), ("metis-0850", "--log-at", at, "да, снимаем"),
+             ("metis-0850", "да, снимаем"), ("metis-0850", "--text", "да"), ("metis-0850",), ("Bad id", "--log-at", at)):
+    br = bind(*args, **HQ)
+    check(f"bind: свой текст или не тот вызов {args[1:]} → код 2, связки нет",
+          br.returncode == 2 and not os.path.exists(BIND), br.stdout + br.stderr)
+br = bind("metis-0850", "--log-at", ago(-3600)[11:], **HQ)
+check("bind: в это время вашей строки нет → код 1, связки нет",
+      br.returncode == 1 and "нет вашей строки" in br.stderr and not os.path.exists(BIND), br.stdout + br.stderr)
+cr = consent("metis-0850")
+check("consent до привязки: прямое слово без вопроса с [id] — не ответ, код 1", cr.returncode == 1, cr.stdout)
+br = bind("metis-0850", "--log-at", at[11:], **HQ)
+cr = consent("metis-0850")
+check("bind из окна Зевса → код 0; consent <id> выдаёт строку журнала дословно, с пометкой «привязал Зевс»",
+      br.returncode == 0 and cr.returncode == 0 and f"## {at} · ваше слово в окне Зевса" in cr.stdout
+      and "привязал к metis-0850 Зевс" in cr.stdout and "\nубери это правило\n" in cr.stdout,
+      br.stdout + br.stderr + cr.stdout + cr.stderr)
+rec = json.loads(open(BIND, encoding="utf-8").read().splitlines()[0])
+check("bind: в связке только id, время строки и хеш — текста владельца в ней нет",
+      rec["id"] == "metis-0850" and rec["at"] == at and len(rec["sha256"]) == 64 and "убери" not in json.dumps(rec),
+      rec)
+check("bind: привязка — к своему id, у другого id ответа нет", consent("metis-0851").returncode == 1)
+cr = consent("metis-0850", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0850")
+check("bind: привязанное слово — не метка Гестии (push и гашение — только ответ на вопрос с [id])",
+      cr.returncode == 1 and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0850")), cr.stdout)
+# строка журнала изменилась после привязки — связка не сходится по хешу, ответа нет
+log_text = zeus()
+open(os.path.join(LOG, "zeus.md"), "w").write(log_text.replace("убери это правило", "убери это правило и всё прочее"))
+cr = consent("metis-0850")
+check("consent: текст строки не тот, что при привязке → не ответ, код 1, подсказка о несошедшейся привязке",
+      cr.returncode == 1 and "Привязки Зевса к metis-0850, которых нет в журнале" in cr.stdout and at in cr.stdout,
+      cr.stdout)
+open(os.path.join(LOG, "zeus.md"), "w").write(log_text)
+# связку не командой (подложенная строка) — на запись с пометкой хука: consent её не берёт
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {ago(30)} · принята подсказка Claude\nда, снимаем\n\n")
+noted = ago(30)
+with open(BIND, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"id": "metis-0852", "at": noted, "sha256": __import__("hashlib").sha256(
+        "да, снимаем".encode()).hexdigest(), "time": "x"}, ensure_ascii=False) + "\n")
+cr = consent("metis-0852")
+check("consent: связка на запись с пометкой (не ваш набранный ввод) → не ответ, код 1", cr.returncode == 1, cr.stdout)
+br = bind("metis-0852", "--log-at", noted, **HQ)
+check("bind: у строки пометка → код 1, отказ с названием пометки",
+      br.returncode == 1 and "принята подсказка Claude" in br.stderr, br.stdout + br.stderr)
+# ответ в чате (запись хука с пометкой) в то же время, что ваша строка: привязывается только строка без пометки
+fresh()
+tr = Tr("bind2")
+tr.say(Q843).end_turn()
+tr.owner("а", "p-bind2")
+hook(tr, "а", "p-bind2")
+at2 = [ln[3:].split(" · ")[0] for ln in zeus().splitlines() if ln.startswith("## ")][0]
+br = bind("metis-0853", "--log-at", at2, **HQ)
+check("bind: в это время и ваша строка, и запись «ответ в чате» → привязана ваша строка «а»",
+      br.returncode == 0 and br.stdout.rstrip().endswith("\n\nа"), br.stdout + br.stderr + zeus())
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {at2[:17]}59\nещё строка\n\n")
+br = bind("metis-0853", "--log-at", at2[11:16], **HQ)
+check("bind: ЧЧ:ММ, а ваших строк в эту минуту две → код 1, просьба указать секунды",
+      br.returncode == 1 and "укажи время с секундами" in br.stderr, br.stdout + br.stderr)
+old = ago(8 * 86400)
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {old}\nда, делай\n\n")
+br = bind("metis-0854", "--log-at", old, **HQ)
+check("bind: строка старше недели → код 1", br.returncode == 1 and "старше 7 дн." in br.stderr, br.stdout + br.stderr)
+yes_at = ago(20)
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {yes_at}\nвопрос: [metis-0855] Пушим?\nответ: Да — пушить\n\n")
+br = bind("metis-0855", "--log-at", yes_at, **HQ)
+cr = consent("metis-0855", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0855")
+check("bind: ваша строка «ответ: Да — пушить» привязана — Гестии не «да»: код 1, метки нет, слово показано",
+      br.returncode == 0 and cr.returncode == 1 and "не «да»" in cr.stdout and "ответ: Да — пушить" in cr.stdout
+      and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0855")), br.stderr + cr.stdout + cr.stderr)
+br = bind("metis-0854", "--log-at", "25:99", **HQ)
+check("bind: время не по образцу → код 2", br.returncode == 2, br.stdout + br.stderr)
+
 # читатели в процессе: тот же журнал zeus.md
 os.environ.update({"HOME": home, "PANTHEON_HOME": pantheon, "PANTHEON_STATE": state, "PANTHEON_VIEW": view})
 P = load("pantheon_chat_test", os.path.join(LIB, "pantheon.py"))
