@@ -4,9 +4,10 @@
 Запуск: python3 -I plugins/guard/tests/test_daemon_roster.py   (код выхода 0 — все прошли)
 HOME подменён временной папкой, реестр — подставной файл с выдуманными ключами. Проверяет: Read, Grep и Bash по файлу
 у субагента и окна роли — отказ правилом daemon-roster с подсказкой `pantheon roster`; безопасный путь `pantheon roster`
-guard пропускает, и его вывод (настоящий CLI pantheon на том же HOME) ключей не содержит; текст коммита и задачи,
-поиск по исходникам без слова daemon, Glob имён и сессия владельца без роли — без отказа. Имена собраны склейкой, чтобы
-команды прогона этого файла не задевали правило живого хука.
+guard пропускает, и его вывод (настоящий CLI pantheon на том же HOME) ключей не содержит. Bash — по схеме metis-0823:
+имя файла среди слов команды, во входном перенаправлении, код интерпретатору из stdin и неразборная команда — отказ;
+текст коммита (-m, -F - из heredoc), задачи, echo и шаблон grep/rg, Glob имён и сессия владельца без роли — без
+отказа. Имена собраны склейкой, чтобы команды прогона этого файла не задевали правило живого хука.
 """
 import atexit
 import json
@@ -85,6 +86,12 @@ deny = [
     ("главная сессия окна роли (PANTHEON_ROLE)", ("Read", {"file_path": ROSTER}), {"role": None, "sub": False,
                                                                                   "window": "metis-pantheon"}),
     ("субагент сессии владельца", B(f"cat ~/.claude/{DAEMON}/{NAME}"), {"role": "general-purpose"}),
+    # схема metis-0823: имя среди слов команды, вход перенаправления, код из stdin, команду не разобрать
+    ("grep с файлом операндом (не шаблон)", B(f"grep -n Auth ~/.claude/{DAEMON}/{NAME}"), {}),
+    ("файл входного перенаправления", B(f"head -c 400 < ~/.claude/{DAEMON}/{NAME}"), {}),
+    ("python3 - <<EOF с кодом", B(f"python3 - <<'EOF'\nprint(open('/x/.claude/{DAEMON}/{NAME}').read())\nEOF"), {}),
+    ("bash <<EOF с командой", B(f"bash <<'EOF'\ncat ~/.claude/{DAEMON}/{NAME}\nEOF"), {}),
+    ("команду не разобрать", B(f"cat \"~/.claude/{DAEMON}/{NAME}"), {}),
 ]
 for name, (tool, ti), kw in deny:
     out = run(tool, ti, **kw)
@@ -97,9 +104,17 @@ allow = [
     ("Read другого файла папки", ("Read", {"file_path": os.path.join(DDIR, "other.log")}), {}),
     ("Grep по папке выше (остаток, README)", ("Grep", {"pattern": "x", "path": os.path.join(HOME, ".claude")}), {}),
     ("поиск по исходникам без слова daemon", B(f"grep -n {NAME} plugins/pantheon/lib/pantheon.py"), {}),
+    ("чужой roster.json без слова daemon", B(f"cat data/{NAME}"), {}),
     ("git commit -m с путём", B(f'git commit -qm "guard: ~/.claude/{DAEMON}/{NAME} — только через pantheon roster"'), {}),
     ("pantheon task set --note с путём", B(f'pantheon task set app-0001 --note "{DAEMON}/{NAME} закрыт"'), {}),
     ("сессия владельца без роли", ("Read", {"file_path": ROSTER}), {"role": None, "sub": False}),
+    # схема metis-0823: текст сообщения и шаблон поиска путём не считаются (долги argus Д1, Д2 по #342)
+    ("grep -rn шаблоном (Д1)", B(f"grep -rn {DAEMON}/{NAME} plugins/"), {}),
+    ("rg -n шаблоном", B(f"rg -n '{DAEMON}/{NAME}' plugins/"), {}),
+    ("git commit -F - из heredoc (Д2)", B(f"git commit -q -F - <<'EOF'\nguard: ~/.claude/{DAEMON}/{NAME}\nEOF"), {}),
+    ("echo с путём в заметку", B(f"echo '~/.claude/{DAEMON}/{NAME} — через pantheon roster' >> notes.md"), {}),
+    ("git commit -m && pantheon task --note", B(f'git commit -qm "{DAEMON}/{NAME}" && pantheon task set app-0001 '
+                                                f'--note "{DAEMON}/{NAME}"'), {}),
 ]
 for name, (tool, ti), kw in allow:
     out = run(tool, ti, **kw)
