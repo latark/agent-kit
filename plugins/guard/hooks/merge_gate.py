@@ -72,7 +72,10 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    лимита минут или оплаты GitHub Actions и job без раннера и шагов (ci_billing, ещё GET аннотаций и GET job на каждую
    такую), остальные обязательные — SUCCESS: вместо CI засчитывается запись tests на этот SHA с командой полного
    набора FULL_TESTS (_billing_problem, full_tests_record) — пропуск со строкой systemMessage, без записи — отказ с
-   командой, у репозитория без FULL_TESTS — отказ.
+   командой, у репозитория без FULL_TESTS — отказ. PR вне ядра защит (metis-0734) засчитывает и узкую запись
+   `pantheon outside test --affected` (narrow_tests_record): FULL_TESTS с `--affected --base <SHA>`, files и map; база —
+   единственная merge-base head и base PR, карта — sha256 affected-map.json в дереве head (_narrow_problem). PR ядра —
+   только полный набор, и с Touch ID.
 Записи tests нет — отказ называет узкую команду репозитория из NARROW_TESTS (metis-0666): `--affected`
 run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
@@ -86,6 +89,7 @@ run-tests.py в своей worktree без heavy; на основном пути
 
 import ast
 import glob
+import hashlib
 import json
 import os
 import posixpath
@@ -1271,7 +1275,8 @@ FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-te
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
 # Основной путь (CI зелёный) засчитывает любую непустую запись tests на SHA, эту тоже; запасной (CI без минут) — только
-# FULL_TESTS. Не в зеркале lib/merge.py: подсказка, а не правило
+# FULL_TESTS, а у PR вне ядра ещё узкую запись outside с базой SHA, files и map (narrow_tests_record; у этой команды
+# база — ref, а не SHA, поэтому там она не в счёт). Не в зеркале lib/merge.py: подсказка, а не правило
 NARROW_TESTS = {"agent-kit": ("python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected --base origin/main "
                               "plugins/guard plugins/pantheon plugins/project-tools")}
 
@@ -1411,6 +1416,75 @@ def full_tests_record(repo, rec):
     return got == need
 
 
+# узкая запись на запасном пути (metis-0734, «да» владельца 05.11): PR вне ядра — затронутые тесты вместо полного
+# набора. Схема — как у дозапуска metis-0735: cmd, files (прогнанные метки), map (sha256 карты affected-map.json);
+# база дифф — в самой команде (`--base <SHA>`), второго поля для неё нет. Не в зеркале lib/merge.py: Touch ID сливает
+# ядро, а ему нужен полный набор
+MAP_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def narrow_tests_record(repo, rec):
+    """Запись tests — узкий прогон этого репозитория (metis-0734) → (база, sha256 карты) или None. Команда — FULL_TESTS
+    репозитория (full_tests_record) с одним `--affected` и одним `--base <SHA из 40 знаков>` (коммит, от которого
+    раннер взял дифф: у `pantheon outside test --affected` — merge-base с base PR); files — непустой список меток, map —
+    sha256 карты, по которой выбраны файлы. Другие ключи раннера (--only, --base=…), ref вместо SHA — None."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("cmd"), str):
+        return None
+    files, mp = rec.get("files"), rec.get("map")
+    if not (isinstance(files, list) and files and all(isinstance(f, str) for f in files)) \
+            or not (isinstance(mp, str) and MAP_HASH_RE.fullmatch(mp)):
+        return None
+    try:
+        words = shlex.split(re.sub(r"\s#.*\Z", "", rec["cmd"], flags=re.S))
+    except ValueError:
+        return None
+    # второй --base (или --affected) остаётся в rest — и full_tests_record его не примет
+    if "--affected" not in words or "--base" not in words:
+        return None
+    i, j = words.index("--base"), words.index("--affected")
+    base = words[i + 1] if i + 1 < len(words) else ""
+    if not SHA_RE.fullmatch(base):
+        return None
+    rest = [w for k, w in enumerate(words) if k not in (i, i + 1, j)]
+    return (base, mp) if full_tests_record(repo, {"cmd": shlex.join(rest)}) else None
+
+
+def narrow_map_path(repo):
+    """Путь карты affected-map.json от корня — рядом с run-tests.py команды FULL_TESTS репозитория; нет — None."""
+    try:
+        words = shlex.split(FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()) or "")
+    except ValueError:
+        return None
+    script = next((w for w in words if posixpath.basename(w) == "run-tests.py"), None)
+    return posixpath.join(posixpath.dirname(script), "affected-map.json") if script else None
+
+
+def _narrow_problem(cwd, repo, sha, base_oid, base, mp):
+    """Узкая запись (база base, карта mp) годится для head sha PR с base PR base_oid → None или почему нет. Дифф
+    раннера — от base: она должна быть единственной merge-base head и base PR (её считает git папки слияния): другая
+    база — дифф не тот (ветка от другой ветки, старый origin/main в клоне). Карта — sha256 файла карты в дереве head:
+    раннер выбирал файлы по ней, а не по своей старой копии. Git папки — _carry_git (клон repo, полная история)."""
+    gd, why = _carry_git(cwd, repo, base_oid)
+    if why:
+        return why
+    if _git_bytes(gd, "cat-file", "-e", sha + "^{commit}") is None:
+        return f"коммита head {sha[:12]} нет в git папки слияния — сделай git fetch"
+    out = _git_bytes(gd, "merge-base", "--all", sha, base_oid.lower())
+    mbs = out.decode("ascii", "replace").split() if out is not None else []
+    if len(mbs) != 1 or not SHA_RE.fullmatch(mbs[0]):
+        return f"merge-base head {sha[:12]} и base PR {base_oid[:12]} не одна или не посчитана"
+    if mbs[0] != base:
+        return (f"узкий набор посчитан от {base[:12]}, а merge-base head и base PR — {mbs[0][:12]}: дифф не тот (база "
+                "не та или origin/main в клоне старый) — сделай git fetch и повтори узкий прогон или прогони полный")
+    path = narrow_map_path(repo)
+    blob = _git_bytes(gd, "cat-file", "blob", f"{sha}:{path}") if path else None
+    if blob is None:
+        return f"карты {path or 'affected-map.json'} нет в дереве head {sha[:12]}"
+    if hashlib.sha256(blob).hexdigest() != mp:
+        return f"карта в записи не та, что {path} в дереве head {sha[:12]} — повтори узкий прогон на этом коммите"
+    return None
+
+
 def ci_verdict(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
     StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
@@ -1536,13 +1610,15 @@ def _ci_jobs(repo, ids):
     return out
 
 
-def _billing_problem(repo, pr, sha):
+def _billing_problem(repo, pr, sha, narrow=None, base_oid=None):
     """Запасной путь (metis-0655, решение владельца 02.11): CI на head не запускался из-за лимита минут или оплаты
     GitHub Actions (ci_billing) — вместо CI засчитывается запись tests на этот SHA и этот репозиторий из журнала
     шлюза (ту же пишет хук guard на `pantheon review test` в любой сессии) с командой полного набора FULL_TESTS
-    (full_tests_record). Есть — пропуск с предупреждением; нет, журнал не читается или у репозитория нет FULL_TESTS —
-    отказ (с командой записи, если она известна). Возврат, как у _ci_problem, — (текст отказа или None,
-    предупреждения пропуска)."""
+    (full_tests_record). narrow — папка слияния, если PR не задевает ядро (metis-0734): тогда годится и узкая запись
+    (narrow_tests_record), если её база — merge-base head и base PR base_oid, а карта — из дерева head
+    (_narrow_problem); у PR ядра (narrow None) — только полный набор. Есть — пропуск с предупреждением; нет, журнал не
+    читается или у репозитория нет FULL_TESTS — отказ (с командой записи, если она известна). Возврат, как у
+    _ci_problem, — (текст отказа или None, предупреждения пропуска)."""
     where = f"{repo}#{pr}@{sha[:12]}"
     cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower())
     if not cmd:
@@ -1554,20 +1630,37 @@ def _billing_problem(repo, pr, sha):
         return (f"CI на {where} не запускался (лимит минут или оплата GitHub Actions), а журнал записей тестов "
                 "~/.local/state/pantheon/merge-gate/records.jsonl не читается (симлинк или сбой) — местный прогон не "
                 "сверить"), ()
-    if any(r["kind"] == "tests" and r["sha"] == sha and repo.lower() in [x.lower() for x in r["repo"]]
-           and full_tests_record(repo, r) for r in records):
+    mine = [r for r in records if r["kind"] == "tests" and r["sha"] == sha
+            and repo.lower() in [x.lower() for x in r["repo"]]]
+    if any(full_tests_record(repo, r) for r in mine):
         return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись полного набора "
                       f"тестов на этом коммите) на {where}",)
+    narrows = [(r, got) for r in mine for got in [narrow_tests_record(repo, r)] if got]
+    note = ""
+    if narrows and narrow is None:
+        note = (" Узкая запись (--affected) на этом коммите есть, но PR задевает ядро защит — засчитывается только "
+                "полный набор.")
+    elif narrow is not None:
+        whys = []
+        for r, (base, mp) in narrows:
+            why = _narrow_problem(narrow, repo, sha, str(base_oid or ""), base, mp)
+            if why is None:
+                return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный узкий прогон (затронутые "
+                              f"PR тесты, файлов {len(r['files'])}, PR не задевает ядро) на {where}",)
+            whys.append(why)
+        note = (f" Узкая запись есть, но не засчитана: {whys[-1]}." if whys else "") + (
+            " PR не задевает ядро — годится и узкий прогон: из корня чистой копии на этом коммите "
+            "`pantheon outside test --affected --wait 590` (затронутые тесты от merge-base с origin/main).")
     return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…», job "
             f"не стартовал). Запасной путь — местный полный прогон с записью на этом коммите (засчитывается только "
             f"эта команда: {cmd}). Основной способ: из корня чистой копии на {sha[:12]} запусти `pantheon outside "
             "test --wait 590` (Bash не в фоне, timeout 600000 мс): прогон `.pantheon-verify` вне окна до 2 ч, запись "
             "пишет плановый проход; код 75 — итога ещё нет, смотри `pantheon outside status <ID>`. Вариант — "
             f"`pantheon review test -- {cmd}` (не в фоне: фоновый прогон записи не пишет, а полный набор с очередью "
-            "heavy бывает дольше 600 с). Затем повтори слияние"), ()
+            f"heavy бывает дольше 600 с).{note} Затем повтори слияние"), ()
 
 
-def _ci_problem(repo, pr, sha, data, owner=False):
+def _ci_problem(repo, pr, sha, data, owner=False, narrow=None):
     """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
     check-traces). data — ответ _pr_view; его rollup — проверки коммита headRefOid, а он сверяется с SHA из
     --match-head-commit: PR на другом коммите — отказ. Разбор — ci_verdict с обязательными проверками репозитория
@@ -1582,7 +1675,8 @@ def _ci_problem(repo, pr, sha, data, owner=False):
     base PR (ответ 404 на оба): PR, который удаляет или переименовывает папку workflows, проверок не получает, а на
     base она есть (ревью argus 0297b). Сбой любого запроса — отказ; base спрашивается, только когда rollup пуст и на
     head папки нет. owner — путь без роли (owner_ci_problem): записей там не просят, а в текстах отказа — аварийный
-    путь OWNER_EMERGENCY вместо «сливает владелец» (Д2, Д4' argus #235). Возврат — (текст отказа или None,
+    путь OWNER_EMERGENCY вместо «сливает владелец» (Д2, Д4' argus #235). narrow — папка слияния PR вне ядра: на
+    запасном пути годится и узкая запись (metis-0734, _billing_problem). Возврат — (текст отказа или None,
     предупреждения пропуска): их несёт возврат, а не модуль (metis-0650)."""
     head = data.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha:
@@ -1596,7 +1690,7 @@ def _ci_problem(repo, pr, sha, data, owner=False):
         ids = ci_billing_ids(runs, required)
         if ci_billing(runs, required, _ci_notes(repo, ids), _ci_jobs(repo, ids)):
             # предупреждения о красных необязательных — и на запасном пути, рядом со строкой о лимите (С1 argus #248)
-            why, extra = _billing_problem(repo, pr, sha)
+            why, extra = _billing_problem(repo, pr, sha, narrow, data.get("baseRefOid"))
             return (why, ()) if why else (None, extra + tuple(f"{n} на {repo}#{pr}@{sha[:12]}" for n in notes))
         if owner:
             return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит; {OWNER_EMERGENCY}", ()
@@ -2174,17 +2268,19 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if view is None:
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
+    core_why = MERGE_CORE
     if protect:
         files = pr_files()
         why = _version_problem(files)
         if why:
             return f"{why}. {MERGE_VERSION}. {advice}"
-        why = _core_problem(repo, pr, sha, view, files, cwd)
+        why = core_why = _core_problem(repo, pr, sha, view, files, cwd)
         # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
-    why, notes = _ci_problem(repo, pr, sha, view)
+    # узкая запись тестов на запасном пути — только в защитах и только PR вне ядра (metis-0734)
+    why, notes = _ci_problem(repo, pr, sha, view, narrow=cwd if core_why is None else None)
     if why:
         return f"{why}. {advice}"
     if carried:
