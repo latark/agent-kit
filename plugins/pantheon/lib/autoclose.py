@@ -33,6 +33,7 @@ from datetime import datetime
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
 PART_RE = re.compile(r"(?<!\w)часть(?!\w)", re.I)
 FETCH_BUDGET = 240     # секунд на весь сетевой проход (fetch): дольше не ждём, остаток репозиториев — в следующий раз
+REPO_BUDGET = 75       # секунд на один репозиторий (metis-0808): fetch иногда 100-350 с против обычных 40 — завислый gh не съедает весь проход
 FIRST_LOOKBACK = 48 * 3600  # первый проход (нет состояния) смотрит назад на столько: старые упоминания задач не трогаем
 KEEP = 500             # отметок обработанных PR в состоянии
 LIMIT = 100
@@ -238,7 +239,8 @@ def pr_index(cache):
                 for tid in ids:
                     out.setdefault(tid, []).append({"repo": repo, "number": pr["number"],
                                                     "sha": sha if re.fullmatch(r"[0-9a-f]{7,40}", sha) else "",
-                                                    "merged": merged, "branch": branch})
+                                                    "merged": merged, "branch": branch,
+                                                    "day": (merged_day(pr.get("mergedAt")) or "") if merged else ""})
     return out
 
 
@@ -361,28 +363,61 @@ def sandbox_core(repo, p, env=None, gate=None, left=None):
     return got is None or bool(got)
 
 
-def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None, sandbox=None):
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+
+def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None, sandbox=None, repo_budget=REPO_BUDGET):
     """Сетевой проход: gh по репозиториям → кэш cache_file. Только он зовёт gh; лёгкий тик (run) читает кэш.
-    budget — секунд на весь проход: на каждый вызов gh остаётся не больше, чем осталось; не успел — ошибка по репозиторию.
+    budget — секунд на весь проход, repo_budget — на один репозиторий (metis-0808: один завислый репозиторий не съедает
+    весь проход): на каждый вызов gh остаётся не больше, чем осталось; не успел — ошибка по репозиторию. Порядок —
+    от давнего успеха к свежему: репозиторий, которому не хватило времени, в следующий раз идёт первым.
+    Ошибка gh по репозиторию (401, TLS, EOF, время) не стирает его прошлые строки (merged, open, open_prs): они остаются
+    в кэше, а stale[repo] — время последнего успешного ответа по нему (repo_ok); читатели доски пишут «данные от HH:MM».
     core — путь → ядро ли (merge.is_core): открытые PR в кэше (open_prs) несут пометку «задето ядро» для автоблока
     board.md (metis-0397); sandbox — (repo, строка PR) → задевает ли PR сборку окон в pantheon.py (sandbox_core, metis-0686):
     зовётся, только если по путям не ядро. → ошибки по репозиториям {repo: текст}."""
     end = time.monotonic() + budget
+    prev = load_state(cache_file)
+    prev_ok = prev.get("repo_ok") if isinstance(prev.get("repo_ok"), dict) else {}
+
+    def prev_at(r):
+        """Время последнего успешного ответа gh по репозиторию; кэш до metis-0808 — время всего прохода, если строки были; иначе 0."""
+        if r in prev_ok:
+            return _num(prev_ok[r])
+        had = any(isinstance(prev.get(k), dict) and isinstance(prev[k].get(r), list) for k in ("merged", "open_prs"))
+        return _num(prev.get("fetched")) if had else 0
 
     def left():
         return end - time.monotonic()
 
+    def keep_prev(repo, part, errors_text):
+        """Прошлые строки репозитория part ('all' | 'open') — в новый кэш; → есть ли что сохранять."""
+        for key, dst in (("merged", merged), ("open", opened), ("open_prs", open_prs)):
+            if key == "merged" and part == "open":
+                continue
+            old = prev.get(key) if isinstance(prev.get(key), dict) else {}
+            if isinstance(old.get(repo), list):
+                dst[repo] = old[repo]
+        errors[repo] = errors_text
+        stale[repo] = prev_at(repo)
+
     done = load_state(state_file).get("done")
     done = done if isinstance(done, dict) else {}
-    merged, opened, open_prs, errors = {}, {}, {}, {}
-    for repo in sorted(set(repos)):
-        if left() <= 1:
-            errors[repo] = "не хватило времени прохода"
+    merged, opened, open_prs, errors, stale = {}, {}, {}, {}, {}
+    repo_ok = {r: v for r, v in prev_ok.items() if r in repos}
+    for repo in sorted(set(repos), key=lambda r: (prev_at(r), r)):
+        rend = min(end, time.monotonic() + repo_budget)
+
+        def rleft(rend=rend):
+            return rend - time.monotonic()
+        if rleft() <= 1:
+            keep_prev(repo, "all", "не хватило времени прохода")
             continue
         data, err = gh_json(["pr", "list", "--repo", repo, "--state", "merged", "--limit", str(LIMIT), "--json",
-                             "number,headRefName,body,mergedAt,mergeCommit,files,isCrossRepository"], env, timeout=min(90, left()))
+                             "number,headRefName,body,mergedAt,mergeCommit,files,isCrossRepository"], env, timeout=min(90, rleft()))
         if err or not isinstance(data, list):
-            errors[repo] = err or "ответ gh — не список"
+            keep_prev(repo, "all", err or "ответ gh — не список")
             continue
         rows = []
         for pr in data:
@@ -393,32 +428,35 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                    "cross": pr.get("isCrossRepository") is not False}  # PR из форка (или gh не сказал) — не PR пачки
             files = [f.get("path", "") for f in pr.get("files") or [] if isinstance(f, dict)]
             if f"{repo}#{pr.get('number')}" not in done and any(x.endswith(".claude-plugin/plugin.json") for x in files):
-                if left() <= 1:
+                if rleft() <= 1:
                     errors[f"{repo}#{pr.get('number')}"] = "не хватило времени на diff"
                     continue  # без версии PR не отдаём: закрытие подождёт следующего прохода
                 row["versions"] = plugin_versions(gh_text(["pr", "diff", str(pr.get("number")), "--repo", repo], env,
-                                                          timeout=min(90, left())))
+                                                          timeout=min(90, rleft())))
             rows.append(row)
         merged[repo] = rows
-        if left() > 1:
-            o, _ = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIMIT), "--json",
-                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files,isCrossRepository"], env, timeout=min(90, left()))
-            if isinstance(o, list):
-                opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
-                # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
-                open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
-                                   "branch": str(p.get("headRefName") or "")[:200],
-                                   "cross": p.get("isCrossRepository") is not False,
-                                   "files": [f.get("path") for f in p.get("files") or []
-                                             if isinstance(f, dict) and _path_ok(f.get("path"))],
-                                   "ids": find_ids(p.get("headRefName"), p.get("body")),
-                                   "closes": closing_ids(p.get("headRefName"), p.get("body")),
-                                   "part": is_part(p.get("body")),
-                                   "core": open_core(repo, p, core, sandbox, left)}
-                                  for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
-    old_heads = former_heads(load_state(cache_file), open_prs)
+        o, oerr = (gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIMIT), "--json",
+                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files,isCrossRepository"], env,
+                           timeout=min(90, rleft())) if rleft() > 1 else (None, "не хватило времени прохода"))
+        if isinstance(o, list):
+            opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
+            # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
+            open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
+                               "branch": str(p.get("headRefName") or "")[:200],
+                               "cross": p.get("isCrossRepository") is not False,
+                               "files": [f.get("path") for f in p.get("files") or []
+                                         if isinstance(f, dict) and _path_ok(f.get("path"))],
+                               "ids": find_ids(p.get("headRefName"), p.get("body")),
+                               "closes": closing_ids(p.get("headRefName"), p.get("body")),
+                               "part": is_part(p.get("body")),
+                               "core": open_core(repo, p, core, sandbox, rleft)}
+                              for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
+            repo_ok[repo] = t
+        else:  # слитые свежие, открытые — прошлые: без этого «Открытых PR нет» при открытых PR
+            keep_prev(repo, "open", "открытые PR: " + (oerr or "ответ gh — не список"))
+    old_heads = former_heads(prev, open_prs)
     save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "open_prs": open_prs, "errors": errors,
-                            "old_heads": old_heads})
+                            "old_heads": old_heads, "repo_ok": repo_ok, "stale": stale})
     return errors
 
 
