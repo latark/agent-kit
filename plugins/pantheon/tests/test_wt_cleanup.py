@@ -50,6 +50,16 @@ def age(wt, seconds):
     os.utime(wt, (T0 - seconds, T0 - seconds))
 
 
+def age_all(wt, seconds, keep=()):
+    """Состарить всё в копии (файлы и папки, без перехода по ссылкам), кроме имён keep, затем саму копию."""
+    when = T0 - seconds
+    for d, dirs, files in os.walk(wt, topdown=False):
+        for n in files + dirs:
+            if n not in keep:
+                os.utime(os.path.join(d, n), (when, when), follow_symlinks=False)
+    os.utime(wt, (when, when))
+
+
 def branch_sha(g, name):
     r = g("rev-parse", "--verify", "-q", f"refs/heads/{name}")
     return r.stdout.strip() if r.returncode == 0 else None
@@ -100,6 +110,7 @@ def sub_meta(e, agent, wt, mtime, finished=False):
     if finished:
         meta["finished"] = True
     p = os.path.join(d, agent + ".meta.json")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
     json.dump(meta, open(p, "w"))
     open(p[:-len(".meta.json")] + ".jsonl", "w").write("{}\n")
     for f in (p, p[:-len(".meta.json")] + ".jsonl"):
@@ -131,6 +142,26 @@ def test_agent_lock():
     check(os.path.exists(live), "замок субагента: копия живого субагента (журнал свежий) убрана")
     check(os.path.exists(young), "замок субагента: копия моложе порога убрана")
     check("agent-a0bb22cc33dd44ee" not in e.alerts(), "живой субагент попал в тревоги")
+    # meta субагента лежит глубже (subagents/<x>/) — тоже найден: живой субагент держит копию
+    nested = copy(folder, g, "agent-a0ee55ff66007711")
+    g("worktree", "lock", "--reason", "claude agent agent-a0ee55ff66007711 (pid 99999 x)", nested)
+    sub_meta(e, "x/agent-a0ee55ff66007711", nested, T0 - 60)
+    # замок называет субагента, а meta нет: копия держится, пока в ней есть правка моложе LIVE_SUBAGENT_MAX (3 ч)
+    fresh = copy(folder, g, "agent-a0ff66007711aa22")
+    quiet = copy(folder, g, "agent-a0aa77118822bb33")
+    for wt in (fresh, quiet):
+        g("worktree", "lock", "--reason", f"claude agent {os.path.basename(wt)} (pid 99999 x)", wt)
+        open(os.path.join(wt, "notes.txt"), "w").write("x\n")
+        os.utime(os.path.join(wt, "notes.txt"), (T0 - 4 * DAY, T0 - 4 * DAY))
+    open(os.path.join(fresh, "draft.txt"), "w").write("свежее\n")
+    os.utime(os.path.join(fresh, "draft.txt"), (T0 - 600, T0 - 600))
+    os.remove(os.path.join(quiet, "notes.txt"))
+    for wt in (nested, fresh, quiet):
+        age_all(wt, 4 * DAY, keep=("draft.txt",))
+    e.run("watch", t=T0)
+    check(os.path.exists(nested), "замок субагента: meta во вложенной папке не найден — живая копия убрана")
+    check(os.path.exists(fresh), "замок субагента без meta: копия со свежей правкой убрана")
+    check(not os.path.exists(quiet), "замок субагента без meta: затихшая копия (всё старше 3 ч) не убрана")
 
 
 def test_detached_unmerged():
@@ -168,9 +199,14 @@ def test_dirty_patch_and_empty_patch():
     os.makedirs(os.path.join(empty, "node_modules", "x"))
     open(os.path.join(empty, "node_modules", "x", "index.js"), "w").write("1\n")
     check(g("status", "--porcelain", cwd=empty).stdout.strip() != "", "пустой патч: копия чистая для git")
-    for w in (dirty, empty):
+    links = copy(folder, g, "w-links")  # неотслеживаемое — только ссылка внутрь копии: архив был бы пуст
+    os.symlink("base.txt", os.path.join(links, "alias.txt"))
+    for w in (dirty, empty, links):
         age(w, 4 * DAY)
     e.run("watch", t=T0)
+    check(os.path.islink(os.path.join(links, "alias.txt")), "только ссылки: копия убрана, а сохранено ничего")
+    check("w-links" in e.alerts(), f"только ссылки: нет тревоги: {e.alerts()[-300:]}")
+    check(not os.path.exists(e.st("wt-archive", "untracked", "w-links.tar.gz")), "только ссылки: пустой архив остался")
     patch = e.st("wt-archive", "patches", "w-dirty.patch")
     check(os.path.isfile(patch) and "правка не закоммичена" in open(patch, encoding="utf-8").read(),
           "грязная: нет патча с правкой в wt-archive/patches")
@@ -189,12 +225,22 @@ def test_untracked_tar_and_failure():
     open(os.path.join(wt, "notes", "draft.txt"), "w").write("черновик\n")
     os.makedirs(os.path.join(wt, "node_modules"))
     open(os.path.join(wt, "node_modules", "big.js"), "w").write("x\n")
+    # ссылки внутрь копии (наружу — копию держит outward_links) и канал: в архив идут только обычные файлы
+    os.symlink("base.txt", os.path.join(wt, "link.txt"))
+    os.symlink("../base.txt", os.path.join(wt, "notes", "inner-link.txt"))
+    os.mkfifo(os.path.join(wt, "notes", "pipe"))
     age(wt, 4 * DAY)
     e.run("watch", t=T0)
     tar = e.st("wt-archive", "untracked", "w-untr.tar.gz")
     names = tarfile.open(tar).getnames() if os.path.isfile(tar) else []
     check("notes/draft.txt" in names, f"неотслеживаемое: нет notes/draft.txt в архиве: {names}")
     check(not any("node_modules" in n for n in names), f"неотслеживаемое: node_modules в архиве: {names}")
+    check(not any(n.endswith(("link.txt", "pipe")) for n in names), f"неотслеживаемое: ссылка или канал в архиве: {names}")
+    blob = b"".join(tarfile.open(tar).extractfile(m).read() for m in tarfile.open(tar).getmembers() if m.isfile()) \
+        if os.path.isfile(tar) else b""
+    members = tarfile.open(tar).getmembers() if os.path.isfile(tar) else []
+    check(members and all(m.isfile() for m in members), f"неотслеживаемое: не только обычные файлы: {[(m.name, m.type) for m in members]}")
+    check(blob == "черновик\n".encode(), f"неотслеживаемое: содержимое архива {blob!r}")
     check(not os.path.exists(wt), "неотслеживаемое: копия не убрана после архива")
     # сбой архива
     e2, folder2, g2 = repo()
@@ -208,6 +254,32 @@ def test_untracked_tar_and_failure():
     check(os.path.isfile(os.path.join(wt2, "draft.txt")), "сбой архива: копия убрана")
     check("w-fail" in e2.alerts() and "архив не собрался" in e2.alerts(), f"сбой архива: нет тревоги: {e2.alerts()[-300:]}")
     check(not os.path.exists(e2.st("wt-archive", "patches", "w-fail.patch")), "сбой архива: недописанный патч остался")
+
+
+def test_tar_regular_only():
+    """_tar_regular (lib/watch.py) кладёт в архив только обычный файл, прочитанный без перехода по ссылке: ссылка и
+    канал (git их в список неотслеживаемого не всегда даёт, но файл могут подменить между списком и чтением) — пропуск,
+    размер — по прочитанному, больше остатка предела — _TooBig."""
+    import io
+    import tempfile
+    sys.path.insert(0, os.path.join(W.ROOT, "lib"))
+    import watch  # noqa: E402 — модуль без ядра: _tar_regular не трогает P
+    d = tempfile.mkdtemp()
+    reg, fifo, link = (os.path.join(d, n) for n in ("reg.txt", "pipe", "link.txt"))
+    open(reg, "w").write("12345")
+    os.mkfifo(fifo)
+    os.symlink(reg, link)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        got = [watch._tar_regular(tf, p, os.path.basename(p), 100) for p in (reg, fifo, link)]
+        names = [m.name for m in tf.getmembers()]
+    check(got == [5, 0, 0] and names == ["reg.txt"], f"_tar_regular: прочитано {got}, в архиве {names}")
+    with tarfile.open(fileobj=io.BytesIO(), mode="w") as tf:
+        try:
+            watch._tar_regular(tf, reg, "reg.txt", 4)
+            check(False, "_tar_regular: файл больше остатка предела принят")
+        except watch._TooBig:
+            pass
 
 
 def test_live_session_never_touched():
@@ -299,6 +371,15 @@ def test_wt_done_command():
     check(os.path.isdir(foreign), "заявка чужого окна исполнена")
     check(os.listdir(os.path.join(cache, "zz-other", "wt-req")) == [], "заявка чужого окна не снята")
     check(os.listdir(os.path.join(cache, "g-dir", "wt-req")) == [], "исполненная заявка не снята")
+    # папка заявок окна подменена ссылкой на чужую папку: её файлы проход не читает и не удаляет
+    other_dir = os.path.join(e.tmp, "not-requests")
+    os.makedirs(other_dir)
+    junk = os.path.join(other_dir, "0123456789abcdef.json")
+    open(junk, "w").write("{}")
+    os.makedirs(os.path.join(cache, "g-link"))
+    os.symlink(other_dir, os.path.join(cache, "g-link", "wt-req"))
+    e.run("watch", t=T0)
+    check(os.path.isfile(junk), "заявки: файл в папке за ссылкой wt-req удалён")
 
 
 if __name__ == "__main__":

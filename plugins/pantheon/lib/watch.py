@@ -52,6 +52,7 @@
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
 """
 import contextlib
+import errno
 import glob
 import hashlib
 import json
@@ -63,6 +64,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import tomllib
 from datetime import date, datetime, timedelta
@@ -1059,11 +1061,17 @@ def proc_cwds():
 
 
 def subagent_live(agent, wt, t):
-    """Субагент копии ещё работает (metis-0835): его ~/.claude/projects/*/*/subagents/<agent>.meta.json без finished,
-    worktreePath — эта копия, а журнал или meta писались не раньше LIVE_SUBAGENT_MAX назад. Субагент, оборванный
-    перезапуском родителя, остаётся без finished навсегда, но его журнал стареет. meta не найден — False."""
-    pat = os.path.join(glob.escape(P.HOME), ".claude", "projects", "*", "*", "subagents", agent + ".meta.json")
-    for m in glob.glob(pat):
+    """Субагент копии ещё работает (metis-0835): его ~/.claude/projects/*/*/subagents/[*/[*/]]<agent>.meta.json (как
+    review_find_transcripts) без finished, worktreePath — эта копия, а журнал или meta писались не раньше
+    LIVE_SUBAGENT_MAX назад. Субагент, оборванный перезапуском родителя, остаётся без finished навсегда, но его журнал
+    стареет. → True | False | None — meta не найден (решает вызывающий: под замком субагента это не «мёртв»)."""
+    base = os.path.join(glob.escape(P.HOME), ".claude", "projects", "*", "*", "subagents")
+    metas = set()
+    for sub in ((), ("*",), ("*", "*")):
+        metas.update(glob.glob(os.path.join(base, *sub, glob.escape(agent) + ".meta.json")))
+    if not metas:
+        return None
+    for m in sorted(metas):
         meta = P.read_json(m, {})
         if not isinstance(meta, dict) or meta.get("finished"):
             continue
@@ -1077,6 +1085,33 @@ def subagent_live(agent, wt, t):
         if t - mt <= LIVE_SUBAGENT_MAX:
             return True
     return False
+
+
+QUIET_LIMIT = 50000   # записей копии (без LINK_SKIP) для _quiet_since; больше — «не знаю», копия считается занятой
+
+
+def _quiet_since(wt, since):
+    """Ни одна запись копии (папки и файлы, без LINK_SKIP, без перехода по ссылкам) не менялась после since. Обход
+    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем."""
+    stack, n = [wt], 0
+    while stack:
+        d = stack.pop()
+        try:
+            if os.lstat(d).st_mtime > since:
+                return False
+            with os.scandir(d) as it:
+                for e in it:
+                    n += 1
+                    if n > QUIET_LIMIT:
+                        return False
+                    st = e.stat(follow_symlinks=False)
+                    if st.st_mtime > since:
+                        return False
+                    if e.is_dir(follow_symlinks=False) and e.name not in LINK_SKIP:
+                        stack.append(e.path)
+        except OSError:
+            return False
+    return True
 
 
 def merged_branches(root):
@@ -1146,11 +1181,13 @@ def _git_bytes(*args, env=None, timeout=120):
 
 def _untracked(wt, env):
     """Неотслеживаемые файлы копии без зависимостей и кэшей (LINK_SKIP) → [(путь, имя в архиве)] или None (git не
-    ответил). Вложенный репозиторий git выдаёт папкой «x/» — её файлы берём обходом без перехода по ссылкам."""
+    ответил). Вложенный репозиторий git выдаёт папкой «x/» — её файлы берём обходом без перехода по ссылкам. Ссылки,
+    устройства и каналы отсеивает _tar_regular при записи архива (O_NOFOLLOW и fstat — без гонки проверки и чтения)."""
     r = _git_bytes("-C", wt, "ls-files", "-o", "--exclude-standard", "-z", env=env)
     if r.returncode != 0:
         return None
     skip = lambda rel: any(part in LINK_SKIP for part in rel.split("/"))  # noqa: E731
+
     out = []
     for raw in r.stdout.split(b"\0"):
         rel = os.fsdecode(raw)
@@ -1160,7 +1197,7 @@ def _untracked(wt, env):
         if rel.endswith("/") and os.path.isdir(p) and not os.path.islink(p.rstrip("/")):
             for d, dirs, files in os.walk(p, followlinks=False):
                 dirs[:] = [x for x in dirs if x not in LINK_SKIP]
-                for f in files + [x for x in dirs if os.path.islink(os.path.join(d, x))]:
+                for f in files:
                     q = os.path.join(d, f)
                     out.append((q, os.path.relpath(q, wt)))
         else:
@@ -1178,6 +1215,38 @@ def _free_stem(name):
     return f"{name}-{int(time.time())}"
 
 
+class _TooBig(Exception):
+    """Прочитанное неотслеживаемое превысило UNTRACKED_MAX_MB."""
+
+
+def _tar_regular(tf, src, arc, budget):
+    """Обычный файл src → член arc архива tf. Открывается без перехода по ссылке (O_NOFOLLOW), fstat — обычный файл,
+    иначе пропуск; размер в архиве — сколько байт прочитано, а не lstat: файл, выросший после подсчёта, предел не
+    обойдёт. → прочитано байт; больше budget — _TooBig."""
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOENT):
+            return 0  # подменён ссылкой или пропал после списка — не наш файл
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return 0
+        buf, n = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024), 0
+        with buf:
+            while chunk := fh.read(1024 * 1024):
+                n += len(chunk)
+                if n > budget:
+                    raise _TooBig()
+                buf.write(chunk)
+            buf.seek(0)
+            ti = tarfile.TarInfo(arc)
+            ti.size, ti.mtime, ti.mode = n, int(st.st_mtime), stat.S_IMODE(st.st_mode)
+            tf.addfile(ti, buf)
+    return n
+
+
 def wt_save(wt, env):
     """Грязная копия до удаления (metis-0835): `git diff HEAD --binary` → wt-archive/patches/<имя>.patch и
     неотслеживаемое (без LINK_SKIP) → wt-archive/untracked/<имя>.tar.gz. → (True, [пути]) или (False, причина):
@@ -1189,8 +1258,6 @@ def wt_save(wt, env):
     files = _untracked(wt, env)
     if files is None:
         return False, "список неотслеживаемого не прочитан"
-    if not d.stdout and not files:
-        return False, "грязная, а сохранить нечего: патч пуст, неотслеживаемое — только зависимости и кэши"
     total = 0
     for p, _ in files:
         with contextlib.suppress(OSError):
@@ -1210,16 +1277,30 @@ def wt_save(wt, env):
         if files:
             p = wt_archive("untracked", stem + ".tar.gz")
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            made.append(p)
-            with tarfile.open(p, "x:gz") as tf:
+            budget = UNTRACKED_MAX_MB * 1024 * 1024
+            with tarfile.open(p, "x:gz") as tf:  # «x» — O_EXCL: чужой файл на этом месте не затрём и не снимем
+                made.append(p)
                 for src, arc in files:
-                    tf.add(src, arcname=arc, recursive=False)
-    except (OSError, tarfile.TarError) as e:
-        for p in made:
-            with contextlib.suppress(OSError):
+                    budget -= _tar_regular(tf, src, arc, budget)
+                members = len(tf.getmembers())
+            if not members:  # в списке были только ссылки и каналы — архив пуст
+                made.remove(p)
                 os.remove(p)
+    except _TooBig:
+        _unmake(made)
+        return False, f"неотслеживаемого больше предела {UNTRACKED_MAX_MB} МБ (по прочитанному)"
+    except (OSError, tarfile.TarError) as e:
+        _unmake(made)
         return False, f"архив не собрался ({getattr(e, 'strerror', None) or e})"
+    if not made:
+        return False, "грязная, а сохранить нечего: патч пуст, неотслеживаемое — только ссылки, каналы, зависимости и кэши"
     return True, made
+
+
+def _unmake(made):
+    for p in made:
+        with contextlib.suppress(OSError):
+            os.remove(p)
 
 
 def _archive_branch(root, name, head):
@@ -1278,8 +1359,12 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     am = AGENT_LOCK.match(reason) if lm else None
     name = os.path.basename(wt)
     agent = am.group(1) if am else (name if AGENT_DIR.fullmatch(name) else None)
-    if agent and subagent_live(agent, wt, t):
+    alive = subagent_live(agent, wt, t) if agent else False
+    if alive:
         return "live", f"субагент {agent} ещё работает"
+    if alive is None and am and not _quiet_since(wt, t - LIVE_SUBAGENT_MAX):
+        # замок называет субагента, а его meta не найден: жив ли он — неизвестно; ждём, пока копия затихнет
+        return "live", f"замок субагента {agent}: meta не найден, в копии правки моложе {LIVE_SUBAGENT_MAX / 3600:g} ч"
     try:
         age = (t - os.stat(wt).st_mtime) / 3600
     except OSError:
@@ -1365,40 +1450,68 @@ def _req_dirs(doms):
     return out
 
 
+def _req_open(d):
+    """Папка заявок без перехода по ссылке → fd папки или None: подложенная ссылка на чужую папку не читается и в ней
+    ничего не удаляется (все unlink — относительно этого fd). _open_dir — общий с уборкой кэшей окон."""
+    try:
+        fd = _open_dir(d)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return fd
+
+
 def wt_requests(doms, t):
-    """Заявки `pantheon wt done` → {путь копии: [файлы заявок]}. Битые, подложенные (ссылка, не обычный файл), старше
-    WT_REQ_DAYS и на копию вне папок, которые этой папке заявок можно, снимаются сразу."""
+    """Заявки `pantheon wt done` → {путь копии: [(папка заявок, имя файла)]}. Битые, подложенные (ссылка, не обычный
+    файл), старше WT_REQ_DAYS и на копию вне папок, которые этой папке заявок можно, снимаются сразу. Папка и файлы —
+    через fd папки (O_NOFOLLOW): подменённая ссылкой папка пропускается. Имена с точки — недописанные заявки окна, их
+    не трогаем."""
     out = {}
     for d, roots in _req_dirs(doms):
-        try:
-            names = os.listdir(d)
-        except OSError:
+        dfd = _req_open(d)
+        if dfd is None:
             continue
-        for n in names:
-            p = os.path.join(d, n)
-            data = None
-            if REQ_FILE.fullmatch(n):
-                with contextlib.suppress(OSError, ValueError):
-                    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                    with os.fdopen(fd, "rb") as fh:
-                        if stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                            data = json.loads(fh.read(REQ_MAX + 1)[:REQ_MAX] or b"null")
-            wt = data.get("path") if isinstance(data, dict) else None
-            when = data.get("time") if isinstance(data, dict) else None
-            ok = (isinstance(wt, str) and isinstance(when, (int, float)) and t - when <= WT_REQ_DAYS * 86400
-                  and any(os.path.dirname(os.path.realpath(wt)) == os.path.join(r, ".claude", "worktrees") for r in roots))
-            if ok:
-                out.setdefault(os.path.realpath(wt), []).append(p)
-            else:
-                with contextlib.suppress(OSError):
-                    os.unlink(p)
+        try:
+            for n in os.listdir(dfd):
+                if n.startswith("."):
+                    continue
+                data = None
+                if REQ_FILE.fullmatch(n):
+                    with contextlib.suppress(OSError, ValueError):
+                        fd = os.open(n, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+                        with os.fdopen(fd, "rb") as fh:
+                            if stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                                data = json.loads(fh.read(REQ_MAX + 1)[:REQ_MAX] or b"null")
+                wt = data.get("path") if isinstance(data, dict) else None
+                when = data.get("time") if isinstance(data, dict) else None
+                ok = (isinstance(wt, str) and isinstance(when, (int, float)) and t - when <= WT_REQ_DAYS * 86400
+                      and any(os.path.dirname(os.path.realpath(wt)) == os.path.join(r, ".claude", "worktrees")
+                              for r in roots))
+                if ok:
+                    out.setdefault(os.path.realpath(wt), []).append((d, n))
+                else:
+                    with contextlib.suppress(OSError):
+                        os.unlink(n, dir_fd=dfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
     return out
 
 
-def _drop(paths):
-    for p in paths or ():
-        with contextlib.suppress(OSError):
-            os.unlink(p)
+def _drop(items):
+    """Снять заявки [(папка, имя)] — через fd папки без перехода по ссылке."""
+    for d, n in items or ():
+        dfd = _req_open(d)
+        if dfd is None:
+            continue
+        try:
+            with contextlib.suppress(OSError):
+                os.unlink(n, dir_fd=dfd)
+        finally:
+            os.close(dfd)
 
 
 def _copies(root):
