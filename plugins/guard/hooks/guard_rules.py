@@ -29,11 +29,15 @@ PostToolUse (Bash:
   pantheon-acl — запись в ~/ai/pantheon по карте прав; ~/.local/state/pantheon — ни одной роли; файлы задач
                  (directions/*/tasks/, inbox/tasks/) — ни одной роли, штабу тоже: только `pantheon task`; доска
                  ~/ai/pantheon-view и журналы ваших слов owner-log — ни одной сессии Claude, без роли тоже (metis-0044);
+                 цель записи «не разобрать» ($(…), переменная, цикл) — отказ, только если команда идёт в эти папки
+                 или называет их (metis-0823);
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron (только в окне штаба,
                  PANTHEON_ROLE=hq, P0-2) и mnemo-brain (SEC-11); hq и chiron закрыты лишь ключи — отказ на явный путь
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
+                 остальным обход папки выше — отказ, только если читает me/ или журнал (grep -r без --exclude-dir=me)
+                 или копирует личное (tar, rsync, cp); список имён (find, fd, ls, Glob) — можно (metis-0823);
   hq-projects  — окну штаба (PANTHEON_ROLE=hq) Read, Grep, Glob папок проектов направлений из domains.json — отказ
                  с именем координатора: поручение в inbox и `pantheon start <имя>` (metis-0771); открыты agent-kit,
                  направления с coordinator = false, ~/ai, README.md, AGENTS.md и .git проекта; Bash — песочница окна;
@@ -62,7 +66,8 @@ PostToolUse (Bash:
                 (metis-0245); git push и gh pr create|edit — только при свежей метке «да» на задачу окна
                 (`pantheon consent`, metis-0562), -R и --body-file в gh ограничены, сети у окна нет;
   cdp-role    — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
-                по всему тексту команды, кроме слов в сообщении git commit, gh pr|issue, pantheon task (metis-0624);
+                только подключение: curl, nc, интерпретатор с кодом в -c/-e или из stdin, /dev/tcp рядом с портом,
+                запуск cdp-daemon.mjs, чтение пароля; слова о демоне в тексте — можно (metis-0823);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -180,6 +185,7 @@ def configure():
     # разбор Bash кэширован по (команда, папка), а раскрывает ~, $HOME и $TMPDIR — другой контекст, разбор заново
     _ANALYSIS.clear()
     _READS.clear()
+    _CWDS.clear()
 
 
 DEADLINE = 8       # с: таймаут хука PreToolUse и PostToolUse — 10 с, а таймаут Claude Code пропускает вызов
@@ -1708,8 +1714,9 @@ def _run(words, st, stdin, piped, depth):
     if not argv:
         return
     head, args = argv[0], argv[1:]
-    if head.zglob or any(c in "*?[" and m in "uv" for c, m in zip(head.lit, head.mask)):
-        alts = [None]
+    if head.zglob or (head.lit not in ("[", "[[")
+                      and any(c in "*?[" and m in "uv" for c, m in zip(head.lit, head.mask))):
+        alts = [None]  # `[` и `[[` — проверка условия, не шаблон: без `]` в слове шаблона нет (metis-0823)
     else:
         alts = [(None if _DYN in l else l, l, m) for bl, bm in _braces(head.lit, head.mask) for l, m in _params(st, bl, bm)]
     t = [_text(st, a) for a in args]
@@ -2272,6 +2279,7 @@ def _analyze_string(text, st, depth):
 
 _ANALYSIS = {}
 _READS = {}
+_CWDS = {}  # папки, где идут команды строки (событие и каждый cd); None — папку не вычислить
 
 
 def bash_analysis(cmd, cwd):
@@ -2296,9 +2304,11 @@ def bash_analysis(cmd, cwd):
             st.out.append(UNRESOLVED)
         res = sorted(set(st.out)), st.cmds
         _READS[(cmd, cwd)] = sorted(set(st.reads))
+        _CWDS[(cmd, cwd)] = list(st.cwds)
     except (_ParseError, RecursionError, ValueError, OSError):
         res = [UNRESOLVED], []
         _READS[(cmd, cwd)] = [UNRESOLVED]
+        _CWDS[(cmd, cwd)] = [None]
     _ANALYSIS[(cmd, cwd)] = res
     return res
 
@@ -2311,6 +2321,29 @@ def bash_reads(cmd, cwd):
 
 def bash_targets(cmd, cwd):
     return bash_analysis(cmd, cwd)[0]
+
+
+def bash_cwds(cmd, cwd):
+    """Папки, где могут идти команды строки: папка события и каждая цель cd; None — папку не вычислить."""
+    bash_analysis(cmd, cwd)
+    return _CWDS.get((cmd, cwd), [None])
+
+
+def near_zones(cmd, cwd, zones):
+    """metis-0823: может ли неразобранная цель записи попасть в зоны: команда идёт в зоне или в папке над ней
+    (событие, cd), или её текст называет зону путём (~/ai/pantheon, $HOME/.local/state/pantheon, абсолютный). Иначе
+    цель неразобрана, но о зоне команда не знает — ошибкой агента туда не попасть, а намеренный обход (путь из
+    переменной окружения, собранный по частям) — граница песочницы окна."""
+    for d in bash_cwds(cmd, cwd):
+        if d is not None and any(_inside(d, [z]) or _inside(z, [d]) for z in zones):
+            return True
+    text = _key(cmd.replace("\\", ""))
+    homes = {HOME, os.path.realpath(HOME)}
+    for z in zones:
+        frags = {z} | {z[len(h) + 1:] for h in homes if _inside(z, [h]) and _key(z) != _key(h)}
+        if any(_key(f) in text for f in frags if f):
+            return True
+    return False
 
 
 def roles_probe_ok(texts):
@@ -2505,6 +2538,12 @@ UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи 
                      "на macOS пишут в /var/folders, песочница это режет).")
 
 
+UNRESOLVED_ZONE = (" Отказ — потому что команда идёт в ~/ai/pantheon, ~/ai/pantheon-view или ~/.local/state/pantheon "
+                   "(или в папке над ними) либо называет их путём: там пишут по карте прав. Без зоны в команде запись "
+                   "с $(…), переменной и циклом проходит (metis-0823) — вынеси её в отдельный вызов или назови "
+                   "точный файл.")
+
+
 OWNER_RECORDS_REASON = ("Правило pantheon-acl: в доску ~/ai/pantheon-view (карточки, ваши галочки и заметки) и в "
                         "журналы ваших слов ~/.local/state/pantheon/owner-log не пишет ни одна сессия Claude, и без "
                         "роли тоже: доску владелец правит в Obsidian, журналы пишут хук и плановый проход. Иначе ответ на "
@@ -2553,8 +2592,11 @@ def check_pantheon(event, tool, tool_input):
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None
-    if UNRESOLVED in targets and pantheon_role:
-        return UNRESOLVED_REASON
+    # metis-0823: неразобранная цель — отказ, только если команда может задеть зоны этого правила (near_zones). Запись
+    # с $(…), циклом или переменной в $TMPDIR, кэш окна и свою worktree проходит: там pantheon-acl судить нечего
+    if UNRESOLVED in targets and pantheon_role and (tool != "Bash" or near_zones(
+            tool_input.get("command") or "", cwd, [PANTHEON, PANTHEON_VIEW, STATE_DIR])):
+        return UNRESOLVED_REASON + UNRESOLVED_ZONE
     targets = [p for p in targets if p != UNRESOLVED]
     domains = policy = None
     for p in targets:
@@ -2586,16 +2628,22 @@ def check_pantheon(event, tool, tool_input):
 #   private  (SEC-11, SEC-21) — личное из [private] policy.toml (me/, ключи git-crypt, журнал штаба) читают и пишут
 #            только роли из [private].roles (hq, chiron) и главная сессия координатора из [private].coordinators
 #            (mnemo-brain). Read, Grep, Glob, правки и Bash — по явным путям: это защита от случайности; в окнах
-#            ролей Bash к личному закрыт ещё и песочницей (denyRead).
+#            ролей Bash к личному закрыт ещё и песочницей (denyRead). Обход папки выше (metis-0823, _walk_reads):
+#            поиск (grep -r, rg, Grep, find -exec) — отказ, только если внутри me/ или журнал и они не исключены
+#            (--exclude-dir=me, rg -g '!me', glob «!me/**»): ключ git-crypt — двоичный, поиск его не выводит;
+#            копирование (tar, zip, rsync, cp, ditto) — отказ, если внутри любое личное; список имён (find, fd,
+#            ls, Glob) — можно. Слова-текст (echo, git commit -m, pantheon task --note) и шаблон поиска — не пути.
 #   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs, пароль
 #            ~/.config/cdp-daemon/token): никому из ролей (CDP_READERS и CDP_ACTORS пусты, metis-0227). /close —
-#            никому из ролей: демон общий для всех сессий. Bash — по всему тексту команды (порт, имя демона, папка
-#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды, первое
-#            слово которой — ровно её имя (metis-0630: без X=…, env, time, exec, пути): git commit -m/-F, gh pr|issue create|edit|comment --body/--title/
-#            --body-file, pantheon task new|set --text/--note/--title… (_cdp_text_only, CDP_TEXT_CMDS); отказ Bash
-#            подсказывает это исключение (CDP_TEXT_HINT). Read, Grep и Glob папки пароля — отказ; Edit и
-#            Write исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит
-#            к демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
+#            никому из ролей: демон общий для всех сессий. Bash — только подключение (metis-0823, _cdp_connects):
+#            сетевой клиент (CDP_NET), имя команды не вычислить, интерпретатор с кодом в -c/-e или из stdin, /dev/tcp
+#            или неразобранная команда — вместе с портом 9222, 9333–9339 или адресом devtools в тексте; запуск
+#            cdp-daemon.mjs; путь в папку пароля среди слов, кроме текста и ls/stat (CDP_TOKEN_META), и `< пароль`;
+#            флаг --remote-debugging*; присваивание (GH_HOST=…, env X=…) с портом или паролем. Слова о демоне в
+#            echo, grep, git commit -m, pantheon task --note — не подключение (прежнее исключение metis-0624 для
+#            одной простой команды снято за ненадобностью). Read, Grep и Glob папки пароля — отказ; Edit и Write
+#            исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит к
+#            демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
 #            песочницы нет, пароль закрыт denyRead.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
 #            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
@@ -2624,28 +2672,47 @@ DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
 # команды, которые обходят папку целиком: путь-предок личной папки для них — то же, что сама папка
 RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "gtar", "zip", "rsync", "cp", "gcp",
              "ditto", "qmd"}
-# порт демона или браузера — отдельным числом, при любой записи адреса петли (127.1, 0x7f000001, [::ffff:…]) и без
-# адреса вовсе (nc localhost 9222, socket.connect((h, 9222))): разбор адреса здесь не граница, ловим по числу
-CDP_TARGET = re.compile(r"(?<![\w.])93(?:3[3-9])(?![\w.])|cdp-daemon", re.I)
-# отладочный порт самого браузера с отладкой (9222 или порт из DevToolsActivePort): мимо демона — никому из ролей
-CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(?:browser|page)/|remote-debugging", re.I)
-# metis-0624: шаблоны смотрят весь текст команды; исключение — слово стоит значением флага-сообщения у одной простой
-# команды git commit, gh pr|issue, pantheon task (_cdp_text_only). Флаг → вид значения: "text" — текст, "md" — файл .md
-CDP_TEXT_CMDS = {
-    "git": ({("commit",)}, {"-m": "text", "--message": "text", "-F": "md", "--file": "md"}, ()),
-    "gh": ({("pr", "create"), ("pr", "edit"), ("pr", "comment"), ("issue", "create"), ("issue", "edit"),
-            ("issue", "comment")},
-           {"-b": "text", "--body": "text", "-t": "text", "--title": "text", "-F": "md", "--body-file": "md"}, ()),
-    "pantheon": ({("task", "new"), ("task", "set")},
-                 {f: "text" for f in ("--title", "--text", "--body", "--note", "--question", "--why", "--option",
-                                      "--recommend", "--if-no-answer", "--done-when", "--mode-why", "--next", "--force")}
-                 | {"--body-file": "md"},
-                 ("result", "note", "title", "next", "question", "why", "recommend", "if_no_answer")),
-}
-# подсказка в отказе Bash (metis-0630): как написать о демоне в коммите, PR или задаче, не задев правило
-CDP_TEXT_HINT = ("\nСлова о демоне в тексте коммита, PR или задачи проходят, если это одна простая команда (без &&, |, "
-                 "$(…), 2>&1 и слов вроде X=… или env перед git, gh, pantheon), а текст стоит в -m/--body/--text/--note или в файле .md через "
-                 "-F/--body-file; заголовок задачи — через --title.")
+# metis-0823: обход папки выше личной — отказ, только если команда читает содержимое личного. Поиск (SEARCHERS) —
+# только me/ и журнал Пританея внутри и не исключённые (--exclude-dir=me, rg -g '!me'): ключ git-crypt — двоичный
+# файл, поиск его не выводит. Список имён (find и fd без -exec, ls, Glob) — не чтение, проходит. Копирование (tar,
+# zip, rsync, cp, ditto) и find -exec / fd -x — как раньше: любой личный путь внутри
+SEARCHERS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "qmd"}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir", "-x", "--exec", "-X", "--exec-batch"}
+# флаги со значением у grep, rg, ag, ack: слово после них — не шаблон поиска и не путь
+SEARCH_VALUE_OPTS = {"-A", "-B", "-C", "-m", "-d", "-D", "-g", "-t", "-T", "-j", "-M", "--include", "--exclude",
+                     "--exclude-dir", "--glob", "--iglob", "--type", "--type-not", "--ignore", "--ignore-dir",
+                     "--ignore-directory", "--max-count", "--context", "--after-context", "--before-context",
+                     "--max-depth", "--threads", "--max-columns", "--color", "--colour"}
+# metis-0823: слова-текст — значения флагов сообщения, поля задачи, аргументы echo и printf. Правила private и
+# cdp-role не читают их как пути и адреса: заметка о порте или о папке me/ — не чтение и не подключение
+TEXT_CMDS = {"echo", "printf", "print"}
+TEXT_FLAGS = {"git": {"-m", "--message"}, "gh": {"-b", "--body", "-t", "--title"},
+              "pantheon": {"--title", "--text", "--body", "--note", "--question", "--why", "--option", "--recommend",
+                           "--if-no-answer", "--done-when", "--mode-why", "--next", "--force", "--result"}}
+TEXT_FIELDS = {"result", "note", "title", "next", "question", "why", "recommend", "if_no_answer"}
+# флаг исключения → смотрит ли он папки (иначе только имя файла): grep, rg, ag, ack
+PRIVATE_EXCLUDE = {"--exclude-dir": True, "--exclude": False, "-g": True, "--glob": True, "--iglob": True,
+                   "--ignore-dir": True, "--ignore-directory": True, "--ignore": True}
+# metis-0823: правило ловит подключение, а не слова. Bash — отказ, если в команде есть «подключатель» и в тексте —
+# порт или адрес браузера: сетевой клиент (CDP_NET), имя команды не вычислить, интерпретатор с кодом в -c/-e или
+# из stdin, /dev/tcp, команду не разобрать. Ещё — запуск cdp-daemon.mjs, чтение папки пароля, флаг
+# --remote-debugging*, файл DevToolsActivePort и присваивание (GH_HOST=…, env X=…) с портом или паролем. Слова о
+# демоне в echo, grep, git commit -m, pantheon task --note и в исходниках — не подключение
+CDP_PORTS = re.compile(r"(?<![\w.])93(?:3[3-9])(?![\w.])|(?<![\w.])9222(?![\w.])|/devtools/(?:browser|page)/|"
+                       r"DevToolsActivePort|\.config/cdp-daemon", re.I)
+CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|/devtools/(?:browser|page)/|DevToolsActivePort", re.I)
+CDP_NET = {"curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "websocat", "wscat", "http", "https", "xh",
+           "aria2c", "lynx", "w3m", "links", "?"}
+CDP_INTERP = re.compile(r"python[0-9.]*t?|pypy[0-9.]*|node|nodejs|deno|bun|tsx|ts-node|ruby|perl|php|osascript")
+# есть ли файл и какой он (ls, stat, test) — не чтение пароля
+CDP_TOKEN_META = {"ls", "stat", "test", "[", "[[", "realpath", "readlink", "dirname", "basename"}
+CDP_INLINE = {"-c", "-e", "-E", "-p", "-r", "--eval", "--print", "-l"}
+CDP_ASSIGN = re.compile(r"(?:^|[;&|({!\n]|\b(?:env|export|exec|time|nohup|command|declare|local|typeset|readonly)\s)"
+                        r"\s*(?:[A-Za-z_]\w*=\S*\s+)*[A-Za-z_]\w*=(\S*)")
+# подсказка в отказе Bash: на что правило смотрит (metis-0823)
+CDP_HINT = ("\nПравило смотрит подключение, а не слова: curl, wget, nc, python или node с кодом в -c/-e или из stdin, "
+            "/dev/tcp рядом с портом 9222 или 9333–9339, запуск cdp-daemon.mjs, чтение ~/.config/cdp-daemon. Слова о "
+            "демоне в echo, grep, git commit -m, pantheon task --note — можно.")
 # CDP_TOKEN_DIR (папка пароля демона в ~/.config) — в configure()
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
@@ -2704,10 +2771,11 @@ def private_ok(policy, role, sub, pdir):
     return not sub and any(privileged(policy, c, role, pdir) for c in conf["coordinators"])
 
 
-def _glob_reaches(p, priv, whole=False):
+def _glob_reaches(p, priv, whole=False, dots=False):
     """Путь с * ? [ ] может раскрыться в личное: ~/ai/knowledge/m?/x.md, ~/ai/*/me, ~/ai/kn*. whole — только сам
     личный путь или что-то внутри него (~/ai/pantheon/.git/git-cr*), а не папка выше (~/ai/pantheon/*): для роли,
-    которой закрыт лишь ключ git-crypt (metis-0084)."""
+    которой закрыт лишь ключ git-crypt (metis-0084). dots — как оболочка: * ? [ ] не берут имя на точку (.git), если
+    часть шаблона сама не на точку: ~/ai/pantheon/* не раскрывается в .git/git-crypt (metis-0823)."""
     if not re.search(r"[*?\[{]", p):
         return False
     import fnmatch
@@ -2720,7 +2788,8 @@ def _glob_reaches(p, priv, whole=False):
                 return True
             continue
         n = min(len(pat), len(parts))
-        if "**" in pat[:n] or all(fnmatch.fnmatchcase(parts[i], pat[i]) for i in range(n)):
+        if "**" in pat[:n] or all(fnmatch.fnmatchcase(parts[i], pat[i]) and not (
+                dots and parts[i].startswith(".") and not pat[i].startswith(".")) for i in range(n)):
             return True
     return False
 
@@ -2765,16 +2834,138 @@ def read_paths(event, tool, tool_input):
     return []
 
 
-def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=False):
+def _prose(name, texts):
+    """Индексы слов-текста команды (TEXT_CMDS, TEXT_FLAGS, поле=текст у pantheon task) — metis-0823."""
+    if name in TEXT_CMDS:
+        return set(range(len(texts)))
+    flags = TEXT_FLAGS.get(name)
+    out = set()
+    for i, a in enumerate(texts if flags else ()):
+        if a is None:
+            continue
+        key = a.split("=", 1)[0]
+        if a in flags or (name == "git" and re.fullmatch(r"-[a-z]*m", a)):
+            out.add(i + 1)
+        elif "=" in a and (key in flags or (name == "pantheon" and key in TEXT_FIELDS)):
+            out.add(i)
+    return out
+
+
+def _search_pattern_at(name, texts):
+    """Индекс шаблона поиска у grep, rg, ag, ack — первое слово без флага, если шаблона нет в -e/-f: это не путь."""
+    if name not in SEARCHERS or name == "qmd":
+        return None
+    i = 0
+    while i < len(texts):
+        x = texts[i]
+        if x is None:
+            return i
+        if x == "--":
+            return i + 1
+        if x.startswith("-") and x != "-":
+            if x in ("-e", "-f", "--regexp", "--file") or re.match(r"-[A-Za-z]*[ef].|--(?:regexp|file)=", x) or \
+                    re.fullmatch(r"-[A-Za-z]*[ef]", x):
+                return None
+            i += 2 if x in SEARCH_VALUE_OPTS else 1
+            continue
+        return i
+    return None
+
+
+def _private_content(priv):
+    """Личное с содержимым — всё, кроме ключей git-crypt: me/ и журнал Пританея (metis-0823)."""
+    return [x for x in priv if "/.git/git-crypt" not in x + "/"]
+
+
+def _walk_excludes(name, texts):
+    """Исключения обхода в аргументах поиска → [(шаблон, смотрит ли папки)]. У rg — только -g с «!»."""
+    out, nxt = [], None
+    for x in texts:
+        if x is None:
+            nxt = None
+            continue
+        if nxt is not None:
+            out.append((x, nxt))
+            nxt = None
+            continue
+        if x == "--":
+            break
+        flag, eq, val = x.partition("=")
+        if flag in PRIVATE_EXCLUDE:
+            if eq:
+                out.append((val, PRIVATE_EXCLUDE[flag]))
+            else:
+                nxt = PRIVATE_EXCLUDE[flag]
+        elif x.startswith("-g") and len(x) > 2 and name == "rg":
+            out.append((x[2:], True))
+    if name == "rg":
+        out = [(g[1:], d) for g, d in out if g.startswith("!")]
+    return out
+
+
+def _walk_excluded(x, root, excl):
+    """Личный путь x внутри обхода root закрыт исключением: шаблон папки — по любой части пути от root, шаблон
+    файла — по имени самого x."""
+    import fnmatch
+    parts = [c for c in os.path.relpath(x, root).split("/") if c and c != "."]
+    for g, dirs in excl:
+        g = re.sub(r"^(?:\*\*/)+|(?:/\*\*?)+$", "", g.strip()).strip("/")
+        if not g:
+            continue
+        if "/" in g:
+            rel = "/".join(parts)
+            if fnmatch.fnmatchcase(rel, g) or rel.startswith(g + "/"):
+                return True
+        elif any(fnmatch.fnmatchcase(c, g) for c in (parts if dirs else parts[-1:])):
+            return True
+    return False
+
+
+def _grep_recursive(texts):
+    """grep, egrep, fgrep обходят папку только с -r, -R, --recursive или -d recurse."""
+    for i, x in enumerate(texts):
+        if x is None or x == "--":
+            break
+        if x in ("--recursive", "--dereference-recursive", "--directories=recurse") or (
+                x == "-d" and i + 1 < len(texts) and texts[i + 1] == "recurse"):
+            return True
+        if x.startswith("-") and not x.startswith("--") and set("rR") & set(x[1:]):
+            return True
+    return False
+
+
+def _walk_reads(name, texts, root, priv, content):
+    """Обход root командой name читает личное (metis-0823). content None — как было: любой обход предка."""
+    inner = [x for x in priv if _inside(x, [root])]
+    if not inner or name not in RECURSIVE:
+        return False
+    if content is None:
+        return True
+    if name in ("find", "fd") and not any(x in FIND_EXEC for x in texts if x):
+        return False
+    if name in SEARCHERS or name in ("find", "fd"):  # find -exec, fd -x — как поиск: что запустят, обычно grep
+        if name in ("grep", "egrep", "fgrep") and not _grep_recursive(texts):
+            return False
+        excl = _walk_excludes(name, texts)
+        return any(x in content and not _walk_excluded(x, root, excl) for x in inner)
+    return True
+
+
+def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=False, content=None):
     """Личные пути, которые задевает команда Bash: явные пути в словах, обход папки выше (ancestor), шаблоны, цели
-    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): check_private и hq-gh."""
+    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): check_private и hq-gh.
+    content — личное с содержимым (metis-0823): обход папки выше задевает личное только по _walk_reads; None — как
+    было, любой обход предка (hq-gh)."""
     cmd = tool_input.get("command") or ""
     _, cmds = bash_analysis(cmd, cwd)
     # относительные пути — от папки события и от каждой папки, куда команда делает cd
     cwds = [cwd] + [_expand(t[0], cwd) for n, t in cmds if n in ("cd", "chdir", "pushd") and t and t[0]]
+    if content is not None:  # metis-0823: cd ../.. — от папки прошлого cd, как считает разбор
+        cwds = list(dict.fromkeys([cwd] + [d for d in bash_cwds(cmd, cwd) if d]))
     hits = [d for d in cwds if _inside(d, priv) and cmds]
     for name, texts in cmds:
-        words = [name] + [x for x in texts if x]
+        skip = (_prose(name, texts) | {_search_pattern_at(name, texts)}) if content is not None else ()
+        words = [name] + [x for i, x in enumerate(texts) if x and i not in skip]
         if values:
             words += [w.split("=", 1)[1] if "=" in w else w[2:] for w in words
                       if w.startswith("-") and ("=" in w or (len(w) > 2 and w[1] != "-"))]
@@ -2783,8 +2974,7 @@ def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=F
                 continue
             for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
                 p = _expand(w, d)
-                if _inside(p, priv) or (ancestor and name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
-                        or reaches(p):
+                if _inside(p, priv) or (ancestor and _walk_reads(name, texts, p, priv, content)) or reaches(p):
                     hits.append(p)
     hits += [p for p in write_targets(event, "Bash", tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     # metis-0247: файл после `<` разбор не держит среди слов — без этого `gh pr edit --body-file - < личное`
@@ -2816,19 +3006,32 @@ def check_private(event, tool, tool_input):
     # ключа штабу закрыт песочницей окна (denyRead), а Grep Claude Code в .git не заходит. Роли без доступа к личному —
     # как было: обход предка личной папки (grep -r по ~/ai/knowledge, где me/) — отказ
     ancestor = not keys_only
-    reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else (lambda p: _glob_reaches(p, priv))
+    reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else \
+        (lambda p: _glob_reaches(p, priv, dots=True))
     hits = []
     if tool == "Bash":
         # metis-0247 (argus-69b3): значение флага в том же слове (--body-file=<путь>, -F<путь>) — у всех ролей, не
         # только у штаба: иначе координатор отдавал личное в gh через склейку
-        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=True)
+        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=True,
+                                  content=_private_content(priv))
     elif tool in EDIT_TOOLS:
         hits = [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     else:
+        # metis-0823: Glob — список имён, обход папки выше проходит; Grep — только me/ и журнал внутри, не исключённые
+        # его glob «!me/**» (Claude Code отдаёт glob в rg --glob)
+        excl = _walk_excludes("rg", ["-g", tool_input.get("glob") or ""]) if tool == "Grep" else []
         for p, whole in read_paths(event, tool, tool_input):
-            if _inside(p, priv) or (ancestor and whole and any(_inside(x, [p]) for x in priv)):
+            if _inside(p, priv) or (ancestor and whole and tool != "Glob" and any(
+                    _inside(x, [p]) and not _walk_excluded(x, p, excl) for x in _private_content(priv))):
                 hits.append(p)
         pat = (tool_input.get("pattern") or "") if tool == "Glob" else ""
+        if pat and not keys_only:
+            # Glob от папки выше — список имён, но шаблон, чья буквальная часть идёт в личное (me/*.md), — отказ
+            words = _expand(pat, _expand(tool_input.get("path") or cwd, cwd)).split("/")
+            k = next((i for i, c in enumerate(words) if set(c) & set("*?[{")), len(words))
+            lit = "/".join(words[:k]) or "/"
+            if _inside(lit, priv):
+                hits.append(lit)
         if keys_only and pat:
             # шаблон Glob — от path («.git/git-crypt/**» из ~/ai/pantheon) или абсолютный: раскрывается ли в ключ
             full = _expand(pat, _expand(tool_input.get("path") or cwd, cwd))
@@ -2842,8 +3045,9 @@ def check_private(event, tool, tool_input):
                 "она. Поиск по папке выше (grep -r, Grep) можно: назови путь мимо .git/git-crypt.")
     return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
             f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал Пританея — только hq, chiron (в окне Пританея) и "
-            "mnemo-brain. Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, "
-            "wiki/, inbox/.")
+            "mnemo-brain. Поиск по папке выше — исключи личное: grep -r --exclude-dir=me, rg -g '!me', Grep с glob "
+            "«!me/**» (журнал — --exclude-dir=owner-log) или сузь путь: raw/, wiki/, inbox/. Список имён (find, fd, "
+            "ls, Glob) по папке выше проходит.")
 
 
 FAKE_IP_NET = "198.18.0.0/15"  # сеть прокси с подменой адресов; ipaddress грузится в _local_url (metis-0330)
@@ -2884,66 +3088,50 @@ def _local_url(url):
     return False
 
 
-def _cdp_whole_text(cmd):
-    """Обращение к браузеру владельца по всему тексту команды → (вид, текст): "direct" — отладочный порт браузера
-    мимо демона, "daemon" — демон или его пароль, None — упоминаний нет."""
+def _cdp_connects(cmd, cwd):
+    """metis-0823: команда Bash подключается к браузеру владельца → "direct" (отладочный порт браузера мимо демона),
+    "daemon" (демон, его запуск или пароль) или None. Слова в тексте без подключения — None."""
     text = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
-    if CDP_DIRECT.search(text):
-        return "direct", text
-    if CDP_TARGET.search(text):
-        return "daemon", text
-    return None, text
-
-
-def _cdp_hit(word):
-    return bool(CDP_DIRECT.search(word) or CDP_TARGET.search(word))
-
-
-def _cdp_text_only(cmd, cwd):
-    """metis-0624: порт, пароль и имя демона стоят только значением флага-сообщения (CDP_TEXT_CMDS) у одной простой
-    команды: git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
-    --text/--note/--title… и поле=текст в task new|set. Вне кавычек — ни ;, &, |, ни перенаправлений; первое слово
-    команды — ровно её имя, без присваивания, обёртки и пути перед ним (GH_HOST=… gh, env X=… git — metis-0630);
-    каждое слово вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
-    bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
-    if re.search(r"[;&|<>\n\r`\\'\"]", bare):
-        return False
     _, cmds = bash_analysis(cmd, cwd)
-    if len(cmds) != 1 or not cmds[0][0]:
-        return False
-    name, args = cmds[0]
-    # первое слово — ровно git, gh или pantheon: присваивание (GH_HOST=…), обёртка (env, time, exec, !, (, {) и путь
-    # к команде перед ним — окружение и запуск, а не текст сообщения
-    if bare.split()[:1] != [name]:
-        return False
-    spec = CDP_TEXT_CMDS.get(name)  # имя — уже basename в нижнем регистре (bash_analysis)
-    if not spec:
-        return False
-    subs, flags, fields = spec
-    depth = len(next(iter(subs)))
-    if tuple(args[:depth]) not in subs:
-        return False
-    i = depth
-    while i < len(args):
-        a, kind, value = args[i], None, None
-        if a is None:  # слово не вычислить (переменная) — не исключение
-            return False
-        if a in flags:
-            kind, value, i = flags[a], (args[i + 1] if i + 1 < len(args) else None), i + 2
-        elif "=" in a and a.split("=", 1)[0] in flags:
-            kind, value, i = flags[a.split("=", 1)[0]], a.split("=", 1)[1], i + 1
-        elif re.fullmatch(r"-[A-Za-z]+", a) and "-" + a[-1] in flags:  # склейка коротких: git commit -qm "…"
-            kind, value, i = flags["-" + a[-1]], (args[i + 1] if i + 1 < len(args) else None), i + 2
-        elif "=" in a and a.split("=", 1)[0] in fields:  # pantheon task set ID result="…"
-            kind, value, i = "text", a.split("=", 1)[1], i + 1
-        else:
-            if _cdp_hit(a):
-                return False
-            i += 1
+    kind = "direct" if CDP_DIRECT.search(text) else "daemon"
+    for n, t in cmds:
+        prose = _prose(n, t)
+        if any(x and i not in prose and (x.startswith("--remote-debugging") or x.endswith("/DevToolsActivePort"))
+               for i, x in enumerate(t)):
+            return "direct"
+    # запуск демона: сам файл командой или первым операндом интерпретатора (чтение исходника grep, sed — не запуск)
+    for n, t in cmds:
+        plain = _opts(t)[1]
+        first = t[plain[0]] if plain and CDP_INTERP.fullmatch(n or "") else None
+        if n == "cdp-daemon.mjs" or os.path.basename((first or "").rstrip("/")).lower() == "cdp-daemon.mjs":
+            return "daemon"
+    # пароль: путь в папку пароля среди слов (кроме текста), входное перенаправление
+    cwds = [cwd] + [d for d in bash_cwds(cmd, cwd) if d]
+    for n, t in cmds:
+        prose = _prose(n, t) if n not in CDP_TOKEN_META else range(len(t))
+        for i, x in enumerate(t):
+            if x and i not in prose and _pathlike(x) and any(
+                    _inside(_expand(x, d), [CDP_TOKEN_DIR]) for d in (cwds if x[0] not in "/~$" else [cwd])):
+                return "daemon"
+    if any(p != UNRESOLVED and _inside(p, [CDP_TOKEN_DIR]) for p in bash_reads(cmd, cwd)):
+        return "daemon"
+    # присваивание перед командой (GH_HOST=…, HTTPS_PROXY=…, env X=…) с портом или паролем — адрес для программы
+    if any(CDP_PORTS.search(v) for v in CDP_ASSIGN.findall(cmd)):
+        return kind
+    if not CDP_PORTS.search(text):
+        return None
+    # подключатель: сетевой клиент, имя не вычислить, сокет оболочки, команду не разобрать
+    if not cmds or "/dev/tcp/" in text or "/dev/udp/" in text or any(n in CDP_NET for n, _ in cmds):
+        return kind
+    # интерпретатор с кодом не из файла: -c/-e, stdin (heredoc, конвейер), операнд «-»
+    for n, t in cmds:
+        if not CDP_INTERP.fullmatch(n or ""):
             continue
-        if value is None or (kind == "md" and not value.casefold().endswith(".md")):
-            return False
-    return True
+        opts, plain = _opts(t)
+        if any(x in CDP_INLINE or re.fullmatch(r"-[A-Za-z]*[ce]", x) for _, x in opts) or not plain or \
+                t[plain[0]] in (None, "-"):
+            return kind
+    return None
 
 
 def check_cdp_role(event, tool, tool_input):
@@ -2964,18 +3152,14 @@ def check_cdp_role(event, tool, tool_input):
         return None
     else:
         cmd = tool_input.get("command") or ""
-        cwd = os.path.realpath(event.get("cwd") or os.getcwd())
-        kind, text = _cdp_whole_text(cmd)
-        if kind and _cdp_text_only(cmd, cwd):
-            kind = None
-        cmd = text
-    hint = CDP_TEXT_HINT if tool == "Bash" else ""
+        kind = _cdp_connects(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    hint = CDP_HINT if tool == "Bash" else ""
     if kind == "direct":
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
                 "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль." + hint)
     if kind is None:
         return None
-    if re.search(r"/close\b", cmd):
+    if re.search(r"/close(?![\w-])", cmd):
         return ("Правило cdp-role: /close выключает общий демон браузера у всех сессий — ролям нельзя. "
                 "Вкладку демона закрывать не нужно.")
     if role in CDP_ACTORS and not sub:
@@ -3347,6 +3531,49 @@ def check_owner_merge(event, tool_input):
     return allow(notes)
 
 
+# metis-0823: знак → замена в тексте записи (--opened, --ran, --unchecked) и как его назвать в отказе
+REVIEW_SWAP = {";": (",", "`;`"), "|": ("/", "`|`"), "&": ("и", "`&`"), "<": ("←", "`<`"), ">": ("→", "`>`"),
+               "`": ("'", "обратная кавычка"), "\n": (" ", "перевод строки"), "\r": (" ", "перевод строки"),
+               "$(": ("(", "`$(`")}
+
+
+def _review_format(kind, cmd):
+    """Отказ шлюза «только простой командой» (merge_gate.NOT_SIMPLE ищет знаки во всей строке, и в кавычках тоже):
+    какие знаки нашлись, внутри кавычек или снаружи, и для записи argus/talos с лишним только в кавычках — та же
+    команда с заменой знаков (metis-0823: 87 таких отказов за 7 дней, почти все — `;` и `>` в тексте --opened)."""
+    inside, outside, fixed, q, i = [], [], [], None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        mark = "$(" if cmd.startswith("$(", i) else c if c in REVIEW_SWAP else None
+        if mark is None:
+            if q is None and c in "'\"":
+                q = c
+            elif q == c and (c == "'" or cmd[i - 1] != "\\"):
+                q = None
+            fixed.append(c)
+        else:
+            name = REVIEW_SWAP[mark][1]
+            group = inside if q else outside
+            if name not in group:
+                group.append(name)
+            fixed.append(REVIEW_SWAP[mark][0] if q else mark)
+        i += len(mark or c)
+    where = "; ".join(x for x in (f"внутри кавычек: {', '.join(inside)}" if inside else "",
+                                  f"снаружи кавычек: {', '.join(outside)}" if outside else "") if x)
+    head = (f"`pantheon review {kind}` — только отдельной простой командой. Шлюз ищет `;` `|` `&` `<` `>` `$(`, "
+            f"обратную кавычку и перевод строки во всей строке, в тексте в кавычках тоже, — здесь {where}.")
+    if kind == "test":
+        return (head + " Запись берёт HEAD папки, откуда запущена команда, поэтому cd, && и вывод в файл не "
+                "помогут. Запусти `pantheon review test -- <команда>` одной командой из корня нужной копии: "
+                "главная сессия — `cd` отдельным вызовом; субагенту папку не сменить — переключи свою worktree "
+                "(`git checkout --detach <SHA>`) или прогони вне окна: `pantheon outside test --wait 590`. "
+                "Пульт сам печатает код и SHA, длинный вывод Claude Code сохранит в файл.")
+    if outside:
+        return head + " Убери их: cd, && и перенаправления — отдельными командами. Иначе записи не будет."
+    return (head + " Замени их в тексте: `;` → запятая, `>` → «→», `&` → «и», `|` → «/», перевод строки → "
+            "пробел. Готовая команда:\n" + "".join(fixed))
+
+
 def check_push(event, tool, tool_input):
     ok, role, sub, pdir = limited(event)
     if tool != "Bash":
@@ -3389,7 +3616,10 @@ def check_push(event, tool, tool_input):
             notes.extend(notes_of(why))
             continue
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
-            why = _mg().review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
+            cmd = tool_input.get("command") or ""
+            why = _mg().review_problem(role, texts, cmd, bool(tool_input.get("run_in_background")))
+            if why and "простой командой" in why and _mg().NOT_SIMPLE.search(cmd):
+                why = _review_format(texts[1] if len(texts) > 1 else "", cmd)
             if why:
                 return f"Правило push (шлюз слияния): {why}"
             continue
