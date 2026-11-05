@@ -1580,6 +1580,8 @@ def main():
         )],
         *[(f"0823 private: {n} — отказ", "deny", d, r, True, x) for n, d, r, x in (
             ("grep -r без исключения", br, "argus", B(f"grep -r налог {home}/ai/knowledge")),
+            ("grep -r --exclude=me — шаблон файла, не папки (находка №2)", br, "argus",
+             B(f"grep -r налог {home}/ai/knowledge --exclude=me")),
             ("grep -r --exclude-dir=raw — me/ не исключена", br, "argus",
              B(f"grep -r налог {home}/ai/knowledge --exclude-dir=raw")),
             ("rg -g без ! — не исключение", br, "argus", B(f"rg налог {home}/ai/knowledge -g '*.md'")),
@@ -1614,15 +1616,25 @@ def main():
         # metis-0823: неразобранная цель вне зон pantheon-acl — можно (раньше отказ «цель не разобрать»)
         *[(f"mktemp: {c!r} — цель не разобрать, но вне зон, можно", "allow", br, "dev-sonnet", True, B(c)) for c in (
             'f=$(mktemp); echo x > $f', 'f=$(mktemp -d); echo x > $f/a', 'f=$(mktemp -t foo); echo x > $f')],
-        *[(f"0823 неразобранная цель вне зон: {n} — можно", "allow", br, "dev-sonnet", True, B(c)) for n, c in (
+        # metis-0823 (находки №3, №6): неразобранная цель проходит, только если её буквальная часть — в $TMPDIR, кэше
+        # окна или своей worktree; эту папку правила судят как обычную цель
+        *[(f"0823 неразобранная цель в $TMPDIR, кэше окна, worktree: {n} — можно", "allow", br, "dev-sonnet", True, B(c))
+          for n, c in (
             ("цикл в $TMPDIR", 'for f in a b; do echo x > "$TMPDIR/$f.log"; done'),
-            ("кэш окна", 'echo x > "$PANTHEON_TMP/$(date +%s).log"'),
-            ("своя worktree", 'R=$(git rev-parse --show-toplevel); echo x > "$R/notes.md"'),
-            ("while read", "ls | while read f; do cp \"$f\" \"$f.bak\"; done"),
+            ("/tmp и $(date)", 'echo x > "/tmp/run-$(date +%s).log"'),
+            ("кэш окна", 'echo x > ~/Library/Caches/pantheon-sandbox/w/tmp/"$(date +%s).log"'),
+            ("подпапка своей worktree", 'for f in $(ls); do echo x > "out/$f.log"; done'),
             ("[ -n ] — условие, не шаблон", '[ -n "$X" ] && echo ok > out.txt'),
-            ("xargs rm в своём проекте", "ls *.tmp | xargs rm"),
-            ("tee в файл из переменной", 'echo x | tee "$OUT"'),
             ("[ -f ] в зоне — проверка, не цель записи", 'cd ~/ai/pantheon && [ -f board.md ] && echo yes'))],
+        *[(f"0823 неразобранная цель вне $TMPDIR и worktree: {n} — отказ", "deny", br, "dev-sonnet", True, B(c))
+          for n, c in (
+            ("слово начинается с подстановки", "ls | while read f; do cp \"$f\" \"$f.bak\"; done"),
+            ("$R из $(…) — значение неизвестно", 'R=$(git rev-parse --show-toplevel); echo x > "$R/notes.md"'),
+            ("xargs rm", "ls *.tmp | xargs rm"),
+            ("tee в файл из переменной", 'echo x | tee "$OUT"'),
+            ("чужой проект", 'echo x > ~/projects/other/x/"$(date +%s).md"'),
+            ("{…}: явная цель рядом с $TMPDIR судится", 'echo x > {~/.claude/settings.json,"$TMPDIR/$F"}'),
+            ("protect-config: .claude/hooks своей worktree", 'for f in $(ls); do echo x > ".claude/hooks/$f"; done'))],
         *[(f"0823 неразобранная цель у зон: {n} — отказ", "deny", d, "dev-sonnet", True, B(c)) for n, d, c in (
             ("cd ~/ai/pantheon", br, 'cd ~/ai/pantheon && echo x > "$(date +%s).md"'),
             ("cd ~/ai — папка над зоной", br, 'cd ~/ai && echo x > "$F"'),

@@ -186,6 +186,7 @@ def configure():
     _ANALYSIS.clear()
     _READS.clear()
     _CWDS.clear()
+    _UNRES.clear()
 
 
 DEADLINE = 8       # с: таймаут хука PreToolUse и PostToolUse — 10 с, а таймаут Claude Code пропускает вызов
@@ -1516,6 +1517,25 @@ def _paths(st, lit, mask):
 _ZSH_OPT_GLOB = re.compile(r"[\^#~!@+()|<>]")
 
 
+class _Unres(str):
+    """UNRESOLVED с папками, куда идёт неразобранная цель (metis-0823): буквальная часть слова до первой подстановки —
+    `"$TMPDIR/$f.log"` пишет в $TMPDIR, `out/$n` — в <папка>/out. base None — папку не вычислить: слово начинается с
+    подстановки (`"$f.bak"`, `"$R/x"` — значение может быть любым путём) или папка команды неизвестна."""
+    base = None
+
+
+def _unres(st, lit):
+    u = _Unres(UNRESOLVED)
+    pre = lit.split(_DYN, 1)[0]
+    if pre:
+        d = pre.rsplit("/", 1)[0] + "/" if "/" in pre else ""
+        if d.startswith("/"):
+            u.base = (os.path.realpath(d),)
+        elif None not in st.cwds:
+            u.base = tuple(sorted(os.path.realpath(os.path.join(c, d)) for c in st.cwds))
+    return u
+
+
 def _targets(st, w):
     """Слово-цель записи → абсолютные пути; UNRESOLVED, если путь не вычислить."""
     if w.proc:
@@ -1526,12 +1546,14 @@ def _targets(st, w):
     for blit, bmask in _braces(w.lit, w.mask):
         for plit, pmask in _params(st, blit, bmask):
             if _DYN in plit:
-                return [UNRESOLVED]
+                out.append(_unres(st, plit))  # остальные варианты {a,b} судятся дальше
+                continue
             if st.opts and any(_ZSH_OPT_GLOB.match(c) and m in "uv" for c, m in zip(plit[1:], pmask[1:])):
                 return [UNRESOLVED]
             for lit, mask in _split(st, plit, pmask):
                 if _DYN in lit:
-                    return [UNRESOLVED]
+                    out.append(_unres(st, lit))
+                    continue
                 out += _paths(st, lit, mask)
                 if len(lit) > 1 and lit.endswith("}") and mask[-1] == "u":
                     out += _paths(st, lit[:-1], mask[:-1])  # zsh: «}» в конце слова закрывает { … }
@@ -2280,6 +2302,7 @@ def _analyze_string(text, st, depth):
 _ANALYSIS = {}
 _READS = {}
 _CWDS = {}  # папки, где идут команды строки (событие и каждый cd); None — папку не вычислить
+_UNRES = {}  # metis-0823: папки каждой неразобранной цели записи (_Unres.base); None — папку не вычислить
 
 
 def bash_analysis(cmd, cwd):
@@ -2305,10 +2328,12 @@ def bash_analysis(cmd, cwd):
         res = sorted(set(st.out)), st.cmds
         _READS[(cmd, cwd)] = sorted(set(st.reads))
         _CWDS[(cmd, cwd)] = list(st.cwds)
+        _UNRES[(cmd, cwd)] = [getattr(p, "base", None) for p in st.out if p == UNRESOLVED]
     except (_ParseError, RecursionError, ValueError, OSError):
         res = [UNRESOLVED], []
         _READS[(cmd, cwd)] = [UNRESOLVED]
         _CWDS[(cmd, cwd)] = [None]
+        _UNRES[(cmd, cwd)] = [None]
     _ANALYSIS[(cmd, cwd)] = res
     return res
 
@@ -2329,21 +2354,27 @@ def bash_cwds(cmd, cwd):
     return _CWDS.get((cmd, cwd), [None])
 
 
-def near_zones(cmd, cwd, zones):
-    """metis-0823: может ли неразобранная цель записи попасть в зоны: команда идёт в зоне или в папке над ней
-    (событие, cd), или её текст называет зону путём (~/ai/pantheon, $HOME/.local/state/pantheon, абсолютный). Иначе
-    цель неразобрана, но о зоне команда не знает — ошибкой агента туда не попасть, а намеренный обход (путь из
-    переменной окружения, собранный по частям) — граница песочницы окна."""
-    for d in bash_cwds(cmd, cwd):
-        if d is not None and any(_inside(d, [z]) or _inside(z, [d]) for z in zones):
-            return True
-    text = _key(cmd.replace("\\", ""))
-    homes = {HOME, os.path.realpath(HOME)}
-    for z in zones:
-        frags = {z} | {z[len(h) + 1:] for h in homes if _inside(z, [h]) and _key(z) != _key(h)}
-        if any(_key(f) in text for f in frags if f):
-            return True
-    return False
+def unresolved_dirs(event, tool, tool_input):
+    """metis-0823: папки неразобранных целей записи Bash, если каждая лежит в $TMPDIR (/tmp), кэше окна
+    ($PANTHEON_TMP, ~/Library/Caches/pantheon-sandbox) или своей worktree (репозиторий папки события); иначе None —
+    отказ, как до 0823. Папки правило затем судит как обычные цели: `.claude/hooks/$f` в своей worktree — отказ
+    protect-config. Путь в значении подстановки (`"$TMPDIR/$f"` с f=../..) — намеренный обход, граница — песочница."""
+    if tool != "Bash":
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    cmd = tool_input.get("command") or ""
+    bash_analysis(cmd, cwd)
+    bases = _UNRES.get((cmd, cwd)) or [None]
+    if any(b is None for b in bases):
+        return None
+    roots = [r for r in TEMP_ROOTS if r != os.path.realpath("/dev/null")]
+    roots += [os.path.realpath(p) for p in (os.environ.get("PANTHEON_TMP"),
+                                            os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")) if p]
+    top = _git_top(cwd)
+    if _inside(top, [HOME]) and _key(top) != _key(HOME):
+        roots.append(top)
+    dirs = sorted({d for b in bases for d in b})
+    return dirs if all(_inside(d, roots) for d in dirs) else None
 
 
 def roles_probe_ok(texts):
@@ -2538,10 +2569,9 @@ UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи 
                      "на macOS пишут в /var/folders, песочница это режет).")
 
 
-UNRESOLVED_ZONE = (" Отказ — потому что команда идёт в ~/ai/pantheon, ~/ai/pantheon-view или ~/.local/state/pantheon "
-                   "(или в папке над ними) либо называет их путём: там пишут по карте прав. Без зоны в команде запись "
-                   "с $(…), переменной и циклом проходит (metis-0823) — вынеси её в отдельный вызов или назови "
-                   "точный файл.")
+UNRESOLVED_SAFE = (" Проходит только цель, чья буквальная часть до $(…) или переменной лежит в $TMPDIR, кэше окна или "
+                   "твоей worktree: `\"$TMPDIR/$f.log\"`, `out/$name` (metis-0823). Слово, которое начинается с "
+                   "подстановки (`\"$f.bak\"`, `\"$R/x\"`), xargs и цикл с командой записи — отказ.")
 
 
 OWNER_RECORDS_REASON = ("Правило pantheon-acl: в доску ~/ai/pantheon-view (карточки, ваши галочки и заметки) и в "
@@ -2592,12 +2622,12 @@ def check_pantheon(event, tool, tool_input):
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None
-    # metis-0823: неразобранная цель — отказ, только если команда может задеть зоны этого правила (near_zones). Запись
-    # с $(…), циклом или переменной в $TMPDIR, кэш окна и свою worktree проходит: там pantheon-acl судить нечего
-    if UNRESOLVED in targets and pantheon_role and (tool != "Bash" or near_zones(
-            tool_input.get("command") or "", cwd, [PANTHEON, PANTHEON_VIEW, STATE_DIR])):
-        return UNRESOLVED_REASON + UNRESOLVED_ZONE
-    targets = [p for p in targets if p != UNRESOLVED]
+    # metis-0823: неразобранная цель проходит, только если её папка в $TMPDIR, кэше окна или своей worktree
+    # (unresolved_dirs) — и эту папку судит карта прав как обычную цель
+    dirs = unresolved_dirs(event, tool, tool_input) if UNRESOLVED in targets and pantheon_role else []
+    if dirs is None:
+        return UNRESOLVED_REASON + UNRESOLVED_SAFE
+    targets = [p for p in targets if p != UNRESOLVED] + dirs
     domains = policy = None
     for p in targets:
         if _inside(p, [STATE_DIR]) or (pantheon_role and _inside(STATE_DIR, [p])):
@@ -2691,8 +2721,10 @@ TEXT_FLAGS = {"git": {"-m", "--message"}, "gh": {"-b", "--body", "-t", "--title"
                            "--if-no-answer", "--done-when", "--mode-why", "--next", "--force", "--result"}}
 TEXT_FIELDS = {"result", "note", "title", "next", "question", "why", "recommend", "if_no_answer"}
 # флаг исключения → смотрит ли он папки (иначе только имя файла): grep, rg, ag, ack
-PRIVATE_EXCLUDE = {"--exclude-dir": True, "--exclude": False, "-g": True, "--glob": True, "--iglob": True,
-                   "--ignore-dir": True, "--ignore-directory": True, "--ignore": True}
+# metis-0823 (находка №2): только исключения папок — --exclude-dir и отрицательные глобы rg. --exclude у grep —
+# шаблон имени файла: --exclude=me не закрывает папку me/
+PRIVATE_EXCLUDE = {"--exclude-dir": True, "-g": True, "--glob": True, "--iglob": True,
+                   "--ignore-dir": True, "--ignore-directory": True}
 # metis-0823: правило ловит подключение, а не слова. Bash — отказ, если в команде есть «подключатель» и в тексте —
 # порт или адрес браузера: сетевой клиент (CDP_NET), имя команды не вычислить, интерпретатор с кодом в -c/-e или
 # из stdin, /dev/tcp, команду не разобрать. Ещё — запуск cdp-daemon.mjs, чтение папки пароля, флаг
@@ -3561,7 +3593,8 @@ def _review_format(kind, cmd):
     where = "; ".join(x for x in (f"внутри кавычек: {', '.join(inside)}" if inside else "",
                                   f"снаружи кавычек: {', '.join(outside)}" if outside else "") if x)
     head = (f"`pantheon review {kind}` — только отдельной простой командой. Шлюз ищет `;` `|` `&` `<` `>` `$(`, "
-            f"обратную кавычку и перевод строки во всей строке, в тексте в кавычках тоже, — здесь {where}.")
+            f"обратную кавычку и перевод строки во всей строке, в тексте в кавычках тоже, — здесь {where}. Иначе "
+            "код выхода был бы не от тестов, и запись не сделается.")
     if kind == "test":
         return (head + " Запись берёт HEAD папки, откуда запущена команда, поэтому cd, && и вывод в файл не "
                 "помогут. Запусти `pantheon review test -- <команда>` одной командой из корня нужной копии: "

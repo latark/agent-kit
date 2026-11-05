@@ -19,8 +19,8 @@ claude-config: коммит в обход sync.sh отправил бы прав
 папку над репозиториями (tar -x, unzip, ditto, cp -R, rsync -r/-a или «папка/», scp -r), и git clone в <репо>/.claude.
 Файлы с известными именами (curl -O, wget без -r и -m, patch, rsync одного файла) в корне репозитория — можно.
 С metis-0194 закрыты дыры ревью #35: rsync с «.», «папка/.» и -R, wget -r/-m, git checkout/restore поверх .claude, 7z -o.
-С metis-0823 неразобранная цель Bash ($(…), переменная, цикл) — отказ, только если команда может задеть защищённое:
-идёт в защищённую папку или над ней, называет её или настройки репозитория (unresolved_near). Иначе запись проходит.
+С metis-0823 неразобранная цель Bash ($(…), переменная) проходит, только если её буквальная часть лежит в $TMPDIR,
+кэше окна или своей worktree (G.unresolved_dirs); эта папка судится как обычная цель.
 """
 
 import os
@@ -89,23 +89,6 @@ TREE_COPY_FLAG = {"cp": "rRa", "gcp": "rRa", "scp": "r"}
 CLONE_OPT_ARG = {"-o", "--origin", "-b", "--branch", "-u", "--upload-pack", "--reference", "--reference-if-able",
                  "--separate-git-dir", "--depth", "--shallow-since", "--shallow-exclude", "-c", "--config",
                  "--server-option", "-j", "--jobs", "--template", "--filter", "--bundle-uri", "--ref-format"}
-
-
-# metis-0823: слова, по которым неразобранная цель может быть настройкой репозитория: <репо>/.claude как цель и его
-# settings, agents, hooks, skills, commands; .mcp.json; .git/hooks и .git/config. «.claude/worktrees/…» — нет
-PROTECTED_WORDS = re.compile(r"\.claude(?:/(?:settings|agents|hooks|skills|commands)|/?(?![\w./-]))|\.mcp\.json|"
-                             r"\.git/(?:hooks|config)", re.I)
-UNRESOLVED_PROTECTED = (" Отказ — потому что команда идёт в защищённую папку (~/.claude, профили оболочки, ~/.ssh, "
-                        "~/.local/bin, LaunchAgents) или папку над ней, либо называет её или настройки репозитория "
-                        "(.claude/settings*, agents, hooks, .mcp.json, .git/hooks). Без этого запись с $(…), "
-                        "переменной и циклом проходит (metis-0823) — назови точный файл.")
-
-
-def unresolved_near(cmd, cwd):
-    """Может ли неразобранная цель записи быть защищённой (metis-0823): команда идёт в защищённой папке или над ней
-    (событие, cd — так `cd ~ && … > $F` судится), называет защищённый путь или настройки репозитория. Путь из
-    переменной окружения или собранный по частям — намеренный обход: его граница — песочница окна."""
-    return G.near_zones(cmd, cwd, protected()) or bool(PROTECTED_WORDS.search(cmd.replace("\\", "")))
 
 
 def _repo_or_above(t):
@@ -361,11 +344,12 @@ def check_protect_config(event, tool, tool_input):
     if not sub and G.privileged(G.load_policy(), "metis-pantheon", role, pdir):
         return None
     cwd, targets = G.write_targets(event, tool, tool_input)
-    # metis-0823: неразобранная цель — отказ, только если команда может задеть защищённое (unresolved_near); запись с
-    # $(…), циклом или переменной в $TMPDIR, кэш окна и свою worktree проходит
-    if G.UNRESOLVED in targets and (tool != "Bash" or unresolved_near(tool_input.get("command") or "", cwd)):
-        return G.UNRESOLVED_REASON + UNRESOLVED_PROTECTED
-    targets = [p for p in targets if p != G.UNRESOLVED]
+    # metis-0823: неразобранная цель проходит, только если её папка в $TMPDIR, кэше окна или своей worktree —
+    # и эту папку судят как обычную цель
+    dirs = G.unresolved_dirs(event, tool, tool_input) if G.UNRESOLVED in targets else []
+    if dirs is None:
+        return G.UNRESOLVED_REASON + G.UNRESOLVED_SAFE
+    targets = [p for p in targets if p != G.UNRESOLVED] + dirs
     prot = protected()
     mk = tool == "Bash" and bool(MKDIR_ONLY.match(tool_input.get("command") or ""))
     bad = [p for p in targets
