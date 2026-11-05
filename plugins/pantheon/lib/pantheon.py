@@ -74,8 +74,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
                                         тревога об открытом координаторе)
   pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
-                                        и размеры берёт с холста; задача расписания (every = 5), пишет только при смене
-                                        входов (metis-0825)
+                                        и размеры берёт с холста; в расписании — скрипт плагина scripts/who-canvas.sh
+                                        (every = 5), пишет только при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
@@ -4359,7 +4359,8 @@ def who_canvas_sync(force=False, agents=None, reg_path=None):
 
 
 def who_canvas_cmd(rest):
-    """pantheon who-canvas [--force] — задача расписания (every = 5, hosts = primary): пересборка только при смене
+    """pantheon who-canvas [--force] — зовёт scripts/who-canvas.sh из расписания (every = 5, hosts = primary; самой
+    команды нет в TICK_SUBCOMMANDS, parse_command пускает только скрипт плагина): пересборка только при смене
     входов (отпечаток в STATE/who-canvas.json), так что обычный проход ничего не пишет. Холст не читается или сбой —
     тревога, файл не затирается, код 1. В тик не вшито: tick() входит в сборку окон (ядро, metis-0404)."""
     if [a for a in rest if a != "--force"]:

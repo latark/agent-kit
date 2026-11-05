@@ -1,8 +1,8 @@
 """Холст «Кто есть кто.canvas» строится кодом из ролей, реестра направлений и статуса задач (metis-0825).
 
 Раньше холст собрал одноразовый скрипт и дальше правили руками, а сверка (pantheon.who_is_who_check, metis-0120/0252)
-проверяла только имена: Харон висел «🚧 строится», когда роль уже была. Теперь плановый проход (pantheon.who_canvas_tick)
-пересобирает холст, когда изменились роли, реестр или статус задач из карточек, а не каждый тик.
+проверяла только имена: Харон висел «🚧 строится», когда роль уже была. Теперь задача расписания `pantheon who-canvas`
+(scripts/who-canvas.sh, каждые 5 минут) пересобирает холст, когда изменились роли, реестр или статус задач из карточек, а не каждый тик.
 
 Что строит код:
   - карточка роли — из CATALOG: есть роль → карточка без 🚧; роли нет, а в записи стоит `planned` (задача) → жёлтая
@@ -58,7 +58,7 @@ CATALOG = [
     _e("daed", "top", "workshop", "**Дедал** · мастерская\nОдна разовая задача; сколько задач — столько Дедалов. Поручает Зевс\n"
        "`daedalus-<задача>`"),
     _e("charon", "top", "charon", "**Харон** · служебная\nЧитает страницы в ваших Comet и Chrome со входами (`pantheon browser`); "
-       "сайт не из списка — после вашего «да».{?task:metis-0765= Формы и кнопки — скоро ([[metis-0765]])}"
+       "сайт не из списка — после вашего «да».{?task:metis-0765= Ввод в поля и нажатия — скоро ([[metis-0765]])}"
        "{?task:metis-0760=\n[[metis-0760]]}"),
     _e("hestia", "top", "hestia", "**Гестия** · служебная\nСтавит выпуски, перезапускает окна, чинит систему; спит, будит Зевс"
        "{?task:metis-0245=\n[[directions/metis-pantheon/tasks/metis-0245|metis-0245]]}"),
@@ -235,8 +235,9 @@ def build(current, roles, directions, statuses, catalog=None):
     want_ids = {w[0] for w in want}
     # карточки, которыми владеет код: из каталога, авто-карточки ролей и координаторы (ссылка на STATUS направления);
     # такая карточка, которой больше нет среди нужных, уходит, прочие узлы (добавил владелец) остаются
+    # (по id, а не по тексту: заметка владельца со ссылкой на STATUS — не карточка кода)
     def owned(n):
-        return n["id"] in known or n["id"].startswith("role-") or "/STATUS|" in str(n.get("text", ""))
+        return n["id"] in known or n["id"].startswith("role-") or n["id"] in GODS_RU
     # группы
     nodes = []
     for gid, (label, color, x, y, w, h) in GROUPS.items():
@@ -250,6 +251,9 @@ def build(current, roles, directions, statuses, catalog=None):
         else:
             g.pop("color", None)
         nodes.append(g)
+    for nid, n in cur_nodes.items():  # группы, которых код не знает (добавил владелец), остаются со связями
+        if n.get("type") == "group" and nid not in GROUPS:
+            nodes.append(dict(n))
     groups = {n["id"]: n for n in nodes}
     # узлы, которых код не знает (добавил владелец), и прежние карточки: порядок холста сохраняется
     rest = [n for nid, n in cur_nodes.items() if n.get("type") != "group" and (not owned(n) or nid in want_ids)]

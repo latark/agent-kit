@@ -285,5 +285,46 @@ check("9. collect_roles: роль появилась → ghost present, без �
 check("9. collect_roles: роли нет и planned нет → записи нет",
       "argus" not in {x["name"] for x in W.collect_roles({r: "" for r in ALL if r != "argus"}, st2, cat)}
       and "argus" in crn)
+# --- 10. замечания argus (PR #314) ---
+cur = copy.deepcopy(c0)
+cur["nodes"].insert(0, {"id": "mygroup", "type": "group", "x": 3000, "y": 0, "width": 400, "height": 300, "label": "моя группа"})
+cur["nodes"].append({"id": "inmine", "type": "text", "text": "в моей группе", "x": 3050, "y": 80, "width": 100, "height": 50})
+cur["edges"].append({"id": "e-mine", "fromNode": "you", "fromSide": "right", "toNode": "mygroup", "toSide": "left"})
+b = byid(W.build(cur, roles, dirs, st))
+bc = W.build(cur, roles, dirs, st)
+check("10. группа владельца (неизвестный id) остаётся с карточками и связью, группы идут первыми",
+      "mygroup" in b and b["mygroup"]["label"] == "моя группа" and "inmine" in b
+      and any(e["id"] == "e-mine" for e in bc["edges"])
+      and [n["type"] for n in bc["nodes"]].index("text") > max(i for i, n in enumerate(bc["nodes"]) if n["type"] == "group"))
+cur = copy.deepcopy(c0)
+cur["nodes"].append({"id": "note", "type": "text", "text": "см. [[directions/themis-sources/STATUS|themis-sources]]",
+                     "x": 1, "y": 1, "width": 10, "height": 10})
+check("10. заметка владельца со ссылкой на STATUS остаётся, даже когда направления нет в реестре",
+      "note" in byid(W.build(cur, roles, dirs[:1], st)) and "themis" not in byid(W.build(cur, roles, dirs[:1], st)))
+canvas2 = os.path.join(ROOT, "pan2", W.CANVAS_NAME)
+sig2 = os.path.join(ROOT, "state2", "who-canvas.json")
+W.sync(canvas2, sig2, rl, dirs, st)
+os.remove(canvas2)
+check("10. холст удалён, отпечаток прежний → создаётся заново", W.sync(canvas2, sig2, rl, dirs, st) == "written"
+      and os.path.exists(canvas2))
+probe2 = f"""
+import sys
+sys.path.insert(0, {os.path.join(PLUGIN, "lib")!r})
+import pantheon as p
+sc = {os.path.join(PLUGIN, "scripts", "who-canvas.sh")!r}
+print("script:", p.parse_command(sc) == [sc])
+print("cmd:", p.parse_command("pantheon who-canvas"))
+"""
+r = subprocess.run([PY311, "-I", "-c", probe2], env=env, capture_output=True, text=True, timeout=60)
+check("10. расписание: скрипт плагина проходит parse_command, `pantheon who-canvas` — нет (команды нет в TICK_SUBCOMMANDS)",
+      "script: True" in r.stdout and "cmd: None" in r.stdout, r.stdout + r.stderr)
+for sub in ("who-canvas.sh",):
+    pass
+write(os.path.join(home, W.CANVAS_NAME), "{нет")
+r = subprocess.run([os.path.join(PLUGIN, "scripts", "who-canvas.sh"), "--bad"], env=dict(env), capture_output=True, text=True,
+                   timeout=60)
+check("10. скрипт передаёт аргументы команде: неверный аргумент → код 2 и справка", r.returncode == 2 and "использование" in r.stderr,
+      (r.returncode, r.stdout, r.stderr))
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
