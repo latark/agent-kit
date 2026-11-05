@@ -2438,11 +2438,12 @@ def test_worktree_node_modules_0616():
     open(os.path.join(target, "keep.txt"), "w").write("x")
     old = T0 - 3 * 86400
     wts = {}
-    for n in ("w-clean", "w-link", "w-wide"):
+    for n in ("w-clean", "w-link", "w-wide", "w-dirty"):
         wts[n] = os.path.join(folder, ".claude", "worktrees", n)
         g("worktree", "add", "-q", "-b", n, wts[n])
-    for n in ("w-clean", "w-link"):
+    for n in ("w-clean", "w-link", "w-dirty"):
         w = wts[n]
+        _mk_wt_files(os.path.join(w, ".venv", "lib"), 1000)
         _mk_wt_files(os.path.join(w, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
         _mk_wt_files(os.path.join(w, ".next", "cache"), 3000)
         os.symlink(os.path.join(w, "node_modules", ".pnpm", "x"), os.path.join(w, "node_modules", "inner"))
@@ -2453,13 +2454,19 @@ def test_worktree_node_modules_0616():
                             text=True).stdout.strip()
         ex = ex if os.path.isabs(ex) else os.path.join(w, ex)
         os.makedirs(os.path.dirname(ex), exist_ok=True)
-        open(ex, "a").write("node_modules\n.next\nsrc\n")
+        open(ex, "a").write("node_modules\n.next\n.venv\nsrc\n")
+        if n == "w-dirty":
+            open(os.path.join(w, "work.txt"), "w").write("не закоммичено")
+            check(g("status", "--porcelain", cwd=w).stdout.strip() != "", "w-dirty чистая")
+            os.utime(w, (old, old))
+            continue
         check(g("status", "--porcelain", cwd=w).stdout.strip() == "", f"{n}: копия не чистая для git")
         os.utime(w, (old, old))
     e.run("watch", t=T0)
     check(not os.path.exists(wts["w-clean"]), "слитая чистая копия с 6000 файлами в node_modules не убрана за проход")
     check(os.path.exists(wts["w-link"]) and os.path.exists(os.path.join(target, "keep.txt")),
           "копия со ссылкой наружу в node_modules убрана или цель тронута")
+    check(os.path.exists(os.path.join(wts["w-dirty"], "work.txt")), "копия с незакоммиченной работой и большим node_modules убрана")
     check("w-link" in e.alerts() and "ссылки наружу" in e.alerts(), "нет тревоги о ссылке наружу в node_modules")
     check(os.path.exists(wts["w-wide"]) and "w-wide" in e.alerts() and "обход длиннее лимита" in e.alerts(),
           "копия с 6000 файлами вне зависимостей убрана или нет тревоги о лимите")
@@ -2497,6 +2504,9 @@ def test_outward_links_skips_node_modules_0616():
             check(w.outward_links(clean) is None, "зависимости больше DEPS_LIMIT не дали None")
         finally:
             w.DEPS_LIMIT = saved
+        venv = os.path.join(base, "venv-wt")
+        _mk_wt_files(os.path.join(venv, ".venv", "lib"), 6000)
+        check(w.outward_links(venv) == (0, None), f".venv с 6000 файлами: {w.outward_links(venv)}")
         plain = os.path.join(base, "plain")
         _mk_wt_files(plain, 6000)
         check(w.outward_links(plain) is None, "6000 файлов вне node_modules не дали None")
