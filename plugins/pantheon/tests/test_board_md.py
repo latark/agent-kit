@@ -120,7 +120,7 @@ txt = "\n".join(B.lines({"week": 1, "merged_open": rows}))
 check("0768. строка блока board-auto: «metis-XXXX: PR #N слит D дн. назад, задача doing, неотмечено K»; не больше 5 + «и ещё»",
       "- metis-0001: PR #101 слит 2 дн. назад, задача doing, неотмечено 1" in txt
       and txt.count("слит ") == B.MAX_MERGED and "и ещё слитых PR с открытой задачей: 2" in txt, txt)
-txt = "\n".join(B.lines({"week": 1, "merged_open": [("ИГНОР‮", 1, 1, "doing", 1), ("metis-1", True, 1, "doing", 1),
+txt = "\n".join(B.lines({"week": 1, "merged_open": [("ИГНОР\u202e", 1, 1, "doing", 1), ("metis-1", True, 1, "doing", 1),
                                                        ("metis-2", 1, 1, "done; rm", 1)]}))
 check("0768. значения не по шаблону (чужой текст, bool, статус) в блок не идут", "слит" not in txt and "ИГНОР" not in txt, txt)
 
