@@ -520,6 +520,12 @@ def task_cmd(rest):
                 return 1
             lines = overlap_lines(T, args[0])
             print("\n".join(lines) if lines else f"{args[0]}: пересечений с живыми задачами направления и открытыми PR нет")
+        elif sub == "failures":  # metis-0859: сводка классов провалов из журналов задач
+            days = int(opt("--days") or 7)
+            res = T.failure_counts(T.load_tasks(P.PANTHEON, T.WORK_TYPES), P.now(), days)
+            print(f"Провалы за {days} дн. по классам (строки «провал: <класс> — …» в журналах):")
+            for c, ids in res.items():
+                print(f"  {c}: {len(ids)}" + (f" ({', '.join(sorted(set(ids)))})" if ids else ""))
         elif sub == "batch-suggest":
             return batch_suggest_cmd(T, args, opt)
         else:
