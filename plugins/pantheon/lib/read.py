@@ -5,8 +5,9 @@
         заявка: папка STATE/read/<rid>/ (0700, вне git и коллекций qmd), request.json (0600). --folder и --chat
         повторяются в любом сочетании; УКАЗАНИЕ — id, @имя, ссылка или название, как их понимает источник. Чаты по
         указаниям найдёт плановый проход; вопрос владельцу со списком чатов придёт карточкой во входящие Зевса.
-        Из окна роли (задан PANTHEON_TMP; STATE окну закрыт) — очередь окна <кэш окна>/read/<rid>.req.json (0600):
-        проход `read run` в начале забирает её, проверяет заново и ставит by по имени окна из папки кэша
+        Из окна роли (STATE окну закрыт) — очередь окна <кэш окна>/read/<rid>.req.json (0600): проход `read run`
+        в начале забирает её, проверяет заново и ставит by по имени окна из папки кэша. Окно не опознано, а STATE
+        закрыт — отказ с кодом 1 и причиной последней строкой (окно старой сборки — перезапустить)
   pantheon read run      проход по заявкам (задача планового прохода read-run; из окна Claude Code — отказ)
   pantheon read status   заявки: номер, направление, этап, числа и причина отказа — без текста переписки (в окне роли —
                          и заявки его очереди)
@@ -61,8 +62,10 @@
   с отступом в 4 пробела, служебные — «#id [дата] [служебное: …]». Сообщением считается строка «#id [дата время]»;
   по таким строкам ядро считает сообщения, режет большой чат на части и вырезает окна.
 
-Очередь окна (metis-0508). Окну роли песочница закрывает запись в STATE, поэтому `read request` в окне (есть
-PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) проверяет заявку и источник как обычно,
+Очередь окна (metis-0508). Окну роли песочница закрывает запись в STATE, поэтому `read request` в окне (кэш окна
+~/Library/Caches/pantheon-sandbox/<окно> — тем же правилом, что у `pantheon browser`: папка над PANTHEON_TMP у окон
+направлений и мастерской, а у окон без него — штаба hq, Гестии и задач job-* — над XDG_CACHE_HOME=<кэш окна>/xdg,
+metis-0821) проверяет заявку и источник как обычно,
 отказ — сразу, а пишет заявку в соседнюю папку read/ кэша: <rid>.req.json, 0600, атомарно (временный файл и rename) —
 по образцу `pantheon outside`. `read run` (плановый проход, вне песочницы окон) под замком read, до остальных этапов,
 забирает файлы из read/ всех кэшей окон. Каждую заявку — заново: имя <rid>.req.json по RID_RE и тот же rid внутри; только
@@ -638,7 +641,17 @@ def cmd_request(args):
                 "2 мин): проверит заново и заведёт заявку; до того `pantheon read status` показывает её как «в очереди "
                 "окна».\n")
     else:
-        head = f"Заявка read-{rid}: {short(create_request(req))}\n"
+        try:
+            head = f"Заявка read-{rid}: {short(create_request(req))}\n"
+        except PermissionError as e:   # песочница окна, которое не опознано как окно роли (metis-0821)
+            err(f"pantheon read request: заявку не записать в {short(root())} ({type(e).__name__}: {e.strerror or e}). "
+                "Похоже на окно роли, которое не опознано: нет PANTHEON_TMP и XDG_CACHE_HOME внутри "
+                "~/Library/Caches/pantheon-sandbox/<окно> — окно собрано старой версией Пантеона, перезапустить его; "
+                "владелец может подать заявку вне окна")
+            return 1
+        except OSError as e:
+            err(f"pantheon read request: заявку не записать в {short(root())} ({type(e).__name__}: {e})")
+            return 1
     folders = sum(1 for s in specs if s["kind"] == "folder")
     print(head +
           f"Указаний {len(specs)} (папок {folders}, чатов {len(specs) - folders}). Чаты по ним найдёт плановый проход "
@@ -664,9 +677,11 @@ def create_request(req):
 # --- очередь окна роли (metis-0508; файлы — помощниками lib/outside.py) ---------------------------------------------
 
 def own_queue():
-    """Очередь этого вызова: в окне роли — read/ рядом с PANTHEON_TMP (кэш окна), вне окна — None."""
-    tmp = os.environ.get("PANTHEON_TMP")
-    return os.path.join(os.path.dirname(os.path.realpath(tmp)), QUEUE) if tmp else None
+    """Очередь этого вызова: в окне роли — read/ в кэше окна, вне окна — None. Кэш окна — тот же, что у ящика
+    `pantheon browser` (browser.window_cache): по PANTHEON_TMP у окон направлений и мастерской, а у окон без него —
+    штаба hq, Гестии и задач job-* (metis-0821) — по XDG_CACHE_HOME=<кэш окна>/xdg, который сборка ставит каждому окну."""
+    cache = P.browser_mod().window_cache()
+    return os.path.join(cache, QUEUE) if cache else None
 
 
 def queue_put(q, req):

@@ -1694,6 +1694,114 @@ def test_window_queue_bad_window_name():
           or not os.listdir(os.path.join(b.state, "read")))
 
 
+# --- metis-0821: окна без PANTHEON_TMP (hq, hestia, job-*) и проба под seatbelt-профилем окна ------------------------
+
+def _xdg(b, name):
+    """Окно без PANTHEON_TMP (штаб hq, Гестия, job-*): сборка ставит ему только XDG_CACHE_HOME=<кэш окна>/xdg."""
+    cache = os.path.join(b.home, "Library", "Caches", "pantheon-sandbox", name)
+    os.makedirs(os.path.join(cache, "xdg"), exist_ok=True)
+    return {"XDG_CACHE_HOME": os.path.join(cache, "xdg")}, os.path.join(cache, "read")
+
+
+def test_window_queue_xdg():
+    """Окно без PANTHEON_TMP опознаётся по XDG_CACHE_HOME внутри кэшей окон (как ящик `pantheon browser`): заявка — в
+    очередь его кэша, by — имя окна. XDG_CACHE_HOME вне кэшей окон — не окно: STATE закрыт — отказ кодом 1 и причиной
+    последней строкой, без трассировки."""
+    b = Box()
+    extra, q = _xdg(b, "hq")
+    r, rid = _win_request(b, extra)
+    p = os.path.join(q, f"{rid}.req.json")
+    check("окно hq (только XDG_CACHE_HOME): заявка в очереди окна, STATE не тронут",
+          r.returncode == 0 and rid and os.path.isfile(p) and not os.path.exists(os.path.join(b.state, "read")),
+          r.stdout + r.stderr)
+    s = b.cli(["read", "status"], extra=extra)
+    check("окно hq: status показывает заявку очереди", f"read-{rid}\tdemo-dir\tв очереди окна" in s.stdout, s.stdout)
+    b.run(T0 + 10)
+    req = json.load(open(os.path.join(b.folder(rid), "request.json"), encoding="utf-8")) if rid and os.path.isdir(
+        b.folder(rid)) else {}
+    check("окно hq: проход завёл заявку, by — имя окна по папке кэша", req.get("by") == "hq" and not os.path.exists(p),
+          req)
+    b = Box()   # новая коробка: STATE/read прошлой ещё есть, а chmod 0500 закрывает только сам STATE
+    other = os.path.join(b.home, ".cache", "xdg")
+    os.makedirs(other, exist_ok=True)
+    r, rid = _win_request(b, {"XDG_CACHE_HOME": other})
+    last = (r.stderr.strip().splitlines() or [""])[-1]
+    check("XDG_CACHE_HOME вне кэшей окон — не окно: STATE закрыт — код 1, причина последней строкой, без трассировки",
+          r.returncode == 1 and rid is None and "заявку не записать" in last and "PermissionError" in last
+          and "Traceback" not in r.stderr and not os.path.exists(os.path.join(b.home, ".cache", "read")),
+          (r.returncode, r.stdout, r.stderr[-600:]))
+
+
+def _seatbelt():
+    """sandbox-exec этой машины, если он применяет профиль (macOS и не внутри чужой песочницы), иначе None."""
+    sb = "/usr/bin/sandbox-exec"
+    if sys.platform != "darwin" or not os.path.exists(sb):
+        return None
+    r = subprocess.run([sb, "-p", "(version 1)(allow default)", "/usr/bin/true"], capture_output=True, text=True,
+                       timeout=30)
+    return sb if r.returncode == 0 else None
+
+
+def test_window_queue_seatbelt():
+    """Сквозная проба (metis-0821): настройки окон — настоящий `pantheon domains build` на временном HOME, запись —
+    только туда, куда пускает allowWrite окна (тем же правилом subpath, что ставит Claude Code), плюс своя папка вместо
+    TMPDIR песочницы. Окно направления (PANTHEON_TMP) и штаб hq (только XDG_CACHE_HOME) ставят заявку в очередь своего
+    кэша; без обеих переменных — тот самый отказ песочницы на mkdir STATE/read, но с причиной, а не трассировкой.
+    Проход вне песочницы заводит обе заявки, by — имя окна."""
+    sb = _seatbelt()
+    if sb is None:
+        print("пропущено: нужен macOS — sandbox-exec недоступен или проба идёт внутри песочницы")
+        return
+    b = Box()
+    os.makedirs(os.path.join(b.home, "projects", "demo"))
+    with open(os.path.join(b.pantheon, "directions.toml"), "w", encoding="utf-8") as fh:
+        fh.write('[[direction]]\nname = "demo-dir"\nfolders = ["~/projects/demo"]\n')
+    r = b.cli(["domains", "build"])
+    out = os.path.join(b.state, "settings")
+    if not (r.returncode == 0 and all(os.path.isfile(os.path.join(out, n + ".json")) for n in ("demo-dir", "hq"))):
+        check("domains build на временном HOME собрал окна demo-dir и hq", False, r.stderr[-600:])
+        return
+    sbtmp = os.path.join(b.tmp, "sbtmp")   # вместо /tmp/claude-<uid>: HOME коробки — не под ним
+    os.makedirs(sbtmp)
+
+    def window(name, drop=()):
+        with open(os.path.join(out, name + ".json"), encoding="utf-8") as fh:
+            s = json.load(fh)
+        allow = [os.path.realpath(p.replace("~", b.home, 1)) for p in s["sandbox"]["filesystem"]["allowWrite"]]
+        allow += [os.path.realpath(sbtmp), "/dev"]
+        profile = ("(version 1)(allow default)(deny file-write* (require-not (require-any "
+                   + " ".join(f"(subpath {json.dumps(p)})" for p in allow) + ")))")
+        env = b.env(T0)
+        env.update({k: v for k, v in s["env"].items() if k not in drop}, TMPDIR=sbtmp)
+        args = ["read", "request", "--folder", "Торги", "--direction", "demo-dir", "--since", "2026-10-18",
+                "--until", "2026-10-18", "--why", "о чём договорились по встрече"]
+        res = subprocess.run([sb, "-p", profile, PY311, "-I", RUN_PY] + args, env=env, capture_output=True, text=True,
+                             timeout=60)
+        m = re.search(r"Заявка read-(\S+):", res.stdout)
+        return res, (m.group(1) if m else None)
+
+    caches = os.path.join(b.home, "Library", "Caches", "pantheon-sandbox")
+    r1, rid1 = window("demo-dir")
+    check("seatbelt, окно направления: заявка в очереди его кэша", r1.returncode == 0 and rid1 and os.path.isfile(
+        os.path.join(caches, "demo-dir", "read", f"{rid1}.req.json")), r1.stdout + r1.stderr[-600:])
+    r2, rid2 = window("hq")
+    check("seatbelt, окно hq без PANTHEON_TMP: заявка в очереди его кэша", r2.returncode == 0 and rid2 and os.path.isfile(
+        os.path.join(caches, "hq", "read", f"{rid2}.req.json")), r2.stdout + r2.stderr[-600:])
+    r3, rid3 = window("demo-dir", drop=("PANTHEON_TMP", "XDG_CACHE_HOME"))
+    last = (r3.stderr.strip().splitlines() or [""])[-1]
+    check("seatbelt, окно не опознано: профиль закрывает mkdir STATE/read — код 1, причина последней строкой",
+          r3.returncode == 1 and rid3 is None and "PermissionError" in last and "перезапустить" in last
+          and "Traceback" not in r3.stderr, (r3.returncode, r3.stderr[-600:]))
+    check("seatbelt: в STATE/read окна ничего не записали", not os.path.exists(os.path.join(b.state, "read")))
+    b.run(T0 + 10)
+    by = {}
+    for rid in (rid1, rid2):
+        p = os.path.join(b.folder(rid), "request.json") if rid else ""
+        by[rid] = json.load(open(p, encoding="utf-8")).get("by") if os.path.isfile(p) else None
+    check("seatbelt: проход завёл обе заявки, by — имя окна", rid1 and rid2 and by == {rid1: "demo-dir", rid2: "hq"}
+          and b.st(rid1)["phase"] == "requested" and b.st(rid2)["phase"] == "requested", by)
+
+
 # --- metis-0622: долги ревью #222 и #223 ------------------------------------------------------------------------------
 
 def _consented(**kw):
