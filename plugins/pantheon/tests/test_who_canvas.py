@@ -312,7 +312,8 @@ import sys
 sys.path.insert(0, {os.path.join(PLUGIN, "lib")!r})
 import pantheon as p
 sc = {os.path.join(PLUGIN, "scripts", "who-canvas.sh")!r}
-print("script:", p.parse_command(sc) == [sc])
+import os
+print("script:", p.parse_command(sc) == [os.path.realpath(sc)])
 print("cmd:", p.parse_command("pantheon who-canvas"))
 """
 r = subprocess.run([PY311, "-I", "-c", probe2], env=env, capture_output=True, text=True, timeout=60)
@@ -326,6 +327,16 @@ r = subprocess.run([os.path.join(PLUGIN, "scripts", "who-canvas.sh"), "--bad"], 
 check("10. скрипт передаёт аргументы команде: неверный аргумент → код 2 и справка", r.returncode == 2 and "использование" in r.stderr,
       (r.returncode, r.stdout, r.stderr))
 
+# Д5: карточка направления с богом вне GODS_RU уходит вместе с направлением (id записан в прошлом отпечатке)
+canvas5 = os.path.join(ROOT, "pan5", W.CANVAS_NAME)
+sig5 = os.path.join(ROOT, "state5", "who-canvas.json")
+dx = dirs + [{"name": "zzgod-new", "short": "x"}]
+W.sync(canvas5, sig5, rl, dx, st)
+had = "zzgod" in byid(json.load(open(canvas5, encoding="utf-8")))
+W.sync(canvas5, sig5, rl, dirs, st)
+now = byid(json.load(open(canvas5, encoding="utf-8")))
+check("10. направление с неизвестным богом убрано → его карточка уходит (id из прошлого отпечатка), заметка владельца цела",
+      had and "zzgod" not in now)
 # --- 11. ручная правка текста, цвета и подписи группы не затирается ---
 canvas3 = os.path.join(ROOT, "pan3", W.CANVAS_NAME)
 sig3 = os.path.join(ROOT, "state3", "who-canvas.json")

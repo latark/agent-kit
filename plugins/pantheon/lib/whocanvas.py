@@ -247,7 +247,8 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
     # такая карточка, которой больше нет среди нужных, уходит, прочие узлы (добавил владелец) остаются
     # (по id, а не по тексту: заметка владельца со ссылкой на STATUS — не карточка кода)
     def owned(n):
-        return n["id"] in known or n["id"].startswith("role-") or n["id"] in GODS_RU
+        return (n["id"] in known or n["id"].startswith("role-") or n["id"] in hashes  # записан кодом в прошлый раз
+                or n["id"] in GODS_RU)  # первая сборка по старому холсту: записей ещё нет
     # группы
     nodes = []
     for gid, (label, color, x, y, w, h) in GROUPS.items():

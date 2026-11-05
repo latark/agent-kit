@@ -74,8 +74,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
                                         тревога об открытом координаторе)
   pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
-                                        и размеры берёт с холста; в расписании — скрипт плагина scripts/who-canvas.sh
-                                        (every = 5), пишет только при смене входов (metis-0825)
+                                        и размеры берёт с холста; в расписании — command =
+                                        "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
+                                        при смене входов (metis-0825)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
