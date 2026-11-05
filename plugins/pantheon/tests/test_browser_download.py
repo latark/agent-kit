@@ -6,6 +6,8 @@
 ведёт вкладку, а свой JS прохода (DL_START_JS, DL_CHUNK_JS, DL_DROP_JS) выполняет настоящий node с заглушками
 fetch, Cache Storage и FileReader — так проверяется и сам JS, а не только Python. Нет node — строка «пропущено».
 Проверяется:
+- карантин: метка com.apple.quarantine на файле (macOS), не поставилась — сбой и файла нет; .dmg, .app, .command,
+  .sh и прочее из DL_EXEC_EXT — с хвостом .download;
 - путь: файл в <направление задачи>/inbox/<сайт или --to>/, байт в байт, права 0644 (без исполняемого бита), sha256
   в итоге, имя в .gitignore папки; вкладка — своя (session окна), переход на главную сайта, /cmd не зовётся, тело
   в кэше сайта удалено; недокачанное — вне inbox и убрано;
@@ -250,6 +252,12 @@ check("download: файл в inbox/<сайт>/ направления задач
       res["state"] == "done" and os.path.isfile(want) and open(want, "rb").read() == DATA, (res, tree(INBOX)))
 mode = os.stat(want).st_mode & 0o7777 if os.path.isfile(want) else None
 check("download: права 0644 — без исполняемого бита", mode == 0o644, oct(mode or 0))
+if sys.platform == "darwin":
+    q = subprocess.run(["/usr/bin/xattr", "-p", "com.apple.quarantine", want], capture_output=True, text=True)
+    check("download: метка карантина macOS (com.apple.quarantine «0081;…;pantheon;»)",
+          q.returncode == 0 and re.fullmatch(r"0081;[0-9a-f]{8};pantheon;", q.stdout.strip()), (q.returncode, q.stdout, q.stderr))
+else:
+    print("пропущено: метка карантина — нужен macOS")
 check("download: итог — путь, размер, sha256", res.get("text") and "Сделки 3 кв.zip" in res["text"]
       and str(len(DATA)) in res["text"] and hashlib.sha256(DATA).hexdigest() in res["text"], res)
 gi = open(os.path.join(INBOX, SITE, ".gitignore"), encoding="utf-8").read() if os.path.isfile(
@@ -267,6 +275,8 @@ check("download: тело кусками (по DL_CHUNK), последний к�
 f0 = node({"cmd": "state"})["fetches"]
 check("download: fetch файла — со входами (credentials include)", f0 and f0[-1] == {"url": ZIP, "credentials": "include"}, f0)
 check("download: тело в кэше сайта удалено, недокачанного в STATE нет", tidy() and stage() == [], (node({"cmd": "state"}), stage()))
+note = open(NOTIFY, encoding="utf-8").read() if os.path.isfile(NOTIFY) else ""
+check("download: уведомление владельцу — кто, что, сайт, задача", f"hq): download на {SITE}, задача athena-0205" in note, note)
 log = open(os.path.join(STATE, "logs", "browser.jsonl"), encoding="utf-8").read()
 check("download: журнал — запись op download, без содержимого файла", '"op": "download"' in log and '"state": "done"' in log)
 
@@ -286,6 +296,13 @@ serve(PDF, PDF_DATA, type="application/pdf")
 res = run(req(PDF, to="rosreestr"))
 check("--to rosreestr: файл в inbox/rosreestr/, имя из адреса",
       res["state"] == "done" and open(os.path.join(INBOX, "rosreestr", "opisanie.pdf"), "rb").read() == PDF_DATA, (res, tree(INBOX)))
+
+DMG = f"https://{SITE}/upload/Setup.dmg"
+serve(DMG, body(5000, "dmg"), type="application/octet-stream")
+res = run(req(DMG, to="rosreestr"))
+check("файл .dmg (macOS монтирует и запускает) — с хвостом .download",
+      res["state"] == "done" and os.path.isfile(os.path.join(INBOX, "rosreestr", "Setup.dmg.download"))
+      and not os.path.exists(os.path.join(INBOX, "rosreestr", "Setup.dmg")), (res, tree(INBOX)))
 
 # --- согласие ----------------------------------------------------------------------------------------------------------
 OTHER = "https://data.example.org/f.zip"
@@ -321,6 +338,8 @@ clean_fail("больше предела по content-length", run(req(BIG, to="f
 check("больше предела: новая папка --to fresh убрана", not os.path.exists(os.path.join(INBOX, "fresh")), tree(INBOX))
 serve(BIG, body(1024 * 1024 + 1, "big"), length=None)
 clean_fail("больше предела без content-length (счёт по потоку)", run(req(BIG)), "refused", "больше")
+serve(BIG, b"z" * 10, length=1024 * 1024 + 1)
+clean_fail("content-length больше предела — обрыв до чтения тела", run(req(BIG)), "refused", "больше")
 B.DL_MAX = 6 * 1024 * 1024
 HTML = f"https://{SITE}/login.zip"
 serve(HTML, b"<html>login</html>", type="text/html; charset=utf-8")
@@ -353,6 +372,15 @@ def badsha(expr, v):
 D.hook = badsha
 clean_fail("sha256 браузера не сошлась", run(req(ZIP)), "failed", "sha256")
 D.hook = None
+
+
+def no_quarantine(fd):
+    raise OSError(1, "Operation not permitted")
+
+
+real_quarantine, B.quarantine = B.quarantine, no_quarantine
+clean_fail("метка карантина не поставилась", run(req(ZIP)), "failed", "карантина")
+B.quarantine = real_quarantine
 B.DL_TIME = -1
 clean_fail("время вышло", run(req(ZIP)), "failed", "время вышло")
 B.DL_TIME = 540
@@ -421,7 +449,11 @@ for disp, url, want_name in (
         ("", "https://a.ru/", "download"),
         ('attachment; filename="a‮gpj.exe"', ZIP, "a_gpj.exe"),
         ('attachment; filename="-rf $HOME;.zip"', ZIP, "rf _HOME_.zip"),
-        ("attachment; filename*=UTF-8''%E2%80%AE%00x.zip", ZIP, "__x.zip")):
+        ("attachment; filename*=UTF-8''%E2%80%AE%00x.zip", ZIP, "__x.zip"),
+        ('attachment; filename="run.COMMAND"', ZIP, "run.COMMAND.download"),
+        ("", "https://a.ru/install.sh", "install.sh.download"),
+        ('attachment; filename="Viewer.app"', ZIP, "Viewer.app.download"),
+        ('attachment; filename="data.app.zip"', ZIP, "data.app.zip")):
     got = B.dl_name(disp, url)
     check(f"имя: {disp or url!r:.50} → {want_name!r}", got == want_name, got)
 long = B.dl_safe("я" * 300 + ".zip")

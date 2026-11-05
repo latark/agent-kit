@@ -69,7 +69,9 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   по 2 МБ base64 через /eval, сверяет размер и sha256 браузера и удаляет кэш. Поведение скачивания браузера
   (Browser.setDownloadBehavior через /cmd) не трогаем: оно общее на весь браузер владельца. Недокачанное лежит в
   STATE/browser/dl, а в inbox попадает только целый файл: link без перезаписи, права 0644 без исполняемого бита,
-  имя из Content-Disposition или адреса, очищенное. Имя файла пишется строкой в .gitignore папки до появления
+  метка карантина macOS (com.apple.quarantine — до link; не поставилась — файла нет и сбой), имя из
+  Content-Disposition или адреса, очищенное; расширение, которое macOS запускает как код (DL_EXEC_EXT: .app, .dmg,
+  .command, .sh…), — с хвостом .download. Имя файла пишется строкой в .gitignore папки до появления
   файла: ~/ai/pantheon коммитит тик, а GitHub не берёт файлы больше 100 МБ. Сбой и таймаут (DL_TIME) — вкладка
   about:blank, понятная строка, в inbox ничего.
 
@@ -888,6 +890,27 @@ DL_TIME = 540                                 # всё скачивание, с:
 DL_STALE = 3600                               # недокачанное старше часа в STATE/browser/dl — убрать
 DL_DIR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")   # --to и папка сайта: одна ступень, не скрытая
 DL_GITIGNORE = ".gitignore"
+# Что macOS по двойному щелчку запускает как код или монтирует — с хвостом .download (находка проверки безопасности)
+DL_EXEC_EXT = frozenset((".app", ".command", ".terminal", ".pkg", ".mpkg", ".dmg", ".webloc", ".fileloc", ".inetloc",
+                         ".scpt", ".scptd", ".workflow", ".tool", ".sh", ".jar"))
+DL_QUARANTINE = "com.apple.quarantine"        # метка карантина: Gatekeeper спросит владельца, если он откроет файл
+
+
+def quarantine(fd):
+    """Метка карантина macOS на открытый файл (fsetxattr: по дескриптору, без пути). Сбой — OSError. Не macOS —
+    False: метки там нет, ставить нечего."""
+    if sys.platform != "darwin":
+        return False
+    import ctypes
+    import ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    value = f"0081;{int(P.now()):08x};pantheon;".encode()
+    libc.fsetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint32,
+                               ctypes.c_int]
+    if libc.fsetxattr(fd, DL_QUARANTINE.encode(), value, ctypes.c_size_t(len(value)), 0, 0) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+    return True
 
 DL_START_JS = """(async () => {
   const lim = %(lim)d, shaMax = %(sha)d, tok = %(tok)s;
@@ -981,13 +1004,16 @@ def dl_name(disp, url):
 
 def dl_safe(name):
     """Очищенное имя: последняя часть после / и \\, буквы и цифры любого языка и « ._-()+,», остальное — «_»;
-    без точки, минуса и пробела в начале (не скрытый, не ключ), до 200 байт UTF-8 с расширением; пустое — download."""
+    без точки, минуса и пробела в начале (не скрытый, не ключ), до 200 байт UTF-8 с расширением; пустое — download.
+    Расширение, которое macOS запускает как код по двойному щелчку (DL_EXEC_EXT), получает хвост .download."""
     name = unicodedata.normalize("NFC", name or "").replace("\\", "/").rsplit("/", 1)[-1]
     name = "".join(c if c.isalnum() or c in " ._-()+," else "_" for c in name)
     name = re.sub(r"\s+", " ", name).lstrip(" .-").rstrip(" .")
     stem, ext = os.path.splitext(name)
     if len(ext.encode()) > 16:
         stem, ext = name, ""
+    if ext.lower() in DL_EXEC_EXT:
+        ext += ".download"
     while len((stem + ext).encode()) > 200:
         stem = stem[:-1]
     name = (stem.rstrip(" .") + ext) if stem.rstrip(" .") else ""
@@ -1160,6 +1186,11 @@ def download(b, req, win, domains, host):
                 fh.write(data)
                 h.update(data)
                 done += n
+            fh.flush()
+            try:                              # до link: в inbox файл появляется уже с меткой
+                quarantine(fh.fileno())
+            except OSError as e:
+                raise Fail(f"метку карантина macOS не поставить ({e}) — файл не кладу")
         digest = h.hexdigest()
         if head.get("sha") is not None and head.get("sha") != digest:
             raise Fail(f"sha256 не сошлась с браузером ({str(head.get('sha'))[:16]}… ≠ {digest[:16]}…) — файл битый")
