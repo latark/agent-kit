@@ -296,9 +296,22 @@ REPO = os.path.dirname(os.path.dirname(PLUGIN))
 amap, why = R.load_map()
 check("карта репозитория читается, версия та", amap is not None, why)
 amap = amap or {"tests": set(), "always": set(), "files": {}}
+try:
+    with open(R.MAP, encoding="utf-8") as fh:
+        RAWMAP = json.load(fh)
+except (OSError, ValueError):
+    RAWMAP = {}
 # сам этот файл в копии сборки проверяет прошлую карту: упал он в прошлой сборке — упадёт и в этой, если не исключить
-check("карта: при сборке не упал ни один файл тестов", not amap["always"] - {"pantheon/test_run_tests.py"},
-      sorted(amap["always"]))
+check("карта: при сборке не упал ни один файл тестов",
+      not set(RAWMAP.get("broken") or ()) - {"pantheon/test_run_tests.py"}, RAWMAP.get("broken"))
+# metis-0791: правка bin/heavy — только тесты, что его запускают; линтер словаря читает heavy, но он в readers
+HEAVY = amap["files"].get("plugins/pantheon/bin/heavy", set())
+check("карта: bin/heavy → test_heavy_queue, не больше 12 тестов, без линтеров и test_watch (было 33)",
+      "pantheon/test_heavy_queue.py" in HEAVY and len(HEAVY) <= 12
+      and not HEAVY & {"pantheon/test_glossary.py", "pantheon/test_watch.py"}, sorted(HEAVY))
+check("карта: readers — test_glossary (читает дерево), идёт всегда",
+      "pantheon/test_glossary.py" in (RAWMAP.get("readers") or ()) and "pantheon/test_glossary.py" in amap["always"],
+      RAWMAP.get("readers"))
 check("FULL: lib/pantheon.py, hooks/python.sh обоих плагинов, сам раннер — общие",
       {"plugins/pantheon/lib/pantheon.py", "plugins/pantheon/hooks/python.sh", "plugins/guard/hooks/python.sh",
        "plugins/pantheon/scripts/run-tests.py"} <= R.FULL)
@@ -314,11 +327,11 @@ check("карта: AGENTS.md не задевает ни один тест", amap
       amap["files"].get("AGENTS.md"))
 
 
-def mkmap(tests, files, broken=(), version=2, hashes=None):
+def mkmap(tests, files, broken=(), version=3, hashes=None, readers=()):
     p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
     idx = {lb: i for i, lb in enumerate(tests)}
     with open(p, "w") as fh:
-        json.dump({"version": version, "tests": list(tests), "broken": list(broken),
+        json.dump({"version": version, "tests": list(tests), "broken": list(broken), "readers": list(readers),
                    "hashes": {lb: "0" for lb in tests} if hashes is None else hashes,
                    "files": {k: [idx[x] for x in v] for k, v in files.items()}}, fh)
     return p
@@ -359,11 +372,20 @@ check("select: новый файл тестов (карта не знает) и 
 sel = R.select(["README.md"], "/r", ITEMS, AM2)
 check("select: ничего не задето — «всегда» (не из карты, упавшие при сборке) всё равно идут",
       sel == ([ITEMS[1], ITEMS[2]], [], ["alpha/test_y.py", "beta/test_b.py"]), sel)
-for body, why in (("{", "JSONDecodeError"), ('{"version": 3, "tests": [], "files": {}}', "версии 3"),
+# metis-0791: читающий дерево (readers) — всегда, даже когда правка (README) ни одного теста не задела; его связей в
+# files нет, поэтому правка файла, который он только читал, не тянет других
+AM3, _ = R.load_map(mkmap(MT[:3], {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": []},
+                          readers=["beta/test_b.py"]))
+sel = R.select(["README.md"], "/r", ITEMS, AM3)
+check("select: readers идут при любой правке, в том числе README", sel == ([ITEMS[2]], [], ["beta/test_b.py"]), sel)
+sel = R.select(["plugins/alpha/lib/x.py"], "/r", ITEMS, AM3)
+check("select: правка x.py — его тест и readers, test_y — нет", sel == ([ITEMS[0], ITEMS[2]], [], ["beta/test_b.py"]),
+      sel)
+for body, why in (("{", "JSONDecodeError"), ('{"version": 2, "tests": [], "files": {}}', "версии 2"),
                   ('{"version": 1, "tests": [], "files": {}}', "версии 1"),
-                  ('{"version": 2, "hashes": {}, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
-                  ('{"version": 2, "tests": [], "files": {}}', "KeyError"),
-                  ('{"version": 2, "files": {}}', "KeyError"), ("[]", "AttributeError")):
+                  ('{"version": 3, "hashes": {}, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
+                  ('{"version": 3, "tests": [], "files": {}}', "KeyError"),
+                  ('{"version": 3, "files": {}}', "KeyError"), ("[]", "AttributeError")):
     p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
     with open(p, "w") as fh:
         fh.write(body)
@@ -610,6 +632,29 @@ put(os.path.join(ma, "lib", "twin_b.sh"), TWIN)
 put(os.path.join(ma, "tests", "test_twin.py"), HDR + "a, b = (open(os.path.join(P, 'lib', f)).read() for f in "
     "('twin_a.sh', 'twin_b.sh'))\nassert a == b, 'копии разошлись'\nsubprocess.run(['/bin/sh', os.path.join(P, "
     "'lib', 'twin_a.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+# metis-0791: текст `python -c` и пустой аргумент в папке плагина (от текущей папки — путь папки) и rmtree временной
+# папки с lib/ (open с dir_fd хук видел от текущей папки) не связывают тест с файлами плагина
+put(os.path.join(ma, "tests", "test_cscript.py"), HDR + "subprocess.run([sys.executable, '-I', '-c', '\\nimport os\\n"
+    "x = 1\\n'], cwd=P, check=True)\nsubprocess.run([sys.executable, '-I', '-c', 'pass', ''], cwd=P, check=True)\n" + OK2)
+put(os.path.join(ma, "tests", "test_rmtree.py"), HDR + "t = tempfile.mkdtemp()\nos.makedirs(os.path.join(t, 'lib', "
+    "'tree'))\nopen(os.path.join(t, 'lib', 'x.py'), 'w').close()\nos.chdir(P)\nshutil.rmtree(t)\n" + OK2)
+# читает дерево: открывает 25 файлов из пяти папок (порог — 20 из 5), ничего из них не запуская; s.sh запускает — эта
+# связь остаётся. test_fewdirs — 20 файлов из четырёх папок, test_thin — 15 из пяти: обычные тесты, связи остаются
+READ_DIRS = ("docs/a", "docs/b", "docs/c", "docs/d", "docs/e")
+for sub in READ_DIRS:
+    for i in range(5):
+        put(os.path.join(ma, sub, f"f{i}.md"), f"{sub} {i}\n")
+
+
+def reads(dirs, n):
+    return HDR + f"for sub in {dirs!r}:\n    for f in sorted(os.listdir(os.path.join(P, sub)))[:{n}]:\n" \
+        "        open(os.path.join(P, sub, f)).read()\n"
+
+
+put(os.path.join(ma, "tests", "test_reader.py"), reads(READ_DIRS, 5) + "subprocess.run(['/bin/sh', os.path.join(P, "
+    "'lib', 's.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+put(os.path.join(ma, "tests", "test_fewdirs.py"), reads(READ_DIRS[:4], 5) + OK2)
+put(os.path.join(ma, "tests", "test_thin.py"), reads(READ_DIRS, 3) + OK2)
 put(os.path.join(ma, "tests", "test_fail.py"), "import sys\nprint('ok   a')\nsys.exit(1)\n")
 git(mrepo, "init", "-q", "-b", "main")
 git(mrepo, "add", "-A")
@@ -625,20 +670,36 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/data.txt", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/front.py", {"alpha/test_lazy.py"}),
                    ("plugins/alpha/lib/lazy.py", {"alpha/test_lazy.py"}),
-                   ("plugins/alpha/lib/s.sh", {"alpha/test_sh.py"}),
                    ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py"}),
                    ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
                    ("plugins/alpha/lib/twin_b.sh", {"alpha/test_twin.py"}),
+                   # s.sh запускает и test_reader: запуск у читающего дерево остаётся связью
+                   ("plugins/alpha/lib/s.sh", {"alpha/test_sh.py", "alpha/test_reader.py"}),
+                   ("plugins/alpha/docs/a/f0.md", {"alpha/test_fewdirs.py", "alpha/test_thin.py"}),
+                   ("plugins/alpha/docs/a/f4.md", {"alpha/test_fewdirs.py"}),
+                   ("plugins/alpha/docs/e/f0.md", {"alpha/test_thin.py"}),
+                   ("plugins/alpha/docs/e/f4.md", set()),
                    ("AGENTS.md", set())):
     check(f"affected-map: {path} → {sorted(want) or 'ничего'}", F.get(path) == want, (F.get(path), why))
-check("affected-map: version 2, hashes — sha256 каждого файла тестов", mm.get("hashes") and all(
+# metis-0791: ни `python -c` с переводом строки, ни rmtree временной папки с lib/ не связывают тест с файлами плагина
+for lb in ("alpha/test_cscript.py", "alpha/test_rmtree.py"):
+    got = sorted(p for p, v in F.items() if lb in v and not p.startswith("plugins/alpha/tests/"))
+    check(f"affected-map: {lb} не задевает файлов плагина", got == [], got)
+with open(mout, encoding="utf-8") as fh:
+    RAW = json.load(fh)
+check("affected-map: readers — только читающий дерево (25 файлов из 5 папок); 20 из 4 и 15 из 5 — нет",
+      RAW.get("readers") == ["alpha/test_reader.py"], RAW.get("readers"))
+check("affected-map: readers идут всегда (load_map)", "alpha/test_reader.py" in mm["always"], mm["always"])
+check("affected-map: version 3, hashes — sha256 каждого файла тестов", RAW.get("version") == 3 and mm.get("hashes") and all(
     mm["hashes"].get(lb) == hashlib.sha256(open(os.path.join(ma, "tests", lb.split("/")[1]), "rb").read()).hexdigest()
     for lb in mm["tests"]), mm.get("hashes"))
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
-    "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py"} and mm["always"] == {"alpha/test_fail.py"}, mm)
+    "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py", "alpha/test_cscript.py", "alpha/test_rmtree.py",
+    "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
+      mm)
 with open(os.path.join(ma, "lib", "x.py")) as fh:
     check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')
 r = subprocess.run([sys.executable, "-I", MAPPER, "--out", mout, mkplugin({"test_a.py": OK2})], env=GENV,
@@ -893,27 +954,49 @@ check("Linux: все файлы пропущены — код 3 «нечего �
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
 
-# --- metis-0728: файлы тестов идут через taskpolicy -c utility (macOS и есть бинарь), иначе как раньше ---
+# --- metis-0647: файл тестов — в классе раннера; RUN_TESTS_QOS=utility на macOS с taskpolicy — `taskpolicy -c utility` ---
 TP = R.TASKPOLICY
+T = ["py", "-I", os.path.join("tests", "test_x.py")]
+U = {"RUN_TESTS_QOS": "utility"}
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP, {})
+check("macOS, taskpolicy есть, без RUN_TESTS_QOS: файл в классе раннера, без taskpolicy", c == T, c)
+for val in ("", "default", "UTILITY", "background"):
+    c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP, {"RUN_TESTS_QOS": val})
+    check(f"RUN_TESTS_QOS={val!r} — не utility: без taskpolicy", c == T, c)
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP, U)
+check("RUN_TESTS_QOS=utility, macOS и taskpolicy есть: команда начинается с taskpolicy -c utility",
+      c[:3] == [TP, "-c", "utility"] and c[3:] == T, c)
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: False, U)
+check("RUN_TESTS_QOS=utility, macOS без taskpolicy: команда как раньше", c == T, c)
+c = R.launch_cmd("py", "test_x.py", "linux", lambda p: True, U)
+check("RUN_TESTS_QOS=utility, Linux: taskpolicy нет, даже если бинарь есть", c == T, c)
+_qos = os.environ.pop("RUN_TESTS_QOS", None)
 c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP)
-check("macOS и taskpolicy есть: команда начинается с taskpolicy -c utility",
-      c[:3] == [TP, "-c", "utility"] and c[3:] == ["py", "-I", os.path.join("tests", "test_x.py")], c)
-c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: False)
-check("macOS без taskpolicy: команда как раньше", c == ["py", "-I", os.path.join("tests", "test_x.py")], c)
-c = R.launch_cmd("py", "test_x.py", "linux", lambda p: True)
-check("Linux: taskpolicy нет, даже если бинарь есть", "taskpolicy" not in " ".join(c) and c[0] == "py", c)
+check("без env= берёт окружение процесса: переменной нет — без taskpolicy", c == T, c)
+os.environ["RUN_TESTS_QOS"] = "utility"
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP)
+check("без env= берёт окружение процесса: RUN_TESTS_QOS=utility — taskpolicy", c[:3] == [TP, "-c", "utility"], c)
+os.environ.pop("RUN_TESTS_QOS")
 check("не macOS — строки QoS нет", R.qos_line(sys.executable, dict(os.environ), "linux") is None)
 if sys.platform == "darwin" and os.path.exists(TP):
     q = R.qos_line(sys.executable, dict(os.environ))
-    check("macOS: строка QoS называет класс и для раннера, и для файла",
-          q and "раннер:" in q and "файл (taskpolicy -c utility):" in q and "проба не удалась" not in q
-          and "utility" in q.split("файл (")[1], q)
+    check("macOS: строка QoS называет класс и для раннера, и для файла (класс раннера)",
+          q and "раннер:" in q and "файл (класс раннера):" in q and "проба не удалась" not in q, q)
+    os.environ["RUN_TESTS_QOS"] = "utility"
+    try:
+        q = R.qos_line(sys.executable, dict(os.environ))
+    finally:
+        os.environ.pop("RUN_TESTS_QOS")
+    check("macOS, RUN_TESTS_QOS=utility: файл пробы — через taskpolicy -c utility и в классе utility",
+          q and "файл (taskpolicy -c utility):" in q and "utility" in q.split("файл (")[1].split("):")[1], q)
     pl = mkplugin({"test_q.py": "import os\nprint('ok q', os.environ.get('RUN_TESTS_RUNNER'))\nprint('1/1')\n"}, "qq")
     r = run([pl])
     check("прогон печатает QoS-строку, а файлу виден RUN_TESTS_RUNNER=1",
           "run-tests: QoS (доля CPU)" in r.stdout and "ok   qq/test_q.py" in r.stdout, r.stdout)
 else:
     print("пропущено: нужен macOS — живая проба QoS")
+if _qos is not None:
+    os.environ["RUN_TESTS_QOS"] = _qos
 
 # настоящая карта: test_merge_gate читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его выбрать (#288)
 real_map = json.load(open(os.path.join(PLUGIN, "scripts", "affected-map.json"), encoding="utf-8"))
