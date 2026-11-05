@@ -1005,4 +1005,4 @@ head, как в `pantheon review status`, а «принять» до «верн�
     python3 -I tests/test_hookd.py        # демон хуков: сверка решений с медленным путём, откаты, канарейка, сборка
     python3 -I scripts/bench.py -n 20     # замер холодного вызова хуков: медиана и p95 в мс (не тест; --out, --hooks)
     python3 -I scripts/bench.py --hookd   # холодный guard против пути через демон, вперемешку (не тест)
-    python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось
+    python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось; владелец пула PID 1 — не выход

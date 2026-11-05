@@ -113,6 +113,31 @@ def test_worker_exits_on_parent_change():
           (r.returncode, r.stdout, r.stderr[-300:]))
 
 
+def test_owner_pid1():
+    """metis-0805: владелец пула — сам PID 1 (контейнер без init). ppid воркера 1 с самого старта — это живой родитель:
+    сторож не выходит сразу, а выходит только при смене ppid. Владелец не 1, а ppid 1 — родитель умер, выход сразу.
+    Подмена os.getppid в отдельном процессе; process_pool передаёт воркеру pid владельца (initargs)."""
+    code = ("import os, sys, time\nsys.path.insert(0, sys.argv[1])\nimport _orphan_pool as m\n"
+            "m.WATCH_EVERY = 0.05\nos.getppid = lambda: 1\nm.die_with_parent(int(sys.argv[2]))\ntime.sleep(0.4)\n"
+            "print('жив', flush=True)\nos.getppid = lambda: 4242\ntime.sleep(2)\nprint('не вышел', flush=True)\n")
+    r = subprocess.run([sys.executable, "-I", "-c", code, HERE, "1"], capture_output=True, text=True, timeout=30)
+    check("владелец пула PID 1: ppid 1 с начала — сторож живёт, смена ppid — выход 0",
+          r.returncode == 0 and r.stdout.split() == ["жив"], (r.returncode, r.stdout, r.stderr[-300:]))
+    r = subprocess.run([sys.executable, "-I", "-c", code, HERE, "777"], capture_output=True, text=True, timeout=30)
+    check("владелец пула не PID 1, ppid воркера 1 — родитель умер, выход 0 сразу",
+          r.returncode == 0 and r.stdout.split() == [], (r.returncode, r.stdout, r.stderr[-300:]))
+    sys.path.insert(0, HERE)
+    import _orphan_pool as m
+    real = m.ProcessPoolExecutor
+    m.ProcessPoolExecutor = lambda **kw: kw
+    try:
+        kw = m.process_pool(2)
+    finally:
+        m.ProcessPoolExecutor = real
+    check("process_pool передаёт воркеру pid владельца пула (initargs)",
+          kw.get("initializer") is m.die_with_parent and kw.get("initargs") == (os.getpid(),), kw)
+
+
 if __name__ == "__main__":
     if not sem_ok():
         print("пропущено: песочница окна не даёт семафоры — пул multiprocessing")
@@ -120,5 +145,6 @@ if __name__ == "__main__":
     else:
         test_workers_die_with_parent()
         test_worker_exits_on_parent_change()
+    test_owner_pid1()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)

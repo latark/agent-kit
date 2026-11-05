@@ -906,8 +906,6 @@ def cmd_owner_log(ev):
     src = ev.get("source")
     if src is not None and src != "user":
         return 0  # расписание, /loop, пробуждение, SDK: текст пишет не владелец (поле Claude Code 2.1.29x)
-    if src is None:
-        hook_log("owner-log", "в событии нет поля source — сверка только по транскрипту")
     t = time.time()
     tpath = ev.get("transcript_path") or ""
     sid = ev.get("session_id") or ""
@@ -918,6 +916,8 @@ def cmd_owner_log(ev):
     # иначе mark = 0 и годилось бы любое вложение файла, появившегося позже (--fork-session с историей)
     mark = file_size(tpath) if tpath and os.path.isfile(tpath) else None
     start = max(0, mark - 2000000) if mark is not None else (0 if tpath else None)
+    if src is None:  # после mark: по этой строке test_owner_log_gap знает, что место уже запомнено (metis-0805)
+        hook_log("owner-log", "в событии нет поля source — сверка только по транскрипту")
     entry, queued, extended, skipped = None, None, False, set()
     deadline = t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)
     while True:  # Claude Code пишет транскрипт сам и с задержкой: ждём запись этого ввода

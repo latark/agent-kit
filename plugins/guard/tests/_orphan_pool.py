@@ -12,6 +12,8 @@
 Воркеры гаснут, канал resource_tracker закрывается, и он выходит сам. Родитель при старте — тот, кто запустил
 воркер: при spawn и fork это сам пул, при forkserver (Linux, 3.14) — процесс forkserver, а он выходит, когда умер
 пул. Остаток: родитель умер ещё до запуска сторожа — ppid уже 1, это тоже выход; subreaper в этот миг не ловится.
+Владелец пула — сам PID 1 (контейнер без init, metis-0805): ppid воркера 1 с самого старта, и это живой родитель, а не
+launchd. Тогда выход — только по смене ppid: владелец (его pid пул передаёт воркеру, initargs) и есть 1.
 """
 import os
 import threading
@@ -21,18 +23,19 @@ from concurrent.futures import ProcessPoolExecutor
 WATCH_EVERY = 0.5
 
 
-def _watch(start):
+def _watch(start, owner):
     while True:
         ppid = os.getppid()
-        if ppid != start or ppid == 1:
+        if ppid != start or (ppid == 1 and owner != 1):
             os._exit(0)
         time.sleep(WATCH_EVERY)
 
 
-def die_with_parent():
-    """initializer воркера: поток-сторож, демон — обычному выходу воркера он не мешает."""
-    threading.Thread(target=_watch, args=(os.getppid(),), name="orphan-watch", daemon=True).start()
+def die_with_parent(owner=None):
+    """initializer воркера: поток-сторож, демон — обычному выходу воркера он не мешает. owner — pid владельца пула
+    (process_pool передаёт свой): 1 — владелец сам PID 1, ppid 1 у воркера — живой родитель."""
+    threading.Thread(target=_watch, args=(os.getppid(), owner), name="orphan-watch", daemon=True).start()
 
 
 def process_pool(workers):
-    return ProcessPoolExecutor(max_workers=workers, initializer=die_with_parent)
+    return ProcessPoolExecutor(max_workers=workers, initializer=die_with_parent, initargs=(os.getpid(),))

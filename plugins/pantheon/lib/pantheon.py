@@ -171,8 +171,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
   pantheon reap --auto                  плановый проход раз в 30 мин (metis-0617): гасит только брошенное старше
                                         30 мин — сироты multiprocessing и сироты в песочнице окна, процессы удалённых
-                                        worktree и закрытых задач, language server без живого claude; строка
-                                        «погашено: …» в alerts.md
+                                        worktree и закрытых задач, language server без живого claude (прямо под
+                                        launchd, ppid 1, — только в удалённой копии или копии закрытой задачи; в
+                                        живой копии не гасит); строка «погашено: …» в alerts.md
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
