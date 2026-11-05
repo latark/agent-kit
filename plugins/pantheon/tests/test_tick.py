@@ -543,7 +543,7 @@ def main():
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
-                                     "sessync find", "sessync find *",
+                                     "sessync find", "sessync find *", "pantheon qmd where *",
                                      "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr list",
                                      "gh pr list *", "gh pr edit *"])
     others = {n: load(n)["sandbox"]["excludedCommands"] for n in ("athena-shop", "metis-pantheon", "workshop",
