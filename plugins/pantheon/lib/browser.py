@@ -37,7 +37,7 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   владелец сам (classify, PAY_*, IMPORTANT_*; адреса — страница, formaction или action формы, href ссылки). Нажатие —
   вид только по тегу, без интерактивных предков (click_kind); без согласия — только обычный класс, удаляющее нажатие
   — как delete; прокрутка мгновенная, точка сверяется перед нажатием (point_js). Форма уходит на другой сайт или в
-  другое окно (formtarget, target, <base target>) — отказ.
+  другое окно (formtarget, target, <base target>), <base href> страницы другого origin — отказ.
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
@@ -879,7 +879,9 @@ WIDGET_ROLES = frozenset(("button", "link", "menuitem", "menuitemcheckbox", "men
 TEXT_TYPES = ("", "text", "search", "email", "tel", "url", "number")
 
 # Факты страницы для прохода: цель, её предки, поля и кнопки формы. У формы — действующие адрес, метод и окно
-# отправки: formaction, formmethod, formtarget нажимаемой кнопки важнее атрибутов формы, окно без них — <base target>. Классифицирует Python (тяжёлые регулярки в
+# отправки: formAction, formMethod, formTarget нажимаемой кнопки важнее свойств формы, окно без них — <base target>.
+# Адреса — уже разобранные браузером свойства (относительно document.baseURI, как при отправке), а не new URL от
+# location.href; свойства формы — геттерами HTMLFormElement.prototype: поле name="action" их не подменит. Классифицирует Python (тяжёлые регулярки в
 # странице вешают вкладку). Прокрутка мгновенная: плавная (CSS scroll-behavior) сдвинула бы точку после замера (K4)
 FACTS_JS = r"""/*charon-facts*/(() => { const S = %s; const e = document.querySelector(S); if (!e) return null;
 e.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); %s
@@ -898,9 +900,9 @@ const info = n => { const c = n.tagName === 'LABEL' ? n.control : null; return {
     .join(' ').slice(0, 300) }; };
 const chain = []; for (let n = hit ? p : e; n && n.nodeType === 1 && chain.length < 40; n = n.parentElement) chain.push(info(n));
 const f = (e.form && e.form.tagName === 'FORM') ? e.form : e.closest('form');
-const abs = v => { try { return new URL(v || location.href, location.href).href; } catch (_) { return 'invalid:' + v; } };
 const sb = (hit ? p : e).closest('button,input[type=submit],input[type=image]'), sub = f && sb && sb.form === f ? sb : null;
-const bt = document.querySelector('base[target]');
+const bt = document.querySelector('base[target]'), sp = k => String(sub[k] || '');
+const fp = k => { const d = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, k); return d && d.get ? String(d.get.call(f)) : ''; };
 const flab = n => String((n.labels && n.labels[0] && n.labels[0].innerText) || at(n, 'aria-label') || at(n, 'placeholder')
   || '').trim().slice(0, 80);
 const nodes = f ? [...f.elements, ...f.querySelectorAll('[contenteditable]')]
@@ -919,11 +921,12 @@ const buttons = f ? [...f.querySelectorAll('button,input[type=submit],input[type
 const heads = f ? [...f.querySelectorAll('legend,h1,h2,h3')].slice(0, 5).map(n => String(n.innerText).trim().slice(0, 120)) : [];
 return { url: location.href, x, y, w: r.width, h: r.height, hit, chain, el: info(e), elabel: lab(e),
   focused: document.activeElement === e, fields, buttons, heads,
-  form: f ? { action: abs(sub && sub.hasAttribute('formaction') ? at(sub, 'formaction') : at(f, 'action')),
-              own: abs(at(f, 'action')),
-              method: String((sub && at(sub, 'formmethod')) || at(f, 'method') || 'get').toLowerCase(),
-              target: String(sub && sub.hasAttribute('formtarget') ? at(sub, 'formtarget')
-                             : f.hasAttribute('target') ? at(f, 'target') : bt ? at(bt, 'target') : '').toLowerCase(),
+  base: document.baseURI,
+  form: f ? { action: sub && sub.hasAttribute('formaction') ? sp('formAction') : fp('action'),
+              own: fp('action'),
+              method: (sub && sub.hasAttribute('formmethod') ? sp('formMethod') : fp('method')).toLowerCase(),
+              target: ((sub && sub.hasAttribute('formtarget') ? sp('formTarget') : fp('target'))
+                       || (bt ? at(bt, 'target') : '')).toLowerCase(),
               label: [at(f, 'aria-label'), at(f, 'id'), at(f, 'name')].join(' ').slice(0, 200) } : null }; })()"""
 # Перед нажатием (K4): рамка цели та же и точка всё ещё попадает в неё
 POINT_JS = r"""/*charon-point*/(() => { const S = %s; const e = document.querySelector(S); if (!e) return null;
@@ -1017,6 +1020,15 @@ def _path_of(u):
     with contextlib.suppress(ValueError):
         return urlsplit(u).path or "/"
     return "/"
+
+
+def _origin(u):
+    """(схема, хост, порт) адреса; None — не разобрать."""
+    with contextlib.suppress(ValueError):
+        x = urlsplit(u)
+        if x.scheme and x.hostname:
+            return x.scheme.lower(), x.hostname.lower(), x.port
+    return None
 
 
 def _path_query(u):
@@ -1373,6 +1385,11 @@ def do_act(req, win, domains):
             return "done", f"нажато {sel} ({kind}) на {site}; теперь {after_click(b, domains, task, win)}", ""
         # удаляющее нажатие (надпись, атрибуты или адрес ссылки) — дальше как delete: поручение и согласие (F3)
     kind = cls if cls.startswith("delete") else "ordinary"
+    if op != "click":                             # <base href> чужого origin: относительные адреса страницы — туда
+        base = facts.get("base")
+        if not isinstance(base, str) or _origin(base) is None or _origin(base) != _origin(facts["url"]):
+            raise Refuse(f"{op} {sel}: <base href> страницы ведёт на {str(base)[:120]}, а не на адрес вкладки — "
+                         "отправки нет")
     form = facts.get("form") if isinstance(facts.get("form"), dict) else None
     if form is not None and op != "click":       # click — флажок, label или ссылка: форму не отправляет
         action = form.get("action")               # C13: действующий адрес — formaction кнопки или action формы

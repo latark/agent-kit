@@ -155,6 +155,7 @@ class Daemon:
                     return 200, json.dumps(None)
                 out = copy.deepcopy(el)
                 out["url"] = self.tab
+                out.setdefault("base", self.tab)
                 out["focused"] = "e.focus();" in expr and self.focusable
                 return 200, json.dumps(out)
             if expr.startswith("/*charon-point*/"):
@@ -671,9 +672,34 @@ for form, what in ((tform(own=SITE + "/checkout"), "собственный actio
     got = B.classify(facts(SEND, fields=[TITLE], form=form), "submit")[0]
     check(f"[B2] classify: {what} — оплата", got == "pay", got)
 js = B.facts_js("#a")
-check("[B2] FACTS_JS: адрес, метод и окно отправки — formaction, formmethod, formtarget кнопки, target формы, <base target>",
-      all(x in js for x in ("at(sub, 'formaction')", "at(sub, 'formmethod')", "at(sub, 'formtarget')",
-                            "at(f, 'target')", "base[target]", "own: abs(at(f, 'action'))")))
+check("[B2][B4] FACTS_JS: адрес, метод и окно отправки — разобранные браузером formAction, formMethod, formTarget "
+      "кнопки, свойства формы геттерами прототипа, <base target>, document.baseURI; не new URL от location.href",
+      all(x in js for x in ("sp('formAction')", "sp('formMethod')", "sp('formTarget')", "fp('target')",
+                            "own: fp('action')",
+                            "action: sub && sub.hasAttribute('formaction') ? sp('formAction') : fp('action')", "base[target]", "HTMLFormElement.prototype",
+                            "base: document.baseURI"))
+      and "new URL(" not in js and "location.href, location.href" not in js)
+
+# [B4] <base href> чужого origin: относительный action ушёл бы туда — отказ до согласия
+D.page(SITE + "/z", {"#evil": dict(facts(SEND, fields=[TITLE], form=tform()), base="https://evil.com/"),
+                     "#port": dict(facts(SEND, fields=[TITLE], form=tform()), base="https://www.avito.ru:8443/"),
+                     "#same": dict(facts(SEND, fields=[TITLE], form=tform()), base=SITE + "/static/")})
+os.environ["PANTHEON_FAKE_IDLE"] = "5"
+finger(0)
+clear_touch()
+for sel, word in (("#evil", "evil.com"), ("#port", "8443")):
+    res = act("submit", sel, SITE + "/z")
+    check(f"[B4] {sel}: <base href> другого origin — отказ даже с пальцем, окна Touch ID нет, нажатия нет",
+          res["state"] == "refused" and "base href" in res["why"] and word in res["why"] and not touches()
+          and not D.clicked(), res)
+res = act("delete", "#evil", SITE + "/z")
+check("[B4] delete с <base href> чужого origin — тоже отказ", res["state"] == "refused" and "base href" in res["why"]
+      and not D.clicked(), res)
+res = act("submit", "#same", SITE + "/z")
+check("[B4] <base href> того же origin (другой путь) — отправка как обычно", res["state"] == "done"
+      and len(D.clicked()) == 1, res)
+finger(3)
+clear_touch()
 
 # --- [F3] удаление ------------------------------------------------------------------------------------------------
 DEL = SITE + "/items"
