@@ -334,7 +334,8 @@ def t_run_tests():
     check("run-tests: ruff недоступен — строка «skip lint_ratchet · пропущено» и код тестов",
           r.returncode == 0 and "skip lint_ratchet · пропущено" in r.stdout, r.stdout[-800:])
     r = runner(root, "--only", "x/test_a.py", env={"LINT_RATCHET_RUFF": stub})
-    check("run-tests --only: храповик не идёт", r.returncode == 0 and "храповик" not in r.stdout, r.stdout[-800:])
+    check("run-tests --only (дозапуск outside пишет запись полного набора): храповик идёт и краснит — код 1",
+          r.returncode == 1 and r.last.startswith("run-tests: храповик красный") and "big.py" in r.last, r.stdout[-800:])
     alone = repo({"plugins/x/tests/test_a.py": "print('ok a')\nprint('1 из 1 прошли')\n"})
     r = runner(alone, env={"LINT_RATCHET_RUFF": stub})
     check("run-tests: репозиторий без храповика — без строки храповика", r.returncode == 0 and "храповик" not in r.stdout
