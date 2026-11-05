@@ -4145,6 +4145,24 @@ def _journal(body):
     return out
 
 
+FAILURE_CLASSES = ("непонятная задача", "неверный подход", "не хватило контекста", "трудная логика")
+FAILURE_RE = re.compile(r"^провал:\s*([^—\n]*?)\s*(?:—|$)")
+
+
+def failure_counts(tasks, t, days=7):
+    """metis-0859: строки журнала «провал: <класс> — <довод>» за days дней → {класс: [id задач по строкам]}.
+    Класс вне четырёх — «прочее». Все четыре ключа есть всегда."""
+    out = {c: [] for c in FAILURE_CLASSES}
+    since = t - days * 86400
+    for tid in sorted(tasks):
+        for when, _actor, text, _ln in _journal(tasks[tid][2]):
+            m = FAILURE_RE.match(text.strip())
+            if not m or when is None or when < since:
+                continue
+            out.setdefault(m.group(1) if m.group(1) in FAILURE_CLASSES else "прочее", []).append(tid)
+    return out
+
+
 def tail_lines(tasks, t, days=TAIL_DAYS):
     """[(id задачи, строка журнала)] со словами хвоста, не старше days дней. Строки самого тика (actor check) не считаются.
     Не хвост (metis-0572): в строке id другой существующей задачи (в том числе без префикса — «0366», если такая задача
