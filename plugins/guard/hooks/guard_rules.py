@@ -63,7 +63,10 @@ PostToolUse (Bash:
                 (`pantheon consent`, metis-0562), -R и --body-file в gh ограничены, сети у окна нет;
   cdp-role    — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
                 по всему тексту команды, кроме слов в сообщении git commit, gh pr|issue, pantheon task (metis-0624);
-  push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
+  daemon-roster — реестр демона Claude Code ~/.claude/daemon/roster.json (в записях ключи сокетов) ролям, субагентам
+                и окну роли целиком не читать: Read и Grep по файлу и папке daemon, Bash — по тексту (roster.json и
+                daemon), кроме сообщения, как у cdp-role; нужные поля — `pantheon roster` (metis-0871);
+  push       — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
                  репозитории по git remote — только Метида или её лид. Во всех режимах — запор (P1-4, guard 0.5.4,
@@ -104,7 +107,7 @@ hooks/__pycache__ (.pyc), а не компилируется на каждый �
   В окне роли хук плагина молчит и на том инструменте, который в этой же сессии уже проверил строгий guard (метка
   сессии, шапка guard.py). Управляемая и строгая копии проверяют всегда.
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
-исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, hq-projects, cdp-role, push, terminal,
+исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, hq-projects, cdp-role, daemon-roster, push, terminal,
 hq-telegram, hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
@@ -150,7 +153,7 @@ def configure():
     Демон только ускоряет: любая его ошибка — медленный путь с теми же правилами (принцип F1, README guard)."""
     global OFF, HOME, MODE, FAIL_LOG, MARKET_GUARD, CDP_DAEMON, TG_SCRIPT, TG_TESTS, STATE_DIR, OWNER_LOG, \
         DOMAINS_FILE, LEGACY_DOMAINS_FILE, POLICY_FILE, AI_HOME, PANTHEON, PANTHEON_VIEW, TEMP_ROOTS, CDP_TOKEN_DIR, \
-        HESTIA_CONSENT_DIR, PROTECTED, EVENT_NAME
+        HESTIA_CONSENT_DIR, PROTECTED, EVENT_NAME, DAEMON_DIR
     argv = sys.argv[1:]
     # событие прошлого вызова (долг С2 argus, metis-0330): с ним сбой нового вызова в том же процессе судился бы как
     # сбой на Stop — код 0 вместо отказа
@@ -175,6 +178,7 @@ def configure():
     PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
     TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
     CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке; cdp-role
+    DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")  # реестр демона Claude Code roster.json — daemon-roster
     HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")  # метки «да» окна hestia
     PROTECTED = protect_config.protected()
     # разбор Bash кэширован по (команда, папка), а раскрывает ~, $HOME и $TMPDIR — другой контекст, разбор заново
@@ -2899,12 +2903,15 @@ def _cdp_hit(word):
     return bool(CDP_DIRECT.search(word) or CDP_TARGET.search(word))
 
 
-def _cdp_text_only(cmd, cwd):
+def _cdp_text_only(cmd, cwd, hit=None):
     """metis-0624: порт, пароль и имя демона стоят только значением флага-сообщения (CDP_TEXT_CMDS) у одной простой
     команды: git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
     --text/--note/--title… и поле=текст в task new|set. Вне кавычек — ни ;, &, |, ни перенаправлений; первое слово
     команды — ровно её имя, без присваивания, обёртки и пути перед ним (GH_HOST=… gh, env X=… git — metis-0630);
-    каждое слово вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
+    каждое слово вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст.
+    hit — что искать в словах вне сообщения: по умолчанию слова демона браузера (_cdp_hit), у daemon-roster — имя
+    реестра (_roster_hit, metis-0871)."""
+    hit = hit or _cdp_hit
     bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
     if re.search(r"[;&|<>\n\r`\\'\"]", bare):
         return False
@@ -2937,7 +2944,7 @@ def _cdp_text_only(cmd, cwd):
         elif "=" in a and a.split("=", 1)[0] in fields:  # pantheon task set ID result="…"
             kind, value, i = "text", a.split("=", 1)[1], i + 1
         else:
-            if _cdp_hit(a):
+            if hit(a):
                 return False
             i += 1
             continue
@@ -2985,6 +2992,51 @@ def check_cdp_role(event, tool, tool_input):
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
             "Сайт со входом владельца — Харон, после metis-0077; публичные страницы — веб-поиск prometheus без входов. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos)." + hint)
+
+
+# daemon-roster (metis-0871, «да» владельца 06.11): в записях реестра демона Claude Code ~/.claude/daemon/roster.json
+# лежат ключи его локальных сокетов (rvAuth, ptyAuth …); 06.11 dev-opus при сверке вывел их в транскрипт. Нужные поля
+# (id, pid, startedAt воркеров и updatedAt) печатает `pantheon roster`: код Пантеона читает файл сам и берёт только их
+# (P.roster_safe). Ролям, субагентам и главной сессии окна роли: Read и Grep по файлу (Grep — и по папке daemon),
+# Bash — по всему тексту команды, где есть имя roster.json и слово daemon; исключение — текст коммита, PR и задачи,
+# как у cdp-role (_cdp_text_only). Grep по папке выше (~/.claude, ~), имя файла глобом (daemon/*.json) и чтение своим
+# скриптом — намеренный обход, граница — песочница: разбор Bash не наращиваем (README guard, «Остатки»). Сессии
+# владельца без роли правило не касается; control.key и остальное в папке daemon оно не закрывает.
+ROSTER_NAME = re.compile(r"roster\.json", re.I)
+ROSTER_DAEMON = re.compile(r"daemon", re.I)
+ROSTER_REASON = (
+    "Правило daemon-roster: ~/.claude/daemon/roster.json целиком не читай — в его записях ключи сокетов демона "
+    "Claude Code (rvAuth, ptyAuth), они попали бы в транскрипт. Нужные поля без ключей печатает `pantheon roster` "
+    "(JSON: updatedAt и у каждого воркера id, pid, startedAt); в коде Пантеона — P.roster_safe(). Искать по исходникам "
+    "— инструментом Grep по папке репозитория.")
+ROSTER_TEXT_HINT = ("\nИмя файла в тексте коммита, PR или задачи проходит, если это одна простая команда (без &&, |, "
+                    "$(…), 2>&1 и слов вроде X=… или env перед git, gh, pantheon), а текст стоит в -m/--body/--text/"
+                    "--note или в файле .md через -F/--body-file; заголовок задачи — через --title.")
+
+
+def _roster_hit(word):
+    return bool(word and ROSTER_NAME.search(word))
+
+
+def check_daemon_roster(event, tool, tool_input):
+    if not (limited(event)[0] or window_role()):
+        return None
+    if tool in ("Read", "NotebookRead", "Grep"):
+        roster = os.path.realpath(os.path.join(DAEMON_DIR, "roster.json"))
+        daemon = os.path.realpath(DAEMON_DIR)
+        # сам файл или папка daemon (Grep по ней читает и файл); папка выше — нет; Glob только перечисляет имена
+        if any(_inside(roster, [p]) and _inside(p, [daemon]) for p, _ in read_paths(event, tool, tool_input)):
+            return ROSTER_REASON
+        return None
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    text = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
+    if not (ROSTER_NAME.search(text) and ROSTER_DAEMON.search(text)):
+        return None
+    if _cdp_text_only(cmd, os.path.realpath(event.get("cwd") or os.getcwd()), hit=_roster_hit):
+        return None
+    return ROSTER_REASON + ROSTER_TEXT_HINT
 
 
 def push_foreign(texts, cwd, cmds, pdir):
@@ -4370,7 +4422,7 @@ def check_roles(event, tool, tool_input):
     предупреждениями шлюза слияния этого события (metis-0650); отказ следующего правила их отбрасывает."""
     notes = []
     for rule, check in (("private", check_private), ("hq-projects", check_hq_projects), ("cdp-role", check_cdp_role),
-                        ("push", check_push),
+                        ("daemon-roster", check_daemon_roster), ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role),
                         ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env), ("hestia", check_hestia)):
         if rule not in OFF:
