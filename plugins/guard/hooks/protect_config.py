@@ -50,14 +50,19 @@ PROJECT_ITEMS = {"hooks", "skills", "commands"}
 OWN_ITEMS = {"skills", "commands", "agents"}
 # Ревью #347 (Б2): frontmatter судим классом, а не списком запретных ключей — у YAML много форм ключа («!!str k»,
 # «&a k», «"k"», «? k», алиас «*k»). Строка frontmatter у левого края — только «ключ: значение», ключ из списка ниже
-# (без регистра, «-» и «_»), значение не начинается с { [ & * ! ? % @ `; с отступом пробелами — значение ключа выше;
-# пустая или «# комментарий» — можно; любая другая — отказ
+# (без регистра, «-» и «_»), значение не начинается с & * ! ? % @ ` (якорь, алиас, тег, зарезервированное); строка с
+# отступом пробелами — значение ключа выше, а похожая на «ключ:» — только под пустым значением (вложенный словарь)
+# или блоком | и >; пустая или «# комментарий» — можно; любая другая — отказ. Вложенное ({…}, […], словарь под
+# ключом) — данные разрешённого ключа, а не ключ верхнего уровня
 SAFE_KEYS = {"skills": {"name", "description", "argumenthint", "whentouse", "disablemodelinvocation", "userinvocable",
                         "version", "license", "compatibility", "metadata"},
              "agents": {"name", "description", "model", "color", "effort", "maxturns"}}
 SAFE_KEYS["commands"] = SAFE_KEYS["skills"]
 FM_LINE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]+(.*))?", re.ASCII)
-VALUE_BAD_START = set("{[&*!?%@`")
+VALUE_BAD_START = set("&*!?%@`")
+# строка с отступом, похожая на ключ: под простым значением («name: x\n  allowed-tools: Bash») YAML её не примет,
+# а запасной разбор Claude Code может взять — отказ
+INDENT_KEY = re.compile(r"\s+[^\s#][^:]*:(?:\s|\Z)")
 # имя роли проекта: простое слово (кавычки можно); иначе — не разобрать, отказ
 ROLE_NAME = re.compile(r"""(["']?)([A-Za-z0-9_.-]+)\1(?:\s+#.*)?""", re.ASCII)
 # Ревью #347 (Б3): роль проекта берётся раньше ~/.claude/agents — с именем роли Пантеона она подменяет её (шлюз
@@ -236,7 +241,7 @@ def _text_risk(text, kinds, path=""):
     if i >= len(lines) or lines[i].strip() != "---":
         return None
     safe = set.intersection(*(SAFE_KEYS[k] for k in kinds))
-    top = False  # был ключ у левого края: строки с отступом — его значение
+    top = None  # значение последнего ключа у левого края; None — ключа ещё не было
     for line in lines[i + 1:]:
         if line.rstrip() == "---":
             break
@@ -244,8 +249,10 @@ def _text_risk(text, kinds, path=""):
             continue
         shown = line.strip()[:60]
         if line.startswith(" "):
-            if not top or line.strip() in ("---", "..."):
+            if top is None or line.strip() in ("---", "..."):
                 return f"строка frontmatter «{shown}» с отступом не под ключом (форма YAML не из простых)"
+            if INDENT_KEY.match(line) and top != "" and top[:1] not in "|>":
+                return f"строка frontmatter «{shown}» с отступом похожа на ключ под простым значением"
             continue
         m = FM_LINE.fullmatch(line)
         if not m:
@@ -262,7 +269,7 @@ def _text_risk(text, kinds, path=""):
                 return f"во frontmatter name роли «{shown}» не разобрать — нужно простое имя"
             if _pantheon_role(m.group(2)):
                 return f"name роли «{m.group(2)}» — роль Пантеона: роль проекта подменила бы её"
-        top = True
+        top = value
     return None
 
 

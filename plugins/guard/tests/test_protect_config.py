@@ -163,7 +163,8 @@ def main():
          W(skill, "---\nname: x\n---\nТекущая ветка: !`git branch --show-current`\n")),
         *[(f"skills: ключ {k} — отказ", "deny", APP, COORD, W(skill, fm(k))) for k in (
             "hooks:\n  PreToolUse: []", "model: opus", "context: fork", "allowed_tools: Bash", "Allowed-Tools: Bash",
-            '"allowed-tools": Bash', "metadata: {a: 1, allowed-tools: Bash}", "  allowed-tools: Bash")],
+            '"allowed-tools": Bash', "  allowed-tools: Bash", "name: x\n  allowed-tools: Bash",
+            "description: d\n    hooks: {}")],
         ("commands: allowed-tools — отказ", "deny", APP, COORD, W(APP + "/.claude/commands/x.md", fm("allowed-tools: Bash"))),
         ("commands: !`cmd` — отказ", "deny", APP, LEAD, W(APP + "/.claude/commands/x.md", "Статус: !`git status`\n")),
         *[(f"agents: ключ {k} — отказ", "deny", APP, COORD, W(APP + "/.claude/agents/x.md", fm(k))) for k in (
@@ -187,6 +188,10 @@ def main():
             "agent: Explore", "allowed-tools : Bash", "name:x")],
         ("skills: metadata вложенным словарём — можно", "allow", APP, COORD,
          W(skill, fm("metadata:\n  author: a\n  allowed-tools: Bash"))),
+        ("skills: metadata и argument-hint потоком {…} и […] — можно (вложенное — данные)", "allow", APP, COORD,
+         W(skill, fm("metadata: {a: 1, allowed-tools: Bash}\nargument-hint: [msg]"))),
+        ("skills: description блоком > со строкой «ключ:» внутри — можно", "allow", APP, COORD,
+         W(skill, fm("description: >\n  пример: текст\n  ещё"))),
         ("skills: frontmatter с отступом у первой строки — отказ", "deny", APP, COORD,
          W(skill, "---\n  name: x\n  allowed-tools: Bash\n---\nтекст\n")),
         ("skills: строка «  ---» внутри frontmatter — отказ", "deny", APP, COORD,
