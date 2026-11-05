@@ -301,7 +301,7 @@ FNV-1a 64 и оба решения (`slow=<код>:<deny|ask|allow>`, `daemon=�
 2. Открыть «Конфиденциальность и безопасность → Файлы и папки»:
    `open "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"`.
    Найти `pantheon-hookd` и включить нужные папки. Если его нет в списке — «Полный доступ к диску»
-   (`…?Privacy_AllFiles`), кнопка «+», ⌘⇧G и путь `~/.cache/pantheon/hookd/bin/pantheon-hookd`.
+   (`…?Privacy_AllFiles`), значок «+», ⌘⇧G и путь `~/.cache/pantheon/hookd/bin/pantheon-hookd`.
 3. Перезапустить службу: `launchctl kickstart -k gui/$(id -u)/pantheon.svc.hookd`.
 4. Снова `--check`: в таблице везде «есть».
 
