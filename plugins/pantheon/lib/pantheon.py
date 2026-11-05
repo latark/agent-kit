@@ -7026,6 +7026,7 @@ def _attach(name):
     return m
 
 
+_attach("review_rules")   # правило вердиктов argus — ядро защит (metis-0858); review.py берёт его через P
 _attach("review")
 _attach("plugins")
 _attach("taskcli")

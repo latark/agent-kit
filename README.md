@@ -223,6 +223,7 @@
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, сборка окон `sandbox_build` в
   `plugins/pantheon/lib/pantheon.py`, с metis-0598 `plugins/pantheon/hooks/ctx.py`, `plugins/pantheon/hooks/hooks.json`,
   `plugins/pantheon/lib/merge.py`, `plugins/pantheon/lib/plugin_map.py`, `plugins/pantheon/plugins-by-role.toml`,
+  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
