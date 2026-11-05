@@ -669,6 +669,29 @@ def test_pantheon_wake_fresh_sees_limited():
     check("свежей сессией" in buf.getvalue(), f"нет свежего старта в выводе: {buf.getvalue()!r}")
 
 
+def test_pantheon_wake_fresh_busy_skip_0241():
+    # metis-0241, ветвь fresh_start: имя уже поднимает другой процесс (замок start-<имя> занят, fresh-busy) — пропуск:
+    # код 0, «пропуск: имя — причина», ни «поднимаю», ни тревоги «не поднялась (код …)»
+    e = Env()
+    e.task("hermes-site")
+    e.limited("hermes-site")
+    e.now(at(2026, 10, 19, 8, 0) + 60)
+    saved = (P.fresh_reason, P.state_files)
+    P.fresh_reason = lambda a, t=None: "контекст большой"
+    P.state_files = lambda n: []
+    buf, err = io.StringIO(), io.StringIO()
+    try:
+        with P.lock("start-hermes-site", block=False) as held, contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(err):
+            rc = P._wake(False) if held else "замок не взят"
+    finally:
+        P.fresh_reason, P.state_files = saved
+    out = buf.getvalue()
+    check(rc == 0 and "пропуск: hermes-site — другой процесс уже поднимает" in out and "поднимаю" not in out
+          and "не поднялась" not in err.getvalue() and "не поднялась" not in alerts_text(e) and not e.calls,
+          f"fresh-busy: код {rc!r}, вывод {out!r}, stderr {err.getvalue()!r}, тревоги {alerts_text(e)!r}, вызовы {e.calls}")
+
+
 def test_wake_waiting_blockers():
     # все задачи с «владелец: id» в STATUS.md — молчит
     e = Env()
