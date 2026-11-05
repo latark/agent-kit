@@ -1688,15 +1688,24 @@ def status():
     lines.append(f"сбоев guard за сутки: {n_fail}")
     if n_fail:
         warn.append("сбои guard")
-    plug = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "managed-settings.json")
+    # сверка — с проверенным деревом guard (verified.json), как у прохода (merge.managed_source), а не с клоном маркетплейса:
+    # клон впереди выпуска, и status показывал «отстали» там, где проход ничего не покажет (metis-0718)
     if not os.path.exists(MANAGED):
         lines.append("управляемые настройки: НЕ установлены (README guard, sudo)")
         warn.append("управляемые настройки")
-    elif open(MANAGED, "rb").read() != (open(plug, "rb").read() if os.path.exists(plug) else b""):
-        lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
-        warn.append("управляемые настройки")
     else:
-        lines.append("управляемые настройки: установлены, совпадают с guard")
+        try:
+            src = merge_mod().managed_source()
+        except Exception:  # noqa: BLE001 — сбой разбора не ломает экран
+            src = None
+        if src is None:
+            lines.append("управляемые настройки: проверенного дерева guard нет — сверить не с чем (pantheon plugins accept)")
+            warn.append("управляемые настройки")
+        elif open(MANAGED, "rb").read() != src[1]:
+            lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
+            warn.append("управляемые настройки")
+        else:
+            lines.append("управляемые настройки: установлены, совпадают с guard")
     section("Защиты", lines)
 
     # синхронизация ~/.claude
