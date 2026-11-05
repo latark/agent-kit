@@ -30,7 +30,9 @@ CLAUDE_ITEMS = ("hooks", "agents", "plugins", "pantheon", "settings.json", "sett
                 "statusline.sh", "bootstrap.sh", ".sync-held", ".sync-incoming", ".git", "tools", "CLAUDE.md", "rules",
                 "commands", "output-styles")
 HOME_ITEMS = (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile", ".profile", ".gitconfig",
-              ".config/git", ".ssh", ".claude.json", ".local/share/pantheon", ".local/bin", "Library/LaunchAgents")
+              ".config/git", ".ssh", ".claude.json", ".local/share/pantheon", ".local/bin", "Library/LaunchAgents",
+              # демон хуков guard (metis-0330): сокет и собранный клиент; plist pantheon.svc.hookd — в Library/LaunchAgents
+              ".cache/pantheon/hookd")
 SETTINGS_NAMES = {"settings.json", "settings.local.json"}
 # <репо>/.claude/<x> в любом репозитории, кроме ~/.claude: как agents (metis-0177). У ~/.claude свой список
 # CLAUDE_ITEMS: hooks и commands в нём есть, skills нет — ~/.claude/skills это правило не закрывает
