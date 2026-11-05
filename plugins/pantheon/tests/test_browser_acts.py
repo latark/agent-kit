@@ -683,7 +683,8 @@ check("[B2][B4] FACTS_JS: адрес, метод и окно отправки �
 # [B4] <base href> чужого origin: относительный action ушёл бы туда — отказ до согласия
 D.page(SITE + "/z", {"#evil": dict(facts(SEND, fields=[TITLE], form=tform()), base="https://evil.com/"),
                      "#port": dict(facts(SEND, fields=[TITLE], form=tform()), base="https://www.avito.ru:8443/"),
-                     "#same": dict(facts(SEND, fields=[TITLE], form=tform()), base=SITE + "/static/")})
+                     "#same": dict(facts(SEND, fields=[TITLE], form=tform()), base=SITE + "/static/"),
+                     "#p443": dict(facts(SEND, fields=[TITLE], form=tform()), base="HTTPS://WWW.Avito.ru:443/s/")})
 os.environ["PANTHEON_FAKE_IDLE"] = "5"
 finger(0)
 clear_touch()
@@ -698,6 +699,9 @@ check("[B4] delete с <base href> чужого origin — тоже отказ", 
 res = act("submit", "#same", SITE + "/z")
 check("[B4] <base href> того же origin (другой путь) — отправка как обычно", res["state"] == "done"
       and len(D.clicked()) == 1, res)
+res = act("submit", "#p443", SITE + "/z")
+check("[B4] <base href> с портом 443 и другим регистром — тот же origin, отправка как обычно", res["state"] == "done"
+      and len(D.clicked()) == 2, res)
 finger(3)
 clear_touch()
 

@@ -1022,12 +1022,13 @@ def _path_of(u):
     return "/"
 
 
-def _origin(u):
-    """(схема, хост, порт) адреса; None — не разобрать."""
+def _url_origin(u):
+    """(схема, хост, порт) адреса-строки, порт по умолчанию подставлен; None — не разобрать."""
     with contextlib.suppress(ValueError):
         x = urlsplit(u)
         if x.scheme and x.hostname:
-            return x.scheme.lower(), x.hostname.lower(), x.port
+            sch = x.scheme.lower()
+            return sch, x.hostname.lower().rstrip("."), x.port or {"http": 80, "https": 443}.get(sch)
     return None
 
 
@@ -1387,7 +1388,7 @@ def do_act(req, win, domains):
     kind = cls if cls.startswith("delete") else "ordinary"
     if op != "click":                             # <base href> чужого origin: относительные адреса страницы — туда
         base = facts.get("base")
-        if not isinstance(base, str) or _origin(base) is None or _origin(base) != _origin(facts["url"]):
+        if not isinstance(base, str) or _url_origin(base) is None or _url_origin(base) != _url_origin(facts["url"]):
             raise Refuse(f"{op} {sel}: <base href> страницы ведёт на {str(base)[:120]}, а не на адрес вкладки — "
                          "отправки нет")
     form = facts.get("form") if isinstance(facts.get("form"), dict) else None
