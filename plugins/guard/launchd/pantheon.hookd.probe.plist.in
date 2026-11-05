@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Разовое задание пробы доступа демона хуков (metis-0811). Заполняет scripts/hookd-install.sh (установка и проверка доступа):
-     @HOME@, @HOOKS@, @SVC@ и @OUT@ (файл итога в ~/.cache/pantheon/hookd/probe). Тот же pantheon-hookd, что у службы,
+     @HOME@ и @SVC@; итог pantheon-hookd всегда пишет в ~/.cache/pantheon/hookd/probe/result.json. Тот же pantheon-hookd, что у службы,
      под launchd: окна macOS «разрешить доступ» спрашивают про него, и разрешение достаётся службе. Запускается один раз:
      RunAtLoad без KeepAlive. LaunchOnlyOnce нет — он не дал бы повторить пробу до перезагрузки. plist лежит не в
      ~/Library/LaunchAgents; скрипт снимает задание (bootout), как только итог готов или вышел срок ожидания. Метка не
@@ -10,7 +10,7 @@
 <dict>
   <key>Label</key><string>pantheon.hookd.probe</string>
   <key>ProgramArguments</key>
-  <array><string>@SVC@</string><string>@HOOKS@</string><string>--tcc-probe</string><string>@OUT@</string></array>
+  <array><string>@SVC@</string><string>--tcc-probe</string></array>
   <key>RunAtLoad</key><true/>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>

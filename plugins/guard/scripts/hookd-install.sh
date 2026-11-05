@@ -20,6 +20,9 @@
 # как его дать (scripts/hookd-check.py tcc). --check делает ту же пробу: macOS ещё не спрашивала — спросит; отказ
 # уже записан — второй раз не спросит, и вывод даёт команду, которая открывает «Файлы и папки», и перезапуск службы.
 # Без доступа служба безопасна: демон отвечает «F perm», и вызов идёт медленным путём с правами окна (metis-0811 ч. 1).
+# Папку hooks pantheon-hookd берёт не из аргументов, а из ~/.cache/pantheon/hookd/bin/pantheon-hookd.hooks (0600) —
+# его пишет установка: так разрешение macOS не достаётся чужому коду, запущенному через pantheon-hookd (шапка
+# hooks/hookd-svc.c). --check сверяет этот файл с деревом, откуда зван.
 #
 # Внимание: плановый проход Пантеона (services_sync) снимает любой pantheon.svc.*, которого нет в schedule.toml, —
 # пока он не знает hookd, поставленная вручную служба проживёт до ближайшего прохода. Установка плановым проходом —
@@ -54,7 +57,7 @@ render() {
     /usr/bin/sed -e "s|@HOME@|$HOME|g" -e "s|@HOOKS@|$h|g" -e "s|@SVC@|$svc|g" "$tmpl"
 }
 render_probe() {
-    /usr/bin/sed -e "s|@HOME@|$HOME|g" -e "s|@HOOKS@|$h|g" -e "s|@SVC@|$svc|g" -e "s|@OUT@|$pdir/result.json|g" "$ptmpl"
+    /usr/bin/sed -e "s|@HOME@|$HOME|g" -e "s|@HOOKS@|$h|g" -e "s|@SVC@|$svc|g" "$ptmpl"
 }
 py() {
     /bin/sh "$h/python.sh" "$@"
@@ -117,14 +120,19 @@ case "${1:-}" in
                 bad="${bad:+$bad; }служба не загружена"
             fi
         fi
-        if [ -x "$svc" ]; then
+        pin=$(/bin/cat "$svc.hooks" 2>/dev/null)
+        if [ -n "$pin" ] && [ "$pin" != "$h" ]; then
+            echo "служба запускает демон из другого дерева guard: $pin, а не $h — переставить: /bin/sh $here/hookd-install.sh"
+            bad="${bad:+$bad; }служба другого дерева"
+        fi
+        if [ -x "$svc" ] && [ -n "$pin" ]; then
             if probe; then
                 py "$here/hookd-check.py" tcc "$pdir/result.json" "$svc" || bad="${bad:+$bad; }нет доступа к папкам"
             else
                 bad="${bad:+$bad; }проба доступа не прошла"
             fi
         else
-            echo "нет $svc — доступ к папкам не проверить (поставить службу: /bin/sh $here/hookd-install.sh)"
+            echo "нет $svc или $svc.hooks — доступ к папкам не проверить (поставить службу: /bin/sh $here/hookd-install.sh)"
             bad="${bad:+$bad; }нет pantheon-hookd"
         fi
         py "$here/hookd-check.py" windows || bad="${bad:+$bad; }папка демона открыта окнам"
@@ -146,6 +154,9 @@ sock=$top/hookd.sock
 /bin/sh "$h/hookd-build.sh" --svc >/dev/null || { echo "hookd-install: pantheon-hookd не собран (hookd-build.sh --svc)" >&2; exit 1; }
 /bin/mkdir -p "$top" "$HOME/.local/state/pantheon/logs" "$HOME/Library/LaunchAgents" \
     && /bin/chmod 700 "$top" || { echo "hookd-install: папки не созданы" >&2; exit 1; }
+# папка hooks для pantheon-hookd: только отсюда, не из аргументов (шапка hooks/hookd-svc.c)
+(umask 077 && printf '%s\n' "$h" >"$svc.hooks.new") && /bin/mv -f "$svc.hooks.new" "$svc.hooks" \
+    || { /bin/rm -f "$svc.hooks.new"; echo "hookd-install: $svc.hooks не записан" >&2; exit 1; }
 render >"$plist.new" && /usr/bin/plutil -lint "$plist.new" >/dev/null && /bin/mv -f "$plist.new" "$plist" \
     || { /bin/rm -f "$plist.new"; echo "hookd-install: plist не записан" >&2; exit 1; }
 "$lctl" bootout "gui/$uid/$label" 2>/dev/null

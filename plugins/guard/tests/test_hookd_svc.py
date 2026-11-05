@@ -11,8 +11,10 @@
 - --fd: демон отвечает на запросы через переданный сокет; решения считаются (отказы «F …» — нет), строка
   «время<TAB>ok<TAB>число» — перед выходом по простою, по stale и раз в FLUSH_EVERY;
 - hookd-build.sh --svc: собирает pantheon-hookd с метками .sum и .src, тот же исходник — без пересборки, правка — заново;
-- pantheon-hookd: без аргументов и с относительной папкой — 64, вне launchd — 1 и причина; код ребёнка и SIGTERM
-  (ребёнку, код 143) передаются; Python-ребёнок приписан pantheon-hookd;
+- pantheon-hookd: папку hooks и файл итога из аргументов не берёт (64), чужой python.sh не запускает: нет
+  pantheon-hookd.hooks, он открыт другим или ссылка, путь не канонический, папка hooks открыта всем, копия файла вне
+  ~/.cache/pantheon/hookd/bin — код 78 (confused deputy, находка 05.11); окружение ребёнка — только HOME и PATH;
+  вне launchd — 1 и причина; код ребёнка и SIGTERM (ребёнку, код 143) передаются; Python-ребёнок приписан ему;
 - hookd-install.sh: установка — plist с pantheon-hookd первым, проба под «launchd», таблица доступа, задание пробы
   снято; --check — в порядке (код 0), нет доступа (код 1, команда «Файлы и папки», перезапуск службы), старая
   установка, нет службы, проба без итога, canary-diff, папка демона открыта окну.
@@ -333,24 +335,105 @@ def spawn_self_responsible(argv, env):
 '''
 
 
+def svc_home(svc):
+    """HOME, от которого собран pantheon-hookd: …/<HOME>/.cache/pantheon/hookd/bin/pantheon-hookd."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(svc)))))
+
+
+def pin_hooks(svc, path, mode=0o600):
+    p = svc + ".hooks"
+    if os.path.lexists(p):
+        os.remove(p)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(path + "\n")
+    os.chmod(p, mode)
+
+
+def fake_hooks(root, name, script, mode=0o755):
+    d = os.path.join(root, name)
+    os.makedirs(d)
+    with open(os.path.join(d, "python.sh"), "w") as fh:
+        fh.write(script)
+    open(os.path.join(d, "daemon.py"), "w").close()
+    os.chmod(d, mode)
+    return os.path.realpath(d)
+
+
 def test_wrapper(root, svc):
-    home = os.path.join(root, "wr")
-    os.makedirs(home)
-    for args, want in (([], 64), (["hooks"], 64), ([HOOKS, "--tcc-probe"], 64)):
-        r = subprocess.run([svc, *args], env=env_for(home), capture_output=True, text=True, timeout=30)
-        check(f"pantheon-hookd {' '.join(args) or '(без аргументов)'} — код {want} и причина",
-              r.returncode == want and r.stderr.startswith("pantheon-hookd: "), (r.returncode, r.stderr))
-    r = subprocess.run([svc, HOOKS], env=env_for(home), capture_output=True, text=True, timeout=30)
+    home = svc_home(svc)
+    real_home = os.path.realpath(home)
+    hooks_real = os.path.realpath(HOOKS)
+    marker = os.path.join(root, "evil-ran")
+    evil = fake_hooks(root, "evil", f'echo ran >> "{marker}"\nexit 0\n')
+
+    def run(argv, **kw):
+        return subprocess.run(argv, env=env_for(home, **kw), capture_output=True, text=True, timeout=30)
+
+    def refused(name, r, code, words):
+        ok = r.returncode == code and words in r.stderr and not os.path.exists(marker)
+        check(name, ok, (r.returncode, r.stderr, os.path.exists(marker)))
+        if os.path.exists(marker):
+            os.remove(marker)
+
+    pin_hooks(svc, hooks_real)
+    for args in ([evil], [evil, "--tcc-probe"], ["--tcc-probe", os.path.join(root, "out.json")], ["--bogus"]):
+        refused(f"pantheon-hookd {' '.join(args)}: папку hooks и файл итога из аргументов не берёт — код 64, "
+                "чужой python.sh не запущен", run([svc, *args]), 64, "аргументов нет")
+    r = run([svc])
     check("pantheon-hookd вне launchd — код 1, «сокет от launchd не получен»",
           r.returncode == 1 and "сокет от launchd не получен" in r.stderr, (r.returncode, r.stderr))
-    # ребёнок: код и сигнал передаются (поддельная папка hooks: python.sh вместо демона)
-    fake = os.path.join(root, "fakehooks")
-    os.makedirs(fake)
-    with open(os.path.join(fake, "python.sh"), "w") as fh:
-        fh.write('case $2 in --tcc-probe) ;; *) exit 99 ;; esac\n[ "$3" = sleep ] && exec /bin/sleep 30\nexit 7\n')
-    r = subprocess.run([svc, fake, "--tcc-probe", "x"], env=env_for(home), capture_output=True, timeout=30)
-    check("pantheon-hookd: код ребёнка (`daemon.py --tcc-probe x`) — его код (7)", r.returncode == 7, r.returncode)
-    p = subprocess.Popen([svc, fake, "--tcc-probe", "sleep"], env=env_for(home))
+    # закрепление папки hooks: только свой файл 0600 с каноническим путём к своей закрытой папке
+    os.remove(svc + ".hooks")
+    refused("нет pantheon-hookd.hooks — код 78, ничего не запущено", run([svc, "--tcc-probe"]), 78,
+            "нет pantheon-hookd.hooks")
+    pin_hooks(svc, evil, mode=0o622)
+    refused("pantheon-hookd.hooks открыт на запись другим — код 78, чужой python.sh не запущен",
+            run([svc, "--tcc-probe"]), 78, "открыт другим")
+    os.remove(svc + ".hooks")
+    other = os.path.join(root, "pin-other")
+    with open(other, "w") as fh:
+        fh.write(evil + "\n")
+    os.symlink(other, svc + ".hooks")
+    refused("pantheon-hookd.hooks — ссылка — код 78, чужой python.sh не запущен", run([svc, "--tcc-probe"]), 78,
+            "pantheon-hookd.hooks")
+    pin_hooks(svc, os.path.join(evil, "..", "evil"))
+    refused("в pantheon-hookd.hooks путь с «..» — код 78", run([svc, "--tcc-probe"]), 78, "не канонический")
+    open_dir = fake_hooks(root, "evil-open", f'echo ran >> "{marker}"\nexit 0\n', mode=0o777)
+    pin_hooks(svc, open_dir)
+    refused("папка hooks открыта на запись всем — код 78, её python.sh не запущен", run([svc, "--tcc-probe"]), 78,
+            "открыты на запись другим")
+    pin_hooks(svc, evil)
+    bindir = os.path.dirname(svc)
+    os.chmod(bindir, 0o777)
+    try:
+        r = run([svc, "--tcc-probe"])
+    finally:
+        os.chmod(bindir, 0o755)
+    refused("папка bin открыта на запись всем — код 78, pantheon-hookd.hooks в ней не читается", r, 78, "папка bin")
+    elsewhere = os.path.join(root, "elsewhere")
+    os.makedirs(elsewhere)
+    copy = os.path.join(elsewhere, "pantheon-hookd")
+    shutil.copy2(svc, copy)
+    pin_hooks(copy, evil)
+    refused("копия pantheon-hookd вне ~/.cache/pantheon/hookd/bin — код 78, её pantheon-hookd.hooks не читается",
+            run([copy, "--tcc-probe"]), 78, "запущен не из")
+    # ребёнок: окружение только HOME и PATH, итог пробы — свой путь, код и сигнал передаются
+    out = os.path.join(root, "child.txt")
+    fake = fake_hooks(root, "fakehooks", f'{{ env; echo "ARGS $1 $2 $3"; }} > "{out}"\n'
+                      'case $2 in --tcc-probe) ;; *) exit 99 ;; esac\n'
+                      '[ -f "$HOME/sleep-please" ] && exec /bin/sleep 30\nexit 7\n')
+    pin_hooks(svc, fake)
+    r = run([svc, "--tcc-probe"], PYTHONPATH="/x", FOO="bar", PYTHONEXECUTABLE="/x/python", BASH_ENV="/x/env")
+    seen = open(out).read() if os.path.exists(out) else ""
+    env_names = sorted(ln.split("=", 1)[0] for ln in seen.splitlines() if "=" in ln and not ln.startswith("ARGS"))
+    check("pantheon-hookd: код ребёнка — его код (7)", r.returncode == 7, (r.returncode, r.stderr))
+    check("pantheon-hookd: окружение ребёнка — HOME от своего пути и PATH; PYTHON*, BASH_ENV и прочее не доходят",
+          f"HOME={real_home}\n" in seen and "FOO" not in seen and "PYTHON" not in seen and "BASH_ENV" not in seen
+          and set(env_names) <= {"HOME", "PATH", "PWD", "SHLVL", "_", "OLDPWD"}, seen)
+    check("pantheon-hookd --tcc-probe: итог — всегда ~/.cache/pantheon/hookd/probe/result.json",
+          f"ARGS {fake}/daemon.py --tcc-probe {real_home}/.cache/pantheon/hookd/probe/result.json" in seen, seen)
+    open(os.path.join(home, "sleep-please"), "w").close()
+    p = subprocess.Popen([svc, "--tcc-probe"], env=env_for(home))
     PROCS.append(p)
     time.sleep(0.5)
     p.send_signal(signal.SIGTERM)
@@ -358,21 +441,26 @@ def test_wrapper(root, svc):
         code = p.wait(timeout=10)
     except subprocess.TimeoutExpired:
         code = None
+    os.remove(os.path.join(home, "sleep-please"))
     check("pantheon-hookd: SIGTERM передан ребёнку — выход 128+15", code == 143, code)
     if not MAC:
         print("пропущено: нужен macOS — ответственный процесс TCC")
         return
     # главное свойство: Python-ребёнок приписан pantheon-hookd, когда тот ответственен за себя (как задание launchd)
-    ph = probe_home(root, "wrp")
-    out = os.path.join(ph, "r.json")
+    pin_hooks(svc, hooks_real)
+    for d in ("Desktop", "Documents", os.path.join("Library", "Mobile Documents"),
+              os.path.join(".cache", "pantheon", "hookd", "probe")):
+        os.makedirs(os.path.join(home, d), exist_ok=True)
+    os.chmod(os.path.join(home, "Documents"), 0)
+    res_path = os.path.join(home, ".cache", "pantheon", "hookd", "probe", "result.json")
     ns = {}
     exec(disclaim_spawn_code(), ns)  # noqa: S102 — код теста
     try:
-        pid = ns["spawn_self_responsible"]([svc, HOOKS, "--tcc-probe", out], env_for(ph))
+        pid = ns["spawn_self_responsible"]([svc, "--tcc-probe"], env_for(home))
         _, st = os.waitpid(pid, 0)
-        res = json.load(open(out, encoding="utf-8")) if os.path.exists(out) else {}
+        res = json.load(open(res_path, encoding="utf-8")) if os.path.exists(res_path) else {}
     finally:
-        os.chmod(os.path.join(ph, "Documents"), 0o700)
+        os.chmod(os.path.join(home, "Documents"), 0o700)
     check("pantheon-hookd под «launchd» (ответственен за себя): Python-демон приписан ему, а не Python.app",
           os.waitstatus_to_exitcode(st) == 0 and os.path.realpath(res.get("responsible") or "-") == os.path.realpath(svc)
           and res.get("dirs", {}).get("Documents") == "denied", res)
@@ -438,8 +526,8 @@ def last_line(s):
 
 def test_templates():
     """Оба шаблона — строгий XML (plutil -lint прощает «--» в комментарии, launchd и plistlib — нет)."""
-    for name, want in (("pantheon.svc.hookd.plist.in", ["/S/pantheon-hookd", "/H"]),
-                       ("pantheon.hookd.probe.plist.in", ["/S/pantheon-hookd", "/H", "--tcc-probe", "/O/r.json"])):
+    for name, want in (("pantheon.svc.hookd.plist.in", ["/S/pantheon-hookd"]),
+                       ("pantheon.hookd.probe.plist.in", ["/S/pantheon-hookd", "--tcc-probe"])):
         with open(os.path.join(PLUGIN, "launchd", name), encoding="utf-8") as fh:
             body = fh.read()
         body = body.replace("@SVC@", "/S/pantheon-hookd").replace("@HOOKS@", "/H").replace("@HOME@", "/home") \
@@ -464,9 +552,14 @@ def test_install(root, svc_built):
     svc = os.path.join(TH.hookd_dir(home), "bin", "pantheon-hookd")
     plist = os.path.join(home, "Library", "LaunchAgents", "pantheon.svc.hookd.plist")
     pl = plistlib.load(open(plist, "rb")) if os.path.exists(plist) else {}
-    check("установка: код 0, plist службы — pantheon-hookd первым и папка hooks этого дерева",
-          code == 0 and pl.get("ProgramArguments") == [svc, os.path.realpath(HOOKS)] and os.access(svc, os.X_OK),
+    check("установка: код 0, plist службы — один pantheon-hookd, без папки hooks в аргументах",
+          code == 0 and pl.get("ProgramArguments") == [svc] and os.access(svc, os.X_OK),
           (code, out[-600:], err[-600:], pl.get("ProgramArguments")))
+    pin = svc + ".hooks"
+    pin_text = open(pin).read() if os.path.exists(pin) else ""
+    check("установка: pantheon-hookd.hooks — папка hooks этого дерева, файл 0600",
+          pin_text == os.path.realpath(HOOKS) + "\n" and stat.S_IMODE(os.lstat(pin).st_mode) == 0o600,
+          (pin_text, oct(os.lstat(pin).st_mode) if os.path.exists(pin) else None))
     probe_pl = os.path.join(home, "lctl", "plist-pantheon.hookd.probe")
     ppl = plistlib.load(open(probe_pl, "rb")) if os.path.exists(probe_pl) else {}
     check("установка: после bootstrap службы — разовое задание пробы через тот же pantheon-hookd (RunAtLoad, без "
@@ -496,6 +589,16 @@ def test_install(root, svc_built):
           and "Privacy_AllFiles" in out and f"launchctl kickstart -k gui/{uid}/pantheon.svc.hookd" in out
           and "tccutil" in out and last_line(out).endswith("нет доступа к папкам"), (code, out[-1200:]))
     check("--check ничего не правит: plist службы тот же", os.stat(plist).st_mtime_ns == st_before)
+    # служба закреплена за другим деревом guard
+    other = os.path.realpath(os.path.join(root, "work"))
+    with open(pin, "w") as fh:
+        fh.write(other + "\n")
+    code, out, err, _ = inst(home, lctl, "--check", PANTHEON_HOOKD_PROBE_WAIT="1")
+    check("--check: pantheon-hookd.hooks указывает на другое дерево — код 1, «служба другого дерева» и оба пути",
+          code == 1 and "служба другого дерева" in last_line(out) and other in out
+          and os.path.realpath(HOOKS) in out, (code, out[-900:]))
+    with open(pin, "w") as fh:
+        fh.write(pin_text)
     # canary-diff и окно с записью в папку демона
     logs = os.path.join(home, ".local", "state", "pantheon", "logs")
     now = time.strftime("%Y-%m-%dT%H:%M:%S")

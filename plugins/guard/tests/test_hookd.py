@@ -347,8 +347,7 @@ def test_static(root):
           and lst.get("SockPathName") == os.path.join(home, SOCK_REL) and lst.get("SockPathMode") == 0o600
           and lst.get("SockFamily") == "Unix" and lst.get("SockType") == "stream"
           and "KeepAlive" not in pl and "RunAtLoad" not in pl and 1 <= pl.get("ThrottleInterval", 0) <= 2
-          and pl.get("ProgramArguments") == [os.path.join(home, ".cache", "pantheon", "hookd", "bin", "pantheon-hookd"),
-                                             hooks_real],
+          and pl.get("ProgramArguments") == [os.path.join(home, ".cache", "pantheon", "hookd", "bin", "pantheon-hookd")],
           (r.returncode, r.stderr[-300:], pl))
     check("hookd-install.sh --print ничего не ставит: ~/Library в подменённом HOME не создан",
           not os.path.exists(os.path.join(home, "Library")), os.listdir(home))
