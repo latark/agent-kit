@@ -185,6 +185,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
+  pantheon wt done <путь> [--dry-run]   убрать копию .claude/worktrees/<имя> после отчёта субагента или слияния PR
+                                        (metis-0835): без вопроса и сырого git, только без живой сессии, процесса и
+                                        субагента в ней; ветка остаётся (detached — ветка archive/wt-<имя>), грязная —
+                                        сначала патч и архив неотслеживаемого в STATE/wt-archive. В окне роли — заявка в
+                                        кэш окна, её исполняет плановый проход (раз в 5 мин); занятая копия ждёт в
+                                        заявке. Код: 0 — убрана или заявка принята, 1 — нельзя (причина), 2 — не та папка
+  pantheon wt plan [<папка> …]          сухой прогон уборки копий: что дежурный сделал бы с каждой копией; ничего не меняет
   pantheon reap [--apply] [--pid N …]   виновники памяти (lib/culprits.py, metis-0568): процессы claude/node/tsx/
                                         next/vitest/pnpm и сироты multiprocessing старше 2 ч — чей, память, возраст;
                                         --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
@@ -7257,7 +7264,7 @@ def _read_strict(p):
 
 # --- дежурный и управление сессиями (шаг 1.4) — lib/watch.py ---------------------------------------------------------
 WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check",
-              "launch-question"}
+              "launch-question", "wt"}
 
 
 def watch_cmd(cmd, rest, over=False):
@@ -7272,7 +7279,8 @@ def watch_cmd(cmd, rest, over=False):
     return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
             "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
             "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
-            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest)}[cmd]()
+            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest),
+            "wt": lambda: w.wt_cmd(rest)}[cmd]()
 
 
 def usage_report(rest):

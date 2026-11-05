@@ -287,7 +287,20 @@
   папкой, как везде. Граница та же, что у остальных папок окна: guard — защита от ошибок, а не от намеренного обхода.
 - `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,
   `who`, `revisits`, `wake <имя>`, `stop|resume <имя>|--all`, `pause <имя>|--all --reason limit|swap|manual`,
-  `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
+  `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`, `wt done|plan`. Подключает его `pantheon.py`
+  (`watch_cmd`).
+  Уборка копий `.claude/worktrees` (metis-0616, metis-0835) — каждый проход, без владельца; живая сессия (cwd), процесс
+  с текущей папкой в копии (lsof) или работающий субагент — копию не трогает никогда. Сроки по возрасту папки: пустая
+  (HEAD в основной ветке, своих коммитов нет) — через 30 мин (знает Claude Code её остановленную сессию — через сутки);
+  слитая (PR слит по кэшу gh, HEAD на origin или `git cherry` без «+») — через сутки; неслитая и грязная — через
+  3 дня. Ветка остаётся (пустая — `branch -d`), detached со своими коммитами — сначала ветка `archive/wt-<имя>`, грязная
+  — сначала `git diff HEAD` в `STATE/wt-archive/patches/<имя>.patch` и неотслеживаемое без зависимостей и кэшей в
+  `untracked/<имя>.tar.gz`; архив не собрался, больше 200 МБ или сохранить нечего — копия цела, тревога. Замок
+  «claude agent …» без живого субагента снимается, замок с другой причиной держит. Убранное — строкой в
+  `STATE/wt-archive/removed-<день>.txt`, сводка — одной строкой в день. `pantheon wt done <путь>` — то же без сроков,
+  сразу после отчёта субагента или слияния PR, агенту без вопроса и без сырого git (код 0 — убрана или заявка принята,
+  1 — нельзя, причина последней строкой, 2 — не копия `.claude/worktrees` папок реестра); в окне роли и для занятой
+  копии — заявка, её исполняет проход. `pantheon wt plan [<папка> …]` — сухой прогон, ничего не меняет.
 - `plugins/pantheon/lib/culprits.py` — виновники памяти (metis-0568). В красной зоне — своп выше порога, давление
   памяти от «предупреждения» или нагрузка выше 4 на ядро — дежурный пишет в `alerts.md` одну строку на эпизод (перерыв меньше
   часа — тот же эпизод), а пока зона держится — повтор раз в 6 ч (metis-0617: своп выше порога держится сутками, и до
@@ -823,6 +836,7 @@
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: заявки на тесты, тревога о «принять» без tests, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
+    python3 -I plugins/pantheon/tests/test_wt_cleanup.py   # уборка копий .claude/worktrees: слитые, замок субагента, патч и архив, pantheon wt done
     python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод и повтор, чей процесс, reap и reap --auto
     python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: плановый проход пишет probes.json, окно читает свежий, старый/битый — как раньше
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
