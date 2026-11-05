@@ -9,8 +9,11 @@
 - daemon.py: плохие --fd, --socket вместе с --fd, --tcc-probe без файла — код 64; не сокет, не слушающий — код 1;
 - --tcc-probe: ok, denied (EACCES), missing по каждой папке, путь ответственного процесса; файл не записать — код 1;
 - --fd: демон отвечает на запросы через переданный сокет; решения считаются (отказы «F …» — нет), строка
-  «время<TAB>ok<TAB>число» — перед выходом по простою, по stale и раз в FLUSH_EVERY;
+  «время<TAB>ok<TAB>число» — перед выходом по простою, по stale, по SIGTERM и раз в FLUSH_EVERY, в том числе
+  в тишине после решения;
 - hookd-build.sh --svc: собирает pantheon-hookd с метками .sum и .src, тот же исходник — без пересборки, правка — заново;
+- pantheon-hookd: DYLD_INSERT_LIBRARIES не внедряет код (сегмент __RESTRICT и подпись ad-hoc с hardened runtime,
+  Б1 argus #320); подпись не прошла или без runtime — сборка отказывает; старая сборка без runtime — заново;
 - pantheon-hookd: папку hooks и файл итога из аргументов не берёт (64), чужой python.sh не запускает: нет
   pantheon-hookd.hooks, он открыт другим или ссылка, путь не канонический, папка hooks не из кэша guard
   (~/.claude/plugins/cache/agent-kit/guard/<версия>/hooks) или открыта всем, копия файла вне
@@ -24,6 +27,7 @@
 import json
 import os
 import plistlib
+import re
 import shutil
 import signal
 import socket
@@ -266,6 +270,60 @@ def test_flush_paths(root):
     check("счёт решений: журнал не записать — решения идут дальше, причина в журнале демона",
           got.startswith("X 0 ") and again.startswith("X 0 ") and "не записан в hookd-calls.log" in log,
           (got, again, log[-400:]))
+    # SIGTERM (launchctl bootout, kickstart -k): строка пишется перед выходом, код 0 (Д1 argus #320)
+    home = os.path.join(root, "fth")
+    os.makedirs(home)
+    path = os.path.join(root, "ft.sock")
+    p = spawn_fd_daemon(root, home, path, idle="300")
+    got = valid_call(path, work, home)
+    time.sleep(0.3)  # байт ребёнка дошёл до родителя
+    p.send_signal(signal.SIGTERM)
+    try:
+        code = p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        code = None
+    check("счёт решений: SIGTERM — код 0 и строка «ok 1» перед выходом",
+          got.startswith("X 0 ") and code == 0 and calls_total(home) == 1, (got, code, calls_lines(home)))
+    # SIGTERM, пока байт ребёнка ещё не прочитан: в копии ребёнок пишет байт через 1 с после ответа; демон остановлен
+    # (SIGSTOP) до того, байт лёг в канал, затем SIGTERM и SIGCONT — select видит и SIGTERM, и байт сразу
+    copy = patched_tree(root, "flu")
+    dp = os.path.join(copy, "hooks", "daemon.py")
+    body = open(dp, encoding="utf-8").read()
+    slow = body.replace('                os.write(self.count_w, b".")',
+                        '                time.sleep(1)\n                os.write(self.count_w, b".")', 1)
+    if slow == body:
+        check("копия демона: байт счёта с задержкой", False)
+        return
+    with open(dp, "w", encoding="utf-8") as fh:
+        fh.write(slow)
+    home = os.path.join(root, "fuh")
+    os.makedirs(home)
+    path = os.path.join(root, "fu.sock")
+    p = spawn_fd_daemon(root, home, path, hooks=os.path.join(copy, "hooks"), idle="300")
+    got = TH.raw_call(path, hdr_for(copy, work, home), json.dumps(TH.deny_event(work)).encode())
+    p.send_signal(signal.SIGSTOP)
+    time.sleep(1.5)  # ребёнок дописал байт, родитель его не прочёл
+    p.send_signal(signal.SIGTERM)
+    p.send_signal(signal.SIGCONT)
+    try:
+        code = p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        code = None
+    check("счёт решений: SIGTERM при непрочитанном байте счёта — он тоже в строке «ok 1»",
+          got.startswith("X 0 ") and code == 0 and calls_total(home) == 1, (got, code, calls_lines(home)))
+    # тишина после решения: строка — через FLUSH_EVERY, а не на следующем соединении или по простою
+    copy = patched_tree(root, "flq", flush_every=3)
+    home = os.path.join(root, "fqh")
+    os.makedirs(home)
+    path = os.path.join(root, "fq.sock")
+    p = spawn_fd_daemon(root, home, path, hooks=os.path.join(copy, "hooks"), idle="300")
+    got = TH.raw_call(path, hdr_for(copy, work, home), json.dumps(TH.deny_event(work)).encode())
+    end = time.monotonic() + 10
+    while time.monotonic() < end and not calls_lines(home):
+        time.sleep(0.05)
+    check("счёт решений: после решения тишина — строка «ok 1» через FLUSH_EVERY, демон жив",
+          got.startswith("X 0 ") and p.poll() is None and calls_total(home) == 1, (got, p.poll(), calls_lines(home)))
+    TH.stop(p)
 
 
 # --- pantheon-hookd ---------------------------------------------------------------------------------------------
@@ -311,6 +369,84 @@ def test_build_svc(root):
           code4 == 0 and open(want + ".src").read() != src_before, (code4, err4[-300:]))
     code5, out5, _ = build_svc(home)  # обратно на исходник этого дерева
     return out5 if code5 == 0 else None
+
+
+INJ_C = r'''
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+__attribute__((constructor)) static void injected(void) {
+    const char *m = getenv("HOOKD_INJ_MARK");
+    if (m) { int fd = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600); if (fd >= 0) { write(fd, "x", 1); close(fd); } }
+}
+'''
+
+
+def test_hardened(root, svc):
+    """Б1 argus #320: DYLD_INSERT_LIBRARIES не внедряет чужой код в pantheon-hookd (иначе он работал бы с его TCC)."""
+    d = os.path.join(root, "inj")
+    os.makedirs(d)
+    with open(os.path.join(d, "inj.c"), "w") as fh:
+        fh.write(INJ_C)
+    with open(os.path.join(d, "plain.c"), "w") as fh:
+        fh.write("int main(void) { return 0; }\n")
+    dylib, plain = os.path.join(d, "inj.dylib"), os.path.join(d, "plain")
+    cc = [subprocess.run(["/usr/bin/cc", *a], capture_output=True, text=True, timeout=120)
+          for a in (["-dynamiclib", "-o", dylib, os.path.join(d, "inj.c")], ["-o", plain, os.path.join(d, "plain.c")])]
+    if any(r.returncode for r in cc):
+        check("тестовая dylib и программа собраны", False, [r.stderr[-300:] for r in cc])
+        return
+    home = svc_home(svc)
+
+    def injected(prog, *args):
+        mark = os.path.join(d, "mark-" + os.path.basename(prog))
+        subprocess.run([prog, *args], env=env_for(home, DYLD_INSERT_LIBRARIES=dylib, HOOKD_INJ_MARK=mark),
+                       capture_output=True, timeout=30)
+        return os.path.exists(mark)
+
+    check("проверка теста: в программу, собранную голым cc, DYLD_INSERT_LIBRARIES внедряет dylib", injected(plain))
+    check("pantheon-hookd: DYLD_INSERT_LIBRARIES не внедряет чужой код (hardened runtime, __RESTRICT)",
+          not injected(svc, "--bogus"))
+    r = subprocess.run(["/usr/bin/codesign", "-dv", svc], capture_output=True, text=True, timeout=30)
+    check("pantheon-hookd подписан ad-hoc с hardened runtime (codesign -o runtime)",
+          r.returncode == 0 and "Signature=adhoc" in r.stderr and "Identifier=pantheon-hookd\n" in r.stderr
+          and re.search(r"^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*\bruntime\b", r.stderr, re.M), r.stderr[-400:])
+    with open(svc, "rb") as fh:
+        head = fh.read(65536)
+    check("pantheon-hookd: сегмент __RESTRICT — второй слой, если подпись снимут", b"__RESTRICT\0" in head)
+    # уже стоящий файл без hardened runtime (старая сборка) при том же исходнике — пересобирается
+    subprocess.run(["/usr/bin/codesign", "-s", "-", "-f", "-i", "pantheon-hookd", svc], capture_output=True, timeout=30)
+    with open(svc + ".sum", "w") as fh:
+        fh.write(TH.hashlib.sha256(open(svc, "rb").read()).hexdigest() + "\n")
+    code, out, err = build_svc(home)
+    r = subprocess.run(["/usr/bin/codesign", "-dv", svc], capture_output=True, text=True, timeout=30)
+    check("hookd-build.sh --svc: стоящий файл без hardened runtime при том же исходнике — пересобран с ним",
+          code == 0 and out == svc and re.search(r"flags=0x[0-9a-f]+\([^)]*\bruntime\b", r.stderr), (code, err, r.stderr))
+    # подпись не прошла или прошла без runtime — сборка отказывает и ничего не ставит (codesign подменён в копии)
+    sign_fails = ('[ "$1" = -dv ] && { echo "CodeDirectory v=20500 size=1 flags=0x10002(adhoc,runtime) hashes=1+0" >&2;'
+                  ' exit 0; }\necho "подмена: подпись не прошла" >&2\nexit 1\n')
+    sign_noop = '[ "$1" = -dv ] && exec /usr/bin/codesign "$@"\nexit 0\n'
+    for name, fake, why in (("bcs", sign_fails, "codesign не прошёл (код не 0)"),
+                            ("bcn", sign_noop, "codesign прошёл, но в подписи нет runtime")):
+        copy = patched_tree(root, name)
+        p = os.path.join(copy, "hooks", "hookd-build.sh")
+        body = open(p, encoding="utf-8").read()
+        if "/usr/bin/codesign" not in body:
+            check("hookd-build.sh --svc подписывает /usr/bin/codesign", False)
+            return
+        cs = os.path.join(root, name + "-codesign")
+        with open(cs, "w") as fh:
+            fh.write("#!/bin/sh\n" + fake)
+        os.chmod(cs, 0o755)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body.replace("/usr/bin/codesign", cs))
+        h2 = os.path.join(root, name + "h")
+        os.makedirs(h2)
+        code, out, err = build_svc(h2, build=p)
+        want = os.path.join(TH.hookd_dir(h2), "bin", "pantheon-hookd")
+        check(f"hookd-build.sh --svc: {why} — код 1, причина «codesign», файла службы и метки .sum нет",
+              code == 1 and "codesign" in (err.splitlines() or [""])[-1] and not os.path.exists(want)
+              and not os.path.exists(want + ".sum"), (code, out, err[-300:]))
 
 
 def disclaim_spawn_code():
@@ -694,6 +830,7 @@ def main():
         if not MAC:
             print("пропущено: нужен macOS — pantheon-hookd (launch.h)")
         if svc:
+            test_hardened(root, svc)
             test_wrapper(root, svc)
         test_install(root, svc)
     finally:

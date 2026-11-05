@@ -61,7 +61,10 @@ Edit, разбор команды Bash) демон решает сам.
 Счёт решений (F9, metis-0811). Откаты клиент пишет в hookd-fallback.log, а решения демона — нигде: без них долю
 откатов не посчитать. Ребёнок, отправив «X …», пишет один байт в канал родителя (неблокирующий: занят — байт теряется,
 вызов не ждёт). Родитель копит счёт и не чаще раза в FLUSH_EVERY с, а также перед выходом, дописывает строку
-«время<TAB>ok<TAB>число» в ~/.local/state/pantheon/logs/hookd-calls.log. Долю за сутки считает scripts/hookd-stats.py.
+«время<TAB>ok<TAB>число» в ~/.local/state/pantheon/logs/hookd-calls.log. Пока счёт не записан, select ждёт не дольше
+остатка FLUSH_EVERY: строка приходит и в тишине после решения. Выход — по простою, stale и SIGTERM (launchctl bootout,
+kickstart -k): обработчик SIGTERM только ставит флаг и будит select байтом в свой канал (signal.set_wakeup_fd), а
+счёт пишет сам цикл — запись не прерывается посередине. Долю за сутки считает scripts/hookd-stats.py.
 
 Проба TCC (--tcc-probe, решение владельца 04.11). hookd-install.sh запускает её разовым заданием launchd через тот же
 pantheon-hookd, что и службу: окна macOS «разрешить доступ» появляются при установке, а не из фона в случайный миг, и
@@ -259,6 +262,8 @@ class Daemon:
         self.uid = os.getuid() if uid is None else uid
         self.count_r = self.count_w = None  # канал «решение отправлено» от детей (F9)
         self.ok = 0  # решений с прошлой строки счёта
+        self.wake_r = self.wake_w = None  # канал signal.set_wakeup_fd: SIGTERM будит select
+        self.term = False  # пришёл SIGTERM: записать счёт и выйти
         self.flushed = time.monotonic()
         self.hooks = os.path.dirname(os.path.realpath(__file__))
         self.root = os.path.dirname(self.hooks)
@@ -324,15 +329,37 @@ class Daemon:
         self.cleanup()
         os._exit(0)
 
+    def on_term(self, _sig, _frame):
+        self.term = True  # выход — в цикле: select разбудит байт в wake_r
+
     def loop(self):
         signal.signal(signal.SIGCHLD, signal.SIG_IGN)  # дети не становятся зомби
         self.count_r, self.count_w = os.pipe()
-        os.set_blocking(self.count_r, False)
-        os.set_blocking(self.count_w, False)
+        self.wake_r, self.wake_w = os.pipe()
+        for fd in (self.count_r, self.count_w, self.wake_r, self.wake_w):
+            os.set_blocking(fd, False)
+        signal.set_wakeup_fd(self.wake_w)
+        signal.signal(signal.SIGTERM, self.on_term)
         log(f"готов: {self.hooks} версия {self.version or '?'}")
+        last = time.monotonic()  # последнее соединение или байт счёта: от него считается простой
         while True:
-            ready, _, _ = select.select(self.listeners + [self.count_r], [], [], self.idle)
-            if not ready:
+            now = time.monotonic()
+            wait = self.idle - (now - last)
+            if self.ok:  # счёт не записан: проснуться к сроку строки, а не ждать соединения или простоя
+                wait = min(wait, FLUSH_EVERY - (now - self.flushed))
+            ready, _, _ = select.select(self.listeners + [self.count_r, self.wake_r], [], [], max(wait, 0))
+            if self.term:
+                self.drain()
+                self.exit("SIGTERM — выход")
+            if self.wake_r in ready:
+                try:
+                    os.read(self.wake_r, 4096)
+                except OSError:
+                    pass
+                ready.remove(self.wake_r)
+            if ready:
+                last = time.monotonic()
+            elif time.monotonic() - last >= self.idle:
                 self.exit("простой — выход")
             for lst in ready:
                 if lst == self.count_r:
@@ -358,9 +385,12 @@ class Daemon:
                     conn.close()
                     continue
                 if pid == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    signal.set_wakeup_fd(-1)
                     for x in self.listeners:
                         x.close()
-                    os.close(self.count_r)
+                    for fd in (self.count_r, self.wake_r, self.wake_w):
+                        os.close(fd)
                     self.serve(conn)
                 conn.close()
             if self.ok and time.monotonic() - self.flushed >= FLUSH_EVERY:

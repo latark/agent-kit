@@ -52,15 +52,22 @@ d=$top/bin
 /bin/mkdir -p "$d" && /bin/chmod 700 "$top" "$d" || { echo "hookd-build: папка $d не создаётся" >&2; exit 1; }
 if [ -n "$svc" ]; then
     # исполняемый файл службы pantheon-hookd (hookd-svc.c, metis-0811): путь постоянный, пересборка — только при
-    # правке исходника (метка .src — его SHA-256): иначе macOS заново спрашивала бы доступ к папкам. Собирается под
-    # своим именем во временной папке — подпись ad-hoc от компоновщика берёт имя файла, и тот же исходник даёт тот же
-    # файл. Только macOS: служба launchd — там
+    # правке исходника (метка .src — его SHA-256) или если в подписи нет hardened runtime: иначе macOS заново
+    # спрашивала бы доступ к папкам. Собирается под своим именем во временной папке — подпись ad-hoc берёт имя файла,
+    # и тот же исходник даёт тот же файл. Только macOS: служба launchd — там.
+    # Защита от внедрения кода (Б1 argus #320): без неё dyld до main выполнил бы DYLD_INSERT_LIBRARIES того, кто
+    # запускает файл, и чужой код работал бы с разрешением TCC службы. Два слоя, каждый сам закрывает DYLD_*: сегмент
+    # __RESTRICT от компоновщика и подпись ad-hoc с hardened runtime (codesign -o runtime). Подпись не прошла или в
+    # ней нет runtime — отказ: неподписанный файл не ставится. Метка .sum — от подписанного файла
     ssrc=$h/hookd-svc.c
     bin=$d/pantheon-hookd
+    runtime() {  # подпись файла $1 с hardened runtime: «flags=0x10002(adhoc,runtime)»
+        /usr/bin/codesign -dv "$1" 2>&1 | /usr/bin/grep -q '^CodeDirectory .*flags=0x[0-9a-f]*([^)]*runtime'
+    }
     s_src=$(sum "$ssrc")
     [ ${#s_src} -eq 64 ] || { echo "hookd-build: не посчитать SHA-256 $ssrc" >&2; exit 1; }
     if [ -f "$bin" ] && [ -x "$bin" ] && [ "$(/usr/bin/head -c 64 "$bin.src" 2>/dev/null)" = "$s_src" ] \
-        && [ "$(sum "$bin")" = "$(/usr/bin/head -c 64 "$bin.sum" 2>/dev/null)" ]; then
+        && [ "$(sum "$bin")" = "$(/usr/bin/head -c 64 "$bin.sum" 2>/dev/null)" ] && runtime "$bin"; then
         echo "$bin"
         exit 0
     fi
@@ -71,8 +78,13 @@ if [ -n "$svc" ]; then
     /bin/rm -rf "$lock" 2>/dev/null  # собирает только hookd-install.sh из терминала владельца, не фон хука
     /bin/mkdir "$lock" || { echo "hookd-build: папка $lock не создаётся" >&2; exit 1; }
     trap '/bin/rm -rf "$lock" 2>/dev/null' EXIT
-    cd "$h" && /usr/bin/env -i HOME="$HOME" PATH="$PATH" TMPDIR="$lock" /usr/bin/cc -O2 -o "$lock/pantheon-hookd" \
-        "$ssrc" 2>"$lock/cc.log" || { echo "hookd-build: cc: $(/usr/bin/tail -n 1 "$lock/cc.log")" >&2; exit 1; }
+    cd "$h" && /usr/bin/env -i HOME="$HOME" PATH="$PATH" TMPDIR="$lock" /usr/bin/cc -O2 \
+        -Wl,-sectcreate,__RESTRICT,__restrict,/dev/null -o "$lock/pantheon-hookd" "$ssrc" 2>"$lock/cc.log" \
+        || { echo "hookd-build: cc: $(/usr/bin/tail -n 1 "$lock/cc.log")" >&2; exit 1; }
+    /usr/bin/env -i HOME="$HOME" PATH="$PATH" TMPDIR="$lock" /usr/bin/codesign -s - -f -o runtime \
+        -i pantheon-hookd "$lock/pantheon-hookd" >"$lock/cs.log" 2>&1 \
+        || { echo "hookd-build: codesign -o runtime не прошёл: $(/usr/bin/tail -n 1 "$lock/cs.log")" >&2; exit 1; }
+    runtime "$lock/pantheon-hookd" || { echo "hookd-build: codesign: в подписи нет hardened runtime" >&2; exit 1; }
     s=$(sum "$lock/pantheon-hookd")
     [ ${#s} -eq 64 ] || { echo "hookd-build: не посчитать SHA-256 собранного pantheon-hookd" >&2; exit 1; }
     printf '%s\n' "$s" >"$bin.sum" && printf '%s\n' "$s_src" >"$bin.src" && /bin/chmod 755 "$lock/pantheon-hookd" \
