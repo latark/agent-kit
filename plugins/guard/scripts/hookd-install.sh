@@ -3,11 +3,14 @@
 #   /bin/sh hookd-install.sh --print        plist на stdout, ничего не ставит (тесты, будущий плановый проход)
 #   /bin/sh hookd-install.sh                собрать клиент и pantheon-hookd, папка сокета 0700, plist в
 #                                           ~/Library/LaunchAgents, bootstrap, затем запрос доступа к папкам (ниже)
+#   /bin/sh hookd-install.sh --no-probe     то же без пробы доступа: так ставит плановый проход Пантеона
+#                                           (services_sync, metis-0845) — окна macOS не всплывают из фона, проход не
+#                                           ждёт ответа до 300 с; доступ проверяет владелец командой --check
 #   /bin/sh hookd-install.sh --check        ничего не ставит и не правит: стоит ли служба, есть ли у неё доступ к
 #                                           Desktop, Documents, Downloads и iCloud Drive и как его дать, не открыта ли
 #                                           папка демона окнам ролей (F7), доля откатов и canary-diff за сутки (F9)
 #   /bin/sh hookd-install.sh --uninstall    bootout и удалить plist
-# Службу ставит владелец своей командой из терминала (README guard, «Демон хуков»), роли — нет: ~/Library/LaunchAgents
+# Службу ставит владелец своей командой из терминала или плановый проход (ниже), роли — нет: ~/Library/LaunchAgents
 # и ~/.cache/pantheon/hookd закрыты protect-config. Дерево — то, где лежит этот скрипт: зовите его из проверенного
 # дерева guard (~/.claude/plugins/cache/agent-kit/guard/<версия>/scripts/), а не из рабочей копии.
 #
@@ -26,9 +29,10 @@
 # ~/.claude/plugins/cache/agent-kit/guard/<версия>/ (HOME — из окружения, сверка по realpath); из рабочей копии и
 # любой другой папки — код 1 и причина: её правят агенты, а служба исполняет её с доступом к папкам владельца.
 #
-# Внимание: плановый проход Пантеона (services_sync) снимает любой pantheon.svc.*, которого нет в schedule.toml, —
-# пока он не знает hookd, поставленная вручную служба проживёт до ближайшего прохода. Установка плановым проходом —
-# следующая часть metis-0330.
+# Плановый проход Пантеона (services_sync, metis-0845) ставит службу сам, если в schedule.toml есть [[service]] с
+# name = "hookd": этим скриптом из проверенного дерева guard с --no-probe, и переставляет её после выпуска guard
+# (pantheon-hookd.hooks называет прежнюю версию). Записи нет, она выключена или на паузе — проход службу снимает:
+# поставленная вручную без записи проживёт до ближайшего прохода (README agent-kit, «Службы»).
 # PANTHEON_HOOKD_LAUNCHCTL — только тестам (подменённый launchctl); владельцу не нужен.
 # Код 0 — сделано (установка: служба стоит, даже если доступа к папкам нет — это видно в выводе; --check: всё в
 # порядке); иначе код не 0 и причина последней строкой.
@@ -44,6 +48,7 @@ case "$HOME$h" in
     *'&'*|*'|'*|*'\'*|*'<'*|*'>'*) echo "hookd-install: в пути HOME или hooks знак, который plist не примет" >&2; exit 1 ;;
 esac
 label=pantheon.svc.hookd
+noprobe=
 plabel=pantheon.hookd.probe
 plist=$HOME/Library/LaunchAgents/$label.plist
 top=$HOME/.cache/pantheon/hookd
@@ -148,7 +153,8 @@ case "${1:-}" in
         exit 0
         ;;
     "") ;;
-    *) echo "hookd-install: неизвестный ключ $1 (--print, --check, --uninstall)" >&2; exit 64 ;;
+    --no-probe) noprobe=1 ;;
+    *) echo "hookd-install: неизвестный ключ $1 (--print, --check, --uninstall, --no-probe)" >&2; exit 64 ;;
 esac
 # ставить — только из проверенного дерева guard: pantheon-hookd исполняет закреплённую папку hooks с доступом к
 # папкам владельца, а рабочую копию и /tmp правят агенты (вторая находка проверки безопасности 05.11)
@@ -178,7 +184,9 @@ render >"$plist.new" && /usr/bin/plutil -lint "$plist.new" >/dev/null && /bin/mv
 "$lctl" bootout "gui/$uid/$label" 2>/dev/null
 "$lctl" bootstrap "gui/$uid" "$plist" || { echo "hookd-install: launchctl bootstrap не принял $plist" >&2; exit 1; }
 echo "служба $label поставлена: сокет $sock, первый процесс $svc"
-if probe; then
+if [ -n "$noprobe" ]; then
+    echo "доступ к папкам не проверялся (--no-probe) — проверить в терминале: /bin/sh $here/hookd-install.sh --check"
+elif probe; then
     py "$here/hookd-check.py" tcc "$pdir/result.json" "$svc"
 else
     echo "доступ к папкам не проверен — повторить: /bin/sh $here/hookd-install.sh --check"
