@@ -1107,6 +1107,7 @@ def _fp_board_auto():
     правки; открытые PR и неделя — по содержимому кэша и целым процентам (fetch и строка статуса пишут их часто)."""
     B = boardtext_mod()
     return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
+                                                        ("pr_stale", B.pr_stale(path("autoclose-prs.json"))),
                                                         ("week", board_week())]
 
 

@@ -1596,12 +1596,30 @@ def links_lines(links):
             + [f"- [коммит {c}](https://github.com/{r}/commit/{c}) · {r}" for r, c in commits])
 
 
+def merged_wait(head, body, links, pr_days=None):
+    """Задача в review со слитым PR (metis-0826) → «PR #N слит DD.MM, ждёт пунктов Готово, когда: k из n» (k — неотмеченных,
+    n — всего пунктов без заглушки); не review, не задача или слитого PR нет — None. links — work_links, pr_days —
+    {(репозиторий, номер): 'ГГГГ-ММ-ДД'} дня слияния (autoclose.pr_index, поле day). Пункты сам проход не отмечает:
+    приёмку делает argus или владелец («без самоприёмки»)."""
+    if head.get("type") != "task" or head.get("status") != "review" or not links:
+        return None
+    got = [((pr_days or {}).get((r, n)) or "", n) for r, n, v in links[0] if v is True]
+    if not got:
+        return None
+    day, n = max(got)
+    dd = f" {day[8:10]}.{day[5:7]}" if re.fullmatch(r"\d{4}-\d\d-\d\d", day) else ""
+    crit = [done for done, text in done_criteria(body) if not _is_stub(text)]
+    total, left = len(crit), crit.count(False)  # не unchecked_criteria: у задач до CRITERIA_FROM она даёт 0, а total считает пункты
+    return f"PR #{n} слит{dd}, " + (f"ждёт пунктов Готово, когда: {left} из {total}" if total else "пунктов «Готово, когда» нет")
+
+
 def id_link(i, names):
     """Ссылка на карточку задачи `[[<имя файла>|<id>]]`; карточки нет — голый id (metis-0322)."""
     return f"[[{names[i]}|{i}]]" if names.get(i) else i
 
 
-def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None, outs=None, links=None, tails=None):
+def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None, outs=None, links=None, tails=None,
+             pr_days=None):
     """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней, слова
     «внимания» по всему (review без PR, готово без приёмки). outs — outcomes(tasks): что из задачи вышло; links —
     work_links (PR и коммиты); tails — {id: [текст]} хвостов последнего pantheon check (metis-0506, metis-0572)."""
@@ -1611,6 +1629,9 @@ def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs
            "links": links or ([], []), "tails": [str(x) for x in (tails or {}).get(tid) or [] if x]}
     if t is not None:
         ctx["flags"] = extra_attention(head, tasks[tid][2] if tid in tasks else "", tasks, t, night_end, open_prs)
+        mw = merged_wait(head, tasks[tid][2] if tid in tasks else "", links, pr_days)
+        if mw:
+            ctx["flags"].append(mw)
     sid = head.get("parent")
     if sid in tasks and tasks[sid][1].get("type") == "story":
         ctx["story"] = names.get(sid) or card_name(tasks[sid][1])
@@ -3129,11 +3150,12 @@ def _plain(text):
 SUMMARY_WAIT_TOP = 5  # «Нужен ответ» в сводке: столько с советом, остальные — «ещё N»
 
 
-def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
+def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None, accept=None):
     """names — id → имя файла карточки (как его записал проход доски); ссылки — с подписью-заголовком.
-    long_ids — решения «долго ждёт»; queue — что политика уведомлений отложила без пинга за сутки."""
+    long_ids — решения «долго ждёт»; queue — что политика уведомлений отложила без пинга за сутки; accept — {id: «PR #N слит …»}
+    задач в review со слитым PR (metis-0826): отдельный раздел «Слито, ждёт приёмки», не вперемешку с «на проверке»."""
     names, long_ids = names or {}, long_ids or set()
-    rows = {"wait": [], "overdue": [], "doing": [], "done": [],
+    rows = {"wait": [], "overdue": [], "doing": [], "done": [], "accept": [],
             "inbox": [f"[[Доска/{names.get(cid) or card_name({'title': it['title']})}|{_plain(it['title'])}]] · "
                       f"{it['direction']}" for cid, it in (inbox or {}).items()]}
     wait = []
@@ -3156,6 +3178,8 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
             wait.append((due_ts(h.get("due")) or float("inf"), since, tid, line))
         if overdue(h, t):
             rows["overdue"].append(f"{name} · срок {h['due']}")
+        if tid in (accept or {}) and h.get("status") == "review":
+            rows["accept"].append(f"{name} · {one_line(accept[tid])}")
         if h.get("status") == "doing":
             rows["doing"].append(f"{name} · {_plain(h.get('owner')) or '—'}")
         if h.get("status") == "done" and (h.get("updated") or "") >= now_iso(t - 86400):
@@ -3169,7 +3193,8 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
         top.append(f"ещё {len(wait) - SUMMARY_WAIT_TOP} — колонка «{HUMAN_WAIT}» на доске")
     quiet = [f"{when} · {_plain(text)}" for when, _, _, text in (queue or [])]
     counters = (f"🔴 От меня нужно {len(mine)} · ⏰ Просрочено {len(rows['overdue'])} · 📥 Входящие {len(rows['inbox'])}"
-                f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}")
+                f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}"
+                + (f" · 🔵 Слито, ждёт приёмки: {len(rows['accept'])}" if rows["accept"] else ""))
     done_fold = (f"> [!success]- 🟢 Готово за сутки ({len(rows['done'])})\n"
                  + ("\n".join(f"> - {x}" for x in rows["done"]) if rows["done"] else "> —") + "\n")
     return ("# Сводка\n\n" + counters + "\n\n" + render_views_section() + "\n"
@@ -3177,7 +3202,8 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
             + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
             + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
-            + sec("🟡 В работе", rows["doing"]) + "\n" + done_fold
+            + sec("🟡 В работе", rows["doing"]) + "\n"
+            + (sec("🔵 Слито, ждёт приёмки", rows["accept"]) + "\n" if rows["accept"] else "") + done_fold
             + ("\n" + sec("🔕 Без уведомления за сутки", quiet) if quiet else "")
             + "\n✍️ Написать агенту — текстом в раздел «Ваши заметки» внизу карточки. Перенести — перетащите карточку на доске. "
               "Готовые карточки уходят с доски через 7 дней.\n"), rows
@@ -3858,6 +3884,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     cross = crossings(tasks)
     outs = outcomes(tasks)
     wl = {i: work_links(h, b, pr_index, repos) for i, (_, h, b) in tasks.items()} if repos else {}
+    pr_days = {(x["repo"], x["number"]): x.get("day") for xs in (pr_index or {}).values() for x in xs if x.get("merged")}
+    accept = {i: w for i, (_, h, b) in tasks.items() if i in wl for w in [merged_wait(h, b, wl[i], pr_days)] if w}
     for cid, _, src, h, b in items:
         name = names[cid]
         st = cards.setdefault(cid, {})
@@ -3884,7 +3912,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                                                 batch_pr=batch_pr(cid, pr_index, own) if repos else None, **kw)
             else:
                 card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs,
-                                                                          outs, wl.get(cid), tails), **kw)
+                                                                          outs, wl.get(cid), tails, pr_days), **kw)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
@@ -3918,13 +3946,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _sync_nodes(board, state, roles, tasks, names, slugs, alert)
 
     # 7. уведомления (политика: утренний дайджест, пинги по решениям), сводка, вид
-    _, rows = _summary(tasks, t, inbox, names, long_ids)
+    _, rows = _summary(tasks, t, inbox, names, long_ids, accept=accept)
     if policy is not None:
         # digest_day прежнего board.json (до 0.11.15) — политике: в день обновления второго утреннего не будет
         policy.run((len(rows["wait"]), len(rows["overdue"]), len(rows["inbox"])),
                    lambda tid: card_url(vault, names.get(tid, "Сводка")), card_url(vault, "Сводка"),
                    legacy_digest_day=state.pop("digest_day", None))
-    text, rows = _summary(tasks, t, inbox, names, long_ids, policy.queue_view() if policy is not None else None)
+    text, rows = _summary(tasks, t, inbox, names, long_ids, policy.queue_view() if policy is not None else None, accept)
     sp = os.path.join(board, "Сводка.md")
     old = open(sp, encoding="utf-8").read() if os.path.exists(sp) else ""
     if old != text:
