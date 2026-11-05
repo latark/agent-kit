@@ -30,6 +30,7 @@ DEFAULTS = {
     "urgent_hours": 4,            # срок ближе — срочно: сразу, мимо присутствия и бюджета
     "urgent_remind_min": [60, 30],  # напоминания срочного — за столько минут до срока
     "daily_budget": 5,            # прерывающих уведомлений в день
+    "done_digest": True,          # в утренней сводке — «Закрыто за сутки: N» (done за сутки); false — без строки
     "phone": False,               # push на телефон — выключено: нужно отдельное «да» владельца
 }
 OUTCOMES = ("answer", "expired", "closed")
@@ -62,7 +63,7 @@ def settings(raw=None):
         v = raw[k]
         if k in ("quiet_start", "quiet_end"):
             ok = _hm(v) is not None
-        elif k == "phone":
+        elif k in ("phone", "done_digest"):
             ok = isinstance(v, bool)
         elif k == "urgent_remind_min":
             ok = isinstance(v, list) and all(_num(x) and 0 < x <= 1440 for x in v)
@@ -315,17 +316,17 @@ class Policy:
             text += " · совет: " + (rec if len(rec) <= 80 else rec[:79] + "…")
         return text
 
-    def run(self, counts=None, url=None, summary_url=None, legacy_digest_day=None):
+    def run(self, counts=None, url=None, summary_url=None, legacy_digest_day=None, done=0):
         """Утренний дайджест и пинги по решениям этого прохода. counts — (нужен ответ, просрочено, входящих);
         url(id) — ссылка на карточку. legacy_digest_day — digest_day прежнего board.json (до 0.11.15): в день
-        обновления второго утреннего не будет."""
+        обновления второго утреннего не будет. done — задач закрыто за сутки (строка сводки, если cfg done_digest)."""
         url = url or (lambda tid: None)
         if "digest_day" not in self.st and legacy_digest_day:
             self.st["digest_day"] = legacy_digest_day
-        self._digest(counts or (0, 0, 0), summary_url)
+        self._digest(counts or (0, 0, 0), summary_url, done)
         self._ping_decisions(url, summary_url)
 
-    def _digest(self, counts, summary_url):
+    def _digest(self, counts, summary_url, done=0):
         if self.st.get("digest_day") == self.today or not _after_end(self.t, self.cfg) or self.presence != "here":
             return
         self.st["digest_day"] = self.today
@@ -336,9 +337,12 @@ class Policy:
             if c.pop("night", None):
                 c["last"], c["queued"] = self.t, False
         n, overdue, inbox = counts
-        if not (n or overdue or inbox or held):
+        done = done if self.cfg.get("done_digest", True) and _num(done) and done > 0 else 0
+        if not (n or overdue or inbox or held or done):
             return
         text = f"Доброе утро. {HUMAN_WAIT}: {n}, просрочено: {overdue}, входящих заявок: {inbox}."
+        if done:
+            text += f" Закрыто за сутки: {int(done)}."
         if held:
             text += f" Отложено: {held} — в сводке."
         self._send(text, "digest", ["digest"], summary_url, "digest")

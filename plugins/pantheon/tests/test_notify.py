@@ -494,9 +494,33 @@ def review_case():
     check("повторное ревью: тихие часы 00:30–08:00 — срок-дата вечером срочная", len(k) == 1 and "Срочно" in k[0][1])
 
 
+def done_digest_case():
+    """metis-0851: в утренней сводке — «Закрыто за сутки: N» (done с closed со вчерашнего дня); N=0 и done_digest = false — без строки."""
+    def mk(sched, closed_days):
+        w = make(sched)
+        for i, d in enumerate(closed_days):
+            r = run(w, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", f"Сделано {i}",
+                    "--status", "done", "--project", "Пантеон", t=at(d, 12))
+            assert r.returncode == 0, r.stderr
+            tid = r.stdout.split()[0]
+            f = src(w, tid)  # дату закрытия ставит команда закрытия; здесь — прямо в заголовок
+            txt = open(f, encoding="utf-8").read().replace("\nupdated:", f"\nclosed: 2026-10-{d:02d}\nupdated:", 1)
+            open(f, "w", encoding="utf-8").write(txt)
+        board(w, at(20, 7, 1), idle=0)  # ночью дайджеста нет
+        sent(w)
+        board(w, at(20, 9), idle=0)
+        return [x[1] for x in sent(w) if x[3] == "digest"]
+    a = mk("", [19, 20, 10])  # вчера и сегодня — в счёт, 10.10 — нет
+    check("закрыто за сутки: N>0 — строка «Закрыто за сутки: 2»", len(a) == 1 and "Закрыто за сутки: 2." in a[0])
+    b = mk("", [10])
+    check("закрыто за сутки: N=0 — строки нет, дайджеста нет", not b)
+    c = mk('\n[notify]\ndone_digest = false\n', [19, 20])
+    check("done_digest = false — строки нет", not any("Закрыто за сутки" in x for x in c))
+
+
 def main():
     for case in (presence_case, quiet_case, repeat_case, group_case, journal_case, budget_case, config_case,
-                 faults_case, conflict_case, legacy_and_due_case, review_case):
+                 faults_case, conflict_case, legacy_and_due_case, review_case, done_digest_case):
         case()
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
