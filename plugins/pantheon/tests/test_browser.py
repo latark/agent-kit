@@ -81,6 +81,8 @@ class Daemon:
         self.open_no_url = False      # A4: /open без поля url
         self.read_url = None          # A5: READ_JS вернёт этот адрес ("" — без поля url)
         self.eval_goes = None         # A6: выражение eval уводит вкладку сюда
+        self.sessions_mode = False    # metis-0774: демон со вкладками сессий; False — старый, поле session игнорирует
+        self.stabs = {}               # вкладки сессий: имя → адрес
 
     def transport(self, port, method, path, body=None, token=None, timeout=60):
         self.calls.append((port, method, path, body, token))
@@ -90,11 +92,25 @@ class Daemon:
             return 200, json.dumps({"browser": "comet", "port": port, "connected": True})
         if token != TOKEN:
             return 401, "нужен заголовок"
+        sid = body.get("session") if (self.sessions_mode and isinstance(body, dict)) else None
         if path == "/health":
-            return 200, json.dumps({"connected": True, "work": {"url": self.tab}})
+            out = {"connected": True, "work": {"url": self.tab}}
+            if self.sessions_mode:
+                out["sessions"] = [{"session": k, "url": v} for k, v in self.stabs.items()]
+            return 200, json.dumps(out)
+        if sid is not None and path == "/eval" and sid not in self.stabs:
+            return 404, f"у сессии {sid} нет вкладки"
+        if sid is not None and path == "/eval":
+            expr = body["expr"]
+            if expr == B.READ_JS:
+                return 200, json.dumps({"url": self.stabs[sid], **self.pages.get(self.stabs[sid], {})})
+            return 200, json.dumps({"value": "ок:" + expr[:40]})
         if path == "/open":
             url = self.redirect.get(body["url"], body["url"])
-            self.tab = url
+            if sid is not None:
+                self.stabs[sid] = url
+            else:
+                self.tab = url
             out = {"url": url, "title": self.pages.get(url, {}).get("title", ""), "timedOut": False}
             if self.open_no_url:
                 del out["url"]
@@ -671,6 +687,73 @@ for d, _w in B.queue_dirs():
         for f in os.listdir(d):
             dumps += open(os.path.join(d, f), encoding="utf-8").read()
 check("[O2] пароль демона не в итогах и не в журнале", TOKEN not in dumps and dumps)
+
+# --- metis-0774: своя вкладка демона на окно (поле session = имя окна) -------------------------------------------------
+def sess_calls():
+    return [c for c in D.calls if c[2] in ("/open", "/eval")]
+
+
+D.sessions_mode, D.tab, D.stabs = True, "about:blank", {}
+D.calls.clear()
+res = run(req("read", url=AVITO), win="hq")
+sc = sess_calls()
+check("[S1] окно hq: read — /open и /eval с session == имя окна",
+      res["state"] == "done" and [c[2] for c in sc] == ["/open", "/eval"] and all(c[3].get("session") == "hq" for c in sc)
+      and D.stabs == {"hq": AVITO} and D.tab == "about:blank", (res, sc))
+D.calls.clear()
+res = run(req("open", url=AVITO), win="hq")
+check("[S1] окно: open — /open с session", res["state"] == "done" and sess_calls()[0][3].get("session") == "hq", res)
+D.calls.clear()
+res = run(req("eval", here=True, expr="document.title"), win="hq")
+check("[S1] окно: eval --here — /eval с session, адрес своей вкладки из /health.sessions",
+      res["state"] == "done" and all(c[3].get("session") == "hq" for c in sess_calls()) and "ок:" in res["text"], res)
+D.calls.clear()
+D.tab = "https://example.com/a"       # общая вкладка на чужом сайте не мешает окну со своей вкладкой
+res = run(req("read", here=True), win="hq")
+check("[S1] окно: read --here смотрит свою вкладку, а не общую", res["state"] == "done" and "Авито" in res["text"], res)
+D.stabs.pop("hq")
+D.tab = AVITO
+D.calls.clear()
+res = run(req("eval", here=True, expr="document.title"), win="hq")
+check("[S1] окно без своей вкладки: eval --here — отказ «пуста», общая вкладка не подставляется",
+      res["state"] == "refused" and "пуста" in res["why"] and not any(c[2] == "/eval" for c in D.calls), res)
+
+D.calls.clear()
+D.stabs.clear()
+D.tab = "about:blank"
+res = run(req("read", url=AVITO), win=None)
+sc = sess_calls()
+check("[S2] сессия владельца (win None): в /open и /eval поля session нет",
+      res["state"] == "done" and [c[2] for c in sc] == ["/open", "/eval"] and all("session" not in c[3] for c in sc)
+      and D.tab == AVITO and not D.stabs, (res, sc))
+
+D.calls.clear()
+D.tab = "about:blank"
+res = run(req("open", url="https://www.avito.ru/go"), win="hq")
+bl = [c for c in D.calls if c[2] == "/open"]
+check("[S3] увод на чужой сайт: about:blank тоже с session окна, общая вкладка не тронута",
+      res["state"] == "refused" and len(bl) == 2 and bl[1][3] == {"url": "about:blank", "console": False, "session": "hq"}
+      and D.tab == "about:blank" and D.stabs == {"hq": "about:blank"}, (res, bl))
+
+for bad in ("окно с пробелом", "x" * 65, ""):
+    try:
+        B.session_of(bad)
+        check(f"[S4] session_of({bad[:12]!r}) — отказ", False)
+    except B.Fail:
+        check(f"[S4] session_of({bad[:12]!r}) — отказ", True)
+check("[S4] session_of: имена окон — как есть, None — None",
+      B.session_of("hq") == "hq" and B.session_of("athena-brokerassistant") == "athena-brokerassistant"
+      and B.session_of(None) is None)
+
+# старый демон: поля session не знает, игнорирует; /health без sessions — адрес общей вкладки
+D.sessions_mode, D.tab, D.stabs = False, "about:blank", {}
+D.calls.clear()
+res = run(req("read", url=AVITO), win="hq")
+check("[S5] старый демон: read из окна работает через общую вкладку (session игнорируется, откат не нужен)",
+      res["state"] == "done" and D.tab == AVITO and "Авито" in res["text"], res)
+res = run(req("eval", here=True, expr="document.title"), win="hq")
+check("[S5] старый демон: eval --here читает адрес общей вкладки", res["state"] == "done", res)
+D.sessions_mode = False
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)

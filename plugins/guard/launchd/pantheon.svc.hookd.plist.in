@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Шаблон службы демона хуков guard (metis-0330). Заполняет scripts/hookd-install.sh: @HOME@ и @HOOKS@ (папка hooks
+     проверенного дерева guard). Сокет держит launchd: первое соединение запускает демон, после простоя он выходит
+     сам. Без KeepAlive и без ProcessType Background: демон отвечает на каждый вызов инструмента. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>pantheon.svc.hookd</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/sh</string><string>@HOOKS@/python.sh</string><string>@HOOKS@/daemon.py</string></array>
+  <key>Sockets</key>
+  <dict><key>Listeners</key><dict>
+    <key>SockPathName</key><string>@HOME@/.cache/pantheon/hookd/hookd.sock</string>
+    <key>SockPathMode</key><integer>384</integer>
+    <key>SockType</key><string>stream</string>
+    <key>SockFamily</key><string>Unix</string>
+  </dict></dict>
+  <key>ThrottleInterval</key><integer>2</integer>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>@HOME@/.local/state/pantheon/logs/svc-hookd.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/.local/state/pantheon/logs/svc-hookd.log</string>
+</dict>
+</plist>

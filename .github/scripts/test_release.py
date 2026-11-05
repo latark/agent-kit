@@ -219,6 +219,8 @@ def t_push_race():
     """Второе слияние приходит между fetch и push: push отказан, пересчёт на свежем main покрывает оба."""
     w, origin = repo()
     run(w, "--push")
+    g(w, "checkout", "-q", "main")  # скрипт HEAD отвязывает и main не двигает (metis-0814) — подтягиваем сами
+    g(w, "reset", "-q", "--hard", "origin/main")
     other = os.path.join(os.path.dirname(w), "other")
     subprocess.run(["git", "clone", "-q", origin, other], check=True, env=ENV)
     merge_pr(w, {"plugins/guard/hooks/a.py": "a = 2\n"}, "first")
@@ -254,6 +256,24 @@ def t_push_race():
     check("push отказан всегда — код 1 после трёх попыток, причина последней строкой", rc == 1
           and out.count("не прошла") == 3 and out.strip().splitlines()[-1].startswith("release: push в origin/main не "
                                                                                        "прошёл за 3"), out)
+
+
+def t_push_detach():
+    """metis-0814: --push во второй worktree не двигает локальную ветку main, открытую в первой."""
+    w, origin = repo()
+    second = os.path.join(os.path.dirname(w), "second")
+    g(w, "worktree", "add", "-q", "--detach", second, "main")  # w держит main; second отвязана
+    merge_pr(w, {"plugins/guard/hooks/a.py": "a = 2\n"}, "pr")
+    g(w, "push", "-q", "origin", "main")
+    main_before = g(w, "rev-parse", "main")
+    rc, out = run(second, "--push")
+    check("detach: код 0", rc == 0, out)
+    check("detach: локальная main первой worktree не сдвинулась", g(w, "rev-parse", "main") == main_before
+          and g(w, "rev-parse", "HEAD") == main_before and g(w, "status", "--porcelain") == "", g(w, "status", "-sb"))
+    g(w, "fetch", "-q", "origin")
+    check("detach: выпуск ушёл на origin/main", g(w, "log", "-1", "--format=%s", "origin/main").startswith("выпуск: ")
+          and g(w, "rev-parse", "origin/main") == g(second, "rev-parse", "HEAD"), g(w, "log", "--oneline", "-3", "origin/main"))
+    check("detach: HEAD второй worktree отвязан", g(second, "symbolic-ref", "-q", "HEAD", check=False) == "")
 
 
 def t_reconcile():
@@ -654,7 +674,7 @@ def t_workflows_on_bad_copies():
 
 
 
-for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
+for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_push_detach, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
           t_wf_parse_selftest, t_workflows, t_workflows_on_bad_copies):
     try:
         t()

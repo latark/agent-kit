@@ -18,8 +18,10 @@ PR `version` в plugins/<плагин>/.claude-plugin/plugin.json и файл .c
    версию, только если запись совпала с каталогом: слито, а выпуска ещё нет — не ставит (окно «номер ещё старый»).
 4. Перед коммитом — сверка: изменены только plugin.json тронутых плагинов (и в них только version) и releases.json.
    Один коммит «выпуск: <плагин> <версия>, …» от github-actions[bot].
-5. --push: git push <remote> HEAD:<branch>. Отказ (main ушёл вперёд — второе слияние подряд) — fetch, сброс на
-   свежий <branch> и пересчёт с шага 1, до трёх попыток: свежий запуск покрывает и новое слияние.
+5. --push: git push <remote> HEAD:<branch>. Отказ (main ушёл вперёд — второе слияние подряд) — fetch, переход на
+   свежий <branch> с отвязанным HEAD (`checkout --detach FETCH_HEAD`, не `-B`: он двигал бы локальную ветку, даже
+   открытую в другой worktree, и файлы той папки оставались старыми, metis-0814) и пересчёт с шага 1, до трёх
+   попыток: свежий запуск покрывает и новое слияние. Локальные ветки скрипт не трогает.
 
 Привилегированная цепочка (contents: write) — только этот файл и release.yml, оба в ядре шлюза (.github целиком,
 CORE_DIR в merge_gate.py): PR, правящий их, сливает владелец. Скрипт ничего не импортирует из репозитория.
@@ -223,7 +225,7 @@ def main(argv):
         for attempt in range(1, ATTEMPTS + 1 if push else 2):
             if push:
                 git(root, "fetch", "-q", remote, branch)
-                git(root, "checkout", "-q", "-B", branch, "FETCH_HEAD")
+                git(root, "checkout", "-q", "--detach", "FETCH_HEAD")
             what = release_once(root)
             if what is None:
                 print("release: поднимать нечего — выпуск совпадает с деревом")

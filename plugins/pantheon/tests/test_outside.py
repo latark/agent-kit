@@ -1145,6 +1145,60 @@ check("--app у не-монорепо: отказ", state(q, rid) == "failed"
 rc, _, _ = role_request("athena-x", MONO, "serve", "--app", "../x")
 check("--app не по образцу: код 2", rc == 2)
 
+# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (alexbroker: site/)
+SUB = os.path.join(HOME, "projects", "subapp")
+os.makedirs(SUB)
+git(SUB, "init", "-q", "-b", "main")
+git(SUB, "remote", "add", "origin", "https://github.com/latark/subapp.git")
+commit(SUB, {"site/package.json": json.dumps({"name": "site", "scripts": {"dev": "next dev"}}),
+             "site/pnpm-lock.yaml": "", "empty/readme.txt": "x", ".gitignore": "node_modules/\n"}, "s1")
+os.symlink(os.path.join(HOME, "projects"), os.path.join(SUB, "out"))   # ссылка наружу корня
+git(SUB, "add", "out")
+git(SUB, "commit", "-q", "-m", "s2")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/subapp"],
+                          "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+kill_all_servers()
+before = len(calls())
+rc, q, rid = role_request("athena-x", SUB, "serve", "--app", "site")
+serve_pass()
+res = O.load_result(q, rid) or {}
+c = calls()[before:]
+_site = os.path.join(work_of(rid), "site")
+check("0790: --app site без корневого package.json — сервер в site/ (скрипт и cwd)",
+      res.get("state") == "serving" and c and c[-1]["cwd"] == _site and c[-1]["cmd"][-3:] == ["pnpm", "run", "dev"]
+      and c[-1]["env"].get("PORT") == str(res.get("port")), (res, [(x["cmd"], x["cwd"]) for x in c]))
+check("0790: зависимости ставятся в site/, а не в корне копии",
+      c and c[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"] and c[0]["cwd"] == _site, c[:1])
+kill_all_servers()
+rc, q, rid = role_request("athena-x", SUB, "serve")
+serve_pass()
+check("0790: без --app и без корневого package.json — прежний отказ",
+      state(q, rid) == "failed" and "нет package.json" in (O.load_result(q, rid) or {}).get("why", ""))
+for _bad, _why in (("out", "вне корня"), ("empty", "нет package.json"), ("nope", "не монорепо")):
+    rc, q, rid = role_request("athena-x", SUB, "serve", "--app", _bad)
+    serve_pass()
+    check(f"0790: --app {_bad}: отказ ({_why})", state(q, rid) == "failed"
+          and _why in (O.load_result(q, rid) or {}).get("why", ""), O.load_result(q, rid))
+rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "../x")
+check("0790: --app ../x: код 2", rc == 2)
+rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "/etc")
+check("0790: --app абсолютный путь: код 2", rc == 2)
+_sw = os.path.realpath(tempfile.mkdtemp(prefix="sw-"))
+_sx = os.path.realpath(tempfile.mkdtemp(prefix="sx-"))
+os.makedirs(os.path.join(_sw, "site"))
+json.dump({"scripts": {"dev": "x"}}, open(os.path.join(_sw, "site", "package.json"), "w"))
+json.dump({"scripts": {"dev": "x"}}, open(os.path.join(_sx, "package.json"), "w"))
+os.symlink(_sx, os.path.join(_sw, "ext"))            # папка-ссылка наружу, с package.json
+os.makedirs(os.path.join(_sw, "pk"))
+os.symlink(os.path.join(_sx, "package.json"), os.path.join(_sw, "pk", "package.json"))   # package.json-ссылка наружу
+check("0790: serve_command(site) — папка site", O.serve_command(_sw, None, "site")[2] == os.path.join(_sw, "site"))
+check("0790: serve_command(абсолютный) — отказ", O.serve_command(_sw, None, "/etc")[0] is None)
+check("0790: serve_command(..) — отказ", O.serve_command(_sw, None, "../x")[0] is None
+      and O.serve_command(_sw, None, "site/../../x")[0] is None)
+check("0790: serve_command(ссылка-папка наружу) — отказ", O.serve_command(_sw, None, "ext")[0] is None)
+check("0790: serve_command(package.json-ссылка наружу) — отказ", O.serve_command(_sw, None, "pk")[0] is None)
+
 # разбор workspaces и выбор приложения — без запуска
 _ws = os.path.realpath(tempfile.mkdtemp(prefix="ws-"))
 for rel, pj in {"package.json": {"name": "r"}, "apps/a/package.json": {"name": "a", "scripts": {"dev": "x"}},
@@ -1625,6 +1679,33 @@ for _p in _kid:
         os.kill(_p, 9)
 alien.kill()
 alien.wait()
+
+# --- ps не запустить (sandbox-exec): strays и kill_group идут по libproc (metis-0786) ---
+if not MAC:
+    print("пропущено: нужен macOS — strays и kill_group без ps (libproc)")
+else:
+    _ps_keep = O.PS
+    O.PS = os.path.join(_ROOT, "нет-ps-0786")
+    _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
+                            "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
+                            start_new_session=True)
+    TEST_PROCS.append(_par)
+    _kid2 = []
+    for _ in range(40):
+        time.sleep(0.1)
+        _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
+        if _kid2:
+            break
+    _st = O.strays(_par.pid)
+    _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
+    check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
+          and _me_row[2] > 0, _me_row)
+    check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
+    O.kill_group(_par.pid)
+    time.sleep(0.3)
+    check("без ps: kill_group гасит и главу, и потомка в своей группе",
+          _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
+    O.PS = _ps_keep
 
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
 TEST_PROCS.append(leader)
