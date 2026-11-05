@@ -452,7 +452,7 @@ for disp, url, want_name in (
         ("attachment; filename=\"" + "Отчёт.pdf".encode().decode("latin-1") + "\"", ZIP, "Отчёт.pdf"),
         ("", "https://a.ru/dir/%2E%2E%2Fx.zip", "x.zip"),
         ("", "https://a.ru/", "file.download"),
-        ('attachment; filename="a‮gpj.exe"', ZIP, "a_gpj.exe.download"),
+        ('attachment; filename="a\u202egpj.exe"', ZIP, "a_gpj.exe.download"),
         ('attachment; filename="-rf $HOME;.zip"', ZIP, "rf _HOME_.zip"),
         ("attachment; filename*=UTF-8''%E2%80%AE%00x.zip", ZIP, "__x.zip"),
         ('attachment; filename="run.COMMAND"', ZIP, "run.COMMAND.download"),
