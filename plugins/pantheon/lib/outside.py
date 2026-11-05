@@ -10,6 +10,8 @@
                                          test/check package.json, иначе pytest; --script — скрипт package.json
                                          Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
                                          новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
+                                         Заявка с --sha и обычная на одном SHA и папке не сцеплены: у --sha своя копия
+                                         (pin), у обычной — дерево папки; каждая получает свой ID (metis-0796)
   pantheon outside test --sha SHA [--script ИМЯ] [--wait С]
                                          та же проверка на коммите SHA (7–40 знаков, есть в клоне) в своей копии, а не
                                          в этой папке: ветку PR не переключить в worktree окна, если .claude/ проекта
@@ -401,7 +403,8 @@ def inside(p, roots):
 # git вне песочницы в папках, которые пишет роль: ни монитора файлов, ни хуков, ни сети, ни подмодулей (metis-0614).
 # -c перекрывает значения из конфига репозитория; фильтры и include так не снять — их отсекает unsafe_config.
 # --no-replace-objects (и GIT_NO_REPLACE_OBJECTS в окружении, как у шлюза) — refs/replace в клоне не подменяют содержимое
-# копии при том же HEAD и чистом status (metis-0796, Д1); attributes и alternates клона на дерево копии не влияют
+# копии при том же HEAD и чистом status (metis-0796, Д1); attributes клона (ident, eol, working-tree-encoding) при
+# checkout меняют байты файлов копии, но не дерево коммита и не его запись; alternates содержимое не подменяют (metis-0798, Д2)
 GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
             "-c", "submodule.recurse=false")
 
@@ -764,10 +767,15 @@ def _ps_table_libproc():
     n = lib.proc_listallpids(None, 0)
     if n <= 0:
         return None
-    buf = (ctypes.c_int * (n + 256))()
-    got = lib.proc_listallpids(buf, ctypes.sizeof(buf))   # число pid, а не байт
-    if got <= 0:
-        return None
+    size = n + 256
+    while True:
+        buf = (ctypes.c_int * size)()
+        got = lib.proc_listallpids(buf, ctypes.sizeof(buf))   # число pid, а не байт
+        if got <= 0:
+            return None
+        if got < len(buf) or size >= 1 << 20:
+            break
+        size *= 4                    # буфер полон — процессы могли не влезть (появились между вызовами), как _lp_pids
     table = {}
     for p in buf[:min(got, len(buf))]:
         if p <= 0:
@@ -782,8 +790,10 @@ def _ps_table_libproc():
 
 
 def ps_table():
-    """{pid: (ppid, pgid, rss в КБ)} всех процессов: на macOS по libproc (setuid /bin/ps под sandbox-exec не
-    запускается, и strays() иначе вернул бы [] — metis-0786), ps — запасной путь (Linux, нет libproc); сбой — {}."""
+    """{pid: (ppid, pgid, rss в КБ)} процессов: на macOS по libproc (setuid /bin/ps под sandbox-exec не
+    запускается, и strays() иначе вернул бы [] — metis-0786), ps — запасной путь (Linux, нет libproc или он ничего
+    не вернул); сбой — {}. Без root на macOS libproc отдаёт только процессы своего uid и без зомби (чужие pidinfo не
+    даёт), ps — все."""
     table = _ps_table_libproc()
     if table is not None:
         return table

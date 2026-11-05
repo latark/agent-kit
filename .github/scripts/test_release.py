@@ -276,6 +276,27 @@ def t_push_detach():
     check("detach: HEAD второй worktree отвязан", g(second, "symbolic-ref", "-q", "HEAD", check=False) == "")
 
 
+def t_push_from_main():
+    """metis-0818 (мутант reset --hard FETCH_HEAD): --push из копии, где открыта main и она позади origin, — локальная
+    main не сдвигается, HEAD отвязан, выпуск ушёл на origin/main."""
+    w, origin = repo()
+    main_before = g(w, "rev-parse", "main")
+    other = os.path.join(os.path.dirname(w), "other")
+    subprocess.run(["git", "clone", "-q", origin, other], check=True, env=ENV)
+    merge_pr(other, {"plugins/guard/hooks/a.py": "a = 3\n"}, "pr-other")
+    g(other, "push", "-q", "origin", "main")
+    check("main: до запуска копия на ветке main, и она позади origin", g(w, "symbolic-ref", "-q", "HEAD") == "refs/heads/main"
+          and g(w, "rev-parse", "main") == main_before, g(w, "status", "-sb"))
+    rc, out = run(w, "--push")
+    check("main: код 0", rc == 0, out)
+    check("main: локальная main не сдвинулась (не reset --hard)", g(w, "rev-parse", "main") == main_before,
+          g(w, "status", "-sb"))
+    check("main: HEAD отвязан, ветки нет", g(w, "symbolic-ref", "-q", "HEAD", check=False) == "")
+    g(w, "fetch", "-q", "origin")
+    check("main: выпуск ушёл на origin/main", g(w, "log", "-1", "--format=%s", "origin/main").startswith("выпуск: ")
+          and g(w, "rev-parse", "origin/main") == g(w, "rev-parse", "HEAD"), g(w, "log", "--oneline", "-3", "origin/main"))
+
+
 def t_reconcile():
     """Сверка перед коммитом: лишний файл или правка plugin.json не только в version — отказ без коммита."""
     w, _o = repo()
@@ -674,7 +695,7 @@ def t_workflows_on_bad_copies():
 
 
 
-for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_push_detach, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
+for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_push_detach, t_push_from_main, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
           t_wf_parse_selftest, t_workflows, t_workflows_on_bad_copies):
     try:
         t()

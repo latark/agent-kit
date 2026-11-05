@@ -651,8 +651,19 @@ def reads(dirs, n):
         "        open(os.path.join(P, sub, f)).read()\n"
 
 
-put(os.path.join(ma, "tests", "test_reader.py"), reads(READ_DIRS, 5) + "subprocess.run(['/bin/sh', os.path.join(P, "
-    "'lib', 's.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+# metis-0817 (M9): s.sh и copied.py сначала открыты (метка «r»), потом запущены и скопированы (метка «o») — запуск не
+# теряется: дедуп по пути без метки оставил бы только «r», и у читающего дерево связь пропала бы
+put(os.path.join(ma, "tests", "test_reader.py"), reads(READ_DIRS, 5)
+    + "open(os.path.join(P, 'lib', 's.sh')).read()\nopen(os.path.join(P, 'lib', 'copied.py')).read()\n"
+    "subprocess.run(['/bin/sh', os.path.join(P, 'lib', 's.sh')], check=True, stdout=subprocess.DEVNULL)\n"
+    "shutil.copy(os.path.join(P, 'lib', 'copied.py'), tempfile.mkdtemp())\n" + OK2)
+# metis-0817 (M10): 20 модулей из 5 папок загружены (импорт: метка «m», он же открывает файл — «r») — не читают дерево:
+# прочитанное без загрузки — ничего; без вычитания use они выглядели бы как 20 прочитанных из 5 папок
+for _i in range(5):
+    for _j in range(4):
+        put(os.path.join(ma, "mods", f"d{_i}", f"m{_i}{_j}.py"), f"V = {_j}\n")
+put(os.path.join(ma, "tests", "test_loader.py"), HDR + "for i in range(5):\n    sys.path.insert(0, os.path.join(P, 'mods', "
+    "f'd{i}'))\nfor i in range(5):\n    for j in range(4):\n        __import__(f'm{i}{j}')\n" + OK2)
 put(os.path.join(ma, "tests", "test_fewdirs.py"), reads(READ_DIRS[:4], 5) + OK2)
 put(os.path.join(ma, "tests", "test_thin.py"), reads(READ_DIRS, 3) + OK2)
 put(os.path.join(ma, "tests", "test_fail.py"), "import sys\nprint('ok   a')\nsys.exit(1)\n")
@@ -670,7 +681,9 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/data.txt", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/front.py", {"alpha/test_lazy.py"}),
                    ("plugins/alpha/lib/lazy.py", {"alpha/test_lazy.py"}),
-                   ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py"}),
+                   ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py", "alpha/test_reader.py"}),
+                   ("plugins/alpha/mods/d0/m00.py", {"alpha/test_loader.py"}),
+                   ("plugins/alpha/mods/d4/m43.py", {"alpha/test_loader.py"}),
                    ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
@@ -698,7 +711,7 @@ check("affected-map: version 3, hashes — sha256 каждого файла те
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
     "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py", "alpha/test_cscript.py", "alpha/test_rmtree.py",
-    "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
+    "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py", "alpha/test_loader.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
       mm)
 with open(os.path.join(ma, "lib", "x.py")) as fh:
     check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')
