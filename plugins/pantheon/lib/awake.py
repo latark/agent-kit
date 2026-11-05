@@ -14,7 +14,8 @@
   возобновление ждущих сессий
       сессия направления «ждёт вас», а в его очереди есть задача todo без блокера и не на другой сессии (owner —
       направление, его команда или пусто, как у самозапуска) — разбудить (night.gate("wake")), не чаще раза в час на
-      сессию.
+      сессию. Не будит, пока у окна идёт работа (watch.live_work, metis-0864): ждёт разрешения или ответа на вопрос,
+      живы субагенты или фоновые задачи — respawn оборвал бы их.
   поручения во входящих (metis-0276)
       координатор закончил ход (done, без субагентов и фоновых команд) или его сессии нет, а в inbox/ направления —
       поручение Зевса, написанное после конца его последнего хода и по вашему слову Зевсу (запись в owner-log/zeus.md
@@ -501,6 +502,10 @@ def wake_waiting(agents, registry, doms, t):
             continue
         tid = free_task(name, t)
         if not tid or recheck(name) or scheduler_paused():
+            continue
+        busy = P.watch_mod().live_work(a, t)  # metis-0864: respawn оборвал бы вопрос о разрешении и субагентов
+        if busy:
+            P.start_log(f"wake-live\t{name}\t{a.get('id')}\t{busy}")
             continue
         ok, reason = gate("wake", t, agents=agents, registry=registry)
         if not ok:

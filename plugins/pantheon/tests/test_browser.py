@@ -4,8 +4,8 @@
 Запуск: python3.14 -I plugins/pantheon/tests/test_browser.py  (код выхода 0 — все прошли)
 Всё во временных папках (HOME, PANTHEON_HOME, PANTHEON_STATE подменены); демон — подделка на месте transport(),
 настоящий браузер, порт и пароль не трогаются. Проверки с меткой [A1]…[O2] — строки модели угроз
-(drafts/0760-threat-model.md направления metis-pantheon): класс → обход → защита. Только чтение: click, type и submit
-вынесены в metis-0765 (классы K и C3–C6 модели — там). Проверяется:
+(drafts/0760-threat-model.md направления metis-pantheon): класс → обход → защита. Действия (allow, click, type, submit,
+delete; metis-0765) — tests/test_browser_acts.py. Проверяется:
 - адрес (A): «\\», не-ASCII, %, [], @ в адресе, IP и порт — отказ; адреса нет в ответе /open или чтения, переход
   скриптом до чтения или во время eval, редирект на чужой сайт — about:blank и отказ;
 - согласие на чужой сайт (C1, C2): только окно вопросов (галочка доски — нет), хост вопроса целым токеном; без
@@ -15,10 +15,10 @@
   другой вызов вне списка — отказ с его именем), побочные действия, навигация, вызов по чужому имени, доступ по
   строке, фоновые API, `new` вне списка (E6), функция по ссылке и переназначение имени из списка (E8), прятки имени
   вызова (E9: \\u, комментарий, тег шаблона, `?.(`, `)(`) — отказ; чтение и свойства без вызова — можно;
-- click, type, submit — отказ «вынесено в metis-0765» и в CLI (код 2), и в заявке прохода;
+- click, type, submit, delete без поручения — отказ в заявке прохода, без --task — в CLI (код 2);
 - ящик (W): заявка из окна роли — в кэш окна (PANTHEON_TMP, у hq — XDG_CACHE_HOME собранного окна), вне окна —
   STATE/browser/queue; окно не из списка windows — отказ; вывод демона (O) — рядом с паролем, пароля нет в итогах;
-- сырых /cmd, /close, /events наружу нет, проход их не зовёт; демон не отвечает — уведомление и запуск не чаще 10 мин; run из Claude Code —
+- сырых /cmd, /close, /events наружу нет, проход /close, /events, /console не зовёт; демон не отвечает — уведомление и запуск не чаще 10 мин; run из Claude Code —
   отказ; kick — проход только при заявках.
 """
 import atexit
@@ -488,24 +488,24 @@ for expr in ("[...document.querySelectorAll('a')].map(a => a.href)", "document.t
     res = run(req("eval", url=AVITO, expr=expr))
     check(f"{'[E6] ' if 'new' in expr else ''}eval «{expr}» — чтение, можно", res["state"] == "done", res)
 
-# --- click, type, submit вынесены в metis-0765; нет сырых /cmd и /close -------------------------------------------
+# --- click, type, submit, delete — только по поручению (metis-0765); нет сырых /cmd и /close ------------------------
 D.tab = AVITO
 for op, kw in (("click", {"selector": "#agree"}), ("type", {"selector": "#q", "text": "x"}),
-               ("submit", {"selector": "#send"})):
+               ("submit", {"selector": "#send"}), ("delete", {"selector": "#del"})):
     D.calls.clear()
     res = run(req(op, task="metis-0999", **kw))
-    check(f"заявка {op} в проходе — отказ «вынесено в metis-0765», демон не зван",
-          res["state"] == "refused" and "metis-0765" in res["why"] and not D.calls, res)
+    check(f"заявка {op} без поручения — отказ «поручения … нет», демон не нажимал (/cmd не зван)",
+          res["state"] == "refused" and "поручения" in res["why"] and "/cmd" not in D.paths(), res)
 for op in ("cmd", "close", "events", "console"):
     res = run(req(op, method="Runtime.evaluate"))
     check(f"op {op} — отказ «не того вида»", res["state"] == "refused" and "не того вида" in res["why"], res)
 methods = {c[3]["method"] for c in D.calls if c[2] == "/cmd"}
 all_paths = set(D.paths())
-check("проход не зовёт /cmd, /close, /events, /console — только /health, /open, /eval",
+check("проход без поручения не зовёт /cmd, /close, /events, /console — только /health, /open, /eval",
       not methods and all_paths <= {"/health", "/open", "/eval"}, (methods, all_paths))
 src = open(os.path.join(LIB, "browser.py"), encoding="utf-8").read()
-check("в browser.py нет вызовов /cmd, /close, /events, /console демона",
-      not re.search(r'"/(?:cmd|close|events|console)"', src))
+check("в browser.py нет вызовов /close, /events, /console демона; /cmd — только в cmd() (CMD_ALLOWED)",
+      not re.search(r'"/(?:close|events|console)"', src) and src.count('"/cmd"') == 1)
 
 # --- список из reads.toml, окна --------------------------------------------------------------------------------------
 os.makedirs(os.path.join(HOME, ".claude", "pantheon"), exist_ok=True)
@@ -603,13 +603,12 @@ win_env = dict(base_env, PANTHEON_TMP=HQ_TMP, PANTHEON_ROLE="charon")
 r = subprocess.run([PY311, "-I", RUN_PY, "browser", "read", AVITO, "--wait", "0"],
                    env=win_env, capture_output=True, text=True, timeout=60)
 qd = os.path.join(CACHES, "hq", "browser")
-for argv in (["click", "#agree", "--task", "metis-0999"], ["type", "#q", "текст", "--task", "metis-0999"],
-             ["submit", "#send", "--task", "metis-0999"], ["click", "#agree"]):
+for argv in (["click", "#agree"], ["type", "#q", "текст"], ["submit", "#send"], ["delete", "#d"]):
     rbad = subprocess.run([PY311, "-I", RUN_PY, "browser", *argv], env=win_env, capture_output=True, text=True, timeout=60)
     last = (rbad.stdout + rbad.stderr).strip().splitlines()[-1:]
-    check(f"CLI {' '.join(argv)}: код 2, «вынесено в metis-0765» последней строкой, заявки нет",
+    check(f"CLI {' '.join(argv)} без --task: код 2, причина последней строкой, заявки нет",
           rbad.returncode == 2 and last and last[0].startswith(f"pantheon browser: {argv[0]}: ")
-          and "metis-0765" in last[0] and len(os.listdir(qd) if os.path.isdir(qd) else []) == 1,
+          and "--task" in last[0] and len(os.listdir(qd) if os.path.isdir(qd) else []) == 1,
           (rbad.returncode, last))
 reqs = [n for n in os.listdir(qd)] if os.path.isdir(qd) else []
 check("CLI из окна: заявка в кэше окна (hq/browser), код 0", r.returncode == 0 and len(reqs) == 1
