@@ -211,7 +211,7 @@
     "test_spawn": 54,
     "test_supply": 62
    },
-   "lines": 1484
+   "lines": 1483
   },
   "plugins/guard/tests/test_hookd_check.py": {
    "lines": 230
@@ -225,7 +225,7 @@
     "test_install": 87,
     "test_wrapper": 84
    },
-   "lines": 888
+   "lines": 887
   },
   "plugins/guard/tests/test_hooks_json.py": {
    "lines": 334
@@ -281,7 +281,7 @@
    "PLR0915": {
     "test_sets": 58
    },
-   "lines": 504
+   "lines": 534
   },
   "plugins/guard/tests/test_tg_self.py": {
    "lines": 84
@@ -302,7 +302,7 @@
    "PLR0915": {
     "cmd_owner_log": 74
    },
-   "lines": 2289
+   "lines": 2389
   },
   "plugins/pantheon/hooks/dev-stop-verify.py": {
    "PLR0912": {
@@ -357,8 +357,8 @@
    "PLR0915": {
     "inbox_wake": 104
    },
-   "backrefs": 80,
-   "lines": 747
+   "backrefs": 82,
+   "lines": 752
   },
   "plugins/pantheon/lib/batch.py": {
    "backrefs": 8,
@@ -390,19 +390,24 @@
   },
   "plugins/pantheon/lib/browser.py": {
    "C901": {
+    "do_act": 22,
     "download": 28,
     "eval_skeleton": 19
    },
    "PLR0912": {
+    "check_req": 14,
+    "classify": 13,
+    "do_act": 21,
     "download": 28,
-    "execute": 13
+    "execute": 15
    },
    "PLR0915": {
+    "do_act": 65,
     "download": 106,
     "eval_skeleton": 51
    },
-   "backrefs": 43,
-   "lines": 1519
+   "backrefs": 63,
+   "lines": 2159
   },
   "plugins/pantheon/lib/consent.py": {
    "C901": {
@@ -591,7 +596,7 @@
     "status": 168,
     "tick": 86
    },
-   "lines": 7395
+   "lines": 7396
   },
   "plugins/pantheon/lib/pconfig.py": {
    "lines": 106
@@ -785,6 +790,7 @@
     "oneshots": 19,
     "owner_logs": 14,
     "pause": 13,
+    "respawn_busy": 13,
     "restart": 22,
     "sandbox_clean": 15,
     "worktrees": 21
@@ -797,8 +803,8 @@
     "restart": 71,
     "worktrees": 63
    },
-   "backrefs": 553,
-   "lines": 3557
+   "backrefs": 555,
+   "lines": 3620
   },
   "plugins/pantheon/lib/whocanvas.py": {
    "C901": {
@@ -936,7 +942,7 @@
    "PLR0915": {
     "test_inbox_gates": 61
    },
-   "lines": 1322
+   "lines": 1404
   },
   "plugins/pantheon/tests/test_baseline.py": {
    "lines": 332
@@ -998,7 +1004,13 @@
    "PLR0912": {
     "Daemon.transport": 16
    },
-   "lines": 760
+   "lines": 759
+  },
+  "plugins/pantheon/tests/test_browser_acts.py": {
+   "PLR0912": {
+    "Daemon.transport": 14
+   },
+   "lines": 851
   },
   "plugins/pantheon/tests/test_browser_download.py": {
    "lines": 477
@@ -1034,7 +1046,7 @@
    "lines": 78
   },
   "plugins/pantheon/tests/test_ctx_deferred.py": {
-   "lines": 375
+   "lines": 616
   },
   "plugins/pantheon/tests/test_culprits.py": {
    "PLR0915": {
@@ -1393,7 +1405,7 @@
     "test_who_is_who_memo": 68,
     "test_zeus_clean_0136": 83
    },
-   "lines": 4726
+   "lines": 4768
   },
   "plugins/pantheon/tests/test_who_canvas.py": {
    "lines": 403
