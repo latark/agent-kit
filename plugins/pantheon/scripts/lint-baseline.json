@@ -222,10 +222,10 @@
   "plugins/guard/tests/test_hookd_svc.py": {
    "PLR0915": {
     "test_flush_paths": 86,
-    "test_install": 70,
+    "test_install": 87,
     "test_wrapper": 84
    },
-   "lines": 854
+   "lines": 888
   },
   "plugins/guard/tests/test_hooks_json.py": {
    "lines": 334
@@ -451,18 +451,18 @@
   },
   "plugins/pantheon/lib/jobs.py": {
    "C901": {
-    "jobs_show": 20
+    "jobs_show": 21
    },
    "PLR0912": {
-    "jobs_show": 21,
+    "jobs_show": 22,
     "run_job": 16
    },
    "PLR0915": {
-    "jobs_show": 56,
+    "jobs_show": 59,
     "run_job": 65
    },
-   "backrefs": 77,
-   "lines": 210
+   "backrefs": 81,
+   "lines": 218
   },
   "plugins/pantheon/lib/merge.py": {
    "C901": {
@@ -547,20 +547,21 @@
   "plugins/pantheon/lib/pantheon.py": {
    "C901": {
     "_role_apply": 18,
+    "_services_sync": 16,
     "board_drift": 17,
     "check": 39,
     "direction_init": 27,
     "main": 64,
     "parse_command": 20,
     "roles_build": 38,
-    "sandbox_build": 34,
+    "sandbox_build": 35,
     "status": 45,
-    "tick": 26,
+    "tick": 27,
     "unwrap_rule": 17
    },
    "PLR0912": {
     "_role_apply": 18,
-    "_services_sync": 16,
+    "_services_sync": 17,
     "board_archive": 15,
     "board_drift": 16,
     "check": 44,
@@ -572,24 +573,25 @@
     "parse_command": 19,
     "roles_build": 37,
     "sandbox_build": 22,
+    "sandbox_build.one": 13,
     "status": 48,
-    "tick": 26,
+    "tick": 27,
     "unwrap_rule": 16
    },
    "PLR0915": {
     "_role_apply": 59,
-    "_services_sync": 53,
+    "_services_sync": 56,
     "check": 110,
     "direction_init": 69,
     "domains_build": 54,
     "lock": 51,
     "main": 91,
     "roles_build": 103,
-    "sandbox_build": 163,
+    "sandbox_build": 168,
     "status": 168,
-    "tick": 82
+    "tick": 86
    },
-   "lines": 7207
+   "lines": 7395
   },
   "plugins/pantheon/lib/pconfig.py": {
    "lines": 106
@@ -648,8 +650,8 @@
     "read_parts": 97,
     "resolve_all": 55
    },
-   "backrefs": 48,
-   "lines": 1909
+   "backrefs": 49,
+   "lines": 1924
   },
   "plugins/pantheon/lib/review.py": {
    "C901": {
@@ -695,7 +697,7 @@
     "start": 66
    },
    "backrefs": 200,
-   "lines": 1105
+   "lines": 1114
   },
   "plugins/pantheon/lib/setup.py": {
    "C901": {
@@ -723,16 +725,16 @@
   },
   "plugins/pantheon/lib/taskcli.py": {
    "C901": {
-    "task_cmd": 68
+    "task_cmd": 73
    },
    "PLR0912": {
-    "task_cmd": 69
+    "task_cmd": 74
    },
    "PLR0915": {
-    "task_cmd": 177
+    "task_cmd": 188
    },
-   "backrefs": 52,
-   "lines": 537
+   "backrefs": 55,
+   "lines": 563
   },
   "plugins/pantheon/lib/tasks.py": {
    "C901": {
@@ -764,7 +766,7 @@
     "render_card": 75,
     "task_new": 52
    },
-   "lines": 4414
+   "lines": 4440
   },
   "plugins/pantheon/lib/traces.py": {
    "lines": 114
@@ -934,7 +936,7 @@
    "PLR0915": {
     "test_inbox_gates": 61
    },
-   "lines": 1294
+   "lines": 1322
   },
   "plugins/pantheon/tests/test_baseline.py": {
    "lines": 332
@@ -1075,7 +1077,7 @@
    "PLR0915": {
     "main": 65
    },
-   "lines": 174
+   "lines": 225
   },
   "plugins/pantheon/tests/test_heavy_queue.py": {
    "C901": {
@@ -1211,7 +1213,7 @@
     "test_full_flow": 51,
     "test_parts_stop_conditions": 51
    },
-   "lines": 1999
+   "lines": 2107
   },
   "plugins/pantheon/tests/test_review.py": {
    "PLR0915": {
@@ -1270,9 +1272,9 @@
     "main": 17
    },
    "PLR0915": {
-    "main": 892
+    "main": 903
    },
-   "lines": 1462
+   "lines": 1478
   },
   "plugins/pantheon/tests/test_start_request.py": {
    "lines": 120
@@ -1298,6 +1300,12 @@
    },
    "lines": 320
   },
+  "plugins/pantheon/tests/test_svc_hookd.py": {
+   "PLR0915": {
+    "test_install_and_upgrade": 51
+   },
+   "lines": 408
+  },
   "plugins/pantheon/tests/test_svc_ondemand.py": {
    "C901": {
     "test_proxy_inproc": 20
@@ -1322,9 +1330,9 @@
   },
   "plugins/pantheon/tests/test_task_keep.py": {
    "PLR0915": {
-    "main": 299
+    "main": 333
    },
-   "lines": 592
+   "lines": 663
   },
   "plugins/pantheon/tests/test_task_origin.py": {
    "PLR0915": {
