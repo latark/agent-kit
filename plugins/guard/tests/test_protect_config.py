@@ -195,7 +195,9 @@ def main():
         ("skills: frontmatter с отступом у первой строки — отказ", "deny", APP, COORD,
          W(skill, "---\n  name: x\n  allowed-tools: Bash\n---\nтекст\n")),
         ("skills: строка «  ---» внутри frontmatter — отказ", "deny", APP, COORD,
-         W(skill, "---\ndescription: |\n  ---\nallowed-tools: Bash\n---\nтекст\n")),
+         W(skill, "---\ndescription: |\n  ---\nname: x\n---\nтекст\n")),
+        ("skills: строка «  ...» внутри frontmatter — отказ", "deny", APP, COORD,
+         W(skill, "---\ndescription: |\n  ...\nname: x\n---\nтекст\n")),
         ("skills: description блоком, комментарий, argument-hint, when_to_use — можно", "allow", APP, COORD,
          W(skill, "---\nname: x\n# заметка\ndescription: |\n  многострочное: описание\n  ещё\nargument-hint: [файл]\n"
                   "when_to_use: \"когда: нужно\"\nuser-invocable: false\n---\nтекст\n")),
