@@ -21,12 +21,16 @@ locks/heavy-queue/ (имя — время прихода и pid) и держит
 (процесс остановлен, SIGSTOP или Ctrl-Z): очередь его обходит, но не удаляет — оживший владелец встанет первым.
 `heavy --status` считает только живые билеты. Сервер (--server): за жетон сервера очереди нет (ждёт опросом), а за
 два места, как у любой команды, — по порядку прихода.
+Команды нет в PATH окна (окно подняли без ~/.zprofile, nvm в PATH не попал — `pnpm` не находился, metis-0569) —
+heavy ищет её сам: bin версии node из nvm (alias/default, затем новейшие), Homebrew, ~/.local/bin; нашла — добавляет эту
+папку в PATH команды (у pnpm и npx shebang `env node`). Не нашла — код 127 и одна строка, без очереди за местом.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
 import contextlib
 import fcntl
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -192,6 +196,44 @@ def tmp_env():
     return env
 
 
+def _vkey(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in v.lstrip("v").split("."))
+
+
+def fallback_dirs():
+    """Где искать команду, которой нет в PATH окна: bin версии node из nvm (по alias/default первой, дальше новейшие),
+    Homebrew, ~/.local/bin."""
+    home = os.path.expanduser("~")
+    nvm = os.environ.get("NVM_DIR") or os.path.join(home, ".nvm")
+    root = os.path.join(nvm, "versions", "node")
+    try:
+        vers = sorted((v for v in os.listdir(root) if v.startswith("v")), key=_vkey, reverse=True)
+    except OSError:
+        vers = []
+    try:
+        with open(os.path.join(nvm, "alias", "default"), encoding="utf-8") as fh:
+            want = fh.read().strip().lstrip("v")
+    except OSError:
+        want = ""
+    first = [v for v in vers if want and (v[1:] == want or v[1:].startswith(want + "."))]
+    order = first[:1] + [v for v in vers if v not in first[:1]]
+    return [os.path.join(root, v, "bin") for v in order] + ["/opt/homebrew/bin", "/usr/local/bin",
+                                                          os.path.join(home, ".local", "bin")]
+
+
+def resolve(argv, env):
+    """→ (argv, env) с найденной командой; команду не нашли — None. Путь со слэшем и команду из PATH не трогает."""
+    name = argv[0]
+    if "/" in name or shutil.which(name, path=env.get("PATH") or os.defpath):
+        return argv, env
+    for d in fallback_dirs():
+        if shutil.which(name, path=d):
+            env = dict(env)
+            env["PATH"] = d + os.pathsep + env["PATH"] if env.get("PATH") else d
+            return argv, env
+    return None
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -204,9 +246,16 @@ def main(argv):
     if not argv:
         print(__doc__)
         return 2
+    env = tmp_env()
+    found = resolve(argv, env)
+    if not found:
+        print(f"heavy: команда {argv[0]!r} не найдена ни в PATH, ни в nvm, Homebrew и ~/.local/bin — не запускалась",
+              file=sys.stderr)
+        return 127
+    argv, env = found
     if not any(os.path.exists(os.path.join(LOCKS, n + ".lock")) for n in SLOTS):
         print("heavy: мест блокировки нет (pantheon install их создаёт) — запускаю без неё", file=sys.stderr)
-        return subprocess.call(argv, env=tmp_env())
+        return subprocess.call(argv, env=env)
     try:
         wait_max = float(os.environ.get("HEAVY_WAIT_MAX") or 0)
     except ValueError:
@@ -234,7 +283,7 @@ def main(argv):
             if ticket:
                 ticket.drop()
         held.append(fd)
-    proc = subprocess.Popen(argv, env=tmp_env())
+    proc = subprocess.Popen(argv, env=env)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda s, _f: proc.send_signal(s))
     code = proc.wait()
