@@ -236,6 +236,43 @@ r6 = run()
 check("нет общей истории с base: failed без прогона, «merge-base … не одна или не посчитана»",
       r6.get("state") == "failed" and ncalls() == n0 and "не одна или не посчитана" in r6.get("why", ""), r6)
 git("checkout", "-q", "-f", "feat")
+
+# --- 5б. история подменена (shallow, info/grafts, refs/replace) — полный набор вместо узкого, запись полная ----------
+GITDIR = os.path.join(RK, ".git")
+
+
+def _file(name, text):
+    def put():
+        with open(os.path.join(GITDIR, name), "w") as fh:
+            fh.write(text)
+    return put, lambda: os.remove(os.path.join(GITDIR, name))
+
+
+git("checkout", "-q", "-b", "hist", F3)
+for label, word, (setup, undo) in (
+        ("shallow", "shallow", _file("shallow", B0 + "\n")),
+        ("info/grafts", "info/grafts", _file("info/grafts", F3 + "\n")),
+        ("refs/replace", "refs/replace", (lambda: git("replace", F1, B0), lambda: git("replace", "-d", F1)))):
+    # своё дерево на каждый случай: полный набор на том же дереве перенёсся бы без прогона (tree_record)
+    hx = commit({f"plugins/kit/hist-{len(word)}.txt": word + "\n"}, f"hist: {label}")
+    setup()
+    try:
+        n0, k0 = ncalls(), len(tests_for(hx))
+        rx = run()
+        recs = tests_for(hx)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            O.show(rx)
+    finally:
+        undo()
+    check(f"{label}: полный набор вместо узкого — команда без --affected, итог без base, narrow_why «{word}»",
+          ncalls() == n0 + 1 and last_cmd()[-1] == LINE and "base" not in rx and word in rx.get("narrow_why", "")
+          and rx.get("code") == 0 and rx.get("record"), rx)
+    check(f"{label}: запись полная (без --affected) — её шлюз засчитает и ядру; status называет причину",
+          len(recs) == k0 + 1 and "--affected" not in recs[-1]["cmd"] and "полный набор, а не узкий" in out.getvalue(),
+          (recs[-1:], out.getvalue()))
+check("история снова целая — narrow_history_problem None", O.narrow_history_problem(RK) is None)
+git("checkout", "-q", "feat")
 _cmd = O.command
 O.command = lambda d, kind, script=None: (["/bin/sh", "-c", "python3 t.py"], "python3 t.py")
 n0 = ncalls()

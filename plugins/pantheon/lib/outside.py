@@ -18,7 +18,8 @@
                                          узкий набор (metis-0734): run-tests.py из .pantheon-verify с `--affected --base
                                          <merge-base REF и коммита>` (REF — по умолчанию origin/main, вершина берётся
                                          при заявке). Запись tests — с этой командой, files и map: шлюз guard на
-                                         запасном пути засчитывает её только PR вне ядра защит
+                                         запасном пути засчитывает её только PR вне ядра защит. История копии
+                                         подменена (shallow, info/grafts, refs/replace) — гонится полный набор
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
@@ -1453,6 +1454,23 @@ def rerun_plan(d, sha, argv, line, repos):
                                 + shlex.quote(",".join(files))]}, None
 
 
+def narrow_history_problem(d):
+    """Подменённая история папки d → почему узкий набор нельзя, иначе None. run-tests --affected считает изменённые
+    файлы git'ом в песочнице, без защит шлюза: shallow, info/grafts или refs/replace сдвинут дифф. Тогда гонится
+    полный набор (как _carry_git шлюза guard, только дёшево)."""
+    if (git(d, "rev-parse", "--is-shallow-repository") or "").strip() != "false":
+        return "неполная история (shallow) или git не ответил"
+    grafts = (git(d, "rev-parse", "--git-path", "info/grafts") or "").strip()
+    if not grafts:
+        return "git не ответил на --git-path info/grafts"
+    if os.path.lexists(os.path.join(d, grafts)):
+        return "в git есть info/grafts — история подменена"
+    replace = git(d, "for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/")
+    if replace is None or replace.strip():
+        return "в git есть refs/replace (или git не ответил) — содержимое коммитов подменено"
+    return None
+
+
 def narrow_plan(d, sha, argv, line, base):
     """Узкий набор заявки test --affected (metis-0734) → (план или None, почему нельзя). План — {argv, line, mb, map,
     mp}: команда проверки проекта (run-tests.py с папками плагинов, как у дозапуска — runner_args) с `--affected --base
@@ -1505,7 +1523,8 @@ def new_log(rid):
 def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
-    (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed. src —
+    (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
+    подменена (narrow_history_problem: shallow, info/grafts, refs/replace) — полный набор с narrow_why. src —
     папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по ней live_test находит идущую заявку.
     expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей сдвинула HEAD или правит дерево) —
     ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда."""
@@ -1539,8 +1558,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     argv, line = command(d, "test", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": line})
-    narrow = None
-    if base:
+    narrow, narrow_why = None, (narrow_history_problem(d) if base else None)
+    if base and not narrow_why:
         narrow, why = narrow_plan(d, sha, argv, line, base)
         if not narrow:
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "base": base,
@@ -1562,6 +1581,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         extra["pin"] = True
     if narrow:   # узкий набор: live_test сцепляет только заявки с той же базой
         extra["base"] = base
+    if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
+        extra["narrow_why"] = narrow_why
     save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
                             **({"script": script} if script else {}), **extra})
     log, fd = new_log(rid)
@@ -3166,6 +3187,8 @@ def show(res):
         print(f"дозапуск после красного полного набора {res['rerun_of']}: {', '.join(res.get('files') or [])}")
     if res.get("full_why"):
         print(f"полный набор, а не дозапуск: {res['full_why']}")
+    if res.get("narrow_why"):
+        print(f"полный набор, а не узкий (--affected): {res['narrow_why']}")
     if res.get("record"):
         print("запись tests для шлюза слияния сделана")
     if res.get("why"):
