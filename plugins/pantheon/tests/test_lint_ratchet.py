@@ -83,7 +83,8 @@ def run(root, *args, ruff=None, env=None):
     cmd = [sys.executable, "-I", SCRIPT, "--root", root, "--baseline", os.path.join(root, "base.json")]
     if ruff is not False:
         cmd += ["--ruff", ruff or f"{sys.executable} -I {STUB_PATH}"]
-    r = subprocess.run(cmd + list(args), capture_output=True, text=True, env={**os.environ, **(env or {})})
+    env = {**os.environ, "LINT_RATCHET_MODE": "fail", **(env or {})}  # режим отказа; warn — t_mode
+    r = subprocess.run(cmd + list(args), capture_output=True, text=True, env=env)
     lines = (r.stdout + r.stderr).strip().splitlines()
     r.last = lines[-1] if lines else ""
     return r
@@ -280,6 +281,38 @@ def t_backrefs():
     check("новая обратная ссылка solo.G = <gr> — новый цикл, код 1", r.returncode == 1 and "solo.py" in r.last, r.stdout)
 
 
+def t_mode():
+    """Режим warn (по умолчанию, режим ускорения 05.11): причины те же, последней строкой предупреждение, код 0."""
+    root = started({"a.py": "x = 1\n"})
+    write(root, {"big.py": body(801)})
+    r = run(root, env={"LINT_RATCHET_MODE": ""})
+    check("нет файла режима — warn: код 0, «предупреждение» и причина последней строкой",
+          r.returncode == 0 and r.last.startswith("храповик: предупреждение") and "big.py" in r.last, r.stdout)
+    write(root, {"plugins/pantheon/scripts/lint-ratchet-mode": "fail\n"})
+    r = run(root, env={"LINT_RATCHET_MODE": "warn"})
+    check("в файле fail — отказ, код 1; warn в переменной его не ослабляет", r.returncode == 1 and "отказ" in r.last,
+          r.stdout)
+    write(root, {"plugins/pantheon/scripts/lint-ratchet-mode": "warn\n"})
+    r = run(root, "--update", env={"LINT_RATCHET_MODE": ""})
+    check("warn: --update при нарушении — всё равно отказ, код 1", r.returncode == 1 and "big.py" not in base(root)["files"],
+          r.stdout)
+    r = runner_in(root)
+    check("run-tests в режиме warn: строка предупреждения, код тестов не меняется", r[0] == 0 and "предупреждение" in r[1],
+          r[1][-600:])
+
+
+def runner_in(root):
+    """run-tests.py по папке без тестов внутри root — только чтобы увидеть, как он отдаёт вывод храповика."""
+    os.makedirs(os.path.join(root, "plugins", "pantheon", "scripts"), exist_ok=True)
+    shutil.copy(SCRIPT, os.path.join(root, "plugins", "pantheon", "scripts", "lint_ratchet.py"))
+    shutil.copy(os.path.join(root, "base.json"), os.path.join(root, "plugins", "pantheon", "scripts", "lint-baseline.json"))
+    write(root, {"plugins/x/tests/test_a.py": "print('ok a')\nprint('1 из 1 прошли')\n"})
+    r = subprocess.run([sys.executable, "-I", RUNNER, os.path.join(root, "plugins", "x")], capture_output=True, text=True,
+                       env={**os.environ, "LINT_RATCHET_MODE": "", "LINT_RATCHET_RUFF": f"{sys.executable} -I {STUB_PATH}"},
+                       timeout=300)
+    return r.returncode, r.stdout
+
+
 def t_lint():
     """Обычный `ruff check .` по ruff.toml репозитория — до правил храповика: ошибка — отказ последней строкой."""
     root = started({"a.py": "x = 1\n", "b.py": "y = 1\n"})
@@ -337,7 +370,7 @@ def mini_repo():
 
 def runner(root, *args, env=None):
     r = subprocess.run([sys.executable, "-I", RUNNER, *args, os.path.join(root, "plugins", "x")], capture_output=True,
-                       text=True, env={**os.environ, **(env or {})}, timeout=300)
+                       text=True, env={**os.environ, "LINT_RATCHET_MODE": "fail", **(env or {})}, timeout=300)
     lines = r.stdout.strip().splitlines()
     r.last = lines[-1] if lines else ""
     return r
@@ -423,7 +456,7 @@ def t_real_ruff():
 
 def main():
     for t in (t_clean, t_sizes, t_sizes_lower, t_complexity, t_complexity_lower, t_move, t_cycles, t_edges, t_backrefs,
-              t_backref_counts, t_lint, t_fatal, t_run_tests, t_real_baseline, t_real_ruff):
+              t_backref_counts, t_lint, t_mode, t_fatal, t_run_tests, t_real_baseline, t_real_ruff):
         t()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)

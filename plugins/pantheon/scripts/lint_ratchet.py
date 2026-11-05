@@ -34,6 +34,10 @@
      в файле из базы их не больше, в сумме по репозиторию тоже — новый модуль берёт не больше, чем ушло из старых.
 База только опускается: --update пишет нынешнее состояние, но строк — не больше, чем было, и только если проверка
 чистая. Запись ниже базы — не отказ, а подсказка `--update` последней строкой.
+Режим (владелец 05.11, режим ускорения): файл MODE_FILE — слово warn или fail; нет файла — warn. В warn проверка
+печатает те же причины и последней строкой «храповик: предупреждение», код 0: ни CI, ни run-tests.py не краснеют, чужие
+PR не стоят. fail — отказ с кодом 1. LINT_RATCHET_MODE=fail только ужесточает (warn в переменной файл не ослабляет).
+--update при нарушениях отказывает в любом режиме.
 Коды: 0 — чисто; 1 — отказ (причина и «что делать» — последней строкой); 2 — нет ruff, базы, git или ruff упал.
 Только stdlib, Python 3.11+.
 """
@@ -56,6 +60,7 @@ RULES = {
 BASELINE = os.path.join("plugins", "pantheon", "scripts", "lint-baseline.json")
 RUFF_REQ = os.path.join(".github", "ruff-requirements.txt")
 SELF = "python3 -I plugins/pantheon/scripts/lint_ratchet.py"
+MODE_FILE = os.path.join("plugins", "pantheon", "scripts", "lint-ratchet-mode")
 # Плагин загрузчика pantheon: в этой папке имя P — модуль pantheon (pantheon._attach и set_core).
 CORE_BACKREF = ("plugins/pantheon/lib/", "P", "plugins/pantheon/lib/pantheon.py")
 LOADERS = {"spec_from_file_location", "run_path", "SourceFileLoader"}
@@ -592,6 +597,18 @@ def parse_args(argv):
     return opts
 
 
+def ratchet_mode(root):
+    """fail — если так в LINT_RATCHET_MODE или первым словом MODE_FILE; иначе warn (и когда файла нет)."""
+    if os.environ.get("LINT_RATCHET_MODE", "").strip() == "fail":
+        return "fail"
+    try:
+        with open(os.path.join(root, MODE_FILE), encoding="utf-8") as fh:
+            word = (fh.read().split() or [""])[0]
+    except OSError:
+        word = ""
+    return "fail" if word == "fail" else "warn"
+
+
 def run(opts):
     path = opts["baseline"]
     if opts["mode"] == "init" and os.path.exists(path):
@@ -609,6 +626,9 @@ def run(opts):
         print(f)
     if fails:
         more = f" (и ещё {len(fails) - 1} выше)" if len(fails) > 1 else ""
+        if opts["mode"] == "check" and ratchet_mode(opts["root"]) == "warn":
+            print(f"храповик: предупреждение{more}, код 0 — режим warn ({MODE_FILE}; отказ — fail там) — {fails[0]}")
+            return 0
         print(f"храповик: отказ{more} — {fails[0]}. Поднять базу можно только ручной правкой {BASELINE} с причиной в PR")
         return 1
     new = lowered(base, cur)

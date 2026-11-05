@@ -13,7 +13,8 @@
 #     локальный полный набор.
 # ruff (metis-0265) — первый шаг job affected, на каждый PR: правила — ruff.toml, версия и хеши колёс —
 # .github/ruff-requirements.txt. Вторым шагом — храповик (metis-0854, plugins/pantheon/scripts/lint_ratchet.py):
-# размер файлов, сложность функций и циклы импорта не растут против plugins/pantheon/scripts/lint-baseline.json; ruff —
+# размер файлов, сложность функций и циклы импорта не растут против plugins/pantheon/scripts/lint-baseline.json
+# (режим — plugins/pantheon/scripts/lint-ratchet-mode: warn — предупреждение с кодом 0, fail — отказ); ruff —
 # с PATH, нет его — красный (run-tests.py зовёт храповик и сам, но без ruff пропускает). Не отдельным job: шлюз guard
 # считает job на PR вне REQUIRED_CHECKS и OPTIONAL_CHECKS ошибкой (Д1 argus #235), а внутри affected красный ruff и
 # так держит обязательную проверку.
