@@ -569,6 +569,20 @@
   `~/.claude/skills` — шапка, `name` = имя папки, `description` до 1024 знаков, ссылки на соседние файлы живы; ошибка —
   код 1, в плановом проходе (`--quiet`) — одна тревога `check-skills`. `pantheon check путь/SKILL.md [задача.md …]` —
   только указанные навыки (ошибка навыка даёт код 1 и рядом с задачами); нечитаемая папка навыков — ошибка в строке.
+- `plugins/pantheon/lib/moved.py` — перенос папок в `~/ai` (metis-0899): одна таблица `MOVES` старый путь → новый
+  (agent-kit → `~/ai/agent-kit`, workshop → `~/ai/workshop`, finances → `~/ai/life/finances`) на обе команды.
+  `pantheon migrate-paths <перенос>… [--dry-run]` — для планового прохода после `mv`: папки истории
+  `~/.claude/projects/<ключ>` под новый ключ (ключи worktree `…--claude-worktrees-…` не трогает), ключи и значения
+  `~/.claude.json` и замена во всех текстовых файлах `~/ai`, `~/.claude` и кода agent-kit, архивы и закрытые задачи тоже.
+  Не трогает git, транскрипты (`~/.claude/projects/**/*.jsonl`, `history.jsonl`) и личное в `~/ai/knowledge` (me, Self,
+  Areas, People — их меняет Мнемозина). До переноса — отказ, код 1; `--dry-run` печатает план и ничего не меняет;
+  совпадение ключа истории или `.claude.json` — конфликт, обе записи остаются. `pantheon check` (раз в 6 ч в плановом
+  проходе, тревога `check-moved`) и `pantheon check --moved` — предупреждение на каждый файл со старым путём сделанного
+  переноса, кроме тех же исключений; код выхода `pantheon check` оно не меняет.
+- Мастерская — `~/ai/workshop/<задача>` (`WORKSHOP_DIR` в `lib/pantheon.py`, metis-0899); окна ролей пишут в
+  `SANDBOX_ROOTS`: подпапки `~/projects` и `~/ai/life`, а также `~/ai/knowledge`, `~/ai/workshop`, `~/ai/agent-kit`.
+  `pantheon direction init` заводит папку в `~/projects/<имя>` (свой git) или в `~/ai/life/<имя>`: там один общий git
+  `~/ai/life` — создаётся при первом направлении, подпапка получает только AGENTS.md, коммит — только этого файла.
 - `board_drift` в `plugins/pantheon/lib/pantheon.py` — проверка доски в `pantheon check` (metis-0441): три
   расхождения, видимые в Obsidian. Статус задачи против PR (кэш `autoclose-prs.json`): PR открыт и закрывает задачу (`closes`, не «часть»), а задача todo/done; PR слит
   (закрывающий, не «часть»), а задача doing/review. Вопрос владельцу отвечен (окно вопросов, ответ в чате или галочка, как у
