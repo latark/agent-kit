@@ -66,6 +66,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
                                         отправка и удаление — Touch ID или «да» на каждую; оплата и важные формы — нет
+  pantheon handoff route|touch|status|cancel|run   отказ роли → кто умеет (lib/handoff.py, metis-0832, 0775): route —
+                                        подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
+                                        белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
+                                        Touch ID с этим действием целиком → исполнение один раз по sha256 текста
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -1332,6 +1336,7 @@ def tick():
                        "pantheon-tick")
         merge_kick()
         outside_kick()
+        handoff_kick()
         try:
             browser_mod().kick()  # браузер владельца для ролей вне окна (lib/browser.py, metis-0760)
         except Exception as e:  # сбой браузера не должен останавливать тик
@@ -5323,6 +5328,24 @@ def merge_kick():
                    "pantheon-tick")
 
 
+def handoff_kick():
+    """Отказ роли → Touch ID владельца на одно действие из белого списка (metis-0832, 0775, lib/handoff.py) —
+    отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт. Без заявок и строк журнала в кэшах окон — нет."""
+    try:
+        if locked("handoff-run") or not handoff_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} handoff-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "handoff", "run"], env=outside_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой прохода не должен останавливать тик
+        alert_once("handoff-kick", type(e).__name__, f"Touch ID действий роли: проход не запущен ({type(e).__name__}: "
+                   f"{e})", "pantheon-tick")
+
+
 def outside_kick():
     """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
     тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
@@ -5710,6 +5733,21 @@ def outside_mod():
         spec.loader.exec_module(_OUTSIDE)
         _OUTSIDE.set_core(sys.modules[__name__])
     return _OUTSIDE
+
+_HANDOFF = None
+
+
+def handoff_mod():
+    """lib/handoff.py — отказ роли → способный исполнитель, Touch ID на одно действие (metis-0832, 0775)."""
+    global _HANDOFF
+    if _HANDOFF is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_handoff", os.path.join(LIB, "handoff.py"))
+        _HANDOFF = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_HANDOFF)
+        _HANDOFF.set_core(sys.modules[__name__])
+    return _HANDOFF
+
 
 _BROWSER = None
 
@@ -7584,6 +7622,8 @@ def main(argv):
         return outside_mod().main(rest)
     if cmd == "browser":
         return browser_mod().main(rest)
+    if cmd == "handoff":
+        return handoff_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
     if cmd == "probes":
