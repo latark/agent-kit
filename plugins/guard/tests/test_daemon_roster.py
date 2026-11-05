@@ -80,6 +80,7 @@ deny = [
     ("cd в папку && cat", B(f"cd ~/.claude/{DAEMON} && cat {NAME}"), {}),
     ("имя по частям в кавычках", B(f"cat ~/.claude/{DAEMON}/ros''ter.json"), {}),
     ("git commit -m && cat — не исключение", B(f'git commit -qm "x" && cat ~/.claude/{DAEMON}/{NAME}'), {}),
+    ("git commit с путём вне сообщения", B(f'git commit -qm "ok" ~/.claude/{DAEMON}/{NAME}'), {}),
     ("git log с путём — не сообщение", B(f"git log -- ~/.claude/{DAEMON}/{NAME}"), {}),
     ("главная сессия окна роли (PANTHEON_ROLE)", ("Read", {"file_path": ROSTER}), {"role": None, "sub": False,
                                                                                   "window": "metis-pantheon"}),
