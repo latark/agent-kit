@@ -39,7 +39,7 @@
    "PLR0915": {
     "t_workflows": 78
    },
-   "lines": 697
+   "lines": 718
   },
   "plugins/guard/hooks/daemon.py": {
    "C901": {
@@ -63,7 +63,7 @@
    "C901": {
     "_Lexer.dollar": 19,
     "_Lexer.run": 26,
-    "_analyze": 21,
+    "_analyze": 22,
     "_dispatch": 203,
     "_gh_out_problem": 32,
     "_hq_gh_args": 29,
@@ -74,42 +74,42 @@
     "check_hestia": 33,
     "check_owner_merge": 17,
     "check_pantheon": 18,
-    "check_push": 23,
+    "check_push": 24,
     "main": 28,
     "pantheon_allowed": 17
    },
    "PLR0912": {
     "_Lexer.dollar": 21,
     "_Lexer.run": 27,
-    "_analyze": 24,
+    "_analyze": 26,
     "_braces": 15,
-    "_cdp_text_only": 14,
+    "_cdp_connects": 14,
     "_dispatch": 212,
     "_gh_out_problem": 34,
     "_hq_gh_args": 28,
     "_params": 17,
     "_push_parse": 18,
     "_run": 20,
-    "check_cdp_role": 13,
     "check_corpus_role": 15,
     "check_hestia": 32,
     "check_owner_merge": 16,
     "check_pantheon": 17,
-    "check_private": 14,
-    "check_push": 22,
+    "check_private": 16,
+    "check_push": 23,
     "main": 28,
     "pantheon_allowed": 16
    },
    "PLR0915": {
     "_Lexer.dollar": 55,
     "_Lexer.run": 94,
+    "_analyze": 58,
     "_dispatch": 369,
     "_gh_out_problem": 58,
     "_params": 60,
     "check_hestia": 57,
     "main": 63
    },
-   "lines": 4551
+   "lines": 4875
   },
   "plugins/guard/hooks/merge_gate.py": {
    "C901": {
@@ -139,11 +139,11 @@
    "PLR0912": {
     "_unpack_dests": 16
    },
-   "backrefs": 43,
-   "lines": 368
+   "backrefs": 49,
+   "lines": 396
   },
   "plugins/guard/hooks/taint.py": {
-   "lines": 626
+   "lines": 629
   },
   "plugins/guard/scripts/bench.py": {
    "lines": 236
@@ -201,7 +201,7 @@
     "main": 168,
     "merge_security_checks": 109
    },
-   "lines": 2384
+   "lines": 2529
   },
   "plugins/guard/tests/test_hookd.py": {
    "PLR0915": {
@@ -263,7 +263,7 @@
     "t_narrow_gate_unit": 52,
     "t_opus_transcript": 95
    },
-   "lines": 4945
+   "lines": 4966
   },
   "plugins/guard/tests/test_misc.py": {
    "lines": 71
@@ -281,7 +281,7 @@
    "PLR0915": {
     "test_sets": 58
    },
-   "lines": 534
+   "lines": 560
   },
   "plugins/guard/tests/test_tg_self.py": {
    "lines": 84
@@ -357,8 +357,8 @@
    "PLR0915": {
     "inbox_wake": 104
    },
-   "backrefs": 82,
-   "lines": 752
+   "backrefs": 81,
+   "lines": 766
   },
   "plugins/pantheon/lib/batch.py": {
    "backrefs": 8,
@@ -407,7 +407,7 @@
     "eval_skeleton": 51
    },
    "backrefs": 63,
-   "lines": 2159
+   "lines": 2162
   },
   "plugins/pantheon/lib/consent.py": {
    "C901": {
@@ -529,7 +529,7 @@
     "cmd_request": 25,
     "rerun_plan": 19,
     "run_serve": 28,
-    "run_test": 35
+    "run_test": 37
    },
    "PLR0912": {
     "cmd_request": 27,
@@ -537,17 +537,17 @@
     "requests": 13,
     "rerun_plan": 18,
     "run_serve": 26,
-    "run_test": 34,
+    "run_test": 36,
     "wait_proc": 14,
     "workspaces": 13
    },
    "PLR0915": {
     "cmd_request": 78,
     "run_serve": 97,
-    "run_test": 105
+    "run_test": 111
    },
-   "backrefs": 68,
-   "lines": 3350
+   "backrefs": 70,
+   "lines": 3469
   },
   "plugins/pantheon/lib/pantheon.py": {
    "C901": {
@@ -596,7 +596,7 @@
     "status": 168,
     "tick": 86
    },
-   "lines": 7396
+   "lines": 7428
   },
   "plugins/pantheon/lib/pconfig.py": {
    "lines": 106
@@ -803,8 +803,8 @@
     "restart": 71,
     "worktrees": 63
    },
-   "backrefs": 555,
-   "lines": 3620
+   "backrefs": 556,
+   "lines": 3632
   },
   "plugins/pantheon/lib/whocanvas.py": {
    "C901": {
@@ -942,7 +942,7 @@
    "PLR0915": {
     "test_inbox_gates": 61
    },
-   "lines": 1404
+   "lines": 1549
   },
   "plugins/pantheon/tests/test_baseline.py": {
    "lines": 332
@@ -999,12 +999,12 @@
   },
   "plugins/pantheon/tests/test_browser.py": {
    "C901": {
-    "Daemon.transport": 16
+    "Daemon.transport": 17
    },
    "PLR0912": {
-    "Daemon.transport": 16
+    "Daemon.transport": 17
    },
-   "lines": 759
+   "lines": 781
   },
   "plugins/pantheon/tests/test_browser_acts.py": {
    "PLR0912": {
@@ -1052,7 +1052,7 @@
    "PLR0915": {
     "auto_set": 69
    },
-   "lines": 632
+   "lines": 638
   },
   "plugins/pantheon/tests/test_direction.py": {
    "PLR0915": {
@@ -1093,15 +1093,15 @@
   },
   "plugins/pantheon/tests/test_heavy_queue.py": {
    "C901": {
-    "main": 19
-   },
-   "PLR0912": {
     "main": 20
    },
-   "PLR0915": {
-    "main": 193
+   "PLR0912": {
+    "main": 22
    },
-   "lines": 319
+   "PLR0915": {
+    "main": 219
+   },
+   "lines": 358
   },
   "plugins/pantheon/tests/test_hooks.py": {
    "lines": 1302
@@ -1116,7 +1116,7 @@
    "lines": 466
   },
   "plugins/pantheon/tests/test_live_code.py": {
-   "lines": 396
+   "lines": 401
   },
   "plugins/pantheon/tests/test_managed_compare.py": {
    "lines": 121
@@ -1164,7 +1164,7 @@
    "lines": 125
   },
   "plugins/pantheon/tests/test_outside.py": {
-   "lines": 2772
+   "lines": 2929
   },
   "plugins/pantheon/tests/test_outside_idle.py": {
    "lines": 176
@@ -1173,7 +1173,7 @@
    "lines": 380
   },
   "plugins/pantheon/tests/test_outside_rerun.py": {
-   "lines": 446
+   "lines": 562
   },
   "plugins/pantheon/tests/test_owner_cap.py": {
    "lines": 484
@@ -1259,7 +1259,7 @@
    "lines": 111
   },
   "plugins/pantheon/tests/test_run_tests.py": {
-   "lines": 1009
+   "lines": 1022
   },
   "plugins/pantheon/tests/test_sandbox_size.py": {
    "PLR0915": {
@@ -1284,9 +1284,9 @@
     "main": 17
    },
    "PLR0915": {
-    "main": 903
+    "main": 905
    },
-   "lines": 1478
+   "lines": 1481
   },
   "plugins/pantheon/tests/test_start_request.py": {
    "lines": 120
