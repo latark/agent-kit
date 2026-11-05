@@ -579,6 +579,88 @@ def test_wake_waiting():
     check(not e.calls, f"разбудил не ждущую: {e.calls}")
 
 
+def _transcript(e, a, lines):
+    """Транскрипт сессии a там, где его ищет P.transcript_path: ~/.claude/projects/<cwd с «-»>/<sessionId>.jsonl."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "w") as fh:
+        for x in lines:
+            fh.write(json.dumps(x) + "\n")
+    return p
+
+
+def _sub(tp, n, mtime, finished=False):
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    for f, body in ((f"agent-{n}.jsonl", "{}\n"),
+                    (f"agent-{n}.meta.json", json.dumps({"name": f"dev-{n}", **({"finished": True} if finished else {})}))):
+        p = os.path.join(d, f)
+        open(p, "w").write(body)
+        os.utime(p, (mtime, mtime))
+
+
+def _state(e, a, **kw):
+    """state.json задания сессии a (его пишет Claude Code): ~/.claude/jobs/<id>/state.json."""
+    json.dump({"state": a["state"], **kw}, open(os.path.join(e.home, ".claude", "jobs", a["id"], "state.json"), "w"))
+
+
+def _wake_live(e, name):
+    log = os.path.join(e.state, "logs", "start.log")
+    rows = open(log).read().splitlines() if os.path.exists(log) else []
+    return [r for r in rows if f"wake-live\t{name}\t" in r]
+
+
+def test_wake_waiting_live_work_0864():
+    """metis-0864: 05.11 окно metis-pantheon четыре раза ждало вашего «да» (blocked), а возобновление ждущих раз в час
+    поднимало его заново: вопрос пропадал, субагенты гибли. Ждущее окно с работой не будят — строка wake-live в
+    start.log: ждёт разрешения (waitingFor), открытый tool_use в журнале, фоновые задачи (inFlight), живой субагент
+    (meta.json без finished, журнал после старта процесса). Свободное — будят, как прежде."""
+    use = {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "gh pr checks 318"}}]}}
+    res = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}}
+    cases = (
+        ("waitingFor permission", lambda e, a: a.update(waitingFor="permission prompt"), "ждёт разрешения"),
+        ("открытый tool_use", lambda e, a: _transcript(e, a, [use]), "ход не закончен: Bash → gh pr checks 318"),
+        ("inFlight", lambda e, a: _state(e, a, inFlight={"tasks": 2, "queued": 0}), "фоновые задачи: 2"),
+        ("subagents в claude agents", lambda e, a: a.update(subagents=1), "субагенты или фоновые задачи"),
+        ("живой субагент", lambda e, a: _sub(_transcript(e, a, [use, res]), "x1", MON - 1200), "живые субагенты: dev-x1"),
+    )
+    for what, setup, why in cases:
+        e = Env()
+        a = e.agent("hermes-site", "blocked", needs="waiting for your answer")
+        e.task("hermes-site")
+        setup(e, a)
+        AW.wake_waiting(e.agents_list, [], DOMS, MON)
+        rows = _wake_live(e, "hermes-site")
+        check(not e.calls and not e.gate_calls and rows and why in rows[-1],
+              f"0864: {what} — ждущее окно разбужено или нет строки wake-live: {e.calls} {rows}")
+    # свободное: tool_use закрыт, субагенты закончили, оборваны прошлым перезапуском (журнал до старта процесса, но
+    # моложе LIVE_SUBAGENT_MAX) или молчат дольше 3 ч (журнал после старта)
+    for what, started, subs in (
+            ("закончил и оборван до старта", MON - 3600, (("f1", MON - 600, True), ("d1", MON - 3605, False))),
+            ("молчит 4 ч", MON - 5 * 3600, (("s1", MON - 4 * 3600, False),))):
+        e = Env()
+        a = e.agent("hermes-site", "blocked", needs="waiting for your answer", inFlight={"tasks": 0, "queued": 0})
+        a["startedAt"] = started * 1000
+        e.task("hermes-site")
+        tp = _transcript(e, a, [use, res])
+        for n, mt, fin in subs:
+            _sub(tp, n, mt, finished=fin)
+        AW.wake_waiting(e.agents_list, [], DOMS, MON)
+        check(len(e.calls) == 1 and not _wake_live(e, "hermes-site"),
+              f"0864: свободное ждущее окно ({what}) не разбужено: {e.calls} {_wake_live(e, 'hermes-site')}")
+    # процесса нет (noProcess) — обрывать нечего, будим и с открытым tool_use
+    e = Env()
+    a = e.agent("hermes-site", "blocked", needs="waiting for your answer")
+    a["noProcess"] = True
+    e.task("hermes-site")
+    _transcript(e, a, [use])
+    AW.wake_waiting(e.agents_list, [], DOMS, MON)
+    check(len(e.calls) == 1, f"0864: окно без процесса с открытым tool_use не разбужено: {e.calls}")
+
+
 def test_wake_waiting_owner_elsewhere_0708():
     """metis-0708: ждущее окно будят задачей, которую оно может взять. 02.11 21:23 окно metis-pantheon подняли с
     «возьми metis-0272», а её вела другая сессия (owner agent-kit-47) — окно отказалось и встало без работы. Задача на
@@ -667,6 +749,29 @@ def test_pantheon_wake_fresh_sees_limited():
         P.fresh_reason, P.state_files, P.fresh_start = saved
     check(got == [None], f"recheck свежего старта на лимите: {got} {buf.getvalue()!r}")
     check("свежей сессией" in buf.getvalue(), f"нет свежего старта в выводе: {buf.getvalue()!r}")
+
+
+def test_pantheon_wake_fresh_busy_skip_0241():
+    # metis-0241, ветвь fresh_start: имя уже поднимает другой процесс (замок start-<имя> занят, fresh-busy) — пропуск:
+    # код 0, «пропуск: имя — причина», ни «поднимаю», ни тревоги «не поднялась (код …)»
+    e = Env()
+    e.task("hermes-site")
+    e.limited("hermes-site")
+    e.now(at(2026, 10, 19, 8, 0) + 60)
+    saved = (P.fresh_reason, P.state_files)
+    P.fresh_reason = lambda a, t=None: "контекст большой"
+    P.state_files = lambda n: []
+    buf, err = io.StringIO(), io.StringIO()
+    try:
+        with P.lock("start-hermes-site", block=False) as held, contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(err):
+            rc = P._wake(False) if held else "замок не взят"
+    finally:
+        P.fresh_reason, P.state_files = saved
+    out = buf.getvalue()
+    check(rc == 0 and "пропуск: hermes-site — другой процесс уже поднимает" in out and "поднимаю" not in out
+          and "не поднялась" not in err.getvalue() and "не поднялась" not in alerts_text(e) and not e.calls,
+          f"fresh-busy: код {rc!r}, вывод {out!r}, stderr {err.getvalue()!r}, тревоги {alerts_text(e)!r}, вызовы {e.calls}")
 
 
 def test_wake_waiting_blockers():
@@ -823,13 +928,18 @@ def test_new_order_goal():
     w = P.WAITING_GOAL
     # строки, которым цель верит, — те же, что печатает `task set` (lib/tasks.py; поведение — test_task_keep.py)
     T = P.tasks_mod()
-    check("«ждёт» (waiting)" in w and f"«<id>: {T.GOAL_OUT}»" in w and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
+    check("ждёт ответа владельца на вопрос или другую задачу" in w and f"«<id>: {T.GOAL_OUT}»" in w
+          and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
           and "в работе (doing) и в очереди (todo) — в цели" in w
           and "Верь последней такой строке по этой задаче" in w, f"условие о задаче в «ждёт»: {w!r}")
-    # argus-280a (Д1): плановый проход возвращает задачу в doing без строки в транскрипте — «снята» верна на момент записи
-    check(f"«Снята» верна на момент записи: если позже по задаче есть «{T.GOAL_IN.split()[0]}»" in w
-          and "статус вернулся в работу (doing) или очередь (todo) — задача снова в цели" in w,
-          f"условие о задаче в «ждёт» без «снята верна на момент записи»: {w!r}")
+    # metis-0738 (argus-280a, Д1): блокер закрыла другая сессия, плановый проход, владелец на доске — строка GOAL_IN
+    # уходит не в транскрипт ждущей. «Снята» засчитывается только свежей, проверка — `pantheon task goal <id>`
+    check("`pantheon task goal <id>`" in w and "«Снята» засчитывается, только если напечатана в том же ходе, что и "
+          "последний отчёт сессии" in w and "более ранняя «снята» устарела" in w,
+          f"условие цели без свежей «снята» и task goal: {w!r}")
+    # metis-0725: задачу, которую ведёт другая сессия, цель не держит, даже в поручении и в чек-листе эпика
+    check("её ведёт другая сессия (owner — не это окно и не его команда), даже если она в поручении, в чек-листе эпика"
+          in w, f"условие цели без owner другой сессии: {w!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())

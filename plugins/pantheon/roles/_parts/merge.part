@@ -26,7 +26,8 @@ PR в основную ветку сливают только через шлю�
 permissions окон `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json` и с metis-0598 журнал ваших
 слов и хуки `plugins/pantheon/hooks/ctx.py` и `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID
 `plugins/pantheon/lib/merge.py`, карта плагинов `plugins/pantheon/lib/plugin_map.py` и
-`plugins/pantheon/plugins-by-role.toml`: такой PR шлюз не сливает.
+`plugins/pantheon/plugins-by-role.toml`, правила ревью `plugins/pantheon/lib/review_rules.py` и ответы окна вопросов
+`plugins/pantheon/lib/answers.py` (metis-0858): такой PR шлюз не сливает.
 PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugin/releases.json`: номер поднимает workflow release
 на main после слияния (metis-0512), а PR с номером шлюз не сливает совсем. Так же веди правку их сборки в
 `plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает). PR ядра сливает только владелец: в

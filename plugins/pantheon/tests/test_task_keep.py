@@ -575,6 +575,77 @@ def main():
           and dep("ab-002", store) == [] and dep("ab-001", store) == [] and dep("ab-001", None) == [],
           (dep("ab-005", store), dep("ab-007", store)))
 
+    # metis-0738: A ждёт B — у ждущей сессии «снята»; B закрыла другая сессия (её GOAL_IN — в чужом транскрипте),
+    # плановый проход вернул A в doing или владелец отменил B на доске. `task goal A` — строка по хранилищу на эту минуту
+    win = dict(env5, PANTHEON_SESSION="metis-pantheon")
+    goal = lambda *ids, e=win: run(e, "task", "goal", *ids)
+    ga, gb, gc, gd, ge = (fresh() for _ in range(5))
+    wait_set(ga, f"waiting_on={gb}")
+    wait_set(gc, f"waiting_on={gd}")
+    wait_set(ge, "waiting_on=human", "question=Какой вариант?", "why=нужно решение")
+    before = goal(ga, gc, ge)
+    closed_b = run(env5, "task", "set", gb, "status=done", "--force", "проба")  # другая сессия, без окна
+    run(env5, "task", "set", gd, "status=dropped")  # владелец отменил блокер на доске
+    after = goal(ga, gc)
+    run(env5, "task", "set", ga, "status=doing")  # плановый проход вернул задачу в работу
+    back = goal(ga)
+    check("task goal: A ждёт B — «снята — ждёт задачу B»; B закрыла другая сессия (её строка — не в транскрипте "
+          "ждущей) или отменили — «остаётся в цели окна — блокер B done|dropped»; A снова doing — «остаётся — в работе»",
+          before.returncode == 0 and f"{ga}: {T.GOAL_OUT} — ждёт задачу {gb}" in before.stdout
+          and f"{gc}: {T.GOAL_OUT} — ждёт задачу {gd}" in before.stdout
+          and f"{ge}: {T.GOAL_OUT} — ждёт ответа владельца на вопрос" in before.stdout
+          and closed_b.returncode == 0 and f"{ga}: {T.GOAL_IN}" in closed_b.stdout
+          and after.returncode == 0 and f"{ga}: {T.GOAL_IN} — блокер {gb} done" in after.stdout
+          and f"{gc}: {T.GOAL_IN} — блокер {gd} dropped" in after.stdout and T.GOAL_OUT not in after.stdout
+          and back.stdout.strip() == f"{ga}: {T.GOAL_IN} — в работе",
+          (before.stdout, closed_b.stdout, after.stdout, back.stdout))
+    # metis-0725: задачу ведёт другая сессия (owner agent-kit-47) — окну её цель не держит, хоть она в очереди;
+    # своя, команды (dev-*) и без owner — в цели. Окно — PANTHEON_SESSION; без него owner не сверяется
+    go, gt, gs, gn, gw, gz = (fresh() for _ in range(6))
+    run(env5, "task", "set", go, "owner=Agent-Kit-47 ")
+    run(env5, "task", "set", gt, "owner=dev-opus")
+    run(env5, "task", "set", gs, "owner=metis-pantheon")
+    run(env5, "task", "set", gw, "owner=agent-kit-47")
+    wait_set(gw, "waiting_on=agent")  # «ждёт» без основания, но ведёт другая — тоже не держит
+    run(env5, "task", "set", gz, "status=inbox")
+    own = goal(go, gt, gs, gn, gw, gz)
+    nowin = goal(go, e=env5)
+    lines = dict(ln.split(": ", 1) for ln in own.stdout.splitlines())
+    check("task goal: owner — другая сессия (agent-kit-47, регистр и пробел не в счёт) — «снята — ведёт agent-kit-47»; "
+          "owner dev-opus, само окно, пустой — «остаётся — очередь»; во входящих — «снята»; без PANTHEON_SESSION — "
+          "owner не сверяется, «остаётся»",
+          own.returncode == 0 and lines.get(go) == f"{T.GOAL_OUT} — ведёт agent-kit-47"
+          and lines.get(gw) == f"{T.GOAL_OUT} — ведёт agent-kit-47"
+          and all(lines.get(x) == f"{T.GOAL_IN} — очередь" for x in (gt, gs, gn))
+          and lines.get(gz) == f"{T.GOAL_OUT} — вернули во входящие"
+          and nowin.returncode == 0 and nowin.stdout.strip() == f"{go}: {T.GOAL_IN} — очередь", (own.stdout, nowin.stdout))
+    give = run(win, "task", "set", gn, "owner=agent-kit-47")
+    take = run(win, "task", "set", gn, "owner=metis-pantheon")
+    other = run(env5, "task", "set", gs, "owner=agent-kit-47")
+    check("task set owner=… из окна: передал другой сессии — «снята — ведёт …», взял себе — «остаётся»; вне окна — "
+          "строки нет",
+          give.returncode == 0 and f"{gn}: {T.GOAL_OUT} — ведёт agent-kit-47" in give.stdout
+          and take.returncode == 0 and f"{gn}: {T.GOAL_IN} — очередь" in take.stdout and T.GOAL_OUT not in take.stdout
+          and other.returncode == 0 and T.GOAL_OUT not in other.stdout and T.GOAL_IN not in other.stdout,
+          (give.stdout, take.stdout, other.stdout))
+    run(env5, "task", "set", gt, "status=done", "--force", "проба")
+    miss, empty, flag = goal(gt, "metis-9999"), goal(), goal("--window", "zeus", go)
+    check("task goal: закрытая — «снята — закрыта (done)»; нет задачи — строка в stderr и код 1, остальные печатаются; "
+          "без id и с флагом (окно не подменить) — код 2",
+          miss.returncode == 1 and f"{gt}: {T.GOAL_OUT} — закрыта (done)" in miss.stdout
+          and "нет задачи metis-9999" in miss.stderr and empty.returncode == 2 and flag.returncode == 2
+          and not flag.stdout, (miss.returncode, miss.stdout, miss.stderr, empty.returncode, flag.returncode))
+    gs_ = T.goal_state
+    ew = lambda h, d: (h.get("owner") or None) if h.get("owner") not in (None, d) else None
+    check("goal_state: без хранилища и окна — doing/todo/review в цели, human+вопрос — снята; elsewhere без окна не зовётся",
+          gs_({"status": "doing", "owner": "x"}, None, None, ew) == (False, "в работе")
+          and gs_({"status": "review"}) == (False, "на проверке")
+          and gs_({"status": "waiting", "waiting_on": "human", "question": "?"}) == (True, "ждёт ответа владельца на вопрос")
+          and gs_({"status": "waiting", "waiting_on": "agent"})[0] is False
+          and gs_({"status": "todo", "owner": "x"}, None, "w", ew) == (True, "ведёт x")
+          and gs_({"status": "dropped", "owner": "x"}, None, "w", ew) == (True, "закрыта (dropped)")
+          and gs_(None) == (False, "статус не указан"))
+
     # чистые функции
     desc = T.has_description
     check("has_description: заголовок и журнал — нет; текст — да; чужой раздел — да",

@@ -6,7 +6,10 @@
 - истёкшее — не попадает, тревога одна на разрешение; без срока, с лишним ключом или с записью в ~/.ssh — не
   применяется, тревога grants-bad;
 - файл запущенной сессии (settings/run/, PANTHEON_WINDOW) обновляется вместе с окном, её env остаётся;
-- --if-changed пересобирает окна после правки grants.toml и к сроку разрешения (grants_next в domains.json).
+- --if-changed пересобирает окна после правки grants.toml и к сроку разрешения (grants_next в domains.json);
+- папка демона хуков ~/.cache/pantheon/hookd (metis-0845): grant write в неё и в папку выше (~/.cache) не даётся,
+  sandbox_write policy.toml в неё — тоже, а denyWrite каждого окна её закрывает; итог сверяет проверка F7 guard
+  (scripts/hookd-check.py windows).
 """
 import atexit
 import json
@@ -168,7 +171,55 @@ write = ["~/state/x"]
           and "Bash(new *)" not in json.load(open(os.path.join(run, "athena-shop.json")))["permissions"].get("allow", []))
 
 
+def hookd_closed():
+    """Папка демона хуков (metis-0845): ни grant, ни sandbox_write не открывают её ни одному окну."""
+    tmp = os.path.join(ROOT, "hk")
+    home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
+    os.makedirs(home)
+    for d in ("projects/br", "ai/knowledge", "projects/workshop", ".claude/pantheon", ".cache/pantheon/hookd/bin",
+              ".cache/other"):
+        os.makedirs(os.path.join(tmp, d), exist_ok=True)
+    with open(os.path.join(home, "directions.toml"), "w") as fh:
+        fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
+    with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
+        fh.write('[sandbox_write]\nathena-shop = ["~/.cache/pantheon/hookd", "~/.cache/pantheon/hookd/bin", '
+                 '"~/.cache/pantheon"]\n')
+    future = (date.today() + timedelta(days=7)).isoformat()
+    with open(os.path.join(tmp, ".claude", "pantheon", "grants.toml"), "w") as fh:
+        for w in ("~/.cache", "~/.cache/pantheon/hookd", "~/.cache/pantheon/hookd/bin", "~/.cache/other"):
+            fh.write(f'[[grant]]\nwindow = "athena-shop"\nuntil = "{future}"\nwrite = ["{w}"]\n\n')
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_NO_NOTIFY": "1"}
+    r = subprocess.run([py311(), "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True, timeout=120)
+    check("hookd: сборка прошла", r.returncode == 0)
+    out = os.path.join(state, "settings")
+    hk = os.path.realpath(os.path.join(tmp, ".cache", "pantheon", "hookd"))
+    a = json.load(open(os.path.join(out, "athena-shop.json")))
+    aw = a["sandbox"]["filesystem"]["allowWrite"]
+    check("hookd: grant ~/.cache, ~/.cache/pantheon/hookd и папка внутри — не в allowWrite",
+          not any(x == os.path.realpath(os.path.join(tmp, ".cache")) or x.startswith(hk) for x in aw))
+    check("hookd: соседняя папка ~/.cache/other — дана (запрет только на папку демона и выше)",
+          os.path.realpath(os.path.join(tmp, ".cache", "other")) in aw)
+    al = open(os.path.join(home, "alerts.md")).read() if os.path.isfile(os.path.join(home, "alerts.md")) else ""
+    check("hookd: тревога grants-bad называет ~/.cache и ~/.cache/pantheon/hookd",
+          "не даётся: ~/.cache;" in al and "не даётся: ~/.cache/pantheon/hookd;" in al)
+    check("hookd: sandbox_write в папку демона и внутрь — отброшен, папка выше (~/.cache/pantheon) — осталась",
+          not any(x.startswith(hk) for x in aw) and os.path.realpath(os.path.join(tmp, ".cache", "pantheon")) in aw
+          and "sandbox_write в папку демона хуков не даётся" in r.stderr)
+    files = sorted(f for f in os.listdir(out) if f.endswith(".json"))
+    closed = [f for f in files if hk in json.load(open(os.path.join(out, f)))["sandbox"]["filesystem"]["denyWrite"]
+              and "~/.cache/pantheon/hookd" in json.load(open(os.path.join(out, f)))["sandbox"]["filesystem"]["denyWrite"]]
+    check(f"hookd: denyWrite каждого окна закрывает папку демона ({len(closed)}/{len(files)})",
+          len(files) >= 4 and closed == files)
+    checker = os.path.join(os.path.dirname(PLUGIN), "guard", "scripts", "hookd-check.py")
+    if os.path.isfile(checker):  # проверка F7 guard — по готовым настройкам окон
+        r = subprocess.run([py311(), "-I", checker, "windows"], env=env, capture_output=True, text=True, timeout=60)
+        check("hookd: проверка F7 guard (hookd-check.py windows) — ни одному окну папка демона не открыта",
+              r.returncode == 0 and "ни одному не дана запись" in r.stdout)
+
+
 if __name__ == "__main__":
     main()
+    hookd_closed()
     print(f"\n{sum(results)}/{len(results)} прошли")
     sys.exit(0 if results and all(results) else 1)

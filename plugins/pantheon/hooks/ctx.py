@@ -33,9 +33,12 @@
                      <STATE>/ctx/deferred/<CLAUDE_PID>.<sid>.json с путём транскрипта и его размером в момент хука.
                      Её доставляют deferred, clock и maint-post основной сессии (без agent_id), когда в транскрипте
                      после этого места есть compact_boundary не раньше отметки минус 5 с, — сколько бы времени ни прошло. Отметка без
-                     границы старше 15 мин снимается без вставки; отметку с границей, которую сессия так и не забрала
-                     (умерла), чистка снимает через сутки, а отметку умершего процесса — сразу. Чистку зовут start и
-                     deferred; start снимает и отметки других сессий своего процесса (/clear, /resume — metis-0793).
+                     границы старше 15 мин снимается без вставки; отметку с границей, которую сессия так и не забрала,
+                     чистка снимает через сутки. Чистку зовут start и deferred. Отметка в сроке, чьего процесса нет, и
+                     отметки других сессий своего процесса (start после /clear, /resume — metis-0793) уходят на стоянку
+                     parked.<sid>.json: оболочка по ним python не зовёт. start сессии с тем же sid (claude -r, respawn,
+                     /resume обратно) переносит её отметку из любого имени в своё <CLAUDE_PID>.<sid>.json — вставка
+                     доходит в продолженную сессию один раз (metis-0816); отметки других sid он не трогает.
                      Отметку забирает ровно один хук: rename в своё имя (os.remove на APFS не исключителен), со
                      сверкой байтов — только что записанная новая отметка вместо старой не снимается.
   ctx.py clock       UserPromptSubmit (в том числе сообщения других сессий): та же строка часов в контекст ролей
@@ -1281,6 +1284,45 @@ def defer_path(sid):
     return os.path.join(CTX, "deferred", "%s.%s.json" % (defer_pid(), re.sub(r"[^\w-]", "", sid or "")))
 
 
+PARKED = "parked"  # префикс отметки без процесса: оболочка hooks.json её не видит, продолжение сессии забирает (metis-0816)
+
+
+def adopt_marks(sid):
+    """SessionStart основной сессии (metis-0816, выбор владельца Б — переносить по sid): отметка этой же сессии под
+    другим префиксом переходит в своё имя <CLAUDE_PID>.<sid>.json. Она от прошлого процесса (claude -r, respawn — sid
+    тот же, CLAUDE_PID новый, старый может ещё жить) или со стоянки parked.<sid>.json (/resume после /clear в том же
+    процессе, отметка умершего процесса). Переносит rename: вставку выдаёт ровно один хук, старый процесс свою
+    отметку больше не найдёт. Своя отметка уже есть — остаётся она, перенесённая снимается. Отметки других sid не
+    трогает. Сбой ФС при переносе — строка в журнале хуков, отметка остаётся, где была, SessionStart идёт дальше."""
+    sid = re.sub(r"[^\w-]", "", sid or "")
+    d = os.path.join(CTX, "deferred")
+    if not sid:
+        return
+    own = defer_path(sid)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in sorted(names):
+        parts = n.split(".")
+        if len(parts) != 3 or parts[1] != sid or parts[2] != "json" or os.path.join(d, n) == own:
+            continue
+        p = os.path.join(d, n)
+        try:
+            with open(p, "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        try:
+            got = move_mark(p, raw, own)
+        except OSError as e:  # не ENOENT (папка только для чтения, длинное имя .claim): SessionStart выдаёт своё дальше
+            hook_log("start", "отметка %s не перенесена в продолженную сессию: %s" % (n, e))
+            continue
+        if got is not None:
+            hook_log("start", ("отметка отложенной вставки перенесена в продолженную сессию: %s → %s" if got else
+                               "отметка %s снята: у продолженной сессии уже есть своя %s") % (n, os.path.basename(own)))
+
+
 def live_subagents(transcript, sid):
     """Есть ли у сессии субагент, писавший свой транскрипт <папка транскрипта>/<sid>/subagents/agent-*.jsonl
     за последние SUB_LIVE секунд."""
@@ -1339,16 +1381,17 @@ def compact_boundary_since(path, since, off=None):
     return False
 
 
-def claim_mark(p, seen=None):
-    """Забрать отметку: True — только у одного из одновременных вызовов. os.remove на APFS не исключителен (один файл
-    успешно удаляют несколько процессов разом), rename в своё имя — исключителен; хвост .claim не попадает под *.json.
-    seen — байты отметки, по которым вызов решил её снять: если под именем уже другая (её только что записало новое
-    сжатие — гонка снятия старой с записью новой, metis-0793 Д4), она возвращается на место, а вызов получает False."""
+def take_mark(p, seen=None):
+    """Забрать отметку себе: путь её копии под именем <отметка>.<pid>.claim — только у одного из одновременных вызовов,
+    иначе None. os.remove на APFS не исключителен (один файл успешно удаляют несколько процессов разом), rename в своё
+    имя — исключителен; хвост .claim не попадает под *.json. seen — байты отметки, по которым вызов решил её забрать:
+    если под именем уже другая (её только что записало новое сжатие — гонка снятия старой с записью новой, metis-0793
+    Д4), она возвращается на место, а вызов получает None."""
     q = "%s.%d.claim" % (p, os.getpid())
     try:
         os.rename(p, q)
     except FileNotFoundError:
-        return False
+        return None
     other = False
     if seen is not None:
         try:
@@ -1361,11 +1404,51 @@ def claim_mark(p, seen=None):
             os.link(q, p)  # без перезаписи: если тем временем легла ещё новее — остаётся она
         except OSError:
             pass
+        try:
+            os.remove(q)
+        except OSError:
+            pass
+        return None
+    return q
+
+
+def claim_mark(p, seen=None):
+    """Снять отметку: True — только у одного из одновременных вызовов (take_mark)."""
+    q = take_mark(p, seen)
+    if q is None:
+        return False
     try:
         os.remove(q)
     except OSError:
         pass
-    return not other
+    return True
+
+
+def move_mark(p, seen, dst):
+    """Переложить отметку p в имя dst (metis-0816): забирает её один вызов (take_mark), кладёт без перезаписи (link)
+    — время записи отметки сохраняется, чистка считает срок от него. True — переложена; False — под dst уже есть
+    отметка, она и остаётся, а p снята (вставка одна на сессию); None — p забрал другой вызов или под p уже другая."""
+    q = take_mark(p, seen)
+    if q is None:
+        return None
+    moved = False
+    try:
+        os.link(q, dst)
+        moved = True
+    except FileExistsError:
+        pass
+    except OSError as e:
+        try:
+            os.link(q, p)  # не вышло переложить — вернуть на место, а не потерять
+        except OSError:
+            pass
+        hook_log("deferred", "отметка %s не переложена: %s" % (os.path.basename(p), e))
+        moved = None
+    try:
+        os.remove(q)
+    except OSError:
+        pass
+    return moved
 
 
 def deferred_compact(ev, cmd, room):
@@ -1412,6 +1495,8 @@ def cmd_start(ev):
     role = session_role(ev)
     if ev.get("agent_id"):
         return 0
+    if not automation():
+        adopt_marks(ev.get("session_id"))  # до снятия ниже: сжатие без субагентов снимает и перенесённую (metis-0816)
     source = ev.get("source")
     if source == "compact":
         try:
@@ -1906,9 +1991,21 @@ def pid_dead(pid):
     return False
 
 
+def park_mark(p, raw, n):
+    """Отметку уводят из имени процесса на стоянку parked.<sid>.json (metis-0816): оболочка hooks.json по ней python
+    больше не зовёт, а продолжение этой сессии (adopt_marks) её заберёт. На стоянке уже есть отметка той же сессии —
+    остаётся она. True — отметка ушла из имени процесса."""
+    parts = n.split(".")
+    if len(parts) != 3:
+        return claim_mark(p, raw)  # имя не <префикс>.<sid>.json — продолжить её нечем
+    got = move_mark(p, raw, os.path.join(os.path.dirname(p), "%s.%s.json" % (PARKED, parts[1])))
+    return got is not None
+
+
 def drop_moved_marks(sid):
-    """SessionStart основной сессии: отметки этого процесса для других сессий снимаются — процесс от них ушёл (/clear,
-    /resume), их вставку уже никто не заберёт, а оболочка в hooks.json запускала бы python до суток (metis-0793)."""
+    """SessionStart основной сессии: отметки этого процесса для других сессий уходят на стоянку — процесс от них ушёл
+    (/clear, /resume), оболочка в hooks.json запускала бы по ним python до суток (metis-0793), а /resume обратно или
+    claude -r их заберёт (metis-0816). Так же уходят отметки прошлого процесса с тем же PID."""
     pid, sid = defer_pid(), re.sub(r"[^\w-]", "", sid or "")
     d = os.path.join(CTX, "deferred")
     if pid == "nopid" or not sid:
@@ -1924,17 +2021,19 @@ def drop_moved_marks(sid):
         try:
             with open(p, "rb") as f:
                 raw = f.read()
-            if claim_mark(p, raw):
-                hook_log("start", "отметка прошлой сессии этого процесса снята: %s" % n)
+            if park_mark(p, raw, n):
+                hook_log("start", "отметка прошлой сессии этого процесса — на стоянку: %s" % n)
         except OSError:
             pass
 
 
 def sweep_deferred():
-    """Снять отметки любых сессий: процесса из имени отметки нет — сразу; старше DEFER_MAX, у которых граница сжатия
-    так и не появилась, и любые старше DEFER_DEAD. Отметку с границей забирает сама сессия. Чужая отметка хук уже не
-    держит (оболочка в hooks.json смотрит только свою, metis-0793) — чистка нужна, чтобы файлы не копились; её зовут
-    SessionStart и deferred. Снятие сверяет байты (claim_mark): только что записанная новая отметка не теряется."""
+    """Чистка отметок любых сессий: старше DEFER_MAX, у которых граница сжатия так и не появилась, и любые старше
+    DEFER_DEAD снимаются. Отметку с границей забирает сама сессия. Отметка в сроке, чьего процесса из имени нет,
+    уходит на стоянку parked.<sid>.json (metis-0816): её заберёт claude -r или respawn этой сессии, а новый процесс с
+    тем же PID python по ней не запускает. Чужая отметка хук уже не держит (оболочка в hooks.json смотрит только
+    свою, metis-0793) — чистка нужна, чтобы файлы не копились; её зовут SessionStart и deferred. Снятие сверяет байты
+    (take_mark): только что записанная новая отметка не теряется."""
     d = os.path.join(CTX, "deferred")
     try:
         names = os.listdir(d)
@@ -1948,18 +2047,19 @@ def sweep_deferred():
             with open(p, "rb") as f:
                 raw = f.read()
             age = time.time() - os.path.getmtime(p)
-            if not pid_dead(n.split(".", 1)[0]):
-                if age <= DEFER_MAX:
-                    continue
-                if age <= DEFER_DEAD:
-                    try:
-                        m = json.loads(raw)
-                        if (isinstance(m, dict) and m.get("tp")
-                                and compact_boundary_since(m["tp"], float(m.get("t", 0)) - DEFER_SLACK, m.get("off"))):
-                            continue  # граница есть — вставку заберёт сама сессия на своём шаге
-                    except (OSError, ValueError, TypeError):
-                        pass
-            if claim_mark(p, raw):
+            dead = pid_dead(n.split(".", 1)[0])
+            keep = age <= DEFER_MAX
+            if not keep and age <= DEFER_DEAD:
+                try:
+                    m = json.loads(raw)
+                    keep = bool(isinstance(m, dict) and m.get("tp") and compact_boundary_since(
+                        m["tp"], float(m.get("t", 0)) - DEFER_SLACK, m.get("off")))  # вставку заберёт сама сессия
+                except (OSError, ValueError, TypeError):
+                    pass
+            if keep:
+                if dead and park_mark(p, raw, n):
+                    hook_log("deferred", "отметка умершего процесса — на стоянку: %s" % n)
+            elif claim_mark(p, raw):
                 hook_log("deferred", "просроченная отметка снята: %s" % n)
         except OSError:
             pass

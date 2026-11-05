@@ -1,4 +1,4 @@
-"""Пантеон: pantheon task … — разбор флагов и подкоманды задач (new, set, show, ready, claim, split, attach,
+"""Пантеон: pantheon task … — разбор флагов и подкоманды задач (new, set, show, goal, ready, claim, split, attach,
 migrate-*). Сами задачи и доска — lib/tasks.py.
 
 Вынесено из pantheon.py (metis-0586) без изменения поведения. P — модуль pantheon: его ставит загрузчик
@@ -11,7 +11,7 @@ import sys
 __all__ = [
     "TASK_NEW_VALUE_FLAGS", "TASK_NEW_BOOL_FLAGS", "TASK_SPLIT_VALUE_FLAGS", "TASK_SET_VALUE_FLAGS",
     "TASK_REPEATABLE_FLAGS", "TASK_FLAG_ALIASES", "task_repeat_error", "task_flag_error", "task_body_arg",
-    "_read_or_empty", "task_new_notify", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "batch_suggest_cmd", "task_cmd",
+    "_read_or_empty", "task_new_notify", "goal_line", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "batch_suggest_cmd", "task_cmd",
 ]
 
 
@@ -285,10 +285,20 @@ def batch_suggest_cmd(T, args, opt):
     return 0
 
 
+def goal_line(T, tid, head, tasks):
+    """Строка цели окна по задаче (metis-0725, metis-0738): «<id>: снята с цели окна — почему» или «<id>: остаётся в
+    цели окна — почему» по хранилищу на эту минуту. Окно — PANTHEON_SESSION (имя сессии роли, его ставит окно запуска):
+    задачу, которую ведёт другая сессия (owner — не окно и не его команда, watch.owner_elsewhere), цель окна не держит.
+    Флага окна нет нарочно: строку о своей цели сессия печатает только про себя."""
+    window = (os.environ.get("PANTHEON_SESSION") or "").strip()
+    out, why = T.goal_state(head, tasks, window, P.watch_mod().owner_elsewhere if window else None)
+    return f"{tid}: {T.GOAL_OUT if out else T.GOAL_IN} — {why}"
+
+
 def task_cmd(rest):
     T = P.tasks_mod()
     if not rest:
-        print("pantheon task new|set|show|ready|claim|overlap — справка: pantheon help", file=sys.stderr)
+        print("pantheon task new|set|show|goal|ready|claim|overlap — справка: pantheon help", file=sys.stderr)
         return 2
     sub, args = rest[0], rest[1:]
 
@@ -413,7 +423,10 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(P.PANTHEON, P.now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
-            if head.get("status") == "waiting":  # metis-0714: строка для проверяющей модели цели окна (WAITING_GOAL)
+            if "owner" in changes and (os.environ.get("PANTHEON_SESSION") or "").strip():
+                # metis-0725: owner сменили из окна — строка цели по нему (передал другой сессии — «снята», взял — «остаётся»)
+                print(goal_line(T, tid, head, T.load_tasks(P.PANTHEON, T.WORK_TYPES)))
+            elif head.get("status") == "waiting":  # metis-0714: строка для проверяющей модели цели окна (WAITING_GOAL)
                 print(f"{tid}: {T.GOAL_OUT} — ждёт " + ("ответа владельца на вопрос" if head.get("waiting_on") == "human"
                                                        else f"задачу {head.get('waiting_on')}")
                       if T.goal_released(head, T.load_tasks(P.PANTHEON, T.WORK_TYPES))
@@ -442,6 +455,19 @@ def task_cmd(rest):
             for w in words or [{"time": "—", "kind": "нет записей"}]:
                 print(f"- {w.get('time', '')[:16].replace('T', ' ')} · {w.get('kind')} · "
                       f"{w.get('dst') or w.get('answer') or w.get('text') or w.get('title') or ''}")
+        elif sub == "goal":
+            # metis-0725, metis-0738: строка цели окна по задачам на эту минуту — блокер мог закрыть другой, owner сменить Зевс
+            if not args or any(a.startswith("-") for a in args):
+                print("pantheon task goal ID [ID …] — строка цели окна по каждой задаче", file=sys.stderr)
+                return 2
+            tasks, rc = T.load_tasks(P.PANTHEON, T.WORK_TYPES), 0
+            for tid in args:
+                if tid not in tasks:
+                    print(f"pantheon task goal: нет задачи {tid}", file=sys.stderr)
+                    rc = 1
+                    continue
+                print(goal_line(T, tid, tasks[tid][1], tasks))
+            return rc
         elif sub == "split" and args and not args[0].startswith("--"):
             err = task_flag_error("split", args[1:], TASK_SPLIT_VALUE_FLAGS)
             if err:

@@ -339,7 +339,6 @@ def test_static(root):
     except Exception as e:  # noqa: BLE001
         pl = {"error": repr(e)}
     lst = ((pl.get("Sockets") or {}).get("Listeners") or {})
-    hooks_real = os.path.realpath(HOOKS)
     check("hookd-install.sh --print: plist без меток @…@, сокет 0600 в ~/.cache/pantheon/hookd, без KeepAlive, "
           "ThrottleInterval 1–2 с, первый процесс pantheon-hookd (папка hooks этого дерева)",
           r.returncode == 0 and b"@" not in r.stdout.replace(b"<?xml", b"")

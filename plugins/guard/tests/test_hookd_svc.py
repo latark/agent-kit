@@ -34,7 +34,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -750,6 +749,40 @@ def test_install(root, svc_built):
           and not os.path.exists(os.path.join(TH.hookd_dir(home), "probe", "probe.plist")), (calls, ppl))
     check("установка: таблица доступа — все четыре папки «есть», ответственный — pantheon-hookd",
           "итог: доступ ко всем папкам есть" in out and out.count(" есть") >= 4 and svc in out, out[-900:])
+    # --no-probe — так ставит плановый проход Пантеона (metis-0845): служба переставлена, задания пробы нет
+    code, out, err, calls2 = ins("--no-probe")
+    new = calls2[len(calls):]
+    check("--no-probe: код 0, служба переставлена (bootout, bootstrap), задания пробы нет, вывод — как проверить",
+          code == 0 and any(c.startswith("bootstrap gui/") and c.endswith("pantheon.svc.hookd.plist") for c in new)
+          and not any("pantheon.hookd.probe" in c for c in new) and "Проба доступа" not in out
+          and "не проверялся (--no-probe)" in out and "--check" in out
+          and open(pin).read() == hooks_c + "\n", (code, new, out[-600:], err[-300:]))
+    # выпуск guard с тем же hookd-svc.c (другая версия — другой путь кэша): переустановка меняет только pin и plist,
+    # pantheon-hookd тот же — тот же файл и CDHash, macOS не спросит доступ снова (TCC ad-hoc-подписи — по cdhash)
+    def cdhash(p):
+        r = subprocess.run(["/usr/bin/codesign", "-dvvv", p], capture_output=True, text=True, timeout=30)
+        return next((x.split("=", 1)[1] for x in (r.stderr + r.stdout).splitlines() if x.startswith("CDHash=")), None)
+
+    st0, cd0 = os.stat(svc), cdhash(svc)
+    hooks_v2 = cache_tree(home, "9.9.10")
+    code, out, err, _ = inst(home, lctl, "--no-probe", script=os.path.join(os.path.dirname(hooks_v2), "scripts",
+                                                                          "hookd-install.sh"))
+    st1 = os.stat(svc)
+    check("выпуск guard с тем же hookd-svc.c: pin → новая версия, pantheon-hookd не пересобран (inode, mtime, CDHash)",
+          code == 0 and open(pin).read() == hooks_v2 + "\n" and cd0 and cdhash(svc) == cd0
+          and (st0.st_ino, st0.st_mtime_ns) == (st1.st_ino, st1.st_mtime_ns),
+          (code, err[-300:], cd0, cdhash(svc), st0.st_mtime_ns, st1.st_mtime_ns))
+    hooks_v3 = cache_tree(home, "9.9.11")
+    with open(os.path.join(hooks_v3, "hookd-svc.c"), "a", encoding="utf-8") as fh:
+        fh.write("const char pantheon_hookd_test_mark[] = \"правка исходника службы\";\n")  # код, а не комментарий: сборка детерминирована
+    code, out, err, _ = inst(home, lctl, "--no-probe", script=os.path.join(os.path.dirname(hooks_v3), "scripts",
+                                                                          "hookd-install.sh"))
+    check("выпуск с правкой hookd-svc.c: pantheon-hookd пересобран — другой CDHash",
+          code == 0 and open(pin).read() == hooks_v3 + "\n" and cdhash(svc) not in (None, cd0),
+          (code, err[-300:], cd0, cdhash(svc)))
+    code, out, err, _ = ins("--no-probe")  # обратно на дерево hooks_c: пересборка его исходником
+    check("обратно на исходное дерево — pin и CDHash исходные", code == 0 and open(pin).read() == hooks_c + "\n"
+          and cd0 and cdhash(svc) == cd0, (code, err[-300:], cdhash(svc), cd0))
     code, out, err, _ = ins("--check")
     check("--check: служба загружена, доступ есть, окон нет, вызовов нет — код 0, «всё в порядке»",
           code == 0 and last_line(out) == "hookd-install --check: всё в порядке" and "загружена" in out

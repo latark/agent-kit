@@ -759,6 +759,22 @@ def main():
     check("wake <имя>: остановлено вами — код 0, «пропуск: athena-shop — остановлено вами», claude не звали",
           r.returncode == 0 and "пропуск: athena-shop — остановлено вами" in r.stdout and not calls())
     open(log, "w").close()
+    # metis-0241: имя уже поднимает другой процесс (блокировка start-<имя> занята, resume-busy) — тоже пропуск: код 0,
+    # «пропуск: имя — причина», ни «поднимаю», ни тревоги «не поднялась (код …)»
+    import fcntl
+    ldir = os.path.join(state, "hq-rw", "locks")
+    os.makedirs(ldir, mode=0o700, exist_ok=True)
+    open(agents_file, "w").write(json.dumps([sleeper]))
+    al_busy0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    with open(os.path.join(ldir, "start-athena-shop.lock"), "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        r = run("wake")
+    al_busy = open(alerts_md).read()[len(al_busy0):] if os.path.exists(alerts_md) else ""
+    check("wake: имя поднимает другой процесс (блокировка занята) — код 0, «пропуск: athena-shop — другой процесс уже "
+          "поднимает», без «поднимаю» и тревоги, claude не звали",
+          r.returncode == 0 and "пропуск: athena-shop — другой процесс уже поднимает" in r.stdout
+          and "поднимаю" not in r.stdout and not al_busy and not r.stderr and not calls())
+    open(log, "w").close()
 
     # wake hestia (metis-0245): без открытой задачи — отказ «нет задачи», код 2, claude не зовётся
     task("athena-0001", "doing")

@@ -24,6 +24,10 @@ def service_run(name):
         time.sleep(60)
         return 1
     svc = next((s for s in sched.get("service") or [] if s["name"] == name), None)
+    if name == P.HOOKD_SVC:
+        # демон хуков guard идёт своим plist (pantheon-hookd), его ставит установщик guard (metis-0845), не service-run
+        print(f"служба {name}: её запускает launchd через pantheon-hookd, а не service-run", file=sys.stderr)
+        return 2
     ok, why = P.service_wanted(svc, sched) if svc else (False, "нет в schedule.toml")
     if not ok:
         print(f"{P.stamp()} служба {name} не идёт: {why}", file=sys.stderr)
@@ -195,7 +199,11 @@ def jobs_show():
         for svc in sched["service"]:
             ok, why = P.service_wanted(svc, sched)
             pid = P.svc_running(svc["name"])
-            if ok and P.svc_on_demand(svc):
+            if ok and svc["name"] == P.HOOKD_SVC:  # сокет и простой — у демона guard, не в schedule.toml
+                where = os.path.join(P.HOOKD_DIR, "hookd.sock").replace(P.HOME, "~")
+                state = (f"идёт по запросу, pid {pid}" if pid else f"по требованию: ждёт запроса на {where}"
+                         if pid == 0 else "не загружена — плановый проход поставит установщиком guard")
+            elif ok and P.svc_on_demand(svc):
                 where = f"127.0.0.1:{P.svc_socket(svc)}"
                 state = (f"идёт по запросу, pid {pid}; выйдет после простоя {int(P.svc_idle(svc) // 60)} мин" if pid
                          else f"по требованию: ждёт запроса на {where}" if pid == 0
