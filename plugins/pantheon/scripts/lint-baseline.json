@@ -24,6 +24,7 @@
    "plugins/pantheon/lib/quarantine.py",
    "plugins/pantheon/lib/read.py",
    "plugins/pantheon/lib/review.py",
+   "plugins/pantheon/lib/review_rules.py",
    "plugins/pantheon/lib/rolecmd.py",
    "plugins/pantheon/lib/sessions.py",
    "plugins/pantheon/lib/taskcli.py",
@@ -41,13 +42,19 @@
    "lines": 697
   },
   "plugins/guard/hooks/daemon.py": {
+   "C901": {
+    "Daemon.loop": 19
+   },
    "PLR0912": {
-    "Daemon.decide": 13
+    "Daemon.decide": 14,
+    "Daemon.loop": 18,
+    "main": 15
    },
    "PLR0915": {
-    "Daemon.decide": 58
+    "Daemon.decide": 60,
+    "Daemon.loop": 58
    },
-   "lines": 506
+   "lines": 689
   },
   "plugins/guard/hooks/guard.py": {
    "lines": 247
@@ -126,7 +133,7 @@
     "merge_problem": 72
    },
    "backrefs": 28,
-   "lines": 2613
+   "lines": 2617
   },
   "plugins/guard/hooks/protect_config.py": {
    "PLR0912": {
@@ -140,6 +147,12 @@
   },
   "plugins/guard/scripts/bench.py": {
    "lines": 236
+  },
+  "plugins/guard/scripts/hookd-check.py": {
+   "lines": 200
+  },
+  "plugins/guard/scripts/hookd-stats.py": {
+   "lines": 119
   },
   "plugins/guard/tests/_cached_main.py": {
    "lines": 61
@@ -162,6 +175,16 @@
   "plugins/guard/tests/test_context.py": {
    "lines": 424
   },
+  "plugins/guard/tests/test_core_deps.py": {
+   "C901": {
+    "p_names": 16
+   },
+   "PLR0912": {
+    "deps": 14,
+    "p_names": 13
+   },
+   "lines": 332
+  },
   "plugins/guard/tests/test_drafts.py": {
    "PLR0915": {
     "main": 70
@@ -178,7 +201,7 @@
     "main": 168,
     "merge_security_checks": 109
    },
-   "lines": 2375
+   "lines": 2384
   },
   "plugins/guard/tests/test_hookd.py": {
    "PLR0915": {
@@ -188,7 +211,21 @@
     "test_spawn": 54,
     "test_supply": 62
    },
-   "lines": 1485
+   "lines": 1484
+  },
+  "plugins/guard/tests/test_hookd_check.py": {
+   "lines": 230
+  },
+  "plugins/guard/tests/test_hookd_stats.py": {
+   "lines": 125
+  },
+  "plugins/guard/tests/test_hookd_svc.py": {
+   "PLR0915": {
+    "test_flush_paths": 86,
+    "test_install": 70,
+    "test_wrapper": 84
+   },
+   "lines": 854
   },
   "plugins/guard/tests/test_hooks_json.py": {
    "lines": 334
@@ -254,17 +291,18 @@
   },
   "plugins/pantheon/hooks/ctx.py": {
    "C901": {
+    "_qmd_why": 17,
     "cmd_owner_log": 27
    },
    "PLR0912": {
-    "_qmd_why": 13,
+    "_qmd_why": 16,
     "cmd_owner_log": 28,
     "previous_assistant_text": 13
    },
    "PLR0915": {
     "cmd_owner_log": 74
    },
-   "lines": 2240
+   "lines": 2289
   },
   "plugins/pantheon/hooks/dev-stop-verify.py": {
    "PLR0912": {
@@ -443,7 +481,7 @@
     "process_batch": 54
    },
    "backrefs": 79,
-   "lines": 1479
+   "lines": 1481
   },
   "plugins/pantheon/lib/metrics.py": {
    "C901": {
@@ -551,7 +589,7 @@
     "status": 168,
     "tick": 82
    },
-   "lines": 7201
+   "lines": 7207
   },
   "plugins/pantheon/lib/pconfig.py": {
    "lines": 106
@@ -574,10 +612,11 @@
     "load": 18
    },
    "PLR0912": {
-    "load": 17
+    "load": 17,
+    "where": 13
    },
-   "backrefs": 18,
-   "lines": 369
+   "backrefs": 19,
+   "lines": 447
   },
   "plugins/pantheon/lib/quarantine.py": {
    "C901": {
@@ -624,8 +663,12 @@
    "PLR0915": {
     "review_cmd": 101
    },
-   "backrefs": 19,
-   "lines": 489
+   "backrefs": 27,
+   "lines": 436
+  },
+  "plugins/pantheon/lib/review_rules.py": {
+   "backrefs": 1,
+   "lines": 71
   },
   "plugins/pantheon/lib/rolecmd.py": {
    "backrefs": 15,
@@ -768,7 +811,7 @@
    "lines": 408
   },
   "plugins/pantheon/lib/window_rules.py": {
-   "lines": 105
+   "lines": 106
   },
   "plugins/pantheon/scripts/affected-map.py": {
    "C901": {
@@ -1161,7 +1204,7 @@
    "lines": 176
   },
   "plugins/pantheon/tests/test_qmd.py": {
-   "lines": 520
+   "lines": 630
   },
   "plugins/pantheon/tests/test_read.py": {
    "PLR0915": {
@@ -1473,6 +1516,7 @@
    "plugins/pantheon/lib/quarantine.py",
    "plugins/pantheon/lib/read.py",
    "plugins/pantheon/lib/review.py",
+   "plugins/pantheon/lib/review_rules.py",
    "plugins/pantheon/lib/rolecmd.py",
    "plugins/pantheon/lib/sessions.py",
    "plugins/pantheon/lib/skills_lint.py",
@@ -1498,6 +1542,9 @@
    "plugins/pantheon/lib/pantheon.py"
   ],
   "plugins/pantheon/lib/review.py": [
+   "plugins/pantheon/lib/pantheon.py"
+  ],
+  "plugins/pantheon/lib/review_rules.py": [
    "plugins/pantheon/lib/pantheon.py"
   ],
   "plugins/pantheon/lib/rolecmd.py": [
