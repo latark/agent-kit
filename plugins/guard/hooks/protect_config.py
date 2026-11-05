@@ -40,6 +40,186 @@ SETTINGS_NAMES = {"settings.json", "settings.local.json"}
 # CLAUDE_ITEMS: hooks и commands в нём есть, skills нет — ~/.claude/skills это правило не закрывает
 PROJECT_ITEMS = {"hooks", "skills", "commands"}
 
+# metis-0841 («да» владельца 05.11 16:04 и 16:09): координатор и лид направления правят навыки, команды и роли
+# проекта в папках своего направления (domains.json, его собирают из directions.toml). Отказ, если новый текст даёт
+# права или запускает код без вопроса: ключи frontmatter ниже (без регистра, «-» и «_») или строка `!`команда``
+# (её выполняют при загрузке навыка). Текст записи не разобрать — тоже отказ. .claude/hooks, settings, .mcp.json,
+# .git и сама .claude как цель — защита и в своём направлении
+OWN_ITEMS = {"skills", "commands", "agents"}
+RISKY_KEYS = {"skills": {"allowedtools", "hooks", "model", "context"},
+              "commands": {"allowedtools", "hooks", "model", "context"},
+              "agents": {"tools", "disallowedtools", "permissionmode", "hooks", "mcpservers"}}
+DYN_COMMAND = re.compile(r"!\s*`")
+# ключ YAML в строке frontmatter: в начале строки (и пункта «- »), после «{» или «,»; в кавычках тоже
+FM_KEY = re.compile(r"""(?:^|[{,])\s*(?:-\s+)?["']?([A-Za-z_][\w-]*)["']?\s*:""")
+TEXT_LIMIT = 1 << 20  # больше — текст не разбираем, отказ
+
+
+def own_folders(role, sub, pdir):
+    """Папки направления, где роль правит skills, commands и agents проекта: координатор (главная сессия
+    domain-coordinator) и лид направления (hephaestus-<коротко>, apollo-<коротко> — главная сессия или субагент окна).
+    Направление — по папке запуска (domains.json). Иначе []: остальные роли, субагенты и чужое направление."""
+    name, folders = G.direction_of(G.load_domains(), pdir)
+    if not name or not folders:
+        return []
+    if role == "domain-coordinator" and not sub:
+        return folders
+    short = name.split("-", 1)[1] if "-" in name else ""
+    return folders if short and role in {p + short for p in G.PANTHEON_ROLE_PREFIXES} else []
+
+
+def _own_kinds(p, own):
+    """Какие из OWN_ITEMS своего направления содержат путь (их ключи frontmatter судим)."""
+    parts = [G._key(x) for x in p.split("/")]
+    return {parts[i + 1] for i, x in enumerate(parts[:-1])
+            if x == ".claude" and parts[i + 1] in OWN_ITEMS and G._inside("/".join(parts[:i + 1]), own)}
+
+
+def _read_text(p):
+    """Текст обычного файла (не больше TEXT_LIMIT); нет файла — ""; иначе None (не разобрать)."""
+    if not os.path.lexists(p):
+        return ""
+    try:
+        if not os.path.isfile(p) or os.path.getsize(p) > TEXT_LIMIT:
+            return None
+        with open(p, "rb") as fh:
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def _edit_text(tool, tool_input, p):
+    """Новый текст файла после Write, Edit, MultiEdit; None — не вычислить (NotebookEdit, нет old_string)."""
+    if tool == "Write":
+        c = tool_input.get("content")
+        return c if isinstance(c, str) else None
+    if tool == "Edit":
+        edits = [tool_input]
+    elif tool == "MultiEdit":
+        edits = tool_input.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return None
+    else:
+        return None
+    text = _read_text(p)
+    if text is None:
+        return None
+    for e in edits:
+        old, new = (e.get("old_string"), e.get("new_string")) if isinstance(e, dict) else (None, None)
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None
+        if old == "":
+            if text:
+                return None
+            text = new  # Edit с пустым old_string создаёт файл
+        elif old not in text:
+            return None
+        else:
+            text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
+
+
+def _bash_texts(cmd, cwd, paths):
+    """Новый текст каждого пути из paths после команды Bash: {путь: текст или None — файла не будет (rm, mkdir)}.
+    Разбираются только простые формы одной командой: `cat > файл <<'EOF'` (и >>), `cp|mv [-fnvpi] файл цель`,
+    `rm`, `rmdir`, `mkdir`; остальное (sed -i, tee, цепочки, подстановки) — None: текст не разобрать, отказ."""
+    if MKDIR_ONLY.match(cmd):
+        return {p: None for p in paths}
+    try:
+        lex = G._Lexer(cmd)
+        lex.run()
+    except (G._ParseError, RecursionError, ValueError):
+        return None
+    toks = list(lex.toks)
+    while toks and toks[-1] == "\n":
+        toks.pop()
+    if lex.danger or any(isinstance(t, str) for t in toks):
+        return None
+    cmds = G.bash_analysis(cmd, cwd)[1]
+    if len(cmds) != 1 or any(x is None for x in cmds[0][1]):
+        return None
+    name, args = cmds[0]
+    words, redirs, k = [], [], 0
+    while k < len(toks):
+        t = toks[k]
+        if isinstance(t, G._Redir):
+            w = toks[k + 1] if k + 1 < len(toks) and isinstance(toks[k + 1], G._Word) else None
+            redirs.append((t, w))
+            k += 2 if w else 1
+        else:
+            words.append(t)
+            k += 1
+    if not words or words[0].bare() != name or len(words) != len(args) + 1:
+        return None  # обёртка (command cat, env) или слово, которого разбор не отдал
+    if name in ("rm", "rmdir") and not redirs:
+        return {p: None for p in paths}
+    if name in ("cp", "mv") and not redirs:
+        flags = [x for x in args if x.startswith("-")]
+        ops = [x for x in args if not x.startswith("-")]
+        if len(ops) != 2 or not all(re.fullmatch(r"-[fnvpi]+", x) for x in flags):
+            return None
+        src = G._expand(ops[0], cwd)
+        if name == "mv" and os.path.islink(src):
+            return None  # ссылка переедет ссылкой: текст потом поменяют мимо проверки
+        text = _read_text(src) if os.path.isfile(src) else None
+        return None if text is None else {p: text for p in paths}
+    if name == "cat" and args in ([], ["-"]):
+        docs = [(r, w) for r, w in redirs if r.op in ("<<", "<<-")]
+        outs = [(r, w) for r, w in redirs if r.op in (">", ">|", ">!", ">>")]
+        if len(docs) != 1 or len(outs) != 1 or len(redirs) != 2 or len(paths) != 1 or docs[0][1] is None:
+            return None
+        body = docs[0][0].body or ""
+        if docs[0][1].bare() is not None and re.search(r"[$`\\]", body):
+            return None  # ограничитель без кавычек: оболочка раскроет $…, `…` и \ — текст другой
+        text = body + "\n"
+        if outs[0][0].op == ">>":
+            old = _read_text(paths[0])
+            if old is None:
+                return None
+            text = old + text
+        return {paths[0]: text}
+    return None
+
+
+def _text_risk(text, kinds):
+    """Что в тексте даёт права или запускает код: ключ frontmatter из RISKY_KEYS или `!`команда``; иначе None.
+    Frontmatter — от первой непустой строки «---» до строки «---» или «...»; без конца — весь текст."""
+    m = DYN_COMMAND.search(text)
+    if m:
+        return "строка динамической команды !`…` (её выполняют при загрузке навыка)"
+    lines = text.lstrip(chr(0xFEFF)).splitlines()
+    i = next((n for n, x in enumerate(lines) if x.strip()), len(lines))
+    if i >= len(lines) or lines[i].strip() != "---":
+        return None
+    risky = set().union(*(RISKY_KEYS[k] for k in kinds))
+    for line in lines[i + 1:]:
+        if line.strip() in ("---", "..."):
+            break
+        for key in FM_KEY.findall(line):
+            if re.sub(r"[-_]", "", key.lower()) in risky:
+                return f"во frontmatter ключ «{key}» (права или запуск кода без вопроса)"
+    return None
+
+
+def own_text_problem(event, tool, tool_input, paths, own):
+    """Почему запись в навыки, команды и роли своего проекта нельзя: (путь, причина) или None."""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    if tool == "Bash":
+        texts = _bash_texts(tool_input.get("command") or "", cwd, paths)
+        if texts is None:
+            return paths[0], ("текст записи через Bash не разобрать — запиши файл через Write или Edit "
+                              "(или `cat > файл <<'EOF'`)")
+    else:
+        texts = {p: _edit_text(tool, tool_input, p) for p in paths}
+        bad = next((p for p in paths if texts[p] is None), None)
+        if bad:
+            return bad, "новый текст файла не вычислить (NotebookEdit или old_string не найден)"
+    for p in paths:
+        why = texts.get(p) and _text_risk(texts[p], _own_kinds(p, own) or OWN_ITEMS)
+        if why:
+            return p, why
+    return None
+
 
 def protected():
     """Защищённые пути (realpath) для текущего HOME."""
@@ -48,10 +228,12 @@ def protected():
             [os.path.realpath(os.path.join(home, x)) for x in HOME_ITEMS])
 
 
-def _settings_file(p, mkdir_only=False):
+def _settings_file(p, mkdir_only=False, own=()):
     """Настройки, которые меняют разрешения, хуки или запускают код в любом репозитории: .claude/settings*.json,
     .claude/agents/ (роли проекта), сама папка .claude (цель записи, чьё последнее звено — .claude), .mcp.json,
-    .git/hooks/… и .git/config. Внутри .claude остальное (worktrees/…) не защищено этим правилом."""
+    .git/hooks/… и .git/config. Внутри .claude остальное (worktrees/…) не защищено этим правилом.
+    own — папки своего направления (metis-0841, own_folders): в них .claude/skills, commands и agents проекта не
+    считаются защитой — их текст судит own_text_problem; .claude/hooks, settings и всё прочее — как без own."""
     key = G._key
     parent, base = os.path.split(p)
     # tar -x -C, unzip -d, wget -P дают цель «новый файл в папке» (ANY_FILE): смотрим саму папку
@@ -71,6 +253,9 @@ def _settings_file(p, mkdir_only=False):
     for i, x in enumerate(parts[:-1]):
         if x == ".claude" and (parts[i + 1] == "agents" or parts[i + 1] in PROJECT_ITEMS
                                and "/".join(parts[:i + 1]) != home_claude):
+            here = "/".join(parts[:i + 1])
+            if own and parts[i + 1] in OWN_ITEMS and here != home_claude and G._inside(here, own):
+                continue  # своё направление: навык, команда или роль проекта — дальше судит текст
             return True
     for i, x in enumerate(parts[:-1]):
         if x == ".git" and (parts[i + 1] == "hooks" or (parts[i + 1] == "config" and i + 2 == len(parts))):
@@ -360,6 +545,13 @@ def check_protect_config(event, tool, tool_input):
     mk = tool == "Bash" and bool(MKDIR_ONLY.match(tool_input.get("command") or ""))
     bad = [p for p in targets
            if G._inside(p, prot) or _settings_file(p, mk) or any(G._inside(x, [p]) for x in prot)]
+    # metis-0841: навыки, команды и роли проекта в папках своего направления — координатору и лиду, если текст
+    # не даёт прав и не запускает код (own_text_problem). Копии дерева, распаковка, git checkout и clone ниже судят
+    # без этого исключения: их текста не видно
+    own = own_folders(role, sub, pdir) if bad else []
+    opened = [p for p in bad if own and not G._inside(p, prot) and not any(G._inside(x, [p]) for x in prot)
+              and not _settings_file(p, mk, own)]
+    bad = [p for p in bad if p not in opened]
     if tool == "Bash":
         cmds = G.bash_analysis(tool_input.get("command") or "", cwd)[1]
         bad += [p for p in _tree_dests(cmds, cwd, targets) if _repo_or_above(p) and p not in bad]
@@ -370,6 +562,15 @@ def check_protect_config(event, tool, tool_input):
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
         bad += [p for p in _clone_dests(cmds, cwd) if p not in bad and (
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
+    if not bad and opened:
+        problem = own_text_problem(event, tool, tool_input, opened, own)
+        if problem:
+            return (f"Правило protect-config: роль «{role}» правит навыки, команды и роли своего проекта, но не то, что "
+                    f"даёт права или запускает код без вопроса: {problem[0].replace(G.HOME, '~')} — {problem[1]}. "
+                    "allowed-tools, hooks, model, context у навыка и команды, tools, disallowedTools, permissionMode, "
+                    "hooks, mcpServers у роли и строки !`…` правит только metis-pantheon после «да» владельца — опиши "
+                    "правку файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
+        return None
     if not bad:
         return None
     return (f"Правило protect-config: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не правит защиты "
