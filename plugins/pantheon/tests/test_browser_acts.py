@@ -202,6 +202,8 @@ def run(r, win=None, cfg=None):
 
 
 def answer(t, q, a="Да — разрешить"):
+    """Ответ окном вопросов так, как его пишет хук answer (ctx.py cmd_answer): «→» и ёлочки — пробел, пробелы сжаты."""
+    q = re.sub(r"\s+", " ", re.sub(r"[→«»]", " ", q)).strip()
     with open(os.path.join(STATE, "owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
         fh.write("\n## %s · окно вопросов\nвопрос: %s\nответ: %s\n" % (
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)), q, a))
@@ -271,10 +273,21 @@ q = quoted(res.get("why"))
 check("[M1][T3] владельца нет у Mac — окна нет, отказ с вопросом «[ID] Поручение Харону на avito.ru: нажатия, "
       "отправка форм.»", res["state"] == "refused" and not touches() and q
       and q.startswith(f"[{TASK}] Поручение Харону на avito.ru: нажатия, отправка форм.") and not mandates(), res)
-answer(T0 + 5, q)
 at(T0 + 10)
+for tail, what in ((" Ещё: оплатить продвижение", "тот же вопрос и лишний хвост"),
+                   (None, "только начало вопроса (без цели)")):
+    answer(T0 + 4, q + tail if tail else q.split(" Цель:")[0])
+    res = run(req("allow", site="avito.ru", actions="click,submit", why="подать объявление"))
+    check(f"[B3] «да» на другой вопрос с тем же началом ({what}) — не согласие, поручения нет",
+          res["state"] == "refused" and not mandates() and not touches(), res)
+res = run(req("allow", site="avito.ru", actions="click,submit", why="продать диван"))
+q_other = quoted(res.get("why"))
+answer(T0 + 4, q_other)
 res = run(req("allow", site="avito.ru", actions="click,submit", why="подать объявление"))
-check("[M1] «да» окном вопросов на этот вопрос — поручение есть (по «да»), Touch ID не звали",
+check("[B3] «да» на вопрос поручения с другой целью — не согласие на эту", res["state"] == "refused" and not mandates(), res)
+answer(T0 + 5, q)
+res = run(req("allow", site="avito.ru", actions="click,submit", why="подать объявление"))
+check("[M1][B3] «да» окном вопросов на этот вопрос (ёлочки убраны хуком) — поручение есть (по «да»), Touch ID не звали",
       res["state"] == "done" and "«да»" in res["text"] and len(mandates()) == 1 and not touches(), res)
 os.environ["PANTHEON_FAKE_IDLE"] = "5"
 res = run(req("allow", site="www.avito.ru", actions="click", why="ещё"))
@@ -520,9 +533,15 @@ check("[T3] помощник не собран — отказ «не собра�
 HELPER["path"] = TOUCH
 os.environ["PANTHEON_FAKE_IDLE"] = "900"
 n_touch = len(touches())
+for wrong, what in ((q1 + " Ещё: продвинуть", "лишний хвост"), (q1.split(" Кнопка")[0], "только начало с кодом"),
+                    (q1.replace("Цена=5000", "Цена=500"), "другие поля")):
+    answer(T0 + 2, wrong, "Да — отправить")
+    res = act("submit", "#send", NEW)
+    check(f"[B3] «да» на вопрос с тем же кодом, но другим текстом ({what}) — не согласие, нажатия нет",
+          res["state"] == "refused" and not D.clicked() and quoted(res["why"]) == q1, res)
 answer(T0 + 2, q1, "Да — отправить")
 res = act("submit", "#send", NEW)
-check("[C3] «да» на вопрос с кодом — отправлено по «да», окна Touch ID нет", res["state"] == "done"
+check("[C3][B3] «да» на вопрос с кодом целиком — отправлено по «да», окна Touch ID нет", res["state"] == "done"
       and "«да» владельца" in res["text"] and len(D.clicked()) == 1 and len(touches()) == n_touch, res)
 res = act("submit", "#send", NEW)
 q2 = quoted(res.get("why"))
@@ -619,8 +638,42 @@ for sel, word in (("#send", "evil.com"), ("#js", "не проверить")):
     check(f"[C13] форма уходит на другой сайт ({sel}) — отказ, окна нет", res["state"] == "refused" and word in res["why"]
           and not D.cmds(), res)
 finger(3)
+
+# [B2] действующие адрес и окно отправки: formaction и formtarget нажимаемой кнопки, target формы, <base target>
+def tform(action=SITE + "/items/new", own=SITE + "/items/new", method="post", target=""):
+    return {"action": action, "own": own, "method": method, "target": target, "label": ""}
+
+
+D.page(SITE + "/y", {"#fa": facts(SEND, fields=[TITLE], form=tform(action="https://evil.com/collect")),
+                     "#blank": facts(SEND, fields=[TITLE], form=tform(target="_blank")),
+                     "#named": facts(SEND, fields=[TITLE], form=tform(target="result")),
+                     "#self": facts(SEND, fields=[TITLE], form=tform(target="_self"))})
 os.environ["PANTHEON_FAKE_IDLE"] = "5"
+finger(0)
 clear_touch()
+for sel, word in (("#fa", "evil.com"), ("#blank", "_blank"), ("#named", "result")):
+    res = act("submit", sel, SITE + "/y")
+    check(f"[B2] {sel}: форма уходит не туда («{word}») — отказ даже с пальцем, окна Touch ID нет, нажатия нет",
+          res["state"] == "refused" and word in res["why"] and not touches() and not D.clicked(), res)
+res = act("submit", "#self", SITE + "/y")
+check("[B2] formtarget _self — отправка как обычно (палец)", res["state"] == "done" and len(D.clicked()) == 1, res)
+finger(3)
+clear_touch()
+base = facts(SEND, fields=[TITLE], form=tform())
+for k, v in (("action", SITE + "/items/other"), ("own", SITE + "/items/other"), ("method", "get"),
+             ("target", "_blank")):
+    f2 = copy.deepcopy(base)
+    f2["form"][k] = v
+    check(f"[B2] form_digest: другое {k} формы — другой отпечаток (прежнее «да» не подходит)",
+          B.form_digest(f2) != B.form_digest(base))
+for form, what in ((tform(own=SITE + "/checkout"), "собственный action формы — /checkout"),
+                   (tform(action="https://yoomoney.ru/quickpay"), "formaction кнопки — yoomoney.ru")):
+    got = B.classify(facts(SEND, fields=[TITLE], form=form), "submit")[0]
+    check(f"[B2] classify: {what} — оплата", got == "pay", got)
+js = B.facts_js("#a")
+check("[B2] FACTS_JS: адрес, метод и окно отправки — formaction, formmethod, formtarget кнопки, target формы, <base target>",
+      all(x in js for x in ("at(sub, 'formaction')", "at(sub, 'formmethod')", "at(sub, 'formtarget')",
+                            "at(f, 'target')", "base[target]", "own: abs(at(f, 'action'))")))
 
 # --- [F3] удаление ------------------------------------------------------------------------------------------------
 DEL = SITE + "/items"
@@ -663,6 +716,49 @@ answer(T0 + 7, qd, "Да — удалить")
 res = act("delete", "#del", DEL)
 check("[F3] удаление одного — по «да»", res["state"] == "done" and len(D.clicked()) == 1, res)
 finger(3)
+
+# [B1] click: без согласия — только обычный класс; адрес ссылки — оплата, вход, удаление
+L = SITE + "/l"
+D.page(L, {"#pay-link": dict(facts(node("a", href=SITE + "/payment/42", label="Далее")), x=31.0),
+           "#login-link": dict(facts(node("a", href=SITE + "/login?next=%2F", label="Далее")), x=32.0),
+           "#del-link": dict(facts(node("a", href=SITE + "/item/7/delete", label="x")), x=33.0),
+           "#rm-link": dict(facts(node("a", href=SITE + "/items?action=remove&id=3", label="ок")), x=34.0),
+           "#destroy-link": dict(facts(node("a", href=SITE + "/item/9/destroy", label="ок")), x=35.0),
+           "#cb-del": dict(facts(node("input", "checkbox", label="", attrs="удалить фото")), x=36.0),
+           "#ok-link": dict(facts(node("a", href=SITE + "/item/7", label="x")), x=37.0)})
+finger(0)
+for sel, word in (("#pay-link", "оплата"), ("#login-link", "важная")):
+    res = act("click", sel, L)
+    check(f"[B1][F1][F2] click по ссылке {sel}: адрес href — отказ «{word}» даже с пальцем, окна нет, нажатия нет",
+          res["state"] == "refused" and word in res["why"] and not touches() and not D.clicked(), res)
+reset_mandates()
+give(actions="click")
+finger(0)
+res = act("click", "#del-link", L)
+check("[B1][F3] click по удаляющей ссылке (/delete) по поручению без delete — отказ, окна и нажатия нет",
+      res["state"] == "refused" and "удаление" in res["why"] and not touches() and not D.clicked(), res)
+reset_mandates()
+give()
+finger(0)
+res = act("click", "#del-link", L)
+check("[B1][F3][T1] click по удаляющей ссылке — как delete: окно Touch ID «удалить элемент», палец — удалено",
+      res["state"] == "done" and "удалено" in res["text"] and len(touches()) == 1 and "удалить элемент" in touches()[0]
+      and len(D.clicked()) == 1, res)
+res = act("click", "#cb-del", L)
+check("[B1][F3] click по флажку «удалить фото» — удаление: окно Touch ID", res["state"] == "done"
+      and "удалено" in res["text"] and len(touches()) == 2, res)
+finger(2)
+for sel, path in (("#rm-link", "remove в запросе"), ("#destroy-link", "destroy в пути")):
+    res = act("click", sel, L)
+    qr = quoted(res.get("why"))
+    check(f"[B1][F3] click по ссылке ({path}) без окна — вопрос «Удалить на avito.ru/l?», нажатия нет",
+          res["state"] == "refused" and not D.clicked() and qr and qr.startswith(f"[{TASK}] Удалить на avito.ru/l?"), res)
+n_touch = len(touches())
+res = act("click", "#ok-link", L)
+check("[B1] click по обычной ссылке того же сайта — без согласия и окна", res["state"] == "done"
+      and "(link)" in res["text"] and len(D.clicked()) == 1 and len(touches()) == n_touch, res)
+finger(3)
+clear_touch()
 
 # --- /cmd только из списка ------------------------------------------------------------------------------------------
 try:

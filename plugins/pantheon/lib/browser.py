@@ -29,11 +29,14 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   Действия (metis-0765, решение владельца 05.11; правила и модель угроз — plugins/pantheon/docs/charon/README.md):
   click, type, submit и delete — во вкладке, которую открыл open, только по поручению (allow: задача, сайт, список
   действий; одно «да» владельца окном вопросов или Touch ID, срок 24 ч). Каждая отправка и каждое удаление — своё
-  согласие: Touch ID в момент действия или «да» на вопрос с кодом, который выдал проход (код привязан к сайту, пути
-  и запросу адреса, селектору и отпечатку полей формы в момент вопроса; одно «да» — одна отправка). Удаление пачки —
-  только «да». Оплата и важная форма (вход, пароль, смена почты или телефона, договор, торги, перевод, удаление
-  аккаунта, госкабинеты) — отказ всегда: только владелец сам (classify, PAY_*, IMPORTANT_*). Нажатие — вид только по
-  тегу, без интерактивных предков (click_kind); прокрутка мгновенная, точка сверяется перед нажатием (point_js).
+  согласие: Touch ID в момент действия или «да» на этот вопрос целиком (same_question) с кодом, который выдал проход
+  (код привязан к сайту, пути и запросу адреса, селектору и отпечатку формы — поля, действующие адрес, метод и окно
+  отправки — в момент вопроса; одно «да» — одна отправка). Удаление пачки — только «да». Оплата и важная форма (вход,
+  пароль, смена почты или телефона, договор, торги, перевод, удаление аккаунта, госкабинеты) — отказ всегда: только
+  владелец сам (classify, PAY_*, IMPORTANT_*; адреса — страница, formaction или action формы, href ссылки). Нажатие —
+  вид только по тегу, без интерактивных предков (click_kind); без согласия — только обычный класс, удаляющее нажатие
+  — как delete; прокрутка мгновенная, точка сверяется перед нажатием (point_js). Форма уходит на другой сайт или в
+  другое окно (formtarget, target, <base target>) — отказ.
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
@@ -846,6 +849,7 @@ IMPORTANT_WORDS = re.compile(r"""(?ix)
 """)
 # F3: удаление — надпись или атрибуты цели; пачка — «все», «выбранные», число от 2 или два отмеченных флажка и больше
 DELETE_WORDS = re.compile(r"удал|(?<![а-яё])стереть|очист|уничтож|delete|remove|erase|trash|\bdel\b", re.I)
+DELETE_HREF = re.compile(r"delete|remove|destroy", re.I)   # путь и запрос ссылки: удаляющая ссылка — удаление
 BATCH_WORDS = re.compile(r"\bвс[её]\b|\bвсех\b|выбранн|отмеченн|\ball\b|selected|checked|"
                          r"(?<![\w.,:/-])(?:[2-9]|[1-9]\d+)(?![\w.,:/-])", re.I)
 
@@ -855,7 +859,8 @@ WIDGET_ROLES = frozenset(("button", "link", "menuitem", "menuitemcheckbox", "men
                           "checkbox", "radio", "treeitem", "combobox", "textbox", "searchbox", "slider", "spinbutton"))
 TEXT_TYPES = ("", "text", "search", "email", "tel", "url", "number")
 
-# Факты страницы для прохода: цель, её предки, поля и кнопки формы. Классифицирует Python (тяжёлые регулярки в
+# Факты страницы для прохода: цель, её предки, поля и кнопки формы. У формы — действующие адрес, метод и окно
+# отправки: formaction, formmethod, formtarget нажимаемой кнопки важнее атрибутов формы, окно без них — <base target>. Классифицирует Python (тяжёлые регулярки в
 # странице вешают вкладку). Прокрутка мгновенная: плавная (CSS scroll-behavior) сдвинула бы точку после замера (K4)
 FACTS_JS = r"""/*charon-facts*/(() => { const S = %s; const e = document.querySelector(S); if (!e) return null;
 e.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); %s
@@ -874,6 +879,9 @@ const info = n => { const c = n.tagName === 'LABEL' ? n.control : null; return {
     .join(' ').slice(0, 300) }; };
 const chain = []; for (let n = hit ? p : e; n && n.nodeType === 1 && chain.length < 40; n = n.parentElement) chain.push(info(n));
 const f = (e.form && e.form.tagName === 'FORM') ? e.form : e.closest('form');
+const abs = v => { try { return new URL(v || location.href, location.href).href; } catch (_) { return 'invalid:' + v; } };
+const sb = (hit ? p : e).closest('button,input[type=submit],input[type=image]'), sub = f && sb && sb.form === f ? sb : null;
+const bt = document.querySelector('base[target]');
 const flab = n => String((n.labels && n.labels[0] && n.labels[0].innerText) || at(n, 'aria-label') || at(n, 'placeholder')
   || '').trim().slice(0, 80);
 const nodes = f ? [...f.elements, ...f.querySelectorAll('[contenteditable]')]
@@ -892,7 +900,11 @@ const buttons = f ? [...f.querySelectorAll('button,input[type=submit],input[type
 const heads = f ? [...f.querySelectorAll('legend,h1,h2,h3')].slice(0, 5).map(n => String(n.innerText).trim().slice(0, 120)) : [];
 return { url: location.href, x, y, w: r.width, h: r.height, hit, chain, el: info(e), elabel: lab(e),
   focused: document.activeElement === e, fields, buttons, heads,
-  form: f ? { action: new URL(at(f, 'action') || location.href, location.href).href,
+  form: f ? { action: abs(sub && sub.hasAttribute('formaction') ? at(sub, 'formaction') : at(f, 'action')),
+              own: abs(at(f, 'action')),
+              method: String((sub && at(sub, 'formmethod')) || at(f, 'method') || 'get').toLowerCase(),
+              target: String(sub && sub.hasAttribute('formtarget') ? at(sub, 'formtarget')
+                             : f.hasAttribute('target') ? at(f, 'target') : bt ? at(bt, 'target') : '').toLowerCase(),
               label: [at(f, 'aria-label'), at(f, 'id'), at(f, 'name')].join(' ').slice(0, 200) } : null }; })()"""
 # Перед нажатием (K4): рамка цели та же и точка всё ещё попадает в неё
 POINT_JS = r"""/*charon-point*/(() => { const S = %s; const e = document.querySelector(S); if (!e) return null;
@@ -988,10 +1000,19 @@ def _path_of(u):
     return "/"
 
 
+def _path_query(u):
+    with contextlib.suppress(ValueError):
+        x = urlsplit(u)
+        return (x.path or "/") + (f"?{x.query}" if x.query else "")
+    return "/"
+
+
 def classify(facts, op):
     """Вид формы → (вид, причина): pay (оплата), important (важная), delete-batch, delete, ordinary. Порядок — оплата,
     важная, удаление, обычная (F1–F3). Слова — у цели (надпись и атрибуты), а в форме ещё у её кнопок, заголовков,
-    имени и подписей полей; поля — формы цели, без формы — поля страницы вне форм."""
+    имени и подписей полей; поля — формы цели, без формы — поля страницы вне форм. Адреса — страницы, действующий и
+    собственный адрес отправки формы и href цели-ссылки (оплата, вход); путь ссылки с delete, remove, destroy —
+    удаление."""
     fields = [f for f in facts.get("fields") or [] if isinstance(f, dict)]
     form = facts.get("form") if isinstance(facts.get("form"), dict) else None
     _, btn = target_of(facts)
@@ -1001,7 +1022,9 @@ def classify(facts, op):
         texts += [str(x) for x in (facts.get("buttons") or []) + (facts.get("heads") or [])] + [str(form.get("label") or "")]
         texts += [str(f.get("label") or "") for f in fields]
     text = " | ".join(texts)
-    urls = [u for u in (facts.get("url"), (form or {}).get("action")) if isinstance(u, str) and u]
+    href = str(btn.get("href") or "") if btn.get("tag") == "a" else ""
+    urls = [u for u in (facts.get("url"), (form or {}).get("action"), (form or {}).get("own"), href)
+            if isinstance(u, str) and u]
     for f in fields:
         name = f"{f.get('name') or ''} {f.get('label') or ''}"
         if str(f.get("auto") or "").startswith("cc-") or PAY_FIELD.search(name):
@@ -1022,7 +1045,7 @@ def classify(facts, op):
     m = IMPORTANT_WORDS.search(text)
     if m:
         return "important", f"надпись «{m.group(0).strip()}»"
-    if op == "delete" or DELETE_WORDS.search(own):
+    if op == "delete" or DELETE_WORDS.search(own) or (href and DELETE_HREF.search(_path_query(href))):
         checked = sum(1 for f in fields if f.get("type") == "checkbox" and f.get("checked"))
         if checked >= 2 or BATCH_WORDS.search(own):
             return "delete-batch", f"пачка: отмечено {checked}" if checked >= 2 else "пачка: надпись"
@@ -1031,11 +1054,13 @@ def classify(facts, op):
 
 
 def form_digest(facts):
-    """Отпечаток формы (C5, C11): поля формы цели (без скрытых и паролей), адрес отправки и надпись кнопки."""
+    """Отпечаток формы (C5, C11): поля формы цели (без скрытых и паролей), адрес, метод и окно отправки и надпись
+    кнопки."""
     _, btn = target_of(facts)
     data = {"fields": [[f.get(k) for k in ("tag", "type", "name", "value", "checked")]
                        for f in facts.get("fields") or [] if isinstance(f, dict)],
-            "action": (facts.get("form") or {}).get("action") if isinstance(facts.get("form"), dict) else None,
+            "form": [(facts.get("form") or {}).get(k) for k in ("action", "own", "method", "target")]
+            if isinstance(facts.get("form"), dict) else None,
             "button": btn.get("label")}
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1104,6 +1129,15 @@ def mandate_question(task, site, acts, why):
             "удаление — отдельный вопрос или Touch ID; оплата и важные формы — только вы")
 
 
+def same_question(q, want):
+    """B3: ответ — на этот вопрос целиком, а не на вопрос с тем же началом. Сверка после той же нормализации, что у
+    хука answer и разбора ответа в чате (lib/answers.py): разметка ** и __ убрана, «→» и ёлочки — пробел, пробелы
+    сжаты."""
+    def norm(s):
+        return re.sub(r"\s+", " ", re.sub(r"[→«»]", " ", re.sub(r"(\*\*|__)", "", str(s or "")))).strip()
+    return norm(q) == norm(want)
+
+
 def mandate_for(task, host, op):
     """Действующее поручение на задачу и сайт вкладки с этим действием (M1–M3) или None."""
     for _, rec in _load_all("mandates"):
@@ -1134,7 +1168,7 @@ def touch(text):
 
 
 def do_allow(req, win, domains):
-    """Поручение (M1–M3): «да» окном вопросов на вопрос, который начинается ровно с mandate_head (не старше
+    """Поручение (M1–M3): «да» окном вопросов на этот вопрос целиком — mandate_question с той же целью (не старше
     MANDATE_TTL), или Touch ID; иначе отказ с текстом вопроса."""
     task, why = req["task"], req["why"]
     raw = req["site"].strip().lower()
@@ -1152,8 +1186,8 @@ def do_allow(req, win, domains):
     if have:
         return "done", f"поручение на {site} ({', '.join(acts)}) по {task} уже есть до {P.stamp(have[0]['until'])}", ""
     name = re.sub(r"[^a-z0-9.-]", "_", f"{task}__{site}__{'-'.join(acts)}") + ".json"
-    head = mandate_head(task, site, acts)
-    t = owner_yes(task, lambda q: q.startswith(head))
+    want = mandate_question(task, site, acts, why)
+    t = owner_yes(task, lambda q: same_question(q, want))
     if t is not None and P.now() - t < MANDATE_TTL:
         _save("mandates", name, {"task": task, "site": site, "actions": acts, "from": t, "until": t + MANDATE_TTL,
                                  "by": "да", "window": win, "why": why})
@@ -1195,7 +1229,7 @@ def approve(b, win, task, sel, facts, kind):
             and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
     stale = False
     for name, rec in sorted(mine, key=lambda x: -x[1]["issued"]):
-        t = owner_yes(task, lambda q, h=rec["head"]: q.startswith(h))
+        t = owner_yes(task, lambda q, w=ask_question(rec): same_question(q, w))
         if t is None or t + 1 < rec["issued"]:
             continue
         if rec.get("digest") != dig:
@@ -1314,18 +1348,24 @@ def do_act(req, win, domains):
         kind, why = click_kind(facts, host)
         if why:
             raise Refuse(f"click {sel}: {why} (pantheon browser submit — с согласием владельца на каждую отправку)")
-        point_ok(b, sel, facts, win)
-        mouse_click(b, facts["x"], facts["y"], win)
-        return "done", f"нажато {sel} ({kind}) на {site}; теперь {after_click(b, domains, task, win)}", ""
+        if cls == "ordinary":                     # без отдельного согласия — только обычное нажатие
+            point_ok(b, sel, facts, win)
+            mouse_click(b, facts["x"], facts["y"], win)
+            return "done", f"нажато {sel} ({kind}) на {site}; теперь {after_click(b, domains, task, win)}", ""
+        # удаляющее нажатие (надпись, атрибуты или адрес ссылки) — дальше как delete: поручение и согласие (F3)
     kind = cls if cls.startswith("delete") else "ordinary"
-    action = (facts.get("form") or {}).get("action") if isinstance(facts.get("form"), dict) else None
-    if action is not None:                        # C13: форма уходит на другой сайт — не по этому поручению
+    form = facts.get("form") if isinstance(facts.get("form"), dict) else None
+    if form is not None and op != "click":       # click — флажок, label или ссылка: форму не отправляет
+        action = form.get("action")               # C13: действующий адрес — formaction кнопки или action формы
         try:
-            to = site_word(url_host(action))
+            to = site_word(url_host(str(action or "")))
         except Refuse:
             raise Refuse(f"{op} {sel}: адрес отправки формы не проверить ({str(action)[:120]}) — отправки нет")
         if to != site:
             raise Refuse(f"{op} {sel}: форма уходит на {to}, а поручение на {site} — отправки нет")
+        target = str(form.get("target") or "")
+        if target not in ("", "_self"):           # итог отправки ушёл бы в другое окно, мимо проверок прохода
+            raise Refuse(f"{op} {sel}: форма отправляется в окно «{target[:40]}», а не в эту вкладку — отправки нет")
     need = "delete" if kind.startswith("delete") else "submit"
     if need != op and not mandate_for(task, host, need):
         raise Refuse(f"{op} {sel}: это {'удаление' if need == 'delete' else 'отправка формы'} ({why}), а в поручении на "
