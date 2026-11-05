@@ -4456,6 +4456,199 @@ def test_ghost_detail_is_not_question_0662():
     check("поднята" in out and _woke(e), f"Д2: правка реестра из будущего спрятала призрак: {out}")
 
 
+def test_jobs_show_read_only_locks_0266():
+    """metis-0266: `pantheon jobs` в окне, куда в STATE/locks не пишут (песочница), не падает с PermissionError: замок
+    задачи показ открывает только на чтение. Замок держит другой процесс — «идёт»; файл замка не читается — «не знаю»,
+    а остальные строки таблицы целы."""
+    import fcntl
+    e = Env()
+    e.schedule('primary_host = "mac-a"\n[[job]]\nname = "jb-a"\ncommand = "pantheon sync-answers"\nevery = "tick"\n'
+               '[[job]]\nname = "jb-b"\ncommand = "pantheon sync-answers"\nevery = "tick"\n')
+    locks = e.st("locks")
+    os.makedirs(locks, exist_ok=True)
+    la, lb = os.path.join(locks, "job-jb-a.lock"), os.path.join(locks, "job-jb-b.lock")
+    open(la, "w").close()
+    open(lb, "w").close()
+    os.chmod(la, 0o400)  # писать в замок нельзя (как в песочнице окна): O_WRONLY → PermissionError
+    os.chmod(lb, 0o000)  # а этот и читать нельзя — «не знаю»
+    os.chmod(locks, 0o500)
+    try:
+        if os.access(la, os.W_OK):  # root обходит права — проверять нечем
+            return
+        r = e.run("jobs", t=T0)
+        check(r.returncode == 0 and "Traceback" not in r.stderr and "jb-a" in r.stdout and "jb-b" in r.stdout,
+              f"0266: jobs при замках без записи: {r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}")
+        row_b = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-b")]
+        check(row_b and "идёт ли сейчас — не знаю" in row_b[0] and "не знаю (замок" in row_b[0],
+              f"0266: нечитаемый замок — не «не знаю» в состоянии и в «дальше»: {row_b}")
+        row_a = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-a")]
+        check(row_a and "идёт" not in row_a[0] and "не знаю" not in row_a[0],
+              f"0266: свободный замок показан занятым: {row_a}")
+    finally:
+        os.chmod(locks, 0o700)
+        os.chmod(lb, 0o600)
+        os.chmod(la, 0o600)
+    # замок держит другой процесс — «идёт» (и тоже без записи в замок)
+    with open(la, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        os.chmod(locks, 0o500)
+        try:
+            r = e.run("jobs", t=T0)
+            row_a = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-a")]
+            check(r.returncode == 0 and row_a and row_a[0].count("идёт") == 2,
+                  f"0266: замок занят, а показ не «идёт»: {r.returncode} {row_a} {r.stderr[-200:]}")
+        finally:
+            os.chmod(locks, 0o700)
+    # замка нет и создать его нельзя — задача свободна, показ не падает
+    os.remove(lb)
+    os.chmod(locks, 0o500)
+    try:
+        r = e.run("jobs", t=T0)
+        row_b = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-b")]
+        check(r.returncode == 0 and row_b and "идёт" not in row_b[0] and not os.path.exists(lb),
+              f"0266: нет файла замка: {r.returncode} {row_b} {r.stderr[-200:]}")
+    finally:
+        os.chmod(locks, 0o700)
+
+
+def _maint(e, sessions, t=T0, reason="обновление"):
+    json.dump({"id": P_STAMP(t), "since": t, "expires": t + 7200, "reason": reason, "by": "test", "sessions": sessions},
+              open(e.st("maintenance.json"), "w"))
+
+
+def P_STAMP(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))
+
+
+def test_saved_zeus_in_read_only_state_0577():
+    """metis-0577: `pantheon saved --by zeus` из окна штаба (песочница не пускает писать в STATE/maintenance и STATE/plugins)
+    не падает с PermissionError: код 0, понятная строка в stderr без трассировки; для остальных окон — код 1 с той же
+    строкой (метка им нужна). Метка там, куда писать можно, по-прежнему пишется (с id сессии)."""
+    sid = "5a5a5a5a-1111-4111-8111-111111111111"
+    own = {"PANTHEON_SESSION": "zeus", "CLAUDE_CODE_SESSION_ID": sid}
+    e = Env()
+    _maint(e, ["zeus", "dev-x"])
+    md = e.st("maintenance")
+    os.makedirs(md, exist_ok=True)
+    os.chmod(md, 0o500)
+    try:
+        if os.access(md, os.W_OK):  # root обходит права — проверять нечем
+            return
+        r = e.run("saved", "--by", "zeus", "--state", "STATUS.md", extra=own)
+        check(r.returncode == 0 and "Traceback" not in r.stderr and "не записана" in r.stderr and "ведёт владелец" in r.stderr,
+              f"0577: saved zeus без записи в STATE: {r.returncode} {r.stderr[-300:]}")
+        r = e.run("saved", "--by", "dev-x", "--state", "STATUS.md", extra={**own, "PANTHEON_SESSION": "dev-x"})
+        check(r.returncode == 1 and "Traceback" not in r.stderr and "не записана" in r.stderr
+              and "ведёт владелец" not in r.stderr, f"0577: saved другого окна без записи — не отказ: {r.returncode} {r.stderr[-300:]}")
+        # перезапуск после плагинов: метка respawn-ok — тоже без трассировки
+        e2 = Env()
+        os.makedirs(e2.st("plugins"), exist_ok=True)
+        json.dump({"since": T0 - 100, "plugins": ["pantheon"], "done": []}, open(e2.st("plugins", "respawn.json"), "w"))
+        os.chmod(e2.st("plugins"), 0o500)
+        try:
+            r = e2.run("saved", "--by", "zeus", "--state", "STATUS.md", extra=own)
+            check(r.returncode == 0 and "Traceback" not in r.stderr and "не записана" in r.stderr,
+                  f"0577: saved zeus (после плагинов) без записи: {r.returncode} {r.stderr[-300:]}")
+        finally:
+            os.chmod(e2.st("plugins"), 0o700)
+    finally:
+        os.chmod(md, 0o700)
+    r = e.run("saved", "--by", "zeus", "--state", "STATUS.md", extra=own)
+    rec = json.load(open(e.st("maintenance", "zeus.json"))) if os.path.exists(e.st("maintenance", "zeus.json")) else {}
+    check(r.returncode == 0 and rec.get("sessionId") == sid and not r.stderr.strip(), f"0577: запись при праве: {r} {rec}")
+
+
+def test_restart_done_and_auto_close_0338():
+    """metis-0338: завершённый техперезапуск закрывается — `restart --done` снимает метку и пишет в тревоги «завершён»; --status
+    закрывает сам, когда все перезапущены, а Зевс (если был) поднят заново (id сессии не тот, что в его saved); пока Зевс
+    не поднят или id неизвестен — метка стоит; --go без пропущенных пишет «завершён», а не «перезапущены»."""
+    zold, znew = "20202020-0000-4000-8000-000000000001", "30303030-0000-4000-8000-000000000002"
+    # --done: метка и отметки сняты, тревога «завершён», код 0
+    e = Env()
+    _maint(e, ["mm-dir", "zeus"])
+    os.makedirs(e.st("maintenance"), exist_ok=True)
+    open(e.st("maintenance", "mm-dir.done"), "w").write("x\n")
+    r = e.run("restart", "--done", t=T0 + 60)
+    check(r.returncode == 0 and not os.path.exists(e.st("maintenance.json"))
+          and not os.listdir(e.st("maintenance")) and "технический перезапуск завершён" in e.alerts()
+          and "mm-dir" in e.alerts() and "--done" in e.alerts(), f"0338: --done: {r.returncode} {r.stderr[-200:]} {e.alerts()}")
+    check(e.run("restart", "--done", t=T0 + 70).returncode == 1, "0338: --done без метки — не «готово»")
+    # --done при неперезапущенной сессии — закрывает, но называет её
+    e = Env()
+    _maint(e, ["mm-dir"])
+    r = e.run("restart", "--done", t=T0 + 60)
+    check(r.returncode == 0 and "без перезапуска: mm-dir" in r.stdout and "остались: mm-dir" in e.alerts(),
+          f"0338: --done с остатком: {r.stdout!r} {e.alerts()}")
+
+    def zeus_case(saved_sid, live_sid, done=True):
+        e = Env()
+        e.direction("mm-dir")
+        _maint(e, ["mm-dir", "zeus"])
+        os.makedirs(e.st("maintenance"), exist_ok=True)
+        if done:
+            open(e.st("maintenance", "mm-dir.done"), "w").write("x\n")
+        json.dump({"time": "2026-10-15 10:00:00", "state": "S", "by": "zeus", **({"sessionId": saved_sid} if saved_sid else {})},
+                  open(e.st("maintenance", "zeus.json"), "w"))
+        e.agents([bg("zeus", "working", live_sid, pid=77)] if live_sid else [])
+        return e, e.run("restart", "--status", t=T0 + 60)
+    e, r = zeus_case(zold, znew)
+    check(r.returncode == 0 and not os.path.exists(e.st("maintenance.json")) and "перезапуск завершён" in r.stdout
+          and "технический перезапуск завершён" in e.alerts(), f"0338: --status, Зевс поднят заново: {r.stdout!r} {r.stderr[-200:]}")
+    for what, args in (("Зевс всё ещё старый", (zold, zold)), ("id Зевса в saved неизвестен", (None, znew)),
+                       ("Зевса нет среди живых", (zold, None))):
+        e, r = zeus_case(*args)
+        check(os.path.exists(e.st("maintenance.json")) and "Зевс" in r.stdout and "технический перезапуск завершён" not in e.alerts(),
+              f"0338: {what} — метка должна стоять: {r.stdout!r}")
+    e, r = zeus_case(zold, znew, done=False)
+    check(os.path.exists(e.st("maintenance.json")), f"0338: сессия не перезапущена — --status не закрывает: {r.stdout!r}")
+    # --go без пропущенных: тревога «завершён»
+    e = Env()
+    e.direction("mm-dir")
+    e.agents([bg("mm-dir", "working", "mmmmmmmm-1", pid=21)])
+    e.run("restart", "--prepare", "обновление", t=T0)
+    e.run("saved", "--by", "mm-dir", "--state", "STATUS.md", t=T0 + 20)
+    r = e.run("restart", "--go", t=T0 + 40, extra={"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"})
+    check(r.returncode == 0 and "технический перезапуск завершён" in e.alerts() and not os.path.exists(e.st("maintenance.json")),
+          f"0338: --go без пропущенных: {r.stdout!r} {e.alerts()!r}")
+
+
+def test_resume_picks_saved_session_0499():
+    """metis-0499: продолжение остановленной сессии (resume_or_start: wake, самозапуск) берёт ту, что записала `pantheon saved`
+    (id в метке), а не самую свежую по startedAt; метки нет или id среди остановленных нет — прежний выбор. Перезапуск
+    после плагинов: метка «можно» с id сессии относится только к ней, другая живая копия ждёт простоя."""
+    saved_id = "5a5a5a5a-1111-4111-8111-111111111111"
+    other = "bbbbbbbb-2222-4222-8222-222222222222"
+    for with_mark, want in (("maintenance", "5a5a5a5a"), ("respawn-ok", "5a5a5a5a"), (None, "bbbbbbbb"), ("gone", "bbbbbbbb")):
+        e = Env()
+        e.direction("sv-dir")
+        e.agents([bg("sv-dir", "stopped", saved_id, started=T0 - 500), bg("sv-dir", "stopped", other, started=T0 - 10)])
+        if with_mark:
+            rec = {"time": "2026-10-15 10:00:00", "state": "S", "by": "x", "t": T0 - 50,
+                   "sessionId": saved_id if with_mark != "gone" else "cccccccc-3333-4333-8333-333333333333"}
+            d = e.st("maintenance") if with_mark in ("maintenance", "gone") else e.st("plugins", "respawn-ok")
+            os.makedirs(d, exist_ok=True)
+            json.dump(rec, open(os.path.join(d, "sv-dir.json"), "w"))
+        r = e.run("wake", "sv-dir", t=T0, extra={"PANTHEON_DRYRUN": "1"})
+        check(f"[resume] sv-dir {want}" in r.stdout, f"0499: метка {with_mark}: ждали {want}: {r.stdout!r} {r.stderr[-200:]}")
+    # перезапуск после плагинов: метка «можно» с id другой копии не освобождает эту (транскрипт свежий — без метки ждёт)
+    for sid_in_mark, want in ((None, True), ("5a5a5a5a-1111-4111-8111-111111111111", True),
+                              ("bbbbbbbb-2222-4222-8222-222222222222", False)):
+        e, a, tp = respawn_env("rk-dir", "5a5a5a5a-1111-4111-8111-111111111111", state="done")
+        os.utime(tp, (T0 - 60, T0 - 60))
+        rec = {"t": T0 - 10, "time": "x", "state": "S", "by": "x"}
+        if sid_in_mark:
+            rec["sessionId"] = sid_in_mark
+        os.makedirs(e.st("plugins", "respawn-ok"), exist_ok=True)
+        json.dump(rec, open(e.st("plugins", "respawn-ok", "rk-dir.json"), "w"))
+        e.run("watch", t=T0)
+        check(respawned(e, "5a5a5a5a") == want, f"0499: метка «можно» с id {sid_in_mark}: перезапущено={not want}: {e.calls()}")
+    # saved записывает id сессии и в метку «можно»
+    e, a, tp = respawn_env("rk-dir", "5a5a5a5a-1111-4111-8111-111111111111", state="working", status="busy")
+    e.run("saved", "--by", "rk-dir", "--state", "S", t=T0,
+          extra={"PANTHEON_SESSION": "rk-dir", "CLAUDE_CODE_SESSION_ID": "5a5a5a5a-1111-4111-8111-111111111111"})
+    check(json.load(open(e.st("plugins", "respawn-ok", "rk-dir.json"))).get("sessionId") == "5a5a5a5a-1111-4111-8111-111111111111",
+          "0499: saved не записал id в метку «можно»")
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:

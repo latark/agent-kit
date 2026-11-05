@@ -475,6 +475,33 @@ def locked(name):
         return not got
 
 
+def lock_held(name):
+    """Держит ли кто замок name — для показа (metis-0266). Файл замка открывается только на чтение и проверяется
+    LOCK_SH|LOCK_NB: чужой LOCK_EX отказывает, создавать и писать ничего не нужно, так что окно с песочницей, куда в
+    STATE/locks не пишут (pantheon jobs), не падает с PermissionError. → True — держат; False — свободен или файла нет
+    (замок не брали); None — не знаю: файл не читается, подложена ссылка (O_NOFOLLOW) или это не обычный файл."""
+    p = path(HQ_RW, "locks", name + ".lock") if hq_lock_name(name) else path("locks", name + ".lock")
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def read_json(p, default=None):
     try:
         with open(p) as fh:
