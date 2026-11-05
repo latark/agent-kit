@@ -32,8 +32,9 @@
                             stop — метка «остановлено вами», claude stop и claude rm: сессия уходит из фоновых
                             сессий Claude Code (metis-0239), переписка остаётся
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
-  pantheon restart --prepare [причина]|--status|--go [--force]|--cancel, pantheon saved --by <имя> --state <путь>
-                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10); pantheon saved без
+  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel, pantheon saved --by <имя> --state <путь>
+                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10); --done и --status
+                            (все перезапущены, Зевс поднят заново) закрывают завершённый перезапуск (metis-0338); pantheon saved без
                             техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
   pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04);
@@ -2366,7 +2367,9 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
     old = [a for a in agents if alias.fullmatch(str(a.get("name") or "")) and a.get("state") in ("stopped", "failed")
            and a.get("sessionId")]
     if old:
-        a = max(old, key=lambda a: a.get("startedAt") or 0)
+        # metis-0499: если сессия записала `pantheon saved` (id в метке), продолжаем именно её, а не самую свежую по
+        # startedAt — ожившая остановленная копия с тем же именем иначе перехватила бы продолжение (как restart --go)
+        a = saved_agent(name, old, saved_sid(name), warn=False)
         fresh = P.fresh_reason(a)  # metis-0147 п. 2: контекст большой, кэш остыл — новая сессия с файла состояния
         if fresh:
             return P.fresh_start(name, a, P.fresh_text("свежий старт", name, a.get("id"), text), origin,
@@ -2746,8 +2749,13 @@ def resume(rest, who):
 # 2) `pantheon restart --status` — кто сохранился. 3) `pantheon restart --go` — сохранившиеся останавливаются и
 #    продолжаются той же сессией с её именем и окном (новые плагины, роли и Claude Code берутся при старте процесса);
 #    сессию выбирает id, записанный `pantheon saved` (metis-0421), а не самый свежий startedAt; нет id — прежний выбор;
-#    повтор --go не трогает уже перезапущенные. Зевс — интерактивная сессия владельца: его перезапуск —
-#    `pantheon start zeus --restart` во вкладке iTerm. Метка истекла — дежурный снимает её с тревогой.
+#    повтор --go не трогает уже перезапущенные; продолжение остановленной сессии (resume_or_start) тоже берёт ту, что
+#    записала `pantheon saved`, если её id в метке (metis-0499). Зевс — интерактивная сессия владельца: его перезапуск —
+#    `pantheon start zeus --restart` во вкладке iTerm; в песочнице окна штаба `pantheon saved` метку не пишет (STATE
+#    закрыт), но для zeus* это не отказ — метка ему справочная (metis-0577). 4) Завершённый перезапуск закрывают
+#    `pantheon restart --done` или `--status` (все перезапущены, Зевс поднят заново: id его сессии не тот, что в saved) —
+#    тревога «технический перезапуск завершён»; иначе метка висит до срока и снимается тревогой «не завершён» (metis-0338).
+#    Метка истекла — дежурный снимает её с тревогой.
 
 def maint_path():
     return P.path("maintenance.json")
@@ -2841,7 +2849,8 @@ def respawn_busy(a, doms, since, t):
     if not idle_holder(a):
         return "занято"
     ok = P.read_json(respawn_path("respawn-ok", str(a.get("name")) + ".json"), {})
-    if isinstance(ok, dict) and float(ok.get("t") or 0) > since:
+    # metis-0499: метка с id сессии — «можно» только ей; другая живая копия с тем же именем ждёт простоя
+    if isinstance(ok, dict) and float(ok.get("t") or 0) > since and ok.get("sessionId") in (None, a.get("sessionId")):
         return None
     lim = t - RESPAWN_IDLE_MIN * 60
     tp = P.transcript_path(a)
@@ -2934,10 +2943,11 @@ def plugins_respawn(agents, doms, t):
                         os.remove(respawn_path("respawn-ok", f))
 
 
-def saved_agent(name, mine, sid):
+def saved_agent(name, mine, sid, warn=True):
     """metis-0421: сессия для restart --go — та, что записала `pantheon saved` (по id), а не самая свежая по startedAt: ожившая
     остановленная копия с тем же именем иначе перехватила бы перезапуск. Записи или id нет в списке — прежний выбор
-    (самая свежая) и предупреждение в stderr."""
+    (самая свежая) и предупреждение в stderr (warn; продолжение остановленной сессии, metis-0499, молчит: метки saved
+    у неё обычно нет)."""
     if sid:
         for a in mine:
             if a.get("sessionId") == sid:
@@ -2945,8 +2955,22 @@ def saved_agent(name, mine, sid):
         why = f"сохранённой сессии {sid[:8]} нет среди сессий с этим именем"
     else:
         why = "в записи saved нет id сессии"
-    print(f"pantheon restart: {name}: {why} — беру самую свежую по startedAt", file=P.sys.stderr)
+    if warn:
+        print(f"pantheon restart: {name}: {why} — беру самую свежую по startedAt", file=P.sys.stderr)
     return max(mine, key=lambda a: a.get("startedAt") or 0)
+
+
+def saved_sid(name):
+    """metis-0499: id сессии из последней метки `pantheon saved` этого имени — техперезапуск (STATE/maintenance/<имя>.json)
+    или перезапуск после плагинов (STATE/plugins/respawn-ok/<имя>.json); None — метки или id в ней нет."""
+    if not P.SESSION_NAME.fullmatch(str(name)):
+        return None
+    for p in (P.path("maintenance", name + ".json"), respawn_path("respawn-ok", name + ".json")):
+        rec = P.read_json(p, {})
+        sid = rec.get("sessionId") if isinstance(rec, dict) else None
+        if isinstance(sid, str) and re.fullmatch(r"[0-9a-f-]{8,64}", sid):
+            return sid
+    return None
 
 
 def restart(rest, who):
@@ -2981,6 +3005,8 @@ def restart(rest, who):
                 saved[f[:-5]] = P.read_json(P.path("maintenance", f), {})
             elif f.endswith(".done"):
                 done_marks.add(f[:-5])
+    if rest[:1] == ["--done"]:  # metis-0338: перезапуск закончен — метку снять (рядом с --cancel: тот отменяет)
+        return restart_close(m, done_marks, who, "по команде --done")
     if rest[:1] == ["--status"] or not rest:
         print(f"перезапуск с {m['id'][:16]} ({m.get('reason')}), метка до {P.stamp(float(m.get('expires') or 0))[11:16]}:")
         for n in m.get("sessions") or []:
@@ -2988,6 +3014,14 @@ def restart(rest, who):
             print(f"  {n}: " + ("перезапущена" if n in done_marks else
                                 f"сохранилась {s.get('time', '')[11:16]}, состояние — {s.get('state') or '—'}" if s
                                 else "ещё нет"))
+        waiting = [n for n in m.get("sessions") or [] if not n.startswith("zeus") and n not in done_marks]
+        owner = [n for n in m.get("sessions") or [] if n.startswith("zeus")]
+        if not waiting and (not owner or zeus_renewed(owner, saved)):
+            # metis-0338: все перезапущены, а Зевс (если был) поднят заново — метка больше не нужна
+            return restart_close(m, done_marks, who, "всё перезапущено" + (", Зевс поднят заново" if owner else ""))
+        if not waiting:
+            print("осталось: Зевс — pantheon start zeus --restart во вкладке iTerm; потом pantheon restart --status "
+                  "(или --done) снимет метку")
         return 0 if all(n in saved or n in done_marks or n.startswith("zeus") for n in m.get("sessions") or []) else 1
     if rest[:1] == ["--go"]:
         force = "--force" in rest
@@ -3025,7 +3059,7 @@ def restart(rest, who):
                 skip.append(f"{n} (код {rc})")
         if not skip:
             maint_clear()
-        P.alert(f"технический перезапуск ({who}): перезапущены {', '.join(done) or 'никто'}"
+        P.alert(f"технический перезапуск {'завершён' if not skip else ''} ({who}): перезапущены {', '.join(done) or 'никто'}"
                 + (f"; не тронуты: {', '.join(skip)}" if skip else "")
                 + ("; Зевс — вы сами: pantheon start zeus --restart во вкладке iTerm" if owner else ""), "pantheon-restart")
         print(f"перезапущены: {', '.join(done) or 'никто'}" + (f"\nне тронуты: {', '.join(skip)} (--force — без отметки; "
@@ -3038,8 +3072,53 @@ def restart(rest, who):
         P.alert(f"технический перезапуск отменён ({who})", "pantheon-restart")
         print("метка снята")
         return 0
-    print("pantheon restart --prepare [причина] | --status | --go [--force] | --cancel", file=P.sys.stderr)
+    print("pantheon restart --prepare [причина] | --status | --go [--force] | --done | --cancel", file=P.sys.stderr)
     return 2
+
+
+def zeus_renewed(names, saved):
+    """metis-0338: Зевс (zeus*) поднят заново после `pantheon saved`. Признак — у каждого есть живая сессия с этим именем
+    (claude agents или реестр имён вкладок), и среди живых нет той, что записала saved (sessionId метки): после
+    `pantheon start zeus --restart` id другой. Метки с id нет — не знаем, False (тогда метку снимет --done)."""
+    agents, reg = P.agents_all() or [], P.sessions_registry()
+    for n in names:
+        sid = (saved.get(n) or {}).get("sessionId")
+        live = holders(n, agents, reg)
+        if not sid or not live or any(a.get("sessionId") == sid for a in live):
+            return False
+    return True
+
+
+def restart_close(m, done_marks, who, how):
+    """metis-0338: закрыть завершённый технический перезапуск — метка и отметки сняты, в тревогах «завершён» (а не
+    «метка снята по сроку без restart --go» через два часа)."""
+    left = [n for n in m.get("sessions") or [] if not n.startswith("zeus") and n not in done_marks]
+    maint_clear()
+    P.alert(f"технический перезапуск завершён ({who}, {how}): перезапущены "
+            f"{', '.join(n for n in m.get('sessions') or [] if n in done_marks) or 'никто'}"
+            + (f"; без перезапуска остались: {', '.join(left)} — поднять вручную: pantheon wake <имя>" if left else ""),
+            "pantheon-restart")
+    print("перезапуск завершён, метка снята" + (f"; без перезапуска: {', '.join(left)}" if left else ""))
+    return 0
+
+
+def _write_mark(name, p, rec):
+    """Запись pantheon saved. Не записалась (PermissionError: песочница окна не пускает в STATE/maintenance и
+    STATE/plugins, metis-0577) — строка в stderr и False, без трассировки. Зевс (zeus*) — интерактивная сессия владельца:
+    его не перезапускает ни restart --go, ни тик, hook его не закрывает, так что метка для него справочная и её
+    отсутствие работе не мешает; остальным нужна: без метки restart --go их не тронет."""
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        P.write_json(p, rec)
+        return True
+    except OSError as e:
+        owner = name.startswith("zeus")
+        print(f"pantheon saved: метка {P.tilde(p)} не записана — {type(e).__name__}: {e.strerror or e}"
+              + (f"\n{name}: его перезапуск ведёт владелец (pantheon start zeus --restart), метка ему не нужна — "
+                 "команда считается выполненной" if owner else
+                 "\nокно не может писать в состояние Пантеона: метку поставит тот, кто вне песочницы"),
+              file=P.sys.stderr)
+        return False
 
 
 def saved_cmd(rest, who):
@@ -3063,8 +3142,12 @@ def saved_cmd(rest, who):
         print(f"pantheon saved: сессия {own} отмечает только себя, не {name}", file=P.sys.stderr)
         return 2
     if not m:
-        P.write_json(respawn_path("respawn-ok", name + ".json"), {"t": P.now(), "time": P.stamp(),
-                                                                  "state": " ".join(state.split())[:300], "by": who})
+        rec = {"t": P.now(), "time": P.stamp(), "state": " ".join(state.split())[:300], "by": who}
+        sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+        if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0499: перезапуск после плагинов продолжит эту сессию
+            rec["sessionId"] = sid
+        if not _write_mark(name, respawn_path("respawn-ok", name + ".json"), rec):
+            return 0 if name.startswith("zeus") else 1
         print(f"{name}: отмечено «можно перезапускать». Плановый проход перезапустит окно с новыми плагинами, когда оно закончит ход; "
               "работающее окно не тронет")
         return 0
@@ -3072,12 +3155,12 @@ def saved_cmd(rest, who):
         print(f"pantheon saved: {name or '(без имени)'} нет в списке перезапуска: {', '.join(m.get('sessions') or [])}",
               file=P.sys.stderr)
         return 2
-    os.makedirs(P.path("maintenance"), exist_ok=True)
     rec = {"time": P.stamp(), "state": " ".join(state.split())[:300], "by": who}
     sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
     if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0421: restart --go продолжит именно эту сессию
         rec["sessionId"] = sid
-    P.write_json(P.path("maintenance", name + ".json"), rec)
+    if not _write_mark(name, P.path("maintenance", name + ".json"), rec):
+        return 0 if name.startswith("zeus") else 1
     print(f"{name}: отмечено «сохранилась». Отчитайся Зевсу строкой (SendMessage zeus) и жди перезапуска: дальше "
           "инструменты закрыты до pantheon restart --go")
     return 0

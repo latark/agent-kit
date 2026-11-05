@@ -510,6 +510,9 @@
   «сохранись», после `pantheon saved` ей закрыты инструменты (кроме отчёта Зевсу); `push` (SessionStart, asyncRewake) —
   отдаёт сессии текст из `~/.local/state/pantheon/push/<сессия>.txt` после `claude respawn`. Уборку журналов ваших слов
   делает дежурный, хук только дописывает.
+  Завершённый техперезапуск закрывает `pantheon restart --done` или `--status` (все перезапущены, Зевс поднят заново),
+  в тревогах «технический перезапуск завершён» (metis-0338); `pantheon saved --by zeus` из окна Зевса, куда STATE
+  не пишется, не падает (метка Зевсу справочная, metis-0577); `pantheon jobs` блокировки задач только читает (metis-0266).
 - `plugins/pantheon/hooks/agents.py` (0.11.19, P0-6) — PreToolUse `Agent|Task|Skill` в окнах Пританея и координаторов:
   главная сессия зовёт только субагентов из списка окна, навык с `context: fork` проверяется по своему `agent:`.
   Субагенты окна (лиды с их dev-*, argus) не проверяются. Списки — в `pantheon.py`: `HQ_AGENTS`, `COORDINATOR_AGENTS`

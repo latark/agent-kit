@@ -164,7 +164,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
-  pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
+  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel   технический перезапуск всех сессий
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
@@ -478,6 +478,33 @@ def lock(name, block=True):
 def locked(name):
     with lock(name, block=False) as got:
         return not got
+
+
+def lock_held(name):
+    """Держит ли кто замок name — для показа (metis-0266). Файл замка открывается только на чтение и проверяется
+    LOCK_SH|LOCK_NB: чужой LOCK_EX отказывает, создавать и писать ничего не нужно, так что окно с песочницей, куда в
+    STATE/locks не пишут (pantheon jobs), не падает с PermissionError. → True — держат; False — свободен или файла нет
+    (замок не брали); None — не знаю: файл не читается, подложена ссылка (O_NOFOLLOW) или это не обычный файл."""
+    p = path(HQ_RW, "locks", name + ".lock") if hq_lock_name(name) else path("locks", name + ".lock")
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def read_json(p, default=None):
