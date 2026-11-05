@@ -64,7 +64,7 @@
 
 Очередь окна (metis-0508). Окну роли песочница закрывает запись в STATE, поэтому `read request` в окне (кэш окна
 ~/Library/Caches/pantheon-sandbox/<окно> — тем же правилом, что у `pantheon browser`: папка над PANTHEON_TMP у окон
-направлений и мастерской, а у окон без него — штаба hq, Гестии и задач job-* — над XDG_CACHE_HOME=<кэш окна>/xdg,
+направлений и мастерской, а у окон без него — Пританея hq, Гестии и задач job-* — над XDG_CACHE_HOME=<кэш окна>/xdg,
 metis-0821) проверяет заявку и источник как обычно,
 отказ — сразу, а пишет заявку в соседнюю папку read/ кэша: <rid>.req.json, 0600, атомарно (временный файл и rename) —
 по образцу `pantheon outside`. `read run` (плановый проход, вне песочницы окон) под замком read, до остальных этапов,
@@ -679,7 +679,7 @@ def create_request(req):
 def own_queue():
     """Очередь этого вызова: в окне роли — read/ в кэше окна, вне окна — None. Кэш окна — тот же, что у ящика
     `pantheon browser` (browser.window_cache): по PANTHEON_TMP у окон направлений и мастерской, а у окон без него —
-    штаба hq, Гестии и задач job-* (metis-0821) — по XDG_CACHE_HOME=<кэш окна>/xdg, который сборка ставит каждому окну."""
+    Пританея hq, Гестии и задач job-* (metis-0821) — по XDG_CACHE_HOME=<кэш окна>/xdg, который сборка ставит каждому окну."""
     cache = P.browser_mod().window_cache()
     return os.path.join(cache, QUEUE) if cache else None
 

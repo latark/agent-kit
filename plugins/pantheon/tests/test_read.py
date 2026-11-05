@@ -1697,7 +1697,7 @@ def test_window_queue_bad_window_name():
 # --- metis-0821: окна без PANTHEON_TMP (hq, hestia, job-*) и проба под seatbelt-профилем окна ------------------------
 
 def _xdg(b, name):
-    """Окно без PANTHEON_TMP (штаб hq, Гестия, job-*): сборка ставит ему только XDG_CACHE_HOME=<кэш окна>/xdg."""
+    """Окно без PANTHEON_TMP (Пританей hq, Гестия, job-*): сборка ставит ему только XDG_CACHE_HOME=<кэш окна>/xdg."""
     cache = os.path.join(b.home, "Library", "Caches", "pantheon-sandbox", name)
     os.makedirs(os.path.join(cache, "xdg"), exist_ok=True)
     return {"XDG_CACHE_HOME": os.path.join(cache, "xdg")}, os.path.join(cache, "read")
@@ -1745,7 +1745,7 @@ def _seatbelt():
 def test_window_queue_seatbelt():
     """Сквозная проба (metis-0821): настройки окон — настоящий `pantheon domains build` на временном HOME, запись —
     только туда, куда пускает allowWrite окна (тем же правилом subpath, что ставит Claude Code), плюс своя папка вместо
-    TMPDIR песочницы. Окно направления (PANTHEON_TMP) и штаб hq (только XDG_CACHE_HOME) ставят заявку в очередь своего
+    TMPDIR песочницы. Окно направления (PANTHEON_TMP) и Пританей hq (только XDG_CACHE_HOME) ставят заявку в очередь своего
     кэша; без обеих переменных — тот самый отказ песочницы на mkdir STATE/read, но с причиной, а не трассировкой.
     Проход вне песочницы заводит обе заявки, by — имя окна."""
     sb = _seatbelt()
