@@ -27,9 +27,11 @@
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
                                          --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
-  pantheon outside stop ID [--wait С]    погасить сервер раньше срока (из любого окна) и дождаться итога (20 с)
-                                         тест, ещё лежащий заявкой в очереди своего окна, снимается: итог stopped; идущий тест
-                                         не гасится — идёт до конца
+  pantheon outside stop ID [--wait С]    снять свою заявку и дождаться итога (20 с): сервер гаснет раньше срока,
+                                         тест в очереди своего окна снимается сразу (итог stopped только в своей
+                                         папке, STATE окно не пишет), идущий тест гасит проход (TERM, через 5 с KILL
+                                         группе; место heavy освобождается) — итог stopped, записи tests и строки
+                                         full.jsonl нет. Чужую заявку — нет: код 1 «не из этого окна» (metis-0873)
   pantheon outside run [--serve]         проход по заявкам — только плановый проход (из окна Claude Code — отказ):
                                          без флага — тесты, --serve — серверы и сторож
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
@@ -75,8 +77,18 @@
   - состояния: queued (заявка записана) → preparing (копия и зависимости) → starting (ждём порт) → serving →
     stopping → stopped; failed — с причиной, и при любом сбое прохода посреди заявки (копия снята, а не preparing
     до суток); копия без сервера старше WORK_ORPHAN_AGE (проход упал, Mac перезагрузился) снимается в конце круга;
-  - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна; проход ищет его во всех папках заявок, а не только в
-    папке сервера (стоп из окна координатора доходит). Нет такой заявки — `stop` так и говорит, код 1.
+  - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна. Проход исполняет его, только если он лежит в папке
+    самой заявки или в очереди терминала владельца STATE/outside/queue (own_stop, metis-0873: решение владельца
+    «сузить», и для серверов). Метку с тем же ID в папке другого окна проход убирает без исполнения и пишет в журнал
+    stop-foreign. Нет такой заявки — `stop` так и говорит, код 1; заявка чужого окна — код 1 «не из этого окна»;
+  - проход тестов сам снимает свой прогон (TestWatch): «стоп» своего окна — до запуска, между взятием и запуском,
+    во время прогона и установки зависимостей копии, после выхода команды до записи; ушедший head — обычная заявка,
+    когда HEAD папки уже не коммит прогона (грязное дерево без коммита — не повод), test --sha — когда коммит стал
+    бывшим head PR (stale_head) или в той же папке заявок ждёт заявка --sha на более новый коммит того же клона,
+    потомок этого. Снятый прогон — stopped с причиной, без записи tests и без строки full.jsonl. Заявка в очереди на
+    коммит, с которого HEAD уже ушёл, при более новой заявке той же папки из той же папки заявок — failed
+    «superseded <ID>» без прогона. Итог running раз в 30 с несёт срез процессов (procs: pid, CPU, время, команда,
+    heavy_wait) — только в своей папке заявок.
 
 Куда пишет заявка. В окне роли (есть PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) —
 в соседнюю папку outside/ кэша: туда окно пишет само, а итог проход кладёт туда же, окно его читает. Вне окна — в
@@ -87,7 +99,7 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 Два прохода, оба запускает тик, когда у них есть дело; у каждого свой замок — сервер не ждёт тестов (metis-0614):
   `outside run --serve` (замок outside-serve) — серверы и сторож. Живёт, пока есть серверы или заявки serve (не дольше
   RESIDENT_MAX, потом тик зовёт заново), и каждые SWEEP_EVERY (2 с):
-  1. Сторож: срок вышел (аренда — until), есть «стоп» из любой папки заявок, процесс умер или дерево сервера больше
+  1. Сторож: срок вышел (аренда — until), есть «стоп» своего окна (own_stop), процесс умер или дерево сервера больше
      лимита памяти — состояние stopping,
      группа процессов гаснет (SIGTERM, через 5 с SIGKILL) вместе с потомками, ушедшими в свою группу (turbo ставит её
      каждой задаче), и с любым своим процессом, у которого текущая папка — копия заявки (сирота next dev, ушедший к
@@ -227,6 +239,8 @@ WORK_ORPHAN_AGE = 600               # с: копия серверов без з�
 PREPARE_SPAWN_TRIES = 3             # запусков установки при временном отказе fork/exec
 SPAWN_RETRY_ERRNO = {errno.EAGAIN, errno.ETXTBSY, errno.ENOMEM}
 STOP_WAIT = 20                      # с: `outside stop` ждёт итог по умолчанию
+SUPERSEDE_EVERY = 30                # с: так часто проход тестов сверяет head идущего прогона (metis-0873)
+PROCS_EVERY = 30                    # с: так часто итог running своего qdir получает срез процессов прогона
 RESIDENT_MAX = 3600                 # с: проход серверов живёт не дольше, потом его зовёт тик (новая версия кода)
 AUTO_TTL = 24 * 3600                # «принять» старше суток дежурному уже не напоминается
 ALERT_AFTER = 3600                  # с: «принять» без записи tests дольше этого — тревога дежурному (03.11)
@@ -1059,8 +1073,8 @@ def last_line(log):
 
 def wait_proc(proc, timeout, tick=None, idle_log=None):
     """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
-    «стопа» своей заявки — tick() вернул True — группа гаснет, ждём её конца (metis-0606, 0614). Тесты идут в своём
-    проходе и серверы не смотрят. TimeoutExpired — как у proc.wait.
+    «стопа» своей заявки, у прохода тестов — TestWatch (свой «стоп» и ушедший head, metis-0873) — tick() вернул
+    True — группа гаснет, ждём её конца (metis-0606, 0614). TimeoutExpired — как у proc.wait.
     idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с И прирост CPU-времени дерева (user+sys, tree_cpu: libproc или ps)
     за окно меньше IDLE_CPU от окна → SIGKILL группе и её потомкам, исключение Silent. Считающий без вывода (под
     нагрузкой «0 % CPU» по ps — не зависание) не гасится; CPU не узнать — не гасим, предупреждение в журнал."""
@@ -1579,14 +1593,114 @@ def new_log(rid):
 
 # --- тесты --------------------------------------------------------------------------------------------------------
 
-def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None):
+def procs_of(pid):
+    """Срез процессов прогона (группа pid и потомки): [{pid, cpu, time, cmd до 200 знаков, heavy_wait}] для итога
+    running в своём qdir — окно ps не зовёт (metis-0873). heavy_wait — heavy без детей: ждёт место. Сбой ps — []."""
+    table = ps_table()
+    pids = sorted(_tree(pid, table) | {pid}) if table else [pid]
+    try:
+        out = subprocess.run(["ps", "-o", "pid=,pcpu=,etime=,command=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    parents = {pp for pp, _g, _r in table.values()}
+    res = []
+    for ln in out.splitlines():
+        f = ln.split(None, 3)
+        if len(f) < 4 or not f[0].isdigit():
+            continue
+        p = int(f[0])
+        heavy = any(w == "heavy" or w.endswith("/heavy") for w in f[3].split()[:3])
+        res.append({"pid": p, "cpu": f[1], "time": f[2], "cmd": f[3][:200],
+                    **({"heavy_wait": True} if heavy and p not in parents else {})})
+    return res
+
+
+class TestWatch:
+    """Сторож идущего теста rid (metis-0873), tick для wait_proc и prepare. Снимает прогон, если (1) лежит «стоп» своего
+    окна (own_stop: папка заявки или очередь терминала владельца; метка из чужой папки — stop-foreign, не снимает) или
+    (2) раз в SUPERSEDE_EVERY с head ушёл: обычная заявка — HEAD папки d не sha прогона (грязное дерево без нового
+    коммита — не повод); test --sha — stale_head по свежему кэшу или более новая заявка --sha из того же qdir на тот же
+    клон, где sha — предок нового. Причина (why) ставится до того, как tick вернёт True и wait_proc погасит группу:
+    снятый прогон записи для шлюза и строки full.jsonl не даёт. Раз в PROCS_EVERY с — срез процессов в итог running."""
+
+    def __init__(self, rid, qdir, window, d, sha=None, pin=False, src=None, script=None, base=None):
+        self.rid, self.qdir, self.window, self.d, self.sha = rid, qdir, window, d, sha
+        self.pin, self.src, self.script, self.base = pin, src, script, base
+        self.why, self.by, self.where = None, [], []
+        self.running, self.pid = None, None
+        now = time.monotonic()
+        self.next_head, self.next_procs = now + SUPERSEDE_EVERY, now + PROCS_EVERY
+
+    def marker(self):
+        """Лежит своя метка «стоп» → причина поставлена, True."""
+        where = own_stop(self.rid, self.qdir)
+        if where and not self.why:
+            self.why, self.where = "заявка «стоп»", where
+            self.by = [w or "владелец" for _, w in where]
+        return bool(where)
+
+    def superseded(self):
+        if not self.sha:
+            return None
+        if not self.pin:
+            cur = head_state(self.d)[0]
+            return f"superseded: HEAD ушёл {self.sha[:12]}→{cur[:12]}" if cur and cur != self.sha else None
+        why = stale_head(self.src, self.sha) if self.src and not self.script else None
+        if why:
+            return f"superseded: {why}"
+        me = os.path.realpath(self.qdir) if self.qdir else None
+        common = getattr(self.src, "common", None)
+        for q2, w2, rid2, req2 in _queued_tests():
+            if os.path.realpath(q2) != me or rid2 <= self.rid or not req2.get("pin") \
+                    or (req2.get("script") or None) != (self.script or None) or req2.get("base") != self.base:
+                continue
+            d2, _roots = resolve_dir(req2["dir"], w2)
+            if d2 is None or not common or d2.common != common:
+                continue
+            new = resolve_sha(common, str(req2.get("sha") or ""))
+            if new and new != self.sha and git_dir(common, "merge-base", "--is-ancestor", self.sha, new) is not None:
+                return f"superseded: заявка {rid2} на {new[:12]} новее, {self.sha[:12]} — её предок"
+        return None
+
+    def __call__(self):
+        if self.why or self.marker():
+            return True
+        now = time.monotonic()
+        if now >= self.next_head:
+            self.next_head = now + SUPERSEDE_EVERY
+            why = self.superseded()
+            if why:
+                self.why = why
+                return True
+        if self.running and self.pid and now >= self.next_procs:
+            self.next_procs = now + PROCS_EVERY
+            save_result(self.qdir, self.rid, {**self.running, "procs": procs_of(self.pid)})
+        return False
+
+    def stopped(self, **kw):
+        """Итог снятого прогона: stopped, записи нет; своя метка убрана, событие stop в журнал."""
+        clear_stop(self.rid, self.where)
+        log_event(id=self.rid, kind="stop", window=self.window, why=self.why, by=self.by,
+                  **({"sha": self.sha} if self.sha else {}))
+        return save_result(self.qdir, self.rid, {"state": "stopped", "kind": "test", "why": f"снят: {self.why}",
+                                                 "record": False, **({"sha": self.sha} if self.sha else {}), **kw})
+
+
+def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
     (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
     подменена (narrow_history_problem: shallow, info/grafts, refs/replace) — полный набор с narrow_why. src —
     папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по ней live_test находит идущую заявку.
     expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей сдвинула HEAD или правит дерево) —
-    ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда."""
+    ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда. watch — сторож TestWatch (снятие своим
+    «стопом» и ушедшим head, metis-0873); нет — свой."""
+    if watch is None:
+        watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base)
+    if watch.marker():   # «стоп» пришёл до запуска: ни переноса записи по дереву, ни прогона
+        return watch.stopped(**({"src": src} if src else {}))
+
     def off(sha, clean):
         """Копия ушла с коммита заявки (expect) → итог failed; иначе None."""
         if not expect or (sha == expect and clean):
@@ -1642,8 +1756,10 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         extra["base"] = base
     if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
         extra["narrow_why"] = narrow_why
-    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
-                            **({"script": script} if script else {}), **extra})
+    running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
+               **({"script": script} if script else {}), **extra}
+    save_result(qdir, rid, running)
+    watch.sha, watch.running = sha, running
     log, fd = new_log(rid)
     tmp = tempfile.mkdtemp(prefix="outside-")
     code, timed_out = None, False
@@ -1652,6 +1768,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             os.write(fd, (f"$ {line}  (папка {d}, {sha})\n" + (
                 f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: "
                 f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "")).encode())
+        if watch():   # «стоп» между взятием заявки и запуском (T10a): команда не запускается
+            return watch.stopped(cmd=line, log=log, **extra)
         try:
             proc = subprocess.Popen(wrap(plan["argv"] if plan else argv, write_profile(roots)), cwd=d,
                                     env=sandbox_env(tmp, "test"),
@@ -1659,8 +1777,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         except OSError as e:
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": f"команда не запустилась: {e}", "log": log})
+        watch.pid = proc.pid
         try:
-            code = wait_proc(proc, TEST_TIMEOUT, idle_log=log)
+            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=log)
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
@@ -1674,9 +1793,10 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     finally:
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)
+    watch.marker()   # «стоп» пришёл, пока команда выходила с кодом, — до записи (T10c)
     sha2, clean2 = head_state(d)
-    res = {"state": "done", "kind": "test", "sha": sha, "code": code, "cmd": line, "dir": d, "log": log,
-           "tail": tail(log), "record": False, **extra}
+    res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
+           "dir": d, "log": log, "tail": tail(log), "record": False, **extra}
     text = log_text(log) if full or narrow else ""
     got = run_failed(text) if full or narrow else None
     if plan:
@@ -1686,7 +1806,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if narrow:
         res["note"] = f"узкий набор (--affected) от merge-base {narrow['mb'][:12]}" + (
             f": файлов {len(got[0]) + len(got[1])}" if got else "")
-    if timed_out:
+    if watch.why:   # снят (metis-0873): записи tests нет, даже если команда вышла с 0 по TERM
+        res["why"] = f"снят: {watch.why}"
+    elif timed_out:
         res["why"] = f"тесты дольше {TEST_TIMEOUT} с — остановлены"
     elif sha2 != sha or not clean2:
         res["why"] = f"команда изменила HEAD или дерево (стало {sha2 or '?'}, чистое: {'да' if clean2 else 'нет'}) — записи нет"
@@ -1713,7 +1835,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                 res["record"] = True
             except OSError as e:
                 res["why"] = f"запись tests не сделана: {e}"
-    if full and not timed_out and sha2 == sha and clean2:
+    if full and not timed_out and not watch.why and sha2 == sha and clean2:   # снятый — не в журнал (T11)
         # журнал полных прогонов: опора следующего дозапуска (только запись без rerun_of) и след самих дозапусков
         entry = {"rid": rid, "repo": repos0, "sha": sha, "tree": tree_of(d, sha), "branch": branch_of(d), "dir": d,
                  "cmd": line, "env": run_env(line), "code": code, "failed": got[1] if got else None}
@@ -1728,6 +1850,10 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             append_full(entry)
         except OSError as e:
             res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + f"журнал full.jsonl: {e}"
+    if watch.why:
+        clear_stop(rid, watch.where)
+        log_event(id=rid, kind="stop", window=window, why=watch.why, by=watch.by, sha=sha, code=code)
+        return save_result(qdir, rid, res)
     log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
               **({"rerun_of": plan["rerun_of"]} if plan else {}))
     return save_result(qdir, rid, res)
@@ -1752,6 +1878,9 @@ def run_test_at(rid, d, req, window, qdir, roots):
     sha = resolve_sha(common, ref) if ref else None
     if not sha:
         return fail(f"коммита {ref or '?'} нет в клоне {d.clone}: сделай git fetch в своей копии и повтори")
+    watch = TestWatch(rid, qdir, window, d, sha=sha, pin=True, src=d, script=script, base=req.get("base"))
+    if watch.marker():
+        return watch.stopped(**base)
     why = None if script else stale_head(d, sha)
     if why:
         return fail(why, sha=sha)
@@ -1765,13 +1894,16 @@ def run_test_at(rid, d, req, window, qdir, roots):
         if wcommon != common:
             return fail(f"копия {work} — не worktree клона {d.clone}", sha=sha)
         w = checked(work, d.clone, common, wgitdir)
-        code = prepare(w, rid, timeout=INSTALL_TIMEOUT)
+        code = prepare(w, rid, tick=watch, timeout=INSTALL_TIMEOUT)
         reap(work)   # остатки установки (фоновые процессы lifecycle-скриптов) не двигают HEAD во время теста
+        if watch.why:
+            return watch.stopped(**base)
         if code not in (None, 0):
             log = root("runs", rid + ".log")
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
+        watch.d = w
         return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha,
-                        base=req.get("base"))
+                        base=req.get("base"), watch=watch)
     finally:
         reap(work)
         remove_work(common, work)
@@ -2086,6 +2218,22 @@ def _stop_age(rid, where, t):
     return min(ages) if ages else 0
 
 
+def own_stop(rid, qdir, stops=None):
+    """«Стоп» заявки rid от её владельца (metis-0873): метка <ID>.stop в папке самой заявки qdir или в очереди
+    терминала владельца (STATE/outside/queue). Метка с тем же ID в папке другого окна — чужая: проход её убирает,
+    не исполняет и пишет в журнал stop-foreign. → [(папка, окно)] своих меток; пусто — стопа нет."""
+    stops = stop_requests() if stops is None else stops
+    where = stops.get(rid) or []
+    mine = {os.path.realpath(p) for p in (qdir, root("queue")) if p}
+    own = [(q, w) for q, w in where if os.path.realpath(q) in mine]
+    alien = [(q, w) for q, w in where if os.path.realpath(q) not in mine]
+    if alien:
+        clear_stop(rid, alien)
+        log_event(id=rid, kind="stop-foreign", by=[w for _, w in alien],
+                  why="метка «стоп» не из папки заявки — не исполнена")
+    return own
+
+
 def busy_why(live):
     """Причина отказа новому серверу (лимит серверов, давление памяти) или None (решение владельца 01.11)."""
     if len(live) >= MAX_SERVERS:
@@ -2129,7 +2277,7 @@ def run_serve(rid, d, req, window, qdir):
     def tick():
         """Сторож других серверов и «стоп» этой заявки, пока копия, зависимости и порт."""
         sweep_quiet()
-        return rid in stop_requests()
+        return bool(own_stop(rid, qdir))
 
     try:
         with contextlib.suppress(OSError):
@@ -2146,7 +2294,7 @@ def run_serve(rid, d, req, window, qdir):
         # не монорепо с --app ПАПКА: зависимости ставятся в папке приложения (metis-0790); монорепо — в корне
         inst = cwd if app and app != "." and not workspaces(work, _pkg(work)) else work
         code = prepare(inst, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
-        if rid in stop_requests():
+        if own_stop(rid, qdir):
             raise Cancelled
         if code not in (None, 0):
             raise RuntimeError(f"установка зависимостей вышла с кодом {code}")
@@ -2195,7 +2343,7 @@ def run_serve(rid, d, req, window, qdir):
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
         if cancelled:
-            where = stop_requests().get(rid, [])
+            where = own_stop(rid, qdir)
             clear_stop(rid, where)
             log_event(id=rid, kind="stop", why="заявка «стоп» до запуска", by=[w for _, w in where])
             return save_result(qdir, rid, {"state": "stopped", **base, "why": "заявка «стоп» до запуска сервера",
@@ -2225,14 +2373,16 @@ def run_serve(rid, d, req, window, qdir):
 # --- серверы: сторож ----------------------------------------------------------------------------------------------
 
 def sweep(t=None, stops=None):
-    """Серверы со сроком, «стопом» из любой папки заявок или умершим процессом — погасить. → число погашенных."""
+    """Серверы со сроком, «стопом» своего окна (own_stop: папка заявки или очередь терминала владельца) или умершим
+    процессом — погасить. → число погашенных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
     srv, n, table = servers(), 0, None
     for rid, s in list(srv.items()):
         pid = int(s.get("pid") or 0)
         alien = foreign(pid, s.get("started"))
-        why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if rid in stops
+        where = own_stop(rid, s.get("qdir"), stops) if rid in stops else []
+        why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if where
                else "процесс завершился" if not pid or alien or not alive(pid) else None)
         if not why:
             table = ps_table() if table is None else table   # один ps на круг сторожа
@@ -2248,7 +2398,6 @@ def sweep(t=None, stops=None):
         orphans = reap(s.get("work"))   # свои по папке копии — и у чужого номера процесса тоже
         if s.get("tmp"):
             shutil.rmtree(s["tmp"], ignore_errors=True)
-        where = stops.get(rid, [])
         clear_stop(rid, where)
         del srv[rid]
         save_servers(srv)
@@ -2267,20 +2416,27 @@ def sweep(t=None, stops=None):
 
 
 def drop_orphan_stops(stops=None, t=None):
-    """«Стоп» без живого сервера и без заявки в очереди, старше STOP_ORPHAN_AGE, — убрать (тесты и уже погашенные
-    серверы гасить нечего; молодой — может ждать свою заявку). → число убранных."""
+    """«Стоп» без живого сервера, без заявки в очереди и без идущего теста, старше STOP_ORPHAN_AGE, — убрать (уже
+    погашенные серверы и тесты гасить нечего; молодой — может ждать свою заявку). Метку идущего теста (runs/<ID>.json:
+    test в running или preparing) не трогает — её снимет проход тестов (metis-0873). → число убранных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
     live = set(servers())
     queued = {rid for rid, _ in _queued_ids()}
     n = 0
     for rid, where in stops.items():
-        if rid in live or rid in queued or _stop_age(rid, where, t) < STOP_ORPHAN_AGE:
+        if rid in live or rid in queued or _stop_age(rid, where, t) < STOP_ORPHAN_AGE or _test_running(rid):
             continue
         clear_stop(rid, where)
         log_event(id=rid, kind="stop-unknown", by=[w for _, w in where])
         n += 1
     return n
+
+
+def _test_running(rid):
+    """Тест rid идёт: итог прохода в STATE (runs/<ID>.json, окну закрыт) — test в running или preparing."""
+    res = P.read_json(root("runs", rid + ".json"), None)
+    return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") in ("running", "preparing")
 
 
 def drop_orphan_work(t=None):
@@ -2452,9 +2608,7 @@ def requests(kinds=KINDS, limit=None, taken=None):
         if dfd is None:
             continue
         try:
-            name = item[4] + ".req.json"
-            _unlink_in(dfd, name)
-            if _gone(dfd, name):
+            if _take_in(dfd, item[4] + ".req.json"):   # снял не этот вызов (окно сняло заявку) — не отдаём
                 out.append(item)
         finally:
             os.close(dfd)
@@ -2543,15 +2697,39 @@ def handle(qdir, window, rid, req):
 def before_test(qdir, window, rid, req, d):
     """Перед прогоном заявки test в папке d: HEAD — бывший head открытого PR (stale_head) — итог failed без прогона
     (только проверка проекта: --script — для себя, не для шлюза); иначе ждущие заявки на ту же проверку снимаются
-    (drop_dupes) и идёт прогон этой. Дерево не чистое или HEAD нет — None: отказ даст run_test."""
+    (drop_dupes) и идёт прогон этой. Дерево не чистое или HEAD нет — None: отказ даст run_test. Заявка подана на
+    другой коммит (HEAD ушёл), а в том же qdir ждёт более новая заявка на ту же папку и ту же проверку — failed
+    «superseded <новый ID>» без прогона (metis-0873); новой нет — прогон текущего HEAD, как раньше."""
     sha, clean = head_state(d)
-    if not sha or not clean:
+    if not sha:
+        return None
+    newer = _newer_same(qdir, rid, req, d) if req.get("sha") and req["sha"] != sha else None
+    if newer:
+        why = f"superseded {newer}: HEAD ушёл с {str(req['sha'])[:12]}, в очереди более новая заявка {newer}"
+        log_event(id=rid, kind="refused", window=window, dir=d, sha=req["sha"], why=why)
+        return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": req["sha"], "why": why,
+                                       "superseded": newer})
+    if not clean:
         return None
     why = None if req.get("script") else stale_head(d, sha)
     if why:
         log_event(id=rid, kind="refused", window=window, dir=d, sha=sha, why=why)
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": why})
     drop_dupes(qdir, rid, req, d, sha, window)
+    return None
+
+
+def _newer_same(qdir, rid, req, d):
+    """ID более новой ждущей заявки test из той же папки заявок qdir на ту же папку d и ту же проверку (--script,
+    --base; не --sha) или None. Чужое окно своей заявкой чужую не снимет: сверка только в пределах qdir."""
+    me, q = os.path.realpath(d), os.path.realpath(qdir)
+    for q2, w2, rid2, req2 in _queued_tests():
+        if os.path.realpath(q2) != q or rid2 <= rid or req2.get("pin") \
+                or (req2.get("script") or None) != (req.get("script") or None) or req2.get("base") != req.get("base"):
+            continue
+        d2, _roots = resolve_dir(req2["dir"], w2)
+        if d2 is not None and os.path.realpath(d2) == me:
+            return rid2
     return None
 
 
@@ -3083,7 +3261,7 @@ def serve_round(t=None):
     """Один круг прохода серверов: сторож, заявки serve, снова сторож, уборка брошенных «стопов» и копий."""
     sweep(t)
     for _t, _k, qdir, window, rid, req in requests(("serve",)):
-        where = stop_requests().get(rid)
+        where = own_stop(rid, qdir)
         age = P.now() - (_epoch(req) or P.now())
         if where:
             clear_stop(rid, where)
@@ -3266,6 +3444,8 @@ def live_test(d, sha, script=None, pin=False, base=None):
                 where = res.get("src") or res.get("dir")
                 if not isinstance(where, str) or os.path.realpath(where) != d:
                     continue
+                if rid + ".stop" in names:   # снимается своим «стопом» — не сцеплять (metis-0873)
+                    continue
                 if res.get("state") == "queued" and (rid + ".req.json") in names:
                     return qdir, rid
                 if res.get("state") == "running":
@@ -3383,8 +3563,9 @@ def _known(q, rid):
 
 
 def _cancel_queued_test(q, rid):
-    """Тест, ещё лежащий заявкой в своей папке q, снимается: заявка удалена, итог stopped (metis-0706). True — снят;
-    False — не тест, не здесь или проход уже взял (тогда он идёт до конца)."""
+    """Тест, ещё лежащий заявкой в своей папке q, снимается: заявка удалена, итог stopped (metis-0706). Окно пишет итог
+    только в свой qdir: STATE окну закрыт, в нём пишет один проход (metis-0873); терминал владельца — save_result.
+    True — снят; False — не тест, не здесь или проход уже взял (тогда снимает метка «стоп»)."""
     dfd = _open_dir(q)
     if dfd is None:
         return False
@@ -3392,13 +3573,32 @@ def _cancel_queued_test(q, rid):
         req = _parse(_read_in(dfd, rid + ".req.json"))
         if not isinstance(req, dict) or req.get("kind") != "test" or not _take_in(dfd, rid + ".req.json"):
             return False
+        res = {"state": "stopped", "kind": "test", "why": "отменена до запуска", "record": False,
+               **{k: req[k] for k in ("sha", "dir") if req.get(k)}}
+        if q == root("queue"):
+            save_result(q, rid, res)
+        else:
+            with contextlib.suppress(OSError):
+                _write_in(dfd, rid + ".result.json",
+                          json.dumps({"id": rid, "updated": P.stamp(), **res}, ensure_ascii=False, indent=1))
     finally:
         os.close(dfd)
-    save_result(q, rid, {"state": "stopped", "kind": "test", "why": "отменена до запуска",
-                         **{k: req[k] for k in ("sha",) if req.get(k)}})
     log_event(id=rid, kind="stop", why="отменена до запуска")
     print(f"{rid}: тест был в очереди — снят, итог stopped")
     return True
+
+
+def _mine(q, rid):
+    """Заявка rid — этого окна: свой итог или своя заявка в папке q; терминал владельца (q — очередь STATE) — любая."""
+    if q == root("queue"):
+        return True
+    dfd = _open_dir(q)
+    if dfd is None:
+        return False
+    try:
+        return any(_read_in(dfd, rid + ext, 1024 * 1024) is not None for ext in (".result.json", ".req.json"))
+    finally:
+        os.close(dfd)
 
 
 def cmd_stop(args):
@@ -3418,13 +3618,14 @@ def cmd_stop(args):
     if not res and not live and not queued:
         print(f"{rid}: нет такой заявки — ни итога, ни сервера, ни заявки в очереди (status покажет свои)")
         return 1
+    if not _mine(q, rid):   # metis-0873: снимает только своё окно и терминал владельца; чужую метку проход не возьмёт
+        print(f"{rid}: заявка не из этого окна — снять её может только окно, подавшее заявку, или владелец")
+        return 1
     if queued and _cancel_queued_test(q, rid):
         return 0
-    if (res or {}).get("kind") == "test" and not live and res.get("state") != "stopped":
-        print(f"{rid}: это тесты, а не сервер — они идут до конца (не дольше {TEST_TIMEOUT // 60} мин)")
-        return 1
     if res and res.get("state") in ("stopped", "failed", "done") and not live and not queued:
-        print(f"{rid}: уже {res['state']}" + (f" — {res['why']}" if res.get("why") else ""))
+        print(f"{rid}: уже {res['state']}" + (f" — {res['why']}" if res.get("why") else "")
+              + (" — запись tests для шлюза есть" if res.get("record") else ""))
         return 0
     dfd = _open_dir(q, create=True)
     if dfd is None:
@@ -3438,17 +3639,23 @@ def cmd_stop(args):
     finally:
         os.close(dfd)
     if not wait:
-        print(f"{rid}: «стоп» записан — сервер погасит проход серверов (до {SWEEP_EVERY} с, если он идёт, иначе до "
+        print(f"{rid}: «стоп» записан — прогон погасит его проход (до {SWEEP_EVERY} с, если он идёт, иначе до "
               f"минуты); итог: pantheon outside status {rid}")
         return 0
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         time.sleep(1)
         res, live, _q = _known(q, rid)
-        if res and res.get("state") in ("stopped", "failed") and not live:
+        if res and res.get("state") in ("stopped", "failed", "done") and not live:
             show(res)
+            if res.get("state") == "done":   # проход успел закончить до метки: итог и запись — как есть
+                print(f"{rid}: уже done до «стопа»" + (" — запись tests для шлюза есть" if res.get("record") else ""))
+                dfd = _open_dir(q)
+                if dfd is not None:
+                    _unlink_in(dfd, rid + ".stop")
+                    os.close(dfd)
             return 0
-    print(f"{rid}: за {wait} с не погас (состояние: {(res or {}).get('state', '?')}) — «стоп» лежит, проход серверов "
+    print(f"{rid}: за {wait} с не погас (состояние: {(res or {}).get('state', '?')}) — «стоп» лежит, проход "
           f"погасит его на следующем круге; итог: pantheon outside status {rid}")
     return 75
 
