@@ -1084,6 +1084,31 @@ def test_old_card_leaves_board_0459():
     check(tid not in waiting, f"карточка ночи в «Ждёт вас»: {waiting}")
 
 
+def test_night_declined_no_repeat_0392():
+    """metis-0392: владелец ответил «Нет» на вопрос о ночи в окне Зевса (22:16) — вечером он больше не спрашивается: проходы
+    каждые 5 минут до 23:30 не заводят ни карточку «ночь?», ни уведомление, ни строки о ночи (с 28.10 фиксированного вопроса
+    нет, ночь — только по ответу на вопрос о пачке; «Нет» разобран один раз, answers_seen). Слово «Да» позже — по-прежнему открывает ночь по пачке."""
+    e = _pack_env(start_line="")
+    night_yes(e, hm("22:16"), answer="Нет")
+    t = hm("22:20")
+    while t <= hm("23:30"):
+        e.at_line(t, 0)
+        e.watch(t)
+        t += 300
+    check(not e.cards(), f"0392: после «Нет» вопрос повторён карточкой: {e.cards()}")
+    check(not e.sent() and "не исполняю" not in e.alerts() and "одобрена" not in e.alerts(),
+          f"0392: после «Нет» уведомление/строка: {e.sent()} {e.alerts()}")
+    st = N.load(EVENING)
+    check(st["answer"] is None and not st.get("opened_at") and not st.get("packs") and len(st["answers_seen"]) == 1,
+          f"0392: ночь после «Нет»: {st}")
+    # «Да» после «Нет» (передумал) открывает ночь по пачке
+    night_yes(e, hm("23:40"))
+    e.at_line(hm("23:45"), 0)
+    e.watch(hm("23:45"))
+    st = N.load(EVENING)
+    check(st["answer"] == "да" and st.get("opened_at") and len(st["answers_seen"]) == 2, f"0392: «Да» после «Нет»: {st}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
