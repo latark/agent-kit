@@ -151,9 +151,7 @@ def main_hookd(a):
                            text=True, timeout=300)
         if r.returncode != 0:
             sys.exit(f"bench: клиент не собран: {r.stderr.strip()[-300:]}")
-        # первая проверка нового файла macOS (~0,4 с) — не в замере. Только с env временного HOME: клиент без
-        # аргументов пишет «usage» в журнал откатов $HOME, и без env он попал бы в настоящий
-        subprocess.run([r.stdout.strip()], input=b"", capture_output=True, env=env, timeout=30)
+        client = r.stdout.strip()
         sock = os.path.join(home, ".cache", "pantheon", "hookd", "hookd.sock")
         if len(sock) > 103:
             sys.exit(f"bench: путь сокета длиннее 103 байт ({sock}) — задай TMPDIR короче")
@@ -165,6 +163,13 @@ def main_hookd(a):
             time.sleep(0.02)
         if not os.path.exists(sock):
             sys.exit("bench: демон не создал сокет")
+        # первая проверка нового файла macOS (~0,4 с) — не в замере. Прогрев — настоящий вызов через демон: клиент без
+        # аргументов пишет «usage» в журнал откатов, и замер всегда кончался бы кодом 1 (argus, Д5). Только с env
+        # временного HOME — журнал настоящего HOME не трогается
+        warm = {"hook_event_name": "PreToolUse", "session_id": "bench0330warm0000", "tool_name": "Bash",
+                "tool_input": {"command": "true"}, "cwd": tmp, "transcript_path": os.path.join(tmp, "none.jsonl")}
+        subprocess.run([client, sock, hooks], input=json.dumps(warm).encode(), capture_output=True, env=env, cwd=tmp,
+                       timeout=30)
         res = run_hookd(a.n, hooks, env, tmp)
         fb = os.path.join(home, ".local", "state", "pantheon", "logs", "hookd-fallback.log")
         res["fallbacks"] = open(fb, encoding="utf-8").read().splitlines() if os.path.exists(fb) else []
