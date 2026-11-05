@@ -657,12 +657,17 @@ def main():
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
     # metis-0583: автозакрытие закрывает задачу по «Closes <id>» в теле PR — правило у тех, кто открывает и сливает PR
     closes_rule = ("Тело PR называет каждую задачу, которую он закрывает: `Closes <id>` или списком `Closes metis-0522, "
-                   "metis-0534 и 0535`. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
+                   "metis-0534 и 0535`. Это правило — для PR в любом репозитории направления (agent-kit, BA, сайт): автозакрытие читает тела PR всех репозиториев из [merge_repos]. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
                    "тоже (metis-0583). Слово «часть» в теле — все задачи PR остаются открытыми; если частичная только одна — отдельный "
                    "PR или без Closes и без её номера в имени ветки.")
     miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md") if closes_rule not in flat.get(f, "")]
     check("лиды и координатор: тело PR — «Closes <id>» списком, «часть» оставляет открытыми все задачи PR (metis-0583)"
           + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
+            if "в любом репозитории направления" not in flat.get(f, "")]
+    check("лиды и координатор: правило Closes — для PR в любом репозитории направления" + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md") if "`Closes <id>` каждой задачи" not in flat.get(f, "")]
+    check("разработчики: ветка с номером задачи и `Closes <id>` каждой задачи в коммите" + (f" (нет у: {miss})" if miss else ""), not miss)
     # сама роль (без приклеенного _ref) несёт строку-ссылку: без неё правило Closes роль не увидит (argus #241 круг 2, Б1)
     miss_raw = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
                 if "Тело PR: `Closes <id>, …` — подробности в `_ref/merge-rounds.md`" not in raw_texts.get(f, "")]
