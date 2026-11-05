@@ -3405,10 +3405,13 @@ def infra_check():
     except (OSError, ValueError):
         add(False, "hooks.json pantheon читается")
     add(P.agents_all() is not None, "claude agents --json отвечает")
-    plug = os.path.join(P.HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard",
-                        "managed-settings.json")
+    # с проверенным деревом guard (merge.managed_source), как у прохода, а не с клоном маркетплейса (metis-0718); дерева
+    # или поставленного файла нет — строки нет, как раньше
     with contextlib.suppress(OSError):
-        add(open(P.MANAGED, "rb").read() == open(plug, "rb").read(), "управляемые настройки совпадают с guard")
+        cur = open(P.MANAGED, "rb").read()
+        src = P.merge_mod().managed_source()
+        if src is not None:
+            add(cur == src[1], "управляемые настройки совпадают с guard")
     pol = os.path.join(P.HOME, ".claude", "pantheon", "policy.toml")
     # что закрыто штабу — [hq] policy.toml, в коде значений нет (metis-0182): без раздела штабу не закрыто ничего
     try:
