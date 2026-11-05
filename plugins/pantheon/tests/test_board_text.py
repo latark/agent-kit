@@ -402,6 +402,8 @@ _l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
 check("0808: ошибок нет - по-прежнему «Открытых PR нет»", "- Открытых PR нет." in _l and not any("недоступен" in x for x in _l), _l)
 _l = B.lines({"prs": [], "pr_stale": [("evil/\u202e<x>", 5)]})
 check("0808: имя репозитория не по шаблону в блок не идёт", "- Открытых PR нет." in _l and not any("evil" in x for x in _l), _l)
+_l = B.lines({"prs": [], "pr_stale": [("o/a", T0 - 7200), ("o/b", T0 - 600)]})
+check("0808: два сбойных репозитория - время самого давнего успеха", f"- PR: данные от {B.hm(T0 - 7200)}, gh недоступен (a, b)." in _l, _l)
 check("0808: pr_stale - нет файла и мусор дают пусто", B.pr_stale(os.path.join(ROOT, "nope.json")) == []
       and B.pr_stale(write(os.path.join(ROOT, "junk.json"), "[1]")) == [])
 

@@ -129,6 +129,10 @@ def unit():
           and T.merged_wait(rv, crit, None, days) is None)
     check("merged_wait: пунктов нет - «пунктов Готово, когда нет»",
           T.merged_wait(rv, "", wl(rv), days) == f"PR #163 слит {dd}, пунктов «Готово, когда» нет", T.merged_wait(rv, "", wl(rv), days))
+    two = ([(R, 163, True), (R, 170, True)], [])
+    check("merged_wait: два слитых PR - последний по дню слияния",
+          T.merged_wait(rv, crit, two, {(R, 163): "2026-10-27", (R, 170): "2026-10-20"}).startswith("PR #163 слит 27.10")
+          and T.merged_wait(rv, crit, two, {(R, 163): "2026-10-01", (R, 170): "2026-10-20"}).startswith("PR #170 слит 20.10"))
     check("merged_wait: без дня слияния - «слит» без даты",
           T.merged_wait(rv, crit, wl(rv), {}) == "PR #163 слит, ждёт пунктов Готово, когда: 2 из 3")
     check("merged_wait: все пункты отмечены - «0 из n»",
