@@ -654,7 +654,10 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
    (решение владельца 30.10) — ещё журнал ваших слов и регистрация хуков Пантеона `plugins/pantheon/hooks/ctx.py` и
    `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID `plugins/pantheon/lib/merge.py`, карта плагинов и MCP
    `plugins/pantheon/lib/plugin_map.py` и `plugins/pantheon/plugins-by-role.toml`; соседние файлы тех же папок — не
-   ядро. Проверяются и новый путь, и `previous_filename`, так что вынос
+   ядро. С metis-0858 (решение владельца 05.11) — ещё то, что ядро берёт из других файлов: правило вердиктов argus
+   `plugins/pantheon/lib/review_rules.py` (его зовёт merge.py) и разбор ваших ответов `plugins/pantheon/lib/answers.py`
+   (его грузит ctx.py); `tests/test_core_deps.py` по AST ищет такие зависимости ядра и краснеет на источнике вне ядра.
+   Проверяются и новый путь, и `previous_filename`, так что вынос
    файла из guard тоже виден. С metis-0404 в ядре и сборка окон в `plugins/pantheon/lib/pantheon.py`, но не весь файл:
    шлюз берёт старый и новый pantheon.py из папки слияния (base и head PR, одна merge-base) и сравнивает по AST
    функции `sandbox_build`, `domains_build`, `run_settings` и всё, что они транзитивно зовут и читают в этом файле,

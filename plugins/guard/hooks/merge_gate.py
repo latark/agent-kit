@@ -141,6 +141,10 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               # (plugin_map.py и её данные plugins-by-role.toml)
               "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
+              # metis-0858 (решение владельца 05.11): что ядро берёт из других файлов, тоже ядро — правило вердиктов
+              # argus шлюза владельца (review_rules.py, его зовёт merge.py) и разбор ваших ответов (answers.py, его
+              # грузит ctx.py); сверяет tests/test_core_deps.py
+              "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
               ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
 # и папки целиком: весь плагин guard (metis-0092) — код, тесты, README, настройки; общие роли Пантеона — в них
 # правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро

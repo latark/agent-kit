@@ -112,6 +112,7 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
               "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
+              "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
 MAX_BATCH = 5                        # PR в одной пачке: их номера, SHA и ядро — в окне не длиннее 400 знаков
@@ -741,7 +742,8 @@ def gate(repo, pr, sha, view):
         if r.get("kind") in ("accept", "reject") and by.get("agent_type") == "argus" and r.get("pr") == pr \
                 and r.get("sha") == sha:
             # «принять» без перечня или не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе.
-            # Правило общее с итогом `pantheon review status` (P.review_accept_counts, metis-0393)
+            # Правило общее с итогом `pantheon review status` (P.review_accept_counts, metis-0393) — из
+            # lib/review_rules.py, ядра защит (metis-0858)
             if r["kind"] == "accept" and not P.review_accept_counts(r):
                 continue
             latest[(by.get("session_id") or "", by.get("agent_id") or "")] = r
