@@ -188,29 +188,35 @@ def reviews(pantheon):
 STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE (boardtext грузится без tasks — общий импорт нельзя; равенство держит test_board_text)
 
 
-BATCH_HEAD_RE = re.compile(r"batch/([a-z][a-z0-9]{1,11}-\d{3,})")  # ветка пачки batch/<story-id> (tasks.BATCH_BRANCH)
+def _autoclose():
+    """lib/autoclose.py рядом — правило «PR пачки» (batch_prs, batch_pick) одно с карточкой и check (metis-0810).
+    Только стандартная библиотека, как этот модуль; грузится лениво: хуку (hooks/ctx.py) оно не нужно."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_autoclose_bt", os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), "autoclose.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
-def batch_branch_prs(cache_path):
+def batch_branch_prs(cache_path, own_of=None):
     """{id пачки: номер PR} по ветке batch/<id> из кэша autoclose fetch (metis-0799): PR пачки, открытый не через
-    `pantheon batch pr`, поля pr не ставит. Открытый важнее слитого, из нескольких — больший номер; нет кэша — {}.
-    PR из форка и строка кэша без поля cross (isCrossRepository) — не PR пачки: ветку batch/<id> форк назовёт как угодно."""
+    `pantheon batch pr`, поля pr не ставит. Правило — autoclose.batch_prs и batch_pick, одно с карточкой пачки и check
+    (metis-0810): ветка ровно batch/<id>, не форк, «часть» не мешает; открытый важнее слитого, из нескольких — больший
+    номер; own_of(id пачки) — репозитории её направления в нижнем регистре (None — любые; own_of нет — любые).
+    Нет кэша или он битый — {}."""
     try:
         with open(cache_path, encoding="utf-8") as fh:
             st = json.load(fh)
     except (OSError, ValueError):
         return {}
-    best = {}
-    for key, branch_key, rank in (("merged", "headRefName", 0), ("open_prs", "branch", 1)):
-        by_repo = st.get(key) if isinstance(st, dict) and isinstance(st.get(key), dict) else {}
-        for prs in by_repo.values():
-            for p in prs if isinstance(prs, list) else []:
-                n = p.get("number") if isinstance(p, dict) else None
-                m = BATCH_HEAD_RE.fullmatch(p.get(branch_key) or "") if isinstance(p, dict) and isinstance(
-                    p.get(branch_key), str) else None
-                if m and isinstance(n, int) and not isinstance(n, bool) and n > 0 and p.get("cross") is False:  # не форк
-                    best[m.group(1)] = max(best.get(m.group(1), (-1, 0)), (rank, n))
-    return {sid: n for sid, (_, n) in best.items()}
+    A = _autoclose()
+    out = {}
+    for sid, rows in A.batch_prs(st).items():
+        best = A.batch_pick(rows, own_of(sid) if own_of else None)
+        if best:
+            out[sid] = best[1]
+    return out
 
 
 def batches(tasks, branch_prs=None):
@@ -400,14 +406,15 @@ def watch_files(pantheon, state):
         + [handoff_log(state)]
 
 
-def collect(pantheon, state, tasks, t, week=None, owner=None):
+def collect(pantheon, state, tasks, t, week=None, owner=None, own_of=None):
     """Все входы блока одним словарём; files — сколько файлов прочитано (для штампа). owner — шапка → на владельце
-    ли карточка (tasks.Roles и assignee у вызывающего); без него разделов «Ждёт вас» и «Руками» нет."""
+    ли карточка (tasks.Roles и assignee у вызывающего); без него разделов «Ждёт вас» и «Руками» нет. own_of — id пачки →
+    репозитории её направления (batch_branch_prs; None — любые)."""
     cache = os.path.join(state, "autoclose-prs.json")
     zeus_md, board_jsonl = owner_log(state)
     files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
         + sum(1 for p in (cache, zeus_md, board_jsonl) if os.path.isfile(p))
-    return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache)), "week": week,
+    return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache, own_of)), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
             "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
             "owner": owner_cards(tasks, owner) if owner else None, "handoffs": handoffs(state, t)}

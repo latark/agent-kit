@@ -274,6 +274,23 @@ for fork in ({"cross": True}, {"cross": None}):
     e.cache(open_prs={"o/r": []}, merged={"o/r": [row]})
     check(f"9. PR из форка или строка кэша без cross ({fork}) — не PR пачки: строк нет",
           not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
+# metis-0810: репозитории направления пачки ([merge_repos]) и решение координатора keep_outside — через CLI
+pol = os.path.join(e.home, ".claude", "pantheon", "policy.toml")
+os.makedirs(os.path.dirname(pol), exist_ok=True)
+with open(pol, "w", encoding="utf-8") as fh:
+    fh.write(f'[merge_repos]\n"{DIR}" = ["O/R"]\n')
+e.cache(open_prs={"o/r": []}, merged={"o/r": [pr], "x/y": [dict(pr, number=777)]})
+lines = e.drift()[1]
+check("10. [merge_repos] есть: PR пачки из репозитория направления — строки; из чужого (x/y#777) — нет (metis-0810)",
+      len(lines) == 2 and not any("x/y" in x for x in lines), lines)
+r = e.run(["task", "set", s1, f"keep_outside={other}"])
+lines = e.drift()[1]
+check("10. pantheon task set <пачка> keep_outside=<id> — предупреждения о ней больше нет, о другой — есть",
+      r.returncode == 0 and len(lines) == 1 and loose in lines[0] and not any(other in x for x in lines), (r.stderr, lines))
+r = e.run(["task", "set", own, f"keep_outside={other}"])
+check("10. keep_outside у задачи (не пачки) — отказ, код не 0, причина последней строкой",
+      r.returncode != 0 and "поле пачки" in (r.stderr.strip().splitlines() or [""])[-1], (r.returncode, r.stderr))
+os.remove(pol)
 e.set_status(s1, "done")
 e.cache(open_prs={"o/r": []}, merged={"o/r": [pr]})
 check("9. пачка закрыта — история не шумит", not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])

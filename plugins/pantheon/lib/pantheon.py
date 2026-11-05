@@ -5976,7 +5976,9 @@ def board_links():
         out["tails"] = {}
     try:
         out["repos"] = metrics_ctx().repos
-        out["pr_index"] = autoclose_mod().pr_index(read_json(path("autoclose-prs.json"), {}))
+        cache, A = read_json(path("autoclose-prs.json"), {}), autoclose_mod()
+        out["pr_index"] = A.pr_index(cache)
+        out["batch_prs"] = A.batch_prs(cache)  # PR пачки — одно правило с board-auto и check (metis-0810)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -6258,7 +6260,8 @@ def board_archive(rest):
     board.md правят и руками (Зевс, владелец) без замка pantheon-git, поэтому перед записью архива и перед заменой
     board.md сверяются inode, mtime и размер с прочитанными (metis-0780): изменился — отказ «board.md изменился,
     повтори», код 1, board.md не тронут, дописанное в архив откатывается. Остаток — правка в те же доли секунды
-    между последней сверкой и заменой."""
+    между последней сверкой и заменой. Сбой дописывания или замены (OSError) — строка «… — архив откатан, board.md не
+    тронут», без трассировки; откат сам не удался — «архив НЕ откатан (архив: причина)», код 1 (metis-0810)."""
     M, days = boardmd_mod(), None
     args = list(rest)
     if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
@@ -6287,6 +6290,30 @@ def board_archive(rest):
         stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
         undo = {}   # архив → размер до дописывания (None — файла не было)
         done = False
+
+        def rollback():
+            """Дописанное в архивы — обратно; → [«архив: причина»] того, что откатить не вышло (metis-0810)."""
+            bad = []
+            for ap, size in undo.items():
+                try:
+                    if size is None:
+                        os.remove(ap)
+                    else:
+                        os.truncate(ap, size)
+                except FileNotFoundError:
+                    if size is not None:
+                        bad.append(f"{os.path.relpath(ap, PANTHEON)}: файла нет")
+                except OSError as e:
+                    bad.append(f"{os.path.relpath(ap, PANTHEON)}: {type(e).__name__}: {e}")
+            undo.clear()
+            return bad
+
+        def undone(bad):
+            """Итог отката честно: откатан — так и пишем; нет — что осталось в каком архиве, код 1."""
+            if bad:
+                return ("архив НЕ откатан (" + "; ".join(bad) + ") — в нём строки, которые остались и в board.md: "
+                        "убрать их из архива руками")
+            return "архив откатан"
         try:
             for key, ls in sorted(moved.items()):
                 ap = os.path.join(PANTHEON, "archive", f"{key}.md")
@@ -6294,22 +6321,21 @@ def board_archive(rest):
                 with open(ap, "a", encoding="utf-8") as fh:
                     fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
             if _board_changed(board, seen):
+                bad = rollback()
+                if bad:
+                    print(f"pantheon board archive: {undone(bad)}", file=sys.stderr)
                 return 1
             write_atomic(board, kept)
             done = True
         except OSError as e:   # metis-0792: сбой дописывания или замены — архив откатывается, board.md цел
-            print(f"pantheon board archive: {type(e).__name__}: {e} — архив откатан, board.md не тронут", file=sys.stderr)
+            print(f"pantheon board archive: {type(e).__name__}: {e} — {undone(rollback())}, board.md не тронут",
+                  file=sys.stderr)
             return 1
         finally:
-            if not done:
-                for ap, size in undo.items():
-                    try:
-                        if size is None:
-                            os.remove(ap)
-                        else:
-                            os.truncate(ap, size)
-                    except OSError:
-                        pass
+            if not done:   # иной сбой (не OSError): откат и честная строка, трассировка уйдёт выше
+                bad = rollback()
+                if bad:
+                    print(f"pantheon board archive: {undone(bad)}", file=sys.stderr)
     print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
     return 0
 
@@ -6322,8 +6348,10 @@ def board_auto_sync(T):
     try:
         B = boardtext_mod()
         fp, t = board_auto_fp(), now()
-        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
-                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        data = B.collect(PANTHEON, STATE, tasks, t, board_week(),
+                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE,
+                         own_of=batch_own_of(tasks, metrics_ctx().repos))
         data["merged_open"] = board_merged_open(T, t)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
@@ -6784,7 +6812,7 @@ def board_drift(T, tasks, cache, inbox):
                 if h.get("status") in ("doing", "review") and tid not in open_ids \
                         and not (mts and (T.ts_of(h.get("updated")) or 0) > mts):
                     out.append((tid, f"статус {h['status']}, а PR {repo}#{pr.get('number')} уже слит"))
-    out += batch_outside(T, tasks, cache)
+    out += batch_outside(T, tasks, cache, metrics_ctx().repos)
     for tid, (_, h, _) in sorted(tasks.items()):
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             since = T.ts_of(h.get("question_at")) or T.ts_of(h.get("created")) or 0
@@ -6801,38 +6829,45 @@ def board_drift(T, tasks, cache, inbox):
     return out
 
 
-def batch_outside(T, tasks, cache):
-    """PR пачки (ветка batch/<id>) закрыл задачу, у которой parent — не эта пачка (metis-0799): состав пачки считается
-    по parent, поэтому сделанное в её ветке ложится в чужую пачку или никуда, и карточка пачки показывает «1 из 13».
-    Только открытые пачки (не done/dropped) и PR без «часть»; parent не правим — его решает координатор. → [(id, текст)]."""
+def batch_own_of(tasks, repos):
+    """id пачки → репозитории её направления в нижнем регистре (autoclose.batch_pick, metis-0810): repos —
+    [merge_repos] policy.toml (направление → [репозиторий]); его нет, он пуст или у направления пачки нет строки —
+    None (любые), как у board-auto до правила (argus #341 Д1)."""
+    if not isinstance(repos, dict) or not repos:
+        return lambda sid: None
+
+    def own(sid):
+        mine = repos.get((tasks.get(sid) or (None, {}, ""))[1].get("direction"))
+        return [r.lower() for r in mine if isinstance(r, str)] if isinstance(mine, list) else None
+    return own
+
+
+def batch_outside(T, tasks, cache, repos=None):
+    """PR пачки (autoclose.batch_prs — одно правило с карточкой и board-auto, metis-0810) закрыл задачу, у которой parent
+    — не эта пачка (metis-0799): состав пачки считается по parent, поэтому сделанное в её ветке ложится в чужую пачку
+    или никуда, и карточка пачки показывает «1 из 13». Только открытые пачки (не done/dropped), PR из репозиториев
+    направления пачки (repos — [merge_repos]; нет — любые); PR с «часть» задач не закрывает. parent не правим — его
+    решает координатор: attach или поле пачки keep_outside — задачи, оставленные вне её состава (предупреждения о них
+    нет). → [(id, текст)]."""
     A, out, seen = autoclose_mod(), [], set()
-    for key, branch_key in (("merged", "headRefName"), ("open_prs", "branch")):
-        by_repo = cache.get(key) if isinstance(cache.get(key), dict) else {}
-        for repo, prs in sorted(by_repo.items()):
-            for pr in prs if isinstance(prs, list) else []:
-                if not isinstance(pr, dict) or not isinstance(pr.get(branch_key), str) or pr.get("cross") is not False:
-                    continue  # PR из форка или строка кэша без cross — не PR пачки
-                m = re.fullmatch(re.escape(T.BATCH_BRANCH) + r"(\S+)", pr[branch_key])
-                sh = (tasks.get(m.group(1)) or (None, {}, ""))[1] if m else {}
-                if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):
+    own_of = batch_own_of(tasks, repos)
+    for sid, rows in sorted(A.batch_prs(cache).items()):
+        sh = (tasks.get(sid) or (None, {}, ""))[1]
+        if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):
+            continue
+        own, keep = own_of(sid), set(sh.get("keep_outside") or [])
+        for repo, num, _, ids in rows:
+            if own is not None and repo not in own:
+                continue
+            for tid in ids:
+                h = (tasks.get(tid) or (None, {}, ""))[1]
+                if h.get("type") != "task" or h.get("parent") == sid or tid in keep or (tid, sid) in seen:
                     continue
-                if key == "merged":
-                    if not isinstance(pr.get("body"), (str, type(None))) or A.is_part(pr.get("body")):
-                        continue
-                    ids = A.closing_ids(pr[branch_key], pr.get("body"))
-                else:
-                    if pr.get("part") or not isinstance(pr.get("closes"), list):
-                        continue
-                    ids = [i for i in pr["closes"] if isinstance(i, str)]
-                sid = m.group(1)
-                for tid in ids:
-                    h = (tasks.get(tid) or (None, {}, ""))[1]
-                    if h.get("type") != "task" or h.get("parent") == sid or (tid, sid) in seen:
-                        continue
-                    seen.add((tid, sid))
-                    out.append((tid, f"PR пачки {sid} ({repo}#{pr.get('number')}, ветка {pr[branch_key]}) закрывает задачу, "
-                                     f"а её parent — {h.get('parent') or 'пусто'}: в составе {sid} её нет; "
-                                     f"parent решает координатор (pantheon task attach {tid} {sid} или оставить)"))
+                seen.add((tid, sid))
+                out.append((tid, f"PR пачки {sid} ({repo}#{num}, ветка {T.BATCH_BRANCH}{sid}) закрывает задачу, "
+                                 f"а её parent — {h.get('parent') or 'пусто'}: в составе {sid} её нет; "
+                                 f"parent решает координатор (pantheon task attach {tid} {sid} или оставить вне пачки: "
+                                 f"pantheon task set {sid} keep_outside=…,{tid})"))
     return out
 
 
@@ -6935,6 +6970,9 @@ def check(paths=None, quiet=False):
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                     for i, ln in T.part_stalled(tasks_now, now())]
+                 # metis-0615: «часть» без неотмеченных пунктов — остаток не записан; сразу, не через сутки
+                 + [("часть-пусто", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
+                     f"{i}: «{ln[:140]}»") for i, ln in T.part_no_items(tasks_now)]
                  # metis-0868 п. 5: время строки журнала ставит код; строка «из будущего» дописана руками на глаз
                  + [("время", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
                      f"{i}: строка журнала позже часов системы — «{ln[:140]}»") for i, ln in T.journal_future(tasks_now, now())])
@@ -7078,9 +7116,11 @@ TAIL_TEXT = {"хвост": "хвост в журнале без задачи (н
                       "pantheon task set --note, время ставит код)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
 TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review (записать ход, закрыть или вернуть в очередь)",
-                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)"})
+                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)",
+                                     "часть-пусто": "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет (вписать "
+                                                    "пункт остатка или закрыть задачу)"})
 TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
-             "доска": "доска", "время": "время журнала"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
 
 
 def tails_by_task(items):
@@ -7105,7 +7145,7 @@ def tails_board(items):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
             "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
             + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
