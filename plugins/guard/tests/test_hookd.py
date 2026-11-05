@@ -133,6 +133,22 @@ def wrap(args, ev, env, cwd, raw=None, hooks=HOOKS, canary="0"):
     return run([os.path.join(hooks, "hookd.sh"), "guard", *args], ev, env, cwd, raw)
 
 
+def wrap_argv(args, hooks=HOOKS):
+    return [os.path.join(hooks, "hookd.sh"), "guard", *args]
+
+
+def run_late(argv, ev, env, cwd, delay):
+    """Как run, но stdin закрывается через delay с после старта: клиент ждёт его, а срок демона уже идёт."""
+    t = time.perf_counter()
+    p = subprocess.Popen(["/bin/sh", *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=env, cwd=cwd)
+    p.stdin.write(json.dumps(ev, ensure_ascii=False).encode())
+    p.stdin.flush()
+    time.sleep(delay)
+    out, err = p.communicate(timeout=SUB_TIMEOUT)
+    return (p.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")), time.perf_counter() - t
+
+
 def dec(res):
     return TC.dec(res)
 
@@ -272,6 +288,14 @@ def b_ack_noread(c):
 def b_allow(c):
     c.sendall(b"A\n")
     read_request(c)
+    c.sendall(b"X 0 0 0\n")
+
+
+def b_allow_late(c):
+    """«Пропустить» через 2,5 с: дольше CANARY_MS клиента (2 с) — канарейка не идёт."""
+    c.sendall(b"A\n")
+    read_request(c)
+    time.sleep(2.5)
     c.sendall(b"X 0 0 0\n")
 
 
@@ -549,6 +573,48 @@ def test_supply(root, client):
           got == ref and reasons(home) == ["client-sum"] and healed(), (got == ref, fb_lines(home)))
 
 
+def test_shasum(root, client):
+    """Д4: без /sbin/sha256 и sha256sum (macOS старше 14) оболочка сверяет клиент через /usr/bin/shasum, как сборка
+    (sum() в hookd-build.sh) — клиент запускается, а не client-sum навсегда. Копия плагина: в hookd.sh пути первых двух
+    заменены несуществующими."""
+    if not os.access("/usr/bin/shasum", os.X_OK):
+        print("пропущено: shasum в оболочке — /usr/bin/shasum нет")
+        return
+    copy = os.path.join(root, "shasum")
+    shutil.copytree(PLUGIN, copy, ignore=shutil.ignore_patterns("__pycache__", "tests"))
+    w = os.path.join(copy, "hooks", "hookd.sh")
+    with open(w, encoding="utf-8") as fh:
+        text = fh.read()
+    text = text.replace("/sbin/sha256", "/nonexistent/sha256").replace("/usr/bin/sha256sum", "/nonexistent/sha256sum")
+    with open(w, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    home = os.path.join(root, "shs")
+    os.makedirs(home)
+    d = install(home, client)
+    fake = Fake(os.path.join(d, "hookd.sock"), b_allow)
+    work = os.path.join(root, "work")
+    try:
+        got, _ = wrap(["--strict"], deny_event(work), base_env(home), work, hooks=os.path.join(copy, "hooks"))
+    finally:
+        fake.close()
+    check("оболочка без /sbin/sha256 и sha256sum: клиент сверен через shasum и запущен (ответ демона, откатов нет)",
+          got == (0, "", "") and fake.count == 1 and not fb_lines(home), (got, fake.count, fb_lines(home)))
+
+
+def test_bench(root):
+    """Д5: bench.py --hookd не падает кодом 1 из-за прогрева клиента без аргументов (usage): прогрев — настоящий вызов."""
+    bench = os.path.join(PLUGIN, "scripts", "bench.py")
+    # bench кладёт HOME в <TMPDIR>/gbXXXXXXXX/home: папка, где сокет укладывается в 103 байта
+    fits = [d for d in (root, tempfile.gettempdir(), "/tmp")
+            if len(d) + len("/gbXXXXXXXX/home/") + len(SOCK_REL) <= 103]
+    if not fits:
+        print("пропущено: bench.py --hookd — нет папки с коротким путём для сокета")
+        return
+    r = subprocess.run([sys.executable, "-I", bench, "--hookd", "-n", "1"], capture_output=True, text=True,
+                       env=dict(os.environ, TMPDIR=fits[0]), timeout=300)
+    check("bench.py --hookd -n 1 → код 0", r.returncode == 0, (r.returncode, r.stdout[-300:], r.stderr[-500:]))
+
+
 def test_background_build(root):
     work = os.path.join(root, "work")
     home = os.path.join(root, "bg")
@@ -563,25 +629,59 @@ def test_background_build(root):
     check("клиента нет → этот вызов медленным путём (no-client), а клиент собирается в фоне",
           got == ref and reasons(home) == ["no-client"] and os.access(c, os.X_OK) and not os.path.exists(c + ".lock"),
           (got == ref, fb_lines(home), os.path.exists(c)))
+    # С-A2: замок сборки брошен (сборку убили SIGKILL, папка замка осталась). Свежий замок — сборка идёт, фон не
+    # запускается; старше 2 мин — оболочка запускает фон, hookd-build.sh снимает замок и собирает клиент
+    for name, age, built in (("свежий замок — фон не запускается", 0, False),
+                             ("замок старше 2 мин — фон запускается и собирает клиент", 180, True)):
+        home = os.path.join(root, "bgl" + str(age))
+        os.makedirs(os.path.join(hookd_dir(home), "bin"))
+        c = os.path.join(hookd_dir(home), "bin", "client-" + src_hash())
+        os.makedirs(c + ".lock")
+        t = time.time() - age
+        os.utime(c + ".lock", (t, t))
+        got, _ = wrap(["--strict"], ev, base_env(home), work)
+        end = time.monotonic() + (120 if built else 3)
+        while time.monotonic() < end and not (os.access(c, os.X_OK) and not os.path.exists(c + ".lock")):
+            time.sleep(0.1)
+        ok = os.access(c, os.X_OK) and not os.path.exists(c + ".lock") if built else \
+            not os.path.exists(c) and os.path.isdir(c + ".lock")
+        check(f"клиента нет, {name}; вызов — медленным путём (no-client)",
+              got == ref and reasons(home) == ["no-client"] and ok,
+              (got == ref, fb_lines(home), os.path.exists(c), os.path.exists(c + ".lock")))
 
 
 # --- сверка решений -----------------------------------------------------------------------------------------------
 
 def tree_of(root, skip):
+    """Файлы и папки под root с правами (umask вызова): [(путь, права)]."""
     out = []
     for d, dirs, files in os.walk(root):
         dirs[:] = sorted(x for x in dirs if os.path.join(d, x) not in skip)
-        for f in files:
+        for f in files + dirs:
             if f != "hookd-fallback.log":
-                out.append(os.path.relpath(os.path.join(d, f), root))
+                p = os.path.join(d, f)
+                out.append((os.path.relpath(p, root), oct(os.lstat(p).st_mode & 0o7777)))
     return sorted(out)
 
 
 def test_equivalence(root, client, sock):
+    """Сверка решений и файлов с правами; umask вызовов — не тот, с которым запущен демон (Д1/Д-A3). Набор, где guard
+    создаёт папки по umask, — test_strict_sequence. Только PreToolUse: остальное демон не судит (С-A3, проверка в
+    test_daemon_refusals)."""
     w = TC.World(os.path.join(root, "w"))
     ctx, evs = TC.contexts(w), TC.events(w)
-    jobs = [(f"{cn} {en}", argv, env, ev) for en, ev in evs.items() for cn, (argv, env) in ctx.items()]
+    jobs = [(f"{cn} {en}", argv, env, ev) for en, ev in evs.items() for cn, (argv, env) in ctx.items()
+            if ev.get("hook_event_name") == "PreToolUse"]
+    daemon_umask = os.umask(0)
+    call_umask = 0o027 if daemon_umask != 0o027 else 0o077
+    os.umask(call_umask)
+    try:
+        _equivalence(w, jobs, client, sock, call_umask, daemon_umask)
+    finally:
+        os.umask(daemon_umask)
 
+
+def _equivalence(w, jobs, client, sock, call_umask, daemon_umask):
     def one_pass(via):
         w.reset()
         for h in (w.ha, w.hb):
@@ -604,7 +704,8 @@ def test_equivalence(root, client, sock):
     check(f"демон: решения — как у медленного пути ({len(jobs)} вызовов: плагин, --managed, --strict, hestia, "
           "dev-opus, два HOME, TMPDIR, GUARD_OFF): код, stdout и stderr", not bad,
           [(n, a[0], a[1][:160], a[2][:160], "≠", b[0], b[1][:160], b[2][:160]) for n, a, b in bad[:3]])
-    check("демон: файлы, которые guard пишет в HOME и TMPDIR (метки strict, журналы), — те же, что у медленного пути",
+    check(f"демон: файлы и папки, которые guard пишет в HOME и TMPDIR (метки strict, журналы), и их права при umask "
+          f"вызова {oct(call_umask)} (у демона {oct(daemon_umask)}) — те же, что у медленного пути",
           got_files == want_files, sorted(set(got_files) ^ set(want_files))[:10])
     check("демон: ни одного отката — все вызовы решил демон", not logs, logs[:5])
     check("оболочка без флага — те же решения и файлы", off == want and off_files == want_files,
@@ -622,20 +723,78 @@ def test_equivalence(root, client, sock):
               "различаются по ним")
 
 
+def test_push_accepted(root, client, sock):
+    """Д-B3-2: push в принятый PR (metis-0794) через демон. Случаи test_push_accepted (настоящий git, поддельный gh в
+    PATH вызова, записи argus в HOME) идут медленным путём и через демон: ответы те же, проверки случаев проходят,
+    откатов нет. gh и git зовёт внук демона — с PATH и HOME вызова."""
+    import test_push_accepted as tpa
+    tm = tpa.tm
+    base = tpa.mkroot("pa", first=root)
+    if len(base) + len("/") + len(SOCK_REL) > 103:
+        print(f"пропущено: push в принятый PR — путь сокета в {base} длиннее 103 байт")
+        return
+    h = tm.Home(base)
+    install(h.root, client, sock)
+    calls, verdicts = {}, {}
+
+    def hook_via(via):
+        def hook(event, pdir, mode=(), extra_env=None):
+            env = dict(h.env(pdir), **(extra_env or {}))
+            raw = json.dumps(event).encode()
+            res = (slow if via == "slow" else wrap)(list(mode), None, env, h.j(pdir), raw=raw)[0]
+            calls[via].append(res)
+            return subprocess.CompletedProcess([], res[0], res[1], res[2])
+        return hook
+
+    old_check = tpa.check
+    try:
+        for via in ("slow", "hookd"):
+            calls[via], verdicts[via] = [], []
+            tpa.check = lambda name, cond, detail="", v=via: verdicts[v].append((name, bool(cond)))
+            h.hook = hook_via(via)
+            for case in tpa.CASES:
+                h.reset()
+                case(h)
+        fb = fb_lines(h.root)
+    finally:
+        tpa.check = old_check
+        shutil.rmtree(base, ignore_errors=True)
+    bad = [n for n, ok in verdicts["hookd"] if not ok]
+    check(f"push в принятый PR через демон: все {len(verdicts['hookd'])} проверок test_push_accepted прошли",
+          verdicts["hookd"] and not bad and verdicts["hookd"] == verdicts["slow"], bad[:3])
+    def norm(res):  # коммиты каждого прохода новые (время в коммите) — SHA в тексте отказа разные
+        return tuple(re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", x) if isinstance(x, str) else x for x in res)
+
+    diff = [(i, a, b) for i, (a, b) in enumerate(zip(calls["slow"], calls["hookd"])) if norm(a) != norm(b)]
+    check(f"push в принятый PR: {len(calls['hookd'])} ответов демона — как у медленного пути (код, stdout, stderr), "
+          "есть отказы, откатов нет",
+          len(calls["slow"]) == len(calls["hookd"]) and not diff and any(dec(r) == "deny" for r in calls["hookd"])
+          and not fb, (diff[:2], fb[:3]))
+
+
 def test_strict_sequence(root, client, sock):
     """Строгий guard и хук плагина одной сессии окна по очереди через один демон: строгий пишет метку и отказывает,
-    хук плагина после метки молчит, строгий снова отказывает — как у медленного пути."""
+    хук плагина после метки молчит, строгий снова отказывает — как у медленного пути. umask вызовов — не демона
+    (Д1/Д-A3): родители папки меток (~/.local, ~/.local/state, …/pantheon) создаются с правами по umask вызова."""
     work = os.path.join(root, "work")
     co = "Co-" + "Authored-By: " + "Cla" + "ude <noreply@anthropic.com>"
     ev = dict(deny_event(work), session_id="strictseq0330abcd", tool_input={"command": f"git commit -m x -m '{co}'"})
     seq = (["--strict"], [], ["--strict"], [], ["--managed"])
     res = {}
+    daemon_umask = os.umask(0)
+    os.umask(daemon_umask)
+    call_umask = 0o027 if daemon_umask != 0o027 else 0o077
     for via in ("slow", "hookd"):
         home = os.path.join(root, "sq" + via[:2])
         os.makedirs(home)
         install(home, client, sock)
         env = base_env(home, PANTHEON_WINDOW="w1")
-        res[via] = [(slow if via == "slow" else wrap)(a, ev, env, work)[0] for a in seq]
+        os.umask(call_umask)
+        try:
+            res[via] = [(slow if via == "slow" else wrap)(a, ev, env, work)[0] for a in seq]
+        finally:
+            os.umask(daemon_umask)
+        res[via + "-tree"] = tree_of(home, {hookd_dir(home)})
         marker = os.path.join(home, ".local", "state", "pantheon", "guard-strict", ev["session_id"])
         res[via + "-marker"] = open(marker, encoding="utf-8").read() if os.path.exists(marker) else None
         res[via + "-log"] = fb_lines(home)
@@ -644,6 +803,11 @@ def test_strict_sequence(root, client, sock):
     check("строгий guard через демон отказал оба раза и записал метку окна w1\\tBash в HOME вызова",
           [dec(r) for r in res["hookd"][0::2][:2]] == ["deny", "deny"] and res["hookd-marker"] == "w1\tBash\n",
           ([dec(r) for r in res["hookd"]], res["hookd-marker"]))
+    local = dict(res["hookd-tree"]).get(".local")
+    check(f"umask вызова {oct(call_umask)} (у демона {oct(daemon_umask)}): файлы и права в HOME — как у медленного "
+          f"пути, ~/.local — {oct(0o777 & ~call_umask)}",
+          res["hookd-tree"] == res["slow-tree"] and local == oct(0o777 & ~call_umask),
+          (sorted(set(res["hookd-tree"]) ^ set(res["slow-tree"]))[:6], local))
 
 
 # --- отказы -------------------------------------------------------------------------------------------------------
@@ -694,18 +858,21 @@ def test_failures(root, client):
             extra = f" за {t_got - t_ref + 0.0:.2f} с сверх медленного пути"
         check(f"отказ: {name} → ответ медленного пути, причина {want}{extra}", ok,
               (got, ref, fb_lines(home), round(t_got, 2), round(t_ref, 2)))
-    # решение не пришло за 8,5 с — медленный путь
+    # решение не пришло — медленный путь. Срок демона — 7,5 с от старта клиента (Д-D1): stdin приходит через 1,5 с,
+    # а клиент всё равно отпускает демона к 7,5 с от своего старта — медленному пути до таймаута хука 10 с остаётся 2,5 с
     home = os.path.join(root, "fsr")
     os.makedirs(home)
     d = install(home, client)
     fake = Fake(os.path.join(d, "hookd.sock"), b_ack_hang)
     try:
         ref, t_ref = slow(["--strict"], ev, base_env(home), work)
-        got, t_got = wrap(["--strict"], ev, base_env(home), work)
+        got, t_got = run_late(wrap_argv(["--strict"]), ev, dict(base_env(home), PANTHEON_HOOKD="1",
+                                                               PANTHEON_HOOKD_CANARY="0"), work, 1.5)
     finally:
         fake.close()
-    check("отказ: «принят», но решения нет 8,5 с → медленный путь, причина no-reply (ждали 8,5 с, не больше 10)",
-          got == ref and reasons(home) == ["no-reply"] and 8.4 < t_got - t_ref < 9.8 + t_ref,
+    check("отказ: «принят», но решения нет → медленный путь, причина no-reply; stdin через 1,5 с, а демона ждали "
+          "7,5 с от старта клиента — медленному пути до 10 с осталось 2,5 с",
+          got == ref and reasons(home) == ["no-reply"] and 7.3 < t_got - t_ref < 7.9,
           (got == ref, fb_lines(home), round(t_got, 2), round(t_ref, 2)))
     # «принят», а запрос около 1 МиБ демон не читает: запись в сокет не держит вызов сверх срока (F1, argus PR 307)
     home = os.path.join(root, "fsend")
@@ -718,8 +885,8 @@ def test_failures(root, client):
         got, t_got = wrap(["--strict"], padded, base_env(home), work)
     finally:
         fake.close()
-    check("отказ: «принят», демон не читает stdin 1 МиБ → медленный путь, причина send, весь вызов меньше 9,8 с",
-          got == ref and '"deny"' in ref[1] and reasons(home) == ["send"] and t_got < 9.8,
+    check("отказ: «принят», демон не читает stdin 1 МиБ → медленный путь, причина send; демона ждали не дольше 7,5 с",
+          got == ref and '"deny"' in ref[1] and reasons(home) == ["send"] and t_got - t_ref < 7.9,
           (got == ref, fb_lines(home), round(t_got, 2), round(t_ref, 2)))
     # путь сокета длиннее sun_path
     home = os.path.join(root, "L" * (110 - len(root)))
@@ -751,6 +918,31 @@ def test_failures(root, client):
                                                                            LINE_RE.fullmatch(ln)][:3])
 
 
+def test_double_failure(root, client):
+    """Д-B2-1: демона нет и медленный путь не запустился (python.sh нет) или убит (python.sh делает kill -9 себе) —
+    двойной отказ: код 2 (запрет этого вызова, а не «пропустить»), причина в stderr и строки no-socket и
+    slow-exec / slow-signal в журнале откатов."""
+    work = os.path.join(root, "work")
+    ev = deny_event(work)
+    for name, body, want, text in (("python.sh нет", None, "slow-exec", "недоступны (python.sh: код 127)"),
+                                   ("python.sh убивает себя kill -9", "#!/bin/sh\nkill -9 $$\n", "slow-signal",
+                                    "прерван сигналом 9")):
+        copy = os.path.join(root, "dbl-" + want[5:])
+        shutil.copytree(PLUGIN, copy, ignore=shutil.ignore_patterns("__pycache__", "tests"))
+        py = os.path.join(copy, "hooks", "python.sh")
+        os.unlink(py)
+        if body:
+            with open(py, "w") as fh:
+                fh.write(body)
+        home = os.path.join(root, "db" + want[5:8])
+        os.makedirs(home)
+        install(home, client)
+        got, _ = wrap(["--strict"], ev, base_env(home), work, hooks=os.path.join(copy, "hooks"))
+        check(f"двойной отказ: демона нет, {name} → код 2, причина в stderr, строки no-socket и {want}",
+              got[0] == 2 and got[1] == "" and text in got[2] and "действие остановлено" in got[2]
+              and reasons(home) == ["no-socket", want], (got, fb_lines(home)))
+
+
 def test_daemon_refusals(root, client, sock):
     """Отказы настоящего демона: протокол руками и через клиент."""
     work = os.path.join(root, "work")
@@ -770,6 +962,12 @@ def test_daemon_refusals(root, client, sock):
             ("событие не UTF-8", hdr, b"\xff\xfe", None, "F encoding"),
             ("локаль KOI8-R", dict(hdr, env=dict(env, LC_ALL="ru_RU.KOI8-R")), body, None, "F locale"),
             ("папки вызова нет", dict(hdr, cwd=os.path.join(root, "nope")), body, None, "F cwd"),
+            ("событие PostToolUse (С-A3: демон судит только PreToolUse)", hdr,
+             json.dumps(dict(deny_event(work), hook_event_name="PostToolUse")).encode(), None, "F event"),
+            ("событие без hook_event_name", hdr,
+             json.dumps({k: v for k, v in deny_event(work).items() if k != "hook_event_name"}).encode(), None,
+             "F event"),
+            ("событие не JSON", hdr, b"abc", None, "F event"),
             ("запрос больше 8 МиБ", None, b"", "G2 9000000 1\n", "F big")):
         got = raw_call(sock, h, b, line=line)
         check(f"демон: {name} → «{want}»", got == want, got)
@@ -779,7 +977,11 @@ def test_daemon_refusals(root, client, sock):
     # через клиент: кодировка и локаль ведут на медленный путь с тем же решением
     for name, raw, extra, want in (("событие не UTF-8", b'{"hook_event_name": "PreToolUse", "x": "\xff"}', {},
                                     "encoding"),
-                                   ("локаль KOI8-R", None, {"LC_ALL": "ru_RU.KOI8-R"}, "locale")):
+                                   ("локаль KOI8-R", None, {"LC_ALL": "ru_RU.KOI8-R"}, "locale"),
+                                   ("событие PostToolUse", json.dumps(dict(
+                                       deny_event(work), hook_event_name="PostToolUse",
+                                       tool_response={"stdout": "", "stderr": "", "interrupted": False})).encode(),
+                                    {}, "event")):
         h2 = os.path.join(root, "d" + want[:3])
         os.makedirs(h2)
         install(h2, client, sock)
@@ -790,15 +992,106 @@ def test_daemon_refusals(root, client, sock):
               got == ref and reasons(h2) == [want], (got, ref, fb_lines(h2)))
 
 
+def test_perm(root, client, sock):
+    """Решение владельца 04.11 (Д-A2): отказ доступа во внуке (EPERM, EACCES) — «F perm» и медленный путь, а не решение
+    по нераскрытому пути. Запись в симлинк на ~/.claude/settings.json защищена (protect-config), пока симлинк читается.
+    chmod 000 на его папке — EACCES и у демона, и у медленного пути. Песочница sandbox-exec только у демона — EPERM, как
+    у службы launchd без доступа TCC: медленный путь раскрывает ссылку и отказывает, а демон без «F perm» пропустил бы."""
+    work = os.path.join(root, "work")
+    home = os.path.join(root, "pm")
+    os.makedirs(os.path.join(home, ".claude"))
+    with open(os.path.join(home, ".claude", "settings.json"), "w") as fh:
+        fh.write("{}\n")
+    locked = os.path.join(work, "locked")
+    os.makedirs(locked)
+    link = os.path.join(locked, "s.json")
+    os.symlink(os.path.join(home, ".claude", "settings.json"), link)
+    install(home, client, sock)
+    ev = dict(deny_event(work), tool_name="Write", tool_input={"file_path": link, "content": "{}"},
+              agent_type="dev-opus")
+    env = base_env(home)
+    hdr = {"argv": ["--strict"], "cwd": work, "env": env, "hooks": HOOKS, "version": plugin_version(), "umask": 0o22}
+    ref, _ = slow(["--strict"], ev, env, work)
+    got, _ = wrap(["--strict"], ev, env, work)
+    check("perm: симлинк на settings.json читается — отказ, через демон тот же и без отката",
+          got == ref and dec(ref) == "deny" and not fb_lines(home), (got, ref, fb_lines(home)))
+    unread = os.path.join(work, "unread")
+    os.makedirs(unread)
+    try:
+        os.chmod(locked, 0)
+        os.chmod(unread, 0o311)
+        got_raw = raw_call(sock, hdr, json.dumps(ev).encode())
+        ref, _ = slow(["--strict"], ev, env, work)
+        got, _ = wrap(["--strict"], ev, env, work)
+        cwd_raw = raw_call(sock, dict(hdr, cwd=unread), json.dumps(dict(deny_event(unread))).encode())
+    finally:
+        os.chmod(locked, 0o755)
+        os.chmod(unread, 0o755)
+    check("perm: папка симлинка chmod 000 (EACCES) → демон «F perm», а не решение", got_raw == "F perm", got_raw)
+    check("perm: chmod 000 через клиент → ответ медленного пути, причина perm",
+          got == ref and reasons(home) == ["perm"], (got, ref, fb_lines(home)))
+    check("perm: папка вызова не читается (0311) → «F perm»", cwd_raw == "F perm", cwd_raw)
+    sbx = "/usr/bin/sandbox-exec"
+    probe = subprocess.run([sbx, "-p", "(version 1)(allow default)", "/usr/bin/true"], capture_output=True,
+                           timeout=SUB_TIMEOUT) if os.path.exists(sbx) else None
+    if probe is None or probe.returncode != 0:
+        print("пропущено: perm под песочницей — sandbox-exec нет или вложенная песочница запрещена")
+        return
+    prof = '(version 1)(allow default)(deny file-read* (subpath "%s"))' % os.path.realpath(locked)
+    dhome = os.path.join(root, "pmd")
+    os.makedirs(dhome)
+    sock2 = os.path.join(root, "pm.sock")
+    log = open(os.path.join(root, "pm-daemon.log"), "ab")
+    p = subprocess.Popen([sbx, "-p", prof, "/bin/sh", LAUNCHER, DAEMON, "--socket", sock2, "--idle", "300"],
+                         env=base_env(dhome), stdout=log, stderr=log)
+    PROCS.append(p)
+    end = time.monotonic() + 30
+    while time.monotonic() < end and not os.path.exists(sock2) and p.poll() is None:
+        time.sleep(0.02)
+    home = os.path.join(root, "pms")
+    os.makedirs(os.path.join(home, ".claude"))
+    os.replace(os.path.join(root, "pm", ".claude", "settings.json"), os.path.join(home, ".claude", "settings.json"))
+    os.unlink(link)
+    os.symlink(os.path.join(home, ".claude", "settings.json"), link)
+    install(home, client, sock2)
+    env = base_env(home)
+    got_raw = raw_call(sock2, dict(hdr, env=env), json.dumps(ev).encode())
+    ref, _ = slow(["--strict"], ev, env, work)
+    got, _ = wrap(["--strict"], ev, env, work)
+    stop(p)
+    check("perm: демон в песочнице без доступа к папке симлинка (EPERM, как TCC у launchd) → «F perm»",
+          got_raw == "F perm", got_raw)
+    check("perm: через клиент — отказ медленного пути (он ссылку раскрыл), а не пропуск демона; причина perm",
+          got == ref and dec(got) == "deny" and reasons(home) == ["perm"], (got, ref, fb_lines(home)))
+
+
 def patched_copy(root, name):
-    """Копия плагина guard: guard.run убивает себя (KILLME) или выходит кодом 99 (EXIT99) — для проб демона."""
+    """Копия плагина guard для проб демона: guard.run убивает себя (KILLME), выходит кодом 99 (EXIT99), печатает
+    часовой пояс процесса (PROBE-TZ: time.tzname, time.timezone, strftime %z) или код подпроцесса `sh -c 'exit 1'`
+    (PROBE-SUB). Подмена — после входа `if __name__ == "__main__"`: медленный путь копии её не видит, только демон."""
     copy = os.path.join(root, name)
     shutil.copytree(PLUGIN, copy, ignore=shutil.ignore_patterns("__pycache__", "tests"))
     with open(os.path.join(copy, "hooks", "guard.py"), "a", encoding="utf-8") as fh:
         fh.write("\n_run0 = run\n\n\ndef run(argv, raw=None):\n"
                  "    if raw and b'KILLME' in raw:\n        os.kill(os.getpid(), signal.SIGKILL)\n"
-                 "    if raw and b'EXIT99' in raw:\n        os._exit(99)\n    return _run0(argv, raw)\n")
+                 "    if raw and b'EXIT99' in raw:\n        os._exit(99)\n"
+                 "    if raw and b'PROBE-TZ' in raw:\n"
+                 "        print(json.dumps([list(time.tzname), time.timezone, time.strftime('%z')]), flush=True)\n"
+                 "        os._exit(0)\n"
+                 "    if raw and b'PROBE-SUB' in raw:\n        import subprocess\n"
+                 "        print(subprocess.run(['/bin/sh', '-c', 'exit 1']).returncode, flush=True)\n"
+                 "        os._exit(0)\n"
+                 "    return _run0(argv, raw)\n")
     return copy
+
+
+TZ_PRINT = "import json, time; print(json.dumps([list(time.tzname), time.timezone, time.strftime('%z')]))"
+
+
+def far_tz():
+    """Пояс, далёкий от пояса этой машины (у демона теста TZ нет — пояс машины): UTC-10 или UTC+12."""
+    off = time.localtime().tm_gmtoff / 3600
+    return "Etc/GMT+10" if abs(off + 10) >= 4 else "Etc/GMT-12"
 
 
 def test_copy_daemon(root, client):
@@ -828,6 +1121,27 @@ def test_copy_daemon(root, client):
     got, _ = wrap(["--strict"], kev, base_env(home), work, hooks=chooks)
     check("клиент: внук убит → медленный путь, тот же отказ, причина killed",
           got == ref and '"deny"' in ref[1] and reasons(home) == ["killed"], (got, ref, fb_lines(home)))
+    # пояс вызова (Д1/Д-A3): у демона TZ нет, у вызова — далёкий; внук видит пояс вызова, как новый процесс
+    home = os.path.join(root, "cptz")
+    os.makedirs(home)
+    install(home, client, sock)
+    tz = far_tz()
+    tenv = base_env(home, TZ=tz)
+    want = subprocess.run([sys.executable, "-I", "-c", TZ_PRINT], env=tenv, capture_output=True, text=True,
+                          timeout=SUB_TIMEOUT).stdout
+    got, _ = wrap(["--strict"], dict(ev, tool_input={"command": "echo PROBE-TZ"}), tenv, work, hooks=chooks)
+    mine = subprocess.run([sys.executable, "-I", "-c", TZ_PRINT], env=base_env(home), capture_output=True, text=True,
+                          timeout=SUB_TIMEOUT).stdout
+    check(f"демон: TZ вызова ({tz}) ≠ TZ демона — time.tzname, time.timezone и %z внука как у нового процесса",
+          got == (0, want, "") and want != mine and not fb_lines(home), (got, want, mine, fb_lines(home)))
+    # SIGCHLD (Д-A1, Д-B3-1): у демона SIG_IGN; ребёнок и внук — SIG_DFL: код подпроцесса внука настоящий, waitpid
+    # ребёнка не ECHILD
+    home = os.path.join(root, "cpsc")
+    os.makedirs(home)
+    install(home, client, sock)
+    got, _ = wrap(["--strict"], dict(ev, tool_input={"command": "echo PROBE-SUB"}), base_env(home), work, hooks=chooks)
+    check("демон: внук зовёт подпроцесс `sh -c 'exit 1'` — код 1, решение от демона (не откат error)",
+          got == (0, "1\n", "") and not fb_lines(home), (got, fb_lines(home)))
     # чужое дерево: клиент основного дерева на сокете демона копии
     home = os.path.join(root, "cptr")
     os.makedirs(home)
@@ -917,6 +1231,24 @@ def test_canary(root, client, sock):
     check("канарейка: расхождение — строка с хешем события FNV-1a и обоими решениями",
           len(lines) == 1 and CANARY_RE.fullmatch(lines[0]) is not None and lines[0].split("\t")[2] == fnv1a(data)
           and "slow=0:deny" in lines[0] and "daemon=0:allow" in lines[0], (lines, fnv1a(data)))
+    # Д-B2-2: канарейка не идёт на событиях шлюза слияния и когда демон думал дольше 2 с — ответ демона как есть
+    # (фальшивый «пропустить»), строк нет. Медленный путь на этих событиях отказывает: прошла бы канарейка — был бы отказ
+    for name, cmd, behaviour in (("gh pr merge", "gh pr merge 7 --merge && npm run dev", b_allow),
+                                 ("git push", "git -C . push origin main && npm run dev", b_allow),
+                                 ("pantheon review", "pantheon review accept x 1 y; npm run dev", b_allow),
+                                 ("демон ответил через 2,5 с", "npm run dev", b_allow_late)):
+        home = os.path.join(root, "cn" + str(abs(hash(name)) % 10000))
+        os.makedirs(home)
+        d = install(home, client)
+        fake = Fake(os.path.join(d, "hookd.sock"), behaviour)
+        e = dict(ev, tool_input={"command": cmd})
+        try:
+            ref, _ = slow(["--strict"], e, base_env(home), work)
+            got, _ = wrap(["--strict"], e, base_env(home), work, canary="1")
+        finally:
+            fake.close()
+        check(f"канарейка (1 из 1) не идёт: {name} — ответ демона, строк нет (медленный путь отказал бы)",
+              got == (0, "", "") and dec(ref) == "deny" and not fb_lines(home), (got, dec(ref), fb_lines(home)))
     # настоящий демон и канарейка на каждом вызове: расхождений нет
     home = os.path.join(root, "canr")
     os.makedirs(home)
@@ -954,13 +1286,18 @@ def main():
         check("демон запустился и создал сокет", os.path.exists(sock) and p.poll() is None, p.poll())
         test_daemon_refusals(root, client, sock)
         if client:
+            test_perm(root, client, sock)
             test_flag_off(root, client)
             test_equivalence(root, client, sock)
+            test_push_accepted(root, client, sock)
             test_strict_sequence(root, client, sock)
             test_failures(root, client)
+            test_double_failure(root, client)
             test_copy_daemon(root, client)
             test_canary(root, client, sock)
             test_supply(root, client)
+            test_shasum(root, client)
+            test_bench(root)
             test_log_home(root, client)
             test_background_build(root)
             # демон убит SIGKILL: сокет остался, слушателя нет — медленный путь

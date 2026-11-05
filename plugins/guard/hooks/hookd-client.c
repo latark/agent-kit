@@ -4,17 +4,20 @@
  *   client-<SRC> <сокет> <папка hooks> [аргументы guard…]      событие — на stdin, как у guard.py
  *
  * Принцип F1 (README guard): демон только ускоряет. Клиент читает stdin целиком и спрашивает демона; любой сбой
- * (каталог сокета чужой или открыт группе и прочим, нет сокета, нет «принят» за 300 мс, нет решения за 8,5 с, обрыв,
- * мусор, ответ «F <причина>») — строка «время<TAB>причина» в ~/.local/state/pantheon/logs/hookd-fallback.log (без
+ * (каталог сокета чужой или открыт группе и прочим, нет сокета, нет «принят» за 300 мс, нет решения за 7,5 с от старта
+ * клиента, обрыв, мусор, ответ «F <причина>») — строка «время<TAB>причина» в ~/.local/state/pantheon/logs/hookd-fallback.log (без
  * текста события) и медленный путь: /bin/sh <hooks>/python.sh <hooks>/guard.py <аргументы> с тем же stdin. Его код,
  * stdout и stderr — ответ клиента. Медленный путь не запустился (126, 127) или убит — двойной отказ: код 2 и причина,
  * запрет одного вызова. Коды 126 и 127 клиент не возвращает никогда: оболочка hookd.sh читает их как «клиент не
  * запустился» и сама идёт медленным путём, а stdin уже прочитан.
  * Канарейка: 1 вызов из PANTHEON_HOOKD_CANARY (по умолчанию 100; 0 — выключена) идёт обоими путями. Отдаётся решение
  * медленного пути; разошлись код, stdout или stderr — строка «время<TAB>canary-diff<TAB><хеш события FNV-1a 64>
- * <TAB>slow=<код>:<решение><TAB>daemon=<код>:<решение>» в тот же журнал.
- * Каждый read и write сокета — в пределах срока (сокет неблокирующий): демон, который завис и не читает запрос,
- * держит вызов не дольше 300 мс + 8,5 с (причина send), а не до таймаута хука.
+ * <TAB>slow=<код>:<решение><TAB>daemon=<код>:<решение>» в тот же журнал. Канарейка не идёт, если демон думал дольше
+ * CANARY_MS от старта клиента (второй проход не уложился бы в таймаут хука), и на событиях шлюза слияния (gate_event:
+ * слова gh, git … push, pantheon merge|review): второй проход удвоил бы вызовы gh и записи шлюза (перенос «принять»).
+ * Срок демона — TOTAL_MS (7,5 с) от старта клиента, а не от соединения: медленному пути до таймаута хука 10 с остаётся
+ * 2,5 с, даже если stdin пришёл не сразу. Каждый read и write сокета — в пределах срока (сокет неблокирующий): демон,
+ * который завис и не читает запрос, держит вызов не дольше TOTAL_MS (причина send), а не до таймаута хука.
  * Протокол — шапка hooks/daemon.py. Без зависимостей: cc -O2 -o client hookd-client.c. */
 #include <errno.h>
 #include <fcntl.h>
@@ -32,8 +35,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define ACK_MS 300
-#define DECIDE_MS 8500
+#define ACK_MS 300      /* «принят» — не дольше этого от соединения */
+#define TOTAL_MS 7500   /* весь разговор с демоном — от старта клиента; медленному пути до 10 с остаётся 2,5 с */
+#define CANARY_MS 2000  /* канарейка — только если демон ответил за это время от старта клиента */
 #define MAX_REQ (8u * 1024u * 1024u)
 #define CANARY_DEFAULT 100
 
@@ -67,6 +71,7 @@ static void put_json_str(buf_t *b, const char *s, size_t n) {
 static buf_t in;            /* stdin целиком */
 static const char *hooks;   /* папка hooks плагина */
 static int g_argc; static char **g_argv;
+static long long t0;        /* старт клиента, мс CLOCK_MONOTONIC: от него — срок демона и канарейки */
 
 static long long now_ms(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -350,9 +355,9 @@ static const char *ask_daemon(const char *sock, result_t *r, char *why_buf, size
     }
     fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);  /* срок держат poll и запись кусками, а не блокирующий write */
     char line[256];
-    if (read_line(s, line, sizeof line, now_ms() + ACK_MS) != 0) { close(s); free(h.p); return "no-ack"; }
+    long long deadline = t0 + TOTAL_MS, ack = now_ms() + ACK_MS;
+    if (read_line(s, line, sizeof line, ack < deadline ? ack : deadline) != 0) { close(s); free(h.p); return "no-ack"; }
     if (strcmp(line, "A") != 0) { close(s); free(h.p); return reason_of(line, why_buf, why_cap); }
-    long long deadline = now_ms() + DECIDE_MS;
     char head[64];
     int hn = snprintf(head, sizeof head, "G2 %zu %zu\n", h.n, in.n);
     if (write_all_deadline(s, head, (size_t)hn, deadline) || write_all_deadline(s, h.p, h.n, deadline)
@@ -405,6 +410,25 @@ static int canary_hit(void) {
     return z % (uint64_t)n == 0;
 }
 
+/* Слово w в событии: соседние знаки — не буква, цифра, «_», «-», «.» (gh, а не high или gh-pages). */
+static int is_word_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+}
+static int has_word(const char *w) {
+    size_t k = strlen(w);
+    if (!in.p || in.n < k) return 0;
+    for (size_t i = 0; i + k <= in.n; i++) {
+        if (memcmp(in.p + i, w, k) != 0) continue;
+        if ((i == 0 || !is_word_char(in.p[i - 1])) && (i + k == in.n || !is_word_char(in.p[i + k]))) return 1;
+    }
+    return 0;
+}
+/* Событие шлюза слияния (merge_gate.py): gh, git push, pantheon merge и review. Ложное «да» только убирает пробу. */
+static int gate_event(void) {
+    return has_word("gh") || (has_word("git") && has_word("push"))
+        || (has_word("pantheon") && (has_word("merge") || has_word("review")));
+}
+
 static int same(const result_t *a, const result_t *b) {
     return a->code == b->code && a->out.n == b->out.n && a->err.n == b->err.n
         && (a->out.n == 0 || memcmp(a->out.p, b->out.p, a->out.n) == 0)
@@ -413,6 +437,7 @@ static int same(const result_t *a, const result_t *b) {
 
 int main(int argc, char **argv) {
     g_argc = argc; g_argv = argv;
+    t0 = now_ms();
     signal(SIGPIPE, SIG_IGN);
     char tmp[65536];
     for (;;) {
@@ -431,7 +456,7 @@ int main(int argc, char **argv) {
     result_t d;
     const char *why = ask_daemon(argv[1], &d, why_buf, sizeof why_buf);
     if (why) return fallback(why);
-    if (canary_hit()) {
+    if (now_ms() - t0 <= CANARY_MS && !gate_event() && canary_hit()) {
         result_t s;
         run_slow(&s, 1);
         if (!same(&s, &d)) {

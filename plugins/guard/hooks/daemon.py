@@ -28,13 +28,24 @@ os.environ.clear() и меняет глобальные имена модуле�
 Причины F: stale — файлы правил изменились (выход демона), peer — чужой uid (LOCAL_PEERCRED), proto — чужая версия
 или мусор, big — запрос больше MAX_REQ, encoding — шапка или событие не UTF-8 (медленный путь разберёт его сам),
 locale — локаль вызова не UTF-8 (медленный путь читает событие в своей кодировке), tree — клиент из другого дерева
-плагина, version — другая версия плагина, cwd — папку вызова не открыть, killed — внук не уложился или убит, error
-— любой другой сбой. Команд управления нет.
+плагина, version — другая версия плагина, event — событие не PreToolUse (демон судит только его; остальное — медленный
+путь), cwd — папку вызова не открыть, perm — внуку отказано в доступе к файлу (EPERM, EACCES; ниже), killed — внук не
+уложился или убит, error — любой другой сбой. Команд управления нет.
+
+Отказ доступа — «F perm», а не решение (решение владельца 04.11, Д-A2). Правила guard на ошибке чтения пути идут
+дальше: realpath без strict молча оставляет симлинк нераскрытым, os.path.exists и isfile отвечают «нет», open в
+`except OSError` пропускается. У службы launchd права TCC другие, чем у окна (Desktop, Documents, Downloads, iCloud):
+внук получил бы EPERM там, где медленный путь читает файл, и пропустил бы то, что медленный путь запрещает. Поэтому во
+внуке os.stat, lstat, open, listdir, scandir, readlink, getcwd и встроенный open обёрнуты (trap_perm): первый же EPERM
+или EACCES — выход внука кодом PERM_EXIT, ответ «F perm» и медленный путь с правами окна. Папку вызова внук тоже
+пробует прочесть (scandir) до решения: git и gh во внуке в закрытой папке ответили бы иначе. Ловушка — на уровне os,
+а не в отдельных местах guard_rules: новый код правил под неё попадает сам.
 
 Устаревшие правила: при каждом соединении демон сверяет файлы hooks/*.py и .claude-plugin/plugin.json по mtime,
 размеру и inode (и их список) с тем, что загрузил. Разошлось — «F stale» и выход: launchd поднимет свежий демон по
 следующему соединению, а этот вызов идёт медленным путём. Версия плагина из plugin.json едет и в протоколе.
 """
+import errno
 import json
 import os
 import select
@@ -46,10 +57,44 @@ import time
 
 PROTO = "G2"
 MAX_REQ = 8 * 1024 * 1024  # байт шапки и события; больше — «F big», медленный путь
-DECIDE_LIMIT = 8.3  # с: guard сам кончает за DEADLINE 8 с, клиент ждёт решения 8,5 с
+# с: клиент ждёт демона не дольше 7,5 с от своего старта (TOTAL_MS в hookd-client.c) — медленному пути до таймаута хука
+# 10 с остаётся 2,5 с. Демон убивает внука раньше, и клиент получает «F killed», а не ждёт до своего срока. guard во
+# внуке своего DEADLINE 8 с не достигает: долгое решение уходит на медленный путь, где DEADLINE считается заново
+DECIDE_LIMIT = 7.0
 RECV_LIMIT = 5.0  # с на приём запроса от клиента
 IDLE_DEFAULT = 1800  # с простоя до выхода
 REASON_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz-")
+PERM_EXIT = 98  # код внука: отказ доступа к файлу (trap_perm) — «F perm». guard сам выходит 0 или 2, сбой Python — 1
+PERM_ERRNO = frozenset((errno.EPERM, errno.EACCES))
+# функции os, которыми guard читает пути; os.path (realpath, exists, isfile, isdir) берёт их из os в момент вызова
+PERM_OS = ("stat", "lstat", "open", "listdir", "scandir", "readlink", "getcwd")
+
+
+def trap_perm(on_perm):
+    """Внук: EPERM или EACCES из функций PERM_OS и встроенного open — сразу on_perm() (выход PERM_EXIT), до того как
+    правило проглотит ошибку в `except OSError`. Обёртки встают и в os.supports_* вместо исходных функций: shutil и
+    pathlib сверяют по ним, можно ли передать dir_fd или fd."""
+    import builtins
+    import io
+
+    def wrap(fn):
+        def inner(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except OSError as e:
+                if e.errno in PERM_ERRNO:
+                    on_perm()
+                raise
+        return inner
+
+    for name in PERM_OS:
+        fn = getattr(os, name)
+        w = wrap(fn)
+        setattr(os, name, w)
+        for s in (os.supports_dir_fd, os.supports_fd, os.supports_follow_symlinks, os.supports_effective_ids):
+            if fn in s:
+                s.add(w)
+    builtins.open = io.open = wrap(builtins.open)
 
 
 def log(msg):
@@ -218,6 +263,9 @@ class Daemon:
 
     def serve(self, conn):
         """Ребёнок на соединение. Не возвращается."""
+        # SIG_IGN у родителя (loop) наследуется. На macOS waitpid ребёнка при SIG_IGN ждёт выхода внука и даёт ECHILD
+        # — «F error» на каждый вызов. На Linux так же, и ещё subprocess во внуке (git, gh шлюза слияния) при ECHILD
+        # получает код 0 вместо настоящего — правило решило бы мягче. Тест test_hookd: внук зовёт подпроцесс с кодом 1
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         try:
             if peer_uid(conn) != self.uid:
@@ -253,11 +301,17 @@ class Daemon:
         try:
             hdr = json.loads(recv_exact(conn, n_hdr).decode("utf-8"))
             raw = recv_exact(conn, n_in)
-            raw.decode("utf-8")  # как разберёт медленный путь кодировку не UTF-8 — решает он сам
+            text = raw.decode("utf-8")  # как разберёт медленный путь кодировку не UTF-8 — решает он сам
         except UnicodeDecodeError:
             raise Refuse("encoding") from None
         except ValueError:
             raise Refuse("proto") from None
+        try:  # демон судит только PreToolUse (hooks.json зовёт hookd.sh только на нём); прочее и мусор — медленный путь
+            ev = json.loads(text)
+        except ValueError:
+            ev = None
+        if not (isinstance(ev, dict) and ev.get("hook_event_name") == "PreToolUse"):
+            raise Refuse("event")
         if not (isinstance(hdr, dict) and isinstance(hdr.get("argv"), list)
                 and all(isinstance(x, str) for x in hdr["argv"]) and isinstance(hdr.get("cwd"), str)
                 and isinstance(hdr.get("env"), dict)
@@ -296,9 +350,12 @@ class Daemon:
                 sys.stdin = open(0, encoding="utf-8", errors="strict", closefd=False)
                 sys.stdout = open(1, "w", encoding="utf-8", closefd=False)
                 sys.stderr = open(2, "w", encoding="utf-8", errors="backslashreplace", closefd=False)
+                trap_perm(lambda: os._exit(PERM_EXIT))
+                with os.scandir(".") as it:  # папка вызова не читается (TCC, права) — «F perm»
+                    next(it, None)
                 os.umask(hdr["umask"])  # файлы журналов и меток — с правами, как у медленного пути
                 self.guard.set_context(hdr["argv"], hdr["env"])
-                time.tzset()  # время в журналах — по TZ вызова
+                time.tzset()  # TZ вызова: time.tzname, time.timezone; на Linux и время strftime
                 self.guard.run(hdr["argv"], raw)
             finally:
                 os._exit(99)  # guard.run не возвращается: сюда — только сбой самого демона
@@ -324,6 +381,8 @@ class Daemon:
         code = os.waitstatus_to_exitcode(status)
         if code < 0:
             raise Refuse("killed")
+        if code == PERM_EXIT:
+            raise Refuse("perm")
         if code == 99:
             raise Refuse("error")
         return code, bytes(bufs[o_r]), bytes(bufs[e_r])
