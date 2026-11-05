@@ -5,6 +5,9 @@
   имя, а не os.remove — на APFS один файл успешно удаляют несколько процессов разом (Д-A);
 - оболочка из hooks.json запускает python только при отметке своего процесса (<CLAUDE_PID>.<sid>.json, Д1);
 - снятие старой отметки не уносит только что записанную новую (Д4: deferred_compact, sweep_deferred);
+- после claude -r, respawn и /resume отметка переходит в продолженную сессию по sid и выдаётся один раз; отметки
+  других сессий не трогаются; отметки умершего процесса и прошлой сессии процесса ждут на стоянке parked.<sid> (metis-0816);
+  перенос — link (inode и mtime те же), сбой ФС при переносе SessionStart не роняет, две start resume — вставка одна;
 - prune_records (ctx.py, бывшая строка 791) не ломает замок: удаление файла и его замка — под самим замком, а locked
   после захвата сверяет, что запер файл под этим именем.
 
@@ -187,7 +190,7 @@ spec = importlib.util.spec_from_file_location("ctx_race", hook)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 ev = m.read_event()
-fn = {"deferred": m.cmd_deferred, "clock": m.cmd_clock, "maint-post": m.cmd_maint_post}[cmd]
+fn = {"deferred": m.cmd_deferred, "clock": m.cmd_clock, "maint-post": m.cmd_maint_post, "start": m.cmd_start}[cmd]
 open(go + "." + str(os.getpid()), "w").close()
 while not os.path.exists(go):
     time.sleep(0.0002)
@@ -272,11 +275,14 @@ for p in (mark_of("s-gone", str(dead.pid)), mark_of("s-old"), mark_of("s-other",
         json.dump({"session_id": "x", "t": time.time(), "role": ""}, fh)
 r = run("start", {"session_id": "s-new", "transcript_path": os.path.join(home, "tr", "s-new.jsonl"), "source": "clear"})
 left = sorted(os.listdir(DEFD))
-check("start: свежая отметка умершего процесса снята сразу", os.path.basename(mark_of("s-gone", str(dead.pid))) not in left,
-      left)
-check("start: отметка прошлой сессии этого процесса (/clear) снята, живого чужого процесса — цела",
-      os.path.basename(mark_of("s-old")) not in left and os.path.basename(mark_of("s-other", "1")) in left, left)
-os.remove(mark_of("s-other", "1"))
+check("start: свежая отметка умершего процесса ушла из его PID на стоянку parked.<sid> (metis-0816)",
+      os.path.basename(mark_of("s-gone", str(dead.pid))) not in left and "parked.s-gone.json" in left, left)
+check("start: отметка прошлой сессии этого процесса (/clear) — на стоянке, живого чужого процесса — цела",
+      os.path.basename(mark_of("s-old")) not in left and "parked.s-old.json" in left
+      and os.path.basename(mark_of("s-other", "1")) in left, left)
+check("оболочка: отметок своего PID не осталось → python не запускается", shell(PID) == ("", 0), shell(PID))
+for x in (mark_of("s-other", "1"), mark_of("s-gone", "parked"), mark_of("s-old", "parked")):
+    os.remove(x)
 with open(mark_of("s-new"), "w") as fh:
     json.dump({"session_id": "s-new", "t": time.time(), "role": ""}, fh)
 run("start", {"session_id": "s-new", "transcript_path": os.path.join(home, "tr", "s-new.jsonl"), "source": "resume"})
@@ -284,6 +290,241 @@ check("start той же сессии свою свежую отметку не 
 r = run("start", {"session_id": "s-new2", "transcript_path": os.path.join(home, "tr", "s-new.jsonl"), "source": "clear"},
         CLAUDE_CODE_ENTRYPOINT="sdk-cli")
 check("start в claude -p (sdk) отметки процесса не трогает", os.path.exists(mark_of("s-new")), os.listdir(DEFD))
+shutil.rmtree(DEFD)
+
+# --- metis-0816: claude -r, respawn и /resume — отметка переходит в продолженную сессию по sid ---------------------
+
+
+def tool_ev(ev):
+    return dict(ev, hook_event_name="PostToolUse", tool_name="Read", prompt="x", source=None)
+
+
+def deliveries(ev, cmds=("deferred", "clock", "deferred", "maint-post"), **env):
+    """Какие хуки подряд выдали вставку (кодовое слово из файла передачи дел)."""
+    return [("СЛИВА" in ctx_text(run(c, tool_ev(ev), **env).stdout)) for c in cmds]
+
+
+def defer_at(sid, pid):
+    """Сжатие при живом субагенте в процессе pid → отметка pid.sid; граница сжатия — следом в транскрипт."""
+    ev = session(sid)
+    live_sub(ev["transcript_path"], sid)
+    run("start", ev, CLAUDE_PID=pid)
+    ok = os.path.exists(mark_of(sid, pid))
+    append(ev["transcript_path"], boundary(time.time() + 1))
+    return ev, ok
+
+
+def ls():
+    return sorted(os.listdir(DEFD)) if os.path.isdir(DEFD) else []
+
+
+# claude -r / respawn: старый процесс умер, между его смертью и продолжением стартует другая сессия Mac (чистка)
+old_proc = subprocess.Popen(["sleep", "60"])
+ev_r, ok = defer_at("s-cr", str(old_proc.pid))
+old_proc.kill()
+old_proc.wait()
+run("start", {"session_id": "s-bystander", "transcript_path": os.path.join(home, "tr", "s-by.jsonl"), "source": "startup"},
+    CLAUDE_PID="1")
+check("claude -r: отметка умершего процесса чисткой другой сессии не снята, а ушла на стоянку",
+      ok and "parked.s-cr.json" in ls() and os.path.basename(mark_of("s-cr", str(old_proc.pid))) not in ls(), ls())
+run("start", dict(ev_r, source="resume"))  # новый процесс (CLAUDE_PID = PID), тот же sid
+check("claude -r: start продолженной сессии перенёс отметку в своё имя <новый PID>.<sid>, стоянка пуста",
+      ls() == [os.path.basename(mark_of("s-cr"))], ls())
+check("claude -r: оболочка hooks.json нового процесса видит перенесённую отметку", shell(PID) == (started, 0), shell(PID))
+got = deliveries(ev_r)
+check("claude -r: вставка старой сессии выдана в продолженную ровно один раз (deferred, clock, deferred, maint-post)",
+      got.count(True) == 1 and ls() == [], (got, ls()))
+
+# respawn, пока старый процесс ещё жив: отметку забирает продолженная сессия, старый процесс её больше не выдаёт
+old_proc = subprocess.Popen(["sleep", "60"])
+try:
+    ev_r, ok = defer_at("s-rs", str(old_proc.pid))
+    run("start", dict(ev_r, source="resume"))
+    moved = ls() == [os.path.basename(mark_of("s-rs"))]
+    got = deliveries(ev_r, ("deferred",), CLAUDE_PID=str(old_proc.pid)) + deliveries(ev_r)
+finally:
+    old_proc.kill()
+    old_proc.wait()
+check("respawn при живом старом процессе: отметка перенесена, выдача одна — в новом процессе, не в старом",
+      ok and moved and got == [False, True, False, False, False] and ls() == [], (ok, moved, got, ls()))
+
+# /resume в том же процессе после /clear: отметка ждёт на стоянке, /resume обратно её забирает
+ev_c, ok = defer_at("s-back", PID)
+run("start", {"session_id": "s-other2", "transcript_path": os.path.join(home, "tr", "s-o2.jsonl"), "source": "clear"})
+parked = ls() == ["parked.s-back.json"] and shell(PID) == ("", 0)
+run("start", dict(ev_c, source="resume"))
+got = deliveries(ev_c)
+check("/resume обратно после /clear: отметка со стоянки вернулась, вставка выдана один раз",
+      ok and parked and got.count(True) == 1 and ls() == [], (ok, parked, got, ls()))
+
+# отметки других сессий продолжение не трогает: ни живого чужого процесса, ни стоянки, ни sid с тем же началом
+ev_m = session("s-mine")
+alien = {mark_of("s-alien", "1"): b'{"session_id": "s-alien", "t": %f}' % time.time(),
+         mark_of("s-alien2", "parked"): b'{"session_id": "s-alien2", "t": %f}' % time.time(),
+         mark_of("s-mine2", "1"): b'{"session_id": "s-mine2", "t": %f}' % time.time()}
+os.makedirs(DEFD, exist_ok=True)
+for x, b in alien.items():
+    with open(x, "wb") as fh:
+        fh.write(b)
+before = {x: os.stat(x).st_ino for x in alien}
+run("start", dict(ev_m, source="resume"))
+got = deliveries(ev_m, ("deferred", "clock"))
+check("чужие отметки (другой sid, в том числе s-mine2) не перенесены и не выданы: имена, байты и inode те же",
+      got == [False, False] and ls() == sorted(os.path.basename(x) for x in alien)
+      and all(open(x, "rb").read() == b and os.stat(x).st_ino == before[x] for x, b in alien.items()), (got, ls()))
+for x in alien:
+    os.remove(x)
+
+# у продолженной сессии уже есть своя отметка: остаётся она, перенесённая снимается, выдача одна
+ev_d, ok = defer_at("s-dup", PID)
+own_b = open(mark_of("s-dup"), "rb").read() if ok else b""
+with open(mark_of("s-dup", "1"), "w") as fh:
+    json.dump({"session_id": "s-dup", "t": time.time(), "role": "", "tp": "", "off": None}, fh)
+run("start", dict(ev_d, source="resume"))
+kept = ls() == [os.path.basename(mark_of("s-dup"))] and open(mark_of("s-dup"), "rb").read() == own_b
+got = deliveries(ev_d)
+check("своя отметка и чужая того же sid: своя цела, чужая снята, вставка одна",
+      ok and kept and got.count(True) == 1 and ls() == [], (ok, kept, got, ls()))
+
+# claude -p (sdk) с тем же sid отметку не забирает — её ждёт продолжение в окне
+with open(mark_of("s-sdk", "1"), "w") as fh:
+    json.dump({"session_id": "s-sdk", "t": time.time()}, fh)
+run("start", {"session_id": "s-sdk", "transcript_path": os.path.join(home, "tr", "s-sdk.jsonl"), "source": "resume"},
+    CLAUDE_CODE_ENTRYPOINT="sdk-cli")
+check("claude -p -r (sdk): отметку той же сессии не переносит", ls() == [os.path.basename(mark_of("s-sdk", "1"))], ls())
+os.remove(mark_of("s-sdk", "1"))
+
+# стоянка подчиняется срокам чистки: без границы старше 15 мин — снята, свежая — цела
+for sid, age in (("s-p-old", 1000), ("s-p-new", 100)):
+    with open(mark_of(sid, "parked"), "w") as fh:
+        json.dump({"session_id": sid, "t": time.time() - age, "tp": "", "off": None}, fh)
+    os.utime(mark_of(sid, "parked"), (time.time() - age, time.time() - age))
+ctx.sweep_deferred()
+check("стоянка: просроченная без границы снята, свежая цела", ls() == ["parked.s-p-new.json"], ls())
+shutil.rmtree(DEFD)
+
+# стоянка с границей сжатия: её ждут сутки (DEFER_DEAD), старше — снимается
+os.makedirs(DEFD, exist_ok=True)
+tpb = os.path.join(home, "tr", "s-pb.jsonl")
+open(tpb, "w").close()
+append(tpb, boundary(time.time() - 60))
+for sid, age in (("s-pb-day", 90000), ("s-pb-2h", 7200)):
+    with open(mark_of(sid, "parked"), "w") as fh:
+        json.dump({"session_id": sid, "t": time.time() - age, "tp": tpb, "off": None}, fh)
+    os.utime(mark_of(sid, "parked"), (time.time() - age, time.time() - age))
+ctx.sweep_deferred()
+check("стоянка с границей сжатия: старше суток снята, 2 ч — цела", ls() == ["parked.s-pb-2h.json"], ls())
+shutil.rmtree(DEFD)
+
+# move_mark: dst не записать (папки нет) — отметка возвращается на место, хвостов .claim нет
+os.makedirs(DEFD, exist_ok=True)
+pa = mark_of("s-mv", "1")
+ba = b'{"session_id": "s-mv", "t": %f}' % time.time()
+with open(pa, "wb") as fh:
+    fh.write(ba)
+got = ctx.move_mark(pa, ba, os.path.join(DEFD, "nodir", "x.json"))
+check("move_mark: сбой link в dst → None, отметка на месте с теми же байтами, хвостов .claim нет",
+      got is None and ls() == [os.path.basename(pa)] and open(pa, "rb").read() == ba, (got, ls()))
+shutil.rmtree(DEFD)
+
+# две start resume одного sid в разных процессах разом: переносит один, вставка ровно одна
+sl = [subprocess.Popen(["sleep", "300"]) for _ in range(2)]
+pids2 = [str(s.pid) for s in sl]
+ev_2 = session("s-2r")
+off2 = os.path.getsize(ev_2["transcript_path"])
+append(ev_2["transcript_path"], boundary(time.time() + 1))
+mk2 = json.dumps({"session_id": "s-2r", "t": time.time(), "role": "", "tp": ev_2["transcript_path"], "off": off2}).encode()
+bad2, rounds2 = [], 10
+try:
+    for i in range(rounds2):
+        os.makedirs(DEFD, exist_ok=True)
+        with open(mark_of("s-2r", "parked"), "wb") as fh:
+            fh.write(mk2)
+        go = os.path.join(tmp, "go2-%d" % i)
+        ps = [subprocess.Popen([PY, "-I", RUNNER, HOOK, "start", go], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=dict(BASE, CLAUDE_PID=p), text=True) for p in pids2]
+        for pr in ps:
+            pr.stdin.write(json.dumps(dict(ev_2, source="resume")))
+            pr.stdin.close()
+            pr.stdin = None
+        deadline = time.time() + 30
+        while time.time() < deadline and sum(n.startswith("go2-%d." % i) for n in os.listdir(tmp)) < len(ps):
+            time.sleep(0.005)
+        open(go, "w").close()
+        for pr in ps:
+            pr.communicate(timeout=60)
+        after = ls()
+        got = ["СЛИВА" in ctx_text(run(c, tool_ev(ev_2), CLAUDE_PID=p).stdout) for p in pids2 for c in ("deferred", "clock")]
+        if got.count(True) != 1 or len(after) != 1 or ls():
+            bad2.append((got, after, ls()))
+finally:
+    for s in sl:
+        s.kill()
+        s.wait()
+check("гонка двух start resume одного sid × %d: после них одна отметка, вставка ровно одна, хвостов нет" % rounds2,
+      not bad2, bad2[:3])
+shutil.rmtree(DEFD, ignore_errors=True)
+
+# перенос (park и adopt) идёт link, а не копией: inode и время записи те же — срок отметки не продлевается
+dead = subprocess.Popen([PY, "-I", "-c", "pass"])
+dead.wait()
+os.makedirs(DEFD, exist_ok=True)
+p = mark_of("s-mt", str(dead.pid))
+with open(p, "w") as fh:
+    json.dump({"session_id": "s-mt", "t": time.time() - 300, "tp": "", "off": None}, fh)
+os.utime(p, (time.time() - 300, time.time() - 300))
+st0 = os.stat(p)
+ctx.sweep_deferred()
+pk = mark_of("s-mt", "parked")
+st1 = os.stat(pk) if os.path.exists(pk) else None
+check("стоянка (park): inode и mtime отметки те же, что до переноса",
+      st1 is not None and (st1.st_ino, st1.st_mtime_ns) == (st0.st_ino, st0.st_mtime_ns),
+      (ls(), st0, st1))
+ctx.adopt_marks("s-mt")
+st2 = os.stat(mark_of("s-mt")) if os.path.exists(mark_of("s-mt")) else None
+check("продолжение (adopt): inode и mtime отметки те же, что до переноса, стоянка пуста",
+      st2 is not None and (st2.st_ino, st2.st_mtime_ns) == (st0.st_ino, st0.st_mtime_ns) and ls() == ["%s.s-mt.json" % PID],
+      (ls(), st0, st2))
+shutil.rmtree(DEFD)
+
+
+# сбой ФС при переносе (не ENOENT) не роняет SessionStart: вставка после сжатия, часы и чистка выдаются (Б1 круга 1)
+def hlog_has(s):
+    try:
+        with open(HLOG, encoding="utf-8") as fh:
+            return s in fh.read()
+    except OSError:
+        return False
+
+
+os.makedirs(DEFD, exist_ok=True)
+ev_ro = session("s-ro")
+pk = mark_of("s-ro", "parked")
+body = b'{"session_id": "s-ro", "t": %f}' % time.time()
+with open(pk, "wb") as fh:
+    fh.write(body)
+os.chmod(DEFD, 0o555)
+try:
+    r = run("start", ev_ro)
+finally:
+    os.chmod(DEFD, 0o755)
+check("deferred только для чтения + отметка этого sid на стоянке: SessionStart:compact выдаёт вставку, код 0",
+      r.returncode == 0 and "СЛИВА" in ctx_text(r.stdout), (r.returncode, r.stdout[:200], r.stderr[-300:]))
+check("deferred только для чтения: отметка не потеряна (байты те же), сбой переноса — в журнале хуков",
+      ls() == ["parked.s-ro.json"] and open(pk, "rb").read() == body and hlog_has("parked.s-ro.json не перенесена"),
+      ls())
+os.remove(pk)
+
+ev_ln = session("s-long")
+n = "9" * (255 - len(".s-long.json") - 2) + ".s-long.json"  # своё имя влезает в NAME_MAX, имя .claim — нет
+pl = os.path.join(DEFD, n)
+with open(pl, "wb") as fh:
+    fh.write(b'{"session_id": "s-long", "t": %f}' % time.time())
+r = run("start", ev_ln)
+check("имя .claim длиннее NAME_MAX: SessionStart:compact выдаёт вставку, код 0",
+      r.returncode == 0 and "СЛИВА" in ctx_text(r.stdout), (r.returncode, r.stdout[:200], r.stderr[-300:]))
+check("имя .claim длиннее NAME_MAX: отметка на месте, сбой переноса — в журнале хуков",
+      ls() == [n] and hlog_has("%s не перенесена" % n), ls())
 shutil.rmtree(DEFD)
 
 # --- ctx.py:791 prune_records: двойной захват замка -------------------------------------------------------------
