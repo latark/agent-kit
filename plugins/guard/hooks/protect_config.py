@@ -91,6 +91,12 @@ CLONE_OPT_ARG = {"-o", "--origin", "-b", "--branch", "-u", "--upload-pack", "--r
                  "--server-option", "-j", "--jobs", "--template", "--filter", "--bundle-uri", "--ref-format"}
 
 
+# metis-0823: слова настроек репозитория в слове неразобранной цели (без подстановок) — отказ: <репо>/.claude как
+# цель и его settings, agents, hooks, skills, commands; .mcp.json; .git/hooks и .git/config. «.claude/worktrees/…» — нет
+PROTECTED_WORDS = re.compile(r"\.claude(?:/(?:settings|agents|hooks|skills|commands)|/?(?![\w./-]))|\.mcp\.json|"
+                             r"\.git/(?:hooks|config)", re.I)
+
+
 def _repo_or_above(t):
     """Папка — репозиторий (в ней .git или .claude) или папка над репозиториями (такой у неё ребёнок; во временных
     папках детей не смотрим). Дерево, положенное сюда, может принести <репо>/.claude/settings.json или agents."""
@@ -346,7 +352,7 @@ def check_protect_config(event, tool, tool_input):
     cwd, targets = G.write_targets(event, tool, tool_input)
     # metis-0823: неразобранная цель проходит, только если её папка в $TMPDIR, кэше окна или своей worktree —
     # и эту папку судят как обычную цель
-    dirs = G.unresolved_dirs(event, tool, tool_input) if G.UNRESOLVED in targets else []
+    dirs = G.unresolved_dirs(event, tool, tool_input, protected(), PROTECTED_WORDS) if G.UNRESOLVED in targets else []
     if dirs is None:
         return G.UNRESOLVED_REASON + G.UNRESOLVED_SAFE
     targets = [p for p in targets if p != G.UNRESOLVED] + dirs

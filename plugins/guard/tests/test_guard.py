@@ -1634,7 +1634,14 @@ def main():
             ("tee в файл из переменной", 'echo x | tee "$OUT"'),
             ("чужой проект", 'echo x > ~/projects/other/x/"$(date +%s).md"'),
             ("{…}: явная цель рядом с $TMPDIR судится", 'echo x > {~/.claude/settings.json,"$TMPDIR/$F"}'),
-            ("protect-config: .claude/hooks своей worktree", 'for f in $(ls); do echo x > ".claude/hooks/$f"; done'))],
+            ("protect-config: .claude/hooks своей worktree", 'for f in $(ls); do echo x > ".claude/hooks/$f"; done'),
+            # вторая фоновая проверка: «..» после подстановки, зона и слово настроек в слове цели
+            ("«..» после подстановки уходит из папки", 'echo x > "out/$(date +%s)/../../../../projects/other/y/a.md"'),
+            ("зона в слове цели после подстановки", 'echo x > "$TMPDIR/$(date +%s)/ai/pantheon/board.md"'),
+            ("protect-config: слово настроек после подстановки", 'echo x > "out/$(date +%s).claude/settings.json"'))],
+        # корень репозитория, равный зоне или над ней, — не «своя worktree»: ~/.claude сам репозиторий
+        ("0823 неразобранная цель: корень-зона ~/.claude — отказ", "deny", ".claude", "dev-sonnet", True,
+         B('for f in $(ls); do echo x > "skills/$f.md"; done')),
         *[(f"0823 неразобранная цель у зон: {n} — отказ", "deny", d, "dev-sonnet", True, B(c)) for n, d, c in (
             ("cd ~/ai/pantheon", br, 'cd ~/ai/pantheon && echo x > "$(date +%s).md"'),
             ("cd ~/ai — папка над зоной", br, 'cd ~/ai && echo x > "$F"'),

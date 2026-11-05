@@ -1520,14 +1520,18 @@ _ZSH_OPT_GLOB = re.compile(r"[\^#~!@+()|<>]")
 class _Unres(str):
     """UNRESOLVED с папками, куда идёт неразобранная цель (metis-0823): буквальная часть слова до первой подстановки —
     `"$TMPDIR/$f.log"` пишет в $TMPDIR, `out/$n` — в <папка>/out. base None — папку не вычислить: слово начинается с
-    подстановки (`"$f.bak"`, `"$R/x"` — значение может быть любым путём) или папка команды неизвестна."""
+    подстановки (`"$f.bak"`, `"$R/x"` — значение может быть любым путём), после подстановки есть «..»
+    (`out/$(x)/../../.claude/x` уходит из out) или папка команды неизвестна. text — слово без подстановок: по нему
+    судят, называет ли цель зону или настройки репозитория."""
     base = None
+    text = ""
 
 
 def _unres(st, lit):
     u = _Unres(UNRESOLVED)
-    pre = lit.split(_DYN, 1)[0]
-    if pre:
+    u.text = lit.replace(_DYN, "")
+    pre, rest = lit.split(_DYN, 1)
+    if pre and ".." not in rest.replace(_DYN, "/").split("/"):
         d = pre.rsplit("/", 1)[0] + "/" if "/" in pre else ""
         if d.startswith("/"):
             u.base = (os.path.realpath(d),)
@@ -2328,12 +2332,12 @@ def bash_analysis(cmd, cwd):
         res = sorted(set(st.out)), st.cmds
         _READS[(cmd, cwd)] = sorted(set(st.reads))
         _CWDS[(cmd, cwd)] = list(st.cwds)
-        _UNRES[(cmd, cwd)] = [getattr(p, "base", None) for p in st.out if p == UNRESOLVED]
+        _UNRES[(cmd, cwd)] = [(getattr(p, "base", None), getattr(p, "text", "")) for p in st.out if p == UNRESOLVED]
     except (_ParseError, RecursionError, ValueError, OSError):
         res = [UNRESOLVED], []
         _READS[(cmd, cwd)] = [UNRESOLVED]
         _CWDS[(cmd, cwd)] = [None]
-        _UNRES[(cmd, cwd)] = [None]
+        _UNRES[(cmd, cwd)] = [(None, "")]
     _ANALYSIS[(cmd, cwd)] = res
     return res
 
@@ -2354,25 +2358,35 @@ def bash_cwds(cmd, cwd):
     return _CWDS.get((cmd, cwd), [None])
 
 
-def unresolved_dirs(event, tool, tool_input):
+def unresolved_dirs(event, tool, tool_input, zones, words=None):
     """metis-0823: папки неразобранных целей записи Bash, если каждая лежит в $TMPDIR (/tmp), кэше окна
     ($PANTHEON_TMP, ~/Library/Caches/pantheon-sandbox) или своей worktree (репозиторий папки события); иначе None —
     отказ, как до 0823. Папки правило затем судит как обычные цели: `.claude/hooks/$f` в своей worktree — отказ
-    protect-config. Путь в значении подстановки (`"$TMPDIR/$f"` с f=../..) — намеренный обход, граница — песочница."""
+    protect-config. Разрешённый корень, равный зоне правила, её предку или потомку, не считается (~/ai/pantheon — сам
+    репозиторий). Отказ и тогда, когда слово цели без подстановок называет зону или слово настроек (words).
+    Путь в значении подстановки (`"$TMPDIR/$f"` с f=../..) — намеренный обход, граница — песочница."""
     if tool != "Bash":
         return None
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     cmd = tool_input.get("command") or ""
     bash_analysis(cmd, cwd)
-    bases = _UNRES.get((cmd, cwd)) or [None]
-    if any(b is None for b in bases):
+    found = _UNRES.get((cmd, cwd)) or [(None, "")]
+    if any(b is None for b, _ in found):
         return None
+    homes = {HOME, os.path.realpath(HOME)}
+    frags = {_key(f) for z in zones for f in {z} | {z[len(h) + 1:] for h in homes if _inside(z, [h]) and _key(z) != _key(h)}
+             if f}
+    for _, text in found:
+        if any(f in _key(text) for f in frags) or (words and words.search(text)):
+            return None
+    bases = [b for b, _ in found]
     roots = [r for r in TEMP_ROOTS if r != os.path.realpath("/dev/null")]
     roots += [os.path.realpath(p) for p in (os.environ.get("PANTHEON_TMP"),
                                             os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")) if p]
     top = _git_top(cwd)
     if _inside(top, [HOME]) and _key(top) != _key(HOME):
         roots.append(top)
+    roots = [r for r in roots if not any(_inside(r, [z]) or _inside(z, [r]) for z in zones)]
     dirs = sorted({d for b in bases for d in b})
     return dirs if all(_inside(d, roots) for d in dirs) else None
 
@@ -2624,7 +2638,8 @@ def check_pantheon(event, tool, tool_input):
         return None
     # metis-0823: неразобранная цель проходит, только если её папка в $TMPDIR, кэше окна или своей worktree
     # (unresolved_dirs) — и эту папку судит карта прав как обычную цель
-    dirs = unresolved_dirs(event, tool, tool_input) if UNRESOLVED in targets and pantheon_role else []
+    zones = [PANTHEON, PANTHEON_VIEW, STATE_DIR]
+    dirs = unresolved_dirs(event, tool, tool_input, zones) if UNRESOLVED in targets and pantheon_role else []
     if dirs is None:
         return UNRESOLVED_REASON + UNRESOLVED_SAFE
     targets = [p for p in targets if p != UNRESOLVED] + dirs
