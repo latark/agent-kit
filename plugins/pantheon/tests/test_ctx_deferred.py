@@ -7,6 +7,7 @@
 - снятие старой отметки не уносит только что записанную новую (Д4: deferred_compact, sweep_deferred);
 - после claude -r, respawn и /resume отметка переходит в продолженную сессию по sid и выдаётся один раз; отметки
   других сессий не трогаются; отметки умершего процесса и прошлой сессии процесса ждут на стоянке parked.<sid> (metis-0816);
+  перенос — link (inode и mtime те же), сбой ФС при переносе SessionStart не роняет, две start resume — вставка одна;
 - prune_records (ctx.py, бывшая строка 791) не ломает замок: удаление файла и его замка — под самим замком, а locked
   после захвата сверяет, что запер файл под этим именем.
 
@@ -189,7 +190,7 @@ spec = importlib.util.spec_from_file_location("ctx_race", hook)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 ev = m.read_event()
-fn = {"deferred": m.cmd_deferred, "clock": m.cmd_clock, "maint-post": m.cmd_maint_post}[cmd]
+fn = {"deferred": m.cmd_deferred, "clock": m.cmd_clock, "maint-post": m.cmd_maint_post, "start": m.cmd_start}[cmd]
 open(go + "." + str(os.getpid()), "w").close()
 while not os.path.exists(go):
     time.sleep(0.0002)
@@ -401,6 +402,68 @@ for sid, age in (("s-p-old", 1000), ("s-p-new", 100)):
 ctx.sweep_deferred()
 check("стоянка: просроченная без границы снята, свежая цела", ls() == ["parked.s-p-new.json"], ls())
 shutil.rmtree(DEFD)
+
+# стоянка с границей сжатия: её ждут сутки (DEFER_DEAD), старше — снимается
+os.makedirs(DEFD, exist_ok=True)
+tpb = os.path.join(home, "tr", "s-pb.jsonl")
+open(tpb, "w").close()
+append(tpb, boundary(time.time() - 60))
+for sid, age in (("s-pb-day", 90000), ("s-pb-2h", 7200)):
+    with open(mark_of(sid, "parked"), "w") as fh:
+        json.dump({"session_id": sid, "t": time.time() - age, "tp": tpb, "off": None}, fh)
+    os.utime(mark_of(sid, "parked"), (time.time() - age, time.time() - age))
+ctx.sweep_deferred()
+check("стоянка с границей сжатия: старше суток снята, 2 ч — цела", ls() == ["parked.s-pb-2h.json"], ls())
+shutil.rmtree(DEFD)
+
+# move_mark: dst не записать (папки нет) — отметка возвращается на место, хвостов .claim нет
+os.makedirs(DEFD, exist_ok=True)
+pa = mark_of("s-mv", "1")
+ba = b'{"session_id": "s-mv", "t": %f}' % time.time()
+with open(pa, "wb") as fh:
+    fh.write(ba)
+got = ctx.move_mark(pa, ba, os.path.join(DEFD, "nodir", "x.json"))
+check("move_mark: сбой link в dst → None, отметка на месте с теми же байтами, хвостов .claim нет",
+      got is None and ls() == [os.path.basename(pa)] and open(pa, "rb").read() == ba, (got, ls()))
+shutil.rmtree(DEFD)
+
+# две start resume одного sid в разных процессах разом: переносит один, вставка ровно одна
+sl = [subprocess.Popen(["sleep", "300"]) for _ in range(2)]
+pids2 = [str(s.pid) for s in sl]
+ev_2 = session("s-2r")
+off2 = os.path.getsize(ev_2["transcript_path"])
+append(ev_2["transcript_path"], boundary(time.time() + 1))
+mk2 = json.dumps({"session_id": "s-2r", "t": time.time(), "role": "", "tp": ev_2["transcript_path"], "off": off2}).encode()
+bad2, rounds2 = [], 10
+try:
+    for i in range(rounds2):
+        os.makedirs(DEFD, exist_ok=True)
+        with open(mark_of("s-2r", "parked"), "wb") as fh:
+            fh.write(mk2)
+        go = os.path.join(tmp, "go2-%d" % i)
+        ps = [subprocess.Popen([PY, "-I", RUNNER, HOOK, "start", go], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=dict(BASE, CLAUDE_PID=p), text=True) for p in pids2]
+        for pr in ps:
+            pr.stdin.write(json.dumps(dict(ev_2, source="resume")))
+            pr.stdin.close()
+            pr.stdin = None
+        deadline = time.time() + 30
+        while time.time() < deadline and sum(n.startswith("go2-%d." % i) for n in os.listdir(tmp)) < len(ps):
+            time.sleep(0.005)
+        open(go, "w").close()
+        for pr in ps:
+            pr.communicate(timeout=60)
+        after = ls()
+        got = ["СЛИВА" in ctx_text(run(c, tool_ev(ev_2), CLAUDE_PID=p).stdout) for p in pids2 for c in ("deferred", "clock")]
+        if got.count(True) != 1 or len(after) != 1 or ls():
+            bad2.append((got, after, ls()))
+finally:
+    for s in sl:
+        s.kill()
+        s.wait()
+check("гонка двух start resume одного sid × %d: после них одна отметка, вставка ровно одна, хвостов нет" % rounds2,
+      not bad2, bad2[:3])
+shutil.rmtree(DEFD, ignore_errors=True)
 
 # перенос (park и adopt) идёт link, а не копией: inode и время записи те же — срок отметки не продлевается
 dead = subprocess.Popen([PY, "-I", "-c", "pass"])
