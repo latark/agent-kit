@@ -297,12 +297,13 @@
    "PLR0912": {
     "_qmd_why": 16,
     "cmd_owner_log": 28,
+    "cmd_start": 13,
     "previous_assistant_text": 13
    },
    "PLR0915": {
     "cmd_owner_log": 74
    },
-   "lines": 2389
+   "lines": 2539
   },
   "plugins/pantheon/hooks/dev-stop-verify.py": {
    "PLR0912": {
@@ -380,7 +381,7 @@
    "PLR0912": {
     "plan": 19
    },
-   "lines": 177
+   "lines": 302
   },
   "plugins/pantheon/lib/boardtext.py": {
    "PLR0912": {
@@ -586,6 +587,7 @@
    "PLR0915": {
     "_role_apply": 59,
     "_services_sync": 56,
+    "board_owner_sync": 55,
     "check": 110,
     "direction_init": 69,
     "domains_build": 54,
@@ -596,7 +598,7 @@
     "status": 168,
     "tick": 86
    },
-   "lines": 7428
+   "lines": 7613
   },
   "plugins/pantheon/lib/pconfig.py": {
    "lines": 106
@@ -730,16 +732,16 @@
   },
   "plugins/pantheon/lib/taskcli.py": {
    "C901": {
-    "task_cmd": 73
+    "_task_cmd": 74
    },
    "PLR0912": {
-    "task_cmd": 74
+    "_task_cmd": 75
    },
    "PLR0915": {
-    "task_cmd": 188
+    "_task_cmd": 190
    },
-   "backrefs": 55,
-   "lines": 563
+   "backrefs": 58,
+   "lines": 595
   },
   "plugins/pantheon/lib/tasks.py": {
    "C901": {
@@ -765,13 +767,13 @@
     "task_new": 17
    },
    "PLR0915": {
-    "_task_set_locked": 51,
+    "_task_set_locked": 52,
     "board_sync": 257,
     "check_head": 65,
     "render_card": 75,
     "task_new": 52
    },
-   "lines": 4440
+   "lines": 4473
   },
   "plugins/pantheon/lib/traces.py": {
    "lines": 114
@@ -804,7 +806,7 @@
     "worktrees": 63
    },
    "backrefs": 556,
-   "lines": 3632
+   "lines": 3634
   },
   "plugins/pantheon/lib/whocanvas.py": {
    "C901": {
@@ -936,13 +938,13 @@
     "test_fetch_keeps_rows_on_error": 67,
     "test_lists_and_checked": 55
    },
-   "lines": 1042
+   "lines": 1073
   },
   "plugins/pantheon/tests/test_awake.py": {
    "PLR0915": {
     "test_inbox_gates": 61
    },
-   "lines": 1549
+   "lines": 1591
   },
   "plugins/pantheon/tests/test_baseline.py": {
    "lines": 332
@@ -974,6 +976,9 @@
   },
   "plugins/pantheon/tests/test_board_metrics.py": {
    "lines": 145
+  },
+  "plugins/pantheon/tests/test_board_owners.py": {
+   "lines": 376
   },
   "plugins/pantheon/tests/test_board_status.py": {
    "lines": 417
@@ -1047,6 +1052,9 @@
   },
   "plugins/pantheon/tests/test_ctx_deferred.py": {
    "lines": 616
+  },
+  "plugins/pantheon/tests/test_ctx_revive.py": {
+   "lines": 214
   },
   "plugins/pantheon/tests/test_culprits.py": {
    "PLR0915": {

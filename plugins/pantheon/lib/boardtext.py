@@ -30,6 +30,8 @@
 - «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
   карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K», не больше MAX_MERGED строк;
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
+- отказы ролей за сутки (metis-0832) — журнал STATE/logs/handoff.jsonl (lib/handoff.py): источник, вид → кому передано
+  и итоги, только из словарей HANDOFF_*; заявка Touch ID — одна, по последнему итогу;
 - ответы владельца — журнал owner-log: выбор в окне вопросов или в чате на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
   галочкой на карточке (board.jsonl), за сутки — [id], время и буква варианта (или да/нет). Блок — сводка для глаз, а не
   согласие: согласие проверяет только `pantheon consent <id>`.
@@ -186,29 +188,35 @@ def reviews(pantheon):
 STORY_PR_RE = re.compile(r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}#([1-9]\d{0,5})")  # поле pr пачки = tasks.STORY_PR_RE (boardtext грузится без tasks — общий импорт нельзя; равенство держит test_board_text)
 
 
-BATCH_HEAD_RE = re.compile(r"batch/([a-z][a-z0-9]{1,11}-\d{3,})")  # ветка пачки batch/<story-id> (tasks.BATCH_BRANCH)
+def _autoclose():
+    """lib/autoclose.py рядом — правило «PR пачки» (batch_prs, batch_pick) одно с карточкой и check (metis-0810).
+    Только стандартная библиотека, как этот модуль; грузится лениво: хуку (hooks/ctx.py) оно не нужно."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_autoclose_bt", os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), "autoclose.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
-def batch_branch_prs(cache_path):
+def batch_branch_prs(cache_path, own_of=None):
     """{id пачки: номер PR} по ветке batch/<id> из кэша autoclose fetch (metis-0799): PR пачки, открытый не через
-    `pantheon batch pr`, поля pr не ставит. Открытый важнее слитого, из нескольких — больший номер; нет кэша — {}.
-    PR из форка и строка кэша без поля cross (isCrossRepository) — не PR пачки: ветку batch/<id> форк назовёт как угодно."""
+    `pantheon batch pr`, поля pr не ставит. Правило — autoclose.batch_prs и batch_pick, одно с карточкой пачки и check
+    (metis-0810): ветка ровно batch/<id>, не форк, «часть» не мешает; открытый важнее слитого, из нескольких — больший
+    номер; own_of(id пачки) — репозитории её направления в нижнем регистре (None — любые; own_of нет — любые).
+    Нет кэша или он битый — {}."""
     try:
         with open(cache_path, encoding="utf-8") as fh:
             st = json.load(fh)
     except (OSError, ValueError):
         return {}
-    best = {}
-    for key, branch_key, rank in (("merged", "headRefName", 0), ("open_prs", "branch", 1)):
-        by_repo = st.get(key) if isinstance(st, dict) and isinstance(st.get(key), dict) else {}
-        for prs in by_repo.values():
-            for p in prs if isinstance(prs, list) else []:
-                n = p.get("number") if isinstance(p, dict) else None
-                m = BATCH_HEAD_RE.fullmatch(p.get(branch_key) or "") if isinstance(p, dict) and isinstance(
-                    p.get(branch_key), str) else None
-                if m and isinstance(n, int) and not isinstance(n, bool) and n > 0 and p.get("cross") is False:  # не форк
-                    best[m.group(1)] = max(best.get(m.group(1), (-1, 0)), (rank, n))
-    return {sid: n for sid, (_, n) in best.items()}
+    A = _autoclose()
+    out = {}
+    for sid, rows in A.batch_prs(st).items():
+        best = A.batch_pick(rows, own_of(sid) if own_of else None)
+        if best:
+            out[sid] = best[1]
+    return out
 
 
 def batches(tasks, branch_prs=None):
@@ -322,6 +330,71 @@ def decisions(zeus_md, board_jsonl, t):
     return out[:MAX_DECISION]
 
 
+# журнал отказов ролей (metis-0832, lib/handoff.py): только перечислимые значения — вид, кому, итог, источник.
+# Словари = handoff.ROUTE_KEYS, OUTCOME_RU и SOURCE_RU (boardtext грузится без handoff; равенство держит test_handoff)
+HANDOFF_TO = {"payment": "оплата → владелец руками", "important-form": "важная форма → владелец руками",
+              "guard": "защиты → шлюз слияния", "batch-delete": "удаление пачки → «да» словами",
+              "touch": "белый список → Touch ID", "browser": "браузер → Харон", "telegram": "Telegram → read",
+              "outside": "тесты и серверы → outside", "hestia": "окна и процессы → Гестия", "ask": "прочее → «да» через Зевса"}
+HANDOFF_OUT = {"handed": "передано", "waiting": "ждёт Touch ID", "done": "сделано", "failed": "не вышло",
+               "declined": "отклонено", "owner": "только владелец", "yes": "только «да»", "merge": "только шлюз",
+               "refused": "отказ", "dropped": "снято"}
+HANDOFF_SRC = {"sandbox": "песочница", "classifier": "классификатор", "nocmd": "нет команды", "guard": "guard",
+               "role": "роль"}
+HANDOFF_TAIL = 256 * 1024
+MAX_HANDOFF = 4
+
+
+def handoff_log(state):
+    return os.path.join(state, "logs", "handoff.jsonl")
+
+
+def handoffs(state, t):
+    """Отказы за сутки: [(вид, всего, {итог: n})] по убыванию числа и {источник: n}. Строки заявок Touch ID (у них
+    id) складываются в одну по последнему итогу заявки: «ждёт» и «сделано» одной заявки — одно действие."""
+    raw = _read(handoff_log(state))
+    if not raw:
+        return [], {}
+    raw = raw[-HANDOFF_TAIL:]
+    last, plain, src = {}, [], {}
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+            ts = float(e.get("t"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(e, dict) or not -60 <= t - ts <= DAY or e.get("kind") not in HANDOFF_TO \
+                or e.get("outcome") not in HANDOFF_OUT:
+            continue
+        rid = e.get("id")
+        one = isinstance(rid, str) and re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", rid)
+        if (not one or rid not in last) and e.get("source") in HANDOFF_SRC:
+            src[e["source"]] = src.get(e["source"], 0) + 1     # заявка — один отказ, сколько бы строк ни дала
+        if one:
+            last[rid] = e
+        else:
+            plain.append(e)
+    groups = {}
+    for e in plain + list(last.values()):
+        g = groups.setdefault(e["kind"], {})
+        g[e["outcome"]] = g.get(e["outcome"], 0) + 1
+    rows = sorted(((k, sum(v.values()), v) for k, v in groups.items()), key=lambda r: (-r[1], r[0]))
+    return rows, src
+
+
+def handoff_line(rows, src):
+    """«- Отказы за сутки (песочница 2, классификатор 1): браузер → Харон ×2 — передано 2; …»."""
+    rows = [r for r in rows or [] if r[0] in HANDOFF_TO]
+    if not rows:
+        return None
+    s_ = ", ".join(f"{HANDOFF_SRC[k]} {n}" for k, n in sorted((src or {}).items()) if k in HANDOFF_SRC)
+    parts = [f"{HANDOFF_TO[k]} ×{n} — " + ", ".join(f"{HANDOFF_OUT[o]} {c}" for o, c in sorted(v.items())
+                                                 if o in HANDOFF_OUT) for k, n, v in rows[:MAX_HANDOFF]]
+    more = f"; и ещё видов: {len(rows) - MAX_HANDOFF}" if len(rows) > MAX_HANDOFF else ""
+    return f"- Отказы за сутки ({s_}): " + "; ".join(parts) + more + "." if s_ else \
+        "- Отказы за сутки: " + "; ".join(parts) + more + "."
+
+
 def owner_log(state):
     return [os.path.join(state, "owner-log", "zeus.md"), os.path.join(state, "owner-log", "board.jsonl")]
 
@@ -329,20 +402,22 @@ def owner_log(state):
 def watch_files(pantheon, state):
     """Файлы входов для отпечатка свежести (без задач и кэша PR — их отпечаток по содержимому даёт вызывающий):
     ревью, STATUS.md, decisions.md, журнал владельца (у него — только размер и время правки)."""
-    return review_files(pantheon) + status_files(pantheon) + [os.path.join(pantheon, "decisions.md")] + owner_log(state)
+    return review_files(pantheon) + status_files(pantheon) + [os.path.join(pantheon, "decisions.md")] + owner_log(state) \
+        + [handoff_log(state)]
 
 
-def collect(pantheon, state, tasks, t, week=None, owner=None):
+def collect(pantheon, state, tasks, t, week=None, owner=None, own_of=None):
     """Все входы блока одним словарём; files — сколько файлов прочитано (для штампа). owner — шапка → на владельце
-    ли карточка (tasks.Roles и assignee у вызывающего); без него разделов «Ждёт вас» и «Руками» нет."""
+    ли карточка (tasks.Roles и assignee у вызывающего); без него разделов «Ждёт вас» и «Руками» нет. own_of — id пачки →
+    репозитории её направления (batch_branch_prs; None — любые)."""
     cache = os.path.join(state, "autoclose-prs.json")
     zeus_md, board_jsonl = owner_log(state)
     files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
         + sum(1 for p in (cache, zeus_md, board_jsonl) if os.path.isfile(p))
-    return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache)), "week": week,
+    return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache, own_of)), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
             "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
-            "owner": owner_cards(tasks, owner) if owner else None}
+            "owner": owner_cards(tasks, owner) if owner else None, "handoffs": handoffs(state, t)}
 
 
 # --- блок -------------------------------------------------------------------------------------------------------
@@ -425,6 +500,10 @@ def lines(data):
         out.append("- STATUS правлены: " + ", ".join(f"{n} {hm(mt)}" for n, mt in st) + ".")
     for ts, qid, var, src in data.get("decisions") or []:
         out.append(f"- Ответ владельца [{qid}] {hm(ts)} ({src}): " + (var or "ответ дан") + ".")
+    ho = data.get("handoffs")
+    line = handoff_line(*ho) if isinstance(ho, (tuple, list)) and len(ho) == 2 else None
+    if line:
+        out.append(line)
     return [clean(x) for x in out]
 
 

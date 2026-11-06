@@ -175,6 +175,40 @@
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/refusal.py\" fail",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/refusal.py\" denied",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$CLAUDE_PID\" in ''|*[!0-9]*) p=nopid ;; *) p=$CLAUDE_PID ;; esac; for f in \"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/handoff/hint/$p\".*.json; do [ -e \"$f\" ] || exit 0; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/refusal.py\" batch; done",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

@@ -76,6 +76,9 @@ FIELDS = {
     # ветка и PR пачки (story, metis-0757): ставят `pantheon batch start` (branch — batch/<id>) и `pantheon batch pr`
     # (pr — «владелец/репозиторий#N», STORY_PR_RE); карточка пачки и board-auto показывают PR пачки
     "branch": ("str", False), "pr": ("str", False),
+    # решение координатора у пачки (metis-0810): задачи, которые PR пачки закрыл, а в её состав (parent) они не входят —
+    # «оставить вне пачки»; check о них больше не предупреждает (pantheon.batch_outside)
+    "keep_outside": ("list", False),
 }
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
@@ -767,7 +770,22 @@ def parent_problem(tasks, tid, par):
     if kind != "story":
         return (f"parent {par} — не пачка (type {kind}): parent — только id карточки type story, иначе задача не видна "
                 "ни в одной пачке; связь с задачей — source или depends_on")
+    # цикл пачек (metis-0810, проба argus B #305): A.parent=B, B.parent=A — обе вечно doing; tid среди предков par — отказ
+    path, cur = [par], tasks[par][1].get("parent")
+    while cur and cur in tasks and cur not in path:
+        path.append(cur)
+        if cur == tid:
+            return f"parent {par} замыкает пачки в цикл: {' → '.join([tid] + path)}"
+        cur = tasks[cur][1].get("parent")
     return None
+
+
+def keep_outside_problem(tasks, tid, ids):
+    """keep_outside — только у пачки (type story) и только id задач (metis-0810). → текст отказа или None."""
+    if (tasks.get(tid) or (None, {}, ""))[1].get("type") != "story":
+        return "keep_outside — поле пачки (type story): задачи, оставленные вне её состава"
+    bad = [i for i in ids if (tasks.get(i) or (None, {}, ""))[1].get("type") != "task"]
+    return f"keep_outside: {', '.join(map(str, bad))} — не задача" if bad else None
 
 
 def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, need_story_criteria=False, **fields):
@@ -909,6 +927,10 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     if changes.get("source"):
         check_source(pantheon, tid, changes["source"])
+    if changes.get("keep_outside"):
+        bad = keep_outside_problem(tasks, tid, changes["keep_outside"])
+        if bad:
+            raise ValueError(f"{tid}: {bad}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
         return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated, force,
                                 pantheon)
@@ -1788,26 +1810,21 @@ def sum_text(inf):
 BATCH_BRANCH = "batch/"  # ветка пачки — batch/<story-id> (AGENTS.md, pantheon batch pr)
 
 
-def batch_pr(sid, idx, own=None):
+def batch_pr(sid, prs, own=None):
     """PR пачки по её ветке batch/<sid> из кэша gh (metis-0799): поле pr пишет `pantheon batch pr`, но PR, открытый
-    иначе, его не ставит, и пачка оставалась без PR. idx — autoclose.pr_index (запись с branch), own — репозитории
-    направления пачки (в нижнем регистре; None — любые); у PR из форка pr_index ветку не пишет — он сюда не попадает.
-    → (репозиторий, номер, слит, [id задач, которые PR закрывает,
-    кроме самой пачки]) или None. Открытый PR важнее слитого, из нескольких — с большим номером."""
-    found = {}
-    for tid, rows in (idx or {}).items():
-        for x in rows if isinstance(rows, list) else []:
-            if not isinstance(x, dict) or x.get("branch") != BATCH_BRANCH + str(sid) or not isinstance(x.get("repo"), str):
-                continue
-            repo = x["repo"].lower()
-            if own is not None and repo not in own:
-                continue
-            found.setdefault((repo, x.get("number"), bool(x.get("merged"))), set()).add(tid)
-    keys = [k for k in found if isinstance(k[1], int) and not isinstance(k[1], bool)]
-    if not keys:
-        return None
-    key = max(keys, key=lambda k: (not k[2], k[1]))
-    return key[0], key[1], key[2], sorted(found[key] - {sid})
+    иначе, его не ставит, и пачка оставалась без PR. prs — autoclose.batch_prs (одно правило «PR пачки» для карточки,
+    board-auto и check, metis-0810: ветка, не форк, «часть» — PR пачки без закрытых задач), own — репозитории
+    направления пачки (в нижнем регистре; None — любые). Выбор — как autoclose.batch_pick: первый (открытый важнее
+    слитого, из нескольких — с большим номером) из own. → (репозиторий, номер, слит, [id задач, которые PR закрывает,
+    кроме самой пачки]) или None."""
+    rows = (prs or {}).get(sid) if isinstance(prs, dict) else None
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, (tuple, list)) or len(r) != 4 or not isinstance(r[0], str) or not isinstance(r[1], int) \
+                or isinstance(r[1], bool):
+            continue
+        if own is None or r[0] in own:
+            return r[0], r[1], bool(r[2]), sorted(i for i in r[3] or [] if isinstance(i, str) and i != sid)
+    return None
 
 
 def story_text(sid, tasks):
@@ -3699,12 +3716,13 @@ def _sync_types(vault, alert):
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
                policy=None, marks=None, registry=None, night_end="08:00", open_prs=None, pr_index=None, repos=None,
-               tails=None):
+               tails=None, batch_prs=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
     (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
     уведомлений; notify — прежний параметр, не используется. registry — проекты для пульта (project_registry);
     без него — из projects и marks. pr_index — autoclose.pr_index, repos — направление → [repo]: ссылки на PR и коммиты
-    в карточках; tails — {id: [текст]} хвостов последнего pantheon check (свойство «Хвост»)."""
+    в карточках; tails — {id: [текст]} хвостов последнего pantheon check (свойство «Хвост»); batch_prs —
+    autoclose.batch_prs: PR пачки по ветке batch/<id> для карточки пачки (metis-0810)."""
     alert = alert or (lambda *a, **k: None)
     projects = projects or {}
     if registry is None:
@@ -3952,7 +3970,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                           None)
                 own = [r.lower() for r in (repos or {}).get(h.get("direction")) or [] if isinstance(r, str)]
                 card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, child_links=wl,
-                                                batch_pr=batch_pr(cid, pr_index, own) if repos else None, **kw)
+                                                batch_pr=batch_pr(cid, batch_prs, own) if repos else None, **kw)
             else:
                 card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs,
                                                                           outs, wl.get(cid), tails, pr_days), **kw)
@@ -3992,9 +4010,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _, rows = _summary(tasks, t, inbox, names, long_ids, accept=accept)
     if policy is not None:
         # digest_day прежнего board.json (до 0.11.15) — политике: в день обновления второго утреннего не будет
+        # закрыто с прошлой сводки (digest_t), не старше суток (metis-0851); closed — дата, поэтому сравнение по дню,
+        # а задачи, уже посчитанные прошлой сводкой, политика вычитает сама — каждая в одной сводке
+        since_day = now_iso(policy.done_since())[:10]
+        done_n = [i for i, (_, h, _) in tasks.items() if h.get("status") == "done" and str(h.get("closed") or "") >= since_day]
         policy.run((len(rows["wait"]), len(rows["overdue"]), len(rows["inbox"])),
                    lambda tid: card_url(vault, names.get(tid, "Сводка")), card_url(vault, "Сводка"),
-                   legacy_digest_day=state.pop("digest_day", None))
+                   legacy_digest_day=state.pop("digest_day", None), done=done_n)
     text, rows = _summary(tasks, t, inbox, names, long_ids, policy.queue_view() if policy is not None else None, accept)
     sp = os.path.join(board, "Сводка.md")
     old = open(sp, encoding="utf-8").read() if os.path.exists(sp) else ""
@@ -4278,6 +4300,21 @@ def part_stalled(tasks, t, hours=PART_STALL_HOURS):
             out.append((tid, last[3]))
     return out
 
+
+
+def part_no_items(tasks):
+    """[(id, строка)] открытые задачи, которые слитый PR с «часть» оставил открытыми (строка PART_NOTE_RE в журнале), а
+    неотмеченных пунктов «Готово, когда» у них нет (заглушка — не пункт): что осталось сделать, не записано (metis-0615).
+    Не тревога и не по времени, как part_stalled: строка в Хвосты.md и свойство «Хвост» карточки, пока у задачи нет
+    пункта остатка (вписать его) или она не закрыта. Строка — последняя запись «часть» в журнале."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in TAIL_OPEN:
+            continue
+        parts = [x for x in _journal(body) if PART_NOTE_RE.search(x[2])]
+        if parts and not any(not ok and not _is_stub(text) for ok, text in done_criteria(body)):
+            out.append((tid, parts[-1][3]))
+    return out
 
 STALL_DAYS = 2
 STALL_STATUSES = ("doing", "review")
