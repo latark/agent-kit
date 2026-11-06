@@ -3,7 +3,10 @@
 .claude/worktrees/ папок своего направления, и только когда сессия стоит в той же папке — так Claude Code пускает без
 вопроса владельцу. Своя папка из другой точки, своя папка не под .claude/worktrees/, папка чужого направления и путь
 вне папок направлений — отказ с подсказкой (cd, pantheon start <направление>, задача ему). Без path, вне окна
-направления и в окне, которого нет в domains.json, правило молчит. Хук целиком (guard.py --strict и плагин) ловит
+направления и в окне, которого нет в domains.json, правило молчит. Репозиторий — путь до последнего
+.claude/worktrees/<имя>: папка-контейнер (MorphStream/app) пропускается из app, вложенный репозиторий (LW/data →
+LW/.claude/worktrees/a) — отказ. Настройки проекта вне папки запуска с allow, sandbox, hooks, env — отказ, и с name.
+Хук целиком (guard.py --strict и плагин) ловит
 EnterWorktree и отвечает deny.
 
 Запуск: python3 -I plugins/guard/tests/test_worktree_own.py
@@ -146,7 +149,8 @@ try:
                       ({"sandbox": {"enabled": False}}, "sandbox.enabled"),
                       ({"sandbox": {"filesystem": {"allowWrite": ["/"]}}}, "sandbox.filesystem"),
                       ({"permissions": {"defaultMode": "bypassPermissions"}}, "permissions.defaultMode"),
-                      ({"enabledMcpjsonServers": ["x"]}, "enabledMcpjsonServers"), ("{не json", "?")):
+                      ({"enabledMcpjsonServers": ["x"]}, "enabledMcpjsonServers"), ("{не json", "?"),
+                      ({"permissions": ["Bash(*)"]}, "permissions")):
         settings(EC, data)
         r = run({"path": WT}, cwd=EC)
         check(f"13 ключ {key} во второй папке — отказ", bool(r) and f": {key}" in r, r)

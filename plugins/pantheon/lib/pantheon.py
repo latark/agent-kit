@@ -2154,8 +2154,9 @@ def domains_build(if_changed=False):
         # попасть в hq.json
         # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
-        # и проектные настройки папок запуска направлений: allow с gh pr merge роняет окно (metis-0137)
-        launches = [launch_folder(fs) for fs in (read_json(path("domains.json")).get("domains") or {}).values()]
+        # и проектные настройки всех папок окон направлений: allow с gh pr merge роняет окно (metis-0137, metis-0911)
+        launches = [f for fs in (read_json(path("domains.json")).get("domains") or {}).values()
+                    if isinstance(fs, list) for f in window_folders(fs)]
         # и реестр установленных плагинов: путь guard.py и agents.py окон берётся из него — обновили guard, окна
         # пересобираются на новый путь (metis-0321, ревью 90a)
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP, INSTALLED_PLUGINS,
@@ -2967,6 +2968,19 @@ def project_allow_problems(launch):
     return found
 
 
+def window_folders(folders):
+    """Все папки окна направления настоящими путями, без повторов: папка запуска первой (launch_folder), за ней
+    остальные по порядку реестра. Окно — одна граница на все папки (metis-0911, решение 06.11, ревью argus 2 PR #360):
+    они рабочие (additionalDirectories), cd туда сохраняется, и проектные allow проверяются во всех."""
+    real = [os.path.realpath(os.path.expanduser(f)) for f in folders or [] if isinstance(f, str) and f]
+    return list(dict.fromkeys([launch_folder(folders)] + real)) if real else []
+
+
+def folders_allow_problems(folders):
+    """project_allow_problems по всем папкам окна (window_folders)."""
+    return [x for f in window_folders(folders) for x in project_allow_problems(f)]
+
+
 def project_allow_text(name, problems):
     shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
     return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
@@ -2984,13 +2998,13 @@ def drop_window(name):
 
 
 def allow_gate(name, folders=None):
-    """Проектные allow папки запуска направления name (metis-0137): есть правило с gh pr merge — оба файла окна
-    убираются. Зовут сборка, тик (check) и каждый подъём сессии: сборка по --if-changed сравнивает только mtime, а
+    """Проектные allow папок окна направления name (metis-0137; все папки, а не только папка запуска — metis-0911): есть
+    правило с gh pr merge — оба файла окна убираются. Зовут сборка, тик (check) и каждый подъём сессии: сборка по --if-changed сравнивает только mtime, а
     файл со старым mtime (cp -p, rsync -a, tar) её не запускает (ревью argus PR #32). folders — папки из domains.json;
     не направление (мастерская, штаб) — проверки нет. → список проблем."""
     if folders is None:
         folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
-    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    problems = folders_allow_problems(folders)
     if problems:
         drop_window(name)
     return problems
@@ -3680,9 +3694,9 @@ def window_missing(name, origin, why, how):
 
 
 def no_window_reason(window):
-    """Почему нет окна window: allow проекта в папке запуска (metis-0137) или окно не собрано."""
+    """Почему нет окна window: allow проекта в папках окна (metis-0137, metis-0911) или окно не собрано."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
-    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    problems = folders_allow_problems(folders)
     if problems:
         return "окно не собрано: " + project_allow_text(window, problems)
     return f"нет окна {tilde(path('settings', window + '.json'))} — pantheon domains build"
@@ -4945,9 +4959,9 @@ def direction_check(name):
     dom = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
     add(dom, "направление в domains.json (pantheon domains build) — guard его знает")
     add(os.path.isfile(path("settings", name + ".json")), "окно роли settings/" + name + ".json")
-    bad_allow = project_allow_problems(launch) if launch else []
-    add(not bad_allow, "проектные allow папки запуска не пускают gh pr merge (иначе окно не соберётся, metis-0137)"
-        + (": " + "; ".join(f"{os.path.basename(f)} «{r}»" for f, r in bad_allow) if bad_allow else ""))
+    bad_allow = folders_allow_problems(d.get("folders"))
+    add(not bad_allow, "проектные allow папок окна не пускают gh pr merge (иначе окно не соберётся, metis-0137)"
+        + (": " + "; ".join(f"{tilde(f)} «{r}»" for f, r in bad_allow) if bad_allow else ""))
     agents = os.path.join(launch, "AGENTS.md")
     claude_md = os.path.join(launch, "CLAUDE.md")
     cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None

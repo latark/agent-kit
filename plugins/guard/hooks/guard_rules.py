@@ -58,8 +58,9 @@ PostToolUse (Bash:
   hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
                  (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
   worktree-own — окну направления (PANTHEON_WINDOW из domains.json) EnterWorktree с path — только в .claude/worktrees/
-                 своей папки и из неё же (иначе Claude Code спрашивает владельца); чужое направление — отказ с
-                 подсказкой pantheon start или задача ему; своя папка из другой точки — подсказка cd (metis-0911);
+                 репозитория своего направления и из него же (иначе Claude Code спрашивает владельца); чужое
+                 направление — отказ с подсказкой pantheon start или задача ему; другой репозиторий — подсказка cd;
+                 вне папки запуска настройки проекта с allow, hooks, sandbox, env — отказ и с name (metis-0911);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);

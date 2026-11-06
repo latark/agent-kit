@@ -6,6 +6,8 @@
   свои папки из directions.toml настоящими путями (cd туда сохраняется, EnterWorktree в их .claude/worktrees/ Claude
   Code пускает без вопроса владельцу); папок чужого направления в нём нет;
 - мастерская и окна без направления additionalDirectories не получают;
+- allow_gate по всем папкам окна (ревью argus 2 PR #360): allow с gh pr merge во второй папке — окно не собрано, и
+  при --if-changed; no_window_reason и direction check называют эту папку;
 - строгий guard окна ловит EnterWorktree (matcher): чужой репозиторий закрывает правило worktree-own
   (plugins/guard/tests/test_worktree_own.py).
 """
@@ -16,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PY = os.path.join(PLUGIN, "lib", "run.py")  # загрузчик, как bin/pantheon
@@ -40,7 +43,8 @@ def main():
         fh.write('[[direction]]\nname = "themis-sources"\nfolders = ["~/projects/legal-watch", "~/projects/expert-corpus"]\n'
                  '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
-           "PANTHEON_NO_NOTIFY": "1"}
+           "PANTHEON_NO_NOTIFY": "1", "PANTHEON_CLAUDE_TMP": os.path.join(tmp, "ctmp")}  # общий /tmp/claude-<uid> меняется
+    os.makedirs(env["PANTHEON_CLAUDE_TMP"])  # сам: иначе --if-changed пересобирал бы всегда
     r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
                        timeout=120)
     check("сборка прошла", r.returncode == 0, r.stderr)
@@ -59,6 +63,46 @@ def main():
                 if any("guard.py" in h.get("command", "") for h in g.get("hooks") or [])]
     check("строгий guard окна ловит EnterWorktree (worktree-own)",
           len(matchers) == 1 and "EnterWorktree" in matchers[0].split("|"), matchers)
+
+    # allow_gate по всем папкам окна (ревью argus 2 PR #360): вторая папка с allow, пускающим gh pr merge, — окно не
+    # собирается, как и при таком allow в папке запуска (metis-0137)
+    ifc = lambda: subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env,  # noqa: E731
+                                 capture_output=True, text=True, timeout=120)
+    built = lambda: json.load(open(os.path.join(state, "domains.json"))).get("built_ts")  # noqa: E731
+    ifc()  # сборка ролей дописывает файлы после отметки: одна доводка, дальше тихо (как test_plugin_map)
+    b0 = built()
+    ifc()
+    check("--if-changed без правок — пересборки нет (иначе проверка ниже ничего не доказывает)", built() == b0)
+    second = os.path.join(tmp, "projects/expert-corpus/.claude")
+    os.makedirs(second)
+    with open(os.path.join(second, "settings.json"), "w") as fh:
+        json.dump({"permissions": {"allow": ["Bash(gh pr *)", "Bash(mailkeeper scan *)"]},
+                   "sandbox": {"excludedCommands": ["mailkeeper *"]}}, fh)
+    os.utime(os.path.join(second, "settings.json"), (time.time() + 5,) * 2)  # новее built_ts: --if-changed заметит
+    r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True,
+                       text=True, timeout=120)
+    gone = not os.path.exists(os.path.join(state, "settings", "themis-sources.json"))
+    check("вторая папка с allow gh pr merge — окно направления не собрано, причина названа",
+          gone and "expert-corpus/.claude/settings.json" in r.stderr and "gh pr merge" in r.stderr, (gone, r.stderr))
+    check("чужое направление при этом собрано", os.path.exists(os.path.join(state, "settings", "athena-shop.json")))
+    sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+    os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_NO_NOTIFY="1")
+    import pantheon as P  # noqa: E402 — после HOME: модуль берёт пути при загрузке
+    folders = ["~/projects/legal-watch", "~/projects/expert-corpus", "~/projects/legal-watch"]
+    check("window_folders: папка запуска первой, остальные по реестру, без повторов",
+          P.window_folders(folders) == [real("projects/legal-watch"), real("projects/expert-corpus")],
+          P.window_folders(folders))
+    reason = P.no_window_reason("themis-sources")
+    check("no_window_reason называет allow второй папки", "expert-corpus" in reason and "gh pr merge" in reason, reason)
+    line = [t for ok, t in P.direction_check("themis-sources") if "gh pr merge" in t]
+    check("direction check: allow второй папки — пункт не готов, с путём",
+          len(line) == 1 and "expert-corpus/.claude/settings.json" in line[0]
+          and not dict((t, ok) for ok, t in P.direction_check("themis-sources"))[line[0]], line)
+    os.remove(os.path.join(second, "settings.json"))
+    r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
+                       timeout=120)
+    check("allow убран — окно снова собрано", os.path.exists(os.path.join(state, "settings", "themis-sources.json")),
+          r.stderr)
     return all(results)
 
 

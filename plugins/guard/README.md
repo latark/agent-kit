@@ -488,12 +488,23 @@ answer и плановый проход, это скрипты, guard их не 
   `…/pulls/<N>/merge`, `…/merges` и мутации `mergePullRequest`, `enablePullRequestAutoMerge` — отказ. Шлюз слияния
   берёт роль из agent_type, а у главной сессии окна его нет: без этого отказа она прошла бы мимо шлюза.
 - **worktree-own (metis-0911).** Окну направления (`PANTHEON_WINDOW` есть в domains.json) EnterWorktree с `path`
-  пропускается, только если путь — под `.claude/worktrees/` его папки, а сессия стоит в той же папке. Иначе Claude Code
-  задаёт владельцу вопрос «permission-root relocation»: это его проверка безопасности, её не снимают ни разрешения, ни
-  additionalDirectories, ни allow хука. Поэтому папки направления — рабочие папки окна (`additionalDirectories` в
-  `pantheon domains build`), и `cd` туда сохраняется. Своя папка из другой точки — отказ с подсказкой «сначала cd»;
-  папка чужого направления — отказ с подсказкой `pantheon start <направление>` или задачи в его inbox; путь вне папок
-  направлений — отказ. EnterWorktree с `name`, мастерская и сессия без окна — правило молчит.
+  пропускается, только если путь — под `.claude/worktrees/<имя>` репозитория его направления, а сессия стоит в этом
+  репозитории. Иначе Claude Code задаёт владельцу вопрос «permission-root relocation»: это его проверка безопасности,
+  её не снимают ни разрешения, ни additionalDirectories, ни allow хука. Поэтому папки направления — рабочие папки окна
+  (`additionalDirectories` в `pantheon domains build`), и `cd` туда сохраняется.
+  - Репозиторий — путь до последнего `.claude/worktrees/<имя>`: папка направления бывает контейнером репозиториев
+    (`~/projects/MorphStream` не git, внутри `app` и `gpu-worker`). Он должен лежать в своей папке: самая глубокая
+    папка направлений над ним — своя.
+  - «Сессия в репозитории» — ближайший `.git` над cwd — сам репозиторий или его worktree. Сессия во вложенном
+    репозитории (`LW/data` → `LW/.claude/worktrees/a`) или в другом — отказ с подсказкой «сначала cd».
+  - Папка чужого направления — отказ с подсказкой `pantheon start <направление>` или задачи в его inbox; путь вне
+    папок направлений — отказ.
+  - Настройки проекта: EnterWorktree загружает `.claude/settings.json` и `settings.local.json` репозитория и worktree.
+    Вне папки запуска окна там не должно быть ключей, расширяющих окно: hooks, env, enabledPlugins, MCP проекта,
+    `permissions` кроме deny и ask, `sandbox` кроме autoAllowBashIfSandboxed, failIfUnavailable и `enabled: true`.
+    Иначе отказ — и с `path`, и с `name`. Папку запуска окно приняло при старте; allow с `gh pr merge` во всех папках
+    окна ловит сборка окна (allow_gate в pantheon.py).
+  - Мастерская и сессия без окна — правило молчит.
 - **hq-sessync (metis-0566).** Окну Пританея `sessync find <слова> [-p имя] [-n число]` выпущен мимо песочницы
   (`excludedCommands` окна Пританея, `HQ_EXCLUDED` в pantheon.py): поиск по прошлым разговорам читает транскрипты
   `~/.claude/projects`, закрытые окну, а вывод проходит маску похожего на ключи — она в самом sessync. Правило — одна
