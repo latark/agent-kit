@@ -744,6 +744,14 @@
   поднимают `version` тронутых с прошлого выпуска плагинов и пишут `.claude-plugin/releases.json` одним коммитом от
   github-actions[bot]. PR номер версии не трогают: шлюз guard такой PR не сливает (AGENTS.md «Выпуск»). `.github` —
   ядро шлюза: право записи в main есть только у этого workflow.
+- `plugins/pantheon/lib/release_tick.py` — выпуск без Actions (metis-0880, решение владельца 06.11): кончились минуты,
+  workflow release не запустился — плановый проход основного Mac сам выполняет `python3 -I .github/scripts/release.py
+  --push`. Код берётся только из своей копии `STATE/release/agent-kit`, сброшенной на свежий origin/main (fetch,
+  checkout --detach, reset --hard, clean -ffdx). Рабочую копию владельца и ветки PR проход не трогает. Запуск — только
+  при трёх условиях: после последнего коммита «выпуск: …» есть слияние, и head main старше 15 мин; у workflow release
+  на этом sha запуска нет, либо он упал с job без раннера и шагов или с аннотацией лимита минут; копия чистая и на sha
+  origin/main. Проверка — не чаще раза в 15 мин, на отработавшем sha release.py второй раз не зовётся. Итог — строка
+  `release-tick:` в `logs/tick.log`, сбой — тревога без critical.
 - `plugins/pantheon/scripts/run-tests.py` — параллельный прогон `tests/test_*.py` плагинов (metis-0450): каждый
   файл — свой процесс в своей группе со своим HOME и TMPDIR, воркеров min(ядра/2, 3), медленные первыми,
   таймаут файла и SIGTERM/HUP/INT гасят группы файлов; код не 0 при падении, таймауте, 0 файлов и коде 0 без

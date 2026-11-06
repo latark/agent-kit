@@ -242,7 +242,7 @@ w = World("c2-jobs-down")
 w.run(job=UNSTARTED)
 w.api["jobs"] = (None, "gh: таймаут")
 RT.tick(T)
-check("условие 2: список job не получен → не запускает", w.releases() == [] and w.alerts, w.alerts)
+check("условие 2: список job не получен → не запускает", w.releases() == [] and w.alerts and "таймаут" in w.alerts[0][2], w.alerts)
 
 # --- [условие 3] --------------------------------------------------------------------------------------------------
 w2 = World("c3-dirty")

@@ -173,12 +173,10 @@ def actions_skipped(repo, sha):
         return None, "ответ gh о запусках не разобран"
     if not rel:
         return True, "запуска release нет"
-    for run in rel:
+    for run in rel:  # идёт или в очереди — conclusion у GitHub null: тоже не failure
         status, concl = str(run.get("status") or ""), str(run.get("conclusion") or "")
-        if status != "completed":
-            return False, f"release на {sha[:7]} ещё идёт ({status or 'нет статуса'})"
         if concl != "failure":
-            return False, f"release на {sha[:7]} завершён: {concl or 'нет итога'}"
+            return False, f"release на {sha[:7]}: {status or 'нет статуса'}, итог {concl or 'ещё нет'}"
     jobs = []
     for run in rel:
         data, err = gh_api(f"repos/{repo}/actions/runs/{run.get('id')}/jobs?per_page=100")
