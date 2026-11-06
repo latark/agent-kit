@@ -1104,9 +1104,13 @@ def main():
     src = open(LIB, encoding="utf-8").read()
     # start и свежий старт — lib/sessions.py (metis-0586): подъём сессий ищется в обоих файлах
     src += open(os.path.join(os.path.dirname(LIB), "sessions.py"), encoding="utf-8").read()
+    # metis-0933 класс 5: argv подъёма окна целиком собирает window_launch(role, …) — роль у неё обязательный аргумент
     spawns = [ln for ln in src.splitlines() if "claude_bin()," in ln and ('"--bg"' in ln or '"--resume"' in ln)]
-    check("pantheon.py: все команды подъёма сессии (--bg/--resume) содержат --agent (найдено %d)" % len(spawns),
-          len(spawns) >= 3 and all('"--agent"' in ln for ln in spawns))
+    body = src[src.index("def window_launch("):src.index("\ndef ", src.index("def window_launch("))]
+    launches = re.findall(r"\bwindow_launch\((\"hq\"|role)\b", src)
+    check("pantheon.py: все команды подъёма сессии (--bg/--resume) содержат --agent (window_launch: %d запусков)"
+          % len(launches), '"--agent", role' in body and len(launches) >= 4
+          and all('"--agent"' in ln for ln in spawns))
     check("pantheon.py: путь штаба в _resume_session даёт роль hq для zeus", 'role = "hq" if name == "zeus"' in src)
 
     # ревью argus PR #32: окно не собрано из-за allow проекта (metis-0137) — сессию не поднимает ни wake (respawn
