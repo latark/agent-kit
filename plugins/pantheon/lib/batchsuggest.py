@@ -329,6 +329,12 @@ def _reasons(why):
     return out
 
 
+def best_join(res, tid):
+    """Лучшая существующая пачка для задачи tid по результату suggest() → предложение «в пачку» или None
+    (`pantheon task new` без --parent: подсказка, metis-0940)."""
+    return next((j for j in res["joins"] if j["task"] == tid), None)
+
+
 def keys(res):
     """Ключи предложений: по ним проход видит, что нового."""
     return sorted([f"join:{j['task']}>{j['story']}" for j in res["joins"]]
