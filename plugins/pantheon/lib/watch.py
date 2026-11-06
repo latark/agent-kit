@@ -72,6 +72,19 @@ from datetime import date, datetime, timedelta
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
 
 
+def _load_rule():
+    """lib/live_subagent.py — правило «живой субагент», общее с хуком ctx (metis-0904); грузится рядом с этим файлом."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pantheon_live_subagent", os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_subagent.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+LIVE = _load_rule()
+
+
 def set_core(mod):
     global P
     P = mod
@@ -185,15 +198,16 @@ def idle_holder(a):
     return True
 
 
-LIVE_SUBAGENT_MAX = 3 * 3600   # субагент без записи журнала дольше — мёртв (metis-0864): ожидание outside test — до 2 ч
-LIVE_SUBAGENT_GRACE = 120      # с после старта процесса: журналы, закрытые прежним процессом при его снятии, — до этого
+LIVE_SUBAGENT_MAX = LIVE.LIVE_MAX  # субагент без записи дольше — мёртв (metis-0864): ожидание outside test — до 2 ч
 
 
 def live_subagents(a, t):
-    """Живые субагенты окна по subagents/*.meta.json (metis-0864): без «finished», журнал писался после старта нынешнего
-    процесса (+ LIVE_SUBAGENT_GRACE) и не раньше LIVE_SUBAGENT_MAX назад. Субагенты, оборванные перезапуском, остаются
-    без «finished» навсегда, но их журнал старше старта процесса. Старт — P.session_started (Д2 ревью #332): startedAt
-    claude agents без видимого процесса — createdAt задания, он старше прошлых перезапусков. → отсортированные имена."""
+    """Живые субагенты окна по subagents/*.meta.json (metis-0864) — правило lib/live_subagent.py, общее с хуком ctx
+    (metis-0904): не закончил (finished без своей фоновой команды, stoppedByUser, сдача последним ответом), журнал или
+    meta писались после старта нынешнего процесса (+ LIVE_GRACE) или субагент запущен после старта, и не раньше
+    LIVE_MAX назад. Субагенты, оборванные перезапуском, остаются без «finished» навсегда, но их журнал старше старта
+    процесса. Старт — P.session_started (Д2 ревью #332): startedAt claude agents без видимого процесса — createdAt
+    задания, он старше прошлых перезапусков. → отсортированные имена."""
     tp = P.transcript_path(a)
     if not tp:
         return []
@@ -208,13 +222,7 @@ def live_subagents(a, t):
             if not (e.name.startswith("agent-") and e.name.endswith(".meta.json")):
                 continue
             meta = P.read_json(e.path, {})
-            if not isinstance(meta, dict) or meta.get("finished"):
-                continue
-            mt = 0.0
-            for f in (e.path, e.path[:-len(".meta.json")] + ".jsonl"):
-                with contextlib.suppress(OSError):
-                    mt = max(mt, os.path.getmtime(f))
-            if mt <= started + LIVE_SUBAGENT_GRACE or t - mt > LIVE_SUBAGENT_MAX:
+            if not LIVE.live(meta, e.path[:-len(".meta.json")] + ".jsonl", started, t):
                 continue
             out.append(clean_why(meta.get("name") or e.name[len("agent-"):-len(".meta.json")])[:40])
     return sorted(out)
@@ -1071,9 +1079,11 @@ def proc_cwds():
 
 def subagent_live(agent, wt, t):
     """Субагент копии ещё работает (metis-0835): его ~/.claude/projects/*/*/subagents/[*/[*/]]<agent>.meta.json (как
-    review_find_transcripts) без finished, worktreePath — эта копия, а журнал или meta писались не раньше
-    LIVE_SUBAGENT_MAX назад. Субагент, оборванный перезапуском родителя, остаётся без finished навсегда, но его журнал
-    стареет. → True | False | None — meta не найден (решает вызывающий: под замком субагента это не «мёртв»)."""
+    review_find_transcripts), worktreePath — эта копия, и он живой по правилу lib/live_subagent.py, общему с хуком ctx
+    (metis-0904), при неизвестном старте процесса: не закончил (finished без своей фоновой команды, stoppedByUser, сдача
+    последним ответом), а журнал или meta писались не раньше LIVE_SUBAGENT_MAX назад. Субагент, оборванный
+    перезапуском родителя, остаётся без finished навсегда, но его журнал стареет. → True | False | None — meta не
+    найден (решает вызывающий: под замком субагента это не «мёртв»)."""
     base = os.path.join(glob.escape(P.HOME), ".claude", "projects", "*", "*", "subagents")
     metas = set()
     for sub in ((), ("*",), ("*", "*")):
@@ -1082,16 +1092,12 @@ def subagent_live(agent, wt, t):
         return None
     for m in sorted(metas):
         meta = P.read_json(m, {})
-        if not isinstance(meta, dict) or meta.get("finished"):
+        if not isinstance(meta, dict):
             continue
         wp = meta.get("worktreePath")
         if isinstance(wp, str) and wp and os.path.realpath(wp) != wt:
             continue
-        mt = 0.0
-        for f in (m, m[:-len(".meta.json")] + ".jsonl"):
-            with contextlib.suppress(OSError):
-                mt = max(mt, os.path.getmtime(f))
-        if t - mt <= LIVE_SUBAGENT_MAX:
+        if LIVE.live(meta, m[:-len(".meta.json")] + ".jsonl", 0, t):  # чей процесс — не знаем: только по сроку
             return True
     return False
 

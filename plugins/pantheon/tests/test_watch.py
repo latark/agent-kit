@@ -26,6 +26,7 @@ tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
@@ -3701,6 +3702,50 @@ def test_plugins_respawn_quiet_subagent_0864():
     sub_meta(tp, "s1", T0 - 4 * 3600)
     e.run("watch", t=T0)
     check(respawned(e, "efef0864"), f"0864: субагент молчит 4 ч (больше LIVE_SUBAGENT_MAX) — держит окно: {e.calls()}")
+
+
+def sub_journal(tp, n, mtime, records):
+    """Журнал субагента своими записями (dict) с временем mtime."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.jsonl")
+    with open(f, "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_plugins_respawn_live_rule_0904():
+    """metis-0904: watch берёт правило «живой» из lib/live_subagent.py, общее с хуком ctx. Субагент с «finished», чья
+    фоновая команда ещё без итога (Bash ушёл в фон), — живой: окно не перезапускается; итог пришёл — перезапуск.
+    Субагент, запущенный в первые LIVE_GRACE с после старта процесса (первая запись журнала позже старта), — живой,
+    хотя журнал писался в пределах LIVE_GRACE."""
+    bg = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "Command running in background with ID: bq1. Output x"}]}}
+    note = {"type": "user", "message": {"role": "user", "content":
+            "<task-notification>\n<task-id>bq1</task-id>\n<status>completed</status>\n</task-notification>"}}
+    e, a, tp = respawn_env("rb-dir", "abcd0904-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg])
+    sub_meta(tp, "b1", T0 - 1200, finished=True)
+    e.run("watch", t=T0)
+    check(not respawned(e, "abcd0904") and "rb-dir (живые субагенты: dev-b1)" in e.alerts(),
+          f"0904: finished с фоновой командой без итога — окно перезапущено: {e.calls()} {e.alerts()[-400:]}")
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg, note])
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "abcd0904"), f"0904: итог фоновой пришёл — окно не перезапущено: {e.calls()}")
+    # запущен через 10 с после старта, журнал последний раз писался через 60 с (в пределах LIVE_GRACE)
+    e, a, tp = respawn_env("rg-dir", "dcba0904-1")
+    a["startedAt"] = (T0 - 3600) * 1000
+    e.agents([a])
+    born = datetime.fromtimestamp(T0 - 3590, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    sub_journal(tp, "g1", T0 - 3540, [{"type": "user", "timestamp": born, "message": {"role": "user", "content": "x"}}])
+    sub_meta(tp, "g1", T0 - 3590)
+    e.run("watch", t=T0)
+    check(not respawned(e, "dcba0904") and "rg-dir (живые субагенты: dev-g1)" in e.alerts(),
+          f"0904: запущенный в окне старта субагент не держит окно: {e.calls()} {e.alerts()[-400:]}")
 
 
 def test_plugins_respawn_idle_free_0181():
