@@ -13,6 +13,11 @@ SubagentStop). Основа — stop-verify.sh одного из проекто�
 --script и --sha: --sha гоняет другой коммит в копии прохода, а не эту worktree, metis-0779): плановый проход гоняет проверку проекта вне окна на закоммиченном HEAD, код выхода — код тестов, 75 —
 итога не дождался (красный).
 
+Фоновый прогон (metis-0905: роли велят долгие команды запускать с run_in_background — /clear у запустившего обрывает
+команду на переднем плане) судится по уведомлению <task-notification> с тем же tool-use-id: зелёный — только status
+completed (у `run-tests.py --affected` ещё код 3). Уведомления ещё нет — прогон идёт: хук отпускает без возврата и
+без счёта, ход «жду итога» — не сдача; уведомление разбудит разработчика, и на следующем Stop хук проверит итог.
+
 Какая проверка — по версии файлов в точке, от которой ответвилась ветка разработчика (не по его правкам):
   1. строка `dev: <команда>` .pantheon-verify в корне репозитория (узкая проверка исполнителя), иначе его первая
      строка (её кладёт лид или координатор; это полный набор для записи шлюза);
@@ -102,6 +107,11 @@ def norm(cmd):
 
 AFFECTED = re.compile(r"run-tests\.py\b.*--affected\b")
 EXIT3 = re.compile(r"\s*Exit code 3\b")
+# фоновый прогон (metis-0905): ответ Bash при запуске — «Command running in background», не итог; итог — уведомление
+# <task-notification> с тем же tool-use-id: status completed (код 0) или failed (summary «… exit code N»)
+TASK_NOTE = re.compile(r"<task-notification>.*?<tool-use-id>(toolu_[A-Za-z0-9_]+)</tool-use-id>.*?"
+                       r"<status>(\w+)</status>(?:(?:(?!</task-notification>).)*?<summary>(.*?)</summary>)?", re.S)
+EXIT_N = re.compile(r"exit code (\d+)")
 
 
 def result_text(content):
@@ -112,15 +122,34 @@ def result_text(content):
     return ""
 
 
+def run_state(cmd, result, background, note):
+    """Прогон проверки → (зелёный, идёт ли ещё). result — (is_error, текст ответа Bash), note — (status, код) из
+    уведомления о конце фоновой команды или None. run-tests.py --affected: код 3 — «нечего гонять» (правка не задевает
+    тесты по карте), не падение."""
+    err, text = result
+    if err or not background:
+        return not (err and not (AFFECTED.search(cmd) and EXIT3.match(text))), False
+    if note is None:
+        return False, True
+    status, code = note
+    return status == "completed" or (bool(AFFECTED.search(cmd)) and code == 3), False
+
+
 def last_runs(transcript, variants):
-    """По транскрипту: (был ли прогон проверки после последней правки, зелёный ли последний такой прогон)."""
-    uses, results, order = {}, {}, []
+    """По транскрипту: (был ли прогон проверки после последней правки, зелёный ли последний такой прогон, идёт ли он
+    ещё в фоне). Фоновый прогон (run_in_background или уведённый в фон — backgroundTaskId) — по уведомлению о его
+    конце: зелёный — только status completed; уведомления ещё нет — прогон идёт (metis-0905)."""
+    uses, results, order, bg, notes = {}, {}, [], set(), {}
     try:
         fh = open(transcript, encoding="utf-8")
     except OSError:
         return None
     with fh:
         for line in fh:
+            if "<task-notification>" in line:
+                for tid, status, summary in TASK_NOTE.findall(line):
+                    code = EXIT_N.search(summary or "")
+                    notes[tid] = (status, int(code.group(1)) if code else None)
             try:
                 d = json.loads(line)
             except ValueError:
@@ -128,6 +157,7 @@ def last_runs(transcript, variants):
             content = (d.get("message") or {}).get("content")
             if not isinstance(content, list):
                 continue
+            tur = d.get("toolUseResult")
             for x in content:
                 if not isinstance(x, dict):
                     continue
@@ -136,23 +166,23 @@ def last_runs(transcript, variants):
                     order.append(x.get("id"))
                 elif x.get("type") == "tool_result":
                     results[x.get("tool_use_id")] = (bool(x.get("is_error")), result_text(x.get("content")))
+                    if isinstance(tur, dict) and tur.get("backgroundTaskId"):
+                        bg.add(x.get("tool_use_id"))
     last_edit, last_run = -1, None
     for i, uid in enumerate(order):
         name, inp = uses[uid]
         cmd = norm(inp.get("command", "")) if name == "Bash" else ""
         if name == "Bash" and (any(v in cmd for v in variants) or OUTSIDE_TEST.search(cmd)):
             if uid in results:
-                err, text = results[uid]
-                # run-tests.py --affected: код 3 — «нечего гонять» (правка не задевает тесты по карте), не падение
-                if err and AFFECTED.search(cmd) and EXIT3.match(text):
-                    err = False
-                last_run = (i, not err)
+                green, pending = run_state(cmd, results[uid], inp.get("run_in_background") or uid in bg,
+                                           notes.get(uid))
+                last_run = (i, green, pending)
             continue
         if name in EDIT_TOOLS or (name == "Bash" and BASH_WRITES.search(cmd)):
             last_edit = i
     if last_run is None or last_run[0] < last_edit:
-        return False, False
-    return True, last_run[1]
+        return False, False, False
+    return True, last_run[1], last_run[2]
 
 
 def counter(agent_id, value=None):
@@ -191,7 +221,9 @@ def main():
     seen = last_runs(ev.get("agent_transcript_path") or ev.get("transcript_path") or "", [norm(v) for v in variants])
     if seen is None:
         return 0  # транскрипта нет — проверить нечем, не держим
-    ran, green = seen
+    ran, green, pending = seen
+    if ran and pending:
+        return 0  # прогон идёт в фоне: ход «жду итога» — не сдача; уведомление разбудит, и хук проверит снова
     if ran and green:
         counter(agent, 0)
         return 0
