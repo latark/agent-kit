@@ -2796,11 +2796,57 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     return data
 
 
-def _read_small_regular(p, limit=8 << 20):
-    """Текст обычного файла не больше limit, иначе None. Папки проекта пишут роли, а читает тик вне песочницы:
-    FIFO, устройство или ссылка вместо файла не должны его повесить, огромный файл — съесть память."""
+def _split_trusted(p):
+    """Абсолютный путь p → (надёжное начало настоящим путём, [звенья ниже]). Начало — $HOME, если p под ним (в
+    любом из видов: как задан и настоящим путём), иначе первое звено пути (/tmp → /private/tmp на macOS): системные
+    ссылки выше папок окон законны, ниже них звено-ссылку подставило бы окно (metis-0933, класс 3)."""
+    p = os.path.normpath(os.path.abspath(p))
+    home = os.path.abspath(HOME)
+    for pre in (home, os.path.realpath(home)):
+        if p == pre or p.startswith(pre.rstrip("/") + "/"):
+            return os.path.realpath(home), [x for x in p[len(pre):].split("/") if x]
+    top = "/" + p.split("/")[1] if p != "/" else "/"
+    return os.path.realpath(top), [x for x in p[len(top):].split("/") if x]
+
+
+def _link_free(p):
+    """True, если ни одно звено пути p ниже надёжного начала (_split_trusted) не ссылка. Нет звена — тоже True: его
+    нет, подменять нечего (папку проверит isdir вызывающего)."""
+    cur, parts = _split_trusted(p)
+    for part in parts:
+        cur = os.path.join(cur, part)
+        try:
+            if stat.S_ISLNK(os.lstat(cur).st_mode):
+                return False
+        except OSError:
+            return True
+    return True
+
+
+def _open_nofollow(p):
+    """fd для чтения файла p, открытого по звеньям ниже надёжного начала с O_NOFOLLOW (openat): ссылка любым звеном —
+    в папке из domains.json, в середине пути, на месте .claude, последним — OSError. Проверка и открытие одним ходом:
+    подмена звена между ними (TOCTOU) ничего не даёт."""
+    base, parts = _split_trusted(p)
+    if not parts:
+        raise OSError(f"{p}: не файл")
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        for part in parts[:-1]:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def _read_small_regular(p, limit=8 << 20, whole_path=False):
+    """Текст обычного файла не больше limit, иначе None. Папки проекта пишут роли, а читает тик вне песочницы:
+    FIFO, устройство или ссылка вместо файла не должны его повесить, огромный файл — съесть память. whole_path —
+    ссылка не только последним звеном, а любым ниже надёжного начала (_open_nofollow) — тоже None."""
+    try:
+        fd = _open_nofollow(p) if whole_path else os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
     try:
@@ -3045,16 +3091,23 @@ def nested_projects(folder):
 
 def window_dirs(folders):
     """→ (папка запуска, [папки для --add-dir]): остальные папки окна и вложенные проекты всех папок, без повторов и
-    без ~/.claude (уровень user окно и так читает; его --add-dir задвоил бы навыки и CLAUDE.md)."""
+    без ~/.claude (уровень user окно и так читает; его --add-dir задвоил бы навыки и CLAUDE.md).
+    Папка реестра, путь к которой идёт через ссылку ниже $HOME (_link_free: сама папка или звено в середине пути),
+    пропускается (metis-0933, ревью argus B2 Д1): окно пишет папку-родителя и могло подменить её ссылкой на чужую
+    папку — её AGENTS.md попал бы в системную подсказку, а настройки — в pantheon check. Папка запуска через ссылку —
+    "" (её файлы не читаются; сам запуск в ней — launch_folder)."""
     wf = window_folders(folders)
     if not wf:
         return "", []
+    linked = {os.path.realpath(os.path.expanduser(f)) for f in folders
+              if isinstance(f, str) and f and not _link_free(os.path.expanduser(f))}
     user = os.path.realpath(os.path.join(HOME, ".claude"))
     dirs = []
     for f in wf:
-        if f != user:
+        if f != user and f not in linked:
             dirs += ([f] if f != wf[0] else []) + nested_projects(f)
-    return wf[0], [d for d in dict.fromkeys(dirs) if d != wf[0] and os.path.isdir(d)]
+    launch = "" if wf[0] in linked else wf[0]
+    return launch, [d for d in dict.fromkeys(dirs) if d != wf[0] and os.path.isdir(d)]
 
 
 FOLDER_TEXT_LIMIT = 256 << 10  # AGENTS.md и CLAUDE.md папки окна: больше — не вклеиваем в системную подсказку
@@ -3062,13 +3115,16 @@ FOLDER_TEXT_LIMIT = 256 << 10  # AGENTS.md и CLAUDE.md папки окна: б�
 
 def _read_in(folder, rel, limit=FOLDER_TEXT_LIMIT):
     """Текст файла rel папки окна folder (класс 3 модели угроз metis-0933): папки пишет окно, а читает запуск и тик вне
-    песочницы. Только обычный файл не больше limit (_read_small_regular: ссылка последним звеном, FIFO, устройство —
-    None) и только если его настоящий путь внутри настоящей папки folder (ссылка звеном пути — None)."""
-    top = os.path.realpath(folder)
-    p = os.path.join(top, rel)
-    if not _under(os.path.realpath(p), top) or os.path.realpath(p) != os.path.normpath(p):
+    песочницы. Только обычный файл не больше limit (FIFO, устройство — None), путь rel внутри folder, и ни одно звено
+    пути ниже $HOME — ни папка folder, ни звено в середине (.claude → чужая папка), ни сам файл — не ссылка:
+    открытие по звеньям с O_NOFOLLOW (_open_nofollow), без зазора между проверкой и чтением."""
+    if not folder:
         return None
-    return _read_small_regular(p, limit)
+    top = os.path.normpath(os.path.abspath(folder))
+    p = os.path.normpath(os.path.join(top, rel))
+    if not _under(p, top) or p == top:
+        return None
+    return _read_small_regular(p, limit, whole_path=True)
 
 
 def _read_json_in(folder, rel):
@@ -3087,7 +3143,7 @@ def window_agents_md(launch, dirs):
     → [(путь, текст)]."""
     out = []
     for d in [launch] + dirs:
-        text = _read_in(d, "AGENTS.md")
+        text = _read_in(d, "AGENTS.md") if d else None  # папка запуска через ссылку — "" (window_dirs)
         if text is None:
             continue
         if d == launch and IMPORTS_AGENTS.search((_read_in(d, "CLAUDE.md") or "")[:65536]):

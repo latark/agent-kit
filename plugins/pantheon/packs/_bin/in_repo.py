@@ -19,11 +19,26 @@ CLAUDE_FILE_PATH=<путь файла> и тем же stdin. Код выхода
               исходных настроек — не формат matcher хука, там он срабатывал бы на каждую команду Bash
 
 Цель вне репозитория без --always — выход 0 молча. Нет папки репозитория или команды — выход 0 со строкой в stderr:
-хук пакета не должен ронять инструменты окна. Python 3.9+ (системный python3 macOS)."""
+хук пакета не должен ронять инструменты окна. Путь к репозиторию ниже $HOME, его .claude или .claude/hooks — ссылка
+(окно подменило папку, metis-0933) — выход 2 с причиной в stderr: хук из чужой папки не запускается, инструмент
+блокируется. Python 3.9+ (системный python3 macOS)."""
 import json
 import os
 import subprocess
 import sys
+
+
+def linked(p):
+    """Звенья пути p ниже $HOME (вне $HOME — ниже первого звена), которые — ссылки: окно пишет папку-родителя
+    репозитория и могло подменить его (или звено выше) ссылкой на папку, где .claude/hooks не под запретом записи."""
+    home = os.path.abspath(os.environ.get("HOME") or "/")
+    top = home if p == home or p.startswith(home.rstrip("/") + "/") else "/" + p.split("/")[1]
+    out, cur = [], top
+    for part in [x for x in p[len(top):].split("/") if x]:
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            out.append(cur)
+    return out
 
 
 def main(argv):
@@ -31,11 +46,17 @@ def main(argv):
         print("in_repo.py: нужно <репозиторий> [флаги] -- <команда>", file=sys.stderr)
         return 0
     cut = argv.index("--")
-    repo, flags, cmd = os.path.realpath(os.path.expanduser(argv[0])), set(argv[1:cut]), argv[cut + 1:]
+    given, flags, cmd = os.path.abspath(os.path.expanduser(argv[0])), set(argv[1:cut]), argv[cut + 1:]
+    repo = os.path.realpath(given)
     raw = sys.stdin.buffer.read()
     if not os.path.isdir(repo):
         print(f"in_repo.py: нет папки {repo} — хук пропущен", file=sys.stderr)
         return 0
+    links = linked(given) + [x for x in (".claude", ".claude/hooks") if os.path.islink(os.path.join(given, x))]
+    if links:
+        print(f"in_repo.py: {given}: ссылка вместо папки ({', '.join(links)}) — хук из чужой папки не запускаю",
+              file=sys.stderr)
+        return 2
     try:
         data = json.loads(raw or b"{}")
     except ValueError:
