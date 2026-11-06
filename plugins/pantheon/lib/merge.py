@@ -21,7 +21,10 @@ PR ядра защит (Д3) агенты не сливают: его слива
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
-     меньше двух, «вернуть» нет; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
+     меньше двух, «вернуть» нет. «Вернуть» на любом head PR в силе, пока его не сняло «принять» после него (того же
+     рецензента или свежее на этот SHA), а «принять», записанное раньше последнего неснятого «вернуть», не в счёт
+     (held_rejects, reject_floor — правило шлюза guard, metis-0465; «другой код» — другой коммит: git папки слияния у
+     прохода нет). «Принять» с прошлых head проход не переносит — на SHA нужны свои; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
@@ -724,6 +727,37 @@ def ci_state(rollup, required=(), runs=None, optional=()):
 
 # --- шлюз -----------------------------------------------------------------------------------------------------------
 
+def _reviewer(r):
+    """Рецензент вердикта — пара (session_id, agent_id), как в шлюзе guard (metis-0158)."""
+    by = r.get("by") if isinstance(r.get("by"), dict) else {}
+    return by.get("session_id") or "", by.get("agent_id") or ""
+
+
+def held_rejects(verdicts, sha):
+    """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
+    по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
+    снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head или на sha; 2) другого argus на
+    sha, если «вернуть» на другом head. Шлюз guard во втором случае ещё сверяет, что код sha не равен коду «вернуть»;
+    у прохода нет git папки слияния, и «другой код» здесь — другой коммит (metis-0443). Третий head «вернуть» не
+    снимает: проход «принять» не переносит, на sha нужны свои."""
+    def lifts(a, r):
+        return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r) and a["sha"] in (r["sha"], sha)
+                                          or a["sha"] == sha != r["sha"])
+    return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
+
+
+def reject_floor(verdicts):
+    """Отсечка, как merge_gate._floor шлюза guard: номер последнего «вернуть», которое тот же рецензент не снял
+    «принять» на том же head, или -1. «Принять», записанное до неё, не в счёт и на своём head: иначе откат force-push к
+    коду, принятому до «вернуть», прошёл бы по старым «принять» (metis-0465)."""
+    floor = -1
+    for i, r in enumerate(verdicts):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and _reviewer(a) == _reviewer(r)
+                                             and a["sha"] == r["sha"] for a in verdicts[i + 1:]):
+            floor = i
+    return floor
+
+
 def gate(repo, pr, sha, view):
     """Шлюз на этот head заново: (ok|wait|fail, текст). Записи шлюза пишет только хук guard (роли их не подделают)."""
     if not isinstance(view, dict):
@@ -738,21 +772,34 @@ def gate(repo, pr, sha, view):
     recs = P.review_records(repo)
     if not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
         return "fail", f"нет записи тестов шлюза на {sha[:12]}"
-    latest = {}
+    verdicts = []
     for r in recs:
         by = r.get("by") if isinstance(r.get("by"), dict) else {}
         if r.get("kind") in ("accept", "reject") and by.get("agent_type") == "argus" and r.get("pr") == pr \
-                and r.get("sha") == sha:
+                and isinstance(r.get("sha"), str):
             # «принять» без перечня или не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе.
             # Правило общее с итогом `pantheon review status` (P.review_accept_counts, metis-0393) — из
             # lib/review_rules.py, ядра защит (metis-0858)
             if r["kind"] == "accept" and not P.review_accept_counts(r):
                 continue
-            latest[(by.get("session_id") or "", by.get("agent_id") or "")] = r
-    if any(r["kind"] != "accept" for r in latest.values()):
-        return "fail", "у argus последний вердикт — «вернуть»"
-    if len(latest) < MIN_ACCEPTS:
-        return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
+            verdicts.append(r)
+    # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard
+    held = held_rejects(verdicts, sha)
+    if held:
+        return "fail", (f"«вернуть» от argus на {', '.join(r['sha'][:12] for r in held)} в силе: оно привязано к PR, "
+                        f"снимает его «принять» после него — того же рецензента или свежее на {sha[:12]}")
+    floor = reject_floor(verdicts)
+    latest = {}
+    for i, r in enumerate(verdicts):
+        if r["sha"] == sha:
+            latest[_reviewer(r)] = (i, r)
+    counted = [r for i, r in latest.values() if i > floor]
+    if len(counted) < MIN_ACCEPTS:
+        cut = len(latest) - len(counted)
+        return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}"
+                        + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
+                           if cut else ""))
+    latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
     state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))

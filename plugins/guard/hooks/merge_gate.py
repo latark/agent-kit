@@ -34,18 +34,21 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    различаются (0415b: accept другого argus на код, равный коду reject, reject не снимает; код не посчитан — тоже);
    3) на третьем head с другим кодом от той же merge-base, если код сливаемого SHA — не код reject (_held; metis-0158:
    два argus на одном head — accept и reject в любом порядке дают отказ). Перенос accept: accept с перечнем на
-   прошлом head PR засчитывается на новом SHA, если собственный дифф PR (merge-base с base PR..head) тот же —
+   прошлом head PR засчитывается на новом SHA, если собственный дифф PR (merge-base с живой вершиной ветки base
+   PR..head, metis-0471: не снимок baseRefOid) тот же —
    отпечаток _fingerprint по содержимому файлов (решение владельца 25.10 23:05): `git diff --raw -z --no-abbrev
    --no-renames --no-relative --ignore-submodules=none` без pathspec — режим, sha блоба или gitlink, статус и путь
    каждого файла; фильтр plugin.json и сортировка по пути — в Python, plugin.json плагинов сверяется по канону без
    version с учётом режима. Настройки git (diff.*, core.abbrev, submodule.*.ignore, атрибуты, GIT_* окружения) на
    отпечаток не влияют: окружение без GIT_*, явный --git-dir. Вывод --raw разбирается строго (формат, \0 в конце,
-   путь один раз), иначе отпечатка нет. Цена (решение владельца 25.10): main правил файл, который правит и PR, —
-   переноса нет, нужен argus. Засчитывается — и прямо на своём head, и переносом — только accept, записанное позже
+   путь один раз), иначе отпечатка нет. Отпечаток другой, а код тот же (main правил файл PR, базовый PR слит
+   squash) — переносится, если прошлый head, слитый с merge-base нового (git merge-tree --write-tree), без
+   конфликтов даёт ровно дерево нового head, кроме номера версии (_merge_same, metis-0445 и 0674). Засчитывается — и прямо на своём head, и переносом — только accept, записанное позже
    каждого reject PR, кроме reject, снятого accept с перечнем того же рецензента на том же head (_floor, _carried,
    #134 п.2, argus-b r2): иначе откат к коду, принятому до reject (force-push на старый head после снятия reject
    правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
-   CARRY_BUDGET секунд (запас только в тесте — GUARD_TEST_CARRY_BUDGET), у git — таймаут 3 с. Нет отпечатка — нет
+   CARRY_BUDGET секунд (запас только в тесте — GUARD_TEST_CARRY_BUDGET), у git — таймаут _git_timeout: 3–6 с по
+   остатку срока хука (metis-0787). Нет отпечатка — нет
    переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
@@ -239,10 +242,30 @@ def _git_env():
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def _git(d, *args):
-    """Вывод git в папке d; None — git не ответил (не репозиторий, сбой, таймаут)."""
+GIT_TIMEOUT = 3  # с на местный git: без таймера хука и как нижняя граница под ним
+GIT_TIMEOUT_MAX = 6  # с: потолок одного местного git под таймером хука
+GIT_MARGIN = 1.5  # с до срока хука, которые git оставляет шлюзу на отказ с причиной
+
+
+def _git_timeout():
+    """Срок одного местного git (metis-0787). Под нагрузкой Mac git бывал дольше 3 с, и шлюз отказывал «git не ответил»
+    или «не клон» ложно. Под таймером хука (ITIMER_REAL, guard_rules.set_deadline) git ждёт столько, сколько осталось
+    до срока без GIT_MARGIN, но от GIT_TIMEOUT до GIT_TIMEOUT_MAX. Без таймера (pantheon, тест в процессе) —
+    GIT_TIMEOUT. Сеть git здесь не трогает: только чтение своего репозитория."""
     try:
-        r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=3, env=_git_env())
+        left = signal.getitimer(signal.ITIMER_REAL)[0]
+    except (AttributeError, OSError, ValueError):
+        left = 0
+    if not left:
+        return GIT_TIMEOUT
+    return min(GIT_TIMEOUT_MAX, max(GIT_TIMEOUT, left - GIT_MARGIN))
+
+
+def _git(d, *args):
+    """Вывод git в папке d; None — git не ответил (не репозиторий, сбой, таймаут _git_timeout)."""
+    try:
+        r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=_git_timeout(),
+                           env=_git_env())
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -261,7 +284,7 @@ def _gh_resolved(d):
     сам remote, его пропускаем. → список owner/repo; код 1 (ключей нет) — пусто; другой сбой — None."""
     try:
         r = subprocess.run(["git", "-C", d, "config", "--get-regexp", r"^remote\..*\.gh-resolved$"],
-                           capture_output=True, text=True, timeout=3, env=_git_env())
+                           capture_output=True, text=True, timeout=_git_timeout(), env=_git_env())
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if r.returncode == 1 and not r.stdout.strip():
@@ -1789,7 +1812,7 @@ def _git_bytes(gd, *args, input=None):
     env = dict(_git_env(), GIT_NO_REPLACE_OBJECTS="1")
     try:
         r = subprocess.run(["git", "-C", gd, "--git-dir=" + gd, "--no-replace-objects", "-c", "core.quotePath=true",
-                            *args], input=input, capture_output=True, timeout=3, env=env)
+                            *args], input=input, capture_output=True, timeout=_git_timeout(), env=env)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -1905,6 +1928,23 @@ def _fingerprint(gd, base, head):
     return h.hexdigest(), mb
 
 
+def _merge_same(gd, head, mb, sha):
+    """Код head, слитый с mb (merge-base нового head sha с base PR), — ровно дерево sha (metis-0445, вариант
+    argus-134r2): `git merge-tree --write-tree head mb` без конфликтов, а дифф его дерева с sha — только номер версии в
+    plugin.json плагинов. Так «принять» переходит, когда main сдвинул строки в файле PR или когда базовый PR слит
+    squash, а этот перенесён rebase --onto main (metis-0674): отпечаток собственного диффа там другой, а код тот же.
+    Место правки учитывается — слияние по строкам, а не patch-id (владелец 25.10 10:08). Конфликт, сбой git (и git
+    старше 2.38 без --write-tree), чужой вывод — False."""
+    out = _git_bytes(gd, "merge-tree", "--write-tree", "--no-messages", head, mb)
+    tree = out.strip().decode("ascii", "replace") if out is not None else ""
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", tree):
+        return False
+    entries = _raw_entries(gd, tree, sha)
+    if entries is None or any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
+        return False
+    return _manifests(gd, entries) == []
+
+
 def _carry_heads(verdicts, sha):
     """Head, у которых считается отпечаток: sha и CARRY_HEADS последних (по последней записи) других head."""
     order = []
@@ -1961,9 +2001,10 @@ def _floor(verdicts):
     return floor
 
 
-def _carried(verdicts, sha, fp, cut=None):
+def _carried(verdicts, sha, fp, cut=None, merged=None):
     """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже отсечки
-    _floor. cut — список: в него пары («принять», отсёкшее его «вернуть») с тем же отпечатком, но записанные раньше
+    _floor. merged(head) → True — код head, слитый с base sha, и есть sha (_merge_same): такое «принять» тоже
+    переносится. cut — список: в него пары («принять», отсёкшее его «вернуть») с тем же кодом, но записанные раньше
     отсечки (для текста отказа)."""
     fs = fp(sha)
     if not fs:
@@ -1973,7 +2014,7 @@ def _carried(verdicts, sha, fp, cut=None):
     for i, a in enumerate(verdicts):
         if a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
             fa = fp(a["sha"])
-            if fa and fa[0] == fs[0]:
+            if fa and (fa[0] == fs[0] or (merged is not None and merged(a["sha"]))):
                 if i > floor:
                     out.append(a)
                 elif cut is not None:
@@ -2015,13 +2056,19 @@ class _Prints:
             if base is None:
                 self._note("gh pr view не ответил — base PR неизвестна")
             else:
-                self.gd, why = _carry_git(self.cwd, self.repo, base)
-                self.base = base.lower() if self.gd else None
-                self._note(why)
+                # база отпечатков — живая вершина ветки base, а не снимок baseRefOid (metis-0471): в ветку PR влили X
+                # и откатили, а X уже в main — против снимка дифф PR тот же, против вершины в нём откат X
+                branch = v.get("baseRefName")
+                tip = _base_tip(self.repo, branch)
+                if tip is None:
+                    self._note(f"вершину ветки base PR ({branch}) не получить от gh — дифф PR не сверить")
+                else:
+                    self.gd, why = _carry_git(self.cwd, self.repo, tip)
+                    self.base = tip if self.gd else None
+                    self._note(why)
         if not self.gd:
             return None
-        if head not in self.memo and time.monotonic() - self.t0 > self.budget:
-            self._note(f"сверка дольше {self.budget:g} с — остановлена (таймаут хука 10 с)")
+        if head not in self.memo and self._late():
             return None
         if head not in self.memo:
             got = _fingerprint(self.gd, self.base, head)
@@ -2029,6 +2076,24 @@ class _Prints:
             if not got[0]:
                 self._note(got[1])
         return self.memo[head]
+
+    def _late(self):
+        if time.monotonic() - self.t0 > self.budget:
+            self._note(f"сверка дольше {self.budget:g} с — остановлена (таймаут хука 10 с)")
+            return True
+        return False
+
+    def merged(self, head):
+        """Код head, слитый с base шлюзуемого sha, — ровно sha (_merge_same, metis-0445 и 0674)."""
+        fs, fa = self(self.sha), self(head)
+        key = ("merged", head)
+        if not (fs and fa):
+            return False
+        if key not in self.memo:
+            if self._late():
+                return False
+            self.memo[key] = _merge_same(self.gd, head, fs[1], self.sha)
+        return self.memo[key]
 
 
 def carry_file():
@@ -2300,7 +2365,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 "другой merge-base «вернуть» не перекрывает; код не посчитан — тоже."
                 + why_fp() + f" {advice}")
     latest, direct, cut = head_verdicts(verdicts, sha)
-    carried = [] if direct else _carried(verdicts, sha, fp, cut)
+    carried = [] if direct else _carried(verdicts, sha, fp, cut, fp.merged)
     if not direct and not carried:
         fs = fp(sha) if weak else None
         weak_used = [r for r in weak if r["sha"] == sha or (fs and fp(r["sha"]) and fp(r["sha"])[0] == fs[0])]
@@ -2315,8 +2380,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                     + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
                 f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. «Принять» с прошлого head PR переходит "
-                "на новый, только если собственный дифф PR от merge-base с base PR тот же (кроме номера версии в "
-                "plugin.json) и «принять» записано после каждого «вернуть» PR." + why_fp()
+                "на новый, только если собственный дифф PR от merge-base с живой вершиной base PR тот же (кроме "
+                "номера версии в plugin.json) или прошлый head, слитый с этой merge-base без конфликтов, даёт ровно "
+                "новый, и «принять» записано после каждого «вернуть» PR." + why_fp()
                 + (f" Дифф тот же у «принять» {'; '.join(_who(a) + ' на ' + a['sha'][:12] for a, _ in cut)}, но оно "
                    f"записано раньше «вернуть» {_who(cut[0][1])} на {cut[0][1]['sha'][:12]}: после «вернуть» старое "
                    "«принять» не засчитывается ни на своём head, ни переносом (откат к принятому коду), нужен свежий "
