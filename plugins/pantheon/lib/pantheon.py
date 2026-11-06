@@ -72,8 +72,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         Touch ID с этим действием целиком → исполнение один раз по sha256 текста
   pantheon owner-edit propose|status|cancel|run   правка файла владельца (policy.toml, ~/.claude/agents/_parts/*.part)
                                         без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
-                                        диффа; проход вне окна применяет по «да» в окне вопросов Зевса на «[id] …» с
-                                        этим sha или по Touch ID, если файл с заявки не изменился; хеши — в журнал
+                                        диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
+                                        «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl

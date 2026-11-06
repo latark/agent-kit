@@ -14,7 +14,9 @@
 
 Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml и
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
-права и хуки — никогда. Новый текст — UTF-8 без NUL, .toml — разбирается tomllib.
+права и хуки — никогда. Новый текст — UTF-8 без NUL и без невидимых, управляющих и bidi-знаков (HIDDEN, кроме \\n и
+\\t; --why — тоже), .toml — разбирается tomllib. Правка в вопросе и окне — shown(): строки «-»/«+» через « ⏎ » (⏎ внутри
+строки экранирован), у policy.toml каждая с разделом TOML — «[coordinators] +строка» (у «-» раздел старого текста).
 
 Проход (тик зовёт его отдельным процессом, пока есть заявки; окружение — merge.clean_env, как у слияния). Папка
 очереди открыта один раз (open_queue: части пути без ссылок), дальше файлы в ней — только через её fd (dir_fd).
@@ -48,6 +50,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+import unicodedata
 from datetime import datetime
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
@@ -73,6 +76,10 @@ TASK_RE = re.compile(r"[a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}-\d{1,6}")
 WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 ROLE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+HIDDEN = ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp")   # как handoff.BAD_CHARS: окно Touch ID их не покажет
+SEP = "⏎"            # «⏎» — между строками правки в вопросе и окне; внутри строки — экранирован
+ROOT = "(вне таблиц)"     # раздел строк policy.toml до первой таблицы
 FINAL = ("done", "failed", "declined", "refused", "dropped")
 CANCEL_LABEL = "Не применять"
 USAGE = ("pantheon owner-edit propose <файл> --from <новый текст> --task ID [--why \"зачем\"] | status [ID] | "
@@ -136,10 +143,24 @@ def read_target(rel):
     return data
 
 
+def hidden_at(text, keep="\n\t"):
+    """Первый невидимый, управляющий или bidi-знак (категории HIDDEN, кроме keep) → (номер строки, знак) или None.
+    Такой знак вопрос Зевсу и окно Touch ID не покажут, а в файл он ляжет (ревью PR #362, круг 2, Д)."""
+    for i, c in enumerate(text):
+        if c not in keep and unicodedata.category(c) in HIDDEN:
+            return text.count("\n", 0, i) + 1, c
+    return None
+
+
 def check_text(rel, new):
-    """Новый текст годится для файла: UTF-8 без NUL, не больше NEW_MAX; .toml — разбирается."""
+    """Новый текст годится для файла: UTF-8 без NUL, не больше NEW_MAX, без невидимых и bidi-знаков (кроме \\n и \\t);
+    .toml — разбирается."""
     if not isinstance(new, str) or "\x00" in new or len(new.encode("utf-8")) > NEW_MAX:
         raise Refuse(f"новый текст ~/{rel}: не текст, с NUL или больше {NEW_MAX // 1024} КБ")
+    bad = hidden_at(new)
+    if bad:
+        raise Refuse(f"новый текст ~/{rel}, строка {bad[0]}: невидимый или управляющий знак U+{ord(bad[1]):04X} — "
+                     "вопрос и окно Touch ID его не покажут")
     if rel.endswith(".toml"):
         try:
             tomllib.loads(new)
@@ -162,16 +183,120 @@ def diff_sha(rel, before, after, diff):
     return sha(json.dumps([rel, before, after, diff], ensure_ascii=False))
 
 
-def changes(diff):
-    """Строки «-»/«+» диффа, переводы строк сняты. Заголовки ---/+++ — только до первого «@@»: дальше «+++ …» —
-    добавленная строка «++ …», а не заголовок, и её владелец видит (ревью PR #362, Б1)."""
-    out, body = [], False
+def walk(diff):
+    """[(строка «-»/«+» диффа без перевода, её номер от 0 в старом тексте у «-» / в новом у «+», или None)]. Заголовки
+    ---/+++ — только до первого «@@»: дальше «+++ …» — добавленная строка «++ …», а не заголовок, и её владелец видит
+    (ревью PR #362, Б1). Номера — от заголовка ханка «@@ -a,b +c,d @@» (у пустого диапазона difflib пишет начало − 1)."""
+    out, o, n, body = [], None, None, False
     for ln in diff.splitlines():
         if ln.startswith("@@"):
-            body = True
+            body, m = True, HUNK.match(ln)
+            o = n = None
+            if m:
+                o = int(m[1]) - (m[2] != "0")
+                n = int(m[3]) - (m[4] != "0")
         elif body and ln[:1] in "+-":
-            out.append(ln)
+            i = o if ln[0] == "-" else n
+            out.append((ln, i))
+            if i is not None:
+                if ln[0] == "-":
+                    o += 1
+                else:
+                    n += 1
+        elif body and ln[:1] == " " and o is not None:
+            o, n = o + 1, n + 1
     return out
+
+
+def changes(diff):
+    """Строки «-»/«+» диффа, переводы строк сняты (порядок и набор — как в walk)."""
+    return [ln for ln, _ in walk(diff)]
+
+
+def old_text(rel, new, diff):
+    """Старый текст из нового и диффа (обратно по ханкам) или None: make_diff от него не даёт тот же дифф."""
+    newl, rows = new.splitlines(True), diff.splitlines()
+    out, pos, body = [], 0, False
+    for k, ln in enumerate(rows):
+        m = HUNK.match(ln) if ln.startswith("@@") else None
+        if ln.startswith("@@"):
+            if not m:
+                return None
+            start = int(m[3]) - (m[4] != "0")
+            out += newl[pos:start]
+            pos, body = start, True
+        elif body and ln[:1] in " -":
+            out.append(ln[1:] + ("" if k + 1 < len(rows) and rows[k + 1].startswith("\\") else "\n"))
+            pos += ln[0] == " "
+        elif body and ln[:1] == "+":
+            pos += 1
+    old = "".join(out + newl[pos:])
+    return old if make_diff(rel, old, new) == diff else None
+
+
+def _probe_path(obj, key, path=()):
+    """Путь таблицы, где лежит ключ-проба key, или None."""
+    if isinstance(obj, dict):
+        if key in obj and path:
+            return path
+        items = obj.items()
+    elif isinstance(obj, list):
+        items = ((None, v) for v in obj)
+    else:
+        return None
+    for k, v in items:
+        got = _probe_path(v, key, path + (k,))
+        if got is not None:
+            return got
+    return None
+
+
+def _label(path):
+    parts = [k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=bool(hidden_at(k, "")))
+             for k in path if k is not None]
+    return ("[[{}]]" if path[-1] is None else "[{}]").format(".".join(parts))
+
+
+def toml_sections(text):
+    """Раздел TOML каждой строки text (элементы splitlines(True)) → [подпись] или None: text не TOML. Заголовок — строка
+    «[…]», после которой вставленный ключ-проба ложится в таблицу (tomllib): «[x]» внутри многострочной строки или
+    массива — не заголовок. До первой таблицы — ROOT."""
+    if text is None:
+        return None
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    elems, key = text.splitlines(True), "oe_probe"
+    while key in text:
+        key += "_"
+    out, cur = [], ROOT
+    for i, ln in enumerate(elems):
+        if ln.lstrip().startswith("["):
+            probe = "".join(elems[:i + 1]) + ("" if ln.endswith("\n") else "\n") + f"{key} = 1\n" + "".join(elems[i + 1:])
+            with contextlib.suppress(tomllib.TOMLDecodeError):
+                path = _probe_path(tomllib.loads(probe), key)
+                if path:
+                    cur = _label(path)
+        out.append(cur)
+    return out
+
+
+def shown(req):
+    """Строки правки, как их видит владелец, по одной: у policy.toml — с разделом TOML «[таблица] +строка» (у «-» —
+    раздел в старом тексте, у «+» — в новом; не определить — «[?]»): одна строка в [sandbox_write] и в [coordinators]
+    даёт разные права (ревью PR #362, круг 2, Б). Знак-разделитель SEP внутри строки — экранирован."""
+    rows = walk(req["diff"])
+    if req["file"].endswith(".toml"):
+        new = req.get("new")
+        secs = {"+": toml_sections(new) if isinstance(new, str) else None,
+                "-": toml_sections(old_text(req["file"], new, req["diff"])) if isinstance(new, str) else None}
+
+        def sec(ln, i):
+            s = secs[ln[0]]
+            return s[i] if s is not None and i is not None and 0 <= i < len(s) else "[?]"
+        rows = [(f"{sec(ln, i)} {ln}", i) for ln, i in rows]
+    return [ln.replace(SEP, "\\u23ce") for ln, _ in rows]
 
 
 def one_line(s):
@@ -182,16 +307,20 @@ def one_line(s):
 
 def window_text(req):
     """Текст окна Touch ID — правка целиком, или None: окно её целиком не покажет (тогда только «да» в окне вопросов)."""
-    text = (f"Правка ~/{req['file']} (заявка {req['id']}, {req.get('window') or 'вне окна'}, {req['task']}): "
-            + "; ".join(changes(req["diff"])) + f". sha {req['diff_sha'][:SHORT]}")
+    rows = shown(req)
+    text = (f"Правка ~/{req['file']} (заявка {req['id']}, {req.get('window') or 'вне окна'}, {req['task']}, sha "
+            f"{req['diff_sha'][:SHORT]}), строк {len(rows)}: " + f" {SEP} ".join(rows))
     return text if P.handoff_mod().showable(text) and len(text) <= WINDOW_MAX else None
 
 
 def question(req):
-    """Вопрос для Зевса: [id], файл, sha диффа (его сверяет проход), зачем, правка строками."""
+    """Вопрос для Зевса: [id], файл, sha диффа, зачем, правка строками (shown) через « ⏎ »: вопрос — одна строка (хук
+    окна вопросов сводит переводы строк в пробел), а SEP внутри строки правки экранирован — «ok; -Правило» не читается
+    как вторая строка (ревью PR #362, круг 2, Д)."""
     why = f" Зачем: {req['why']}." if req.get("why") else ""
+    rows = shown(req)
     return (f"[{req['id']}] Применить правку ~/{req['file']} (задача {req['task']}, sha диффа "
-            f"{req['diff_sha'][:SHORT]})?{why} Правка: " + "; ".join(changes(req["diff"])))
+            f"{req['diff_sha'][:SHORT]})?{why} Правка, строк {len(rows)}: " + f" {SEP} ".join(rows))
 
 
 def facts(req):
@@ -397,6 +526,9 @@ def cmd_propose(args):
                          "~/.claude/agents/_parts/<имя>.part)")
         if len(why) > WHY_MAX:
             raise Refuse(f"--why длиннее {WHY_MAX} знаков")
+        if hidden_at(why, ""):
+            raise Refuse(f"--why: невидимый или управляющий знак U+{ord(hidden_at(why, '')[1]):04X} — вопрос его не "
+                         "покажет")
         raw_new = read_file(kv["--from"], NEW_MAX)
         if raw_new is None:
             raise Refuse(f"{kv['--from']}: не читается, ссылка или больше {NEW_MAX // 1024} КБ")

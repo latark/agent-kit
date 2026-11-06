@@ -637,6 +637,101 @@ check("Д dir_fd: настоящая папка открывается", fd is n
 if fd is not None:
     os.close(fd)
 
+# --- [ревью PR #362, круг 2] --------------------------------------------------------------------------------------
+# Б: строка policy.toml — с разделом TOML. Одна и та же строка в [sandbox_write] и в [coordinators] — разный текст
+SEC_OLD = ('top = 1\n[sandbox_write]\nmetis-pantheon = ["~/ai"]\nnote = """\n[coordinators]\n"""\na = 1\nb = 2\nc = 3\n'
+           '[coordinators]\nzeus = ["~/ai"]\nd = 1\ne = 2\nf = 3\n[[runs]]\nname = "x"\n')
+LINE = 'hephaestus-morph = ["~/projects/agent-kit"]\n'
+texts = {}
+for table, anchor in (("[sandbox_write]", "c = 3\n"), ("[coordinators]", "f = 3\n")):
+    fresh(policy=SEC_OLD)
+    new = SEC_OLD.replace(anchor, anchor + LINE)
+    rc, out, errs = propose("~/.claude/pantheon/policy.toml", new, window="metis-pantheon")
+    _, req, win = reqs()[0]
+    texts[table] = (OE.question(req).replace(short(req), "<sha>"),
+                    (OE.window_text(dict(req, window=win)) or "").replace(short(req), "<sha>"))
+    check(f"Б круг 2: {table} — раздел у строки в вопросе и в окне Touch ID (заголовок вне контекста диффа)",
+          f"{table} +{LINE.strip()}" in texts[table][0] and f"{table} +{LINE.strip()}" in texts[table][1]
+          and table not in req["diff"].split("@@")[-1], (texts[table], req["diff"]))
+check("Б круг 2: одна строка в [sandbox_write] и в [coordinators] — разный вопрос и разное окно (без sha)",
+      texts["[sandbox_write]"][0] != texts["[coordinators]"][0]
+      and texts["[sandbox_write]"][1] != texts["[coordinators]"][1], texts)
+fresh(policy=SEC_OLD)
+new = SEC_OLD.replace('[coordinators]\nzeus = ["~/ai"]\n', "").replace('name = "x"\n', 'name = "y"\n')
+new = ("pre = 0\n" + new).replace("note = ", "notes = ")
+propose("~/.claude/pantheon/policy.toml", new)
+_, req, _ = reqs()[0]
+rows = OE.shown(req)
+check("Б круг 2: «-» — раздел старого текста, «+» — нового; [x] в многострочной строке — не заголовок; [[таблица]]",
+      rows == ["(вне таблиц) +pre = 0", '[sandbox_write] -note = """', '[sandbox_write] +notes = """',
+               "[coordinators] -[coordinators]", '[coordinators] -zeus = ["~/ai"]', '[[runs]] -name = "x"',
+               '[[runs]] +name = "y"'], rows)
+for old_t, new_t in ((SEC_OLD, new), ("a\nb", "a\nc"), ("a\nb\n", "a\nb"), ("x\n", "y\nx\n"), ("x\ny\n", "x\n"),
+                     ("".join(f"{i}\n" for i in range(30)), "".join(f"{i}\n" for i in range(30) if i not in (3, 20)))):
+    d = OE.make_diff("f.toml", old_t, new_t)
+    check(f"Б круг 2: старый текст из нового и диффа — тот же ({old_t[:12]!r} → {new_t[:12]!r})",
+          OE.old_text("f.toml", new_t, d) == old_t, OE.old_text("f.toml", new_t, d))
+check("Б круг 2: дифф не от этого нового текста — старый не восстановить, раздел «[?]»",
+      OE.old_text("f.toml", "q\n", OE.make_diff("f.toml", "a\n", "b\n")) is None
+      and OE.shown({"file": ".claude/pantheon/policy.toml", "diff": OE.make_diff("f.toml", "[t]\na = 1\n", "[t]\n"),
+                    "new": "zzz = 2\n"}) == ["[?] -a = 1"])
+check("Б круг 2: .part — без раздела", OE.shown({"file": ".claude/agents/_parts/names.part", "new": "b\n",
+                                                  "diff": OE.make_diff("x", "a\n", "b\n")}) == ["-a", "+b"])
+
+# Д: невидимые и bidi-знаки в новом тексте и в --why — отказ в propose; \t и \n — можно
+check("Д круг 2: HIDDEN — те же категории, что handoff.BAD_CHARS (окно Touch ID)",
+      tuple(OE.HIDDEN) == tuple(P.handoff_mod().BAD_CHARS))
+for ch in ("\u200b", "\u202e", "\U000e0000", "\U000e0070", "\r", "\u2028"):
+    fresh()
+    rc, out, errs = propose("~/.claude/agents/_parts/names.part", f"Зевс — он\nok{ch}push\n")
+    check(f"Д круг 2: знак U+{ord(ch):04X} в новом тексте — отказ, заявки нет", rc != 0 and not reqs()
+          and f"U+{ord(ch):04X}" in errs and "строка 2" in errs, (rc, errs))
+fresh()
+rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он\n\tотступ\n")
+check("Д круг 2: табуляция в новом тексте — заявка есть", rc == 0 and len(reqs()) == 1, errs)
+fresh()
+rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он\nМетида\n", why="ok\u202eон")
+check("Д круг 2: bidi-знак в --why — отказ", rc != 0 and not reqs() and "U+202E" in errs, errs)
+fresh()
+write(NAMES, "Зевс — он\n")
+propose("~/.claude/agents/_parts/names.part", "Зевс — он\nМетида\n")
+path0, req, _ = reqs()[0]
+write(path0, json.dumps(dict(req, new="Зевс — он\nМетида\u200b\n")), 0o600)   # заявку подменили в обход propose
+IDLE[0] = 0.0
+run()
+check("Д круг 2: невидимый знак в заявке, положенной в обход propose, — отказ в проходе, окна нет",
+      read(NAMES) == "Зевс — он\n" and not ASKED and result(req).get("state") == "refused", (ASKED, result(req)))
+
+# Д: окно Touch ID с невидимым знаком (в старом тексте файла владельца) — не показывается, только «да» в окне вопросов
+fresh()
+write(NAMES, "Зевс — он\nстарое\u200bскрыто\n")
+rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он\n")
+_, req, win = reqs()[0]
+check("Д круг 2: невидимый знак в строке правки — окна Touch ID нет (showable)",
+      OE.window_text(dict(req, window=win)) is None and "Окно Touch ID правку целиком не покажет" in out, out)
+IDLE[0] = 0.0
+run()
+check("Д круг 2: проход окно Touch ID с невидимым знаком не показывает", not ASKED and read(NAMES)
+      == "Зевс — он\nстарое\u200bскрыто\n", ASKED)
+
+# Д: строки правки — через « ⏎ », знак ⏎ внутри строки экранирован: «ok ⏎ -Правило» — одна добавленная строка
+fresh()
+rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он\nok ⏎ -Правило; -Ещё\n")
+_, req, win = reqs()[0]
+q = OE.question(req)
+check("Д круг 2: ⏎ в строке экранирован, строк 1 — в вопросе и в окне",
+      q.endswith("Правка, строк 1: +ok \\u23ce -Правило; -Ещё") and (OE.window_text(dict(req, window=win)) or "")
+      .endswith("строк 1: +ok \\u23ce -Правило; -Ещё"), (q, OE.window_text(dict(req, window=win))))
+fresh()
+propose("~/.claude/agents/_parts/names.part", "Метида — она\n")
+_, req, win = reqs()[0]
+check("Д круг 2: две строки правки — через « ⏎ », а не «; »", OE.question(req).endswith(
+      "Правка, строк 2: -Зевс — он ⏎ +Метида — она") and (OE.window_text(dict(req, window=win)) or "").endswith(
+      "строк 2: -Зевс — он ⏎ +Метида — она"), (OE.question(req), OE.window_text(dict(req, window=win))))
+answer(yes_question(req), "А — Да, применить")
+run()
+check("Д круг 2: «да» на вопрос с « ⏎ » (как пишет хук) — применено", read(NAMES) == "Метида — она\n", journal())
+
 # --- [проход] -------------------------------------------------------------------------------------------------------
 fresh()
 propose("~/.claude/pantheon/policy.toml", NEW)
