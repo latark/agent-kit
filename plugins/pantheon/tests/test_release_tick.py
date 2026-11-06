@@ -288,5 +288,5 @@ w = World("no-repo")
 M.allowed_repos = lambda: {"latark/other"}
 check("agent-kit нет в merge_repos → ничего", RT.tick(T) is None and w.releases() == [])
 
-print(f"\nитог: {len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
+print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)
