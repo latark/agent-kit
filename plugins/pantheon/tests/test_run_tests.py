@@ -141,7 +141,11 @@ p = mkplugin({"helper.py": "print(1)\n"})
 r = run([p])
 check("0 файлов — раннер не 0", r.returncode != 0 and "ни одного файла" in r.stdout, r.stdout)
 r = run([tempfile.mkdtemp(prefix="empty-")])
-check("папка без tests/ — раннер не 0", r.returncode != 0, r.stdout)
+check("папка без tests/ — код 2 и строка про tests", r.returncode == 2 and "tests" in r.stdout, r.stdout)
+okp = mkplugin({"test_a.py": OK2})
+r = run([okp, tempfile.mkdtemp(prefix="notests-")])
+check("рядом с папкой без tests/ зелёная папка — всё равно код 2, ничего не пропущено молча",
+      r.returncode == 2 and "ok   " not in r.stdout, r.stdout)
 r = run([os.path.join(_ROOT, "нет-такой")])
 check("несуществующая папка — код 2", r.returncode == 2, r.stdout)
 r = run([])
@@ -279,6 +283,24 @@ check("checks: «тестов: 3 прошло, 1 не прошло» — 4", R.c
 check("checks: ANSI не мешает итогу", R.checks("\x1b[32mok a\x1b[0m\n\x1b[1m1 из 1\x1b[0m\n") == (True, 1, None))
 check("verdict: код 0 с ПРОВАЛ — не ok", R.verdict(0, "ok a\nПРОВАЛ: b\n", False)[0] is False)
 check("verdict: код 0, «1/1» — ok", R.verdict(0, "ok a\n1/1\n", False) == (True, None, 1))
+# --- явный провал в выводе при коде 0 (metis-0556) ---
+for nm, body in (("FAIL <имя>", "ok a\nFAIL b  деталь\n2/2\n"), ("НЕ ПРОШЛО", "ok a\nНЕ ПРОШЛО: b\n1/1\n"),
+                 ("Traceback", "ok a\nTraceback (most recent call last):\n  File x\n1/1\n"),
+                 ("«не прошло: 2»", "ok a\nне прошло: 2\n1/1\n"), ("«FAIL 3»", "ok a\nFAIL 3\n"),
+                 ("«2 не прошло»", "ok a\nтестов: 3 прошло, 2 не прошло\n"),
+                 ("с ANSI", "ok a\n\x1b[31mFAIL b\x1b[0m\n1/1\n")):
+    v = R.verdict(0, body, False)
+    check(f"verdict: код 0 с {nm} — красный", v[0] is False and "в выводе" in (v[1] or ""), v)
+for nm, body in (("«не прошло: 0»", "ok a\nне прошло: 0\n1/1\n"), ("«FAIL 0»", "ok a\nFAIL 0\n"),
+                 ("FAIL внутри имени", "ok test_FAIL_case\nok a FAIL b\n2/2\n"),
+                 ("«0 не прошло»", "ok a\nтестов: 3 прошло, 0 не прошло\n"),
+                 ("Traceback в середине строки", "ok a  # ожидаемый Traceback (most recent call last)\n1/1\n"),
+                 ("«FAILED» без пробела", "ok a\nok FAILURE-mode\n1/1\n")):
+    v = R.verdict(0, body, False)
+    check(f"verdict: код 0 с {nm} — не ложное срабатывание", v[0] is True, v)
+p = mkplugin({"test_lie.py": "print('ok a')\nprint('FAIL b  деталь')\nprint('2/2')\n"})
+r = run([p])
+check("раннер: файл с кодом 0 и строкой FAIL — красный, код 1", r.returncode == 1 and "в выводе строка FAIL" in r.stdout, r.stdout)
 NS = frozenset({"g/test_old.py"})
 check("verdict: старый файл без итога из списка — ok", R.verdict(0, "ok a\nok b\n", False, "g/test_old.py", NS)
       == (True, None, 2))
