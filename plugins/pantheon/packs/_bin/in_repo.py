@@ -44,7 +44,9 @@ window_launch собрал до старта окна (pantheon.py pack_snapshot
 Цель вне репозитория без --always — выход 0 молча. Нет папки репозитория — выход 0 со строкой в stderr: хук пакета не
 должен ронять инструменты окна. Нет скрипта `.claude/hooks/<имя>` в снимке (при запуске окна его не было, или звено
 пути к нему было ссылкой) или команда не запустилась — выход 1 со строкой в stderr (ошибка хука; onFailure: block её
-блокирует). Звено пути репозитория ниже $HOME — ссылка или не папка (окно подменило), обёртка не из снимка, файл
+блокирует). Скрипт при запуске окна не совпал с эталоном пакета (packs/<окно>/approved-hooks.json, класс 6: `git
+pull` окна идёт мимо песочницы и мог переписать .claude/hooks; в манифесте — unapproved) — выход 2 со строкой
+«скрипт <путь> не одобрен: хеш …, одобрить — PR в packs»: инструмент блокируется. Звено пути репозитория ниже $HOME — ссылка или не папка (окно подменило), обёртка не из снимка, файл
 снимка не обычный или его хеш не совпал с манифестом — выход 2 с причиной: инструмент блокируется. Python 3.9+
 (системный python3 macOS)."""
 import hashlib
@@ -63,6 +65,15 @@ MANIFEST_LIMIT = 1 << 20
 
 class Linked(OSError):
     """Звено — ссылка или не папка (не обычный файл): окно подменило путь."""
+
+
+class Unapproved(Exception):
+    """Скрипт репозитория при запуске окна не совпал с эталоном пакета (manifest unapproved, класс 6)."""
+
+
+def unapproved_line(script_path, digest):
+    """Строка отказа — как pack_unapproved_line ядра (pantheon.py)."""
+    return f"скрипт {script_path} не одобрен: хеш {digest}, одобрить — PR в packs (approved-hooks.json)"
 
 
 def open_root(given):
@@ -201,7 +212,12 @@ def snap_script(man, repo, arg):
     if arg.startswith(HOOKS):
         if man is None:
             raise Linked(f"{arg}: обёртка не из снимка окна — скрипт репозитория не исполняю")
-        rel = (man["repos"].get(repo) or {}).get(arg[len(HOOKS):])
+        name = arg[len(HOOKS):]
+        rel = (man["repos"].get(repo) or {}).get(name)
+        bad = man.get("unapproved") if isinstance(man.get("unapproved"), dict) else {}
+        digest = (bad.get(repo) if isinstance(bad.get(repo), dict) else {}).get(name)
+        if not isinstance(rel, str) and isinstance(digest, str):
+            raise Unapproved(unapproved_line(os.path.join(repo, arg), digest))
         if not isinstance(rel, str):
             raise FileNotFoundError(f"{arg}: нет в снимке окна (снимок берётся при запуске окна)")
         return open_snap(man, rel)
@@ -258,6 +274,9 @@ def main(argv):
             if sfd is not None:
                 fds.append(sfd)
                 cmd[i] = f"/dev/fd/{sfd}"
+    except Unapproved as e:
+        print(f"in_repo.py: {e} — хук не запущен, инструмент заблокирован", file=sys.stderr)
+        return 2
     except FileNotFoundError as e:
         print(f"in_repo.py: {repo}: {e} — хук не запущен", file=sys.stderr)
         return 1

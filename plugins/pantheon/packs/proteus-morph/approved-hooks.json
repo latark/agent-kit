@@ -1,0 +1,12 @@
+{
+  "_": "Эталоны sha256 скриптов .claude/hooks репозиториев, которые хуки пакета исполняют вне песочницы (metis-0933 круг G, решение владельца 07.11 02:27). Снимок окна берёт скрипт, только если хеш совпал; новый эталон — PR в agent-kit, его сливает владелец.",
+  "scripts": {
+    "$HOME/projects/MorphStream/app": {
+      "protect-db.sh": "64424dc8d65892db2d4591cc5457aec00b714d66d388000392b7beef8b06b80b",
+      "pre-commit-check.sh": "c5f0650b77e4e429c12e68e6a0e69280f82a9f96cba648c72c99487575a8a1a0"
+    },
+    "$HOME/projects/MorphStream/gpu-worker": {
+      "pre-commit-check.sh": "52bd45f194a93a54fbc2a0a2acca4f56fde9d0b6974ea95a076297298483cb11"
+    }
+  }
+}

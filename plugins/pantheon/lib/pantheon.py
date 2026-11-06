@@ -3219,6 +3219,41 @@ PACK_PLUGIN_FILES = (".claude-plugin/plugin.json", "hooks/hooks.json")
 PACK_SCRIPT_LIMIT = 1 << 20
 PACK_SNAPSHOT_KEEP = 14 * 86400  # старые снимки окна: их может держать ещё живая сессия
 REPO_HOOKS_PREFIX = ".claude/hooks/"
+# Эталоны скриптов репозиториев (metis-0933 круг G, класс 6; решение владельца 07.11 02:27 «А — хуки с вашим
+# одобрением»). excludedCommands окна (`git pull *`) идут мимо песочницы и переписывают .claude/hooks рабочей копии
+# коммитом, собранным окном в песочнице, — литеральный denyWrite держит только команды в песочнице. Поэтому снимок
+# берёт скрипт репозитория, только если его sha256 совпал с эталоном из данных пакета packs/<окно>/approved-hooks.json
+# (код ядра: новый эталон — только PR в agent-kit, его сливает владелец). Не совпал — скрипта в снимке нет, в
+# манифесте — unapproved {репозиторий: {имя: sha256}}, и хук окна получает отказ in_repo.py со строкой
+# pack_unapproved_line (выход 2), а запуск окна — ту же строку в stderr.
+PACK_APPROVED = "approved-hooks.json"
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def pack_unapproved_line(script_path, digest):
+    """Строка отказа для скрипта репозитория, чей sha256 не совпал с эталоном пакета (та же — в in_repo.py)."""
+    return f"скрипт {script_path} не одобрен: хеш {digest}, одобрить — PR в packs (approved-hooks.json)"
+
+
+def _pack_repo(s):
+    """Строка репозитория из пакета ($HOME, ${HOME}, ~) → путь без ссылок, как его считает in_repo.open_root."""
+    base, parts = _split_trusted(os.path.expanduser(s.replace("${HOME}", HOME).replace("$HOME", HOME)))
+    return os.path.join(base, *parts)
+
+
+def pack_approved(pack_dir):
+    """Эталоны пакета pack_dir: {репозиторий (_pack_repo): {имя скрипта: sha256}} из PACK_APPROVED
+    {"scripts": {"$HOME/…/app": {"protect-db.sh": "<sha256>"}}}. Нет файла, не JSON, кривая строка — без неё:
+    скрипт без эталона не одобрен."""
+    data = read_json(os.path.join(pack_dir, PACK_APPROVED), {})
+    got = data.get("scripts") if isinstance(data, dict) else None
+    out = {}
+    for repo, names in (got.items() if isinstance(got, dict) else ()):
+        if not isinstance(repo, str) or not repo or not isinstance(names, dict):
+            continue
+        out.setdefault(_pack_repo(repo), {}).update(
+            {n: h for n, h in names.items() if isinstance(n, str) and isinstance(h, str) and SHA256_HEX.fullmatch(h)})
+    return out
 
 
 def _read_bytes_nofollow(p, limit):
@@ -3264,20 +3299,22 @@ def pack_hook_scripts(pack_dir):
                 at = next((i for i, t in enumerate(toks) if t.endswith("/_bin/in_repo.py")), None)
                 if at is None or at + 1 >= len(toks) or "--" not in toks[at + 1:]:
                     continue
-                base, parts = _split_trusted(os.path.expanduser(toks[at + 1]))
-                repo = os.path.join(base, *parts)
+                repo = _pack_repo(toks[at + 1])
                 cut = toks.index("--", at + 1)
                 out += [(repo, t[len(REPO_HOOKS_PREFIX):]) for t in toks[cut + 1:] if t.startswith(REPO_HOOKS_PREFIX)]
     return list(dict.fromkeys(out))
 
 
-def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=()):
+def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), approved=None):
     """Снимок в out_dir/<name>-<16 знаков sha256 manifest.json> → путь к нему. Внутри: _bin/* (из bin_dir), plugin/
     (PACK_PLUGIN_FILES из plugin_dir, если есть), repo/<sha репозитория>/<имя> — скрипты scripts [(репозиторий, имя)],
     прочитанные _read_bytes_nofollow (ссылка, не файл, нет файла — пропуск: хук получит отказ in_repo.py), и
-    manifest.json {files: {путь: sha256}, repos: {репозиторий: {имя: путь}}}. Готовый снимок с тем же хешем и целыми
-    файлами берётся как есть; испорченный — собирается заново. Старые снимки окна старше PACK_SNAPSHOT_KEEP убирает."""
-    files, repos = {}, {}
+    manifest.json {files: {путь: sha256}, repos: {репозиторий: {имя: путь}}, unapproved: {репозиторий: {имя: sha256}}}.
+    Скрипт репозитория идёт в снимок, только если его sha256 — эталон approved {репозиторий: {имя: sha256}}
+    (pack_approved, класс 6); иначе — в unapproved и строкой pack_unapproved_line в stderr. approved не задан — ни
+    одного одобренного. Готовый снимок с тем же хешем и целыми файлами берётся как есть; испорченный — собирается
+    заново. Старые снимки окна старше PACK_SNAPSHOT_KEEP убирает."""
+    files, repos, unapproved, approved = {}, {}, {}, approved or {}
     # _bin и плагин — код ядра (папка плагина, путь от realpath): ссылки в пути к ней законны
     for fn in sorted(os.listdir(bin_dir)) if os.path.isdir(bin_dir) else []:
         if fn.endswith(".py"):
@@ -3291,14 +3328,20 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=()):
     for repo, script in scripts:
         if not script or "/" in script or script in (".", ".."):
             continue
-        data = _read_bytes_nofollow(os.path.join(repo, ".claude", "hooks", script), PACK_SCRIPT_LIMIT)
+        where = os.path.join(repo, ".claude", "hooks", script)
+        data = _read_bytes_nofollow(where, PACK_SCRIPT_LIMIT)
         if data is None:
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        if (approved.get(repo) or {}).get(script) != digest:
+            unapproved.setdefault(repo, {})[script] = digest
+            print(f"pantheon: окно {name}: {pack_unapproved_line(where, digest)}", file=sys.stderr)
             continue
         rel = f"repo/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
         files[rel] = data
         repos.setdefault(repo, {})[script] = rel
     manifest = json.dumps({"files": {k: hashlib.sha256(v).hexdigest() for k, v in sorted(files.items())},
-                           "repos": repos}, sort_keys=True, ensure_ascii=False).encode()
+                           "repos": repos, "unapproved": unapproved}, sort_keys=True, ensure_ascii=False).encode()
     snap = os.path.join(out_dir, f"{name}-{hashlib.sha256(manifest).hexdigest()[:16]}")
     if not _snapshot_intact(snap, manifest, files):
         os.makedirs(out_dir, exist_ok=True)
@@ -3348,7 +3391,7 @@ def pack_snapshot(window, name):
     if not plugin and not os.path.isfile(os.path.join(pack, "mcp.json")):
         return None
     return pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
-                              pack_hook_scripts(pack) if plugin else ())
+                              pack_hook_scripts(pack) if plugin else (), pack_approved(pack))
 
 
 def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
