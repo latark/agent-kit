@@ -223,8 +223,14 @@ def main():
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
     open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/ai/agent-kit"]\n')
     # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
+    # CLAUDE_TMP сборки окон (общий TMPDIR сессий, его чужие папки закрыты окну штаба) — своя папка вне HOME теста
+    # (metis-0876). Без неё в окне роли корень теста — /tmp/claude-<uid> (mkroot), то есть настоящая CLAUDE_TMP: HOME
+    # теста попадал под «чужие папки CLAUDE_TMP», и allowRead .git/README.md/AGENTS.md (metis-0771) отбрасывался.
+    # Имя — claude-<uid>, как у настоящей: проверки шаблонов окна штаба ищут его в путях
+    ctmp = os.path.join(tempfile.mkdtemp(prefix="tick-ctmp-"), f"claude-{os.getuid()}")
+    os.makedirs(ctmp)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
-           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty"), "PANTHEON_CLAUDE_TMP": ctmp}
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
@@ -575,6 +581,11 @@ def main():
           br + "/*" in hdr and br + "/*/**" in hdr and br not in hdr and "Read(/" + br + "/**)" not in str(hq), hdr[-12:])
     check("окно штаба: в проекте открыты .git (git log), README.md и AGENTS.md — allowRead (metis-0771)",
           all(br + x in har for x in ("/.git", "/README.md", "/AGENTS.md")), har)
+    rct = os.path.realpath(ctmp)
+    check("окно штаба: выводы чужих сессий закрыты в CLAUDE_TMP теста (PANTHEON_CLAUDE_TMP), а не в общей "
+          "/tmp/claude-<uid> — проверка выше не зависит от того, где лежит корень теста (metis-0876)",
+          any(x.startswith(rct + "/") for x in hdr) and not os.path.realpath(tmp).startswith(rct + "/"),
+          [x for x in hdr if "claude-" in x][:4])
     check("окно штаба: ~/ai (directions, knowledge, pantheon), agent-kit, coordinator = false, ~/projects и скрытые "
           "папки не закрыты (metis-0771)",
           real("projects") + "/*" not in hdr and real("ai/knowledge") + "/*" not in hdr

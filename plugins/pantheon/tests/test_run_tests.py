@@ -944,12 +944,14 @@ check("main: пропуск окна и FAIL — код 1, а не 4", rc == 1 a
 rc, out = main_with({"test_outside.py": OKF}, bind=lambda: "EPERM bind")
 check("main: пропущены все файлы окна — код 4 (не 3 «нечего гонять»), а не зелёный 0", rc == 4 and "для записи полного набора не годится" in out, (rc, out))
 ALT = os.path.join("/tmp", f"claude-{os.getuid()}")
-ALTR = os.path.join(ALT, "run-tests-")  # TMPDIR сам может лежать под ALT: различаем по префиксу запасного корня
-HOME_IN = ("import os\nok = {neg}os.environ['HOME'].startswith({alt!r})\nprint('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
+# TMPDIR сам может лежать под ALT (в окне роли этот файл идёт в запасном корне ALT/run-tests-…, metis-0941): префикс
+# пути не различает. Запасной корень — ALT/run-tests-…, HOME файла в нём — <корень>/<NNN-…>/home: три уровня от HOME — ALT
+HOME_IN = ("import os\nd = os.path.dirname\nok = {neg}(d(d(d(os.environ['HOME']))) == {alt!r})\n"
+           "print('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
            "print('1 из 1' if ok else '0 из 1')\nraise SystemExit(0 if ok else 1)\n")
 if os.path.isdir(ALT):
     alt_fs = lambda b: None if b == ALT else "EPERM fs"
-    rc, out = main_with({"test_roles.py": HOME_IN.format(neg="", alt=ALTR), "test_board.py": HOME_IN.format(neg="not ", alt=ALTR)},
+    rc, out = main_with({"test_roles.py": HOME_IN.format(neg="", alt=ALT), "test_board.py": HOME_IN.format(neg="not ", alt=ALT)},
                         fs=alt_fs)
     check("main: корень закрыт, запасной открыт — файл WINDOW_FS идёт с HOME в запасном корне, прочие в обычном; код 0",
           rc == 0 and "ok   pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out

@@ -20,9 +20,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from _py311 import PY311  # noqa: E402,F401  pantheon.py — только на Python 3.11+
+from _py311 import PY311, mkroot  # noqa: E402,F401  pantheon.py — только на Python 3.11+
 
-_ROOT = os.path.realpath(tempfile.mkdtemp(prefix="outside-load-"))
+_ROOT = os.path.realpath(mkroot("outside-load-"))  # окно роли: metis-0941
 tempfile.tempdir = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)
 

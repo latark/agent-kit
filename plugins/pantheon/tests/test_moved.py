@@ -8,11 +8,11 @@ import re
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+from _py311 import PY311, mkroot  # CLI pantheon — только на Python 3.11+
 import tempfile
 import atexit as _atexit
 import shutil as _shutil
-_ROOT = tempfile.mkdtemp(prefix="moved-root-")
+_ROOT = mkroot("moved-root-")  # окно роли: metis-0941
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
@@ -126,7 +126,7 @@ def main():
           and "--dry-run, ничего не изменено" in out)
     check("--dry-run: в плане карточка (закрытая), роль, автопамять, код agent-kit, история, ~/.claude.json",
           "~/ai/pantheon/directions/metis-pantheon/tasks/metis-0001.md: 5" in out and "~/.claude/agents/x.md: 1" in out
-          and f"MEMORY.md: 1" in out and f"~/{AK}/README.md" not in out and "plugins/guard" not in out
+          and "MEMORY.md: 1" in out and f"~/{AK}/README.md" not in out and "plugins/guard" not in out
           and f"история {key(AK)} → {key('ai/agent-kit')}" in out and "~/.claude.json: 3" in out
           and f"история {key(f'{WS}/avito')} → {key('ai/workshop/avito')}" in out)
     check("--dry-run: транскрипты, history.jsonl, .git, плагины, worktree, личное, двоичное — вне плана",
@@ -168,7 +168,7 @@ def main():
           and os.path.isfile(ws_hist) and os.path.isdir(os.path.join(tmp, ".claude", "projects", key("ai/agent-kit"))))
     text = read(task)
     check("карточка: все виды путей заменены, похожие — нет",
-          f"touches: [~/ai/agent-kit/plugins/x.py]" in text and "см. ~/ai/agent-kit." in text
+          "touches: [~/ai/agent-kit/plugins/x.py]" in text and "см. ~/ai/agent-kit." in text
           and "$HOME/ai/workshop/avito" in text and "/Users/someone/ai/life/finances/a.csv" in text
           and f"{tmp}/ai/agent-kit/README.md" in text and f"~/{AK}-old" in text and f"~/{AK}.git" in text
           and f"~/{P}/workshopx" in text)

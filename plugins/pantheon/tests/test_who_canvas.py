@@ -16,9 +16,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # noqa: E402 — pantheon.py только на Python 3.11+
+from _py311 import PY311, mkroot  # noqa: E402 — pantheon.py только на Python 3.11+
 
-ROOT = os.path.realpath(tempfile.mkdtemp(prefix="who-canvas-"))
+ROOT = os.path.realpath(mkroot("who-canvas-"))  # окно роли: metis-0941
 tempfile.tempdir = ROOT
 os.environ["TMPDIR"] = ROOT
 atexit.register(shutil.rmtree, ROOT, True)

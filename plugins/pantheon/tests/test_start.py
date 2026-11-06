@@ -227,6 +227,8 @@ def main():
     open(os.path.join(bindir, "claude"), "w").write(FAKE)
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     agents_file, log = os.path.join(tmp, "agents.json"), os.path.join(tmp, "claude.log")
+    ctmp = os.path.join(os.path.realpath(tempfile.mkdtemp(prefix="start-ctmp-")), f"claude-{os.getuid()}")
+    os.makedirs(ctmp)
     open(agents_file, "w").write("[]")
     open(os.path.join(home, "directions.toml"), "w").write(
         '[[direction]]\nname = "athena-shop"\nproject = "ExampleApp"\nfolders = ["~/projects/br"]\n'
@@ -238,7 +240,10 @@ def main():
            "FAKE_SEQ": os.path.join(tmp, "agents-seq.json"), "PANTHEON_STOP_WAIT": "3", "PANTHEON_STOP_POLL": "0.02",
            "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1", "FAKE_ALL": os.path.join(tmp, "claude-all.log"),
            # здесь проверяется личный слой ролей: общий слой плагина пуст (оба слоя вместе — test_roles.py)
-           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty"),
+           # domains build --if-changed следит и за CLAUDE_TMP: общую /tmp/claude-<uid> трогают другие сессии, и
+           # окно пересобиралось посреди проверки «не пересобирает» (флак, metis-0293) — у теста своя
+           "PANTHEON_CLAUDE_TMP": ctmp}
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
@@ -1289,6 +1294,22 @@ def main():
         os.remove(f)
     open(agents_file, "w").write("[]")
     open(log, "w").close()
+
+    # metis-0293: --if-changed следит за CLAUDE_TMP теста, а не за общей /tmp/claude-<uid>. Сборка «в будущем» (+60 с):
+    # свежее неё только CLAUDE_TMP теста (+1 ч) — пересборка; общая папка за минуту вперёд не уйдёт, так что без
+    # PANTHEON_CLAUDE_TMP в env пересборки нет и проверка красная
+    run("domains", "build")
+    dj = os.path.join(state, "domains.json")
+    mark = time.time() + 60
+    dd = json.load(open(dj))
+    dd["built_ts"] = mark
+    open(dj, "w").write(json.dumps(dd))
+    os.utime(ctmp, (mark + 3600, mark + 3600))
+    run("domains", "build", "--if-changed")
+    check("domains build --if-changed: CLAUDE_TMP теста свежее сборки — пересборка (следит за PANTHEON_CLAUDE_TMP, "
+          "а не за общей /tmp/claude-<uid>, metis-0293)", json.load(open(dj)).get("built_ts", mark) < mark)
+    old = time.time() - 86400
+    os.utime(ctmp, (old, old))
 
     # ревью argus PR #32 (c6eb7e1): allow со старым mtime (cp -p, rsync -a, tar) сборка --if-changed не видит —
     # правило перепроверяют каждый подъём сессии и check --quiet
