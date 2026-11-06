@@ -8,7 +8,7 @@
   папки запуска, которую её CLAUDE.md импортирует, — не дублируется; --plugin-dir и --mcp-config пакета, если есть;
   всё до --settings; без пакета — без --plugin-dir;
 - `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny EnterWorktree и
-  ExitWorktree, window.json пакета (allow, ask, deny, plugins, env, sandbox); allow с gh pr merge и неизвестный ключ —
+  ExitWorktree, window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
   не влиты, окно собрано; мастерская — без этого;
 - `pantheon check`: хук и сервер .mcp.json вложенного проекта без строки в пакете — «предупреждение · окно …»; после
   записи в seen и сервера в mcp.json пакета — тишина; настройки папки запуска не предупреждают; код выхода тот же;
@@ -138,11 +138,11 @@ def main():
           (win.get("env") or {}).get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD") == "1", win.get("env"))
     check("deny EnterWorktree и ExitWorktree (П9b)",
           {"EnterWorktree", "ExitWorktree"} <= set(perms.get("deny") or []), perms.get("deny"))
-    check("window.json: allow, ask, deny пакета влиты",
-          "Bash(uv sync *)" in perms.get("allow", []) and perms.get("ask") == ["Bash(codesign *)"]
+    check("window.json: ask и deny пакета влиты",
+          perms.get("ask") == ["Bash(codesign *)"]
           and "Bash(docker rm *)" in perms.get("deny", []), perms)
-    check("window.json: allow с gh pr merge не влит (metis-0137), окно собрано",
-          not any("gh pr merge" in x for x in perms.get("allow", [])), perms.get("allow"))
+    check("window.json: allow пакета не влит совсем — permissions.allow окна пуст (metis-0137), окно собрано",
+          not perms.get("allow"), perms.get("allow"))
     check("window.json: plugins, env, sandbox влиты; кривой id плагина — нет",
           (win.get("enabledPlugins") or {}).get("p@m") is True and "bad id" not in (win.get("enabledPlugins") or {})
           and win["env"].get("PACK_ENV") == "1"

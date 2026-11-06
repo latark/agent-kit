@@ -3104,16 +3104,17 @@ def window_launch(window, name=None):
     return args
 
 
-WINDOW_EXTRA_LISTS = ("allow", "deny", "ask")
+WINDOW_EXTRA_LISTS = ("deny", "ask")  # allow окну не даётся (metis-0137): его команды решает autoMode окна
 WINDOW_EXTRA_SANDBOX = {"denyRead": ("filesystem", "denyRead"), "deniedDomains": ("network", "deniedDomains"),
                         "excludedCommands": (None, "excludedCommands")}
 PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def window_extra_apply(data, extra):
-    """window.json пакета (packs/<окно>/window.json) → в data (окно): permissions allow, deny, ask без повторов,
-    enabledPlugins: true, env, sandbox (denyRead, deniedDomains, excludedCommands). allow с gh pr merge не вливается
-    (metis-0137). → [(ключ, значение)] отброшенного. Ключи seen и description — для pantheon check и людей."""
+    """window.json пакета (packs/<окно>/window.json) → в data (окно): permissions deny, ask без повторов,
+    enabledPlugins: true, env, sandbox (denyRead, deniedDomains, excludedCommands). Ключ allow не вливается совсем
+    (metis-0137: permissions.allow окна пуст, allow сработал бы раньше классификатора autoMode) — он в отброшенном.
+    → [(ключ, значение)] отброшенного. Ключи seen и description — для pantheon check и людей."""
     bad = [(k, extra[k]) for k in extra if k not in WINDOW_EXTRA_LISTS + ("plugins", "env", "sandbox", "seen",
                                                                           "description")]
     perms = data.setdefault("permissions", {})
@@ -3121,7 +3122,7 @@ def window_extra_apply(data, extra):
         vals = extra.get(key)
         have = perms.setdefault(key, []) if vals else perms.get(key, [])
         for r in vals if isinstance(vals, list) else ([] if vals is None else [vals]):
-            if not isinstance(r, str) or not r.strip() or (key == "allow" and allow_rule_merges(r)):
+            if not isinstance(r, str) or not r.strip():
                 bad.append((key, r))
             elif r not in have:
                 have.append(r)

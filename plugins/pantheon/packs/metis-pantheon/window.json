@@ -1,17 +1,5 @@
 {
   "description": "Окно metis-pantheon: настройки other/mailkeeper, которых --add-dir не приносит (metis-0933)",
-  "allow": [
-    "Bash(mailkeeper status *)",
-    "Bash(mailkeeper rules *)",
-    "Bash(mailkeeper scan *)",
-    "Bash(mailkeeper report *)",
-    "Bash(mailkeeper plan *)",
-    "Bash(mailkeeper logs *)",
-    "Bash(uv run ruff *)",
-    "Bash(uv run pyright *)",
-    "Bash(uv run pytest *)",
-    "Bash(uv sync *)"
-  ],
   "ask": [
     "Bash(mailkeeper apply *)",
     "Bash(mailkeeper undo *)",
@@ -63,7 +51,7 @@
     ]
   },
   "seen": {
-    "~/projects/other/mailkeeper/.claude/settings.json permissions.allow": "перенесено: window.json allow",
+    "~/projects/other/mailkeeper/.claude/settings.json permissions.allow": "не перенесено: allow окну не даётся; чем заменено: autoMode окна (metis-0137); mailkeeper — нужен autoMode.allow словами (вопрос владельцу)",
     "~/projects/other/mailkeeper/.claude/settings.json permissions.ask": "перенесено: window.json ask",
     "~/projects/other/mailkeeper/.claude/settings.json permissions.deny": "перенесено: window.json deny; браузерные mcp__ — не переносятся: закрыли бы браузер всему окну; security — дубль user",
     "~/projects/other/mailkeeper/.claude/settings.json sandbox.enabled": "не переносится: опасно (решение владельца 06.11 18:30) (песочница выключена)",

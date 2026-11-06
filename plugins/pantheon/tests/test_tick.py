@@ -19,7 +19,9 @@ import tempfile
 import atexit as _atexit
 import os as _os
 import shutil as _shutil
-_ROOT = mkroot("tick-root-")
+# «tmp»: окно штаба закрывает в /tmp/claude-<uid> имена без этой приставки (папки чужих сессий), и allowRead штаба
+# для проектов внутри такой папки не выдаётся (metis-0771, проверка ниже)
+_ROOT = mkroot("tmp-tick-root-")
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
