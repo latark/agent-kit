@@ -138,6 +138,9 @@ import json, os, sys
 rec = os.environ["FAKE_REC"]
 with open(os.path.join(rec, "touchid-argv.jsonl"), "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
+o = os.path.join(rec, "touchid-out")
+if os.path.exists(o):
+    print(open(o).read())
 p = os.path.join(rec, "touchid-rc")
 sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 '''
@@ -700,6 +703,47 @@ def window_script(body, rc):
 
 CANCEL_BODY = ("q = os.path.join(state, 'merge-queue')\n"
                "[os.remove(os.path.join(q, f)) for f in os.listdir(q) if f.endswith('.json')]")
+
+
+def jsonl(b):
+    p = os.path.join(b.state, "logs", "merge.jsonl")
+    return [json.loads(ln) for ln in open(p)] if os.path.exists(p) else []
+
+
+def test_merged_notice_and_window_fields():
+    """metis-0921: слито → одно уведомление «слит repo#N (sha7)»; поля окна помощника — в событии window."""
+    b = Box()
+    b.request()
+    b.set("touchid-out", json.dumps({"biometry": "touchID", "la_code": None, "shown_sec": 3.4, "text": "x"}))
+    b.run()
+    note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
+    check("слито → ровно одно уведомление «слит repo#N (sha7)», без щелчка-команды",
+          note.count(f"слит {REPO}#{PR} ({SHA[:7]})") == 1 and note.count("\n") == 1 and "execute:" not in note, note)
+    w = [r for r in jsonl(b) if r["event"] == "window"]
+    check("window: biometry, la_code, shown_sec из помощника, чужое поле не попало",
+          len(w) == 1 and w[0]["biometry"] == "touchID" and w[0]["la_code"] is None and w[0]["shown_sec"] == 3.4
+          and "text" not in w[0], w)
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 1)
+    b.set("touchid-out", json.dumps({"biometry": "none", "la_code": -2, "shown_sec": 1}))
+    b.run()
+    w = [r for r in jsonl(b) if r["event"] == "window"]
+    check("отказ: la_code -2 в журнале, уведомления о слиянии нет",
+          w and w[0]["la_code"] == -2 and w[0]["biometry"] == "none" and not os.path.exists(b.notify_log), (w, b.outs[-1]))
+    b = Box()
+    b.request()
+    b.set("gh-merge-rc", 1)
+    b.run()
+    check("gh pr merge упал → уведомления «слит» нет",
+          len(b.merges()) == 1 and not os.path.exists(b.notify_log), b.outs[-1])
+    b = Box()
+    b.request()
+    b.set("touchid-out", "не json")
+    b.run()
+    w = [r for r in jsonl(b) if r["event"] == "window"]
+    check("помощник напечатал не JSON → слияние идёт, полей окна нет",
+          len(b.merges()) == 1 and w and "biometry" not in w[0] and "shown_sec" not in w[0], w)
 
 
 def test_cancel_during_window():

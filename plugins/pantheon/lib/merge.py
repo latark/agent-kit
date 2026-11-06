@@ -862,16 +862,42 @@ def batch_window_text(reqs, views, whys, paths):
     return f"{top} Вердикты: {items}. Заголовки: {titles}"[:400]
 
 
-def ask(text):
-    """Код помощника: 0 — палец, 1 — отказ, 2 — окно не показать, 3 — время вышло; None — помощника нет."""
+def window_info(out):
+    """Поля из JSON-строки помощника (metis-0921): biometry, la_code, shown_sec — только эти и только с нужным типом;
+    не JSON или чужие поля — пусто. Текст окна и всё лишнее в журнал не идёт."""
+    try:
+        d = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
+    except (ValueError, IndexError, AttributeError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    info = {}
+    if isinstance(d.get("biometry"), str) and d["biometry"] in ("touchID", "faceID", "opticID", "none"):
+        info["biometry"] = d["biometry"]
+    if "la_code" in d and (d["la_code"] is None or type(d["la_code"]) is int):
+        info["la_code"] = d["la_code"]
+    if type(d.get("shown_sec")) in (int, float):
+        info["shown_sec"] = d["shown_sec"]
+    return info
+
+
+def ask_full(text):
+    """(код помощника, поля окна для журнала). Код: 0 — палец, 1 — отказ, 2 — окно не показать, 3 — время вышло;
+    None — помощника нет."""
     h = helper()
     if not h:
-        return None
+        return None, {}
     try:
-        return subprocess.run([h, text, str(WINDOW_WAIT)], stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=WINDOW_WAIT + 60).returncode
+        r = subprocess.run([h, text, str(WINDOW_WAIT)], stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=WINDOW_WAIT + 60)
+        return r.returncode, window_info(r.stdout)
     except (OSError, subprocess.SubprocessError):
-        return 2
+        return 2, {}
+
+
+def ask(text):
+    """Только код помощника (см. ask_full); для handoff и других, кому поля окна не нужны."""
+    return ask_full(text)[0]
 
 
 def approve(req):
@@ -905,7 +931,12 @@ def fallback_notify(req, window):
     env = " ".join(shlex.quote(f"{k}={v}") for k, v in pass_env().items())
     cmd = f"/usr/bin/env -i {env} {shlex.quote(os.path.join(base, 'bin', 'pantheon'))} merge run --click"
     text = f"{window[:300]}. Щёлкните — откроется окно Touch ID"
-    line = f"Слияние ядра|{text}|execute:{cmd}|merge\n"
+    return post_notice(text, cmd, f"Слияние ядра|{text}|execute:{cmd}|merge\n")
+
+
+def post_notice(text, cmd, line):
+    """Уведомление «Слияние ядра»: cmd — что запустит щелчок (None — ничего). Тест — строка line в файл (журнал
+    PANTHEON_NOTIFY_LOG или STATE/notify-test.log), на экран владельца не идёт. True — ушло."""
     if os.environ.get("PANTHEON_NOTIFY_LOG"):   # только из TEST: clean_env окружение launchd сняла
         with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
             fh.write(line)
@@ -917,9 +948,21 @@ def fallback_notify(req, window):
         with open(P.path("notify-test.log"), "a", encoding="utf-8") as fh:
             fh.write(line)
         return True
-    r = subprocess.run([tn, "-title", "Слияние ядра", "-message", text, "-execute", cmd, "-group", "pantheon-merge"],
-                       capture_output=True, timeout=15)
+    argv = [tn, "-title", "Слияние ядра", "-message", text, "-group", "pantheon-merge"]
+    if cmd:
+        argv += ["-execute", cmd]
+    r = subprocess.run(argv, capture_output=True, timeout=15)
     return r.returncode == 0
+
+
+def notify_merged(req):
+    """После rc 0 gh pr merge — одно уведомление владельцу «слит repo#N (sha7)» (metis-0921): он не видит окон Touch ID
+    и иначе о слиянии не узнаёт. Сбой уведомления слияния не отменяет — оно уже сделано."""
+    text = f"слит {req['repo']}#{req['pr']} ({req['sha'][:7]})"
+    try:
+        return post_notice(text, None, f"Слияние ядра|{text}||merged\n")
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 # --- управляемые настройки guard (metis-0710) ---------------------------------------------------------------------
@@ -1218,6 +1261,8 @@ def finger(req, rc=0):
         return False, f"снята: {bad}"
     code, out = gh_merge(req)
     log(req, "merged" if code == 0 else "merge-failed", rc=code)
+    if code == 0:
+        notify_merged(req)
     if code != 0:
         P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
                 "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
@@ -1241,12 +1286,12 @@ def process(req, click):
     if not click and P.idle_sec() > PRESENT_SEC:
         return "ждёт: вас нет у Mac"
     text = window_text(req, view, why, paths)
-    rc = ask(text)
+    rc, info = ask_full(text)
     if rc is None:
         P.alert_once("merge-helper", "1", "слияние по Touch ID: помощник окна не собран (swiftc) — заявки ждут; "
                      "собрать: pantheon install", "pantheon-merge")
         return "ждёт: помощника окна нет"
-    log(req, "window", rc=rc, click=click)
+    log(req, "window", rc=rc, click=click, **info)
     if rc == 0:
         return finger(req, rc)[1]
     if rc == 1:
@@ -1311,13 +1356,13 @@ def process_batch(reqs, click):
     if not click and P.idle_sec() > PRESENT_SEC:
         return [(r, "ждёт: вас нет у Mac") for r in reqs]
     text = batch_window_text(reqs, views, whys, paths)
-    rc = ask(text)
+    rc, info = ask_full(text)
     if rc is None:
         P.alert_once("merge-helper", "1", "слияние по Touch ID: помощник окна не собран (swiftc) — заявки ждут; "
                      "собрать: pantheon install", "pantheon-merge")
         return [(r, "ждёт: помощника окна нет") for r in reqs]
     for r in reqs:
-        log(r, "window", rc=rc, click=click, batch=",".join(map(str, batch)))
+        log(r, "window", rc=rc, click=click, batch=",".join(map(str, batch)), **info)
     if rc == 0:
         out, merged, untouched, stop = [], [], [], None
         for r in reqs:
