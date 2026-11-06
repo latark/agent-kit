@@ -233,6 +233,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-0523); «вернуть» снимает и «остановлено вами»
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
+  pantheon consent bind <id> --log-at <ЧЧ:ММ[:СС] | ГГГГ-ММ-ДД ЧЧ:ММ[:СС]>   только окно Зевса: привязать к <id>
+                                        ваше прямое слово без вопроса с [id] — одну строку owner-log/zeus.md без
+                                        пометки (своего текста команда не берёт); consent <id> покажет её дословно,
+                                        метку Гестии и согласие браузера она не даёт (metis-0843)
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
@@ -1380,6 +1384,11 @@ def tick():
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
                 alert_once("autoclose-tick", type(e).__name__, f"автозакрытие задач: проход упал ({type(e).__name__}: {e})",
                            "pantheon-tick")
+            try:
+                release_tick_mod().tick(t)  # выпуск без Actions: release.py --push из копии main (metis-0880)
+            except Exception as e:  # сбой выпуска не должен останавливать тик
+                alert_once("release-tick-crash", type(e).__name__, f"выпуск без Actions: проход упал "
+                           f"({type(e).__name__}: {e})", "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -5804,6 +5813,21 @@ def handoff_mod():
         spec.loader.exec_module(_HANDOFF)
         _HANDOFF.set_core(sys.modules[__name__])
     return _HANDOFF
+
+
+_RELEASE_TICK = None
+
+
+def release_tick_mod():
+    """lib/release_tick.py — выпуск без Actions: release.py --push из копии на origin/main (metis-0880)."""
+    global _RELEASE_TICK
+    if _RELEASE_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_release_tick", os.path.join(LIB, "release_tick.py"))
+        _RELEASE_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_RELEASE_TICK)
+        _RELEASE_TICK.set_core(sys.modules[__name__])
+    return _RELEASE_TICK
 
 
 _BROWSER = None

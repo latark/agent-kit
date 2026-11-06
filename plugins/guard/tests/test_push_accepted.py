@@ -238,6 +238,166 @@ def t_remote_url(h):
     passed("remote адресом: push идёт", s.push(f"git push https://github.com/{REPO} {BRANCH}"))
 
 
+def _main_commit(s, name, msg):
+    """Коммит в main на remote (refs/remotes/origin/main) поверх init main: файл name, сообщение msg."""
+    tm.git(s.p, "checkout", "-q", "-B", "main-work", s.h.sha["agent-kit"])
+    with open(os.path.join(s.p, name), "w") as fh:
+        fh.write(name + "\n")
+    tm.git(s.p, "add", name)
+    tm.git(s.p, "commit", "-q", "-m", msg)
+    tm.git(s.p, "update-ref", "refs/remotes/origin/main", tm.git(s.p, "rev-parse", "HEAD"))
+    tm.git(s.p, "checkout", "-q", BRANCH)
+
+
+class FilePush(Push):
+    """Как Push, но вершина PR правит файл pr.txt (собственный дифф PR не пуст), а base в gh pr view — init main
+    (коммит есть в git папки): отпечаток переноса «принять» считается."""
+
+    def __init__(self, h):
+        self.h, self.p = h, h.j(KIT)
+        tm.git(self.p, "checkout", "-q", "-B", BRANCH, h.sha["agent-kit"])
+        tm.git(self.p, "update-ref", "-d", "refs/remotes/origin/main")
+        with open(os.path.join(self.p, "pr.txt"), "w") as fh:
+            fh.write("pr\n")
+        tm.git(self.p, "add", "pr.txt")
+        tm.git(self.p, "commit", "-q", "-m", "правка PR")
+        self.tip = self.new = tm.git(self.p, "rev-parse", "HEAD")
+        tm.git(self.p, "update-ref", f"refs/remotes/origin/{BRANCH}", self.tip)
+        tm.git(self.p, "config", f"branch.{BRANCH}.remote", "origin")
+        tm.git(self.p, "config", f"branch.{BRANCH}.merge", f"refs/heads/{BRANCH}")
+
+    def pr(self, files=NON_CORE, **fields):
+        super().pr(files, **dict({"baseRefOid": self.h.sha["agent-kit"], "baseRefName": "main"}, **fields))
+
+    def merge_main(self):
+        tm.git(self.p, "merge", "-q", "--no-edit", "refs/remotes/origin/main")
+        self.new = tm.git(self.p, "rev-parse", "HEAD")
+
+
+def t_force(h):
+    """metis-0809: amend и принудительная отправка (--force-with-lease, +ветка, -f) в принятый PR — окну без роли
+    отказ, как новому коммиту; роли — отказ правилом push (флаг); amend со строкой «Б: …» — push идёт."""
+    s = Push(h)
+    s.pr(CORE_FILES)
+    s.accepts(2)
+    tm.git(s.p, "reset", "-q", "--hard", s.tip)
+    tm.git(s.p, "commit", "-q", "--amend", "--allow-empty", "-m", "правка PR, amend: долг ревью")
+    for cmd in (f"git push --force-with-lease origin {BRANCH}", f"git push origin +{BRANCH}",
+                f"git push -f origin {BRANCH}", f"git push --force origin HEAD:{BRANCH}",
+                f"git push --force-with-lease={BRANCH} origin {BRANCH}", f"git push -uf origin {BRANCH}",
+                "git push --force-with-lease", f"git push --force-if-includes --force-with-lease origin +HEAD:{BRANCH}"):
+        stopped(f"окно без роли, «{cmd}»: push остановлен", s.push(cmd, role=None))
+    got = s.push(f"git push --force-with-lease origin {BRANCH}")
+    check("роль, --force-with-lease: отказ правилом push (флаг)", got[0] == "deny" and "--force-with-lease" in got[1],
+          got)
+    passed("окно без роли, удаление ветки (-d) — не судим: push идёт", s.push(f"git push -d origin {BRANCH}", role=None))
+    tm.git(s.p, "commit", "-q", "--amend", "--allow-empty", "-m", "правка PR\n\nБ: argus Б1 — красный тест")
+    passed("окно без роли, amend со строкой «Б: …» и --force-with-lease: push идёт",
+           s.push(f"git push --force-with-lease origin {BRANCH}", role=None))
+
+
+def t_blocker_from_main(h):
+    """metis-0809: «Б:» только из коммитов PR. main со строкой «Б:» подтянут слиянием, а сверху свой коммит долга без
+    «Б:» — push остановлен (раньше «Б:» из main его пропускал)."""
+    s = FilePush(h)
+    s.pr(CORE_FILES)
+    s.accepts(2)
+    _main_commit(s, "main.txt", "guard: правка в main\n\nБ: argus Б1 — блокер другого PR")
+    s.merge_main()
+    with open(os.path.join(s.p, "debt.txt"), "w") as fh:
+        fh.write("долг\n")
+    tm.git(s.p, "add", "debt.txt")
+    s.commit("долг ревью Д-A")
+    for who, role in ROLES:
+        stopped(f"«Б:» только в коммите main, свой коммит без «Б:» — {who}: push остановлен", s.push(role=role))
+    s.commit("правка блокера\n\nБ: argus Б1 — красный тест")
+    passed("«Б:» в своём коммите PR поверх слияния main: push идёт", s.push())
+
+
+def t_base_merge(h):
+    """metis-0809: подтянуть main без правок (merge-rounds.md) — push идёт: собственный дифф PR тот же, шлюз перенесёт
+    «принять». Слияние с правкой (дифф PR другой) — остановлен, подсказка называет git merge; отпечаток не посчитать
+    (base PR нет в git папки) — пропуск."""
+    s = FilePush(h)
+    s.pr(CORE_FILES)
+    s.accepts(2)
+    _main_commit(s, "main.txt", "pantheon: правка в main")
+    s.merge_main()
+    for who, role in ROLES:
+        passed(f"чистое слияние origin/main — {who}: push идёт", s.push(role=role))
+    h.reset()
+    s = FilePush(h)
+    s.pr(CORE_FILES)
+    s.accepts(2)
+    _main_commit(s, "main.txt", "pantheon: правка в main")
+    s.merge_main()
+    with open(os.path.join(s.p, "pr.txt"), "w") as fh:
+        fh.write("pr, правка при слиянии\n")
+    tm.git(s.p, "add", "pr.txt")
+    tm.git(s.p, "commit", "-q", "--amend", "--no-edit")
+    s.new = tm.git(s.p, "rev-parse", "HEAD")
+    got = s.push(role=None)
+    stopped("слияние main с правкой своего файла: push остановлен", got)
+    check("подсказка называет подтягивание base без правок", "git merge origin/<base>" in got[1], got)
+    h.reset()
+    s = FilePush(h)
+    s.pr(CORE_FILES, baseRefOid=tm.BASE)
+    s.accepts(2)
+    _main_commit(s, "main.txt", "pantheon: правка в main")
+    s.merge_main()
+    with open(os.path.join(s.p, "debt.txt"), "w") as fh:
+        fh.write("долг\n")
+    tm.git(s.p, "add", "debt.txt")
+    tm.git(s.p, "commit", "-q", "--amend", "--no-edit")
+    s.new = tm.git(s.p, "rev-parse", "HEAD")
+    passed("слияние, а base PR нет в git папки (отпечаток не посчитать): push идёт", s.push())
+
+
+def t_checklist(h):
+    """«Принять» без перечня проверенного (старый формат, Б6) не засчитано, как в шлюзе: вне ядра — push идёт."""
+    s = Push(h)
+    s.pr(NON_CORE)
+    s.accepts(1, checklist=None)
+    passed("вне ядра, одно «принять» без перечня: push идёт", s.push())
+    s.accepts(1, checklist={"opened": "x", "ran": "модель: claude-opus-5-5", "unchecked": " "})
+    passed("вне ядра, «принять» с пустым полем перечня: push идёт", s.push())
+
+
+def t_parse_fail_open(h):
+    """metis-0809: разбор push внутри try — git не запустить (нет в PATH): окно без роли не останавливается."""
+    s = Push(h)
+    s.pr(CORE_FILES)
+    s.accepts(2)
+    got = h.pre("git push", role=None, pdir=KIT, cwd=KIT, extra_env={"PATH": h.j("bin")})
+    passed("git нет в PATH, git push без аргументов — окно без роли: push идёт", got)
+
+
+def t_files_parallel(h):
+    """metis-0809: файлы PR запрашиваются вместе с gh pr view, а не после, только если осталось время. Время кончилось
+    после view (_gh_fits: да, затем нет) — PR вне ядра с одним «принять» всё равно узнан: push остановлен."""
+    import threading
+    s = Push(h)
+    mg = tm._load_merge_gate("merge_gate_push")
+    started = threading.Event()
+    view = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": s.tip, "mergeable": "MERGEABLE",
+            "baseRefOid": tm.BASE, "baseRefName": "main", "changedFiles": len(NON_CORE)}
+    waited = []
+
+    def gh(args):
+        if args[0] == "api":
+            started.set()
+            return [{"filename": f, "status": "modified"} for f in NON_CORE]
+        waited.append(started.wait(10))
+        return [dict(view)]
+    fits = iter([True])
+    mg._gh_json = gh
+    mg._gh_fits = lambda: next(fits, False)
+    mg.read_records = lambda: [tm.rec("accept", REPO, 7, s.tip)]
+    why = mg.accepted_push_problem(s.p, "origin", [("HEAD", BRANCH)])
+    check("время кончилось после gh pr view: PR вне ядра узнан — push остановлен", why and HINT in why, why)
+    check("gh pr view дождался запроса файлов (запросы параллельно)", waited == [True], waited)
+
+
 def t_core_count_same():
     """CORE_ACCEPTS проверки push равно MIN_ACCEPTS шлюза владельца (pantheon merge.py): числа не разъехались."""
     want = re.search(r"^MIN_ACCEPTS = (\d+)", open(MERGE_PY, encoding="utf-8").read(), re.M)
@@ -246,7 +406,8 @@ def t_core_count_same():
 
 
 CASES = [t_accepted_core, t_core_one, t_core_not_opus, t_non_core_one, t_non_core_files_fail, t_reject, t_reject_floor,
-         t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url]
+         t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url, t_force,
+         t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel]
 
 
 def main():
