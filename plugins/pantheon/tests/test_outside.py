@@ -3002,9 +3002,22 @@ s_mode("sleep")
 q, rid = new_request("athena-x", APP, "test")
 th, up = s_start(q, rid)
 pids = s_pids()
-res = wait_for(lambda: (O.load_result(q, rid) or {}).get("procs") and O.load_result(q, rid), 10) or {}
+# Срез procs пишет TestWatch.__call__ на тике wait_proc: тик раз в SWEEP_EVERY с, запись не раньше PROCS_EVERY с после
+# старта сторожа (lib/outside.py). procs_of берёт данные у ps (setuid /bin/ps), а сбой ps даёт procs == [] — ключ есть,
+# но пустой. В песочнице ps не запускается (Operation not permitted, metis-0786), и итог несёт [], а не срез: на
+# «пусто» тест ждал зря (metis-0873, прогон 20261106-050513-080e2d: ([257], [257], {})). Ждём по коду ключ procs
+# (PROCS_EVERY + SWEEP_EVERY + 10 с ps + запас; wait_for выходит сразу), pid в срезе требуем, когда ps доступен.
+try:
+    PS_OK = subprocess.run(["ps", "-o", "pid=", "-p", str(os.getpid())], capture_output=True, text=True,
+                           timeout=10).stdout.split() == [str(os.getpid())]
+except (OSError, subprocess.SubprocessError):
+    PS_OK = False
+res = wait_for(lambda: "procs" in (O.load_result(q, rid) or {}) and O.load_result(q, rid),
+               O.PROCS_EVERY + O.SWEEP_EVERY + 10 + 20) or {}
+if not PS_OK:
+    print("пропущено: ps недоступен (песочница) — pid прогона в срезе procs T1 не проверяется")
 check("T1 status_shows_procs_own_only: итог running своего qdir несёт срез процессов с pid прогона, в соседнем qdir — "
-      "ничего", up and any(p.get("pid") in pids for p in res.get("procs") or [])
+      "ничего", up and "procs" in res and (not PS_OK or any(p.get("pid") in pids for p in res["procs"]))
       and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".result.json")), (up, pids, res))
 _fy = os.path.join(CACHE, "metis-y", "outside", rid + ".stop")
 os.makedirs(os.path.dirname(_fy), exist_ok=True)
