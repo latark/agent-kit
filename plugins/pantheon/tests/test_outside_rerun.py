@@ -379,6 +379,36 @@ with_prev("время опоры не разобрать", "время не ра
 with_prev("опоре 23 часа — дозапуск", None, rid="inj-fresh", failed=LABELS[3:], sha=C4,
           time=time.strftime(STAMP, time.localtime(time.time() - 23 * 3600)))
 
+# --- 5б. пустой дифф опора→HEAD: карта не нужна, даже устаревшая (metis-0842) ------------------------------------
+CS = commit({"plugins/kit/tests/test_d.py": TEST_SRC.format(x="d") + "# правка после сборки карты\n"},
+            "cs: карта устарела")
+ps = with_prev("тот же sha, карта устарела — только упавшие, проверка карты пропущена", None, rid="inj-same",
+               failed=LABELS[1:2], sha=CS)
+check("тот же sha + устаревшая карта: --only только упавшего b, map — хеш карты HEAD", ps and ps["files"] == LABELS[1:2]
+      and ps["argv"][-1].endswith(" --only kit/test_b.py") and ps["ancestor"] is True
+      and ps["map"] == hashlib.sha256(open(os.path.join(RK, "tools", "affected-map.json"), "rb").read()).hexdigest(), ps)
+with_prev("другой sha (C4) + устаревшая карта — весь набор, как раньше", "карта устарела: 1", rid="inj-other-sha",
+          failed=LABELS[1:2], sha=C4)
+CST = git("commit-tree", f"{CS}^{{tree}}", "-p", CS, "-m", "cst: то же дерево")
+git("reset", "-q", "--hard", CST)
+pt = with_prev("другой коммит с тем же деревом + устаревшая карта — только упавшие", None, rid="inj-tree",
+               failed=LABELS[1:2], sha=CS)
+check("то же дерево: дозапуск только b", pt and pt["files"] == LABELS[1:2], pt)
+pz = with_prev("тот же sha, упавших больше половины — весь набор и без карты", "больше половины", rid="inj-half",
+               failed=LABELS[:3], sha=CST)
+CN = commit({"plugins/kit/lib/n.txt": "x"}, "cn: файл вне карты, без опоры на нём")
+with_prev("дифф непуст (CST→CN) — проверка карты действует: устаревшая карта — весь набор", "карта устарела: 1",
+          rid="inj-cn",
+          failed=LABELS[1:2], sha=CST)
+git("rm", "-q", "tools/affected-map.json")
+git("commit", "-q", "-m", "cm: карты нет")
+CM = git("rev-parse", "HEAD")
+pm = with_prev("тот же sha, карты нет — дозапуск без карты, map None", None, rid="inj-nomap", failed=LABELS[1:2], sha=CM)
+check("карты нет при пустом диффе: только b, map None", pm and pm["files"] == LABELS[1:2] and pm["map"] is None, pm)
+with_prev("карты нет, дифф непуст (CN→CM удаляет карту) — весь набор", "дифф задевает tools/affected-map.json",
+          rid="inj-nomap2", failed=LABELS[1:2], sha=CN)
+git("reset", "-q", "--hard", C4)
+
 git("checkout", "-q", "--detach")
 p, why = plan()
 check("весь набор: HEAD без ветки", p is None and "без ветки" in (why or ""), (p, why))

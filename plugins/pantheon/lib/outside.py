@@ -88,7 +88,11 @@
     потомок этого. Снятый прогон — stopped с причиной, без записи tests и без строки full.jsonl. Заявка в очереди на
     коммит, с которого HEAD уже ушёл, при более новой заявке той же папки из той же папки заявок — failed
     «superseded <ID>» без прогона. Итог running раз в 30 с несёт срез процессов (procs: pid, CPU, время, команда,
-    heavy_wait) — только в своей папке заявок.
+    heavy_wait) — только в своей папке заявок;
+  - новая заявка test сразу снимает из своей папки заявок ещё не начатые заявки test той же папки и той же проверки
+    (--script, --base, --sha или без), чей коммит — предок нового (replace_older, metis-0852): итог stopped «заменена
+    заявкой <ID> на <sha>» (тот же коммит git тоже считает предком). Начатую, заявки других окон и папок и не
+    предка не трогает.
 
 Куда пишет заявка. В окне роли (есть PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) —
 в соседнюю папку outside/ кэша: туда окно пишет само, а итог проход кладёт туда же, окно его читает. Вне окна — в
@@ -181,7 +185,8 @@ env и той же командой засчитывается новому HEAD
 Весь набор вместо дозапуска (причина — full_why итога), если: HEAD без ветки; полного прогона ветки нет, он зелёный,
 у него другая команда или env, нет списка упавших (старая запись, прерванный прогон), его коммита нет в клоне; дифф
 задевает файл вне карты или общий (FULL раннера), раннер, карту, bin/heavy, tests/_*.py любого плагина или
-.pantheon-verify; карта не читается или устарела (stale хоть один файл); упавших больше половины; выбор — весь набор;
+.pantheon-verify; карта не читается или устарела (stale хоть один файл) — кроме пустого диффа опора→HEAD (тот же
+коммит или то же дерево, metis-0842): тогда карта не нужна и гонятся только упавшие; упавших больше половины; выбор — весь набор;
 run-tests.py в HEAD не знает --only; опоре больше RERUN_MAX_AGE (24 ч) или время не разобрать; сбой расчёта. Дозапуск зелёный и строки ok его вывода — ровно его файлы — запись
 tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и полями rerun_of (id заявки опоры), files (прогнанные
 метки), map (sha256 affected-map.json HEAD). Шлюз guard её засчитывает как полный набор (merge_gate.py не менялся).
@@ -1487,7 +1492,9 @@ def rerun_plan(d, sha, argv, line, repos):
     предок он или нет) по карте affected-map.json рядом с раннером, выбор — select раннера, как у --affected. Весь
     набор, если дифф задевает файл вне карты или общий (FULL раннера), раннер, карту, heavy, tests/_*.py, .pantheon-verify;
     карта не читается или устарела (хоть один файл тестов изменён после её сборки); упавших больше половины; дозапуск —
-    весь набор; run-tests.py в HEAD не знает --only."""
+    весь набор; run-tests.py в HEAD не знает --only. Дифф пуст (опора на том же коммите или на коммите с тем же деревом)
+    — карта не нужна (metis-0842): гонятся только упавшие, проверки карты (чтение, stale, select) пропускаются, map —
+    её sha256 или None, если её нет; прочие условия те же."""
     parsed = runner_args(argv[2]) if argv[:2] == ["/bin/sh", "-c"] and len(argv) == 3 else None
     if not parsed:
         return None, "команда полного набора — не run-tests.py с папками плагинов"
@@ -1526,16 +1533,18 @@ def rerun_plan(d, sha, argv, line, repos):
     if forced:
         return None, f"дифф задевает {forced[0]}"
     rt = runner_mod()
-    amap, why = rt.load_map(os.path.join(d, mp))
-    if amap is None:
-        return None, why
     items = rt.collect([os.path.join(d, x) for x in dirs])
-    stale = rt.stale_tests(items, amap)
-    if stale:
-        return None, f"карта устарела: {len(stale)} файлов тестов изменены после её сборки ({stale[0]})"
-    chosen, unknown, _ = rt.select(changed, d, items, amap)
-    if unknown:
-        return None, f"дифф: {unknown[0][0]} — {unknown[0][1]}"
+    chosen = []
+    if changed:   # пустой дифф (тот же коммит или то же дерево) — карта не нужна: только упавшие (metis-0842)
+        amap, why = rt.load_map(os.path.join(d, mp))
+        if amap is None:
+            return None, why
+        stale = rt.stale_tests(items, amap)
+        if stale:
+            return None, f"карта устарела: {len(stale)} файлов тестов изменены после её сборки ({stale[0]})"
+        chosen, unknown, _ = rt.select(changed, d, items, amap)
+        if unknown:
+            return None, f"дифф: {unknown[0][0]} — {unknown[0][1]}"
     labels = {lb for _, lb in items}
     if len(failed) * 2 > len(labels):
         return None, f"упавших в прошлом полном прогоне {len(failed)} из {len(labels)} — больше половины"
@@ -1546,7 +1555,9 @@ def rerun_plan(d, sha, argv, line, repos):
         with open(os.path.join(d, mp), "rb") as fh:
             mhash = hashlib.sha256(fh.read()).hexdigest()
     except OSError as e:
-        return None, f"карту не прочесть: {e}"
+        if changed:
+            return None, f"карту не прочесть: {e}"
+        mhash = None   # пустой дифф: выбор не по карте, хеша нет
     return {"rerun_of": pid, "prev": psha, "files": files, "map": mhash,
             "ancestor": git(d, "merge-base", "--is-ancestor", psha, sha) is not None,
             # хвост-комментарий строки (« # …») срезан: иначе --only попал бы в комментарий и sh гнал весь набор
@@ -3498,6 +3509,8 @@ def cmd_request(kind, args):
     except OSError as e:
         err(f"pantheon outside: заявку не записать ({e})")
         return 1
+    if kind == "test":
+        replace_older(q, rid, req, d)
     at = f" на {req['sha'][:12]}" if req.get("sha") else ""
     print(f"заявка {rid}: {kind} в {d}{at} — её исполнит плановый проход (раз в минуту)")
     if req.get("dirty"):
@@ -3508,6 +3521,55 @@ def cmd_request(kind, args):
         print(f"итог: pantheon outside status {rid}")
         return 0
     return wait_result(q, rid, wait)
+
+
+def replace_older(q, rid, req, d):
+    """Новая заявка test rid (папка d, коммит req["sha"]) снимает из своей папки заявок q ещё не начатые заявки test той
+    же папки и той же проверки (--script, --base, --sha или без), чей коммит — предок нового (`git merge-base
+    --is-ancestor`, metis-0852): очередь прохода строго последовательная, прогон старого head — до получаса впустую.
+    Итог снятой — stopped «заменена заявкой <ID> на <sha>». Начатую (проход уже снял её .req.json) не трогает, как и
+    заявки других окон (папок заявок), других папок и не на предке. Окно пишет итог только в свой q
+    (STATE ему закрыт), терминал владельца — save_result, как _cancel_queued_test. → [ID снятых]."""
+    sha = req.get("sha")
+    if req.get("kind") != "test" or not sha:
+        return []
+    me, out = os.path.realpath(d), []
+    dfd = _open_dir(q)
+    if dfd is None:
+        return []
+    try:
+        for name in sorted(os.listdir(dfd)):
+            rid2 = name[:-len(".req.json")]
+            if not name.endswith(".req.json") or rid2 == rid or not ID_RE.fullmatch(rid2):
+                continue
+            req2 = _parse(_read_in(dfd, name))
+            if not isinstance(req2, dict) or req2.get("kind") != "test" or check_request(req2, rid2) \
+                    or bool(req2.get("pin")) != bool(req.get("pin")) or req2.get("base") != req.get("base") \
+                    or (req2.get("script") or None) != (req.get("script") or None) \
+                    or os.path.realpath(req2["dir"]) != me:
+                continue
+            # тот же коммит git тоже считает предком: снять старую заявку ради новой на нём же — не потеря
+            old = str(req2.get("sha") or "")
+            if git(d, "merge-base", "--is-ancestor", old, sha) is None or not _take_in(dfd, name):
+                continue
+            why = f"заменена заявкой {rid} на {sha[:12]}"
+            res = {"state": "stopped", "kind": "test", "why": why, "record": False, "sha": old, "dir": req2["dir"],
+                   "replaced_by": rid}
+            if q == root("queue"):
+                save_result(q, rid2, res)
+            else:
+                with contextlib.suppress(OSError):
+                    _write_in(dfd, rid2 + ".result.json",
+                              json.dumps({"id": rid2, "updated": P.stamp(), **res}, ensure_ascii=False, indent=1))
+            out.append((rid2, old))
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
+    for rid2, old in out:
+        log_event(id=rid2, kind="stop", why=f"заменена заявкой {rid} на {sha[:12]}", sha=old)
+        print(f"{rid2}: заявка на {old[:12]} ещё не начата — снята, заменена заявкой {rid} на {sha[:12]}")
+    return [r for r, _ in out]
 
 
 def live_test(d, sha, script=None, pin=False, base=None):
