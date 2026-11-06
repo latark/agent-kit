@@ -4821,12 +4821,9 @@ def test_resume_picks_saved_session_0499():
           "0499: saved не записал id в метку «можно»")
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in tests:
-        try:
-            fn()
-        except Exception as ex:  # noqa: BLE001
-            FAILS.append(f"{fn.__name__}: {type(ex).__name__}: {ex}")
-            print("ОШИБКА:", fn.__name__, type(ex).__name__, ex)
-    print(f"тестов: {len(tests)}, не прошло: {len(FAILS)}")
+    sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
+    from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
+    n = run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")], FAILS,
+                  lambda name, err: FAILS.append(f"{name}: {err}"))
+    print(f"тестов: {n}, не прошло: {len(FAILS)}")
     sys.exit(1 if FAILS else 0)

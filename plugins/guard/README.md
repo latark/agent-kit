@@ -1240,3 +1240,9 @@ origin/<ветка>», окно не показывается. Окно гово
     python3 -I scripts/bench.py -n 20     # замер холодного вызова хуков: медиана и p95 в мс (не тест; --out, --hooks)
     python3 -I scripts/bench.py --hookd   # холодный guard против пути через демон, вперемешку (не тест)
     python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось; владелец пула PID 1 — не выход
+    python3 -I tests/test_par.py          # случаи параллельно (_par.py): по n сразу, вывод и итоги по порядку, сбой случая — провал
+
+Самые долгие файлы — test_guard (таблица случаев), test_merge_gate, а в pantheon test_watch, test_merge и test_read —
+гоняют случаи через `tests/_par.py` (metis-0544): каждый случай в своём fork процесса файла, по
+`min(3, ядер // 2)` сразу. Вывод и число проверок — те же, что подряд. `TESTS_JOBS=1` — по одному, для разбора
+упавшего случая; `TESTS_JOBS=<n>` — своё число.
