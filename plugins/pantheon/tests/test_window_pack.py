@@ -23,6 +23,7 @@
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -123,8 +124,15 @@ def main():
     check("AGENTS.md папки запуска с @AGENTS.md в CLAUDE.md не дублируется", "LAUNCH-RULES" not in text, text)
     check("файл AGENTS.md окна — в settings/run, не в репозитории",
           files and files[0] == os.path.join(state, "settings", "run", "proteus-ms.agents.md"), files)
-    check("--plugin-dir пакета, --mcp-config — его mcp.json, собранный ядром в settings/run",
-          after(argv, "--plugin-dir") == [pack]
+    snaps = os.path.join(state, "settings", "run", "packs")
+    plug = after(argv, "--plugin-dir")
+    snap = os.path.dirname(plug[0]) if len(plug) == 1 else ""
+    check("--plugin-dir — плагин пакета из снимка settings/run/packs/<окно>-<хеш> (круг F), не packs/; "
+          "--mcp-config — его mcp.json, собранный ядром в settings/run",
+          plug == [os.path.join(snap, "plugin")] and os.path.dirname(snap) == snaps
+          and re.fullmatch(r"proteus-ms-[0-9a-f]{16}", os.path.basename(snap))
+          and open(os.path.join(snap, "plugin", ".claude-plugin", "plugin.json")).read()
+          == open(os.path.join(pack, ".claude-plugin", "plugin.json")).read()
           and after(argv, "--mcp-config") == [os.path.join(state, "settings", "run", "proteus-ms.mcp.json")], argv)
     s = argv.index("--settings") if "--settings" in argv else -1
     check("флаги схемы А — до --settings, текст поручения последним",

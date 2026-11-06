@@ -3074,20 +3074,69 @@ def pack_window(name):
     return got if isinstance(got, dict) else {}
 
 
+def _open_dir_nofollow(p):
+    """fd папки p, открытой по звеньям ниже надёжного начала (_split_trusted) openat с O_NOFOLLOW|O_DIRECTORY, и её
+    путь строкой без ссылок (надёжное начало + звенья). OSError — звено ссылка, не папка или его нет."""
+    base, parts = _split_trusted(p)
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, os.path.join(base, *parts)
+
+
+def _has_mark(dfd, mark):
+    """Есть ли метка PROJECT_MARKS (файл или папка, «.claude/…» — звеньями) в папке dfd: lstat от fd, ссылки не
+    проходит (звено-ссылка — метки нет)."""
+    *mids, last = mark.split("/")
+    fd = os.dup(dfd)
+    try:
+        for part in mids:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        os.stat(last, dir_fd=fd, follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def nested_projects(folder):
     """Вложенные проекты папки на один уровень вниз: подпапка (не скрытая, не ссылка) с CLAUDE.md, AGENTS.md,
-    .mcp.json или своей .claude с настройками, навыками, командами, агентами, правилами (PROJECT_MARKS)."""
+    .mcp.json или своей .claude с настройками, навыками, командами, агентами, правилами (PROJECT_MARKS).
+    Окно пишет папку и в любой миг может подменить подпапку ссылкой (renamex_np, отвязанный ребёнок прошлой сессии —
+    и до запуска окна; ревью argus E2 Б1 PR #360): папка открыта по fd (_open_dir_nofollow), подпапка — openat от него
+    с O_NOFOLLOW|O_DIRECTORY, метки — от fd подпапки, а наружу — строка join(путь папки без ссылок, имя), не realpath:
+    ссылка, подставленная после проверки, не уведёт --add-dir в чужую папку."""
     try:
-        names = sorted(os.listdir(folder))
+        fd, top = _open_dir_nofollow(folder)
     except OSError:
         return []
     out = []
-    for n in names:
-        p = os.path.join(folder, n)
-        if n.startswith(".") or n in NESTED_SKIP or os.path.islink(p) or not os.path.isdir(p):
-            continue
-        if any(os.path.exists(os.path.join(p, m)) for m in PROJECT_MARKS):
-            out.append(os.path.realpath(p))
+    try:
+        for n in sorted(os.listdir(fd)):
+            if n.startswith(".") or n in NESTED_SKIP:
+                continue
+            try:
+                nfd = os.open(n, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError:
+                continue
+            try:
+                if any(_has_mark(nfd, m) for m in PROJECT_MARKS):
+                    out.append(os.path.join(top, n))
+            finally:
+                os.close(nfd)
+    except OSError:
+        return out
+    finally:
+        os.close(fd)
     return out
 
 
@@ -3154,7 +3203,152 @@ def window_agents_md(launch, dirs):
     return out
 
 
-PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка packs/_bin (её путь знает только ядро)
+PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка _bin снимка (её путь знает только ядро)
+
+# Снимок исполняемого пакета (metis-0933 круг F, решение Зевса 06.11 23:46). Хуки пакета и серверы MCP идут вне
+# песочницы, а скрипты вложенных проектов (app/.claude/hooks/*.sh, mailkeeper/.claude/hooks/*.py) лежат в папках,
+# которые окно пишет: проверка пути и исполнение по пути разнесены во времени, и переименование промежуточной папки
+# (app, app/.claude — ревью argus E1 Б1) подменяло скрипт. Поэтому window_launch до старта окна копирует всё, что
+# исполняется вне песочницы, — плагин пакета (.claude-plugin, hooks), packs/_bin и скрипты .claude/hooks репозиториев,
+# названные в hooks.json, — в снимок STATE/settings/run/packs/<имя>-<sha256 манифеста>. Снимок вне allowWrite окон,
+# имя папки — хеш manifest.json, в манифесте sha256 каждого файла: in_repo.py исполняет только файлы снимка, сверив
+# хеш. Обновление — только при следующем запуске окна (здесь), не из окна. Скрипт репозитория читается по звеньям с
+# O_NOFOLLOW (_read_bytes_nofollow): ссылка любым звеном — скрипта в снимке нет, хук получит отказ.
+PACK_SNAPSHOTS = ("settings", "run", "packs")
+PACK_PLUGIN_FILES = (".claude-plugin/plugin.json", "hooks/hooks.json")
+PACK_SCRIPT_LIMIT = 1 << 20
+PACK_SNAPSHOT_KEEP = 14 * 86400  # старые снимки окна: их может держать ещё живая сессия
+REPO_HOOKS_PREFIX = ".claude/hooks/"
+
+
+def _read_bytes_nofollow(p, limit):
+    """Байты обычного файла p не больше limit, открытого по звеньям с O_NOFOLLOW (_open_nofollow); иначе None."""
+    try:
+        fd = _open_nofollow(p)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        data = b""
+        while len(data) <= limit:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            data += chunk
+        return data if len(data) <= limit else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def pack_hook_scripts(pack_dir):
+    """Скрипты репозиториев, которые хуки пакета pack_dir запускают через in_repo.py: [(репозиторий, имя)], где
+    репозиторий — строка без ссылок, как её считает in_repo.open_root (надёжное начало + звенья), имя — файл в
+    <репозиторий>/.claude/hooks. Пакет — код ядра, разбор shlex его строк."""
+    hooks = read_json(os.path.join(pack_dir, "hooks", "hooks.json"), {})
+    hooks = hooks.get("hooks") if isinstance(hooks, dict) else None
+    out = []
+    for groups in (hooks.values() if isinstance(hooks, dict) else []):
+        for g in groups if isinstance(groups, list) else []:
+            for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                cmd = h.get("command") if isinstance(h, dict) else None
+                if not isinstance(cmd, str):
+                    continue
+                try:
+                    toks = shlex.split(cmd.replace("${HOME}", HOME).replace("$HOME", HOME))
+                except ValueError:
+                    continue
+                at = next((i for i, t in enumerate(toks) if t.endswith("/_bin/in_repo.py")), None)
+                if at is None or at + 1 >= len(toks) or "--" not in toks[at + 1:]:
+                    continue
+                base, parts = _split_trusted(os.path.expanduser(toks[at + 1]))
+                repo = os.path.join(base, *parts)
+                cut = toks.index("--", at + 1)
+                out += [(repo, t[len(REPO_HOOKS_PREFIX):]) for t in toks[cut + 1:] if t.startswith(REPO_HOOKS_PREFIX)]
+    return list(dict.fromkeys(out))
+
+
+def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=()):
+    """Снимок в out_dir/<name>-<16 знаков sha256 manifest.json> → путь к нему. Внутри: _bin/* (из bin_dir), plugin/
+    (PACK_PLUGIN_FILES из plugin_dir, если есть), repo/<sha репозитория>/<имя> — скрипты scripts [(репозиторий, имя)],
+    прочитанные _read_bytes_nofollow (ссылка, не файл, нет файла — пропуск: хук получит отказ in_repo.py), и
+    manifest.json {files: {путь: sha256}, repos: {репозиторий: {имя: путь}}}. Готовый снимок с тем же хешем и целыми
+    файлами берётся как есть; испорченный — собирается заново. Старые снимки окна старше PACK_SNAPSHOT_KEEP убирает."""
+    files, repos = {}, {}
+    # _bin и плагин — код ядра (папка плагина, путь от realpath): ссылки в пути к ней законны
+    for fn in sorted(os.listdir(bin_dir)) if os.path.isdir(bin_dir) else []:
+        if fn.endswith(".py"):
+            data = _read_bytes_nofollow(os.path.realpath(os.path.join(bin_dir, fn)), PACK_SCRIPT_LIMIT)
+            if data is not None:
+                files[f"_bin/{fn}"] = data
+    for rel in PACK_PLUGIN_FILES if plugin_dir else ():
+        data = _read_bytes_nofollow(os.path.realpath(os.path.join(plugin_dir, rel)), PACK_SCRIPT_LIMIT)
+        if data is not None:
+            files[f"plugin/{rel}"] = data
+    for repo, script in scripts:
+        if not script or "/" in script or script in (".", ".."):
+            continue
+        data = _read_bytes_nofollow(os.path.join(repo, ".claude", "hooks", script), PACK_SCRIPT_LIMIT)
+        if data is None:
+            continue
+        rel = f"repo/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
+        files[rel] = data
+        repos.setdefault(repo, {})[script] = rel
+    manifest = json.dumps({"files": {k: hashlib.sha256(v).hexdigest() for k, v in sorted(files.items())},
+                           "repos": repos}, sort_keys=True, ensure_ascii=False).encode()
+    snap = os.path.join(out_dir, f"{name}-{hashlib.sha256(manifest).hexdigest()[:16]}")
+    if not _snapshot_intact(snap, manifest, files):
+        os.makedirs(out_dir, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix=f".{name}-", dir=out_dir)
+        try:
+            for rel, data in list(files.items()) + [("manifest.json", manifest)]:
+                p = os.path.join(tmp, rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                os.chmod(p, 0o444)
+            if os.path.islink(snap) or os.path.isfile(snap):
+                os.unlink(snap)
+            elif os.path.isdir(snap):
+                shutil.rmtree(snap, ignore_errors=True)
+            os.rename(tmp, snap)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+    now, mine = time.time(), re.compile(re.escape(name) + r"-[0-9a-f]{16}")
+    for old in os.listdir(out_dir):
+        p = os.path.join(out_dir, old)
+        try:
+            stale = (mine.fullmatch(old) and p != snap and now - os.lstat(p).st_mtime > PACK_SNAPSHOT_KEEP) or (
+                old.startswith(f".{name}-") and now - os.lstat(p).st_mtime > 3600)
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(p, ignore_errors=True)
+    os.utime(snap)
+    return snap
+
+
+def _snapshot_intact(snap, manifest, files):
+    """Снимок snap — папка (не ссылка) с тем же manifest.json и теми же байтами каждого файла."""
+    if os.path.islink(snap) or not os.path.isdir(snap):
+        return False
+    return all(_read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT) == data
+               for rel, data in list(files.items()) + [("manifest.json", manifest)])
+
+
+def pack_snapshot(window, name):
+    """Снимок пакета окна направления window для запуска name (pack_snapshot_make в STATE/settings/run/packs) или
+    None — пакета нет."""
+    pack = os.path.join(PACKS, window)
+    plugin = os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json"))
+    if not plugin and not os.path.isfile(os.path.join(pack, "mcp.json")):
+        return None
+    return pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
+                              pack_hook_scripts(pack) if plugin else ())
 
 
 def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
@@ -3171,9 +3365,10 @@ def window_launch(role, name, window, settings, prompt=None, resume=None, bg=Tru
 def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
-    settings/run/<name>.agents.md), --plugin-dir пакета и --mcp-config его mcp.json, если они есть (${PANTHEON_PACK_BIN}
-    в нём — настоящий путь packs/_bin, файл — settings/run/<name>.mcp.json). Не направление (мастерская, штаб,
-    задачи) — []."""
+    settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть. Плагин и
+    _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
+    settings/run/<name>.mcp.json), не из packs/. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
+    обновляет. Не направление (мастерская, штаб, задачи) — []."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
     if not isinstance(folders, list) or not folders:
         return []
@@ -3193,12 +3388,13 @@ def window_flags(window, name=None):
     if parts:
         args += ["--append-system-prompt-file", run_file("agents.md", "\n\n".join(parts))]
     pack = os.path.join(PACKS, window)
-    if os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json")):
-        args += ["--plugin-dir", pack]
-    if os.path.isfile(os.path.join(pack, "mcp.json")):
+    snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
+    if snap and os.path.isfile(os.path.join(snap, "plugin", ".claude-plugin", "plugin.json")):
+        args += ["--plugin-dir", os.path.join(snap, "plugin")]
+    if snap and os.path.isfile(os.path.join(pack, "mcp.json")):
         with open(os.path.join(pack, "mcp.json"), encoding="utf-8") as fh:
             text = fh.read()
-        bin_dir = json.dumps(os.path.realpath(os.path.join(PACKS, "_bin")))[1:-1]
+        bin_dir = json.dumps(os.path.join(snap, "_bin"))[1:-1]
         args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
     return args
 
@@ -3491,6 +3687,13 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             deny_list = data["permissions"].setdefault("deny", [])
             deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
             data["sandbox"]["excludedCommands"] += window_excluded(name)
+            # скрипты репозиториев, которые снимок пакета берёт при запуске окна (pack_hook_scripts): их .claude/hooks —
+            # литералом в denyWrite. Глоб «/**/.claude/hooks» Claude Code закрывает только по регулярке, а литерал — и
+            # переименование его предков (app, app/.claude; ревью argus E1 Б1): без этого окно подменило бы папку
+            # переименованием, и следующий запуск взял бы в снимок чужой скрипт
+            dw = data["sandbox"]["filesystem"]["denyWrite"]
+            dw += [x for x in dict.fromkeys(os.path.join(r, ".claude", "hooks")
+                                            for r, _ in pack_hook_scripts(os.path.join(PACKS, name))) if x not in dw]
             bad = window_extra_apply(data, pack_window(name), window_plugins_allowed(pmap, name))
             if bad:
                 keys = dict.fromkeys(f"{k}.{v}" if k in ("env", "sandbox") else k for k, v in bad)

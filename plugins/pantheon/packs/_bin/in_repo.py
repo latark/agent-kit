@@ -5,7 +5,16 @@
         -- <команда> […]
 
 Только с -I (metis-0933, класс 2): хук идёт вне песочницы, и PYTHONPATH или sitecustomize из окружения исполнили бы
-чужой код. Скрипт хука — аргумент `.claude/hooks/<имя>`: эту папку песочница окна закрывает на запись (EXEC_DIRS ядра).
+чужой код.
+
+Исполняется только снимок (metis-0933 круг F, решение Зевса 06.11 23:46). Обёртка лежит в _bin снимка, который
+window_launch собрал до старта окна (pantheon.py pack_snapshot): <снимок>/manifest.json, <снимок>/_bin, <снимок>/plugin,
+<снимок>/repo/…; имя папки снимка кончается 16 знаками sha256 манифеста, в манифесте — sha256 каждого файла. Аргумент
+команды `.claude/hooks/<имя>` — не файл репозитория, а его копия из снимка (manifest repos[<репозиторий>][<имя>]);
+аргумент — путь внутри снимка (repo_hooks.py) — тоже файл снимка. Каждый открывается по fd, его хеш сверяется с
+манифестом, команда получает /dev/fd/N. Окно папку снимка не пишет, а переименование app или app/.claude в
+репозитории (ревью argus E1 Б1) скрипт хука не меняет. Обёртка не из снимка (нет manifest.json рядом, хеш не тот) —
+скрипт репозитория не исполняет.
 
 Окно направления запущено в одной папке, а хуки вложенных проектов (MorphStream/app, gpu-worker, mailkeeper) писались
 под запуск в своём репозитории: относительный путь `.claude/hooks/…`, путь файла аргументом. Обёртка читает вход хука
@@ -18,8 +27,8 @@
 2 раза исполнился чужой скрипт). Поэтому обёртка действует не по пути, а по открытым дескрипторам (fd):
 - корень репозитория открывается по звеньям от realpath($HOME) (вне $HOME — от realpath первого звена): openat с
   O_NOFOLLOW, звено-ссылка — отказ; дальше обёртка держит этот fd;
-- .claude, .claude/hooks и скрипт `.claude/hooks/<имя>` — openat от fd корня с O_NOFOLLOW; скрипт — обычный файл,
-  команда получает его как /dev/fd/N (bash /dev/fd/N, python3 -I /dev/fd/N), а не по пути;
+- скрипт — файл снимка, сверенный по хешу; команда получает его как /dev/fd/N (bash /dev/fd/N, python3 -I /dev/fd/N),
+  а не по пути;
 - папка команды — fchdir(fd корня); fd корня передаётся ребёнку (номер — в REPO_FD_ENV), и repo_hooks.py открывает
   файлы от него, путь CLAUDE_PROJECT_DIR заново не разрешает (CLAUDE_PROJECT_DIR — только строка для сообщений).
 
@@ -33,10 +42,12 @@
               прогона) — вывод хука выброшен, выход 2 с причиной (pre-commit-check.sh)
 
 Цель вне репозитория без --always — выход 0 молча. Нет папки репозитория — выход 0 со строкой в stderr: хук пакета не
-должен ронять инструменты окна. Нет скрипта `.claude/hooks/<имя>` или команда не запустилась — выход 1 со строкой в
-stderr (ошибка хука; onFailure: block её блокирует). Звено пути репозитория ниже $HOME, .claude, .claude/hooks или
-скрипт — ссылка или не то, чем должно быть (окно подменило) — выход 2 с причиной: хук из чужой папки не запускается,
-инструмент блокируется. Python 3.9+ (системный python3 macOS)."""
+должен ронять инструменты окна. Нет скрипта `.claude/hooks/<имя>` в снимке (при запуске окна его не было, или звено
+пути к нему было ссылкой) или команда не запустилась — выход 1 со строкой в stderr (ошибка хука; onFailure: block её
+блокирует). Звено пути репозитория ниже $HOME — ссылка или не папка (окно подменило), обёртка не из снимка, файл
+снимка не обычный или его хеш не совпал с манифестом — выход 2 с причиной: инструмент блокируется. Python 3.9+
+(системный python3 macOS)."""
+import hashlib
 import json
 import os
 import stat
@@ -46,6 +57,8 @@ import sys
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 HOOKS = ".claude/hooks/"
 REPO_FD_ENV = "PANTHEON_REPO_FD"
+SNAP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # снимок: обёртка — <снимок>/_bin/in_repo.py
+MANIFEST_LIMIT = 1 << 20
 
 
 class Linked(OSError):
@@ -125,23 +138,77 @@ def links_under(root, rel):
     return out
 
 
-def open_script(hooks, name):
-    """fd скрипта .claude/hooks/<name>: обычный файл, openat от fd папки hooks с O_NOFOLLOW."""
-    if hooks is None:
-        raise FileNotFoundError(f"{HOOKS}{name}: нет папки .claude/hooks")
-    if not name or "/" in name or name in (".", ".."):
-        raise Linked(f"{HOOKS}{name}: не имя файла в .claude/hooks")
+def _read_fd(fd, limit):
+    data = b""
+    while len(data) <= limit:
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def load_manifest():
+    """manifest.json снимка или None — обёртка не из снимка (packs/ плагина) или манифест не тот: не обычный файл,
+    не JSON, его sha256 не совпал с хвостом имени папки снимка."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=hooks)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"{HOOKS}{name}: нет файла")
-    except OSError as e:
-        raise Linked(f"{HOOKS}{name}: ссылка или не файл ({e.strerror})")
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        fd = os.open(os.path.join(SNAP, "manifest.json"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = _read_fd(fd, MANIFEST_LIMIT)
+    finally:
         os.close(fd)
-        raise Linked(f"{HOOKS}{name}: не обычный файл")
-    os.set_blocking(fd, True)
-    return fd
+    if not os.path.basename(SNAP).endswith("-" + hashlib.sha256(raw).hexdigest()[:16]):
+        return None
+    try:
+        man = json.loads(raw)
+    except ValueError:
+        return None
+    ok = isinstance(man, dict) and isinstance(man.get("files"), dict) and isinstance(man.get("repos"), dict)
+    return man if ok else None
+
+
+def open_snap(man, rel):
+    """fd файла rel снимка: обычный файл, sha256 — как в манифесте; позиция — начало (bash /dev/fd/N на macOS делит
+    её с fd). Linked — файла нет в манифесте, не обычный файл или хеш не тот."""
+    want = man["files"].get(rel)
+    if not isinstance(want, str) or rel.startswith("/") or ".." in rel.split("/"):
+        raise Linked(f"{rel}: нет в манифесте снимка")
+    try:
+        fd = os.open(os.path.join(SNAP, rel), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        raise Linked(f"снимок {rel}: {e.strerror}")
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Linked(f"снимок {rel}: не обычный файл")
+        if hashlib.sha256(_read_fd(fd, MANIFEST_LIMIT)).hexdigest() != want:
+            raise Linked(f"снимок {rel}: хеш не совпал с манифестом")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.set_blocking(fd, True)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def snap_script(man, repo, arg):
+    """fd файла снимка для аргумента команды arg или None — arg не скрипт: `.claude/hooks/<имя>` — копия скрипта
+    репозитория repo из снимка, путь внутри папки снимка — сам файл снимка. FileNotFoundError — скрипта нет в снимке,
+    Linked — обёртка не из снимка, файл снимка не тот."""
+    if arg.startswith(HOOKS):
+        if man is None:
+            raise Linked(f"{arg}: обёртка не из снимка окна — скрипт репозитория не исполняю")
+        rel = (man["repos"].get(repo) or {}).get(arg[len(HOOKS):])
+        if not isinstance(rel, str):
+            raise FileNotFoundError(f"{arg}: нет в снимке окна (снимок берётся при запуске окна)")
+        return open_snap(man, rel)
+    p = os.path.normpath(os.path.abspath(arg)) if arg.startswith("/") else ""
+    if man is not None and p.startswith(SNAP.rstrip("/") + "/"):
+        return open_snap(man, os.path.relpath(p, SNAP))
+    return None
 
 
 def main(argv):
@@ -158,13 +225,6 @@ def main(argv):
         return 0
     except OSError as e:
         print(f"in_repo.py: {given}: {e} — хук из чужой папки не запускаю", file=sys.stderr)
-        return 2
-    try:
-        hooks = open_sub(root, ".claude/hooks")
-    except FileNotFoundError:
-        hooks = None
-    except OSError as e:
-        print(f"in_repo.py: {repo}: {e} — хук из чужой папки не запускаю", file=sys.stderr)
         return 2
     try:
         data = json.loads(raw or b"{}")
@@ -191,18 +251,18 @@ def main(argv):
         print(f"in_repo.py: в {repo} ссылка ({', '.join(bad[:5])}) — хук читает эти папки вне песочницы, "
               "не запускаю; убери ссылку", file=sys.stderr)
         return 2
-    fds, cmd = [root], list(cmd)
+    fds, cmd, man = [root], list(cmd), load_manifest()
     try:
         for i, a in enumerate(cmd):
-            if a.startswith(HOOKS):
-                sfd = open_script(hooks, a[len(HOOKS):])
+            sfd = snap_script(man, repo, a)
+            if sfd is not None:
                 fds.append(sfd)
                 cmd[i] = f"/dev/fd/{sfd}"
     except FileNotFoundError as e:
         print(f"in_repo.py: {repo}: {e} — хук не запущен", file=sys.stderr)
         return 1
     except OSError as e:
-        print(f"in_repo.py: {repo}: {e} — хук из чужой папки не запускаю", file=sys.stderr)
+        print(f"in_repo.py: {repo}: {e} — не запускаю", file=sys.stderr)
         return 2
     env = dict(os.environ, CLAUDE_PROJECT_DIR=repo, CLAUDE_FILE_PATH=where if target else "")
     env[REPO_FD_ENV] = str(root)

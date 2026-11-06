@@ -16,11 +16,17 @@
   AGENTS.md на 100 МБ: запуск и pantheon check не виснут, чужое не попадает в AGENTS.md окна; window_dirs и _read_in
   не идут по ссылке — папка из domains.json, звено в середине пути, ссылка на месте .claude;
 - класс 4 — плагины и версии: пакет npx — с точной версией x.y.z, включённые плагины окна — из карты
-  plugins-by-role.toml.
+  plugins-by-role.toml;
+- круг F (решение Зевса 06.11 23:46) — класс «проверили путь в папке окна, потом исполняем»: хуки и серверы пакета
+  исполняются только из снимка (pack_snapshot_make), снятого до старта окна, с проверкой sha256; фоновая подмена и
+  переименование промежуточной папки (app, app/.claude — пробы E1 Б1, два mv) не меняют исполняемого, а app ↔ ссылка
+  через renamex_np (проба E2 r7) не меняет ни одной папки --add-dir (nested_projects по fd). Мутанты краснеют.
 Во временном HOME, настоящие ~/.claude и ~/ai не трогает. Python 3.14 (metis-0571)."""
 import atexit
 import copy
 import fnmatch
+import hashlib
+import inspect
 import json
 import os
 import re
@@ -39,6 +45,7 @@ _base = "/tmp/claude-%d" % os.getuid()
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="tmp-winthreat-", dir=_base if os.path.isdir(_base) else None))
 atexit.register(shutil.rmtree, ROOT, True)
 results = []
+P = None  # модуль ядра (lib), main
 PINNED = re.compile(r"(@[\w.-]+/)?[\w.-]+@\d+\.\d+\.\d+")
 
 
@@ -157,8 +164,18 @@ def execs(tokens, cwd, why, wrapped=False):
         out.append((script, why))
         rest = tokens[at + 1:]
         if os.path.basename(script) == "in_repo.py":
-            cut = rest.index("--")
-            sub_out, sub_errs = execs(rest[cut + 1:], rest[0], why)
+            # in_repo.py исполняет `.claude/hooks/<имя>` только из своего снимка (manifest.json рядом с _bin)
+            cut, snap = rest.index("--"), os.path.dirname(os.path.dirname(os.path.normpath(script)))
+            man = json.load(open(os.path.join(snap, "manifest.json"))) if os.path.isfile(
+                os.path.join(snap, "manifest.json")) else None
+            sub = list(rest[cut + 1:])
+            for i, t in enumerate(sub):
+                if t.startswith(".claude/hooks/"):
+                    rel = ((man or {}).get("repos", {}).get(rest[0]) or {}).get(t[len(".claude/hooks/"):])
+                    if rel is None:
+                        errs.append((why, f"{t}: in_repo.py не из снимка или скрипта нет в снимке"))
+                    sub[i] = os.path.join(snap, rel) if rel else os.path.join(rest[0], t)
+            sub_out, sub_errs = execs(sub, rest[0], why)
             out, errs = out + sub_out, errs + sub_errs
         elif os.path.basename(script) == "env_from.py":  # до «--» — .env-файл и имена: данные, не код
             cut = rest.index("--")
@@ -177,17 +194,18 @@ def execs(tokens, cwd, why, wrapped=False):
     return out, errs
 
 
-def pack_execs(home, state, name, pack_root):
-    """Все исполняемые файлы пакета name: хуки (hooks.json), серверы (settings/run/<name>.mcp.json)."""
+def pack_execs(home, state, name, plugin):
+    """Все исполняемые файлы пакета name: хуки (hooks.json плагина plugin — --plugin-dir окна), серверы
+    (settings/run/<name>.mcp.json)."""
     out, errs = [], []
-    hooks_file = os.path.join(pack_root, name, "hooks", "hooks.json")
+    hooks_file = os.path.join(plugin, "hooks", "hooks.json")
     hooks = json.load(open(hooks_file)).get("hooks", {}) if os.path.isfile(hooks_file) else {}
     for ev, groups in hooks.items():
         for g in groups:
             for h in g["hooks"]:
                 if h.get("type") != "command":
                     continue
-                c = h["command"].replace("${CLAUDE_PLUGIN_ROOT}", os.path.join(pack_root, name)).replace("$HOME", home)
+                c = h["command"].replace("${CLAUDE_PLUGIN_ROOT}", plugin).replace("$HOME", home)
                 o, e = execs(shlex.split(c), home, f"hook {ev}: {h['command'][:90]}")
                 out, errs = out + o, errs + e
     mcp_file = os.path.join(state, "settings", "run", f"{name}.mcp.json")
@@ -212,6 +230,10 @@ def class2(tmp, env, P):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     for d in ("app", "gpu-worker"):
         put(os.path.join(tmp, "projects/MorphStream", d, "AGENTS.md"), f"{d}\n")
+    for f in ("other/mailkeeper/.claude/hooks/guard_bash.py", "other/mailkeeper/.claude/hooks/guard_read.py",
+              "MorphStream/app/.claude/hooks/protect-db.sh", "MorphStream/app/.claude/hooks/pre-commit-check.sh",
+              "MorphStream/gpu-worker/.claude/hooks/pre-commit-check.sh"):
+        put(os.path.join(tmp, "projects", f), "exit 0\n")
     put(os.path.join(env["PANTHEON_HOME"], "directions.toml"),
         '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit", "~/.claude", '
         '"~/projects/other/mailkeeper"]\n[[direction]]\nname = "proteus-morph"\nfolders = ["~/projects/MorphStream"]\n')
@@ -221,7 +243,25 @@ def class2(tmp, env, P):
         r = run(env, "start", name, "x", "--from", "zeus", "--dry-run")
         check(f"класс 2: start {name} --dry-run прошёл", r.returncode == 0, (r.stdout[-500:], r.stderr))
         win = json.load(open(os.path.join(state, "settings", f"{name}.json")))
-        out, errs, servers = pack_execs(home, state, name, PACKS)
+        line = next((x for x in r.stdout.splitlines() if "--plugin-dir" in x), "")
+        toks = shlex.split(line) if line else []
+        plugin = toks[toks.index("--plugin-dir") + 1] if "--plugin-dir" in toks else ""
+        check(f"класс 2/F: {name} — --plugin-dir из снимка settings/run/packs, не packs/ (решение Зевса 06.11 23:46)",
+              os.path.dirname(os.path.dirname(plugin)) == os.path.join(state, "settings", "run", "packs")
+              and os.path.isfile(os.path.join(os.path.dirname(plugin), "manifest.json")), (plugin, r.stdout[-800:]))
+        mcp_file = os.path.join(state, "settings", "run", f"{name}.mcp.json")
+        scripts = [a for v in (json.load(open(mcp_file)).get("mcpServers", {}) if os.path.isfile(mcp_file) else {}
+                               ).values() for a in v.get("args", []) if a.endswith(".py")]
+        check(f"класс 2/F: {name} — скрипты серверов mcp.json (${{PANTHEON_PACK_BIN}}) — из _bin того же снимка",
+              all(a.startswith(os.path.join(os.path.dirname(plugin), "_bin") + "/") for a in scripts)
+              and (scripts or name == "metis-pantheon"), scripts)
+        repos = {"metis-pantheon": ["projects/other/mailkeeper"],
+                 "proteus-morph": ["projects/MorphStream/app", "projects/MorphStream/gpu-worker"]}[name]
+        lit = [os.path.join(home, x, ".claude", "hooks") for x in repos]
+        dw = win["sandbox"]["filesystem"].get("denyWrite", [])
+        check(f"класс 2/F: {name} — .claude/hooks репозиториев снимка литералом в denyWrite (предки — не "
+              "переименовать)", all(x in dw for x in lit), (lit, dw))
+        out, errs, servers = pack_execs(home, state, name, plugin)
         # в работе пакет лежит в кэше плагинов: ~/.claude/plugins/cache/<маркетплейс>/pantheon/<версия>/packs
         prod = os.path.join(home, ".claude/plugins/cache/agent-kit/pantheon/0.0.1/packs")
         out += [(p.replace(PACKS, prod), why + " (из кэша плагинов)") for p, why in out if p.startswith(PACKS)]
@@ -256,6 +296,18 @@ def class2(tmp, env, P):
 
 ENV_FROM = os.path.join(PACKS, "_bin", "env_from.py")
 IN_REPO = os.path.join(PACKS, "_bin", "in_repo.py")
+
+
+def snap_of(tmp, label, bin_dir, pairs=(), plugin_dir=None, home=None):
+    """Снимок ядра (pack_snapshot_make — как window_launch до старта окна) из bin_dir, плагина plugin_dir и скриптов
+    pairs [(репозиторий, имя)] → путь к нему. home — $HOME хуков пакета: скрипты из hooks.json (pack_hook_scripts)."""
+    old = P.HOME
+    P.HOME = home or old
+    try:
+        pairs = list(pairs) + (P.pack_hook_scripts(plugin_dir) if plugin_dir else [])
+        return P.pack_snapshot_make(os.path.join(tmp, "snaps"), label, bin_dir, plugin_dir, pairs)
+    finally:
+        P.HOME = old
 
 
 def class2_npx(tmp):
@@ -305,8 +357,10 @@ def class2_npx(tmp):
 
 
 def class2_links(tmp):
-    """in_repo.py не запускает хук, если репозиторий, его .claude или .claude/hooks подменены ссылкой (окно пишет
-    папку-родителя): выход 2, хук чужой папки не исполнен. Обычная папка — исполнен (самопроверка)."""
+    """Хук чужой папки не исполняется, если репозиторий, звено пути, его .claude или .claude/hooks подменены ссылкой
+    (окно пишет папку-родителя): репозиторий или звено — in_repo.py выход 2; .claude или .claude/hooks — снимок скрипт
+    по ссылке не берёт, in_repo.py выход 1. Обычная папка — исполнен (самопроверка); in_repo.py не из снимка скрипт
+    репозитория не исполняет (выход 2)."""
     foreign = os.path.join(tmp, "foreign-hooks")
     mark = os.path.join(tmp, "HOOK-RAN")
     put(os.path.join(foreign, ".claude", "hooks", "x.sh"), f"#!/bin/sh\ntouch {shlex.quote(mark)}\n")
@@ -320,20 +374,29 @@ def class2_links(tmp):
     os.symlink(os.path.join(foreign, ".claude", "hooks"), os.path.join(proj, "hooks", ".claude", "hooks"))
     os.symlink(tmp, os.path.join(tmp, "projects", "midp"))  # $HOME/projects/midp/foreign-hooks — ссылка звеном midp
     env = {"PATH": os.environ["PATH"], "HOME": tmp}
+    cases = (("репозиторий — ссылка", "$HOME/projects/hk/app", 2),
+             ("ссылка в середине пути", "$HOME/projects/midp/foreign-hooks", 2),
+             (".claude — ссылка", "$HOME/projects/hk/dot", 1), (".claude/hooks — ссылка", "$HOME/projects/hk/hooks", 1))
+    pairs = [(repo.replace("$HOME", tmp), "x.sh") for _, repo, _ in cases] + [(os.path.join(proj, "real"), "x.sh")]
+    snap = snap_of(tmp, "links", os.path.join(PACKS, "_bin"), pairs, home=tmp)
 
-    def hook(repo):
+    def hook(repo, wrapper=os.path.join(snap, "_bin", "in_repo.py")):
         if os.path.exists(mark):
             os.unlink(mark)
-        r = subprocess.run([sys.executable, "-I", IN_REPO, repo, "--always", "--", "bash", ".claude/hooks/x.sh"],
+        r = subprocess.run([sys.executable, "-I", wrapper, repo, "--always", "--", "bash", ".claude/hooks/x.sh"],
                            input="{}", env=env, capture_output=True, text=True, timeout=30)
         return r.returncode, os.path.exists(mark), r.stderr
 
-    for name, repo in (("репозиторий — ссылка", "$HOME/projects/hk/app"), ("ссылка в середине пути", "$HOME/projects/midp/foreign-hooks"),
-                       (".claude — ссылка", "$HOME/projects/hk/dot"), (".claude/hooks — ссылка", "$HOME/projects/hk/hooks")):
+    man = json.load(open(os.path.join(snap, "manifest.json")))
+    for name, repo, want in cases:
         rc, ran, err = hook(repo.replace("$HOME", tmp))
-        check(f"класс 2: in_repo.py — {name}: хук не исполнен, выход 2", rc == 2 and not ran, (rc, ran, err))
+        check(f"класс 2: хук — {name}: в снимок не взят, не исполнен, выход {want}",
+              rc == want and not ran and repo.replace("$HOME", tmp) not in man["repos"], (rc, ran, err, man["repos"]))
     rc, ran, err = hook(os.path.join(proj, "real"))
-    check("класс 2: самопроверка — in_repo.py в обычной папке исполняет хук", rc == 0 and ran, (rc, ran, err))
+    check("класс 2: самопроверка — хук обычной папки из снимка исполнен", rc == 0 and ran, (rc, ran, err))
+    rc, ran, err = hook(os.path.join(proj, "real"), IN_REPO)
+    check("класс 2/F: in_repo.py не из снимка (packs/_bin) — скрипт репозитория не исполнен, выход 2",
+          rc == 2 and not ran and "не из снимка" in err, (rc, ran, err))
     # имя не .env*: песочница планового прохода закрывает запись файлов .env* (outside 2a8c58, EPERM) — env_from.py
     # имя файла не важно, проверяется путь
     put(os.path.join(foreign, "dotenv.local"), "TOKEN=FOREIGN\n")
@@ -428,7 +491,8 @@ def class2_pack_hooks(tmp):
         home = os.path.join(tmp, "packhooks-" + link_at.replace("/", "-"))
         app, gpu, foreign = morph(home, link_at)
         before = tree(foreign)
-        res = run_pack_hooks(home, app, gpu, root)
+        res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph", os.path.join(PACKS, "_bin"), (), root,
+                                                                  home), "plugin"))
         check(f"класс 2: хуки пакета (ссылка {link_at}) — запущены на правках и git commit", len(res) >= 8, res)
         check(f"класс 2: хуки пакета (ссылка {link_at} → чужая папка) — чужая папка не изменена, файлы не созданы",
               tree(foreign) == before, sorted(set(tree(foreign).items()) ^ set(before.items()))[:5])
@@ -449,7 +513,8 @@ def class2_pack_hooks(tmp):
             c = re.sub(r'python3 -I "\$\{CLAUDE_PLUGIN_ROOT\}/../_bin/repo_hooks.py" reexport',
                        "bash .claude/hooks/check-reexport.sh", c)
             h["command"] = re.sub(r" --plain=\S+", "", c)
-    res = run_pack_hooks(home, app, gpu, root, old)
+    res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph-old", os.path.join(PACKS, "_bin"),
+                                                              [(app, "check-reexport.sh")], root, home), "plugin"), old)
     check("класс 2: самопроверка — прежний check-reexport.sh по ссылке app/app пишет в чужую папку (проба C1/C2)",
           tree(foreign) != before, res)
     check("класс 2: самопроверка — прежний pre-commit без --plain читает чужое по ссылке src/shared и app/lnk.py",
@@ -457,7 +522,8 @@ def class2_pack_hooks(tmp):
     # без ссылок замена делает то же, что check-reexport.sh: новый re-export создан, устаревший обновлён
     home = os.path.join(tmp, "packhooks-plain")
     app, gpu, foreign = morph(home, None)
-    res = run_pack_hooks(home, app, gpu, root)
+    res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph-plain", os.path.join(PACKS, "_bin"), (), root,
+                                                              home), "plugin"))
     got = {f: open(os.path.join(app, "app/api", f, "route.ts")).read() if os.path.isfile(
         os.path.join(app, "app/api", f, "route.ts")) else None for f in ("x", "new")}
     check("класс 2: без ссылок repo_hooks.py reexport создаёт и обновляет re-export, как check-reexport.sh",
@@ -537,6 +603,159 @@ def mutant_bin(tmp, name, subs):
             fh.write(text)
     return d
 
+
+
+# мутант in_repo.py: скрипт `.claude/hooks/<имя>` — из репозитория по пути (как до круга F), а не из снимка
+SCRIPT_FROM_REPO = (
+    '        if not isinstance(rel, str):\n'
+    '            raise FileNotFoundError(f"{arg}: нет в снимке окна (снимок берётся при запуске окна)")\n'
+    '        return open_snap(man, rel)\n',
+    '        return os.open(os.path.join(repo, arg), os.O_RDONLY)\n')
+NO_HASH = ("if hashlib.sha256(_read_fd(fd, MANIFEST_LIMIT)).hexdigest() != want:", "if False:")
+SWAP_NP = r"""
+import ctypes, os, sys
+d, a, b, stop = sys.argv[1:5]
+os.chdir(d)
+rx = ctypes.CDLL(None).renamex_np
+n = 0
+while not os.path.exists(stop):
+    if rx(a.encode(), b.encode(), 2) == 0:  # RENAME_SWAP: a и b меняются местами одним вызовом
+        n += 1
+if n % 2:
+    rx(a.encode(), b.encode(), 2)
+print(n)
+"""
+
+
+def swap_np(d, a, b, stop):
+    """Фоновый обмен d/a ↔ d/b (renamex_np, RENAME_SWAP) — как отвязанный ребёнок прошлой сессии окна."""
+    if os.path.exists(stop):
+        os.unlink(stop)
+    return subprocess.Popen([sys.executable, "-I", "-c", SWAP_NP, d, a, b, stop], stdout=subprocess.PIPE, text=True)
+
+
+def swap_stop(procs, stop):
+    put(stop, "")
+    return [int(p.communicate(timeout=30)[0].strip() or 0) for p in procs]
+
+
+def class_f_dirs(tmp):
+    """Проба E2 r7: окно меняет app ↔ ссылку на чужую папку (renamex_np) в любой миг — nested_projects и window_dirs
+    не возвращают ни одной чужой папки для --add-dir; мутант «realpath после проверки» (как до круга F) — возвращает."""
+    if sys.platform != "darwin":
+        print("     пропущено: нужен macOS (renamex_np) — круг F, проба E2 r7")
+        return
+    ms, foreign = os.path.join(tmp, "projects", "MF"), os.path.join(tmp, "fF")
+    put(os.path.join(ms, "app", "CLAUDE.md"), "own\n")
+    put(os.path.join(foreign, "CLAUDE.md"), "foreign\n")
+    os.symlink(foreign, os.path.join(ms, "lnk"))
+    src = inspect.getsource(P.nested_projects)
+    old = "out.append(os.path.join(top, n))"
+    assert old in src
+    ns = dict(P.__dict__)
+    exec(src.replace(old, "out.append(os.path.realpath(os.path.join(top, n)))"), ns)
+    mutant = ns["nested_projects"]
+    stop, n, far = os.path.join(tmp, "f-dirs.stop"), 3000, os.path.realpath(foreign)
+
+    def bad(out):  # папка --add-dir — только строка внутри ms (её имя окна), не чужая папка, куда вела ссылка
+        return [d for d in out if not d.startswith(ms + "/") or d == far or os.path.dirname(d) != ms]
+
+    sw = swap_np(ms, "app", "lnk", stop)
+    try:
+        got = [P.nested_projects(ms) for _ in range(n)] + [P.window_dirs([ms])[1] for _ in range(n // 6)]
+        mut = [mutant(ms) for _ in range(n)]
+    finally:
+        swaps = swap_stop([sw], stop)
+    hit = [o for o in got if bad(o)]
+    check(f"круг F: проба E2 r7 — app ↔ ссылка (renamex_np) фоном, {len(got)} вызовов nested_projects и window_dirs: "
+          "ни одной чужой папки для --add-dir", not hit, hit[:3])
+    check("круг F: самопроверка — обмен шёл, своя папка находилась", swaps[0] > n and any(got), (swaps, sum(map(bool, got))))
+    check("круг F: самопроверка — мутант «realpath после проверки» отдаёт чужую папку",
+          any(bad(o) for o in mut), sum(bool(bad(o)) for o in mut))
+
+
+def class_f_hooks(tmp):
+    """Проба E1 Б1 и её фоновый вариант: окно кладёт свой .claude_new/hooks и переименовывает app/.claude (два mv),
+    а затем без остановки меняет местами app/.claude ↔ чужую .claude и app ↔ чужой репозиторий. Хук идёт из снимка:
+    чужой скрипт не исполнен ни разу, файлы снимка не изменились (sha256 манифеста) и не пишутся; снимок с
+    испорченным файлом не исполняется; правка скрипта окном попадает только в следующий снимок (следующий запуск).
+    Мутанты «скрипт из репозитория по пути» и «без сверки хеша» исполняют чужое."""
+    home = os.path.join(tmp, "fhome")
+    app = os.path.join(home, "projects", "MorphStream", "app")
+    log = os.path.join(tmp, "f-hooks.log")
+    own_sh = 'echo OWN >> "$F_LOG"\n'
+    put(os.path.join(app, ".claude", "hooks", "protect-db.sh"), own_sh)
+    env = {"PATH": os.environ["PATH"], "HOME": home, "F_LOG": log}
+    pairs = [(app, "protect-db.sh")]
+    good = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
+    m_repo = snap_of(tmp, "f-repo", mutant_bin(tmp, "f-repo", {"in_repo.py": [SCRIPT_FROM_REPO]}), pairs)
+    m_hash = snap_of(tmp, "f-hash", mutant_bin(tmp, "f-hash", {"in_repo.py": [NO_HASH]}), pairs)
+    man = json.load(open(os.path.join(good, "manifest.json")))
+    digest = lambda s: {r: hashlib.sha256(open(os.path.join(s, r), "rb").read()).hexdigest()  # noqa: E731
+                        for r in json.load(open(os.path.join(s, "manifest.json")))["files"]}
+    before = digest(good)
+
+    def hook(snap):
+        if os.path.exists(log):
+            os.unlink(log)
+        r = subprocess.run([sys.executable, "-I", os.path.join(snap, "_bin", "in_repo.py"), app, "--always", "--",
+                            "bash", ".claude/hooks/protect-db.sh"], input="{}", env=env, cwd=home,
+                           capture_output=True, text=True, timeout=30)
+        words = open(log).read().split() if os.path.exists(log) else []
+        return words.count("FOREIGN"), words.count("OWN"), r.returncode, r.stderr
+
+    # E1 Б1 статично: два mv после снятия снимка
+    put(os.path.join(app, ".claude_new", "hooks", "protect-db.sh"), 'echo FOREIGN >> "$F_LOG"\n')
+    os.rename(os.path.join(app, ".claude"), os.path.join(app, ".claude_old"))
+    os.rename(os.path.join(app, ".claude_new"), os.path.join(app, ".claude"))
+    got = hook(good)
+    check("круг F: проба E1 Б1 (mv .claude .claude_old; mv .claude_new .claude) — исполнен свой скрипт из снимка",
+          got[:3] == (0, 1, 0), got)
+    got = hook(m_repo)
+    check("круг F: самопроверка — мутант «скрипт из репозитория по пути» после двух mv исполняет чужой", got[0] == 1, got)
+    # фоном: app/.claude ↔ чужая .claude и app ↔ чужой репозиторий
+    if sys.platform == "darwin":
+        put(os.path.join(home, "projects", "MorphStream", "evil", ".claude", "hooks", "protect-db.sh"),
+            'echo FOREIGN >> "$F_LOG"\n')
+        stop, n = os.path.join(tmp, "f-hooks.stop"), 150
+        res = {"снимок": [0, 0, 0], "мутант": [0, 0, 0]}
+        sws = [swap_np(app, ".claude", ".claude_old", stop)]
+        sws.append(swap_np(os.path.dirname(app), "app", "evil", stop))
+        try:
+            for _ in range(n):
+                for label, s in (("снимок", good), ("мутант", m_repo)):
+                    f, o, rc, _ = hook(s)
+                    res[label] = [res[label][0] + f, res[label][1] + o, res[label][2] + (rc == 2)]
+        finally:
+            swaps = swap_stop(sws, stop)
+        check(f"круг F: фоновая подмена app/.claude и app, {n} запусков хука из снимка — 0 чужих исполнений",
+              res["снимок"][0] == 0 and res["снимок"][1] > 0, (res, swaps))
+        check("круг F: самопроверка — подмена шла, мутант «скрипт по пути» под ней исполняет чужой",
+              min(swaps) > n and res["мутант"][0] > 0, (res, swaps))
+    else:
+        print("     пропущено: нужен macOS (renamex_np) — круг F, фоновая подмена")
+    after = digest(good)
+    modes = {r: os.stat(os.path.join(good, r)).st_mode & 0o222 for r in man["files"]}
+    check("круг F: файлы снимка не изменились (sha256 = манифест) и без права записи",
+          after == before == man["files"] and not any(modes.values()), (after == before, modes))
+    # испорченный файл снимка (окно его не пишет — это модель сбоя): без исполнения, выход 2; мутант без хеша — исполнит
+    for label, s in (("снимок", good), ("мутант", m_hash)):
+        f = os.path.join(s, json.load(open(os.path.join(s, "manifest.json")))["repos"][app]["protect-db.sh"])
+        os.chmod(f, 0o644)
+        put(f, 'echo FOREIGN >> "$F_LOG"\n')
+        got = hook(s)
+        if label == "снимок":
+            check("круг F: файл снимка не совпал с манифестом — не исполнен, выход 2", got[0] == 0 and got[2] == 2, got)
+        else:
+            check("круг F: самопроверка — мутант «без сверки хеша» исполняет испорченный файл снимка", got[0] == 1, got)
+    # снимок обновляется только следующим запуском: правка скрипта окном — новый снимок, старый цел
+    os.rename(os.path.join(app, ".claude_old"), os.path.join(app, ".claude_x"))
+    put(os.path.join(app, ".claude", "hooks", "protect-db.sh"), 'echo NEW >> "$F_LOG"\n')
+    fresh = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
+    again = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
+    check("круг F: правка скрипта окном — новый снимок у следующего запуска (старый на месте: его держит идущая "
+          "сессия), тот же снимок при тех же файлах", fresh == again != good and os.path.isdir(good)
+          and hook(fresh)[:3] == (0, 0, 0) and open(log).read().split() == ["NEW"], (fresh, good))
 
 
 # --- класс 2: гонка «проверка пути строкой → действие по строке» (ревью argus D2, metis-0933 круг E) ---
@@ -620,12 +839,13 @@ def class2_race(tmp):
     app, foreign = race_repo(home)
     log = os.path.join(tmp, "race.log")
     env = {"PATH": os.environ["PATH"], "HOME": home, "RACE_LOG": log}
-    bin_dir = os.path.join(PACKS, "_bin")
-    m_in = mutant_bin(tmp, "in-path", {"in_repo.py": [('cmd[i] = f"/dev/fd/{sfd}"', "cmd[i] = a"),
-                                                      ("os.fchdir(root)", "pass"),
-                                                      ("env=env, input=raw", "env=env, cwd=repo, input=raw")]})
-    m_rh = mutant_bin(tmp, "rh-path", {"repo_hooks.py": [(
-        "fd = os.dup(root)", 'fd = os.open(os.path.realpath(os.environ["CLAUDE_PROJECT_DIR"]), os.O_RDONLY)')]})
+    snap = lambda label, b: os.path.join(snap_of(tmp, label, b, [(app, "x.sh")]), "_bin")  # noqa: E731
+    bin_dir = snap("race", os.path.join(PACKS, "_bin"))
+    m_in = snap("race-in", mutant_bin(tmp, "in-path", {"in_repo.py": [
+        ('cmd[i] = f"/dev/fd/{sfd}"', "cmd[i] = a"), ("os.fchdir(root)", "pass"),
+        ("env=env, input=raw", "env=env, cwd=repo, input=raw"), SCRIPT_FROM_REPO]}))
+    m_rh = snap("race-rh", mutant_bin(tmp, "rh-path", {"repo_hooks.py": [(
+        "fd = os.dup(root)", 'fd = os.open(os.path.realpath(os.environ["CLAUDE_PROJECT_DIR"]), os.O_RDONLY)')]}))
     clean = tree(foreign)
     for label, b in (("fd", bin_dir), ("in_repo", m_in), ("repo_hooks", m_rh)):
         got = {}
@@ -691,7 +911,8 @@ def class2_plain_after(tmp):
     m = mutant_bin(tmp, "plain-after", {"in_repo.py": [(
         "    if plain:\n        bad = [x for rel in plain for x in links_under(root, rel)]\n",
         "    if plain:\n        bad = []\n")]})
-    for label, b in (("fd", os.path.join(PACKS, "_bin")), ("мутант", m)):
+    snap = lambda label, b: os.path.join(snap_of(tmp, label, b, [(app, "pc.sh")]), "_bin")  # noqa: E731
+    for label, b in (("fd", snap("plain", os.path.join(PACKS, "_bin"))), ("мутант", snap("plain-m", m))):
         if os.path.lexists(os.path.join(app, "src/lnk")):
             os.unlink(os.path.join(app, "src/lnk"))
         r = subprocess.run([sys.executable, "-I", os.path.join(b, "in_repo.py"), app, "--always", "--plain=src", "--",
@@ -810,6 +1031,7 @@ def class4(P, tmp, env):
 
 
 def main():
+    global P
     tmp = os.path.join(ROOT, "h")
     os.makedirs(tmp)
     env = env_for(tmp)
@@ -827,6 +1049,8 @@ def main():
     class2_pack_hooks(os.path.join(ROOT, "h2"))
     class2_race(os.path.join(ROOT, "h2"))
     class2_plain_after(os.path.join(ROOT, "h2"))
+    class_f_dirs(os.path.join(ROOT, "h2"))
+    class_f_hooks(os.path.join(ROOT, "h2"))
     class3_links(P, tmp)
     tmp3 = os.path.join(ROOT, "h3")
     os.makedirs(tmp3)
