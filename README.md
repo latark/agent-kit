@@ -188,17 +188,7 @@
   allow = ["mcp__shadcn__*"]          # permissions.allow окна
   deny = ["Bash(git push --force*)"]  # permissions.deny окна
   plugins = ["vercel@claude-plugins-official"]  # enabledPlugins: true, плагин должен быть установлен
-
-  [[window_extra.athena-shop.hooks]]  # защитный хук проекта: окно его из .claude/settings.json больше не берёт
-  event = "PreToolUse"                # PreToolUse, PostToolUse, Stop, SessionStart и другие события Claude Code
-  matcher = "Edit|Write"              # по желанию
-  command = "~/projects/br/.claude/hooks/guard.py"  # только исполняемый файл внутри папок этого окна, без аргументов
-  timeout = 10                        # по желанию, а также onFailure = "block" | "continue" и statusMessage
   ```
-
-  Хук берётся только из policy.toml, не из настроек проекта. Команда — настоящий путь к исполняемому файлу внутри
-  папок окна: строка оболочки (`python3 …`), ссылка наружу, файл чужого направления, неизвестное событие или ключ не
-  вливаются, о них та же тревога.
 
   Проверка проектных allow ниже (metis-0137) осталась для сессий, поднятых до этих флагов: раньше
   `.claude/settings.json` проекта сливался с `--settings` окна, а правило allow срабатывает раньше классификатора auto. Поэтому `Bash(gh *)` в `.claude/settings.json` или `settings.local.json`
