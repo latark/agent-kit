@@ -652,7 +652,7 @@ def workshop_task(ev):
     if title.startswith("daedalus-"):
         return safe_name(title[len("daedalus-"):])
     pdir = project_dir(ev)
-    root = os.path.join(HOME, "projects", "workshop")
+    root = workshop_root(HOME)   # по факту: ~/ai/workshop или до переноса старая в ~/projects (metis-0899)
     if pdir and inside(pdir, root) and _key(pdir) != _key(root):
         return safe_name(os.path.relpath(os.path.realpath(pdir), os.path.realpath(root)).split(os.sep)[0])
     return safe_name(title) or None
@@ -1029,6 +1029,14 @@ def cmd_owner_log(ev):
 # --- ответ в чате (metis-0405, решение владельца 01.11) ---------------------------------------------------------
 
 CHAT_WALK = 400  # шагов по цепочке parentUuid назад от вашего ввода до сообщения ассистента
+
+
+def workshop_root(home):
+    """Папка мастерской по факту — копия pantheon.workshop_root (metis-0899): новая ~/ai/workshop, если есть и не
+    ссылка, иначе старая workshop в ~/projects. Копия, а не загрузка: ctx.py — ядро защит, moved.py вне ядра
+    (test_core_deps); совпадение трёх копий держит test_workshop_sockets."""
+    new = os.path.join(home, "ai", "workshop")
+    return new if os.path.isdir(new) and not os.path.islink(new) else os.path.join(home, "projects", "workshop")
 
 
 def answers_mod():
