@@ -16,6 +16,7 @@ import sys
 # Срок самого guard (DEADLINE) это не меняет и им не проверяется.
 SUB_TIMEOUT = 60
 import tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from _par import run_cases  # noqa: E402  (metis-0544)
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
 import atexit as _atexit
@@ -2305,18 +2306,17 @@ def main():
         ("dev-server: координатор в worktree — можно [sb-simplify]", "allow", br, "domain-coordinator", False, B("pnpm dev"),
          br + "/.claude/worktrees/agent-1"),
     ]
-    failed = 0
-    for case in cases:
+    oks = []  # таблица — по 25 случаев в своём fork (metis-0544, _par.py): HOME случаи не меняют, кроме журнала сбоев
+    def one(case):
         name, want, pdir, role, sub, (tool, ti) = case[:6]
         if sys.platform != "darwin" and name in MAC_CASEFOLD:  # guard сравнивает пути без регистра только на macOS (IS_MAC)
-            print(f"пропущено: {name} — нужен macOS (регистронезависимая ФС)")
-            continue
-        cwd = case[6] if len(case) > 6 else None
-        penv = case[7] if len(case) > 7 else None  # env окна: PANTHEON_ROLE (guard 0.5.5)
+            return print(f"пропущено: {name} — нужен macOS (регистронезависимая ФС)")
+        cwd, penv = (*case[6:8], None, None)[:2]  # папка запуска и env окна: PANTHEON_ROLE (guard 0.5.5)
         got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv)
-        mark = "ok  " if got == want else "FAIL"
-        failed += got != want
-        print(f"{mark} {name}: {got}")
+        oks.append(got == want)
+        print(f"{'ok  ' if got == want else 'FAIL'} {name}: {got}")
+    run_cases([(f"случаи {i + 1}-{i + 25}", lambda i=i: [one(c) for c in cases[i:i + 25]]) for i in range(0, len(cases), 25)], oks, lambda name, err: oks.append(False))
+    failed = oks.count(False)
     # tg-role (metis-0267): отказ называет путь — заявку pantheon read
     out = run(home, lw, "domain-coordinator", "Bash", {"command": "~/projects/other/tg-read/" + TGR + " history 1"},
               raw=True, penv=TL)

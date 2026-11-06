@@ -233,6 +233,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-0523); «вернуть» снимает и «остановлено вами»
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
+  pantheon consent bind <id> --log-at <ЧЧ:ММ[:СС] | ГГГГ-ММ-ДД ЧЧ:ММ[:СС]>   только окно Зевса: привязать к <id>
+                                        ваше прямое слово без вопроса с [id] — одну строку owner-log/zeus.md без
+                                        пометки (своего текста команда не берёт); consent <id> покажет её дословно,
+                                        метку Гестии и согласие браузера она не даёт (metis-0843)
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
@@ -1380,6 +1384,11 @@ def tick():
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
                 alert_once("autoclose-tick", type(e).__name__, f"автозакрытие задач: проход упал ({type(e).__name__}: {e})",
                            "pantheon-tick")
+            try:
+                release_tick_mod().tick(t)  # выпуск без Actions: release.py --push из копии main (metis-0880)
+            except Exception as e:  # сбой выпуска не должен останавливать тик
+                alert_once("release-tick-crash", type(e).__name__, f"выпуск без Actions: проход упал "
+                           f"({type(e).__name__}: {e})", "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -2722,15 +2731,20 @@ def agents_window(data, allowed, deny, script):
     return data
 
 
-def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None):
+def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
+                  own_agents=False):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
-    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже
+    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже.
+    # own_agents (metis-0841, «да» владельца 05.11 16:09): окно направления правит роли своего проекта — в папках
+    # folders песочница .claude/agents не закрывает, их текст судит guard protect-config (ключи tools, hooks и т. п.)
     # папка демона хуков (HOOKD_DIR, metis-0845) — каждому окну: allowWrite выше неё (sandbox_write ~/.cache) её не
     # откроет, запрет сильнее разрешения (проверка F7 — hookd-check.py windows)
+    agents = ("/.claude/agents", "/**/.claude/agents")
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
-        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks", "/.claude/agents", "/**/.claude/agents")]
+        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + (
+        () if own_agents and r in folders else agents)]
     deny_write += _deny_forms([HOOKD_HOME])
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
@@ -3112,7 +3126,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         ok = [r for r in real if r]
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
-                             guard, auto_allow)
+                             guard, auto_allow, own_agents=direction)
         if direction:
             data["sandbox"]["excludedCommands"] += GH_PR_WRITE
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
@@ -5824,6 +5838,21 @@ def handoff_mod():
     return _HANDOFF
 
 
+_RELEASE_TICK = None
+
+
+def release_tick_mod():
+    """lib/release_tick.py — выпуск без Actions: release.py --push из копии на origin/main (metis-0880)."""
+    global _RELEASE_TICK
+    if _RELEASE_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_release_tick", os.path.join(LIB, "release_tick.py"))
+        _RELEASE_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_RELEASE_TICK)
+        _RELEASE_TICK.set_core(sys.modules[__name__])
+    return _RELEASE_TICK
+
+
 _BROWSER = None
 
 
@@ -7646,6 +7675,24 @@ def main(argv):
             # отправителя называет он сам (--from, PANTHEON_ROLE — переменные вызова): заголовок не утверждает, кто
             # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
             notify_critical(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})")
+        return 0
+    if cmd == "notify" and rest:  # metis-0907: уведомление macOS сразу (хук wait-owner); щелчок — доска или --target
+        opts = {"--title": "Пантеон", "--group": None, "--target": None}
+        words = []
+        it = iter(rest)
+        for a in it:
+            if a in opts:
+                v = next(it, None)
+                if v is None:
+                    print(f"pantheon notify: после {a} нужно значение", file=sys.stderr)
+                    return 2
+                opts[a] = v
+            else:
+                words.append(a)
+        if not " ".join(words).strip():
+            print("pantheon notify: пустой текст", file=sys.stderr)
+            return 2
+        notify(" ".join(words)[:300], title=opts["--title"], target=opts["--target"], group=opts["--group"])
         return 0
     if cmd == "archive":
         return archive()

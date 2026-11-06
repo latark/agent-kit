@@ -123,6 +123,83 @@ check("«да», когда словом «да» начинаются два в
 check("номер — только при номерах вариантов: «2» → второй, буква при номерах → не выбор",
       A.pick("2", "x-1", YES_NO) == 1 and A.pick("б", "x-1", YES_NO) is None)
 
+
+# metis-0843: цитата варианта с подтверждением — выбор (случаи 05.11 16:04, 16:11, 16:16), и то же в английской раскладке
+EN = str.maketrans("йцукенгшщзхъфывапролджэячсмитьбюё\"", "qwertyuiop[]asdfghjkl;'zxcvbnm,.`@")
+Q43 = [("А", "да, все три части (совет)."), ("Б", "нет, только ч.1"), ("В", "отложить")]
+N43 = [("1", "Да — убери правило «ни прокси»"), ("2", "Нет — оставляем")]
+QUOTED = (('"А — да, все три части (совет)." - да', Q43), ("1. Да — … «ни прокси» да", N43),
+          ('"А — …" - этот вариант', Q43), ('"А — …" - ' + "этот вариант".translate(EN), Q43),
+          ('"А — …" - этот вариант'.translate(EN), Q43), ("«А — да, все три части» — да", Q43),
+          ("А — да, все три части (совет).", Q43), ("1. Да — убери правило", N43),
+          ("А — … три части (совет). да", Q43), ("А — да, все три части - ок", Q43))
+for reply, opts in QUOTED:
+    got = A.pick(reply, "metis-0843", opts)
+    check(f"цитата варианта «{reply}» → вариант {opts[0][0]}", got == 0, got)
+for reply, opts in (('"А — …" - нет', Q43), ('"А — …" - но не сейчас', Q43), ('"А — …" - только ч.1', Q43),
+                    ("1. Да — … не убирай", N43), ('"Б — да, все три" - да', Q43), ('"А — …" - ' + "нет".translate(EN), Q43),
+                    ('"А — …" - да или нет', Q43), ('"А — …" - да, но потом', Q43), ('"А — …" - да, если успеешь', Q43), ('"А — …" - да, но завтра и не всё', Q43), ('"А — …" - да?', Q43),
+                    ("А — отложить", Q43), ("А — …", [("1", "Да"), ("2", "Нет")]),
+                    ('"А — да, все" - этот вариант и Б', Q43), ("1. Нет — … убери да", N43),
+                    ("1. Да — … убери да", N43), ("А — … все три да", Q43)):
+    got = A.pick(reply, "metis-0843", opts)
+    check(f"цитата варианта «{reply}» → не выбор", got is None, got)
+# argus PR #344, Б: хвост после цитаты — только подтверждение и слова этого варианта; слово-условие («завтра»,
+# «частично», «отложи») — не выбор, хотя рядом «да» или «ок». Так же в английской раскладке.
+PUSH = [("А", "Да, пушить сейчас"), ("Б", "Нет")]
+for reply, opts in (("А — давай завтра", PUSH), ("А — ок, завтра", PUSH), ("А — ок через неделю", PUSH),
+                    ("А — да, отложи", PUSH), ("А — ок после ревью", PUSH), ('"А — …" - да, завтра', PUSH),
+                    ('"А — …" да, частично', PUSH), ("А — да, сейчас завтра", PUSH), ("А — … да, все", PUSH),
+                    ("f - lfdfq pfdnhf", PUSH), ("f - jr pfdnhf", PUSH), ("f - lf? jnkj;b", PUSH),
+                    ("f - lf, jnkj;b", PUSH), ("1. Да — … убери да", [("1", "Да — снимаем правило"), ("2", "Нет")]),
+                    ('"1. Да — убрать правило «ни прокси»" - убери да', [("1", "Да — убрать правило «ни прокси»"),
+                                                                         ("2", "Нет — оставить")])):
+    got = A.pick(reply, "metis-0843", opts)
+    check(f"цитата варианта с условием «{reply}» → не выбор", got is None, got)
+for reply in ("А — да", "А — да, пушить", "А — Да, пушить сейчас - ок", "А — … сейчас да", "f - lf"):
+    got = A.pick(reply, "metis-0843", PUSH)
+    check(f"цитата варианта «{reply}» на «А — Да, пушить сейчас» → вариант А", got == 0, got)
+# argus PR #344, круг 2: слова варианта в хвосте — только подряд с его начала или после «…» до его конца; слова из
+# середины и не по порядку — другой смысл, не выбор
+FIX = [("А", "Да, пушить ветку fix, ветку exp не трогать"), ("Б", "Да, пушить ветку exp, ветку fix не трогать")]
+for reply, opts in (("А — пушить ветку exp", FIX), ("А — … ветку exp", FIX), ("А — … ветку exp да", FIX),
+                    ("А — да, пушить ветку exp", FIX), ("А — … exp ветку не трогать", FIX), ("А — да, сейчас", PUSH),
+                    ("А — … пушить да", PUSH), ("А — ок, завтра", PUSH)):
+    got = A.pick(reply, "metis-0843", opts)
+    check(f"слова варианта не подряд с начала или конца «{reply}» → не выбор", got is None, got)
+for reply in ("А — да, пушить ветку fix", "А — … ветку exp не трогать", "А — … ветку exp не трогать - да"):
+    got = A.pick(reply, "metis-0843", FIX)
+    check(f"цитата начала или конца варианта «{reply}» → вариант А", got == 0, got)
+# metis-0888: ответы владельца 06.11 — цитата одного варианта (кавычки, пробелы в начале, «…» внутри, «(совет)», тире)
+# и «да»/«давай» → запись «ответ в чате» с текстом этого варианта; отрицание и два варианта — не распознан
+check("metis-0888: «да» и «давай» — слова согласия", {"да", "давай"} <= A.YES)
+O888 = (('"А — Да, завести Плутоса … (совет)" - давай', "Да, завести Плутоса с чтением финансовой части сведений о вас (совет)"),
+        ('"А — Да, сузить (совет)" - да', "Да, сузить (совет)"),
+        ('"А — Да, с агентом …" - да', "Да, с агентом в окне финансов"),
+        ('"  А — Да, открыть Харону…" - давай', "Да, открыть Харону доступ к серверу (совет)"))
+for reply, text in O888:
+    rec = A.chat_record(f"[metis-0888] Решаем?\nА — {text}\nБ — Нет, оставить как есть", reply)
+    check(f"metis-0888: «{reply}» → «ответ в чате» с текстом варианта А",
+          len(rec) == 1 and rec[0][0] == "ответ в чате" and f"\nответ: А — {text}\nвариант: А\n" in rec[0][1], rec)
+for reply, text in [(r.replace("- давай", "- нет").replace("- да", "- нет"), t) for r, t in O888] \
+        + [(r.replace("- давай", "- не надо").replace("- да", "- не надо"), t) for r, t in O888] \
+        + [('"А — Да, сузить (совет)" и "Б — Нет, оставить как есть" - да', "Да, сузить (совет)"),
+           ('"А — Да, сузить (совет)", "Б — Нет, оставить" - да', "Да, сузить (совет)")]:
+    rec = A.chat_record(f"[metis-0888] Решаем?\nА — {text}\nБ — Нет, оставить как есть", reply)
+    check(f"metis-0888: «{reply}» → «ответ в чате не распознан»",
+          len(rec) == 1 and rec[0][0] == "ответ в чате не распознан", rec)
+check("цитата варианта: «…» без текста варианта до неё — выбор этой метки", A.pick("А — …", "x-1", Q43) == 0)
+check("английская раскладка: «f» → А, «lf» → «да» на единственный «Да — …», латинские метки A/B — как были",
+      A.pick("f", "x-1", Q43) == 0 and A.pick("lf", "x-1", N43) == 0
+      and A.pick("b", "x-1", [("A", "раз"), ("B", "два")]) == 1, (A.pick("f", "x-1", Q43), A.pick("lf", "x-1", N43)))
+check("английская раскладка: встречный вопрос («?», «&» — это «?») — не выбор",
+      A.pick("f?", "x-1", Q43) is None and A.pick("f&", "x-1", Q43) is None)
+rec = A.chat_record("[metis-0843] Чиним согласие?\nА — да, все три части (совет).\nБ — нет, только ч.1",
+                    '"А — да, все три части (совет)." - да')
+check("цитата варианта → запись «ответ в чате»: ответ — буква и текст варианта, дословно ваш текст",
+      rec == [("ответ в чате", "вопрос: [metis-0843] Чиним согласие?\nответ: А — да, все три части (совет).\nвариант: А\n"
+                               'дословно: "А — да, все три части (совет)." - да')], rec)
+
 rec = A.chat_record(Q, "давай вариант а")
 check("запись «ответ в чате»: вопрос с [id], ответ — буква и текст варианта, вариант, дословно ваш текст",
       rec == [("ответ в чате", "вопрос: [metis-0384] Как засчитывать ответ владельца?\n"
@@ -466,6 +543,13 @@ LETTERS = (  # id, варианты, ваш ответ, метка Гестии
     ("metis-0736", "А — Да, сейчас\nБ — Да, завтра", "да", False),
     ("metis-0737", "А — Да, сейчас\nБ — Да, завтра", "б", True),
     ("metis-0738", "(а) Да, пушить\n(б) Нет", "давай вариант а", True),
+    # argus PR #344, Б: цитата с условием — не «да», метки push нет
+    ("metis-0760", "А — Да, пушить сейчас\nБ — Нет", "А — давай завтра", False),
+    ("metis-0761", "А — Да, пушить сейчас\nБ — Нет", "А — ок, завтра", False),
+    ("metis-0762", "А — Да, пушить сейчас\nБ — Нет", "f - lfdfq pfdnhf", False),
+    ("metis-0763", "А — Да, пушить сейчас\nБ — Нет", "А — да, пушить", True),
+    ("metis-0764", "А — Да, пушить ветку fix, ветку exp не трогать\nБ — Да, пушить ветку exp, ветку fix не трогать",
+     "А — пушить ветку exp", False),
 )
 for qid, opts, reply, want in LETTERS:
     fresh()
@@ -484,6 +568,130 @@ open(os.path.join(LOG, "zeus.md"), "w").write(
 cr = consent("metis-0739", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0739")
 check("consent в окне Гестии: выбор «А — Да, пушить» в окне вопросов → метка, как и ответ в чате",
       cr.returncode == 0 and os.path.isfile(os.path.join(state, "hestia-consent", "metis-0739")), cr.stdout + cr.stderr)
+
+# metis-0843 ч.1: цитата варианта в чате → «ответ в чате» в owner-log, и consent выдаёт выбор
+Q843 = "[metis-0843] Чиним согласие владельца?\nА — да, все три части (совет).\nБ — нет, только ч.1\nВ — отложить"
+for i, reply in enumerate(('"А — да, все три части (совет)." - да', '"А — …" - этот вариант',
+                           '"А — …" - ' + "этот вариант".translate(EN), "А — … (совет). да")):
+    log, r = case(f"q843-{i}", lambda tr: tr.say("Готово.", Q843).end_turn(), reply)
+    cr = consent("metis-0843")
+    check(f"хук и consent: цитата варианта «{reply}» → «ответ в чате», consent выдаёт «ответ: А — да, все три части»",
+          "· ответ в чате\nвопрос: [metis-0843] Чиним согласие владельца?\nответ: А — да, все три части (совет).\n"
+          "вариант: А\n" in log and cr.returncode == 0 and "ответ: А — да, все три части (совет)." in cr.stdout
+          and "ответ в чате у Зевса" in cr.stdout, log + cr.stdout + cr.stderr)
+log, r = case("q843-num", lambda tr: tr.say("[metis-0840] Убираем правило «ни прокси»?\n1. Да — убери правило\n"
+                                            "2. Нет — оставляем").end_turn(), "1. Да — … правило да")
+cr = consent("metis-0840")
+check("хук и consent: «1. Да — … правило да» на варианты номерами → «ответ в чате», consent выдаёт «ответ: Да — убери»",
+      "· ответ в чате\n" in log and cr.returncode == 0 and "ответ: Да — убери правило" in cr.stdout, log + cr.stdout)
+log, r = case("q843-no", lambda tr: tr.say(Q843).end_turn(), '"А — …" - но не сейчас')
+check("хук: цитата варианта с условием → «ответ в чате не распознан», consent — код 1",
+      "· ответ в чате не распознан\n" in log and "· ответ в чате\n" not in log and consent("metis-0843").returncode == 1,
+      log)
+
+# metis-0843 ч.2: `pantheon consent bind <id> --log-at <время>` — прямое слово владельца в окне Зевса без вопроса с [id]
+BIND = os.path.join(state, "consent-bind.jsonl")
+
+
+def bind(*args, **env):
+    return subprocess.run([PY311, "-I", RUN_PY, "consent", "bind", *args], env=dict(BASE, **env), capture_output=True,
+                          text=True, timeout=60)
+
+
+def ago(sec):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - sec))
+
+
+fresh()
+if os.path.exists(BIND):
+    os.remove(BIND)
+tr = Tr("bind")
+tr.say("Правило «ни прокси» мешает.").end_turn()
+tr.owner("убери это правило", "p-bind")
+hook(tr, "убери это правило", "p-bind")
+heads = [ln[3:].split(" · ")[0] for ln in zeus().splitlines() if ln.startswith("## ")]
+at = heads[0] if heads else "нет"
+check("bind: хук записал ваше слово строкой без пометки", zeus().startswith(f"## {at}\nубери это правило\n"), zeus())
+HQ = {"PANTHEON_ROLE": "hq"}
+for name, env in (("терминал без роли", {}), ("окно Метиды", {"PANTHEON_ROLE": "metis-pantheon"}),
+                  ("окно Гестии", {"PANTHEON_ROLE": "hestia", "PANTHEON_TASK": "metis-0850"})):
+    br = bind("metis-0850", "--log-at", at, **env)
+    check(f"bind: из окна не Зевса ({name}) → код 2, связки нет",
+          br.returncode == 2 and "только в окне Зевса" in br.stderr and not os.path.exists(BIND), br.stdout + br.stderr)
+for args in (("metis-0850", "--log-at", at, "--text", "да"), ("metis-0850", "--log-at", at, "да, снимаем"),
+             ("metis-0850", "да, снимаем"), ("metis-0850", "--text", "да"), ("metis-0850",), ("Bad id", "--log-at", at)):
+    br = bind(*args, **HQ)
+    check(f"bind: свой текст или не тот вызов {args[1:]} → код 2, связки нет",
+          br.returncode == 2 and not os.path.exists(BIND), br.stdout + br.stderr)
+br = bind("metis-0850", "--log-at", ago(-3600)[11:], **HQ)
+check("bind: в это время вашей строки нет → код 1, связки нет",
+      br.returncode == 1 and "нет вашей строки" in br.stderr and not os.path.exists(BIND), br.stdout + br.stderr)
+cr = consent("metis-0850")
+check("consent до привязки: прямое слово без вопроса с [id] — не ответ, код 1", cr.returncode == 1, cr.stdout)
+br = bind("metis-0850", "--log-at", at[11:], **HQ)
+cr = consent("metis-0850")
+check("bind из окна Зевса → код 0; consent <id> выдаёт строку журнала дословно, с пометкой «привязал Зевс»",
+      br.returncode == 0 and cr.returncode == 0 and f"## {at} · ваше слово в окне Зевса" in cr.stdout
+      and "привязал к metis-0850 Зевс" in cr.stdout and "\nубери это правило\n" in cr.stdout,
+      br.stdout + br.stderr + cr.stdout + cr.stderr)
+rec = json.loads(open(BIND, encoding="utf-8").read().splitlines()[0])
+check("bind: в связке только id, время строки и хеш — текста владельца в ней нет",
+      rec["id"] == "metis-0850" and rec["at"] == at and len(rec["sha256"]) == 64 and "убери" not in json.dumps(rec),
+      rec)
+check("bind: привязка — к своему id, у другого id ответа нет", consent("metis-0851").returncode == 1)
+cr = consent("metis-0850", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0850")
+check("bind: привязанное слово — не метка Гестии (push и гашение — только ответ на вопрос с [id])",
+      cr.returncode == 1 and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0850")), cr.stdout)
+# строка журнала изменилась после привязки — связка не сходится по хешу, ответа нет
+log_text = zeus()
+open(os.path.join(LOG, "zeus.md"), "w").write(log_text.replace("убери это правило", "убери это правило и всё прочее"))
+cr = consent("metis-0850")
+check("consent: текст строки не тот, что при привязке → не ответ, код 1, подсказка о несошедшейся привязке",
+      cr.returncode == 1 and "Привязки Зевса к metis-0850, которых нет в журнале" in cr.stdout and at in cr.stdout,
+      cr.stdout)
+open(os.path.join(LOG, "zeus.md"), "w").write(log_text)
+# связку не командой (подложенная строка) — на запись с пометкой хука: consent её не берёт
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {ago(30)} · принята подсказка Claude\nда, снимаем\n\n")
+noted = ago(30)
+with open(BIND, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"id": "metis-0852", "at": noted, "sha256": __import__("hashlib").sha256(
+        "да, снимаем".encode()).hexdigest(), "time": "x"}, ensure_ascii=False) + "\n")
+cr = consent("metis-0852")
+check("consent: связка на запись с пометкой (не ваш набранный ввод) → не ответ, код 1", cr.returncode == 1, cr.stdout)
+br = bind("metis-0852", "--log-at", noted, **HQ)
+check("bind: у строки пометка → код 1, отказ с названием пометки",
+      br.returncode == 1 and "принята подсказка Claude" in br.stderr, br.stdout + br.stderr)
+# ответ в чате (запись хука с пометкой) в то же время, что ваша строка: привязывается только строка без пометки
+fresh()
+tr = Tr("bind2")
+tr.say(Q843).end_turn()
+tr.owner("а", "p-bind2")
+hook(tr, "а", "p-bind2")
+at2 = [ln[3:].split(" · ")[0] for ln in zeus().splitlines() if ln.startswith("## ")][0]
+br = bind("metis-0853", "--log-at", at2, **HQ)
+check("bind: в это время и ваша строка, и запись «ответ в чате» → привязана ваша строка «а»",
+      br.returncode == 0 and br.stdout.rstrip().endswith("\n\nа"), br.stdout + br.stderr + zeus())
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {at2[:17]}59\nещё строка\n\n")
+br = bind("metis-0853", "--log-at", at2[11:16], **HQ)
+check("bind: ЧЧ:ММ, а ваших строк в эту минуту две → код 1, просьба указать секунды",
+      br.returncode == 1 and "укажи время с секундами" in br.stderr, br.stdout + br.stderr)
+old = ago(8 * 86400)
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {old}\nда, делай\n\n")
+br = bind("metis-0854", "--log-at", old, **HQ)
+check("bind: строка старше недели → код 1", br.returncode == 1 and "старше 7 дн." in br.stderr, br.stdout + br.stderr)
+yes_at = ago(20)
+with open(os.path.join(LOG, "zeus.md"), "a", encoding="utf-8") as fh:
+    fh.write(f"## {yes_at}\nвопрос: [metis-0855] Пушим?\nответ: Да — пушить\n\n")
+br = bind("metis-0855", "--log-at", yes_at, **HQ)
+cr = consent("metis-0855", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0855")
+check("bind: ваша строка «ответ: Да — пушить» привязана — Гестии не «да»: код 1, метки нет, слово показано",
+      br.returncode == 0 and cr.returncode == 1 and "не «да»" in cr.stdout and "ответ: Да — пушить" in cr.stdout
+      and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0855")), br.stderr + cr.stdout + cr.stderr)
+br = bind("metis-0854", "--log-at", "25:99", **HQ)
+check("bind: время не по образцу → код 2", br.returncode == 2, br.stdout + br.stderr)
 
 # читатели в процессе: тот же журнал zeus.md
 os.environ.update({"HOME": home, "PANTHEON_HOME": pantheon, "PANTHEON_STATE": state, "PANTHEON_VIEW": view})

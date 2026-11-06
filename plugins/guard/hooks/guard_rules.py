@@ -2731,8 +2731,9 @@ def check_pantheon(event, tool, tool_input):
 #            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
 #            нет. Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
 #            вне ядра — одно, «вернуть» нет), — отказ и ролям, и сессии без роли (metis-0794, push_accepted →
-#            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; строка «Б: <причина>» в новом
-#            коммите и любой сбой проверки — пропуск. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
+#            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; принудительная отправка в такой
+#            PR — тоже (metis-0809); строка «Б: <причина>» в коммите PR (не из base), base подтянут без правок и
+#            любой сбой проверки — пропуск. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
 #            команде, или её лид (metis-0054, guard 0.5.2): субагент hephaestus-<short> или apollo-<short>, где short —
 #            имя направления папки запуска (domains.json) после первого «-», как собирает pantheon roles build; дальше
 #            лид проверяется как координатор (личное, Метида, защиты). Лид чужого направления, сессия без
@@ -2810,6 +2811,7 @@ _GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-p
 _PUSH_OPT_ARG = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 _PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
              "--force-if-includes"}
+_PUSH_FORCE = {"--force", "-f", "--force-with-lease", "--force-if-includes"}  # их судит push_accepted (metis-0809)
 
 
 def limited(event):
@@ -3407,9 +3409,11 @@ def push_problem(texts, cwd, moved):
     return got if isinstance(got, str) else None
 
 
-def _push_parse(texts, cwd, moved):
+def _push_parse(texts, cwd, moved, force=False):
     """Разбор git push: текст — почему отправка ролям нельзя (push_problem); None — это не push; иначе (папка git,
-    remote или None, [(что отправляется, ветка назначения)]) — для push_accepted (metis-0794)."""
+    remote или None, [(что отправляется, ветка назначения)]) — для push_accepted (metis-0794). force — принудительная
+    отправка (--force, -f, --force-with-lease, --force-if-includes, +ветка) разбирается как обычная: её судит
+    push_accepted (metis-0809), а ролям её закрывает push_problem."""
     parsed = _git_sub(texts)
     if parsed is None:
         return "аргументы git не разобрать"
@@ -3421,6 +3425,9 @@ def _push_parse(texts, cwd, moved):
     pos, i = [], 0
     while i < len(args):
         a = args[i]
+        if force and (a.split("=", 1)[0] in _PUSH_FORCE or re.fullmatch(r"-[a-ce-zA-Z]*f[a-ce-zA-Z]*", a)):
+            i += 1
+            continue
         if a in _PUSH_BAD or a.split("=", 1)[0] in _PUSH_BAD or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
             return f"флаг {a}"
         if a in _PUSH_OPT_ARG:
@@ -3445,6 +3452,8 @@ def _push_parse(texts, cwd, moved):
             pairs.append(("HEAD", up.split("/", 1)[1]))
             remote = remote or up.split("/", 1)[0]
     for spec in pos[1:]:
+        if force and spec.startswith("+"):
+            spec = spec[1:]
         if spec.startswith("+"):
             return f"принудительная отправка ({spec})"
         src, _, dst = spec.partition(":")
@@ -3467,11 +3476,13 @@ def push_accepted(texts, cwd, moved):
     """Push в ветку открытого PR, который argus уже принял на текущем head (metis-0794): новый коммит сжёг бы
     вердикты и потребовал нового круга, а долг ревью в принятый PR не тянут (merge-rounds.md, «Находки ревью»).
     Текст отказа или None. Не разобрать, нет записей, нет сети, любой сбой — None: push идёт как раньше (защита от
-    ошибки агента, а не от обхода — README guard). Судит merge_gate.accepted_push_problem."""
-    got = _push_parse(texts, cwd, moved)
-    if not isinstance(got, tuple):
-        return None
+    ошибки агента, а не от обхода — README guard). Судит merge_gate.accepted_push_problem. Принудительная отправка
+    (amend и force, +ветка) — тоже новый head, судится так же (metis-0809). Разбор — внутри try: сбой git в нём (нет
+    git, таймаут) — тоже пропуск, а не остановка (metis-0809)."""
     try:
+        got = _push_parse(texts, cwd, moved, force=True)
+        if not isinstance(got, tuple):
+            return None
         return _mg().accepted_push_problem(*got)
     except Exception:  # fail-open: сбой проверки не останавливает push; срок хука — HookTimeout (BaseException), не он
         return None

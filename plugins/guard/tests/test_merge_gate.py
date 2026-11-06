@@ -16,6 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import mkroot  # noqa: E402  (metis-0729)
+from _par import run_cases  # noqa: E402  (metis-0544)
 
 # Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
 SUB_TIMEOUT = 60
@@ -4985,15 +4986,14 @@ def main():
     base = None if not os.path.realpath(tempfile.gettempdir()).startswith(("/tmp", "/private/tmp")) else "/var/tmp"
     # в окне роли под песочницей git init в TMPDIR падает (код 128) — mkroot берёт папку, где он работает (metis-0729)
     tmp = os.path.realpath(mkroot("merge-gate-test-", first=base))
-    try:
-        h = Home(tmp)
-        only = set(sys.argv[1:])
-        for case in CASES:
-            if only and case.__name__ not in only:
-                continue
-            h.core = case in CASES_CORE
+    try:  # HOME собирается раз — шаблон tmp/home; случай идёт в своём fork на своей копии (metis-0544, _par.py)
+        h = Home(os.path.join(tmp, "home"))
+        def one(case):  # копия шаблона: git и файлы — как после Home(), прошлые случаи их не меняли
+            h.root, h.core = shutil.copytree(h.root, os.path.join(tmp, case.__name__), symlinks=True), case in CASES_CORE
             h.reset()
             case(h)
+        run_cases([(c.__name__, lambda c=c: one(c)) for c in CASES if c.__name__ in (sys.argv[1:] or [c.__name__])],
+                  results, lambda name, err: results.append(False))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"{sum(results)} из {len(results)} прошли")
