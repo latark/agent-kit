@@ -108,39 +108,12 @@ def main():
 
     # разрешения, которые давал проект, — [window_extra.<окно>] policy.toml (metis-0919): окно настроек проекта не
     # читает (--setting-sources user), сборка вливает их сама; allow с gh pr merge и мусор — не вливаются, тревога
-    # хуки проекта (metis-0919): исполняемый файл в папке окна — вливается; чужая папка, ссылка наружу, строка
-    # оболочки, неисполняемый файл, относительный путь, неизвестное событие или ключ, плохой timeout — нет
-    hk = os.path.join(tmp, "projects/br/.claude/hooks")
-    os.makedirs(hk)
-    for f, mode in (("guard.py", 0o755), ("stop.sh", 0o755), ("plain.py", 0o644)):
-        with open(os.path.join(hk, f), "w") as fh:
-            fh.write("#!/bin/sh\nexit 0\n")
-        os.chmod(os.path.join(hk, f), mode)
-    alien = os.path.join(tmp, "projects/legal-watch/x.sh")  # папка чужого направления
-    with open(alien, "w") as fh:
-        fh.write("#!/bin/sh\nexit 0\n")
-    os.chmod(alien, 0o755)
-    os.symlink(alien, os.path.join(hk, "link.sh"))
-    good = ('[[window_extra.athena-shop.hooks]]\nevent = "PreToolUse"\nmatcher = "Edit|Write"\n'
-            'command = "~/projects/br/.claude/hooks/guard.py"\ntimeout = 10\nonFailure = "block"\n'
-            '[[window_extra.athena-shop.hooks]]\nevent = "Stop"\ncommand = "~/projects/br/.claude/hooks/stop.sh"\n'
-            'statusMessage = "проверка"\n')
-    bad_hooks = [('PreToolUse', 'command = "~/projects/legal-watch/x.sh"'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/link.sh"'),
-                 ('PreToolUse', 'command = "python3 ~/projects/br/.claude/hooks/guard.py"'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/plain.py"'),
-                 ('PreToolUse', 'command = "projects/br/.claude/hooks/guard.py"'),
-                 ('Nope', 'command = "~/projects/br/.claude/hooks/guard.py"'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\nshell = "zsh"'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\ntimeout = -1'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\nonFailure = "ignore"')]
-    good += "".join(f'[[window_extra.athena-shop.hooks]]\nevent = "{e}"\nmatcher = "Bash"\n{c}\n' for e, c in bad_hooks)
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
         fh.write('[window_extra.athena-shop]\nallow = ["mcp__shadcn__*", "Bash(pnpm test *)", "Bash(gh *)", 7]\n'
                  'deny = ["Bash(git push --force*)"]\n'
                  'plugins = ["vercel@claude-plugins-official", "notion@anthropic-plugin-directory", "не плагин"]\n'
                  'model = "opus"\n'
-                 '[window_extra.themis-sources]\nallow = "Bash(uv run pytest *)"\n' + good)
+                 '[window_extra.themis-sources]\nallow = "Bash(uv run pytest *)"\n')
     r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
                        timeout=120)
     at, th = win("athena-shop"), win("themis-sources")
@@ -164,27 +137,6 @@ def main():
     check("window_extra: отброшенное названо в тревоге (gh *, 7, не плагин, неизвестный ключ model)",
           "[window_extra.athena-shop]" in alerts and "Bash(gh *)" in alerts and "не плагин" in alerts
           and "model" in alerts, alerts[-1500:])
-    gp = os.path.join(real("projects/br"), ".claude/hooks/guard.py")
-    pre = [g for g in at["hooks"].get("PreToolUse", []) if any(gp in h["command"] for h in g["hooks"])]
-    check("window_extra: хук из папки окна влит в его настройки — matcher, timeout, onFailure; guard окна на месте",
-          pre == [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": gp, "timeout": 10,
-                                                        "onFailure": "block"}]}]
-          and any("guard/hooks/guard.py" in h["command"] for g in at["hooks"]["PreToolUse"] for h in g["hooks"]),
-          at["hooks"].get("PreToolUse"))
-    stop = [h for g in at["hooks"].get("Stop", []) for h in g["hooks"] if "stop.sh" in h["command"]]
-    check("window_extra: хук Stop без matcher, со statusMessage",
-          stop == [{"type": "command", "command": os.path.join(real("projects/br"), ".claude/hooks/stop.sh"),
-                    "statusMessage": "проверка"}], stop)
-    cmds = [h["command"] for ev in at["hooks"].values() for g in ev for h in g["hooks"]]
-    check("window_extra: чужая папка, ссылка наружу, строка оболочки, неисполняемый, относительный, неизвестное "
-          "событие, лишний ключ, плохой timeout и onFailure — не влиты",
-          not any(x in c for c in cmds for x in ("legal-watch", "link.sh", "plain.py", "python3"))
-          and "Nope" not in at["hooks"] and len([c for c in cmds if c == gp]) == 1, cmds)
-    check("window_extra: хуки чужого окна не задевают",
-          not any("projects/br" in h["command"] for ev in th["hooks"].values() for g in ev for h in g["hooks"]))
-    check("window_extra: отброшенные хуки названы в тревоге",
-          all(x in alerts for x in ("legal-watch/x.sh", "link.sh", "python3 ~", "plain.py", "Nope", "shell",
-                                    "ignore")), alerts[-1500:])
     return all(results)
 
 

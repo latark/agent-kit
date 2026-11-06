@@ -2989,65 +2989,19 @@ def project_allow_problems(launch):
 # (enabledPlugins: true; плагин должен быть установлен). Не directions.toml и не папка направления: их правит штаб или
 # само окно, а это права окна — их правит только metis-pantheon после «да» владельца (protect-config). Правило allow,
 # пускающее gh pr merge (allow_rule_merges), не вливается — как и раньше из проекта (metis-0137).
-# hooks (metis-0919, решение владельца 06.11): защитные хуки проектов (guard.py finances, guard_bash и guard_read
-# mailkeeper, stop-verify athena) окно с --setting-sources user не получает — их список [[window_extra.<окно>.hooks]]:
-# event, matcher, command, по желанию timeout, onFailure, statusMessage. Команда — только путь к исполняемому файлу
-# внутри папок этого окна (настоящий путь, без ссылок наружу и без аргументов): строка оболочки или чужой скрипт из
-# policy.toml не вливаются — как allow с gh pr merge, с тревогой. Источник — только policy.toml, не settings проекта.
-WINDOW_EXTRA_KEYS = ("allow", "deny", "plugins", "hooks")
+WINDOW_EXTRA_KEYS = ("allow", "deny", "plugins")
 PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*")
-HOOK_EVENTS = ("PreToolUse", "PostToolUse", "Stop", "SubagentStop", "SessionStart", "SessionEnd", "UserPromptSubmit",
-               "Notification", "PreCompact")
-HOOK_KEYS = ("event", "matcher", "command", "timeout", "onFailure", "statusMessage")
 
 
-def window_hook(entry, folders):
-    """Запись [[window_extra.<окно>.hooks]] → (событие, группа хуков settings) или None: не таблица, неизвестный ключ
-    или событие, команда — не путь к исполняемому файлу внутри folders (настоящие пути папок окна)."""
-    if not isinstance(entry, dict) or set(entry) - set(HOOK_KEYS) or entry.get("event") not in HOOK_EVENTS:
-        return None
-    cmd, matcher = entry.get("command"), entry.get("matcher")
-    if not isinstance(cmd, str) or not os.path.isabs(os.path.expanduser(cmd)) or (
-            matcher is not None and not isinstance(matcher, str)):
-        return None
-    real = os.path.realpath(os.path.expanduser(cmd))
-    roots = [os.path.realpath(f) for f in folders or [] if isinstance(f, str) and f]
-    if not any(_under(real, r) and real != r for r in roots) or not os.path.isfile(real) or not os.access(real, os.X_OK):
-        return None
-    hook = {"type": "command", "command": shlex.quote(real)}
-    t = entry.get("timeout")
-    if t is not None:
-        if isinstance(t, bool) or not isinstance(t, int) or t <= 0:
-            return None
-        hook["timeout"] = t
-    if "onFailure" in entry:
-        if entry["onFailure"] not in ("block", "continue"):
-            return None
-        hook["onFailure"] = entry["onFailure"]
-    if "statusMessage" in entry:
-        if not isinstance(entry["statusMessage"], str):
-            return None
-        hook["statusMessage"] = entry["statusMessage"]
-    return entry["event"], ({"matcher": matcher} if matcher else {}) | {"hooks": [hook]}
-
-
-def window_extra_apply(data, policy, name, folders=()):
+def window_extra_apply(data, policy, name):
     """[window_extra.<name>] policy.toml → в data (окно): permissions.allow, permissions.deny без повторов,
-    enabledPlugins: true, hooks (window_hook; folders — папки окна). → [(ключ, значение)] отброшенного: allow с gh pr
-    merge, не строка, не плагин «имя@каталог», хук не из папок окна, неизвестный ключ. Раздела или записи нет — data
-    как есть."""
+    enabledPlugins: true. → [(ключ, значение)] отброшенного: allow с gh pr merge, не строка, не плагин «имя@каталог»,
+    неизвестный ключ. Раздела или записи нет — data как есть."""
     sec = policy.get("window_extra") if isinstance(policy, dict) else None
     extra = sec.get(name) if isinstance(sec, dict) else None
     if not isinstance(extra, dict):
         return []
     bad = [(k, extra[k]) for k in extra if k not in WINDOW_EXTRA_KEYS]
-    hooks = extra.get("hooks")
-    for h in hooks if isinstance(hooks, list) else ([] if hooks is None else [hooks]):
-        got = window_hook(h, folders)
-        if got:
-            data.setdefault("hooks", {}).setdefault(got[0], []).append(got[1])
-        else:
-            bad.append(("hooks", h))
     perms = data.setdefault("permissions", {})
     for key in ("allow", "deny"):
         vals = extra.get(key)
@@ -3251,13 +3205,12 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction)
         # после карты плагинов: плагин, названный окну в policy.toml, включён и тогда, когда карта его выключает
-        dropped = window_extra_apply(data, policy, name, ok)
+        dropped = window_extra_apply(data, policy, name)
         if dropped:
             alert_once(f"window-extra-{name}", json.dumps(dropped, ensure_ascii=False, default=str),
                        f"policy.toml [window_extra.{name}]: не влито в окно — "
                        + "; ".join(f"{k} «{v}»" for k, v in dropped)
-                       + " (allow с gh pr merge, не строка, не плагин «имя@каталог», хук — не исполняемый файл в папках"
-                       " окна или с лишним ключом, неизвестный ключ)", "pantheon")
+                       + " (allow с gh pr merge, не строка, не плагин «имя@каталог» или неизвестный ключ)", "pantheon")
         else:
             clear_once(f"window-extra-{name}")
         write_window(out_dir, name, data)
