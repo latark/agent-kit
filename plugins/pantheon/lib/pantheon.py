@@ -3192,7 +3192,8 @@ def window_launch(window, name=None):
 
 # Пакет только сужает права окна (вариант Б модели угроз metis-0933, решение координатора 06.11): правила deny и ask,
 # запреты песочницы denyRead и deniedDomains. allow (metis-0137), excludedCommands, allowWrite, allowedDomains, хуки,
-# режимы — не вливаются: папка packs/ не ядро, её PR идёт с одним argus. env — только имена из WINDOW_ENV_NAMES (флаги
+# режимы — не вливаются: пакет только сужает, а расширение — дело правил ядра. С #372 папка packs/ — ядро шлюза (CORE_DIR),
+# window_launch — в SANDBOX_BUILD_ROOTS: их PR сливает владелец. env — только имена из WINDOW_ENV_NAMES (флаги
 # «без телеметрии») и только новые для окна: HOME, PATH, TMPDIR, GUARD_*, *_PROXY, DYLD_*, NODE_OPTIONS, BASH_FUNC_*,
 # кэши окна (XDG_CACHE_HOME, npm_config_cache) и ANTHROPIC_* переключили бы guard, интерпретаторы хуков и сеть.
 # Плагины — только из карты plugins-by-role.toml, оставленные этому окну (класс 4).
