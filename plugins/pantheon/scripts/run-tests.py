@@ -166,6 +166,7 @@ WINDOW_FS = {
     "pantheon/test_role_apply.py", "pantheon/test_roles.py", "pantheon/test_sandbox_size.py",
     "pantheon/test_run_tests.py", "pantheon/test_window_ports.py", "pantheon/test_traces.py",
     "pantheon/test_workshop_sockets.py", "pantheon/test_tick_skip.py", "pantheon/test_map_cache.py",
+    "pantheon/test_window_folders.py",
 }
 # Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate
 # уходит в /var/tmp, а он в окне закрыт). В окне, где запасной корень нужен, они пропускаются строкой.
