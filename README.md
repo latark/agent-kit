@@ -226,7 +226,8 @@
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, сборка окон `sandbox_build` в
   `plugins/pantheon/lib/pantheon.py`, с metis-0598 `plugins/pantheon/hooks/ctx.py`, `plugins/pantheon/hooks/hooks.json`,
   `plugins/pantheon/lib/merge.py`, `plugins/pantheon/lib/plugin_map.py`, `plugins/pantheon/plugins-by-role.toml`,
-  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`,
+  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`, с metis-0951
+  `plugins/pantheon/packs/` и запуск окна `window_launch` в `pantheon.py`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
@@ -399,7 +400,8 @@
 - `plugins/pantheon/lib/window_rules.py` — правила окон координаторов для слияния через шлюз guard
   (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
   PR, который его задевает, ждёт слияния владельцем. С metis-0404 так же и PR, который меняет в `pantheon.py`
-  сборку окон: `sandbox_build`, `domains_build`, `run_settings` и то, что они зовут и читают (README guard, Д3).
+  сборку окон: `sandbox_build`, `domains_build`, `run_settings`, запуск окна `window_launch` (metis-0951) и то, что они
+  зовут и читают (README guard, Д3).
 - `plugins/pantheon/plugins-by-role.toml` и `lib/plugin_map.py` — карта «окно или роль × плагин и MCP» (metis-0238, слово
   владельца 17.10: отключать там, где 100% не нужно). Запись — «оставить»: названное остаётся, остальное из `[catalog]`
   выключается. Окно (`pantheon domains build`): `enabledPlugins: false` у лишних плагинов и `permissions.deny`

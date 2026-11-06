@@ -38,7 +38,7 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
               "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
               ".claude-plugin/marketplace.json")
-CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github", "plugins/pantheon/packs")
 CORE_TEXT = ("any path under " + ", ".join(f"`{d}/`" for d in CORE_DIR) + ", or one of the files "
              + ", ".join(f"`{f}`" for f in CORE_FILES))
 GATED_MERGE_RULE = (

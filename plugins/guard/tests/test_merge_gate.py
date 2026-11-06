@@ -538,13 +538,16 @@ def t_core(h):
     merge_case("защиты: PR только в plugins/pantheon (и plugins/guardian) — проходит",
                h.pre(cmd, pdir="projects/agent-kit"), True)
     # metis-0182 п. 4 и metis-0174: общие роли и правила autoMode окон — тоже ядро (даже если папки ещё нет на main)
+    # metis-0951: пакеты окон направлений — их хуки исполняются вне песочницы
     for path in ("plugins/pantheon/roles/argus.md", "./Plugins/Pantheon/Roles/dev-opus.md", "plugins/pantheon/roles",
-                 "plugins/pantheon/lib/window_rules.py", "./plugins/pantheon/lib/Window_Rules.py"):
+                 "plugins/pantheon/lib/window_rules.py", "./plugins/pantheon/lib/Window_Rules.py",
+                 "plugins/pantheon/packs/x/hooks.json", "Plugins/Pantheon/Packs/legal/bin/run.sh"):
         h.gh(["README.md", path])
         merge_case(f"защиты: ядро pantheon — {path} — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                    CORE + ": PR задевает")
-    h.gh(["plugins/pantheon/rolesx/a.md", "plugins/pantheon/lib/window_rules_test.py", "plugins/pantheon/roles.md"])
-    merge_case("защиты: соседи ядра pantheon (rolesx/, window_rules_test.py, roles.md) — проходит",
+    h.gh(["plugins/pantheon/rolesx/a.md", "plugins/pantheon/lib/window_rules_test.py", "plugins/pantheon/roles.md",
+          "plugins/pantheon/packsx/hooks.json", "plugins/pantheon/lib/packs.py"])
+    merge_case("защиты: соседи ядра pantheon (rolesx/, window_rules_test.py, roles.md, packsx/, packs.py) — проходит",
                h.pre(cmd, pdir="projects/agent-kit"), True)
     h.gh([{"filename": "plugins/pantheon/agents/argus.md", "status": "renamed",
            "previous_filename": "plugins/pantheon/roles/argus.md"}])
@@ -911,6 +914,8 @@ def t_core_paths(h):
     for path, want in (("plugins/guard/hooks/merge_gate.py", True), ("./plugins/guard/hooks/merge_gate.py", True),
                        ("plugins//guard/hooks/merge_gate.py", True), ("plugins/x/../guard/hooks/merge_gate.py", True),
                        ("plugins/pantheon//roles/dev-sonnet.tmpl", True), ("PLUGINS/Guard/Hooks/Merge_Gate.py", True),
+                       ("plugins/pantheon/packs/x/hooks.json", True), ("plugins/pantheon/packs", True),
+                       ("plugins/pantheon/packsx/hooks.json", False),
                        ("plugins/x/../README.md", False), ("README.md", False),
                        ("../agent-kit/plugins/guard/hooks/merge_gate.py", False)):
         got = mg._is_core(path, core)
@@ -4156,6 +4161,20 @@ SB_VARIANTS = (
 # а PR (вариант «other») правит task_cmd. На merge-base и head task_cmd вне сборки, на вершине base — внутри
 SB_TIP = ("    return {n: role_settings(f) for n, f in domains.items()}",
           "    task_cmd([])\n    return {n: role_settings(f) for n, f in domains.items()}")
+# metis-0951: запуск окна (придёт с PR #360) — корень сборки; на main его ещё нет, поэтому SB_SRC без него
+WL_SRC = '''
+
+def launch_args(name):
+    return ["claude", "--settings", run_settings(name)]
+
+
+def window_launch(name):
+    return launch_args(name)
+'''
+WL_VARIANTS = (
+    ("body", ("    return launch_args(name)\n", "    return launch_args(name) + ['--dangerously-skip-permissions']\n")),
+    ("helper", ('["claude", "--settings"', '["claude", "--yolo", "--settings"')),
+)
 
 
 def t_core_sandbox_unit(h):
@@ -4177,6 +4196,23 @@ def t_core_sandbox_unit(h):
           mg.sandbox_build_changes(SB_SRC, other, SB_SRC) == [])
     check("сборка окон Б1: вершину base не разобрать — None",
           mg.sandbox_build_changes(SB_SRC, other, "def (") is None)
+    # metis-0951: запуск окна window_launch — корень сборки; пока его нет в файле (SB_SRC), проверка идёт по остальным
+    check("запуск окна: window_launch — в корнях сборки", "window_launch" in mg.SANDBOX_BUILD_ROOTS)
+    check("запуск окна: файла без window_launch проверка не ломает (замыкание есть)", mg._defs_closure(SB_SRC) is not None)
+    check("запуск окна: без обязательного корня run_settings — по-прежнему None (ядро)",
+          mg._defs_closure(SB_SRC.replace("def run_settings(name):", "def run_cfg(name):")) is None)
+    wl = SB_SRC + WL_SRC
+    for name, (a, b) in WL_VARIANTS:
+        check(f"запуск окна: замена «{name}» есть в образце", a in wl)
+        got = mg.sandbox_build_changes(wl, wl.replace(a, b, 1))
+        check(f"запуск окна: {name} — ядро", bool(got), got)
+    check("запуск окна: правка тела — имя window_launch",
+          mg.sandbox_build_changes(wl, wl.replace(*WL_VARIANTS[0][1], 1)) == ["window_launch"])
+    check("запуск окна: появился в PR — ядро", mg.sandbox_build_changes(SB_SRC, wl) == ["launch_args", "window_launch"],
+          mg.sandbox_build_changes(SB_SRC, wl))
+    check("запуск окна: удалён в PR — ядро", bool(mg.sandbox_build_changes(wl, SB_SRC)))
+    check("запуск окна: правка другой функции при window_launch в файле — не ядро",
+          mg.sandbox_build_changes(wl, wl.replace(*SB_VARIANTS[10][1], 1)) == [])
     real_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(GUARD))), "pantheon", "lib", "pantheon.py")
     real = open(real_path, encoding="utf-8").read()
     got = mg._defs_closure(real)

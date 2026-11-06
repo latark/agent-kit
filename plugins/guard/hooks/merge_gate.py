@@ -151,7 +151,10 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
 # правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles",
             # CI с правом записи в main (metis-0512): workflow release и его скрипт .github/scripts/release.py
-            ".github")
+            ".github",
+            # metis-0951 (решение владельца 06.11, metis-0933): пакеты окон направлений — их хуки и команды
+            # исполняются вне песочницы
+            "plugins/pantheon/packs")
 GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPO_RE = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+")
@@ -939,7 +942,7 @@ def _is_core(path, core_files):
 
 # Сборка окон в pantheon.py — тоже ядро (metis-0404, «да» владельца 27.10): sandbox_build пишет settings/<окно>.json —
 # песочницу, permissions и env окон ролей. Признак — не весь файл, а то, от чего зависит записанное: функции
-# SANDBOX_BUILD_ROOTS (сборка, её вызов с папками и лидами из реестра, файл запуска окна) и всё, на что они ссылаются по
+# SANDBOX_BUILD_ROOTS (сборка, её вызов с папками и лидами из реестра, файл запуска окна, запуск окна — metis-0951) и всё, на что они ссылаются по
 # именам, транзитивно в пределах файла (role_settings, JOB_ROLES, SANDBOX_DOMAINS…). Правка — инструкция верхнего уровня
 # с другим AST (комментарии не в счёт), которая задаёт или меняет такое имя: def и class — своё имя, global, запись в
 # элемент или поле, метод-мутатор; прочие инструкции — все свои имена. Файл до и после — из git папки слияния
@@ -949,7 +952,11 @@ def _is_core(path, core_files):
 # корня, файл переименован или в другом регистре — ядро. Вне признака: обращения по строке (getattr, globals()), псевдоним изменяемого значения, другие файлы
 # (window_rules.py — в CORE_FILES)
 SANDBOX_BUILD_FILE = "plugins/pantheon/lib/pantheon.py"
-SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings")
+SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings", "window_launch")
+# Корни, которых может ещё не быть в файле: запуск окна window_launch (metis-0951) приходит отдельным PR. Нет его в
+# версии — замыкание идёт по остальным корням; появился, пропал или изменился — правка его имени, ядро. Без
+# остальных корней — по-прежнему None (ядро)
+SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch"})
 MUTATORS = frozenset({"append", "extend", "insert", "update", "setdefault", "pop", "popitem", "remove", "clear", "add",
                       "discard", "sort", "reverse", "__setitem__", "__delitem__", "__iadd__", "__ior__"})
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -1028,7 +1035,7 @@ def _defs_closure(src):
         for name in _touched(st, data):
             defs.setdefault(name, []).append(st)
     if not all(any(isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == r for st in tree.body)
-               for r in SANDBOX_BUILD_ROOTS):
+               for r in SANDBOX_BUILD_ROOTS if r not in SANDBOX_BUILD_OPTIONAL):
         return None
     seen, todo = set(), list(SANDBOX_BUILD_ROOTS)
     while todo:
