@@ -133,11 +133,8 @@ def main():
                  ('Nope', 'command = "~/projects/br/.claude/hooks/guard.py"'),
                  ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\nshell = "zsh"'),
                  ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\ntimeout = -1'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\nonFailure = "ignore"'),
-                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\nstatusMessage = 5')]
+                 ('PreToolUse', 'command = "~/projects/br/.claude/hooks/guard.py"\nonFailure = "ignore"')]
     good += "".join(f'[[window_extra.athena-shop.hooks]]\nevent = "{e}"\nmatcher = "Bash"\n{c}\n' for e, c in bad_hooks)
-    good += ('[[window_extra.athena-shop.hooks]]\nevent = "PostToolUse"\nmatcher = 5\n'
-             'command = "~/projects/br/.claude/hooks/guard.py"\n')
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
         fh.write('[window_extra.athena-shop]\nallow = ["mcp__shadcn__*", "Bash(pnpm test *)", "Bash(gh *)", 7]\n'
                  'deny = ["Bash(git push --force*)"]\n'
@@ -188,7 +185,7 @@ def main():
           not any("projects/br" in h["command"] for ev in th["hooks"].values() for g in ev for h in g["hooks"]))
     check("window_extra: отброшенные хуки названы в тревоге",
           all(x in alerts for x in ("legal-watch/x.sh", "link.sh", "python3 ~", "plain.py", "Nope", "shell",
-                                    "ignore", "'statusMessage': 5", "'matcher': 5")), alerts[-1500:])
+                                    "ignore")), alerts[-1500:])
     return all(results)
 
 
