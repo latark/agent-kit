@@ -2095,13 +2095,10 @@ def test_queue_old_yes_does_not_count():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn) and (len(sys.argv) == 1 or name in sys.argv[1:]):   # имена в argv — выборка
-            try:
-                fn()
-            except Exception as e:  # падение одного случая — провал, остальные идут
-                FAILS.append(name)
-                print(f"FAIL {name} — исключение {type(e).__name__}: {e}")
+    sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
+    from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544); исключение — провал случая
+    run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+               and (len(sys.argv) == 1 or k in sys.argv[1:])], FAILS, lambda name, err: FAILS.append(name))  # argv — выборка
     print(f"\n{'ПРОВАЛ: ' + ', '.join(FAILS) if FAILS else 'все прошли'}")
     sys.stdout.flush()
     os._exit(1 if FAILS else 0)
