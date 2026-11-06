@@ -4,5 +4,6 @@
 `plugins/pantheon/lib/merge.py`, карта плагинов и MCP `plugins/pantheon/lib/plugin_map.py` и
 `plugins/pantheon/plugins-by-role.toml`, правила autoMode и permissions окон `plugins/pantheon/lib/window_rules.py` и
 песочница окон — `sandbox_build` в `plugins/pantheon/lib/pantheon.py` и всё, что он записывает (правила окон,
-excludedCommands, denyWrite и другие поля sandbox). Незакоммиченное смотри `git status --porcelain --ignored`: обычный
-вид игнорируемых файлов (`.claude/settings.local.json`) не покажет.
+excludedCommands, denyWrite и другие поля sandbox), запуск окна `window_launch` там же и пакеты окон направлений
+`plugins/pantheon/packs/` (metis-0951). Незакоммиченное смотри `git status --porcelain --ignored`: обычный вид
+игнорируемых файлов (`.claude/settings.local.json`) не покажет.

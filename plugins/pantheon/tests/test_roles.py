@@ -581,7 +581,8 @@ def main():
          "новых находок не ищешь» там не действует."),
         ("второй argus — только ядро; список шлюза с origin/main", "Второй независимый argus — только PR, "
          "который задевает ядро. Ядро — список шлюза guard: `CORE_DIR` и `CORE_FILES` в "
-         "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` в `plugins/pantheon/lib/pantheon.py`. "
+         "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` с запуском окна `window_launch` в "
+         "`plugins/pantheon/lib/pantheon.py`. "
          "Читай список с `origin/main`"),
         ("вне ядра argus один; сложность и метка второго не добавляют", "Вне ядра argus один: "
          "сложность по диффу и метка «Сложная» в поручении второго не добавляют."),
