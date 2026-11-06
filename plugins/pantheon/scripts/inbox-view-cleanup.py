@@ -57,6 +57,29 @@ def src_hashes(src, inbox):
     return out
 
 
+def classify(p, name, hashes):
+    if os.path.islink(p):
+        return "в архив"
+    if logical_name(name).startswith(".claude__"):
+        return "служебное .claude"
+    if os.path.getsize(p) == 0 or sha(p) in hashes:
+        return "копия оригинала или пусто"
+    return "в архив"
+
+
+def dispose(p, kind, inbox, archive):
+    if kind != "в архив":
+        os.remove(p)
+        return
+    os.makedirs(archive, exist_ok=True)
+    dest = os.path.join(archive, os.path.relpath(p, inbox).replace(os.sep, "__"))
+    i = 1
+    while os.path.lexists(dest):
+        i += 1
+        dest = f"{dest}.{i}"
+    shutil.move(p, dest)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--src", default=os.path.expanduser("~/ai/pantheon"))
@@ -78,27 +101,10 @@ def main(argv=None):
     for d, _dirs, files in os.walk(inbox):
         for f in files:
             p = os.path.join(d, f)
-            if os.path.islink(p):
-                kind = "в архив"
-            elif logical_name(f).startswith(".claude__"):
-                kind = "служебное .claude"
-            elif os.path.getsize(p) == 0 or sha(p) in hashes:
-                kind = "копия оригинала или пусто"
-            else:
-                kind = "в архив"
+            kind = classify(p, f, hashes)
             n[kind] += 1
-            if not a.apply:
-                continue
-            if kind == "в архив":
-                os.makedirs(archive, exist_ok=True)
-                dest = os.path.join(archive, os.path.relpath(p, inbox).replace(os.sep, "__"))
-                i = 1
-                while os.path.lexists(dest):
-                    i += 1
-                    dest = f"{dest}.{i}"
-                shutil.move(p, dest)
-            else:
-                os.remove(p)
+            if a.apply:
+                dispose(p, kind, inbox, archive)
     if a.apply:
         for d, _dirs, _files in os.walk(inbox, topdown=False):
             if d != inbox:

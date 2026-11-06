@@ -163,7 +163,7 @@ def main():
     view_tests() if os.path.exists("/bin/zsh") else None
     cleanup_tests()
     bad = results.count(False)
-    print(f"\nвсего {len(results)}, FAIL {bad}")
+    print(f"\n{sum(results)}/{len(results)}")
     sys.exit(1 if bad else 0)
 
 
