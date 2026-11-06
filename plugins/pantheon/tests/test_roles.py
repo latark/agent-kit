@@ -293,6 +293,13 @@ def main():
     # самопроверка до сдачи (metis-0357): шесть пунктов и строка отчёта у разработчиков, требование в поручении лидов
     # сверка по тексту без переносов строк: пробелы схлопнуты, иначе перенос строки в шаблоне ломает поиск фразы
     flat = {f: " ".join(t.split()) for f, t in texts.items()}
+    # dev-сервер на коммите PR (metis-0614): talos и разработчики не переключают ветку и не ставят зависимости сами
+    check("talos: dev-сервер — outside serve --sha, без checkout --detach и pnpm install (metis-0614)",
+          "outside serve --sha" in flat.get("talos.md", "") and "checkout --detach" not in flat.get("talos.md", "")
+          and "pnpm install" not in flat.get("talos.md", "") and "talos.md" in flat)
+    for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
+        check(f"{f}: dev.part — outside serve [--sha …] [--app …], ветку не переключать, зависимости не ставить (metis-0614)",
+              "outside serve [--sha <коммит>] [--app ИМЯ]" in flat.get(f, "") and "pnpm install" not in flat.get(f, ""))
     # тела всех шести пунктов и формат строки отчёта с доказательством (review-0357-argus-d): мутант любого убит
     selfcheck = (
         "## Самопроверка до сдачи",
@@ -790,8 +797,9 @@ def main():
     check("настоящие шаблоны плагина собираются, dev-*.tmpl найдены", r.returncode == 0 and len(devs) >= 3)
     for f in devs:
         text = read(os.path.join(out_real, f[:-5] + ".md"))
-        check(f"{f[:-5]}: тестам с портом — pantheon outside test --wait 590, dev-серверу — serve --wait 120",
-              "pantheon outside test --wait 590" in text and "pantheon outside serve --wait 120" in text
+        check(f"{f[:-5]}: тестам с портом — pantheon outside test --wait 590, dev-серверу — serve [--sha …] --wait 120",
+              "pantheon outside test --wait 590" in text
+              and "pantheon outside serve [--sha <коммит>] [--app ИМЯ] --wait 120" in text
               and "pantheon outside stop" in text)
     # metis-0653: полный набор исполнители и argus сами не гоняют; ожидание — Monitor; запускающий делает TaskStop
     for f in devs + ["argus.tmpl", "codex-dev.tmpl"]:
@@ -832,8 +840,8 @@ def main():
         check(f"{f}: после отчёта субагента — TaskStop его id, в передаче дел список живых (metis-0653)",
               "сразу `TaskStop` его id" in text and "список живых субагентов" in text)
     talos_real = read(os.path.join(out_real, "talos.md"))
-    check("talos: dev-сервер — pantheon outside serve --wait 120, гасит stop",
-          "pantheon outside serve --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    check("talos: dev-сервер — pantheon outside serve --sha … --wait 120, гасит stop",
+          "pantheon outside serve --sha <head PR> [--app ИМЯ] --wait 120" in talos_real and "pantheon outside stop" in talos_real)
 
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1
