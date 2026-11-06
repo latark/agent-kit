@@ -233,6 +233,23 @@ def main():
           for o in ("---﻿", "--- ﻿ ", "---﻿﻿")
           for body in ("allowed-tools: Bash\n", "permissionMode: bypassPermissions\n", "name: argus\n")
           if kind == "agents" or not body.startswith("name")],
+        # ревью #347 круг 3 (Б6/Б7): граница — регуляркой Claude Code, JS \s целиком; закрытие на первом «---»
+        *[(f"{kind}: открывающая «---» + U+{cp:04X} + {body.splitlines()[0]} — отказ", "deny", APP, COORD,
+           W(path, "---" + chr(cp) + "\n" + body + "---\nтекст\n"))
+          for kind, path in (("skills", skill), ("agents", APP + "/.claude/agents/x.md"))
+          for cp in (0xA0, 0x3000, 0x202F, 0x1680, 0x205F, 0x2000, 0x200A, 0x2028, 0xFEFF)
+          for body in ("allowed-tools: Bash\n", "name: argus\ndescription: d\n")
+          if kind == "agents" or not body.startswith("name")],
+        ("skills: BOM в начале и «---» с NBSP — отказ", "deny", APP, COORD,
+         W(skill, chr(0xFEFF) + "---" + chr(0xA0) + "\nallowed-tools: Bash\n---\n")),
+        ("skills: пустая строка, затем «---» с U+3000 (построчный разбор) — отказ", "deny", APP, COORD,
+         W(skill, "\n---" + chr(0x3000) + "\nallowed-tools: Bash\n---\n")),
+        ("agents: «name: argus---», затем «---» — отказ (Claude Code закрывает внутри строки)", "deny", APP, COORD,
+         W(APP + "/.claude/agents/x.md", "---\ndescription: d\nname: argus---\n---\nтекст\n")),
+        ("agents: «name: argus ---x», затем «---» — отказ", "deny", APP, COORD,
+         W(APP + "/.claude/agents/x.md", "---\ndescription: d\nname: argus ---x\n---\nтекст\n")),
+        ("skills: «---» внутри значения, остальное чисто — можно", "allow", APP, COORD,
+         W(skill, "---\nname: x\ndescription: a---b\n---\nтекст\n")),
         ("skills: frontmatter без конца — весь текст судится — отказ", "deny", APP, COORD,
          W(skill, "---\nname: x\nтекст\nmodel: opus\n")),
         ("skills: скрипт рядом с навыком (scripts/run.sh) — можно", "allow", APP, COORD,
@@ -339,6 +356,16 @@ def main():
     why = pc._text_risk("т\n", {"agents"}, "CHARON.md") or ""
     check("собранная роль charon — файл CHARON.md отказ", "роль Пантеона" in why, why)
     check("собранная роль charon — навык с name: charon можно", pc._text_risk(charon, {"skills"}, "SKILL.md") is None)
+    # разбор Claude Code сам по себе (ревью #347 круг 3, Б6): после «---» — весь JS \s, ведущий BOM снят один раз
+    for cp in (0x0B, 0x0C, 0xA0, 0x1680, 0x2000, 0x2005, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF):
+        m = pc.CC_FRONTMATTER.match("---" + chr(cp) + "\nk: v\n---\n")
+        check(f"разбор CC: «---» + U+{cp:04X} — граница", bool(m) and m.group(1) == "k: v\n")
+    check("разбор CC: «---» + U+0085 — не граница (не JS \\s)",
+          pc.CC_FRONTMATTER.match("---" + chr(0x85) + "\nk: v\n---") is None)
+    fm = pc._frontmatters(chr(0xFEFF) + "---\nk: v\n---\n")
+    check("разбор CC: ведущий BOM снят — оба разбора CC и построчный", len(fm) == 3, repr(fm))
+    fm = pc._frontmatters(chr(0xFEFF) * 2 + "---\nk: v\n---\n")
+    check("разбор CC: второй BOM не снят — только построчный", len(fm) == 1, repr(fm))
     # --- «Готово, когда» 3: после taint запись в свои skills — вопрос, в bypassPermissions — отказ ---
     th = os.path.realpath(tempfile.mkdtemp(prefix="taint-home-"))
     setup(th)

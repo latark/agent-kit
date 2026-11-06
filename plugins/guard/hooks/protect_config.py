@@ -224,19 +224,43 @@ def _pantheon_role(name):
                         or os.path.isfile(os.path.join(G.HOME, ROLES_DIR, n + ".md")))
 
 
+# Граница frontmatter — как у Claude Code (бинарь 2.1.318, ревью #347 круг 3, Б6/Б7): ведущий U+FEFF снимается
+# один раз в начале текста, затем `/^---\s*\n([\s\S]*?)---/` — закрытие на первом «---» в любом месте, и внутри
+# строки («name: argus---»). JS_WS — набор JS `\s` целиком, а не символ за символом.
+JS_WS = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+CC_FRONTMATTER = re.compile("---[" + JS_WS + "]*\n(.*?)---", re.DOTALL)
+
+
 def _fence(line, lead=True):
-    """Строка «---» (граница frontmatter). Claude Code ищет её регуляркой с \s, а в JS \s включает U+FEFF:
-    пробелы, табы и FEFF после «---» границу не отменяют (ревью #347, круг 2, Б5/Д1). Отступ слева у закрывающей
-    строки её границей не делает («  ---» — строка под ключом), у открывающей снимается, как раньше."""
-    ws = " \t\r\n\f\v" + chr(0xFEFF)
-    return (line.strip(ws) if lead else line.rstrip(ws)) == "---"
+    """Строка «---» (граница frontmatter в построчном разборе). Пробелы Unicode (str.strip) и U+FEFF после «---»
+    границу не отменяют. Отступ слева у закрывающей строки её границей не делает («  ---» — строка под ключом),
+    у открывающей снимается."""
+    s = line.replace("\ufeff", " ")
+    return (s.strip() if lead else s.rstrip()) == "---"
+
+
+def _frontmatters(text):
+    """Строки frontmatter, которые судим, — списком по разборам: разбор Claude Code (CC_FRONTMATTER) и построчный —
+    от первой непустой строки «---» до строки «---», без конца — весь текст. Отказ, если откажет любой: построчный
+    строже на отступах («  ---»), разбор CC — на границе внутри строки и пробелах Unicode. Текст CC режем на строки
+    дважды: splitlines и только LF/CR (как YAML)."""
+    out = []
+    m = CC_FRONTMATTER.match(text[1:] if text.startswith("\ufeff") else text)
+    if m:
+        out += [m.group(1).splitlines(), re.split(r"\r\n|\r|\n", m.group(1))]
+    lines = text.lstrip("\ufeff").splitlines()
+    i = next((n for n, x in enumerate(lines) if x.replace("\ufeff", " ").strip()), len(lines))
+    if i < len(lines) and _fence(lines[i]):
+        body = lines[i + 1:]
+        end = next((n for n, x in enumerate(body) if _fence(x, lead=False)), len(body))
+        out.append(body[:end])
+    return out
 
 
 def _text_risk(text, kinds, path=""):
     """Что в тексте даёт права, запускает код или подменяет роль Пантеона; иначе None.
-    Динамическая команда (DYN_COMMAND) — в любом месте текста. Frontmatter — от первой непустой строки «---» до
-    строки «---»; без конца — весь текст; каждая его строка — по классу SAFE_KEYS (см. выше). У роли (agents) имя
-    файла и name — не роль Пантеона."""
+    Динамическая команда (DYN_COMMAND) — в любом месте текста. Frontmatter — см. _frontmatters; каждая его строка —
+    по классу SAFE_KEYS (см. выше). У роли (agents) имя файла и name — не роль Пантеона."""
     if DYN_COMMAND.search(text):
         return "динамическая команда !`…` или блок ```! (их выполняют при загрузке навыка)"
     agent = "agents" in kinds
@@ -244,15 +268,18 @@ def _text_risk(text, kinds, path=""):
     stem = stem[:-3] if stem.casefold().endswith(".md") else stem
     if agent and _pantheon_role(stem):
         return f"имя файла роли «{stem}» — роль Пантеона: роль проекта подменила бы её"
-    lines = text.lstrip(chr(0xFEFF)).splitlines()
-    i = next((n for n, x in enumerate(lines) if x.strip()), len(lines))
-    if i >= len(lines) or not _fence(lines[i]):
-        return None
     safe = set.intersection(*(SAFE_KEYS[k] for k in kinds))
+    for lines in _frontmatters(text):
+        why = _lines_risk(lines, safe, agent)
+        if why:
+            return why
+    return None
+
+
+def _lines_risk(lines, safe, agent):
+    """Строки одного frontmatter: что в них опасно или не из простых форм YAML; иначе None."""
     top = None  # значение последнего ключа у левого края; None — ключа ещё не было
-    for line in lines[i + 1:]:
-        if _fence(line, lead=False):
-            break
+    for line in lines:
         if not line.strip() or line.startswith("#"):
             continue
         shown = line.strip()[:60]
