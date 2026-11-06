@@ -61,6 +61,8 @@ def sync_tests():
           not any(".claude" in f for f in os.listdir(inbox)), str(os.listdir(inbox)))
     check("sync: .claude в копии остаётся записываемым (права не сняты)",
           os.access(os.path.join(dst, ".claude", "scheduled_tasks.json"), os.W_OK))
+    check("sync: папка .claude/worktrees в копии записываемая (права на папки не сняты)",
+          os.access(os.path.join(dst, ".claude", "worktrees"), os.W_OK) and os.access(os.path.join(dst, ".claude"), os.W_OK))
     check("sync: inbox-view из копии убран", not os.path.exists(os.path.join(dst, "inbox-view")))
     check("sync: обычная лишняя заметка по-прежнему уходит во входящие",
           any(f.endswith("-Новая заметка.md") for f in os.listdir(inbox)) and not os.path.exists(os.path.join(dst, "Новая заметка.md")))
@@ -81,6 +83,32 @@ def sync_tests():
     put(os.path.join(src, "inbox-view", "k.md"), "k\n")
     sync(src, dst, os.path.join(t, "вне"))
     check("sync: inbox-view оригинала не копируется и при входящих снаружи", not os.path.exists(os.path.join(dst, "inbox-view")))
+
+
+def sync_guard_tests():
+    t = tempfile.mkdtemp(prefix="guard-")
+    src = os.path.join(t, "src")
+    put(os.path.join(src, "board.md"), "доска\n")
+    put(os.path.join(src, "inbox-view", "k.md"), "настоящее входящее\n")
+    put(os.path.join(src, "archive", "inbox-view-20261106-100000", "a.md"), "архив уборки\n")
+    put(os.path.join(src, "archive", "board-2026-10.md"), "обычный архив\n")
+    dst = os.path.join(t, "dst")
+    put(os.path.join(dst, "archive", "inbox-view-20261105-100000", "old.md"), "след старого круга\n")
+    put(os.path.join(dst, "Лишнее.md"), "архив уборки\n")  # содержимое как в архиве уборки: он не «оригинал»
+    r = sync(src, dst, os.path.join(src, "inbox-view"))
+    check("sync: архив уборки archive/inbox-view-* не копируется, обычный архив — копируется",
+          r.returncode == 0 and not any(x.startswith("inbox-view-") for x in os.listdir(os.path.join(dst, "archive")))
+          and os.path.isfile(os.path.join(dst, "archive", "board-2026-10.md")), str(os.listdir(os.path.join(dst, "archive"))))
+    got = sorted(os.listdir(os.path.join(src, "inbox-view")))
+    check("sync: архив уборки не копируется во входящие, а лишний файл с его содержимым не считается копией оригинала",
+          len(got) == 2 and "k.md" in got and any(g.endswith("-Лишнее.md") for g in got), str(got))
+    link = os.path.join(t, "link")
+    os.symlink(src, link)
+    for name, d in (("та же папка", src), ("та же папка через ссылку", link)):
+        r = sync(src, d, os.path.join(src, "inbox-view"))
+        check(f"sync: оригинал и копия — {name}: отказ, код 2, входящие целы",
+              r.returncode == 2 and "одна папка" in r.stderr
+              and open(os.path.join(src, "inbox-view", "k.md"), encoding="utf-8").read() == "настоящее входящее\n", r.stderr)
 
 
 def view_tests():
@@ -155,13 +183,61 @@ def cleanup_tests():
     check("уборка: архив внутри входящих — отказ, код 2", r.returncode == 2 and "архив" in r.stderr, r.stderr)
 
 
+def cleanup_guard_tests():
+    def mk():
+        t = tempfile.mkdtemp(prefix="cg-")
+        src = os.path.join(t, "real", "pantheon")
+        put(os.path.join(src, "a.md"), "оригинал\n")
+        put(os.path.join(src, "inbox-view", "20261103-120000-уник.md"), "уникальное\n")
+        put(os.path.join(src, "inbox-view", "20261103-120001-копия.md"), "оригинал\n")
+        return t, src
+
+    t, src = mk()
+    link = os.path.join(t, "link")
+    os.symlink(os.path.join(src, "inbox-view"), link)
+    arch = os.path.join(t, "arch")
+    r = subprocess.run([sys.executable, "-I", CLEAN, "--src", src, "--inbox", link, "--archive", arch, "--apply"],
+                       capture_output=True, text=True)
+    saved = os.listdir(arch) if os.path.isdir(arch) else []
+    check("уборка: входящие через ссылку — уникальный файл в архиве, не удалён",
+          r.returncode == 0 and any("уник" in f for f in saved), f"{r.stdout} {saved}")
+    t, src = mk()
+    arch = os.path.join(t, "arch")
+    alt = os.path.join(src, "Inbox-View")
+    if os.path.isdir(alt):  # файловая система без учёта регистра (APFS по умолчанию)
+        r = subprocess.run([sys.executable, "-I", CLEAN, "--src", src, "--inbox", alt, "--archive", arch, "--apply"],
+                           capture_output=True, text=True)
+        saved = os.listdir(arch) if os.path.isdir(arch) else []
+        check("уборка: входящие в другом регистре — уникальный файл в архиве, не удалён",
+              r.returncode == 0 and any("уник" in f for f in saved), f"{r.stdout} {saved}")
+    else:
+        print("пропущено: файловая система различает регистр")
+    t, src = mk()
+    arch = os.path.join(t, "arch")
+    for name, inbox in (("входящие == оригинал", src), ("входящие выше оригинала", os.path.dirname(src))):
+        r = subprocess.run([sys.executable, "-I", CLEAN, "--src", src, "--inbox", inbox, "--archive", arch, "--apply"],
+                           capture_output=True, text=True)
+        check(f"уборка: {name} — отказ, код 2, ничего не тронуто",
+              r.returncode == 2 and os.path.isfile(os.path.join(src, "a.md")) and not os.path.exists(arch)
+              and len(os.listdir(os.path.join(src, "inbox-view"))) == 2, r.stderr)
+    # архив по умолчанию (archive/inbox-view-*) не считается оригиналом при следующей уборке
+    t, src = mk()
+    put(os.path.join(src, "archive", "inbox-view-20261105-100000", "x.md"), "уникальное\n")
+    r = subprocess.run([sys.executable, "-I", CLEAN, "--src", src, "--apply"], capture_output=True, text=True)
+    left = os.listdir(os.path.join(src, "archive"))
+    check("уборка: прежний архив уборки не считается оригиналом — уникальный файл сохранён",
+          r.returncode == 0 and len([x for x in left if x.startswith("inbox-view-")]) == 2, f"{r.stdout} {left}")
+
+
 def main():
     if os.path.exists("/bin/zsh"):
         sync_tests()
+        sync_guard_tests()
     else:
         print("пропущено: нужен macOS — view-sync.sh запускается как /bin/zsh")
     view_tests() if os.path.exists("/bin/zsh") else None
     cleanup_tests()
+    cleanup_guard_tests()
     bad = results.count(False)
     print(f"\n{sum(results)}/{len(results)}")
     sys.exit(1 if bad else 0)

@@ -43,10 +43,34 @@ def sha(p):
     return h.hexdigest()
 
 
-def src_hashes(src, inbox):
+def same(a, b):
+    """Одна и та же папка по (st_dev, st_ino): ссылка и другой регистр на APFS не обманывают, строка пути — обманывает."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def is_within(p, root):
+    """p равна root или лежит внутри (проверка идёт вверх по существующим родителям p, сравнение — samefile)."""
+    cur = os.path.abspath(p)
+    while True:
+        if same(cur, root):
+            return True
+        up = os.path.dirname(cur)
+        if up == cur:
+            return False
+        cur = up
+
+
+def src_hashes(src, skip):
+    """sha256 файлов оригинала, кроме .git, входящих и архивов уборки (skip — папки, сравнение через samefile)."""
     out = set()
     for d, dirs, files in os.walk(src):
-        dirs[:] = [x for x in dirs if os.path.join(d, x) not in (os.path.join(src, ".git"), inbox)]
+        dirs[:] = [x for x in dirs if not (
+            x == ".git" and same(d, src)
+            or any(same(os.path.join(d, x), s) for s in skip)
+            or (x.startswith("inbox-view-") and same(d, os.path.join(src, "archive"))))]
         for f in files:
             p = os.path.join(d, f)
             if not os.path.islink(p):
@@ -93,10 +117,13 @@ def main(argv=None):
     if not os.path.isdir(inbox):
         print(f"нет папки входящих: {inbox}")
         return 0
-    if archive == inbox or archive.startswith(inbox + os.sep):
+    if is_within(src, inbox):
+        print(f"входящие совпадают с оригиналом или лежат выше него: {inbox}", file=sys.stderr)
+        return 2
+    if is_within(archive, inbox):
         print("архив не может лежать во входящих", file=sys.stderr)
         return 2
-    hashes = src_hashes(src, inbox)
+    hashes = src_hashes(src, [inbox, archive])
     n = {"служебное .claude": 0, "копия оригинала или пусто": 0, "в архив": 0}
     for d, _dirs, files in os.walk(inbox):
         for f in files:
