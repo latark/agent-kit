@@ -6,8 +6,8 @@
   pantheon owner-edit propose <файл> --from <новый текст> --task ID [--why "зачем"]
         заявка: файл из списка FILES, sha256 его байтов сейчас, новый текст целиком (из файла --from), дифф и «sha
         диффа» — sha256 от [файл, sha до, sha после, дифф]. Печатает вопрос для Зевса «[<id>] …» с первыми SHORT
-        знаками sha диффа. Заявка из окна роли — owner-edit/ рядом с PANTHEON_TMP (кэш окна), вне окна —
-        STATE/owner-edit/queue
+        знаками sha диффа (ответ сверяется по всему тексту вопроса). Заявка из окна роли — owner-edit/ рядом с
+        PANTHEON_TMP (кэш окна), вне окна — STATE/owner-edit/queue
   pantheon owner-edit status [ID]   заявки и итоги
   pantheon owner-edit cancel ID     снять свою заявку
   pantheon owner-edit run           проход — только плановый проход (из окна Claude Code — отказ)
@@ -16,20 +16,26 @@
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
 права и хуки — никогда. Новый текст — UTF-8 без NUL, .toml — разбирается tomllib.
 
-Проход (тик зовёт его отдельным процессом, пока есть заявки; окружение — merge.clean_env, как у слияния):
-  1. Заявка старше REQ_TTL (24 ч) — снята. Файл сейчас: sha256 не тот, что в заявке, — отказ «файл изменился после
-     заявки»; дифф и sha диффа пересчитаны из файла и нового текста — не сошлись с заявкой — отказ.
+Проход (тик зовёт его отдельным процессом, пока есть заявки; окружение — merge.clean_env, как у слияния). Папка
+очереди открыта один раз (open_queue: части пути без ссылок), дальше файлы в ней — только через её fd (dir_fd).
+  1. У id заявки уже есть итог в журнале — отказ: та же заявка, положенная снова, второй раз не применяется. Время
+     заявки — не позже ctime её файла (дата из текста не продлевает её). Заявка старше REQ_TTL (24 ч) — снята. Файл
+     сейчас: sha256 не тот, что в заявке, — отказ «файл изменился после заявки»; дифф и sha диффа пересчитаны из файла
+     и нового текста — не сошлись с заявкой — отказ.
   2. «Да» в окне вопросов: consent_found(<id>) — только ответы у Зевса (окно вопросов, ответ в чате; галочка на доске
-     не в счёт) не раньше заявки, решает последний. «Да» и в тексте вопроса первые SHORT знаков sha диффа — применить;
-     «да» без них (вопрос был о другой правке) — отказ; не «да» — отклонено.
+     не в счёт) не раньше заявки, решает последний. «Да» на вопрос дословно question(заявки) (правка строками и sha
+     диффа; пробелы и ёлочки — как пишет хук) — применить; «да» на другой текст (пересказ, другая правка) — отказ;
+     не «да» — отклонено.
   3. Иначе Touch ID: владелец у Mac (простой меньше PRESENT_SEC), окно покажет правку целиком (каждая строка «-»/«+»
-     диффа, не длиннее WINDOW_MAX, без невидимых знаков) — окно помощника слияния (merge.helper). Палец — заявка
-     перечитана, байты те же — строка `<время> owner-edit-approve <id> <sha диффа>` в owner-log/owner-edit-approve.log
-     и применить. Отказ — отклонено; время вышло — повтор через RETRY_SEC; окно не показать — ждёт «да».
-  4. Применить: заявка забирается переименованием (второй раз не применится), под замком файл перечитан — sha256 тот
-     же, что в заявке (иначе отказ без записи), новый текст — атомарно (временный файл рядом, права прежние,
-     os.replace), записанное перечитано. Журнал STATE/logs/owner-edit.jsonl: id, файл, sha до и после, sha диффа,
-     как согласовано (consent | touchid), итог. Итог роли — <id>.result.json рядом с заявкой.
+     диффа после первого «@@», не длиннее WINDOW_MAX, без невидимых знаков) — окно помощника слияния (merge.helper).
+     Палец — заявка перечитана, байты те же — строка `<время> owner-edit-approve <id> <sha диффа>` в
+     owner-log/owner-edit-approve.log и применить. Отказ — отклонено; время вышло — повтор через RETRY_SEC; окно не
+     показать — ждёт «да».
+  4. Применить: заявка забирается переименованием, под замком файл перечитан — sha256 тот же, что в заявке (иначе
+     отказ без записи), журнал открывается на дописывание (не открыть — файл не трогается), новый текст — атомарно
+     (временный файл рядом, права прежние, os.replace), записанное перечитано. Журнал STATE/logs/owner-edit.jsonl
+     (пишется первым): id, файл, sha до и после, sha диффа, как согласовано (consent | touchid), итог. Итог роли —
+     <id>.result.json рядом с заявкой; не записать — тревога, журнал уже есть.
 """
 import contextlib
 import difflib
@@ -157,8 +163,21 @@ def diff_sha(rel, before, after, diff):
 
 
 def changes(diff):
-    """Строки «-»/«+» диффа (без заголовков ---/+++), переводы строк сняты."""
-    return [ln for ln in diff.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++ ", "--- "))]
+    """Строки «-»/«+» диффа, переводы строк сняты. Заголовки ---/+++ — только до первого «@@»: дальше «+++ …» —
+    добавленная строка «++ …», а не заголовок, и её владелец видит (ревью PR #362, Б1)."""
+    out, body = [], False
+    for ln in diff.splitlines():
+        if ln.startswith("@@"):
+            body = True
+        elif body and ln[:1] in "+-":
+            out.append(ln)
+    return out
+
+
+def one_line(s):
+    """Как хук окна вопросов и ответ в чате пишут вопрос в owner-log (answers._one_line): «→» и ёлочки — пробел, все
+    пробелы и переводы строк — один пробел."""
+    return re.sub(r"\s+", " ", re.sub(r"[→«»]", " ", s or "")).strip()
 
 
 def window_text(req):
@@ -221,10 +240,31 @@ def queue_dirs():
     return out
 
 
-def read_file(path, limit=REQ_MAX):
-    """Обычный свой файл без ссылок → байты; иначе None."""
+def open_queue(win):
+    """Папка очереди (окно None — STATE/owner-edit/queue, иначе кэш окна <win>/owner-edit) → fd или None: открыта один
+    раз, каждая часть пути после корня (STATE, кэш окон) — O_NOFOLLOW; файлы в ней read_file проверяет на «свой».
+    Дальше проход пишет и удаляет только через этот fd (dir_fd): папку, подменённую ссылкой после открытия, он не
+    видит (ревью PR #362, Д dir_fd)."""
+    base, parts = (P.path(), ("owner-edit", "queue")) if win is None else (caches(), (win, "owner-edit"))
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for part in parts:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def read_file(path, limit=REQ_MAX, dir_fd=None):
+    """Обычный свой файл без ссылок → байты; иначе None. dir_fd — path от этой папки."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError:
         return None
     with os.fdopen(fd, "rb") as fh:
@@ -242,8 +282,8 @@ def valid(req, name):
         and TASK_RE.fullmatch(req["task"]) is not None and isinstance(req.get("created"), (int, float))
 
 
-def load_req(path):
-    raw = read_file(path)
+def load_req(path, dir_fd=None):
+    raw = read_file(path, dir_fd=dir_fd)
     if raw is None:
         return None, None
     with contextlib.suppress(ValueError):
@@ -253,13 +293,21 @@ def load_req(path):
     return None, raw
 
 
-def write_atomic(path, data):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False)
-    os.replace(tmp, path)
+def write_atomic(path, data, dir_fd=None):
+    """JSON атомарно: временный файл со случайным хвостом рядом (O_EXCL, без ссылок), os.replace. dir_fd — path от
+    этой папки, папку не создаёт. Сбой — временный файл убран, исключение дальше."""
+    if dir_fd is None:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+        os.replace(tmp, path, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
 
 
 def who():
@@ -269,19 +317,50 @@ def who():
     return (win if win and WINDOW_RE.fullmatch(win) else None), (role if ROLE_RE.fullmatch(role) else None)
 
 
+def journal_open():
+    """Журнал STATE/logs/owner-edit.jsonl на дописывание (без ссылки). Не открыть — OSError."""
+    os.makedirs(P.path("logs"), exist_ok=True)
+    fd = os.open(P.path("logs", "owner-edit.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def journal(rec):
     rec = dict(rec, time=datetime.fromtimestamp(P.now()).astimezone().isoformat(timespec="seconds"))
-    os.makedirs(P.path("logs"), exist_ok=True)
-    with open(P.path("logs", "owner-edit.jsonl"), "a", encoding="utf-8") as fh:
+    with journal_open() as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def finish(d, req, state, note, **extra):
-    write_atomic(os.path.join(d, f"{req['id']}.result.json"),
-                 {"id": req["id"], "state": state, "note": str(note)[:400], "t": P.now()})
+def finished(rid):
+    """У заявки rid уже есть итог в журнале (любой из FINAL): ту же заявку, положенную снова, проход не применяет —
+    одно «да» или палец — одно применение (ревью PR #362, повтор). Журнала нет — False; не читается — OSError дальше:
+    без журнала повтор не отличить, заявка ждёт."""
+    try:
+        fh = open(P.path("logs", "owner-edit.jsonl"), encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return False
+    with fh:
+        for ln in fh:
+            if rid not in ln:
+                continue
+            with contextlib.suppress(ValueError):
+                rec = json.loads(ln)
+                if isinstance(rec, dict) and rec.get("id") == rid and rec.get("state") in FINAL:
+                    return True
+    return False
+
+
+def finish(dfd, req, state, note, **extra):
+    """Итог: сначала журнал (он — правда о применении), потом <id>.result.json роли в папке очереди (dfd). Итог роли не
+    записать (на месте папка, нет места) — тревога, журнал уже есть (ревью PR #362, Д1)."""
     journal(dict({"id": req["id"], "file": req.get("file"), "task": req.get("task"), "role": req.get("role"),
                   "window": req.get("window"), "diff_sha": req.get("diff_sha"), "state": state,
                   "note": str(note)[:400]}, **extra))
+    try:
+        write_atomic(f"{req['id']}.result.json", {"id": req["id"], "state": state, "note": str(note)[:400],
+                                                  "t": P.now()}, dir_fd=dfd)
+    except OSError as e:
+        P.alert_once("owner-edit-result", type(e).__name__, f"правка файла владельца: итог {req['id']} ({state}) роли "
+                     f"не записан — {type(e).__name__}: {e}; в журнале logs/owner-edit.jsonl он есть", "owner-edit")
 
 
 # --- команды роли -------------------------------------------------------------------------------------------------
@@ -410,7 +489,9 @@ def ask(text):
 
 def consent_decision(req):
     """Последний ответ владельца у Зевса на «[<id>] …» не раньше заявки → (вердикт, заголовок) или None — ответа нет.
-    Вердикт: yes — «да» и в вопросе sha диффа; wrong — «да», но sha в вопросе нет; no — не «да»."""
+    Вердикт: yes — «да», и вопрос дословно question(req) (с правкой строками и sha диффа); wrong — «да» на другой текст
+    (пересказ правки с верным sha — тоже: ревью PR #362, Д2); no — не «да». Сверка — после one_line с обеих сторон:
+    так хук пишет вопрос в owner-log."""
     days = min(30.0, max(0.1, (P.now() - req["created"]) / 86400 + 0.01))
     found, _, _ = P.consent_found(req["id"], days)
     own = [(t, head, body) for t, head, body in found if head.endswith(" у Зевса") and t >= int(req["created"])]
@@ -419,8 +500,8 @@ def consent_decision(req):
     _, head, body = own[-1]
     if not P.consent_is_yes(body):
         return "no", head
-    q = body.split("\nответ:")[0].lower()
-    if not re.search(r"(?<![0-9a-f])" + req["diff_sha"][:SHORT], q):
+    q = one_line(body.split("\nответ:")[0].removeprefix("вопрос:"))
+    if q != one_line(question(req)):
         return "wrong", head
     return "yes", head
 
@@ -438,16 +519,18 @@ def approve_line(req):
         fh.write(line)
 
 
-def apply(d, path, req, how, evidence):
-    """Одно применение: заявка забрана переименованием, под замком файл тот же (sha до) — новый текст атомарно."""
-    taken = f"{path}.taken"
+def apply(dfd, name, req, how, evidence):
+    """Одно применение: заявка забрана переименованием, под замком файл тот же (sha до) и журнал пишется — новый текст
+    атомарно."""
+    taken = f"{name}.taken"
     try:
-        os.rename(path, taken)
+        os.rename(name, taken, src_dir_fd=dfd, dst_dir_fd=dfd)
     except OSError:
         return None
     try:
         with P.lock("owner-edit-apply"):
             facts(req)
+            journal_open().close()   # журнал не дописать — файл не трогаю: правка без записи в журнале (Д1)
             if how == "touchid":
                 approve_line(req)
             p = target(req["file"])
@@ -459,54 +542,62 @@ def apply(d, path, req, how, evidence):
             os.chmod(tmp, mode)
             os.replace(tmp, p)
             got = sha(read_target(req["file"]))   # в журнал — то, что легло на диск, а не то, что ждали
-        return finish(d, req, "done", f"применено ({'«да» в окне вопросов' if how == 'consent' else 'Touch ID'}): "
+        return finish(dfd, req, "done", f"применено ({'«да» в окне вопросов' if how == 'consent' else 'Touch ID'}): "
                       f"~/{req['file']} sha {req['before'][:12]} → {got[:12]}", how=how, before=req["before"],
                       after=got, evidence=evidence)
     except Refuse as e:
-        return finish(d, req, "refused", str(e), how=how)
+        return finish(dfd, req, "refused", str(e), how=how)
     except OSError as e:
-        return finish(d, req, "failed", f"{type(e).__name__}: {e}"[:300], how=how)
+        return finish(dfd, req, "failed", f"{type(e).__name__}: {e}"[:300], how=how)
     finally:
         with contextlib.suppress(OSError):
-            os.unlink(taken)
+            os.unlink(taken, dir_fd=dfd)
 
 
 def retry_mark(req):
     return P.path("owner-edit", "retry", req["id"])
 
 
-def drop(d, path, req, state, note):
+def drop(dfd, name, req, state, note):
     with contextlib.suppress(OSError):
-        os.unlink(path)
-    return finish(d, req, state, note)
+        os.unlink(name, dir_fd=dfd)
+    return finish(dfd, req, state, note)
 
 
-def process(d, win, name):
-    path = os.path.join(d, name)
-    req, raw = load_req(path)
+def process(dfd, win, name):
+    req, raw = load_req(name, dir_fd=dfd)
     if req is None:
         with contextlib.suppress(OSError):
-            os.unlink(path)
+            os.unlink(name, dir_fd=dfd)
         return None
     req["window"] = win   # окно — по месту папки заявки, не из её текста
+    if finished(req["id"]):
+        return drop(dfd, name, req, "refused", "итог этой заявки уже в журнале — та же заявка второй раз не "
+                    "применяется; новая правка — новая заявка и новый вопрос")
+    # время заявки — не позже времени её файла (ctime ставит система, окно его вперёд не сдвинет): дата из текста
+    # заявки в будущем не держит её дольше REQ_TTL (ревью PR #362, Д created)
+    try:
+        req["created"] = min(req["created"], os.stat(name, dir_fd=dfd, follow_symlinks=False).st_ctime)
+    except OSError:
+        return None
     if P.now() - req["created"] > REQ_TTL:
-        return drop(d, path, req, "dropped", f"заявка старше {REQ_TTL // 3600} ч без ответа — снята")
+        return drop(dfd, name, req, "dropped", f"заявка старше {REQ_TTL // 3600} ч без ответа — снята")
     try:
         facts(req)
     except Refuse as e:
-        return drop(d, path, req, "refused", str(e))
+        return drop(dfd, name, req, "refused", str(e))
     try:
         said = consent_decision(req)
     except P.ConsentLogError as e:
         P.alert_once("owner-edit-consent", type(e).__name__, f"правка файла владельца: {e}", "owner-edit")
         said = None
     if said and said[0] == "yes":
-        return apply(d, path, req, "consent", said[1])
+        return apply(dfd, name, req, "consent", said[1])
     if said and said[0] == "no":
-        return drop(d, path, req, "declined", f"владелец ответил не «да» ({said[1]})")
+        return drop(dfd, name, req, "declined", f"владелец ответил не «да» ({said[1]})")
     if said:
-        return drop(d, path, req, "refused", f"«да» на вопрос без sha диффа {req['diff_sha'][:SHORT]} — это ответ не на "
-                    "эту правку; новая заявка и вопрос со строкой из propose")
+        return drop(dfd, name, req, "refused", f"«да» на вопрос не дословно из propose (sha диффа "
+                    f"{req['diff_sha'][:SHORT]}) — это ответ не на эту правку; новая заявка и вопрос строкой целиком")
     text = window_text(req)
     if text is None or P.idle_sec() > PRESENT_SEC:
         return None
@@ -524,22 +615,21 @@ def process(d, win, name):
             pass
         return None
     if code != 0:
-        return drop(d, path, req, "declined", "владелец отказал в окне Touch ID")
-    req2, raw2 = load_req(path)
+        return drop(dfd, name, req, "declined", "владелец отказал в окне Touch ID")
+    req2, raw2 = load_req(name, dir_fd=dfd)
     if req2 is None or raw2 != raw:
-        return drop(d, path, req, "dropped", "заявку сменили или сняли, пока окно было открыто — палец не засчитан")
+        return drop(dfd, name, req, "dropped", "заявку сменили или сняли, пока окно было открыто — палец не засчитан")
     req2["window"] = win   # байты те же — и текст окна тот же, что видел владелец
-    return apply(d, path, req2, "touchid", "Touch ID")
+    return apply(dfd, name, req2, "touchid", "Touch ID")
 
 
-def sweep(d):
+def sweep(dfd):
     with contextlib.suppress(OSError):
-        for n in os.listdir(d):
+        for n in os.listdir(dfd):
             if n.endswith(".result.json"):
-                p = os.path.join(d, n)
                 with contextlib.suppress(OSError):
-                    if P.now() - os.lstat(p).st_mtime > RESULT_TTL:
-                        os.unlink(p)
+                    if P.now() - os.stat(n, dir_fd=dfd, follow_symlinks=False).st_mtime > RESULT_TTL:
+                        os.unlink(n, dir_fd=dfd)
 
 
 def pending():
@@ -561,19 +651,24 @@ def cmd_run():
     with P.lock("owner-edit-run", block=False) as got:
         if not got:
             return 0
-        for d, win in queue_dirs():
+        for _, win in queue_dirs():
+            dfd = open_queue(win)   # папка — один раз, дальше только dir_fd: ссылка вместо неё не уводит запись
+            if dfd is None:
+                continue
             try:
-                names = sorted(n for n in os.listdir(d) if n.endswith(".req.json"))
+                names = sorted(n for n in os.listdir(dfd) if n.endswith(".req.json"))
+                for n in names:
+                    try:
+                        process(dfd, win, n)
+                    except Exception as e:  # noqa: BLE001 — одна заявка не останавливает остальные
+                        rc = 1
+                        P.alert_once("owner-edit-run", type(e).__name__, f"правка файла владельца: заявка {n} — "
+                                     f"{type(e).__name__}: {e}", "owner-edit")
+                sweep(dfd)
             except OSError:
                 continue
-            for n in names:
-                try:
-                    process(d, win, n)
-                except Exception as e:  # noqa: BLE001 — одна заявка не останавливает остальные
-                    rc = 1
-                    P.alert_once("owner-edit-run", type(e).__name__, f"правка файла владельца: заявка {n} — "
-                                 f"{type(e).__name__}: {e}", "owner-edit")
-            sweep(d)
+            finally:
+                os.close(dfd)
     return rc
 
 
