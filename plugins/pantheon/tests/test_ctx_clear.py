@@ -3,14 +3,18 @@
 
 - stop: при живом фоновом субагенте вместо «Пора очистить» — «Не очищай: живых субагентов N, жди их отчётов», в метке
   held; пока живые есть — тишина; первый Stop без живых — «Пора очистить» на том же уровне; без живых — как раньше;
-- живой — meta.json без finished и stoppedByUser, без отчёта SubagentHandback, журнал писался после старта процесса и
-  не старше LIVE_MAX; законченный, остановленный вами, сдавший отчёт, оборванный прошлым процессом, давний — не живые;
+- живой — правило lib/live_subagent.py (metis-0904, подробно — test_live_subagent.py): meta.json без finished (или с
+  ним и своей фоновой командой без итога) и stoppedByUser, не сдал SubagentHandback, журнал писался после старта
+  процесса и не старше LIVE_MAX; законченный, остановленный вами, сдавший отчёт, оборванный прошлым процессом, давний,
+  с цитатой запуска фоновой в тексте ассистента или в поручении (Д1) — не живые; сбой подсчёта в Stop — код 0 и
+  строка в журнале хуков (Д2);
 - start source=clear: субагенты прошлой сессии окна (запись процесса CLAUDE_PID, иначе ~/.claude/sessions/<pid>.json)
   — живые с последним текстом и законченные после сохранения файла состояния с отчётом SubagentHandback (обрезан,
   одной строкой, помечен как данные); законченные раньше, остановленные, дети законченного лида — нет; второй раз
   не повторяются; блок в room, в метку — только показанные; claude -p — ни блока, ни метки;
 - resume (metis-0875): ребёнок законченного лида не в списке, ребёнок живого лида помечен; блок в room и метка только
-  показанных; claude -p --resume — ни блока, ни метки; журнал, продолжившийся в папке другой сессии, — не оборванный.
+  показанных; claude -p --resume — ни блока, ни метки; журнал, продолжившийся в папке другой сессии, — не оборванный;
+  finished со своей фоновой командой без итога — оборванный (metis-0904).
 
 Запуск: python3 -I plugins/pantheon/tests/test_ctx_clear.py  (код выхода 0 — все прошли)
 """
@@ -47,6 +51,7 @@ os.environ.update(BASE)
 spec = importlib.util.spec_from_file_location("ctx_under_test", HOOK)
 ctx = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ctx)
+R = ctx.rule()  # lib/live_subagent.py — правило «живой», общее с watch (metis-0904)
 HLOG = os.path.join(state, "logs", "ctx-hooks.log")
 NOW = time.time()
 # старт «нынешнего процесса» — запись реестра имён (позднее ps запуска теста): журналы «после старта» — в будущем
@@ -117,10 +122,12 @@ def sub(tp, sid, aid, meta, at=AFTER, texts=("работаю",), report=None, fo
             f.write(json.dumps({"type": "user", "agentId": aid, "message": {"role": "user", "content": [
                 {"type": "tool_result", "content": "delivered"}]}}) + "\n")
         f.write("{битая строка\n")
-    if meta is not None:
-        with open(os.path.join(folder, "agent-%s.meta.json" % aid), "w") as f:
-            json.dump(meta, f, ensure_ascii=False)
     t = NOW + at
+    if meta is not None:  # meta.json не новее журнала: Claude Code пишет его при запуске и при конце
+        mp = os.path.join(folder, "agent-%s.meta.json" % aid)
+        with open(mp, "w") as f:
+            json.dump(meta, f, ensure_ascii=False)
+        os.utime(mp, (t, t))
     os.utime(jl, (t, t))
     return jl
 
@@ -214,19 +221,24 @@ try:
     sub(tp4, "s-count", "c3", meta(desc="остановлен", stoppedByUser=True))
     sub(tp4, "s-count", "c4", meta(desc="сдал отчёт"), report="итог")
     sub(tp4, "s-count", "c5", meta(desc="прошлого процесса"), at=BEFORE)
-    sub(tp4, "s-count", "c6", meta(desc="давний"), at=-(ctx.LIVE_MAX + 600))
-    sub(tp4, "s-count", "c7", meta(desc="в окне старта"), at=ctx.LIVE_GRACE - 30)
+    sub(tp4, "s-count", "c6", meta(desc="давний"), at=-(R.LIVE_MAX + 600))
+    sub(tp4, "s-count", "c7", meta(desc="в окне старта"), at=R.LIVE_GRACE - 30)
     sub(tp4, "s-count", "c8", None)  # журнал без meta.json
     # в окне старта, но запущен до старта (журнал прошлого процесса с временем записи) — не живой
-    sub(tp4, "s-count", "c9", meta(desc="прошлого процесса, окно старта"), at=ctx.LIVE_GRACE - 30, born=BEFORE)
+    sub(tp4, "s-count", "c9", meta(desc="прошлого процесса, окно старта"), at=R.LIVE_GRACE - 30, born=BEFORE)
     # запущен в первые LIVE_GRACE с процесса и ждёт долгую команду (проба metis-0839) — живой
-    sub(tp4, "s-count", "c10", meta(desc="запущен сразу после старта"), at=ctx.LIVE_GRACE - 30, born=10)
+    sub(tp4, "s-count", "c10", meta(desc="запущен сразу после старта"), at=R.LIVE_GRACE - 30, born=10)
     # finished, но своя фоновая команда без итога: Bash ушёл в фон сам (проба metis-0839) — живой
     sub(tp4, "s-count", "c11", meta(desc="ждёт свою фоновую команду", finished=True), extra=(BG_MOVED("bgA"),))
     # фоновая команда с итогом (task-notification) или снятая TaskStop — закончил
     sub(tp4, "s-count", "c12", meta(desc="итог фоновой пришёл", finished=True),
         extra=(BG_RUN("bgB"), BG_NOTE("bgB")))
     sub(tp4, "s-count", "c13", meta(desc="фоновую снял", finished=True), extra=(BG_RUN("bgC"), BG_STOP("bgC")))
+    # Д1 metis-0904: строка запуска фоновой в тексте ассистента или в поручении — не запуск, закончил
+    sub(tp4, "s-count", "c14", meta(desc="цитирует фоновую", finished=True),
+        texts=("видел: Command running in background with ID: bgD. Output x",))
+    sub(tp4, "s-count", "c15", meta(desc="фоновая в поручении", finished=True), extra=(
+        {"type": "user", "message": {"role": "user", "content": "лог: Command running in background with ID: bgE."}},))
     started, now = ctx.process_started(PID), time.time()
     check("live_subagent_count: живые c1, c10, c11", ctx.live_subagent_count(tp4, "s-count", started, now) == 3,
           ctx.live_subagent_count(tp4, "s-count", started, now))
@@ -234,20 +246,20 @@ try:
           ctx.live_subagent_count(tp4, "s-count", 0.0, now) == 6)
     cdir = os.path.join(home, "tr", "s-count", "subagents")
     check("background_pending: ушла в фон без итога — да; итог или TaskStop — нет; без фоновых — нет",
-          ctx.background_pending(os.path.join(cdir, "agent-c11.jsonl"))
-          and not ctx.background_pending(os.path.join(cdir, "agent-c12.jsonl"))
-          and not ctx.background_pending(os.path.join(cdir, "agent-c13.jsonl"))
-          and not ctx.background_pending(os.path.join(cdir, "agent-c2.jsonl")))
+          R.background_pending(os.path.join(cdir, "agent-c11.jsonl"))
+          and not R.background_pending(os.path.join(cdir, "agent-c12.jsonl"))
+          and not R.background_pending(os.path.join(cdir, "agent-c13.jsonl"))
+          and not R.background_pending(os.path.join(cdir, "agent-c2.jsonl")))
     check("born_after: первая запись после старта; без времени, битая, нет файла — нет",
-          ctx.born_after(os.path.join(home, "tr", "s-count", "subagents", "agent-c10.jsonl"), started)
-          and not ctx.born_after(os.path.join(home, "tr", "s-count", "subagents", "agent-c9.jsonl"), started)
-          and not ctx.born_after(os.path.join(home, "tr", "s-count", "subagents", "agent-c7.jsonl"), started)
-          and not ctx.born_after(os.path.join(home, "tr", "s-count", "subagents", "nope.jsonl"), started))
+          R.born_after(os.path.join(home, "tr", "s-count", "subagents", "agent-c10.jsonl"), started)
+          and not R.born_after(os.path.join(home, "tr", "s-count", "subagents", "agent-c9.jsonl"), started)
+          and not R.born_after(os.path.join(home, "tr", "s-count", "subagents", "agent-c7.jsonl"), started)
+          and not R.born_after(os.path.join(home, "tr", "s-count", "subagents", "nope.jsonl"), started))
     check("live_subagent_count: нет папки, пустой sid — 0",
           ctx.live_subagent_count(tp4, "nope", started, now) == 0 and ctx.live_subagent_count(tp4, "", started, now) == 0)
     check("agent_report: последний SubagentHandback; без него ''",
-          ctx.agent_report(os.path.join(home, "tr", "s-count", "subagents", "agent-c4.jsonl")) == "итог"
-          and ctx.agent_report(os.path.join(home, "tr", "s-count", "subagents", "agent-c1.jsonl")) == "")
+          R.agent_report(os.path.join(home, "tr", "s-count", "subagents", "agent-c4.jsonl")) == "итог"
+          and R.agent_report(os.path.join(home, "tr", "s-count", "subagents", "agent-c1.jsonl")) == "")
 
     # --- 3. start source=clear: список субагентов прошлой сессии -------------------------------------------------------
     ho = os.path.join(pantheon, "handoff", "topic", "HANDOFF.md")
@@ -268,9 +280,9 @@ try:
     sub(prev, "s-prev", "lead", meta(desc="лид закончил", finished=True), report="лид сдал", at=50)
     sub(prev, "s-prev", "kid", meta(desc="ребёнок законченного лида", parentAgentId="lead", spawnDepth=2))
     sub(prev, "s-prev", "k5", meta(desc="закончил без отчёта", finished=True), at=250, texts=("итог  встроенного\n агента",))
-    sub(prev, "s-prev", "k6", meta(desc="запущен в окне старта"), at=ctx.LIVE_GRACE - 30, born=10)
+    sub(prev, "s-prev", "k6", meta(desc="запущен в окне старта"), at=R.LIVE_GRACE - 30, born=10)
     sub(prev, "s-prev", "k8", meta(desc="finished, но ждёт фоновую", finished=True), extra=(BG_RUN("bgK"),))
-    sub(prev, "s-prev", "k7", meta(desc="журнал прошлого процесса в окне старта"), at=ctx.LIVE_GRACE - 30)
+    sub(prev, "s-prev", "k7", meta(desc="журнал прошлого процесса в окне старта"), at=R.LIVE_GRACE - 30)
     new = transcript("s-new")
     evc = {"session_id": "s-new", "transcript_path": new, "source": "clear", "cwd": home}
     out = run("start", evc)
@@ -420,6 +432,10 @@ try:
     sub(t2, "s-res2", "kid2", meta(desc="ребёнок оборванного", parentAgentId="lead2", spawnDepth=2), at=BEFORE)
     sub(t2, "s-res2", "mv", meta(desc="перенесён /clear"), at=BEFORE - 60)
     sub(t2, "s-res2", "mv", meta(desc="перенесён /clear", finished=True), at=BEFORE, folder_sid="s-later")
+    # metis-0904: finished, но своя фоновая без итога — её оборвал конец процесса; с итогом — закончил
+    sub(t2, "s-res2", "fbg", meta(desc="фоновая оборвана", finished=True), at=BEFORE, extra=(BG_RUN("bgR"),))
+    sub(t2, "s-res2", "fend", meta(desc="фоновая с итогом", finished=True), at=BEFORE,
+        extra=(BG_RUN("bgS"), BG_NOTE("bgS")))
     out = run("start", evd, CLAUDE_CODE_ENTRYPOINT="sdk-cli")
     check("resume при claude -p: блока нет, метка не тронута (Д4)",
           "Оборванные субагенты" not in ctx_text(out) and not os.path.exists(ctx.revive_mark_path("s-res2")),
@@ -431,6 +447,24 @@ try:
     check("resume: ребёнок оборванного лида помечен «субагент лида»",
           "«ребёнок оборванного» (agentId kid2, субагент лида lead2," in text, text)
     check("resume: журнал, продолжившийся в папке другой сессии, — не оборванный", "перенесён /clear" not in text, text)
+    check("resume: finished с фоновой без итога — оборванный; с итогом — нет (metis-0904)",
+          "«фоновая оборвана» (agentId fbg," in text and "фоновая с итогом" not in text, text)
+
+    # --- 6. Д2 metis-0904: подсчёт живых падает в Stop — код 0, строка в журнале хуков ------------------------------
+    plug = os.path.join(tmp, "broken-plugin")
+    os.makedirs(os.path.join(plug, "hooks"))
+    os.makedirs(os.path.join(plug, "lib"))
+    shutil.copy(HOOK, os.path.join(plug, "hooks", "ctx.py"))
+    with open(os.path.join(plug, "lib", "live_subagent.py"), "w") as f:
+        f.write("raise RuntimeError('правило сломано')\n")
+    tpb = transcript("s-broken", [owner(NOW - 100)], tokens=160000)
+    sub(tpb, "s-broken", "z1", meta(desc="живой"))
+    out = subprocess.run([PY, "-I", os.path.join(plug, "hooks", "ctx.py"), "stop"],
+                         input=json.dumps(stop_ev("s-broken", tpb)), env=BASE, capture_output=True, text=True, timeout=60)
+    log = open(HLOG).read() if os.path.exists(HLOG) else ""
+    check("stop, сбой подсчёта живых: код 0, без подсказки, строка «stop RuntimeError» в журнале хуков",
+          out.returncode == 0 and out.stdout.strip() == "" and "stop RuntimeError" in log and "правило сломано" in log,
+          out.stdout + out.stderr + log[-500:])
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

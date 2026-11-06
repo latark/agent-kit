@@ -166,6 +166,31 @@ def test_agent_lock():
     check(not os.path.exists(quiet), "lock субагента без meta: затихшая копия (всё старше 3 ч) не убрана")
 
 
+def test_agent_lock_background_0904():
+    """metis-0904: правило «живой» общее с хуком ctx — субагент с finished, чья фоновая команда ещё без итога, держит
+    свою копию; итог пришёл (task-notification) — копия убрана."""
+    e, folder, g = repo()
+    bg = copy(folder, g, "agent-a0dd44ee55ff6600")
+    end = copy(folder, g, "agent-a0dd44ee55ff6611")
+    run = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "Command running in background with ID: bw1. Output x"}]}}
+    note = {"type": "user", "message": {"role": "user", "content": "<task-notification>\n<task-id>bw1</task-id>\n"}}
+    for wt, recs in ((bg, (run,)), (end, (run, note))):
+        name = os.path.basename(wt)
+        g("worktree", "lock", "--reason", f"claude agent {name} (pid 99999 start x)", wt)
+        sub_meta(e, name, wt, T0 - 60, finished=True)
+        jl = os.path.join(e.home, ".claude", "projects", "-proj", "11111111-2222-4333-8444-555555555555", "subagents",
+                          name + ".jsonl")
+        with open(jl, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+        os.utime(jl, (T0 - 60, T0 - 60))
+        age(wt, 4 * 3600)
+    e.run("watch", t=T0)
+    check(os.path.exists(bg), "0904: копия субагента с finished и фоновой командой без итога убрана")
+    check(not os.path.exists(end), "0904: копия субагента, чья фоновая команда закончилась, не убрана")
+
+
 def test_detached_unmerged():
     """Неслитая detached копия старше WORKTREE_DAYS: сначала ветка archive/wt-<имя> на её HEAD, потом копия убрана."""
     e, folder, g = repo()
