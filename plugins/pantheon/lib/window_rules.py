@@ -13,12 +13,9 @@ import re
 # в обход запора шло без проверки. Разрешённую форму слияния пропускает autoMode-правило GATED_MERGE_RULE
 # (coordinator_auto_allow), а каждое слияние по-прежнему проверяет guard (merge_problem): главная сессия
 # domain-coordinator или лид её направления (metis-0054), свои папки, без --admin и --auto. Мастерской и штабу правила нет.
-# Настройки проекта окно не читает (metis-0919, решение владельца 06.11): каждый запуск окна идёт с --settings и
-# --setting-sources user (window_flags в pantheon.py), и .claude/settings.json проекта не сливается с окном ни в папке
-# запуска, ни после cd и EnterWorktree (проба F1 06.11, Claude Code 2.1.319). Разрешения, которые давал проект, —
-# [window_extra.<окно>] policy.toml; allow с gh pr merge туда не вливается (window_extra_apply). Прежняя сверка allow
-# проекта (project_allow_problems, sandbox_build, `pantheon check`, `direction check`) осталась — для сессий,
-# поднятых до этих флагов: claude respawn берёт прежние флаги запуска.
+# Но .claude/settings.json проекта папки запуска сливается с --settings окна (флага --setting-sources нет), и allow
+# вроде Bash(gh *) в нём возвращает тот же обход: такое окно не собирается (project_allow_problems, sandbox_build),
+# `pantheon check` и `direction check` показывают то же предупреждение.
 COORDINATOR_ALLOW = []
 # Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
 # владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор

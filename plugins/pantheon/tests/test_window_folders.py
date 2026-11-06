@@ -9,9 +9,7 @@
 - allow_gate по всем папкам окна (ревью argus 2 PR #360): allow с gh pr merge во второй папке — окно не собрано, и
   при --if-changed; no_window_reason и direction check называют эту папку;
 - строгий guard окна ловит EnterWorktree (matcher): чужой репозиторий закрывает правило worktree-own
-  (plugins/guard/tests/test_worktree_own.py);
-- [window_extra.<окно>] policy.toml (metis-0919): allow, deny и plugins вливаются в своё окно, поверх карты плагинов;
-  allow с gh pr merge, не строка, не плагин «имя@каталог» и неизвестный ключ — не вливаются, тревога их называет.
+  (plugins/guard/tests/test_worktree_own.py).
 """
 import atexit
 import json
@@ -105,38 +103,6 @@ def main():
                        timeout=120)
     check("allow убран — окно снова собрано", os.path.exists(os.path.join(state, "settings", "themis-sources.json")),
           r.stderr)
-
-    # разрешения, которые давал проект, — [window_extra.<окно>] policy.toml (metis-0919): окно настроек проекта не
-    # читает (--setting-sources user), сборка вливает их сама; allow с gh pr merge и мусор — не вливаются, тревога
-    with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
-        fh.write('[window_extra.athena-shop]\nallow = ["mcp__shadcn__*", "Bash(pnpm test *)", "Bash(gh *)", 7]\n'
-                 'deny = ["Bash(git push --force*)"]\n'
-                 'plugins = ["vercel@claude-plugins-official", "notion@anthropic-plugin-directory", "не плагин"]\n'
-                 'model = "opus"\n'
-                 '[window_extra.themis-sources]\nallow = "Bash(uv run pytest *)"\n')
-    r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
-                       timeout=120)
-    at, th = win("athena-shop"), win("themis-sources")
-    allow, deny = at["permissions"].get("allow") or [], at["permissions"].get("deny") or []
-    check("window_extra: allow из policy.toml попал в окно направления",
-          "mcp__shadcn__*" in allow and "Bash(pnpm test *)" in allow, at["permissions"])
-    check("window_extra: allow с gh pr merge и не строка — не влиты", "Bash(gh *)" not in allow and 7 not in allow, allow)
-    check("window_extra: deny влит, прежние deny окна на месте",
-          "Bash(git push --force*)" in deny and any(x.startswith("Read(") for x in deny), deny)
-    plugins = at.get("enabledPlugins") or {}
-    check("window_extra: plugins — enabledPlugins: true, и поверх карты плагинов; не «имя@каталог» — не влит",
-          plugins.get("vercel@claude-plugins-official") is True
-          and plugins.get("notion@anthropic-plugin-directory") is True and "не плагин" not in plugins, plugins)
-    check("window_extra: одно правило строкой — тоже allow; чужого окна не задевает",
-          (th["permissions"].get("allow") or []) == ["Bash(uv run pytest *)"]
-          and "mcp__shadcn__*" not in (th["permissions"].get("allow") or []), th["permissions"])
-    check("window_extra: окно без записи — без изменений", "allow" not in (ws.get("permissions") or {})
-          and "allow" not in (win("workshop").get("permissions") or {}), win("workshop").get("permissions"))
-    alerts = open(os.path.join(home, "alerts.md"), encoding="utf-8").read() if os.path.exists(
-        os.path.join(home, "alerts.md")) else ""
-    check("window_extra: отброшенное названо в тревоге (gh *, 7, не плагин, неизвестный ключ model)",
-          "[window_extra.athena-shop]" in alerts and "Bash(gh *)" in alerts and "не плагин" in alerts
-          and "model" in alerts, alerts[-1500:])
     return all(results)
 
 

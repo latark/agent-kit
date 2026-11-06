@@ -365,8 +365,8 @@ def main():
     check("start: claude --bg с ролью, именем, окном запуска; поручение позиционным аргументом с пометкой и /goal",
           r.returncode == 0 and len(c) == 1 and c[0]["argv"][:6] == ["--bg", "--agent", "domain-coordinator", "--name",
                                                                      "athena-shop", "--settings"]
-          and c[0]["argv"][6] == run_file and c[0]["argv"][-1].startswith("/goal [Пантеон: поручение от zeus] закрой эпик Цель достигнута, когда")
-          and "критерий «готово» этого поручения" in c[0]["argv"][-1] and "чек-листа эпика" not in c[0]["argv"][-1]
+          and c[0]["argv"][6] == run_file and c[0]["argv"][7].startswith("/goal [Пантеон: поручение от zeus] закрой эпик Цель достигнута, когда")
+          and "критерий «готово» этого поручения" in c[0]["argv"][7] and "чек-листа эпика" not in c[0]["argv"][7]
           and c[0]["cwd"] == os.path.join(tmp, "projects", "br"))
     check("start: окно запуска = окно направления + PANTHEON_ORIGIN и PANTHEON_SESSION; песочница на месте",
           rs.get("env", {}).get("PANTHEON_ORIGIN") == "zeus" and rs["env"].get("PANTHEON_SESSION") == "athena-shop"
@@ -642,7 +642,7 @@ def main():
     r = run("start", "athena-shop")
     c = calls()
     check("start: без поручения — продолжать эпик, цель по чек-листу эпика в STATUS.md",
-          r.returncode == 0 and "STATUS.md" in c[-1]["argv"][-1] and "чек-листа эпика" in c[-1]["argv"][-1])
+          r.returncode == 0 and "STATUS.md" in c[-1]["argv"][7] and "чек-листа эпика" in c[-1]["argv"][7])
     open(log, "w").close()
     r = run("start", "hermes-site")
     check("start: направление без папки на этом Mac — отказ", r.returncode == 2 and "нет папки" in r.stderr)
@@ -988,8 +988,8 @@ def main():
           "поручение с id задачи; в окне запуска PANTHEON_ROLE=hestia и PANTHEON_ORIGIN=zeus",
           r.returncode == 0 and len(bg) == 1
           and bg[0]["argv"][:6] == ["--bg", "--agent", "hestia", "--name", "hestia", "--settings"]
-          and bg[0]["argv"][6] == hrun_path and "Задача athena-0001" in bg[0]["argv"][-1]
-          and "pantheon task show athena-0001" in bg[0]["argv"][-1] and bg[0]["cwd"] == hcache
+          and bg[0]["argv"][6] == hrun_path and "Задача athena-0001" in bg[0]["argv"][7]
+          and "pantheon task show athena-0001" in bg[0]["argv"][7] and bg[0]["cwd"] == hcache
           and hrun.get("env", {}).get("PANTHEON_ROLE") == "hestia"
           and hrun["env"].get("PANTHEON_TASK") == "athena-0001" and hrun["env"].get("PANTHEON_TASK_DIRECTION") == "athena-shop"
           and hrun["env"].get("PANTHEON_ORIGIN") == "zeus" and hrun["env"].get("PANTHEON_SESSION") == "hestia"
@@ -1067,7 +1067,7 @@ def main():
           r.returncode == 0 and not [x for x in c if x["argv"][:1] in (["respawn"], ["--resume"])] and len(bg) == 1
           and bg[0][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "athena-shop", "--settings"]
           and bg[0][6] == os.path.join(state, "settings", "run", "athena-shop.json")
-          and "[Пантеон: пробуждение]" in bg[0][-1] and "Прочитай ~/ai/pantheon/directions/athena-shop/STATUS.md" in bg[0][-1]
+          and "[Пантеон: пробуждение]" in bg[0][7] and "Прочитай ~/ai/pantheon/directions/athena-shop/STATUS.md" in bg[0][7]
           and "свежей сессией (контекст 120 тыс., простой 120 мин)" in r.stdout)
     check("wake: свежий старт — прежняя сессия a1 (без процесса) убрана claude rm после запуска новой (metis-0250)",
           [x["argv"] for x in c][-1:] == [["rm", "a1"]] and [x["argv"] for x in c].index(["rm", "a1"])
@@ -1214,7 +1214,7 @@ def main():
     r = run("start", "athena-shop", "сверх", "--over-cap")
     c = calls()
     check("потолок: --over-cap из вашего терминала — запуск, флаг не попал в поручение, в замере over_cap",
-          r.returncode == 0 and len(c) == 1 and "--over-cap" not in json.dumps(c) and "сверх" in c[0]["argv"][-1]
+          r.returncode == 0 and len(c) == 1 and "--over-cap" not in json.dumps(c) and "сверх" in c[0]["argv"][7]
           and caprows()[-1]["result"] == "allowed" and caprows()[-1].get("over_cap") is True)
     open(agents_file, "w").write("[]")
     open(log, "w").close()
@@ -1591,13 +1591,6 @@ def main():
     every = [json.loads(x) for x in open(env["FAKE_ALL"])] if os.path.exists(env["FAKE_ALL"]) else []
     resumes = [a for a in every if "--resume" in a]
     check("за весь файл: --resume был и ни разу без --settings", resumes and all("--settings" in a for a in resumes))
-    # metis-0919: окно не читает настроек проекта — каждый запуск с --settings идёт и с --setting-sources user
-    windows = [a for a in every if "--settings" in a]
-    kinds = {k for a in windows for k in ("--resume", "--bg") if k in a}
-    check("за весь файл: каждый запуск окна (--bg, --resume, Пританей) — --settings <окно> --setting-sources user",
-          windows and kinds == {"--resume", "--bg"} and all(
-              a[a.index("--settings") + 2:a.index("--settings") + 4] == ["--setting-sources", "user"] for a in windows),
-          [a for a in windows if "--setting-sources" not in a][:2])
 
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)

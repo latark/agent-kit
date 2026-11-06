@@ -821,22 +821,6 @@ HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pant
 HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
 
 
-# Окно роли читает только свои настройки (metis-0919, решение владельца 06.11 «А — окна читают только свои»): каждый
-# запуск claude с окном — `--settings <окно> --setting-sources user`. .claude/settings.json и settings.local.json
-# проекта (hooks, env, allow, sandbox, enabledPlugins, MCP проекта) окно не грузит ни в папке запуска, ни после cd и
-# EnterWorktree (проба F1 06.11, Claude Code 2.1.319: env и хуки проекта и его worktree не пришли). Файл --settings и
-# управляемые настройки идут всегда. Разрешения, которые окну давал проект, — [window_extra.<направление>] policy.toml
-# (window_extra_apply). claude respawn берёт прежние флаги запуска; --setting-sources после --settings — так префикс
-# argv «… --name <имя> --settings» остаётся прежним. Флаги окна — только отсюда: test_setting_sources ищет "--settings"
-# в списках argv кода.
-WINDOW_SOURCES = ("--setting-sources", "user")
-
-
-def window_flags(settings):
-    """argv окна: --settings <файл> и --setting-sources user (настроек проектов окно не читает, metis-0919)."""
-    return ["--settings", settings, *WINDOW_SOURCES]
-
-
 def job_window(role):
     return path("settings", f"job-{role}.json")
 
@@ -902,7 +886,7 @@ def parse_command(cmd):
             return None  # роль без окна задачи — без песочницы не идёт (P0-3)
         if conf.get("model"):
             seen["--model"] = conf["model"]
-        out = ["claude", "-p", *window_flags(job_window(seen["--agent"]))]
+        out = ["claude", "-p", "--settings", job_window(seen["--agent"])]
         for flag, value in seen.items():
             out += [flag, value]
         return out + [argv[-1]]
@@ -2984,43 +2968,6 @@ def project_allow_problems(launch):
     return found
 
 
-# Разрешения сборки и тестов, которые окну давал проект (metis-0919): окно настроек проекта не читает (WINDOW_SOURCES),
-# поэтому нужное — в [window_extra.<окно>] ~/.claude/pantheon/policy.toml: allow и deny (правила permissions), plugins
-# (enabledPlugins: true; плагин должен быть установлен). Не directions.toml и не папка направления: их правит штаб или
-# само окно, а это права окна — их правит только metis-pantheon после «да» владельца (protect-config). Правило allow,
-# пускающее gh pr merge (allow_rule_merges), не вливается — как и раньше из проекта (metis-0137).
-WINDOW_EXTRA_KEYS = ("allow", "deny", "plugins")
-PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-def window_extra_apply(data, policy, name):
-    """[window_extra.<name>] policy.toml → в data (окно): permissions.allow, permissions.deny без повторов,
-    enabledPlugins: true. → [(ключ, значение)] отброшенного: allow с gh pr merge, не строка, не плагин «имя@каталог»,
-    неизвестный ключ. Раздела или записи нет — data как есть."""
-    sec = policy.get("window_extra") if isinstance(policy, dict) else None
-    extra = sec.get(name) if isinstance(sec, dict) else None
-    if not isinstance(extra, dict):
-        return []
-    bad = [(k, extra[k]) for k in extra if k not in WINDOW_EXTRA_KEYS]
-    perms = data.setdefault("permissions", {})
-    for key in ("allow", "deny"):
-        vals = extra.get(key)
-        vals = vals if isinstance(vals, list) else ([] if vals is None else [vals])
-        have = perms.setdefault(key, [])
-        for r in vals:
-            if not isinstance(r, str) or not r.strip() or (key == "allow" and allow_rule_merges(r)):
-                bad.append((key, r))
-            elif r not in have:
-                have.append(r)
-    plugins = extra.get("plugins")
-    for p in plugins if isinstance(plugins, list) else ([] if plugins is None else [plugins]):
-        if isinstance(p, str) and PLUGIN_ID.fullmatch(p):
-            data.setdefault("enabledPlugins", {})[p] = True
-        else:
-            bad.append(("plugins", p))
-    return bad
-
-
 def window_folders(folders):
     """Все папки окна направления настоящими путями, без повторов: папка запуска первой (launch_folder), за ней
     остальные по порядку реестра. Окно — одна граница на все папки (metis-0911, решение 06.11, ревью argus 2 PR #360):
@@ -3204,15 +3151,6 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "его папок, окно его не получит", "pantheon")
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction)
-        # после карты плагинов: плагин, названный окну в policy.toml, включён и тогда, когда карта его выключает
-        dropped = window_extra_apply(data, policy, name)
-        if dropped:
-            alert_once(f"window-extra-{name}", json.dumps(dropped, ensure_ascii=False, default=str),
-                       f"policy.toml [window_extra.{name}]: не влито в окно — "
-                       + "; ".join(f"{k} «{v}»" for k, v in dropped)
-                       + " (allow с gh pr merge, не строка, не плагин «имя@каталог» или неизвестный ключ)", "pantheon")
-        else:
-            clear_once(f"window-extra-{name}")
         write_window(out_dir, name, data)
         return True
 
@@ -3811,7 +3749,7 @@ def _resume_session(name, a, text, origin):
     # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, *window_flags(run), text]
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))

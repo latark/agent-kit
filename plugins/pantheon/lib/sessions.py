@@ -254,7 +254,7 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
         P.alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
         return 1
     before = {x.get("id") for x in P.agents_all() or [] if x.get("id")}
-    argv = [P.claude_bin(), "--bg", "--agent", role, "--name", name, *P.window_flags(win), text]
+    argv = [P.claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", win, text]
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
     P.start_log(f"fresh-start\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\t{reason}" if reason else ""))
     if r.returncode != 0:
@@ -574,7 +574,7 @@ def start(rest):
                 print(f"pantheon start: отказ — {why}", file=sys.stderr)
                 return code
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
-        argv = [P.claude_bin(), "--agent", "hq", "--name", "zeus", *P.window_flags(P.path("settings", "hq.json"))]
+        argv = [P.claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", P.path("settings", "hq.json")]
         if dry:
             print(shlex.join(argv), f"(папка {P.PANTHEON})")
             return 0
@@ -697,7 +697,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         # DONE-02: /goal первым словом поручения — Stop-хук сессии с отдельной проверяющей моделью: координатор не
         # закончит, пока условие не выполнено (проверено вживую 15.10: `claude --bg "/goal …"` включает цель)
         prompt = "/goal " + prompt + " " + (TASK_GOAL if " ".join(rest).strip() else COORDINATOR_GOAL)
-    argv = [P.claude_bin(), "--bg", "--agent", role, "--name", name, *P.window_flags(run), prompt]
+    argv = [P.claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", run, prompt]
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0

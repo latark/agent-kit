@@ -174,24 +174,8 @@
   правило autoMode «Pantheon Gated Merge» (шлюз слияния, ниже), а каждое слияние дополнительно проверяет guard: главная
   сессия domain-coordinator или лид её направления (`hephaestus-*`, `apollo-*`; metis-0054), свои папки, без `--admin`
   и `--auto`.
-  Настройки проектов окно не читает (metis-0919, решение владельца 06.11 «А — окна читают только свои»). Каждый
-  запуск окна — `--settings <окно> --setting-sources user` (`window_flags` в pantheon.py): `pantheon start`,
-  Пританей, `wake`, свежий старт, `--resume`, задачи расписания `claude -p`; `claude respawn` берёт прежние флаги.
-  `.claude/settings.json` и `settings.local.json` проекта — hooks, env, allow, sandbox, enabledPlugins, MCP — не
-  грузятся ни в папке запуска, ни после `cd` и EnterWorktree (проба F1, Claude Code 2.1.319). Разрешения сборки и
-  тестов, которые окну давал проект, — в `~/.claude/pantheon/policy.toml`: его правит только Метида после «да»
-  владельца, а directions.toml и папку направления правят штаб и само окно. `pantheon domains build` вливает их в окно;
-  allow с `gh pr merge`, не строка и не плагин «имя@каталог» не вливаются, о них тревога:
-
-  ```toml
-  [window_extra.athena-shop]
-  allow = ["mcp__shadcn__*"]          # permissions.allow окна
-  deny = ["Bash(git push --force*)"]  # permissions.deny окна
-  plugins = ["vercel@claude-plugins-official"]  # enabledPlugins: true, плагин должен быть установлен
-  ```
-
-  Проверка проектных allow ниже (metis-0137) осталась для сессий, поднятых до этих флагов: раньше
-  `.claude/settings.json` проекта сливался с `--settings` окна, а правило allow срабатывает раньше классификатора auto. Поэтому `Bash(gh *)` в `.claude/settings.json` или `settings.local.json`
+  Проверка проектных allow (metis-0137): `.claude/settings.json` проекта сливается с `--settings` окна, а правило allow
+  срабатывает раньше классификатора auto. Поэтому `Bash(gh *)` в `.claude/settings.json` или `settings.local.json`
   папки запуска возвращало бы слияние `--admin`/`--auto` мимо шлюза. `sandbox_build` проверяет оба файла: правило
   `Bash`, `Bash(*)` или `Bash(<шаблон>)`, где начало шаблона до первой `*` — начало `gh pr merge` (`gh *`, `gh pr *`,
   `g*`) или само начинается с `gh pr merge` (`gh pr merge --admin *`, точное `gh pr merge 32`), а также старая форма
