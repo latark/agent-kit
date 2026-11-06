@@ -1596,7 +1596,8 @@ def main():
     kinds = {k for a in windows for k in ("--resume", "--bg") if k in a}
     check("за весь файл: каждый запуск окна (--bg, --resume, Пританей) — --settings <окно> --setting-sources user",
           windows and kinds == {"--resume", "--bg"} and all(
-              a[a.index("--settings") + 2:a.index("--settings") + 4] == ["--setting-sources", "user"] for a in windows))
+              a[a.index("--settings") + 2:a.index("--settings") + 4] == ["--setting-sources", "user"] for a in windows),
+          [a for a in windows if "--setting-sources" not in a][:2])
 
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
