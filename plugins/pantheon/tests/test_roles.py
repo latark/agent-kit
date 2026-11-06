@@ -50,6 +50,44 @@ REG = ('[[direction]]\nname = "iris-demo"\nproject = "demo"\nfolders = ["~/proje
        'does = "Демо"\ndoes_not = "Чужое — соседям"\nexamples = ["раз", "два", "три"]\n')
 
 
+def check_longrun(out_real, devs, flat):
+    """metis-0905: долгие команды субагентов — в фоне, итог — уведомлением о конце; лиды не принимают
+    промежуточное уведомление за отчёт."""
+    # metis-0905: /clear у запустившего обрывает Bash субагента на переднем плане (137), фоновый — нет: долгие команды
+    # (тесты, heavy, мутанты, run-tests.py) — run_in_background и ожидание уведомления о конце, а не Monitor и не опрос
+    longrun = ("## Долгие команды — в фоне (metis-0905)", "обрывает твою команду Bash на переднем плане (код 137)",
+               "запускай в Bash с `run_in_background: true`",
+               "своё `> <файл>` не нужно: Stop-хук разработчика считает перенаправление правкой", "закончи ход одной строкой «жду итога <ID>: <что идёт>»",
+               "Это не отчёт: отчёт пишешь после итога", "«completed (exit code 0)» или «failed with exit code N»",
+               "Оно будит тебя и после /clear у запустившего", "Файл вывода в цикле не опрашивай",
+               "`sleep` и Monitor ради одного итога не ставь", "В фон уводи только команду, которая кончится сама",
+               "`pantheon review test|accept|reject|talos` — только на переднем плане",
+               "Долгий набор для записи — `pantheon outside test --wait 590`, его можно в фоне",
+               "лог до уведомления не читай",
+               "Пока итога нет, хук возвращает тебя «дождись итога» в общем счёте возвратов")
+    for f in devs + ["argus.tmpl", "codex-dev.tmpl", "talos.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        miss = [x for x in longrun if x not in text]
+        check(f"{f[:-5]}: долгие команды — в фоне, итог — уведомлением, записи шлюза — на переднем плане (metis-0905)"
+              + (f"; нет: {miss}" if miss else ""), not miss)
+        check(f"{f[:-5]}: старого «Monitor с условием, а не конец хода со словом «жду»» нет (metis-0905)",
+              "Monitor с условием" not in text and "Monitor-ом с условием" not in text and "словом «жду»" not in text
+              and "Monitor или цикл `until`" not in text and "Monitor-ом или циклом `until`" not in text)
+    for f in devs:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: outside test и узкие тесты дольше минуты — в фоне, не «Bash не в фоне, timeout 600000» (metis-0905)",
+              "`pantheon outside test --wait 590` — в фоне (раздел «Долгие команды»)" in text
+              and "дольше минуты — тоже в фоне" in text and "Bash не в фоне, с timeout 600000" not in text
+              and "соседние) гоняй на переднем плане" not in text)
+    # лиды (merge.part): промежуточное уведомление «ждёт свою фоновую работу» — не отчёт, TaskStop не делать;
+    # долгий набор для записи шлюза — outside test, его можно в фоне (metis-0905)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: «is waiting on its own background work» — не отчёт, TaskStop не делать; outside test в фоне (metis-0905)",
+              "Уведомление «is waiting on its own background work» (в нём «may be interim») — не отчёт" in flat[f]
+              and "`TaskStop` ему не делай и работу не перепоручай" in flat[f]
+              and "его можно в фоне: запись пишет плановый проход, и /clear её не теряет" in flat[f])
+
+
 def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="roles-test-"))
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
@@ -284,8 +322,10 @@ def main():
     # metis-0653: +~450 — TaskStop после отчёта субагента (merge.part) и «ждать на переднем плане» (persist.part)
     # metis-0832: +~430 — раздел handoff.part «отказ — передай тому, кто умеет; владельцу только «да/нет»» (с [person]:
     # координатор 31546, лид 24367)
+    # metis-0905: +~430 — merge.part (промежуточное уведомление субагента — не отчёт; outside test для записи — в фоне)
+    # и persist.part (своя фоновая команда — ждать уведомления о конце)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 31800 and len(raw_texts["hephaestus-demo.md"]) <= 25800)  # metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 32200 and len(raw_texts["hephaestus-demo.md"]) <= 26200)  # metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -801,22 +841,23 @@ def main():
               "pantheon outside test --wait 590" in text
               and "pantheon outside serve [--sha <коммит>] [--app ИМЯ] --wait 120" in text
               and "pantheon outside stop" in text)
-    # metis-0653: полный набор исполнители и argus сами не гоняют; ожидание — Monitor; запускающий делает TaskStop
+    # metis-0653: полный набор исполнители и argus сами не гоняют; запускающий делает TaskStop
+    check_longrun(out_real, devs, flat)
     for f in devs + ["argus.tmpl", "codex-dev.tmpl"]:
         text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
-        check(f"{f[:-5]}: полный набор сам не гоняет, ждёт Monitor-ом, а не концом хода «жду» (metis-0653)",
-              "полный набор тестов репозитория" in text.lower() and "не гоняй" in text and "Monitor с условием" in text
-              and "словом «жду»" in text)
-    # persist.part (metis-0653): свою фоновую команду ждут Monitor-ом, субагента — концом хода; лиды говорят то же
+        check(f"{f[:-5]}: полный набор сам не гоняет (metis-0653)",
+              "полный набор тестов репозитория" in text.lower() and "не гоняй" in text)
+    # persist.part: свою фоновую команду ждут уведомлением о конце (metis-0905), субагента — так же концом хода
+    persist = ("Свою фоновую команду ждут её уведомлением о конце", "закончи ход строкой «жду итога <ID>»",
+               "Субагента ждут так же — концом хода")
     for f in devs + ["codex-dev.tmpl", "workshop.tmpl"]:
         text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
-        check(f"{f[:-5]}: persist — свою фоновую команду ждут Monitor-ом, субагента концом хода (metis-0653)",
-              "Свою фоновую команду ждут на переднем плане" in text and "Субагента, наоборот, ждут концом хода" in text)
+        check(f"{f[:-5]}: persist — свою фоновую команду ждут уведомлением о конце, субагента концом хода (metis-0905)",
+              all(x in text for x in persist) and "Свою фоновую команду ждут на переднем плане" not in text)
     # persist.part и dev.part проверяются порознь: workshop берёт persist без dev.part, dev-* — оба
     wtext = " ".join(read(os.path.join(out_real, "workshop.md")).split())
-    check("workshop (persist.part без dev.part): своя фоновая команда — Monitor, субагент — концом хода; фразы dev.part нет",
-          "Свою фоновую команду ждут на переднем плане" in wtext and "Субагента, наоборот, ждут концом хода" in wtext
-          and "Есть строка `dev:`" not in wtext)
+    check("workshop (persist.part без dev.part): своя фоновая команда — уведомлением, субагент — концом хода; фразы dev.part нет",
+          all(x in wtext for x in persist) and "Есть строка `dev:`" not in wtext)
     for f in devs:
         check(f"{f[:-5]}: Bash уводит команду в фон через ~180 с — ждать Monitor/until, не timeout 600000 (metis-0653)",
               "примерно через 180 с" in " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split()))
@@ -824,7 +865,7 @@ def main():
           "примерно через 180 с" in " ".join(read(os.path.join(out_real, "argus.md")).split()))
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: persist — субагента ждут концом хода, не Monitor-ом (metis-0653)",
-              "Субагента, наоборот, ждут концом хода" in flat[f]
+              "Субагента ждут так же — концом хода" in flat[f]
               and ("закончи ход и жди уведомления" in flat[f] or f == "apollo-demo.md"))
     # dev.part: запрет полного набора привязан к строке dev:
     for f in devs:
