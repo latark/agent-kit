@@ -74,7 +74,9 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 (все строки, кроме `ok` и пустых: упавшие проверки, трассировка и итог видны, где бы они ни были; больше NOT_OK_MAX —
 начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и последняя строка — файлов,
 ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
-или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
+или с итогом без проверок, или с явным провалом в выводе при коде 0 (строка с начала FAIL <имя>, НЕ ПРОШЛО,
+Traceback, «FAIL K», «не прошло: K» при K>0; «FAIL 0» и «не прошло: 0» — чисто, metis-0556), или раннер прерван сигналом.
+Папка плагина без tests/ — код 2 и строка «нет папки …/tests», как при «нет папки» (metis-0556). Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Храповик (metis-0854): перед тестами — scripts/lint_ratchet.py (с ним и `ruff check .`) по репозиторию первой
 папки, так его держит и запасной путь слияния (запись полного набора на head PR). И при --only: дозапуск pantheon
 outside (только упавшие файлы) тоже пишет запись полного набора, без храповика рост прошёл бы через него. Режим warn
@@ -651,9 +653,36 @@ def checks(out):
     return True, n, None
 
 
+# Явный провал в выводе (metis-0556): строка с начала — `FAIL <имя>`, `НЕ ПРОШЛО`, `Traceback (most recent call last)`,
+# итог `FAIL K` (K>0); где угодно — «не прошло: K» и «K не прошло» при K>0 (кроме строк ok — там имя проверки). Слово FAIL внутри строки или имени теста,
+# «FAIL 0», «не прошло: 0» провалом не считаются.
+_EXPLICIT_LINE = (
+    (re.compile(r"\s*FAIL\s+0+\s*$"), None),  # итог «FAIL 0» — чисто
+    (re.compile(r"\s*FAIL\b"), "строка FAIL"),
+    (re.compile(r"\s*НЕ\s+ПРОШЛО\b"), "строка НЕ ПРОШЛО"),
+    (re.compile(r"Traceback \(most recent call last\)"), "Traceback"),
+)
+_EXPLICIT_COUNT = re.compile(r"не\s+прошло:\s*(\d+)|(\d+)\s+не\s+прошло\b", re.I)
+
+
+def explicit_fail(out):
+    """Почему вывод файла — явный провал, или None. Смотрит строки вывода независимо от кода выхода и итога."""
+    for ln in ANSI.sub("", out).splitlines():
+        for rx, why in _EXPLICIT_LINE:
+            if rx.match(ln):
+                if why:
+                    return f"в выводе {why}: «{ln.strip()[:80]}»"
+                break
+        else:
+            m = None if re.match(r"\s*ok\b", ln) else _EXPLICIT_COUNT.search(ln)  # строка ok — имя проверки
+            if m and int(m[1] or m[2]) > 0:
+                return f"в выводе «{m[0]}»: «{ln.strip()[:80]}»"
+    return None
+
+
 def verdict(rc, out, timed_out, label=None, no_summary=None):
     """(ok, почему не ok или None, число проверок). Код 0 без итога — красный, кроме файлов NO_SUMMARY со строками ok
-    и без строк FAIL."""
+    и без строк FAIL. Код 0 с явным провалом в выводе (explicit_fail) — красный."""
     no_summary = NO_SUMMARY if no_summary is None else no_summary
     has, n, bad = checks(out)
     if timed_out:
@@ -661,6 +690,9 @@ def verdict(rc, out, timed_out, label=None, no_summary=None):
     if rc != 0:
         why = f"сигнал {-rc}" if rc < 0 else f"код {rc}"
         return False, why, n
+    bad_out = explicit_fail(out)
+    if bad_out:
+        return False, bad_out, n
     if not has:
         if label in no_summary and n and not re.search(r"^\s*FAIL\b", ANSI.sub("", out), re.M):
             return True, None, n
@@ -948,6 +980,9 @@ def main(argv):
     for d in opts["dirs"]:
         if not os.path.isdir(d):
             print(f"run-tests: нет папки {d}")
+            return 2
+        if not os.path.isdir(os.path.join(d, "tests")):
+            print(f"run-tests: нет папки {os.path.join(d, 'tests')} — в {d} тестов нет, молча не пропускаю")
             return 2
     items = collect(opts["dirs"])
     if not items:
