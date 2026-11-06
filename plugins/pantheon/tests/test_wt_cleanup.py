@@ -118,8 +118,8 @@ def sub_meta(e, agent, wt, mtime, finished=False):
 
 
 def test_agent_lock():
-    """Замок «claude agent agent-<id> (pid P)» без живой сессии в cwd и старше порога — снимается, копия убрана; замок с
-    другой причиной — копия цела и тревога; замок субагента, который ещё пишет журнал, — копия цела."""
+    """Lock «claude agent agent-<id> (pid P)» без живой сессии в cwd и старше порога — снимается, копия убрана; lock с
+    другой причиной — копия цела и тревога; lock субагента, который ещё пишет журнал, — копия цела."""
     e, folder, g = repo()
     dead = copy(folder, g, "agent-a0aa11bb22cc33dd")
     hold = copy(folder, g, "w-hold")
@@ -136,17 +136,17 @@ def test_agent_lock():
     age(hold, 10 * DAY)
     age(young, 60)
     e.run("watch", t=T0)
-    check(not os.path.exists(dead), "замок субагента: копия без живого субагента старше порога не убрана")
-    check(os.path.exists(hold), "замок: копия с замком «держу руками» убрана")
-    check("w-hold" in e.alerts() and "замок не субагента" in e.alerts(), f"замок: нет тревоги о чужом замке: {e.alerts()[-300:]}")
-    check(os.path.exists(live), "замок субагента: копия живого субагента (журнал свежий) убрана")
-    check(os.path.exists(young), "замок субагента: копия моложе порога убрана")
+    check(not os.path.exists(dead), "lock субагента: копия без живого субагента старше порога не убрана")
+    check(os.path.exists(hold), "lock: копия с lock «держу руками» убрана")
+    check("w-hold" in e.alerts() and "lock не субагента" in e.alerts(), f"lock: нет тревоги о чужом lock: {e.alerts()[-300:]}")
+    check(os.path.exists(live), "lock субагента: копия живого субагента (журнал свежий) убрана")
+    check(os.path.exists(young), "lock субагента: копия моложе порога убрана")
     check("agent-a0bb22cc33dd44ee" not in e.alerts(), "живой субагент попал в тревоги")
     # meta субагента лежит глубже (subagents/<x>/) — тоже найден: живой субагент держит копию
     nested = copy(folder, g, "agent-a0ee55ff66007711")
     g("worktree", "lock", "--reason", "claude agent agent-a0ee55ff66007711 (pid 99999 x)", nested)
     sub_meta(e, "x/agent-a0ee55ff66007711", nested, T0 - 60)
-    # замок называет субагента, а meta нет: копия держится, пока в ней есть правка моложе LIVE_SUBAGENT_MAX (3 ч)
+    # lock называет субагента, а meta нет: копия держится, пока в ней есть правка моложе LIVE_SUBAGENT_MAX (3 ч)
     fresh = copy(folder, g, "agent-a0ff66007711aa22")
     quiet = copy(folder, g, "agent-a0aa77118822bb33")
     for wt in (fresh, quiet):
@@ -159,9 +159,9 @@ def test_agent_lock():
     for wt in (nested, fresh, quiet):
         age_all(wt, 4 * DAY, keep=("draft.txt",))
     e.run("watch", t=T0)
-    check(os.path.exists(nested), "замок субагента: meta во вложенной папке не найден — живая копия убрана")
-    check(os.path.exists(fresh), "замок субагента без meta: копия со свежей правкой убрана")
-    check(not os.path.exists(quiet), "замок субагента без meta: затихшая копия (всё старше 3 ч) не убрана")
+    check(os.path.exists(nested), "lock субагента: meta во вложенной папке не найден — живая копия убрана")
+    check(os.path.exists(fresh), "lock субагента без meta: копия со свежей правкой убрана")
+    check(not os.path.exists(quiet), "lock субагента без meta: затихшая копия (всё старше 3 ч) не убрана")
 
 
 def test_detached_unmerged():
@@ -284,7 +284,7 @@ def test_tar_regular_only():
 
 def test_live_session_never_touched():
     """Живая сессия в копии (cwd сессии с процессом или процесс с текущей папкой в ней) — копия цела в любом случае:
-    пустая, грязная старше срока, с замком субагента, по заявке `pantheon wt done`."""
+    пустая, грязная старше срока, с lock субагента, по заявке `pantheon wt done`."""
     e, folder, g = repo()
     names = ("w-empty", "w-dirty", "agent-a0dd44ee55ff6600", "w-req", "w-proc")
     wts = {n: copy(folder, g, n) for n in names}

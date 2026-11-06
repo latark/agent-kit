@@ -1032,7 +1032,7 @@ WORKTREE_EMPTY_MIN = 30     # мин: пустая чистая копия (HEAD
 WT_REQ_DAYS = 7             # заявку `pantheon wt done`, которую так и не исполнить (копия занята), снимаем через столько дней
 UNTRACKED_MAX_MB = 200      # неотслеживаемое грязной копии больше — архив не собираем, копию не убираем
 WT_REQ_DIR = "wt-req"       # заявки `pantheon wt done`: STATE/wt-req (ваши сессии), <кэш окна>/wt-req (окно роли)
-AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # замок, который Claude Code вешает на копию субагента
+AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # lock, который Claude Code вешает на копию субагента
 AGENT_DIR = re.compile(r"agent-[0-9a-f]{6,40}")
 REQ_FILE = re.compile(r"[0-9a-f]{16}\.json")
 REQ_MAX = 4096
@@ -1343,7 +1343,7 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     Сроки по mtime папки копии: пустая чистая (HEAD в основной ветке) — WORKTREE_EMPTY_MIN (копия, в которой Claude
     Code знает сессию без процесса, — WORKTREE_CLEAN_HOURS); чистая слитая (merged_why) — WORKTREE_CLEAN_HOURS;
     чистая неслитая и грязная — WORKTREE_DAYS. requested (`pantheon wt done`) — без сроков. Замок «claude agent …»
-    без живого субагента не держит; замок с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
+    без живого субагента не держит; lock с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
     сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; грязную — сначала
     в патч и архив (wt_save)."""
     t = ctx.t
@@ -1363,15 +1363,15 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     if alive:
         return "live", f"субагент {agent} ещё работает"
     if alive is None and am and not _quiet_since(wt, t - LIVE_SUBAGENT_MAX):
-        # замок называет субагента, а его meta не найден: жив ли он — неизвестно; ждём, пока копия затихнет
-        return "live", f"замок субагента {agent}: meta не найден, в копии правки моложе {LIVE_SUBAGENT_MAX / 3600:g} ч"
+        # lock называет субагента, а его meta не найден: жив ли он — неизвестно; ждём, пока копия затихнет
+        return "live", f"lock субагента {agent}: meta не найден, в копии правки моложе {LIVE_SUBAGENT_MAX / 3600:g} ч"
     try:
         age = (t - os.stat(wt).st_mtime) / 3600
     except OSError:
         return "wait", "копия не читается"
     late = "keep" if requested or age > WORKTREE_DAYS * 24 else "wait"
     if lm and not am:
-        return late, f"замок не субагента ({reason or 'без причины'})"
+        return late, f"lock не субагента ({reason or 'без причины'})"
     hm = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
     bm = re.search(r"^branch refs/heads/(.+)$", block, re.M)
     if not hm:
@@ -1406,7 +1406,7 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
         return "keep", f"в ней {what}"
     archive = branch is None and not empty and not on_origin
     if dry:
-        return "plan", (f"убрал бы: {kind}, {age / 24:.1f} дн." + (", замок субагента снять" if am else "")
+        return "plan", (f"убрал бы: {kind}, {age / 24:.1f} дн." + (", lock субагента снять" if am else "")
                         + (f", сначала ветка archive/wt-{name}" if archive else "")
                         + (", сначала патч и архив неотслеживаемого" if not clean else ""))
     if archive:
@@ -1421,7 +1421,7 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
             return "keep", res
         saved = res
     if am and _git("-C", root, "worktree", "unlock", wt).returncode != 0:
-        return "keep", "замок субагента не снят"
+        return "keep", "lock субагента не снят"
     # чистоту и состав смотрел свой status по записанному каталогу; без --force git проверил бы её ещё раз своим
     # status — уже по конфигурации, которую мы не смотрели
     rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=300)
@@ -1533,7 +1533,7 @@ def worktrees(agents, registry, doms, t):
     """Копии .claude/worktrees/* (QA-05, metis-0616, metis-0835) — решает wt_one: дежурный убирает сам пустые (почти
     сразу), слитые (через сутки), неслитые (ветка остаётся) и грязные (сначала патч и архив) — без живой сессии,
     процесса и субагента в копии. Заявки `pantheon wt done` (wt_requests) — без сроков, с теми же проверками; занятая
-    копия ждёт в заявке. Пора, но нельзя (ссылки наружу, чужой замок, архив не собрался …) — тревога координатору.
+    копия ждёт в заявке. Пора, но нельзя (ссылки наружу, чужой lock, архив не собрался …) — тревога координатору.
     Убранное — строкой в STATE/wt-archive/removed-<день>.txt, в alerts.md — одна сводка в день.
     Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
     не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий; решает _prune_state по пути из gitdir,
