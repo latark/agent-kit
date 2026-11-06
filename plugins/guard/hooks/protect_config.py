@@ -224,6 +224,14 @@ def _pantheon_role(name):
                         or os.path.isfile(os.path.join(G.HOME, ROLES_DIR, n + ".md")))
 
 
+def _fence(line, lead=True):
+    """Строка «---» (граница frontmatter). Claude Code ищет её регуляркой с \s, а в JS \s включает U+FEFF:
+    пробелы, табы и FEFF после «---» границу не отменяют (ревью #347, круг 2, Б5/Д1). Отступ слева у закрывающей
+    строки её границей не делает («  ---» — строка под ключом), у открывающей снимается, как раньше."""
+    ws = " \t\r\n\f\v" + chr(0xFEFF)
+    return (line.strip(ws) if lead else line.rstrip(ws)) == "---"
+
+
 def _text_risk(text, kinds, path=""):
     """Что в тексте даёт права, запускает код или подменяет роль Пантеона; иначе None.
     Динамическая команда (DYN_COMMAND) — в любом месте текста. Frontmatter — от первой непустой строки «---» до
@@ -238,12 +246,12 @@ def _text_risk(text, kinds, path=""):
         return f"имя файла роли «{stem}» — роль Пантеона: роль проекта подменила бы её"
     lines = text.lstrip(chr(0xFEFF)).splitlines()
     i = next((n for n, x in enumerate(lines) if x.strip()), len(lines))
-    if i >= len(lines) or lines[i].strip() != "---":
+    if i >= len(lines) or not _fence(lines[i]):
         return None
     safe = set.intersection(*(SAFE_KEYS[k] for k in kinds))
     top = None  # значение последнего ключа у левого края; None — ключа ещё не было
     for line in lines[i + 1:]:
-        if line.rstrip() == "---":
+        if _fence(line, lead=False):
             break
         if not line.strip() or line.startswith("#"):
             continue

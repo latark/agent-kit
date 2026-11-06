@@ -227,6 +227,12 @@ def main():
         ("skills: без frontmatter, простой текст — можно", "allow", APP, COORD, W(skill, "заметка\n")),
         ("skills: frontmatter после пустых строк и BOM — отказ", "deny", APP, COORD,
          W(skill, "﻿\n\n---\nallowed-tools: Bash\n---\n")),
+        *[(f"{kind}: открывающая «---» с FEFF/пробелами ({o!r}) + {body.splitlines()[0]} — отказ", "deny", APP, COORD,
+           W(path, o + "\n" + body + "---\nтекст\n"))
+          for kind, path in (("skills", skill), ("agents", APP + "/.claude/agents/x.md"))
+          for o in ("---﻿", "--- ﻿ ", "---﻿﻿")
+          for body in ("allowed-tools: Bash\n", "permissionMode: bypassPermissions\n", "name: argus\n")
+          if kind == "agents" or not body.startswith("name")],
         ("skills: frontmatter без конца — весь текст судится — отказ", "deny", APP, COORD,
          W(skill, "---\nname: x\nтекст\nmodel: opus\n")),
         ("skills: скрипт рядом с навыком (scripts/run.sh) — можно", "allow", APP, COORD,
