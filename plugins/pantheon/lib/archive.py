@@ -12,12 +12,43 @@ import sys
 from datetime import datetime, timedelta
 
 __all__ = [
-    "VIEW_INBOX", "view", "PUSH_POST_BUFFER", "PUSH_FAIL_LIMIT", "PUSH_SERVER_ERR", "push_failed", "commit",
+    "VIEW_INBOX", "VIEW_INBOX_LIMIT", "VIEW_INBOX_GROWTH", "view_inbox_count", "view_inbox_check", "view", "PUSH_POST_BUFFER", "PUSH_FAIL_LIMIT", "PUSH_SERVER_ERR", "push_failed", "commit",
     "DONE_HEAD", "DATE_ISO", "DATE_RU", "line_date", "archive", "archive_status",
 ]
 
 
 VIEW_INBOX = os.environ.get("PANTHEON_VIEW_INBOX") or os.path.join(P.PANTHEON, "inbox-view")
+
+
+# Входящие копии (inbox-view): обычно пусты или единицы. Больше предела или рост за проход — тревога (metis-0920:
+# 7779 файлов накопилось за дни, никто не заметил).
+VIEW_INBOX_LIMIT = 200
+VIEW_INBOX_GROWTH = 20
+
+
+def view_inbox_count(inbox=None):
+    n = 0
+    for _d, _dirs, files in os.walk(inbox or VIEW_INBOX):
+        n += len(files)
+    return n
+
+
+def view_inbox_check():
+    """Тревога, если во входящих больше VIEW_INBOX_LIMIT файлов или их стало на VIEW_INBOX_GROWTH+ больше, чем в
+    прошлом проходе. Число хранится в STATE/view-inbox.json. → число файлов."""
+    n = view_inbox_count()
+    f = P.path("view-inbox.json")
+    rec = P.read_json(f)
+    prev = rec.get("n") if isinstance(rec, dict) else None
+    prev = prev if isinstance(prev, int) else n
+    P.write_json(f, {"n": n, "t": P.now()})
+    if n > VIEW_INBOX_LIMIT or n - prev >= VIEW_INBOX_GROWTH:
+        P.alert_once("view-inbox", n, f"{VIEW_INBOX}: {n} файлов (было {prev}, предел {VIEW_INBOX_LIMIT}) — копия для "
+                   "Obsidian переносит что-то лишнее; разбор — view-sync.sh, уборка — scripts/inbox-view-cleanup.py",
+                   "pantheon-view", note="Входящие копии Obsidian разрослись")
+    else:
+        P.clear_once("view-inbox")
+    return n
 
 
 def view(quiet=False):
@@ -26,6 +57,8 @@ def view(quiet=False):
     with P.lock("view"):
         rc = subprocess.run(["/bin/zsh", os.path.join(P.LIB, "view-sync.sh"), P.PANTHEON, P.VIEW, VIEW_INBOX],
                             capture_output=quiet).returncode
+        with contextlib.suppress(OSError):
+            view_inbox_check()
     return rc
 
 
