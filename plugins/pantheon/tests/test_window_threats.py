@@ -27,7 +27,10 @@ import tempfile
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PY = os.path.join(PLUGIN, "lib", "run.py")
 PACKS = os.path.join(PLUGIN, "packs")
-ROOT = os.path.realpath(tempfile.mkdtemp(prefix="winthreat-"))
+# корень — как у test_tick (9fc5026f): под run-tests TMPDIR окна закрывает запись в …/.claude/agents временного HOME
+# (domains build собирает роли туда) — тогда корень с приставкой tmp прямо в /tmp/claude-<uid>
+_base = "/tmp/claude-%d" % os.getuid()
+ROOT = os.path.realpath(tempfile.mkdtemp(prefix="tmp-winthreat-", dir=_base if os.path.isdir(_base) else None))
 atexit.register(shutil.rmtree, ROOT, True)
 results = []
 PINNED = re.compile(r"(@[\w.-]+/)?[\w.-]+@\d+\.\d+\.\d+")
