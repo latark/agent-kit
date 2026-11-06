@@ -9,6 +9,7 @@
 """
 import json
 import os
+import stat
 import subprocess
 import sys
 import tarfile
@@ -465,6 +466,8 @@ def test_ignored_files_saved():
     tar = e.st("wt-archive", "untracked", "w-env.tar.gz")
     names = tarfile.open(tar).getnames() if os.path.isfile(tar) else []
     check(".env.local" in names and "config/local.json" in names, f"D2: .env.local или config/ не в архиве: {names}")
+    mode = stat.S_IMODE(os.stat(tar).st_mode) if os.path.isfile(tar) else None
+    check(mode == 0o600, f"D2: архив с .env.local читают другие: права {mode and oct(mode)}")
     check(not any(n.startswith(("dist", "node_modules")) for n in names), f"D2: сборка или зависимости в архиве: {names}")
     check(not os.path.exists(wt), "D2: чистая копия с .env.local не убрана после архива")
     check("w-env" in journal(e) and "w-env.tar.gz" in journal(e), f"D2: архив не в журнале: {journal(e)!r}")

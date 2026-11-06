@@ -1288,17 +1288,19 @@ def wt_save(wt, env, clean=False):
     try:
         if d.stdout:
             p = wt_archive("patches", stem + ".patch")
-            os.makedirs(os.path.dirname(p), exist_ok=True)
+            os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             made.append(p)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(d.stdout)
         if files:
             p = wt_archive("untracked", stem + ".tar.gz")
-            os.makedirs(os.path.dirname(p), exist_ok=True)
+            os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
             budget = UNTRACKED_MAX_MB * 1024 * 1024
-            with tarfile.open(p, "x:gz") as tf:  # «x» — O_EXCL: чужой файл на этом месте не затрём и не снимем
-                made.append(p)
+            # O_EXCL: чужой файл на этом месте не затрём и не снимем; 0600 — в архиве бывают .env.local и ключи
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            made.append(p)
+            with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tf:
                 for src, arc in files:
                     budget -= _tar_regular(tf, src, arc, budget)
                 members = len(tf.getmembers())
