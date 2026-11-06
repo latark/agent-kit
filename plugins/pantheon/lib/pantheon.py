@@ -2664,7 +2664,7 @@ def _deny_forms(paths):
 # ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
 # (находка проверки безопасности 14.10). Ваших сессий без роли это не касается. Agent|Task|Skill — правила
 # hq-telegram и chiron (P0-1, P0-2): штабу — ни tg-reader, ни telegram-read; коуч с личным — только у Зевса.
-GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill"
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill|EnterWorktree"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
@@ -3093,6 +3093,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                              guard, auto_allow)
         if direction:
             data["sandbox"]["excludedCommands"] += GH_PR_WRITE
+            # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
+            # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
+            # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
+            data["permissions"]["additionalDirectories"] = list(ok)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:

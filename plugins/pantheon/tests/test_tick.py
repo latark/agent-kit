@@ -517,7 +517,7 @@ def main():
           "у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"/bin/sh {os.path.join(os.path.dirname(gpath), 'python.sh')} {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
-          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
+          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill|EnterWorktree")
     hq = load("hq")
     hb = hq["sandbox"]
     check("окно штаба (SEC-26): пишет только ~/ai/pantheon без .git и alerts.md, сети нет, мимо песочницы — start/wake/alert",

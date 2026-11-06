@@ -1,7 +1,7 @@
 # guard
 
 Правила, которые Claude Code проверяет сам, а не на память модели. Хук PreToolUse (Bash, Write, Edit, MultiEdit,
-NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; хуки зовут короткий вход `hooks/guard.py`,
+NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill, EnterWorktree) и Stop; хуки зовут короткий вход `hooks/guard.py`,
 правила — модуль `hooks/guard_rules.py`, его шапка их перечисляет (metis-0148). Флаг «сессия читала сырой Telegram» — отдельный `hooks/taint.py` (раздел tg-taint).
 
 ## От чего защищает (модель угроз, SEC-27, [sb-simplify] 27.10)
@@ -186,7 +186,7 @@ send-keys и т. п. — ввод от имени владельца), попо�
 
 | Запуск | Кто вызывает | Особенность |
 | --- | --- | --- |
-| без аргумента | хук этого плагина | если guard уже вызывают управляемые настройки (`--managed`), хук плагина молчит — кроме Agent, Task и Skill |
+| без аргумента | хук этого плагина | если guard уже вызывают управляемые настройки (`--managed`), хук плагина молчит — кроме Agent, Task, Skill и EnterWorktree |
 | `--managed` | хук из управляемых настроек | — |
 | `--strict` | хук окна роли с `onFailure: "block"` | таймаут или пропавший файл останавливают и на старом Claude Code |
 
@@ -195,7 +195,7 @@ send-keys и т. п. — ввод от имени владельца), попо�
 `hooks/__pycache__` (.pyc) — компиляция 4000 строк была больше половины времени вызова. Молчит только хук плагина;
 управляемая копия (`--managed`) и строгая (`--strict`) проверяют всегда — управляемую ничто в файлах не выключает.
 Хук плагина молчит:
-- при управляемых настройках с `guard.py --managed` — как раньше, кроме Agent, Task и Skill;
+- при управляемых настройках с `guard.py --managed` — как раньше, кроме Agent, Task, Skill и EnterWorktree;
 - в окне роли — на инструменте, который строгий guard этой же сессии уже проверил (так и Agent, Task, Skill). Строгий
   guard на PreToolUse пишет метку `~/.local/state/pantheon/guard-strict/<session_id>`, строка «окно, табуляция,
   инструмент», и обновляет её на каждом вызове. Хук плагина молчит, только если в метке есть его окно
@@ -487,6 +487,13 @@ answer и плановый проход, это скрипты, guard их не 
   Слияние окну Пританея закрыто всегда (ревью 69m-b): `gh pr merge` с `-R` и без, а также `gh api` к
   `…/pulls/<N>/merge`, `…/merges` и мутации `mergePullRequest`, `enablePullRequestAutoMerge` — отказ. Шлюз слияния
   берёт роль из agent_type, а у главной сессии окна его нет: без этого отказа она прошла бы мимо шлюза.
+- **worktree-own (metis-0911).** Окну направления (`PANTHEON_WINDOW` есть в domains.json) EnterWorktree с `path`
+  пропускается, только если путь — под `.claude/worktrees/` его папки, а сессия стоит в той же папке. Иначе Claude Code
+  задаёт владельцу вопрос «permission-root relocation»: это его проверка безопасности, её не снимают ни разрешения, ни
+  additionalDirectories, ни allow хука. Поэтому папки направления — рабочие папки окна (`additionalDirectories` в
+  `pantheon domains build`), и `cd` туда сохраняется. Своя папка из другой точки — отказ с подсказкой «сначала cd»;
+  папка чужого направления — отказ с подсказкой `pantheon start <направление>` или задачи в его inbox; путь вне папок
+  направлений — отказ. EnterWorktree с `name`, мастерская и сессия без окна — правило молчит.
 - **hq-sessync (metis-0566).** Окну Пританея `sessync find <слова> [-p имя] [-n число]` выпущен мимо песочницы
   (`excludedCommands` окна Пританея, `HQ_EXCLUDED` в pantheon.py): поиск по прошлым разговорам читает транскрипты
   `~/.claude/projects`, закрытые окну, а вывод проходит маску похожего на ключи — она в самом sessync. Правило — одна
