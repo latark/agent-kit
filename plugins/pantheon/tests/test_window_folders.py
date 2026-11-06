@@ -169,17 +169,18 @@ def main():
     check("window_extra: хук из папки окна влит в его настройки — matcher, timeout, onFailure; guard окна на месте",
           pre == [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": gp, "timeout": 10,
                                                         "onFailure": "block"}]}]
-          and any("guard/hooks/guard.py" in h["command"] for g in at["hooks"]["PreToolUse"] for h in g["hooks"]),
+          and any("guard.py' --strict" in h["command"] for g in at["hooks"]["PreToolUse"] for h in g["hooks"]),
           at["hooks"].get("PreToolUse"))
     stop = [h for g in at["hooks"].get("Stop", []) for h in g["hooks"] if "stop.sh" in h["command"]]
     check("window_extra: хук Stop без matcher, со statusMessage",
           stop == [{"type": "command", "command": os.path.join(real("projects/br"), ".claude/hooks/stop.sh"),
                     "statusMessage": "проверка"}], stop)
-    cmds = [h["command"] for ev in at["hooks"].values() for g in ev for h in g["hooks"]]
+    cmds = [h["command"] for ev in at["hooks"].values() for g in ev for h in g["hooks"]
+            if "/.claude/plugins/" not in h["command"]]  # хуки проекта, без guard и pantheon окна
     check("window_extra: чужая папка, ссылка наружу, строка оболочки, неисполняемый, относительный, неизвестное "
           "событие, лишний ключ, плохой timeout и onFailure — не влиты",
           not any(x in c for c in cmds for x in ("legal-watch", "link.sh", "plain.py", "python3"))
-          and "Nope" not in at["hooks"] and len([c for c in cmds if c == gp]) == 1, cmds)
+          and "Nope" not in at["hooks"] and cmds.count(gp) == 1 and len(cmds) == 2, cmds)
     check("window_extra: хуки чужого окна не задевают",
           not any("projects/br" in h["command"] for ev in th["hooks"].values() for g in ev for h in g["hooks"]))
     check("window_extra: отброшенные хуки названы в тревоге",
