@@ -61,6 +61,8 @@ MANAGED_RETRY (STATE/managed-update.json; попытка пишется до о�
 (managed_check).
 Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Помощник — только STATE/bin/pantheon-touchid с
 отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением).
+В событии window — поля помощника (metis-0921): biometry, la_code, shown_sec (JSON в его stdout). После слияния
+(gh pr merge rc 0) владельцу уходит одно уведомление «слит repo#N (sha7)».
 
 Окружение прохода (metis-0303). Его задаёт launchd, а launchd-окружение меняет любой процесс владельца (launchctl
 setenv). Поэтому проход строит окружение с нуля (clean_env): HOME — realpath домашней папки учётной записи (pw_dir;
