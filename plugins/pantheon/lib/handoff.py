@@ -144,7 +144,8 @@ ROUTES = (
     ("touch", "Touch ID владельца", re.compile(
         r"git\s+(?:-C\s+\S+\s+)?worktree\s+remove|deploy\.sh|(?:перезапуск|перезапуст\w*|restart)\W+(?:\w+\W+)?"
         r"(?:демон\w*\s+)?(?:cdp|comet|chrome)|cdp-daemon\S*\s+(?:comet|chrome)", re.I), "waiting",
-     "Это из белого списка Touch ID: `pantheon handoff touch <вид> <цель> --task <id> --why \"зачем\"` — плановый "
+     "Копию .claude/worktrees/<имя> после отчёта субагента или слияния PR убирает без Touch ID `pantheon wt done <путь>` "
+     "(metis-0835). Остальное — из белого списка Touch ID: `pantheon handoff touch <вид> <цель> --task <id> --why \"зачем\"` — плановый "
      "проход покажет владельцу окно Touch ID с этим действием и исполнит его один раз. Виды: worktree-remove <путь>, "
      "deploy <папка репозитория>, cdp-restart comet|chrome."),
     ("browser", "Харон", re.compile(

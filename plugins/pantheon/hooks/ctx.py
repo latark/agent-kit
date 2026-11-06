@@ -23,6 +23,11 @@
                      (afkTimeoutMs) и частичное (followUp) — не пишется; свой текст в окне — строка без статуса ответа.
   ctx.py stop        Stop: контекст 150 тыс., дальше каждые +100 тыс. → Claude сверяет файл состояния, дописывает
                      недостающее и одной строкой говорит «Пора очистить: …» (штаб и сессии без роли; не claude -p).
+                     Живые фоновые субагенты сессии (metis-0839: meta.json без finished — или с finished, но своя
+                     фоновая команда субагента ещё без итога, — без stoppedByUser и отчёта SubagentHandback, журнал
+                     писался или запущен после старта процесса и не старше 3 ч) — вместо подсказки
+                     «Не очищай: живых субагентов N, жди их отчётов», в метке слово held; /clear предлагается на
+                     первом Stop, когда живых не осталось, не дожидаясь следующих +100 тыс.
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
                      кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов; ролям Пантеона
                      последней строкой — «Сейчас: ДД.ММ ЧЧ:ММ (часы Mac)» (metis-0281).
@@ -48,7 +53,18 @@
                      окно само решает, продолжать ли (SendMessage, иначе новый субагент того же типа), и сначала
                      смотрит worktree исполнителя. Показанные — в метке <STATE>/ctx/marks/revive-<sid>: второй
                      resume их не повторяет. Хук ничего не запускает и meta.json не трогает; сбой — строка в журнале
-                     хуков, SessionStart идёт дальше.
+                     хуков, SessionStart идёт дальше. Не в списке и субагент законченного лида (parentAgentId), и
+                     субагент, чей журнал продолжился в папке другой сессии (его перенёс /clear). Блок не длиннее
+                     остатка предела хука, в метку — только показанные поимённо (metis-0875).
+                     После /clear (source=clear, metis-0839): /clear фоновых субагентов не обрывает — их журнал
+                     продолжается в папке новой сессии, итог приходит в неё уведомлением; команду Bash на переднем
+                     плане субагента /clear убивает (код 137), фоновая доживает. Прошлая сессия окна — из
+                     записи процесса CLAUDE_PID, иначе из ~/.claude/sessions/<CLAUDE_PID>.json. Её субагенты — живые
+                     и законченные после последнего сохранения файла состояния (без него — после вашего последнего
+                     сообщения) — списком: тип, описание, agentId, журнал, worktree и ветка, у живого последний текст,
+                     у законченного отчёт SubagentHandback (до 1200 знаков, пометка «данные»), без отчёта — его
+                     последний текст (встроенные субагенты SubagentHandback не зовут). Метка та же, revive-<
+                     прошлый sid>. claude -p и SDK списков не получают и меток не тратят.
   ctx.py clock       UserPromptSubmit (в том числе сообщения других сессий): та же строка часов в контекст ролей
                      Пантеона (hq, domain-coordinator, workshop; не субагентам и не вне окон ролей). Модель
                      оценивает время на глаз и ошибается на час; PANTHEON_NOW подменяет часы для тестов. Перед
@@ -91,6 +107,7 @@ PANTHEON_CTX_STEP; папки — PANTHEON_HOME, PANTHEON_STATE (для пров
 hooks/python.sh (metis-0571).
 """
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -1139,6 +1156,9 @@ def hq_news(seen_path=None, commit=True, budget=6000):
 
 # --- подсказка «пора очистить» (CTX-01) ---------------------------------------
 
+HELD = "held"  # слово в метке подсказки: на этом уровне сказано «не очищай», /clear предложить, как живых не станет
+
+
 def mark_path(sid):
     return os.path.join(CTX, "marks", re.sub(r"[^\w-]", "", sid or ""))
 
@@ -1156,18 +1176,25 @@ def cmd_stop(ev):
         return 0  # в хвосте транскрипта нет ответа (огромный вывод инструмента) — ничего не решаем
     mark = mark_path(sid)
     try:
-        last = int(open(mark).read().strip() or 0)
+        words = open(mark).read().split()
+        last, held = int(words[0]) if words else 0, HELD in words[1:]
     except (OSError, ValueError):
-        last = 0
+        last, held = 0, False
     if last and n < last // 2:
-        last = 0  # контекст сжался — отсчёт заново
-    if n < AT or (last and n < last + STEP):
+        last, held = 0, False  # контекст сжался — отсчёт заново
+    due = n >= AT and (not last or n >= last + STEP)
+    if not due and not held:
         if last == 0 and os.path.exists(mark):
             os.remove(mark)
         return 0
+    # metis-0839: пока у сессии живые фоновые субагенты, /clear не предлагается; отложенная подсказка («held» в метке)
+    # приходит на первом Stop без живых, не дожидаясь следующих +STEP
+    live = live_subagent_count(transcript, sid, process_started(os.environ.get("CLAUDE_PID")), time.time())
+    if held and not due and live:
+        return 0
     private_dir(os.path.dirname(mark))
     with open(mark, "w") as f:
-        f.write(str(n))
+        f.write("%d %s" % (n, HELD) if live else str(n))
     k = n // 1000
     path, desc = state_file(role, ev, transcript, inherited=remembered_state_file(this_session(ev)))
     if path:
@@ -1179,9 +1206,14 @@ def cmd_stop(ev):
                 "решения, что ждёт владельца и следующий шаг — после /clear хук найдёт его по этой записи."
                 % tilde(os.path.join(PANTHEON, "handoff")))
         where = "HANDOFF.md"
-    msg = ("Контекст сессии — %d тыс. токенов. %s Затем одной строкой скажи владельцу: «Пора очистить: контекст %d тыс., "
-           "всё сохранено в %s → /clear» — или назови, что ещё не закрыто. Это сообщение хука, а не владельца."
-           % (k, what, k, where))
+    if live:
+        msg = ("Контекст сессии — %d тыс. токенов. %s Запиши туда же живых субагентов: agentId, что делают и что делать "
+               "с их отчётом. Затем одной строкой скажи владельцу: «Не очищай: живых субагентов %d, жди их отчётов» — "
+               "когда они закончат, хук сам предложит /clear. Это сообщение хука, а не владельца." % (k, what, live))
+    else:
+        msg = ("Контекст сессии — %d тыс. токенов. %s Затем одной строкой скажи владельцу: «Пора очистить: контекст %d "
+               "тыс., всё сохранено в %s → /clear» — или назови, что ещё не закрыто. Это сообщение хука, а не владельца."
+               % (k, what, k, where))
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": msg}}, ensure_ascii=False))
     return 0
 
@@ -1512,6 +1544,9 @@ REVIVE_SHOW = 8            # субагентов в списке; осталь�
 REVIVE_TEXT = 300          # знаков последнего текста субагента
 REVIVE_TAIL = 400000       # хвост журнала субагента, где ищется его последний текст, байт
 REVIVE_KEEP = 200          # agentId в метке показанных
+LIVE_MAX = 3 * 3600        # живой субагент писал журнал не раньше этого (как watch.LIVE_SUBAGENT_MAX), с
+LIVE_GRACE = 120           # с после старта процесса: журналы, закрытые прежним процессом при его снятии, — до этого
+CLEAR_REPORT = 1200        # знаков отчёта субагента в списке после /clear
 
 
 def process_started(pid):
@@ -1555,9 +1590,55 @@ def last_agent_text(path):
     return ""
 
 
-def interrupted_subagents(transcript, sid, started, now):
-    """Субагенты сессии без пометки finished и stoppedByUser, чей журнал записан до старта нынешнего процесса и не
-    старше REVIVE_MAX_AGE: [(agentId, meta, путь журнала, время записи)], старые первыми. Битый meta.json — мимо."""
+BG_STARTED = re.compile(rb"running in background with ID: ([\w-]+)|moved to the background \(ID: ([\w-]+)\)")
+BG_ENDED = re.compile(rb"<task-id>([\w-]+)</task-id>|\"name\":\s*\"(?:TaskStop|KillShell|KillBash)\",\s*\"input\":\s*\{"
+                      rb"[^}]*\"(?:task_id|shell_id)\":\s*\"([\w-]+)\"")
+
+
+def background_pending(path):
+    """У субагента есть своя фоновая команда без итога (metis-0839, живая проба 06.11): Bash, ушедший в фон сам (через
+    180 с) или с run_in_background, — субагент заканчивает ход, meta.json получает finished, а итог команды будит его
+    снова. Запущенные — по ответу Bash с ID, законченные — по task-notification с этим ID или вызову TaskStop."""
+    started, ended = set(), set()
+    for raw in tail_lines(path, REVIVE_TAIL):
+        for m in BG_STARTED.finditer(raw):
+            started.add(m.group(1) or m.group(2))
+        for m in BG_ENDED.finditer(raw):
+            ended.add(m.group(1) or m.group(2))
+    return bool(started - ended)
+
+
+def agent_done(meta, jl):
+    """Субагент закончил: finished без своей фоновой команды в работе."""
+    return bool(meta.get("finished")) and not background_pending(jl)
+
+
+def agent_report(path):
+    """Отчёт субагента (metis-0839): поле message последнего вызова SubagentHandback в хвосте его журнала; '' — нет.
+    Субагент Пантеона сдаёт работу этим вызовом, его текст и есть отчёт, который получило окно."""
+    for raw in reversed(tail_lines(path, REVIVE_TAIL)):
+        if b"SubagentHandback" not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        m = d.get("message") if isinstance(d, dict) and d.get("type") == "assistant" else None
+        content = m.get("content") if isinstance(m, dict) else None
+        for c in reversed(content if isinstance(content, list) else []):
+            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "SubagentHandback":
+                msg = c.get("input").get("message") if isinstance(c.get("input"), dict) else None
+                if isinstance(msg, str) and msg.strip():
+                    return msg.strip()
+    return ""
+
+
+def session_subagents(transcript, sid):
+    """Субагенты сессии с годным meta.json (есть agentType): [(agentId, meta, путь журнала, время записи журнала)],
+    старые первыми; журнала нет — время -1. Битый meta.json — мимо."""
+    sid = re.sub(r"[^\w-]", "", sid or "")
+    if not sid or not transcript:
+        return []
     folder = os.path.join(os.path.dirname(transcript), sid, "subagents")
     try:
         names = sorted(os.listdir(folder))
@@ -1569,14 +1650,120 @@ def interrupted_subagents(transcript, sid, started, now):
         if not m:
             continue
         meta = load_json(os.path.join(folder, n))
-        if not isinstance(meta, dict) or not meta.get("agentType") or meta.get("finished") or meta.get("stoppedByUser"):
+        if not isinstance(meta, dict) or not meta.get("agentType"):
             continue
         jl = os.path.join(folder, "agent-%s.jsonl" % m.group(1))
-        t = _mtime(jl)
-        if t < 0 or t >= started or now - t > REVIVE_MAX_AGE:
-            continue
-        out.append((m.group(1), meta, jl, t))
+        out.append((m.group(1), meta, jl, _mtime(jl)))
     return sorted(out, key=lambda x: x[3])
+
+
+def lead_done(meta, metas):
+    """Субагент лида (parentAgentId), чей лид закончил или остановлен вами (metis-0875 Д2): его итог — в отчёте лида,
+    отдельной строкой он не нужен."""
+    lead = metas.get(str(meta.get("parentAgentId") or ""))
+    return isinstance(lead, dict) and bool(lead.get("finished") or lead.get("stoppedByUser"))
+
+
+def interrupted_subagents(transcript, sid, started, now):
+    """Субагенты сессии без пометки finished и stoppedByUser, чей журнал записан до старта нынешнего процесса и не
+    старше REVIVE_MAX_AGE: [(agentId, meta, путь журнала, время записи)], старые первыми. Субагент законченного лида —
+    мимо (metis-0875 Д2)."""
+    found = session_subagents(transcript, sid)
+    metas = {aid: meta for aid, meta, _, _ in found}
+    return [(aid, meta, jl, t) for aid, meta, jl, t in found
+            if not meta.get("finished") and not meta.get("stoppedByUser") and 0 <= t < started
+            and now - t <= REVIVE_MAX_AGE and not lead_done(meta, metas) and not moved_on(transcript, sid, aid, t)]
+
+
+def moved_on(transcript, sid, aid, t):
+    """Журнал субагента продолжился в папке другой сессии того же проекта (metis-0839): /clear его не оборвал, а
+    перенёс в новую сессию. Здесь остался журнал до /clear без finished — это не оборванный субагент."""
+    pattern = os.path.join(glob.escape(os.path.dirname(transcript)), "*", "subagents", "agent-%s.jsonl" % aid)
+    own = os.path.join(os.path.dirname(transcript), sid, "subagents")
+    return any(os.path.dirname(p) != own and _mtime(p) >= t for p in glob.glob(pattern))
+
+
+def born_after(path, started):
+    """Первая запись журнала субагента позже старта процесса: его запустил нынешний процесс."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            first = f.readline(65536)
+        t = iso_ts(json.loads(first).get("timestamp"))
+    except (OSError, ValueError, AttributeError):
+        return False
+    return t is not None and t > started
+
+
+def after_start(jl, t, started):
+    """Субагент — нынешнего процесса: старт неизвестен, журнал писался позже старта + LIVE_GRACE или запущен после
+    старта. Без второго условия субагент, запущенный в первые LIVE_GRACE секунд процесса, не считался живым (проба
+    metis-0839: подсказка /clear при живом)."""
+    return not started or t > started + LIVE_GRACE or born_after(jl, started)
+
+
+def live_subagent_count(transcript, sid, started, now):
+    """Живые субагенты сессии (metis-0839, правило то же, что watch.live_subagents): без finished (или с ним, но своя
+    фоновая команда субагента ещё идёт — background_pending), без stoppedByUser и без отчёта SubagentHandback, журнал писался после старта нынешнего процесса (+ LIVE_GRACE) или запущен после
+    старта, и не раньше LIVE_MAX назад. Старт процесса неизвестен (0) — по одному сроку: лишний «живой» только
+    задержит подсказку /clear."""
+    n = 0
+    for _, meta, jl, t in session_subagents(transcript, sid):
+        if meta.get("stoppedByUser") or t < 0 or now - t > LIVE_MAX or agent_done(meta, jl):
+            continue
+        if not after_start(jl, t, started):
+            continue
+        if not agent_report(jl):
+            n += 1
+    return n
+
+
+def agent_line(aid, meta, jl, t, metas):
+    """Строка субагента для списка: тип, описание, agentId, имя, лид, журнал, время, worktree, ветка."""
+    name = " имя %s," % meta["name"] if isinstance(meta.get("name"), str) and meta.get("name") else ""
+    lead = str(meta.get("parentAgentId") or "")
+    lead = " субагент лида %s," % lead if lead and lead in metas else ""
+    wt, br = meta.get("worktreePath"), meta.get("worktreeBranch")
+    return "- %s «%s» (agentId %s,%s%s журнал %s, последняя запись %s%s%s)" % (
+        str(meta.get("agentType")), " ".join(str(meta.get("description") or "").split())[:120], aid, name, lead,
+        tilde(jl), datetime.fromtimestamp(t).strftime("%d.%m %H:%M") if t >= 0 else "—",
+        ", worktree %s" % tilde(wt) if isinstance(wt, str) and wt else "",
+        ", ветка %s" % br if isinstance(br, str) and br else "")
+
+
+def fit_block(head, tail, items, render, more, room):
+    """Блок «head, строки, пустая строка, tail» не длиннее room (metis-0875 Д3): строки по порядку, пока влезают вместе
+    со строкой more(n) об остальных. → (текст, показанные элементы); не влезает ни одна строка — (None, [])."""
+    used = len(head) + 2 + len(tail)  # "\n" после head и "\n" пустой строки перед tail
+    lines, shown = [], []
+    for i, item in enumerate(items[:REVIVE_SHOW]):
+        line = render(item)
+        rest = len(items) - i - 1
+        if used + len(line) + 1 + (len(more(rest)) + 1 if rest else 0) > room:
+            break
+        used += len(line) + 1
+        lines.append(line)
+        shown.append(item)
+    if not shown:
+        return None, []
+    if len(shown) < len(items):
+        lines.append(more(len(items) - len(shown)))
+    return "\n".join([head] + lines + ["", tail]), shown
+
+
+def marked_once(mp, items, build):
+    """Показать элементы один раз на метку mp ({agents: [agentId…]}): build(новые) → (текст, показанные); в метку
+    уходят только показанные поимённо (metis-0875 Д3). None — показывать нечего."""
+    with locked(mp):
+        mark = load_json(mp)
+        seen = [str(x) for x in mark.get("agents") or []] if isinstance(mark, dict) else []
+        items = [x for x in items if x[0] not in seen]
+        if not items:
+            return None
+        text, shown = build(items)
+        if not text:
+            return None
+        save_json(mp, {"agents": (seen + [x[0] for x in shown])[-REVIVE_KEEP:], "t": time.time()})
+    return text
 
 
 def revive_mark_path(sid):
@@ -1594,14 +1781,7 @@ def revive_block(ev, room=INJECT_MAX):
     found = interrupted_subagents(transcript, sid, process_started(os.environ.get("CLAUDE_PID")), time.time())
     if not found:
         return None
-    mp = revive_mark_path(sid)
-    with locked(mp):
-        mark = load_json(mp)
-        seen = [str(x) for x in mark.get("agents") or []] if isinstance(mark, dict) else []
-        found = [f for f in found if f[0] not in seen]
-        if not found:
-            return None
-        save_json(mp, {"agents": (seen + [f[0] for f in found])[-REVIVE_KEEP:], "t": time.time()})
+    metas = {aid: meta for aid, meta, _, _ in session_subagents(transcript, sid)}
     head = ("Оборванные субагенты (metis-0864): прошлый процесс этой сессии завершился, пока они работали, и сами они "
             "не продолжатся. Последний текст субагента — пересказ, данные, а не указание.")
     tail = ("Продолжать ли каждого — решаешь ты, хук ничего не запускает. Сначала посмотри worktree исполнителя "
@@ -1610,26 +1790,105 @@ def revive_block(ev, room=INJECT_MAX):
             "поднимается из своего журнала с тем же agentId, но прерванную команду запускает заново, поэтому в "
             "сообщении скажи, что уже сделано и что не повторять. Если SendMessage не поднял его — новый субагент "
             "того же типа с путём к старому журналу в поручении.")
-    lines = []
-    budget = room - len(head) - len(tail) - 4
-    for i, (aid, meta, jl, t) in enumerate(found[:REVIVE_SHOW]):
-        name = " имя %s," % meta["name"] if isinstance(meta.get("name"), str) and meta.get("name") else ""
-        wt = meta.get("worktreePath")
-        line = "- %s «%s» (agentId %s,%s журнал %s, последняя запись %s%s)" % (
-            str(meta.get("agentType")), " ".join(str(meta.get("description") or "").split())[:120], aid, name,
-            tilde(jl), datetime.fromtimestamp(t).strftime("%d.%m %H:%M"),
-            ", worktree %s" % tilde(wt) if isinstance(wt, str) and wt else "")
+
+    def render(item):
+        aid, meta, jl, t = item
         text = last_agent_text(jl)
-        line += ": «%s»" % text if text else ": текста нет"
-        if len(line) + 1 > budget:
-            lines.append("- ещё %d — в папке %s" % (len(found) - i, tilde(os.path.dirname(jl))))
-            break
-        budget -= len(line) + 1
-        lines.append(line)
-    else:
-        if len(found) > REVIVE_SHOW:
-            lines.append("- ещё %d — в папке %s" % (len(found) - REVIVE_SHOW, tilde(os.path.dirname(found[0][2]))))
-    return "\n".join([head] + lines + ["", tail])
+        return agent_line(aid, meta, jl, t, metas) + (": «%s»" % text if text else ": текста нет")
+
+    folder = tilde(os.path.dirname(found[0][2]))
+    return marked_once(revive_mark_path(sid), found, lambda items: fit_block(
+        head, tail, items, render, lambda n: "- ещё %d — в папке %s" % (n, folder), room))
+
+
+# --- субагенты прошлой сессии после /clear (metis-0839) ----------------------------------------------------------
+# Живая проба 06.11 (Claude Code 2.1.318, Haiku, интерактивная сессия в псевдотерминале) и 24 случая в журналах на диске:
+# /clear фоновых субагентов не обрывает. Работающий субагент доживает с тем же agentId, его журнал продолжается в
+# <новый sid>/subagents/agent-<id>.jsonl (там же meta.json, к концу с finished), а уведомление task-notification с его
+# итогом <result> приходит в новую сессию. В папке прошлой сессии остаются журнал до /clear и meta.json без finished.
+# Но команду Bash, которая шла у субагента на переднем плане, /clear убивает: субагент получает «Exit code 137» и
+# сам решает, что дальше (проба live10: Haiku сдал «не вышло»); его фоновая команда (run_in_background) доживает и
+# будит его итогом (проба live3). Поэтому Stop не предлагает /clear при живых, а список зовёт проверить итог живого.
+# Новая сессия не знает, чей это субагент и что делать с итогом, — SessionStart clear отдаёт ей список субагентов прошлой
+# сессии: живых и законченных после последнего сохранения файла состояния, с отчётом.
+
+
+def cleared_session(ev):
+    """Прошлая сессия окна, которую сменил /clear: запись процесса CLAUDE_PID (её ведёт start), иначе запись реестра
+    ~/.claude/sessions/<CLAUDE_PID>.json, если в ней ещё прошлый sessionId и его транскрипт лежит рядом с нынешним.
+    → {"id", "transcript", …} или None."""
+    prev = previous_session(ev)
+    if prev and prev.get("id") and prev.get("transcript"):
+        return prev
+    pid, sid, tp = os.environ.get("CLAUDE_PID") or "", ev.get("session_id") or "", ev.get("transcript_path") or ""
+    if not re.fullmatch(r"[0-9]+", pid) or not tp:
+        return None
+    rec = load_json(os.path.join(HOME, ".claude", "sessions", pid + ".json"))
+    old = rec.get("sessionId") if isinstance(rec, dict) and str(rec.get("pid")) == pid else None
+    if not isinstance(old, str) or not re.fullmatch(r"[\w-]+", old) or old == sid:
+        return None
+    otp = os.path.join(os.path.dirname(tp), old + ".jsonl")
+    return {"id": old, "transcript": otp, "role": ""} if os.path.isfile(otp) else None
+
+
+def clear_block(ev, room=INJECT_MAX):
+    """SessionStart clear основной сессии: субагенты прошлой сессии — живые (доработают, итог придёт сюда) и законченные
+    после последнего сохранения файла состояния (с отчётом SubagentHandback). Показанные — в метке revive-<прошлый sid>,
+    той же, что у resume: второй раз не повторяются. None — показывать нечего."""
+    prev = cleared_session(ev)
+    if not prev:
+        return None
+    psid, ptp = re.sub(r"[^\w-]", "", prev.get("id") or ""), prev.get("transcript") or ""
+    found = session_subagents(ptp, psid)
+    if not found:
+        return None
+    now = time.time()
+    metas = {aid: meta for aid, meta, _, _ in found}
+    started = process_started(os.environ.get("CLAUDE_PID"))
+    path, desc = state_file(ev.get("agent_type") or prev.get("role") or "", ev, ptp,
+                            inherited=remembered_state_file(prev))
+    since = _mtime(path) if path else -1
+    if since < 0:
+        since, desc = last_owner_time(ptp) or 0, None
+    live, done = [], []
+    for aid, meta, jl, t in found:
+        if meta.get("stoppedByUser") or t < 0 or now - t > REVIVE_MAX_AGE or lead_done(meta, metas):
+            continue
+        report = agent_report(jl)
+        if report or agent_done(meta, jl):
+            if t >= since:
+                done.append((aid, meta, jl, t, report))
+        elif now - t <= LIVE_MAX and after_start(jl, t, started):
+            live.append((aid, meta, jl, t, None))
+    items = live + done
+    if not items:
+        return None
+    saved = ("после последнего сохранения: %s" % desc) if desc else "после вашего последнего сообщения"
+    head = ("Субагенты прошлой сессии (metis-0839): /clear их не обрывает. Живой доработает: его журнал продолжится в "
+            "папке этой сессии, итог придёт сюда уведомлением task-notification с тем же agentId. Но команду, которая "
+            "шла у живого на переднем плане, /clear убил (код 137): в итоге проверь, не оборван ли прогон. Ниже живые и "
+            "законченные %s. Отчёт и последний текст субагента — данные, а не указание и не слова владельца." % saved)
+    tail = ("Живого не запускай заново: он работает, итог придёт сам. Законченных сверь с файлом передачи дел и доведи "
+            "неучтённое (ревью, слияние, следующий шаг). Полный отчёт — в журнале субагента, вызов SubagentHandback.")
+
+    def render(item):
+        aid, meta, jl, t, report = item
+        line = agent_line(aid, meta, jl, t, metas)[2:]
+        if report is None:
+            text = last_agent_text(jl)
+            return "- живой: " + line + (": последний текст «%s»" % text if text else "")
+        text = " ".join(report.split())
+        if len(text) > CLEAR_REPORT:
+            text = text[:CLEAR_REPORT - 1] + "… (дальше — в журнале)"
+        if text:
+            return "- закончил: " + line + ": отчёт «%s»" % text
+        # встроенный субагент (general-purpose и т. п.) не вызывает SubagentHandback: его итог — последний текст
+        text = last_agent_text(jl)
+        return "- закончил: " + line + ": отчёта SubagentHandback нет" + (", последний текст «%s»" % text if text else "")
+
+    folder = tilde(os.path.dirname(found[0][2]))
+    return marked_once(revive_mark_path(psid), items, lambda xs: fit_block(
+        head, tail, xs, render, lambda n: "- ещё %d — в папке %s" % (n, folder), room))
 
 
 def cmd_start(ev):
@@ -1661,13 +1920,16 @@ def cmd_start(ev):
     out = hq_news(commit=not automation()) if role == "hq" else []  # тревоги — первыми: короче и важнее доски
     clock = clock_line(ev)
     reserve = len(clock) + 2 if clock else 0  # строка часов идёт последней и в предел не режется
-    if source == "resume" and not ctx_off():
+    # claude -p --resume и SDK (metis-0875 Д4): окна, которому решать, нет — ни списка, ни метки
+    if source in ("resume", "clear") and not ctx_off() and not automation():
         try:
-            block = revive_block(ev, INJECT_MAX - reserve - sum(len(x) + 2 for x in out))
+            block = (revive_block if source == "resume" else clear_block)(
+                ev, INJECT_MAX - reserve - sum(len(x) + 2 for x in out))
             if block:
                 out.append(block)
-        except Exception as e:  # noqa: BLE001 — список оборванных субагентов не должен ронять SessionStart
-            hook_log("start", "список оборванных субагентов не собран: %r" % (e,))
+        except Exception as e:  # noqa: BLE001 — список субагентов не должен ронять SessionStart
+            hook_log("start", "%s не собран: %r" % ("список оборванных субагентов" if source == "resume"
+                                                    else "список субагентов прошлой сессии", e))
     if not ctx_off():
         out += after_compact_blocks(role, ev, source, INJECT_MAX - reserve - sum(len(x) + 2 for x in out))
     emit("SessionStart", out + [clock])

@@ -8,6 +8,7 @@
   «истекло»; карточка ушла без ответа — «закрыто». Повтор не раньше repeat_min, после long_wait_min — «долго ждёт»
   и тишина. Срочное (срок близко) — сразу и с напоминаниями.
 - Тихие часы и сверх бюджета — в очередь: утренний дайджест при первом движении и раздел сводки.
+- Утренний дайджест: строка «Закрыто за сутки: N» (done с прошлой сводки, не старше суток; каждая задача — в одной сводке); done_digest = false — без неё.
 - Журнал notify-log.jsonl: исход только «answer», «expired», «closed»; «answer» — только по журналу владельца.
 
 Пороги — DEFAULTS, переопределение — таблица [notify] в schedule.toml. Состояние — STATE/notify.json (пишется под
@@ -30,6 +31,7 @@ DEFAULTS = {
     "urgent_hours": 4,            # срок ближе — срочно: сразу, мимо присутствия и бюджета
     "urgent_remind_min": [60, 30],  # напоминания срочного — за столько минут до срока
     "daily_budget": 5,            # прерывающих уведомлений в день
+    "done_digest": True,          # в утренней сводке — «Закрыто за сутки: N» (done за сутки); false — без строки
     "phone": False,               # push на телефон — выключено: нужно отдельное «да» владельца
 }
 OUTCOMES = ("answer", "expired", "closed")
@@ -62,7 +64,7 @@ def settings(raw=None):
         v = raw[k]
         if k in ("quiet_start", "quiet_end"):
             ok = _hm(v) is not None
-        elif k == "phone":
+        elif k in ("phone", "done_digest"):
             ok = isinstance(v, bool)
         elif k == "urgent_remind_min":
             ok = isinstance(v, list) and all(_num(x) and 0 < x <= 1440 for x in v)
@@ -315,30 +317,39 @@ class Policy:
             text += " · совет: " + (rec if len(rec) <= 80 else rec[:79] + "…")
         return text
 
-    def run(self, counts=None, url=None, summary_url=None, legacy_digest_day=None):
+    def run(self, counts=None, url=None, summary_url=None, legacy_digest_day=None, done=()):
         """Утренний дайджест и пинги по решениям этого прохода. counts — (нужен ответ, просрочено, входящих);
         url(id) — ссылка на карточку. legacy_digest_day — digest_day прежнего board.json (до 0.11.15): в день
-        обновления второго утреннего не будет."""
+        обновления второго утреннего не будет. done — id задач, закрытых в окне done_since (строка сводки, если cfg done_digest); уже посчитанные прошлой сводкой не в счёт."""
         url = url or (lambda tid: None)
         if "digest_day" not in self.st and legacy_digest_day:
             self.st["digest_day"] = legacy_digest_day
-        self._digest(counts or (0, 0, 0), summary_url)
+        self._digest(counts or (0, 0, 0), summary_url, done)
         self._ping_decisions(url, summary_url)
 
-    def _digest(self, counts, summary_url):
+    def done_since(self):
+        """Начало окна «закрыто»: прошлая отправка сводки (digest_t), но не старше суток; сводки не было — сутки."""
+        return max(self.st.get("digest_t") or 0, self.t - DAY)
+
+    def _digest(self, counts, summary_url, done=()):
         if self.st.get("digest_day") == self.today or not _after_end(self.t, self.cfg) or self.presence != "here":
             return
         self.st["digest_day"] = self.today
         since = max(self.st.get("digest_t") or 0, self.t - DAY)
         held = sum(1 for x in self.st["queue"] if x.get("t", 0) > since)
         self.st["digest_t"] = self.t
+        done_ids = sorted({str(x) for x in done}) if isinstance(done, (list, tuple, set)) else []
+        done = len(set(done_ids) - set(self.st.get("digest_done") or [])) if self.cfg.get("done_digest", True) else 0
+        self.st["digest_done"] = done_ids
         for c in self.st["cycles"].values():  # ночное отложенное вышло дайджестом: отсчёт повтора — от него
             if c.pop("night", None):
                 c["last"], c["queued"] = self.t, False
         n, overdue, inbox = counts
-        if not (n or overdue or inbox or held):
+        if not (n or overdue or inbox or held or done):
             return
         text = f"Доброе утро. {HUMAN_WAIT}: {n}, просрочено: {overdue}, входящих заявок: {inbox}."
+        if done:
+            text += f" Закрыто за сутки: {done}."
         if held:
             text += f" Отложено: {held} — в сводке."
         self._send(text, "digest", ["digest"], summary_url, "digest")
