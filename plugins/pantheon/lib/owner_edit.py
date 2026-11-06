@@ -528,9 +528,7 @@ def process(d, win, name):
     req2, raw2 = load_req(path)
     if req2 is None or raw2 != raw:
         return drop(d, path, req, "dropped", "заявку сменили или сняли, пока окно было открыто — палец не засчитан")
-    req2["window"] = win
-    if window_text(req2) != text:
-        return drop(d, path, req, "dropped", "текст правки изменился после пальца — новая заявка")
+    req2["window"] = win   # байты те же — и текст окна тот же, что видел владелец
     return apply(d, path, req2, "touchid", "Touch ID")
 
 

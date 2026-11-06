@@ -171,6 +171,14 @@ def short(req):
     return req["diff_sha"][:OE.SHORT]
 
 
+def raises(fn, *a):
+    try:
+        fn(*a)
+    except OE.Refuse:
+        return True
+    return False
+
+
 def yes_question(req):
     return OE.question(req)
 
@@ -260,6 +268,31 @@ check("файл изменён: отказ с причиной", result(req).get
 fresh()
 propose("~/.claude/pantheon/policy.toml", NEW)
 path0, req, _ = reqs()[0]
+write(POLICY, OLD + "# правка владельца\n")
+run()
+check("файл изменён, ответа нет — отказ без окна Touch ID", not ASKED and result(req).get("state") == "refused"
+      and read(POLICY) == OLD + "# правка владельца\n", (ASKED, result(req)))
+
+# новый текст подменён целиком, sha после, дифф и sha диффа пересчитаны под него: проверка текста — и в проходе
+for target_, bad_new, what in (("~/.claude/pantheon/policy.toml", "[merge_repos\n", "не TOML"),
+                               ("~/.claude/agents/_parts/names.part", "x" * (OE.NEW_MAX + 1), "больше предела")):
+    fresh()
+    propose(target_, NEW)
+    path0, req, _ = reqs()[0]
+    IDLE[0] = 10 ** 6
+    p_ = OE.target(req["file"])
+    d_ = OE.make_diff(req["file"], read(p_), bad_new)
+    bad = dict(req, new=bad_new, after=OE.sha(bad_new), diff=d_,
+               diff_sha=OE.diff_sha(req["file"], req["before"], OE.sha(bad_new), d_))
+    write(path0, json.dumps(bad))
+    answer(OE.question(bad), "А — Да, применить")
+    run()
+    check(f"заявка с новым текстом {what} (согласованная) — не применено", read(p_) != bad_new
+          and result(req).get("state") == "refused", result(req))
+
+fresh()
+propose("~/.claude/pantheon/policy.toml", NEW)
+path0, req, _ = reqs()[0]
 IDLE[0] = 10 ** 6
 answer(yes_question(req), "А — Да, применить", t=time.time() - 3600)
 run()
@@ -333,7 +366,61 @@ evil = dict(req, file=".claude/settings.json", diff=diff,
 write(path0, json.dumps(evil))
 answer(OE.question(evil), "А — Да, применить")
 run()
-check("заявка на файл вне списка — снята, файл не тронут", read(settings) == OLD and not os.path.exists(path0))
+check("заявка на файл вне списка — снята как негодная, файл не тронут", read(settings) == OLD
+      and not os.path.exists(path0) and result(evil) == {} and not journal(), (result(evil), journal()))
+
+# каждое поле сверки отдельно: sha после, дифф, sha диффа (остальное в заявке — как было)
+for field, value in (("after", "0" * 64), ("diff", None), ("diff_sha", "1" * 64)):
+    fresh()
+    propose("~/.claude/pantheon/policy.toml", NEW)
+    path0, req, _ = reqs()[0]
+    IDLE[0] = 10 ** 6
+    bad = dict(req, **{field: value if value else req["diff"].replace("latark/other", "latark/evil")})
+    write(path0, json.dumps(bad))
+    answer(OE.question(bad), "А — Да, применить")
+    run()
+    check(f"заявка: {field} не сходится с файлом и новым текстом — не применено", read(POLICY) == OLD
+          and result(req).get("state") == "refused", result(req))
+
+fresh()
+propose("~/.claude/pantheon/policy.toml", NEW)
+path0, req, _ = reqs()[0]
+IDLE[0] = 10 ** 6
+answer(yes_question(req).replace(short(req), "ab" + short(req)), "А — Да, применить")
+run()
+check("sha диффа внутри другого числа — не тот sha", read(POLICY) == OLD and result(req).get("state") == "refused")
+
+fresh()
+propose("~/.claude/pantheon/policy.toml", NEW)
+path0, req, _ = reqs()[0]
+IDLE[0] = 10 ** 6
+answer(yes_question(req), "А — Да, применить")
+answer(yes_question(req), "Б — Нет", t=time.time() + 1)
+run()
+check("решает последний ответ: «да», потом «нет» — отклонено", read(POLICY) == OLD
+      and result(req).get("state") == "declined", result(req))
+
+check("путь вне списка: rel_of и target отказывают сами", OE.rel_of("~/.claude/settings.json") is None
+      and OE.rel_of(os.path.join(HOME, ".claude", "pantheon", "policy.toml")) == ".claude/pantheon/policy.toml"
+      and raises(OE.target, ".claude/settings.json") and raises(OE.target, "../.claude/pantheon/policy.toml"))
+fresh()
+os.link(POLICY, os.path.join(WORK, "hard"))
+rc, _, errs = propose("~/.claude/pantheon/policy.toml", NEW)
+os.unlink(os.path.join(WORK, "hard"))
+check("policy.toml с жёсткой ссылкой — отказ", rc == 2 and not reqs() and "не обычный" in errs, errs)
+os.unlink(POLICY)
+os.mkfifo(POLICY)
+rc, _, errs = propose("~/.claude/pantheon/policy.toml", NEW)
+os.unlink(POLICY)
+check("policy.toml — не обычный файл — отказ", rc == 2 and not reqs() and "не обычный" in errs, errs)
+fresh(policy=OLD + "#" * OE.NEW_MAX)
+rc, _, errs = propose("~/.claude/pantheon/policy.toml", NEW)
+check("policy.toml больше предела — отказ", rc == 2 and not reqs() and "КБ" in errs, errs)
+fresh()
+rc, _, errs = propose("~/.claude/agents/_parts/names.part", "Зевс\x00\n")
+check("новый текст с NUL — отказ", rc == 2 and not reqs() and "NUL" in errs, errs)
+rc, _, errs = propose("~/.claude/agents/_parts/names.part", "x" * (OE.NEW_MAX + 1))
+check("новый текст больше предела — отказ", rc == 2 and not reqs(), errs)
 
 fresh()
 propose("~/.claude/pantheon/policy.toml", NEW)
@@ -424,10 +511,21 @@ fresh()
 propose("~/.claude/pantheon/policy.toml", NEW)
 os.environ["CLAUDECODE"] = "1"
 rc, _, errs = quiet(OE.main, ["run"])
-os.environ.pop("CLAUDECODE")
+os.environ.pop("CLAUDECODE", None)   # проход (если пошёл) снял окружение теста — вернуть
+os.environ.update(dict(BASE_ENV, HOME=HOME))
 check("run из окна Claude Code — отказ, код 2", rc == 2 and read(POLICY) == OLD and not ASKED, errs)
-rc, out, _ = quiet(OE.main, ["status"])
-check("status: заявка видна", "ждёт" in out and "policy.toml" in out, out)
+os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"
+rc, _, errs = quiet(OE.main, ["run"])
+os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+os.environ.update(dict(BASE_ENV, HOME=HOME))
+check("run с CLAUDE_CODE_ENTRYPOINT — отказ, код 2", rc == 2 and read(POLICY) == OLD and not ASKED, errs)
+M.TEST = None   # настоящая сверка: HOME теста — не домашняя папка учётной записи
+rc, _, errs = quiet(OE.main, ["run"])
+M.TEST = {"env": BASE_ENV}
+check("run: HOME окружения не домашняя папка — отказ, код 2", rc == 2 and read(POLICY) == OLD and not ASKED
+      and "окружение прохода подменено" in errs, errs)
+rc, out, _ = quiet(P.main, ["owner-edit", "status"])
+check("pantheon owner-edit status: заявка видна", "ждёт" in out and "policy.toml" in out, out)
 dry = os.path.join(STATE, "dryrun.log")
 with contextlib.suppress(FileNotFoundError):
     os.remove(dry)

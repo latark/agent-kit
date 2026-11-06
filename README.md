@@ -623,6 +623,13 @@
   проход показывает владельцу окно Touch ID с действием целиком (помощник слияния) и исполняет его один раз по sha256
   текста. Где Touch ID не действует — README guard, «Touch ID: где не действует». Журнал отказов —
   `STATE/logs/handoff.jsonl`, строка «Отказы за сутки» — в сводке доски (board-auto.md).
+- `plugins/pantheon/lib/owner_edit.py` — правка файла владельца без окна роли (metis-0910, план 0907 (а)): только
+  `~/.claude/pantheon/policy.toml` и `~/.claude/agents/_parts/*.part`, уже существующие; settings.json — нет.
+  `pantheon owner-edit propose <файл> --from <новый текст> --task ID` кладёт заявку (sha до, дифф, sha диффа) и печатает
+  вопрос Зевсу «[<id>] …» с sha диффа. Роль файл не пишет: плановый проход (`owner-edit run`, его зовёт тик, пока есть
+  заявки) применяет по одному действию владельца на выбор — «да» в окне вопросов или ответом в чате на этот вопрос
+  (owner-log, с тем же sha в вопросе; галочка на доске не в счёт) или Touch ID в окне с правкой целиком. Файл изменился
+  после заявки — отказ. Хеши до и после — `STATE/logs/owner-edit.jsonl`, палец — `owner-log/owner-edit-approve.log`.
 - `plugins/pantheon/lib/browser.py` — браузер владельца для ролей без пароля и порта демона (metis-0760, путь В):
   `pantheon browser health|open|read|eval|status` — чтение, `allow|click|type|submit|delete` — действия (metis-0765). Окно кладёт заявку в `browser/` своего кэша,
   демон с паролем зовёт проход вне окна (`pantheon browser run`, его запускает плановый проход, пока есть заявки). Окна —
