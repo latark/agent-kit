@@ -47,7 +47,8 @@ def commit(g, wt, fname, text):
 
 
 def age(wt, seconds):
-    os.utime(wt, (T0 - seconds, T0 - seconds))
+    """Состарить копию целиком: уборка смотрит не только mtime папки, но и свежие правки внутри (metis-0835, D1)."""
+    age_all(wt, seconds)
 
 
 def age_all(wt, seconds, keep=()):
@@ -132,7 +133,7 @@ def test_agent_lock():
     sub_meta(e, "agent-a0aa11bb22cc33dd", dead, T0 - 5 * 3600, finished=True)
     sub_meta(e, "agent-a0bb22cc33dd44ee", live, T0 - 60)
     for wt in (dead, live):
-        age(wt, 2 * 3600)
+        age(wt, 4 * 3600)
     age(hold, 10 * DAY)
     age(young, 60)
     e.run("watch", t=T0)
@@ -312,21 +313,22 @@ def test_live_session_never_touched():
 
 
 def test_empty_copy_without_day():
-    """(б) Пустая чистая копия (HEAD = main, своих коммитов нет) без сессии убирается через WORKTREE_EMPTY_MIN, а не
-    через сутки; моложе — остаётся; копия, где Claude Code знает сессию без процесса (её поднимут), ждёт сутки."""
+    """(б) Пустая чистая копия (HEAD = main, своих коммитов нет) без сессии убирается через LIVE_SUBAGENT_MAX (3 ч без
+    правок), а не через сутки; моложе — остаётся; копия, где Claude Code знает сессию без процесса (её поднимут), ждёт
+    сутки."""
     e, folder, g = repo()
     old = copy(folder, g, "w-empty-old")
     young = copy(folder, g, "w-empty-young")
     known = copy(folder, g, "w-empty-known")
     e.agents([{"id": "stop0001", "sessionId": "stop0001-x", "name": "x", "state": "stopped", "kind": "background",
                "cwd": known, "startedAt": (T0 - 9000) * 1000}])
-    age(old, 3600)
-    age(known, 3600)
+    age(old, 4 * 3600)
+    age(known, 4 * 3600)
     age(young, 10 * 60)
     e.run("watch", t=T0)
-    check(not os.path.exists(old), "пустая копия часового возраста не убрана (ждёт сутки?)")
+    check(not os.path.exists(old), "пустая копия 4 ч без правок не убрана (ждёт сутки?)")
     check(branch_sha(g, "w-empty-old") is None, "пустая копия: слитая ветка не снята branch -d")
-    check(os.path.exists(young), "пустая копия моложе WORKTREE_EMPTY_MIN убрана")
+    check(os.path.exists(young), "пустая копия моложе LIVE_SUBAGENT_MAX убрана")
     check(os.path.exists(known), "пустая копия с остановленной сессией Claude Code убрана раньше суток")
 
 
@@ -341,6 +343,8 @@ def test_wt_done_command():
     open(os.path.join(dirty, "base.txt"), "w").write("правка\n")
     other = os.path.join(e.tmp, "outside-copy")
     g("worktree", "add", "-q", "-b", "o-1", other)
+    for w in (plain, dirty):
+        age(w, 3600)
     r = e.run("wt", "plan", folder, t=T0)
     check(r.returncode == 0 and "w-plain" in r.stdout and os.path.isdir(plain), f"plan: {r.stdout!r} {r.stderr!r}")
     r = e.run("wt", "done", plain, "--dry-run", t=T0)
@@ -359,6 +363,8 @@ def test_wt_done_command():
     # окно роли: заявка в кэш окна
     win = copy(folder, g, "w-win")
     foreign = copy(folder, g, "w-foreign")
+    for w in (win, foreign):
+        age(w, 3600)
     cache = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox")
     for n, w in (("g-dir", win), ("zz-other", foreign)):
         os.makedirs(os.path.join(cache, n, "tmp"), exist_ok=True)
@@ -380,6 +386,163 @@ def test_wt_done_command():
     os.symlink(other_dir, os.path.join(cache, "g-link", "wt-req"))
     e.run("watch", t=T0)
     check(os.path.isfile(junk), "заявки: файл в папке за ссылкой wt-req удалён")
+
+
+def fresh(wt, fname, seconds, text="правка\n"):
+    """Файл копии с правкой seconds назад (по часам T0); папка, где он лежит, — тоже (новый файл меняет её mtime)."""
+    p = os.path.join(wt, fname)
+    open(p, "w").write(text)
+    for q in (p, os.path.dirname(p)):
+        os.utime(q, (T0 - seconds, T0 - seconds))
+
+
+def test_fresh_change_keeps_copy():
+    """D1 (metis-0835): живую работу, которую не видно по cwd, lsof и meta (сессия сделала cd в копию, субагент без
+    worktreePath в meta), выдают свежие правки. Дежурный: копия, которой по сроку пора (4 дн.), но в ней правка
+    моложе LIVE_SUBAGENT_MAX (3 ч), — цела, без патча и тревоги; та же правка старше 3 ч — копия убрана. `wt done`:
+    правка 2 мин назад — копия цела, заявка оставлена; правка старше WT_DONE_QUIET (10 мин) — убрана сразу."""
+    e, folder, g = repo()
+    busy = copy(folder, g, "w-busy")
+    calm = copy(folder, g, "w-calm")
+    for w in (busy, calm):
+        age(w, 4 * DAY)
+    fresh(busy, "base.txt", 3600)          # грязная, правка час назад
+    fresh(calm, "base.txt", 4 * 3600)      # грязная, правка 4 ч назад
+    os.utime(busy, (T0 - 4 * DAY, T0 - 4 * DAY))
+    os.utime(calm, (T0 - 4 * DAY, T0 - 4 * DAY))
+    e.run("watch", t=T0)
+    check(os.path.isfile(os.path.join(busy, "base.txt")), "D1 проход: копия со свежей правкой (1 ч) убрана")
+    check(not os.path.exists(e.st("wt-archive", "patches", "w-busy.patch")), "D1 проход: патч занятой копии записан")
+    check("w-busy" not in e.alerts(), "D1 проход: занятая копия попала в тревоги")
+    check(not os.path.exists(calm), "D1 проход: копия с правкой старше 3 ч не убрана")
+    # wt done: короткое окно
+    now = copy(folder, g, "w-now")
+    later = copy(folder, g, "w-later")
+    for w in (now, later):
+        age(w, 3600)
+    fresh(now, "draft.txt", 120)
+    fresh(later, "draft.txt", 20 * 60)
+    r = e.run("wt", "done", now, t=T0)
+    check(r.returncode == 0 and "занята" in r.stdout and "правки моложе 10 мин" in r.stdout and os.path.isdir(now),
+          f"D1 wt done: копия с правкой 2 мин назад: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    check(len(os.listdir(e.st("wt-req"))) == 1, "D1 wt done: заявка на занятую копию не оставлена")
+    r = e.run("wt", "done", later, t=T0)
+    check(r.returncode == 0 and not os.path.exists(later), f"D1 wt done: правка 20 мин назад, копия не убрана: {r.stdout!r} {r.stderr!r}")
+
+
+def ignore_repo():
+    """Репозиторий, где .gitignore закоммичен: .env.local, сборка и зависимости игнорируются."""
+    e, folder, g = repo()
+    open(os.path.join(folder, ".gitignore"), "w").write(".env.local\nconfig/\ndist/\nnode_modules/\n*.bin\nlogs/\n")
+    g("add", ".gitignore")
+    g("commit", "-q", "-m", "gitignore")
+    return e, folder, g
+
+
+def test_ignored_files_saved():
+    """D2 (metis-0835): игнорируемое (.gitignore) вне зависимостей и сборки — .env.local, целиком игнорируемая папка
+    config/ — идёт в архив копии и у чистой копии; dist/ и node_modules/ — нет. Игнорируемого больше предела (по
+    байтам или числу файлов) — копия цела, тревога."""
+    e, folder, g = ignore_repo()
+    wt = copy(folder, g, "w-env")
+    open(os.path.join(wt, ".env.local"), "w").write("SECRET=1\n")
+    os.makedirs(os.path.join(wt, "config"))
+    open(os.path.join(wt, "config", "local.json"), "w").write("{}\n")
+    for d in ("dist", "node_modules"):
+        os.makedirs(os.path.join(wt, d))
+        open(os.path.join(wt, d, "x.js"), "w").write("1\n")
+    check(g("status", "--porcelain", cwd=wt).stdout.strip() == "", "D2: копия с игнорируемым не чистая для git")
+    big = copy(folder, g, "w-bigign")
+    with open(os.path.join(big, "huge.bin"), "wb") as fh:
+        fh.truncate(201 * 1024 * 1024)  # разреженный: места не занимает, размер больше UNTRACKED_MAX_MB
+    many = copy(folder, g, "w-many")
+    os.makedirs(os.path.join(many, "logs"))
+    for i in range(2001):  # SAVE_MAX_FILES + 1, меньше WALK_LIMIT
+        open(os.path.join(many, "logs", f"{i}.log"), "w").close()
+    for w in (wt, big, many):
+        age(w, 4 * 3600)
+    e.run("watch", t=T0)
+    tar = e.st("wt-archive", "untracked", "w-env.tar.gz")
+    names = tarfile.open(tar).getnames() if os.path.isfile(tar) else []
+    check(".env.local" in names and "config/local.json" in names, f"D2: .env.local или config/ не в архиве: {names}")
+    check(not any(n.startswith(("dist", "node_modules")) for n in names), f"D2: сборка или зависимости в архиве: {names}")
+    check(not os.path.exists(wt), "D2: чистая копия с .env.local не убрана после архива")
+    check("w-env" in journal(e) and "w-env.tar.gz" in journal(e), f"D2: архив не в журнале: {journal(e)!r}")
+    check(os.path.isfile(os.path.join(big, "huge.bin")), "D2: копия с игнорируемым больше 200 МБ убрана")
+    check("w-bigign" in e.alerts() and "больше предела" in e.alerts(), f"D2: нет тревоги о пределе: {e.alerts()[-400:]}")
+    check(not os.path.exists(e.st("wt-archive", "untracked", "w-bigign.tar.gz")), "D2: архив сверх предела записан")
+    check(os.path.isdir(os.path.join(many, "logs")), "D2: копия с 2001 игнорируемым файлом убрана")
+    check("w-many" in e.alerts() and "файлов больше" in e.alerts(), f"D2: нет тревоги о числе файлов: {e.alerts()[-400:]}")
+
+
+def test_change_after_save_keeps_copy():
+    """D4 (metis-0835): правка, легшая в копию после патча и архива (wt_save), — копия цела: перепроверка прямо перед
+    `git worktree remove`; устаревший патч снят. Без правки та же копия убирается. В процессе: wt_save подменён."""
+    import types
+    sys.path.insert(0, os.path.join(W.ROOT, "lib"))
+    import watch  # noqa: E402
+    e, folder, g = repo()
+    root = os.path.realpath(folder)
+
+    def read_json(p, default=None):
+        try:
+            return json.load(open(p))
+        except (OSError, ValueError):
+            return {} if default is None else default
+
+    saved_p, orig = watch.P, watch.wt_save
+    watch.set_core(types.SimpleNamespace(HOME=e.home, path=lambda *a: e.st(*a), read_json=read_json))
+    try:
+        for name, late in (("w-race", True), ("w-norace", False)):
+            wt = copy(folder, g, name)
+            fresh(wt, "base.txt", 4 * DAY)
+            age(wt, 4 * DAY)
+
+            def racing(w, env, clean=False, late=late):
+                res = orig(w, env, clean=clean)
+                if late:
+                    open(os.path.join(w, "late.txt"), "w").write("правка после патча\n")
+                return res
+
+            watch.wt_save = racing
+            block = dict(watch._copies(root))[wt]
+            verdict, text = watch.wt_one(root, wt, block, watch.WtCtx([], [], T0))
+            if late:
+                check(verdict == "live" and os.path.isfile(os.path.join(wt, "late.txt")),
+                      f"D4: правка после патча, копия убрана: {verdict} {text}")
+                check("правка во время уборки" in text, f"D4: причина не названа: {text}")
+                check(not os.path.exists(e.st("wt-archive", "patches", name + ".patch")), "D4: устаревший патч не снят")
+            else:
+                check(verdict == "removed" and not os.path.exists(wt), f"D4: копия без поздней правки: {verdict} {text}")
+    finally:
+        watch.wt_save = orig
+        watch.set_core(saved_p)
+
+
+def test_lock_refused_does_nothing():
+    """D5 (metis-0835): lock уборки (P.lock("worktrees")) не взят — проход не трогает ни одной копии. В процессе:
+    P подменён, lock отдаёт False."""
+    import contextlib
+    import types
+    sys.path.insert(0, os.path.join(W.ROOT, "lib"))
+    import watch  # noqa: E402
+    e, folder, g = repo()
+    wt = copy(folder, g, "w-old-empty")
+    age(wt, 4 * 3600)
+
+    @contextlib.contextmanager
+    def refused(name, block=True):
+        yield False
+
+    noop = lambda *a, **k: None  # noqa: E731
+    saved_p = watch.P
+    watch.set_core(types.SimpleNamespace(HOME=e.home, path=lambda *a: e.st(*a), read_json=lambda p, d=None: d or {},
+                                         lock=refused, alert_once=noop, clear_once=noop, alert=noop))
+    try:
+        watch.worktrees([], [], {"g-dir": [folder]}, T0)
+    finally:
+        watch.set_core(saved_p)
+    check(os.path.isdir(wt), "D5: lock уборки не взят, а копия убрана")
 
 
 if __name__ == "__main__":

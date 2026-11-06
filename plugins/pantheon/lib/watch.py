@@ -1028,9 +1028,18 @@ def _prune_state(root, live):
 
 # --- уборка копий .claude/worktrees (QA-05, metis-0616, metis-0835) --------------------------------------------------
 
-WORKTREE_EMPTY_MIN = 30     # мин: пустая чистая копия (HEAD в основной ветке, своих коммитов нет) — без суток (metis-0835, б)
+WT_DONE_QUIET = 600         # с: `pantheon wt done` и его заявки убирают копию, только если в ней столько нет правок
+                            # (дежурный по срокам — LIVE_SUBAGENT_MAX): правка свежее — в копии, похоже, ещё работают
+                            # (сессия сделала в неё cd, субагент без worktreePath в meta) — не трогаем (metis-0835, D1)
 WT_REQ_DAYS = 7             # заявку `pantheon wt done`, которую так и не исполнить (копия занята), снимаем через столько дней
-UNTRACKED_MAX_MB = 200      # неотслеживаемое грязной копии больше — архив не собираем, копию не убираем
+UNTRACKED_MAX_MB = 200      # неотслеживаемое и игнорируемое копии больше — архив не собираем, копию не убираем
+SAVE_MAX_FILES = 2000       # файлов в архив копии больше — тоже не собираем: копия цела, тревога (обход копии
+                            # outward_links и так держит её при WALK_LIMIT записей вне LINK_SKIP)
+# игнорируемое (.gitignore), которое при уборке не сохраняем: зависимости, сборка, кэши; остальное (.env.local и т. п.)
+# идёт в архив копии вместе с неотслеживаемым (metis-0835, D2)
+IGNORED_SKIP = LINK_SKIP + ("dist", "build", "out", ".output", "coverage", "target", "__pycache__", ".pytest_cache",
+                            ".mypy_cache", ".ruff_cache", ".parcel-cache", ".svelte-kit", ".nuxt", ".vercel", ".tox",
+                            ".gradle", ".DS_Store")
 WT_REQ_DIR = "wt-req"       # заявки `pantheon wt done`: STATE/wt-req (ваши сессии), <кэш окна>/wt-req (окно роли)
 AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # lock, который Claude Code вешает на копию субагента
 AGENT_DIR = re.compile(r"agent-[0-9a-f]{6,40}")
@@ -1180,28 +1189,34 @@ def _git_bytes(*args, env=None, timeout=120):
 
 
 def _untracked(wt, env):
-    """Неотслеживаемые файлы копии без зависимостей и кэшей (LINK_SKIP) → [(путь, имя в архиве)] или None (git не
-    ответил). Вложенный репозиторий git выдаёт папкой «x/» — её файлы берём обходом без перехода по ссылкам. Ссылки,
+    """Неотслеживаемые файлы копии без зависимостей и кэшей (LINK_SKIP) и игнорируемые (.gitignore: .env.local и т. п.)
+    без зависимостей, сборки и кэшей (IGNORED_SKIP, metis-0835 D2) → [(путь, имя в архиве)] или None (git не ответил).
+    Вложенный репозиторий и целиком игнорируемую папку git выдаёт папкой «x/» — её файлы берём обходом без перехода по
+    ссылкам. Список длиннее SAVE_MAX_FILES обрывается (вызывающий видит превышение и копию не трогает). Ссылки,
     устройства и каналы отсеивает _tar_regular при записи архива (O_NOFOLLOW и fstat — без гонки проверки и чтения)."""
-    r = _git_bytes("-C", wt, "ls-files", "-o", "--exclude-standard", "-z", env=env)
-    if r.returncode != 0:
-        return None
-    skip = lambda rel: any(part in LINK_SKIP for part in rel.split("/"))  # noqa: E731
-
     out = []
-    for raw in r.stdout.split(b"\0"):
-        rel = os.fsdecode(raw)
-        if not rel or skip(rel):
-            continue
-        p = os.path.join(wt, rel)
-        if rel.endswith("/") and os.path.isdir(p) and not os.path.islink(p.rstrip("/")):
-            for d, dirs, files in os.walk(p, followlinks=False):
-                dirs[:] = [x for x in dirs if x not in LINK_SKIP]
-                for f in files:
-                    q = os.path.join(d, f)
-                    out.append((q, os.path.relpath(q, wt)))
-        else:
-            out.append((p.rstrip("/"), rel.rstrip("/")))
+    for extra, skip in (((), LINK_SKIP), (("--ignored", "--directory"), IGNORED_SKIP)):
+        r = _git_bytes("-C", wt, "ls-files", "-o", *extra, "--exclude-standard", "-z", env=env)
+        if r.returncode != 0:
+            return None
+        for raw in r.stdout.split(b"\0"):
+            rel = os.fsdecode(raw)
+            if not rel or any(part in skip for part in rel.split("/")):
+                continue
+            p = os.path.join(wt, rel)
+            if rel.endswith("/") and os.path.isdir(p) and not os.path.islink(p.rstrip("/")):
+                for d, dirs, files in os.walk(p, followlinks=False):
+                    dirs[:] = [x for x in dirs if x not in skip]
+                    for f in files:
+                        if f not in skip:
+                            q = os.path.join(d, f)
+                            out.append((q, os.path.relpath(q, wt)))
+                    if len(out) > SAVE_MAX_FILES:
+                        return out
+            else:
+                out.append((p.rstrip("/"), rel.rstrip("/")))
+            if len(out) > SAVE_MAX_FILES:
+                return out
     return out
 
 
@@ -1247,11 +1262,12 @@ def _tar_regular(tf, src, arc, budget):
     return n
 
 
-def wt_save(wt, env):
-    """Грязная копия до удаления (metis-0835): `git diff HEAD --binary` → wt-archive/patches/<имя>.patch и
-    неотслеживаемое (без LINK_SKIP) → wt-archive/untracked/<имя>.tar.gz. → (True, [пути]) или (False, причина):
-    архив не собрался, неотслеживаемого больше UNTRACKED_MAX_MB или сохранить нечего (status грязный, а патч и список
-    пусты) — тогда копию не убираем, недописанные файлы архива снимаются."""
+def wt_save(wt, env, clean=False):
+    """Копия до удаления (metis-0835): `git diff HEAD --binary` → wt-archive/patches/<имя>.patch, неотслеживаемое
+    (без LINK_SKIP) и игнорируемое (.env.local и т. п., без IGNORED_SKIP; у чистой копии — только оно) →
+    wt-archive/untracked/<имя>.tar.gz. → (True, [пути]; у чистой без игнорируемого — пусто) или (False, причина):
+    архив не собрался, файлов больше SAVE_MAX_FILES или больше UNTRACKED_MAX_MB, у грязной сохранить нечего (status
+    грязный, а патч и список пусты) — тогда копию не убираем, недописанные файлы архива снимаются."""
     d = _git_bytes("-C", wt, "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv", env=env)
     if d.returncode != 0:
         return False, "git diff HEAD не прошёл"
@@ -1262,8 +1278,11 @@ def wt_save(wt, env):
     for p, _ in files:
         with contextlib.suppress(OSError):
             total += os.lstat(p).st_size
+    if len(files) > SAVE_MAX_FILES:
+        return False, f"неотслеживаемых и игнорируемых файлов больше {SAVE_MAX_FILES} — архив не собираю"
     if total > UNTRACKED_MAX_MB * 1024 * 1024:
-        return False, f"неотслеживаемого {total / 1048576:.0f} МБ — больше предела {UNTRACKED_MAX_MB} МБ"
+        return False, (f"неотслеживаемого и игнорируемого {total / 1048576:.0f} МБ — больше предела "
+                       f"{UNTRACKED_MAX_MB} МБ")
     stem = _free_stem(os.path.basename(wt))
     made = []
     try:
@@ -1288,11 +1307,11 @@ def wt_save(wt, env):
                 os.remove(p)
     except _TooBig:
         _unmake(made)
-        return False, f"неотслеживаемого больше предела {UNTRACKED_MAX_MB} МБ (по прочитанному)"
+        return False, f"неотслеживаемого и игнорируемого больше предела {UNTRACKED_MAX_MB} МБ (по прочитанному)"
     except (OSError, tarfile.TarError) as e:
         _unmake(made)
         return False, f"архив не собрался ({getattr(e, 'strerror', None) or e})"
-    if not made:
+    if not made and not clean:
         return False, "грязная, а сохранить нечего: патч пуст, неотслеживаемое — только ссылки, каналы, зависимости и кэши"
     return True, made
 
@@ -1340,12 +1359,16 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
       keep    — пора, но убрать нельзя: текст — причина для тревоги;
       plan    — убрал бы (dry: ничего не меняет);
       removed — убрана, текст — для сводки.
-    Сроки по mtime папки копии: пустая чистая (HEAD в основной ветке) — WORKTREE_EMPTY_MIN (копия, в которой Claude
+    Сроки по mtime папки копии: пустая чистая (HEAD в основной ветке) — LIVE_SUBAGENT_MAX (копия, в которой Claude
     Code знает сессию без процесса, — WORKTREE_CLEAN_HOURS); чистая слитая (merged_why) — WORKTREE_CLEAN_HOURS;
-    чистая неслитая и грязная — WORKTREE_DAYS. requested (`pantheon wt done`) — без сроков. Замок «claude agent …»
+    чистая неслитая и грязная — WORKTREE_DAYS. requested (`pantheon wt done`) — без сроков. Любое удаление — только
+    если в копии (все записи, кроме LINK_SKIP) нет правок моложе LIVE_SUBAGENT_MAX у дежурного и WT_DONE_QUIET у
+    `wt done` (lock субагента без meta — тоже LIVE_SUBAGENT_MAX): живую работу, которую не видно по cwd, lsof и meta
+    (сессия сделала cd в копию, субагент без worktreePath), выдают свежие правки (metis-0835, D1). Lock «claude agent …»
     без живого субагента не держит; lock с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
-    сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; грязную — сначала
-    в патч и архив (wt_save)."""
+    сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; правки и
+    неотслеживаемое, а у любой копии игнорируемое вне IGNORED_SKIP (.env.local) — сначала в патч и архив (wt_save).
+    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела."""
     t = ctx.t
     if _has_inside(wt, ctx.live):
         return "live", "живая сессия в копии"
@@ -1362,9 +1385,6 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     alive = subagent_live(agent, wt, t) if agent else False
     if alive:
         return "live", f"субагент {agent} ещё работает"
-    if alive is None and am and not _quiet_since(wt, t - LIVE_SUBAGENT_MAX):
-        # lock называет субагента, а его meta не найден: жив ли он — неизвестно; ждём, пока копия затихнет
-        return "live", f"lock субагента {agent}: meta не найден, в копии правки моложе {LIVE_SUBAGENT_MAX / 3600:g} ч"
     try:
         age = (t - os.stat(wt).st_mtime) / 3600
     except OSError:
@@ -1390,7 +1410,7 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     on_origin = False  # HEAD есть на ветке origin: коммиты не потеряются и без archive/wt-<имя>
     if clean and empty:
         kind = "пустая"
-        need = WORKTREE_CLEAN_HOURS if _has_inside(wt, ctx.known) else WORKTREE_EMPTY_MIN / 60
+        need = WORKTREE_CLEAN_HOURS if _has_inside(wt, ctx.known) else LIVE_SUBAGENT_MAX / 3600
     elif clean:
         why = merged_why(root, head, branch, base, ctx)
         on_origin = bool(why) and why.startswith("есть на ")
@@ -1399,6 +1419,12 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
         kind, need = "грязная", WORKTREE_DAYS * 24
     if not requested and age <= need:
         return "wait", f"{kind}, {age:.1f} ч из {need:g}"
+    # lock называет субагента, а его meta не найден (жив ли — неизвестно) — и у `wt done` ждём, пока копия затихнет
+    quiet = WT_DONE_QUIET if requested and not (alive is None and am) else LIVE_SUBAGENT_MAX
+    since = t - quiet
+    if not _quiet_since(wt, since):
+        return "live", (f"lock субагента {agent}: meta не найден, " if alive is None and am else "") + \
+            f"в копии правки моложе {_dur(quiet)} — похоже, в ней ещё работают"
     out = outward_links(wt)
     if out is None or out[0]:
         what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
@@ -1414,12 +1440,13 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
         if not made:
             return "keep", f"ветка archive/wt-{name} не создана"
         branch = made
-    saved = []
-    if not clean:
-        ok, res = wt_save(wt, env)
-        if not ok:
-            return "keep", res
-        saved = res
+    ok, saved = wt_save(wt, env, clean=clean)
+    if not ok:
+        return "keep", saved
+    busy = _busy_now(wt, agent, t, since)
+    if busy:
+        _unmake(saved)  # копия остаётся — её архив устарел, следующая уборка соберёт заново
+        return "live", busy
     if am and _git("-C", root, "worktree", "unlock", wt).returncode != 0:
         return "keep", "lock субагента не снят"
     # чистоту и состав смотрел свой status по записанному каталогу; без --force git проверил бы её ещё раз своим
@@ -1433,6 +1460,25 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     return "removed", f"{name} ({kind}" + (f", ветка {branch}" if branch else "") + \
         (", архив: " + ", ".join(os.path.basename(x) for x in saved) if saved else "") + \
         ("" if j else ", журнал не записан") + ")"
+
+
+def _dur(sec):
+    return f"{sec / 3600:g} ч" if sec >= 3600 else f"{sec / 60:g} мин"
+
+
+def _busy_now(wt, agent, t, since):
+    """Перепроверка прямо перед `git worktree remove` (metis-0835, D4): между первой проверкой и удалением прошли
+    сохранение и архив — за это время в копию мог зайти процесс, ожить субагент или лечь правка. → причина или None."""
+    procs = proc_cwds()
+    if procs is None:
+        return "lsof не ответил при перепроверке перед удалением"
+    if _has_inside(wt, procs):
+        return "процесс с текущей папкой в копии — появился во время уборки"
+    if agent and subagent_live(agent, wt, t):
+        return f"субагент {agent} ожил во время уборки"
+    if not _quiet_since(wt, since):
+        return "в копии появилась правка во время уборки — копия цела"
+    return None
 
 
 def _req_dirs(doms):
@@ -1543,7 +1589,9 @@ def worktrees(agents, registry, doms, t):
     reqs = wt_requests(doms, t)
     removed = []
     seen = set()
-    with P.lock("worktrees"):
+    with P.lock("worktrees") as got:
+        if not got:  # lock не взят (подложенный файл и т. п.; причину печатает P.lock) — копий не трогаем (D5)
+            return
         for name, folders in doms.items():
             for f in folders if isinstance(folders, list) else []:
                 root = os.path.realpath(os.path.expanduser(f))
@@ -1614,10 +1662,10 @@ def wt_cmd(rest):
     done — убрать копию .claude/worktrees/<имя> сразу после отчёта субагента или слияния PR, без вопроса и без сырого
     git: те же проверки, что у дежурного (wt_one), но без сроков. В окне роли (есть PANTHEON_TMP) запись в STATE и
     чужие процессы закрыты — команда кладёт заявку в <кэш окна>/wt-req, её исполняет плановый проход (раз в 5 мин).
-    Вне окна — сразу; копия занята (живая сессия, субагент ещё работает) — заявка в STATE/wt-req, проход уберёт её,
-    когда освободится. Код: 0 — убрана или заявка принята, 1 — убрать нельзя (причина последней строкой), 2 — не тот
-    вызов или не та папка. plan — сухой прогон: что дежурный сделал бы с каждой копией папок (по умолчанию — всех
-    папок реестра); ничего не меняет."""
+    Вне окна — сразу; копия занята (живая сессия, субагент ещё работает, правки моложе WT_DONE_QUIET) — заявка в
+    STATE/wt-req, проход уберёт её, когда освободится. Код: 0 — убрана или заявка принята, 1 — убрать нельзя (причина
+    последней строкой), 2 — не тот вызов или не та папка. plan — сухой прогон: что дежурный сделал бы с каждой копией
+    папок (по умолчанию — всех папок реестра); ничего не меняет."""
     if rest[:1] == ["plan"]:
         return wt_plan(rest[1:])
     args = [a for a in rest[1:] if a != "--dry-run"]
@@ -1647,8 +1695,8 @@ def wt_cmd(rest):
             print(f"заявка не записана: {e.strerror or e}", file=sys.stderr)
             return 1
         print(f"заявка принята: плановый проход (раз в 5 мин) уберёт {wt.replace(P.HOME, '~')}, когда в ней нет живой "
-              "сессии и субагента; грязную — сначала в патч и архив. Итог — STATE/wt-archive/removed-<день>.txt, "
-              "отказ — строкой в alerts.md")
+              "сессии, субагента и правок моложе 10 мин; грязную — сначала в патч и архив. Итог — "
+              "STATE/wt-archive/removed-<день>.txt, отказ — строкой в alerts.md")
         return 0
     roots = [os.path.realpath(os.path.expanduser(f)) for fs in domains().values()
              for f in (fs if isinstance(fs, list) else []) if isinstance(f, str)]
@@ -1661,7 +1709,10 @@ def wt_cmd(rest):
     if agents is None:
         print("claude agents --json не ответил — живые сессии неизвестны, копию не трогаю", file=sys.stderr)
         return 1
-    with P.lock("worktrees"):
+    with P.lock("worktrees") as got:
+        if not got:
+            print("lock уборки копий (STATE/locks/worktrees.lock) не взят — копию не трогаю", file=sys.stderr)
+            return 1
         verdict, text = wt_one(root, wt, block, WtCtx(agents, P.sessions_registry(), t), requested=True, dry=dry_run)
     short = wt.replace(P.HOME, "~")
     if verdict == "removed":
