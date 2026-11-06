@@ -629,15 +629,23 @@
   только указанные навыки (ошибка навыка даёт код 1 и рядом с задачами); нечитаемая папка навыков — ошибка в строке.
 - `plugins/pantheon/lib/moved.py` — перенос папок в `~/ai` (metis-0899): одна таблица `MOVES` старый путь → новый
   (agent-kit → `~/ai/agent-kit`, workshop → `~/ai/workshop`, finances → `~/ai/life/finances`) на обе команды.
-  `pantheon migrate-paths <перенос>… [--dry-run]` — для планового прохода после `mv`: папки истории
-  `~/.claude/projects/<ключ>` под новый ключ (ключи worktree `…--claude-worktrees-…` не трогает), ключи и значения
-  `~/.claude.json` и замена во всех текстовых файлах `~/ai`, `~/.claude` и кода agent-kit, архивы и закрытые задачи тоже.
+  `pantheon migrate-paths <перенос>… [--dry-run]` — разовый запуск вручную после `mv` и «да» владельца на план;
+  плановый проход её не вызывает (её нет в `TICK_SUBCOMMANDS`). Делает: папки истории `~/.claude/projects/<ключ>` под
+  новый ключ — сама папка и её настоящие подпапки на диске (ключи соседних `agent-kit-old`, `agent-kit-v2` и ключи
+  worktree `…--claude-worktrees-…` не трогает), ключи и значения `~/.claude.json` и замена во всех текстовых файлах
+  `~/ai` и `~/.claude`, архивы и закрытые задачи тоже. Код agent-kit не переписывает ни на старом, ни на новом месте:
+  его пути и тестовые данные guard меняет PR через шлюз. Запись — через временный файл и `os.replace`:
+  оборванный запуск не оставляет обрезанного файла.
   Не трогает git, транскрипты (`~/.claude/projects/**/*.jsonl`, `history.jsonl`) и личное в `~/ai/knowledge` (me, Self,
   Areas, People — их меняет Мнемозина). До переноса — отказ, код 1; `--dry-run` печатает план и ничего не меняет;
   совпадение ключа истории или `.claude.json` — конфликт, обе записи остаются. `pantheon check` (раз в 6 ч в плановом
   проходе, тревога `check-moved`) и `pantheon check --moved` — предупреждение на каждый файл со старым путём сделанного
-  переноса, кроме тех же исключений; код выхода `pantheon check` оно не меняет.
-- Мастерская — `~/ai/workshop/<задача>` (`WORKSHOP_DIR` в `lib/pantheon.py`, metis-0899); окна ролей пишут в
+  переноса, кроме тех же исключений; личные файлы (`me`, `Self`, `Areas`, `People`) — только числом, без имён, и в
+  выводе, и в тревоге. Код выхода `pantheon check` оно не меняет.
+- Мастерская — по факту на диске (`workshop_root` в `lib/moved.py`, одна на песочницу окна workshop, `pantheon start
+  workshop`, текст роли `{{workshop}}` и ctx.py; metis-0899): `~/ai/workshop/<задача>`, если `~/ai/workshop` есть,
+  иначе старая папка workshop в `~/projects`. Появилась новая — `domains build --if-changed` пересобирает окно и роль
+  (поле `workshop` в domains.json). Окна ролей пишут в
   `SANDBOX_ROOTS`: подпапки `~/projects` и `~/ai/life`, а также `~/ai/knowledge`, `~/ai/workshop`, `~/ai/agent-kit`.
   `pantheon direction init` заводит папку в `~/projects/<имя>` или в `~/ai/life/<имя>`: в обоих случаях свой git
   (`git init`, main, AGENTS.md, локальный коммит). Сам `~/ai/life` — простая папка без `.git`, создаётся при первом направлении.

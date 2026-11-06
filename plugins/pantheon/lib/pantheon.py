@@ -31,7 +31,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         коммит; без remote. ~/ai/life/<имя> — то же, свой git у каждой
                                         области; сам ~/ai/life — простая папка без .git
   pantheon migrate-paths <перенос>… [--dry-run]   после переноса папки: старые пути → новые во всех текстовых
-                                        файлах ~/ai, ~/.claude и кода agent-kit, папки истории ~/.claude/projects
+                                        файлах ~/ai и ~/.claude (код agent-kit — нет), папки истории ~/.claude/projects
                                         и записи projects в ~/.claude.json под новый ключ; переносы: agent-kit,
                                         workshop, finances. Без --dry-run — только когда старой папки уже нет
   pantheon check --moved                старые пути перенесённых папок в живых файлах — предупреждение
@@ -158,7 +158,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon exec codex <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
                                         защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
-  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/ai/workshop/<задача>
+  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/ai/workshop/<задача> (до
+                                        переноса, пока ~/ai/workshop нет, — в старой папке workshop в ~/projects)
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
                                         start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» — только предупреждение (stderr, тревога раз в день), запуск идёт; в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
@@ -2184,7 +2185,9 @@ def domains_build(if_changed=False):
         # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
         newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
         due = read_json(path("domains.json")).get("grants_next")
-        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
+        # и папка мастерской: появилась ~/ai/workshop (перенос) — окно workshop и текст роли на новую (metis-0899)
+        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES) \
+                and read_json(path("domains.json")).get("workshop") == workshop_dir():
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -2224,7 +2227,8 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1]})
+        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1],
+        "workshop": workshop_dir()})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
@@ -2261,7 +2265,7 @@ def domains_build(if_changed=False):
 # Папки направлений для песочницы — только внутри этих. Первые SANDBOX_STRICT — только папки внутри (не сам корень):
 # ~/projects/<x> и ~/ai/life/<x> (личное владельца, metis-0899); ~/ai/knowledge, мастерская ~/ai/workshop и код
 # Пантеона ~/ai/agent-kit (папка metis-pantheon) — и сам корень. Остальное в ~/ai (pantheon, pantheon-view) — нет
-WORKSHOP_DIR = "~/ai/workshop"   # мастерская Дедала: ~/ai/workshop/<задача> (metis-0899; до переноса — в ~/projects)
+WORKSHOP_DIR = "~/ai/workshop"   # мастерская Дедала после переноса (metis-0899); живая папка — workshop_dir()
 LIFE_DIR = "~/ai/life"   # области жизни владельца: простая папка без .git, у каждой области свой git (Зевс 06.11, metis-0899)
 AGENT_KIT_DIR = "~/ai/agent-kit"   # рабочая копия agent-kit (metis-0899; до переноса — в ~/projects)
 SANDBOX_ROOTS = ["~/projects", LIFE_DIR, "~/ai/knowledge", WORKSHOP_DIR, AGENT_KIT_DIR]
@@ -3177,8 +3181,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
                auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name))):
             built.append(name)
-    # мастерская пишет в папку запуска (~/ai/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
-    one("workshop", [WORKSHOP_DIR], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
+    # workshop/ доски; список субагентов — вне P0-6
+    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths)
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -3350,7 +3355,18 @@ HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheo
 # sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
 START_MARK = "[Пантеон:"
 SESSION_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
-WORKSHOP = os.path.expanduser(WORKSHOP_DIR)
+
+
+def workshop_root():
+    """Папка мастерской по факту на диске (вариант А, 06.11 18:06): ~/ai/workshop, если она есть, иначе старая папка
+    workshop в ~/projects — до переноса окна и задачи мастерской остаются там (lib/moved.py, общая с ctx.py)."""
+    return moved_mod().workshop_root(HOME)
+
+
+def workshop_dir():
+    """workshop_root() в виде «~/…» — для песочницы, текста роли и сообщений."""
+    root = workshop_root()
+    return "~" + root[len(HOME):] if root.startswith(HOME + "/") else root
 
 
 def claude_bin():
@@ -3982,10 +3998,11 @@ def direction_target(target, rest, domains):
     if target == "workshop":
         if not rest or not SESSION_NAME.fullmatch(rest[0]):
             return "pantheon start workshop <задача> [поручение]: имя задачи — a-z, 0-9, дефис"
-        task, folder = rest[0], os.path.join(WORKSHOP, rest[0])
+        root = workshop_root()
+        task, folder = rest[0], os.path.join(root, rest[0])
         os.makedirs(folder, exist_ok=True)
-        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(WORKSHOP) + "/"):
-            return f"папка задачи мастерской {folder} — ссылка или вне {WORKSHOP_DIR}"
+        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(root) + "/"):
+            return f"папка задачи мастерской {folder} — ссылка или вне {workshop_dir()}"
         return (f"daedalus-{task}", "workshop", folder, "workshop",
                 f"Прочитай ~/ai/pantheon/workshop/{task}.md и выполни задачу. Внешние действия — только по "
                 "approvals.toml или после «да» владельца в этой сессии.")
@@ -4022,6 +4039,7 @@ def watch_mod():
 # ~/.claude/.gitignore): на каждом Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
 #   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
 #   {{qmd_collections}} {{browser}} — во всех ролях, после вставки частей, из раздела [person] реестра (PERSON_*).
+#   {{workshop}}        — папка мастерской по факту (workshop_dir(): ~/ai/workshop или до переноса старая в ~/projects).
 #                         Пустое значение или нет раздела — строка шаблона с подстановкой выпадает целиком, вместе с
 #                         переводом строки. Поэтому в шаблонах такая подстановка стоит в своей строке-фразе, а текст
 #                         вокруг неё связен и без неё;
@@ -4195,6 +4213,7 @@ def roles_build(src=None, out=None, role_errors=None):
             continue
         try:
             text = _person_text(_role_text(open(layer[f], encoding="utf-8").read(), parts), person, person_bad)
+            text = text.replace("{{workshop}}", workshop_dir())
         except (OSError, ValueError) as e:
             err(f, f"{f}: {e}")
             if base in LEAD_ROLES:
@@ -5817,8 +5836,11 @@ def check_moved(quiet=False, force=False):
         with contextlib.suppress(OSError):
             os.makedirs(os.path.dirname(stamp), exist_ok=True)
             open(stamp, "w").close()
-    found, pending = M.check(HOME)
+    found, pending, n_personal = M.check(HOME)
     short = lambda p: "~" + p[len(HOME):] if p.startswith(HOME + "/") else p
+    # личное — только числом: имя файла в me/Self/Areas/People не уходит ни в вывод, ни в alerts.md (argus-2 Б2)
+    personal = (f"личное ~/ai/knowledge ({', '.join(M.PERSONAL)}): {n_personal} файлов — его меняет Мнемозина"
+                if n_personal else "")
     if force:
         for n in pending:
             print(f"перенос {n} ещё не сделан — его пути не проверяю")
@@ -5827,16 +5849,20 @@ def check_moved(quiet=False, force=False):
             print(f"предупреждение · старый путь · {short(p)}: {k} — pantheon migrate-paths <перенос>")
     if len(found) > 20 and not force and not quiet:
         print(f"предупреждение · старый путь ещё в {len(found) - 20} файлах — pantheon check --moved")
+    if personal and not quiet:
+        print(f"предупреждение · старый путь · {personal}")
+    total = len(found) + n_personal
     if quiet:
-        if found:
-            alert_once("check-moved", "|".join(p for p, _ in found),
-                       f"старые пути перенесённых папок в {len(found)} файлах: {short(found[0][0])}… — "
+        if total:
+            first = f"{short(found[0][0])}…" if found else personal
+            alert_once("check-moved", "|".join(p for p, _ in found) + f"|personal={n_personal}",
+                       f"старые пути перенесённых папок в {total} файлах: {first} — "
                        "pantheon check --moved, замена — pantheon migrate-paths", "check")
         else:
             clear_once("check-moved")
     elif force:
-        print(f"старых путей: {len(found)} файлов" if found else "старых путей нет")
-    return len(found)
+        print(f"старых путей: {total} файлов" if total else "старых путей нет")
+    return total
 
 
 def night_mod():

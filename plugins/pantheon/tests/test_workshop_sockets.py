@@ -101,7 +101,65 @@ def seatbelt_probe(cache, outside):
     return res
 
 
+def workshop_by_fact():
+    """Песочница, роль и пересборка мастерской по факту на диске (metis-0899, вариант А): ~/ai/workshop нет — пишет
+    в старую папку workshop в ~/projects, появилась — в новую (domains build --if-changed сам пересобирает)."""
+    tmp = os.path.join(ROOT, "fact")
+    home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
+    os.makedirs(home)
+    old, new = os.path.join(tmp, "projects", "workshop"), os.path.join(tmp, "ai", "workshop")
+    os.makedirs(os.path.join(old, "old-task"))
+    with open(os.path.join(home, "directions.toml"), "w") as fh:
+        fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
+    os.makedirs(os.path.join(tmp, "projects", "br"))
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_NO_NOTIFY": "1"}
+    build = lambda *a: subprocess.run([py311(), "-I", RUN_PY, "domains", "build", *a], env=env, capture_output=True,
+                                      text=True, timeout=120)
+    aw = lambda: json.load(open(os.path.join(state, "settings", "workshop.json")))["sandbox"]["filesystem"]["allowWrite"]
+    role = lambda: open(os.path.join(tmp, ".claude", "agents", "workshop.md"), encoding="utf-8").read()
+    r = build()
+    w = aw()
+    check("мастерская без ~/ai/workshop: песочница пишет в старую папку workshop в ~/projects, новой нет",
+          r.returncode == 0 and os.path.realpath(old) in w and not any(x.startswith(os.path.realpath(new)) for x in w)
+          and "песочница workshop:" not in r.stderr)
+    check("мастерская без ~/ai/workshop: роль — в старой папке",
+          "~/projects/workshop/<задача>" in role() and "~/ai/workshop/<задача>" not in role())
+    os.makedirs(new)
+    r = build("--if-changed")
+    w = aw()
+    check("появилась ~/ai/workshop: --if-changed пересобрал, песочница пишет в новую, старой нет",
+          r.returncode == 0 and os.path.realpath(new) in w and os.path.realpath(old) not in w)
+    check("появилась ~/ai/workshop: роль — в новой папке",
+          "~/ai/workshop/<задача>" in role() and "~/projects/workshop/<задача>" not in role())
+    # копия правила в хуке ctx.py (ядро защит, moved.py грузить не может) совпадает с moved.workshop_root
+    import importlib.util
+
+    def load(name, rel):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(PLUGIN, rel))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+    ctx, moved = load("ctx_ws", os.path.join("hooks", "ctx.py")), load("moved_ws", os.path.join("lib", "moved.py"))
+    h = os.path.join(ROOT, "parity")
+    os.makedirs(os.path.join(h, "ai"))
+    os.makedirs(os.path.join(h, "elsewhere"))
+    states = []
+    states.append((ctx.workshop_root(h), moved.workshop_root(h)))               # новой нет
+    os.symlink(os.path.join(h, "elsewhere"), os.path.join(h, "ai", "workshop"))
+    states.append((ctx.workshop_root(h), moved.workshop_root(h)))               # новая — ссылка
+    os.remove(os.path.join(h, "ai", "workshop"))
+    os.makedirs(os.path.join(h, "ai", "workshop"))
+    states.append((ctx.workshop_root(h), moved.workshop_root(h)))               # новая — папка
+    check("ctx.workshop_root совпадает с moved.workshop_root: нет новой, ссылка, папка",
+          all(a == b for a, b in states) and states[0][0] == os.path.join(h, "projects", "workshop")
+          and states[1][0] == states[0][0] and states[2][0] == os.path.join(h, "ai", "workshop"))
+    if not all(a == b for a, b in states):
+        print("     ", states)
+
+
 def main():
+    workshop_by_fact()
     tmp = os.path.join(ROOT, "h")
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)

@@ -18,6 +18,8 @@ os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 
 RUN_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "run.py")
+MOVED_PY = os.path.join(os.path.dirname(RUN_PY), "moved.py")
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 results = []
 P = "projects"
 AK, WS, FIN = f"{P}/agent-kit", f"{P}/workshop", f"{P}/other/finances"   # старые пути от HOME
@@ -87,6 +89,23 @@ def main():
     write(code, f"код: ~/{WS}\n")
     wt_code = os.path.join(tmp, AK, ".claude", "worktrees", "a1", "README.md")
     write(wt_code, f"код: ~/{WS}\n")
+    # Д3: соседние живые папки с тем же началом ключа и настоящая подпапка (у неё ключ тоже с хвостом)
+    hist = lambda rel: os.path.join(tmp, ".claude", "projects", key(rel), "s.jsonl")
+    for rel in (f"{AK}-old", f"{P}/workshop_notes", f"{AK}-x", f"{AK}/plugins", f"{AK}/x"):
+        os.makedirs(os.path.join(tmp, rel), exist_ok=True)
+    for rel in (f"{AK}-old", f"{AK}-v2", f"{P}/workshop_notes", f"{AK}-x", f"{AK}/plugins"):
+        write(hist(rel), "{}\n")   # agent-kit-v2 — папки нет; agent-kit/x и agent-kit-x — ключ один, неоднозначно
+    write(os.path.join(tmp, "ai", "pantheon", "notes.md"),
+          f"история {key(AK + '-old')} и {key(AK + '/plugins')}; {key(P + '/workshop_notes')}\n")
+    # argus-2 Б1: код agent-kit (настоящие тесты и данные guard) migrate-paths не переписывает
+    guard_copy = os.path.join(tmp, AK, "plugins", "guard")
+    _shutil.copytree(os.path.join(REPO, "plugins", "guard"), guard_copy,
+                     ignore=_shutil.ignore_patterns("__pycache__", "*.pyc"))
+    guard_before = snapshot(guard_copy)
+    # Д2 argus-2: ссылка-файл в ~/ai на внешний файл со старым путём — не переписывается
+    ext = os.path.join(_ROOT, "external.md")
+    write(ext, f"~/{AK}\n")
+    os.symlink(ext, os.path.join(tmp, "ai", "link.md"))
     cj = os.path.join(tmp, ".claude.json")
     write(cj, json.dumps({"projects": {f"{tmp}/{AK}": {"hasTrustDialogAccepted": True, "allowedTools": ["x"]},
                                        f"{tmp}/{WS}/avito": {"hasTrustDialogAccepted": True},
@@ -107,11 +126,11 @@ def main():
           and "--dry-run, ничего не изменено" in out)
     check("--dry-run: в плане карточка (закрытая), роль, автопамять, код agent-kit, история, ~/.claude.json",
           "~/ai/pantheon/directions/metis-pantheon/tasks/metis-0001.md: 5" in out and "~/.claude/agents/x.md: 1" in out
-          and f"MEMORY.md: 1" in out and f"~/{AK}/README.md: 1" in out
+          and f"MEMORY.md: 1" in out and f"~/{AK}/README.md" not in out and "plugins/guard" not in out
           and f"история {key(AK)} → {key('ai/agent-kit')}" in out and "~/.claude.json: 3" in out
           and f"история {key(f'{WS}/avito')} → {key('ai/workshop/avito')}" in out)
     check("--dry-run: транскрипты, history.jsonl, .git, плагины, worktree, личное, двоичное — вне плана",
-          "s1.jsonl" not in out and "history.jsonl" not in out and ".git" not in out and "plugins" not in out
+          "s1.jsonl" not in out and "history.jsonl" not in out and ".git" not in out and "plugins/cache" not in out
           and "worktrees/a1" not in out and "money.md" not in out and "bin.dat" not in out
           and "--claude-worktrees-a1 →" not in out)
     check("--dry-run ничего не меняет на диске", snapshot(tmp) == before)
@@ -128,12 +147,14 @@ def main():
     os.rename(os.path.join(tmp, AK), os.path.join(tmp, "ai", "agent-kit"))
     os.rename(os.path.join(tmp, WS), os.path.join(tmp, "ai", "workshop"))
     os.rename(os.path.join(tmp, FIN), os.path.join(tmp, "ai", "life", "finances"))
-    code, wt_code = (p.replace(f"/{AK}/", "/ai/agent-kit/") for p in (code, wt_code))
+    code, wt_code, guard_copy = (p.replace(f"/{AK}/", "/ai/agent-kit/") for p in (code, wt_code, guard_copy))
     r = run("check", "--moved")
     check("check --moved после переноса: файлы со старыми путями — предупреждение, код 1; личное тоже",
           r.returncode == 1 and "предупреждение · старый путь · ~/ai/pantheon/directions" in r.stdout
-          and "~/.claude.json" in r.stdout and "money.md" in r.stdout and "s1.jsonl" not in r.stdout
-          and "history.jsonl" not in r.stdout)
+          and "~/.claude.json" in r.stdout and "s1.jsonl" not in r.stdout and "history.jsonl" not in r.stdout
+          and "личное ~/ai/knowledge" in r.stdout and ": 1 файлов — его меняет Мнемозина" in r.stdout)
+    check("check --moved: имени личного файла и кода agent-kit в выводе нет (argus-2 Б2, Б1)",
+          "money" not in r.stdout and "Areas/" not in r.stdout and "plugins/guard" not in r.stdout)
     r = run("check")
     check("pantheon check: старые пути — строкой «предупреждение», на код выхода не влияют",
           "предупреждение · старый путь" in r.stdout)
@@ -151,8 +172,21 @@ def main():
           and "$HOME/ai/workshop/avito" in text and "/Users/someone/ai/life/finances/a.csv" in text
           and f"{tmp}/ai/agent-kit/README.md" in text and f"~/{AK}-old" in text and f"~/{AK}.git" in text
           and f"~/{P}/workshopx" in text)
-    check("роль, код agent-kit на новом месте — заменены", read(agent) == "папка ~/ai/workshop/<задача>\n"
-          and read(code) == "код: ~/ai/workshop\n")
+    check("роль заменена; код agent-kit на новом месте — нет (его меняет PR)",
+          read(agent) == "папка ~/ai/workshop/<задача>\n" and read(code) == f"код: ~/{WS}\n")
+    check("копия plugins/guard в ~/ai/agent-kit побайтно прежняя — набор guard не сломан (argus-2 Б1)",
+          snapshot(guard_copy) == guard_before)
+    check("ссылка-файл в ~/ai: внешний файл не тронут, ссылка на месте",
+          read(ext) == f"~/{AK}\n" and os.path.islink(os.path.join(tmp, "ai", "link.md")))
+    pk = lambda rel: os.path.isfile(hist(rel))
+    check("история: соседи agent-kit-old, agent-kit-v2, workshop_notes и неоднозначный agent-kit-x — на месте",
+          all(pk(x) for x in (f"{AK}-old", f"{AK}-v2", f"{P}/workshop_notes", f"{AK}-x"))
+          and not os.path.lexists(hist("ai/agent-kit-old")) and not os.path.lexists(hist("ai/agent-kit-x")))
+    check("история: настоящая подпапка agent-kit/plugins — под новым ключом",
+          not pk(f"{AK}/plugins") and os.path.isfile(hist("ai/agent-kit/plugins")))
+    notes = read(os.path.join(tmp, "ai", "pantheon", "notes.md"))
+    check("ключи в тексте: подпапка заменена, соседи — нет",
+          key("ai/agent-kit/plugins") in notes and key(AK + "-old") in notes and key(P + "/workshop_notes") in notes)
     mem = read(os.path.join(tmp, ".claude", "projects", key("ai/agent-kit"), "memory", "MEMORY.md"))
     check("автопамять: папка под новым ключом, ключ в тексте заменён, ключ worktree — нет",
           f"projects/{key('ai/agent-kit')}/" in mem and f"{key(AK)}--claude-worktrees-a1" in mem)
@@ -173,8 +207,17 @@ def main():
     check("повтор: замен нет, код 0", r.returncode == 0 and "итог: файлов 0, замен 0, папок истории 0, замен в "
           "~/.claude.json 0" in r.stdout)
     r = run("check", "--moved")
-    check("check --moved после замены: остались только личное и конфликт — код 1, в выводе нет карточки",
-          r.returncode == 1 and "money.md" in r.stdout and "metis-0001" not in r.stdout)
+    check("check --moved после замены: осталось только личное — код 1, числом, без имени; карточки нет",
+          r.returncode == 1 and "личное ~/ai/knowledge" in r.stdout and "money" not in r.stdout
+          and "metis-0001" not in r.stdout)
+    # argus-2 Б2: тревога планового прохода (check --quiet) — личное только числом
+    with __import__("contextlib").suppress(OSError):
+        os.remove(os.path.join(tmp, "state", "moved-check.stamp"))
+    run("check", "--quiet")
+    alerts = os.path.join(tmp, "ai", "pantheon", "alerts.md")
+    al = read(alerts) if os.path.isfile(alerts) else ""
+    check("check --quiet: тревога о старых путях есть, имени личного файла в alerts.md нет",
+          "старые пути перенесённых папок" in al and "money" not in al and "Areas/" not in al)
     os.remove(personal)
     r = run("check", "--moved")
     check("check --moved: старых путей нет — код 0", r.returncode == 0 and "старых путей нет" in r.stdout)
@@ -187,8 +230,63 @@ def main():
           r.returncode == 1 and "конфликт ~/.claude.json" in r.stdout
           and data["projects"] == {f"{tmp}/{FIN}": {"a": 1}, f"{tmp}/ai/life/finances": {"b": 2}})
 
+    edge_cases()
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
+
+
+def load_moved():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("moved_t", MOVED_PY)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def edge_cases():
+    """Ссылки, done() без новой папки (мутанты argus-2 Д2) и запись целиком (Д2 argus-1)."""
+    M = load_moved()
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="moved-edge-"))
+    ext = os.path.join(tmp, "ext")
+    write(os.path.join(ext, "agents", "x.md"), f"~/{WS}\n")
+    home = os.path.join(tmp, "h")
+    os.makedirs(os.path.join(home, "ai"))
+    os.symlink(ext, os.path.join(home, ".claude"))   # ~/.claude — ссылка: обходить её нельзя
+    log = []
+    rc = M.migrate(["workshop"], False, home, out=log.append)
+    check("done(): ни старой, ни новой папки — отказ, код 1", rc == 1 and any("новой папки нет" in x for x in log))
+    os.makedirs(os.path.join(home, "ai", "workshop"))
+    log = []
+    rc = M.migrate(["workshop"], False, home, out=log.append)
+    check("~/.claude — ссылка: внешние файлы не тронуты", rc == 0 and read(os.path.join(ext, "agents", "x.md")) == f"~/{WS}\n")
+    # запись целиком: сбой os.replace — ~/.claude.json и файл прежние, временных файлов нет, код 1
+    os.remove(os.path.join(home, ".claude"))
+    task = os.path.join(home, "ai", "t.md")
+    write(task, f"~/{WS}\n")
+    cj = os.path.join(home, ".claude.json")
+    write(cj, json.dumps({"projects": {f"{home}/{WS}/a": {"x": 1}}}))
+    os.chmod(cj, 0o600)
+    cj_before, task_before = read(cj), read(task)
+    real_replace = os.replace
+
+    def boom(*a, **k):
+        raise OSError(5, "сбой записи (проба)")
+    os.replace = boom
+    try:
+        log = []
+        rc = M.migrate(["workshop"], False, home, out=log.append)
+    finally:
+        os.replace = real_replace
+    left = [x for d, _, ns in os.walk(home) for x in ns if x.endswith(".moved")]
+    check("сбой записи: ~/.claude.json и файл целы, временных файлов нет, код 1",
+          rc == 1 and read(cj) == cj_before and read(task) == task_before and not left
+          and any("сбой    ~/.claude.json" in x for x in log))
+    log = []
+    rc = M.migrate(["workshop"], False, home, out=log.append)
+    check("запись после сбоя: заменено, права ~/.claude.json прежние (0600)",
+          rc == 0 and f"{home}/ai/workshop/a" in read(cj) and read(task) == "~/ai/workshop\n"
+          and (os.stat(cj).st_mode & 0o777) == 0o600)
+    _shutil.rmtree(tmp, True)
 
 
 if __name__ == "__main__":
