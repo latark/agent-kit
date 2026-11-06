@@ -793,8 +793,8 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
         rc_ok = subprocess.run([PY311, "-I", RUN_PY, "run-job", "clio-weekly"], env=jenv,
                                capture_output=True).returncode
         called = open(calls).read() if os.path.exists(calls) else ""
-        check("run-job: окно на месте — claude -p идёт с --settings окна clio",
-              rc_ok == 0 and called.strip() == f"-p --settings {win('clio')} --agent clio проход")
+        check("run-job: окно на месте — claude -p идёт с --settings окна clio и --setting-sources user",
+              rc_ok == 0 and called.strip() == f"-p --settings {win('clio')} --setting-sources user --agent clio проход")
 
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")

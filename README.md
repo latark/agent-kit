@@ -180,7 +180,7 @@
   `.claude/settings.json` и `settings.local.json` проекта — hooks, env, allow, sandbox, enabledPlugins, MCP — не
   грузятся ни в папке запуска, ни после `cd` и EnterWorktree (проба F1, Claude Code 2.1.319). Разрешения сборки и
   тестов, которые окну давал проект, — в `~/.claude/pantheon/policy.toml`: его правит только Метида после «да»
-  владельца, а directions.toml и папку направления правят штаб и само окно. `pantheon domains build` вливает их в окно;
+  владельца, а directions.toml и папку направления правят Пританей и само окно. `pantheon domains build` вливает их в окно;
   allow с `gh pr merge`, не строка и не плагин «имя@каталог» не вливаются, о них тревога:
 
   ```toml
