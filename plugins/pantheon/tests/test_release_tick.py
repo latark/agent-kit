@@ -35,9 +35,11 @@ os.environ.pop("PANTHEON_DRYRUN", None)
 REPO = "latark/agent-kit"
 T = int(time.time())
 FAILS = []
+CHECKS = []
 
 
 def check(name, cond, extra=""):
+    CHECKS.append(name)
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f" — {extra}"))
     if not cond:
         FAILS.append(name)
@@ -286,5 +288,5 @@ w = World("no-repo")
 M.allowed_repos = lambda: {"latark/other"}
 check("agent-kit нет в merge_repos → ничего", RT.tick(T) is None and w.releases() == [])
 
-print(f"\n{'FAIL' if FAILS else 'ok'}: провалов {len(FAILS)}")
+print(f"\nитог: {len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)
