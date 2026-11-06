@@ -499,11 +499,10 @@ answer и плановый проход, это скрипты, guard их не 
     репозитории (`LW/data` → `LW/.claude/worktrees/a`) или в другом — отказ с подсказкой «сначала cd».
   - Папка чужого направления — отказ с подсказкой `pantheon start <направление>` или задачи в его inbox; путь вне
     папок направлений — отказ.
-  - Настройки проекта: EnterWorktree загружает `.claude/settings.json` и `settings.local.json` репозитория и worktree.
-    Вне папки запуска окна там не должно быть ключей, расширяющих окно: hooks, env, enabledPlugins, MCP проекта,
-    `permissions` кроме deny и ask, `sandbox` кроме autoAllowBashIfSandboxed, failIfUnavailable и `enabled: true`.
-    Иначе отказ — и с `path`, и с `name`. Папку запуска окно приняло при старте; allow с `gh pr merge` во всех папках
-    окна ловит сборка окна (allow_gate в pantheon.py).
+  - Настройки проекта правило не сверяет (metis-0919, решение владельца 06.11). Окна запускаются с `--settings` и
+    `--setting-sources user`, поэтому `.claude/settings*.json` репозитория и worktree окно не грузит — ни в папке
+    запуска, ни после `cd` и EnterWorktree (проба F1). EnterWorktree с `name` правило пропускает. Разрешения, которые
+    окну давал проект, — `[window_extra.<направление>]` в policy.toml (README pantheon).
   - Мастерская и сессия без окна — правило молчит.
 - **hq-sessync (metis-0566).** Окну Пританея `sessync find <слова> [-p имя] [-n число]` выпущен мимо песочницы
   (`excludedCommands` окна Пританея, `HQ_EXCLUDED` в pantheon.py): поиск по прошлым разговорам читает транскрипты

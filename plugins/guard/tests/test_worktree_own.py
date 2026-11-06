@@ -5,7 +5,8 @@
 вне папок направлений — отказ с подсказкой (cd, pantheon start <направление>, задача ему). Без path, вне окна
 направления и в окне, которого нет в domains.json, правило молчит. Репозиторий — путь до последнего
 .claude/worktrees/<имя>: папка-контейнер (MorphStream/app) пропускается из app, вложенный репозиторий (LW/data →
-LW/.claude/worktrees/a) — отказ. Настройки проекта вне папки запуска с allow, sandbox, hooks, env — отказ, и с name.
+LW/.claude/worktrees/a) — отказ. Настройки проекта правило не сверяет: окна запускаются с --setting-sources user и
+их не грузят (metis-0919).
 Хук целиком (guard.py --strict и плагин) ловит
 EnterWorktree и отвечает deny.
 
@@ -131,46 +132,27 @@ try:
     r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW + "/data/.claude/worktrees/z")
     check("12 вложенный репозиторий: из worktree LW/data — отказ", bool(r) and f"cd {LW}`" in r, r)
 
-    # настройки проекта не папки запуска (ревью argus 2 PR #360, Б): allow, sandbox, hooks, env расширили бы окно
+    # настройки проекта правило не сверяет (metis-0919, решение владельца 06.11): окна идут с --setting-sources user,
+    # и .claude/settings*.json репозитория и worktree после EnterWorktree не грузятся (проба F1)
     def settings(folder, data, fn="settings.json"):
         os.makedirs(os.path.join(folder, ".claude"), exist_ok=True)
         f = os.path.join(folder, ".claude", fn)
         with open(f, "w") as fh:
             fh.write(data if isinstance(data, str) else json.dumps(data))
         return f
-    f = settings(EC, {"permissions": {"allow": ["Bash(mailkeeper scan *)"]},
-                      "sandbox": {"excludedCommands": ["mailkeeper *"]}})
+    made = [settings(EC, {"permissions": {"allow": ["Bash(*)"], "defaultMode": "bypassPermissions"},
+                          "sandbox": {"enabled": False}, "hooks": {"Stop": [{"hooks": []}]}, "env": {"PATH": "/x"},
+                          "enabledMcpjsonServers": ["x"]}),
+            settings(WT, "{не json", "settings.local.json")]
     r = run({"path": WT}, cwd=EC)
-    check("13 вторая папка с allow и excludedCommands — отказ worktree-own с ключами",
-          bool(r) and "worktree-own" in r and "permissions.allow" in r and "sandbox.excludedCommands" in r, r)
+    check("13 вторая папка и worktree с hooks, env, allow, sandbox, MCP — пропуск: настроек проекта окно не грузит",
+          r is None, r)
     r = run({"name": "themis-0099"}, cwd=EC + "/src")
-    check("13 то же с name из второй папки — отказ", bool(r) and "permissions.allow" in r, r)
-    for data, key in (({"hooks": {"Stop": [{"hooks": []}]}}, "hooks"), ({"env": {"PATH": "/x"}}, "env"),
-                      ({"sandbox": {"enabled": False}}, "sandbox.enabled"),
-                      ({"sandbox": {"filesystem": {"allowWrite": ["/"]}}}, "sandbox.filesystem"),
-                      ({"permissions": {"defaultMode": "bypassPermissions"}}, "permissions.defaultMode"),
-                      ({"enabledMcpjsonServers": ["x"]}, "enabledMcpjsonServers"), ("{не json", "?"),
-                      ({"permissions": ["Bash(*)"]}, "permissions")):
-        settings(EC, data)
-        r = run({"path": WT}, cwd=EC)
-        check(f"13 ключ {key} во второй папке — отказ", bool(r) and f": {key}" in r, r)
-    settings(EC, {"permissions": {"deny": ["Bash(rm *)"], "ask": ["Bash(git push *)"]},
-                  "sandbox": {"autoAllowBashIfSandboxed": True, "enabled": True}, "model": "opus", "hooks": {}})
-    r = run({"path": WT}, cwd=EC)
-    check("13 только сужающие и пустые ключи — пропуск", r is None, r)
-    os.remove(f)
-    f = settings(WT, {"env": {"X": "1"}}, "settings.local.json")
-    r = run({"path": WT}, cwd=EC)
-    check("13 настройки в самой worktree — отказ", bool(r) and "env" in r and WT in r, r)
-    os.remove(f)
-    f = settings(LW, {"hooks": {"Stop": [{"hooks": []}]}, "permissions": {"allow": ["Bash(ls)"]}})
-    r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW)
-    check("13 папка запуска со своими настройками — пропуск (окно их приняло)", r is None, r)
-    r = run({"name": "themis-0100"}, cwd=LW)
-    check("13 name в папке запуска — пропуск", r is None, r)
-    os.remove(f)
-    r = run({"path": WT}, cwd=EC)
-    check("13 настройки убраны — снова пропуск", r is None, r)
+    check("13 name из второй папки с такими настройками — пропуск", r is None, r)
+    check("13 сверки настроек проекта в правиле нет (WIDEN_KEYS, _widening убраны)",
+          not hasattr(g, "WIDEN_KEYS") and not hasattr(g, "_widening"))
+    for f in made:
+        os.remove(f)
 
     r = run({"path": os.path.join(root, "projects/stray/.claude/worktrees/y")}, cwd=LW)
     check("5 вне папок направлений — отказ", bool(r) and "worktree-own" in r and "themis-sources" in r, r)

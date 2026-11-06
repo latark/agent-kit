@@ -254,8 +254,8 @@ def cli_tests():
           r.returncode == 0 and len(b) == 1
           and b[0]["argv"][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "hephaestus-site", "--settings"]
           and b[0]["argv"][6] == lrun and b[0]["cwd"] == os.path.join(tmp, "projects", "site")
-          and b[0]["argv"][7].startswith("/goal ") and "pantheon task show hermes-0001" in b[0]["argv"][7]
-          and "Другие задачи и пункты эпика в эту цель не входят" in b[0]["argv"][7],
+          and b[0]["argv"][-1].startswith("/goal ") and "pantheon task show hermes-0001" in b[0]["argv"][-1]
+          and "Другие задачи и пункты эпика в эту цель не входят" in b[0]["argv"][-1],
           (r.returncode, r.stderr[-300:], b))
     check("окно лида равно окну координатора: settings/hermes-site.json + PANTHEON_ROLE=domain-coordinator, "
           "PANTHEON_SESSION=hephaestus-site, PANTHEON_ORIGIN=zeus — песочница и правила те же",

@@ -749,13 +749,13 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
     got = json.loads(subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True).stdout)
     win = lambda r: os.path.join(os.path.realpath(state), "settings", f"job-{r}.json")  # noqa: E731
     check("parse_command: claude -p получает --settings окна задачи роли, -p первым",
-          got['claude -p --agent clio "проход"'] == ["claude", "-p", "--settings", win("clio"), "--agent", "clio", "проход"]
-          and got['claude -p --agent prometheus --model opus "x"'] == ["claude", "-p", "--settings", win("prometheus"),
+          got['claude -p --agent clio "проход"'] == ["claude", "-p", "--settings", win("clio"), "--setting-sources", "user", "--agent", "clio", "проход"]
+          and got['claude -p --agent prometheus --model opus "x"'] == ["claude", "-p", "--settings", win("prometheus"), "--setting-sources", "user",
                                                                        "--agent", "prometheus", "--model", "opus", "x"])
     check("parse_command: iris — --model sonnet вместо любого из команды",
           got['claude -p --agent iris --model haiku --max-turns 5 "x"'] == [
-              "claude", "-p", "--settings", win("iris"), "--agent", "iris", "--model", "sonnet", "--max-turns", "5", "x"]
-          and got['claude -p --agent iris "x"'] == ["claude", "-p", "--settings", win("iris"), "--agent", "iris",
+              "claude", "-p", "--settings", win("iris"), "--setting-sources", "user", "--agent", "iris", "--model", "sonnet", "--max-turns", "5", "x"]
+          and got['claude -p --agent iris "x"'] == ["claude", "-p", "--settings", win("iris"), "--setting-sources", "user", "--agent", "iris",
                                                     "--model", "sonnet", "x"])
     check("parse_command: роль без окна задачи и --settings в команде — не разрешены",
           got['claude -p --agent argus "x"'] is None and got['claude -p --agent clio --settings /tmp/a.json "x"'] is None)
