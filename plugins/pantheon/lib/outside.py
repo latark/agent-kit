@@ -132,7 +132,9 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
 (лимит серверов держит проход) в папке копии; окружение с нуля (HOME, PATH с node из nvm, TMPDIR — своя временная
-папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT. Сторож тишины (metis-0770): лог прогона не
+папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT (ожидание места heavy не в счёт, не больше HEAVY_WAIT_MAX; полный набор при load выше
+LOAD_PER_CORE на ядро ждёт спада в итоге queued; красный только из-за таймаутов файлов под нагрузкой — один повтор сам, затем итог
+«таймаут под нагрузкой», код 75: metis-0901). Сторож тишины (metis-0770): лог прогона не
 растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
 sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
 гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
@@ -227,6 +229,14 @@ MAX_SERVERS = 2                     # решение владельца 01.11: �
 SERVER_MEM_MB = 4096                # и у каждого лимит 4 ГБ (владелец 01.11): RSS дерева сервера больше — сторож гасит
 SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
+# metis-0901: порог нагрузки — load (среднее за 5 мин, os.getloadavg()[1]) на ядро. Два места heavy (по -j 3 процесса
+# на файл) дают на здоровой машине 1–2 на ядро; 06.11 полный набор упал по таймаутам файлов (test_guard 720 с,
+# test_merge_gate 1200 с, …), когда load был 85–93 на 8 ядер, то есть ~11 на ядро. 3 — вдвое выше обычной загрузки двух
+# мест и почти вчетверо ниже того, где файлы уже не укладываются: выше порога полный набор не стартует, а ждёт спада.
+LOAD_PER_CORE = 3.0
+LOAD_POLL = 30                      # с: так часто ждущая спада нагрузки заявка перечитывает load и обновляет итог queued
+LOAD_WAIT_MAX = 3600                # с: ждать спада не дольше — потом идёт как есть (таймаут под нагрузкой даст один повтор)
+HEAVY_WAIT_MAX = 3600               # с: сколько ожидания места heavy не входит в TEST_TIMEOUT (дальше часы идут)
 IDLE_TIMEOUT = 900                  # с: лог прогона не растёт, а дерево процессов почти не тратит CPU — завис, гасим (metis-0770)
 IDLE_CPU = 0.01                     # доля ядра: прирост user+sys дерева за окно меньше этого — «почти не тратит»
 INSTALL_TIMEOUT = 900               # с: установка зависимостей копии сервера
@@ -1071,19 +1081,36 @@ def last_line(log):
     return ""
 
 
-def wait_proc(proc, timeout, tick=None, idle_log=None):
+def heavy_waiting(pid):
+    """heavy (корень группы pid) ещё ждёт место: у него нет ни одного потомка — команда не запущена (metis-0901)."""
+    table = ps_table()
+    return bool(table) and _tree(pid, table) <= {pid}
+
+
+def wait_proc(proc, timeout, tick=None, idle_log=None, hold=None):
     """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
     «стопа» своей заявки, у прохода тестов — TestWatch (свой «стоп» и ушедший head, metis-0873) — tick() вернул
     True — группа гаснет, ждём её конца (metis-0606, 0614). TimeoutExpired — как у proc.wait.
     idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с И прирост CPU-времени дерева (user+sys, tree_cpu: libproc или ps)
     за окно меньше IDLE_CPU от окна → SIGKILL группе и её потомкам, исключение Silent. Считающий без вывода (под
-    нагрузкой «0 % CPU» по ps — не зависание) не гасится; CPU не узнать — не гасим, предупреждение в журнал."""
+    нагрузкой «0 % CPU» по ps — не зависание) не гасится; CPU не узнать — не гасим, предупреждение в журнал.
+    hold — вызываемое «ещё ждём место heavy» (metis-0901): пока True, срок timeout не идёт (не дольше HEAVY_WAIT_MAX с в
+    сумме); первый False — команда пошла, hold больше не зовётся."""
     deadline = time.monotonic() + timeout
+    last, held = time.monotonic(), 0.0
     step = min(SWEEP_EVERY, max(0.1, IDLE_TIMEOUT / 4)) if idle_log else SWEEP_EVERY
     size, grew = None, time.monotonic()
     base = None                      # (время, CPU дерева) на первом тихом шаге после роста лога
     warned = False
     while True:
+        if hold:
+            now = time.monotonic()
+            if hold():
+                add = max(0.0, min(now - last, HEAVY_WAIT_MAX - held))
+                held, deadline = held + add, deadline + add
+            else:
+                hold = None
+            last = now
         try:
             return proc.wait(timeout=max(0.01, min(step, deadline - time.monotonic())))
         except subprocess.TimeoutExpired:
@@ -1687,7 +1714,49 @@ class TestWatch:
                                                  "record": False, **({"sha": self.sha} if self.sha else {}), **kw})
 
 
-def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None):
+def load_state():
+    """(load за 5 минут, порог) — порог LOAD_PER_CORE на ядро (metis-0901). Load не узнать — (0.0, порог): не ждём."""
+    limit = LOAD_PER_CORE * (os.cpu_count() or 1)
+    try:
+        return os.getloadavg()[1], limit
+    except (OSError, AttributeError):
+        return 0.0, limit
+
+
+def wait_load(qdir, rid, watch, state):
+    """Полный набор под нагрузкой не стартует (metis-0901): пока load выше порога — итог queued с причиной «жду спада
+    нагрузки (load N)», опрос раз в LOAD_POLL с, не дольше LOAD_WAIT_MAX; «стоп» и ушедший head снимают (watch).
+    state — поля итога running, чтобы queued нёс те же sha и cmd. → "stop" (снято), "waited" (ждала) или None."""
+    end, did = time.monotonic() + LOAD_WAIT_MAX, None
+    while True:
+        load, limit = load_state()
+        if load <= limit or time.monotonic() >= end:
+            return did
+        did = "waited"
+        save_result(qdir, rid, {**state, "state": "queued",
+                                "why": f"жду спада нагрузки (load {load:.0f}, порог {limit:.0f})"})
+        nxt = time.monotonic() + LOAD_POLL
+        while time.monotonic() < nxt:
+            if watch():
+                return "stop"
+            time.sleep(min(SWEEP_EVERY, LOAD_POLL))
+
+
+def overload_files(text):
+    """Красный вывод run-tests, где упали только по таймауту файла, а load выше порога (metis-0901) → [метки] или None:
+    тест не падал — машине не хватило ядер. Любой другой упавший файл или итог не разобран — None (настоящий красный)."""
+    got = run_failed(text)
+    if not got or not got[1]:
+        return None
+    causes = run_causes(text)
+    if not all(causes.get(lb, {}).get("kind") == "таймаут" for lb in got[1]):
+        return None
+    load, limit = load_state()
+    return got[1] if load > limit else None
+
+
+def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None,
+             retried=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
     (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
@@ -1695,7 +1764,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по ней live_test находит идущую заявку.
     expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей сдвинула HEAD или правит дерево) —
     ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда. watch — сторож TestWatch (снятие своим
-    «стопом» и ушедшим head, metis-0873); нет — свой."""
+    «стопом» и ушедшим head, metis-0873); нет — свой. Полный набор не стартует при load выше порога (wait_load); красный
+    только из-за таймаутов файлов под нагрузкой (overload_files) — один повтор сам (retried — данные первого прогона),
+    второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901)."""
     if watch is None:
         watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base)
     if watch.marker():   # «стоп» пришёл до запуска: ни переноса записи по дереву, ни прогона
@@ -1760,7 +1831,13 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                **({"script": script} if script else {}), **extra}
     save_result(qdir, rid, running)
     watch.sha, watch.running = sha, running
-    log, fd = new_log(rid)
+    if full and not plan and not narrow:   # metis-0901: узкий набор и дозапуск лёгкие, полный под нагрузкой — нет
+        waited = wait_load(qdir, rid, watch, running)
+        if waited == "stop":
+            return watch.stopped(cmd=line, **extra)
+        if waited:
+            save_result(qdir, rid, running)
+    log, fd = new_log(rid + "-retry" if retried else rid)
     tmp = tempfile.mkdtemp(prefix="outside-")
     code, timed_out = None, False
     try:
@@ -1779,7 +1856,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                                            "why": f"команда не запустилась: {e}", "log": log})
         watch.pid = proc.pid
         try:
-            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=log)
+            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=log,
+                             hold=(lambda: heavy_waiting(proc.pid)) if heavy_bin() else None)   # metis-0901
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
@@ -1795,6 +1873,13 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         shutil.rmtree(tmp, ignore_errors=True)
     watch.marker()   # «стоп» пришёл, пока команда выходила с кодом, — до записи (T10c)
     sha2, clean2 = head_state(d)
+    over = None
+    if code not in (0, None) and not timed_out and not watch.why and sha2 == sha and clean2:   # metis-0901
+        over = overload_files(log_text(log))
+    if over and not retried:
+        log_event(id=rid, kind="test-overload", window=window, sha=sha, files=over, load=round(load_state()[0]))
+        return run_test(rid, d, script, window, qdir, roots, record=record, src=src, expect=expect, base=base,
+                        watch=watch, retried={"log": log, "files": over})
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
            "dir": d, "log": log, "tail": tail(log), "record": False, **extra}
     text = log_text(log) if full or narrow else ""
@@ -1806,8 +1891,15 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if narrow:
         res["note"] = f"узкий набор (--affected) от merge-base {narrow['mb'][:12]}" + (
             f": файлов {len(got[0]) + len(got[1])}" if got else "")
+    if retried:
+        res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + (
+            f"повтор после «таймаут под нагрузкой» (первый прогон: {retried['log']}, файлов {len(retried['files'])})")
     if watch.why:   # снят (metis-0873): записи tests нет, даже если команда вышла с 0 по TERM
         res["why"] = f"снят: {watch.why}"
+    elif over:   # второй прогон тоже упал только по таймаутам под нагрузкой: не красный, а «повторить»
+        res["overload"] = True
+        res["why"] = (f"таймаут под нагрузкой (load {load_state()[0]:.0f}): файлов {len(over)} — тест не падал, "
+                      "повторить, когда машина свободна")
     elif timed_out:
         res["why"] = f"тесты дольше {TEST_TIMEOUT} с — остановлены"
     elif sha2 != sha or not clean2:
@@ -1835,7 +1927,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                 res["record"] = True
             except OSError as e:
                 res["why"] = f"запись tests не сделана: {e}"
-    if full and not timed_out and not watch.why and sha2 == sha and clean2:   # снятый — не в журнал (T11)
+    if full and not timed_out and not over and not watch.why and sha2 == sha and clean2:   # снятый — не в журнал (T11)
         # журнал полных прогонов: опора следующего дозапуска (только запись без rerun_of) и след самих дозапусков
         entry = {"rid": rid, "repo": repos0, "sha": sha, "tree": tree_of(d, sha), "branch": branch_of(d), "dir": d,
                  "cmd": line, "env": run_env(line), "code": code, "failed": got[1] if got else None}
@@ -3130,7 +3222,7 @@ def recover_results(t=None):
     return n
 
 
-WATCH_RUNNING = TEST_TIMEOUT + 1800   # с: running дольше — заход завис; не меньше предела прогона TEST_TIMEOUT (metis-0723)
+WATCH_RUNNING = TEST_TIMEOUT + HEAVY_WAIT_MAX + 1800   # с: running дольше — заход завис; не меньше предела прогона TEST_TIMEOUT (metis-0723)
 WATCH_QUEUED = 4 * 3600               # с: queued с лежащей заявкой дольше — очередь стоит, тревога без снятия (metis-0723)
 
 
@@ -3505,6 +3597,8 @@ def result_code(res):
         return 75   # снятый дубль: своего итога нет, он у первой заявки (в этом окне его не прочесть) — «итога ещё нет»
     if res.get("state") == "failed" and res.get("busy"):
         return 75   # два сервера уже идут или давление памяти — отказ «занято», как истёкшее ожидание
+    if res.get("state") == "done" and res.get("overload"):
+        return 75   # таймаут под нагрузкой (metis-0901): тест не падал, прогон надо повторить — как «итога ещё нет»
     if res.get("state") == "done" and isinstance(res.get("code"), int) and not res.get("why"):
         return res["code"]
     return 1
