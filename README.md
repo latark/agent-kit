@@ -643,7 +643,7 @@
   песочницы, «команда не найдена» (PostToolUseFailure) и отказ классификатора (PermissionDenied → PostToolBatch) даёт
   роли подсказку: браузер — Харон, окна и процессы — Гестия (карточкой Зевсу), тесты и серверы — `pantheon outside`,
   Telegram — `pantheon read`, остальное — вопрос «да/нет» через Зевса; после отказа guard — `pantheon handoff route`.
-  Белый список (удалить worktree без своего, `deploy.sh`, перезапуск демона CDP) — `pantheon handoff touch`: плановый
+  Белый список (удалить worktree без своего, `deploy.sh` слитого коммита, перезапуск демона CDP) — `pantheon handoff touch`: плановый
   проход показывает владельцу окно Touch ID с действием целиком (помощник слияния) и исполняет его один раз по sha256
   текста. Где Touch ID не действует — README guard, «Touch ID: где не действует». Журнал отказов —
   `STATE/logs/handoff.jsonl`, строка «Отказы за сутки» — в сводке доски (board-auto.md).
