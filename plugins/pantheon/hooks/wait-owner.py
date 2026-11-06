@@ -17,6 +17,8 @@ alerts.md Зевс получает в сводке новых тревог (ctx
   - на других notification_type (простой окна, вход, диалог MCP);
   - чаще раза в 2 минуты на окно: отметка STATE/ctx/wait-owner/<окно> — время последней тревоги. Отметка из будущего
     (часы ушли назад) окно не продлевает.
+После успешного alert хук шлёт `pantheon notify` — уведомление macOS владельцу сразу, щелчок открывает доску; сбой
+уведомления — строка в журнал, хук цел, предел «раз в 2 мин на окно» общий с alert (metis-0907).
 Сбой `pantheon alert` (код не 0, нет файла, таймаут) — строка в STATE/logs/ctx-hooks.log, отметка не ставится:
 следующий запрос разрешения попробует снова. Хук всегда выходит с кодом 0 и ничего не печатает в окно.
 PANTHEON_NOW — подмена часов для тестов (секунды с эпохи), PANTHEON_STATE — папка состояния.
@@ -95,6 +97,16 @@ def main():
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as fh:
         fh.write(str(t))
+    # уведомление macOS тем же путём, что у Пантеона (щелчок открывает доску); сбой его — в журнал, хук цел (metis-0907)
+    try:
+        r = subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "notify", "--title", "Окно ждёт вас",
+                            "--group", f"wait-owner-{name}", f"{name}: {msg}"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
+            log(f"{name}\tpantheon notify: код {r.returncode}: {tail[0][:200]}")
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"{name}\tpantheon notify: {type(e).__name__}: {e}")
     return 0
 
 

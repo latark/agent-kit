@@ -7583,6 +7583,24 @@ def main(argv):
             # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
             notify_critical(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})")
         return 0
+    if cmd == "notify" and rest:  # metis-0907: уведомление macOS сразу (хук wait-owner); щелчок — доска или --target
+        opts = {"--title": "Пантеон", "--group": None, "--target": None}
+        words = []
+        it = iter(rest)
+        for a in it:
+            if a in opts:
+                v = next(it, None)
+                if v is None:
+                    print(f"pantheon notify: после {a} нужно значение", file=sys.stderr)
+                    return 2
+                opts[a] = v
+            else:
+                words.append(a)
+        if not " ".join(words).strip():
+            print("pantheon notify: пустой текст", file=sys.stderr)
+            return 2
+        notify(" ".join(words)[:300], title=opts["--title"], target=opts["--target"], group=opts["--group"])
+        return 0
     if cmd == "archive":
         return archive()
     if cmd == "domains" and rest[:1] == ["build"]:

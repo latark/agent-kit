@@ -52,9 +52,23 @@ def place():
     return home, state
 
 
-def run(home, state, role="domain-coordinator", session="metis-pantheon", t=T0, ev=None, via="sh", raw=None):
+def nlog(state):
+    return os.path.join(os.path.dirname(state), "notify.log")
+
+
+def sent(state):
+    """Уведомления из PANTHEON_NOTIFY_LOG: строки «заголовок|текст|ссылка|группа»."""
+    try:
+        with open(nlog(state), encoding="utf-8") as fh:
+            return [ln.rstrip("\n") for ln in fh if ln.strip()]
+    except OSError:
+        return []
+
+
+def run(home, state, role="domain-coordinator", session="metis-pantheon", t=T0, ev=None, via="sh", raw=None,
+        notify_log=None):
     env = {"PATH": "/usr/bin:/bin", "HOME": ROOT, "TMPDIR": ROOT, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
-           "PANTHEON_NOW": str(t), "CLAUDE_PLUGIN_ROOT": PLUGIN}
+           "PANTHEON_NOW": str(t), "CLAUDE_PLUGIN_ROOT": PLUGIN, "PANTHEON_NOTIFY_LOG": notify_log or nlog(state)}
     if role is not None:
         env["PANTHEON_ROLE"] = role
     if session is not None:
@@ -88,6 +102,9 @@ want = f" · metis-pantheon · окно metis-pantheon ждёт вас: Claude n
 check("permission_prompt в окне роли → одна строка alerts.md с именем окна (--from и в тексте)",
       r.returncode == 0 and len(got) == 1 and got[0].endswith(want), (r.returncode, r.stderr, got))
 check("тревога без --critical: нет «КРИТИЧНО»", got and "КРИТИЧНО" not in got[0], got)
+check("запрос разрешения → одно уведомление в PANTHEON_NOTIFY_LOG с именем окна и текстом запроса",
+      sent(state) == ["Окно ждёт вас|metis-pantheon: Claude needs your permission to use Bash||wait-owner-metis-pantheon"],
+      sent(state))
 check("хук ничего не печатает в окно", r.stdout == "", r.stdout)
 
 # 2. повтор раньше 2 минут — тишина; через 121 с — новая строка
@@ -95,6 +112,7 @@ r = run(home, state, t=T0 + 60)
 check("повтор через 60 с — новой строки нет", r.returncode == 0 and len(lines(home)) == 1, lines(home))
 r = run(home, state, t=T0 + 119)
 check("повтор через 119 с — новой строки нет", r.returncode == 0 and len(lines(home)) == 1, lines(home))
+check("повтор раньше 2 минут — нового уведомления нет", len(sent(state)) == 1, sent(state))
 r = run(home, state, t=T0 + 121)
 got = lines(home)
 check("через 121 с — вторая строка со своим временем", r.returncode == 0 and len(got) == 2
@@ -179,8 +197,21 @@ check("сбой pantheon alert → код 0, строка в ctx-hooks.log с к
       and "wait-owner\tmetis-pantheon\tpantheon alert: код " in log, (r.returncode, log))
 check("сбой pantheon alert → отметка не ставится", not os.path.exists(os.path.join(state, "ctx", "wait-owner",
                                                                                      "metis-pantheon")))
+check("сбой alert — уведомления нет", sent(state) == [], sent(state))
 run(home, state, t=T0 + 5)
 check("после сбоя следующий запрос пробует снова (без паузы 2 мин)", len(lines(home)) == 1, lines(home))
+
+# 10. сбой уведомления (PANTHEON_NOTIFY_LOG — папка): код 0, строка alert есть, запись в журнал хука
+home, state = place()
+r = run(home, state, notify_log=ROOT)
+logp = os.path.join(state, "logs", "ctx-hooks.log")
+log = open(logp, encoding="utf-8").read() if os.path.exists(logp) else ""
+check("сбой pantheon notify → код 0, alert записан, строка в ctx-hooks.log", r.returncode == 0 and len(lines(home)) == 1
+      and "wait-owner\tmetis-pantheon\tpantheon notify: код " in log, (r.returncode, lines(home), log))
+check("pantheon notify: пустой текст и --title без значения → код 2",
+      all(subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "notify"] + a, capture_output=True, text=True,
+                         env={"PATH": "/usr/bin:/bin", "HOME": ROOT, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+                              "PANTHEON_NOTIFY_LOG": nlog(state)}).returncode == 2 for a in (["--title", "x", " "], ["x", "--title"])))
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)
