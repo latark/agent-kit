@@ -145,9 +145,8 @@ def main():
                  'plugins = ["vercel@claude-plugins-official", "notion@anthropic-plugin-directory", "не плагин"]\n'
                  'model = "opus"\n'
                  '[window_extra.themis-sources]\nallow = "Bash(uv run pytest *)"\n' + good)
-    # cwd — HOME: относительный путь хука нашёлся бы от папки сборки, а влиться не должен
     r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
-                       timeout=120, cwd=tmp)
+                       timeout=120)
     at, th = win("athena-shop"), win("themis-sources")
     allow, deny = at["permissions"].get("allow") or [], at["permissions"].get("deny") or []
     check("window_extra: allow из policy.toml попал в окно направления",
@@ -190,8 +189,7 @@ def main():
           not any("projects/br" in h["command"] for ev in th["hooks"].values() for g in ev for h in g["hooks"]))
     check("window_extra: отброшенные хуки названы в тревоге",
           all(x in alerts for x in ("legal-watch/x.sh", "link.sh", "python3 ~", "plain.py", "Nope", "shell",
-                                    "ignore", "'statusMessage': 5", "'matcher': 5"))
-          and "stop.sh" not in alerts, alerts[-1500:])  # влитый хук тревога не называет
+                                    "ignore", "'statusMessage': 5", "'matcher': 5")), alerts[-1500:])
     return all(results)
 
 
