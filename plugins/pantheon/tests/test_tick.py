@@ -500,9 +500,16 @@ def main():
     check("песочница: запреты и настоящими путями — .git внутри каждой разрешённой папки, личное — оба вида",
           real("projects/br") + "/**/.git/config" in dw and real("projects/br") + "/.git/hooks" in dw
           and cache_a + "/**/.git/hooks" in dw and real("ai/knowledge/me") in dr and "~/ai/knowledge/me" in dr)
-    check("denyWrite: .claude/agents каждой папки (репозитория) окна, и в worktree внутри неё — как .git/config (metis-0140)",
-          real("projects/br") + "/.claude/agents" in dw and real("projects/br") + "/**/.claude/agents" in dw
-          and all(f + "/.claude/agents" in dw for f in box["filesystem"]["allowWrite"]))
+    # metis-0841 («да» владельца 05.11 16:09): окно направления правит роли своего проекта — .claude/agents его папок
+    # песочница не закрывает (текст судит guard protect-config); прочие разрешённые папки (кэш) — как metis-0140
+    folders_a = [f for f in box["filesystem"]["allowWrite"] if f.startswith(real("projects") + "/")]
+    check("denyWrite окна направления: .claude/agents его папок открыта, кэша и прочих — закрыта (metis-0140, 0841)",
+          real("projects/br") in folders_a and not any(f + "/.claude/agents" in dw or f + "/**/.claude/agents" in dw
+                                                        for f in folders_a)
+          and cache_a + "/.claude/agents" in dw and cache_a + "/**/.claude/agents" in dw, dw)
+    ww, wdw = sw["sandbox"]["filesystem"]["allowWrite"], sw["sandbox"]["filesystem"]["denyWrite"]
+    check("denyWrite окна мастерской: .claude/agents каждой папки и в worktree внутри неё — закрыта (metis-0140)",
+          ww and all(f + "/.claude/agents" in wdw and f + "/**/.claude/agents" in wdw for f in ww), wdw)
     check("песочница: terminal-notifier ролям не прочитать и не запустить",
           "/opt/homebrew/Cellar/terminal-notifier" in box["filesystem"]["denyRead"]
           and "/opt/homebrew/Cellar/terminal-notifier" in sw["sandbox"]["filesystem"]["denyRead"])
