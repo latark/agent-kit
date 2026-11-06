@@ -14,6 +14,7 @@
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -199,8 +200,20 @@ try:
     with open(reg, "w") as f:
         json.dump({"pid": int(PID), "startedAt": int((NOW - 10 * 86400) * 1000)}, f)
     st = ctx.process_started(PID)
-    check("process_started: устаревшая запись — время ps (запуск теста, не 10 дней назад)",
-          NOW - 600 < st <= time.time(), (st, NOW))
+    # граница — запуск самого PID по ps, а не NOW - 600: от длины прогона не зависит (metis-0909)
+    try:
+        ps_out = subprocess.run(["ps", "-o", "etime=", "-p", PID], capture_output=True, text=True,
+                                env=dict(os.environ, LC_ALL="C")).stdout.strip()
+    except OSError:
+        ps_out = ""
+    pm = re.fullmatch(r"(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)", ps_out)
+    if not pm:
+        print("пропущено: ps недоступен (песочница окна) — проверка «время ps, а не запись 10-дневной давности»")
+    else:
+        d, h, mi, sec = (int(x or 0) for x in pm.groups())
+        ps_start = time.time() - (((d * 24 + h) * 60 + mi) * 60 + sec)
+        check("process_started: устаревшая запись — время ps (запуск этого PID, не 10 дней назад)",
+              abs(st - ps_start) < 5 and st > NOW - 86400, (st, ps_start, NOW))
     with open(reg, "w") as f:
         json.dump({"pid": 1, "startedAt": int((NOW + 3600) * 1000)}, f)
     st = ctx.process_started(PID)
