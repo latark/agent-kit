@@ -26,6 +26,7 @@ tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
@@ -2301,6 +2302,15 @@ def test_owner_log_shrink_and_u2028():
     check("x.md пропал" in e.alerts(), "пропажа журнала не замечена")
 
 
+def _age_tree(w, when):
+    """Состарить копию целиком (файлы и папки без перехода по ссылкам, затем её саму): уборка копий смотрит не только
+    mtime папки, но и свежие правки внутри (metis-0835, D1), а файлы теста созданы позже T0."""
+    for d, dirs, files in os.walk(w, topdown=False):
+        for n in files + dirs:
+            os.utime(os.path.join(d, n), (when, when), follow_symlinks=False)
+    os.utime(w, (when, when))
+
+
 def test_security_0100():
     """Проверка безопасности 0.10.0: git в копии роли не исполняет конфигурацию; pause --off не выходит из pauses/;
     из сессии Claude метку и ручную паузу без вашей строки не снять; saved — только имя сессии."""
@@ -2324,7 +2334,7 @@ def test_security_0100():
     g("config", "extensions.worktreeConfig", "true")
     old = T0 - 3 * 86400
     for n in ("w-ok", "w-bad"):
-        os.utime(os.path.join(folder, ".claude", "worktrees", n), (old, old))
+        _age_tree(os.path.join(folder, ".claude", "worktrees", n), old)
     e.run("watch", t=T0)
     check(not os.path.exists(pwn), "git исполнил fsmonitor из копии роли")
     check(not os.path.exists(os.path.join(folder, ".claude", "worktrees", "w-ok")), "чистая слитая копия не убрана")
@@ -2334,7 +2344,7 @@ def test_security_0100():
     g("worktree", "add", "-q", "-b", "w3", w3)
     g("config", "filter.x\u2028y.clean", f"touch {pwn}")
     open(os.path.join(w3, ".gitattributes"), "w").write("* filter=x\u2028y\n")
-    os.utime(w3, (old, old))
+    _age_tree(w3, old)
     e.run("watch", t=T0 + 86400)
     check(not os.path.exists(pwn) and os.path.exists(w3), "фильтр с U+2028 в имени исполнился или копия убрана")
     # pause --off не выходит из pauses/
@@ -2386,7 +2396,7 @@ def test_worktree_outward_links_0101():
         check(g("status", "--porcelain", cwd=w).stdout.strip() == "", "копия не чистая для git")
     old = T0 - 3 * 86400
     for w in (out_wt, in_wt):
-        os.utime(w, (old, old))
+        _age_tree(w, old)
     e.run("watch", t=T0)
     check(os.path.exists(out_wt) and os.path.exists(os.path.join(target, "keep.txt")),
           "копия со ссылкой наружу убрана или цель тронута")
@@ -2438,11 +2448,12 @@ def test_worktree_node_modules_0616():
     open(os.path.join(target, "keep.txt"), "w").write("x")
     old = T0 - 3 * 86400
     wts = {}
-    for n in ("w-clean", "w-link", "w-wide"):
+    for n in ("w-clean", "w-link", "w-wide", "w-dirty"):
         wts[n] = os.path.join(folder, ".claude", "worktrees", n)
         g("worktree", "add", "-q", "-b", n, wts[n])
-    for n in ("w-clean", "w-link"):
+    for n in ("w-clean", "w-link", "w-dirty"):
         w = wts[n]
+        _mk_wt_files(os.path.join(w, ".venv", "lib"), 1000)
         _mk_wt_files(os.path.join(w, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
         _mk_wt_files(os.path.join(w, ".next", "cache"), 3000)
         os.symlink(os.path.join(w, "node_modules", ".pnpm", "x"), os.path.join(w, "node_modules", "inner"))
@@ -2453,13 +2464,19 @@ def test_worktree_node_modules_0616():
                             text=True).stdout.strip()
         ex = ex if os.path.isabs(ex) else os.path.join(w, ex)
         os.makedirs(os.path.dirname(ex), exist_ok=True)
-        open(ex, "a").write("node_modules\n.next\nsrc\n")
+        open(ex, "a").write("node_modules\n.next\n.venv\nsrc\n")
+        if n == "w-dirty":
+            open(os.path.join(w, "work.txt"), "w").write("не закоммичено")
+            check(g("status", "--porcelain", cwd=w).stdout.strip() != "", "w-dirty чистая")
+            _age_tree(w, old)
+            continue
         check(g("status", "--porcelain", cwd=w).stdout.strip() == "", f"{n}: копия не чистая для git")
-        os.utime(w, (old, old))
+        _age_tree(w, old)
     e.run("watch", t=T0)
     check(not os.path.exists(wts["w-clean"]), "слитая чистая копия с 6000 файлами в node_modules не убрана за проход")
     check(os.path.exists(wts["w-link"]) and os.path.exists(os.path.join(target, "keep.txt")),
           "копия со ссылкой наружу в node_modules убрана или цель тронута")
+    check(os.path.exists(os.path.join(wts["w-dirty"], "work.txt")), "копия с незакоммиченной работой и большим node_modules убрана")
     check("w-link" in e.alerts() and "ссылки наружу" in e.alerts(), "нет тревоги о ссылке наружу в node_modules")
     check(os.path.exists(wts["w-wide"]) and "w-wide" in e.alerts() and "обход длиннее лимита" in e.alerts(),
           "копия с 6000 файлами вне зависимостей убрана или нет тревоги о лимите")
@@ -2497,6 +2514,9 @@ def test_outward_links_skips_node_modules_0616():
             check(w.outward_links(clean) is None, "зависимости больше DEPS_LIMIT не дали None")
         finally:
             w.DEPS_LIMIT = saved
+        venv = os.path.join(base, "venv-wt")
+        _mk_wt_files(os.path.join(venv, ".venv", "lib"), 6000)
+        check(w.outward_links(venv) == (0, None), f".venv с 6000 файлами: {w.outward_links(venv)}")
         plain = os.path.join(base, "plain")
         _mk_wt_files(plain, 6000)
         check(w.outward_links(plain) is None, "6000 файлов вне node_modules не дали None")
@@ -2760,7 +2780,7 @@ def test_worktree_keeps_unmerged_and_untracked_0184():
     open(os.path.join(path["w-untracked"], "draft.txt"), "w").write("черновик\n")
     old = T0 - 3 * 86400
     for wt in path.values():
-        os.utime(wt, (old, old))
+        _age_tree(wt, old)
     r = e.run("watch", t=T0)
     check(r.returncode == 0, f"watch упал: {r.stderr[-300:]}")
     check(not os.path.exists(path["w-clean"]), "контроль: слитая и чистая копия не убрана")
@@ -2777,7 +2797,7 @@ def test_watch_and_wake_second_instance_exits_0184():
     wt = os.path.join(folder, ".claude", "worktrees", "w-held")
     g("worktree", "add", "-q", "-b", "w-held", wt)
     old = T0 - 3 * 86400
-    os.utime(wt, (old, old))
+    _age_tree(wt, old)
     e.task("g-0001", "g-dir", status="todo")
     e.agents([{"id": "dead0001", "sessionId": "dead0001-x", "name": "g-dir", "state": "failed", "kind": "background",
                "cwd": folder, "startedAt": (T0 - 7200) * 1000}])
@@ -3682,6 +3702,50 @@ def test_plugins_respawn_quiet_subagent_0864():
     sub_meta(tp, "s1", T0 - 4 * 3600)
     e.run("watch", t=T0)
     check(respawned(e, "efef0864"), f"0864: субагент молчит 4 ч (больше LIVE_SUBAGENT_MAX) — держит окно: {e.calls()}")
+
+
+def sub_journal(tp, n, mtime, records):
+    """Журнал субагента своими записями (dict) с временем mtime."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.jsonl")
+    with open(f, "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_plugins_respawn_live_rule_0904():
+    """metis-0904: watch берёт правило «живой» из lib/live_subagent.py, общее с хуком ctx. Субагент с «finished», чья
+    фоновая команда ещё без итога (Bash ушёл в фон), — живой: окно не перезапускается; итог пришёл — перезапуск.
+    Субагент, запущенный в первые LIVE_GRACE с после старта процесса (первая запись журнала позже старта), — живой,
+    хотя журнал писался в пределах LIVE_GRACE."""
+    bg = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "Command running in background with ID: bq1. Output x"}]}}
+    note = {"type": "user", "message": {"role": "user", "content":
+            "<task-notification>\n<task-id>bq1</task-id>\n<status>completed</status>\n</task-notification>"}}
+    e, a, tp = respawn_env("rb-dir", "abcd0904-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg])
+    sub_meta(tp, "b1", T0 - 1200, finished=True)
+    e.run("watch", t=T0)
+    check(not respawned(e, "abcd0904") and "rb-dir (живые субагенты: dev-b1)" in e.alerts(),
+          f"0904: finished с фоновой командой без итога — окно перезапущено: {e.calls()} {e.alerts()[-400:]}")
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg, note])
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "abcd0904"), f"0904: итог фоновой пришёл — окно не перезапущено: {e.calls()}")
+    # запущен через 10 с после старта, журнал последний раз писался через 60 с (в пределах LIVE_GRACE)
+    e, a, tp = respawn_env("rg-dir", "dcba0904-1")
+    a["startedAt"] = (T0 - 3600) * 1000
+    e.agents([a])
+    born = datetime.fromtimestamp(T0 - 3590, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    sub_journal(tp, "g1", T0 - 3540, [{"type": "user", "timestamp": born, "message": {"role": "user", "content": "x"}}])
+    sub_meta(tp, "g1", T0 - 3590)
+    e.run("watch", t=T0)
+    check(not respawned(e, "dcba0904") and "rg-dir (живые субагенты: dev-g1)" in e.alerts(),
+          f"0904: запущенный в окне старта субагент не держит окно: {e.calls()} {e.alerts()[-400:]}")
 
 
 def test_plugins_respawn_idle_free_0181():
@@ -4757,12 +4821,9 @@ def test_resume_picks_saved_session_0499():
           "0499: saved не записал id в метку «можно»")
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in tests:
-        try:
-            fn()
-        except Exception as ex:  # noqa: BLE001
-            FAILS.append(f"{fn.__name__}: {type(ex).__name__}: {ex}")
-            print("ОШИБКА:", fn.__name__, type(ex).__name__, ex)
-    print(f"тестов: {len(tests)}, не прошло: {len(FAILS)}")
+    sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
+    from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
+    n = run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")], FAILS,
+                  lambda name, err: FAILS.append(f"{name}: {err}"))
+    print(f"тестов: {n}, не прошло: {len(FAILS)}")
     sys.exit(1 if FAILS else 0)

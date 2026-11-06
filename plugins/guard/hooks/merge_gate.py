@@ -45,8 +45,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    каждого reject PR, кроме reject, снятого accept с перечнем того же рецензента на том же head (_floor, _carried,
    #134 п.2, argus-b r2): иначе откат к коду, принятому до reject (force-push на старый head после снятия reject
    правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
-   CARRY_BUDGET секунд, у git — таймаут 3 с. Нет отпечатка — нет переноса: папка слияния не клон репозитория PR,
-   shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
+   CARRY_BUDGET секунд (запас только в тесте — GUARD_TEST_CARRY_BUDGET), у git — таймаут 3 с. Нет отпечатка — нет
+   переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py по AST — metis-0404), casefold;
@@ -97,6 +97,7 @@ import re
 import shlex
 import signal
 import subprocess
+import threading
 import sys
 import time
 from datetime import datetime
@@ -1761,6 +1762,12 @@ def owner_approved(repo, pr, sha, now=None):
 # история — не переходит
 CARRY_HEADS = 8  # сколько прошлых head с вердиктами сверять (кроме нового); старые — без отпечатка
 CARRY_BUDGET = 4  # с на все отпечатки одного шлюза: дальше — без отпечатка (таймаут хука 10 с, ещё gh pr view и CI)
+# запас только в тестах (metis-0696, решение владельца 06.11 «А: запас только в тестах»): под нагрузкой Mac сверка
+# в test_merge_gate (r6) не укладывалась в 4 с. GUARD_TEST_CARRY_BUDGET=<с> ставит только тест, как
+# GUARD_TEST_DEADLINE у загрузчика tests/_cached_main.py; бюджет только растёт и не выше CARRY_BUDGET_MAX, чтобы
+# опечатка не повесила хук. Пусто, не число, не больше 4 — боевые CARRY_BUDGET
+CARRY_BUDGET_ENV = "GUARD_TEST_CARRY_BUDGET"
+CARRY_BUDGET_MAX = 30
 PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")
 # дифф без pathspec и без текста: от конфига git (diff.*, core.abbrev, атрибуты, diff.submodule) вывод не зависит,
 # orderFile меняет только порядок строк — сортировка в Python (threat-134-carry п.2)
@@ -1967,6 +1974,15 @@ def _carried(verdicts, sha, fp, cut=None):
     return out
 
 
+def _carry_budget():
+    """Бюджет сверки, с: CARRY_BUDGET, в тесте — GUARD_TEST_CARRY_BUDGET (больше 4, не выше CARRY_BUDGET_MAX)."""
+    try:
+        v = float(os.environ.get(CARRY_BUDGET_ENV, ""))
+    except ValueError:
+        return CARRY_BUDGET
+    return min(v, CARRY_BUDGET_MAX) if v > CARRY_BUDGET else CARRY_BUDGET  # nan > 4 — False
+
+
 class _Prints:
     """Отпечатки head для одного шлюза: git папки и base PR — один раз, отпечаток — по запросу и только для
     _carry_heads; why — почему чего-то не посчитали (для текста отказа)."""
@@ -1975,7 +1991,7 @@ class _Prints:
         self.cwd, self.repo, self.sha, self.view = cwd, repo, sha, view
         self.allowed = _carry_heads(verdicts, sha)
         self.memo, self.why, self.gd, self.base, self.ready = {}, [], None, None, False
-        self.t0 = time.monotonic()
+        self.t0, self.budget = time.monotonic(), _carry_budget()
 
     def _note(self, why):
         if why and why not in self.why:
@@ -1997,8 +2013,8 @@ class _Prints:
                 self._note(why)
         if not self.gd:
             return None
-        if head not in self.memo and time.monotonic() - self.t0 > CARRY_BUDGET:
-            self._note(f"сверка дольше {CARRY_BUDGET} с — остановлена (таймаут хука 10 с)")
+        if head not in self.memo and time.monotonic() - self.t0 > self.budget:
+            self._note(f"сверка дольше {self.budget:g} с — остановлена (таймаут хука 10 с)")
             return None
         if head not in self.memo:
             got = _fingerprint(self.gd, self.base, head)
@@ -2067,10 +2083,15 @@ def head_verdicts(verdicts, sha):
 # задачей, а PR — к слиянию (roles/_ref/merge-rounds.md, «Находки ревью: Б, Д, С»). Счёт — как у шлюза и итога
 # `pantheon review status`: последний вердикт каждого рецензента на head (head_verdicts), «принять» с перечнем (Б6),
 # в PR ядра — только на Opus (opus_problem) и их CORE_ACCEPTS, вне ядра — одно. Ядро ли — _core_problem шлюза; файлы
-# не получены или сборку окон не проверить — считаем ядром (нужно больше «принять», реже отказ). Push пропускается:
-# нет записей «принять» на вершине ветки, ветка remote по адресу (не имени), PR не открыт, не та ветка, другой head,
-# конфликт с base, отправляется тот же коммит, в новых коммитах строка «Б: <причина>» (правка блокера от argus или
-# владельца, красные тесты), сбой git или gh. Модель угроз — ошибка агента, не обход (README guard).
+# не получены или сборку окон не проверить — считаем ядром (нужно больше «принять», реже отказ). Файлы PR
+# запрашиваются вместе с gh pr view, параллельно (metis-0809): по очереди второй gh не укладывался в срок хука, и PR
+# вне ядра считался ядром. Принудительная отправка (--force, --force-with-lease, +ветка) судится так же: amend и
+# force сжигают вердикты, как новый коммит (metis-0809, случай #296). Push пропускается: нет записей «принять» на
+# вершине ветки, ветка remote по адресу (не имени), PR не открыт, не та ветка, другой head, конфликт с base,
+# отправляется тот же коммит, строка «Б: <причина>» в коммитах PR (правка блокера от argus или владельца, красные
+# тесты; коммиты base — main, подтянутый слиянием, — не в счёт, metis-0809), подтянут base без правок (в новых
+# коммитах есть слияние, а собственный дифф PR — отпечаток _fingerprint, как у переноса «принять» шлюзом, — тот же
+# или его не посчитать), сбой git или gh. Модель угроз — ошибка агента, не обход (README guard).
 CORE_ACCEPTS = 2  # «принять» argus на Opus в PR ядра — как MIN_ACCEPTS шлюза владельца (pantheon/lib/merge.py)
 PUSH_REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")  # имя remote, а не адрес
 PUSH_BLOCKER_RE = re.compile(r"^Б[0-9]*:[ \t]*\S", re.M)  # «Б: …», «Б1: …» — новый коммит правит блокер
@@ -2099,6 +2120,41 @@ def push_accepts(records, repo, pr, sha, core):
     return sum(1 for r in direct if checklist_ok(r))
 
 
+def _push_bases(d, remote, view):
+    """Коммиты base PR в git папки: baseRefOid из gh и вершина ветки base у remote (refs/remotes/<remote>/<base>) —
+    то, что подтягивают слиянием. Список sha (0–2): чего нет в git папки, того нет и в списке."""
+    out = []
+    name = view.get("baseRefName")
+    refs = [str(view.get("baseRefOid") or "").lower()]
+    if isinstance(name, str) and BRANCH_RE.fullmatch(name):
+        refs.append(f"refs/remotes/{remote}/{name}")
+    for ref in refs:
+        if not ref:
+            continue
+        got = (_git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip().lower()
+        if SHA_RE.fullmatch(got) and got not in out:
+            out.append(got)
+    return out
+
+
+def _push_base_merged(d, repo, view, tip, new, bases):
+    """Подтянут base без правок: в коммитах tip..new вне base есть слияние, а собственный дифф PR (отпечаток
+    _fingerprint от merge-base с base) на new тот же, что на tip, — шлюз перенесёт «принять» сам. Отпечаток не
+    посчитать (не клон, shallow, нет коммита base) — тоже да: сбой git — пропуск. Слияния нет — нет."""
+    merges = _git(d, "rev-list", "--merges", f"{tip}..{new}", "--not", *bases)
+    if merges is None:
+        return True
+    if not merges.strip():
+        return False
+    old_base = str(view.get("baseRefOid") or "").lower()
+    gd, _ = _carry_git(d, repo, old_base)
+    if gd is None or not bases:
+        return True
+    old, _ = _fingerprint(gd, old_base, tip)
+    cur, _ = _fingerprint(gd, bases[-1], new)
+    return old is None or cur is None or old == cur
+
+
 def accepted_push_problem(d, remote, pairs):
     """Текст отказа push в принятый PR или None (metis-0794). d — папка git, remote — имя remote из команды или
     @{push}, pairs — [(что отправляется, ветка назначения)] (guard_rules._push_parse)."""
@@ -2120,31 +2176,39 @@ def accepted_push_problem(d, remote, pairs):
         new = (_git(d, "rev-parse", "--verify", "-q", f"{src}^{{commit}}") or "").strip().lower()
         if not SHA_RE.fullmatch(new) or new == tip:
             continue
-        msgs = _git(d, "log", "--format=%B", f"{tip}..{new}")
-        if msgs is None or PUSH_BLOCKER_RE.search(msgs):
-            continue
         for pr in prs[:2]:
             if not _gh_fits():
                 return None
+            # файлы PR — параллельно с gh pr view (metis-0809): оба gh укладываются в один GH_TIMEOUT
+            box = []
+            th = threading.Thread(target=lambda pr=pr: box.append(_pr_files(repo, pr)), daemon=True)
+            th.start()
             got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", PUSH_VIEW_FIELDS])
             view = got[0] if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else None
             if view is None or str(view.get("state") or "").upper() != "OPEN" or view.get("headRefName") != dst \
                     or str(view.get("headRefOid") or "").lower() != tip \
                     or str(view.get("mergeable") or "").upper() == "CONFLICTING":
                 continue
+            # «Б:» — только в коммитах PR: коммиты base (main, подтянутый слиянием) не в счёт (metis-0809)
+            bases = _push_bases(d, remote, view)
+            msgs = _git(d, "log", "--format=%B", f"{tip}..{new}", "--not", *bases)
+            if msgs is None or PUSH_BLOCKER_RE.search(msgs) or _push_base_merged(d, repo, view, tip, new, bases):
+                continue
             n, need = push_accepts(records, repo, pr, tip, True), CORE_ACCEPTS
-            if n < need and push_accepts(records, repo, pr, tip, False) >= 1 \
-                    and _gh_fits() \
-                    and _core_problem(repo, pr, tip, view, _pr_files(repo, pr)) is None:
-                n, need = push_accepts(records, repo, pr, tip, False), 1
+            if n < need and push_accepts(records, repo, pr, tip, False) >= 1:
+                th.join(GH_TIMEOUT)
+                if box and _core_problem(repo, pr, tip, view, box[0]) is None:
+                    n, need = push_accepts(records, repo, pr, tip, False), 1
             if n >= need:
                 return (f"Правило push: PR {repo}#{pr} уже принят на {tip[:12]} — «принять» argus {n} (нужно {need}), "
-                        "«вернуть» нет. Новый коммит в ветке сожжёт эти вердикты и потребует нового круга ревью. Долг "
-                        "ревью (Д, С) в принятый PR не тянут: заведи задачу `pantheon task new … --from ревью`, а PR "
-                        "веди к слиянию (ядро — `pantheon merge request " + str(pr) + "`, иначе gh pr merge через "
-                        "шлюз). Правка блокера (Б от argus или владельца, красные тесты) — строка «Б: <причина>» в "
-                        "сообщении нового коммита, тогда push пройдёт; «вернуть» argus на этот head тоже снимает "
-                        "остановку.")
+                        "«вернуть» нет. Новый коммит в ветке (и amend с принудительной отправкой) сожжёт эти вердикты "
+                        "и потребует нового круга ревью. Долг ревью (Д, С) в принятый PR не тянут: заведи задачу "
+                        "`pantheon task new … --from ревью`, а PR веди к слиянию (ядро — `pantheon merge request "
+                        + str(pr) + "`, иначе gh pr merge через шлюз). Подтянуть base без правок — `git merge "
+                        f"{remote}/<base>` без своих коммитов: собственный дифф PR тот же, push пройдёт, а шлюз "
+                        "перенесёт «принять» сам; с правкой конфликта — строка «Б: …» и новый круг. Правка "
+                        "блокера (Б от argus или владельца, красные тесты) — строка «Б: <причина>» в сообщении нового "
+                        "коммита, тогда push пройдёт; «вернуть» argus на этот head тоже снимает остановку.")
     return None
 
 

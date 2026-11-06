@@ -15,8 +15,8 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается (и close_checked, metis-0660).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
 строку «слит, неотмечено N», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
-Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing её направления review — один раз
-на PR (строка REVIEW_MARK в журнале).
+Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing/waiting её направления review — один
+раз на PR (строка REVIEW_MARK в журнале); PR без Closes — задачам doing/waiting, названным в его ветке или теле (metis-0615).
 Обработанные PR отмечены в STATE/autoclose.json; задачу, уже закрытую этим PR (строка в журнале), второй раз не трогаем. Заодно проход запоминает, у каких
 задач есть открытый PR: без него «review больше суток» на доске — повод для внимания.
 
@@ -214,9 +214,9 @@ def save_state(p, st):
 def pr_index(cache):
     """PR задач по кэшу fetch (metis-0501 [zeus-pr-link]) → {id: [{"repo", "number", "sha", "merged", "branch"}]}: слитые — по
     ветке и «Closes» (и с «часть»: PR всё равно её), открытые — по closes. Карточка задачи берёт отсюда ссылки на GitHub;
-    упоминания в журнале дополняет tasks.work_links. branch — ветка PR (headRefName слитого, branch открытого): по ней
-    карточка пачки находит PR с ветки batch/<id> без поля pr (metis-0799, tasks.batch_pr); у PR из форка
-    (isCrossRepository, поле cross кэша) и у строки кэша без поля cross branch пуст."""
+    упоминания в журнале дополняет tasks.work_links. branch — ветка PR (headRefName слитого, branch открытого); у PR из
+    форка (isCrossRepository, поле cross кэша) и у строки кэша без поля cross branch пуст. PR пачки по ветке batch/<id>
+    ищет не индекс, а batch_prs (одно правило для карточки, board-auto и check, metis-0810)."""
     out = {}
     cache = cache if isinstance(cache, dict) else {}
     for key, merged in (("merged", True), ("open_prs", False)):
@@ -242,6 +242,48 @@ def pr_index(cache):
                                                     "merged": merged, "branch": branch,
                                                     "day": (merged_day(pr.get("mergedAt")) or "") if merged else ""})
     return out
+
+
+BATCH_HEAD_RE = re.compile(r"batch/([a-z][a-z0-9]{1,11}-\d{3,})")  # ветка пачки batch/<story-id> (tasks.BATCH_BRANCH)
+
+
+def batch_prs(cache):
+    """Одно правило «PR пачки» (metis-0810) — для карточки пачки (tasks.batch_pr), board-auto (boardtext.batch_branch_prs)
+    и check (pantheon.batch_outside). PR пачки <id> — строка кэша fetch с веткой ровно batch/<id> (слитый — headRefName,
+    открытый — branch), не из форка (cross is False: форк назовёт ветку как угодно, строка без cross — тоже нет), номер —
+    целое больше нуля. «часть» в теле PR не мешает ему быть PR пачки (карточка и доска его показывают), но закрывает он
+    тогда ничего: closes пуст, «вне состава» по нему нет — как у autoclose. Репозитории направления пачки (own) — выбор
+    batch_pick. → {id пачки: [(репозиторий в нижнем регистре, номер, слит, [id задач, которые PR закрывает, кроме самой
+    пачки])]}, лучший первым: открытый важнее слитого, из одинаковых — больший номер."""
+    out = {}
+    cache = cache if isinstance(cache, dict) else {}
+    for key, branch_key in (("merged", "headRefName"), ("open_prs", "branch")):
+        by_repo = cache.get(key) if isinstance(cache.get(key), dict) else {}
+        for repo, rows in by_repo.items():
+            for pr in rows if isinstance(rows, list) and isinstance(repo, str) else []:
+                if not isinstance(pr, dict) or not isinstance(pr.get(branch_key), str) or pr.get("cross") is not False:
+                    continue
+                m = BATCH_HEAD_RE.fullmatch(pr[branch_key])
+                n = pr.get("number")
+                if not m or not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+                    continue
+                sid = m.group(1)
+                if key == "merged":
+                    body = pr.get("body") if isinstance(pr.get("body"), str) else ""
+                    ids = [] if is_part(body) else closing_ids(pr[branch_key], body)
+                else:
+                    ids = [i for i in pr.get("closes") or [] if isinstance(i, str)] \
+                        if isinstance(pr.get("closes"), list) and not pr.get("part") else []
+                out.setdefault(sid, []).append((repo.lower(), n, key == "merged", [i for i in ids if i != sid]))
+    for rows in out.values():
+        rows.sort(key=lambda r: (not r[2], r[1]), reverse=True)
+    return out
+
+
+def batch_pick(rows, own=None):
+    """Лучший PR пачки (строка batch_prs) из репозиториев её направления: own — их имена в нижнем регистре, None — любые.
+    Нет такого — None. Тот же выбор — tasks.batch_pr (модуль без autoclose; равенство держит test_board_sync)."""
+    return next((r for r in rows or [] if own is None or r[0] in own), None)
 
 
 def open_pr_tasks(state_file):
@@ -539,25 +581,50 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
     return log, errors
 
 
+REVIEW_FROM = ("todo", "doing", "waiting")   # открытый PR с Closes ставит review из этих статусов
+REVIEW_FROM_MENTION = ("doing", "waiting")   # PR без Closes — только начатую работу: todo по упоминанию не трогаем
+BRANCH_NUM_RE = re.compile(r"(?<!\d)\d{3,}(?!\d)")   # номер задачи в имени ветки без префикса: landing-claims-0275
+
+
+def branch_named(branch, ids):
+    """PR без Closes (metis-0615, argus #341 Б1): из id тела — только те, чей номер есть в имени ветки (BA #38: ветка
+    …-0184 и athena-0184 в теле). Простое упоминание («после metis-0201», «зависит от athena-0274» в PR ветки …-0275)
+    задачу не трогает. Номера сравниваются числом: 0184 и 184 — один."""
+    nums = {int(x) for x in BRANCH_NUM_RE.findall(branch)} if isinstance(branch, str) else set()
+    return [i for i in ids if isinstance(i, str) and (m := re.search(r"-(\d+)$", i)) and int(m.group(1)) in nums]
+
+
 def review_pr(pantheon, t, repo, pr, dirs, T, log, errors):
-    """Открытый PR, который закрывает задачу (id в ветке или «Closes» в теле, без «часть»), → задача todo/doing его
-    направления в review (metis-0397, п. 7). Строка REVIEW_MARK в журнале: этим PR уже ставили — второй раз не трогаем
-    (владелец вернул задачу — тревога у прохода доски, lib/boardstatus.py)."""
+    """Открытый PR, который закрывает задачу (id в ветке или «Closes» в теле, без «часть»), → задача todo/doing/waiting
+    его направления в review (metis-0397, п. 7). PR без Closes и без id в ветке (closes пуст) — задачи из тела (ids),
+    чей номер есть в имени ветки (branch_named), и только doing/waiting (metis-0615, случай athena-0184 и PR BA #38: задача
+    в waiting с открытым PR висела мимо review); простое упоминание в теле не в счёт. waiting владельца (waiting_on human,
+    колонка «Нужен ответ») не трогаем: вопрос не теряется; прежний waiting_on — в строке журнала (task_set его стирает).
+    Строка REVIEW_MARK в журнале: этим PR уже ставили — второй раз не трогаем (владелец вернул задачу —
+    тревога у прохода доски, lib/boardstatus.py)."""
     n = pr.get("number")
     if not isinstance(n, int) or pr.get("part") or not isinstance(pr.get("closes"), list):
         return
+    ids, allowed = [i for i in pr["closes"] if isinstance(i, str)], REVIEW_FROM
+    if not ids:
+        ids = branch_named(pr.get("branch"), pr["ids"]) if isinstance(pr.get("ids"), list) else []
+        allowed = REVIEW_FROM_MENTION
+    if not ids:
+        return
     tasks = T.load_tasks(pantheon, T.WORK_TYPES)
     note = f"PR #{n} ({repo}) {REVIEW_MARK}"
-    for tid in pr["closes"]:
-        if not isinstance(tid, str):
-            continue
+    for tid in ids:
         path, head, _ = tasks.get(tid, ("", {}, ""))
-        if head.get("type") != "task" or head.get("direction") not in dirs or head.get("status") not in ("todo", "doing"):
+        if head.get("type") != "task" or head.get("direction") not in dirs or head.get("status") not in allowed:
+            continue
+        if head.get("status") == "waiting" and head.get("waiting_on") == "human":
             continue
         if journal_has(path, T, note):
             continue
         try:
-            T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
+            was = head.get("waiting_on") if head.get("status") == "waiting" else None
+            T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход",
+                       note=note + (f"; был waiting_on {was}" if was else ""))
             log.append(f"{tid}: review — открыт PR #{n} ({repo})")
         except ValueError as e:
             errors[f"{repo}#{n}"] = f"{tid}: {e}"

@@ -72,7 +72,7 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
 - Своя вкладка на окно (metis-0774): заявка из окна идёт в /open и /eval с полем session = имя окна — демон заводит
   этому окну отдельную вкладку (первый /open), чужие окна страницу не уводят. Сессия владельца — без поля, общая
   вкладка. Вкладку проход не закрывает (/close-tab не зовёт): простаивающую демон закрывает сам через 6 ч, предел —
-  12 вкладок (429 — отказ с текстом демона). Старый демон поле молча игнорирует (работает общая вкладка), откат не нужен.
+  12 вкладок (429 — отказ своим текстом без совета «POST /close-tab»: окну это не выполнить, metis-0812). Старый демон поле молча игнорирует (работает общая вкладка), откат не нужен.
 - Демон не отвечает — проход уведомляет владельца (кто, что, какой сайт, задача; «нажмите Разрешить») и запускает его
   (`node cdp-daemon.mjs <браузер>`); повтор запуска не раньше чем через 10 мин. Первое обращение по задаче и сайту за
   6 ч — тоже уведомление.
@@ -660,6 +660,9 @@ def call(browser, path, body=None):
         code, text = transport(BROWSERS[browser], "GET" if body is None else "POST", path, body, read_token())
     except ConnectionError as e:
         raise Fail(f"демон {browser} не отвечает ({e})")
+    if code == 429:   # предел вкладок: совет демона «POST /close-tab» окну не выполнить (этого пути у прохода нет)
+        raise Fail(f"демон {browser}: открыто слишком много вкладок окон (предел демона). Закрыть вкладку окно не может — "
+                   "простаивающую демон закроет сам через 6 ч; повторите позже или скажите владельцу")
     if code != 200:
         raise Fail(f"демон {browser}: {path} → {code} {text.strip()[:300]}")
     try:
@@ -708,7 +711,7 @@ def ensure_daemon(browser, why):
                f"{START_COOLDOWN // 60} мин")
 
 
-SESSION_RE = re.compile(r"[\w.@:-]{1,64}")      # как tabKey в демоне: иначе он ответит 400
+SESSION_RE = re.compile(r"[A-Za-z0-9_.@:-]{1,64}")      # как tabKey в демоне (только ASCII; \w в Python принял бы и Юникод)
 
 
 def session_of(win):
@@ -1261,7 +1264,7 @@ def approve(b, win, task, sel, facts, kind):
             and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
     stale = False
     for name, rec in sorted(mine, key=lambda x: -x[1]["issued"]):
-        t = owner_yes(task, lambda q, w=ask_question(rec): same_question(q, w))
+        t = owner_yes(task, lambda q, w=ask_question(rec): same_question(q, w))  # noqa: B008 — вопрос этой записи, привязан в цикле
         if t is None or t + 1 < rec["issued"]:
             continue
         if rec.get("digest") != dig:

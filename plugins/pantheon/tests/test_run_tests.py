@@ -141,7 +141,11 @@ p = mkplugin({"helper.py": "print(1)\n"})
 r = run([p])
 check("0 файлов — раннер не 0", r.returncode != 0 and "ни одного файла" in r.stdout, r.stdout)
 r = run([tempfile.mkdtemp(prefix="empty-")])
-check("папка без tests/ — раннер не 0", r.returncode != 0, r.stdout)
+check("папка без tests/ — код 2 и строка про tests", r.returncode == 2 and "tests" in r.stdout, r.stdout)
+okp = mkplugin({"test_a.py": OK2})
+r = run([okp, tempfile.mkdtemp(prefix="notests-")])
+check("рядом с папкой без tests/ зелёная папка — всё равно код 2, ничего не пропущено молча",
+      r.returncode == 2 and "ok   " not in r.stdout, r.stdout)
 r = run([os.path.join(_ROOT, "нет-такой")])
 check("несуществующая папка — код 2", r.returncode == 2, r.stdout)
 r = run([])
@@ -279,6 +283,25 @@ check("checks: «тестов: 3 прошло, 1 не прошло» — 4", R.c
 check("checks: ANSI не мешает итогу", R.checks("\x1b[32mok a\x1b[0m\n\x1b[1m1 из 1\x1b[0m\n") == (True, 1, None))
 check("verdict: код 0 с ПРОВАЛ — не ok", R.verdict(0, "ok a\nПРОВАЛ: b\n", False)[0] is False)
 check("verdict: код 0, «1/1» — ok", R.verdict(0, "ok a\n1/1\n", False) == (True, None, 1))
+# --- явный провал в выводе при коде 0 (metis-0556) ---
+for nm, body in (("FAIL <имя>", "ok a\nFAIL b  деталь\n2/2\n"), ("НЕ ПРОШЛО", "ok a\nНЕ ПРОШЛО: b\n1/1\n"),
+                 ("Traceback", "ok a\nTraceback (most recent call last):\n  File x\n1/1\n"),
+                 ("«не прошло: 2»", "ok a\nне прошло: 2\n1/1\n"), ("«FAIL 3»", "ok a\nFAIL 3\n"),
+                 ("«2 не прошло»", "ok a\nтестов: 3 прошло, 2 не прошло\n"),
+                 ("с ANSI", "ok a\n\x1b[31mFAIL b\x1b[0m\n1/1\n")):
+    v = R.verdict(0, body, False)
+    check(f"verdict: код 0 с {nm} — красный", v[0] is False and "в выводе" in (v[1] or ""), v)
+for nm, body in (("«не прошло: 0»", "ok a\nне прошло: 0\n1/1\n"), ("«FAIL 0»", "ok a\nFAIL 0\n"),
+                 ("FAIL внутри имени", "ok test_FAIL_case\nok a FAIL b\n2/2\n"),
+                 ("«0 не прошло»", "ok a\nтестов: 3 прошло, 0 не прошло\n"),
+                 ("Traceback в середине строки", "ok a  # ожидаемый Traceback (most recent call last)\n1/1\n"),
+                 ("строка ok с «1 не прошло» в имени", "ok checks: «3 прошло, 1 не прошло» — 4\n4/4\n"),
+                 ("«FAILED» без пробела", "ok a\nok FAILURE-mode\n1/1\n")):
+    v = R.verdict(0, body, False)
+    check(f"verdict: код 0 с {nm} — не ложное срабатывание", v[0] is True, v)
+p = mkplugin({"test_lie.py": "print('ok a')\nprint('FAIL b  деталь')\nprint('2/2')\n"})
+r = run([p])
+check("раннер: файл с кодом 0 и строкой FAIL — красный, код 1", r.returncode == 1 and "в выводе строка FAIL" in r.stdout, r.stdout)
 NS = frozenset({"g/test_old.py"})
 check("verdict: старый файл без итога из списка — ok", R.verdict(0, "ok a\nok b\n", False, "g/test_old.py", NS)
       == (True, None, 2))
@@ -651,8 +674,19 @@ def reads(dirs, n):
         "        open(os.path.join(P, sub, f)).read()\n"
 
 
-put(os.path.join(ma, "tests", "test_reader.py"), reads(READ_DIRS, 5) + "subprocess.run(['/bin/sh', os.path.join(P, "
-    "'lib', 's.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+# metis-0817 (M9): s.sh и copied.py сначала открыты (метка «r»), потом запущены и скопированы (метка «o») — запуск не
+# теряется: дедуп по пути без метки оставил бы только «r», и у читающего дерево связь пропала бы
+put(os.path.join(ma, "tests", "test_reader.py"), reads(READ_DIRS, 5)
+    + "open(os.path.join(P, 'lib', 's.sh')).read()\nopen(os.path.join(P, 'lib', 'copied.py')).read()\n"
+    "subprocess.run(['/bin/sh', os.path.join(P, 'lib', 's.sh')], check=True, stdout=subprocess.DEVNULL)\n"
+    "shutil.copy(os.path.join(P, 'lib', 'copied.py'), tempfile.mkdtemp())\n" + OK2)
+# metis-0817 (M10): 20 модулей из 5 папок загружены (импорт: метка «m», он же открывает файл — «r») — не читают дерево:
+# прочитанное без загрузки — ничего; без вычитания use они выглядели бы как 20 прочитанных из 5 папок
+for _i in range(5):
+    for _j in range(4):
+        put(os.path.join(ma, "mods", f"d{_i}", f"m{_i}{_j}.py"), f"V = {_j}\n")
+put(os.path.join(ma, "tests", "test_loader.py"), HDR + "for i in range(5):\n    sys.path.insert(0, os.path.join(P, 'mods', "
+    "f'd{i}'))\nfor i in range(5):\n    for j in range(4):\n        __import__(f'm{i}{j}')\n" + OK2)
 put(os.path.join(ma, "tests", "test_fewdirs.py"), reads(READ_DIRS[:4], 5) + OK2)
 put(os.path.join(ma, "tests", "test_thin.py"), reads(READ_DIRS, 3) + OK2)
 put(os.path.join(ma, "tests", "test_fail.py"), "import sys\nprint('ok   a')\nsys.exit(1)\n")
@@ -670,7 +704,9 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/data.txt", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/front.py", {"alpha/test_lazy.py"}),
                    ("plugins/alpha/lib/lazy.py", {"alpha/test_lazy.py"}),
-                   ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py"}),
+                   ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py", "alpha/test_reader.py"}),
+                   ("plugins/alpha/mods/d0/m00.py", {"alpha/test_loader.py"}),
+                   ("plugins/alpha/mods/d4/m43.py", {"alpha/test_loader.py"}),
                    ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
@@ -698,7 +734,7 @@ check("affected-map: version 3, hashes — sha256 каждого файла те
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
     "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py", "alpha/test_cscript.py", "alpha/test_rmtree.py",
-    "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
+    "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py", "alpha/test_loader.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
       mm)
 with open(os.path.join(ma, "lib", "x.py")) as fh:
     check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')

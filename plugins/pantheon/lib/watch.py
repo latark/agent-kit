@@ -52,6 +52,8 @@
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
 """
 import contextlib
+import errno
+import glob
 import hashlib
 import json
 import os
@@ -61,11 +63,26 @@ import stat
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import tomllib
 from datetime import date, datetime, timedelta
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
+
+
+def _load_rule():
+    """lib/live_subagent.py — правило «живой субагент», общее с хуком ctx (metis-0904); грузится рядом с этим файлом."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pantheon_live_subagent", os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_subagent.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+LIVE = _load_rule()
 
 
 def set_core(mod):
@@ -181,18 +198,20 @@ def idle_holder(a):
     return True
 
 
-LIVE_SUBAGENT_MAX = 3 * 3600   # субагент без записи журнала дольше — мёртв (metis-0864): ожидание outside test — до 2 ч
-LIVE_SUBAGENT_GRACE = 120      # с после старта процесса: журналы, закрытые прежним процессом при его снятии, — до этого
+LIVE_SUBAGENT_MAX = LIVE.LIVE_MAX  # субагент без записи дольше — мёртв (metis-0864): ожидание outside test — до 2 ч
 
 
 def live_subagents(a, t):
-    """Живые субагенты окна по subagents/*.meta.json (metis-0864): без «finished», журнал писался после старта нынешнего
-    процесса (+ LIVE_SUBAGENT_GRACE) и не раньше LIVE_SUBAGENT_MAX назад. Субагенты, оборванные перезапуском, остаются
-    без «finished» навсегда, но их журнал старше старта процесса. → отсортированные имена."""
+    """Живые субагенты окна по subagents/*.meta.json (metis-0864) — правило lib/live_subagent.py, общее с хуком ctx
+    (metis-0904): не закончил (finished без своей фоновой команды, stoppedByUser, сдача последним ответом), журнал или
+    meta писались после старта нынешнего процесса (+ LIVE_GRACE) или субагент запущен после старта, и не раньше
+    LIVE_MAX назад. Субагенты, оборванные перезапуском, остаются без «finished» навсегда, но их журнал старше старта
+    процесса. Старт — P.session_started (Д2 ревью #332): startedAt claude agents без видимого процесса — createdAt
+    задания, он старше прошлых перезапусков. → отсортированные имена."""
     tp = P.transcript_path(a)
     if not tp:
         return []
-    started = float(a.get("startedAt") or 0) / 1000
+    started = P.session_started(a, t)
     out = []
     try:
         it = os.scandir(os.path.join(tp[:-len(".jsonl")], "subagents"))
@@ -203,13 +222,7 @@ def live_subagents(a, t):
             if not (e.name.startswith("agent-") and e.name.endswith(".meta.json")):
                 continue
             meta = P.read_json(e.path, {})
-            if not isinstance(meta, dict) or meta.get("finished"):
-                continue
-            mt = 0.0
-            for f in (e.path, e.path[:-len(".meta.json")] + ".jsonl"):
-                with contextlib.suppress(OSError):
-                    mt = max(mt, os.path.getmtime(f))
-            if mt <= started + LIVE_SUBAGENT_GRACE or t - mt > LIVE_SUBAGENT_MAX:
+            if not LIVE.live(meta, e.path[:-len(".meta.json")] + ".jsonl", started, t):
                 continue
             out.append(clean_why(meta.get("name") or e.name[len("agent-"):-len(".meta.json")])[:40])
     return sorted(out)
@@ -218,8 +231,8 @@ def live_subagents(a, t):
 def live_work(a, t):
     """Почему окно сейчас нельзя поднимать заново (claude respawn обрывает его ход и субагентов), или None (metis-0864).
     05.11 окно metis-pantheon четыре раза ждало вашего «да» на команду, а возобновление ждущих (wake-waiting) раз в час
-    перезапускало его: вопрос пропадал, субагенты гибли. Работа окна — ждёт разрешения или ответа на вопрос (последний
-    tool_use без tool_result), живые субагенты и фоновые задачи (claude agents, inFlight из state.json, meta.json
+    перезапускало его: вопрос пропадал, субагенты гибли. Работа окна — ждёт разрешения или ответа на вопрос (tool_use
+    последнего ответа без tool_result, pending_tool), живые субагенты и фоновые задачи (claude agents, inFlight из state.json, meta.json
     субагентов). Процесса нет (noProcess) — обрывать нечего."""
     if a.get("noProcess"):
         return None
@@ -415,19 +428,32 @@ def clean_why(v):
 
 
 def pending_tool(a):
-    """Чего ждёт сессия по её журналу: последний tool_use без tool_result → «Инструмент → цель» или None."""
+    """Чего ждёт сессия по её журналу: tool_use последнего ответа (message assistant) без tool_result → «Инструмент →
+    цель» или None. Открытым считается только tool_use последнего ответа (ревью argus #332 Д1): tool_use-сирота
+    раньше в хвосте (оборванный ход, после которого сессия жила дальше) — не работа, иначе окно числилось бы занятым
+    навсегда. Один ответ — записи журнала с одним message.id (параллельные вызовы Claude Code пишет по записи на блок);
+    без id запись — отдельный ответ. Ответом считается только запись type=assistant с model ≠ <synthetic>. Записи боковой ветки (isSidechain) не в счёт."""
     tp = P.transcript_path(a)
     if not tp:
         return None
     try:
         C = P.ctx_mod()
-        used, results, order = {}, set(), []
-        for d in C.entries(C.tail_lines(tp, 1_000_000)):
-            items = (d.get("message") or {}).get("content")
+        used, results, order, last = {}, set(), [], None
+        for n, d in enumerate(C.entries(C.tail_lines(tp, 1_000_000))):
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            items = msg.get("content")
+            if msg.get("role") == "assistant" and (d.get("type") != "assistant" or msg.get("model") == "<synthetic>"):
+                continue  # ревью argus #337: ответ — только type=assistant; <synthetic> (ошибка API, прерывание) не ответ
+            if msg.get("role") == "assistant" and not d.get("isSidechain"):
+                mid = msg.get("id") or ("entry", n)
+                if mid != last:  # новый ответ: tool_use прежних ответов уже не «ход не закончен»
+                    used, order, last = {}, [], mid
+            elif msg.get("role") == "assistant":
+                continue
             for x in items if isinstance(items, list) else []:
                 if not isinstance(x, dict):
                     continue
-                if x.get("type") == "tool_use" and x.get("id"):
+                if x.get("type") == "tool_use" and x.get("id") and msg.get("role") == "assistant":
                     used[x["id"]] = x
                     order.append(x["id"])
                 elif x.get("type") == "tool_result":
@@ -920,13 +946,13 @@ def _base_ref(root):
 
 
 WALK_LIMIT = 5000
-LINK_SKIP = ("node_modules", ".next")   # зависимости и сборка: большие, считаются отдельно (metis-0616)
+LINK_SKIP = ("node_modules", ".next", ".venv", "venv", ".turbo", ".cache")   # зависимости и сборка: большие, считаются отдельно (metis-0616)
 DEPS_LIMIT = 300000                     # записей внутри LINK_SKIP; больше — «не знаю» (None), копия не удаляется
 
 
 def outward_links(wt):
     """Символические ссылки копии, чья цель (realpath) лежит вне неё. Обход без перехода по ссылкам, папку .git
-    копии пропускаем. Записи внутри node_modules и .next (у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
+    копии пропускаем. Записи внутри LINK_SKIP (node_modules, .next, .venv и т. п.; у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
     DEPS_LIMIT, остальные — под WALK_LIMIT. Превышение любого лимита — копия считается небезопасной (None, «не знаю»)
     и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None."""
     root = os.path.realpath(wt)
@@ -1008,96 +1034,740 @@ def _prune_state(root, live):
     return need, block
 
 
+# --- уборка копий .claude/worktrees (QA-05, metis-0616, metis-0835) --------------------------------------------------
+
+WT_DONE_QUIET = 600         # с: `pantheon wt done` и его заявки убирают копию, только если в ней столько нет правок
+                            # (дежурный по срокам — LIVE_SUBAGENT_MAX): правка свежее — в копии, похоже, ещё работают
+                            # (сессия сделала в неё cd, субагент без worktreePath в meta) — не трогаем (metis-0835, D1)
+WT_REQ_DAYS = 7             # заявку `pantheon wt done`, которую так и не исполнить (копия занята), снимаем через столько дней
+UNTRACKED_MAX_MB = 200      # неотслеживаемое и игнорируемое копии больше — архив не собираем, копию не убираем
+SAVE_MAX_FILES = 2000       # файлов в архив копии больше — тоже не собираем: копия цела, тревога (обход копии
+                            # outward_links и так держит её при WALK_LIMIT записей вне LINK_SKIP)
+# игнорируемое (.gitignore), которое при уборке не сохраняем: зависимости, сборка, кэши; остальное (.env.local и т. п.)
+# идёт в архив копии вместе с неотслеживаемым (metis-0835, D2)
+IGNORED_SKIP = LINK_SKIP + ("dist", "build", "out", ".output", "coverage", "target", "__pycache__", ".pytest_cache",
+                            ".mypy_cache", ".ruff_cache", ".parcel-cache", ".svelte-kit", ".nuxt", ".vercel", ".tox",
+                            ".gradle", ".DS_Store")
+WT_REQ_DIR = "wt-req"       # заявки `pantheon wt done`: STATE/wt-req (ваши сессии), <кэш окна>/wt-req (окно роли)
+AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # lock, который Claude Code вешает на копию субагента
+AGENT_DIR = re.compile(r"agent-[0-9a-f]{6,40}")
+REQ_FILE = re.compile(r"[0-9a-f]{16}\.json")
+REQ_MAX = 4096
+
+
+def wt_archive(*parts):
+    """Архив уборки копий: STATE/wt-archive/{removed-<день>.txt, patches/, untracked/}."""
+    return P.path("wt-archive", *parts)
+
+
+def _has_inside(wt, paths):
+    """Есть ли среди путей сама копия или папка внутри неё."""
+    return any(c == wt or c.startswith(wt + os.sep) for c in paths)
+
+
+def proc_cwds():
+    """Текущие папки всех процессов (lsof -d cwd), настоящими путями; None — lsof не ответил: тогда копий не убираем."""
+    try:
+        r = subprocess.run(["lsof", "-a", "-d", "cwd", "-nP", "-Fn"], capture_output=True, text=True, timeout=60,
+                           errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not r.stdout:
+        return None
+    return {os.path.realpath(ln[1:]) for ln in r.stdout.splitlines() if ln.startswith("n/")}
+
+
+def subagent_live(agent, wt, t):
+    """Субагент копии ещё работает (metis-0835): его ~/.claude/projects/*/*/subagents/[*/[*/]]<agent>.meta.json (как
+    review_find_transcripts), worktreePath — эта копия, и он живой по правилу lib/live_subagent.py, общему с хуком ctx
+    (metis-0904), при неизвестном старте процесса: не закончил (finished без своей фоновой команды, stoppedByUser, сдача
+    последним ответом), а журнал или meta писались не раньше LIVE_SUBAGENT_MAX назад. Субагент, оборванный
+    перезапуском родителя, остаётся без finished навсегда, но его журнал стареет. → True | False | None — meta не
+    найден (решает вызывающий: под замком субагента это не «мёртв»)."""
+    base = os.path.join(glob.escape(P.HOME), ".claude", "projects", "*", "*", "subagents")
+    metas = set()
+    for sub in ((), ("*",), ("*", "*")):
+        metas.update(glob.glob(os.path.join(base, *sub, glob.escape(agent) + ".meta.json")))
+    if not metas:
+        return None
+    for m in sorted(metas):
+        meta = P.read_json(m, {})
+        if not isinstance(meta, dict):
+            continue
+        wp = meta.get("worktreePath")
+        if isinstance(wp, str) and wp and os.path.realpath(wp) != wt:
+            continue
+        if LIVE.live(meta, m[:-len(".meta.json")] + ".jsonl", 0, t):  # чей процесс — не знаем: только по сроку
+            return True
+    return False
+
+
+QUIET_LIMIT = 50000   # записей копии (без LINK_SKIP) для _quiet_since; больше — «не знаю», копия считается занятой
+
+
+def _quiet_since(wt, since):
+    """Ни одна запись копии (папки и файлы, без LINK_SKIP, без перехода по ссылкам) не менялась после since. Обход
+    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем."""
+    stack, n = [wt], 0
+    while stack:
+        d = stack.pop()
+        try:
+            if os.lstat(d).st_mtime > since:
+                return False
+            with os.scandir(d) as it:
+                for e in it:
+                    n += 1
+                    if n > QUIET_LIMIT:
+                        return False
+                    st = e.stat(follow_symlinks=False)
+                    if st.st_mtime > since:
+                        return False
+                    if e.is_dir(follow_symlinks=False) and e.name not in LINK_SKIP:
+                        stack.append(e.path)
+        except OSError:
+            return False
+    return True
+
+
+def merged_branches(root):
+    """Ветки слитых PR репозитория root по кэшу `pantheon autoclose fetch` (STATE/autoclose-prs.json, ключ merged;
+    репозиторий — по origin основной копии). В сеть не ходит; кэша нет — пусто."""
+    url = _git("-C", root, "config", "--get", "remote.origin.url").stdout.strip()
+    m = re.search(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    cache = P.read_json(P.path("autoclose-prs.json"), {})
+    merged = cache.get("merged") if isinstance(cache, dict) else None
+    if not m or not isinstance(merged, dict):
+        return set()
+    out = set()
+    for repo, rows in merged.items():
+        if str(repo).lower() == m.group(1).lower() and isinstance(rows, list):
+            out |= {r["headRefName"] for r in rows if isinstance(r, dict) and isinstance(r.get("headRefName"), str)
+                    and r["headRefName"]}
+    return out
+
+
+class WtCtx:
+    """Общее на проход уборки: сессии (live — с процессом, known — все, о ком знает Claude Code), папки процессов
+    (lsof — один раз и только когда есть что решать), основная ветка и ветки слитых PR каждого репозитория."""
+
+    def __init__(self, agents, registry, t):
+        both = [a for a in list(agents) + list(registry) if isinstance(a, dict) and isinstance(a.get("cwd"), str)
+                and a.get("cwd")]
+        self.live = [os.path.realpath(a["cwd"]) for a in both if a.get("pid")]
+        self.known = [os.path.realpath(a["cwd"]) for a in both]
+        self.t = t
+        self._procs, self._base, self._prs = False, {}, {}
+
+    def procs(self):
+        if self._procs is False:
+            self._procs = proc_cwds()
+        return self._procs
+
+    def base(self, root):
+        if root not in self._base:
+            self._base[root] = _base_ref(root)
+        return self._base[root]
+
+    def prs(self, root):
+        if root not in self._prs:
+            self._prs[root] = merged_branches(root)
+        return self._prs[root]
+
+
+def merged_why(root, head, branch, base, ctx):
+    """Чистая копия со своими коммитами слита (metis-0835): PR её ветки слит (кэш gh), HEAD есть на origin или все её
+    коммиты уже в основной ветке (`git cherry` без «+»). → причина словами или None."""
+    if branch and branch in ctx.prs(root):
+        return "PR слит"
+    r = _git("-C", root, "for-each-ref", "--contains", head, "--count=1", "--format=%(refname:short)", "refs/remotes/origin")
+    if r.returncode == 0 and r.stdout.strip():
+        return f"есть на {r.stdout.strip()}"
+    if base:
+        c = _git("-C", root, "cherry", base, head)
+        if c.returncode == 0 and c.stdout.strip() and not any(ln.startswith("+") for ln in c.stdout.splitlines()):
+            return "коммиты уже в основной ветке"
+    return None
+
+
+def _git_bytes(*args, env=None, timeout=120):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", **(env or {}))
+    return subprocess.run(["git", *GIT_SAFE, *args], capture_output=True, timeout=timeout, env=env)
+
+
+def _untracked(wt, env):
+    """Неотслеживаемые файлы копии без зависимостей и кэшей (LINK_SKIP) и игнорируемые (.gitignore: .env.local и т. п.)
+    без зависимостей, сборки и кэшей (IGNORED_SKIP, metis-0835 D2) → [(путь, имя в архиве)] или None (git не ответил).
+    Вложенный репозиторий и целиком игнорируемую папку git выдаёт папкой «x/» — её файлы берём обходом без перехода по
+    ссылкам. Список длиннее SAVE_MAX_FILES обрывается (вызывающий видит превышение и копию не трогает). Ссылки,
+    устройства и каналы отсеивает _tar_regular при записи архива (O_NOFOLLOW и fstat — без гонки проверки и чтения)."""
+    out = []
+    for extra, skip in (((), LINK_SKIP), (("--ignored", "--directory"), IGNORED_SKIP)):
+        r = _git_bytes("-C", wt, "ls-files", "-o", *extra, "--exclude-standard", "-z", env=env)
+        if r.returncode != 0:
+            return None
+        for raw in r.stdout.split(b"\0"):
+            rel = os.fsdecode(raw)
+            if not rel or any(part in skip for part in rel.split("/")):
+                continue
+            p = os.path.join(wt, rel)
+            if rel.endswith("/") and os.path.isdir(p) and not os.path.islink(p.rstrip("/")):
+                for d, dirs, files in os.walk(p, followlinks=False):
+                    dirs[:] = [x for x in dirs if x not in skip]
+                    for f in files:
+                        if f not in skip:
+                            q = os.path.join(d, f)
+                            out.append((q, os.path.relpath(q, wt)))
+                    if len(out) > SAVE_MAX_FILES:
+                        return out
+            else:
+                out.append((p.rstrip("/"), rel.rstrip("/")))
+            if len(out) > SAVE_MAX_FILES:
+                return out
+    return out
+
+
+def _free_stem(name):
+    """Имя архива копии: <имя>, <имя>-2, …: прежний патч и архив той же копии не затираем."""
+    for i in range(1, 100):
+        stem = name if i == 1 else f"{name}-{i}"
+        if not (os.path.lexists(wt_archive("patches", stem + ".patch"))
+                or os.path.lexists(wt_archive("untracked", stem + ".tar.gz"))):
+            return stem
+    return f"{name}-{int(time.time())}"
+
+
+class _TooBig(Exception):
+    """Прочитанное неотслеживаемое превысило UNTRACKED_MAX_MB."""
+
+
+def _tar_regular(tf, src, arc, budget):
+    """Обычный файл src → член arc архива tf. Открывается без перехода по ссылке (O_NOFOLLOW), fstat — обычный файл,
+    иначе пропуск; размер в архиве — сколько байт прочитано, а не lstat: файл, выросший после подсчёта, предел не
+    обойдёт. → прочитано байт; больше budget — _TooBig."""
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOENT):
+            return 0  # подменён ссылкой или пропал после списка — не наш файл
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return 0
+        buf, n = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024), 0
+        with buf:
+            while chunk := fh.read(1024 * 1024):
+                n += len(chunk)
+                if n > budget:
+                    raise _TooBig()
+                buf.write(chunk)
+            buf.seek(0)
+            ti = tarfile.TarInfo(arc)
+            ti.size, ti.mtime, ti.mode = n, int(st.st_mtime), stat.S_IMODE(st.st_mode)
+            tf.addfile(ti, buf)
+    return n
+
+
+def wt_save(wt, env, clean=False):
+    """Копия до удаления (metis-0835): `git diff HEAD --binary` → wt-archive/patches/<имя>.patch, неотслеживаемое
+    (без LINK_SKIP) и игнорируемое (.env.local и т. п., без IGNORED_SKIP; у чистой копии — только оно) →
+    wt-archive/untracked/<имя>.tar.gz. → (True, [пути]; у чистой без игнорируемого — пусто) или (False, причина):
+    архив не собрался, файлов больше SAVE_MAX_FILES или больше UNTRACKED_MAX_MB, у грязной сохранить нечего (status
+    грязный, а патч и список пусты) — тогда копию не убираем, недописанные файлы архива снимаются."""
+    d = _git_bytes("-C", wt, "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv", env=env)
+    if d.returncode != 0:
+        return False, "git diff HEAD не прошёл"
+    files = _untracked(wt, env)
+    if files is None:
+        return False, "список неотслеживаемого не прочитан"
+    total = 0
+    for p, _ in files:
+        with contextlib.suppress(OSError):
+            total += os.lstat(p).st_size
+    if len(files) > SAVE_MAX_FILES:
+        return False, f"неотслеживаемых и игнорируемых файлов больше {SAVE_MAX_FILES} — архив не собираю"
+    if total > UNTRACKED_MAX_MB * 1024 * 1024:
+        return False, (f"неотслеживаемого и игнорируемого {total / 1048576:.0f} МБ — больше предела "
+                       f"{UNTRACKED_MAX_MB} МБ")
+    stem = _free_stem(os.path.basename(wt))
+    made = []
+    try:
+        if d.stdout:
+            p = wt_archive("patches", stem + ".patch")
+            os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            made.append(p)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(d.stdout)
+        if files:
+            p = wt_archive("untracked", stem + ".tar.gz")
+            os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+            budget = UNTRACKED_MAX_MB * 1024 * 1024
+            # O_EXCL: чужой файл на этом месте не затрём и не снимем; 0600 — в архиве бывают .env.local и ключи
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            made.append(p)
+            with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tf:
+                for src, arc in files:
+                    budget -= _tar_regular(tf, src, arc, budget)
+                members = len(tf.getmembers())
+            if not members:  # в списке были только ссылки и каналы — архив пуст
+                made.remove(p)
+                os.remove(p)
+    except _TooBig:
+        _unmake(made)
+        return False, f"неотслеживаемого и игнорируемого больше предела {UNTRACKED_MAX_MB} МБ (по прочитанному)"
+    except (OSError, tarfile.TarError) as e:
+        _unmake(made)
+        return False, f"архив не собрался ({getattr(e, 'strerror', None) or e})"
+    if not made and not clean:
+        return False, "грязная, а сохранить нечего: патч пуст, неотслеживаемое — только ссылки, каналы, зависимости и кэши"
+    return True, made
+
+
+def _unmake(made):
+    for p in made:
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+
+def _archive_branch(root, name, head):
+    """Ветка archive/wt-<имя> на HEAD копии без ветки (detached): коммиты не теряются. Такая ветка уже есть на другом
+    коммите — archive/wt-<имя>-2 и т. д. → имя ветки или None."""
+    for i in range(1, 20):
+        b = f"archive/wt-{name}" + (f"-{i}" if i > 1 else "")
+        cur = _git("-C", root, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}^{{commit}}")
+        if cur.returncode == 0:
+            if cur.stdout.strip() == head:
+                return b
+            continue
+        return b if _git("-C", root, "branch", b, head).returncode == 0 else None
+    return None
+
+
+def wt_journal(t, root, wt, branch, head, kind, saved):
+    """Строка убранной копии в STATE/wt-archive/removed-<день>.txt: время, репозиторий, копия, ветка, HEAD, почему,
+    архивы. → путь журнала или None (не записался — копия уже убрана, это скажет итог)."""
+    p = wt_archive(f"removed-{today(t)}.txt")
+    line = "\t".join([datetime.fromtimestamp(t).strftime("%H:%M"), root.replace(P.HOME, "~"), os.path.basename(wt),
+                      branch or "detached", head, kind, " ".join(x.replace(P.HOME, "~") for x in saved)])
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        return None
+    return p
+
+
+def wt_one(root, wt, block, ctx, requested=False, dry=False):
+    """Одна копия <root>/.claude/worktrees/<имя> (metis-0835). block — её запись `git worktree list --porcelain`.
+    → (итог, текст):
+      live    — в копии живая сессия (cwd), процесс (lsof) или работающий субагент: не трогаем ни при каком условии;
+      wait    — рано по возрасту (или lsof не ответил);
+      keep    — пора, но убрать нельзя: текст — причина для тревоги;
+      plan    — убрал бы (dry: ничего не меняет);
+      removed — убрана, текст — для сводки.
+    Сроки по mtime папки копии: пустая чистая (HEAD в основной ветке) — LIVE_SUBAGENT_MAX (копия, в которой Claude
+    Code знает сессию без процесса, — WORKTREE_CLEAN_HOURS); чистая слитая (merged_why) — WORKTREE_CLEAN_HOURS;
+    чистая неслитая и грязная — WORKTREE_DAYS. requested (`pantheon wt done`) — без сроков. Любое удаление — только
+    если в копии (все записи, кроме LINK_SKIP) нет правок моложе LIVE_SUBAGENT_MAX у дежурного и WT_DONE_QUIET у
+    `wt done` (lock субагента без meta — тоже LIVE_SUBAGENT_MAX): живую работу, которую не видно по cwd, lsof и meta
+    (сессия сделала cd в копию, субагент без worktreePath), выдают свежие правки (metis-0835, D1). Lock «claude agent …»
+    без живого субагента не держит; lock с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
+    сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; правки и
+    неотслеживаемое, а у любой копии игнорируемое вне IGNORED_SKIP (.env.local) — сначала в патч и архив (wt_save).
+    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела."""
+    t = ctx.t
+    if _has_inside(wt, ctx.live):
+        return "live", "живая сессия в копии"
+    procs = ctx.procs()
+    if procs is None:
+        return "wait", "lsof не ответил — папки процессов неизвестны"
+    if _has_inside(wt, procs):
+        return "live", "процесс с текущей папкой в копии"
+    lm = re.search(r"^locked(?: (.*))?$", block, re.M)
+    reason = (lm.group(1) or "").strip() if lm else ""
+    am = AGENT_LOCK.match(reason) if lm else None
+    name = os.path.basename(wt)
+    agent = am.group(1) if am else (name if AGENT_DIR.fullmatch(name) else None)
+    alive = subagent_live(agent, wt, t) if agent else False
+    if alive:
+        return "live", f"субагент {agent} ещё работает"
+    try:
+        age = (t - os.stat(wt).st_mtime) / 3600
+    except OSError:
+        return "wait", "копия не читается"
+    late = "keep" if requested or age > WORKTREE_DAYS * 24 else "wait"
+    if lm and not am:
+        return late, f"lock не субагента ({reason or 'без причины'})"
+    hm = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
+    bm = re.search(r"^branch refs/heads/(.+)$", block, re.M)
+    if not hm:
+        return late, "нет HEAD"
+    head, branch = hm.group(1), (bm.group(1) if bm else None)
+    env = wt_env(root, wt)
+    bad = unsafe_config(wt, env)
+    if bad:
+        return late, f"конфигурация git: {bad}"
+    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all", env=env)
+    if st.returncode != 0:
+        return late, "git status не прошёл"
+    clean = st.stdout.strip() == ""
+    base = ctx.base(root)
+    empty = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head, base).returncode == 0
+    on_origin = False  # HEAD есть на ветке origin: коммиты не потеряются и без archive/wt-<имя>
+    if clean and empty:
+        kind = "пустая"
+        need = WORKTREE_CLEAN_HOURS if _has_inside(wt, ctx.known) else LIVE_SUBAGENT_MAX / 3600
+    elif clean:
+        why = merged_why(root, head, branch, base, ctx)
+        on_origin = bool(why) and why.startswith("есть на ")
+        kind, need = (f"слитая: {why}", WORKTREE_CLEAN_HOURS) if why else ("неслитая", WORKTREE_DAYS * 24)
+    else:
+        kind, need = "грязная", WORKTREE_DAYS * 24
+    if not requested and age <= need:
+        return "wait", f"{kind}, {age:.1f} ч из {need:g}"
+    # lock называет субагента, а его meta не найден (жив ли — неизвестно) — и у `wt done` ждём, пока копия затихнет
+    quiet = WT_DONE_QUIET if requested and not (alive is None and am) else LIVE_SUBAGENT_MAX
+    since = t - quiet
+    if not _quiet_since(wt, since):
+        return "live", (f"lock субагента {agent}: meta не найден, " if alive is None and am else "") + \
+            f"в копии правки моложе {_dur(quiet)} — похоже, в ней ещё работают"
+    out = outward_links(wt)
+    if out is None or out[0]:
+        what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
+                "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0], out[1][1].replace(P.HOME, "~")))
+        return "keep", f"в ней {what}"
+    archive = branch is None and not empty and not on_origin
+    if dry:
+        return "plan", (f"убрал бы: {kind}, {age / 24:.1f} дн." + (", lock субагента снять" if am else "")
+                        + (f", сначала ветка archive/wt-{name}" if archive else "")
+                        + (", сначала патч и архив неотслеживаемого" if not clean else ""))
+    if archive:
+        made = _archive_branch(root, name, head)
+        if not made:
+            return "keep", f"ветка archive/wt-{name} не создана"
+        branch = made
+    ok, saved = wt_save(wt, env, clean=clean)
+    if not ok:
+        return "keep", saved
+    busy = _busy_now(wt, agent, t, since)
+    if busy:
+        _unmake(saved)  # копия остаётся — её архив устарел, следующая уборка соберёт заново
+        return "live", busy
+    if am and _git("-C", root, "worktree", "unlock", wt).returncode != 0:
+        return "keep", "lock субагента не снят"
+    # чистоту и состав смотрел свой status по записанному каталогу; без --force git проверил бы её ещё раз своим
+    # status — уже по конфигурации, которую мы не смотрели
+    rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=300)
+    if rm.returncode != 0:
+        return "keep", f"git worktree remove: {(rm.stderr or rm.stdout).strip()[:160]}"
+    if empty and branch:
+        _git("-C", root, "branch", "-d", branch)
+    j = wt_journal(t, root, wt, branch, head, kind, saved)
+    return "removed", f"{name} ({kind}" + (f", ветка {branch}" if branch else "") + \
+        (", архив: " + ", ".join(os.path.basename(x) for x in saved) if saved else "") + \
+        ("" if j else ", журнал не записан") + ")"
+
+
+def _dur(sec):
+    return f"{sec / 3600:g} ч" if sec >= 3600 else f"{sec / 60:g} мин"
+
+
+def _busy_now(wt, agent, t, since):
+    """Перепроверка прямо перед `git worktree remove` (metis-0835, D4): между первой проверкой и удалением прошли
+    сохранение и архив — за это время в копию мог зайти процесс, ожить субагент или лечь правка. → причина или None."""
+    procs = proc_cwds()
+    if procs is None:
+        return "lsof не ответил при перепроверке перед удалением"
+    if _has_inside(wt, procs):
+        return "процесс с текущей папкой в копии — появился во время уборки"
+    if agent and subagent_live(agent, wt, t):
+        return f"субагент {agent} ожил во время уборки"
+    if not _quiet_since(wt, since):
+        return "в копии появилась правка во время уборки — копия цела"
+    return None
+
+
+def _req_dirs(doms):
+    """[(папка заявок, папки реестра, которые ей можно)]: STATE/wt-req — ваши сессии (все папки реестра);
+    <кэш окна>/wt-req — окно роли, только папки направления с его именем (как у `pantheon outside`)."""
+    real = lambda fs: [os.path.realpath(os.path.expanduser(f)) for f in (fs if isinstance(fs, list) else [])  # noqa: E731
+                       if isinstance(f, str)]
+    out = [(P.path(WT_REQ_DIR), [r for fs in doms.values() for r in real(fs)])]
+    with contextlib.suppress(OSError):
+        for name in sorted(os.listdir(sandbox_root())):
+            d = os.path.join(sandbox_root(), name, WT_REQ_DIR)
+            with contextlib.suppress(OSError):
+                if stat.S_ISDIR(os.lstat(d).st_mode):
+                    out.append((d, real(doms.get(name))))
+    return out
+
+
+def _req_open(d):
+    """Папка заявок без перехода по ссылке → fd папки или None: подложенная ссылка на чужую папку не читается и в ней
+    ничего не удаляется (все unlink — относительно этого fd). _open_dir — общий с уборкой кэшей окон."""
+    try:
+        fd = _open_dir(d)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return fd
+
+
+def wt_requests(doms, t):
+    """Заявки `pantheon wt done` → {путь копии: [(папка заявок, имя файла)]}. Битые, подложенные (ссылка, не обычный
+    файл), старше WT_REQ_DAYS и на копию вне папок, которые этой папке заявок можно, снимаются сразу. Папка и файлы —
+    через fd папки (O_NOFOLLOW): подменённая ссылкой папка пропускается. Имена с точки — недописанные заявки окна, их
+    не трогаем."""
+    out = {}
+    for d, roots in _req_dirs(doms):
+        dfd = _req_open(d)
+        if dfd is None:
+            continue
+        try:
+            for n in os.listdir(dfd):
+                if n.startswith("."):
+                    continue
+                data = None
+                if REQ_FILE.fullmatch(n):
+                    with contextlib.suppress(OSError, ValueError):
+                        fd = os.open(n, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+                        with os.fdopen(fd, "rb") as fh:
+                            if stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                                data = json.loads(fh.read(REQ_MAX + 1)[:REQ_MAX] or b"null")
+                wt = data.get("path") if isinstance(data, dict) else None
+                when = data.get("time") if isinstance(data, dict) else None
+                ok = (isinstance(wt, str) and isinstance(when, (int, float)) and t - when <= WT_REQ_DAYS * 86400
+                      and any(os.path.dirname(os.path.realpath(wt)) == os.path.join(r, ".claude", "worktrees")
+                              for r in roots))
+                if ok:
+                    out.setdefault(os.path.realpath(wt), []).append((d, n))
+                else:
+                    with contextlib.suppress(OSError):
+                        os.unlink(n, dir_fd=dfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return out
+
+
+def _drop(items):
+    """Снять заявки [(папка, имя)] — через fd папки без перехода по ссылке."""
+    for d, n in items or ():
+        dfd = _req_open(d)
+        if dfd is None:
+            continue
+        try:
+            with contextlib.suppress(OSError):
+                os.unlink(n, dir_fd=dfd)
+        finally:
+            os.close(dfd)
+
+
+def _copies(root):
+    """Записи `git worktree list --porcelain` репозитория root, кроме основной копии: [(настоящий путь, запись)]."""
+    r = _git("-C", root, "worktree", "list", "--porcelain")
+    out = []
+    for block in r.stdout.split("\n\n"):
+        m = re.search(r"^worktree (.+)$", block, re.M)
+        if m and os.path.realpath(m.group(1)) != root:
+            out.append((os.path.realpath(m.group(1)), block))
+    return out
+
+
+def _in_worktrees(wt):
+    return os.sep + os.path.join(".claude", "worktrees") + os.sep in wt + os.sep
+
+
 def worktrees(agents, registry, doms, t):
-    """Копии .claude/worktrees/* (QA-05). Слитая в основную ветку и чистая (git status пуст), старше суток и без живой
-    сессии в ней — дежурный убирает сам: `git worktree remove` без --force (грязную git не отдаст) и `git branch -d`
-    (неслитую не удалит). Прочие без живой сессии дольше WORKTREE_DAYS — тревога координатору: в них может быть
-    неотправленная работа. Копию со ссылками наружу (outward_links) не удаляем и тревожим: старые Claude Code при
-    удалении сносили цель ссылки вне копии.
+    """Копии .claude/worktrees/* (QA-05, metis-0616, metis-0835) — решает wt_one: дежурный убирает сам пустые (почти
+    сразу), слитые (через сутки), неслитые (ветка остаётся) и грязные (сначала патч и архив) — без живой сессии,
+    процесса и субагента в копии. Заявки `pantheon wt done` (wt_requests) — без сроков, с теми же проверками; занятая
+    копия ждёт в заявке. Пора, но нельзя (ссылки наружу, чужой lock, архив не собрался …) — тревога координатору.
+    Убранное — строкой в STATE/wt-archive/removed-<день>.txt, в alerts.md — одна сводка в день.
     Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
     не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий; решает _prune_state по пути из gitdir,
     как git: недоступная копия (в том числе с chmod 000 на ней самой) или живая сессия в пропавшей папке блокирует
     prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога."""
-    live = [os.path.realpath(a["cwd"]) for a in list(agents) + list(registry) if a.get("cwd") and a.get("pid")]
+    ctx = WtCtx(agents, registry, t)
+    reqs = wt_requests(doms, t)
+    removed = []
     seen = set()
-    for name, folders in doms.items():
-        for f in folders if isinstance(folders, list) else []:
-            root = os.path.realpath(os.path.expanduser(f))
-            if root in seen or not os.path.isdir(os.path.join(root, ".git")):
-                continue
-            seen.add(root)
-            r = _git("-C", root, "worktree", "list", "--porcelain")
-            base = None
-            for block in r.stdout.split("\n\n"):
-                m = re.search(r"^worktree (.+)$", block, re.M)
-                if not m:
+    with P.lock("worktrees") as got:
+        if not got:  # lock не взят (подложенный файл и т. п.; причину печатает P.lock) — копий не трогаем (D5)
+            return
+        for name, folders in doms.items():
+            for f in folders if isinstance(folders, list) else []:
+                root = os.path.realpath(os.path.expanduser(f))
+                if root in seen or not os.path.isdir(os.path.join(root, ".git")):
                     continue
-                wt = os.path.realpath(m.group(1))
-                if wt == root:
-                    continue
-                try:
-                    os.lstat(wt)
-                except OSError:
-                    continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
-                if os.sep + os.path.join(".claude", "worktrees") + os.sep not in wt + os.sep:
-                    # копия вне штатной папки: только тревога, никогда не удаляем
-                    if any(c == wt or c.startswith(wt + os.sep) for c in live):
-                        continue
+                seen.add(root)
+                for wt, block in _copies(root):
                     try:
-                        out_age = (t - os.stat(wt).st_mtime) / 3600
+                        os.lstat(wt)
                     except OSError:
+                        continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
+                    short = wt.replace(P.HOME, "~")
+                    if not _in_worktrees(wt):
+                        # копия вне штатной папки: только тревога, никогда не удаляем
+                        if _has_inside(wt, ctx.live):
+                            continue
+                        try:
+                            out_age = (t - os.stat(wt).st_mtime) / 3600
+                        except OSError:
+                            continue
+                        if out_age > WORKTREE_DAYS * 24:
+                            P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {short} ({name}, "
+                                         f"{out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать", "watch")
                         continue
-                    if out_age > WORKTREE_DAYS * 24:
-                        P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {wt.replace(P.HOME, '~')} "
-                                     f"({name}, {out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать",
-                                     "watch")
-                    continue
-                if any(c == wt or c.startswith(wt + os.sep) for c in live):
-                    continue
-                try:
-                    age = (t - os.stat(wt).st_mtime) / 3600
-                except OSError:
-                    continue
-                head = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
-                branch = re.search(r"^branch refs/heads/(.+)$", block, re.M)
-                short = wt.replace(P.HOME, "~")
-                env = wt_env(root, wt)
-                if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block and not unsafe_config(wt, env):
-                    base = base or _base_ref(root)
-                    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all", env=env)
-                    clean = st.returncode == 0 and st.stdout.strip() == ""
-                    merged = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head.group(1),
-                                                 base).returncode == 0
-                    if clean and merged:
-                        out = outward_links(wt)
-                        if out is None or out[0]:
-                            what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
-                                    "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0],
-                                                                         out[1][1].replace(P.HOME, "~")))
-                            P.alert_once(f"watch-wt-{wt}", "links", f"копия {short} не убрана: в ней {what} — "
-                                         "координатору: убрать ссылки и удалить вручную", "watch")
-                            continue
-                        # чистота уже проверена своим status по записанному каталогу; без --force git проверил бы её
-                        # ещё раз своим status — уже по конфигурации, которую мы не смотрели
-                        rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=60)
-                        if rm.returncode == 0:
-                            if branch:
-                                _git("-C", root, "branch", "-d", branch.group(1))
-                            P.alert(f"убрана слитая чистая копия {short} ({name}"
-                                    + (f", ветка {branch.group(1)}" if branch else "") + ")", "watch")
-                            P.clear_once(f"watch-wt-{wt}")
-                            continue
-                if age > WORKTREE_DAYS * 24:
-                    P.alert_once(f"watch-wt-{wt}", "1", f"забытая копия {short} ({name}, {age / 24:.0f} дн. без "
-                                 "сессии, не слита или не чистая) — координатору: слить или убрать", "watch")
-            need_prune, blockers = _prune_state(root, live)
-            for path, ex in blockers:
-                P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
-                             f"недоступна ({ex}) — prune отложен", "watch")
-            if need_prune and not blockers:
-                # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
-                # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
-                _git("-C", root, "worktree", "prune")
+                    req = reqs.pop(wt, None)
+                    verdict, text = wt_one(root, wt, block, ctx, requested=bool(req))
+                    if verdict == "removed":
+                        removed.append(text)
+                        P.clear_once(f"watch-wt-{wt}")
+                        _drop(req)
+                    elif verdict == "keep":
+                        P.alert_once(f"watch-wt-{wt}", text, f"копия {short} ({name}) не убрана: {text} — "
+                                     "координатору: разобрать и убрать вручную", "watch")
+                        _drop(req)
+                need_prune, blockers = _prune_state(root, ctx.live)
+                for path, ex in blockers:
+                    P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
+                                 f"недоступна ({ex}) — prune отложен", "watch")
+                if need_prune and not blockers:
+                    # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
+                    # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
+                    _git("-C", root, "worktree", "prune")
+    for left in reqs.values():  # копии больше нет в списке git — заявка исполнена или не нужна
+        _drop(left)
+    if removed:
+        P.alert_once("watch-wt-removed", today(t), f"уборка копий: убрано {len(removed)} — " + "; ".join(removed[:3])
+                     + (f" и ещё {len(removed) - 3}" if len(removed) > 3 else "")
+                     + f"; журнал дня — {wt_archive('removed-' + today(t) + '.txt').replace(P.HOME, '~')}", "watch")
+
+
+def _find_copy(path, roots):
+    """Путь → (корень, копия, запись git) для копии <корень>/.claude/worktrees/<имя> одного из roots; иначе причина."""
+    wt = os.path.realpath(os.path.expanduser(path))
+    parent = os.path.dirname(wt)
+    root = os.path.dirname(os.path.dirname(parent))
+    if os.path.basename(parent) != "worktrees" or os.path.basename(os.path.dirname(parent)) != ".claude":
+        return None, f"{path}: не копия .claude/worktrees/<имя> — такие эта команда не трогает"
+    if root not in roots:
+        return None, f"{path}: репозиторий {root.replace(P.HOME, '~')} не из папок реестра (directions.toml)"
+    for w, block in _copies(root):
+        if w == wt:
+            return (root, wt, block), None
+    return None, f"{path}: такой копии нет в `git worktree list` репозитория {root.replace(P.HOME, '~')}"
+
+
+def wt_cmd(rest):
+    """pantheon wt done <путь> [--dry-run] | pantheon wt plan [<папка> …] (metis-0835).
+    done — убрать копию .claude/worktrees/<имя> сразу после отчёта субагента или слияния PR, без вопроса и без сырого
+    git: те же проверки, что у дежурного (wt_one), но без сроков. В окне роли (есть PANTHEON_TMP) запись в STATE и
+    чужие процессы закрыты — команда кладёт заявку в <кэш окна>/wt-req, её исполняет плановый проход (раз в 5 мин).
+    Вне окна — сразу; копия занята (живая сессия, субагент ещё работает, правки моложе WT_DONE_QUIET) — заявка в
+    STATE/wt-req, проход уберёт её, когда освободится. Код: 0 — убрана или заявка принята, 1 — убрать нельзя (причина
+    последней строкой), 2 — не тот вызов или не та папка. plan — сухой прогон: что дежурный сделал бы с каждой копией
+    папок (по умолчанию — всех папок реестра); ничего не меняет."""
+    if rest[:1] == ["plan"]:
+        return wt_plan(rest[1:])
+    args = [a for a in rest[1:] if a != "--dry-run"]
+    if rest[:1] != ["done"] or len(args) != 1 or args[0].startswith("-"):
+        print("использование: pantheon wt done <путь копии .claude/worktrees/<имя>> [--dry-run] | "
+              "pantheon wt plan [<папка репозитория> …]", file=sys.stderr)
+        return 2
+    dry_run = "--dry-run" in rest
+    t = P.now()
+    wt = os.path.realpath(os.path.expanduser(args[0]))
+    tmp = os.environ.get("PANTHEON_TMP")
+    if tmp and not dry_run:
+        parent = os.path.dirname(wt)
+        if os.path.basename(parent) != "worktrees" or os.path.basename(os.path.dirname(parent)) != ".claude" \
+                or not os.path.isdir(wt):
+            print(f"{args[0]}: не копия .claude/worktrees/<имя> — такие эта команда не трогает", file=sys.stderr)
+            return 2
+        d = os.path.join(os.path.dirname(os.path.realpath(tmp)), WT_REQ_DIR)
+        name = hashlib.sha1(wt.encode()).hexdigest()[:16] + ".json"
+        try:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            tmpf = os.path.join(d, f".{name}.{os.getpid()}")
+            with open(tmpf, "x", encoding="utf-8") as fh:
+                json.dump({"path": wt, "time": t}, fh)
+            os.replace(tmpf, os.path.join(d, name))
+        except OSError as e:
+            print(f"заявка не записана: {e.strerror or e}", file=sys.stderr)
+            return 1
+        print(f"заявка принята: плановый проход (раз в 5 мин) уберёт {wt.replace(P.HOME, '~')}, когда в ней нет живой "
+              "сессии, субагента и правок моложе 10 мин; грязную — сначала в патч и архив. Итог — "
+              "STATE/wt-archive/removed-<день>.txt, отказ — строкой в alerts.md")
+        return 0
+    roots = [os.path.realpath(os.path.expanduser(f)) for fs in domains().values()
+             for f in (fs if isinstance(fs, list) else []) if isinstance(f, str)]
+    found, why = _find_copy(args[0], roots)
+    if not found:
+        print(why, file=sys.stderr)
+        return 2
+    root, wt, block = found
+    agents = P.agents_all()
+    if agents is None:
+        print("claude agents --json не ответил — живые сессии неизвестны, копию не трогаю", file=sys.stderr)
+        return 1
+    with P.lock("worktrees") as got:
+        if not got:
+            print("lock уборки копий (STATE/locks/worktrees.lock) не взят — копию не трогаю", file=sys.stderr)
+            return 1
+        verdict, text = wt_one(root, wt, block, WtCtx(agents, P.sessions_registry(), t), requested=True, dry=dry_run)
+    short = wt.replace(P.HOME, "~")
+    if verdict == "removed":
+        print(f"убрана: {text}")
+        P.clear_once(f"watch-wt-{wt}")
+        return 0
+    if verdict == "plan":
+        print(f"{short}: {text}")
+        return 0
+    if verdict in ("live", "wait"):
+        if dry_run:
+            print(f"{short}: занята — {text}")
+            return 0
+        d = P.path(WT_REQ_DIR)
+        try:
+            os.makedirs(d, exist_ok=True)
+            P.write_json(os.path.join(d, hashlib.sha1(wt.encode()).hexdigest()[:16] + ".json"), {"path": wt, "time": t})
+        except OSError as e:
+            print(f"{short}: занята ({text}), заявка не записана: {e.strerror or e}", file=sys.stderr)
+            return 1
+        print(f"{short}: занята ({text}) — заявка оставлена, плановый проход уберёт копию, когда она освободится")
+        return 0
+    print(f"{short}: не убрана — {text}", file=sys.stderr)
+    return 1
+
+
+def wt_plan(folders):
+    """Сухой прогон уборки (metis-0616, 0835): для каждой копии .claude/worktrees папок — итог wt_one(dry=True) строкой
+    «итог<TAB>копия<TAB>почему». Ничего не меняет: git только читает (GIT_OPTIONAL_LOCKS=0), обход — без записи."""
+    roots = [os.path.realpath(os.path.expanduser(f)) for f in folders] or \
+        [os.path.realpath(os.path.expanduser(f)) for fs in domains().values()
+         for f in (fs if isinstance(fs, list) else []) if isinstance(f, str)]
+    agents = P.agents_all()
+    if agents is None:
+        print("предупреждение: claude agents --json не ответил — живые сессии по cwd не учтены (процессы и субагенты учтены)",
+              file=sys.stderr)
+        agents = []
+    ctx = WtCtx(agents, P.sessions_registry(), P.now())
+    for root in dict.fromkeys(roots):
+        if not os.path.isdir(os.path.join(root, ".git")):
+            continue
+        for wt, block in _copies(root):
+            if not _in_worktrees(wt) or not os.path.lexists(wt):
+                continue
+            verdict, text = wt_one(root, wt, block, ctx, dry=True)
+            print(f"{verdict}\t{wt.replace(P.HOME, '~')}\t{text}")
+    return 0
 
 
 # --- кэши песочниц (metis-0620) ---------------------------------------------------------------------------------
@@ -2819,7 +3489,16 @@ def maint_path():
     return P.path("maintenance.json")
 
 
+def hq_saved_clear():
+    """Метки окна штаба в STATE/hq-rw/saved снимаем вместе с остальными метками saved (metis-0577)."""
+    with contextlib.suppress(OSError):
+        for f in os.listdir(P.path(P.HQ_RW, "saved")):
+            with contextlib.suppress(OSError):
+                os.remove(P.path(P.HQ_RW, "saved", f))
+
+
 def maint_clear():
+    hq_saved_clear()
     with contextlib.suppress(FileNotFoundError):
         os.remove(maint_path())
     with contextlib.suppress(FileNotFoundError):
@@ -3004,6 +3683,7 @@ def plugins_respawn(agents, doms, t):
                 for f in os.listdir(respawn_path("respawn-ok")):
                     with contextlib.suppress(OSError):
                         os.remove(respawn_path("respawn-ok", f))
+            hq_saved_clear()
 
 
 def saved_agent(name, mine, sid, warn=True):
@@ -3028,8 +3708,8 @@ def saved_sid(name):
     или перезапуск после плагинов (STATE/plugins/respawn-ok/<имя>.json); None — метки или id в ней нет."""
     if not P.SESSION_NAME.fullmatch(str(name)):
         return None
-    for p in (P.path("maintenance", name + ".json"), respawn_path("respawn-ok", name + ".json")):
-        rec = P.read_json(p, {})
+    for rec in (P.read_json(P.path("maintenance", name + ".json"), {}),
+                P.read_json(respawn_path("respawn-ok", name + ".json"), {}), hq_saved(name)):
         sid = rec.get("sessionId") if isinstance(rec, dict) else None
         if isinstance(sid, str) and re.fullmatch(r"[0-9a-f-]{8,64}", sid):
             return sid
@@ -3068,6 +3748,9 @@ def restart(rest, who):
                 saved[f[:-5]] = P.read_json(P.path("maintenance", f), {})
             elif f.endswith(".done"):
                 done_marks.add(f[:-5])
+    for n in m.get("sessions") or []:  # окно штаба пишет метку в STATE/hq-rw/saved (metis-0577)
+        if n not in saved and hq_saved(n).get("time"):
+            saved[n] = hq_saved(n)
     if rest[:1] == ["--done"]:  # metis-0338: перезапуск закончен — метку снять (рядом с --cancel: тот отменяет)
         return restart_close(m, done_marks, who, "по команде --done")
     if rest[:1] == ["--status"] or not rest:
@@ -3165,6 +3848,40 @@ def restart_close(m, done_marks, who, how):
     return 0
 
 
+SAVED_NAME = re.compile(r"zeus[a-z0-9-]{0,36}")
+
+
+def hq_saved(name):
+    """metis-0577: метка `pantheon saved` окна штаба из STATE/hq-rw/saved (пишет само окно — только Зевс); {} — нет.
+    Папку пишет окно, а читает проход вне песочницы: ссылка, FIFO, чужой или большой файл — не читаем (O_NOFOLLOW|O_NONBLOCK,
+    обычный файл, одна ссылка, наш владелец, читаем не больше 64 КБ — длиннее не разбирается как JSON); поля проверяем по типу, а не доверяем."""
+    if not SAVED_NAME.fullmatch(str(name)):
+        return {}
+    try:
+        fd = os.open(P.path(P.HQ_RW, "saved", name + ".json"), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+            return {}
+        raw = os.read(fd, 65537)
+        rec = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    finally:
+        os.close(fd)
+    if not isinstance(rec, dict):
+        return {}
+    out = {}
+    for k in ("time", "state", "by"):
+        if isinstance(rec.get(k), str):
+            out[k] = rec[k][:300]
+    if isinstance(rec.get("sessionId"), str) and re.fullmatch(r"[0-9a-f-]{8,64}", rec["sessionId"]):
+        out["sessionId"] = rec["sessionId"]
+    return out
+
+
 def _write_mark(name, p, rec):
     """Запись pantheon saved. Не записалась (PermissionError: песочница окна не пускает в STATE/maintenance и
     STATE/plugins, metis-0577) — строка в stderr и False, без трассировки. Зевс (zeus*) — интерактивная сессия владельца:
@@ -3176,9 +3893,16 @@ def _write_mark(name, p, rec):
         return True
     except OSError as e:
         owner = name.startswith("zeus")
+        kept = None
+        if owner and SAVED_NAME.fullmatch(name):  # metis-0577: окно штаба пишет только в STATE/hq-rw — метка там
+            try:
+                P.hq_put("saved", name + ".json", json.dumps(rec, ensure_ascii=False) + "\n")
+                kept = P.tilde(P.path(P.HQ_RW, "saved", name + ".json"))
+            except OSError:
+                pass
         print(f"pantheon saved: метка {P.tilde(p)} не записана — {type(e).__name__}: {e.strerror or e}"
               + (f"\n{name}: его перезапуск ведёт владелец (pantheon start zeus --restart), метка ему не нужна — "
-                 "команда считается выполненной" if owner else
+                 "команда считается выполненной" + (f"; копия записана в {kept}" if kept else "") if owner else
                  "\nокно не может писать в состояние Пантеона: метку поставит тот, кто вне песочницы"),
               file=P.sys.stderr)
         return False

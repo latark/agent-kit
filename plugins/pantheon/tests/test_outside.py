@@ -8,7 +8,7 @@ tests, грязное дерево, команда меняет дерево, п
 установкой зависимостей и его уборка; заявка роли из кэша окна → итог рядом с ней; окно не своего направления,
 мастерская, подложенная ссылка, скрипта нет — отказ; dev-сервер (metis-0614) — свой проход и сторож, своя копия на
 коммите (--sha), порт 4300–4399 мимо портов владельца, не больше двух и отказ при давлении памяти, монорепо и --app,
-dev-ключи из STATE окружением, «стоп» из любого окна и «нет такой заявки», отмена до запуска, срок, сирота по папке
+dev-ключи из STATE окружением, «стоп» только своего окна (metis-0873) и «нет такой заявки», отмена до запуска, срок, сирота по папке
 копии, лимит памяти сервера; безопасность копии: .git-файл роли, конфиг клона с командами, подмодули, worktree
 для тестов после «принять» — через trusted_clone; окружение команды с нуля; профиль; тик зовёт каждый проход только по
 делу; `outside run` из окна Claude Code — отказ; guard не спрашивает; сирот нет: заглушка и задачи «turbo» гаснут сами
@@ -63,6 +63,19 @@ def _kill_servers():
 
 _atexit.register(_kill_servers)  # раньше rmtree: atexit идёт с конца
 TEST_PROCS = []   # процессы, которые тест порождает сам в своих сессиях (сирота, «чужой», sleep)
+
+
+class _Gk:
+    """Процесс-внук, известный только по pid: в TEST_PROCS ради последнего рубежа (SIGKILL), как Popen."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def kill(self):
+        os.kill(self.pid, 9)
+
+    def wait(self, timeout=None):
+        pass
 
 
 def fake_pids():
@@ -932,24 +945,36 @@ check("третий сервер: отказ «уже идут 2 сервера�
       res3.get("state") == "failed" and "уже идут 2 сервера из 2" in res3.get("why", "") and rid in res3.get("why", "")
       and O.result_code(res3) == 75 and len(calls()) == before and not os.path.exists(work_of(rid3)), res3)
 
-# «стоп» из окна координатора (другая папка заявок) — 30.10 стоп лежал в чужой папке, проход его не видел
+# metis-0873 T13 (решение владельца «сузить»): «стоп» сервера — только окно заявки и терминал владельца
 rc, out = say("metis-y", "stop", rid, "--wait", "0")
-check("стоп из другого окна: заявка известна (итог прохода в STATE), «стоп» записан в своей папке, код 0",
-      rc == 0 and os.path.isfile(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+check("T13 стоп чужого сервера из другого окна: «не из этого окна», код 1, «стоп» не записан",
+      rc == 1 and "не из этого окна" in out
+      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+_foreign = os.path.join(CACHE, "metis-y", "outside", rid + ".stop")
+with open(_foreign, "w"):
+    pass
+os.utime(_foreign, (time.time() - 3600, time.time() - 3600))   # старше STOP_ORPHAN_AGE: не «ждёт заявку»
+serve_pass()
+check("T13 serve_stop_foreign_qdir_ignored: метка в папке другого окна — сервер жив, метка убрана, stop-foreign",
+      rid in O.servers() and port_open(port) and not os.path.exists(_foreign)
+      and [e.get("by") for e in events(rid, "stop-foreign")] == [["metis-y"]], events(rid, "stop-foreign"))
+rc, out = say("athena-x", "stop", rid, "--wait", "0")
+check("стоп своего окна: «стоп» записан в своей папке, код 0",
+      rc == 0 and os.path.isfile(os.path.join(CACHE, "athena-x", "outside", rid + ".stop")), (rc, out))
 check("тик: «стоп» — дело проходу серверов", O.pending_serve())
 serve_pass()
 res = O.load_result(q, rid) or {}
-check("стоп из другого окна: погашен, итог stopped в папке заявки, порт свободен",
+check("стоп своего окна: погашен, итог stopped в папке заявки, порт свободен",
       res.get("state") == "stopped" and res.get("why") == "заявка «стоп»" and not port_open(port)
       and rid not in O.servers(), res)
 check("стоп: копия снята (папки нет, git worktree list её не знает), «стоп» убран",
       not os.path.exists(W) and W not in worktrees()
-      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")))
-check("стоп: в журнале — кто просил", [e.get("by") for e in events(rid, "stop")] == [["metis-y"]], events(rid, "stop"))
+      and not os.path.exists(os.path.join(CACHE, "athena-x", "outside", rid + ".stop")))
+check("стоп: в журнале — кто просил", [e.get("by") for e in events(rid, "stop")] == [["athena-x"]], events(rid, "stop"))
 check("второй сервер жив", port_open(res2.get("port") or 0) and rid2 in O.servers())
-rc, out = say("metis-y", "stop", rid)
+rc, out = say("athena-x", "stop", rid)
 check("стоп погашенного: «уже stopped», код 0, без нового «стопа»", rc == 0 and "уже stopped" in out
-      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+      and not os.path.exists(os.path.join(CACHE, "athena-x", "outside", rid + ".stop")), (rc, out))
 
 # «нет такой заявки» — честно, код 1, файла нет
 rc, out = say("athena-x", "stop", "20261101-000000-abcdef", "--wait", "0")
@@ -975,7 +1000,9 @@ serve_pass()
 res = O.load_result(q, rid) or {}
 check("стоп заявки в очереди: stopped «отменена», не запущено, копии нет", rc == 0 and res.get("state") == "stopped"
       and "отменена" in res.get("why", "") and len(calls()) == before and not os.path.exists(work_of(rid)), (rc, out, res))
-check("стоп тестов: «это тесты», код 1", say("athena-x", "stop", rid_test_done, "--wait", "0")[0] == 1
+check("стоп законченного теста: «уже …», код 0, «стоп» не записан (metis-0873: отказа «это тесты» нет)",
+      (lambda r: r[0] == 0 and "уже " in r[1] and not os.path.exists(os.path.join(q, rid_test_done + ".stop")))(
+          say("athena-x", "stop", rid_test_done, "--wait", "0"))
       if (rid_test_done := next((n[:-12] for n in sorted(os.listdir(q)) if n.endswith(".result.json")
                                   and (O.load_result(q, n[:-12]) or {}).get("kind") == "test"), None)) else False)
 
@@ -1180,6 +1207,29 @@ for _bad, _why in (("out", "вне корня"), ("empty", "нет package.json"
     serve_pass()
     check(f"0790: --app {_bad}: отказ ({_why})", state(q, rid) == "failed"
           and _why in (O.load_result(q, rid) or {}).get("why", ""), O.load_result(q, rid))
+# metis-0804 (argus #302, мутант m8 «без app != "."»): --app . в репозитории с корневым package.json без workspaces —
+# корневой скрипт, папка запуска и установка зависимостей — корень копии, а не приложение-подпапка
+ROOTP = os.path.join(HOME, "projects", "rootpkg")
+os.makedirs(ROOTP)
+git(ROOTP, "init", "-q", "-b", "main")
+git(ROOTP, "remote", "add", "origin", "https://github.com/latark/rootpkg.git")
+commit(ROOTP, {"package.json": json.dumps({"name": "rootpkg", "scripts": {"dev": "next dev"}}),
+               "pnpm-lock.yaml": "", ".gitignore": "node_modules/\n"}, "r1")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/subapp", "~/projects/rootpkg"],
+                          "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+kill_all_servers()
+before = len(calls())
+rc, q, rid = role_request("athena-x", ROOTP, "serve", "--app", ".")
+serve_pass()
+res = O.load_result(q, rid) or {}
+c = calls()[before:]
+check("0804: --app . без монорепо, с корневым package.json — корневой скрипт в корне копии",
+      res.get("state") == "serving" and c and c[-1]["cwd"] == work_of(rid) and c[-1]["cmd"][-3:] == ["pnpm", "run", "dev"],
+      (res, [(x["cmd"], x["cwd"]) for x in c]))
+check("0804: --app . без монорепо — зависимости ставятся в корне копии",
+      c and c[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"] and c[0]["cwd"] == work_of(rid), c[:1])
+kill_all_servers()
 rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "../x")
 check("0790: --app ../x: код 2", rc == 2)
 rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "/etc")
@@ -1292,7 +1342,9 @@ rc, out = dup_say("athena-x", APP, "test")
 check("дубль (а): прежний тест идёт (running) — новой заявки нет", rc == 0 and req_ids(q) == [] and rid_a in out,
       (rc, out, req_ids(q)))
 rc, out = say("athena-x", "stop", rid_a, "--wait", "0")
-check("stop идущего теста — по-прежнему отказ «это тесты», код 1", rc == 1 and "это тесты" in out, (rc, out))
+check("M1 stop идущего теста: «стоп» записан в своей папке, код 0 (metis-0873: отказа «это тесты» нет)",
+      rc == 0 and "это тесты" not in out and os.path.isfile(os.path.join(q, rid_a + ".stop")), (rc, out))
+os.remove(os.path.join(q, rid_a + ".stop"))
 # running старше срока теста — висяк, не блокирует
 O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP,
                          "updated": "2020-01-01 00:00"})
@@ -1557,9 +1609,9 @@ _orphan = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.s
                            start_new_session=True)   # копии нет, если сервер не поднялся: FAIL выше, а не обрыв файла (metis-0731)
 TEST_PROCS.append(_orphan)
 t0 = time.monotonic()
-rc, out = say("metis-y", "stop", rid_s)
+rc, out = say("athena-x", "stop", rid_s)
 dt = time.monotonic() - t0
-check("стоп из другого окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
+check("стоп своего окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
       rc == 0 and "stopped" in out and dt <= 10 and th_t.is_alive() and state(q, rid_t) == "running",
       (rc, out, round(dt, 1)))
 check("стоп: порт свободен, погашены сервер, «turbo» и задача в своей группе, копия снята",
@@ -1686,26 +1738,112 @@ if not MAC:
 else:
     _ps_keep = O.PS
     O.PS = os.path.join(_ROOT, "нет-ps-0786")
-    _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
-                            "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
-                            start_new_session=True)
-    TEST_PROCS.append(_par)
-    _kid2 = []
-    for _ in range(40):
-        time.sleep(0.1)
-        _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
-        if _kid2:
-            break
-    _st = O.strays(_par.pid)
-    _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
-    check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
-          and _me_row[2] > 0, _me_row)
-    check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
-    O.kill_group(_par.pid)
-    time.sleep(0.3)
-    check("без ps: kill_group гасит и главу, и потомка в своей группе",
-          _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
-    O.PS = _ps_keep
+    try:
+        _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
+                                "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
+                                start_new_session=True)
+        TEST_PROCS.append(_par)
+        _kid2 = []
+        for _ in range(40):
+            time.sleep(0.1)
+            _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
+            if _kid2:
+                break
+        TEST_PROCS.extend(_kid2 and [_Gk(p) for p in _kid2] or [])
+        _st = O.strays(_par.pid)
+        _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
+        check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
+              and _me_row[2] > 0, _me_row)
+        check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
+        O.kill_group(_par.pid)
+        time.sleep(0.3)
+        check("без ps: kill_group гасит и главу, и потомка в своей группе",
+              _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
+    finally:   # O.PS возвращается и при исключении (metis-0804)
+        O.PS = _ps_keep
+
+# --- ps_table (metis-0804, долги argus #300): откат на ps, полнота таблицы, повтор с большим буфером ----------------
+# ложная libproc в O._libproc (работает на любой ОС) и ps-шим в O.PS
+
+
+class _FakeLib:
+    """proc_listallpids / proc_pidinfo как в libproc: listall(None, 0) — число pid, listall(buf, байт) — сколько
+    записано (не больше, чем влезло); pidinfo заполняет struct по byref."""
+
+    def __init__(self, count, query=None, info_ok=True, fill=None):
+        self.count, self.query, self.info_ok, self.fill = count, query, info_ok, fill
+
+    def proc_listallpids(self, buf, size):
+        if buf is None:
+            return self.count if self.query is None else self.query
+        if self.fill is not None:
+            return self.fill
+        n = min(self.count, size // 4)
+        for i in range(n):
+            buf[i] = 1000 + i
+        return n
+
+    def proc_pidinfo(self, p, flavor, _arg, ref, size):
+        if not self.info_ok:
+            return 0
+        obj = ref._obj
+        if flavor == 3:
+            obj.ppid, obj.pgid = 1, p
+        else:
+            obj[1] = 2048 * 1024
+        return size
+
+
+_ps_sh = os.path.join(_ROOT, "ps-0804.sh")
+with open(_ps_sh, "w") as fh:
+    fh.write("#!/bin/sh\nprintf '  11 1 11 100\\n  12 11 11 200\\n'\n")
+os.chmod(_ps_sh, 0o755)
+_ps_keep, _lp_keep = O.PS, O._libproc
+O.PS = _ps_sh
+try:
+    for _label, _lib in (("proc_listallpids вернула 0", _FakeLib(0)), ("proc_listallpids вернула -1", _FakeLib(-1)),
+                         ("заполнение списка вернуло -1", _FakeLib(5, fill=-1)),
+                         ("список есть, а pidinfo не ответила ни на один pid (пустая таблица)", _FakeLib(5, info_ok=False))):
+        O._libproc = lambda _l=_lib: (_l, 1e-9)
+        _t = O.ps_table()
+        check(f"0804: {_label} — таблица по ps, а не пустая", _t == {11: (1, 11, 100), 12: (11, 11, 200)}, _t)
+    O._libproc = lambda: None
+    check("0804: libproc нет — таблица по ps", O.ps_table() == {11: (1, 11, 100), 12: (11, 11, 200)})
+    # полнота: все 450 процессов в таблице (буфер размером в pid, а не в байтах — мутант терял 189 из 450)
+    O._libproc = lambda: (_FakeLib(450), 1e-9)
+    _t = O.ps_table()
+    check("0804: libproc отдала 450 процессов — в таблице все 450", sorted(_t) == list(range(1000, 1450))
+          and _t[1000] == (1, 1000, 2048), (len(_t), sorted(_t)[:3]))
+    # буфер оказался полон (процессы появились между вызовами): повтор с большим — ничего не потеряно
+    O._libproc = lambda: (_FakeLib(900, query=10), 1e-9)
+    _t = O.ps_table()
+    check("0804: буфер полон — повтор с большим, все 900 процессов в таблице", sorted(_t) == list(range(1000, 1900)),
+          len(_t))
+finally:
+    O.PS, O._libproc = _ps_keep, _lp_keep
+# живая сверка (macOS, ps запускается): свои процессы по ps есть в таблице libproc, с допуском на гонку и зомби
+if MAC:
+    try:
+        _ps_own = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True, text=True,
+                                 timeout=10).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        _ps_own = []
+    _lp = O._ps_table_libproc()
+    if len(_ps_own) < 20 or not _lp:
+        print("пропущено: ps не запустить в этой среде — сверка libproc с ps вне песочницы")
+    else:
+        def _alive0804(p):
+            try:
+                os.kill(p, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+        # под нагрузкой (pr353-red-1) процессы рождаются и гаснут между ps и libproc: потеря — только у ещё живых
+        _miss = [p for p in map(int, _ps_own) if p not in _lp and _alive0804(p)]
+        check("0804: libproc видит свои процессы — потеря живых не больше 5% + 5 (зомби, гонка)",
+              len(_miss) <= 5 + len(_ps_own) // 20, (len(_miss), len(_ps_own), _miss[:10]))
 
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
 TEST_PROCS.append(leader)
@@ -1965,13 +2103,13 @@ check("заход прерван на первой заявке: её .req.json 
       and os.path.exists(os.path.join(q, r2 + ".req.json")), (got, r1, r2))
 os.remove(os.path.join(q, r2 + ".req.json"))
 rc, q, r3 = role_request("athena-x", APP, "test")
-_u = O._unlink_in
-O._unlink_in = lambda dfd, name: None   # снять заявку не удаётся
+_u = O._take_in
+O._take_in = lambda dfd, name: False   # снять заявку не удаётся (или её уже сняло окно)
 got = []
 O.handle = lambda qdir, window, rid, req: got.append(rid)
 t0 = time.time()
 O.run_test_queue()
-O.handle, O._unlink_in = _h, _u
+O.handle, O._take_in = _h, _u
 check("заявку не снять: заход заканчивается, заявка не запускается и не крутит цикл", got == [] and time.time() - t0 < 30, got)
 os.remove(os.path.join(q, r3 + ".req.json"))
 
@@ -2569,7 +2707,8 @@ for label, spoil in (("сдвинула HEAD копии на другой зел
 
 # HEAD копии сдвинулся уже после первой проверки — перед прогоном (между tree_record и чтением HEAD) или во время
 # прогона: запись только на коммит заявки, на сдвинутый HEAD — никогда
-_tr, _wp = O.tree_record, O.wait_proc
+_tr, _wp, _rt = O.tree_record, O.wait_proc, O.run_test
+_cwd_of = [None]  # папка прогона для подмены wait_proc; вне цикла, чтобы лямбды не держали переменную цикла (B023)
 
 
 def _move_head(d):
@@ -2581,8 +2720,7 @@ for label, attr, fake in (
         # wait_proc зовёт и установка (prepare) — HEAD двигаем только в прогоне теста (у него idle_log)
         ("во время прогона", "wait_proc",
          lambda proc, *a, **kw: (kw.get("idle_log") and _move_head(_cwd_of[0]), _wp(proc, *a, **kw))[1])):
-    _cwd_of = [None]
-    _rt = O.run_test
+    _cwd_of[0] = None
     O.run_test = lambda rid, d, *a, **kw: (_cwd_of.__setitem__(0, str(d)), _rt(rid, d, *a, **kw))[1]
     setattr(O, attr, fake)
     n_e, n_g = len(tests_for(HEADE)), len(tests_for(CPG))
@@ -2707,6 +2845,50 @@ before = reqs()
 role_request("athena-x", APP, "test")
 check("0796: две обычные на одном HEAD — вторая не плодит заявку", reqs() == before, (before, reqs()))
 run_pass()
+
+# metis-0798 Д1: итог running заявки --sha несёт pin, и обычная заявка при нём не сцепляется (мутант «pin убран из
+# running» в run_test, outside.py: extra["pin"] = True)
+_runs, _save0 = [], O.save_result
+
+
+def _save_spy(qdir, rid, res):
+    if res.get("state") == "running":
+        _runs.append((qdir, rid, dict(res)))
+    return _save0(qdir, rid, res)
+
+
+O.save_result = _save_spy
+try:
+    q_pin, r_pin = new_request("athena-x", APP, "test", "--sha", CPG)
+    run_pass()
+finally:
+    O.save_result = _save0
+_run_pin = [r for r in _runs if r[1] == r_pin]
+check("0798: итог running заявки --sha несёт pin: true", bool(_run_pin) and all(r[2].get("pin") is True for r in _run_pin),
+      _runs)
+_fake = "20261103-099999-feedfa"
+_res_pin = {**_run_pin[-1][2], "id": _fake, "src": APP, "updated": P.stamp()}
+with open(os.path.join(q_pin, _fake + ".result.json"), "w") as fh:
+    json.dump(_res_pin, fh)
+before = reqs()
+rc, _, _ = role_request("athena-x", APP, "test")
+check("0798: обычная заявка при running --sha на том же SHA — новая заявка, не сцепление",
+      rc == 0 and len(reqs() - before) == 1, (rc, before, reqs()))
+before = reqs()
+role_request("athena-x", APP, "test", "--sha", CPG)
+check("0798: --sha при running --sha на том же SHA — сцеплена, новой заявки нет", reqs() == before, (before, reqs()))
+# и обратно: running обычной заявки не сцепляет --sha
+with open(os.path.join(q_pin, _fake + ".result.json"), "w") as fh:
+    json.dump({k: v for k, v in _res_pin.items() if k != "pin"}, fh)
+before = reqs()
+role_request("athena-x", APP, "test", "--sha", CPG)
+check("0798: --sha при running обычной на том же SHA — новая заявка", len(reqs() - before) == 1, (before, reqs()))
+os.remove(os.path.join(q_pin, _fake + ".result.json"))
+for _n in reqs():   # ждущие заявки этого блока снимаем: дальше блоки считают очередь сами
+    try:
+        os.remove(os.path.join(_q, _n))
+    except OSError:
+        pass
 git(APP, "switch", "-q", "main")
 
 # metis-0796 Д1: refs/replace в клоне подменяет содержимое копии при том же HEAD и чистом status — копия идёт с
@@ -2761,6 +2943,336 @@ shutil.rmtree(_keep, ignore_errors=True)
 if _saved_e is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved_e)
+
+# --- metis-0873: окно снимает свой прогон (идущий и в очереди), проход снимает прогон ушедшего head -------------------
+import fcntl as _fcntl
+import threading as _thr
+
+S_PIDS, S_MODE, S_GO = (os.path.join(_ROOT, n) for n in ("stop0873-pids", "stop0873-mode", "stop0873-go"))
+S_TPY = (f"import os, signal, sys, time\nR = {_ROOT!r}  # 0873\n"
+         "mode = open(os.path.join(R, 'stop0873-mode')).read().strip()\n"
+         "with open(os.path.join(R, 'stop0873-pids'), 'a') as fh:\n    fh.write(f'{os.getpid()}\\n')\n"
+         "if mode.startswith('mark:'):\n    open(mode[5:], 'w').close()\n    sys.exit(0)\n"
+         "if mode == 'red':\n    sys.exit(1)\n"
+         "if mode == 'trap':\n    signal.signal(signal.SIGTERM, lambda *a: os._exit(0))\n"
+         "end = time.time() + 120\n"
+         "while time.time() < end and not os.path.exists(os.path.join(R, 'stop0873-go')):\n    time.sleep(0.2)\n"
+         "sys.exit(0)\n")
+O.SUPERSEDE_EVERY, O.PROCS_EVERY = 1, 1
+
+
+def s_pids():
+    try:
+        with open(S_PIDS) as fh:
+            return [int(x) for x in fh.read().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def s_mode(m):
+    with open(S_MODE, "w") as fh:
+        fh.write(m)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(S_PIDS)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(S_GO)
+
+
+def s_dead(pids, sec=10):
+    return wait_for(lambda: all(not pid_alive(p, 0) for p in pids), sec)
+
+
+def s_start(q, rid, sec=30):
+    th = _thr.Thread(target=run_pass, daemon=True)
+    th.start()
+    return th, wait_for(lambda: state(q, rid) == "running" and s_pids(), sec)
+
+
+def s_stopped(q, rid, sec=10):
+    return wait_for(lambda: state(q, rid) == "stopped", sec)
+
+
+git(APP, "switch", "-q", "main")
+D0 = git(APP, "rev-parse", "HEAD")
+SD = commit(APP, {"t.py": S_TPY}, "0873 диспетчер")
+n_full0 = len(open(O.full_file()).read().splitlines()) if os.path.exists(O.full_file()) else 0
+
+# R1: T1 срез процессов, T3b чужая метка, T9 метка-ссылка, T6b грязное дерево, затем T3a свой «стоп»
+s_mode("sleep")
+q, rid = new_request("athena-x", APP, "test")
+th, up = s_start(q, rid)
+pids = s_pids()
+# Срез procs пишет TestWatch.__call__ на тике wait_proc: тик раз в SWEEP_EVERY с, запись не раньше PROCS_EVERY с после
+# старта сторожа (lib/outside.py). procs_of берёт данные у ps (setuid /bin/ps), а сбой ps даёт procs == [] — ключ есть,
+# но пустой. В песочнице ps не запускается (Operation not permitted, metis-0786), и итог несёт [], а не срез: на
+# «пусто» тест ждал зря (metis-0873, прогон 20261106-050513-080e2d: ([257], [257], {})). Ждём по коду ключ procs
+# (PROCS_EVERY + SWEEP_EVERY + 10 с ps + запас; wait_for выходит сразу), pid в срезе требуем, когда ps доступен.
+try:
+    PS_OK = subprocess.run(["ps", "-o", "pid=", "-p", str(os.getpid())], capture_output=True, text=True,
+                           timeout=10).stdout.split() == [str(os.getpid())]
+except (OSError, subprocess.SubprocessError):
+    PS_OK = False
+res = wait_for(lambda: "procs" in (O.load_result(q, rid) or {}) and O.load_result(q, rid),
+               O.PROCS_EVERY + O.SWEEP_EVERY + 10 + 20) or {}
+if not PS_OK:
+    print("пропущено: ps недоступен (песочница) — pid прогона в срезе procs T1 не проверяется")
+check("T1 status_shows_procs_own_only: итог running своего qdir несёт срез процессов с pid прогона, в соседнем qdir — "
+      "ничего", up and "procs" in res and (not PS_OK or any(p.get("pid") in pids for p in res["procs"]))
+      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".result.json")), (up, pids, res))
+_fy = os.path.join(CACHE, "metis-y", "outside", rid + ".stop")
+os.makedirs(os.path.dirname(_fy), exist_ok=True)
+open(_fy, "w").close()
+_lnk = os.path.join(q, rid + ".stop")
+open(os.path.join(_ROOT, "stop0873-target"), "w").close()
+os.symlink(os.path.join(_ROOT, "stop0873-target"), _lnk)
+with open(os.path.join(APP, "t.py"), "a") as fh:
+    fh.write("# грязная правка\n")
+time.sleep(4)
+check("T3b stop_foreign_qdir_ignored: метка в соседнем qdir — прогон идёт, метка убрана, в журнале stop-foreign",
+      state(q, rid) == "running" and all(pid_alive(p, 0) for p in pids) and not os.path.exists(_fy)
+      and [e.get("by") for e in events(rid, "stop-foreign")] == [["metis-y"]], (state(q, rid), events(rid)))
+check("T9 stop_symlink_marker_ignored: ссылка на месте метки — прогон идёт", state(q, rid) == "running", state(q, rid))
+check("T6b dirty_tree_not_superseded: грязная правка без коммита — прогон идёт", state(q, rid) == "running")
+os.remove(_lnk)
+git(APP, "checkout", "--", "t.py")
+n_rec = len(tests_for(SD))
+t0 = time.monotonic()
+rc, out = say("athena-x", "stop", rid, "--wait", "15")
+dt = time.monotonic() - t0
+res = O.load_result(q, rid) or {}
+th.join(30)
+check("T3a stop_running_own: stop своего идущего теста — код 0, stopped за ≤10 с, группа мертва, метки нет",
+      rc == 0 and res.get("state") == "stopped" and dt <= 10 and s_dead(pids)
+      and "заявка «стоп»" in res.get("why", "") and not os.path.exists(os.path.join(q, rid + ".stop")),
+      (rc, out, round(dt, 1), res))
+check("T3a: снятый — без записи tests и без строки full.jsonl; в журнале stop с окном",
+      res.get("record") is False and len(tests_for(SD)) == n_rec
+      and (len(open(O.full_file()).read().splitlines()) if os.path.exists(O.full_file()) else 0) == n_full0
+      and [e.get("by") for e in events(rid, "stop")] == [["athena-x"]], (res, events(rid, "stop")))
+
+# T3c: команда ловит TERM и выходит с 0 — записи нет
+s_mode("trap")
+q, rid = new_request("athena-x", APP, "test")
+th, up = s_start(q, rid)
+pids = s_pids()
+rc, out = say("athena-x", "stop", rid, "--wait", "15")
+th.join(30)
+res = O.load_result(q, rid) or {}
+check("T3c stop_trap_term_exit0_no_record: код 0 после TERM — stopped, record false, записи tests нет",
+      up and rc == 0 and res.get("state") == "stopped" and res.get("code") == 0 and res.get("record") is False
+      and len(tests_for(SD)) == n_rec and s_dead(pids), (up, rc, out, res))
+
+# T10c: метка ставится самой командой перед выходом с 0 — записи нет
+q, rid = new_request("athena-x", APP, "test")
+s_mode("mark:" + os.path.join(q, rid + ".stop"))
+run_pass()
+res = O.load_result(q, rid) or {}
+check("T10c stop_before_append: «стоп» пришёл перед выходом с 0 — stopped, записи tests нет, метка убрана",
+      res.get("state") == "stopped" and res.get("code") == 0 and len(tests_for(SD)) == n_rec and s_pids()
+      and not os.path.exists(os.path.join(q, rid + ".stop")), res)
+
+# T10a: «стоп» между взятием заявки и запуском — команда не запускается
+s_mode("sleep")
+q, rid = new_request("athena-x", APP, "test")
+_cmd0 = O.command
+
+
+def _cmd_mark(d, kind, script=None):
+    open(os.path.join(q, rid + ".stop"), "w").close()
+    return _cmd0(d, kind, script)
+
+
+O.command = _cmd_mark
+try:
+    run_pass()
+finally:
+    O.command = _cmd0
+res = O.load_result(q, rid) or {}
+check("T10a stop_between_take_and_popen: метка до Popen — stopped, команда не запускалась, метка убрана",
+      res.get("state") == "stopped" and not s_pids() and not os.path.exists(os.path.join(q, rid + ".stop")), res)
+
+# T10b: прогон уже done с записью — stop так и говорит, код 0
+rid_b = "20261106-000001-0873bb"
+O.save_result(q, rid_b, {"state": "done", "kind": "test", "sha": SD, "code": 0, "record": True})
+rc, out = say("athena-x", "stop", rid_b, "--wait", "0")
+check("T10b stop_after_record_keeps_record: «уже done», запись есть, код 0, метки нет",
+      rc == 0 and "уже done" in out and "запись tests" in out and not os.path.exists(os.path.join(q, rid_b + ".stop")),
+      (rc, out))
+
+# T2: заявка в очереди, STATE окну закрыт (runs/ только для чтения) — снятие без записи в STATE
+q, rid = new_request("athena-x", APP, "test")
+_runs = O.root("runs")
+os.chmod(_runs, 0o500)
+try:
+    rc, out = say("athena-x", "stop", rid, "--wait", "0")
+except PermissionError as e:
+    rc, out = None, f"PermissionError: {e}"
+finally:
+    os.chmod(_runs, 0o700)
+O.recover_results(t=time.time() + 3600)
+check("T2 stop_queued_from_window_no_state_write: код 0, stopped в своей папке, заявки нет, STATE не писался, "
+      "recover_results не делает «потеряна»", rc == 0 and state(q, rid) == "stopped"
+      and not os.path.exists(os.path.join(q, rid + ".req.json")) and not os.path.exists(os.path.join(_runs, rid + ".json")),
+      (rc, out, O.load_result(q, rid)))
+
+# T4: метка идущего теста старше STOP_ORPHAN_AGE — drop_orphan_stops её не убирает
+rid_4 = "20261106-000002-0873cc"
+O.save_result(q, rid_4, {"state": "running", "kind": "test", "sha": SD})
+_m4 = os.path.join(q, rid_4 + ".stop")
+open(_m4, "w").close()
+os.utime(_m4, (time.time() - 3600, time.time() - 3600))
+O.drop_orphan_stops()
+check("T4 orphan_stops_keeps_running_test: метка running-теста лежит после drop_orphan_stops", os.path.exists(_m4))
+O.save_result(q, rid_4, {"state": "stopped", "kind": "test", "sha": SD})
+O.drop_orphan_stops()
+check("T4: тест закончен — метка-сирота убрана", not os.path.exists(_m4))
+
+# T3b из CLI: заявка другого окна, итог которой виден в STATE (идёт) — «не из этого окна», код 1, метки нет;
+# снятая из окна (итог только в его папке, T2) другому окну не видна вовсе — «нет такой заявки», код 1
+rid_3 = "20261106-000003-0873cc"
+O.save_result(q, rid_3, {"state": "running", "kind": "test", "sha": SD})
+rc, out = say("metis-y", "stop", rid_3, "--wait", "0")
+check("T3b CLI: stop идущей заявки другого окна — «не из этого окна», код 1, метки нет",
+      rc == 1 and "не из этого окна" in out
+      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid_3 + ".stop")), (rc, out))
+O.save_result(q, rid_3, {"state": "stopped", "kind": "test", "sha": SD})
+rc, out = say("metis-y", "stop", rid, "--wait", "0")
+check("T3b CLI: stop снятой в другом окне — «нет такой заявки», код 1, метки нет",
+      rc == 1 and "нет такой заявки" in out
+      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+
+# T6a: коммит в папке во время прогона — проход снимает сам (superseded), записи нет
+s_mode("sleep")
+q, rid = new_request("athena-x", APP, "test")
+th, up = s_start(q, rid)
+pids = s_pids()
+SE = commit(APP, {"t.py": S_TPY + "# e\n"}, "0873 новый head")
+ok = s_stopped(q, rid, 15)
+th.join(30)
+res = O.load_result(q, rid) or {}
+check("T6a superseded_head_moved_running: HEAD ушёл — stopped «superseded», группа мертва, записи нет",
+      up and ok and "superseded: HEAD ушёл" in res.get("why", "") and res.get("record") is False and s_dead(pids)
+      and len(tests_for(SD)) == n_rec, (up, res))
+
+# T8a: заявка в очереди на ушедший head при более новой заявке той же папки — failed superseded, без прогона
+s_mode("red")
+qa, ra = new_request("athena-x", APP, "test")
+SF = commit(APP, {"t.py": S_TPY + "# f\n"}, "0873 f")
+# ID заявки — секунда и случайный хвост: в одну секунду новая могла встать раньше старой и снять её «дублем»
+# (pr353-red-1) — новая заявка в следующей секунде
+wait_for(lambda: time.strftime("%Y%m%d-%H%M%S") > ra[:15], 3)
+qb, rb = new_request("athena-x", APP, "test")
+run_pass()
+resa, resb = O.load_result(qa, ra) or {}, O.load_result(qb, rb) or {}
+check("T8a queued_superseded_by_newer: старая — failed «superseded <новый>», новая прогнана, прогон один",
+      resa.get("state") == "failed" and resa.get("superseded") == rb and f"superseded {rb}" in resa.get("why", "")
+      and resb.get("state") == "done" and len(s_pids()) == 1, (resa, resb, s_pids()))
+# T8b: новой заявки нет — старая идёт на текущем HEAD
+s_mode("red")
+qc, rc_ = new_request("athena-x", APP, "test")
+SG = commit(APP, {"t.py": S_TPY + "# g\n"}, "0873 g")
+run_pass()
+resc = O.load_result(qc, rc_) or {}
+check("T8b queued_no_newer_runs: новой заявки нет — прогон текущего HEAD", resc.get("state") == "done"
+      and resc.get("sha") == SG and len(s_pids()) == 1, resc)
+
+# T7a/T7b: test --sha — снимает только более новая заявка --sha из того же qdir на потомка
+s_mode("sleep")
+PX = commit(APP, {"t.py": S_TPY + "# x\n"}, "0873 x")
+PY = commit(APP, {"t.py": S_TPY + "# y\n"}, "0873 y")
+qx, rx = new_request("athena-x", APP, "test", "--sha", PX)
+th, up = s_start(qx, rx, 60)
+pids = s_pids()
+_cwd = os.getcwd()
+os.chdir(APP)
+try:
+    rcs, _o = say(None, "test", "--sha", PY)   # из очереди терминала (другой qdir) — не снимает
+finally:
+    os.chdir(_cwd)
+time.sleep(3)
+check("T7b pin_not_superseded_by_other_qdir: новая заявка --sha из другого qdir — старая идёт",
+      up and rcs == 0 and state(qx, rx) == "running" and all(pid_alive(p, 0) for p in pids), (up, rcs, state(qx, rx)))
+# заявка терминала на PY убрана: иначе новая заявка окна на тот же коммит сцепляется с ней (pr353-red-1)
+for _n in os.listdir(O.root("queue")):
+    if _n.endswith(".req.json"):
+        os.remove(os.path.join(O.root("queue"), _n))
+qy, ry = new_request("athena-x", APP, "test", "--sha", PY)
+ok = s_stopped(qx, rx, 15)
+res = O.load_result(qx, rx) or {}
+open(S_GO, "w").close()
+th.join(90)
+check("T7a pin_superseded_by_newer_same_qdir: новая --sha того же qdir на потомка — старая stopped «superseded», "
+      "копия снята, записи нет", ok and "superseded: заявка " + ry in res.get("why", "") and s_dead(pids)
+      and not os.path.exists(test_work(rx)) and not tests_for(PX), res)
+for _n in os.listdir(O.root("queue")):
+    if _n.endswith(".req.json"):
+        os.remove(os.path.join(O.root("queue"), _n))
+git(APP, "reset", "-q", "--hard", D0)
+
+# T5a/T5b: настоящий heavy — после стопа места свободны; стоп, пока heavy ждёт место, — команда не стартовала
+_locks = os.path.join(STATE, "locks")
+os.makedirs(_locks, exist_ok=True)
+_slots = [os.path.join(_locks, f"heavy-cmd-{i}.lock") for i in (1, 2)]
+for _s in _slots:
+    open(_s, "a").close()
+O.HEAVY = "default"
+SH = commit(APP, {"t.py": S_TPY + "# h\n"}, "0873 heavy")
+try:
+    s_mode("sleep")
+    q, rid = new_request("athena-x", APP, "test")
+    th, up = s_start(q, rid, 60)
+    pids = s_pids()
+    rc, out = say("athena-x", "stop", rid, "--wait", "15")
+    th.join(30)
+    free = []
+    for _s in _slots:
+        with open(_s, "a") as fh:
+            try:
+                _fcntl.flock(fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                free.append(True)
+            except OSError:
+                free.append(False)
+    check("T5a stop_releases_heavy_slot: стоп под heavy — stopped, оба места свободны",
+          up and rc == 0 and state(q, rid) == "stopped" and s_dead(pids) and free == [True, True], (up, rc, out, free))
+    _held = [open(_s, "a") for _s in _slots]
+    for fh in _held:
+        _fcntl.flock(fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    s_mode("sleep")
+    q, rid = new_request("athena-x", APP, "test")
+    th = _thr.Thread(target=run_pass, daemon=True)
+    th.start()
+    up = wait_for(lambda: state(q, rid) == "running", 30)
+    time.sleep(2)
+    rc, out = say("athena-x", "stop", rid, "--wait", "15")
+    th.join(30)
+    for fh in _held:
+        fh.close()
+    check("T5b stop_while_heavy_waits: стоп, пока heavy ждёт место, — stopped, команда не стартовала",
+          up and rc == 0 and state(q, rid) == "stopped" and not s_pids(), (up, rc, out, s_pids()))
+finally:
+    O.HEAVY = None
+    git(APP, "reset", "-q", "--hard", D0)
+
+# T11: снятый полный набор не попадает в full.jsonl
+s_mode("sleep")
+KS = commit(KIT, {"t.py": S_TPY + "# kit\n"}, "0873 kit")
+one_request.n += 1
+rk = f"20261106-1{one_request.n:05d}-c0c0c0"
+with open(os.path.join(qkit, rk + ".req.json"), "w") as fh:
+    json.dump({"v": 1, "id": rk, "kind": "test", "dir": KIT, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+n_full = len(open(O.full_file()).read().splitlines()) if os.path.exists(O.full_file()) else 0
+th, up = s_start(qkit, rk)
+rc, out = say("metis-k", "stop", rk, "--wait", "15")
+th.join(30)
+check("T11 stopped_not_in_full_jsonl: снятый полный набор — stopped, строки full.jsonl нет, записи tests нет",
+      up and rc == 0 and state(qkit, rk) == "stopped" and not tests_for(KS)
+      and (len(open(O.full_file()).read().splitlines()) if os.path.exists(O.full_file()) else 0) == n_full,
+      (up, rc, out))
+open(S_GO, "w").close()
+for _p in s_pids():
+    with contextlib.suppress(OSError):
+        os.kill(_p, signal.SIGKILL)
+O.SUPERSEDE_EVERY, O.PROCS_EVERY = 30, 30
 
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()

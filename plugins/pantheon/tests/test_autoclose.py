@@ -171,14 +171,17 @@ def test_tick():
         rf = pan(env, T0, "autoclose", "fetch")
         check("fetch: код 0, gh спрошен, кэш записан", rf.returncode == 0 and os.path.exists(os.path.join(gh, "calls.log"))
               and os.path.exists(os.path.join(state, "autoclose-prs.json")), rf.stdout + rf.stderr)
-        check("fetch ничего не закрывает", T.read(pa)[0].get("status") == "doing")
+        ha = T.read(pa)[0]
+        # metis-0868: закрытие — в том же проходе, сразу после fetch, а не на следующем тике
+        check("fetch: слитый PR с metis-0001 в ветке закрывает задачу в том же проходе", ha.get("status") == "done",
+              rf.stdout + rf.stderr + text(pa)[:400])
+        fetched = {p: text(p) for p in (pa, pb, pc, pd)}
         os.remove(os.path.join(gh, "calls.log"))
         r = pan(env, T0, "tick")
         check("лёгкий тик не зовёт gh", not os.path.exists(os.path.join(gh, "calls.log")), text(os.path.join(gh, "calls.log"))
               if os.path.exists(os.path.join(gh, "calls.log")) else "")
-        ha = T.read(pa)[0]
-        check("тик: слитый PR с metis-0001 в ветке закрывает задачу", ha.get("status") == "done" and r.returncode == 0,
-              r.stdout + r.stderr + text(pa)[:400])
+        check("тик после fetch: закрывать уже нечего, задачи не изменились",
+              r.returncode == 0 and {p: text(p) for p in (pa, pb, pc, pd)} == fetched, r.stdout + r.stderr)
         check("closed — день слияния", ha.get("closed") == day(merged_at), str(ha.get("closed")))
         check("release: PR → коммит", ha.get("release") == "PR #7 → abcdef0", str(ha.get("release")))
         check("actual: из metrics/tasks.jsonl", ha.get("actual") == "$1.50 · 450k токенов · 2.1 ч", str(ha.get("actual")))
@@ -204,6 +207,33 @@ def test_tick():
         st = json.load(open(os.path.join(state, "autoclose.json")))
         check("отметки обработанных PR в STATE", set(st["done"]) == {"latark/agent-kit#7", "latark/agent-kit#8", "latark/agent-kit#10", "acme/site#3"},
               str(st.get("done")))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_fetch_same_pass_primary_only():
+    """metis-0868, п. 1: fetch закрывает в том же проходе только на главном Mac (как тик); карточки закрыты — view
+    и доска сразу (задачи расписания), а не через минуту."""
+    tmp, home, state, gh, env = make()
+    try:
+        open(os.path.join(home, "schedule.toml"), "w").write(
+            'primary_host = "mac-a"\n\n[[job]]\nname = "view"\ncommand = "pantheon view --quiet"\nevery = "tick"\n')
+        a, pa, _ = new(env, home, T0 - 7200, "metis-pantheon", "Ядро", "--status", "doing", "--next", "x")
+        write_gh(gh, "latark/agent-kit", "merged", [pr(7, "feature", "Closes metis-0001", T0 - 3600)])
+        rb = pan(dict(env, PANTHEON_HOST="mac-b", PANTHEON_REFRESH="1"), T0, "autoclose", "fetch")
+        dry = os.path.join(state, "dryrun.log")
+        check("fetch не на главном Mac: кэш записан, задача не закрыта (закрывает главный)",
+              rb.returncode == 0 and T.read(pa)[0].get("status") == "doing" and not os.path.exists(dry), rb.stdout + rb.stderr)
+        ra = pan(dict(env, PANTHEON_REFRESH="1"), T0 + 60, "autoclose", "fetch")
+        check("fetch на главном Mac: закрыта в том же проходе, строка «автозакрытие ·» в выводе",
+              ra.returncode == 0 and T.read(pa)[0].get("status") == "done" and f"автозакрытие · {a}" in ra.stdout,
+              ra.stdout + ra.stderr)
+        check("… и копия Obsidian сразу: задача view запущена", os.path.exists(dry) and text(dry).split()[1:] == ["view"],
+              text(dry) if os.path.exists(dry) else "нет dryrun.log")
+        open(os.path.join(home, "schedule.toml"), "w").write("primary_host = [не toml\n")
+        rc = pan(env, T0 + 120, "autoclose", "fetch")
+        check("schedule.toml не читается — fetch не падает, проход по кэшу пропущен с причиной",
+              rc.returncode == 0 and "проход по кэшу пропущен: schedule.toml не читается" in rc.stderr, rc.stdout + rc.stderr)
     finally:
         shutil.rmtree(tmp, True)
 
@@ -1013,6 +1043,52 @@ def test_lists_and_checked():
         shutil.rmtree(tmp, True)
 
 
+def test_review_without_closes():
+    """metis-0615 п. 3 (случай athena-0184, PR BA #38): открытый PR без Closes и без id в ветке ставит review задачам
+    doing/waiting, названным в ветке или теле (ids); todo по упоминанию не трогает. PR с Closes ставит review и задаче в
+    waiting; waiting владельца (waiting_on human) остаётся в «Нужен ответ»; «часть» — никому."""
+    tmp, home, state, gh, env = make()
+    try:
+        R = "latark/agent-kit"
+        ps = {i: put(home, "metis-pantheon", i, status=st, **kw) for i, st, kw in (
+            ("metis-0101", "waiting", {"waiting_on": "talos"}), ("metis-0102", "doing", {}), ("metis-0103", "todo", {}),
+            ("metis-0104", "waiting", {"waiting_on": "human"}), ("metis-0105", "waiting", {"waiting_on": "talos"}),
+            ("metis-0106", "doing", {}), ("metis-0107", "todo", {}), ("metis-0108", "doing", {}),
+            ("metis-0109", "waiting", {"waiting_on": "talos"}))}
+        # ветка без префикса id (как BA #38 …-0184): номера 0101–0104 в ветке, 0108 и 0109 — только упоминание в теле
+        # («после metis-0108», «зависит от metis-0109», argus #341 Б1)
+        rows = [{"number": 38, "closes": [], "branch": "fix-0101-0102-0103-0104",
+                 "ids": ["metis-0101", "metis-0102", "metis-0103", "metis-0104", "metis-0108", "metis-0109"], "part": False},
+                {"number": 39, "closes": ["metis-0105", "metis-0107"], "ids": ["metis-0105", "metis-0106", "metis-0107"],
+                 "part": False},
+                {"number": 40, "closes": [], "ids": ["metis-0106"], "part": True}]
+        log, errs = [], {}
+        for row in rows:
+            A.review_pr(home, T0, R, row, {"metis-pantheon"}, T, log, errs)
+        st = {i: T.read(p)[0].get("status") for i, p in ps.items()}
+        check("0615: PR без Closes — waiting и doing из ветки/тела → review, строка в журнале",
+              st["metis-0101"] == "review" and st["metis-0102"] == "review"
+              and "PR #38 (latark/agent-kit) " + A.REVIEW_MARK in text(ps["metis-0101"]), (st, errs))
+        check("0615: PR без Closes — todo по упоминанию не трогает, waiting владельца (human) тоже",
+              st["metis-0103"] == "todo" and st["metis-0104"] == "waiting", st)
+        check("0615: PR с Closes — review и у waiting; упоминание рядом с Closes не в счёт; todo по Closes — review",
+              st["metis-0105"] == "review" and st["metis-0106"] == "doing" and st["metis-0107"] == "review", st)
+        check("0615: waiting → review снимает waiting_on, прежний — в строке журнала",
+              T.read(ps["metis-0101"])[0].get("waiting_on") is None and "; был waiting_on talos" in text(ps["metis-0101"]),
+              text(ps["metis-0101"])[-300:])
+        check("0615 (argus #341 Б1): PR без Closes — задача только упомянута в теле («после Y»), номера нет в ветке: "
+              "doing и waiting не трогаются, waiting_on цел",
+              st["metis-0108"] == "doing" and st["metis-0109"] == "waiting"
+              and T.read(ps["metis-0109"])[0].get("waiting_on") == "talos", st)
+        check("0615: branch_named — номер числом в имени ветки; соседний номер (0274 при ветке …-0275), ветки нет — нет",
+              A.branch_named("landing-claims-0275", ["athena-0274", "athena-0275", "athena-275", 7]) == ["athena-0275",
+                                                                                                      "athena-275"]
+              and A.branch_named(None, ["athena-0275"]) == [] and A.branch_named("x-02750", ["athena-0275"]) == [])
+        check("0615: PR «часть» без Closes review не ставит", st["metis-0106"] == "doing" and not errs, (st, errs))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_lists_and_checked()
     test_unit()
@@ -1020,6 +1096,7 @@ def main():
     test_attention_on_card()
     test_close_criteria()
     test_tick()
+    test_fetch_same_pass_primary_only()
     test_old_and_errors()
     test_rules()
     test_reopen_and_eviction()
@@ -1034,6 +1111,7 @@ def main():
     test_batch_needs_mode()
     test_off_warning()
     test_check()
+    test_review_without_closes()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

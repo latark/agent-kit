@@ -120,7 +120,7 @@ txt = "\n".join(B.lines({"week": 1, "merged_open": rows}))
 check("0768. строка блока board-auto: «metis-XXXX: PR #N слит D дн. назад, задача doing, неотмечено K»; не больше 5 + «и ещё»",
       "- metis-0001: PR #101 слит 2 дн. назад, задача doing, неотмечено 1" in txt
       and txt.count("слит ") == B.MAX_MERGED and "и ещё слитых PR с открытой задачей: 2" in txt, txt)
-txt = "\n".join(B.lines({"week": 1, "merged_open": [("ИГНОР‮", 1, 1, "doing", 1), ("metis-1", True, 1, "doing", 1),
+txt = "\n".join(B.lines({"week": 1, "merged_open": [("ИГНОР\u202e", 1, 1, "doing", 1), ("metis-1", True, 1, "doing", 1),
                                                        ("metis-2", 1, 1, "done; rm", 1)]}))
 check("0768. значения не по шаблону (чужой текст, bool, статус) в блок не идут", "слит" not in txt and "ИГНОР" not in txt, txt)
 
@@ -381,6 +381,10 @@ FAIL = ("import os, sys; sys.path.insert(0, %r); import pantheon as p, builtins\
         "            if len(n) == 2: raise OSError(28, 'нет места')\n"
         "        return builtins.open(f, mode, *a, **k)\n"
         "    p.open = opener\n"
+        "if len(sys.argv) > 2:  # откат сам падает (metis-0810): truncate и remove архива — OSError\n"
+        "    def nope(*a): raise OSError(13, 'нет доступа')\n"
+        "    p.os.truncate = nope\n"
+        "    p.os.remove = nope\n"
         "sys.exit(p.board_archive([]))\n" % LIB)
 for what in ("write", "append2"):
     for existed in (True, False):
@@ -397,6 +401,22 @@ for what in ("write", "append2"):
               r.returncode == 1 and "OSError" in r.stderr and read(bm) == SRC
               and (text_of(a10) == "старый архив 10\n" and text_of(a09) == "старый архив 09\n" if existed else left == []),
               (r.returncode, r.stderr[-300:], left))
+        last = (r.stderr.strip().splitlines() or [""])[-1]
+        check(f"0810. board archive: OSError ({what}, {'были' if existed else 'не было'}) — последняя строка «архив откатан, "
+              "board.md не тронут», трассировки нет (мутант: снять except OSError)",
+              "архив откатан, board.md не тронут" in last and "Traceback" not in r.stderr, r.stderr[-400:])
+# откат сам не удался — сообщение не врёт «архив откатан», а называет архив и причину; код 1, трассировки нет
+shutil.rmtree(arch, ignore_errors=True)
+write(a10, "старый архив 10\n")
+write(a09, "старый архив 09\n")
+write(bm, SRC)
+r = subprocess.run([PY311, "-I", "-c", FAIL, "write", "rollback"], env=dict(env, PANTHEON_NOW=str(NOW)), capture_output=True,
+                   text=True, timeout=300)
+last = (r.stderr.strip().splitlines() or [""])[-1]
+check("0810. board archive: откат архива упал — код 1, «архив НЕ откатан (archive/…: PermissionError …)», не «архив откатан», "
+      "board.md цел, трассировки нет",
+      r.returncode == 1 and "архив НЕ откатан (archive/" in last and "PermissionError" in last and "архив откатан," not in last
+      and read(bm) == SRC and "Traceback" not in r.stderr and text_of(a10) != "старый архив 10\n", (r.returncode, r.stderr[-500:]))
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

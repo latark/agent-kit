@@ -19,6 +19,10 @@ claude-config: коммит в обход sync.sh отправил бы прав
 папку над репозиториями (tar -x, unzip, ditto, cp -R, rsync -r/-a или «папка/», scp -r), и git clone в <репо>/.claude.
 Файлы с известными именами (curl -O, wget без -r и -m, patch, rsync одного файла) в корне репозитория — можно.
 С metis-0194 закрыты дыры ревью #35: rsync с «.», «папка/.» и -R, wget -r/-m, git checkout/restore поверх .claude, 7z -o.
+С metis-0823 неразобранная цель Bash ($(…), переменная) проходит, только если её буквальная часть лежит в $TMPDIR,
+кэше окна или своей worktree (G.unresolved_dirs); эта папка судится как обычная цель. Папка-основа .git и папка
+с настройками репозитория (корень, вложенный проект) — отказ: имя из подстановки может оказаться config, .mcp.json
+(_unres_risky).
 """
 
 import os
@@ -38,6 +42,291 @@ SETTINGS_NAMES = {"settings.json", "settings.local.json"}
 # CLAUDE_ITEMS: hooks и commands в нём есть, skills нет — ~/.claude/skills это правило не закрывает
 PROJECT_ITEMS = {"hooks", "skills", "commands"}
 
+# metis-0841 («да» владельца 05.11 16:04 и 16:09): координатор и лид направления правят навыки, команды и роли
+# проекта в папках своего направления (domains.json, его собирают из directions.toml). Отказ, если новый текст даёт
+# права или запускает код без вопроса: строка frontmatter вне класса ниже или динамическая команда навыка (её
+# выполняют при загрузке). Текст записи не разобрать — тоже отказ. .claude/hooks, settings, .mcp.json, .git и сама
+# .claude как цель — защита и в своём направлении
+OWN_ITEMS = {"skills", "commands", "agents"}
+# Ревью #347 (Б2): frontmatter судим классом, а не списком запретных ключей — у YAML много форм ключа («!!str k»,
+# «&a k», «"k"», «? k», алиас «*k»). Строка frontmatter у левого края — только «ключ: значение», ключ из списка ниже
+# (без регистра, «-» и «_»), значение не начинается с & * ! ? % @ ` (якорь, алиас, тег, зарезервированное); строка с
+# отступом пробелами — значение ключа выше, а похожая на «ключ:» — только под пустым значением (вложенный словарь)
+# или блоком | и >; пустая или «# комментарий» — можно; любая другая — отказ. Вложенное ({…}, […], словарь под
+# ключом) — данные разрешённого ключа, а не ключ верхнего уровня
+SAFE_KEYS = {"skills": {"name", "description", "argumenthint", "whentouse", "disablemodelinvocation", "userinvocable",
+                        "version", "license", "compatibility", "metadata"},
+             "agents": {"name", "description", "model", "color", "effort", "maxturns"}}
+SAFE_KEYS["commands"] = SAFE_KEYS["skills"]
+FM_LINE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]+(.*))?", re.ASCII)
+VALUE_BAD_START = set("&*!?%@`")
+# строка с отступом, похожая на ключ: под простым значением («name: x\n  allowed-tools: Bash») YAML её не примет,
+# а запасной разбор Claude Code может взять — отказ
+INDENT_KEY = re.compile(r"\s+[^\s#][^:]*:(?:\s|\Z)")
+# имя роли проекта: простое слово (кавычки можно); иначе — не разобрать, отказ
+ROLE_NAME = re.compile(r"""(["']?)([A-Za-z0-9_.-]+)\1(?:\s+#.*)?""", re.ASCII)
+# Ревью #347 (Б3): роль проекта берётся раньше ~/.claude/agents — с именем роли Пантеона она подменяет её (шлюз
+# узнаёт argus по agent_type, taint — tg-reader). Роли Пантеона: G.is_pantheon_role, роли ниже вне его списка и
+# собранные ~/.claude/agents/<имя>.md
+PANTHEON_AGENTS = {"tg-reader"}
+ROLES_DIR = os.path.join(".claude", "agents")  # от HOME: собранные роли (тест подменяет — песочница окна её закрывает)
+# динамическая команда навыка: строка !`…` и блок ```! (Claude Code ищет «```!» в любом месте текста); ~~~! — тоже
+DYN_COMMAND = re.compile(r"!\s*`|```!|~~~!")
+TEXT_LIMIT = 1 << 20  # больше — текст не разбираем, отказ
+
+
+def own_folders(role, sub, pdir):
+    """Папки направления, где роль правит skills, commands и agents проекта: координатор (главная сессия
+    domain-coordinator) и лид направления (hephaestus-<коротко>, apollo-<коротко> — главная сессия или субагент окна).
+    Направление — по папке запуска (domains.json). Иначе []: остальные роли, субагенты и чужое направление."""
+    name, folders = G.direction_of(G.load_domains(), pdir)
+    if not name or not folders:
+        return []
+    if role == "domain-coordinator" and not sub:
+        return folders
+    short = name.split("-", 1)[1] if "-" in name else ""
+    return folders if short and role in {p + short for p in G.PANTHEON_ROLE_PREFIXES} else []
+
+
+def _own_kinds(p, own):
+    """Какие из OWN_ITEMS своего направления содержат путь (их ключи frontmatter судим)."""
+    parts = [G._key(x) for x in p.split("/")]
+    return {parts[i + 1] for i, x in enumerate(parts[:-1])
+            if x == ".claude" and parts[i + 1] in OWN_ITEMS and G._inside("/".join(parts[:i + 1]), own)}
+
+
+def _read_text(p):
+    """Текст обычного файла (не больше TEXT_LIMIT); нет файла — ""; иначе None (не разобрать)."""
+    if not os.path.lexists(p):
+        return ""
+    try:
+        if not os.path.isfile(p) or os.path.getsize(p) > TEXT_LIMIT:
+            return None
+        with open(p, "rb") as fh:
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def _edit_text(tool, tool_input, p):
+    """Новый текст файла после Write, Edit, MultiEdit; None — не вычислить (NotebookEdit, нет old_string)."""
+    if tool == "Write":
+        c = tool_input.get("content")
+        return c if isinstance(c, str) else None
+    if tool == "Edit":
+        edits = [tool_input]
+    elif tool == "MultiEdit":
+        edits = tool_input.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return None
+    else:
+        return None
+    text = _read_text(p)
+    if text is None:
+        return None
+    for e in edits:
+        old, new = (e.get("old_string"), e.get("new_string")) if isinstance(e, dict) else (None, None)
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None
+        if old == "":
+            if text:
+                return None
+            text = new  # Edit с пустым old_string создаёт файл
+        elif old not in text:
+            return None
+        else:
+            text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
+
+
+def _bash_texts(cmd, cwd, paths):
+    """Новый текст каждого пути из paths после команды Bash: {путь: текст или None — файла не будет (rm, mkdir)};
+    у cp и mv в папку — путь файла в ней.
+    Разбираются только простые формы одной командой: `cat > файл <<'EOF'` (и >>), `cp|mv [-fnvpi] файл цель`,
+    `rm`, `rmdir`, `mkdir`; остальное (sed -i, tee, цепочки, подстановки) — None: текст не разобрать, отказ."""
+    if MKDIR_ONLY.match(cmd):
+        return {p: None for p in paths}
+    try:
+        lex = G._Lexer(cmd)
+        lex.run()
+    except (G._ParseError, RecursionError, ValueError):
+        return None
+    toks = list(lex.toks)
+    while toks and toks[-1] == "\n":
+        toks.pop()
+    if lex.danger or any(isinstance(t, str) for t in toks):
+        return None
+    cmds = G.bash_analysis(cmd, cwd)[1]
+    if len(cmds) != 1 or any(x is None for x in cmds[0][1]):
+        return None
+    name, args = cmds[0]
+    words, redirs, k = [], [], 0
+    while k < len(toks):
+        t = toks[k]
+        if isinstance(t, G._Redir):
+            w = toks[k + 1] if k + 1 < len(toks) and isinstance(toks[k + 1], G._Word) else None
+            redirs.append((t, w))
+            k += 2 if w else 1
+        else:
+            words.append(t)
+            k += 1
+    if not words or words[0].bare() != name or len(words) != len(args) + 1:
+        return None  # обёртка (command cat, env) или слово, которого разбор не отдал
+    if name in ("rm", "rmdir") and not redirs:
+        return {p: None for p in paths}
+    if name in ("cp", "mv") and not redirs:
+        flags = [x for x in args if x.startswith("-")]
+        ops = [x for x in args if not x.startswith("-")]
+        if len(ops) != 2 or not all(re.fullmatch(r"-[fnvpi]+", x) for x in flags):
+            return None
+        src = G._expand(ops[0], cwd)
+        # _expand даёт realpath — ссылку смотрим по пути до раскрытия последнего звена
+        raw = os.path.join(cwd, os.path.expanduser(ops[0].replace("${HOME}", G.HOME).replace("$HOME", G.HOME)))
+        if name == "mv" and (os.path.islink(raw.rstrip("/")) or _nlink(raw.rstrip("/")) > 1):
+            return None  # ссылка (и жёсткая, ревью #347 Б4) переедет ссылкой: текст потом поменяют мимо проверки
+        text = _read_text(src) if os.path.isfile(src) else None
+        if text is None:
+            return None
+        # цель — папка (`mv a/argus.md .claude/agents/`): файл ляжет в неё под именем источника — его и судим
+        into = ops[1].endswith("/") or os.path.isdir(G._expand(ops[1], cwd))
+        base = os.path.basename(ops[0].rstrip("/"))
+        return {(os.path.join(p, base) if into else p): text for p in paths}
+    if name == "cat" and args in ([], ["-"]):
+        docs = [(r, w) for r, w in redirs if r.op in ("<<", "<<-")]
+        outs = [(r, w) for r, w in redirs if r.op in (">", ">|", ">!", ">>")]
+        if len(docs) != 1 or len(outs) != 1 or len(redirs) != 2 or len(paths) != 1 or docs[0][1] is None:
+            return None
+        body = docs[0][0].body or ""
+        if docs[0][1].bare() is not None and re.search(r"[$`\\]", body):
+            return None  # ограничитель без кавычек: оболочка раскроет $…, `…` и \ — текст другой
+        text = body + "\n"
+        if outs[0][0].op == ">>":
+            old = _read_text(paths[0])
+            if old is None:
+                return None
+            text = old + text
+        return {paths[0]: text}
+    return None
+
+
+def _nlink(p):
+    """Число жёстких ссылок файла (без перехода по ссылке); нет файла — 0."""
+    try:
+        return os.lstat(p).st_nlink
+    except OSError:
+        return 0
+
+
+def _pantheon_role(name):
+    """Имя (без регистра) — роль Пантеона: роль проекта с ним подменит её (ревью #347, Б3)."""
+    n = name.casefold()
+    return bool(n) and (G.is_pantheon_role(n) or n in PANTHEON_AGENTS
+                        or os.path.isfile(os.path.join(G.HOME, ROLES_DIR, n + ".md")))
+
+
+# Граница frontmatter — как у Claude Code (бинарь 2.1.318, ревью #347 круг 3, Б6/Б7): ведущий U+FEFF снимается
+# один раз в начале текста, затем `/^---\s*\n([\s\S]*?)---/` — закрытие на первом «---» в любом месте, и внутри
+# строки («name: argus---»). JS_WS — набор JS `\s` целиком, а не символ за символом.
+JS_WS = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+CC_FRONTMATTER = re.compile("---[" + JS_WS + "]*\n(.*?)---", re.DOTALL)
+
+
+def _fence(line, lead=True):
+    """Строка «---» (граница frontmatter в построчном разборе). Пробелы Unicode (str.strip) и U+FEFF после «---»
+    границу не отменяют. Отступ слева у закрывающей строки её границей не делает («  ---» — строка под ключом),
+    у открывающей снимается."""
+    s = line.replace("\ufeff", " ")
+    return (s.strip() if lead else s.rstrip()) == "---"
+
+
+def _frontmatters(text):
+    """Строки frontmatter, которые судим, — списком по разборам: разбор Claude Code (CC_FRONTMATTER) и построчный —
+    от первой непустой строки «---» до строки «---», без конца — весь текст. Отказ, если откажет любой: построчный
+    строже на отступах («  ---»), разбор CC — на границе внутри строки и пробелах Unicode. Текст CC режем на строки
+    дважды: splitlines и только LF/CR (как YAML)."""
+    out = []
+    m = CC_FRONTMATTER.match(text[1:] if text.startswith("\ufeff") else text)
+    if m:
+        out += [m.group(1).splitlines(), re.split(r"\r\n|\r|\n", m.group(1))]
+    lines = text.lstrip("\ufeff").splitlines()
+    i = next((n for n, x in enumerate(lines) if x.replace("\ufeff", " ").strip()), len(lines))
+    if i < len(lines) and _fence(lines[i]):
+        body = lines[i + 1:]
+        end = next((n for n, x in enumerate(body) if _fence(x, lead=False)), len(body))
+        out.append(body[:end])
+    return out
+
+
+def _text_risk(text, kinds, path=""):
+    """Что в тексте даёт права, запускает код или подменяет роль Пантеона; иначе None.
+    Динамическая команда (DYN_COMMAND) — в любом месте текста. Frontmatter — см. _frontmatters; каждая его строка —
+    по классу SAFE_KEYS (см. выше). У роли (agents) имя файла и name — не роль Пантеона."""
+    if DYN_COMMAND.search(text):
+        return "динамическая команда !`…` или блок ```! (их выполняют при загрузке навыка)"
+    agent = "agents" in kinds
+    stem = os.path.basename(path)
+    stem = stem[:-3] if stem.casefold().endswith(".md") else stem
+    if agent and _pantheon_role(stem):
+        return f"имя файла роли «{stem}» — роль Пантеона: роль проекта подменила бы её"
+    safe = set.intersection(*(SAFE_KEYS[k] for k in kinds))
+    for lines in _frontmatters(text):
+        why = _lines_risk(lines, safe, agent)
+        if why:
+            return why
+    return None
+
+
+def _lines_risk(lines, safe, agent):
+    """Строки одного frontmatter: что в них опасно или не из простых форм YAML; иначе None."""
+    top = None  # значение последнего ключа у левого края; None — ключа ещё не было
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            continue
+        shown = line.strip()[:60]
+        if line.startswith(" "):
+            if top is None or line.strip() in ("---", "..."):
+                return f"строка frontmatter «{shown}» с отступом не под ключом (форма YAML не из простых)"
+            if INDENT_KEY.match(line) and top != "" and top[:1] not in "|>":
+                return f"строка frontmatter «{shown}» с отступом похожа на ключ под простым значением"
+            continue
+        m = FM_LINE.fullmatch(line)
+        if not m:
+            return f"строка frontmatter «{shown}» — не «ключ: значение» (форма YAML не из простых)"
+        key, value = m.group(1), (m.group(2) or "").strip()
+        norm = re.sub(r"[-_]", "", key.lower())
+        if norm not in safe:
+            return f"во frontmatter ключ «{key}» не из разрешённых (права или запуск кода без вопроса)"
+        if value[:1] in VALUE_BAD_START:
+            return f"во frontmatter значение «{shown}» начинается с {value[:1]} (тег, якорь, алиас или вложение YAML)"
+        if agent and norm == "name":
+            m = ROLE_NAME.fullmatch(value)
+            if not m:
+                return f"во frontmatter name роли «{shown}» не разобрать — нужно простое имя"
+            if _pantheon_role(m.group(2)):
+                return f"name роли «{m.group(2)}» — роль Пантеона: роль проекта подменила бы её"
+        top = value
+    return None
+
+
+def own_text_problem(event, tool, tool_input, paths, own):
+    """Почему запись в навыки, команды и роли своего проекта нельзя: (путь, причина) или None."""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    if tool == "Bash":
+        texts = _bash_texts(tool_input.get("command") or "", cwd, paths)
+        if texts is None:
+            return paths[0], ("текст записи через Bash не разобрать — запиши файл через Write или Edit "
+                              "(или `cat > файл <<'EOF'`)")
+    else:
+        texts = {p: _edit_text(tool, tool_input, p) for p in paths}
+        bad = next((p for p in paths if texts[p] is None), None)
+        if bad:
+            return bad, "новый текст файла не вычислить (NotebookEdit или old_string не найден)"
+    for p, text in texts.items():
+        why = text is not None and _text_risk(text, _own_kinds(p, own) or OWN_ITEMS, p)
+        if why:
+            return p, why
+    return None
+
 
 def protected():
     """Защищённые пути (realpath) для текущего HOME."""
@@ -46,10 +335,12 @@ def protected():
             [os.path.realpath(os.path.join(home, x)) for x in HOME_ITEMS])
 
 
-def _settings_file(p, mkdir_only=False):
+def _settings_file(p, mkdir_only=False, own=()):
     """Настройки, которые меняют разрешения, хуки или запускают код в любом репозитории: .claude/settings*.json,
     .claude/agents/ (роли проекта), сама папка .claude (цель записи, чьё последнее звено — .claude), .mcp.json,
-    .git/hooks/… и .git/config. Внутри .claude остальное (worktrees/…) не защищено этим правилом."""
+    .git/hooks/… и .git/config. Внутри .claude остальное (worktrees/…) не защищено этим правилом.
+    own — папки своего направления (metis-0841, own_folders): в них .claude/skills, commands и agents проекта не
+    считаются защитой — их текст судит own_text_problem; .claude/hooks, settings и всё прочее — как без own."""
     key = G._key
     parent, base = os.path.split(p)
     # tar -x -C, unzip -d, wget -P дают цель «новый файл в папке» (ANY_FILE): смотрим саму папку
@@ -69,6 +360,9 @@ def _settings_file(p, mkdir_only=False):
     for i, x in enumerate(parts[:-1]):
         if x == ".claude" and (parts[i + 1] == "agents" or parts[i + 1] in PROJECT_ITEMS
                                and "/".join(parts[:i + 1]) != home_claude):
+            here = "/".join(parts[:i + 1])
+            if own and parts[i + 1] in OWN_ITEMS and here != home_claude and G._inside(here, own):
+                continue  # своё направление: навык, команда или роль проекта — дальше судит текст
             return True
     for i, x in enumerate(parts[:-1]):
         if x == ".git" and (parts[i + 1] == "hooks" or (parts[i + 1] == "config" and i + 2 == len(parts))):
@@ -87,6 +381,23 @@ TREE_COPY_FLAG = {"cp": "rRa", "gcp": "rRa", "scp": "r"}
 CLONE_OPT_ARG = {"-o", "--origin", "-b", "--branch", "-u", "--upload-pack", "--reference", "--reference-if-able",
                  "--separate-git-dir", "--depth", "--shallow-since", "--shallow-exclude", "-c", "--config",
                  "--server-option", "-j", "--jobs", "--template", "--filter", "--bundle-uri", "--ref-format"}
+
+
+# metis-0823: слова настроек репозитория в слове неразобранной цели (без подстановок) — отказ: <репо>/.claude как
+# цель и его settings, agents, hooks, skills, commands; .mcp.json; .git/hooks и .git/config. «.claude/worktrees/…» — нет
+PROTECTED_WORDS = re.compile(r"\.claude(?:/(?:settings|agents|hooks|skills|commands)|/?(?![\w./-]))|\.mcp\.json|"
+                             r"\.git/(?:hooks|config)", re.I)
+
+
+def _unres_risky(d):
+    """metis-0823 (Б2 ревью #330): неразобранное имя в папке d может стать защищённым файлом прямо в ней —
+    `.git/$(echo config)`, `./$(echo .mcp.json)`. Такая папка: .git или папка, где прямо лежат настройки репозитория
+    (.git, .claude, .mcp.json: корень репозитория, вложенный проект). Подпапки worktree (out/, src/), $TMPDIR и кэш
+    окна — нет. Папку, где прямо лежит путь из protected() (~/.claude, ~), unresolved_dirs уже не пускает: корни,
+    над зонами, он отбрасывает."""
+    if G._key(os.path.basename(d)) == ".git":
+        return True
+    return any(os.path.lexists(os.path.join(d, x)) for x in (".git", ".claude", ".mcp.json"))
 
 
 def _repo_or_above(t):
@@ -342,12 +653,26 @@ def check_protect_config(event, tool, tool_input):
     if not sub and G.privileged(G.load_policy(), "metis-pantheon", role, pdir):
         return None
     cwd, targets = G.write_targets(event, tool, tool_input)
-    if G.UNRESOLVED in targets:
-        return G.UNRESOLVED_REASON
+    # metis-0823: неразобранная цель проходит, только если её папка в $TMPDIR, кэше окна или своей worktree —
+    # и эту папку судят как обычную цель
+    dirs = G.unresolved_dirs(event, tool, tool_input, protected(), PROTECTED_WORDS) if G.UNRESOLVED in targets else []
+    if dirs is None:
+        return G.UNRESOLVED_REASON + G.UNRESOLVED_SAFE
+    if any(_unres_risky(d) for d in dirs):
+        return (G.UNRESOLVED_REASON + G.UNRESOLVED_SAFE + " Корень репозитория, .git и папка с защитами — тоже отказ: "
+                "имя из подстановки может оказаться .mcp.json или config. Пиши в подпапку (`out/$f`) или в $TMPDIR.")
+    targets = [p for p in targets if p != G.UNRESOLVED] + dirs
     prot = protected()
     mk = tool == "Bash" and bool(MKDIR_ONLY.match(tool_input.get("command") or ""))
     bad = [p for p in targets
            if G._inside(p, prot) or _settings_file(p, mk) or any(G._inside(x, [p]) for x in prot)]
+    # metis-0841: навыки, команды и роли проекта в папках своего направления — координатору и лиду, если текст
+    # не даёт прав и не запускает код (own_text_problem). Копии дерева, распаковка, git checkout и clone ниже судят
+    # без этого исключения: их текста не видно
+    own = own_folders(role, sub, pdir) if bad else []
+    opened = [p for p in bad if own and not G._inside(p, prot) and not any(G._inside(x, [p]) for x in prot)
+              and not _settings_file(p, mk, own)]
+    bad = [p for p in bad if p not in opened]
     if tool == "Bash":
         cmds = G.bash_analysis(tool_input.get("command") or "", cwd)[1]
         bad += [p for p in _tree_dests(cmds, cwd, targets) if _repo_or_above(p) and p not in bad]
@@ -358,6 +683,18 @@ def check_protect_config(event, tool, tool_input):
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
         bad += [p for p in _clone_dests(cmds, cwd) if p not in bad and (
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
+    if not bad and opened:
+        problem = own_text_problem(event, tool, tool_input, opened, own)
+        if problem:
+            return (f"Правило protect-config: роль «{role}» правит навыки, команды и роли своего проекта, но не то, что "
+                    f"даёт права, запускает код без вопроса или подменяет роль Пантеона: "
+                    f"{problem[0].replace(G.HOME, '~')} — {problem[1]}. Во frontmatter навыка и команды можно только "
+                    "name, description, argument-hint, when_to_use, disable-model-invocation, user-invocable, version, "
+                    "license, compatibility, metadata, у роли — name, description, model, color, effort, maxTurns, простыми строками «ключ: "
+                    "значение». Остальное (allowed-tools, hooks, tools, permissionMode…), строки !`…` и ```!, роль с "
+                    "именем роли Пантеона правит только metis-pantheon после «да» владельца — опиши правку файлом в "
+                    "~/ai/pantheon/directions/metis-pantheon/inbox/.")
+        return None
     if not bad:
         return None
     return (f"Правило protect-config: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не правит защиты "
