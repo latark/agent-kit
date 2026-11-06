@@ -17,11 +17,18 @@ CLAUDE_FILE_PATH=<путь файла> и тем же stdin. Код выхода
   --ok        как `… 2>/dev/null || true` исходной строки: stderr — в никуда, выход 0
   --cmd-prefix=<начало>  только Bash, чья tool_input.command начинается с <начало>: matcher `Bash(git commit *)`
               исходных настроек — не формат matcher хука, там он срабатывал бы на каждую команду Bash
+  --plain=<папка>[,<папка>…]  папки репозитория, которые хук читает целиком (grep -r, find): если на их звеньях или
+              внутри есть ссылка — хук не запускается, выход 2 с причиной (pre-commit-check.sh)
 
 Цель вне репозитория без --always — выход 0 молча. Нет папки репозитория или команды — выход 0 со строкой в stderr:
 хук пакета не должен ронять инструменты окна. Путь к репозиторию ниже $HOME, его .claude или .claude/hooks — ссылка
 (окно подменило папку, metis-0933) — выход 2 с причиной в stderr: хук из чужой папки не запускается, инструмент
-блокируется. Python 3.9+ (системный python3 macOS)."""
+блокируется.
+
+Хук идёт вне песочницы, а окно пишет папки репозитория и может подложить ссылку на чужую папку или файл (класс 2,
+ревью argus C1 и C2 PR #360). Поэтому: цель — по realpath внутри репозитория; хук, который пишет или читает файлы по
+своим путям, — repo_hooks.py (openat без ссылок), а не скрипт оболочки; папки, которые читает целиком, — --plain.
+Python 3.9+ (системный python3 macOS)."""
 import json
 import os
 import subprocess
@@ -38,6 +45,21 @@ def linked(p):
         cur = os.path.join(cur, part)
         if os.path.islink(cur):
             out.append(cur)
+    return out
+
+
+def links_under(repo, rel):
+    """Ссылки на звеньях repo/rel и внутри этой папки (по ссылкам не ходит); нет папки — пусто."""
+    cur = repo
+    for part in [x for x in rel.split("/") if x]:
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur) or part == "..":
+            return [cur]
+        if not os.path.lexists(cur):
+            return []
+    out = []
+    for dp, dns, fns in os.walk(cur, followlinks=False):
+        out += [os.path.join(dp, n) for n in dns + fns if os.path.islink(os.path.join(dp, n))]
     return out
 
 
@@ -74,6 +96,12 @@ def main(argv):
         command = ti.get("command") if isinstance(ti.get("command"), str) else ""
         if not (command.strip() + " ").startswith(prefix.strip() + " "):
             return 0
+    plain = [x for f in flags if f.startswith("--plain=") for x in f.split("=", 1)[1].split(",") if x]
+    bad = [x for rel in plain for x in links_under(repo, rel)]
+    if bad:
+        print(f"in_repo.py: в {repo} ссылка ({', '.join(bad[:5])}) — хук читает эти папки вне песочницы, "
+              "не запускаю; убери ссылку", file=sys.stderr)
+        return 2
     env = dict(os.environ, CLAUDE_PROJECT_DIR=repo, CLAUDE_FILE_PATH=where if target else "")
     if "--file-arg" in flags:
         cmd = cmd + [where if target else ""]

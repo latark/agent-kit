@@ -9,7 +9,9 @@
   настоящему пути — вне allowWrite окна или под denyWrite; python3 — только с -I; кэш npx — вне allowWrite; npx —
   только через env_from.py: поддельные node_modules/<пакет>, .npmrc (script-shell, logs-dir) и NODE_OPTIONS в папке
   запуска не исполняются (cwd «/», npm_config_* сброшены); in_repo.py не запускает хук, если репозиторий, звено пути,
-  .claude или .claude/hooks — ссылка; .env через ссылку env_from.py не читает;
+  .claude или .claude/hooks — ссылка; .env через ссылку env_from.py не читает; хуки пакета proteus-morph на образцах
+  tests/fixtures/morph-hooks не пишут и не читают чужое по ссылке в середине пути цели (app/app, app/api, src/shared,
+  app/lnk.py): repo_hooks.py вместо check-reexport.sh и check-env-sync.sh, --plain у pre-commit;
 - класс 3 — чтение вне песочницы: AGENTS.md — ссылка на личный файл, CLAUDE.md и .claude/settings.json — FIFO,
   AGENTS.md на 100 МБ: запуск и pantheon check не виснут, чужое не попадает в AGENTS.md окна; window_dirs и _read_in
   не идут по ссылке — папка из domains.json, звено в середине пути, ссылка на месте .claude;
@@ -332,16 +334,172 @@ def class2_links(tmp):
         check(f"класс 2: in_repo.py — {name}: хук не исполнен, выход 2", rc == 2 and not ran, (rc, ran, err))
     rc, ran, err = hook(os.path.join(proj, "real"))
     check("класс 2: самопроверка — in_repo.py в обычной папке исполняет хук", rc == 0 and ran, (rc, ran, err))
-    put(os.path.join(foreign, ".env.local"), "TOKEN=FOREIGN\n")
-    put(os.path.join(proj, "real", ".env.local"), "TOKEN=OWN\n")
+    # имя не .env*: песочница планового прохода закрывает запись файлов .env* (outside 2a8c58, EPERM) — env_from.py
+    # имя файла не важно, проверяется путь
+    put(os.path.join(foreign, "dotenv.local"), "TOKEN=FOREIGN\n")
+    put(os.path.join(proj, "real", "dotenv.local"), "TOKEN=OWN\n")
     probe = "import os; print(os.environ.get('TOKEN'))"
-    for name, f, want in (("через ссылку папки — не прочитан, выход 1", os.path.join(proj, "app", ".env.local"), None),
-                          ("обычный — имя передано", os.path.join(proj, "real", ".env.local"), "OWN")):
+    for name, f, want in (("через ссылку папки — не прочитан, выход 1", os.path.join(proj, "app", "dotenv.local"), None),
+                          ("обычный — имя передано", os.path.join(proj, "real", "dotenv.local"), "OWN")):
         r = subprocess.run([sys.executable, "-I", ENV_FROM, f, "TOKEN", "--", sys.executable, "-I", "-c", probe],
                            env=env, capture_output=True, text=True, timeout=30)
         got = r.stdout.strip() if r.returncode == 0 else None
         check(f"класс 2: env_from.py — .env {name}", got == want and (want or r.returncode == 1), (r.returncode, got,
                                                                                                     r.stderr))
+
+
+FIXT = os.path.join(PLUGIN, "tests", "fixtures", "morph-hooks")
+REPO_HOOKS = os.path.join(PACKS, "_bin", "repo_hooks.py")
+MARK = "FOREIGN-SECRET-7731"
+
+
+def tree(p):
+    """Снимок папки без перехода по ссылкам: путь → содержимое файла, цель ссылки или «папка»."""
+    out = {}
+    for dp, dns, fns in os.walk(p):
+        for n in dns + fns:
+            f = os.path.join(dp, n)
+            out[os.path.relpath(f, p)] = ("link", os.readlink(f)) if os.path.islink(f) else (
+                ("dir",) if os.path.isdir(f) else ("file", open(f, "rb").read()))
+    return out
+
+
+def morph(home, link_at):
+    """Временный MorphStream с образцами хуков (tests/fixtures/morph-hooks) и чужая папка с MARK. link_at — где окно
+    подложило ссылку: «app» (app/app → чужая папка, проба C1/C2), «app/api» (звено глубже) или None (без ссылок)."""
+    ms = os.path.join(home, "projects", "MorphStream")
+    app, gpu, foreign = os.path.join(ms, "app"), os.path.join(ms, "gpu-worker"), os.path.join(home, "foreign")
+    for d, sub in ((app, "app"), (gpu, "gpu-worker")):
+        shutil.copytree(os.path.join(FIXT, sub), os.path.join(d, ".claude", "hooks"))
+    put(os.path.join(app, "src/app/api/x/route.ts"), "export async function GET() {}\nexport function POST() {}\n")
+    put(os.path.join(app, "src/app/api/new/route.ts"), "export function GET() {}\n")
+    put(os.path.join(foreign, "api/x/route.ts"), f"{MARK} ДАННЫЕ ДРУГОГО ПРОЕКТА\n")
+    put(os.path.join(foreign, "x/route.ts"), f"{MARK} ДАННЫЕ ДРУГОГО ПРОЕКТА\n")
+    for d in ("api/new", "new"):  # re-export «new» по ссылке есть: прежний pre-commit доходит до grep src/shared/
+        put(os.path.join(foreign, d, "route.ts"), "export { GET } from '@/app/api/new/route'\n")
+    put(os.path.join(foreign, "lib/s.ts"), f"import a from '@/features/{MARK}'\n")
+    put(os.path.join(foreign, "cuda.py"), "import onnxruntime\nonnxruntime.get_available_providers()\n")
+    os.makedirs(os.path.join(gpu, "app"))
+    if link_at:
+        if link_at == "app/api":
+            os.makedirs(os.path.join(app, "app"))
+        os.symlink(foreign, os.path.join(app, link_at))
+        os.symlink(os.path.join(foreign, "lib"), os.path.join(app, "src/shared"))
+        os.symlink(os.path.join(foreign, "cuda.py"), os.path.join(gpu, "app", "lnk.py"))
+    else:
+        put(os.path.join(app, "app/api/x/route.ts"), "export { GET } from '@/app/api/x/route'\n")
+        os.makedirs(os.path.join(app, "src/shared"))
+    return app, gpu, foreign
+
+
+def run_pack_hooks(home, app, gpu, plugin_root, hooks=None):
+    """Каждый хук-команда пакета на правку route.ts (есть и новый), git commit в app и в gpu-worker: [(команда, вход,
+    код, вывод)]. hooks — подмена hooks.json (мутант), по умолчанию — из plugin_root."""
+    hooks = hooks or json.load(open(os.path.join(plugin_root, "hooks", "hooks.json")))["hooks"]
+    inputs = [{"tool_name": "Edit", "tool_input": {"file_path": os.path.join(app, "src/app/api/x/route.ts")}, "cwd": app},
+              {"tool_name": "Write", "tool_input": {"file_path": os.path.join(app, "src/app/api/new/route.ts")},
+               "cwd": app},
+              {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": app},
+              {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": gpu}]
+    env = {"PATH": os.environ["PATH"], "HOME": home, "CLAUDE_PLUGIN_ROOT": plugin_root}
+    out = []
+    for groups in hooks.values():
+        for g in groups:
+            for h in g["hooks"]:
+                if h.get("type") != "command":
+                    continue
+                for inp in inputs:
+                    if g.get("matcher") and not re.fullmatch(g["matcher"], inp["tool_name"]):
+                        continue
+                    r = subprocess.run(["/bin/sh", "-c", h["command"]], input=json.dumps(inp), env=env, cwd=home,
+                                       capture_output=True, text=True, timeout=60)
+                    out.append((h["command"][-70:], inp["tool_name"], r.returncode, r.stdout + r.stderr))
+    return out
+
+
+def class2_pack_hooks(tmp):
+    """Хуки пакета proteus-morph идут вне песочницы и не пишут и не читают вне репозитория по ссылке, которую подложило
+    окно (ревью argus C1 и C2 PR #360): app/app или app/api → чужая папка, src/shared → чужая папка, app/lnk.py
+    gpu-worker → чужой файл. Чужая папка не меняется, её содержимое не попадает в вывод, git commit с такой ссылкой
+    не проверяется (выход 2). Самопроверки: прежние строки (bash check-reexport.sh, pre-commit без --plain) по тем
+    же ссылкам пишут и читают чужое; без ссылок замена делает то же, что check-reexport.sh."""
+    root = os.path.join(PACKS, "proteus-morph")
+    for link_at in ("app", "app/api"):
+        home = os.path.join(tmp, "packhooks-" + link_at.replace("/", "-"))
+        app, gpu, foreign = morph(home, link_at)
+        before = tree(foreign)
+        res = run_pack_hooks(home, app, gpu, root)
+        check(f"класс 2: хуки пакета (ссылка {link_at}) — запущены на правках и git commit", len(res) >= 8, res)
+        check(f"класс 2: хуки пакета (ссылка {link_at} → чужая папка) — чужая папка не изменена, файлы не созданы",
+              tree(foreign) == before, sorted(set(tree(foreign).items()) ^ set(before.items()))[:5])
+        leak = [(c, t, rc, o) for c, t, rc, o in res if MARK in o or "❌" in o]
+        check(f"класс 2: хуки пакета (ссылка {link_at}) — содержимое чужих файлов не попало в вывод", not leak, leak)
+        commit = [(c, rc) for c, t, rc, o in res if t == "Bash" and "pre-commit-check.sh" in c and rc != 0]
+        check(f"класс 2: хуки пакета (ссылка {link_at}) — git commit со ссылкой в src/ или app/ — выход 2 обоих "
+              "pre-commit", len(commit) == 2 and all(rc == 2 for _, rc in commit), res)
+    # самопроверки: те же ссылки, прежние строки пакета (до metis-0933 круга D) — чужое пишется и читается
+    home = os.path.join(tmp, "packhooks-old")
+    app, gpu, foreign = morph(home, "app")
+    before = tree(foreign)
+    old = json.load(open(os.path.join(root, "hooks", "hooks.json")))["hooks"]
+    old = copy.deepcopy(old)
+    for g in old["PreToolUse"] + old["PostToolUse"]:
+        for h in g["hooks"]:
+            c = h.get("command", "")
+            c = re.sub(r'python3 -I "\$\{CLAUDE_PLUGIN_ROOT\}/../_bin/repo_hooks.py" reexport',
+                       "bash .claude/hooks/check-reexport.sh", c)
+            h["command"] = re.sub(r" --plain=\S+", "", c)
+    res = run_pack_hooks(home, app, gpu, root, old)
+    check("класс 2: самопроверка — прежний check-reexport.sh по ссылке app/app пишет в чужую папку (проба C1/C2)",
+          tree(foreign) != before, res)
+    check("класс 2: самопроверка — прежний pre-commit без --plain читает чужое по ссылке src/shared и app/lnk.py",
+          any(MARK in o for _, _, _, o in res) and any("❌ app/lnk.py" in o for _, _, _, o in res), res)
+    # без ссылок замена делает то же, что check-reexport.sh: новый re-export создан, устаревший обновлён
+    home = os.path.join(tmp, "packhooks-plain")
+    app, gpu, foreign = morph(home, None)
+    res = run_pack_hooks(home, app, gpu, root)
+    got = {f: open(os.path.join(app, "app/api", f, "route.ts")).read() if os.path.isfile(
+        os.path.join(app, "app/api", f, "route.ts")) else None for f in ("x", "new")}
+    check("класс 2: без ссылок repo_hooks.py reexport создаёт и обновляет re-export, как check-reexport.sh",
+          got == {"x": "export { GET,POST } from '@/app/api/x/route'\n", "new": "export { GET } from '@/app/api/new/route'\n"}
+          and not [rc for c, t, rc, o in res if rc == 2], (got, res))
+    # env-sync: имена не .env* (песочница прохода, п. 5) — те же три роли файлов аргументами
+    names = ["sync.example", "sync.local", "sync.production"]
+    for n in names[:2]:
+        put(os.path.join(app, n), "# ключи\nA=1\nB=2\n")
+    env = {"PATH": os.environ["PATH"], "HOME": home, "CLAUDE_PROJECT_DIR": app}
+
+    def sync(*ns):
+        r = subprocess.run([sys.executable, "-I", REPO_HOOKS, "env-sync", os.path.join(app, "sync.local"), *ns],
+                           env=env, cwd=app, capture_output=True, text=True, timeout=30)
+        return r.returncode, r.stdout + r.stderr
+
+    put(os.path.join(foreign, "prod"), f"# ключи\nA=1\n{MARK} строка чужого файла\n")
+    os.symlink(os.path.join(foreign, "prod"), os.path.join(app, "sync.production"))
+    os.symlink(foreign, os.path.join(app, "cfg"))
+    for name, ns in (("файл — ссылка на чужой файл", names), ("ссылка в середине пути", names[:2] + ["cfg/prod"])):
+        rc, o = sync(*ns)
+        check(f"класс 2: repo_hooks.py env-sync — {name}: чужое не прочитано, проверка пропущена",
+              rc == 0 and MARK not in o and "не прочитан" in o, (rc, o))
+    # запись по ссылке-файлу: окно подменило файл между чтением и записью (гонка) — write_in и сам не идёт по ссылке
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("repo_hooks", REPO_HOOKS)
+    rh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rh)
+    put(os.path.join(foreign, "victim"), f"{MARK}\n")
+    os.symlink(os.path.join(foreign, "victim"), os.path.join(app, "app/api/x/lnk.ts"))
+    before = tree(foreign)
+    try:
+        rh.write_in(app, "app/api/x/lnk.ts", "export {}\n")
+        refused = False
+    except OSError:
+        refused = True
+    check("класс 2: repo_hooks.write_in — последнее звено ссылка на чужой файл: отказ, файл не тронут",
+          refused and tree(foreign) == before, refused)
+    put(os.path.join(app, "own.production"), "# ключи\nA=1\nEXTRA-OWN-LINE\n")
+    rc, o = sync(*names[:2], "own.production")
+    check("класс 2: самопроверка — env-sync по своему файлу выводит расхождение структуры", rc == 0
+          and "EXTRA-OWN-LINE" in o and "рассинхронизирована" in o, (rc, o))
 
 
 # --- класс 3: чтение вне песочницы ---
@@ -463,6 +621,7 @@ def main():
     class4(P, tmp, env)
     class2_npx(tmp)
     class2_links(tmp)
+    class2_pack_hooks(os.path.join(ROOT, "h2"))
     class3_links(P, tmp)
     tmp3 = os.path.join(ROOT, "h3")
     os.makedirs(tmp3)
