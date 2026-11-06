@@ -20,8 +20,15 @@ import atexit as _atexit
 import os as _os
 import shutil as _shutil
 # «tmp»: окно штаба закрывает в /tmp/claude-<uid> имена без этой приставки (папки чужих сессий), и allowRead штаба
-# для проектов внутри такой папки не выдаётся (metis-0771, проверка ниже)
+# для проектов внутри такой папки не выдаётся (metis-0771, проверка ниже). run-tests даёт TMPDIR вида
+# /tmp/claude-<uid>/run-tests-…/…: первое имя без приставки — тогда корень прямо в /tmp/claude-<uid>
 _ROOT = mkroot("tmp-tick-root-")
+for _base in ("/tmp/claude-%d" % _os.getuid(), "/private/tmp/claude-%d" % _os.getuid()):
+    _rel = _os.path.relpath(_ROOT, _base)
+    if not _rel.startswith("..") and not _rel.split(_os.sep)[0].startswith("tmp"):
+        _shutil.rmtree(_ROOT, True)
+        _ROOT = tempfile.mkdtemp(prefix="tmp-tick-root-", dir=_base)
+        break
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
