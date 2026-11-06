@@ -325,7 +325,7 @@ def main():
     # metis-0905: +~430 — merge.part (промежуточное уведомление субагента — не отчёт; outside test для записи — в фоне)
     # и persist.part (своя фоновая команда — ждать уведомления о конце)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 32450 and len(raw_texts["hephaestus-demo.md"]) <= 26450)  # metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 32600 and len(raw_texts["hephaestus-demo.md"]) <= 26600)  # metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
