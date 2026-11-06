@@ -33,12 +33,15 @@ os.environ["HOME"] = root
 try:
     for d in ("projects/legal-watch/.claude/worktrees/a", "projects/expert-corpus/.claude/worktrees/themis-0020",
               "projects/expert-corpus/src", "projects/brokerAssistantApp/.claude/worktrees/x",
-              "projects/stray/.claude/worktrees/y", ".local/state/pantheon", "links"):
+              "projects/stray/.claude/worktrees/y", ".local/state/pantheon", "links",
+              "projects/legal-watch/data/.claude/worktrees/z", "projects/brokerAssistantApp/fin/.claude/worktrees/q"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
     os.symlink(os.path.join(root, "projects/brokerAssistantApp"), os.path.join(root, "links/ba"))
     with open(os.path.join(root, ".local/state/pantheon/domains.json"), "w") as fh:
-        json.dump({"domains": {"themis-sources": ["~/projects/legal-watch", "~/projects/expert-corpus"],
-                               "athena-brokerassistant": ["~/projects/brokerAssistantApp"]}}, fh)
+        json.dump({"domains": {"themis-sources": ["~/projects/legal-watch", "~/projects/expert-corpus",
+                                                  "~/projects/legal-watch/data"],
+                               "athena-brokerassistant": ["~/projects/brokerAssistantApp"],
+                               "plutus-finance": ["~/projects/brokerAssistantApp/fin"]}}, fh)
     spec = importlib.util.spec_from_file_location("guard_under_test", RULES)
     g = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(g)
@@ -82,6 +85,11 @@ try:
     check("4 ссылка в чужой репозиторий — отказ (realpath)", bool(r) and "athena-brokerassistant" in r, r)
     r = run({"path": "~/projects/brokerAssistantApp/.claude/worktrees/x"}, cwd=LW)
     check("4 путь с ~ — отказ чужого направления", bool(r) and "athena-brokerassistant" in r, r)
+    r = run({"path": LW + "/data/.claude/worktrees/z"}, cwd=LW + "/data")
+    check("1 вложенная своя папка — берётся самая глубокая, пропуск", r is None, r)
+    r = run({"path": BA + "/fin/.claude/worktrees/q"}, cwd=LW)
+    check("4 вложенная чужая папка — называет самое глубокое направление",
+          bool(r) and "pantheon start plutus-finance" in r and "athena-brokerassistant" not in r, r)
     r = run({"path": os.path.join(root, "projects/stray/.claude/worktrees/y")}, cwd=LW)
     check("5 вне папок направлений — отказ", bool(r) and "worktree-own" in r and "themis-sources" in r, r)
     r = run({"name": "themis-0021"}, cwd=LW)
@@ -92,7 +100,8 @@ try:
     check("7 вне окна (нет PANTHEON_WINDOW) — молчит", r is None, r)
     r = run({"path": BA + "/.claude/worktrees/x"}, win="workshop")
     check("7 окно не из domains.json (мастерская) — молчит", r is None, r)
-    r = g.check_worktree_own({"cwd": LW}, "Bash", {"path": BA})
+    os.environ["PANTHEON_WINDOW"] = "themis-sources"
+    r = g.check_worktree_own({"cwd": LW}, "Bash", {"path": BA + "/.claude/worktrees/x"})
     check("8 другой инструмент — молчит", r is None, r)
     os.environ["PANTHEON_WINDOW"] = "themis-sources"
     r = g.check_window({"cwd": LW}, "EnterWorktree", {"path": BA + "/.claude/worktrees/x"})

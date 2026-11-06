@@ -4769,7 +4769,7 @@ def check_worktree_own(event, tool, tool_input):
     own = _deepest(target, _norm([x for x in doms[win] if isinstance(x, str)]))
     if own is not None:
         rel = _rel(target, own)
-        if not (rel.startswith(WORKTREES_DIR) and len(rel) > len(WORKTREES_DIR)):
+        if not rel.startswith(WORKTREES_DIR):  # realpath без «/» в конце: сама папка worktrees сюда не проходит
             return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/ репозитория "
                     f"(metis-0911). Worktree окна — только `{own}/{WORKTREES_DIR}<имя>`: `cd {own}` отдельной командой "
                     "Bash, затем EnterWorktree с name, или `git worktree add .claude/worktrees/<имя>` и EnterWorktree "
@@ -4779,7 +4779,8 @@ def check_worktree_own(event, tool, tool_input):
         return (f"Правило worktree-own: сессия стоит в {cwd}, а {target} — worktree другого репозитория твоего "
                 f"направления; так Claude Code спросил бы владельца (metis-0911). Сначала `cd {own}` отдельной командой "
                 "Bash (папки направления — рабочие папки окна, cd сохраняется), затем тот же EnterWorktree.")
-    other = [(f, n) for n, fs in doms.items() if n != win and isinstance(fs, list)
+    # своих папок над target нет (own is None) — совпасть могут только чужие
+    other = [(f, n) for n, fs in doms.items() if isinstance(fs, list)
              for f in _norm([x for x in fs if isinstance(x, str)]) if _inside(target, [f])]
     if other:
         name = max(other, key=lambda x: len(x[0]))[1]
