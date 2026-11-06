@@ -78,7 +78,9 @@ def main():
     put(os.path.join(pack, "mcp.json"), {"mcpServers": {}})
     put(os.path.join(pack, "window.json"), {
         "allow": ["Bash(uv sync *)", "Bash(gh pr merge *)"], "ask": ["Bash(codesign *)"],
-        "deny": ["Bash(docker rm *)"], "plugins": ["p@m", "bad id"], "env": {"PACK_ENV": "1"},
+        "deny": ["Bash(docker rm *)"], "plugins": ["pyright-lsp@claude-plugins-official", "p@m", "bad id",
+                                                   "notion@anthropic-plugin-directory"],
+        "env": {"HF_HUB_DISABLE_TELEMETRY": "1", "PACK_ENV": "1", "GUARD_OFF": "1"},
         "sandbox": {"denyRead": ["~/Library/Mail"], "deniedDomains": ["mail.example"], "excludedCommands": ["mk *"]},
         "strange": 1, "seen": {}})
     bindir = os.path.join(tmp, "bin")
@@ -113,8 +115,9 @@ def main():
     check("AGENTS.md папки запуска с @AGENTS.md в CLAUDE.md не дублируется", "LAUNCH-RULES" not in text, text)
     check("файл AGENTS.md окна — в settings/run, не в репозитории",
           files and files[0] == os.path.join(state, "settings", "run", "proteus-ms.agents.md"), files)
-    check("--plugin-dir и --mcp-config пакета", after(argv, "--plugin-dir") == [pack]
-          and after(argv, "--mcp-config") == [os.path.join(pack, "mcp.json")], argv)
+    check("--plugin-dir пакета, --mcp-config — его mcp.json, собранный ядром в settings/run",
+          after(argv, "--plugin-dir") == [pack]
+          and after(argv, "--mcp-config") == [os.path.join(state, "settings", "run", "proteus-ms.mcp.json")], argv)
     s = argv.index("--settings") if "--settings" in argv else -1
     check("флаги схемы А — до --settings, текст поручения последним",
           s > max(i for i, a in enumerate(argv) if a in ("--add-dir", "--plugin-dir", "--mcp-config"))
@@ -143,16 +146,22 @@ def main():
           and "Bash(docker rm *)" in perms.get("deny", []), perms)
     check("window.json: allow пакета не влит совсем — permissions.allow окна пуст (metis-0137), окно собрано",
           not perms.get("allow"), perms.get("allow"))
-    check("window.json: plugins, env, sandbox влиты; кривой id плагина — нет",
-          (win.get("enabledPlugins") or {}).get("p@m") is True and "bad id" not in (win.get("enabledPlugins") or {})
-          and win["env"].get("PACK_ENV") == "1"
+    ep = win.get("enabledPlugins") or {}
+    check("window.json: сужающее влито — плагин карты окна, env из белого списка, denyRead, deniedDomains",
+          ep.get("pyright-lsp@claude-plugins-official") is True and win["env"].get("HF_HUB_DISABLE_TELEMETRY") == "1"
           and "~/Library/Mail" in win["sandbox"]["filesystem"]["denyRead"]
-          and "mail.example" in win["sandbox"]["network"].get("deniedDomains", [])
-          and "mk *" in win["sandbox"]["excludedCommands"], (win.get("enabledPlugins"), win["sandbox"]))
+          and "mail.example" in win["sandbox"]["network"].get("deniedDomains", []), (ep, win["env"], win["sandbox"]))
+    # класс 1 модели угроз metis-0933: прежде здесь требовалось, чтобы «mk *» влилось, — тест закреплял дыру
+    check("window.json: excludedCommands, env вне белого списка, плагин вне карты окна и кривой id — не влиты",
+          "mk *" not in win["sandbox"]["excludedCommands"] and "PACK_ENV" not in win["env"]
+          and "GUARD_OFF" not in win["env"] and ep.get("p@m") is None and "bad id" not in ep
+          and ep.get("notion@anthropic-plugin-directory") is not True, (ep, win["env"], win["sandbox"]))
     alerts = open(os.path.join(home, "alerts.md"), encoding="utf-8").read() \
         if os.path.isfile(os.path.join(home, "alerts.md")) else ""
     check("отброшенное из window.json названо тревогой", "packs/proteus-ms/window.json" in alerts
-          and "gh pr merge" in alerts and "strange" in alerts, alerts[-800:])
+          and "gh pr merge" in alerts and "strange" in alerts and "sandbox.excludedCommands" in alerts
+          and "env.GUARD_OFF" in alerts,
+          alerts[-800:])
     solo = json.load(open(os.path.join(state, "settings", "athena-solo.json")))
     check("окно без пакета: deny EnterWorktree тоже есть, allow пакета — нет",
           "EnterWorktree" in solo["permissions"]["deny"] and "Bash(uv sync *)" not in solo["permissions"].get("allow", []),
@@ -241,7 +250,7 @@ def shipped_packs(tmp):
         if w:  # seen — опись для check, в ней имена убранного; в окно она не идёт
             texts[f"{n}/window.json"] = json.dumps({k: v for k, v in w.items() if k != "seen"}, ensure_ascii=False)
         data = {}
-        bad = P.window_extra_apply(data, w)
+        bad = P.window_extra_apply(data, w, P.window_plugins_allowed(P.plugin_map_load(alert=False), n))
         cmds = [h.get("command", "") for evs in (js.get(f"{n}/hooks/hooks.json") or {}).get("hooks", {}).values()
                 for g in evs for h in g["hooks"] if h.get("type") == "command"]
         check(f"пакет {n}: plugin.json pack-{n}, window.json вливается целиком", man.get("name") == f"pack-{n}"
@@ -252,8 +261,9 @@ def shipped_packs(tmp):
         check(f"пакет {n}: нет bypassPermissions, defaultMode, токенов и путей /Users/",
               not [(k, x) for k, v in texts.items() for x in FORBIDDEN_TEXT if x in v],
               [(k, x) for k, v in texts.items() for x in FORBIDDEN_TEXT if x in v])
-        check(f"пакет {n}: хуки с относительным путём — только через in_repo.py пакета",
-              cmds and all("_bin/in_repo.py" in c or c.startswith("python3 \"$HOME/") for c in cmds), cmds)
+        check(f"пакет {n}: хуки — через in_repo.py пакета или скрипт .claude/hooks, python3 — только с -I",
+              cmds and all(c.startswith("python3 -I ") and ("_bin/in_repo.py" in c or "/.claude/hooks/" in c)
+                           for c in cmds), cmds)
     mcp = js_of(root, "proteus-morph/mcp.json").get("mcpServers", {})
     hooks = js_of(root, "proteus-morph/hooks/hooks.json")["hooks"]["PreToolUse"]
     check("пакет proteus-morph: supabase — только вместе с protect-db.sh на его инструментах",

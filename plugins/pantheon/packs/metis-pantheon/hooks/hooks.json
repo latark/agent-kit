@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/projects/other/mailkeeper/.claude/hooks/guard_bash.py\"",
+            "command": "python3 -I \"$HOME/projects/other/mailkeeper/.claude/hooks/guard_bash.py\"",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -17,21 +17,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/projects/other/mailkeeper/.claude/hooks/guard_read.py\"",
+            "command": "python3 -I \"$HOME/projects/other/mailkeeper/.claude/hooks/guard_read.py\"",
             "timeout": 10,
             "onFailure": "block"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "timeout": 60,
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/other/mailkeeper\" -- bash .claude/hooks/after_edit.sh"
           }
         ]
       }

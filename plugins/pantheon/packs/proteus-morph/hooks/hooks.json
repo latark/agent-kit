@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --always -- bash .claude/hooks/protect-db.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --always -- bash .claude/hooks/protect-db.sh"
           }
         ]
       },
@@ -15,11 +15,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" \"--cmd-prefix=git commit\" -- bash .claude/hooks/pre-commit-check.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" \"--cmd-prefix=git commit\" -- bash .claude/hooks/pre-commit-check.sh"
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/gpu-worker\" \"--cmd-prefix=git commit\" -- bash .claude/hooks/pre-commit-check.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/gpu-worker\" \"--cmd-prefix=git commit\" -- bash .claude/hooks/pre-commit-check.sh"
           }
         ]
       }
@@ -30,19 +30,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --file-arg --ok -- bash .claude/hooks/check-reexport.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --file-arg --ok -- bash .claude/hooks/check-reexport.sh"
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --file-arg --ok -- bash .claude/hooks/check-fsd.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --file-arg --ok -- bash .claude/hooks/check-fsd.sh"
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" -- bash .claude/hooks/check-env-sync.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" -- bash .claude/hooks/check-env-sync.sh"
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/gpu-worker\" -- bash .claude/hooks/check-cuda-safety.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/gpu-worker\" -- bash .claude/hooks/check-cuda-safety.sh"
           }
         ]
       }

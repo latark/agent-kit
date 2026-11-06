@@ -3,14 +3,24 @@
     "chrome-devtools": {
       "command": "npx",
       "args": [
-        "chrome-devtools-mcp@latest"
-      ]
+        "-y",
+        "chrome-devtools-mcp@1.10.1"
+      ],
+      "env": {
+        "npm_config_cache": "${HOME}/.npm"
+      }
     },
     "grafana": {
-      "command": "bash",
+      "command": "python3",
       "args": [
-        "-c",
-        "cd \"${HOME}/projects/MorphStream/app\" && exec bash ./scripts/start-grafana-mcp.sh"
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "${HOME}/projects/MorphStream/app/.env.local",
+        "GRAFANA_URL,GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "--",
+        "${HOME}/.local/bin/mcp-grafana",
+        "-t",
+        "stdio"
       ]
     },
     "next-devtools": {
@@ -20,22 +30,36 @@
         "next-devtools-mcp@0.4.0"
       ],
       "env": {
-        "NEXT_TELEMETRY_DISABLED": "1"
+        "NEXT_TELEMETRY_DISABLED": "1",
+        "npm_config_cache": "${HOME}/.npm"
       }
     },
     "shadcn": {
       "command": "npx",
       "args": [
+        "-y",
         "shadcn@4.8.2",
         "mcp"
-      ]
+      ],
+      "env": {
+        "npm_config_cache": "${HOME}/.npm"
+      }
     },
     "upstash": {
-      "command": "bash",
+      "command": "python3",
       "args": [
-        "-c",
-        "cd \"${HOME}/projects/MorphStream/app\" && exec bash ./scripts/start-upstash-mcp.sh"
-      ]
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "${HOME}/projects/MorphStream/app/.env.local",
+        "UPSTASH_EMAIL,UPSTASH_API_KEY",
+        "--",
+        "npx",
+        "-y",
+        "@upstash/mcp-server@0.3.0"
+      ],
+      "env": {
+        "npm_config_cache": "${HOME}/.npm"
+      }
     },
     "vast-ai": {
       "type": "http",

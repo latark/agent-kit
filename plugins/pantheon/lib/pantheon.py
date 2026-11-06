@@ -2731,6 +2731,9 @@ def agents_window(data, allowed, deny, script):
     return data
 
 
+EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
+
+
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
                   own_agents=False):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
@@ -2741,9 +2744,12 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     # folders песочница .claude/agents не закрывает, их текст судит guard protect-config (ключи tools, hooks и т. п.)
     # папка демона хуков (HOOKD_DIR, metis-0845) — каждому окну: allowWrite выше неё (sandbox_write ~/.cache) её не
     # откроет, запрет сильнее разрешения (проверка F7 — hookd-check.py windows)
+    # .claude/hooks — в каждой папке и вглубь (metis-0933, класс 2 модели угроз): скрипты оттуда хуки окна и пакета
+    # направления (packs/) запускают вне песочницы — окно, переписав их Bash-ом, вышло бы из неё. Edit и Write туда
+    # закрывает guard protect-config (PROJECT_ITEMS hooks)
     agents = ("/.claude/agents", "/**/.claude/agents")
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
-        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + (
+        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
         () if own_agents and r in folders else agents)]
     deny_write += _deny_forms([HOOKD_HOME])
     data = {
@@ -3051,100 +3057,150 @@ def window_dirs(folders):
     return wf[0], [d for d in dict.fromkeys(dirs) if d != wf[0] and os.path.isdir(d)]
 
 
+FOLDER_TEXT_LIMIT = 256 << 10  # AGENTS.md и CLAUDE.md папки окна: больше — не вклеиваем в системную подсказку
+
+
+def _read_in(folder, rel, limit=FOLDER_TEXT_LIMIT):
+    """Текст файла rel папки окна folder (класс 3 модели угроз metis-0933): папки пишет окно, а читает запуск и тик вне
+    песочницы. Только обычный файл не больше limit (_read_small_regular: ссылка последним звеном, FIFO, устройство —
+    None) и только если его настоящий путь внутри настоящей папки folder (ссылка звеном пути — None)."""
+    top = os.path.realpath(folder)
+    p = os.path.join(top, rel)
+    if not _under(os.path.realpath(p), top) or os.path.realpath(p) != os.path.normpath(p):
+        return None
+    return _read_small_regular(p, limit)
+
+
+def _read_json_in(folder, rel):
+    """JSON-объект файла rel папки окна (через _read_in) или None."""
+    text = _read_in(folder, rel)
+    try:
+        got = json.loads(text) if text is not None else None
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) else None
+
+
 def window_agents_md(launch, dirs):
     """AGENTS.md окна: каждой папки --add-dir и папки запуска, если её CLAUDE.md не импортирует @AGENTS.md (импорт в
-    папке запуска Claude Code раскрывает сам, П7). → [пути]."""
+    папке запуска Claude Code раскрывает сам, П7). Читает _read_in: ссылка, FIFO и огромный файл пропускаются.
+    → [(путь, текст)]."""
     out = []
     for d in [launch] + dirs:
-        a = os.path.join(d, "AGENTS.md")
-        if not os.path.isfile(a):
+        text = _read_in(d, "AGENTS.md")
+        if text is None:
             continue
-        if d == launch:
-            try:
-                with open(os.path.join(d, "CLAUDE.md"), encoding="utf-8") as fh:
-                    if IMPORTS_AGENTS.search(fh.read(65536)):
-                        continue
-            except OSError:
-                pass
-        out.append(a)
+        if d == launch and IMPORTS_AGENTS.search((_read_in(d, "CLAUDE.md") or "")[:65536]):
+            continue
+        out.append((os.path.join(d, "AGENTS.md"), text))
     return out
+
+
+PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка packs/_bin (её путь знает только ядро)
 
 
 def window_launch(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — ставятся перед `--settings <файл>`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
-    settings/run/<name>.agents.md), --plugin-dir пакета и --mcp-config его mcp.json, если они есть. Не направление
-    (мастерская, штаб, задачи) — []."""
+    settings/run/<name>.agents.md), --plugin-dir пакета и --mcp-config его mcp.json, если они есть (${PANTHEON_PACK_BIN}
+    в нём — настоящий путь packs/_bin, файл — settings/run/<name>.mcp.json). Не направление (мастерская, штаб,
+    задачи) — []."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
     if not isinstance(folders, list) or not folders:
         return []
     launch, dirs = window_dirs(folders)
     args = [x for d in dirs for x in ("--add-dir", d)]
-    agents = window_agents_md(launch, dirs)
-    if agents:
-        parts = []
-        for a in agents:
-            try:
-                with open(a, encoding="utf-8") as fh:
-                    parts.append(f"# Правила проекта {tilde(os.path.dirname(a))} (AGENTS.md)\n\n{fh.read()}")
-            except OSError:
-                pass
-        if parts:
-            out = path("settings", "run", f"{name or window}.agents.md")
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out + ".tmp", "w", encoding="utf-8") as fh:
-                fh.write("\n\n".join(parts))
-            os.replace(out + ".tmp", out)
-            args += ["--append-system-prompt-file", out]
+    parts = [f"# Правила проекта {tilde(os.path.dirname(a))} (AGENTS.md)\n\n{text}"
+             for a, text in window_agents_md(launch, dirs)]
+
+    def run_file(ext, text):
+        out = path("settings", "run", f"{name or window}.{ext}")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(out + ".tmp", out)
+        return out
+
+    if parts:
+        args += ["--append-system-prompt-file", run_file("agents.md", "\n\n".join(parts))]
     pack = os.path.join(PACKS, window)
     if os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json")):
         args += ["--plugin-dir", pack]
     if os.path.isfile(os.path.join(pack, "mcp.json")):
-        args += ["--mcp-config", os.path.join(pack, "mcp.json")]
+        with open(os.path.join(pack, "mcp.json"), encoding="utf-8") as fh:
+            text = fh.read()
+        bin_dir = json.dumps(os.path.realpath(os.path.join(PACKS, "_bin")))[1:-1]
+        args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
     return args
 
 
-WINDOW_EXTRA_LISTS = ("deny", "ask")  # allow окну не даётся (metis-0137): его команды решает autoMode окна
-WINDOW_EXTRA_SANDBOX = {"denyRead": ("filesystem", "denyRead"), "deniedDomains": ("network", "deniedDomains"),
-                        "excludedCommands": (None, "excludedCommands")}
+# Пакет только сужает права окна (вариант Б модели угроз metis-0933, решение координатора 06.11): правила deny и ask,
+# запреты песочницы denyRead и deniedDomains. allow (metis-0137), excludedCommands, allowWrite, allowedDomains, хуки,
+# режимы — не вливаются: папка packs/ не ядро, её PR идёт с одним argus. env — только имена из WINDOW_ENV_NAMES (флаги
+# «без телеметрии») и только новые для окна: HOME, PATH, TMPDIR, GUARD_*, *_PROXY, DYLD_*, NODE_OPTIONS, BASH_FUNC_*,
+# кэши окна (XDG_CACHE_HOME, npm_config_cache) и ANTHROPIC_* переключили бы guard, интерпретаторы хуков и сеть.
+# Плагины — только из карты plugins-by-role.toml, оставленные этому окну (класс 4).
+WINDOW_EXTRA_LISTS = ("deny", "ask")
+WINDOW_EXTRA_SANDBOX = {"denyRead": ("filesystem", "denyRead"), "deniedDomains": ("network", "deniedDomains")}
+WINDOW_ENV_NAMES = frozenset({"NEXT_TELEMETRY_DISABLED", "TURBO_TELEMETRY_DISABLED", "DO_NOT_TRACK",
+                              "GATSBY_TELEMETRY_DISABLED", "NUXT_TELEMETRY_DISABLED", "ASTRO_TELEMETRY_DISABLED",
+                              "STORYBOOK_DISABLE_TELEMETRY", "HF_HUB_DISABLE_TELEMETRY", "DOTNET_CLI_TELEMETRY_OPTOUT"})
+WINDOW_ENV_VALUE = re.compile(r"[01]|true|false")
 PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*")
+# Мимо песочницы окна направления — только эти команды и только абсолютным путём вне папок окна (класс 2): по имени
+# команду нашёл бы поиск по PATH, а бинарь в папке окна окно переписало бы само
+WINDOW_EXCLUDED = {"metis-pantheon": (os.path.join(HOME, ".local", "bin", "mailkeeper"),)}
 
 
-def window_extra_apply(data, extra):
-    """window.json пакета (packs/<окно>/window.json) → в data (окно): permissions deny, ask без повторов,
-    enabledPlugins: true, env, sandbox (denyRead, deniedDomains, excludedCommands). Ключ allow не вливается совсем
-    (metis-0137: permissions.allow окна пуст, allow сработал бы раньше классификатора autoMode) — он в отброшенном.
-    → [(ключ, значение)] отброшенного. Ключи seen и description — для pantheon check и людей."""
+def window_excluded(name):
+    """excludedCommands окна направления name из WINDOW_EXCLUDED: «<путь>» и «<путь> *»."""
+    return [x for p in WINDOW_EXCLUDED.get(name, ()) for x in (p, p + " *")]
+
+
+def window_plugins_allowed(pmap, name):
+    """Плагины, которые пакет может включить окну name: «оставить» его записи карты (своей или direction). Карты нет
+    (не читается) — никакие: пакет не включает плагины мимо карты."""
+    key = PLUGIN_MAP.window_key(pmap, name, True) if pmap else None
+    return set(pmap["window"][key]["plugins"]) if key else set()
+
+
+def window_extra_apply(data, extra, plugins_ok=()):
+    """window.json пакета (packs/<окно>/window.json) → в data (окно), только сужая права: permissions deny, ask без
+    повторов, sandbox denyRead и deniedDomains, enabledPlugins: true у плагинов из plugins_ok (window_plugins_allowed),
+    env из WINDOW_ENV_NAMES со значением 0/1/true/false, если окно его ещё не задало. Остальное — в отброшенное, data не
+    трогается. → [(ключ, значение)] отброшенного. Ключи seen и description — для pantheon check и людей."""
     bad = [(k, extra[k]) for k in extra if k not in WINDOW_EXTRA_LISTS + ("plugins", "env", "sandbox", "seen",
                                                                           "description")]
-    perms = data.setdefault("permissions", {})
     for key in WINDOW_EXTRA_LISTS:
         vals = extra.get(key)
-        have = perms.setdefault(key, []) if vals else perms.get(key, [])
-        for r in vals if isinstance(vals, list) else ([] if vals is None else [vals]):
-            if not isinstance(r, str) or not r.strip():
-                bad.append((key, r))
-            elif r not in have:
-                have.append(r)
-    for p in extra.get("plugins") or []:
-        if isinstance(p, str) and PLUGIN_ID.fullmatch(p):
+        vals = vals if isinstance(vals, list) else ([] if vals is None else [vals])
+        bad += [(key, r) for r in vals if not isinstance(r, str) or not r.strip()]
+        new = [r for r in dict.fromkeys(r for r in vals if isinstance(r, str) and r.strip())
+               if r not in data.get("permissions", {}).get(key, [])]
+        if new:
+            data.setdefault("permissions", {}).setdefault(key, []).extend(new)
+    plugins = extra.get("plugins") or []
+    for p in plugins if isinstance(plugins, list) else [plugins]:
+        if isinstance(p, str) and PLUGIN_ID.fullmatch(p) and p in plugins_ok:
             data.setdefault("enabledPlugins", {})[p] = True
         else:
             bad.append(("plugins", p))
     env = extra.get("env") or {}
-    for k, v in (env.items() if isinstance(env, dict) else []):
-        if isinstance(k, str) and isinstance(v, str) and not k.startswith("PANTHEON_"):
+    for k, v in (env.items() if isinstance(env, dict) else [("env", env)]):
+        if k in WINDOW_ENV_NAMES and isinstance(v, str) and WINDOW_ENV_VALUE.fullmatch(v) \
+                and k not in data.get("env", {}):
             data.setdefault("env", {})[k] = v
         else:
             bad.append(("env", k))
     sb = extra.get("sandbox") or {}
-    for k, v in (sb.items() if isinstance(sb, dict) else []):
+    for k, v in (sb.items() if isinstance(sb, dict) else [("sandbox", sb)]):
         where = WINDOW_EXTRA_SANDBOX.get(k)
         if not where or not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
             bad.append(("sandbox", k))
             continue
-        top = data.setdefault("sandbox", {})
-        top = top.setdefault(where[0], {}) if where[0] else top
+        if not v:
+            continue
+        top = data.setdefault("sandbox", {}).setdefault(where[0], {})
         have = top.setdefault(where[1], [])
         have += [x for x in v if x not in have]
     return bad
@@ -3156,8 +3212,8 @@ def repo_items(folder):
     → [строка-ключ «~/папка/файл что»]."""
     out, label = [], tilde(folder)
     for rel in PROJECT_SETTINGS:
-        data = read_json(os.path.join(folder, rel), None)
-        if not isinstance(data, dict):
+        data = _read_json_in(folder, rel)  # тик вне песочницы: ссылка, FIFO, огромный файл — пропуск (класс 3)
+        if data is None:
             continue
         for k, v in data.items():
             if k == "$schema":
@@ -3173,7 +3229,7 @@ def repo_items(folder):
                 out += [f"{label}/{rel} {k}.{kk}" for kk in v]
             else:
                 out.append(f"{label}/{rel} {k}")
-    mcp = read_json(os.path.join(folder, ".mcp.json"), None)
+    mcp = _read_json_in(folder, ".mcp.json")
     servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
     out += [f"{label}/.mcp.json {s}" for s in (servers if isinstance(servers, dict) else {})]
     return out
@@ -3359,15 +3415,20 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             data["permissions"]["additionalDirectories"] = list(ok)
             # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; EnterWorktree и
             # ExitWorktree закрыты (П9b: вход в worktree чужого репозитория загрузил бы его настройки) — worktree
-            # задачи окно заводит `git worktree add`; пакет направления — allow, deny, ask, plugins, env, sandbox
+            # задачи окно заводит `git worktree add`; пакет направления только сужает (window_extra_apply), мимо
+            # песочницы — только WINDOW_EXCLUDED ядра
             data["env"][ADD_DIRS_ENV] = "1"
             deny_list = data["permissions"].setdefault("deny", [])
             deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
-            bad = window_extra_apply(data, pack_window(name))
+            data["sandbox"]["excludedCommands"] += window_excluded(name)
+            bad = window_extra_apply(data, pack_window(name), window_plugins_allowed(pmap, name))
             if bad:
+                keys = dict.fromkeys(f"{k}.{v}" if k in ("env", "sandbox") else k for k, v in bad)
                 alert_once(f"pack-extra-{name}", repr(bad), f"packs/{name}/window.json: не влито в окно {name} — "
-                           + "; ".join(f"{k}: {v}" for k, v in bad)[:400] + " (неизвестный ключ, не строка или allow "
-                           "с gh pr merge, metis-0137)", "pantheon")
+                           + ", ".join(keys)[:300] + " — " + "; ".join(f"{k}: {v}" for k, v in bad)[:400]
+                           + " (пакет только сужает: deny, ask, "
+                           "sandbox denyRead и deniedDomains, env из белого списка, плагины из карты — metis-0933)",
+                           "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
         if name == "metis-pantheon":

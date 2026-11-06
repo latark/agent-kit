@@ -6,19 +6,13 @@
     "Bash(docker rmi *)"
   ],
   "plugins": [
-    "context7@claude-plugins-official",
-    "supabase@claude-plugins-official",
     "frontend-design@claude-plugins-official",
     "feature-dev@claude-plugins-official",
     "typescript-lsp@claude-plugins-official",
     "commit-commands@claude-plugins-official",
     "security-guidance@claude-plugins-official",
     "code-simplifier@claude-plugins-official",
-    "vercel@claude-plugins-official",
-    "ralph-loop@claude-plugins-official",
-    "pyright-lsp@claude-plugins-official",
-    "sentry@claude-plugins-official",
-    "nvidia-skills@claude-plugins-official"
+    "pyright-lsp@claude-plugins-official"
   ],
   "seen": {
     "~/projects/MorphStream/app/.claude/settings.json env.PROJECT_NAME": "убрано: мёртвое (решение владельца 06.11 18:30) (шаблонные env)",
@@ -51,7 +45,7 @@
     "~/projects/MorphStream/app/.claude/settings.json enabledPlugins.ralph-loop@claude-plugins-official": "перенесено: window.json plugins",
     "~/projects/MorphStream/app/.claude/settings.json sandbox.autoAllowBashIfSandboxed": "не переносится: опасно (решение владельца 06.11 18:30) (песочницу окна задаёт Пантеон)",
     "~/projects/MorphStream/app/.claude/settings.local.json permissions.allow": "не переносится: одноразовые; широкие python3, brew install — сузить, решение лида направления; git push — через шлюз слияния; токен HF — в Связку ключей (proteus-0001)",
-    "~/projects/MorphStream/app/.claude/settings.local.json enabledMcpjsonServers": "перенесено: mcp.json (серверы из списка)",
+    "~/projects/MorphStream/app/.claude/settings.local.json enabledMcpjsonServers": "перенесено: mcp.json (серверы из списка); grafana и upstash — через packs/_bin/env_from.py: .env.local только данными, без scripts/start-*-mcp.sh; npx — точные версии и кэш ~/.npm вне папок окна (metis-0933, классы 2 и 4)",
     "~/projects/MorphStream/gpu-worker/.claude/settings.json env.PROJECT_NAME": "убрано: мёртвое (решение владельца 06.11 18:30) (шаблонные env)",
     "~/projects/MorphStream/gpu-worker/.claude/settings.json env.PRIMARY_LANGUAGE": "убрано: мёртвое (решение владельца 06.11 18:30) (шаблонные env)",
     "~/projects/MorphStream/gpu-worker/.claude/settings.json permissions.allow": "не перенесено: allow окну не даётся; чем заменено: autoMode окна (metis-0137); supabase — вместе с protect-db.sh; python, pip, docker — сузить, решение лида направления",
