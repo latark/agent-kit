@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" \"--cmd-prefix=git commit\" --plain=src -- bash .claude/hooks/pre-commit-check.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" \"--cmd-prefix=git commit\" --plain=src,app -- bash .claude/hooks/pre-commit-check.sh"
           },
           {
             "type": "command",
@@ -34,7 +34,7 @@
           },
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --file-arg --ok -- bash .claude/hooks/check-fsd.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/app\" --file-arg --ok -- python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py\" fsd"
           },
           {
             "type": "command",
@@ -42,7 +42,7 @@
           },
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/gpu-worker\" -- bash .claude/hooks/check-cuda-safety.sh"
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/MorphStream/gpu-worker\" --file-arg -- python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py\" cuda-safety"
           }
         ]
       }

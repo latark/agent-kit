@@ -640,7 +640,9 @@ def main():
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
-          and all(len(am[n]) == 4 and len(rule(n, "Pantheon Gated Merge:")) == 1
+          # metis-pantheon: ещё два правила направления — Mailkeeper Read и Uv Sync (metis-0933, владелец 06.11 21:55)
+          and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
+          and all(len(am[n]) == {"athena-shop": 4, "metis-pantheon": 6}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
                   == record for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record)

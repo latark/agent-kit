@@ -91,7 +91,7 @@ DANGEROUS = [
     ("defaultMode", {"defaultMode": "bypassPermissions"}),
     ("mcpServers", {"mcpServers": {"x": {"command": "x"}}}),
     ("apiKeyHelper", {"apiKeyHelper": "x"}),
-    ("плагин вне карты окна", {"plugins": ["context7@claude-plugins-official"]}),
+    ("плагин вне карты окна", {"plugins": ["ralph-loop@claude-plugins-official"]}),  # убран, владелец 06.11 21:55
     ("кривой id плагина", {"plugins": ["a b"]}),
     ("env DO_NOT_TRACK не 0/1", {"env": {"DO_NOT_TRACK": "1; rm -rf ~"}}),
 ] + [(f"env {k}", {"env": {k: "1"}}) for k in (
@@ -469,9 +469,12 @@ def class2_pack_hooks(tmp):
         put(os.path.join(app, n), "# ключи\nA=1\nB=2\n")
     env = {"PATH": os.environ["PATH"], "HOME": home, "CLAUDE_PROJECT_DIR": app}
 
-    def sync(*ns):
-        r = subprocess.run([sys.executable, "-I", REPO_HOOKS, "env-sync", os.path.join(app, "sync.local"), *ns],
-                           env=env, cwd=app, capture_output=True, text=True, timeout=30)
+    def sync(*ns, bin_dir=None):  # как хук пакета: через in_repo.py (fd корня), путь файла — явно перед именами
+        b = bin_dir or os.path.dirname(REPO_HOOKS)
+        inp = json.dumps({"tool_name": "Edit", "tool_input": {"file_path": os.path.join(app, "sync.local")}})
+        r = subprocess.run([sys.executable, "-I", os.path.join(b, "in_repo.py"), app, "--", sys.executable, "-I",
+                            os.path.join(b, "repo_hooks.py"), "env-sync", os.path.join(app, "sync.local"), *ns],
+                           input=inp, env=env, cwd=home, capture_output=True, text=True, timeout=30)
         return r.returncode, r.stdout + r.stderr
 
     put(os.path.join(foreign, "prod"), f"# ключи\nA=1\n{MARK} строка чужого файла\n")
@@ -489,18 +492,218 @@ def class2_pack_hooks(tmp):
     put(os.path.join(foreign, "victim"), f"{MARK}\n")
     os.symlink(os.path.join(foreign, "victim"), os.path.join(app, "app/api/x/lnk.ts"))
     before = tree(foreign)
+    rfd = os.open(app, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        rh.write_in(app, "app/api/x/lnk.ts", "export {}\n")
+        rh.write_in(rfd, "app/api/x/lnk.ts", "export {}\n")
         refused = False
     except OSError:
         refused = True
+    finally:
+        os.close(rfd)
     check("класс 2: repo_hooks.write_in — последнее звено ссылка на чужой файл: отказ, файл не тронут",
           refused and tree(foreign) == before, refused)
-    put(os.path.join(app, "own.production"), "# ключи\nA=1\nEXTRA-OWN-LINE\n")
+    # жёсткая ссылка на чужой файл (st_nlink 2): окно не может её отличить от своего файла по пути (metis-0950, m4)
+    hard_key = "FOREIGN_HARD_7731"  # строка вида KEY= — env-sync её покажет, если прочтёт (маска её не скрывает)
+    put(os.path.join(foreign, "prod-hard"), f"# ключи\nA=1\n{hard_key}=1\n")
+    os.link(os.path.join(foreign, "prod-hard"), os.path.join(app, "hard.production"))
+    rc, o = sync(*names[:2], "hard.production")
+    check("класс 2: repo_hooks.py env-sync — жёсткая ссылка на чужой файл (st_nlink 2): чужое не прочитано",
+          rc == 0 and hard_key not in o and "не прочитан" in o, (rc, o))
+    m4 = mutant_bin(tmp, "m4", {"repo_hooks.py": [("st.st_nlink != 1 or ", "")]})
+    rc, o = sync(*names[:2], "hard.production", bin_dir=m4)
+    check("класс 2: самопроверка — мутант m4 (без st_nlink != 1) читает чужое по жёсткой ссылке", hard_key in o, (rc, o))
+    # вывод env-sync — только строки KEY= (ревью argus D2, Д2): строка без «=» или комментарий — маской
+    put(os.path.join(app, "own.production"), "# ключи\nA=1\nEXTRA-OWN-LINE sk-SECRET\n# секрет-в-комментарии\nB=2\n")
     rc, o = sync(*names[:2], "own.production")
-    check("класс 2: самопроверка — env-sync по своему файлу выводит расхождение структуры", rc == 0
-          and "EXTRA-OWN-LINE" in o and "рассинхронизирована" in o, (rc, o))
+    check("класс 2: env-sync — расхождение выведено, строки не KEY= — маской (EXTRA-OWN-LINE и комментарий скрыты)",
+          rc == 0 and "рассинхронизирована" in o and "EXTRA-OWN-LINE" not in o and "секрет-в-комментарии" not in o
+          and "строка не KEY=" in o, (rc, o))
+    m = mutant_bin(tmp, "mask", {"repo_hooks.py": [('return line if not line.strip() or ENV_KEY.fullmatch(line) else',
+                                                    'return line if True else')]})
+    rc, o = sync(*names[:2], "own.production", bin_dir=m)
+    check("класс 2: самопроверка — без маски env-sync выводит строку не KEY= целиком", "EXTRA-OWN-LINE" in o, (rc, o))
 
+
+def mutant_bin(tmp, name, subs):
+    """Копия packs/_bin с заменами {файл: [(было, стало)]} — мутант для самопроверки; замена обязана сработать."""
+    d = os.path.join(tmp, "mutant-" + name)
+    shutil.copytree(os.path.join(PACKS, "_bin"), d)
+    for f, pairs in subs.items():
+        text = open(os.path.join(d, f), encoding="utf-8").read()
+        for a, b in pairs:
+            assert a in text, (name, f, a)
+            text = text.replace(a, b)
+        with open(os.path.join(d, f), "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return d
+
+
+
+# --- класс 2: гонка «проверка пути строкой → действие по строке» (ревью argus D2, metis-0933 круг E) ---
+SWAP_AT_RUN = r"""
+import importlib.util, os, subprocess, sys
+path, app, foreign = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("in_repo", path)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+real_run = subprocess.run
+def swapped(*a, **k):  # худший миг: проверки in_repo.py позади, ребёнок ещё не начал — окно подменяет app ссылкой
+    os.rename(app, app + ".real")
+    os.symlink(foreign, app)
+    try:
+        return real_run(*a, **k)
+    finally:
+        os.unlink(app)
+        os.rename(app + ".real", app)
+subprocess.run = swapped
+sys.exit(m.main(sys.argv[4:]))
+"""
+SWAPPER = r"""
+import os, sys, time
+app, foreign, stop = sys.argv[1:4]
+n = 0
+while not os.path.exists(stop):
+    os.rename(app, app + ".real")
+    os.symlink(foreign, app)
+    time.sleep(0.0003)
+    os.unlink(app)
+    os.rename(app + ".real", app)
+    time.sleep(0.0003)
+    n += 1
+print(n)
+"""
+RACE_MARK = "FOREIGN_RACE_5517"  # годится в ключ KEY= — маска env-sync его не скрывает
+
+
+def race_repo(home):
+    """Свой репозиторий app и чужая папка: хук .claude/hooks/x.sh (пишет OWN или FOREIGN в $RACE_LOG), route.ts,
+    sync.* для env-sync, src/shared/s.ts и gpu.py для fsd и cuda-safety; в чужих файлах — RACE_MARK."""
+    app, foreign = os.path.join(home, "projects", "M", "app"), os.path.join(home, "foreign")
+    for d, who in ((app, "OWN"), (foreign, "FOREIGN")):
+        mark = RACE_MARK if who == "FOREIGN" else "own"
+        put(os.path.join(d, ".claude/hooks/x.sh"), f'echo {who} >> "$RACE_LOG"\n')
+        put(os.path.join(d, "src/app/api/x/route.ts"), "export function GET() {}\n")
+        for n in ("sync.example", "sync.local", "sync.production"):
+            put(os.path.join(d, n), f"# ключи\nA=1\n{mark}_{n.replace('.', '_')}=1\n")
+        put(os.path.join(d, "src/shared/s.ts"), f"import a from '@/features/{mark}'\n")
+        put(os.path.join(d, "gpu.py"), "import onnxruntime\nonnxruntime.get_available_providers()\n"
+            if who == "FOREIGN" else "x = 1\n")
+    return app, foreign
+
+
+def race_cmds(app, bin_dir):
+    """Хуки пакета под гонкой: (имя, флаги in_repo, команда, вход)."""
+    rh = [sys.executable, "-I", os.path.join(bin_dir, "repo_hooks.py")]
+    edit = lambda rel: json.dumps({"tool_name": "Edit", "tool_input": {"file_path": os.path.join(app, rel)}})  # noqa
+    return [("исполнение .claude/hooks/x.sh", ["--always"], ["bash", ".claude/hooks/x.sh"], "{}"),
+            ("reexport", ["--file-arg"], rh + ["reexport"], edit("src/app/api/x/route.ts")),
+            ("env-sync", [], rh + ["env-sync", os.path.join(app, "sync.local"), "sync.example", "sync.local",
+                                   "sync.production"], edit("sync.local")),
+            ("fsd", ["--file-arg"], rh + ["fsd"], edit("src/shared/s.ts")),
+            ("cuda-safety", ["--file-arg"], rh + ["cuda-safety"], edit("gpu.py"))]
+
+
+def race_effects(foreign, before, log, outs):
+    """(сколько раз исполнен чужой хук, чужая папка изменена, сколько выводов с чужим текстом)."""
+    ran = open(log).read().split().count("FOREIGN") if os.path.exists(log) else 0
+    read = sum(RACE_MARK in o or "CUDA-safety" in o for o in outs)  # у своего gpu.py предупреждения нет
+    return ran, tree(foreign) != before, read
+
+
+def class2_race(tmp):
+    """Окно подменяет папку репозитория ссылкой (app ↔ ссылка на чужую папку) в любой миг: in_repo.py и repo_hooks.py
+    действуют по fd корня, открытого без ссылок, а не по строке пути — чужой скрипт не исполнен, в чужую папку ничего
+    не записано и из неё ничего не прочитано. Подмена в худший миг (после проверок, до запуска ребёнка) —
+    детерминированно, на каждом хуке; мутанты «по строке вместо fd» в in_repo.py и repo_hooks.py ловятся. Затем
+    фоновая подмена и N запусков исполнения, reexport и env-sync."""
+    home = os.path.join(tmp, "race")
+    app, foreign = race_repo(home)
+    log = os.path.join(tmp, "race.log")
+    env = {"PATH": os.environ["PATH"], "HOME": home, "RACE_LOG": log}
+    bin_dir = os.path.join(PACKS, "_bin")
+    m_in = mutant_bin(tmp, "in-path", {"in_repo.py": [('cmd[i] = f"/dev/fd/{sfd}"', "cmd[i] = a"),
+                                                      ("os.fchdir(root)", "pass"),
+                                                      ("env=env, input=raw", "env=env, cwd=repo, input=raw")]})
+    m_rh = mutant_bin(tmp, "rh-path", {"repo_hooks.py": [(
+        "fd = os.dup(root)", 'fd = os.open(os.path.realpath(os.environ["CLAUDE_PROJECT_DIR"]), os.O_RDONLY)')]})
+    clean = tree(foreign)
+    for label, b in (("fd", bin_dir), ("in_repo", m_in), ("repo_hooks", m_rh)):
+        got = {}
+        for name, flags, cmd, inp in race_cmds(app, b):
+            if os.path.exists(log):
+                os.unlink(log)
+            r = subprocess.run([sys.executable, "-I", "-c", SWAP_AT_RUN, os.path.join(b, "in_repo.py"), app, foreign,
+                                app, *flags, "--", *cmd], input=inp, env=env, cwd=home, capture_output=True,
+                               text=True, timeout=60)
+            own = open(log).read().split().count("OWN") if os.path.exists(log) else 0
+            got[name] = race_effects(foreign, clean, log, [r.stdout + r.stderr]) + (own, r.returncode)
+            if tree(foreign) != clean:  # мутант записал в чужую папку — вернуть её, следующий хук сравнивает с чистой
+                shutil.rmtree(foreign)
+                race_repo(os.path.join(tmp, "race-reset"))
+                shutil.move(os.path.join(tmp, "race-reset", "foreign"), foreign)
+                shutil.rmtree(os.path.join(tmp, "race-reset"))
+        if label == "fd":
+            bad = {k: v for k, v in got.items() if v[:3] != (0, False, 0)}
+            check("класс 2: гонка — подмена app ссылкой в худший миг: 0 чужих исполнений, 0 записей, 0 чтений чужого "
+                  "(исполнение, reexport, env-sync, fsd, cuda-safety); свой хук исполнен",
+                  not bad and got["исполнение .claude/hooks/x.sh"][3] == 1, got)
+        elif label == "in_repo":
+            check("класс 2: самопроверка — мутант «in_repo по строке» (cwd=путь, скрипт по пути) исполняет чужой хук",
+                  got["исполнение .claude/hooks/x.sh"][0] == 1, got)
+        else:
+            check("класс 2: самопроверка — мутант «repo_hooks по строке» (realpath CLAUDE_PROJECT_DIR) пишет в чужую "
+                  "папку и читает чужое (reexport, env-sync, fsd, cuda-safety)",
+                  got["reexport"][1] and all(got[k][2] for k in ("env-sync", "fsd", "cuda-safety")), got)
+    # фоновая подмена: N запусков каждого хука, пока окно без остановки меняет app ↔ ссылка
+    n = 200
+    stop = os.path.join(tmp, "race.stop")
+    if os.path.exists(log):
+        os.unlink(log)
+    sw = subprocess.Popen([sys.executable, "-I", "-c", SWAPPER, app, foreign, stop], stdout=subprocess.PIPE, text=True)
+    outs, codes = [], {}
+    try:
+        for name, flags, cmd, inp in race_cmds(app, bin_dir)[:3]:
+            for _ in range(n):
+                r = subprocess.run([sys.executable, "-I", os.path.join(bin_dir, "in_repo.py"), app, *flags, "--",
+                                    *cmd], input=inp, env=env, cwd=home, capture_output=True, text=True, timeout=60)
+                outs.append(r.stdout + r.stderr)
+                codes.setdefault(name, []).append(r.returncode)
+    finally:
+        put(stop, "")
+        swaps = sw.communicate(timeout=30)[0].strip()
+    ran, wrote, read = race_effects(foreign, clean, log, outs)
+    own = open(log).read().split().count("OWN") if os.path.exists(log) else 0
+    refused = sum(c == 2 for c in codes["исполнение .claude/hooks/x.sh"])
+    check(f"класс 2: гонка — фоновая подмена app ↔ ссылка, по {n} запусков исполнения, reexport и env-sync: 0 чужих "
+          "исполнений, 0 записей и 0 чтений в чужой папке", (ran, wrote, read) == (0, False, 0),
+          (ran, wrote, read, [o for o in outs if RACE_MARK in o][:2]))
+    check("класс 2: самопроверка гонки — подмена шла, хук то исполнялся из своей папки, то получал отказ (выход 2)",
+          int(swaps or 0) > n and own > 0 and refused > 0, (swaps, own, refused))
+
+
+def class2_plain_after(tmp):
+    """--plain: окно подложило ссылку во время прогона хука (ревью argus D2, Д1) — после прогона links_under заново,
+    вывод хука выброшен, выход 2. Хук сам кладёт ссылку и читает по ней — так гонка детерминирована."""
+    home = os.path.join(tmp, "plain-after")
+    app, foreign = race_repo(home)
+    put(os.path.join(app, ".claude/hooks/pc.sh"), f"ln -s {shlex.quote(foreign)} src/lnk\ncat src/lnk/src/shared/s.ts\n")
+    env = {"PATH": os.environ["PATH"], "HOME": home}
+    m = mutant_bin(tmp, "plain-after", {"in_repo.py": [(
+        "    if plain:\n        bad = [x for rel in plain for x in links_under(root, rel)]\n",
+        "    if plain:\n        bad = []\n")]})
+    for label, b in (("fd", os.path.join(PACKS, "_bin")), ("мутант", m)):
+        if os.path.lexists(os.path.join(app, "src/lnk")):
+            os.unlink(os.path.join(app, "src/lnk"))
+        r = subprocess.run([sys.executable, "-I", os.path.join(b, "in_repo.py"), app, "--always", "--plain=src", "--",
+                            "bash", ".claude/hooks/pc.sh"], input="{}", env=env, cwd=home, capture_output=True,
+                           text=True, timeout=30)
+        if label == "fd":
+            check("класс 2: --plain — ссылка появилась во время хука: вывод выброшен, выход 2",
+                  r.returncode == 2 and RACE_MARK not in r.stdout + r.stderr and "во время хука" in r.stderr,
+                  (r.returncode, r.stdout, r.stderr))
+        else:
+            check("класс 2: самопроверка — без проверки после прогона чужое попадает в вывод",
+                  RACE_MARK in r.stdout, (r.returncode, r.stdout, r.stderr))
 
 # --- класс 3: чтение вне песочницы ---
 def class3(tmp, env):
@@ -622,6 +825,8 @@ def main():
     class2_npx(tmp)
     class2_links(tmp)
     class2_pack_hooks(os.path.join(ROOT, "h2"))
+    class2_race(os.path.join(ROOT, "h2"))
+    class2_plain_after(os.path.join(ROOT, "h2"))
     class3_links(P, tmp)
     tmp3 = os.path.join(ROOT, "h3")
     os.makedirs(tmp3)

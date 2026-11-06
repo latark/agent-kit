@@ -12,8 +12,9 @@ MCP-сервер идёт вне песочницы, а Claude Code запуск
 Необязательная часть — ключи из .env-файла репозитория: серверы grafana и upstash MorphStream/app запускались
 скриптами app/scripts/start-*-mcp.sh, они делают `source .env.local`. Здесь .env-файл — только данные: строки
 `[export ]ИМЯ=значение` (кавычки снимаются, подстановок нет), в окружение команды идут только названные имена. Файл —
-обычный, не больше 1 МБ, и путь к нему без ссылок ниже $HOME (каждое звено — O_NOFOLLOW: подменённая ссылкой папка
-не подсунет чужой .env; FIFO не вешает). Нет файла или имени — выход 1 с причиной в stderr; иначе exec команды (код
+обычный, без других жёстких ссылок, не больше 1 МБ, и путь к нему без ссылок ниже $HOME (каждое звено — openat с
+O_NOFOLLOW от fd предыдущего, файл читается по своему fd: подменённая ссылкой папка не подсунет чужой .env ни до, ни
+во время чтения; FIFO не вешает). Нет файла или имени — выход 1 с причиной в stderr; иначе exec команды (код
 выхода — её)."""
 import os
 import re
@@ -55,8 +56,8 @@ def read_env(p):
     fd = open_nofollow(p)
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > LIMIT:
-            raise OSError(f"{p}: не обычный файл или больше {LIMIT} байт")
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > LIMIT:
+            raise OSError(f"{p}: не обычный файл, с другими жёсткими ссылками или больше {LIMIT} байт")
         with os.fdopen(fd, "rb", closefd=False) as fh:
             text = fh.read(LIMIT).decode("utf-8", "replace")
     finally:

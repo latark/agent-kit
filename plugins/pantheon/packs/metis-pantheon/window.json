@@ -47,7 +47,7 @@
     ]
   },
   "seen": {
-    "~/projects/other/mailkeeper/.claude/settings.json permissions.allow": "не перенесено: allow окну не даётся; чем заменено: autoMode окна (metis-0137); mailkeeper — нужен autoMode.allow словами (вопрос владельцу)",
+    "~/projects/other/mailkeeper/.claude/settings.json permissions.allow": "не перенесено: allow окну не даётся; чем заменено: autoMode окна (metis-0137); mailkeeper status, rules, scan, report, plan, logs и uv sync — правила autoMode.allow окна Mailkeeper Read и Uv Sync (lib/window_rules.py DIRECTION_AUTO_ALLOW, владелец 21:55)",
     "~/projects/other/mailkeeper/.claude/settings.json permissions.ask": "перенесено: window.json ask",
     "~/projects/other/mailkeeper/.claude/settings.json permissions.deny": "перенесено: window.json deny; браузерные mcp__ — не переносятся: закрыли бы браузер всему окну; security — дубль user",
     "~/projects/other/mailkeeper/.claude/settings.json sandbox.enabled": "не переносится: опасно (решение владельца 06.11 18:30) (песочница выключена)",
@@ -57,8 +57,8 @@
     "~/projects/other/mailkeeper/.claude/settings.json sandbox.excludedCommands": "заменено: WINDOW_EXCLUDED ядра (pantheon.py) — ~/.local/bin/mailkeeper абсолютным путём; пакет excludedCommands не задаёт (metis-0933, класс 1)",
     "~/projects/other/mailkeeper/.claude/settings.json sandbox.filesystem": "перенесено: window.json sandbox.denyRead",
     "~/projects/other/mailkeeper/.claude/settings.json sandbox.network": "перенесено: window.json sandbox.deniedDomains без api.anthropic.com (вопрос владельцу: закрыл бы claude -p проб Метиды); allowedDomains — песочницу окна задаёт Пантеон",
-    "~/projects/other/mailkeeper/.claude/settings.json hooks.PreToolUse python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\"": "перенесено: hooks/hooks.json (python3 -I)",
-    "~/projects/other/mailkeeper/.claude/settings.json hooks.PreToolUse python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_read.py\"": "перенесено: hooks/hooks.json (python3 -I)",
+    "~/projects/other/mailkeeper/.claude/settings.json hooks.PreToolUse python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\"": "перенесено: hooks/hooks.json (in_repo.py --always, скрипт по fd из .claude/hooks — metis-0933 круг E)",
+    "~/projects/other/mailkeeper/.claude/settings.json hooks.PreToolUse python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_read.py\"": "перенесено: hooks/hooks.json (in_repo.py --always, скрипт по fd из .claude/hooks — metis-0933 круг E)",
     "~/projects/other/mailkeeper/.claude/settings.json hooks.PostToolUse \"$CLAUDE_PROJECT_DIR/.claude/hooks/after_edit.sh\"": "не переносится: опасно — uv run исполняет .venv репозитория, а mailkeeper ищется по PATH, вне песочницы (metis-0933, класс 2); чем заменено: `uv run ruff check` и `mailkeeper rules check` — в Bash окна, под песочницей",
     "~/projects/other/mailkeeper/.claude/settings.json hooks.SessionStart \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_start.sh\"": "не переносится: опасно (решение владельца 06.11 18:30) (окно metis-pantheon — не сессия mailkeeper)"
   }

@@ -261,9 +261,9 @@ def shipped_packs(tmp):
         check(f"пакет {n}: нет bypassPermissions, defaultMode, токенов и путей /Users/",
               not [(k, x) for k, v in texts.items() for x in FORBIDDEN_TEXT if x in v],
               [(k, x) for k, v in texts.items() for x in FORBIDDEN_TEXT if x in v])
-        check(f"пакет {n}: хуки — через in_repo.py пакета или скрипт .claude/hooks, python3 — только с -I",
-              cmds and all(c.startswith("python3 -I ") and ("_bin/in_repo.py" in c or "/.claude/hooks/" in c)
-                           for c in cmds), cmds)
+        # metis-0933 круг E: скрипт .claude/hooks напрямую по пути окно подменило бы ссылкой — только через in_repo.py
+        check(f"пакет {n}: хуки — только через in_repo.py пакета (скрипт .claude/hooks по fd), python3 — только с -I",
+              cmds and all(c.startswith('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" ') for c in cmds), cmds)
     mcp = js_of(root, "proteus-morph/mcp.json").get("mcpServers", {})
     hooks = js_of(root, "proteus-morph/hooks/hooks.json")["hooks"]["PreToolUse"]
     check("пакет proteus-morph: supabase — только вместе с protect-db.sh на его инструментах",

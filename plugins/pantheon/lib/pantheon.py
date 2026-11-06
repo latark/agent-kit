@@ -3533,7 +3533,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
-               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name))):
+               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name), name)):
             built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
