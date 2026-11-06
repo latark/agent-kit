@@ -2995,6 +2995,229 @@ def folders_allow_problems(folders):
     return [x for f in window_folders(folders) for x in project_allow_problems(f)]
 
 
+# --- окно направления по схеме А (metis-0933, решение владельца 06.11 17:42 «А — окно направления») ---------------
+# Одно окно на направление, папка запуска — launch_folder. Настройки папки запуска (.claude/settings*.json, .mcp.json,
+# CLAUDE.md с @AGENTS.md) Claude Code грузит сам. Остальные папки и вложенные проекты (app/, gpu-worker/) — через
+# --add-dir: оттуда приходят CLAUDE.md (при CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1), .claude/rules, навыки,
+# команды и агенты, но не settings, не .mcp.json и не импорт @AGENTS.md (пробы П1, П7 drafts/metis-0933-f8-probes.md).
+# Это недостающее — пакет направления packs/<направление>/ в этом репозитории (под ревью): плагин для --plugin-dir
+# (hooks/hooks.json), window.json (window_extra: allow, deny, ask, plugins, env, sandbox — вливает sandbox_build;
+# seen — что из репозиториев учтено и как) и mcp.json для --mcp-config (П8). AGENTS.md всех папок — один файл
+# --append-system-prompt-file: флаг не повторяется, второй затирает первый (проба 06.11 18:2x, Claude Code 2.1.318).
+PACKS = os.environ.get("PANTHEON_PACKS") or os.path.join(PLUGIN, "packs")  # PANTHEON_PACKS — для тестов
+PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json",
+                 ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
+NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
+ADD_DIRS_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"]  # П9b: worktree окна — git worktree add в Bash
+IMPORTS_AGENTS = re.compile(r"^\s*@(\./)?AGENTS\.md\s*$", re.M)
+PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
+
+
+def pack_window(name):
+    """packs/<name>/window.json → dict (нет файла или не объект — {})."""
+    got = read_json(os.path.join(PACKS, name, "window.json"), {})
+    return got if isinstance(got, dict) else {}
+
+
+def nested_projects(folder):
+    """Вложенные проекты папки на один уровень вниз: подпапка (не скрытая, не ссылка) с CLAUDE.md, AGENTS.md,
+    .mcp.json или своей .claude с настройками, навыками, командами, агентами, правилами (PROJECT_MARKS)."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        p = os.path.join(folder, n)
+        if n.startswith(".") or n in NESTED_SKIP or os.path.islink(p) or not os.path.isdir(p):
+            continue
+        if any(os.path.exists(os.path.join(p, m)) for m in PROJECT_MARKS):
+            out.append(os.path.realpath(p))
+    return out
+
+
+def window_dirs(folders):
+    """→ (папка запуска, [папки для --add-dir]): остальные папки окна и вложенные проекты всех папок, без повторов и
+    без ~/.claude (уровень user окно и так читает; его --add-dir задвоил бы навыки и CLAUDE.md)."""
+    wf = window_folders(folders)
+    if not wf:
+        return "", []
+    user = os.path.realpath(os.path.join(HOME, ".claude"))
+    dirs = []
+    for f in wf:
+        if f != user:
+            dirs += ([f] if f != wf[0] else []) + nested_projects(f)
+    return wf[0], [d for d in dict.fromkeys(dirs) if d != wf[0] and os.path.isdir(d)]
+
+
+def window_agents_md(launch, dirs):
+    """AGENTS.md окна: каждой папки --add-dir и папки запуска, если её CLAUDE.md не импортирует @AGENTS.md (импорт в
+    папке запуска Claude Code раскрывает сам, П7). → [пути]."""
+    out = []
+    for d in [launch] + dirs:
+        a = os.path.join(d, "AGENTS.md")
+        if not os.path.isfile(a):
+            continue
+        if d == launch:
+            try:
+                with open(os.path.join(d, "CLAUDE.md"), encoding="utf-8") as fh:
+                    if IMPORTS_AGENTS.search(fh.read(65536)):
+                        continue
+            except OSError:
+                pass
+        out.append(a)
+    return out
+
+
+def window_launch(window, name=None):
+    """Флаги запуска окна направления window по схеме А (metis-0933) — ставятся перед `--settings <файл>`:
+    --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
+    settings/run/<name>.agents.md), --plugin-dir пакета и --mcp-config его mcp.json, если они есть. Не направление
+    (мастерская, штаб, задачи) — []."""
+    folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
+    if not isinstance(folders, list) or not folders:
+        return []
+    launch, dirs = window_dirs(folders)
+    args = [x for d in dirs for x in ("--add-dir", d)]
+    agents = window_agents_md(launch, dirs)
+    if agents:
+        parts = []
+        for a in agents:
+            try:
+                with open(a, encoding="utf-8") as fh:
+                    parts.append(f"# Правила проекта {tilde(os.path.dirname(a))} (AGENTS.md)\n\n{fh.read()}")
+            except OSError:
+                pass
+        if parts:
+            out = path("settings", "run", f"{name or window}.agents.md")
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out + ".tmp", "w", encoding="utf-8") as fh:
+                fh.write("\n\n".join(parts))
+            os.replace(out + ".tmp", out)
+            args += ["--append-system-prompt-file", out]
+    pack = os.path.join(PACKS, window)
+    if os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json")):
+        args += ["--plugin-dir", pack]
+    if os.path.isfile(os.path.join(pack, "mcp.json")):
+        args += ["--mcp-config", os.path.join(pack, "mcp.json")]
+    return args
+
+
+WINDOW_EXTRA_LISTS = ("allow", "deny", "ask")
+WINDOW_EXTRA_SANDBOX = {"denyRead": ("filesystem", "denyRead"), "deniedDomains": ("network", "deniedDomains"),
+                        "excludedCommands": (None, "excludedCommands")}
+PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def window_extra_apply(data, extra):
+    """window.json пакета (packs/<окно>/window.json) → в data (окно): permissions allow, deny, ask без повторов,
+    enabledPlugins: true, env, sandbox (denyRead, deniedDomains, excludedCommands). allow с gh pr merge не вливается
+    (metis-0137). → [(ключ, значение)] отброшенного. Ключи seen и description — для pantheon check и людей."""
+    bad = [(k, extra[k]) for k in extra if k not in WINDOW_EXTRA_LISTS + ("plugins", "env", "sandbox", "seen",
+                                                                          "description")]
+    perms = data.setdefault("permissions", {})
+    for key in WINDOW_EXTRA_LISTS:
+        vals = extra.get(key)
+        have = perms.setdefault(key, []) if vals else perms.get(key, [])
+        for r in vals if isinstance(vals, list) else ([] if vals is None else [vals]):
+            if not isinstance(r, str) or not r.strip() or (key == "allow" and allow_rule_merges(r)):
+                bad.append((key, r))
+            elif r not in have:
+                have.append(r)
+    for p in extra.get("plugins") or []:
+        if isinstance(p, str) and PLUGIN_ID.fullmatch(p):
+            data.setdefault("enabledPlugins", {})[p] = True
+        else:
+            bad.append(("plugins", p))
+    env = extra.get("env") or {}
+    for k, v in (env.items() if isinstance(env, dict) else []):
+        if isinstance(k, str) and isinstance(v, str) and not k.startswith("PANTHEON_"):
+            data.setdefault("env", {})[k] = v
+        else:
+            bad.append(("env", k))
+    sb = extra.get("sandbox") or {}
+    for k, v in (sb.items() if isinstance(sb, dict) else []):
+        where = WINDOW_EXTRA_SANDBOX.get(k)
+        if not where or not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+            bad.append(("sandbox", k))
+            continue
+        top = data.setdefault("sandbox", {})
+        top = top.setdefault(where[0], {}) if where[0] else top
+        have = top.setdefault(where[1], [])
+        have += [x for x in v if x not in have]
+    return bad
+
+
+def repo_items(folder):
+    """Что в репозитории может не дойти до окна по --add-dir (П1): хуки (событие и команда), ключи settings (верхний
+    уровень; у словарей — второй, например env.X, enabledPlugins.Y, permissions.allow) и серверы .mcp.json.
+    → [строка-ключ «~/папка/файл что»]."""
+    out, label = [], tilde(folder)
+    for rel in PROJECT_SETTINGS:
+        data = read_json(os.path.join(folder, rel), None)
+        if not isinstance(data, dict):
+            continue
+        for k, v in data.items():
+            if k == "$schema":
+                continue
+            if k == "hooks" and isinstance(v, dict):
+                for ev, groups in v.items():
+                    for g in groups if isinstance(groups, list) else []:
+                        for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                            if isinstance(h, dict):
+                                what = h.get("command") or h.get("prompt") or h.get("type")
+                                out.append(f"{label}/{rel} hooks.{ev} {' '.join(str(what).split())[:120]}")
+            elif isinstance(v, dict) and v:
+                out += [f"{label}/{rel} {k}.{kk}" for kk in v]
+            else:
+                out.append(f"{label}/{rel} {k}")
+    mcp = read_json(os.path.join(folder, ".mcp.json"), None)
+    servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+    out += [f"{label}/.mcp.json {s}" for s in (servers if isinstance(servers, dict) else {})]
+    return out
+
+
+def pack_missing(name, folders):
+    """Пункты repo_items папок --add-dir окна (window_dirs), которых нет в пакете: ни в seen его window.json, ни
+    сервером с тем же именем в mcp.json. Папку запуска не смотрит: её настройки Claude Code грузит сам. → [строки]."""
+    _, dirs = window_dirs(folders)
+    seen = pack_window(name).get("seen") or {}
+    mcp = read_json(os.path.join(PACKS, name, "mcp.json"), {})
+    servers = set((mcp.get("mcpServers") or {}) if isinstance(mcp, dict) else {})
+    out = []
+    for d in dirs:
+        for item in repo_items(d):
+            if item in seen or ("/.mcp.json " in item and item.split("/.mcp.json ", 1)[1] in servers):
+                continue
+            out.append(item)
+    return out
+
+
+def pack_check(quiet=False):
+    """pantheon check: у каждого направления — новое в репозиториях (хук, ключ settings, сервер .mcp.json), чего нет
+    в пакете (pack_missing). Предупреждение, на код выхода не влияет; в тике — одна тревога на набор. → {окно: [..]}."""
+    found = {}
+    for name, folders in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
+        if isinstance(folders, list):
+            miss = pack_missing(name, folders)
+            if miss:
+                found[name] = miss
+            if quiet:
+                if miss:
+                    alert_once(f"check-pack-{name}", "|".join(miss),
+                               f"окно {name}: в репозиториях есть то, чего нет в пакете packs/{name} — {miss[0]}"
+                               + (f" и ещё {len(miss) - 1}" if len(miss) > 1 else "")
+                               + " (перенести в пакет или отметить в seen его window.json, metis-0933)", "check")
+                else:
+                    clear_once(f"check-pack-{name}")
+    if not quiet:
+        for name, miss in found.items():
+            for m in miss:
+                print(f"предупреждение · окно {name}: нет в пакете packs/{name} — {m}")
+    return found
+
+
 def project_allow_text(name, problems):
     shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
     return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
@@ -3133,6 +3356,19 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
             data["permissions"]["additionalDirectories"] = list(ok)
+            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; EnterWorktree и
+            # ExitWorktree закрыты (П9b: вход в worktree чужого репозитория загрузил бы его настройки) — worktree
+            # задачи окно заводит `git worktree add`; пакет направления — allow, deny, ask, plugins, env, sandbox
+            data["env"][ADD_DIRS_ENV] = "1"
+            deny_list = data["permissions"].setdefault("deny", [])
+            deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
+            bad = window_extra_apply(data, pack_window(name))
+            if bad:
+                alert_once(f"pack-extra-{name}", repr(bad), f"packs/{name}/window.json: не влито в окно {name} — "
+                           + "; ".join(f"{k}: {v}" for k, v in bad)[:400] + " (неизвестный ключ, не строка или allow "
+                           "с gh pr merge, metis-0137)", "pantheon")
+            else:
+                clear_once(f"pack-extra-{name}")
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
@@ -3763,7 +3999,9 @@ def _resume_session(name, a, text, origin):
     # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
+    # схема А (metis-0933): те же --add-dir, AGENTS.md и пакет, что у pantheon start (--resume прежних флагов не берёт)
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name,
+            *window_launch(got[3], name), "--settings", run, text]
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
@@ -7155,7 +7393,11 @@ def check(paths=None, quiet=False):
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
         tail_alert(T, tails)
+        if not paths:
+            pack_check(quiet=True)
         return 0
+    if not paths:
+        pack_check()  # предупреждение, на код выхода не влияет (metis-0933)
     return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad or coord_errs else 0
 
 

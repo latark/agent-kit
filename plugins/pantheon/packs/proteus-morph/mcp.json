@@ -1,0 +1,45 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp@latest"
+      ]
+    },
+    "grafana": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "cd \"${HOME}/projects/MorphStream/app\" && exec bash ./scripts/start-grafana-mcp.sh"
+      ]
+    },
+    "next-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "next-devtools-mcp@0.4.0"
+      ],
+      "env": {
+        "NEXT_TELEMETRY_DISABLED": "1"
+      }
+    },
+    "shadcn": {
+      "command": "npx",
+      "args": [
+        "shadcn@4.8.2",
+        "mcp"
+      ]
+    },
+    "upstash": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "cd \"${HOME}/projects/MorphStream/app\" && exec bash ./scripts/start-upstash-mcp.sh"
+      ]
+    },
+    "vast-ai": {
+      "type": "http",
+      "url": "https://docs.vast.ai/mcp"
+    }
+  }
+}

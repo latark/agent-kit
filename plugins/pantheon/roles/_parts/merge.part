@@ -2,8 +2,8 @@ PR в основную ветку сливают только через шлю�
 записи:
 1. Тесты — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
    отдельным вызовом Bash, не в фоне; пустую (`true`, `echo`) шлюз не примет. В изолированной сессии переключи
-   worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach <sha>`), иначе — EnterWorktree в папку
-   под `.claude/worktrees/`. Не `cd`: с ним guard запись не сделает. Не переключить (`.claude/`) или набор
+   worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach <sha>`). Не `cd`: с ним guard запись не
+   сделает. EnterWorktree окну направления закрыт (metis-0933). Не переключить (`.claude/`) или набор
    долгий — `pantheon outside test --sha <head> --wait 590`, его можно в фоне: запись пишет плановый проход, и /clear
    её не теряет (metis-0905).
 2. «Принять» от argus с перечнем «открыл / запустил / не проверял» — запись `pantheon review accept …` он делает сам.
