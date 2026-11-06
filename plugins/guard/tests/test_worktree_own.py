@@ -34,14 +34,25 @@ try:
     for d in ("projects/legal-watch/.claude/worktrees/a", "projects/expert-corpus/.claude/worktrees/themis-0020",
               "projects/expert-corpus/src", "projects/brokerAssistantApp/.claude/worktrees/x",
               "projects/stray/.claude/worktrees/y", ".local/state/pantheon", "links",
-              "projects/legal-watch/data/.claude/worktrees/z", "projects/brokerAssistantApp/fin/.claude/worktrees/q"):
+              "projects/legal-watch/data/.claude/worktrees/z", "projects/brokerAssistantApp/fin/.claude/worktrees/q",
+              "projects/MorphStream/app/.claude/worktrees/p1", "projects/MorphStream/app/src",
+              "projects/MorphStream/gpu-worker/.claude/worktrees/g1"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
+    # .git — у репозиториев; MorphStream — контейнер без git (ревью argus PR #360), у worktree — файл .git
+    for d in ("legal-watch", "expert-corpus", "legal-watch/data", "brokerAssistantApp", "brokerAssistantApp/fin",
+              "stray", "MorphStream/app", "MorphStream/gpu-worker"):
+        os.makedirs(os.path.join(root, "projects", d, ".git"))
+    for d in ("expert-corpus/.claude/worktrees/themis-0020", "MorphStream/app/.claude/worktrees/p1",
+              "legal-watch/data/.claude/worktrees/z"):
+        with open(os.path.join(root, "projects", d, ".git"), "w") as fh:
+            fh.write("gitdir: x\n")
     os.symlink(os.path.join(root, "projects/brokerAssistantApp"), os.path.join(root, "links/ba"))
     with open(os.path.join(root, ".local/state/pantheon/domains.json"), "w") as fh:
         json.dump({"domains": {"themis-sources": ["~/projects/legal-watch", "~/projects/expert-corpus",
                                                   "~/projects/legal-watch/data"],
                                "athena-brokerassistant": ["~/projects/brokerAssistantApp"],
-                               "plutus-finance": ["~/projects/brokerAssistantApp/fin"]}}, fh)
+                               "plutus-finance": ["~/projects/brokerAssistantApp/fin"],
+                               "proteus-morph": ["~/projects/MorphStream"]}}, fh)
     spec = importlib.util.spec_from_file_location("guard_under_test", RULES)
     g = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(g)
@@ -90,6 +101,73 @@ try:
     r = run({"path": BA + "/fin/.claude/worktrees/q"}, cwd=LW)
     check("4 вложенная чужая папка — называет самое глубокое направление",
           bool(r) and "pantheon start plutus-finance" in r and "athena-brokerassistant" not in r, r)
+    r = run({"path": BA + "/fin/.claude/worktrees/q"}, cwd=BA, win="athena-brokerassistant")
+    check("4 вложенная чужая папка внутри своей — отказ чужого направления, не пропуск",
+          bool(r) and "pantheon start plutus-finance" in r, r)
+
+    # папка направления — контейнер репозиториев (ревью argus 1 PR #360, Б): репозиторий — путь до .claude/worktrees
+    MS = os.path.join(root, "projects/MorphStream")
+    r = run({"path": MS + "/app/.claude/worktrees/p1"}, cwd=MS + "/app", win="proteus-morph")
+    check("11 контейнер: worktree репозитория app из app — пропуск", r is None, r)
+    r = run({"path": ".claude/worktrees/p1"}, cwd=MS + "/app", win="proteus-morph")
+    check("11 контейнер: относительный path из app — пропуск", r is None, r)
+    r = run({"path": MS + "/app/.claude/worktrees/p1"}, cwd=MS + "/app/src", win="proteus-morph")
+    check("11 контейнер: из подпапки app — пропуск", r is None, r)
+    r = run({"path": MS + "/app/.claude/worktrees/p1"}, cwd=MS, win="proteus-morph")
+    check("11 контейнер: из самого контейнера — отказ с подсказкой cd в app",
+          bool(r) and f"cd {MS}/app`" in r, r)
+    r = run({"path": MS + "/gpu-worker/.claude/worktrees/g1"}, cwd=MS + "/app", win="proteus-morph")
+    check("11 контейнер: worktree соседнего репозитория из app — отказ с cd в gpu-worker",
+          bool(r) and f"cd {MS}/gpu-worker`" in r, r)
+    r = run({"path": MS + "/app/.claude/worktrees/p1"}, cwd=MS + "/app/.claude/worktrees/p1", win="proteus-morph")
+    check("11 контейнер: сессия уже в worktree app — пропуск", r is None, r)
+    # вложенный репозиторий (Д): сессия в LW/data, path в worktree родителя LW — Claude Code спросил бы владельца
+    r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW + "/data")
+    check("12 вложенный репозиторий: из LW/data в LW/.claude/worktrees/a — отказ с cd в LW",
+          bool(r) and f"cd {LW}`" in r, r)
+    r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW + "/data/.claude/worktrees/z")
+    check("12 вложенный репозиторий: из worktree LW/data — отказ", bool(r) and f"cd {LW}`" in r, r)
+
+    # настройки проекта не папки запуска (ревью argus 2 PR #360, Б): allow, sandbox, hooks, env расширили бы окно
+    def settings(folder, data, fn="settings.json"):
+        os.makedirs(os.path.join(folder, ".claude"), exist_ok=True)
+        f = os.path.join(folder, ".claude", fn)
+        with open(f, "w") as fh:
+            fh.write(data if isinstance(data, str) else json.dumps(data))
+        return f
+    f = settings(EC, {"permissions": {"allow": ["Bash(mailkeeper scan *)"]},
+                      "sandbox": {"excludedCommands": ["mailkeeper *"]}})
+    r = run({"path": WT}, cwd=EC)
+    check("13 вторая папка с allow и excludedCommands — отказ worktree-own с ключами",
+          bool(r) and "worktree-own" in r and "permissions.allow" in r and "sandbox.excludedCommands" in r, r)
+    r = run({"name": "themis-0099"}, cwd=EC + "/src")
+    check("13 то же с name из второй папки — отказ", bool(r) and "permissions.allow" in r, r)
+    for data, key in (({"hooks": {"Stop": [{"hooks": []}]}}, "hooks"), ({"env": {"PATH": "/x"}}, "env"),
+                      ({"sandbox": {"enabled": False}}, "sandbox.enabled"),
+                      ({"sandbox": {"filesystem": {"allowWrite": ["/"]}}}, "sandbox.filesystem"),
+                      ({"permissions": {"defaultMode": "bypassPermissions"}}, "permissions.defaultMode"),
+                      ({"enabledMcpjsonServers": ["x"]}, "enabledMcpjsonServers"), ("{не json", "?")):
+        settings(EC, data)
+        r = run({"path": WT}, cwd=EC)
+        check(f"13 ключ {key} во второй папке — отказ", bool(r) and f": {key}" in r, r)
+    settings(EC, {"permissions": {"deny": ["Bash(rm *)"], "ask": ["Bash(git push *)"]},
+                  "sandbox": {"autoAllowBashIfSandboxed": True, "enabled": True}, "model": "opus", "hooks": {}})
+    r = run({"path": WT}, cwd=EC)
+    check("13 только сужающие и пустые ключи — пропуск", r is None, r)
+    os.remove(f)
+    f = settings(WT, {"env": {"X": "1"}}, "settings.local.json")
+    r = run({"path": WT}, cwd=EC)
+    check("13 настройки в самой worktree — отказ", bool(r) and "env" in r and WT in r, r)
+    os.remove(f)
+    f = settings(LW, {"hooks": {"Stop": [{"hooks": []}]}, "permissions": {"allow": ["Bash(ls)"]}})
+    r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW)
+    check("13 папка запуска со своими настройками — пропуск (окно их приняло)", r is None, r)
+    r = run({"name": "themis-0100"}, cwd=LW)
+    check("13 name в папке запуска — пропуск", r is None, r)
+    os.remove(f)
+    r = run({"path": WT}, cwd=EC)
+    check("13 настройки убраны — снова пропуск", r is None, r)
+
     r = run({"path": os.path.join(root, "projects/stray/.claude/worktrees/y")}, cwd=LW)
     check("5 вне папок направлений — отказ", bool(r) and "worktree-own" in r and "themis-sources" in r, r)
     r = run({"name": "themis-0021"}, cwd=LW)

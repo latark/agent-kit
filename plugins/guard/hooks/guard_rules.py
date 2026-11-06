@@ -4736,24 +4736,101 @@ def check_hq_sessync(event, tool, tool_input):
 
 
 # worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
-# EnterWorktree с path только в .claude/worktrees/ папок своего направления. Claude Code спрашивает владельца
+# EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
 # («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
 # ТЕКУЩЕЙ папки сессии. Это проверка safetyCheck: её не снимают ни правило allow, ни permissions.additionalDirectories,
 # ни allow хука — снимает только cd в тот репозиторий. Папки направления — рабочие папки окна (additionalDirectories,
-# sandbox_build), поэтому cd туда сохраняется. Правило:
-#   - path в .claude/worktrees/<имя> своей папки, сессия стоит в той же папке — пропуск: Claude Code пустит без вопроса;
-#   - path там же, а сессия стоит в другой папке — отказ с подсказкой: сначала `cd <папка>`, затем тот же вызов;
-#   - своя папка, но не .claude/worktrees/ — отказ: worktree окна — только под .claude/worktrees/;
+# sandbox_build), поэтому cd туда сохраняется. Репозиторий worktree — путь до последнего `.claude/worktrees/<имя>`
+# (ревью argus PR #360): папка направления бывает контейнером репозиториев (~/projects/MorphStream не git, внутри app,
+# gpu-worker со своими worktrees). Правило:
+#   - репозиторий внутри своей папки (самая глубокая папка направлений над ним — твоя), сессия стоит в нём: ближайший
+#     .git над cwd — сам репозиторий или его worktree — пропуск: Claude Code пустит без вопроса;
+#   - сессия в другом репозитории, в том числе во вложенном (LW/data → LW/.claude/worktrees/a) — отказ: сначала cd;
+#   - своя папка, но не .claude/worktrees/<имя> — отказ: worktree окна — только под .claude/worktrees/;
 #   - папка чужого направления — отказ с подсказкой: `pantheon start <направление>` или задача ему;
 #   - вне папок направлений — отказ. Вопроса владельцу не бывает ни в одном случае.
-# Без path (EnterWorktree с name — новая worktree в репозитории текущей папки) и вне окна направления — молчит.
+# Настройки проекта (ревью argus 2 PR #360, вариант 2 по содержимому): EnterWorktree загружает .claude/settings.json и
+# settings.local.json репозитория и worktree — allow, hooks, sandbox, env, MCP проекта. Папку запуска окно приняло при
+# старте (allow_gate в pantheon.py); в другом репозитории своего направления такие ключи расширили бы окно молча —
+# отказ, и с path, и с name (новая worktree в репозитории cwd). Вне окна направления правило молчит.
 WORKTREES_DIR = ".claude/worktrees/"
+# ключи настроек проекта, которые расширяют окно: truthy значение — отказ. permissions и sandbox — по вложенным ключам
+WIDEN_KEYS = ("hooks", "env", "enabledPlugins", "enabledMcpjsonServers", "enableAllProjectMcpServers", "apiKeyHelper",
+              "statusLine", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
+SAFE_PERMISSIONS = ("deny", "ask")
+SAFE_SANDBOX = ("autoAllowBashIfSandboxed", "failIfUnavailable", "enabled")
 
 
-def _deepest(target, folders):
-    """Самая глубокая папка из folders, внутри которой target, или None."""
-    inside = [f for f in folders if _inside(target, [f])]
-    return max(inside, key=len) if inside else None
+def _wt_repo(path):
+    """(репозиторий, папка worktree) для пути под последним `.claude/worktrees/<имя>`, иначе (None, None)."""
+    parts = path.split("/")
+    for i in range(len(parts) - 3, 0, -1):
+        if parts[i].casefold() == ".claude" and parts[i + 1].casefold() == "worktrees" and parts[i + 2]:
+            return "/".join(parts[:i]) or "/", "/".join(parts[:i + 3])
+    return None, None
+
+
+def _git_root(cwd, stop):
+    """Ближайшая папка с .git над cwd (cwd включительно), не выше stop; нет — None."""
+    d = cwd
+    while _inside(d, [stop]):
+        if os.path.lexists(os.path.join(d, ".git")):
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return None
+
+
+def _owner(path, doms):
+    """(папка, направление) — самая глубокая папка направлений, внутри которой path, или (None, None)."""
+    hits = [(f, n) for n, fs in doms.items() if isinstance(fs, list)
+            for f in _norm([x for x in fs if isinstance(x, str)]) if _inside(path, [f])]
+    return max(hits, key=lambda x: len(x[0])) if hits else (None, None)
+
+
+def _launch(folders):
+    """Папка запуска — как launch_folder в pantheon.py: первая существующая, иначе первая."""
+    real = _norm([f for f in folders if isinstance(f, str) and f])
+    return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
+
+
+def _widening(dirs):
+    """[(файл, ключ)] — ключи .claude/settings*.json папок dirs, расширяющие окно (WIDEN_KEYS, permissions кроме deny
+    и ask, sandbox кроме безопасных и enabled: false). Нечитаемый файл — сам по себе ключ «?»: Claude Code его прочтёт."""
+    found = []
+    for d in dirs:
+        for fn in ("settings.json", "settings.local.json"):
+            f = os.path.join(d, ".claude", fn)
+            if not os.path.lexists(f):
+                continue
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                found.append((f, "?"))
+                continue
+            if not isinstance(data, dict):
+                continue
+            keys = [k for k in WIDEN_KEYS if data.get(k)]
+            for top, safe in (("permissions", SAFE_PERMISSIONS), ("sandbox", SAFE_SANDBOX)):
+                sub = data.get(top)
+                if isinstance(sub, dict):
+                    keys += [f"{top}.{k}" for k, v in sub.items() if v and k not in safe]
+                    if top == "sandbox" and sub.get("enabled") is False:
+                        keys.append("sandbox.enabled")
+                elif sub:
+                    keys.append(top)
+            found += [(f, k) for k in keys]
+    return found
+
+
+def _widen_msg(repo, found):
+    shown = "; ".join(f"{f}: {', '.join(k for g, k in found if g == f)}" for f in dict.fromkeys(f for f, _ in found))
+    return (f"Правило worktree-own: EnterWorktree в {repo} загрузил бы в окно настройки проекта ({shown}) — это не папка "
+            "запуска, и права окна выросли бы молча (metis-0911). Работай в репозитории без worktree или верни в отчёт: "
+            "ключи убирает или принимает владелец, из окна его не спрашивай.")
 
 
 def check_worktree_own(event, tool, tool_input):
@@ -4762,31 +4839,37 @@ def check_worktree_own(event, tool, tool_input):
     raw = tool_input.get("path")
     win = os.environ.get("PANTHEON_WINDOW") or ""
     doms = load_domains().get("domains") or {}
-    if not isinstance(raw, str) or not raw or not isinstance(doms.get(win), list):
+    if not isinstance(doms.get(win), list):
         return None
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    launch = _launch(doms[win])
+    if not isinstance(raw, str) or not raw:  # name: новая worktree в репозитории cwd — только сверка настроек
+        folder, owner = _owner(cwd, doms)
+        repo = _git_root(cwd, folder) if owner == win else None
+        found = _widening([repo]) if repo and _key(repo) != _key(launch) else []
+        return _widen_msg(repo, found) if found else None
     target = _expand(raw, cwd)
-    own = _deepest(target, _norm([x for x in doms[win] if isinstance(x, str)]))
-    if own is not None:
-        rel = _rel(target, own)
-        if not rel.startswith(WORKTREES_DIR):  # realpath без «/» в конце: сама папка worktrees сюда не проходит
-            return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/ репозитория "
-                    f"(metis-0911). Worktree окна — только `{own}/{WORKTREES_DIR}<имя>`: `cd {own}` отдельной командой "
-                    "Bash, затем EnterWorktree с name, или `git worktree add .claude/worktrees/<имя>` и EnterWorktree "
-                    "с этим path.")
-        if _inside(cwd, [own]):
+    repo, wt = _wt_repo(target)
+    folder, owner = _owner(repo or target, doms)
+    if owner == win and repo is None:
+        return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/<имя> репозитория "
+                f"(metis-0911). Worktree окна — только `<репозиторий>/{WORKTREES_DIR}<имя>`: `cd <репозиторий>` "
+                "отдельной командой Bash, затем EnterWorktree с name, или `git worktree add .claude/worktrees/<имя>` и "
+                "EnterWorktree с этим path.")
+    if owner == win:
+        found = _widening([repo, wt]) if _key(repo) != _key(launch) else []
+        if found:
+            return _widen_msg(repo, found)
+        root = _git_root(cwd, repo)
+        if root and (_key(root) == _key(repo) or _key(_wt_repo(root)[0] or "") == _key(repo)):
             return None
-        return (f"Правило worktree-own: сессия стоит в {cwd}, а {target} — worktree другого репозитория твоего "
-                f"направления; так Claude Code спросил бы владельца (metis-0911). Сначала `cd {own}` отдельной командой "
-                "Bash (папки направления — рабочие папки окна, cd сохраняется), затем тот же EnterWorktree.")
-    # своих папок над target нет (own is None) — совпасть могут только чужие
-    other = [(f, n) for n, fs in doms.items() if isinstance(fs, list)
-             for f in _norm([x for x in fs if isinstance(x, str)]) if _inside(target, [f])]
-    if other:
-        name = max(other, key=lambda x: len(x[0]))[1]
-        return (f"Правило worktree-own: {target} — репозиторий направления {name}, не твоего ({win}); это работа {name} "
-                f"(metis-0911). Поручение — задачей направлению {name} или файлом в ~/ai/pantheon/directions/{name}/inbox/, "
-                f"затем `pantheon start {name}`. Владельца не спрашивай.")
+        return (f"Правило worktree-own: сессия стоит в {cwd}, а {target} — worktree репозитория {repo}; так Claude Code "
+                f"спросил бы владельца (metis-0911). Сначала `cd {repo}` отдельной командой Bash (папки направления — "
+                "рабочие папки окна, cd сохраняется), затем тот же EnterWorktree.")
+    if owner:
+        return (f"Правило worktree-own: {target} — репозиторий направления {owner}, не твоего ({win}); это работа {owner} "
+                f"(metis-0911). Поручение — задачей направлению {owner} или файлом в ~/ai/pantheon/directions/{owner}/inbox/, "
+                f"затем `pantheon start {owner}`. Владельца не спрашивай.")
     return (f"Правило worktree-own: {target} — вне папок направления {win} (directions.toml, folders); окно входит "
             "EnterWorktree только в .claude/worktrees/ своих репозиториев (metis-0911). Нужен другой репозиторий — "
             "задача его направлению, а не вопрос владельцу.")
