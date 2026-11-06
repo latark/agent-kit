@@ -654,7 +654,7 @@ def checks(out):
 
 
 # Явный провал в выводе (metis-0556): строка с начала — `FAIL <имя>`, `НЕ ПРОШЛО`, `Traceback (most recent call last)`,
-# итог `FAIL K` (K>0); где угодно — «не прошло: K» и «K не прошло» при K>0. Слово FAIL внутри строки или имени теста,
+# итог `FAIL K` (K>0); где угодно — «не прошло: K» и «K не прошло» при K>0 (кроме строк ok — там имя проверки). Слово FAIL внутри строки или имени теста,
 # «FAIL 0», «не прошло: 0» провалом не считаются.
 _EXPLICIT_LINE = (
     (re.compile(r"\s*FAIL\s+0+\s*$"), None),  # итог «FAIL 0» — чисто
@@ -674,7 +674,7 @@ def explicit_fail(out):
                     return f"в выводе {why}: «{ln.strip()[:80]}»"
                 break
         else:
-            m = _EXPLICIT_COUNT.search(ln)
+            m = None if re.match(r"\s*ok\b", ln) else _EXPLICIT_COUNT.search(ln)  # строка ok — имя проверки
             if m and int(m[1] or m[2]) > 0:
                 return f"в выводе «{m[0]}»: «{ln.strip()[:80]}»"
     return None

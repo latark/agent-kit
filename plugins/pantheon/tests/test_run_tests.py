@@ -295,6 +295,7 @@ for nm, body in (("«не прошло: 0»", "ok a\nне прошло: 0\n1/1\n
                  ("FAIL внутри имени", "ok test_FAIL_case\nok a FAIL b\n2/2\n"),
                  ("«0 не прошло»", "ok a\nтестов: 3 прошло, 0 не прошло\n"),
                  ("Traceback в середине строки", "ok a  # ожидаемый Traceback (most recent call last)\n1/1\n"),
+                 ("строка ok с «1 не прошло» в имени", "ok checks: «3 прошло, 1 не прошло» — 4\n4/4\n"),
                  ("«FAILED» без пробела", "ok a\nok FAILURE-mode\n1/1\n")):
     v = R.verdict(0, body, False)
     check(f"verdict: код 0 с {nm} — не ложное срабатывание", v[0] is True, v)
