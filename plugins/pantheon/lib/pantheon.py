@@ -3358,9 +3358,12 @@ SESSION_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 
 
 def workshop_root():
-    """Папка мастерской по факту на диске (вариант А, 06.11 18:06): ~/ai/workshop, если она есть, иначе старая папка
-    workshop в ~/projects — до переноса окна и задачи мастерской остаются там (lib/moved.py, общая с ctx.py)."""
-    return moved_mod().workshop_root(HOME)
+    """Папка мастерской по факту на диске (вариант А, 06.11 18:06): ~/ai/workshop, если она есть и не ссылка, иначе
+    старая папка workshop в ~/projects — до переноса окна и задачи мастерской остаются там. Правило здесь, а не в
+    lib/moved.py: по нему sandbox_build (ядро) открывает запись окну workshop, а moved.py вне ядра (argus-4 Б1). Копии —
+    moved.workshop_root и ctx.workshop_root; совпадение трёх держит test_workshop_sockets."""
+    new = os.path.join(HOME, "ai", "workshop")
+    return new if os.path.isdir(new) and not os.path.islink(new) else os.path.join(HOME, "projects", "workshop")
 
 
 def workshop_dir():

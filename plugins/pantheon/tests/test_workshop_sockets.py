@@ -126,6 +126,11 @@ def workshop_by_fact():
     check("мастерская без ~/ai/workshop: роль — в старой папке",
           "~/projects/workshop/<задача>" in role() and "~/ai/workshop/<задача>" not in role())
     os.makedirs(new)
+    dj = os.path.join(state, "domains.json")
+    d = json.load(open(dj))
+    d["built_ts"] = 4102444800   # 2100 год: по mtime сборка свежая, пересобрать велит только поле workshop (argus-3 Д1)
+    d.pop("grants_next", None)
+    json.dump(d, open(dj, "w"))
     r = build("--if-changed")
     w = aw()
     check("появилась ~/ai/workshop: --if-changed пересобрал, песочница пишет в новую, старой нет",
@@ -141,21 +146,48 @@ def workshop_by_fact():
         spec.loader.exec_module(m)
         return m
     ctx, moved = load("ctx_ws", os.path.join("hooks", "ctx.py")), load("moved_ws", os.path.join("lib", "moved.py"))
+    pan = lambda h: subprocess.run(       # pantheon.HOME — из окружения при загрузке, поэтому отдельный процесс
+        [py311(), "-I", "-c", "import importlib.util as u,sys;s=u.spec_from_file_location('p',sys.argv[1]);"
+         "m=u.module_from_spec(s);s.loader.exec_module(m);print(m.workshop_root())", LIB],
+        env={"PATH": os.environ["PATH"], "HOME": h, "PANTHEON_HOME": os.path.join(h, "pantheon"),
+             "PANTHEON_STATE": os.path.join(h, "state")}, capture_output=True, text=True, timeout=60).stdout.strip()
     h = os.path.join(ROOT, "parity")
     os.makedirs(os.path.join(h, "ai"))
     os.makedirs(os.path.join(h, "elsewhere"))
     states = []
-    states.append((ctx.workshop_root(h), moved.workshop_root(h)))               # новой нет
+    states.append((ctx.workshop_root(h), moved.workshop_root(h), pan(h)))       # новой нет
     os.symlink(os.path.join(h, "elsewhere"), os.path.join(h, "ai", "workshop"))
-    states.append((ctx.workshop_root(h), moved.workshop_root(h)))               # новая — ссылка
+    states.append((ctx.workshop_root(h), moved.workshop_root(h), pan(h)))       # новая — ссылка
     os.remove(os.path.join(h, "ai", "workshop"))
     os.makedirs(os.path.join(h, "ai", "workshop"))
-    states.append((ctx.workshop_root(h), moved.workshop_root(h)))               # новая — папка
-    check("ctx.workshop_root совпадает с moved.workshop_root: нет новой, ссылка, папка",
-          all(a == b for a, b in states) and states[0][0] == os.path.join(h, "projects", "workshop")
+    states.append((ctx.workshop_root(h), moved.workshop_root(h), pan(h)))       # новая — папка
+    check("workshop_root: pantheon.py (ядро), ctx.py и moved.py совпадают — нет новой, ссылка, папка",
+          all(a == b == c for a, b, c in states) and states[0][0] == os.path.join(h, "projects", "workshop")
           and states[1][0] == states[0][0] and states[2][0] == os.path.join(h, "ai", "workshop"))
-    if not all(a == b for a, b in states):
+    if not all(a == b == c for a, b, c in states):
         print("     ", states)
+    # мутант: moved.workshop_root отдаёт папку чужого направления — песочница окна workshop её не получает
+    plug = os.path.join(ROOT, "mutplug")
+    shutil.copytree(PLUGIN, plug, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    mp = os.path.join(plug, "lib", "moved.py")
+    src = open(mp, encoding="utf-8").read()
+    rule = "return new if os.path.isdir(new) and not os.path.islink(new) else old"
+    open(mp, "w", encoding="utf-8").write(src.replace(rule, 'return os.path.join(home, "projects", "br")'))
+    mh = os.path.join(ROOT, "mut")
+    os.makedirs(os.path.join(mh, "pantheon"))
+    os.makedirs(os.path.join(mh, "projects", "br"))
+    os.makedirs(os.path.join(mh, "projects", "workshop"))
+    with open(os.path.join(mh, "pantheon", "directions.toml"), "w") as fh:
+        fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
+    r = subprocess.run([py311(), "-I", os.path.join(plug, "lib", "run.py"), "domains", "build"],
+                       env={"PATH": os.environ["PATH"], "HOME": mh, "PANTHEON_HOME": os.path.join(mh, "pantheon"),
+                            "PANTHEON_STATE": os.path.join(mh, "state"), "PANTHEON_NO_NOTIFY": "1"},
+                       capture_output=True, text=True, timeout=120)
+    mw = json.load(open(os.path.join(mh, "state", "settings", "workshop.json")))["sandbox"]["filesystem"]["allowWrite"]
+    br = os.path.realpath(os.path.join(mh, "projects", "br"))
+    check("мутант moved.workshop_root → ~/projects/br: workshop.json его не берёт, пишет в старую мастерскую",
+          r.returncode == 0 and rule in src and not any(x == br or x.startswith(br + "/") for x in mw)
+          and os.path.realpath(os.path.join(mh, "projects", "workshop")) in mw)
 
 
 def main():

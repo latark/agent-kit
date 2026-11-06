@@ -16,8 +16,9 @@
   TICK_SUBCOMMANDS): запуск — разовый, вручную после переноса папки и «да» владельца на план.
 
 workshop_root(home) — папка мастерской по факту на диске (вариант А, координатор 06.11 18:06): новая ~/ai/workshop,
-если она есть, иначе старая (workshop в ~/projects). Её берут песочница окна workshop, `pantheon start workshop`, текст
-роли и ctx.py — до переноса мастерская остаётся в старой папке.
+если она есть и не ссылка, иначе старая (workshop в ~/projects). Правило — в pantheon.workshop_root (ядро): по нему
+песочница окна workshop, `pantheon start workshop` и текст роли; здесь и в ctx.py — копии (argus-4 Б1), совпадение
+трёх держит test_workshop_sockets.
 
 `pantheon check --moved` — те же файлы (и личное, если читается, — только числом, без имён файлов): старый путь
 сделанного переноса — предупреждение, чтобы агент не вернул его из памяти. Код 1 — старые пути есть, 0 — нет.
@@ -59,7 +60,9 @@ def done(name, home):
 
 
 def workshop_root(home):
-    """Папка мастерской по факту: новая (~/ai/workshop), если она есть и не ссылка, иначе старая (workshop в ~/projects)."""
+    """Папка мастерской по факту: новая (~/ai/workshop), если она есть и не ссылка, иначе старая (workshop в ~/projects).
+    Копия pantheon.workshop_root (ядро; окно workshop собирается по нему, не по этой) — совпадение держит
+    test_workshop_sockets."""
     old, new = paths("workshop", home)
     return new if os.path.isdir(new) and not os.path.islink(new) else old
 

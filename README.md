@@ -642,8 +642,9 @@
   проходе, тревога `check-moved`) и `pantheon check --moved` — предупреждение на каждый файл со старым путём сделанного
   переноса, кроме тех же исключений; личные файлы (`me`, `Self`, `Areas`, `People`) — только числом, без имён, и в
   выводе, и в тревоге. Код выхода `pantheon check` оно не меняет.
-- Мастерская — по факту на диске (`workshop_root` в `lib/moved.py`, одна на песочницу окна workshop, `pantheon start
-  workshop`, текст роли `{{workshop}}` и ctx.py; metis-0899): `~/ai/workshop/<задача>`, если `~/ai/workshop` есть,
+- Мастерская — по факту на диске (`workshop_root` в `lib/pantheon.py`: песочница окна workshop, `pantheon start
+  workshop`, текст роли `{{workshop}}`; копии в ctx.py и `lib/moved.py` — ядро moved.py не грузит, совпадение трёх
+  держит test_workshop_sockets; metis-0899): `~/ai/workshop/<задача>`, если `~/ai/workshop` есть,
   иначе старая папка workshop в `~/projects`. Появилась новая — `domains build --if-changed` пересобирает окно и роль
   (поле `workshop` в domains.json). Окна ролей пишут в
   `SANDBOX_ROOTS`: подпапки `~/projects` и `~/ai/life`, а также `~/ai/knowledge`, `~/ai/workshop`, `~/ai/agent-kit`.

@@ -1032,9 +1032,9 @@ CHAT_WALK = 400  # шагов по цепочке parentUuid назад от в�
 
 
 def workshop_root(home):
-    """Папка мастерской по факту — то же правило, что moved.workshop_root (metis-0899): новая ~/ai/workshop, если
-    есть и не ссылка, иначе старая workshop в ~/projects. Копия, а не загрузка moved.py: ctx.py — ядро защит, moved.py
-    нет (test_core_deps); совпадение копий держит test_workshop_sockets."""
+    """Папка мастерской по факту — копия pantheon.workshop_root (metis-0899): новая ~/ai/workshop, если есть и не
+    ссылка, иначе старая workshop в ~/projects. Копия, а не загрузка: ctx.py — ядро защит, moved.py вне ядра
+    (test_core_deps); совпадение трёх копий держит test_workshop_sockets."""
     new = os.path.join(home, "ai", "workshop")
     return new if os.path.isdir(new) and not os.path.islink(new) else os.path.join(home, "projects", "workshop")
 
