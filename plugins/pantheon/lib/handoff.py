@@ -19,7 +19,8 @@
                           заявка на торги, перевод денег, удаление аккаунта, госкабинеты)
   правка защит          → только PR и шлюз слияния (`pantheon merge request`); Touch ID вне шлюза её не разрешает
   удаление пачки        → только «да» владельца словами (вопрос через Зевса)
-  белый список Touch ID → `pantheon handoff touch` (удалить worktree без своего, deploy.sh, перезапуск демона CDP)
+  белый список Touch ID → `pantheon handoff touch` (удалить worktree без своего, deploy.sh слитого коммита,
+                          перезапуск демона CDP)
   браузер владельца     → Харон: карточка Зевсу «Харону: …», Зевс зовёт charon
   Telegram              → `pantheon read request`
   тесты и серверы       → `pantheon outside test|serve`
@@ -37,15 +38,18 @@
 Окно Touch ID (одно действие, один раз, по хешу текста):
   1. Роль пишет заявку: вид, цель, задача, зачем. Заявка из окна роли — в handoff/ рядом с PANTHEON_TMP (кэш окна, туда
      окно пишет само), вне окна — STATE/handoff/queue. Кто просит — имя окна по месту папки заявки (не из текста) и
-     роль со слов заявки. Текст окна собирает describe() из живых фактов: путь, ветка и HEAD worktree, хеш deploy.sh,
-     порт демона. Факты не те (коммит только здесь, ссылка, путь вне ~/projects, чужой gitdir) — отказ сразу.
+     роль со слов заявки. Текст окна собирает describe() из живых фактов: путь, ветка и HEAD worktree, хеш deploy.sh
+     и ветка origin, где есть HEAD, порт демона. Факты не те (коммит только здесь, ссылка, путь вне ~/projects, чужой
+     gitdir, HEAD не слит) — отказ сразу.
      git у владельца идёт вне песочницы и config роли не читает: частный GIT_DIR в STATE (свой config, копия HEAD,
      refs и объекты роли — только как данные), глобальный и системный config выключены, защитные ключи — через
      GIT_CONFIG_COUNT (private_git). Config роли — копией байтов через `git config --file --no-includes`; ключ вне
      белого списка GIT_KEYS_OK — отказ. До вопроса — только чтение объектов (rev-parse, cat-file, ls-tree,
      for-each-ref); status с неотслеживаемыми — после пальца, до действия. deploy — только основная копия (не
-     worktree, не .claude/, не кэш окна); исполняются байты deploy.sh из коммита HEAD (`cat-file blob`), чей хеш
-     показан, через bash -s; дерево проверяется до и после запуска.
+     worktree, не .claude/, не кэш окна) и только слитый HEAD: он есть в ветке по умолчанию origin (цель
+     refs/remotes/origin/HEAD, без неё — main, потом master) по уже известным ссылкам, без fetch; не слит или
+     ссылки нет — отказ «только шлюз», окно показывает «HEAD … есть в origin/<ветка>». Исполняются байты deploy.sh из
+     коммита HEAD (`cat-file blob`), чей хеш показан, через bash -s; дерево проверяется до и после запуска.
   2. Проход (тик, вне окна): заявка старше REQ_TTL — снята. Текст собирается заново; не равен тексту заявки — снята
      («изменилось с заявки — новая заявка»). Владелец не у Mac (простой больше PRESENT_SEC) — ждёт.
   3. Окно Touch ID — помощник слияния (merge.ask, lib/touchid.swift; merge.py не правится). Текст окна — ровно этот
@@ -538,9 +542,36 @@ def facts_worktree(target):
                         "с незакоммиченным не удалю)"}
 
 
+ORIGIN_REFS = "refs/remotes/origin/"
+
+
+def merged_into(g, head):
+    """Ветка по умолчанию origin, в которой есть head, — по уже известным ссылкам (без fetch). Ветка — цель
+    refs/remotes/origin/HEAD, без неё — main, потом master. Цель origin/HEAD висит — git её не перечисляет, и ветка
+    тоже main или master. Ссылки нет или head в ней нет — Refuse("merge")."""
+    refs = {}
+    for line in gitc(g, ["for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/origin"]).splitlines():
+        name, _, sym = line.partition(" ")
+        refs[name] = sym
+    sym = refs.get(ORIGIN_REFS + "HEAD") or ""
+    if sym:
+        base = sym[len(ORIGIN_REFS):] if sym.startswith(ORIGIN_REFS) else ""
+    else:
+        base = next((b for b in ("main", "master") if ORIGIN_REFS + b in refs), "")
+    if not base:
+        raise Refuse("merge", "нет ссылки origin на ветку по умолчанию (origin/HEAD, origin/main, origin/master) — не "
+                              "видно, слит ли HEAD: deploy только слитого через шлюз")
+    ref = ORIGIN_REFS + base
+    if ref not in gitc(g, ["for-each-ref", "--contains", head, "--format=%(refname)", ref]).splitlines():
+        raise Refuse("merge", f"HEAD {head[:7]} не слит в origin/{base} — deploy только слитого через шлюз: сначала "
+                              "PR и слияние")
+    return base
+
+
 def facts_deploy(target):
-    """Выкладка: основная копия (не worktree, не .claude/ и не кэш окна); deploy.sh — байты из коммита HEAD
-    (`git cat-file blob`), обычный файл в дереве. Исполняются ровно они (exec_deploy, bash -s)."""
+    """Выкладка: основная копия (не worktree, не .claude/ и не кэш окна); HEAD слит в ветку по умолчанию origin
+    (merged_into); deploy.sh — байты из коммита HEAD (`git cat-file blob`), обычный файл в дереве. Исполняются ровно
+    они (exec_deploy, bash -s)."""
     p = inside_projects(target)
     if "/.claude/" in p + "/" or p.startswith(caches() + "/"):
         raise Refuse("bad", "deploy — не из папки .claude/ и не из кэша окна роли")
@@ -548,6 +579,7 @@ def facts_deploy(target):
         if g["gd"] != g["common"]:
             raise Refuse("bad", "deploy — только из основной копии репозитория, не из worktree")
         head = gitc(g, ["rev-parse", "--verify", "HEAD^{commit}"])
+        base = merged_into(g, head)
         tree = gitc(g, ["ls-tree", head, "--", "deploy.sh"])
         if not re.match(r"100(?:644|755) blob [0-9a-f]{40}\tdeploy\.sh$", tree):
             raise Refuse("bad", "в коммите HEAD нет deploy.sh обычным файлом")
@@ -557,7 +589,8 @@ def facts_deploy(target):
         branch = gitc(g, ["rev-parse", "--abbrev-ref", "HEAD"])
     digest = hashlib.sha256(data).hexdigest()
     return {"path": p, "head": head, "script": digest, "bytes": data,
-            "desc": f"выложить {tilde(p)}: deploy.sh {digest[:12]} из коммита, ветка {branch}, HEAD {head[:7]}"}
+            "desc": f"выложить {tilde(p)}: deploy.sh {digest[:12]} из коммита, ветка {branch}, HEAD {head[:7]} есть "
+                    f"в origin/{base}"}
 
 
 CDP_PORTS = {"comet": 9333, "chrome": 9334}   # = browser.BROWSERS (сверяет test_handoff)
