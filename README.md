@@ -647,6 +647,12 @@
   проход показывает владельцу окно Touch ID с действием целиком (помощник слияния) и исполняет его один раз по sha256
   текста. Где Touch ID не действует — README guard, «Touch ID: где не действует». Журнал отказов —
   `STATE/logs/handoff.jsonl`, строка «Отказы за сутки» — в сводке доски (board-auto.md).
+- `plugins/pantheon/hooks/wait-owner.py` — окно роли встало на запросе разрешения (metis-0900): хук Notification
+  (matcher `permission_prompt`) пишет `pantheon alert "окно <имя> ждёт вас: <текст запроса> (с ЧЧ:ММ)"`, без
+  `--critical`; строку Зевс получает в сводке новых тревог, а владелец сразу — уведомление macOS (`pantheon notify`,
+  щелчок открывает доску). В окне Зевса (hq) и вне окон ролей молчит, одно окно — не
+  чаще раза в 2 минуты. Правило ролей (`roles/_parts/external.part`): перед таким действием — строка Зевсу «[id] жду
+  вас в окне <роль>: <что>». Тест — `plugins/pantheon/tests/test_wait_owner.py`.
 - `plugins/pantheon/lib/browser.py` — браузер владельца для ролей без пароля и порта демона (metis-0760, путь В):
   `pantheon browser health|open|read|eval|status` — чтение, `allow|click|type|submit|delete` — действия (metis-0765). Окно кладёт заявку в `browser/` своего кэша,
   демон с паролем зовёт проход вне окна (`pantheon browser run`, его запускает плановый проход, пока есть заявки). Окна —

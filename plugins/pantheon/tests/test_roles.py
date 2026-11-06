@@ -325,7 +325,7 @@ def main():
     # metis-0905: +~430 — merge.part (промежуточное уведомление субагента — не отчёт; outside test для записи — в фоне)
     # и persist.part (своя фоновая команда — ждать уведомления о конце)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 32200 and len(raw_texts["hephaestus-demo.md"]) <= 26200)  # metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 32450 and len(raw_texts["hephaestus-demo.md"]) <= 26450)  # metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -888,6 +888,12 @@ def main():
     talos_real = read(os.path.join(out_real, "talos.md"))
     check("talos: dev-сервер — pantheon outside serve --sha … --wait 120, гасит stop",
           "pantheon outside serve --sha <head PR> [--app ИМЯ] --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    # metis-0900: ожидание владельца в окне роли — строка Зевсу до действия (external.part)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "workshop.md", "hq.md"):
+        text = " ".join(read(os.path.join(out_real, f)).split())
+        check(f"{f}: перед подтверждением владельца в окне — строка Зевсу «[id] жду вас в окне <роль>: <что>» (metis-0900)",
+              "сначала строка Зевсу «[id] жду вас в окне <роль>: <что>», потом действие" in text
+              and "Окну Зевса не нужно" in text)
 
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1
