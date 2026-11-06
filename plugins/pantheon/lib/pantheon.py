@@ -3056,7 +3056,9 @@ def folders_allow_problems(folders):
 # (hooks/hooks.json), window.json (window_extra: allow, deny, ask, plugins, env, sandbox — вливает sandbox_build;
 # seen — что из репозиториев учтено и как) и mcp.json для --mcp-config (П8). AGENTS.md всех папок — один файл
 # --append-system-prompt-file: флаг не повторяется, второй затирает первый (проба 06.11 18:2x, Claude Code 2.1.318).
-PACKS = os.environ.get("PANTHEON_PACKS") or os.path.join(PLUGIN, "packs")  # PANTHEON_PACKS — для тестов
+# Откуда пакеты — только код плагина, не окружение (класс 5 «граница ядра»): переменная окна не подменит пакет. Тесты
+# подменяют константу P.PACKS в процессе, как AI_HOME через HOME.
+PACKS = os.path.join(PLUGIN, "packs")
 PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json",
                  ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
 NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
@@ -3155,8 +3157,19 @@ def window_agents_md(launch, dirs):
 PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка packs/_bin (её путь знает только ядро)
 
 
-def window_launch(window, name=None):
-    """Флаги запуска окна направления window по схеме А (metis-0933) — ставятся перед `--settings <файл>`:
+def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
+    """Весь argv запуска окна роли (metis-0933, класс 5 «граница ядра»): claude [--resume <сессия>] [--bg] --agent
+    <роль> --name <имя>, флаги схемы А окна направления window (window_flags), --settings <файл окна>, текст поручения
+    последним. Флаги запуска окна собирает только ядро: sessions.py и другие модули вне ядра argv лишь исполняют —
+    иначе PR без Touch ID дописал бы --plugin-dir или --mcp-config, и хуки пошли бы вне песочницы (тест
+    test_window_pack). window=None — без флагов схемы А (штаб)."""
+    argv = [claude_bin()] + (["--resume", resume] if resume else []) + (["--bg"] if bg else [])
+    argv += ["--agent", role, "--name", name, *window_flags(window, name), "--settings", settings]
+    return argv + ([prompt] if prompt is not None else [])
+
+
+def window_flags(window, name=None):
+    """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
     settings/run/<name>.agents.md), --plugin-dir пакета и --mcp-config его mcp.json, если они есть (${PANTHEON_PACK_BIN}
     в нём — настоящий путь packs/_bin, файл — settings/run/<name>.mcp.json). Не направление (мастерская, штаб,
@@ -4119,8 +4132,7 @@ def _resume_session(name, a, text, origin):
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
     # схема А (metis-0933): те же --add-dir, AGENTS.md и пакет, что у pantheon start (--resume прежних флагов не берёт)
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name,
-            *window_launch(got[3], name), "--settings", run, text]
+    argv = window_launch(role, name, got[3], run, text, resume=sid or a.get("id"))
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))

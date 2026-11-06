@@ -7,6 +7,8 @@
   --append-system-prompt-file с AGENTS.md всех этих папок (флаг не повторяется: второй затирает первый); AGENTS.md
   папки запуска, которую её CLAUDE.md импортирует, — не дублируется; --plugin-dir и --mcp-config пакета, если есть;
   всё до --settings; без пакета — без --plugin-dir;
+- граница ядра (класс 5): argv запуска окна целиком собирает P.window_launch, флагов запуска (LAUNCH_FLAGS) в lib/ и
+  scripts/ вне pantheon.py нет; PANTHEON_PACKS окружения пакеты не подменяет (тест подменяет константу P.PACKS);
 - `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny EnterWorktree и
   ExitWorktree, window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
   не влиты, окно собрано; мастерская — без этого;
@@ -52,6 +54,7 @@ def after(argv, flag):
 def main():
     tmp = os.path.join(ROOT, "h")
     home, state, packs = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state"), os.path.join(tmp, "packs")
+    decoy = os.path.join(tmp, "decoy-packs")
     ms, side = os.path.join(tmp, "projects/ms"), os.path.join(tmp, "projects/side")
     put(os.path.join(ms, "CLAUDE.md"), "@AGENTS.md\n")
     put(os.path.join(ms, "AGENTS.md"), "LAUNCH-RULES\n")
@@ -88,9 +91,14 @@ def main():
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state, "PANTHEON_NO_NOTIFY": "1", "PANTHEON_CLAUDE_TMP": os.path.join(tmp, "ctmp"),
-           "PANTHEON_PACKS": packs}
+           "PANTHEON_PACKS": decoy}  # класс 5: окружение не меняет, откуда пакеты, — приманка не должна попасть в argv
+    put(os.path.join(decoy, "proteus-ms", ".claude-plugin/plugin.json"), {"name": "decoy"})
     os.makedirs(env["PANTHEON_CLAUDE_TMP"])
-    run = lambda *a: subprocess.run([sys.executable, "-I", RUN_PY, *a], env=env, capture_output=True, text=True,  # noqa: E731
+    # пакеты теста — подменой константы P.PACKS в процессе (как AI_HOME через HOME), а не переменной окружения
+    shim = os.path.join(tmp, "run_packs.py")
+    put(shim, f"import sys\nsys.path.insert(0, {os.path.join(PLUGIN, 'lib')!r})\nimport pantheon\n"
+              f"pantheon.PACKS = {packs!r}\nsys.exit(pantheon.main(sys.argv[1:]))\n")
+    run = lambda *a: subprocess.run([sys.executable, "-I", shim, *a], env=env, capture_output=True, text=True,  # noqa: E731
                                     timeout=120)
     r = run("domains", "build")
     check("сборка прошла", r.returncode == 0, r.stderr)
@@ -220,8 +228,49 @@ def main():
           (code, got, code2, got2) == (0, None, 0, None), (code, got, code2, got2))
     code, got = wrap("", pre, cwd=side, ti={"command": "git commit -m x"})
     check("in_repo: --cmd-prefix — git commit вне репозитория — хук не запущен", (code, got) == (0, None), (code, got))
+    r = subprocess.run([sys.executable, "-I", RUN_PY, "start", "proteus-ms", "x", "--from", "zeus", "--dry-run"],
+                       env=env, capture_output=True, text=True, timeout=120)
+    check("PANTHEON_PACKS окружения не подменяет пакеты: обычный запуск pantheon не берёт пакет-приманку",
+          " --settings " in r.stdout and decoy not in r.stdout, (r.stdout, r.stderr))
+    r = run("start", "zeus", "--dry-run")
+    line = next((x for x in r.stdout.splitlines() if " --settings " in x), "")
+    check("штаб: start zeus --dry-run — тот же запуск через window_launch, без --bg и флагов схемы А",
+          shlex.split(line.rsplit(" (папка ", 1)[0])[1:] == ["--agent", "hq", "--name", "zeus", "--settings",
+                                                              os.path.join(state, "settings", "hq.json")],
+          (r.stdout, r.stderr))
+    launch_only_in_core()
     shipped_packs(tmp)
     return all(results)
+
+
+# Флаги, которыми запуск окна подключает своё к сессии (настройки, плагин, MCP, папки, системный текст, режим прав).
+# Класс 5 «граница ядра» (ревью #372 Д2): собирает их только pantheon.py (window_launch и job-окна), модуль вне ядра
+# дописал бы --plugin-dir или --mcp-config без Touch ID — и хуки пошли бы вне песочницы.
+LAUNCH_FLAGS = ("--settings", "--plugin-dir", "--mcp-config", "--add-dir", "--append-system-prompt", "--system-prompt",
+                "--setting-sources", "--permission-mode", "--dangerously-skip-permissions", "--allowedTools",
+                "--allowed-tools", "--disallowedTools")  # --strict-mcp-config сужает (читатель read.py) — можно
+
+
+def launch_only_in_core():
+    """Ни один флаг запуска окна (LAUNCH_FLAGS) не собирается в lib/ и scripts/ вне pantheon.py: строковые константы
+    AST, в том числе куски f-строк; sessions.py запуск окна берёт целиком у P.window_launch."""
+    import ast
+    hits, calls = [], 0
+    for sub in ("lib", "scripts"):
+        for fn in sorted(os.listdir(os.path.join(PLUGIN, sub))):
+            if not fn.endswith(".py") or (sub, fn) == ("lib", "pantheon.py"):
+                continue
+            p = os.path.join(PLUGIN, sub, fn)
+            with open(p, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), p)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                        and any(node.value.lstrip().startswith(f) for f in LAUNCH_FLAGS):
+                    hits.append(f"{sub}/{fn}:{node.lineno} {node.value[:40]!r}")
+                if fn == "sessions.py" and isinstance(node, ast.Attribute) and node.attr == "window_launch":
+                    calls += 1
+    check("флаги запуска окна (--settings, --plugin-dir, --mcp-config, …) не собираются вне pantheon.py", not hits, hits)
+    check("sessions.py: все три запуска окна (свежий, start, штаб) — через P.window_launch", calls == 3, calls)
 
 
 # Решение владельца 06.11 18:30 «А — опасное заменить, мёртвое убрать»: в пакеты не идут
