@@ -29,8 +29,9 @@ HOOK_DEADLINE = 40
 HOOK_SUB_TIMEOUT = 20
 SLOW_GIT = 50  # с: «медленный git» дольше и HOOK_SUB_TIMEOUT, и HOOK_DEADLINE
 # бюджет сверки отпечатков в хуке (metis-0696, «А: запас только в тестах»): боевые 4 с под нагрузкой Mac r6 не
-# укладывал. Меньше HOOK_SUB_TIMEOUT: один зависший git (r4 шлюз) исчерпывает бюджет, и хук отказывает сам
-# раньше HOOK_DEADLINE
+# укладывал, 15 с не хватило при load 200+ в полном наборе (metis-0989, r6 ctl2) — взят предел CARRY_BUDGET_MAX.
+# Зависший git (r4 шлюз) гаснет по HOOK_SUB_TIMEOUT, остаток бюджета идёт на остальные отпечатки, хук укладывается
+# в HOOK_DEADLINE
 HOOK_CARRY_BUDGET = 15
 import tempfile
 import time
@@ -101,6 +102,7 @@ def rest_runs(view):
 class Home:
     def __init__(self, root):
         self.root = root
+        self.carry_budget = HOOK_CARRY_BUDGET  # GUARD_TEST_CARRY_BUDGET хуку; t_carry_r6 поднимает до предела
         self.core = False  # reset(): PR agent-kit#7 задевает ядро (со строкой согласия владельца) — см. CASES_CORE
         j = self.j
         for d in ("ai/pantheon", ".local/state/pantheon", ".claude/pantheon", "bin"):
@@ -277,7 +279,7 @@ class Home:
         return {"HOME": self.root, "PATH": self.j("bin") + os.pathsep + os.environ["PATH"],
                 "CLAUDE_PROJECT_DIR": self.j(pdir), "TMPDIR": "/nonexistent-tmp",
                 "GUARD_TEST_DEADLINE": str(HOOK_DEADLINE), "GUARD_TEST_SUB_TIMEOUT": str(HOOK_SUB_TIMEOUT),
-                "GUARD_TEST_CARRY_BUDGET": str(HOOK_CARRY_BUDGET)}
+                "GUARD_TEST_CARRY_BUDGET": str(self.carry_budget)}
 
     def hook(self, event, pdir, mode=(), extra_env=None):
         return subprocess.run([sys.executable, "-I", CACHED, GUARD, *mode], input=json.dumps(event), capture_output=True,
@@ -4298,6 +4300,17 @@ def t_carry_r4_gate(h):
 
 
 def t_carry_r6(h):
+    """r6 сверяет перенос по длинной истории (много вызовов git подряд): на load 200+ полного набора 15 с не хватало
+    (metis-0989, r6 ctl2). Предел CARRY_BUDGET_MAX — только здесь: от общего 15 зависит t_carry_r4_gate (зависший
+    git не должен выходить за бюджет)."""
+    h.carry_budget = _load_merge_gate("merge_gate_r6_budget").CARRY_BUDGET_MAX
+    try:
+        _t_carry_r6(h)
+    finally:
+        h.carry_budget = HOOK_CARRY_BUDGET
+
+
+def _t_carry_r6(h):
     """argus-b r2 (#134): откат force-push к точному старому head, принятому до «вернуть», после снятия «вернуть»
     правилом 3 — прямое «принять» до отсечки не засчитывается, как и перенос."""
     s = kit_history(h)

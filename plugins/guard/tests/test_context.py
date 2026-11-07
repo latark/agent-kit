@@ -20,6 +20,7 @@ configure() модуля и пересчитывается заново — guar
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -289,6 +290,18 @@ def forked(py, w, jobs, where):
     return json.load(open(of, encoding="utf-8")), ""
 
 
+# флаг tg-taint несёт минуту установки («since»), и она — в причине ask: заново пройденные задания (после w.reset())
+# получают другую минуту, когда на нагрузке прогон переходит границу минуты — это время, а не расхождение контекста
+_SINCE = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d")
+
+
+def _same_run(name, a, b):
+    if name.startswith("taint-"):
+        a, b = [_SINCE.sub("<since>", x) if isinstance(x, str) else x for x in a], \
+            [_SINCE.sub("<since>", x) if isinstance(x, str) else x for x in b]
+    return a == b
+
+
 def dec(res):
     code, out, _ = res
     if code == 2 or '"deny"' in out:
@@ -334,7 +347,7 @@ def test_decisions(py, w):
         if got is None:
             check(f"процесс с fork ({where}) отработал", False, err)
             continue
-        bad = [(name, a, b) for (name, _), a, b in zip(jobs, want, got) if a != b]
+        bad = [(name, a, b) for (name, _), a, b in zip(jobs, want, got) if not _same_run(name, a, b)]
         check(f"решения одного процесса с set_context в {'родителе' if where == 'parent' else 'ребёнке'} — как у "
               f"нового процесса: {len(jobs)} заданий, код, stdout и stderr", not bad,
               [(n, a[0], a[1][:160], a[2][:160], "≠", b[0], b[1][:160], b[2][:160]) for n, a, b in bad[:3]])
