@@ -3755,8 +3755,11 @@ def check_owner_merge(event, tool_input):
             if why:
                 return (f"Правило fetch: {why}. Окну fetch пишет только refs/remotes/* и теги — локальную ветку "
                         "сдвигают merge, rebase или switch в своей копии.")
-            # и push — как у ролей, в репозиториях [merge_repos]: main сливает шлюз (metis-0983, Д2 argus #378)
-            why = push_problem(texts, cwd, moved) if window_role() and window_push_judged(texts, cwd) else None
+            # и push — как у ролей, в репозиториях [merge_repos]: main сливает шлюз (metis-0983, Д2 argus #378). Окно
+            # hestia — своё правило (check_hestia: push_problem по consent, --force-with-lease своей ветки можно)
+            win = window_role()
+            why = (push_problem(texts, cwd, moved) if win and win != "hestia" and window_push_judged(texts, cwd)
+                   else None)
             if why:
                 return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`git push origin "
                         "HEAD:refs/heads/<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
