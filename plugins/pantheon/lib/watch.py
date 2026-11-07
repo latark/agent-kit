@@ -3874,7 +3874,7 @@ def hq_saved(name):
             return {}
         raw = os.read(fd, 65537)
         rec = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # RecursionError: глубоко вложенный JSON в пределах 64 КБ
         return {}
     finally:
         os.close(fd)
