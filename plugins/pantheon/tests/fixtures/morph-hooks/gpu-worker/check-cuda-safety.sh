@@ -1,16 +1,16 @@
 #!/bin/bash
-# PostToolUse hook: предупреждает о CUDA-before-fork опасных паттернах в Python-файлах.
+# PostToolUse hook: warns about CUDA-before-fork dangerous patterns in Python files.
 #
-# Контекст (CLAUDE.md → "CUDA + fork() SAFETY"): инициализация CUDA в parent-процессе
-# ДО mp.fork() тихо роняет GPU subprocess в CPUExecutionProvider — 0.3 FPS вместо 24+,
-# без единой ошибки. Известные UNSAFE-вызовы: onnxruntime.get_available_providers()
-# (вызывает cudaGetDeviceCount), av.CodecContext.open() с GPU-кодеками.
+# Context (CLAUDE.md -> "CUDA + fork() SAFETY"): initializing CUDA in the parent process
+# BEFORE mp.fork() silently drops the GPU subprocess to CPUExecutionProvider - 0.3 FPS instead of 24+,
+# without a single error. Known UNSAFE calls: onnxruntime.get_available_providers()
+# (calls cudaGetDeviceCount), av.CodecContext.open() with GPU codecs.
 #
-# Хук НЕ блокирует — только warning: эти паттерны легитимны в child-subprocess и в main
-# после fork, статически отличить parent-pre-fork путь нельзя. Решение — за cuda-safety-reviewer.
+# The hook does NOT block - warning only: these patterns are legitimate in a child subprocess and in main
+# after fork, the parent-pre-fork path cannot be told apart statically. The decision is for cuda-safety-reviewer.
 #
-# torch.cuda.* СОЗНАТЕЛЬНО не проверяется — он в ~8 файлах легитимного кода (cuda_stream,
-# torch_io_binding и т.д., все в GPU subprocess после fork), греп по нему = сплошной шум.
+# torch.cuda.* is DELIBERATELY not checked - it is in ~8 files of legitimate code (cuda_stream,
+# torch_io_binding etc., all in the GPU subprocess after fork), grep on it = pure noise.
 set -euo pipefail
 
 input=$(cat)
@@ -23,8 +23,8 @@ esac
 
 [ -f "$file_path" ] || exit 0
 
-# Вырезаем # комментарии и triple-quoted docstrings — в коде много NOTE/CRITICAL пояснений,
-# объясняющих почему так делать НЕЛЬЗЯ; без этого хук сработает на безопасных файлах.
+# Strip # comments and triple-quoted docstrings - the code has many NOTE/CRITICAL explanations
+# of why this must NOT be done; without this the hook fires on safe files.
 strip_noncode() {
   awk '
   {
@@ -42,25 +42,25 @@ base=$(basename "$file_path")
 warned=0
 
 if echo "$code" | grep -qE 'get_available_providers[[:space:]]*\('; then
-  echo "⚠ CUDA-safety: вызов get_available_providers() в $base"
-  echo "   Он вызывает cudaGetDeviceCount() → инициализирует CUDA. Если файл исполняется в"
-  echo "   parent-процессе ДО mp.fork() — GPU subprocess упадёт в CPU mode (0.3 FPS вместо 24+)."
-  echo "   Safe-альтернатива: onnxruntime.get_all_providers()."
+  echo "[WARN] CUDA-safety: call to get_available_providers() in $base"
+  echo "   It calls cudaGetDeviceCount() -> initializes CUDA. If the file runs in"
+  echo "   the parent process BEFORE mp.fork(), the GPU subprocess falls to CPU mode (0.3 FPS instead of 24+)."
+  echo "   Safe alternative: onnxruntime.get_all_providers()."
   warned=1
 fi
 
 if echo "$code" | grep -qE 'CodecContext.*\.open[[:space:]]*\(' \
   || echo "$code" | grep -qE 'h264_nvenc.*\.open[[:space:]]*\('; then
-  echo "⚠ CUDA-safety: CodecContext.open() с GPU-кодеком в $base"
-  echo "   open() на NVENC-кодеке инициализирует CUDA. Используй deferred-init pattern"
-  echo "   (изолированный subprocess probe), как в patches/aiortc_h264_nvenc.py."
+  echo "[WARN] CUDA-safety: CodecContext.open() with a GPU codec in $base"
+  echo "   open() on an NVENC codec initializes CUDA. Use the deferred-init pattern"
+  echo "   (isolated subprocess probe), as in patches/aiortc_h264_nvenc.py."
   warned=1
 fi
 
 if [ "$warned" -eq 1 ]; then
   echo ""
-  echo "→ Прогони агент cuda-safety-reviewer — убедись, что паттерн не в parent pre-fork пути."
-  echo "  Детали: CLAUDE.md → \"CUDA + fork() SAFETY\"."
+  echo "-> Run the cuda-safety-reviewer agent - make sure the pattern is not on the parent pre-fork path."
+  echo "  Details: CLAUDE.md -> \"CUDA + fork() SAFETY\"."
 fi
 
 exit 0

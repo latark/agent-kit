@@ -1,14 +1,14 @@
 #!/bin/bash
-# Полная проверка gpu-worker перед коммитом. Блокирует коммит при нарушениях.
+# Full gpu-worker check before commit. Blocks the commit on violations.
 #
-# Ruff (format + lint) уже покрыт .pre-commit-config.yaml (нативный git pre-commit).
-# Этот скрипт — про правило #1 проекта, которое ruff не ловит: CUDA + fork() safety
-# (CLAUDE.md → "CUDA + fork() SAFETY"). Проектно-специфичный архитектурный gate,
-# по аналогии с FSD-проверкой в pre-commit-check.sh основного App.
+# Ruff (format + lint) is already covered by .pre-commit-config.yaml (native git pre-commit).
+# This script is about project rule #1 that ruff does not catch: CUDA + fork() safety
+# (CLAUDE.md -> "CUDA + fork() SAFETY"). A project-specific architecture gate,
+# like the FSD check in pre-commit-check.sh of the main App.
 set -e
 
-# Вырезает # комментарии и triple-quoted docstrings — иначе греп ловит NOTE/CRITICAL
-# пояснения, объясняющие почему так делать НЕЛЬЗЯ.
+# Strips # comments and triple-quoted docstrings, otherwise grep catches NOTE/CRITICAL
+# explanations of why this must NOT be done.
 strip_noncode() {
   awk '
   {
@@ -21,25 +21,25 @@ strip_noncode() {
   }' "$1"
 }
 
-echo "🔍 CUDA + fork() safety: поиск get_available_providers() в app/..."
+echo ">> CUDA + fork() safety: looking for get_available_providers() in app/..."
 
 VIOLATIONS=0
 while IFS= read -r f; do
   if strip_noncode "$f" | grep -qE 'get_available_providers[[:space:]]*\('; then
-    echo "❌ $f — вызов get_available_providers() (инициализирует CUDA до возможного fork)"
+    echo "[FAIL] $f - call to get_available_providers() (initializes CUDA before a possible fork)"
     VIOLATIONS=$((VIOLATIONS + 1))
   fi
 done < <(find app -name "*.py" 2>/dev/null | grep -v __pycache__)
 
 if [ "$VIOLATIONS" -gt 0 ]; then
   echo ""
-  echo "BLOCK: Найдено $VIOLATIONS нарушений CUDA + fork() safety."
-  echo "get_available_providers() вызывает cudaGetDeviceCount() → инициализирует CUDA."
-  echo "В parent-процессе до mp.fork() это роняет GPU subprocess в CPU mode (0.3 FPS)."
-  echo "Используй onnxruntime.get_all_providers(). См. CLAUDE.md → CUDA + fork() SAFETY."
+  echo "BLOCK: Found $VIOLATIONS CUDA + fork() safety violations."
+  echo "get_available_providers() calls cudaGetDeviceCount() -> initializes CUDA."
+  echo "In the parent process before mp.fork() this drops the GPU subprocess to CPU mode (0.3 FPS)."
+  echo "Use onnxruntime.get_all_providers(). See CLAUDE.md -> CUDA + fork() SAFETY."
   exit 1
 fi
-echo "✓ CUDA + fork() safety OK"
+echo "[OK] CUDA + fork() safety OK"
 
 echo ""
-echo "✅ Все проверки пройдены"
+echo "[OK] All checks passed"

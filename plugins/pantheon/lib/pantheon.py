@@ -3314,238 +3314,45 @@ def pack_approved(p):
 
 
 def _pack_data(text):
-    """Строка чужого текста (скрипта или диффа из репозитория окна) для тревоги и вывода packs hashes: управляющие
-    знаки, кроме \\n и \\t (ESC перекрашивает и стирает строки в терминале), невидимые знаки формата (смена
-    направления письма U+202E), разделители строк и знаки обрамления ⟦⟧⏎ — кодом \\uXXXX, сама «\\» — «\\\\» (круг
-    G6, Б2 а: литерал «\\u000d» и настоящий CR видны по-разному): окно не подделает ни строку «одобрить?», ни конец
-    диффа. Каждый оставшийся знак вне ASCII — в метке [ ] (круг G8, решение Зевса 07.11 13:27; ревью argus G7-2 Б1):
-    подряд идущие знаки вне ASCII и пробелы между ними — одна метка, «ехit» с кириллическими е, х виден как «[ех]it»,
-    а не как exit; латинская буква в метку не попадает."""
-    return PACK_MARK.sub(lambda m: f"[{m.group()}]", "".join(
-        "\\\\" if c == "\\" else c if c in "\n\t" or (c not in "⟦⟧⏎" and unicodedata.category(c) not in (
-            "Cc", "Cf", "Cs", "Zl", "Zp")) else f"\\u{ord(c):04x}" for c in text))
+    """Строка чужого текста (скрипта или диффа из репозитория окна) для тревоги и вывода packs hashes: каждый знак вне
+    печатного ASCII, кроме \\n и \\t, — кодом \\uXXXX, сама «\\» — «\\\\» (круг G6, Б2 а: литерал «\\u000d» и
+    настоящий CR видны по-разному). В скрипте, взятом в снимок, таких знаков нет (белый список круга G9,
+    pack_script_reject), но их несут одобренная копия до G9 и путь снимка. ESC перекрашивает и стирает строки в
+    терминале, U+202E меняет направление письма, кириллическая «е» выглядит как латинская e, знаки обрамления ⟦⟧⏎ —
+    тоже вне ASCII: окно не подделает ни строку «одобрить?», ни конец диффа, ни команду (круг G9, решение Зевса 07.11
+    13:27: метки [ ] круга G8 убраны)."""
+    return "".join("\\\\" if c == "\\" else c if c in "\n\t" or " " <= c <= "~" else f"\\u{ord(c):04x}" for c in text)
 
 
-PACK_MARK = re.compile(r"[^\x00-\x7f](?: *[^\x00-\x7f])*")
+def _pack_alert_line(line):
+    """Строка диффа (уже через _pack_data) для строки тревоги в alerts.md (круг G9, ревью argus G8-2 Б1 и Д3): alert()
+    схлопывает пробелы, и отступ 4 и 8 у Python-хука давали одну тревогу, а alerts.md — Markdown, и «<!-- … -->» из
+    скрипта прятал код при отрисовке. Табуляция — «\\t», пробел в начале и в конце строки и каждый из подряд идущих —
+    «·» (U+00B7: в тексте после _pack_data он только кодом \\u00b7), «<» и «>» — \\u003c и \\u003e."""
+    line = line.replace("\t", "\\t").replace("<", "\\u003c").replace(">", "\\u003e")
+    return PACK_ALERT_SPACES.sub(lambda m: "·" * len(m.group()), line)
+
+
+PACK_ALERT_SPACES = re.compile(r"^ +| +$| {2,}")
 
 
 # Белый список текста скрипта репозитория (metis-0933 круг G6, решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2):
 # в снимок идёт только скрипт в UTF-8 без BOM, без объявления кодировки (PEP 263: Python исполнил бы utf-7 иначе, чем
-# его видит владелец) и из знаков PACK_SCRIPT_CHARS. Список — точные диапазоны, а не категории Unicode (круг G7, ревью
-# argus G6-2 Б1; решение координатора 07.11 12:55): ASCII 0x20–0x7E, \n, \t, кириллица А–я, Ё, ё и « » — – … №,
-# и видимые значки настоящих хуков MorphStream → ↔ ✓ ✅ ❌ 🔍 ⚠ ℹ (вариант А, координатор 13:17; без U+FE0F).
-# str.isprintable() пропускал знаки, которые терминал рисует пустыми или не рисует (U+3164, U+115F, U+FFA0, U+2800,
-# селекторы вариантов U+FE00–FE0F и U+E0100, U+034F): bash видит их частью слова, а владелец — комментарий. CR, прочие
-# Cc, U+2028/U+2029, bidi и нулевой ширины (Cf) — тоже вне списка. Не прошёл — хука нет, тревога и packs hashes
-# называют причину и строку без байтов скрипта.
+# его видит владелец) и из знаков PACK_SCRIPT_CHARS. Круг G9 (решение Зевса 07.11 13:27, ревью argus G8-2 Б2, Д1, Д2):
+# в списке только печатные ASCII 0x20–0x7E, \n и \t. Знак вне ASCII в коде выглядит как латиница («ехit» с
+# кириллическими е, х — не exit), а разбор кавычек, echo и лексера, которым круг G8 пускал его в текст и комментарии,
+# обходился глобом [e]xit, «#» внутри (( )) и eval; разбора больше нет. CR, прочие Cc, U+2028/U+2029, bidi и нулевой
+# ширины — тоже вне списка. Не прошёл — хука нет (packs hashes — код 1), тревога и packs hashes называют причину и
+# строку без байтов скрипта.
 PACK_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
-PACK_SCRIPT_CHARS = frozenset("\t\n" + "".join(map(chr, range(0x20, 0x7F))) + "".join(map(chr, range(0x410, 0x450)))
-                              + "\u0401\u0451\u00ab\u00bb\u2014\u2013\u2026\u2116"  # Ё ё « » — – … №
-                              + "\u2192\u2194\u2713\u2705\u274c\U0001f50d\u26a0\u2139")  # → ↔ ✓ ✅ ❌ 🔍 ⚠ ℹ
+PACK_SCRIPT_CHARS = frozenset("\t\n" + "".join(map(chr, range(0x20, 0x7F))))
 
 
-PACK_ECHO = ("echo", "printf")
-# echo или printf переопределены (функция, алиас, enable) — текст их аргументов уже не только печать
-PACK_ECHO_REDEF = re.compile(r"\b(?:echo|printf)\s*\(\s*\)|\bfunction\s+(?:echo|printf)\b|\bexpand_aliases\b|\benable\b")
-PACK_SH_RESERVED = frozenset(("{", "!", "if", "then", "elif", "else", "while", "until", "do", "time"))
-
-
-def _pack_strict_line(text, at, why):
-    """Запасной разбор (кавычки и комментарии с места at не разобрать): первая строка от строки с at, где есть знак
-    вне ASCII и это не целая строка-комментарий «#…» (перед ней строка не кончается «\\»). → (строка, пояснение) или
-    (None, None)."""
-    lines = text.split("\n")
-    for k in range(text.count("\n", 0, at), len(lines)):
-        line = lines[k]
-        if line.isascii() or (line.lstrip(" \t").startswith("#") and not (k and lines[k - 1].endswith("\\"))):
-            continue
-        return k + 1, f"вне комментария «#…», {why} — разбор кавычек дальше не надёжен"
-    return None, None
-
-
-def _pack_sh_code(text):
-    """Первая строка bash-скрипта text, где знак вне ASCII стоит вне комментария «#…» и вне текста в кавычках
-    ('…', "…", $'…') у аргумента echo или printf, → (строка, пояснение) или (None, None). Разбор — подмножество bash:
-    слова, кавычки, \\, $( ), ${ }, $(( )), ( ), ; & | и перевод строки; первое слово простой команды — после них и
-    после { ! if then elif else while until do time. Чего разбор не знает (обратные кавычки, heredoc <<, $"…",
-    кавычки в ${ } и $(( )), комментарий или case внутри $( )), — с этого места запасной разбор _pack_strict_line:
-    ошибка разбора даёт лишний отказ, а не пропуск."""
-    echo_ok = not PACK_ECHO_REDEF.search(text)
-    size, i = len(text), 0
-    stack = [{"k": "code", "close": None, "depth": 0, "w": 0, "cmd": "", "cur": "", "in": False}]
-
-    def deny(at, where="в коде, а не в комментарии «#…» или тексте echo/printf в кавычках"):
-        return text.count("\n", 0, at) + 1, where
-
-    def word(f, ch):
-        if not f["in"]:
-            f["in"], f["cur"] = True, ""
-        f["cur"] += ch
-
-    def end(f):
-        if f["in"]:
-            f["in"] = False
-            if f["w"] == 0 and f["cur"] in PACK_SH_RESERVED:
-                return
-            if f["w"] == 0:
-                f["cmd"] = f["cur"]
-            f["w"] += 1
-
-    def reset(f):
-        end(f)
-        f["w"], f["cmd"] = 0, ""
-
-    def frame(k, **more):
-        stack.append({"k": k, "close": None, "depth": 0, "w": 0, "cmd": "", "cur": "", "in": False, **more})
-
-    def dollar(at):
-        """$(( $( ${ с места at — новый кадр и новое место, иначе None."""
-        if text.startswith("$((", at):
-            frame("arith")
-            return at + 3
-        if text.startswith("$(", at):
-            frame("code", close=")")
-            return at + 2
-        if text.startswith("${", at):
-            frame("param")
-            return at + 2
-        return None
-
-    while i < size:
-        c, f = text[i], stack[-1]
-        k = f["k"]
-        if k in ("sq", "ansi"):
-            if k == "ansi" and c == "\\":
-                if not text[i + 1:i + 2].isascii() and not f["allow"]:
-                    return deny(i + 1, "в тексте $'…' не у echo/printf")
-                i += 2
-                continue
-            if c == "'":
-                stack.pop()
-            elif not c.isascii() and not f["allow"]:
-                return deny(i, "в тексте в кавычках не у echo/printf")
-            i += 1
-            continue
-        if k == "dq":
-            if c == '"':
-                stack.pop()
-                i += 1
-            elif c == "\\":
-                if not text[i + 1:i + 2].isascii() and not f["allow"]:
-                    return deny(i + 1, "в тексте в кавычках не у echo/printf")
-                i += 2
-            elif c == "`":
-                return _pack_strict_line(text, i, "обратные кавычки")
-            elif c == "$" and (j := dollar(i)):
-                i = j
-            else:
-                if not c.isascii() and not f["allow"]:
-                    return deny(i, "в тексте в кавычках не у echo/printf")
-                i += 1
-            continue
-        if k in ("param", "arith"):
-            if c in "'\"`\\":
-                return _pack_strict_line(text, i, "кавычки или \\ внутри ${…} или $((…))")
-            if not c.isascii():
-                return deny(i, "в ${…} или $((…))")
-            if c == "$":
-                j = dollar(i)
-                i = j if j else i + 1
-                continue
-            opener, closer = ("{", "}") if k == "param" else ("(", ")")
-            if c == opener:
-                f["depth"] += 1
-            elif c == closer and f["depth"]:
-                f["depth"] -= 1
-            elif c == closer and k == "param":
-                stack.pop()
-            elif c == closer:
-                if text[i + 1:i + 2] != ")":
-                    return _pack_strict_line(text, i, "$((…)) без «))»")
-                stack.pop()
-                i += 1
-            i += 1
-            continue
-        # код
-        if c == "#" and not f["in"]:
-            if f["close"]:
-                return _pack_strict_line(text, i, "комментарий внутри $(…)")
-            j = text.find("\n", i)
-            i = size if j < 0 else j
-            continue
-        if c == "\\":
-            nxt = text[i + 1:i + 2]
-            if not nxt.isascii():
-                return deny(i + 1)
-            if nxt != "\n":
-                word(f, "\0")
-            i += 2
-            continue
-        if c in "'\"" or text.startswith("$'", i):
-            allow = echo_ok and f["w"] >= 1 and f["cmd"] in PACK_ECHO
-            word(f, "\0")
-            frame("sq" if c == "'" else "dq" if c == '"' else "ansi", allow=allow)
-            i += 1 if c != "$" else 2
-            continue
-        if c == "`" or text.startswith('$"', i) or (text.startswith("<<", i) and not text.startswith("<<<", i)):
-            return _pack_strict_line(text, i, "обратные кавычки, $\"…\" или heredoc")
-        if c == "$":
-            j = dollar(i)
-            word(f, "\0" if j else "$")
-            i = j if j else i + 1
-            continue
-        if c in " \t":
-            end(f)
-        elif c in ";&|\n":
-            reset(f)
-        elif c == "(":
-            reset(f)
-            f["depth"] += 1
-        elif c == ")":
-            if f["close"] == ")" and not f["depth"]:
-                end(f)
-                stack.pop()
-            else:
-                f["depth"] = max(0, f["depth"] - 1)
-                reset(f)
-        elif not c.isascii():
-            return deny(i)
-        else:
-            word(f, c)
-            if f["close"] and f["w"] == 0 and f["cur"] == "case" and text[i + 1:i + 2] in (" ", "\t", "\n", ""):
-                return _pack_strict_line(text, i, "case внутри $(…)")
-        i += 1
-    return None, None
-
-
-def _pack_py_code(text):
-    """Первая строка Python-скрипта text, где знак вне ASCII стоит вне комментария и строки (лексер tokenize), →
-    (строка, пояснение) или (None, None). Лексер не разобрал — запасной разбор _pack_strict_line; f-строка до Python
-    3.12 — один токен, её текст в {…} — код: там знак вне ASCII — отказ."""
-    import io
-    import tokenize
-    ok = {tokenize.COMMENT, tokenize.STRING} | {getattr(tokenize, n) for n in ("FSTRING_MIDDLE", "TSTRING_MIDDLE")
-                                                 if hasattr(tokenize, n)}
-    try:
-        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (tokenize.TokenError, SyntaxError, ValueError):
-        return _pack_strict_line(text, 0, "лексер Python не разобрал скрипт")
-    for t in toks:
-        if t.string.isascii():
-            continue
-        old_f = t.type == tokenize.STRING and sys.version_info < (3, 12) and "f" in t.string.split("'")[0].split(
-            '"')[0].lower()
-        if t.type not in ok or old_f:
-            return t.start[0], "в коде Python, а не в комментарии или строке"
-    return None, None
-
-
-def pack_script_reject(data, name=""):
-    """Причина, по которой байты data скрипта репозитория не берутся в снимок (белый список круга G6), со строкой:
-    «…, строка N», или None — скрипт прошёл. Строки считаются только по \\n. Байтов скрипта в причине нет: знак — кодом
-    U+XXXX и категорией Unicode. Знак вне PACK_SCRIPT_CHARS — отказ, печатный он или нет (круг G7). Знак вне ASCII
-    вне комментария и вне текста (круг G8): name на .py — лексер Python (_pack_py_code), иначе bash (_pack_sh_code:
-    только текст в кавычках у echo/printf) — отказ; «ехit 0» с кириллическими е, х — код, а не текст."""
+def pack_script_reject(data):
+    """Причина, по которой байты data скрипта репозитория не берутся в снимок (белый список кругов G6 и G9), со
+    строкой: «…, строка N», или None — скрипт прошёл. Строки считаются только по \\n. Байтов скрипта в причине нет:
+    знак — кодом U+XXXX и категорией Unicode. Знак вне PACK_SCRIPT_CHARS (печатные ASCII, \\n, \\t) — отказ, где бы
+    он ни стоял: в коде, тексте echo или комментарии (круг G9)."""
     if data.startswith(b"\xef\xbb\xbf"):
         return "метка порядка байтов (BOM) в начале, строка 1"
     try:
@@ -3561,13 +3368,7 @@ def pack_script_reject(data, name=""):
     for n, line in enumerate(lines[:2], 1):
         if PACK_CODING.match(line):
             return f"объявление кодировки (PEP 263), строка {n}"
-    if text.isascii():
-        return None
-    n, why = (_pack_py_code if name.endswith(".py") else _pack_sh_code)(text)
-    if n is None:
-        return None
-    bad = next((c for c in lines[n - 1] if not c.isascii()), "?")
-    return f"знак вне ASCII U+{ord(bad):04X} ({unicodedata.category(bad)}) {why}, строка {n}"
+    return None
 
 
 def pack_approved_text(window, digest):
@@ -3630,7 +3431,7 @@ def pack_diff(window, repo, script, current, approved):
     lines = [_pack_data(x) for x in difflib.unified_diff(
         base.decode("utf-8", "replace").split("\n"), current.decode("utf-8", "replace").split("\n"),
         "-", rel, lineterm="")]
-    return None, [f"--- одобрено {old[:12]}:{rel}"] + lines[1:] if lines else []  # заголовок ядра — без меток G8
+    return None, [f"--- одобрено {old[:12]}:{rel}"] + lines[1:] if lines else []
 
 
 def pack_unapproved_alert(window, repo, script, new, current, approved, snap_file=None):
@@ -3646,14 +3447,14 @@ def pack_unapproved_alert(window, repo, script, new, current, approved, snap_fil
     old = ((approved or {}).get(repo) or {}).get(script)
     where = os.path.join(repo, ".claude", "hooks", script)
     key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
-    reject = pack_script_reject(current, script)
+    reject = pack_script_reject(current)
     if reject:
         text = (f"[metis-0933] {window}: хук {tilde(where)} не взят в снимок — {reject}; одобрить такой нельзя, "
                 f"хук пропускается. sha256 {new}, текст не показан")
     else:
         diff, lines = pack_diff(window, repo, script, current, approved)
         if lines is not None:
-            body = PACK_DATA_EOL.join(lines)
+            body = PACK_DATA_EOL.join(map(_pack_alert_line, lines))
             snap = f" (файл снимка {_pack_data(tilde(snap_file))})" if snap_file else ""
             more = f" — обрезано, полный: pantheon packs diff {window}{snap}" if len(body) > PACK_ALERT_DIFF else ""
             diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{body[:PACK_ALERT_DIFF]}"
@@ -3831,7 +3632,7 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
         if data is None:
             continue
         digest = hashlib.sha256(data).hexdigest()
-        reject = pack_script_reject(data, script)
+        reject = pack_script_reject(data)
         if reject:  # белый список круга G6: ни в repo/, ни в pending/ — байтов в снимке нет, хук пропускается
             unapproved.setdefault(repo, {})[script] = digest
             rejected.setdefault(repo, {})[script] = reject
