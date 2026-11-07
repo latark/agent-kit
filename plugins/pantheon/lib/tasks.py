@@ -19,6 +19,11 @@ import os
 import re
 import unicodedata
 from datetime import datetime
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location("pantheon_deferral", os.path.join(os.path.dirname(os.path.abspath(__file__)), "deferral.py"))
+_deferral = _ilu.module_from_spec(_spec)  # metis-0834: отложенные вопросы; файл рядом, путь импорта под -I не нужен
+_spec.loader.exec_module(_deferral)
 
 SCHEMA_VERSION = 1
 TYPES = ("task", "stage", "project", "story")
@@ -3748,6 +3753,12 @@ def _sync_types(vault, alert):
         alert("board-types", type(e).__name__, f"доска: {p} не записать ({e}) — типы свойств не обновлены", "board")
 
 
+def _deferral_api():
+    """Функции tasks для lib/deferral.py (модуль грузят и под другим именем, импортом его не достать)."""
+    return type("TasksApi", (), {"owner_answers_all": staticmethod(owner_answers_all), "_live": staticmethod(_live),
+                                 "one_line": staticmethod(one_line), "task_new": staticmethod(task_new)})
+
+
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
                policy=None, marks=None, registry=None, night_end="08:00", open_prs=None, pr_index=None, repos=None,
                tails=None, batch_prs=None):
@@ -3947,9 +3958,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     # 5а. решения «Нужен ответ» — циклы политики уведомлений: ответ, истекло, закрыто, «долго ждёт»
     long_ids = set()
+    held = _deferral.hold(_deferral_api(), pantheon, t, tasks, cards, log_path, registry, primary, policy,
+                          alert, done_lines)
     if policy is not None:
         decs = []
         for tid, (_, h, _) in tasks.items():
+            if tid in held:
+                continue  # отложен DEFER_LIMIT раз: тот же вопрос пингом больше не идёт
             if h.get("status") == "waiting" and h.get("waiting_on") == "human" and _live(h, t):
                 q = hashlib.sha256(_question_key(h.get("question")).encode("utf-8")).hexdigest()[:12]
                 decs.append({"id": tid, "sig": f"{h.get('question_at') or ''}|{q}", "since": ts_of(h.get("question_at")),
