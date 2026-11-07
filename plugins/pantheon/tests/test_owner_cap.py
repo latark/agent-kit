@@ -284,7 +284,7 @@ def test_status_line():
 def _cli_env(e, t, role="domain-coordinator", **kw):
     env_ = {"PATH": os.path.dirname(PY311) + ":/usr/bin:/bin", "HOME": e.home, "PANTHEON_HOME": e.pantheon,
             "PANTHEON_STATE": e.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1",
-            "TMPDIR": e.tmp, "CLAUDE_PLUGIN_ROOT": TN.ROOT}
+            "TMPDIR": e.tmp, "CLAUDE_PLUGIN_ROOT": TN.ROOT, "PANTHEON_SCHEDULE_DEFAULTS": os.devnull}
     if role is not None:
         env_["PANTHEON_ROLE"] = role
     if "TZ" in os.environ:

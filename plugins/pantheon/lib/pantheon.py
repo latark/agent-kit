@@ -591,6 +591,34 @@ def save_job_state(name, st):
     write_json(path("jobs", _job_name(name) + ".json"), st)
 
 
+def default_jobs():
+    """Задания из schedule-defaults.toml плагина (их приносит выпуск). Нет файла или он битый — пусто: расписание
+    владельца не должно падать из-за него. PANTHEON_SCHEDULE_DEFAULTS — подмена пути для тестов."""
+    p = os.environ.get("PANTHEON_SCHEDULE_DEFAULTS") or os.path.join(PLUGIN, "schedule-defaults.toml")
+    try:
+        with open(p, "rb") as fh:
+            jobs = tomllib.load(fh).get("job") or []
+    except (OSError, ValueError):
+        return []
+    return [j for j in jobs if isinstance(j, dict)]
+
+
+def _merge_default_jobs(owner_jobs):
+    """Задания по умолчанию + [[job]] владельца. Одноимённое задание владельца меняет поля умолчания (поверх них),
+    остальные его задания идут как есть, после умолчаний."""
+    merged = {}
+    for j in default_jobs():
+        merged[str(j.get("name"))] = dict(j)
+    extra = []
+    for j in owner_jobs or []:
+        name = str(j.get("name")) if isinstance(j, dict) else None
+        if name in merged:
+            merged[name].update(j)
+        else:
+            extra.append(j)
+    return [*merged.values(), *extra]
+
+
 def load_schedule():
     """schedule.toml; задачи с именем не по образцу [a-z0-9-] отбрасываются (имя идёт в пути меток и блокировок)."""
     p = os.path.join(PANTHEON, "schedule.toml")
@@ -598,6 +626,7 @@ def load_schedule():
         sched = tomllib.load(fh)
     sched["defaults"] = {**DEFAULTS, **(sched.get("defaults") or {})}
     sched["notify"] = notify_mod().settings(sched.get("notify"))
+    sched["job"] = _merge_default_jobs(sched.get("job"))
     jobs = []
     for j in sched.get("job") or []:
         if isinstance(j, dict) and JOB_NAME.fullmatch(str(j.get("name", ""))):
