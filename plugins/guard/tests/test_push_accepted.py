@@ -160,6 +160,36 @@ def t_reject_floor(h):
     passed("«вернуть» после «принять» (на старом head): push идёт", s.push())
 
 
+def t_off_base_lie(h):
+    """Д6 долга #388: «принять» на другой base PR (base_counts, metis-0965) и с полем «вернули», которое называет
+    рецензента без «вернуть» на PR (returned_lie, metis-0497), push не останавливают — как в шлюзе."""
+    s = Push(h)
+    s.pr(NON_CORE)
+    s.accepts(1, base="release")
+    passed("вне ядра, «принять» на base release, PR на main: push идёт", s.push())
+    h.reset()
+    s = Push(h)
+    s.pr(NON_CORE)
+    s.accepts(1, base=None)
+    passed("вне ядра, «принять» без поля base (до 0965): push идёт", s.push())
+    h.reset()
+    s = Push(h)
+    s.pr(NON_CORE)
+    h.seed(dict(tm.rec("accept", REPO, 7, s.tip, agent_id="argus1"), returned=["12345678/9abcdef0"]))
+    passed("вне ядра, «принять» с полем «вернули» без «вернуть» в журнале: push идёт", s.push())
+    h.reset()
+    s = Push(h)
+    s.pr(NON_CORE)
+    h.seed(dict(tm.rec("accept", REPO, 7, s.tip, agent_id="argus1"), returned=["argus1"]))
+    stopped("контроль: поле «вернули» называет самого рецензента (не сверяется) — push остановлен", s.push())
+    h.reset()
+    s = Push(h)
+    s.pr(CORE_FILES)
+    s.accepts(1)
+    h.seed(tm.rec("accept", REPO, 7, s.tip, agent_id="argus2", base="release"))
+    passed("ядро: два «принять», одно на base release — засчитано одно, push идёт", s.push())
+
+
 def t_no_verdicts(h):
     """Без вердиктов — push идёт, gh не зовётся (нет записей «принять» на вершине)."""
     s = Push(h)
@@ -406,7 +436,7 @@ def t_core_count_same():
 
 
 CASES = [t_accepted_core, t_core_one, t_core_not_opus, t_non_core_one, t_non_core_files_fail, t_reject, t_reject_floor,
-         t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url, t_force,
+         t_off_base_lie, t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url, t_force,
          t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel]
 
 

@@ -219,6 +219,45 @@ def run_all(tmp):
           sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
     check("status: транскрипт без моделей (models: []) помечен своей строкой, а не «по --ran»",
           sum("транскрипт argus найден, но моделей в нём нет" in ln for ln in out) == 1, r.stdout)
+    # Д6 долга #388: итог — как в шлюзах: «принять» на другой base PR и с полем «вернули», которое врёт, не в счёт
+    nobase = {k: x for k, x in v("accept", S2, "nnnnnnnn01", pr=43).items() if k != "base"}
+    d6 = [v("accept", S2, "aaaaaaaa11", pr=42), dict(v("accept", S2, "bbbbbbbb22", pr=42), base="dev"),
+          dict(v("accept", S2, "cccccccc33", pr=42), returned=["zzzzzzzz/s9"]), v("reject", S2, "dddddddd44", pr=42),
+          nobase,
+          dict(v("accept", S2, "aaaaaaaa11", pr=44), base="dev"), dict(v("accept", S2, "bbbbbbbb22", pr=44), base="dev"),
+          v("reject", S2, "cccccccc33", pr=44)]
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write("".join(json.dumps(x) + "\n" for x in d6))
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    check("Д6: итог — «принять» на base dev и с «вернули» без «вернуть» на PR не в счёт: принять 1, вернуть 1",
+          f"итог на {S2[:12]}: принять 1, вернуть 1 — последний вердикт каждого argus" in r.stdout
+          and "base PR для итога — main" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "43")
+    check("Д6: ни у одной записи нет base — base неизвестна, «принять» не в счёт",
+          f"итог на {S2[:12]}: принять 0, вернуть 0" in r.stdout and "неизвестна" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "44")
+    check("Д6: base для итога — по последней записи с base (main), «принять» на dev не в счёт",
+          f"итог на {S2[:12]}: принять 0, вернуть 1" in r.stdout, r.stdout)
+    # metis-0443: решения шлюза guard о коде head и переносы «принять» — в status
+    with open(os.path.join(state, "merge-gate", "carry.jsonl"), "w") as fh:
+        fh.write(json.dumps({"v": 1, "kind": "decision", "repo": ["latark/agent-kit"], "pr": 42, "sha": S2,
+                             "base": "main", "same": [S3], "differs": [S4], "why": ["head x старше 8 последних"],
+                             "time": "2026-11-08T01:00:00+03:00"}) + "\n"
+                 + json.dumps({"v": 1, "kind": "carry", "repo": ["latark/agent-kit"], "pr": 42, "sha": S2,
+                               "from": [{"sha": S3}], "time": "2026-11-08T01:05:00+03:00"}) + "\n"
+                 + json.dumps({"v": 1, "kind": "decision", "repo": ["latark/agent-kit"], "pr": 41, "sha": S2,
+                               "base": "main", "same": [S5], "differs": [], "time": "x"}) + "\n"
+                 + json.dumps({"v": 1, "kind": "decision", "repo": ["latark/agent-kit"], "pr": 42, "sha": S2,
+                               "base": "main", "same": "битое", "differs": [], "time": "y"}) + "\n" + "не json\n")
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    out43 = r.stdout.splitlines()
+    check("0443: status показывает решение шлюза (тот же код, другой, что не сверено) и перенос «принять»",
+          f"2026-11-08T01:00:00+03:00  decision  код {S2[:12]} (base main): тот же — {S3[:12]}; другой — {S4[:12]}; "
+          "не сверено: head x старше 8 последних" in out43
+          and f"2026-11-08T01:05:00+03:00  carry   шлюз guard перенёс «принять» с {S3[:12]} на {S2[:12]} (тот же код)"
+          in out43, r.stdout)
+    check("0443: решение другого PR, битое решение и битая строка — не показаны",
+          S5[:12] not in r.stdout and "битое" not in r.stdout and sum("decision" in ln for ln in out43) == 1, r.stdout)
     # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
@@ -245,7 +284,8 @@ def run_all(tmp):
         return mod
     _M = _load("merge_for_test", os.path.join(os.path.dirname(LIB), "merge.py"))
     _P = _types.SimpleNamespace(review_records=lambda repo: [x for x in tally if x["sha"] == S5],
-                                review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts)
+                                review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts,
+                                review_decisions=lambda repo, pr: [], now=lambda: 0)   # решений шлюза нет (metis-0966)
     _M.P = _P
     # запуски Actions (metis-0633) — подмена вместо настоящего gh: тест в сеть не ходит; обязательные agent-kit зелёные;
     # fork — голова PR из форка (metis-0649), у этого PR её нет

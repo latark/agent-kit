@@ -238,24 +238,53 @@ def review_report(args):
     return 0
 
 
-def review_tally(recs, pr, opus_only=False):
+def tally_base(recs, pr):
+    """base PR для итога `review status` без gh: base последней записи вердикта PR с полем base (metis-0965) или None."""
+    got = [r.get("base") for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+           and isinstance(r.get("base"), str) and r["base"]]
+    return got[-1] if got else None
+
+
+def review_tally(recs, pr, opus_only=False, base=None):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
     вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
     «Принять» без полного перечня не в счёт: «вернуть» того же рецензента оно не снимает. Модель не смотрим — вне
     ядра шлюз guard считает «принять» на любой модели (simplify п. 9, 27.10); opus_only=True — как для PR ядра:
-    ещё и на Opus (по --ran и по моделям транскрипта argus, P.review_accept_counts)."""
+    ещё и на Opus (по --ran и по моделям транскрипта argus, P.review_accept_counts). Как в шлюзах (Д6 долга #388):
+    «принять» на другой base PR, чем base (base_counts, metis-0965; base None — неизвестна, не в счёт), и с полем
+    «вернули», которое называет рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт."""
     ok = P.review_accept_counts if opus_only else P.review_accept_full
-    last = {}
-    for r in recs:
-        by = r.get("by")
-        if (r.get("kind") in ("accept", "reject") and r.get("pr") == pr and isinstance(by, dict)
-                and by.get("agent_type") == "argus" and isinstance(r.get("sha"), str)):
-            if r["kind"] == "accept" and not ok(r):
-                continue
-            last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
+    rules = P.merge_mod()
+    verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+                and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
+                and isinstance(r.get("sha"), str)]
+    last = {r["sha"].lower(): {} for r in verdicts}  # head с вердиктами — в итоге и тогда, когда ни один не в счёт
+    verdicts = [r for r in verdicts if r["kind"] == "reject" or ok(r) and rules.base_counts(r, {"baseRefName": base})]
+    verdicts = [r for r in verdicts if not (r["kind"] == "accept" and rules.returned_lie(r, verdicts))]
+    for r in verdicts:
+        by = r["by"]
+        last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
     return {sha: (sum(k == "accept" for k in v.values()), sum(k == "reject" for k in v.values()))
             for sha, v in last.items()}
+
+
+def carry_lines(repo, pr):
+    """Строки `review status` о записях carry.jsonl шлюза guard на PR (metis-0443): перенос «принять» шлюзом gh pr
+    merge и решение о коде head при `pantheon merge request` (его читает шлюз владельца, merge.code_facts)."""
+    out, decisions = [], P.review_decisions(repo, pr)
+    for d in P.carry_records(repo, pr):
+        sha, t = str(d.get("sha") or "")[:12], d.get("time", "?")
+        if d.get("kind") == "carry" and isinstance(d.get("from"), list):
+            src = ", ".join(str(x.get("sha") or "")[:12] for x in d["from"] if isinstance(x, dict))
+            out.append(f"{t}  carry   шлюз guard перенёс «принять» с {src or '?'} на {sha} (тот же код)")
+        elif d.get("kind") == "decision" and d in decisions:
+            why = d.get("why") if isinstance(d.get("why"), list) else []
+            out.append(f"{t}  decision  код {sha} (base {d.get('base')}): тот же — "
+                       f"{', '.join(h[:12] for h in d['same']) or 'нет'}; другой — "
+                       f"{', '.join(h[:12] for h in d['differs']) or 'нет'}"
+                       + (f"; не сверено: {'; '.join(map(str, why))}" if why else ""))
+    return out
 
 
 REVIEW_PENDING_TTL = 2 * 3600  # метка «ревью идёт» устаревает через 2 часа
@@ -429,8 +458,16 @@ def review_cmd(rest):
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
         if args:
-            strict = review_tally(recs, int(args[1]), opus_only=True)
-            for sha, (acc, rej) in review_tally(recs, int(args[1])).items():
+            base = tally_base(recs, int(args[1]))
+            # metis-0443: что шлюз guard решил о коде head — переносы «принять» и решения при `merge request`
+            for line in carry_lines(args[0], int(args[1])):
+                print(line)
+            if any(r.get("kind") in ("accept", "reject") for r in recs):
+                print(f"base PR для итога — {base or 'неизвестна (нет записи вердикта с base)'}: по последней записи "
+                      "вердикта, gh не спрашиваем; «принять» на другой base или с полем «вернули» без «вернуть» на "
+                      "PR не в счёт, как в шлюзе")
+            strict = review_tally(recs, int(args[1]), opus_only=True, base=base)
+            for sha, (acc, rej) in review_tally(recs, int(args[1]), base=base).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
                 if core_repo and strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра — только «принять» на Opus
                     print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "

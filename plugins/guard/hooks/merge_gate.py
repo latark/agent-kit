@@ -846,7 +846,10 @@ def record(event):
             rec["models"] = models
             if not models:
                 rec["models_note"] = NO_MODELS
-        rec.update(_verdict_base(repos[0], pr))  # metis-0965: base PR в момент вердикта
+        # metis-0965: base PR в момент вердикта. Шлюзы сверяют base только у «принять» (base_counts), поэтому gh — только
+        # для него и только если успевает до срока хука (_gh_fits): иначе срок вышел бы, и запись не сделалась бы вовсе
+        if rec_kind == "accept" and _gh_fits():
+            rec.update(_verdict_base(repos[0], pr))
         rounds = agent_rounds(event, repos[0], pr)  # metis-0497: «вернули» лида и взятые отчёты — для шлюза
         if rounds and rounds[0] is not None:
             rec["returned"], rec["reported"] = rounds
@@ -2122,8 +2125,9 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     plugin.json); None — не посчитано: сбой или таймаут git, git старше 2.40 без --merge-base, чужой вывод.
     Драйвер слияния из атрибутов (merge=ours, union) решил бы конфликт «чисто», и откат правки main сошёл бы за тот же
     код (metis-0969, Д1 argus #375). Поэтому атрибутов нет: git зовётся из новой пустой папки (.gitattributes он берёт
-    из папки запуска), без системных и core.attributesFile (_git_code), с merge.renormalize=false; info/attributes в git
-    папки не выключить — с ним None. note(текст) — причина «не посчитано» для отказа (metis-0981: git старше 2.40)."""
+    из папки запуска), без системных и core.attributesFile (_git_code), с merge.renormalize=false (иначе core.autocrlf
+    конфига снял бы конфликт перевода строк) и merge.default=text (драйвер по умолчанию из конфига git папки, например
+    ours, — тот же обход без атрибутов, долг #388); info/attributes в git папки не выключить — с ним None. note(текст) — причина «не посчитано» для отказа (metis-0981: git старше 2.40)."""
     note = note or (lambda why: None)
     attrs = _git_bytes(gd, "rev-parse", "--git-path", "info/attributes")
     if attrs is None:
@@ -2134,8 +2138,8 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     import tempfile  # по первому обращению, как hashlib в _fingerprint (metis-0330)
     try:
         with tempfile.TemporaryDirectory(prefix="guard-merge-tree-") as empty:
-            got = _git_code(gd, "-c", "merge.renormalize=false", "merge-tree", "--write-tree", "--no-messages",
-                            "--merge-base=" + hb, head, mb, where=empty)
+            got = _git_code(gd, "-c", "merge.renormalize=false", "-c", "merge.default=text", "merge-tree",
+                            "--write-tree", "--no-messages", "--merge-base=" + hb, head, mb, where=empty)
     except OSError:
         note("папку для git merge-tree не создать")
         return None
@@ -2428,6 +2432,74 @@ def append_carry(rec):
         os.close(fd)
 
 
+# --- решение шлюза для прохода владельца (metis-0966, 0396, 0443, вариант А) -------------------------------------
+# Шлюз владельца (pantheon/lib/merge.py, слияние PR ядра по Touch ID или фразе) работает в плановом проходе без git
+# папки слияния: «тот же код» на другом head он не сверит, и раньше другой коммит считался другим кодом — второй argus
+# снимал «вернуть» после rebase с тем же кодом, а «принять» после release.py и rebase не переносилось. Теперь при
+# `pantheon merge request` хук guard в папке, откуда заявка (клон repo), сверяет код нового head с кодом каждого
+# прошлого head с вердиктами argus — те же _Prints, что у шлюза gh pr merge, — и пишет в carry.jsonl запись kind
+# "decision": same — head с тем же кодом (отпечаток или слияние, _merge_same), differs — посчитано, код другой.
+# Чего не посчитали (не клон, сбой gh или git, бюджет, срок хука), того нет ни там, ни там: проход судит строго.
+# Запись — факт о коде, а не вердикт: вердикты проход считает сам по records.jsonl. Пишет её только хук guard
+# (STATE закрыт ролям правилом pantheon-acl), сбой записи команду не останавливает — проход тогда судит строго.
+
+def request_decisions(event, args, cwd):
+    """PreToolUse `pantheon merge request <N>… -R <owner/repo>`: запись kind "decision" в carry.jsonl на каждый PR, у
+    которого есть вердикты argus на других head. args — слова после pantheon, cwd — папка команды (None — в команде
+    cd, папка не та). Ничего не возвращает и не бросает (сбой — записи нет)."""
+    if not cwd or args[:2] != ["merge", "request"] or not all(isinstance(a, str) for a in args):
+        return
+    rest = args[2:]
+    if "-R" not in rest or rest.index("-R") + 1 >= len(rest):
+        return
+    i = rest.index("-R")
+    repo = rest[i + 1].lower()
+    nums = [a for j, a in enumerate(rest) if j not in (i, i + 1)]
+    if not REPO_RE.fullmatch(repo) or not all(PR_RE.fullmatch(a) for a in nums):
+        return
+    try:
+        records = read_records()
+        tips = {}
+        for pr in dict.fromkeys(int(a) for a in nums):
+            _decision(event, records or [], repo, pr, cwd, tips)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return
+
+
+def _decision(event, records, repo, pr, cwd, tips):
+    """Решение шлюза для repo#pr (request_decisions): gh pr view и вершина base — только если успевают до срока хука
+    (_gh_fits), git — со сроком от остатка (_git_timeout)."""
+    verdicts = argus_verdicts(records, repo, pr)
+    if not verdicts or not _gh_fits():
+        return
+    view = _pr_view(repo, pr)
+    sha = str((view or {}).get("headRefOid") or "").lower()
+    base = (view or {}).get("baseRefName")
+    others = list(dict.fromkeys(r["sha"] for r in reversed(verdicts) if r["sha"] != sha))
+    if not SHA_RE.fullmatch(sha) or not isinstance(base, str) or not base or not others or not _gh_fits():
+        return
+    fp = _Prints(cwd, repo, sha, verdicts, lambda: view, tips)
+    same, differs = [], []
+    fs = fp(sha)
+    for h in others if fs else []:
+        fa = fp(h)
+        if not fa:
+            continue
+        if fa[0] == fs[0]:
+            same.append(h)
+            continue
+        got = fp.merged(h)
+        if got is True:
+            same.append(h)
+        elif got is False:
+            differs.append(h)
+    by = {"agent_type": event.get("agent_type") or "", "session_id": event.get("session_id") or "",
+          "agent_id": event.get("agent_id") or ""}
+    append_carry({"v": RECORD_V, "kind": "decision", "repo": [repo], "pr": pr, "sha": sha, "base": base,
+                  "base_oid": fp.base, "same": same, "differs": differs, "why": list(fp.why), "by": by,
+                  "time": datetime.now().astimezone().isoformat(timespec="seconds")})
+
+
 def _reviewer(rec):
     """Рецензент записи — пара (session_id, agent_id): два argus одной сессии — разные рецензенты (metis-0158)."""
     return rec["by"].get("session_id") or "", rec["by"].get("agent_id") or ""
@@ -2493,10 +2565,13 @@ def _gh_fits():
     return not left or left > GH_TIMEOUT + PUSH_GH_MARGIN
 
 
-def push_accepts(records, repo, pr, sha, core):
+def push_accepts(records, repo, pr, sha, core, view):
     """Сколько «принять» argus засчитано на head sha PR repo#pr для слияния; 0 — есть «вернуть» в силе на sha (последний
-    вердикт рецензента) или «принять» нет. core — PR ядра: «принять» не на Opus выбывает, как в шлюзе (weak)."""
-    verdicts = argus_verdicts(records, repo, pr)
+    вердикт рецензента) или «принять» нет. core — PR ядра: «принять» не на Opus выбывает, как в шлюзе (weak). view —
+    ответ gh pr view PR: «принять» на другой base PR (base_counts, metis-0965) и с полем «вернули», которое называет
+    рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт, как в шлюзе (Д6 долга #388)."""
+    verdicts = [r for r in argus_verdicts(records, repo, pr) if r["kind"] != "accept" or base_counts(r, view)]
+    verdicts = [r for r in verdicts if not (r["kind"] == "accept" and returned_lie(r, verdicts))]
     if core:
         verdicts = [r for r in verdicts if not (r["kind"] == "accept" and checklist_ok(r) and opus_problem(r))]
     latest, direct, _ = head_verdicts(verdicts, sha)
@@ -2579,11 +2654,11 @@ def accepted_push_problem(d, remote, pairs):
             msgs = _git(d, "log", "--format=%B", f"{tip}..{new}", "--not", *bases)
             if msgs is None or PUSH_BLOCKER_RE.search(msgs) or _push_base_merged(d, repo, view, tip, new, bases):
                 continue
-            n, need = push_accepts(records, repo, pr, tip, True), CORE_ACCEPTS
-            if n < need and push_accepts(records, repo, pr, tip, False) >= 1:
+            n, need = push_accepts(records, repo, pr, tip, True, view), CORE_ACCEPTS
+            if n < need and push_accepts(records, repo, pr, tip, False, view) >= 1:
                 th.join(GH_TIMEOUT)
                 if box and _core_problem(repo, pr, tip, view, box[0]) is None:
-                    n, need = push_accepts(records, repo, pr, tip, False), 1
+                    n, need = push_accepts(records, repo, pr, tip, False, view), 1
             if n >= need:
                 return (f"Правило push: PR {repo}#{pr} уже принят на {tip[:12]} — «принять» argus {n} (нужно {need}), "
                         "«вернуть» нет. Новый коммит в ветке (и amend с принудительной отправкой) сожжёт эти вердикты "
