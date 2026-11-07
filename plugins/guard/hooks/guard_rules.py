@@ -3428,14 +3428,23 @@ def _dst_refs(dst):
 
 def fetch_problem(texts):
     """git fetch и pull (metis-0983): почему эта запись ref ролям нельзя, или None. Ролям fetch пишет только
-    refs/remotes/*, теги и FETCH_HEAD: refspec с назначением в refs/heads/* (в том числе --refmap) и --update-head-ok
-    сдвигают локальную ветку — и ту, что под HEAD защищённого репозитория (~/.claude, ~/ai/pantheon)."""
+    refs/remotes/*, теги и FETCH_HEAD: refspec с другим назначением (refs/heads/*, refs/replace/*, refs/notes/*, в том
+    числе --refmap) — отказ: он и --update-head-ok сдвигают локальную ветку (и ту, что под HEAD защищённого
+    репозитория: ~/.claude, ~/ai/pantheon) или подменяют объекты.
+    Слово до подкоманды не вычислить (`git -C "$d" fetch …`): судятся слова после fetch или pull, если они есть среди
+    слов команды, — папка запись ref не меняет; без fetch и pull — не судится (metis-0983, Д1 argus #380)."""
     parsed = _git_sub(texts)
-    if parsed is None or parsed[1] not in ("fetch", "pull"):
+    if parsed is None:
+        at = next((i for i, a in enumerate(texts) if a in ("fetch", "pull")), None)
+        if at is None:
+            return None
+        sub, args = texts[at], texts[at + 1:]
+    elif parsed[1] not in ("fetch", "pull"):
         return None
-    args = parsed[2]
+    else:
+        sub, args = parsed[1], parsed[2]
     if any(a is None for a in args):
-        return f"аргументы {parsed[1]} не разобрать"
+        return f"аргументы {sub} не разобрать"
     pos, specs, i = [], [], 0
     while i < len(args):
         a = args[i]
@@ -3453,8 +3462,10 @@ def fetch_problem(texts):
         i += 1
     for spec in specs + pos[1:]:
         dst = spec.lstrip("+").partition(":")[2]
-        if dst and any(r.lower().startswith("refs/heads/") for r in _dst_refs(dst)):
-            return f"refspec «{spec}» пишет в локальную ветку {dst}"
+        # назначение — только refs/remotes/* и теги: refs/replace/* подменяет объекты, refs/notes/* и прочие ref
+        # защищённого репозитория fetch ролям тоже не пишет (Д2 argus-2 #380); пустое назначение — только FETCH_HEAD
+        if dst and not all(r.lower().startswith(("refs/remotes/", "refs/tags/")) for r in _dst_refs(dst)):
+            return f"refspec «{spec}» пишет не в refs/remotes/* и не в теги, а в {dst}"
     return None
 
 
@@ -3468,10 +3479,12 @@ def _merge_repo_set():
 def window_push_judged(texts, cwd):
     """git push главной сессии окна судит push_problem (metis-0983): True — репозиторий remote из [merge_repos] или
     его не вычислить; False — не push или репозиторий вне [merge_repos] (~/ai/pantheon и прочие хранилища окна: их
-    main шлюз не сливает, отправка туда — законный путь)."""
+    main шлюз не сливает, отправка туда — законный путь). Слово до подкоманды не вычислить (`git -C "$d" …`): судится,
+    только если среди слов есть push, — `git -C "$d" status` окно проходит, как до metis-0983 (Б1 argus #380).
+    URL — для push (`get-url --push`): remote.X.pushurl в [merge_repos] из-под суда не выводит (Д2 argus #380)."""
     parsed = _git_sub(texts)
     if parsed is None:
-        return True
+        return "push" in texts
     gdir, sub, args = parsed
     if sub != "push":
         return False
@@ -3491,7 +3504,7 @@ def window_push_judged(texts, cwd):
     if not remote:
         up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
         remote = up.split("/", 1)[0] if "/" in up else "origin"
-    url = remote if re.search(r"[/:]", remote) else (_git_out(d, "remote", "get-url", remote) or "")
+    url = remote if re.search(r"[/:]", remote) else (_git_out(d, "remote", "get-url", "--push", remote) or "")
     repo = _mg()._repo_tail(_mg()._remote_id(url)) if url.strip() else ""
     return not repo or repo in _merge_repo_set()
 
@@ -3518,10 +3531,10 @@ def _push_parse(texts, cwd, moved, force=False):
     pos, i = [], 0
     while i < len(args):
         a = args[i]
-        if force and (_opt_in(a, _PUSH_FORCE) or re.fullmatch(r"-[a-ce-zA-Z]*f[a-ce-zA-Z]*", a)):
+        if force and (_opt_in(a, _PUSH_FORCE) or re.fullmatch(r"-[a-ce-zA-Z0-9]*f[a-ce-zA-Z0-9]*", a)):
             i += 1
             continue
-        if _opt_in(a, _PUSH_BAD) or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
+        if _opt_in(a, _PUSH_BAD) or re.fullmatch(r"-[a-zA-Z0-9]*[fd][a-zA-Z0-9]*", a):
             return f"флаг {a}"
         if a in _PUSH_OPT_ARG:
             i += 2

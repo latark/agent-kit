@@ -2297,7 +2297,8 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("",
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
 # сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master при любой записи назначения,
 # --force и --delete не пускает guard (push_problem); fetch с --update-head-ok или назначением в refs/heads/* — тоже
-# (fetch_problem, metis-0983). Только сеть, без записи в рабочую копию (metis-0971, решение Зевса 07.11, вариант А):
+# (fetch_problem, metis-0983). Это не «только сеть»: fetch пишет в .git — refs/remotes/*, теги, FETCH_HEAD. Без записи
+# в рабочую копию — поэтому pull в списке нет (metis-0971, решение Зевса 07.11, вариант А):
 # `git pull` вне песочницы вливал коммит в рабочую копию защищённого репозитория (~/.claude, ~/ai/pantheon), если cwd
 # внутри allowWrite. Подтянуть — `git fetch` мимо песочницы, затем `git merge` в ней: запись там судит песочница.
 # Список команд, меняющих рабочую копию, держит тест test_window_rules.py (WORKTREE_WRITE)

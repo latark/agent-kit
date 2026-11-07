@@ -2,7 +2,9 @@
 """Назначение refspec у git push и git fetch (metis-0983): guard понимает его по правилам git, а не по строке.
 push в main/master отказ при любой записи назначения (heads/main, refs/heads/main, +main, X:main, HEAD:refs/heads/main,
 --all, --mirror и их сокращения); fetch и pull — отказ с --update-head-ok (-u), --stdin и с refspec или --refmap,
-который пишет в refs/heads/*; refs/remotes/* и теги — можно. Разбор — тот же, что у хука: bash_analysis → push_problem
+который пишет не в refs/remotes/* и не в теги (refs/heads/*, refs/replace/*, refs/notes/*); refs/remotes/* и
+теги — можно. Слово до подкоманды не вычислить (`git -C "$d"`): push в окне — отказ, fetch — по словам после fetch,
+прочее — пропуск. Разбор — тот же, что у хука: bash_analysis → push_problem
 и fetch_problem; HEAD берётся из временного репозитория на ветке feat.
 Запуск: python3 -I plugins/guard/tests/test_refspec.py   (код 0 — все прошли)
 """
@@ -45,13 +47,15 @@ PUSH_DENY = [
     "git push --all origin", "git push --mirror origin", "git push --branches origin", "git push --al origin",
     "git push --mirr origin", "git push --bra origin", "git push --forc origin feat", "git push --del origin x",
     "git push origin :feat", "git push origin feat:",
+    # связки коротких флагов с цифрой (Д4 argus-2 #380)
+    "git push -4f origin feat", "git push -4d origin feat", "git push -6f origin feat", "git push -f4 origin feat",
 ]
 PUSH_ALLOW = [
     "git push origin feat", "git push origin feat:feat", "git push origin HEAD", "git push origin HEAD:feat",
     "git push origin feat:heads/feat", "git push origin feat:refs/heads/feat", "git push origin feat:mainline",
     "git push origin feat:main-x", "git push origin feat:refs/tags/main", "git push origin v1:tags/main",
     "git push --dry-run origin feat", "git push --atomic origin feat", "git push -u origin feat",
-    "git push --follow-tags origin feat",
+    "git push --follow-tags origin feat", "git push -4 origin feat", "git push -6q origin feat",
 ]
 FETCH_DENY = [
     "git fetch --update-head-ok origin main:feat", "git fetch -u origin main:feat", "git fetch -qu origin main:feat",
@@ -64,6 +68,13 @@ FETCH_DENY = [
     "git fetch --refmap=+refs/heads/*:refs/heads/rm/* origin main", "git fetch --refmap +refs/heads/*:refs/heads/* origin",
     "git fetch --depth 1 origin main:feat", "git fetch origin -- main:feat", "git -C . fetch origin main:feat",
     "git pull origin main:main", "git pull -u origin main:feat",
+    # слово до подкоманды не вычислить — судятся слова после fetch и pull (Д1 argus #380)
+    'for d in a b; do git -C "$d" fetch -u . feat:main; done', 'for d in a b; do git -C "$d" fetch origin main:feat; done',
+    'for d in a b; do git -C "$d" fetch --stdin origin; done', 'for d in a b; do git -C "$d" pull --update-h; done',
+    'for d in a b; do git -C "$d" fetch "$d" main:feat; done',
+    # назначение — только refs/remotes/* и теги (Д2 argus-2 #380)
+    "git fetch origin main:refs/replace/0123abcd", "git fetch origin main:refs/notes/commits",
+    "git fetch origin main:refs/x/y", "git fetch --refmap=+refs/heads/*:refs/notes/* origin main",
 ]
 FETCH_ALLOW = [
     "git fetch", "git fetch origin", "git fetch origin main", "git fetch --prune origin", "git fetch --all",
@@ -73,6 +84,9 @@ FETCH_ALLOW = [
     "git fetch --depth 1 origin main", "git fetch git@github.com:o/r.git main", "git fetch https://x/o/r main",
     "git fetch origin ^refs/heads/x", "git pull", "git pull --rebase origin main", "git pull -s ours origin main",
     "git fetch origin main:remotes/origin/zz", "git fetch origin main:", "git status", "git push origin feat",
+    'for d in a b; do git -C "$d" fetch origin; done', 'for d in a b; do git -C "$d" pull --rebase origin main; done',
+    'for d in a b; do git -C "$d" status; done', 'for d in a b; do git -C "$d" log --grep x -- a:refs/heads/b; done',
+    "git fetch origin v1:tags/v1", "git fetch origin main:Refs/Remotes/o/main",
 ]
 
 
@@ -97,6 +111,9 @@ def main():
         # шлюз push в принятый PR получает имя ветки, а не запись назначения
         got = g._push_parse(words(g, "git push origin feat:heads/feat", repo), repo, False)
         check("push: heads/feat → ветка feat для push_accepted", got[2] == [("feat", "feat")], got)
+        got = g._push_parse(words(g, "git push -4f origin feat", repo), repo, False, force=True)
+        check("push: -4f для push_accepted — принудительная отправка в feat", isinstance(got, tuple)
+              and got[2] == [("feat", "feat")], got)
         git(repo, "switch", "-q", "main")
         for cmd in ("git push", "git push origin", "git push origin HEAD", "git push origin HEAD:HEAD"):
             why = g.push_problem(words(g, cmd, repo), repo, False)
@@ -117,7 +134,10 @@ def main():
                 (lead, "", "git fetch origin main:refs/remotes/origin/main", False),
                 (win, "metis-pantheon", "git fetch --update-head-ok origin main:main", True),
                 (win, "metis-pantheon", "git fetch origin 'refs/heads/*:refs/heads/*'", True),
-                (win, "metis-pantheon", "git fetch origin", False), (win, "", "git fetch origin main:main", False)):
+                (win, "metis-pantheon", "git fetch origin", False), (win, "", "git fetch origin main:main", False),
+                (win, "metis-pantheon", 'for d in a b; do git -C "$d" fetch -u . feat:main; done', True),
+                (win, "metis-pantheon", 'for d in a b; do git -C "$d" fetch origin; done', False),
+                (lead, "", 'for d in a b; do git -C "$d" fetch origin main:feat; done', True)):
             os.environ["PANTHEON_ROLE"] = env
             why = g.check_push(ev, "Bash", {"command": cmd})
             got = isinstance(why, str) and why.startswith(("Правило push", "Правило fetch"))
@@ -130,7 +150,20 @@ def main():
         git(repo, "remote", "add", "origin", "https://github.com/latark/agent-kit.git")
         git(repo, "remote", "add", "store", "git@github.com:latark/pantheon.git")
         git(repo, "remote", "add", "bare", "")
+        # push идёт по pushurl, а не по url (Д2 argus #380)
+        git(repo, "remote", "add", "pu", "https://github.com/latark/pantheon.git")
+        git(repo, "config", "remote.pu.pushurl", "https://github.com/latark/agent-kit.git")
+        git(repo, "remote", "add", "pu2", "https://github.com/latark/agent-kit.git")
+        git(repo, "config", "remote.pu2.pushurl", "git@github.com:latark/pantheon.git")
         for env, cmd, deny in (
+                ("metis-pantheon", "git push pu feat:main", True),
+                ("metis-pantheon", "git push pu2 feat:main", False),
+                # слово до подкоманды не вычислить: судится, только если среди слов есть push (Б1 argus #380)
+                ("metis-pantheon", 'for d in a b; do git -C "$d" status; done', False),
+                ("metis-pantheon", 'git -C "$(git rev-parse --show-toplevel)" log -1', False),
+                ("metis-pantheon", 'for g in a b; do git --git-dir="$g" log; done', False),
+                ("metis-pantheon", 'for d in a b; do git -C "$d" push origin feat:main; done', True),
+                ("metis-pantheon", 'for d in a b; do git -C "$d" push origin feat; done', True),
                 ("metis-pantheon", "git push origin feat:main", True),
                 ("metis-pantheon", "git push origin HEAD:refs/heads/feat-x", False),
                 ("metis-pantheon", "git push origin feat:heads/main", True),
