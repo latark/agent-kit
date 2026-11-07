@@ -4868,6 +4868,51 @@ def t_carry_merged(h):
     check("0471: отказ называет вершину ветки base", "вершину ветки base PR" in got[1], got[1])
 
 
+def t_carry_rej(h):
+    """argus #375 Б1 (проба probe.py): перенос слиянием не обходит «вернуть». X вернул qc, Z принял qc, X принял qa,
+    head снова код qc и подтянул main со сдвигом строк (qcm): отпечаток qcm ≠ qc, но qc, слитый с merge-base qcm, —
+    ровно qcm. «Вернуть» X держится и в правиле 3 _lifts (принято на третьем head), и в правиле 2 (принято на sha)."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    lines = [f"c{i}\n" for i in range(30)]
+    pr_c = "".join(lines[:20] + ["pr\n"] + lines[21:])
+    fix_c = "".join(lines[:20] + ["fixed\n"] + lines[21:])
+    bc = plumb(p, [s["B"]], {"c.txt": F("".join(lines))}, "main: c.txt")
+    bc2 = plumb(p, [bc], {"c.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
+    bc3 = plumb(p, [bc], {"other.txt": F("o\n")}, "main: другой файл")
+    qc = plumb(p, [bc], {"c.txt": F(pr_c)}, "PR: правка c.txt")
+    qa = plumb(p, [bc], {"c.txt": F(fix_c)}, "PR: исправление")
+    qcm = plumb(p, [qc, bc2], {"c.txt": F("top\n" + pr_c)}, "PR: вернулся к qc и подтянул main", src=bc2)
+    qcr = plumb(p, [qc, bc3], {"other.txt": F("o\n")}, "PR: вернулся к qc, main не трогал c.txt", src=qc)
+    qam = plumb(p, [qa, bc2], {"c.txt": F("top\n" + fix_c)}, "PR: исправление и подтянул main", src=bc2)
+
+    def case(name, head, base, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, head, base)
+        h.seed(*recs)
+        merge_case(name, h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit), allow, why)
+
+    x_rej = opus(qc, "x", "reject", checklist=None, session="s-x")
+    z_acc = opus(qc, "z", session="s-z")
+    x_acc = opus(qa, "x", session="s-x")
+    case("Б1 контроль: только «принять» Z на qc, qcm — переносится", qcm, bc2, [z_acc, tests(qcm)], True)
+    case("Б1 контроль: X вернул qc, Z принял qc, X принял qa; main не трогал файл — отказ", qcr, bc3,
+         [x_rej, z_acc, x_acc, tests(qcr)], False, "«вернуть» (reject)")
+    case("Б1 контроль: X вернул qc, Z принял qc; qcm — отказ", qcm, bc2, [x_rej, z_acc, tests(qcm)], False,
+         "«вернуть» (reject)")
+    case("Б1 правило 3: X вернул qc, Z принял qc, X принял qa; qcm (код qc + main) — отказ", qcm, bc2,
+         [x_rej, z_acc, x_acc, tests(qcm)], False, "«вернуть» (reject)")
+    case("Б1 правило 2: X вернул qc, Z принял qcm (код qc + main) — отказ", qcm, bc2,
+         [x_rej, opus(qcm, "z", session="s-z"), tests(qcm)], False, "«вернуть» (reject)")
+    case("Б1 правило 2 контроль: X вернул qc, Z принял qam (иной код + main) — сливает", qam, bc2,
+         [x_rej, opus(qam, "z", session="s-z"), tests(qam)], True)
+    case("Б1 правило 3 контроль: X вернул qc, X принял qa; qam (код qa + main) — сливает", qam, bc2,
+         [x_rej, x_acc, tests(qam)], True)
+
+
 def t_ci_fork_billing(h):
     """Долг argus #248 (проба probe_fb.py): лимит минут у PR из форка. Запуски форка без номера PR засчитываются по
     репозиторию и ветке head (metis-0649) и на запасном пути: запись полного набора есть — пропуск без роли со строкой
@@ -5154,7 +5199,7 @@ CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_fu
          t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
+         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 
 # случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;
 # вне ядра те же записи проходят — это проверяют отдельные места в самих случаях (h.core = False; h.reset())

@@ -1965,7 +1965,9 @@ def _lifts(a, r, sha, fp):
     merge-base) или None. Все правила — только «принять» с перечнем (Б6). 1: тот же рецензент на том же head.
     2: на sha, r — на другом head: тот же рецензент — снимает; другой argus — только если код sha посчитан и не
     равен коду r (решение 25.10 23:10, 0415b: иначе «вернуть» обходится выбором рецензента; код не посчитан — не
-    снимает). 3: на третьем head с другим кодом от той же merge-base, если код sha — не код r."""
+    снимает). 3: на третьем head с другим кодом от той же merge-base, если код sha — не код r. Код sha — код r и
+    тогда, когда head r, слитый с merge-base sha, даёт ровно sha (fp.merged, _merge_same; argus #375 Б1): иначе
+    вернулись к коду r и подтянули main со сдвигом строк — «вернуть» снято, а «принять» с r переносится слиянием."""
     if not checklist_ok(a):
         return False
     if _self_lift(a, r):
@@ -1976,11 +1978,19 @@ def _lifts(a, r, sha, fp):
         if _reviewer(a) == _reviewer(r):
             return True
         fr, fs = fp(r["sha"]), fp(sha)
-        return bool(fr and fs) and fs[0] != fr[0]
+        return bool(fr and fs) and fs[0] != fr[0] and not _code_of(fp, r["sha"])
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
     fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
-    return bool(fr and fa and fs) and fr[1] == fa[1] and fr[0] != fa[0] and fs[0] != fr[0]
+    return (bool(fr and fa and fs) and fr[1] == fa[1] and fr[0] != fa[0] and fs[0] != fr[0]
+            and not _code_of(fp, r["sha"]))
+
+
+def _code_of(fp, head):
+    """Код сливаемого sha — код head при другом отпечатке: head, слитый с merge-base sha, даёт sha (fp.merged). У fp
+    без merged (тесты правил) — False, как раньше."""
+    merged = getattr(fp, "merged", None)
+    return bool(merged is not None and merged(head))
 
 
 def _held(verdicts, sha, fp):
