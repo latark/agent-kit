@@ -50,10 +50,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         Хеш и текст каждого скрипта (в stderr) — из снимка в STATE, .git не
                                         читается; в ~/.claude/pantheon ничего не пишет. Скрипт не прочитан
                                         или не прошёл белый список (UTF-8 без BOM и объявления кодировки,
-                                        только печатные знаки, перевод строки и табуляция) — «внимание — …»
-                                        с причиной и строкой, код 1
-  pantheon packs diff <направление>     полный дифф неодобренных скриптов от одобренной копии, знаки кодом
-                                        \\uXXXX, обратная косая удвоена (то, что тревога «хук изменён» обрезала)
+                                        только печатные ASCII и перевод строки, без пробела в конце строки) —
+                                        «внимание — …» с причиной и строкой, код 1
+  pantheon packs diff <направление>     полный дифф неодобренных скриптов от одобренной копии, строки как есть;
+                                        тревога «хук изменён» в alerts.md называет только счёт строк (круг G11)
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
@@ -3259,7 +3259,8 @@ REPO_HOOKS_PREFIX = ".claude/hooks/"
 # owner-edit; PR в agent-kit не нужен). Формат: {"repos": {"$HOME/…/app": {"scripts": {"protect-db.sh": "<sha256>"}}}}
 # (поле commit прошлых кругов не читается). Не совпал или файла нет — скрипта в снимке нет, его байты — в pending/
 # снимка, в манифесте — unapproved {репозиторий: {имя: sha256}}: in_repo.py пропускает хук (выход 0), запуск окна —
-# строка в stderr и одна тревога на хеш (pack_unapproved_alert) с диффом от одобренной копии.
+# строка в stderr и одна тревога на хеш (pack_unapproved_alert): счёт строк диффа от одобренной копии, без текста
+# скрипта (круг G11); сам дифф — `pantheon packs diff <направление>`.
 # Круг G5 (решение Зевса 07.11, вариант А): ни хеш, ни текст, ни дифф не берутся из .git — его пишет окно (объекты,
 # refs/replace, origin: три круга подряд по классу). Хеш и текст — из файлов снимка; одобренная копия — байты скрипта
 # с sha256 эталона, PACK_APPROVED_HOME/<направление>/approved/<sha256>: её кладёт запуск окна из снимка, когда скрипт
@@ -3269,9 +3270,8 @@ REPO_HOOKS_PREFIX = ".claude/hooks/"
 PACK_APPROVED_HOME = os.path.join(HOME, ".claude", "pantheon", "packs")
 PACK_APPROVED = "approved.json"
 PACK_APPROVED_COPY = "approved"  # PACK_APPROVED_HOME/<направление>/approved/<sha256>: байты одобренного скрипта
-PACK_ALERT_DIFF = 1500  # знаков диффа в строке тревоги: длиннее — «обрезано», полный — diff одобренной копии и снимка
 PACK_DIFFS = "pack-diffs"  # STATE/pack-diffs — полные диффы кругов G3–G4; больше не пишутся, pack_snapshot их убирает
-PACK_DATA_OPEN, PACK_DATA_CLOSE, PACK_DATA_EOL = "⟦", "⟧", " ⏎ "  # обрамление диффа (данные) и конец его строки
+PACK_DATA_OPEN, PACK_DATA_CLOSE = "⟦", "⟧"  # обрамление текста и диффа скрипта (данные) в packs hashes и packs diff
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -3329,24 +3329,22 @@ def pack_show(data):
     return [_pack_show_line(x) for x in data.decode("utf-8", "replace").split("\n")]
 
 
-def _pack_alert_line(line):
-    """Строка диффа (уже через pack_show) для строки тревоги в alerts.md: alert() схлопывает пробелы, поэтому пробел в
-    начале строки и каждый из подряд идущих — «·» (круг G9, G8-2 Б1: отступ 4 и 8 у Python-хука — разные тревоги;
-    «·» вне ASCII, в показанной строке его нет). Табуляции и пробела в конце строки после белого списка нет (G10)."""
-    return PACK_ALERT_SPACES.sub(lambda m: "·" * len(m.group()), line)
-
-
-PACK_ALERT_SPACES = re.compile(r"^ +| {2,}")
 PACK_HIDDEN_OPEN, PACK_HIDDEN_CLOSE = "⟪", "⟫"
+PACK_ALERT_NAME = re.compile(r"[^A-Za-z0-9._/-]")  # знак имени направления или пути хука, который тревога заменяет «?»
 
 
-def _pack_alert_code(body):
-    """Тело диффа для alerts.md (Markdown, его читают в Obsidian) — кодом Markdown: ограждение из «`» на одну длиннее
-    самой длинной серии «`» в теле, по пробелу внутри с обеих сторон (круг G10, ревью argus G9-2 Б2, G9-1 Д2). Внутри
-    кода Markdown не разбирает ни ссылки [x](…), ни «\\», ни «<!--», ни &num;: отрисовка совпадает с исполняемым
-    текстом. Тревога — одна строка (alert() склеивает строки), поэтому ограждение строчное, а не блоком."""
-    fence = "`" * (max(map(len, re.findall("`+", body)), default=0) + 1)
-    return f"{fence} {body} {fence}"
+def _pack_alert_name(name):
+    """Имя направления или путь хука для строки тревоги в alerts.md: знаки вне [A-Za-z0-9._/-] — «?» (круг G11). Путь
+    и имя скрипта задаёт репозиторий окна, а alerts.md — один абзац Markdown на весь файл: «`», «<», «[» из имени
+    сложились бы в разметку с соседними строками."""
+    return PACK_ALERT_NAME.sub("?", name)
+
+
+def pack_diff_counts(lines):
+    """Сколько строк добавлено и убрано → (добавлено, убрано) по строкам pack_diff: первые две — заголовки «--- одобрено»
+    и «+++ <путь>», дальше — блоки «@@», строки « », «+», «-» (добавленная «++x» — тоже «+»)."""
+    body = lines[2:]
+    return sum(x.startswith("+") for x in body), sum(x.startswith("-") for x in body)
 
 
 # Белый список текста скрипта репозитория (metis-0933 круг G6, решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2):
@@ -3456,33 +3454,31 @@ def pack_diff(window, repo, script, current, approved):
     return None, [f"--- одобрено {old[:12]}:{rel}"] + lines[1:] if lines else []
 
 
-def pack_unapproved_alert(window, repo, script, new, current, approved, snap_file=None):
-    """Тревога Зевсу о скрипте с чужим хешем new (байты current, в снимке — snap_file) — одна на (направление,
-    скрипт, хеш): «[metis-0933] <направление>: хук <путь> изменён, одобрить?», старый и новый sha256, дифф от
-    одобренной копии (pack_approved_text: sha256 копии — эталон approved.json). approved — pack_approved направления.
-    Нет approved.json, эталона или копии — тревога без диффа: «нет одобренной копии». .git репозитория не читается
-    (круг G5): объекты, refs/replace и origin пишет окно. Дифф строк pack_show (как есть, круг G10) — в ⟦…⟧ с
-    пометкой «данные», внутри кода Markdown (_pack_alert_code), строки — только по \\n (круг G6, Б1); длиннее
-    PACK_ALERT_DIFF — «обрезано, полный: pantheon packs diff <направление>» (Д1), а при snap_file — ещё «(файл снимка
-    <путь>)», путь — через _pack_show_line (G5-1 Д1). Скрипт не прошёл белый список (pack_script_reject) — «не взят в снимок: <причина>,
-    строка N», без диффа и байтов."""
+def pack_unapproved_alert(window, repo, script, new, current, approved):
+    """Тревога Зевсу о скрипте с чужим хешем new (байты current) — одна на (направление, скрипт, хеш), одной строкой
+    без текста скрипта (круг G11, ревью argus G10-1 Б1, G10-2 Б1: alerts.md — один абзац Markdown, непарная «`» или
+    «<a title="» в соседней строке ломает любой код Markdown, и ссылка прячет вызов): «[metis-0933] <направление>: хук
+    <путь> изменён, одобрить? sha256 было <12 знаков>, стало <12 знаков>; строк добавлено A, убрано R — смотрите
+    pantheon packs diff <направление>». Имя направления и путь — через _pack_alert_name. Счёт строк — по диффу от
+    одобренной копии (pack_diff, pack_approved_text: sha256 копии — эталон approved.json); approved — pack_approved
+    направления. Нет approved.json, эталона или копии — вместо счёта причина: «нет одобренной копии». .git репозитория
+    не читается (круг G5): объекты, refs/replace и origin пишет окно. Текст и дифф скрипта владелец смотрит в
+    терминале: pantheon packs diff и packs hashes. Скрипт не прошёл белый список (pack_script_reject) — «не взят в
+    снимок — <причина>, строка N», без счёта и байтов."""
     old = ((approved or {}).get(repo) or {}).get(script)
     where = os.path.join(repo, ".claude", "hooks", script)
     key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
+    win, shown = _pack_alert_name(window), _pack_alert_name(where)
     reject = pack_script_reject(current)
     if reject:
-        text = (f"[metis-0933] {window}: хук {tilde(where)} не взят в снимок — {reject}; одобрить такой нельзя, "
-                f"хук пропускается. sha256 {new}, текст не показан")
+        text = (f"[metis-0933] {win}: хук {shown} не взят в снимок — {reject}; одобрить такой нельзя, "
+                f"хук пропускается. sha256 {new[:12]}, текст не показан")
     else:
         diff, lines = pack_diff(window, repo, script, current, approved)
         if lines is not None:
-            body = PACK_DATA_EOL.join(map(_pack_alert_line, lines))
-            snap = f" (файл снимка {_pack_show_line(tilde(snap_file))})" if snap_file else ""
-            more = f" — обрезано, полный: pantheon packs diff {window}{snap}" if len(body) > PACK_ALERT_DIFF else ""
-            diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}"
-                    f"{_pack_alert_code(body[:PACK_ALERT_DIFF])}{PACK_DATA_CLOSE}{more}")
-        text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "
-                f"стало {new}. {diff}")
+            diff = "строк добавлено {}, убрано {}".format(*pack_diff_counts(lines))
+        text = (f"[metis-0933] {win}: хук {shown} изменён, одобрить? sha256 было {(old or 'нет эталона')[:12]}, "
+                f"стало {new[:12]}; {diff} — смотрите pantheon packs diff {win}")
     try:
         alert_once(key, "1", text, who="pantheon")
     except OSError as e:
@@ -3736,7 +3732,7 @@ def pack_snapshot(window, name, keep=True):
     approved = pack_approved(pack_approved_path(window))
     snap = pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
                               pack_hook_scripts(pack) if plugin else (), approved,
-                              (lambda r, s, d, b, f: pack_unapproved_alert(window, r, s, d, b, approved, f))
+                              (lambda r, s, d, b, f: pack_unapproved_alert(window, r, s, d, b, approved))
                               if keep else None, quiet=not keep)
     if keep:
         shutil.rmtree(path(PACK_DIFFS), ignore_errors=True)
