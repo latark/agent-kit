@@ -6625,7 +6625,7 @@ BATCH_SUGGEST_EVERY = 3 * 86400  # задача расписания раз в 3
 
 def batch_suggest_run(rest):
     """pantheon batch-suggest run [--force] — плановая сводка (metis-0595): предложения по пачкам для всех направлений
-    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Ничего не меняет в задачах. Раньше чем через
+    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Прикрепляет только предложения «уверенно» (task_attach, строка в журнал). Раньше чем через
     BATCH_SUGGEST_EVERY после прошлого прохода — пропуск (--force снимает). Тревога — одна строка, и только если среди
     предложений есть ещё не виденные (ключи в STATE/batch-suggest.json)."""
     if rest not in ([], ["run"], ["run", "--force"]):
@@ -6641,6 +6641,14 @@ def batch_suggest_run(rest):
     tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
     dirs = sorted({h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
     results = [B.suggest(tasks, d) for d in dirs]
+    applied, skipped = [], []
+    for res in results:  # «уверенно» прикрепляет сам проход (metis-0940); журнал задачи и пачки пишет task_attach
+        d, sk = B.apply(res, tasks, lambda tid, sid: T.task_attach(PANTHEON, now(), tid, sid, actor="плановый проход"))
+        applied += d
+        skipped += sk
+    if applied:
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        results = [B.suggest(tasks, d) for d in dirs]
     results = [r for r in results if r["joins"] or r["groups"] or r["duplicates"]]
     keys = sorted(k for r in results for k in B.keys(r))
     seen = st.get("seen") if isinstance(st.get("seen"), list) else None
@@ -6648,7 +6656,7 @@ def batch_suggest_run(rest):
     body = "\n\n".join(B.render(r) for r in results) or "Предложений нет."
     text = ("# Пачки: предложения\n\nСчитает плановый проход без модели, раз в 3–4 суток (`pantheon task batch-suggest`). "
             "Ничего не меняет: пачку ставит координатор — `pantheon task set ID parent=ПАЧКА` (для новой пачки сначала "
-            "`pantheon task new --type story`). «Уверенно» прикрепляет `pantheon task batch-suggest --apply`.\n\n"
+            "`pantheon task new --type story`). «Уверенно» прикрепляет сам проход (то же, что `pantheon task batch-suggest --apply`).\n\n"
             f"Проход: {stamp(t)}\n\n```\n{body}\n```\n")
     os.makedirs(STATE, exist_ok=True)
     write_atomic(path("batch-suggest.md"), text)
@@ -6662,7 +6670,8 @@ def batch_suggest_run(rest):
         n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
         alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
               f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
-    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}")
+    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}, прикреплено {len(applied)}"
+          + "".join(f"\n  прикреплено · {x}" for x in applied) + "".join(f"\n  пропущено · {x}" for x in skipped))
     return 0
 
 
@@ -7085,6 +7094,37 @@ def board_drift_report(T, quiet):
         print(f"предупреждение · доска · {k}: {text}")
 
 
+NO_PARENT_FROM = "2026-11-03"  # задачи старше плана 1.0 без пачки — старый хвост, не тревожим
+NO_PARENT_AGE = 86400
+
+
+def check_no_parent(T, quiet):
+    """Открытая задача type task без parent, созданная больше суток назад и не раньше NO_PARENT_FROM (metis-0940, слово
+    владельца 06.11). Тик (quiet) — одна тревога на пачку новых номеров, каждый номер один раз (STATE/no-parent-seen.json,
+    ушедшие из списка забываются); руками — предупреждение со всем списком. → список номеров."""
+    t = now()
+    ids = sorted(tid for tid, (_, h, _) in T.load_tasks(PANTHEON, T.WORK_TYPES).items()
+                 if h.get("type") == "task" and h.get("status") not in ("done", "dropped", "inbox")
+                 and not h.get("parent") and not h.get("batch") and str(h.get("created") or "") >= NO_PARENT_FROM
+                 and t - (T.ts_of(h.get("created")) or t) > NO_PARENT_AGE)
+    if not quiet:
+        if ids:
+            print(f"предупреждение · задачи без пачки старше суток: {_ids_text(ids)} — pantheon task batch-suggest, "
+                  "затем pantheon task set ID parent=… mode=single mode_why=…")
+        return ids
+    seen = read_json(path("no-parent-seen.json"), [])
+    seen = seen if isinstance(seen, list) else []
+    fresh = [i for i in ids if i not in seen]
+    if fresh:
+        alert(f"задачи без пачки старше суток: {_ids_text(fresh)} — положить в пачку: pantheon task batch-suggest, "
+              "затем pantheon task set ID parent=… mode=single mode_why=…", "check")
+    keep = sorted(set(seen) & set(ids) | set(fresh))
+    if keep != sorted(seen):
+        os.makedirs(STATE, exist_ok=True)
+        write_json(path("no-parent-seen.json"), keep)
+    return ids
+
+
 def check_task_projects(T, quiet):
     """project задачи — только имя проекта из directions.toml (metis-0323). → число задач с чужим именем; на тике
     (quiet) — одна тревога на набор. Реестра нет — не сверяем."""
@@ -7141,6 +7181,7 @@ def check(paths=None, quiet=False):
         check_moved(quiet)   # предупреждение, на код выхода check не влияет
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
+        check_no_parent(T, quiet)  # без пачки старше суток: предупреждение, код выхода не меняет (metis-0940)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
             # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
             # бы сессию снова (ревью argus PR #32)

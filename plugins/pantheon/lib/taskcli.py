@@ -11,7 +11,7 @@ import sys
 __all__ = [
     "TASK_NEW_VALUE_FLAGS", "TASK_NEW_BOOL_FLAGS", "TASK_SPLIT_VALUE_FLAGS", "TASK_SET_VALUE_FLAGS",
     "TASK_REPEATABLE_FLAGS", "TASK_FLAG_ALIASES", "task_repeat_error", "task_flag_error", "task_body_arg",
-    "_read_or_empty", "READ_SUBS", "_cards_fp", "_task_cmd", "task_new_notify", "goal_line", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "batch_suggest_cmd", "task_cmd",
+    "_read_or_empty", "READ_SUBS", "_cards_fp", "_task_cmd", "task_new_notify", "goal_line", "overlap_open_prs", "no_parent_hint", "ready_overlap_lines", "overlap_lines", "batch_suggest_cmd", "task_cmd",
 ]
 
 
@@ -285,6 +285,20 @@ def batch_suggest_cmd(T, args, opt):
     return 0
 
 
+def no_parent_hint(T, tid, direction):
+    """Подсказка после `task new` без --parent (metis-0940, слово владельца 06.11: задачи — по пачкам): лучшая пачка из
+    batch-suggest и готовая команда, иначе «без пачки: …». Сбой подсказки задачу не ломает — пустая строка."""
+    try:
+        B = P.batchsuggest_mod()
+        j = B.best_join(B.suggest(T.load_tasks(P.PANTHEON, T.WORK_TYPES), direction), tid)
+    except Exception:  # noqa: BLE001 — подсказка не должна ронять создание
+        j = None
+    if not j:
+        return "без пачки: положите в пачку (pantheon task batch-suggest)"
+    return (f"без пачки: кандидат {j['story']} «{j['story_title']}» ({j['score']}; {', '.join(j['reasons'])}) — "
+            f"pantheon task set {tid} parent={j['story']} mode=single mode_why=\"почему одна задача\"")
+
+
 def goal_line(T, tid, head, tasks):
     """Строка цели окна по задаче (metis-0725, metis-0738): «<id>: снята с цели окна — почему» или «<id>: остаётся в
     цели окна — почему» по хранилищу на эту минуту. Окно — PANTHEON_SESSION (имя сессии роли, его ставит окно запуска):
@@ -387,6 +401,8 @@ def _task_cmd(rest):
             task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
+            if not opt("--parent") and (opt("--type") or "task") != "story" and body_text is not None:
+                print(no_parent_hint(T, tid, opt("--direction")), file=sys.stderr)
         elif sub == "set" and args:
             tid, changes, note, i, seen, force = args[0], {}, None, 1, set(), None
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
