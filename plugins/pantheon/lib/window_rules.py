@@ -90,15 +90,41 @@ REVIEW_RECORD_RULE = (
     "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")
 
 
-def coordinator_auto_allow(repos):
+# Правила autoMode.allow окна направления на команды его репозиториев, которые раньше разрешал permissions.allow
+# проекта (metis-0933: окну permissions.allow не даётся). Решение владельца 06.11 21:55 «Б — все восемь»: шесть
+# команд чтения mailkeeper, uv sync и git remote. Пакет окна права только сужает — поэтому здесь, в ядре. Имени
+# направления в тексте правил нет (решение 16.10): правило попадает только в окно своего направления.
+MAILKEEPER_READ_RULE = (
+    "Pantheon Mailkeeper Read: In this Pantheon direction window, `mailkeeper status`, `mailkeeper rules`, "
+    "`mailkeeper scan`, `mailkeeper report`, `mailkeeper plan` and `mailkeeper logs` (with their own options) are the "
+    "owner's own local mail-sorting CLI run for the coordinator's task; it runs outside the sandbox by the window's "
+    "sandbox.excludedCommands and only reads or plans, it does not move, label or delete mail. It does not cover "
+    "`mailkeeper apply`, `undo`, `run`, `auth`, `daemon`, `service`, `on`, `off`, `resume` or `excerpt`, `cd` or "
+    "chained commands; those are judged by the built-in rules.")
+UV_SYNC_RULE = (
+    "Pantheon Uv Sync: In this Pantheon direction window, `uv sync` (optionally with `--frozen`, `--locked`, "
+    "`--all-extras`, `--extra <name>`, `--group <name>` or `--dev`) inside one of this direction's repositories installs "
+    "the project's own locked dependencies into its `.venv`, as the project's settings allowed before. It does not "
+    "cover `uv pip`, `uv add`, `uv remove`, `uv tool`, `uv run`, another index or source URL, `cd` or chained "
+    "commands.")
+GIT_REMOTE_RULE = (
+    "Pantheon Git Remote: In this Pantheon direction window, `git remote` (`-v`, `show`, `get-url`, `add`, "
+    "`set-url`, `rename`, `remove`, `prune`, `update`) in one of this direction's repositories is routine repository "
+    "upkeep for the coordinator's task, as the project's settings allowed before. It covers only `git remote` itself: "
+    "a push, a fetch from a new URL, `cd` or chained commands are judged by the built-in rules.")
+DIRECTION_AUTO_ALLOW = {"metis-pantheon": (MAILKEEPER_READ_RULE, UV_SYNC_RULE), "proteus-morph": (GIT_REMOTE_RULE,)}
+
+
+def coordinator_auto_allow(repos, direction=None):
     """autoMode.allow окна координатора: "$defaults", правило слияния и правило сдачи работы лида (push рабочей ветки,
     argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
-    owner/repo; нет таких — обоих правил нет) и правило записей проверок."""
+    owner/repo; нет таких — обоих правил нет), правила направления из DIRECTION_AUTO_ALLOW (metis-0933) и правило
+    записей проверок."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return ["$defaults"] + gated + lead + [REVIEW_RECORD_RULE]
+    return ["$defaults"] + gated + lead + list(DIRECTION_AUTO_ALLOW.get(direction, ())) + [REVIEW_RECORD_RULE]
 
 
 def auto_mode(auto_allow):

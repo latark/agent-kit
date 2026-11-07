@@ -19,7 +19,16 @@ import tempfile
 import atexit as _atexit
 import os as _os
 import shutil as _shutil
-_ROOT = mkroot("tick-root-")
+# «tmp»: окно штаба закрывает в /tmp/claude-<uid> имена без этой приставки (папки чужих сессий), и allowRead штаба
+# для проектов внутри такой папки не выдаётся (metis-0771, проверка ниже). run-tests даёт TMPDIR вида
+# /tmp/claude-<uid>/run-tests-…/…: первое имя без приставки — тогда корень прямо в /tmp/claude-<uid>
+_ROOT = mkroot("tmp-tick-root-")
+for _base in ("/tmp/claude-%d" % _os.getuid(), "/private/tmp/claude-%d" % _os.getuid()):
+    _rel = _os.path.relpath(_ROOT, _base)
+    if not _rel.startswith("..") and not _rel.split(_os.sep)[0].startswith("tmp"):
+        _shutil.rmtree(_ROOT, True)
+        _ROOT = tempfile.mkdtemp(prefix="tmp-tick-root-", dir=_base)
+        break
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
@@ -535,7 +544,7 @@ def main():
           "у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"/bin/sh {os.path.join(os.path.dirname(gpath), 'python.sh')} {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
-          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
+          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill|EnterWorktree")
     hq = load("hq")
     hb = hq["sandbox"]
     check("окно штаба (SEC-26): пишет только ~/ai/pantheon без .git и alerts.md, сети нет, мимо песочницы — start/wake/alert",
@@ -647,7 +656,9 @@ def main():
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
-          and all(len(am[n]) == 4 and len(rule(n, "Pantheon Gated Merge:")) == 1
+          # metis-pantheon: ещё два правила направления — Mailkeeper Read и Uv Sync (metis-0933, владелец 06.11 21:55)
+          and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
+          and all(len(am[n]) == {"athena-shop": 4, "metis-pantheon": 6}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
                   == record for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record)

@@ -26,6 +26,10 @@ plugins = [
   "commit-commands@claude-plugins-official",
   "claude-md-management@claude-plugins-official",
   "notion@anthropic-plugin-directory",
+  # плагины проектов MorphStream (metis-0933, решение владельца 06.11 21:55): включает только пакет окна proteus-morph
+  # (packs/proteus-morph/window.json plugins); в «оставить» окон направлений и мастерской — чтобы там всё было как раньше
+  "context7@claude-plugins-official", "supabase@claude-plugins-official", "vercel@claude-plugins-official",
+  "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
 # имя сервера в правиле mcp__<имя>
 mcp = ["qmd", "context7", "jetbrains", "computer-use", "claude-in-chrome", "plugin_Notion_notion", "claude_ai_Claude_Docs"]
@@ -39,6 +43,8 @@ plugins = [
   "feature-dev@claude-plugins-official", "code-simplifier@claude-plugins-official",
   "frontend-design@claude-plugins-official", "security-guidance@claude-plugins-official",
   "commit-commands@claude-plugins-official", "claude-md-management@claude-plugins-official",
+  "context7@claude-plugins-official", "supabase@claude-plugins-official", "vercel@claude-plugins-official",
+  "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
 mcp = ["qmd", "context7", "jetbrains", "claude_ai_Claude_Docs"]
 
@@ -53,6 +59,8 @@ plugins = [
   "feature-dev@claude-plugins-official", "code-simplifier@claude-plugins-official",
   "frontend-design@claude-plugins-official", "security-guidance@claude-plugins-official",
   "commit-commands@claude-plugins-official", "claude-md-management@claude-plugins-official",
+  "context7@claude-plugins-official", "supabase@claude-plugins-official", "vercel@claude-plugins-official",
+  "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
 mcp = ["qmd", "context7", "jetbrains"]
 

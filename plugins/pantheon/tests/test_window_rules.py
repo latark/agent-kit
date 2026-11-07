@@ -149,6 +149,23 @@ def main():
     check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
           "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]
           and lead.split("(1)")[0].count("`") == 4, lead.split("(1)")[0])
+    # metis-0933, решение владельца 06.11 21:55 «Б — все восемь»: правила направления в autoMode.allow его окна
+    mp, pm = w.coordinator_auto_allow(["a-org/app"], "metis-pantheon"), w.coordinator_auto_allow([], "proteus-morph")
+    check("coordinator_auto_allow(metis-pantheon): шесть команд чтения mailkeeper и uv sync — перед Review Record",
+          mp[-3:] == [w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.REVIEW_RECORD_RULE]
+          and all(f"`mailkeeper {c}`" in w.MAILKEEPER_READ_RULE
+                  for c in ("status", "rules", "scan", "report", "plan", "logs")), mp)
+    check("coordinator_auto_allow(proteus-morph): git remote, без правила слияния (нет репозиториев)",
+          pm == ["$defaults", w.GIT_REMOTE_RULE, w.REVIEW_RECORD_RULE], pm)
+    check("правила направления — только своему окну: другое направление и без имени — без них",
+          w.coordinator_auto_allow(["a-org/app"], "zeus") == w.coordinator_auto_allow(["a-org/app"])
+          and not {w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.GIT_REMOTE_RULE} & set(allow))
+    check("Mailkeeper Read: команды записи mailkeeper не покрыты",
+          all(f"`{c}`" in w.MAILKEEPER_READ_RULE.split("does not cover")[1]
+              for c in ("mailkeeper apply", "undo", "run", "auth", "daemon", "service", "on", "off", "resume",
+                        "excerpt")), w.MAILKEEPER_READ_RULE)
+    check("правила направления — без «permissions»: окну permissions.allow не даётся", w.COORDINATOR_ALLOW == []
+          and all("permissions" not in r for r in (w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.GIT_REMOTE_RULE)))
     check("auto_mode: раздел autoMode — копия списка",
           w.auto_mode(allow) == {"allow": allow} and w.auto_mode(allow)["allow"] is not allow)
 
@@ -157,6 +174,11 @@ def main():
                        "def coordinator_auto_allow", "MERGE_REPO_RE = re.compile", '"autoMode"] = {')
            if x in psrc]
     check("pantheon.py сам правил не определяет — только берёт из window_rules.py", not own, own)
+    calls = [c for c in ast.walk(ast.parse(psrc)) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+             and c.func.id == "coordinator_auto_allow"]
+    check("sandbox_build: окну направления — coordinator_auto_allow(…, name): его правила из DIRECTION_AUTO_ALLOW",
+          len(calls) == 1 and len(calls[0].args) == 2 and isinstance(calls[0].args[1], ast.Name)
+          and calls[0].args[1].id == "name", [ast.dump(c)[:200] for c in calls])
 
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="window-rules-"))
     old = {k: os.environ.get(k) for k in ("HOME", "PANTHEON_HOME", "PANTHEON_STATE")}

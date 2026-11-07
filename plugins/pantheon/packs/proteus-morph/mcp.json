@@ -1,0 +1,71 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "python3",
+      "args": [
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "--",
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@1.10.1"
+      ]
+    },
+    "grafana": {
+      "command": "python3",
+      "args": [
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "${HOME}/projects/MorphStream/app/.env.local",
+        "GRAFANA_URL,GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "--",
+        "${HOME}/.local/bin/mcp-grafana",
+        "-t",
+        "stdio"
+      ]
+    },
+    "next-devtools": {
+      "command": "python3",
+      "args": [
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "--",
+        "npx",
+        "-y",
+        "next-devtools-mcp@0.4.0"
+      ],
+      "env": {
+        "NEXT_TELEMETRY_DISABLED": "1"
+      }
+    },
+    "shadcn": {
+      "command": "python3",
+      "args": [
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "--",
+        "npx",
+        "-y",
+        "shadcn@4.8.2",
+        "mcp"
+      ]
+    },
+    "upstash": {
+      "command": "python3",
+      "args": [
+        "-I",
+        "${PANTHEON_PACK_BIN}/env_from.py",
+        "${HOME}/projects/MorphStream/app/.env.local",
+        "UPSTASH_EMAIL,UPSTASH_API_KEY",
+        "--",
+        "npx",
+        "-y",
+        "@upstash/mcp-server@0.3.0"
+      ]
+    },
+    "vast-ai": {
+      "type": "http",
+      "url": "https://docs.vast.ai/mcp"
+    }
+  }
+}
