@@ -3458,6 +3458,44 @@ def fetch_problem(texts):
     return None
 
 
+def _merge_repo_set():
+    """owner/repo из [merge_repos] policy.toml всех направлений, в нижнем регистре."""
+    mr = load_policy().get("merge_repos")
+    return {r.strip().lower() for v in (mr.values() if isinstance(mr, dict) else ()) if isinstance(v, list)
+            for r in v if isinstance(r, str) and r.strip()}
+
+
+def window_push_judged(texts, cwd):
+    """git push главной сессии окна судит push_problem (metis-0983): True — репозиторий remote из [merge_repos] или
+    его не вычислить; False — не push или репозиторий вне [merge_repos] (~/ai/pantheon и прочие хранилища окна: их
+    main шлюз не сливает, отправка туда — законный путь)."""
+    parsed = _git_sub(texts)
+    if parsed is None:
+        return True
+    gdir, sub, args = parsed
+    if sub != "push":
+        return False
+    if any(a is None for a in args):
+        return True
+    remote, i = None, 0
+    while i < len(args):
+        a = args[i]
+        if a in _PUSH_OPT_ARG:
+            i += 2
+            continue
+        if not a.startswith("-"):
+            remote = a
+            break
+        i += 1
+    d = _expand(gdir, cwd) if gdir else cwd
+    if not remote:
+        up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
+        remote = up.split("/", 1)[0] if "/" in up else "origin"
+    url = remote if re.search(r"[/:]", remote) else (_git_out(d, "remote", "get-url", remote) or "")
+    repo = _mg()._repo_tail(_mg()._remote_id(url)) if url.strip() else ""
+    return not repo or repo in _merge_repo_set()
+
+
 def push_problem(texts, cwd, moved):
     """Почему эта отправка ролям нельзя, или None."""
     got = _push_parse(texts, cwd, moved)
@@ -3717,6 +3755,12 @@ def check_owner_merge(event, tool_input):
             if why:
                 return (f"Правило fetch: {why}. Окну fetch пишет только refs/remotes/* и теги — локальную ветку "
                         "сдвигают merge, rebase или switch в своей копии.")
+            # и push — как у ролей, в репозиториях [merge_repos]: main сливает шлюз (metis-0983, Д2 argus #378)
+            why = push_problem(texts, cwd, moved) if window_role() and window_push_judged(texts, cwd) else None
+            if why:
+                return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`git push origin "
+                        "HEAD:refs/heads/<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
+                        "удаление веток — только владелец.")
             why = push_accepted(texts, cwd, moved)
             if why:
                 return why

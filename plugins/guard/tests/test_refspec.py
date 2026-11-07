@@ -123,6 +123,30 @@ def main():
             got = isinstance(why, str) and why.startswith(("Правило push", "Правило fetch"))
             who = "окно" if ev is win and env else "владелец" if ev is win else "лид"
             check(f"check_push {who}: {cmd} — {'отказ' if deny else 'можно'}", got == deny, why)
+        # push главной сессии окна — по push_problem, но только в репозиториях [merge_repos] или с невычислимым remote
+        os.makedirs(os.path.join(root, ".claude", "pantheon"))
+        with open(os.path.join(root, ".claude", "pantheon", "policy.toml"), "w") as fh:
+            fh.write('[merge_repos]\nmetis-pantheon = ["latark/agent-kit"]\n')
+        git(repo, "remote", "add", "origin", "https://github.com/latark/agent-kit.git")
+        git(repo, "remote", "add", "store", "git@github.com:latark/pantheon.git")
+        git(repo, "remote", "add", "bare", "")
+        for env, cmd, deny in (
+                ("metis-pantheon", "git push origin feat:main", True),
+                ("metis-pantheon", "git push origin HEAD:refs/heads/feat-x", False),
+                ("metis-pantheon", "git push origin feat:heads/main", True),
+                ("metis-pantheon", "git push https://github.com/Latark/agent-kit feat:main", True),
+                ("metis-pantheon", "git push -C . origin feat:main", True),
+                ("metis-pantheon", "git push bare feat:main", True),
+                ("metis-pantheon", "git push store feat:main", False),
+                ("metis-pantheon", "git push https://github.com/latark/pantheon feat:main", False),
+                ("metis-pantheon", "git push $R feat:main", True),
+                ("metis-pantheon", "git push origin --force feat", True),
+                ("", "git push origin feat:main", False)):
+            os.environ["PANTHEON_ROLE"] = env
+            why = g.check_push(win, "Bash", {"command": cmd})
+            got = isinstance(why, str) and why.startswith("Правило push")
+            who = "окно" if env else "владелец"
+            check(f"check_push {who}: {cmd} — {'отказ' if deny else 'можно'}", got == deny, why)
         os.environ.pop("PANTHEON_ROLE", None)
     finally:
         shutil.rmtree(root, ignore_errors=True)
