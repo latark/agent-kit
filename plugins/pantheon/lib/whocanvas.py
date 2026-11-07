@@ -16,7 +16,8 @@
 Что берётся из текущего холста: x, y, ширина и высота узла по id (владелец двигает карточки руками), размер и место
 групп, связи (остаются, если оба конца есть) и узлы с id, которых код не знает (добавил владелец). Новый узел встаёт в
 первое свободное место своей группы; места нет — группа растёт вниз, а всё, что лежало под ней, сдвигается. Тексты,
-цвет и подписи групп код пишет сам: правки текста руками пересборка затрёт.
+цвет и подписи групп код пишет сам; узел, в котором не то, что код писал (хеш в отпечатке) и не то, что пишет сейчас,
+правили руками — он остаётся как есть, а тревога приходит один раз на его текст (metis-0838).
 
 Только стандартная библиотека; пути и чтение задач передаёт pantheon.py.
 """
@@ -231,14 +232,29 @@ def _hash(text, color):
     return hashlib.sha256(f"{text}\0{color or ''}".encode()).hexdigest()[:16]
 
 
+def _known(hashes, nid):
+    """Хеши, которые код записывал в узел nid: строка (обычная запись) или список (запись перед холстом, metis-0838 Д8:
+    старый и новый, пока холст не записан)."""
+    v = hashes.get(nid)
+    return set(v) if isinstance(v, list) else {v} if isinstance(v, str) else set()
+
+
+def _is_manual(hashes, nid, cur, want):
+    """Узел правили руками: код его уже писал (есть запись), сейчас в нём не то, что код писал, и не то, что код
+    пишет сейчас. Последнее — Д8: отпечаток отстал от холста (холст записан, а отпечаток нет) — узел кода не ручной."""
+    return nid in hashes and cur != want and cur not in _known(hashes, nid)
+
+
 def build(current, roles, directions, statuses, catalog=None, hashes=None, report=None):
     """Новый холст {'nodes', 'edges'} по текущему (словарь JSON Canvas или None) и входным данным.
     hashes — {id: хеш текста и цвета (у группы — подписи и цвета), записанных кодом в прошлый раз}: узел, у которого
-    сейчас другое, правили руками — его текст, цвет и подпись остаются. Нет записи (первая сборка) — пишет код.
-    report (словарь) получает 'hashes' (что записано сейчас) и 'manual' (id узлов, правленных руками)."""
+    сейчас другое — и не то, что код пишет сейчас, — правили руками: его текст, цвет и подпись остаются. Нет записи
+    (первая сборка) — пишет код. report (словарь) получает 'hashes' (что записано сейчас), 'manual' (id узлов,
+    правленных руками), 'manual_hash' ({id: хеш их нынешнего текста} — значение тревоги, Д9) и 'auto' (id узлов,
+    которые код пишет сам: их метку ручной правки можно снять)."""
     hashes = hashes or {}
     report = report if report is not None else {}
-    report["hashes"], report["manual"] = {}, []
+    report["hashes"], report["manual"], report["manual_hash"] = {}, [], {}
     cur_nodes = {n["id"]: n for n in (current or {}).get("nodes", []) if isinstance(n, dict) and "id" in n}
     known = {"you", "legend", *GROUPS, *[e["id"] for e in (catalog if catalog is not None else CATALOG)]}
     want = desired(roles, directions, statuses, catalog)
@@ -254,9 +270,11 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
     for gid, (label, color, x, y, w, h) in GROUPS.items():
         old = cur_nodes.get(gid)
         if old and _geom(old) and old.get("type") == "group":
-            if gid in hashes and hashes[gid] != _hash(old.get("label"), old.get("color")):
+            cur_h = _hash(old.get("label"), old.get("color"))
+            if _is_manual(hashes, gid, cur_h, _hash(label, color)):
                 g = dict(old)  # подпись или цвет группы правили руками
                 report["manual"].append(gid)
+                report["manual_hash"][gid] = cur_h
                 report["hashes"][gid] = hashes[gid]
                 nodes.append(g)
                 continue
@@ -281,9 +299,11 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
         if n["id"] in texts:
             _, _, text, w, h, color = texts[n["id"]]
             nid = n["id"]
-            if nid in hashes and hashes[nid] != _hash(n.get("text"), n.get("color")):
+            cur_h = _hash(n.get("text"), n.get("color"))
+            if _is_manual(hashes, nid, cur_h, _hash(text, color)):
                 placed.append(dict(n))  # текст или цвет правили руками — код карточку не обновляет
                 report["manual"].append(nid)
+                report["manual_hash"][nid] = cur_h
                 report["hashes"][nid] = hashes[nid]
                 continue
             report["hashes"][nid] = _hash(text, color)
@@ -333,6 +353,7 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
     else:
         edges = [dict(e) for e in current.get("edges", []) if isinstance(e, dict)
                  and e.get("fromNode") in ids and e.get("toNode") in ids]
+    report["auto"] = sorted(set(report["hashes"]) - set(report["manual"]))
     return {"nodes": nodes, "edges": edges}
 
 
@@ -356,11 +377,42 @@ def signature(roles, directions, statuses, catalog=None):
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force=False, manual_out=None):
+def _write_json(p, data):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, p)
+
+
+def _merged(prev, new):
+    """Хеши на время записи холста (Д8): у каждого узла — и прежний, и новый. Сбой между отпечатком и холстом
+    оставит холст со старым текстом — старый хеш в записи есть, узел не станет «ручным»."""
+    out = {}
+    for nid, v in new.items():
+        both = _known(prev, nid) | _known(new, nid)
+        out[nid] = sorted(both) if len(both) > 1 else v
+    return out
+
+
+def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force=False, manual_out=None,
+         report_out=None):
     """Пересобирает холст, если изменился отпечаток входов (или force). Возвращает 'written' | 'same' | 'unchanged'.
+    Под замком (файл sig_path + '.lock'): два запуска сразу не пишут холст и отпечаток вперемешку (metis-0838 Д8).
     roles — {имя: путь файла роли}; в отпечаток идёт и время правки файла (описание новой роли без каталога).
     В файл отпечатка пишутся и хеши текста и цвета каждого узла кода: узел, правленный руками, не обновляется, его id
-    попадает в manual_out (список). Удалённая карточка собирается заново."""
+    попадает в manual_out (список). Удалённая карточка собирается заново. report_out (словарь) получает отчёт build
+    ('manual', 'manual_hash', 'auto'); при 'unchanged' он пуст. Порядок записи: отпечаток со старым и новым хешем
+    узлов (прежний sig) → холст → отпечаток с новым sig и хешами — убитый на любом шаге процесс не делает узлы кода
+    «ручными» и не теряет пересборку."""
+    import fcntl
+    os.makedirs(os.path.dirname(sig_path), exist_ok=True)
+    with open(sig_path + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        return _sync(canvas_path, sig_path, roles, directions, statuses, catalog, force, manual_out, report_out)
+
+
+def _sync(canvas_path, sig_path, roles, directions, statuses, catalog, force, manual_out, report_out):
     stamped = {}
     for r, p in roles.items():
         try:
@@ -390,19 +442,20 @@ def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force
     text = render(build(current, roles, directions, statuses, catalog, prev, report))
     if manual_out is not None:
         manual_out.extend(report["manual"])
+    if report_out is not None:
+        report_out.update(report)
     result = "same"
     try:
         same = open(canvas_path, encoding="utf-8").read() == text
     except OSError:
         same = False
     if not same:
+        _write_json(sig_path, {"sig": old, "hashes": _merged(prev, report["hashes"])})  # отпечаток до холста
         os.makedirs(os.path.dirname(canvas_path), exist_ok=True)
         tmp = canvas_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(text)
         os.replace(tmp, canvas_path)
         result = "written"
-    os.makedirs(os.path.dirname(sig_path), exist_ok=True)
-    with open(sig_path, "w", encoding="utf-8") as fh:
-        json.dump({"sig": sig, "hashes": report["hashes"]}, fh)
+    _write_json(sig_path, {"sig": sig, "hashes": report["hashes"]})
     return result

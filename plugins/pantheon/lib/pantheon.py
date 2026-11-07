@@ -4795,7 +4795,7 @@ def who_canvas_inputs(agents=None, reg_path=None):
     return roles, dirs, statuses
 
 
-def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None):
+def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None, report_out=None):
     """Пересобрать холст, если изменились роли, реестр или статус задач из карточек. 'written' | 'same' | 'unchanged' |
     'skip' (нет ни холста, ни памятки, ни реестра — вести нечего)."""
     canvas = os.path.join(PANTHEON, whocanvas_mod().CANVAS_NAME)
@@ -4804,7 +4804,7 @@ def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None):
         return "skip"
     roles, dirs, statuses = who_canvas_inputs(agents, reg_path)
     return whocanvas_mod().sync(canvas, path("who-canvas.json"), roles, dirs, statuses, force=force,
-                                manual_out=manual_out)
+                                manual_out=manual_out, report_out=report_out)
 
 
 def who_canvas_cmd(rest):
@@ -4816,18 +4816,22 @@ def who_canvas_cmd(rest):
         print("использование: pantheon who-canvas [--force]", file=sys.stderr)
         return 2
     try:
-        manual = []
-        got = who_canvas_sync(force="--force" in rest, manual_out=manual)
+        report = {}
+        got = who_canvas_sync(force="--force" in rest, report_out=report)
     except Exception as e:
         msg = f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})"
         alert_once("who-canvas", type(e).__name__, msg, "pantheon")
         print(msg, file=sys.stderr)
         return 1
     clear_once("who-canvas")
-    for nid in manual:  # правка руками (текст, цвет, подпись группы): один раз на состояние карточки
-        alert_once("who-canvas-manual-" + nid, "1",
+    # правка руками (текст, цвет, подпись группы): тревога один раз на текст карточки — значение хеш её текста, новая
+    # правка руками даёт новую тревогу (metis-0838 Д9); карточка снова под кодом — метка снята
+    for nid, h in sorted((report.get("manual_hash") or {}).items()):
+        alert_once("who-canvas-manual-" + nid, h,
                    f"Кто есть кто.canvas: карточка {nid} правлена руками, код её не обновляет; "
                    "чтобы вернуть автосборку — удалите карточку", "pantheon")
+    for nid in report.get("auto") or ():
+        clear_once("who-canvas-manual-" + nid)
     if got == "written":
         print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
     return 0

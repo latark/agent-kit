@@ -399,5 +399,108 @@ check("11. pantheon who-canvas: тревога «карточка argus прав
       al.count("карточка argus правлена руками, код её не обновляет") == 1
       and "удалите карточку" in al and byid(json.load(open(cvp, encoding="utf-8")))["argus"]["text"] == "РУКАМИ", al[-400:])
 
+# --- 12. долги #314 (metis-0838) ----------------------------------------------------------------------------------
+# Д8: отпечаток отстал от холста (холст записан, отпечаток нет) — карточка кода не «ручная»
+canvas6 = os.path.join(ROOT, "pan6", W.CANVAS_NAME)
+sig6 = os.path.join(ROOT, "state6", "who-canvas.json")
+W.sync(canvas6, sig6, rl, dirs, st)
+saved = json.load(open(sig6, encoding="utf-8"))
+saved["hashes"]["zeus"] = "0" * 16  # прошлая запись — от другого текста; на холсте текст кода нынешний
+saved["hashes"]["top"] = "1" * 16
+write(sig6, json.dumps(saved))
+man6, rep6 = [], {}
+W.sync(canvas6, sig6, dict(rl, iris=""), dirs, st, manual_out=man6, report_out=rep6)
+check("12. Д8: хеш в отпечатке отстал, а текст и цвет узла — как пишет код → узел не ручной, тревоги нет",
+      "zeus" not in man6 and "top" not in man6 and "zeus" in rep6["auto"] and "top" in rep6["auto"]
+      and json.load(open(sig6, encoding="utf-8"))["hashes"]["zeus"] != "0" * 16, (man6, rep6.get("auto")))
+# Д8: процесс убит между отпечатком и холстом → холст со старым текстом не «ручной», пересборка не потеряна
+canvas7 = os.path.join(ROOT, "pan7", W.CANVAS_NAME)
+sig7 = os.path.join(ROOT, "state7", "who-canvas.json")
+rl7 = dict(rl, charon="")
+W.sync(canvas7, sig7, rl7, dirs, st)
+st7 = dict(st, **{"metis-0760": "done"})  # текст Харона меняется
+real_replace = W.os.replace
+
+
+def boom(src, dst):
+    if dst == canvas7:
+        raise OSError("убит")
+    return real_replace(src, dst)
+
+
+W.os.replace = boom
+try:
+    W.sync(canvas7, sig7, rl7, dirs, st7)
+    crashed = False
+except OSError:
+    crashed = True
+finally:
+    W.os.replace = real_replace
+mid = json.load(open(sig7, encoding="utf-8"))
+man7 = []
+got7 = W.sync(canvas7, sig7, rl7, dirs, st7, manual_out=man7)
+check("12. Д8: сбой записи холста после отпечатка → прежний sig, в записи старый и новый хеш; следующий проход "
+      "пересобирает, Харон не ручной",
+      crashed and isinstance(mid["hashes"].get("charon"), list) and got7 == "written" and "charon" not in man7
+      and "metis-0760" not in byid(json.load(open(canvas7, encoding="utf-8")))["charon"]["text"]
+      and isinstance(json.load(open(sig7, encoding="utf-8"))["hashes"]["charon"], str), (crashed, mid["hashes"].get("charon"), got7, man7))
+# Д8: замок — второй запуск ждёт первого
+import fcntl  # noqa: E402
+import threading  # noqa: E402
+lk = open(sig7 + ".lock", "a")
+fcntl.flock(lk, fcntl.LOCK_EX)
+done = []
+th = threading.Thread(target=lambda: done.append(W.sync(canvas7, sig7, rl7, dirs, st, force=True)))
+th.start()
+th.join(0.5)
+waited = not done
+fcntl.flock(lk, fcntl.LOCK_UN)
+lk.close()
+th.join(10)
+check("12. Д8: sync берёт замок — пока он занят, сборка ждёт; отпущен — доходит", waited and done == ["written"], (waited, done))
+
+# Д9 и clear_once("who-canvas"): команда целиком
+probe_f = probe.replace("p.who_canvas_cmd([])", "p.who_canvas_cmd(['--force'])") + f"""
+print("mark-canvas:", _o.path.exists(p.once_path("who-canvas")))
+print("mark-argus:", _o.path.exists(p.once_path("who-canvas-manual-argus")))
+"""
+
+
+def run_f():
+    return subprocess.run([PY311, "-I", "-c", probe_f], env=env, capture_output=True, text=True, timeout=120)
+
+
+def edit_argus(text):
+    d = json.load(open(cvp, encoding="utf-8"))
+    byid(d)["argus"]["text"] = text
+    write(cvp, json.dumps(d, ensure_ascii=False, indent="\t"))
+
+
+def alerts_argus():
+    a = open(os.path.join(home, "alerts.md"), encoding="utf-8").read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
+    return a.count("карточка argus правлена руками")
+
+
+edit_argus("ДРУГОЕ РУКАМИ")
+r = run_f()
+check("12. Д9: новая ручная правка той же карточки → новая тревога (значение — хеш текста)",
+      alerts_argus() == 2 and "mark-argus: True" in r.stdout, (alerts_argus(), r.stdout + r.stderr))
+d = json.load(open(cvp, encoding="utf-8"))
+d["nodes"] = [n for n in d["nodes"] if n["id"] != "argus"]
+write(cvp, json.dumps(d, ensure_ascii=False, indent="\t"))
+r = run_f()
+check("12. Д9: карточка удалена и собрана кодом → метка ручной правки снята", "mark-argus: False" in r.stdout,
+      r.stdout + r.stderr)
+edit_argus("РУКАМИ")
+run_f()
+check("12. Д9: после возврата под код та же правка, что раньше, снова даёт тревогу", alerts_argus() == 3, alerts_argus())
+write(cvp, "{нет")
+r = run_f()
+had_mark = "mark-canvas: True" in r.stdout
+os.remove(cvp)
+r = run_f()
+check("12. clear_once: холст не читался (тревога, метка) → удачная сборка снимает метку «who-canvas»",
+      had_mark and "1: 0" in r.stdout and "mark-canvas: False" in r.stdout, r.stdout + r.stderr)
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
