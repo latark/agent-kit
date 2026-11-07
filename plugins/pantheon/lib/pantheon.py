@@ -3325,16 +3325,21 @@ def _pack_data(text):
 
 # Белый список текста скрипта репозитория (metis-0933 круг G6, решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2):
 # в снимок идёт только скрипт в UTF-8 без BOM, без объявления кодировки (PEP 263: Python исполнил бы utf-7 иначе, чем
-# его видит владелец) и из одних печатных знаков, \n и \t. CR, прочие Cc, U+2028/U+2029, знаки bidi и нулевой ширины
-# (Cf) bash и Python читают не так, как их показывает терминал. Не прошёл — хука нет, тревога и packs hashes называют
-# причину и строку без байтов скрипта.
+# его видит владелец) и из знаков PACK_SCRIPT_CHARS. Список — точные диапазоны, а не категории Unicode (круг G7, ревью
+# argus G6-2 Б1; решение координатора 07.11 12:55): ASCII 0x20–0x7E, \n, \t, кириллица А–я, Ё, ё и « » — – … №.
+# str.isprintable() пропускал знаки, которые терминал рисует пустыми или не рисует (U+3164, U+115F, U+FFA0, U+2800,
+# селекторы вариантов U+FE00–FE0F и U+E0100, U+034F): bash видит их частью слова, а владелец — комментарий. CR, прочие
+# Cc, U+2028/U+2029, bidi и нулевой ширины (Cf) — тоже вне списка. Не прошёл — хука нет, тревога и packs hashes
+# называют причину и строку без байтов скрипта.
 PACK_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+PACK_SCRIPT_CHARS = frozenset("\t\n" + "".join(map(chr, range(0x20, 0x7F))) + "".join(map(chr, range(0x410, 0x450)))
+                              + "\u0401\u0451\u00ab\u00bb\u2014\u2013\u2026\u2116")  # Ё ё « » — – … №
 
 
 def pack_script_reject(data):
     """Причина, по которой байты data скрипта репозитория не берутся в снимок (белый список круга G6), со строкой:
     «…, строка N», или None — скрипт прошёл. Строки считаются только по \\n. Байтов скрипта в причине нет: знак — кодом
-    U+XXXX и категорией Unicode."""
+    U+XXXX и категорией Unicode. Знак вне PACK_SCRIPT_CHARS — отказ, печатный он или нет (круг G7)."""
     if data.startswith(b"\xef\xbb\xbf"):
         return "метка порядка байтов (BOM) в начале, строка 1"
     try:
@@ -3344,9 +3349,9 @@ def pack_script_reject(data):
         return f"не UTF-8 (байт {e.start}), строка {n}"
     lines = text.split("\n")
     for n, line in enumerate(lines, 1):
-        bad = next((c for c in line if c != "\t" and not c.isprintable()), None)
+        bad = next((c for c in line if c not in PACK_SCRIPT_CHARS), None)
         if bad is not None:
-            return f"непечатный знак U+{ord(bad):04X} ({unicodedata.category(bad)}), строка {n}"
+            return f"знак вне белого списка U+{ord(bad):04X} ({unicodedata.category(bad)}), строка {n}"
     for n, line in enumerate(lines[:2], 1):
         if PACK_CODING.match(line):
             return f"объявление кодировки (PEP 263), строка {n}"

