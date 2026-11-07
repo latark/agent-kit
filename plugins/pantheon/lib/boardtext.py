@@ -39,6 +39,9 @@
 Свежесть: watch_files — файлы, по которым тик сверяет, что сборка прошла после изменения входов (тревога, если входы
 менялись, а сборки нет 10 мин и больше — pantheon.py board_auto_watch).
 
+Тот же проход пишет и «Ждёт владельца» каждого направления — directions/<имя>/waiting-auto.md (metis-0829,
+waiting_sync): карточки направления, PR ядра и заявки очереди слияния; STATUS.md встраивает его строкой WAIT_EMBED.
+
 Только стандартная библиотека: модуль грузит и хук (hooks/ctx.py).
 """
 import glob
@@ -270,6 +273,83 @@ def owner_cards(tasks, is_owner):
     for _, tid, kind in sorted(rows):
         out[kind].append(tid)
     return out
+
+
+# --- «Ждёт владельца» направления (metis-0829) --------------------------------------------------------------------
+# Файл directions/<имя>/waiting-auto.md рядом со STATUS.md: тот же проход и тот же один писатель, что у board-auto.md.
+# STATUS.md код не пишет (его ведёт координатор): строку встраивания WAIT_EMBED ставит координатор в раздел «Ждёт
+# владельца». Пункты — только id и номера (SEC-13): карточки «Ждёт ответа» и «Руками» направления (owner_cards по его
+# задачам), PR ядра (сливает владелец) с задачами направления из кэша autoclose и заявки на слияние из очереди
+# STATE/merge-queue (ждут Touch ID). Пункт, ставший неправдой (карточка закрыта, PR слит и ушёл из кэша, заявка снята),
+# пропадает на следующем проходе: файл собирается целиком из входов. Штамп «собрано» — время сборки, давшей текст.
+WAIT_NAME = "waiting-auto.md"
+WAIT_EMBED = "![[directions/{name}/waiting-auto]]"
+WAIT_HEAD = ("<!-- файл собирает плановый проход (pantheon board, metis-0829) из задач, кэша PR и очереди слияния; "
+             "руками не править — перезапишется -->")
+QUEUE_RE = re.compile(r"([A-Za-z0-9._-]+)__([A-Za-z0-9._-]+)__([1-9]\d{0,6})\.json")
+
+
+def merge_queue(state):
+    """Заявки на слияние в очереди (ждут Touch ID владельца): [(репозиторий, номер)] по имени файла и его содержимому."""
+    out = []
+    for p in sorted(glob.glob(os.path.join(state, "merge-queue", "*.json"))):
+        m = QUEUE_RE.fullmatch(os.path.basename(p))
+        if not m or os.path.islink(p):
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                req = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        repo = f"{m.group(1)}/{m.group(2)}"
+        if isinstance(req, dict) and req.get("repo") == repo and req.get("pr") == int(m.group(3)):
+            out.append((repo, int(m.group(3))))
+    return out
+
+
+def waiting(pantheon, state, tasks, is_owner, prs):
+    """{направление: {"ask", "do", "prs", "queue"}} для каждой папки directions/<имя> со STATUS.md. prs — open_prs
+    (None — кэша нет: PR не показываем). PR идёт в направление, если среди его задач есть задача этого направления."""
+    queued = set(merge_queue(state))
+    out = {}
+    for p in status_files(pantheon):
+        d = os.path.basename(os.path.dirname(p))
+        if not _ok(NAME_RE, d):
+            continue
+        own = owner_cards({tid: rec for tid, rec in tasks.items() if rec[1].get("direction") == d}, is_owner)
+        mine = [x for x in prs or [] if any((tasks.get(i) or (None, {}))[1].get("direction") == d for i in x["ids"])]
+        out[d] = {"ask": own["ask"], "do": own["do"], "prs": [x for x in mine if x["core"]],
+                  "queue": [x["number"] for x in mine if (x["repo"], x["number"]) in queued]}
+    return out
+
+
+def waiting_render(item, t, files=0):
+    lines = [WAIT_HEAD, f"**Ждёт владельца · собрано {hm(t)} из {int(files)} файлов**", ""]
+    for kind, label in (("ask", "Ждёт ответа"), ("do", "Руками")):
+        ids = [i for i in item.get(kind) or [] if _ok(ID_RE, i)]
+        if ids:
+            more = f" и ещё {len(ids) - MAX_OWNER}" if len(ids) > MAX_OWNER else ""
+            lines.append(f"- **{label}** ({len(ids)}): " + ", ".join(ids[:MAX_OWNER]) + more + ".")
+    for n in item.get("queue") or []:
+        lines.append(f"- Заявка на слияние PR #{n} ждёт Touch ID.")
+    for p in (item.get("prs") or [])[:MAX_PR]:
+        repo = p["repo"].rsplit("/", 1)[-1]
+        ids = f" ({', '.join(p['ids'][:MAX_IDS])})" if p["ids"] else ""
+        lines.append(f"- PR #{p['number']} {repo if _ok(NAME_RE, repo) else '?'}{ids} · ядро → сливает владелец.")
+    if len(lines) == 3:
+        lines.append("- Ничего не ждёт.")
+    return "\n".join(clean(x) for x in lines) + "\n"
+
+
+def waiting_sync(pantheon, state, tasks, is_owner, t):
+    """Записать waiting-auto.md каждого направления → [направления, где файл переписан]. Текст без штампа тот же —
+    файл не трогается (same)."""
+    prs = open_prs(os.path.join(state, "autoclose-prs.json"))
+    made = []
+    for d, item in sorted(waiting(pantheon, state, tasks, is_owner, prs).items()):
+        if sync(os.path.join(pantheon, "directions", d, WAIT_NAME), waiting_render(item, t, len(tasks))) == "written":
+            made.append(d)
+    return made
 
 
 def status_files(pantheon):

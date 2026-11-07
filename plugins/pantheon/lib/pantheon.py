@@ -1164,7 +1164,8 @@ def _fp_board_auto():
     B = boardtext_mod()
     return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
                                                         ("pr_stale", B.pr_stale(path("autoclose-prs.json"))),
-                                                        ("week", board_week())]
+                                                        ("week", board_week()),
+                                                        ("merge_queue", B.merge_queue(STATE))]  # waiting-auto (0829)
 
 
 TICK_SKIP = {
@@ -6599,6 +6600,15 @@ def board_auto_sync(T):
         clear_once("board-auto-embed")
     if res == "written":
         print("board-auto.md: сводка прохода обновлена")
+    try:  # «Ждёт владельца» направлений — directions/<имя>/waiting-auto.md из тех же входов (metis-0829)
+        made = B.waiting_sync(PANTHEON, STATE, tasks, lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE, t)
+    except Exception as e:  # noqa: BLE001 — сбой не ломает проход доски
+        alert_once("board-waiting", type(e).__name__,
+                   f"waiting-auto.md направлений: сборка упала ({type(e).__name__}: {e})", "board")
+        return
+    clear_once("board-waiting")
+    if made:
+        print("waiting-auto.md: «Ждёт владельца» обновлено — " + ", ".join(made))
 
 
 def board_auto_watch(t, sched):
