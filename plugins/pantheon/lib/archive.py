@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timedelta
 
 __all__ = [
-    "VIEW_INBOX", "VIEW_INBOX_LIMIT", "VIEW_INBOX_GROWTH", "view_inbox_count", "view_inbox_check", "view", "PUSH_POST_BUFFER", "PUSH_FAIL_LIMIT", "PUSH_SERVER_ERR", "push_failed", "commit",
+    "VIEW_INBOX", "VIEW_INBOX_LIMIT", "VIEW_INBOX_GROWTH", "view_inbox_count", "view_inbox_check", "view", "PUSH_POST_BUFFER", "PUSH_FAIL_LIMIT", "PUSH_SERVER_ERR", "push_failed", "commit", "data_guard", "DATA_MAX_BYTES", "DATA_EXT",
     "DONE_HEAD", "DATE_ISO", "DATE_RU", "line_date", "archive", "archive_status",
 ]
 
@@ -85,6 +85,52 @@ def push_failed(stderr):
                    "pantheon-commit", note="~/ai/pantheon: push не проходит несколько раз подряд")
 
 
+# Данные не в git (metis-0846): большой файл или архив/таблица во входящих навсегда остаётся в истории, а GitHub не
+# принимает файл больше 100 МБ — и push плана встаёт целиком.
+DATA_MAX_BYTES = 5 * 1024 * 1024
+DATA_EXT = (".zip", ".7z", ".rar", ".csv", ".xlsx", ".parquet")
+
+
+def _in_inbox(rel):
+    parts = rel.split("/")
+    return parts[0] == "inbox" or (len(parts) > 2 and parts[0] == "directions" and parts[2] == "inbox")
+
+
+def _ignore_line(name):
+    """Имя файла как строка .gitignore: от корня папки, спецзнаки экранированы."""
+    return "/" + re.sub(r"([\\*?\[\]!# ])", r"\\\1", name)
+
+
+def data_guard():
+    """Перед `git add`: неотслеживаемый файл больше DATA_MAX_BYTES (где угодно) или с расширением DATA_EXT во входящих
+    (inbox/, directions/*/inbox/) → строка в .gitignore его папки и одна тревога на файл. Закоммиченное не трогает
+    (ls-files --others его не видит). → число скрытых файлов."""
+    out = P.git("ls-files", "--others", "--exclude-standard", "-z", check=False).stdout
+    n = 0
+    for rel in filter(None, out.split("\0")):
+        full = os.path.join(P.PANTHEON, rel)
+        try:
+            size = os.path.getsize(full)
+        except OSError:
+            continue
+        if not (size > DATA_MAX_BYTES or (_in_inbox(rel) and rel.lower().endswith(DATA_EXT))):
+            continue
+        folder, name = os.path.split(full)
+        if "\n" in name:  # такое имя в .gitignore не записать
+            continue
+        gi = os.path.join(folder, ".gitignore")
+        try:
+            have = open(gi, encoding="utf-8").read()
+        except OSError:
+            have = ""
+        with open(gi, "a", encoding="utf-8") as fh:
+            fh.write(("" if not have or have.endswith("\n") else "\n") + _ignore_line(name) + "\n")
+        mb = f"{size / 1048576:.1f} МБ" if size >= 1048576 else f"{size} Б"
+        P.alert_once("data-not-in-git:" + rel, 1, f"данные не в git: {rel}, {mb}", "pantheon-commit")
+        n += 1
+    return n
+
+
 def commit():
     """commit → pull без rebase → push, как Obsidian Git. Слияние шифрованных файлов — git-crypt-merge.sh
     (дописываемые файлы — объединением). Без сети — код TEMPFAIL и тишина; тревога, только если синхронизации
@@ -92,6 +138,7 @@ def commit():
     if not os.path.isdir(os.path.join(P.PANTHEON, ".git")):
         return 0
     with P.lock("pantheon-git"):
+        data_guard()
         if P.git("status", "--porcelain").stdout.strip():
             P.git("add", "-A")
             P.git("commit", "-q", "-m", f"pantheon: {P.host()} {P.stamp()}")
