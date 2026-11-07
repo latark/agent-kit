@@ -2723,8 +2723,11 @@ def check_pantheon(event, tool, tool_input):
 #            демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
 #            песочницы нет, пароль закрыт denyRead.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
-#            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
-#            нет. Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
+#            master — никто из ролей (в main сливаете вы) при любой записи назначения: heads/main, refs/heads/main,
+#            X:main, регистр (APFS) — по правилам git (_dst_refs, metis-0983); --all, --branches, --mirror (и сокращения
+#            вроде --mirr), удаление и принудительная отправка — тоже нет. git fetch и pull (metis-0983, ролям и главной
+#            сессии окна): --update-head-ok (-u), --stdin и refspec или --refmap с назначением в refs/heads/* — отказ,
+#            fetch пишет только refs/remotes/* и теги (fetch_problem). Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
 #            вне ядра — одно, «вернуть» нет), — отказ и ролям, и сессии без роли (metis-0794, push_accepted →
 #            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; принудительная отправка в такой
 #            PR — тоже (metis-0809); строка «Б: <причина>» в коммите PR (не из base), base подтянут без правок и
@@ -2804,9 +2807,15 @@ PROTECTED_BRANCHES = {"main", "master"}
 TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
 _GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
 _PUSH_OPT_ARG = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
-_PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
+_PUSH_BAD = {"--all", "--branches", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
              "--force-if-includes"}
 _PUSH_FORCE = {"--force", "-f", "--force-with-lease", "--force-if-includes"}  # их судит push_accepted (metis-0809)
+# git fetch/pull (metis-0983): флаги со значением отдельным словом; --update-head-ok (-u) сдвигает ветку под HEAD,
+# --stdin читает refspec мимо разбора
+_FETCH_OPT_ARG = {"--refmap", "-o", "--server-option", "--upload-pack", "--depth", "--deepen", "--shallow-since",
+                  "--shallow-exclude", "-j", "--jobs", "--negotiation-tip", "--filter", "--submodule-prefix",
+                  "--recurse-submodules-default", "-s", "--strategy", "-X", "--strategy-option"}
+_FETCH_BAD = {"--update-head-ok", "--stdin"}
 
 
 def limited(event):
@@ -3398,6 +3407,57 @@ def _git_out(d, *args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _opt_in(a, opts):
+    """Флаг a — один из opts, в том числе сокращённый: git понимает однозначное начало длинного флага (--mirr)."""
+    name = a.split("=", 1)[0]
+    return name in opts or (name.startswith("--") and len(name) > 2 and any(o.startswith(name) for o in opts))
+
+
+def _dst_refs(dst):
+    """Полные ref, в которые git может понять назначение refspec (metis-0983) — по его правилам, а не по строке:
+    refs/… — как есть; heads/, tags/, remotes/ — с refs/ спереди (fetch — get_local_ref, push — правило refs/%s:
+    «git push origin X:heads/main» пишет в refs/heads/main); прочее короткое — refs/heads/ или refs/tags/.
+    Сравнивать без регистра: на APFS refs/heads/MAIN — тот же файл, что refs/heads/main."""
+    low = dst.lower()
+    if low.startswith("refs/"):
+        return [dst]
+    if low.startswith(("heads/", "tags/", "remotes/")):
+        return ["refs/" + dst]
+    return ["refs/heads/" + dst, "refs/tags/" + dst]
+
+
+def fetch_problem(texts):
+    """git fetch и pull (metis-0983): почему эта запись ref ролям нельзя, или None. Ролям fetch пишет только
+    refs/remotes/*, теги и FETCH_HEAD: refspec с назначением в refs/heads/* (в том числе --refmap) и --update-head-ok
+    сдвигают локальную ветку — и ту, что под HEAD защищённого репозитория (~/.claude, ~/ai/pantheon)."""
+    parsed = _git_sub(texts)
+    if parsed is None or parsed[1] not in ("fetch", "pull"):
+        return None
+    args = parsed[2]
+    if any(a is None for a in args):
+        return f"аргументы {parsed[1]} не разобрать"
+    pos, specs, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") and (_opt_in(a, _FETCH_BAD) or re.fullmatch(r"-[afkmnpPqtv46]*u[afkmnpPqtv46]*", a)):
+            return f"флаг {a}"
+        if _opt_in(a, {"--refmap"}):
+            if "=" not in a and i + 1 >= len(args):
+                return f"флаг {a} без значения"
+            specs.append(a.split("=", 1)[1] if "=" in a else args[i + 1])
+        if a in _FETCH_OPT_ARG or (a.startswith("--") and "=" not in a and _opt_in(a, {"--refmap"})):
+            i += 2
+            continue
+        if not a.startswith("-"):
+            pos.append(a)
+        i += 1
+    for spec in specs + pos[1:]:
+        dst = spec.lstrip("+").partition(":")[2]
+        if dst and any(r.lower().startswith("refs/heads/") for r in _dst_refs(dst)):
+            return f"refspec «{spec}» пишет в локальную ветку {dst}"
+    return None
+
+
 def push_problem(texts, cwd, moved):
     """Почему эта отправка ролям нельзя, или None."""
     got = _push_parse(texts, cwd, moved)
@@ -3420,10 +3480,10 @@ def _push_parse(texts, cwd, moved, force=False):
     pos, i = [], 0
     while i < len(args):
         a = args[i]
-        if force and (a.split("=", 1)[0] in _PUSH_FORCE or re.fullmatch(r"-[a-ce-zA-Z]*f[a-ce-zA-Z]*", a)):
+        if force and (_opt_in(a, _PUSH_FORCE) or re.fullmatch(r"-[a-ce-zA-Z]*f[a-ce-zA-Z]*", a)):
             i += 1
             continue
-        if a in _PUSH_BAD or a.split("=", 1)[0] in _PUSH_BAD or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
+        if _opt_in(a, _PUSH_BAD) or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
             return f"флаг {a}"
         if a in _PUSH_OPT_ARG:
             i += 2
@@ -3460,10 +3520,10 @@ def _push_parse(texts, cwd, moved, force=False):
         pairs.append((src, current if dst in ("HEAD", "@") else dst))
     out = []
     for src, x in pairs:
-        name = re.sub(r"^refs/heads/", "", x or "")
-        if not name or name in PROTECTED_BRANCHES or "*" in name:
-            return f"отправка в {name or 'неизвестную ветку'}"
-        out.append((src, name))
+        heads = [r[len("refs/heads/"):] for r in _dst_refs(x or "") if r.lower().startswith("refs/heads/")]
+        if not x or "*" in x or any(h.lower() in PROTECTED_BRANCHES for h in heads):
+            return f"отправка в {x or 'неизвестную ветку'}"
+        out.append((src, heads[0] if heads else x))
     return d, remote, out
 
 
@@ -3651,6 +3711,12 @@ def check_owner_merge(event, tool_input):
     notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
         if name == "git":  # push в принятый PR (metis-0794) — и окнам без роли, как ролям
+            # главная сессия окна (PANTHEON_ROLE есть, agent_type нет): fetch у окна мимо песочницы — в refs/heads/*
+            # не пишет, как у ролей (metis-0983, Д1 argus #378)
+            why = fetch_problem(texts) if window_role() else None
+            if why:
+                return (f"Правило fetch: {why}. Окну fetch пишет только refs/remotes/* и теги — локальную ветку "
+                        "сдвигают merge, rebase или switch в своей копии.")
             why = push_accepted(texts, cwd, moved)
             if why:
                 return why
@@ -3799,6 +3865,10 @@ def check_push(event, tool, tool_input):
             # рецензент не меняет то, что проверяет: вердикт argus — на чужой SHA (запор слияния, P1-4)
             return (f"Правило push (шлюз слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
                     "коммит и не меняет его. Нашёл, что исправить, — верни «reject» и опиши в отчёте лиду.")
+        why = fetch_problem(texts) if name == "git" else None
+        if why:
+            return (f"Правило fetch: {why}. Ролям fetch пишет только refs/remotes/* и теги — локальную ветку сдвигают "
+                    "merge, rebase или switch в своей копии: `git fetch origin main`, затем `git merge origin/main`.")
         if name == "?" and "push" not in texts:
             continue
         if name == "?" or (parsed and parsed[1] == "push"):

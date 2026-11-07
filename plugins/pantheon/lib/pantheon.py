@@ -2295,8 +2295,10 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # gh pr diff и gh run — нет: лишний чужой текст в окне
 HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
-# сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
-# пускает guard (_PUSH_BAD)
+# сетевые команды git — мимо неё; мастерской — только при SSH-remote. Это не «только сеть»: мимо песочницы они и
+# пишут в рабочую копию — fetch и pull меняют ref. Поэтому guard: push в main/master при любой записи назначения,
+# --force и --delete — отказ (push_problem); fetch и pull с --update-head-ok или назначением в refs/heads/* — отказ
+# (fetch_problem, metis-0983)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам

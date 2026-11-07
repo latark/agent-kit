@@ -1842,6 +1842,18 @@ def main():
         # shopKeeperApp — её продукт ([merge_client]): слияние открыто, talos и откат — обязанность роли
         ("push: gh pr merge Афиной в своём продукте — можно (0.5.0)", "allow", br, "domain-coordinator", False,
          B("gh pr merge 12 --merge")),
+        # metis-0983: назначение по правилам git (подробно — test_refspec.py); fetch не пишет в refs/heads/*
+        ("push: X:heads/main — отказ", "deny", br, "hephaestus-shop", True, B("git push origin develop:heads/main")),
+        ("push: --mirror — отказ", "deny", br, "domain-coordinator", False, B("git push --mirr origin")),
+        ("fetch: --update-head-ok в ветку под HEAD — отказ", "deny", br, "domain-coordinator", False,
+         B("git fetch --update-head-ok . epic-tax:main")),
+        ("fetch: refspec в refs/heads — отказ субагенту", "deny", br, "dev-sonnet", True,
+         B("git fetch origin main:heads/main")),
+        ("fetch: окно координатора без agent_type, -u — отказ", "deny", br, "", False,
+         B("git fetch -u origin main:feat"), None, TL),
+        ("fetch: в refs/remotes — можно", "allow", br, "dev-sonnet", True,
+         B("git fetch origin main:refs/remotes/origin/main")),
+        ("fetch: ваша сессия в refs/heads — можно", "allow", alex, "", False, B("git fetch origin main:main")),
         ("push: ваша сессия в main — можно", "allow", alex, "", False, B("git push origin main")),
         ("push: git push внутри текста коммита — не отправка", "allow", br, "dev-sonnet", True,
          B("git commit -m 'не делать git push в main'")),
