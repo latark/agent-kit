@@ -330,11 +330,14 @@ def decision(r):
     return "deny", json.loads(r.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def rec(kind, repo, pr, sha, who="argus", agent_id="argus1", session="s-coord", checklist=MISSING):
-    """Запись журнала; у accept по умолчанию — полный перечень Б6, checklist=None — запись старого формата."""
+def rec(kind, repo, pr, sha, who="argus", agent_id="argus1", session="s-coord", checklist=MISSING, base="main"):
+    """Запись журнала; у accept по умолчанию — полный перечень Б6, checklist=None — запись старого формата. base —
+    base PR при записи вердикта (metis-0965), None — поля нет (запись до 0965)."""
     r = {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": sha,
          "by": {"agent_type": who, "agent_id": agent_id, "session_id": session}, "cwd": "/x",
          "time": "2026-10-15T20:00:00+0300", "tool_use_id": "t", "cmd": "pantheon review"}
+    if kind in ("accept", "reject") and base is not None:
+        r["base"] = base
     if checklist is MISSING and kind == "accept":
         checklist = dict(CHECKLIST)
     if checklist is not MISSING and checklist is not None:
@@ -367,6 +370,35 @@ def t_pass_internal(h):
           and stat.S_IMODE(os.stat(h.records).st_mode) == 0o600)
     merge_case("accept и tests на текущий SHA — проходит", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
     merge_case("--match-head-commit=SHA — тоже проходит", h.pre(f"gh pr merge 3 --match-head-commit={sha}"), True)
+    # metis-0965: base PR — в записи вердикта, у gh с -R; gh не ответил — поля нет, «принять» не в счёт
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("0965: accept — поле base из gh pr view -R … --json baseRefName", recs[1].get("base") == "main"
+          and "pr view 3 -R latark/tg-read --json baseRefName" in log, (recs[1], log))
+    open(h.j("gh.fail"), "w").close()
+    h.post(f"pantheon review reject latark/tg-read 3 {sha}{CL}", "argus", agent_id="argus2")
+    os.remove(h.j("gh.fail"))
+    got = h.read()[-1]
+    check("0965: gh не ответил — запись есть, поля base нет", got["kind"] == "reject" and "base" not in got, got)
+    with open(h.records) as fh:
+        lines = fh.readlines()
+    with open(h.records, "w") as fh:
+        fh.writelines(lines[:-1])
+    # base PR сменили (gh pr edit --base): «принять» на main — не в счёт, отказ называет обе base
+    h.view["tg-read"]["baseRefName"] = "release"
+    h.write_view("tg-read")
+    merge_case("0965: base PR сменили — «принять» на старой base не в счёт",
+               h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False, "(base main) не в счёт: base PR сейчас release")
+
+
+def t_returned_empty(h):
+    """Д3 argus #382: «принять» с полем «вернули» без пар — повторный круг; «вернуть» другого в силе, отказ называет
+    поле без пар и metis-0497."""
+    sha = h.sha["tg-read"]
+    h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"),
+           rec("reject", "latark/tg-read", 3, sha, agent_id="argusr", session="s-r"),
+           dict(rec("accept", "latark/tg-read", 3, sha, agent_id="argusa", session="s-a"), returned=[]))
+    merge_case("Д3: поле «вернули» без пар — «вернуть» в силе, отказ называет поле",
+               h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False, "поле «вернули» без пар agent8/сессия8")
 
 
 def t_old_sha(h):
@@ -1614,7 +1646,7 @@ def t_ci(h):
     os.remove(h.j("gh.ci.fail"))
     h.ci(None, raw="не json")
     merge_case("CI: неразборный ответ gh — отказ", h.pre(cmd), False, "проверки GitHub не получены")
-    h.ci(None, raw=json.dumps({"headRefOid": sha, "baseRefOid": BASE}))
+    h.ci(None, raw=json.dumps({"headRefOid": sha, "baseRefOid": BASE, "baseRefName": "main"}))
     merge_case("CI: нет statusCheckRollup в ответе — отказ", h.pre(cmd), False, "проверки GitHub не получены")
     h.ci(["x"])
     merge_case("CI: проверка не словарь — отказ", h.pre(cmd), False, "проверки GitHub не получены")
@@ -1904,15 +1936,17 @@ def t_ci_required(h):
     h.ci([dict(AFFECTED, workflowName=None), TRACES], name="agent-kit")
     merge_case("required: affected без workflowName не засчитывается — отказ", h.pre(cmd, pdir=kit), False,
                "коммите): tests/affected")
-    # ветка base: affected гоняется только на PR в main (tests.yml) — PR в другую ветку его не ждёт, traces — ждёт
+    # ветка base: affected гоняется только на PR в main (tests.yml) — PR в другую ветку его не ждёт, traces — ждёт.
+    # «Принять» — на той же base, что у PR (metis-0965)
+    h.seed(rec("accept", "latark/agent-kit", 7, sha, base="feature-x"))
     h.ci([TRACES], name="agent-kit", baseRefName="feature-x")
     merge_case("required: PR не в main — affected не обязателен, traces зелёная — проходит", h.pre(cmd, pdir=kit), True)
     h.ci([], name="agent-kit", baseRefName="feature-x")
     merge_case("required: PR не в main, rollup пуст — отказ по traces", h.pre(cmd, pdir=kit), False,
                "коммите): check-traces/traces")
     h.ci([TRACES], name="agent-kit", baseRefName=None)
-    merge_case("required: baseRefName нет — обязательны все, affected нет — отказ", h.pre(cmd, pdir=kit), False,
-               "коммите): tests/affected")
+    merge_case("required: baseRefName нет — «принять» с base не сверить (metis-0965), отказ", h.pre(cmd, pdir=kit),
+               False, "base PR сейчас неизвестна")
     # необязательная красная — пропуск и строка systemMessage; при отказе строки нет
     h.ci([AFFECTED, TRACES, dict(full, conclusion="FAILURE")], name="agent-kit", baseRefName="main")
     r = _hook_out(h, cmd, kit)
@@ -3490,6 +3524,18 @@ def t_returned_unit(h):
     for label, x in (("поля нет", acc("b" * 40)), ("поле пустое", acc("b" * 40, returned=[])),
                      ("поле не список", acc("b" * 40, returned=pa))):
         check(f"returned_lie: {label} — []", mg.returned_lie(x, [ra, x]) == [])
+    # Д4 argus #382, вариант Б: своя пара рецензента (agent — его, сессия с опечаткой, #286) не сверяется
+    own = acc("b" * 40, A, returned=["aaaa1111/eeee0000"])
+    check("returned_lie Д4: своя пара с чужой сессией — не врёт", mg.returned_lie(own, [own]) == [])
+    own2 = acc("b" * 40, A, returned=["aaaa1111/eeee0000", "12345678/9abcdef0"])
+    check("returned_lie Д4: своя пара не сверяется, чужая без «вернуть» — врёт",
+          mg.returned_lie(own2, [own2]) == ["12345678/9abcdef0"])
+    check("returned_lie Д4: пара чужого agent с сессией рецензента — врёт",
+          mg.returned_lie(acc("b" * 40, A, returned=["eeee3333/cccc2222"]), []) == ["eeee3333/cccc2222"])
+    check("_empty_field_hint: поле без пар — названо в отказе с metis-0497",
+          "без пар agent8/сессия8 (metis-0497)" in mg._empty_field_hint([ra, acc("b" * 40, returned=[])]))
+    check("_empty_field_hint: поле с парами или без поля — пусто",
+          mg._empty_field_hint([ra, acc("b" * 40, returned=[pa]), acc("c" * 40)]) == "")
     check("returned_lifts: поля «вернули» нет (свежий argus) — снимает", mg.returned_lifts(acc("b" * 40), ra))
     check("returned_lifts: поле есть, отчётов не брал — не снимает", not mg.returned_lifts(b, ra))
     check("returned_lifts: поле есть, reported не список — не снимает",
@@ -3555,6 +3601,39 @@ def t_returned_unit(h):
     check("agent_rounds: поля нет ни в одном поручении — returned None (свежий argus)", got == (None, [pa]), got)
     got = write(user(f"вернули: {pa}» и дальше"), user(f"Узкий повтор, вернули: {pa.upper()}"))
     check("agent_rounds: пары без регистра и без повторов, «» и хвост не мешают", got == ([pa], []), got)
+    # 0991 (Д1–Д3, Д5 argus #382)
+    got = write(user(f"Повторный круг, Вернули: {pa}"))
+    check("0991 Д1: «Вернули:» с заглавной — поле есть", got == ([pa], []), got)
+    got = write(user(f"ВЕРНУЛИ: {pa}"))
+    check("0991 Д1: «ВЕРНУЛИ:» — поле есть", got == ([pa], []), got)
+    got = write(user("Повторный круг, вернули: <agent_id/сессия, …>"))
+    check("0991 Д3: поле без пар — [] (повторный круг, строже), а не None", got == ([], []), got)
+
+    def bg(tid, cmd):
+        e = bash(tid, cmd)
+        e["message"]["content"][0]["input"]["run_in_background"] = True
+        return e
+    short = "abcd/ef01"
+    got = write(user("Полный круг"),
+                bash("o1", rep_("aaaaaaa1") + " --out /tmp/r.md"), result("o1"),
+                bash("o2", rep_("aaaaaaa2") + " --out=/tmp/r.md"), result("o2"),
+                bash("o3", rep_(short) + " 2>&1"), result("o3"),
+                bash("o4", rep_("aaaaaaa4") + " > /tmp/r.md 2>&1"), result("o4"),
+                bash("o5", "pantheon review report --out /tmp/r.md latark/agent-kit 7 aaaaaaa5"), result("o5"))
+    check("0991 Д2: --out, --out=, 2>&1, > файл, --out до позиционных, пара из 4 знаков — в reported",
+          got == (None, sorted(["aaaaaaa1", "aaaaaaa2", short, "aaaaaaa4", "aaaaaaa5"])), got)
+    got = write(user("Полный круг"),
+                bash("n1", rep_("bbbbbbb1") + " --out"), result("n1"),
+                bash("n2", rep_("bbbbbbb2") + " --out a --out b"), result("n2"),
+                bash("n3", rep_("bbbbbbb3") + " --out=--x"), result("n3"),
+                bash("n4", rep_("bbb")), result("n4"),
+                bash("n5", rep_("bbbbbbb5") + " extra"), result("n5"),
+                bash("n6", rep_("bbbbbbb6") + " | tee x"), result("n6"),
+                bash("n7", rep_("bbbbbbb7") + " > $(x)"), result("n7"),
+                bg("n8", rep_("bbbbbbb8")), result("n8"),
+                bash("n9", rep_("bbbbbbb9")), dict(result("n9"), toolUseResult={"backgroundTaskId": "b1"}))
+    check("0991 Д2/Д5: --out без пути, дважды, пара из 3 знаков, лишнее слово, |, $(), фон — не в reported",
+          got == (None, []), got)
     check("agent_rounds: главная сессия (без agent_id) — None",
           mg.agent_rounds(dict(event, agent_id=None), "latark/agent-kit", 7) is None)
     os.remove(path)
@@ -4535,6 +4614,26 @@ def t_core_sandbox(h):
     case("сборка окон Б1: вершины base нет в git папки — отказ, подсказка git fetch", "other", False,
          "вершины base dddddddddddd нет в git папки", tip_sha="d" * 40)
     case("сборка окон Б1: имя ветки base не по формату — отказ", "other", False, "не получить от gh", bname="../x")
+    # metis-0974: «принять» на другом коммите с тем же кодом — вершину base берут и перенос «принять», и сборка
+    # окон; у gh она спрашивается один раз на шлюз
+    H.br("t-sb-other-again", base)
+    again = H.put({SB: SB_SRC.replace(*dict((n, ab) for n, ab, _ in SB_VARIANTS)["other"], 1)}, "other ещё раз")
+    git(p, "checkout", "-q", "-f", "main")
+    git(p, "clean", "-qfdx")
+    for tip_sha, allow in ((tip_other, True), ("fail", False)):
+        h.reset()
+        h.gh([SB], head=heads["other"])
+        h.view["agent-kit"].update(baseRefOid=base, baseRefName="main")
+        h.tip["agent-kit"] = tip_sha
+        h.write_view("agent-kit")
+        h.seed(rec("tests", "latark/agent-kit", None, heads["other"], "dev-opus"),
+               rec("accept", "latark/agent-kit", 7, again))
+        got = h.pre(f"gh pr merge 7 --match-head-commit {heads['other']}", role="hephaestus-pantheon",
+                    agent_id="L1", pdir=kit)
+        merge_case(f"0974: «принять» перенесено, вершина base {'есть' if allow else 'сбой gh'} — "
+                   f"{'проходит' if allow else 'отказ'}", got, allow, "" if allow else "не получить от gh")
+        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+        check(f"0974: вершина base ({tip_sha[:8]}) — один запрос gh на шлюз", log.count("/git/ref/heads/") == 1, log)
     h.reset()
     h.approve(f"{ts()} merge-approve latark/agent-kit#7 {heads['sb']}")
     h.gh([SB], head=heads["sb"])
@@ -4889,6 +4988,27 @@ def t_carry_budget(h):
             if raw is None:
                 check("бюджет сверки: без переменной — причина «дольше 4 с»", any("дольше 4 с" in w for w in p.why),
                       p.why)
+        # metis-0974: бюджет — от конца запросов gh. gh pr view и вершина base шли 10 с — сверка всё равно считает;
+        # вершина спрошена через память шлюза (tips), её же возьмёт сборка окон
+        keep = mg._base_tip, mg._carry_git
+        box = []
+
+        def slow_tip(repo, branch, memo=None):
+            box[0].t0 = time.monotonic() - 10   # gh ответил через 10 с после создания _Prints
+            memo[(repo, branch)] = BASE
+            return BASE
+        mg._base_tip, mg._carry_git = slow_tip, lambda cwd, repo, base: (h.root, None)
+        try:
+            tips = {}
+            p = mg._Prints(h.root, "latark/agent-kit", OLD, [], lambda: {"baseRefOid": BASE, "baseRefName": "main"},
+                           tips)
+            box.append(p)
+            got = p(OLD)
+            check("0974: gh шёл 10 с — бюджет сверки от конца gh, отпечаток посчитан", got == ("отпечаток", ""),
+                  (got, p.why))
+            check("0974: вершина base — в памяти шлюза", tips == {("latark/agent-kit", "main"): BASE}, tips)
+        finally:
+            mg._base_tip, mg._carry_git = keep
     finally:
         mg._fingerprint = saved
 
@@ -4992,10 +5112,15 @@ def t_git_timeout(h):
     try:
         signal.setitimer(signal.ITIMER_REAL, 0)
         check("git: без таймера хука — 3 с", mg._git_timeout() == 3, mg._git_timeout())
-        for left, want in ((7.5, 6), (6.5, 5), (5.5, 4), (4, 3), (1, 3), (60, 6)):
+        # metis-0975: остаток меньше 3 с — git ждёт меньше 3 с и не переживает срок хука; меньше запаса — сразу гаснет
+        for left, want in ((7.5, 6), (6.5, 5), (5.5, 4), (4, 2.5), (3, 1.5), (1.6, 0.1), (1, 0.05), (60, 6)):
             signal.setitimer(signal.ITIMER_REAL, left)
             got = mg._git_timeout()
-            check(f"git: до срока хука {left} с — ждёт {want} с", abs(got - want) < 0.3, got)
+            check(f"git: до срока хука {left} с — ждёт {want} с", abs(got - want) < 0.3 and got < left, got)
+        signal.setitimer(signal.ITIMER_REAL, 1)
+        mg._git_bytes(h.root, "status")
+        check("0975: до срока хука 1 с — git ждёт не дольше 0.05 с, а не 3", seen and seen[-1] <= 0.05, seen)
+        seen.clear()
         signal.setitimer(signal.ITIMER_REAL, 7)
         mg._git(h.root, "status")
         mg._gh_resolved(h.root)
@@ -5091,9 +5216,49 @@ def t_carry_merged(h):
                                                                      lambda *a, **k: (129, tree)),
                        ("вывод не дерево", lambda *a, **k: (0, b"junk\n"))):
         # подмена — только merge-tree: diff и cat-file после него идут в настоящий git
-        mg._git_code = lambda gd_, *a, fake=fake, **k: fake() if a[0] == "merge-tree" else real(gd_, *a, **k)
-        check(f"Б2: _merge_same — {name} — None (не посчитано)", mg._merge_same(gd, qc, fq[1], bc2, qreb) is None)
+        mg._git_code = lambda gd_, *a, fake=fake, **k: fake() if "merge-tree" in a else real(gd_, *a, **k)
+        notes = []
+        check(f"Б2: _merge_same — {name} — None (не посчитано)",
+              mg._merge_same(gd, qc, fq[1], bc2, qreb, notes.append) is None)
+        old = any("git старше 2.40" in n for n in notes)
+        check(f"0981: _merge_same — {name} — причина «git старше 2.40» {'есть' if '129' in name else 'нет'}",
+              old is ("129" in name), notes)
     mg._git_code = real
+    # metis-0969: атрибуты merge=ours из папки git, info/attributes и core.attributesFile не решают конфликт за PR.
+    # Конфликт qc с bcc: с атрибутом слияние берёт сторону PR и совпадает с qconf — без защиты «тот же код» (True).
+    gitc = lambda *a: subprocess.run(["git", "--git-dir=" + gd, *a], capture_output=True, check=True)
+    gitc("config", "merge.ours.driver", "true")
+    ga = os.path.join(h.root, "attrs-0969")
+    with open(ga, "w") as fh:
+        fh.write("* merge=ours\n")
+    info = os.path.join(gd, "info", "attributes")
+    for where, path in (("папка git/.gitattributes", os.path.join(gd, ".gitattributes")), ("info/attributes", info),
+                        ("core.attributesFile", None)):
+        if path is None:
+            gitc("config", "core.attributesFile", ga)
+        else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("* merge=ours\n")
+        notes = []
+        got = mg._merge_same(gd, qc, fq[1], bcc, qconf, notes.append)
+        want = None if path == info else False
+        check(f"0969: _merge_same — merge=ours в {where} — {want} (конфликт не снят)", got is want, (got, notes))
+        if path == info:
+            check("0969: info/attributes — причина названа", any("info/attributes" in n for n in notes), notes)
+        if path is None:
+            gitc("config", "--unset", "core.attributesFile")
+        else:
+            os.remove(path)
+    check("0969: контроль — без атрибутов конфликт — False", mg._merge_same(gd, qc, fq[1], bcc, qconf) is False)
+    real_b = mg._git_bytes
+    mg._git_bytes = lambda gd_, *a, **k: None if "--git-path" in a else real_b(gd_, *a, **k)
+    with open(info, "w") as fh:
+        fh.write("* merge=ours\n")
+    check("0969: путь info/attributes не узнать (сбой git) — None", mg._merge_same(gd, qc, fq[1], bcc, qconf) is None)
+    os.remove(info)
+    mg._git_bytes = real_b
+    gitc("config", "--unset", "merge.ours.driver")
     for fn in ("_raw_entries", "_manifests"):
         keep = getattr(mg, fn)
         setattr(mg, fn, lambda *a, **k: None)
@@ -5487,7 +5652,7 @@ def t_owner_api_merge(h):
                h.pre("gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", role=None, pdir="projects/tg-read"), True)
 
 
-CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_returned_empty, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_review_format, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
