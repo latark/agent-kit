@@ -4961,6 +4961,27 @@ def launch_folder(folders):
     return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
 
 
+def launch_symlink(folders, folder):
+    """metis-0947 (класс 3 модели угроз metis-0933): первая символьная ссылка в пути папки запуска folder (результат
+    launch_folder: уже настоящий путь) → её путь как записан в реестре; иначе "". launch_folder идёт по ссылке через
+    realpath, а Claude Code грузит CLAUDE.md цели — поэтому смотрим записанный путь по частям: сама папка и любой
+    каталог выше. Ссылки в корне (/var, /tmp, /etc — системные на macOS) не в счёт."""
+    for f in folders or []:
+        if not (isinstance(f, str) and f):
+            continue
+        p = os.path.expanduser(f)
+        if os.path.realpath(p) != folder:
+            continue
+        parts = os.path.abspath(p).split(os.sep)[1:]
+        cur = os.sep
+        for i, part in enumerate(parts):
+            cur = os.path.join(cur, part)
+            if i > 0 and os.path.islink(cur):
+                return cur
+        return ""
+    return ""
+
+
 def hq_led(reg=None):
     """metis-0155 (Б): направления, которые ведёт Пританей, — `coordinator = false` в записи directions.toml. → {имя:
     запись реестра}. По умолчанию координатор включён; выключает только булево false — другое значение `pantheon check`
@@ -5017,6 +5038,10 @@ def direction_target(target, rest, domains):
     folder = launch_folder(domains[target])
     if not os.path.isdir(folder):
         return f"у направления {target} нет папки на этом Mac: {domains[target]}"
+    link = launch_symlink(domains[target], folder)
+    if link:
+        return (f"папка запуска направления {target}: {link} — символьная ссылка; Claude Code загрузил бы CLAUDE.md "
+                "цели ссылки (metis-0947). Окно не запускаю: замените ссылку настоящей папкой в реестре")
     return (target, "domain-coordinator", folder, target,
             f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по нему.")
 
