@@ -37,6 +37,7 @@ import atexit
 import contextlib
 import copy
 import fnmatch
+import glob
 import hashlib
 import inspect
 import io
@@ -48,6 +49,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PY = os.path.join(PLUGIN, "lib", "run.py")
@@ -1109,7 +1111,7 @@ def class_g_debts(tmp):
 # (ревью argus G3-2 Б1 П1 и П4, Д1, Д2; G3-1 Д1–Д3) ---
 NO_COPY_CHECK = ("return data if data is not None and hashlib.sha256(data).hexdigest() == digest else None",
                  "return data")
-NO_SCRUB = ('return "".join(', 'return text or "".join(')
+NO_SCRUB = (', "".join(', ', text or "".join(')  # G8: вычистка внутри PACK_MARK.sub
 NO_CUT = ('if len(body) > PACK_ALERT_DIFF else ""', 'if False else ""')
 NO_KEEP = ("pack_keep_approved(window, approved, kept)", "pass")
 NO_PRUNE = ("if fn not in want:", "if False:")
@@ -1389,7 +1391,7 @@ def class_g5_hashes(tmp):
 # частью слова, и «x=0<знак># ; команда» исполняет команду, а владелец видит комментарий
 G7_INVISIBLE = ((0x3164, "Lo"), (0x115F, "Lo"), (0xFFA0, "Lo"), (0x2800, "So"), (0xFE00, "Mn"), (0xFE0F, "Mn"),
                 (0xE0100, "Mn"), (0x034F, "Mn"))
-G7_PASS = "\techo «ок» — Ёж ё – … № АЯая → ↔ ✓ ✅ ❌ 🔍 ⚠ ℹ\n".encode()  # кириллица и знаки списка — проходят
+G7_PASS = "\techo \"«ок» — Ёж ё – … № АЯая → ↔ ✓ ✅ ❌ 🔍 ⚠ ℹ\"\n".encode()  # кириллица и знаки списка — проходят
 G6_SEPS = (("CR", "\r"), ("FS", "\x1c"), ("VT", "\x0b"), ("FF", "\x0c"), ("NEL", "\u0085"), ("LS", "\u2028"),
            ("PS", "\u2029"))
 # (метка, байты скрипта, что должно быть в причине) — каждая проба Б1 и Б2 argus G5-2 и соседние пути
@@ -1410,7 +1412,7 @@ G6_PROBES = tuple((f"разделитель {n}", ("#!/bin/bash\necho ok" + s + 
            f"знак вне белого списка U+{cp:04X} ({cat}), строка 2") for cp, cat in G7_INVISIBLE)
 G6_LITERAL = b"# check \\u000dprint('EXECUTED')\n"  # литерал «\u000d» (печатные знаки) — проходит, «\» кодом «\\»
 G6_RAW = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u200b\u2028\u2029\u202e\ufeff\u3164\u115f\uffa0\u2800\ufe00-\ufe0f\U000e0100\u034f]")
-NO_LIST = lambda data: None  # noqa: E731 — мутант «проверка списка выключена»
+NO_LIST = lambda data, name="": None  # noqa: E731 — мутант «проверка списка выключена»
 LIST_MUTANTS = (("список выключен", ("c not in PACK_SCRIPT_CHARS", "False")),
                 ("isprintable вместо списка (G7)", ("c not in PACK_SCRIPT_CHARS", 'c != "\\t" and not c.isprintable()')),
                 ("строки по splitlines", ('lines = text.split("\\n")', "lines = text.splitlines()")),
@@ -1421,7 +1423,7 @@ DIFF_SPLITLINES = ('base.decode("utf-8", "replace").split("\\n"), current.decode
                    'base.decode("utf-8", "replace").splitlines(), current.decode("utf-8", "replace").splitlines()')
 NO_BSLASH = ('"\\\\\\\\" if c == "\\\\" else c if c in', "c if c in")
 DIFF_NO_SCRUB = ("[_pack_data(x) for x in difflib", "[x for x in difflib")
-SNAP_NO_LIST = ("reject = pack_script_reject(data)\n        if reject:", "reject = None\n        if reject:")
+SNAP_NO_LIST = ("reject = pack_script_reject(data, script)\n        if reject:", "reject = None\n        if reject:")
 SNAP_FILE_NONE = ("os.path.join(snap, rel) if rel else None)", "None)")  # G5-1 Д1: on_unapproved без файла снимка
 KEEP_FOLLOWS = ("if bad:", "if False:")  # G5-1 Д2: pack_keep_approved без отказа по ссылке
 
@@ -1460,10 +1462,14 @@ def class_g6_list(tmp):
         "MorphStream/app/.claude/hooks/protect-db.sh", "MorphStream/app/.claude/hooks/pre-commit-check.sh",
         "MorphStream/gpu-worker/.claude/hooks/pre-commit-check.sh")]
     real = [p for p in real if os.path.isfile(p)]
-    bad = {p: P.pack_script_reject(open(p, "rb").read()) for p in real}
+    got = {p: P.pack_script_reject(open(p, "rb").read(), os.path.basename(p)) for p in real}
+    g8 = {p: why for p, why in got.items() if why and why.startswith("знак вне ASCII")}
+    bad = {p: why for p, why in got.items() if why and p not in g8}
     if real:
         check(f"круг G6: настоящие хуки пакетов проходят белый список ({len(real)} из 5 есть на машине)",
-              not any(bad.values()), bad)
+              not bad, bad)
+        for p, why in g8.items():  # круг G8: знак вне ASCII в коде — отказ, решение — у координатора
+            print(f"круг G8: настоящий хук {p} не взят — {why}")
     else:
         print("пропущено: настоящих хуков mailkeeper и MorphStream на машине нет (CI)")
 
@@ -1933,6 +1939,168 @@ def class4(P, tmp, env):
                 check(f"класс 4: {name}/{s} — npx {pkg} с точной версией", PINNED.fullmatch(pkg), words)
 
 
+# --- круг G8 (решение Зевса 07.11 13:27; ревью argus G7-2 Б1): двойник латиницы — показом и отказом в коде ---
+G8_MARKED = re.compile(r"\[[^\x00-\x7f](?: *[^\x00-\x7f])*\]")
+G8_PY = ('#!/usr/bin/env python3\n"""Хук: запрещает отправку почты."""\nimport sys\n\nRULES = [(r"sendmail", '
+         '"отправка почты")]  # правила\n\n\ndef main():\n    print(f"verdict: {RULES[0][1]}", file=sys.stderr)\n'
+         '    return 0\n\n\nif __name__ == "__main__":\n    sys.exit(main())\n')
+# (метка, имя скрипта, текст, должен ли пройти) — каждая ветка разбора
+G8_PROBES = (
+    ("ехit 0 (Б1 G7-2)", "s.sh", "#!/bin/bash\nехit 0\ntouch MARK\n", False),
+    ("«ехit» в кавычках словом команды", "s.sh", '"ехit" 0\n', False),
+    ("кавычки у не-echo (deny «…»)", "s.sh", 'deny "нельзя"\n', False),
+    ("$(…) внутри текста echo", "s.sh", 'echo "ok $(ехit)"\n', False),
+    ("${…}", "s.sh", 'x="${ех:-1}"\n', False),
+    ("# внутри слова — не комментарий", "s.sh", "true#ехit 0\n", False),
+    ("heredoc — запасной разбор", "s.sh", "cat <<EOF\necho '\nEOF\nехit 0\n# '\n", False),
+    ("обратные кавычки — запасной разбор", "s.sh", "x=`true`\necho '\nехit 0\n'\n", False),
+    ("echo переопределён функцией", "s.sh", 'echo() { eval "$1"; }\necho "ехit 0"\n', False),
+    ("Python: имя кириллицей", "s.py", "import sys\nsys.ехit(0)\n", False),
+    ("Python: f-строка с кодом кириллицей", "s.py", 'print(f"{ехit()}")\n', False),
+    ("текст echo, printf и комментарии", "s.sh", '#!/bin/bash\n# Проверка\nif true; then echo "⚠ Готово — ок"; fi\n'
+     'printf "%s\\n" "✓ всё" >&2  # конец\n[ -n "$x" ] && echo \'✅ да\' || echo $\'❌ нет\'\n', True),
+    ("Python: строки, докстринг, комментарии", "s.py", G8_PY.replace("sendmail", "сендмейл"), True),
+)
+SH_NO_LEXER = ("    if text.isascii():\n        return None\n", "    if True:\n        return None\n")
+SH_ALLOW_ALL = ('allow = echo_ok and f["w"] >= 1 and f["cmd"] in PACK_ECHO', "allow = True")
+SH_HASH_IN_WORD = ('if c == "#" and not f["in"]:', 'if c == "#":')
+SH_NO_DQ_DOLLAR = ('elif c == "$" and (j := dollar(i)):', 'elif False:')
+SH_NO_PARAM = ('if not c.isascii():\n                return deny(i, "в ${…} или $((…))")', "if False:\n                pass")
+SH_NO_HEREDOC = ("(text.startswith(\"<<\", i) and not text.startswith(\"<<<\", i))", "False")
+SH_NO_BACKTICK = ('if c == "`" or text.startswith', 'if text.startswith')
+SH_NO_REDEF = ("echo_ok = not PACK_ECHO_REDEF.search(text)", "echo_ok = True")
+PY_ALLOW_NAMES = ("if t.type not in ok or old_f:", "if False:")
+NO_MARK = ('f"[{m.group()}]"', "m.group()")
+
+
+def g8_mutants():
+    """(метка мутанта, функция, которую он подменяет, мутант) — каждая ветка разбора и показа."""
+    sh = lambda pair: ("_pack_sh_code", mutant_fn(P._pack_sh_code, *pair))  # noqa: E731
+    return (("разбор выключен", "pack_script_reject", mutant_fn(P.pack_script_reject, *SH_NO_LEXER)),
+            ("кавычки любой команды", *sh(SH_ALLOW_ALL)), ("# внутри слова — комментарий", *sh(SH_HASH_IN_WORD)),
+            ("$( ) в тексте не разбирается", *sh(SH_NO_DQ_DOLLAR)), ("${ } без отказа", *sh(SH_NO_PARAM)),
+            ("heredoc без запасного разбора", *sh(SH_NO_HEREDOC)), ("` без запасного разбора", *sh(SH_NO_BACKTICK)),
+            ("переопределённый echo", *sh(SH_NO_REDEF)),
+            ("Python: имена не смотрятся", "_pack_py_code", mutant_fn(P._pack_py_code, *PY_ALLOW_NAMES)))
+
+
+def g8_visible(orig, mut):
+    """Замена в mut видна на карточке: каждая строка через _pack_data, вне меток [ ] — только ASCII, и показ строки
+    отличается от показа исходной."""
+    shown, was = P._pack_data(mut), P._pack_data(orig)
+    return G8_MARKED.sub("", shown).isascii() and shown != was
+
+
+G8_LIST_WANT = frozenset("\t\n" + "".join(map(chr, range(0x20, 0x7F)))
+                         + "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя"
+                         + "Ёё«»—–…№" + "→↔✓✅❌🔍⚠ℹ")  # эталон списка, выписан буквами, а не диапазонами
+G8_LIST_EDGE = (0x3FF, 0x400, 0x40F, 0x450, 0x45F, 0x483, 0x4FF, 0x500)  # соседи кириллицы А–я, Ё, ё (G7-1 Д1)
+LIST_WIDE = ("range(0x410, 0x450)", "range(0x400, 0x500)")  # мутант argus G7-1 Д1: вся кириллица в списке
+
+
+def g8_list_exact(chars):
+    """Список chars равен эталону G8_LIST_WANT, и каждый сосед кириллицы G8_LIST_EDGE даёт отказ «вне белого
+    списка» (U+0483 — комбинируемый знак: bash видит его частью слова, терминал рисует над соседней буквой)."""
+    with patched(PACK_SCRIPT_CHARS=chars):
+        edges = all(P.pack_script_reject(f"echo ok\nec{chr(cp)}ho x\n".encode())
+                    == f"знак вне белого списка U+{cp:04X} ({unicodedata.category(chr(cp))}), строка 2"
+                    for cp in G8_LIST_EDGE)
+    return chars == G8_LIST_WANT and edges
+
+
+def class_g8_list():
+    """Круг G8 (argus G7-1 Д1): точный состав PACK_SCRIPT_CHARS закреплён эталоном и пробами соседей диапазона."""
+    check("круг G8 (G7-1 Д1): PACK_SCRIPT_CHARS равен эталону, U+0400, U+040F, U+0450, U+0483, U+04FF… — отказ",
+          g8_list_exact(P.PACK_SCRIPT_CHARS), sorted(P.PACK_SCRIPT_CHARS ^ G8_LIST_WANT))
+    src = open(P.__file__, encoding="utf-8").read()
+    assert src.count(LIST_WIDE[0]) == 1, LIST_WIDE
+    start = src.index("PACK_SCRIPT_CHARS = frozenset(")
+    expr = src[start + len("PACK_SCRIPT_CHARS = "):src.index("\n\n", start)].replace(*LIST_WIDE)
+    wide = eval(expr, {})  # noqa: S307 — выражение из pantheon.py с подменой диапазона
+    check("круг G8: самопроверка — мутант range(0x400, 0x500) не равен эталону и пропускает U+0483",
+          not g8_list_exact(wide) and "\u0483" in wide)
+
+
+def class_g8_marks(tmp):
+    """Класс «двойник латиницы»: случайная замена латинской буквы на каждый знак вне ASCII из PACK_SCRIPT_CHARS в
+    случайном месте образцов хуков (fixtures/morph-hooks и Python-образец) — видна меткой на карточке или отказ
+    pack_script_reject (код 1 у packs hashes, хук пропущен). «ехит 0» Б1 — отказ «в коде», в тревоге «не взят в снимок»;
+    текст echo/printf, комментарии и строки Python проходят, но в диффе тревоги — в метке. Мутанты каждой ветки
+    разбора и показа краснеют."""
+    import random
+    samples = [(os.path.basename(p), open(p, encoding="utf-8").read()) for p in sorted(
+        glob.glob(os.path.join(FIXT, "*", "*.sh")))] + [("s.py", G8_PY)]
+    chars = sorted(c for c in P.PACK_SCRIPT_CHARS if not c.isascii())
+    rnd, cases = random.Random(933), []
+    for c in chars:
+        for _ in range(6):
+            name, text = rnd.choice(samples)
+            at = rnd.choice([i for i, ch in enumerate(text) if ch.isascii() and ch.isalpha()])
+            cases.append((name, text, text[:at] + c + text[at + 1:]))
+
+    def run(mark=None, reject=None):
+        """→ (не видно, отказов, меток) по всем заменам."""
+        hidden, refused, marked = [], 0, 0
+        with patched(**({"_pack_data": mark} if mark else {}), **({"pack_script_reject": reject} if reject else {})):
+            for name, text, mut in cases:
+                if P.pack_script_reject(mut.encode(), name):
+                    refused += 1
+                elif g8_visible(text, mut):
+                    marked += 1
+                else:
+                    hidden.append((name, mut))
+        return hidden, refused, marked
+
+    hidden, refused, marked = run()
+    check(f"круг G8: класс — {len(cases)} замен латинской буквы на {len(chars)} знаков вне ASCII видны "
+          f"(меток {marked}, отказов {refused})", not hidden and marked and refused, hidden[:3])
+    hidden, _, _ = run(mark=mutant_fn(P._pack_data, *NO_MARK))
+    check("круг G8: самопроверка — мутант «без меток» прячет замену в тексте echo или комментарии", hidden)
+    for label, name, text, want in G8_PROBES:
+        got = P.pack_script_reject(text.encode(), name)
+        check(f"круг G8: {label} — {'проходит' if want else 'отказ'}", (got is None) == want, got)
+    got = P.pack_script_reject(G8_PROBES[0][2].encode(), "s.sh")
+    check("круг G8: причина Б1 — знак, «в коде», строка, без байтов скрипта",
+          got == "знак вне ASCII U+0435 (Ll) в коде, а не в комментарии «#…» или тексте echo/printf в кавычках, "
+          "строка 2", got)
+    check("круг G8: показ «ехit 0» — «[ех]it 0», текст echo — «[⚠ Готово — ок]»",
+          P._pack_data("ехit 0") == "[ех]it 0" and P._pack_data('echo "⚠ Готово — ок"') == 'echo "[⚠ Готово — ок]"'
+          and P._pack_data("a\u202eб") == "a\\u202e[б]", (P._pack_data("ехit 0"), P._pack_data("a\u202eб")))
+    for label, fn_name, mut in g8_mutants():
+        with patched(**{fn_name: mut}):
+            same = all((P.pack_script_reject(text.encode(), name) is None) == want for _, name, text, want in G8_PROBES)
+        check(f"круг G8: самопроверка — мутант «{label}» пропускает пробу", not same)
+
+    # тревога: Б1 — «не взят в снимок» без байтов; текст echo проходит — в диффе метка
+    os.makedirs(os.path.join(tmp, "g8", "app"), exist_ok=True)
+    app = os.path.realpath(os.path.join(tmp, "g8", "app"))
+    win, ahome, base = "g8win", os.path.join(tmp, "g8", "approved-home"), b"echo ok\n"
+    approved = {app: {"s.sh": hashlib.sha256(base).hexdigest()}}
+    alerts = os.path.join(P.PANTHEON, "alerts.md")
+
+    def alert(current, **mut):
+        with patched(PACK_APPROVED_HOME=ahome):
+            P.pack_keep_approved(win, approved, {hashlib.sha256(base).hexdigest(): base})
+        if os.path.exists(alerts):
+            os.unlink(alerts)
+        shutil.rmtree(P.path("once"), ignore_errors=True)
+        with patched(PACK_APPROVED_HOME=ahome, **mut), contextlib.redirect_stderr(io.StringIO()):
+            P.pack_unapproved_alert(win, app, "s.sh", hashlib.sha256(current).hexdigest(), current, approved, "/x")
+        got = [x for x in open(alerts, encoding="utf-8").read().splitlines() if f"[metis-0933] {win}:" in x]
+        return got[0] if len(got) == 1 else repr(got)
+
+    line = alert(G8_PROBES[0][2].encode())
+    check("круг G8: тревога «ехit 0» — «не взят в снимок … в коде …, строка 2», без диффа и байтов",
+          "не взят в снимок — знак вне ASCII U+0435 (Ll) в коде" in line and "строка 2" in line and "⟦" not in line
+          and "ехit" not in line and "MARK" not in line, line)
+    line = alert('echo "ехit 0"\n'.encode())
+    check("круг G8: тревога — текст echo с двойником проходит, в диффе «+echo \"[ех]it 0\"»",
+          '+echo "[ех]it 0"' in line and "не взят" not in line, line)
+    line = alert('echo "ехit 0"\n'.encode(), _pack_data=mutant_fn(P._pack_data, *NO_MARK))
+    check("круг G8: самопроверка — мутант «без меток» показывает в тревоге «+echo \"ехit 0\"»",
+          '+echo "ехit 0"' in line, line)
+
+
 def main():
     global P
     tmp = os.path.join(ROOT, "h")
@@ -1960,6 +2128,8 @@ def main():
     class_g5_hashes(os.path.join(ROOT, "h2"))
     class_g6_list(os.path.join(ROOT, "h2"))
     class_g6_hashes(os.path.join(ROOT, "h2"))
+    class_g8_marks(os.path.join(ROOT, "h2"))
+    class_g8_list()
     class3_links(P, tmp)
     tmp3 = os.path.join(ROOT, "h3")
     os.makedirs(tmp3)
