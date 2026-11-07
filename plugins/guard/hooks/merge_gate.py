@@ -1116,7 +1116,9 @@ SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings", "window
 # остальных корней — по-прежнему None (ядро). Корни запуска LAUNCH_ROOTS — так же: пропал — правка имени, ядро
 SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", "_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS",
                                     "ROLE_ENV", "job_window_problem", "cwd_allow_problems", "claude_env",
-                                    "start_target", "live_copies", "stop_copies", "agents_all"})
+                                    "start_target", "direction_target", "live_copies", "stop_copies",
+                                    "agents_all", "window_missing", "no_window_reason", "rm_previous", "push_text",
+                                    "lock"})
 # Запуск окон с --settings (metis-0552, Д2 argus-160b): _start_session, _fresh_start и start в sessions.py,
 # продолжение сессии _resume_session и окна задач расписания parse_command в pantheon.py собирают argv
 # `claude … --settings <окно>`; без --settings окно ушло бы без песочницы. Эти корни — без замыкания: ядро — правка
@@ -1125,16 +1127,23 @@ SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", "_resume_session", "parse_c
 # Мелкие корни защит запуска (Б1 обоих argus PR #394): на base 45f35bac они были в ядре через os, после сужения
 # metis-0550 выпали. Флаги claude со значением CLAUDE_VALUE_FLAGS (разбор argv задачи), окно задачи
 # job_window_problem, отказ в запуске из папки с allow cwd_allow_problems, снятие роли у дочерних claude claude_env и
-# ROLE_ENV (metis-0321), цель pantheon start start_target, живые копии окна live_copies, их остановка stop_copies и
-# список сессий agents_all. Все они в SANDBOX_BUILD_OPTIONAL (CLAUDE_VALUE_FLAGS и ROLE_ENV — данные, не функции;
-# в старых версиях файла части функций нет): пропажа в одной версии — правка имени, ядро
+# ROLE_ENV (metis-0321), цель pantheon start start_target и окно её --settings direction_target (sessions.py зовёт
+# его и прямо — Б2 argus R2 PR #394), живые копии окна live_copies, их остановка stop_copies и список сессий
+# agents_all. Все они в SANDBOX_BUILD_OPTIONAL (CLAUDE_VALUE_FLAGS и ROLE_ENV — данные, не функции; в старых версиях
+# файла части функций нет): пропажа в одной версии — правка имени, ядро. Мелкий корень — не барьер для замыкания
+# сборки (Б1 argus R2 PR #394): вызван из сборки (sandbox_build → project_allow_stop → stop_copies → claude_env →
+# run_env) — то, что он зовёт, в замыкании; так в ядре и бинарь claude_bin, окружение run_env, clean_path, nvm_bin,
+# installed_plugin_dir (Б2 argus R2-2). Помощники запуска окон из sessions.py, которые замыкание pantheon.py не видит
+# (Б2 argus R2-2): отказ без окна window_missing и no_window_reason, снятие прежних копий rm_previous, текст старта
+# push_text, замок имени lock
 LAUNCH_ROOTS = ("_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS", "ROLE_ENV", "job_window_problem",
-                "cwd_allow_problems", "claude_env", "start_target", "live_copies", "stop_copies", "agents_all")
+                "cwd_allow_problems", "claude_env", "start_target", "direction_target", "live_copies", "stop_copies",
+                "agents_all", "window_missing", "no_window_reason", "rm_previous", "push_text", "lock")
 # Имена, по которым замыкание не идёт дальше (metis-0550): тревоги владельцу и список живых сессий claude agents.
 # Сборка зовёт их ради побочного действия (тревога), а не ради того, что пишет в settings/<окно>.json; через них в
 # сборку попадали реестр сессий и журнал ваших слов. Правка самого имени — ядро. project_allow_stop — не барьер (Б1
 # argus PR #394): он останавливает живое окно, чей allow пускает gh pr merge; его live_copies и stop_copies — мелкие
-# корни LAUNCH_ROOTS, дальше них замыкание тоже не идёт
+# корни LAUNCH_ROOTS, и замыкание сборки идёт через них дальше (Б1 argus R2)
 BUILD_STOP = frozenset({"alert", "alert_once", "clear_once", "agents_all"})
 SESSIONS_FILE = "plugins/pantheon/lib/sessions.py"
 # fresh_target даёт _fresh_start значение --settings — окно цели (Д1 обоих argus PR #394); его может не быть в
@@ -1271,7 +1280,8 @@ def _defs_closure(src, path=SANDBOX_BUILD_FILE):
     if not all(any(isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == r for st in tree.body)
                for r in (*roots, *shallow) if r not in optional):
         return None
-    seen, todo = set(shallow), list(roots)
+    # мелкие корни — к итогу после обхода, а не в seen до него: иначе они обрывали путь сборки (Б1 argus R2 PR #394)
+    seen, todo = set(), list(roots)
     while todo:
         name = todo.pop()
         if name in seen or name not in defs:
@@ -1281,6 +1291,7 @@ def _defs_closure(src, path=SANDBOX_BUILD_FILE):
             continue
         for st in defs[name]:
             todo.extend(_def_names(st, scopes) if isinstance(st, _DEFS) else _all_names(st))
+    seen |= set(shallow)
     memo = {id(st): ast.dump(st) for st in tree.body}
     for name, sts in defs.items():
         dumps[name] = [memo[id(st)] for st in sts]

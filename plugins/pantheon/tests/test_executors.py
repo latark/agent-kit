@@ -706,7 +706,9 @@ def tests():
     # metis-0411: строка продолжения многострочного списка — слово WINDOW_WORDS на первой строке инструкции
     base_src = ('HQ_EXCLUDED = [\n    "pantheon alert *",\n    "pantheon read *",\n]\n'
                 'OTHER = [\n    "a",\n    "b",\n]\n\n\ndef f():\n    out = {\n        "permissions": [\n'
-                '            "x",\n        ],\n    }\n    return out\n')
+                '            "x",\n        ],\n    }\n    return out\n'
+                '\n\ndef g(data):\n    if (data.get("a") or\n            "permissions" in data):\n        data["x"] = 1\n'
+                '    if data.get("b"):\n        data["y"] = 2\n    return data\n')
     pan = os.path.join(fresh, "plugins", "pantheon", "lib", "pantheon.py")
     with open(pan, "w") as fh:
         fh.write(base_src)
@@ -717,7 +719,12 @@ def tests():
              '    "pantheon read *",\n    "gh pr merge *",\n', True),
             ("удалённый элемент списка HQ_EXCLUDED — защита", '    "pantheon read *",\n', "", True),
             ("правка элемента словаря permissions в функции — защита", '            "x",\n', '            "y",\n', True),
-            ("правка списка без слов окон — не защита", '    "b",\n', '    "c",\n', False)):
+            ("правка списка без слов окон — не защита", '    "b",\n', '    "c",\n', False),
+            # Д3 argus R2-1 и Д4 argus R2-2 PR #394: составная инструкция со словом окна в заголовке
+            ("многострочное условие if, слово на другой строке — защита", '    if (data.get("a") or\n',
+             '    if (data.get("c") or\n', True),
+            ("тело if со словом окна в условии — защита", '        data["x"] = 1\n', '        data["x"] = 0\n', True),
+            ("тело if без слов окон — не защита", '        data["y"] = 2\n', '        data["y"] = 3\n', False)):
         with open(pan, "w") as fh:
             fh.write(base_src.replace(a, b, 1))
         got = m.window_rules_hit(fresh, "HEAD")

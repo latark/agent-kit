@@ -828,14 +828,18 @@ Claude Code, у которого есть журнал ваших слов: Зе
    ядро — правка самой функции (её снятие `--settings` уводит окно без песочницы), а не того, что она зовёт.
    Так же, без замыкания, — защиты запуска (Б1 argus PR #394; на base 45f35bac они были в ядре через `os`):
    `CLAUDE_VALUE_FLAGS`, `ROLE_ENV`, `claude_env`, `job_window_problem`, `cwd_allow_problems`, `start_target`,
-   `live_copies`, `stop_copies`, `agents_all` в pantheon.py и `fresh_target` в sessions.py — правка каждого — ядро.
+   `live_copies`, `stop_copies`, `agents_all`, окно `--settings` цели `direction_target` (sessions.py зовёт его и
+   прямо), отказ без окна `window_missing` и `no_window_reason`, снятие прежних копий `rm_previous`, текст старта
+   `push_text`, замок `lock` в pantheon.py и `fresh_target` в sessions.py — правка каждого — ядро (Б2 обоих argus R2).
    Замыкание сужено (metis-0550): имя модуля из `import` (`os`, `sys`) — не данные сборки, так что `os.environ[…] =`
    в посторонней функции её не тянет; имена тела функции — по `symtable`, и локальная переменная `check` не тянет
-   функцию модуля `check`; дальше тревог (`alert`, `alert_once`, `clear_once`, `BUILD_STOP`) и мелких корней выше
-   (`agents_all`, `live_copies`, `stop_copies`) замыкание не идёт, их собственная правка — ядро. Остановка живого окна
-   с запретным allow `project_allow_stop` — не барьер: то, что она зовёт, в замыкании. Правка
-   комментария или другой функции — не ядро: из 40 последних слияний pantheon.py и sessions.py Touch ID нужен в 13,
-   из них ложно в 3 (#237, #242, #249 — правки `_fresh_start` и `_start_session` вне argv); до metis-0550 — в 24.
+   функцию модуля `check`; дальше тревог (`alert`, `alert_once`, `clear_once`, `BUILD_STOP`) замыкание не идёт.
+   Мелкий корень — не барьер (Б1 argus R2): вне сборки идёт только его собственная правка, а вызванный из сборки он
+   ведёт замыкание дальше — так в ядре окружение окна `run_env` (sandbox_build → `project_allow_stop` →
+   `stop_copies` → `claude_env` → `run_env`), бинарь `claude_bin`, `clean_path`, `nvm_bin`. Правка
+   комментария или другой функции — не ядро: из 40 последних слияний pantheon.py и sessions.py Touch ID нужен в 14
+   (с #294 — правка `run_env`, PATH окна), из них ложно в 3 (#237, #242, #249 — правки `_fresh_start` и
+   `_start_session` вне argv); до metis-0550 — в 24 (по признаку base 45f35bac — 22 из тех же 40).
    Тот же признак — у окна Touch ID (`merge.is_core` совпадает с `_is_core`, файлы сборки `merge.BUILD_FILES` окно
    называет среди ядра) и у доски (`autoclose.sandbox_core` сверяет каждый файл `BUILD_ROOTS`), metis-0551.
    Не разобрать — ядро: папка не клон, нет коммита head (подсказка `git fetch`), не одна merge-base, файл не

@@ -648,11 +648,31 @@ def protected_hit(p):
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
+_BODY_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
+
+
+def _stmt_head(st):
+    """Строки (первая, последняя) заголовка инструкции st: у составной (if, for, with, def, class, try, match) — от
+    декораторов до конца условия, аргументов, баз; у инструкции без тела — она вся."""
+    if not any(getattr(st, f, None) for f in _BODY_FIELDS):
+        return st.lineno, st.end_lineno
+    first = last = st.lineno
+    for field, value in ast.iter_fields(st):
+        if field in _BODY_FIELDS:
+            continue
+        for n in value if isinstance(value, list) else [value]:
+            if isinstance(n, ast.AST) and getattr(n, "lineno", None) is not None:
+                first, last = min(first, n.lineno), max(last, n.end_lineno)
+    return first, last
+
+
 def _stmt_hits(src, lines, sign):
-    """Строки продолжения (metis-0411): инструкция без тела (присваивание, выражение, return), в которой есть задетая
-    строка lines (номера с 1), а слово WINDOW_WORDS — на другой её строке, например элемент многострочного списка
-    `HQ_EXCLUDED = [` … `]`. → первая строка каждой такой инструкции со знаком sign. Не разобрать — пусто: тогда
-    остаются построчные совпадения."""
+    """Строки продолжения (metis-0411): инструкция, в которой есть задетая строка lines (номера с 1), а слово
+    WINDOW_WORDS — на другой её строке. Без тела (присваивание, выражение, return) — слово где угодно в ней, например
+    элемент многострочного списка `HQ_EXCLUDED = [` … `]`. Составная (if, for, with, def, match) — слово в её
+    заголовке, а задета строка заголовка или тела: многострочное условие `if (… or` / `"permissions" in d):` и правка
+    тела `if "permissions" in data:` (Д3 argus R2-1, Д4 argus R2-2 PR #394). → первая строка каждой такой инструкции со
+    знаком sign. Не разобрать — пусто: тогда остаются построчные совпадения."""
     if not lines or src is None:
         return []
     try:
@@ -662,11 +682,15 @@ def _stmt_hits(src, lines, sign):
     text = src.splitlines()
     out = []
     for st in ast.walk(tree):
-        if not isinstance(st, ast.stmt) or hasattr(st, "body") or st.end_lineno == st.lineno:
+        if not isinstance(st, ast.stmt):
             continue
-        if any(st.lineno <= n <= st.end_lineno for n in lines) and \
-                WINDOW_WORDS.search("\n".join(text[st.lineno - 1:st.end_lineno])):
-            out.append(f"{sign}{text[st.lineno - 1]}  # строки {st.lineno}-{st.end_lineno}")
+        first, last = _stmt_head(st)
+        hit = [n for n in lines if first <= n <= st.end_lineno]
+        # однострочная инструкция или задет только однострочный заголовок — его видит построчное совпадение
+        if not hit or all(n == first == last for n in hit) or \
+                not WINDOW_WORDS.search("\n".join(text[first - 1:last])):
+            continue
+        out.append(f"{sign}{text[st.lineno - 1]}  # строки {st.lineno}-{st.end_lineno}")
     return out
 
 
