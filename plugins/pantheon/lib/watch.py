@@ -629,6 +629,10 @@ def _job_time(js):
     return None
 
 
+def _base_name(name):
+    return re.sub(r" \(\d+\)$", "", name or "")
+
+
 def auto_rm(agents, doms, t):
     """Уборка (metis-0250, поручение Зевса 18.10): фоновая сессия Пантеона закончила ход или остановлена (done/stopped),
     процесса нет и в этом состоянии она дольше AUTO_RM_AFTER — `claude rm <id>` (P.rm_session, как у pantheon stop).
@@ -636,14 +640,17 @@ def auto_rm(agents, doms, t):
     тревога один раз и новая попытка через сутки. Не трогаем: при техперезапуске, паузе планировщика и паузе по нагрузке
     (их снятие продолжает остановленную сессию той же), без state.json (время неизвестно), вкладки и чужие сессии.
     Есть живая сессия того же имени — прежнюю убираем сразу, без 2 ч: в claude agents у имени одна строка (добивает то,
-    что не убрали start/wake/restart, P.rm_previous)."""
+    что не убрали start/wake/restart, P.rm_previous). Имена сравниваются без суффикса « (N)» (metis-0885): после
+    перезапуска окна новая сессия при ещё не убранной старой зовётся «zeus (2)», и старая «zeus» — лишняя строка.
+    Мёртвая «имя (N)» при живой «имя» убирается так же; живая «имя (N)» без живой «имя» не трогается."""
     if dry() or P.maintenance_active() or os.path.exists(P.path("paused")):
         return
     tried = P.read_json(P.path("auto-rm.json"), {})
     tried = {k: v for k, v in tried.items() if isinstance(v, (int, float)) and t - v < AUTO_RM_RETRY} \
         if isinstance(tried, dict) else {}
     gone = []
-    live = {a.get("name") for a in agents if a.get("kind") in (None, "background")
+    # Новая сессия при живой старой того же имени получает «zeus (2)» (metis-0885): имя сравниваем без суффикса « (N)».
+    live = {_base_name(a.get("name")) for a in agents if a.get("kind") in (None, "background")
             and a.get("state") in ("working", "blocked") and not a.get("noProcess")}
     for a in agents:
         name, sid = a.get("name") or "", str(a.get("id") or "")
@@ -652,7 +659,7 @@ def auto_rm(agents, doms, t):
                 or P.load_pause(name)):
             continue
         since = _job_time(P.claude_job_state(sid))
-        if name not in live and (since is None or t - since < AUTO_RM_AFTER):
+        if _base_name(name) not in live and (since is None or t - since < AUTO_RM_AFTER):
             continue  # у имени есть живая сессия — эта лишняя строка, убираем сразу (start/wake не добили)
         reason = P.rm_session(sid, tries=1, name=name, why="auto-rm")
         if reason is None:

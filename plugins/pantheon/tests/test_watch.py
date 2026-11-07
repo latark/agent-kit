@@ -3999,6 +3999,37 @@ def test_auto_rm_done_stopped_0250():
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
 
 
+def test_auto_rm_suffixed_live_name_0885():
+    """metis-0885: перезапуск окна (plugins-update: старая stopped; start --restart: старая done) при живой старой
+    сессии даёт новой имя «zeus (2)» — прежнюю «zeus» убираем в том же проходе, без 2 ч (свежая отметка state.json)."""
+    for old_name, state, sid in (("zeus", "stopped", "c1c1c1c1"), ("zeus", "done", "c2c2c2c2"),
+                                 ("ar-dir", "stopped", "c3c3c3c3")):
+        e = Env()
+        e.direction("ar-dir")
+        live = old_name + " (2)"
+        e.agents([bg(old_name, state, sid + "-1"), bg(live, "working", "d9d9d9d9-1", pid=os.getpid())])
+        _job(e, sid, state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+        e.run("watch", t=T0)
+        rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+        check(rms == [sid], f"0885: {old_name}/{state} при живой «{live}»: rm {rms}")
+    # мёртвая «zeus (2)» при живой «zeus» — убирается; живая «zeus (2)» без живой «zeus» — не трогается
+    e = Env()
+    e.agents([bg("zeus (2)", "stopped", "f1f1f1f1-1"), bg("zeus", "working", "f2f2f2f2-1", pid=os.getpid())])
+    _job(e, "f1f1f1f1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+    check(rms == ["f1f1f1f1"], f"0885: мёртвая «zeus (2)» при живой «zeus»: rm {rms}")
+    e = Env()
+    e.agents([bg("zeus (2)", "working", "g1g1g1g1-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: живую «zeus (2)» тронули: {e.calls()}")
+    e = Env()
+    e.agents([bg("zeus", "stopped", "e1e1e1e1-1"), bg("zeus (2)", "stopped", "e2e2e2e2-1")])
+    _job(e, "e1e1e1e1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: нет живой — свежая убрана: {e.calls()}")
+
+
 def _hestia_env(task_status, extra=""):
     """Гестия с задачей: run-файл окна (куда его пишет wake hestia) держит PANTHEON_TASK, реестр демона есть."""
     e = Env()
