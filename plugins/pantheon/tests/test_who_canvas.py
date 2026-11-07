@@ -502,5 +502,86 @@ r = run_f()
 check("12. clear_once: холст не читался (тревога, метка) → удачная сборка снимает метку «who-canvas»",
       had_mark and "1: 0" in r.stdout and "mark-canvas: False" in r.stdout, r.stdout + r.stderr)
 
+# --- 13. таблица ролей в «Кто есть кто.md» и реестр в system.md (metis-0828) ----------------------------------------
+B, E = W.BEGIN_FULL.format(name="roles"), W.END.format(name="roles")
+mt = W.memo_table(dict(roles, newbie=new_role), dirs, st2, cat)
+rows = {ln.split(" | ")[0][2:]: ln for ln in mt.splitlines()[2:]}
+check("13. таблица: строка на каждую запись каталога, авто-роль, координатор; лиды — `<имя>-<проект>`, dev — все",
+      "**Аргус**, ревьюер" in rows and "**Newbie**" in rows and "Новичок Пантеона." in rows["**Newbie**"]
+      and "`athena-brokerassistant` · [[directions/athena-brokerassistant/STATUS\\|STATUS]]" in rows["**Афина**"]
+      and "`hephaestus-<проект>`" in rows["**Гефест**, лид кода"] and "`zeus`" in rows["**Зевс**, Пританей"]
+      and all(f"`{r}`" in rows["**Разработчики**"] for r in ("dev-haiku", "dev-opus", "dev-sonnet", "codex-dev")),
+      mt)
+check("13. таблица: роли нет, задача открыта → «🚧 роли ещё нет» со ссылкой; роль появилась → «есть»",
+      "🚧 роли ещё нет · [[metis-9999]]" in rows["**Призрак**, пробная"]
+      and "| есть |" in {ln.split(" | ")[0][2:]: ln for ln in W.memo_table(dict(roles, ghost=""), dirs, st2, cat)
+                         .splitlines()[2:]}["**Призрак**, пробная"])
+check("13. таблица: роль удалена → строки нет; направление убрано → строки координатора нет",
+      "**Аргус**, ревьюер" not in W.memo_table(r_no_argus, dirs, st) and "**Фемида**" not in W.memo_table(roles, dirs[:2], st)
+      and "**Фемида**" in mt)
+check("13. таблица: порядок групп — Пританей, Полисы, Артель, Оракулы, Оры",
+      [ln.split(" | ")[3] for ln in mt.splitlines()[2:]] == sorted(
+          [ln.split(" | ")[3] for ln in mt.splitlines()[2:]],
+          key=["Пританей", "Полисы", "Артель", "Оракулы", "Оры"].index))
+doc = "# Памятка\n\nручное до\n\n" + B + "\nстарая таблица\n" + E + "\n\nручное после\n"
+new_doc = W.splice(doc, "roles", "| новая |", W.MEMO_HEADING)
+check("13. splice: между маркерами — новое, текст до и после маркеров цел",
+      new_doc == "# Памятка\n\nручное до\n\n" + B + "\n| новая |\n" + E + "\n\nручное после\n", new_doc)
+app = W.splice("# Памятка\nручное\n", "roles", "| т |", W.MEMO_HEADING)
+check("13. splice: маркеров нет → блок в конце под заголовком, ручной текст цел; повтор ничего не меняет",
+      app == "# Памятка\nручное\n\n" + W.MEMO_HEADING + "\n\n" + B + "\n| т |\n" + E + "\n"
+      and W.splice(app, "roles", "| т |", W.MEMO_HEADING) == app, app)
+bad_doc = os.path.join(ROOT, "docs", "bad.md")
+write(bad_doc, "до\n" + B + "\nбез конца\n")
+try:
+    W.sync_doc(bad_doc, "roles", "| т |", W.MEMO_HEADING)
+    raised_b = False
+except ValueError:
+    raised_b = True
+bad2 = "x\n" + E + "\n" + B + "\n"
+try:
+    W.splice(bad2, "roles", "т", "h")
+    raised_c = False
+except ValueError:
+    raised_c = True
+check("13. маркер без пары или конец раньше начала → ValueError, файл не тронут",
+      raised_b and raised_c and open(bad_doc, encoding="utf-8").read() == "до\n" + B + "\nбез конца\n")
+check("13. sync_doc: файла нет → 'skip', файл не создан",
+      W.sync_doc(os.path.join(ROOT, "docs", "none.md"), "roles", "т", "h") == "skip"
+      and not os.path.exists(os.path.join(ROOT, "docs", "none.md")))
+stt = W.system_table({"hq": "", "argus": "/x/roles/argus.tmpl", "hephaestus-site": "/a/agents/hephaestus-site.md",
+                      "domain-coordinator": "", "newbie": new_role}, st)
+srow = {ln.split(" | ")[0][2:]: ln for ln in stt.splitlines()[2:]}
+check("13. system_table: строка на каждую роль по имени файла, кто она и источник",
+      set(srow) == {"`hq`", "`argus`", "`hephaestus-site`", "`domain-coordinator`", "`newbie`"}
+      and "**Зевс**, Пританей" in srow["`hq`"] and "шаблон плагина `roles/argus.tmpl`" in srow["`argus`"]
+      and "`~/.claude/agents/hephaestus-site.md`" in srow["`hephaestus-site`"] and "**Гефест**" in srow["`hephaestus-site`"]
+      and "Новичок Пантеона." in srow["`newbie`"] and "координатор направления" in srow["`domain-coordinator`"], stt)
+# команда целиком: памятка и system.md получают блок, сверка памятки (who_is_who_check) — без расхождений
+memo_p = os.path.join(home, "Кто есть кто.md")
+sys_p = os.path.join(home, "system.md")
+write(memo_p, "# Памятка\n\nручной текст владельца\n")
+write(sys_p, "# Реестр\n\n| ручная таблица |\n\n" + B + "\nстарое\n" + E + "\n\nхвост\n")
+probe_d = probe_f + """
+print("check:", p.who_is_who_check())
+"""
+r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
+mtext, stext = open(memo_p, encoding="utf-8").read(), open(sys_p, encoding="utf-8").read()
+check("13. pantheon who-canvas: блок ролей в памятке и в system.md, ручной текст цел, сверка памятки чистая",
+      "ручной текст владельца" in mtext and W.MEMO_HEADING in mtext and "`charon`" in mtext and "`athena-brokerassistant`" in mtext
+      and stext.startswith("# Реестр\n\n| ручная таблица |\n\n") and stext.endswith("\n\nхвост\n") and "старое" not in stext
+      and "`argus`" in stext and "check: ([], [])" in r.stdout and "1: 0" in r.stdout, r.stdout + r.stderr + mtext[-600:])
+m_before = os.stat(memo_p).st_mtime_ns
+os.utime(memo_p, ns=(1, 1))
+r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
+check("13. повторный проход без перемен файл памятки не переписывает", os.stat(memo_p).st_mtime_ns == 1 and m_before != 1,
+      r.stdout + r.stderr)
+write(sys_p, "x\n" + B + "\n")
+r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
+al = open(os.path.join(home, "alerts.md"), encoding="utf-8").read()
+check("13. маркер без пары в system.md → код 1, тревога, файл не тронут",
+      "1: 1" in r.stdout and "таблица ролей не собрана" in al and open(sys_p, encoding="utf-8").read() == "x\n" + B + "\n",
+      r.stdout + r.stderr)
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

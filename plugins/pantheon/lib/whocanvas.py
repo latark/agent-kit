@@ -19,6 +19,9 @@
 цвет и подписи групп код пишет сам; узел, в котором не то, что код писал (хеш в отпечатке) и не то, что пишет сейчас,
 правили руками — он остаётся как есть, а тревога приходит один раз на его текст (metis-0838).
 
+Из тех же входов — таблица ролей в «Кто есть кто.md» и реестр ролей в system.md (metis-0828, sync_docs): код пишет
+только между маркерами `<!-- pantheon:roles начало … -->` и `<!-- pantheon:roles конец -->`, текст вокруг — ручной.
+
 Только стандартная библиотека; пути и чтение задач передаёт pantheon.py.
 """
 import fnmatch
@@ -197,6 +200,141 @@ def collect_roles(roles, statuses, catalog=None):
     for r in sorted(set(roles) - covered):
         out.append(dict(name=r, kind="auto", description=role_blurb(roles[r]), present=True, task=None, roles=[r]))
     return out
+
+
+# --- таблица ролей в «Кто есть кто.md» и реестр ролей в system.md (metis-0828) -------------------------------------
+# Те же входы, что у холста: роли (~/.claude/agents и шаблоны плагина), directions.toml, статус задач каталога. Код
+# пишет только между маркерами своего блока; текст вокруг — ручной и остаётся. Маркеров нет — блок дописывается в
+# конец файла под своим заголовком (перенести маркеры на место ручной таблицы можно руками, код их найдёт). Только
+# один маркер из пары — файл не трогаем (ValueError: тревогу поднимает вызывающий).
+MEMO_NAME = "Кто есть кто.md"
+SYSTEM_NAME = "system.md"
+BEGIN = "<!-- pantheon:{name} начало"
+END = "<!-- pantheon:{name} конец -->"
+BEGIN_FULL = BEGIN + " — собирает pantheon who-canvas из ролей и directions.toml; правка внутри затрётся -->"
+MEMO_HEADING = "## Все роли — собирает код"
+SYSTEM_HEADING = "## Реестр ролей — собирает код"
+FIND = {"hq": "`zeus`", "workshop": "`daedalus-<задача>`"}  # роль окна ищут по имени сессии, а не роли
+EXTRA = {"devs": ("codex-dev",)}  # роли из IGNORED, которые названы в тексте записи
+GROUP_SHORT = {"top": "Пританей", "coords": "Полисы", "team": "Артель", "help": "Оракулы", "sched": "Оры"}
+
+
+def _cell(s):
+    """Ячейка таблицы markdown: одна строка, `|` экранирован (в том числе в [[ссылка|подпись]] — так читает Obsidian)."""
+    return re.sub(r"\s*\n\s*", " · ", str(s or "").strip()).replace("|", "\\|")
+
+
+def _who(line):
+    """Первая строка карточки → «**Имя**, пояснение»: «## Зевс · Пританей» → «**Зевс**, Пританей»."""
+    m = re.match(r"#+\s*(.+)", line)
+    if m:
+        name, _, rest = m.group(1).partition(" · ")
+        line = f"**{name}**" + (f" · {rest}" if rest else "")
+    return line.replace(" · ", ", ")
+
+
+def _find(e, names, roles):
+    if e["role"] is None:
+        return "—"
+    if e["role"] in FIND:
+        return FIND[e["role"]]
+    if e["role"].endswith("*") and not e["role"].startswith("dev-"):
+        return f"`{e['role'].rstrip('*-')}-<проект>`"
+    extra = [r for r in EXTRA.get(e["id"], ()) if r in roles]
+    return ", ".join(f"`{r}`" for r in names + extra) or "—"
+
+
+def role_rows(roles, directions, statuses, catalog=None):
+    """Строки таблицы ролей по collect_roles и координаторам реестра: [(группа, кто, что делает, как найти, состояние)],
+    по порядку групп GROUPS."""
+    catalog = CATALOG if catalog is None else catalog
+    by_id = {e["id"]: e for e in catalog}
+    rows = []
+    for x in collect_roles(roles, statuses, catalog):
+        if x["kind"] == "auto":
+            r = x["name"]
+            rows.append(("help", f"**{r.replace('-', ' ').capitalize()}**", x["description"], f"`{r}`", "есть"))
+            continue
+        e = by_id[x["name"]]
+        lines = render_text(e["text"], roles, statuses).split("\n")
+        who = _who(lines[0])
+        state = "есть" if x["present"] else "🚧 роли ещё нет"
+        if x["task"] and not x["present"]:
+            state += f" · [[{x['task']}]]"
+        if not x["present"] and e["name"]:
+            who = f"**{e['name']}**"
+        rows.append((e["group"], who, "\n".join(lines[1:]), _find(e, x["roles"], roles), state))
+    for d in directions:
+        god = d["name"].split("-")[0]
+        rows.append(("coords", f"**{GODS_RU.get(god, god.capitalize())}**", d.get("short") or "",
+                     f"`{d['name']}` · [[directions/{d['name']}/STATUS|STATUS]]", "есть"))
+    order = list(GROUPS)
+    return sorted(rows, key=lambda r: order.index(r[0]))  # sorted устойчив: внутри группы — порядок каталога
+
+
+def memo_table(roles, directions, statuses, catalog=None):
+    """Таблица ролей для «Кто есть кто.md»."""
+    out = ["| Кто | Что делает | Как найти | Группа | Состояние |", "| --- | --- | --- | --- | --- |"]
+    for g, who, what, find, state in role_rows(roles, directions, statuses, catalog):
+        out.append("| " + " | ".join(_cell(v) for v in (who, what, find, GROUP_SHORT.get(g, g), state)) + " |")
+    return "\n".join(out)
+
+
+def system_table(roles, statuses, catalog=None):
+    """Реестр ролей для system.md: каждая роль по имени файла — кто она и откуда берётся."""
+    catalog = CATALOG if catalog is None else catalog
+    who = {}
+    for e in catalog:
+        name = _who(render_text(e["text"], roles, statuses).split("\n")[0])
+        for r in sorted(roles):
+            if e["role"] and r not in who and (fnmatch.fnmatchcase(r, e["role"]) or r in EXTRA.get(e["id"], ())):
+                who[r] = name
+    who.setdefault("domain-coordinator", "координатор направления — одна роль на все направления реестра")
+    out = ["| Роль | Кто | Источник |", "| --- | --- | --- |"]
+    for r in sorted(roles):
+        src = roles[r] or ""
+        src = (f"шаблон плагина `roles/{r}.tmpl`" if src.endswith(".tmpl")
+               else f"`~/.claude/agents/{r}.md`" if src else "—")
+        out.append("| " + " | ".join(_cell(v) for v in (f"`{r}`", who.get(r) or role_blurb(roles[r]) or "—", src)) + " |")
+    return "\n".join(out)
+
+
+def splice(text, name, body, heading):
+    """Текст файла с автоблоком name: между маркерами — body, вне их — как было. Маркеров нет — блок в конце файла
+    под heading. Один маркер без пары или конец раньше начала — ValueError."""
+    b, e = BEGIN.format(name=name), END.format(name=name)
+    i, j = text.find(b), text.find(e)
+    block = f"{BEGIN_FULL.format(name=name)}\n{body.rstrip()}\n{e}"
+    if i < 0 and j < 0:
+        return text.rstrip("\n") + f"\n\n{heading}\n\n{block}\n"
+    if i < 0 or j < 0 or j < i or text.count(b) > 1 or text.count(e) > 1:
+        raise ValueError(f"маркеры блока pantheon:{name} не парные — файл не тронут")
+    return text[:i] + block + text[j + len(e):]
+
+
+def sync_doc(path, name, body, heading):
+    """Записать автоблок в файл path. 'written' | 'same' | 'skip' (файла нет — не создаём: документ ведёт владелец)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cur = fh.read()
+    except FileNotFoundError:
+        return "skip"
+    new = splice(cur, name, body, heading)
+    if new == cur:
+        return "same"
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    os.replace(tmp, path)
+    return "written"
+
+
+def sync_docs(base, roles, directions, statuses, catalog=None):
+    """Автоблоки ролей в «Кто есть кто.md» и system.md папки base → {имя файла: итог sync_doc}."""
+    return {MEMO_NAME: sync_doc(os.path.join(base, MEMO_NAME), "roles", memo_table(roles, directions, statuses, catalog),
+                                MEMO_HEADING),
+            SYSTEM_NAME: sync_doc(os.path.join(base, SYSTEM_NAME), "roles", system_table(roles, statuses, catalog),
+                                  SYSTEM_HEADING)}
 
 
 def _overlap(a, b, margin=0):

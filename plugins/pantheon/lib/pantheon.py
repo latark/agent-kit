@@ -89,7 +89,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
                                         и размеры берёт с холста; в расписании — command =
                                         "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
-                                        при смене входов (metis-0825)
+                                        при смене входов (metis-0825); из тех же входов — таблица ролей в «Кто есть
+                                        кто.md» и реестр в system.md между маркерами <!-- pantheon:roles … --> (0828)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; на главном Mac сразу проход по кэшу (и плановый проход каждую минуту) закрывает задачи, чей номер в
                                         ветке или после «Closes» в теле PR — в том же проходе, что увидел слияние (metis-0868)
@@ -4834,6 +4835,21 @@ def who_canvas_cmd(rest):
         clear_once("who-canvas-manual-" + nid)
     if got == "written":
         print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
+    if got == "skip":
+        return 0
+    try:  # таблица ролей в «Кто есть кто.md» и реестр в system.md — из тех же входов (metis-0828)
+        W = whocanvas_mod()
+        roles, dirs, statuses = who_canvas_inputs()
+        docs = W.sync_docs(PANTHEON, roles, dirs, statuses)
+    except Exception as e:
+        msg = f"Кто есть кто.md / system.md: таблица ролей не собрана ({type(e).__name__}: {e})"
+        alert_once("who-docs", f"{type(e).__name__}: {e}", msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
+    clear_once("who-docs")
+    for f, res in docs.items():
+        if res == "written":
+            print(f"{f}: таблица ролей пересобрана")
     return 0
 
 
