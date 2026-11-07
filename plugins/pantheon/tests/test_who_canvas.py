@@ -583,5 +583,49 @@ check("13. маркер без пары в system.md → код 1, тревог�
       "1: 1" in r.stdout and "таблица ролей не собрана" in al and open(sys_p, encoding="utf-8").read() == "x\n" + B + "\n",
       r.stdout + r.stderr)
 
+# --- 14. долги #383 (metis-0992): маркеры в середине строки, двойные, сбой одного файла, ссылка, замок --------------
+mid = "вот " + B + " середина " + E + " дальше\nручное\n"
+got_mid = W.splice(mid, "roles", "| т |", W.MEMO_HEADING)
+check("14. splice: маркеры в середине строки — обычный текст: ничего не теряется, блок добавлен в конец",
+      got_mid.startswith(mid.rstrip("\n")) and " середина " in got_mid and got_mid.endswith(B + "\n| т |\n" + E + "\n")
+      and W.splice(got_mid, "roles", "| т |", W.MEMO_HEADING) == got_mid, got_mid)
+mid2 = "вот " + E + " конец в строке\n" + B + "\nстарое\n" + E + "\nхвост\n"
+check("14. splice: конец в середине строки до настоящего блока не обрезает его и не теряет текст",
+      W.splice(mid2, "roles", "| н |", "h") == "вот " + E + " конец в строке\n" + B + "\n| н |\n" + E + "\nхвост\n")
+for nm, dbl in (("два начала", B + "\na\n" + B + "\nb\n" + E + "\n"), ("два блока", B + "\na\n" + E + "\n" + B + "\nb\n" + E + "\n"),
+                ("два конца", B + "\na\n" + E + "\n" + E + "\n")):
+    try:
+        W.splice(dbl, "roles", "т", "h")
+        rz = False
+    except ValueError:
+        rz = True
+    check(f"14. splice: {nm} → ValueError", rz)
+d14 = os.path.join(ROOT, "docs14")
+real14 = write(os.path.join(d14, "real.md"), "до\n" + B + "\nстарое\n" + E + "\n")
+link14 = os.path.join(d14, "link.md")
+os.symlink(real14, link14)
+fixed_tmp = write(real14 + ".tmp", "чужой файл")
+res14 = W.sync_doc(link14, "roles", "| н |", "h")
+check("14. sync_doc: ссылка остаётся ссылкой, запись в её цель; чужой path.tmp цел; временных файлов не осталось",
+      res14 == "written" and os.path.islink(link14) and "| н |" in open(real14, encoding="utf-8").read()
+      and open(fixed_tmp, encoding="utf-8").read() == "чужой файл"
+      and sorted(os.listdir(d14)) == ["link.md", "real.md", "real.md.lock", "real.md.tmp"], sorted(os.listdir(d14)))
+d15 = os.path.join(ROOT, "docs15")
+write(os.path.join(d15, W.MEMO_NAME), "x\n" + B + "\nнет конца\n")
+write(os.path.join(d15, W.SYSTEM_NAME), "# Реестр\n")
+got15 = W.sync_docs(d15, roles, dirs, st2, cat)
+check("14. sync_docs: маркеры первого файла не парные → у него «ошибка», второй файл всё равно обновлён",
+      got15[W.MEMO_NAME].startswith("ошибка") and got15[W.SYSTEM_NAME] == "written"
+      and "`argus`" in open(os.path.join(d15, W.SYSTEM_NAME), encoding="utf-8").read(), got15)
+canvas16, sig16 = os.path.join(ROOT, "c16", "k.canvas"), os.path.join(ROOT, "c16", "state", "sig.json")
+W.sync(canvas16, sig16, rl, dirs, st)
+c16 = json.load(open(canvas16, encoding="utf-8"))
+gone = next(n["id"] for n in c16["nodes"] if n["type"] != "group")
+c16["nodes"] = [n for n in c16["nodes"] if n["id"] != gone]
+write(canvas16, json.dumps(c16, ensure_ascii=False))
+check("14. удалённая карточка, входы те же → холст собирается заново (без --force)",
+      W.sync(canvas16, sig16, rl, dirs, st) == "written" and gone in byid(json.load(open(canvas16, encoding="utf-8")))
+      and W.sync(canvas16, sig16, rl, dirs, st) == "unchanged")
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

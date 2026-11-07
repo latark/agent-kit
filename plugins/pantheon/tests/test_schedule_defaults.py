@@ -86,5 +86,17 @@ code = ("import sys; sys.path.insert(0, %r); import pantheon as p; "
 r = subprocess.run([PY311, "-I", "-c", code], env=env(), capture_output=True, text=True, timeout=60)
 check("все задания schedule-defaults.toml проходят parse_command", r.stdout.strip() == "[True]", (r.stdout, r.stderr))
 
+# порядок (metis-0993): нетронутые умолчания первыми, потом задания владельца в его порядке; одноимённое стоит у владельца
+two = os.path.join(ROOT, "два.toml")
+open(two, "w").write('[[job]]\nname = "d1"\ncommand = "pantheon reap --auto"\nevery = 30\n\n'
+                     '[[job]]\nname = "d2"\ncommand = "pantheon reap --auto"\nevery = 30\n')
+jobs = schedule(BASE + '[[job]]\nname = "x"\ncommand = "pantheon board"\n[[job]]\nname = "d1"\nevery = 5\n'
+                '[[job]]\nname = "y"\ncommand = "pantheon board"\n', PANTHEON_SCHEDULE_DEFAULTS=two)
+check("порядок: d2 (умолчание), затем x, d1, y как у владельца; d1 с полями умолчания и every = 5",
+      list(jobs) == ["d2", "x", "d1", "y"] and jobs["d1"]["every"] == 5 and jobs["d1"]["command"] == "pantheon reap --auto", list(jobs))
+jobs = schedule(BASE + '[[job]]\nname = "z"\ncommand = "pantheon board"\n[[job]]\nname = "a"\ncommand = "pantheon board"\n',
+                PANTHEON_SCHEDULE_DEFAULTS=two)
+check("порядок: чужие задания владельца идут как записаны (z, a), после умолчаний", list(jobs) == ["d1", "d2", "z", "a"], list(jobs))
+
 print("\n%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

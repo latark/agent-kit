@@ -98,26 +98,32 @@ def _in_inbox(rel):
 
 
 def _ignore_line(name):
-    """Имя файла как строка .gitignore: от корня папки, спецзнаки экранированы."""
-    return "/" + re.sub(r"([\\*?\[\]!# ])", r"\\\1", name)
+    """Имя файла как строка .gitignore: от корня папки, спецзнаки экранированы. Перевод строки в имени в .gitignore не
+    записать (строка кончилась бы) — на его месте `?`: он совпадает с любым знаком, кроме «/», и с переводом строки."""
+    return "/" + re.sub(r"([\\*?\[\]!# ])", r"\\\1", name).replace("\n", "?")
 
 
 def _append_ignore(folder, name):
     """Дописать строку для name в .gitignore папки folder (путь от корня плана). Ссылка в любой части пути, на папке или
-    на самом .gitignore — не пишем (запись ушла бы в чужой файл). → записано ли (False — папку пропустили)."""
-    cur = P.PANTHEON
-    for part in filter(None, folder.split("/")):
-        cur = os.path.join(cur, part)
-        if os.path.islink(cur):
+    на самом .gitignore — не пишем (запись ушла бы в чужой файл). Путь проходит по частям через dir_fd и O_NOFOLLOW:
+    папку между проверкой и записью не подменить ссылкой. → записано ли (False — папку пропустили)."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    try:
+        dfd = os.open(P.PANTHEON, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return False
+    try:
+        for part in filter(None, folder.split("/")):
+            try:
+                nfd = os.open(part, flags, dir_fd=dfd)
+            except OSError:
+                return False
+            os.close(dfd)
+            dfd = nfd
+        try:
+            fd = os.open(".gitignore", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+        except OSError:
             return False
-    try:
-        dfd = os.open(cur, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
-    except OSError:
-        return False
-    try:
-        fd = os.open(".gitignore", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
-    except OSError:
-        return False
     finally:
         os.close(dfd)
     try:
@@ -149,8 +155,6 @@ def data_guard():
         if not (size > DATA_MAX_BYTES or (_in_inbox(rel) and rel.lower().endswith(DATA_EXT))):
             continue
         folder, name = os.path.split(rel)
-        if "\n" in name:  # такое имя в .gitignore не записать
-            continue
         if not _append_ignore(folder, name):
             # папка или .gitignore — ссылка: туда не пишем, файл прячем локально (.git/info/exclude), чтобы не ушёл в git
             ex = os.path.join(P.PANTHEON, ".git", "info", "exclude")

@@ -604,19 +604,18 @@ def default_jobs():
 
 
 def _merge_default_jobs(owner_jobs):
-    """Задания по умолчанию + [[job]] владельца. Одноимённое задание владельца меняет поля умолчания (поверх них),
-    остальные его задания идут как есть, после умолчаний."""
-    merged = {}
+    """Задания по умолчанию + [[job]] владельца. Сначала умолчания, которых владелец не касался (в порядке файла
+    умолчаний), потом все задания владельца в его порядке: одноимённое умолчанию меняет его поля (поверх них) и стоит
+    там, где владелец его записал, а не уезжает вперёд остальных."""
+    defaults = {}
     for j in default_jobs():
-        merged[str(j.get("name"))] = dict(j)
-    extra = []
+        defaults[str(j.get("name"))] = dict(j)
+    owned = {str(j.get("name")) for j in owner_jobs or [] if isinstance(j, dict)}
+    out = [j for n, j in defaults.items() if n not in owned]
     for j in owner_jobs or []:
         name = str(j.get("name")) if isinstance(j, dict) else None
-        if name in merged:
-            merged[name].update(j)
-        else:
-            extra.append(j)
-    return [*merged.values(), *extra]
+        out.append({**defaults[name], **j} if name in defaults else j)
+    return out
 
 
 def load_schedule():
@@ -4878,11 +4877,17 @@ def who_canvas_cmd(rest):
         alert_once("who-docs", f"{type(e).__name__}: {e}", msg, "pantheon")
         print(msg, file=sys.stderr)
         return 1
-    clear_once("who-docs")
+    bad = {f: res for f, res in docs.items() if res.startswith("ошибка")}
+    if bad:  # один файл не собрался (маркеры не парные) — второй обновлён, тревога по первому
+        msg = "Кто есть кто.md / system.md: таблица ролей не собрана — " + "; ".join(f"{f}: {r}" for f, r in sorted(bad.items()))
+        alert_once("who-docs", msg, msg, "pantheon")
+        print(msg, file=sys.stderr)
+    else:
+        clear_once("who-docs")
     for f, res in docs.items():
         if res == "written":
             print(f"{f}: таблица ролей пересобрана")
-    return 0
+    return 1 if bad else 0
 
 
 def roles_newest():
