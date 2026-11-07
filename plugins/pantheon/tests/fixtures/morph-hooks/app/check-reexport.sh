@@ -28,7 +28,7 @@ if [ -f "$APP_FILE" ]; then
     done
 
     if [ -n "$MISSING" ]; then
-        echo "⚠️ Re-export устарел: $APP_FILE"
+        echo "⚠ Re-export устарел: $APP_FILE"
         echo "   Отсутствуют:$MISSING"
         # Пересоздаём файл
         IMPORT_PATH="@/app/api/$(echo "$REL_PATH" | sed 's|/route.ts||')/route"
@@ -46,7 +46,7 @@ mkdir -p "$(dirname "$APP_FILE")"
 EXPORTS=$(grep -oE 'export (async )?function (GET|POST|PUT|PATCH|DELETE|OPTIONS)' "$FILE_PATH" 2>/dev/null | grep -oE '(GET|POST|PUT|PATCH|DELETE|OPTIONS)' | sort -u | tr '\n' ', ' | sed 's/,$//')
 
 if [ -z "$EXPORTS" ]; then
-    echo "⚠️ Нет HTTP методов в $FILE_PATH"
+    echo "⚠ Нет HTTP методов в $FILE_PATH"
     exit 0
 fi
 

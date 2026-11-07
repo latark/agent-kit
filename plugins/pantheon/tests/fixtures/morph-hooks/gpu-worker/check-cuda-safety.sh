@@ -42,7 +42,7 @@ base=$(basename "$file_path")
 warned=0
 
 if echo "$code" | grep -qE 'get_available_providers[[:space:]]*\('; then
-  echo "⚠️ CUDA-safety: вызов get_available_providers() в $base"
+  echo "⚠ CUDA-safety: вызов get_available_providers() в $base"
   echo "   Он вызывает cudaGetDeviceCount() → инициализирует CUDA. Если файл исполняется в"
   echo "   parent-процессе ДО mp.fork() — GPU subprocess упадёт в CPU mode (0.3 FPS вместо 24+)."
   echo "   Safe-альтернатива: onnxruntime.get_all_providers()."
@@ -51,7 +51,7 @@ fi
 
 if echo "$code" | grep -qE 'CodecContext.*\.open[[:space:]]*\(' \
   || echo "$code" | grep -qE 'h264_nvenc.*\.open[[:space:]]*\('; then
-  echo "⚠️ CUDA-safety: CodecContext.open() с GPU-кодеком в $base"
+  echo "⚠ CUDA-safety: CodecContext.open() с GPU-кодеком в $base"
   echo "   open() на NVENC-кодеке инициализирует CUDA. Используй deferred-init pattern"
   echo "   (изолированный subprocess probe), как в patches/aiortc_h264_nvenc.py."
   warned=1

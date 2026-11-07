@@ -22,7 +22,7 @@ PROD="$PROJECT_DIR/.env.production"
 
 for f in "$EXAMPLE" "$LOCAL" "$PROD"; do
   if [ ! -f "$f" ]; then
-    echo "ℹ️ .env-sync: файл $(basename "$f") отсутствует — проверку пропускаю"
+    echo "ℹ .env-sync: файл $(basename "$f") отсутствует — проверку пропускаю"
     exit 0
   fi
 done
@@ -61,7 +61,7 @@ if ! diff -q "$tmp_ex" "$tmp_pr" >/dev/null; then
 fi
 
 if [ "$drift" -eq 1 ]; then
-  echo "⚠️ .env-sync: структура .env-файлов рассинхронизирована."
+  echo "⚠ .env-sync: структура .env-файлов рассинхронизирована."
   echo "   Ключи, их порядок и комментарии должны совпадать во всех трёх файлах — отличаться могут только значения."
   echo "$report"
   echo "Приведи файлы к идентичной структуре (см. память проекта: .env files sync)."
