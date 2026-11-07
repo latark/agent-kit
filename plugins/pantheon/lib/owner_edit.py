@@ -17,10 +17,14 @@
 права и хуки — никогда. Новый текст — UTF-8 без NUL и без невидимых, управляющих и bidi-знаков (HIDDEN, кроме \\n и
 \\t; --why — тоже, и ещё не длиннее WHY_MAX и без лишних пробелов: why_ok, его повторяет и valid() прохода). .toml —
 сравнение по смыслу (toml_keys): старый и новый текст разобраны tomllib, каждый изменённый ключ правит своя строка
-«-»/«+»; ключ сменился без своей строки (строку контекста проглотила многострочная строка, удалён заголовок таблицы) или
-текст не TOML — отказ в propose и в проходе. Правка в вопросе и окне — shown(): строки «-»/«+» через « ⏎ » (⏎ внутри
-строки экранирован), у policy.toml каждая с разделом TOML — «[coordinators] +строка» (у «-» раздел старого текста), и
-за ними «Ключи, изменено N: путь: старое → новое» (key_rows) — смысл правки целиком.
+«-»/«+» (тронутый заголовок таблицы правит её ключи, только если таблица добавлена или убрана: «[ private ]» — нет);
+ключ сменился без своей строки (строку контекста проглотила многострочная строка, удалён заголовок таблицы) или текст
+не TOML — отказ в propose и в проходе. Правка в вопросе и окне — shown(): строки «-»/«+» через « ⏎ » (⏎ внутри строки
+экранирован), каждая с разделом (у «-» — раздел старого текста): у policy.toml — таблица TOML «[coordinators]
++строка», у .part — заголовок «[## Можно] +строка». У policy.toml за ними «Ключи, изменено N: путь: старое → новое»
+(key_rows) — смысл правки целиком. Знаки: у policy.toml в строках и ключах каждый знак вне печатного ASCII — \\uXXXX
+(esc: «е» кириллицей в латинском пути видна); у .part русский текст как есть, слово из двух алфавитов — «[смешаны
+алфавиты: m\\u0430in]», прочее вне ASCII и русского — \\uXXXX (mark). --why — последним, «Пояснение роли: …».
 
 Проход (тик зовёт его отдельным процессом, пока есть заявки; окружение — merge.clean_env, как у слияния). Папка
 очереди открыта один раз (open_queue: части пути без ссылок), дальше файлы в ней — только через её fd (dir_fd).
@@ -84,6 +88,7 @@ HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 HIDDEN = ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp")   # как handoff.BAD_CHARS: окно Touch ID их не покажет
 SEP = "⏎"            # «⏎» — между строками правки в вопросе и окне; внутри строки — экранирован
 ROOT = "(вне таблиц)"     # раздел строк policy.toml до первой таблицы
+PART_ROOT = "(вне разделов)"   # раздел строк .part до первого заголовка «#»
 MISSING = object()        # ключа нет в старом или новом тексте (toml_changes)
 FINAL = ("done", "failed", "declined", "refused", "dropped")
 CANCEL_LABEL = "Не применять"
@@ -257,8 +262,36 @@ def _probe_path(obj, key, path=()):
 
 
 def _dotted(path):
-    return ".".join(k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=bool(hidden_at(k, "")))
-                    for k in path if k is not None)
+    """Путь ключа «a.b."в"» только печатным ASCII: ключ в кавычках — JSON с \\uXXXX (кириллица в ключе видна)."""
+    return ".".join(k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k) for k in path if k is not None)
+
+
+RU = re.compile(r"[А-Яа-яЁё]")
+TYPO = frozenset("«»—–…№“”„‘’→")   # знаки русского текста .part, которые показываются как есть
+
+
+def _u(c):
+    return f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\U{ord(c):08x}"
+
+
+def esc(s):
+    """Каждый знак вне печатного ASCII — \\uXXXX: «е» кириллицей в латинском пути видна (ревью PR #362, R3 Б1)."""
+    return "".join(c if " " <= c <= "~" else _u(c) for c in s)
+
+
+def _script(c):
+    return unicodedata.name(c, "?").split(" ")[0]
+
+
+def mark(s):
+    """Строка .part для вопроса и окна: русский текст законен и остаётся читаемым, поэтому экранируется не всё (как esc),
+    а только чужое. Слово, где буквы двух алфавитов (латиница и кириллица, греческие), — «[смешаны алфавиты: m\\u0430in]»;
+    знак вне печатного ASCII, русского алфавита и TYPO — \\uXXXX (і, ѕ, ο и прочие двойники латиницы)."""
+    def word(m):
+        w = m[0]
+        return f"[смешаны алфавиты: {esc(w)}]" if len({_script(c) for c in w if c.isalpha()}) > 1 else w
+    s = re.sub(r"\w+", word, s)
+    return "".join(c if " " <= c <= "~" or RU.fullmatch(c) or c in TYPO else _u(c) for c in s)
 
 
 def _label(path):
@@ -366,7 +399,8 @@ def toml_changes(old, new):
 
 
 def key_row(path, old, new):
-    show = (lambda v: "нет" if v is MISSING else _canon(v))
+    """«путь: старое → новое»; путь и значения — только печатным ASCII (не-ASCII — \\uXXXX, R3 Б1)."""
+    show = (lambda v: "нет" if v is MISSING else _canon(v, True))
     return f"{_dotted(path)}: {show(old)} → {show(new)}"
 
 
@@ -384,9 +418,13 @@ def toml_keys(rel, old, new, diff=None):
     except tomllib.TOMLDecodeError as e:
         raise Refuse(f"~/{rel}: старый или новый текст не TOML ({e}) — ключи не сравнить, не правлю")
     lines = {"-": old.splitlines(True), "+": new.splitlines(True)}
+    heads = {s: [p for p, h in secs[s] if h] for s in secs}
     owners = []
     for ln, i in walk(make_diff(rel, old, new) if diff is None else diff):
         if i is not None and 0 <= i < len(lines[ln[0]]):
+            sec, head = secs[ln[0]][i]
+            if head and heads["-"].count(sec) == heads["+"].count(sec):
+                continue   # заголовок тронут, а таблица та же («[ private ]») — ключи таблицы он не правит (R3-1 Д1)
             k = _owner(lines[ln[0]], secs[ln[0]], objs[ln[0]], i)
             if k is not None:
                 owners.append(k[:k.index(None)] if None in k else k)
@@ -405,7 +443,7 @@ def key_rows(req):
     new = req.get("new")
     old = old_text(req["file"], new, req["diff"]) if isinstance(new, str) else None
     try:
-        return [key_row(*c).replace(SEP, "\\u23ce") for c in toml_changes(old, new)] if old is not None else ["?"]
+        return [key_row(*c) for c in toml_changes(old, new)] if old is not None else ["?"]
     except tomllib.TOMLDecodeError:
         return ["?"]
 
@@ -417,21 +455,37 @@ def keys_text(req):
     return f". Ключи, изменено {len(rows)}: " + (f" {SEP} ".join(rows) if rows else "нет")
 
 
-def shown(req):
-    """Строки правки, как их видит владелец, по одной: у policy.toml — с разделом TOML «[таблица] +строка» (у «-» —
-    раздел в старом тексте, у «+» — в новом; не определить — «[?]»): одна строка в [sandbox_write] и в [coordinators]
-    даёт разные права (ревью PR #362, круг 2, Б). Знак-разделитель SEP внутри строки — экранирован."""
-    rows = walk(req["diff"])
-    if req["file"].endswith(".toml"):
-        new = req.get("new")
-        secs = {"+": toml_sections(new) if isinstance(new, str) else None,
-                "-": toml_sections(old_text(req["file"], new, req["diff"])) if isinstance(new, str) else None}
+def part_sections(text):
+    """Раздел .part каждой строки text → [«[## Заголовок]» (mark) или PART_ROOT до первого]; строка-заголовок — свой
+    раздел; «#» внутри блока ``` — не заголовок. text None — None."""
+    if text is None:
+        return None
+    out, cur, fence = [], PART_ROOT, False
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence and re.match(r"#{1,6}(\s|$)", ln):
+            cur = f"[{mark(ln.strip())}]"
+        out.append(cur)
+    return out
 
-        def sec(ln, i):
-            s = secs[ln[0]]
-            return s[i] if s is not None and i is not None and 0 <= i < len(s) else "[?]"
-        rows = [(f"{sec(ln, i)} {ln}", i) for ln, i in rows]
-    return [ln.replace(SEP, "\\u23ce") for ln, _ in rows]
+
+def shown(req):
+    """Строки правки, как их видит владелец, по одной, с разделом: у policy.toml — «[таблица] +строка» (одна строка в
+    [sandbox_write] и в [coordinators] даёт разные права, ревью PR #362, круг 2, Б), у .part — «[## Можно] +строка»
+    (перенос строки из «## Нельзя» в «## Можно» виден, R3-2 Д1). У «-» — раздел в старом тексте, у «+» — в новом; не
+    определить — «[?]». Сама строка у .toml — esc (каждый знак вне печатного ASCII — \\uXXXX: в TOML любой знак может
+    быть путём), у .part — mark (русский текст как есть, смешанные алфавиты помечены). SEP внутри строки — экранирован."""
+    new = req.get("new")
+    old = old_text(req["file"], new, req["diff"]) if isinstance(new, str) else None
+    toml = req["file"].endswith(".toml")
+    split, fix = (toml_sections, esc) if toml else (part_sections, mark)
+    secs = {"+": split(new) if isinstance(new, str) else None, "-": split(old)}
+
+    def sec(ln, i):
+        s = secs[ln[0]]
+        return s[i] if s is not None and i is not None and 0 <= i < len(s) else "[?]"
+    return [f"{sec(ln, i)} {fix(ln)}".replace(SEP, "\\u23ce") for ln, i in walk(req["diff"])]
 
 
 def one_line(s):
@@ -449,13 +503,14 @@ def window_text(req):
 
 
 def question(req):
-    """Вопрос для Зевса: [id], файл, sha диффа, зачем, правка строками (shown) через « ⏎ »: вопрос — одна строка (хук
-    окна вопросов сводит переводы строк в пробел), а SEP внутри строки правки экранирован — «ok; -Правило» не читается
-    как вторая строка (ревью PR #362, круг 2, Д)."""
-    why = f" Зачем: {req['why']}." if req.get("why") else ""
+    """Вопрос для Зевса: [id], файл, sha диффа, правка строками (shown) через « ⏎ », ключи и последним — «Пояснение
+    роли: …» (--why, mark): после правки и с меткой он не подделает её начало «Правка, строк 0: …» (R3-2 С). Вопрос —
+    одна строка (хук окна вопросов сводит переводы строк в пробел), а SEP внутри строки правки экранирован — «ok;
+    -Правило» не читается как вторая строка (ревью PR #362, круг 2, Д)."""
+    why = f". Пояснение роли: {mark(req['why'])}" if req.get("why") else ""
     rows = shown(req)
     return (f"[{req['id']}] Применить правку ~/{req['file']} (задача {req['task']}, sha диффа "
-            f"{req['diff_sha'][:SHORT]})?{why} Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req))
+            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req) + why)
 
 
 def facts(req):

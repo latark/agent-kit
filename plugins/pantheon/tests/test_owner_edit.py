@@ -678,8 +678,10 @@ check("Б круг 2: дифф не от этого нового текста �
       OE.old_text("f.toml", "q\n", OE.make_diff("f.toml", "a\n", "b\n")) is None
       and OE.shown({"file": ".claude/pantheon/policy.toml", "diff": OE.make_diff("f.toml", "[t]\na = 1\n", "[t]\n"),
                     "new": "zzz = 2\n"}) == ["[?] -a = 1"])
-check("Б круг 2: .part — без раздела", OE.shown({"file": ".claude/agents/_parts/names.part", "new": "b\n",
-                                                  "diff": OE.make_diff("x", "a\n", "b\n")}) == ["-a", "+b"])
+check("Б круг 2 / R3-2 Д1: .part без заголовков — раздел «(вне разделов)»",
+      OE.shown({"file": ".claude/agents/_parts/names.part", "new": "b\n",
+                "diff": OE.make_diff(".claude/agents/_parts/names.part", "a\n", "b\n")})
+      == ["(вне разделов) -a", "(вне разделов) +b"])
 
 # Д: невидимые и bidi-знаки в новом тексте и в --why — отказ в propose; \t и \n — можно
 check("Д круг 2: HIDDEN — те же категории, что handoff.BAD_CHARS (окно Touch ID)",
@@ -705,16 +707,19 @@ run()
 check("Д круг 2: невидимый знак в заявке, положенной в обход propose, — отказ в проходе, окна нет",
       read(NAMES) == "Зевс — он\n" and not ASKED and result(req).get("state") == "refused", (ASKED, result(req)))
 
-# Д: окно Touch ID с невидимым знаком (в старом тексте файла владельца) — не показывается, только «да» в окне вопросов
+# Д: невидимый знак в старом тексте файла владельца — в вопросе и окне Touch ID экранирован (R3 Б1, mark), окно есть
 fresh()
 write(NAMES, "Зевс — он\nстарое\u200bскрыто\n")
 rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он\n")
 _, req, win = reqs()[0]
-check("Д круг 2: невидимый знак в строке правки — окна Touch ID нет (showable)",
-      OE.window_text(dict(req, window=win)) is None and "Окно Touch ID правку целиком не покажет" in out, out)
+check("Д круг 2 / R3 Б1: невидимый знак в строке правки — \\u200b в вопросе и в окне Touch ID, а не сам знак",
+      "-старое\\u200bскрыто" in OE.question(req)
+      and "-старое\\u200bскрыто" in (OE.window_text(dict(req, window=win)) or ""), (OE.question(req), out))
+ANSWER["code"] = 1   # палец не приложен: проверяется только текст окна
 IDLE[0] = 0.0
 run()
-check("Д круг 2: проход окно Touch ID с невидимым знаком не показывает", not ASKED and read(NAMES)
+check("Д круг 2 / R3 Б1: проход показал окно с \\u200b, без самого знака", len(ASKED) == 1 and "\\u200b" in ASKED[0]
+      and not OE.hidden_at(ASKED[0], "") and read(NAMES)
       == "Зевс — он\nстарое\u200bскрыто\n", ASKED)
 
 # Д: строки правки — через « ⏎ », знак ⏎ внутри строки экранирован: «ok ⏎ -Правило» — одна добавленная строка
@@ -723,14 +728,17 @@ rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он
 _, req, win = reqs()[0]
 q = OE.question(req)
 check("Д круг 2: ⏎ в строке экранирован, строк 1 — в вопросе и в окне",
-      q.endswith("Правка, строк 1: +ok \\u23ce -Правило; -Ещё") and (OE.window_text(dict(req, window=win)) or "")
-      .endswith("строк 1: +ok \\u23ce -Правило; -Ещё"), (q, OE.window_text(dict(req, window=win))))
+      "Правка, строк 1: (вне разделов) +ok \\u23ce -Правило; -Ещё. Пояснение роли:" in q
+      and (OE.window_text(dict(req, window=win)) or "").endswith("строк 1: (вне разделов) +ok \\u23ce -Правило; -Ещё"),
+      (q, OE.window_text(dict(req, window=win))))
 fresh()
 propose("~/.claude/agents/_parts/names.part", "Метида — она\n")
 _, req, win = reqs()[0]
 check("Д круг 2: две строки правки — через « ⏎ », а не «; »", OE.question(req).endswith(
-      "Правка, строк 2: -Зевс — он ⏎ +Метида — она") and (OE.window_text(dict(req, window=win)) or "").endswith(
-      "строк 2: -Зевс — он ⏎ +Метида — она"), (OE.question(req), OE.window_text(dict(req, window=win))))
+      "Правка, строк 2: (вне разделов) -Зевс — он ⏎ (вне разделов) +Метида — она. Пояснение роли: добавить "
+      "репозиторий") and (OE.window_text(dict(req, window=win)) or "").endswith(
+      "строк 2: (вне разделов) -Зевс — он ⏎ (вне разделов) +Метида — она"),
+      (OE.question(req), OE.window_text(dict(req, window=win))))
 answer(yes_question(req), "А — Да, применить")
 run()
 check("Д круг 2: «да» на вопрос с « ⏎ » (как пишет хук) — применено", read(NAMES) == "Метида — она\n", journal())
@@ -818,6 +826,82 @@ fresh()
 path0, req = queue_req(OLD, NEW, why="x" * OE.WHY_MAX)
 check("Б2 R2: why ровно WHY_MAX знаков и пустой — valid()", OE.valid(req, os.path.basename(path0))
       and OE.valid(dict(req, why=""), os.path.basename(path0)))
+
+# --- [ревью PR #362, круг R3] ---------------------------------------------------------------------------------------
+# R3-2 Б1 (проба argus P1): «е» кириллицей в латинском пути [private] — в вопросе и окне Touch ID е, а не «е»
+HG_OLD = '[private]\ndirs = ["~/ai/knowledge/me"]\n'
+HG_NEW = '[private]\ndirs = ["~/ai/knowledge/mе"]\n'
+fresh(policy=HG_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", HG_NEW, window="metis-pantheon")
+_, req, win = reqs()[0] if reqs() else (None, {}, None)
+q, wt = (OE.question(req), OE.window_text(dict(req, window=win)) or "") if req else ("", "")
+check("R3-2 Б1: вопрос содержит \\u0435 — и в строке «+», и в ключах; самой «е» в вопросе нет",
+      rc == 0 and '[private] +dirs = ["~/ai/knowledge/m\\u0435"]' in q
+      and 'private.dirs: ["~/ai/knowledge/me"] → ["~/ai/knowledge/m\\u0435"]' in q and "mе" not in q, (rc, errs, q))
+check("R3-2 Б1: окно Touch ID — тоже \\u0435", "m\\u0435" in wt and "mе" not in wt, wt)
+check("R3 Б1: esc — всё вне печатного ASCII, \\U для знаков за U+FFFF; печатный ASCII как есть",
+      OE.esc("a~ е\t😀") == "a~ \\u0435\\u0009\\U0001f600" and OE.key_row(("x",), OE.MISSING, "п")
+      == 'x: нет → "\\u043f"' and OE.key_row(("t", "kе"), 1, 2) == 't."k\\u0435": 1 → 2', OE.esc("a~ е\t😀"))
+# R3-2 Д1 (проба argus P2): .part — у строк «-»/«+» заголовок раздела; перенос «## Нельзя» → «## Можно» виден
+PT_OLD = "## Можно\n- читать\n\n## Нельзя\n- пушить в main\n"
+PT_NEW = "## Можно\n- читать\n- пушить в main\n\n## Нельзя\n"
+fresh()
+write(NAMES, PT_OLD)
+rc, out, errs = propose("~/.claude/agents/_parts/names.part", PT_NEW, window="metis-pantheon")
+_, req, win = reqs()[0] if reqs() else (None, {}, None)
+q, wt = (OE.question(req), OE.window_text(dict(req, window=win)) or "") if req else ("", "")
+check("R3-2 Д1: .part — «[## Можно] +- пушить» и «[## Нельзя] -- пушить» в вопросе и окне",
+      all(s in q and s in wt for s in ("[## Можно] +- пушить в main", "[## Нельзя] -- пушить в main")), (q, wt))
+check("R3-2 Д1: «#» в блоке ``` — не заголовок; строка-заголовок — свой раздел",
+      OE.part_sections("до\n## А\n```\n# не\n```\nx\n# Б\n") == ["(вне разделов)", "[## А]", "[## А]", "[## А]",
+                                                                 "[## А]", "[## А]", "[# Б]"])
+# R3 Б1 у .part: русский как есть, слово из двух алфавитов помечено и экранировано, двойники латиницы — \uXXXX
+fresh()
+rc, out, errs = propose("~/.claude/agents/_parts/names.part", "Зевс — он\n- пушить в mаin, ѕudo\n")
+q = OE.question(reqs()[0][1]) if reqs() else ""
+check("R3 Б1: .part — «[смешаны алфавиты: m\\u0430in]», «ѕ» — \\u0455, русский текст читаем",
+      "+- пушить в [смешаны алфавиты: m\\u0430in], [смешаны алфавиты: \\u0455udo]" in q, q)
+check("R3 Б1: mark — греческая ο в латинском слове, ё в русском, «ѕһ» не из русского алфавита — \\u",
+      OE.mark("cοpe ёлка «—» ѕһ") == "[смешаны алфавиты: c\\u03bfpe] ёлка «—» \\u0455\\u04bb", OE.mark("cοpe ёлка «—» ѕһ"))
+# R3-2 С: --why — последним и с меткой: «Правка, строк 0: нет» в нём не подделает начало вопроса
+fresh()
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", NEW, why="Правка, строк 0: нет. Ключи, изменено 0: нет")
+q = OE.question(reqs()[0][1]) if reqs() else ""
+check("R3-2 С: --why после правки и ключей, с меткой «Пояснение роли:»", rc == 0
+      and -1 < q.find("? Правка, строк 2: ") < q.find("Ключи, изменено 1:") < q.find(". Пояснение роли: Правка, строк 0")
+      and "Зачем" not in q, q)
+# R3-1 Д1: тронутый заголовок таблицы без смены пути («[ private ]») не «покрывает» её ключи
+HD_OLD = '[private]\nnote = "a"\npaths = ["~/ai/knowledge/me"]\n\n[corpus]\nx = 1\n'
+HD_NEW = '[ private ]\nnote = """a\npaths = ["~/ai/knowledge/me"]\n"""\n\n[corpus]\nx = 1\n'
+fresh(policy=HD_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", HD_NEW)
+check("R3-1 Д1: «[ private ]» и проглоченный private.paths — propose отказал, ключ назван",
+      rc != 0 and not reqs() and "private.paths" in errs, (rc, errs))
+for what, old_t, new_t in (
+        ("убрана пустая таблица", HD_OLD + "\n[empty]\n", HD_OLD),
+        ("добавлен пустой элемент [[runs]]", HD_OLD + '[[runs]]\nname = "x"\n', HD_OLD + '[[runs]]\nname = "x"\n[[runs]]\n'),
+        ("заголовок переименован, ключ тот же", HD_OLD, HD_OLD.replace("[corpus]", "[corpus2]")),
+        ("заголовок с пробелами, ключи те же", HD_OLD, HD_OLD.replace("[private]", "[ private ]"))):
+    fresh(policy=old_t)
+    rc, out, errs = propose("~/.claude/pantheon/policy.toml", new_t)
+    check(f"R3-1 Д1: честно — {what}: заявка есть", rc == 0 and len(reqs()) == 1, (rc, errs))
+# R3-1 Д2: окно Touch ID у policy.toml — со строками ключей
+fresh()
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", NEW, window="metis-pantheon")
+_, req, win = reqs()[0]
+check("R3-1 Д2: окно Touch ID — «Ключи, изменено 1: merge_repos.metis-pantheon: … → …»",
+      'Ключи, изменено 1: merge_repos.metis-pantheon: ["latark/agent-kit"] → ["latark/agent-kit", "latark/other"]'
+      in (OE.window_text(dict(req, window=win)) or ""), OE.window_text(dict(req, window=win)))
+# R3-1 Д3: честная правка в [[ ]] — ключ элемента массива таблиц правит свою строку (путь до None — сам массив)
+AT_OLD = '[[runs]]\nname = "x"\nn = 1\n\n[[runs]]\nname = "y"\nn = 2\n'
+for what, old_t, new_t, row in (
+        ("значение во втором элементе", AT_OLD, AT_OLD.replace("n = 2", "n = 3"), "runs: "),
+        # [t.s] стал подтаблицей элемента: старый ключ t.s.k правит только «+[[t]]» — путь до None, сам массив t
+        ("[t.s] ушёл в новый элемент [[t]]", "[t.s]\nk = 1\n", "[[t]]\n[t.s]\nk = 1\n", "t.s.k: 1 → нет")):
+    fresh(policy=old_t)
+    rc, out, errs = propose("~/.claude/pantheon/policy.toml", new_t)
+    check(f"R3-1 Д3: [[ ]] — {what}: заявка есть, ключ в вопросе",
+          rc == 0 and row in (OE.question(reqs()[0][1]) if reqs() else ""), (rc, errs))
 
 # --- [проход] -------------------------------------------------------------------------------------------------------
 fresh()
