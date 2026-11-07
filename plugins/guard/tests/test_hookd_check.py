@@ -20,11 +20,13 @@ import plistlib
 import shutil
 import subprocess
 import sys
-import tempfile
 from contextlib import redirect_stdout
 from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from _py311 import mkroot  # noqa: E402 — корень, где roles build пишет .claude/agents, и в окне роли (metis-0941)
+
 PLUGIN = os.path.dirname(HERE)
 SCRIPT = os.path.join(PLUGIN, "scripts", "hookd-check.py")
 LAUNCHER = os.path.join(PLUGIN, "hooks", "python.sh")
@@ -215,7 +217,7 @@ def test_real_build(root):
 
 def main():
     C = load()
-    root = tempfile.mkdtemp(prefix="hkc")
+    root = mkroot("hkc")
     try:
         test_tcc(C, root)
         test_windows(C, root)

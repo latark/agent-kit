@@ -325,7 +325,7 @@ def main():
     # metis-0905: +~430 — merge.part (промежуточное уведомление субагента — не отчёт; outside test для записи — в фоне)
     # и persist.part (своя фоновая команда — ждать уведомления о конце)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 32200 and len(raw_texts["hephaestus-demo.md"]) <= 26200)  # metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 32600 and len(raw_texts["hephaestus-demo.md"]) <= 26600)  # metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -581,7 +581,8 @@ def main():
          "новых находок не ищешь» там не действует."),
         ("второй argus — только ядро; список шлюза с origin/main", "Второй независимый argus — только PR, "
          "который задевает ядро. Ядро — список шлюза guard: `CORE_DIR` и `CORE_FILES` в "
-         "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` в `plugins/pantheon/lib/pantheon.py`. "
+         "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` с запуском окна `window_launch` в "
+         "`plugins/pantheon/lib/pantheon.py`. "
          "Читай список с `origin/main`"),
         ("вне ядра argus один; сложность и метка второго не добавляют", "Вне ядра argus один: "
          "сложность по диффу и метка «Сложная» в поручении второго не добавляют."),
@@ -737,6 +738,11 @@ def main():
           "Вопрос владельцу на решение — в окне вопросов, в карточке, в сообщении — начинается с «[<id>]»"
           in flat.get("hq.md", "") and "(`--question`, `--why`, два `--option`, `--recommend`)" in flat.get("hq.md", "")
           and "вопрос о карточке сверх лимита — с id задачи-причины" in flat.get("hq.md", ""))
+    check("hq: решение владельца под согласие исполнителя — одно окно вопросов с [id] в том же ходе, прямое слово — "
+          "consent bind по строке owner-log без пометки (metis-0843)",
+          "— в том же ходе одно окно вопросов с «[<id>]» его вопроса, а не просьба «ответьте цифрой»" in flat.get("hq.md", "")
+          and "`pantheon consent bind <id> --log-at <ЧЧ:ММ[:СС]>`" in flat.get("hq.md", "")
+          and "своего текста не передаёшь; пересказ — не согласие" in flat.get("hq.md", ""))
     # потолок владельца (metis-0444, metis-0588): отказ start/wake не повторять и не обходить; владельцу — --over-cap
     # его командой или поднять потолок; Гестию потолок не держит
     # metis-0832: владельцу — вопрос «да/нет», а не команда для его терминала
@@ -883,6 +889,12 @@ def main():
     talos_real = read(os.path.join(out_real, "talos.md"))
     check("talos: dev-сервер — pantheon outside serve --sha … --wait 120, гасит stop",
           "pantheon outside serve --sha <head PR> [--app ИМЯ] --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    # metis-0900: ожидание владельца в окне роли — строка Зевсу до действия (external.part)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "workshop.md", "hq.md"):
+        text = " ".join(read(os.path.join(out_real, f)).split())
+        check(f"{f}: перед подтверждением владельца в окне — строка Зевсу «[id] жду вас в окне <роль>: <что>» (metis-0900)",
+              "сначала строка Зевсу «[id] жду вас в окне <роль>: <что>», потом действие" in text
+              and "Окну Зевса не нужно" in text)
 
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1

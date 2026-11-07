@@ -16,6 +16,7 @@ import sys
 # Срок самого guard (DEADLINE) это не меняет и им не проверяется.
 SUB_TIMEOUT = 60
 import tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from _par import run_cases  # noqa: E402  (metis-0544)
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
 import atexit as _atexit
@@ -138,6 +139,7 @@ def gate_fixtures(home):
                     r = {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
                          "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}
                     if kind == "accept":  # Б6 (guard 0.5.6): запор пускает только «принять» с перечнем проверенного
+                        r["base"] = "main"  # base PR на записи «принять» (metis-0965) — как baseRefName поддельного gh
                         # ran с моделью: в защитах шлюз засчитывает только argus на Opus (metis-0176)
                         r["checklist"] = {"opened": "дифф PR", "ran": "модель: claude-opus-5-5, тесты",
                                           "unchecked": "живой gh"}
@@ -161,7 +163,7 @@ def gate_fixtures(home):
                  "  'api '*/actions/runs\\?*) echo '" + json.dumps(wr) + "'; exit 0 ;;\n"
                  "  'api '*/check-runs\\?*) echo '" + json.dumps(cr) + "'; exit 0 ;;\n"
                  "  api*) echo '" + json.dumps({"filename": "README.md", "status": "modified"}) + "'; exit 0 ;;\n"
-                 "esac\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK, "statusCheckRollup": [
+                 "esac\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK, "baseRefName": "main", "statusCheckRollup": [
                      {"name": "check-traces", "status": "COMPLETED", "conclusion": "SUCCESS"}]}) + "'\n")
     os.chmod(os.path.join(home, "fake-bin/gh"), 0o755)
 
@@ -1841,6 +1843,18 @@ def main():
         # shopKeeperApp — её продукт ([merge_client]): слияние открыто, talos и откат — обязанность роли
         ("push: gh pr merge Афиной в своём продукте — можно (0.5.0)", "allow", br, "domain-coordinator", False,
          B("gh pr merge 12 --merge")),
+        # metis-0983: назначение по правилам git (подробно — test_refspec.py); fetch не пишет в refs/heads/*
+        ("push: X:heads/main — отказ", "deny", br, "hephaestus-shop", True, B("git push origin develop:heads/main")),
+        ("push: --mirror — отказ", "deny", br, "domain-coordinator", False, B("git push --mirr origin")),
+        ("fetch: --update-head-ok в ветку под HEAD — отказ", "deny", br, "domain-coordinator", False,
+         B("git fetch --update-head-ok . epic-tax:main")),
+        ("fetch: refspec в refs/heads — отказ субагенту", "deny", br, "dev-sonnet", True,
+         B("git fetch origin main:heads/main")),
+        ("fetch: окно координатора без agent_type, -u — отказ", "deny", br, "", False,
+         B("git fetch -u origin main:feat"), None, TL),
+        ("fetch: в refs/remotes — можно", "allow", br, "dev-sonnet", True,
+         B("git fetch origin main:refs/remotes/origin/main")),
+        ("fetch: ваша сессия в refs/heads — можно", "allow", alex, "", False, B("git fetch origin main:main")),
         ("push: ваша сессия в main — можно", "allow", alex, "", False, B("git push origin main")),
         ("push: git push внутри текста коммита — не отправка", "allow", br, "dev-sonnet", True,
          B("git commit -m 'не делать git push в main'")),
@@ -2305,18 +2319,17 @@ def main():
         ("dev-server: координатор в worktree — можно [sb-simplify]", "allow", br, "domain-coordinator", False, B("pnpm dev"),
          br + "/.claude/worktrees/agent-1"),
     ]
-    failed = 0
-    for case in cases:
+    oks = []  # таблица — по 25 случаев в своём fork (metis-0544, _par.py): HOME случаи не меняют, кроме журнала сбоев
+    def one(case):
         name, want, pdir, role, sub, (tool, ti) = case[:6]
         if sys.platform != "darwin" and name in MAC_CASEFOLD:  # guard сравнивает пути без регистра только на macOS (IS_MAC)
-            print(f"пропущено: {name} — нужен macOS (регистронезависимая ФС)")
-            continue
-        cwd = case[6] if len(case) > 6 else None
-        penv = case[7] if len(case) > 7 else None  # env окна: PANTHEON_ROLE (guard 0.5.5)
+            return print(f"пропущено: {name} — нужен macOS (регистронезависимая ФС)")
+        cwd, penv = (*case[6:8], None, None)[:2]  # папка запуска и env окна: PANTHEON_ROLE (guard 0.5.5)
         got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv)
-        mark = "ok  " if got == want else "FAIL"
-        failed += got != want
-        print(f"{mark} {name}: {got}")
+        oks.append(got == want)
+        print(f"{'ok  ' if got == want else 'FAIL'} {name}: {got}")
+    run_cases([(f"случаи {i + 1}-{i + 25}", lambda i=i: [one(c) for c in cases[i:i + 25]]) for i in range(0, len(cases), 25)], oks, lambda name, err: oks.append(False))
+    failed = oks.count(False)
     # tg-role (metis-0267): отказ называет путь — заявку pantheon read
     out = run(home, lw, "domain-coordinator", "Bash", {"command": "~/projects/other/tg-read/" + TGR + " history 1"},
               raw=True, penv=TL)

@@ -13,7 +13,10 @@ import subprocess
 import sys
 import tempfile
 
-_ROOT = tempfile.mkdtemp(prefix="ratchet-root-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import mkroot  # noqa: E402 — корень, где идёт git init, и в окне роли (metis-0941)
+
+_ROOT = mkroot("ratchet-root-")
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)

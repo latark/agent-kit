@@ -408,8 +408,8 @@ def place_owner(p, ctx):
             rel = os.path.relpath(rp, P.PANTHEON).split(os.sep)
             who = rel[1] if rel[:1] == ["directions"] and len(rel) > 1 else "Пританей"
             return f"{who}, ~/ai/pantheon", "ask", "папка Пантеона"
-        if _under(rp, _real(P.WORKSHOP)):
-            rel = os.path.relpath(rp, _real(P.WORKSHOP)).split(os.sep)
+        if _under(rp, _real(P.workshop_root())):
+            rel = os.path.relpath(rp, _real(P.workshop_root())).split(os.sep)
             return f"мастерская {rel[0]}", "ask", "мастерская"
         if _under(rp, _real(sandbox_root())):
             return f"песочница окна, {place.replace(P.HOME, '~')}", "ask", SANDBOX_WHY

@@ -32,14 +32,16 @@ def review_accept_full(r):
 def review_accept_counts(r):
     """«Принять» в счёт шлюза ядра (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале, а если хук
     guard записал модели из транскрипта argus (поле models) — все они claude-opus и среди них модель из ran (тот же ID
-    или он с датой), как opus_problem шлюза guard. Поля models нет (models_note — транскрипта не было, или запись
-    старше) — судим по ran. Одно правило для шлюза владельца (merge.gate) и итога `review status` (review_tally),
+    или он с датой), как opus_problem шлюза guard. Поля models нет: у субагента argus (agent_id есть) с пометкой
+    models_note — свой транскрипт не найден, не в счёт (metis-0489); у главной сессии argus или записи старше без
+    пометки — судим по ran. Одно правило для шлюза владельца (merge.gate) и итога `review status` (review_tally),
     чтобы они не разошлись (metis-0393). Шлюз ядра владельца — только для PR ядра, там Opus обязателен."""
     c = r.get("checklist")
     if not (review_accept_full(r) and OPUS_RAN.match(c["ran"])):
         return False
     if "models" not in r:
-        return True
+        by = r.get("by") if isinstance(r.get("by"), dict) else {}
+        return not (r.get("models_note") and by.get("agent_id"))
     seen = r["models"]
     if not isinstance(seen, list) or not all(isinstance(m, str) and m.startswith("claude-opus") for m in seen):
         return False   # пустой список отсеет any() ниже

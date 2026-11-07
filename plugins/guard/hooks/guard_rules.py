@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Правила из ~/.claude/CLAUDE.md, которые Claude Code проверяет сам, а не на память модели.
 
-Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, Agent, Task, Skill),
+Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, Agent, Task, Skill,
+EnterWorktree),
 PostToolUse (Bash:
 журнал запора слияния) и Stop плагина guard (hooks/hooks.json). Код запора слияния и protect-config — в merge_gate.py
 и protect_config.py рядом (ядро защит, Д3).
@@ -56,6 +57,10 @@ PostToolUse (Bash:
                  мимо песочницы (metis-0533, metis-0596);
   hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
                  (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
+  worktree-own — окну направления (PANTHEON_WINDOW из domains.json) EnterWorktree с path — только в .claude/worktrees/
+                 репозитория своего направления и из него же (иначе Claude Code спрашивает владельца); чужое
+                 направление — отказ с подсказкой pantheon start или задача ему; другой репозиторий — подсказка cd;
+                 вне папки запуска настройки проекта с allow, hooks, sandbox, env — отказ и с name (metis-0911);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -2723,11 +2728,15 @@ def check_pantheon(event, tool, tool_input):
 #            демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
 #            песочницы нет, пароль закрыт denyRead.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
-#            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
-#            нет. Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
+#            master — никто из ролей (в main сливаете вы) при любой записи назначения: heads/main, refs/heads/main,
+#            X:main, регистр (APFS) — по правилам git (_dst_refs, metis-0983); --all, --branches, --mirror (и сокращения
+#            вроде --mirr), удаление и принудительная отправка — тоже нет. git fetch и pull (metis-0983, ролям и главной
+#            сессии окна): --update-head-ok (-u), --stdin и refspec или --refmap с назначением в refs/heads/* — отказ,
+#            fetch пишет только refs/remotes/* и теги (fetch_problem). Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
 #            вне ядра — одно, «вернуть» нет), — отказ и ролям, и сессии без роли (metis-0794, push_accepted →
-#            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; строка «Б: <причина>» в новом
-#            коммите и любой сбой проверки — пропуск. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
+#            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; принудительная отправка в такой
+#            PR — тоже (metis-0809); строка «Б: <причина>» в коммите PR (не из base), base подтянут без правок и
+#            любой сбой проверки — пропуск. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
 #            команде, или её лид (metis-0054, guard 0.5.2): субагент hephaestus-<short> или apollo-<short>, где short —
 #            имя направления папки запуска (domains.json) после первого «-», как собирает pantheon roles build; дальше
 #            лид проверяется как координатор (личное, Метида, защиты). Лид чужого направления, сессия без
@@ -2803,8 +2812,15 @@ PROTECTED_BRANCHES = {"main", "master"}
 TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
 _GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
 _PUSH_OPT_ARG = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
-_PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
+_PUSH_BAD = {"--all", "--branches", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
              "--force-if-includes"}
+_PUSH_FORCE = {"--force", "-f", "--force-with-lease", "--force-if-includes"}  # их судит push_accepted (metis-0809)
+# git fetch/pull (metis-0983): флаги со значением отдельным словом; --update-head-ok (-u) сдвигает ветку под HEAD,
+# --stdin читает refspec мимо разбора
+_FETCH_OPT_ARG = {"--refmap", "-o", "--server-option", "--upload-pack", "--depth", "--deepen", "--shallow-since",
+                  "--shallow-exclude", "-j", "--jobs", "--negotiation-tip", "--filter", "--submodule-prefix",
+                  "--recurse-submodules-default", "-s", "--strategy", "-X", "--strategy-option"}
+_FETCH_BAD = {"--update-head-ok", "--stdin"}
 
 
 def limited(event):
@@ -3396,15 +3412,119 @@ def _git_out(d, *args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _opt_in(a, opts):
+    """Флаг a — один из opts, в том числе сокращённый: git понимает однозначное начало длинного флага (--mirr)."""
+    name = a.split("=", 1)[0]
+    return name in opts or (name.startswith("--") and len(name) > 2 and any(o.startswith(name) for o in opts))
+
+
+def _dst_refs(dst):
+    """Полные ref, в которые git может понять назначение refspec (metis-0983) — по его правилам, а не по строке:
+    refs/… — как есть; heads/, tags/, remotes/ — с refs/ спереди (fetch — get_local_ref, push — правило refs/%s:
+    «git push origin X:heads/main» пишет в refs/heads/main); прочее короткое — refs/heads/ или refs/tags/.
+    Сравнивать без регистра: на APFS refs/heads/MAIN — тот же файл, что refs/heads/main."""
+    low = dst.lower()
+    if low.startswith("refs/"):
+        return [dst]
+    if low.startswith(("heads/", "tags/", "remotes/")):
+        return ["refs/" + dst]
+    return ["refs/heads/" + dst, "refs/tags/" + dst]
+
+
+def fetch_problem(texts):
+    """git fetch и pull (metis-0983): почему эта запись ref ролям нельзя, или None. Ролям fetch пишет только
+    refs/remotes/*, теги и FETCH_HEAD: refspec с другим назначением (refs/heads/*, refs/replace/*, refs/notes/*, в том
+    числе --refmap) — отказ: он и --update-head-ok сдвигают локальную ветку (и ту, что под HEAD защищённого
+    репозитория: ~/.claude, ~/ai/pantheon) или подменяют объекты.
+    Слово до подкоманды не вычислить (`git -C "$d" fetch …`): судятся слова после fetch или pull, если они есть среди
+    слов команды, — папка запись ref не меняет; без fetch и pull — не судится (metis-0983, Д1 argus #380)."""
+    parsed = _git_sub(texts)
+    if parsed is None:
+        at = next((i for i, a in enumerate(texts) if a in ("fetch", "pull")), None)
+        if at is None:
+            return None
+        sub, args = texts[at], texts[at + 1:]
+    elif parsed[1] not in ("fetch", "pull"):
+        return None
+    else:
+        sub, args = parsed[1], parsed[2]
+    if any(a is None for a in args):
+        return f"аргументы {sub} не разобрать"
+    pos, specs, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") and (_opt_in(a, _FETCH_BAD) or re.fullmatch(r"-[afkmnpPqtv46]*u[afkmnpPqtv46]*", a)):
+            return f"флаг {a}"
+        if _opt_in(a, {"--refmap"}):
+            if "=" not in a and i + 1 >= len(args):
+                return f"флаг {a} без значения"
+            specs.append(a.split("=", 1)[1] if "=" in a else args[i + 1])
+        if a in _FETCH_OPT_ARG or (a.startswith("--") and "=" not in a and _opt_in(a, {"--refmap"})):
+            i += 2
+            continue
+        if not a.startswith("-"):
+            pos.append(a)
+        i += 1
+    for spec in specs + pos[1:]:
+        dst = spec.lstrip("+").partition(":")[2]
+        # назначение — только refs/remotes/* и теги: refs/replace/* подменяет объекты, refs/notes/* и прочие ref
+        # защищённого репозитория fetch ролям тоже не пишет (Д2 argus-2 #380); пустое назначение — только FETCH_HEAD
+        if dst and not all(r.lower().startswith(("refs/remotes/", "refs/tags/")) for r in _dst_refs(dst)):
+            return f"refspec «{spec}» пишет не в refs/remotes/* и не в теги, а в {dst}"
+    return None
+
+
+def _merge_repo_set():
+    """owner/repo из [merge_repos] policy.toml всех направлений, в нижнем регистре."""
+    mr = load_policy().get("merge_repos")
+    return {r.strip().lower() for v in (mr.values() if isinstance(mr, dict) else ()) if isinstance(v, list)
+            for r in v if isinstance(r, str) and r.strip()}
+
+
+def window_push_judged(texts, cwd):
+    """git push главной сессии окна судит push_problem (metis-0983): True — репозиторий remote из [merge_repos] или
+    его не вычислить; False — не push или репозиторий вне [merge_repos] (~/ai/pantheon и прочие хранилища окна: их
+    main шлюз не сливает, отправка туда — законный путь). Слово до подкоманды не вычислить (`git -C "$d" …`): судится,
+    только если среди слов есть push, — `git -C "$d" status` окно проходит, как до metis-0983 (Б1 argus #380).
+    URL — для push (`get-url --push`): remote.X.pushurl в [merge_repos] из-под суда не выводит (Д2 argus #380)."""
+    parsed = _git_sub(texts)
+    if parsed is None:
+        return "push" in texts
+    gdir, sub, args = parsed
+    if sub != "push":
+        return False
+    if any(a is None for a in args):
+        return True
+    remote, i = None, 0
+    while i < len(args):
+        a = args[i]
+        if a in _PUSH_OPT_ARG:
+            i += 2
+            continue
+        if not a.startswith("-"):
+            remote = a
+            break
+        i += 1
+    d = _expand(gdir, cwd) if gdir else cwd
+    if not remote:
+        up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
+        remote = up.split("/", 1)[0] if "/" in up else "origin"
+    url = remote if re.search(r"[/:]", remote) else (_git_out(d, "remote", "get-url", "--push", remote) or "")
+    repo = _mg()._repo_tail(_mg()._remote_id(url)) if url.strip() else ""
+    return not repo or repo in _merge_repo_set()
+
+
 def push_problem(texts, cwd, moved):
     """Почему эта отправка ролям нельзя, или None."""
     got = _push_parse(texts, cwd, moved)
     return got if isinstance(got, str) else None
 
 
-def _push_parse(texts, cwd, moved):
+def _push_parse(texts, cwd, moved, force=False):
     """Разбор git push: текст — почему отправка ролям нельзя (push_problem); None — это не push; иначе (папка git,
-    remote или None, [(что отправляется, ветка назначения)]) — для push_accepted (metis-0794)."""
+    remote или None, [(что отправляется, ветка назначения)]) — для push_accepted (metis-0794). force — принудительная
+    отправка (--force, -f, --force-with-lease, --force-if-includes, +ветка) разбирается как обычная: её судит
+    push_accepted (metis-0809), а ролям её закрывает push_problem."""
     parsed = _git_sub(texts)
     if parsed is None:
         return "аргументы git не разобрать"
@@ -3416,7 +3536,10 @@ def _push_parse(texts, cwd, moved):
     pos, i = [], 0
     while i < len(args):
         a = args[i]
-        if a in _PUSH_BAD or a.split("=", 1)[0] in _PUSH_BAD or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
+        if force and (_opt_in(a, _PUSH_FORCE) or re.fullmatch(r"-[a-ce-zA-Z0-9]*f[a-ce-zA-Z0-9]*", a)):
+            i += 1
+            continue
+        if _opt_in(a, _PUSH_BAD) or re.fullmatch(r"-[a-zA-Z0-9]*[fd][a-zA-Z0-9]*", a):
             return f"флаг {a}"
         if a in _PUSH_OPT_ARG:
             i += 2
@@ -3440,6 +3563,8 @@ def _push_parse(texts, cwd, moved):
             pairs.append(("HEAD", up.split("/", 1)[1]))
             remote = remote or up.split("/", 1)[0]
     for spec in pos[1:]:
+        if force and spec.startswith("+"):
+            spec = spec[1:]
         if spec.startswith("+"):
             return f"принудительная отправка ({spec})"
         src, _, dst = spec.partition(":")
@@ -3451,10 +3576,10 @@ def _push_parse(texts, cwd, moved):
         pairs.append((src, current if dst in ("HEAD", "@") else dst))
     out = []
     for src, x in pairs:
-        name = re.sub(r"^refs/heads/", "", x or "")
-        if not name or name in PROTECTED_BRANCHES or "*" in name:
-            return f"отправка в {name or 'неизвестную ветку'}"
-        out.append((src, name))
+        heads = [r[len("refs/heads/"):] for r in _dst_refs(x or "") if r.lower().startswith("refs/heads/")]
+        if not x or "*" in x or any(h.lower() in PROTECTED_BRANCHES for h in heads):
+            return f"отправка в {x or 'неизвестную ветку'}"
+        out.append((src, heads[0] if heads else x))
     return d, remote, out
 
 
@@ -3462,11 +3587,13 @@ def push_accepted(texts, cwd, moved):
     """Push в ветку открытого PR, который argus уже принял на текущем head (metis-0794): новый коммит сжёг бы
     вердикты и потребовал нового круга, а долг ревью в принятый PR не тянут (merge-rounds.md, «Находки ревью»).
     Текст отказа или None. Не разобрать, нет записей, нет сети, любой сбой — None: push идёт как раньше (защита от
-    ошибки агента, а не от обхода — README guard). Судит merge_gate.accepted_push_problem."""
-    got = _push_parse(texts, cwd, moved)
-    if not isinstance(got, tuple):
-        return None
+    ошибки агента, а не от обхода — README guard). Судит merge_gate.accepted_push_problem. Принудительная отправка
+    (amend и force, +ветка) — тоже новый head, судится так же (metis-0809). Разбор — внутри try: сбой git в нём (нет
+    git, таймаут) — тоже пропуск, а не остановка (metis-0809)."""
     try:
+        got = _push_parse(texts, cwd, moved, force=True)
+        if not isinstance(got, tuple):
+            return None
         return _mg().accepted_push_problem(*got)
     except Exception:  # fail-open: сбой проверки не останавливает push; срок хука — HookTimeout (BaseException), не он
         return None
@@ -3640,6 +3767,21 @@ def check_owner_merge(event, tool_input):
     notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
         if name == "git":  # push в принятый PR (metis-0794) — и окнам без роли, как ролям
+            # главная сессия окна (PANTHEON_ROLE есть, agent_type нет): fetch у окна мимо песочницы — в refs/heads/*
+            # не пишет, как у ролей (metis-0983, Д1 argus #378)
+            why = fetch_problem(texts) if window_role() else None
+            if why:
+                return (f"Правило fetch: {why}. Окну fetch пишет только refs/remotes/* и теги — локальную ветку "
+                        "сдвигают merge, rebase или switch в своей копии.")
+            # и push — как у ролей, в репозиториях [merge_repos]: main сливает шлюз (metis-0983, Д2 argus #378). Окно
+            # hestia — своё правило (check_hestia: push_problem по consent, --force-with-lease своей ветки можно)
+            win = window_role()
+            why = (push_problem(texts, cwd, moved) if win and win != "hestia" and window_push_judged(texts, cwd)
+                   else None)
+            if why:
+                return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`git push origin "
+                        "HEAD:refs/heads/<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
+                        "удаление веток — только владелец.")
             why = push_accepted(texts, cwd, moved)
             if why:
                 return why
@@ -3788,6 +3930,10 @@ def check_push(event, tool, tool_input):
             # рецензент не меняет то, что проверяет: вердикт argus — на чужой SHA (запор слияния, P1-4)
             return (f"Правило push (шлюз слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
                     "коммит и не меняет его. Нашёл, что исправить, — верни «reject» и опиши в отчёте лиду.")
+        why = fetch_problem(texts) if name == "git" else None
+        if why:
+            return (f"Правило fetch: {why}. Ролям fetch пишет только refs/remotes/* и теги — локальную ветку сдвигают "
+                    "merge, rebase или switch в своей копии: `git fetch origin main`, затем `git merge origin/main`.")
         if name == "?" and "push" not in texts:
             continue
         if name == "?" or (parsed and parsed[1] == "push"):
@@ -3956,7 +4102,7 @@ def check_corpus_role(event, tool, tool_input):
 #                 с subagent_type chiron, если PANTHEON_ROLE задан и не hq, или если зовёт роль Пантеона или субагент вне
 #                 окна штаба. Ваша сессия без роли и без PANTHEON_ROLE позвать может, но личного chiron там не увидит.
 AGENT_TOOLS = {"Agent", "Task"}
-WINDOW_ONLY_TOOLS = AGENT_TOOLS | {"Skill"}  # их проверяет только хук плагина и окна: управляемые настройки не зовут
+WINDOW_ONLY_TOOLS = AGENT_TOOLS | {"Skill", "EnterWorktree"}  # их проверяет только хук плагина и окна: управляемые настройки не зовут
 TG_DAEMON = re.compile(r"(?<![\w-])tg-readd(?![\w-])")
 
 
@@ -4731,9 +4877,149 @@ def check_hq_sessync(event, tool, tool_input):
             "присваивания, env, bash -c, `;`, `&`, `|`, перенаправлений, подстановок и глобов (* ? [ ] { } ~ ^ # !).")
 
 
+# worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
+# EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
+# («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
+# ТЕКУЩЕЙ папки сессии. Это проверка safetyCheck: её не снимают ни правило allow, ни permissions.additionalDirectories,
+# ни allow хука — снимает только cd в тот репозиторий. Папки направления — рабочие папки окна (additionalDirectories,
+# sandbox_build), поэтому cd туда сохраняется. Репозиторий worktree — путь до последнего `.claude/worktrees/<имя>`
+# (ревью argus PR #360): папка направления бывает контейнером репозиториев (~/projects/MorphStream не git, внутри app,
+# gpu-worker со своими worktrees). Правило:
+#   - репозиторий внутри своей папки (самая глубокая папка направлений над ним — твоя), сессия стоит в нём: ближайший
+#     .git над cwd — сам репозиторий или его worktree — пропуск: Claude Code пустит без вопроса;
+#   - сессия в другом репозитории, в том числе во вложенном (LW/data → LW/.claude/worktrees/a) — отказ: сначала cd;
+#   - своя папка, но не .claude/worktrees/<имя> — отказ: worktree окна — только под .claude/worktrees/;
+#   - папка чужого направления — отказ с подсказкой: `pantheon start <направление>` или задача ему;
+#   - вне папок направлений — отказ. Вопроса владельцу не бывает ни в одном случае.
+# Настройки проекта (ревью argus 2 PR #360, вариант 2 по содержимому): EnterWorktree загружает .claude/settings.json и
+# settings.local.json репозитория и worktree — allow, hooks, sandbox, env, MCP проекта. Папку запуска окно приняло при
+# старте (allow_gate в pantheon.py); в другом репозитории своего направления такие ключи расширили бы окно молча —
+# отказ, и с path, и с name (новая worktree в репозитории cwd). Вне окна направления правило молчит.
+WORKTREES_DIR = ".claude/worktrees/"
+# ключи настроек проекта, которые расширяют окно: truthy значение — отказ. permissions и sandbox — по вложенным ключам
+WIDEN_KEYS = ("hooks", "env", "enabledPlugins", "enabledMcpjsonServers", "enableAllProjectMcpServers", "apiKeyHelper",
+              "statusLine", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
+SAFE_PERMISSIONS = ("deny", "ask")
+SAFE_SANDBOX = ("autoAllowBashIfSandboxed", "failIfUnavailable", "enabled")
+
+
+def _wt_repo(path):
+    """(репозиторий, папка worktree) для пути под последним `.claude/worktrees/<имя>`, иначе (None, None)."""
+    parts = path.split("/")
+    for i in range(len(parts) - 3, 0, -1):
+        if parts[i].casefold() == ".claude" and parts[i + 1].casefold() == "worktrees" and parts[i + 2]:
+            return "/".join(parts[:i]) or "/", "/".join(parts[:i + 3])
+    return None, None
+
+
+def _git_root(cwd, stop):
+    """Ближайшая папка с .git над cwd (cwd включительно), не выше stop; нет — None."""
+    d = cwd
+    while _inside(d, [stop]):
+        if os.path.lexists(os.path.join(d, ".git")):
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return None
+
+
+def _owner(path, doms):
+    """(папка, направление) — самая глубокая папка направлений, внутри которой path, или (None, None)."""
+    hits = [(f, n) for n, fs in doms.items() if isinstance(fs, list)
+            for f in _norm([x for x in fs if isinstance(x, str)]) if _inside(path, [f])]
+    return max(hits, key=lambda x: len(x[0])) if hits else (None, None)
+
+
+def _launch(folders):
+    """Папка запуска — как launch_folder в pantheon.py: первая существующая, иначе первая."""
+    real = _norm([f for f in folders if isinstance(f, str) and f])
+    return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
+
+
+def _widening(dirs):
+    """[(файл, ключ)] — ключи .claude/settings*.json папок dirs, расширяющие окно (WIDEN_KEYS, permissions кроме deny
+    и ask, sandbox кроме безопасных и enabled: false). Нечитаемый файл — сам по себе ключ «?»: Claude Code его прочтёт."""
+    found = []
+    for d in dirs:
+        for fn in ("settings.json", "settings.local.json"):
+            f = os.path.join(d, ".claude", fn)
+            if not os.path.lexists(f):
+                continue
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                found.append((f, "?"))
+                continue
+            if not isinstance(data, dict):
+                continue
+            keys = [k for k in WIDEN_KEYS if data.get(k)]
+            for top, safe in (("permissions", SAFE_PERMISSIONS), ("sandbox", SAFE_SANDBOX)):
+                sub = data.get(top)
+                if isinstance(sub, dict):
+                    keys += [f"{top}.{k}" for k, v in sub.items() if v and k not in safe]
+                    if top == "sandbox" and sub.get("enabled") is False:
+                        keys.append("sandbox.enabled")
+                elif sub:
+                    keys.append(top)
+            found += [(f, k) for k in keys]
+    return found
+
+
+def _widen_msg(repo, found):
+    shown = "; ".join(f"{f}: {', '.join(k for g, k in found if g == f)}" for f in dict.fromkeys(f for f, _ in found))
+    return (f"Правило worktree-own: EnterWorktree в {repo} загрузил бы в окно настройки проекта ({shown}) — это не папка "
+            "запуска, и права окна выросли бы молча (metis-0911). Работай в репозитории без worktree или верни в отчёт: "
+            "ключи убирает или принимает владелец, из окна его не спрашивай.")
+
+
+def check_worktree_own(event, tool, tool_input):
+    if tool != "EnterWorktree":
+        return None
+    raw = tool_input.get("path")
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    doms = load_domains().get("domains") or {}
+    if not isinstance(doms.get(win), list):
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    launch = _launch(doms[win])
+    if not isinstance(raw, str) or not raw:  # name: новая worktree в репозитории cwd — только сверка настроек
+        folder, owner = _owner(cwd, doms)
+        repo = _git_root(cwd, folder) if owner == win else None
+        found = _widening([repo]) if repo and _key(repo) != _key(launch) else []
+        return _widen_msg(repo, found) if found else None
+    target = _expand(raw, cwd)
+    repo, wt = _wt_repo(target)
+    folder, owner = _owner(repo or target, doms)
+    if owner == win and repo is None:
+        return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/<имя> репозитория "
+                f"(metis-0911). Worktree окна — только `<репозиторий>/{WORKTREES_DIR}<имя>`: `cd <репозиторий>` "
+                "отдельной командой Bash, затем EnterWorktree с name, или `git worktree add .claude/worktrees/<имя>` и "
+                "EnterWorktree с этим path.")
+    if owner == win:
+        found = _widening([repo, wt]) if _key(repo) != _key(launch) else []
+        if found:
+            return _widen_msg(repo, found)
+        root = _git_root(cwd, repo)
+        if root and (_key(root) == _key(repo) or _key(_wt_repo(root)[0] or "") == _key(repo)):
+            return None
+        return (f"Правило worktree-own: сессия стоит в {cwd}, а {target} — worktree репозитория {repo}; так Claude Code "
+                f"спросил бы владельца (metis-0911). Сначала `cd {repo}` отдельной командой Bash (папки направления — "
+                "рабочие папки окна, cd сохраняется), затем тот же EnterWorktree.")
+    if owner:
+        return (f"Правило worktree-own: {target} — репозиторий направления {owner}, не твоего ({win}); это работа {owner} "
+                f"(metis-0911). Поручение — задачей направлению {owner} или файлом в ~/ai/pantheon/directions/{owner}/inbox/, "
+                f"затем `pantheon start {owner}`. Владельца не спрашивай.")
+    return (f"Правило worktree-own: {target} — вне папок направления {win} (directions.toml, folders); окно входит "
+            "EnterWorktree только в .claude/worktrees/ своих репозиториев (metis-0911). Нужен другой репозиторий — "
+            "задача его направлению, а не вопрос владельцу.")
+
+
 def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("gh-out", check_gh_out),
-                        ("hq-sessync", check_hq_sessync),
+                        ("hq-sessync", check_hq_sessync), ("worktree-own", check_worktree_own),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:

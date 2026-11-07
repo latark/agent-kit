@@ -418,6 +418,10 @@ def review_cmd(rest):
             elif r.get("kind") == "accept" and r.get("models") == []:  # metis-0413: транскрипт найден, моделей нет
                 print("    транскрипт argus найден, но моделей в нём нет — для PR ядра не в счёт; вне ядра шлюз его "
                       "считает")
+            elif r.get("kind") == "accept" and "models" not in r and r.get("models_note") \
+                    and (r.get("by") if isinstance(r.get("by"), dict) else {}).get("agent_id"):
+                print("    транскрипт субагента argus не найден — модель не подтвердить: для PR ядра не в счёт "
+                      "(metis-0489); вне ядра шлюз его считает")
             elif r.get("kind") == "accept" and not P.review_accept_counts(r):
                 print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — для PR ядра не в счёт; "
                       "вне ядра шлюз его считает")

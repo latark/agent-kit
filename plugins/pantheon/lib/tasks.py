@@ -19,6 +19,11 @@ import os
 import re
 import unicodedata
 from datetime import datetime
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location("pantheon_deferral", os.path.join(os.path.dirname(os.path.abspath(__file__)), "deferral.py"))
+_deferral = _ilu.module_from_spec(_spec)  # metis-0834: отложенные вопросы; файл рядом, путь импорта под -I не нужен
+_spec.loader.exec_module(_deferral)
 
 SCHEMA_VERSION = 1
 TYPES = ("task", "stage", "project", "story")
@@ -2087,6 +2092,39 @@ def project_registry(dirs):
 
 
 HQ_LED = "ведёт Пританей"  # метка проекта на пульте, когда у направления coordinator = false (metis-0155)
+# дата «ДД.ММ» или «ДД.ММ.ГГГГ» в цели и бюджете реестра (metis-0828): «~28–30.10», «до 30.10 12:00»; «1.0» — не дата
+REG_DATE = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?![\d.]*\d)")
+
+
+def reg_dates(text, t):
+    """Даты из строки реестра → [datetime]; без года — ближайшая к t: год t, а дальше полугода вперёд или назад —
+    прошлый или следующий год."""
+    now = datetime.fromtimestamp(t)
+    out = []
+    for d, m, y in REG_DATE.findall(str(text or "")):
+        try:
+            x = datetime(int(y) if y else now.year, int(m), int(d))
+        except ValueError:
+            continue
+        if not y and (x - now).days > 183:
+            x = x.replace(year=x.year - 1)
+        elif not y and (now - x).days > 183:  # «15.01» в ноябре — следующий январь
+            x = x.replace(year=x.year + 1)
+        out.append(x)
+    return out
+
+
+def stale_mark(text, t):
+    """Цель или бюджет из directions.toml, все даты которых прошли (последняя — раньше сегодняшнего дня), → строка
+    с пометкой «устарело ДД.ММ» спереди: пульт не выдаёт её за текущую. Дат нет или срок не прошёл — как есть."""
+    s = one_line(text) if text not in (None, "") else text
+    dates = reg_dates(s, t)
+    if not dates:
+        return s
+    last = max(dates)
+    if datetime.fromtimestamp(t).date() <= last.date():
+        return s
+    return f"устарело {last:%d.%m} · {s}"
 
 
 def project_note_name(p):
@@ -2107,8 +2145,9 @@ def render_project_note(p, reg, tasks, t, roles=None):
     budget = reg.get("budget")
     head = {"Тип": "проект", "Направление": ", ".join(reg["directions"]), "Значок": mark,
             "Статус проекта": one_line(reg.get("status")), "Ранг": reg["rank"], "Координатор": coord,
-            "Цель": one_line(reg.get("goal")) or None, "Здоровье": hl, "Цвет": color, "Обновлено": upd or None,
-            "Бюджет недели": one_line(budget) if budget not in (None, "") else None, **c}
+            "Цель": stale_mark(one_line(reg.get("goal")), t) or None, "Здоровье": hl, "Цвет": color,
+            "Обновлено": upd or None,
+            "Бюджет недели": stale_mark(budget, t) if budget not in (None, "") else None, **c}
     body = (f"\n> Заметку пишет плановый проход по `directions.toml` и задачам. Не правьте её: счётчики сверяет "
             f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {coord}"
             + (f" · **Цель:** {head['Цель']}" if head["Цель"] else "")
@@ -3714,6 +3753,12 @@ def _sync_types(vault, alert):
         alert("board-types", type(e).__name__, f"доска: {p} не записать ({e}) — типы свойств не обновлены", "board")
 
 
+def _deferral_api():
+    """Функции tasks для lib/deferral.py (модуль грузят и под другим именем, импортом его не достать)."""
+    return type("TasksApi", (), {"owner_answers_all": staticmethod(owner_answers_all), "_live": staticmethod(_live),
+                                 "one_line": staticmethod(one_line), "task_new": staticmethod(task_new)})
+
+
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
                policy=None, marks=None, registry=None, night_end="08:00", open_prs=None, pr_index=None, repos=None,
                tails=None, batch_prs=None):
@@ -3913,9 +3958,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     # 5а. решения «Нужен ответ» — циклы политики уведомлений: ответ, истекло, закрыто, «долго ждёт»
     long_ids = set()
+    held = _deferral.hold(_deferral_api(), pantheon, t, tasks, cards, log_path, registry, primary, policy,
+                          alert, done_lines)
     if policy is not None:
         decs = []
         for tid, (_, h, _) in tasks.items():
+            if tid in held:
+                continue  # отложен DEFER_LIMIT раз: тот же вопрос пингом больше не идёт
             if h.get("status") == "waiting" and h.get("waiting_on") == "human" and _live(h, t):
                 q = hashlib.sha256(_question_key(h.get("question")).encode("utf-8")).hexdigest()[:12]
                 decs.append({"id": tid, "sig": f"{h.get('question_at') or ''}|{q}", "since": ts_of(h.get("question_at")),

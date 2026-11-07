@@ -227,6 +227,8 @@ def main():
     open(os.path.join(bindir, "claude"), "w").write(FAKE)
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     agents_file, log = os.path.join(tmp, "agents.json"), os.path.join(tmp, "claude.log")
+    ctmp = os.path.join(os.path.realpath(tempfile.mkdtemp(prefix="start-ctmp-")), f"claude-{os.getuid()}")
+    os.makedirs(ctmp)
     open(agents_file, "w").write("[]")
     open(os.path.join(home, "directions.toml"), "w").write(
         '[[direction]]\nname = "athena-shop"\nproject = "ExampleApp"\nfolders = ["~/projects/br"]\n'
@@ -238,7 +240,10 @@ def main():
            "FAKE_SEQ": os.path.join(tmp, "agents-seq.json"), "PANTHEON_STOP_WAIT": "3", "PANTHEON_STOP_POLL": "0.02",
            "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1", "FAKE_ALL": os.path.join(tmp, "claude-all.log"),
            # здесь проверяется личный слой ролей: общий слой плагина пуст (оба слоя вместе — test_roles.py)
-           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty"),
+           # domains build --if-changed следит и за CLAUDE_TMP: общую /tmp/claude-<uid> трогают другие сессии, и
+           # окно пересобиралось посреди проверки «не пересобирает» (флак, metis-0293) — у теста своя
+           "PANTHEON_CLAUDE_TMP": ctmp}
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
@@ -656,12 +661,20 @@ def main():
     check("start: остановленную вами не запускает", r.returncode == 1 and "остановлена вами" in r.stderr)
     r = run("start", "workshop", "../etc")
     check("start workshop: имя задачи по образцу", r.returncode == 2)
+    # папка мастерской по факту (metis-0899, вариант А): пока ~/ai/workshop нет — старая в ~/projects, потом новая
     r = run("start", "workshop", "avito-scan", "--from", "tick")
     c = calls()[-1]
-    check("start workshop: daedalus-<задача> в ~/projects/workshop/<задача>, поручение по умолчанию",
+    check("start workshop: без ~/ai/workshop — daedalus-<задача> в старой папке ~/projects, поручение по умолчанию",
           r.returncode == 0 and c["argv"][2:5] == ["workshop", "--name", "daedalus-avito-scan"]
           and c["cwd"] == os.path.join(tmp, "projects", "workshop", "avito-scan")
+          and not os.path.exists(os.path.join(tmp, "ai", "workshop"))
           and c["argv"][-1].startswith("[Пантеон: поручение от tick] Прочитай ~/ai/pantheon/workshop/avito-scan.md"))
+    os.makedirs(os.path.join(tmp, "ai", "workshop"))
+    r = run("start", "workshop", "avito-new", "--from", "tick")
+    c = calls()[-1]
+    check("start workshop: ~/ai/workshop есть — daedalus-<задача> в ~/ai/workshop/<задача>",
+          r.returncode == 0 and c["argv"][2:5] == ["workshop", "--name", "daedalus-avito-new"]
+          and c["cwd"] == os.path.join(tmp, "ai", "workshop", "avito-new"))
     r = run("start", "zeus", "--dry-run")
     check("start zeus: интерактивная сессия hq с окном hq.json (без --bg)",
           r.returncode == 0 and "--agent hq --name zeus --settings" in r.stdout and "hq.json" in r.stdout
@@ -1104,9 +1117,13 @@ def main():
     src = open(LIB, encoding="utf-8").read()
     # start и свежий старт — lib/sessions.py (metis-0586): подъём сессий ищется в обоих файлах
     src += open(os.path.join(os.path.dirname(LIB), "sessions.py"), encoding="utf-8").read()
+    # metis-0933 класс 5: argv подъёма окна целиком собирает window_launch(role, …) — роль у неё обязательный аргумент
     spawns = [ln for ln in src.splitlines() if "claude_bin()," in ln and ('"--bg"' in ln or '"--resume"' in ln)]
-    check("pantheon.py: все команды подъёма сессии (--bg/--resume) содержат --agent (найдено %d)" % len(spawns),
-          len(spawns) >= 3 and all('"--agent"' in ln for ln in spawns))
+    body = src[src.index("def window_launch("):src.index("\ndef ", src.index("def window_launch("))]
+    launches = re.findall(r"\bwindow_launch\((\"hq\"|role)\b", src)
+    check("pantheon.py: все команды подъёма сессии (--bg/--resume) содержат --agent (window_launch: %d запусков)"
+          % len(launches), '"--agent", role' in body and len(launches) >= 4
+          and all('"--agent"' in ln for ln in spawns))
     check("pantheon.py: путь штаба в _resume_session даёт роль hq для zeus", 'role = "hq" if name == "zeus"' in src)
 
     # ревью argus PR #32: окно не собрано из-за allow проекта (metis-0137) — сессию не поднимает ни wake (respawn
@@ -1281,6 +1298,22 @@ def main():
         os.remove(f)
     open(agents_file, "w").write("[]")
     open(log, "w").close()
+
+    # metis-0293: --if-changed следит за CLAUDE_TMP теста, а не за общей /tmp/claude-<uid>. Сборка «в будущем» (+60 с):
+    # свежее неё только CLAUDE_TMP теста (+1 ч) — пересборка; общая папка за минуту вперёд не уйдёт, так что без
+    # PANTHEON_CLAUDE_TMP в env пересборки нет и проверка красная
+    run("domains", "build")
+    dj = os.path.join(state, "domains.json")
+    mark = time.time() + 60
+    dd = json.load(open(dj))
+    dd["built_ts"] = mark
+    open(dj, "w").write(json.dumps(dd))
+    os.utime(ctmp, (mark + 3600, mark + 3600))
+    run("domains", "build", "--if-changed")
+    check("domains build --if-changed: CLAUDE_TMP теста свежее сборки — пересборка (следит за PANTHEON_CLAUDE_TMP, "
+          "а не за общей /tmp/claude-<uid>, metis-0293)", json.load(open(dj)).get("built_ts", mark) < mark)
+    old = time.time() - 86400
+    os.utime(ctmp, (old, old))
 
     # ревью argus PR #32 (c6eb7e1): allow со старым mtime (cp -p, rsync -a, tar) сборка --if-changed не видит —
     # правило перепроверяют каждый подъём сессии и check --quiet

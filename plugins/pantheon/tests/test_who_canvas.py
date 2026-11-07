@@ -16,9 +16,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # noqa: E402 — pantheon.py только на Python 3.11+
+from _py311 import PY311, mkroot  # noqa: E402 — pantheon.py только на Python 3.11+
 
-ROOT = os.path.realpath(tempfile.mkdtemp(prefix="who-canvas-"))
+ROOT = os.path.realpath(mkroot("who-canvas-"))  # окно роли: metis-0941
 tempfile.tempdir = ROOT
 os.environ["TMPDIR"] = ROOT
 atexit.register(shutil.rmtree, ROOT, True)
@@ -398,6 +398,190 @@ al = open(os.path.join(home, "alerts.md"), encoding="utf-8").read() if os.path.e
 check("11. pantheon who-canvas: тревога «карточка argus правлена руками» — один раз, текст держится",
       al.count("карточка argus правлена руками, код её не обновляет") == 1
       and "удалите карточку" in al and byid(json.load(open(cvp, encoding="utf-8")))["argus"]["text"] == "РУКАМИ", al[-400:])
+
+# --- 12. долги #314 (metis-0838) ----------------------------------------------------------------------------------
+# Д8: отпечаток отстал от холста (холст записан, отпечаток нет) — карточка кода не «ручная»
+canvas6 = os.path.join(ROOT, "pan6", W.CANVAS_NAME)
+sig6 = os.path.join(ROOT, "state6", "who-canvas.json")
+W.sync(canvas6, sig6, rl, dirs, st)
+saved = json.load(open(sig6, encoding="utf-8"))
+saved["hashes"]["zeus"] = "0" * 16  # прошлая запись — от другого текста; на холсте текст кода нынешний
+saved["hashes"]["top"] = "1" * 16
+write(sig6, json.dumps(saved))
+man6, rep6 = [], {}
+W.sync(canvas6, sig6, dict(rl, iris=""), dirs, st, manual_out=man6, report_out=rep6)
+check("12. Д8: хеш в отпечатке отстал, а текст и цвет узла — как пишет код → узел не ручной, тревоги нет",
+      "zeus" not in man6 and "top" not in man6 and "zeus" in rep6["auto"] and "top" in rep6["auto"]
+      and json.load(open(sig6, encoding="utf-8"))["hashes"]["zeus"] != "0" * 16, (man6, rep6.get("auto")))
+# Д8: процесс убит между отпечатком и холстом → холст со старым текстом не «ручной», пересборка не потеряна
+canvas7 = os.path.join(ROOT, "pan7", W.CANVAS_NAME)
+sig7 = os.path.join(ROOT, "state7", "who-canvas.json")
+rl7 = dict(rl, charon="")
+W.sync(canvas7, sig7, rl7, dirs, st)
+st7 = dict(st, **{"metis-0760": "done"})  # текст Харона меняется
+real_replace = W.os.replace
+
+
+def boom(src, dst):
+    if dst == canvas7:
+        raise OSError("убит")
+    return real_replace(src, dst)
+
+
+W.os.replace = boom
+try:
+    W.sync(canvas7, sig7, rl7, dirs, st7)
+    crashed = False
+except OSError:
+    crashed = True
+finally:
+    W.os.replace = real_replace
+mid = json.load(open(sig7, encoding="utf-8"))
+man7 = []
+got7 = W.sync(canvas7, sig7, rl7, dirs, st7, manual_out=man7)
+check("12. Д8: сбой записи холста после отпечатка → прежний sig, в записи старый и новый хеш; следующий проход "
+      "пересобирает, Харон не ручной",
+      crashed and isinstance(mid["hashes"].get("charon"), list) and got7 == "written" and "charon" not in man7
+      and "metis-0760" not in byid(json.load(open(canvas7, encoding="utf-8")))["charon"]["text"]
+      and isinstance(json.load(open(sig7, encoding="utf-8"))["hashes"]["charon"], str), (crashed, mid["hashes"].get("charon"), got7, man7))
+# Д8: замок — второй запуск ждёт первого
+import fcntl  # noqa: E402
+import threading  # noqa: E402
+lk = open(sig7 + ".lock", "a")
+fcntl.flock(lk, fcntl.LOCK_EX)
+done = []
+th = threading.Thread(target=lambda: done.append(W.sync(canvas7, sig7, rl7, dirs, st, force=True)))
+th.start()
+th.join(0.5)
+waited = not done
+fcntl.flock(lk, fcntl.LOCK_UN)
+lk.close()
+th.join(10)
+check("12. Д8: sync берёт замок — пока он занят, сборка ждёт; отпущен — доходит", waited and done == ["written"], (waited, done))
+
+# Д9 и clear_once("who-canvas"): команда целиком
+probe_f = probe.replace("p.who_canvas_cmd([])", "p.who_canvas_cmd(['--force'])") + f"""
+print("mark-canvas:", _o.path.exists(p.once_path("who-canvas")))
+print("mark-argus:", _o.path.exists(p.once_path("who-canvas-manual-argus")))
+"""
+
+
+def run_f():
+    return subprocess.run([PY311, "-I", "-c", probe_f], env=env, capture_output=True, text=True, timeout=120)
+
+
+def edit_argus(text):
+    d = json.load(open(cvp, encoding="utf-8"))
+    byid(d)["argus"]["text"] = text
+    write(cvp, json.dumps(d, ensure_ascii=False, indent="\t"))
+
+
+def alerts_argus():
+    a = open(os.path.join(home, "alerts.md"), encoding="utf-8").read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
+    return a.count("карточка argus правлена руками")
+
+
+edit_argus("ДРУГОЕ РУКАМИ")
+r = run_f()
+check("12. Д9: новая ручная правка той же карточки → новая тревога (значение — хеш текста)",
+      alerts_argus() == 2 and "mark-argus: True" in r.stdout, (alerts_argus(), r.stdout + r.stderr))
+d = json.load(open(cvp, encoding="utf-8"))
+d["nodes"] = [n for n in d["nodes"] if n["id"] != "argus"]
+write(cvp, json.dumps(d, ensure_ascii=False, indent="\t"))
+r = run_f()
+check("12. Д9: карточка удалена и собрана кодом → метка ручной правки снята", "mark-argus: False" in r.stdout,
+      r.stdout + r.stderr)
+edit_argus("РУКАМИ")
+run_f()
+check("12. Д9: после возврата под код та же правка, что раньше, снова даёт тревогу", alerts_argus() == 3, alerts_argus())
+write(cvp, "{нет")
+r = run_f()
+had_mark = "mark-canvas: True" in r.stdout
+os.remove(cvp)
+r = run_f()
+check("12. clear_once: холст не читался (тревога, метка) → удачная сборка снимает метку «who-canvas»",
+      had_mark and "1: 0" in r.stdout and "mark-canvas: False" in r.stdout, r.stdout + r.stderr)
+
+# --- 13. таблица ролей в «Кто есть кто.md» и реестр в system.md (metis-0828) ----------------------------------------
+B, E = W.BEGIN_FULL.format(name="roles"), W.END.format(name="roles")
+mt = W.memo_table(dict(roles, newbie=new_role), dirs, st2, cat)
+rows = {ln.split(" | ")[0][2:]: ln for ln in mt.splitlines()[2:]}
+check("13. таблица: строка на каждую запись каталога, авто-роль, координатор; лиды — `<имя>-<проект>`, dev — все",
+      "**Аргус**, ревьюер" in rows and "**Newbie**" in rows and "Новичок Пантеона." in rows["**Newbie**"]
+      and "`athena-brokerassistant` · [[directions/athena-brokerassistant/STATUS\\|STATUS]]" in rows["**Афина**"]
+      and "`hephaestus-<проект>`" in rows["**Гефест**, лид кода"] and "`zeus`" in rows["**Зевс**, Пританей"]
+      and all(f"`{r}`" in rows["**Разработчики**"] for r in ("dev-haiku", "dev-opus", "dev-sonnet", "codex-dev")),
+      mt)
+check("13. таблица: роли нет, задача открыта → «🚧 роли ещё нет» со ссылкой; роль появилась → «есть»",
+      "🚧 роли ещё нет · [[metis-9999]]" in rows["**Призрак**, пробная"]
+      and "| есть |" in {ln.split(" | ")[0][2:]: ln for ln in W.memo_table(dict(roles, ghost=""), dirs, st2, cat)
+                         .splitlines()[2:]}["**Призрак**, пробная"])
+check("13. таблица: роль удалена → строки нет; направление убрано → строки координатора нет",
+      "**Аргус**, ревьюер" not in W.memo_table(r_no_argus, dirs, st) and "**Фемида**" not in W.memo_table(roles, dirs[:2], st)
+      and "**Фемида**" in mt)
+check("13. таблица: порядок групп — Пританей, Полисы, Артель, Оракулы, Оры",
+      [ln.split(" | ")[3] for ln in mt.splitlines()[2:]] == sorted(
+          [ln.split(" | ")[3] for ln in mt.splitlines()[2:]],
+          key=["Пританей", "Полисы", "Артель", "Оракулы", "Оры"].index))
+doc = "# Памятка\n\nручное до\n\n" + B + "\nстарая таблица\n" + E + "\n\nручное после\n"
+new_doc = W.splice(doc, "roles", "| новая |", W.MEMO_HEADING)
+check("13. splice: между маркерами — новое, текст до и после маркеров цел",
+      new_doc == "# Памятка\n\nручное до\n\n" + B + "\n| новая |\n" + E + "\n\nручное после\n", new_doc)
+app = W.splice("# Памятка\nручное\n", "roles", "| т |", W.MEMO_HEADING)
+check("13. splice: маркеров нет → блок в конце под заголовком, ручной текст цел; повтор ничего не меняет",
+      app == "# Памятка\nручное\n\n" + W.MEMO_HEADING + "\n\n" + B + "\n| т |\n" + E + "\n"
+      and W.splice(app, "roles", "| т |", W.MEMO_HEADING) == app, app)
+bad_doc = os.path.join(ROOT, "docs", "bad.md")
+write(bad_doc, "до\n" + B + "\nбез конца\n")
+try:
+    W.sync_doc(bad_doc, "roles", "| т |", W.MEMO_HEADING)
+    raised_b = False
+except ValueError:
+    raised_b = True
+bad2 = "x\n" + E + "\n" + B + "\n"
+try:
+    W.splice(bad2, "roles", "т", "h")
+    raised_c = False
+except ValueError:
+    raised_c = True
+check("13. маркер без пары или конец раньше начала → ValueError, файл не тронут",
+      raised_b and raised_c and open(bad_doc, encoding="utf-8").read() == "до\n" + B + "\nбез конца\n")
+check("13. sync_doc: файла нет → 'skip', файл не создан",
+      W.sync_doc(os.path.join(ROOT, "docs", "none.md"), "roles", "т", "h") == "skip"
+      and not os.path.exists(os.path.join(ROOT, "docs", "none.md")))
+stt = W.system_table({"hq": "", "argus": "/x/roles/argus.tmpl", "hephaestus-site": "/a/agents/hephaestus-site.md",
+                      "domain-coordinator": "", "newbie": new_role}, st)
+srow = {ln.split(" | ")[0][2:]: ln for ln in stt.splitlines()[2:]}
+check("13. system_table: строка на каждую роль по имени файла, кто она и источник",
+      set(srow) == {"`hq`", "`argus`", "`hephaestus-site`", "`domain-coordinator`", "`newbie`"}
+      and "**Зевс**, Пританей" in srow["`hq`"] and "шаблон плагина `roles/argus.tmpl`" in srow["`argus`"]
+      and "`~/.claude/agents/hephaestus-site.md`" in srow["`hephaestus-site`"] and "**Гефест**" in srow["`hephaestus-site`"]
+      and "Новичок Пантеона." in srow["`newbie`"] and "координатор направления" in srow["`domain-coordinator`"], stt)
+# команда целиком: памятка и system.md получают блок, сверка памятки (who_is_who_check) — без расхождений
+memo_p = os.path.join(home, "Кто есть кто.md")
+sys_p = os.path.join(home, "system.md")
+write(memo_p, "# Памятка\n\nручной текст владельца\n")
+write(sys_p, "# Реестр\n\n| ручная таблица |\n\n" + B + "\nстарое\n" + E + "\n\nхвост\n")
+probe_d = probe_f + """
+print("check:", p.who_is_who_check())
+"""
+r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
+mtext, stext = open(memo_p, encoding="utf-8").read(), open(sys_p, encoding="utf-8").read()
+check("13. pantheon who-canvas: блок ролей в памятке и в system.md, ручной текст цел, сверка памятки чистая",
+      "ручной текст владельца" in mtext and W.MEMO_HEADING in mtext and "`charon`" in mtext and "`athena-brokerassistant`" in mtext
+      and stext.startswith("# Реестр\n\n| ручная таблица |\n\n") and stext.endswith("\n\nхвост\n") and "старое" not in stext
+      and "`argus`" in stext and "check: ([], [])" in r.stdout and "1: 0" in r.stdout, r.stdout + r.stderr + mtext[-600:])
+m_before = os.stat(memo_p).st_mtime_ns
+os.utime(memo_p, ns=(1, 1))
+r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
+check("13. повторный проход без перемен файл памятки не переписывает", os.stat(memo_p).st_mtime_ns == 1 and m_before != 1,
+      r.stdout + r.stderr)
+write(sys_p, "x\n" + B + "\n")
+r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
+al = open(os.path.join(home, "alerts.md"), encoding="utf-8").read()
+check("13. маркер без пары в system.md → код 1, тревога, файл не тронут",
+      "1: 1" in r.stdout and "таблица ролей не собрана" in al and open(sys_p, encoding="utf-8").read() == "x\n" + B + "\n",
+      r.stdout + r.stderr)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

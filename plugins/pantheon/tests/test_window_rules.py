@@ -4,9 +4,11 @@
 определяет; сборка autoMode и permissions окна та же; шлюз guard считает файл ядром."""
 import ast
 import importlib.util
+import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -26,6 +28,85 @@ def load(name, path):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+# metis-0971 (решение Зевса 07.11, вариант А): команда мимо песочницы не должна менять рабочую копию. Иначе при cwd
+# внутри allowWrite она пишет в защищённый репозиторий (~/.claude, ~/ai/pantheon) без проверки песочницы — так делал
+# `git pull`. Подкоманды git, которые пишут в рабочую копию или индекс:
+WORKTREE_WRITE = ("pull", "merge", "checkout", "switch", "reset", "restore", "stash", "am", "rebase", "cherry-pick",
+                  "revert")
+GIT_NETWORK_ONLY = ("push", "fetch")  # мимо песочницы из git — только сеть
+# Не git, но пишет в рабочую копию: каждая такая команда — здесь явно, с причиной. Модель угроз всего класса — metis-0972
+WORKTREE_WRITE_KNOWN = {
+    "gh pr merge *": "с --delete-branch gh переключает локальную копию на основную ветку и делает в ней pull; окна "
+                     "направлений сливают через шлюз guard (merge_problem). Остаток класса — metis-0972",
+}
+WORKTREE_WRITE_OTHER = (("gh", "pr", "checkout"), ("gh", "repo", "sync"), ("gh", "repo", "clone"))
+
+
+def worktree_write_problem(cmd):
+    """Строка excludedCommands → причина, почему она может писать в рабочую копию мимо песочницы, или None."""
+    t = cmd.split()
+    if not t:
+        return "пустая строка"
+    if t[0] == "*" or (t[0] in ("git", "gh") and len(t) > 1 and t[1] == "*"):
+        return "шаблон шире одной подкоманды"
+    if t[0] == "git":
+        sub = t[1] if len(t) > 1 else ""
+        if sub in WORKTREE_WRITE:
+            return f"git {sub} пишет в рабочую копию"
+        if sub not in GIT_NETWORK_ONLY:
+            return f"git {sub or '(без подкоманды)'} — не сетевая команда"
+    if t[0] == "gh":
+        if len(t) > 2 and t[2] == "*":
+            return "шаблон шире одной подкоманды gh"
+        if tuple(t[:3]) in WORKTREE_WRITE_OTHER:
+            return f"{' '.join(t[:3])} пишет в рабочую копию"
+        if t[:3] == ["gh", "pr", "merge"] and cmd not in WORKTREE_WRITE_KNOWN:
+            return "gh pr merge — не в WORKTREE_WRITE_KNOWN"
+    return None
+
+
+def excluded_no_worktree_write(p, tmp):
+    """Настоящая сборка окон (sandbox_build) во временном HOME: окна двух направлений (одно — metis-pantheon),
+    мастерская с SSH-remote, окна задач, Гестия, Пританей; ни одна строка excludedCommands не пишет в рабочую копию."""
+    for cmd in ("git pull", "git pull *", "git merge *", "git checkout *", "git cherry-pick *", "git *", "*",
+                "gh pr checkout *", "gh pr *", "gh pr merge --admin *"):
+        check(f"worktree_write_problem: «{cmd}» — отказ", worktree_write_problem(cmd), cmd)
+    for cmd in ("git push", "git fetch *", "gh pr view *", "gh pr merge *", "pantheon alert *"):
+        check(f"worktree_write_problem: «{cmd}» — можно", worktree_write_problem(cmd) is None,
+              worktree_write_problem(cmd))
+    check("GIT_NETWORK: только push и fetch, без git pull (metis-0971)",
+          {x.split()[1] for x in p.GIT_NETWORK} == set(GIT_NETWORK_ONLY), p.GIT_NETWORK)
+    folders = {}
+    os.makedirs(p.PANTHEON, exist_ok=True)  # alerts.md: нет guard в временном HOME — тревога, сборка идёт дальше
+    for name, rel in (("alpha-test", "projects/app"), ("metis-pantheon", "projects/kit")):
+        os.makedirs(os.path.join(tmp, rel), exist_ok=True)
+        folders[name] = [os.path.join(tmp, rel)]  # окну направления сетевой git — всегда, репозиторий не нужен
+    # мастерской — только при SSH-remote; окно роли режет запись .git/config под ~ (временный HOME в кэше окна)
+    wr = os.path.join(tmp, "ai", "workshop", "t1")
+    os.makedirs(wr, exist_ok=True)
+    ws_ssh = subprocess.run(["git", "init", "-q", wr], capture_output=True).returncode == 0 and subprocess.run(
+        ["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], capture_output=True).returncode == 0
+    if not ws_ssh:
+        print("пропущено: мастерская с SSH-remote — окно не даёт записать .git/config во временном HOME")
+    built = p.sandbox_build(folders, os.path.join(tmp, "no-policy.toml"))
+    out = p.path("settings")
+    windows = {}
+    for f in sorted(os.listdir(out)):
+        if f.endswith(".json"):
+            with open(os.path.join(out, f), encoding="utf-8") as fh:
+                windows[f[:-5]] = json.load(fh)["sandbox"]["excludedCommands"]
+    need = {"alpha-test", "metis-pantheon", "workshop", "hestia", "hq"}
+    check("sandbox_build: окна направлений, мастерской, Гестии и Пританея собраны", need <= set(windows),
+          (built, sorted(windows)))
+    bad = {(n, c): worktree_write_problem(c) for n, ex in windows.items() for c in ex if worktree_write_problem(c)}
+    check("excludedCommands ни одного окна не пишут в рабочую копию: без git pull/merge/checkout/switch/reset/"
+          "restore/stash/am/rebase/cherry-pick/revert, gh pr merge — только известной строкой (metis-0971)",
+          not bad, bad)
+    check("сборка не пустая: git fetch * и gh pr merge * у окна направления, git fetch * у мастерской с SSH-remote",
+          all("git fetch *" in windows.get(n, []) for n in ("alpha-test", "metis-pantheon") + (("workshop",) * ws_ssh))
+          and "gh pr merge *" in windows.get("alpha-test", []), {n: windows.get(n) for n in ("alpha-test", "workshop")})
 
 
 def main():
@@ -68,6 +149,23 @@ def main():
     check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
           "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]
           and lead.split("(1)")[0].count("`") == 4, lead.split("(1)")[0])
+    # metis-0933, решение владельца 06.11 21:55 «Б — все восемь»: правила направления в autoMode.allow его окна
+    mp, pm = w.coordinator_auto_allow(["a-org/app"], "metis-pantheon"), w.coordinator_auto_allow([], "proteus-morph")
+    check("coordinator_auto_allow(metis-pantheon): шесть команд чтения mailkeeper и uv sync — перед Review Record",
+          mp[-3:] == [w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.REVIEW_RECORD_RULE]
+          and all(f"`mailkeeper {c}`" in w.MAILKEEPER_READ_RULE
+                  for c in ("status", "rules", "scan", "report", "plan", "logs")), mp)
+    check("coordinator_auto_allow(proteus-morph): git remote, без правила слияния (нет репозиториев)",
+          pm == ["$defaults", w.GIT_REMOTE_RULE, w.REVIEW_RECORD_RULE], pm)
+    check("правила направления — только своему окну: другое направление и без имени — без них",
+          w.coordinator_auto_allow(["a-org/app"], "zeus") == w.coordinator_auto_allow(["a-org/app"])
+          and not {w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.GIT_REMOTE_RULE} & set(allow))
+    check("Mailkeeper Read: команды записи mailkeeper не покрыты",
+          all(f"`{c}`" in w.MAILKEEPER_READ_RULE.split("does not cover")[1]
+              for c in ("mailkeeper apply", "undo", "run", "auth", "daemon", "service", "on", "off", "resume",
+                        "excerpt")), w.MAILKEEPER_READ_RULE)
+    check("правила направления — без «permissions»: окну permissions.allow не даётся", w.COORDINATOR_ALLOW == []
+          and all("permissions" not in r for r in (w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.GIT_REMOTE_RULE)))
     check("auto_mode: раздел autoMode — копия списка",
           w.auto_mode(allow) == {"allow": allow} and w.auto_mode(allow)["allow"] is not allow)
 
@@ -76,6 +174,11 @@ def main():
                        "def coordinator_auto_allow", "MERGE_REPO_RE = re.compile", '"autoMode"] = {')
            if x in psrc]
     check("pantheon.py сам правил не определяет — только берёт из window_rules.py", not own, own)
+    calls = [c for c in ast.walk(ast.parse(psrc)) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+             and c.func.id == "coordinator_auto_allow"]
+    check("sandbox_build: окну направления — coordinator_auto_allow(…, name): его правила из DIRECTION_AUTO_ALLOW",
+          len(calls) == 1 and len(calls[0].args) == 2 and isinstance(calls[0].args[1], ast.Name)
+          and calls[0].args[1].id == "name", [ast.dump(c)[:200] for c in calls])
 
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="window-rules-"))
     old = {k: os.environ.get(k) for k in ("HOME", "PANTHEON_HOME", "PANTHEON_STATE")}
@@ -95,6 +198,18 @@ def main():
               rs.get("autoMode") == {"allow": w.coordinator_auto_allow(["a-org/app"])}, rs.get("autoMode"))
         rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [])
         check("role_settings без auto_allow: autoMode нет", "autoMode" not in rs, rs.get("autoMode"))
+        # metis-0841: окно направления пишет .claude/agents своих папок (текст судит guard), прочие — закрыто
+        proj, own, cache = os.path.join(tmp, "projects/app"), os.path.join(tmp, "own"), os.path.join(tmp, "cache")
+        dw = lambda rs: rs["sandbox"]["filesystem"]["denyWrite"]  # noqa: E731
+        rs = p.role_settings([proj], own, [], cache, False, [])
+        check("role_settings: без own_agents .claude/agents папки окна закрыта песочницей",
+              {proj + "/.claude/agents", proj + "/**/.claude/agents"} <= set(dw(rs)), dw(rs))
+        rs = p.role_settings([proj], own, [], cache, False, [], own_agents=True)
+        check("role_settings own_agents: .claude/agents папки направления открыта, .git/config и .git/hooks — нет",
+              not {proj + "/.claude/agents", proj + "/**/.claude/agents"} & set(dw(rs))
+              and {proj + "/.git/config", proj + "/**/.git/hooks"} <= set(dw(rs)), dw(rs))
+        check("role_settings own_agents: своя папка роли и кэш — .claude/agents закрыта",
+              {own + "/.claude/agents", cache + "/**/.claude/agents"} <= set(dw(rs)), dw(rs))
         # хуки окна на Python — через hooks/python.sh рядом со скриптом (metis-0571); его нет — прежняя форма
         hd = os.path.join(tmp, "plug dir", "hooks")
         os.makedirs(hd)
@@ -106,6 +221,7 @@ def main():
         check("hook_python_cmd: python.sh рядом — /bin/sh <python.sh> <скрипт> <аргументы>",
               p.hook_python_cmd(script, "--strict") == f"/bin/sh '{hd}/python.sh' '{script}' --strict",
               p.hook_python_cmd(script, "--strict"))
+        excluded_no_worktree_write(p, tmp)
     finally:
         for k, v in old.items():
             if v is None:

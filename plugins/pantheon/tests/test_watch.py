@@ -26,6 +26,7 @@ tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
@@ -3703,6 +3704,50 @@ def test_plugins_respawn_quiet_subagent_0864():
     check(respawned(e, "efef0864"), f"0864: субагент молчит 4 ч (больше LIVE_SUBAGENT_MAX) — держит окно: {e.calls()}")
 
 
+def sub_journal(tp, n, mtime, records):
+    """Журнал субагента своими записями (dict) с временем mtime."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.jsonl")
+    with open(f, "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_plugins_respawn_live_rule_0904():
+    """metis-0904: watch берёт правило «живой» из lib/live_subagent.py, общее с хуком ctx. Субагент с «finished», чья
+    фоновая команда ещё без итога (Bash ушёл в фон), — живой: окно не перезапускается; итог пришёл — перезапуск.
+    Субагент, запущенный в первые LIVE_GRACE с после старта процесса (первая запись журнала позже старта), — живой,
+    хотя журнал писался в пределах LIVE_GRACE."""
+    bg = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "Command running in background with ID: bq1. Output x"}]}}
+    note = {"type": "user", "message": {"role": "user", "content":
+            "<task-notification>\n<task-id>bq1</task-id>\n<status>completed</status>\n</task-notification>"}}
+    e, a, tp = respawn_env("rb-dir", "abcd0904-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg])
+    sub_meta(tp, "b1", T0 - 1200, finished=True)
+    e.run("watch", t=T0)
+    check(not respawned(e, "abcd0904") and "rb-dir (живые субагенты: dev-b1)" in e.alerts(),
+          f"0904: finished с фоновой командой без итога — окно перезапущено: {e.calls()} {e.alerts()[-400:]}")
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg, note])
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "abcd0904"), f"0904: итог фоновой пришёл — окно не перезапущено: {e.calls()}")
+    # запущен через 10 с после старта, журнал последний раз писался через 60 с (в пределах LIVE_GRACE)
+    e, a, tp = respawn_env("rg-dir", "dcba0904-1")
+    a["startedAt"] = (T0 - 3600) * 1000
+    e.agents([a])
+    born = datetime.fromtimestamp(T0 - 3590, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    sub_journal(tp, "g1", T0 - 3540, [{"type": "user", "timestamp": born, "message": {"role": "user", "content": "x"}}])
+    sub_meta(tp, "g1", T0 - 3590)
+    e.run("watch", t=T0)
+    check(not respawned(e, "dcba0904") and "rg-dir (живые субагенты: dev-g1)" in e.alerts(),
+          f"0904: запущенный в окне старта субагент не держит окно: {e.calls()} {e.alerts()[-400:]}")
+
+
 def test_plugins_respawn_idle_free_0181():
     """metis-0181: idle, транскрипт и субагенты старше 15 мин, worktree нет — перезапуск. Свежая worktree лида в папке
     направления держит окно; поднятое после установки и Зевс — не кандидаты."""
@@ -3952,6 +3997,37 @@ def test_auto_rm_done_stopped_0250():
     e.run("watch", t=T0 + 10 + 86400 + 60, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
     check("a8a8a8a8" in [c[1] for c in e.calls() if c[:1] == ["rm"]][n + len(again):], "через сутки повтора нет")
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
+
+
+def test_auto_rm_suffixed_live_name_0885():
+    """metis-0885: перезапуск окна (plugins-update: старая stopped; start --restart: старая done) при живой старой
+    сессии даёт новой имя «zeus (2)» — прежнюю «zeus» убираем в том же проходе, без 2 ч (свежая отметка state.json)."""
+    for old_name, state, sid in (("zeus", "stopped", "c1c1c1c1"), ("zeus", "done", "c2c2c2c2"),
+                                 ("ar-dir", "stopped", "c3c3c3c3")):
+        e = Env()
+        e.direction("ar-dir")
+        live = old_name + " (2)"
+        e.agents([bg(old_name, state, sid + "-1"), bg(live, "working", "d9d9d9d9-1", pid=os.getpid())])
+        _job(e, sid, state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+        e.run("watch", t=T0)
+        rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+        check(rms == [sid], f"0885: {old_name}/{state} при живой «{live}»: rm {rms}")
+    # мёртвая «zeus (2)» при живой «zeus» — убирается; живая «zeus (2)» без живой «zeus» — не трогается
+    e = Env()
+    e.agents([bg("zeus (2)", "stopped", "f1f1f1f1-1"), bg("zeus", "working", "f2f2f2f2-1", pid=os.getpid())])
+    _job(e, "f1f1f1f1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+    check(rms == ["f1f1f1f1"], f"0885: мёртвая «zeus (2)» при живой «zeus»: rm {rms}")
+    e = Env()
+    e.agents([bg("zeus (2)", "working", "g1g1g1g1-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: живую «zeus (2)» тронули: {e.calls()}")
+    e = Env()
+    e.agents([bg("zeus", "stopped", "e1e1e1e1-1"), bg("zeus (2)", "stopped", "e2e2e2e2-1")])
+    _job(e, "e1e1e1e1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: нет живой — свежая убрана: {e.calls()}")
 
 
 def _hestia_env(task_status, extra=""):
@@ -4776,12 +4852,9 @@ def test_resume_picks_saved_session_0499():
           "0499: saved не записал id в метку «можно»")
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in tests:
-        try:
-            fn()
-        except Exception as ex:  # noqa: BLE001
-            FAILS.append(f"{fn.__name__}: {type(ex).__name__}: {ex}")
-            print("ОШИБКА:", fn.__name__, type(ex).__name__, ex)
-    print(f"тестов: {len(tests)}, не прошло: {len(FAILS)}")
+    sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
+    from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
+    n = run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")], FAILS,
+                  lambda name, err: FAILS.append(f"{name}: {err}"))
+    print(f"тестов: {n}, не прошло: {len(FAILS)}")
     sys.exit(1 if FAILS else 0)

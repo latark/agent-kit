@@ -160,7 +160,7 @@ def run_all(tmp):
 
     def v(kind, sha, aid, sid="s", pr=40, who="argus", cl=opus):
         return dict(rec, kind=kind, sha=sha, pr=pr, by={"agent_type": who, "agent_id": aid, "session_id": sid},
-                    checklist=cl)
+                    checklist=cl, base="main")  # base PR на записи (metis-0965): шлюз сверяет с baseRefName
     S2, S3, S4, S5 = "b" * 40, "c" * 40, "d" * 40, "e" * 40
     sonnet = dict(opus, ran="модель: claude-sonnet-4-6, heavy pytest")
     tally = [v("reject", SHA, "aaaaaaaa11"), v("accept", SHA, "aaaaaaaa11"),  # вернул и сам же снял
@@ -181,8 +181,12 @@ def run_all(tmp):
              # claude-opus» в --ran, а по транскрипту Sonnet — не в счёт; models_note (транскрипта не было) — по --ran
              dict(v("accept", S5, "jjjjjjjj01"), models=["claude-sonnet-4-6"]),
              dict(v("accept", S5, "jjjjjjjj02"), models=["claude-opus-5-5-20261001"]),
-             dict(v("accept", S5, "jjjjjjjj03"), models_note="транскрипт argus не найден"),
+             # главная сессия argus (agent_id пуст) без транскрипта — по --ran
+             dict(v("accept", S5, "", sid="s-main03"), models_note="транскрипт argus не найден"),
              dict(v("accept", S5, "jjjjjjjj04", cl=sonnet), models_note="транскрипт argus не найден"),
+             # metis-0489: субагент (agent_id есть), свой транскрипт не найден — для ядра не в счёт, как в шлюзе guard
+             dict(v("accept", S5, "jjjjjjjj06"), models_note="транскрипт субагента argus не найден — модель не "
+                  "подтвердить"),
              # metis-0413: транскрипт найден, моделей нет (models: []) — не в счёт, как в шлюзе guard
              dict(v("accept", S5, "jjjjjjjj05"), models=[],
                   models_note="транскрипт argus найден, но моделей в нём нет — модель не подтвердить")]
@@ -204,9 +208,13 @@ def run_all(tmp):
           f"итог на {S4[:12]}: принять 1, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
     check("status: «принять» не на Opus помечено в журнале",
           sum("не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт" in ln for ln in out) == 4, r.stdout)
-    check("status: Sonnet по транскрипту argus в счёт вне ядра, для ядра — нет; models_note — по --ran",
-          f"итог на {S5[:12]}: принять 5, вернуть 0 — последний вердикт каждого argus" in out
+    check("status: Sonnet по транскрипту argus в счёт вне ядра, для ядра — нет; models_note главной сессии — по "
+          "--ran, субагента — для ядра не в счёт (metis-0489)",
+          f"итог на {S5[:12]}: принять 6, вернуть 0 — последний вердикт каждого argus" in out
           and "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in out, r.stdout)
+    check("status: транскрипт субагента не найден — помечен своей строкой (metis-0489)",
+          sum("транскрипт субагента argus не найден — модель не подтвердить: для PR ядра не в счёт" in ln
+              for ln in out) == 1, r.stdout)
     check("status: расхождение --ran с транскриптом помечено своей строкой",
           sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
     check("status: транскрипт без моделей (models: []) помечен своей строкой, а не «по --ran»",

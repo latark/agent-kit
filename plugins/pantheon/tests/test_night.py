@@ -37,7 +37,7 @@ for k in ("PANTHEON_FAKE_LIMIT", "PANTHEON_DRYRUN", "PANTHEON_NO_NOTIFY"):
 os.environ.update({"PANTHEON_FAKE_AC": "1", "PANTHEON_FAKE_BATT": "100"})
 os.environ.update({"PANTHEON_HOST": "mac-a", "PANTHEON_FAKE_IDLE": "0", "HOME": os.path.join(_ROOT, "home0"),
                    "PANTHEON_HOME": os.path.join(_ROOT, "home0", "ai", "pantheon"),
-                   "PANTHEON_STATE": os.path.join(_ROOT, "state0")})
+                   "PANTHEON_STATE": os.path.join(_ROOT, "state0"), "PANTHEON_SCHEDULE_DEFAULTS": os.devnull})
 _spec = importlib.util.spec_from_file_location("pantheon_night_test", os.path.join(LIB, "pantheon.py"))
 P = importlib.util.module_from_spec(_spec)
 sys.modules["pantheon_night_test"] = P
@@ -724,7 +724,7 @@ def test_status_format():
     with open(os.path.join(fbin, "claude"), "w") as fh:
         fh.write("#!/bin/sh\necho '[]'\n")
     os.chmod(os.path.join(fbin, "claude"), 0o755)
-    env = {"PATH": fbin + os.pathsep + os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon,
+    env = {"PATH": fbin + os.pathsep + os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon, "PANTHEON_SCHEDULE_DEFAULTS": os.devnull,
            "PANTHEON_STATE": e.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": _ROOT}
     if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест (metis-0222)
         env["TZ"] = os.environ["TZ"]

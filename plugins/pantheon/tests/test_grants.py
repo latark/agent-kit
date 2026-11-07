@@ -41,7 +41,7 @@ def main():
     tmp = os.path.join(ROOT, "h")
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
-    for d in ("projects/br", "ai/knowledge", "projects/workshop", ".claude/pantheon", "data"):
+    for d in ("projects/br", "ai/knowledge", "ai/workshop", ".claude/pantheon", "data"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     with open(os.path.join(home, "directions.toml"), "w") as fh:
         fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
@@ -176,7 +176,7 @@ def hookd_closed():
     tmp = os.path.join(ROOT, "hk")
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
-    for d in ("projects/br", "ai/knowledge", "projects/workshop", ".claude/pantheon", ".cache/pantheon/hookd/bin",
+    for d in ("projects/br", "ai/knowledge", "ai/workshop", ".claude/pantheon", ".cache/pantheon/hookd/bin",
               ".cache/other"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     with open(os.path.join(home, "directions.toml"), "w") as fh:

@@ -19,7 +19,16 @@ import tempfile
 import atexit as _atexit
 import os as _os
 import shutil as _shutil
-_ROOT = mkroot("tick-root-")
+# «tmp»: окно штаба закрывает в /tmp/claude-<uid> имена без этой приставки (папки чужих сессий), и allowRead штаба
+# для проектов внутри такой папки не выдаётся (metis-0771, проверка ниже). run-tests даёт TMPDIR вида
+# /tmp/claude-<uid>/run-tests-…/…: первое имя без приставки — тогда корень прямо в /tmp/claude-<uid>
+_ROOT = mkroot("tmp-tick-root-")
+for _base in ("/tmp/claude-%d" % _os.getuid(), "/private/tmp/claude-%d" % _os.getuid()):
+    _rel = _os.path.relpath(_ROOT, _base)
+    if not _rel.startswith("..") and not _rel.split(_os.sep)[0].startswith("tmp"):
+        _shutil.rmtree(_ROOT, True)
+        _ROOT = tempfile.mkdtemp(prefix="tmp-tick-root-", dir=_base)
+        break
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
@@ -218,17 +227,23 @@ def main():
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, "")
     open(os.path.join(home, "directions.toml"), "w").write(
-        '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br", "~/projects/agent-kit"]\n'
-        '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
+        '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br", "~/ai/agent-kit"]\n'
+        '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/ai/agent-kit"]\n')
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
-    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
+    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/ai/agent-kit"]\n')
     # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
+    # CLAUDE_TMP сборки окон (общий TMPDIR сессий, его чужие папки закрыты окну штаба) — своя папка вне HOME теста
+    # (metis-0876). Без неё в окне роли корень теста — /tmp/claude-<uid> (mkroot), то есть настоящая CLAUDE_TMP: HOME
+    # теста попадал под «чужие папки CLAUDE_TMP», и allowRead .git/README.md/AGENTS.md (metis-0771) отбрасывался.
+    # Имя — claude-<uid>, как у настоящей: проверки шаблонов окна штаба ищут его в путях
+    ctmp = os.path.join(tempfile.mkdtemp(prefix="tick-ctmp-"), f"claude-{os.getuid()}")
+    os.makedirs(ctmp)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
-           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty"), "PANTHEON_CLAUDE_TMP": ctmp}
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
-          dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
+          dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/ai/agent-kit"])
 
     # зарезервированные имена окон: hq, workshop, job-* — не направления (metis-0163)
     rtmp = tempfile.mkdtemp(prefix="tick-test-")
@@ -384,22 +399,27 @@ def main():
           os.path.isdir(hq) and all(hq in w["sandbox"]["filesystem"]["allowWrite"] for w in (sa, sm, sw, sn, sz))
           and not any(x == os.path.dirname(hq) for x in aw)
           and not any("heavy-queue" in x for x in sa.get("permissions", {}).get("allow", [])))
-    check("песочница: git push/fetch/pull мимо песочницы у каждого направления, и без SSH-remote (metis-0064)",
+    check("песочница: git push/fetch мимо песочницы у каждого направления, и без SSH-remote (metis-0064); "
+          "git pull — нет (metis-0971)",
           all("git push *" in w["sandbox"]["excludedCommands"] and "git push" in w["sandbox"]["excludedCommands"]
+              and "git fetch *" in w["sandbox"]["excludedCommands"]
+              and not any(x.startswith("git pull") for x in w["sandbox"]["excludedCommands"])
               for w in (sa, sm, sn, sz)))
-    # мастерская: тот же сетевой git — только при SSH-remote в ~/projects/workshop; здесь его нет
+    # мастерская: тот же сетевой git — только при SSH-remote в ~/ai/workshop; здесь его нет
     check("песочница: у мастерской без SSH-remote сетевого git мимо песочницы нет",
           not any(x.startswith("git ") for x in sw["sandbox"]["excludedCommands"]))
-    # metis-0141 п. 3: репозиторий с SSH-remote в подпапке ~/projects/workshop → сетевой git мимо песочницы есть;
+    # metis-0141 п. 3: репозиторий с SSH-remote в подпапке ~/ai/workshop → сетевой git мимо песочницы есть;
     # убрали репозиторий — снова нет (сборка настоящая, окно workshop пересобирается)
-    wr = os.path.join(tmp, "projects", "workshop", "t1")
+    wr = os.path.join(tmp, "ai", "workshop", "t1")
     os.makedirs(wr, exist_ok=True)
     subprocess.run(["git", "init", "-q", wr], check=True)
     subprocess.run(["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], check=True)
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     swx = load("workshop")["sandbox"]["excludedCommands"]
-    check("песочница: у мастерской при SSH-remote в ~/projects/workshop git push/fetch/pull мимо песочницы",
-          all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *")))
+    check("песочница: у мастерской при SSH-remote в ~/ai/workshop git push/fetch мимо песочницы, git pull — нет "
+          "(metis-0971)",
+          all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *"))
+          and not any(x.startswith("git pull") for x in swx))
     # ссылка на месте папки очереди — запись не даём (иначе она ушла бы по ссылке)
     os.rmdir(hq)
     os.makedirs(os.path.join(tmp, "elsewhere"), exist_ok=True)
@@ -500,9 +520,16 @@ def main():
     check("песочница: запреты и настоящими путями — .git внутри каждой разрешённой папки, личное — оба вида",
           real("projects/br") + "/**/.git/config" in dw and real("projects/br") + "/.git/hooks" in dw
           and cache_a + "/**/.git/hooks" in dw and real("ai/knowledge/me") in dr and "~/ai/knowledge/me" in dr)
-    check("denyWrite: .claude/agents каждой папки (репозитория) окна, и в worktree внутри неё — как .git/config (metis-0140)",
-          real("projects/br") + "/.claude/agents" in dw and real("projects/br") + "/**/.claude/agents" in dw
-          and all(f + "/.claude/agents" in dw for f in box["filesystem"]["allowWrite"]))
+    # metis-0841 («да» владельца 05.11 16:09): окно направления правит роли своего проекта — .claude/agents его папок
+    # песочница не закрывает (текст судит guard protect-config); прочие разрешённые папки (кэш) — как metis-0140
+    folders_a = [f for f in box["filesystem"]["allowWrite"] if f.startswith(real("projects") + "/")]
+    check("denyWrite окна направления: .claude/agents его папок открыта, кэша и прочих — закрыта (metis-0140, 0841)",
+          real("projects/br") in folders_a and not any(f + "/.claude/agents" in dw or f + "/**/.claude/agents" in dw
+                                                        for f in folders_a)
+          and cache_a + "/.claude/agents" in dw and cache_a + "/**/.claude/agents" in dw, dw)
+    ww, wdw = sw["sandbox"]["filesystem"]["allowWrite"], sw["sandbox"]["filesystem"]["denyWrite"]
+    check("denyWrite окна мастерской: .claude/agents каждой папки и в worktree внутри неё — закрыта (metis-0140)",
+          ww and all(f + "/.claude/agents" in wdw and f + "/**/.claude/agents" in wdw for f in ww), wdw)
     check("песочница: terminal-notifier ролям не прочитать и не запустить",
           "/opt/homebrew/Cellar/terminal-notifier" in box["filesystem"]["denyRead"]
           and "/opt/homebrew/Cellar/terminal-notifier" in sw["sandbox"]["filesystem"]["denyRead"])
@@ -517,7 +544,7 @@ def main():
           "у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"/bin/sh {os.path.join(os.path.dirname(gpath), 'python.sh')} {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
-          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
+          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill|EnterWorktree")
     hq = load("hq")
     hb = hq["sandbox"]
     check("окно штаба (SEC-26): пишет только ~/ai/pantheon без .git и alerts.md, сети нет, мимо песочницы — start/wake/alert",
@@ -568,6 +595,11 @@ def main():
           br + "/*" in hdr and br + "/*/**" in hdr and br not in hdr and "Read(/" + br + "/**)" not in str(hq), hdr[-12:])
     check("окно штаба: в проекте открыты .git (git log), README.md и AGENTS.md — allowRead (metis-0771)",
           all(br + x in har for x in ("/.git", "/README.md", "/AGENTS.md")), har)
+    rct = os.path.realpath(ctmp)
+    check("окно штаба: выводы чужих сессий закрыты в CLAUDE_TMP теста (PANTHEON_CLAUDE_TMP), а не в общей "
+          "/tmp/claude-<uid> — проверка выше не зависит от того, где лежит корень теста (metis-0876)",
+          any(x.startswith(rct + "/") for x in hdr) and not os.path.realpath(tmp).startswith(rct + "/"),
+          [x for x in hdr if "claude-" in x][:4])
     check("окно штаба: ~/ai (directions, knowledge, pantheon), agent-kit, coordinator = false, ~/projects и скрытые "
           "папки не закрыты (metis-0771)",
           real("projects") + "/*" not in hdr and real("ai/knowledge") + "/*" not in hdr
@@ -624,7 +656,9 @@ def main():
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
-          and all(len(am[n]) == 4 and len(rule(n, "Pantheon Gated Merge:")) == 1
+          # metis-pantheon: ещё два правила направления — Mailkeeper Read и Uv Sync (metis-0933, владелец 06.11 21:55)
+          and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
+          and all(len(am[n]) == {"athena-shop": 4, "metis-pantheon": 6}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
                   == record for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record)

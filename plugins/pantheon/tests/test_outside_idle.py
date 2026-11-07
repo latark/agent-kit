@@ -22,9 +22,9 @@ import time
 MAC = sys.platform == "darwin"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from _py311 import PY311  # noqa: E402,F401
+from _py311 import PY311, mkroot  # noqa: E402,F401
 
-_ROOT = os.path.realpath(tempfile.mkdtemp(prefix="outside-idle-"))
+_ROOT = os.path.realpath(mkroot("outside-idle-"))  # окно роли: metis-0941
 tempfile.tempdir = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)
 HOME = os.path.join(_ROOT, "home")

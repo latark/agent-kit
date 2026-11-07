@@ -7,6 +7,8 @@
 head перед окном (новый «вернуть», нет тестов) → окна нет; CI идёт, владельца нет → ждёт; окно без ответа — повтор
 позже; окно не показать → уведомление с `merge run --click`, щелчок сливает; из окна Claude Code — отказ; строку
 согласия принимает шлюз guard (настоящий merge_gate.owner_approved); тик запускает проход, только когда есть заявки.
+Фраза «слей #N <hex>» в owner-log (metis-0959, test_phrase_*): та же строка согласия без окна; чужой head, PR без
+заявки, старше 2 ч, повтор, пометка, не первая строка, неоднозначность, обёртки NOT_OWNER настоящего хука ctx.py — нет.
 """
 import hashlib
 import json
@@ -64,6 +66,13 @@ def view_by_sha(sha):
     return json.load(open(os.path.join(rec, "gh-view.json")))
 
 
+if sys.argv[1:3] == ["pr", "view"] and os.path.exists(os.path.join(rec, "gh-view-side")):
+    # побочное действие первого gh pr view (metis-0959): дописать текст в файл — «владелец передумал» во время прохода
+    side = os.path.join(rec, "gh-view-side")
+    target, text = open(side, encoding="utf-8").read().split("\n", 1)
+    with open(target, "a", encoding="utf-8") as fh:
+        fh.write(text)
+    os.remove(side)
 if sys.argv[1:3] == ["pr", "view"]:
     p = one("gh-view.json", sys.argv[3])
     if not os.path.exists(p):
@@ -74,8 +83,19 @@ if sys.argv[1:3] == ["pr", "view"]:
         v = json.loads(raw)
     except ValueError:
         v = None
+    # rec/unknown-once — номера PR: следующий gh pr view каждого из них один раз отдаёт mergeable UNKNOWN, как GitHub
+    # после сдвига base (Б1 argus #381: mergeable считается лениво)
+    uo = os.path.join(rec, "unknown-once")
+    if isinstance(v, dict) and os.path.exists(uo) and sys.argv[3] in open(uo).read().split():
+        v = dict(v, mergeable="UNKNOWN", mergeStateStatus="UNKNOWN")
+        left = [n for n in open(uo).read().split() if n != sys.argv[3]]
+        open(uo, "w").write(" ".join(left))
     print(json.dumps({k: x for k, x in v.items() if k in want}) if isinstance(v, dict) and want else raw)
     sys.exit(0)
+if sys.argv[1:3] == ["pr", "merge"] and os.path.exists(os.path.join(rec, "base-moves")):
+    # rec/base-moves — номера PR пачки: слияние одного сдвигает base, у остальных mergeable снова UNKNOWN
+    left = [n for n in open(os.path.join(rec, "base-moves")).read().split() if n != sys.argv[3]]
+    open(os.path.join(rec, "unknown-once"), "w").write(" ".join(left))
 if sys.argv[1:3] == ["pr", "merge"]:
     p = one("gh-merge-rc", sys.argv[3])
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
@@ -138,6 +158,9 @@ import json, os, sys
 rec = os.environ["FAKE_REC"]
 with open(os.path.join(rec, "touchid-argv.jsonl"), "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
+o = os.path.join(rec, "touchid-out")
+if os.path.exists(o):
+    print(open(o).read())
 p = os.path.join(rec, "touchid-rc")
 sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 '''
@@ -234,10 +257,11 @@ class Box:
         return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil, attrs=attrs)
 
     def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main",
-             head=None, pr=None):
+             head=None, pr=None, mergeable="MERGEABLE", merge_state="CLEAN"):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
         len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.); pr —
-        ответ только этого PR (пачка, metis-0668), иначе общий для всех."""
+        ответ только этого PR (пачка, metis-0668), иначе общий для всех; mergeable, merge_state — mergeable и
+        mergeStateStatus (None — поля нет, metis-0819)."""
         sfx = "" if pr is None else f"-{pr}"
         files = FILES if files is None else files
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
@@ -245,6 +269,8 @@ class Box:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
                        **({} if pr is None else {"_pr": pr}),
                        **({} if base is None else {"baseRefName": base}),
+                       **({} if mergeable is None else {"mergeable": mergeable}),
+                       **({} if merge_state is None else {"mergeStateStatus": merge_state}),
                        "statusCheckRollup": ci("SUCCESS", "SUCCESS") if checks is None else checks,
                        "changedFiles": len(recs) if count is None else count, **(head or {})}, fh)
         with open(os.path.join(self.rec, f"gh-files{sfx}.jsonl"), "w") as fh:
@@ -255,25 +281,28 @@ class Box:
             fh.write(str(value))
 
     def add(self, kind, sha=SHA, pr=PR, who="argus", sid="s1", aid="a1", ran="модель: claude-opus-5-5, тесты",
-            models=None, cmd=None):
+            models=None, cmd=None, base="main", **extra):
         rec = {"v": 1, "kind": kind, "repo": [REPO], "pr": None if kind == "tests" else pr, "sha": sha,
                "by": {"agent_type": who, "agent_id": aid, "session_id": sid}}
         if kind == "tests":   # команда полного набора — на запасном пути при лимите минут засчитывается только она
             rec["cmd"] = FULL_TESTS_CMD if cmd is None else cmd
         if kind in ("accept", "reject"):
             rec["checklist"] = {"opened": "diff", "ran": ran, "unchecked": "ничего"}
+            if base is not None:   # base PR при записи вердикта (metis-0965); None — запись до 0965
+                rec["base"] = base
         if models is not None:   # модели транскрипта argus, как их пишет хук guard (metis-0176)
             rec["models"] = models
+        rec.update(extra)   # поля хука guard: returned и reported (metis-0497)
         self.records.append(rec)
         d = os.path.join(self.state, "merge-gate")
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "records.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self.records))
 
-    def gate_ok(self, sha, pr=PR):
+    def gate_ok(self, sha, pr=PR, base="main"):
         self.add("tests", sha=sha, who="")
-        self.add("accept", sha=sha, pr=pr, sid="s1", aid="a1")
-        self.add("accept", sha=sha, pr=pr, sid="s2", aid="a2")
+        self.add("accept", sha=sha, pr=pr, sid="s1", aid="a1", base=base)
+        self.add("accept", sha=sha, pr=pr, sid="s2", aid="a2", base=base)
 
     def calls(self, name):
         p = os.path.join(self.rec, name + "-argv.jsonl")
@@ -415,6 +444,165 @@ def test_gate_rechecked():
           and "FAILURE" in b.alerts(), b.alerts())
 
 
+def test_gate_batch():
+    """metis-0758: PR пачки (ветка batch/<story>) — тесты только по записи полного набора FULL_TESTS на head, и при
+    зелёном CI, как в шлюзе guard (batch_tests_problem); не пачка — любая запись tests, как раньше."""
+    def box(branch, cmd=None):
+        b = Box()
+        b.records = []
+        b.add("tests", who="", cmd=cmd)
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.view(SHA, head={"headRefName": branch})
+        b.request()
+        b.run()
+        return b
+
+    def run_only(cmd):
+        """Заявка подана на полной записи, а к проходу запись — уже не полного набора: отказ в самом проходе."""
+        b = Box()
+        b.view(SHA, head={"headRefName": "batch/metis-0754"})
+        b.request()
+        b.records = []
+        b.add("tests", who="", cmd=cmd)
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.run()
+        return b
+
+    narrow = "pantheon review test -- python3.14 -I plugins/pantheon/scripts/run-tests.py --affected plugins/guard"
+    b = box("batch/metis-0754")
+    check("0758: пачка, запись полного набора на head, CI зелёный — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    why = "PR пачки (ветка batch/metis-0754): засчитывается только запись полного набора тестов (FULL_TESTS)"
+    b = box("batch/metis-0754", cmd=narrow)
+    check("0758: пачка, на head только узкая запись, CI зелёный — заявки нет, причина названа",
+          not b.windows() and not b.merges() and b.req() is None and why in b.outs[-2], b.outs[-2:])
+    b = run_only(narrow)
+    check("0758: пачка, к проходу только узкая запись — окна нет, заявка снята, причина в тревоге",
+          not b.windows() and not b.merges() and b.req() is None and why in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box("metis-0758-gate", cmd=narrow)
+    check("0758: не пачка, узкая запись, CI зелёный — сливает, как раньше", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+
+
+def test_gate_other_heads():
+    """metis-0465: «вернуть» на другом head PR в силе и в шлюзе владельца, как в шлюзе guard; «принять» до него не
+    в счёт (откат force-push на старый head с двумя «принять»)."""
+    def box(*adds):
+        b = Box()
+        b.request()
+        for kind, sha, sid in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        b.run()
+        return b
+
+    b = box(("reject", SHA2, "s3"))
+    check("0465: «вернуть» на другом head, после него ни одного «принять» — окна нет, заявка снята, тревога",
+          not b.windows() and not b.merges() and b.req() is None and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"))
+    check("0465: «принять» на SHA после «вернуть» снимает его, но второе «принять» записано до — 1 из 2",
+          not b.windows() and not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(),
+          b.alerts())
+    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
+    check("0465: два свежих «принять» на SHA после «вернуть» на другом head — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", SHA2, "s3"))
+    check("0465: «вернуть» снял сам рецензент на том же head — отсечки нет, «принять» на SHA в силе — сливает",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", "f" * 40, "s4"))
+    check("0465: «принять» другого argus на третьем head «вернуть» не снимает — окна нет",
+          not b.windows() and not b.merges() and "вернуть" in b.alerts(), b.alerts())
+    b = box(("reject", SHA, "s3"), ("accept", SHA, "s4"))
+    check("0465: «вернуть» на SHA, «принять» другого argus на тот же SHA — в силе (metis-0158)",
+          not b.windows() and not b.merges() and "вернуть" in b.alerts(), b.alerts())
+    b = box(("reject", SHA, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
+    check("0465: «вернуть» на SHA и два «принять» других argus после него — в силе, не перекрыто числом",
+          not b.windows() and not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.add("reject", sha=SHA2, pr=PR + 1, sid="s3", aid="a3")
+    b.run()
+    check("0465: «вернуть» на другом PR — не мешает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = Box()
+    b.request()
+    b.add("reject", sha=SHA2, who="dev-opus", sid="s3", aid="a3")
+    b.run()
+    check("0465: запись reject не от argus — не в счёт", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+
+
+def test_gate_returned():
+    """metis-0497 (Д1 ревью PR #149 r2): поле «вернули» — слово лида, и в шлюзе владельца, как в шлюзе guard.
+    «Принять» повторного круга (поле есть) снимает «вернуть» другого argus, только если взяло его отчёт (reported);
+    поле, назвавшее рецензента без «вернуть» на PR, — «принять» не в счёт."""
+    def box(*adds):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid, extra in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:], **extra)
+        b.run()
+        return b
+
+    back, took = {"returned": ["a3/s3"]}, {"returned": ["a3/s3"], "reported": ["a3/s3"]}
+    b = box(("reject", SHA2, "s3", {}), ("accept", SHA, "s1", back), ("accept", SHA, "s2", back))
+    check("0497: «вернуть» a3, оба «принять» с «вернули: a3», отчёта a3 не брали — в силе, окна нет",
+          not b.windows() and not b.merges() and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3", {}), ("accept", SHA, "s1", took), ("accept", SHA, "s2", took))
+    check("0497: взяли отчёт a3 — «вернуть» снято, сливает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3", {}), ("accept", SHA, "s1", back), ("accept", SHA, "s2", {}))
+    check("0497: свежий argus без поля снимает «вернуть», как раньше — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box(("accept", SHA, "s1", {"returned": ["a9/s9"]}), ("accept", SHA, "s2", {}))
+    check("0497: «вернули: a9», а «вернуть» a9 на PR нет — «принять» не в счёт, 1 из 2",
+          not b.windows() and not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(("accept", SHA, "s1", {"returned": ["a3/s3"]}), ("reject", SHA2, "s3", {}),
+            ("accept", SHA, "s1", {"returned": ["a3/s3"]}), ("accept", SHA, "s2", {}))
+    check("0497: «вернуть» a3 записано между — второе «принять» s1 поле не врёт, свежий s2 снимает — сливает",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    # Д4 argus #382, вариант Б: своя пара рецензента (agent тот же, сессия с опечаткой) не сверяется с журналом
+    b = box(("accept", SHA, "s1", {"returned": ["a1/zz"]}), ("accept", SHA, "s2", {}))
+    check("Д4: «вернули: a1/zz» у самого a1 — пара своя, «принять» в счёт — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box(("accept", SHA, "s1", {"returned": ["a1/zz", "a9/s9"]}), ("accept", SHA, "s2", {}))
+    check("Д4: своя пара и чужая без «вернуть» — «принять» не в счёт, 1 из 2",
+          not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+
+
+def test_gate_base():
+    """metis-0965: «принять» засчитывается только на той base PR, на которой записано; без поля base (запись до
+    0965) — не в счёт; «вернуть» на другой base — в силе."""
+    def box(bases, view_base="main", reject=None):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        if reject is not None:
+            b.add("reject", sha=SHA, sid="s3", aid="a3", base=reject)
+        for i, base in enumerate(bases, 1):
+            b.add("accept", sha=SHA, sid=f"s{i}", aid=f"a{i}", base=base)
+        b.view(SHA, base=view_base)
+        b.run()
+        return b
+    b = box(["main", "main"])
+    check("0965: оба «принять» на base main, PR в main — сливает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(["main", "dev"])
+    check("0965: одно «принять» на base dev, PR в main — 1 из 2", not b.merges() and "1 из 2" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = box(["dev", "dev"])
+    check("0965: оба «принять» на dev, PR перевели в main — 0 из 2", not b.merges() and "0 из 2" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = box(["main", None])
+    check("0965: «принять» без base (до 0965) — не в счёт, 1 из 2", not b.merges() and "1 из 2" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = box(["main", "main"], view_base=None)
+    check("0965: base PR неизвестна — «принять» не в счёт, не сливает", not b.merges(), (b.outs[-1], b.alerts()))
+    b = box(["main", "main"], reject="dev")
+    check("0965: «вернуть» на другой base — в силе, не сливает", not b.merges() and "вернуть" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+
+
 def test_request_refusals():
     b = Box()
     r = b.request(repo="latark/shop")
@@ -550,6 +738,8 @@ def test_ci_required_names():
           not b.windows() and not b.merges() and b.req() is None and "traces красная" in b.alerts(), b.alerts())
     b = Box()
     b.request()
+    b.records = []
+    b.gate_ok(SHA, base="feature-x")   # «принять» записано на base PR (metis-0965)
     b.view(SHA, checks=ci("SUCCESS", "SUCCESS")[1:], base="feature-x")
     b.run()
     check("PR не в main: только traces зелёная → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1,
@@ -622,6 +812,123 @@ def test_merge_fails():
     check("gh pr merge упал → тревога, заявка снята (одно применение), согласие записано",
           len(b.merges()) == 1 and b.req() is None and "не прошло" in b.alerts() and len(b.approve_lines()) == 1,
           b.alerts())
+
+
+def test_conflict_before_window():
+    """metis-0819: PR с конфликтом с main (CONFLICTING или DIRTY) — окна нет, заявка снята с причиной, причина в
+    status; GitHub ещё считает (UNKNOWN, поля нет) — окна нет, заявка ждёт, а посчитал — окно и слияние."""
+    for name, kw in (("mergeable CONFLICTING", {"mergeable": "CONFLICTING", "merge_state": "DIRTY"}),
+                     ("только mergeStateStatus DIRTY", {"merge_state": "DIRTY"})):
+        b = Box()
+        b.request()
+        b.view(SHA, **kw)
+        b.run()
+        check(f"{name} → окна нет, слияния нет, заявка снята с тревогой «конфликт с main»",
+              not b.windows() and not b.merges() and b.req() is None and "конфликт с main" in b.alerts(), b.alerts())
+        r = b.cli(["merge", "status"])
+        check(f"{name} → status: заявок нет, ниже — снятая с причиной «конфликт с main»",
+              "заявок нет" in r.stdout and f"{REPO}#{PR}\t{SHA[:12]}\tgate: конфликт с main" in r.stdout, r.stdout)
+    for name, kw in (("mergeable UNKNOWN", {"mergeable": "UNKNOWN", "merge_state": "UNKNOWN"}),
+                     ("mergeStateStatus UNKNOWN", {"merge_state": "UNKNOWN"}),
+                     ("полей mergeable нет", {"mergeable": None, "merge_state": None})):
+        b = Box()
+        b.request()
+        b.view(SHA, **kw)
+        b.run()
+        check(f"{name} → окна нет, заявка ждёт без тревоги",
+              not b.windows() and b.req() is not None and not b.alerts()
+              and "ждёт: GitHub ещё не посчитал, сливается ли PR с main" in b.outs[-1], (b.outs[-1], b.alerts()))
+        b.view(SHA)
+        b.run(t=T0 + 60)
+        check(f"{name}, затем MERGEABLE → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, mergeable="CONFLICTING", checks=ci("PENDING", "SUCCESS"))
+    b.run()
+    check("конфликт, CI ещё идёт → снята сразу (ждать CI незачем)", b.req() is None and not b.windows(), b.outs[-1])
+
+
+def test_unknown_after_finger():
+    """Б1, Д1 argus #381: после пальца base мог сдвинуться (прежний PR пачки слит, другое слияние за время окна), и
+    GitHub отдаёт mergeable UNKNOWN — это не «условия изменились»: PR сливается. Конфликт после пальца — снята."""
+    b = Box()
+    b.request()
+    script(b.touchid, window_script("open(os.path.join(rec, 'unknown-once'), 'w').write('7')", 0))
+    b.run()
+    check("одна заявка: UNKNOWN после пальца → слита, без тревоги",
+          b.merges() == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]]
+          and b.req() is None and not b.alerts() and "gate-after" not in b.log(), (b.outs[-1], b.alerts()))
+    body = ("v = json.load(open(os.path.join(rec, 'gh-view.json'))); v['mergeable'] = 'CONFLICTING'\n"
+            "json.dump(v, open(os.path.join(rec, 'gh-view.json'), 'w'))")
+    b = Box()
+    b.request()
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    check("одна заявка: CONFLICTING после пальца → слияния и согласия нет, снята с тревогой «конфликт с main»",
+          not b.merges() and not b.approve_lines() and b.req() is None and "gate-after" in b.log()
+          and "после пальца условия изменились — конфликт с main" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.set("base-moves", "7 8")
+    b.run()
+    check("пачка: base сдвинулся после слияния #7 (у #8 UNKNOWN) → слиты оба, без тревоги",
+          b.merges() == [merge_argv(7), merge_argv(8)] and b.req(8) is None and not b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = Box()
+    b.request()
+    b.view(SHA, mergeable="UNKNOWN")
+    b.run()
+    r = b.cli(["merge", "status"])
+    check("Д2 argus #381: status показывает, почему заявка ждёт",
+          f"{REPO}#{PR}\t{SHA[:12]}" in r.stdout and "ждёт: GitHub ещё не посчитал, сливается ли PR с main" in r.stdout,
+          r.stdout)
+    b2 = batch_box()
+    request_batch(b2)
+    b2.view(SHA2, pr=8, title="PR 8", files=["docs.md"], mergeable="UNKNOWN")
+    b2.run()
+    rows = {ln.split("\t")[0]: ln for ln in b2.cli(["merge", "status"]).stdout.splitlines()}
+    check("Д2, пачка: причина ожидания — у того PR, который ждёт (#8), у #7 её нет",
+          "ждёт: GitHub ещё не посчитал" in rows.get(f"{REPO}#8", "") and f"{REPO}#7" in rows
+          and "ждёт:" not in rows[f"{REPO}#7"],
+          rows)
+    b.view(SHA)
+    b.set("touchid-rc", 3)
+    b.run(t=T0 + 60)
+    req = b.req()
+    check("ждать больше нечего (окно было, без ответа) → отметка причины снята",
+          req is not None and "waiting" not in req and "ждёт: GitHub" not in b.cli(["merge", "status"]).stdout, req)
+
+
+def test_status_shows_done():
+    """metis-0819: status — не только «заявок нет»: снятые за сутки с причиной, провал gh pr merge после пальца,
+    слитые; старше суток и мусор в журнале — нет."""
+    b = Box()
+    b.request()
+    b.set("gh-merge-rc", 1)
+    b.run()
+    r = b.cli(["merge", "status"], t=T0 + 3600)
+    check("merge-failed после пальца — в status с причиной",
+          "заявок нет" in r.stdout and f"{REPO}#{PR}\t{SHA[:12]}\tmerge-failed: палец есть, gh pr merge упал (1)"
+          in r.stdout, r.stdout)
+    with open(os.path.join(b.state, "logs", "merge.jsonl"), "a") as fh:
+        fh.write("не json\n[1]\n" + json.dumps({"time": "вчера", "event": "gate"}) + "\n")
+    with open(os.path.join(b.state, "logs", "merge.jsonl"), "ab") as fh:   # Д1 argus A #381: байты не в UTF-8
+        fh.write(b"\xff\xfe broken\n")
+    r = b.cli(["merge", "status"], t=T0 + 25 * 3600)
+    check("через 25 ч — снятых нет, мусор в журнале не роняет status",
+          r.returncode == 0 and r.stdout.strip() == "заявок нет", r.stdout + r.stderr)
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 1)
+    b.run()
+    b.request()
+    r = b.cli(["merge", "status"])
+    check("отказ — в status «refused: вы отказали», и стоящая заявка видна",
+          f"{REPO}#{PR}\t{SHA[:12]}\trefused: вы отказали" in r.stdout and "заявок нет" not in r.stdout, r.stdout)
+    b.set("touchid-rc", 0)
+    b.run()
+    r = b.cli(["merge", "status"])
+    check("слит — в status «merged»", f"{REPO}#{PR}\t{SHA[:12]}\tmerged" in r.stdout, r.stdout)
 
 
 def test_refused_from_claude_window():
@@ -700,6 +1007,63 @@ def window_script(body, rc):
 
 CANCEL_BODY = ("q = os.path.join(state, 'merge-queue')\n"
                "[os.remove(os.path.join(q, f)) for f in os.listdir(q) if f.endswith('.json')]")
+
+
+def jsonl(b):
+    p = os.path.join(b.state, "logs", "merge.jsonl")
+    return [json.loads(ln) for ln in open(p)] if os.path.exists(p) else []
+
+
+def test_merged_notice_and_window_fields():
+    """metis-0921: слито → одно уведомление «слит repo#N (sha7)»; поля окна помощника — в событии window."""
+    b = Box()
+    b.request()
+    b.set("touchid-out", json.dumps({"biometry": "touchID", "la_code": None, "shown_sec": 3.4, "text": "x"}))
+    b.run()
+    note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
+    check("слито → ровно одно уведомление «слит repo#N (sha7)», без щелчка-команды",
+          note.count(f"слит {REPO}#{PR} ({SHA[:7]})") == 1 and note.count("\n") == 1 and "execute:" not in note, note)
+    w = [r for r in jsonl(b) if r["event"] == "window"]
+    check("window: device_biometry (тип датчика, metis-0932), la_code, shown_sec из помощника, чужое поле не попало",
+          len(w) == 1 and w[0]["device_biometry"] == "touchID" and "biometry" not in w[0] and w[0]["la_code"] is None
+          and w[0]["shown_sec"] == 3.4 and "text" not in w[0], w)
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 1)
+    b.set("touchid-out", json.dumps({"biometry": "none", "la_code": -2, "shown_sec": 1}))
+    b.run()
+    w = [r for r in jsonl(b) if r["event"] == "window"]
+    check("отказ: la_code -2 в журнале, уведомления о слиянии нет",
+          w and w[0]["la_code"] == -2 and w[0]["device_biometry"] == "none" and not os.path.exists(b.notify_log),
+          (w, b.outs[-1]))
+    for bad in ("-2", True, 1.5):   # Д3 argus #364 (M7): la_code только int или null — строка, bool, float не идут
+        b = Box()
+        b.request()
+        b.set("touchid-rc", 1)
+        b.set("touchid-out", json.dumps({"la_code": bad, "shown_sec": 1}))
+        b.run()
+        w = [r for r in jsonl(b) if r["event"] == "window"]
+        check(f"la_code {bad!r} (не int) → в журнал не идёт, shown_sec идёт",
+              w and "la_code" not in w[0] and w[0]["shown_sec"] == 1, w)
+    b = Box()
+    b.request()
+    b.set("gh-merge-rc", 1)
+    b.run()
+    check("gh pr merge упал → уведомления «слит» нет",
+          len(b.merges()) == 1 and not os.path.exists(b.notify_log), b.outs[-1])
+    b = Box()
+    b.request()
+    b.set("touchid-out", "не json")
+    b.run()
+    w = [r for r in jsonl(b) if r["event"] == "window"]
+    check("помощник напечатал не JSON → слияние идёт, полей окна нет",
+          len(b.merges()) == 1 and w and "device_biometry" not in w[0] and "shown_sec" not in w[0], w)
+    # Д3 argus #364 (M6): merge.ask — только код помощника (int), его зовёт handoff; кортеж ask_full — нет
+    code = ("import sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); "
+            "m.ask_full = lambda text: (3, {'la_code': -9}); print(repr(m.ask('x')))" % LIBDIR)
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60,
+                       env={"HOME": b.home, "PATH": "/usr/bin:/bin", "PANTHEON_STATE": b.state, "TMPDIR": _ROOT})
+    check("merge.ask → код помощника 3, а не кортеж", r.stdout.strip() == "3", r.stdout + r.stderr)
 
 
 def test_cancel_during_window():
@@ -866,8 +1230,10 @@ def test_ci_fork():
 
 def test_ci_matches_guard():
     """metis-0633, 0649, 0655: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, ci_billing_ids, ci_billing,
-    ci_job_unstarted, full_tests_record, required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus
-    #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, CI_OK, CI_WAIT и CI_NONE в merge.py
+    ci_job_unstarted, full_tests_record, required_checks, optional_checks, batch_tests_problem (metis-0758),
+    pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), base_counts (metis-0965),
+    REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
+    FULL_TESTS, BATCH_BRANCH, CI_OK, CI_WAIT и CI_NONE в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -877,20 +1243,23 @@ def test_ci_matches_guard():
         for n in tree.body:
             if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids",
                                                              "ci_billing", "ci_job_unstarted", "full_tests_record",
-                                                             "required_checks", "optional_checks"):
+                                                             "required_checks", "optional_checks",
+                                                             "batch_tests_problem", "pair_match", "returned_lie",
+                                                             "returned_lifts", "base_counts"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
-                                            "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "CI_OK", "CI_WAIT",
-                                            "CI_NONE"):
+                                            "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "BATCH_BRANCH", "CI_OK",
+                                            "CI_WAIT", "CI_NONE"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
     names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "ci_job_unstarted",
-             "full_tests_record", "required_checks", "optional_checks", "REQUIRED_CHECKS", "OPTIONAL_CHECKS",
-             "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "CI_OK", "CI_WAIT",
-             "CI_NONE")
+             "full_tests_record", "required_checks", "optional_checks", "batch_tests_problem", "pair_match",
+             "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
+             "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
+             "BATCH_BRANCH", "CI_OK", "CI_WAIT", "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
@@ -958,10 +1327,8 @@ def test_ci_billing():
              None),
             ("красная без аннотаций", [dict(blocked[0], notes=[]), blocked[1]], None),
             ("TIMED_OUT с аннотацией лимита", [dict(blocked[0], conclusion="TIMED_OUT"), blocked[1]], None),
-            ("аннотации не получены", blocked, "gh-notes-fail"),
             ("аннотацию лимита напечатал сам job (раннер и шаги есть)",
-             [{k: v for k, v in blocked[0].items() if k != "job"}, blocked[1]], None),
-            ("данные job не получены", blocked, "gh-jobs-fail")):
+             [{k: v for k, v in blocked[0].items() if k != "job"}, blocked[1]], None)):
         b = Box()
         b.request()
         b.view(SHA, checks=checks)
@@ -1023,6 +1390,31 @@ def test_ci_billing():
     b.run()
     check("лимит, запись прохода outside test (без heavy, с хвостом) → окно и слияние", len(b.merges()) == 1,
           b.outs[-1])
+
+
+def test_ci_billing_gh_fail():
+    """metis-0813: сбой gh на аннотациях или job (TLS из окна) — признак лимита не проверить: ждёт, а не снята."""
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    for name, setup in (("аннотации не получены", "gh-notes-fail"), ("данные job не получены", "gh-jobs-fail")):
+        b = Box()
+        b.request()
+        b.view(SHA, checks=blocked)
+        b.set(setup, "")
+        b.run()
+        check(f"лимит, {name} (сбой gh) → окна нет, заявка ждёт без тревоги",
+              not b.windows() and not b.merges() and b.req() is not None and not b.alerts()
+              and "ждёт: аннотации CI не получены (сбой gh)" in b.outs[-1], (b.outs[-1], b.alerts()))
+        os.remove(os.path.join(b.rec, setup))
+        b.run(t=T0 + 60)
+        check(f"лимит, {name}, сбой прошёл → следующий проход: окно и слияние",
+              len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=[dict(blocked[0], notes=[billing_note("Process completed with exit code 1.")]), blocked[1]])
+    b.set("gh-jobs-fail", "")
+    b.run()
+    check("обычная красная, данные job не получены → тоже ждёт (признак не проверить), заявка цела",
+          not b.windows() and b.req() is not None and "аннотации CI не получены" in b.outs[-1], b.outs[-1])
 
 
 def test_ci_fork_billing():
@@ -1799,7 +2191,12 @@ def test_batch_one_window_merges_all():
           r.returncode == 0 and r7 and r8 and r7["batch"] == r8["batch"] == [7, 8] and r7["created"] == r8["created"]
           and r7["sha"] == SHA and r8["sha"] == SHA2 and "Пачка" in r.stdout, b.outs[-1])
     check("пачка: окна и слияния нет до прохода", not b.windows() and not b.merges())
+    b.set("touchid-out", json.dumps({"biometry": "touchID", "la_code": None, "shown_sec": 2.5}))
     b.run()
+    ws = [r for r in jsonl(b) if r["event"] == "window"]
+    check("пачка: поля окна помощника — в событии window каждого PR (Д3 argus #364, M3)",
+          [r["pr"] for r in ws] == [7, 8] and all(r.get("shown_sec") == 2.5 and r.get("device_biometry") == "touchID"
+                                                  and "la_code" in r for r in ws), ws)
     w = b.windows()
     text = w[0][0] if w else ""
     check("пачка: одно окно на оба PR — номер, SHA и вердикт каждого, ядро, заголовки последними, не длиннее 400",
@@ -2038,14 +2435,310 @@ def test_batch_max_fallback_window_core():
           and all(f"#{1000 + i} {'%07d' % i}" in text for i in range(5)), text or r.stderr)
 
 
+# --- согласие фразой «слей #N <hex>» (metis-0959) ---------------------------------------------------------------------
+AWAY = {"PANTHEON_FAKE_IDLE": "900"}   # владельца нет у Mac: окна Touch ID не будет, фразе это не мешает
+CTX_HOOK = os.path.join(os.path.dirname(HERE), "hooks", "ctx.py")
+
+
+def say(b, text, t, note="", name="zeus", folder=None):
+    """Запись журнала ваших слов в формате append_owner_line (hooks/ctx.py): заголовок с местным временем."""
+    from datetime import datetime as _dt
+    d = folder or os.path.join(b.state, "owner-log")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    body = "\n".join((" " + ln) if ln.startswith("##") else ln for ln in text.split("\n"))
+    with open(os.path.join(d, name + ".md"), "a", encoding="utf-8") as fh:
+        fh.write("## %s%s\n%s\n\n" % (_dt.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S"),
+                                      (" · " + note) if note else "", body))
+
+
+def merge_recs(b):
+    p = os.path.join(b.state, "logs", "merge.jsonl")
+    return [json.loads(ln) for ln in open(p)] if os.path.exists(p) else []
+
+
+def phrase_box(text=None, t=T0 + 60, **kw):
+    b = Box()
+    b.request()
+    if text is not None:
+        say(b, text, t, **kw)
+    return b
+
+
+def merged_once(b):
+    return b.merges() == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]]
+
+
+def untouched(b):
+    """Фраза не подействовала: слияния и строки согласия нет, заявка ждёт."""
+    return not b.merges() and not b.approve_lines() and b.req() is not None
+
+
+def test_phrase_merges_full_sha():
+    b = phrase_box(f"слей #{PR} {SHA[:7]}")
+    b.run(t=T0 + 120, extra=AWAY)
+    lines = b.approve_lines()
+    check("фраза «слей #N <head7>» + заявка, владельца нет у Mac → слияние этого SHA без окна Touch ID",
+          merged_once(b) and not b.windows() and b.req() is None, b.outs[-1])
+    check("фраза: строка merge-approve на полный SHA — та же, что после пальца",
+          len(lines) == 1 and re.fullmatch(r"\S+ merge-approve " + re.escape(f"{REPO}#{PR} {SHA}"), lines[0]), lines)
+    ok, out = guard_approves(b, REPO, PR, SHA, now=T0 + 120)
+    check("фраза: настоящий шлюз guard (owner_approved) пускает этот SHA", ok, out)
+    ok2, _ = guard_approves(b, REPO, PR, SHA2, now=T0 + 120)
+    check("фраза: шлюз guard не пускает другой SHA", not ok2)
+    recs = merge_recs(b)
+    ph = [r for r in recs if r["event"] == "phrase"]
+    mg = [r for r in recs if r["event"] == "merged"]
+    check("фраза: способ в merge.jsonl — событие phrase (файл owner-log, строка, время записи) и how=phrase у merged",
+          len(ph) == 1 and ph[0]["file"] == "owner-log/zeus.md" and ph[0]["line"] == 1
+          and ph[0]["said"] == f"слей #{PR} {SHA[:7]}" and len(mg) == 1 and mg[0]["how"] == "phrase"
+          and "window" not in [r["event"] for r in recs], recs)
+    note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
+    check("фраза: уведомление о слиянии называет способ", "фразой из owner-log/zeus.md" in note, note)
+    p = os.path.join(b.state, "merge-phrases.json")
+    used = json.load(open(p)) if os.path.exists(p) else {}
+    check("фраза отмечена использованной (STATE/merge-phrases.json, 0600)", len(used.get("used") or {}) == 1
+          and oct(os.stat(p).st_mode & 0o777) == "0o600", used)
+    b2 = Box()
+    b2.request()
+    b2.run(extra=AWAY)
+    check("без фразы владельца нет у Mac — ждёт (Touch ID)", untouched(b2), b2.outs[-1])
+    b3 = Box()
+    b3.request()
+    b3.run()
+    check("Touch ID: how=touchid у merged", [r.get("how") for r in merge_recs(b3) if r["event"] == "merged"]
+          == ["touchid"], merge_recs(b3))
+
+
+def test_phrase_forms():
+    for name, text, ok in (
+            ("с телефона: «Слей» с заглавной, hex заглавными, точка в конце", f"Слей #{PR} {SHA[:7].upper()}.", True),
+            ("полный SHA", f"слей #{PR} {SHA}", True),
+            ("первая строка — фраза, дальше пояснение", f"слей #{PR} {SHA[:9]}\nпроверил, всё ок", True),
+            ("пустые строки до фразы", f"\n\nслей #{PR} {SHA[:7]}", True),
+            ("6 hex — коротко", f"слей #{PR} {SHA[:6]}", False),
+            ("«да» без номера", "да", False),
+            ("«слей» без hex", f"слей #{PR}", False),
+            ("фраза не первой строкой (вставленный текст)", f"посмотри это:\nслей #{PR} {SHA[:7]}", False),
+            ("фраза внутри строки", f"не надо, слей #{PR} {SHA[:7]}", False),
+            ("вопрос «слей …?»", f"слей #{PR} {SHA[:7]}?", False),
+            ("вставка <pasted_content>", f"<pasted_content>слей #{PR} {SHA[:7]}</pasted_content>", False),
+            ("hex — не начало SHA (середина)", f"слей #{PR} {SHA[1:8]}", False),
+            ("41 hex", f"слей #{PR} {SHA}0", False)):
+        b = phrase_box(text)
+        b.run(t=T0 + 120, extra=AWAY)
+        check("фраза: " + name + (" → слияние" if ok else " → строки нет"),
+              (merged_once(b) and len(b.approve_lines()) == 1) if ok else untouched(b), b.outs[-1])
+
+
+def test_phrase_refused():
+    b = phrase_box(f"слей #{PR} {SHA2[:7]}")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза на чужой head → строки нет, заявка ждёт", untouched(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR + 1} {SHA[:7]}")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза на PR без заявки (#8 при заявке на #7 с тем же head) → строки нет", untouched(b), b.outs[-1])
+    b = Box()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза без заявки → проход ничего не сливает", not b.merges() and not b.approve_lines(), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0)
+    b.run(t=T0 + 2 * 3600 + 1, extra=AWAY)
+    check("фраза старше 2 ч → строки нет", untouched(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0)
+    b.run(t=T0 + 2 * 3600 - 30, extra=AWAY)
+    check("фраза моложе 2 ч → слияние", merged_once(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 600)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("запись «из будущего» (дальше 2 мин) → строки нет", untouched(b), b.outs[-1])
+    for note in ("принята подсказка Claude", "окно вопросов, свой текст", "ответ в чате"):
+        b = phrase_box(f"слей #{PR} {SHA[:7]}", note=note)
+        b.run(t=T0 + 120, extra=AWAY)
+        check(f"запись с пометкой «{note}» → строки нет", untouched(b), b.outs[-1])
+    b = phrase_box()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60, folder=os.path.join(b.state, "owner-log", "unconfirmed"))
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза в owner-log/unconfirmed/ (ввод без пометки транскрипта) → строки нет", untouched(b), b.outs[-1])
+    b = phrase_box()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60, folder=b.tmp, name="fake")
+    os.makedirs(os.path.join(b.state, "owner-log"), mode=0o700, exist_ok=True)
+    os.symlink(os.path.join(b.tmp, "fake.md"), os.path.join(b.state, "owner-log", "zeus.md"))
+    b.run(t=T0 + 120, extra=AWAY)
+    check("owner-log/zeus.md — ссылка на файл с фразой → строки нет", untouched(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 60)
+    say(b, f"слей #{PR} {SHA2[:7]}", T0 + 90)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("решает последняя фраза на номер: позже «слей #N <другой head>» → строки нет", untouched(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA2[:7]}", t=T0 + 60)
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 90)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("последняя фраза — на этот head (прежняя на другой) → слияние", merged_once(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 60)
+    say(b, f"слей #{PR} {SHA2[:7]}", T0 + 60, name="metis-pantheon")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("две разные фразы на номер в одну секунду → неоднозначно, строки нет", untouched(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 60)
+    from datetime import datetime as _dt
+    b.set("gh-view-side", os.path.join(b.state, "owner-log", "zeus.md") + "\n## %s\nслей #%d %s\n\n"
+          % (_dt.fromtimestamp(T0 + 100).strftime("%Y-%m-%d %H:%M:%S"), PR, SHA2[:7]))
+    b.run(t=T0 + 120, extra=AWAY)
+    check("владелец передумал во время прохода (новая фраза на другой head) → под замком фраза не в силе, не слито",
+          untouched(b) and "фраза уже не в силе" in b.outs[-1], b.outs[-1])
+
+
+def test_phrase_ambiguous_repo():
+    for name, sha, ok in (("та же фраза подходит к заявкам #7 двух репозиториев → неоднозначно, строки нет",
+                           SHA[:7] + "1" * 33, False),
+                          ("заявка #7 другого репозитория с другим head → фраза однозначна, слияние", SHA3, True)):
+        b = Box(repos=(REPO, "latark/other"))
+        b.request()
+        other = os.path.join(b.state, "merge-queue", "latark__other__7.json")
+        with open(other, "w") as fh:
+            json.dump({"repo": "latark/other", "pr": PR, "sha": sha, "by": "x", "created": T0}, fh)
+        os.chmod(other, 0o600)
+        say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+        b.run(t=T0 + 120, extra=AWAY)
+        mine = [m for m in b.merges() if REPO in m]
+        check(name, (mine == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]]) if ok
+              else (not mine and not b.approve_lines()), (b.outs[-1], b.merges()))
+    b = Box(repos=(REPO, "latark/other"))
+    b.request()
+    with open(os.path.join(b.state, "merge-queue", "latark__other__7.json"), "w") as fh:
+        json.dump({"repo": "latark/other", "pr": PR, "sha": SHA3, "by": "x", "created": T0}, fh)
+    say(b, f"слей #{PR} {SHA3[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза на head заявки #7 другого репозитория → эта заявка #7 не слита",
+          not [m for m in b.merges() if REPO in m] and not b.approve_lines(), (b.outs[-1], b.merges()))
+    b = Box()
+    b.request()
+    with open(os.path.join(b.state, "merge-queue", f"latark__agent-kit__{PR + 1}.json"), "w") as fh:
+        json.dump({"repo": REPO, "pr": PR + 1, "sha": SHA[:7] + "2" * 33, "by": "x", "created": T0}, fh)
+    say(b, f"слей #{PR + 1} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза «слей #8 <hex>» при заявках на #7 и #8 с тем же началом head → #7 не слит",
+          not [m for m in b.merges() if m[2] == str(PR)] and not b.approve_lines(), (b.outs[-1], b.merges()))
+
+
+def test_phrase_once():
+    b = phrase_box(f"слей #{PR} {SHA[:7]}")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("повтор: первая заявка слита фразой", merged_once(b), b.outs[-1])
+    b.request(t=T0 + 200)   # новая заявка на тот же head (например, gh упал)
+    b.run(t=T0 + 300, extra=AWAY)
+    check("повтор: та же фраза второй раз не действует — строки нет, заявка ждёт",
+          len(b.merges()) == 1 and len(b.approve_lines()) == 1 and b.req() is not None, b.outs[-1])
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 400)
+    b.run(t=T0 + 500, extra=AWAY)
+    check("повтор: новая фраза — новое согласие", len(b.merges()) == 2 and len(b.approve_lines()) == 2, b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}")
+    with open(os.path.join(b.state, "merge-phrases.json"), "w") as fh:
+        fh.write("{битый")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("журнал использованных фраз битый → фраза не в силе (строки нет)", untouched(b), b.outs[-1])
+
+
+def test_phrase_gate_and_wait():
+    b = phrase_box(f"слей #{PR} {SHA[:7]}")
+    b.view(SHA, checks=ci("SUCCESS", "PENDING"))
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза есть, CI идёт → ждёт, фраза не тратится", untouched(b)
+          and not os.path.exists(os.path.join(b.state, "merge-phrases.json")), b.outs[-1])
+    b.view(SHA)
+    b.run(t=T0 + 180, extra=AWAY)
+    check("CI зелёный → та же фраза сливает", merged_once(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}")
+    b.add("reject", sid="s3", aid="a3")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза есть, у argus «вернуть» → не слито, заявка снята", not b.merges() and not b.approve_lines()
+          and b.req() is None, b.outs[-1])
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 2)
+    b.run()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("заявка ждёт щелчка по уведомлению — фраза сливает без щелчка", merged_once(b)
+          and len(b.windows()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
+    b.set("gh-merge-rc", 1)
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("фраза, gh pr merge упал → тревога «после фразы», согласие записано, how=phrase у merge-failed",
+          len(b.merges()) == 1 and "после фразы" in b.alerts() and len(b.approve_lines()) == 1
+          and [r.get("how") for r in merge_recs(b) if r["event"] == "merge-failed"] == ["phrase"], b.alerts())
+
+
+def test_phrase_batch_not_merged():
+    b = batch_box()
+    r = request_batch(b)
+    say(b, f"слей #7 {SHA[:7]}", T0 + 60)
+    say(b, f"слей #8 {SHA2[:7]}", T0 + 61)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("пачка фразой не сливается — только окном Touch ID", r.returncode == 0 and not b.merges()
+          and not b.approve_lines() and b.req(7) is not None and b.req(8) is not None, b.outs[-1])
+
+
+def _hook(b, ev, wait="1"):
+    env = {"PATH": "/usr/bin:/bin", "HOME": b.home, "PANTHEON_HOME": b.pantheon, "PANTHEON_STATE": b.state,
+           "PANTHEON_VIEW": os.path.join(b.home, "ai", "pantheon-view"), "CLAUDE_PID": str(os.getpid()),
+           "CLAUDE_CODE_ENTRYPOINT": "cli", "PANTHEON_CONFIRM_WAIT": wait, "TMPDIR": _ROOT}
+    return subprocess.run([PY311, "-I", CTX_HOOK, "owner-log"], input=json.dumps(ev), env=env, capture_output=True,
+                          text=True, timeout=60)
+
+
+def test_phrase_not_owner_hook():
+    """Сквозная: фразу в owner-log пишет только настоящий хук ctx.py owner-log и только из вашего ввода; сообщение
+    другой сессии, отчёт субагента, уведомление задачи, «[Пантеон: …]», ввод не владельца и ввод без пометки
+    транскрипта — строки согласия нет."""
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    now = int(_time.time())
+    b = Box()
+    tr = os.path.join(b.tmp, "hq.jsonl")
+    open(tr, "w").close()
+
+    def entry(text, pid, kind="human"):
+        d = {"type": "user", "isSidechain": False, "promptId": pid, "message": {"role": "user", "content": text},
+             "timestamp": _dt.fromtimestamp(_time.time(), _tz.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+             "promptSource": "typed", "turnPosition": {"promptIndex": 2}}
+        if kind:
+            d["origin"] = {"kind": kind}
+        with open(tr, "a") as fh:
+            fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+    phrase = f"слей #{PR} {SHA[:7]}"
+    ev = {"session_id": "s-hq", "transcript_path": tr, "hook_event_name": "UserPromptSubmit", "agent_type": "hq"}
+    b.request(t=now)
+    for i, p in enumerate((f"<cross-session-message from-name=\"lead\">{phrase}</cross-session-message>",
+                           f"Another Claude session sent a message: <cross-session-message>{phrase}",
+                           f"<agent-message from=\"a1\">\n{phrase}", f"<task-notification>\n{phrase}",
+                           f"[Пантеон: поручение от zeus] {phrase}", f"[Cross-session] {phrase}")):
+        entry(p, f"p-n{i}")   # даже с пометкой human: обёртку отсекает NOT_OWNER до сверки с транскриптом
+        _hook(b, dict(ev, prompt=p, prompt_id=f"p-n{i}"))
+    entry(phrase, "p-sched", kind="")   # тот же текст, но не ваш ввод (расписание, субагент): origin не human
+    _hook(b, dict(ev, prompt=phrase, prompt_id="p-sched"))
+    _hook(b, dict(ev, prompt=phrase, prompt_id="p-missing"))   # записи ввода в транскрипте нет → unconfirmed/
+    zeus = os.path.join(b.state, "owner-log", "zeus.md")
+    unc = os.path.join(b.state, "owner-log", "unconfirmed", "zeus.md")
+    check("хук: обёртки NOT_OWNER и ввод не владельца в zeus.md не попали, без пометки — в unconfirmed/",
+          not os.path.exists(zeus) and os.path.exists(unc) and phrase in open(unc).read(),
+          open(zeus).read() if os.path.exists(zeus) else "")
+    b.run(t=now + 5, extra=AWAY)
+    check("хук: сообщение другой сессии, субагента, уведомление, [Пантеон:, ввод без пометки → строки нет",
+          untouched(b), b.outs[-1])
+    entry(phrase, "p-owner")
+    r = _hook(b, dict(ev, prompt=phrase, prompt_id="p-owner"), wait="5")
+    check("хук: ваш ввод (origin.kind human) → запись в zeus.md без пометки",
+          os.path.exists(zeus) and phrase in open(zeus).read(), r.stderr)
+    b.run(t=now + 10, extra=AWAY)
+    check("хук: ваша фраза → слияние этого SHA", merged_once(b) and len(b.approve_lines()) == 1, b.outs[-1])
+
+
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-            except Exception as e:  # падение одного случая — провал, остальные идут
-                FAILS.append(name)
-                print(f"FAIL {name} — исключение {type(e).__name__}: {e}")
+    sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
+    from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544); исключение — провал случая
+    run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)], FAILS,
+              lambda name, err: FAILS.append(name))
     print(f"\n{'ПРОВАЛ: ' + ', '.join(FAILS) if FAILS else 'все прошли'}")
     sys.stdout.flush()
     os._exit(1 if FAILS else 0)

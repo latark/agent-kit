@@ -345,7 +345,7 @@ def test_hook_projects(vec):
     with open(os.path.join(h, "ai", "pantheon", "directions.toml"), "w") as fh:
         fh.write('[[direction]]\nname = "athena-broker"\n[[direction]]\nname = "solo-led"\ncoordinator = false\n')
     colls = {"pantheon": "~/ai/pantheon", "knowledge": "~/ai/knowledge", "broker": "~/projects/broker",
-             "brokerdocs": "~/projects/broker/docs", "wide": "~/projects", "agentkit": "~/projects/agent-kit",
+             "brokerdocs": "~/projects/broker/docs", "wide": "~/projects", "agentkit": "~/ai/agent-kit",
              "solo": "~/projects/solo", "hidden": "~/.hidden/proj"}
     qmd_toml = os.path.join(h, "ai", "pantheon", "qmd.toml")
     with open(qmd_toml, "w") as fh:

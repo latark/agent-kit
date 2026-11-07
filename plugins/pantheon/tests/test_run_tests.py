@@ -141,7 +141,11 @@ p = mkplugin({"helper.py": "print(1)\n"})
 r = run([p])
 check("0 файлов — раннер не 0", r.returncode != 0 and "ни одного файла" in r.stdout, r.stdout)
 r = run([tempfile.mkdtemp(prefix="empty-")])
-check("папка без tests/ — раннер не 0", r.returncode != 0, r.stdout)
+check("папка без tests/ — код 2 и строка про tests", r.returncode == 2 and "tests" in r.stdout, r.stdout)
+okp = mkplugin({"test_a.py": OK2})
+r = run([okp, tempfile.mkdtemp(prefix="notests-")])
+check("рядом с папкой без tests/ зелёная папка — всё равно код 2, ничего не пропущено молча",
+      r.returncode == 2 and "ok   " not in r.stdout, r.stdout)
 r = run([os.path.join(_ROOT, "нет-такой")])
 check("несуществующая папка — код 2", r.returncode == 2, r.stdout)
 r = run([])
@@ -279,6 +283,25 @@ check("checks: «тестов: 3 прошло, 1 не прошло» — 4", R.c
 check("checks: ANSI не мешает итогу", R.checks("\x1b[32mok a\x1b[0m\n\x1b[1m1 из 1\x1b[0m\n") == (True, 1, None))
 check("verdict: код 0 с ПРОВАЛ — не ok", R.verdict(0, "ok a\nПРОВАЛ: b\n", False)[0] is False)
 check("verdict: код 0, «1/1» — ok", R.verdict(0, "ok a\n1/1\n", False) == (True, None, 1))
+# --- явный провал в выводе при коде 0 (metis-0556) ---
+for nm, body in (("FAIL <имя>", "ok a\nFAIL b  деталь\n2/2\n"), ("НЕ ПРОШЛО", "ok a\nНЕ ПРОШЛО: b\n1/1\n"),
+                 ("Traceback", "ok a\nTraceback (most recent call last):\n  File x\n1/1\n"),
+                 ("«не прошло: 2»", "ok a\nне прошло: 2\n1/1\n"), ("«FAIL 3»", "ok a\nFAIL 3\n"),
+                 ("«2 не прошло»", "ok a\nтестов: 3 прошло, 2 не прошло\n"),
+                 ("с ANSI", "ok a\n\x1b[31mFAIL b\x1b[0m\n1/1\n")):
+    v = R.verdict(0, body, False)
+    check(f"verdict: код 0 с {nm} — красный", v[0] is False and "в выводе" in (v[1] or ""), v)
+for nm, body in (("«не прошло: 0»", "ok a\nне прошло: 0\n1/1\n"), ("«FAIL 0»", "ok a\nFAIL 0\n"),
+                 ("FAIL внутри имени", "ok test_FAIL_case\nok a FAIL b\n2/2\n"),
+                 ("«0 не прошло»", "ok a\nтестов: 3 прошло, 0 не прошло\n"),
+                 ("Traceback в середине строки", "ok a  # ожидаемый Traceback (most recent call last)\n1/1\n"),
+                 ("строка ok с «1 не прошло» в имени", "ok checks: «3 прошло, 1 не прошло» — 4\n4/4\n"),
+                 ("«FAILED» без пробела", "ok a\nok FAILURE-mode\n1/1\n")):
+    v = R.verdict(0, body, False)
+    check(f"verdict: код 0 с {nm} — не ложное срабатывание", v[0] is True, v)
+p = mkplugin({"test_lie.py": "print('ok a')\nprint('FAIL b  деталь')\nprint('2/2')\n"})
+r = run([p])
+check("раннер: файл с кодом 0 и строкой FAIL — красный, код 1", r.returncode == 1 and "в выводе строка FAIL" in r.stdout, r.stdout)
 NS = frozenset({"g/test_old.py"})
 check("verdict: старый файл без итога из списка — ok", R.verdict(0, "ok a\nok b\n", False, "g/test_old.py", NS)
       == (True, None, 2))
@@ -569,6 +592,25 @@ r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
 check("устаревшая карта + файл вне карты: весь набор, одна строка с причиной и файлом",
       r.returncode == 0 and "brand_new.py — нет в карте" in r.stdout and "весь набор" in r.stdout
       and r.stdout.count("run-tests: затронутое") == 1 and f"файлов {len(mlabels)}, ok {len(mlabels)}" in r.stdout, r.stdout)
+# 7 файлов вне карты (долг argus #292, metis-0782): строка называет первые 5 и «и ещё 2», не один и не все
+NEW7 = [f"brand_new{i}.py" for i in range(1, 7)]
+for nm in NEW7:
+    put(os.path.join(mdir, "lib", nm), "B = 1\n")
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+line7 = next((ln for ln in r.stdout.splitlines() if ln.startswith("run-tests: затронутое")), "")
+check("7 файлов вне карты: строка называет ровно 5 с причиной и «и ещё 2», весь набор",
+      r.returncode == 0 and line7.count("— нет в карте") == 5 and line7.endswith(" и ещё 2 — весь набор")
+      and "изменено 8" in line7 and f"файлов {len(mlabels)}, ok {len(mlabels)}" in r.stdout, r.stdout)
+os.remove(os.path.join(mdir, "lib", NEW7[-1]))
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+line6 = next((ln for ln in r.stdout.splitlines() if ln.startswith("run-tests: затронутое")), "")
+check("6 файлов вне карты: 5 названо и «и ещё 1»", line6.count("— нет в карте") == 5
+      and line6.endswith(" и ещё 1 — весь набор"), r.stdout)
+for nm in NEW7[:-1] + ["brand_new.py"]:
+    os.remove(os.path.join(mdir, "lib", nm))
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+check("один файл вне карты убран, вне карты ничего: «и ещё» нет", "и ещё" not in r.stdout
+      and "весь набор" not in r.stdout, r.stdout)
 
 # --- affected-map.py: карта по прогону в копии с метками ---
 MAPPER = os.path.join(PLUGIN, "scripts", "affected-map.py")
@@ -921,12 +963,14 @@ check("main: пропуск окна и FAIL — код 1, а не 4", rc == 1 a
 rc, out = main_with({"test_outside.py": OKF}, bind=lambda: "EPERM bind")
 check("main: пропущены все файлы окна — код 4 (не 3 «нечего гонять»), а не зелёный 0", rc == 4 and "для записи полного набора не годится" in out, (rc, out))
 ALT = os.path.join("/tmp", f"claude-{os.getuid()}")
-ALTR = os.path.join(ALT, "run-tests-")  # TMPDIR сам может лежать под ALT: различаем по префиксу запасного корня
-HOME_IN = ("import os\nok = {neg}os.environ['HOME'].startswith({alt!r})\nprint('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
+# TMPDIR сам может лежать под ALT (в окне роли этот файл идёт в запасном корне ALT/run-tests-…, metis-0941): префикс
+# пути не различает. Запасной корень — ALT/run-tests-…, HOME файла в нём — <корень>/<NNN-…>/home: три уровня от HOME — ALT
+HOME_IN = ("import os\nd = os.path.dirname\nok = {neg}(d(d(d(os.environ['HOME']))) == {alt!r})\n"
+           "print('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
            "print('1 из 1' if ok else '0 из 1')\nraise SystemExit(0 if ok else 1)\n")
 if os.path.isdir(ALT):
     alt_fs = lambda b: None if b == ALT else "EPERM fs"
-    rc, out = main_with({"test_roles.py": HOME_IN.format(neg="", alt=ALTR), "test_board.py": HOME_IN.format(neg="not ", alt=ALTR)},
+    rc, out = main_with({"test_roles.py": HOME_IN.format(neg="", alt=ALT), "test_board.py": HOME_IN.format(neg="not ", alt=ALT)},
                         fs=alt_fs)
     check("main: корень закрыт, запасной открыт — файл WINDOW_FS идёт с HOME в запасном корне, прочие в обычном; код 0",
           rc == 0 and "ok   pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
