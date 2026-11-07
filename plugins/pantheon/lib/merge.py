@@ -28,7 +28,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      Код прошлых head проход сам не сверит — git папки слияния у него нет. Его сверяет хук guard при `pantheon merge
      request` из клона репозитория (merge_gate.request_decisions, metis-0966, 0396, 0443, вариант А): запись kind
      "decision" в carry.jsonl — head с тем же кодом, что у SHA (same), и посчитанно другим (differs). Проход берёт
-     последнее решение на SHA и нынешнюю base PR, не старше REQUEST_TTL (code_facts): «принять» с head из same
+     последнее решение на SHA и нынешнюю base PR, не старше REQUEST_TTL и на нынешней вершине ветки base (gh api,
+     base_tip — как у шлюза; main ушёл вперёд — решение не в счёт) (code_facts): «принять» с head из same
      переносится на SHA (в счёт — последний вердикт рецензента на SHA и этих head после отсечки), а «вернуть» другой
      argus снимает, только если head «вернуть» в differs. Решения нет или код не посчитан — строго: другой коммит —
      неизвестный код, «принять» не переносится, «вернуть» не снимается; правило 3 шлюза guard (третий head) проход
@@ -875,13 +876,34 @@ def returned_lifts(a, r):
     return isinstance(got, list) and any(pair_match(p, r) for p in got)
 
 
+def base_tip(repo, branch):
+    """Живая вершина ветки branch (gh api …/git/ref/heads/<branch>) — SHA в нижнем регистре или None: сбой gh, не та
+    ветка, не коммит. Тот же источник, что у шлюза guard (merge_gate._base_tip): с ним сверяется base_oid решения."""
+    if not isinstance(branch, str) or not re.fullmatch(r"(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![/.])", branch):
+        return None
+    try:
+        r = subprocess.run([gh_path(), "api", f"repos/{repo}/git/ref/heads/{branch}"], capture_output=True, text=True,
+                           timeout=GH_TIMEOUT, env=gh_env())
+        ref = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    obj = ref.get("object") if isinstance(ref, dict) and isinstance(ref.get("object"), dict) else {}
+    sha = obj.get("sha")
+    if ref.get("ref") != "refs/heads/" + branch or obj.get("type") != "commit" or not isinstance(sha, str) \
+            or not re.fullmatch(r"[0-9a-f]{40}", sha.lower()):
+        return None
+    return sha.lower()
+
+
 def code_facts(repo, pr, sha, view):
     """(same, differs) — head PR, чей код шлюз guard сверил с кодом sha (metis-0966, 0396, 0443, вариант А): same — тот
     же код (отпечаток собственного диффа или слияние, merge_gate._merge_same), differs — посчитано, код другой. Берётся
     последнее решение (запись kind "decision" в carry.jsonl, её пишет хук guard при `pantheon merge request`, P.
-    review_decisions) на sha и нынешнюю base PR, записанное не раньше REQUEST_TTL назад. Нет решения — пустые множества:
-    у прохода нет git папки слияния, другой коммит здесь — неизвестный код, и шлюз судит строго."""
+    review_decisions) на sha и нынешнюю base PR, записанное не раньше REQUEST_TTL назад и на нынешней вершине ветки
+    base (base_oid решения — живая вершина base_tip: main ушёл вперёд — решение о другом слиянии). Нет решения —
+    пустые множества: у прохода нет git папки слияния, другой коммит здесь — неизвестный код, и шлюз судит строго."""
     base = view.get("baseRefName") if isinstance(view, dict) else None
+    tip = []
     for d in reversed(P.review_decisions(repo, pr)):
         try:
             age = P.now() - datetime.fromisoformat(str(d.get("time"))).timestamp()
@@ -889,6 +911,10 @@ def code_facts(repo, pr, sha, view):
             continue
         if d.get("sha") == sha and isinstance(base, str) and base and d.get("base") == base \
                 and 0 <= age <= REQUEST_TTL:
+            if not tip:
+                tip.append(base_tip(repo, base))  # gh — только когда есть решение-кандидат, один раз
+            if str(d.get("base_oid") or "").lower() != tip[0]:  # вершины нет (None) — тоже не та
+                return frozenset(), frozenset()
             same, differs = set(d["same"]) - {sha}, set(d["differs"]) - {sha}
             return frozenset(same - differs), frozenset(differs - same)
     return frozenset(), frozenset()

@@ -3962,6 +3962,15 @@ def t_carry_gate(h):
              [opus(s["P"]), tests(s["N1"])], False, "неполная история")
     finally:
         os.remove(os.path.join(p, ".git", "shallow"))
+    alt = os.path.join(p, ".git", "objects", "info", "alternates")
+    os.makedirs(os.path.dirname(alt), exist_ok=True)
+    with open(alt, "w") as fh:
+        fh.write(os.path.join(p, ".git", "objects") + "\n")
+    try:
+        case("objects/info/alternates (объекты из другой папки) — не переносится", "N1", "M1",
+             [opus(s["P"]), tests(s["N1"])], False, "alternates")
+    finally:
+        os.remove(alt)
     git(p, "replace", s["out"], s["N1"])
     try:
         case("git replace (117-b): head с правкой кода не переносит", "out", "M1", [opus(s["P"]), tests(s["out"])],
@@ -5425,6 +5434,16 @@ def t_request_decision(h):
     got = case("клон другого репозитория", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
     check("решение: git не сверить (не клон) — запись с пустыми same и differs и причиной", len(got) == 1
           and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
+    alt = os.path.join(p, ".git", "objects", "info", "alternates")
+    os.makedirs(os.path.dirname(alt), exist_ok=True)
+    with open(alt, "w") as fh:
+        fh.write(os.path.join(p, ".git", "objects") + "\n")
+    try:
+        got = case("alternates в клоне", qdm, bd2, [opus(qd)])
+    finally:
+        os.remove(alt)
+    check("решение: objects/info/alternates — не сверено: same и differs пусты, причина названа", len(got) == 1
+          and got[0]["same"] == [] and got[0]["differs"] == [] and any("alternates" in w for w in got[0]["why"]), got)
     got = case("два номера одного PR", qdm, bd2, [opus(qd)], cmd="pantheon merge request 7 7 -R Latark/Agent-Kit")
     check("решение: номер дважды — одна запись, repo в нижнем регистре", len(got) == 1
           and got[0]["repo"] == ["latark/agent-kit"], got)

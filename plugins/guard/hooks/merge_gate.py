@@ -2005,7 +2005,8 @@ def _git_bytes(gd, *args, input=None):
 
 def _carry_git(cwd, repo, base):
     """Git папки слияния для сверки диффов → (git dir, None) или (None, почему не переносится). Нужны: папка — клон
-    repo (remote), полная история (не shallow, без info/grafts) и коммит base PR в git папки."""
+    repo (remote), полная история (не shallow, без info/grafts), свои объекты (без objects/info/alternates) и коммит
+    base PR в git папки."""
     remotes = _git_remotes(cwd) if cwd else None
     if remotes is None or repo not in {_repo_tail(r) for r in remotes}:
         return None, f"папка слияния — не клон {repo}, диффы не сверить (сливай из клона {repo})"
@@ -2021,6 +2022,12 @@ def _carry_git(cwd, repo, base):
         return None, "git папки слияния не ответил"
     if os.path.lexists(os.path.join(gd, os.fsdecode(grafts.strip()))):
         return None, "в git папки есть info/grafts — история подменена"
+    # объекты из чужой папки (git clone --reference, подложенный alternates) — «тот же код» по ним не сверить
+    alt = _git_bytes(gd, "rev-parse", "--git-path", "objects/info/alternates")
+    if alt is None:
+        return None, "git папки слияния не ответил"
+    if os.path.lexists(os.path.join(gd, os.fsdecode(alt.strip()))):
+        return None, "в git папки есть objects/info/alternates — объекты из другой папки, диффы не сверить"
     if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()) \
             or _git_bytes(gd, "cat-file", "-e", base.lower() + "^{commit}") is None:
         return None, f"коммита base PR ({str(base)[:12]}) нет в git папки — сделай git fetch"

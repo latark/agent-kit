@@ -141,6 +141,15 @@ if sys.argv[1] == "api" and "/actions/jobs/" in sys.argv[2]:
     print(json.dumps(v["statusCheckRollup"][i].get("job") or {"runner_id": 5, "runner_name": "r5",
                                                               "steps": [{"name": "Set up job"}]}))
     sys.exit(0)
+if sys.argv[1] == "api" and "/git/ref/heads/" in sys.argv[2]:
+    # вершина ветки base (code_facts, metis-0966): rec/gh-tip — SHA (по умолчанию b×40, как base_oid Box.decide),
+    # с gh-tip-fail — сбой
+    if os.path.exists(os.path.join(rec, "gh-tip-fail")):
+        sys.exit(1)
+    t = os.path.join(rec, "gh-tip")
+    print(json.dumps({"ref": "refs/heads/" + sys.argv[2].split("/git/ref/heads/")[1],
+                      "object": {"sha": open(t).read().strip() if os.path.exists(t) else "b" * 40, "type": "commit"}}))
+    sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
     p = one("gh-files.jsonl", sys.argv[2].split("/pulls/")[1].split("/")[0])
     if not os.path.exists(p):
@@ -656,6 +665,18 @@ def test_gate_decision():
     check("0966: решение на другой head — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
     b = box(held, {"differs": [SHA2], "t": T0 - 24 * 3600 - 60})
     check("0966: решение старше суток — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
+    for name, tip, fail in (("вершина base ушла вперёд после решения", "c" * 40, False),
+                            ("вершину base не получить от gh", None, True)):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid in held:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        b.decide(differs=[SHA2])
+        open(os.path.join(b.rec, "gh-tip-fail" if fail else "gh-tip"), "w").write(tip or "")
+        b.run()
+        check(f"0966: {name} — решение не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
     b = box(held, {"differs": [SHA2], "t": T0 + 3600})
     check("0966: решение из будущего (часы сдвинуты) — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(),
           b.alerts())
