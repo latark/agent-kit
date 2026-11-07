@@ -39,6 +39,27 @@ def main():
     return 0 if all(results) else 1
 
 
+def budget_checks(pantheon, git, repo):
+    # metis-0513: бюджет под предел вызова Bash (600 с): ожидание места heavy и сами тесты не дольше бюджета
+    show = ["review", "test", "--", "sh", "-c", "echo HWM=${HEAVY_WAIT_MAX-unset}"]
+    r = pantheon(*show, cwd=repo)
+    check("test — heavy ждёт места не дольше бюджета (по умолчанию 570 с)", "HWM=570" in r.stdout, r.stdout)
+    r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "100", "HEAVY_WAIT_MAX": "900"})
+    check("test — свой HEAVY_WAIT_MAX больше бюджета урезается до бюджета", "HWM=100" in r.stdout, r.stdout)
+    r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "100", "HEAVY_WAIT_MAX": "50"})
+    check("test — свой HEAVY_WAIT_MAX меньше бюджета остаётся", "HWM=50" in r.stdout, r.stdout)
+    r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "0"})
+    check("test — бюджет 0: без ограничения, HEAVY_WAIT_MAX не ставится", "HWM=unset" in r.stdout, r.stdout)
+    head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    r = pantheon("review", "test", "--", "sleep", "60", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
+    check("test — команда дольше бюджета: остановлена, код 75, причина и совет в stderr, SHA не печатается",
+          r.returncode == 75 and "не уложилась в 1 с" in r.stderr and "outside test" in r.stderr
+          and head not in r.stdout, (r.returncode, r.stderr, r.stdout))
+    r = pantheon("review", "test", "--", "true", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
+    head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()  # прежние проверки сдвигали HEAD
+    check("test — команда в бюджете: код 0 и SHA, как раньше", r.returncode == 0 and head in r.stdout, r.stderr)
+
+
 def run_all(tmp):
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
@@ -94,6 +115,7 @@ def run_all(tmp):
     check("test — не git: код 2", r.returncode == 2)
     r = pantheon("review", "test", "true", cwd=repo)
     check("test без -- : код 2", r.returncode == 2)
+    budget_checks(pantheon, git, repo)
 
     cl = ["--opened", "merge_gate.py, README", "--ran", 'heavy python3 -I tests/x.py "84 из 84"', "--unchecked", "gh"]
     for kind, extra in (("accept", cl), ("reject", []), ("talos", [])):
