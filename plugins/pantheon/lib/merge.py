@@ -100,6 +100,7 @@ import contextlib
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -137,6 +138,10 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github", "plugins/pantheon/packs")
+# файлы, где ядро — сборка и запуск окон по AST (BUILD_ROOTS шлюза, metis-0404, 0552): окно Touch ID называет их
+# среди ядра, как только PR их правит, — шлюз уже счёл PR ядром или не смог проверить (metis-0551); совпадение
+# с шлюзом сверяет test_merge_gate
+BUILD_FILES = ("plugins/pantheon/lib/pantheon.py", "plugins/pantheon/lib/sessions.py")
 MAX_BATCH = 5                        # PR в одной пачке: их номера, SHA и ядро — в окне не длиннее 400 знаков
 # согласие фразой (metis-0959): «слей #N <hex>» — первой строкой вашего сообщения в owner-log/<окно>.md
 PHRASE_TTL = 2 * 3600                # фраза старше 2 ч не действует
@@ -468,11 +473,15 @@ def version_problem(files):
 
 
 def is_core(path):
-    """Ядро — как _is_core шлюза guard: папки CORE_DIR целиком и файлы CORE_FILES, без учёта регистра."""
-    p = path.strip("/").casefold()
-    while p.startswith("./"):
-        p = p[2:].lstrip("/")
+    """Ядро — как _is_core шлюза guard: папки CORE_DIR целиком и файлы CORE_FILES, без учёта регистра; ./, //, `..`
+    в середине пути сводятся так же (posixpath.normpath, metis-0551 — совпадение сверяет test_merge_gate)."""
+    p = posixpath.normpath(path.strip("/") or ".").strip("/").casefold()
     return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
+
+
+def window_core(path):
+    """Ядро для окна Touch ID: is_core или файл сборки и запуска окон BUILD_FILES (metis-0551)."""
+    return is_core(path) or posixpath.normpath(path.strip("/") or ".").strip("/").casefold() in BUILD_FILES
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
@@ -1014,7 +1023,7 @@ def build_helper(quiet=True):
 def window_text(req, view, why, paths):
     """Текст окна: сначала задетые файлы ядра (их владелец и подтверждает), заголовок автора PR — последним, в
     кавычках и коротко: он не перекроет список."""
-    core = [p for p in dict.fromkeys(paths) if is_core(p)]
+    core = [p for p in dict.fromkeys(paths) if window_core(p)]
     shown, size = [], 0
     for p in core:
         if shown and size + len(p) > 200:
@@ -1042,7 +1051,7 @@ def batch_window_text(reqs, views, whys, paths):
     n = len(reqs)
     head = f"Слить по очереди {n} PR {reqs[0]['repo']}, отказ шлюза у одного останавливает следующие."
     every = [x for p in paths for x in p]
-    core = [x for x in dict.fromkeys(every) if is_core(x)]
+    core = [x for x in dict.fromkeys(every) if window_core(x)]
     pre = [f"#{r['pr']} {r['sha'][:7]}" for r in reqs]
     fixed = len(" Вердикты: .") + sum(len(x) + 3 for x in pre)   # «#N sha7 » и «; » у каждого
     room = max(400 - len(head) - fixed - n * len(f"argus ×2 ✓, {BILLING_SHORT}") - 40, 60)

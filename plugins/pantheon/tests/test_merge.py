@@ -1186,6 +1186,34 @@ def test_core_matches_guard():
     check("ядро merge.py == ядро merge_gate.py", r.stdout.strip() == "True", r.stdout + r.stderr)
 
 
+
+def test_is_core_matches_gate():
+    """metis-0551: один признак ядра — merge.is_core и _is_core шлюза совпадают на одних путях (./, //, `..`, регистр),
+    а окно Touch ID называет среди ядра и файлы сборки окон BUILD_ROOTS шлюза."""
+    paths = ["plugins/guard/x.py", "./plugins/guard/x.py", "plugins//guard/x.py", "plugins/x/../guard/x.py",
+             "PLUGINS/Pantheon/lib/merge.py", "plugins/pantheon/lib/a/../merge.py", "/plugins/pantheon/hooks/ctx.py",
+             "plugins/pantheon/lib/pantheon.py", "plugins/pantheon/lib/sessions.py", "README.md", "", "/", ".",
+             "plugins/guardian/x.py", ".github", "plugins/pantheon/packs/a/hooks.json",
+             "a/../.claude-plugin/marketplace.json"]
+    code = ("import sys, json, importlib.util; sys.path.insert(0, %r); import merge_gate as g\n"
+            "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m)\ncore = {c.casefold() for c in g.CORE_FILES}\nps = json.loads(sys.argv[1])\n"
+            "print(json.dumps([[p, g._is_core(p, core), m.is_core(p), m.window_core(p)] for p in ps]))\n"
+            "print(json.dumps(sorted(g.BUILD_ROOTS) == sorted(m.BUILD_FILES)))"
+            % (GUARD_HOOKS, os.path.join(LIBDIR, "merge.py")))
+    r = subprocess.run([sys.executable, "-I", "-c", code, json.dumps(paths)], capture_output=True, text=True,
+                       timeout=60)
+    lines = r.stdout.splitlines()
+    rows = json.loads(lines[0]) if lines else []
+    check("is_core: ответ на каждый путь", len(rows) == len(paths), r.stdout + r.stderr)
+    bad = [x for x in rows if x[1] != x[2]]
+    check("is_core merge.py == _is_core шлюза на всех путях", not bad, bad)
+    check("окно: файлы сборки — среди ядра окна, но не is_core",
+          all(x[3] and not x[2] for x in rows if x[0].endswith(("lib/pantheon.py", "lib/sessions.py"))), rows)
+    check("окно: ядро is_core — и ядро окна", all(x[3] for x in rows if x[2]), rows)
+    check("BUILD_FILES merge.py == BUILD_ROOTS шлюза", lines[1:] == ["true"], r.stdout + r.stderr)
+
+
 FORK = {"isCrossRepository": True, "headRepository": {"id": "R_x", "name": "agent-kit", "nameWithOwner": "Ext/agent-kit"},
         "headRefName": "feat"}
 

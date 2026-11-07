@@ -418,6 +418,47 @@ def test_open_core_sandbox_build():
         A.gh_text, A.base_tip = real_text, real_tip
 
 
+def test_open_core_sessions_launch():
+    """metis-0551, 0552: доска берёт у шлюза и запуск окон в sessions.py — снятие --settings в _start_session ядро,
+    новая функция в sessions.py — не ядро; PR с pantheon.py и sessions.py сверяет оба файла."""
+    import hashlib
+    gate = A.load_gate()
+    pp, sp = "plugins/pantheon/lib/pantheon.py", "plugins/pantheon/lib/sessions.py"
+    src = {pp: open(CLI, encoding="utf-8").read(), sp: open(os.path.join(LIB, "sessions.py"), encoding="utf-8").read()}
+    a = '"--settings", run, prompt]'
+    check("в sessions.py есть запуск с --settings", src[sp].count(a) == 1)
+
+    def sha(n):
+        return hashlib.sha1(str(n).encode()).hexdigest()
+    base, head, mb, tip = sha("b"), sha("h"), sha("m"), sha("t")
+    state = dict(src)
+    asked = []
+
+    def fake_text(args, env=None, timeout=90):
+        if "compare" in args[1]:
+            return mb + "\n"
+        path, ref = args[1].split("/contents/", 1)[1].split("?ref=", 1)
+        asked.append(path)
+        return state[path] if ref == head else src[path]
+
+    real_text, real_tip = A.gh_text, A.base_tip
+    A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
+    try:
+        row = {"number": 7, "headRefOid": head, "baseRefOid": base, "baseRefName": "main", "files": [{"path": sp}]}
+        state[sp] = src[sp].replace(a, "prompt]", 1)
+        check("PR снимает --settings в _start_session → ядро", A.sandbox_core("a/b", row, gate=gate) is True)
+        state[sp] = src[sp] + "\n\ndef _probe_0552():\n    return 1\n"
+        check("PR добавляет функцию в sessions.py → не ядро", A.sandbox_core("a/b", row, gate=gate) is False)
+        del asked[:]
+        both = dict(row, files=[{"path": pp}, {"path": sp}])
+        check("PR с pantheon.py и sessions.py без правки сборки → не ядро",
+              A.sandbox_core("a/b", both, gate=gate) is False and {pp, sp} <= set(asked), asked)
+        state[sp] = src[sp].replace(a, "prompt]", 1)
+        check("PR с pantheon.py и sessions.py, снятие --settings → ядро", A.sandbox_core("a/b", both, gate=gate) is True)
+    finally:
+        A.gh_text, A.base_tip = real_text, real_tip
+
+
 def test_board_line_core():
     """metis-0686 п. 3: PR с правкой функции из замыкания sandbox_build проходит весь путь доски — fetch (признак шлюза)
     → кэш autoclose-prs.json → boardtext.open_prs → pr_line: в строке «ядро → сливает владелец», слов «не ядро» нет.
