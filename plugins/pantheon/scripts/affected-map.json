@@ -304,7 +304,7 @@
     "pantheon/test_wt_cleanup.py",
     "project-tools/test_project_tools.py"
   ],
-  "broken": ["pantheon/test_merge.py"],
+  "broken": [],
   "readers": ["guard/test_context.py", "guard/test_core_deps.py", "guard/test_taint.py", "pantheon/test_glossary.py"],
   "files": {
     ".claude-plugin/marketplace.json": [113],
@@ -387,7 +387,7 @@
     "plugins/pantheon/docs/charon/README.md": [48, 68, 72, 94, 113, 146],
     "plugins/pantheon/glossary.toml": [48, 68, 72, 94, 113, 146],
     "plugins/pantheon/hooks/agents.py": [24, 48, 66, 68, 69, 72, 94, 113, 131, 146],
-    "plugins/pantheon/hooks/ctx.py": [8, 24, 27, 31, 39, 42, 46, 48, 51, 52, 53, 54, 55, 63, 66, 68, 69, 71, 72, 73, 91, 92, 94, 96, 100, 101, 105, 109, 113, 114, 131, 141, 143, 144, 146],
+    "plugins/pantheon/hooks/ctx.py": [8, 24, 27, 31, 39, 42, 46, 48, 51, 52, 53, 54, 55, 63, 66, 68, 69, 71, 72, 91, 92, 94, 96, 100, 101, 105, 109, 113, 114, 131, 141, 143, 144, 146],
     "plugins/pantheon/hooks/dev-stop-verify.py": [48, 61, 66, 68, 69, 72, 94, 113, 114, 146],
     "plugins/pantheon/hooks/hooks.json": [11, 31, 48, 54, 64, 66, 68, 71, 72, 90, 94, 113, 140, 141, 146],
     "plugins/pantheon/hooks/python.sh": [1, 5, 6, 7, 8, 9, 10, 11, 48, 64, 66, 68, 71, 72, 94, 113, 140, 141, 146],
