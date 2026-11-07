@@ -23,8 +23,10 @@
   через renamex_np (проба E2 r7) не меняет ни одной папки --add-dir (nested_projects по fd). Мутанты краснеют;
 - класс 6 (круг G, решение владельца 07.11 02:27) — мимо песочницы пишет исключённая команда: коммит, собранный
   окном низкоуровневыми git, приходит в .claude/hooks через `git pull . <ветка>`; снимок берёт скрипт репозитория,
-  только если его sha256 — эталон пакета (packs/<окно>/approved-hooks.json), иначе хук — отказ in_repo.py (выход 2,
-  «не одобрен»). Долги F1 Д1–Д3 — мутанты M5, M3, M6 краснеют.
+  только если его sha256 — эталон направления (~/.claude/pantheon/packs/<направление>/approved.json, поправка Зевса
+  02:30), иначе хук пропущен (in_repo.py, выход 0) и Зевсу одна тревога на хеш с диффом; нет файла — скрипты
+  направления не исполняются; `pantheon packs hashes` печатает эталоны и ничего не пишет. Долги F1 Д1–Д3 — мутанты
+  M5, M3, M6 краснеют.
 Во временном HOME, настоящие ~/.claude и ~/ai не трогает. Python 3.14 (metis-0571)."""
 import atexit
 import contextlib
@@ -269,7 +271,19 @@ def class2(tmp, env, P):
         got = {(rp, n) for rp, ns in man.get("unapproved", {}).items() for n in ns}
         check(f"класс 6: {name} — скрипты не по эталону пакета в снимок не взяты (unapproved), запуск окна назвал "
               "их строкой «не одобрен»", got == want and not any(man.get("repos", {}).values())
-              and r.stderr.count("не одобрен: хеш") == len(want), (got, want, man.get("repos"), r.stderr[-600:]))
+              and r.stderr.count("не одобрен (хеш") == len(want), (got, want, man.get("repos"), r.stderr[-600:]))
+        hashes, warn = P.pack_hashes(name)
+        listed = {(rp.replace("$HOME", os.path.realpath(home)), n) for rp, v in (hashes or {}).get("repos", {}).items()
+                  for n in v["scripts"]}
+        check(f"класс 6: packs hashes {name} — sha256 каждого скрипта хуков пакета и только их; HEAD нет — сказано",
+              listed == set(P.pack_hook_scripts(os.path.join(PACKS, name))) == want and all(
+                  h == hashlib.sha256(b"exit 0\n").hexdigest() for v in hashes["repos"].values()
+                  for h in v["scripts"].values()) and any("HEAD" in w for w in warn), (listed, want, warn))
+        approved_home = os.path.join(home, ".claude", "pantheon")
+        r = run(env, "packs", "hashes", name)
+        check(f"класс 6: pantheon packs hashes {name} — JSON в stdout, код 1 (HEAD не прочитан), "
+              "~/.claude/pantheon/packs не создан", r.returncode == 1 and json.loads(r.stdout) == hashes
+              and not os.path.exists(os.path.join(approved_home, "packs")), (r.returncode, r.stdout[-300:], r.stderr))
         mcp_file = os.path.join(state, "settings", "run", f"{name}.mcp.json")
         scripts = [a for v in (json.load(open(mcp_file)).get("mcpServers", {}) if os.path.isfile(mcp_file) else {}
                                ).values() for a in v.get("args", []) if a.endswith(".py")]
@@ -789,8 +803,8 @@ def class_f_hooks(tmp):
     with contextlib.redirect_stderr(io.StringIO()):
         unok = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs, approved=own)
     got = hook(unok)
-    check("круг G: правка скрипта окном без нового эталона — в снимок не взята, хук — отказ (выход 2)",
-          got[:3] == (0, 0, 2) and "не одобрен" in got[3], got)
+    check("круг G: правка скрипта окном без нового эталона — в снимок не взята, хук пропущен (выход 0), не исполнен",
+          got[:3] == (0, 0, 0) and "не одобрен" in got[3], got)
     fresh = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
     again = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
     check("круг F: правка скрипта с новым эталоном — новый снимок у следующего запуска (старый на месте: его держит "
@@ -800,7 +814,13 @@ def class_f_hooks(tmp):
 
 # --- класс 6: мимо песочницы пишет не окно, а исключённая из неё команда (ревью argus F1 Б1, F2 Б1 PR #360) ---
 NO_APPROVAL = ("if (approved.get(repo) or {}).get(script) != digest:", "if False:")
+NO_FILE_RUNS = ("if (approved.get(repo) or {}).get(script) != digest:",
+                "if approved and (approved.get(repo) or {}).get(script) != digest:")
+ALERT_EVERY = ('alert_once(key, "1", text, who="pantheon")', 'alert(text, who="pantheon")')
 UNAPPROVED_AS_MISSING = ("if not isinstance(rel, str) and isinstance(digest, str):", "if False:")
+WRITES_APPROVED = ("print(json.dumps(got, ensure_ascii=False, indent=2, sort_keys=True))",
+                   "os.makedirs(os.path.dirname(pack_approved_path(rest[1])), exist_ok=True); "
+                   "open(pack_approved_path(rest[1]), 'w').write(json.dumps(got))")
 
 
 def git(repo, *a, env=None, inp=None):
@@ -820,13 +840,39 @@ def mutant_fn(fn, old, new):
     return ns[fn.__name__]
 
 
+@contextlib.contextmanager
+def patched(**kw):
+    """Атрибуты модуля ядра P на время блока (HOME, PACKS, PACK_APPROVED_HOME, функции-мутанты)."""
+    old = {k: getattr(P, k) for k in kw}
+    for k, v in kw.items():
+        setattr(P, k, v)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            setattr(P, k, v)
+
+
+def tree_state(top):
+    """{путь: байты} всех файлов под top (нет папки — {}): было ли что-то записано."""
+    out = {}
+    for dp, _, fns in os.walk(top):
+        for n in fns:
+            with open(os.path.join(dp, n), "rb") as fh:
+                out[os.path.join(dp, n)] = fh.read()
+    return out
+
+
 def class_g_pull(tmp):
-    """Класс 6: окно в песочнице собирает коммит низкоуровневыми git (пишутся только .git/objects и refs — рабочая
-    копия не тронута), а `git pull . <ветка>` из excludedCommands окна идёт мимо песочницы и переписывает
-    .claude/hooks/protect-db.sh. Литеральный denyWrite такую запись не держит. Следующий запуск окна
-    (pack_snapshot_make) скрипт с чужим хешем в снимок не берёт — в манифесте unapproved, в stderr строка «не одобрен»,
-    а хук (in_repo.py) — отказ, выход 2, чужое не исполнено. Одобренный эталон (PR владельца) — исполняется.
-    Мутанты «без сверки с эталоном» (pantheon.py) и «не одобрен — как нет скрипта» (in_repo.py) краснеют."""
+    """Класс 6 (решение владельца 07.11 02:27 «А — хуки с вашим одобрением», поправка Зевса 02:30): окно в песочнице
+    собирает коммит низкоуровневыми git (пишутся только .git/objects и refs — рабочая копия не тронута), а `git pull .
+    <ветка>` из excludedCommands окна идёт мимо песочницы и переписывает .claude/hooks/protect-db.sh. Литеральный
+    denyWrite такую запись не держит. Эталоны — в данных пользователя ~/.claude/pantheon/packs/<направление>/
+    approved.json (PACK_APPROVED_HOME), их печатает `pantheon packs hashes` и ничего не пишет. Следующий запуск окна
+    (pack_snapshot) скрипт с чужим хешем в снимок не берёт — хук пропущен (in_repo.py, выход 0), чужое не исполнено,
+    Зевсу одна тревога на хеш со старым и новым sha256 и диффом от коммита одобрения. Нет approved.json — скрипты
+    направления не исполняются, та же тревога. Мутанты «без сверки», «без файла исполняем», «тревога на каждый
+    запуск», «не одобрен — как нет скрипта» (in_repo.py) и «пишет approved.json» краснеют."""
     home = os.path.join(tmp, "ghome")
     app = os.path.join(home, "projects", "MorphStream", "app")
     log, hooks_rel = os.path.join(tmp, "g-pull.log"), ".claude/hooks/protect-db.sh"
@@ -835,9 +881,19 @@ def class_g_pull(tmp):
     git(app, "init", "-q", "-b", "main")
     git(app, "add", "-A")
     git(app, "commit", "-q", "-m", "свои хуки")
-    pairs, bin_dir = [(app, "protect-db.sh")], os.path.join(PACKS, "_bin")
-    approved = {app: {"protect-db.sh": hashlib.sha256(own.encode()).hexdigest()}}
+    head = git(app, "rev-parse", "HEAD")
+    # пакет направления gwin: хук protect-db.sh через in_repo.py, как у proteus-morph
+    packs, win = os.path.join(tmp, "gpacks"), "gwin"
+    shutil.copytree(os.path.join(PACKS, "_bin"), os.path.join(packs, "_bin"))
+    put(os.path.join(packs, win, ".claude-plugin", "plugin.json"), {"name": "gwin"})
+    put(os.path.join(packs, win, "hooks", "hooks.json"), {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+        {"type": "command", "command": 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
+                                       '"$HOME/projects/MorphStream/app" --always -- bash .claude/hooks/protect-db.sh'}]}]}})
+    ahome = os.path.join(home, ".claude", "pantheon", "packs")
+    afile = os.path.join(ahome, win, "approved.json")
+    alerts = os.path.join(P.PANTHEON, "alerts.md")
     env = {"PATH": os.environ["PATH"], "HOME": home, "G_LOG": log}
+    mods = dict(HOME=home, PACKS=packs, PACK_APPROVED_HOME=ahome)
 
     def hook(snap):
         if os.path.exists(log):
@@ -848,15 +904,47 @@ def class_g_pull(tmp):
         words = open(log).read().split() if os.path.exists(log) else []
         return words.count("EVIL"), words.count("OWN"), r.returncode, r.stderr
 
-    def snap(label, bdir=bin_dir, ok=approved, make=None):
+    def launch(label, **mut):
+        """Запуск окна: pack_snapshot (как window_launch) → (снимок, stderr, строки тревог класса 6)."""
         err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            s = snap_of(tmp, label, bdir, pairs, approved=ok, make=make)
-        return s, err.getvalue()
+        with patched(**mods, **mut), contextlib.redirect_stderr(err):
+            s = P.pack_snapshot(win, label)
+        lines = [x for x in (open(alerts, encoding="utf-8").read().splitlines() if os.path.exists(alerts) else [])
+                 if f"[metis-0933] {win}:" in x]
+        return s, err.getvalue(), lines
 
-    before, _ = snap("g")
-    check("класс 6: самопроверка — скрипт по эталону взят в снимок и исполнен", hook(before)[:3] == (0, 1, 0),
-          hook(before))
+    # первичное одобрение: владелец кладёт вывод `pantheon packs hashes` в approved.json (owner-edit)
+    with patched(**mods):
+        before = tree_state(ahome)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = P.pack_hashes_cmd(["hashes", win])
+        printed = json.loads(out.getvalue())
+        wrote = tree_state(ahome) != before
+    want = {"repos": {"$HOME/projects/MorphStream/app": {
+        "commit": head, "scripts": {"protect-db.sh": hashlib.sha256(own.encode()).hexdigest()}}}}
+    check("класс 6: packs hashes — нынешние sha256 и HEAD в формате approved.json, код 0, ничего не записано",
+          rc == 0 and printed == want and not wrote, (rc, printed, wrote))
+    with patched(**mods, pack_hashes_cmd=mutant_fn(P.pack_hashes_cmd, *WRITES_APPROVED)):
+        with contextlib.redirect_stderr(io.StringIO()):
+            P.pack_hashes_cmd(["hashes", win])
+        mutant_wrote = tree_state(ahome) != before
+    check("класс 6: самопроверка — мутант «hashes пишет approved.json» замечен", mutant_wrote, tree_state(ahome))
+    shutil.rmtree(ahome, ignore_errors=True)
+    # без approved.json: скрипты направления не исполняются, одна тревога
+    s0, err0, al0 = launch("g0")
+    man = json.load(open(os.path.join(s0, "manifest.json")))
+    got = hook(s0)
+    check("класс 6: approved.json нет — скрипт не в снимке, хук пропущен (выход 0), не исполнен, тревога одна",
+          not man["repos"] and got[:3] == (0, 0, 0) and "не одобрен" in got[3] and len(al0) == 1
+          and "approved.json нет" in al0[0] and "одобрить?" in al0[0], (man, got, al0, err0))
+    m0, _, _ = launch("g0m", pack_snapshot_make=mutant_fn(P.pack_snapshot_make, *NO_FILE_RUNS))
+    check("класс 6: самопроверка — мутант «без файла исполняем» исполняет скрипт без эталона", hook(m0)[1] == 1,
+          hook(m0))
+    put(afile, json.dumps(printed))
+    ok_snap, _, al1 = launch("g")
+    check("класс 6: самопроверка — скрипт по эталону взят в снимок и исполнен, новой тревоги нет",
+          hook(ok_snap)[:3] == (0, 1, 0) and len(al1) == 1, (hook(ok_snap), al1))
     # окно в песочнице: коммит без рабочей копии (hash-object, update-index во временный индекс, commit-tree, update-ref)
     blob = git(app, "hash-object", "-w", "--stdin", inp=evil)
     idx = {"GIT_INDEX_FILE": os.path.join(tmp, "g-evil.index")}
@@ -869,44 +957,52 @@ def class_g_pull(tmp):
     git(app, "-c", "pull.rebase=false", "pull", "-q", ".", "evil")  # мимо песочницы (excludedCommands окна)
     check("класс 6: самопроверка — git pull . evil переписал .claude/hooks рабочей копии",
           open(os.path.join(app, hooks_rel)).read() == evil, open(os.path.join(app, hooks_rel)).read())
-    digest = hashlib.sha256(evil.encode()).hexdigest()
-    line = f"скрипт {os.path.join(app, hooks_rel)} не одобрен: хеш {digest}, одобрить — PR в packs"
-    after, err = snap("g")
+    digest, was = hashlib.sha256(evil.encode()).hexdigest(), hashlib.sha256(own.encode()).hexdigest()
+    after, err, al2 = launch("g")
+    after2, _, al3 = launch("g")
     man = json.load(open(os.path.join(after, "manifest.json")))
-    check("класс 6: после git pull pack_snapshot_make не берёт скрипт с чужим хешем — unapproved и строка в stderr",
-          after != before and not man["repos"] and man["unapproved"] == {app: {"protect-db.sh": digest}}
-          and line in err, (man, err))
     got = hook(after)
-    check("класс 6: после git pull хук — отказ in_repo.py (выход 2, «не одобрен: хеш …, одобрить — PR в packs»), "
-          "чужое не исполнено", got[:3] == (0, 0, 2) and line in got[3], got)
-    m, _ = snap("g-mut", make=mutant_fn(P.pack_snapshot_make, *NO_APPROVAL))
+    new = [x for x in al3 if x not in al1]
+    check("класс 6: после git pull . evil подменённый скрипт не в снимке (unapproved), хук пропущен (выход 0), чужое "
+          "не исполнено", after != ok_snap and not man["repos"] and man["unapproved"] == {app: {"protect-db.sh": digest}}
+          and got[:3] == (0, 0, 0) and "не одобрен" in got[3] and "не одобрен" in err, (man, got, err))
+    check("класс 6: тревога одна на два запуска окна — «[metis-0933] gwin: хук … изменён, одобрить?», старый и новый "
+          "sha256, дифф от коммита одобрения", after2 == after and al2 == al3 and len(new) == 1
+          and "protect-db.sh изменён, одобрить?" in new[0] and was in new[0] and digest in new[0]
+          and f"{head[:12]}:{hooks_rel}" in new[0] and "-echo OWN" in new[0] and "+echo EVIL" in new[0], (al1, al3))
+    m, _, _ = launch("g-mut", pack_snapshot_make=mutant_fn(P.pack_snapshot_make, *NO_APPROVAL))
     check("класс 6: самопроверка — мутант «без сверки с эталоном» берёт подменённый скрипт и исполняет чужое",
           hook(m)[0] == 1, hook(m))
-    m, _ = snap("g-mut2", bdir=mutant_bin(tmp, "g-missing", {"in_repo.py": [UNAPPROVED_AS_MISSING]}))
-    got = hook(m)
+    os.unlink(alerts)
+    launch("g-mut3", pack_unapproved_alert=mutant_fn(P.pack_unapproved_alert, *ALERT_EVERY))
+    _, _, al4 = launch("g-mut3", pack_unapproved_alert=mutant_fn(P.pack_unapproved_alert, *ALERT_EVERY))
+    check("класс 6: самопроверка — мутант «тревога на каждый запуск» пишет вторую строку", len(al4) == 2, al4)
+    with patched(**mods), contextlib.redirect_stderr(io.StringIO()):
+        m2 = P.pack_snapshot_make(os.path.join(tmp, "snaps"), "g-mut2", mutant_bin(
+            tmp, "g-missing", {"in_repo.py": [UNAPPROVED_AS_MISSING]}), None, [(app, "protect-db.sh")], {})
+    got = hook(m2)
     check("класс 6: самопроверка — мутант «не одобрен — как нет скрипта» отдаёт выход 1 без строки об одобрении",
           got[2] == 1 and "не одобрен" not in got[3], got)
-    later, _ = snap("g", ok={app: {"protect-db.sh": digest}})
-    check("класс 6: новый эталон (PR владельца в packs) — тот же скрипт взят и исполнен", hook(later)[:3] == (1, 0, 0),
-          hook(later))
-    # эталоны пакетов репозитория: у каждого скрипта хуков пакета — sha256 (иначе окно получит отказ на всех хуках)
-    old = P.HOME
-    P.HOME = home
-    try:
-        for name in sorted(n for n in os.listdir(PACKS) if not n.startswith(("_", "."))):
-            want = set(P.pack_hook_scripts(os.path.join(PACKS, name)))
-            ok = P.pack_approved(os.path.join(PACKS, name))
-            have = {(r, n) for r, ns in ok.items() for n in ns}
-            check(f"класс 6: пакет {name} — эталон sha256 у каждого скрипта его хуков и только у них", want == have,
-                  (sorted(want ^ have)))
-        put(os.path.join(tmp, "gpack", P.PACK_APPROVED), {"scripts": {"$HOME/x": {"a.sh": "0" * 64, "b.sh": "nothex",
-                                                                                  "c.sh": 1}, "~/y": []}})
-        check("класс 6: pack_approved — $HOME раскрыт, кривой хеш и не словарь отброшены",
-              P.pack_approved(os.path.join(tmp, "gpack")) == {os.path.join(os.path.realpath(home), "x"):
-                                                              {"a.sh": "0" * 64}}, P.pack_approved(os.path.join(tmp,
-                                                                                                                "gpack")))
-    finally:
-        P.HOME = old
+    # коммит одобрения без объекта — тревога без диффа; новый эталон (одобрение владельца) — исполняется
+    put(afile, {"repos": {"$HOME/projects/MorphStream/app": {"commit": "0" * 40, "scripts": {"protect-db.sh": was}}}})
+    os.unlink(alerts)
+    shutil.rmtree(P.path("once"), ignore_errors=True)  # этот хеш уже был в тревоге: отметки «один раз» — заново
+    _, _, al5 = launch("g-noobj")
+    check("класс 6: коммита одобрения нет в репозитории — тревога без диффа («объекта … нет»)",
+          len(al5) == 1 and "объекта 000000000000" in al5[0] and "+echo EVIL" not in al5[0], al5)
+    put(afile, {"repos": {"$HOME/projects/MorphStream/app": {"commit": commit, "scripts": {"protect-db.sh": digest}}}})
+    later, _, _ = launch("g")
+    check("класс 6: новый эталон в approved.json (одобрение владельца) — тот же скрипт взят и исполнен",
+          hook(later)[:3] == (1, 0, 0), hook(later))
+    put(os.path.join(tmp, "gpack.json"), {"repos": {"$HOME/x": {"commit": "nothex", "scripts": {
+        "a.sh": "0" * 64, "b.sh": "nothex", "c.sh": 1}}, "~/y": [], "$HOME/z": {"commit": "a" * 40, "scripts": []}}})
+    with patched(HOME=home):
+        got = P.pack_approved(os.path.join(tmp, "gpack.json"))
+        none = P.pack_approved(os.path.join(tmp, "nope.json"))
+    rh = os.path.realpath(home)
+    check("класс 6: pack_approved — $HOME раскрыт, кривые хеш, коммит и не словарь отброшены; нет файла — (None, {})",
+          got == ({os.path.join(rh, "x"): {"a.sh": "0" * 64}, os.path.join(rh, "z"): {}},
+                  {os.path.join(rh, "z"): "a" * 40}) and none == (None, {}), (got, none))
 
 
 def class_g_debts(tmp):

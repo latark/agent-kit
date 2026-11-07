@@ -44,9 +44,11 @@ window_launch собрал до старта окна (pantheon.py pack_snapshot
 Цель вне репозитория без --always — выход 0 молча. Нет папки репозитория — выход 0 со строкой в stderr: хук пакета не
 должен ронять инструменты окна. Нет скрипта `.claude/hooks/<имя>` в снимке (при запуске окна его не было, или звено
 пути к нему было ссылкой) или команда не запустилась — выход 1 со строкой в stderr (ошибка хука; onFailure: block её
-блокирует). Скрипт при запуске окна не совпал с эталоном пакета (packs/<окно>/approved-hooks.json, класс 6: `git
-pull` окна идёт мимо песочницы и мог переписать .claude/hooks; в манифесте — unapproved) — выход 2 со строкой
-«скрипт <путь> не одобрен: хеш …, одобрить — PR в packs»: инструмент блокируется. Звено пути репозитория ниже $HOME — ссылка или не папка (окно подменило), обёртка не из снимка, файл
+блокирует). Скрипт при запуске окна не совпал с эталоном направления или эталона нет
+(~/.claude/pantheon/packs/<направление>/approved.json, класс 6: `git pull` окна идёт мимо песочницы и мог переписать
+.claude/hooks; в манифесте — unapproved; решение владельца 07.11 02:27, поправка Зевса 02:30) — хук пропущен: выход 0
+и строка «скрипт <путь> не одобрен (хеш …) — хук пропущен» в stderr, чужое не исполняется; тревогу Зевсу шлёт запуск
+окна (pantheon.py pack_unapproved_alert). Звено пути репозитория ниже $HOME — ссылка или не папка (окно подменило), обёртка не из снимка, файл
 снимка не обычный или его хеш не совпал с манифестом — выход 2 с причиной: инструмент блокируется. Python 3.9+
 (системный python3 macOS)."""
 import hashlib
@@ -68,12 +70,13 @@ class Linked(OSError):
 
 
 class Unapproved(Exception):
-    """Скрипт репозитория при запуске окна не совпал с эталоном пакета (manifest unapproved, класс 6)."""
+    """Скрипт репозитория при запуске окна не совпал с эталоном направления (manifest unapproved, класс 6)."""
 
 
 def unapproved_line(script_path, digest):
-    """Строка отказа — как pack_unapproved_line ядра (pantheon.py)."""
-    return f"скрипт {script_path} не одобрен: хеш {digest}, одобрить — PR в packs (approved-hooks.json)"
+    """Строка о пропуске — как pack_unapproved_line ядра (pantheon.py)."""
+    return (f"скрипт {script_path} не одобрен (хеш {digest}) — хук пропущен; одобрение — у владельца через Зевса "
+            "(~/.claude/pantheon/packs/<направление>/approved.json)")
 
 
 def open_root(given):
@@ -275,8 +278,8 @@ def main(argv):
                 fds.append(sfd)
                 cmd[i] = f"/dev/fd/{sfd}"
     except Unapproved as e:
-        print(f"in_repo.py: {e} — хук не запущен, инструмент заблокирован", file=sys.stderr)
-        return 2
+        print(f"in_repo.py: {e}", file=sys.stderr)
+        return 0
     except FileNotFoundError as e:
         print(f"in_repo.py: {repo}: {e} — хук не запущен", file=sys.stderr)
         return 1
