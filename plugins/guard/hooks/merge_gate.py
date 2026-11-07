@@ -1727,9 +1727,11 @@ def _ci_problem(repo, pr, sha, data, owner=False, narrow=None):
         notes_by, jobs = _ci_notes(repo, ids), _ci_jobs(repo, ids)
         if any(notes_by.get(i) is None or jobs.get(i) is None for i in ids):
             # сбой gh на аннотациях или job (metis-0813: TLS x509 из окна) — лимит ли это, не проверить: отказ, но
-            # «повтори позже», а не «почини»: красная может быть лимитом минут, и тогда хватит записи тестов
+            # «повтори позже», а не «почини»: красная может быть лимитом минут, и тогда хватит записи тестов; владельцу —
+            # и аварийный путь, как в других отказах его пути (С1 argus #381)
             return (f"{text} на {repo}#{pr}@{sha[:12]}; аннотации CI или данные job красной проверки не получены (сбой "
-                    "gh) — не лимит ли это минут GitHub Actions, не проверить: повтори слияние позже"), ()
+                    "gh) — не лимит ли это минут GitHub Actions, не проверить: повтори слияние позже"
+                    + (f"; {OWNER_EMERGENCY}" if owner else "")), ()
         if ci_billing(runs, required, notes_by, jobs):
             # предупреждения о красных необязательных — и на запасном пути, рядом со строкой о лимите (С1 argus #248)
             why, extra = _billing_problem(repo, pr, sha, narrow, data.get("baseRefOid"))

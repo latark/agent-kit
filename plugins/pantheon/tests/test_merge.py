@@ -83,8 +83,19 @@ if sys.argv[1:3] == ["pr", "view"]:
         v = json.loads(raw)
     except ValueError:
         v = None
+    # rec/unknown-once — номера PR: следующий gh pr view каждого из них один раз отдаёт mergeable UNKNOWN, как GitHub
+    # после сдвига base (Б1 argus #381: mergeable считается лениво)
+    uo = os.path.join(rec, "unknown-once")
+    if isinstance(v, dict) and os.path.exists(uo) and sys.argv[3] in open(uo).read().split():
+        v = dict(v, mergeable="UNKNOWN", mergeStateStatus="UNKNOWN")
+        left = [n for n in open(uo).read().split() if n != sys.argv[3]]
+        open(uo, "w").write(" ".join(left))
     print(json.dumps({k: x for k, x in v.items() if k in want}) if isinstance(v, dict) and want else raw)
     sys.exit(0)
+if sys.argv[1:3] == ["pr", "merge"] and os.path.exists(os.path.join(rec, "base-moves")):
+    # rec/base-moves — номера PR пачки: слияние одного сдвигает base, у остальных mergeable снова UNKNOWN
+    left = [n for n in open(os.path.join(rec, "base-moves")).read().split() if n != sys.argv[3]]
+    open(os.path.join(rec, "unknown-once"), "w").write(" ".join(left))
 if sys.argv[1:3] == ["pr", "merge"]:
     p = one("gh-merge-rc", sys.argv[3])
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
@@ -718,6 +729,57 @@ def test_conflict_before_window():
     check("конфликт, CI ещё идёт → снята сразу (ждать CI незачем)", b.req() is None and not b.windows(), b.outs[-1])
 
 
+def test_unknown_after_finger():
+    """Б1, Д1 argus #381: после пальца base мог сдвинуться (прежний PR пачки слит, другое слияние за время окна), и
+    GitHub отдаёт mergeable UNKNOWN — это не «условия изменились»: PR сливается. Конфликт после пальца — снята."""
+    b = Box()
+    b.request()
+    script(b.touchid, window_script("open(os.path.join(rec, 'unknown-once'), 'w').write('7')", 0))
+    b.run()
+    check("одна заявка: UNKNOWN после пальца → слита, без тревоги",
+          b.merges() == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]]
+          and b.req() is None and not b.alerts() and "gate-after" not in b.log(), (b.outs[-1], b.alerts()))
+    body = ("v = json.load(open(os.path.join(rec, 'gh-view.json'))); v['mergeable'] = 'CONFLICTING'\n"
+            "json.dump(v, open(os.path.join(rec, 'gh-view.json'), 'w'))")
+    b = Box()
+    b.request()
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    check("одна заявка: CONFLICTING после пальца → слияния и согласия нет, снята с тревогой «конфликт с main»",
+          not b.merges() and not b.approve_lines() and b.req() is None and "gate-after" in b.log()
+          and "после пальца условия изменились — конфликт с main" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.set("base-moves", "7 8")
+    b.run()
+    check("пачка: base сдвинулся после слияния #7 (у #8 UNKNOWN) → слиты оба, без тревоги",
+          b.merges() == [merge_argv(7), merge_argv(8)] and b.req(8) is None and not b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = Box()
+    b.request()
+    b.view(SHA, mergeable="UNKNOWN")
+    b.run()
+    r = b.cli(["merge", "status"])
+    check("Д2 argus #381: status показывает, почему заявка ждёт",
+          f"{REPO}#{PR}\t{SHA[:12]}" in r.stdout and "ждёт: GitHub ещё не посчитал, сливается ли PR с main" in r.stdout,
+          r.stdout)
+    b2 = batch_box()
+    request_batch(b2)
+    b2.view(SHA2, pr=8, title="PR 8", files=["docs.md"], mergeable="UNKNOWN")
+    b2.run()
+    rows = {ln.split("\t")[0]: ln for ln in b2.cli(["merge", "status"]).stdout.splitlines()}
+    check("Д2, пачка: причина ожидания — у того PR, который ждёт (#8), у #7 её нет",
+          "ждёт: GitHub ещё не посчитал" in rows.get(f"{REPO}#8", "") and f"{REPO}#7" in rows
+          and "ждёт:" not in rows[f"{REPO}#7"],
+          rows)
+    b.view(SHA)
+    b.set("touchid-rc", 3)
+    b.run(t=T0 + 60)
+    req = b.req()
+    check("ждать больше нечего (окно было, без ответа) → отметка причины снята",
+          req is not None and "waiting" not in req and "ждёт: GitHub" not in b.cli(["merge", "status"]).stdout, req)
+
+
 def test_status_shows_done():
     """metis-0819: status — не только «заявок нет»: снятые за сутки с причиной, провал gh pr merge после пальца,
     слитые; старше суток и мусор в журнале — нет."""
@@ -731,6 +793,8 @@ def test_status_shows_done():
           in r.stdout, r.stdout)
     with open(os.path.join(b.state, "logs", "merge.jsonl"), "a") as fh:
         fh.write("не json\n[1]\n" + json.dumps({"time": "вчера", "event": "gate"}) + "\n")
+    with open(os.path.join(b.state, "logs", "merge.jsonl"), "ab") as fh:   # Д1 argus A #381: байты не в UTF-8
+        fh.write(b"\xff\xfe broken\n")
     r = b.cli(["merge", "status"], t=T0 + 25 * 3600)
     check("через 25 ч — снятых нет, мусор в журнале не роняет status",
           r.returncode == 0 and r.stdout.strip() == "заявок нет", r.stdout + r.stderr)

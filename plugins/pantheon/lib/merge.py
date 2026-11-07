@@ -12,8 +12,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
                                                 шлюз не пройден хоть у одного — заявок нет ни на один
   pantheon merge run [--click]   проход по заявкам: зовёт его тик (из окна Claude Code — отказ, guard ролям тоже не даёт);
                                  --click — щелчок по уведомлению запасного пути: владелец у Mac
-  pantheon merge status          заявки: репозиторий#N, SHA, возраст, отметки; ниже — снятые и слитые за сутки с
-                                 причиной из logs/merge.jsonl (metis-0819)
+  pantheon merge status          заявки: репозиторий#N, SHA, возраст, отметки и причина ожидания; ниже — снятые и
+                                 слитые за сутки с причиной из logs/merge.jsonl (metis-0819)
   pantheon merge cancel <N> -R <owner/repo>    снять заявку (из пачки — вместе со всей пачкой)
 
 Проход по каждой заявке (одна заявка — одно применение):
@@ -35,7 +35,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
      набора FULL_TESTS (full_tests_record); нет такой — снята с тревогой. Аннотации или данные job красных не
      получены (сбой gh) — ждёт: признак лимита не проверить (ci_billing_fetch, metis-0813).
      PR не сливается с base (mergeable CONFLICTING или mergeStateStatus DIRTY) — снята с тревогой «конфликт с main»
-     до окна; GitHub ещё считает (UNKNOWN) — ждёт (merge_conflict, metis-0819).
+     до окна; GitHub ещё считает (UNKNOWN) — ждёт (merge_conflict, metis-0819). После пальца UNKNOWN не помеха:
+     слияние прежнего PR пачки сдвигает base, и GitHub пересчитывает mergeable лениво; снимает только конфликт
+     (check_all after, Б1 argus #381). Причину ожидания проход пишет в заявку (mark_wait) — её показывает status.
      Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
      показать. PR правит version в plugin.json плагина или трогает
      .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
@@ -323,6 +325,20 @@ def keep(req):
             return False
         write_req(req)
     return True
+
+
+def mark_wait(req, state, why):
+    """Ждёт ли заявка (state — итог check_all). Причина ожидания (сбой gh, CI идёт, GitHub ещё считает mergeable) —
+    в файл заявки: её показывает `pantheon merge status` (Д2 argus #381); не ждёт — отметка снимается. Файл пишется,
+    только когда отметка поменялась."""
+    why = why if state == "wait" else None
+    if req.get("waiting") != why:
+        if why is None:
+            req.pop("waiting", None)
+        else:
+            req["waiting"] = why
+        keep(req)
+    return why is not None
 
 
 def drop(req, event, why=None, warn=False):
@@ -844,21 +860,21 @@ def gate(repo, pr, sha, view):
     state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
     # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
     warn = "".join(f"; {n}" for n in notes)
-    if state == "fail":
-        state, why = billing_verdict(repo, sha, recs, runs, required, why)
-    elif state == "ok":
-        why = "CI ✓"
+    state, why = billing_verdict(repo, sha, recs, runs, required, state, why)
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, {why}{warn}"
 
 
-def billing_verdict(repo, sha, recs, runs, required, why):
-    """Красный CI в gate (why — его текст): (ok|wait|fail, текст). CI не запускался из-за лимита минут или оплаты
+def billing_verdict(repo, sha, recs, runs, required, state, why):
+    """Итог CI в gate (state, why — вердикт ci_verdict): (ok|wait|fail, текст). Зелёный — «CI ✓», идёт — как есть.
+    Красный: CI не запускался из-за лимита минут или оплаты
     (metis-0655) — вместо CI засчитывается запись тестов на этот SHA с командой полного набора FULL_TESTS
     (full_tests_record), как в шлюзе guard (_billing_problem); нет такой записи или FULL_TESTS у репозитория — fail по
     красной. Аннотации или job не получены (сбой gh) — wait: признак не проверить, а снять заявку по красной значило бы
     потерять запасной путь (metis-0813)."""
+    if state != "fail":
+        return state, "CI ✓" if state == "ok" else why
     billing = ci_billing_fetch(repo, runs, required)
     if billing is None:
         return "wait", f"аннотации CI не получены (сбой gh) — лимит минут или нет, не проверить; {why}"
@@ -1471,16 +1487,19 @@ def merge_conflict(view):
     return None
 
 
-def check_all(req):
+def check_all(req, after=False):
     """Все условия заново: (ok|wait|fail, текст, view, пути файлов). Репозиторий — из [merge_repos] сейчас, шлюз — на
-    тот же head, PR сливается с base (merge_conflict), список файлов PR полон (окно показывает задетое ядро)."""
+    тот же head, PR сливается с base (merge_conflict), список файлов PR полон (окно показывает задетое ядро). after —
+    сверка после пальца (finger): «GitHub ещё считает» (UNKNOWN) там не wait, а не помеха — слияние прежнего PR пачки
+    или другое слияние за время окна сдвигает base, и mergeable пересчитывается лениво (Б1 argus #381); конфликтный PR
+    `gh pr merge --match-head-commit` всё равно не сольёт. CONFLICTING и DIRTY — fail и после пальца."""
     if req["repo"] not in allowed_repos():
         return "fail", f"{req['repo']} больше не в [merge_repos] {MERGE_DIRECTION}", None, None
     view = pr_view(req["repo"], req["pr"])
     state, why = gate(req["repo"], req["pr"], req["sha"], view)
     # конфликт с base — до окна (metis-0819: 05.11 палец трижды тратился на PR, который gh pr merge не сливал)
     conflict = merge_conflict(view) if state != "fail" and isinstance(view, dict) else None
-    if conflict and (conflict[0] == "fail" or state == "ok"):
+    if conflict and (conflict[0] == "fail" or state == "ok" and not after):
         return conflict[0], conflict[1], view, None
     if state != "ok":
         return state, why, view, None
@@ -1508,7 +1527,7 @@ def finger(req, rc=0, phrase=None):
             cur = find_phrase(req)
             if cur is None or cur["key"] != phrase["key"]:
                 return False, "ждёт: фраза уже не в силе"
-        state, why, _, _ = check_all(req)
+        state, why, _, _ = check_all(req, after=True)
         if state != "ok":
             os.remove(req_file(req["repo"], req["pr"]))
             bad = f"{after} условия изменились — {why}"
@@ -1552,7 +1571,7 @@ def process(req, click):
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
         return drop(req, "gate", why, warn=True)
-    if state == "wait":
+    if mark_wait(req, state, why):
         return f"ждёт: {why}"
     if phrase is not None:
         return finger(req, None, phrase)[1]
@@ -1619,7 +1638,7 @@ def process_batch(reqs, click):
         state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
         if state == "fail":
             return drop_batch(reqs, "gate", f"#{r['pr']}: {why}", warn=True)
-        if state == "wait":
+        if mark_wait(r, state, why):
             waits.append(f"#{r['pr']}: {why}")
         views.append(view)
         whys.append(why)
@@ -1752,6 +1771,8 @@ def cmd_status():
                 marks = (" уведомление" if req.get("notified") else "") + (" повтор позже" if req.get("wait_until", 0) > t else "")
                 if req.get("batch"):
                     marks += " пачка " + ",".join("#%d" % n for n in req["batch"])
+                if isinstance(req.get("waiting"), str):   # Д2 argus #381: почему ждёт — mark_wait прохода
+                    marks += f" ждёт: {req['waiting']}"
                 rows.append(f"{req['repo']}#{req['pr']}\t{req['sha'][:12]}\t{int((t - req['created']) // 60)} мин\t"
                             f"{req.get('by', '?')}{marks}")
     print("\n".join(rows) if rows else "заявок нет")
@@ -1763,10 +1784,11 @@ def cmd_status():
 
 def recent_done(t):
     """Строки `pantheon merge status` о заявках, ушедших из очереди за DONE_SHOW (metis-0819): время, repo#N, SHA,
-    событие и причина из logs/merge.jsonl. Журнал не читается — пусто."""
+    событие и причина из logs/merge.jsonl. Журнал не читается — пусто; байты не в UTF-8 (порча файла) — заменой, а не
+    трассировкой status (Д1 argus A #381)."""
     out = []
     try:
-        with open(P.path("logs", "merge.jsonl"), encoding="utf-8") as fh:
+        with open(P.path("logs", "merge.jsonl"), encoding="utf-8", errors="replace") as fh:
             lines = fh.read().splitlines()
     except OSError:
         return out
