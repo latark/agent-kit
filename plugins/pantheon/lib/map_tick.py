@@ -187,7 +187,7 @@ def work(job):
     """Работник: update под heavy → publish → итог в состоянии. Зовётся из отдельного процесса (main ниже)."""
     st_path = job["state"]
     _patch_state(st_path, lambda st: st.setdefault("running", {}).update(pid=os.getpid()))
-    env = {k: v for k, v in job["env"].items()}
+    env = dict(os.environ)  # окружение дал spawn через env= Popen, а не argv: argv видит любой пользователь (ps)
     code, last = _run([*job["heavy"], sys.executable, "-I", os.path.join(job["copy"], MAP_SCRIPT), "--update",
                        *PLUGIN_DIRS], job["copy"], env, job.get("timeout", UPDATE_TIMEOUT))
     if code != 0:
@@ -203,9 +203,10 @@ def spawn(job):
     """Работник в своей группе процессов; тик его не ждёт. Тесты подменяют на прямой вызов work()."""
     log = os.path.join(os.path.dirname(job["state"]), "logs", "map-tick-worker.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
-    with open(log, "a", encoding="utf-8") as fh:
+    with open(log, "a", encoding="utf-8") as fh:  # в argv — только job без окружения; env — отдельным аргументом Popen
         subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), json.dumps(job)], stdin=subprocess.DEVNULL,
-                         stdout=fh, stderr=fh, start_new_session=True, cwd=job["copy"])
+                         stdout=fh, stderr=fh, start_new_session=True, cwd=job["copy"],
+                         env=P.release_tick_mod()._env())
 
 
 # --- тик ---------------------------------------------------------------------------------------------------------
@@ -255,7 +256,7 @@ def check(repo, t, st):
         return f"{repo}: {why}", why, False
     if not stale:
         return f"{repo}: карта свежая — {why}", None, False
-    job = {"repo": repo, "copy": copy, "sha": sha, "state": state_file(), "heavy": heavy_prefix(), "env": RT._env()}
+    job = {"repo": repo, "copy": copy, "sha": sha, "state": state_file(), "heavy": heavy_prefix()}
     st["running"] = {"t": t, "sha": sha}
     P.write_json(state_file(), st)
     spawn(job)

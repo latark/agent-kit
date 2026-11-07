@@ -233,6 +233,32 @@ check("main ушёл вперёд → push отклонён, не сбой, ка
       not w.alerts and not any(s.startswith("карта:") for s in w.origin_log()) and "отклонён" in w.tick_log(),
       (w.alerts, w.origin_log(), w.tick_log()))
 
+# --- [argv работника] ---------------------------------------------------------------------------------------------
+w = World("argv")
+os.environ["MAP_TICK_SECRET"] = "s3cret-token"
+seen = {}
+
+
+class FakePopen:
+    def __init__(self, argv, **kw):
+        seen.update(argv=argv, kw=kw)
+
+
+real_popen = MT.subprocess.Popen
+MT.subprocess.Popen = FakePopen
+try:
+    ORIG_SPAWN({"repo": REPO, "copy": w.work, "sha": w.sha, "state": os.path.join(w.state, "map-tick.json"),
+                "heavy": []})
+finally:
+    MT.subprocess.Popen = real_popen
+    os.environ.pop("MAP_TICK_SECRET")
+check("argv работника не несёт окружения (ps видит всех)", "s3cret-token" not in " ".join(seen["argv"])
+      and "env" not in json.loads(seen["argv"][-1]), seen["argv"])
+check("окружение идёт отдельным env= Popen", seen["kw"].get("env", {}).get("MAP_TICK_SECRET") == "s3cret-token", seen["kw"])
+w = World("argv-job")
+MT.tick(T)
+check("job из тика — без поля env", w.heavy_calls and "env" not in w.heavy_calls[0], w.heavy_calls)
+
 # --- [частота] ----------------------------------------------------------------------------------------------------
 w = World("busy")
 w._write_json(os.path.join(w.state, "map-tick.json"), {"running": {"t": T, "pid": os.getpid(), "sha": w.sha}})
