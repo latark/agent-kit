@@ -427,6 +427,51 @@ def test_gate_rechecked():
           and "FAILURE" in b.alerts(), b.alerts())
 
 
+def test_gate_other_heads():
+    """metis-0465: «вернуть» на другом head PR в силе и в шлюзе владельца, как в шлюзе guard; «принять» до него не
+    в счёт (откат force-push на старый head с двумя «принять»)."""
+    def box(*adds):
+        b = Box()
+        b.request()
+        for kind, sha, sid in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        b.run()
+        return b
+
+    b = box(("reject", SHA2, "s3"))
+    check("0465: «вернуть» на другом head, после него ни одного «принять» — окна нет, заявка снята, тревога",
+          not b.windows() and not b.merges() and b.req() is None and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"))
+    check("0465: «принять» на SHA после «вернуть» снимает его, но второе «принять» записано до — 1 из 2",
+          not b.windows() and not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(),
+          b.alerts())
+    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
+    check("0465: два свежих «принять» на SHA после «вернуть» на другом head — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", SHA2, "s3"))
+    check("0465: «вернуть» снял сам рецензент на том же head — отсечки нет, «принять» на SHA в силе — сливает",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", "f" * 40, "s4"))
+    check("0465: «принять» другого argus на третьем head «вернуть» не снимает — окна нет",
+          not b.windows() and not b.merges() and "вернуть" in b.alerts(), b.alerts())
+    b = box(("reject", SHA, "s3"), ("accept", SHA, "s4"))
+    check("0465: «вернуть» на SHA, «принять» другого argus на тот же SHA — в силе (metis-0158)",
+          not b.windows() and not b.merges() and "вернуть" in b.alerts(), b.alerts())
+    b = box(("reject", SHA, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
+    check("0465: «вернуть» на SHA и два «принять» других argus после него — в силе, не перекрыто числом",
+          not b.windows() and not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.add("reject", sha=SHA2, pr=PR + 1, sid="s3", aid="a3")
+    b.run()
+    check("0465: «вернуть» на другом PR — не мешает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = Box()
+    b.request()
+    b.add("reject", sha=SHA2, who="dev-opus", sid="s3", aid="a3")
+    b.run()
+    check("0465: запись reject не от argus — не в счёт", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+
+
 def test_request_refusals():
     b = Box()
     r = b.request(repo="latark/shop")

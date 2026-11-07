@@ -163,7 +163,8 @@ def test_tick():
         write_gh(gh, "latark/agent-kit", "merged", [
             pr(7, "metis-0001-autoclose", "Закрывает задачу", merged_at),
             pr(8, "feature-x", "Closes metis-0002, но только часть 1 из 2", merged_at),
-            pr(10, "metis-0003-v", "версия", merged_at, oid="1234567fffffff", files=["plugins/pantheon/.claude-plugin/plugin.json"])])
+            pr(10, "metis-0003-v", "версия", merged_at, oid="1234567fffffff",
+               files=[None, "plugins/pantheon/.claude-plugin/plugin.json"])])  # path null: fetch не падает (0674)
         write_gh(gh, "acme/site", "merged", [pr(3, "demo-0001-site", "", merged_at, oid="9999999aaaaaaa")])
         with open(os.path.join(gh, "diff.txt"), "w") as fh:
             fh.write('diff --git a/plugins/pantheon/.claude-plugin/plugin.json b/plugins/pantheon/.claude-plugin/plugin.json\n'
