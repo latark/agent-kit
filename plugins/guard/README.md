@@ -826,10 +826,14 @@ Claude Code, у которого есть журнал ваших слов: Зе
    С metis-0552 в ядре и запуск окон с `--settings`: `_start_session`, `_fresh_start` и `start` в
    `plugins/pantheon/lib/sessions.py`, `_resume_session` и `parse_command` в pantheon.py. Эти корни — без замыкания:
    ядро — правка самой функции (её снятие `--settings` уводит окно без песочницы), а не того, что она зовёт.
+   Так же, без замыкания, — защиты запуска (Б1 argus PR #394; на base 45f35bac они были в ядре через `os`):
+   `CLAUDE_VALUE_FLAGS`, `ROLE_ENV`, `claude_env`, `job_window_problem`, `cwd_allow_problems`, `start_target`,
+   `live_copies`, `stop_copies`, `agents_all` в pantheon.py и `fresh_target` в sessions.py — правка каждого — ядро.
    Замыкание сужено (metis-0550): имя модуля из `import` (`os`, `sys`) — не данные сборки, так что `os.environ[…] =`
    в посторонней функции её не тянет; имена тела функции — по `symtable`, и локальная переменная `check` не тянет
-   функцию модуля `check`; дальше тревог и списка сессий (`alert`, `alert_once`, `clear_once`, `agents_all`,
-   `project_allow_stop`, `BUILD_STOP`) замыкание не идёт, их собственная правка — ядро. Правка
+   функцию модуля `check`; дальше тревог (`alert`, `alert_once`, `clear_once`, `BUILD_STOP`) и мелких корней выше
+   (`agents_all`, `live_copies`, `stop_copies`) замыкание не идёт, их собственная правка — ядро. Остановка живого окна
+   с запретным allow `project_allow_stop` — не барьер: то, что она зовёт, в замыкании. Правка
    комментария или другой функции — не ядро: из 40 последних слияний pantheon.py и sessions.py Touch ID нужен в 13,
    из них ложно в 3 (#237, #242, #249 — правки `_fresh_start` и `_start_session` вне argv); до metis-0550 — в 24.
    Тот же признак — у окна Touch ID (`merge.is_core` совпадает с `_is_core`, файлы сборки `merge.BUILD_FILES` окно

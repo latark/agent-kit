@@ -4669,6 +4669,38 @@ def t_core_lists_unit(h):
         check(f"настоящий sessions.py: снятие --settings в {name} — ядро", got == [name], got)
     check("настоящий sessions.py: новая функция в конце — не ядро",
           mg.sandbox_build_changes(real, real + "\n\ndef _metis_0552_probe():\n    return 1\n", path=P) == [])
+    # Б1 обоих argus PR #394: защиты запуска — мелкие корни; на base 45f35bac были ядром через os, после 0550 выпали
+    got = mg.sandbox_build_changes(real, real.replace("    P.allow_gate(name)", "    pass", 1), path=P)
+    check("настоящий sessions.py: fresh_target без allow_gate — ядро", got == ["fresh_target"], got)
+    pan = open(os.path.join(os.path.dirname(real_path), "pantheon.py"), encoding="utf-8").read()
+    for name, a, b in (("CLAUDE_VALUE_FLAGS", '"--name"}', '"--name", "--permission-mode"}'),
+                       ("ROLE_ENV", 'ROLE_ENV = ("PANTHEON_ROLE", ', "ROLE_ENV = (")):
+        check(f"настоящий pantheon.py: {name} есть", pan.count(a) == 1)
+        got = mg.sandbox_build_changes(pan, pan.replace(a, b, 1))
+        check(f"настоящий pantheon.py: правка {name} — ядро", got == [name], got)
+    for name in ("job_window_problem", "cwd_allow_problems", "claude_env", "start_target", "live_copies",
+                 "stop_copies", "agents_all"):
+        m = re.search(r'^def %s\(.*?\):\n(    """.*?"""\n)?' % name, pan, re.M | re.S)
+        check(f"настоящий pantheon.py: def {name} есть", m is not None)
+        if m:
+            got = mg.sandbox_build_changes(pan, pan[:m.end()] + "    return None\n" + pan[m.end():])
+            check(f"настоящий pantheon.py: {name} → return None — ядро", got == [name], got)
+    # project_allow_stop — не барьер: то, что он зовёт из сборки, — в замыкании
+    pas = LAUNCH_SRC.replace("def role_settings(folders):\n", "def role_settings(folders):\n    project_allow_stop('x')\n") \
+        + "\n\ndef project_allow_stop(name):\n    return _pa_text(name)\n\n\ndef _pa_text(name):\n    return [name, 'pa']\n"
+    got = mg.sandbox_build_changes(pas, pas.replace("[name, 'pa']", "[name, 'pa!']"))
+    check("Б1: правка того, что зовёт project_allow_stop из сборки, — ядро", got == ["_pa_text"], got)
+    # мелкие корни без вызова из сборки: своя правка — ядро, правка того, что они зовут, — нет (барьер)
+    lc = LAUNCH_SRC + "".join(f"\n\ndef {n}(x):\n    return _lc_help(x, '{n}')\n"
+                              for n in ("live_copies", "stop_copies", "agents_all")) + \
+        "\n\ndef _lc_help(x, n):\n    return [x, n]\n"
+    for n in ("live_copies", "stop_copies", "agents_all"):
+        got = mg.sandbox_build_changes(lc, lc.replace(f"_lc_help(x, '{n}')", f"_lc_help(x, '{n}!')"))
+        check(f"мелкий корень {n} вне сборки: его правка — ядро", got == [n], got)
+    got = mg.sandbox_build_changes(lc, lc.replace("return [x, n]", "return [n, x]"))
+    check("мелкие корни: правка того, что зовут live_copies/stop_copies/agents_all, — не ядро", got == [], got)
+    got = mg.sandbox_build_changes(SS_SRC, SS_SRC + "\n\ndef fresh_target(name):\n    return name\n", path=P)
+    check("sessions.py: fresh_target появился — правка имени, ядро", got == ["fresh_target"], got)
 
 
 def t_core_sandbox(h):

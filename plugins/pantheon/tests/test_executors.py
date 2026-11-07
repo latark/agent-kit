@@ -703,6 +703,25 @@ def tests():
     with open(os.path.join(fresh, "plugins", "pantheon", "lib", "pantheon.py"), "w") as fh:
         fh.write('D = {"permissions": 1}\n')
     check("правила окон: новый неотслеживаемый pantheon.py тоже смотрится", m.window_rules_hit(fresh, "HEAD"))
+    # metis-0411: строка продолжения многострочного списка — слово WINDOW_WORDS на первой строке инструкции
+    base_src = ('HQ_EXCLUDED = [\n    "pantheon alert *",\n    "pantheon read *",\n]\n'
+                'OTHER = [\n    "a",\n    "b",\n]\n\n\ndef f():\n    out = {\n        "permissions": [\n'
+                '            "x",\n        ],\n    }\n    return out\n')
+    pan = os.path.join(fresh, "plugins", "pantheon", "lib", "pantheon.py")
+    with open(pan, "w") as fh:
+        fh.write(base_src)
+    git(fresh, "add", "-A")
+    git(fresh, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "1")
+    for title, a, b, want in (
+            ("новый элемент списка HQ_EXCLUDED — защита", '    "pantheon read *",\n',
+             '    "pantheon read *",\n    "gh pr merge *",\n', True),
+            ("удалённый элемент списка HQ_EXCLUDED — защита", '    "pantheon read *",\n', "", True),
+            ("правка элемента словаря permissions в функции — защита", '            "x",\n', '            "y",\n', True),
+            ("правка списка без слов окон — не защита", '    "b",\n', '    "c",\n', False)):
+        with open(pan, "w") as fh:
+            fh.write(base_src.replace(a, b, 1))
+        got = m.window_rules_hit(fresh, "HEAD")
+        check(f"правила окон, строка продолжения: {title}", bool(got) == want, got)
     # песочница окон (metis-0393): всё, что пишет sandbox_build, — и excludedCommands, и списки *_EXCLUDED
     check("песочница окон: строка с excludedCommands — защита",
           bool(m.WINDOW_WORDS.search('HQ_X = ["pantheon alert *"]  # excludedCommands'))

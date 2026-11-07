@@ -17,6 +17,7 @@ CODEX_HOME роли codex-dev — STATE/codex-dev (0700, свой вход `code
 PANTHEON_CODEX_TIMEOUT_S (общий предел, 7200), PANTHEON_CODEX_HELLO_S (hello-проба, 45), PANTHEON_CODEX_GRACE_S
 (SIGTERM → SIGKILL, 5).
 """
+import ast
 import fnmatch
 import importlib.util
 import json
@@ -644,12 +645,55 @@ def protected_hit(p):
     return False
 
 
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _stmt_hits(src, lines, sign):
+    """Строки продолжения (metis-0411): инструкция без тела (присваивание, выражение, return), в которой есть задетая
+    строка lines (номера с 1), а слово WINDOW_WORDS — на другой её строке, например элемент многострочного списка
+    `HQ_EXCLUDED = [` … `]`. → первая строка каждой такой инструкции со знаком sign. Не разобрать — пусто: тогда
+    остаются построчные совпадения."""
+    if not lines or src is None:
+        return []
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    text = src.splitlines()
+    out = []
+    for st in ast.walk(tree):
+        if not isinstance(st, ast.stmt) or hasattr(st, "body") or st.end_lineno == st.lineno:
+            continue
+        if any(st.lineno <= n <= st.end_lineno for n in lines) and \
+                WINDOW_WORDS.search("\n".join(text[st.lineno - 1:st.end_lineno])):
+            out.append(f"{sign}{text[st.lineno - 1]}  # строки {st.lineno}-{st.end_lineno}")
+    return out
+
+
 def window_rules_hit(wt, base):
-    """Строки диффа pantheon.py (против base, вместе с незакоммиченным), задевающие правила окон."""
+    """Строки диффа pantheon.py (против base, вместе с незакоммиченным), задевающие правила окон: со словом
+    WINDOW_WORDS — и строки продолжения многострочной инструкции, где это слово стоит на другой строке (metis-0411)."""
     r = _git(wt, "diff", "--unified=0", base, "--", WINDOW_FILE)
     hits = [ln for ln in r.stdout.splitlines()
             if ln[:1] in "+-" and not ln.startswith(("+++", "---")) and WINDOW_WORDS.search(ln)]
+    old_lines, new_lines = set(), set()
+    for ln in r.stdout.splitlines():
+        m = HUNK.match(ln)
+        if m:
+            a, b = int(m[1]), int(m[2] if m[2] is not None else 1)
+            c, d = int(m[3]), int(m[4] if m[4] is not None else 1)
+            old_lines.update(range(a, a + b))
+            new_lines.update(range(c, c + d))
     p = os.path.join(wt, WINDOW_FILE)
+    if old_lines:
+        old = _git(wt, "show", f"{base}:{WINDOW_FILE}")
+        hits += _stmt_hits(old.stdout if old.returncode == 0 else None, old_lines, "-")
+    if new_lines:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                hits += _stmt_hits(fh.read(), new_lines, "+")
+        except OSError:
+            pass
     if os.path.isfile(p) and not _git(wt, "ls-files", "--", WINDOW_FILE).stdout.strip():
         try:  # файл новый и не в индексе — git diff его не видит, смотрим целиком
             with open(p, encoding="utf-8", errors="replace") as fh:

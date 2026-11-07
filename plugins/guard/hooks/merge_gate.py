@@ -1114,23 +1114,36 @@ SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings", "window
 # Корни, которых может ещё не быть в файле: запуск окна window_launch (metis-0951) приходит отдельным PR. Нет его в
 # версии — замыкание идёт по остальным корням; появился, пропал или изменился — правка его имени, ядро. Без
 # остальных корней — по-прежнему None (ядро). Корни запуска LAUNCH_ROOTS — так же: пропал — правка имени, ядро
-SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", "_resume_session", "parse_command"})
+SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", "_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS",
+                                    "ROLE_ENV", "job_window_problem", "cwd_allow_problems", "claude_env",
+                                    "start_target", "live_copies", "stop_copies", "agents_all"})
 # Запуск окон с --settings (metis-0552, Д2 argus-160b): _start_session, _fresh_start и start в sessions.py,
 # продолжение сессии _resume_session и окна задач расписания parse_command в pantheon.py собирают argv
 # `claude … --settings <окно>`; без --settings окно ушло бы без песочницы. Эти корни — без замыкания: ядро — правка
 # самой функции (argv окна собирает window_launch, а он в замыкании выше). С замыканием они тянули тексты целей и реестр
-# сессий: 18 из 40 прошлых слияний pantheon.py и sessions.py — ядро, без него — 13, из них ложных 3 (metis-0550)
-LAUNCH_ROOTS = ("_resume_session", "parse_command")
+# сессий: 18 из 40 прошлых слияний pantheon.py и sessions.py — ядро, без него — 13, из них ложных 3 (metis-0550).
+# Мелкие корни защит запуска (Б1 обоих argus PR #394): на base 45f35bac они были в ядре через os, после сужения
+# metis-0550 выпали. Флаги claude со значением CLAUDE_VALUE_FLAGS (разбор argv задачи), окно задачи
+# job_window_problem, отказ в запуске из папки с allow cwd_allow_problems, снятие роли у дочерних claude claude_env и
+# ROLE_ENV (metis-0321), цель pantheon start start_target, живые копии окна live_copies, их остановка stop_copies и
+# список сессий agents_all. Все они в SANDBOX_BUILD_OPTIONAL (CLAUDE_VALUE_FLAGS и ROLE_ENV — данные, не функции;
+# в старых версиях файла части функций нет): пропажа в одной версии — правка имени, ядро
+LAUNCH_ROOTS = ("_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS", "ROLE_ENV", "job_window_problem",
+                "cwd_allow_problems", "claude_env", "start_target", "live_copies", "stop_copies", "agents_all")
 # Имена, по которым замыкание не идёт дальше (metis-0550): тревоги владельцу и список живых сессий claude agents.
-# Сборка зовёт их ради побочного действия (тревога, остановка окна с запретным allow), а не ради того, что пишет в
-# settings/<окно>.json; через них в сборку попадали реестр сессий и журнал ваших слов. Правка самого имени — ядро
-BUILD_STOP = frozenset({"alert", "alert_once", "clear_once", "agents_all", "project_allow_stop"})
+# Сборка зовёт их ради побочного действия (тревога), а не ради того, что пишет в settings/<окно>.json; через них в
+# сборку попадали реестр сессий и журнал ваших слов. Правка самого имени — ядро. project_allow_stop — не барьер (Б1
+# argus PR #394): он останавливает живое окно, чей allow пускает gh pr merge; его live_copies и stop_copies — мелкие
+# корни LAUNCH_ROOTS, дальше них замыкание тоже не идёт
+BUILD_STOP = frozenset({"alert", "alert_once", "clear_once", "agents_all"})
 SESSIONS_FILE = "plugins/pantheon/lib/sessions.py"
-SESSIONS_ROOTS = ("_start_session", "_fresh_start", "start")
+# fresh_target даёт _fresh_start значение --settings — окно цели (Д1 обоих argus PR #394); его может не быть в
+# версии, как мелких корней pantheon.py: пропажа в одной версии — правка имени, ядро
+SESSIONS_ROOTS = ("_start_session", "_fresh_start", "start", "fresh_target")
 # файл → (корни с замыканием, корни, которых может не быть, корни без замыкания). Один признак на шлюз, окно Touch ID
 # merge.py и доску autoclose.py (metis-0551) — sandbox_build_changes по каждому файлу
 BUILD_ROOTS = {SANDBOX_BUILD_FILE: (SANDBOX_BUILD_ROOTS, SANDBOX_BUILD_OPTIONAL, LAUNCH_ROOTS),
-               SESSIONS_FILE: ((), frozenset(), SESSIONS_ROOTS)}
+               SESSIONS_FILE: ((), frozenset({"fresh_target"}), SESSIONS_ROOTS)}
 MUTATORS = frozenset({"append", "extend", "insert", "update", "setdefault", "pop", "popitem", "remove", "clear", "add",
                       "discard", "sort", "reverse", "__setitem__", "__delitem__", "__iadd__", "__ior__"})
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
