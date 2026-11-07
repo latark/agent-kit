@@ -812,8 +812,8 @@ def _reviewer(r):
     return by.get("session_id") or "", by.get("agent_id") or ""
 
 
-# поле «вернули» (metis-0497, Д1 ревью PR #149 r2): pair_match, returned_lie и returned_lifts — дословно те же,
-# что в шлюзе guard (merge_gate.py), сверяет test_merge (AST). Правишь — правь оба
+# поле «вернули» (metis-0497, Д1 ревью PR #149 r2): pair_match, returned_lie, returned_lifts и base_counts
+# (metis-0965) — дословно те же, что в шлюзе guard (merge_gate.py), сверяет test_merge (AST). Правишь — правь оба
 def pair_match(pair, rec):
     """Пара agent8[/сессия8] из поля «вернули» или `pantheon review report` — рецензент записи rec (metis-0497):
     agent_id записи начинается с первой части, session_id — со второй (если она есть)."""
@@ -826,12 +826,24 @@ def pair_match(pair, rec):
 
 def returned_lie(a, verdicts):
     """Пары поля «вернули» записи a, за которыми нет «вернуть» на этом PR, записанного раньше a (metis-0497): поле
-    — слово лида, сверяется с журналом. verdicts — вердикты argus PR по порядку записи, a среди них. Поля нет — []."""
+    — слово лида, сверяется с журналом. verdicts — вердикты argus PR по порядку записи, a среди них. Поля нет — [].
+    Пара самого рецензента a (agent8 — его agent_id, сессия любая) не сверяется (Д4 argus #382, вариант Б): опечатка
+    лида в сессии (#286) отбросила бы «принять», которое снимает своё «вернуть» правилом 1 или 2, — лишний круг.
+    Чужое «вернуть» и без неё снимает только взятый отчёт (returned_lifts)."""
     got = a.get("returned")
     if not isinstance(got, list):
         return []
     before = verdicts[:next((i for i, r in enumerate(verdicts) if r is a), len(verdicts))]
-    return [p for p in got if not any(r.get("kind") == "reject" and pair_match(p, r) for r in before)]
+    return [p for p in got if not pair_match(str(p).split("/")[0], a)
+            and not any(r.get("kind") == "reject" and pair_match(p, r) for r in before)]
+
+
+def base_counts(rec, view):
+    """Засчитывается ли «принять» rec для PR с view (metis-0965): base записи (baseRefName PR, когда argus записал
+    вердикт) — нынешняя base PR. PR перевели на другую ветку (gh pr edit --base) — сливается другой дифф, «принять»
+    было не про него. Поля base нет (запись до 0965 или gh не ответил при записи) или base PR неизвестна — не в счёт."""
+    base = view.get("baseRefName") if isinstance(view, dict) else None
+    return isinstance(base, str) and bool(base) and rec.get("base") == base
 
 
 def returned_lifts(a, r):
@@ -872,17 +884,27 @@ def reject_floor(verdicts):
     return floor
 
 
-def gate(repo, pr, sha, view):
-    """Шлюз на этот head заново: (ok|wait|fail, текст). Записи шлюза пишет только хук guard (роли их не подделают)."""
+def _view_problem(view, sha):
+    """Первые проверки gate по ответу gh pr view: (wait|fail, текст) или None — PR открыт, не черновик, на sha."""
     if not isinstance(view, dict):
         return "wait", "gh pr view не ответил"
     if str(view.get("state") or "").upper() != "OPEN":
         return "fail", f"PR не открыт ({view.get('state')})"
     if view.get("isDraft"):
         return "fail", "PR — черновик"
+    if not view.get("baseRefName") or not isinstance(view.get("baseRefName"), str):
+        return "wait", "gh pr view не дал base PR (baseRefName) — «принять» с base не сверить (metis-0965)"
     head = str(view.get("headRefOid") or "").lower()
     if head != sha:
         return "fail", f"у PR новый коммит {head[:7] or '?'} — нужна новая заявка"
+    return None
+
+
+def gate(repo, pr, sha, view):
+    """Шлюз на этот head заново: (ok|wait|fail, текст). Записи шлюза пишет только хук guard (роли их не подделают)."""
+    why = _view_problem(view, sha)
+    if why:
+        return why
     recs = P.review_records(repo)
     if not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
         return "fail", f"нет записи тестов шлюза на {sha[:12]}"
@@ -897,7 +919,7 @@ def gate(repo, pr, sha, view):
             # «принять» без перечня или не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе.
             # Правило общее с итогом `pantheon review status` (P.review_accept_counts, metis-0393) — из
             # lib/review_rules.py, ядра защит (metis-0858)
-            if r["kind"] == "accept" and not P.review_accept_counts(r):
+            if r["kind"] == "accept" and not (P.review_accept_counts(r) and base_counts(r, view)):
                 continue
             verdicts.append(r)
     # поле «вернули» называет рецензента без «вернуть» на PR — «принять» не в счёт, как в шлюзе guard (metis-0497)

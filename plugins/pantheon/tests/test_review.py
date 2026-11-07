@@ -160,7 +160,7 @@ def run_all(tmp):
 
     def v(kind, sha, aid, sid="s", pr=40, who="argus", cl=opus):
         return dict(rec, kind=kind, sha=sha, pr=pr, by={"agent_type": who, "agent_id": aid, "session_id": sid},
-                    checklist=cl)
+                    checklist=cl, base="main")  # base PR на записи (metis-0965): шлюз сверяет с baseRefName
     S2, S3, S4, S5 = "b" * 40, "c" * 40, "d" * 40, "e" * 40
     sonnet = dict(opus, ran="модель: claude-sonnet-4-6, heavy pytest")
     tally = [v("reject", SHA, "aaaaaaaa11"), v("accept", SHA, "aaaaaaaa11"),  # вернул и сам же снял
