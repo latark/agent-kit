@@ -139,6 +139,7 @@ def gate_fixtures(home):
                     r = {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
                          "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}
                     if kind == "accept":  # Б6 (guard 0.5.6): запор пускает только «принять» с перечнем проверенного
+                        r["base"] = "main"  # base PR на записи «принять» (metis-0965) — как baseRefName поддельного gh
                         # ran с моделью: в защитах шлюз засчитывает только argus на Opus (metis-0176)
                         r["checklist"] = {"opened": "дифф PR", "ran": "модель: claude-opus-5-5, тесты",
                                           "unchecked": "живой gh"}
@@ -162,7 +163,7 @@ def gate_fixtures(home):
                  "  'api '*/actions/runs\\?*) echo '" + json.dumps(wr) + "'; exit 0 ;;\n"
                  "  'api '*/check-runs\\?*) echo '" + json.dumps(cr) + "'; exit 0 ;;\n"
                  "  api*) echo '" + json.dumps({"filename": "README.md", "status": "modified"}) + "'; exit 0 ;;\n"
-                 "esac\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK, "statusCheckRollup": [
+                 "esac\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK, "baseRefName": "main", "statusCheckRollup": [
                      {"name": "check-traces", "status": "COMPLETED", "conclusion": "SUCCESS"}]}) + "'\n")
     os.chmod(os.path.join(home, "fake-bin/gh"), 0o755)
 
