@@ -4012,6 +4012,17 @@ def test_auto_rm_suffixed_live_name_0885():
         e.run("watch", t=T0)
         rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
         check(rms == [sid], f"0885: {old_name}/{state} при живой «{live}»: rm {rms}")
+    # мёртвая «zeus (2)» при живой «zeus» — убирается; живая «zeus (2)» без живой «zeus» — не трогается
+    e = Env()
+    e.agents([bg("zeus (2)", "stopped", "f1f1f1f1-1"), bg("zeus", "working", "f2f2f2f2-1", pid=os.getpid())])
+    _job(e, "f1f1f1f1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+    check(rms == ["f1f1f1f1"], f"0885: мёртвая «zeus (2)» при живой «zeus»: rm {rms}")
+    e = Env()
+    e.agents([bg("zeus (2)", "working", "g1g1g1g1-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: живую «zeus (2)» тронули: {e.calls()}")
     e = Env()
     e.agents([bg("zeus", "stopped", "e1e1e1e1-1"), bg("zeus (2)", "stopped", "e2e2e2e2-1")])
     _job(e, "e1e1e1e1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
