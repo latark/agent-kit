@@ -11,7 +11,9 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import mkroot  # noqa: E402  (git init там, где песочница даёт .git/hooks, metis-0729)
 
 RULES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard_rules.py")
 ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t",
@@ -75,7 +77,7 @@ FETCH_ALLOW = [
 
 
 def main():
-    root = os.path.realpath(tempfile.mkdtemp(prefix="guard-refspec-"))
+    root = os.path.realpath(mkroot("guard-refspec-"))
     os.environ["HOME"] = root
     try:
         spec = importlib.util.spec_from_file_location("guard_under_test", RULES)
