@@ -24,7 +24,9 @@
 +строка», у .part — заголовок «[## Можно] +строка». У policy.toml за ними «Ключи, изменено N: путь: старое → новое»
 (key_rows) — смысл правки целиком. Знаки: у policy.toml в строках и ключах каждый знак вне печатного ASCII — \\uXXXX
 (esc: «е» кириллицей в латинском пути видна); у .part русский текст как есть, слово из двух алфавитов — «[смешаны
-алфавиты: m\\u0430in]», прочее вне ASCII и русского — \\uXXXX (mark). --why — последним, «Пояснение роли: …».
+алфавиты: m\\u0430in]», прочее вне ASCII и русского — \\uXXXX (mark); строка-комментарий policy.toml — тоже mark. --why — последним, «Пояснение роли: …». Вопрос в
+чате — через md (каждый знак ASCII-пунктуации с «\\»: `, *, ~, [ ] видны буквально), окно Touch ID — без md. Разделы
+.part — по CommonMark: «#» с отступом до 3 пробелов, setext, блоки ``` и ~~~.
 
 Проход (тик зовёт его отдельным процессом, пока есть заявки; окружение — merge.clean_env, как у слияния). Папка
 очереди открыта один раз (open_queue: части пути без ссылок), дальше файлы в ней — только через её fd (dir_fd).
@@ -55,6 +57,7 @@ import os
 import re
 import secrets
 import stat
+import string
 import subprocess
 import sys
 import tomllib
@@ -279,6 +282,17 @@ def esc(s):
     return "".join(c if " " <= c <= "~" else _u(c) for c in s)
 
 
+MD_PUNCT = frozenset(string.punctuation)   # вся ASCII-пунктуация: CommonMark экранирует её «\» (раздел 2.4)
+
+
+def md(s):
+    """Текст из файла для вопроса в чате: каждый знак ASCII-пунктуации — с «\\» перед ним. Отрисовка Markdown (CommonMark,
+    GFM) выдаёт его буквально: ни `код`, ни *курсив*, ни ~зачёркнутое~, ни [ссылка](…) не прячут знаков, а «**» и «__»,
+    которые сверка ответа в чате вырезает (answers._strip_md), в тексте не остаются (ревью PR #362, R4-2 Б1). Окну Touch
+    ID — без md: оно Markdown не рисует."""
+    return "".join("\\" + c if c in MD_PUNCT else c for c in s)
+
+
 def _script(c):
     return unicodedata.name(c, "?").split(" ")[0]
 
@@ -448,26 +462,71 @@ def key_rows(req):
         return ["?"]
 
 
-def keys_text(req):
+def keys_text(req, fix=str):
     rows = key_rows(req)
     if rows is None:
         return ""
-    return f". Ключи, изменено {len(rows)}: " + (f" {SEP} ".join(rows) if rows else "нет")
+    return f". Ключи, изменено {len(rows)}: " + (f" {SEP} ".join(fix(r) for r in rows) if rows else "нет")
+
+
+FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")
+ATX_RE = re.compile(r" {0,3}#{1,6}(?:[ \t]|$)")
+SETEXT_RE = re.compile(r" {0,3}(=+|-+)[ \t]*$")
+BREAK_RE = re.compile(r" {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
+BLOCK_RE = re.compile(r" {0,3}(?:>|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))|    |\t")
 
 
 def part_sections(text):
-    """Раздел .part каждой строки text → [«[## Заголовок]» (mark) или PART_ROOT до первого]; строка-заголовок — свой
-    раздел; «#» внутри блока ``` — не заголовок. text None — None."""
+    """Раздел .part каждой строки text → [«[## Заголовок]» (mark) или PART_ROOT до первого] по правилам CommonMark:
+    заголовок «#…» с отступом до 3 пробелов и setext — абзац, подчёркнутый «===» (как «#») или «---» (как «##»); строки
+    заголовка — его раздел. Внутри блока ``` или ~~~ (закрывает тот же знак, не короче) заголовков нет; строка с отступом
+    4 пробела — код; «---» после пустой строки, пункта списка или цитаты — черта, а не заголовок (R4-2 Д1). text None —
+    None."""
     if text is None:
         return None
-    out, cur, fence = [], PART_ROOT, False
-    for ln in text.splitlines():
-        if ln.lstrip().startswith("```"):
-            fence = not fence
-        elif not fence and re.match(r"#{1,6}(\s|$)", ln):
-            cur = f"[{mark(ln.strip())}]"
+    lines = text.splitlines()
+    out, cur, fence, para, other = [], PART_ROOT, None, None, False
+    for i, ln in enumerate(lines):
         out.append(cur)
+        f = FENCE_RE.match(ln)
+        if fence:
+            if f and f[1][0] == fence[0] and len(f[1]) >= len(fence) and not f[2].strip():
+                fence = None
+            continue
+        if not ln.strip():
+            para, other = None, False
+        elif f and not (f[1][0] == "`" and "`" in f[2]):
+            fence, para, other = f[1], None, False
+        elif ATX_RE.match(ln):
+            cur = out[-1] = f"[{mark(ln.strip())}]"
+            para, other = None, False
+        elif SETEXT_RE.match(ln) and para is not None:
+            head = " ".join(x.strip() for x in lines[para:i])
+            cur = f"[{'#' if ln.strip()[0] == '=' else '##'} {mark(head)}]"
+            out[para:] = [cur] * (i + 1 - para)
+            para = None
+        elif BREAK_RE.match(ln):
+            para, other = None, False
+        elif para is None and not other:
+            if BLOCK_RE.match(ln):
+                other = True
+            else:
+                para = i
+        elif para is not None and BLOCK_RE.match(ln) and not ln.startswith(("    ", "\t")):
+            para, other = None, True   # пункт списка или цитата прерывают абзац: «---» под ними — черта
     return out
+
+
+def toml_comment(text, i, base=None):
+    """Строка i текста TOML — целиком комментарий: начинается с «#», и без неё разбор tomllib тот же («#» внутри
+    многострочной строки — часть значения, не комментарий). base — готовый разбор text."""
+    lines = text.splitlines(True)
+    if not 0 <= i < len(lines) or not lines[i].lstrip().startswith("#"):
+        return False
+    try:
+        return tomllib.loads("".join(lines[:i] + lines[i + 1:])) == (tomllib.loads(text) if base is None else base)
+    except tomllib.TOMLDecodeError:
+        return False
 
 
 def shown(req):
@@ -475,17 +534,34 @@ def shown(req):
     [sandbox_write] и в [coordinators] даёт разные права, ревью PR #362, круг 2, Б), у .part — «[## Можно] +строка»
     (перенос строки из «## Нельзя» в «## Можно» виден, R3-2 Д1). У «-» — раздел в старом тексте, у «+» — в новом; не
     определить — «[?]». Сама строка у .toml — esc (каждый знак вне печатного ASCII — \\uXXXX: в TOML любой знак может
-    быть путём), у .part — mark (русский текст как есть, смешанные алфавиты помечены). SEP внутри строки — экранирован."""
+    быть путём; строка-комментарий toml_comment — mark, русский комментарий читаем, R4-1 Д1), у .part — mark (русский
+    текст как есть, смешанные алфавиты помечены). SEP внутри строки — экранирован."""
     new = req.get("new")
     old = old_text(req["file"], new, req["diff"]) if isinstance(new, str) else None
     toml = req["file"].endswith(".toml")
-    split, fix = (toml_sections, esc) if toml else (part_sections, mark)
-    secs = {"+": split(new) if isinstance(new, str) else None, "-": split(old)}
+    split = toml_sections if toml else part_sections
+    texts = {"+": new if isinstance(new, str) else None, "-": old}
+    secs = {s: split(t) for s, t in texts.items()}
 
     def sec(ln, i):
         s = secs[ln[0]]
         return s[i] if s is not None and i is not None and 0 <= i < len(s) else "[?]"
-    return [f"{sec(ln, i)} {fix(ln)}".replace(SEP, "\\u23ce") for ln, i in walk(req["diff"])]
+
+    base = {}
+
+    def comment(ln, i):
+        t = texts[ln[0]]
+        if t is None or i is None or not ln[1:].lstrip().startswith("#"):
+            return False
+        with contextlib.suppress(tomllib.TOMLDecodeError):
+            if ln[0] not in base:
+                base[ln[0]] = tomllib.loads(t)
+            return toml_comment(t, i, base[ln[0]])
+        return False
+
+    def fix(ln, i):
+        return esc(ln) if toml and not comment(ln, i) else mark(ln)
+    return [f"{sec(ln, i)} {fix(ln, i)}".replace(SEP, "\\u23ce") for ln, i in walk(req["diff"])]
 
 
 def one_line(s):
@@ -506,11 +582,14 @@ def question(req):
     """Вопрос для Зевса: [id], файл, sha диффа, правка строками (shown) через « ⏎ », ключи и последним — «Пояснение
     роли: …» (--why, mark): после правки и с меткой он не подделает её начало «Правка, строк 0: …» (R3-2 С). Вопрос —
     одна строка (хук окна вопросов сводит переводы строк в пробел), а SEP внутри строки правки экранирован — «ok;
-    -Правило» не читается как вторая строка (ревью PR #362, круг 2, Д)."""
-    why = f". Пояснение роли: {mark(req['why'])}" if req.get("why") else ""
-    rows = shown(req)
-    return (f"[{req['id']}] Применить правку ~/{req['file']} (задача {req['task']}, sha диффа "
-            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req) + why)
+    -Правило» не читается как вторая строка (ревью PR #362, круг 2, Д). Вопрос идёт в чат, а чат рисует Markdown: всё,
+    что пришло из файла и от роли (путь, строки правки с разделами, ключи, --why), — через md, каждый знак ASCII-
+    пунктуации экранирован и виден буквально (R4-2 Б1). «[id]» в начале — как есть: по нему сверка ищет вопрос."""
+    why = f". Пояснение роли: {md(mark(req['why']))}" if req.get("why") else ""
+    rows = [md(r) for r in shown(req)]
+    return (f"[{req['id']}] Применить правку {md('~/' + req['file'])} (задача {req['task']}, sha диффа "
+            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req, md)
+            + why)
 
 
 def facts(req):
