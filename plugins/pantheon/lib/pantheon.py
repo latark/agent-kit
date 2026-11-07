@@ -41,7 +41,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon packs hashes <направление>   нынешние sha256 скриптов .claude/hooks, которые хуки пакета направления
                                         исполняют, и HEAD их репозиториев — JSON для одобрения владельцем в
                                         ~/.claude/pantheon/packs/<направление>/approved.json; ничего не пишет
-                                        (metis-0933, класс 6)
+                                        (metis-0933, класс 6). В stderr — совпал ли HEAD с origin/<ветка> и
+                                        чисто ли дерево, расхождение — «внимание — …» и код 1
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
@@ -308,6 +309,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from datetime import datetime, timedelta
 
 if sys.version_info < (3, 11):
@@ -3236,7 +3238,9 @@ REPO_HOOKS_PREFIX = ".claude/hooks/"
 # `pantheon packs hashes <направление>` (pack_hashes) — ничего не пишет.
 PACK_APPROVED_HOME = os.path.join(HOME, ".claude", "pantheon", "packs")
 PACK_APPROVED = "approved.json"
-PACK_ALERT_DIFF = 1500  # знаков диффа в строке тревоги: alerts.md — строка, полный дифф — командой из неё
+PACK_ALERT_DIFF = 1500  # знаков диффа в строке тревоги: alerts.md — строка, полный дифф — файлом PACK_DIFFS
+PACK_DIFFS = "pack-diffs"  # STATE/pack-diffs/<направление>-<хеш пути>-<sha256>.diff: полный дифф обрезанной тревоги
+PACK_DATA_OPEN, PACK_DATA_CLOSE, PACK_DATA_EOL = "⟦", "⟧", " ⏎ "  # обрамление диффа (данные) и конец его строки
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 COMMIT_HEX = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
@@ -3278,27 +3282,52 @@ def pack_approved(p):
     return scripts, commits
 
 
+# git в репозитории, который пишет окно (дифф тревоги, хеши первичного одобрения — круг G3, ревью argus G1 Б1): без
+# GIT_* вызывающего, без refs/replace (окно пишет refs в песочнице: `update-ref refs/replace/<коммит одобрения>`
+# подменяло текст, от которого считается дифф), без системного и глобального конфига, без хуков, сети и fsmonitor
+REPO_GIT_ENV = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
+                "GIT_OPTIONAL_LOCKS": "0"}
+REPO_GIT_SAFE = ("-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "core.fsmonitor=false")
+
+
 def _repo_git(repo, *args):
-    """git в чужом репозитории (его пишет окно) только на чтение → stdout байтами или None. Без ленивой докачки
-    объектов и сети (protocol.allow=never: transport и ssh из .git/config не запускаются), без fsmonitor."""
-    env = dict(_git_env(), GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+    """git в чужом репозитории (его пишет окно) только на чтение → stdout байтами или None. Окружение — REPO_GIT_ENV
+    без чужих GIT_*, ключи — REPO_GIT_SAFE: ни refs/replace, ни конфига вне репозитория, ни хуков, ни докачки
+    объектов и сети (protocol.allow=never: transport и ssh из .git/config не запускаются)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(REPO_GIT_ENV)
     try:
-        r = subprocess.run(["git", "-c", "protocol.allow=never", "-c", "core.fsmonitor=false", "-C", repo, *args],
+        r = subprocess.run(["git", *REPO_GIT_SAFE, "-C", repo, *args],
                            capture_output=True, env=env, timeout=20, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
 
 
+def _pack_data(text):
+    """Строка чужого текста (диффа из репозитория окна) для тревоги: управляющие знаки, кроме \\n и \\t (ESC
+    перекрашивает и стирает строки в терминале), невидимые знаки формата (смена направления письма U+202E),
+    разделители строк и знаки обрамления ⟦⟧⏎ — кодом \\uXXXX: окно не подделает ни строку «одобрить?», ни конец
+    диффа."""
+    return "".join(c if c in "\n\t" or (c not in "⟦⟧⏎" and unicodedata.category(c) not in (
+        "Cc", "Cf", "Cs", "Zl", "Zp")) else f"\\u{ord(c):04x}" for c in text)
+
+
 def pack_unapproved_alert(window, repo, script, new, current, approved):
     """Тревога Зевсу о скрипте с чужим хешем new (байты current) — одна на (направление, скрипт, хеш): «[metis-0933]
     <направление>: хук <путь> изменён, одобрить?», старый и новый sha256, дифф от коммита одобрения (`git diff
     <commit> -- <путь>`: текст коммита из `git cat-file`, сравнение с прочитанными байтами). approved — pack_approved
-    направления; нет approved.json, коммита или объекта — тревога без диффа."""
+    направления; нет approved.json, коммита или объекта — тревога без диффа.
+    Дифф не подделать из окна (круг G3, ревью argus G1 Б1, Д3, G2 Д1): git — _repo_git (без refs/replace); текст
+    коммита одобрения показывается, только если его sha256 — эталон approved.json (переписанный объект в
+    .git/objects не совпадёт); управляющие и невидимые знаки — кодом \\uXXXX (_pack_data), дифф в ⟦…⟧ с пометкой
+    «данные»; длиннее PACK_ALERT_DIFF — «обрезано, полный — <файл>», файл — STATE/pack-diffs (окно его не пишет)."""
     scripts, commits = approved
     old, commit = ((scripts or {}).get(repo) or {}).get(script), commits.get(repo)
     where = os.path.join(repo, ".claude", "hooks", script)
     rel = f".claude/hooks/{script}"
+    key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
     if scripts is None:
         diff = f"{tilde(pack_approved_path(window))} нет — хуки направления не исполняются"
     elif not commit:
@@ -3307,14 +3336,25 @@ def pack_unapproved_alert(window, repo, script, new, current, approved):
         base = _repo_git(repo, "cat-file", "blob", f"{commit}:{rel}")
         if base is None:
             diff = f"дифф: объекта {commit[:12]}:{rel} нет"
+        elif old and hashlib.sha256(base).hexdigest() != old:
+            diff = (f"дифф не показан: текст {commit[:12]}:{rel} не совпал с эталоном sha256 {old[:12]} — объекты "
+                    "репозитория подменены или коммит одобрения не тот")
         else:
-            lines = difflib.unified_diff(base.decode("utf-8", "replace").splitlines(),
-                                         current.decode("utf-8", "replace").splitlines(),
-                                         f"{commit[:12]}:{rel}", rel, lineterm="")
-            text = " ⏎ ".join(lines)
-            more = f" … (полный: git -C {tilde(repo)} diff {commit} -- {rel})" if len(text) > PACK_ALERT_DIFF else ""
-            diff = f"дифф: {text[:PACK_ALERT_DIFF]}{more}"
-    key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
+            lines = [_pack_data(x) for x in difflib.unified_diff(
+                base.decode("utf-8", "replace").splitlines(), current.decode("utf-8", "replace").splitlines(),
+                f"{commit[:12]}:{rel}", rel, lineterm="")]
+            text = PACK_DATA_EOL.join(lines)
+            more = ""
+            if len(text) > PACK_ALERT_DIFF:
+                full = path(PACK_DIFFS, key.removeprefix("pack-hook-") + ".diff")
+                try:
+                    os.makedirs(os.path.dirname(full), mode=0o700, exist_ok=True)
+                    write_atomic(full, "\n".join(lines) + "\n")
+                    more = f" — обрезано, полный — {tilde(full)}"
+                except OSError as e:
+                    more = f" — обрезано, полный дифф не записан ({e})"
+            diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{text[:PACK_ALERT_DIFF]}"
+                    f"{PACK_DATA_CLOSE}{more}")
     text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "
             f"стало {new}. {diff}")
     try:
@@ -3323,9 +3363,75 @@ def pack_unapproved_alert(window, repo, script, new, current, approved):
         print(f"pantheon: тревога о {where} не записана — {e}", file=sys.stderr)
 
 
-def pack_hashes(window):
+PACK_TREE_FILES = 50000  # файлов HEAD, которые packs hashes сверяет с рабочей копией; больше — «сверено не всё»
+PACK_TREE_FILE_LIMIT = 64 << 20
+
+
+def _repo_tree_dirty(repo, head):
+    """Файлы дерева head, чьи байты в рабочей копии не совпали с объектом (нет файла, ссылка вместо файла, правка) →
+    (список путей, сверено ли всё) или (None, False) — дерево не прочитано. Без git status и diff: они запускают
+    фильтры и textconv из .git/config, который пишет окно, а packs hashes идёт вне песочницы. Неотслеживаемые файлы
+    не в счёт; режим (x-бит) не сверяется."""
+    fmt = (_repo_git(repo, "rev-parse", "--show-object-format") or b"sha1").decode().strip() or "sha1"
+    out = _repo_git(repo, "ls-tree", "-r", "-z", "--full-tree", head)
+    if out is None or fmt not in ("sha1", "sha256"):
+        return None, False
+    dirty, entries = [], [e for e in out.split(b"\0") if e]
+    for entry in entries[:PACK_TREE_FILES]:
+        meta, _, name = entry.partition(b"\t")
+        mode, kind, oid = (meta.split(b" ") + [b"", b""])[:3]
+        if kind != b"blob":
+            continue  # подмодуль
+        p = os.path.join(repo, os.fsdecode(name))
+        if mode == b"120000":
+            try:
+                data = os.fsencode(os.readlink(p))
+            except OSError:
+                data = None
+        else:
+            data = _read_bytes_nofollow(p, PACK_TREE_FILE_LIMIT)
+        if data is None or hashlib.new(fmt, b"blob %d\0" % len(data) + data).hexdigest() != oid.decode():
+            dirty.append(os.fsdecode(name))
+    return dirty, len(entries) <= PACK_TREE_FILES
+
+
+def pack_repo_state(repo, head):
+    """Для первичного одобрения (ревью argus G1 Д2): совпал ли HEAD с origin/<ветка> и чисто ли дерево →
+    (строка состояния, [предупреждения]). origin/<ветка> — ref последнего fetch: сети нет (protocol.allow=never), а
+    ref пишет и окно, поэтому совпадение — не доказательство, расхождение — повод не одобрять."""
+    warn, parts = [], []
+    branch = _repo_git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = branch.decode("utf-8", "replace").strip() if branch else ""
+    up = _repo_git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}^{{commit}}") \
+        if branch else None
+    up = up.decode().strip() if up else ""
+    if not branch:
+        warn.append(f"{tilde(repo)}: HEAD {head[:12]} не на ветке — с origin не сверен")
+    elif not up:
+        warn.append(f"{tilde(repo)}: нет origin/{_pack_data(branch)} — HEAD {head[:12]} с сервером не сверен")
+    elif up != head:
+        warn.append(f"{tilde(repo)}: HEAD {head[:12]} не совпал с origin/{_pack_data(branch)} {up[:12]} (последний "
+                    "fetch) — одобряется не то, что на сервере")
+    else:
+        parts.append(f"HEAD {head[:12]} = origin/{_pack_data(branch)} (последний fetch)")
+    dirty, whole = _repo_tree_dirty(repo, head)
+    if dirty is None:
+        warn.append(f"{tilde(repo)}: дерево HEAD не прочитано — чистота рабочей копии не проверена")
+    elif dirty:
+        shown = ", ".join(_pack_data(x) for x in dirty[:5]) + (" …" if len(dirty) > 5 else "")
+        warn.append(f"{tilde(repo)}: дерево не чисто — {len(dirty)} файл(ов) не совпали с HEAD: {shown}")
+    elif not whole:
+        warn.append(f"{tilde(repo)}: в HEAD больше {PACK_TREE_FILES} файлов — сверены первые, не всё дерево")
+    else:
+        parts.append("дерево чисто")
+    return f"{tilde(repo)}: " + (", ".join(parts) or "расхождения — ниже"), warn
+
+
+def pack_hashes(window, notes=None):
     """Текущие sha256 скриптов хуков пакета направления window и HEAD их репозиториев — в формате approved.json, для
-    карточки владельцу (`pantheon packs hashes`). Ничего не пишет. → (dict, предупреждения); пакета нет — (None, …)."""
+    карточки владельцу (`pantheon packs hashes`). Ничего не пишет. → (dict, предупреждения); пакета нет — (None, …).
+    Для каждого репозитория — pack_repo_state: строка состояния в notes (если дан список), расхождения — в
+    предупреждения."""
     pack = os.path.join(PACKS, window)
     if not window or "/" in window or window.startswith((".", "_")) or not os.path.isfile(
             os.path.join(pack, "hooks", "hooks.json")):
@@ -3340,6 +3446,11 @@ def pack_hashes(window):
             item["commit"] = head.decode().strip() if head else None
             if not item["commit"]:
                 warn.append(f"{tilde(repo)}: HEAD не прочитан — без коммита тревога придёт без диффа")
+            else:
+                note, more = pack_repo_state(repo, item["commit"])
+                warn += more
+                if notes is not None:
+                    notes.append(note)
         data = _read_bytes_nofollow(os.path.join(repo, ".claude", "hooks", script), PACK_SCRIPT_LIMIT)
         if data is None:
             warn.append(f"{tilde(repo)}/.claude/hooks/{script}: нет обычного файла (или звено — ссылка) — не в списке")
@@ -3354,14 +3465,18 @@ def pack_hashes(window):
 
 
 def pack_hashes_cmd(rest):
-    """pantheon packs hashes <направление>: JSON для approved.json в stdout, предупреждения — в stderr. Код 0 — все
-    скрипты прочитаны, 1 — есть предупреждения, 2 — нет пакета или аргумента."""
+    """pantheon packs hashes <направление>: JSON для approved.json в stdout; в stderr — состояние каждого репозитория
+    (HEAD против origin/<ветка>, чистота дерева) и предупреждения «внимание — …». Код 0 — все скрипты прочитаны, HEAD
+    = origin/<ветка> и дерево чисто, 1 — есть предупреждения, 2 — нет пакета или аргумента."""
     if rest[:1] != ["hashes"] or len(rest) != 2:
         print("pantheon packs hashes <направление>", file=sys.stderr)
         return 2
-    got, warn = pack_hashes(rest[1])
-    for w in warn:
+    notes = []
+    got, warn = pack_hashes(rest[1], notes)
+    for w in notes:
         print(f"pantheon packs: {w}", file=sys.stderr)
+    for w in warn:
+        print(f"pantheon packs: внимание — {w}", file=sys.stderr)
     if got is None:
         return 2
     print(json.dumps(got, ensure_ascii=False, indent=2, sort_keys=True))
