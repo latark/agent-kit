@@ -15,8 +15,12 @@
 Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml и
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
 права и хуки — никогда. Новый текст — UTF-8 без NUL и без невидимых, управляющих и bidi-знаков (HIDDEN, кроме \\n и
-\\t; --why — тоже), .toml — разбирается tomllib. Правка в вопросе и окне — shown(): строки «-»/«+» через « ⏎ » (⏎ внутри
-строки экранирован), у policy.toml каждая с разделом TOML — «[coordinators] +строка» (у «-» раздел старого текста).
+\\t; --why — тоже, и ещё не длиннее WHY_MAX и без лишних пробелов: why_ok, его повторяет и valid() прохода). .toml —
+сравнение по смыслу (toml_keys): старый и новый текст разобраны tomllib, каждый изменённый ключ правит своя строка
+«-»/«+»; ключ сменился без своей строки (строку контекста проглотила многострочная строка, удалён заголовок таблицы) или
+текст не TOML — отказ в propose и в проходе. Правка в вопросе и окне — shown(): строки «-»/«+» через « ⏎ » (⏎ внутри
+строки экранирован), у policy.toml каждая с разделом TOML — «[coordinators] +строка» (у «-» раздел старого текста), и
+за ними «Ключи, изменено N: путь: старое → новое» (key_rows) — смысл правки целиком.
 
 Проход (тик зовёт его отдельным процессом, пока есть заявки; окружение — merge.clean_env, как у слияния). Папка
 очереди открыта один раз (open_queue: части пути без ссылок), дальше файлы в ней — только через её fd (dir_fd).
@@ -80,6 +84,7 @@ HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 HIDDEN = ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp")   # как handoff.BAD_CHARS: окно Touch ID их не покажет
 SEP = "⏎"            # «⏎» — между строками правки в вопросе и окне; внутри строки — экранирован
 ROOT = "(вне таблиц)"     # раздел строк policy.toml до первой таблицы
+MISSING = object()        # ключа нет в старом или новом тексте (toml_changes)
 FINAL = ("done", "failed", "declined", "refused", "dropped")
 CANCEL_LABEL = "Не применять"
 USAGE = ("pantheon owner-edit propose <файл> --from <новый текст> --task ID [--why \"зачем\"] | status [ID] | "
@@ -251,16 +256,22 @@ def _probe_path(obj, key, path=()):
     return None
 
 
+def _dotted(path):
+    return ".".join(k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=bool(hidden_at(k, "")))
+                    for k in path if k is not None)
+
+
 def _label(path):
-    parts = [k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=bool(hidden_at(k, "")))
-             for k in path if k is not None]
-    return ("[[{}]]" if path[-1] is None else "[{}]").format(".".join(parts))
+    if not path:
+        return ROOT
+    return ("[[{}]]" if path[-1] is None else "[{}]").format(_dotted(path))
 
 
-def toml_sections(text):
-    """Раздел TOML каждой строки text (элементы splitlines(True)) → [подпись] или None: text не TOML. Заголовок — строка
-    «[…]», после которой вставленный ключ-проба ложится в таблицу (tomllib): «[x]» внутри многострочной строки или
-    массива — не заголовок. До первой таблицы — ROOT."""
+def toml_paths(text):
+    """Таблица TOML каждой строки text (элементы splitlines(True)) → [(путь, заголовок ли)] или None: text не TOML.
+    Путь — кортеж ключей, None — элемент массива таблиц «[[…]]», () — до первой таблицы. Заголовок — строка «[…]»,
+    после которой вставленный ключ-проба ложится в таблицу (tomllib): «[x]» внутри многострочной строки или массива — не
+    заголовок."""
     if text is None:
         return None
     try:
@@ -270,16 +281,140 @@ def toml_sections(text):
     elems, key = text.splitlines(True), "oe_probe"
     while key in text:
         key += "_"
-    out, cur = [], ROOT
+    out, cur = [], ()
     for i, ln in enumerate(elems):
+        head = False
         if ln.lstrip().startswith("["):
             probe = "".join(elems[:i + 1]) + ("" if ln.endswith("\n") else "\n") + f"{key} = 1\n" + "".join(elems[i + 1:])
             with contextlib.suppress(tomllib.TOMLDecodeError):
                 path = _probe_path(tomllib.loads(probe), key)
                 if path:
-                    cur = _label(path)
-        out.append(cur)
+                    cur, head = path, True
+        out.append((cur, head))
     return out
+
+
+def toml_sections(text):
+    """Раздел TOML каждой строки text → [подпись «[таблица]», «[[массив]]» или ROOT] или None: text не TOML."""
+    paths = toml_paths(text)
+    return None if paths is None else [_label(p) for p, _ in paths]
+
+
+def _key_of(line):
+    """Путь ключа строки «ключ = …» (голый, в кавычках, через точку) или None. Ключ — разбор tomllib начала строки до
+    одного из «=»: «=» внутри кавычек ключа такое начало не разбирает."""
+    s = line.strip()
+    if not s or s[0] in "#[":
+        return None
+    for m in re.finditer("=", s):
+        try:
+            obj = tomllib.loads(s[:m.start()] + "= 0\n")
+        except tomllib.TOMLDecodeError:
+            continue
+        path = ()
+        while isinstance(obj, dict) and len(obj) == 1:
+            k, obj = next(iter(obj.items()))
+            path += (k,)
+        return path or None
+    return None
+
+
+def _exists(obj, path):
+    if not path:
+        return True
+    if path[0] is None:
+        return isinstance(obj, list) and any(_exists(e, path[1:]) for e in obj)
+    return isinstance(obj, dict) and path[0] in obj and _exists(obj[path[0]], path[1:])
+
+
+def _leaves(obj, path=()):
+    """(путь, значение) каждого ключа-листа: таблицы раскрыты, массив (и массив таблиц) — одно значение, пустая таблица
+    — лист {}."""
+    if isinstance(obj, dict) and (obj or not path):
+        for k, v in obj.items():
+            yield from _leaves(v, path + (k,))
+    else:
+        yield path, obj
+
+
+def _canon(v, ascii_=False):
+    """Значение TOML одной строкой JSON: тип различим (1, 1.0, true, "1", дата), невидимые знаки — экранированы."""
+    s = json.dumps(v, ensure_ascii=ascii_, sort_keys=True, default=lambda o: {"$" + type(o).__name__: o.isoformat()})
+    return _canon(v, True) if not ascii_ and hidden_at(s, "") else s
+
+
+def _owner(lines, secs, obj, i):
+    """Ключ (путь), который правит строка i диффа: заголовок таблицы — её путь; иначе ближайшая строка «ключ = …» на i
+    или выше в той же таблице, чей ключ в разборе этого текста есть (строка внутри многострочного значения — его ключ).
+    Не нашёлся — None."""
+    for j in range(i, -1, -1):
+        sec, head = secs[j]
+        if head:
+            return sec if j == i else None
+        key = _key_of(lines[j])
+        if key and _exists(obj, sec + key):
+            return sec + key
+    return None
+
+
+def toml_changes(old, new):
+    """Изменённые ключи двух текстов TOML (разбор tomllib) → [(путь, старое, новое)], MISSING — ключа нет. Порядок —
+    как в старом тексте, новые ключи — в конце. Текст не TOML — TOMLDecodeError."""
+    lo, ln = dict(_leaves(tomllib.loads(old))), dict(_leaves(tomllib.loads(new)))
+    return [(p, lo.get(p, MISSING), ln.get(p, MISSING)) for p in list(lo) + [p for p in ln if p not in lo]
+            if p not in lo or p not in ln or _canon(lo[p]) != _canon(ln[p])]
+
+
+def key_row(path, old, new):
+    show = (lambda v: "нет" if v is MISSING else _canon(v))
+    return f"{_dotted(path)}: {show(old)} → {show(new)}"
+
+
+def toml_keys(rel, old, new, diff=None):
+    """Правка .toml по смыслу (ревью PR #362, R2 Б1): старый и новый текст разобраны tomllib, каждый изменённый ключ
+    должен править своя строка «-»/«+» диффа (_owner: строка «ключ = …», строка его многострочного значения, заголовок
+    его таблицы). Ключ сменился без своей строки — строка контекста ушла в другой ключ или раздел (её проглотила
+    добавленная многострочная строка, удалён заголовок таблицы) — Refuse; текст не TOML — Refuse. → строки «путь: старое
+    → новое» (key_row) — их владелец видит в вопросе и окне Touch ID: смысл правки показан целиком, даже если сверка
+    строк что-то пропустит."""
+    try:
+        changed = toml_changes(old, new)
+        secs = {"-": toml_paths(old), "+": toml_paths(new)}
+        objs = {"-": tomllib.loads(old), "+": tomllib.loads(new)}
+    except tomllib.TOMLDecodeError as e:
+        raise Refuse(f"~/{rel}: старый или новый текст не TOML ({e}) — ключи не сравнить, не правлю")
+    lines = {"-": old.splitlines(True), "+": new.splitlines(True)}
+    owners = []
+    for ln, i in walk(make_diff(rel, old, new) if diff is None else diff):
+        if i is not None and 0 <= i < len(lines[ln[0]]):
+            k = _owner(lines[ln[0]], secs[ln[0]], objs[ln[0]], i)
+            if k is not None:
+                owners.append(k[:k.index(None)] if None in k else k)
+    loose = [p for p, _, _ in changed if not any(p[:len(k)] == k or k[:len(p)] == p for k in owners)]
+    if loose:
+        raise Refuse(f"~/{rel}: правка меняет {', '.join(_dotted(p) for p in loose[:5])} без своей строки «-»/«+» — "
+                     "строка контекста ушла в другой ключ или раздел (многострочная строка, заголовок таблицы); не правлю")
+    return [key_row(*c) for c in changed]
+
+
+def key_rows(req):
+    """Изменённые ключи заявки для вопроса и окна: у .toml — key_row каждого (старый текст — из нового и диффа), не
+    сравнить — ["?"]; у .part — None."""
+    if not req["file"].endswith(".toml"):
+        return None
+    new = req.get("new")
+    old = old_text(req["file"], new, req["diff"]) if isinstance(new, str) else None
+    try:
+        return [key_row(*c).replace(SEP, "\\u23ce") for c in toml_changes(old, new)] if old is not None else ["?"]
+    except tomllib.TOMLDecodeError:
+        return ["?"]
+
+
+def keys_text(req):
+    rows = key_rows(req)
+    if rows is None:
+        return ""
+    return f". Ключи, изменено {len(rows)}: " + (f" {SEP} ".join(rows) if rows else "нет")
 
 
 def shown(req):
@@ -309,7 +444,7 @@ def window_text(req):
     """Текст окна Touch ID — правка целиком, или None: окно её целиком не покажет (тогда только «да» в окне вопросов)."""
     rows = shown(req)
     text = (f"Правка ~/{req['file']} (заявка {req['id']}, {req.get('window') or 'вне окна'}, {req['task']}, sha "
-            f"{req['diff_sha'][:SHORT]}), строк {len(rows)}: " + f" {SEP} ".join(rows))
+            f"{req['diff_sha'][:SHORT]}), строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req))
     return text if P.handoff_mod().showable(text) and len(text) <= WINDOW_MAX else None
 
 
@@ -320,7 +455,7 @@ def question(req):
     why = f" Зачем: {req['why']}." if req.get("why") else ""
     rows = shown(req)
     return (f"[{req['id']}] Применить правку ~/{req['file']} (задача {req['task']}, sha диффа "
-            f"{req['diff_sha'][:SHORT]})?{why} Правка, строк {len(rows)}: " + f" {SEP} ".join(rows))
+            f"{req['diff_sha'][:SHORT]})?{why} Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req))
 
 
 def facts(req):
@@ -331,9 +466,12 @@ def facts(req):
                      "новая заявка от нового текста")
     check_text(req["file"], req["new"])
     after = sha(req["new"])
-    diff = make_diff(req["file"], cur.decode("utf-8", "replace"), req["new"])
+    old = cur.decode("utf-8", "replace")
+    diff = make_diff(req["file"], old, req["new"])
     if after != req["after"] or diff != req["diff"] or diff_sha(req["file"], req["before"], after, diff) != req["diff_sha"]:
         raise Refuse("заявка не сходится с файлом и новым текстом (дифф или sha диффа) — не применяю")
+    if req["file"].endswith(".toml"):
+        toml_keys(req["file"], old, req["new"], diff)   # и у заявки, положенной в очередь мимо propose (R2 Б1)
     return cur
 
 
@@ -403,12 +541,20 @@ def read_file(path, limit=REQ_MAX, dir_fd=None):
         return fh.read(limit + 1)
 
 
+def why_ok(why):
+    """--why годится в вопрос владельцу: не длиннее WHY_MAX, без невидимых, управляющих и bidi-знаков (\\n и \\t — тоже),
+    пробелы — по одному и не по краям (так его сводит propose). Проверяют и propose, и проход (valid): заявку, записанную
+    прямо в очередь мимо propose, тоже (ревью PR #362, R2 Б2)."""
+    return len(why) <= WHY_MAX and hidden_at(why, "") is None and why == " ".join(why.split())
+
+
 def valid(req, name):
     return isinstance(req, dict) and ID_RE.fullmatch(str(req.get("id"))) is not None \
         and name == f"{req['id']}.req.json" and FILES.fullmatch(str(req.get("file"))) is not None \
         and all(HEX64.fullmatch(str(req.get(k))) for k in ("before", "after", "diff_sha")) \
         and all(isinstance(req.get(k), str) for k in ("new", "diff", "task", "why")) \
-        and TASK_RE.fullmatch(req["task"]) is not None and isinstance(req.get("created"), (int, float))
+        and TASK_RE.fullmatch(req["task"]) is not None and isinstance(req.get("created"), (int, float)) \
+        and why_ok(req["why"])
 
 
 def load_req(path, dir_fd=None):
@@ -542,6 +688,8 @@ def cmd_propose(args):
             old = cur.decode("utf-8")
         except UnicodeDecodeError:
             raise Refuse(f"~/{rel}: не UTF-8")
+        if rel.endswith(".toml") and old != new:
+            toml_keys(rel, old, new)
     except Refuse as e:
         return err(f"pantheon owner-edit propose: отказ — {e}")
     if old == new:

@@ -659,8 +659,11 @@ check("Б круг 2: одна строка в [sandbox_write] и в [coordinato
 fresh(policy=SEC_OLD)
 new = SEC_OLD.replace('[coordinators]\nzeus = ["~/ai"]\n', "").replace('name = "x"\n', 'name = "y"\n')
 new = ("pre = 0\n" + new).replace("note = ", "notes = ")
-propose("~/.claude/pantheon/policy.toml", new)
-_, req, _ = reqs()[0]
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", new)
+check("Б1 R2: удалён заголовок [coordinators] — d, e, f ушли в [sandbox_write]: propose отказал",
+      rc != 0 and not reqs() and "sandbox_write.d" in errs, errs)
+req = {"file": ".claude/pantheon/policy.toml", "new": new, "diff": OE.make_diff(".claude/pantheon/policy.toml",
+                                                                               SEC_OLD, new)}
 rows = OE.shown(req)
 check("Б круг 2: «-» — раздел старого текста, «+» — нового; [x] в многострочной строке — не заголовок; [[таблица]]",
       rows == ["(вне таблиц) +pre = 0", '[sandbox_write] -note = """', '[sandbox_write] +notes = """',
@@ -732,6 +735,90 @@ answer(yes_question(req), "А — Да, применить")
 run()
 check("Д круг 2: «да» на вопрос с « ⏎ » (как пишет хук) — применено", read(NAMES) == "Метида — она\n", journal())
 
+# --- [ревью PR #362, круг R2, второй argus] --------------------------------------------------------------------------
+# Б1: добавленные строки молча меняют смысл строк контекста policy.toml (пробы argus probe_swallow.py)
+SW_OLD = ('always = ["~/.claude/agent-memory"]\n\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n\n'
+          '[private]\nroles = ["hq", "chiron"]\ncoordinators = ["mnemo-brain"]\n# Self, Areas, People\n'
+          'paths = ["~/ai/knowledge/me", "~/ai/knowledge/Self", "~/ai/knowledge/People"]\n\n'
+          '[sandbox_write]\nthemis-sources = ["~/.cache/expert-corpus"]\n')
+Q3 = "'" * 3
+SWALLOW = {
+    "строка в многострочную строку (private.paths пропадает)":
+        (SW_OLD.replace("# Self, Areas, People\n", f"note = {Q3}\n# Self, Areas, People\n")
+         .replace('People"]\n\n[sandbox_write]', f'People"]\n{Q3}\n\n[sandbox_write]'), "private.paths"),
+    "то же и комментарий под [private] (не правит всю таблицу)":
+        (SW_OLD.replace("[private]\n", "[private]\n# новый комментарий\n")
+         .replace("# Self, Areas, People\n", f"note = {Q3}\n# Self, Areas, People\n")
+         .replace('People"]\n\n[sandbox_write]', f'People"]\n{Q3}\n\n[sandbox_write]'), "private.paths"),
+    "удалён заголовок [sandbox_write] (ключи уходят в [private])":
+        (SW_OLD.replace("\n[sandbox_write]\n", "\n"), "private.themis-sources"),
+}
+
+
+def queue_req(old, new, why="добавить репозиторий", rel=".claude/pantheon/policy.toml"):
+    """Заявка, записанная прямо в очередь STATE мимо propose: поля сверки честные (sha до, дифф, sha диффа)."""
+    diff = OE.make_diff(rel, old, new)
+    before, after = OE.sha(old), OE.sha(new)
+    rid = "oe-20261108-000000-abcdef"
+    req = {"id": rid, "file": rel, "before": before, "after": after, "diff": diff,
+           "diff_sha": OE.diff_sha(rel, before, after, diff), "new": new, "task": "metis-0910", "why": why,
+           "role": None, "created": time.time()}
+    p = os.path.join(STATE, "owner-edit", "queue", f"{rid}.req.json")
+    write(p, json.dumps(req, ensure_ascii=False), 0o600)
+    return p, req
+
+
+for what, (sw_new, lost) in SWALLOW.items():
+    fresh(policy=SW_OLD)
+    rc, out, errs = propose("~/.claude/pantheon/policy.toml", sw_new)
+    check(f"Б1 R2: {what} — propose отказал, заявки нет, ключ назван", rc != 0 and not reqs() and lost in errs,
+          (rc, out, errs))
+    fresh(policy=SW_OLD)
+    path0, req = queue_req(SW_OLD, sw_new)
+    answer(OE.question(req), "А — Да, применить")
+    run()
+    check(f"Б1 R2: {what} — заявка мимо propose с «да»: проход отказал, файл не тронут, окна нет",
+          read(POLICY) == SW_OLD and not ASKED and result(req).get("state") == "refused"
+          and lost in result(req).get("note", ""), (ASKED, result(req), journal()))
+    check(f"Б1 R2: {what} — в вопросе изменённый ключ со значениями", f"{lost}: " in OE.question(req)
+          and "→" in OE.question(req).split("Ключи")[-1], OE.question(req))
+fresh(policy=SW_OLD)
+check("Б1 R2: старый текст не TOML — отказ", hasattr(OE, "toml_keys") and raises(OE.toml_keys, ".claude/pantheon/policy.toml", "[x\n", SW_OLD))
+# честные правки: ключ добавлен, элемент многострочного массива, ключ удалён — заявка есть, ключи с «старое → новое»
+ML_OLD = '[merge_repos]\nmetis-pantheon = [\n  "latark/agent-kit",\n]\nzeus = ["a"]\n'
+for what, old_t, new_t, key_row in (
+        ("ключ добавлен", SW_OLD, SW_OLD.replace('roles = ["hq", "chiron"]\n', 'roles = ["hq", "chiron"]\nx = 1\n'),
+         "private.x: нет → 1"),
+        ("элемент многострочного массива", ML_OLD, ML_OLD.replace('  "latark/agent-kit",\n',
+                                                                 '  "latark/agent-kit",\n  "latark/other",\n'),
+         'merge_repos.metis-pantheon: ["latark/agent-kit"] → ["latark/agent-kit", "latark/other"]'),
+        ("ключ удалён", ML_OLD, ML_OLD.replace('zeus = ["a"]\n', ""), 'merge_repos.zeus: ["a"] → нет')):
+    fresh(policy=old_t)
+    rc, out, errs = propose("~/.claude/pantheon/policy.toml", new_t)
+    q = OE.question(reqs()[0][1]) if reqs() else ""
+    check(f"Б1 R2: {what} — заявка есть, в вопросе «{key_row}»", rc == 0 and key_row in q, (rc, errs, q))
+    answer(q, "А — Да, применить")
+    IDLE[0] = 10 ** 6
+    run()
+    check(f"Б1 R2: {what} — «да» на вопрос с ключами применено", read(POLICY) == new_t, journal())
+
+# Б2: заявка, записанная прямо в очередь, с --why из bidi-знака, переводов строк, длиннее WHY_MAX (probe_why.py)
+for what, bad_why in (("bidi U+202E", "ok\u202eон"), ("перевод строки", "строка\nвторая"),
+                      (f"длиннее {OE.WHY_MAX}", "x" * (OE.WHY_MAX + 1)), ("пробел по краю", " зачем"),
+                      ("двойной пробел", "за  чем"), ("неразрывный пробел", "за" + chr(0xA0) + "чем"),
+                      ("пробы argus", "\u202eлюбой текст\n" * 3 + "x" * 500)):
+    fresh()
+    path0, req = queue_req(OLD, NEW, why=bad_why)
+    check(f"Б2 R2: why {what} — valid() отказ", not OE.valid(req, os.path.basename(path0)))
+    answer(OE.question(req), "А — Да, применить")
+    run()
+    check(f"Б2 R2: why {what} — заявка мимо propose не применена, окна нет", read(POLICY) == OLD and not ASKED
+          and not os.path.exists(path0), (ASKED, journal()))
+fresh()
+path0, req = queue_req(OLD, NEW, why="x" * OE.WHY_MAX)
+check("Б2 R2: why ровно WHY_MAX знаков и пустой — valid()", OE.valid(req, os.path.basename(path0))
+      and OE.valid(dict(req, why=""), os.path.basename(path0)))
+
 # --- [проход] -------------------------------------------------------------------------------------------------------
 fresh()
 propose("~/.claude/pantheon/policy.toml", NEW)
@@ -758,9 +845,17 @@ with contextlib.suppress(FileNotFoundError):
 os.environ["PANTHEON_DRYRUN"] = "1"
 P.owner_edit_kick()
 check("тик: есть заявка — проход запускается", os.path.exists(dry) and "owner-edit-run" in read(dry))
+os.remove(dry)
+with P.lock("owner-edit-run") as held:   # Д2 R2: проход уже идёт — второй не запускается
+    P.owner_edit_kick()
+check("тик: замок прохода занят — проход не запускается (Д2 R2)", held and reqs() and not os.path.exists(dry))
+import inspect  # noqa: E402
+check("tick() зовёт owner_edit_kick после handoff_kick (Д1 R2)",
+      "handoff_kick()\n        owner_edit_kick()" in inspect.getsource(P.tick))
 _, r0, _ = reqs()[0]
 rc, out, _ = quiet(OE.main, ["cancel", r0["id"]])
-os.remove(dry)
+with contextlib.suppress(FileNotFoundError):
+    os.remove(dry)
 P.owner_edit_kick()
 os.environ.pop("PANTHEON_DRYRUN")
 check("тик: заявок нет — прохода нет", rc == 0 and not reqs() and not os.path.exists(dry))
