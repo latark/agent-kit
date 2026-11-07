@@ -47,6 +47,17 @@ def _version_newer(new, old):
         return str(new) != str(old)
 
 
+def _known_version(name, installed_version):
+    """«Старая» версия для сравнения с каталогом (metis-0922): последняя проверенная по verified.json, а не установленная.
+    Claude Code 2.1.319 сам ставит выпуск при `marketplace update`, и установленная уже равна каталогу, а живой код
+    (current, окна) стоит на проверенной. Записи нет или версия в ней не разбирается — установленная."""
+    rec = P.verified_record(name) or {}
+    ver = rec.get("version")
+    if isinstance(ver, str) and ver and all(x.isdigit() for x in ver.split(".")):
+        return ver
+    return installed_version
+
+
 def _plugins_installed():
     """{имя: {version, installPath}} — плагины agent-kit уровня пользователя по `claude plugin list --json`; None — сбой."""
     try:
@@ -299,7 +310,7 @@ def _plugins_update(quiet):
     for name in sorted(installed):
         if name not in catalog:
             continue
-        old, (new, src) = installed[name]["version"], catalog[name]
+        old, (new, src) = _known_version(name, installed[name]["version"]), catalog[name]
         if _version_newer(new, old) and not checked:  # новый выпуск: заодно смотрим tests на main (metis-0587)
             checked = True
             _main_ci_check()

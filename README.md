@@ -226,7 +226,8 @@
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, сборка окон `sandbox_build` в
   `plugins/pantheon/lib/pantheon.py`, с metis-0598 `plugins/pantheon/hooks/ctx.py`, `plugins/pantheon/hooks/hooks.json`,
   `plugins/pantheon/lib/merge.py`, `plugins/pantheon/lib/plugin_map.py`, `plugins/pantheon/plugins-by-role.toml`,
-  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`,
+  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`, с metis-0951
+  `plugins/pantheon/packs/` и запуск окна `window_launch` в `pantheon.py`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
@@ -399,7 +400,8 @@
 - `plugins/pantheon/lib/window_rules.py` — правила окон координаторов для слияния через шлюз guard
   (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
   PR, который его задевает, ждёт слияния владельцем. С metis-0404 так же и PR, который меняет в `pantheon.py`
-  сборку окон: `sandbox_build`, `domains_build`, `run_settings` и то, что они зовут и читают (README guard, Д3).
+  сборку окон: `sandbox_build`, `domains_build`, `run_settings`, запуск окна `window_launch` (metis-0951) и то, что они
+  зовут и читают (README guard, Д3).
 - `plugins/pantheon/plugins-by-role.toml` и `lib/plugin_map.py` — карта «окно или роль × плагин и MCP» (metis-0238, слово
   владельца 17.10: отключать там, где 100% не нужно). Запись — «оставить»: названное остаётся, остальное из `[catalog]`
   выключается. Окно (`pantheon domains build`): `enabledPlugins: false` у лишних плагинов и `permissions.deny`
@@ -627,6 +629,29 @@
   `~/.claude/skills` — шапка, `name` = имя папки, `description` до 1024 знаков, ссылки на соседние файлы живы; ошибка —
   код 1, в плановом проходе (`--quiet`) — одна тревога `check-skills`. `pantheon check путь/SKILL.md [задача.md …]` —
   только указанные навыки (ошибка навыка даёт код 1 и рядом с задачами); нечитаемая папка навыков — ошибка в строке.
+- `plugins/pantheon/lib/moved.py` — перенос папок в `~/ai` (metis-0899): одна таблица `MOVES` старый путь → новый
+  (agent-kit → `~/ai/agent-kit`, workshop → `~/ai/workshop`, finances → `~/ai/life/finances`) на обе команды.
+  `pantheon migrate-paths <перенос>… [--dry-run]` — разовый запуск вручную после `mv` и «да» владельца на план;
+  плановый проход её не вызывает (её нет в `TICK_SUBCOMMANDS`). Делает: папки истории `~/.claude/projects/<ключ>` под
+  новый ключ — сама папка и её настоящие подпапки на диске (ключи соседних `agent-kit-old`, `agent-kit-v2` и ключи
+  worktree `…--claude-worktrees-…` не трогает), ключи и значения `~/.claude.json` и замена во всех текстовых файлах
+  `~/ai` и `~/.claude`, архивы и закрытые задачи тоже. Код agent-kit не переписывает ни на старом, ни на новом месте:
+  его пути и тестовые данные guard меняет PR через шлюз. Запись — через временный файл и `os.replace`:
+  оборванный запуск не оставляет обрезанного файла.
+  Не трогает git, транскрипты (`~/.claude/projects/**/*.jsonl`, `history.jsonl`) и личное в `~/ai/knowledge` (me, Self,
+  Areas, People — их меняет Мнемозина). До переноса — отказ, код 1; `--dry-run` печатает план и ничего не меняет;
+  совпадение ключа истории или `.claude.json` — конфликт, обе записи остаются. `pantheon check` (раз в 6 ч в плановом
+  проходе, тревога `check-moved`) и `pantheon check --moved` — предупреждение на каждый файл со старым путём сделанного
+  переноса, кроме тех же исключений; личные файлы (`me`, `Self`, `Areas`, `People`) — только числом, без имён, и в
+  выводе, и в тревоге. Код выхода `pantheon check` оно не меняет.
+- Мастерская — по факту на диске (`workshop_root` в `lib/pantheon.py`: песочница окна workshop, `pantheon start
+  workshop`, текст роли `{{workshop}}`; копии в ctx.py и `lib/moved.py` — ядро moved.py не грузит, совпадение трёх
+  держит test_workshop_sockets; metis-0899): `~/ai/workshop/<задача>`, если `~/ai/workshop` есть,
+  иначе старая папка workshop в `~/projects`. Появилась новая — `domains build --if-changed` пересобирает окно и роль
+  (поле `workshop` в domains.json). Окна ролей пишут в
+  `SANDBOX_ROOTS`: подпапки `~/projects` и `~/ai/life`, а также `~/ai/knowledge`, `~/ai/workshop`, `~/ai/agent-kit`.
+  `pantheon direction init` заводит папку в `~/projects/<имя>` или в `~/ai/life/<имя>`: в обоих случаях свой git
+  (`git init`, main, AGENTS.md, локальный коммит). Сам `~/ai/life` — простая папка без `.git`, создаётся при первом направлении.
 - `board_drift` в `plugins/pantheon/lib/pantheon.py` — проверка доски в `pantheon check` (metis-0441): три
   расхождения, видимые в Obsidian. Статус задачи против PR (кэш `autoclose-prs.json`): PR открыт и закрывает задачу (`closes`, не «часть»), а задача todo/done; PR слит
   (закрывающий, не «часть»), а задача doing/review. Вопрос владельцу отвечен (окно вопросов, ответ в чате или галочка, как у
@@ -703,7 +728,11 @@
   старше 10 минут проход серверов снимает сам). Повторный `test` на тот же HEAD и ту же папку, пока прежняя заявка в
   очереди или идёт, новой не подаёт — печатает ID прежней и с `--wait` ждёт её; `stop` снимает тест из очереди окна
   (metis-0706) и идущий тест своего окна — проход гасит группу, итог stopped без записи tests и строки full.jsonl;
-  прогон, у которого HEAD папки ушёл, проход снимает сам (metis-0873). Заявка — в кэш окна, исполняют два прохода со своими замками: тесты
+  прогон, у которого HEAD папки ушёл, проход снимает сам (metis-0873). Нагрузка (metis-0901, дополняет 0873: та снимает
+  заявку ушедшего head, эта — прогон, который выйдет красным по таймаутам): полный набор при load (5 минут) выше 3 на ядро не
+  стартует — итог queued «жду спада нагрузки (load N)», не дольше часа; красный только из-за таймаутов файлов под нагрузкой
+  повторяется один раз сам, второй такой же — итог «таймаут под нагрузкой» (код 75, не красный, в full.jsonl не пишется);
+  ожидание места heavy не считается в TEST_TIMEOUT (не больше часа). Заявка — в кэш окна, исполняют два прохода со своими замками: тесты
   (`outside run`) и серверы с надзором за ними (`outside run --serve`, «стоп» и срок — за секунды, тестов не ждёт); зовёт их
   только плановый проход. Всё — под `sandbox-exec` с профилем: без чтения ключей (`.env*`, `secrets/`, `STATE/outside/env`, `~/.ssh`, `~/.npmrc`, пароль
   демона CDP, Связка ключей), без записи в состояние, ядро, `~/.claude`, `~/.nvm` и кэши окон и без сети к портам
@@ -866,6 +895,7 @@
     python3 -I plugins/pantheon/tests/test_plugin_map.py   # карта плагинов и MCP: окна, роли, битая карта, неизвестное
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: заявки на тесты, тревога о «принять» без tests, dev-сервер, профиль
+    python3 -I plugins/pantheon/tests/test_outside_load.py # outside под нагрузкой: ожидание спада load, один повтор после таймаутов, heavy вне TEST_TIMEOUT
     python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_wt_cleanup.py   # уборка копий .claude/worktrees: слитые, lock субагента, патч и архив, pantheon wt done

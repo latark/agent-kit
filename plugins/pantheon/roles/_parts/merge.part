@@ -29,10 +29,11 @@ permissions окон `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/mar
 слов и хуки `plugins/pantheon/hooks/ctx.py` и `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID
 `plugins/pantheon/lib/merge.py`, карта плагинов `plugins/pantheon/lib/plugin_map.py` и
 `plugins/pantheon/plugins-by-role.toml`, правила ревью `plugins/pantheon/lib/review_rules.py` и ответы окна вопросов
-`plugins/pantheon/lib/answers.py` (metis-0858): такой PR шлюз не сливает.
+`plugins/pantheon/lib/answers.py` (metis-0858), пакеты окон направлений `plugins/pantheon/packs/` (их хуки идут вне
+песочницы, metis-0951): такой PR шлюз не сливает.
 PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugin/releases.json`: номер поднимает workflow release
 на main после слияния (metis-0512), а PR с номером шлюз не сливает совсем. Так же веди правку их сборки в
-`plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает). PR ядра сливает только владелец: в
+`plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает, запуск окна `window_launch`). PR ядра сливает только владелец: в
 текстах ему — «PR #N ждёт вашего слияния». Остальное, ночную работу, после «принять» сливает лид или координатор
 через шлюз.
 
@@ -40,7 +41,7 @@ PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugi
 - Любой PR: argus — при зелёном CI на head и ветке на свежем `origin/main` (metis-0669).
 - Ядро — дифф трогает путь из списка «Ядро защит» выше. Список один, как у шлюза guard (`CORE_DIR` и `CORE_FILES` в
   `plugins/guard/hooks/merge_gate.py`; тест сверяет этот текст с кодом шлюза). Сомневаешься — `plugins/pantheon/lib/pantheon.py`
-  (сборка окон, `sandbox_build`) считай ядром. В PR ядра — два независимых argus на Opus: вызов без `model`
+  (сборка окон `sandbox_build`, запуск окна `window_launch`) считай ядром. В PR ядра — два независимых argus на Opus: вызов без `model`
   и без `effort` (Opus и high из файла роли).
 - Остальное, в том числе остальные «Защищённые пути» (`plugins/pantheon/roles/_parts/protected.part`) — один argus на
   Opus (модель из файла роли), с `effort: "medium"`. Второго не зови: сложность задачи и метка «Сложная» этого не

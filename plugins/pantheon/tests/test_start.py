@@ -656,12 +656,20 @@ def main():
     check("start: остановленную вами не запускает", r.returncode == 1 and "остановлена вами" in r.stderr)
     r = run("start", "workshop", "../etc")
     check("start workshop: имя задачи по образцу", r.returncode == 2)
+    # папка мастерской по факту (metis-0899, вариант А): пока ~/ai/workshop нет — старая в ~/projects, потом новая
     r = run("start", "workshop", "avito-scan", "--from", "tick")
     c = calls()[-1]
-    check("start workshop: daedalus-<задача> в ~/projects/workshop/<задача>, поручение по умолчанию",
+    check("start workshop: без ~/ai/workshop — daedalus-<задача> в старой папке ~/projects, поручение по умолчанию",
           r.returncode == 0 and c["argv"][2:5] == ["workshop", "--name", "daedalus-avito-scan"]
           and c["cwd"] == os.path.join(tmp, "projects", "workshop", "avito-scan")
+          and not os.path.exists(os.path.join(tmp, "ai", "workshop"))
           and c["argv"][-1].startswith("[Пантеон: поручение от tick] Прочитай ~/ai/pantheon/workshop/avito-scan.md"))
+    os.makedirs(os.path.join(tmp, "ai", "workshop"))
+    r = run("start", "workshop", "avito-new", "--from", "tick")
+    c = calls()[-1]
+    check("start workshop: ~/ai/workshop есть — daedalus-<задача> в ~/ai/workshop/<задача>",
+          r.returncode == 0 and c["argv"][2:5] == ["workshop", "--name", "daedalus-avito-new"]
+          and c["cwd"] == os.path.join(tmp, "ai", "workshop", "avito-new"))
     r = run("start", "zeus", "--dry-run")
     check("start zeus: интерактивная сессия hq с окном hq.json (без --bg)",
           r.returncode == 0 and "--agent hq --name zeus --settings" in r.stdout and "hq.json" in r.stdout

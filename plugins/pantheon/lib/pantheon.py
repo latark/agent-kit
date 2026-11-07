@@ -28,7 +28,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
-                                        коммит; без remote
+                                        коммит; без remote. ~/ai/life/<имя> — то же, свой git у каждой
+                                        области; сам ~/ai/life — простая папка без .git
+  pantheon migrate-paths <перенос>… [--dry-run]   после переноса папки: старые пути → новые во всех текстовых
+                                        файлах ~/ai и ~/.claude (код agent-kit — нет), папки истории ~/.claude/projects
+                                        и записи projects в ~/.claude.json под новый ключ; переносы: agent-kit,
+                                        workshop, finances. Без --dry-run — только когда старой папки уже нет
+  pantheon check --moved                старые пути перенесённых папок в живых файлах — предупреждение
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
                                         (200 строк / 25 КБ), CLAUDE.md с импортами длиннее 200 строк
   pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
@@ -157,7 +163,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon exec codex <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
                                         защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
-  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
+  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/ai/workshop/<задача> (до
+                                        переноса, пока ~/ai/workshop нет, — в старой папке workshop в ~/projects)
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
                                         start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» — только предупреждение (stderr, тревога раз в день), запуск идёт; в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
@@ -2186,7 +2193,9 @@ def domains_build(if_changed=False):
         # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
         newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
         due = read_json(path("domains.json")).get("grants_next")
-        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
+        # и папка мастерской: появилась ~/ai/workshop (перенос) — окно workshop и текст роли на новую (metis-0899)
+        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES) \
+                and read_json(path("domains.json")).get("workshop") == workshop_dir():
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -2226,7 +2235,8 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1]})
+        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1],
+        "workshop": workshop_dir()})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
@@ -2260,7 +2270,14 @@ def domains_build(if_changed=False):
 # npm_config_store_dir, а ваш терминал — тот же store-dir в .npmrc проекта (вариант А athena-0001, 15.10). Переменная
 # нужна копиям разработчиков: .npmrc вне git в них не попадает.
 # Координаторам там же — окно сжатия 200k (CTX-04).
-SANDBOX_ROOTS = ["~/projects", "~/ai/knowledge"]   # папки направлений для песочницы — только внутри этих
+# Папки направлений для песочницы — только внутри этих. Первые SANDBOX_STRICT — только папки внутри (не сам корень):
+# ~/projects/<x> и ~/ai/life/<x> (личное владельца, metis-0899); ~/ai/knowledge, мастерская ~/ai/workshop и код
+# Пантеона ~/ai/agent-kit (папка metis-pantheon) — и сам корень. Остальное в ~/ai (pantheon, pantheon-view) — нет
+WORKSHOP_DIR = "~/ai/workshop"   # мастерская Дедала после переноса (metis-0899); живая папка — workshop_dir()
+LIFE_DIR = "~/ai/life"   # области жизни владельца: простая папка без .git, у каждой области свой git (Зевс 06.11, metis-0899)
+AGENT_KIT_DIR = "~/ai/agent-kit"   # рабочая копия agent-kit (metis-0899; до переноса — в ~/projects)
+SANDBOX_ROOTS = ["~/projects", LIFE_DIR, "~/ai/knowledge", WORKSHOP_DIR, AGENT_KIT_DIR]
+SANDBOX_STRICT = 2
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
@@ -2686,7 +2703,7 @@ def _deny_forms(paths):
 # Строгий guard окна роли (SEC-29): тот же guard.py, но с --strict и onFailure "block" — сбой, таймаут, плохой вход
 # или пропавший файл защиты останавливают действие, а не пропускают. Путь — только клон маркетплейса внутри
 # ~/.claude/plugins (туда ролям писать нельзя: protect-config), а не «рядом с этим плагином»: рабочая копия
-# ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
+# agent-kit (AGENT_KIT_DIR) — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
 # (находка проверки безопасности 14.10). Ваших сессий без роли это не касается. Agent|Task|Skill — правила
 # hq-telegram и chiron (P0-1, P0-2): штабу — ни tg-reader, ни telegram-read; коуч с личным — только у Зевса.
 GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill|EnterWorktree"
@@ -3933,10 +3950,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 if stop_live:
                     project_allow_stop(name, problems)
                 return False
-        real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
+        real = [_real_dir(f, SANDBOX_ROOTS[:SANDBOX_STRICT], strict=True) or _real_dir(f, SANDBOX_ROOTS[SANDBOX_STRICT:])
+                for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
-            print(f"песочница {name}: вне ~/projects и ~/ai/knowledge, ссылка или нет папки — только через Write/Edit: "
+            print(f"песочница {name}: вне {', '.join(SANDBOX_ROOTS)}, ссылка или нет папки — только через Write/Edit: "
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
@@ -3983,7 +4001,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             else:
                 clear_once(f"pack-extra-{name}")
         if name == "metis-pantheon":
-            # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
+            # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
@@ -4030,8 +4048,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
                auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name), name)):
             built.append(name)
-    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
-    one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
+    # workshop/ доски; список субагентов — вне P0-6
+    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths)
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -4203,7 +4222,21 @@ HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheo
 # sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
 START_MARK = "[Пантеон:"
 SESSION_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
-WORKSHOP = os.path.join(HOME, "projects", "workshop")
+
+
+def workshop_root():
+    """Папка мастерской по факту на диске (вариант А, 06.11 18:06): ~/ai/workshop, если она есть и не ссылка, иначе
+    старая папка workshop в ~/projects — до переноса окна и задачи мастерской остаются там. Правило здесь, а не в
+    lib/moved.py: по нему sandbox_build (ядро) открывает запись окну workshop, а moved.py вне ядра (argus-4 Б1). Копии —
+    moved.workshop_root и ctx.workshop_root; совпадение трёх держит test_workshop_sockets."""
+    new = os.path.join(HOME, "ai", "workshop")
+    return new if os.path.isdir(new) and not os.path.islink(new) else os.path.join(HOME, "projects", "workshop")
+
+
+def workshop_dir():
+    """workshop_root() в виде «~/…» — для песочницы, текста роли и сообщений."""
+    root = workshop_root()
+    return "~" + root[len(HOME):] if root.startswith(HOME + "/") else root
 
 
 def claude_bin():
@@ -4836,10 +4869,11 @@ def direction_target(target, rest, domains):
     if target == "workshop":
         if not rest or not SESSION_NAME.fullmatch(rest[0]):
             return "pantheon start workshop <задача> [поручение]: имя задачи — a-z, 0-9, дефис"
-        task, folder = rest[0], os.path.join(WORKSHOP, rest[0])
+        root = workshop_root()
+        task, folder = rest[0], os.path.join(root, rest[0])
         os.makedirs(folder, exist_ok=True)
-        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(WORKSHOP) + "/"):
-            return f"папка задачи мастерской {folder} — ссылка или вне ~/projects/workshop"
+        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(root) + "/"):
+            return f"папка задачи мастерской {folder} — ссылка или вне {workshop_dir()}"
         return (f"daedalus-{task}", "workshop", folder, "workshop",
                 f"Прочитай ~/ai/pantheon/workshop/{task}.md и выполни задачу. Внешние действия — только по "
                 "approvals.toml или после «да» владельца в этой сессии.")
@@ -4876,6 +4910,7 @@ def watch_mod():
 # ~/.claude/.gitignore): на каждом Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
 #   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
 #   {{qmd_collections}} {{browser}} — во всех ролях, после вставки частей, из раздела [person] реестра (PERSON_*).
+#   {{workshop}}        — папка мастерской по факту (workshop_dir(): ~/ai/workshop или до переноса старая в ~/projects).
 #                         Пустое значение или нет раздела — строка шаблона с подстановкой выпадает целиком, вместе с
 #                         переводом строки. Поэтому в шаблонах такая подстановка стоит в своей строке-фразе, а текст
 #                         вокруг неё связен и без неё;
@@ -5049,6 +5084,7 @@ def roles_build(src=None, out=None, role_errors=None):
             continue
         try:
             text = _person_text(_role_text(open(layer[f], encoding="utf-8").read(), parts), person, person_bad)
+            text = text.replace("{{workshop}}", workshop_dir())
         except (OSError, ValueError) as e:
             err(f, f"{f}: {e}")
             if base in LEAD_ROLES:
@@ -5839,11 +5875,8 @@ def direction_check(name):
             + ("" if here else "; Codex на этом Mac нет — не блокирует") + "): сверх Codex молча обрезает")
         longest = max((n for _, _, n in found), default=0)
         add(longest <= CLAUDE_LINES, f"Claude: CLAUDE.md с импортами до {CLAUDE_LINES} строк (сейчас {longest})")
-    try:
-        cj = json.load(open(os.path.join(HOME, ".claude.json"), encoding="utf-8"))
-    except (OSError, ValueError):
-        cj = {}
-    add(((cj.get("projects") or {}).get(launch) or {}).get("hasTrustDialogAccepted"),
+    # доверие — по правилу Claude Code (watch.trusted): у каждой области свой git, «Да» нужно на ней самой
+    add(watch_mod().trusted(launch),
         f"доверие к {launch.replace(HOME, '~')} — владелец, одна интерактивная сессия (без него claude --bg не стартует)")
     remote = ""
     if os.path.isdir(os.path.join(launch, ".git")):
@@ -5874,8 +5907,10 @@ def direction_check(name):
 
 # `pantheon direction init` (metis-0042): папку нового направления создаёт команда, а не Метида — её окну guard и
 # песочница не дают писать в ~/projects/<новое>. Ворота — те же, что у check (ваша галочка в журнале доски). Создаёт
-# только ровно ~/projects/<x>; существующие папки не трогает, ссылки и «..» — отказ; сначала проверяет все папки
-# записи, потом создаёт. Повтор доделывает прерванный запуск и ничего не меняет у готового.
+# только ровно ~/projects/<x> или ~/ai/life/<x>; существующие папки не трогает, ссылки и «..» — отказ; сначала
+# проверяет все папки записи, потом создаёт. Повтор доделывает прерванный запуск и ничего не меняет у готового.
+# ~/ai/life — простая папка без .git (Зевс 06.11, metis-0899): у каждой области свой git, init делает то же, что для
+# ~/projects/<x>; ~/ai/life при необходимости создаётся как простая папка.
 INIT_OWN = {".git", "AGENTS.md"}   # что оставляет init: папка только с этим — начатая им, её можно доделать
 INIT_COMMIT = "AGENTS.md (pantheon direction init)"
 
@@ -5925,17 +5960,24 @@ def direction_init(name):
     if not isinstance(folders, list) or not folders:
         print(f"в записи {name} в directions.toml нет folders — нечего создавать")
         return 1
-    projects = os.path.join(HOME, "projects")
+    real_home = os.path.realpath(HOME)
+    roots = {"projects": (os.path.join(HOME, "projects"), os.path.join(real_home, "projects")),
+             "life": (os.path.expanduser(LIFE_DIR), os.path.join(real_home, *LIFE_DIR[2:].split("/")))}
     short = lambda p: "~" + p[len(HOME):] if p == HOME or p.startswith(HOME + "/") else p
 
-    def new_ok(p):
-        """Создавать можно только ровно ~/projects/<x>: один компонент, не скрытый, ~/projects — не ссылка в сторону
-        (сравнение с настоящим путём HOME: сам HOME может быть ссылкой, как /var → /private/var)."""
+    def area(p):
+        """Где папку можно создать: «projects» — ровно ~/projects/<x>, «life» — ровно ~/ai/life/<x>; None — нигде.
+        Один компонент, не скрытый; корень — не ссылка в сторону (сравнение с настоящим путём HOME: сам HOME может
+        быть ссылкой, как /var → /private/var)."""
         base = os.path.basename(p)
-        return (os.path.dirname(p) == projects and base and not base.startswith(".")
-                and os.path.realpath(projects) == os.path.join(os.path.realpath(HOME), "projects"))
+        if not base or base.startswith("."):
+            return None
+        for kind, (root, real) in roots.items():
+            if os.path.dirname(p) == root and os.path.realpath(root) == real:
+                return kind
+        return None
 
-    plan, bad = [], []   # plan: (путь, create | resume | skip | busy)
+    plan, bad = [], []   # plan: (путь, create | resume | skip | busy, projects | life | None)
     for f in folders:
         if not isinstance(f, str) or not f.strip():
             bad.append(f"{f!r}: пустая строка вместо папки — не создаю")
@@ -5944,23 +5986,28 @@ def direction_init(name):
             bad.append(f"{f}: «..» в пути — не создаю")
             continue
         p = os.path.normpath(os.path.expanduser(f))
+        a = area(p)
         if not os.path.isabs(p):
             bad.append(f"{f}: не абсолютный путь и не от ~/ — не создаю")
         elif os.path.islink(p):
             bad.append(f"{short(p)}: ссылка — не создаю и не трогаю")
         elif os.path.isdir(p):
-            if not new_ok(p):
-                plan.append((p, "skip"))
+            if not a:
+                plan.append((p, "skip", a))
             elif _init_own(p):
-                plan.append((p, "resume"))
+                plan.append((p, "resume", a))
             else:
-                plan.append((p, "busy"))
+                plan.append((p, "busy", a))
         elif os.path.lexists(p):
             bad.append(f"{short(p)}: есть, но не папка — не трогаю")
-        elif new_ok(p):
-            plan.append((p, "create"))
+        elif a:
+            plan.append((p, "create", a))
         else:
-            bad.append(f"{short(p)}: вне ~/projects — не создаю (новая папка — только ~/projects/<имя>)")
+            bad.append(f"{short(p)}: вне ~/projects и {LIFE_DIR} — не создаю (новая папка — только ~/projects/<имя> "
+                       f"или {LIFE_DIR}/<имя>)")
+    life = roots["life"][0]
+    if any(a == "life" and kind == "create" for _, kind, a in plan) and os.path.lexists(life) and not os.path.isdir(life):
+        bad.append(f"{short(life)}: есть, но не папка — не трогаю")
     if bad:
         for x in bad:
             print("отказ   " + x)
@@ -5972,7 +6019,7 @@ def direction_init(name):
     launch = plan[0][0]
     note = " — папка запуска: AGENTS.md в ней дописывает координатор направления"
     rc = 0
-    for p, kind in plan:
+    for p, kind, a in plan:
         if kind == "skip":
             print(f"есть, пропущено {short(p)}" + (note if p == launch else ""))
             continue
@@ -5981,7 +6028,7 @@ def direction_init(name):
             continue
         if kind == "create":
             try:
-                os.makedirs(projects, exist_ok=True)
+                os.makedirs(roots[a][0], exist_ok=True)
                 os.mkdir(p)
             except OSError as e:
                 print(f"отказ   {short(p)}: не создана ({e.strerror or e})")
@@ -6026,9 +6073,9 @@ def _init_launch(p, name, d):
             return done, f"AGENTS.md: {e.strerror or e}"
         done.append("AGENTS.md")
     if git("rev-parse", "--verify", "-q", "HEAD").returncode:
-        r = git("add", "AGENTS.md")
+        r = git("add", "--", "AGENTS.md")
         if r.returncode == 0:
-            r = git("commit", "-q", "-m", INIT_COMMIT)
+            r = git("commit", "-q", "-m", INIT_COMMIT, "--", "AGENTS.md")
         if r.returncode:
             return done, "git commit: " + ((r.stderr or r.stdout).strip() or f"код {r.returncode}") + \
                 " — повтор `pantheon direction init` доделает"
@@ -6039,7 +6086,7 @@ def _init_launch(p, name, d):
 def direction(rest):
     """pantheon direction check <имя> — что готово у нового направления (навык new-direction).
     pantheon direction init <имя>  — папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный коммит;
-                                     без remote."""
+                                     без remote. ~/ai/life/<имя> — то же, свой git у каждой области."""
     if len(rest) != 2 or rest[0] not in ("check", "init"):
         print(direction.__doc__, file=sys.stderr)
         return 2
@@ -6615,6 +6662,78 @@ def _task_head(tid):
 
 
 _NIGHT = None
+
+
+def moved_mod():
+    """lib/moved.py — таблица переносов папок, migrate-paths и check --moved (metis-0899)."""
+    global _MOVED
+    if _MOVED is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_moved", os.path.join(LIB, "moved.py"))
+        _MOVED = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MOVED)
+    return _MOVED
+
+
+_MOVED = None
+MOVED_EVERY = 6 * 3600   # check --quiet (тик) ищет старые пути не чаще раза в 6 ч: обход ~/ai и ~/.claude не мгновенный
+
+
+def migrate_paths_cmd(rest):
+    """pantheon migrate-paths <перенос>… [--dry-run] — переносы: agent-kit, workshop, finances (lib/moved.py)."""
+    M = moved_mod()
+    names = [a for a in rest if not a.startswith("-")]
+    unknown = [a for a in rest if a.startswith("-") and a != "--dry-run"] + [n for n in names if n not in M.MOVES]
+    if not names or unknown:
+        print(f"pantheon migrate-paths <{'|'.join(M.MOVES)}>… [--dry-run]"
+              + (f": не знаю {', '.join(unknown)}" if unknown else ""), file=sys.stderr)
+        return 2
+    return M.migrate(list(dict.fromkeys(names)), "--dry-run" in rest, HOME)
+
+
+def check_moved(quiet=False, force=False):
+    """Старые пути сделанных переносов в живых файлах (metis-0899) — предупреждение, а на тике — тревога раз в набор.
+    Пока ни один перенос не сделан, не обходит ничего. → число файлов со старыми путями."""
+    M = moved_mod()
+    if not any(M.done(n, HOME) for n in M.MOVES):
+        if not force:
+            clear_once("check-moved")
+            return 0
+    elif quiet and not force:
+        stamp = path("moved-check.stamp")
+        with contextlib.suppress(OSError):
+            if time.time() - os.stat(stamp).st_mtime < MOVED_EVERY:
+                return 0
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(stamp), exist_ok=True)
+            open(stamp, "w").close()
+    found, pending, n_personal = M.check(HOME)
+    short = lambda p: "~" + p[len(HOME):] if p.startswith(HOME + "/") else p
+    # личное — только числом: имя файла в me/Self/Areas/People не уходит ни в вывод, ни в alerts.md (argus-2 Б2)
+    personal = (f"личное ~/ai/knowledge ({', '.join(M.PERSONAL)}): {n_personal} файлов — его меняет Мнемозина"
+                if n_personal else "")
+    if force:
+        for n in pending:
+            print(f"перенос {n} ещё не сделан — его пути не проверяю")
+    for p, k in (found if force else found[:20]):
+        if not quiet:
+            print(f"предупреждение · старый путь · {short(p)}: {k} — pantheon migrate-paths <перенос>")
+    if len(found) > 20 and not force and not quiet:
+        print(f"предупреждение · старый путь ещё в {len(found) - 20} файлах — pantheon check --moved")
+    if personal and not quiet:
+        print(f"предупреждение · старый путь · {personal}")
+    total = len(found) + n_personal
+    if quiet:
+        if total:
+            first = f"{short(found[0][0])}…" if found else personal
+            alert_once("check-moved", "|".join(p for p, _ in found) + f"|personal={n_personal}",
+                       f"старые пути перенесённых папок в {total} файлах: {first} — "
+                       "pantheon check --moved, замена — pantheon migrate-paths", "check")
+        else:
+            clear_once("check-moved")
+    elif force:
+        print(f"старых путей: {total} файлов" if total else "старых путей нет")
+    return total
 
 
 def night_mod():
@@ -7374,7 +7493,7 @@ BATCH_SUGGEST_EVERY = 3 * 86400  # задача расписания раз в 3
 
 def batch_suggest_run(rest):
     """pantheon batch-suggest run [--force] — плановая сводка (metis-0595): предложения по пачкам для всех направлений
-    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Ничего не меняет в задачах. Раньше чем через
+    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Прикрепляет только предложения «уверенно» (task_attach, строка в журнал). Раньше чем через
     BATCH_SUGGEST_EVERY после прошлого прохода — пропуск (--force снимает). Тревога — одна строка, и только если среди
     предложений есть ещё не виденные (ключи в STATE/batch-suggest.json)."""
     if rest not in ([], ["run"], ["run", "--force"]):
@@ -7390,6 +7509,14 @@ def batch_suggest_run(rest):
     tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
     dirs = sorted({h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
     results = [B.suggest(tasks, d) for d in dirs]
+    applied, skipped = [], []
+    for res in results:  # «уверенно» прикрепляет сам проход (metis-0940); журнал задачи и пачки пишет task_attach
+        d, sk = B.apply(res, tasks, lambda tid, sid: T.task_attach(PANTHEON, now(), tid, sid, actor="плановый проход"))
+        applied += d
+        skipped += sk
+    if applied:
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        results = [B.suggest(tasks, d) for d in dirs]
     results = [r for r in results if r["joins"] or r["groups"] or r["duplicates"]]
     keys = sorted(k for r in results for k in B.keys(r))
     seen = st.get("seen") if isinstance(st.get("seen"), list) else None
@@ -7397,7 +7524,7 @@ def batch_suggest_run(rest):
     body = "\n\n".join(B.render(r) for r in results) or "Предложений нет."
     text = ("# Пачки: предложения\n\nСчитает плановый проход без модели, раз в 3–4 суток (`pantheon task batch-suggest`). "
             "Ничего не меняет: пачку ставит координатор — `pantheon task set ID parent=ПАЧКА` (для новой пачки сначала "
-            "`pantheon task new --type story`). «Уверенно» прикрепляет `pantheon task batch-suggest --apply`.\n\n"
+            "`pantheon task new --type story`). «Уверенно» прикрепляет сам проход (то же, что `pantheon task batch-suggest --apply`).\n\n"
             f"Проход: {stamp(t)}\n\n```\n{body}\n```\n")
     os.makedirs(STATE, exist_ok=True)
     write_atomic(path("batch-suggest.md"), text)
@@ -7411,7 +7538,8 @@ def batch_suggest_run(rest):
         n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
         alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
               f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
-    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}")
+    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}, прикреплено {len(applied)}"
+          + "".join(f"\n  прикреплено · {x}" for x in applied) + "".join(f"\n  пропущено · {x}" for x in skipped))
     return 0
 
 
@@ -7834,6 +7962,37 @@ def board_drift_report(T, quiet):
         print(f"предупреждение · доска · {k}: {text}")
 
 
+NO_PARENT_FROM = "2026-11-03"  # задачи старше плана 1.0 без пачки — старый хвост, не тревожим
+NO_PARENT_AGE = 86400
+
+
+def check_no_parent(T, quiet):
+    """Открытая задача type task без parent, созданная больше суток назад и не раньше NO_PARENT_FROM (metis-0940, слово
+    владельца 06.11). Тик (quiet) — одна тревога на пачку новых номеров, каждый номер один раз (STATE/no-parent-seen.json,
+    ушедшие из списка забываются); руками — предупреждение со всем списком. → список номеров."""
+    t = now()
+    ids = sorted(tid for tid, (_, h, _) in T.load_tasks(PANTHEON, T.WORK_TYPES).items()
+                 if h.get("type") == "task" and h.get("status") not in ("done", "dropped", "inbox")
+                 and not h.get("parent") and not h.get("batch") and str(h.get("created") or "") >= NO_PARENT_FROM
+                 and t - (T.ts_of(h.get("created")) or t) > NO_PARENT_AGE)
+    if not quiet:
+        if ids:
+            print(f"предупреждение · задачи без пачки старше суток: {_ids_text(ids)} — pantheon task batch-suggest, "
+                  "затем pantheon task set ID parent=… mode=single mode_why=…")
+        return ids
+    seen = read_json(path("no-parent-seen.json"), [])
+    seen = seen if isinstance(seen, list) else []
+    fresh = [i for i in ids if i not in seen]
+    if fresh:
+        alert(f"задачи без пачки старше суток: {_ids_text(fresh)} — положить в пачку: pantheon task batch-suggest, "
+              "затем pantheon task set ID parent=… mode=single mode_why=…", "check")
+    keep = sorted(set(seen) & set(ids) | set(fresh))
+    if keep != sorted(seen):
+        os.makedirs(STATE, exist_ok=True)
+        write_json(path("no-parent-seen.json"), keep)
+    return ids
+
+
 def check_task_projects(T, quiet):
     """project задачи — только имя проекта из directions.toml (metis-0323). → число задач с чужим именем; на тике
     (quiet) — одна тревога на набор. Реестра нет — не сверяем."""
@@ -7887,8 +8046,10 @@ def check(paths=None, quiet=False):
     coord_errs = 0
     if not paths:
         _check_long_state(quiet)
+        check_moved(quiet)   # предупреждение, на код выхода check не влияет
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
+        check_no_parent(T, quiet)  # без пачки старше суток: предупреждение, код выхода не меняет (metis-0940)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
             # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
             # бы сессию снова (ревью argus PR #32)
@@ -8572,6 +8733,10 @@ def main(argv):
         return batch_suggest_run(rest)
     if cmd == "status":
         return status()
+    if cmd == "check" and "--moved" in rest:
+        return 1 if check_moved(force=True) else 0
+    if cmd == "migrate-paths":
+        return migrate_paths_cmd(rest)
     if cmd == "check":
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":
