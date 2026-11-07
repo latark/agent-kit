@@ -281,7 +281,7 @@ class Box:
             fh.write(str(value))
 
     def add(self, kind, sha=SHA, pr=PR, who="argus", sid="s1", aid="a1", ran="модель: claude-opus-5-5, тесты",
-            models=None, cmd=None):
+            models=None, cmd=None, **extra):
         rec = {"v": 1, "kind": kind, "repo": [REPO], "pr": None if kind == "tests" else pr, "sha": sha,
                "by": {"agent_type": who, "agent_id": aid, "session_id": sid}}
         if kind == "tests":   # команда полного набора — на запасном пути при лимите минут засчитывается только она
@@ -290,6 +290,7 @@ class Box:
             rec["checklist"] = {"opened": "diff", "ran": ran, "unchecked": "ничего"}
         if models is not None:   # модели транскрипта argus, как их пишет хук guard (metis-0176)
             rec["models"] = models
+        rec.update(extra)   # поля хука guard: returned и reported (metis-0497)
         self.records.append(rec)
         d = os.path.join(self.state, "merge-gate")
         os.makedirs(d, exist_ok=True)
@@ -441,6 +442,48 @@ def test_gate_rechecked():
           and "FAILURE" in b.alerts(), b.alerts())
 
 
+def test_gate_batch():
+    """metis-0758: PR пачки (ветка batch/<story>) — тесты только по записи полного набора FULL_TESTS на head, и при
+    зелёном CI, как в шлюзе guard (batch_tests_problem); не пачка — любая запись tests, как раньше."""
+    def box(branch, cmd=None):
+        b = Box()
+        b.records = []
+        b.add("tests", who="", cmd=cmd)
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.view(SHA, head={"headRefName": branch})
+        b.request()
+        b.run()
+        return b
+
+    def run_only(cmd):
+        """Заявка подана на полной записи, а к проходу запись — уже не полного набора: отказ в самом проходе."""
+        b = Box()
+        b.view(SHA, head={"headRefName": "batch/metis-0754"})
+        b.request()
+        b.records = []
+        b.add("tests", who="", cmd=cmd)
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.run()
+        return b
+
+    narrow = "pantheon review test -- python3.14 -I plugins/pantheon/scripts/run-tests.py --affected plugins/guard"
+    b = box("batch/metis-0754")
+    check("0758: пачка, запись полного набора на head, CI зелёный — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    why = "PR пачки (ветка batch/metis-0754): засчитывается только запись полного набора тестов (FULL_TESTS)"
+    b = box("batch/metis-0754", cmd=narrow)
+    check("0758: пачка, на head только узкая запись, CI зелёный — заявки нет, причина названа",
+          not b.windows() and not b.merges() and b.req() is None and why in b.outs[-2], b.outs[-2:])
+    b = run_only(narrow)
+    check("0758: пачка, к проходу только узкая запись — окна нет, заявка снята, причина в тревоге",
+          not b.windows() and not b.merges() and b.req() is None and why in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box("metis-0758-gate", cmd=narrow)
+    check("0758: не пачка, узкая запись, CI зелёный — сливает, как раньше", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+
+
 def test_gate_other_heads():
     """metis-0465: «вернуть» на другом head PR в силе и в шлюзе владельца, как в шлюзе guard; «принять» до него не
     в счёт (откат force-push на старый head с двумя «принять»)."""
@@ -484,6 +527,38 @@ def test_gate_other_heads():
     b.add("reject", sha=SHA2, who="dev-opus", sid="s3", aid="a3")
     b.run()
     check("0465: запись reject не от argus — не в счёт", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+
+
+def test_gate_returned():
+    """metis-0497 (Д1 ревью PR #149 r2): поле «вернули» — слово лида, и в шлюзе владельца, как в шлюзе guard.
+    «Принять» повторного круга (поле есть) снимает «вернуть» другого argus, только если взяло его отчёт (reported);
+    поле, назвавшее рецензента без «вернуть» на PR, — «принять» не в счёт."""
+    def box(*adds):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid, extra in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:], **extra)
+        b.run()
+        return b
+
+    back, took = {"returned": ["a3/s3"]}, {"returned": ["a3/s3"], "reported": ["a3/s3"]}
+    b = box(("reject", SHA2, "s3", {}), ("accept", SHA, "s1", back), ("accept", SHA, "s2", back))
+    check("0497: «вернуть» a3, оба «принять» с «вернули: a3», отчёта a3 не брали — в силе, окна нет",
+          not b.windows() and not b.merges() and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3", {}), ("accept", SHA, "s1", took), ("accept", SHA, "s2", took))
+    check("0497: взяли отчёт a3 — «вернуть» снято, сливает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3", {}), ("accept", SHA, "s1", back), ("accept", SHA, "s2", {}))
+    check("0497: свежий argus без поля снимает «вернуть», как раньше — сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box(("accept", SHA, "s1", {"returned": ["a9/s9"]}), ("accept", SHA, "s2", {}))
+    check("0497: «вернули: a9», а «вернуть» a9 на PR нет — «принять» не в счёт, 1 из 2",
+          not b.windows() and not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(("accept", SHA, "s1", {"returned": ["a3/s3"]}), ("reject", SHA2, "s3", {}),
+            ("accept", SHA, "s1", {"returned": ["a3/s3"]}), ("accept", SHA, "s2", {}))
+    check("0497: «вернуть» a3 записано между — второе «принять» s1 поле не врёт, свежий s2 снимает — сливает",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
 
 
 def test_request_refusals():
@@ -1111,8 +1186,9 @@ def test_ci_fork():
 
 def test_ci_matches_guard():
     """metis-0633, 0649, 0655: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, ci_billing_ids, ci_billing,
-    ci_job_unstarted, full_tests_record, required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus
-    #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, CI_OK, CI_WAIT и CI_NONE в merge.py
+    ci_job_unstarted, full_tests_record, required_checks, optional_checks, batch_tests_problem (metis-0758),
+    pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
+    FULL_TESTS, BATCH_BRANCH, CI_OK, CI_WAIT и CI_NONE в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -1122,20 +1198,23 @@ def test_ci_matches_guard():
         for n in tree.body:
             if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids",
                                                              "ci_billing", "ci_job_unstarted", "full_tests_record",
-                                                             "required_checks", "optional_checks"):
+                                                             "required_checks", "optional_checks",
+                                                             "batch_tests_problem", "pair_match", "returned_lie",
+                                                             "returned_lifts"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
-                                            "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "CI_OK", "CI_WAIT",
-                                            "CI_NONE"):
+                                            "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "BATCH_BRANCH", "CI_OK",
+                                            "CI_WAIT", "CI_NONE"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
     names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "ci_job_unstarted",
-             "full_tests_record", "required_checks", "optional_checks", "REQUIRED_CHECKS", "OPTIONAL_CHECKS",
-             "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "CI_OK", "CI_WAIT",
-             "CI_NONE")
+             "full_tests_record", "required_checks", "optional_checks", "batch_tests_problem", "pair_match",
+             "returned_lie", "returned_lifts", "REQUIRED_CHECKS",
+             "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
+             "BATCH_BRANCH", "CI_OK", "CI_WAIT", "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
