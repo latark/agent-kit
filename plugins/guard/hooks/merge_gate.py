@@ -42,8 +42,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    version с учётом режима. Настройки git (diff.*, core.abbrev, submodule.*.ignore, атрибуты, GIT_* окружения) на
    отпечаток не влияют: окружение без GIT_*, явный --git-dir. Вывод --raw разбирается строго (формат, \0 в конце,
    путь один раз), иначе отпечатка нет. Отпечаток другой, а код тот же (main правил файл PR, базовый PR слит
-   squash) — переносится, если прошлый head, слитый с merge-base нового (git merge-tree --write-tree), без
-   конфликтов даёт ровно дерево нового head, кроме номера версии (_merge_same, metis-0445 и 0674). Засчитывается — и прямо на своём head, и переносом — только accept, записанное позже
+   squash) — переносится, если собственный дифф прошлого head, наложенный на merge-base нового (git merge-tree
+   --write-tree с явной --merge-base, argus #375), без конфликтов даёт ровно дерево нового head, кроме номера версии
+   (_merge_same, metis-0445 и 0674). Не посчитано (сбой, таймаут, бюджет) — не переносит и «вернуть» не снимает. Засчитывается — и прямо на своём head, и переносом — только accept, записанное позже
    каждого reject PR, кроме reject, снятого accept с перечнем того же рецензента на том же head (_floor, _carried,
    #134 п.2, argus-b r2): иначе откат к коду, принятому до reject (force-push на старый head после снятия reject
    правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
@@ -1807,15 +1808,22 @@ RAW_META_RE = re.compile(rb":([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}(?:[0-9a-f]{24})
                          rb"([ADMT])")
 
 
-def _git_bytes(gd, *args, input=None):
-    """Вывод git (байты) в git dir gd без рабочего дерева, без подмен git replace; None — сбой, таймаут, код не 0."""
+def _git_code(gd, *args, input=None):
+    """(код выхода, вывод в байтах) git в git dir gd без рабочего дерева, без подмен git replace; None — не запустился
+    или таймаут. Код нужен merge-tree: 1 — конфликт, а не сбой (argus #375 Б2)."""
     env = dict(_git_env(), GIT_NO_REPLACE_OBJECTS="1")
     try:
         r = subprocess.run(["git", "-C", gd, "--git-dir=" + gd, "--no-replace-objects", "-c", "core.quotePath=true",
                             *args], input=input, capture_output=True, timeout=_git_timeout(), env=env)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    return r.stdout if r.returncode == 0 else None
+    return r.returncode, r.stdout
+
+
+def _git_bytes(gd, *args, input=None):
+    """Вывод git (байты), как _git_code; None — сбой, таймаут, код не 0."""
+    got = _git_code(gd, *args, input=input)
+    return got[1] if got is not None and got[0] == 0 else None
 
 
 def _carry_git(cwd, repo, base):
@@ -1928,21 +1936,31 @@ def _fingerprint(gd, base, head):
     return h.hexdigest(), mb
 
 
-def _merge_same(gd, head, mb, sha):
-    """Код head, слитый с mb (merge-base нового head sha с base PR), — ровно дерево sha (metis-0445, вариант
-    argus-134r2): `git merge-tree --write-tree head mb` без конфликтов, а дифф его дерева с sha — только номер версии в
-    plugin.json плагинов. Так «принять» переходит, когда main сдвинул строки в файле PR или когда базовый PR слит
-    squash, а этот перенесён rebase --onto main (metis-0674): отпечаток собственного диффа там другой, а код тот же.
-    Место правки учитывается — слияние по строкам, а не patch-id (владелец 25.10 10:08). Конфликт, сбой git (и git
-    старше 2.38 без --write-tree), чужой вывод — False."""
-    out = _git_bytes(gd, "merge-tree", "--write-tree", "--no-messages", head, mb)
-    tree = out.strip().decode("ascii", "replace") if out is not None else ""
+def _merge_same(gd, head, hb, mb, sha):
+    """Собственный дифф head (от hb — его merge-base с base PR), наложенный на mb (merge-base нового head sha с base
+    PR), — ровно дерево sha (metis-0445, вариант argus-134r2): `git merge-tree --write-tree --merge-base=hb head mb`
+    без конфликтов, а дифф его дерева с sha — только номер версии в plugin.json плагинов. Так «принять» переходит,
+    когда main сдвинул строки в файле PR или когда базовый PR слит squash, а этот перенесён rebase --onto main
+    (metis-0674): отпечаток собственного диффа там другой, а код тот же. База слияния — явная: свою git выбрала бы
+    старее, если sha — squash на старую базу, и правки main из дерева head сошли бы за код PR (argus #375 Б1 круг 2).
+    Место правки учитывается — слияние по строкам, а не patch-id (владелец 25.10 10:08).
+    Три ответа (argus #375 Б2): True — тот же код; False — посчитано, код другой (конфликт, другой файл, другое поле
+    plugin.json); None — не посчитано: сбой или таймаут git, git старше 2.40 без --merge-base, чужой вывод."""
+    got = _git_code(gd, "merge-tree", "--write-tree", "--no-messages", "--merge-base=" + hb, head, mb)
+    if got is None or got[0] not in (0, 1):
+        return None
+    tree = got[1].split(b"\n", 1)[0].strip().decode("ascii", "replace")
     if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", tree):
-        return False
+        return None
+    if got[0] == 1:
+        return False  # конфликт
     entries = _raw_entries(gd, tree, sha)
-    if entries is None or any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
+    if entries is None:
+        return None
+    if any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
         return False
-    return _manifests(gd, entries) == []
+    man = _manifests(gd, entries)
+    return None if man is None else man == []
 
 
 def _carry_heads(verdicts, sha):
@@ -1967,7 +1985,8 @@ def _lifts(a, r, sha, fp):
     равен коду r (решение 25.10 23:10, 0415b: иначе «вернуть» обходится выбором рецензента; код не посчитан — не
     снимает). 3: на третьем head с другим кодом от той же merge-base, если код sha — не код r. Код sha — код r и
     тогда, когда head r, слитый с merge-base sha, даёт ровно sha (fp.merged, _merge_same; argus #375 Б1): иначе
-    вернулись к коду r и подтянули main со сдвигом строк — «вернуть» снято, а «принять» с r переносится слиянием."""
+    вернулись к коду r и подтянули main со сдвигом строк — «вернуть» снято, а «принять» с r переносится слиянием.
+    Слияние не посчитано (None: сбой, таймаут, бюджет) — не снимает (argus #375 Б2, metis-0973)."""
     if not checklist_ok(a):
         return False
     if _self_lift(a, r):
@@ -1978,19 +1997,19 @@ def _lifts(a, r, sha, fp):
         if _reviewer(a) == _reviewer(r):
             return True
         fr, fs = fp(r["sha"]), fp(sha)
-        return bool(fr and fs) and fs[0] != fr[0] and not _code_of(fp, r["sha"])
+        return bool(fr and fs) and fs[0] != fr[0] and _code_of(fp, r["sha"]) is False
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
     fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
     return (bool(fr and fa and fs) and fr[1] == fa[1] and fr[0] != fa[0] and fs[0] != fr[0]
-            and not _code_of(fp, r["sha"]))
+            and _code_of(fp, r["sha"]) is False)
 
 
 def _code_of(fp, head):
-    """Код сливаемого sha — код head при другом отпечатке: head, слитый с merge-base sha, даёт sha (fp.merged). У fp
-    без merged (тесты правил) — False, как раньше."""
+    """Код сливаемого sha — код head при другом отпечатке: head, слитый с merge-base sha, даёт sha (fp.merged) →
+    True, False или None (не посчитано). У fp без merged (тесты правил) — False, как раньше."""
     merged = getattr(fp, "merged", None)
-    return bool(merged is not None and merged(head))
+    return False if merged is None else merged(head)
 
 
 def _held(verdicts, sha, fp):
@@ -2014,7 +2033,7 @@ def _floor(verdicts):
 def _carried(verdicts, sha, fp, cut=None, merged=None):
     """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже отсечки
     _floor. merged(head) → True — код head, слитый с base sha, и есть sha (_merge_same): такое «принять» тоже
-    переносится. cut — список: в него пары («принять», отсёкшее его «вернуть») с тем же кодом, но записанные раньше
+    переносится; False и None (не посчитано) — нет. cut — список: в него пары («принять», отсёкшее его «вернуть») с тем же кодом, но записанные раньше
     отсечки (для текста отказа)."""
     fs = fp(sha)
     if not fs:
@@ -2024,7 +2043,7 @@ def _carried(verdicts, sha, fp, cut=None, merged=None):
     for i, a in enumerate(verdicts):
         if a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
             fa = fp(a["sha"])
-            if fa and (fa[0] == fs[0] or (merged is not None and merged(a["sha"]))):
+            if fa and (fa[0] == fs[0] or (merged is not None and merged(a["sha"]) is True)):
                 if i > floor:
                     out.append(a)
                 elif cut is not None:
@@ -2094,15 +2113,16 @@ class _Prints:
         return False
 
     def merged(self, head):
-        """Код head, слитый с base шлюзуемого sha, — ровно sha (_merge_same, metis-0445 и 0674)."""
+        """Собственный дифф head на merge-base шлюзуемого sha — ровно sha (_merge_same, metis-0445 и 0674): True,
+        False или None — не посчитано (нет отпечатка, бюджет, сбой git)."""
         fs, fa = self(self.sha), self(head)
         key = ("merged", head)
         if not (fs and fa):
-            return False
+            return None
         if key not in self.memo:
             if self._late():
-                return False
-            self.memo[key] = _merge_same(self.gd, head, fs[1], self.sha)
+                return None
+            self.memo[key] = _merge_same(self.gd, head, fa[1], fs[1], self.sha)
         return self.memo[key]
 
 

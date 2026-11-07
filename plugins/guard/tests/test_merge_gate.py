@@ -4830,21 +4830,68 @@ def t_carry_merged(h):
     check("0445: _carry_git — git dir", gd and why is None, why)
     fq, fqm = mg._fingerprint(gd, bc2, qc), mg._fingerprint(gd, bc2, qcm)
     check("0445: main сдвинул строки — отпечаток другой", fq[0] and fqm[0] and fq[0] != fqm[0], (fq, fqm))
-    check("0445: _merge_same — слияние P с main и есть новый head", mg._merge_same(gd, qc, fqm[1], qcm))
-    check("0445: _merge_same — rebase на main тоже", mg._merge_same(gd, qc, bc2, qreb))
-    check("0445: _merge_same — правка в слиянии — нет", not mg._merge_same(gd, qc, bc2, qevil))
-    check("0445: _merge_same — конфликт с main — нет", not mg._merge_same(gd, qc, bcc, qconf))
+    check("0445: _merge_same — слияние P с main и есть новый head", mg._merge_same(gd, qc, fq[1], fqm[1], qcm) is True)
+    check("0445: _merge_same — rebase на main тоже", mg._merge_same(gd, qc, fq[1], bc2, qreb) is True)
+    check("0445: _merge_same — правка в слиянии — нет", mg._merge_same(gd, qc, fq[1], bc2, qevil) is False)
+    check("0445: _merge_same — конфликт с main — нет", mg._merge_same(gd, qc, fq[1], bcc, qconf) is False)
     qv = plumb(p, [qcm], {PJ: F(_man("pantheon", "0.11.99"))}, "PR: номер версии")
     qf = plumb(p, [qcm], {PJ: F(_man("pantheon", "0.11.84", description="x"))}, "PR: другое поле plugin.json")
     qj = plumb(p, [qcm], {"plugins/x/package.json": F(_man("x", "1.0.1"))}, "PR: version в package.json")
     qj0 = plumb(p, [bc2], {"plugins/x/package.json": F(_man("x", "1.0.0"))}, "main: package.json")
     qjm = plumb(p, [qc, qj0], {"c.txt": F("top\n" + pr_c), "plugins/x/package.json": F(_man("x", "1.0.1"))},
                 "PR: слияние и номер в package.json", src=qj0)
-    check("0445: _merge_same — только номер версии в plugin.json — да", mg._merge_same(gd, qc, bc2, qv))
-    check("0445: _merge_same — другое поле plugin.json — нет", not mg._merge_same(gd, qc, bc2, qf))
-    check("0445: _merge_same — новый файл с полем version — нет", not mg._merge_same(gd, qc, bc2, qj))
-    check("0445: _merge_same — version в package.json (не plugin.json) — нет", not mg._merge_same(gd, qc, qj0, qjm))
-    check("0445: _merge_same — head без общей истории — нет", not mg._merge_same(gd, s["orphan"], bc2, qcm))
+    check("0445: _merge_same — только номер версии в plugin.json — да", mg._merge_same(gd, qc, fq[1], bc2, qv) is True)
+    check("0445: _merge_same — другое поле plugin.json — нет", mg._merge_same(gd, qc, fq[1], bc2, qf) is False)
+    check("0445: _merge_same — новый файл с полем version — нет", mg._merge_same(gd, qc, fq[1], bc2, qj) is False)
+    check("0445: _merge_same — version в package.json (не plugin.json) — нет", mg._merge_same(gd, qc, fq[1], qj0, qjm) is False)
+    check("0445: _merge_same — head без общей истории — нет", mg._merge_same(gd, s["orphan"], fq[1], bc2, qcm) is not True)
+    # argus #375 Б2: «не посчитано» — None, а не False (конфликт)
+    real = mg._git_code
+    tree = mg._git_bytes(gd, "rev-parse", qreb + "^{tree}")  # настоящее дерево qreb: код 129 с ним — всё равно сбой
+    for name, fake in (("git не запустился", lambda *a, **k: None), ("git без --merge-base (код 129)",
+                                                                     lambda *a, **k: (129, tree)),
+                       ("вывод не дерево", lambda *a, **k: (0, b"junk\n"))):
+        # подмена — только merge-tree: diff и cat-file после него идут в настоящий git
+        mg._git_code = lambda gd_, *a, fake=fake, **k: fake() if a[0] == "merge-tree" else real(gd_, *a, **k)
+        check(f"Б2: _merge_same — {name} — None (не посчитано)", mg._merge_same(gd, qc, fq[1], bc2, qreb) is None)
+    mg._git_code = real
+    for fn in ("_raw_entries", "_manifests"):
+        keep = getattr(mg, fn)
+        setattr(mg, fn, lambda *a, **k: None)
+        check(f"Б2: _merge_same — {fn} не разобрал — None", mg._merge_same(gd, qc, fq[1], bc2, qv) is None)
+        setattr(mg, fn, keep)
+    pr_ = mg._Prints(None, "latark/agent-kit", qcm, [], lambda: {})
+    pr_.allowed, pr_.ready, pr_.gd = {qcm, qc}, True, gd
+    pr_.memo.update({qcm: ("f1", bc2), qc: ("f2", bc)})
+    pr_.budget = -1
+    check("Б2: _Prints.merged — бюджет вышел — None", pr_.merged(qc) is None)
+    pr_.budget = 60
+    check("Б2: _Prints.merged — посчитано — True", pr_.merged(qc) is True)
+    check("Б2: _Prints.merged — у head нет отпечатка — None", pr_.merged(qreb) is None)
+
+    qx = plumb(p, [bc], {"c.txt": F("x\n")}, "PR: третий head")
+
+    class FP:
+        def __init__(self, got):
+            self.got = got
+
+        def __call__(self, head):
+            return {qc: ("fr", bc), qcm: ("fs", bc2), qx: ("fa", bc)}.get(head)
+
+        def merged(self, head):
+            return self.got
+
+    x_rej = opus(qc, "x", "reject", checklist=None, session="s-x")
+    check("Б2: _lifts — fp без merged (функция) — снимает по отпечатку, как раньше",
+          mg._lifts(opus(qcm, "z", session="s-z"), x_rej, qcm, lambda head: FP(None)(head)) is True)
+    for got, lift in ((None, False), (False, True), (True, False)):
+        fp = FP(got)
+        check(f"Б2: _lifts правило 2 — слияние {got} → снимает {lift}",
+              mg._lifts(opus(qcm, "z", session="s-z"), x_rej, qcm, fp) is lift)
+        check(f"Б2: _lifts правило 3 — слияние {got} → снимает {lift}",
+              mg._lifts(opus(qx, "x", session="s-x"), x_rej, qcm, fp) is lift)
+        got_c = mg._carried([opus(qc, "z", session="s-z")], qcm, fp, None, fp.merged)
+        check(f"Б2: _carried — слияние {got} → переносит {got is True}", bool(got_c) is (got is True), got_c)
     case("0445: main сдвинул строки, PR подтянул main — «принять» переносится", qcm, bc2, [opus(qc), tests(qcm)], True)
     got = carry_lines(h)
     check("0445: перенос записан в carry.jsonl", len(got) == 1 and got[0]["sha"] == qcm
@@ -4866,6 +4913,16 @@ def t_carry_merged(h):
     got = case("0471: вершину base не получить от gh — не переносится", xs, bc, [opus(xa), tests(xs)], False,
                "нет «принять»", tip="fail")
     check("0471: отказ называет вершину ветки base", "вершину ветки base PR" in got[1], got[1])
+    # argus #375 Б1 круг 2 (probe_375.py): принятый head на m4, main убрал m.txt (r6), новый head — squash на старую
+    # базу bc с m.txt: слияние со своей базой git (bc) дало бы дерево squash, и m.txt вернулся бы в main
+    m4 = plumb(p, [bc], {"m.txt": F("m\n")}, "main: m.txt")
+    acc = plumb(p, [m4], {"a.py": F("a = 1\n")}, "PR на m4 — argus принял")
+    r6 = plumb(p, [m4], {"m.txt": None}, "main: убрал m.txt")
+    stale = plumb(p, [bc], {"m.txt": F("m\n"), "a.py": F("a = 1\n")}, "PR: squash на старую базу bc")
+    good = plumb(p, [r6], {"a.py": F("a = 1\n")}, "PR: rebase на живой main")
+    case("Б1 круг 2 контроль: rebase на живой main — переносится", good, r6, [opus(acc), tests(good)], True, tip=r6)
+    case("Б1 круг 2: squash на старую базу вернул бы убранное main — не переносится", stale, r6,
+         [opus(acc), tests(stale)], False, "нет «принять»", tip=r6)
 
 
 def t_carry_rej(h):
