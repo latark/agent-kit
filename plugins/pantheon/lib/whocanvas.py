@@ -16,7 +16,11 @@
 Что берётся из текущего холста: x, y, ширина и высота узла по id (владелец двигает карточки руками), размер и место
 групп, связи (остаются, если оба конца есть) и узлы с id, которых код не знает (добавил владелец). Новый узел встаёт в
 первое свободное место своей группы; места нет — группа растёт вниз, а всё, что лежало под ней, сдвигается. Тексты,
-цвет и подписи групп код пишет сам: правки текста руками пересборка затрёт.
+цвет и подписи групп код пишет сам; узел, в котором не то, что код писал (хеш в отпечатке) и не то, что пишет сейчас,
+правили руками — он остаётся как есть, а тревога приходит один раз на его текст (metis-0838).
+
+Из тех же входов — таблица ролей в «Кто есть кто.md» и реестр ролей в system.md (metis-0828, sync_docs): код пишет
+только между маркерами `<!-- pantheon:roles начало … -->` и `<!-- pantheon:roles конец -->`, текст вокруг — ручной.
 
 Только стандартная библиотека; пути и чтение задач передаёт pantheon.py.
 """
@@ -198,6 +202,141 @@ def collect_roles(roles, statuses, catalog=None):
     return out
 
 
+# --- таблица ролей в «Кто есть кто.md» и реестр ролей в system.md (metis-0828) -------------------------------------
+# Те же входы, что у холста: роли (~/.claude/agents и шаблоны плагина), directions.toml, статус задач каталога. Код
+# пишет только между маркерами своего блока; текст вокруг — ручной и остаётся. Маркеров нет — блок дописывается в
+# конец файла под своим заголовком (перенести маркеры на место ручной таблицы можно руками, код их найдёт). Только
+# один маркер из пары — файл не трогаем (ValueError: тревогу поднимает вызывающий).
+MEMO_NAME = "Кто есть кто.md"
+SYSTEM_NAME = "system.md"
+BEGIN = "<!-- pantheon:{name} начало"
+END = "<!-- pantheon:{name} конец -->"
+BEGIN_FULL = BEGIN + " — собирает pantheon who-canvas из ролей и directions.toml; правка внутри затрётся -->"
+MEMO_HEADING = "## Все роли — собирает код"
+SYSTEM_HEADING = "## Реестр ролей — собирает код"
+FIND = {"hq": "`zeus`", "workshop": "`daedalus-<задача>`"}  # роль окна ищут по имени сессии, а не роли
+EXTRA = {"devs": ("codex-dev",)}  # роли из IGNORED, которые названы в тексте записи
+GROUP_SHORT = {"top": "Пританей", "coords": "Полисы", "team": "Артель", "help": "Оракулы", "sched": "Оры"}
+
+
+def _cell(s):
+    """Ячейка таблицы markdown: одна строка, `|` экранирован (в том числе в [[ссылка|подпись]] — так читает Obsidian)."""
+    return re.sub(r"\s*\n\s*", " · ", str(s or "").strip()).replace("|", "\\|")
+
+
+def _who(line):
+    """Первая строка карточки → «**Имя**, пояснение»: «## Зевс · Пританей» → «**Зевс**, Пританей»."""
+    m = re.match(r"#+\s*(.+)", line)
+    if m:
+        name, _, rest = m.group(1).partition(" · ")
+        line = f"**{name}**" + (f" · {rest}" if rest else "")
+    return line.replace(" · ", ", ")
+
+
+def _find(e, names, roles):
+    if e["role"] is None:
+        return "—"
+    if e["role"] in FIND:
+        return FIND[e["role"]]
+    if e["role"].endswith("*") and not e["role"].startswith("dev-"):
+        return f"`{e['role'].rstrip('*-')}-<проект>`"
+    extra = [r for r in EXTRA.get(e["id"], ()) if r in roles]
+    return ", ".join(f"`{r}`" for r in names + extra) or "—"
+
+
+def role_rows(roles, directions, statuses, catalog=None):
+    """Строки таблицы ролей по collect_roles и координаторам реестра: [(группа, кто, что делает, как найти, состояние)],
+    по порядку групп GROUPS."""
+    catalog = CATALOG if catalog is None else catalog
+    by_id = {e["id"]: e for e in catalog}
+    rows = []
+    for x in collect_roles(roles, statuses, catalog):
+        if x["kind"] == "auto":
+            r = x["name"]
+            rows.append(("help", f"**{r.replace('-', ' ').capitalize()}**", x["description"], f"`{r}`", "есть"))
+            continue
+        e = by_id[x["name"]]
+        lines = render_text(e["text"], roles, statuses).split("\n")
+        who = _who(lines[0])
+        state = "есть" if x["present"] else "🚧 роли ещё нет"
+        if x["task"] and not x["present"]:
+            state += f" · [[{x['task']}]]"
+        if not x["present"] and e["name"]:
+            who = f"**{e['name']}**"
+        rows.append((e["group"], who, "\n".join(lines[1:]), _find(e, x["roles"], roles), state))
+    for d in directions:
+        god = d["name"].split("-")[0]
+        rows.append(("coords", f"**{GODS_RU.get(god, god.capitalize())}**", d.get("short") or "",
+                     f"`{d['name']}` · [[directions/{d['name']}/STATUS|STATUS]]", "есть"))
+    order = list(GROUPS)
+    return sorted(rows, key=lambda r: order.index(r[0]))  # sorted устойчив: внутри группы — порядок каталога
+
+
+def memo_table(roles, directions, statuses, catalog=None):
+    """Таблица ролей для «Кто есть кто.md»."""
+    out = ["| Кто | Что делает | Как найти | Группа | Состояние |", "| --- | --- | --- | --- | --- |"]
+    for g, who, what, find, state in role_rows(roles, directions, statuses, catalog):
+        out.append("| " + " | ".join(_cell(v) for v in (who, what, find, GROUP_SHORT.get(g, g), state)) + " |")
+    return "\n".join(out)
+
+
+def system_table(roles, statuses, catalog=None):
+    """Реестр ролей для system.md: каждая роль по имени файла — кто она и откуда берётся."""
+    catalog = CATALOG if catalog is None else catalog
+    who = {}
+    for e in catalog:
+        name = _who(render_text(e["text"], roles, statuses).split("\n")[0])
+        for r in sorted(roles):
+            if e["role"] and r not in who and (fnmatch.fnmatchcase(r, e["role"]) or r in EXTRA.get(e["id"], ())):
+                who[r] = name
+    who.setdefault("domain-coordinator", "координатор направления — одна роль на все направления реестра")
+    out = ["| Роль | Кто | Источник |", "| --- | --- | --- |"]
+    for r in sorted(roles):
+        src = roles[r] or ""
+        src = (f"шаблон плагина `roles/{r}.tmpl`" if src.endswith(".tmpl")
+               else f"`~/.claude/agents/{r}.md`" if src else "—")
+        out.append("| " + " | ".join(_cell(v) for v in (f"`{r}`", who.get(r) or role_blurb(roles[r]) or "—", src)) + " |")
+    return "\n".join(out)
+
+
+def splice(text, name, body, heading):
+    """Текст файла с автоблоком name: между маркерами — body, вне их — как было. Маркеров нет — блок в конце файла
+    под heading. Один маркер без пары или конец раньше начала — ValueError."""
+    b, e = BEGIN.format(name=name), END.format(name=name)
+    i, j = text.find(b), text.find(e)
+    block = f"{BEGIN_FULL.format(name=name)}\n{body.rstrip()}\n{e}"
+    if i < 0 and j < 0:
+        return text.rstrip("\n") + f"\n\n{heading}\n\n{block}\n"
+    if i < 0 or j < 0 or j < i or text.count(b) > 1 or text.count(e) > 1:
+        raise ValueError(f"маркеры блока pantheon:{name} не парные — файл не тронут")
+    return text[:i] + block + text[j + len(e):]
+
+
+def sync_doc(path, name, body, heading):
+    """Записать автоблок в файл path. 'written' | 'same' | 'skip' (файла нет — не создаём: документ ведёт владелец)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cur = fh.read()
+    except FileNotFoundError:
+        return "skip"
+    new = splice(cur, name, body, heading)
+    if new == cur:
+        return "same"
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    os.replace(tmp, path)
+    return "written"
+
+
+def sync_docs(base, roles, directions, statuses, catalog=None):
+    """Автоблоки ролей в «Кто есть кто.md» и system.md папки base → {имя файла: итог sync_doc}."""
+    return {MEMO_NAME: sync_doc(os.path.join(base, MEMO_NAME), "roles", memo_table(roles, directions, statuses, catalog),
+                                MEMO_HEADING),
+            SYSTEM_NAME: sync_doc(os.path.join(base, SYSTEM_NAME), "roles", system_table(roles, statuses, catalog),
+                                  SYSTEM_HEADING)}
+
+
 def _overlap(a, b, margin=0):
     return not (a[0] + a[2] + margin <= b[0] or b[0] + b[2] + margin <= a[0]
                 or a[1] + a[3] + margin <= b[1] or b[1] + b[3] + margin <= a[1])
@@ -231,14 +370,29 @@ def _hash(text, color):
     return hashlib.sha256(f"{text}\0{color or ''}".encode()).hexdigest()[:16]
 
 
+def _known(hashes, nid):
+    """Хеши, которые код записывал в узел nid: строка (обычная запись) или список (запись перед холстом, metis-0838 Д8:
+    старый и новый, пока холст не записан)."""
+    v = hashes.get(nid)
+    return set(v) if isinstance(v, list) else {v} if isinstance(v, str) else set()
+
+
+def _is_manual(hashes, nid, cur, want):
+    """Узел правили руками: код его уже писал (есть запись), сейчас в нём не то, что код писал, и не то, что код
+    пишет сейчас. Последнее — Д8: отпечаток отстал от холста (холст записан, а отпечаток нет) — узел кода не ручной."""
+    return nid in hashes and cur != want and cur not in _known(hashes, nid)
+
+
 def build(current, roles, directions, statuses, catalog=None, hashes=None, report=None):
     """Новый холст {'nodes', 'edges'} по текущему (словарь JSON Canvas или None) и входным данным.
     hashes — {id: хеш текста и цвета (у группы — подписи и цвета), записанных кодом в прошлый раз}: узел, у которого
-    сейчас другое, правили руками — его текст, цвет и подпись остаются. Нет записи (первая сборка) — пишет код.
-    report (словарь) получает 'hashes' (что записано сейчас) и 'manual' (id узлов, правленных руками)."""
+    сейчас другое — и не то, что код пишет сейчас, — правили руками: его текст, цвет и подпись остаются. Нет записи
+    (первая сборка) — пишет код. report (словарь) получает 'hashes' (что записано сейчас), 'manual' (id узлов,
+    правленных руками), 'manual_hash' ({id: хеш их нынешнего текста} — значение тревоги, Д9) и 'auto' (id узлов,
+    которые код пишет сам: их метку ручной правки можно снять)."""
     hashes = hashes or {}
     report = report if report is not None else {}
-    report["hashes"], report["manual"] = {}, []
+    report["hashes"], report["manual"], report["manual_hash"] = {}, [], {}
     cur_nodes = {n["id"]: n for n in (current or {}).get("nodes", []) if isinstance(n, dict) and "id" in n}
     known = {"you", "legend", *GROUPS, *[e["id"] for e in (catalog if catalog is not None else CATALOG)]}
     want = desired(roles, directions, statuses, catalog)
@@ -254,9 +408,11 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
     for gid, (label, color, x, y, w, h) in GROUPS.items():
         old = cur_nodes.get(gid)
         if old and _geom(old) and old.get("type") == "group":
-            if gid in hashes and hashes[gid] != _hash(old.get("label"), old.get("color")):
+            cur_h = _hash(old.get("label"), old.get("color"))
+            if _is_manual(hashes, gid, cur_h, _hash(label, color)):
                 g = dict(old)  # подпись или цвет группы правили руками
                 report["manual"].append(gid)
+                report["manual_hash"][gid] = cur_h
                 report["hashes"][gid] = hashes[gid]
                 nodes.append(g)
                 continue
@@ -281,9 +437,11 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
         if n["id"] in texts:
             _, _, text, w, h, color = texts[n["id"]]
             nid = n["id"]
-            if nid in hashes and hashes[nid] != _hash(n.get("text"), n.get("color")):
+            cur_h = _hash(n.get("text"), n.get("color"))
+            if _is_manual(hashes, nid, cur_h, _hash(text, color)):
                 placed.append(dict(n))  # текст или цвет правили руками — код карточку не обновляет
                 report["manual"].append(nid)
+                report["manual_hash"][nid] = cur_h
                 report["hashes"][nid] = hashes[nid]
                 continue
             report["hashes"][nid] = _hash(text, color)
@@ -333,6 +491,7 @@ def build(current, roles, directions, statuses, catalog=None, hashes=None, repor
     else:
         edges = [dict(e) for e in current.get("edges", []) if isinstance(e, dict)
                  and e.get("fromNode") in ids and e.get("toNode") in ids]
+    report["auto"] = sorted(set(report["hashes"]) - set(report["manual"]))
     return {"nodes": nodes, "edges": edges}
 
 
@@ -356,11 +515,42 @@ def signature(roles, directions, statuses, catalog=None):
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force=False, manual_out=None):
+def _write_json(p, data):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, p)
+
+
+def _merged(prev, new):
+    """Хеши на время записи холста (Д8): у каждого узла — и прежний, и новый. Сбой между отпечатком и холстом
+    оставит холст со старым текстом — старый хеш в записи есть, узел не станет «ручным»."""
+    out = {}
+    for nid, v in new.items():
+        both = _known(prev, nid) | _known(new, nid)
+        out[nid] = sorted(both) if len(both) > 1 else v
+    return out
+
+
+def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force=False, manual_out=None,
+         report_out=None):
     """Пересобирает холст, если изменился отпечаток входов (или force). Возвращает 'written' | 'same' | 'unchanged'.
+    Под замком (файл sig_path + '.lock'): два запуска сразу не пишут холст и отпечаток вперемешку (metis-0838 Д8).
     roles — {имя: путь файла роли}; в отпечаток идёт и время правки файла (описание новой роли без каталога).
     В файл отпечатка пишутся и хеши текста и цвета каждого узла кода: узел, правленный руками, не обновляется, его id
-    попадает в manual_out (список). Удалённая карточка собирается заново."""
+    попадает в manual_out (список). Удалённая карточка собирается заново. report_out (словарь) получает отчёт build
+    ('manual', 'manual_hash', 'auto'); при 'unchanged' он пуст. Порядок записи: отпечаток со старым и новым хешем
+    узлов (прежний sig) → холст → отпечаток с новым sig и хешами — убитый на любом шаге процесс не делает узлы кода
+    «ручными» и не теряет пересборку."""
+    import fcntl
+    os.makedirs(os.path.dirname(sig_path), exist_ok=True)
+    with open(sig_path + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        return _sync(canvas_path, sig_path, roles, directions, statuses, catalog, force, manual_out, report_out)
+
+
+def _sync(canvas_path, sig_path, roles, directions, statuses, catalog, force, manual_out, report_out):
     stamped = {}
     for r, p in roles.items():
         try:
@@ -390,19 +580,20 @@ def sync(canvas_path, sig_path, roles, directions, statuses, catalog=None, force
     text = render(build(current, roles, directions, statuses, catalog, prev, report))
     if manual_out is not None:
         manual_out.extend(report["manual"])
+    if report_out is not None:
+        report_out.update(report)
     result = "same"
     try:
         same = open(canvas_path, encoding="utf-8").read() == text
     except OSError:
         same = False
     if not same:
+        _write_json(sig_path, {"sig": old, "hashes": _merged(prev, report["hashes"])})  # отпечаток до холста
         os.makedirs(os.path.dirname(canvas_path), exist_ok=True)
         tmp = canvas_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(text)
         os.replace(tmp, canvas_path)
         result = "written"
-    os.makedirs(os.path.dirname(sig_path), exist_ok=True)
-    with open(sig_path, "w", encoding="utf-8") as fh:
-        json.dump({"sig": sig, "hashes": report["hashes"]}, fh)
+    _write_json(sig_path, {"sig": sig, "hashes": report["hashes"]})
     return result

@@ -19,6 +19,7 @@ import sys
 import shlex
 import tempfile
 import time
+from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 
@@ -84,6 +85,24 @@ def board_tests():
           "**Координатор:** ведёт Пританей" in site and "Координатор: ведёт Пританей" in site, site[:400])
     check("пульт: проект с координатором — ссылка на координатора, без «ведёт Пританей»",
           "ведёт Пританей" not in shop and "**Координатор:** [[" in shop, shop[:400])
+    # metis-0828: цель и бюджет с прошедшей датой — «устарело ДД.ММ», а не как текущие
+    now7 = datetime(2026, 11, 7, 12, 0).timestamp()
+    goal = "Пантеон 1.0 — 10 условий, ~28–30.10 (metis-0430)"
+    budget = "57 % на неделе до 30.10 12:00, затем 50 % недели до 1.0"
+    reg2 = T.project_registry([{"name": "metis-x", "project": "P", "goal": goal, "budget": budget}])
+    note = T.render_project_note("P", reg2["P"], {}, now7)
+    check("пульт: цель и бюджет с прошедшей датой → «устарело 30.10 · …» в шапке и в тексте",
+          f"Цель: \"устарело 30.10 · {goal}\"" in note and "Бюджет недели: \"устарело 30.10 · 57 %" in note
+          and f"**Цель:** устарело 30.10 · {goal}" in note, note[:600])
+    check("пульт: срок сегодня или впереди, дат нет, «1.0» и номер версии — как есть",
+          T.stale_mark("до 7.11", now7) == "до 7.11" and T.stale_mark("до 8.11 вечером", now7) == "до 8.11 вечером"
+          and T.stale_mark("без срока, версия 2.10.3, 1.0", now7) == "без срока, версия 2.10.3, 1.0"
+          and T.stale_mark("до 20.12", datetime(2027, 1, 5).timestamp()) == "устарело 20.12 · до 20.12"
+          and T.stale_mark("до 6.11", now7) == "устарело 06.11 · до 6.11"
+          and T.stale_mark("к 20.12.2025", now7) == "устарело 20.12 · к 20.12.2025"
+          and T.stale_mark("в январе, 15.01", now7) == "в январе, 15.01"  # 15.01 — следующий год, не прошлый
+          and T.stale_mark("с 1.10 по 15.11", now7) == "с 1.10 по 15.11",
+          [T.stale_mark(x, now7) for x in ("до 7.11", "до 6.11", "к 20.12.2025", "в январе, 15.01", "с 1.10 по 15.11")])
 
 
 def agent_of(dry_out):

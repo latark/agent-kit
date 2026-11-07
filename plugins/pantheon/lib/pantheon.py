@@ -89,7 +89,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
                                         и размеры берёт с холста; в расписании — command =
                                         "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
-                                        при смене входов (metis-0825)
+                                        при смене входов (metis-0825); из тех же входов — таблица ролей в «Кто есть
+                                        кто.md» и реестр в system.md между маркерами <!-- pantheon:roles … --> (0828)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; на главном Mac сразу проход по кэшу (и плановый проход каждую минуту) закрывает задачи, чей номер в
                                         ветке или после «Closes» в теле PR — в том же проходе, что увидел слияние (metis-0868)
@@ -1163,7 +1164,8 @@ def _fp_board_auto():
     B = boardtext_mod()
     return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
                                                         ("pr_stale", B.pr_stale(path("autoclose-prs.json"))),
-                                                        ("week", board_week())]
+                                                        ("week", board_week()),
+                                                        ("merge_queue", B.merge_queue(STATE))]  # waiting-auto (0829)
 
 
 TICK_SKIP = {
@@ -4795,7 +4797,7 @@ def who_canvas_inputs(agents=None, reg_path=None):
     return roles, dirs, statuses
 
 
-def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None):
+def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None, report_out=None):
     """Пересобрать холст, если изменились роли, реестр или статус задач из карточек. 'written' | 'same' | 'unchanged' |
     'skip' (нет ни холста, ни памятки, ни реестра — вести нечего)."""
     canvas = os.path.join(PANTHEON, whocanvas_mod().CANVAS_NAME)
@@ -4804,7 +4806,7 @@ def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None):
         return "skip"
     roles, dirs, statuses = who_canvas_inputs(agents, reg_path)
     return whocanvas_mod().sync(canvas, path("who-canvas.json"), roles, dirs, statuses, force=force,
-                                manual_out=manual_out)
+                                manual_out=manual_out, report_out=report_out)
 
 
 def who_canvas_cmd(rest):
@@ -4816,20 +4818,39 @@ def who_canvas_cmd(rest):
         print("использование: pantheon who-canvas [--force]", file=sys.stderr)
         return 2
     try:
-        manual = []
-        got = who_canvas_sync(force="--force" in rest, manual_out=manual)
+        report = {}
+        got = who_canvas_sync(force="--force" in rest, report_out=report)
     except Exception as e:
         msg = f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})"
         alert_once("who-canvas", type(e).__name__, msg, "pantheon")
         print(msg, file=sys.stderr)
         return 1
     clear_once("who-canvas")
-    for nid in manual:  # правка руками (текст, цвет, подпись группы): один раз на состояние карточки
-        alert_once("who-canvas-manual-" + nid, "1",
+    # правка руками (текст, цвет, подпись группы): тревога один раз на текст карточки — значение хеш её текста, новая
+    # правка руками даёт новую тревогу (metis-0838 Д9); карточка снова под кодом — метка снята
+    for nid, h in sorted((report.get("manual_hash") or {}).items()):
+        alert_once("who-canvas-manual-" + nid, h,
                    f"Кто есть кто.canvas: карточка {nid} правлена руками, код её не обновляет; "
                    "чтобы вернуть автосборку — удалите карточку", "pantheon")
+    for nid in report.get("auto") or ():
+        clear_once("who-canvas-manual-" + nid)
     if got == "written":
         print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
+    if got == "skip":
+        return 0
+    try:  # таблица ролей в «Кто есть кто.md» и реестр в system.md — из тех же входов (metis-0828)
+        W = whocanvas_mod()
+        roles, dirs, statuses = who_canvas_inputs()
+        docs = W.sync_docs(PANTHEON, roles, dirs, statuses)
+    except Exception as e:
+        msg = f"Кто есть кто.md / system.md: таблица ролей не собрана ({type(e).__name__}: {e})"
+        alert_once("who-docs", f"{type(e).__name__}: {e}", msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
+    clear_once("who-docs")
+    for f, res in docs.items():
+        if res == "written":
+            print(f"{f}: таблица ролей пересобрана")
     return 0
 
 
@@ -6579,6 +6600,15 @@ def board_auto_sync(T):
         clear_once("board-auto-embed")
     if res == "written":
         print("board-auto.md: сводка прохода обновлена")
+    try:  # «Ждёт владельца» направлений — directions/<имя>/waiting-auto.md из тех же входов (metis-0829)
+        made = B.waiting_sync(PANTHEON, STATE, tasks, lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE, t)
+    except Exception as e:  # noqa: BLE001 — сбой не ломает проход доски
+        alert_once("board-waiting", type(e).__name__,
+                   f"waiting-auto.md направлений: сборка упала ({type(e).__name__}: {e})", "board")
+        return
+    clear_once("board-waiting")
+    if made:
+        print("waiting-auto.md: «Ждёт владельца» обновлено — " + ", ".join(made))
 
 
 def board_auto_watch(t, sched):

@@ -2087,6 +2087,39 @@ def project_registry(dirs):
 
 
 HQ_LED = "ведёт Пританей"  # метка проекта на пульте, когда у направления coordinator = false (metis-0155)
+# дата «ДД.ММ» или «ДД.ММ.ГГГГ» в цели и бюджете реестра (metis-0828): «~28–30.10», «до 30.10 12:00»; «1.0» — не дата
+REG_DATE = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?![\d.]*\d)")
+
+
+def reg_dates(text, t):
+    """Даты из строки реестра → [datetime]; без года — ближайшая к t: год t, а дальше полугода вперёд или назад —
+    прошлый или следующий год."""
+    now = datetime.fromtimestamp(t)
+    out = []
+    for d, m, y in REG_DATE.findall(str(text or "")):
+        try:
+            x = datetime(int(y) if y else now.year, int(m), int(d))
+        except ValueError:
+            continue
+        if not y and (x - now).days > 183:
+            x = x.replace(year=x.year - 1)
+        elif not y and (now - x).days > 183:  # «15.01» в ноябре — следующий январь
+            x = x.replace(year=x.year + 1)
+        out.append(x)
+    return out
+
+
+def stale_mark(text, t):
+    """Цель или бюджет из directions.toml, все даты которых прошли (последняя — раньше сегодняшнего дня), → строка
+    с пометкой «устарело ДД.ММ» спереди: пульт не выдаёт её за текущую. Дат нет или срок не прошёл — как есть."""
+    s = one_line(text) if text not in (None, "") else text
+    dates = reg_dates(s, t)
+    if not dates:
+        return s
+    last = max(dates)
+    if datetime.fromtimestamp(t).date() <= last.date():
+        return s
+    return f"устарело {last:%d.%m} · {s}"
 
 
 def project_note_name(p):
@@ -2107,8 +2140,9 @@ def render_project_note(p, reg, tasks, t, roles=None):
     budget = reg.get("budget")
     head = {"Тип": "проект", "Направление": ", ".join(reg["directions"]), "Значок": mark,
             "Статус проекта": one_line(reg.get("status")), "Ранг": reg["rank"], "Координатор": coord,
-            "Цель": one_line(reg.get("goal")) or None, "Здоровье": hl, "Цвет": color, "Обновлено": upd or None,
-            "Бюджет недели": one_line(budget) if budget not in (None, "") else None, **c}
+            "Цель": stale_mark(one_line(reg.get("goal")), t) or None, "Здоровье": hl, "Цвет": color,
+            "Обновлено": upd or None,
+            "Бюджет недели": stale_mark(budget, t) if budget not in (None, "") else None, **c}
     body = (f"\n> Заметку пишет плановый проход по `directions.toml` и задачам. Не правьте её: счётчики сверяет "
             f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {coord}"
             + (f" · **Цель:** {head['Цель']}" if head["Цель"] else "")
