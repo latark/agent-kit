@@ -2295,11 +2295,13 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # gh pr diff и gh run — нет: лишний чужой текст в окне
 HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
-# сетевые команды git — мимо неё; мастерской — только при SSH-remote. Это не «только сеть»: мимо песочницы они и
-# пишут в рабочую копию — fetch и pull меняют ref. Поэтому guard: push в main/master при любой записи назначения,
-# --force и --delete — отказ (push_problem); fetch и pull с --update-head-ok или назначением в refs/heads/* — отказ
-# (fetch_problem, metis-0983)
-GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
+# сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master при любой записи назначения,
+# --force и --delete не пускает guard (push_problem); fetch с --update-head-ok или назначением в refs/heads/* — тоже
+# (fetch_problem, metis-0983). Только сеть, без записи в рабочую копию (metis-0971, решение Зевса 07.11, вариант А):
+# `git pull` вне песочницы вливал коммит в рабочую копию защищённого репозитория (~/.claude, ~/ai/pantheon), если cwd
+# внутри allowWrite. Подтянуть — `git fetch` мимо песочницы, затем `git merge` в ней: запись там судит песочница.
+# Список команд, меняющих рабочую копию, держит тест test_window_rules.py (WORKTREE_WRITE)
+GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *"]
 COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)

@@ -202,7 +202,8 @@
   Мимо песочницы gh (в ней не работает) — чтение: `gh pr view|checks|diff|list|status`, `gh issue view|list`,
   `gh run view|list|watch`, `gh repo view`, `gh auth status`; `gh api`, запись в `gh issue` и
   `gh run cancel|rerun|delete` в песочнице падают. Окна направлений мимо песочницы ещё пишут PR:
-  `gh pr create|edit|comment|ready|merge` и сетевой git (push, fetch, pull); мастерской — только сетевой git и только
+  `gh pr create|edit|comment|ready|merge` и сетевой git (push, fetch; `git pull` — нет, он пишет в рабочую копию мимо песочницы: `git fetch`,
+  затем `git merge` в ней, metis-0971); мастерской — только сетевой git и только
   при SSH-remote. Запись в PR сужает правило guard gh-out (metis-0533, metis-0596): только `-R` из `[merge_repos]`
   своего направления, без «GH_X=» в строке и `--hostname`, текст из файла (`--body-file`, `-F`) — из временных
   папок и своей копии репозитория, но не из личного и не из `.git`, относительный путь — только если gh в строке один, без других команд и обёрток; слияние судит шлюз (push). Подробности — README

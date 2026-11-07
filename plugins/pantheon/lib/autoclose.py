@@ -470,7 +470,8 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             row = {"number": pr.get("number"), "headRefName": pr.get("headRefName") or "", "body": (pr.get("body") or "")[:4000],
                    "mergedAt": pr.get("mergedAt"), "oid": ((pr.get("mergeCommit") or {}).get("oid") or ""),
                    "cross": pr.get("isCrossRepository") is not False}  # PR из форка (или gh не сказал) — не PR пачки
-            files = [f.get("path", "") for f in pr.get("files") or [] if isinstance(f, dict)]
+            # path null у файла слитого PR — пропустить, а не упасть на endswith (metis-0674)
+            files = [f["path"] for f in pr.get("files") or [] if isinstance(f, dict) and isinstance(f.get("path"), str)]
             if f"{repo}#{pr.get('number')}" not in done and any(x.endswith(".claude-plugin/plugin.json") for x in files):
                 if rleft() <= 1:
                     errors[f"{repo}#{pr.get('number')}"] = "не хватило времени на diff"
