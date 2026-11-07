@@ -33,7 +33,12 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    reject на другом head — того же рецензента или другого argus, если коды reject и сливаемого SHA посчитаны и
    различаются (0415b: accept другого argus на код, равный коду reject, reject не снимает; код не посчитан — тоже);
    3) на третьем head с другим кодом от той же merge-base, если код сливаемого SHA — не код reject (_held; metis-0158:
-   два argus на одном head — accept и reject в любом порядке дают отказ). Перенос accept: accept с перечнем на
+   два argus на одном head — accept и reject в любом порядке дают отказ). Поле «вернули» в поручении argus — слово
+   лида, а не факт (metis-0497, Д1 ревью PR #149 r2): record пишет в вердикт субагента "returned" — пары
+   agent8/сессия8 последнего «вернули: …» его поручений — и "reported" — пары успешных `pantheon review report`
+   (agent_rounds). Правила 2 и 3 для другого argus с полем «вернули» снимают reject, только если его пара в
+   reported (returned_lifts); поле, назвавшее рецензента без reject на PR раньше этого accept, — accept не в счёт
+   (returned_lie). Перенос accept: accept с перечнем на
    прошлом head PR засчитывается на новом SHA, если собственный дифф PR (merge-base с живой вершиной ветки base
    PR..head, metis-0471: не снимок baseRefOid) тот же —
    отпечаток _fingerprint по содержимому файлов (решение владельца 25.10 23:05): `git diff --raw -z --no-abbrev
@@ -62,8 +67,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи. Модель сверяется и с транскриптом argus: record пишет в
    accept и reject поле "models" — значения message.model его assistant-записей; в PR ядра accept засчитывается,
-   только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note", судим по ran;
-   транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в PR ядра accept не в счёт (metis-0413).
+   только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note": у главной сессии
+   argus судим по ran, у субагента (agent_id есть) — пометка NO_AGENT_TRANSCRIPT, в PR ядра accept не в счёт
+   (metis-0489); транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, тоже не в счёт (metis-0413).
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR. У репозитория из REQUIRED_CHECKS (agent-kit: tests/affected на PR в main, check-traces/traces —
@@ -79,7 +85,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    командой, у репозитория без FULL_TESTS — отказ. PR вне ядра защит (metis-0734) засчитывает и узкую запись
    `pantheon outside test --affected` (narrow_tests_record): FULL_TESTS с `--affected --base <SHA>`, files и map; база —
    единственная merge-base head и base PR, карта — sha256 affected-map.json в дереве head (_narrow_problem). PR ядра —
-   только полный набор, и с Touch ID.
+   только полный набор, и с Touch ID. PR пачки (ветка batch/<story>, metis-0758) у репозитория с FULL_TESTS — только
+   запись полного набора на head, и при зелёном CI: CI на PR гонит лишь затронутое (batch_tests_problem).
 Записи tests нет — отказ называет узкую команду репозитория из NARROW_TESTS (metis-0666): `--affected`
 run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
@@ -178,6 +185,14 @@ RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)
 SEGMENT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # session_id и agent_id в пути транскрипта — одним сегментом
 NO_TRANSCRIPT = "транскрипта argus нет — модель по --ran"
 NO_MODELS = "транскрипт argus найден, но моделей в нём нет — модель не подтвердить"  # metis-0413: не молча как NO_TRANSCRIPT
+# metis-0489 (Д1 ревью PR #146): у субагента argus (agent_id есть) свой транскрипт не найден — Claude Code сменил
+# раскладку или файла нет. Модель не подтвердить: в PR ядра «принять» не в счёт, а не молча «по --ran»
+NO_AGENT_TRANSCRIPT = "транскрипт субагента argus не найден — модель не подтвердить"
+# поле «вернули: <agent8/сессия8, …>» в поручении повторного круга argus (metis-0420, 0497) и пары в нём; пара
+# `pantheon review report` — agent8 или agent8/сессия8 (REVIEW_AGENT в lib/review.py), здесь от 8 знаков
+RETURNED_FIELD = re.compile(r"вернули:[ \t]*([^\n»]*)")
+RETURNED_PAIRS = re.compile(r"(?<![0-9a-f])[0-9a-f]{8,64}/[0-9a-f]{8,64}(?![0-9a-f])", re.I)
+RETURNED_PAIR = re.compile(r"[0-9a-f]{8,64}(?:/[0-9a-f]{8,64})?", re.I)
 UNFILLED_ID_HINT = ("в --ran остался шаблон «<ID>»: подставь ID своей модели из системной подсказки — "
                     "`--ran \"модель: claude-opus-…, что запустил\"`")
 # пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
@@ -817,12 +832,15 @@ def record(event):
         rec["checklist"] = checklist
     if rec_kind in ("accept", "reject"):  # модель argus — из данных сессии, а не со слов ran (metis-0176)
         models = agent_models(event)
-        if models is None:
-            rec["models_note"] = NO_TRANSCRIPT
+        if models is None:  # у субагента — своя пометка: его «принять» в PR ядра не в счёт (metis-0489)
+            rec["models_note"] = NO_AGENT_TRANSCRIPT if event.get("agent_id") else NO_TRANSCRIPT
         else:  # [] — транскрипт найден, моделей нет (сменился формат?): в защитах не в счёт, а не «как без транскрипта»
             rec["models"] = models
             if not models:
                 rec["models_note"] = NO_MODELS
+        rounds = agent_rounds(event, repos[0], pr)  # metis-0497: «вернули» лида и взятые отчёты — для шлюза
+        if rounds and rounds[0] is not None:
+            rec["returned"], rec["reported"] = rounds
     append_record(rec)
     return rec_kind
 
@@ -834,6 +852,28 @@ def agent_models(event):
     глубже, subagents/workflows/<runId>/agent-<agent_id>.jsonl (transcriptSubdir Claude Code, metis-0413); ищется и
     одна подпапка. У главной сессии (agent_id нет) — сам transcript_path. Свой файл субагента не нашёлся — None, а не
     главный transcript_path: он чужой (сессия того, кто позвал argus)."""
+    fd = _agent_transcript(event)
+    if fd is None:
+        return None
+    models = set()
+    with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"assistant"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+            model = msg.get("model") if isinstance(msg, dict) else None
+            if isinstance(model, str) and model.strip() and model != "<synthetic>":
+                models.add(model.strip().lower())
+    return sorted(models)
+
+
+def _agent_transcript(event):
+    """Открытый на чтение транскрипт argus (дескриптор, O_NOFOLLOW) по входу хука — путь, как в agent_models; None —
+    не найден или не открыть."""
     tp, sid, aid = (event.get(k) for k in ("transcript_path", "session_id", "agent_id"))
     if not isinstance(tp, str) or not os.path.isabs(tp):
         return None
@@ -848,36 +888,80 @@ def agent_models(event):
         paths = [tp]
     for path in paths:
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            return os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
             continue
-        models = set()
-        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if '"assistant"' not in line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
-                model = msg.get("model") if isinstance(msg, dict) else None
-                if isinstance(model, str) and model.strip() and model != "<synthetic>":
-                    models.add(model.strip().lower())
-        return sorted(models)
     return None
+
+
+def _commission(entry):
+    """Текст поручения лида в записи транскрипта субагента или None: запись user со строкой — первое поручение (не
+    isMeta) или сообщение лида по ходу работы (origin.kind coordinator, SendMessage). Уведомления о задачах
+    (task-notification), результаты инструментов (content — список) и записи самого argus — не поручение."""
+    msg = entry.get("message") if entry.get("type") == "user" else None
+    text = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(text, str):
+        return None
+    origin = entry.get("origin") if isinstance(entry.get("origin"), dict) else {}
+    if origin.get("kind") == "coordinator" or (not entry.get("isMeta") and not origin.get("kind")):
+        return text
+    return None
+
+
+def agent_rounds(event, repo, pr):
+    """Поле «вернули» и взятые отчёты argus-субагента по его транскрипту (metis-0497, Д1 ревью PR #149 r2: поле —
+    слово лида, а не факт продолжения) → (returned, reported) или None (не субагент, транскрипта нет).
+    returned — пары agent8/сессия8 из последнего «вернули: …» в поручениях (_commission): сообщение лида по ходу
+    круга без поля повторный круг не отменяет; None — поля нет ни в одном поручении (свежий argus, полный круг). reported — пары успешных `pantheon review report <repo> <pr> <пара>` argus (результат без
+    is_error, metis-0602: новый argus взял отчёт вернувшего — его Б он видел)."""
+    if not event.get("agent_id"):
+        return None
+    fd = _agent_transcript(event)
+    if fd is None:
+        return None
+    field, asked, done = None, {}, []
+    with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            for m in RETURNED_FIELD.finditer(_commission(entry) or ""):
+                field = m.group(1)
+            msg = entry.get("message")
+            blocks = msg.get("content") if isinstance(msg, dict) else None
+            for b in blocks if isinstance(blocks, list) else ():
+                if not isinstance(b, dict):
+                    continue
+                if entry.get("type") == "assistant" and b.get("type") == "tool_use" and b.get("name") == "Bash":
+                    words = simple_review((b.get("input") or {}).get("command") if isinstance(b.get("input"), dict)
+                                          else None) or []
+                    if words[1:2] == ["report"] and len(words) == 5 and words[2].lower() == str(repo).lower() \
+                            and words[3] == str(pr) and RETURNED_PAIR.fullmatch(words[4]):
+                        asked[b.get("id")] = words[4].lower()
+                elif entry.get("type") == "user" and b.get("type") == "tool_result" and not b.get("is_error") \
+                        and b.get("tool_use_id") in asked:
+                    done.append(asked.pop(b.get("tool_use_id")))
+    returned = None if field is None else sorted({m.group(0).lower() for m in RETURNED_PAIRS.finditer(field)})
+    return returned, sorted(set(done))
 
 
 def opus_problem(rec):
     """Почему «принять» в защитах не засчитан (metis-0176), или None — засчитан: ran начинается с «модель:
     claude-opus», а если в записи есть модели из транскрипта — все они claude-opus и среди них модель из ran (тот же
     ID или он с датой: claude-opus-4-1 и claude-opus-4-1-20250805). Транскрипт найден, а моделей нет ("models": []) —
-    не засчитан с причиной NO_MODELS (metis-0413)."""
+    не засчитан с причиной NO_MODELS (metis-0413). Транскрипта нет (models_note), а запись от субагента (agent_id
+    есть) — не засчитан с причиной NO_AGENT_TRANSCRIPT (metis-0489): его файл должен быть, и «нет» — смена раскладки
+    Claude Code или сбой, а не повод судить по --ran. Так и у записей с прежней пометкой NO_TRANSCRIPT."""
     ran = rec["checklist"]["ran"]
     if not OPUS_RAN.match(ran):
         return "по --ran"
     if "models" not in rec:
-        return None  # транскрипта не было (models_note) или запись до metis-0176 — судим по ran
+        if rec.get("models_note") and rec["by"].get("agent_id"):
+            return NO_AGENT_TRANSCRIPT
+        return None  # главная сессия argus без транскрипта или запись до metis-0176 (пометки нет) — судим по ran
     seen = rec["models"]
     if seen == []:
         return NO_MODELS  # metis-0413: транскрипт без моделей не равен «транскрипта нет»
@@ -1265,8 +1349,9 @@ def _version_problem(files):
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
-# optional_checks), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
-# FULL_TESTS, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет test_merge (AST)
+# optional_checks; batch_tests_problem — metis-0758), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING,
+# CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, BATCH_BRANCH, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
+# test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 CI_NONE = "проверки GitHub не получены"
@@ -1450,6 +1535,29 @@ def full_tests_record(repo, rec):
     got = got[1:] if got[:1] and os.path.basename(got[0]) == "heavy" else got
     need = need[1:] if need[:1] and os.path.basename(need[0]) == "heavy" else need
     return got == need
+
+
+# PR пачки (metis-0758, решение владельца 03.11 [zeus-fast-2d]: один полный набор на пачку) — ветка head PR с этой
+# приставкой (её даёт `pantheon batch start`, lib/batch.py batch_branch)
+BATCH_BRANCH = "batch/"
+
+
+def batch_tests_problem(repo, sha, view, records):
+    """PR пачки (metis-0758): ветка head PR (headRefName ответа gh pr view) начинается с BATCH_BRANCH. Его тесты —
+    только запись полного набора FULL_TESTS на sha (full_tests_record), и при зелёном CI: пачка сводит правки
+    нескольких задач, а CI на PR и узкая запись гонят только затронутое. Есть такая запись, PR не пачки или у
+    репозитория нет строки в FULL_TESTS (полный набор не задан — как раньше) — None; записи нет — текст причины."""
+    branch = view.get("headRefName") if isinstance(view, dict) else None
+    if not isinstance(branch, str) or not branch.startswith(BATCH_BRANCH):
+        return None
+    if not FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()):
+        return None
+    if any(isinstance(r, dict) and r.get("kind") == "tests" and r.get("sha") == sha and isinstance(r.get("repo"), list)
+           and str(repo).lower() in [str(x).lower() for x in r["repo"]] and full_tests_record(repo, r)
+           for r in records):
+        return None
+    return (f"PR пачки (ветка {branch}): засчитывается только запись полного набора тестов (FULL_TESTS) на "
+            f"{sha[:12]}, а её нет — узкая запись и CI на PR гонят только затронутое")
 
 
 # узкая запись на запасном пути (metis-0734, «да» владельца 05.11): PR вне ядра — затронутые тесты вместо полного
@@ -1994,7 +2102,9 @@ def _lifts(a, r, sha, fp):
     снимает). 3: на третьем head с другим кодом от той же merge-base, если код sha — не код r. Код sha — код r и
     тогда, когда head r, слитый с merge-base sha, даёт ровно sha (fp.merged, _merge_same; argus #375 Б1): иначе
     вернулись к коду r и подтянули main со сдвигом строк — «вернуть» снято, а «принять» с r переносится слиянием.
-    Слияние не посчитано (None: сбой, таймаут, бюджет) — не снимает (argus #375 Б2, metis-0973)."""
+    Слияние не посчитано (None: сбой, таймаут, бюджет) — не снимает (argus #375 Б2, metis-0973). Правила 2 и 3 для
+    другого argus — ещё returned_lifts (metis-0497): «принять» повторного круга (поле «вернули») снимает «вернуть»
+    другого, только если взяло его отчёт."""
     if not checklist_ok(a):
         return False
     if _self_lift(a, r):
@@ -2004,13 +2114,50 @@ def _lifts(a, r, sha, fp):
             return False
         if _reviewer(a) == _reviewer(r):
             return True
+        if not returned_lifts(a, r):
+            return False
         fr, fs = fp(r["sha"]), fp(sha)
         return bool(fr and fs) and fs[0] != fr[0] and _code_of(fp, r["sha"]) is False
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
+    if _reviewer(a) != _reviewer(r) and not returned_lifts(a, r):
+        return False
     fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
     return (bool(fr and fa and fs) and fr[1] == fa[1] and fr[0] != fa[0] and fs[0] != fr[0]
             and _code_of(fp, r["sha"]) is False)
+
+
+# поле «вернули» (metis-0497, Д1 ревью PR #149 r2): pair_match, returned_lie и returned_lifts — дословно те же в
+# plugins/pantheon/lib/merge.py (held_rejects и gate шлюза владельца), сверяет test_merge (AST)
+def pair_match(pair, rec):
+    """Пара agent8[/сессия8] из поля «вернули» или `pantheon review report` — рецензент записи rec (metis-0497):
+    agent_id записи начинается с первой части, session_id — со второй (если она есть)."""
+    parts = pair.lower().split("/") if isinstance(pair, str) else []
+    by = rec.get("by") if isinstance(rec.get("by"), dict) else {}
+    aid, sid = str(by.get("agent_id") or "").lower(), str(by.get("session_id") or "").lower()
+    return (1 <= len(parts) <= 2 and all(parts) and bool(aid) and aid.startswith(parts[0])
+            and (len(parts) == 1 or bool(sid) and sid.startswith(parts[1])))
+
+
+def returned_lie(a, verdicts):
+    """Пары поля «вернули» записи a, за которыми нет «вернуть» на этом PR, записанного раньше a (metis-0497): поле
+    — слово лида, сверяется с журналом. verdicts — вердикты argus PR по порядку записи, a среди них. Поля нет — []."""
+    got = a.get("returned")
+    if not isinstance(got, list):
+        return []
+    before = verdicts[:next((i for i, r in enumerate(verdicts) if r is a), len(verdicts))]
+    return [p for p in got if not any(r.get("kind") == "reject" and pair_match(p, r) for r in before)]
+
+
+def returned_lifts(a, r):
+    """Может ли «принять» a другого argus снять «вернуть» r (metis-0497). Без поля «вернули» — да, как раньше:
+    свежий argus ведёт полный круг. С полем — повторный круг: снимает, только если a взяло отчёт вернувшего (его
+    пара в reported — успешный `pantheon review report`, metis-0602). Иначе a — продолженный argus, Б вернувшего он
+    не видел, и «вернуть» снимает только сам вернувший тем же вызовом (Д1 ревью PR #149 r2)."""
+    if not isinstance(a.get("returned"), list):
+        return True
+    got = a.get("reported")
+    return isinstance(got, list) and any(pair_match(p, r) for p in got)
 
 
 def _code_of(fp, head):
@@ -2387,6 +2534,10 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         if view is not None and _core_problem(repo, pr, sha, view, pr_files(), cwd) is None:
             weak = []
     verdicts = [r for r in pr_verdicts if not any(r is w for w in weak)]
+    # metis-0497: поле «вернули» называет рецензента без «вернуть» на PR — поле врёт, «принять» не в счёт
+    lied = [(r, returned_lie(r, pr_verdicts)) for r in verdicts if r["kind"] == "accept"]
+    lied = [(r, bad) for r, bad in lied if bad]
+    verdicts = [r for r in verdicts if not any(r is x for x, _ in lied)]
 
     fp = _Prints(cwd, repo, sha, pr_verdicts, pr_view)
 
@@ -2405,6 +2556,13 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     latest, direct, cut = head_verdicts(verdicts, sha)
     carried = [] if direct else _carried(verdicts, sha, fp, cut, fp.merged)
     if not direct and not carried:
+        lied_here = [(r, bad) for r, bad in lied if r["sha"] == sha]
+        if lied_here:
+            return (f"«принять» на {repo}#{pr}@{sha[:12]} от "
+                    f"{'; '.join(_who(r) + ' (вернули: ' + ', '.join(bad) + ')' for r, bad in lied_here)} не в счёт: "
+                    "поле «вернули» в поручении argus называет рецензента, чьего «вернуть» на этом PR в журнале нет "
+                    "(metis-0497). В «вернули» — пары agent8/сессия8 из `pantheon review status` тех, чей последний "
+                    "вердикт — «reject»; поправь поручение и повтори круг тем же argus." + f" {advice}")
         fs = fp(sha) if weak else None
         weak_used = [r for r in weak if r["sha"] == sha or (fs and fp(r["sha"]) and fp(r["sha"])[0] == fs[0])]
         if weak_used:
@@ -2447,6 +2605,13 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if view is None:
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
+    why = batch_tests_problem(repo, sha, view, records)  # PR пачки — только полный набор на head (metis-0758)
+    if why:
+        cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower())
+        return (f"{why}. Из корня чистой копии на {sha[:12]} запусти `pantheon outside test --wait 590` (Bash не в "
+                "фоне, timeout 600000 мс): плановый проход прогонит `.pantheon-verify` вне окна и сам напишет запись; "
+                f"код 75 — итога ещё нет, смотри `pantheon outside status <ID>`. Вариант — `pantheon review test -- "
+                f"{cmd}` не в фоне. {advice}")
     core_why = MERGE_CORE
     if protect:
         files = pr_files()

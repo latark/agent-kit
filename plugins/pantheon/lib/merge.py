@@ -476,8 +476,9 @@ def is_core(path):
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
-# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS,
-# CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, CI_OK, CI_WAIT и CI_NONE —
+# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, batch_tests_problem (metis-0758),
+# REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, BATCH_BRANCH,
+# CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
 # друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -650,6 +651,29 @@ def full_tests_record(repo, rec):
     return got == need
 
 
+# PR пачки (metis-0758, решение владельца 03.11 [zeus-fast-2d]: один полный набор на пачку) — ветка head PR с этой
+# приставкой (её даёт `pantheon batch start`, lib/batch.py batch_branch)
+BATCH_BRANCH = "batch/"
+
+
+def batch_tests_problem(repo, sha, view, records):
+    """PR пачки (metis-0758): ветка head PR (headRefName ответа gh pr view) начинается с BATCH_BRANCH. Его тесты —
+    только запись полного набора FULL_TESTS на sha (full_tests_record), и при зелёном CI: пачка сводит правки
+    нескольких задач, а CI на PR и узкая запись гонят только затронутое. Есть такая запись, PR не пачки или у
+    репозитория нет строки в FULL_TESTS (полный набор не задан — как раньше) — None; записи нет — текст причины."""
+    branch = view.get("headRefName") if isinstance(view, dict) else None
+    if not isinstance(branch, str) or not branch.startswith(BATCH_BRANCH):
+        return None
+    if not FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()):
+        return None
+    if any(isinstance(r, dict) and r.get("kind") == "tests" and r.get("sha") == sha and isinstance(r.get("repo"), list)
+           and str(repo).lower() in [str(x).lower() for x in r["repo"]] and full_tests_record(repo, r)
+           for r in records):
+        return None
+    return (f"PR пачки (ветка {branch}): засчитывается только запись полного набора тестов (FULL_TESTS) на "
+            f"{sha[:12]}, а её нет — узкая запись и CI на PR гонят только затронутое")
+
+
 def ci_verdict(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
     StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
@@ -788,16 +812,51 @@ def _reviewer(r):
     return by.get("session_id") or "", by.get("agent_id") or ""
 
 
+# поле «вернули» (metis-0497, Д1 ревью PR #149 r2): pair_match, returned_lie и returned_lifts — дословно те же,
+# что в шлюзе guard (merge_gate.py), сверяет test_merge (AST). Правишь — правь оба
+def pair_match(pair, rec):
+    """Пара agent8[/сессия8] из поля «вернули» или `pantheon review report` — рецензент записи rec (metis-0497):
+    agent_id записи начинается с первой части, session_id — со второй (если она есть)."""
+    parts = pair.lower().split("/") if isinstance(pair, str) else []
+    by = rec.get("by") if isinstance(rec.get("by"), dict) else {}
+    aid, sid = str(by.get("agent_id") or "").lower(), str(by.get("session_id") or "").lower()
+    return (1 <= len(parts) <= 2 and all(parts) and bool(aid) and aid.startswith(parts[0])
+            and (len(parts) == 1 or bool(sid) and sid.startswith(parts[1])))
+
+
+def returned_lie(a, verdicts):
+    """Пары поля «вернули» записи a, за которыми нет «вернуть» на этом PR, записанного раньше a (metis-0497): поле
+    — слово лида, сверяется с журналом. verdicts — вердикты argus PR по порядку записи, a среди них. Поля нет — []."""
+    got = a.get("returned")
+    if not isinstance(got, list):
+        return []
+    before = verdicts[:next((i for i, r in enumerate(verdicts) if r is a), len(verdicts))]
+    return [p for p in got if not any(r.get("kind") == "reject" and pair_match(p, r) for r in before)]
+
+
+def returned_lifts(a, r):
+    """Может ли «принять» a другого argus снять «вернуть» r (metis-0497). Без поля «вернули» — да, как раньше:
+    свежий argus ведёт полный круг. С полем — повторный круг: снимает, только если a взяло отчёт вернувшего (его
+    пара в reported — успешный `pantheon review report`, metis-0602). Иначе a — продолженный argus, Б вернувшего он
+    не видел, и «вернуть» снимает только сам вернувший тем же вызовом (Д1 ревью PR #149 r2)."""
+    if not isinstance(a.get("returned"), list):
+        return True
+    got = a.get("reported")
+    return isinstance(got, list) and any(pair_match(p, r) for p in got)
+
+
+
 def held_rejects(verdicts, sha):
     """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
     по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
     снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head или на sha; 2) другого argus на
-    sha, если «вернуть» на другом head. Шлюз guard во втором случае ещё сверяет, что код sha не равен коду «вернуть»;
+    sha, если «вернуть» на другом head, и у «принять» с полем «вернули» — только взявшего отчёт вернувшего
+    (returned_lifts, metis-0497). Шлюз guard во втором случае ещё сверяет, что код sha не равен коду «вернуть»;
     у прохода нет git папки слияния, и «другой код» здесь — другой коммит (metis-0443). Третий head «вернуть» не
     снимает: проход «принять» не переносит, на sha нужны свои."""
     def lifts(a, r):
         return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r) and a["sha"] in (r["sha"], sha)
-                                          or a["sha"] == sha != r["sha"])
+                                          or a["sha"] == sha != r["sha"] and returned_lifts(a, r))
     return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
 
 
@@ -827,6 +886,9 @@ def gate(repo, pr, sha, view):
     recs = P.review_records(repo)
     if not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
         return "fail", f"нет записи тестов шлюза на {sha[:12]}"
+    why = batch_tests_problem(repo, sha, view, recs)  # PR пачки — только полный набор на head, как в шлюзе guard
+    if why:
+        return "fail", why
     verdicts = []
     for r in recs:
         by = r.get("by") if isinstance(r.get("by"), dict) else {}
@@ -838,6 +900,8 @@ def gate(repo, pr, sha, view):
             if r["kind"] == "accept" and not P.review_accept_counts(r):
                 continue
             verdicts.append(r)
+    # поле «вернули» называет рецензента без «вернуть» на PR — «принять» не в счёт, как в шлюзе guard (metis-0497)
+    verdicts = [r for r in verdicts if not (r["kind"] == "accept" and returned_lie(r, verdicts))]
     # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard
     held = held_rejects(verdicts, sha)
     if held:
