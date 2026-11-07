@@ -330,5 +330,5 @@ finally:
 check("prepare: срок 2 с, heavy ждёт место 3 с — установка дождалась и вышла кодом 0, а не -1", code == 0 and dt >= 2.5,
       (code, dt, log_text))
 
-print(f"\n{TOTAL[0] - len(FAILS)} ok, {len(FAILS)} FAIL")
+print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
