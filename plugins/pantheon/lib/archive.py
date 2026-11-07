@@ -7,12 +7,13 @@ pantheon._attach до выполнения этого файла, имена и�
 import contextlib
 import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timedelta
 
 __all__ = [
-    "VIEW_INBOX", "VIEW_INBOX_LIMIT", "VIEW_INBOX_GROWTH", "view_inbox_count", "view_inbox_check", "view", "PUSH_POST_BUFFER", "PUSH_FAIL_LIMIT", "PUSH_SERVER_ERR", "push_failed", "commit", "data_guard", "DATA_MAX_BYTES", "DATA_EXT",
+    "VIEW_INBOX", "VIEW_INBOX_LIMIT", "VIEW_INBOX_GROWTH", "view_inbox_count", "view_inbox_check", "view", "PUSH_POST_BUFFER", "PUSH_FAIL_LIMIT", "PUSH_SERVER_ERR", "push_failed", "commit", "data_guard", "_append_ignore", "DATA_MAX_BYTES", "DATA_EXT",
     "DONE_HEAD", "DATE_ISO", "DATE_RU", "line_date", "archive", "archive_status",
 ]
 
@@ -101,6 +102,35 @@ def _ignore_line(name):
     return "/" + re.sub(r"([\\*?\[\]!# ])", r"\\\1", name)
 
 
+def _append_ignore(folder, name):
+    """Дописать строку для name в .gitignore папки folder (путь от корня плана). Ссылка в любой части пути, на папке или
+    на самом .gitignore — не пишем (запись ушла бы в чужой файл). → записано ли (False — папку пропустили)."""
+    cur = P.PANTHEON
+    for part in filter(None, folder.split("/")):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return False
+    try:
+        dfd = os.open(cur, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        fd = os.open(".gitignore", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+    except OSError:
+        return False
+    finally:
+        os.close(dfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        glue = b"\n" if st.st_size and os.pread(fd, 1, st.st_size - 1) != b"\n" else b""
+        os.write(fd, glue + _ignore_line(name).encode() + b"\n")
+    finally:
+        os.close(fd)
+    return True
+
+
 def data_guard():
     """Перед `git add`: неотслеживаемый файл больше DATA_MAX_BYTES (где угодно) или с расширением DATA_EXT во входящих
     (inbox/, directions/*/inbox/) → строка в .gitignore его папки и одна тревога на файл. Закоммиченное не трогает
@@ -110,21 +140,24 @@ def data_guard():
     for rel in filter(None, out.split("\0")):
         full = os.path.join(P.PANTHEON, rel)
         try:
-            size = os.path.getsize(full)
+            st = os.lstat(full)  # ссылку не читаем: размер цели не наш
         except OSError:
             continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        size = st.st_size
         if not (size > DATA_MAX_BYTES or (_in_inbox(rel) and rel.lower().endswith(DATA_EXT))):
             continue
-        folder, name = os.path.split(full)
+        folder, name = os.path.split(rel)
         if "\n" in name:  # такое имя в .gitignore не записать
             continue
-        gi = os.path.join(folder, ".gitignore")
-        try:
-            have = open(gi, encoding="utf-8").read()
-        except OSError:
-            have = ""
-        with open(gi, "a", encoding="utf-8") as fh:
-            fh.write(("" if not have or have.endswith("\n") else "\n") + _ignore_line(name) + "\n")
+        if not _append_ignore(folder, name):
+            # папка или .gitignore — ссылка: туда не пишем, файл прячем локально (.git/info/exclude), чтобы не ушёл в git
+            ex = os.path.join(P.PANTHEON, ".git", "info", "exclude")
+            with contextlib.suppress(OSError):
+                os.makedirs(os.path.dirname(ex), exist_ok=True)
+                with open(ex, "a", encoding="utf-8") as fh:
+                    fh.write("\n" + _ignore_line(rel) + "\n")
         mb = f"{size / 1048576:.1f} МБ" if size >= 1048576 else f"{size} Б"
         P.alert_once("data-not-in-git:" + rel, 1, f"данные не в git: {rel}, {mb}", "pantheon-commit")
         n += 1

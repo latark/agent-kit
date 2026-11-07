@@ -140,6 +140,46 @@ tracked, alerts = commit(pan)
 check("уже в .gitignore: строка не дублируется, тревоги нет",
       gi(pan) == "/seen.csv\n" and "данные не в git" not in alerts, (gi(pan), alerts))
 
+# ссылки (metis-0846, проверка безопасности): запись и чтение не идут по ним
+pan = fresh()
+outside = os.path.join(ROOT, f"outside{n[0]}")
+os.makedirs(outside)
+target = os.path.join(outside, "target-gi")
+open(target, "w").write("чужой файл\n")
+os.symlink(target, os.path.join(pan, D1, ".gitignore"))
+put(pan, D1 + "l.csv", 10)
+tracked, alerts = commit(pan)
+check(".gitignore — ссылка: цель не изменилась", open(target).read() == "чужой файл\n", open(target).read())
+check(".gitignore — ссылка: csv всё равно не в коммите (прячется в .git/info/exclude)",
+      D1 + "l.csv" not in tracked, tracked)
+
+pan = fresh()
+other = os.path.join(ROOT, f"otherdir{n[0]}")
+os.makedirs(other)
+shutil.rmtree(os.path.join(pan, "inbox"))
+os.symlink(other, os.path.join(pan, "inbox"))
+open(os.path.join(other, "z.csv"), "w").write("1")
+tracked, alerts = commit(pan)
+check("inbox — ссылка: в цели нет .gitignore", not os.path.exists(os.path.join(other, ".gitignore")), os.listdir(other))
+
+# прямой вызов: папка — ссылка (git сам внутрь ссылки не заглядывает, это второй слой защиты)
+sub = os.path.join(pan, "lnkdir")
+os.symlink(other, sub)
+code = (f"import sys; sys.path.insert(0, {LIB!r}); import pantheon as p; "
+        "print(p._append_ignore('lnkdir', 'x.csv'), p._append_ignore('', 'ok.csv'))")
+r = subprocess.run([PY311, "-I", "-c", code], env={"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pan,
+                   "PANTHEON_STATE": state}, capture_output=True, text=True, timeout=60)
+check("_append_ignore: папка-ссылка → False, цель пуста; обычная папка → True",
+      r.stdout.strip() == "False True" and not os.path.exists(os.path.join(other, ".gitignore")), (r.stdout, r.stderr))
+
+pan = fresh()
+big =os.path.join(outside, "big.bin")
+put(outside, "big.bin", 6 * MB)
+os.symlink(big, os.path.join(pan, D1, "lnk.bin"))
+tracked, alerts = commit(pan)
+check("файл-ссылка на 6 МБ в inbox — не кандидат: ни строки, ни тревоги",
+      gi(pan) == "" and "данные не в git" not in alerts, (gi(pan), alerts))
+
 # имя со спецзнаками: файл действительно игнорируется
 pan = fresh()
 put(pan, D1 + "my data [1] #2.csv", 10)
