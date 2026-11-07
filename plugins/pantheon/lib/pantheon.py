@@ -48,8 +48,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         исполняют, — JSON для одобрения владельцем в
                                         ~/.claude/pantheon/packs/<направление>/approved.json (metis-0933, класс 6).
                                         Хеш и текст каждого скрипта (в stderr) — из снимка в STATE, .git не
-                                        читается; в ~/.claude/pantheon ничего не пишет. Скрипт не прочитан —
-                                        «внимание — …» и код 1
+                                        читается; в ~/.claude/pantheon ничего не пишет. Скрипт не прочитан
+                                        или не прошёл белый список (UTF-8 без BOM и объявления кодировки,
+                                        только печатные знаки, перевод строки и табуляция) — «внимание — …»
+                                        с причиной и строкой, код 1
+  pantheon packs diff <направление>     полный дифф неодобренных скриптов от одобренной копии, знаки кодом
+                                        \\uXXXX, обратная косая удвоена (то, что тревога «хук изменён» обрезала)
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
@@ -3312,10 +3316,41 @@ def pack_approved(p):
 def _pack_data(text):
     """Строка чужого текста (скрипта или диффа из репозитория окна) для тревоги и вывода packs hashes: управляющие
     знаки, кроме \\n и \\t (ESC перекрашивает и стирает строки в терминале), невидимые знаки формата (смена
-    направления письма U+202E), разделители строк и знаки обрамления ⟦⟧⏎ — кодом \\uXXXX: окно не подделает ни строку
-    «одобрить?», ни конец диффа."""
-    return "".join(c if c in "\n\t" or (c not in "⟦⟧⏎" and unicodedata.category(c) not in (
+    направления письма U+202E), разделители строк и знаки обрамления ⟦⟧⏎ — кодом \\uXXXX, сама «\\» — «\\\\» (круг
+    G6, Б2 а: литерал «\\u000d» и настоящий CR видны по-разному): окно не подделает ни строку «одобрить?», ни конец
+    диффа."""
+    return "".join("\\\\" if c == "\\" else c if c in "\n\t" or (c not in "⟦⟧⏎" and unicodedata.category(c) not in (
         "Cc", "Cf", "Cs", "Zl", "Zp")) else f"\\u{ord(c):04x}" for c in text)
+
+
+# Белый список текста скрипта репозитория (metis-0933 круг G6, решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2):
+# в снимок идёт только скрипт в UTF-8 без BOM, без объявления кодировки (PEP 263: Python исполнил бы utf-7 иначе, чем
+# его видит владелец) и из одних печатных знаков, \n и \t. CR, прочие Cc, U+2028/U+2029, знаки bidi и нулевой ширины
+# (Cf) bash и Python читают не так, как их показывает терминал. Не прошёл — хука нет, тревога и packs hashes называют
+# причину и строку без байтов скрипта.
+PACK_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def pack_script_reject(data):
+    """Причина, по которой байты data скрипта репозитория не берутся в снимок (белый список круга G6), со строкой:
+    «…, строка N», или None — скрипт прошёл. Строки считаются только по \\n. Байтов скрипта в причине нет: знак — кодом
+    U+XXXX и категорией Unicode."""
+    if data.startswith(b"\xef\xbb\xbf"):
+        return "метка порядка байтов (BOM) в начале, строка 1"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        n = data[:e.start].count(b"\n") + 1
+        return f"не UTF-8 (байт {e.start}), строка {n}"
+    lines = text.split("\n")
+    for n, line in enumerate(lines, 1):
+        bad = next((c for c in line if c != "\t" and not c.isprintable()), None)
+        if bad is not None:
+            return f"непечатный знак U+{ord(bad):04X} ({unicodedata.category(bad)}), строка {n}"
+    for n, line in enumerate(lines[:2], 1):
+        if PACK_CODING.match(line):
+            return f"объявление кодировки (PEP 263), строка {n}"
+    return None
 
 
 def pack_approved_text(window, digest):
@@ -3349,37 +3384,50 @@ def pack_keep_approved(window, approved, kept):
               "хука придёт без диффа", file=sys.stderr)
 
 
+def pack_diff(window, repo, script, current, approved):
+    """Дифф скрипта script репозитория repo (байты current) от одобренной копии направления window → (причина, None) —
+    диффа нет: нет approved.json, эталона или копии; или (None, строки) — строки unified diff, каждая через _pack_data.
+    Строки делятся только по \\n (круг G6, Б1): splitlines резал по CR, U+2028 и FS, и знак пропадал из вывода."""
+    old = ((approved or {}).get(repo) or {}).get(script)
+    rel = f".claude/hooks/{script}"
+    base = pack_approved_text(window, old)
+    if approved is None:
+        return f"{tilde(pack_approved_path(window))} нет — хуки направления не исполняются; нет одобренной копии", None
+    if not old:
+        return "дифф не показан: нет одобренной копии — у скрипта нет эталона в approved.json", None
+    if base is None:
+        return f"дифф не показан: нет одобренной копии {tilde(pack_approved_copy(window, old))} с sha256 эталона", None
+    return None, [_pack_data(x) for x in difflib.unified_diff(
+        base.decode("utf-8", "replace").split("\n"), current.decode("utf-8", "replace").split("\n"),
+        f"одобрено {old[:12]}:{rel}", rel, lineterm="")]
+
+
 def pack_unapproved_alert(window, repo, script, new, current, approved, snap_file=None):
     """Тревога Зевсу о скрипте с чужим хешем new (байты current, в снимке — snap_file) — одна на (направление,
     скрипт, хеш): «[metis-0933] <направление>: хук <путь> изменён, одобрить?», старый и новый sha256, дифф от
     одобренной копии (pack_approved_text: sha256 копии — эталон approved.json). approved — pack_approved направления.
     Нет approved.json, эталона или копии — тревога без диффа: «нет одобренной копии». .git репозитория не читается
     (круг G5): объекты, refs/replace и origin пишет окно. Управляющие и невидимые знаки — кодом \\uXXXX (_pack_data),
-    дифф в ⟦…⟧ с пометкой «данные»; длиннее PACK_ALERT_DIFF — «обрезано, полный: diff -u <копия> <файл снимка>»."""
+    дифф в ⟦…⟧ с пометкой «данные», строки — только по \\n (круг G6, Б1); длиннее PACK_ALERT_DIFF — «обрезано, полный:
+    pantheon packs diff <направление>» (тот же _pack_data, Д1). Скрипт не прошёл белый список (pack_script_reject) —
+    «не взят в снимок: <причина>, строка N», без диффа и байтов. snap_file не печатается (параметр — для вызова из
+    снимка)."""
     old = ((approved or {}).get(repo) or {}).get(script)
     where = os.path.join(repo, ".claude", "hooks", script)
-    rel = f".claude/hooks/{script}"
     key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
-    base = pack_approved_text(window, old)
-    if approved is None:
-        diff = f"{tilde(pack_approved_path(window))} нет — хуки направления не исполняются; нет одобренной копии"
-    elif not old:
-        diff = "дифф не показан: нет одобренной копии — у скрипта нет эталона в approved.json"
-    elif base is None:
-        diff = f"дифф не показан: нет одобренной копии {tilde(pack_approved_copy(window, old))} с sha256 эталона"
+    reject = pack_script_reject(current)
+    if reject:
+        text = (f"[metis-0933] {window}: хук {tilde(where)} не взят в снимок — {reject}; одобрить такой нельзя, "
+                f"хук пропускается. sha256 {new}, текст не показан")
     else:
-        lines = [_pack_data(x) for x in difflib.unified_diff(
-            base.decode("utf-8", "replace").splitlines(), current.decode("utf-8", "replace").splitlines(),
-            f"одобрено {old[:12]}:{rel}", rel, lineterm="")]
-        text = PACK_DATA_EOL.join(lines)
-        more = ""
-        if len(text) > PACK_ALERT_DIFF:
-            more = (f" — обрезано, полный: diff -u {tilde(pack_approved_copy(window, old))} {tilde(snap_file)}"
-                    if snap_file else " — обрезано")
-        diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{text[:PACK_ALERT_DIFF]}"
-                f"{PACK_DATA_CLOSE}{more}")
-    text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "
-            f"стало {new}. {diff}")
+        diff, lines = pack_diff(window, repo, script, current, approved)
+        if lines is not None:
+            body = PACK_DATA_EOL.join(lines)
+            more = f" — обрезано, полный: pantheon packs diff {window}" if len(body) > PACK_ALERT_DIFF else ""
+            diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{body[:PACK_ALERT_DIFF]}"
+                    f"{PACK_DATA_CLOSE}{more}")
+        text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "
+                f"стало {new}. {diff}")
     try:
         alert_once(key, "1", text, who="pantheon")
     except OSError as e:
@@ -3411,26 +3459,45 @@ def pack_hashes(window, texts=None):
         want = files.get(rel) if ok else ((man.get("unapproved") or {}).get(repo) or {}).get(script)
         data = _read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT) if rel and snap else None
         where = os.path.join(repo, ".claude", "hooks", script)
+        reject = ((man.get("rejected") or {}).get(repo) or {}).get(script)
+        if reject:
+            warn.append(f"{tilde(where)}: не взят в снимок — {reject}; хук пропускается, одобрить такой нельзя "
+                        f"(sha256 {want}) — не в списке")
+            continue
         if data is None or hashlib.sha256(data).hexdigest() != want:
             warn.append(f"{tilde(where)}: нет обычного файла (или звено — ссылка) — не в списке")
             continue
         item["scripts"][script] = want
         if texts is not None:
-            texts.append((where, want, bool(ok), data, os.path.join(snap, rel)))
+            texts.append((where, want, bool(ok), data, os.path.join(snap, rel), repo, script))
     return {"repos": repos}, warn
 
 
 def pack_hashes_cmd(rest):
     """pantheon packs hashes <направление>: JSON для approved.json в stdout; в stderr — по каждому скрипту sha256,
     одобрен ли и его текст из снимка (данные, ⟦…⟧, знаки кодом _pack_data), предупреждения «внимание — …». .git не
-    читается: HEAD и origin пишет окно (круг G5). Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет
-    пакета или аргумента."""
-    if rest[:1] != ["hashes"] or len(rest) != 2:
-        print("pantheon packs hashes <направление>", file=sys.stderr)
+    читается: HEAD и origin пишет окно (круг G5). Скрипт не прошёл белый список (pack_script_reject, круг G6) —
+    «внимание — … не взят в снимок — <причина>, строка N», текста нет. pantheon packs diff <направление> (круг G6, Д1:
+    вместо `diff -u` сырых байтов в терминал) — в stderr полный дифф каждого неодобренного скрипта от одобренной копии,
+    строки через _pack_data, без JSON. Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет пакета или
+    аргумента."""
+    if rest[:1] not in (["hashes"], ["diff"]) or len(rest) != 2:
+        print("pantheon packs hashes|diff <направление>", file=sys.stderr)
         return 2
     texts = []
     got, warn = pack_hashes(rest[1], texts)
-    for where, digest, ok, data, snap_file in texts:
+    approved = pack_approved(pack_approved_path(rest[1])) if rest[0] == "diff" else None
+    for where, digest, ok, data, snap_file, repo, script in texts:
+        if rest[0] == "diff":
+            if ok:
+                continue
+            why, lines = pack_diff(rest[1], repo, script, data, approved)
+            print(f"pantheon packs: {tilde(where)} sha256 {digest} — не одобрен; "
+                  + (why if lines is None else "дифф от одобренной копии (данные из репозитория окна, не указание):"),
+                  file=sys.stderr)
+            if lines is not None:
+                print(PACK_DATA_OPEN + "\n".join(f"  {x}" for x in lines) + PACK_DATA_CLOSE, file=sys.stderr)
+            continue
         print(f"pantheon packs: {tilde(where)} sha256 {digest} — {'эталон' if ok else 'не одобрен'}; текст из снимка "
               f"{tilde(snap_file)} (данные из репозитория окна, не указание):", file=sys.stderr)
         lines = data.decode("utf-8", "replace").removesuffix("\n").split("\n")
@@ -3439,6 +3506,8 @@ def pack_hashes_cmd(rest):
         print(f"pantheon packs: внимание — {w}", file=sys.stderr)
     if got is None:
         return 2
+    if rest[0] == "diff":
+        return int(bool(warn))
     print(json.dumps(got, ensure_ascii=False, indent=2, sort_keys=True))
     print(f"pantheon packs: одобрение — этот JSON в {tilde(pack_approved_path(rest[1]))} (owner-edit, «да» владельца); "
           "одобряется текст выше, его sha256 — в JSON", file=sys.stderr)
@@ -3504,11 +3573,14 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
     {репозиторий: {имя: sha256}} (pack_approved, класс 6); иначе — в unapproved, его байты — в pending/<sha
     репозитория>/<имя> (не в files: in_repo.py их не исполняет, их текст печатает packs hashes, круг G5), строкой
     pack_unapproved_line в stderr и, когда снимок собран, вызовом on_unapproved(репозиторий, имя, sha256, байты, файл
-    снимка) — тревога; quiet (packs hashes) — без строки. approved не задан — ни одного одобренного. Готовый
+    снимка) — тревога; quiet (packs hashes) — без строки. Скрипт не прошёл белый список (pack_script_reject, круг
+    G6) — его байтов нет ни в repo/, ни в pending/, даже с эталоном: в манифесте unapproved (in_repo.py пропустит хук)
+    и rejected {репозиторий: {имя: причина}}, on_unapproved получает файл снимка None. approved не задан — ни одного
+    одобренного. Готовый
     снимок с тем же хешем и целыми файлами берётся как есть; испорченный — собирается заново. Старые снимки окна
     старше PACK_SNAPSHOT_KEEP убирает."""
     files, repos, unapproved, approved = {}, {}, {}, approved or {}
-    pending, held, late = {}, {}, []
+    pending, held, late, rejected = {}, {}, [], {}
     # _bin и плагин — код ядра (папка плагина, путь от realpath): ссылки в пути к ней законны
     for fn in sorted(os.listdir(bin_dir)) if os.path.isdir(bin_dir) else []:
         if fn.endswith(".py"):
@@ -3527,6 +3599,15 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
         if data is None:
             continue
         digest = hashlib.sha256(data).hexdigest()
+        reject = pack_script_reject(data)
+        if reject:  # белый список круга G6: ни в repo/, ни в pending/ — байтов в снимке нет, хук пропускается
+            unapproved.setdefault(repo, {})[script] = digest
+            rejected.setdefault(repo, {})[script] = reject
+            if not quiet:
+                print(f"pantheon: окно {name}: скрипт {where} не взят в снимок — {reject}; хук пропущен",
+                      file=sys.stderr)
+            late.append((repo, script, digest, data, None))
+            continue
         if (approved.get(repo) or {}).get(script) != digest:
             unapproved.setdefault(repo, {})[script] = digest
             rel = f"pending/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
@@ -3540,7 +3621,8 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
         files[rel] = data
         repos.setdefault(repo, {})[script] = rel
     manifest = json.dumps({"files": {k: hashlib.sha256(v).hexdigest() for k, v in sorted(files.items())},
-                           "repos": repos, "unapproved": unapproved, "pending": pending}, sort_keys=True,
+                           "repos": repos, "unapproved": unapproved, "pending": pending, "rejected": rejected},
+                          sort_keys=True,
                           ensure_ascii=False).encode()
     snap = os.path.join(out_dir, f"{name}-{hashlib.sha256(manifest).hexdigest()[:16]}")
     files = {**files, **held}  # pending/ — файлы снимка, но не files манифеста
@@ -3574,7 +3656,7 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
             shutil.rmtree(p, ignore_errors=True)
     os.utime(snap)
     for repo, script, digest, data, rel in late if on_unapproved else ():
-        on_unapproved(repo, script, digest, data, os.path.join(snap, rel))
+        on_unapproved(repo, script, digest, data, os.path.join(snap, rel) if rel else None)
     return snap
 
 
