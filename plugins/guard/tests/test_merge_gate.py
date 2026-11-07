@@ -4657,8 +4657,9 @@ def t_carry_budget(h):
 def prod_timeouts(sources):
     """Боевые сроки по тексту кода (AST), без ожидания и без GUARD_TEST_* (metis-0730). sources: {имя файла: текст}.
     → список нарушений. Правила: DEADLINE в guard.py, guard_rules.py, taint.py ровно 8 с; в merge_gate.py каждый
-    timeout= у subprocess.run — число 3 (вызовы git) или GH_TIMEOUT, и GH_TIMEOUT = 6; все они меньше DEADLINE, иначе
-    хук гаснет по сроку раньше, чем успевает отказать сам. Мало найденных мест — тоже нарушение (разбор не пустой)."""
+    timeout= у subprocess.run — вызов _git_timeout() (местный git, metis-0787) или GH_TIMEOUT, GH_TIMEOUT = 6,
+    GIT_TIMEOUT = 3, GIT_TIMEOUT_MAX = 6; все они меньше DEADLINE, иначе хук гаснет по сроку раньше, чем успевает
+    отказать сам. Мало найденных мест — тоже нарушение (разбор не пустой)."""
     import ast
     bad = []
 
@@ -4675,21 +4676,28 @@ def prod_timeouts(sources):
     gh = consts(tree).get("GH_TIMEOUT")
     if gh != 6:
         bad.append(f"merge_gate.py: GH_TIMEOUT = {gh!r}, боевой 6")
-    lits = []
+    for k, want in (("GIT_TIMEOUT", 3), ("GIT_TIMEOUT_MAX", 6)):
+        got = consts(tree).get(k)
+        if got != want:
+            bad.append(f"merge_gate.py: {k} = {got!r}, боевой {want}")
+    margin = consts(tree).get("GIT_MARGIN")
+    if not isinstance(margin, (int, float)) or margin < 1:
+        bad.append(f"merge_gate.py: GIT_MARGIN = {margin!r}, нужен запас не меньше 1 с до срока хука")
+    gits = []
     for n in ast.walk(tree):
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run" \
                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess":
             for kw in n.keywords:
                 if kw.arg != "timeout":
                     continue
-                if isinstance(kw.value, ast.Constant):
-                    lits.append(kw.value.value)
-                    if kw.value.value != 3:
-                        bad.append(f"merge_gate.py:{n.lineno}: timeout={kw.value.value!r}, боевой 3")
-                elif not (isinstance(kw.value, ast.Name) and kw.value.id == "GH_TIMEOUT"):
-                    bad.append(f"merge_gate.py:{n.lineno}: timeout не число и не GH_TIMEOUT")
-    if len(lits) < 3:
-        bad.append(f"merge_gate.py: числовых timeout у subprocess.run {len(lits)}, ждали 3")
+                v = kw.value
+                if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "_git_timeout" \
+                        and not v.args and not v.keywords:
+                    gits.append(n.lineno)
+                elif not (isinstance(v, ast.Name) and v.id == "GH_TIMEOUT"):
+                    bad.append(f"merge_gate.py:{n.lineno}: timeout не _git_timeout() и не GH_TIMEOUT")
+    if len(gits) < 3:
+        bad.append(f"merge_gate.py: timeout=_git_timeout() у subprocess.run {len(gits)}, ждали 3")
     return bad
 
 
@@ -4703,14 +4711,17 @@ def t_prod_timeouts(h):
         with open(os.path.join(hooks, n), encoding="utf-8") as fh:
             sources[n] = fh.read()
     got = prod_timeouts(sources)
-    check("боевые сроки: DEADLINE 8 с, timeout git 3 с, GH_TIMEOUT 6 с — как в коде", got == [], got)
+    check("боевые сроки: DEADLINE 8 с, timeout git 3–6 с, GH_TIMEOUT 6 с — как в коде", got == [], got)
     check("боевые сроки: поднятые сроки теста выше боевых (иначе поднимать нечего)",
           HOOK_DEADLINE > 8 and HOOK_SUB_TIMEOUT > 3, (HOOK_DEADLINE, HOOK_SUB_TIMEOUT))
     for what, name, old, new in (
-            ("timeout git 3 → 15", "merge_gate.py", "capture_output=True, text=True, timeout=3, env=_git_env())",
-             "capture_output=True, text=True, timeout=15, env=_git_env())"),
-            ("timeout _git_bytes 3 → 20", "merge_gate.py", "capture_output=True, timeout=3, env=env)",
+            ("timeout git → 15", "merge_gate.py", "timeout=_git_timeout(),\n                           env=_git_env())",
+             "timeout=15,\n                           env=_git_env())"),
+            ("timeout _git_bytes → 20", "merge_gate.py", "capture_output=True, timeout=_git_timeout(), env=env)",
              "capture_output=True, timeout=20, env=env)"),
+            ("GIT_TIMEOUT 3 → 15", "merge_gate.py", "GIT_TIMEOUT = 3 ", "GIT_TIMEOUT = 15 "),
+            ("GIT_TIMEOUT_MAX 6 → 9", "merge_gate.py", "GIT_TIMEOUT_MAX = 6 ", "GIT_TIMEOUT_MAX = 9 "),
+            ("GIT_MARGIN 1.5 → 0", "merge_gate.py", "GIT_MARGIN = 1.5 ", "GIT_MARGIN = 0 "),
             ("GH_TIMEOUT 6 → 9", "merge_gate.py", "GH_TIMEOUT = 6", "GH_TIMEOUT = 9"),
             ("DEADLINE guard.py 8 → 15", "guard.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
             ("DEADLINE guard_rules.py 8 → 15", "guard_rules.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
@@ -4720,6 +4731,243 @@ def t_prod_timeouts(h):
             continue
         mutated = dict(sources, **{name: sources[name].replace(old, new, 1)})
         check(f"боевые сроки, мутант «{what}» убит", prod_timeouts(mutated) != [], what)
+
+
+def t_git_timeout(h):
+    """metis-0787: местный git шлюза ждёт по остатку срока хука (от GIT_TIMEOUT 3 с до GIT_TIMEOUT_MAX 6 с, запас
+    GIT_MARGIN), а не 3 с всегда: под нагрузкой Mac шлюз ложно отказывал «git не ответил». Без таймера — 3 с."""
+    import signal
+    mg = _load_merge_gate("merge_gate_git_timeout")
+    seen = []
+
+    class Rec:
+        SubprocessError, TimeoutExpired = subprocess.SubprocessError, subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append(kw.get("timeout"))
+            return subprocess.CompletedProcess(argv, 0, "" if kw.get("text") else b"", "")
+
+    mg.subprocess = Rec
+    old = signal.signal(signal.SIGALRM, lambda *a: None)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        check("git: без таймера хука — 3 с", mg._git_timeout() == 3, mg._git_timeout())
+        for left, want in ((7.5, 6), (6.5, 5), (5.5, 4), (4, 3), (1, 3), (60, 6)):
+            signal.setitimer(signal.ITIMER_REAL, left)
+            got = mg._git_timeout()
+            check(f"git: до срока хука {left} с — ждёт {want} с", abs(got - want) < 0.3, got)
+        signal.setitimer(signal.ITIMER_REAL, 7)
+        mg._git(h.root, "status")
+        mg._gh_resolved(h.root)
+        mg._git_bytes(h.root, "status")
+        check("git: _git, _gh_resolved и _git_bytes ждут по остатку срока (5.5 с при 7 с)",
+              len(seen) == 3 and all(5 < t <= 5.5 for t in seen), seen)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def t_manifest_types(h):
+    """metis-0417 (argus-117b7): plugin.json сверяется по типам значений — true → 1, 1 → 1.0, "1" → 1 не «только
+    version»; симлинк вместо файла — в t_carry_r4 (typechange, отпечатка нет)."""
+    mg = _load_merge_gate("merge_gate_manifest_types")
+    canon = lambda d: mg._manifest_canon(json.dumps(d).encode())
+    base = {"name": "pantheon", "version": "0.11.1"}
+    check("plugin.json: другой номер версии — тот же канон",
+          canon(dict(base, x=True)) == canon(dict(base, x=True, version="0.11.2")))
+    for a, b in ((True, 1), (False, 0), (1, 1.0), ("1", 1), (None, False), ([1], [True])):
+        check(f"plugin.json: {a!r} → {b!r} — канон другой", canon(dict(base, x=a)) != canon(dict(base, x=b)), (a, b))
+
+
+def t_carry_merged(h):
+    """Перенос «принять», когда отпечаток другой, а код тот же (_merge_same): main сдвинул строки в файле PR
+    (metis-0445), базовый PR слит squash и PR сверху перенесён rebase --onto (metis-0674). И база отпечатков — живая
+    вершина ветки base, а не снимок baseRefOid (metis-0471)."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    lines = [f"c{i}\n" for i in range(30)]
+    pr_c = "".join(lines[:20] + ["pr\n"] + lines[21:])
+    bc = plumb(p, [s["B"]], {"c.txt": F("".join(lines))}, "main: c.txt")
+    bc2 = plumb(p, [bc], {"c.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
+    qc = plumb(p, [bc], {"c.txt": F(pr_c)}, "PR: правка c.txt")
+    qcm = plumb(p, [qc, bc2], {"c.txt": F("top\n" + pr_c)}, "PR: подтянул main", src=bc2)
+    qreb = plumb(p, [bc2], {"c.txt": F("top\n" + pr_c)}, "PR: rebase на main")
+    qevil = plumb(p, [qc, bc2], {"c.txt": F("top\n" + pr_c), "evil.py": F("e = 1\n")}, "PR: слияние с правкой",
+                  src=bc2)
+    bcc = plumb(p, [bc], {"c.txt": F("".join(lines[:20] + ["main\n"] + lines[21:]))}, "main: та же строка")
+    qconf = plumb(p, [qc, bcc], {"c.txt": F(pr_c)}, "PR: конфликт решён своей стороной", src=bcc)
+    # PR1 (x1.py) от bc, PR2 (x2.py) сверху на ветке PR1; PR1 слит squash поверх bc2, PR2 — rebase --onto main
+    p1 = plumb(p, [bc], {"x1.py": F("a = 1\n")}, "PR1")
+    a2 = plumb(p, [p1], {"x2.py": F("b = 1\n")}, "PR2 на ветке PR1")
+    sq = plumb(p, [bc2], {"x1.py": F("a = 1\n")}, "main: squash PR1")
+    s2 = plumb(p, [sq], {"x2.py": F("b = 1\n")}, "PR2: rebase --onto main")
+    sqx = plumb(p, [bc2], {"x1.py": F("a = 2\n")}, "main: squash PR1 с правкой после «принять» PR2")
+    s2x = plumb(p, [sqx], {"x2.py": F("b = 1\n")}, "PR2: rebase --onto main")
+    # metis-0471: в ветку PR влили X и откатили, X уже в main (живая вершина), снимок baseRefOid — до X
+    x = plumb(p, [bc], {"x.py": F("x = 1\n")}, "X")
+    xa = plumb(p, [bc], {"a.py": F("a = 1\n")}, "PR: a.py")
+    xm = plumb(p, [xa, x], {"x.py": F("x = 1\n")}, "PR: влил X", src=xa)
+    xs = plumb(p, [xm], {"x.py": None}, "PR: откат X")
+    main_x = plumb(p, [bc, x], {"x.py": F("x = 1\n")}, "main: X", src=bc)
+
+    def case(name, head, base, recs, allow, why="", tip=None):
+        h.reset()
+        if tip is not None:
+            h.tip["agent-kit"] = tip
+        kit_pr(h, head, base)
+        h.seed(*recs)
+        got = h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit)
+        merge_case(name, got, allow, why)
+        return got
+
+    # сначала то, чего отпечаток не берёт: иначе тест 0445 ничего бы не проверял
+    mg = _load_merge_gate("merge_gate_carry_merged")
+    gd, why = mg._carry_git(p, "latark/agent-kit", bc2)
+    check("0445: _carry_git — git dir", gd and why is None, why)
+    fq, fqm = mg._fingerprint(gd, bc2, qc), mg._fingerprint(gd, bc2, qcm)
+    check("0445: main сдвинул строки — отпечаток другой", fq[0] and fqm[0] and fq[0] != fqm[0], (fq, fqm))
+    check("0445: _merge_same — слияние P с main и есть новый head", mg._merge_same(gd, qc, fq[1], fqm[1], qcm) is True)
+    check("0445: _merge_same — rebase на main тоже", mg._merge_same(gd, qc, fq[1], bc2, qreb) is True)
+    check("0445: _merge_same — правка в слиянии — нет", mg._merge_same(gd, qc, fq[1], bc2, qevil) is False)
+    check("0445: _merge_same — конфликт с main — нет", mg._merge_same(gd, qc, fq[1], bcc, qconf) is False)
+    qv = plumb(p, [qcm], {PJ: F(_man("pantheon", "0.11.99"))}, "PR: номер версии")
+    qf = plumb(p, [qcm], {PJ: F(_man("pantheon", "0.11.84", description="x"))}, "PR: другое поле plugin.json")
+    qj = plumb(p, [qcm], {"plugins/x/package.json": F(_man("x", "1.0.1"))}, "PR: version в package.json")
+    qj0 = plumb(p, [bc2], {"plugins/x/package.json": F(_man("x", "1.0.0"))}, "main: package.json")
+    qjm = plumb(p, [qc, qj0], {"c.txt": F("top\n" + pr_c), "plugins/x/package.json": F(_man("x", "1.0.1"))},
+                "PR: слияние и номер в package.json", src=qj0)
+    check("0445: _merge_same — только номер версии в plugin.json — да", mg._merge_same(gd, qc, fq[1], bc2, qv) is True)
+    check("0445: _merge_same — другое поле plugin.json — нет", mg._merge_same(gd, qc, fq[1], bc2, qf) is False)
+    check("0445: _merge_same — новый файл с полем version — нет", mg._merge_same(gd, qc, fq[1], bc2, qj) is False)
+    check("0445: _merge_same — version в package.json (не plugin.json) — нет", mg._merge_same(gd, qc, fq[1], qj0, qjm) is False)
+    check("0445: _merge_same — head без общей истории — нет", mg._merge_same(gd, s["orphan"], fq[1], bc2, qcm) is not True)
+    # argus #375 Б2: «не посчитано» — None, а не False (конфликт)
+    real = mg._git_code
+    tree = mg._git_bytes(gd, "rev-parse", qreb + "^{tree}")  # настоящее дерево qreb: код 129 с ним — всё равно сбой
+    for name, fake in (("git не запустился", lambda *a, **k: None), ("git без --merge-base (код 129)",
+                                                                     lambda *a, **k: (129, tree)),
+                       ("вывод не дерево", lambda *a, **k: (0, b"junk\n"))):
+        # подмена — только merge-tree: diff и cat-file после него идут в настоящий git
+        mg._git_code = lambda gd_, *a, fake=fake, **k: fake() if a[0] == "merge-tree" else real(gd_, *a, **k)
+        check(f"Б2: _merge_same — {name} — None (не посчитано)", mg._merge_same(gd, qc, fq[1], bc2, qreb) is None)
+    mg._git_code = real
+    for fn in ("_raw_entries", "_manifests"):
+        keep = getattr(mg, fn)
+        setattr(mg, fn, lambda *a, **k: None)
+        check(f"Б2: _merge_same — {fn} не разобрал — None", mg._merge_same(gd, qc, fq[1], bc2, qv) is None)
+        setattr(mg, fn, keep)
+    pr_ = mg._Prints(None, "latark/agent-kit", qcm, [], lambda: {})
+    pr_.allowed, pr_.ready, pr_.gd = {qcm, qc}, True, gd
+    pr_.memo.update({qcm: ("f1", bc2), qc: ("f2", bc)})
+    pr_.budget = -1
+    check("Б2: _Prints.merged — бюджет вышел — None", pr_.merged(qc) is None)
+    pr_.budget = 60
+    check("Б2: _Prints.merged — посчитано — True", pr_.merged(qc) is True)
+    check("Б2: _Prints.merged — у head нет отпечатка — None", pr_.merged(qreb) is None)
+
+    qx = plumb(p, [bc], {"c.txt": F("x\n")}, "PR: третий head")
+
+    class FP:
+        def __init__(self, got):
+            self.got = got
+
+        def __call__(self, head):
+            return {qc: ("fr", bc), qcm: ("fs", bc2), qx: ("fa", bc)}.get(head)
+
+        def merged(self, head):
+            return self.got
+
+    x_rej = opus(qc, "x", "reject", checklist=None, session="s-x")
+    check("Б2: _lifts — fp без merged (функция) — снимает по отпечатку, как раньше",
+          mg._lifts(opus(qcm, "z", session="s-z"), x_rej, qcm, lambda head: FP(None)(head)) is True)
+    for got, lift in ((None, False), (False, True), (True, False)):
+        fp = FP(got)
+        check(f"Б2: _lifts правило 2 — слияние {got} → снимает {lift}",
+              mg._lifts(opus(qcm, "z", session="s-z"), x_rej, qcm, fp) is lift)
+        check(f"Б2: _lifts правило 3 — слияние {got} → снимает {lift}",
+              mg._lifts(opus(qx, "x", session="s-x"), x_rej, qcm, fp) is lift)
+        got_c = mg._carried([opus(qc, "z", session="s-z")], qcm, fp, None, fp.merged)
+        check(f"Б2: _carried — слияние {got} → переносит {got is True}", bool(got_c) is (got is True), got_c)
+    case("0445: main сдвинул строки, PR подтянул main — «принять» переносится", qcm, bc2, [opus(qc), tests(qcm)], True)
+    got = carry_lines(h)
+    check("0445: перенос записан в carry.jsonl", len(got) == 1 and got[0]["sha"] == qcm
+          and [r["sha"] for r in got[0]["from"]] == [qc] and got[0]["base"] == bc2, got)
+    case("0445: rebase на сдвинутый main — переносится", qreb, bc2, [opus(qc), tests(qreb)], True)
+    case("0445: правка внутри слияния — не переносится", qevil, bc2, [opus(qc), tests(qevil)], False, "нет «принять»")
+    case("0445: конфликт с main решён своей стороной — не переносится", qconf, bcc, [opus(qc), tests(qconf)], False,
+         "нет «принять»")
+    case("0445: «вернуть» после «принять» — отсечка держит и такой перенос", qcm, bc2,
+         [opus(qc), opus(qc, "y", "reject", checklist=None, session="s-y"), tests(qcm)], False, "«вернуть» (reject)")
+    case("0674: PR1 слит squash, PR2 — rebase --onto main: «принять» PR2 переносится", s2, sq, [opus(a2), tests(s2)],
+         True)
+    case("0674: PR1 в main иной, чем под «принять» PR2 — не переносится", s2x, sqx, [opus(a2), tests(s2x)], False,
+         "нет «принять»")
+    case("0471 контроль: X не в main — влили и откатили, код PR тот же — переносится", xs, bc, [opus(xa), tests(xs)],
+         True, tip=bc)
+    case("0471: X в живом main, снимок baseRefOid до X — откат X не переносится", xs, bc, [opus(xa), tests(xs)], False,
+         "нет «принять»", tip=main_x)
+    got = case("0471: вершину base не получить от gh — не переносится", xs, bc, [opus(xa), tests(xs)], False,
+               "нет «принять»", tip="fail")
+    check("0471: отказ называет вершину ветки base", "вершину ветки base PR" in got[1], got[1])
+    # argus #375 Б1 круг 2 (probe_375.py): принятый head на m4, main убрал m.txt (r6), новый head — squash на старую
+    # базу bc с m.txt: слияние со своей базой git (bc) дало бы дерево squash, и m.txt вернулся бы в main
+    m4 = plumb(p, [bc], {"m.txt": F("m\n")}, "main: m.txt")
+    acc = plumb(p, [m4], {"a.py": F("a = 1\n")}, "PR на m4 — argus принял")
+    r6 = plumb(p, [m4], {"m.txt": None}, "main: убрал m.txt")
+    stale = plumb(p, [bc], {"m.txt": F("m\n"), "a.py": F("a = 1\n")}, "PR: squash на старую базу bc")
+    good = plumb(p, [r6], {"a.py": F("a = 1\n")}, "PR: rebase на живой main")
+    case("Б1 круг 2 контроль: rebase на живой main — переносится", good, r6, [opus(acc), tests(good)], True, tip=r6)
+    case("Б1 круг 2: squash на старую базу вернул бы убранное main — не переносится", stale, r6,
+         [opus(acc), tests(stale)], False, "нет «принять»", tip=r6)
+
+
+def t_carry_rej(h):
+    """argus #375 Б1 (проба probe.py): перенос слиянием не обходит «вернуть». X вернул qc, Z принял qc, X принял qa,
+    head снова код qc и подтянул main со сдвигом строк (qcm): отпечаток qcm ≠ qc, но qc, слитый с merge-base qcm, —
+    ровно qcm. «Вернуть» X держится и в правиле 3 _lifts (принято на третьем head), и в правиле 2 (принято на sha)."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    lines = [f"c{i}\n" for i in range(30)]
+    pr_c = "".join(lines[:20] + ["pr\n"] + lines[21:])
+    fix_c = "".join(lines[:20] + ["fixed\n"] + lines[21:])
+    bc = plumb(p, [s["B"]], {"c.txt": F("".join(lines))}, "main: c.txt")
+    bc2 = plumb(p, [bc], {"c.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
+    bc3 = plumb(p, [bc], {"other.txt": F("o\n")}, "main: другой файл")
+    qc = plumb(p, [bc], {"c.txt": F(pr_c)}, "PR: правка c.txt")
+    qa = plumb(p, [bc], {"c.txt": F(fix_c)}, "PR: исправление")
+    qcm = plumb(p, [qc, bc2], {"c.txt": F("top\n" + pr_c)}, "PR: вернулся к qc и подтянул main", src=bc2)
+    qcr = plumb(p, [qc, bc3], {"other.txt": F("o\n")}, "PR: вернулся к qc, main не трогал c.txt", src=qc)
+    qam = plumb(p, [qa, bc2], {"c.txt": F("top\n" + fix_c)}, "PR: исправление и подтянул main", src=bc2)
+
+    def case(name, head, base, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, head, base)
+        h.seed(*recs)
+        merge_case(name, h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit), allow, why)
+
+    x_rej = opus(qc, "x", "reject", checklist=None, session="s-x")
+    z_acc = opus(qc, "z", session="s-z")
+    x_acc = opus(qa, "x", session="s-x")
+    case("Б1 контроль: только «принять» Z на qc, qcm — переносится", qcm, bc2, [z_acc, tests(qcm)], True)
+    case("Б1 контроль: X вернул qc, Z принял qc, X принял qa; main не трогал файл — отказ", qcr, bc3,
+         [x_rej, z_acc, x_acc, tests(qcr)], False, "«вернуть» (reject)")
+    case("Б1 контроль: X вернул qc, Z принял qc; qcm — отказ", qcm, bc2, [x_rej, z_acc, tests(qcm)], False,
+         "«вернуть» (reject)")
+    case("Б1 правило 3: X вернул qc, Z принял qc, X принял qa; qcm (код qc + main) — отказ", qcm, bc2,
+         [x_rej, z_acc, x_acc, tests(qcm)], False, "«вернуть» (reject)")
+    case("Б1 правило 2: X вернул qc, Z принял qcm (код qc + main) — отказ", qcm, bc2,
+         [x_rej, opus(qcm, "z", session="s-z"), tests(qcm)], False, "«вернуть» (reject)")
+    case("Б1 правило 2 контроль: X вернул qc, Z принял qam (иной код + main) — сливает", qam, bc2,
+         [x_rej, opus(qam, "z", session="s-z"), tests(qam)], True)
+    case("Б1 правило 3 контроль: X вернул qc, X принял qa; qam (код qa + main) — сливает", qam, bc2,
+         [x_rej, x_acc, tests(qam)], True)
 
 
 def t_ci_fork_billing(h):
@@ -5008,7 +5256,7 @@ CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_fu
          t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
+         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 
 # случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;
 # вне ядра те же записи проходят — это проверяют отдельные места в самих случаях (h.core = False; h.reset())

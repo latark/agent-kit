@@ -21,7 +21,10 @@ PR ядра защит (Д3) агенты не сливают: его слива
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
-     меньше двух, «вернуть» нет; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
+     меньше двух, «вернуть» нет. «Вернуть» на любом head PR в силе, пока его не сняло «принять» после него (того же
+     рецензента или свежее на этот SHA), а «принять», записанное раньше последнего неснятого «вернуть», не в счёт
+     (held_rejects, reject_floor — правило шлюза guard, metis-0465; «другой код» — другой коммит: git папки слияния у
+     прохода нет). «Принять» с прошлых head проход не переносит — на SHA нужны свои; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
@@ -41,6 +44,15 @@ PR ядра защит (Д3) агенты не сливают: его слива
      launchd не в сессии владельца) — запасной путь: уведомление один раз, щелчок по нему запускает
      `pantheon merge run --click` от имени владельца, и окно Touch ID показывается уже оттуда. Заявку сняли или
      заменили, пока окно открыто, — проход её не трогает: ни согласия, ни слияния, ни записи обратно.
+  4а. Фраза вместо пальца (metis-0959, слово владельца 07.11): владелец вне Mac пишет в окне Claude Code с журналом
+     ваших слов (Зевс, координатор, мастерская; remote-control с телефона) «слей #N <hex>». Проход берёт её из
+     owner-log/*.md (find_phrase): запись хука ctx.py без пометки, фраза — целиком первая строка сообщения, hex от 7
+     до 40 знаков — начало SHA заявки, не старше PHRASE_TTL (2 ч), решает последняя фраза на этот номер, в очереди нет
+     другой заявки с тем же номером и началом SHA, фраза не использована (STATE/merge-phrases.json). Тогда — как
+     после пальца, без окна и без проверки «у Mac»: под замком фраза и шлюз заново, фраза отмечена использованной,
+     та же строка merge-approve, `gh pr merge --match-head-commit`. Способ — в merge.jsonl: событие phrase (файл
+     owner-log, строка, время записи) и how у merged; в уведомлении о слиянии — «фразой из owner-log/<файл>». Пачку
+     фраза не сливает: только окно Touch ID.
 
 Пачка (metis-0668, process_batch) — одно окно на все её PR: в тексте — сначала задетое ядро всех и число файлов, затем
 каждый PR с SHA и вердиктом шлюза по порядку, заголовки последними. До окна пункты 1–3 — у каждого: неполна (одну заявку сняли или заменили) или
@@ -118,6 +130,13 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github", "plugins/pantheon/packs")
 MAX_BATCH = 5                        # PR в одной пачке: их номера, SHA и ядро — в окне не длиннее 400 знаков
+# согласие фразой (metis-0959): «слей #N <hex>» — первой строкой вашего сообщения в owner-log/<окно>.md
+PHRASE_TTL = 2 * 3600                # фраза старше 2 ч не действует
+PHRASE_SKEW = 120                    # запись «из будущего» дальше 2 мин — не в счёт (как read_log в ctx.py)
+PHRASE_RE = re.compile(r"слей\s+#([1-9][0-9]{0,8})\s+([0-9a-f]{7,40})[.!]?", re.IGNORECASE)
+OWNER_ENTRY_RE = re.compile(r"## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)")   # заголовок записи append_owner_line
+PHRASES_FILE = "merge-phrases.json"  # STATE: использованные фразы — одна фраза, одно согласие
+PHRASES_KEEP = 24 * 3600
 # вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
 BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
 BILLING_SHORT = "CI: лимит, тесты ✓"
@@ -724,6 +743,37 @@ def ci_state(rollup, required=(), runs=None, optional=()):
 
 # --- шлюз -----------------------------------------------------------------------------------------------------------
 
+def _reviewer(r):
+    """Рецензент вердикта — пара (session_id, agent_id), как в шлюзе guard (metis-0158)."""
+    by = r.get("by") if isinstance(r.get("by"), dict) else {}
+    return by.get("session_id") or "", by.get("agent_id") or ""
+
+
+def held_rejects(verdicts, sha):
+    """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
+    по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
+    снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head или на sha; 2) другого argus на
+    sha, если «вернуть» на другом head. Шлюз guard во втором случае ещё сверяет, что код sha не равен коду «вернуть»;
+    у прохода нет git папки слияния, и «другой код» здесь — другой коммит (metis-0443). Третий head «вернуть» не
+    снимает: проход «принять» не переносит, на sha нужны свои."""
+    def lifts(a, r):
+        return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r) and a["sha"] in (r["sha"], sha)
+                                          or a["sha"] == sha != r["sha"])
+    return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
+
+
+def reject_floor(verdicts):
+    """Отсечка, как merge_gate._floor шлюза guard: номер последнего «вернуть», которое тот же рецензент не снял
+    «принять» на том же head, или -1. «Принять», записанное до неё, не в счёт и на своём head: иначе откат force-push к
+    коду, принятому до «вернуть», прошёл бы по старым «принять» (metis-0465)."""
+    floor = -1
+    for i, r in enumerate(verdicts):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and _reviewer(a) == _reviewer(r)
+                                             and a["sha"] == r["sha"] for a in verdicts[i + 1:]):
+            floor = i
+    return floor
+
+
 def gate(repo, pr, sha, view):
     """Шлюз на этот head заново: (ok|wait|fail, текст). Записи шлюза пишет только хук guard (роли их не подделают)."""
     if not isinstance(view, dict):
@@ -738,21 +788,34 @@ def gate(repo, pr, sha, view):
     recs = P.review_records(repo)
     if not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
         return "fail", f"нет записи тестов шлюза на {sha[:12]}"
-    latest = {}
+    verdicts = []
     for r in recs:
         by = r.get("by") if isinstance(r.get("by"), dict) else {}
         if r.get("kind") in ("accept", "reject") and by.get("agent_type") == "argus" and r.get("pr") == pr \
-                and r.get("sha") == sha:
+                and isinstance(r.get("sha"), str):
             # «принять» без перечня или не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе.
             # Правило общее с итогом `pantheon review status` (P.review_accept_counts, metis-0393) — из
             # lib/review_rules.py, ядра защит (metis-0858)
             if r["kind"] == "accept" and not P.review_accept_counts(r):
                 continue
-            latest[(by.get("session_id") or "", by.get("agent_id") or "")] = r
-    if any(r["kind"] != "accept" for r in latest.values()):
-        return "fail", "у argus последний вердикт — «вернуть»"
-    if len(latest) < MIN_ACCEPTS:
-        return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
+            verdicts.append(r)
+    # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard
+    held = held_rejects(verdicts, sha)
+    if held:
+        return "fail", (f"«вернуть» от argus на {', '.join(r['sha'][:12] for r in held)} в силе: оно привязано к PR, "
+                        f"снимает его «принять» после него — того же рецензента или свежее на {sha[:12]}")
+    floor = reject_floor(verdicts)
+    latest = {}
+    for i, r in enumerate(verdicts):
+        if r["sha"] == sha:
+            latest[_reviewer(r)] = (i, r)
+    counted = [r for i, r in latest.values() if i > floor]
+    if len(counted) < MIN_ACCEPTS:
+        cut = len(latest) - len(counted)
+        return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}"
+                        + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
+                           if cut else ""))
+    latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
     state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
@@ -915,6 +978,141 @@ def approve(req):
         fh.write(line)
 
 
+# --- согласие фразой (metis-0959) -----------------------------------------------------------------------------------
+# Слово владельца 07.11 (окно sb-gates-2, «давай»): вне Mac, без Touch ID, он пишет в окне Claude Code (remote-control
+# с телефона) «слей #N <hex>». Проход находит фразу в журнале ваших слов и пишет ту же строку merge-approve, что после
+# пальца: шлюз guard не меняется. Способ — в merge.jsonl (событие phrase: файл owner-log, строка, время записи; поле how
+# у merged и merge-failed), а не в строке согласия: её формат сверяет APPROVE_RE шлюза.
+
+def _owner_entries(path):
+    """Записи журнала ваших слов owner-log/<окно>.md: [(время, заголовок-время, пометка, номер строки заголовка,
+    первая непустая строка текста)]. Формат — append_owner_line в hooks/ctx.py: заголовок «## ГГГГ-ММ-ДД ЧЧ:ММ:СС[ ·
+    пометка]» с начала строки; строки текста, которые начинаются с «##», хук сдвигает пробелом — заголовка в тексте нет.
+    Ссылка, не обычный файл, сбой чтения — пусто."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return []
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return []
+            lines = fh.read().decode("utf-8", "replace").split("\n")
+    except OSError:
+        return []
+    out, cur = [], None
+    for i, ln in enumerate(lines, 1):
+        m = OWNER_ENTRY_RE.fullmatch(ln)
+        if m:
+            try:
+                t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                t = None
+            if t is not None:
+                cur = [t, m.group(1), m.group(2).strip().removeprefix("·").strip(), i, None]
+                out.append(cur)
+                continue
+        if cur is not None and cur[4] is None and ln.strip():
+            cur[4] = ln.strip()
+    return [tuple(e) for e in out]
+
+
+def phrases(now):
+    """Фразы «слей #N <hex>» владельца за PHRASE_TTL: [{pr, hex, t, file, line, at, key}].
+    Источник — только файлы owner-log/*.md верхнего уровня: их пишет хук ctx.py owner-log из ввода, который Claude Code
+    пометил вашим (origin.kind human), без обёрток NOT_OWNER — сообщений других сессий, отчётов субагентов, уведомлений
+    задач, «[Пантеон: …]»; роли в owner-log не пишут. unconfirmed/ (ввод без пометки транскрипта) — не в счёт.
+    Запись — без пометки: принятая подсказка Claude, окно вопросов и ответ в чате — не фраза. Фраза — целиком первая
+    непустая строка сообщения (вставленный дальше текст её не даст); «да» без номера и короче 7 hex — не фраза."""
+    d = P.path("owner-log")
+    if os.path.islink(d) or not _real_dir(d):
+        return []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.endswith(".md") or name.startswith("."):
+            continue
+        for t, at, note, line, first in _owner_entries(os.path.join(d, name)):
+            if note or first is None or not -PHRASE_SKEW <= now - t <= PHRASE_TTL:
+                continue
+            m = PHRASE_RE.fullmatch(first)
+            if m:
+                pr, hx = int(m.group(1)), m.group(2).lower()
+                out.append({"pr": pr, "hex": hx, "t": t, "file": name, "line": line, "at": at,
+                            "key": f"{name}|{at}|{pr}|{hx}"})
+    return out
+
+
+def queue():
+    """Заявки в очереди сейчас (для однозначности фразы)."""
+    r = root()
+    try:
+        names = sorted(os.listdir(r)) if _real_dir(r) else []
+    except OSError:
+        return []
+    return [q for q in (read_req(os.path.join(r, f)) for f in names if FILE_RE.fullmatch(f)) if q]
+
+
+def used_phrases():
+    """Использованные фразы {ключ: время}; файла нет — пусто; не прочитать или битый — None (тогда фраза не в силе)."""
+    try:
+        fd = os.open(P.path(PHRASES_FILE), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    used = data.get("used") if isinstance(data, dict) else None
+    return used if isinstance(used, dict) else None
+
+
+def find_phrase(req):
+    """Фраза владельца, которая даёт согласие на эту заявку, или None. Решает последняя фраза на этот номер PR (позже
+    «слей #N <другой hex>» — передумал); две разные в одну секунду — неоднозначно. Её hex — начало SHA заявки (он же
+    head PR: шлюз сверяет его заново), фраза ещё не использована, и в очереди нет другой заявки с тем же номером и
+    тем же началом SHA (другой репозиторий). Вызывать можно и под замком merge-queue: сама замков не берёт."""
+    mine = [p for p in phrases(P.now()) if p["pr"] == req["pr"]]
+    if not mine:
+        return None
+    last = max(p["t"] for p in mine)
+    top = [p for p in mine if p["t"] == last]
+    ph = top[-1]
+    if len({p["hex"] for p in top}) != 1 or not req["sha"].startswith(ph["hex"]):
+        return None
+    used = used_phrases()
+    if used is None or ph["key"] in used:
+        return None
+    if sum(1 for q in queue() if q["pr"] == ph["pr"] and q["sha"].startswith(ph["hex"])) != 1:
+        return None
+    return ph
+
+
+def mark_phrase(ph):
+    """Фраза использована — до строки согласия, под замком merge-queue: одна фраза, одно согласие. Не записать —
+    исключение, и ни строки согласия, ни слияния."""
+    used = used_phrases()
+    if used is None:
+        raise OSError(f"{PHRASES_FILE} не прочитать")
+    t = P.now()
+    used = {k: v for k, v in used.items() if isinstance(v, (int, float)) and t - v <= PHRASES_KEEP}
+    used[ph["key"]] = t
+    p = P.path(PHRASES_FILE)
+    tmp = f"{p}.tmp.{os.getpid()}"
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"used": used}, fh, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
 def gh_merge(req):
     try:
         r = subprocess.run([gh_path(), "pr", "merge", str(req["pr"]), "-R", req["repo"], "--match-head-commit",
@@ -957,10 +1155,13 @@ def post_notice(text, cmd, line):
     return r.returncode == 0
 
 
-def notify_merged(req):
+def notify_merged(req, phrase=None):
     """После rc 0 gh pr merge — одно уведомление владельцу «слит repo#N (sha7)» (metis-0921): он не видит окон Touch ID
-    и иначе о слиянии не узнаёт. Сбой уведомления слияния не отменяет — оно уже сделано."""
+    и иначе о слиянии не узнаёт; слит по фразе (metis-0959) — с её местом в owner-log. Сбой уведомления слияния не
+    отменяет — оно уже сделано."""
     text = f"слит {req['repo']}#{req['pr']} ({req['sha'][:7]})"
+    if phrase:
+        text += f" фразой из owner-log/{phrase['file']} {phrase['at']}"
     try:
         return post_notice(text, None, f"Слияние ядра|{text}||merged\n")
     except (OSError, subprocess.SubprocessError):
@@ -1240,51 +1441,67 @@ def check_all(req):
     return "ok", why, view, paths
 
 
-def finger(req, rc=0):
-    """После пальца — одна заявка: (слит ли, текст итога). Окно было открыто до двух минут, а у пачки перед этой
-    заявкой ещё шли слияния прежних: отмена, новый «вернуть», новый коммит или правка [merge_repos] за это время — не
-    сливать. Сверка шлюза, строка согласия и снятие заявки — под замком merge-queue, как у request и cancel; слияние —
+def finger(req, rc=0, phrase=None):
+    """После пальца (или фразы phrase — find_phrase, metis-0959) — одна заявка: (слит ли, текст итога). Окно было
+    открыто до двух минут, а у пачки перед этой заявкой ещё шли слияния прежних: отмена, новый «вернуть», новый коммит
+    или правка [merge_repos] за это время — не сливать. Сверка шлюза (и фразы: та же, не использована), отметка
+    фразы, строка согласия и снятие заявки — под замком merge-queue, как у request и cancel; слияние —
     `gh pr merge --match-head-commit` того SHA, что в заявке."""
+    how, after = ("фразой", "после фразы") if phrase else ("по Touch ID", "после пальца")
     with P.lock("merge-queue"):
         if not same_req(req):
             return False, gone(req, rc)
+        if phrase is not None:
+            cur = find_phrase(req)
+            if cur is None or cur["key"] != phrase["key"]:
+                return False, "ждёт: фраза уже не в силе"
         state, why, _, _ = check_all(req)
         if state != "ok":
             os.remove(req_file(req["repo"], req["pr"]))
-            bad = f"после пальца условия изменились — {why}"
+            bad = f"{after} условия изменились — {why}"
         else:
             bad = None
+            if phrase is not None:
+                mark_phrase(phrase)   # одна фраза — одно согласие: до строки согласия, сбой — ни строки, ни слияния
             approve(req)
             os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
     if bad:
         log(req, "gate-after")
-        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: не слито, заявка снята — {bad}",
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) {how}: не слито, заявка снята — {bad}",
                 "pantheon-merge")
         return False, f"снята: {bad}"
+    if phrase is not None:
+        log(req, "phrase", file=f"owner-log/{phrase['file']}", line=phrase["line"], at=phrase["at"],
+            said=f"слей #{phrase['pr']} {phrase['hex']}")
     code, out = gh_merge(req)
-    log(req, "merged" if code == 0 else "merge-failed", rc=code)
+    log(req, "merged" if code == 0 else "merge-failed", rc=code, how="phrase" if phrase else "touchid")
     if code == 0:
-        notify_merged(req)
+        notify_merged(req, phrase)
     if code != 0:
-        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
-                "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
-        return False, f"палец есть, gh pr merge упал ({code})"
-    return True, "слит"
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) {'после фразы' if phrase else 'после Touch ID'} "
+                f"не прошло: {out}. Согласие записано — шлюз guard пустит слияние этого SHA в течение суток",
+                "pantheon-merge")
+        return False, f"{'фраза' if phrase else 'палец'} есть, gh pr merge упал ({code})"
+    return True, "слит фразой" if phrase else "слит"
 
 
 def process(req, click):
     t = P.now()
     if t - req["created"] > REQUEST_TTL:
         return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
-    if not click and req.get("wait_until", 0) > t:
+    # фраза владельца «слей #N <hex>» (metis-0959) — согласие без окна: ни повтора окна, ни щелчка, ни Mac рядом
+    phrase = find_phrase(req)
+    if phrase is None and not click and req.get("wait_until", 0) > t:
         return "ждёт: окно закрыто без ответа, повтор позже"
-    if not click and req.get("notified"):
+    if phrase is None and not click and req.get("notified"):
         return "ждёт щелчка по уведомлению"
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
         return drop(req, "gate", why, warn=True)
     if state == "wait":
         return f"ждёт: {why}"
+    if phrase is not None:
+        return finger(req, None, phrase)[1]
     if not click and P.idle_sec() > PRESENT_SEC:
         return "ждёт: вас нет у Mac"
     text = window_text(req, view, why, paths)
