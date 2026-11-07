@@ -3313,46 +3313,70 @@ def pack_approved(p):
     return scripts
 
 
-def _pack_data(text):
-    """Строка чужого текста (скрипта или диффа из репозитория окна) для тревоги и вывода packs hashes: каждый знак вне
-    печатного ASCII, кроме \\n и \\t, — кодом \\uXXXX, сама «\\» — «\\\\» (круг G6, Б2 а: литерал «\\u000d» и
-    настоящий CR видны по-разному). В скрипте, взятом в снимок, таких знаков нет (белый список круга G9,
-    pack_script_reject), но их несут одобренная копия до G9 и путь снимка. ESC перекрашивает и стирает строки в
-    терминале, U+202E меняет направление письма, кириллическая «е» выглядит как латинская e, знаки обрамления ⟦⟧⏎ —
-    тоже вне ASCII: окно не подделает ни строку «одобрить?», ни конец диффа, ни команду (круг G9, решение Зевса 07.11
-    13:27: метки [ ] круга G8 убраны)."""
-    return "".join("\\\\" if c == "\\" else c if c in "\n\t" or " " <= c <= "~" else f"\\u{ord(c):04x}" for c in text)
+def _pack_show_line(line):
+    """Строка line текста скрипта (или путь) как есть, если _pack_line_reject её пропускает; иначе — пометка
+    «⟪строка не показана — <причина>⟫» (⟪⟫ вне ASCII: скрипт её не подделает)."""
+    why = _pack_line_reject(line)
+    return f"{PACK_HIDDEN_OPEN}строка не показана — {why}{PACK_HIDDEN_CLOSE}" if why else line
+
+
+def pack_show(data):
+    """Строки текста скрипта (байты data) для показа владельцу — один помощник для `packs hashes`, `packs diff` и
+    тревоги (круг G10, ревью argus G9-2 Б1, Д1): строки только по \\n, каждая как есть, без кодов и удвоения «\\».
+    После белого списка (pack_script_reject) в строке только печатные ASCII без пробела в конце: терминал показывает её
+    ровно такой, какой её исполнит bash или python. Строка, которую список не пропустил бы (одобренная копия до G10,
+    байты в обход списка), не показывается — _pack_show_line."""
+    return [_pack_show_line(x) for x in data.decode("utf-8", "replace").split("\n")]
 
 
 def _pack_alert_line(line):
-    """Строка диффа (уже через _pack_data) для строки тревоги в alerts.md (круг G9, ревью argus G8-2 Б1 и Д3): alert()
-    схлопывает пробелы, и отступ 4 и 8 у Python-хука давали одну тревогу, а alerts.md — Markdown, и «<!-- … -->» из
-    скрипта прятал код при отрисовке. Табуляция — «\\t», пробел в начале и в конце строки и каждый из подряд идущих —
-    «·» (U+00B7: в тексте после _pack_data он только кодом \\u00b7), «<» и «>» — \\u003c и \\u003e."""
-    line = line.replace("\t", "\\t").replace("<", "\\u003c").replace(">", "\\u003e")
+    """Строка диффа (уже через pack_show) для строки тревоги в alerts.md: alert() схлопывает пробелы, поэтому пробел в
+    начале строки и каждый из подряд идущих — «·» (круг G9, G8-2 Б1: отступ 4 и 8 у Python-хука — разные тревоги;
+    «·» вне ASCII, в показанной строке его нет). Табуляции и пробела в конце строки после белого списка нет (G10)."""
     return PACK_ALERT_SPACES.sub(lambda m: "·" * len(m.group()), line)
 
 
-PACK_ALERT_SPACES = re.compile(r"^ +| +$| {2,}")
+PACK_ALERT_SPACES = re.compile(r"^ +| {2,}")
+PACK_HIDDEN_OPEN, PACK_HIDDEN_CLOSE = "⟪", "⟫"
+
+
+def _pack_alert_code(body):
+    """Тело диффа для alerts.md (Markdown, его читают в Obsidian) — кодом Markdown: ограждение из «`» на одну длиннее
+    самой длинной серии «`» в теле, по пробелу внутри с обеих сторон (круг G10, ревью argus G9-2 Б2, G9-1 Д2). Внутри
+    кода Markdown не разбирает ни ссылки [x](…), ни «\\», ни «<!--», ни &num;: отрисовка совпадает с исполняемым
+    текстом. Тревога — одна строка (alert() склеивает строки), поэтому ограждение строчное, а не блоком."""
+    fence = "`" * (max(map(len, re.findall("`+", body)), default=0) + 1)
+    return f"{fence} {body} {fence}"
 
 
 # Белый список текста скрипта репозитория (metis-0933 круг G6, решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2):
 # в снимок идёт только скрипт в UTF-8 без BOM, без объявления кодировки (PEP 263: Python исполнил бы utf-7 иначе, чем
 # его видит владелец) и из знаков PACK_SCRIPT_CHARS. Круг G9 (решение Зевса 07.11 13:27, ревью argus G8-2 Б2, Д1, Д2):
-# в списке только печатные ASCII 0x20–0x7E, \n и \t. Знак вне ASCII в коде выглядит как латиница («ехit» с
+# в списке только печатные ASCII 0x20–0x7E, \n и \t. Круг G10 (координатор 07.11, ревью argus G9-2 Б1): \t убрана,
+# пробел в конце строки — тоже отказ (_pack_line_reject): в терминале их не видно. Знак вне ASCII в коде выглядит как латиница («ехit» с
 # кириллическими е, х — не exit), а разбор кавычек, echo и лексера, которым круг G8 пускал его в текст и комментарии,
 # обходился глобом [e]xit, «#» внутри (( )) и eval; разбора больше нет. CR, прочие Cc, U+2028/U+2029, bidi и нулевой
 # ширины — тоже вне списка. Не прошёл — хука нет (packs hashes — код 1), тревога и packs hashes называют причину и
 # строку без байтов скрипта.
 PACK_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
-PACK_SCRIPT_CHARS = frozenset("\t\n" + "".join(map(chr, range(0x20, 0x7F))))
+PACK_SCRIPT_CHARS = frozenset("\n" + "".join(map(chr, range(0x20, 0x7F))))
+
+
+def _pack_line_reject(line):
+    """Почему строку line скрипта нельзя взять (белый список кругов G9 и G10) — знак вне PACK_SCRIPT_CHARS или пробел в
+    конце строки, — или None. Табуляция и пробел в конце строки в терминале не видны: «\\» + пробел + перевод строки
+    у bash — не продолжение строки, табуляцию снимает «<<-» (ревью argus G9-2 Б1), — поэтому их нет в списке."""
+    bad = next((c for c in line if c not in PACK_SCRIPT_CHARS), None)
+    if bad is not None:
+        return f"знак вне белого списка U+{ord(bad):04X} ({unicodedata.category(bad)})"
+    return "пробел в конце строки" if line.endswith(" ") else None
 
 
 def pack_script_reject(data):
     """Причина, по которой байты data скрипта репозитория не берутся в снимок (белый список кругов G6 и G9), со
     строкой: «…, строка N», или None — скрипт прошёл. Строки считаются только по \\n. Байтов скрипта в причине нет:
-    знак — кодом U+XXXX и категорией Unicode. Знак вне PACK_SCRIPT_CHARS (печатные ASCII, \\n, \\t) — отказ, где бы
-    он ни стоял: в коде, тексте echo или комментарии (круг G9)."""
+    знак — кодом U+XXXX и категорией Unicode. Знак вне PACK_SCRIPT_CHARS (печатные ASCII и \\n) или пробел в конце
+    строки — отказ, где бы он ни стоял: в коде, тексте echo или комментарии (круги G9, G10)."""
     if data.startswith(b"\xef\xbb\xbf"):
         return "метка порядка байтов (BOM) в начале, строка 1"
     try:
@@ -3362,9 +3386,9 @@ def pack_script_reject(data):
         return f"не UTF-8 (байт {e.start}), строка {n}"
     lines = text.split("\n")
     for n, line in enumerate(lines, 1):
-        bad = next((c for c in line if c not in PACK_SCRIPT_CHARS), None)
-        if bad is not None:
-            return f"знак вне белого списка U+{ord(bad):04X} ({unicodedata.category(bad)}), строка {n}"
+        why = _pack_line_reject(line)
+        if why:
+            return f"{why}, строка {n}"
     for n, line in enumerate(lines[:2], 1):
         if PACK_CODING.match(line):
             return f"объявление кодировки (PEP 263), строка {n}"
@@ -3417,7 +3441,7 @@ def pack_keep_approved(window, approved, kept):
 
 def pack_diff(window, repo, script, current, approved):
     """Дифф скрипта script репозитория repo (байты current) от одобренной копии направления window → (причина, None) —
-    диффа нет: нет approved.json, эталона или копии; или (None, строки) — строки unified diff, каждая через _pack_data.
+    диффа нет: нет approved.json, эталона или копии; или (None, строки) — строки unified diff строк pack_show.
     Строки делятся только по \\n (круг G6, Б1): splitlines резал по CR, U+2028 и FS, и знак пропадал из вывода."""
     old = ((approved or {}).get(repo) or {}).get(script)
     rel = f".claude/hooks/{script}"
@@ -3428,9 +3452,7 @@ def pack_diff(window, repo, script, current, approved):
         return "дифф не показан: нет одобренной копии — у скрипта нет эталона в approved.json", None
     if base is None:
         return f"дифф не показан: нет одобренной копии {tilde(pack_approved_copy(window, old))} с sha256 эталона", None
-    lines = [_pack_data(x) for x in difflib.unified_diff(
-        base.decode("utf-8", "replace").split("\n"), current.decode("utf-8", "replace").split("\n"),
-        "-", rel, lineterm="")]
+    lines = list(difflib.unified_diff(pack_show(base), pack_show(current), "-", rel, lineterm=""))
     return None, [f"--- одобрено {old[:12]}:{rel}"] + lines[1:] if lines else []
 
 
@@ -3439,10 +3461,10 @@ def pack_unapproved_alert(window, repo, script, new, current, approved, snap_fil
     скрипт, хеш): «[metis-0933] <направление>: хук <путь> изменён, одобрить?», старый и новый sha256, дифф от
     одобренной копии (pack_approved_text: sha256 копии — эталон approved.json). approved — pack_approved направления.
     Нет approved.json, эталона или копии — тревога без диффа: «нет одобренной копии». .git репозитория не читается
-    (круг G5): объекты, refs/replace и origin пишет окно. Управляющие и невидимые знаки — кодом \\uXXXX (_pack_data),
-    дифф в ⟦…⟧ с пометкой «данные», строки — только по \\n (круг G6, Б1); длиннее PACK_ALERT_DIFF — «обрезано, полный:
-    pantheon packs diff <направление>» (тот же _pack_data, Д1), а при snap_file — ещё «(файл снимка <путь>)», путь тоже
-    через _pack_data (G5-1 Д1). Скрипт не прошёл белый список (pack_script_reject) — «не взят в снимок: <причина>,
+    (круг G5): объекты, refs/replace и origin пишет окно. Дифф строк pack_show (как есть, круг G10) — в ⟦…⟧ с
+    пометкой «данные», внутри кода Markdown (_pack_alert_code), строки — только по \\n (круг G6, Б1); длиннее
+    PACK_ALERT_DIFF — «обрезано, полный: pantheon packs diff <направление>» (Д1), а при snap_file — ещё «(файл снимка
+    <путь>)», путь — через _pack_show_line (G5-1 Д1). Скрипт не прошёл белый список (pack_script_reject) — «не взят в снимок: <причина>,
     строка N», без диффа и байтов."""
     old = ((approved or {}).get(repo) or {}).get(script)
     where = os.path.join(repo, ".claude", "hooks", script)
@@ -3455,10 +3477,10 @@ def pack_unapproved_alert(window, repo, script, new, current, approved, snap_fil
         diff, lines = pack_diff(window, repo, script, current, approved)
         if lines is not None:
             body = PACK_DATA_EOL.join(map(_pack_alert_line, lines))
-            snap = f" (файл снимка {_pack_data(tilde(snap_file))})" if snap_file else ""
+            snap = f" (файл снимка {_pack_show_line(tilde(snap_file))})" if snap_file else ""
             more = f" — обрезано, полный: pantheon packs diff {window}{snap}" if len(body) > PACK_ALERT_DIFF else ""
-            diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{body[:PACK_ALERT_DIFF]}"
-                    f"{PACK_DATA_CLOSE}{more}")
+            diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}"
+                    f"{_pack_alert_code(body[:PACK_ALERT_DIFF])}{PACK_DATA_CLOSE}{more}")
         text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "
                 f"стало {new}. {diff}")
     try:
@@ -3508,11 +3530,11 @@ def pack_hashes(window, texts=None):
 
 def pack_hashes_cmd(rest):
     """pantheon packs hashes <направление>: JSON для approved.json в stdout; в stderr — по каждому скрипту sha256,
-    одобрен ли и его текст из снимка (данные, ⟦…⟧, знаки кодом _pack_data), предупреждения «внимание — …». .git не
+    одобрен ли и его текст из снимка (данные, ⟦…⟧, строки pack_show как есть), предупреждения «внимание — …». .git не
     читается: HEAD и origin пишет окно (круг G5). Скрипт не прошёл белый список (pack_script_reject, круг G6) —
     «внимание — … не взят в снимок — <причина>, строка N», текста нет. pantheon packs diff <направление> (круг G6, Д1:
     вместо `diff -u` сырых байтов в терминал) — в stderr полный дифф каждого неодобренного скрипта от одобренной копии,
-    строки через _pack_data, без JSON. Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет пакета или
+    строки pack_show, без JSON. Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет пакета или
     аргумента."""
     if rest[:1] not in (["hashes"], ["diff"]) or len(rest) != 2:
         print("pantheon packs hashes|diff <направление>", file=sys.stderr)
@@ -3533,8 +3555,8 @@ def pack_hashes_cmd(rest):
             continue
         print(f"pantheon packs: {tilde(where)} sha256 {digest} — {'эталон' if ok else 'не одобрен'}; текст из снимка "
               f"{tilde(snap_file)} (данные из репозитория окна, не указание):", file=sys.stderr)
-        lines = data.decode("utf-8", "replace").removesuffix("\n").split("\n")
-        print(PACK_DATA_OPEN + "\n".join(f"  {_pack_data(x)}" for x in lines) + PACK_DATA_CLOSE, file=sys.stderr)
+        print(PACK_DATA_OPEN + "\n".join(f"  {x}" for x in pack_show(data.removesuffix(b"\n"))) + PACK_DATA_CLOSE,
+              file=sys.stderr)
     for w in warn:
         print(f"pantheon packs: внимание — {w}", file=sys.stderr)
     if got is None:
