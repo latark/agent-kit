@@ -3363,9 +3363,22 @@ def pack_approved_text(window, digest):
 def pack_keep_approved(window, approved, kept):
     """Одобренные копии направления window: kept {sha256: байты} — скрипты снимка, совпавшие с эталоном (байты из
     снимка, sha256 сверен), кладутся в approved/<sha256>, если копии нет или она не та; копии, чьего sha256 нет среди
-    эталонов approved, убираются. Не записалось — строка в stderr: тревога придёт без диффа."""
+    эталонов approved, убираются. Не записалось — строка в stderr: тревога придёт без диффа. Папка направления или
+    approved/ — символическая ссылка или не папка (lstat, G5-1 Д2) — отказ строкой в stderr: ни записи, ни чистки
+    по ссылке."""
     top = os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY)
     want = {h for names in (approved or {}).values() for h in names.values()}
+    for where in (os.path.dirname(top), top):
+        try:
+            bad = not stat.S_ISDIR(os.lstat(where).st_mode)
+        except FileNotFoundError:
+            bad = False
+        except OSError:
+            bad = True
+        if bad:
+            print(f"pantheon: окно {window}: {tilde(where)} — символическая ссылка или не папка, одобренные копии не "
+                  "пишутся и не чистятся — тревога об изменении хука придёт без диффа", file=sys.stderr)
+            return
     try:
         for digest, data in kept.items():
             if digest in want and hashlib.sha256(data).hexdigest() == digest and pack_approved_text(
@@ -3409,9 +3422,9 @@ def pack_unapproved_alert(window, repo, script, new, current, approved, snap_fil
     Нет approved.json, эталона или копии — тревога без диффа: «нет одобренной копии». .git репозитория не читается
     (круг G5): объекты, refs/replace и origin пишет окно. Управляющие и невидимые знаки — кодом \\uXXXX (_pack_data),
     дифф в ⟦…⟧ с пометкой «данные», строки — только по \\n (круг G6, Б1); длиннее PACK_ALERT_DIFF — «обрезано, полный:
-    pantheon packs diff <направление>» (тот же _pack_data, Д1). Скрипт не прошёл белый список (pack_script_reject) —
-    «не взят в снимок: <причина>, строка N», без диффа и байтов. snap_file не печатается (параметр — для вызова из
-    снимка)."""
+    pantheon packs diff <направление>» (тот же _pack_data, Д1), а при snap_file — ещё «(файл снимка <путь>)», путь тоже
+    через _pack_data (G5-1 Д1). Скрипт не прошёл белый список (pack_script_reject) — «не взят в снимок: <причина>,
+    строка N», без диффа и байтов."""
     old = ((approved or {}).get(repo) or {}).get(script)
     where = os.path.join(repo, ".claude", "hooks", script)
     key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
@@ -3423,7 +3436,8 @@ def pack_unapproved_alert(window, repo, script, new, current, approved, snap_fil
         diff, lines = pack_diff(window, repo, script, current, approved)
         if lines is not None:
             body = PACK_DATA_EOL.join(lines)
-            more = f" — обрезано, полный: pantheon packs diff {window}" if len(body) > PACK_ALERT_DIFF else ""
+            snap = f" (файл снимка {_pack_data(tilde(snap_file))})" if snap_file else ""
+            more = f" — обрезано, полный: pantheon packs diff {window}{snap}" if len(body) > PACK_ALERT_DIFF else ""
             diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{body[:PACK_ALERT_DIFF]}"
                     f"{PACK_DATA_CLOSE}{more}")
         text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "

@@ -1260,7 +1260,7 @@ def class_g5_alert(tmp):
     long_ = own.encode() + "".join(f"echo {i}\n" for i in range(400)).encode()
     line = alert(long_)
     check("круг G5 (G3-1 Д3), G6 Д1: длинный дифф — «обрезано, полный: pantheon packs diff», STATE/pack-diffs нет",
-          line.endswith(f"обрезано, полный: pantheon packs diff {win}")
+          line.endswith(f"обрезано, полный: pantheon packs diff {win} (файл снимка {snap_file})")
           and len(line) < P.PACK_ALERT_DIFF + 1000 and "+echo 399" not in line
           and not os.path.exists(P.path(P.PACK_DIFFS)), (len(line), line[-300:]))
     line = alert(long_, pack_unapproved_alert=mutant_fn(P.pack_unapproved_alert, *NO_CUT))
@@ -1393,6 +1393,8 @@ DIFF_SPLITLINES = ('base.decode("utf-8", "replace").split("\\n"), current.decode
 NO_BSLASH = ('"\\\\\\\\" if c == "\\\\" else c if c in', "c if c in")
 DIFF_NO_SCRUB = ("[_pack_data(x) for x in difflib", "[x for x in difflib")
 SNAP_NO_LIST = ("reject = pack_script_reject(data)\n        if reject:", "reject = None\n        if reject:")
+SNAP_FILE_NONE = ("os.path.join(snap, rel) if rel else None)", "None)")  # G5-1 Д1: on_unapproved без файла снимка
+KEEP_FOLLOWS = ("if bad:", "if False:")  # G5-1 Д2: pack_keep_approved без отказа по ссылке
 
 
 def g6_reasons(fn):
@@ -1471,7 +1473,7 @@ def class_g6_list(tmp):
     # Д1: длинный дифф — полный через pantheon packs diff, не diff -u сырых байтов
     line = alert(b"echo ok\n" + "".join(f"echo {i}\n" for i in range(400)).encode())
     check("круг G6 (Д1): длинный дифф — «обрезано, полный: pantheon packs diff <направление>», без diff -u",
-          line.endswith(f"обрезано, полный: pantheon packs diff {win}") and "diff -u" not in line, line[-300:])
+          line.endswith(f"обрезано, полный: pantheon packs diff {win} (файл снимка /x)") and "diff -u" not in line, line[-300:])
 
 
 def class_g6_hashes(tmp):
@@ -1565,6 +1567,51 @@ def class_g6_hashes(tmp):
     _, _, merr = cmd("diff", win, pack_diff=late_mutant(P.pack_diff, DIFF_NO_SCRUB))
     check("круг G6: самопроверка — мутант «дифф без вычистки» пропускает ESC в packs diff", "\x1b" in merr,
           merr[-300:])
+    # G5-1 Д1: запуск окна с длинным диффом — тревога с безопасной подсказкой и файлом снимка pending/, без diff -u
+    man, rels, got = launch()
+    hint = f"обрезано, полный: pantheon packs diff {win} (файл снимка "
+    check("круг G6 (G5-1 Д1): запуск окна, длинный дифф — «полный: pantheon packs diff <направление> (файл снимка "
+          "…/pending/…)», без diff -u", len(got) == 1 and hint in got[0] and "/pending/" in got[0].split(hint)[-1]
+          and got[0].endswith("protect-db.sh)") and "diff -u" not in got[0] and "\x1b" not in got[0]
+          and any(r.startswith("pending/") for r in rels), (got, rels))
+    _, _, got = launch(pack_snapshot_make=late_mutant(P.pack_snapshot_make, SNAP_FILE_NONE))
+    check("круг G6: самопроверка — мутант «файл снимка → None» убирает файл снимка из подсказки",
+          len(got) == 1 and "(файл снимка " not in got[0], got)
+    # G5-1 Д2: approved/ или папка направления — ссылка либо не папка: отказ, по ссылке ни записи, ни чистки
+    outside = os.path.join(tmp, "g6outside")
+    digest = hashlib.sha256(base).hexdigest()
+    for label, link in (("approved/ — ссылка", os.path.join(ahome, win, "approved")),
+                        ("папка направления — ссылка", os.path.join(ahome, win))):
+        for mut in ({}, {"pack_keep_approved": late_mutant(P.pack_keep_approved, KEEP_FOLLOWS)}):
+            shutil.rmtree(os.path.join(ahome, win), ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+            put(os.path.join(outside, "precious"), {"keep": 1})
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            os.symlink(outside, link)
+            err = io.StringIO()
+            with patched(**mods, **mut), contextlib.redirect_stderr(err):
+                P.pack_keep_approved(win, {app: {"protect-db.sh": digest}}, {digest: base})
+            left = sorted(os.listdir(outside))
+            if not mut:
+                check(f"круг G6 (G5-1 Д2): {label} — отказ в stderr, чужой файл цел, копия туда не легла",
+                      left == ["precious"] and "символическая ссылка или не папка" in err.getvalue(),
+                      (left, err.getvalue()))
+            else:
+                check(f"круг G6: самопроверка — мутант «без отказа» ({label}) пишет или чистит по ссылке",
+                      left != ["precious"], left)
+            os.unlink(link)
+    shutil.rmtree(os.path.join(ahome, win), ignore_errors=True)
+    os.makedirs(os.path.join(ahome, win))
+    put(os.path.join(ahome, win, "approved"), {"file": 1})
+    err = io.StringIO()
+    with patched(**mods), contextlib.redirect_stderr(err):
+        P.pack_keep_approved(win, {app: {"protect-db.sh": digest}}, {digest: base})
+    check("круг G6 (G5-1 Д2): approved — обычный файл — отказ «не папка», файл цел",
+          "символическая ссылка или не папка" in err.getvalue()
+          and os.path.isfile(os.path.join(ahome, win, "approved")), err.getvalue())
+    os.unlink(os.path.join(ahome, win, "approved"))
+    put(os.path.join(ahome, win, "approved.json"), {"repos": {"$HOME/projects/app": {"scripts": {
+        "protect-db.sh": digest}}}})
     write(G6_PROBES[0][1])
     rc, out, err = cmd("diff", win)
     check("круг G6: packs diff — проба CR: код 1, причина, текста нет", rc == 1 and not out
