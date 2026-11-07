@@ -54,7 +54,7 @@ GATED_MERGE_RULE = (
     "direction, and client products also have a `talos` check and a rollback line in the owner's summary; GitHub "
     "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
     "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
-    "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
+    "`git merge`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
     "core — " + CORE_TEXT + " — wait for the owner to merge them himself: guard refuses them, and this exception "
     "does not cover merging them any other way. It "
     "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "

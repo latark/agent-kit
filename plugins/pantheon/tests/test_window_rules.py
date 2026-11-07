@@ -4,9 +4,11 @@
 определяет; сборка autoMode и permissions окна та же; шлюз guard считает файл ядром."""
 import ast
 import importlib.util
+import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -26,6 +28,85 @@ def load(name, path):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+# metis-0971 (решение Зевса 07.11, вариант А): команда мимо песочницы не должна менять рабочую копию. Иначе при cwd
+# внутри allowWrite она пишет в защищённый репозиторий (~/.claude, ~/ai/pantheon) без проверки песочницы — так делал
+# `git pull`. Подкоманды git, которые пишут в рабочую копию или индекс:
+WORKTREE_WRITE = ("pull", "merge", "checkout", "switch", "reset", "restore", "stash", "am", "rebase", "cherry-pick",
+                  "revert")
+GIT_NETWORK_ONLY = ("push", "fetch")  # мимо песочницы из git — только сеть
+# Не git, но пишет в рабочую копию: каждая такая команда — здесь явно, с причиной. Модель угроз всего класса — metis-0972
+WORKTREE_WRITE_KNOWN = {
+    "gh pr merge *": "с --delete-branch gh переключает локальную копию на основную ветку и делает в ней pull; окна "
+                     "направлений сливают через шлюз guard (merge_problem). Остаток класса — metis-0972",
+}
+WORKTREE_WRITE_OTHER = (("gh", "pr", "checkout"), ("gh", "repo", "sync"), ("gh", "repo", "clone"))
+
+
+def worktree_write_problem(cmd):
+    """Строка excludedCommands → причина, почему она может писать в рабочую копию мимо песочницы, или None."""
+    t = cmd.split()
+    if not t:
+        return "пустая строка"
+    if t[0] == "*" or (t[0] in ("git", "gh") and len(t) > 1 and t[1] == "*"):
+        return "шаблон шире одной подкоманды"
+    if t[0] == "git":
+        sub = t[1] if len(t) > 1 else ""
+        if sub in WORKTREE_WRITE:
+            return f"git {sub} пишет в рабочую копию"
+        if sub not in GIT_NETWORK_ONLY:
+            return f"git {sub or '(без подкоманды)'} — не сетевая команда"
+    if t[0] == "gh":
+        if len(t) > 2 and t[2] == "*":
+            return "шаблон шире одной подкоманды gh"
+        if tuple(t[:3]) in WORKTREE_WRITE_OTHER:
+            return f"{' '.join(t[:3])} пишет в рабочую копию"
+        if t[:3] == ["gh", "pr", "merge"] and cmd not in WORKTREE_WRITE_KNOWN:
+            return "gh pr merge — не в WORKTREE_WRITE_KNOWN"
+    return None
+
+
+def excluded_no_worktree_write(p, tmp):
+    """Настоящая сборка окон (sandbox_build) во временном HOME: окна двух направлений (одно — metis-pantheon),
+    мастерская с SSH-remote, окна задач, Гестия, Пританей; ни одна строка excludedCommands не пишет в рабочую копию."""
+    for cmd in ("git pull", "git pull *", "git merge *", "git checkout *", "git cherry-pick *", "git *", "*",
+                "gh pr checkout *", "gh pr *", "gh pr merge --admin *"):
+        check(f"worktree_write_problem: «{cmd}» — отказ", worktree_write_problem(cmd), cmd)
+    for cmd in ("git push", "git fetch *", "gh pr view *", "gh pr merge *", "pantheon alert *"):
+        check(f"worktree_write_problem: «{cmd}» — можно", worktree_write_problem(cmd) is None,
+              worktree_write_problem(cmd))
+    check("GIT_NETWORK: только push и fetch, без git pull (metis-0971)",
+          {x.split()[1] for x in p.GIT_NETWORK} == set(GIT_NETWORK_ONLY), p.GIT_NETWORK)
+    folders = {}
+    os.makedirs(p.PANTHEON, exist_ok=True)  # alerts.md: нет guard в временном HOME — тревога, сборка идёт дальше
+    for name, rel in (("alpha-test", "projects/app"), ("metis-pantheon", "projects/kit")):
+        os.makedirs(os.path.join(tmp, rel), exist_ok=True)
+        folders[name] = [os.path.join(tmp, rel)]  # окну направления сетевой git — всегда, репозиторий не нужен
+    # мастерской — только при SSH-remote; окно роли режет запись .git/config под ~ (временный HOME в кэше окна)
+    wr = os.path.join(tmp, "ai", "workshop", "t1")
+    os.makedirs(wr, exist_ok=True)
+    ws_ssh = subprocess.run(["git", "init", "-q", wr], capture_output=True).returncode == 0 and subprocess.run(
+        ["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], capture_output=True).returncode == 0
+    if not ws_ssh:
+        print("пропущено: мастерская с SSH-remote — окно не даёт записать .git/config во временном HOME")
+    built = p.sandbox_build(folders, os.path.join(tmp, "no-policy.toml"))
+    out = p.path("settings")
+    windows = {}
+    for f in sorted(os.listdir(out)):
+        if f.endswith(".json"):
+            with open(os.path.join(out, f), encoding="utf-8") as fh:
+                windows[f[:-5]] = json.load(fh)["sandbox"]["excludedCommands"]
+    need = {"alpha-test", "metis-pantheon", "workshop", "hestia", "hq"}
+    check("sandbox_build: окна направлений, мастерской, Гестии и Пританея собраны", need <= set(windows),
+          (built, sorted(windows)))
+    bad = {(n, c): worktree_write_problem(c) for n, ex in windows.items() for c in ex if worktree_write_problem(c)}
+    check("excludedCommands ни одного окна не пишут в рабочую копию: без git pull/merge/checkout/switch/reset/"
+          "restore/stash/am/rebase/cherry-pick/revert, gh pr merge — только известной строкой (metis-0971)",
+          not bad, bad)
+    check("сборка не пустая: git fetch * и gh pr merge * у окна направления, git fetch * у мастерской с SSH-remote",
+          all("git fetch *" in windows.get(n, []) for n in ("alpha-test", "metis-pantheon") + (("workshop",) * ws_ssh))
+          and "gh pr merge *" in windows.get("alpha-test", []), {n: windows.get(n) for n in ("alpha-test", "workshop")})
 
 
 def main():
@@ -140,6 +221,7 @@ def main():
         check("hook_python_cmd: python.sh рядом — /bin/sh <python.sh> <скрипт> <аргументы>",
               p.hook_python_cmd(script, "--strict") == f"/bin/sh '{hd}/python.sh' '{script}' --strict",
               p.hook_python_cmd(script, "--strict"))
+        excluded_no_worktree_write(p, tmp)
     finally:
         for k, v in old.items():
             if v is None:

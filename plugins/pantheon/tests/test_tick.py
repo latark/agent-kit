@@ -393,8 +393,11 @@ def main():
           os.path.isdir(hq) and all(hq in w["sandbox"]["filesystem"]["allowWrite"] for w in (sa, sm, sw, sn, sz))
           and not any(x == os.path.dirname(hq) for x in aw)
           and not any("heavy-queue" in x for x in sa.get("permissions", {}).get("allow", [])))
-    check("песочница: git push/fetch/pull мимо песочницы у каждого направления, и без SSH-remote (metis-0064)",
+    check("песочница: git push/fetch мимо песочницы у каждого направления, и без SSH-remote (metis-0064); "
+          "git pull — нет (metis-0971)",
           all("git push *" in w["sandbox"]["excludedCommands"] and "git push" in w["sandbox"]["excludedCommands"]
+              and "git fetch *" in w["sandbox"]["excludedCommands"]
+              and not any(x.startswith("git pull") for x in w["sandbox"]["excludedCommands"])
               for w in (sa, sm, sn, sz)))
     # мастерская: тот же сетевой git — только при SSH-remote в ~/ai/workshop; здесь его нет
     check("песочница: у мастерской без SSH-remote сетевого git мимо песочницы нет",
@@ -407,8 +410,10 @@ def main():
     subprocess.run(["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], check=True)
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     swx = load("workshop")["sandbox"]["excludedCommands"]
-    check("песочница: у мастерской при SSH-remote в ~/ai/workshop git push/fetch/pull мимо песочницы",
-          all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *")))
+    check("песочница: у мастерской при SSH-remote в ~/ai/workshop git push/fetch мимо песочницы, git pull — нет "
+          "(metis-0971)",
+          all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *"))
+          and not any(x.startswith("git pull") for x in swx))
     # ссылка на месте папки очереди — запись не даём (иначе она ушла бы по ссылке)
     os.rmdir(hq)
     os.makedirs(os.path.join(tmp, "elsewhere"), exist_ok=True)
