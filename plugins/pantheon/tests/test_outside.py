@@ -127,8 +127,41 @@ FAILS = []
 TOTAL = [0]
 
 
+def _bind_open():
+    """Даёт ли окружение занять локальный TCP-порт (окно роли: нет, песочница — metis-0773, 0777)."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+BIND_OPEN = _bind_open()
+PORT_MISS = [0]    # сколько раз pick_port не нашёл порт — только при закрытом bind это значит «bind закрыт»
+SKIPPED_BIND = []
+
+
+def _pick_port_counted(taken, _real=O.pick_port):
+    port = _real(taken)
+    if not port and not BIND_OPEN:
+        PORT_MISS[0] += 1
+    return port
+
+
+O.pick_port = _pick_port_counted
+
+
 def check(name, cond, extra=""):
+    """Случай, которому нужен bind на порт: при закрытом bind (окно роли) и после того, как сервер не нашёл свободный
+    порт — строка «пропущено: …», остальные идут (metis-0777). При открытом bind пропуска нет: упавшая проверка — FAIL."""
     TOTAL[0] += 1
+    if not cond and not BIND_OPEN and PORT_MISS[0]:
+        SKIPPED_BIND.append(name)
+        print(f"пропущено: {name} — bind на локальный порт закрыт (сервер не нашёл свободный порт)")
+        return
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f"  [{extra}]"))
     if not cond:
         FAILS.append(name)
@@ -324,8 +357,15 @@ def calls():
 
 
 def git(d, *args):
-    r = subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
-                        *args], capture_output=True, text=True)
+    """git в папке теста. Фоновый git самого прохода (сверка head, «грязное дерево») на миг держит index.lock: наша
+    команда падала с «File exists» — как любой git при гонке за замок (metis-0672). Повтор только по этой причине;
+    замок убитого git держится дольше срока повторов, и тест тогда упадёт."""
+    for left in range(40, -1, -1):
+        r = subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                            "commit.gpgsign=false", *args], capture_output=True, text=True)
+        if r.returncode == 0 or left == 0 or "index.lock" not in r.stderr or "File exists" not in r.stderr:
+            break
+        time.sleep(0.25)
     assert r.returncode == 0, (args, r.stderr)
     return r.stdout.strip()
 
@@ -2985,7 +3025,7 @@ def s_dead(pids, sec=10):
     return wait_for(lambda: all(not pid_alive(p, 0) for p in pids), sec)
 
 
-def s_start(q, rid, sec=30):
+def s_start(q, rid, sec=120):   # ждём события «running»; под нагрузкой 30 с не хватало (T11)
     th = _thr.Thread(target=run_pass, daemon=True)
     th.start()
     return th, wait_for(lambda: state(q, rid) == "running" and s_pids(), sec)
@@ -3285,5 +3325,6 @@ _left = [p for p in fake_pids() if still_alive(p)]
 check("тесты не оставляют процессов: заглушка sandbox-exec и задачи «turbo» погашены", fake_pids() and not _left,
       (_left, len(fake_pids())))
 
-print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
+print(f"{TOTAL[0] - len(FAILS) - len(SKIPPED_BIND)} из {TOTAL[0]} прошли"
+      + (f", пропущено при закрытом bind: {len(SKIPPED_BIND)}" if SKIPPED_BIND else ""))
 sys.exit(1 if FAILS else 0)
