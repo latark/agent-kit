@@ -2153,13 +2153,14 @@ def t_ci_billing(h):
     merge_case("PR 225 с записями — роль: отказ", h.pre(cmd, pdir=kit), False, "tests/affected красная: FAILURE")
     saved(222)
     os.remove(h.j("gh.notes.124603333226"))
-    merge_case("лимит, аннотации traces не получены — отказ по красной", h.pre(cmd, **owner), False,
-               "check-traces/traces красная: FAILURE")
+    merge_case("лимит, аннотации traces не получены — отказ «повтори позже», а не «почини» (metis-0813)",
+               h.pre(cmd, **owner), False, "аннотации CI или данные job красной проверки не получены (сбой gh) — не "
+               "лимит ли это минут GitHub Actions, не проверить: повтори слияние позже")
     # проверка безопасности 0655: аннотацию лимита job мог напечатать сам — нужен ещё «job не стартовал» от GitHub
     saved(222)
     os.remove(h.j("gh.jobs.124603333226"))
-    merge_case("лимит, данные job traces не получены — отказ по красной", h.pre(cmd, **owner), False,
-               "check-traces/traces красная: FAILURE")
+    merge_case("лимит, данные job traces не получены — отказ «повтори позже» (metis-0813)", h.pre(cmd, **owner), False,
+               "аннотации CI или данные job красной проверки не получены (сбой gh)")
     saved(222)
     with open(h.j("gh.jobs.124603333231"), "w") as fh:
         json.dump(_saved(225, "runs")["jobs"]["124790157366"], fh)

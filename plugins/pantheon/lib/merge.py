@@ -12,7 +12,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
                                                 шлюз не пройден хоть у одного — заявок нет ни на один
   pantheon merge run [--click]   проход по заявкам: зовёт его тик (из окна Claude Code — отказ, guard ролям тоже не даёт);
                                  --click — щелчок по уведомлению запасного пути: владелец у Mac
-  pantheon merge status          заявки: репозиторий#N, SHA, возраст, отметки
+  pantheon merge status          заявки: репозиторий#N, SHA, возраст, отметки; ниже — снятые и слитые за сутки с
+                                 причиной из logs/merge.jsonl (metis-0819)
   pantheon merge cancel <N> -R <owner/repo>    снять заявку (из пачки — вместе со всей пачкой)
 
 Проход по каждой заявке (одна заявка — одно применение):
@@ -31,7 +32,10 @@ PR ядра защит (Д3) агенты не сливают: его слива
      нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
      запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
      job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
-     набора FULL_TESTS (full_tests_record); нет такой — снята с тревогой.
+     набора FULL_TESTS (full_tests_record); нет такой — снята с тревогой. Аннотации или данные job красных не
+     получены (сбой gh) — ждёт: признак лимита не проверить (ci_billing_fetch, metis-0813).
+     PR не сливается с base (mergeable CONFLICTING или mergeStateStatus DIRTY) — снята с тревогой «конфликт с main»
+     до окна; GitHub ещё считает (UNKNOWN) — ждёт (merge_conflict, metis-0819).
      Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
      показать. PR правит version в plugin.json плагина или трогает
      .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
@@ -73,8 +77,10 @@ MANAGED_RETRY (STATE/managed-update.json; попытка пишется до о�
 (managed_check).
 Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Помощник — только STATE/bin/pantheon-touchid с
 отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением).
-В событии window — поля помощника (metis-0921): biometry, la_code, shown_sec (JSON в его stdout). После слияния
-(gh pr merge rc 0) владельцу уходит одно уведомление «слит repo#N (sha7)».
+В событии window — поля помощника (metis-0921): device_biometry (тип датчика Mac, не способ подтверждения —
+metis-0932), la_code, shown_sec (JSON в его stdout). После слияния (gh pr merge rc 0) владельцу уходит одно
+уведомление «слит repo#N (sha7)». Снятие заявки пишет причину (поле why), провал gh pr merge — тоже; `pantheon merge
+status` показывает под очередью снятые и слитые за сутки (recent_done, metis-0819).
 
 Окружение прохода (metis-0303). Его задаёт launchd, а launchd-окружение меняет любой процесс владельца (launchctl
 setenv). Поэтому проход строит окружение с нуля (clean_env): HOME — realpath домашней папки учётной записи (pw_dir;
@@ -140,6 +146,11 @@ PHRASES_KEEP = 24 * 3600
 # вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
 BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
 BILLING_SHORT = "CI: лимит, тесты ✓"
+# `pantheon merge status` (metis-0819): события merge.jsonl, с которыми заявка ушла из очереди, — за сутки, последние 20
+DONE_EVENTS = ("merged", "merge-failed", "gate", "gate-after", "expired", "refused", "no-window", "batch-broken",
+               "batch-stopped", "error", "cancelled")
+DONE_SHOW = 24 * 3600
+DONE_MAX = 20
 USAGE = ("pantheon merge request <N> [<N2> …] -R <owner/repo> | cancel <N> -R <owner/repo> | run [--click] | "
          "status")
 
@@ -321,7 +332,7 @@ def drop(req, event, why=None, warn=False):
             return gone(req)
         with contextlib.suppress(FileNotFoundError):
             os.remove(req_file(req["repo"], req["pr"]))
-    log(req, event)
+    log(req, event, why=why)   # причина — для `pantheon merge status` (снятые за сутки, metis-0819)
     if warn:
         P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: заявка снята — {why}", "pantheon-merge")
     return f"снята: {why or event}"
@@ -359,11 +370,13 @@ def gh_path():
 
 def pr_view(repo, pr):
     """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles, isCrossRepository,
-    headRepository, headRefName} или None — gh не ответил. Последние три — голова PR из форка (ci_fork, metis-0649)."""
+    headRepository, headRefName, mergeable, mergeStateStatus} или None — gh не ответил. isCrossRepository,
+    headRepository, headRefName — голова PR из форка (ci_fork, metis-0649); последние два — сливается ли с base
+    (merge_conflict, metis-0819)."""
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
                             "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles,"
-                            "isCrossRepository,headRepository,headRefName"],
+                            "isCrossRepository,headRepository,headRefName,mergeable,mergeStateStatus"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
         data = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -727,6 +740,16 @@ def ci_jobs_fetch(repo, ids):
     return out
 
 
+def ci_billing_fetch(repo, runs, required):
+    """ci_billing с запросами аннотаций и job (metis-0655): True или False; None — ci_billing_ids не пуст, а ответ на
+    аннотации или job хоть одной проверки не получен (сбой gh, metis-0813: TLS x509 из окна): признак не проверить."""
+    ids = ci_billing_ids(runs, required)
+    notes, jobs = ci_notes_fetch(repo, ids), ci_jobs_fetch(repo, ids)
+    if any(notes.get(i) is None or jobs.get(i) is None for i in ids):
+        return None
+    return ci_billing(runs, required, notes, jobs)
+
+
 def ci_state(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail, текст, предупреждения о красных необязательных) по ci_verdict. Проверок нет — wait: они ещё не
     встали; по 24 ч заявка всё равно гаснет. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait:
@@ -822,18 +845,29 @@ def gate(repo, pr, sha, view):
     # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
     warn = "".join(f"; {n}" for n in notes)
     if state == "fail":
-        # CI не запускался из-за лимита минут или оплаты (metis-0655): вместо CI засчитывается запись тестов на этот
-        # SHA с командой полного набора FULL_TESTS (full_tests_record), как в шлюзе guard (_billing_problem); нет
-        # такой записи или FULL_TESTS у репозитория — заявка снята по красной
-        ids = ci_billing_ids(runs, required)
-        if ci_billing(runs, required, ci_notes_fetch(repo, ids), ci_jobs_fetch(repo, ids)):
-            if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
-                return "ok", f"argus ×{len(latest)} ✓, {BILLING_OK}{sha[:12]}{warn}"
-            return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
-                            f"(FULL_TESTS) на {sha[:12]} нет")
+        state, why = billing_verdict(repo, sha, recs, runs, required, why)
+    elif state == "ok":
+        why = "CI ✓"
     if state != "ok":
         return state, why
-    return "ok", f"argus ×{len(latest)} ✓, CI ✓{warn}"
+    return "ok", f"argus ×{len(latest)} ✓, {why}{warn}"
+
+
+def billing_verdict(repo, sha, recs, runs, required, why):
+    """Красный CI в gate (why — его текст): (ok|wait|fail, текст). CI не запускался из-за лимита минут или оплаты
+    (metis-0655) — вместо CI засчитывается запись тестов на этот SHA с командой полного набора FULL_TESTS
+    (full_tests_record), как в шлюзе guard (_billing_problem); нет такой записи или FULL_TESTS у репозитория — fail по
+    красной. Аннотации или job не получены (сбой gh) — wait: признак не проверить, а снять заявку по красной значило бы
+    потерять запасной путь (metis-0813)."""
+    billing = ci_billing_fetch(repo, runs, required)
+    if billing is None:
+        return "wait", f"аннотации CI не получены (сбой gh) — лимит минут или нет, не проверить; {why}"
+    if not billing:
+        return "fail", why
+    if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
+        return "ok", f"{BILLING_OK}{sha[:12]}"
+    return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
+                    f"(FULL_TESTS) на {sha[:12]} нет")
 
 
 # --- помощник Touch ID ----------------------------------------------------------------------------------------------
@@ -929,7 +963,9 @@ def batch_window_text(reqs, views, whys, paths):
 
 def window_info(out):
     """Поля из JSON-строки помощника (metis-0921): biometry, la_code, shown_sec — только эти и только с нужным типом;
-    не JSON или чужие поля — пусто. Текст окна и всё лишнее в журнал не идёт."""
+    не JSON или чужие поля — пусто. Текст окна и всё лишнее в журнал не идёт. biometry помощника (LAContext.biometryType)
+    — тип датчика Mac, а не способ подтверждения: при пароле и часах тоже touchID. В журнал оно идёт полем
+    device_biometry (metis-0932); способ видно только косвенно — shown_sec около 0 — или в log show вне окна."""
     try:
         d = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
     except (ValueError, IndexError, AttributeError):
@@ -938,7 +974,7 @@ def window_info(out):
         return {}
     info = {}
     if isinstance(d.get("biometry"), str) and d["biometry"] in ("touchID", "faceID", "opticID", "none"):
-        info["biometry"] = d["biometry"]
+        info["device_biometry"] = d["biometry"]
     if "la_code" in d and (d["la_code"] is None or type(d["la_code"]) is int):
         info["la_code"] = d["la_code"]
     if type(d.get("shown_sec")) in (int, float):
@@ -1422,13 +1458,30 @@ def cmd_request(args):
     return 0
 
 
+def merge_conflict(view):
+    """Сливается ли PR с base по gh pr view (metis-0819): mergeable CONFLICTING или mergeStateStatus DIRTY — (fail,
+    «конфликт с <base>»): окно не показывать, gh pr merge всё равно упадёт; GitHub ещё считает (UNKNOWN, поля нет) —
+    (wait, …), проход попробует позже; сливается — None."""
+    m, s = str(view.get("mergeable") or "").upper(), str(view.get("mergeStateStatus") or "").upper()
+    base = view.get("baseRefName") or "base"
+    if m == "CONFLICTING" or s == "DIRTY":
+        return "fail", f"конфликт с {base} (mergeable {m or '?'}, {s or '?'}) — нужен новый коммит и новая заявка"
+    if m != "MERGEABLE" or s in ("", "UNKNOWN"):
+        return "wait", f"GitHub ещё не посчитал, сливается ли PR с {base} (mergeable {m or '?'}, {s or '?'})"
+    return None
+
+
 def check_all(req):
     """Все условия заново: (ok|wait|fail, текст, view, пути файлов). Репозиторий — из [merge_repos] сейчас, шлюз — на
-    тот же head, список файлов PR полон (окно показывает задетое ядро)."""
+    тот же head, PR сливается с base (merge_conflict), список файлов PR полон (окно показывает задетое ядро)."""
     if req["repo"] not in allowed_repos():
         return "fail", f"{req['repo']} больше не в [merge_repos] {MERGE_DIRECTION}", None, None
     view = pr_view(req["repo"], req["pr"])
     state, why = gate(req["repo"], req["pr"], req["sha"], view)
+    # конфликт с base — до окна (metis-0819: 05.11 палец трижды тратился на PR, который gh pr merge не сливал)
+    conflict = merge_conflict(view) if state != "fail" and isinstance(view, dict) else None
+    if conflict and (conflict[0] == "fail" or state == "ok"):
+        return conflict[0], conflict[1], view, None
     if state != "ok":
         return state, why, view, None
     raw = []
@@ -1466,7 +1519,7 @@ def finger(req, rc=0, phrase=None):
             approve(req)
             os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
     if bad:
-        log(req, "gate-after")
+        log(req, "gate-after", why=bad)
         P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) {how}: не слито, заявка снята — {bad}",
                 "pantheon-merge")
         return False, f"снята: {bad}"
@@ -1474,7 +1527,8 @@ def finger(req, rc=0, phrase=None):
         log(req, "phrase", file=f"owner-log/{phrase['file']}", line=phrase["line"], at=phrase["at"],
             said=f"слей #{phrase['pr']} {phrase['hex']}")
     code, out = gh_merge(req)
-    log(req, "merged" if code == 0 else "merge-failed", rc=code, how="phrase" if phrase else "touchid")
+    log(req, "merged" if code == 0 else "merge-failed", rc=code, how="phrase" if phrase else "touchid",
+        why=None if code == 0 else f"{'фраза' if phrase else 'палец'} есть, gh pr merge упал ({code}): {out}")
     if code == 0:
         notify_merged(req, phrase)
     if code != 0:
@@ -1701,7 +1755,32 @@ def cmd_status():
                 rows.append(f"{req['repo']}#{req['pr']}\t{req['sha'][:12]}\t{int((t - req['created']) // 60)} мин\t"
                             f"{req.get('by', '?')}{marks}")
     print("\n".join(rows) if rows else "заявок нет")
+    done = recent_done(t)
+    if done:   # metis-0819: «заявок нет» после снятия или провала gh pr merge — не «окна не было»
+        print(f"за {DONE_SHOW // 3600} ч сняты и слиты:\n" + "\n".join(done))
     return 0
+
+
+def recent_done(t):
+    """Строки `pantheon merge status` о заявках, ушедших из очереди за DONE_SHOW (metis-0819): время, repo#N, SHA,
+    событие и причина из logs/merge.jsonl. Журнал не читается — пусто."""
+    out = []
+    try:
+        with open(P.path("logs", "merge.jsonl"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return out
+    for ln in lines:
+        try:
+            rec = json.loads(ln)
+            at = datetime.strptime(rec["time"], "%Y-%m-%d %H:%M").timestamp()
+        except (ValueError, TypeError, KeyError):
+            continue
+        if isinstance(rec, dict) and rec.get("event") in DONE_EVENTS and 0 <= t - at <= DONE_SHOW:
+            why = rec.get("why") if isinstance(rec.get("why"), str) else ""
+            out.append(f"{rec['time']}\t{rec.get('repo')}#{rec.get('pr')}\t{str(rec.get('sha') or '?')[:12]}\t"
+                       f"{rec['event']}" + (f": {why}" if why else ""))
+    return out[-DONE_MAX:]
 
 
 def cmd_cancel(args):

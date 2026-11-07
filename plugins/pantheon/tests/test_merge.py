@@ -246,10 +246,11 @@ class Box:
         return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil, attrs=attrs)
 
     def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main",
-             head=None, pr=None):
+             head=None, pr=None, mergeable="MERGEABLE", merge_state="CLEAN"):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
         len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.); pr —
-        ответ только этого PR (пачка, metis-0668), иначе общий для всех."""
+        ответ только этого PR (пачка, metis-0668), иначе общий для всех; mergeable, merge_state — mergeable и
+        mergeStateStatus (None — поля нет, metis-0819)."""
         sfx = "" if pr is None else f"-{pr}"
         files = FILES if files is None else files
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
@@ -257,6 +258,8 @@ class Box:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
                        **({} if pr is None else {"_pr": pr}),
                        **({} if base is None else {"baseRefName": base}),
+                       **({} if mergeable is None else {"mergeable": mergeable}),
+                       **({} if merge_state is None else {"mergeStateStatus": merge_state}),
                        "statusCheckRollup": ci("SUCCESS", "SUCCESS") if checks is None else checks,
                        "changedFiles": len(recs) if count is None else count, **(head or {})}, fh)
         with open(os.path.join(self.rec, f"gh-files{sfx}.jsonl"), "w") as fh:
@@ -681,6 +684,70 @@ def test_merge_fails():
           b.alerts())
 
 
+def test_conflict_before_window():
+    """metis-0819: PR с конфликтом с main (CONFLICTING или DIRTY) — окна нет, заявка снята с причиной, причина в
+    status; GitHub ещё считает (UNKNOWN, поля нет) — окна нет, заявка ждёт, а посчитал — окно и слияние."""
+    for name, kw in (("mergeable CONFLICTING", {"mergeable": "CONFLICTING", "merge_state": "DIRTY"}),
+                     ("только mergeStateStatus DIRTY", {"merge_state": "DIRTY"})):
+        b = Box()
+        b.request()
+        b.view(SHA, **kw)
+        b.run()
+        check(f"{name} → окна нет, слияния нет, заявка снята с тревогой «конфликт с main»",
+              not b.windows() and not b.merges() and b.req() is None and "конфликт с main" in b.alerts(), b.alerts())
+        r = b.cli(["merge", "status"])
+        check(f"{name} → status: заявок нет, ниже — снятая с причиной «конфликт с main»",
+              "заявок нет" in r.stdout and f"{REPO}#{PR}\t{SHA[:12]}\tgate: конфликт с main" in r.stdout, r.stdout)
+    for name, kw in (("mergeable UNKNOWN", {"mergeable": "UNKNOWN", "merge_state": "UNKNOWN"}),
+                     ("mergeStateStatus UNKNOWN", {"merge_state": "UNKNOWN"}),
+                     ("полей mergeable нет", {"mergeable": None, "merge_state": None})):
+        b = Box()
+        b.request()
+        b.view(SHA, **kw)
+        b.run()
+        check(f"{name} → окна нет, заявка ждёт без тревоги",
+              not b.windows() and b.req() is not None and not b.alerts()
+              and "ждёт: GitHub ещё не посчитал, сливается ли PR с main" in b.outs[-1], (b.outs[-1], b.alerts()))
+        b.view(SHA)
+        b.run(t=T0 + 60)
+        check(f"{name}, затем MERGEABLE → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, mergeable="CONFLICTING", checks=ci("PENDING", "SUCCESS"))
+    b.run()
+    check("конфликт, CI ещё идёт → снята сразу (ждать CI незачем)", b.req() is None and not b.windows(), b.outs[-1])
+
+
+def test_status_shows_done():
+    """metis-0819: status — не только «заявок нет»: снятые за сутки с причиной, провал gh pr merge после пальца,
+    слитые; старше суток и мусор в журнале — нет."""
+    b = Box()
+    b.request()
+    b.set("gh-merge-rc", 1)
+    b.run()
+    r = b.cli(["merge", "status"], t=T0 + 3600)
+    check("merge-failed после пальца — в status с причиной",
+          "заявок нет" in r.stdout and f"{REPO}#{PR}\t{SHA[:12]}\tmerge-failed: палец есть, gh pr merge упал (1)"
+          in r.stdout, r.stdout)
+    with open(os.path.join(b.state, "logs", "merge.jsonl"), "a") as fh:
+        fh.write("не json\n[1]\n" + json.dumps({"time": "вчера", "event": "gate"}) + "\n")
+    r = b.cli(["merge", "status"], t=T0 + 25 * 3600)
+    check("через 25 ч — снятых нет, мусор в журнале не роняет status",
+          r.returncode == 0 and r.stdout.strip() == "заявок нет", r.stdout + r.stderr)
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 1)
+    b.run()
+    b.request()
+    r = b.cli(["merge", "status"])
+    check("отказ — в status «refused: вы отказали», и стоящая заявка видна",
+          f"{REPO}#{PR}\t{SHA[:12]}\trefused: вы отказали" in r.stdout and "заявок нет" not in r.stdout, r.stdout)
+    b.set("touchid-rc", 0)
+    b.run()
+    r = b.cli(["merge", "status"])
+    check("слит — в status «merged»", f"{REPO}#{PR}\t{SHA[:12]}\tmerged" in r.stdout, r.stdout)
+
+
 def test_refused_from_claude_window():
     b = Box()
     b.request()
@@ -774,9 +841,9 @@ def test_merged_notice_and_window_fields():
     check("слито → ровно одно уведомление «слит repo#N (sha7)», без щелчка-команды",
           note.count(f"слит {REPO}#{PR} ({SHA[:7]})") == 1 and note.count("\n") == 1 and "execute:" not in note, note)
     w = [r for r in jsonl(b) if r["event"] == "window"]
-    check("window: biometry, la_code, shown_sec из помощника, чужое поле не попало",
-          len(w) == 1 and w[0]["biometry"] == "touchID" and w[0]["la_code"] is None and w[0]["shown_sec"] == 3.4
-          and "text" not in w[0], w)
+    check("window: device_biometry (тип датчика, metis-0932), la_code, shown_sec из помощника, чужое поле не попало",
+          len(w) == 1 and w[0]["device_biometry"] == "touchID" and "biometry" not in w[0] and w[0]["la_code"] is None
+          and w[0]["shown_sec"] == 3.4 and "text" not in w[0], w)
     b = Box()
     b.request()
     b.set("touchid-rc", 1)
@@ -784,7 +851,17 @@ def test_merged_notice_and_window_fields():
     b.run()
     w = [r for r in jsonl(b) if r["event"] == "window"]
     check("отказ: la_code -2 в журнале, уведомления о слиянии нет",
-          w and w[0]["la_code"] == -2 and w[0]["biometry"] == "none" and not os.path.exists(b.notify_log), (w, b.outs[-1]))
+          w and w[0]["la_code"] == -2 and w[0]["device_biometry"] == "none" and not os.path.exists(b.notify_log),
+          (w, b.outs[-1]))
+    for bad in ("-2", True, 1.5):   # Д3 argus #364 (M7): la_code только int или null — строка, bool, float не идут
+        b = Box()
+        b.request()
+        b.set("touchid-rc", 1)
+        b.set("touchid-out", json.dumps({"la_code": bad, "shown_sec": 1}))
+        b.run()
+        w = [r for r in jsonl(b) if r["event"] == "window"]
+        check(f"la_code {bad!r} (не int) → в журнал не идёт, shown_sec идёт",
+              w and "la_code" not in w[0] and w[0]["shown_sec"] == 1, w)
     b = Box()
     b.request()
     b.set("gh-merge-rc", 1)
@@ -797,7 +874,13 @@ def test_merged_notice_and_window_fields():
     b.run()
     w = [r for r in jsonl(b) if r["event"] == "window"]
     check("помощник напечатал не JSON → слияние идёт, полей окна нет",
-          len(b.merges()) == 1 and w and "biometry" not in w[0] and "shown_sec" not in w[0], w)
+          len(b.merges()) == 1 and w and "device_biometry" not in w[0] and "shown_sec" not in w[0], w)
+    # Д3 argus #364 (M6): merge.ask — только код помощника (int), его зовёт handoff; кортеж ask_full — нет
+    code = ("import sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); "
+            "m.ask_full = lambda text: (3, {'la_code': -9}); print(repr(m.ask('x')))" % LIBDIR)
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60,
+                       env={"HOME": b.home, "PATH": "/usr/bin:/bin", "PANTHEON_STATE": b.state, "TMPDIR": _ROOT})
+    check("merge.ask → код помощника 3, а не кортеж", r.stdout.strip() == "3", r.stdout + r.stderr)
 
 
 def test_cancel_during_window():
@@ -1056,10 +1139,8 @@ def test_ci_billing():
              None),
             ("красная без аннотаций", [dict(blocked[0], notes=[]), blocked[1]], None),
             ("TIMED_OUT с аннотацией лимита", [dict(blocked[0], conclusion="TIMED_OUT"), blocked[1]], None),
-            ("аннотации не получены", blocked, "gh-notes-fail"),
             ("аннотацию лимита напечатал сам job (раннер и шаги есть)",
-             [{k: v for k, v in blocked[0].items() if k != "job"}, blocked[1]], None),
-            ("данные job не получены", blocked, "gh-jobs-fail")):
+             [{k: v for k, v in blocked[0].items() if k != "job"}, blocked[1]], None)):
         b = Box()
         b.request()
         b.view(SHA, checks=checks)
@@ -1121,6 +1202,31 @@ def test_ci_billing():
     b.run()
     check("лимит, запись прохода outside test (без heavy, с хвостом) → окно и слияние", len(b.merges()) == 1,
           b.outs[-1])
+
+
+def test_ci_billing_gh_fail():
+    """metis-0813: сбой gh на аннотациях или job (TLS из окна) — признак лимита не проверить: ждёт, а не снята."""
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    for name, setup in (("аннотации не получены", "gh-notes-fail"), ("данные job не получены", "gh-jobs-fail")):
+        b = Box()
+        b.request()
+        b.view(SHA, checks=blocked)
+        b.set(setup, "")
+        b.run()
+        check(f"лимит, {name} (сбой gh) → окна нет, заявка ждёт без тревоги",
+              not b.windows() and not b.merges() and b.req() is not None and not b.alerts()
+              and "ждёт: аннотации CI не получены (сбой gh)" in b.outs[-1], (b.outs[-1], b.alerts()))
+        os.remove(os.path.join(b.rec, setup))
+        b.run(t=T0 + 60)
+        check(f"лимит, {name}, сбой прошёл → следующий проход: окно и слияние",
+              len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=[dict(blocked[0], notes=[billing_note("Process completed with exit code 1.")]), blocked[1]])
+    b.set("gh-jobs-fail", "")
+    b.run()
+    check("обычная красная, данные job не получены → тоже ждёт (признак не проверить), заявка цела",
+          not b.windows() and b.req() is not None and "аннотации CI не получены" in b.outs[-1], b.outs[-1])
 
 
 def test_ci_fork_billing():
@@ -1897,7 +2003,12 @@ def test_batch_one_window_merges_all():
           r.returncode == 0 and r7 and r8 and r7["batch"] == r8["batch"] == [7, 8] and r7["created"] == r8["created"]
           and r7["sha"] == SHA and r8["sha"] == SHA2 and "Пачка" in r.stdout, b.outs[-1])
     check("пачка: окна и слияния нет до прохода", not b.windows() and not b.merges())
+    b.set("touchid-out", json.dumps({"biometry": "touchID", "la_code": None, "shown_sec": 2.5}))
     b.run()
+    ws = [r for r in jsonl(b) if r["event"] == "window"]
+    check("пачка: поля окна помощника — в событии window каждого PR (Д3 argus #364, M3)",
+          [r["pr"] for r in ws] == [7, 8] and all(r.get("shown_sec") == 2.5 and r.get("device_biometry") == "touchID"
+                                                  and "la_code" in r for r in ws), ws)
     w = b.windows()
     text = w[0][0] if w else ""
     check("пачка: одно окно на оба PR — номер, SHA и вердикт каждого, ядро, заголовки последними, не длиннее 400",
