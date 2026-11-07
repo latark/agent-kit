@@ -887,7 +887,9 @@ def base_tip(repo, branch):
         ref = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    obj = ref.get("object") if isinstance(ref, dict) and isinstance(ref.get("object"), dict) else {}
+    if not isinstance(ref, dict):
+        return None
+    obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
     sha = obj.get("sha")
     if ref.get("ref") != "refs/heads/" + branch or obj.get("type") != "commit" or not isinstance(sha, str) \
             or not re.fullmatch(r"[0-9a-f]{40}", sha.lower()):
