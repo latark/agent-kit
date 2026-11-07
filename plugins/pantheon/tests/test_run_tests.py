@@ -592,6 +592,25 @@ r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
 check("устаревшая карта + файл вне карты: весь набор, одна строка с причиной и файлом",
       r.returncode == 0 and "brand_new.py — нет в карте" in r.stdout and "весь набор" in r.stdout
       and r.stdout.count("run-tests: затронутое") == 1 and f"файлов {len(mlabels)}, ok {len(mlabels)}" in r.stdout, r.stdout)
+# 7 файлов вне карты (долг argus #292, metis-0782): строка называет первые 5 и «и ещё 2», не один и не все
+NEW7 = [f"brand_new{i}.py" for i in range(1, 7)]
+for nm in NEW7:
+    put(os.path.join(mdir, "lib", nm), "B = 1\n")
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+line7 = next((ln for ln in r.stdout.splitlines() if ln.startswith("run-tests: затронутое")), "")
+check("7 файлов вне карты: строка называет ровно 5 с причиной и «и ещё 2», весь набор",
+      r.returncode == 0 and line7.count("— нет в карте") == 5 and line7.endswith(" и ещё 2 — весь набор")
+      and "изменено 8" in line7 and f"файлов {len(mlabels)}, ok {len(mlabels)}" in r.stdout, r.stdout)
+os.remove(os.path.join(mdir, "lib", NEW7[-1]))
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+line6 = next((ln for ln in r.stdout.splitlines() if ln.startswith("run-tests: затронутое")), "")
+check("6 файлов вне карты: 5 названо и «и ещё 1»", line6.count("— нет в карте") == 5
+      and line6.endswith(" и ещё 1 — весь набор"), r.stdout)
+for nm in NEW7[:-1] + ["brand_new.py"]:
+    os.remove(os.path.join(mdir, "lib", nm))
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+check("один файл вне карты убран, вне карты ничего: «и ещё» нет", "и ещё" not in r.stdout
+      and "весь набор" not in r.stdout, r.stdout)
 
 # --- affected-map.py: карта по прогону в копии с метками ---
 MAPPER = os.path.join(PLUGIN, "scripts", "affected-map.py")

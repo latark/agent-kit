@@ -1357,8 +1357,11 @@ rid_b = ids[0]
 git(APP, "commit", "--allow-empty", "-q", "-m", "m0706")
 rc, out = dup_say("athena-x", APP, "test")
 ids = req_ids(q)
-check("регрессия: другой head — вторая заявка, обе в очереди", rc == 0 and len(ids) == 2 and rid_b in ids, (rc, out, ids))
-rid_c = next(i for i in ids if i != rid_b)
+rid_c = ids[0] if len(ids) == 1 and rid_b not in ids else None
+res_b = O.load_result(q, rid_b) or {}
+check("регрессия: другой head — новая заявка, а не дубль; прежняя на предке снята «заменена» (metis-0852)",
+      rc == 0 and rid_c and res_b.get("state") == "stopped" and res_b.get("replaced_by") == rid_c
+      and f"заменена заявкой {rid_c}" in res_b.get("why", ""), (rc, out, ids, res_b))
 check("регрессия: у второй свой head", (O.load_result(q, rid_c) or {}).get("sha") != head_now, O.load_result(q, rid_c))
 # (б) stop снимает тест, пока он в очереди
 rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
@@ -1367,9 +1370,9 @@ check("stop (б): тест в очереди снят — код 0, заявки
       rc == 0 and rid_c not in req_ids(q) and res.get("state") == "stopped" and "отменена" in res.get("why", ""),
       (rc, out, res))
 run_pass()
-check("stop (б): снятый тест проход не запускает, остальная очередь идёт",
+check("stop (б): снятый тест и заменённый проход не запускает",
       (O.load_result(q, rid_c) or {}).get("state") == "stopped"
-      and (O.load_result(q, rid_b) or {}).get("state") in ("done", "failed"), (O.load_result(q, rid_c), O.load_result(q, rid_b)))
+      and (O.load_result(q, rid_b) or {}).get("replaced_by") == rid_c, (O.load_result(q, rid_c), O.load_result(q, rid_b)))
 rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
 check("stop (б): повтор — «уже stopped», код 0", rc == 0 and "stopped" in out, (rc, out))
 git(APP, "reset", "-q", "--hard", head_now)
@@ -3161,7 +3164,9 @@ SF = commit(APP, {"t.py": S_TPY + "# f\n"}, "0873 f")
 # ID заявки — секунда и случайный хвост: в одну секунду новая могла встать раньше старой и снять её «дублем»
 # (pr353-red-1) — новая заявка в следующей секунде
 wait_for(lambda: time.strftime("%Y%m%d-%H%M%S") > ra[:15], 3)
-qb, rb = new_request("athena-x", APP, "test")
+# новая заявка — файлом, мимо cmd_request: подача сама сняла бы старую на предке (metis-0852), а здесь проверка
+# прохода — заявки, поданные до выпуска 0852 или с другого пути
+qb, rb = qa, one_request(qd=qa, rid=time.strftime("%Y%m%d-%H%M%S") + "-b8b8b8")
 run_pass()
 resa, resb = O.load_result(qa, ra) or {}, O.load_result(qb, rb) or {}
 check("T8a queued_superseded_by_newer: старая — failed «superseded <новый>», новая прогнана, прогон один",
