@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "head": "87712e42",
+  "head": "313410d1",
   "python": "3.14",
   "hashes": {
     "guard/test_canaries.py": "258eb161a78d7babefa81225643bacbdc82029f74bfb3a892055304a777cf576",
@@ -662,7 +662,7 @@
     ".pantheon-verify": "7b67c00ccc83b9bac4943b95cbfe23180c4064d7c5676aa4653db8aa5fb81f82",
     "AGENTS.md": "4b27a2c1956c4a8a4fffbaa9d7cdeee81f47312b1d1c205f1cdac16a862764b1",
     "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49",
-    "README.md": "be1e8644fcf6b5df496af2dea51c5bfd123afcbefa645053484adb0c707889df",
+    "README.md": "340cee4860f646af020387938061c191f056606ae099b0d189841894950dfcf8",
     "drafts/0771-threat-model.md": "03af9b7e51a6a62313b4f0f9cba9448ba5219e883f823b002f700ddb55b00ee5",
     "plugins/guard/.claude-plugin/plugin.json": "108d2aeb369d70f6ee0b58de13afa4814b448d2160e938a4127db69b86fbff71",
     "plugins/guard/README.md": "60336381fd950dc34029d4ec2b2a9cc0f65d17b21b5c0733fcedf45b9c18f485",
