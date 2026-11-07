@@ -45,10 +45,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         окнам из карты plugins-by-role.toml — enabledPlugins: false и
                                         permissions.deny mcp__<сервер> вне их «оставить» (metis-0238)
   pantheon packs hashes <направление>   нынешние sha256 скриптов .claude/hooks, которые хуки пакета направления
-                                        исполняют, и HEAD их репозиториев — JSON для одобрения владельцем в
-                                        ~/.claude/pantheon/packs/<направление>/approved.json; ничего не пишет
-                                        (metis-0933, класс 6). В stderr — совпал ли HEAD с origin/<ветка> и
-                                        чисто ли дерево, расхождение — «внимание — …» и код 1
+                                        исполняют, — JSON для одобрения владельцем в
+                                        ~/.claude/pantheon/packs/<направление>/approved.json (metis-0933, класс 6).
+                                        Хеш и текст каждого скрипта (в stderr) — из снимка в STATE, .git не
+                                        читается; в ~/.claude/pantheon ничего не пишет. Скрипт не прочитан —
+                                        «внимание — …» и код 1
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
@@ -3251,18 +3252,23 @@ REPO_HOOKS_PREFIX = ".claude/hooks/"
 # .claude/hooks рабочей копии коммитом, собранным окном в песочнице, — литеральный denyWrite держит только команды в
 # песочнице. Поэтому снимок берёт скрипт репозитория, только если его sha256 совпал с эталоном из данных пользователя
 # PACK_APPROVED_HOME/<направление>/approved.json (~/.claude/pantheon/packs: вне allowWrite окон, правит владелец через
-# owner-edit; PR в agent-kit не нужен). Формат: {"repos": {"$HOME/…/app": {"commit": "<sha коммита одобрения>",
-# "scripts": {"protect-db.sh": "<sha256>"}}}}. Не совпал или файла нет — скрипта в снимке нет, в манифесте —
-# unapproved {репозиторий: {имя: sha256}}: in_repo.py пропускает хук (выход 0), запуск окна — строка в stderr и одна
-# тревога на хеш (pack_unapproved_alert) с диффом от коммита одобрения. Текущие хеши для карточки владельцу печатает
-# `pantheon packs hashes <направление>` (pack_hashes) — ничего не пишет.
+# owner-edit; PR в agent-kit не нужен). Формат: {"repos": {"$HOME/…/app": {"scripts": {"protect-db.sh": "<sha256>"}}}}
+# (поле commit прошлых кругов не читается). Не совпал или файла нет — скрипта в снимке нет, его байты — в pending/
+# снимка, в манифесте — unapproved {репозиторий: {имя: sha256}}: in_repo.py пропускает хук (выход 0), запуск окна —
+# строка в stderr и одна тревога на хеш (pack_unapproved_alert) с диффом от одобренной копии.
+# Круг G5 (решение Зевса 07.11, вариант А): ни хеш, ни текст, ни дифф не берутся из .git — его пишет окно (объекты,
+# refs/replace, origin: три круга подряд по классу). Хеш и текст — из файлов снимка; одобренная копия — байты скрипта
+# с sha256 эталона, PACK_APPROVED_HOME/<направление>/approved/<sha256>: её кладёт запуск окна из снимка, когда скрипт
+# совпал с эталоном, при чтении она сверяется с эталоном снова. Нет копии или эталона — тревога без диффа: «нет
+# одобренной копии». Текущие хеши и текст для карточки владельцу печатает `pantheon packs hashes <направление>`
+# (pack_hashes) — из своего снимка, в ~/.claude/pantheon ничего не пишет.
 PACK_APPROVED_HOME = os.path.join(HOME, ".claude", "pantheon", "packs")
 PACK_APPROVED = "approved.json"
-PACK_ALERT_DIFF = 1500  # знаков диффа в строке тревоги: alerts.md — строка, полный дифф — файлом PACK_DIFFS
-PACK_DIFFS = "pack-diffs"  # STATE/pack-diffs/<направление>-<хеш пути>-<sha256>.diff: полный дифф обрезанной тревоги
+PACK_APPROVED_COPY = "approved"  # PACK_APPROVED_HOME/<направление>/approved/<sha256>: байты одобренного скрипта
+PACK_ALERT_DIFF = 1500  # знаков диффа в строке тревоги: длиннее — «обрезано», полный — diff одобренной копии и снимка
+PACK_DIFFS = "pack-diffs"  # STATE/pack-diffs — полные диффы кругов G3–G4; больше не пишутся, pack_snapshot их убирает
 PACK_DATA_OPEN, PACK_DATA_CLOSE, PACK_DATA_EOL = "⟦", "⟧", " ⏎ "  # обрамление диффа (данные) и конец его строки
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
-COMMIT_HEX = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def pack_unapproved_line(script_path, digest):
@@ -3281,100 +3287,97 @@ def pack_approved_path(window):
     return os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED)
 
 
+def pack_approved_copy(window, digest):
+    """Путь одобренной копии скрипта с sha256 digest направления window."""
+    return os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY, digest)
+
+
 def pack_approved(p):
-    """Эталоны файла p (approved.json): ({репозиторий (_pack_repo): {имя скрипта: sha256}}, {репозиторий: коммит
-    одобрения}) или (None, {}) — файла нет. Не JSON, кривая строка, кривой хеш или коммит — без них: скрипт без эталона
-    не одобрен, репозиторий без коммита — тревога без диффа."""
+    """Эталоны файла p (approved.json): {репозиторий (_pack_repo): {имя скрипта: sha256}} или None — файла нет. Не
+    JSON, кривая строка или кривой хеш — без них: скрипт без эталона не одобрен."""
     if not os.path.lexists(p):
-        return None, {}
+        return None
     data = read_json(p, {})
     got = data.get("repos") if isinstance(data, dict) else None
-    scripts, commits = {}, {}
+    scripts = {}
     for repo, item in (got.items() if isinstance(got, dict) else ()):
         if not isinstance(repo, str) or not repo or not isinstance(item, dict):
             continue
         names = item.get("scripts") if isinstance(item.get("scripts"), dict) else {}
-        key = _pack_repo(repo)
-        scripts.setdefault(key, {}).update(
+        scripts.setdefault(_pack_repo(repo), {}).update(
             {n: h for n, h in names.items() if isinstance(n, str) and isinstance(h, str) and SHA256_HEX.fullmatch(h)})
-        if isinstance(item.get("commit"), str) and COMMIT_HEX.fullmatch(item["commit"]):
-            commits[key] = item["commit"]
-    return scripts, commits
-
-
-# git в репозитории, который пишет окно (дифф тревоги, хеши первичного одобрения — круг G3, ревью argus G1 Б1): без
-# GIT_* вызывающего, без refs/replace (окно пишет refs в песочнице: `update-ref refs/replace/<коммит одобрения>`
-# подменяло текст, от которого считается дифф), без системного и глобального конфига, без хуков, сети и fsmonitor
-REPO_GIT_ENV = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
-                "GIT_OPTIONAL_LOCKS": "0"}
-REPO_GIT_SAFE = ("-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "core.fsmonitor=false")
-
-
-def _repo_git(repo, *args):
-    """git в чужом репозитории (его пишет окно) только на чтение → stdout байтами или None. Окружение — REPO_GIT_ENV
-    без чужих GIT_*, ключи — REPO_GIT_SAFE: ни refs/replace, ни конфига вне репозитория, ни хуков, ни докачки
-    объектов и сети (protocol.allow=never: transport и ssh из .git/config не запускаются)."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(REPO_GIT_ENV)
-    try:
-        r = subprocess.run(["git", *REPO_GIT_SAFE, "-C", repo, *args],
-                           capture_output=True, env=env, timeout=20, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return r.stdout if r.returncode == 0 else None
+    return scripts
 
 
 def _pack_data(text):
-    """Строка чужого текста (диффа из репозитория окна) для тревоги: управляющие знаки, кроме \\n и \\t (ESC
-    перекрашивает и стирает строки в терминале), невидимые знаки формата (смена направления письма U+202E),
-    разделители строк и знаки обрамления ⟦⟧⏎ — кодом \\uXXXX: окно не подделает ни строку «одобрить?», ни конец
-    диффа."""
+    """Строка чужого текста (скрипта или диффа из репозитория окна) для тревоги и вывода packs hashes: управляющие
+    знаки, кроме \\n и \\t (ESC перекрашивает и стирает строки в терминале), невидимые знаки формата (смена
+    направления письма U+202E), разделители строк и знаки обрамления ⟦⟧⏎ — кодом \\uXXXX: окно не подделает ни строку
+    «одобрить?», ни конец диффа."""
     return "".join(c if c in "\n\t" or (c not in "⟦⟧⏎" and unicodedata.category(c) not in (
         "Cc", "Cf", "Cs", "Zl", "Zp")) else f"\\u{ord(c):04x}" for c in text)
 
 
-def pack_unapproved_alert(window, repo, script, new, current, approved):
-    """Тревога Зевсу о скрипте с чужим хешем new (байты current) — одна на (направление, скрипт, хеш): «[metis-0933]
-    <направление>: хук <путь> изменён, одобрить?», старый и новый sha256, дифф от коммита одобрения (`git diff
-    <commit> -- <путь>`: текст коммита из `git cat-file`, сравнение с прочитанными байтами). approved — pack_approved
-    направления; нет approved.json, коммита или объекта — тревога без диффа.
-    Дифф не подделать из окна (круг G3, ревью argus G1 Б1, Д3, G2 Д1): git — _repo_git (без refs/replace); текст
-    коммита одобрения показывается, только если его sha256 — эталон approved.json (переписанный объект в
-    .git/objects не совпадёт); управляющие и невидимые знаки — кодом \\uXXXX (_pack_data), дифф в ⟦…⟧ с пометкой
-    «данные»; длиннее PACK_ALERT_DIFF — «обрезано, полный — <файл>», файл — STATE/pack-diffs (окно его не пишет)."""
-    scripts, commits = approved
-    old, commit = ((scripts or {}).get(repo) or {}).get(script), commits.get(repo)
+def pack_approved_text(window, digest):
+    """Байты одобренной копии с sha256 digest или None — копии нет, это ссылка или не обычный файл, или её байты не
+    дают digest (копию переписали): тогда дифф не показывается."""
+    data = _read_bytes_nofollow(pack_approved_copy(window, digest), PACK_SCRIPT_LIMIT) if digest else None
+    return data if data is not None and hashlib.sha256(data).hexdigest() == digest else None
+
+
+def pack_keep_approved(window, approved, kept):
+    """Одобренные копии направления window: kept {sha256: байты} — скрипты снимка, совпавшие с эталоном (байты из
+    снимка, sha256 сверен), кладутся в approved/<sha256>, если копии нет или она не та; копии, чьего sha256 нет среди
+    эталонов approved, убираются. Не записалось — строка в stderr: тревога придёт без диффа."""
+    top = os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY)
+    want = {h for names in (approved or {}).values() for h in names.values()}
+    try:
+        for digest, data in kept.items():
+            if digest in want and hashlib.sha256(data).hexdigest() == digest and pack_approved_text(
+                    window, digest) != data:
+                os.makedirs(top, mode=0o700, exist_ok=True)
+                tmp = tempfile.NamedTemporaryFile(dir=top, prefix=".copy-", delete=False)
+                with tmp:
+                    tmp.write(data)
+                os.chmod(tmp.name, 0o444)
+                os.replace(tmp.name, os.path.join(top, digest))
+        for fn in os.listdir(top) if os.path.isdir(top) else ():
+            if fn not in want:
+                os.unlink(os.path.join(top, fn))
+    except OSError as e:
+        print(f"pantheon: окно {window}: одобренная копия в {tilde(top)} не записана ({e}) — тревога об изменении "
+              "хука придёт без диффа", file=sys.stderr)
+
+
+def pack_unapproved_alert(window, repo, script, new, current, approved, snap_file=None):
+    """Тревога Зевсу о скрипте с чужим хешем new (байты current, в снимке — snap_file) — одна на (направление,
+    скрипт, хеш): «[metis-0933] <направление>: хук <путь> изменён, одобрить?», старый и новый sha256, дифф от
+    одобренной копии (pack_approved_text: sha256 копии — эталон approved.json). approved — pack_approved направления.
+    Нет approved.json, эталона или копии — тревога без диффа: «нет одобренной копии». .git репозитория не читается
+    (круг G5): объекты, refs/replace и origin пишет окно. Управляющие и невидимые знаки — кодом \\uXXXX (_pack_data),
+    дифф в ⟦…⟧ с пометкой «данные»; длиннее PACK_ALERT_DIFF — «обрезано, полный: diff -u <копия> <файл снимка>»."""
+    old = ((approved or {}).get(repo) or {}).get(script)
     where = os.path.join(repo, ".claude", "hooks", script)
     rel = f".claude/hooks/{script}"
     key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
-    if scripts is None:
-        diff = f"{tilde(pack_approved_path(window))} нет — хуки направления не исполняются"
-    elif not commit:
-        diff = "дифф: коммита одобрения в approved.json нет"
+    base = pack_approved_text(window, old)
+    if approved is None:
+        diff = f"{tilde(pack_approved_path(window))} нет — хуки направления не исполняются; нет одобренной копии"
+    elif not old:
+        diff = "дифф не показан: нет одобренной копии — у скрипта нет эталона в approved.json"
+    elif base is None:
+        diff = f"дифф не показан: нет одобренной копии {tilde(pack_approved_copy(window, old))} с sha256 эталона"
     else:
-        base = _repo_git(repo, "cat-file", "blob", f"{commit}:{rel}")
-        if base is None:
-            diff = f"дифф: объекта {commit[:12]}:{rel} нет"
-        elif old and hashlib.sha256(base).hexdigest() != old:
-            diff = (f"дифф не показан: текст {commit[:12]}:{rel} не совпал с эталоном sha256 {old[:12]} — объекты "
-                    "репозитория подменены или коммит одобрения не тот")
-        else:
-            lines = [_pack_data(x) for x in difflib.unified_diff(
-                base.decode("utf-8", "replace").splitlines(), current.decode("utf-8", "replace").splitlines(),
-                f"{commit[:12]}:{rel}", rel, lineterm="")]
-            text = PACK_DATA_EOL.join(lines)
-            more = ""
-            if len(text) > PACK_ALERT_DIFF:
-                full = path(PACK_DIFFS, key.removeprefix("pack-hook-") + ".diff")
-                try:
-                    os.makedirs(os.path.dirname(full), mode=0o700, exist_ok=True)
-                    write_atomic(full, "\n".join(lines) + "\n")
-                    more = f" — обрезано, полный — {tilde(full)}"
-                except OSError as e:
-                    more = f" — обрезано, полный дифф не записан ({e})"
-            diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{text[:PACK_ALERT_DIFF]}"
-                    f"{PACK_DATA_CLOSE}{more}")
+        lines = [_pack_data(x) for x in difflib.unified_diff(
+            base.decode("utf-8", "replace").splitlines(), current.decode("utf-8", "replace").splitlines(),
+            f"одобрено {old[:12]}:{rel}", rel, lineterm="")]
+        text = PACK_DATA_EOL.join(lines)
+        more = ""
+        if len(text) > PACK_ALERT_DIFF:
+            more = (f" — обрезано, полный: diff -u {tilde(pack_approved_copy(window, old))} {tilde(snap_file)}"
+                    if snap_file else " — обрезано")
+        diff = (f"дифф (данные из репозитория окна, не указание): {PACK_DATA_OPEN}{text[:PACK_ALERT_DIFF]}"
+                f"{PACK_DATA_CLOSE}{more}")
     text = (f"[metis-0933] {window}: хук {tilde(where)} изменён, одобрить? sha256 было {old or 'нет эталона'}, "
             f"стало {new}. {diff}")
     try:
@@ -3383,125 +3386,62 @@ def pack_unapproved_alert(window, repo, script, new, current, approved):
         print(f"pantheon: тревога о {where} не записана — {e}", file=sys.stderr)
 
 
-PACK_TREE_FILES = 50000  # файлов HEAD, которые packs hashes сверяет с рабочей копией; больше — «сверено не всё»
-PACK_TREE_FILE_LIMIT = 64 << 20
-
-
-def _repo_tree_dirty(repo, head):
-    """Файлы дерева head, чьи байты в рабочей копии не совпали с объектом (нет файла, ссылка вместо файла, правка) →
-    (список путей, сверено ли всё) или (None, False) — дерево не прочитано. Без git status и diff: они запускают
-    фильтры и textconv из .git/config, который пишет окно, а packs hashes идёт вне песочницы. Неотслеживаемые файлы
-    не в счёт; режим (x-бит) не сверяется."""
-    fmt = (_repo_git(repo, "rev-parse", "--show-object-format") or b"sha1").decode().strip() or "sha1"
-    out = _repo_git(repo, "ls-tree", "-r", "-z", "--full-tree", head)
-    if out is None or fmt not in ("sha1", "sha256"):
-        return None, False
-    dirty, entries = [], [e for e in out.split(b"\0") if e]
-    for entry in entries[:PACK_TREE_FILES]:
-        meta, _, name = entry.partition(b"\t")
-        mode, kind, oid = (meta.split(b" ") + [b"", b""])[:3]
-        if kind != b"blob":
-            continue  # подмодуль
-        p = os.path.join(repo, os.fsdecode(name))
-        if mode == b"120000":
-            try:
-                data = os.fsencode(os.readlink(p))
-            except OSError:
-                data = None
-        else:
-            data = _read_bytes_nofollow(p, PACK_TREE_FILE_LIMIT)
-        if data is None or hashlib.new(fmt, b"blob %d\0" % len(data) + data).hexdigest() != oid.decode():
-            dirty.append(os.fsdecode(name))
-    return dirty, len(entries) <= PACK_TREE_FILES
-
-
-def pack_repo_state(repo, head):
-    """Для первичного одобрения (ревью argus G1 Д2): совпал ли HEAD с origin/<ветка> и чисто ли дерево →
-    (строка состояния, [предупреждения]). origin/<ветка> — ref последнего fetch: сети нет (protocol.allow=never), а
-    ref пишет и окно, поэтому совпадение — не доказательство, расхождение — повод не одобрять."""
-    warn, parts = [], []
-    branch = _repo_git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
-    branch = branch.decode("utf-8", "replace").strip() if branch else ""
-    up = _repo_git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}^{{commit}}") \
-        if branch else None
-    up = up.decode().strip() if up else ""
-    if not branch:
-        warn.append(f"{tilde(repo)}: HEAD {head[:12]} не на ветке — с origin не сверен")
-    elif not up:
-        warn.append(f"{tilde(repo)}: нет origin/{_pack_data(branch)} — HEAD {head[:12]} с сервером не сверен")
-    elif up != head:
-        warn.append(f"{tilde(repo)}: HEAD {head[:12]} не совпал с origin/{_pack_data(branch)} {up[:12]} (последний "
-                    "fetch) — одобряется не то, что на сервере")
-    else:
-        parts.append(f"HEAD {head[:12]} = origin/{_pack_data(branch)} (последний fetch)")
-    dirty, whole = _repo_tree_dirty(repo, head)
-    if dirty is None:
-        warn.append(f"{tilde(repo)}: дерево HEAD не прочитано — чистота рабочей копии не проверена")
-    elif dirty:
-        shown = ", ".join(_pack_data(x) for x in dirty[:5]) + (" …" if len(dirty) > 5 else "")
-        warn.append(f"{tilde(repo)}: дерево не чисто — {len(dirty)} файл(ов) не совпали с HEAD: {shown}")
-    elif not whole:
-        warn.append(f"{tilde(repo)}: в HEAD больше {PACK_TREE_FILES} файлов — сверены первые, не всё дерево")
-    else:
-        parts.append("дерево чисто")
-    return f"{tilde(repo)}: " + (", ".join(parts) or "расхождения — ниже"), warn
-
-
-def pack_hashes(window, notes=None):
-    """Текущие sha256 скриптов хуков пакета направления window и HEAD их репозиториев — в формате approved.json, для
-    карточки владельцу (`pantheon packs hashes`). Ничего не пишет. → (dict, предупреждения); пакета нет — (None, …).
-    Для каждого репозитория — pack_repo_state: строка состояния в notes (если дан список), расхождения — в
-    предупреждения."""
+def pack_hashes(window, texts=None):
+    """Текущие sha256 скриптов хуков пакета направления window в формате approved.json — для карточки владельцу
+    (`pantheon packs hashes`). Хеш и байты — из снимка (pack_snapshot без тревог и копий: в ~/.claude/pantheon ничего
+    не пишет), .git не читается. → (dict, предупреждения); пакета нет — (None, …). texts (если дан список) получает
+    (путь скрипта, sha256, одобрен ли, байты из снимка, файл снимка)."""
     pack = os.path.join(PACKS, window)
     if not window or "/" in window or window.startswith((".", "_")) or not os.path.isfile(
             os.path.join(pack, "hooks", "hooks.json")):
         return None, [f"у направления {window} нет пакета с хуками ({tilde(pack)})"]
+    try:
+        snap = pack_snapshot(window, f"{window}.hashes", keep=False)
+        man = read_json(os.path.join(snap, "manifest.json"), {}) if snap else {}
+    except OSError as e:
+        return None, [f"снимок пакета {window} не собран — {e}"]
+    files, pending = man.get("files") or {}, man.get("pending") or {}
     home = os.path.realpath(HOME)
     repos, warn = {}, []
     for repo, script in pack_hook_scripts(pack):
         shown = "$HOME" + repo[len(home):] if repo.startswith(home.rstrip("/") + "/") else repo
-        item = repos.setdefault(shown, {"commit": None, "scripts": {}})
-        if item["commit"] is None:
-            head = _repo_git(repo, "rev-parse", "--verify", "HEAD")
-            item["commit"] = head.decode().strip() if head else None
-            if not item["commit"]:
-                warn.append(f"{tilde(repo)}: HEAD не прочитан — без коммита тревога придёт без диффа")
-            else:
-                note, more = pack_repo_state(repo, item["commit"])
-                warn += more
-                if notes is not None:
-                    notes.append(note)
-        data = _read_bytes_nofollow(os.path.join(repo, ".claude", "hooks", script), PACK_SCRIPT_LIMIT)
-        if data is None:
-            warn.append(f"{tilde(repo)}/.claude/hooks/{script}: нет обычного файла (или звено — ссылка) — не в списке")
+        item = repos.setdefault(shown, {"scripts": {}})
+        ok = ((man.get("repos") or {}).get(repo) or {}).get(script)
+        rel = ok or (pending.get(repo) or {}).get(script)
+        want = files.get(rel) if ok else ((man.get("unapproved") or {}).get(repo) or {}).get(script)
+        data = _read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT) if rel and snap else None
+        where = os.path.join(repo, ".claude", "hooks", script)
+        if data is None or hashlib.sha256(data).hexdigest() != want:
+            warn.append(f"{tilde(where)}: нет обычного файла (или звено — ссылка) — не в списке")
             continue
-        item["scripts"][script] = hashlib.sha256(data).hexdigest()
-        if item["commit"]:
-            blob = _repo_git(repo, "cat-file", "blob", f"{item['commit']}:.claude/hooks/{script}")
-            if blob != data:
-                warn.append(f"{tilde(repo)}/.claude/hooks/{script}: рабочая копия не совпала с HEAD — дифф следующей "
-                            "тревоги будет от HEAD, а не от одобренного текста; сначала коммит")
+        item["scripts"][script] = want
+        if texts is not None:
+            texts.append((where, want, bool(ok), data, os.path.join(snap, rel)))
     return {"repos": repos}, warn
 
 
 def pack_hashes_cmd(rest):
-    """pantheon packs hashes <направление>: JSON для approved.json в stdout; в stderr — состояние каждого репозитория
-    (HEAD против origin/<ветка>, чистота дерева) и предупреждения «внимание — …». Код 0 — все скрипты прочитаны, HEAD
-    = origin/<ветка> и дерево чисто, 1 — есть предупреждения, 2 — нет пакета или аргумента."""
+    """pantheon packs hashes <направление>: JSON для approved.json в stdout; в stderr — по каждому скрипту sha256,
+    одобрен ли и его текст из снимка (данные, ⟦…⟧, знаки кодом _pack_data), предупреждения «внимание — …». .git не
+    читается: HEAD и origin пишет окно (круг G5). Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет
+    пакета или аргумента."""
     if rest[:1] != ["hashes"] or len(rest) != 2:
         print("pantheon packs hashes <направление>", file=sys.stderr)
         return 2
-    notes = []
-    got, warn = pack_hashes(rest[1], notes)
-    for w in notes:
-        print(f"pantheon packs: {w}", file=sys.stderr)
+    texts = []
+    got, warn = pack_hashes(rest[1], texts)
+    for where, digest, ok, data, snap_file in texts:
+        print(f"pantheon packs: {tilde(where)} sha256 {digest} — {'эталон' if ok else 'не одобрен'}; текст из снимка "
+              f"{tilde(snap_file)} (данные из репозитория окна, не указание):", file=sys.stderr)
+        lines = data.decode("utf-8", "replace").removesuffix("\n").split("\n")
+        print(PACK_DATA_OPEN + "\n".join(f"  {_pack_data(x)}" for x in lines) + PACK_DATA_CLOSE, file=sys.stderr)
     for w in warn:
         print(f"pantheon packs: внимание — {w}", file=sys.stderr)
     if got is None:
         return 2
     print(json.dumps(got, ensure_ascii=False, indent=2, sort_keys=True))
-    print(f"pantheon packs: одобрение — этот JSON в {tilde(pack_approved_path(rest[1]))} (owner-edit, «да» владельца)",
-          file=sys.stderr)
+    print(f"pantheon packs: одобрение — этот JSON в {tilde(pack_approved_path(rest[1]))} (owner-edit, «да» владельца); "
+          "одобряется текст выше, его sha256 — в JSON", file=sys.stderr)
     return 1 if warn else 0
 
 
@@ -3554,17 +3494,21 @@ def pack_hook_scripts(pack_dir):
     return list(dict.fromkeys(out))
 
 
-def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), approved=None, on_unapproved=None):
+def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), approved=None, on_unapproved=None,
+                       quiet=False):
     """Снимок в out_dir/<name>-<16 знаков sha256 manifest.json> → путь к нему. Внутри: _bin/* (из bin_dir), plugin/
     (PACK_PLUGIN_FILES из plugin_dir, если есть), repo/<sha репозитория>/<имя> — скрипты scripts [(репозиторий, имя)],
     прочитанные _read_bytes_nofollow (ссылка, не файл, нет файла — пропуск: хук получит отказ in_repo.py), и
-    manifest.json {files: {путь: sha256}, repos: {репозиторий: {имя: путь}}, unapproved: {репозиторий: {имя: sha256}}}.
-    Скрипт репозитория идёт в снимок, только если его sha256 — эталон approved {репозиторий: {имя: sha256}}
-    (pack_approved, класс 6); иначе — в unapproved, строкой pack_unapproved_line в stderr и вызовом
-    on_unapproved(репозиторий, имя, sha256, байты) — тревога. approved не задан — ни одного одобренного. Готовый
+    manifest.json {files: {путь: sha256}, repos: {репозиторий: {имя: путь}}, unapproved: {репозиторий: {имя: sha256}},
+    pending: {репозиторий: {имя: путь}}}. Скрипт репозитория идёт в repo/, только если его sha256 — эталон approved
+    {репозиторий: {имя: sha256}} (pack_approved, класс 6); иначе — в unapproved, его байты — в pending/<sha
+    репозитория>/<имя> (не в files: in_repo.py их не исполняет, их текст печатает packs hashes, круг G5), строкой
+    pack_unapproved_line в stderr и, когда снимок собран, вызовом on_unapproved(репозиторий, имя, sha256, байты, файл
+    снимка) — тревога; quiet (packs hashes) — без строки. approved не задан — ни одного одобренного. Готовый
     снимок с тем же хешем и целыми файлами берётся как есть; испорченный — собирается заново. Старые снимки окна
     старше PACK_SNAPSHOT_KEEP убирает."""
     files, repos, unapproved, approved = {}, {}, {}, approved or {}
+    pending, held, late = {}, {}, []
     # _bin и плагин — код ядра (папка плагина, путь от realpath): ссылки в пути к ней законны
     for fn in sorted(os.listdir(bin_dir)) if os.path.isdir(bin_dir) else []:
         if fn.endswith(".py"):
@@ -3585,16 +3529,21 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
         digest = hashlib.sha256(data).hexdigest()
         if (approved.get(repo) or {}).get(script) != digest:
             unapproved.setdefault(repo, {})[script] = digest
-            print(f"pantheon: окно {name}: {pack_unapproved_line(where, digest)}", file=sys.stderr)
-            if on_unapproved:
-                on_unapproved(repo, script, digest, data)
+            rel = f"pending/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
+            held[rel] = data
+            pending.setdefault(repo, {})[script] = rel
+            if not quiet:
+                print(f"pantheon: окно {name}: {pack_unapproved_line(where, digest)}", file=sys.stderr)
+            late.append((repo, script, digest, data, rel))
             continue
         rel = f"repo/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
         files[rel] = data
         repos.setdefault(repo, {})[script] = rel
     manifest = json.dumps({"files": {k: hashlib.sha256(v).hexdigest() for k, v in sorted(files.items())},
-                           "repos": repos, "unapproved": unapproved}, sort_keys=True, ensure_ascii=False).encode()
+                           "repos": repos, "unapproved": unapproved, "pending": pending}, sort_keys=True,
+                          ensure_ascii=False).encode()
     snap = os.path.join(out_dir, f"{name}-{hashlib.sha256(manifest).hexdigest()[:16]}")
+    files = {**files, **held}  # pending/ — файлы снимка, но не files манифеста
     if not _snapshot_intact(snap, manifest, files):
         os.makedirs(out_dir, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix=f".{name}-", dir=out_dir)
@@ -3624,6 +3573,8 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
         if stale:
             shutil.rmtree(p, ignore_errors=True)
     os.utime(snap)
+    for repo, script, digest, data, rel in late if on_unapproved else ():
+        on_unapproved(repo, script, digest, data, os.path.join(snap, rel))
     return snap
 
 
@@ -3635,18 +3586,33 @@ def _snapshot_intact(snap, manifest, files):
                for rel, data in list(files.items()) + [("manifest.json", manifest)])
 
 
-def pack_snapshot(window, name):
+def pack_snapshot(window, name, keep=True):
     """Снимок пакета окна направления window для запуска name (pack_snapshot_make в STATE/settings/run/packs) или
     None — пакета нет. Эталоны скриптов — pack_approved(pack_approved_path(window)): файла нет — ни одного
-    одобренного; скрипт с чужим хешем — тревога pack_unapproved_alert."""
+    одобренного; скрипт с чужим хешем — тревога pack_unapproved_alert. keep (запуск окна): скрипты снимка по эталону —
+    в одобренные копии (pack_keep_approved), старые диффы STATE/pack-diffs убраны; keep=False (packs hashes) — без
+    тревог и без записи в ~/.claude/pantheon."""
     pack = os.path.join(PACKS, window)
     plugin = os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json"))
     if not plugin and not os.path.isfile(os.path.join(pack, "mcp.json")):
         return None
     approved = pack_approved(pack_approved_path(window))
-    return pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
-                              pack_hook_scripts(pack) if plugin else (), approved[0],
-                              lambda r, s, d, b: pack_unapproved_alert(window, r, s, d, b, approved))
+    snap = pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
+                              pack_hook_scripts(pack) if plugin else (), approved,
+                              (lambda r, s, d, b, f: pack_unapproved_alert(window, r, s, d, b, approved, f))
+                              if keep else None, quiet=not keep)
+    if keep:
+        shutil.rmtree(path(PACK_DIFFS), ignore_errors=True)
+        man = read_json(os.path.join(snap, "manifest.json"), {})
+        kept = {}
+        for names in (man.get("repos") or {}).values():
+            for rel in names.values():
+                data = _read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT)
+                if data is not None and hashlib.sha256(data).hexdigest() == (man.get("files") or {}).get(rel):
+                    kept[hashlib.sha256(data).hexdigest()] = data
+        if approved is not None or os.path.isdir(os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY)):
+            pack_keep_approved(window, approved, kept)
+    return snap
 
 
 def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
