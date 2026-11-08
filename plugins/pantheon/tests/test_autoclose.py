@@ -420,13 +420,15 @@ def test_open_core_sandbox_build():
 
 def test_open_core_sessions_launch():
     """metis-0551, 0552: доска берёт у шлюза и запуск окон в sessions.py — снятие --settings в _start_session ядро,
-    новая функция в sessions.py — не ядро; PR с pantheon.py и sessions.py сверяет оба файла."""
+    новая функция в sessions.py — не ядро; PR с pantheon.py и sessions.py сверяет оба файла. С metis-0933 argv окна
+    собирает P.window_launch (pantheon.py): снять --settings в sessions.py — собрать argv в обход window_launch."""
     import hashlib
     gate = A.load_gate()
     pp, sp = "plugins/pantheon/lib/pantheon.py", "plugins/pantheon/lib/sessions.py"
     src = {pp: open(CLI, encoding="utf-8").read(), sp: open(os.path.join(LIB, "sessions.py"), encoding="utf-8").read()}
-    a = '"--settings", run, prompt]'
-    check("в sessions.py есть запуск с --settings", src[sp].count(a) == 1)
+    a = "P.window_launch(role, name, window, run, prompt)"
+    b = '[P.claude_bin(), "--bg", "--agent", role, "--name", name, prompt]'
+    check("в sessions.py есть запуск _start_session через window_launch", src[sp].count(a) == 1)
 
     def sha(n):
         return hashlib.sha1(str(n).encode()).hexdigest()
@@ -445,7 +447,7 @@ def test_open_core_sessions_launch():
     A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
     try:
         row = {"number": 7, "headRefOid": head, "baseRefOid": base, "baseRefName": "main", "files": [{"path": sp}]}
-        state[sp] = src[sp].replace(a, "prompt]", 1)
+        state[sp] = src[sp].replace(a, b, 1)
         check("PR снимает --settings в _start_session → ядро", A.sandbox_core("a/b", row, gate=gate) is True)
         state[sp] = src[sp] + "\n\ndef _probe_0552():\n    return 1\n"
         check("PR добавляет функцию в sessions.py → не ядро", A.sandbox_core("a/b", row, gate=gate) is False)
@@ -453,7 +455,7 @@ def test_open_core_sessions_launch():
         both = dict(row, files=[{"path": pp}, {"path": sp}])
         check("PR с pantheon.py и sessions.py без правки сборки → не ядро",
               A.sandbox_core("a/b", both, gate=gate) is False and {pp, sp} <= set(asked), asked)
-        state[sp] = src[sp].replace(a, "prompt]", 1)
+        state[sp] = src[sp].replace(a, b, 1)
         check("PR с pantheon.py и sessions.py, снятие --settings → ядро", A.sandbox_core("a/b", both, gate=gate) is True)
     finally:
         A.gh_text, A.base_tip = real_text, real_tip
@@ -1144,6 +1146,7 @@ def main():
     test_reopen_and_eviction()
     test_mutants()
     test_open_core_sandbox_build()
+    test_open_core_sessions_launch()
     test_board_line_core()
     test_stub_four_consumers()
     test_fetch_budget()
