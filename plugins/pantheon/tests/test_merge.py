@@ -141,6 +141,15 @@ if sys.argv[1] == "api" and "/actions/jobs/" in sys.argv[2]:
     print(json.dumps(v["statusCheckRollup"][i].get("job") or {"runner_id": 5, "runner_name": "r5",
                                                               "steps": [{"name": "Set up job"}]}))
     sys.exit(0)
+if sys.argv[1] == "api" and "/git/ref/heads/" in sys.argv[2]:
+    # вершина ветки base (code_facts, metis-0966): rec/gh-tip — SHA (по умолчанию b×40, как base_oid Box.decide),
+    # с gh-tip-fail — сбой
+    if os.path.exists(os.path.join(rec, "gh-tip-fail")):
+        sys.exit(1)
+    t = os.path.join(rec, "gh-tip")
+    print(json.dumps({"ref": "refs/heads/" + sys.argv[2].split("/git/ref/heads/")[1],
+                      "object": {"sha": open(t).read().strip() if os.path.exists(t) else "b" * 40, "type": "commit"}}))
+    sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
     p = one("gh-files.jsonl", sys.argv[2].split("/pulls/")[1].split("/")[0])
     if not os.path.exists(p):
@@ -298,6 +307,19 @@ class Box:
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "records.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self.records))
+
+    def decide(self, sha=SHA, same=(), differs=(), base="main", t=T0, pr=PR, **extra):
+        """Решение шлюза guard о коде head (metis-0966) — строка kind "decision" в carry.jsonl, как её пишет
+        merge_gate.request_decisions при `pantheon merge request`; t — время записи."""
+        from datetime import datetime as _dt
+        rec = {"v": 1, "kind": "decision", "repo": [REPO], "pr": pr, "sha": sha, "base": base, "base_oid": "b" * 40,
+               "same": list(same), "differs": list(differs), "why": [],
+               "by": {"agent_type": "dev-opus", "session_id": "s-lead", "agent_id": ""},
+               "time": _dt.fromtimestamp(t).astimezone().isoformat(timespec="seconds"), **extra}
+        d = os.path.join(self.state, "merge-gate")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "carry.jsonl"), "a") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def gate_ok(self, sha, pr=PR, base="main"):
         self.add("tests", sha=sha, who="")
@@ -489,24 +511,27 @@ def test_gate_batch():
 def test_gate_other_heads():
     """metis-0465: «вернуть» на другом head PR в силе и в шлюзе владельца, как в шлюзе guard; «принять» до него не
     в счёт (откат force-push на старый head с двумя «принять»)."""
-    def box(*adds):
+    def box(*adds, differs=()):
         b = Box()
         b.request()
         for kind, sha, sid in adds:
             b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        if differs:
+            b.decide(differs=differs)
         b.run()
         return b
 
     b = box(("reject", SHA2, "s3"))
     check("0465: «вернуть» на другом head, после него ни одного «принять» — окна нет, заявка снята, тревога",
           not b.windows() and not b.merges() and b.req() is None and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
-    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"))
-    check("0465: «принять» на SHA после «вернуть» снимает его, но второе «принять» записано до — 1 из 2",
+    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"), differs=[SHA2])
+    check("0465: «принять» на SHA после «вернуть» (код SHA2 другой) снимает его, но второе «принять» записано до — "
+          "1 из 2",
           not b.windows() and not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(),
           b.alerts())
-    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
-    check("0465: два свежих «принять» на SHA после «вернуть» на другом head — сливает", len(b.merges()) == 1,
-          (b.outs[-1], b.alerts()))
+    b = box(("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"), differs=[SHA2])
+    check("0465: два свежих «принять» на SHA после «вернуть» на head с другим кодом (решение шлюза) — сливает",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
     b = box(("reject", SHA2, "s3"), ("accept", SHA2, "s3"))
     check("0465: «вернуть» снял сам рецензент на том же head — отсечки нет, «принять» на SHA в силе — сливает",
           len(b.merges()) == 1, (b.outs[-1], b.alerts()))
@@ -542,6 +567,7 @@ def test_gate_returned():
         b.add("tests", who="")
         for kind, sha, sid, extra in adds:
             b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:], **extra)
+        b.decide(differs=[SHA2])   # код SHA2 другой (metis-0966): снять «вернуть» может и другой argus
         b.run()
         return b
 
@@ -601,6 +627,109 @@ def test_gate_base():
     b = box(["main", "main"], reject="dev")
     check("0965: «вернуть» на другой base — в силе, не сливает", not b.merges() and "вернуть" in b.alerts(),
           (b.outs[-1], b.alerts()))
+
+
+
+def test_gate_decision():
+    """metis-0966, 0396, 0443 (вариант А): код прошлых head — из решения шлюза guard при `pantheon merge request`
+    (carry.jsonl, kind decision). Без решения другой коммит — неизвестный код: второй argus «вернуть» не снимает,
+    «принять» не переносится. Решение — только на этот head, нынешнюю base PR и не старше суток."""
+    def box(adds, *decisions):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        for d in decisions:
+            b.decide(**d)
+        b.run()
+        return b
+
+    held = [("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2")]
+    b = box(held)
+    check("0966: «вернуть» на SHA2, два свежих «принять» других argus на SHA, решения нет (rebase с тем же кодом?) — "
+          "в силе, окна нет", not b.windows() and not b.merges() and "в силе" in b.alerts()
+          and "merge request" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(held, {"same": [SHA2]})
+    check("0966: решение — у SHA2 тот же код (rebase) — «вернуть» в силе", not b.merges() and "в силе" in b.alerts(),
+          b.alerts())
+    b = box(held, {"differs": [SHA2]})
+    check("0966: решение — код SHA2 другой — «вернуть» снято, сливает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(held, {"same": [SHA2], "differs": [SHA2]})
+    check("0966: SHA2 и в same, и в differs (решение противоречит себе) — ни то ни другое, в силе",
+          not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = box(held, {"differs": [SHA2], "base": "dev"})
+    check("0966: решение на другой base PR — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = box(held, {"differs": [SHA2], "sha": SHA3})
+    check("0966: решение на другой head — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = box(held, {"differs": [SHA2], "t": T0 - 24 * 3600 - 60})
+    check("0966: решение старше суток — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
+    for name, tip, fail in (("вершина base ушла вперёд после решения", "c" * 40, False),
+                            ("вершину base не получить от gh", None, True)):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid in held:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        b.decide(differs=[SHA2])
+        open(os.path.join(b.rec, "gh-tip-fail" if fail else "gh-tip"), "w").write(tip or "")
+        b.run()
+        check(f"0966: {name} — решение не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = box(held, {"differs": [SHA2], "t": T0 + 3600})
+    check("0966: решение из будущего (часы сдвинуты) — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(),
+          b.alerts())
+    b = box(held, {"differs": [SHA2], "pr": PR + 1})
+    check("0966: решение на другой PR — не в счёт, в силе", not b.merges() and "в силе" in b.alerts(), b.alerts())
+    b = box(held, {"differs": [SHA2]}, {"same": [SHA2]})
+    check("0966: решает последнее решение на head (позже — тот же код) — в силе", not b.merges()
+          and "в силе" in b.alerts(), b.alerts())
+    # 0396: «принять» с head того же кода переносится (release.py, rebase без правок)
+    moved = [("accept", SHA2, "s1"), ("accept", SHA2, "s2")]
+    b = box(moved)
+    check("0396: два «принять» на SHA2, решения нет — не переносится, 0 из 2 с причиной",
+          not b.merges() and "0 из 2" in b.alerts() and "не перенесено" in b.alerts(), b.alerts())
+    b = box(moved, {"same": [SHA2]})
+    check("0396: решение — у SHA2 тот же код — «принять» переносится, сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box(moved, {"differs": [SHA2]})
+    check("0396: код SHA2 другой — не переносится", not b.merges() and "0 из 2" in b.alerts(), b.alerts())
+    b = box([("accept", SHA2, "s1"), ("accept", SHA, "s2")], {"same": [SHA2]})
+    check("0396: одно «принять» на SHA и одно перенесённое — два рецензента, сливает", len(b.merges()) == 1,
+          (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA2, "s1"), ("accept", SHA, "s1")], {"same": [SHA2]})
+    check("0396: тот же рецензент на SHA2 и SHA — один рецензент, 1 из 2", not b.merges() and "1 из 2" in b.alerts(),
+          b.alerts())
+    b = box([("accept", SHA2, "s1"), ("reject", SHA3, "s3"), ("accept", SHA, "s4")], {"same": [SHA2], "differs": [SHA3]})
+    check("0396: «принять» на SHA2 записано до «вернуть» (отсечка) — не переносится, 1 из 2",
+          not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(), b.alerts())
+
+
+def test_request_conflict_blocked():
+    """metis-0987: `pantheon merge request` с конфликтом с base заявки не ставит; BLOCKED (защита ветки base) —
+    заявка ждёт, окна нет."""
+    b = Box()
+    b.view(SHA, mergeable="CONFLICTING", merge_state="DIRTY")
+    r = b.request()
+    check("0987: конфликт с main при request — код 1, заявки нет, причина названа",
+          r.returncode == 1 and b.req() is None and "конфликт с main" in r.stderr, (r.returncode, r.stderr))
+    b = Box()
+    b.view(SHA, merge_state="BLOCKED")
+    r = b.request()
+    check("0987: BLOCKED при request — заявка стоит, в выводе — защита ветки",
+          r.returncode == 0 and b.req() is not None and "защита ветки" in r.stdout, (r.returncode, r.stdout, r.stderr))
+    b.run()
+    check("0987: BLOCKED — окна нет, слияния нет, заявка ждёт с причиной", not b.windows() and not b.merges()
+          and b.req() is not None and "защита ветки" in str(b.req().get("waiting")), (b.outs[-1], b.req()))
+    b.view(SHA)
+    b.run()
+    check("0987: защиту прошли (CLEAN) — окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.view(SHA, mergeable="UNKNOWN", merge_state="UNKNOWN")
+    r = b.request()
+    check("0987: GitHub ещё считает при request — заявка стоит", r.returncode == 0 and b.req() is not None,
+          (r.returncode, r.stderr))
 
 
 def test_request_refusals():
@@ -2556,6 +2685,48 @@ def test_phrase_forms():
         b.run(t=T0 + 120, extra=AWAY)
         check("фраза: " + name + (" → слияние" if ok else " → строки нет"),
               (merged_once(b) and len(b.approve_lines()) == 1) if ok else untouched(b), b.outs[-1])
+
+
+
+def test_phrase_revoke():
+    """metis-0970: «не сливай #N» и «стоп, не сливай #N» — отзыв: если он последний на номер, фраза не в силе (заявка
+    ждёт окна Touch ID); фраза после отзыва — снова в силе; фраза и отзыв в одну секунду — неоднозначно."""
+    for text in (f"не сливай #{PR}", f"Стоп, не сливай #{PR}!", f"стоп не сливай #{PR}."):
+        b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 30)
+        say(b, text, T0 + 60)
+        b.run(t=T0 + 120, extra=AWAY)
+        check(f"0970: фраза, потом «{text}» — строки нет, заявка ждёт", untouched(b), b.outs[-1])
+    b = phrase_box(f"не сливай #{PR}", t=T0 + 30)
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("0970: отзыв, потом фраза — фраза в силе, слияние", merged_once(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 30)
+    say(b, f"не сливай #{PR + 1}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("0970: отзыв на другой номер фразу не снимает — слияние", merged_once(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 60)
+    say(b, f"не сливай #{PR}", T0 + 60, name="coord")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("0970: фраза и отзыв в одну секунду — не в силе", untouched(b), b.outs[-1])
+    b = phrase_box(f"слей #{PR} {SHA[:7]}", t=T0 + 30)
+    say(b, f"почему не сливай #{PR}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("0970: «не сливай #N» внутри строки — не отзыв, слияние", merged_once(b), b.outs[-1])
+
+
+def test_phrase_drop_names_path():
+    """metis-0980 Д3: заявку на пути фразы снял шлюз — тревога называет «по фразе», а не «по Touch ID»."""
+    b = phrase_box(f"слей #{PR} {SHA[:7]}")
+    b.add("reject", sha=SHA, sid="s3", aid="a3")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("0980: фраза, шлюз не пройден — заявка снята, тревога «по фразе»", b.req() is None and not b.merges()
+          and "по фразе: заявка снята" in b.alerts() and "по Touch ID" not in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.add("reject", sha=SHA, sid="s3", aid="a3")
+    b.run()
+    check("0980: без фразы шлюз не пройден — тревога «по Touch ID»", "по Touch ID: заявка снята" in b.alerts(),
+          b.alerts())
 
 
 def test_phrase_refused():

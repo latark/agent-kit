@@ -383,6 +383,18 @@ def t_pass_internal(h):
         lines = fh.readlines()
     with open(h.records, "w") as fh:
         fh.writelines(lines[:-1])
+    # долг #388: base нужна только «принять» (base_counts) — у «вернуть» gh pr view за base не зовётся: срок хука
+    # уходит на запись, а не на поле, которое никто не читает
+    h.reset_log()
+    h.post(f"pantheon review reject latark/tg-read 3 {sha}{CL}", "argus", agent_id="argus2")
+    got = h.read()[-1]
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("#388: «вернуть» — gh pr view за base не зовётся, поля base нет", got["kind"] == "reject"
+          and "base" not in got and "--json baseRefName" not in log, (got, log))
+    with open(h.records) as fh:
+        lines = fh.readlines()
+    with open(h.records, "w") as fh:
+        fh.writelines(lines[:-1])
     # base PR сменили (gh pr edit --base): «принять» на main — не в счёт, отказ называет обе base
     h.view["tg-read"]["baseRefName"] = "release"
     h.write_view("tg-read")
@@ -3950,6 +3962,15 @@ def t_carry_gate(h):
              [opus(s["P"]), tests(s["N1"])], False, "неполная история")
     finally:
         os.remove(os.path.join(p, ".git", "shallow"))
+    alt = os.path.join(p, ".git", "objects", "info", "alternates")
+    os.makedirs(os.path.dirname(alt), exist_ok=True)
+    with open(alt, "w") as fh:
+        fh.write(os.path.join(p, ".git", "objects") + "\n")
+    try:
+        case("objects/info/alternates (объекты из другой папки) — не переносится", "N1", "M1",
+             [opus(s["P"]), tests(s["N1"])], False, "alternates")
+    finally:
+        os.remove(alt)
     git(p, "replace", s["out"], s["N1"])
     try:
         case("git replace (117-b): head с правкой кода не переносит", "out", "M1", [opus(s["P"]), tests(s["out"])],
@@ -5447,6 +5468,38 @@ def t_carry_merged(h):
         else:
             os.remove(path)
     check("0969: контроль — без атрибутов конфликт — False", mg._merge_same(gd, qc, fq[1], bcc, qconf) is False)
+    # долг #388: драйвер по умолчанию из конфига git папки (merge.default=ours) — тот же обход без атрибутов
+    gitc("config", "merge.default", "ours")
+    got = mg._merge_same(gd, qc, fq[1], bcc, qconf)
+    gitc("config", "--unset", "merge.default")
+    check("#388: _merge_same — merge.default=ours в конфиге git папки — False (конфликт не снят)", got is False, got)
+    # долг #388: merge.renormalize и core.autocrlf из конфига git папки сняли бы конфликт перевода строк. main перевёл
+    # c.txt на CRLF, PR правит строку; head — ровно то, что дало бы слияние с renormalize
+    crlf = plumb(p, [bc], {"c.txt": ("100644", "".join(lines).replace("\n", "\r\n").encode())}, "main: CRLF")
+    norm = ["-c", "core.autocrlf=true", "-c", "merge.renormalize=true"]
+    mt = subprocess.run(["git", "--git-dir=" + gd, *norm, "merge-tree", "--write-tree", "--no-messages",
+                         "--merge-base=" + bc, qc, crlf], capture_output=True, cwd=h.root)
+    check("#388: контроль — с renormalize и autocrlf git сливает CRLF чисто", mt.returncode == 0, mt)
+    blob = gitc("cat-file", "blob", mt.stdout.decode().split()[0] + ":c.txt").stdout
+    qn = plumb(p, [qc, crlf], {"c.txt": ("100644", blob)}, "PR: слияние с renormalize", src=crlf)
+    check("#388: контроль — без renormalize конфликт CRLF — False", mg._merge_same(gd, qc, fq[1], crlf, qn) is False)
+    gitc("config", "merge.renormalize", "true")
+    gitc("config", "core.autocrlf", "true")
+    try:
+        got = mg._merge_same(gd, qc, fq[1], crlf, qn)
+    finally:
+        gitc("config", "--unset", "merge.renormalize")
+        gitc("config", "--unset", "core.autocrlf")
+    check("#388: _merge_same — merge.renormalize и core.autocrlf в конфиге git папки — False", got is False, got)
+    # долг #388: атрибуты системы (etc/gitattributes) без root не положить — проверяется окружение и флаги вызова git
+    seen, real_run = [], mg.subprocess.run
+    mg.subprocess.run = lambda argv, **k: seen.append((argv, k.get("env") or {})) or real_run(argv, **k)
+    try:
+        mg._git_code(gd, "rev-parse", "HEAD")
+    finally:
+        mg.subprocess.run = real_run
+    check("#388: _git_code — GIT_ATTR_NOSYSTEM=1 и core.attributesFile=/dev/null", len(seen) == 1
+          and seen[0][1].get("GIT_ATTR_NOSYSTEM") == "1" and "core.attributesFile=" + os.devnull in seen[0][0], seen)
     real_b = mg._git_bytes
     mg._git_bytes = lambda gd_, *a, **k: None if "--git-path" in a else real_b(gd_, *a, **k)
     with open(info, "w") as fh:
@@ -5523,6 +5576,101 @@ def t_carry_merged(h):
     case("Б1 круг 2 контроль: rebase на живой main — переносится", good, r6, [opus(acc), tests(good)], True, tip=r6)
     case("Б1 круг 2: squash на старую базу вернул бы убранное main — не переносится", stale, r6,
          [opus(acc), tests(stale)], False, "нет «принять»", tip=r6)
+
+
+def t_request_decision(h):
+    """metis-0966, 0396, 0443 (вариант А): PreToolUse `pantheon merge request N -R repo` пишет в carry.jsonl решение
+    kind "decision" — какие прошлые head с вердиктами argus с тем же кодом (same), какие посчитаны другими (differs).
+    Проход владельца (pantheon merge.py) git не зовёт и судит по нему. Команда пропускается всегда."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    lines = [f"d{i}\n" for i in range(30)]
+    pr_d = "".join(lines[:20] + ["pr\n"] + lines[21:])
+    bd = plumb(p, [s["B"]], {"d.txt": F("".join(lines))}, "main: d.txt")
+    bd2 = plumb(p, [bd], {"d.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
+    qd = plumb(p, [bd], {"d.txt": F(pr_d)}, "PR: правка d.txt")
+    qdm = plumb(p, [qd, bd2], {"d.txt": F("top\n" + pr_d)}, "PR: подтянул main", src=bd2)
+    qx = plumb(p, [bd], {"d.txt": F("".join(lines[:20] + ["other\n"] + lines[21:]))}, "PR: другой код")
+    req = "pantheon merge request 7 -R latark/agent-kit"
+    rej = lambda sha, aid="argus2", session="s-b": opus(sha, aid, "reject", checklist=None, session=session)
+
+    def case(name, head, base, recs, cmd=req, cwd=None, view=None, extra_env=None):
+        h.reset()
+        kit_pr(h, head, base)
+        if view:
+            h.view["agent-kit"].update(view)
+            for k in [k for k, v in view.items() if v is None]:
+                del h.view["agent-kit"][k]
+            h.write_view("agent-kit")
+        h.seed(*recs)
+        got = h.pre(cmd, pdir=kit, cwd=cwd, extra_env=extra_env)
+        check(f"решение, {name}: команда пропущена", got[0] == "allow", got)
+        return [x for x in carry_lines(h) if x.get("kind") == "decision"]
+
+    got = case("тот же отпечаток", s["N1"], s["M1"], [opus(s["P"]), rej(s["P"]), opus(s["N1"], "argus3", session="s-c")])
+    d = got[0] if len(got) == 1 else {}
+    check("решение: отпечаток тот же — same=[P], differs пуст", d.get("same") == [s["P"]] and d.get("differs") == [], got)
+    try:
+        when = __import__("datetime").datetime.fromisoformat(d.get("time"))
+    except (TypeError, ValueError):
+        when = None
+    check("решение: поля записи (repo, pr, sha, base, base_oid, by, время с поясом)",
+          d.get("repo") == ["latark/agent-kit"] and d.get("pr") == 7 and d.get("sha") == s["N1"]
+          and d.get("base") == "main" and d.get("base_oid") == s["M1"] and d.get("v") == 1
+          and d.get("by") == {"agent_type": "domain-coordinator", "session_id": "s-coord", "agent_id": ""}
+          and when is not None and when.tzinfo is not None, d)
+    got = case("слияние с main (_merge_same)", qdm, bd2, [opus(qd)])
+    check("решение: отпечаток другой, слияние то же — same", len(got) == 1 and got[0]["same"] == [qd]
+          and got[0]["differs"] == [], got)
+    got = case("тот же и другой код", qdm, bd2, [opus(qd), rej(qx)])
+    check("решение: другой код — differs, порядок — новые первыми", len(got) == 1 and got[0]["same"] == [qd]
+          and got[0]["differs"] == [qx], got)
+    got = case("клон другого репозитория", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
+    check("решение: git не сверить (не клон) — запись с пустыми same и differs и причиной", len(got) == 1
+          and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
+    alt = os.path.join(p, ".git", "objects", "info", "alternates")
+    os.makedirs(os.path.dirname(alt), exist_ok=True)
+    with open(alt, "w") as fh:
+        fh.write(os.path.join(p, ".git", "objects") + "\n")
+    try:
+        got = case("alternates в клоне", qdm, bd2, [opus(qd)])
+    finally:
+        os.remove(alt)
+    check("решение: objects/info/alternates — не сверено: same и differs пусты, причина названа", len(got) == 1
+          and got[0]["same"] == [] and got[0]["differs"] == [] and any("alternates" in w for w in got[0]["why"]), got)
+    got = case("два номера одного PR", qdm, bd2, [opus(qd)], cmd="pantheon merge request 7 7 -R Latark/Agent-Kit")
+    check("решение: номер дважды — одна запись, repo в нижнем регистре", len(got) == 1
+          and got[0]["repo"] == ["latark/agent-kit"], got)
+    for name, recs, kw in (
+            ("вердикты только на head", [opus(qdm), rej(qdm)], {}),
+            ("вердиктов нет", [rec("tests", "latark/agent-kit", None, qdm, "dev-opus")], {}),
+            ("«принять» не от argus", [rec("accept", "latark/agent-kit", 7, qd, "dev-opus")], {}),
+            ("вердикт на другом PR", [opus(qd, pr=8)], {}),
+            ("cd в команде", [opus(qd)], {"cmd": f"cd {p} && {req}"}),
+            ("без -R", [opus(qd)], {"cmd": "pantheon merge request 7"}),
+            ("-R без репозитория", [opus(qd)], {"cmd": "pantheon merge request 7 -R"}),
+            ("номер не число", [opus(qd)], {"cmd": "pantheon merge request 7x -R latark/agent-kit"}),
+            ("номер с нулём впереди", [opus(qd)], {"cmd": "pantheon merge request 07 -R latark/agent-kit"}),
+            ("номер переменной", [opus(qd)], {"cmd": 'pantheon merge request "$N" -R latark/agent-kit'}),
+            ("номера нет", [opus(qd)], {"cmd": "pantheon merge request -R latark/agent-kit"}),
+            ("не request", [opus(qd)], {"cmd": "pantheon merge status 7 -R latark/agent-kit"}),
+            ("gh pr view не ответил", [opus(qd)], {"view": {"headRefOid": "не sha"}}),
+            ("base PR неизвестна", [opus(qd)], {"view": {"baseRefName": None}})):
+        got = case(name, qdm, bd2, recs, **kw)
+        check(f"решение: {name} — записи нет", got == [], got)
+        if name in ("вердиктов нет", "номер не число", "номер переменной"):
+            log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+            check(f"решение: {name} — gh pr view не зовётся", "pr view" not in log, log)
+    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, записи нет
+    mg = _load_merge_gate("merge_gate_request_decision")
+    calls = []
+    mg._gh_fits = lambda: False
+    mg._pr_view = lambda repo, pr: calls.append(("view", pr)) or {}
+    mg.append_carry = lambda r: calls.append(("carry", r))
+    mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
+    check("решение: срок хука не вмещает gh — gh pr view не зовётся, записи нет", calls == [], calls)
 
 
 def t_carry_rej(h):
@@ -5856,7 +6004,7 @@ CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_fu
          t_ci_required, t_batch_full, t_batch_unit, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_returned_unit, t_returned_record, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_lists_unit, t_core_sandbox]
+         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_request_decision, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_lists_unit, t_core_sandbox]
 
 # случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;
 # вне ядра те же записи проходят — это проверяют отдельные места в самих случаях (h.core = False; h.reset())
