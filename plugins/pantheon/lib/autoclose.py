@@ -364,16 +364,19 @@ def sandbox_core(repo, p, env=None, gate=None, left=None):
     gate = gate or load_gate()
     if gate is None:
         return True
-    want = gate.SANDBOX_BUILD_FILE
+    # файлы сборки и запуска окон шлюза (metis-0552: и sessions.py) — у старого шлюза только pantheon.py
+    wants = list(getattr(gate, "BUILD_ROOTS", None) or [gate.SANDBOX_BUILD_FILE])
     files = [f for f in p.get("files") or [] if isinstance(f, dict)]
     for f in files:
         moved = str(f.get("changeType") or "").upper() in ("RENAMED", "COPIED") or f.get("previous_filename") is not None
-        if moved and (f.get("previous_filename") is None or want in (_norm_path(f.get("path")), _norm_path(f.get("previous_filename")))):
-            return True  # старый путь неизвестен или это pantheon.py: переименование — ядро
+        if moved and (f.get("previous_filename") is None
+                      or {_norm_path(f.get("path")), _norm_path(f.get("previous_filename"))} & set(wants)):
+            return True  # старый путь неизвестен или это файл сборки: переименование — ядро
     paths = [_norm_path(f.get("path")) for f in files]
-    if want not in paths:
+    wants = [w for w in wants if w in paths]
+    if not wants:
         return False
-    if not any(f.get("path") == want for f in files):
+    if not all(any(f.get("path") == w for f in files) for w in wants):
         return True  # другой регистр, как у шлюза
     head, base = (str(p.get(k) or "").lower() for k in ("headRefOid", "baseRefOid"))
     sha_re = re.compile(r"[0-9a-f]{40}")
@@ -394,15 +397,19 @@ def sandbox_core(repo, p, env=None, gate=None, left=None):
     if not sha_re.fullmatch(mb) or tip is None:
         return True
 
-    def blob(ref):
+    def blob(ref, want):
         return text(["api", f"repos/{repo}/contents/{want}?ref={ref}", "-H", "Accept: application/vnd.github.raw"])
 
-    old, new = blob(mb), blob(head)
-    tips = [blob(r) for r in dict.fromkeys((base, tip)) if r != mb]
-    if old is None or new is None or any(x is None for x in tips):
-        return True
-    got = gate.sandbox_build_changes(old, new, *tips)
-    return got is None or bool(got)
+    for want in wants:
+        old, new = blob(mb, want), blob(head, want)
+        tips = [blob(r, want) for r in dict.fromkeys((base, tip)) if r != mb]
+        if old is None or new is None or any(x is None for x in tips):
+            return True
+        kw = {"path": want} if hasattr(gate, "BUILD_ROOTS") else {}
+        got = gate.sandbox_build_changes(old, new, *tips, **kw)
+        if got is None or got:
+            return True
+    return False
 
 
 def _num(v):
