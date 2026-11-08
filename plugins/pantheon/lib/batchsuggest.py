@@ -367,7 +367,9 @@ def render(res):
 
 def apply(res, tasks, attach):
     """Прикрепляет только предложения confidence=high через attach(task_id, story_id) (tasks.task_attach).
-    Задача без решённого mode attach не пускает — пропуск со строкой. → (сделано, пропущено) списками строк."""
+    Задача без решённого mode attach не пускает — пропуск со строкой. Сбой записи (OSError и прочее) тоже пропуск со
+    строкой, а не падение прохода: одна задача не отменяет остальные (metis-0960); parent мог успеть записаться
+    до сбоя — строка просит сверить журнал. → (сделано, пропущено) списками строк."""
     done, skipped = [], []
     for j in res["joins"]:
         if j["confidence"] != "high":
@@ -377,4 +379,6 @@ def apply(res, tasks, attach):
             done.append(f"{j['task']} → {j['story']}")
         except ValueError as e:
             skipped.append(f"{j['task']} → {j['story']}: {e}")
+        except Exception as e:  # noqa: BLE001 — сбой диска посреди пары записей
+            skipped.append(f"{j['task']} → {j['story']}: сбой записи ({type(e).__name__}: {e}) — сверьте parent и журнал")
     return done, skipped
