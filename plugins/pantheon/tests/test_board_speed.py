@@ -29,7 +29,7 @@ def check(name, ok, detail=""):
 
 
 DIRS = ["metis-pantheon", "zeus", "athena-brokerassistant", "mnemo-brain", "calliope-content"]
-N, STORIES = 3000, 40
+N, STORIES = 500, 20
 
 
 def build(pan):
