@@ -830,7 +830,7 @@ Claude Code, у которого есть журнал ваших слов: Зе
    `CLAUDE_VALUE_FLAGS`, `ROLE_ENV`, `claude_env`, `job_window_problem`, `cwd_allow_problems`, `start_target`,
    `live_copies`, `stop_copies`, `agents_all`, окно `--settings` цели `direction_target` (sessions.py зовёт его и
    прямо), отказ без окна `window_missing` и `no_window_reason`, снятие прежних копий `rm_previous`, текст старта
-   `push_text`, замок `lock` в pantheon.py и `fresh_target` в sessions.py — правка каждого — ядро (Б2 обоих argus R2).
+   `push_text`, блокировка `lock` в pantheon.py и `fresh_target` в sessions.py — правка каждого — ядро (Б2 обоих argus R2).
    Замыкание сужено (metis-0550): имя модуля из `import` (`os`, `sys`) — не данные сборки, так что `os.environ[…] =`
    в посторонней функции её не тянет; имена тела функции — по `symtable`, и локальная переменная `check` не тянет
    функцию модуля `check`; дальше тревог (`alert`, `alert_once`, `clear_once`, `BUILD_STOP`) замыкание не идёт.
