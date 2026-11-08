@@ -77,9 +77,12 @@ def repo(line):
     return d
 
 
-def run(line, timeout=6):
+def run(line, timeout=60, idle=2):
+    """timeout — общий срок, нарочно с большим запасом: гасит ли молчание, решает причина в why, а не гонка тишины
+    со сроком на загруженной машине (metis-0672); idle — срок тишины."""
     N[0] += 1
     O.TEST_TIMEOUT = timeout
+    O.IDLE_TIMEOUT = idle
     d = repo(line)
     rid = f"20261103-{N[0]:06d}-abcdef"
     t0 = time.monotonic()
@@ -104,18 +107,19 @@ SPIN = "python3 -c 'while True: pass'"   # одна строка: .pantheon-veri
 res, dt = run("echo started-ok; sleep 31337")
 log = open(res["log"]).read() if res.get("log") else ""
 check("молчащий sleep гасится по тишине: failed, why «тишина» и последняя строка",
-      res.get("state") == "failed" and "тишина" in res.get("why", "") and "started-ok" in res["why"] and dt < 5,
-      (res, dt))
+      res.get("state") == "failed" and "тишина" in res.get("why", "") and "started-ok" in res["why"]
+      and "дольше" not in res["why"], (res, dt))
 check("причина — в логе прогона и в outside.jsonl", "тишина" in log and any(
     e.get("kind") == "test-silent" and "тишина" in e.get("why", "") for e in events()), (log, events()))
 time.sleep(0.3)
 check("дерево убито: sleep не жив", not alive("sleep 31337"))
 
-res, dt = run("while :; do echo tick; sleep 0.5; done", timeout=5)
+res, dt = run("while :; do echo tick; sleep 0.5; done", timeout=12,
+          idle=8)  # промежуток тиков ≪ срока тишины, с запасом на нагрузку
 check("строка раз в 0,5 с — не гасится по тишине (стоп только по общему сроку)",
       res.get("state") == "done" and "дольше" in res.get("why", "") and "тишина" not in res.get("why", ""), res)
 
-res, dt = run("echo busy; " + SPIN, timeout=5)
+res, dt = run("echo busy; " + SPIN, timeout=6)
 check("молчит, но жжёт CPU — не гасится по тишине",
       res.get("state") == "done" and "тишина" not in res.get("why", ""), res)
 
@@ -125,7 +129,8 @@ O.PS = NO_PS
 if MAC:
     res, dt = run("echo nops-lp; sleep 31339")
     check("без ps молчащий sleep гасится по тишине: CPU дерева по libproc",
-          res.get("state") == "failed" and "тишина" in res.get("why", "") and "nops-lp" in res["why"] and dt < 5,
+          res.get("state") == "failed" and "тишина" in res.get("why", "") and "nops-lp" in res["why"]
+          and "дольше" not in res["why"],
           (res, dt, [e for e in events() if e.get("kind") == "test-silent-nocpu"]))
     # ребёнок ждёт, а считает внук в своей сессии (как задача turbo): дерево — и потомки в чужих группах
     _burn = ("import time\nt = time.process_time()\nwhile time.process_time() - t < 0.6: pass\n"

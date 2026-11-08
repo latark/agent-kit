@@ -1,0 +1,5 @@
+{
+  "name": "pack-proteus-morph",
+  "description": "Пакет окна proteus-morph (схема А, metis-0933): хуки MorphStream/app и gpu-worker, которых --add-dir не приносит",
+  "version": "0.0.0"
+}

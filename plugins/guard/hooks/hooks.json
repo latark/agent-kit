@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|Agent|Task|Skill",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|Agent|Task|Skill|EnterWorktree",
         "hooks": [
           { "type": "command", "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hookd.sh\" guard", "timeout": 10, "onFailure": "block" }
         ]
