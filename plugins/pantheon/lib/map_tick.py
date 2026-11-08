@@ -27,6 +27,7 @@ PANTHEON_DRYRUN=1 (тесты тика) — ничего не делает.
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -35,7 +36,8 @@ P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
 
 CHECK_EVERY = 10 * 60
 RELEASE_PREFIX = "выпуск: "
-MAP_PREFIX = "карта: "
+MAP_RE = re.compile(r"карта: affected-map на [0-9a-f]{7}")  # тема коммита карты; тема squash-слияния PR («карта: … (#N)») не она
+MAP_AUTHOR = "pantheon-tick"  # и автор: узнаём коммит карты по обоим признакам
 MAP_SCRIPT = os.path.join("plugins", "pantheon", "scripts", "affected-map.py")
 MAP_REL = "plugins/pantheon/scripts/affected-map.json"
 PLUGIN_DIRS = ("plugins/guard", "plugins/pantheon", "plugins/project-tools")
@@ -47,6 +49,7 @@ PUSH_TIMEOUT = 120
 DIED_GRACE = 120     # с: «running» без живого процесса дольше этого — работник погиб
 ALERT_KEY = "map-tick"
 WHO = "pantheon-tick"
+TERM_GRACE = 10      # с между TERM и KILL группе процессов работника (как у review test)
 
 
 def set_core(mod):
@@ -71,16 +74,19 @@ def heavy_prefix():
     return [P.outside_mod().heavy_bin()]
 
 
+def is_map(author, subject):
+    return author == MAP_AUTHOR and MAP_RE.fullmatch(subject) is not None
+
+
 def history_need(rows):
-    """rows — [(sha, тема)] первой родительской линии от head → (нужна ли карта, почему). Условия 1 и 2."""
-    subjects = [s for _, s in rows]
-    rel = next((i for i, s in enumerate(subjects) if s.startswith(RELEASE_PREFIX)), None)
+    """rows — [(sha, автор, тема)] первой родительской линии от head → (нужна ли карта, почему). Условия 1 и 2."""
+    rel = next((i for i, (_, _a, s) in enumerate(rows) if s.startswith(RELEASE_PREFIX)), None)
     if rel is None:
         return False, f"коммита «{RELEASE_PREFIX}…» нет в {LOG_DEPTH} последних"
-    if any(not s.startswith(MAP_PREFIX) for s in subjects[:rel]):
+    if any(not is_map(a, s) for _, a, s in rows[:rel]):
         return False, "слияние ждёт выпуска"
-    for s in subjects:
-        if s.startswith(MAP_PREFIX):
+    for _, a, s in rows:
+        if is_map(a, s):
             return False, "после последнего слияния карта уже обновлялась"
         if not s.startswith(RELEASE_PREFIX):
             return True, "после последней карты были слияния"
@@ -88,10 +94,11 @@ def history_need(rows):
 
 
 def first_parent_rows(RT, copy, sha):
-    code, out = RT.git(copy, "log", "--first-parent", f"-n{LOG_DEPTH}", "--format=%H %s", sha)
+    code, out = RT.git(copy, "log", "--first-parent", f"-n{LOG_DEPTH}", "--format=%H%x09%an%x09%s", sha)
     if code != 0:
         return None, f"git log: {out[-200:]}"
-    return [tuple(ln.split(" ", 1)) if " " in ln else (ln, "") for ln in out.splitlines()], None
+    rows = [tuple((ln.split("\t", 2) + ["", ""])[:3]) for ln in out.splitlines()]
+    return rows, None
 
 
 def map_stale(RT, copy):
@@ -134,15 +141,24 @@ def _run(argv, cwd, env, timeout, keep=1):
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        import signal
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        proc.communicate()
+        _stop_group(proc)
         return None, f"дольше {int(timeout)} с — остановлено"
     lines = [ln for ln in (out or "").splitlines() if ln.strip()]
     return proc.returncode, " | ".join(ln.strip() for ln in lines[-keep:])[:400]
+
+
+def _stop_group(proc):
+    """TERM группе процессов, TERM_GRACE с на выход (heavy и run-tests гасят дерево сами), затем KILL."""
+    for sig, wait in ((signal.SIGTERM, TERM_GRACE), (signal.SIGKILL, None)):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _git(copy, env, *args, keep=1):
@@ -171,7 +187,7 @@ def publish(job, env):
         return why, False
     for args in (("add", "--", MAP_REL),
                  ("-c", "user.name=pantheon-tick", "-c", "user.email=pantheon-tick@localhost", "commit", "-q", "-m",
-                  f"{MAP_PREFIX}affected-map на {sha[:7]}")):
+                  f"карта: affected-map на {sha[:7]}")):
         code, last = _git(copy, env, *args)
         if code != 0:
             return f"git {args[0] if args[0] != '-c' else 'commit'}: {last}", False
@@ -194,7 +210,7 @@ def work(job):
         text, ok = f"affected-map --update на {job['sha'][:7]}: код {code}: {last}", False
     else:
         text, ok = publish(job, env)
-    res = {"sha": job["sha"], "text": text, "ok": ok, "t": time.time()}
+    res = {"sha": job["sha"], "repo": job["repo"], "text": text, "ok": ok, "t": time.time()}
     _patch_state(st_path, lambda st: (st.pop("running", None), st.update(result=res)))
     return 0 if ok is not False else 1
 
@@ -228,11 +244,19 @@ def collect(t, st):
         if pid is None and t - started < DIED_GRACE:
             return "busy", None
         st.pop("running", None)
-        return "работник карты погиб без итога", "работник карты погиб без итога"
+        return _failed(st, run, "работник карты погиб без итога")
     res = st.pop("result", None)
     if isinstance(res, dict):
-        return res.get("text", "?"), (None if res.get("ok") is not False else res.get("text", "сбой"))
+        if res.get("ok") is False:
+            return _failed(st, res, res.get("text", "сбой"))
+        return res.get("text", "?"), None
     return None
+
+
+def _failed(st, src, text):
+    """Сбой работника: sha запоминается — --update на нём не повторяется, пока main не сдвинется (heavy не занимать часами)."""
+    st["failed"] = {"sha": src.get("sha"), "text": text}
+    return text, f"{src.get('repo')}: {text}"  # та же строка, что у check (там тик добавляет «репозиторий: »)
 
 
 def check(repo, t, st):
@@ -251,13 +275,16 @@ def check(repo, t, st):
     ok, why = RT.copy_clean(copy, sha)
     if not ok:
         return f"{repo}: не запускаю — {why}", why, False
+    failed = st.get("failed") if isinstance(st.get("failed"), dict) else {}
+    if failed.get("sha") == sha:  # тот же текст сбоя: alert_once молчит, тревога одна на sha
+        return f"{repo}: обновление на {sha[:7]} уже падало — жду нового main", failed.get("text"), False
     stale, why = map_stale(RT, copy)
     if stale is None:
         return f"{repo}: {why}", why, False
     if not stale:
         return f"{repo}: карта свежая — {why}", None, False
     job = {"repo": repo, "copy": copy, "sha": sha, "state": state_file(), "heavy": heavy_prefix()}
-    st["running"] = {"t": t, "sha": sha}
+    st["running"] = {"t": t, "sha": sha, "repo": repo}
     P.write_json(state_file(), st)
     spawn(job)
     return f"{repo}: карта устарела на {sha[:7]} ({why}) — обновление запущено", None, True

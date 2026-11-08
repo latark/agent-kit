@@ -60,9 +60,9 @@ MT = load("pantheon_map_tick_t", "map_tick.py")
 ORIG_SPAWN = MT.spawn
 
 
-def git(d, *args):
-    env = {"PATH": os.environ["PATH"], "HOME": os.path.join(_ROOT, "home"), "GIT_AUTHOR_NAME": "t",
-           "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+def git(d, *args, author="t"):
+    env = {"PATH": os.environ["PATH"], "HOME": os.path.join(_ROOT, "home"), "GIT_AUTHOR_NAME": author,
+           "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": author, "GIT_COMMITTER_EMAIL": "t@t"}
     r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, env=env)
     assert r.returncode == 0, (args, r.stderr)
     return r.stdout.strip()
@@ -107,7 +107,7 @@ class World:
         for i, subj in enumerate(commits):
             open(os.path.join(self.work, f"f{i}.txt"), "w").write(str(i))
             git(self.work, "add", "-A")
-            git(self.work, "commit", "-q", "-m", subj)
+            git(self.work, "commit", "-q", "-m", subj, author=MT.MAP_AUTHOR if subj.startswith("карта: affected-map на") else "t")
         git(self.work, "remote", "add", "origin", self.origin)
         git(self.work, "push", "-q", "origin", "main")
         self.sha = git(self.work, "rev-parse", "HEAD")
@@ -232,6 +232,65 @@ MT.tick(T + MT.CHECK_EVERY + 1)
 check("main ушёл вперёд → push отклонён, не сбой, карта не лезет в чужую историю",
       not w.alerts and not any(s.startswith("карта:") for s in w.origin_log()) and "отклонён" in w.tick_log(),
       (w.alerts, w.origin_log(), w.tick_log()))
+
+# --- [строгое узнавание карты] ------------------------------------------------------------------------------------
+w = World("squash-title", commits=("выпуск: pantheon 0.1.1", "карта: что-то про карту (#397)", "выпуск: pantheon 0.1.2"))
+out = MT.tick(T)
+check("тема слияния «карта: что-то (#397)» не считается картой — карта строится", len(w.heavy_calls) == 1, out)
+rows_h = [("a", "t", "выпуск: y"), ("b", "t", "карта: affected-map на abc1234"), ("c", "t", "выпуск: x")]
+check("тема карты от другого автора — не карта (нужна новая)", MT.history_need(rows_h)[0] is True, MT.history_need(rows_h))
+check("автор pantheon-tick, но тема не по шаблону — не карта",
+      not MT.is_map(MT.MAP_AUTHOR, "карта: что-то (#397)") and not MT.is_map(MT.MAP_AUTHOR, "карта: affected-map на abc12345")
+      and not MT.is_map(MT.MAP_AUTHOR, "карта: affected-map на abc123x") and MT.is_map(MT.MAP_AUTHOR, "карта: affected-map на abc1234")
+      and not MT.is_map("t", "карта: affected-map на abc1234"))
+
+# --- [сбой работника: тот же sha не повторяется] ------------------------------------------------------------------
+w = World("failed-sha", update="fail")
+for i in range(5):
+    MT.tick(T + i * (MT.CHECK_EVERY + 1))
+check("update=fail, несколько тиков → один запуск", len(w.heavy_calls) == 1, len(w.heavy_calls))
+check("одна тревога на sha (одно значение)", w.alerts and len({a[1] for a in w.alerts}) == 1 and "код 1" in w.alerts[0][2],
+      w.alerts)
+check("в tick.log — «уже падало»", "уже падало" in w.tick_log(), w.tick_log())
+git(w.work, "commit", "-q", "--allow-empty", "-m", "Merge pull request #5")
+git(w.work, "commit", "-q", "--allow-empty", "-m", "выпуск: pantheon 0.1.3")
+git(w.work, "push", "-q", "origin", "main")
+MT.tick(T + 6 * (MT.CHECK_EVERY + 1))
+check("новый sha на main → запуск снова", len(w.heavy_calls) == 2, len(w.heavy_calls))
+
+# --- [остановка группы: TERM, пауза, KILL] ------------------------------------------------------------------------
+class SlowProc:
+    pid = 4242
+
+    def __init__(self, dies_on):
+        self.dies_on, self.calls = dies_on, 0
+
+    def communicate(self, timeout=None):
+        self.calls += 1
+        if self.calls == 1 or (self.dies_on == "kill" and self.calls == 2):
+            raise MT.subprocess.TimeoutExpired("x", timeout)
+        return ("", "")
+
+
+for dies_on, want in (("term", ["TERM"]), ("kill", ["TERM", "KILL"])):
+    sent, proc = [], SlowProc(dies_on)
+    real_killpg, real_popen = MT.os.killpg, MT.subprocess.Popen
+    MT.os.killpg = lambda pid, sig, sent=sent: sent.append(MT.signal.Signals(sig).name[3:])
+    MT.subprocess.Popen = lambda *a, proc=proc, **k: proc
+    try:
+        res = MT._run(["x"], ".", {}, 5)
+    finally:
+        MT.os.killpg, MT.subprocess.Popen = real_killpg, real_popen
+    check(f"таймаут: группе сначала TERM{', потом KILL' if len(want) > 1 else ' (вышла сама — KILL не шлётся)'}",
+          sent == want and res[0] is None and "остановлено" in res[1], (sent, res))
+check("между TERM и KILL пауза TERM_GRACE (10 с)", MT.TERM_GRACE == 10)
+
+# --- [pid ещё не записан] -----------------------------------------------------------------------------------------
+w = World("no-pid")
+w._write_json(os.path.join(w.state, "map-tick.json"), {"running": {"t": T, "sha": w.sha}})
+check("pid ещё не записан, меньше DIED_GRACE → ждём", MT.tick(T + MT.DIED_GRACE - 1) is None and not w.alerts)
+MT.tick(T + MT.DIED_GRACE + 1)
+check("pid не записан дольше DIED_GRACE → погиб, тревога", w.alerts and "погиб" in w.alerts[0][2], w.alerts)
 
 # --- [argv работника] ---------------------------------------------------------------------------------------------
 w = World("argv")
