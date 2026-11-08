@@ -299,8 +299,8 @@ def write_fail():
     check("--apply: сбой записи → код 1 и строка в stderr", r.returncode == 1 and "сбой записи у 1" in r.stderr,
           f"{r.returncode} {r.stderr[-300:]}")
     r2 = _patched(env, ["batch-suggest", "run"], hook)
-    check("run: сбой записи → тревога и код 1", r2.returncode == 1 and "[alert]" in r2.stdout
-          and "сбой записи при прикреплении у 2" in r2.stdout, f"{r2.returncode} {r2.stdout[-400:]} {r2.stderr[-200:]}")
+    check("run: сбой записи → своя тревога и код 76 (ALERTED: вторую тревогу run_job не даёт)", r2.returncode == 76
+          and "[alert] pantheon-tick · пачки: сбой записи при прикреплении у 2" in r2.stdout, f"{r2.returncode} {r2.stdout[-400:]} {r2.stderr[-200:]}")
     ok = _patched(env, ["task", "batch-suggest", "--direction", DIR, "--apply"],
                   "def nofail(res, tasks, attach):\n    return [], ['metis-9011 → metis-9001: нет mode']\nB.apply = nofail")
     check("--apply: отказ attach по правилу (не сбой записи) — код 0", ok.returncode == 0, ok.stderr[-300:])

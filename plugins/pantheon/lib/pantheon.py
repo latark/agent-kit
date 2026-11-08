@@ -7831,7 +7831,7 @@ def batch_suggest_run(rest):
               f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
     print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}, прикреплено {len(applied)}"
           + "".join(f"\n  прикреплено · {x}" for x in applied) + "".join(f"\n  пропущено · {x}" for x in skipped))
-    return 1 if failed else 0
+    return ALERTED if failed else 0  # тревога уже дана — run_job вторую не пишет
 
 
 def autoclose_mod():
