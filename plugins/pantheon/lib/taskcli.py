@@ -272,7 +272,7 @@ def batch_suggest_cmd(T, args, opt):
     applied, skipped = [], []
     if "--apply" in args:
         for res in results:
-            d, s = B.apply(res, tasks, lambda tid, sid: T.task_attach(P.PANTHEON, P.card_now(), tid, sid))
+            d, s = B.apply(res, tasks, lambda tid, sid: T.task_attach(P.PANTHEON, P.card_now(), tid, sid, only_loose=True))
             applied += d
             skipped += s
     if "--json" in args:
@@ -282,12 +282,17 @@ def batch_suggest_cmd(T, args, opt):
         if "--apply" in args:
             print(f"\nприкреплено: {len(applied)}" + "".join(f"\n  {x}" for x in applied)
                   + "".join(f"\n  пропущено · {x}" for x in skipped))
+    failed = B.write_failures(skipped)
+    if failed:  # сбой записи — не «пропущено»: код 1 и строка в stderr (metis-1006)
+        print(f"pantheon task batch-suggest: сбой записи у {len(failed)} — {failed[0]}", file=sys.stderr)
+        return 1
     return 0
 
 
-def no_parent_hint(T, tid, direction):
+def no_parent_hint(T, tid, direction, mode=None):
     """Подсказка после `task new` без --parent (metis-0940, слово владельца 06.11: задачи — по пачкам): лучшая пачка из
-    batch-suggest и готовая команда, иначе «без пачки: …». Сбой подсказки задачу не ломает — пустая строка."""
+    batch-suggest и готовая команда, иначе «без пачки: …». mode — значение --mode при создании: решённый режим в
+    команду не повторяется (metis-0960). Сбой подсказки задачу не ломает — пустая строка."""
     try:
         B = P.batchsuggest_mod()
         j = B.best_join(B.suggest(T.load_tasks(P.PANTHEON, T.WORK_TYPES), direction), tid)
@@ -295,8 +300,9 @@ def no_parent_hint(T, tid, direction):
         j = None
     if not j:
         return "без пачки: положите в пачку (pantheon task batch-suggest)"
+    tail = "" if T.mode_decided({"mode": mode}) else ' mode=single mode_why="почему одна задача"'
     return (f"без пачки: кандидат {j['story']} «{j['story_title']}» ({j['score']}; {', '.join(j['reasons'])}) — "
-            f"pantheon task set {tid} parent={j['story']} mode=single mode_why=\"почему одна задача\"")
+            f"pantheon task set {tid} parent={j['story']}{tail}")
 
 
 def goal_line(T, tid, head, tasks):
@@ -401,8 +407,9 @@ def _task_cmd(rest):
             task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
-            if not opt("--parent") and (opt("--type") or "task") != "story" and body_text is not None:
-                print(no_parent_hint(T, tid, opt("--direction")), file=sys.stderr)
+            if (not opt("--parent") and not opt("--batch") and (opt("--type") or "task") != "story"
+                    and body_text is not None):  # --batch — старое поле пачки (metis-0505), parent с ним не ставят
+                print(no_parent_hint(T, tid, opt("--direction"), opt("--mode")), file=sys.stderr)
         elif sub == "set" and args:
             tid, changes, note, i, seen, force = args[0], {}, None, 1, set(), None
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»

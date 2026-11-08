@@ -60,7 +60,7 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
-   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py по AST — metis-0404), casefold;
+   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py и запуск окон в sessions.py по AST — metis-0404, 0552), casefold;
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
    её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`) или проход по фразе владельца «слей #N <hex>»
@@ -133,7 +133,8 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
                  f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, .github/, "
-                 "plugins/pantheon/lib/window_rules.py, сборка окон sandbox_build в plugins/pantheon/lib/pantheon.py и "
+                 "plugins/pantheon/lib/window_rules.py, merge.py, ctx.py, сборка окон sandbox_build и запуск окон в "
+                 "plugins/pantheon/lib/pantheon.py и sessions.py и "
                  ".claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
                  "заявка `pantheon merge request N -R <owner/repo>`, сливает плановый проход после Touch ID владельца.")
 MERGE_OWNER = "Слияние делает владелец."
@@ -1124,10 +1125,32 @@ def _is_core(path, core_files):
 # (window_rules.py — в CORE_FILES)
 SANDBOX_BUILD_FILE = "plugins/pantheon/lib/pantheon.py"
 SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings", "window_launch")
-# Корни, которых может ещё не быть в файле: запуск окна window_launch (metis-0951) приходит отдельным PR. Нет его в
-# версии — замыкание идёт по остальным корням; появился, пропал или изменился — правка его имени, ядро. Без
-# остальных корней — по-прежнему None (ядро)
-SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch"})
+# Запуск окон с --settings (metis-0552, Д2 argus-160b): продолжение сессии _resume_session и окна задач расписания
+# parse_command собирают argv `claude … --settings <окно>`; без --settings окно ушло бы без песочницы. Мелкие корни
+# защит запуска (Б1 и Б2 argus PR #394): флаги claude со значением CLAUDE_VALUE_FLAGS, окно задачи
+# job_window_problem, отказ в запуске из папки с allow cwd_allow_problems, снятие роли у дочерних claude claude_env и
+# ROLE_ENV (metis-0321), цель pantheon start start_target и окно её --settings direction_target, живые копии окна
+# live_copies, их остановка stop_copies, список сессий agents_all; помощники запуска окон из sessions.py: отказ без
+# окна window_missing и no_window_reason, снятие прежних копий rm_previous, текст старта push_text, замок имени lock.
+# Все они идут с тем же полным замыканием, что SANDBOX_BUILD_ROOTS, без барьеров: в ядре и то, что они зовут и
+# читают (NO_WINDOW, TICK_SUBCOMMANDS — Б1 и Б2 argus R3-2). Сужение замыкания metis-0550 вырезано: оно трижды
+# подряд выбрасывало из ядра правку запуска, которая на base 45f35bac была ядром; ложных ядер столько же, как на base
+LAUNCH_ROOTS = ("_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS", "ROLE_ENV", "job_window_problem",
+                "cwd_allow_problems", "claude_env", "start_target", "direction_target", "live_copies", "stop_copies",
+                "agents_all", "window_missing", "no_window_reason", "rm_previous", "push_text", "lock")
+# Корни, которых может ещё не быть в файле: запуск окна window_launch (metis-0951) приходит отдельным PR, в старых
+# версиях файла нет части корней запуска. Нет его в версии — замыкание идёт по остальным корням; появился, пропал или
+# изменился — правка его имени, ядро. Без остальных корней — по-прежнему None (ядро)
+SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", *LAUNCH_ROOTS})
+SESSIONS_FILE = "plugins/pantheon/lib/sessions.py"
+# Запуск окон в sessions.py (metis-0552): _start_session, _fresh_start и start собирают argv `claude … --settings
+# <окно>`, fresh_target даёт _fresh_start окно цели (Д1 обоих argus PR #394). Замыкание полное, как у pantheon.py;
+# fresh_target может не быть в версии — пропажа в одной версии — правка имени, ядро
+SESSIONS_ROOTS = ("_start_session", "_fresh_start", "start", "fresh_target")
+# файл → (корни замыкания, корни, которых может не быть). Один признак на шлюз, окно Touch ID merge.py и доску
+# autoclose.py (metis-0551) — sandbox_build_changes по каждому файлу
+BUILD_ROOTS = {SANDBOX_BUILD_FILE: ((*SANDBOX_BUILD_ROOTS, *LAUNCH_ROOTS), SANDBOX_BUILD_OPTIONAL),
+               SESSIONS_FILE: (SESSIONS_ROOTS, frozenset({"fresh_target"}))}
 MUTATORS = frozenset({"append", "extend", "insert", "update", "setdefault", "pop", "popitem", "remove", "clear", "add",
                       "discard", "sort", "reverse", "__setitem__", "__delitem__", "__iadd__", "__ior__"})
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -1190,9 +1213,10 @@ def _touched(st, data):
     return out
 
 
-def _defs_closure(src):
-    """Исходник → (имя → дампы его инструкций по порядку, замыкание SANDBOX_BUILD_ROOTS) или None: не разобрать,
-    нет корня функцией верхнего уровня."""
+def _defs_closure(src, path=SANDBOX_BUILD_FILE):
+    """Исходник файла path → (имя → дампы его инструкций по порядку, замыкание корней BUILD_ROOTS[path]) или None: не
+    разобрать, нет обязательного корня функцией верхнего уровня."""
+    roots, optional = BUILD_ROOTS[path]
     try:
         tree = ast.parse(src)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
@@ -1206,9 +1230,9 @@ def _defs_closure(src):
         for name in _touched(st, data):
             defs.setdefault(name, []).append(st)
     if not all(any(isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == r for st in tree.body)
-               for r in SANDBOX_BUILD_ROOTS if r not in SANDBOX_BUILD_OPTIONAL):
+               for r in roots if r not in optional):
         return None
-    seen, todo = set(), list(SANDBOX_BUILD_ROOTS)
+    seen, todo = set(), list(roots)
     while todo:
         name = todo.pop()
         if name in seen or name not in defs:
@@ -1222,12 +1246,12 @@ def _defs_closure(src):
     return dumps, seen
 
 
-def sandbox_build_changes(old, new, *tips):
-    """Исходники pantheon.py до и после → имена сборки окон, которые PR задевает (отсортированы), или None — не
-    разобрать или нет корня: тогда ядро. tips — исходники на вершинах base: их замыкания тоже в счёт (Б1 PR #160 —
-    в base после ответвления PR сборка стала звать функцию, которую PR правит)."""
-    a, b = _defs_closure(old), _defs_closure(new)
-    more = [_defs_closure(t) for t in tips]
+def sandbox_build_changes(old, new, *tips, path=SANDBOX_BUILD_FILE):
+    """Исходники файла path из BUILD_ROOTS (pantheon.py, sessions.py) до и после → имена сборки и запуска окон, которые
+    PR задевает (отсортированы), или None — не разобрать или нет корня: тогда ядро. tips — исходники на вершинах base:
+    их замыкания тоже в счёт (Б1 PR #160 — в base после ответвления PR сборка стала звать функцию, которую PR правит)."""
+    a, b = _defs_closure(old, path), _defs_closure(new, path)
+    more = [_defs_closure(t, path) for t in tips]
     if a is None or b is None or any(c is None for c in more):
         return None
     names = a[1] | b[1]
@@ -1273,36 +1297,36 @@ def _base_tip(repo, branch, memo=None):
     return sha.lower()
 
 
-def _sandbox_problem(cwd, repo, base, sha, branch=None, tip_memo=None):
-    """PR правит pantheon.py: ядро ли это (metis-0404) — текст для списка задетого ядра или None (сборку окон не
+def _sandbox_problem(cwd, repo, base, sha, branch=None, tip_memo=None, path=SANDBOX_BUILD_FILE):
+    """PR правит файл path из BUILD_ROOTS (pantheon.py, sessions.py): ядро ли это (metis-0404, 0552) — текст для списка задетого ядра или None (сборку окон не
     задевает). base — baseRefOid, branch — baseRefName: замыкание берётся и на живой вершине ветки (Б1 PR #160);
     tip_memo — память вершин шлюза (_base_tip, metis-0974)."""
     gd, why = _carry_git(cwd, repo, base)
     if gd is None:
-        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: {why})"
+        return f"{path} (сборку окон не проверить: {why})"
     if _git_bytes(gd, "cat-file", "-e", sha + "^{commit}") is None:
-        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: коммита {sha[:12]} нет в git папки — сделай git fetch)"
+        return f"{path} (сборку окон не проверить: коммита {sha[:12]} нет в git папки — сделай git fetch)"
     out = _git_bytes(gd, "merge-base", "--all", base.lower(), sha)
     mbs = out.split() if out is not None else []
     if len(mbs) != 1:
-        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: у {sha[:12]} и base PR нет единственной merge-base)"
+        return f"{path} (сборку окон не проверить: у {sha[:12]} и base PR нет единственной merge-base)"
     tip = _base_tip(repo, branch, tip_memo)
     if tip is None:
-        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: вершину ветки base PR ({branch}) не получить от gh)"
+        return f"{path} (сборку окон не проверить: вершину ветки base PR ({branch}) не получить от gh)"
     if _git_bytes(gd, "cat-file", "-e", tip + "^{commit}") is None:
-        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: вершины base {tip[:12]} нет в git папки — сделай " \
+        return f"{path} (сборку окон не проверить: вершины base {tip[:12]} нет в git папки — сделай " \
                f"git fetch)"
     mb = mbs[0].decode("ascii", "replace")
-    old, new = _blob(gd, mb, SANDBOX_BUILD_FILE), _blob(gd, sha, SANDBOX_BUILD_FILE)
-    tips = [_blob(gd, r, SANDBOX_BUILD_FILE) for r in dict.fromkeys((base.lower(), tip)) if r != mb]
+    old, new = _blob(gd, mb, path), _blob(gd, sha, path)
+    tips = [_blob(gd, r, path) for r in dict.fromkeys((base.lower(), tip)) if r != mb]
     ok = old is not None and new is not None and all(t is not None for t in tips)
-    got = sandbox_build_changes(old, new, *tips) if ok else None
+    got = sandbox_build_changes(old, new, *tips, path=path) if ok else None
     if got is None:
-        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: файла нет до или после, не разобрать или нет " \
-               f"{'/'.join(SANDBOX_BUILD_ROOTS)})"
+        return f"{path} (сборку окон не проверить: файла нет до или после, не разобрать или нет " \
+               f"{'/'.join(r for r in BUILD_ROOTS[path][0] if r not in BUILD_ROOTS[path][1])})"
     if got:
         shown = ", ".join(got[:8]) + (f" и ещё {len(got) - 8}" if len(got) > 8 else "")
-        return f"{SANDBOX_BUILD_FILE} (сборка окон: {shown})"
+        return f"{path} (сборка окон: {shown})"
     return None
 
 
@@ -1349,17 +1373,20 @@ def _core_problem(repo, pr, sha, data, files=_FETCH, cwd=None, tip_memo=None):
         return f"{MERGE_CORE}: PR сейчас на другом коммите ({head}), а не на {sha}"
     core = {c.casefold() for c in CORE_FILES}
     hit = [p for p in paths if _is_core(p, core)]
-    # сборка окон в pantheon.py (metis-0404): ядро, если PR задевает её имена; переименование и другой регистр — ядро
+    # сборка окон в pantheon.py (metis-0404) и запуск окон в sessions.py (metis-0552): ядро, если PR задевает их имена;
+    # переименование и другой регистр — ядро
     norm = [p.strip("/").casefold() for p in paths]
     while any(p.startswith("./") for p in norm):
         norm = [p[2:].lstrip("/") if p.startswith("./") else p for p in norm]
-    if SANDBOX_BUILD_FILE in norm:
-        own = [f for f in files if SANDBOX_BUILD_FILE in [str(n).strip("/").casefold().lstrip("./")
-                                                          for n in (f.get("filename"), f.get("previous_filename"))]]
-        if len(own) != 1 or own[0].get("filename") != SANDBOX_BUILD_FILE or own[0].get("previous_filename") is not None:
-            hit.append(f"{SANDBOX_BUILD_FILE} (переименован, удалён, добавлен или путь в другом регистре)")
+    for path in BUILD_ROOTS:
+        if path not in norm:
+            continue
+        own = [f for f in files if path in [str(n).strip("/").casefold().lstrip("./")
+                                            for n in (f.get("filename"), f.get("previous_filename"))]]
+        if len(own) != 1 or own[0].get("filename") != path or own[0].get("previous_filename") is not None:
+            hit.append(f"{path} (переименован, удалён, добавлен или путь в другом регистре)")
         else:
-            why = _sandbox_problem(cwd, repo, data.get("baseRefOid"), sha, data.get("baseRefName"), tip_memo)
+            why = _sandbox_problem(cwd, repo, data.get("baseRefOid"), sha, data.get("baseRefName"), tip_memo, path)
             if why:
                 hit.append(why)
     if hit:

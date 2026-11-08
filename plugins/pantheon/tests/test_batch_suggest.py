@@ -259,6 +259,53 @@ def tick(home, state, view, env):
     check("тик пускает только `pantheon batch-suggest run`", pc.stdout.strip() == "True True True", pc.stdout + pc.stderr[-200:])
 
 
+def _patched(env, argv, hook):
+    """pantheon с подменённым batchsuggest_mod в том же процессе: hook — код Python, который получает B (модуль) и
+    T (tasks) и меняет B перед запуском argv (metis-1006)."""
+    code = (f"import sys; sys.path.insert(0, {LIB!r}); import pantheon as P\n"
+            "B0 = P.batchsuggest_mod\n"
+            "def mod():\n    B = B0(); T = P.tasks_mod()\n" + "".join("    " + ln + "\n" for ln in hook.split("\n")) +
+            "    return B\n"
+            f"P.batchsuggest_mod = mod\nsys.exit(P.main({argv!r}))\n")
+    return subprocess.run([PY311, "-I", "-c", code], env=dict(env, PANTHEON_NOW=str(T0)), capture_output=True, text=True,
+                          timeout=120)
+
+
+def apply_race():
+    """Д-1 argus #400: пачку поставили руками между расчётом и записью --apply — задача не перенесена."""
+    tmp, home, state, view, env = make()
+    fill(home)
+    put(home, "metis-9099", "Пачка: поставлена руками", "Другая пачка.", typ="story", status="doing", mode=None)
+    hook = ("real = B.suggest\n"
+            "def suggest(tasks, d):\n"
+            "    r = real(tasks, d)\n"
+            "    T.task_attach(P.PANTHEON, P.now(), 'metis-9010', 'metis-9099')  # руками, пока шёл расчёт\n"
+            "    return r\n"
+            "B.suggest = suggest")
+    r = _patched(env, ["task", "batch-suggest", "--direction", DIR, "--apply"], hook)
+    check("--apply: пачку поставили между расчётом и записью — задача не перенесена, отказ в «пропущено»",
+          r.returncode == 0 and "parent: metis-9099" in task_text(home, "metis-9010")
+          and "предложение устарело" in r.stdout, r.stdout[-400:] + r.stderr[-300:])
+
+
+def write_fail():
+    """Д-2 argus #400: сбой записи при прикреплении — код 1 и тревога, а не тихий «пропущено»."""
+    tmp, home, state, view, env = make()
+    fill(home)
+    hook = ("def boom(res, tasks, attach):\n"
+            "    return [], ['metis-9010 → metis-9001: ' + B.WRITE_FAIL + ' (OSError: диск полон) — сверьте parent и журнал']\n"
+            "B.apply = boom")
+    r = _patched(env, ["task", "batch-suggest", "--direction", DIR, "--apply"], hook)
+    check("--apply: сбой записи → код 1 и строка в stderr", r.returncode == 1 and "сбой записи у 1" in r.stderr,
+          f"{r.returncode} {r.stderr[-300:]}")
+    r2 = _patched(env, ["batch-suggest", "run"], hook)
+    check("run: сбой записи → своя тревога и код 76 (ALERTED: вторую тревогу run_job не даёт)", r2.returncode == 76
+          and "[alert] pantheon-tick · пачки: сбой записи при прикреплении у 2" in r2.stdout, f"{r2.returncode} {r2.stdout[-400:]} {r2.stderr[-200:]}")
+    ok = _patched(env, ["task", "batch-suggest", "--direction", DIR, "--apply"],
+                  "def nofail(res, tasks, attach):\n    return [], ['metis-9011 → metis-9001: нет mode']\nB.apply = nofail")
+    check("--apply: отказ attach по правилу (не сбой записи) — код 0", ok.returncode == 0, ok.stderr[-300:])
+
+
 def main():
     tmp, home, state, view, env = make()
     fill(home)
@@ -266,6 +313,8 @@ def main():
     apply_skips(home)
     common_file()
     cli(home, env)
+    apply_race()
+    write_fail()
     tmp2, home2, state2, view2, env2 = make()
     fill(home2)
     tick(home2, state2, view2, env2)

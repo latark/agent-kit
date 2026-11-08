@@ -27,6 +27,10 @@ locks/heavy-queue/ (имя — время прихода и pid) и держит
 Команды нет в PATH окна (окно подняли без ~/.zprofile, nvm в PATH не попал — `pnpm` не находился, metis-0569) —
 heavy ищет её сам: bin версии node из nvm (alias/default, затем новейшие), Homebrew, ~/.local/bin; нашла — добавляет эту
 папку в PATH команды (у pnpm и npx shebang `env node`). Не нашла — код 127 и одна строка, без очереди за местом.
+Полный набор (metis-1007): run-tests.py с папками плагинов без --affected/--only (правило — lib/fullsuite.py, то же, что у
+outside) занимает ещё и жетон locks/heavy-full.lock — на Mac идёт один полный набор, второй ждёт в очереди так же (за
+жетон — опросом, потом за место по порядку прихода; HEAVY_WAIT_MAX и сообщения те же). Узкие команды и одиночные файлы
+жетон не берут. Нет файла жетона — heavy создаёт его сам, а в песочнице идёт без него.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
@@ -44,6 +48,7 @@ LOCKS = os.path.join(os.path.realpath(os.environ.get("PANTHEON_STATE") or
                                       os.path.join(os.path.expanduser("~"), ".local", "state", "pantheon")), "locks")
 SLOTS = ("heavy-cmd-1", "heavy-cmd-2")
 SERVER = "heavy-server"  # жетон долгого процесса: держит его не больше одного сервера
+FULL = "heavy-full"  # жетон полного набора тестов: на Mac идёт не больше одного (metis-1007)
 WAIT_EXIT = 75
 POLL = 0.5  # с между опросами мест
 
@@ -147,13 +152,32 @@ class Ticket:
         self.fd = self.dfd = self.name = None
 
 
+def is_full(argv):
+    """Полный набор тестов — по тому же правилу, что у outside (lib/fullsuite.py). Не загрузилось — не полный."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "fullsuite", os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "fullsuite.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(mod.is_full(argv))
+    except Exception as e:  # не загрузилось — не полный, но молча нельзя: жетон тогда не работает
+        print(f"heavy: fullsuite не загрузился: {e} — жетон полного набора не работает", file=sys.stderr)
+        return False
+
+
 def try_slot(names=SLOTS):
     for name in names:
         p = os.path.join(LOCKS, name + ".lock")
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
-            continue
+            if name != FULL:
+                continue
+            try:  # файл жетона полного набора ещё не создан (старая установка) — создаём; нельзя (песочница) — без него
+                fd = os.open(p, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+            except OSError:
+                return -1, name
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return fd, name
@@ -180,7 +204,7 @@ def status():
     n = queue_len()
     if n:
         print(f"очередь на места: {n}")
-    for name in SLOTS + (SERVER,):
+    for name in SLOTS + (SERVER, FULL):
         p = os.path.join(LOCKS, name + ".lock")
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
@@ -271,7 +295,8 @@ def main(argv):
     except ValueError:
         wait_max = 0
     held, waited = [], 0
-    need = ([((SERVER,), "сервер уже запущен другой ролью")] if server else []) + \
+    need = ([((FULL,), "полный набор тестов уже идёт (на Mac один)")] if not server and is_full(argv) else []) + \
+        ([((SERVER,), "сервер уже запущен другой ролью")] if server else []) + \
         [(SLOTS, "оба места заняты другими тяжёлыми командами")]
     for names, what in need:
         ticket = Ticket() if names == SLOTS else None  # очередь — только на два места, не на жетон сервера
@@ -292,7 +317,8 @@ def main(argv):
         finally:
             if ticket:
                 ticket.drop()
-        held.append(fd)
+        if fd >= 0:  # -1 — жетон полного набора создать нельзя: идём без него, как без мест
+            held.append(fd)
     proc = subprocess.Popen(argv, env=env)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda s, _f: proc.send_signal(s))

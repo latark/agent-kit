@@ -45,6 +45,7 @@ waiting_sync): карточки направления, PR ядра и заяв�
 Только стандартная библиотека: модуль грузит и хук (hooks/ctx.py).
 """
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -58,8 +59,10 @@ EMBED = "![[board-auto]]"
 EMBED_LINES = 30             # строка встраивания — среди первых строк board.md («вверху»)
 DAY = 86400
 WATCH_GAP = 10 * 60          # входы менялись, а сборки нет столько — тревога
-BLOCK_MAX = 1200             # знаков во всём файле
+BLOCK_MAX = 1500             # знаков во всём файле
 MAX_PR, MAX_BATCH, MAX_STATUS, MAX_DECISION, MAX_IDS = 8, 3, 6, 5, 3
+MAX_WINDOWS = 8  # имён живых окон в строке «Сейчас» (metis-1005)
+MAX_JOURNAL = 3  # направлений с самой свежей записью журнала в строке «Сейчас»
 MAX_MERGED = 5  # строк «PR слит, задача открыта» (metis-0768)
 MAX_OWNER = 10  # id карточек владельца в строке «Ждёт вас» / «Руками»
 REVIEW_RE = re.compile(r"review-([1-9]\d{0,5})-argus(?:-?([a-z]?)(\d*))?\.md")
@@ -77,7 +80,7 @@ STATUS_RU = {"doing": "в работе", "review": "на проверке", "wai
 OWN_Q = re.compile(r"вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", re.I)
 ANSWER_HEADS = ("· окно вопросов", "· ответ в чате")  # = lib/answers.py HEADS (metis-0405; сверяет test_chat_answer)
 HEAD_LINE = "<!-- файл собирает плановый проход (pantheon board, metis-0397); руками не править — перезапишется -->"
-STAMP_RE = re.compile(r" · собрано \d\d\.\d\d \d\d:\d\d из \d+ файл\w*")
+STAMP_RE = re.compile(r" · собрано \d\d\.\d\d \d\d:\d\d из \d+ файл\w*|(?<=\*\*Сейчас) \d\d\.\d\d \d\d:\d\d(?=\*\*)")
 
 
 def hm(t):
@@ -352,6 +355,26 @@ def waiting_sync(pantheon, state, tasks, is_owner, t):
     return made
 
 
+def nowfact():
+    """lib/nowfact.py — время журнала STATUS.md (рядом с этим файлом; модуль грузят и по пути, без пакета)."""
+    spec = importlib.util.spec_from_file_location("pantheon_nowfact", os.path.join(os.path.dirname(__file__), "nowfact.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def journal_times(pantheon, t):
+    """[(направление, время последней записи журнала STATUS.md)] — самые свежие первыми. Текст журнала в блок не идёт."""
+    N, out = nowfact(), []
+    for p in status_files(pantheon):
+        name, mt, text = os.path.basename(os.path.dirname(p)), _mtime(p), _read(p)
+        ts = N.journal_time(text, mt, t) if text is not None and mt is not None else None
+        if ts is not None and _ok(NAME_RE, name):
+            out.append((name, ts))
+    out.sort(key=lambda x: -x[1])
+    return out
+
+
 def status_files(pantheon):
     return sorted(glob.glob(os.path.join(pantheon, "directions", "*", "STATUS.md")))
 
@@ -486,10 +509,11 @@ def watch_files(pantheon, state):
         + [handoff_log(state)]
 
 
-def collect(pantheon, state, tasks, t, week=None, owner=None, own_of=None):
+def collect(pantheon, state, tasks, t, week=None, owner=None, own_of=None, windows=None):
     """Все входы блока одним словарём; files — сколько файлов прочитано (для штампа). owner — шапка → на владельце
     ли карточка (tasks.Roles и assignee у вызывающего); без него разделов «Ждёт вас» и «Руками» нет. own_of — id пачки →
-    репозитории её направления (batch_branch_prs; None — любые)."""
+    репозитории её направления (batch_branch_prs; None — любые). windows — имена живых окон (снимок сессий
+    STATE/agents.json, даёт вызывающий; None — снимка нет, окна в «Сейчас» не показываем)."""
     cache = os.path.join(state, "autoclose-prs.json")
     zeus_md, board_jsonl = owner_log(state)
     files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
@@ -497,7 +521,8 @@ def collect(pantheon, state, tasks, t, week=None, owner=None, own_of=None):
     return {"prs": open_prs(cache), "pr_stale": pr_stale(cache), "reviews": reviews(pantheon), "batches": batches(tasks, batch_branch_prs(cache, own_of)), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
             "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
-            "owner": owner_cards(tasks, owner) if owner else None, "handoffs": handoffs(state, t)}
+            "owner": owner_cards(tasks, owner) if owner else None, "handoffs": handoffs(state, t),
+            "journal": journal_times(pantheon, t), "windows": windows, "queue": merge_queue(state)}
 
 
 # --- блок -------------------------------------------------------------------------------------------------------
@@ -538,9 +563,29 @@ def pr_stale_line(stale):
         else f"- PR: gh недоступен ({names}), данных нет."
 
 
-def lines(data):
-    """Строки блока без штампа (в порядке важности: неделя, PR, пачки, STATUS, ответы владельца)."""
-    out = []
+def now_line(data, t):
+    """«Сейчас» из факта (metis-1005): время сборки, последняя запись журнала STATUS.md, живые окна, заявки merge."""
+    parts = []
+    jr = [(n, ts) for n, ts in data.get("journal") or [] if _ok(NAME_RE, str(n)) and isinstance(ts, (int, float))]
+    if jr:
+        parts.append("журнал STATUS: " + ", ".join(f"{n} {nowfact().display(ts)}" for n, ts in jr[:MAX_JOURNAL]))
+    else:
+        parts.append("журнала STATUS со временем нет")
+    win = data.get("windows")
+    if isinstance(win, (list, tuple)):
+        names = [w for w in win if isinstance(w, str) and _ok(NAME_RE, w)]
+        more = f" и ещё {len(names) - MAX_WINDOWS}" if len(names) > MAX_WINDOWS else ""
+        parts.append(f"живых окон {len(names)}" + (": " + ", ".join(names[:MAX_WINDOWS]) + more if names else ""))
+    else:
+        parts.append("окна неизвестны (снимка сессий нет)")
+    q = sorted({n for _, n in data.get("queue") or [] if isinstance(n, int) and not isinstance(n, bool)})
+    parts.append("заявки merge: " + (", ".join(f"#{n}" for n in q) if q else "нет"))
+    return f"- **Сейчас {hm(t)}** · " + " · ".join(parts) + "."
+
+
+def lines(data, t=None):
+    """Строки блока без штампа (в порядке важности: «Сейчас» из факта, неделя, PR, пачки, STATUS, ответы владельца)."""
+    out = [now_line(data, t)] if t is not None else []
     w = data.get("week")
     out.append(f"- Неделя: {w} %." if isinstance(w, int) and not isinstance(w, bool) else "- Неделя: расход неизвестен.")
     own = data.get("owner")
@@ -590,11 +635,11 @@ def lines(data):
 def render(data, t):
     """Текст файла: строка-пометка, штамп, строки блока; длиннее BLOCK_MAX — хвост строк сводится в «…не вошло»."""
     head = [HEAD_LINE, f"**Сводка прохода · собрано {hm(t)} из {int(data.get('files') or 0)} файлов**", ""]
-    body = lines(data)
+    body = lines(data, t)
     text = "\n".join(head + body) + "\n"
     while len(text) > BLOCK_MAX and body:
         body = body[:-1]
-        more = f"- …не вошло строк: {len(lines(data)) - len(body)}."
+        more = f"- …не вошло строк: {len(lines(data, t)) - len(body)}."
         text = "\n".join(head + body + [more]) + "\n"
     return text
 

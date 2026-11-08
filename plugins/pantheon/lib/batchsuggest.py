@@ -367,7 +367,9 @@ def render(res):
 
 def apply(res, tasks, attach):
     """Прикрепляет только предложения confidence=high через attach(task_id, story_id) (tasks.task_attach).
-    Задача без решённого mode attach не пускает — пропуск со строкой. → (сделано, пропущено) списками строк."""
+    Задача без решённого mode attach не пускает — пропуск со строкой. Сбой записи (OSError и прочее) тоже пропуск со
+    строкой, а не падение прохода: одна задача не отменяет остальные (metis-0960); parent мог успеть записаться
+    до сбоя — строка просит сверить журнал; такие строки отбирает write_failures. → (сделано, пропущено) списками строк."""
     done, skipped = [], []
     for j in res["joins"]:
         if j["confidence"] != "high":
@@ -377,4 +379,15 @@ def apply(res, tasks, attach):
             done.append(f"{j['task']} → {j['story']}")
         except ValueError as e:
             skipped.append(f"{j['task']} → {j['story']}: {e}")
+        except Exception as e:  # noqa: BLE001 — сбой диска посреди пары записей
+            skipped.append(f"{j['task']} → {j['story']}: {WRITE_FAIL} ({type(e).__name__}: {e}) — сверьте parent и журнал")
     return done, skipped
+
+
+WRITE_FAIL = "сбой записи"
+
+
+def write_failures(skipped):
+    """Строки пропуска из-за сбоя записи (не отказ attach по правилу): их проход и --apply не глотают молча — тревога
+    и ненулевой код (metis-1006, Д-2 argus #400)."""
+    return [x for x in skipped if f": {WRITE_FAIL} (" in x]

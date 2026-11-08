@@ -4608,6 +4608,202 @@ def t_core_sandbox_unit(h):
           mg.sandbox_build_changes(real, probe) == ["role_settings"], mg.sandbox_build_changes(real, probe))
 
 
+# metis-0411, 0552: запуск окон с --settings — корни с полным замыканием, как у сборки; сужения 0550 нет: имя модуля
+# через import — данные, локальное имя тянет одноимённую функцию модуля, барьеров нет
+LAUNCH_SRC = SB_SRC + """
+
+def _resume_session(sid):
+    return ["claude", "--resume", sid, "--settings", run_settings(sid)]
+
+
+def parse_command(text):
+    return task_cmd([text, "--settings"])
+
+
+def alert_once(msg):
+    return task_cmd([msg])
+"""
+SS_SRC = """import os
+SESSIONS = {}
+
+
+def _argv(name):
+    return ["claude", "--name", name]
+
+
+def _fresh_start(name):
+    return _argv(name) + ["--settings", name + ".json"]
+
+
+def _start_session(name):
+    SESSIONS[name] = 1
+    return ["claude", "--settings", name + ".json"]
+
+
+def start(rest):
+    return _start_session(rest)
+
+
+def list_sessions():
+    os.environ["PANTHEON_X"] = "1"
+    return sorted(SESSIONS)
+"""
+
+
+def t_core_lists_unit(h):
+    """Ядро — как текст роли «Ядро защит» (metis-0411): merge.py, window_rules.py, ctx.py (hq_policy) — файлы ядра;
+    снятие --settings в запуске окон pantheon.py и sessions.py — ядро (0552); корни запуска идут с полным замыканием,
+    без барьеров: правка того, что они зовут и читают, правка os в функции и функции с именем локальной переменной
+    сборки — ядро, как на base 45f35bac (сужение 0550 вырезано)."""
+    mg = _load_merge_gate("merge_gate_lists")
+    sha = "a" * 40
+    for path in ("plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/window_rules.py",
+                 "plugins/pantheon/hooks/ctx.py", "./plugins/pantheon//lib/../lib/merge.py"):
+        mg._gh_json = lambda args, path=path: [{"filename": path, "status": "modified"}]
+        why = mg._core_problem("latark/agent-kit", 7, sha, {"headRefOid": sha, "changedFiles": 1})
+        check(f"ядро: PR правит {path} — ядро", why and mg.MERGE_CORE in why, why)
+    # sessions.py — тот же путь шлюза, что pantheon.py: _sandbox_problem с path файла
+    calls = []
+    mg._sandbox_problem = lambda *a: calls.append(a[-1]) or f"{a[-1]}: start"
+    mg._gh_json = lambda args: [{"filename": mg.SESSIONS_FILE, "status": "modified"}]
+    why = mg._core_problem("latark/agent-kit", 7, sha, {"headRefOid": sha, "changedFiles": 1})
+    check("запуск окон: PR правит sessions.py — сверка сборки по sessions.py", calls == [mg.SESSIONS_FILE], calls)
+    check("запуск окон: правка запуска в sessions.py — ядро", why and "sessions.py: start" in why, why)
+    mg = _load_merge_gate("merge_gate_lists2")
+    # pantheon.py: _resume_session и parse_command — корни с замыканием
+    for name, (a, b) in (("_resume_session", ('"--settings", run_settings(sid)]', 'run_settings(sid)]')),
+                         ("parse_command", ('[text, "--settings"]', '[text]'))):
+        check(f"запуск окон: замена в {name} есть в образце", a in LAUNCH_SRC)
+        got = mg.sandbox_build_changes(LAUNCH_SRC, LAUNCH_SRC.replace(a, b, 1))
+        check(f"запуск окон: снятие --settings в {name} — ядро", got == [name], got)
+    got = mg.sandbox_build_changes(LAUNCH_SRC, LAUNCH_SRC.replace(*SB_VARIANTS[10][1], 1))
+    check("запуск окон: правка task_cmd, которую зовёт parse_command, — ядро (замыкание)", got == ["task_cmd"], got)
+    check("запуск окон: _resume_session удалён в PR — ядро",
+          bool(mg.sandbox_build_changes(LAUNCH_SRC, LAUNCH_SRC.replace("def _resume_session(sid):", "def _rs(sid):"))))
+    # барьеров нет: тревога alert_once в сборке — её правка ядро, правка того, что она зовёт, — тоже
+    stop = LAUNCH_SRC.replace("def role_settings(folders):\n", "def role_settings(folders):\n    alert_once('x')\n") \
+        + "\n\ndef _al_help(m):\n    return [m]\n"
+    stop = stop.replace("    return task_cmd([msg])", "    return _al_help(msg)")
+    got = mg.sandbox_build_changes(stop, stop.replace("    return _al_help(msg)", "    return _al_help(msg + '!')"))
+    check("без барьера: правка alert_once из сборки — ядро", got == ["alert_once"], got)
+    got = mg.sandbox_build_changes(stop, stop.replace("    return [m]\n", "    return [m, 1]\n"))
+    check("без барьера: правка того, что зовёт только alert_once из сборки, — ядро", got == ["_al_help"], got)
+    # как на base: os пришёл импортом и читается в сборке — правка os.environ в посторонней функции ядро
+    osenv = ("    out = []\n", "    os.environ['PANTHEON_X'] = '1'\n    out = []\n")
+    got = mg.sandbox_build_changes(SB_SRC, SB_SRC.replace(*osenv, 1))
+    check("как на base: os.environ в посторонней функции — ядро", "task_cmd" in (got or []), got)
+    # как на base: локальное имя check в сборке тянет функцию модуля check
+    loc = SB_SRC.replace("    # окна направлений\n", "    # окна направлений\n    check = len(domains)\n") + \
+        "\n\ndef check(x):\n    return x\n"
+    got = mg.sandbox_build_changes(loc, loc.replace("    return x\n", "    return x + 1\n"))
+    check("как на base: функция модуля с именем локальной переменной сборки — ядро", got == ["check"], got)
+    glob = loc.replace("    check = len(domains)\n", "    check(len(domains))\n")
+    got = mg.sandbox_build_changes(glob, glob.replace("    return x\n", "    return x + 1\n"))
+    check("0550: та же функция, которую сборка зовёт, — ядро", got == ["check"], got)
+    # sessions.py: корни _start_session, _fresh_start, start — с замыканием
+    P = mg.SESSIONS_FILE
+    for name, (a, b) in (("_fresh_start", (' + ["--settings", name + ".json"]', '')),
+                         ("_start_session", ('["claude", "--settings", name + ".json"]', '["claude"]')),
+                         ("start", ("return _start_session(rest)", "return _fresh_start(rest)"))):
+        check(f"sessions.py: замена в {name} есть в образце", a in SS_SRC)
+        got = mg.sandbox_build_changes(SS_SRC, SS_SRC.replace(a, b, 1), path=P)
+        # _start_session меняет SESSIONS — его правка задевает и это имя данных
+        check(f"sessions.py: правка запуска {name} — ядро", got and name in got, got)
+    got = mg.sandbox_build_changes(SS_SRC, SS_SRC.replace('"PANTHEON_X"] = "1"', '"PANTHEON_X"] = "2"'), path=P)
+    check("sessions.py: os.environ в функции, до которой запуск не доходит, — не ядро", got == [], got)
+    got = mg.sandbox_build_changes(SS_SRC, SS_SRC.replace('"--name", name]', '"--name", name, "-v"]'), path=P)
+    check("sessions.py: правка помощника _argv, которого зовёт _fresh_start, — ядро", got == ["_argv"], got)
+    check("sessions.py: без корня start — None (ядро)",
+          mg.sandbox_build_changes(SS_SRC, SS_SRC.replace("def start(rest):", "def begin(rest):"), path=P) is None)
+    # настоящий sessions.py: снятие --settings в каждом из трёх запусков — ядро. С metis-0933 argv окна собирает
+    # P.window_launch (pantheon.py): снять --settings в sessions.py — значит собрать argv в обход window_launch
+    real_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(GUARD))), "pantheon", "lib", "sessions.py")
+    real = open(real_path, encoding="utf-8").read()
+    check("настоящий sessions.py: без правки — пусто", mg.sandbox_build_changes(real, real, path=P) == [])
+    for name, a, b in (("_fresh_start", "P.window_launch(role, name, window, win, text)",
+                        '[P.claude_bin(), "--bg", "--agent", role, "--name", name, text]'),
+                       ("start", 'P.window_launch("hq", "zeus", None, P.path("settings", "hq.json"), bg=False)',
+                        '[P.claude_bin(), "--agent", "hq", "--name", "zeus"]'),
+                       ("_start_session", "P.window_launch(role, name, window, run, prompt)",
+                        '[P.claude_bin(), "--bg", "--agent", role, "--name", name, prompt]')):
+        check(f"настоящий sessions.py: запуск через window_launch в {name} есть", real.count(a) == 1)
+        got = mg.sandbox_build_changes(real, real.replace(a, b, 1), path=P)
+        check(f"настоящий sessions.py: снятие --settings в {name} — ядро", got == [name], got)
+    # сам --settings — в window_launch (pantheon.py): его снятие там — ядро
+    pan_path = os.path.join(os.path.dirname(real_path), "pantheon.py")
+    pan = open(pan_path, encoding="utf-8").read()
+    a = '*window_flags(window, name), "--settings", settings]'
+    check("настоящий pantheon.py: --settings в window_launch есть", pan.count(a) == 1)
+    got = mg.sandbox_build_changes(pan, pan.replace(a, "*window_flags(window, name)]", 1))
+    check("настоящий pantheon.py: снятие --settings в window_launch — ядро", got == ["window_launch"], got)
+    check("настоящий sessions.py: новая функция в конце — не ядро",
+          mg.sandbox_build_changes(real, real + "\n\ndef _metis_0552_probe():\n    return 1\n", path=P) == [])
+    # Б1 обоих argus PR #394: защиты запуска — мелкие корни; на base 45f35bac были ядром через os, после 0550 выпали
+    got = mg.sandbox_build_changes(real, real.replace("    P.allow_gate(name)", "    pass", 1), path=P)
+    check("настоящий sessions.py: fresh_target без allow_gate — ядро", got == ["fresh_target"], got)
+    for name, a, b in (("CLAUDE_VALUE_FLAGS", '"--name"}', '"--name", "--permission-mode"}'),
+                       ("ROLE_ENV", 'ROLE_ENV = ("PANTHEON_ROLE", ', "ROLE_ENV = (")):
+        check(f"настоящий pantheon.py: {name} есть", pan.count(a) == 1)
+        got = mg.sandbox_build_changes(pan, pan.replace(a, b, 1))
+        check(f"настоящий pantheon.py: правка {name} — ядро", got == [name], got)
+    # Б1 и Б2 argus R3-2 PR #394: данные, которые читают корни запуска, — ядро (замыкание, как на base 45f35bac)
+    for name, a, b in (("NO_WINDOW", "\nNO_WINDOW = 3\n", "\nNO_WINDOW = 0\n"),
+                       ("TICK_SUBCOMMANDS", 'TICK_SUBCOMMANDS = {"view", ', 'TICK_SUBCOMMANDS = {"merge", "view", ')):
+        check(f"настоящий pantheon.py: {name} есть", pan.count(a) == 1)
+        got = mg.sandbox_build_changes(pan, pan.replace(a, b, 1))
+        check(f"настоящий pantheon.py: правка {name} — ядро", got == [name], got)
+    for name in ("job_window_problem", "cwd_allow_problems", "claude_env", "start_target", "live_copies",
+                 "stop_copies", "agents_all"):
+        m = re.search(r'^def %s\(.*?\):\n(    """.*?"""\n)?' % name, pan, re.M | re.S)
+        check(f"настоящий pantheon.py: def {name} есть", m is not None)
+        if m:
+            got = mg.sandbox_build_changes(pan, pan[:m.end()] + "    return None\n" + pan[m.end():])
+            check(f"настоящий pantheon.py: {name} → return None — ядро", got == [name], got)
+    # Б2 обоих argus R2 PR #394: окно direction_target, бинарь и окружение claude, помощники запуска из sessions.py —
+    # на base 45f35bac ядро; claude_bin, run_env, clean_path, nvm_bin, installed_plugin_dir — через сборку (мелкий
+    # корень не барьер), остальные — мелкие корни
+    for name in ("direction_target", "claude_bin", "run_env", "clean_path", "nvm_bin", "installed_plugin_dir",
+                 "window_missing", "no_window_reason", "rm_previous", "push_text", "lock"):
+        m = re.search(r'^def %s\(.*?\):\n(    """.*?"""\n)?' % name, pan, re.M | re.S)
+        check(f"настоящий pantheon.py: def {name} есть", m is not None)
+        if m:
+            got = mg.sandbox_build_changes(pan, pan[:m.end()] + "    return None\n" + pan[m.end():])
+            check(f"настоящий pantheon.py: {name} → return None — ядро", got and name in got, got)
+    for title, a, b, name in (
+            ("окно мастерской workshop → hq", '"workshop", folder, "workshop",', '"workshop", folder, "hq",',
+             "direction_target"),
+            ("окно координатора → hq", '(target, "domain-coordinator", folder, target,', '(target, "hq", folder, "hq",',
+             "direction_target"),
+            ("PATH окна с /tmp первым", "    extra = [own_bin, ", '    extra = ["/tmp", own_bin, ', "run_env"),
+            ("PANTHEON_ROLE в окружении окна", '    env["PANTHEON_PYTHON"] = sys.executable',
+             '    env["PANTHEON_ROLE"] = "zeus"\n    env["PANTHEON_PYTHON"] = sys.executable', "run_env"),
+            ("подмена бинаря claude", "def claude_bin():\n", 'def claude_bin():\n    return "/tmp/x/claude"\n',
+             "claude_bin")):
+        check(f"настоящий pantheon.py: замена «{title}» есть", pan.count(a) == 1)
+        got = mg.sandbox_build_changes(pan, pan.replace(a, b, 1))
+        check(f"настоящий pantheon.py: {title} — ядро", got == [name], got)
+    # project_allow_stop — не барьер: то, что он зовёт из сборки, — в замыкании
+    pas = LAUNCH_SRC.replace("def role_settings(folders):\n", "def role_settings(folders):\n    project_allow_stop('x')\n") \
+        + "\n\ndef project_allow_stop(name):\n    return _pa_text(name)\n\n\ndef _pa_text(name):\n    return [name, 'pa']\n"
+    got = mg.sandbox_build_changes(pas, pas.replace("[name, 'pa']", "[name, 'pa!']"))
+    check("Б1: правка того, что зовёт project_allow_stop из сборки, — ядро", got == ["_pa_text"], got)
+    # мелкие корни без вызова из сборки: своя правка — ядро, правка того, что они зовут, — тоже (замыкание)
+    lc = LAUNCH_SRC + "".join(f"\n\ndef {n}(x):\n    return _lc_help(x, '{n}')\n"
+                              for n in ("live_copies", "stop_copies", "agents_all")) + \
+        "\n\ndef _lc_help(x, n):\n    return [x, n]\n"
+    for n in ("live_copies", "stop_copies", "agents_all"):
+        got = mg.sandbox_build_changes(lc, lc.replace(f"_lc_help(x, '{n}')", f"_lc_help(x, '{n}!')"))
+        check(f"мелкий корень {n} вне сборки: его правка — ядро", got == [n], got)
+    got = mg.sandbox_build_changes(lc, lc.replace("return [x, n]", "return [n, x]"))
+    check("мелкие корни: правка того, что зовут live_copies/stop_copies/agents_all, — ядро", got == ["_lc_help"], got)
+    # Б1 и Д2 argus R2-1 PR #394: мелкий корень, вызванный из сборки, — не барьер: правка его помощника — ядро
+    lcb = lc.replace("def role_settings(folders):\n", "def role_settings(folders):\n    stop_copies('x')\n")
+    got = mg.sandbox_build_changes(lcb, lcb.replace("return [x, n]", "return [n, x]"))
+    check("мелкий корень stop_copies вызван из сборки: правка его помощника — ядро", got == ["_lc_help"], got)
+    got = mg.sandbox_build_changes(SS_SRC, SS_SRC + "\n\ndef fresh_target(name):\n    return name\n", path=P)
+    check("sessions.py: fresh_target появился — правка имени, ядро", got == ["fresh_target"], got)
+
+
 def t_core_sandbox(h):
     """Шлюз: PR, который правит сборку окон в pantheon.py, — ядро, лид его не сливает; правка другой функции —
     проходит; сборку не проверить (не клон, нет коммита, переименование, другой регистр) — ядро; Touch ID — проходит."""
@@ -5841,7 +6037,7 @@ CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_fu
          t_ci_required, t_batch_full, t_batch_unit, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_returned_unit, t_returned_record, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_request_decision, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
+         t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_request_decision, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_lists_unit, t_core_sandbox]
 
 # случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;
 # вне ядра те же записи проходят — это проверяют отдельные места в самих случаях (h.core = False; h.reset())

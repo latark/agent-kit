@@ -795,6 +795,51 @@ def stale_now(name, text, mtime, agents, registry, t):
         P.alert_once(fail, value, f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
 
 
+HEAD_FRESH = 30              # STATUS.md правили недавно (секунд) — шапку «Сейчас» не переписываем: роль может писать (metis-1005)
+
+
+def retime_status(name, p, text, st, t):
+    """Шапка `## Сейчас (дата)` STATUS.md — по времени последней строки журнала, а не по ручной дате (metis-1005).
+    Переписывается только строка заголовка: замена файла (временный файл рядом и rename) с mtime прежний + 1 с, если файл не
+    менялся с чтения (inode, mtime, размер — сверка перед самой заменой) и его не правили последние HEAD_FRESH секунд. → (текст, st) после записи или прежние."""
+    N = P.boardtext_mod().nowfact()
+    new, changed = N.retime_head(text, N.journal_time(text, st.st_mtime, t))
+    if not changed or t - st.st_mtime < HEAD_FRESH:
+        return text, st
+    tmp = f"{p}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        os.chmod(tmp, st.st_mode & 0o777)
+        # mtime — прежний плюс 1 с: возраст файла и дата журнала без даты считаются по правке роли, а не по нашей замене
+        # шапки, но копия для Obsidian (rsync -t, отпечаток view: размер и mtime) замену видит — шапка той же длины
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        cur = os.stat(p)  # сверка прямо перед заменой: роль дописала файл, пока писали временный, — не трогаем
+        if (cur.st_ino, cur.st_mtime_ns, cur.st_size) != (st.st_ino, st.st_mtime_ns, st.st_size):
+            return text, st
+        os.replace(tmp, p)
+        return new, os.stat(p)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
+def manual_behind(name, text, mtime, t):
+    """Ручной раздел STATUS.md с датой старше свежего журнала больше чем на 6 ч (metis-1005): тревога владельцу файла —
+    координатору направления, один раз на набор разделов; нет такого — отметка снимается."""
+    N = P.boardtext_mod().nowfact()
+    key = f"watch-manual-{name}"
+    late = N.stale_manual(text, mtime, t)
+    if not late:
+        P.clear_once(key)
+        return
+    j = N.display(N.journal_time(text, mtime, t))
+    names = "; ".join(f"«{n}» {N.display(ts)}" for n, ts in late[:3]) + (f" и ещё {len(late) - 3}" if len(late) > 3 else "")
+    P.alert_once(key, "|".join(f"{n}@{N.display(ts)}" for n, ts in late),
+                 f"STATUS.md {name}: ручной раздел с датой старше журнала ({j}) больше {N.STALE_HOURS} ч — {names}. "
+                 f"Владелец файла — координатор {name}: обновить раздел или вынести старое в archive/", "watch")
+
+
 def status_files(doms, t, agents=(), registry=()):
     """STATUS.md направления: с задачей «В работе» давно не обновлялся — состояние могло потеряться; длиннее 200 строк
     — координатору перенести закрытое в archive/ (STATE-14); «Сейчас» старше STALE_NOW_HOURS у работающего окна —
@@ -811,12 +856,19 @@ def status_files(doms, t, agents=(), registry=()):
             n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         except OSError:
             continue
+        mtime0 = st.st_mtime  # возраст файла — по правке роли, а не по нашей замене шапки
         try:
-            stale_now(name, text, st.st_mtime, agents, registry, t)
+            text, st = retime_status(name, p, text, st, t)
+            manual_behind(name, text, mtime0, t)
+        except Exception as ex:  # noqa: BLE001 — сбой шапки или проверки ручных разделов не обрывает остальное
+            P.alert_once(f"watch-head-err-{name}", today(t), f"STATUS.md {name}: шапка «Сейчас» из журнала не обновлена: "
+                         f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
+        try:
+            stale_now(name, text, mtime0, agents, registry, t)
         except Exception as ex:  # сбой одного направления (таймаут resume_session и т. п.) не обрывает остальные
             P.alert_once(f"watch-now-err-{name}", today(t), f"STATUS.md {name}: проверка «Сейчас» упала: "
                          f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
-        age = (t - st.st_mtime) / 86400
+        age = (t - mtime0) / 86400
         if name in doing and age > STALE_STATUS_DAYS:
             P.alert_once(f"watch-status-{name}", today(t),
                          f"STATUS.md {name} не обновлялся {age:.0f} дн., а задача «В работе» есть — спросить "
@@ -1886,13 +1938,45 @@ def sandbox_clean(root, t, opened, days=None):
     return removed, failed
 
 
-def sandbox_mb(root):
-    """Размер кэша песочниц, МБ (du -sk), или None."""
+SANDBOX_DU_TTL = 6 * 3600         # размер кэша пересчитываем не чаще (metis-1007): du по 6,6 ГБ — 30+ с диска на каждом проходе
+
+
+def _du_mb(root):
     try:
         r = subprocess.run(["du", "-sk", root], capture_output=True, text=True, timeout=120)
         return int(r.stdout.split()[0]) // 1024
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
+
+
+def _top_sig(root):
+    """Отпечаток верхнего уровня кэша: имена папок окон и их mtime (не глубже)."""
+    try:
+        return sorted([e.name, int(e.stat(follow_symlinks=False).st_mtime)] for e in os.scandir(root))
+    except OSError:
+        return None
+
+
+def sandbox_mb(root, force=False):
+    """Размер кэша песочниц, МБ, или None. Полный du — не на каждом проходе: прошлый размер берётся из кэша
+    (STATE/sandbox-size.json), пока он моложе SANDBOX_DU_TTL, верхний уровень кэша (имена и mtime папок окон) не
+    изменился и уборка ничего не убрала (force). Иначе du заново."""
+    sig = _top_sig(root)
+    cp = P.path("sandbox-size.json")
+    if not force and sig is not None:
+        try:
+            with open(cp, encoding="utf-8") as fh:
+                c = json.load(fh)
+            if (c.get("root") == root and c.get("sig") == sig and isinstance(c.get("mb"), int)
+                    and 0 <= time.time() - float(c.get("t")) < SANDBOX_DU_TTL):
+                return c["mb"]
+        except (OSError, ValueError, TypeError):
+            pass
+    mb = _du_mb(root)
+    if mb is not None and sig is not None:
+        with contextlib.suppress(OSError):
+            P.write_atomic(cp, json.dumps({"root": root, "sig": sig, "mb": mb, "t": time.time()}))
+    return mb
 
 
 def sandbox_sweep(t):
@@ -1902,6 +1986,7 @@ def sandbox_sweep(t):
     if not os.path.isdir(root):
         return
     opened = _open_paths()
+    removed = 0
     if opened is not None:
         removed, failed = sandbox_clean(root, t, opened)
         if removed or failed:
@@ -1911,7 +1996,7 @@ def sandbox_sweep(t):
         cap = int(os.environ.get("PANTHEON_SANDBOX_CAP_MB") or SANDBOX_CAP_MB)
     except ValueError:
         cap = SANDBOX_CAP_MB
-    mb = sandbox_mb(root)
+    mb = sandbox_mb(root, force=bool(removed))
     if mb is not None and mb > cap:
         P.alert_once("watch-sandbox-cap", today(t), f"кэши песочниц {mb} МБ при потолке {cap} МБ даже после уборки "
                      f"({root.replace(P.HOME, '~')}) — координатору: посмотреть, что держит место", "watch")

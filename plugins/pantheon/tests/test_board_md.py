@@ -34,7 +34,7 @@ def load(name):
     return m
 
 
-T, A, MR, MD, B = (load(n) for n in ("tasks", "autoclose", "boardmerged", "boardmd", "boardtext"))
+T, A, MR, MD, B, NF = (load(n) for n in ("tasks", "autoclose", "boardmerged", "boardmd", "boardtext", "nowfact"))
 results = []
 
 
@@ -150,7 +150,7 @@ check("0769. «Обновлено» 23 ч назад → без тревоги, 
       "updated" not in keys(board("Обновлено 02.11 13:00.")) and "updated" in keys(board("Обновлено 02.11 11:00.")))
 check("0769. «Обновлено» без времени: вчера — ок, позавчера — updated",
       "updated" not in keys(board("Обновлено 02.11.")) and "updated" in keys(board("Обновлено 01.11.")))
-check("0769. нет строки «Обновлено» → updated", "updated" in keys(board("Текст без даты.")))
+check("1005. нет строки «Обновлено» → тревоги нет (дату «Сейчас» собирает board-auto.md)", "updated" not in keys(board("Текст без даты.")))
 check("0769. год: «Обновлено 30.12» в январе — прошлый год, старое", "updated" in keys(board("Обновлено 30.12 10:00."), ts("2027-01-02 10:00")))
 check("0769. «По датам»: 27.10 прошла → dates", "dates" in keys(board(dates="| **27.10** (напомнить) | e-visa | a | b |\n")))
 check("0769. «По датам»: диапазон 25–26.10 прошёл → dates", "dates" in keys(board(dates="| 25–26.10 | PR | a | b |\n")))
@@ -417,6 +417,109 @@ check("0810. board archive: откат архива упал — код 1, «а�
       "board.md цел, трассировки нет",
       r.returncode == 1 and "архив НЕ откатан (archive/" in last and "PermissionError" in last and "архив откатан," not in last
       and read(bm) == SRC and "Traceback" not in r.stderr and text_of(a10) != "старый архив 10\n", (r.returncode, r.stderr[-500:]))
+
+# --- 1005: «Сейчас» из факта ----------------------------------------------------------------------------------------
+def fts(s):
+    return ts("2026-11-" + s)
+
+
+def jk(text, journal, t=NOW):
+    return {k for k, _, _ in MD.problems(text, t, journal)}
+
+
+# п. 3 для board.md: ручное «Обновлено» сверяется со свежим журналом, а не с часами
+check("1005. board.md: «Обновлено» отстаёт от журнала на 7 ч → updated (тревога владельцу файла — Зевсу)",
+      "updated" in jk(board("Обновлено 03.11 10:00."), fts("03 17:00")))
+check("1005. board.md: отставание 5 ч 59 мин — тревоги нет; ровно 6 ч — нет; 6 ч 1 мин — есть",
+      "updated" not in jk(board("Обновлено 03.11 10:00."), fts("03 15:59"))
+      and "updated" not in jk(board("Обновлено 03.11 10:00."), fts("03 16:00"))
+      and "updated" in jk(board("Обновлено 03.11 10:00."), fts("03 16:01")))
+check("1005. board.md: журнал ПОЗЖЕ часов не ломает: «Обновлено» 30.10 при журнале 03.11 — updated, а свежее — нет",
+      "updated" in jk(board("Обновлено 30.10 10:00."), fts("03 11:00")) and "updated" not in jk(board("Обновлено 03.11 11:00."), fts("03 11:30")))
+msg = [m for k, _, m in MD.problems(board("Обновлено 03.11 10:00."), NOW, fts("03 17:00")) if k == "updated"][0]
+check("1005. сообщение называет журнал и владельца файла", "журнала STATUS (03.11 17:00)" in msg and "Зевс" in msg, msg)
+check("1005. журнала нет: прежнее правило «старше суток» осталось",
+      "updated" in jk(board("Обновлено 02.11 11:00."), None) and "updated" not in jk(board("Обновлено 02.11 13:00."), None))
+
+# nowfact: время журнала
+T1 = fts("08 14:30")
+J = "# S\n\n## Сейчас (06.11 10:0x)\n- шаг\n\n## Ход\nДо 08.11 12:56 — archive/x.md\n12:57 запись\n13:5x запись\n- 08.11 14:02 с датой\n"
+check("1005. journal_time: последняя строка с датой 08.11 14:02", NF.journal_time(J, T1, T1) == fts("08 14:02"), NF.journal_time(J, T1, T1))
+check("1005. journal_time: время без даты берёт дату выше («13:5x» → 13:59 08.11)",
+      NF.journal_time("## Ход\n08.11 10:00 а\n13:5x б\n", T1, T1) == fts("08 13:59"))
+check("1005. journal_time: время без даты и без дат выше — дата правки файла",
+      NF.journal_time("## Ход\n09:15 а\n", fts("07 20:00"), T1) == fts("07 09:15"))
+check("1005. journal_time: раздела-журнала нет → None; ‘Начато / сделано’ и ‘Журнал’ — тоже журнал",
+      NF.journal_time("## Сейчас\n12:00 текст\n", T1, T1) is None
+      and NF.journal_time("## Начато / сделано\n- 06.11 06:23 начато: x\n", T1, T1) == fts("06 06:23")
+      and NF.journal_time("## Журнал\n- 2026-11-08 13:26 — агент\n12:00 y\n", T1, T1) == fts("08 12:00") - 0 * 1)
+check("1005. journal_time: строки вне журнала (после следующего ##) не считаются",
+      NF.journal_time("## Ход\n08.11 10:00 а\n\n## Другое\n08.11 23:00 б\n", T1, T1) == fts("08 10:00"))
+check("1005. journal_time: дата из будущего больше чем на сутки — прошлого года; 25:99 не время",
+      NF.journal_time("## Ход\n15.12 10:00 а\n", T1, T1) == datetime(2025, 12, 15, 10, 0).timestamp()
+      and NF.journal_time("## Ход\n25:99 а\n", T1, T1) is None)
+check("1005. display: десятки минут «ДД.ММ ЧЧ:Мx»", NF.display(fts("08 14:02")) == "08.11 14:0x")
+new_t, ch = NF.retime_head(J, fts("08 14:02"))
+check("1005. retime_head: шапка по журналу, остальной текст цел",
+      ch and "## Сейчас (08.11 14:0x)" in new_t and new_t.replace("(08.11 14:0x)", "(06.11 10:0x)") == J, new_t)
+check("1005. retime_head: уже верна / нет времени / заголовок с чужим суффиксом — не меняет",
+      NF.retime_head(new_t, fts("08 14:02")) == (new_t, False) and NF.retime_head(J, None) == (J, False)
+      and NF.retime_head("## Сейчас — итог\nх\n", fts("08 14:02")) == ("## Сейчас — итог\nх\n", False))
+check("1005. retime_head: пометка после даты в скобках остаётся (Д3 argus #399)",
+      NF.retime_head("## Сейчас (08.11 16:3x, точка сохранения ~17:30)\nх\n", fts("08 14:02"))[0]
+      == "## Сейчас (08.11 14:0x, точка сохранения ~17:30)\nх\n")
+check("1005. retime_head: скобки без даты — дата впереди, текст скобок цел; повтор не меняет",
+      NF.retime_head("## Сейчас (черновик)\nх\n", fts("08 14:02"))[0] == "## Сейчас (08.11 14:0x, черновик)\nх\n"
+      and not NF.retime_head("## Сейчас (08.11 14:0x, черновик)\nх\n", fts("08 14:02"))[1])
+check("1005. retime_head: «## Сейчас» без даты получает дату", NF.retime_head("## Сейчас\nх\n", fts("08 14:02"))[0].startswith("## Сейчас (08.11 14:0x)"))
+sm = "## Ждёт владельца (08.11 01:00)\n- х\n\n## Ранее (01.11 10:00) — в archive/x\n\n## Сейчас (01.11 10:00)\n\n## Ход\n08.11 14:00 а\n"
+check("1005. stale_manual: раздел 13 ч позади журнала — да; «Ранее … archive», «Сейчас», «Ход» — нет",
+      [n for n, _ in NF.stale_manual(sm, T1, T1)] == ["Ждёт владельца"], NF.stale_manual(sm, T1, T1))
+check("1005. stale_manual: 6 ч ровно — нет, 6 ч 1 мин — да; без времени (только дата) — конец дня",
+      not NF.stale_manual("## Х (08.11 08:00)\n## Ход\n08.11 14:00 а\n", T1, T1, 6)
+      and NF.stale_manual("## Х (08.11 07:50)\n## Ход\n08.11 14:00 а\n", T1, T1, 6)
+      and not NF.stale_manual("## Х (08.11)\n## Ход\n08.11 14:00 а\n", T1, T1, 6)
+      and NF.stale_manual("## Х (07.11)\n## Ход\n08.11 14:00 а\n", T1, T1, 6))
+check("1005. stale_manual: «Обновлено …» в разделе — считается; в «Сейчас» — нет",
+      NF.stale_manual("## Х\nОбновлено 08.11 01:00\n## Ход\n08.11 14:00 а\n", T1, T1)
+      and not NF.stale_manual("## Сейчас\nОбновлено 08.11 01:00\n## Ход\n08.11 14:00 а\n", T1, T1))
+
+# board-auto.md: «Сейчас» из факта, board.md не тронут
+pan = os.path.join(ROOT, "pan1005")
+state = os.path.join(ROOT, "state1005")
+os.makedirs(state, exist_ok=True)
+OLD_BOARD = "# Доска\n\n![[board-auto]]\n\n## Сейчас\n\n- **06.11 14:1x.** старая ручная запись\n- вторая ручная строка\n"
+write(os.path.join(pan, "board.md"), OLD_BOARD)
+write(os.path.join(pan, "directions", "alpha", "STATUS.md"), "# S\n\n## Сейчас (06.11 10:0x)\n- шаг\n\n## Ход\n08.11 14:02 свежая запись\n")
+write(os.path.join(pan, "directions", "beta", "STATUS.md"), "# S\n\n## Ход\n07.11 09:00 запись\n")
+write(os.path.join(pan, "directions", "gamma", "STATUS.md"), "# S\n\n## Сейчас\n- нет журнала\n")
+write(os.path.join(state, "merge-queue", "latark__agent-kit__394.json"), json.dumps({"repo": "latark/agent-kit", "pr": 394}))
+auto = os.path.join(pan, B.AUTO_NAME)
+data = B.collect(pan, state, {}, T1, windows=["sb-gates-2", "dev-opus"])
+res = B.sync(auto, B.render(data, T1))
+txt = read(auto)
+first = txt.splitlines()[3]
+check("1005. board-auto.md: старый ручной блок + свежий журнал → «Сейчас» из факта (журнал, окна, заявки), время сборки",
+      res == "written" and first.startswith("- **Сейчас 08.11 14:30**") and "alpha 08.11 14:0x" in first and "beta 07.11 09:0x" in first
+      and "gamma" not in first and "живых окон 2: sb-gates-2, dev-opus" in first and "заявки merge: #394" in first, first)
+check("1005. board.md (ручные строки) цел: код его не пишет", read(os.path.join(pan, "board.md")) == OLD_BOARD)
+check("1005. «Сейчас» — первая строка блока, до «Неделя»", txt.index("**Сейчас ") < txt.index("Неделя"))
+res2 = B.sync(auto, B.render(data, T1 + 600))
+check("1005. другая минута сборки — файл не переписывается (штамп «Сейчас» не в сравнении)", res2 == "same", res2)
+write(os.path.join(pan, "directions", "alpha", "STATUS.md"), "# S\n\n## Ход\n08.11 14:20 ещё запись\n")
+data3 = B.collect(pan, state, {}, T1 + 700, windows=["sb-gates-2"])
+res3 = B.sync(auto, B.render(data3, T1 + 700))
+check("1005. новая запись журнала / ушло окно — блок обновлён", res3 == "written" and "alpha 08.11 14:2x" in read(auto)
+      and "живых окон 1:" in read(auto), read(auto))
+bad = B.render(dict(data, windows=["ИГНОР\u202e", "ok-win", "x; rm -rf"], journal=[("плохое имя!", T1), ("alpha", T1)], queue=[("a/b", True)]), T1)
+check("1005. чужие имена (окна, направления) и bool в «Сейчас» не идут; снимка сессий нет → «окна неизвестны»",
+      "ИГНОР" not in bad and "rm -rf" not in bad and "плохое" not in bad and "живых окон 1: ok-win" in bad and "заявки merge: нет" in bad
+      and "окна неизвестны" in B.render(dict(data, windows=None), T1), bad)
+check("1005. журналов со временем нет → строка говорит об этом", "журнала STATUS со временем нет" in B.render({"journal": []}, T1))
+_bm, B.BLOCK_MAX = B.BLOCK_MAX, 500
+big2 = B.render(dict(data, prs=[{"number": i, "repo": "o/r", "head": "abc1234", "ids": [], "core": False} for i in range(1, 30)]), T1)
+B.BLOCK_MAX = _bm
+check("1005. при переполнении «Сейчас» остаётся (режется хвост)", len(big2) <= B.BLOCK_MAX and "**Сейчас " in big2 and "не вошло строк" in big2)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

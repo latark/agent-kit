@@ -1470,27 +1470,14 @@ def runner_mod():
 
 def runner_args(cmd):
     """Команда полного набора (без heavy) → (путь run-tests.py от корня, [папки плагинов]) или None: дозапуск умеет
-    только run-tests.py с папками и ключами -j/--timeout/--log-dir — без --affected, --base и --only."""
-    try:
-        words = shlex.split(re.sub(r"\s#.*\Z", "", cmd, flags=re.S))
-    except ValueError:
-        return None
-    i = next((k for k, w in enumerate(words) if os.path.basename(w) == "run-tests.py"), None)
-    if i is None:
-        return None
-    rest, dirs = iter(words[i + 1:]), []
-    for w in rest:
-        if w in ("-j", "--jobs", "--timeout", "--log-dir"):
-            if next(rest, None) is None:
-                return None
-        elif w.startswith("-"):
-            return None
-        else:
-            dirs.append(w)
-    rel = [words[i]] + dirs
-    if not dirs or any(os.path.isabs(x) or ".." in x.split("/") for x in rel):
-        return None
-    return os.path.normpath(words[i]), [os.path.normpath(x) for x in dirs]
+    только run-tests.py с папками и ключами -j/--timeout/--log-dir — без --affected, --base и --only. Разбор — в
+    lib/fullsuite.py: тем же правилом heavy занимает место «полный» (metis-1007)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fullsuite", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                            "fullsuite.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.runner_args(cmd, strict=True)
 
 
 def branch_of(d):
