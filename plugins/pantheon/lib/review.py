@@ -287,6 +287,78 @@ def review_pending(repo, pr, recs=None):
     return d
 
 
+# metis-0513: запись tests пишет хук guard, когда команда вернулась. Инструмент Bash обрывает вызов на 600 с и хук не видит
+# конца: ожидание места heavy (очередь) и сами тесты шли молча до обрыва, записи не было, причина не видна. Бюджет —
+# меньше предела: ждать места heavy не дольше бюджета (HEAVY_WAIT_MAX — код 75 без запуска), а команда, не уложившаяся,
+# гасится со строкой «для длинного набора — pantheon outside test». PANTHEON_REVIEW_TEST_BUDGET=<с> — свой бюджет
+# (0 — без ограничения, как раньше).
+REVIEW_TEST_BUDGET = 570
+
+
+def _review_budget(env):
+    try:
+        return float(env.get("PANTHEON_REVIEW_TEST_BUDGET", REVIEW_TEST_BUDGET))
+    except ValueError:
+        return float(REVIEW_TEST_BUDGET)
+
+
+def _review_test_run(cmd):
+    """Команда `review test -- …` под бюджетом времени → (код, оборвана): 127 — не запустилась, 75 — не уложилась в
+    бюджет; оборвана — запись и проверку HEAD после неё делать незачем."""
+    env = dict(os.environ)
+    budget = _review_budget(env)
+    if budget > 0:
+        try:
+            own = float(env.get("HEAVY_WAIT_MAX") or 0)
+        except ValueError:
+            own = 0
+        env["HEAVY_WAIT_MAX"] = str(int(min(own, budget) if own > 0 else budget))
+    try:
+        proc = subprocess.Popen(cmd, env=env)
+    except OSError as e:
+        print(f"pantheon review test: команда не запустилась: {e}", file=sys.stderr)
+        return 127, True
+    try:
+        return proc.wait(timeout=budget if budget > 0 else None), False
+    except subprocess.TimeoutExpired:
+        proc.terminate()  # heavy и run-tests получают TERM и гасят дерево
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        print(f"pantheon review test: команда не уложилась в {int(budget)} с (предел вызова Bash — 600 с, ожидание места "
+              "heavy входит в него) — остановлена, записи не будет. Длинный набор — `pantheon outside test --wait 590` "
+              "из корня чистой копии", file=sys.stderr)
+        return 75, True
+
+
+def _review_test_cmd(rest):
+    if len(rest) < 3 or rest[1] != "--":
+        print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
+        return 2
+    head, clean = _review_state()
+    if head is None:
+        print("pantheon review test: папка не репозиторий git или в нём нет коммитов", file=sys.stderr)
+        return 2
+    if not clean:
+        print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
+              "а не на незакоммиченное", file=sys.stderr)
+        return 2
+    rc, over = _review_test_run(rest[2:])
+    if over:
+        return rc
+    head2, clean2 = _review_state()
+    if head2 != head or not clean2:
+        print(f"pantheon review test: команда изменила HEAD или дерево (было {head}, стало {head2 or '?'}, "
+              f"чистое: {'да' if clean2 else 'нет'}) — запись не делается", file=sys.stderr)
+        return 3
+    print(head)
+    print(f"pantheon review test: код {rc} на {head}" + (" — запись тестов сделает хук guard" if rc == 0 else
+                                                         " — тесты не прошли, записи не будет"))
+    return rc
+
+
 def review_cmd(rest):
     sub = rest[0] if rest else ""
     if sub == "miss":
@@ -334,31 +406,7 @@ def review_cmd(rest):
               f"шлюз метку не читает)")
         return 0
     if sub == "test":
-        if len(rest) < 3 or rest[1] != "--":
-            print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
-            return 2
-        head, clean = _review_state()
-        if head is None:
-            print("pantheon review test: папка не репозиторий git или в нём нет коммитов", file=sys.stderr)
-            return 2
-        if not clean:
-            print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
-                  "а не на незакоммиченное", file=sys.stderr)
-            return 2
-        try:
-            rc = subprocess.run(rest[2:]).returncode
-        except OSError as e:
-            print(f"pantheon review test: команда не запустилась: {e}", file=sys.stderr)
-            return 127
-        head2, clean2 = _review_state()
-        if head2 != head or not clean2:
-            print(f"pantheon review test: команда изменила HEAD или дерево (было {head}, стало {head2 or '?'}, "
-                  f"чистое: {'да' if clean2 else 'нет'}) — запись не делается", file=sys.stderr)
-            return 3
-        print(head)
-        print(f"pantheon review test: код {rc} на {head}" + (" — запись тестов сделает хук guard" if rc == 0 else
-                                                             " — тесты не прошли, записи не будет"))
-        return rc
+        return _review_test_cmd(rest)
     if sub in ("accept", "reject", "talos"):
         args, checklist, why = _review_verdict(sub, rest[1:])
         if why:

@@ -1434,11 +1434,19 @@ def tick():
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
                 alert_once("autoclose-tick", type(e).__name__, f"автозакрытие задач: проход упал ({type(e).__name__}: {e})",
                            "pantheon-tick")
-            try:
-                release_tick_mod().tick(t)  # выпуск без Actions: release.py --push из копии main (metis-0880)
-            except Exception as e:  # сбой выпуска не должен останавливать тик
-                alert_once("release-tick-crash", type(e).__name__, f"выпуск без Actions: проход упал "
-                           f"({type(e).__name__}: {e})", "pantheon-tick")
+            release_ticks(t)
+
+
+
+def release_ticks(t):
+    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска). Сбой одного не
+    останавливает тик и второго."""
+    for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
+                           ("map-tick-crash", "карта тестов", map_tick_mod)):
+        try:
+            mod().tick(t)
+        except Exception as e:
+            alert_once(key, type(e).__name__, f"{text}: проход упал ({type(e).__name__}: {e})", "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -6974,6 +6982,21 @@ def release_tick_mod():
         spec.loader.exec_module(_RELEASE_TICK)
         _RELEASE_TICK.set_core(sys.modules[__name__])
     return _RELEASE_TICK
+
+
+_MAP_TICK = None
+
+
+def map_tick_mod():
+    """lib/map_tick.py — пересборка affected-map.json на main и коммит «карта: …» (metis-0842)."""
+    global _MAP_TICK
+    if _MAP_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_map_tick", os.path.join(LIB, "map_tick.py"))
+        _MAP_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MAP_TICK)
+        _MAP_TICK.set_core(sys.modules[__name__])
+    return _MAP_TICK
 
 
 _BROWSER = None
