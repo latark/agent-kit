@@ -11,6 +11,8 @@
     до предела 60 с, код BUDGET_CUT (77);
   - run_job на коде 77: отпечаток входов skip_fp не пишется (тик не пропустит недоделанную доску), сбоем и
     тревогой это не считается;
+  - бюджет считается с начала процесса (медленный импорт 2 с + быстрый проход: «итого» >= 2 с);
+  - `pantheon board archive` ранний обработчик бюджета не получает: замок занят — код 1, не 77, без «доска-время»;
   - нечисловой PANTHEON_BOARD_BUDGET не роняет запуск.
 
 Запуск: python3 -I plugins/pantheon/tests/test_board_time.py  (код выхода 0 — все прошли)
@@ -201,6 +203,31 @@ check("контроль: run_job с кодом 0 пишет skip_fp", r0.get("sk
 r77 = run_rj(77)
 check("run_job с кодом 77 (бюджет доски): skip_fp нет, сбоев 0", r77.get("last_rc") == 77 and not r77.get("skip_fp")
       and r77.get("fails") == 0, r77)
+
+# 6. бюджет считается от старта процесса (metis-0709, Б2): импорт 2 с + быстрый проход — «итого» не меньше 2 с.
+# Режим import драйвера не трогает PROC_T0, его ставит run.py. Мутанты: PROC_T0 не задаётся; BoardClock без t0.
+p = subprocess.run(dargv("import", 2), env=ENV, capture_output=True, text=True, timeout=60)
+ln = line_of(p.stdout)
+m = re.search(r"итого ([0-9.]+) с", ln or "")
+check("импорт 2 с + быстрый проход: код 0, «итого» с начала процесса (>= 2 с)",
+      p.returncode == 0 and m and float(m.group(1)) >= 2.0, (p.returncode, ln, p.stderr[-200:]))
+
+# 7. board archive — не проход (metis-0709, Б1): ранний обработчик бюджета на него не ставится; замок board-git занят —
+# как на base: код 1 за HQ_LOCK_WAIT, без «доска-время» и без кода 77 (иначе os._exit пропустил бы откат архива, metis-0810)
+os.makedirs(os.path.join(state, "hq-rw", "locks"), exist_ok=True)
+with open(os.path.join(home, "board.md"), "w", encoding="utf-8") as fh:
+    fh.write("# Доска\n")
+fh = open(os.path.join(state, "hq-rw", "locks", "board-git.lock"), "a")
+fcntl.flock(fh, fcntl.LOCK_EX)
+t0 = time.time()
+p = subprocess.run([PY311, "-I", RUN_PY, "board", "archive"], env=dict(ENV, PANTHEON_BOARD_BUDGET="1", PANTHEON_HQ_LOCK_WAIT="9"),
+                   capture_output=True, text=True, timeout=60)
+dt = time.time() - t0
+check("board archive при занятом замке (бюджет 1, ожидание 9 с): код 1, «повтори», без «доска-время» и без 77",
+      p.returncode == 1 and "повтори" in p.stderr and "доска-время" not in p.stdout + p.stderr and dt >= 8,
+      (p.returncode, round(dt, 1), p.stdout[-200:], p.stderr[-300:]))
+fcntl.flock(fh, fcntl.LOCK_UN)
+fh.close()
 
 print(f"{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)

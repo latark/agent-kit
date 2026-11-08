@@ -38,7 +38,7 @@ def _early_board_guard():
     signal.setitimer(signal.ITIMER_REAL, max(budget, 1.0) + 5.0)  # = BOARD_HARD_GRACE в pantheon.py
 
 
-if __name__ == "__main__" and sys.argv[1:2] == ["board"]:
+if __name__ == "__main__" and sys.argv[1:] == ["board"]:  # только сам проход; board archive и прочие подкоманды — как на base (ждут замок до HQ_LOCK_WAIT, откат metis-0810)
     _early_board_guard()
 import pantheon  # noqa: E402
 
