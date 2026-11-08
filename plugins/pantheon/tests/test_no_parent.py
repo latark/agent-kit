@@ -24,6 +24,9 @@ atexit.register(shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 RUN_PY = os.path.join(LIB, "run.py")
+sys.path.insert(0, LIB)
+import tasks as T  # noqa: E402
+import batchsuggest as B  # noqa: E402
 NOW = datetime(2026, 11, 7, 12, 0).timestamp()
 DIR = "metis-pantheon"
 results = []
@@ -38,13 +41,15 @@ GATE = "Шлюз слияния ядра: перенос записи приня
 BODY = "Цель: разобрать шлюз.\n\n## Готово, когда\n\n- [ ] пункт один"
 
 
-def put(home, tid, title, text, status="todo", typ="task", parent=None, created="2026-11-05", touches=None, mode="single"):
+def put(home, tid, title, text, status="todo", typ="task", parent=None, created="2026-11-05", touches=None, mode="single",
+        extra=()):
     lines = ["---", f"type: {typ}", f"id: {tid}", f'title: "{title}"', f"status: {status}", "project: Пантеон",
              f"direction: {DIR}", f"owner: {DIR}", f"created: {created}", f"updated: {created}T10:00:00", "schema_version: 1"]
     if touches:
         lines.append(f"touches: [{', '.join(touches)}]")
     if parent:
         lines.append(f"parent: {parent}")
+    lines += list(extra)
     if mode and typ == "task":
         lines += [f"mode: {mode}", "mode_why: тест"]
     lines += ["---", "", f"# {title}", "", text, "", "## Журнал", "", f"- {created} 10:00 — агент: создана", ""]
@@ -115,6 +120,52 @@ def part_new():
     r6 = pan(env, "task", "new", "--direction", DIR, "--title", "Решить вопрос", "--question", "Что выбрать?", "--why", "мешает",
              "--option", "А — один", "--option", "Б — два")
     check("вопрос владельцу с полями и без текста: подсказки нет", r6.returncode == 0 and "без пачки" not in r6.stderr, r6.stderr)
+    r7 = new(env, "--touches", "plugins/pantheon/lib/merge.py", "--mode", "single", "--mode-why", "одна")
+    h7 = [ln for ln in r7.stderr.splitlines() if ln.startswith("без пачки:")]
+    t7 = r7.stdout.split()[0] if r7.stdout.split() else ""
+    check("new с --mode: в подсказке parent без повтора mode/mode_why (Д5)",
+          len(h7) == 1 and h7[0].endswith(f"pantheon task set {t7} parent=metis-9001"), r7.stderr)
+    r8 = new(env, "--batch", "ночь · 1", "--mode", "single", "--mode-why", "одна", "--touches", "plugins/pantheon/lib/merge.py")
+    check("new с --batch: подсказки про parent нет (Д5)", r8.returncode == 0 and "без пачки" not in r8.stderr, r8.stderr)
+    shutil.rmtree(tmp, True)
+
+
+def part_pure():
+    res = {"joins": [{"task": "metis-1", "story": "s-1"}, {"task": "metis-2", "story": "s-2"}]}
+    check("best_join: берёт предложение именно этой задачи, не первое (Д3)",
+          B.best_join(res, "metis-2") == res["joins"][1] and B.best_join(res, "metis-1") == res["joins"][0])
+    check("best_join: нет предложения для задачи — None (Д3)", B.best_join(res, "metis-3") is None
+          and B.best_join({"joins": []}, "metis-1") is None)
+    tasks = {"metis-1": ("", {"type": "task", "direction": "d", "status": "todo", "batch": "ночь · 1"}, ""),
+             "metis-2": ("", {"type": "task", "direction": "d", "status": "todo"}, ""),
+             "metis-3": ("", {"type": "task", "direction": "d", "status": "todo", "parent": "metis-9"}, "")}
+    check("suggest: задача со старым полем batch и задача с parent не «без пачки» (Д3)",
+          B.suggest(tasks, "d")["open_loose"] == 1)
+    done, sk = B.apply({"joins": [{"task": "a-1", "story": "s", "confidence": "high"},
+                                  {"task": "a-2", "story": "s", "confidence": "high"}]}, {},
+                       lambda t, sid: (_ for _ in ()).throw(OSError("диск полон")) if t == "a-1" else None)
+    check("apply: сбой записи (OSError) на первой — пропуск со строкой, вторая прикреплена (Д6)",
+          done == ["a-2 → s"] and len(sk) == 1 and "сбой записи" in sk[0] and "диск полон" in sk[0], (done, sk))
+
+
+def part_attach_race():
+    tmp, home, state, env = make()
+    put(home, "metis-9005", "Пачка вторая", "x", typ="story", status="doing", mode=None)
+    put(home, "metis-9020", "Свободная", "x")
+    put(home, "metis-9021", "Уже в пачке после расчёта", "x", parent="metis-9001")
+    try:
+        T.task_attach(home, NOW, "metis-9021", "metis-9005", only_loose=True)
+        err = ""
+    except ValueError as e:
+        err = str(e)
+    check("task_attach only_loose: parent уже стоит — отказ до записи, карточки не тронуты (Д4)",
+          "уже в пачке metis-9001" in err and "parent: metis-9001\n" in card(home, "metis-9021")
+          and "9021" not in card(home, "metis-9005"), err)
+    old = T.task_attach(home, NOW, "metis-9021", "metis-9005")
+    check("task_attach без only_loose: ручной перенос между пачками работает как раньше", old == "metis-9001"
+          and "parent: metis-9005" in card(home, "metis-9021"))
+    check("task_attach only_loose: свободная прикрепляется", T.task_attach(home, NOW, "metis-9020", "metis-9005",
+                                                                          only_loose=True) is None)
     shutil.rmtree(tmp, True)
 
 
@@ -142,10 +193,47 @@ def part_check():
     a3 = [ln for ln in r3.stdout.splitlines() if "задачи без пачки" in ln]
     check("новая задача без пачки: тревога только про неё (один раз на id)",
           len(a3) == 1 and "metis-9108" in a3[0] and "metis-9101" not in a3[0], r3.stdout[-300:])
+    put(home, "metis-9109", "С полем batch", "x", created="2026-11-05", extra=["batch: ночь · 1"])
+    put(home, "metis-9110", "Во входящих", "x", status="inbox", created="2026-11-05")
+    put(home, "metis-9111", "Вопрос владельцу", "x", status="waiting", created="2026-11-05", extra=["waiting_on: human"])
+    put(home, "metis-9112", "Ждёт другую задачу", "x", status="waiting", created="2026-11-05", extra=["waiting_on: metis-9101"])
+    r3b = pan(env, "check", "--quiet")
+    a3b = " ".join(ln for ln in r3b.stdout.splitlines() if "задачи без пачки" in ln)
+    check("check: поле batch, inbox и вопрос владельцу (waiting human) не названы; ждущая задачу — названа (Д3, С)",
+          "9109" not in a3b and "9110" not in a3b and "9111" not in a3b and "metis-9112" in a3b, r3b.stdout[-300:])
+    seen_p = os.path.join(state, "no-parent-seen.json")
+    with open(seen_p, encoding="utf-8") as fh:
+        seen_now = fh.read()
+    os.rename(os.path.join(home, "directions", DIR, "tasks", "metis-9101.md"), os.path.join(tmp, "x.md"))
+    pan(env, "check", "--quiet")
+    with open(seen_p, encoding="utf-8") as fh:
+        seen_gone = fh.read()
+    os.rename(os.path.join(tmp, "x.md"), os.path.join(home, "directions", DIR, "tasks", "metis-9101.md"))
+    r3c = pan(env, "check", "--quiet")
+    check("check: ушедшая из списка задача забывается и при возвращении тревожит снова (Д3)",
+          "metis-9101" in seen_now and "metis-9101" not in seen_gone and "metis-9101" in r3c.stdout, (seen_now, seen_gone))
     r4 = pan(env, "check")
     check("check руками: предупреждение со списком, код выхода не меняется (0)",
           r4.returncode == 0 and "предупреждение · задачи без пачки старше суток" in r4.stdout and "metis-9101" in r4.stdout,
           r4.stdout[-300:] + str(r4.returncode))
+    shutil.rmtree(tmp, True)
+
+
+def part_many():
+    tmp, home, state, env = make(stories=False)
+    for i in range(15):
+        put(home, f"metis-92{i:02d}", f"Задача {i}", "x", created="2026-11-05")
+    r = pan(env, "check", "--quiet")
+    a = [ln for ln in r.stdout.splitlines() if "задачи без пачки" in ln]
+    check("тревога на 15 задач: названы первые 12, «и ещё 3» (Д7)",
+          len(a) == 1 and "metis-9211" in a[0] and "metis-9212" not in a[0] and "и ещё 3" in a[0], r.stdout[-300:])
+    r2 = pan(env, "check", "--quiet")
+    a2 = [ln for ln in r2.stdout.splitlines() if "задачи без пачки" in ln]
+    check("скрытый хвост не считается виденным: следующий тик называет остальные три (Д7)",
+          len(a2) == 1 and all(x in a2[0] for x in ("metis-9212", "metis-9213", "metis-9214")) and "metis-9200" not in a2[0],
+          r2.stdout[-300:])
+    r3 = pan(env, "check", "--quiet")
+    check("потом тихо", "задачи без пачки" not in r3.stdout, r3.stdout[-200:])
     shutil.rmtree(tmp, True)
 
 
@@ -172,10 +260,36 @@ def part_tick():
     shutil.rmtree(tmp, True)
 
 
+def part_tick_race():
+    tmp, home, state, env = make()
+    put(home, "metis-9005", "Пачка другая", "Другое.", typ="story", status="doing", mode=None)
+    put(home, "metis-9010", "merge.py: gate() теряет принять после squash",
+        GATE + " сверху", touches=["plugins/pantheon/lib/merge.py"])
+    code = (f"import sys; sys.path.insert(0, {LIB!r}); import pantheon as P; T = P.tasks_mod(); B = P.batchsuggest_mod(); "
+            "orig = B.suggest\n"
+            "def late(tasks, d):\n"
+            "    r = orig(tasks, d)\n"
+            "    if not getattr(late, 'done', False) and r['joins']:\n"
+            "        late.done = True\n"
+            "        T.task_set(P.PANTHEON, P.now(), 'metis-9010', {'parent': 'metis-9005'}, note='руками, пока шёл расчёт')\n"
+            "    return r\n"
+            "B.suggest = late; P.batchsuggest_mod = lambda: B\n"
+            "sys.exit(P.batch_suggest_run(['run']))")
+    r = subprocess.run([PY311, "-I", "-c", code], env=dict(env), capture_output=True, text=True, timeout=120)
+    check("проход: пачку поставили руками между расчётом и записью — не переносит, строка «пропущено» (Д4)",
+          r.returncode == 0 and "parent: metis-9005" in card(home, "metis-9010") and "parent: metis-9001" not in card(home, "metis-9010")
+          and "пропущено · metis-9010" in r.stdout and "предложение устарело" in r.stdout, r.stdout[-400:] + r.stderr[-300:])
+    shutil.rmtree(tmp, True)
+
+
 def main():
     part_new()
+    part_pure()
+    part_attach_race()
     part_check()
+    part_many()
     part_tick()
+    part_tick_race()
     print(f"\n{sum(results)}/{len(results)}")
     sys.exit(0 if all(results) else 1)
 
