@@ -1893,9 +1893,11 @@ def story_text(sid, tasks):
     return "\n".join(lines)
 
 
-def task_attach(pantheon, t, tid, sid, actor="агент"):
+def task_attach(pantheon, t, tid, sid, actor="агент", only_loose=False):
     """Прикрепить задачу к пачке: parent у задачи и строка в журнал обеих. Была в другой пачке — переносится,
-    строка и в журнал прежней. → прежняя пачка или None."""
+    строка и в журнал прежней. only_loose (автоматика: плановый проход, --apply, metis-0960) — переносить нельзя:
+    предложение считалось по задачам без parent, а пока шёл расчёт, пачку могли поставить руками; parent уже есть —
+    отказ ValueError до записи. → прежняя пачка или None."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks or tasks[tid][1].get("type") != "task":
         raise ValueError(f"нет задачи {tid}")
@@ -1904,6 +1906,8 @@ def task_attach(pantheon, t, tid, sid, actor="агент"):
     old = tasks[tid][1].get("parent")
     if old == sid:
         raise ValueError(f"{tid} уже в пачке {sid}")
+    if only_loose and old:
+        raise ValueError(f"{tid} уже в пачке {old} — предложение устарело, не переношу")
     if not mode_decided(tasks[tid][1]):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     was = f" (была в {old})" if old else ""
