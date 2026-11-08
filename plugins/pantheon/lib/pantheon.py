@@ -86,6 +86,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
                                         белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
                                         Touch ID с этим действием целиком → исполнение один раз по sha256 текста
+  pantheon owner-edit propose|status|cancel|run   правка файла владельца (policy.toml, ~/.claude/agents/_parts/*.part)
+                                        без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
+                                        диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
+                                        «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -1412,6 +1416,7 @@ def tick():
         merge_kick()
         outside_kick()
         handoff_kick()
+        owner_edit_kick()
         try:
             browser_mod().kick()  # браузер владельца для ролей вне окна (lib/browser.py, metis-0760)
         except Exception as e:  # сбой браузера не должен останавливать тик
@@ -6524,6 +6529,24 @@ def handoff_kick():
                    f"{e})", "pantheon-tick")
 
 
+def owner_edit_kick():
+    """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) — отдельным процессом: окно Touch ID ждёт
+    пальца до двух минут, тик не ждёт. Без заявок — нет."""
+    try:
+        if locked("owner-edit-run") or not owner_edit_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} owner-edit-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "owner-edit", "run"], env=merge_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой прохода не должен останавливать тик
+        alert_once("owner-edit-kick", type(e).__name__, f"правка файла владельца: проход не запущен "
+                   f"({type(e).__name__}: {e})", "pantheon-tick")
+
+
 def outside_kick():
     """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
     тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
@@ -6983,6 +7006,21 @@ def outside_mod():
         spec.loader.exec_module(_OUTSIDE)
         _OUTSIDE.set_core(sys.modules[__name__])
     return _OUTSIDE
+
+_OWNER_EDIT = None
+
+
+def owner_edit_mod():
+    """lib/owner_edit.py — правка файла владельца по «да» в окне вопросов или по Touch ID (metis-0910)."""
+    global _OWNER_EDIT
+    if _OWNER_EDIT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_owner_edit", os.path.join(LIB, "owner_edit.py"))
+        _OWNER_EDIT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OWNER_EDIT)
+        _OWNER_EDIT.set_core(sys.modules[__name__])
+    return _OWNER_EDIT
+
 
 _HANDOFF = None
 
@@ -9026,6 +9064,8 @@ def main(argv):
         return browser_mod().main(rest)
     if cmd == "handoff":
         return handoff_mod().main(rest)
+    if cmd == "owner-edit":
+        return owner_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
     if cmd == "probes":
