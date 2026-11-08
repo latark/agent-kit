@@ -800,20 +800,22 @@ HEAD_FRESH = 30              # STATUS.md правили недавно (секу
 
 def retime_status(name, p, text, st, t):
     """Шапка `## Сейчас (дата)` STATUS.md — по времени последней строки журнала, а не по ручной дате (metis-1005).
-    Переписывается только строка заголовка: замена файла (временный файл рядом и rename), если за время работы файл не
-    менялся (inode, mtime, размер) и его не правили последние HEAD_FRESH секунд. → (текст, st) после записи или прежние."""
+    Переписывается только строка заголовка: замена файла (временный файл рядом и rename) с прежним mtime, если файл не
+    менялся с чтения (inode, mtime, размер — сверка перед самой заменой) и его не правили последние HEAD_FRESH секунд. → (текст, st) после записи или прежние."""
     N = P.boardtext_mod().nowfact()
     new, changed = N.retime_head(text, N.journal_time(text, st.st_mtime, t))
     if not changed or t - st.st_mtime < HEAD_FRESH:
         return text, st
     tmp = f"{p}.{os.getpid()}.tmp"
     try:
-        cur = os.stat(p)
-        if (cur.st_ino, cur.st_mtime_ns, cur.st_size) != (st.st_ino, st.st_mtime_ns, st.st_size):
-            return text, st
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(new)
-        os.chmod(tmp, cur.st_mode & 0o777)
+        os.chmod(tmp, st.st_mode & 0o777)
+        # mtime — прежний: возраст файла и дата журнала без даты считаются по правке роли, а не по нашей замене шапки
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        cur = os.stat(p)  # сверка прямо перед заменой: роль дописала файл, пока писали временный, — не трогаем
+        if (cur.st_ino, cur.st_mtime_ns, cur.st_size) != (st.st_ino, st.st_mtime_ns, st.st_size):
+            return text, st
         os.replace(tmp, p)
         return new, os.stat(p)
     finally:

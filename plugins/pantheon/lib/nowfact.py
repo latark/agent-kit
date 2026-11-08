@@ -8,8 +8,9 @@
 
 - `journal_time(text, mtime, t)` — время последней строки журнала или None (журнала нет / строк со временем нет);
 - `display(ts)` — «ДД.ММ ЧЧ:Мx» (десятки минут: так пишут руками, и шапка не переписывается каждую минуту);
-- `retime_head(text, stamp)` — текст с заголовком `## Сейчас (ДД.ММ ЧЧ:Мx)` по времени журнала; заголовок с чужим
-  суффиксом не трогается; `(новый текст, изменён ли)`;
+- `retime_head(text, stamp)` — текст с заголовком `## Сейчас (ДД.ММ ЧЧ:Мx…)` по времени журнала: меняется только дата
+  в начале скобок, пометка после неё («, точка сохранения …») остаётся; заголовок с чужим суффиксом вне скобок не
+  трогается; `(новый текст, изменён ли)`;
 - `dated_manual(text, t)` — ручные разделы с датой: `[(название, время)]` — заголовки «## … (ДД.ММ [ЧЧ:ММ])» кроме
   «Сейчас», журнала и указателей на archive/, и строки «Обновлено ДД.ММ [ЧЧ:ММ]» вне «Сейчас» (дата без времени — конец
   дня, как в boardmd);
@@ -25,7 +26,8 @@ JOURNAL_HEADS = ("Ход", "Начато / сделано", "Журнал")
 HEAD = re.compile(r"^##[ \t]+(.*?)[ \t]*$")
 LINE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\**(?:До[ \t]+)?(?:(\d{1,2})\.(\d{2})(?:\.\d{4})?[ \t,]+)?"
                   r"(\d{1,2}):([0-5])([\dxXхХ])(?!\d)")
-NOW_RE = re.compile(r"^Сейчас(?:[ \t]*\([^)]*\))?$")
+NOW_RE = re.compile(r"^Сейчас(?:[ \t]*\(([^)]*)\))?$")
+NOW_DATE = re.compile(r"^[ \t]*\d{1,2}\.\d{2}(?:\.\d{4})?(?:[ \t]+\d{1,2}:[0-5][\dxXхХ])?")
 DATED_HEAD = re.compile(r"\((\d{1,2})\.(\d{2})(?:\.(\d{4}))?(?:[ \t]+(\d{1,2}):([0-5])([\dxXхХ]))?[^)]*\)")
 UPDATED = re.compile(r"Обновлено\s+(\d{1,2})\.(\d{2})(?:\.(\d{4}))?(?:\s+(\d{1,2}):([0-5])([\dxXхХ]))?")
 SKIP_HEADS = ("Ранее",)
@@ -78,10 +80,14 @@ def retime_head(text, stamp):
     if stamp is None:
         return text, False
     lines = text.split("\n")
-    want = f"## Сейчас ({display(stamp)})"
     for i, ln in enumerate(lines):
         m = HEAD.match(ln)
-        if m and NOW_RE.match(m.group(1)):
+        n = NOW_RE.match(m.group(1)) if m else None
+        if n:
+            inner = n.group(1) or ""
+            d = NOW_DATE.match(inner)
+            rest = inner[d.end():] if d else (f", {inner.strip()}" if inner.strip() else "")
+            want = f"## Сейчас ({display(stamp)}{rest})"
             if ln == want:
                 return text, False
             lines[i] = want

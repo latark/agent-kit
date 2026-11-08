@@ -2137,9 +2137,10 @@ def test_now_from_fact_1005():
     want = f"## Сейчас ({j[:-1]}x)"
     check(want in out and out.replace(want, f"## Сейчас ({_stamp(30 * H)})") == body,
           f"1005: шапка не по журналу или тронут остальной текст: {out!r}")
-    mt = os.stat(p).st_mtime
+    check(os.stat(p).st_mtime == T0 - 7200, "1005: замена шапки сдвинула mtime — возраст файла и дата журнала без даты поедут")
+    ino = os.stat(p).st_ino
     e.run("watch", t=T0 + 300)
-    check(os.stat(p).st_mtime == mt, "1005: шапка уже верна — файл переписан второй раз")
+    check(os.stat(p).st_ino == ino, "1005: шапка уже верна — файл переписан второй раз")
     e, p = _fact_env("nf-fresh", body, mtime_ago=5)
     e.run("watch", t=T0)
     check(open(p, encoding="utf-8").read() == body, "1005: файл правили 5 с назад — шапку переписали (гонка с ролью)")
@@ -2171,6 +2172,28 @@ def test_now_from_fact_1005():
     e.run("watch", t=T0)
     check(not alerted(e), "1005: журнала нет — сравнивать не с чем, тревоги быть не должно")
 
+
+
+def test_retime_race_1005():
+    """metis-1005 (Д1 argus #399): роль дописала STATUS.md между чтением и заменой — файл не тронут, ручная строка цела."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w, nf = importlib.import_module("watch"), importlib.import_module("nowfact")
+    saved = w.P
+    w.P = type("Core", (), {"boardtext_mod": staticmethod(lambda: type("B", (), {"nowfact": staticmethod(lambda: nf)}))})
+    try:
+        d = tempfile.mkdtemp(prefix="race-", dir=os.environ.get("TMPDIR"))
+        p = os.path.join(d, "STATUS.md")
+        body = "## Сейчас (01.11 10:0x)\n\n## Ход\n08.11 10:00 а\n"
+        open(p, "w", encoding="utf-8").write(body)
+        os.utime(p, (T0 - 3600, T0 - 3600))
+        st = os.stat(p)
+        open(p, "a", encoding="utf-8").write("РУЧНАЯ\n")  # дописано после чтения
+        out, _ = w.retime_status("race", p, body, st, T0)
+        check(out == body and "РУЧНАЯ" in open(p, encoding="utf-8").read(), "1005: файл менялся после чтения — шапку заменили")
+        check(not [f for f in os.listdir(d) if f.endswith(".tmp")], "1005: временный файл остался")
+    finally:
+        w.P = saved
 
 def test_stale_now_push_fail_0707():
     """metis-0707 (argus-277, Б и Д): напоминание не доставлено (respawn, код 1) — отметка пишется всё равно: за 3 прохода
