@@ -13,6 +13,7 @@ affected-map.json и пушит коммит «карта: …» в main.
               цикл «карта → выпуск → карта» не идёт;
   [сбой]      --check код 2, --update код 1, --update тронул лишний файл → тревога, коммита нет;
               main ушёл вперёд — push отклонён без тревоги;
+              карта с непустым broken (упали при сборке) → не коммитится, тревога; broken из одного test_run_tests — коммитится;
   [частота]   повтор раньше 10 мин и живой работник — без проверки; PANTHEON_DRYRUN — ничего.
 """
 import atexit
@@ -75,8 +76,10 @@ if "--check" in sys.argv:
     print("affected-map: заглушка check")
     sys.exit(int(mode[0]))
 if "--update" in sys.argv:
-    with open(os.path.join(here, "affected-map.json"), "a") as fh:
-        fh.write("обновлено\\n")
+    import json
+    broken = {"broken": ["pantheon/test_watch.py", "guard/test_refspec.py"], "broken-self": ["pantheon/test_run_tests.py"]}
+    with open(os.path.join(here, "affected-map.json"), "w") as fh:
+        json.dump({"note": "обновлено", "broken": broken.get(mode[1], [])}, fh, ensure_ascii=False)
     if mode[1] == "extra":
         open(os.path.join(here, "лишний.txt"), "w").write("x")
     print("affected-map: заглушка update")
@@ -217,6 +220,16 @@ MT.tick(T)
 MT.tick(T + MT.CHECK_EVERY + 1)
 check("--update тронул лишний файл → тревога, коммита нет", w.alerts and "лишний.txt" in w.alerts[-1][2]
       and not w.origin_log()[0].startswith("карта:"), (w.alerts, w.origin_log()))
+w = World("broken", update="broken")
+MT.tick(T)
+MT.tick(T + MT.CHECK_EVERY + 1)
+check("карта с broken → тревога с именами файлов, коммита нет", w.alerts and "test_watch.py" in w.alerts[-1][2]
+      and "test_refspec.py" in w.alerts[-1][2] and not w.origin_log()[0].startswith("карта:"), (w.alerts, w.origin_log()))
+check("после карты с broken main не тронут и повтор на том же sha не идёт", len(w.heavy_calls) == 1, len(w.heavy_calls))
+w = World("broken-self", update="broken-self")
+MT.tick(T)
+check("в broken только test_run_tests → карта коммитится", w.origin_log()[0].startswith("карта:") and not w.alerts,
+      (w.origin_log(), w.alerts))
 w = World("race")
 
 
