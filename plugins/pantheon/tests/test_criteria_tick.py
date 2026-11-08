@@ -404,12 +404,41 @@ def test_autoclose():
         shutil.rmtree(tmp, True)
 
 
+def test_tick_failure():
+    """Сбой отметки (не ValueError) не роняет проход: задача не тронута, PR повторим, ошибка в errors для тревоги."""
+    import autoclose as A
+    tmp, home, state, gh, env = make()
+    try:
+        os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_VIEW=os.path.join(tmp, "view"))
+        pa, pb = put(home, "metis-0011"), put(home, "metis-0012")
+        calls = []
+
+        def accepted(repo, pr):
+            calls.append(repo)
+            if len(calls) == 1:
+                raise RuntimeError("сломалось")
+            return {}
+
+        log, errors = [], {}
+        pr = dict(mpr(11, "Closes metis-0011, metis-0012", H1), head=H1)
+        ok = A.close_pr(home, T0, "latark/agent-kit", pr, {"metis-pantheon"}, T, None, log, errors, accepted)
+        err = errors.get("latark/agent-kit#11", "")
+        check("сбой отметки: PR не отмечен обработанным, ошибка с задачей и типом в errors",
+              ok is False and "metis-0011" in err and "RuntimeError: сломалось" in err, (ok, errors))
+        check("сбой отметки: задача со сбоем не тронута", T.read(pa)[0].get("status") == "doing", text(pa)[-300:])
+        check("сбой отметки: вторая задача того же PR обработана",
+              T.read(pb)[0].get("status") == "review" and "неотмечено 2" in text(pb), text(pb)[-300:])
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_tasks_unit()
     test_review_cli()
     test_accepted_unit()
     test_merged_core()
     test_autoclose()
+    test_tick_failure()
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1
 
