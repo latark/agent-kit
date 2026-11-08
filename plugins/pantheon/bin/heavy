@@ -161,7 +161,8 @@ def is_full(argv):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return bool(mod.is_full(argv))
-    except Exception:
+    except Exception as e:  # не загрузилось — не полный, но молча нельзя: жетон тогда не работает
+        print(f"heavy: fullsuite не загрузился: {e} — жетон полного набора не работает", file=sys.stderr)
         return False
 
 

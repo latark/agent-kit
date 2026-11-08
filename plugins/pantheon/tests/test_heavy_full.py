@@ -67,6 +67,16 @@ def main():
               [py, "scripts/run-tests.py"],
               [py, "-I", "plugins/guard/tests/test_x.py"],
               ["pnpm", "test"]]
+        run_ = "python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon"
+        yes += [["sh", "-c", f"{run_} 2>&1 | tail -20"],
+                ["sh", "-c", f"{run_} 2>&1 | grep -E FAIL"],
+                ["sh", "-c", f"{run_} >log.txt 2>&1 || true"],
+                ["sh", "-c", f"{run_} > log.txt"],
+                ["sh", "-c", f"cd x && {run_} ; echo done"]]
+        no += [["sh", "-c", "grep foo plugins/pantheon/scripts/run-tests.py plugins/guard"],
+               ["sh", "-c", f"{run_} --affected | tail"],
+               ["grep", "foo", "plugins/pantheon/scripts/run-tests.py", "plugins/guard"],
+               ["sh", "-c", f"echo {run_.split('python3.14')[0]}run-tests.py plugins/x"]]
         for c in yes:
             check(f"правило: полный {c[-1][:40]}", F.is_full(c) is True)
         for c in no:
@@ -74,6 +84,21 @@ def main():
         check("общее правило: strict отвергает абсолютный путь, прежний ответ outside",
               F.runner_args("python3 /a/run-tests.py plugins/x") is None
               and F.runner_args("python3 tools/run-tests.py -j 3 plugins/kit # c") == ("tools/run-tests.py", ["plugins/kit"]))
+
+        # lib/fullsuite.py есть, но не грузится: heavy пишет одну строку в stderr, команда идёт как не полный набор
+        bad = os.path.join(tmp, "badkit")
+        os.makedirs(os.path.join(bad, "bin"))
+        os.makedirs(os.path.join(bad, "lib"))
+        shutil.copy(HEAVY, os.path.join(bad, "bin", "heavy"))
+        with open(os.path.join(bad, "lib", "fullsuite.py"), "w") as fh:
+            fh.write("raise ImportError('сломан')\n")
+        r = subprocess.run([sys.executable, "-I", os.path.join(bad, "bin", "heavy"), py, fake, "plugins/x"],
+                           env=env_for(state, 5), capture_output=True, text=True, timeout=60)
+        lines = [x for x in r.stderr.splitlines() if "fullsuite не загрузился" in x]
+        check("fullsuite не загрузился: строка в stderr, команда идёт",
+              r.returncode == 0 and "suite ran" in r.stdout and len(lines) == 1
+              and "сломан" in lines[0] and "жетон полного набора не работает" in lines[0],
+              f"{r.returncode} {r.stderr!r}")
 
         hold = os.open(os.path.join(locks, "heavy-full.lock"), os.O_RDONLY)
         fcntl.flock(hold, fcntl.LOCK_EX)
