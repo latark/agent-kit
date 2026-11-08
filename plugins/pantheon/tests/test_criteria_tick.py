@@ -2,7 +2,7 @@
 """Автоотметка «Готово, когда» по вердикту argus (metis-1004).
 
 - `pantheon review accept|reject … --criteria "<id>#<N> <хеш> да|нет <опора>"`: формат, хеш от нынешнего текста пункта,
-  у accept — вердикт по каждому пункту и без «нет»; `pantheon review criteria <id>` печатает готовые флаги; status
+  у accept — без «нет», вердикт можно не по всем пунктам; `pantheon review criteria <id>` печатает готовые флаги; status
   показывает пункты записи.
 - criteria_accepted: только «принять» на head слияния, по правилу шлюза (последний вердикт рецензента, перечень, Opus у
   ядра, base, позже «вернуть»); «нет» или разный хеш у двух argus — пункт не принят; строка кэша без core — как ядро.
@@ -181,8 +181,10 @@ def test_review_cli():
         r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")
         check("accept с вердиктом по каждому пункту — код 0, пункты напечатаны",
               r.returncode == 0 and f"пункт: {ok1}" in r.stdout and f"пункт: {ok2}" in r.stdout, r.stdout + r.stderr)
+        r = pan(env, *base, "--criteria", ok1)
+        check("accept с вердиктом не по всем пунктам (часть, после слияния) — код 0", r.returncode == 0
+              and f"пункт: {ok1}" in r.stdout, r.stdout + r.stderr)
         cases = [
-            ([ok1], "нет вердикта по пунктам 2"),
             ([ok1, crit("metis-0001", 2, A2, "нет")], "это «вернуть»"),
             ([ok1, crit("metis-0001", 2, A1)], "хеш"),
             ([ok1, crit("metis-0001", 3, A2)], "нет пункта 3"),
@@ -305,6 +307,8 @@ def test_merged_core():
     check("merged_core: обычный файл — не ядро", mc([f("README.md")], core, 1) is False)
     check("merged_core: файл ядра — ядро", mc([f(CORE)], core, 1) is True)
     check("merged_core: pantheon.py — ядро", mc([f(PAN)], core, 1) is True)
+    check("merged_core: sessions.py (BUILD_ROOTS шлюза) — ядро",
+          mc([f("plugins/pantheon/lib/sessions.py")], core, 1) is True)
     check("merged_core: пустой PR — не ядро", mc([], core, 0) is False)
     check("merged_core: переименование без старого пути (gh pr list) — ядро", mc([f("docs/x.py", "RENAMED")], core, 1) is True)
     check("merged_core: копия без старого пути — ядро", mc([f("docs/x.py", "copied")], core, 1) is True)

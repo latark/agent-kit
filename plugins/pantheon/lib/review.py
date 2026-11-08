@@ -29,8 +29,8 @@ REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
-                "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый пункт "
-                "«Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
+                "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый проверенный "
+                "пункт «Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
                 "<owner/repo>#<PR> --by <argus> --text \"…\" | sample | criteria <id задачи>… | status [<owner/repo> <PR>] "
                 "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
 # Правило засчитывания вердиктов (REVIEW_CHECKLIST, OPUS_RAN, RAN_MODEL, review_accept_full, review_accept_counts,
@@ -49,8 +49,9 @@ CRITERIA_STUB = "ОПОРА"
 def _review_criteria_problem(sub, items):
     """Значения --criteria у accept|reject (metis-1004) → текст ошибки или None. Каждое — в формате CRITERIA_FMT, без
     повторов пункта; задача есть, пункт N в её «Готово, когда» есть и не заглушка, хеш — от его нынешнего текста;
-    опора — не заглушка «ОПОРА». У accept «нет» — ошибка (пункт не выполнен — это «вернуть»), и вердикт нужен по
-    каждому пункту каждой названной задачи: команда с кодом не 0 записи не даёт (хук пишет только успешную)."""
+    опора — не заглушка «ОПОРА». У accept «нет» — ошибка (пункт не выполнен — это «вернуть»); вердикт не по всем
+    пунктам можно (ревью #401 Б1): пункты вне PR («часть») и проверяемые после слияния остаются без флага, и autoclose
+    сам ставит задаче review «неотмечено N». Команда с кодом не 0 записи не даёт (хук пишет только успешную)."""
     T = P.tasks_mod()
     tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
     seen = {}
@@ -75,13 +76,6 @@ def _review_criteria_problem(sub, items):
             return (f"--{CRITERIA} {tid}#{n}: хеш {h} не от нынешнего текста пункта — пункт изменён или номер не тот; "
                     f"строки с хешами — `pantheon review criteria {tid}`")
         seen.setdefault(tid, set()).add(n)
-    if sub == "accept":
-        for tid, got in seen.items():
-            miss = [str(i) for i, (_, x) in enumerate(T.done_criteria(tasks[tid][2]), 1)
-                    if i not in got and not T._is_stub(x)]
-            if miss:
-                return (f"--{CRITERIA} {tid}: нет вердикта по пунктам {', '.join(miss)} — в «принять» вердикт нужен по "
-                        f"каждому пункту «Готово, когда» (`pantheon review criteria {tid}`)")
     return None
 
 

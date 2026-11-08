@@ -554,7 +554,8 @@ FILES_CAP = 100   # gh pr list отдаёт не больше 100 файлов P
 
 def merged_core(files, core, changed=None):
     """Задето ли ядро слитым PR (metis-1004): files — поле files строки gh pr list (path, changeType), changed — его
-    changedFiles. По путям (core) или правкой pantheon.py — сборку окон в ней без сети не сверить, поэтому как ядро.
+    changedFiles. По путям (core) или правкой файлов сборки и запуска окон шлюза (BUILD_ROOTS: pantheon.py, sessions.py)
+    — сборку окон в них без сети не сверить, поэтому как ядро.
     У переименования и копии — оба пути (previous_filename), а без старого пути (gh pr list его не отдаёт) — ядро,
     как у шлюза: старое имя могло быть ядром. Список неполон — файлов changed больше полученных, а без changed
     получено FILES_CAP и больше (обрезка gh) — ядро; файл без пути — тоже. core нет или шлюз не загрузился — ядро
@@ -574,7 +575,8 @@ def merged_core(files, core, changed=None):
         paths += [f.get("path")] + ([old] if old is not None else [])
     if not all(isinstance(p, str) and p for p in paths):
         return True
-    return any(core(p) or _norm_path(p) == gate.SANDBOX_BUILD_FILE for p in paths)
+    wants = set(getattr(gate, "BUILD_ROOTS", None) or [gate.SANDBOX_BUILD_FILE])  # как sandbox_core (metis-0552)
+    return any(core(p) or _norm_path(p) in wants for p in paths)
 
 
 def open_core(repo, p, core, sandbox, left=None):
