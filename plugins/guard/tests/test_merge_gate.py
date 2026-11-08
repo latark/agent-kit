@@ -4661,22 +4661,32 @@ def t_core_lists_unit(h):
     check("sessions.py: правка помощника _argv, которого зовёт _fresh_start, — ядро", got == ["_argv"], got)
     check("sessions.py: без корня start — None (ядро)",
           mg.sandbox_build_changes(SS_SRC, SS_SRC.replace("def start(rest):", "def begin(rest):"), path=P) is None)
-    # настоящий sessions.py: снятие --settings в каждом из трёх запусков — ядро
+    # настоящий sessions.py: снятие --settings в каждом из трёх запусков — ядро. С metis-0933 argv окна собирает
+    # P.window_launch (pantheon.py): снять --settings в sessions.py — значит собрать argv в обход window_launch
     real_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(GUARD))), "pantheon", "lib", "sessions.py")
     real = open(real_path, encoding="utf-8").read()
     check("настоящий sessions.py: без правки — пусто", mg.sandbox_build_changes(real, real, path=P) == [])
-    for name, a, b in (("_fresh_start", '"--settings", win, text]', "text]"),
-                       ("start", '"--settings", P.path("settings", "hq.json")]', "]"),
-                       ("_start_session", '"--settings", run, prompt]', "prompt]")):
-        check(f"настоящий sessions.py: --settings в {name} есть", real.count(a) == 1)
+    for name, a, b in (("_fresh_start", "P.window_launch(role, name, window, win, text)",
+                        '[P.claude_bin(), "--bg", "--agent", role, "--name", name, text]'),
+                       ("start", 'P.window_launch("hq", "zeus", None, P.path("settings", "hq.json"), bg=False)',
+                        '[P.claude_bin(), "--agent", "hq", "--name", "zeus"]'),
+                       ("_start_session", "P.window_launch(role, name, window, run, prompt)",
+                        '[P.claude_bin(), "--bg", "--agent", role, "--name", name, prompt]')):
+        check(f"настоящий sessions.py: запуск через window_launch в {name} есть", real.count(a) == 1)
         got = mg.sandbox_build_changes(real, real.replace(a, b, 1), path=P)
         check(f"настоящий sessions.py: снятие --settings в {name} — ядро", got == [name], got)
+    # сам --settings — в window_launch (pantheon.py): его снятие там — ядро
+    pan_path = os.path.join(os.path.dirname(real_path), "pantheon.py")
+    pan = open(pan_path, encoding="utf-8").read()
+    a = '*window_flags(window, name), "--settings", settings]'
+    check("настоящий pantheon.py: --settings в window_launch есть", pan.count(a) == 1)
+    got = mg.sandbox_build_changes(pan, pan.replace(a, "*window_flags(window, name)]", 1))
+    check("настоящий pantheon.py: снятие --settings в window_launch — ядро", got == ["window_launch"], got)
     check("настоящий sessions.py: новая функция в конце — не ядро",
           mg.sandbox_build_changes(real, real + "\n\ndef _metis_0552_probe():\n    return 1\n", path=P) == [])
     # Б1 обоих argus PR #394: защиты запуска — мелкие корни; на base 45f35bac были ядром через os, после 0550 выпали
     got = mg.sandbox_build_changes(real, real.replace("    P.allow_gate(name)", "    pass", 1), path=P)
     check("настоящий sessions.py: fresh_target без allow_gate — ядро", got == ["fresh_target"], got)
-    pan = open(os.path.join(os.path.dirname(real_path), "pantheon.py"), encoding="utf-8").read()
     for name, a, b in (("CLAUDE_VALUE_FLAGS", '"--name"}', '"--name", "--permission-mode"}'),
                        ("ROLE_ENV", 'ROLE_ENV = ("PANTHEON_ROLE", ', "ROLE_ENV = (")):
         check(f"настоящий pantheon.py: {name} есть", pan.count(a) == 1)
