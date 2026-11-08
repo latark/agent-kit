@@ -2109,7 +2109,7 @@ def status():
 
     # места heavy, память, версии
     lines = []
-    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):
         p = path("locks", name + ".lock")
         if not os.path.exists(p):
             lines.append(f"{name}: нет (pantheon install)")
@@ -2300,7 +2300,7 @@ def domains_build(if_changed=False):
     with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
         os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
-    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
     roles = roles_build()
     if roles:
@@ -6471,7 +6471,7 @@ def install():
     with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
         os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
-    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):
         open(path("locks", slot + ".lock"), "a").close()
     if os.path.isdir(os.path.join(PANTHEON, ".git")):
         merge = os.path.join(CURRENT, "scripts", "git-crypt-merge.sh")

@@ -1938,13 +1938,45 @@ def sandbox_clean(root, t, opened, days=None):
     return removed, failed
 
 
-def sandbox_mb(root):
-    """Размер кэша песочниц, МБ (du -sk), или None."""
+SANDBOX_DU_TTL = 6 * 3600         # размер кэша пересчитываем не чаще (metis-1007): du по 6,6 ГБ — 30+ с диска на каждом проходе
+
+
+def _du_mb(root):
     try:
         r = subprocess.run(["du", "-sk", root], capture_output=True, text=True, timeout=120)
         return int(r.stdout.split()[0]) // 1024
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
+
+
+def _top_sig(root):
+    """Отпечаток верхнего уровня кэша: имена папок окон и их mtime (не глубже)."""
+    try:
+        return sorted([e.name, int(e.stat(follow_symlinks=False).st_mtime)] for e in os.scandir(root))
+    except OSError:
+        return None
+
+
+def sandbox_mb(root, force=False):
+    """Размер кэша песочниц, МБ, или None. Полный du — не на каждом проходе: прошлый размер берётся из кэша
+    (STATE/sandbox-size.json), пока он моложе SANDBOX_DU_TTL, верхний уровень кэша (имена и mtime папок окон) не
+    изменился и уборка ничего не убрала (force). Иначе du заново."""
+    sig = _top_sig(root)
+    cp = P.path("sandbox-size.json")
+    if not force and sig is not None:
+        try:
+            with open(cp, encoding="utf-8") as fh:
+                c = json.load(fh)
+            if (c.get("root") == root and c.get("sig") == sig and isinstance(c.get("mb"), int)
+                    and 0 <= time.time() - float(c.get("t")) < SANDBOX_DU_TTL):
+                return c["mb"]
+        except (OSError, ValueError, TypeError):
+            pass
+    mb = _du_mb(root)
+    if mb is not None and sig is not None:
+        with contextlib.suppress(OSError):
+            P.write_atomic(cp, json.dumps({"root": root, "sig": sig, "mb": mb, "t": time.time()}))
+    return mb
 
 
 def sandbox_sweep(t):
@@ -1954,6 +1986,7 @@ def sandbox_sweep(t):
     if not os.path.isdir(root):
         return
     opened = _open_paths()
+    removed = 0
     if opened is not None:
         removed, failed = sandbox_clean(root, t, opened)
         if removed or failed:
@@ -1963,7 +1996,7 @@ def sandbox_sweep(t):
         cap = int(os.environ.get("PANTHEON_SANDBOX_CAP_MB") or SANDBOX_CAP_MB)
     except ValueError:
         cap = SANDBOX_CAP_MB
-    mb = sandbox_mb(root)
+    mb = sandbox_mb(root, force=bool(removed))
     if mb is not None and mb > cap:
         P.alert_once("watch-sandbox-cap", today(t), f"кэши песочниц {mb} МБ при потолке {cap} МБ даже после уборки "
                      f"({root.replace(P.HOME, '~')}) — координатору: посмотреть, что держит место", "watch")
