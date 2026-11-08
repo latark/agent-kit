@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 
 CANVAS_NAME = "Кто есть кто.canvas"
 GREEN, CALL, BUILD, YOU = "4", "5", "3", "6"  # цвета темы Obsidian: зелёный, голубой, жёлтый, фиолетовый
@@ -299,42 +300,74 @@ def system_table(roles, statuses, catalog=None):
     return "\n".join(out)
 
 
+def _marks(text, prefix):
+    """Позиции начала строк, где строка начинается с prefix: маркер считается только в начале строки, а такой же текст
+    в середине строки — обычный текст (metis-0992)."""
+    out, pos = [], 0
+    while True:
+        i = text.find(prefix, pos)
+        if i < 0:
+            return out
+        if i == 0 or text[i - 1] == "\n":
+            out.append(i)
+        pos = i + 1
+
+
 def splice(text, name, body, heading):
-    """Текст файла с автоблоком name: между маркерами — body, вне их — как было. Маркеров нет — блок в конце файла
-    под heading. Один маркер без пары или конец раньше начала — ValueError."""
+    """Текст файла с автоблоком name: между маркерами — body, вне их — как было. Маркеры — только в начале строки: тот же
+    текст в середине строки блоком не считается и не теряется. Маркеров нет — блок в конце файла под heading. Один маркер
+    без пары, двойные или конец раньше начала — ValueError."""
     b, e = BEGIN.format(name=name), END.format(name=name)
-    i, j = text.find(b), text.find(e)
+    bs, es = _marks(text, b), _marks(text, e)
     block = f"{BEGIN_FULL.format(name=name)}\n{body.rstrip()}\n{e}"
-    if i < 0 and j < 0:
+    if not bs and not es:
         return text.rstrip("\n") + f"\n\n{heading}\n\n{block}\n"
-    if i < 0 or j < 0 or j < i or text.count(b) > 1 or text.count(e) > 1:
+    if len(bs) != 1 or len(es) != 1 or es[0] < bs[0]:
         raise ValueError(f"маркеры блока pantheon:{name} не парные — файл не тронут")
-    return text[:i] + block + text[j + len(e):]
+    return text[:bs[0]] + block + text[es[0] + len(e):]
 
 
 def sync_doc(path, name, body, heading):
-    """Записать автоблок в файл path. 'written' | 'same' | 'skip' (файла нет — не создаём: документ ведёт владелец)."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            cur = fh.read()
-    except FileNotFoundError:
+    """Записать автоблок в файл path. 'written' | 'same' | 'skip' (файла нет — не создаём: документ ведёт владелец).
+    Чтение и запись — под замком path + '.lock' в той же папке (гонка двух проходов не теряет правку), временный файл
+    уникальный (mkstemp), ссылка остаётся ссылкой: пишем в её цель."""
+    import fcntl
+    real = os.path.realpath(path)
+    if not os.path.isfile(real):
         return "skip"
-    new = splice(cur, name, body, heading)
-    if new == cur:
-        return "same"
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(new)
-    os.replace(tmp, path)
+    with open(real + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                cur = fh.read()
+        except FileNotFoundError:
+            return "skip"
+        new = splice(cur, name, body, heading)
+        if new == cur:
+            return "same"
+        fd, tmp = tempfile.mkstemp(prefix=".pantheon-doc.", suffix=".tmp", dir=os.path.dirname(real))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(new)
+            os.chmod(tmp, os.stat(real).st_mode & 0o777)
+            os.replace(tmp, real)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return "written"
 
 
 def sync_docs(base, roles, directions, statuses, catalog=None):
-    """Автоблоки ролей в «Кто есть кто.md» и system.md папки base → {имя файла: итог sync_doc}."""
-    return {MEMO_NAME: sync_doc(os.path.join(base, MEMO_NAME), "roles", memo_table(roles, directions, statuses, catalog),
-                                MEMO_HEADING),
-            SYSTEM_NAME: sync_doc(os.path.join(base, SYSTEM_NAME), "roles", system_table(roles, statuses, catalog),
-                                  SYSTEM_HEADING)}
+    """Автоблоки ролей в «Кто есть кто.md» и system.md папки base → {имя файла: итог sync_doc}. Сбой одного файла
+    (маркеры не парные, не читается) — итог «ошибка: …» у него, второй файл обновляется."""
+    out = {}
+    for name, body, heading in ((MEMO_NAME, memo_table(roles, directions, statuses, catalog), MEMO_HEADING),
+                                (SYSTEM_NAME, system_table(roles, statuses, catalog), SYSTEM_HEADING)):
+        try:
+            out[name] = sync_doc(os.path.join(base, name), "roles", body, heading)
+        except (ValueError, OSError) as e:
+            out[name] = f"ошибка: {e}"
+    return out
 
 
 def _overlap(a, b, margin=0):
@@ -515,6 +548,16 @@ def signature(roles, directions, statuses, catalog=None):
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
+def _file_hash(p):
+    """Хеш содержимого холста: удалённая или правленная карточка меняет его, и следующий проход собирает холст заново,
+    даже если входы те же (metis-0992). Файла нет или не читается — None."""
+    try:
+        with open(p, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def _write_json(p, data):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
@@ -565,8 +608,8 @@ def _sync(canvas_path, sig_path, roles, directions, statuses, catalog, force, ma
         if not isinstance(prev, dict):
             prev = {}
     except (OSError, ValueError, AttributeError):
-        old, prev = None, {}
-    if old == sig and not force and os.path.exists(canvas_path):
+        saved, old, prev = {}, None, {}
+    if old == sig and not force and os.path.exists(canvas_path) and saved.get("cv") == _file_hash(canvas_path):
         return "unchanged"
     try:
         with open(canvas_path, encoding="utf-8") as fh:
@@ -588,12 +631,12 @@ def _sync(canvas_path, sig_path, roles, directions, statuses, catalog, force, ma
     except OSError:
         same = False
     if not same:
-        _write_json(sig_path, {"sig": old, "hashes": _merged(prev, report["hashes"])})  # отпечаток до холста
+        _write_json(sig_path, {"sig": old, "hashes": _merged(prev, report["hashes"]), "cv": None})  # отпечаток до холста
         os.makedirs(os.path.dirname(canvas_path), exist_ok=True)
         tmp = canvas_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(text)
         os.replace(tmp, canvas_path)
         result = "written"
-    _write_json(sig_path, {"sig": sig, "hashes": report["hashes"]})
+    _write_json(sig_path, {"sig": sig, "hashes": report["hashes"], "cv": _file_hash(canvas_path)})
     return result

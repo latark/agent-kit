@@ -188,5 +188,30 @@ st = subprocess.run(["git", "-C", pan, "status", "--porcelain", "-uall"], env=en
 check("имя с пробелом, [] и #: игнорируется и не в коммите",
       not any("my data" in t for t in tracked) and "my data" not in st, (tracked, st))
 
+# имя файла с переводом строки (metis-0993): в .gitignore такое имя пишется с «?», файл не уходит в git
+pan = fresh()
+put(pan, D1 + "bi\ng.bin", 6 * MB)
+put(pan, D1 + "ok.md", 10)
+tracked, alerts = commit(pan)
+st = subprocess.run(["git", "-C", pan, "status", "--porcelain", "-uall", "-z"], env=env, capture_output=True, text=True).stdout
+check("6 МБ с \\n в имени: не в коммите и не в status, тревога есть, соседний .md коммитится",
+      not any("bi\ng" in t for t in tracked) and "bi\ng" not in st and "данные не в git" in alerts
+      and D1 + "ok.md" in tracked, (tracked, st, alerts))
+check("6 МБ с \\n в имени: строка .gitignore с «?» на своём месте", "/bi?g.bin" in gi(pan).split("\n"), gi(pan))
+
+# папка в середине пути — ссылка, проверка islink обманута (гонка): запись всё равно не идёт по ссылке
+pan = fresh()
+other = os.path.join(ROOT, f"racedir{n[0]}")
+os.makedirs(os.path.join(other, "sub"))
+os.symlink(other, os.path.join(pan, "lnk"))
+code = (f"import sys, os; sys.path.insert(0, {LIB!r}); import pantheon as p; os.path.islink = lambda x: False; "
+        "print(p._append_ignore('lnk/sub', 'x.csv'), p._append_ignore('lnk', 'y.csv'), p._append_ignore('directions/d1', 'ok.csv'))")
+r = subprocess.run([PY311, "-I", "-c", code], env={"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pan,
+                   "PANTHEON_STATE": state}, capture_output=True, text=True, timeout=60)
+check("_append_ignore: ссылка в середине пути при обманутом islink → False, цель пуста; вложенная обычная папка → True",
+      r.stdout.strip() == "False False True" and not os.path.exists(os.path.join(other, "sub", ".gitignore"))
+      and not os.path.exists(os.path.join(other, ".gitignore"))
+      and os.path.exists(os.path.join(pan, "directions", "d1", ".gitignore")), (r.stdout, r.stderr))
+
 print("\n%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
