@@ -795,6 +795,51 @@ def stale_now(name, text, mtime, agents, registry, t):
         P.alert_once(fail, value, f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
 
 
+HEAD_FRESH = 30              # STATUS.md правили недавно (секунд) — шапку «Сейчас» не переписываем: роль может писать (metis-1005)
+
+
+def retime_status(name, p, text, st, t):
+    """Шапка `## Сейчас (дата)` STATUS.md — по времени последней строки журнала, а не по ручной дате (metis-1005).
+    Переписывается только строка заголовка: замена файла (временный файл рядом и rename) с mtime прежний + 1 с, если файл не
+    менялся с чтения (inode, mtime, размер — сверка перед самой заменой) и его не правили последние HEAD_FRESH секунд. → (текст, st) после записи или прежние."""
+    N = P.boardtext_mod().nowfact()
+    new, changed = N.retime_head(text, N.journal_time(text, st.st_mtime, t))
+    if not changed or t - st.st_mtime < HEAD_FRESH:
+        return text, st
+    tmp = f"{p}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        os.chmod(tmp, st.st_mode & 0o777)
+        # mtime — прежний плюс 1 с: возраст файла и дата журнала без даты считаются по правке роли, а не по нашей замене
+        # шапки, но копия для Obsidian (rsync -t, отпечаток view: размер и mtime) замену видит — шапка той же длины
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        cur = os.stat(p)  # сверка прямо перед заменой: роль дописала файл, пока писали временный, — не трогаем
+        if (cur.st_ino, cur.st_mtime_ns, cur.st_size) != (st.st_ino, st.st_mtime_ns, st.st_size):
+            return text, st
+        os.replace(tmp, p)
+        return new, os.stat(p)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
+def manual_behind(name, text, mtime, t):
+    """Ручной раздел STATUS.md с датой старше свежего журнала больше чем на 6 ч (metis-1005): тревога владельцу файла —
+    координатору направления, один раз на набор разделов; нет такого — отметка снимается."""
+    N = P.boardtext_mod().nowfact()
+    key = f"watch-manual-{name}"
+    late = N.stale_manual(text, mtime, t)
+    if not late:
+        P.clear_once(key)
+        return
+    j = N.display(N.journal_time(text, mtime, t))
+    names = "; ".join(f"«{n}» {N.display(ts)}" for n, ts in late[:3]) + (f" и ещё {len(late) - 3}" if len(late) > 3 else "")
+    P.alert_once(key, "|".join(f"{n}@{N.display(ts)}" for n, ts in late),
+                 f"STATUS.md {name}: ручной раздел с датой старше журнала ({j}) больше {N.STALE_HOURS} ч — {names}. "
+                 f"Владелец файла — координатор {name}: обновить раздел или вынести старое в archive/", "watch")
+
+
 def status_files(doms, t, agents=(), registry=()):
     """STATUS.md направления: с задачей «В работе» давно не обновлялся — состояние могло потеряться; длиннее 200 строк
     — координатору перенести закрытое в archive/ (STATE-14); «Сейчас» старше STALE_NOW_HOURS у работающего окна —
@@ -811,12 +856,19 @@ def status_files(doms, t, agents=(), registry=()):
             n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         except OSError:
             continue
+        mtime0 = st.st_mtime  # возраст файла — по правке роли, а не по нашей замене шапки
         try:
-            stale_now(name, text, st.st_mtime, agents, registry, t)
+            text, st = retime_status(name, p, text, st, t)
+            manual_behind(name, text, mtime0, t)
+        except Exception as ex:  # noqa: BLE001 — сбой шапки или проверки ручных разделов не обрывает остальное
+            P.alert_once(f"watch-head-err-{name}", today(t), f"STATUS.md {name}: шапка «Сейчас» из журнала не обновлена: "
+                         f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
+        try:
+            stale_now(name, text, mtime0, agents, registry, t)
         except Exception as ex:  # сбой одного направления (таймаут resume_session и т. п.) не обрывает остальные
             P.alert_once(f"watch-now-err-{name}", today(t), f"STATUS.md {name}: проверка «Сейчас» упала: "
                          f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
-        age = (t - st.st_mtime) / 86400
+        age = (t - mtime0) / 86400
         if name in doing and age > STALE_STATUS_DAYS:
             P.alert_once(f"watch-status-{name}", today(t),
                          f"STATUS.md {name} не обновлялся {age:.0f} дн., а задача «В работе» есть — спросить "

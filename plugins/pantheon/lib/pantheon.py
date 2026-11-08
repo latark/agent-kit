@@ -1217,7 +1217,8 @@ def _fp_board_auto():
     return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
                                                         ("pr_stale", B.pr_stale(path("autoclose-prs.json"))),
                                                         ("week", board_week()),
-                                                        ("merge_queue", B.merge_queue(STATE))]  # waiting-auto (0829)
+                                                        ("merge_queue", B.merge_queue(STATE)),  # waiting-auto (0829)
+                                                        ("windows", board_windows())]
 
 
 TICK_SKIP = {
@@ -7507,6 +7508,17 @@ def board_week():
     return None
 
 
+def board_windows(t=None):
+    """Имена живых окон (state working или blocked) по снимку сессий STATE/agents.json, который пишет тик (watch.snapshot);
+    снимок старше AGENTS_FRESH или нет — None (о окнах ничего не утверждаем). Без вызова claude: проход доски его не ждёт."""
+    t = now() if t is None else t
+    snap = read_json(path("agents.json"), None)
+    if not (isinstance(snap, dict) and isinstance(snap.get("time"), (int, float)) and 0 <= t - snap["time"] < AGENTS_FRESH):
+        return None
+    return sorted({str(a.get("name")) for a in snap.get("agents") or []
+                   if isinstance(a, dict) and a.get("name") and a.get("state") in ("working", "blocked")})
+
+
 def board_auto_fp():
     return hashlib.sha1(repr(_fp_board_auto()).encode("utf-8", "replace")).hexdigest()
 
@@ -7549,7 +7561,13 @@ def board_md_check(quiet):
     p = os.path.join(PANTHEON, "board.md")
     try:
         with open(p, encoding="utf-8") as fh:
-            found = {k: (v, text) for k, v, text in boardmd_mod().problems(fh.read(), now())}
+            body = fh.read()
+        t = now()
+        try:  # время самой свежей записи журналов STATUS.md (metis-1005): ручное «Обновлено» сверяется с ним
+            jt = boardtext_mod().journal_times(PANTHEON, t)
+        except Exception:  # noqa: BLE001 — нет журналов: старое правило «старше суток»
+            jt = []
+        found = {k: (v, text) for k, v, text in boardmd_mod().problems(body, t, jt[0][1] if jt else None)}
     except OSError:
         found = {}
     for k in BOARD_MD_KEYS:
@@ -7683,7 +7701,7 @@ def board_auto_sync(T):
         tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
         data = B.collect(PANTHEON, STATE, tasks, t, board_week(),
                          owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE,
-                         own_of=batch_own_of(tasks, metrics_ctx().repos))
+                         own_of=batch_own_of(tasks, metrics_ctx().repos), windows=board_windows(t))
         data["merged_open"] = board_merged_open(T, t)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
