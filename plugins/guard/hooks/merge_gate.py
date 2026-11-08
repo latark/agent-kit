@@ -109,7 +109,6 @@ import re
 import shlex
 import signal
 import subprocess
-import symtable
 import threading
 import sys
 import time
@@ -1107,52 +1106,35 @@ def _is_core(path, core_files):
 # и живой вершине ветки base (gh api …/git/ref/heads/<base>): соседний PR, слитый в base после ответвления, мог
 # добавить в сборку вызов функции, которую правит этот PR (ревью argus-b PR #160, Б1). Не получить, не разобрать, нет
 # корня, файл переименован или в другом регистре — ядро. Вне признака: обращения по строке (getattr, globals()), псевдоним изменяемого значения, другие файлы
-# (window_rules.py — в CORE_FILES), изменение импортированного модуля внутри функции (os.environ[…] = …, sys.path —
-# metis-0550: иначе каждая функция, что трогает os, тянула в сборку полфайла: 24 из 40 слияний pantheon.py — ядро)
+# (window_rules.py — в CORE_FILES)
 SANDBOX_BUILD_FILE = "plugins/pantheon/lib/pantheon.py"
 SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings", "window_launch")
-# Корни, которых может ещё не быть в файле: запуск окна window_launch (metis-0951) приходит отдельным PR. Нет его в
-# версии — замыкание идёт по остальным корням; появился, пропал или изменился — правка его имени, ядро. Без
-# остальных корней — по-прежнему None (ядро). Корни запуска LAUNCH_ROOTS — так же: пропал — правка имени, ядро
-SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", "_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS",
-                                    "ROLE_ENV", "job_window_problem", "cwd_allow_problems", "claude_env",
-                                    "start_target", "direction_target", "live_copies", "stop_copies",
-                                    "agents_all", "window_missing", "no_window_reason", "rm_previous", "push_text",
-                                    "lock"})
-# Запуск окон с --settings (metis-0552, Д2 argus-160b): _start_session, _fresh_start и start в sessions.py,
-# продолжение сессии _resume_session и окна задач расписания parse_command в pantheon.py собирают argv
-# `claude … --settings <окно>`; без --settings окно ушло бы без песочницы. Эти корни — без замыкания: ядро — правка
-# самой функции (argv окна собирает window_launch, а он в замыкании выше). С замыканием они тянули тексты целей и реестр
-# сессий: 18 из 40 прошлых слияний pantheon.py и sessions.py — ядро, без него — 13, из них ложных 3 (metis-0550).
-# Мелкие корни защит запуска (Б1 обоих argus PR #394): на base 45f35bac они были в ядре через os, после сужения
-# metis-0550 выпали. Флаги claude со значением CLAUDE_VALUE_FLAGS (разбор argv задачи), окно задачи
+# Запуск окон с --settings (metis-0552, Д2 argus-160b): продолжение сессии _resume_session и окна задач расписания
+# parse_command собирают argv `claude … --settings <окно>`; без --settings окно ушло бы без песочницы. Мелкие корни
+# защит запуска (Б1 и Б2 argus PR #394): флаги claude со значением CLAUDE_VALUE_FLAGS, окно задачи
 # job_window_problem, отказ в запуске из папки с allow cwd_allow_problems, снятие роли у дочерних claude claude_env и
-# ROLE_ENV (metis-0321), цель pantheon start start_target и окно её --settings direction_target (sessions.py зовёт
-# его и прямо — Б2 argus R2 PR #394), живые копии окна live_copies, их остановка stop_copies и список сессий
-# agents_all. Все они в SANDBOX_BUILD_OPTIONAL (CLAUDE_VALUE_FLAGS и ROLE_ENV — данные, не функции; в старых версиях
-# файла части функций нет): пропажа в одной версии — правка имени, ядро. Мелкий корень — не барьер для замыкания
-# сборки (Б1 argus R2 PR #394): вызван из сборки (sandbox_build → project_allow_stop → stop_copies → claude_env →
-# run_env) — то, что он зовёт, в замыкании; так в ядре и бинарь claude_bin, окружение run_env, clean_path, nvm_bin,
-# installed_plugin_dir (Б2 argus R2-2). Помощники запуска окон из sessions.py, которые замыкание pantheon.py не видит
-# (Б2 argus R2-2): отказ без окна window_missing и no_window_reason, снятие прежних копий rm_previous, текст старта
-# push_text, замок имени lock
+# ROLE_ENV (metis-0321), цель pantheon start start_target и окно её --settings direction_target, живые копии окна
+# live_copies, их остановка stop_copies, список сессий agents_all; помощники запуска окон из sessions.py: отказ без
+# окна window_missing и no_window_reason, снятие прежних копий rm_previous, текст старта push_text, замок имени lock.
+# Все они идут с тем же полным замыканием, что SANDBOX_BUILD_ROOTS, без барьеров: в ядре и то, что они зовут и
+# читают (NO_WINDOW, TICK_SUBCOMMANDS — Б1 и Б2 argus R3-2). Сужение замыкания metis-0550 вырезано: оно трижды
+# подряд выбрасывало из ядра правку запуска, которая на base 45f35bac была ядром; ложных ядер столько же, как на base
 LAUNCH_ROOTS = ("_resume_session", "parse_command", "CLAUDE_VALUE_FLAGS", "ROLE_ENV", "job_window_problem",
                 "cwd_allow_problems", "claude_env", "start_target", "direction_target", "live_copies", "stop_copies",
                 "agents_all", "window_missing", "no_window_reason", "rm_previous", "push_text", "lock")
-# Имена, по которым замыкание не идёт дальше (metis-0550): тревоги владельцу и список живых сессий claude agents.
-# Сборка зовёт их ради побочного действия (тревога), а не ради того, что пишет в settings/<окно>.json; через них в
-# сборку попадали реестр сессий и журнал ваших слов. Правка самого имени — ядро. project_allow_stop — не барьер (Б1
-# argus PR #394): он останавливает живое окно, чей allow пускает gh pr merge; его live_copies и stop_copies — мелкие
-# корни LAUNCH_ROOTS, и замыкание сборки идёт через них дальше (Б1 argus R2)
-BUILD_STOP = frozenset({"alert", "alert_once", "clear_once", "agents_all"})
+# Корни, которых может ещё не быть в файле: запуск окна window_launch (metis-0951) приходит отдельным PR, в старых
+# версиях файла нет части корней запуска. Нет его в версии — замыкание идёт по остальным корням; появился, пропал или
+# изменился — правка его имени, ядро. Без остальных корней — по-прежнему None (ядро)
+SANDBOX_BUILD_OPTIONAL = frozenset({"window_launch", *LAUNCH_ROOTS})
 SESSIONS_FILE = "plugins/pantheon/lib/sessions.py"
-# fresh_target даёт _fresh_start значение --settings — окно цели (Д1 обоих argus PR #394); его может не быть в
-# версии, как мелких корней pantheon.py: пропажа в одной версии — правка имени, ядро
+# Запуск окон в sessions.py (metis-0552): _start_session, _fresh_start и start собирают argv `claude … --settings
+# <окно>`, fresh_target даёт _fresh_start окно цели (Д1 обоих argus PR #394). Замыкание полное, как у pantheon.py;
+# fresh_target может не быть в версии — пропажа в одной версии — правка имени, ядро
 SESSIONS_ROOTS = ("_start_session", "_fresh_start", "start", "fresh_target")
-# файл → (корни с замыканием, корни, которых может не быть, корни без замыкания). Один признак на шлюз, окно Touch ID
-# merge.py и доску autoclose.py (metis-0551) — sandbox_build_changes по каждому файлу
-BUILD_ROOTS = {SANDBOX_BUILD_FILE: (SANDBOX_BUILD_ROOTS, SANDBOX_BUILD_OPTIONAL, LAUNCH_ROOTS),
-               SESSIONS_FILE: ((), frozenset({"fresh_target"}), SESSIONS_ROOTS)}
+# файл → (корни замыкания, корни, которых может не быть). Один признак на шлюз, окно Touch ID merge.py и доску
+# autoclose.py (metis-0551) — sandbox_build_changes по каждому файлу
+BUILD_ROOTS = {SANDBOX_BUILD_FILE: ((*SANDBOX_BUILD_ROOTS, *LAUNCH_ROOTS), SANDBOX_BUILD_OPTIONAL),
+               SESSIONS_FILE: (SESSIONS_ROOTS, frozenset({"fresh_target"}))}
 MUTATORS = frozenset({"append", "extend", "insert", "update", "setdefault", "pop", "popitem", "remove", "clear", "add",
                       "discard", "sort", "reverse", "__setitem__", "__delitem__", "__iadd__", "__ior__"})
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -1192,46 +1174,11 @@ def _all_names(node):
     return out
 
 
-def _globals_of(table):
-    """Имена модуля, на которые ссылается область symtable table и вложенные в неё (global явный и неявный), — без
-    локальных переменных и параметров: локальная `check` или `direction` не тянет в сборку одноимённую функцию модуля
-    (metis-0550: так замыкание pantheon.py росло до 420 имён из 629)."""
-    out, todo = set(), [table]
-    while todo:
-        t = todo.pop()
-        out |= {s.get_name() for s in t.get_symbols() if s.is_global()}
-        todo.extend(t.get_children())
-    return out
-
-
-def _def_names(st, scopes):
-    """Имена модуля, от которых зависит def или class st: своё имя, декораторы, значения по умолчанию, аннотации, базы
-    класса (их считает модуль) и глобальные имена тела по symtable (scopes — (имя, строка) → таблица)."""
-    out = {st.name}
-    head = [*st.decorator_list]
-    if isinstance(st, ast.ClassDef):
-        head += [*st.bases, *st.keywords]
-    else:
-        a = st.args
-        head += [*a.defaults, *(d for d in a.kw_defaults if d is not None)]
-        head += [x.annotation for x in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg)
-                 if x is not None and x.annotation is not None]
-        if st.returns is not None:
-            head.append(st.returns)
-    for n in head:
-        out |= _all_names(n)
-    t = scopes.get((st.name, st.lineno))
-    return out | (_globals_of(t) if t is not None else _all_names(st))
-
-
-def _touched(st, data, scopes=None):
+def _touched(st, data):
     """Имена, которые задаёт или меняет инструкция верхнего уровня st; data — имена данных модуля (у def и class
-    засчитывается изменение только их, а не своих локальных переменных: имя из _mutated должно быть и глобальным в
-    теле по symtable, scopes)."""
+    засчитывается изменение только их, а не своих локальных переменных)."""
     if isinstance(st, _DEFS):
-        t = (scopes or {}).get((st.name, st.lineno))
-        own = _mutated(st) & data
-        return {st.name} | (own & _globals_of(t) if t is not None else own)
+        return {st.name} | (_mutated(st) & data)
     if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
         targets = st.targets if isinstance(st, (ast.Assign, ast.Delete)) else [st.target]
         out = _mutated(st)
@@ -1253,45 +1200,30 @@ def _touched(st, data, scopes=None):
 def _defs_closure(src, path=SANDBOX_BUILD_FILE):
     """Исходник файла path → (имя → дампы его инструкций по порядку, замыкание корней BUILD_ROOTS[path]) или None: не
     разобрать, нет обязательного корня функцией верхнего уровня."""
-    roots, optional, shallow = BUILD_ROOTS[path]
+    roots, optional = BUILD_ROOTS[path]
     try:
         tree = ast.parse(src)
-        top = symtable.symtable(src, path, "exec")
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
-    scopes = {(t.get_name(), t.get_lineno()): t for t in top.get_children()}
     defs, dumps = {}, {}
-    data, imported = set(), set()
+    data = set()
     for st in tree.body:
         if not isinstance(st, _DEFS):
             data |= _touched(st, set())
-            imported |= {(a.asname or a.name).split(".")[0] for n in ast.walk(st)
-                         if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
-    # имя, которое задаёт только import (os, sys, json), — модуль, а не данные файла: его правка внутри функции не
-    # делает функцию частью сборки (metis-0550). Имя, которое ещё и присваивается, — данные, как раньше
-    assigned = set()
     for st in tree.body:
-        if not isinstance(st, _DEFS):
-            assigned |= {n.id for n in ast.walk(st) if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))}
-    data -= imported - assigned
-    for st in tree.body:
-        for name in _touched(st, data, scopes):
+        for name in _touched(st, data):
             defs.setdefault(name, []).append(st)
     if not all(any(isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == r for st in tree.body)
-               for r in (*roots, *shallow) if r not in optional):
+               for r in roots if r not in optional):
         return None
-    # мелкие корни — к итогу после обхода, а не в seen до него: иначе они обрывали путь сборки (Б1 argus R2 PR #394)
     seen, todo = set(), list(roots)
     while todo:
         name = todo.pop()
         if name in seen or name not in defs:
             continue
         seen.add(name)
-        if name in BUILD_STOP:
-            continue
         for st in defs[name]:
-            todo.extend(_def_names(st, scopes) if isinstance(st, _DEFS) else _all_names(st))
-    seen |= set(shallow)
+            todo.extend(_all_names(st))
     memo = {id(st): ast.dump(st) for st in tree.body}
     for name, sts in defs.items():
         dumps[name] = [memo[id(st)] for st in sts]
@@ -1375,7 +1307,7 @@ def _sandbox_problem(cwd, repo, base, sha, branch=None, tip_memo=None, path=SAND
     got = sandbox_build_changes(old, new, *tips, path=path) if ok else None
     if got is None:
         return f"{path} (сборку окон не проверить: файла нет до или после, не разобрать или нет " \
-               f"{'/'.join(r for part in BUILD_ROOTS[path][::2] for r in part)})"
+               f"{'/'.join(r for r in BUILD_ROOTS[path][0] if r not in BUILD_ROOTS[path][1])})"
     if got:
         shown = ", ".join(got[:8]) + (f" и ещё {len(got) - 8}" if len(got) > 8 else "")
         return f"{path} (сборка окон: {shown})"

@@ -823,23 +823,19 @@ Claude Code, у которого есть журнал ваших слов: Зе
    замыканий на merge-base, head, base PR и живой вершине ветки base (`gh api …/git/ref/heads/<base>`): соседний PR,
    слитый в base после ответвления, мог добавить в сборку вызов функции, которую правит этот PR (argus-b PR #160, Б1).
    Вершину не получить или её нет в git папки — ядро, подсказка `git fetch`.
-   С metis-0552 в ядре и запуск окон с `--settings`: `_start_session`, `_fresh_start` и `start` в
-   `plugins/pantheon/lib/sessions.py`, `_resume_session` и `parse_command` в pantheon.py. Эти корни — без замыкания:
-   ядро — правка самой функции (её снятие `--settings` уводит окно без песочницы), а не того, что она зовёт.
-   Так же, без замыкания, — защиты запуска (Б1 argus PR #394; на base 45f35bac они были в ядре через `os`):
-   `CLAUDE_VALUE_FLAGS`, `ROLE_ENV`, `claude_env`, `job_window_problem`, `cwd_allow_problems`, `start_target`,
-   `live_copies`, `stop_copies`, `agents_all`, окно `--settings` цели `direction_target` (sessions.py зовёт его и
-   прямо), отказ без окна `window_missing` и `no_window_reason`, снятие прежних копий `rm_previous`, текст старта
-   `push_text`, блокировка `lock` в pantheon.py и `fresh_target` в sessions.py — правка каждого — ядро (Б2 обоих argus R2).
-   Замыкание сужено (metis-0550): имя модуля из `import` (`os`, `sys`) — не данные сборки, так что `os.environ[…] =`
-   в посторонней функции её не тянет; имена тела функции — по `symtable`, и локальная переменная `check` не тянет
-   функцию модуля `check`; дальше тревог (`alert`, `alert_once`, `clear_once`, `BUILD_STOP`) замыкание не идёт.
-   Мелкий корень — не барьер (Б1 argus R2): вне сборки идёт только его собственная правка, а вызванный из сборки он
-   ведёт замыкание дальше — так в ядре окружение окна `run_env` (sandbox_build → `project_allow_stop` →
-   `stop_copies` → `claude_env` → `run_env`), бинарь `claude_bin`, `clean_path`, `nvm_bin`. Правка
-   комментария или другой функции — не ядро: из 40 последних слияний pantheon.py и sessions.py Touch ID нужен в 14
-   (с #294 — правка `run_env`, PATH окна), из них ложно в 3 (#237, #242, #249 — правки `_fresh_start` и
-   `_start_session` вне argv); до metis-0550 — в 24 (по признаку base 45f35bac — 22 из тех же 40).
+   С metis-0552 в ядре и запуск окон с `--settings`: `_start_session`, `_fresh_start`, `start` и окно цели
+   `fresh_target` в `plugins/pantheon/lib/sessions.py`, `_resume_session` и `parse_command` в pantheon.py. С ними —
+   защиты запуска (Б1 и Б2 argus PR #394): `CLAUDE_VALUE_FLAGS`, `ROLE_ENV`, `claude_env`, `job_window_problem`,
+   `cwd_allow_problems`, `start_target`, окно `--settings` цели `direction_target`, `live_copies`, `stop_copies`,
+   `agents_all`, отказ без окна `window_missing` и `no_window_reason`, снятие прежних копий `rm_previous`, текст старта
+   `push_text`, блокировка `lock` (`LAUNCH_ROOTS`, `SESSIONS_ROOTS`). Эти корни идут с тем же полным замыканием, что
+   сборка, без барьеров: в ядре и то, что они зовут и читают, — бинарь `claude_bin`, окружение `run_env`, код отказа
+   `NO_WINDOW`, белый список подкоманд тика `TICK_SUBCOMMANDS`. Сужение замыкания metis-0550 (имя модуля из `import` —
+   не данные, имена тела по `symtable`, барьеры у тревог) вырезано: три круга ревью подряд находили правку запуска,
+   которая на base 45f35bac была ядром, а после сужения — нет. Правка комментария или другой функции — не ядро, но
+   ложных ядер столько же, как на base: из 40 последних слияний pantheon.py и sessions.py Touch ID нужен в 25 (на
+   base 45f35bac — в 22, все 22 есть среди 25; с сужением 0550 было 14). Лишние три — #237 (`_fresh_start` вне
+   argv), #247 и #280 (тексты целей, до которых доходят корни запуска).
    Тот же признак — у окна Touch ID (`merge.is_core` совпадает с `_is_core`, файлы сборки `merge.BUILD_FILES` окно
    называет среди ядра) и у доски (`autoclose.sandbox_core` сверяет каждый файл `BUILD_ROOTS`), metis-0551.
    Не разобрать — ядро: папка не клон, нет коммита head (подсказка `git fetch`), не одна merge-base, файл не
