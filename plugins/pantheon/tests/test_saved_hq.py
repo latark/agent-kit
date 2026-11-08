@@ -107,6 +107,10 @@ try:
     open(mark, "w").write("[1, 2]")
     r = probe()
     check("не объект: не читаем", r.stdout.startswith("{} None"), r)
+    open(mark, "w").write("[" * 100000)
+    r = probe()
+    check("глубоко вложенный массив: RecursionError ловится, метки нет",
+          r.returncode == 0 and r.stdout.startswith("{} None") and "Traceback" not in r.stderr, r)
     open(mark, "w").write(json.dumps({"time": "t", "state": "s", "sessionId": SID}))
     os.link(mark, os.path.join(tmp, "hard"))
     r = probe()
@@ -115,6 +119,17 @@ try:
     r = probe()
     check("нормальная метка читается", SID in r.stdout and "'time': 't'" in r.stdout, r)
     os.remove(mark)
+    # Д2: из hq-rw читается только zeus*; подложенный dev-x.json не читает ни restart --status, ни saved_sid
+    planted = os.path.join(st, "hq-rw", "saved", "dev-x.json")
+    json.dump({"time": "2026-11-06 10:00:00", "state": "PLANTED", "by": "dev-x", "sessionId": SID}, open(planted, "w"))
+    r = run(env, "restart", "--status", **own)
+    check("restart --status: подложенный hq-rw/saved/dev-x.json не читается",
+          "dev-x: ещё нет" in r.stdout and "dev-x: сохранилась" not in r.stdout and "PLANTED" not in r.stdout, r)
+    code_dx = (f"import sys;sys.path.insert(0,{LIB!r});import pantheon as P;w=P.watch_mod();"
+               "print(repr(w.hq_saved('dev-x')), w.saved_sid('dev-x'))")
+    r = subprocess.run([sys.executable, "-I", "-c", code_dx], env=env, capture_output=True, text=True, timeout=20)
+    check("saved_sid('dev-x') не читает hq-rw/saved/dev-x.json", r.returncode == 0 and r.stdout.strip() == "{} None", r)
+    os.remove(planted)
     # restart --done снимает метку
     r = run(env, "saved", "--by", "zeus", "--state", "S", **own)
     check("метка есть до restart --done", os.path.exists(mark), r)
