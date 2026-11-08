@@ -13,6 +13,7 @@
 """
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -294,7 +295,39 @@ def _in_dir(path, create=False):
         os.close(fd)
 
 
+# Кэш текста файлов (metis-0926): проход доски читал каждую карточку 2–3 раза (load_tasks ×4, digest ×5 на карточку),
+# и каждое чтение — цепочка openat по всем папкам пути (O_NOFOLLOW). Ключ — путь и (dev, ino, mtime_ns, ctime_ns, size)
+# одного lstat: запись идёт через rename нового файла, поэтому inode меняется; изменённый файл читается заново.
+# Попадание не обходит защиту: текст получен ранее через _in_dir, а подмена пути даст другой inode.
+_TEXT_CACHE = {}
+_TEXT_CACHE_MAX = 20000
+
+
+def _stat_key(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    import stat as _st
+    if not _st.S_ISREG(st.st_mode):
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
 def read_text(path):
+    key = _stat_key(path)
+    hit = _TEXT_CACHE.get(path) if key is not None else None
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    text = _read_text_raw(path)
+    if key is not None:
+        if len(_TEXT_CACHE) >= _TEXT_CACHE_MAX:
+            _TEXT_CACHE.clear()
+        _TEXT_CACHE[path] = (key, text)
+    return text
+
+
+def _read_text_raw(path):
     with _in_dir(path) as (fd, name):
         if fd is None:
             with open(path, encoding="utf-8") as fh:
@@ -305,6 +338,7 @@ def read_text(path):
 
 
 def write_text(path, text):
+    _TEXT_CACHE.pop(path, None)
     with _in_dir(path, create=True) as (fd, name):
         if fd is None:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -613,8 +647,8 @@ def task_dirs(pantheon):
 
 def task_files(pantheon):
     for d in task_dirs(pantheon):
-        for f in list_dir(d):  # папка, открытая без ссылок; файлы — только обычные
-            if f.endswith(".md") and not f.startswith(".") and is_file(d, f):
+        for f in list_dir(d):  # папка d открыта без ссылок (list_dir); файлы — только обычные (lstat имени в ней)
+            if f.endswith(".md") and not f.startswith(".") and _stat_key(os.path.join(d, f)) is not None:
                 yield os.path.join(d, f)
 
 
@@ -1297,7 +1331,12 @@ def ready(pantheon, t, direction=None, owner=None):
 # --- режим, зависимости и пересечения (план metis-0248) ------------------------------
 
 def _area(p):
-    p = str(p).strip().replace("\\", "/")
+    return _area_str(str(p))
+
+
+@functools.lru_cache(maxsize=65536)
+def _area_str(p):  # чистая функция строки; пересечения сравнивают пары — без кэша разбор шёл сотни тысяч раз (metis-0926)
+    p = p.strip().replace("\\", "/")
     while p.startswith("./"):
         p = p[2:]
     return p.rstrip("/")
@@ -1689,7 +1728,7 @@ def id_link(i, names):
 
 
 def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None, outs=None, links=None, tails=None,
-             pr_days=None):
+             pr_days=None, orders=None):
     """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней, слова
     «внимания» по всему (review без PR, готово без приёмки). outs — outcomes(tasks): что из задачи вышло; links —
     work_links (PR и коммиты); tails — {id: [текст]} хвостов последнего pantheon check (metis-0506, metis-0572)."""
@@ -1705,7 +1744,12 @@ def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs
     sid = head.get("parent")
     if sid in tasks and tasks[sid][1].get("type") == "story":
         ctx["story"] = names.get(sid) or card_name(tasks[sid][1])
-        ids = story_order(sid, tasks)
+        if orders is None:
+            ids = story_order(sid, tasks)
+        else:  # порядок пачки один на все её карточки (metis-0926): tasks за проход рендера не меняется
+            ids = orders.get(sid)
+            if ids is None:
+                ids = orders[sid] = story_order(sid, tasks)
         ctx["order"] = ids.index(tid) + 1 if tid in ids else None
     return ctx
 
@@ -1849,9 +1893,11 @@ def story_text(sid, tasks):
     return "\n".join(lines)
 
 
-def task_attach(pantheon, t, tid, sid, actor="агент"):
+def task_attach(pantheon, t, tid, sid, actor="агент", only_loose=False):
     """Прикрепить задачу к пачке: parent у задачи и строка в журнал обеих. Была в другой пачке — переносится,
-    строка и в журнал прежней. → прежняя пачка или None."""
+    строка и в журнал прежней. only_loose (автоматика: плановый проход, --apply, metis-0960) — переносить нельзя:
+    предложение считалось по задачам без parent, а пока шёл расчёт, пачку могли поставить руками; parent уже есть —
+    отказ ValueError до записи. → прежняя пачка или None."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks or tasks[tid][1].get("type") != "task":
         raise ValueError(f"нет задачи {tid}")
@@ -1860,6 +1906,8 @@ def task_attach(pantheon, t, tid, sid, actor="агент"):
     old = tasks[tid][1].get("parent")
     if old == sid:
         raise ValueError(f"{tid} уже в пачке {sid}")
+    if only_loose and old:
+        raise ValueError(f"{tid} уже в пачке {old} — предложение устарело, не переношу")
     if not mode_decided(tasks[tid][1]):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     was = f" (была в {old})" if old else ""
@@ -3987,12 +4035,15 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     for cid, it in inbox.items():
         items.append((cid, card_name({"title": it["title"], "id": cid}, with_id=False), it["path"], None, None))
         slugs[cid] = it["direction"]
+    folded = set()  # имена в нижнем регистре: набор не пересобирается на каждую карточку (metis-0926, было O(n²))
     for cid, name, src, h, b in items:
-        if name.casefold() in {x.casefold() for x in names.values()}:  # Mac: «Bob.md» и «bob.md» — один файл
+        if name.casefold() in folded:  # Mac: «Bob.md» и «bob.md» — один файл
             name = f"{name} ({cid})"
         names[cid] = name
+        folded.add(name.casefold())
     cross = crossings(tasks)
     outs = outcomes(tasks)
+    orders = {}  # id пачки → порядок задач, один на проход рендера (card_ctx)
     wl = {i: work_links(h, b, pr_index, repos) for i, (_, h, b) in tasks.items()} if repos else {}
     pr_days = {(x["repo"], x["number"]): x.get("day") for xs in (pr_index or {}).values() for x in xs if x.get("merged")}
     accept = {i: w for i, (_, h, b) in tasks.items() if i in wl for w in [merged_wait(h, b, wl[i], pr_days)] if w}
@@ -4022,7 +4073,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                                                 batch_pr=batch_pr(cid, batch_prs, own) if repos else None, **kw)
             else:
                 card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs,
-                                                                          outs, wl.get(cid), tails, pr_days), **kw)
+                                                                          outs, wl.get(cid), tails, pr_days,
+                                                                          orders=orders), **kw)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
