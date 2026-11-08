@@ -392,7 +392,11 @@ def path(*parts):
 # прохода (tick, watch, board, notify, git…) — в STATE/locks, куда окно не пишет. Файл в hq-rw открывается
 # hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
+# BOARD_LOCK (metis-0882) — пара «board.md переписывают ↔ коммит ~/ai/pantheon»: `pantheon board archive` из окна Зевса
+# берёт только его (pantheon-git окну не открыт), а commit и archive берут его под pantheon-git. Не взят — переписывание
+# отказывает, коммит ждёт следующего прохода; «иду без него» для этого замка нет.
 HQ_RW = "hq-rw"
+BOARD_LOCK = "board-git"
 HEAVY_QUEUE = "heavy-queue"  # папка билетов очереди heavy в STATE/locks (metis-0659)
 # start-req — заявки Зевса на запуск (metis-0771); saved — метка `pantheon saved --by zeus*`, когда в STATE/maintenance и
 # STATE/plugins окно писать не может (metis-0577)
@@ -408,7 +412,7 @@ class UnsafeFile(OSError):
 
 def hq_lock_name(name):
     """Замок, который берёт и окно Зевса, — живёт в STATE/hq-rw/locks."""
-    return name.startswith("start-") or name == "wake"
+    return name.startswith("start-") or name in ("wake", BOARD_LOCK)
 
 
 def hq_open(sub, fname):
@@ -523,7 +527,8 @@ def lock(name, block=True):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
+                    tail = "не взята" if name == BOARD_LOCK else "иду без него"
+                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — {tail}", file=sys.stderr)
                     break
                 time.sleep(0.2)
     else:
@@ -7516,7 +7521,9 @@ def board_archive(rest):
     board.md сверяются inode, mtime и размер с прочитанными (metis-0780): изменился — отказ «board.md изменился,
     повтори», код 1, board.md не тронут, дописанное в архив откатывается. Остаток — правка в те же доли секунды
     между последней сверкой и заменой. Сбой дописывания или замены (OSError) — строка «… — архив откатан, board.md не
-    тронут», без трассировки; откат сам не удался — «архив НЕ откатан (архив: причина)», код 1 (metis-0810)."""
+    тронут», без трассировки; откат сам не удался — «архив НЕ откатан (архив: причина)», код 1 (metis-0810).
+    От коммита прохода переписывание закрыто замком BOARD_LOCK в STATE/hq-rw/locks, а не pantheon-git: команду зовёт и
+    окно Зевса, которому STATE/locks не открыт (metis-0882). Замок не взят за HQ_LOCK_WAIT — код 1, ничего не записано."""
     M, days = boardmd_mod(), None
     args = list(rest)
     if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
@@ -7530,7 +7537,11 @@ def board_archive(rest):
     if not os.path.exists(board):
         print("board.md нет — нечего переносить")
         return 0
-    with lock("pantheon-git"):
+    with lock(BOARD_LOCK) as got:
+        if not got:
+            print(f"pantheon board archive: board.md сейчас коммитит плановый проход (замок {BOARD_LOCK} не взят) — "
+                  "повтори через минуту, ничего не записано", file=sys.stderr)
+            return 1
         with open(board, encoding="utf-8") as fh:
             text = fh.read()
             seen = _file_mark(os.fstat(fh.fileno()))
