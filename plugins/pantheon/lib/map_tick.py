@@ -20,6 +20,10 @@ affected-map.py --update <папки плагинов>` с таймаутом UP
 коммит «карта: affected-map на <sha7>» от pantheon-tick и обычный `git push origin HEAD:main`. main ушёл вперёд
 (push отклонён) — не сбой: следующая проверка начнёт заново. Итог работника — STATE/map-tick.json (result), тик
 пишет его строкой `map-tick:` в logs/tick.log; сбой — тревога alert_once без critical, удача её снимает.
+Карта с упавшими при сборке файлами (поле broken, кроме BROKEN_OK) в main не идёт: упали они от нагрузки Mac или
+таймаута, а run-tests.py проверяет «ни один файл тестов не упал при сборке» (test_run_tests.py) — такая карта красит main
+(метка sb-map-broken, 08.11: 9 файлов при load 100–300). Работник не коммитит её, ничего не меняет в main, пишет сбой
+(тревога alert_once); sha запоминается, как при любом сбое, повтор — когда main сдвинется.
 Push в main этим процессом идёт вне окон ролей: хук push защиты (guard) на него не действует; ветка main должна
 принимать push от входа gh владельца так же, как для release.py --push.
 PANTHEON_DRYRUN=1 (тесты тика) — ничего не делает.
@@ -40,6 +44,7 @@ MAP_RE = re.compile(r"карта: affected-map на [0-9a-f]{7}")  # тема к
 MAP_AUTHOR = "pantheon-tick"  # и автор: узнаём коммит карты по обоим признакам
 MAP_SCRIPT = os.path.join("plugins", "pantheon", "scripts", "affected-map.py")
 MAP_REL = "plugins/pantheon/scripts/affected-map.json"
+BROKEN_OK = frozenset({"pantheon/test_run_tests.py"})  # его красит сама прошлая карта (см. test_run_tests.py) — не причина отказа
 PLUGIN_DIRS = ("plugins/guard", "plugins/pantheon", "plugins/project-tools")
 REPO_NAMES = ("agent-kit",)
 LOG_DEPTH = 200
@@ -179,12 +184,30 @@ def _only_map_changed(copy, env):
     return True, None
 
 
+def _broken_left(copy):
+    """Упавшие при сборке файлы тестов собранной карты (без BROKEN_OK) → (список, None) или (None, причина)."""
+    try:
+        with open(os.path.join(copy, MAP_REL), encoding="utf-8") as fh:
+            raw = json.load(fh).get("broken") or []
+    except (OSError, ValueError, AttributeError):
+        return None, "собранная карта не читается как JSON"
+    if not isinstance(raw, list):
+        return None, "в собранной карте broken — не список"
+    return sorted(str(b) for b in raw if b not in BROKEN_OK), None
+
+
 def publish(job, env):
     """Проверка, коммит и push → (итог, ok, сбой?) — итог строкой."""
     copy, sha = job["copy"], job["sha"]
     ok, why = _only_map_changed(copy, env)
     if not ok:
         return why, False
+    left, why = _broken_left(copy)
+    if left is None:
+        return why, False
+    if left:
+        return (f"карта собрана с упавшими файлами ({len(left)}): {', '.join(left)[:250]} — не коммичу, "
+                f"прежняя карта остаётся в main"), False
     for args in (("add", "--", MAP_REL),
                  ("-c", "user.name=pantheon-tick", "-c", "user.email=pantheon-tick@localhost", "commit", "-q", "-m",
                   f"карта: affected-map на {sha[:7]}")):
