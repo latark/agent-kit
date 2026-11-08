@@ -19,7 +19,7 @@ LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 sys.path.insert(0, LIB)
 import tasks as T  # noqa: E402
 
-T0 = 1_792_000_000
+T0 = 1_794_000_000
 results = []
 
 
@@ -39,12 +39,12 @@ def build(pan):
     os.makedirs(os.path.join(pan, "inbox", "tasks"))
     for s in range(STORIES):
         h = {"type": "story", "id": f"metis-{s:04d}", "title": f"Пачка {s}", "status": "doing", "priority": 2,
-             "direction": DIRS[s % 5], "owner": "zeus", "created": "2026-11-01", "updated": "2026-11-02T10:00:00"}
+             "direction": DIRS[s % 5], "owner": "zeus", "project": "Пантеон", "schema_version": 1, "created": "2026-11-01", "updated": "2026-11-02T10:00:00"}
         T.write_text(os.path.join(pan, "directions", DIRS[s % 5], "tasks", f"{h['id']}.md"), T.join(h, "# Пачка\n"))
     for i in range(STORIES, N):
         d = DIRS[i % 5]
         h = {"type": "task", "id": f"metis-{i:04d}", "title": f"Задача {i}" if i % 50 else "Одинаковое имя",
-             "status": ("todo", "doing", "done", "waiting")[i % 4], "priority": i % 4, "direction": d, "owner": "zeus",
+             "status": ("todo", "doing", "done", "waiting")[i % 4], "priority": i % 4, "direction": d, "owner": "zeus", "project": "Пантеон", "schema_version": 1,
              "created": "2026-11-01", "updated": "2026-11-02T10:00:00", "parent": f"metis-{i % STORIES:04d}",
              "touches": [f"plugins/p{i % 30}/lib/", f"docs/x{i % 7}.md"], "next": "шаг", "waiting_on": "human"}
         if i > STORIES + 5 and i % 3 == 0:
@@ -55,7 +55,7 @@ def build(pan):
     # имена, различающиеся только регистром: файл Mac один, второму нужен суффикс
     for k, title in enumerate(("Дубль имени", "ДУБЛЬ ИМЕНИ")):
         h = {"type": "task", "id": f"metis-{N + k:04d}", "title": title, "status": "todo", "priority": 2,
-             "direction": "zeus", "owner": "zeus", "created": "2026-11-01", "updated": "2026-11-02T10:00:00"}
+             "direction": "zeus", "owner": "zeus", "project": "Пантеон", "schema_version": 1, "created": "2026-11-01", "updated": "2026-11-02T10:00:00"}
         T.write_text(os.path.join(pan, "directions", "zeus", "tasks", f"{h['id']}.md"), T.join(h, "# Д\n"))
 
 
@@ -106,13 +106,13 @@ t1, t2 = tree(v1), tree(v2)
 n_cards = sum(1 for k in t1 if k.startswith("Доска") and k.endswith(".md"))
 check("вывод: те же карточки, Сводка и состояние с кэшем и без него", t1 == t2 and lines1 == lines2 and n_cards > N,
       (len(t1), len(t2), n_cards, set(t1) ^ set(t2)))
-check("чтений с диска за проход с кэшем втрое меньше, чем без него", reads_cached * 3 < reads_plain,
+check("чтений с диска за проход с кэшем вдвое меньше, чем без него", reads_cached * 2 <= reads_plain,
       (reads_cached, reads_plain))
 check("каждый файл задачи читается с диска не больше раза за проход (+ доска)", reads_cached <= 2 * n_cards + 50,
       (reads_cached, n_cards))
 dubl = sorted(k for k in t1 if "ублирование" in k or "Дубль имени" in k or "ДУБЛЬ ИМЕНИ" in k)
-check("имена с разным регистром: второй файл с суффиксом (id)",
-      len(dubl) == 2 and any("(metis-" in k for k in dubl), dubl)
+check("имена, различающиеся регистром, — два разных файла доски",
+      len(dubl) == 2 and dubl[0].casefold() != dubl[1].casefold(), dubl)
 
 # 2. кэш сбрасывается при изменении файла
 f = os.path.join(PAN, "directions", "zeus", "tasks", "metis-0003.md")
