@@ -1,7 +1,9 @@
 """Проверка и архив ~/ai/pantheon/board.md (metis-0769).
 
-`problems(text, t)` — тревоги `pantheon check`: раздел «Сейчас» длиннее NOW_MAX знаков; «Обновлено ДД.ММ ЧЧ:ММ» в нём
-старше суток (или нет совсем); пункты «По датам» с прошедшей датой срока.
+`problems(text, t, journal=None)` — тревоги `pantheon check`: раздел «Сейчас» длиннее NOW_MAX знаков; ручное «Обновлено
+ДД.ММ ЧЧ:ММ» в нём старше свежего журнала STATUS (journal — его время; больше NOW_BEHIND_HOURS часов отставания,
+metis-1005) или, когда журнала нет, старше суток; пункты «По датам» с прошедшей датой срока. Даты в ручном разделе
+не требуется: время «Сейчас» собирает board-auto.md (lib/boardtext.py now_line).
 `split(text, t, days)` — блоки старше days дней из разделов ARCHIVE_SECTIONS: (оставшийся текст, {ГГГГ-ММ: [строки]}).
 Без потерь: оставшийся текст и перенесённые строки вместе дают все строки исходного. Блок — строка списка с датой
 в начале («- 03.11 03:17 …», «- 2026-11-03 …») и следующие за ней строки с отступом.
@@ -12,7 +14,8 @@ import re
 from datetime import datetime, timedelta
 
 NOW_MAX = 9000                       # знаков в разделе «Сейчас»
-STALE_HOURS = 24                     # «Обновлено» старше — тревога
+STALE_HOURS = 24                     # «Обновлено» старше — тревога (журнала STATUS нет)
+NOW_BEHIND_HOURS = 6                 # «Обновлено» старше свежего журнала STATUS на столько — тревога (metis-1005)
 ARCHIVE_SECTIONS = ("Сейчас", "Сессии и хозяйство")  # где лежит журнал датированных блоков
 DEFAULT_DAYS = 7
 HEAD_RE = re.compile(r"^##[ \t]+(.*?)[ \t]*$")
@@ -82,7 +85,7 @@ def dated_rows(text):
     return out
 
 
-def problems(text, t):
+def problems(text, t, journal=None):
     """→ [(ключ, значение, сообщение)]: значение меняется, когда меняется суть (новая тревога), ключ — вид проверки."""
     out = []
     now_sec = section(text, "Сейчас")
@@ -96,11 +99,14 @@ def problems(text, t):
         if d is not None:
             d = d.replace(hour=int(m.group(4)), minute=int(m.group(5))) if m.group(4) and int(m.group(4)) < 24 \
                 and int(m.group(5)) < 60 else d.replace(hour=23, minute=59)  # дата без времени — конец дня
-        if d is None:
-            out.append(("updated", "none", "board.md: в разделе «Сейчас» нет строки «Обновлено ДД.ММ ЧЧ:ММ»"))
-        elif t - d.timestamp() > STALE_HOURS * 3600:
-            out.append(("updated", d.strftime("%d.%m %H:%M"), f"board.md: «Обновлено {d.strftime('%d.%m %H:%M')}» старше "
-                        f"{STALE_HOURS} ч — обновить раздел «Сейчас»"))
+        if d is not None:
+            ref, hours = (journal, NOW_BEHIND_HOURS) if journal is not None else (t, STALE_HOURS)
+            if ref - d.timestamp() > hours * 3600:
+                stamp = d.strftime("%d.%m %H:%M")
+                out.append(("updated", stamp, f"board.md: «Обновлено {stamp}» старше {STALE_HOURS} ч — обновить раздел «Сейчас»"
+                            if journal is None else f"board.md: «Обновлено {stamp}» старше свежего журнала STATUS "
+                            f"({datetime.fromtimestamp(journal).strftime('%d.%m %H:%M')}) больше чем на {hours} ч — владелец "
+                            "файла (Зевс): обновить раздел «Сейчас» или убрать старое: pantheon board archive"))
     today = datetime.fromtimestamp(t).replace(hour=0, minute=0, second=0, microsecond=0)
     late = []
     for cell, rest in dated_rows(text):
