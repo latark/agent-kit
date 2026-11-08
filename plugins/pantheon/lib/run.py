@@ -35,7 +35,7 @@ def _early_board_guard():
 
     signal.signal(signal.SIGTERM, stop(143))
     signal.signal(signal.SIGALRM, stop(0))
-    signal.setitimer(signal.ITIMER_REAL, max(budget, 1.0))
+    signal.setitimer(signal.ITIMER_REAL, max(budget, 1.0) + 5.0)  # = BOARD_HARD_GRACE в pantheon.py
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["board"]:

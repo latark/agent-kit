@@ -7175,6 +7175,7 @@ except ValueError:  # нечисловое значение не роняет pa
     BOARD_BUDGET = 45.0
 PROC_T0 = None  # monotonic начала процесса (ставит run.py до импорта): бюджет считается и с импорта
 BOARD_NOTIFY_WAIT = 20.0  # с ждать блокировку notify: занята дольше — проход идёт без уведомлений, а не до таймаута
+BOARD_HARD_GRACE = 5.0  # с сверх бюджета до жёсткого SIGALRM: мягкие пропуски (замок, сводка) успевают раньше
 BOARD_AUTO_MIN = 8.0  # с: осталось меньше — сводку board-auto.md этого прохода пропускаем, соберёт следующий
 
 
@@ -7239,7 +7240,7 @@ def board():
     try:
         old = signal.signal(signal.SIGTERM, on_term)
         old_alrm = signal.signal(signal.SIGALRM, on_alarm)
-        signal.setitimer(signal.ITIMER_REAL, max(clock.left(), 0.2))
+        signal.setitimer(signal.ITIMER_REAL, max(clock.left() + BOARD_HARD_GRACE, 0.2))
     except ValueError:  # не главный поток
         old = old_alrm = None
     rc = 0
