@@ -23,9 +23,18 @@ PR ядра защит (Д3) агенты не сливают: его слива
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
      меньше двух, «вернуть» нет. «Вернуть» на любом head PR в силе, пока его не сняло «принять» после него (того же
-     рецензента или свежее на этот SHA), а «принять», записанное раньше последнего неснятого «вернуть», не в счёт
-     (held_rejects, reject_floor — правило шлюза guard, metis-0465; «другой код» — другой коммит: git папки слияния у
-     прохода нет). «Принять» с прошлых head проход не переносит — на SHA нужны свои; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
+     рецензента или свежее другого argus на этот SHA, если код «вернуть» другой), а «принять», записанное раньше
+     последнего неснятого «вернуть», не в счёт (held_rejects, reject_floor — правило шлюза guard, metis-0465).
+     Код прошлых head проход сам не сверит — git папки слияния у него нет. Его сверяет хук guard при `pantheon merge
+     request` из клона репозитория (merge_gate.request_decisions, metis-0966, 0396, 0443, вариант А): запись kind
+     "decision" в carry.jsonl — head с тем же кодом, что у SHA (same), и посчитанно другим (differs). Проход берёт
+     последнее решение на SHA и нынешнюю base PR, не старше REQUEST_TTL и на нынешней вершине ветки base (gh api,
+     base_tip — как у шлюза; main ушёл вперёд — решение не в счёт) (code_facts): «принять» с head из same
+     переносится на SHA (в счёт — последний вердикт рецензента на SHA и этих head после отсечки), а «вернуть» другой
+     argus снимает, только если head «вернуть» в differs. Решения нет или код не посчитан — строго: другой коммит —
+     неизвестный код, «принять» не переносится, «вернуть» не снимается; правило 3 шлюза guard (третий head) проход
+     не применяет. «Принять» на другой base PR (metis-0965) и с полем «вернули», которое врёт (metis-0497), не в
+     счёт. Проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
@@ -35,7 +44,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
      набора FULL_TESTS (full_tests_record); нет такой — снята с тревогой. Аннотации или данные job красных не
      получены (сбой gh) — ждёт: признак лимита не проверить (ci_billing_fetch, metis-0813).
      PR не сливается с base (mergeable CONFLICTING или mergeStateStatus DIRTY) — снята с тревогой «конфликт с main»
-     до окна; GitHub ещё считает (UNKNOWN) — ждёт (merge_conflict, metis-0819). После пальца UNKNOWN не помеха:
+     до окна, а при `pantheon merge request` заявки нет вовсе (metis-0987); GitHub ещё считает (UNKNOWN) или защита
+     ветки не даёт слить (BLOCKED: обязательные проверки или ревью GitHub, metis-0987) — ждёт (merge_conflict,
+     metis-0819). После пальца UNKNOWN не помеха:
      слияние прежнего PR пачки сдвигает base, и GitHub пересчитывает mergeable лениво; снимает только конфликт
      (check_all after, Б1 argus #381). Причину ожидания проход пишет в заявку (mark_wait) — её показывает status.
      Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
@@ -58,7 +69,12 @@ PR ядра защит (Д3) агенты не сливают: его слива
      после пальца, без окна и без проверки «у Mac»: под замком фраза и шлюз заново, фраза отмечена использованной,
      та же строка merge-approve, `gh pr merge --match-head-commit`. Способ — в merge.jsonl: событие phrase (файл
      owner-log, строка, время записи) и how у merged; в уведомлении о слиянии — «фразой из owner-log/<файл>». Пачку
-     фраза не сливает: только окно Touch ID.
+     фраза не сливает: только окно Touch ID. Отозвать словами (metis-0970): «не сливай #N» или «стоп, не сливай #N»
+     первой строкой — если это последняя запись на номер, фраза не в силе (заявка остаётся, ждёт окна Touch ID;
+     снять её — `pantheon merge cancel`). Тревога снятой заявки называет путь: «по фразе» или «по Touch ID»
+     (metis-0980). Время заголовка записи owner-log — без пояса, проход читает его в нынешнем поясе Mac: сменили пояс
+     (перелёт) — возраст фраз до смены сдвинут на разницу часов, фраза старше 2 ч может ожить, свежая — погаснуть
+     (остаток metis-0980 Д2: формат ctx.py не меняем).
 
 Пачка (metis-0668, process_batch) — одно окно на все её PR: в тексте — сначала задетое ядро всех и число файлов, затем
 каждый PR с SHA и вердиктом шлюза по порядку, заголовки последними. До окна пункты 1–3 — у каждого: неполна (одну заявку сняли или заменили) или
@@ -142,6 +158,8 @@ MAX_BATCH = 5                        # PR в одной пачке: их ном�
 PHRASE_TTL = 2 * 3600                # фраза старше 2 ч не действует
 PHRASE_SKEW = 120                    # запись «из будущего» дальше 2 мин — не в счёт (как read_log в ctx.py)
 PHRASE_RE = re.compile(r"слей\s+#([1-9][0-9]{0,8})\s+([0-9a-f]{7,40})[.!]?", re.IGNORECASE)
+# отзыв фразы словами (metis-0970): «не сливай #N», «стоп, не сливай #N» — последняя запись на номер, и фраза не в силе
+REVOKE_RE = re.compile(r"(?:стоп[,.!]?\s+)?не\s+сливай\s+#([1-9][0-9]{0,8})[.!]?", re.IGNORECASE)
 OWNER_ENTRY_RE = re.compile(r"## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)")   # заголовок записи append_owner_line
 PHRASES_FILE = "merge-phrases.json"  # STATE: использованные фразы — одна фраза, одно согласие
 PHRASES_KEEP = 24 * 3600
@@ -341,8 +359,9 @@ def mark_wait(req, state, why):
     return why is not None
 
 
-def drop(req, event, why=None, warn=False):
-    """Снять заявку — только если в очереди та же: новую, поставленную во время прохода, не трогает."""
+def drop(req, event, why=None, warn=False, how="по Touch ID"):
+    """Снять заявку — только если в очереди та же: новую, поставленную во время прохода, не трогает. how — путь
+    согласия для тревоги: «по Touch ID» или «по фразе» (metis-0980 Д3: на пути фразы окна не было)."""
     with P.lock("merge-queue"):
         if not same_req(req):
             return gone(req)
@@ -350,7 +369,7 @@ def drop(req, event, why=None, warn=False):
             os.remove(req_file(req["repo"], req["pr"]))
     log(req, event, why=why)   # причина — для `pantheon merge status` (снятые за сутки, metis-0819)
     if warn:
-        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: заявка снята — {why}", "pantheon-merge")
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) {how}: заявка снята — {why}", "pantheon-merge")
     return f"снята: {why or event}"
 
 
@@ -857,18 +876,64 @@ def returned_lifts(a, r):
     return isinstance(got, list) and any(pair_match(p, r) for p in got)
 
 
+def base_tip(repo, branch):
+    """Живая вершина ветки branch (gh api …/git/ref/heads/<branch>) — SHA в нижнем регистре или None: сбой gh, не та
+    ветка, не коммит. Тот же источник, что у шлюза guard (merge_gate._base_tip): с ним сверяется base_oid решения."""
+    if not isinstance(branch, str) or not re.fullmatch(r"(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![/.])", branch):
+        return None
+    try:
+        r = subprocess.run([gh_path(), "api", f"repos/{repo}/git/ref/heads/{branch}"], capture_output=True, text=True,
+                           timeout=GH_TIMEOUT, env=gh_env())
+        ref = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not isinstance(ref, dict):
+        return None
+    obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
+    sha = obj.get("sha")
+    if ref.get("ref") != "refs/heads/" + branch or obj.get("type") != "commit" or not isinstance(sha, str) \
+            or not re.fullmatch(r"[0-9a-f]{40}", sha.lower()):
+        return None
+    return sha.lower()
 
-def held_rejects(verdicts, sha):
+
+def code_facts(repo, pr, sha, view):
+    """(same, differs) — head PR, чей код шлюз guard сверил с кодом sha (metis-0966, 0396, 0443, вариант А): same — тот
+    же код (отпечаток собственного диффа или слияние, merge_gate._merge_same), differs — посчитано, код другой. Берётся
+    последнее решение (запись kind "decision" в carry.jsonl, её пишет хук guard при `pantheon merge request`, P.
+    review_decisions) на sha и нынешнюю base PR, записанное не раньше REQUEST_TTL назад и на нынешней вершине ветки
+    base (base_oid решения — живая вершина base_tip: main ушёл вперёд — решение о другом слиянии). Нет решения —
+    пустые множества: у прохода нет git папки слияния, другой коммит здесь — неизвестный код, и шлюз судит строго."""
+    base = view.get("baseRefName") if isinstance(view, dict) else None
+    tip = []
+    for d in reversed(P.review_decisions(repo, pr)):
+        try:
+            age = P.now() - datetime.fromisoformat(str(d.get("time"))).timestamp()
+        except ValueError:
+            continue
+        if d.get("sha") == sha and isinstance(base, str) and base and d.get("base") == base \
+                and 0 <= age <= REQUEST_TTL:
+            if not tip:
+                tip.append(base_tip(repo, base))  # gh — только когда есть решение-кандидат, один раз
+            if str(d.get("base_oid") or "").lower() != tip[0]:  # вершины нет (None) — тоже не та
+                return frozenset(), frozenset()
+            same, differs = set(d["same"]) - {sha}, set(d["differs"]) - {sha}
+            return frozenset(same - differs), frozenset(differs - same)
+    return frozenset(), frozenset()
+
+
+def held_rejects(verdicts, sha, differs=frozenset()):
     """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
     по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
     снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head или на sha; 2) другого argus на
-    sha, если «вернуть» на другом head, и у «принять» с полем «вернули» — только взявшего отчёт вернувшего
-    (returned_lifts, metis-0497). Шлюз guard во втором случае ещё сверяет, что код sha не равен коду «вернуть»;
-    у прохода нет git папки слияния, и «другой код» здесь — другой коммит (metis-0443). Третий head «вернуть» не
-    снимает: проход «принять» не переносит, на sha нужны свои."""
+    sha, если «вернуть» на head с другим кодом — head из differs решения шлюза guard (code_facts, metis-0966), — и у
+    «принять» с полем «вернули» — только взявшего отчёт вернувшего (returned_lifts, metis-0497). Решения нет или код
+    head «вернуть» не посчитан — второй argus «вернуть» не снимает: rebase с тем же кодом — не новый код. Третий head
+    (правило 3 шлюза guard) «вернуть» не снимает: строже, на sha нужны свои «принять»."""
     def lifts(a, r):
         return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r) and a["sha"] in (r["sha"], sha)
-                                          or a["sha"] == sha != r["sha"] and returned_lifts(a, r))
+                                          or a["sha"] == sha != r["sha"] and r["sha"] in differs
+                                          and returned_lifts(a, r))
     return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
 
 
@@ -924,22 +989,30 @@ def gate(repo, pr, sha, view):
             verdicts.append(r)
     # поле «вернули» называет рецензента без «вернуть» на PR — «принять» не в счёт, как в шлюзе guard (metis-0497)
     verdicts = [r for r in verdicts if not (r["kind"] == "accept" and returned_lie(r, verdicts))]
-    # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard
-    held = held_rejects(verdicts, sha)
+    # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard; код прошлых head — из
+    # решения шлюза guard при `pantheon merge request` (code_facts, metis-0966)
+    same, differs = code_facts(repo, pr, sha, view)
+    held = held_rejects(verdicts, sha, differs)
     if held:
         return "fail", (f"«вернуть» от argus на {', '.join(r['sha'][:12] for r in held)} в силе: оно привязано к PR, "
-                        f"снимает его «принять» после него — того же рецензента или свежее на {sha[:12]}")
+                        f"снимает его «принять» после него — того же рецензента или свежее на {sha[:12]} с другим "
+                        "кодом (код сверяет шлюз guard при `pantheon merge request` из клона репозитория)")
     floor = reject_floor(verdicts)
+    # «принять» с head того же кода переносится на sha, как в шлюзе guard (_carried, metis-0396): последний вердикт
+    # каждого рецензента — на sha и этих head, в счёт — записанные после отсечки
     latest = {}
     for i, r in enumerate(verdicts):
-        if r["sha"] == sha:
+        if r["sha"] == sha or r["sha"] in same:
             latest[_reviewer(r)] = (i, r)
     counted = [r for i, r in latest.values() if i > floor]
     if len(counted) < MIN_ACCEPTS:
         cut = len(latest) - len(counted)
+        moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same)
         return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}"
                         + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
-                           if cut else ""))
+                           if cut else "")
+                        + (f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
+                           "— сверяет шлюз guard при `pantheon merge request` из клона репозитория" if moved else ""))
     latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
@@ -1156,7 +1229,8 @@ def _owner_entries(path):
 
 
 def phrases(now):
-    """Фразы «слей #N <hex>» владельца за PHRASE_TTL: [{pr, hex, t, file, line, at, key}].
+    """Фразы «слей #N <hex>» владельца за PHRASE_TTL: [{pr, hex, t, file, line, at, key}]; отзыв «[стоп, ]не сливай
+    #N» (metis-0970) — та же запись с hex None и revoke True.
     Источник — только файлы owner-log/*.md верхнего уровня: их пишет хук ctx.py owner-log из ввода, который Claude Code
     пометил вашим (origin.kind human), без обёрток NOT_OWNER — сообщений других сессий, отчётов субагентов, уведомлений
     задач, «[Пантеон: …]»; роли в owner-log не пишут. unconfirmed/ (ввод без пометки транскрипта) — не в счёт.
@@ -1181,6 +1255,11 @@ def phrases(now):
                 pr, hx = int(m.group(1)), m.group(2).lower()
                 out.append({"pr": pr, "hex": hx, "t": t, "file": name, "line": line, "at": at,
                             "key": f"{name}|{at}|{pr}|{hx}"})
+            m = REVOKE_RE.fullmatch(first)
+            if m:
+                pr = int(m.group(1))
+                out.append({"pr": pr, "hex": None, "revoke": True, "t": t, "file": name, "line": line, "at": at,
+                            "key": f"{name}|{at}|{pr}|-"})
     return out
 
 
@@ -1213,7 +1292,8 @@ def used_phrases():
 
 def find_phrase(req):
     """Фраза владельца, которая даёт согласие на эту заявку, или None. Решает последняя фраза на этот номер PR (позже
-    «слей #N <другой hex>» — передумал); две разные в одну секунду — неоднозначно. Её hex — начало SHA заявки (он же
+    «слей #N <другой hex>» — передумал, позже «не сливай #N» — отозвал, metis-0970); две разные в одну секунду или
+    фраза и отзыв в одну секунду — неоднозначно, не в силе. Её hex — начало SHA заявки (он же
     head PR: шлюз сверяет его заново), фраза ещё не использована, и в очереди нет другой заявки с тем же номером и
     тем же началом SHA (другой репозиторий). Вызывать можно и под замком merge-queue: сама замков не берёт."""
     mine = [p for p in phrases(P.now()) if p["pr"] == req["pr"]]
@@ -1222,7 +1302,7 @@ def find_phrase(req):
     last = max(p["t"] for p in mine)
     top = [p for p in mine if p["t"] == last]
     ph = top[-1]
-    if len({p["hex"] for p in top}) != 1 or not req["sha"].startswith(ph["hex"]):
+    if len({p["hex"] for p in top}) != 1 or ph.get("revoke") or not req["sha"].startswith(ph["hex"]):
         return None
     used = used_phrases()
     if used is None or ph["key"] in used:
@@ -1521,6 +1601,10 @@ def cmd_request(args):
             err(f"pantheon merge request: у PR #{pr} нет head SHA — заявки нет")
             return 1
         state, why = gate(repo, pr, sha, view)
+        # конфликт с base — заявки нет, BLOCKED и «GitHub ещё считает» — заявка ждёт (metis-0987), как в check_all
+        conflict = merge_conflict(view) if state != "fail" else None
+        if conflict and (conflict[0] == "fail" or state == "ok"):
+            state, why = conflict
         if state == "fail":
             bad.append(f"#{pr}: {why}" if len(prs) > 1 else why)
         elif state != "ok":
@@ -1563,13 +1647,19 @@ def cmd_request(args):
 def merge_conflict(view):
     """Сливается ли PR с base по gh pr view (metis-0819): mergeable CONFLICTING или mergeStateStatus DIRTY — (fail,
     «конфликт с <base>»): окно не показывать, gh pr merge всё равно упадёт; GitHub ещё считает (UNKNOWN, поля нет) —
-    (wait, …), проход попробует позже; сливается — None."""
+    (wait, …), проход попробует позже; защита ветки base не даёт слить (BLOCKED: обязательные проверки или ревью
+    GitHub) — тоже wait (metis-0987): окно не показывать, палец на PR, который gh pr merge не сольёт, не тратить; без
+    ответа заявка гаснет за REQUEST_TTL. После пальца wait не помеха (check_all), там решает gh pr merge. Сливается —
+    None."""
     m, s = str(view.get("mergeable") or "").upper(), str(view.get("mergeStateStatus") or "").upper()
     base = view.get("baseRefName") or "base"
     if m == "CONFLICTING" or s == "DIRTY":
         return "fail", f"конфликт с {base} (mergeable {m or '?'}, {s or '?'}) — нужен новый коммит и новая заявка"
     if m != "MERGEABLE" or s in ("", "UNKNOWN"):
         return "wait", f"GitHub ещё не посчитал, сливается ли PR с {base} (mergeable {m or '?'}, {s or '?'})"
+    if s == "BLOCKED":
+        return "wait", (f"GitHub не даёт слить в {base}: защита ветки (BLOCKED — обязательные проверки или ревью "
+                        "GitHub не пройдены)")
     return None
 
 
@@ -1656,7 +1746,7 @@ def process(req, click):
         return "ждёт щелчка по уведомлению"
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
-        return drop(req, "gate", why, warn=True)
+        return drop(req, "gate", why, warn=True, how="по фразе" if phrase else "по Touch ID")
     if mark_wait(req, state, why):
         return f"ждёт: {why}"
     if phrase is not None:

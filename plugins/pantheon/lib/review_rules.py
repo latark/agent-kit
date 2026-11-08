@@ -13,7 +13,8 @@ import json
 import os
 import re
 
-__all__ = ["REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL", "review_accept_full", "review_accept_counts", "review_records"]
+__all__ = ["REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL", "review_accept_full", "review_accept_counts", "review_records",
+           "carry_records", "review_decisions"]
 
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
@@ -71,3 +72,33 @@ def review_records(repo=None, pr=None):
                 continue
             out.append(rec)
     return out
+
+
+
+def carry_records(repo, pr):
+    """Записи carry.jsonl шлюза guard на PR repo#pr по порядку записи: kind "carry" — перенос «принять» шлюзом gh pr
+    merge (metis-0415), kind "decision" — решение о коде head при `pantheon merge request` (metis-0966). Битые строки
+    пропускаются; файл — симлинк или не читается — пусто."""
+    try:
+        fd = os.open(os.path.join(P.STATE, "merge-gate", "carry.jsonl"), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    out = []
+    with os.fdopen(fd, "rb") as fh:
+        for raw in fh:
+            try:
+                rec = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(rec, dict) and rec.get("pr") == pr and isinstance(rec.get("repo"), list) \
+                    and repo.lower() in [str(x).lower() for x in rec["repo"]]:
+                out.append(rec)
+    return out
+
+
+def review_decisions(repo, pr):
+    """Решения шлюза guard о коде head PR repo#pr (metis-0966): записи kind "decision" (carry_records) по порядку
+    записи. Их пишет только хук guard при `pantheon merge request` (merge_gate.request_decisions); записи без списков
+    строк same и differs пропускаются."""
+    return [r for r in carry_records(repo, pr) if r.get("kind") == "decision"
+            and all(isinstance(r.get(k), list) and all(isinstance(x, str) for x in r[k]) for k in ("same", "differs"))]

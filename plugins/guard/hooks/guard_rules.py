@@ -3922,6 +3922,9 @@ def check_push(event, tool, tool_input):
                 why = _review_format(texts[1] if len(texts) > 1 else "", cmd)
             if why:
                 return f"Правило push (шлюз слияния): {why}"
+            # `pantheon merge request`: решение шлюза о коде head для прохода владельца (metis-0966); с cd — папка
+            # команды не та, решения нет, и проход судит строго
+            _mg().request_decisions(event, texts, None if moved else cwd)
             continue
         if name not in ("git", "?"):
             continue
