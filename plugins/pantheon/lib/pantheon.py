@@ -7822,13 +7822,16 @@ def batch_suggest_run(rest):
         if old.split("Проход:")[-1].split("\n", 1)[-1] != text.split("Проход:")[-1].split("\n", 1)[-1]:
             write_atomic(pp, text)  # время прохода само файл не меняет: пишется только при новом составе
     write_json(path("batch-suggest.json"), {"last": t, "seen": keys})
+    failed = B.write_failures(skipped)
+    if failed:  # сбой записи при прикреплении — тревога, а не тихий пропуск (metis-1006, Д-2 argus #400)
+        alert(f"пачки: сбой записи при прикреплении у {len(failed)} — {failed[0][:200]}", "pantheon-tick")
     if fresh:
         n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
         alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
               f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
     print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}, прикреплено {len(applied)}"
           + "".join(f"\n  прикреплено · {x}" for x in applied) + "".join(f"\n  пропущено · {x}" for x in skipped))
-    return 0
+    return ALERTED if failed else 0  # тревога уже дана — run_job вторую не пишет
 
 
 def autoclose_mod():
