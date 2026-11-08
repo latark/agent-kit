@@ -919,7 +919,7 @@ def test_failures(root, client):
     check("отказ: «принят», но решения нет → медленный путь, причина no-reply; stdin через 1,5 с, а демона ждали "
           "7,5 с от старта клиента — медленному пути до 10 с осталось 2,5 с",
           got == ref and reasons(home) == ["no-reply"] and w is not None
-          and 7.0 < w + 1.5 < 8.5,   # клиент стартовал на 1,5 с раньше соединения (ждал stdin): срок 7,5 с — от его старта
+          and 7.3 < w + 1.5 < 7.9,   # клиент стартовал на 1,5 с раньше соединения (ждал stdin): срок 7,5 с — от его старта
           (got == ref, fb_lines(home), w, round(t_got, 2), round(t_ref, 2)))
     # «принят», а запрос около 1 МиБ демон не читает: запись в сокет не держит вызов сверх срока (F1, argus PR 307)
     home = os.path.join(root, "fsend")
@@ -934,7 +934,7 @@ def test_failures(root, client):
         fake.close()
     w = waited(home, fake)
     check("отказ: «принят», демон не читает stdin 1 МиБ → медленный путь, причина send; демона ждали не дольше 7,5 с",
-          got == ref and '"deny"' in ref[1] and reasons(home) == ["send"] and w is not None and w < 8.5,
+          got == ref and '"deny"' in ref[1] and reasons(home) == ["send"] and w is not None and w < 7.9,
           (got == ref, fb_lines(home), w, round(t_got, 2), round(t_ref, 2)))
     # путь сокета длиннее sun_path
     home = os.path.join(root, "L" * (110 - len(root)))
