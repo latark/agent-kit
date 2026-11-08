@@ -739,12 +739,81 @@ def done_criteria(body):
     return out
 
 
+# metis-1004: вердикт argus по пункту «Готово, когда» — одно значение `--criteria "<id>#<N> <хеш> да|нет <опора>"` у
+# `pantheon review accept|reject`, по флагу на пункт. N — номер пункта в разделе (с 1, как done_criteria), хеш —
+# criterion_hash текста пункта (дословно, без отметки [ ]/[x]): правка текста после приёмки меняет хеш, и отметки нет.
+# Опора — файл:строка или тест, любое непустое. Хеши и готовые строки печатает `pantheon review criteria <id>`.
+CRITERION_HASH_LEN = 12
+_CRIT_REF = re.compile(r"(" + ID_RE.pattern + r")#([1-9][0-9]{0,2})")
+_CRIT_HASH = re.compile(r"[0-9a-f]{%d}" % CRITERION_HASH_LEN)
+CRITERION_VERDICTS = ("да", "нет")
+
+
+def criterion_hash(text):
+    """Хеш текста пункта «Готово, когда» для --criteria: sha256 текста как его отдаёт done_criteria, первые 12 знаков."""
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:CRITERION_HASH_LEN]
+
+
+def parse_criterion(value):
+    """Значение --criteria → (id задачи, номер пункта, хеш, «да»|«нет», опора) или None — не в формате. Слова через
+    пробелы, опора — остаток строки (в ней могут быть пробелы и «:»)."""
+    parts = value.split(None, 3) if isinstance(value, str) else []
+    if len(parts) != 4:
+        return None
+    m = _CRIT_REF.fullmatch(parts[0])
+    if not m or not _CRIT_HASH.fullmatch(parts[1]) or parts[2] not in CRITERION_VERDICTS or not parts[3].strip():
+        return None
+    return m.group(1), int(m.group(2)), parts[1], parts[2], parts[3].strip()
+
+
+def criteria_tick(pantheon, t, tid, want, actor, note):
+    """Отметить пункты «Готово, когда» задачи tid: want — {номер пункта: хеш}. Пункт отмечается, только если он есть,
+    ещё не отмечен, не заглушка и хеш его нынешнего текста равен хешу из want (metis-1004). Под блокировкой папки,
+    одной записью; note — строка журнала (к ней дописываются номера). → номера отмеченных (пусто — файл не тронут)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    if tid not in tasks or not want:
+        return []
+    path = tasks[tid][0]
+    with dir_lock(os.path.dirname(path)):
+        head, body = read(path)
+        if not head or head.get("id") != tid:
+            raise ValueError(f"задача {tid} изменилась — повторите")
+        lines, on, n, ticked = body.split("\n"), False, 0, []
+        for i, ln in enumerate(lines):
+            if not on:
+                on = bool(_DW_LINE.match(ln))
+                continue
+            m = _DW_ITEM.match(ln)
+            if not m:
+                if ln.strip():
+                    break
+                continue
+            n += 1
+            if m.group(1) == " " and n in want and not _is_stub(m.group(2)) and criterion_hash(m.group(2)) == want[n]:
+                lines[i] = ln[:m.start(1)] + "x" + ln[m.end(1):]
+                ticked.append(n)
+        if not ticked:
+            return []
+        body = append_log("\n".join(lines), f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}"
+                                             f" — отмечены пункты {', '.join(map(str, ticked))}")
+        head["updated"] = now_iso(t)
+        write_task(path, head, body)
+    return ticked
+
+
 def unchecked_criteria(head, body):
     """Число неотмеченных пунктов «Готово, когда»; заглушка шаблона (_is_stub, с любыми пробелами) не пункт, metis-0712;
     0 — у задач, созданных до CRITERIA_FROM. Одна функция для autoclose и `task set status=done`."""
     if str(head.get("created") or "") < CRITERIA_FROM:
         return 0
     return sum(1 for done, text in done_criteria(body) if not done and not _is_stub(text))
+
+
+def unchecked_numbers(head, body):
+    """Номера (с 1) неотмеченных пунктов «Готово, когда» — те же, что считает unchecked_criteria (metis-1004)."""
+    if str(head.get("created") or "") < CRITERIA_FROM:
+        return []
+    return [i for i, (done, text) in enumerate(done_criteria(body), 1) if not done and not _is_stub(text)]
 
 
 def done_when_section(items):
