@@ -5,7 +5,8 @@
   у accept — вердикт по каждому пункту и без «нет»; `pantheon review criteria <id>` печатает готовые флаги; status
   показывает пункты записи.
 - criteria_accepted: только «принять» на head слияния, по правилу шлюза (последний вердикт рецензента, перечень, Opus у
-  ядра, base, позже «вернуть»); «нет» или разный хеш у двух argus — пункт не принят.
+  ядра, base, позже «вернуть»); «нет» или разный хеш у двух argus — пункт не принят; строка кэша без core — как ядро.
+- merged_core: оба пути переименования, переименование без старого пути и список файлов, обрезанный gh, — ядро.
 - autoclose (fetch с поддельным gh → проход по кэшу): слитый PR с Closes отмечает пункты с «да» из записи argus на head
   слияния; все отмечены — done, иначе review с номерами неотмеченных; запись другого head, пункт, которого нет в
   карточке, и пункт, изменённый после приёмки, не отмечают ничего; ядро — только «принять» на Opus.
@@ -276,8 +277,55 @@ def test_accepted_unit():
               acc([verdict("accept", H1, criteria=both, returned=["zzzzzzzz/s9"])]) == {})
         check("review_criteria_ticks: строка кэша без head — пусто",
               P.review_criteria_ticks("latark/agent-kit", {"number": 7}) == {})
+        # строка кэша до metis-1004 без поля core — как ядро: «принять» не на Opus не в счёт, на Opus — в счёт
+        write_records(state, [verdict("accept", H1, criteria=both)])
+        row = {"number": 7, "head": H1, "base": "main"}
+        check("review_criteria_ticks: core False — «принять» не на Opus в счёт",
+              P.review_criteria_ticks("latark/agent-kit", dict(row, core=False)) == want)
+        check("review_criteria_ticks: строка кэша без core — как ядро, «принять» не на Opus не в счёт",
+              P.review_criteria_ticks("latark/agent-kit", row) == {})
+        check("review_criteria_ticks: core null — как ядро", P.review_criteria_ticks("latark/agent-kit", dict(row, core=None)) == {})
+        write_records(state, [verdict("accept", H1, criteria=both, cl=OPUS)])
+        check("review_criteria_ticks: строка кэша без core, «принять» на Opus — в счёт",
+              P.review_criteria_ticks("latark/agent-kit", row) == want)
     finally:
         shutil.rmtree(tmp, True)
+
+
+# --- merged_core: переименования и обрезанный список файлов (долг argus #401, Д1) --------------------------------------
+
+def test_merged_core():
+    import autoclose as A
+    gate = A.load_gate()
+    files_core = {c.casefold() for c in gate.CORE_FILES}
+    core = lambda p: gate._is_core(p, files_core)  # noqa: E731 — как merge.is_core
+    CORE, PAN = "plugins/guard/hooks/merge_gate.py", "plugins/pantheon/lib/pantheon.py"
+    f = lambda path, ct="MODIFIED", **kw: dict({"path": path, "changeType": ct}, **kw)  # noqa: E731
+    mc = A.merged_core
+    check("merged_core: обычный файл — не ядро", mc([f("README.md")], core, 1) is False)
+    check("merged_core: файл ядра — ядро", mc([f(CORE)], core, 1) is True)
+    check("merged_core: pantheon.py — ядро", mc([f(PAN)], core, 1) is True)
+    check("merged_core: пустой PR — не ядро", mc([], core, 0) is False)
+    check("merged_core: переименование без старого пути (gh pr list) — ядро", mc([f("docs/x.py", "RENAMED")], core, 1) is True)
+    check("merged_core: копия без старого пути — ядро", mc([f("docs/x.py", "copied")], core, 1) is True)
+    check("merged_core: переименование из ядра (previous_filename) — ядро",
+          mc([f("docs/x.py", "RENAMED", previous_filename=CORE)], core, 1) is True)
+    check("merged_core: previous_filename без changeType — старый путь тоже",
+          mc([{"path": "docs/x.py", "previous_filename": PAN}], core, 1) is True)
+    check("merged_core: переименование вне ядра с известным старым путём — не ядро",
+          mc([f("docs/y.md", "RENAMED", previous_filename="docs/x.md")], core, 1) is False)
+    many = [f(f"docs/f{i}.md") for i in range(A.FILES_CAP)]
+    check("merged_core: changedFiles больше полученных (обрезка gh) — ядро", mc(many, core, 250) is True)
+    check("merged_core: changedFiles меньше полученных — ядро", mc([f("a.md"), f("b.md")], core, 1) is True)
+    check("merged_core: ровно 100 из 100 — не ядро", mc(many, core, A.FILES_CAP) is False)
+    check("merged_core: 100 файлов без changedFiles — ядро (обрезку не исключить)", mc(many, core) is True)
+    check("merged_core: 99 файлов без changedFiles — не ядро", mc(many[1:], core) is False)
+    check("merged_core: changedFiles не число (True) — по числу полученных", mc(many[1:], core, True) is False
+          and mc(many, core, True) is True)
+    check("merged_core: файл без пути — ядро", mc([f("a.md"), {"path": None}], core, 2) is True)
+    check("merged_core: строка файлов не словарь — ядро", mc([f("a.md"), "x"], core) is True)
+    check("merged_core: files не список — ядро", mc(None, core, 0) is True)
+    check("merged_core: core нет — ядро", mc([f("README.md")], None, 1) is True)
 
 
 # --- autoclose: отметка при слиянии -------------------------------------------------------------------------------------
@@ -317,17 +365,22 @@ def test_autoclose():
         with open(os.path.join(gh, "latark_agent-kit-merged.json"), "w", encoding="utf-8") as fh:
             json.dump([mpr(1, "Closes metis-0001", H1), mpr(2, "Closes metis-0002", H2), mpr(3, "Closes metis-0003", H3),
                        mpr(4, "Closes metis-0004", H4), mpr(5, "Closes metis-0005", H5),
-                       mpr(6, "Closes metis-0006", H6, files=core), mpr(8, "Closes metis-0007", H7, files=core)], fh)
+                       mpr(6, "Closes metis-0006", H6, files=core), mpr(8, "Closes metis-0007", H7, files=core),
+                       dict(mpr(9, "", H1), files=[{"path": "docs/gate.py", "changeType": "RENAMED"}], changedFiles=1),
+                       dict(mpr(10, "", H1), changedFiles=300)], fh)
         r = pan(env, "autoclose", "fetch")
         cache = json.load(open(os.path.join(state, "autoclose-prs.json"), encoding="utf-8"))
         row = next(x for x in cache["merged"]["latark/agent-kit"] if x["number"] == 6)
         check("fetch: в строке слитого PR head, base и core", row.get("head") == H6 and row.get("base") == "main"
               and row.get("core") is True and next(x for x in cache["merged"]["latark/agent-kit"]
                                                    if x["number"] == 1).get("core") is False, row)
+        rows = {x["number"]: x for x in cache["merged"]["latark/agent-kit"]}
+        check("fetch: переименование без старого пути и PR с обрезанным списком файлов — core",
+              rows[9].get("core") is True and rows[10].get("core") is True, (rows[9], rows[10]))
         calls = [c for c in open(os.path.join(gh, "calls.log"), encoding="utf-8").read().splitlines()
                  if "--state merged" in c]
-        check("fetch: слитые PR запрошены с headRefOid и baseRefName",
-              calls and all("headRefOid" in c and "baseRefName" in c for c in calls), calls)
+        check("fetch: слитые PR запрошены с headRefOid, baseRefName и changedFiles",
+              calls and all("headRefOid" in c and "baseRefName" in c and "changedFiles" in c for c in calls), calls)
         st = lambda p: T.read(p)[0].get("status")  # noqa: E731
         check("все пункты «да» на head слияния → отмечены, задача done",
               st(pa) == "done" and text(pa).count("- [x]") == 2 and "отмечены пункты 1, 2" in text(pa),
@@ -355,6 +408,7 @@ def main():
     test_tasks_unit()
     test_review_cli()
     test_accepted_unit()
+    test_merged_core()
     test_autoclose()
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1

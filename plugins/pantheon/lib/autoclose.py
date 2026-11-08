@@ -18,7 +18,8 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 Перед этим (metis-1004) слитый PR с Closes отмечает сам пункты, которые argus принял на head слияния: `accepted(repo,
 строка кэша)` → {id: {номер: хеш}} (review.review_criteria_ticks — засчитанные «принять» с --criteria «да»); пункт
 отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. Для этого
-fetch кладёт в строку слитого PR head (headRefOid), base (baseRefName) и core (задето ли ядро, merged_core).
+fetch кладёт в строку слитого PR head (headRefOid), base (baseRefName) и core (задето ли ядро, merged_core). Ядро по
+обоим путям переименования; переименование без старого пути и список файлов, обрезанный gh (больше 100), — ядро.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing/waiting её направления review — один
 раз на PR (строка REVIEW_MARK в журнале); PR без Closes — задачам doing/waiting, названным в его ветке или теле (metis-0615).
 Обработанные PR отмечены в STATE/autoclose.json; задачу, уже закрытую этим PR (строка в журнале), второй раз не трогаем. Заодно проход запоминает, у каких
@@ -470,7 +471,8 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             keep_prev(repo, "all", "не хватило времени прохода")
             continue
         data, err = gh_json(["pr", "list", "--repo", repo, "--state", "merged", "--limit", str(LIMIT), "--json",
-                             "number,headRefName,headRefOid,baseRefName,body,mergedAt,mergeCommit,files,isCrossRepository"],
+                             "number,headRefName,headRefOid,baseRefName,body,mergedAt,mergeCommit,files,changedFiles,"
+                             "isCrossRepository"],
                             env, timeout=min(90, rleft()))
         if err or not isinstance(data, list):
             keep_prev(repo, "all", err or "ответ gh — не список")
@@ -487,7 +489,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             head = str(pr.get("headRefOid") or "").lower()  # metis-1004: head слияния и base — для отметки пунктов
             row.update(head=head if re.fullmatch(r"[0-9a-f]{40}", head) else "",
                        base=pr.get("baseRefName") if isinstance(pr.get("baseRefName"), str) else "",
-                       core=merged_core(files, core))
+                       core=merged_core(pr.get("files"), core, pr.get("changedFiles")))
             if f"{repo}#{pr.get('number')}" not in done and any(x.endswith(".claude-plugin/plugin.json") for x in files):
                 if rleft() <= 1:
                     errors[f"{repo}#{pr.get('number')}"] = "не хватило времени на diff"
@@ -547,13 +549,32 @@ def former_heads(prev, open_prs):
     return out
 
 
-def merged_core(files, core):
-    """Задето ли ядро слитым PR (metis-1004): по путям (core) или правкой pantheon.py — сборку окон в ней без сети не
-    сверить, поэтому как ядро. core нет или шлюз не загрузился — ядро (строже: в счёт только «принять» на Opus)."""
+FILES_CAP = 100   # gh pr list отдаёт не больше 100 файлов PR (files(first: 100) в GraphQL)
+
+
+def merged_core(files, core, changed=None):
+    """Задето ли ядро слитым PR (metis-1004): files — поле files строки gh pr list (path, changeType), changed — его
+    changedFiles. По путям (core) или правкой pantheon.py — сборку окон в ней без сети не сверить, поэтому как ядро.
+    У переименования и копии — оба пути (previous_filename), а без старого пути (gh pr list его не отдаёт) — ядро,
+    как у шлюза: старое имя могло быть ядром. Список неполон — файлов changed больше полученных, а без changed
+    получено FILES_CAP и больше (обрезка gh) — ядро; файл без пути — тоже. core нет или шлюз не загрузился — ядро
+    (строже: в счёт только «принять» на Opus)."""
     gate = load_gate()
-    if core is None or gate is None:
+    if core is None or gate is None or not isinstance(files, list):
         return True
-    return any(core(f) or _norm_path(f) == gate.SANDBOX_BUILD_FILE for f in files)
+    rows = [f for f in files if isinstance(f, dict)]
+    known = isinstance(changed, int) and not isinstance(changed, bool)
+    if len(rows) != len(files) or (changed != len(rows) if known else len(rows) >= FILES_CAP):
+        return True
+    paths = []
+    for f in rows:
+        old = f.get("previous_filename")
+        if str(f.get("changeType") or "").upper() in ("RENAMED", "COPIED") and old is None:
+            return True
+        paths += [f.get("path")] + ([old] if old is not None else [])
+    if not all(isinstance(p, str) and p for p in paths):
+        return True
+    return any(core(p) or _norm_path(p) == gate.SANDBOX_BUILD_FILE for p in paths)
 
 
 def open_core(repo, p, core, sandbox, left=None):
