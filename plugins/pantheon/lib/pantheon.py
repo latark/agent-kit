@@ -358,6 +358,7 @@ TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тре
 PLUGINS_CATALOG_TIMEOUT = 90    # claude plugin marketplace update: вышло — TEMPFAIL, тревоги нет
 PLUGIN_INSTALL_TIMEOUT = 180    # claude plugin update одного плагина: вышло — сбой установки, тревога, сверка по хешу
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
+BUDGET_CUT = 77  # проход доски прерван по бюджету (metis-0709): не сбой и без тревоги, но отпечаток входов не пишется — тик повторит
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
@@ -7225,7 +7226,7 @@ def lock_wait(name, wait):
 
 
 class BoardBudget(BaseException):
-    """Бюджет прохода доски вышел (SIGALRM): часть прервана, строка времени остаётся, код 0 — следующий тик повторит."""
+    """Бюджет прохода доски вышел (SIGALRM): часть прервана, строка времени остаётся, код BUDGET_CUT — следующий тик повторит."""
 
 
 def board():
@@ -7248,7 +7249,7 @@ def board():
         rc = _board(clock)
     except BoardBudget:
         clock.skipped.append("остаток прохода (бюджет)")
-        rc = 0
+        rc = BUDGET_CUT
     finally:
         if old is not None:
             signal.setitimer(signal.ITIMER_REAL, 0)

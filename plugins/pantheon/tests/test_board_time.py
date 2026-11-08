@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Время прохода доски (metis-0709): строка «доска-время» с частями; занятая блокировка notify (как зависшее
-уведомление или gh у соседнего процесса) не держит проход дольше бюджета — доска выходит с кодом 0 и без уведомлений;
-SIGTERM (таймаут задания) не теряет строку времени.
+"""Время прохода доски (metis-0709). Под нагрузкой Mac (load 40–367) задание launchd с пределом 60 с убивалось по
+таймауту (rc=124), а строки «доска-время» в 32 из 42 случаев не было: SIGTERM приходил, пока pantheon.py ещё
+импортировался (обработчика нет), бюджет не проверялся внутри долгой части, строка шла в буфер stdout без flush.
+
+Что проверяется:
+  - строка «доска-время» с частями и итого, одна на проход;
+  - занятая блокировка notify (зависшее уведомление, gh соседа) не держит проход дольше бюджета: код 0, без уведомлений;
+  - SIGTERM (таймаут задания) в ожидании замка, в импорте и в медленной части «карточки» не теряет строку, «прервано в …»;
+  - бюджет вышел внутри долгой части или импорта (жёсткий SIGALRM, бюджет + BOARD_HARD_GRACE): проход кончает сам
+    до предела 60 с, код BUDGET_CUT (77);
+  - run_job на коде 77: отпечаток входов skip_fp не пишется (тик не пропустит недоделанную доску), сбоем и
+    тревогой это не считается;
+  - нечисловой PANTHEON_BOARD_BUDGET не роняет запуск.
 
 Запуск: python3 -I plugins/pantheon/tests/test_board_time.py  (код выхода 0 — все прошли)
 """
 import atexit
+import json
 import fcntl
 import os
 import re
@@ -126,16 +137,16 @@ p = subprocess.run(dargv("cards", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="3")
                    timeout=60)
 dt = time.time() - t0
 ln = line_of(p.stdout)
-check("медленная «карточки» (120 с) при бюджете 3 с: прервана по бюджету, код 0, строка «прервано в «карточки»»",
-      p.returncode == 0 and dt < 20 and ln and "прервано в «карточки»" in ln, (p.returncode, round(dt, 1), ln, p.stderr[-300:]))
+check("медленная «карточки» (120 с) при бюджете 3 с: прервана по бюджету, код 77, строка «прервано в «карточки»»",
+      p.returncode == 77 and dt < 20 and ln and "прервано в «карточки»" in ln, (p.returncode, round(dt, 1), ln, p.stderr[-300:]))
 
 t0 = time.time()
 p = subprocess.run(dargv("import", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="3"), capture_output=True, text=True,
                    timeout=60)
 dt = time.time() - t0
 ln = line_of(p.stdout)
-check("медленный импорт (120 с) при бюджете 3 с: кончает по бюджету с кодом 0 и строкой «прервано в «импорт pantheon.py»»",
-      p.returncode == 0 and dt < 20 and ln and "прервано в «импорт pantheon.py»" in ln, (p.returncode, round(dt, 1), ln, p.stderr[-300:]))
+check("медленный импорт (120 с) при бюджете 3 с: кончает по бюджету с кодом 77 и строкой «прервано в «импорт pantheon.py»»",
+      p.returncode == 77 and dt < 20 and ln and "прервано в «импорт pantheon.py»" in ln, (p.returncode, round(dt, 1), ln, p.stderr[-300:]))
 
 q = subprocess.Popen(dargv("import", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="60"), stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE, text=True)
@@ -157,6 +168,39 @@ check("SIGTERM в медленной «карточки»: строка «пре
 # нечисловой бюджет не роняет запуск
 p = subprocess.run(argv, env=dict(ENV, PANTHEON_BOARD_BUDGET="abc"), capture_output=True, text=True, timeout=60)
 check("PANTHEON_BOARD_BUDGET=abc: проход идёт с бюджетом по умолчанию", p.returncode == 0 and line_of(p.stdout), (p.returncode, p.stderr[-200:]))
+
+# 5. run_job на коде 77 (бюджет): skip_fp не пишется, сбоя и тревоги нет; на коде 0 skip_fp пишется (контроль)
+with open(os.path.join(home, "schedule.toml"), "a") as fh:
+    fh.write('[[job]]\nname = "board"\ncommand = "pantheon board"\nevery = "tick"\n')
+RJ = os.path.join(tmp, "runjob.py")
+with open(RJ, "w", encoding="utf-8") as fh:
+    fh.write("""import json, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import pantheon as P
+rc = int(sys.argv[2])
+class Fake:
+    pid = 1
+    returncode = rc
+    def __init__(self, *a, **k): pass
+    def communicate(self, timeout=None): return ("доска-время: x\\n", None)
+import subprocess
+subprocess.Popen = Fake
+P.tick_fingerprint = lambda job: "fp-test"
+P.run_job_rc = P.main(["run-job", "board"])
+st = P.job_state("board")
+print(json.dumps({"rc": P.run_job_rc, "skip_fp": st.get("skip_fp"), "fails": st.get("fails"), "last_rc": st.get("last_rc")}))
+""")
+def run_rj(rc):
+    pr = subprocess.run([PY311, "-I", RJ, CLI, str(rc)], env=ENV, capture_output=True, text=True, timeout=60)
+    try:
+        return json.loads(pr.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"err": (pr.stdout[-200:], pr.stderr[-300:])}
+r0 = run_rj(0)
+check("контроль: run_job с кодом 0 пишет skip_fp", r0.get("skip_fp") == "fp-test", r0)
+r77 = run_rj(77)
+check("run_job с кодом 77 (бюджет доски): skip_fp нет, сбоев 0", r77.get("last_rc") == 77 and not r77.get("skip_fp")
+      and r77.get("fails") == 0, r77)
 
 print(f"{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)

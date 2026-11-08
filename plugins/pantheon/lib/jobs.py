@@ -115,11 +115,11 @@ def run_job(name):
                 st["waiting"] = "нет сети или GitHub недоступен"
             else:
                 st.pop("waiting", None)
-                st["fails"] = 0 if rc == 0 else int(st.get("fails") or 0) + 1
+                st["fails"] = 0 if rc in (0, P.BUDGET_CUT) else int(st.get("fails") or 0) + 1
             P.save_job_state(name, st)
             if heavy:
                 P.write_json(P.path("heavy.json"), {"last_end": P.now()})
-            if rc not in (0, P.TEMPFAIL, P.ALERTED) and st["fails"] in (1, 5, 20):
+            if rc not in (0, P.TEMPFAIL, P.ALERTED, P.BUDGET_CUT) and st["fails"] in (1, 5, 20):
                 tail = (out or "").strip().splitlines()[-1:] or [""]
                 P.alert(f"задача {name} упала (код {rc}, подряд {st['fails']}): {tail[0][:200]} — журнал {log.replace(P.HOME, '~')}",
                       "pantheon-tick")

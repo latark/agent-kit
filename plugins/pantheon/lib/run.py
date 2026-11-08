@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 def _early_board_guard():
     """Проход board: до конца импорта pantheon.py SIGTERM (таймаут задания) и бюджет не должны убить процесс молча —
-    без строки «доска-время» (metis-0709). Выход 0 по бюджету (следующий тик повторит), 143 по SIGTERM; os.write мимо
+    без строки «доска-время» (metis-0709). Выход 77 (BUDGET_CUT) по бюджету (следующий тик повторит, отпечатка входов нет), 143 по SIGTERM; os.write мимо
     буфера stdout. Когда pantheon.board() запущена, она ставит свои обработчики."""
     try:
         budget = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)
@@ -34,7 +34,7 @@ def _early_board_guard():
         return handler
 
     signal.signal(signal.SIGTERM, stop(143))
-    signal.signal(signal.SIGALRM, stop(0))
+    signal.signal(signal.SIGALRM, stop(77))  # 77 = BUDGET_CUT в pantheon.py
     signal.setitimer(signal.ITIMER_REAL, max(budget, 1.0) + 5.0)  # = BOARD_HARD_GRACE в pantheon.py
 
 
