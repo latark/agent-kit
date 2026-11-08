@@ -949,6 +949,8 @@
     python3 -I plugins/pantheon/tests/test_plugin_map.py   # карта плагинов и MCP: окна, роли, битая карта, неизвестное
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: заявки на тесты, тревога о «принять» без tests, dev-сервер, профиль
+    python3 -I plugins/pantheon/tests/test_outside_tree.py # outside, часть 2: перенос записи tests по дереву (by_tree), test --sha; общая часть — tests/_outside_common.py, kit — _outside_kit.py (metis-0750)
+    python3 -I plugins/pantheon/tests/test_outside_cancel.py # outside, часть 3: окно снимает свой прогон, проход снимает прогон ушедшего head (metis-0873)
     python3 -I plugins/pantheon/tests/test_outside_load.py # outside под нагрузкой: ожидание спада load, один повтор после таймаутов, heavy вне TEST_TIMEOUT
     python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
