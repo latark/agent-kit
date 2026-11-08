@@ -88,14 +88,18 @@
     потомок этого. Снятый прогон — stopped с причиной, без записи tests и без строки full.jsonl. Заявка в очереди на
     коммит, с которого HEAD уже ушёл, при более новой заявке той же папки из той же папки заявок — failed
     «superseded <ID>» без прогона. Итог running раз в 30 с несёт срез процессов (procs: pid, CPU, время, команда,
-    heavy_wait) — только в своей папке заявок;
+    heavy_wait) — только в своей папке заявок; в running — started, время начала (metis-0646). Установка зависимостей
+    копии не считает ожидание места heavy в свой срок (hold, metis-0862): «код -1» от очереди heavy не бывает;
+  - окно без права писать в STATE (не опознано): `test`/`serve`/`stop` — код 1 и одна строка причины (cant_write), без
+    трассировки; итог отмены в STATE не записать — заявка возвращается в очередь, а не теряется (metis-0867);
   - новая заявка test сразу снимает из своей папки заявок ещё не начатые заявки test той же папки и той же проверки
     (--script, --base, --sha или без), чей коммит — предок нового (replace_older, metis-0852): итог stopped «заменена
     заявкой <ID> на <sha>» (тот же коммит git тоже считает предком). Начатую, заявки других окон и папок и не
     предка не трогает.
 
-Куда пишет заявка. В окне роли (есть PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) —
-в соседнюю папку outside/ кэша: туда окно пишет само, а итог проход кладёт туда же, окно его читает. Вне окна — в
+Куда пишет заявка. В окне роли (кэш окна ~/Library/Caches/pantheon-sandbox/<окно> — browser.window_cache: PANTHEON_TMP
+у окон направлений и мастерской, у hq, hestia и job-* — XDG_CACHE_HOME=<кэш>/xdg, metis-0848) —
+в папку outside/ кэша: туда окно пишет само, а итог проход кладёт туда же, окно его читает. Вне окна — в
 STATE/outside/queue. Имя окна проход берёт из места папки, а не из текста заявки: окну направления можно только его
 папки из реестра (domains.json ← ~/ai/pantheon/directions.toml), очереди STATE — любые папки реестра; кэш окна не
 направления (мастерская, задачи) — отказ. Папка заявки — корень репозитория git внутри этих папок, с remote.
@@ -325,11 +329,20 @@ def pass_env():
 
 
 def own_qdir():
-    """Папка заявок этого вызова: в окне роли — outside/ рядом с PANTHEON_TMP (кэш окна), иначе STATE/outside/queue."""
-    tmp = os.environ.get("PANTHEON_TMP")
-    if tmp:
-        return os.path.join(os.path.dirname(os.path.realpath(tmp)), "outside")
-    return root("queue")
+    """Папка заявок этого вызова: в окне роли — outside/ в кэше окна (browser.window_cache: PANTHEON_TMP у окон
+    направлений и мастерской, а у hq, hestia и job-* — только XDG_CACHE_HOME=<кэш>/xdg, metis-0848), иначе
+    STATE/outside/queue."""
+    cache = P.browser_mod().window_cache()
+    return os.path.join(cache, "outside") if cache else root("queue")
+
+
+UNKNOWN_WINDOW = ("если это окно роли, оно не опознано (нет PANTHEON_TMP и XDG_CACHE_HOME внутри кэшей окон) и "
+                  "STATE ему закрыт — перезапустить окно; из терминала владельца работает без этого")
+
+
+def cant_write(what, e):
+    """Строка отказа записи в STATE (окно роли не опознано или без права): что не записать, почему и кто может."""
+    return f"pantheon outside: {what} ({type(e).__name__}: {e}); {UNKNOWN_WINDOW}"
 
 
 def queue_dirs():
@@ -1838,7 +1851,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         extra["base"] = base
     if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
         extra["narrow_why"] = narrow_why
-    running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
+    running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
                **({"script": script} if script else {}), **extra}
     save_result(qdir, rid, running)
     watch.sha, watch.running = sha, running
@@ -1988,7 +2001,7 @@ def run_test_at(rid, d, req, window, qdir, roots):
     if why:
         return fail(why, sha=sha)
     work = os.path.join(work_root(), TEST_WORK + rid)
-    save_result(qdir, rid, {"state": "running", **base, "sha": sha, "dir": work})
+    save_result(qdir, rid, {"state": "running", **base, "sha": sha, "dir": work, "started": time.strftime("%Y-%m-%d %H:%M:%S")})
     try:
         why = checkout(common, sha, work)
         if why:
@@ -3080,7 +3093,9 @@ def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
                     raise
                 time.sleep(1 + attempt)
         try:
-            code = wait_proc(proc, timeout, tick)
+            # metis-0862: пока heavy ждёт место, срок установки не идёт — иначе «код -1» вместо ожидания очереди
+            hold = (lambda: heavy_waiting(proc.pid)) if heavy and heavy_bin() else None
+            code = wait_proc(proc, timeout, tick, hold=hold)
         except subprocess.TimeoutExpired:
             kill_group(proc.pid)
             proc.wait()
@@ -3507,7 +3522,7 @@ def cmd_request(kind, args):
         finally:
             os.close(dfd)
     except OSError as e:
-        err(f"pantheon outside: заявку не записать ({e})")
+        err(cant_write("заявку не записать", e))
         return 1
     if kind == "test":
         replace_older(q, rid, req, d)
@@ -3630,7 +3645,8 @@ def load_result(q, rid):
 
 def show(res):
     print(f"{res.get('id')}: {res.get('state')}" + (f", код {res['code']}" if res.get("code") is not None else "")
-          + (f", {res['sha'][:12]}" if res.get("sha") else "") + (f" — {res['cmd']}" if res.get("cmd") else ""))
+          + (f", {res['sha'][:12]}" if res.get("sha") else "") + (f" — {res['cmd']}" if res.get("cmd") else "")
+          + (f", начат {res['started']}" if res.get("started") and res.get("state") == "running" else ""))
     if res.get("kind") == "serve" and (res.get("src") or res.get("dir")):
         print(f"копия: {res.get('dir') or '—'}" + (f" (из {res['src']})" if res.get("src") else "")
               + (f", приложение {res['app']}" if res.get("app") else ""))
@@ -3721,7 +3737,8 @@ def _known(q, rid):
 def _cancel_queued_test(q, rid):
     """Тест, ещё лежащий заявкой в своей папке q, снимается: заявка удалена, итог stopped (metis-0706). Окно пишет итог
     только в свой qdir: STATE окну закрыт, в нём пишет один проход (metis-0873); терминал владельца — save_result.
-    True — снят; False — не тест, не здесь или проход уже взял (тогда снимает метка «стоп»)."""
+    True — снят; False — не тест, не здесь или проход уже взял (тогда снимает метка «стоп»); None — итог не записать
+    (STATE закрыт), заявка возвращена и осталась в очереди, причина выведена."""
     dfd = _open_dir(q)
     if dfd is None:
         return False
@@ -3732,7 +3749,13 @@ def _cancel_queued_test(q, rid):
         res = {"state": "stopped", "kind": "test", "why": "отменена до запуска", "record": False,
                **{k: req[k] for k in ("sha", "dir") if req.get(k)}}
         if q == root("queue"):
-            save_result(q, rid, res)
+            try:
+                save_result(q, rid, res)
+            except OSError as e:   # итог в STATE не записать (окно без права): заявку вернуть, а не терять без итога
+                with contextlib.suppress(OSError):
+                    _write_in(dfd, rid + ".req.json", json.dumps(req, ensure_ascii=False))
+                err(cant_write(f"{rid}: итог отмены не записать, заявка осталась в очереди", e))
+                return None
         else:
             with contextlib.suppress(OSError):
                 _write_in(dfd, rid + ".result.json",
@@ -3777,7 +3800,10 @@ def cmd_stop(args):
     if not _mine(q, rid):   # metis-0873: снимает только своё окно и терминал владельца; чужую метку проход не возьмёт
         print(f"{rid}: заявка не из этого окна — снять её может только окно, подавшее заявку, или владелец")
         return 1
-    if queued and _cancel_queued_test(q, rid):
+    cancelled = _cancel_queued_test(q, rid) if queued else False
+    if cancelled is None:
+        return 1
+    if cancelled:
         return 0
     if res and res.get("state") in ("stopped", "failed", "done") and not live and not queued:
         print(f"{rid}: уже {res['state']}" + (f" — {res['why']}" if res.get("why") else "")
@@ -3790,7 +3816,7 @@ def cmd_stop(args):
     try:
         _write_in(dfd, rid + ".stop", "")
     except OSError as e:
-        err(f"pantheon outside: «стоп» не записать ({e})")
+        err(cant_write("«стоп» не записать", e))
         return 1
     finally:
         os.close(dfd)
