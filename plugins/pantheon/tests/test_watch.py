@@ -2137,7 +2137,9 @@ def test_now_from_fact_1005():
     want = f"## Сейчас ({j[:-1]}x)"
     check(want in out and out.replace(want, f"## Сейчас ({_stamp(30 * H)})") == body,
           f"1005: шапка не по журналу или тронут остальной текст: {out!r}")
-    check(os.stat(p).st_mtime == T0 - 7200, "1005: замена шапки сдвинула mtime — возраст файла и дата журнала без даты поедут")
+    check(os.stat(p).st_mtime == T0 - 7200 + 1,
+          "1005: mtime после замены шапки не «прежний + 1 с»: сдвиг — возраст файла и дата журнала без даты поедут, "
+          "без сдвига — rsync копии Obsidian (размер и mtime) не увидит шапку той же длины")
     ino = os.stat(p).st_ino
     e.run("watch", t=T0 + 300)
     check(os.stat(p).st_ino == ino, "1005: шапка уже верна — файл переписан второй раз")
@@ -2188,9 +2190,19 @@ def test_retime_race_1005():
         open(p, "w", encoding="utf-8").write(body)
         os.utime(p, (T0 - 3600, T0 - 3600))
         st = os.stat(p)
-        open(p, "a", encoding="utf-8").write("РУЧНАЯ\n")  # дописано после чтения
-        out, _ = w.retime_status("race", p, body, st, T0)
-        check(out == body and "РУЧНАЯ" in open(p, encoding="utf-8").read(), "1005: файл менялся после чтения — шапку заменили")
+        real_chmod = os.chmod
+
+        def chmod_and_append(path, mode):  # роль дописывает файл, пока пишется временный (Д5 argus #399)
+            real_chmod(path, mode)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write("РУЧНАЯ\n")
+        os.chmod = chmod_and_append
+        try:
+            out, _ = w.retime_status("race", p, body, st, T0)
+        finally:
+            os.chmod = real_chmod
+        check(out == body and "РУЧНАЯ" in open(p, encoding="utf-8").read(),
+              "1005: файл менялся, пока писали временный, — шапку заменили и ручная строка потеряна")
         check(not [f for f in os.listdir(d) if f.endswith(".tmp")], "1005: временный файл остался")
     finally:
         w.P = saved
