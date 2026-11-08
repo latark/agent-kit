@@ -93,5 +93,70 @@ check("SIGTERM: строка времени с «прервано в «блок�
 fcntl.flock(fh, fcntl.LOCK_UN)
 fh.close()
 
+# 4. искусственно медленные части и медленный импорт (металл под нагрузкой Mac, 07–08.11): проход кончает сам до
+# предела задания 60 с, строка времени есть всегда (metis-0709). Драйвер запускает run.py как задание launchd.
+DRV = os.path.join(tmp, "driver.py")
+with open(DRV, "w", encoding="utf-8") as fh:
+    fh.write("""import os, runpy, sys, time
+mode, delay = sys.argv[1], float(sys.argv[2])
+sys.argv = [sys.argv[3], "board"]
+if mode == "import":  # импорт pantheon.py тянется долго
+    class Slow:
+        def find_spec(self, name, path=None, target=None):
+            if name == "pantheon":
+                time.sleep(delay)
+    sys.meta_path.insert(0, Slow())
+else:  # медленная часть «карточки»; SIGALRM обязан прервать её, а не ждать
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_t", sys.argv[0].replace("run.py", "pantheon.py"))
+sys.path.insert(0, os.path.dirname(sys.argv[0]))
+if mode == "cards":
+    import pantheon
+    T = pantheon.tasks_mod()
+    T.board_sync = lambda *a, **k: time.sleep(delay)
+    pantheon.tasks_mod = lambda: T
+    pantheon.PROC_T0 = time.monotonic()
+    sys.exit(pantheon.main(["board"]))
+runpy.run_path(sys.argv[0], run_name="__main__")
+""")
+dargv = lambda mode, delay: [PY311, "-I", DRV, mode, str(delay), RUN_PY]
+
+t0 = time.time()
+p = subprocess.run(dargv("cards", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="3"), capture_output=True, text=True,
+                   timeout=60)
+dt = time.time() - t0
+ln = line_of(p.stdout)
+check("медленная «карточки» (120 с) при бюджете 3 с: прервана по бюджету, код 0, строка «прервано в «карточки»»",
+      p.returncode == 0 and dt < 20 and ln and "прервано в «карточки»" in ln, (p.returncode, round(dt, 1), ln, p.stderr[-300:]))
+
+t0 = time.time()
+p = subprocess.run(dargv("import", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="3"), capture_output=True, text=True,
+                   timeout=60)
+dt = time.time() - t0
+ln = line_of(p.stdout)
+check("медленный импорт (120 с) при бюджете 3 с: кончает по бюджету с кодом 0 и строкой «прервано в «импорт pantheon.py»»",
+      p.returncode == 0 and dt < 20 and ln and "прервано в «импорт pantheon.py»" in ln, (p.returncode, round(dt, 1), ln, p.stderr[-300:]))
+
+q = subprocess.Popen(dargv("import", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="60"), stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, text=True)
+time.sleep(3)
+q.send_signal(signal.SIGTERM)
+out, err = q.communicate(timeout=30)
+ln = line_of(out)
+check("SIGTERM до окончания импорта: строка времени есть, код 143",
+      ln and "прервано в «импорт pantheon.py»" in ln and q.returncode == 143, (q.returncode, ln, err[-200:]))
+
+q = subprocess.Popen(dargv("cards", 120), env=dict(ENV, PANTHEON_BOARD_BUDGET="60"), stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, text=True)
+time.sleep(4)
+q.send_signal(signal.SIGTERM)
+out, err = q.communicate(timeout=30)
+ln = line_of(out)
+check("SIGTERM в медленной «карточки»: строка «прервано в «карточки»»", ln and "прервано в «карточки»" in ln, (ln, err[-200:]))
+
+# нечисловой бюджет не роняет запуск
+p = subprocess.run(argv, env=dict(ENV, PANTHEON_BOARD_BUDGET="abc"), capture_output=True, text=True, timeout=60)
+check("PANTHEON_BOARD_BUDGET=abc: проход идёт с бюджетом по умолчанию", p.returncode == 0 and line_of(p.stdout), (p.returncode, p.stderr[-200:]))
+
 print(f"{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
