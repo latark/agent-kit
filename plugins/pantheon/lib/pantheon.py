@@ -7539,7 +7539,7 @@ def board_archive(rest):
         return 0
     with lock(BOARD_LOCK) as got:
         if not got:
-            print(f"pantheon board archive: board.md сейчас коммитит плановый проход (замок {BOARD_LOCK} не взят) — "
+            print(f"pantheon board archive: board.md сейчас коммитит плановый проход (блокировка {BOARD_LOCK} не взята) — "
                   "повтори через минуту, ничего не записано", file=sys.stderr)
             return 1
         with open(board, encoding="utf-8") as fh:

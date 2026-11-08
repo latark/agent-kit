@@ -172,17 +172,17 @@ def commit():
     """commit → pull без rebase → push, как Obsidian Git. Слияние шифрованных файлов — git-crypt-merge.sh
     (дописываемые файлы — объединением). Без сети — код TEMPFAIL и тишина; тревога, только если синхронизации
     нет дольше 6 часов. Конфликт — слияние отменяется, тревога одна на каждый новый коммит другого Mac.
-    Под pantheon-git берётся и P.BOARD_LOCK (замок в hq-rw, его держит `pantheon board archive`): не взят за
+    Под pantheon-git берётся и P.BOARD_LOCK (блокировка в hq-rw, его держит `pantheon board archive`): не взят за
     HQ_LOCK_WAIT — TEMPFAIL без коммита (metis-0882)."""
     if not os.path.isdir(os.path.join(P.PANTHEON, ".git")):
         return 0
     with P.lock("pantheon-git"), P.lock(P.BOARD_LOCK) as board_free:
         if not board_free:  # board.md переписывает `pantheon board archive` (окно Зевса, metis-0882): вполовину не коммитим
-            why = f"замок {P.BOARD_LOCK} не взят — board.md переписывают или в hq-rw/locks подложен файл"
+            why = f"блокировка {P.BOARD_LOCK} не взята — board.md переписывают или в hq-rw/locks подложен файл"
             ok = P.read_json(P.path("commit-ok.json")).get("t") or 0
-            if ok and P.now() - ok > 6 * 3600:  # TEMPFAIL тих: застрявший замок не должен молча остановить синхронизацию
+            if ok and P.now() - ok > 6 * 3600:  # TEMPFAIL тих: застрявшая блокировка не должна молча остановить синхронизацию
                 P.alert_once("commit-board-lock", int(ok), f"~/ai/pantheon не коммитится больше 6 часов: {why}",
-                             "pantheon-commit", note="~/ai/pantheon давно не коммитится: занят замок доски")
+                             "pantheon-commit", note="~/ai/pantheon давно не коммитится: занята блокировка доски")
             print(f"pantheon commit: {why}, коммит в следующий проход", file=sys.stderr)
             return P.TEMPFAIL
         P.clear_once("commit-board-lock")
@@ -258,7 +258,7 @@ def archive():
     if not blk.__enter__():
         blk.__exit__(None, None, None)
         lk.__exit__(None, None, None)
-        print(f"pantheon archive: замок {P.BOARD_LOCK} не взят — board.md переписывают, архив в следующий проход",
+        print(f"pantheon archive: блокировка {P.BOARD_LOCK} не взята — board.md переписывают, архив в следующий проход",
               file=sys.stderr)
         return P.TEMPFAIL
     os.makedirs(os.path.join(P.PANTHEON, "archive"), exist_ok=True)
