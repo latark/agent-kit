@@ -2115,6 +2115,98 @@ def test_stale_now_0707():
     check(alerted(e) and not [c for c in e.calls() if c[:1] == ["respawn"]], "0707: работающей — только тревога")
 
 
+def _fact_env(name, body, mtime_ago=7200):
+    """metis-1005: окно name со STATUS.md, текст которого задаёт тест (body целиком), mtime — mtime_ago секунд назад."""
+    e = _now_env(name, "## Сейчас", mtime_ago=mtime_ago, state="done", pid=4300 + len(name))
+    p = os.path.join(e.pantheon, "directions", name, "STATUS.md")
+    open(p, "w", encoding="utf-8").write(body)
+    os.utime(p, (T0 - mtime_ago, T0 - mtime_ago))
+    return e, p
+
+
+def test_now_from_fact_1005():
+    """metis-1005: шапка «Сейчас» STATUS.md — по времени последней строки журнала; остальной текст цел; недавно правленный
+    файл и файл без журнала не трогаем; ручной раздел с датой старше журнала больше 6 ч — тревога владельцу файла."""
+    H = 3600
+    j = _stamp(3600)  # журнал: час назад
+    body = (f"# STATUS\n\n## Сейчас ({_stamp(30 * H)})\n- руками написанный шаг\n\n## Ход\n{_stamp(5 * H)} старая запись\n"
+            f"{j} свежая запись\n13:5x запись без даты\n")
+    e, p = _fact_env("nf-head", body)
+    e.run("watch", t=T0)
+    out = open(p, encoding="utf-8").read()
+    want = f"## Сейчас ({j[:-1]}x)"
+    check(want in out and out.replace(want, f"## Сейчас ({_stamp(30 * H)})") == body,
+          f"1005: шапка не по журналу или тронут остальной текст: {out!r}")
+    check(os.stat(p).st_mtime == T0 - 7200 + 1,
+          "1005: mtime после замены шапки не «прежний + 1 с»: сдвиг — возраст файла и дата журнала без даты поедут, "
+          "без сдвига — rsync копии Obsidian (размер и mtime) не увидит шапку той же длины")
+    ino = os.stat(p).st_ino
+    e.run("watch", t=T0 + 300)
+    check(os.stat(p).st_ino == ino, "1005: шапка уже верна — файл переписан второй раз")
+    e, p = _fact_env("nf-fresh", body, mtime_ago=5)
+    e.run("watch", t=T0)
+    check(open(p, encoding="utf-8").read() == body, "1005: файл правили 5 с назад — шапку переписали (гонка с ролью)")
+    nojournal = "# STATUS\n\n## Сейчас (01.01 00:0x)\n- шаг\n"
+    e, p = _fact_env("nf-nojr", nojournal)
+    e.run("watch", t=T0)
+    check(open(p, encoding="utf-8").read() == nojournal, "1005: журнала нет — шапку переписали")
+    # ручной раздел с датой
+    def alerted(e):
+        return "ручной раздел с датой старше журнала" in e.alerts()
+    sec = lambda ago: (f"# STATUS\n\n## Сейчас\n- шаг\n\n## Ждёт владельца ({_stamp(ago)})\n- вопрос\n\n"
+                       f"## Ход\n{_stamp(0)} запись\n")
+    e, p = _fact_env("nf-late", sec(7 * H))
+    e.run("watch", t=T0)
+    check(alerted(e) and "nf-late" in e.alerts() and "Ждёт владельца" in e.alerts() and "координатор nf-late" in e.alerts(),
+          f"1005: раздел старше журнала на 7 ч — нет тревоги владельцу: {e.alerts()}")
+    e.run("watch", t=T0 + 300)
+    check(e.alerts().count("ручной раздел с датой старше журнала") == 1, "1005: тревога повторилась в следующем проходе")
+    e, p = _fact_env("nf-ok", sec(5 * H))
+    e.run("watch", t=T0)
+    check(not alerted(e), f"1005: раздел старше журнала на 5 ч — тревога: {e.alerts()}")
+    e, p = _fact_env("nf-arch", "# STATUS\n\n## Ранее (01.01 10:00) — в archive/STATUS-x.md\n\n## Ход\n" + _stamp(0) + " запись\n")
+    e.run("watch", t=T0)
+    check(not alerted(e), "1005: указатель на archive/ принят за ручной раздел")
+    e, p = _fact_env("nf-upd", f"# STATUS\n\n## Открытые задачи\nОбновлено {_stamp(9 * H)}\n\n## Ход\n{_stamp(0)} запись\n")
+    e.run("watch", t=T0)
+    check(alerted(e), "1005: строка «Обновлено …» старше журнала на 9 ч — нет тревоги")
+    e, p = _fact_env("nf-nojr2", f"# STATUS\n\n## Ждёт владельца ({_stamp(40 * H)})\n- вопрос\n")
+    e.run("watch", t=T0)
+    check(not alerted(e), "1005: журнала нет — сравнивать не с чем, тревоги быть не должно")
+
+
+
+def test_retime_race_1005():
+    """metis-1005 (Д1 argus #399): роль дописала STATUS.md между чтением и заменой — файл не тронут, ручная строка цела."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w, nf = importlib.import_module("watch"), importlib.import_module("nowfact")
+    saved = w.P
+    w.P = type("Core", (), {"boardtext_mod": staticmethod(lambda: type("B", (), {"nowfact": staticmethod(lambda: nf)}))})
+    try:
+        d = tempfile.mkdtemp(prefix="race-", dir=os.environ.get("TMPDIR"))
+        p = os.path.join(d, "STATUS.md")
+        body = "## Сейчас (01.11 10:0x)\n\n## Ход\n08.11 10:00 а\n"
+        open(p, "w", encoding="utf-8").write(body)
+        os.utime(p, (T0 - 3600, T0 - 3600))
+        st = os.stat(p)
+        real_chmod = os.chmod
+
+        def chmod_and_append(path, mode):  # роль дописывает файл, пока пишется временный (Д5 argus #399)
+            real_chmod(path, mode)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write("РУЧНАЯ\n")
+        os.chmod = chmod_and_append
+        try:
+            out, _ = w.retime_status("race", p, body, st, T0)
+        finally:
+            os.chmod = real_chmod
+        check(out == body and "РУЧНАЯ" in open(p, encoding="utf-8").read(),
+              "1005: файл менялся, пока писали временный, — шапку заменили и ручная строка потеряна")
+        check(not [f for f in os.listdir(d) if f.endswith(".tmp")], "1005: временный файл остался")
+    finally:
+        w.P = saved
+
 def test_stale_now_push_fail_0707():
     """metis-0707 (argus-277, Б и Д): напоминание не доставлено (respawn, код 1) — отметка пишется всё равно: за 3 прохода
     один respawn и одна тревога; сбой проверки одного направления не обрывает следующие."""
