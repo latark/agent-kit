@@ -80,10 +80,31 @@ try:
     for f in got:
         os.unlink(os.path.join(inbox, f))
     os.unlink(req)
-    for argv in (["hermes-alex", "--restart"], ["hermes-alex", "--restart", "сделай"], ["hermes-alex", "--over-cap"]):
+    for argv in (["hermes-alex", "--restart"], ["hermes-alex", "--restart", "сделай"], ["hermes-alex", "--over-cap"],
+                 ["hermes-alex", "--force", "сделай"]):
         rc, out, err = call(argv + ["--dry-run"])
         check(f"16 {' '.join(argv[1:])} → не заявка и не поручение: прежний путь (start_gate)",
-              "заявка принята" not in out and not os.path.exists(req) and not os.listdir(inbox), (rc, out, err))
+              "заявка принята" not in out and "была бы принята" not in out and "легло бы" not in out
+              and not os.path.exists(req) and not os.listdir(inbox), (rc, out, err))
+
+    def start_files():
+        """Файлы поручений (…-start-….md) где угодно во временном корне теста."""
+        return sorted(os.path.join(d, f) for d, _, fs in os.walk(_ROOT) for f in fs if "-start-" in f and f.endswith(".md"))
+
+    for name, why in (("../../../escape", "имя с ../"), ("evil-dir", "имя не из реестра"),
+                      ("solo-led", "coordinator = false (hq_led)")):
+        rc, out, err = call([name, "сделай"])
+        check(f"16 поручение на {why} → отказ, код 2, файла поручения нигде нет",
+              rc == 2 and "заявка не принята" in err and not start_files(), (rc, out, err, start_files()))
+    shutil.rmtree(inbox)
+    away = os.path.join(_ROOT, "away")
+    os.makedirs(away)
+    os.symlink(away, inbox)
+    rc, out, err = call(["hermes-alex", "сделай"])
+    check("16 inbox — символьная ссылка → код 1, по ссылке ничего не записано, заявки нет",
+          rc == 1 and not os.listdir(away) and not os.path.exists(req), (rc, out, err, os.listdir(away)))
+    os.unlink(inbox)
+    os.makedirs(inbox)
     rc, out, err = call(["hermes-alex", "x" * (getattr(P, "START_ORDER_MAX", 100_000) + 1)])
     check("16 поручение длиннее START_ORDER_MAX → отказ, ни файла, ни заявки",
           rc != 0 and not os.listdir(inbox) and not os.path.exists(req), (rc, out, err))
@@ -141,6 +162,9 @@ try:
     check("cancel: проход отменил разовый запуск и не добавил новых (одна отмена — без подъёма окна)",
           items[oid].get("done_at") and len(items) == n0 and got == [("hermes-alex", f"cancel {oid}: отменён")],
           (got, items[oid]))
+    rc, out, err = call(["--at-cancel", oid], P.cancel_request)
+    check("cancel: отмена уже погашенного id → код 1, заявки нет", rc == 1 and "погашен" in err
+          and not os.path.exists(req), (rc, out, err))
     oid2 = P.night_mod().oneshot_add("solo-led", t + 6 * 3600, "чужое", "zeus", t=t)
     with open(req, "w") as fh:  # отмена разового запуска другого направления под заявкой hermes-alex
         fh.write(json.dumps({"target": "hermes-alex", "time": "x", "by": "zeus", "cancel": oid2}) + "\n")
