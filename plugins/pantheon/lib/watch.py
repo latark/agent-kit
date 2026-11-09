@@ -333,7 +333,15 @@ def agents_cmd():
     if agents is None:
         print("pantheon agents: claude agents --json не ответил")
         return P.TEMPFAIL
-    snapshot(agents, P.now())
+    try:
+        snapshot(agents, P.now())
+    except PermissionError:
+        # metis-1009: окно Пританея в песочнице не пишет STATE/agents.json — тот же список сюда, снимок обновит
+        # плановый проход (раз в 5 мин)
+        for a in agents:
+            print(f"{a.get('name') or '—'}\t{a.get('state') or a.get('status') or '—'}\t{a.get('id') or '—'}")
+        print(f"pantheon agents: сессий {len(agents)}; снимок STATE/agents.json окну не записать (песочница) — его "
+              "обновит плановый проход")
     return 0
 
 

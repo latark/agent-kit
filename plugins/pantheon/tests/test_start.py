@@ -569,13 +569,17 @@ def main():
     if os.path.exists(zlog):
         os.remove(zlog)
     c0, n0 = len(calls()), len(caprows())
+    inbox = os.path.join(home, "directions", "athena-shop", "inbox")
+    inbox_n = lambda: len(os.listdir(inbox)) if os.path.isdir(inbox) else 0  # noqa: E731
+    i0 = inbox_n()
     r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="hq"))
-    check("PANTHEON_ROLE=hq без --from при красном замере и без слова — отказ, код 2 (не запуск от owner)",
-          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0
-          and caprows()[-1]["origin"] == "zeus" and caprows()[-1]["result"] == "refused")
+    check("PANTHEON_ROLE=hq без --from и без слова — не запуск от owner: поручение во входящие и заявка (metis-1009), "
+          "claude не звали, замера нет",
+          r.returncode == 0 and "заявка принята" in r.stdout and inbox_n() == i0 + 1 and len(calls()) == c0
+          and len(caprows()) == n0)
     r = run("start", "athena-shop", "роль", "--from", "owner", extra=dict(red, PANTHEON_ROLE="hq"))
     check("PANTHEON_ROLE=hq, --from owner — не принимается, код 2, claude не звали, замера нет",
-          r.returncode == 2 and "не принимается" in r.stderr and len(calls()) == c0 and len(caprows()) == n0 + 1)
+          r.returncode == 2 and "не принимается" in r.stderr and len(calls()) == c0 and len(caprows()) == n0)
     r = run("start", "athena-shop", "роль", "--from", "owner", extra=dict(red, PANTHEON_ROLE="domain-coordinator"))
     check("--from owner не принимается и в окне другой роли", r.returncode == 2 and len(calls()) == c0)
     r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="domain-coordinator"))
@@ -599,8 +603,8 @@ def main():
     check("hq + --at --from tick на зелёной памяти — код 2, очередь oneshot не выросла",
           r.returncode == 2 and "только zeus" in r.stderr and len(q0() or []) == n1)
     r = run("start", "athena-shop", "обход", "--from", "zeus", extra=green)
-    check("hq + --from zeus без слова — отказ по слову (код 2), не по совпадению",
-          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0)
+    check("hq + --from zeus без слова — не запуск сразу: поручение во входящие и заявка (metis-1009), claude не звали",
+          r.returncode == 0 and "заявка принята" in r.stdout and len(calls()) == c0)
     r = run("start", "athena-shop", "обход", "--from", "zeus", extra={"PANTHEON_ROLE": "domain-coordinator"})
     check("другая роль + --from zeus — код 2, claude не звали",
           r.returncode == 2 and "только tick" in r.stderr and len(calls()) == c0)
