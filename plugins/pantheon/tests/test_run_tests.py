@@ -314,6 +314,23 @@ missing = [lb for lb in tuple(R.NO_SUMMARY) + tuple(R.SLOW) + tuple(R.SERIAL) if
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
 check("NO_SUMMARY, SLOW, SERIAL — только существующие файлы", not missing, missing)
 
+# --- карантин (metis-1050): упавший файл из QUARANTINE — строка «карантин», код прогона 0; другой FAIL — код 1 ---
+missing = [lb for lb, task in R.QUARANTINE.items() if not re.fullmatch(r"metis-\d{4}", task) or not os.path.exists(
+    os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("QUARANTINE — существующие файлы, у каждого задача metis-NNNN", R.QUARANTINE and not missing, missing)
+qlabel = next(iter(R.QUARANTINE))
+qp = mkplugin({qlabel.split("/")[1]: "import sys\nprint('ok   a')\nsys.exit(1)\n", "test_fine.py": OK2},
+              qlabel.split("/")[0])
+r = run([qp])
+check("карантин: файл из списка упал — строка «карантин … задача», итог «карантин 1», код 0",
+      r.returncode == 0 and f"карантин {qlabel}" in r.stdout and f"задача {R.QUARANTINE[qlabel]}" in r.stdout
+      and "FAIL 0, карантин 1" in r.stdout, r.stdout)
+qp2 = mkplugin({qlabel.split("/")[1]: "import sys\nprint('ok   a')\nsys.exit(1)\n",
+                "test_bad.py": "import sys\nprint('ok   a')\nsys.exit(1)\n"}, qlabel.split("/")[0])
+r = run([qp2])
+check("карантин: рядом упал файл не из списка — код 1, FAIL 1", r.returncode == 1 and "FAIL 1, карантин 1" in r.stdout,
+      r.stdout)
+
 # --- --affected: карта affected-map.json и выбор по ней (metis-0451) ---
 REPO = os.path.dirname(os.path.dirname(PLUGIN))
 amap, why = R.load_map()
