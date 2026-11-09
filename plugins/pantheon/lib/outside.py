@@ -68,7 +68,11 @@
     окружения), ни установка зависимостей копии, ни сервер, ни другие проекты. Прогон с ключом — со своим профилем
     profile-db.sb: сеть наружу только TCP на порт из строки подключения (нет порта — 5432), местные адреса и DNS; в
     PATH — pg_dump из libpq (LIBPQ_BINS, если стоит). Значения вырезаются из журнала прогона, хвоста итога и среза
-    процессов (redact: значение → <ИМЯ>, пароль → ***), в итоге и журнале outside.jsonl — только имена (keys).
+    процессов (redact: значение → <ИМЯ>, пароль → ***), в итоге и журнале outside.jsonl — только имена (keys); и в
+    последней строке вывода, которую пишут why итога и событие test-silent при гашении по тишине, и в причине события
+    stop (TestWatch.clean_why, argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
+    на чтение (argus #410 Б2): denyRead песочницы Bash и правило Read(…/**) для Read, Grep, Glob в сборке окон
+    (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
     Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
     данные на чужой хост на том же порту; пока идёт прогон, окно роли читает окружение и командную строку процесса
     (KERN_PROCARGS2, как у сервера); скрипт пишет роль, и закодированное значение вырезание не поймает. Это
@@ -1767,12 +1771,19 @@ class TestWatch:
             save_result(self.qdir, self.rid, {**self.running, "procs": procs_of(self.pid, self.keys)})
         return False
 
+    def clean_why(self):
+        """Причина снятия без значений ключей тестов прогона (argus #410 Б1: всё, что прогон с ключами пишет в журнал)."""
+        return redact(self.why, self.keys) if self.why and self.keys else self.why
+
+    def log_stop(self, **kw):
+        """Событие stop прогона в outside.jsonl — причина через clean_why."""
+        log_event(id=self.rid, kind="stop", window=self.window, why=self.clean_why(), by=self.by, **kw)
+
     def stopped(self, **kw):
         """Итог снятого прогона: stopped, записи нет; своя метка убрана, событие stop в журнал."""
         clear_stop(self.rid, self.where)
-        log_event(id=self.rid, kind="stop", window=self.window, why=self.why, by=self.by,
-                  **({"sha": self.sha} if self.sha else {}))
-        return save_result(self.qdir, self.rid, {"state": "stopped", "kind": "test", "why": f"снят: {self.why}",
+        self.log_stop(**({"sha": self.sha} if self.sha else {}))
+        return save_result(self.qdir, self.rid, {"state": "stopped", "kind": "test", "why": f"снят: {self.clean_why()}",
                                                  "record": False, **({"sha": self.sha} if self.sha else {}), **kw})
 
 
@@ -1936,7 +1947,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         except Silent as e:      # завис без вывода и CPU: тот же журнал, что отказ запуска (metis-0770)
             with contextlib.suppress(OSError):
                 os.write(fd, f"\n{e.why}\n".encode())
-            log_event(kind="test-silent", id=rid, why=e.why)
+            log_event(kind="test-silent", id=rid, why=redact(e.why, keys))   # последняя строка вывода (argus #410 Б1)
             redact_log(log, keys)
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": redact(e.why, keys), "log": log, "tail": redact(tail(log), keys),
@@ -2022,7 +2033,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + knote
     if watch.why:
         clear_stop(rid, watch.where)
-        log_event(id=rid, kind="stop", window=window, why=watch.why, by=watch.by, sha=sha, code=code)
+        watch.log_stop(sha=sha, code=code)
         return save_result(qdir, rid, res)
     log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
               **({"rerun_of": plan["rerun_of"]} if plan else {}), **({"keys": sorted(keys)} if keys else {}))

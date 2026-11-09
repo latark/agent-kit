@@ -2377,6 +2377,19 @@ COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
 CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
+# Ключи проектов `pantheon outside` (metis-1016, argus #410 Б2): dev-ключи серверов (STATE/outside/env) и ключи тестов —
+# строка подключения к боевой базе (STATE/outside/test-env). Их читает только плановый проход вне окна; окнам ролей они
+# закрыты, как пароль демона CDP: denyRead песочницы (Bash) и правило Read (Read, Grep, Glob)
+OUTSIDE_KEY_DIRS = (os.path.join(STATE, "outside", "env"), os.path.join(STATE, "outside", "test-env"))
+WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS)
+
+
+def _home_form(p):
+    """Путь под HOME — в виде «~/…» (так пишутся правила Read), иначе как есть."""
+    for h in dict.fromkeys((HOME, os.path.realpath(HOME))):
+        if p == h or p.startswith(h + "/"):
+            return "~" + p[len(h):]
+    return p
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
 # он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
 def _window_rules():
@@ -2864,13 +2877,13 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms([CDP_TOKEN_DIR]),
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms(list(WINDOW_SECRET_DIRS)),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
-        # пароль демона CDP — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        # пароль демона CDP и ключи outside — и инструментам Read, Grep, Glob (песочница держит только Bash)
         "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
-                                 for x in _deny_forms([CDP_TOKEN_DIR.replace(HOME, "~", 1)])]},
+                                 for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS])]},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{

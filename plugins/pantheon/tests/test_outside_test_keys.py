@@ -120,6 +120,41 @@ _rc, _st = say("athena-x", "status", rid)
 check("status: без значений", not leaks(_st), leaks(_st))
 check("test --script: записи tests для шлюза нет", not tests_for(git(APP, "rev-parse", "HEAD")))
 
+# --- гашение по тишине: последняя строка вывода со строкой базы (argus #410 Б1) ------------------------------------
+# сторож тишины пишет последнюю строку вывода в why итога и события test-silent; CPU дерева — 0 (гасим наверняка, не
+# завися от libproc и ps в песочнице), IDLE_TIMEOUT — 2 с
+_idle, _cpu = O.IDLE_TIMEOUT, O.tree_cpu
+O.IDLE_TIMEOUT, O.tree_cpu = 2, (lambda pid: 0.0)
+try:
+    commit(APP, {"package.json": json.dumps(dict(PKG, scripts=dict(
+        PKG["scripts"], test=f'echo "url=$SUPABASE_DB_URL pw={PW}"; exec sleep 31337')))}, "silent script")
+    q, rid = new_request("athena-x", APP, "test", "--script", "test")
+    run_pass()
+finally:
+    O.IDLE_TIMEOUT, O.tree_cpu = _idle, _cpu
+    commit(APP, {"package.json": json.dumps(pkg)}, "test script back")
+res = O.load_result(q, rid) or {}
+_sil = events(rid, "test-silent")
+check("тишина: прогон погашен сторожем, событие test-silent есть",
+      res.get("state") == "failed" and "тишина" in (res.get("why") or "") and len(_sil) == 1, (res.get("why"), _sil))
+check("тишина: в why события — последняя строка, строка базы вырезана в имя",
+      bool(_sil) and "url=<SUPABASE_DB_URL> pw=***" in _sil[0].get("why", ""), _sil)
+_ev = open(os.path.join(STATE, "logs", "outside.jsonl")).read()
+check("тишина: outside.jsonl без значений", not leaks(_ev), leaks(_ev))
+_resj = json.dumps(res) + (open(os.path.join(q, rid + ".json")).read() if os.path.exists(os.path.join(q, rid + ".json"))
+                           else "")
+check("тишина: итог (why, tail) без значений", not leaks(_resj), leaks(_resj))
+check("тишина: журнал прогона без значений", not leaks(open(res["log"]).read() if res.get("log") else "x" + PW))
+# событие stop прогона с ключами (снят «стопом» или superseded) — та же причина через clean_why
+_w = O.TestWatch("20261109-000000-aaaaaa", q, "athena-x", APP)
+_w.keys, _w.why = _K, f"причина {URL_APP} {PW}"
+_w.log_stop(sha="abc", code=0)
+_st_ev = events("20261109-000000-aaaaaa", "stop")
+check("stop прогона с ключами: в outside.jsonl причина без значений, имя — есть",
+      len(_st_ev) == 1 and not leaks(json.dumps(_st_ev)) and "<SUPABASE_DB_URL>" in _st_ev[0].get("why", ""), _st_ev)
+_w.keys, _w.why = {}, "заявка «стоп»"
+check("stop без ключей: причина как есть", _w.clean_why() == "заявка «стоп»")
+
 # --- проверка проекта (без --script) на APP: ключа нет ---------------------------------------------------------
 n0 = len(calls())
 q, rid = new_request("athena-x", APP, "test")
