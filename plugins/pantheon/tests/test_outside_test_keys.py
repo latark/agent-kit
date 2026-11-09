@@ -95,7 +95,7 @@ run_pass()
 res = O.load_result(q, rid) or {}
 c = last_call(n0)
 env = c.get("env", {})
-check("test --script на APP: прогон зелёный", res.get("state") == "passed", res)
+check("test --script на APP: прогон зелёный", res.get("state") == "done" and res.get("code") == 0, res)
 check("test --script на APP: строка своего проекта в окружении", env.get("SUPABASE_DB_URL") == URL_APP, sorted(env))
 check("test --script на APP: токен аккаунта и dev-ключи — нет",
       "SUPABASE_ACCESS_TOKEN" not in env and "DEV_ONLY" not in env, sorted(env))
@@ -140,7 +140,7 @@ got = calls()[n0:]
 run_c = [x for x in got if x["cmd"][-2:] == ["run", "test"]]
 inst_c = [x for x in got if x["cmd"][1:2] in (["ci"], ["install"])]
 check("test --sha --script: прогон получил строку своего проекта",
-      res.get("state") == "passed" and run_c and run_c[-1]["env"].get("SUPABASE_DB_URL") == URL_APP, (res.get("state"), res.get("why")))
+      res.get("state") == "done" and res.get("code") == 0 and run_c and run_c[-1]["env"].get("SUPABASE_DB_URL") == URL_APP, (res.get("state"), res.get("why")))
 check("test --sha --script: установка зависимостей — без строки и с обычным профилем",
       all("SUPABASE_DB_URL" not in x["env"] and x["profile"].endswith("profile.sb") for x in inst_c), len(inst_c))
 

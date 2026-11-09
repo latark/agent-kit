@@ -3970,7 +3970,7 @@ def cmd_key(args):
         err(f"pantheon outside key OWNER/REPO ИМЯ — ключ тестов проекта (имена: {', '.join(TEST_KEYS)})")
         return 2
     repo, name = args[0].strip().lower(), args[1]
-    if not re.fullmatch(r"[a-z0-9._-]+/[a-z0-9._-]+", repo):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*", repo):
         err(f"pantheon outside key: «{args[0]}» — не OWNER/REPO (как в origin, например latark/brokerassistantapp)")
         return 2
     if name not in TEST_KEYS:
