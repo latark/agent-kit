@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime
 
 _ROOT = os.path.realpath(tempfile.mkdtemp(prefix="startreq-"))
 tempfile.tempdir = _ROOT
@@ -80,12 +81,54 @@ try:
     for f in got:
         os.unlink(os.path.join(inbox, f))
     os.unlink(req)
-    for argv in (["hermes-alex", "--restart"], ["hermes-alex", "--restart", "сделай"], ["hermes-alex", "--over-cap"],
-                 ["hermes-alex", "--force", "сделай"]):
+    for argv in (["hermes-alex", "--restart"], ["hermes-alex", "--restart", "сделай"], ["hermes-alex", "--over-cap"]):
         rc, out, err = call(argv + ["--dry-run"])
         check(f"16 {' '.join(argv[1:])} → не заявка и не поручение: прежний путь (start_gate)",
               "заявка принята" not in out and "была бы принята" not in out and "легло бы" not in out
               and not os.path.exists(req) and not os.listdir(inbox), (rc, out, err))
+    # metis-1013 (Д3): слово вида флага, которого start не знает, — отказ одной строкой; текст с «-» — поручение
+    for argv in (["hermes-alex", "--force", "сделай"], ["hermes-alex", "сделай", "-v"]):
+        for dry in ([], ["--dry-run"]):
+            rc, out, err = call(argv + dry)
+            check(f"16 (Д3) {' '.join(argv[1:] + dry)} → отказ код 2 «не флаг start», ни поручения, ни заявки",
+                  rc == 2 and "не флаг start" in err and "в кавычках" in err.strip().splitlines()[-1]
+                  and not os.path.exists(req) and not os.listdir(inbox), (rc, out, err))
+    for text in ("- проверь сборку", "-1 баг в сборке", "-проверь сборку"):
+        rc, out, err = call(["hermes-alex", text])
+        got = sorted(os.listdir(inbox))
+        body = open(os.path.join(inbox, got[0]), encoding="utf-8").read() if got else ""
+        data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
+        check(f"16 (Д3) поручение «{text}» → тем же путём: файл во входящих и заявка, код 0",
+              rc == 0 and len(got) == 1 and text in body and len(data) == 1 and "заявка принята" in out,
+              (rc, out, err, got, data))
+        for f in got:
+            os.unlink(os.path.join(inbox, f))
+        if os.path.exists(req):
+            os.unlink(req)
+
+    # metis-1013 (Д4, m6): файл поручения создаётся только новым (O_EXCL) и не по ссылке (O_NOFOLLOW): имя
+    # предсказуемо при подменённых часах и os.urandom — на его месте уже лежит файл или ссылка
+    real_urandom = os.urandom
+    os.environ["PANTHEON_NOW"] = "1794000000"
+    fixed = datetime.fromtimestamp(1794000000).strftime("%Y-%m-%d-%H%M%S") + "-start-000000.md"
+    victim = os.path.join(_ROOT, "victim.txt")
+    try:
+        os.urandom = lambda n: b"\0" * n
+        with open(os.path.join(inbox, fixed), "w") as fh:
+            fh.write("старое поручение\n")
+        rc, out, err = call(["hermes-alex", "новое"])
+        check("16 (m6) на месте имени уже есть файл → код 1, старый файл цел, заявки нет",
+              rc == 1 and open(os.path.join(inbox, fixed)).read() == "старое поручение\n" and not os.path.exists(req),
+              (rc, out, err))
+        os.unlink(os.path.join(inbox, fixed))
+        os.symlink(victim, os.path.join(inbox, fixed))
+        rc, out, err = call(["hermes-alex", "новое"])
+        check("16 (m6) на месте имени ссылка → код 1, по ссылке ничего не создано, заявки нет",
+              rc == 1 and not os.path.exists(victim) and not os.path.exists(req), (rc, out, err))
+        os.unlink(os.path.join(inbox, fixed))
+    finally:
+        os.urandom = real_urandom
+        os.environ.pop("PANTHEON_NOW", None)
 
     def start_files():
         """Файлы поручений (…-start-….md) где угодно во временном корне теста."""
@@ -174,6 +217,29 @@ try:
           "не по образцу" in got.get("hermes-alex", "") and not items[oid2].get("done_at"), (got, items[oid2]))
     rc, out, err = call(["--at-cancel", "at-20991231-2359-hermes-alex"], P.cancel_request)
     check("cancel: несуществующий id → код 1, заявки нет", rc == 1 and not os.path.exists(req), (rc, out, err))
+
+    # metis-1013 (Д2): заявка на отмену подана, а запуск успел пройти до прохода — итог запуска не переписывается
+    oid3 = P.night_mod().oneshot_add("hermes-alex", t + 7 * 3600, "успеет", "zeus", t=t)
+    rc, out, err = call(["--at-cancel", oid3], P.cancel_request)
+    check("cancel (Д2): заявка на отмену непогашенного → код 0", rc == 0 and os.path.exists(req), (rc, out, err))
+    P.night_mod().oneshot_update(oid3, t + 600, done_at=t + 600, result="запускается")  # так гасит watch.oneshots
+    P.night_mod().oneshot_update(oid3, t + 600, result="запущен")
+    got = P.take_start_requests(doms, t + 720)
+    it3 = {x["id"]: x for x in P.night_mod().oneshot_items()}[oid3]
+    check("cancel (Д2): запуск прошёл между заявкой и проходом → result «запущен» и done_at те же, отмены нет",
+          it3.get("result") == "запущен" and it3.get("done_at") == t + 600
+          and got == [("hermes-alex", f"cancel {oid3}: нет")], (got, it3))
+
+    # metis-1013 (Д4, m14): id с именем не по образцу SESSION_NAME, даже если такая запись есть в oneshot.json, —
+    # код 2, заявка не пишется (имя файла заявки — из id)
+    bad_id = "at-20991231-2359-Bad_Name"
+    data = P.read_json(P.night_mod().oneshot_path(), {})
+    data["items"].append({"id": bad_id, "target": "Bad_Name", "at": t + 8 * 3600, "expires": t + 9 * 3600, "text": "x",
+                          "by": "zeus", "created": "x", "done_at": None, "result": None, "wait": None})
+    P.write_json(P.night_mod().oneshot_path(), data)
+    rc, out, err = call(["--at-cancel", bad_id], P.cancel_request)
+    check("cancel (m14): имя в id не по образцу → код 2 «не ручной разовый запуск», файлов заявок нет",
+          rc == 2 and "не ручной разовый запуск" in err and not os.listdir(qdir), (rc, out, err, os.listdir(qdir)))
 finally:
     os.environ.pop("PANTHEON_ROLE", None)
     shutil.rmtree(_ROOT, ignore_errors=True)

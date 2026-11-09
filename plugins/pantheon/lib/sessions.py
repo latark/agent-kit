@@ -440,7 +440,9 @@ def start_at(rest, origin, dry):
         oid = N.oneshot_add(target, when, text, origin, t=t)
     except PermissionError:
         # metis-1009: окно Пританея в песочнице не пишет STATE/oneshot.json и его замок. Поручение по времени в заявку
-        # не кладётся (модель угроз 0771, строка 17: текст в заявке — поручение в обход вашего слова)
+        # не кладётся: у заявки только ключи target, time, by, cancel, а лишний ключ (текст) разбор вне окна отклоняет —
+        # модель угроз 0771, строка 17 таблицы «Запуск окна координатора» (drafts/0771-threat-model.md); текст
+        # поручения идёт файлом во входящие — строка 16 там же
         print(f"pantheon start --at: не записан — песочница окна закрывает STATE/oneshot.json; поднять {target} "
               f"сейчас — pantheon start {target} \"поручение\" (входящие и заявка, окно поднимет плановый проход)",
               file=sys.stderr)
@@ -456,14 +458,16 @@ def start_at(rest, origin, dry):
 # и ставит разовый запуск — его исполняет oneshots по своим правилам (занятость, недельный шлюз, один за проход).
 # metis-1009 (слово владельца 08.11 17:34 и 17:46): с поручением — то же самое, а поручение — файлом во входящих
 # направления (~/ai/pantheon/directions/<имя>/inbox — окну hq туда можно писать; start_order). Окно поднимается с
-# поручением «прочитай STATUS.md и inbox/». Текст в заявку не кладётся (модель угроз 0771, строка 17). С флагами
+# поручением «прочитай STATUS.md и inbox/». Текст в заявку не кладётся (модель угроз 0771, строки 16–17 таблицы
+# «Запуск окна координатора»: текст — файлом во входящие, лишний ключ заявки разбор отклоняет). С флагами
 # (--restart, --over-cap) — прежний путь: запуск сразу, только по вашему слову в owner-log (start_gate) и только там,
 # где STATE/settings/run пишется; окну в песочнице — отказ одной строкой (run_closed). Отмена разового запуска
 # (--at-cancel), которую окно не может записать в STATE/oneshot.json, — строка {"cancel": id} в той же заявке.
 START_REQ = "start-req"
 START_REQ_KEYS = {"target", "time", "by"}
 START_REQ_MAX = 4096
-START_ORDER_MAX = 100_000  # поручение во входящих: меньше awake.INBOX_MAX_BYTES (200 000 байт)
+START_ORDER_MAX = 100_000  # поручение во входящих, байт UTF-8: меньше awake.INBOX_MAX_BYTES (200 000 байт)
+START_FLAG_LIKE = re.compile(r"--?[A-Za-z][A-Za-z0-9-]*")  # metis-1013 (Д3): отдельное слово вида флага, не текст
 
 
 def _cancel_id(oid, target):
@@ -683,10 +687,17 @@ def start(rest):
         # не несёт — они идут прежним путём (start_gate), а без записи STATE/settings/run — отказ одной строкой
         return start_request(target, dry)
     if role == "hq" and target not in ("zeus", "workshop") and not (restart or over) \
-            and not any(a.startswith("-") for a in rest) \
             and (run_closed() or not owner_spoke_recently("zeus", OWNER_WORD_WINDOW)):
         # metis-1009: без вашего слова или без записи STATE/settings/run (песочница окна) поручение — во входящие, и
-        # заявка; окно поднимет плановый проход. Со словом и вне песочницы — прежний запуск сразу через start_gate
+        # заявка; окно поднимет плановый проход. Со словом и вне песочницы — прежний запуск сразу через start_gate.
+        # metis-1013 (Д3): текст, начатый с «-» («- проверь сборку»), — такое же поручение; отдельное слово вида флага
+        # (--force, -f), которого start не знает, — отказ одной строкой, а не поручение с опечаткой во флаге
+        flag = next((a for a in rest if START_FLAG_LIKE.fullmatch(a)), None)
+        if flag:
+            print(f"pantheon start: «{flag}» — не флаг start (флаги: --restart, --over-cap, --at, --at-list, "
+                  f"--at-cancel, --from, --dry-run); поручение, начатое с «-», — одной строкой в кавычках: "
+                  f"pantheon start {target} \"{flag} …\"", file=sys.stderr)
+            return START_REFUSED
         return start_order(target, " ".join(rest).strip(), dry)
     if target == "zeus":
         if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да

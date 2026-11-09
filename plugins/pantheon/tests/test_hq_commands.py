@@ -229,6 +229,17 @@ def suite(kind, prefix_of):
             check(f"{name} — код 0 и одна строка о снимке", rc == 0 and "снимок" in line, (rc, line))
         if argv == ["reap", "--auto"] and rc == 3:
             check(f"{name} — код 3: «задача планового прохода»", "планового прохода" in line, line)
+    # metis-1013 (Д4, m16): снимок STATE/agents.json окну не записать — список сессий печатается сюда, по строке на сессию
+    bin2 = os.path.join(base, "bin-agents")
+    os.makedirs(bin2, exist_ok=True)
+    with open(os.path.join(bin2, "claude"), "w") as fh:
+        fh.write("#!/bin/sh\ncase \"$1\" in agents) echo '[{\"name\": \"win-a\", \"status\": \"idle\", "
+                 "\"id\": \"abc12345\"}]';; esac\nexit 0\n")
+    os.chmod(os.path.join(bin2, "claude"), 0o755)
+    rc, out, err = run(dict(env, PATH=bin2 + ":" + env["PATH"]), ["agents"], prefix)
+    check(f"{kind}: pantheon agents (одна сессия) — код 0, строка сессии «win-a … abc12345» и «сессий 1»",
+          rc == 0 and any(x.startswith("win-a\t") and x.endswith("\tabc12345") for x in out.splitlines())
+          and "сессий 1" in out, (rc, out, err))
     if not prefix:
         unlock_state(state)
     # плановый проход вне окна: отмена гасит разовый запуск, заявка поднимает окно (разовый запуск zeus-request)
@@ -283,6 +294,50 @@ if SB is None:
     sb_rows = []
 else:
     sb_rows = suite("seatbelt", seatbelt_prefix(SB))
+
+
+
+def run_main_permission():
+    """metis-1013 (Д1, m13): run.main ловит PermissionError только в окне роли — одна строка и код 1; в терминале
+    владельца (без PANTHEON_ROLE) исключение уходит наружу, трассировка как была."""
+    env, home, _state = build(os.path.join(_ROOT, "d1"))
+    for k in [k for k in os.environ if k.startswith("PANTHEON_")]:
+        os.environ.pop(k)
+    os.environ.update({k: v for k, v in env.items() if k != "PANTHEON_ROLE"})
+    sys.path.insert(0, LIBDIR)
+    import contextlib
+    import importlib.util
+    import io
+    spec = importlib.util.spec_from_file_location("run_d1", RUN_PY)
+    R = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(R)
+    real = R.pantheon.main
+    where = os.path.join(home, ".local", "state", "pantheon", "agents.json")
+
+    def denied(argv):
+        raise PermissionError(1, "Operation not permitted", where)
+    R.pantheon.main = denied
+    try:
+        try:
+            got = ("вернул", R.main(["agents"]))
+        except PermissionError as e:
+            got = ("исключение", e.filename)
+        check("run.main без PANTHEON_ROLE: PermissionError уходит наружу (трассировка в терминале владельца)",
+              got == ("исключение", where), got)
+        os.environ["PANTHEON_ROLE"] = "hq"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = R.main(["agents"])
+        lines = err.getvalue().strip().splitlines()
+        check("run.main в окне hq: PermissionError — код 1 и одна строка «не сделано … ~/.local/state/…»",
+              rc == 1 and len(lines) == 1 and "pantheon agents: не сделано" in lines[0]
+              and "~/.local/state/pantheon/agents.json" in lines[0] and "окну hq" in lines[0], (rc, lines))
+    finally:
+        R.pantheon.main = real
+        os.environ.pop("PANTHEON_ROLE", None)
+
+
+run_main_permission()
 
 out_md = os.environ.get("HQ_AUDIT_OUT")
 if out_md:
