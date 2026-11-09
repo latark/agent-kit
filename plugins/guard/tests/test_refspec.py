@@ -149,7 +149,19 @@ def main():
             fh.write('[merge_repos]\nmetis-pantheon = ["latark/agent-kit"]\n')
         git(repo, "remote", "add", "origin", "https://github.com/latark/agent-kit.git")
         git(repo, "remote", "add", "store", "git@github.com:latark/pantheon.git")
+        # remote с пустым URL (metis-0983, sb-refspec 09.11): git до 2.46 отдавал на get-url пустоту — адрес не
+        # вычислить, отказ; git 2.56 отдаёт имя remote — push уйдёт в местную папку с этим именем, вне [merge_repos],
+        # можно. Ждём по тому, что вернул сам git, а не по его версии
         git(repo, "remote", "add", "bare", "")
+        got_bare = subprocess.run(["git", "-C", repo, "remote", "get-url", "--push", "bare"], capture_output=True,
+                                  text=True, env=ENV)
+        bare_deny = got_bare.returncode != 0 or not got_bare.stdout.strip()
+        # пустой URL и подмена имени настройкой insteadOf / pushInsteadOf на agent-kit — get-url --push её
+        # разворачивает, guard видит GitHub из [merge_repos] — отказ
+        git(repo, "remote", "add", "ib", "")
+        git(repo, "config", "url.https://github.com/latark/agent-kit.git.insteadOf", "ib")
+        git(repo, "remote", "add", "pib", "")
+        git(repo, "config", "url.git@github.com:latark/agent-kit.git.pushInsteadOf", "pib")
         # push идёт по pushurl, а не по url (Д2 argus #380)
         git(repo, "remote", "add", "pu", "https://github.com/latark/pantheon.git")
         git(repo, "config", "remote.pu.pushurl", "https://github.com/latark/agent-kit.git")
@@ -169,7 +181,10 @@ def main():
                 ("metis-pantheon", "git push origin feat:heads/main", True),
                 ("metis-pantheon", "git push https://github.com/Latark/agent-kit feat:main", True),
                 ("metis-pantheon", "git push -C . origin feat:main", True),
-                ("metis-pantheon", "git push bare feat:main", True),
+                ("metis-pantheon", "git push nosuch feat:main", True),
+                ("metis-pantheon", "git push bare feat:main", bare_deny),
+                ("metis-pantheon", "git push ib feat:main", True),
+                ("metis-pantheon", "git push pib feat:main", True),
                 ("metis-pantheon", "git push store feat:main", False),
                 ("metis-pantheon", "git push https://github.com/latark/pantheon feat:main", False),
                 ("metis-pantheon", "git push $R feat:main", True),
