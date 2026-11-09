@@ -149,7 +149,7 @@ def main():
           all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", "-private-tmp-x01999"]
               for p in inside(n)))
     check("окно направления: имя чужой папки сессии закрыто — mv и rm -rf её нет, новую на чужой префикс не создать",
-          all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", "-private-tmp-new"]
+          all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", f"{dash(tmp)}-projects-zz-new"]
               for p in named(n)))
     check("окно направления: свои папки (папка направления, её worktree и подпапка) открыты на запись, их имена "
           "тоже — mv, rm и новая worktree или подпапка",
