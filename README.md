@@ -952,7 +952,12 @@
 - `plugins/guard/managed-settings.json` — управляемые настройки (SEC-28), ставятся через `sudo` (README guard).
 - `plugins/project-tools/stacks.json` — карта стеков (признак → что подключить); `plugins/project-tools/lib/project_tools.py`
   — команда `project-tools`. Пишет только записи из карты; в окнах ролей запись в `.mcp.json` и `.claude/settings*.json`
-  запрещена песочницей и guard — там только `check`.
+  запрещена песочницей и guard — там только `check`. Стек определяется по зависимостям `package.json`,
+  `pyproject.toml`, `requirements*.txt` и по файлам (`vercel.json`, `components.json`); у каждого инструмента в карте
+  есть `source` (каталог или вендор). `project-tools check --json` печатает стеки и неподключённые инструменты:
+  `pantheon direction check` строкой «ВНИМАНИЕ» напоминает координатору, если стек есть, а инструмента нет и в
+  `AGENTS.md` проекта нет строки «Отказ: <инструмент> — причина»; код выхода она не меняет. Запись реестра
+  `planned = true` (направление ещё не заведено) check показывает как «запланировано», а не как ошибку (metis-1043).
 
 ## Проверки
 

@@ -23,9 +23,9 @@ CHROME = MAP["tools"]["chrome-devtools"]["mcp"]
 results = []
 
 
-def check(name, ok):
+def check(name, ok, detail=""):
     results.append(bool(ok))
-    print(("ok  " if ok else "FAIL") + " " + name)
+    print(("ok  " if ok else "FAIL") + " " + name + ("" if ok or not detail else f"\n     {detail}"))
 
 
 # На macOS в /usr/bin и /bin нет python3.N (там только заглушка 3.9); на Linux есть системный — случаи про «нет 3.11+»
@@ -98,8 +98,10 @@ local = load(os.path.join(r16, ".claude", "settings.local.json"))
 check("apply: .mcp.json — записи из карты", r.returncode == 0 and mcp == {"chrome-devtools": CHROME, "next-devtools": NEXT})
 check("apply: оба сервера одобрены в settings.local.json",
       local == {"enabledMcpjsonServers": ["chrome-devtools", "next-devtools"]})
-check("apply: settings.json не создан (плагинов не нужно)", not os.path.exists(os.path.join(r16, ".claude", "settings.json")))
-check("apply называет файлы для коммита без settings.local.json", "Для коммита: .mcp.json." in r.stdout)
+check("apply: в settings.json только context7 (решение владельца 09.11: документация в проектах на Next.js)",
+      load(os.path.join(r16, ".claude", "settings.json")) == {"enabledPlugins": {"context7@claude-plugins-official": True}})
+check("apply называет файлы для коммита без settings.local.json",
+      "Для коммита: .claude/settings.json, .mcp.json." in r.stdout, r.stdout)
 before = {f: open(os.path.join(r16, f)).read() for f in (".mcp.json", ".claude/settings.local.json")}
 r = run(home, "apply", "--dir", r16)
 check("повтор apply: менять нечего", "Менять нечего" in r.stdout and
@@ -125,7 +127,7 @@ servers = load(os.path.join(mono, ".mcp.json"))["mcpServers"]
 check("монорепозиторий: next (версия из node_modules), shadcn по components.json",
       set(servers) == {"next-devtools", "chrome-devtools", "shadcn"})
 check("монорепозиторий: package.json внутри node_modules не читается",
-      not os.path.exists(os.path.join(mono, ".claude", "settings.json")))
+      load(os.path.join(mono, ".claude", "settings.json")) == {"enabledPlugins": {"context7@claude-plugins-official": True}})
 
 # 4. Готовая запись не как в карте: не трогает, --update заменяет
 diff = project(home, "diff", {"package.json": pkg(next="16.2.6"),
@@ -160,6 +162,7 @@ check("одобрение supabase (нет в .mcp.json) снято, чужие 
       "supabase" not in local["enabledMcpjsonServers"] and local["permissions"] == {"allow": ["Bash(ls)"]})
 check("плагин chrome-devtools-mcp выключен, Supabase включён, model цел",
       shared["enabledPlugins"] == {"chrome-devtools-mcp@claude-plugins-official": False,
+                                   "context7@claude-plugins-official": True,
                                    "supabase@claude-plugins-official": True} and shared["model"] == "opus")
 check("заметка: плагин Supabase не установлен", "claude plugin install supabase@claude-plugins-official" in r.stdout)
 
@@ -340,6 +343,7 @@ check("неожиданный сбой без .mcp.json: молча", r.returnco
 
 # 9d. Другой Mac: .mcp.json пришёл из git, одобрений и отпечатков нет — подсказка предлагает apply, после него молчит
 other = project(home, "other-mac", {"package.json": pkg(next="16.0.0"),
+                                    ".claude/settings.json": {"enabledPlugins": {"context7@claude-plugins-official": True}},
                                     ".mcp.json": {"mcpServers": {"chrome-devtools": CHROME, "next-devtools": NEXT}}})
 r = hint(other)
 check("другой Mac: подсказка предлагает apply", "project-tools apply" in r.stdout and "не по карте" in r.stdout)
@@ -405,6 +409,57 @@ finally:
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+
+# 9a. Python-манифесты и Sentry (metis-1043): стек по pyproject.toml и requirements*.txt, а не только по package.json
+def missing_of(root):
+    r = run(home, "check", "--json", "--dir", root)
+    return r, {m["tool"]: m["stack"] for m in (json.loads(r.stdout)["missing"] if r.returncode == 0 else [])}
+
+
+PYPROJECT = ('[project]\nname = "svc"\nrequires-python = ">=3.12"\n'
+             'dependencies = ["fastapi>=0.1", "Sentry_SDK[fastapi]>=2; python_version > \'3.9\'"]\n'
+             '[project.optional-dependencies]\nsb = ["supabase>=2"]\n[dependency-groups]\ndev = ["pytest", {include-group = "x"}]\n')
+py = project(home, "pysvc", {"pyproject.toml": PYPROJECT})
+r, miss = missing_of(py)
+check("Python: pyproject.toml — pyright-lsp и context7 (Python); sentry-sdk → sentry; supabase из optional → supabase",
+      r.returncode == 0 and set(miss) == {"pyright-lsp", "context7", "sentry", "supabase"}, f"{r.stdout}{r.stderr}")
+check("--json: стек и имя стека для инструмента", miss.get("sentry") == "Sentry" and miss.get("pyright-lsp") == "Python"
+      and "Python" in json.loads(r.stdout)["stacks"])
+check("context7 у Python без версии в подписи стека", miss.get("context7") == "Next.js или Python")
+r = run(home, "check", "--dir", py)
+check("check без --json: Python-стек виден человеку, код 3",
+      r.returncode == 3 and "Python" in r.stdout and "sentry" in r.stdout and "pyright-lsp" in r.stdout, r.stdout)
+run(home, "apply", "--dir", py)
+shared = load(os.path.join(py, ".claude", "settings.json"))["enabledPlugins"]
+check("apply: плагины Python-проекта записаны в settings.json",
+      shared.get("sentry@claude-plugins-official") is True and shared.get("pyright-lsp@claude-plugins-official") is True
+      and shared.get("context7@claude-plugins-official") is True)
+check("повтор после apply: из --json ничего не пропущено", missing_of(py)[1] == {})
+
+req = project(home, "pyreq", {"requirements-dev.txt": "# sentry-sdk\n-r base.txt\n--index-url x\nSentry_SDK==2.1\nruff\n"})
+r, miss = missing_of(req)
+check("requirements-dev.txt: sentry-sdk (регистр и «_») → sentry", "sentry" in miss and "pyright-lsp" in miss, r.stdout)
+req2 = project(home, "pyreq2", {"requirements.txt": "# sentry-sdk==2\n-r sentry-sdk.txt\nrequests\n"})
+r, miss = missing_of(req2)
+check("requirements.txt: комментарий и -r не считаются зависимостью (только Python)",
+      "sentry" not in miss and "supabase" not in miss and "pyright-lsp" in miss, r.stdout)
+plain = project(home, "pyplain", {"pyproject.toml": '[project]\nname = "x"\ndependencies = ["requests"]\n'})
+check("pyproject без sentry-sdk: sentry не нужен", "sentry" not in missing_of(plain)[1])
+bad = project(home, "pybad", {"pyproject.toml": "[project\nbroken"})
+r, miss = missing_of(bad)
+check("битый pyproject.toml: код 0, стек Python всё же есть по имени файла", r.returncode == 0 and "pyright-lsp" in miss)
+
+sen = project(home, "sentrynext", {"package.json": pkg(next="^16.0.0", **{"@sentry/nextjs": "^9"}, typescript="5")})
+r, miss = missing_of(sen)
+check("@sentry/nextjs → sentry; typescript → typescript-lsp; next → context7; vercel без vercel.json нет",
+      {"sentry", "typescript-lsp", "context7"} <= set(miss) and "vercel" not in miss, r.stdout)
+ver = project(home, "vercelapp", {"package.json": pkg(react="19"), "vercel.json": "{}"})
+check("vercel.json → vercel", "vercel" in missing_of(ver)[1])
+nothing = project(home, "bare", {"README.md": "x"})
+check("проект без признаков: пусто", missing_of(nothing)[1] == {})
+skipped = project(home, "refused", {"pyproject.toml": PYPROJECT, ".claude/settings.json":
+                                    json.dumps({"enabledPlugins": {"sentry@claude-plugins-official": False}})})
+check("плагин, выключенный в проекте, не в списке «нет инструмента»", "sentry" not in missing_of(skipped)[1])
 
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",
