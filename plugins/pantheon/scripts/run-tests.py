@@ -170,6 +170,7 @@ WINDOW_FS = {
     "pantheon/test_workshop_sockets.py", "pantheon/test_tick_skip.py", "pantheon/test_map_cache.py",
     "pantheon/test_window_folders.py", "pantheon/test_window_pack.py",
     "pantheon/test_outside_tree.py", "pantheon/test_outside_cancel.py",   # части test_outside.py (metis-0750)
+    "pantheon/test_outside_test_keys.py",   # ключи тестов outside (metis-1016): git init в _outside_common
 }
 # Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate
 # уходит в /var/tmp, а он в окне закрыт). В окне, где запасной корень нужен, они пропускаются строкой.
