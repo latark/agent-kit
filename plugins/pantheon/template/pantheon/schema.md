@@ -28,6 +28,8 @@ pantheon task new --direction <направление> --title "Починить
   --done-when "тест на пустой период зелёный"
 ```
 
+`--parent` — только id пачки (type story): на обычную задачу или несуществующий id `task new` и `task set` отказывают,
+а `pantheon check` предупреждает о таких открытых карточках (metis-0802); связь с задачей — `source` или `depends_on`.
 Задача вне пачки — без `--parent`, `--mode` и `--mode-why`. Вопрос владельцу — карточка с `--question`, `--why` и двумя и
 больше `--option`; в тексте вопроса её id в виде «[<id>]».
 

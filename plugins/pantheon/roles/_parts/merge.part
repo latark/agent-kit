@@ -1,9 +1,11 @@
 PR в основную ветку сливают только через шлюз слияния guard (merge gate). Он пустит, только если на head PR есть все
 записи:
-1. Тесты — `pantheon review test -- <команда тестов>` (например `-- heavy pnpm test`) в worktree на head PR с чистым
-   деревом: без оболочки, отдельным вызовом Bash, не в фоне; пустую команду (`true`, `echo`) шлюз не примет. В
-   изолированной сессии переключи свою worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach
-   <sha>`), иначе — EnterWorktree в папку под `.claude/worktrees/`. Не `cd`: с ним guard запись не сделает.
+1. Тесты — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
+   отдельным вызовом Bash, не в фоне; пустую (`true`, `echo`) шлюз не примет. В изолированной сессии переключи
+   worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach <sha>`). Не `cd`: с ним guard запись не
+   сделает. EnterWorktree окну направления закрыт (metis-0933). Не переключить (`.claude/`) или набор
+   долгий — `pantheon outside test --sha <head> --wait 590`, его можно в фоне: запись пишет плановый проход, и /clear
+   её не теряет (metis-0905).
 2. «Принять» от argus с перечнем «открыл / запустил / не проверял» — запись `pantheon review accept …` он делает сам.
    Шлюз считает последний вердикт каждого argus на head (metis-0158): второго не зови, пока первый не ответил;
    «вернуть» снимает только тот же argus или новый коммит. Новый коммит — заново тесты, argus и для продукта talos.
@@ -17,6 +19,7 @@ PR в основную ветку сливают только через шлю�
 Отказ guard называет, чего не хватает: добавь, а не обходи.
 
 Тело PR: `Closes <id>, …` — подробности в `_ref/merge-rounds.md` (путь ниже).
+Closes — у каждой задачи PR и в любом репозитории, не только в agent-kit.
 Одна задача — один PR (владелец 02.11); задачи на одни файлы — одной веткой или в очередь за открытым PR, ядро —
 пачкой до ~400 строк диффа.
 
@@ -25,10 +28,12 @@ PR в основную ветку сливают только через шлю�
 permissions окон `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json` и с metis-0598 журнал ваших
 слов и хуки `plugins/pantheon/hooks/ctx.py` и `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID
 `plugins/pantheon/lib/merge.py`, карта плагинов `plugins/pantheon/lib/plugin_map.py` и
-`plugins/pantheon/plugins-by-role.toml`: такой PR шлюз не сливает.
+`plugins/pantheon/plugins-by-role.toml`, правила ревью `plugins/pantheon/lib/review_rules.py` и ответы окна вопросов
+`plugins/pantheon/lib/answers.py` (metis-0858), пакеты окон направлений `plugins/pantheon/packs/` (их хуки идут вне
+песочницы, metis-0951): такой PR шлюз не сливает.
 PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugin/releases.json`: номер поднимает workflow release
 на main после слияния (metis-0512), а PR с номером шлюз не сливает совсем. Так же веди правку их сборки в
-`plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает). PR ядра сливает только владелец: в
+`plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает, запуск окна `window_launch`). PR ядра сливает только владелец: в
 текстах ему — «PR #N ждёт вашего слияния». Остальное, ночную работу, после «принять» сливает лид или координатор
 через шлюз.
 
@@ -36,7 +41,7 @@ PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugi
 - Любой PR: argus — при зелёном CI на head и ветке на свежем `origin/main` (metis-0669).
 - Ядро — дифф трогает путь из списка «Ядро защит» выше. Список один, как у шлюза guard (`CORE_DIR` и `CORE_FILES` в
   `plugins/guard/hooks/merge_gate.py`; тест сверяет этот текст с кодом шлюза). Сомневаешься — `plugins/pantheon/lib/pantheon.py`
-  (сборка окон, `sandbox_build`) считай ядром. В PR ядра — два независимых argus на Opus: вызов без `model`
+  (сборка окон `sandbox_build`, запуск окна `window_launch`) считай ядром. В PR ядра — два независимых argus на Opus: вызов без `model`
   и без `effort` (Opus и high из файла роли).
 - Остальное, в том числе остальные «Защищённые пути» (`plugins/pantheon/roles/_parts/protected.part`) — один argus на
   Opus (модель из файла роли), с `effort: "medium"`. Второго не зови: сложность задачи и метка «Сложная» этого не
@@ -47,3 +52,8 @@ PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugi
   файле `~/.claude/plugins/marketplaces/agent-kit/plugins/pantheon/roles/_ref/merge-rounds.md` (Read). Открой его перед
   вторым вызовом argus, решением после возврата или Долгом. Главное: повтор — только при новом диффе, вне ядра — только
   правка и что она задевает, в ядре — полный; «вернуть» снимает тот же argus или новый коммит.
+
+Субагенты (metis-0653): получил отчёт — сразу `TaskStop` его id, иначе агент висит в панели часами (кроме случая, когда
+продолжишь его через SendMessage). В передаче дел — список живых субагентов, остальные остановлены.
+Уведомление «is waiting on its own background work» (в нём «may be interim») — не отчёт (metis-0905): субагент ждёт
+свой фоновый прогон. `TaskStop` ему не делай и работу не перепоручай: отчёт придёт тем же task-id.

@@ -50,6 +50,44 @@ REG = ('[[direction]]\nname = "iris-demo"\nproject = "demo"\nfolders = ["~/proje
        'does = "Демо"\ndoes_not = "Чужое — соседям"\nexamples = ["раз", "два", "три"]\n')
 
 
+def check_longrun(out_real, devs, flat):
+    """metis-0905: долгие команды субагентов — в фоне, итог — уведомлением о конце; лиды не принимают
+    промежуточное уведомление за отчёт."""
+    # metis-0905: /clear у запустившего обрывает Bash субагента на переднем плане (137), фоновый — нет: долгие команды
+    # (тесты, heavy, мутанты, run-tests.py) — run_in_background и ожидание уведомления о конце, а не Monitor и не опрос
+    longrun = ("## Долгие команды — в фоне (metis-0905)", "обрывает твою команду Bash на переднем плане (код 137)",
+               "запускай в Bash с `run_in_background: true`",
+               "своё `> <файл>` не нужно: Stop-хук разработчика считает перенаправление правкой", "закончи ход одной строкой «жду итога <ID>: <что идёт>»",
+               "Это не отчёт: отчёт пишешь после итога", "«completed (exit code 0)» или «failed with exit code N»",
+               "Оно будит тебя и после /clear у запустившего", "Файл вывода в цикле не опрашивай",
+               "`sleep` и Monitor ради одного итога не ставь", "В фон уводи только команду, которая кончится сама",
+               "`pantheon review test|accept|reject|talos` — только на переднем плане",
+               "Долгий набор для записи — `pantheon outside test --wait 590`, его можно в фоне",
+               "лог до уведомления не читай",
+               "Пока итога нет, хук возвращает тебя «дождись итога» в общем счёте возвратов")
+    for f in devs + ["argus.tmpl", "codex-dev.tmpl", "talos.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        miss = [x for x in longrun if x not in text]
+        check(f"{f[:-5]}: долгие команды — в фоне, итог — уведомлением, записи шлюза — на переднем плане (metis-0905)"
+              + (f"; нет: {miss}" if miss else ""), not miss)
+        check(f"{f[:-5]}: старого «Monitor с условием, а не конец хода со словом «жду»» нет (metis-0905)",
+              "Monitor с условием" not in text and "Monitor-ом с условием" not in text and "словом «жду»" not in text
+              and "Monitor или цикл `until`" not in text and "Monitor-ом или циклом `until`" not in text)
+    for f in devs:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: outside test и узкие тесты дольше минуты — в фоне, не «Bash не в фоне, timeout 600000» (metis-0905)",
+              "`pantheon outside test --wait 590` — в фоне (раздел «Долгие команды»)" in text
+              and "дольше минуты — тоже в фоне" in text and "Bash не в фоне, с timeout 600000" not in text
+              and "соседние) гоняй на переднем плане" not in text)
+    # лиды (merge.part): промежуточное уведомление «ждёт свою фоновую работу» — не отчёт, TaskStop не делать;
+    # долгий набор для записи шлюза — outside test, его можно в фоне (metis-0905)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: «is waiting on its own background work» — не отчёт, TaskStop не делать; outside test в фоне (metis-0905)",
+              "Уведомление «is waiting on its own background work» (в нём «may be interim») — не отчёт" in flat[f]
+              and "`TaskStop` ему не делай и работу не перепоручай" in flat[f]
+              and "его можно в фоне: запись пишет плановый проход, и /clear её не теряет" in flat[f])
+
+
 def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="roles-test-"))
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
@@ -281,8 +319,13 @@ def main():
     # размер координатора вырос по двум причинам: metis-0271 (+~400 — правила из decisions.md: findings, /clear между PR,
     # модель угроз, «решение внесено, только когда оно в роли»; дубли сжаты) и metis-0665 (+100 — строка «перед раздачей —
     # pantheon task overlap»; у лида уложилась в прежний потолок, лидов потолок не поднят)
+    # metis-0653: +~450 — TaskStop после отчёта субагента (merge.part) и «ждать на переднем плане» (persist.part)
+    # metis-0832: +~430 — раздел handoff.part «отказ — передай тому, кто умеет; владельцу только «да/нет»» (с [person]:
+    # координатор 31546, лид 24367)
+    # metis-0905: +~430 — merge.part (промежуточное уведомление субагента — не отчёт; outside test для записи — в фоне)
+    # и persist.part (своя фоновая команда — ждать уведомления о конце)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 30700 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
+          len(raw_texts["domain-coordinator.md"]) <= 32600 and len(raw_texts["hephaestus-demo.md"]) <= 26600)  # metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -290,13 +333,20 @@ def main():
     # самопроверка до сдачи (metis-0357): шесть пунктов и строка отчёта у разработчиков, требование в поручении лидов
     # сверка по тексту без переносов строк: пробелы схлопнуты, иначе перенос строки в шаблоне ломает поиск фразы
     flat = {f: " ".join(t.split()) for f, t in texts.items()}
-    # тела всех шести пунктов и формат строки отчёта с доказательством (review-0357-argus-d): мутант любого — красный
+    # dev-сервер на коммите PR (metis-0614): talos и разработчики не переключают ветку и не ставят зависимости сами
+    check("talos: dev-сервер — outside serve --sha, без checkout --detach и pnpm install (metis-0614)",
+          "outside serve --sha" in flat.get("talos.md", "") and "checkout --detach" not in flat.get("talos.md", "")
+          and "pnpm install" not in flat.get("talos.md", "") and "talos.md" in flat)
+    for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
+        check(f"{f}: dev.part — outside serve [--sha …] [--app …], ветку не переключать, зависимости не ставить (metis-0614)",
+              "outside serve [--sha <коммит>] [--app ИМЯ]" in flat.get(f, "") and "pnpm install" not in flat.get(f, ""))
+    # тела всех шести пунктов и формат строки отчёта с доказательством (review-0357-argus-d): мутант любого убит
     selfcheck = (
         "## Самопроверка до сдачи",
         "почти всегда по одному из этих пунктов. Пройди их до отчёта:",
         "1. Кто ещё вызывает правку: поиск по имени функции, команды, файла — окна ролей, плановый проход, хуки, службы.",
         "2. Сбой: код выхода не 0, причина видна в выводе последней строкой, сообщение не врёт о том, что записано.",
-        "3. Тест краснеет на откате правки и на мутанте каждой новой ветки (`1` → `0`, условие → `True`).",
+        "3. Тест падает на откате правки, и мутант каждой новой ветки убит (`1` → `0`, условие → `True`).",
         "4. Обходы через соседние пути: окружение (`PYTHONEXECUTABLE`, `HOME`, `PATH`), другие входы и форматы, "
         "отрицание, пустое и нулевое значение.",
         "5. DOC-01: поведение поменялось — README компонента и шапка скрипта обновлены.",
@@ -305,11 +355,11 @@ def main():
         "(`git worktree add` во временную папку); в свою ветку её не сливай. Общей команды прогона нет — запусти "
         "циклом по всем файлам и сохрани в лог код каждого.",
         "В «Подробностях» отчёта — строка «Самопроверка:» по всем шести, у пункта одно из значений:",
-        # формат доказательства пп. 2, 3, 6 (argus-e/f): сбой — не зелёный прогон, у 3 откат и мутант, у 6 слияние с main
+        # формат доказательства пп. 2, 3, 6 (argus-e/f): сбой — не по зелёному прогону; у 3 откат и мутант, у 6 слияние с main
         "- «сделано (доказательство)». Пункт 2 — проба сбоя: «команда → код N (не 0), последняя строка вывода» или "
-        "«тест сбоя файл:имя → красный на мутанте»; зелёный прогон для него не доказательство.",
-        "Пункт 3 — нужны оба: «откат → <тест> красный; мутант файл:строка → <тест> красный», мутант на каждую "
-        "новую ветку.",
+        "«тест сбоя файл:имя → мутант убит»; зелёный прогон для него не доказательство.",
+        "Пункт 3 — нужны оба: «откат → <тест> красный; мутант файл:строка → убит тестом <тест>», мутант на каждую "
+        "новую ветку; мутант выжил — в тестах дыра, пункт не сделан.",
         "Пункт 6 — «временное слияние с origin/main <sha>: команда → файлов F, всего N тестов, FAIL 0, код, путь к "
         "логу»; один свой файл — не пункт 6.",
         "Пункты 1, 4, 5 — команда поиска или проба и что нашла. Без доказательства пункт не сделан;",
@@ -321,6 +371,10 @@ def main():
         miss = [x for x in selfcheck if x not in flat.get(f, "")]
         check(f"{f}: часть selfcheck — тела шести пунктов, «сделано (доказательство)», «не применимо (почему)»"
               + (f" (нет: {miss})" if miss else ""), not miss)
+    # проверка мутантом в dev.part (metis-0785): «убит», а не «покраснел»
+    for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
+        check(f"{f}: dev.part — новый тест проверен мутантом, «тест его убил» (metis-0785)",
+              "сломай проверяемое правило (мутант) и убедись, что тест его убил." in flat.get(f, ""))
     # доработка после /clear (metis-0602): новому исполнителю — отчёт прежнего, не с нуля
     brief = ("Доработка после /clear или перезапуска: прежнего исполнителя не продолжить (SendMessage: No transcript "
              "found) — новому дай его отчёт, а не начинай с нуля")
@@ -340,6 +394,17 @@ def main():
         ok = not miss and t.find(first) < t.find(then)
         check(f"{f}: сам открывает отчёт до вызова argus, три значения пункта, нет строки — возврат"
               + (f" (нет: {miss})" if miss else ""), ok)
+    # разбор провала (metis-0859): шаг во всех лидах, строка причины у argus
+    for f in ("hephaestus-demo.md", "apollo-demo.md"):
+        t = " ".join(flat.get(f, "").split())
+        miss = [x for x in ("## Разбор провала", "провал: <класс> — <довод>", "непонятная задача", "неверный подход",
+                            "не хватило контекста", "трудная логика", "один раз на задачу", "Третий возврат argus")
+                if x not in t]
+        check(f"{f}: шаг «Разбор провала» с четырьмя классами и действиями (metis-0859)"
+              + (f" (нет: {miss})" if miss else ""), not miss)
+    check("argus: в «вернуть» строка «Причина (предположительно)» с четырьмя классами (metis-0859)",
+          "Причина (предположительно): непонятная задача | неверный подход | не хватило контекста | трудная логика"
+          in " ".join(flat.get("argus.md", "").split()))
     check("argus: правила «нет строки самопроверки — вернуть» нет (отчёт до argus не доходит)",
           "нет строки самопроверки" not in flat.get("argus.md", "")
           and "без строки «Самопроверка:»" not in flat.get("argus.md", ""))
@@ -368,7 +433,7 @@ def main():
           + (f" (нет: {miss})" if miss else ""),
           not miss and "Пункты сверяешь сам по итогу Codex" not in flat.get("codex-dev.md", ""))
     # сколько argus звать (metis-0393): правило по риску (владелец 24.10 02:22, metis-0401) и узкий повтор (#118 круг 3)
-    # по одной проверке на правило: мутант любой строки краснеет ровно свою проверку
+    # по одной проверке на правило: мутанта любой строки убивает ровно своя проверка
     lead_rules = (
         ("ядро — список один с шлюзом, два argus на Opus",
          "- Ядро — дифф трогает путь из списка «Ядро защит» выше. Список один, как у шлюза guard (`CORE_DIR` и "
@@ -516,7 +581,8 @@ def main():
          "новых находок не ищешь» там не действует."),
         ("второй argus — только ядро; список шлюза с origin/main", "Второй независимый argus — только PR, "
          "который задевает ядро. Ядро — список шлюза guard: `CORE_DIR` и `CORE_FILES` в "
-         "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` в `plugins/pantheon/lib/pantheon.py`. "
+         "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` с запуском окна `window_launch` в "
+         "`plugins/pantheon/lib/pantheon.py`. "
          "Читай список с `origin/main`"),
         ("вне ядра argus один; сложность и метка второго не добавляют", "Вне ядра argus один: "
          "сложность по диффу и метка «Сложная» в поручении второго не добавляют."),
@@ -564,7 +630,7 @@ def main():
          "«вернуть»: пиши их замечаниями лиду. В ядре текст и есть правило: формулировка, которая меняет его смысл, — "
          "замечание и «вернуть», как в полном круге. Решения лида «оставить» и правки текста узким повтором в ядре нет "
          "— «вернуть» с причиной «ядро — полный круг»."),
-        # повторный круг после возврата по коду (metis-0420, N1): по якорю на шаг — мутант любого краснеет свою проверку
+        # повторный круг после возврата по коду (metis-0420, N1): по якорю на шаг — мутанта любого убивает своя проверка
         ("повторный круг: поручение, тот же вызов, не узкий повтор, в ядре тоже", "Это не узкий повтор: правка — новый код, её проверяешь ты, и в ядре тоже. Вне ядра весь дифф PR заново не "
          "читаешь: опора — отчёт прошлого круга и дельта, правка и то, что она задевает."),
         ("повторный круг: сверка журнала — рецензенты «reject» на прошлом head", "1. Сначала сверь журнал: в "
@@ -641,12 +707,17 @@ def main():
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
     # metis-0583: автозакрытие закрывает задачу по «Closes <id>» в теле PR — правило у тех, кто открывает и сливает PR
     closes_rule = ("Тело PR называет каждую задачу, которую он закрывает: `Closes <id>` или списком `Closes metis-0522, "
-                   "metis-0534 и 0535`. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
+                   "metis-0534 и 0535`. Это правило — для PR в любом репозитории направления (agent-kit, BA, сайт): автозакрытие читает тела PR всех репозиториев из [merge_repos]. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
                    "тоже (metis-0583). Слово «часть» в теле — все задачи PR остаются открытыми; если частичная только одна — отдельный "
                    "PR или без Closes и без её номера в имени ветки.")
     miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md") if closes_rule not in flat.get(f, "")]
     check("лиды и координатор: тело PR — «Closes <id>» списком, «часть» оставляет открытыми все задачи PR (metis-0583)"
           + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
+            if "в любом репозитории направления" not in flat.get(f, "")]
+    check("лиды и координатор: правило Closes — для PR в любом репозитории направления" + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md") if "`Closes <id>` каждой задачи" not in flat.get(f, "")]
+    check("разработчики: ветка с номером задачи и `Closes <id>` каждой задачи в коммите" + (f" (нет у: {miss})" if miss else ""), not miss)
     # сама роль (без приклеенного _ref) несёт строку-ссылку: без неё правило Closes роль не увидит (argus #241 круг 2, Б1)
     miss_raw = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
                 if "Тело PR: `Closes <id>, …` — подробности в `_ref/merge-rounds.md`" not in raw_texts.get(f, "")]
@@ -667,13 +738,19 @@ def main():
           "Вопрос владельцу на решение — в окне вопросов, в карточке, в сообщении — начинается с «[<id>]»"
           in flat.get("hq.md", "") and "(`--question`, `--why`, два `--option`, `--recommend`)" in flat.get("hq.md", "")
           and "вопрос о карточке сверх лимита — с id задачи-причины" in flat.get("hq.md", ""))
+    check("hq: решение владельца под согласие исполнителя — одно окно вопросов с [id] в том же ходе, прямое слово — "
+          "consent bind по строке owner-log без пометки (metis-0843)",
+          "— в том же ходе одно окно вопросов с «[<id>]» его вопроса, а не просьба «ответьте цифрой»" in flat.get("hq.md", "")
+          and "`pantheon consent bind <id> --log-at <ЧЧ:ММ[:СС]>`" in flat.get("hq.md", "")
+          and "своего текста не передаёшь; пересказ — не согласие" in flat.get("hq.md", ""))
     # потолок владельца (metis-0444, metis-0588): отказ start/wake не повторять и не обходить; владельцу — --over-cap
     # его командой или поднять потолок; Гестию потолок не держит
-    check("hq: отказ start/wake «недельный потолок владельца» — не повторять и не обходить, владельцу --over-cap "
-          "или поднять потолок, Гестию будить можно (metis-0588)",
+    # metis-0832: владельцу — вопрос «да/нет», а не команда для его терминала
+    check("hq: отказ start/wake «недельный потолок владельца» — не повторять и не обходить, владельцу вопрос «да/нет» "
+          "(подождать или поднять потолок) без команды для терминала, Гестию будить можно (metis-0588, 0832)",
           "`pantheon start` или `pantheon wake` отказали кодом 2 с причиной «недельный потолок владельца…» — не повторяй и "
-          "не обходи (`--over-cap` тебе не дан); владельцу одной строкой: запуск сверх потолка — его командой из его "
-          "терминала с `--over-cap`, или поднять потолок. Гестию будить можно: потолок её не держит;"
+          "не обходи (`--over-cap` тебе не дан); владельцу — вопрос «да/нет» в окне вопросов: подождать недели или "
+          "поднять потолок; команду для его терминала не пиши. Гестию будить можно: потолок её не держит;"
           in flat.get("hq.md", ""))
     argus_md = texts.get("argus.md", "")
     check("argus: в файле роли effort: high и model: opus; знает, что вне ядра его зовут с medium, а шлюз сверяет "
@@ -766,12 +843,58 @@ def main():
     check("настоящие шаблоны плагина собираются, dev-*.tmpl найдены", r.returncode == 0 and len(devs) >= 3)
     for f in devs:
         text = read(os.path.join(out_real, f[:-5] + ".md"))
-        check(f"{f[:-5]}: тестам с портом — pantheon outside test --wait 590, dev-серверу — serve --wait 120",
-              "pantheon outside test --wait 590" in text and "pantheon outside serve --wait 120" in text
+        check(f"{f[:-5]}: тестам с портом — pantheon outside test --wait 590, dev-серверу — serve [--sha …] --wait 120",
+              "pantheon outside test --wait 590" in text
+              and "pantheon outside serve [--sha <коммит>] [--app ИМЯ] --wait 120" in text
               and "pantheon outside stop" in text)
+    # metis-0653: полный набор исполнители и argus сами не гоняют; запускающий делает TaskStop
+    check_longrun(out_real, devs, flat)
+    for f in devs + ["argus.tmpl", "codex-dev.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: полный набор сам не гоняет (metis-0653)",
+              "полный набор тестов репозитория" in text.lower() and "не гоняй" in text)
+    # persist.part: свою фоновую команду ждут уведомлением о конце (metis-0905), субагента — так же концом хода
+    persist = ("Свою фоновую команду ждут её уведомлением о конце", "закончи ход строкой «жду итога <ID>»",
+               "Субагента ждут так же — концом хода")
+    for f in devs + ["codex-dev.tmpl", "workshop.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: persist — свою фоновую команду ждут уведомлением о конце, субагента концом хода (metis-0905)",
+              all(x in text for x in persist) and "Свою фоновую команду ждут на переднем плане" not in text)
+    # persist.part и dev.part проверяются порознь: workshop берёт persist без dev.part, dev-* — оба
+    wtext = " ".join(read(os.path.join(out_real, "workshop.md")).split())
+    check("workshop (persist.part без dev.part): своя фоновая команда — уведомлением, субагент — концом хода; фразы dev.part нет",
+          all(x in wtext for x in persist) and "Есть строка `dev:`" not in wtext)
+    for f in devs:
+        check(f"{f[:-5]}: Bash уводит команду в фон через ~180 с — ждать Monitor/until, не timeout 600000 (metis-0653)",
+              "примерно через 180 с" in " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split()))
+    check("argus: Bash уводит команду в фон через ~180 с (metis-0653)",
+          "примерно через 180 с" in " ".join(read(os.path.join(out_real, "argus.md")).split()))
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: persist — субагента ждут концом хода, не Monitor-ом (metis-0653)",
+              "Субагента ждут так же — концом хода" in flat[f]
+              and ("закончи ход и жди уведомления" in flat[f] or f == "apollo-demo.md"))
+    # dev.part: запрет полного набора привязан к строке dev:
+    for f in devs:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: полный набор не гоняй — только при строке `dev:`, без неё проверка — первая строка (metis-0653)",
+              "Есть строка `dev:`" in text and "Строки `dev:` нет" in text)
+    for f in ("dev-opus", "dev-sonnet", "dev-haiku", "codex-dev"):
+        text = " ".join(read(os.path.join(out_real, f + ".md")).split())
+        check(f"{f}: пункт 6 самопроверки при долгом наборе — узкие тесты и «не проверял: полный набор»",
+              "не проверял: полный набор" in text)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        text = flat[f]
+        check(f"{f}: после отчёта субагента — TaskStop его id, в передаче дел список живых (metis-0653)",
+              "сразу `TaskStop` его id" in text and "список живых субагентов" in text)
     talos_real = read(os.path.join(out_real, "talos.md"))
-    check("talos: dev-сервер — pantheon outside serve --wait 120, гасит stop",
-          "pantheon outside serve --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    check("talos: dev-сервер — pantheon outside serve --sha … --wait 120, гасит stop",
+          "pantheon outside serve --sha <head PR> [--app ИМЯ] --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    # metis-0900: ожидание владельца в окне роли — строка Зевсу до действия (external.part)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "workshop.md", "hq.md"):
+        text = " ".join(read(os.path.join(out_real, f)).split())
+        check(f"{f}: перед подтверждением владельца в окне — строка Зевсу «[id] жду вас в окне <роль>: <что>» (metis-0900)",
+              "сначала строка Зевсу «[id] жду вас в окне <роль>: <что>», потом действие" in text
+              and "Окну Зевса не нужно" in text)
 
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1

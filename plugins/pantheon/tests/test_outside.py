@@ -8,7 +8,7 @@ tests, грязное дерево, команда меняет дерево, п
 установкой зависимостей и его уборка; заявка роли из кэша окна → итог рядом с ней; окно не своего направления,
 мастерская, подложенная ссылка, скрипта нет — отказ; dev-сервер (metis-0614) — свой проход и сторож, своя копия на
 коммите (--sha), порт 4300–4399 мимо портов владельца, не больше двух и отказ при давлении памяти, монорепо и --app,
-dev-ключи из STATE окружением, «стоп» из любого окна и «нет такой заявки», отмена до запуска, срок, сирота по папке
+dev-ключи из STATE окружением, «стоп» только своего окна (metis-0873) и «нет такой заявки», отмена до запуска, срок, сирота по папке
 копии, лимит памяти сервера; безопасность копии: .git-файл роли, конфиг клона с командами, подмодули, worktree
 для тестов после «принять» — через trusted_clone; окружение команды с нуля; профиль; тик зовёт каждый проход только по
 делу; `outside run` из окна Claude Code — отказ; guard не спрашивает; сирот нет: заглушка и задачи «turbo» гаснут сами
@@ -16,15 +16,13 @@ dev-ключи из STATE окружением, «стоп» из любого �
 Порты в окне роли закрыты, поэтому в Пантеоне файл идёт через `pantheon outside test` — под песочницей прохода. Там
 живые пробы sandbox-exec пропускаются (вложенная песочница), а setuid /bin/ps не запускается — вместо него ps-shim на
 libproc с тем же выводом, вместе с rss (O.PS); что он совпадает с ps, проверяется и в обычном прогоне.
+Файл разрезан на три для параллельного прогона (metis-0750): здесь разделы 1–5c и 6 (профиль, заявки, serve, стоп, копия,
+тик и очередь, сироты); запись по дереву и test --sha — test_outside_tree.py, стоп и снятие прогона окном (metis-0873) —
+test_outside_cancel.py. Общая часть (заглушка, ps-shim, помощники) — tests/_outside_common.py, репозиторий kit —
+tests/_outside_kit.py: каждый файл получает свой временный корень, STATE и HOME, общего состояния нет.
 """
-import json
 import os
-import shutil
-import socket
-import subprocess
 import sys
-import tempfile
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -33,260 +31,9 @@ from _py311 import PY311  # pantheon.py — только на Python 3.11+
 if sys.version_info < (3, 11):
     os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)] + sys.argv[1:])
 
-import atexit as _atexit
-_ROOT = os.path.realpath(tempfile.mkdtemp(prefix="outside-root-"))
-tempfile.tempdir = _ROOT
-_atexit.register(shutil.rmtree, _ROOT, True)
+# ruff: noqa: F405
+from _outside_common import *  # noqa: E402,F403  (__all__ модуля — все его имена, в том числе с «_»)
 
-LIBDIR = os.path.join(os.path.dirname(HERE), "lib")
-GUARD_HOOKS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "hooks")
-HOME = os.path.join(_ROOT, "home")
-STATE = os.path.join(HOME, ".local", "state", "pantheon")
-os.makedirs(STATE)
-os.makedirs(os.path.join(HOME, "ai", "pantheon"))
-for k in [k for k in os.environ if k.startswith(("PANTHEON_", "GIT_", "CLAUDE"))]:
-    os.environ.pop(k)
-os.environ.update({"HOME": HOME, "PANTHEON_STATE": STATE, "PANTHEON_HOME": os.path.join(HOME, "ai", "pantheon"),
-                   "PANTHEON_NO_NOTIFY": "1", "PANTHEON_TEST": "1", "TMPDIR": _ROOT, "GH_TOKEN": "secret-gh",
-                   "PANTHEON_FAKE_PRESSURE": "1"})   # давление памяти Mac не решает за тест, сколько серверов поднять
-sys.path.insert(0, LIBDIR)
-import pantheon as P  # noqa: E402
-O = P.outside_mod()
-
-
-def _kill_servers():
-    """Серверы теста гаснут и при падении проверки (мутант без гашения не оставляет http.server висеть)."""
-    for s in O.servers().values():
-        if s.get("pid"):
-            O.kill_group(int(s["pid"]))
-
-
-_atexit.register(_kill_servers)  # раньше rmtree: atexit идёт с конца
-TEST_PROCS = []   # процессы, которые тест порождает сам в своих сессиях (сирота, «чужой», sleep)
-
-
-def fake_pids():
-    """Номера всех процессов заглушки sandbox-exec и задач «turbo» за прогон (пишут сами при старте)."""
-    try:
-        with open(os.path.join(_ROOT, "fake-pids")) as fh:
-            return [int(x) for x in fh.read().split()]
-    except (OSError, ValueError):
-        return []
-
-
-def still_alive(pid, grace=3):
-    """Жив ли процесс через grace с; своего зомби сперва прибрать — он уже не процесс."""
-    end = time.monotonic() + grace
-    while True:
-        try:
-            os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            pass
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        if time.monotonic() >= end:
-            return True
-        time.sleep(0.1)
-
-
-def _kill_leftovers():
-    """Последний рубеж перед rmtree: всё, что тест породил, — SIGKILL (упавшая проверка не оставляет сирот)."""
-    for proc in TEST_PROCS:
-        try:
-            proc.kill()
-            proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    for pid in fake_pids():
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-
-
-_atexit.register(_kill_leftovers)
-
-FAILS = []
-TOTAL = [0]
-
-
-def check(name, cond, extra=""):
-    TOTAL[0] += 1
-    print(("ok   " if cond else "FAIL ") + name + ("" if cond else f"  [{extra}]"))
-    if not cond:
-        FAILS.append(name)
-
-
-MAC = sys.platform == "darwin"
-
-
-def check_mac(name, cond, extra=""):
-    """Случай про libproc или /usr/sbin/lsof macOS: вне macOS (CI на Linux) — строка «пропущено», а не проверка."""
-    if MAC:
-        check(name, cond, extra)
-    else:
-        print(f"пропущено: нужен macOS — {name}")
-
-
-# --- заглушка sandbox-exec: пишет argv и окружение, затем исполняет команду (или изображает npm) ------------------
-REC = os.path.join(_ROOT, "sandbox-calls.jsonl")
-FAKE = os.path.join(_ROOT, "fake-sandbox-exec")
-DEVTREE_PIDS = os.path.join(_ROOT, "devtree-pids")      # «turbo» и его задача (metis-0606)
-HOLD_RELEASE = os.path.join(_ROOT, "hold-release")      # тест «hold» идёт, пока нет этого файла
-FAKE_PIDS = os.path.join(_ROOT, "fake-pids")            # все процессы заглушки и задачи «turbo» — для проверки сирот
-# сторож сирот (metis-0614): заглушка и задача «turbo» живут в своих сессиях, и killpg раннера их не достаёт. Тест упал,
-# убит по таймауту или мутант не гасит сервер — они гаснут сами, когда нет процесса теста или его папки _ROOT
-WATCH = (f"import os as _o, threading as _th, time as _t\n"
-         f"def _watch():\n"
-         f"    while True:\n"
-         f"        _t.sleep(0.5)\n"
-         f"        try:\n"
-         f"            _o.kill({os.getpid()}, 0)\n"
-         f"        except ProcessLookupError:\n"
-         f"            _o._exit(0)\n"
-         f"        except OSError:\n"
-         f"            pass\n"
-         f"        if not _o.path.isdir({_ROOT!r}):\n"
-         f"            _o._exit(0)\n"
-         f"_th.Thread(target=_watch, daemon=True).start()\n"
-         f"with open({FAKE_PIDS!r}, 'a') as _fh:\n"
-         f"    _fh.write(str(_o.getpid()) + '\\n')\n")
-with open(FAKE, "w") as fh:
-    fh.write(f"#!{sys.executable}\n" + WATCH + (r'''
-import json, os, sys, time
-args = sys.argv[1:]
-assert args[0] == "-f", args
-profile, cmd = args[1], args[2:]
-with open(%r, "a") as fh:
-    fh.write(json.dumps({"profile": profile, "cmd": cmd, "cwd": os.getcwd(), "env": dict(os.environ)}) + "\n")
-tail = cmd[-2:]
-if tail == ["run", "dev"]:
-    print("сервер слушает", os.environ["PORT"], flush=True)
-    # не «-m http.server»: его server_bind зовёт socket.getfqdn, а обратный DNS на раннере CI висит дольше
-    # READY_SEC — порт не открывается вовремя (metis-0573)
-    import http.server, socketserver
-    class S(http.server.HTTPServer):
-        def server_bind(self):
-            socketserver.TCPServer.server_bind(self)
-            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
-    S(("127.0.0.1", int(os.environ["PORT"])), http.server.SimpleHTTPRequestHandler).serve_forever()
-    os._exit(0)
-if tail == ["run", "bad"]:
-    print("boom: не собралось", flush=True)
-    os._exit(3)
-if tail == ["run", "slow"]:
-    time.sleep(60)
-    os._exit(0)
-if tail == ["run", "devtree"]:
-    # как turbo (metis-0606): задача — в своей сессии и группе процессов, на SIGTERM не гаснет и держит PORT; сам
-    # «turbo» на SIGTERM выходит, задачу не гасит — killpg группы сервера её не достаёт
-    import subprocess, signal
-    task = (WATCH + "import os, signal, socket\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "s = socket.socket(); s.bind(('127.0.0.1', int(os.environ['PORT']))); s.listen(64)\n"
-            "while True:\n    s.accept()[0].close()\n")
-    # cwd="/": сирота по папке копии её не достаёт — гасит только обход потомков (strays), мутант без него красный
-    kid = subprocess.Popen([sys.executable, "-c", task], start_new_session=True, cwd="/")
-    with open(%r, "a") as fh:
-        fh.write(f"{os.getpid()} {kid.pid}\n")
-    time.sleep(600)
-    os._exit(0)
-if tail == ["run", "nap"]:
-    time.sleep(1.5)
-    os._exit(0)
-if tail == ["run", "hold"]:
-    end = time.time() + 120
-    while time.time() < end and not os.path.exists(%r):
-        time.sleep(0.2)
-    os._exit(0)
-if tail in (["run", "test"], ["run", "check"]):
-    body = json.load(open("package.json"))["scripts"][tail[1]]
-    os.execv("/bin/sh", ["/bin/sh", "-c", body])
-if tail == ["run", "lint"] or cmd[1:2] in (["ci"], ["install"]):
-    print("ok", cmd)
-    os._exit(0)
-os.execvp(cmd[0], cmd)
-''' % (REC, DEVTREE_PIDS, HOLD_RELEASE)).replace("(WATCH + ", f"({WATCH!r} + "))
-os.chmod(FAKE, 0o755)
-O.SANDBOX_EXEC = FAKE
-O.HEAVY = None
-O.READY_SEC = 15
-O.KILL_WAIT = 2
-# свой случайный ряд портов вместо 3200–3299: два test_outside сразу (argus и разработчик) иначе берут один порт, и
-# «сервер поднят» видит чужой слушатель (metis-0606)
-import random as _random  # noqa: E402
-DEFAULT_PORTS = O.SERVER_PORTS
-_pbase = _random.randrange(20000, 48000, 100)
-O.SERVER_PORTS = range(_pbase, _pbase + 100)
-
-
-# setuid /bin/ps под sandbox-exec не запускается: test_outside, идущий через `pantheon outside test` (порты в окне
-# закрыты), иначе не видит групп, памяти и времени старта. Тогда — заменитель на libproc с тем же выводом
-# (pid, ppid, pgid, rss, lstart)
-PS_SHIM = os.path.join(_ROOT, "ps-shim")
-with open(PS_SHIM, "w") as fh:
-    fh.write(f"#!{sys.executable}\n" + r'''
-import ctypes, sys, time
-lib = ctypes.CDLL("/usr/lib/libproc.dylib")
-U = ctypes.c_uint32
-
-
-class BSD(ctypes.Structure):   # struct proc_bsdinfo (sys/proc_info.h), PROC_PIDTBSDINFO = 3
-    _fields_ = [(n, U) for n in ("flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid", "rgid", "svuid",
-                                 "svgid", "rfu")] + [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + \
-               [(n, U) for n in ("nfiles", "pgid", "pjobc", "tdev", "tpgid")] + \
-               [("nice", ctypes.c_int32), ("start", ctypes.c_uint64), ("ustart", ctypes.c_uint64)]
-
-
-def info(pid):
-    b = BSD()
-    ok = lib.proc_pidinfo(pid, 3, ctypes.c_uint64(0), ctypes.byref(b), ctypes.sizeof(b)) == ctypes.sizeof(b)
-    return b if ok else None
-
-
-def rss_kb(pid):   # struct proc_taskinfo: pti_virtual_size, pti_resident_size, …; PROC_PIDTASKINFO = 4
-    t = (ctypes.c_uint64 * 12)()
-    ok = lib.proc_pidinfo(pid, 4, ctypes.c_uint64(0), ctypes.byref(t), ctypes.sizeof(t)) == ctypes.sizeof(t)
-    return t[1] // 1024 if ok else 0
-
-
-args, fields, only = sys.argv[1:], [], None
-for i, a in enumerate(args):
-    if a in ("-o", "-axo"):
-        fields = [f.rstrip("=") for f in args[i + 1].split(",")]
-    if a == "-p":
-        only = [int(args[i + 1])]
-if only is None:
-    n = lib.proc_listallpids(None, 0)
-    buf = (ctypes.c_int * (n + 256))()
-    got = lib.proc_listallpids(buf, ctypes.sizeof(buf))
-    only = list(buf)[:got]
-rows = []
-for pid in only:
-    b = info(pid)
-    if b is None:
-        continue
-    val = {"pid": str(b.pid), "ppid": str(b.ppid), "pgid": str(b.pgid),
-           "lstart": time.strftime("%a %b %e %H:%M:%S %Y", time.gmtime(b.start))}
-    if "rss" in fields:
-        val["rss"] = str(rss_kb(pid))
-    rows.append(" ".join(val[f] for f in fields))
-print("\n".join(rows))
-sys.exit(0 if rows else 1)
-''')
-os.chmod(PS_SHIM, 0o755)
-try:
-    _ps_ok = subprocess.run(["/bin/ps", "-o", "pid=", "-p", str(os.getpid())], capture_output=True).returncode == 0
-except OSError:
-    _ps_ok = False
-if not _ps_ok:
-    print("ЗАМЕНЕНО: /bin/ps под песочницей не запускается — группы и время старта по libproc (ps-shim)")
-    O.PS = PS_SHIM
-# заменитель отдаёт то же, что ps: иначе его поломку увидит только прогон под песочницей
 _me = os.getpid()
 _sh = subprocess.run([PS_SHIM, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True,
                      text=True).stdout.split("\n") if MAC else []
@@ -302,85 +49,6 @@ elif _ps_ok:
     check("ps-shim (libproc): время старта — как у ps (UTC)", _real and _real == _fake, (_real, _fake))
 
 
-def calls():
-    try:
-        with open(REC) as fh:
-            return [json.loads(x) for x in fh]
-    except OSError:
-        return []
-
-
-def git(d, *args):
-    r = subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
-                        *args], capture_output=True, text=True)
-    assert r.returncode == 0, (args, r.stderr)
-    return r.stdout.strip()
-
-
-APP = os.path.join(HOME, "projects", "app")
-OTHER = os.path.join(HOME, "projects", "other")
-REPO = "latark/app"
-PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x", "devtree": "x", "hold": "x", "nap": "x"}}
-
-
-def commit(d, files, msg):
-    for name, text in files.items():
-        p = os.path.join(d, name)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as fh:
-            fh.write(text)
-    git(d, "add", "-A")
-    git(d, "commit", "-q", "-m", msg)
-    return git(d, "rev-parse", "HEAD")
-
-
-for d in (APP, OTHER):
-    os.makedirs(d)
-    git(d, "init", "-q", "-b", "main")
-git(APP, "remote", "add", "origin", "git@github.com:Latark/App.git")
-git(OTHER, "remote", "add", "origin", "https://github.com/latark/other.git")
-GREEN = "import sys; sys.exit(0)\n"
-RED = "import sys; print('тест упал'); sys.exit(1)\n"
-C1 = commit(APP, {"package.json": json.dumps(PKG), ".pantheon-verify": "# проверка\nheavy python3 t.py\n",
-                  "t.py": GREEN, ".gitignore": "node_modules/\n"}, "c1")
-C2 = commit(APP, {"t.py": RED}, "c2 red")
-C3 = commit(APP, {"t.py": GREEN + "# c3\n"}, "c3")
-commit(OTHER, {"t.py": GREEN, ".pantheon-verify": "python3 t.py\n"}, "o1")
-P.write_json(os.path.join(STATE, "domains.json"),
-             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
-RECORDS = os.path.join(STATE, "merge-gate", "records.jsonl")
-NOW = time.time()
-
-
-def accept(sha, repo=REPO, who="argus", age=0, pr=5):
-    os.makedirs(os.path.dirname(RECORDS), exist_ok=True)
-    t = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(NOW - age))
-    rec = {"v": 1, "kind": "accept", "repo": [repo], "pr": pr, "sha": sha,
-           "by": {"agent_type": who, "agent_id": "a", "session_id": "s"}, "cwd": APP, "time": t}
-    with open(RECORDS, "a") as fh:
-        fh.write(json.dumps(rec) + "\n")
-
-
-def gate_records():
-    """Записи журнала глазами настоящего шлюза guard (merge_gate.read_records + _valid)."""
-    code = ("import sys, json; sys.path.insert(0, %r); import guard_rules, merge_gate as m; "
-            "print(json.dumps(m.read_records()))" % GUARD_HOOKS)
-    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
-                       env={"HOME": HOME, "PATH": os.environ["PATH"]})
-    assert r.returncode == 0, r.stderr
-    return json.loads(r.stdout)
-
-
-def tests_for(sha):
-    return [r for r in gate_records() if r["kind"] == "tests" and r["sha"] == sha]
-
-
-def alerts():
-    try:
-        with open(os.path.join(HOME, "ai", "pantheon", "alerts.md")) as fh:
-            return fh.read()
-    except OSError:
-        return ""
 
 
 # --- 1. профиль и команда -----------------------------------------------------------------------------------------
@@ -463,6 +131,17 @@ check("профиль: ~/.npmrc, ~/.netrc закрыты на чтение",
 HEAD_NOTE = "python3 t.py  # .pantheon-verify ветки (HEAD)"
 check("команда: строка .pantheon-verify без heavy, из ветки — с пометкой",
       O.command(os.path.realpath(APP), "test") == (["/bin/sh", "-c", "python3 t.py"], HEAD_NOTE))
+# metis-0653: строка `dev:` — только для исполнителя; outside берёт первую некомментарную строку
+commit(OTHER, {".pantheon-verify": "# полный\npython3 t.py\ndev: python3 narrow.py\n"}, "o2 dev-строка")
+check("команда: строка `dev:` .pantheon-verify outside не берёт — первая некомментарная",
+      O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
+commit(OTHER, {".pantheon-verify": "# только узкая\ndev: python3 narrow.py\npython3 t.py\n"}, "o3 dev-строка первой")
+check("команда: `dev:` первой строкой пропускается, берётся следующая некомментарная",
+      O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
+commit(OTHER, {".pantheon-verify": "dev: python3 narrow.py\n"}, "o4 только dev")
+check("команда: только строка `dev:` — не команда, дальше package.json/pytest (здесь нечем — отказ)",
+      O.command(os.path.realpath(OTHER), "test")[0] is None)
+commit(OTHER, {".pantheon-verify": "python3 t.py\n"}, "o5 вернул")
 check("команда: --script из package.json", O.command(os.path.realpath(APP), "test", "lint")[1] == "npm run lint")
 check("команда: скрипта нет — отказ", O.command(os.path.realpath(APP), "test", "nope")[0] is None)
 check("команда: сервер без скрипта dev — отказ", O.command(os.path.realpath(OTHER), "serve")[0] is None)
@@ -479,106 +158,52 @@ commit(B, {".pantheon-verify": "true\n"}, "ослабил проверку")
 git(B, "update-ref", "refs/remotes/origin/main", base)
 check("команда: .pantheon-verify из origin/main, правка ветки не действует", O.command(B, "test")[1] == "python3 t.py")
 
-# --- 2. тесты после «принять» -------------------------------------------------------------------------------------
+# --- 2. прямой путь: заявка test -> run_test в папке клона (автопрогонов нет, решение владельца 03.11) ----------------
+APPR = os.path.realpath(APP)
+
+
+def direct(rid):
+    return O.run_test(rid, APPR, None, "athena-x", None, [APPR])
+
+
 before = len(calls())
-accept(C3)
-check("тик: есть новое «принять» — проход нужен", O.pending())
-res = O.auto_pass()
-check("принять C3 (HEAD клона): один прогон", len(res) == 1 and res[0].get("code") == 0, res)
+res = direct("direct-c3")
+check("прямой прогон C3 (HEAD): код 0, запись есть", res.get("code") == 0 and res.get("record") is True, res)
 recs = tests_for(C3)
 check("запись tests принята настоящим шлюзом guard", len(recs) == 1, gate_records())
 r0 = recs[0] if recs else {}
-check("запись: repo по remote, pr null, by = проход",
-      r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside", r0)
-check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == os.path.realpath(APP), r0)
+check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == APPR, r0)
+check("запись: repo по remote, pr null, by = проход, window",
+      r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside"
+      and r0.get("by", {}).get("window") == "athena-x", r0)
 c = calls()[before:]
 check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
       len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
 env = c[0]["env"] if c else {}
 check("окружение с нуля: нет GH_TOKEN, есть CI=1 и свой TMPDIR",
-      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT) and env.get("HOME") == os.path.realpath(HOME), sorted(env))
-check("тик: «принять» разобрано — прохода нет", not O.pending())
-check("повтор прохода — без второго прогона", O.auto_pass() == [] and len(tests_for(C3)) == 1)
+      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT)
+      and env.get("HOME") == os.path.realpath(HOME), sorted(env))
 
-# коммит не на HEAD: временный worktree, зависимости, уборка
-before = len(calls())
-accept(C1)
-res = O.auto_pass()
-check("принять C1 (не HEAD): тесты прошли, запись есть", len(res) == 1 and len(tests_for(C1)) == 1, res)
-c = calls()[before:]
-wt = os.path.join(HOME, "Library", "Caches", "pantheon-outside", "wt")
-check("временный worktree вне STATE, сначала npm ci, потом тест",
-      len(c) == 2 and c[0]["cmd"] == ["npm", "ci"] and c[1]["cwd"].startswith(os.path.realpath(wt)), [x["cmd"] for x in c])
-check("временный worktree снят", not os.listdir(wt) and "pantheon-outside" not in git(APP, "worktree", "list"))
-check("клон не тронут: HEAD = C3", git(APP, "rev-parse", "HEAD") == C3)
-
-# красные тесты
-accept(C2)
-res = O.auto_pass()
-check("принять C2 (красный): записи нет", len(tests_for(C2)) == 0 and res and res[0].get("code") == 1, res)
-check("красный: тревога со ссылкой на журнал", f"{REPO}@{C2[:12]}" in alerts() and "pantheon outside status" in alerts())
-check("красный: хвост журнала в итоге", "тест упал" in (res[0].get("tail") or "") if res else False, res)
-
-# не берутся: чужой agent_type, старое, нет копии, уже есть tests
-accept(C1[:-1] + ("0" if C1[-1] != "0" else "1"), who="dev-opus")
-accept("e" * 40, age=2 * 86400)
-accept("f" * 40, repo="latark/nowhere")
-todo = O.auto_todo()
-check("не argus и старше суток — не берутся; нет копии — берётся", todo == [("latark/nowhere", "f" * 40)], todo)
-res = O.auto_pass()
-check("нет копии: тревога, записи нет", "нет копии latark/nowhere" in alerts() and not tests_for("f" * 40), res)
-
-# грязное дерево клона на HEAD: копия не годится, worktree на коммите — чистый
-C4 = commit(APP, {"t.py": GREEN + "# c4\n"}, "c4")
-with open(os.path.join(APP, "t.py"), "a") as fh:
-    fh.write("raise SystemExit(0)  # правка без коммита\n")
-accept(C4)
-before = len(calls())
-O.auto_pass()
-c = calls()[before:]
-check("грязный клон: тест идёт во временном worktree", c and c[-1]["cwd"] != os.path.realpath(APP) and len(tests_for(C4)) == 1,
-      [x["cwd"] for x in c])
-git(APP, "checkout", "--", "t.py")
+# красные тесты: записи нет, хвост журнала в итоге
+C4 = commit(APP, {"t.py": RED}, "c4 red")
+res = direct("direct-c4")
+check("красный: код 1, записи нет", res.get("code") == 1 and not tests_for(C4) and res.get("record") is False, res)
+check("красный: хвост журнала в итоге", "тест упал" in (res.get("tail") or ""), res)
 
 # команда портит дерево — записи нет
 C5 = commit(APP, {"t.py": "open('junk.txt', 'w').write('x')\n"}, "c5 пачкает")
-accept(C5)
-res = O.auto_pass()
+res = direct("direct-c5")
 check("команда изменила дерево: записи нет, причина названа",
-      not tests_for(C5) and "изменила HEAD или дерево" in (res[0].get("why") or ""), res)
+      not tests_for(C5) and res.get("code") == 0 and "изменила HEAD или дерево" in (res.get("why") or ""), res)
 os.remove(os.path.join(APP, "junk.txt"))
 
 # пустая команда в .pantheon-verify — записи нет
 C6 = commit(APP, {".pantheon-verify": "true\n"}, "c6 пустая проверка")
-accept(C6)
-res = O.auto_pass()
-check("пустая команда (true): записи нет", not tests_for(C6) and "ничего не проверяет" in (res[0].get("why") or ""), res)
+res = direct("direct-c6")
+check("пустая команда (true): записи нет", not tests_for(C6) and "ничего не проверяет" in (res.get("why") or ""), res)
 C7 = commit(APP, {".pantheon-verify": "heavy python3 t.py\n", "t.py": GREEN}, "c7")
 
 # --- 3. заявка роли из окна -------------------------------------------------------------------------------------
-CACHE = os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")
-os.makedirs(os.path.join(CACHE, "athena-x", "tmp"))
-os.makedirs(os.path.join(CACHE, "workshop", "tmp"))
-os.makedirs(os.path.join(CACHE, "metis-y", "tmp"))
-
-
-def role_request(window, cwd, *args):
-    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, window, "tmp")
-    old = os.getcwd()
-    os.chdir(cwd)
-    try:
-        rc = O.main(list(args))
-    finally:
-        os.chdir(old)
-        os.environ.pop("PANTHEON_TMP")
-    q = os.path.join(CACHE, window, "outside")
-    ids = sorted(n[:-9] for n in os.listdir(q) if n.endswith(".req.json"))
-    return rc, q, ids[-1] if ids else None
-
-
-def run_pass():
-    return O.cmd_run()
-
 
 rc, q, rid = role_request("athena-x", APP, "test")
 check("заявка роли: в кэше окна, код 0", rc == 0 and rid and os.path.isfile(os.path.join(q, rid + ".req.json")), (rc, rid))
@@ -651,11 +276,6 @@ def _dirty_case(name, mk, want):
     shutil.rmtree(d, ignore_errors=True)
 
 
-def _touch(d, rel, text="x"):
-    os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
-    with open(os.path.join(d, rel), "w") as fh:
-        fh.write(text)
-
 
 _dirty_case("только ?? .claude/worktrees/ — чисто", lambda d: _touch(d, ".claude/worktrees/x/f"), True)
 _dirty_case("?? other.txt — грязно", lambda d: _touch(d, "other.txt"), False)
@@ -667,6 +287,36 @@ _dirty_case("a/.claude/worktrees/ — грязно", lambda d: _touch(d, "a/.cla
 _dirty_case("отслеживаемый файл под worktrees с правкой — грязно",
             lambda d: (_touch(d, ".claude/worktrees/t"), git(d, "add", "-f", ".claude/worktrees/t"),
                        git(d, "commit", "-q", "-m", "t"), _touch(d, ".claude/worktrees/t", "y")), False)
+
+# ссылка node_modules (metis-0721): только неотслеживаемая симлинка в корне, apps/*, packages/* — не грязь
+def _nm_link(rel):
+    return lambda d: (os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True),
+                      os.symlink("/nonexistent-target", os.path.join(d, rel)))
+
+
+_dirty_case("симлинк node_modules в корне — чисто", _nm_link("node_modules"), True)
+_dirty_case("симлинк apps/x/node_modules — чисто", lambda d: (_touch(d, "apps/x/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("apps/x/node_modules")(d)), True)
+_dirty_case("симлинк packages/y/node_modules — чисто", lambda d: (_touch(d, "packages/y/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("packages/y/node_modules")(d)), True)
+_dirty_case("симлинк в корне и ?? other.txt — грязно", lambda d: (_nm_link("node_modules")(d), _touch(d, "other.txt")), False)
+_dirty_case("папка node_modules с файлом — грязно", lambda d: _touch(d, "node_modules/f"), False)
+_dirty_case("файл node_modules — грязно", lambda d: _touch(d, "node_modules"), False)
+_dirty_case("симлинк с другим именем — грязно", _nm_link("modules"), False)
+_dirty_case("симлинк apps/x/y/node_modules глубже — грязно", _nm_link("apps/x/y/node_modules"), False)
+_dirty_case("симлинк nested/node_modules — грязно", _nm_link("nested/node_modules"), False)
+
+# та же функция без git init: разбор вывода status + проверка «это симлинк»
+_td = tempfile.mkdtemp(prefix="tc-", dir=os.environ.get("TMPDIR"))
+os.symlink("/nonexistent-target", os.path.join(_td, "node_modules"))
+os.makedirs(os.path.join(_td, "apps", "x", "node_modules"))
+os.symlink("/nonexistent-target", os.path.join(_td, "apps", "x", "y"))
+check("tree_clean: симлинк node_modules в корне", P.tree_clean("?? node_modules\n", _td) is True)
+check("tree_clean: папка apps/x/node_modules (не симлинк) — грязно", P.tree_clean("?? apps/x/node_modules\n", _td) is False)
+check("tree_clean: ссылка глубже — грязно", P.tree_clean("?? apps/x/y/node_modules\n", _td) is False)
+check("tree_clean: изменённый отслеживаемый — грязно", P.tree_clean(" M node_modules\n", _td) is False)
+check("tree_clean: None — грязно", P.tree_clean(None, _td) is False)
+shutil.rmtree(_td, ignore_errors=True)
 
 # подложенная ссылка вместо заявки — не читается и не исполняется
 q = os.path.join(CACHE, "athena-x", "outside")
@@ -722,118 +372,24 @@ check("outside run с CLAUDE_CODE_ENTRYPOINT: код 2", O.main(["run"]) == 2)
 os.environ.pop("CLAUDE_CODE_ENTRYPOINT")
 
 # --- 4. dev-сервер (metis-0614): свой проход, своя копия на коммите, порт из ряда, не больше двух, стоп откуда угодно -
-import contextlib  # noqa: E402
-import fcntl  # noqa: E402
-import io  # noqa: E402
-import signal  # noqa: E402
-import threading  # noqa: E402
-
-
-def port_open(port):
-    s = socket.socket()
-    s.settimeout(0.5)
-    try:
-        s.connect(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-def serve_pass():
-    """Один круг прохода серверов (без житья сторожем)."""
-    return O.cmd_run_serve(once=True)
-
-
-def say(window, *args):
-    """Команда роли из окна window (None — вне окна, очередь STATE) → (код, вывод)."""
-    if window:
-        os.environ["PANTHEON_TMP"] = os.path.join(CACHE, window, "tmp")
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            rc = O.main(list(args))
-    finally:
-        os.environ.pop("PANTHEON_TMP", None)
-    return rc, buf.getvalue()
-
-
-def wait_for(fn, sec):
-    end = time.monotonic() + sec
-    while time.monotonic() < end:
-        v = fn()
-        if v:
-            return v
-        time.sleep(0.2)
-    return fn()
-
-
-def state(q, rid):
-    return (O.load_result(q, rid) or {}).get("state")
-
-
-def pid_alive(pid, grace=3):
-    end = time.monotonic() + grace
-    while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        if time.monotonic() >= end:
-            return True
-        time.sleep(0.1)
-
-
-def new_request(window, cwd, *args):
-    """Заявка роли → (папка, ID) — новый файл, а не последний по имени (две заявки в одну секунду)."""
-    q = os.path.join(CACHE, window, "outside")
-    before = set(os.listdir(q)) if os.path.isdir(q) else set()
-    rc, q, _ = role_request(window, cwd, *args)
-    return q, next(n[:-9] for n in os.listdir(q) if n.endswith(".req.json") and n not in before)
-
-
-def worktrees(d=APP):
-    return git(d, "worktree", "list", "--porcelain")
-
-
-def work_of(rid):
-    return os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work", rid)
-
-
-def events(rid=None, kind=None):
-    try:
-        rows = [json.loads(x) for x in open(os.path.join(STATE, "logs", "outside.jsonl"))]
-    except OSError:
-        return []
-    return [x for x in rows if (rid is None or x.get("id") == rid) and (kind is None or x.get("kind") == kind)]
-
-
-def kill_all_servers():
-    srv = O.servers()
-    for r, s in srv.items():
-        if s.get("pid"):
-            O.kill_group(int(s["pid"]))
-        O.reap(s.get("work"))
-        O.remove_work(s.get("common"), s.get("work"))
-    O.save_servers({})
 
 
 # порт, занятый слушателем на 0.0.0.0 (чужой http.server, dev-сервер), не свободен: на macOS bind с SO_REUSEADDR
 # на 127.0.0.1 при этом удавался, сервер «поднимался» на чужом порту (metis-0592)
-_wild = socket.socket()
-_wild.bind(("0.0.0.0", 0))
-_wild.listen()
-_wp = _wild.getsockname()[1]
-check("порт под слушателем на 0.0.0.0 не свободен", not O.port_free(_wp))
-_wild.close()
-_lo = socket.socket()
-_lo.bind(("127.0.0.1", 0))
-_lo.listen()
-check("порт под слушателем на 127.0.0.1 не свободен", not O.port_free(_lo.getsockname()[1]))
-_lo.close()
+try:
+    _wild = socket.socket()
+    _wild.bind(("0.0.0.0", 0))
+    _wild.listen()
+    _wp = _wild.getsockname()[1]
+    check("порт под слушателем на 0.0.0.0 не свободен", not O.port_free(_wp))
+    _wild.close()
+    _lo = socket.socket()
+    _lo.bind(("127.0.0.1", 0))
+    _lo.listen()
+    check("порт под слушателем на 127.0.0.1 не свободен", not O.port_free(_lo.getsockname()[1]))
+    _lo.close()
+except PermissionError as e:  # окно роли: bind на локальный порт закрыт песочницей (metis-0773)
+    print(f"пропущено: окно не даёт занять локальный порт ({e}) — случаи «порт под слушателем не свободен»")
 
 # ряд портов: не 3000, не 3100–3199 (разработчики), не 3200 (показ владельцу) — 30.10 landing взял PORT=3200
 check("ряд портов сервера по умолчанию — 4300–4399, без портов владельца",
@@ -903,24 +459,36 @@ check("третий сервер: отказ «уже идут 2 сервера�
       res3.get("state") == "failed" and "уже идут 2 сервера из 2" in res3.get("why", "") and rid in res3.get("why", "")
       and O.result_code(res3) == 75 and len(calls()) == before and not os.path.exists(work_of(rid3)), res3)
 
-# «стоп» из окна координатора (другая папка заявок) — 30.10 стоп лежал в чужой папке, проход его не видел
+# metis-0873 T13 (решение владельца «сузить»): «стоп» сервера — только окно заявки и терминал владельца
 rc, out = say("metis-y", "stop", rid, "--wait", "0")
-check("стоп из другого окна: заявка известна (итог прохода в STATE), «стоп» записан в своей папке, код 0",
-      rc == 0 and os.path.isfile(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+check("T13 стоп чужого сервера из другого окна: «не из этого окна», код 1, «стоп» не записан",
+      rc == 1 and "не из этого окна" in out
+      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+_foreign = os.path.join(CACHE, "metis-y", "outside", rid + ".stop")
+with open(_foreign, "w"):
+    pass
+os.utime(_foreign, (time.time() - 3600, time.time() - 3600))   # старше STOP_ORPHAN_AGE: не «ждёт заявку»
+serve_pass()
+check("T13 serve_stop_foreign_qdir_ignored: метка в папке другого окна — сервер жив, метка убрана, stop-foreign",
+      rid in O.servers() and port_open(port) and not os.path.exists(_foreign)
+      and [e.get("by") for e in events(rid, "stop-foreign")] == [["metis-y"]], events(rid, "stop-foreign"))
+rc, out = say("athena-x", "stop", rid, "--wait", "0")
+check("стоп своего окна: «стоп» записан в своей папке, код 0",
+      rc == 0 and os.path.isfile(os.path.join(CACHE, "athena-x", "outside", rid + ".stop")), (rc, out))
 check("тик: «стоп» — дело проходу серверов", O.pending_serve())
 serve_pass()
 res = O.load_result(q, rid) or {}
-check("стоп из другого окна: погашен, итог stopped в папке заявки, порт свободен",
+check("стоп своего окна: погашен, итог stopped в папке заявки, порт свободен",
       res.get("state") == "stopped" and res.get("why") == "заявка «стоп»" and not port_open(port)
       and rid not in O.servers(), res)
 check("стоп: копия снята (папки нет, git worktree list её не знает), «стоп» убран",
       not os.path.exists(W) and W not in worktrees()
-      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")))
-check("стоп: в журнале — кто просил", [e.get("by") for e in events(rid, "stop")] == [["metis-y"]], events(rid, "stop"))
+      and not os.path.exists(os.path.join(CACHE, "athena-x", "outside", rid + ".stop")))
+check("стоп: в журнале — кто просил", [e.get("by") for e in events(rid, "stop")] == [["athena-x"]], events(rid, "stop"))
 check("второй сервер жив", port_open(res2.get("port") or 0) and rid2 in O.servers())
-rc, out = say("metis-y", "stop", rid)
+rc, out = say("athena-x", "stop", rid)
 check("стоп погашенного: «уже stopped», код 0, без нового «стопа»", rc == 0 and "уже stopped" in out
-      and not os.path.exists(os.path.join(CACHE, "metis-y", "outside", rid + ".stop")), (rc, out))
+      and not os.path.exists(os.path.join(CACHE, "athena-x", "outside", rid + ".stop")), (rc, out))
 
 # «нет такой заявки» — честно, код 1, файла нет
 rc, out = say("athena-x", "stop", "20261101-000000-abcdef", "--wait", "0")
@@ -946,7 +514,9 @@ serve_pass()
 res = O.load_result(q, rid) or {}
 check("стоп заявки в очереди: stopped «отменена», не запущено, копии нет", rc == 0 and res.get("state") == "stopped"
       and "отменена" in res.get("why", "") and len(calls()) == before and not os.path.exists(work_of(rid)), (rc, out, res))
-check("стоп тестов: «это тесты», код 1", say("athena-x", "stop", rid_test_done, "--wait", "0")[0] == 1
+check("стоп законченного теста: «уже …», код 0, «стоп» не записан (metis-0873: отказа «это тесты» нет)",
+      (lambda r: r[0] == 0 and "уже " in r[1] and not os.path.exists(os.path.join(q, rid_test_done + ".stop")))(
+          say("athena-x", "stop", rid_test_done, "--wait", "0"))
       if (rid_test_done := next((n[:-12] for n in sorted(os.listdir(q)) if n.endswith(".result.json")
                                   and (O.load_result(q, n[:-12]) or {}).get("kind") == "test"), None)) else False)
 
@@ -1116,6 +686,83 @@ check("--app у не-монорепо: отказ", state(q, rid) == "failed"
 rc, _, _ = role_request("athena-x", MONO, "serve", "--app", "../x")
 check("--app не по образцу: код 2", rc == 2)
 
+# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (alexbroker: site/)
+SUB = os.path.join(HOME, "projects", "subapp")
+os.makedirs(SUB)
+git(SUB, "init", "-q", "-b", "main")
+git(SUB, "remote", "add", "origin", "https://github.com/latark/subapp.git")
+commit(SUB, {"site/package.json": json.dumps({"name": "site", "scripts": {"dev": "next dev"}}),
+             "site/pnpm-lock.yaml": "", "empty/readme.txt": "x", ".gitignore": "node_modules/\n"}, "s1")
+os.symlink(os.path.join(HOME, "projects"), os.path.join(SUB, "out"))   # ссылка наружу корня
+git(SUB, "add", "out")
+git(SUB, "commit", "-q", "-m", "s2")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/subapp"],
+                          "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+kill_all_servers()
+before = len(calls())
+rc, q, rid = role_request("athena-x", SUB, "serve", "--app", "site")
+serve_pass()
+res = O.load_result(q, rid) or {}
+c = calls()[before:]
+_site = os.path.join(work_of(rid), "site")
+check("0790: --app site без корневого package.json — сервер в site/ (скрипт и cwd)",
+      res.get("state") == "serving" and c and c[-1]["cwd"] == _site and c[-1]["cmd"][-3:] == ["pnpm", "run", "dev"]
+      and c[-1]["env"].get("PORT") == str(res.get("port")), (res, [(x["cmd"], x["cwd"]) for x in c]))
+check("0790: зависимости ставятся в site/, а не в корне копии",
+      c and c[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"] and c[0]["cwd"] == _site, c[:1])
+kill_all_servers()
+rc, q, rid = role_request("athena-x", SUB, "serve")
+serve_pass()
+check("0790: без --app и без корневого package.json — прежний отказ",
+      state(q, rid) == "failed" and "нет package.json" in (O.load_result(q, rid) or {}).get("why", ""))
+for _bad, _why in (("out", "вне корня"), ("empty", "нет package.json"), ("nope", "не монорепо")):
+    rc, q, rid = role_request("athena-x", SUB, "serve", "--app", _bad)
+    serve_pass()
+    check(f"0790: --app {_bad}: отказ ({_why})", state(q, rid) == "failed"
+          and _why in (O.load_result(q, rid) or {}).get("why", ""), O.load_result(q, rid))
+# metis-0804 (argus #302, мутант m8 «без app != "."»): --app . в репозитории с корневым package.json без workspaces —
+# корневой скрипт, папка запуска и установка зависимостей — корень копии, а не приложение-подпапка
+ROOTP = os.path.join(HOME, "projects", "rootpkg")
+os.makedirs(ROOTP)
+git(ROOTP, "init", "-q", "-b", "main")
+git(ROOTP, "remote", "add", "origin", "https://github.com/latark/rootpkg.git")
+commit(ROOTP, {"package.json": json.dumps({"name": "rootpkg", "scripts": {"dev": "next dev"}}),
+               "pnpm-lock.yaml": "", ".gitignore": "node_modules/\n"}, "r1")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/subapp", "~/projects/rootpkg"],
+                          "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+kill_all_servers()
+before = len(calls())
+rc, q, rid = role_request("athena-x", ROOTP, "serve", "--app", ".")
+serve_pass()
+res = O.load_result(q, rid) or {}
+c = calls()[before:]
+check("0804: --app . без монорепо, с корневым package.json — корневой скрипт в корне копии",
+      res.get("state") == "serving" and c and c[-1]["cwd"] == work_of(rid) and c[-1]["cmd"][-3:] == ["pnpm", "run", "dev"],
+      (res, [(x["cmd"], x["cwd"]) for x in c]))
+check("0804: --app . без монорепо — зависимости ставятся в корне копии",
+      c and c[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"] and c[0]["cwd"] == work_of(rid), c[:1])
+kill_all_servers()
+rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "../x")
+check("0790: --app ../x: код 2", rc == 2)
+rc, _, _ = role_request("athena-x", SUB, "serve", "--app", "/etc")
+check("0790: --app абсолютный путь: код 2", rc == 2)
+_sw = os.path.realpath(tempfile.mkdtemp(prefix="sw-"))
+_sx = os.path.realpath(tempfile.mkdtemp(prefix="sx-"))
+os.makedirs(os.path.join(_sw, "site"))
+json.dump({"scripts": {"dev": "x"}}, open(os.path.join(_sw, "site", "package.json"), "w"))
+json.dump({"scripts": {"dev": "x"}}, open(os.path.join(_sx, "package.json"), "w"))
+os.symlink(_sx, os.path.join(_sw, "ext"))            # папка-ссылка наружу, с package.json
+os.makedirs(os.path.join(_sw, "pk"))
+os.symlink(os.path.join(_sx, "package.json"), os.path.join(_sw, "pk", "package.json"))   # package.json-ссылка наружу
+check("0790: serve_command(site) — папка site", O.serve_command(_sw, None, "site")[2] == os.path.join(_sw, "site"))
+check("0790: serve_command(абсолютный) — отказ", O.serve_command(_sw, None, "/etc")[0] is None)
+check("0790: serve_command(..) — отказ", O.serve_command(_sw, None, "../x")[0] is None
+      and O.serve_command(_sw, None, "site/../../x")[0] is None)
+check("0790: serve_command(ссылка-папка наружу) — отказ", O.serve_command(_sw, None, "ext")[0] is None)
+check("0790: serve_command(package.json-ссылка наружу) — отказ", O.serve_command(_sw, None, "pk")[0] is None)
+
 # разбор workspaces и выбор приложения — без запуска
 _ws = os.path.realpath(tempfile.mkdtemp(prefix="ws-"))
 for rel, pj in {"package.json": {"name": "r"}, "apps/a/package.json": {"name": "a", "scripts": {"dev": "x"}},
@@ -1168,6 +815,88 @@ check("requests: проход серверов берёт serve, test остаё
       and os.path.isfile(os.path.join(q, rid_ts + ".req.json")) and not os.path.exists(os.path.join(q, rid_sv + ".req.json")))
 got = O.requests(("test",))
 check("requests: проход тестов берёт test", [x[4] for x in got] == [rid_ts])
+
+# metis-0706: не плодить дубли заявок test; тест в очереди снимается stop; --wait ждёт уже поданную заявку
+def dup_say(window, cwd, *args):
+    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, window, "tmp")
+    old, buf = os.getcwd(), io.StringIO()
+    os.chdir(cwd)
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = O.main(list(args))
+    finally:
+        os.chdir(old)
+        os.environ.pop("PANTHEON_TMP")
+    return rc, buf.getvalue()
+
+
+def req_ids(q):
+    return sorted(n[:-9] for n in os.listdir(q) if n.endswith(".req.json")) if os.path.isdir(q) else []
+
+
+q, rid_a = new_request("athena-x", APP, "test")
+head_now = O.head_state(APP)[0]
+check("дубль: в заявке test записан head", (O.load_result(q, rid_a) or {}).get("sha") == head_now, O.load_result(q, rid_a))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): тот же head и папка, прежняя в очереди — новой заявки нет, ID прежней в выводе, код 0",
+      rc == 0 and req_ids(q) == [rid_a] and rid_a in out, (rc, out, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): и третья заявка не плодит", rc == 0 and req_ids(q) == [rid_a], (rc, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test", "--script", "lint")
+ids = req_ids(q)
+check("дубль (а): другой --script — отдельная заявка", rc == 0 and len(ids) == 2 and rid_a in ids, (rc, out, ids))
+for i in ids:
+    if i != rid_a:
+        os.unlink(os.path.join(q, i + ".req.json"))
+        O.save_result(q, i, {"state": "failed", "kind": "test", "why": "проба"})
+# заявка взята проходом и идёт (running, итог свежий) — тоже живая
+os.unlink(os.path.join(q, rid_a + ".req.json"))
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP})
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): прежний тест идёт (running) — новой заявки нет", rc == 0 and req_ids(q) == [] and rid_a in out,
+      (rc, out, req_ids(q)))
+rc, out = say("athena-x", "stop", rid_a, "--wait", "0")
+check("M1 stop идущего теста: «стоп» записан в своей папке, код 0 (metis-0873: отказа «это тесты» нет)",
+      rc == 0 and "это тесты" not in out and os.path.isfile(os.path.join(q, rid_a + ".stop")), (rc, out))
+os.remove(os.path.join(q, rid_a + ".stop"))
+# running старше срока теста — висяк, не блокирует
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP,
+                         "updated": "2020-01-01 00:00"})
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("дубль (а): висящий running старше срока не мешает — заявка новая", rc == 0 and len(ids) == 1 and ids[0] != rid_a,
+      (rc, out, ids))
+rid_b = ids[0]
+# другой head — отдельная заявка (регрессия)
+git(APP, "commit", "--allow-empty", "-q", "-m", "m0706")
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+rid_c = ids[0] if len(ids) == 1 and rid_b not in ids else None
+res_b = O.load_result(q, rid_b) or {}
+check("регрессия: другой head — новая заявка, а не дубль; прежняя на предке снята «заменена» (metis-0852)",
+      rc == 0 and rid_c and res_b.get("state") == "stopped" and res_b.get("replaced_by") == rid_c
+      and f"заменена заявкой {rid_c}" in res_b.get("why", ""), (rc, out, ids, res_b))
+check("регрессия: у второй свой head", (O.load_result(q, rid_c) or {}).get("sha") != head_now, O.load_result(q, rid_c))
+# (б) stop снимает тест, пока он в очереди
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+res = O.load_result(q, rid_c) or {}
+check("stop (б): тест в очереди снят — код 0, заявки нет, итог stopped «отменена»",
+      rc == 0 and rid_c not in req_ids(q) and res.get("state") == "stopped" and "отменена" in res.get("why", ""),
+      (rc, out, res))
+run_pass()
+check("stop (б): снятый тест и заменённый проход не запускает",
+      (O.load_result(q, rid_c) or {}).get("state") == "stopped"
+      and (O.load_result(q, rid_b) or {}).get("replaced_by") == rid_c, (O.load_result(q, rid_c), O.load_result(q, rid_b)))
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+check("stop (б): повтор — «уже stopped», код 0", rc == 0 and "stopped" in out, (rc, out))
+git(APP, "reset", "-q", "--hard", head_now)
+# (в) --wait с уже поданной заявкой ждёт её итог
+q, rid_w = new_request("athena-x", APP, "test")
+threading.Timer(1.0, run_pass).start()
+rc, out = dup_say("athena-x", APP, "test", "--wait", "30")
+res = O.load_result(q, rid_w) or {}
+check("--wait (в): ждёт итог прежней заявки, новой нет, код — её кода",
+      res.get("state") in O.FINAL and req_ids(q) == [] and rc == O.result_code(res) and rid_w in out, (rc, out, res))
 
 # «стоп» без сервера и заявки: старый убирается, молодой ждёт
 _qa = os.path.join(CACHE, "athena-x", "outside")
@@ -1340,36 +1069,6 @@ check("head_state не заходит в подмодуль: clean-фильтр 
 subprocess.run(["git", "-C", SUPER, "status", "--porcelain"], capture_output=True)
 check("проба честная: голый git status фильтр подмодуля исполняет", os.path.exists(_smark))
 
-# 7. тесты после «принять»: worktree роли, чей .git-файл ведёт не в <клон>/.git/worktrees/<имя>, не берётся — его git
-# исполнил бы конфиг, который пишет роль; берётся временный worktree прохода
-_S = C1   # не HEAD клона: иначе find_checkout возьмёт сам клон
-WT7 = os.path.join(_wtd, "wt7")
-git(APP, "worktree", "add", "-q", "--detach", WT7, _S)
-_fc = O.find_checkout(REPO, _S)
-check("find_checkout: настоящий worktree клона реестра — Repo с gitdir клона",
-      isinstance(_fc[0], O.Repo) and _fc[0].clone == os.path.realpath(APP)
-      and _fc[0].gitdir.startswith(os.path.join(os.path.realpath(APP), ".git", "worktrees") + "/")
-      and isinstance(_fc[1], O.Repo), _fc)
-_EG = os.path.join(_ROOT, "evil-gitdir", "wt7")
-_real_gd = open(os.path.join(WT7, ".git")).read().split(":", 1)[1].strip()
-shutil.copytree(_real_gd, _EG)
-with open(os.path.join(_EG, "commondir"), "w") as fh:
-    fh.write(os.path.join(os.path.realpath(APP), ".git") + "\n")
-_saved7 = open(os.path.join(WT7, ".git")).read()
-with open(os.path.join(WT7, ".git"), "w") as fh:
-    fh.write(f"gitdir: {_EG}\n")
-check("проба честная: git по подложенному gitdir видит тот же HEAD и чистое дерево",
-      O.head_state(os.path.realpath(WT7)) == (_S, True), O.head_state(os.path.realpath(WT7)))
-_fc = O.find_checkout(REPO, _S)
-check("find_checkout: .git-файл worktree ведёт в gitdir роли — копия не берётся, только клон для временного worktree",
-      _fc[0] is None and _fc[1] == os.path.realpath(APP), _fc)
-with open(os.path.join(WT7, ".git"), "w") as fh:
-    fh.write(_saved7)
-git(APP, "worktree", "remove", "--force", WT7)
-shutil.rmtree(WT7, ignore_errors=True)
-shutil.rmtree(os.path.dirname(_EG), ignore_errors=True)
-git(APP, "worktree", "prune")
-
 for _p in (FAKE1, EVILB):
     shutil.rmtree(_p, ignore_errors=True)
 for _p in (FAKE2, FAKE3):
@@ -1423,12 +1122,13 @@ def _gone(proc, timeout=5):
 
 
 _orphan = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                            "time.sleep(120)"], cwd=work_of(rid_s), start_new_session=True)
+                            "time.sleep(120)"], cwd=work_of(rid_s) if os.path.isdir(work_of(rid_s)) else _ROOT,
+                           start_new_session=True)   # копии нет, если сервер не поднялся: FAIL выше, а не обрыв файла (metis-0731)
 TEST_PROCS.append(_orphan)
 t0 = time.monotonic()
-rc, out = say("metis-y", "stop", rid_s)
+rc, out = say("athena-x", "stop", rid_s)
 dt = time.monotonic() - t0
-check("стоп из другого окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
+check("стоп своего окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
       rc == 0 and "stopped" in out and dt <= 10 and th_t.is_alive() and state(q, rid_t) == "running",
       (rc, out, round(dt, 1)))
 check("стоп: порт свободен, погашены сервер, «turbo» и задача в своей группе, копия снята",
@@ -1491,6 +1191,43 @@ check("стоп во время установки: установка прер�
       res.get("state") == "stopped" and dt < 15 and not pid_alive(_slow_prepare.pid, 0) and not O.servers()
       and not os.path.exists(work_of(rid)), (res, round(dt, 1)))
 
+# metis-0731: fork/exec под нагрузкой даёт временный отказ — установка зависимостей повторяется, а не падает «кодом -1»
+import errno as _errno
+_pd = tempfile.mkdtemp(prefix="prep-", dir=_ROOT)
+with open(os.path.join(_pd, "package.json"), "w") as fh:
+    fh.write('{"name": "p"}')
+_real_popen, _real_wrap, _real_sleep = subprocess.Popen, O.wrap, time.sleep
+
+
+def _prep_with(errnos):
+    """prepare() с Popen, отказывающим по очереди errnos; → (код, число запусков, журнал)."""
+    calls = []
+
+    def popen(argv, *a, **kw):
+        calls.append(argv)
+        if len(calls) <= len(errnos):
+            raise OSError(errnos[len(calls) - 1], os.strerror(errnos[len(calls) - 1]))
+        return _real_popen([sys.executable, "-c", "pass"], **{k: v for k, v in kw.items() if k != "env"})
+
+    rid_p = "20261103-000000-" + os.urandom(3).hex()
+    subprocess.Popen, O.wrap, time.sleep = popen, (lambda argv, *a, **kw: argv), (lambda t: None)
+    try:
+        code = O.prepare(_pd, rid_p)
+    finally:
+        subprocess.Popen, O.wrap, time.sleep = _real_popen, _real_wrap, _real_sleep
+    with open(O.root("runs", rid_p + ".log")) as fh:
+        return code, len(calls), fh.read()
+
+
+_code, _n, _log = _prep_with([_errno.EAGAIN, _errno.ETXTBSY])
+check("установка: временный отказ запуска (EAGAIN, ETXTBSY) — повтор, код 0", _code == 0 and _n == 3, (_code, _n, _log))
+_code, _n, _log = _prep_with([_errno.EAGAIN] * 3)
+check("установка: отказ на каждой попытке — код -1 после 3 запусков, причина в журнале",
+      _code == -1 and _n == 3 and "установка не запустилась: BlockingIOError" in _log, (_code, _n, _log))
+_code, _n, _log = _prep_with([_errno.ENOENT])
+check("установка: постоянный отказ (ENOENT) — без повтора, код -1, причина в журнале",
+      _code == -1 and _n == 1 and "установка не запустилась: FileNotFoundError" in _log, (_code, _n, _log))
+
 # --- номер процесса сервера занял чужой (metis-0606, Д-2 argus): не гасить ни его, ни его детей в своих группах ----
 _spawn = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
           "'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"]
@@ -1511,6 +1248,119 @@ for _p in _kid:
         os.kill(_p, 9)
 alien.kill()
 alien.wait()
+
+# --- ps не запустить (sandbox-exec): strays и kill_group идут по libproc (metis-0786) ---
+if not MAC:
+    print("пропущено: нужен macOS — strays и kill_group без ps (libproc)")
+else:
+    _ps_keep = O.PS
+    O.PS = os.path.join(_ROOT, "нет-ps-0786")
+    try:
+        _par = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, "
+                                "'-c', 'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"],
+                                start_new_session=True)
+        TEST_PROCS.append(_par)
+        _kid2 = []
+        for _ in range(40):
+            time.sleep(0.1)
+            _kid2 = [p for p, (pp, g, _r) in O.ps_table().items() if pp == _par.pid]
+            if _kid2:
+                break
+        TEST_PROCS.extend(_kid2 and [_Gk(p) for p in _kid2] or [])
+        _st = O.strays(_par.pid)
+        _me_row = O.ps_table().get(os.getpid(), (0, 0, 0))
+        check("без ps: ps_table видит процессы с pid, ppid, pgid, rss", _me_row[:2] == (os.getppid(), os.getpgrp())
+              and _me_row[2] > 0, _me_row)
+        check("без ps: strays находит потомка в своей группе", bool(_kid2) and [p for p, _g in _st] == _kid2, (_st, _kid2))
+        O.kill_group(_par.pid)
+        time.sleep(0.3)
+        check("без ps: kill_group гасит и главу, и потомка в своей группе",
+              _par.poll() is not None and _kid2 and not any(pid_alive(p, 0) for p in _kid2), (_par.poll(), _kid2))
+    finally:   # O.PS возвращается и при исключении (metis-0804)
+        O.PS = _ps_keep
+
+# --- ps_table (metis-0804, долги argus #300): откат на ps, полнота таблицы, повтор с большим буфером ----------------
+# ложная libproc в O._libproc (работает на любой ОС) и ps-шим в O.PS
+
+
+class _FakeLib:
+    """proc_listallpids / proc_pidinfo как в libproc: listall(None, 0) — число pid, listall(buf, байт) — сколько
+    записано (не больше, чем влезло); pidinfo заполняет struct по byref."""
+
+    def __init__(self, count, query=None, info_ok=True, fill=None):
+        self.count, self.query, self.info_ok, self.fill = count, query, info_ok, fill
+
+    def proc_listallpids(self, buf, size):
+        if buf is None:
+            return self.count if self.query is None else self.query
+        if self.fill is not None:
+            return self.fill
+        n = min(self.count, size // 4)
+        for i in range(n):
+            buf[i] = 1000 + i
+        return n
+
+    def proc_pidinfo(self, p, flavor, _arg, ref, size):
+        if not self.info_ok:
+            return 0
+        obj = ref._obj
+        if flavor == 3:
+            obj.ppid, obj.pgid = 1, p
+        else:
+            obj[1] = 2048 * 1024
+        return size
+
+
+_ps_sh = os.path.join(_ROOT, "ps-0804.sh")
+with open(_ps_sh, "w") as fh:
+    fh.write("#!/bin/sh\nprintf '  11 1 11 100\\n  12 11 11 200\\n'\n")
+os.chmod(_ps_sh, 0o755)
+_ps_keep, _lp_keep = O.PS, O._libproc
+O.PS = _ps_sh
+try:
+    for _label, _lib in (("proc_listallpids вернула 0", _FakeLib(0)), ("proc_listallpids вернула -1", _FakeLib(-1)),
+                         ("заполнение списка вернуло -1", _FakeLib(5, fill=-1)),
+                         ("список есть, а pidinfo не ответила ни на один pid (пустая таблица)", _FakeLib(5, info_ok=False))):
+        O._libproc = lambda _l=_lib: (_l, 1e-9)
+        _t = O.ps_table()
+        check(f"0804: {_label} — таблица по ps, а не пустая", _t == {11: (1, 11, 100), 12: (11, 11, 200)}, _t)
+    O._libproc = lambda: None
+    check("0804: libproc нет — таблица по ps", O.ps_table() == {11: (1, 11, 100), 12: (11, 11, 200)})
+    # полнота: все 450 процессов в таблице (буфер размером в pid, а не в байтах — мутант терял 189 из 450)
+    O._libproc = lambda: (_FakeLib(450), 1e-9)
+    _t = O.ps_table()
+    check("0804: libproc отдала 450 процессов — в таблице все 450", sorted(_t) == list(range(1000, 1450))
+          and _t[1000] == (1, 1000, 2048), (len(_t), sorted(_t)[:3]))
+    # буфер оказался полон (процессы появились между вызовами): повтор с большим — ничего не потеряно
+    O._libproc = lambda: (_FakeLib(900, query=10), 1e-9)
+    _t = O.ps_table()
+    check("0804: буфер полон — повтор с большим, все 900 процессов в таблице", sorted(_t) == list(range(1000, 1900)),
+          len(_t))
+finally:
+    O.PS, O._libproc = _ps_keep, _lp_keep
+# живая сверка (macOS, ps запускается): свои процессы по ps есть в таблице libproc, с допуском на гонку и зомби
+if MAC:
+    try:
+        _ps_own = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True, text=True,
+                                 timeout=10).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        _ps_own = []
+    _lp = O._ps_table_libproc()
+    if len(_ps_own) < 20 or not _lp:
+        print("пропущено: ps не запустить в этой среде — сверка libproc с ps вне песочницы")
+    else:
+        def _alive0804(p):
+            try:
+                os.kill(p, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+        # под нагрузкой (pr353-red-1) процессы рождаются и гаснут между ps и libproc: потеря — только у ещё живых
+        _miss = [p for p in map(int, _ps_own) if p not in _lp and _alive0804(p)]
+        check("0804: libproc видит свои процессы — потеря живых не больше 5% + 5 (зомби, гонка)",
+              len(_miss) <= 5 + len(_ps_own) // 20, (len(_miss), len(_ps_own), _miss[:10]))
 
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
 TEST_PROCS.append(leader)
@@ -1744,11 +1594,426 @@ got = json.loads(r.stdout) if r.returncode == 0 else None
 check("guard: `pantheon outside serve` — не dev-сервер (pnpm dev — да)", got and got[0] is None and got[1], r.stdout + r.stderr)
 check("guard: `pantheon outside test` — не привилегированная команда", got and got[2] == [], got)
 
+# --- 5b. заявки по одной (metis-0716); автопрогонов нет (03.11) ---------------------------------------------------
+# заявки по одной: убитый заход не теряет остальные (2а), неснимаемая заявка не крутит заход
+_h = O.handle
+got = []
+rc, q, r1 = role_request("athena-x", APP, "test")
+time.sleep(1.1)   # время заявки — с точностью до секунды: вторая позже первой
+# metis-0706: такой же test (тот же head и папка) отдал бы второй заявке id первой — вторая нужна отдельная, с другим --script
+rc, q, r2 = role_request("athena-x", APP, "test", "--script", "lint")
+
+
+def kill_after_first(qdir, window, rid, req):
+    got.append(rid)
+    raise SystemExit(9)   # заход убит посреди первой заявки
+
+
+O.handle = kill_after_first
+try:
+    O.run_test_queue()
+except SystemExit:
+    pass
+O.handle = _h
+check("заход прерван на первой заявке: её .req.json снят, вторая лежит в очереди",
+      got == [r1] and not os.path.exists(os.path.join(q, r1 + ".req.json"))
+      and os.path.exists(os.path.join(q, r2 + ".req.json")), (got, r1, r2))
+os.remove(os.path.join(q, r2 + ".req.json"))
+rc, q, r3 = role_request("athena-x", APP, "test")
+_u = O._take_in
+O._take_in = lambda dfd, name: False   # снять заявку не удаётся (или её уже сняло окно)
+got = []
+O.handle = lambda qdir, window, rid, req: got.append(rid)
+t0 = time.time()
+O.run_test_queue()
+O.handle, O._take_in = _h, _u
+check("заявку не снять: заход заканчивается, заявка не запускается и не крутит цикл", got == [] and time.time() - t0 < 30, got)
+os.remove(os.path.join(q, r3 + ".req.json"))
+
+# порядок заявок: по времени из id и по кругу между окнами, req["time"] (пишет клиент) не в счёт
+qa = os.path.join(CACHE, "athena-x", "outside")
+qb = os.path.join(CACHE, "metis-y", "outside")
+
+
+def mkreq(qd, rid, when):
+    with open(os.path.join(qd, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": APP, "time": when}, fh)
+
+
+EARLY = "2000-01-01T00:00:00+0000"
+mkreq(qa, "20261102-120001-aaaaaa", EARLY)       # окно ставит себе давнее время
+mkreq(qa, "20261102-120002-aaaaab", EARLY)
+mkreq(qb, "20261102-120000-bbbbbb", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+order = [x[4] for x in O.requests(("test",))]
+check("порядок заявок: по id, а не по времени клиента, по кругу между окнами (по одной от окна за круг)",
+      order == ["20261102-120000-bbbbbb", "20261102-120001-aaaaaa", "20261102-120002-aaaaab"], order)
+mkreq(qa, "20261102-120001-aaaaaa", EARLY)
+mkreq(qa, "20261102-120002-aaaaab", EARLY)
+mkreq(qb, "20261102-120003-bbbbbc", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+order = [x[4] for x in O.requests(("test",))]
+check("круг между окнами: у окна две заявки раньше, но вторая идёт после заявки другого окна",
+      order == ["20261102-120001-aaaaaa", "20261102-120003-bbbbbc", "20261102-120002-aaaaab"], order)
+
+# круг между окнами в основном пути (run_test_queue берёт по одной заявке): a1, b, a2, a3, а не a1, a2, a3, b
+mkreq(qa, "20261102-130001-aaaaaa", EARLY)
+mkreq(qa, "20261102-130002-aaaaab", EARLY)
+mkreq(qa, "20261102-130003-aaaaac", EARLY)
+mkreq(qb, "20261102-130004-bbbbbb", EARLY)
+_h, _got = O.handle, []
+O.handle = lambda qdir, window, rid, req: _got.append(rid[-6:])
+O.run_test_queue()
+O.handle = _h
+check("run_test_queue: круг между окнами сквозь заходы limit=1 — a1, b, a2, a3",
+      _got == ["aaaaaa", "bbbbbb", "aaaaab", "aaaaac"], _got)
+
+# потерянная заявка и зомби running: чинит только заход под замком outside-run
+qa = os.path.join(CACHE, "athena-x", "outside")
+
+
+def put_result(rid, res, age=0):
+    fp = os.path.join(qa, rid + ".result.json")
+    with open(fp, "w") as fh:
+        json.dump({"id": rid, **res}, fh)
+    os.utime(fp, (time.time() - age, time.time() - age))
+
+
+put_result("20261102-101010-aaaaaa", {"state": "queued", "kind": "test", "url": "http://evil", "note": "подложено окном"}, age=900)
+put_result("20261102-101010-bbbbbb", {"state": "queued", "kind": "test"}, age=30)
+put_result("20261102-101010-cccccc", {"state": "queued", "kind": "test"}, age=900)
+with open(os.path.join(qa, "20261102-101010-cccccc.req.json"), "w") as fh:
+    fh.write("{}")
+O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test", "sha": "a" * 40})   # как пишет заход
+put_result("20261102-101010-gggggg", {"state": "running", "kind": "test"}, age=900)   # подложено окном
+put_result("20261102-101010-a1a1a1", {"state": "running", "kind": "test"})   # старая запись runs/ без qdir
+P.write_json(O.root("runs", "20261102-101010-a1a1a1.json"), {"id": "20261102-101010-a1a1a1", "state": "running", "kind": "test"})
+put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=900)
+put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
+P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
+_sv = (O._queued_ids, O.overdue_accepts, O._stale)
+O._queued_ids, O.overdue_accepts, O._stale = (lambda kinds=(): []), (lambda *a, **k: []), (lambda t=None: [])
+check("тик: одни итоги-зомби (queued без заявки, running в runs/) — дело проходу тестов", O.pending_test() is True)
+with P.lock("outside-run", block=False):
+    check("тик: заход жив (замок взят) — зомби не повод для pending_test", O.pending_test() is False)
+O._queued_ids, O.overdue_accepts, O._stale = _sv
+with P.lock("outside-run", block=False):
+    check("тик: заход жив (замок взят) — зомби не повод", not O._zombies())
+O.recover_results()
+st = {x: (O.load_result(qa, "20261102-101010-" + x) or {}) for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg", "a1a1a1")}
+check("после починки зомби в pending_test нет", not O._zombies())
+check("потеряна: queued без .req.json старше 5 мин → failed «заявка потеряна»",
+      st["aaaaaa"].get("state") == "failed" and "потеряна" in st["aaaaaa"].get("why", ""), st["aaaaaa"])
+check("queued свежее 5 мин и queued с лежащей заявкой — не тронуты",
+      st["bbbbbb"].get("state") == "queued" and st["cccccc"].get("state") == "queued", (st["bbbbbb"], st["cccccc"]))
+check("зомби: running из runs/ (записал заход) → failed «заход прерван», итог — минимальный объект",
+      st["dddddd"].get("state") == "failed" and "прерван" in st["dddddd"].get("why", "")
+      and set(st["dddddd"]) == {"id", "kind", "state", "why", "updated"}, st["dddddd"])
+check("running, подложенный окном (в runs/ нет) — не тронут",
+      st["gggggg"].get("state") == "running", st["gggggg"])
+check("потерянная: чужие поля из result.json окна (url, note) в итог не копируются",
+      set(st["aaaaaa"]) == {"id", "kind", "state", "why", "updated"}, st["aaaaaa"])
+check("serve (queued и running) проход тестов не трогает", st["eeeeee"].get("state") == "queued"
+      and st["ffffff"].get("state") == "running", (st["eeeeee"], st["ffffff"]))
+check("старая запись runs/ без qdir: итог в очереди окна тоже стал failed (status не врёт running)",
+      st["a1a1a1"].get("state") == "failed" and "прерван" in st["a1a1a1"].get("why", ""), st["a1a1a1"])
+check("running только в runs/ (без итога в очереди) → failed",
+      P.read_json(O.root("runs", "20261102-101010-a0a0a0.json"), {}).get("state") == "failed")
+O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test"})
+check("cmd_run (замок свободен) чинит зомби сам",
+      run_pass() == 0 and O.load_result(qa, "20261102-101010-dddddd").get("state") == "failed")
+for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg", "a1a1a1"):
+    for ext in ("result.json", "req.json"):
+        if os.path.exists(os.path.join(qa, f"20261102-101010-{x}.{ext}")):
+            os.remove(os.path.join(qa, f"20261102-101010-{x}.{ext}"))
+os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
+os.remove(O.root("runs", "20261102-101010-dddddd.json"))
+os.remove(O.root("runs", "20261102-101010-a1a1a1.json"))
+
+# сторож (metis-0723): running дольше срока при живом заходе — снять; queued с заявкой дольше срока — одна тревога
+_alerts = []
+_pa = P.alert
+P.alert = lambda text, who="pantheon": _alerts.append(text)
+HOLD = ("import fcntl,os,subprocess,sys,time;"
+        "fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_APPEND);fcntl.flock(fd,fcntl.LOCK_EX);"
+        "k=subprocess.Popen(['sleep','300'],start_new_session=True,stdin=-3,stdout=-3,stderr=-3);print(k.pid,flush=True);time.sleep(300)")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    time.sleep(0.05)
+    try:
+        return os.waitpid(pid, os.WNOHANG) == (0, 0)
+    except ChildProcessError:
+        return True
+
+
+def holder_start():
+    os.makedirs(P.path("locks"), exist_ok=True)
+    h = subprocess.Popen([sys.executable, "-I", "-c", HOLD, P.path("locks", "outside-run.lock")],
+                         stdout=subprocess.PIPE, text=True)
+    return h, int(h.stdout.readline())
+
+
+def age_runs(rid, age):
+    fp = O.root("runs", rid + ".json")
+    os.utime(fp, (time.time() - age, time.time() - age))
+
+
+WQ, WR, WF, WL = ("20261102-111111-" + x for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd"))
+put_result(WQ, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)
+with open(os.path.join(qa, WQ + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WF, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED - 600)    # срок не прошёл
+with open(os.path.join(qa, WF + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WL, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)    # без заявки — не дело сторожа
+check("сторож: queued с заявкой дольше срока — due, моложе срока и без заявки — нет",
+      O._watch_due() == [("queued", qa, WQ)], O._watch_due())
+check("сторож: queued — одна тревога, итог не тронут",
+      O.watchdog() == 1 and len(_alerts) == 1 and WQ in _alerts[0] and O.load_result(qa, WQ).get("state") == "queued", _alerts)
+check("сторож: после тревоги queued не повод тику", not O._watch_due())
+check("сторож: повторные проходы (в том числе cmd_run) тревоги не повторяют",
+      O.watchdog() == 0 and run_pass() == 0 and len(_alerts) == 1, _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test", "sha": "a" * 40})
+_h0 = O._run_holder
+h, kid = holder_start()
+O._run_holder = lambda: h.pid
+O.watchdog()
+check("сторож: running в пределах срока при живом заходе — не тронут",
+      O.load_result(qa, WR).get("state") == "running" and alive(h.pid) and alive(kid) and len(_alerts) == 1)
+age_runs(WR, O.WATCH_RUNNING + 60)
+check("сторож: running дольше срока — due", O._watch_due() == [("running", qa, WR)], O._watch_due())
+n = O.watchdog()
+h.wait(timeout=10)
+rs = O.load_result(qa, WR)
+check("сторож: running дольше срока при живом заходе → failed «проверка заявок: дольше», заход и его группа убиты",
+      n == 1 and rs.get("state") == "failed" and "проверка заявок: дольше" in rs.get("why", "") and not alive(h.pid) and not alive(kid)
+      and set(rs) == {"id", "kind", "state", "why", "updated"}, (n, rs))
+check("сторож: на снятие одна тревога, status видит итог", len(_alerts) == 2 and WR in _alerts[1]
+      and P.read_json(O.root("runs", WR + ".json"), {}).get("state") == "failed", _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test"})
+age_runs(WR, O.WATCH_RUNNING + 60)
+O.watchdog()
+check("сторож: захода нет (замок свободен) — running не снимает, его чинит recover_results",
+      O.load_result(qa, WR).get("state") == "running" and len(_alerts) == 2)
+h, kid = holder_start()
+O._run_holder = lambda: None
+O.watchdog()
+O.watchdog()
+check("сторож: замок держит не определить — тревога раз, процесс не тронут, итог тот же",
+      len(_alerts) == 3 and alive(h.pid) and O.load_result(qa, WR).get("state") == "running", _alerts)
+O._run_holder = _h0
+if MAC:
+    check("_run_holder: lsof находит держателя замка", O._run_holder() == h.pid, O._run_holder())
+h.kill()
+h.wait()
+os.kill(kid, 9)
+P.alert = _pa
+for x in (WQ, WR, WF, WL):
+    for ext in ("result.json", "req.json"):
+        if os.path.exists(os.path.join(qa, f"{x}.{ext}")):
+            os.remove(os.path.join(qa, f"{x}.{ext}"))
+    for ext in ("json", "alerted"):
+        if os.path.exists(O.root("runs", f"{x}.{ext}")):
+            os.remove(O.root("runs", f"{x}.{ext}"))
+
+
+# --- тревога дежурному: «принять» argus без tests дольше часа; автопрогонов нет (решение владельца 03.11) ---------
+_cp = os.path.join(STATE, "autoclose-prs.json")
+_saved = open(_cp).read() if os.path.exists(_cp) else None
+if os.path.exists(_cp):
+    os.remove(_cp)
+HEADA = commit(APP, {"t.py": GREEN + "# al-run\n"}, "al-run")   # коммит без записи tests
+accept(HEADA, repo="latark/al-run", age=7200)
+n0, pend0 = len(calls()), O.pending_test()
+run_pass()
+O.run_test_queue()
+check("проход без заявки тесты не запускает, даже при «принять» старше часа на открытом head: прогонов нет, записи нет",
+      len(calls()) == n0 and not tests_for(HEADA), (len(calls()) - n0, tests_for(HEADA)))
+for _n in ("auto_pass", "auto_todo", "run_auto", "auto_due", "early_todo", "heads_due", "find_checkout", "waiting_keys"):
+    check(f"автопрогонов нет: O.{_n} удалена", not hasattr(O, _n))
+a_ = P.read_json(O.root("auto.json"), {})
+check("«принять» старше часа + открытый head → дело для тика и одна тревога с repo@sha12 и номером PR",
+      pend0 and O.pending_test() is False and a_.get("alerted", {}).get(f"latark/al-run@{HEADA}")
+      and alerts().count(f"latark/al-run@{HEADA[:12]}") == 1 and "(PR #100)" in alerts(), (pend0, alerts()[-300:]))
+run_pass()
+run_pass()
+check("повторные проходы: тревога на (repo, sha) одна", alerts().count(f"latark/al-run@{HEADA[:12]}") == 1, alerts()[-400:])
+check("после тревоги тик не будится", not O.pending_test())
+
+AL = {c: c * 40 for c in "abcdefg"}
+accept(AL["a"], repo="latark/al-new", age=1800)
+check("«принять» 30 мин назад (<1 ч): ни дела, ни тревоги",
+      O.overdue_accepts() == [] and O.alert_overdue() == 0 and AL["a"][:12] not in alerts() and not O.pending_test())
+accept(AL["b"], repo="latark/al-tests", age=7200)
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/al-tests"], "pr": None, "sha": AL["b"],
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}) + "\n")
+accept(AL["c"], repo="latark/al-dev", who="dev-opus", age=7200)
+accept(AL["d"], repo="latark/al-old", age=2 * 86400)
+check("есть запись tests, «принять» не от argus, старше суток: тревоги нет",
+      O.overdue_accepts() == [] and O.alert_overdue() == 0 and not any(AL[c][:12] in alerts() for c in "bcd"))
+accept(AL["e"], repo="latark/al-moved", age=7200)
+os.remove(_cp)
+open_pr("latark/al-moved", AL["f"])      # PR ушёл вперёд: «принять» было на другой head
+check("head уже не открыт у PR: тревоги нет", O.overdue_accepts() == [] and O.alert_overdue() == 0)
+os.remove(_cp)
+accept(AL["g"], repo="latark/al-nocache", age=7200)
+os.remove(_cp)
+check("кэша открытых PR нет: журнал не читается, тревоги нет", O.overdue_accepts() == [] and not O.pending_test())
+accept(AL["g"], repo="latark/al-stale", age=7200)
+c_ = json.load(open(_cp))
+c_["fetched"] = time.time() - 2 * 3600
+json.dump(c_, open(_cp, "w"))
+check("кэш старше часа (gh не ответил): тревоги нет", O.overdue_accepts() == [])
+c_["fetched"] = time.time()
+c_["errors"] = {"latark/al-stale": "gh не ответил"}
+json.dump(c_, open(_cp, "w"))
+check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
+if _saved is not None:
+    with open(_cp, "w") as fh:
+        fh.write(_saved)
+elif os.path.exists(_cp):
+    os.remove(_cp)
+
+# --- 5c. перед стартом заявки test: устаревший head и дубли (metis-0726) -------------------------------------------
+_cp = os.path.join(STATE, "autoclose-prs.json")
+_saved = open(_cp).read() if os.path.exists(_cp) else None
+qa = os.path.join(CACHE, "athena-x", "outside")
+HEADA = git(APP, "rev-parse", "HEAD")
+
+
+put_cache(old_heads={"Latark/App": {HEADA: 5}}, prs={"Latark/App": [{"number": 5, "head": NEWH}]})
+n0 = len(calls())
+r_st = one_request()
+run_pass()
+res = O.load_result(qa, r_st) or {}
+check("0726: HEAD папки — бывший head открытого PR, у PR другой head → failed «head устарел», прогона нет",
+      res.get("state") == "failed" and "head устарел, подай на текущий" in res.get("why", "")
+      and NEWH[:12] in res.get("why", "") and len(calls()) == n0, (res, len(calls()) - n0))
+r_lint = one_request(script="lint")
+run_pass()
+check("0726: --script на бывшем head идёт (проверка для себя, не для шлюза)",
+      (O.load_result(qa, r_lint) or {}).get("state") == "done" and len(calls()) == n0 + 1)
+for label, kw in (("кэша нет", None), ("кэш старше часа", {"fetched": time.time() - 2 * 3600}),
+                  ("gh не ответил по репозиторию", {"errors": {"latark/app": "x"}}),
+                  ("SHA не бывший head (коммит не пушили)", {"old": {"latark/app": {"8" * 40: 5}}}),
+                  ("PR закрыт (в open_prs его нет)", {"prs": {"latark/app": [{"number": 6, "head": NEWH}]}})):
+    if kw is None:
+        os.remove(_cp)
+    else:
+        put_cache(old_heads=kw.get("old", {"latark/app": {HEADA: 5}}),
+                  prs=kw.get("prs", {"latark/app": [{"number": 5, "head": NEWH}]}),
+                  fetched=kw.get("fetched"), errors=kw.get("errors"))
+    n1 = len(calls())
+    r_ok = one_request()
+    run_pass()
+    res = O.load_result(qa, r_ok) or {}
+    check(f"0726: {label} — прогон как раньше", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+
+# Д3: SHA — бывший head PR #5 и при этом head другого открытого PR (#7) в том же кэше — не устарел, прогон
+put_cache(old_heads={"Latark/App": {HEADA: 5}},
+          prs={"Latark/App": [{"number": 5, "head": NEWH}, {"number": 7, "head": HEADA.upper()}]})
+n1 = len(calls())
+r_ok = one_request()
+run_pass()
+res = O.load_result(qa, r_ok) or {}
+check("0726: бывший head #5 стал head #7 — не устарел, прогон", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+# force-push назад: PR #5 снова на старом head, old_heads его ещё помнит
+put_cache(old_heads={"Latark/App": {HEADA: 5}}, prs={"Latark/App": [{"number": 5, "head": HEADA}]})
+n1 = len(calls())
+r_ok = one_request()
+run_pass()
+res = O.load_result(qa, r_ok) or {}
+check("0726: force-push назад — старый head снова текущий, прогон", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+put_cache(old_heads={"Latark/App": {HEADA: 5}},
+          prs={"Latark/App": [{"number": 5, "head": NEWH}, {"number": 7, "head": HEADA}]})
+check("0726: stale_head напрямую: head другого открытого PR — None", O.stale_head(APP, HEADA) is None)
+
+# дубли: три заявки на одну папку и одна с --script — идёт первая и lint, две другие failed «дубль <первая>»
+os.remove(_cp)
+n1 = len(calls())
+r_d = [one_request() for _ in range(3)]
+r_dl = one_request(script="lint")
+qk = os.path.join(CACHE, "metis-y", "outside")
+r_other = one_request(qd=qk)   # чужое окно: папка не его — отказ своим путём, не дубль
+run_pass()
+st = {r: O.load_result(qa, r) or {} for r in r_d + [r_dl]}
+check("0726: дубли на ту же папку — в работу одна (первая), прогон один",
+      st[r_d[0]].get("state") == "done" and st[r_d[0]].get("code") == 0 and len(calls()) == n1 + 2,
+      (st[r_d[0]], len(calls()) - n1))
+check("0726: остальные — failed «дубль <id первой>», с командой итога",
+      all(st[r].get("state") == "failed" and st[r].get("why", "").startswith(f"дубль {r_d[0]}")
+          and f"итог у заявки {r_d[0]} в окне athena-x" in st[r]["why"] and "outside status" not in st[r]["why"]
+          for r in r_d[1:]), [st[r] for r in r_d[1:]])
+check("0726: снятый дубль и --wait: код 75 («итога ещё нет»), а не 1",
+      all(O.result_code(st[r]) == 75 for r in r_d[1:]) and O.result_code({"state": "failed", "why": "x"}) == 1,
+      [O.result_code(st[r]) for r in r_d[1:]])
+check("0726: заявка с другим --script — не дубль, идёт", st[r_dl].get("state") == "done", st[r_dl])
+check("0726: заявка чужого окна на ту же папку — не дубль (отказ «не из папок направления»)",
+      "не из папок направления" in (O.load_result(qk, r_other) or {}).get("why", ""))
+# другая папка того же репозитория на том же HEAD (worktree) — тоже дубль
+WT2 = os.path.join(APP, "..", "app-wt2")
+git(APP, "worktree", "add", "-q", "--detach", os.path.realpath(WT2), HEADA)
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/app-wt2"], "metis-y": ["~/projects/other"]}})
+r_a = one_request()
+one_request.n += 1
+r_b = f"20261103-0{one_request.n:05d}-c0c0c0"
+with open(os.path.join(qa, r_b + ".req.json"), "w") as fh:
+    json.dump({"v": 1, "id": r_b, "kind": "test", "dir": os.path.realpath(WT2),
+               "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+n1 = len(calls())
+run_pass()
+check("0726: worktree того же репозитория на том же HEAD — дубль",
+      (O.load_result(qa, r_b) or {}).get("why", "").startswith(f"дубль {r_a}") and len(calls()) == n1 + 1,
+      (O.load_result(qa, r_b), len(calls()) - n1))
+# Д1: worktree того же репозитория на другом HEAD — не дубль
+WT2R = os.path.realpath(WT2)
+
+
+def req_dir(d):
+    one_request.n += 1
+    rid = f"20261103-0{one_request.n:05d}-c0c0c0"
+    with open(os.path.join(qa, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": d, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+    return rid
+
+
+git(WT2R, "commit", "-q", "--allow-empty", "-m", "wt2 свой коммит")
+r_a = req_dir(APP)
+r_b = req_dir(WT2R)
+n1 = len(calls())
+run_pass()
+rb = O.load_result(qa, r_b) or {}
+check("0726: worktree того же репозитория на другом HEAD — не дубль, идёт своим прогоном",
+      rb.get("state") == "done" and not rb.get("dup") and len(calls()) == n1 + 2, (rb, len(calls()) - n1))
+# тот же HEAD, но дерево грязное — не дубль (итог — «дерево не чистое», а не «дубль»)
+git(WT2R, "reset", "-q", "--hard", HEADA)
+with open(os.path.join(WT2R, "dirty.txt"), "w") as fh:
+    fh.write("x")
+r_a = req_dir(APP)
+r_b = req_dir(WT2R)
+run_pass()
+rb = O.load_result(qa, r_b) or {}
+check("0726: тот же HEAD, дерево грязное — не дубль",
+      not rb.get("dup") and not rb.get("why", "").startswith("дубль") and "не чистое" in rb.get("why", ""), rb)
+os.remove(os.path.join(WT2R, "dirty.txt"))
+git(APP, "worktree", "remove", "--force", os.path.realpath(WT2))
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
+
+
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()
 _left = [p for p in fake_pids() if still_alive(p)]
 check("тесты не оставляют процессов: заглушка sandbox-exec и задачи «turbo» погашены", fake_pids() and not _left,
       (_left, len(fake_pids())))
 
-print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
+print(f"{TOTAL[0] - len(FAILS) - len(SKIPPED_BIND)} из {TOTAL[0]} прошли"
+      + (f", пропущено при закрытом bind: {len(SKIPPED_BIND)}" if SKIPPED_BIND else ""))
 sys.exit(1 if FAILS else 0)
+

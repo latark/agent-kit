@@ -37,7 +37,7 @@ def check(name, ok, detail=""):
 DIRS = '''[[direction]]
 name = "metis-pantheon"
 project = "Пантеон"
-folders = ["~/projects/agent-kit", "~/.claude"]
+folders = ["~/ai/agent-kit", "~/.claude"]
 
 [[direction]]
 name = "beta-dir"
@@ -111,7 +111,7 @@ def main():
         r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "X", "--text", "тело задачи", "--project", bad)
         check(f"--project «{bad[:20]}»: отказ, код 1, файл не создан",
               r.returncode == 1 and "directions.toml" in r.stderr and snapshot(home) == before, (r.returncode, r.stderr[-200:]))
-    st = run(env, "task", "new", "--direction", "metis-pantheon", "--type", "story", "--title", "Пачка", "--text", "тело задачи")
+    st = run(env, "task", "new", "--direction", "metis-pantheon", "--type", "story", "--done-when", "пункт", "--title", "Пачка", "--text", "тело задачи")
     check("story без --project: проект направления", st.returncode == 0 and proj(home, st.stdout.split()[0]) == "Пантеон", st.stderr)
 
     # --- check ---
@@ -197,7 +197,7 @@ def main():
 
 def pure():
     """Чистые функции (без CLI)."""
-    dirs = [{"name": "metis-pantheon", "project": "Пантеон", "folders": ["~/projects/agent-kit"]},
+    dirs = [{"name": "metis-pantheon", "project": "Пантеон", "folders": ["~/ai/agent-kit"]},
             {"name": "a-one", "project": "P", "folders": ["~/projects/shared"]},
             {"name": "b-two", "project": "Q", "folders": ["~/projects/shared"]}]
     al = T.project_aliases(dirs)

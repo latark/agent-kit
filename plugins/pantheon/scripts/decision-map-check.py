@@ -28,6 +28,10 @@ STATES = {"план", "есть", "частично", "вы", "не сейчас
 NEED_CHECK = {"план", "частично", "вы"}
 TEMP_WORDS = re.compile(r"(на время|\bвременно\b|пока так|до пересмотра|проверить в пилоте)", re.IGNORECASE)
 QUOTED = re.compile(r"«[^»]*»")
+# «ak/<плагин>/…» — файл кода agent-kit: рабочая копия ~/ai/agent-kit (metis-0899), пока её нет на этом Mac —
+# клон маркетплейса с тем же main
+AGENT_KIT = "~/ai/agent-kit"
+AGENT_KIT_CLONE = "~/.claude/plugins/marketplaces/agent-kit"
 
 
 def parse_rows(text):
@@ -46,7 +50,9 @@ def expand(path):
     path = path.strip("`")
     if path.startswith("ak/"):
         parts = path.split("/", 2)
-        return os.path.expanduser(f"~/projects/agent-kit/plugins/{parts[1]}/{parts[2] if len(parts) > 2 else ''}")
+        kit = os.path.expanduser(AGENT_KIT)
+        kit = kit if os.path.isdir(kit) else os.path.expanduser(AGENT_KIT_CLONE)
+        return os.path.join(kit, "plugins", parts[1], parts[2] if len(parts) > 2 else "")
     if path.startswith("ms/"):
         return os.path.expanduser("~/projects/mac-setup/" + path[3:])
     if path.startswith("роль "):

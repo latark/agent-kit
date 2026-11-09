@@ -531,9 +531,8 @@ def test_limit_skips_stopped_and_paused():
 def test_pantheon_wake_sees_limited():
     e = Env()
     e.direction_tasks = e.task("hermes-site")  # открытая задача направления
-    a = e.limited("hermes-site")
+    e.limited("hermes-site")
     LIM = at(2026, 10, 19, 8, 0)
-    run = lambda t: (e.now(t), io.StringIO())
 
     def wake(t):
         e.now(t)
@@ -578,6 +577,258 @@ def test_wake_waiting():
     e.task("athena-shop")
     AW.wake_waiting(e.agents_list, [], DOMS, MON)
     check(not e.calls, f"разбудил не ждущую: {e.calls}")
+
+
+def _transcript(e, a, lines):
+    """Транскрипт сессии a там, где его ищет P.transcript_path: ~/.claude/projects/<cwd с «-»>/<sessionId>.jsonl."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "w") as fh:
+        for x in lines:
+            fh.write(json.dumps(x) + "\n")
+    return p
+
+
+def _sub(tp, n, mtime, finished=False):
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    for f, body in ((f"agent-{n}.jsonl", "{}\n"),
+                    (f"agent-{n}.meta.json", json.dumps({"name": f"dev-{n}", **({"finished": True} if finished else {})}))):
+        p = os.path.join(d, f)
+        open(p, "w").write(body)
+        os.utime(p, (mtime, mtime))
+
+
+def _state(e, a, **kw):
+    """state.json задания сессии a (его пишет Claude Code): ~/.claude/jobs/<id>/state.json."""
+    json.dump({"state": a["state"], **kw}, open(os.path.join(e.home, ".claude", "jobs", a["id"], "state.json"), "w"))
+
+
+def _wake_live(e, name):
+    log = os.path.join(e.state, "logs", "start.log")
+    rows = open(log).read().splitlines() if os.path.exists(log) else []
+    return [r for r in rows if f"wake-live\t{name}\t" in r]
+
+
+def test_wake_waiting_live_work_0864():
+    """metis-0864: 05.11 окно metis-pantheon четыре раза ждало вашего «да» (blocked), а возобновление ждущих раз в час
+    поднимало его заново: вопрос пропадал, субагенты гибли. Ждущее окно с работой не будят — строка wake-live в
+    start.log: ждёт разрешения (waitingFor), открытый tool_use в журнале, фоновые задачи (inFlight), живой субагент
+    (meta.json без finished, журнал после старта процесса). Свободное — будят, как прежде."""
+    use = {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "gh pr checks 318"}}]}}
+    res = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}}
+    cases = (
+        ("waitingFor permission", lambda e, a: a.update(waitingFor="permission prompt"), "ждёт разрешения"),
+        ("открытый tool_use", lambda e, a: _transcript(e, a, [use]), "ход не закончен: Bash → gh pr checks 318"),
+        ("inFlight", lambda e, a: _state(e, a, inFlight={"tasks": 2, "queued": 0}), "фоновые задачи: 2"),
+        ("subagents в claude agents", lambda e, a: a.update(subagents=1), "субагенты или фоновые задачи"),
+        ("живой субагент", lambda e, a: _sub(_transcript(e, a, [use, res]), "x1", MON - 1200), "живые субагенты: dev-x1"),
+    )
+    for what, setup, why in cases:
+        e = Env()
+        a = e.agent("hermes-site", "blocked", needs="waiting for your answer")
+        e.task("hermes-site")
+        setup(e, a)
+        AW.wake_waiting(e.agents_list, [], DOMS, MON)
+        rows = _wake_live(e, "hermes-site")
+        check(not e.calls and not e.gate_calls and rows and why in rows[-1],
+              f"0864: {what} — ждущее окно разбужено или нет строки wake-live: {e.calls} {rows}")
+    # свободное: tool_use закрыт, субагенты закончили, оборваны прошлым перезапуском (журнал до старта процесса, но
+    # моложе LIVE_SUBAGENT_MAX) или молчат дольше 3 ч (журнал после старта)
+    for what, started, subs in (
+            ("закончил и оборван до старта", MON - 3600, (("f1", MON - 600, True), ("d1", MON - 3605, False))),
+            ("молчит 4 ч", MON - 5 * 3600, (("s1", MON - 4 * 3600, False),))):
+        e = Env()
+        a = e.agent("hermes-site", "blocked", needs="waiting for your answer", inFlight={"tasks": 0, "queued": 0})
+        a["startedAt"] = started * 1000
+        e.task("hermes-site")
+        tp = _transcript(e, a, [use, res])
+        for n, mt, fin in subs:
+            _sub(tp, n, mt, finished=fin)
+        AW.wake_waiting(e.agents_list, [], DOMS, MON)
+        check(len(e.calls) == 1 and not _wake_live(e, "hermes-site"),
+              f"0864: свободное ждущее окно ({what}) не разбужено: {e.calls} {_wake_live(e, 'hermes-site')}")
+    # процесса нет (noProcess) — обрывать нечего, будим и с открытым tool_use
+    e = Env()
+    a = e.agent("hermes-site", "blocked", needs="waiting for your answer")
+    a["noProcess"] = True
+    e.task("hermes-site")
+    _transcript(e, a, [use])
+    AW.wake_waiting(e.agents_list, [], DOMS, MON)
+    check(len(e.calls) == 1, f"0864: окно без процесса с открытым tool_use не разбужено: {e.calls}")
+
+
+def _ans(text="готово", mid=None):
+    m = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    if mid:
+        m["id"] = mid
+    return {"type": "assistant", "message": m}
+
+
+def _use(tid, cmd, mid=None, name="Bash"):
+    m = {"role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": {"command": cmd}}]}
+    if mid:
+        m["id"] = mid
+    return {"type": "assistant", "message": m}
+
+
+def _res(tid):
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}}
+
+
+def _wake_once(setup, started=None):
+    """Одно ждущее окно hermes-site с задачей в очереди; setup(e, a) готовит журнал; → (e, строки wake-live)."""
+    e = Env()
+    a = e.agent("hermes-site", "blocked", needs="waiting for your answer", inFlight={"tasks": 0, "queued": 0})
+    if started is not None:
+        a["startedAt"] = started * 1000
+    e.task("hermes-site")
+    setup(e, a)
+    AW.wake_waiting(e.agents_list, [], DOMS, MON)
+    return e, _wake_live(e, "hermes-site")
+
+
+def test_live_work_last_answer_0864():
+    """Ревью argus #332 Д1: открытым считается только tool_use последнего ответа. 05.11 окно могло оборвать ход на
+    вызове (сирота без tool_result) и жить дальше — с прежним правилом оно числилось занятым навсегда и не будилось.
+    Один ответ — записи с одним message.id (параллельные вызовы); запись боковой ветки ответа не меняет."""
+    user = {"type": "user", "message": {"role": "user", "content": "продолжай"}}
+    free = (
+        ("сирота, за ним ход с ответом", [_use("t0", "gh pr checks 1"), user, _use("t1", "ls"), _res("t1"), _ans()]),
+        ("сирота, за ним текстовый ответ", [_use("t0", "gh pr checks 1"), user, _ans("понял")]),
+    )
+    for what, lines in free:
+        e, rows = _wake_once(lambda e, a, ls=lines: _transcript(e, a, ls))
+        check(len(e.calls) == 1 and not rows, f"Д1 {what}: окно не разбужено: {e.calls} {rows}")
+    busy = (
+        ("сирота раньше, открыт вызов последнего ответа", [_use("t0", "old"), user, _use("t2", "make test")],
+         "Bash → make test"),
+        # параллельные вызовы одного ответа: первый открыт, второй закрыт — ход не закончен
+        ("параллельные вызовы", [_use("tA", "pytest", mid="m1"), _use("tB", "ls", mid="m1"), _res("tB")],
+         "Bash → pytest"),
+        ("боковая ветка после вызова", [_use("t3", "sleep 9"), {**_ans("суб"), "isSidechain": True}], "Bash → sleep 9"),
+    )
+    for what, lines, why in busy:
+        e, rows = _wake_once(lambda e, a, ls=lines: _transcript(e, a, ls))
+        check(not e.calls and rows and f"ход не закончен: {why}" in rows[-1], f"Д1 {what}: {e.calls} {rows}")
+    # blocked_why (сводка «ждёт вас») берёт тот же вызов: сирота — не причина
+    e = Env()
+    a = e.agent("hermes-site", "blocked")
+    _transcript(e, a, [_use("t0", "gh pr checks 1"), user, _ans("понял")])
+    a["waitingFor"] = "ответ на вопрос о плане"
+    check(P.watch_mod().blocked_why(a) == "ответ на вопрос о плане", f"Д1: blocked_why взял сироту: "
+          f"{P.watch_mod().blocked_why(a)}")
+
+
+def test_live_subagent_start_and_limits_0864():
+    """Ревью argus #332 Д2 и Д4. Д2: claude agents без видимого процесса (между снятием старого воркера и выдачей нового,
+    из окна с песочницей) пишет startedAt = createdAt задания — он старше прошлых перезапусков, и субагенты, оборванные
+    ими, держали бы окно до 3 ч. Старт — самое позднее из startedAt, воркера в реестре демона (roster.json) и записи
+    реестра имён. Д4: журнал в пределах LIVE_SUBAGENT_GRACE после старта — закрыт прежним процессом; субагент, молчащий
+    2 ч (ждёт outside test), — живой, пока не старше LIVE_SUBAGENT_MAX."""
+    tp_of = lambda e, a: _transcript(e, a, [_use("t1", "ls"), _res("t1"), _ans()])  # noqa: E731
+
+    def roster(e, a, started):
+        d = os.path.join(e.home, ".claude", "daemon")
+        os.makedirs(d, exist_ok=True)
+        json.dump({"workers": {a["id"]: {"pid": 1, "startedAt": started * 1000}}}, open(os.path.join(d, "roster.json"), "w"))
+
+    def registry(e, a, started):
+        d = os.path.join(e.home, ".claude", "sessions")
+        os.makedirs(d, exist_ok=True)
+        json.dump({"pid": 4242, "sessionId": a["sessionId"], "startedAt": started * 1000},
+                  open(os.path.join(d, "4242.json"), "w"))
+
+    # Д2: startedAt записи — createdAt задания (старый), respawn час назад; субагент оборван им (журнал до respawn)
+    for what, mark in (("реестр демона", roster), ("реестр имён", registry)):
+        def setup(e, a, mark=mark):
+            mark(e, a, MON - 3600)
+            _sub(tp_of(e, a), "k1", MON - 3700)
+        e, rows = _wake_once(setup)
+        check(len(e.calls) == 1 and not rows, f"Д2 ({what}): оборванный прошлым перезапуском субагент держит окно: "
+              f"{e.calls} {rows}")
+    # старая запись реестра демона не отодвигает старт назад: startedAt свежий, roster — прошлого процесса
+    def setup(e, a):
+        roster(e, a, MON - 100000)
+        _sub(tp_of(e, a), "k2", MON - 3700)
+    e, rows = _wake_once(setup, started=MON - 3600)
+    check(len(e.calls) == 1 and not rows, f"Д2: старая запись roster вернула оборванного субагента: {e.calls} {rows}")
+    # живой субагент нового процесса держит окно и при записи roster
+    def setup(e, a):
+        roster(e, a, MON - 3600)
+        _sub(tp_of(e, a), "l1", MON - 1200)
+    e, rows = _wake_once(setup)
+    check(not e.calls and rows and "живые субагенты: dev-l1" in rows[-1], f"Д2: живой субагент не держит: {rows}")
+
+    # Д4: журнал через 60 с после старта (в пределах GRACE) — закрыт прежним процессом при снятии: не держит
+    e, rows = _wake_once(lambda e, a: _sub(tp_of(e, a), "g1", MON - 3600 + 60), started=MON - 3600)
+    check(len(e.calls) == 1 and not rows, f"Д4: журнал в пределах grace держит окно: {e.calls} {rows}")
+    # через 180 с после старта — уже нынешний процесс
+    e, rows = _wake_once(lambda e, a: _sub(tp_of(e, a), "g2", MON - 3600 + 180), started=MON - 3600)
+    check(not e.calls and rows and "dev-g2" in rows[-1], f"Д4: журнал после grace не держит окно: {e.calls} {rows}")
+    # молчит 2 ч (меньше LIVE_SUBAGENT_MAX) — живой
+    e, rows = _wake_once(lambda e, a: _sub(tp_of(e, a), "m1", MON - 7200), started=MON - 5 * 3600)
+    check(not e.calls and rows and "dev-m1" in rows[-1], f"Д4: субагент молчит 2 ч — окно разбужено: {e.calls} {rows}")
+
+
+def test_wake_waiting_log_on_change_0864():
+    """Ревью argus #332 Д3: wake-live и wake-gate пишутся в start.log только при смене причины, а не каждый проход.
+    Причина ушла (окно не ждёт) и вернулась — снова строка."""
+    e = Env()
+    a = e.agent("hermes-site", "blocked", needs="waiting for your answer", inFlight={"tasks": 0, "queued": 0})
+    a["waitingFor"] = "permission prompt"
+    e.task("hermes-site")
+    log = os.path.join(e.state, "logs", "start.log")
+    rows = lambda: [r.split("\t", 1)[1] for r in (open(log).read().splitlines() if os.path.exists(log) else [])]  # noqa: E731
+    for i in range(3):
+        AW.wake_waiting(e.agents_list, [], DOMS, MON + 60 * i)
+    check(len(rows()) == 1 and rows()[0].startswith("wake-live\thermes-site\t"), f"Д3: три прохода — {rows()}")
+    a["waitingFor"] = None
+    _transcript(e, a, [_use("t9", "make test")])
+    for i in range(2):
+        AW.wake_waiting(e.agents_list, [], DOMS, MON + 200 + 60 * i)
+    check(len(rows()) == 2 and rows()[1].endswith("ход не закончен: Bash → make test"), f"Д3: смена причины — {rows()}")
+    _transcript(e, a, [_use("t9", "make test"), _res("t9"), _ans()])
+    e.gate_ok = (False, "ночь не открыта")
+    for i in range(2):
+        AW.wake_waiting(e.agents_list, [], DOMS, MON + 400 + 60 * i)
+    check(len(rows()) == 3 and rows()[2].startswith("wake-gate\thermes-site\t") and rows()[2].endswith("ночь не открыта"),
+          f"Д3: wake-gate — {rows()}")
+    a["state"] = "working"                                       # не ждёт: причина забыта
+    AW.wake_waiting(e.agents_list, [], DOMS, MON + 600)
+    a["state"] = "blocked"
+    AW.wake_waiting(e.agents_list, [], DOMS, MON + 660)
+    check(len(rows()) == 4 and rows()[3] == rows()[2], f"Д3: причина вернулась — нет строки: {rows()}")
+    check(not e.calls, f"Д3: окно разбужено при отказе: {e.calls}")
+
+
+def test_wake_waiting_owner_elsewhere_0708():
+    """metis-0708: ждущее окно будят задачей, которую оно может взять. 02.11 21:23 окно metis-pantheon подняли с
+    «возьми metis-0272», а её вела другая сессия (owner agent-kit-47) — окно отказалось и встало без работы. Задача на
+    другой сессии — мимо: берётся следующая своя (owner — само направление, его команда dev-*/argus-* или пусто); своих
+    нет — окно не будят вовсе."""
+    e = Env()
+    e.agent("hermes-site", "blocked", needs="waiting for your answer")
+    e.task("hermes-site", "чужая", owner="agent-kit-47", priority=1)
+    own = e.task("hermes-site", "своя команды", owner="dev-opus", priority=2)
+    AW.wake_waiting(e.agents_list, [], DOMS, MON)
+    check(e.calls == [("hermes-site", f"[Пантеон: есть задача без блокера] возьми {own} из очереди", "wake-waiting")],
+          f"0708: ждущему окну передана задача другой сессии: {e.calls}")
+    e2 = Env()
+    e2.agent("hermes-site", "blocked", needs="waiting for your answer")
+    e2.task("hermes-site", "чужая", owner="agent-kit-47")
+    e2.task("hermes-site", "чужая Зевса", owner="zeus")
+    AW.wake_waiting(e2.agents_list, [], DOMS, MON)
+    check(not e2.calls, f"0708: окно разбудили, хотя своих задач нет: {e2.calls}")
+    e3 = Env()
+    e3.agent("hermes-site", "blocked", needs="waiting for your answer")
+    mine = e3.task("hermes-site", "своя", owner="hermes-site")
+    AW.wake_waiting(e3.agents_list, [], DOMS, MON)
+    check(len(e3.calls) == 1 and mine in e3.calls[0][1], f"0708: своя задача (owner = направление) не передана: {e3.calls}")
 
 
 def test_skipped_no_alert():
@@ -645,6 +896,29 @@ def test_pantheon_wake_fresh_sees_limited():
     check("свежей сессией" in buf.getvalue(), f"нет свежего старта в выводе: {buf.getvalue()!r}")
 
 
+def test_pantheon_wake_fresh_busy_skip_0241():
+    # metis-0241, ветвь fresh_start: имя уже поднимает другой процесс (замок start-<имя> занят, fresh-busy) — пропуск:
+    # код 0, «пропуск: имя — причина», ни «поднимаю», ни тревоги «не поднялась (код …)»
+    e = Env()
+    e.task("hermes-site")
+    e.limited("hermes-site")
+    e.now(at(2026, 10, 19, 8, 0) + 60)
+    saved = (P.fresh_reason, P.state_files)
+    P.fresh_reason = lambda a, t=None: "контекст большой"
+    P.state_files = lambda n: []
+    buf, err = io.StringIO(), io.StringIO()
+    try:
+        with P.lock("start-hermes-site", block=False) as held, contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(err):
+            rc = P._wake(False) if held else "замок не взят"
+    finally:
+        P.fresh_reason, P.state_files = saved
+    out = buf.getvalue()
+    check(rc == 0 and "пропуск: hermes-site — другой процесс уже поднимает" in out and "поднимаю" not in out
+          and "не поднялась" not in err.getvalue() and "не поднялась" not in alerts_text(e) and not e.calls,
+          f"fresh-busy: код {rc!r}, вывод {out!r}, stderr {err.getvalue()!r}, тревоги {alerts_text(e)!r}, вызовы {e.calls}")
+
+
 def test_wake_waiting_blockers():
     # все задачи с «владелец: id» в STATUS.md — молчит
     e = Env()
@@ -661,7 +935,7 @@ def test_wake_waiting_blockers():
     e = Env()
     e.agent("hermes-site", "blocked", needs="x")
     base = e.task("hermes-site", "основа")
-    dep = e.task("hermes-site", "зависимая", depends_on=[base])
+    e.task("hermes-site", "зависимая", depends_on=[base])
     free = AW.free_task("hermes-site", MON)
     check(free == base, f"первой должна быть основа: {free}")
     e2 = Env()
@@ -792,6 +1066,25 @@ def test_new_order_goal():
         check(g.endswith(P.NEW_ORDER_GOAL), f"{name} без условия о новом поручении: {g!r}")
     check("перехожу к" in P.NEW_ORDER_GOAL and "пришедшее в сессию после её начала" in P.NEW_ORDER_GOAL,
           f"условие о новом поручении: {P.NEW_ORDER_GOAL!r}")
+    # metis-0714: задачу, которую сессия перевела в «ждёт», Stop-хук цели не требует; doing и todo — в цели
+    for name in ("TASK_GOAL", "COORDINATOR_GOAL"):
+        g = getattr(P, name)
+        check(g.endswith(P.WAITING_GOAL + P.NEW_ORDER_GOAL), f"{name} без условия о задаче в «ждёт»: {g!r}")
+    w = P.WAITING_GOAL
+    # строки, которым цель верит, — те же, что печатает `task set` (lib/tasks.py; поведение — test_task_keep.py)
+    T = P.tasks_mod()
+    check("ждёт ответа владельца на вопрос или другую задачу" in w and f"«<id>: {T.GOAL_OUT}»" in w
+          and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
+          and "в работе (doing) и в очереди (todo) — в цели" in w
+          and "Верь последней такой строке по этой задаче" in w, f"условие о задаче в «ждёт»: {w!r}")
+    # metis-0738 (argus-280a, Д1): блокер закрыла другая сессия, плановый проход, владелец на доске — строка GOAL_IN
+    # уходит не в транскрипт ждущей. «Снята» засчитывается только свежей, проверка — `pantheon task goal <id>`
+    check("`pantheon task goal <id>`" in w and "«Снята» засчитывается, только если напечатана в том же ходе, что и "
+          "последний отчёт сессии" in w and "более ранняя «снята» устарела" in w,
+          f"условие цели без свежей «снята» и task goal: {w!r}")
+    # metis-0725: задачу, которую ведёт другая сессия, цель не держит, даже в поручении и в чек-листе эпика
+    check("её ведёт другая сессия (owner — не это окно и не его команда), даже если она в поручении, в чек-листе эпика"
+          in w, f"условие цели без owner другой сессии: {w!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())
@@ -1229,6 +1522,48 @@ def test_inbox_hq_led_skipped():
         ib.run(MON + 300)
         check(not ib.starts, f"поднял координатора направления, которое ведёт Пританей: {ib.starts}")
         check("hermes-site" not in alerts_text(ib.e), f"тревога о направлении без координатора: {alerts_text(ib.e)!r}")
+
+
+def test_pending_tool_only_real_answers_0872():
+    """metis-0872 (долг argus #337): новым ответом считается только запись type=assistant с model ≠ <synthetic>.
+    Запись api-request-blob и синтетический ответ (ошибка API, прерывание) не сбрасывают открытый tool_use."""
+    use = {"type": "assistant", "message": {"id": "m1", "role": "assistant", "model": "claude-x", "content": [
+        {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "gh pr checks 1"}}]}}
+    blob = {"type": "api-request-blob", "message": {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "x"}]}}
+    synth = {"type": "assistant", "message": {"id": "m3", "role": "assistant", "model": "<synthetic>",
+                                              "content": [{"type": "text", "text": "No response requested."}]}}
+    real = {"type": "assistant", "message": {"id": "m4", "role": "assistant", "model": "claude-x",
+                                             "content": [{"type": "text", "text": "готово"}]}}
+    for what, tail, want in (("api-request-blob", [blob], "Bash → gh pr checks 1"),
+                             ("synthetic", [synth], "Bash → gh pr checks 1"),
+                             ("настоящий ответ", [real], None)):
+        e = Env()
+        a = e.agent("hermes-site", "blocked")
+        _transcript(e, a, [use, *tail])
+        got = W.pending_tool(a)
+        check(got == want, f"0872: {what}: pending_tool={got!r}, ждали {want!r}")
+
+
+def test_session_started_finite_and_not_future_0872():
+    """metis-0872 (долг argus #337): startedAt 1e400 → inf делал все субагенты мёртвыми; значения не isfinite и позже
+    t отбрасываются, остаётся лучшее из годных."""
+    for what, v, want in (("inf", "1e400", 0.0), ("nan", "nan", 0.0), ("-inf", "-1e400", 0.0),
+                          ("будущее", (MON + 500) * 1000, 0.0), ("годное", (MON - 50) * 1000, MON - 50),
+                          ("ровно t", MON * 1000, MON)):
+        e = Env()
+        a = e.agent("hermes-site", "working")
+        a["startedAt"] = v
+        got = P.session_started(a, MON)
+        check(got == want, f"0872: {what}: session_started={got!r}, ждали {want!r}")
+    # реестр демона: плохое значение не затирает годное из startedAt записи
+    e = Env()
+    a = e.agent("hermes-site", "working")
+    a["startedAt"] = (MON - 70) * 1000
+    os.makedirs(os.path.join(e.home, ".claude", "daemon"), exist_ok=True)
+    json.dump({"workers": {a["id"]: {"startedAt": "1e400"}}}, open(os.path.join(e.home, ".claude", "daemon", "roster.json"), "w"))
+    got = P.session_started(a, MON)
+    check(got == MON - 70, f"0872: inf из roster.json затёр годное: {got!r}")
+    check(P.session_started(a) == MON - 70, "0872: t по умолчанию (now()) сломал годное значение")
 
 
 # --- крючки в дежурном -------------------------------------------------------------------

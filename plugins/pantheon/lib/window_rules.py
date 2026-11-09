@@ -36,8 +36,9 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
               "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
+              "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
               ".claude-plugin/marketplace.json")
-CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github", "plugins/pantheon/packs")
 CORE_TEXT = ("any path under " + ", ".join(f"`{d}/`" for d in CORE_DIR) + ", or one of the files "
              + ", ".join(f"`{f}`" for f in CORE_FILES))
 GATED_MERGE_RULE = (
@@ -53,7 +54,7 @@ GATED_MERGE_RULE = (
     "direction, and client products also have a `talos` check and a rollback line in the owner's summary; GitHub "
     "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
     "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
-    "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
+    "`git merge`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
     "core — " + CORE_TEXT + " — wait for the owner to merge them himself: guard refuses them, and this exception "
     "does not cover merging them any other way. It "
     "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
@@ -89,15 +90,41 @@ REVIEW_RECORD_RULE = (
     "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")
 
 
-def coordinator_auto_allow(repos):
+# Правила autoMode.allow окна направления на команды его репозиториев, которые раньше разрешал permissions.allow
+# проекта (metis-0933: окну permissions.allow не даётся). Решение владельца 06.11 21:55 «Б — все восемь»: шесть
+# команд чтения mailkeeper, uv sync и git remote. Пакет окна права только сужает — поэтому здесь, в ядре. Имени
+# направления в тексте правил нет (решение 16.10): правило попадает только в окно своего направления.
+MAILKEEPER_READ_RULE = (
+    "Pantheon Mailkeeper Read: In this Pantheon direction window, `mailkeeper status`, `mailkeeper rules`, "
+    "`mailkeeper scan`, `mailkeeper report`, `mailkeeper plan` and `mailkeeper logs` (with their own options) are the "
+    "owner's own local mail-sorting CLI run for the coordinator's task; it runs outside the sandbox by the window's "
+    "sandbox.excludedCommands and only reads or plans, it does not move, label or delete mail. It does not cover "
+    "`mailkeeper apply`, `undo`, `run`, `auth`, `daemon`, `service`, `on`, `off`, `resume` or `excerpt`, `cd` or "
+    "chained commands; those are judged by the built-in rules.")
+UV_SYNC_RULE = (
+    "Pantheon Uv Sync: In this Pantheon direction window, `uv sync` (optionally with `--frozen`, `--locked`, "
+    "`--all-extras`, `--extra <name>`, `--group <name>` or `--dev`) inside one of this direction's repositories installs "
+    "the project's own locked dependencies into its `.venv`, as the project's settings allowed before. It does not "
+    "cover `uv pip`, `uv add`, `uv remove`, `uv tool`, `uv run`, another index or source URL, `cd` or chained "
+    "commands.")
+GIT_REMOTE_RULE = (
+    "Pantheon Git Remote: In this Pantheon direction window, `git remote` (`-v`, `show`, `get-url`, `add`, "
+    "`set-url`, `rename`, `remove`, `prune`, `update`) in one of this direction's repositories is routine repository "
+    "upkeep for the coordinator's task, as the project's settings allowed before. It covers only `git remote` itself: "
+    "a push, a fetch from a new URL, `cd` or chained commands are judged by the built-in rules.")
+DIRECTION_AUTO_ALLOW = {"metis-pantheon": (MAILKEEPER_READ_RULE, UV_SYNC_RULE), "proteus-morph": (GIT_REMOTE_RULE,)}
+
+
+def coordinator_auto_allow(repos, direction=None):
     """autoMode.allow окна координатора: "$defaults", правило слияния и правило сдачи работы лида (push рабочей ветки,
     argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
-    owner/repo; нет таких — обоих правил нет) и правило записей проверок."""
+    owner/repo; нет таких — обоих правил нет), правила направления из DIRECTION_AUTO_ALLOW (metis-0933) и правило
+    записей проверок."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return ["$defaults"] + gated + lead + [REVIEW_RECORD_RULE]
+    return ["$defaults"] + gated + lead + list(DIRECTION_AUTO_ALLOW.get(direction, ())) + [REVIEW_RECORD_RULE]
 
 
 def auto_mode(auto_allow):

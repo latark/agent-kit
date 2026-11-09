@@ -106,7 +106,6 @@ def main():
     def reads(w):
         return w["sandbox"]["filesystem"]["denyRead"]
 
-    me = lambda tmp: os.path.realpath(os.path.join(tmp, "ai/knowledge/me"))  # noqa: E731
 
     r, win, tmp = build("default", "")
     check("без policy.toml-ключа: окно mnemo-brain личное читает, окно athena-shop — нет (умолчание guard)",

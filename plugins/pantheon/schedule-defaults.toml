@@ -1,0 +1,14 @@
+# Задания расписания, которые приносит выпуск плагина (metis-0833): включаются сами, правки ~/ai/pantheon/schedule.toml
+# не нужно. schedule.toml владельца — только переопределения: [[job]] с тем же именем меняет поля задания
+# (`name = "reap"` + `enabled = false` — выключить; `every = 60` — реже), остальные поля остаются отсюда.
+# Поля те же, что у [[job]] в schedule.toml. Команда — только `pantheon …` или скрипт плагина (parse_command).
+
+[[job]]
+name = "reap"
+description = "Автоуборка зависших процессов и сирот (metis-0617, 0805)"
+command = "pantheon reap --auto"
+every = 30
+class = "light"
+hosts = "all"
+timeout = 300
+notify = false

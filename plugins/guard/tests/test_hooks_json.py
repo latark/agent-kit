@@ -11,6 +11,8 @@ metis-0330 F3 («залипший код 2»): пропавший файл ск�
 PostToolUse, SessionStart — код 0 (Python сам дал бы 2: Stop не заканчивал бы ход, сообщения владельца глотались бы во
 всех окнах). Проверка — и запускателем, и настоящими командами hooks.json guard и pantheon на корне плагина без .py.
 Каждый отказ запускателя — строка в guard-failures.log; висячая ссылка на интерпретатор пропускается.
+metis-0330, ступень 2: guard на PreToolUse — `/bin/sh hookd.sh guard` (оболочка демона хуков) с onFailure=block и
+timeout 10; на корне без .py оболочка и без PANTHEON_HOOKD, и с ним даёт тот же код 2 с причиной.
 
 Запуск: python3 -I plugins/guard/tests/test_hooks_json.py
 """
@@ -26,6 +28,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 LAUNCHER = os.path.join(ROOT, "guard", "hooks", "python.sh")
 NO_EFFECT = {"Stop", "SubagentStop", "TaskCompleted", "TeammateIdle"}
 RUNNER = '/bin/sh "${CLAUDE_PLUGIN_ROOT}/hooks/python.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/'
+HOOKD = '/bin/sh "${CLAUDE_PLUGIN_ROOT}/hooks/hookd.sh" guard'
 results = []
 
 
@@ -60,6 +63,14 @@ for plugin in ("guard", "pantheon"):
           py and all(RUNNER in c for c in py), [c for c in py if RUNNER not in c])
     check(f"{plugin}: голого python3 в командах нет", not [c for c in cmds if re.search(r"\bpython3\b", c)],
           [c for c in cmds if re.search(r"\bpython3\b", c)])
+    if plugin == "guard":
+        # metis-0330: guard на PreToolUse — через оболочку демона хуков (без PANTHEON_HOOKD=1 — тот же python.sh)
+        g = [h for h in pre if "hookd.sh" in h["command"]]
+        check("guard: PreToolUse guard — /bin/sh hookd.sh guard, onFailure=block, timeout 10",
+              len(g) == 1 and g[0]["command"] == HOOKD and g[0].get("onFailure") == "block" and g[0].get("timeout") == 10,
+              [(h["command"], h.get("timeout")) for h in pre])
+        check("guard: hookd.sh — только на PreToolUse",
+              [c for c in cmds if "hookd.sh" in c] == [HOOKD], [c for c in cmds if "hookd.sh" in c])
 
 other = os.path.join(ROOT, "pantheon", "hooks", "python.sh")
 if os.path.exists(other):
@@ -118,7 +129,8 @@ try:
     known, fw, old = os.path.join(tmp, "known"), os.path.join(tmp, "fw"), os.path.join(tmp, "old")
     os.makedirs(known)
     os.makedirs(fw)
-    open(os.path.join(tmp, "s.py"), "w").close()  # скрипт на месте (cwd=tmp): запускатель проверяет его до exec
+    with open(os.path.join(tmp, "s.py"), "w") as fh:  # скрипт на месте (cwd=tmp): запускатель проверяет его до exec
+        fh.write("pass\n")
     fake(old, "python3", "exit 1")  # python3 из PATH старше 3.11: проверка версии не проходит
     iso = isolated(known, fw)
     pre_ev = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}})
@@ -215,7 +227,8 @@ try:
     # файл есть, но не читается (chmod 0): Python тоже вышел бы с кодом 2 — ветка `! [ -r ]` запускателя
     noread = os.path.join(tmp, "noread", "ctx.py")
     os.makedirs(os.path.dirname(noread))
-    open(noread, "w").close()
+    with open(noread, "w") as fh:  # не пустой: проверяется ветка «не читается», а не «пустой»
+        fh.write("pass\n")
     os.chmod(noread, 0)
     if os.geteuid() != 0:  # root читает и файл без прав — проверка там не о том
         r = launch([noread], real, json.dumps({"hook_event_name": "Stop"}))
@@ -223,10 +236,33 @@ try:
               r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
         r = launch([noread, "maint-pre"], real, pre_ev)
         check("файл скрипта без прав чтения → PreToolUse: код 2 с причиной",
-              r.returncode == 2 and "файла скрипта нет или он не читается" in r.stderr
+              r.returncode == 2 and "файла скрипта нет, он пустой или не читается" in r.stderr
               and "Permission denied" not in r.stderr,
               (r.returncode, r.stdout, r.stderr))
     os.chmod(noread, 0o600)
+    # argus C1 (metis-0330): пустой .py проходил -f/-r, и Python выполнял его молча с кодом 0 — проверки не было
+    empty = os.path.join(tmp, "empty", "guard.py")
+    os.makedirs(os.path.dirname(empty))
+    open(empty, "w").close()
+    n0 = len(log_lines())
+    r = launch([empty, "--strict"], real, pre_ev)
+    check("пустой файл скрипта → PreToolUse: код 2 с причиной, как нет файла",
+          r.returncode == 2 and "файла скрипта нет, он пустой или не читается" in r.stderr and r.stdout == "",
+          (r.returncode, r.stdout, r.stderr))
+    r = launch([empty], real, json.dumps({"hook_event_name": "Stop"}))
+    check("пустой файл скрипта → Stop: код 0 без вывода и строка no-script в журнале",
+          r.returncode == 0 and r.stdout == "" and r.stderr == ""
+          and log_lines()[n0:] and log_lines()[-1].endswith("\tlauncher\tother\tno-script guard.py"),
+          (r.returncode, r.stderr, log_lines()[n0:]))
+    # argus D2 (metis-0330): журнал недоступен — след остаётся строкой в stderr, а не пропадает молча
+    home_file = os.path.join(tmp, "home-is-a-file")
+    open(home_file, "w").close()
+    for home, what in ((home_file, "HOME — файл, журнал не пишется"), ("", "HOME пуст")):
+        r = subprocess.run(["/bin/sh", LAUNCHER, gone], input=json.dumps({"hook_event_name": "Stop"}),
+                           env={"PATH": real, "HOME": home}, capture_output=True, text=True, timeout=60, cwd=tmp)
+        check(f"нет файла скрипта, {what} → Stop: код 0 и причина в stderr (журнал недоступен)",
+              r.returncode == 0 and r.stdout == "" and "no-script guard.py" in r.stderr
+              and "записать не удалось" in r.stderr, (r.returncode, r.stdout, r.stderr))
     n0 = len(log_lines())
     r = launch(["x.py"], old, json.dumps({"hook_event_name": "Stop"}), iso)
     check("нет 3.11+ → строка launcher no-python в журнале",
@@ -263,28 +299,33 @@ try:
             continue
         root = os.path.join(tmp, "broken-" + plugin)
         os.makedirs(os.path.join(root, "hooks"))
-        shutil.copy2(os.path.join(ROOT, plugin, "hooks", "python.sh"), os.path.join(root, "hooks", "python.sh"))
+        for sh in ("python.sh", "hookd.sh"):
+            if os.path.exists(os.path.join(ROOT, plugin, "hooks", sh)):
+                shutil.copy2(os.path.join(ROOT, plugin, "hooks", sh), os.path.join(root, "hooks", sh))
         with open(hj, encoding="utf-8") as fh:
             hooks = json.load(fh)["hooks"]
         ran = 0
         for event, groups in hooks.items():
             for g in groups:
                 for h in g["hooks"]:
-                    if "python.sh" not in h["command"]:
+                    if "python.sh" not in h["command"] and "hookd.sh" not in h["command"]:
                         continue
                     ran += 1
-                    env = {"PATH": real, "HOME": tmp, "CLAUDE_PLUGIN_ROOT": root, "PANTHEON_STATE": state}
-                    ev_json = json.dumps({"hook_event_name": event, "session_id": "s", "tool_name": "Bash",
-                                          "tool_input": {"command": "ls"}})
-                    r = subprocess.run(["/bin/sh", "-c", h["command"]], input=ev_json, env=env, capture_output=True,
-                                       text=True, timeout=60, cwd=tmp)
-                    tag = f"{plugin} {event} {h['command'].rsplit('/hooks/', 1)[-1][:40]}"
-                    if event == "PreToolUse":
-                        check(f"без .py: {tag} → код 2 с причиной", r.returncode == 2 and "файла скрипта нет" in r.stderr,
-                              (r.returncode, r.stderr))
-                    else:
-                        check(f"без .py: {tag} → код 0, не залипший 2", r.returncode == 0 and r.stderr == "",
-                              (r.returncode, r.stderr))
+                    # оболочка демона хуков — и без флага, и с PANTHEON_HOOKD=1 (клиента в HOME нет: медленный путь)
+                    for flag in ({}, {"PANTHEON_HOOKD": "1"}) if "hookd.sh" in h["command"] else ({},):
+                        env = {"PATH": real, "HOME": tmp, "CLAUDE_PLUGIN_ROOT": root, "PANTHEON_STATE": state, **flag}
+                        ev_json = json.dumps({"hook_event_name": event, "session_id": "s", "tool_name": "Bash",
+                                              "tool_input": {"command": "ls"}})
+                        r = subprocess.run(["/bin/sh", "-c", h["command"]], input=ev_json, env=env,
+                                           capture_output=True, text=True, timeout=60, cwd=tmp)
+                        tag = f"{plugin} {event} {h['command'].rsplit('/hooks/', 1)[-1][:40]}" + \
+                            (" PANTHEON_HOOKD=1" if flag else "")
+                        if event == "PreToolUse":
+                            check(f"без .py: {tag} → код 2 с причиной",
+                                  r.returncode == 2 and "файла скрипта нет" in r.stderr, (r.returncode, r.stderr))
+                        else:
+                            check(f"без .py: {tag} → код 0, не залипший 2", r.returncode == 0 and r.stderr == "",
+                                  (r.returncode, r.stderr))
         check(f"без .py: команды {plugin} через python.sh проверены ({ran})", ran >= 3, ran)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)

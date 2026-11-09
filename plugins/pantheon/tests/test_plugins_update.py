@@ -8,6 +8,7 @@
 первой в PATH: пишет argv в файл, на `plugin list --json` отдаёт JSON из файла (после `plugin update` — уже с новой
 версией), на `plugin marketplace update` — код из STUB_MKT_RC. Настоящие `claude plugin …` не запускаются.
 """
+import contextlib
 import fcntl
 import json
 import os
@@ -535,7 +536,10 @@ print(json.dumps({{
         return e, {"STUB_GH_RC": str(rc)}
 
     def again(e, x):
-        """Ещё один проход с новым выпуском: установленная версия снова старая (как до установки)."""
+        """Ещё один проход с новым выпуском: установленная версия снова старая (как до установки; verified.json тоже
+        возвращаем — «старая» версия теперь из него, metis-0922)."""
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(e.state, "plugins", "verified.json"))
         shutil.copy(os.path.join(e.stub, "list-before.json"), os.path.join(e.stub, "list.json"))
         return e.run("plugins", "update", extra=x)
 
@@ -607,6 +611,43 @@ print(json.dumps({{
         "print(rc, [t for a, t in seen if a == ['plugin', 'marketplace']], [t for a, t in seen if a == ['plugin', 'update']])\n")
     check("plugins update: каталог — потолок 90 с, срок вышел → TEMPFAIL 75; установка — потолок 180 с",
           out == ["75 [90] [180]"], out)
+    e.close()
+
+    # metis-0922: Claude Code 2.1.319 сам ставит выпуск при marketplace update — установленная версия уже равна каталогу,
+    # а verified.json и current отстали; «старая» — версия из verified.json (мутант: «старая» = установленная)
+    def adopt_env(verified_version):
+        e = Env("1.1.0", "1.1.0", name="pantheon")
+        old = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "pantheon", "1.0.0")
+        e.plugin(old, "1.0.0")
+        e.py("P.verified_write('pantheon', sys.argv[2], P._tree_hash(sys.argv[2]), sys.argv[3], 'test')", old, verified_version)
+        cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+        os.makedirs(os.path.dirname(cur))
+        os.symlink(old, cur)
+        return e, old, cur
+
+    e, old, cur = adopt_env("1.0.0")
+    r = e.run()
+    v = e.verified().get("pantheon") or {}
+    check("установлено = каталог = выпуск, verified старше: verified новой версии, current перевешена, «обновлён» в journal",
+          r.returncode == 0 and v.get("version") == "1.1.0" and v.get("path") == os.path.realpath(e.after)
+          and os.path.realpath(cur) == os.path.realpath(e.after) and "pantheon 1.0.0 → 1.1.0: обновлён" in e.journal(),
+          f"{r.returncode} {r.stderr!r} {v} {os.path.realpath(cur)} {e.journal()!r}")
+    e.close()
+
+    e, old, cur = adopt_env("1.0.0")
+    e.write(os.path.join(e.after, "hooks", "evil.py"), "print('не проверялось')\n")
+    e.run()
+    v = e.verified().get("pantheon") or {}
+    check("установлено = каталог, но хеш установленного не равен дереву выпуска: КРИТИЧНО, verified и current прежние",
+          v.get("version") == "1.0.0" and os.path.realpath(cur) == os.path.realpath(old) and "КРИТИЧНО" in e.alerts(),
+          f"{v} {os.path.realpath(cur)} {e.alerts()!r}")
+    e.close()
+
+    e, old, cur = adopt_env("1.1.0")
+    r = e.run()
+    check("verified == каталог: update не вызывается, verified не меняется",
+          r.returncode == 0 and "plugin update" not in e.argv() and (e.verified().get("pantheon") or {}).get("version") == "1.1.0",
+          f"{r.returncode} {e.argv()!r}")
     e.close()
 
     r = subprocess.run([PY, "-I", RUN_PY, "plugins", "foo"], capture_output=True, text=True, timeout=60)

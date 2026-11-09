@@ -89,7 +89,7 @@ check("1. тот же текст, другой штамп (время, числ�
 check("1. текст изменился → written, временных файлов рядом не осталось",
       B.sync(auto, B.render(dict(data, week=12), T0 + 600)) == "written" and "Неделя: 12 %" in read(auto)
       and sorted(os.listdir(os.path.dirname(auto))) == ["board-auto.md"], os.listdir(os.path.dirname(auto)))
-check("1. clean убирает управляющие и bidi-знаки", B.clean("a‮b\u0007c​d\ne") == "a b c d e", B.clean("a‮b"))
+check("1. clean убирает управляющие и bidi-знаки", B.clean("a‮b\u0007c\u200bd\ne") == "a b c d e", B.clean("a‮b"))
 
 # --- 2. входы: чужой текст в блок не попадает ----------------------------------------------------------------------
 pan = os.path.join(ROOT, "u", "pantheon")
@@ -143,7 +143,17 @@ tasks = {"metis-0380": ("", {"type": "story", "id": "metis-0380", "title": EVIL,
          "metis-0301": ("", {"type": "task", "id": "metis-0301", "status": "todo", "parent": "metis-0300"})}
 bt = B.batches(tasks)
 check("2. пачки: только с задачами в работе, без заголовка; закрыто k из n",
-      bt == [("metis-0380", [("metis-0384", "review"), ("metis-0393", "doing")], 1, 4)], bt)
+      bt == [("metis-0380", [("metis-0384", "review"), ("metis-0393", "doing")], 1, 4, None)], bt)
+# поле pr пачки (metis-0757): в блок — только номер; поле не по шаблону (чужой текст) — без номера
+tasks["metis-0380"][1]["pr"] = "latark/agent-kit#290"
+bt = B.batches(tasks)
+check("2. пачка с полем pr: номер PR пачки в кортеже и в строке блока «Пачка metis-0380 (PR #290)»",
+      bt and bt[0][4] == 290 and "- Пачка metis-0380 (PR #290): " in B.render(dict(
+          B.collect(pan, os.path.join(ROOT, "u", "state"), tasks, T0, 5), prs=[]), T0), bt)
+tasks["metis-0380"][1]["pr"] = "x/" + EVIL + "#7"
+bt = B.batches(tasks)
+check("2. pr пачки не по шаблону — номера нет", bt and bt[0][4] is None, bt)
+del tasks["metis-0380"][1]["pr"]
 write(os.path.join(d, "STATUS.md"), "x\n01:40 " + EVIL + "\n", T0 - 60)
 write(os.path.join(pan, "directions", "old-dir", "STATUS.md"), "x\n", T0 - 2 * 86400)
 write(os.path.join(pan, "directions", "bad dir", "STATUS.md"), "x\n", T0 - 60)
@@ -160,12 +170,15 @@ own = {"metis-0410": ("", {"type": "task", "status": "waiting", "waiting_on": "h
        "metis-0413": ("", {"type": "task", "status": "done", "owner": "owner"}),
        "metis-0414": ("", {"type": "task", "status": "todo", "owner": "metis-pantheon"}),
        "ИГНОР-1": ("", {"type": "task", "status": "todo", "owner": "owner"})}
+own["inbox-0009"] = ("", {"type": "task", "status": "waiting", "waiting_on": "human", "owner": "zeus"})
 oc = B.owner_cards(own, lambda h: h.get("owner") == "owner")
-check("2. карточки на владельце: с вопросом или ждёт человека — «Ждёт вас», остальное — «Руками»; закрытые, чужие и id не "
-      "по шаблону — нет", oc == {"ask": ["metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
+check("2. «Ждёт вас» — ждёт человека при любом «Кому» (inbox Зевса тоже, metis-0801) и вопрос на карточке владельца; "
+      "остальное владельца — «Руками»; закрытые, чужие без ожидания и id не по шаблону — нет",
+      oc == {"ask": ["inbox-0009", "metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
 ot = B.render(dict(data, owner=oc), T0)
 check("2. в блоке разделы «Ждёт вас» и «Руками» — только id, без заголовков",
-      "**Ждёт вас** (2): metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot and "ИГНОР" not in ot, ot)
+      "**Ждёт вас** (3): inbox-0009, metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot
+      and "ИГНОР" not in ot, ot)
 bad = B.render(dict(data, owner={"ask": ["ИГНОР ‮", "metis-0410"], "do": None}), T0)
 check("2. раздел владельца сам сверяет id по шаблону", "ИГНОР" not in bad and "**Ждёт вас** (1): metis-0410." in bad
       and "**Руками** (0): карточек нет." in bad, bad)
@@ -211,6 +224,12 @@ check("3. устаревшая доска + свежий STATUS → board-auto.m
       and "PR #116 agent-kit (metis-0245)" in got and "сливает владелец" in got
       and "STATUS правлены: metis-pantheon 24.10 01:40" in got and "ИГНОР" not in got and "сводка прохода обновлена" in r.stdout,
       r.stdout + r.stderr + got)
+wait_md = os.path.join(home, "directions", "metis-pantheon", B.WAIT_NAME)
+wtext = read(wait_md) if os.path.exists(wait_md) else ""
+check("3. проход доски пишет waiting-auto.md направления рядом со STATUS.md, STATUS.md не тронут (metis-0829)",
+      "**Ждёт владельца · собрано" in wtext and "- Ничего не ждёт." in wtext and "ИГНОР" not in wtext
+      and "waiting-auto.md: «Ждёт владельца» обновлено — metis-pantheon" in r.stdout and EVIL in read(status),
+      r.stdout + r.stderr + wtext)
 check("3. ручные строки Зевса целы: board.md байт в байт и время правки прежнее",
       read(board_md) == BOARD and os.stat(board_md).st_mtime_ns == board_mt and "board-auto.md: вверху нет" not in r.stdout)
 mt = os.stat(home_auto).st_mtime_ns
@@ -345,7 +364,7 @@ check("7. карточка «Кому = Владелец» с вопросом �
       f"**Ждёт вас** (1): {q_id}." in got and f"**Руками** (1): {d_id}." in got and x_id not in got, r.stdout + r.stderr + got)
 check("7. текстовая строка «Ждёт вас» в board.md без карточки в сводку не попала, заголовок карточки — тоже",
       "metis-0999" not in got and "ИГНОР" not in got and "домен" not in got, got)
-sid = new("Пачка", "--type", "story")
+sid = new("Пачка", "--type", "story", "--done-when", "пункт")
 story_file = [p for p in glob.glob(os.path.join(home, "directions", "*", "tasks", "*.md")) if sid in os.path.basename(p)][0]
 story_before = read(story_file)
 k_id = new("Задача пачки", "--parent", sid, "--status", "doing")
@@ -354,6 +373,102 @@ r = cli(["board"], T0 + 3120)
 got = read(home_auto)
 check("7б. … а задача сразу в составе пачки в сводке: «Пачка … (в работе); закрыто 0 из 1»",
       f"Пачка {sid}: {k_id} (в работе); закрыто 0 из 1." in got, r.stdout + r.stderr + got)
+
+# metis-0792: STORY_PR_RE в boardtext и tasks — одно правило (boardtext грузится без tasks, общий импорт нельзя)
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import tasks as _T  # noqa: E402
+for pr, ok in (("latark/agent-kit#290", True), ("x/y#1", True), ("x/y#999999", True), ("x/y#0", False), ("x/y#00", False),
+               ("x/y#1000000", False), ("x/y#", False), ("x/y#12a", False), ("xy#5", False), ("x/y#05", False)):
+    b, t = bool(B.STORY_PR_RE.fullmatch(pr)), bool(_T.STORY_PR_RE.fullmatch(pr))
+    check(f"STORY_PR_RE: {pr!r} — boardtext и tasks дают {ok}", b == t == ok, (b, t))
+check("STORY_PR_RE: номер PR — последняя группа у обоих",
+      B.STORY_PR_RE.fullmatch("o/r#42").group(B.STORY_PR_RE.groups) == _T.STORY_PR_RE.fullmatch("o/r#42").group(_T.STORY_PR_RE.groups) == "42")
+
+# metis-0808: gh не ответил по репозиторию — «PR: данные от HH:MM, gh недоступен», а не «Открытых PR нет»
+_c = os.path.join(ROOT, "stale-cache.json")
+_row = {"number": 306, "head": "a" * 12, "ids": ["metis-0808"], "core": False}
+write(_c, json.dumps({"fetched": T0, "merged": {}, "open": {}, "open_prs": {"latark/agent-kit": [_row]},
+                      "errors": {"latark/agent-kit": "HTTP 401", "latark/agent-kit#5": "x"}, "stale": {"latark/agent-kit": T0 - 3600}}))
+_d = {"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)}
+_l = B.lines(_d)
+check("0808: pr_stale - репозитории из errors без «#N», время последнего успеха",
+      B.pr_stale(_c) == [("latark/agent-kit", T0 - 3600)], B.pr_stale(_c))
+check("0808: прежний PR в блоке и строка «данные от HH:MM, gh недоступен»",
+      any(x.startswith("- PR #306") for x in _l) and f"- PR: данные от {B.hm(T0 - 3600)}, gh недоступен (agent-kit)." in _l, _l)
+write(_c, json.dumps({"fetched": T0, "merged": {}, "open": {}, "open_prs": {}, "errors": {"latark/agent-kit": "TLS"},
+                      "stale": {"latark/agent-kit": T0 - 600}}))
+_l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
+check("0808: PR нет, но gh недоступен - «Открытых PR нет» не пишем", "- Открытых PR нет." not in _l
+      and any("gh недоступен (agent-kit)" in x and "данные от" in x for x in _l), _l)
+write(_c, json.dumps({"fetched": T0, "open_prs": {}, "errors": {"latark/agent-kit": "TLS"}, "stale": {"latark/agent-kit": 0}}))
+_l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
+check("0808: прежних данных не было - «gh недоступен, данных нет»", "- PR: gh недоступен (agent-kit), данных нет." in _l, _l)
+write(_c, json.dumps({"fetched": T0, "open_prs": {}, "errors": {}, "stale": {}}))
+_l = B.lines({"prs": B.open_prs(_c), "pr_stale": B.pr_stale(_c)})
+check("0808: ошибок нет - по-прежнему «Открытых PR нет»", "- Открытых PR нет." in _l and not any("недоступен" in x for x in _l), _l)
+_l = B.lines({"prs": [], "pr_stale": [("evil/\u202e<x>", 5)]})
+check("0808: имя репозитория не по шаблону в блок не идёт", "- Открытых PR нет." in _l and not any("evil" in x for x in _l), _l)
+_l = B.lines({"prs": [], "pr_stale": [("o/a", T0 - 7200), ("o/b", T0 - 600)]})
+check("0808: два сбойных репозитория - время самого давнего успеха", f"- PR: данные от {B.hm(T0 - 7200)}, gh недоступен (a, b)." in _l, _l)
+check("0808: pr_stale - нет файла и мусор дают пусто", B.pr_stale(os.path.join(ROOT, "nope.json")) == []
+      and B.pr_stale(write(os.path.join(ROOT, "junk.json"), "[1]")) == [])
+
+# --- 0829: «Ждёт владельца» направления — waiting-auto.md из задач, кэша PR и очереди слияния ----------------------
+wp = os.path.join(ROOT, "w-pan")
+ws = os.path.join(ROOT, "w-state")
+for d in ("athena-x", "hermes-y"):
+    write(os.path.join(wp, "directions", d, "STATUS.md"), f"# {d}\n")
+wtasks = {
+    "athena-0001": ("", {"status": "waiting", "waiting_on": "human", "direction": "athena-x", "title": "СЕКРЕТ"}, ""),
+    "athena-0002": ("", {"status": "todo", "owner": "owner", "direction": "athena-x"}, ""),
+    "athena-0003": ("", {"status": "doing", "direction": "athena-x"}, ""),
+    "hermes-0001": ("", {"status": "doing", "direction": "hermes-y"}, ""),
+}
+is_own = lambda h: h.get("owner") == "owner"  # noqa: E731
+wcache = os.path.join(ws, "autoclose-prs.json")
+write(wcache, json.dumps({"fetched": T0, "open_prs": {"latark/app": [
+    {"number": 10, "head": "b" * 12, "ids": ["athena-0003"], "core": True},
+    {"number": 11, "head": "c" * 12, "ids": ["athena-0003"], "core": False},
+    {"number": 12, "head": "d" * 12, "ids": ["hermes-0001"], "core": True}]}}))
+write(os.path.join(ws, "merge-queue", "latark__app__10.json"), json.dumps({"repo": "latark/app", "pr": 10, "sha": "b" * 40}))
+write(os.path.join(ws, "merge-queue", "latark__app__12.json"), json.dumps({"repo": "evil/app", "pr": 12}))  # не своё имя
+made = B.waiting_sync(wp, ws, wtasks, is_own, T0)
+wa = read(os.path.join(wp, "directions", "athena-x", B.WAIT_NAME))
+wh = read(os.path.join(wp, "directions", "hermes-y", B.WAIT_NAME))
+check("0829: waiting-auto.md: «Ждёт ответа», «Руками», PR ядра и заявка Touch ID своего направления; заголовков задач нет",
+      made == ["athena-x", "hermes-y"] and "- **Ждёт ответа** (1): athena-0001." in wa and "- **Руками** (1): athena-0002." in wa
+      and "- PR #10 app (athena-0003) · ядро → сливает владелец." in wa and "- Заявка на слияние PR #10 ждёт Touch ID." in wa
+      and "#11" not in wa and "#12" not in wa and "СЕКРЕТ" not in wa and wa.startswith(B.WAIT_HEAD), wa)
+check("0829: другое направление — только своё; заявка с чужим содержимым файла не считается",
+      "- PR #12 app (hermes-0001) · ядро → сливает владелец." in wh and "Touch ID" not in wh and "athena" not in wh, wh)
+mt_a = os.stat(os.path.join(wp, "directions", "athena-x", B.WAIT_NAME)).st_mtime_ns
+check("0829: входы те же, время другое → файлы не переписаны", B.waiting_sync(wp, ws, wtasks, is_own, T0 + 600) == []
+      and os.stat(os.path.join(wp, "directions", "athena-x", B.WAIT_NAME)).st_mtime_ns == mt_a)
+wtasks["athena-0001"][1]["status"] = "done"
+wtasks["athena-0002"][1]["status"] = "dropped"
+os.remove(os.path.join(ws, "merge-queue", "latark__app__10.json"))
+write(wcache, json.dumps({"fetched": T0, "open_prs": {"latark/app": [
+    {"number": 12, "head": "d" * 12, "ids": ["hermes-0001"], "core": True}]}}))
+made2 = B.waiting_sync(wp, ws, wtasks, is_own, T0 + 1200)
+wa2 = read(os.path.join(wp, "directions", "athena-x", B.WAIT_NAME))
+check("0829: карточки закрыты, PR слит (ушёл из кэша), заявка снята → пункты пропали сами, «Ничего не ждёт.»",
+      made2 == ["athena-x"] and "athena-0001" not in wa2 and "athena-0002" not in wa2 and "#10" not in wa2
+      and "- Ничего не ждёт." in wa2 and f"собрано {B.hm(T0 + 1200)}" in wa2, wa2)
+fp_probe = f"""
+import sys
+sys.path.insert(0, {os.path.dirname(CLI)!r})
+import pantheon as p
+print(repr(p.board_auto_fp()))
+"""
+fenv = dict(env, PANTHEON_STATE=ws, PANTHEON_HOME=wp)
+fp1 = subprocess.run([PY311, "-I", "-c", fp_probe], env=fenv, capture_output=True, text=True, timeout=120).stdout
+write(os.path.join(ws, "merge-queue", "latark__app__12.json"), json.dumps({"repo": "latark/app", "pr": 12, "sha": "d" * 40}))
+fp2 = subprocess.run([PY311, "-I", "-c", fp_probe], env=fenv, capture_output=True, text=True, timeout=120).stdout
+check("0829: заявка в очереди слияния меняет отпечаток входов доски — проход не пропускается", fp1 and fp2 and fp1 != fp2,
+      (fp1, fp2))
+check("0829: кэша PR нет → PR не показаны, карточки — да", "PR #" not in B.waiting_render(
+    B.waiting(wp, ws, wtasks, is_own, None)["hermes-y"], T0) and "Ничего не ждёт" in B.waiting_render(
+    B.waiting(wp, ws, wtasks, is_own, None)["hermes-y"], T0))
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

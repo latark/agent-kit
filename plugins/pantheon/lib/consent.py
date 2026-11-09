@@ -14,7 +14,7 @@ from datetime import datetime
 
 __all__ = [
     "HESTIA_CONSENT_DAYS", "APPROVALS", "APPROVALS_HEAD", "CONSENT_ID", "CONSENT_MAX", "CONSENT_REAP_Q",
-    "CONSENT_ANSWER", "CONSENT_YES", "CONSENT_NO", "consent_is_yes", "consent", "approvals_load", "toml_str",
+    "CONSENT_ANSWER", "CONSENT_YES", "CONSENT_NO", "consent_is_yes", "ConsentLogError", "consent_found", "consent", "approvals_load", "toml_str",
     "approve",
 ]
 
@@ -67,7 +67,210 @@ def consent_is_yes(body):
     return bool(CONSENT_YES.match(text)) and not CONSENT_NO.search(ans)
 
 
+class ConsentLogError(Exception):
+    """Журнал ответов владельца не читается: ответ проверить нельзя (код 3 у consent)."""
+
+
+def zeus_log_text(qid):
+    """Текст owner-log/zeus.md (нет файла — пусто); не читается — ConsentLogError с подсказкой для окна роли."""
+    try:
+        with open(P.path("owner-log", "zeus.md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        text = ""
+    except PermissionError as e:
+        # metis-0820: окно роли закрывает zeus.md для чтения (защита), а `pantheon consent *` выходит из песочницы,
+        # только если строка — одна эта команда: в цепочке (`cat …; pantheon consent <id>`, `&&`, `|`) она идёт в
+        # песочнице и получает Errno 1 (05.11, athena-0309)
+        raise ConsentLogError(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя. Команда шла в "
+                              f"песочнице окна: запусти `pantheon consent {qid}` отдельным вызовом Bash, без `;`, `&&`, "
+                              f"`|` и других команд в той же строке")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConsentLogError(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя")
+    return text
+
+
+def log_entries(text):
+    """Записи журнала owner-log: [(«ГГГГ-ММ-ДД ЧЧ:ММ:СС», хвост заголовка после времени, тело без краевых пробелов)]."""
+    heads = list(LOG_HEAD.finditer(text))
+    return [(m.group(1), m.group(2), text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip())
+            for i, m in enumerate(heads)]
+
+
+LOG_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", re.M)
+
+
+def consent_found(qid, days):
+    """Ответы владельца на вопрос «[qid] …» за days дней из owner-log/zeus.md и board.jsonl: (found, mentions,
+    unclear), found — [(время, заголовок, «вопрос: …\nответ: …»)] по времени. Журнал не читается — ConsentLogError.
+    Общая часть pantheon consent и pantheon browser (metis-0760)."""
+    text = zeus_log_text(qid)
+    word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
+    # ответ — выбор в окне вопросов (пометка «окно вопросов», хук answer) или однозначный выбор варианта сообщением прямо
+    # после вопроса Зевса с вариантами (пометка «ответ в чате», хук owner-log; lib/answers.py). Пометки ставит хук, ввод
+    # владельца их не получает. Вопрос начинается с [<id>]; id в свободном тексте, цитате, заметке к чужому вопросу и в
+    # записи «ответ в чате не распознан» — не ответ
+    own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
+    since, found, mentions, unclear = P.now() - days * 86400, [], 0, 0
+    A = P.answers_mod()
+    for at, rest, body in log_entries(text):
+        try:
+            t = datetime.strptime(at, "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        if t < since:
+            continue
+        if A.is_answer_head(rest) and own.match(body):
+            found.append((t, at + " " + rest.strip() + " у Зевса", body))
+        elif word.search(body):
+            mentions += 1
+            unclear += rest.strip() == "· " + A.CHAT_NONE_NOTE and bool(own.match(body))
+    try:
+        with open(P.path("owner-log", "board.jsonl"), encoding="utf-8") as fh:
+            board_lines = fh.read().splitlines()
+    except FileNotFoundError:
+        board_lines = []
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConsentLogError(f"pantheon consent: журнал доски не читается ({e}) — ответ проверить нельзя")
+    for line in board_lines:
+        try:
+            rec = json.loads(line)
+            t = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        q, a = rec.get("question"), rec.get("answer")
+        # скрытый текст Obsidian (%%…%%, <!-- -->) в вопросе — вы его не видели, такой ответ не согласие (как owner_approved)
+        if rec.get("kind") != "answer" or rec.get("id") != qid or t < since or not isinstance(q, str) \
+                or not isinstance(a, str) or re.search(r"%%|<", q):
+            continue
+        found.append((t, rec["time"][:19].replace("T", " ") + " · доска, галочка на карточке (деньги, публикации, "
+                      "сообщения людям, удаление — не по галочке, только окном вопросов или ответом в чате)",
+                      f"вопрос: {q.strip()}\nответ: {a.strip()}"))
+    found.sort(key=lambda x: x[0])
+    return found, mentions, unclear
+
+
+# --- привязка прямого слова владельца к id (metis-0843, «да» владельца 05.11 16:11 «А — да, все три части») ----------
+# Владелец распорядился в окне Зевса обычным сообщением, без вопроса с [id] («убери это правило»): consent такое слово не
+# видит. `pantheon consent bind <id> --log-at <время>` из окна Зевса привязывает к id ровно одну строку owner-log/zeus.md —
+# запись без пометки (ваш набранный ввод, как его записал хук). Своего текста команда не принимает: в связке только id,
+# время строки и sha256 её текста, а текст consent каждый раз берёт из журнала и сверяет с хешем. Журнал owner-log пишет
+# только хук — связка лежит отдельно, в STATE/consent-bind.jsonl (окна ролей туда не пишут; `pantheon consent *` идёт мимо
+# песочницы). Привязанное слово исполнитель видит дословно; метку Гестии (push, гашение) и согласие браузера оно не
+# даёт — для них по-прежнему только ответ на вопрос с [id].
+BIND_FILE = "consent-bind.jsonl"
+BIND_DAYS = 7.0                 # привязать можно только строку не старше недели
+BIND_USAGE = ("pantheon consent bind <id> --log-at <ЧЧ:ММ[:СС] | ГГГГ-ММ-ДД ЧЧ:ММ[:СС]> — только в окне Зевса; "
+              "своего текста команда не берёт")
+
+
+def _sha(s):
+    import hashlib
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _plain(rest):
+    """Запись без пометки — ваш набранный ввод: после времени в заголовке ничего нет."""
+    return not (rest or "").strip()
+
+
+def consent_bind(rest):
+    """pantheon consent bind <id> --log-at <время>: привязать вашу строку owner-log/zeus.md без пометки к id."""
+    if os.environ.get("PANTHEON_ROLE") != "hq":
+        print("pantheon consent bind: только в окне Зевса — привязывает он, исполнитель смотрит `pantheon consent <id>`",
+              file=sys.stderr)
+        return 2
+    if len(rest) < 3 or not CONSENT_ID.fullmatch(rest[0]) or rest[1] != "--log-at":
+        print(BIND_USAGE, file=sys.stderr)
+        return 2
+    qid, when = rest[0], " ".join(rest[2:])  # дата и время — одним словом в кавычках или двумя; иное — отказ ниже
+    m = re.fullmatch(r"(?:(\d{4}-\d{2}-\d{2}) )?(\d{2}:\d{2})(:\d{2})?", when.strip())
+    try:
+        m and datetime.strptime((m.group(1) or "2000-01-01") + " " + m.group(2) + (m.group(3) or ":00"),
+                                "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        m = None
+    if not m:
+        print(f"pantheon consent bind: время «{when}» — ЧЧ:ММ, ЧЧ:ММ:СС или ГГГГ-ММ-ДД ЧЧ:ММ:СС; {BIND_USAGE}",
+              file=sys.stderr)
+        return 2
+    prefix = (m.group(1) or datetime.fromtimestamp(P.now()).strftime("%Y-%m-%d")) + " " + m.group(2) + (m.group(3) or "")
+    try:
+        text = zeus_log_text(qid)
+    except ConsentLogError as e:
+        print(e, file=sys.stderr)
+        return 3
+    at_time = [(at, r, body) for at, r, body in log_entries(text) if at.startswith(prefix)]
+    plain = [(at, body) for at, r, body in at_time if _plain(r) and body]
+    if not plain:
+        notes = sorted({r.strip(" ·") for _, r, _ in at_time if not _plain(r)})
+        print(f"pantheon consent bind: в owner-log/zeus.md нет вашей строки без пометки в {prefix}"
+              + (f" — там только записи с пометкой ({'; '.join(notes)}): ответ на вопрос consent видит и так, "
+                 "а записи хука привязать нельзя" if notes else "") + ". Ничего не привязано.", file=sys.stderr)
+        return 1
+    if len(plain) > 1:
+        print(f"pantheon consent bind: в {prefix} ваших строк {len(plain)} ({', '.join(at[11:] for at, _ in plain)}) — "
+              "укажи время с секундами. Ничего не привязано.", file=sys.stderr)
+        return 1
+    at, body = plain[0]
+    if datetime.strptime(at, "%Y-%m-%d %H:%M:%S").timestamp() < P.now() - BIND_DAYS * 86400:
+        print(f"pantheon consent bind: строка {at} старше {BIND_DAYS:g} дн. — привязать нельзя, спроси владельца заново "
+              f"окном вопросов «[{qid}] …».", file=sys.stderr)
+        return 1
+    rec = {"id": qid, "at": at, "sha256": _sha(body), "time": P.stamp(), "host": P.host()}
+    try:
+        os.makedirs(P.STATE, exist_ok=True)
+        fd = os.open(P.path(BIND_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        print(f"pantheon consent bind: связку записать не удалось ({e}) — ничего не привязано", file=sys.stderr)
+        return 3
+    P.start_log(f"consent-bind\t{qid}\t{at}")
+    print(f"Привязано к {qid}: ваша строка owner-log/zeus.md {at} (без пометки). Исполнитель увидит её дословно в "
+          f"`pantheon consent {qid}`:\n\n{body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + '…'}")
+    return 0
+
+
+def consent_bound(qid, days, text):
+    """Привязанные к qid строки owner-log/zeus.md за days дней: ([(время, заголовок, тело)], [что не сошлось]).
+    Строка берётся из журнала заново: нет её, у неё пометка или текст не тот, что при привязке, — не берётся."""
+    try:
+        with open(P.path(BIND_FILE), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except FileNotFoundError:
+        return [], []
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConsentLogError(f"pantheon consent: связки слов владельца не читаются ({e}) — ответ проверить нельзя")
+    entries = {}
+    for at, r, body in log_entries(text):
+        if _plain(r) and body:
+            entries.setdefault(at, []).append(body)
+    since, out, bad, seen = P.now() - days * 86400, [], [], set()
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            at, sha = rec["at"], rec["sha256"]
+            t = datetime.strptime(at, "%Y-%m-%d %H:%M:%S").timestamp()
+        except (ValueError, TypeError, KeyError):
+            continue
+        if rec.get("id") != qid or t < since or (at, sha) in seen:
+            continue
+        seen.add((at, sha))
+        hit = [b for b in entries.get(at, []) if _sha(b) == sha]
+        if len(hit) != 1:
+            bad.append(at)
+            continue
+        out.append((t, f"{at} · ваше слово в окне Зевса без вопроса с [id] — привязал к {qid} Зевс "
+                       f"{rec.get('time') or '?'} (дословно из owner-log/zeus.md)", hit[0]))
+    return out, bad
+
+
 def consent(rest):
+    if rest and rest[0] == "bind":
+        return consent_bind(rest[1:])
     if not rest or not CONSENT_ID.fullmatch(rest[0]):
         print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
         return 2
@@ -87,58 +290,13 @@ def consent(rest):
                   f"не по {qid}", file=sys.stderr)
             return 2
     try:
-        with open(P.path("owner-log", "zeus.md"), encoding="utf-8") as fh:
-            text = fh.read()
-    except FileNotFoundError:
-        text = ""
-    except (OSError, UnicodeDecodeError) as e:
-        print(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
+        found, mentions, unclear = consent_found(qid, days)
+        # привязанное Зевсом слово (metis-0843) исполнитель видит, но «да» оно не считается: said_yes и метка Гестии
+        # (push, гашение) — только по ответам на вопрос с [id] из found
+        bound, bad = consent_bound(qid, days, zeus_log_text(qid))
+    except ConsentLogError as e:
+        print(e, file=sys.stderr)
         return 3
-    word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
-    # ответ — выбор в окне вопросов (пометка «окно вопросов», хук answer) или однозначный выбор варианта сообщением прямо
-    # после вопроса Зевса с вариантами (пометка «ответ в чате», хук owner-log; lib/answers.py). Пометки ставит хук, ввод
-    # владельца их не получает. Вопрос начинается с [<id>]; id в свободном тексте, цитате, заметке к чужому вопросу и в
-    # записи «ответ в чате не распознан» — не ответ
-    own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
-    since, found, mentions, unclear = P.now() - days * 86400, [], 0, 0
-    A = P.answers_mod()
-    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
-    for i, m in enumerate(heads):
-        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
-        try:
-            t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
-        except ValueError:
-            continue
-        if t < since:
-            continue
-        if A.is_answer_head(m.group(2)) and own.match(body):
-            found.append((t, m.group(1) + " " + m.group(2).strip() + " у Зевса", body))
-        elif word.search(body):
-            mentions += 1
-            unclear += m.group(2).strip() == "· " + A.CHAT_NONE_NOTE and bool(own.match(body))
-    try:
-        with open(P.path("owner-log", "board.jsonl"), encoding="utf-8") as fh:
-            board_lines = fh.read().splitlines()
-    except FileNotFoundError:
-        board_lines = []
-    except (OSError, UnicodeDecodeError) as e:
-        print(f"pantheon consent: журнал доски не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
-        return 3
-    for line in board_lines:
-        try:
-            rec = json.loads(line)
-            t = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
-        except (ValueError, TypeError, AttributeError):
-            continue
-        q, a = rec.get("question"), rec.get("answer")
-        # скрытый текст Obsidian (%%…%%, <!-- -->) в вопросе — вы его не видели, такой ответ не согласие (как owner_approved)
-        if rec.get("kind") != "answer" or rec.get("id") != qid or t < since or not isinstance(q, str) \
-                or not isinstance(a, str) or re.search(r"%%|<", q):
-            continue
-        found.append((t, rec["time"][:19].replace("T", " ") + " · доска, галочка на карточке (деньги, публикации, "
-                      "сообщения людям, удаление — не по галочке, только окном вопросов или ответом в чате)",
-                      f"вопрос: {q.strip()}\nответ: {a.strip()}"))
-    found.sort(key=lambda x: x[0])
     # решает последний ответ на каждый вопрос: позднее «нет» на тот же вопрос отменяет прежнее «да» (metis-0656)
     final = {}
     for _, head, body in found:
@@ -148,13 +306,18 @@ def consent(rest):
                      and final[body.split("\nответ:")[0].strip()][1] is body), ("", ""))
     reap_q = last_yes[1].split("\nответ:")[0]
     reap_q = reap_q if CONSENT_REAP_Q in reap_q else None
-    found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
+    found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…")
+             for _, head, body in sorted(found + bound, key=lambda x: x[0])]
     hint = (f"\nУпоминаний {qid} в словах владельца, которые не ответ: {mentions} (ответ — выбор в окне вопросов или "
             f"одного варианта сообщением сразу после вопроса «[{qid}] …» с вариантами"
             + (f"; ответ в чате не распознан: {unclear}" if unclear else "")
             + f"); попроси Зевса переспросить окном вопросов «[{qid}] …»." if mentions else "")
+    if bad:
+        hint += (f"\nПривязки Зевса к {qid}, которых нет в журнале (строки нет, у неё пометка или текст не тот, что при "
+                 f"привязке): {', '.join(bad)} — не ответ.")
     if not found:
-        print(f"ответа владельца на {qid} в окне вопросов, в чате Зевса и на доске за {days:g} дн. нет{hint}")
+        print(f"ответа владельца на {qid} в окне вопросов, в чате Зевса, на доске и в привязках Зевса за {days:g} дн. "
+              f"нет{hint}")
         return 1
     if hestia and not said_yes:
         print(f"Ответ на {qid} есть, но это не «да» — метки для окна нет; наружу не иди, отчёт Зевсу.")

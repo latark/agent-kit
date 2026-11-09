@@ -12,12 +12,34 @@ heavy-cmd-2.lock. Свободного места нет — команда жд
   heavy --status          кто занимает места
 В окне роли (есть PANTHEON_TMP) команда получает TMPDIR=$PANTHEON_TMP: песочница ставит TMPDIR в /tmp/claude-<uid>, где
 сокеты запрещены, и `pnpm check` с tsx падал на listen EPERM; сокеты окну разрешены только в его кэше (metis-0563).
+Очередь (metis-0659): места получают по порядку прихода, а не кто первым опросил место. Ждущая команда кладёт билет в
+locks/heavy-queue/ (имя — время прихода и pid) и держит на нём flock, пока жива; берёт место, только когда перед ней нет
+живого билета. Билеты умерших (блокировка снята системой, в том числе после kill -9) следующий в очереди убирает сам;
+пустой незапертый билет моложе TICKET_GRACE (5 с) — только создан и держит очередь, а с временем дальше TICKET_GRACE в
+любую сторону (в том числе из будущего) — умерший. Папку
+билетов создать или писать в неё нельзя (песочница) — билета нет, команда ждёт опросом мест, как раньше; так же
+при ссылке на месте папки. Чужое в папке, что не обычный файл (FIFO, папка), пропускается. Ждущая команда раз в опрос
+обновляет время своего билета; билет живого владельца, не обновлённый дольше TICKET_STALE (120 с), — застывший
+(процесс остановлен, SIGSTOP или Ctrl-Z): очередь его обходит, но не удаляет — оживший владелец встанет первым.
+Возраст считается от прошлого опроса ждущего, а не от «сейчас»: после сна Mac голова очереди не застывает (metis-0805).
+`heavy --status` считает только живые билеты. Сервер (--server): за жетон сервера очереди нет (ждёт опросом), а за
+два места, как у любой команды, — по порядку прихода.
+Команды нет в PATH окна (окно подняли без ~/.zprofile, nvm в PATH не попал — `pnpm` не находился, metis-0569) —
+heavy ищет её сам: bin версии node из nvm (alias/default, затем новейшие), Homebrew, ~/.local/bin; нашла — добавляет эту
+папку в PATH команды (у pnpm и npx shebang `env node`). Не нашла — код 127 и одна строка, без очереди за местом.
+Полный набор (metis-1007): run-tests.py с папками плагинов без --affected/--only (правило — lib/fullsuite.py, то же, что у
+outside) занимает ещё и жетон locks/heavy-full.lock — на Mac идёт один полный набор, второй ждёт в очереди так же (за
+жетон — опросом, потом за место по порядку прихода; HEAVY_WAIT_MAX и сообщения те же). Узкие команды и одиночные файлы
+жетон не берут. Нет файла жетона — heavy создаёт его сам, а в песочнице идёт без него.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
+import contextlib
 import fcntl
 import os
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -26,7 +48,122 @@ LOCKS = os.path.join(os.path.realpath(os.environ.get("PANTHEON_STATE") or
                                       os.path.join(os.path.expanduser("~"), ".local", "state", "pantheon")), "locks")
 SLOTS = ("heavy-cmd-1", "heavy-cmd-2")
 SERVER = "heavy-server"  # жетон долгого процесса: держит его не больше одного сервера
+FULL = "heavy-full"  # жетон полного набора тестов: на Mac идёт не больше одного (metis-1007)
 WAIT_EXIT = 75
+POLL = 0.5  # с между опросами мест
+
+QUEUE = "heavy-queue"  # папка билетов очереди на два места (metis-0659)
+TICKET_GRACE = 5  # с: билет только создан, блокировка на нём ещё не взята — не считаем умершим
+TICKET_STALE = 120  # с: живой билет не обновлялся дольше — владелец остановлен, очередь его обходит (metis-0659)
+
+
+def probe(dfd, name, now=None):
+    """Состояние билета name в папке очереди: "live" — владелец жив и ждёт; "frozen" — владелец жив, но билет не
+    обновлялся дольше TICKET_STALE (остановлен); "young" — только создан, блокировка ещё не взята; "dead" — владелец
+    умер, блокировка снята системой; None — не обычный файл или не открыть (FIFO не открываем вслепую и не ждём).
+    now — от какого времени считать возраст (по умолчанию — сейчас; Ticket.ahead — время своего прошлого опроса)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        age = (time.time() if now is None else now) - st.st_mtime
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "frozen" if age > TICKET_STALE else "live"
+        except OSError:
+            return None
+        # abs: пустой файл с mtime из будущего (часы назад, touch -t) иначе был бы «young» вечно и держал очередь
+        return "dead" if st.st_size > 0 or abs(time.time() - st.st_mtime) > TICKET_GRACE else "young"
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+class Ticket:
+    """Билет в очереди на места по порядку прихода. Имя — время прихода (нс) и pid, поэтому порядок — по имени.
+    Билет держит flock на своём файле, пока его владелец жив: умер (в том числе kill -9) — блокировка снята системой, и
+    следующий в очереди убирает билет сам. Папку билетов создать или писать в неё нельзя (песочница роли) — билета
+    нет, команда ждёт как раньше, опросом мест."""
+
+    def __init__(self):
+        self.fd = self.dfd = self.name = None
+        self.prev = self.last = time.time()  # время прошлого и последнего своего опроса (touch)
+        qdir = os.path.join(LOCKS, QUEUE)
+        try:
+            os.makedirs(qdir, exist_ok=True)
+            # папку открываем без перехода по ссылке и работаем через неё: heavy идёт и вне песочницы, а ссылка на месте
+            # heavy-queue иначе дала бы удалять файлы в чужой папке
+            self.dfd = os.open(qdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.name = f"{time.time_ns():020d}-{os.getpid()}"
+            self.fd = os.open(self.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.dfd)
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+            os.write(self.fd, f"{os.getpid()}\n".encode())
+        except OSError:
+            self.drop()
+
+    def ahead(self):
+        """Есть ли перед нами живой билет. Билеты умерших владельцев убирает. Застывший билет (владелец остановлен)
+        обходит, не удаляя. Не обычный файл в папке (FIFO, устройство, папка, ссылка) пропускает: не открывает
+        вслепую, не ждёт и не удаляет. Возраст чужого билета — от своего прошлого опроса, а не от «сейчас»: после сна
+        Mac дольше TICKET_STALE не обновлялся ни один билет, и голову очереди обходил бы тот, кто проснулся первым
+        (metis-0805). Сон — пауза и в своём опросе, поэтому он в возраст не идёт; остановленный владелец отстаёт от
+        своих же опросов ждущего и через TICKET_STALE застывает, как раньше."""
+        if self.fd is None:
+            return False
+        try:
+            names = sorted(os.listdir(self.dfd))
+        except OSError:
+            return False
+        for name in names:
+            if name >= self.name:
+                break
+            got = probe(self.dfd, name, self.prev)
+            if got in ("live", "young"):
+                return True
+            if got == "dead":
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=self.dfd)
+        return False
+
+    def touch(self):
+        """Ждём дальше: время билета — сейчас. Остановленный владелец его не обновит, и очередь пойдёт мимо."""
+        self.prev, self.last = self.last, time.time()
+        if self.fd is None:
+            return
+        try:
+            os.utime(self.fd)
+        except OSError:  # смена времени запрещена (песочница) — та же запись pid тоже обновляет время файла
+            with contextlib.suppress(OSError):
+                os.pwrite(self.fd, f"{os.getpid()}\n".encode(), 0)
+
+    def drop(self):
+        if self.fd is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(self.name, dir_fd=self.dfd)
+            os.close(self.fd)
+        if self.dfd is not None:
+            os.close(self.dfd)
+        self.fd = self.dfd = self.name = None
+
+
+def is_full(argv):
+    """Полный набор тестов — по тому же правилу, что у outside (lib/fullsuite.py). Не загрузилось — не полный."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "fullsuite", os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "fullsuite.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(mod.is_full(argv))
+    except Exception as e:  # не загрузилось — не полный, но молча нельзя: жетон тогда не работает
+        print(f"heavy: fullsuite не загрузился: {e} — жетон полного набора не работает", file=sys.stderr)
+        return False
 
 
 def try_slot(names=SLOTS):
@@ -35,7 +172,12 @@ def try_slot(names=SLOTS):
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
-            continue
+            if name != FULL:
+                continue
+            try:  # файл жетона полного набора ещё не создан (старая установка) — создаём; нельзя (песочница) — без него
+                fd = os.open(p, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+            except OSError:
+                return -1, name
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return fd, name
@@ -44,8 +186,25 @@ def try_slot(names=SLOTS):
     return None, None
 
 
+def queue_len():
+    """Сколько живых билетов в очереди: умершие и застывшие не в счёт, папку не меняем."""
+    try:
+        dfd = os.open(os.path.join(LOCKS, QUEUE), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return 0
+    try:
+        return sum(1 for name in os.listdir(dfd) if probe(dfd, name) in ("live", "young"))
+    except OSError:
+        return 0
+    finally:
+        os.close(dfd)
+
+
 def status():
-    for name in SLOTS + (SERVER,):
+    n = queue_len()
+    if n:
+        print(f"очередь на места: {n}")
+    for name in SLOTS + (SERVER, FULL):
         p = os.path.join(LOCKS, name + ".lock")
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
@@ -71,6 +230,44 @@ def tmp_env():
     return env
 
 
+def _vkey(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in v.lstrip("v").split("."))
+
+
+def fallback_dirs():
+    """Где искать команду, которой нет в PATH окна: bin версии node из nvm (по alias/default первой, дальше новейшие),
+    Homebrew, ~/.local/bin."""
+    home = os.path.expanduser("~")
+    nvm = os.environ.get("NVM_DIR") or os.path.join(home, ".nvm")
+    root = os.path.join(nvm, "versions", "node")
+    try:
+        vers = sorted((v for v in os.listdir(root) if v.startswith("v")), key=_vkey, reverse=True)
+    except OSError:
+        vers = []
+    try:
+        with open(os.path.join(nvm, "alias", "default"), encoding="utf-8") as fh:
+            want = fh.read().strip().lstrip("v")
+    except OSError:
+        want = ""
+    first = [v for v in vers if want and (v[1:] == want or v[1:].startswith(want + "."))]
+    order = first[:1] + [v for v in vers if v not in first[:1]]
+    return [os.path.join(root, v, "bin") for v in order] + ["/opt/homebrew/bin", "/usr/local/bin",
+                                                          os.path.join(home, ".local", "bin")]
+
+
+def resolve(argv, env):
+    """→ (argv, env) с найденной командой; команду не нашли — None. Путь со слэшем и команду из PATH не трогает."""
+    name = argv[0]
+    if "/" in name or shutil.which(name, path=env.get("PATH") or os.defpath):
+        return argv, env
+    for d in fallback_dirs():
+        if shutil.which(name, path=d):
+            env = dict(env)
+            env["PATH"] = d + os.pathsep + env["PATH"] if env.get("PATH") else d
+            return argv, env
+    return None
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -83,30 +280,46 @@ def main(argv):
     if not argv:
         print(__doc__)
         return 2
+    env = tmp_env()
+    found = resolve(argv, env)
+    if not found:
+        print(f"heavy: команда {argv[0]!r} не найдена ни в PATH, ни в nvm, Homebrew и ~/.local/bin — не запускалась",
+              file=sys.stderr)
+        return 127
+    argv, env = found
     if not any(os.path.exists(os.path.join(LOCKS, n + ".lock")) for n in SLOTS):
         print("heavy: мест блокировки нет (pantheon install их создаёт) — запускаю без неё", file=sys.stderr)
-        return subprocess.call(argv, env=tmp_env())
+        return subprocess.call(argv, env=env)
     try:
         wait_max = float(os.environ.get("HEAVY_WAIT_MAX") or 0)
     except ValueError:
         wait_max = 0
     held, waited = [], 0
-    need = ([((SERVER,), "сервер уже запущен другой ролью")] if server else []) + \
+    need = ([((FULL,), "полный набор тестов уже идёт (на Mac один)")] if not server and is_full(argv) else []) + \
+        ([((SERVER,), "сервер уже запущен другой ролью")] if server else []) + \
         [(SLOTS, "оба места заняты другими тяжёлыми командами")]
     for names, what in need:
-        fd, _ = try_slot(names)
-        while fd is None:
-            if wait_max and waited >= wait_max:
-                print(f"heavy: {what} — не дождалась места за {int(waited)} с, команда не запускалась",
-                      file=sys.stderr)
-                return WAIT_EXIT
-            if waited % 60 == 0:
-                print(f"heavy: {what} — жду ({waited // 60} мин)", file=sys.stderr)
-            time.sleep(2)
-            waited += 2
-            fd, _ = try_slot(names)
-        held.append(fd)
-    proc = subprocess.Popen(argv, env=tmp_env())
+        ticket = Ticket() if names == SLOTS else None  # очередь — только на два места, не на жетон сервера
+        try:
+            fd = None if ticket and ticket.ahead() else try_slot(names)[0]
+            while fd is None:
+                if wait_max and waited >= wait_max:
+                    print(f"heavy: {what} — не дождалась места за {int(waited)} с, команда не запускалась",
+                          file=sys.stderr)
+                    return WAIT_EXIT
+                if waited % 60 == 0:  # шаг опроса 0,5 с: освободившееся место берётся сразу, а не через 2 с
+                    print(f"heavy: {what} — жду ({int(waited // 60)} мин)", file=sys.stderr)
+                time.sleep(POLL)
+                waited += POLL
+                if ticket:
+                    ticket.touch()
+                fd = None if ticket and ticket.ahead() else try_slot(names)[0]
+        finally:
+            if ticket:
+                ticket.drop()
+        if fd >= 0:  # -1 — жетон полного набора создать нельзя: идём без него, как без мест
+            held.append(fd)
+    proc = subprocess.Popen(argv, env=env)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda s, _f: proc.send_signal(s))
     code = proc.wait()

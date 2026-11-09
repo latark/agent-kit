@@ -164,8 +164,8 @@ def base_checks():
     # metis-0306 (ревью, M10): компактная карточка «Пачки» и в Пульте — не длиннее 5 свойств, как в «Доске»
     ppacks = pd["Пачки"]
     porder = [x.strip() for x in re.search(r"^    order:\n((?:      - .+\n?)+)", ppacks, re.M).group(1).replace("      - ", "").split("\n") if x.strip()]
-    check("metis-0306: Пульт.base, «Пачки» — карточка не больше 5 свойств: имя, Закрыто, сумма/бюджет, цепочка",
-          porder == ["file.name", "note.Закрыто", "formula.sum_budget", "note.Цепочка"], str(porder))
+    check("metis-0306: Пульт.base, «Пачки» — карточка не больше 5 свойств: имя, Закрыто, Вопросов (metis-0801), сумма/бюджет, цепочка",
+          porder == ["file.name", "note.Закрыто", "note.Вопросов", "formula.sum_budget", "note.Цепочка"], str(porder))
     # metis-0306 (ревью, M12): формула accept_view даёт «ждёт приёмки» только для «На проверке» с пустой Приёмкой
     acc = re.search(r"^  accept_view: (.+)$", T.BASE_FILE, re.M).group(1)
     check("metis-0306: accept_view — пустая Приёмка у «На проверке» даёт «ждёт приёмки», заполненная выводится как есть, прочее пусто",

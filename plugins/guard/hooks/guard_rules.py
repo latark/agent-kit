@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Правила из ~/.claude/CLAUDE.md, которые Claude Code проверяет сам, а не на память модели.
 
-Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, Agent, Task, Skill),
+Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, Agent, Task, Skill,
+EnterWorktree),
 PostToolUse (Bash:
 журнал запора слияния) и Stop плагина guard (hooks/hooks.json). Код запора слияния и protect-config — в merge_gate.py
 и protect_config.py рядом (ядро защит, Д3).
@@ -29,11 +30,19 @@ PostToolUse (Bash:
   pantheon-acl — запись в ~/ai/pantheon по карте прав; ~/.local/state/pantheon — ни одной роли; файлы задач
                  (directions/*/tasks/, inbox/tasks/) — ни одной роли, штабу тоже: только `pantheon task`; доска
                  ~/ai/pantheon-view и журналы ваших слов owner-log — ни одной сессии Claude, без роли тоже (metis-0044);
+                 цель записи «не разобрать» ($(…), переменная, цикл) — отказ, только если команда идёт в эти папки
+                 или называет их (metis-0823);
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron (только в окне штаба,
                  PANTHEON_ROLE=hq, P0-2) и mnemo-brain (SEC-11); hq и chiron закрыты лишь ключи — отказ на явный путь
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
+                 остальным обход папки выше — отказ, только если читает me/ или журнал (grep -r без --exclude-dir=me)
+                 или копирует личное (tar, rsync, cp); список имён (find, fd, rg --files, ls, Glob) — можно, если его
+                 вывод не уходит в конвейер или $(…) (metis-0823);
+  hq-projects  — окну штаба (PANTHEON_ROLE=hq) Read, Grep, Glob папок проектов направлений из domains.json — отказ
+                 с именем координатора: поручение в inbox и `pantheon start <имя>` (metis-0771); открыты agent-kit,
+                 направления с coordinator = false, ~/ai, README.md, AGENTS.md и .git проекта; Bash — песочница окна;
   hq-telegram  — окну штаба (PANTHEON_ROLE=hq) Telegram закрыт: субагент tg-reader, навык telegram-read, скрипт
                  tg-read и демон tg-readd в Bash (P0-1, metis-0060);
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
@@ -48,6 +57,10 @@ PostToolUse (Bash:
                  мимо песочницы (metis-0533, metis-0596);
   hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
                  (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
+  worktree-own — окну направления (PANTHEON_WINDOW из domains.json) EnterWorktree с path — только в .claude/worktrees/
+                 репозитория своего направления и из него же (иначе Claude Code спрашивает владельца); чужое
+                 направление — отказ с подсказкой pantheon start или задача ему; другой репозиторий — подсказка cd;
+                 вне папки запуска настройки проекта с allow, hooks, sandbox, env — отказ и с name (metis-0911);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -59,7 +72,12 @@ PostToolUse (Bash:
                 (metis-0245); git push и gh pr create|edit — только при свежей метке «да» на задачу окна
                 (`pantheon consent`, metis-0562), -R и --body-file в gh ограничены, сети у окна нет;
   cdp-role    — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
-                по всему тексту команды, кроме слов в сообщении git commit, gh pr|issue, pantheon task (metis-0624);
+                только подключение: curl, nc, интерпретатор с кодом в -c/-e или из stdin, /dev/tcp рядом с портом,
+                запуск cdp-daemon.mjs, чтение пароля; слова о демоне в тексте — можно (metis-0823);
+  daemon-roster — реестр демона Claude Code ~/.claude/daemon/roster.json (ключи сокетов rvAuth, ptyAuth) ролям и
+                субагентам целиком не читать: Read, Grep файла или папки daemon, Bash с его именем среди слов команды
+                (не текстом -m, --body, --note, echo и не шаблоном grep) и код интерпретатору из stdin; поля без
+                ключей — `pantheon roster` (metis-0871);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -72,7 +90,9 @@ PostToolUse (Bash:
                  alerts.md; защиты — ещё Д3: PR не задевает ядро (весь plugins/guard/**, casefold; файлы из
                  pulls/N/files с previous_filename), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
                  (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
-                 — отказ (DONE-07, metis-0027, themis-0015, metis-0038, metis-0071);
+                 — отказ (DONE-07, metis-0027, themis-0015, metis-0038, metis-0071). Сессия без роли — только CI
+                 перед gh pr merge и gh api с записью на …/pulls/N/merge (check_owner_merge, metis-0633, 0663);
+                 gh alias set со словом merge — отказ всем (алиас слияния шлюз не узнает);
   terminal     — роли не печатают в терминал: osascript, tmux send-keys, screen stuff (SEC-30).
   corpus-role  — роли не запускают пополнение корпуса (подкоманды пополнения и скрипты) и не читают его ключи
                  из Связки: только через посредника; штабу (hq) корпус закрыт целиком (metis-0021, 15.10). Имена
@@ -99,8 +119,8 @@ hooks/__pycache__ (.pyc), а не компилируется на каждый �
   В окне роли хук плагина молчит и на том инструменте, который в этой же сессии уже проверил строгий guard (метка
   сессии, шапка guard.py). Управляемая и строгая копии проверяют всегда.
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
-исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, hq-projects, cdp-role, daemon-roster, push, terminal,
+hq-telegram, hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -109,6 +129,13 @@ attribution, cdp, nextjs) при сбое пропускают к остальн
 строка статуса показывает число сбоев за сутки.
 
 Выключить одно правило: GUARD_OFF=dev-server,nextjs (через запятую) в env settings.json.
+
+Контекст вызова (metis-0330): режим (--strict, --managed), GUARD_OFF, HOME и все пути от него, TEMP_ROOTS (TMPDIR)
+считает одна функция configure() — при загрузке и заново, когда процесс судит другой вызов (guard.set_context:
+sys.argv и os.environ вызова, затем configure() guard, guard_rules и taint). При загрузке модуля argv и окружение
+больше нигде не читаются — это проверяет tests/test_context.py (разбор AST и сверка решений с новым процессом).
+Принцип F1 для будущего демона хуков: демон только ускоряет. Любая его ошибка — медленный путь (новый процесс
+python.sh guard.py) с теми же правилами; «пропустить при сбое демона» и «отказать во всём при сбое демона» запрещены.
 """
 
 import fnmatch
@@ -116,17 +143,62 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 import time
 import tomllib
 
-OFF ={r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
-HOME = os.path.expanduser("~")
-MODE = "strict" if "--strict" in sys.argv[1:] else "managed" if "--managed" in sys.argv[1:] else "plugin"
-FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+# subprocess (git, ps, lsof), ipaddress и merge_gate.py грузятся по первому обращению — внутри функций, которым они
+# нужны (metis-0330): обычный вызов их не трогает, а импорт стоил 5–10 мс на каждый вызов инструмента.
+
 MANAGED_FILE = "/Library/Application Support/ClaudeCode/managed-settings.json"
-MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
+
+
+def configure():
+    """Контекст вызова (metis-0330): всё, что зависит от аргументов и окружения процесса, — здесь, а не в строках
+    модуля. Режим MODE (--strict, --managed, без аргумента — plugin), выключенные правила OFF (GUARD_OFF), HOME и все
+    пути от него, временные корни TEMP_ROOTS (TMPDIR). Считается из sys.argv и os.environ: при загрузке модуля (вызов —
+    последней строкой файла, когда всё определено) и заново, когда процесс решает событие другого вызова (демон хуков,
+    guard.set_context: он ставит sys.argv и os.environ вызова и зовёт configure каждого модуля guard). Правила читают
+    эти имена при вызове как глобальные этого модуля; merge_gate.py и protect_config.py — через G. Копию через
+    `from guard_rules import HOME` делать нельзя: она не обновится (тест test_context.py это ищет). Остальное
+    окружение (PANTHEON_ROLE, PANTHEON_WINDOW, CLAUDE_PROJECT_DIR…) правила читают из os.environ в момент проверки.
+    Демон только ускоряет: любая его ошибка — медленный путь с теми же правилами (принцип F1, README guard)."""
+    global OFF, HOME, MODE, FAIL_LOG, MARKET_GUARD, CDP_DAEMON, TG_SCRIPT, TG_TESTS, STATE_DIR, OWNER_LOG, \
+        DOMAINS_FILE, LEGACY_DOMAINS_FILE, POLICY_FILE, AI_HOME, PANTHEON, PANTHEON_VIEW, TEMP_ROOTS, CDP_TOKEN_DIR, \
+        HESTIA_CONSENT_DIR, PROTECTED, EVENT_NAME, DAEMON_DIR
+    argv = sys.argv[1:]
+    # событие прошлого вызова (долг С2 argus, metis-0330): с ним сбой нового вызова в том же процессе судился бы как
+    # сбой на Stop — код 0 вместо отказа
+    EVENT_NAME = None
+    OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
+    HOME = os.path.expanduser("~")
+    MODE = "strict" if "--strict" in argv else "managed" if "--managed" in argv else "plugin"
+    FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+    MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks",
+                                "guard.py")
+    CDP_DAEMON = os.path.join(HOME, ".claude", "tools", "cdp-daemon.mjs")  # правило cdp
+    TG_SCRIPT = os.path.join(HOME, "projects", "other", "tg-read", "tg_read.py")  # tg-secret
+    TG_TESTS = os.path.join(HOME, "projects", "other", "tg-read", "tests")
+    # карта прав (domain, pantheon-acl, private …)
+    STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
+    OWNER_LOG = os.path.join(STATE_DIR, "owner-log")  # журналы ваших слов: пишут хук и тик, ни одна сессия Claude
+    DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
+    LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
+    POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+    AI_HOME = os.path.join(HOME, "ai")  # рабочие папки системы: pantheon, pantheon-view, knowledge (переезд 14.10)
+    PANTHEON = os.path.realpath(os.path.join(AI_HOME, "pantheon"))
+    PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
+    TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
+    CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке; cdp-role
+    DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")  # реестр демона Claude Code roster.json — daemon-roster
+    HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")  # метки «да» окна hestia
+    PROTECTED = protect_config.protected()
+    # разбор Bash кэширован по (команда, папка), а раскрывает ~, $HOME и $TMPDIR — другой контекст, разбор заново
+    _ANALYSIS.clear()
+    _READS.clear()
+    _CWDS.clear()
+    _UNRES.clear()
+    _FED.clear()
 
 
 DEADLINE = 8       # с: таймаут хука PreToolUse и PostToolUse — 10 с, а таймаут Claude Code пропускает вызов
@@ -143,6 +215,35 @@ class HookFailure(Exception):
 
 class HookTimeout(BaseException):
     """Свой срок DEADLINE вышел. Не Exception: проверки с `except Exception` его не проглотят и не пойдут дальше."""
+
+
+class Allow:
+    """Пропуск с предупреждениями (красная необязательная проверка CI, metis-0633, 0650). Ложь, как None: проверки
+    по-прежнему пишут `if why:`, а предупреждения едут возвратом до main (check_push → check_roles → main) и
+    печатаются строкой systemMessage только в ответе того события, которое их дало. Изменяемого состояния модуля нет:
+    демон хуков (metis-0330) проверит много событий в одном процессе, и чужое предупреждение в ответ не попадёт.
+    Живёт здесь, а не в merge_gate.py (он грузится по первому обращению): merge_gate.allow и notes_of зовут эти."""
+    __slots__ = ("notes",)
+
+    def __init__(self, notes):
+        self.notes = tuple(notes)
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return f"Allow({list(self.notes)!r})"
+
+
+def allow(notes):
+    """None без предупреждений, иначе Allow(notes)."""
+    notes = tuple(notes)
+    return Allow(notes) if notes else None
+
+
+def notes_of(result):
+    """Предупреждения пропуска: notes у Allow, у отказа (строка) и None — пусто."""
+    return result.notes if isinstance(result, Allow) else ()
 
 
 def log_failure(where, e):
@@ -242,7 +343,7 @@ def check_attribution(cmd):
 # --- cdp ----------------------------------------------------------------------
 
 CODE_EXT = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py", ".sh", ".zsh", ".bash")
-CDP_DAEMON = os.path.join(HOME, ".claude", "tools", "cdp-daemon.mjs")
+# CDP_DAEMON — путь демона от HOME: в configure() (контекст вызова)
 
 
 def new_texts(tool_input):
@@ -277,7 +378,7 @@ KEYCHAIN_CMD = re.compile(
     re.S,
 )
 KEYCHAIN_CODE = re.compile(r"find-generic-password|SecItemCopyMatching|keyring\.get_password|StringSession")
-TG_SCRIPT = os.path.join(HOME, "projects", "other", "tg-read", "tg_read.py")
+# TG_SCRIPT — от HOME: в configure()
 TG_SECRET_REASON = (
     "Ключ сессии tg-read в Связке ключей даёт полный доступ к Telegram пользователя; читать его "
     "можно только самому ~/projects/other/tg-read/tg_read.py, где действует белый список «только "
@@ -291,7 +392,7 @@ TG_SECRET_REASON = (
 # который импортирует tg_read или загружает tg_read.py как модуль, не запускаем и не пишем (кроме тестов
 # tg-read): и то и другое ловится по тексту, регулярным выражением, — защита от ошибки и от внедрённых
 # указаний, а не замок. Обычный запуск (tg_read.py команда, uv run … tg_read.py) и тесты проходят.
-TG_TESTS = os.path.join(HOME, "projects", "other", "tg-read", "tests")
+# TG_TESTS — от HOME: в configure()
 TG_CODE_EXT = CODE_EXT + (".pyw", ".ipynb")  # и блокноты: NotebookEdit кладёт код в new_source
 # Python в позиции команды: в начале, после ; && || | ( $( `, после VAR=… и env/exec/sudo, с путём или без
 PY_CMD = re.compile(
@@ -535,6 +636,7 @@ def next_root(path):
 
 
 def dev_server_dirs():
+    import subprocess
     try:
         ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=3).stdout
     except (OSError, subprocess.SubprocessError):
@@ -628,19 +730,11 @@ def check_nextjs(event):
 # Предел: что пишет программа изнутри (python script.py, python -c, node -e, make, свой скрипт), guard не
 # видит. Это защита от ошибки агента, а не от намеренного обхода; настоящая граница — песочница (SEC-19).
 
-import hashlib
 import stat
 import unicodedata
 
-STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
-OWNER_LOG = os.path.join(STATE_DIR, "owner-log")  # журналы ваших слов: пишут хук и тик, ни одна сессия Claude
-DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
-LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
-POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
-AI_HOME = os.path.join(HOME, "ai")  # рабочие папки системы: pantheon, pantheon-view, knowledge (переезд 14.10)
-PANTHEON = os.path.realpath(os.path.join(AI_HOME, "pantheon"))
-PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
-TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
+# STATE_DIR, OWNER_LOG, DOMAINS_FILE, LEGACY_DOMAINS_FILE, POLICY_FILE, AI_HOME, PANTHEON, PANTHEON_VIEW (от HOME) и
+# TEMP_ROOTS (TMPDIR, /tmp, /private/tmp, /dev/null) — в configure(): контекст вызова, metis-0330
 PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku", "hestia"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
@@ -1180,6 +1274,8 @@ class _State:
             if os.environ.get(name):
                 self.vars[name] = {os.environ[name]}
         self.out, self.cmds = [], []
+        self.fed = set()     # индексы st.cmds, чей вывод уходит дальше: в конвейер или в $(…), `…`, <(…) (metis-0823)
+        self.in_sub = 0      # глубина подстановок: внутри $(…) вывод любой команды кто-то читает
         self.reads = []      # цели входного перенаправления `<` и `$(< …)`: что команда читает из файла
         self.links = {}      # ln -s в этой команде: путь ссылки → куда ведёт
         self.opaque = False  # source/. — дальше переменные и папка неизвестны
@@ -1435,6 +1531,30 @@ def _paths(st, lit, mask):
 _ZSH_OPT_GLOB = re.compile(r"[\^#~!@+()|<>]")
 
 
+class _Unres(str):
+    """UNRESOLVED с папкой, куда идёт неразобранная цель (metis-0823). Подстановка — только в последней части пути:
+    `"$TMPDIR/$f.log"` пишет в $TMPDIR, `out/file-$(date).txt` — в <папка>/out. base None — папку не вычислить:
+    слово начинается с подстановки (`"$f.bak"`, `"$R/x"`), после подстановки есть «/» (`out/$(x)/../../.claude`,
+    `out/$(x)//.git/hooks`), в литеральной части шаблон (`.cl*de/$(x)`, `[.]claude/…`) или папка команды
+    неизвестна. text — слово без подстановок после os.path.normpath
+    (повторные слеши и «.» убраны): по нему судят слова настроек репозитория."""
+    base = None
+    text = ""
+
+
+def _unres(st, lit, mask):
+    u = _Unres(UNRESOLVED)
+    pre, rest = lit.split(_DYN, 1)
+    if pre and "/" not in rest and not _globby(pre, mask[:len(pre)]):
+        u.text = os.path.normpath(pre + rest.replace(_DYN, ""))
+        d = pre.rsplit("/", 1)[0] + "/" if "/" in pre else ""
+        if d.startswith("/"):
+            u.base = (os.path.realpath(d),)
+        elif None not in st.cwds:
+            u.base = tuple(sorted(os.path.realpath(os.path.join(c, d)) for c in st.cwds))
+    return u
+
+
 def _targets(st, w):
     """Слово-цель записи → абсолютные пути; UNRESOLVED, если путь не вычислить."""
     if w.proc:
@@ -1445,12 +1565,14 @@ def _targets(st, w):
     for blit, bmask in _braces(w.lit, w.mask):
         for plit, pmask in _params(st, blit, bmask):
             if _DYN in plit:
-                return [UNRESOLVED]
+                out.append(_unres(st, plit, pmask))  # остальные варианты {a,b} судятся дальше
+                continue
             if st.opts and any(_ZSH_OPT_GLOB.match(c) and m in "uv" for c, m in zip(plit[1:], pmask[1:])):
                 return [UNRESOLVED]
             for lit, mask in _split(st, plit, pmask):
                 if _DYN in lit:
-                    return [UNRESOLVED]
+                    out.append(_unres(st, lit, mask))
+                    continue
                 out += _paths(st, lit, mask)
                 if len(lit) > 1 and lit.endswith("}") and mask[-1] == "u":
                     out += _paths(st, lit[:-1], mask[:-1])  # zsh: «}» в конце слова закрывает { … }
@@ -1633,8 +1755,9 @@ def _run(words, st, stdin, piped, depth):
     if not argv:
         return
     head, args = argv[0], argv[1:]
-    if head.zglob or any(c in "*?[" and m in "uv" for c, m in zip(head.lit, head.mask)):
-        alts = [None]
+    if head.zglob or (head.lit not in ("[", "[[")
+                      and any(c in "*?[" and m in "uv" for c, m in zip(head.lit, head.mask))):
+        alts = [None]  # `[` и `[[` — проверка условия, не шаблон: без `]` в слове шаблона нет (metis-0823)
     else:
         alts = [(None if _DYN in l else l, l, m) for bl, bm in _braces(head.lit, head.mask) for l, m in _params(st, bl, bm)]
     t = [_text(st, a) for a in args]
@@ -2142,7 +2265,11 @@ def _analyze(lex, st, depth):
         else:
             cur.append(t)
     segs.append((cur, prev))
-    for items, prev in segs:
+    for si, (items, prev) in enumerate(segs):
+        # metis-0823 (Б1 ревью #330): дальше в строке есть «|» — вывод этой команды может уйти в конвейер. Без учёта
+        # скобок и групп: `{ find …; } | xargs cat` тоже конвейер, лишний отказ на `find …; ls | head` безвреден
+        feeds = st.in_sub > 0 or any(p in ("|", "|&") for _, p in segs[si + 1:])
+        first = len(st.cmds)
         words, stdin, k = [], None, 0
         while k < len(items):
             t = items[k]
@@ -2183,8 +2310,14 @@ def _analyze(lex, st, depth):
             _run(words, st, stdin, piped, depth)  # служебное слово могло быть и операндом: rm -rf done
         for c in cmds:
             _run(c, st, stdin, piped, depth)
-    for sub in lex.inner:
-        _analyze(sub, st, depth + 1)
+        if feeds:
+            st.fed.update(range(first, len(st.cmds)))
+    st.in_sub += 1
+    try:
+        for sub in lex.inner:
+            _analyze(sub, st, depth + 1)
+    finally:
+        st.in_sub -= 1
 
 
 def _analyze_string(text, st, depth):
@@ -2197,6 +2330,9 @@ def _analyze_string(text, st, depth):
 
 _ANALYSIS = {}
 _READS = {}
+_CWDS = {}  # папки, где идут команды строки (событие и каждый cd); None — папку не вычислить
+_UNRES = {}  # metis-0823: папки каждой неразобранной цели записи (_Unres.base); None — папку не вычислить
+_FED = {}  # metis-0823: индексы команд разбора, чей вывод уходит дальше (конвейер, подстановка)
 
 
 def bash_analysis(cmd, cwd):
@@ -2221,9 +2357,15 @@ def bash_analysis(cmd, cwd):
             st.out.append(UNRESOLVED)
         res = sorted(set(st.out)), st.cmds
         _READS[(cmd, cwd)] = sorted(set(st.reads))
+        _CWDS[(cmd, cwd)] = list(st.cwds)
+        _UNRES[(cmd, cwd)] = [(getattr(p, "base", None), getattr(p, "text", "")) for p in st.out if p == UNRESOLVED]
+        _FED[(cmd, cwd)] = frozenset(st.fed)
     except (_ParseError, RecursionError, ValueError, OSError):
         res = [UNRESOLVED], []
         _READS[(cmd, cwd)] = [UNRESOLVED]
+        _CWDS[(cmd, cwd)] = [None]
+        _UNRES[(cmd, cwd)] = [(None, "")]
+        _FED[(cmd, cwd)] = frozenset()
     _ANALYSIS[(cmd, cwd)] = res
     return res
 
@@ -2236,6 +2378,52 @@ def bash_reads(cmd, cwd):
 
 def bash_targets(cmd, cwd):
     return bash_analysis(cmd, cwd)[0]
+
+
+def bash_cwds(cmd, cwd):
+    """Папки, где могут идти команды строки: папка события и каждая цель cd; None — папку не вычислить."""
+    bash_analysis(cmd, cwd)
+    return _CWDS.get((cmd, cwd), [None])
+
+
+def bash_fed(cmd, cwd):
+    """Индексы команд bash_analysis(cmd, cwd)[1], чей вывод уходит дальше: в конвейер или в подстановку (metis-0823)."""
+    bash_analysis(cmd, cwd)
+    return _FED.get((cmd, cwd), frozenset())
+
+
+def unresolved_dirs(event, tool, tool_input, zones, words=None):
+    """metis-0823: папки неразобранных целей записи Bash, если каждая лежит в $TMPDIR (/tmp), кэше окна
+    ($PANTHEON_TMP, ~/Library/Caches/pantheon-sandbox) или своей worktree (репозиторий папки события); иначе None —
+    отказ, как до 0823. Папки правило затем судит как обычные цели: `.claude/hooks/$f` в своей worktree — отказ
+    protect-config. Разрешённый корень, равный зоне правила, её предку или потомку, не считается (~/ai/pantheon — сам
+    репозиторий). Отказ и тогда, когда слово цели без подстановок называет зону или настройки репозитория (words).
+    Путь в значении подстановки (`"$TMPDIR/$f"` с f=../..) — намеренный обход, граница — песочница."""
+    if tool != "Bash":
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    cmd = tool_input.get("command") or ""
+    bash_analysis(cmd, cwd)
+    found = _UNRES.get((cmd, cwd)) or [(None, "")]
+    if any(b is None for b, _ in found):
+        return None
+    homes = {HOME, os.path.realpath(HOME)}
+    frags = {_key(f) for z in zones for f in [z] + [z[len(h) + 1:] for h in homes if _inside(z, [h]) and _key(z) != _key(h)]
+             if f}
+    if any(f in _key(text) for _, text in found for f in frags):
+        return None  # страховка: слово цели называет зону (`$TMPDIR/ai/pantheon/x-$(d)`)
+    if words and any(words.search(text) for _, text in found):
+        return None
+    bases = [b for b, _ in found]
+    roots = [r for r in TEMP_ROOTS if r != os.path.realpath("/dev/null")]
+    roots += [os.path.realpath(p) for p in (os.environ.get("PANTHEON_TMP"),
+                                            os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")) if p]
+    top = _git_top(cwd)
+    if _inside(top, [HOME]) and _key(top) != _key(HOME):
+        roots.append(top)
+    roots = [r for r in roots if not any(_inside(r, [z]) or _inside(z, [r]) for z in zones)]
+    dirs = sorted({d for b in bases for d in b})
+    return dirs if all(_inside(d, roots) for d in dirs) else None
 
 
 def roles_probe_ok(texts):
@@ -2430,6 +2618,11 @@ UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи 
                      "на macOS пишут в /var/folders, песочница это режет).")
 
 
+UNRESOLVED_SAFE = (" Проходит только цель, чья буквальная часть до $(…) или переменной лежит в $TMPDIR, кэше окна или "
+                   "твоей worktree: `\"$TMPDIR/$f.log\"`, `out/$name` (metis-0823). Слово, которое начинается с "
+                   "подстановки (`\"$f.bak\"`, `\"$R/x\"`), xargs и цикл с командой записи — отказ.")
+
+
 OWNER_RECORDS_REASON = ("Правило pantheon-acl: в доску ~/ai/pantheon-view (карточки, ваши галочки и заметки) и в "
                         "журналы ваших слов ~/.local/state/pantheon/owner-log не пишет ни одна сессия Claude, и без "
                         "роли тоже: доску владелец правит в Obsidian, журналы пишут хук и плановый проход. Иначе ответ на "
@@ -2478,9 +2671,13 @@ def check_pantheon(event, tool, tool_input):
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None
-    if UNRESOLVED in targets and pantheon_role:
-        return UNRESOLVED_REASON
-    targets = [p for p in targets if p != UNRESOLVED]
+    # metis-0823: неразобранная цель проходит, только если её папка в $TMPDIR, кэше окна или своей worktree
+    # (unresolved_dirs) — и эту папку судит карта прав как обычную цель
+    zones = [PANTHEON, PANTHEON_VIEW, STATE_DIR]
+    dirs = unresolved_dirs(event, tool, tool_input, zones) if UNRESOLVED in targets and pantheon_role else []
+    if dirs is None:
+        return UNRESOLVED_REASON + UNRESOLVED_SAFE
+    targets = [p for p in targets if p != UNRESOLVED] + dirs
     domains = policy = None
     for p in targets:
         if _inside(p, [STATE_DIR]) or (pantheon_role and _inside(STATE_DIR, [p])):
@@ -2511,20 +2708,35 @@ def check_pantheon(event, tool, tool_input):
 #   private  (SEC-11, SEC-21) — личное из [private] policy.toml (me/, ключи git-crypt, журнал штаба) читают и пишут
 #            только роли из [private].roles (hq, chiron) и главная сессия координатора из [private].coordinators
 #            (mnemo-brain). Read, Grep, Glob, правки и Bash — по явным путям: это защита от случайности; в окнах
-#            ролей Bash к личному закрыт ещё и песочницей (denyRead).
+#            ролей Bash к личному закрыт ещё и песочницей (denyRead). Обход папки выше (metis-0823, _walk_reads):
+#            поиск (grep -r, rg, Grep, find -exec) — отказ, только если внутри me/ или журнал и они не исключены
+#            (--exclude-dir=me, rg -g '!me', glob «!me/**»): ключ git-crypt — двоичный, поиск его не выводит;
+#            копирование (tar, zip, rsync, cp, ditto) — отказ, если внутри любое личное; список имён (find, fd,
+#            rg --files, ls, Glob) — можно, если вывод никуда не уходит: в конвейере (| xargs, | while read) или в
+#            $(…), `…`, <(…) — отказ, как до 0823 (bash_fed). Слова-текст (echo, git commit -m, pantheon task
+#            --note) и шаблон поиска — не пути.
 #   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs, пароль
 #            ~/.config/cdp-daemon/token): никому из ролей (CDP_READERS и CDP_ACTORS пусты, metis-0227). /close —
-#            никому из ролей: демон общий для всех сессий. Bash — по всему тексту команды (порт, имя демона, папка
-#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды, первое
-#            слово которой — ровно её имя (metis-0630: без X=…, env, time, exec, пути): git commit -m/-F, gh pr|issue create|edit|comment --body/--title/
-#            --body-file, pantheon task new|set --text/--note/--title… (_cdp_text_only, CDP_TEXT_CMDS); отказ Bash
-#            подсказывает это исключение (CDP_TEXT_HINT). Read, Grep и Glob папки пароля — отказ; Edit и
-#            Write исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит
-#            к демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
+#            никому из ролей: демон общий для всех сессий. Bash — только подключение (metis-0823, _cdp_connects):
+#            сетевой клиент (CDP_NET), имя команды не вычислить, интерпретатор с кодом в -c/-e или из stdin, /dev/tcp
+#            или неразобранная команда — вместе с портом 9222, 9333–9339 или адресом devtools в тексте; запуск
+#            cdp-daemon.mjs; путь в папку пароля среди слов, кроме текста и ls/stat (CDP_TOKEN_META), и `< пароль`;
+#            флаг --remote-debugging*; присваивание (GH_HOST=…, env X=…) с портом или паролем. Слова о демоне в
+#            echo, grep, git commit -m, pantheon task --note — не подключение (прежнее исключение metis-0624 для
+#            одной простой команды снято за ненадобностью). Read, Grep и Glob папки пароля — отказ; Edit и Write
+#            исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит к
+#            демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
 #            песочницы нет, пароль закрыт denyRead.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
-#            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
-#            нет. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
+#            master — никто из ролей (в main сливаете вы) при любой записи назначения: heads/main, refs/heads/main,
+#            X:main, регистр (APFS) — по правилам git (_dst_refs, metis-0983); --all, --branches, --mirror (и сокращения
+#            вроде --mirr), удаление и принудительная отправка — тоже нет. git fetch и pull (metis-0983, ролям и главной
+#            сессии окна): --update-head-ok (-u), --stdin и refspec или --refmap с назначением в refs/heads/* — отказ,
+#            fetch пишет только refs/remotes/* и теги (fetch_problem). Push нового коммита в ветку открытого PR, который argus уже принял на её вершине (ядро — два Opus,
+#            вне ядра — одно, «вернуть» нет), — отказ и ролям, и сессии без роли (metis-0794, push_accepted →
+#            merge_gate.accepted_push_problem): долг ревью — задачей, PR — к слиянию; принудительная отправка в такой
+#            PR — тоже (metis-0809); строка «Б: <причина>» в коммите PR (не из base), base подтянут без правок и
+#            любой сбой проверки — пропуск. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
 #            команде, или её лид (metis-0054, guard 0.5.2): субагент hephaestus-<short> или apollo-<short>, где short —
 #            имя направления папки запуска (domains.json) после первого «-», как собирает pantheon roles build; дальше
 #            лид проверяется как координатор (личное, Метида, защиты). Лид чужого направления, сессия без
@@ -2546,29 +2758,51 @@ DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
 # команды, которые обходят папку целиком: путь-предок личной папки для них — то же, что сама папка
 RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "gtar", "zip", "rsync", "cp", "gcp",
              "ditto", "qmd"}
-# порт демона или браузера — отдельным числом, при любой записи адреса петли (127.1, 0x7f000001, [::ffff:…]) и без
-# адреса вовсе (nc localhost 9222, socket.connect((h, 9222))): разбор адреса здесь не граница, ловим по числу
-CDP_TARGET = re.compile(r"(?<![\w.])93(?:3[3-9])(?![\w.])|cdp-daemon", re.I)
-# отладочный порт самого браузера с отладкой (9222 или порт из DevToolsActivePort): мимо демона — никому из ролей
-CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(?:browser|page)/|remote-debugging", re.I)
-# metis-0624: шаблоны смотрят весь текст команды; исключение — слово стоит значением флага-сообщения у одной простой
-# команды git commit, gh pr|issue, pantheon task (_cdp_text_only). Флаг → вид значения: "text" — текст, "md" — файл .md
-CDP_TEXT_CMDS = {
-    "git": ({("commit",)}, {"-m": "text", "--message": "text", "-F": "md", "--file": "md"}, ()),
-    "gh": ({("pr", "create"), ("pr", "edit"), ("pr", "comment"), ("issue", "create"), ("issue", "edit"),
-            ("issue", "comment")},
-           {"-b": "text", "--body": "text", "-t": "text", "--title": "text", "-F": "md", "--body-file": "md"}, ()),
-    "pantheon": ({("task", "new"), ("task", "set")},
-                 {f: "text" for f in ("--title", "--text", "--body", "--note", "--question", "--why", "--option",
-                                      "--recommend", "--if-no-answer", "--done-when", "--mode-why", "--next", "--force")}
-                 | {"--body-file": "md"},
-                 ("result", "note", "title", "next", "question", "why", "recommend", "if_no_answer")),
-}
-# подсказка в отказе Bash (metis-0630): как написать о демоне в коммите, PR или задаче, не задев правило
-CDP_TEXT_HINT = ("\nСлова о демоне в тексте коммита, PR или задачи проходят, если это одна простая команда (без &&, |, "
-                 "$(…), 2>&1 и слов вроде X=… или env перед git, gh, pantheon), а текст стоит в -m/--body/--text/--note или в файле .md через "
-                 "-F/--body-file; заголовок задачи — через --title.")
-CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке
+# metis-0823: обход папки выше личной — отказ, только если команда читает содержимое личного. Поиск (SEARCHERS) —
+# только me/ и журнал Пританея внутри и не исключённые (--exclude-dir=me, rg -g '!me'): ключ git-crypt — двоичный
+# файл, поиск его не выводит. Список имён (find и fd без -exec, rg --files, ls, Glob) — не чтение, проходит, пока
+# его вывод не уходит в конвейер или подстановку. Копирование (tar,
+# zip, rsync, cp, ditto) и find -exec / fd -x — как раньше: любой личный путь внутри
+SEARCHERS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "qmd"}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir", "-x", "--exec", "-X", "--exec-batch"}
+# флаги со значением у grep, rg, ag, ack: слово после них — не шаблон поиска и не путь
+SEARCH_VALUE_OPTS = {"-A", "-B", "-C", "-m", "-d", "-D", "-g", "-t", "-T", "-j", "-M", "--include", "--exclude",
+                     "--exclude-dir", "--glob", "--iglob", "--type", "--type-not", "--ignore", "--ignore-dir",
+                     "--ignore-directory", "--max-count", "--context", "--after-context", "--before-context",
+                     "--max-depth", "--threads", "--max-columns", "--color", "--colour"}
+# metis-0823: слова-текст — значения флагов сообщения, поля задачи, аргументы echo и printf. Правила private и
+# cdp-role не читают их как пути и адреса: заметка о порте или о папке me/ — не чтение и не подключение
+TEXT_CMDS = {"echo", "printf", "print"}
+TEXT_FLAGS = {"git": {"-m", "--message"}, "gh": {"-b", "--body", "-t", "--title"},
+              "pantheon": {"--title", "--text", "--body", "--note", "--question", "--why", "--option", "--recommend",
+                           "--if-no-answer", "--done-when", "--mode-why", "--next", "--force", "--result"}}
+TEXT_FIELDS = {"result", "note", "title", "next", "question", "why", "recommend", "if_no_answer"}
+# флаг исключения → смотрит ли он папки (иначе только имя файла): grep, rg, ag, ack
+# metis-0823 (находка №2): только исключения папок — --exclude-dir и отрицательные глобы rg. --exclude у grep —
+# шаблон имени файла: --exclude=me не закрывает папку me/
+PRIVATE_EXCLUDE = {"--exclude-dir": True, "-g": True, "--glob": True, "--iglob": True,
+                   "--ignore-dir": True, "--ignore-directory": True}
+# metis-0823: правило ловит подключение, а не слова. Bash — отказ, если в команде есть «подключатель» и в тексте —
+# порт или адрес браузера: сетевой клиент (CDP_NET), имя команды не вычислить, интерпретатор с кодом в -c/-e или
+# из stdin, /dev/tcp, команду не разобрать. Ещё — запуск cdp-daemon.mjs, чтение папки пароля, флаг
+# --remote-debugging*, файл DevToolsActivePort и присваивание (GH_HOST=…, env X=…) с портом или паролем. Слова о
+# демоне в echo, grep, git commit -m, pantheon task --note и в исходниках — не подключение
+CDP_PORTS = re.compile(r"(?<![\w.])93(?:3[3-9])(?![\w.])|(?<![\w.])9222(?![\w.])|/devtools/(?:browser|page)/|"
+                       r"DevToolsActivePort|\.config/cdp-daemon", re.I)
+CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|/devtools/(?:browser|page)/|DevToolsActivePort", re.I)
+CDP_NET = {"curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "websocat", "wscat", "http", "https", "xh",
+           "aria2c", "lynx", "w3m", "links", "?"}
+CDP_INTERP = re.compile(r"python[0-9.]*t?|pypy[0-9.]*|node|nodejs|deno|bun|tsx|ts-node|ruby|perl|php|osascript")
+# есть ли файл и какой он (ls, stat, test) — не чтение пароля
+CDP_TOKEN_META = {"ls", "stat", "test", "[", "[[", "realpath", "readlink", "dirname", "basename"}
+CDP_INLINE = {"-c", "-e", "-E", "-p", "-r", "--eval", "--print", "-l"}
+CDP_ASSIGN = re.compile(r"(?:^|[;&|({!\n]|\b(?:env|export|exec|time|nohup|command|declare|local|typeset|readonly)\s)"
+                        r"\s*(?:[A-Za-z_]\w*=\S*\s+)*[A-Za-z_]\w*=(\S*)")
+# подсказка в отказе Bash: на что правило смотрит (metis-0823)
+CDP_HINT = ("\nПравило смотрит подключение, а не слова: curl, wget, nc, python или node с кодом в -c/-e или из stdin, "
+            "/dev/tcp рядом с портом 9222 или 9333–9339, запуск cdp-daemon.mjs, чтение ~/.config/cdp-daemon. Слова о "
+            "демоне в echo, grep, git commit -m, pantheon task --note — можно.")
+# CDP_TOKEN_DIR (папка пароля демона в ~/.config) — в configure()
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
                        re.I)
@@ -2578,13 +2812,20 @@ PROTECTED_BRANCHES = {"main", "master"}
 TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
 _GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
 _PUSH_OPT_ARG = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
-_PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
+_PUSH_BAD = {"--all", "--branches", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
              "--force-if-includes"}
+_PUSH_FORCE = {"--force", "-f", "--force-with-lease", "--force-if-includes"}  # их судит push_accepted (metis-0809)
+# git fetch/pull (metis-0983): флаги со значением отдельным словом; --update-head-ok (-u) сдвигает ветку под HEAD,
+# --stdin читает refspec мимо разбора
+_FETCH_OPT_ARG = {"--refmap", "-o", "--server-option", "--upload-pack", "--depth", "--deepen", "--shallow-since",
+                  "--shallow-exclude", "-j", "--jobs", "--negotiation-tip", "--filter", "--submodule-prefix",
+                  "--recurse-submodules-default", "-s", "--strategy", "-X", "--strategy-option"}
+_FETCH_BAD = {"--update-head-ok", "--stdin"}
 
 
 def limited(event):
     """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет (кроме CI перед
-    gh pr merge: check_owner_merge, metis-0633)."""
+    слиянием PR через gh pr merge и gh api …/pulls/N/merge: check_owner_merge, metis-0633, 0663)."""
     role, sub, pdir = who(event)
     return (is_pantheon_role(role) or sub), role, sub, pdir
 
@@ -2626,10 +2867,11 @@ def private_ok(policy, role, sub, pdir):
     return not sub and any(privileged(policy, c, role, pdir) for c in conf["coordinators"])
 
 
-def _glob_reaches(p, priv, whole=False):
+def _glob_reaches(p, priv, whole=False, dots=False):
     """Путь с * ? [ ] может раскрыться в личное: ~/ai/knowledge/m?/x.md, ~/ai/*/me, ~/ai/kn*. whole — только сам
     личный путь или что-то внутри него (~/ai/pantheon/.git/git-cr*), а не папка выше (~/ai/pantheon/*): для роли,
-    которой закрыт лишь ключ git-crypt (metis-0084)."""
+    которой закрыт лишь ключ git-crypt (metis-0084). dots — как оболочка: * ? [ ] не берут имя на точку (.git), если
+    часть шаблона сама не на точку: ~/ai/pantheon/* не раскрывается в .git/git-crypt (metis-0823)."""
     if not re.search(r"[*?\[{]", p):
         return False
     import fnmatch
@@ -2642,7 +2884,8 @@ def _glob_reaches(p, priv, whole=False):
                 return True
             continue
         n = min(len(pat), len(parts))
-        if "**" in pat[:n] or all(fnmatch.fnmatchcase(parts[i], pat[i]) for i in range(n)):
+        if "**" in pat[:n] or all(fnmatch.fnmatchcase(parts[i], pat[i]) and not (
+                dots and parts[i].startswith(".") and not pat[i].startswith(".")) for i in range(n)):
             return True
     return False
 
@@ -2687,16 +2930,154 @@ def read_paths(event, tool, tool_input):
     return []
 
 
-def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=False):
+def _prose(name, texts):
+    """Индексы слов-текста команды (TEXT_CMDS, TEXT_FLAGS, поле=текст у pantheon task) — metis-0823."""
+    if name in TEXT_CMDS:
+        return set(range(len(texts)))
+    flags = TEXT_FLAGS.get(name)
+    out = set()
+    for i, a in enumerate(texts if flags else ()):
+        if a is None:
+            continue
+        key = a.split("=", 1)[0]
+        if a in flags or (name == "git" and re.fullmatch(r"-[a-z]*m", a)):
+            out.add(i + 1)
+        elif "=" in a and (key in flags or (name == "pantheon" and key in TEXT_FIELDS)):
+            out.add(i)
+    return out
+
+
+def _search_pattern_at(name, texts):
+    """Индекс шаблона поиска у grep, rg, ag, ack — первое слово без флага, если шаблона нет в -e/-f: это не путь."""
+    if name not in SEARCHERS or name == "qmd" or _rg_files(name, texts):
+        return None
+    i = 0
+    while i < len(texts):
+        x = texts[i]
+        if x is None:
+            return i
+        if x == "--":
+            return i + 1
+        if x.startswith("-") and x != "-":
+            if x in ("-e", "-f", "--regexp", "--file") or re.match(r"-[A-Za-z]*[ef].|--(?:regexp|file)=", x) or \
+                    re.fullmatch(r"-[A-Za-z]*[ef]", x):
+                return None
+            i += 2 if x in SEARCH_VALUE_OPTS else 1
+            continue
+        return i
+    return None
+
+
+def _private_content(priv):
+    """Личное с содержимым — всё, кроме ключей git-crypt: me/ и журнал Пританея (metis-0823)."""
+    return [x for x in priv if "/.git/git-crypt" not in x + "/"]
+
+
+def _walk_excludes(name, texts):
+    """Исключения обхода в аргументах поиска → [(шаблон, смотрит ли папки)]. У rg — только -g с «!»."""
+    out, nxt = [], None
+    for x in texts:
+        if x is None:
+            nxt = None
+            continue
+        if nxt is not None:
+            out.append((x, nxt))
+            nxt = None
+            continue
+        if x == "--":
+            break
+        flag, eq, val = x.partition("=")
+        if flag in PRIVATE_EXCLUDE:
+            if eq:
+                out.append((val, PRIVATE_EXCLUDE[flag]))
+            else:
+                nxt = PRIVATE_EXCLUDE[flag]
+        elif x.startswith("-g") and len(x) > 2 and name == "rg":
+            out.append((x[2:], True))
+    if name == "rg":
+        out = [(g[1:], d) for g, d in out if g.startswith("!")]
+    return out
+
+
+def _walk_excluded(x, root, excl):
+    """Личный путь x внутри обхода root закрыт исключением: шаблон папки — по любой части пути от root, шаблон
+    файла — по имени самого x."""
+    import fnmatch
+    parts = [c for c in os.path.relpath(x, root).split("/") if c and c != "."]
+    for g, dirs in excl:
+        g = re.sub(r"^(?:\*\*/)+|(?:/\*\*?)+$", "", g.strip()).strip("/")
+        if not g:
+            continue
+        if "/" in g:
+            rel = "/".join(parts)
+            if fnmatch.fnmatchcase(rel, g) or rel.startswith(g + "/"):
+                return True
+        elif any(fnmatch.fnmatchcase(c, g) for c in (parts if dirs else parts[-1:])):
+            return True
+    return False
+
+
+def _grep_recursive(texts):
+    """grep, egrep, fgrep обходят папку только с -r, -R, --recursive или -d recurse."""
+    for i, x in enumerate(texts):
+        if x is None or x == "--":
+            break
+        if x in ("--recursive", "--dereference-recursive", "--directories=recurse") or (
+                x == "-d" and i + 1 < len(texts) and texts[i + 1] == "recurse"):
+            return True
+        if x.startswith("-") and not x.startswith("--") and set("rR") & set(x[1:]):
+            return True
+    return False
+
+
+def _rg_files(name, texts):
+    """rg --files: список имён без шаблона поиска (metis-0823)."""
+    if name != "rg":
+        return False
+    for x in texts:
+        if x == "--":
+            return False
+        if x == "--files":
+            return True
+    return False
+
+
+def _walk_reads(name, texts, root, priv, content, fed=False):
+    """Обход root командой name читает личное (metis-0823). content None — как было: любой обход предка. fed —
+    вывод команды уходит дальше (конвейер, $(…), `…`, <(…), while read): список имён тогда — как раньше, отказ."""
+    inner = [x for x in priv if _inside(x, [root])]
+    if not inner or name not in RECURSIVE:
+        return False
+    if content is None:
+        return True
+    if (name in ("find", "fd") and not any(x in FIND_EXEC for x in texts if x)) or _rg_files(name, texts):
+        # список имён (find, fd без -exec, rg --files) — не чтение, пока имена никто не читает: `| xargs grep`,
+        # `grep … $(find …)`, `| while read f; do cat` — читают файлы по списку (Б1 ревью #330)
+        return fed
+    if name in SEARCHERS or name in ("find", "fd"):  # find -exec, fd -x — как поиск: что запустят, обычно grep
+        if name in ("grep", "egrep", "fgrep") and not _grep_recursive(texts):
+            return False
+        excl = _walk_excludes(name, texts)
+        return any(x in content and not _walk_excluded(x, root, excl) for x in inner)
+    return True
+
+
+def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=False, content=None):
     """Личные пути, которые задевает команда Bash: явные пути в словах, обход папки выше (ancestor), шаблоны, цели
-    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): check_private и hq-gh."""
+    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): check_private и hq-gh.
+    content — личное с содержимым (metis-0823): обход папки выше задевает личное только по _walk_reads; None — как
+    было, любой обход предка (hq-gh)."""
     cmd = tool_input.get("command") or ""
     _, cmds = bash_analysis(cmd, cwd)
     # относительные пути — от папки события и от каждой папки, куда команда делает cd
     cwds = [cwd] + [_expand(t[0], cwd) for n, t in cmds if n in ("cd", "chdir", "pushd") and t and t[0]]
+    if content is not None:  # metis-0823: cd ../.. — от папки прошлого cd, как считает разбор
+        cwds = list(dict.fromkeys([cwd] + [d for d in bash_cwds(cmd, cwd) if d]))
     hits = [d for d in cwds if _inside(d, priv) and cmds]
-    for name, texts in cmds:
-        words = [name] + [x for x in texts if x]
+    fed = bash_fed(cmd, cwd)
+    for ci, (name, texts) in enumerate(cmds):
+        skip = (_prose(name, texts) | {_search_pattern_at(name, texts)}) if content is not None else ()
+        words = [name] + [x for i, x in enumerate(texts) if x and i not in skip]
         if values:
             words += [w.split("=", 1)[1] if "=" in w else w[2:] for w in words
                       if w.startswith("-") and ("=" in w or (len(w) > 2 and w[1] != "-"))]
@@ -2705,8 +3086,8 @@ def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=F
                 continue
             for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
                 p = _expand(w, d)
-                if _inside(p, priv) or (ancestor and name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
-                        or reaches(p):
+                if _inside(p, priv) or (ancestor and _walk_reads(name, texts, p, priv, content, ci in fed)) or \
+                        reaches(p):
                     hits.append(p)
     hits += [p for p in write_targets(event, "Bash", tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     # metis-0247: файл после `<` разбор не держит среди слов — без этого `gh pr edit --body-file - < личное`
@@ -2738,19 +3119,32 @@ def check_private(event, tool, tool_input):
     # ключа штабу закрыт песочницей окна (denyRead), а Grep Claude Code в .git не заходит. Роли без доступа к личному —
     # как было: обход предка личной папки (grep -r по ~/ai/knowledge, где me/) — отказ
     ancestor = not keys_only
-    reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else (lambda p: _glob_reaches(p, priv))
+    reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else \
+        (lambda p: _glob_reaches(p, priv, dots=True))
     hits = []
     if tool == "Bash":
         # metis-0247 (argus-69b3): значение флага в том же слове (--body-file=<путь>, -F<путь>) — у всех ролей, не
         # только у штаба: иначе координатор отдавал личное в gh через склейку
-        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=True)
+        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=True,
+                                  content=_private_content(priv))
     elif tool in EDIT_TOOLS:
         hits = [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     else:
+        # metis-0823: Glob — список имён, обход папки выше проходит; Grep — только me/ и журнал внутри, не исключённые
+        # его glob «!me/**» (Claude Code отдаёт glob в rg --glob)
+        excl = _walk_excludes("rg", ["-g", tool_input.get("glob") or ""]) if tool == "Grep" else []
         for p, whole in read_paths(event, tool, tool_input):
-            if _inside(p, priv) or (ancestor and whole and any(_inside(x, [p]) for x in priv)):
+            if _inside(p, priv) or (ancestor and whole and tool != "Glob" and any(
+                    _inside(x, [p]) and not _walk_excluded(x, p, excl) for x in _private_content(priv))):
                 hits.append(p)
         pat = (tool_input.get("pattern") or "") if tool == "Glob" else ""
+        if pat and not keys_only:
+            # Glob от папки выше — список имён, но шаблон, чья буквальная часть идёт в личное (me/*.md), — отказ
+            words = _expand(pat, _expand(tool_input.get("path") or cwd, cwd)).split("/")
+            k = next((i for i, c in enumerate(words) if set(c) & set("*?[{")), len(words))
+            lit = "/".join(words[:k]) or "/"
+            if _inside(lit, priv):
+                hits.append(lit)
         if keys_only and pat:
             # шаблон Glob — от path («.git/git-crypt/**» из ~/ai/pantheon) или абсолютный: раскрывается ли в ключ
             full = _expand(pat, _expand(tool_input.get("path") or cwd, cwd))
@@ -2764,15 +3158,13 @@ def check_private(event, tool, tool_input):
                 "она. Поиск по папке выше (grep -r, Grep) можно: назови путь мимо .git/git-crypt.")
     return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
             f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал Пританея — только hq, chiron (в окне Пританея) и "
-            "mnemo-brain. Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, "
-            "wiki/, inbox/.")
+            "mnemo-brain. Поиск по папке выше — исключи личное: grep -r --exclude-dir=me, rg -g '!me', Grep с glob "
+            "«!me/**» (журнал — --exclude-dir=owner-log) или сузь путь: raw/, wiki/, inbox/. Список имён (find, fd, "
+            "rg --files, ls, Glob) по папке выше проходит, если его вывод никуда не уходит: find в конвейере "
+            "(| xargs, | while read) или в $(…) — отказ.")
 
 
-try:
-    import ipaddress as _ip
-    FAKE_IP_NET = _ip.ip_network("198.18.0.0/15")
-except Exception:  # noqa: BLE001
-    FAKE_IP_NET = ()
+FAKE_IP_NET = "198.18.0.0/15"  # сеть прокси с подменой адресов; ipaddress грузится в _local_url (metis-0330)
 
 
 def _local_url(url):
@@ -2796,79 +3188,64 @@ def _local_url(url):
         infos = socket.getaddrinfo(host, None)
     except (OSError, UnicodeError):
         return True  # не разрешается отсюда — не знаем, куда уйдёт: отказ (сбой — закрыто)
+    fake = ipaddress.ip_network(FAKE_IP_NET)
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0].split("%")[0])
         except ValueError:
             return True
         ip = getattr(ip, "ipv4_mapped", None) or ip
-        if ip in FAKE_IP_NET:
+        if ip in fake:
             continue  # прокси с подменой адресов отдают имена через 198.18.0.0/15 — настоящий адрес отсюда не виден
         if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
             return True
     return False
 
 
-def _cdp_whole_text(cmd):
-    """Обращение к браузеру владельца по всему тексту команды → (вид, текст): "direct" — отладочный порт браузера
-    мимо демона, "daemon" — демон или его пароль, None — упоминаний нет."""
+def _cdp_connects(cmd, cwd):
+    """metis-0823: команда Bash подключается к браузеру владельца → "direct" (отладочный порт браузера мимо демона),
+    "daemon" (демон, его запуск или пароль) или None. Слова в тексте без подключения — None."""
     text = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
-    if CDP_DIRECT.search(text):
-        return "direct", text
-    if CDP_TARGET.search(text):
-        return "daemon", text
-    return None, text
-
-
-def _cdp_hit(word):
-    return bool(CDP_DIRECT.search(word) or CDP_TARGET.search(word))
-
-
-def _cdp_text_only(cmd, cwd):
-    """metis-0624: порт, пароль и имя демона стоят только значением флага-сообщения (CDP_TEXT_CMDS) у одной простой
-    команды: git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
-    --text/--note/--title… и поле=текст в task new|set. Вне кавычек — ни ;, &, |, ни перенаправлений; первое слово
-    команды — ровно её имя, без присваивания, обёртки и пути перед ним (GH_HOST=… gh, env X=… git — metis-0630);
-    каждое слово вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
-    bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
-    if re.search(r"[;&|<>\n\r`\\'\"]", bare):
-        return False
     _, cmds = bash_analysis(cmd, cwd)
-    if len(cmds) != 1 or not cmds[0][0]:
-        return False
-    name, args = cmds[0]
-    # первое слово — ровно git, gh или pantheon: присваивание (GH_HOST=…), обёртка (env, time, exec, !, (, {) и путь
-    # к команде перед ним — окружение и запуск, а не текст сообщения
-    if bare.split()[:1] != [name]:
-        return False
-    spec = CDP_TEXT_CMDS.get(name)  # имя — уже basename в нижнем регистре (bash_analysis)
-    if not spec:
-        return False
-    subs, flags, fields = spec
-    depth = len(next(iter(subs)))
-    if tuple(args[:depth]) not in subs:
-        return False
-    i = depth
-    while i < len(args):
-        a, kind, value = args[i], None, None
-        if a is None:  # слово не вычислить (переменная) — не исключение
-            return False
-        if a in flags:
-            kind, value, i = flags[a], (args[i + 1] if i + 1 < len(args) else None), i + 2
-        elif "=" in a and a.split("=", 1)[0] in flags:
-            kind, value, i = flags[a.split("=", 1)[0]], a.split("=", 1)[1], i + 1
-        elif re.fullmatch(r"-[A-Za-z]+", a) and "-" + a[-1] in flags:  # склейка коротких: git commit -qm "…"
-            kind, value, i = flags["-" + a[-1]], (args[i + 1] if i + 1 < len(args) else None), i + 2
-        elif "=" in a and a.split("=", 1)[0] in fields:  # pantheon task set ID result="…"
-            kind, value, i = "text", a.split("=", 1)[1], i + 1
-        else:
-            if _cdp_hit(a):
-                return False
-            i += 1
+    kind = "direct" if CDP_DIRECT.search(text) else "daemon"
+    for n, t in cmds:
+        prose = _prose(n, t)
+        if any(x and i not in prose and (x.startswith("--remote-debugging") or x.endswith("/DevToolsActivePort"))
+               for i, x in enumerate(t)):
+            return "direct"
+    # запуск демона: сам файл командой или первым операндом интерпретатора (чтение исходника grep, sed — не запуск)
+    for n, t in cmds:
+        plain = _opts(t)[1]
+        first = t[plain[0]] if plain and CDP_INTERP.fullmatch(n or "") else None
+        if n == "cdp-daemon.mjs" or os.path.basename((first or "").rstrip("/")).lower() == "cdp-daemon.mjs":
+            return "daemon"
+    # пароль: путь в папку пароля среди слов (кроме текста), входное перенаправление
+    cwds = [cwd] + [d for d in bash_cwds(cmd, cwd) if d]
+    for n, t in cmds:
+        prose = _prose(n, t) if n not in CDP_TOKEN_META else range(len(t))
+        for i, x in enumerate(t):
+            if x and i not in prose and _pathlike(x) and any(
+                    _inside(_expand(x, d), [CDP_TOKEN_DIR]) for d in (cwds if x[0] not in "/~$" else [cwd])):
+                return "daemon"
+    if any(p != UNRESOLVED and _inside(p, [CDP_TOKEN_DIR]) for p in bash_reads(cmd, cwd)):
+        return "daemon"
+    # присваивание перед командой (GH_HOST=…, HTTPS_PROXY=…, env X=…) с портом или паролем — адрес для программы
+    if any(CDP_PORTS.search(v) for v in CDP_ASSIGN.findall(cmd)):
+        return kind
+    if not CDP_PORTS.search(text):
+        return None
+    # подключатель: сетевой клиент, имя не вычислить, сокет оболочки, команду не разобрать
+    if not cmds or "/dev/tcp/" in text or "/dev/udp/" in text or any(n in CDP_NET for n, _ in cmds):
+        return kind
+    # интерпретатор с кодом не из файла: -c/-e, stdin (heredoc, конвейер), операнд «-»
+    for n, t in cmds:
+        if not CDP_INTERP.fullmatch(n or ""):
             continue
-        if value is None or (kind == "md" and not value.casefold().endswith(".md")):
-            return False
-    return True
+        opts, plain = _opts(t)
+        if any(x in CDP_INLINE or re.fullmatch(r"-[A-Za-z]*[ce]", x) for _, x in opts) or not plain or \
+                t[plain[0]] in (None, "-"):
+            return kind
+    return None
 
 
 def check_cdp_role(event, tool, tool_input):
@@ -2889,18 +3266,14 @@ def check_cdp_role(event, tool, tool_input):
         return None
     else:
         cmd = tool_input.get("command") or ""
-        cwd = os.path.realpath(event.get("cwd") or os.getcwd())
-        kind, text = _cdp_whole_text(cmd)
-        if kind and _cdp_text_only(cmd, cwd):
-            kind = None
-        cmd = text
-    hint = CDP_TEXT_HINT if tool == "Bash" else ""
+        kind = _cdp_connects(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    hint = CDP_HINT if tool == "Bash" else ""
     if kind == "direct":
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
                 "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль." + hint)
     if kind is None:
         return None
-    if re.search(r"/close\b", cmd):
+    if re.search(r"/close(?![\w-])", cmd):
         return ("Правило cdp-role: /close выключает общий демон браузера у всех сессий — ролям нельзя. "
                 "Вкладку демона закрывать не нужно.")
     if role in CDP_ACTORS and not sub:
@@ -2910,6 +3283,65 @@ def check_cdp_role(event, tool, tool_input):
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
             "Сайт со входом владельца — Харон, после metis-0077; публичные страницы — веб-поиск prometheus без входов. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos)." + hint)
+
+
+# daemon-roster (metis-0871, «да» владельца 06.11): в записях реестра демона Claude Code ~/.claude/daemon/roster.json
+# лежат ключи его локальных сокетов (rvAuth, ptyAuth …); 06.11 dev-opus при сверке вывел их в транскрипт. Нужные поля
+# (id, pid, startedAt воркеров и updatedAt) печатает `pantheon roster`: код Пантеона читает файл сам и берёт только их
+# (P.roster_safe). Ролям, субагентам и главной сессии окна роли: Read и Grep по файлу (Grep — и по папке daemon),
+# Bash (схема metis-0823, как у private и cdp-role): в тексте команды есть roster.json и слово daemon, и имя файла
+# стоит среди слов команды не текстом (_prose: -m, --body, --note, echo …) и не шаблоном поиска (_search_pattern_at),
+# или в файле входного перенаправления; или код идёт интерпретатору из stdin (python3 - <<EOF, bash <<EOF); или команду
+# не разобрать. Grep по папке выше (~/.claude, ~), имя файла глобом (daemon/*.json), путь из $(…) с echo и чтение своим
+# скриптом — намеренный обход, граница — песочница: разбор Bash не наращиваем (README guard, «Остатки»). Сессии
+# владельца без роли правило не касается; control.key и остальное в папке daemon оно не закрывает.
+ROSTER_NAME = re.compile(r"roster\.json", re.I)
+ROSTER_DAEMON = re.compile(r"daemon", re.I)
+ROSTER_REASON = (
+    "Правило daemon-roster: ~/.claude/daemon/roster.json целиком не читай — в его записях ключи сокетов демона "
+    "Claude Code (rvAuth, ptyAuth), они попали бы в транскрипт. Нужные поля без ключей печатает `pantheon roster` "
+    "(JSON: updatedAt и у каждого воркера id, pid, startedAt); в коде Пантеона — P.roster_safe(). Искать по исходникам "
+    "— инструментом Grep по папке репозитория.")
+ROSTER_TEXT_HINT = ("\nПравило смотрит слова команды, а не текст: имя файла в git commit -m, gh pr --body, "
+                    "pantheon task --note, echo и в шаблоне grep — можно.")
+ROSTER_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+
+
+def _roster_hit(word):
+    return bool(word and ROSTER_NAME.search(word))
+
+
+def check_daemon_roster(event, tool, tool_input):
+    if not (limited(event)[0] or window_role()):
+        return None
+    if tool in ("Read", "NotebookRead", "Grep"):
+        roster = os.path.realpath(os.path.join(DAEMON_DIR, "roster.json"))
+        daemon = os.path.realpath(DAEMON_DIR)
+        # сам файл или папка daemon (Grep по ней читает и файл); папка выше — нет; Glob только перечисляет имена
+        if any(_inside(roster, [p]) and _inside(p, [daemon]) for p, _ in read_paths(event, tool, tool_input)):
+            return ROSTER_REASON
+        return None
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    text = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
+    if not (ROSTER_NAME.search(text) and ROSTER_DAEMON.search(text)):
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    if not cmds:  # команду не разобрать, а имя файла и папки в тексте есть
+        return ROSTER_REASON + ROSTER_TEXT_HINT
+    for n, t in cmds:
+        skip = _prose(n, t) | {_search_pattern_at(n, t)}
+        if any(_roster_hit(x) for i, x in enumerate(t) if i not in skip):
+            return ROSTER_REASON + ROSTER_TEXT_HINT
+        # код интерпретатору из stdin (heredoc, конвейер) или операндом «-»: имя файла в нём — не текст
+        plain = _opts(t)[1]
+        if (CDP_INTERP.fullmatch(n or "") or n in ROSTER_SHELLS) and (not plain or t[plain[0]] in (None, "-")):
+            return ROSTER_REASON + ROSTER_TEXT_HINT
+    if any(p != UNRESOLVED and _roster_hit(p) for p in bash_reads(cmd, cwd)):
+        return ROSTER_REASON + ROSTER_TEXT_HINT
+    return None
 
 
 def push_foreign(texts, cwd, cmds, pdir):
@@ -2927,7 +3359,10 @@ def push_foreign(texts, cwd, cmds, pdir):
 
 
 def _gh_api_writes(args):
-    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать."""
+    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать. Связка
+    коротких флагов с X, f или F (`-iX PUT`, `-iF a=b`) — тоже (metis-0681)."""
+    get = any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
+              for i2, x in enumerate(args))
     for i, a in enumerate(args):
         if a is None:
             return True
@@ -2940,8 +3375,13 @@ def _gh_api_writes(args):
                 return True
         elif a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=",
                                                                                       "--input=", "-f", "-F")):
-            if not any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
-                       for i2, x in enumerate(args)):
+            if not get:
+                return True
+        elif m := re.fullmatch(r"-i+([XfF])(.*)", a):
+            # связка коротких флагов (`-iX PUT`, `-iXPUT`, `-iF a=b`): pflag читает её по буквам, -i — без значения,
+            # дальше -X с методом или поле (metis-0681)
+            method = (m[2] or (args[i + 1] if i + 1 < len(args) else None)) if m[1] == "X" else None
+            if (m[1] != "X" and not get) or (m[1] == "X" and (method is None or method.upper() != "GET")):
                 return True
     return False
 
@@ -2967,12 +3407,124 @@ def _git_sub(texts):
 
 
 def _git_out(d, *args):
+    import subprocess
     r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=3)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _opt_in(a, opts):
+    """Флаг a — один из opts, в том числе сокращённый: git понимает однозначное начало длинного флага (--mirr)."""
+    name = a.split("=", 1)[0]
+    return name in opts or (name.startswith("--") and len(name) > 2 and any(o.startswith(name) for o in opts))
+
+
+def _dst_refs(dst):
+    """Полные ref, в которые git может понять назначение refspec (metis-0983) — по его правилам, а не по строке:
+    refs/… — как есть; heads/, tags/, remotes/ — с refs/ спереди (fetch — get_local_ref, push — правило refs/%s:
+    «git push origin X:heads/main» пишет в refs/heads/main); прочее короткое — refs/heads/ или refs/tags/.
+    Сравнивать без регистра: на APFS refs/heads/MAIN — тот же файл, что refs/heads/main."""
+    low = dst.lower()
+    if low.startswith("refs/"):
+        return [dst]
+    if low.startswith(("heads/", "tags/", "remotes/")):
+        return ["refs/" + dst]
+    return ["refs/heads/" + dst, "refs/tags/" + dst]
+
+
+def fetch_problem(texts):
+    """git fetch и pull (metis-0983): почему эта запись ref ролям нельзя, или None. Ролям fetch пишет только
+    refs/remotes/*, теги и FETCH_HEAD: refspec с другим назначением (refs/heads/*, refs/replace/*, refs/notes/*, в том
+    числе --refmap) — отказ: он и --update-head-ok сдвигают локальную ветку (и ту, что под HEAD защищённого
+    репозитория: ~/.claude, ~/ai/pantheon) или подменяют объекты.
+    Слово до подкоманды не вычислить (`git -C "$d" fetch …`): судятся слова после fetch или pull, если они есть среди
+    слов команды, — папка запись ref не меняет; без fetch и pull — не судится (metis-0983, Д1 argus #380)."""
+    parsed = _git_sub(texts)
+    if parsed is None:
+        at = next((i for i, a in enumerate(texts) if a in ("fetch", "pull")), None)
+        if at is None:
+            return None
+        sub, args = texts[at], texts[at + 1:]
+    elif parsed[1] not in ("fetch", "pull"):
+        return None
+    else:
+        sub, args = parsed[1], parsed[2]
+    if any(a is None for a in args):
+        return f"аргументы {sub} не разобрать"
+    pos, specs, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") and (_opt_in(a, _FETCH_BAD) or re.fullmatch(r"-[afkmnpPqtv46]*u[afkmnpPqtv46]*", a)):
+            return f"флаг {a}"
+        if _opt_in(a, {"--refmap"}):
+            if "=" not in a and i + 1 >= len(args):
+                return f"флаг {a} без значения"
+            specs.append(a.split("=", 1)[1] if "=" in a else args[i + 1])
+        if a in _FETCH_OPT_ARG or (a.startswith("--") and "=" not in a and _opt_in(a, {"--refmap"})):
+            i += 2
+            continue
+        if not a.startswith("-"):
+            pos.append(a)
+        i += 1
+    for spec in specs + pos[1:]:
+        dst = spec.lstrip("+").partition(":")[2]
+        # назначение — только refs/remotes/* и теги: refs/replace/* подменяет объекты, refs/notes/* и прочие ref
+        # защищённого репозитория fetch ролям тоже не пишет (Д2 argus-2 #380); пустое назначение — только FETCH_HEAD
+        if dst and not all(r.lower().startswith(("refs/remotes/", "refs/tags/")) for r in _dst_refs(dst)):
+            return f"refspec «{spec}» пишет не в refs/remotes/* и не в теги, а в {dst}"
+    return None
+
+
+def _merge_repo_set():
+    """owner/repo из [merge_repos] policy.toml всех направлений, в нижнем регистре."""
+    mr = load_policy().get("merge_repos")
+    return {r.strip().lower() for v in (mr.values() if isinstance(mr, dict) else ()) if isinstance(v, list)
+            for r in v if isinstance(r, str) and r.strip()}
+
+
+def window_push_judged(texts, cwd):
+    """git push главной сессии окна судит push_problem (metis-0983): True — репозиторий remote из [merge_repos] или
+    его не вычислить; False — не push или репозиторий вне [merge_repos] (~/ai/pantheon и прочие хранилища окна: их
+    main шлюз не сливает, отправка туда — законный путь). Слово до подкоманды не вычислить (`git -C "$d" …`): судится,
+    только если среди слов есть push, — `git -C "$d" status` окно проходит, как до metis-0983 (Б1 argus #380).
+    URL — для push (`get-url --push`): remote.X.pushurl в [merge_repos] из-под суда не выводит (Д2 argus #380)."""
+    parsed = _git_sub(texts)
+    if parsed is None:
+        return "push" in texts
+    gdir, sub, args = parsed
+    if sub != "push":
+        return False
+    if any(a is None for a in args):
+        return True
+    remote, i = None, 0
+    while i < len(args):
+        a = args[i]
+        if a in _PUSH_OPT_ARG:
+            i += 2
+            continue
+        if not a.startswith("-"):
+            remote = a
+            break
+        i += 1
+    d = _expand(gdir, cwd) if gdir else cwd
+    if not remote:
+        up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
+        remote = up.split("/", 1)[0] if "/" in up else "origin"
+    url = remote if re.search(r"[/:]", remote) else (_git_out(d, "remote", "get-url", "--push", remote) or "")
+    repo = _mg()._repo_tail(_mg()._remote_id(url)) if url.strip() else ""
+    return not repo or repo in _merge_repo_set()
+
+
 def push_problem(texts, cwd, moved):
     """Почему эта отправка ролям нельзя, или None."""
+    got = _push_parse(texts, cwd, moved)
+    return got if isinstance(got, str) else None
+
+
+def _push_parse(texts, cwd, moved, force=False):
+    """Разбор git push: текст — почему отправка ролям нельзя (push_problem); None — это не push; иначе (папка git,
+    remote или None, [(что отправляется, ветка назначения)]) — для push_accepted (metis-0794). force — принудительная
+    отправка (--force, -f, --force-with-lease, --force-if-includes, +ветка) разбирается как обычная: её судит
+    push_accepted (metis-0809), а ролям её закрывает push_problem."""
     parsed = _git_sub(texts)
     if parsed is None:
         return "аргументы git не разобрать"
@@ -2984,7 +3536,10 @@ def push_problem(texts, cwd, moved):
     pos, i = [], 0
     while i < len(args):
         a = args[i]
-        if a in _PUSH_BAD or a.split("=", 1)[0] in _PUSH_BAD or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
+        if force and (_opt_in(a, _PUSH_FORCE) or re.fullmatch(r"-[a-ce-zA-Z0-9]*f[a-ce-zA-Z0-9]*", a)):
+            i += 1
+            continue
+        if _opt_in(a, _PUSH_BAD) or re.fullmatch(r"-[a-zA-Z0-9]*[fd][a-zA-Z0-9]*", a):
             return f"флаг {a}"
         if a in _PUSH_OPT_ARG:
             i += 2
@@ -3000,13 +3555,16 @@ def push_problem(texts, cwd, moved):
         current = _git_out(d, "symbolic-ref", "--short", "HEAD")
         if not current:
             return "не понять текущую ветку — назови её явно: git push origin <ветка>"
-    dests = []
+    pairs, remote = [], pos[0] if pos else None
     if not pos[1:]:
-        dests.append(current)
+        pairs.append(("HEAD", current))
         up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}")
         if up and "/" in up:
-            dests.append(up.split("/", 1)[1])
+            pairs.append(("HEAD", up.split("/", 1)[1]))
+            remote = remote or up.split("/", 1)[0]
     for spec in pos[1:]:
+        if force and spec.startswith("+"):
+            spec = spec[1:]
         if spec.startswith("+"):
             return f"принудительная отправка ({spec})"
         src, _, dst = spec.partition(":")
@@ -3015,12 +3573,30 @@ def push_problem(texts, cwd, moved):
         dst = dst if ":" in spec else src
         if not dst:
             return f"refspec «{spec}»"
-        dests.append(current if dst in ("HEAD", "@") else dst)
-    for x in dests:
-        name = re.sub(r"^refs/heads/", "", x or "")
-        if not name or name in PROTECTED_BRANCHES or "*" in name:
-            return f"отправка в {name or 'неизвестную ветку'}"
-    return None
+        pairs.append((src, current if dst in ("HEAD", "@") else dst))
+    out = []
+    for src, x in pairs:
+        heads = [r[len("refs/heads/"):] for r in _dst_refs(x or "") if r.lower().startswith("refs/heads/")]
+        if not x or "*" in x or any(h.lower() in PROTECTED_BRANCHES for h in heads):
+            return f"отправка в {x or 'неизвестную ветку'}"
+        out.append((src, heads[0] if heads else x))
+    return d, remote, out
+
+
+def push_accepted(texts, cwd, moved):
+    """Push в ветку открытого PR, который argus уже принял на текущем head (metis-0794): новый коммит сжёг бы
+    вердикты и потребовал нового круга, а долг ревью в принятый PR не тянут (merge-rounds.md, «Находки ревью»).
+    Текст отказа или None. Не разобрать, нет записей, нет сети, любой сбой — None: push идёт как раньше (защита от
+    ошибки агента, а не от обхода — README guard). Судит merge_gate.accepted_push_problem. Принудительная отправка
+    (amend и force, +ветка) — тоже новый head, судится так же (metis-0809). Разбор — внутри try: сбой git в нём (нет
+    git, таймаут) — тоже пропуск, а не остановка (metis-0809)."""
+    try:
+        got = _push_parse(texts, cwd, moved, force=True)
+        if not isinstance(got, tuple):
+            return None
+        return _mg().accepted_push_problem(*got)
+    except Exception:  # fail-open: сбой проверки не останавливает push; срок хука — HookTimeout (BaseException), не он
+        return None
 
 
 # --- запор слияния и protect-config: ядро защит (Д3, guard 0.5.4) -----------------------------------------
@@ -3028,9 +3604,17 @@ def push_problem(texts, cwd, moved):
 # managed-settings.json это ядро защит, которое агенты не сливают (Д3). Модули берут общие помощники отсюда через G.
 # Хуки плагина запускают guard без -I, тесты — с -I (папки скрипта нет в sys.path), поэтому путь — явно. Модуль,
 # загруженный через importlib без записи в sys.modules (тесты), видят через _Globals.
+# merge_gate.py грузится по первому обращению (_mg, metis-0330): обычному вызову инструмента шлюз слияния не нужен,
+# а импорт с hashlib, ast и subprocess стоил ~5 мс. Его имена, которые раньше шли сюда через `from merge_gate import`,
+# отдаёт __getattr__ модуля (guard_rules.merge_problem, guard_rules.merge_gate — снаружи, тестам); внутри модуля —
+# только через _mg().
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import merge_gate  # noqa: E402
 import protect_config  # noqa: E402
+
+# пропавший merge_gate.py — сбой загрузки, как когда он грузился сразу: сломанная установка останавливает всё
+# (guard.py: «сбой загрузки guard»). Ошибка внутри файла видна при первом обращении — отказом того вызова (run_hook)
+if not os.path.isfile(os.path.join(os.path.dirname(os.path.realpath(__file__)), "merge_gate.py")):
+    raise ImportError("guard: нет merge_gate.py рядом с guard_rules.py")
 
 
 class _Globals:
@@ -3042,13 +3626,29 @@ class _Globals:
             raise AttributeError(k) from None
 
 
-merge_gate.G = protect_config.G = sys.modules.get(__name__) or _Globals()
-from merge_gate import (MERGE_CLOSED, MERGE_LEADS, MERGE_INTERNAL, MERGE_PRODUCT, MERGE_PROTECT,  # noqa: E402,F401
-                        MERGE_OWNER, MERGE_AMBIGUOUS, CORE_FILES, merge_problem, _merge_args, _merge_repo_ok,
-                        _str_list, _repo_arg, _remote_id, _repo_tail, _git_remotes, _gh_resolved, _merge_domains,
-                        _merge_owner, read_records, review_problem)
+_SELF = sys.modules.get(__name__) or _Globals()
+protect_config.G = _SELF
 from protect_config import SETTINGS_NAMES, _settings_file, check_protect_config  # noqa: E402,F401
-PROTECTED = protect_config.protected()
+MERGE_GATE_NAMES = frozenset({
+    "MERGE_CLOSED", "MERGE_LEADS", "MERGE_INTERNAL", "MERGE_PRODUCT", "MERGE_PROTECT", "MERGE_OWNER", "MERGE_AMBIGUOUS",
+    "CORE_FILES", "merge_problem", "_merge_args", "_merge_repo_ok", "_str_list", "_repo_arg", "_remote_id", "_repo_tail",
+    "_git_remotes", "_gh_resolved", "_merge_domains", "_merge_owner", "read_records", "review_problem"})
+
+
+def _mg():
+    """Модуль merge_gate.py, загруженный при первом обращении; его G — этот модуль (как раньше при загрузке)."""
+    import merge_gate
+    merge_gate.G = _SELF
+    return merge_gate
+
+
+def __getattr__(name):
+    """Имена merge_gate.py, которые этот модуль раньше отдавал сам (`from merge_gate import …`), и сам merge_gate."""
+    if name == "merge_gate":
+        return _mg()
+    if name in MERGE_GATE_NAMES:
+        return getattr(_mg(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 ARGUS_GIT_BAN = {"commit", "merge", "rebase", "cherry-pick", "am", "revert", "pull", "commit-tree"}
 
 
@@ -3134,32 +3734,144 @@ def _gh_pr_sub(texts):
     return next(((q, i) for q, i in cands if texts[q] == "pr" and i is not None), None)
 
 
+def _gh_alias_merge(texts):
+    """`gh alias set …` со словом merge (metis-0663): алиас слияния — подкоманда, которую шлюз не узнает (`gh m 7`),
+    поэтому заводить его — отказ. Уже заведённые алиасы, `gh alias import` из файла и расширения gh шлюз не читает
+    (остаток, README guard)."""
+    _, cands = _gh_parse(texts)
+    for q, _ in cands:
+        i = _gh_word(texts, q + 1, False) if texts[q] == "alias" else None
+        if i is not None and i < len(texts) and texts[i] == "set" \
+                and any("merge" in (a or "").casefold() for a in texts[i + 1:]):
+            return True
+    return False
+
+
+GH_ALIAS_MERGE = ("Правило push: gh alias со словом merge — алиас слияния шлюз слияния не узнает (`gh <алиас> N` для "
+                  "него не gh pr merge), metis-0663. Сливай самой командой gh pr merge.")
+
+
 def check_owner_merge(event, tool_input):
-    """Сессия без роли (окно владельца): из правил push — только CI перед gh pr merge (решение владельца 01.11,
-    metis-0633, merge_gate.owner_ci_problem). Команду без слова merge не разбираем: остальное в этой сессии не судим."""
+    """Сессия без роли (окно владельца): из правил push — только CI перед слиянием PR (решение владельца 01.11,
+    metis-0633, merge_gate.owner_ci_problem): gh pr merge и gh api с записью на …/pulls/N/merge — те же проверки
+    (metis-0663, merge_gate.api_merge_args) и git push в принятый PR (push_accepted, metis-0794). Остальное в этой
+    сессии не судим. Слово merge ищется в словах gh после
+    разбора bash, а не в сыром тексте: `gh pr mer''ge` слова merge в тексте не содержит (фоновая проверка 02.11);
+    сырой текст — только для отказа, когда подкоманду gh не вычислить. У gh api — только слова этой gh, кроме фильтров
+    вывода (`--jq .merged`), и только когда невычислимое слово может оказаться флагом записи (Д1 argus #257)."""
     cmd = tool_input.get("command") or ""
-    if "merge" not in cmd:
-        return None
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    said = "merge" in cmd.casefold()
     notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
-        if name == "gh" and _gh_parse(texts)[0]:
-            return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть merge: "
-                    f"не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. {merge_gate.OWNER_CI}")
-        found = _gh_merge(texts) if name == "gh" else None
+        if name == "git":  # push в принятый PR (metis-0794) — и окнам без роли, как ролям
+            # главная сессия окна (PANTHEON_ROLE есть, agent_type нет): fetch у окна мимо песочницы — в refs/heads/*
+            # не пишет, как у ролей (metis-0983, Д1 argus #378)
+            why = fetch_problem(texts) if window_role() else None
+            if why:
+                return (f"Правило fetch: {why}. Окну fetch пишет только refs/remotes/* и теги — локальную ветку "
+                        "сдвигают merge, rebase или switch в своей копии.")
+            # и push — как у ролей, в репозиториях [merge_repos]: main сливает шлюз (metis-0983, Д2 argus #378). Окно
+            # hestia — своё правило (check_hestia: push_problem по consent, --force-with-lease своей ветки можно)
+            win = window_role()
+            why = (push_problem(texts, cwd, moved) if win and win != "hestia" and window_push_judged(texts, cwd)
+                   else None)
+            if why:
+                return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`git push origin "
+                        "HEAD:refs/heads/<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
+                        "удаление веток — только владелец.")
+            why = push_accepted(texts, cwd, moved)
+            if why:
+                return why
+            continue
+        if name != "gh":
+            continue
+        if _gh_parse(texts)[0]:
+            if said or any("merge" in (a or "").casefold() for a in texts):
+                return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть "
+                        "merge: не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. "
+                        f"{_mg().OWNER_CI}")
+            continue
+        if _gh_alias_merge(texts):
+            return GH_ALIAS_MERGE
+        jobs = []  # (что сливает, слова gh pr merge для owner_ci_problem)
+        found = _gh_merge(texts)
         if found is not None:
+            jobs.append(("gh pr merge", found[1]))
+        api = _gh_api(texts)
+        if api is not None and _gh_api_writes(api):
+            # запись (метод не GET или поля) — одно правило fail closed merge_gate.api_merge_args (фоновая проверка
+            # 02.11). Записи по словам не видно, есть только невычислимые слова — это GET: адрес или значение флага
+            # (`gh api repos/o/r/pulls/$N --jq .merged`) не судим; отказ — когда лишнее невычислимое слово может
+            # оказаться флагом записи (`gh api …/merge $F`) и merge есть в словах этой gh, кроме --jq/--template (Д1
+            # argus #257: слово merge в соседней команде строки и `.mergeable` в фильтре — не слияние)
+            if not _gh_api_writes(["" if a is None else a for a in api]):
+                if _mg().api_loose(api) and _mg().api_says_merge(api):
+                    return ("Правило push: gh api — слово не вычислить (переменная, $(…)), а в команде есть merge: не "
+                            "понять, слияние ли это. Пиши адрес и флаги словами. " + _mg().OWNER_CI)
+                continue
+            got = _mg().api_merge_args(api)
+            if isinstance(got, str):
+                return f"Правило push: gh api с записью — {got}. {_mg().OWNER_CI}"
+            if got is not None:
+                jobs.append(("gh api …/pulls/N/merge", got))
+        for what, args in jobs:
             # та же проверка GH_*, что у правила hq-gh: GH_REPO, GH_HOST, GH_CONFIG_DIR уводят gh от сверенного репозитория
             if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
-                return ("Правило push: gh pr merge — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
+                return (f"Правило push: {what} — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
                         f"GH_CONFIG_DIR в окружении: они уводят gh от репозитория, на котором сверен CI. "
-                        f"{merge_gate.OWNER_CI}")
-            why = merge_gate.owner_ci_problem(cwd, moved, found[1])
+                        f"{_mg().OWNER_CI}")
+            why = _mg().owner_ci_problem(cwd, moved, args)
             if why:
-                return f"Правило push: gh pr merge — {why}"
-            notes.extend(merge_gate.notes_of(why))
-    return merge_gate.allow(notes)
+                return f"Правило push: {what} — {why}"
+            notes.extend(notes_of(why))
+    return allow(notes)
+
+
+# metis-0823: знак → замена в тексте записи (--opened, --ran, --unchecked) и как его назвать в отказе
+REVIEW_SWAP = {";": (",", "`;`"), "|": ("/", "`|`"), "&": ("и", "`&`"), "<": ("←", "`<`"), ">": ("→", "`>`"),
+               "`": ("'", "обратная кавычка"), "\n": (" ", "перевод строки"), "\r": (" ", "перевод строки"),
+               "$(": ("(", "`$(`")}
+
+
+def _review_format(kind, cmd):
+    """Отказ шлюза «только простой командой» (merge_gate.NOT_SIMPLE ищет знаки во всей строке, и в кавычках тоже):
+    какие знаки нашлись, внутри кавычек или снаружи, и для записи argus/talos с лишним только в кавычках — та же
+    команда с заменой знаков (metis-0823: 87 таких отказов за 7 дней, почти все — `;` и `>` в тексте --opened)."""
+    inside, outside, fixed, q, i = [], [], [], None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        mark = "$(" if cmd.startswith("$(", i) else c if c in REVIEW_SWAP else None
+        if mark is None:
+            if q is None and c in "'\"":
+                q = c
+            elif q == c and (c == "'" or cmd[i - 1] != "\\"):
+                q = None
+            fixed.append(c)
+        else:
+            name = REVIEW_SWAP[mark][1]
+            group = inside if q else outside
+            if name not in group:
+                group.append(name)
+            fixed.append(REVIEW_SWAP[mark][0] if q else mark)
+        i += len(mark or c)
+    where = "; ".join(x for x in (f"внутри кавычек: {', '.join(inside)}" if inside else "",
+                                  f"снаружи кавычек: {', '.join(outside)}" if outside else "") if x)
+    head = (f"`pantheon review {kind}` — только отдельной простой командой. Шлюз ищет `;` `|` `&` `<` `>` `$(`, "
+            f"обратную кавычку и перевод строки во всей строке, в тексте в кавычках тоже, — здесь {where}. Иначе "
+            "код выхода был бы не от тестов, и запись не сделается.")
+    if kind == "test":
+        return (head + " Запись берёт HEAD папки, откуда запущена команда, поэтому cd, && и вывод в файл не "
+                "помогут. Запусти `pantheon review test -- <команда>` одной командой из корня нужной копии: "
+                "главная сессия — `cd` отдельным вызовом; субагенту папку не сменить — переключи свою worktree "
+                "(`git checkout --detach <SHA>`) или прогони вне окна: `pantheon outside test --wait 590`. "
+                "Пульт сам печатает код и SHA, длинный вывод Claude Code сохранит в файл.")
+    if outside:
+        return head + " Убери их: cd, && и перенаправления — отдельными командами. Иначе записи не будет."
+    return (head + " Замени их в тексте: `;` → запятая, `>` → «→», `&` → «и», `|` → «/», перевод строки → "
+            "пробел. Готовая команда:\n" + "".join(fixed))
 
 
 def check_push(event, tool, tool_input):
@@ -3183,6 +3895,8 @@ def check_push(event, tool, tool_input):
         if name == "gh" and _gh_parse(texts)[0]:
             return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а без него не понять, "
                     "слияние это или нет. Пиши подкоманду gh и флаги перед ней словами.")
+        if name == "gh" and _gh_alias_merge(texts):
+            return GH_ALIAS_MERGE
         api = _gh_api(texts) if name == "gh" else None
         if api is not None and _gh_api_writes(api):
             return ("Правило push: gh api с записью (POST, PUT, PATCH, DELETE) ролям закрыто — слияние, ветки и файлы "
@@ -3195,16 +3909,22 @@ def check_push(event, tool, tool_input):
             extra = _gh_pre_extra(texts[:q])
             if extra:
                 return (f"Правило push: gh pr merge — флаг {extra} перед pr: до pr — только -R/--repo. Форма: "
-                        f"{merge_gate.MERGE_CMD}.")
-            why = merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
+                        f"{_mg().MERGE_CMD}.")
+            why = _mg().merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
             if why:
                 return f"Правило push: gh pr merge — {why}"
-            notes.extend(merge_gate.notes_of(why))
+            notes.extend(notes_of(why))
             continue
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
-            why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
+            cmd = tool_input.get("command") or ""
+            why = _mg().review_problem(role, texts, cmd, bool(tool_input.get("run_in_background")))
+            if why and "простой командой" in why and _mg().NOT_SIMPLE.search(cmd):
+                why = _review_format(texts[1] if len(texts) > 1 else "", cmd)
             if why:
                 return f"Правило push (шлюз слияния): {why}"
+            # `pantheon merge request`: решение шлюза о коде head для прохода владельца (metis-0966); с cd — папка
+            # команды не та, решения нет, и проход судит строго
+            _mg().request_decisions(event, texts, None if moved else cwd)
             continue
         if name not in ("git", "?"):
             continue
@@ -3213,6 +3933,10 @@ def check_push(event, tool, tool_input):
             # рецензент не меняет то, что проверяет: вердикт argus — на чужой SHA (запор слияния, P1-4)
             return (f"Правило push (шлюз слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
                     "коммит и не меняет его. Нашёл, что исправить, — верни «reject» и опиши в отчёте лиду.")
+        why = fetch_problem(texts) if name == "git" else None
+        if why:
+            return (f"Правило fetch: {why}. Ролям fetch пишет только refs/remotes/* и теги — локальную ветку сдвигают "
+                    "merge, rebase или switch в своей копии: `git fetch origin main`, затем `git merge origin/main`.")
         if name == "?" and "push" not in texts:
             continue
         if name == "?" or (parsed and parsed[1] == "push"):
@@ -3228,7 +3952,10 @@ def check_push(event, tool, tool_input):
             if why:
                 return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
                         "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
-    return merge_gate.allow(notes)
+            why = push_accepted(texts, cwd, moved) if name == "git" else None
+            if why:
+                return why
+    return allow(notes)
 
 
 def check_terminal(event, tool, tool_input):
@@ -3378,7 +4105,7 @@ def check_corpus_role(event, tool, tool_input):
 #                 с subagent_type chiron, если PANTHEON_ROLE задан и не hq, или если зовёт роль Пантеона или субагент вне
 #                 окна штаба. Ваша сессия без роли и без PANTHEON_ROLE позвать может, но личного chiron там не увидит.
 AGENT_TOOLS = {"Agent", "Task"}
-WINDOW_ONLY_TOOLS = AGENT_TOOLS | {"Skill"}  # их проверяет только хук плагина и окна: управляемые настройки не зовут
+WINDOW_ONLY_TOOLS = AGENT_TOOLS | {"Skill", "EnterWorktree"}  # их проверяет только хук плагина и окна: управляемые настройки не зовут
 TG_DAEMON = re.compile(r"(?<![\w-])tg-readd(?![\w-])")
 
 
@@ -3405,6 +4132,62 @@ def check_hq_telegram(event, tool, tool_input):
         return (f"Правило hq-telegram: Пританею Telegram закрыт ({hit}; P0-1, metis-0060) — у Зевса личное и действия "
                 "наружу, а переписка и каналы — чужой текст. Вопросы по Telegram-каналам и праву — Фемиде "
                 "направления источников через поручение; свою переписку владелец разбирает в своей сессии.")
+    return None
+
+
+# hq-projects (metis-0771, слово владельца 03.11 19:17 «кодом, а не правилом»): окно Пританея (PANTHEON_ROLE=hq —
+# главная сессия и её субагенты, или agent_type hq) не читает папки проектов направлений: работа направления — его
+# координатору. Read, Grep, Glob внутри папки проекта или обход папки выше неё — отказ с именем направления. Карта —
+# domains.json; не закрыты metis-pantheon (agent-kit), направления с coordinator = false (их ведёт Пританей) и папки
+# в ~/ai или содержащие ~/ai либо открытую папку. Открыты README.md и AGENTS.md в корне проекта и .git (git log).
+# Bash здесь не судим: cat и grep закрывает песочница окна (sandbox_build, denyRead), правило — подсказка инструментам.
+HQ_OWN_DIRECTION = "metis-pantheon"
+HQ_PROJECT_OPEN = {"readme.md", "agents.md"}
+
+
+def _hq_led_names():
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            reg = tomllib.load(fh)
+    except (OSError, ValueError):
+        return set()
+    return {d["name"] for d in reg.get("direction") or []
+            if isinstance(d, dict) and isinstance(d.get("name"), str) and d.get("coordinator") is False}
+
+
+def hq_project_roots(domains=None):
+    """Закрытые окну hq папки проектов → [(настоящий путь, направление)]."""
+    doms = (load_domains() if domains is None else domains).get("domains") or {}
+    led = _hq_led_names()
+    folders = lambda n: _norm([x for x in doms.get(n) or [] if isinstance(x, str)])  # noqa: E731
+    home = os.path.realpath(HOME)  # вне HOME и скрытые папки (~/.claude, ~/.local) не закрываем: окно ими живёт
+    opened = [os.path.realpath(AI_HOME)] + folders(HQ_OWN_DIRECTION) + [p for n in led for p in folders(n)]
+    out = []
+    for name in sorted(doms):
+        if not isinstance(doms[name], list):
+            continue
+        out += [(p, name) for p in folders(name) if not any(_inside(p, [o]) or _inside(o, [p]) for o in opened)
+                and _inside(p, [home]) and p != home and not _rel(p, home).startswith(".")]
+    return out
+
+
+def check_hq_projects(event, tool, tool_input):
+    if tool not in ("Read", "NotebookRead", "Grep", "Glob") or not (window_role() == "hq"
+                                                                   or event.get("agent_type") == "hq"):
+        return None
+    roots = hq_project_roots()
+    for p, whole in read_paths(event, tool, tool_input):
+        for root, name in roots:
+            if _inside(p, [root]):
+                rel = _rel(p, root)
+                if rel in HQ_PROJECT_OPEN or rel == ".git" or rel.startswith(".git/") or (rel == "." and not whole):
+                    continue
+            elif not (whole and _inside(root, [p])):
+                continue
+            return (f"Правило hq-projects: {p} — папка проекта направления {name}; это работа {name}, а не Пританея "
+                    f"(metis-0771). Поручение — файлом в ~/ai/pantheon/directions/{name}/inbox/, затем "
+                    f"`pantheon start {name}` (заявка: окно поднимется на следующем проходе). Открыты README.md и "
+                    "AGENTS.md в корне проекта и .git (git log).")
     return None
 
 
@@ -3546,7 +4329,7 @@ def check_hq_gh(event, tool, tool_input):
         if not repos:
             return (f"{head}: укажи репозиторий явно — gh pr {texts[i]}{'' if texts[i] == 'list' else ' N'} -R "
                     f"<owner/repo> из [merge_repos] policy.toml; без -R gh взял бы репозиторий папки, а его не проверить.{tail}")
-        bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
+        bad = [r for r in repos if not _mg()._merge_repo_ok(r, allowed)]
         if bad:
             known = "" if allowed else " (список [merge_repos] пуст или policy.toml не прочиталась)"
             return f"{head}: -R {bad[0] or '<не вычислить>'} нет в [merge_repos] policy.toml{known}.{tail}"
@@ -3668,7 +4451,7 @@ HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("
 # Остаток: защита от ошибки, не от намеренной подмены .git/config (модель угроз README guard).
 HESTIA_GIT_NET = {"push"}
 HESTIA_GH_WRITE = {("pr", "create"), ("pr", "edit")}
-HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")
+# HESTIA_CONSENT_DIR (<STATE_DIR>/hestia-consent) — в configure()
 HESTIA_CONSENT_TTL = 2 * 3600
 HESTIA_TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 HESTIA_REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -3873,7 +4656,7 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
     mr = load_policy().get("merge_repos")
     mine = mr.get(direction) if isinstance(mr, dict) else None
     allowed = {r.strip().lower() for r in (mine if isinstance(mine, list) else ()) if isinstance(r, str) and r.strip()}
-    bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
+    bad = [r for r in repos if not _mg()._merge_repo_ok(r, allowed)]
     if bad:
         return f"-R {bad[0]} нет среди [merge_repos] {whose} ({direction or 'не задано'})"
     return None
@@ -4097,9 +4880,149 @@ def check_hq_sessync(event, tool, tool_input):
             "присваивания, env, bash -c, `;`, `&`, `|`, перенаправлений, подстановок и глобов (* ? [ ] { } ~ ^ # !).")
 
 
+# worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
+# EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
+# («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
+# ТЕКУЩЕЙ папки сессии. Это проверка safetyCheck: её не снимают ни правило allow, ни permissions.additionalDirectories,
+# ни allow хука — снимает только cd в тот репозиторий. Папки направления — рабочие папки окна (additionalDirectories,
+# sandbox_build), поэтому cd туда сохраняется. Репозиторий worktree — путь до последнего `.claude/worktrees/<имя>`
+# (ревью argus PR #360): папка направления бывает контейнером репозиториев (~/projects/MorphStream не git, внутри app,
+# gpu-worker со своими worktrees). Правило:
+#   - репозиторий внутри своей папки (самая глубокая папка направлений над ним — твоя), сессия стоит в нём: ближайший
+#     .git над cwd — сам репозиторий или его worktree — пропуск: Claude Code пустит без вопроса;
+#   - сессия в другом репозитории, в том числе во вложенном (LW/data → LW/.claude/worktrees/a) — отказ: сначала cd;
+#   - своя папка, но не .claude/worktrees/<имя> — отказ: worktree окна — только под .claude/worktrees/;
+#   - папка чужого направления — отказ с подсказкой: `pantheon start <направление>` или задача ему;
+#   - вне папок направлений — отказ. Вопроса владельцу не бывает ни в одном случае.
+# Настройки проекта (ревью argus 2 PR #360, вариант 2 по содержимому): EnterWorktree загружает .claude/settings.json и
+# settings.local.json репозитория и worktree — allow, hooks, sandbox, env, MCP проекта. Папку запуска окно приняло при
+# старте (allow_gate в pantheon.py); в другом репозитории своего направления такие ключи расширили бы окно молча —
+# отказ, и с path, и с name (новая worktree в репозитории cwd). Вне окна направления правило молчит.
+WORKTREES_DIR = ".claude/worktrees/"
+# ключи настроек проекта, которые расширяют окно: truthy значение — отказ. permissions и sandbox — по вложенным ключам
+WIDEN_KEYS = ("hooks", "env", "enabledPlugins", "enabledMcpjsonServers", "enableAllProjectMcpServers", "apiKeyHelper",
+              "statusLine", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
+SAFE_PERMISSIONS = ("deny", "ask")
+SAFE_SANDBOX = ("autoAllowBashIfSandboxed", "failIfUnavailable", "enabled")
+
+
+def _wt_repo(path):
+    """(репозиторий, папка worktree) для пути под последним `.claude/worktrees/<имя>`, иначе (None, None)."""
+    parts = path.split("/")
+    for i in range(len(parts) - 3, 0, -1):
+        if parts[i].casefold() == ".claude" and parts[i + 1].casefold() == "worktrees" and parts[i + 2]:
+            return "/".join(parts[:i]) or "/", "/".join(parts[:i + 3])
+    return None, None
+
+
+def _git_root(cwd, stop):
+    """Ближайшая папка с .git над cwd (cwd включительно), не выше stop; нет — None."""
+    d = cwd
+    while _inside(d, [stop]):
+        if os.path.lexists(os.path.join(d, ".git")):
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return None
+
+
+def _owner(path, doms):
+    """(папка, направление) — самая глубокая папка направлений, внутри которой path, или (None, None)."""
+    hits = [(f, n) for n, fs in doms.items() if isinstance(fs, list)
+            for f in _norm([x for x in fs if isinstance(x, str)]) if _inside(path, [f])]
+    return max(hits, key=lambda x: len(x[0])) if hits else (None, None)
+
+
+def _launch(folders):
+    """Папка запуска — как launch_folder в pantheon.py: первая существующая, иначе первая."""
+    real = _norm([f for f in folders if isinstance(f, str) and f])
+    return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
+
+
+def _widening(dirs):
+    """[(файл, ключ)] — ключи .claude/settings*.json папок dirs, расширяющие окно (WIDEN_KEYS, permissions кроме deny
+    и ask, sandbox кроме безопасных и enabled: false). Нечитаемый файл — сам по себе ключ «?»: Claude Code его прочтёт."""
+    found = []
+    for d in dirs:
+        for fn in ("settings.json", "settings.local.json"):
+            f = os.path.join(d, ".claude", fn)
+            if not os.path.lexists(f):
+                continue
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                found.append((f, "?"))
+                continue
+            if not isinstance(data, dict):
+                continue
+            keys = [k for k in WIDEN_KEYS if data.get(k)]
+            for top, safe in (("permissions", SAFE_PERMISSIONS), ("sandbox", SAFE_SANDBOX)):
+                sub = data.get(top)
+                if isinstance(sub, dict):
+                    keys += [f"{top}.{k}" for k, v in sub.items() if v and k not in safe]
+                    if top == "sandbox" and sub.get("enabled") is False:
+                        keys.append("sandbox.enabled")
+                elif sub:
+                    keys.append(top)
+            found += [(f, k) for k in keys]
+    return found
+
+
+def _widen_msg(repo, found):
+    shown = "; ".join(f"{f}: {', '.join(k for g, k in found if g == f)}" for f in dict.fromkeys(f for f, _ in found))
+    return (f"Правило worktree-own: EnterWorktree в {repo} загрузил бы в окно настройки проекта ({shown}) — это не папка "
+            "запуска, и права окна выросли бы молча (metis-0911). Работай в репозитории без worktree или верни в отчёт: "
+            "ключи убирает или принимает владелец, из окна его не спрашивай.")
+
+
+def check_worktree_own(event, tool, tool_input):
+    if tool != "EnterWorktree":
+        return None
+    raw = tool_input.get("path")
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    doms = load_domains().get("domains") or {}
+    if not isinstance(doms.get(win), list):
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    launch = _launch(doms[win])
+    if not isinstance(raw, str) or not raw:  # name: новая worktree в репозитории cwd — только сверка настроек
+        folder, owner = _owner(cwd, doms)
+        repo = _git_root(cwd, folder) if owner == win else None
+        found = _widening([repo]) if repo and _key(repo) != _key(launch) else []
+        return _widen_msg(repo, found) if found else None
+    target = _expand(raw, cwd)
+    repo, wt = _wt_repo(target)
+    folder, owner = _owner(repo or target, doms)
+    if owner == win and repo is None:
+        return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/<имя> репозитория "
+                f"(metis-0911). Worktree окна — только `<репозиторий>/{WORKTREES_DIR}<имя>`: `cd <репозиторий>` "
+                "отдельной командой Bash, затем EnterWorktree с name, или `git worktree add .claude/worktrees/<имя>` и "
+                "EnterWorktree с этим path.")
+    if owner == win:
+        found = _widening([repo, wt]) if _key(repo) != _key(launch) else []
+        if found:
+            return _widen_msg(repo, found)
+        root = _git_root(cwd, repo)
+        if root and (_key(root) == _key(repo) or _key(_wt_repo(root)[0] or "") == _key(repo)):
+            return None
+        return (f"Правило worktree-own: сессия стоит в {cwd}, а {target} — worktree репозитория {repo}; так Claude Code "
+                f"спросил бы владельца (metis-0911). Сначала `cd {repo}` отдельной командой Bash (папки направления — "
+                "рабочие папки окна, cd сохраняется), затем тот же EnterWorktree.")
+    if owner:
+        return (f"Правило worktree-own: {target} — репозиторий направления {owner}, не твоего ({win}); это работа {owner} "
+                f"(metis-0911). Поручение — задачей направлению {owner} или файлом в ~/ai/pantheon/directions/{owner}/inbox/, "
+                f"затем `pantheon start {owner}`. Владельца не спрашивай.")
+    return (f"Правило worktree-own: {target} — вне папок направления {win} (directions.toml, folders); окно входит "
+            "EnterWorktree только в .claude/worktrees/ своих репозиториев (metis-0911). Нужен другой репозиторий — "
+            "задача его направлению, а не вопрос владельцу.")
+
+
 def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("gh-out", check_gh_out),
-                        ("hq-sessync", check_hq_sessync),
+                        ("hq-sessync", check_hq_sessync), ("worktree-own", check_worktree_own),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
@@ -4120,18 +5043,19 @@ def strict_window(check, event, tool, tool_input):
 
 
 def check_roles(event, tool, tool_input):
-    """Правила ролей по очереди: первый отказ — его текст. Иначе None или merge_gate.Allow — пропуск с
+    """Правила ролей по очереди: первый отказ — его текст. Иначе None или Allow — пропуск с
     предупреждениями шлюза слияния этого события (metis-0650); отказ следующего правила их отбрасывает."""
     notes = []
-    for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
+    for rule, check in (("private", check_private), ("hq-projects", check_hq_projects), ("cdp-role", check_cdp_role),
+                        ("daemon-roster", check_daemon_roster), ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role),
                         ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env), ("hestia", check_hestia)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)
             if reason:
                 return reason
-            notes.extend(merge_gate.notes_of(reason))
-    return merge_gate.allow(notes)
+            notes.extend(notes_of(reason))
+    return allow(notes)
 
 
 def strict(check, event, tool, tool_input):
@@ -4187,9 +5111,10 @@ def main(raw=None):
         # запись журнала запора слияния (P1-4): только хук плагина и без проверки управляемых настроек — они
         # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего.
         # Сбой записи — код 2: команда уже выполнена, Claude Code только показывает причину агенту (metis-0094)
-        if MODE == "plugin" and "push" not in OFF:
+        # merge_gate.record судит только Bash: остальные инструменты — без загрузки merge_gate.py (metis-0330)
+        if MODE == "plugin" and "push" not in OFF and event.get("tool_name") == "Bash":
             try:
-                merge_gate.record(event)
+                _mg().record(event)
             except Exception as e:
                 log_failure("record", e)
                 raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
@@ -4225,7 +5150,7 @@ def main(raw=None):
                 reason = hard(check_tg_secret_file, tool_input)
         if not reason and (tool == "Bash" or tool in EDIT_TOOLS or tool in READ_TOOLS):
             reason = strict(check_roles, event, tool, tool_input)
-            notes = merge_gate.notes_of(reason)
+            notes = notes_of(reason)
         if not reason and "pantheon-acl" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_pantheon, event, tool, tool_input)
         if not reason and "protect-config" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
@@ -4298,3 +5223,6 @@ def run_hook(raw=None):
             sys.stderr.flush()
     finally:
         os._exit(code)
+
+
+configure()  # контекст вызова — последним, когда определено всё, что он зовёт (protect_config.protected)

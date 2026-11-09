@@ -4,24 +4,43 @@
   heavy python3 -I plugins/pantheon/scripts/affected-map.py plugins/guard plugins/pantheon plugins/project-tools
   -j N        воркеров (по умолчанию как у run-tests.py)
   --out ФАЙЛ  куда записать карту (по умолчанию scripts/affected-map.json рядом с раннером)
+  --update    обновить карту частями (metis-0692): прогнать только файлы тестов, чьи связи могли устареть, остальные
+              связи взять из прежней карты; прежней карты нет, она другой версии или без sums — полная сборка
+  --check     только сверить карту с деревом: код 0 — свежая, 1 — устарела или без sums (что разошлось — строкой)
 
 Карта — по прогону, а не по догадкам из имён и импортов: модули lib/ грузятся лениво, и какой тест что задевает, по
 тексту не видно. Каждый tests/test_*.py идёт в своей копии репозитория (файлы `git ls-files` и новые вне .gitignore,
 одним коммитом в новом git: установщик требует клон). В копии у каждого файла Python и скрипта sh — метка:
   - Python — `exec(…)` в конце строки docstring (или перед первой простой инструкцией), номера строк не сдвигаются:
-    пишет путь файла от корня репозитория и ставит audit hook, который пишет пути из копии: открытые процессом
-    (`open`, импорт тоже), запущенные им программы и их аргументы (`subprocess.Popen`, `os.exec`, `os.posix_spawn`,
-    `os.spawn`) и источники копирования (`shutil.copyfile`, `shutil.copytree`);
+    пишет путь файла от корня репозитория (метка «m»: файл загружен или запущен) и ставит audit hook, который пишет
+    пути из копии: открытые процессом (`open`, импорт тоже — метка «r»), запущенные им программы и их аргументы
+    (`subprocess.Popen`, `os.exec`, `os.posix_spawn`, `os.spawn`) и источники копирования (`shutil.copyfile`,
+    `shutil.copytree`) — метка «o». Пустой аргумент и аргумент с переводом строки (текст `python -c …`) — не путь и не
+    пишутся: от текущей папки они раскрывались в папку плагина и связывали тест со всеми её файлами (metis-0791);
   - sh — строка перед первой командой (после #! и шапки комментариев): `printf <путь> >> метки`.
 Путь вшит в метку, поэтому копия плагина, которую тест сделал сам (кэш плагина, установка), отчитывается тем же путём.
-Папка среди путей (copytree, `cp -R папка`, `git -C папка`) — все файлы под ней: тест, что копирует плагин целиком,
-зависит от всего плагина.
+Папка среди путей «o» (copytree, `cp -R папка`, `git -C папка`) — все файлы под ней: тест, что копирует плагин целиком,
+зависит от всего плагина. Папка среди «r» — ничего: open папки (shutil.rmtree, fsync) её файлов не читает, а путь с
+dir_fd хук видит от текущей папки — rmtree временной папки с `bin/` связывал тест со всеми файлами bin/ плагина.
 
-Карта: hashes — sha256 этих файлов (run-tests по ним находит файлы, изменённые после сборки); tests — файлы тестов, по которым она строилась; broken — файлы, которые в копии упали (их пути могут быть
-неполными, run-tests берёт их всегда); files — путь → номера файлов тестов в tests. Файл, который не задел ни один
+Читает дерево (readers, metis-0791): файл тестов, который только открыл (метка «r», без «m» и «o») не меньше READERS_MIN
+файлов из READERS_DIRS папок и больше — линтер словаря, путей, шапок. Эти прочитанные файлы в его связи не идут, сам он
+— в список readers: run-tests гоняет его при любой правке, а правка, например, bin/heavy не тянет за собой
+два десятка линтеров. Связи по «m» и «o» у такого теста остаются.
+
+Карта: hashes — sha256 файлов тестов (run-tests по ним находит файлы, изменённые после сборки); sums — sha256 каждого
+файла репозитория, кроме самой карты, на момент, когда связи всех тестов в ней верны (по ним --update и --check находят
+расхождение, а кэш run-tests --cache — файлы, чьим связям можно верить); tests — файлы тестов, по которым она строилась; broken — файлы, которые в копии упали (их пути могут быть
+неполными, run-tests берёт их всегда); readers — читают дерево (run-tests берёт их всегда); files — путь → номера файлов тестов в tests. Файл, который не задел ни один
 тест, — с пустым списком. Код выхода не 0: нет файлов тестов, не git, таймаут или упал больше половины файлов.
-Карта устаревает, когда тесты начинают задевать новые файлы: run-tests о ней не знает, поэтому после большой правки
-тестов или переноса кода между файлами (разбиение pantheon.py на lib/, metis-0599) карту строят заново (около 10 мин при трёх воркерах), а полный прогон на main ловит то, что карта пропустила.
+Карта устаревает, когда тесты начинают задевать новые файлы. Полная сборка — около часа (3621 с на 05.11 при трёх
+воркерах), поэтому карту обновляют частями (--update, metis-0692): тест задевает те же файлы, пока не изменились ни он
+сам, ни один из файлов, что он задел, — его связи из прежней карты верны. Заново идут только: новые файлы тестов,
+изменённые после сборки, упавшие при сборке (broken), задевшие по карте изменённый или удалённый файл (по sums) и
+задевшие каждый файл папки, куда лёг новый файл (так ведёт себя тест, копирующий папку или плагин целиком,
+run-tests.folder_users). Правка общего файла (lib/pantheon.py) тянет почти все тесты — это та же полная сборка.
+Остаток: тест, что перебирает файлы папки и не копирует её целиком, о новом файле в ней не узнает до полной сборки;
+это ловит полный прогон на main. Карта без расхождений (--update при свежей) не переписывается.
 Только stdlib.
 """
 import ast
@@ -37,7 +56,12 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "affected-map.json")
-VERSION = 2
+VERSION = 3
+# Тест читает дерево (metis-0791), если открыл, ничего из них не загружая и не запуская, столько файлов из стольких папок.
+# Замер 04.11: линтеры — 124 файла из 14 папок (test_glossary), 170 из 8 (guard/test_context); сборка окон ролей читает
+# шаблоны ролей — 41 файл из 3-4 папок, это данные одной части, а не дерево: их связи остаются
+READERS_MIN = 20
+READERS_DIRS = 5
 
 _spec = importlib.util.spec_from_file_location("run_tests", os.path.join(HERE, "run-tests.py"))
 RT = importlib.util.module_from_spec(_spec)
@@ -73,6 +97,10 @@ if not getattr(sys, "_rt_hooked", False):
             p = os.fsdecode(p)
         except Exception:
             return None
+        # пустой аргумент (`--option ""`) — не путь, а от текущей папки он — вся папка плагина; текст программы
+        # (`python -c …`) — тоже не путь, и строкой лога его не записать
+        if not p or "\n" in p or "\r" in p:
+            return None
         if not os.path.isabs(p):
             try:
                 p = os.path.join(os.getcwd(), p)
@@ -87,8 +115,9 @@ if not getattr(sys, "_rt_hooked", False):
     def _rt_hook(ev, args):
         if _busy[0]:
             return
+        kind = "o "
         if ev == "open":
-            cands = args[:1]
+            cands, kind = args[:1], "r "
         elif ev in ("subprocess.Popen", "os.exec", "os.posix_spawn"):
             a = args[1] if len(args) > 1 else ()
             cands = [args[0], *(a if isinstance(a, (list, tuple)) else [a])]
@@ -103,9 +132,9 @@ if not getattr(sys, "_rt_hooked", False):
         try:
             for c in cands:
                 r = _rt_rel(c)
-                if r and not r.startswith(".rt/") and r not in _seen:
-                    _seen.add(r)
-                    _rt_rec("o " + r)
+                if r and not r.startswith(".rt/") and kind + r not in _seen:
+                    _seen.add(kind + r)
+                    _rt_rec(kind + r)
         except Exception:
             pass
         finally:
@@ -237,27 +266,43 @@ def git_init(dest):
                        stderr=subprocess.DEVNULL, check=True)
 
 
-def expand(got, files):
-    """Пути из меток → файлы репозитория: путь файла — он сам, путь папки — все файлы под ней."""
+def expand(got, files, dirs=True):
+    """Пути из меток → файлы репозитория: путь файла — он сам, путь папки — все файлы под ней (dirs=False — папка
+    ничего не даёт: открыть папку — не прочесть её файлы)."""
     fset = set(files)
     out = set()
     for p in got:
         p = p.rstrip("/")
         if p in fset:
             out.add(p)
-        elif p and p != ".":
+        elif dirs and p and p != ".":
             pre = p + "/"
             out.update(f for f in files if f.startswith(pre))
     return out
 
 
+def links(used, read, files):
+    """(файлы, читает ли дерево, сколько файлов только прочитано) одного файла тестов. used — пути меток «m» и «o»
+    (загрузил, запустил, скопировал; папка — все файлы под ней), read — «r» (открыл, папка не раскрывается).
+    Прочитанных без запуска и загрузки файлов не меньше READERS_MIN из READERS_DIRS папок и больше — тест читает
+    дерево (линтер словаря, путей): эти связи в карту не идут, тест — в readers."""
+    use = expand(used, files)
+    only = expand(read, files, dirs=False) - use
+    tree = len(only) >= READERS_MIN and len({os.path.dirname(p) for p in only}) >= READERS_DIRS
+    return (use if tree else use | only), tree, len(only)
+
+
 def parse(argv):
-    opts = {"jobs": None, "out": OUT, "dirs": []}
+    opts = {"jobs": None, "out": OUT, "dirs": [], "update": False, "check": False}
     it = iter(argv)
     for a in it:
         if a in ("-h", "--help"):
             print(__doc__)
             sys.exit(0)
+        elif a == "--update":
+            opts["update"] = True
+        elif a == "--check":
+            opts["check"] = True
         elif a in ("-j", "--jobs", "--out"):
             v = next(it, None)
             if v is None:
@@ -275,43 +320,19 @@ def parse(argv):
             sys.exit(f"affected-map: неизвестный ключ {a}")
         else:
             opts["dirs"].append(a)
+    if opts["update"] and opts["check"]:
+        sys.exit("affected-map: --update с --check — выбирает что-то одно")
     return opts
 
 
-def main(argv):
-    opts = parse(argv)
-    if not opts["dirs"]:
-        print(__doc__)
-        return 2
-    for d in opts["dirs"]:
-        if not os.path.isdir(d):
-            print(f"affected-map: нет папки {d}")
-            return 2
-    try:
-        repo = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=opts["dirs"][0], stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, check=True, text=True).stdout.strip()
-        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, check=True, text=True).stdout.strip()
-        files = tracked(repo)
-    except (subprocess.CalledProcessError, OSError) as e:
-        print(f"affected-map: не репозиторий git — {e}")
-        return 2
-    items = RT.collect(opts["dirs"])
-    if not items:
-        print("affected-map: ни одного файла tests/test_*.py — карту не из чего строить")
-        return 1
-    plugin_rel = {}
-    for pdir, label in items:
-        plugin_rel[label.split("/", 1)[0]] = os.path.relpath(os.path.realpath(pdir), os.path.realpath(repo))
-    par, ser = RT.order(items)
-    queue = par + ser
-    n = opts["jobs"] or RT.workers(os.cpu_count(), RT.load1())
-    print(f"affected-map: {len(queue)} файлов тестов, {len(files)} файлов репозитория, воркеров {n}", flush=True)
+def run_all(repo, files, queue, plugin_rel, n):
+    """Прогнать файлы тестов queue в копиях с метками → (hits {метка: файлы}, broken, readers)."""
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
     env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
     root = tempfile.mkdtemp(prefix="affected-map-")
-    hits, broken, t0, seq, running = {}, [], time.monotonic(), 0, []
+    hits, broken, readers, seq, running = {}, [], [], 0, []
+    queue = list(queue)
     try:
         while queue or running:
             while queue and len(running) < n:
@@ -341,22 +362,28 @@ def main(argv):
                     continue
                 running.remove(job)
                 job.finish()
-                got = set()
+                used, read = set(), set()
                 try:
                     with open(job.log, encoding="utf-8", errors="replace") as fh:
                         for ln in fh:
                             ln = ln.rstrip("\n")
                             if ln[:2] in ("m ", "o "):
-                                got.add(ln[2:])
+                                used.add(ln[2:])
+                            elif ln[:2] == "r ":
+                                read.add(ln[2:])
                 except OSError:
                     pass
                 shutil.rmtree(job.box, ignore_errors=True)
-                hits[job.label] = expand(got, files)
+                hits[job.label], tree, nread = links(used, read, files)
+                if tree:
+                    readers.append(job.label)
                 if not job.ok:
                     broken.append(job.label)
                 mark = "ok  " if job.ok else "FAIL"
                 why = "" if job.ok else f" · {job.why}"
-                print(f"{mark} {job.label} · {job.sec:.1f} с · файлов задето {len(hits[job.label])}{why}", flush=True)
+                rd = f" · читает дерево ({nread} файлов, в карту не идут)" if tree else ""
+                print(f"{mark} {job.label} · {job.sec:.1f} с · файлов задето {len(hits[job.label])}{rd}{why}",
+                      flush=True)
                 if not job.ok:
                     tail = [ln for ln in job.out.rstrip("\n").splitlines() if not ln.startswith("ok ")][-RT.TAIL // 4:]
                     print("\n".join("     | " + ln for ln in tail), flush=True)
@@ -366,33 +393,126 @@ def main(argv):
             job.kill()
             job.fh.close()
         shutil.rmtree(root, ignore_errors=True)
+    return hits, broken, readers
+
+
+def write_map(out, head, items, hits, broken, readers, files, sums):
+    """Записать карту атомарно (os.replace). files — все файлы репозитория, sums — их sha256 (кроме самой карты)."""
     labels = sorted(hits)
     idx = {lb: i for i, lb in enumerate(labels)}
-    fmap = {}
-    for rel in files:
-        users = {lb for lb in labels if rel in hits[lb]}
-        fmap[rel] = sorted(idx[lb] for lb in users)
-    hashes = {label: RT.test_hash(pdir, label) for pdir, label in items}
-    data = {"version": VERSION, "head": head, "python": "%d.%d" % sys.version_info[:2], "tests": labels,
-            "broken": sorted(broken), "files": fmap}
+    users = {}
+    for lb in labels:
+        for rel in hits[lb]:
+            users.setdefault(rel, set()).add(lb)
+    fmap = {rel: sorted(idx[lb] for lb in users.get(rel, ())) for rel in files}
+    hashes = {label: RT.test_hash(pdir, label) for pdir, label in items if label in idx}
+    py = "%d.%d" % sys.version_info[:2]
     body = ["{", f'  "version": {VERSION},', f'  "head": {json.dumps(head)},',
-            f'  "python": {json.dumps(data["python"])},',
+            f'  "python": {json.dumps(py)},',
             '  "hashes": {', ",\n".join(f"    {json.dumps(lb, ensure_ascii=False)}: {json.dumps(hashes[lb])}" for lb in labels),
             "  },",
             '  "tests": [', ",\n".join(f"    {json.dumps(lb, ensure_ascii=False)}" for lb in labels), "  ],",
-            f'  "broken": {json.dumps(data["broken"], ensure_ascii=False)},', '  "files": {',
+            f'  "broken": {json.dumps(sorted(broken), ensure_ascii=False)},',
+            f'  "readers": {json.dumps(sorted(readers), ensure_ascii=False)},', '  "files": {',
             ",\n".join(f"    {json.dumps(rel, ensure_ascii=False)}: {json.dumps(v)}" for rel, v in fmap.items()),
+            "  },", '  "sums": {',
+            ",\n".join(f"    {json.dumps(rel, ensure_ascii=False)}: {json.dumps(sums[rel])}" for rel in sorted(sums)),
             "  }", "}"]
-    tmp = opts["out"] + ".tmp"
+    tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write("\n".join(body) + "\n")
-    os.replace(tmp, opts["out"])
+    os.replace(tmp, out)
+    return fmap
+
+
+def drift_line(drift):
+    parts = [(len(drift["new_tests"]), "новых файлов тестов"), (len(drift["stale"]), "файлов тестов изменено"),
+             (len(drift["changed"]), "файлов изменено"), (len(drift["added"]), "файлов добавлено"),
+             (len(drift["removed"]), "файлов удалено")]
+    return ", ".join(f"{k} {w}" for k, w in parts if k) or "расхождений нет"
+
+
+def main(argv):
+    opts = parse(argv)
+    if not opts["dirs"]:
+        print(__doc__)
+        return 2
+    for d in opts["dirs"]:
+        if not os.path.isdir(d):
+            print(f"affected-map: нет папки {d}")
+            return 2
+    try:
+        repo = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=opts["dirs"][0], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, check=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, check=True, text=True).stdout.strip()
+        files = tracked(repo)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"affected-map: не репозиторий git — {e}")
+        return 2
+    items = RT.collect(opts["dirs"])
+    if not items:
+        print("affected-map: ни одного файла tests/test_*.py — карту не из чего строить")
+        return 1
+    plugin_rel = {}
+    for pdir, label in items:
+        plugin_rel[label.split("/", 1)[0]] = os.path.relpath(os.path.realpath(pdir), os.path.realpath(repo))
+    mrel = RT.map_rel(repo, opts["out"])
+    sums = {rel: RT.file_sha(os.path.join(repo, rel)) for rel in files if rel != mrel}
+    old, old_why, drift = None, None, None
+    if opts["update"] or opts["check"]:
+        old, old_why = RT.load_map(opts["out"])
+        if old is not None:
+            drift = RT.map_drift(old, items, repo, files, sums, ignore=(mrel,) if mrel else ())
+            if drift is None:
+                old_why = "карта собрана без sums (до metis-0692)"
+    if opts["check"]:
+        if drift is None:
+            print(f"affected-map: свежесть не проверить — {old_why}; нужна полная сборка, код 1")
+            return 1
+        rerun = RT.drift_rerun(old, items, drift)
+        fresh = not rerun and not any(drift.values())
+        print(f"affected-map: карта {opts['out']} — {drift_line(drift)}; пересобрать файлов тестов {len(rerun)}"
+              f"{' (' + ', '.join(rerun[:10]) + (' …' if len(rerun) > 10 else '') + ')' if rerun else ''}"
+              f"{'' if fresh else ' (affected-map.py --update)'}; код {0 if fresh else 1}")
+        return 0 if fresh else 1
+    t0 = time.monotonic()
+    n = opts["jobs"] or RT.workers(os.cpu_count(), RT.load1())
+    keep = {}
+    if opts["update"] and drift is not None:
+        rerun = set(RT.drift_rerun(old, items, drift))
+        if not rerun and not any(drift.values()):
+            print(f"affected-map: карта {opts['out']} свежая — расхождений с деревом нет, не переписана")
+            return 0
+        inputs = RT.map_inputs(old)
+        fset = set(files)
+        for _, label in items:
+            if label not in rerun:
+                keep[label] = inputs.get(label, set()) & fset
+        par, ser = RT.order(items)
+        queue = [it for it in par + ser if it[1] in rerun]
+        print(f"affected-map: обновление — {drift_line(drift)}; пересобрать {len(queue)} из {len(items)} файлов тестов, "
+              f"связи остальных — из прежней карты; воркеров {n}", flush=True)
+    else:
+        if opts["update"]:
+            print(f"affected-map: обновления не будет — {old_why}; полная сборка", flush=True)
+        par, ser = RT.order(items)
+        queue = par + ser
+        print(f"affected-map: {len(queue)} файлов тестов, {len(files)} файлов репозитория, воркеров {n}", flush=True)
+    hits, broken, readers = run_all(repo, files, queue, plugin_rel, n) if queue else ({}, [], [])
+    ran = sorted(hits)
+    for label, got in keep.items():
+        hits[label] = got
+    if keep:
+        readers += [lb for lb in old["readers"] if lb in keep]
+    fmap = write_map(opts["out"], head, items, hits, broken, readers, files, sums)
     untouched = sum(1 for v in fmap.values() if not v)
-    print(f"affected-map: записано {opts['out']} — тестов {len(labels)}, упало в копии {len(broken)}"
-          f"{' (' + ', '.join(broken) + ')' if broken else ''}, файлов {len(fmap)}, ни одним не задето {untouched}; "
+    print(f"affected-map: записано {opts['out']} — тестов {len(hits)} (прогнано {len(ran)}), упало в копии {len(broken)}"
+          f"{' (' + ', '.join(sorted(broken)) + ')' if broken else ''}, читают дерево {len(readers)}"
+          f"{' (' + ', '.join(sorted(readers)) + ')' if readers else ''}, файлов {len(fmap)}, ни одним не задето {untouched}; "
           f"{time.monotonic() - t0:.0f} с", flush=True)
-    if len(broken) * 2 > len(labels) or len(labels) != len(items):
-        print("affected-map: упало больше половины файлов или не все дошли — карта ненадёжна, код 1")
+    if len(broken) * 2 > len(ran) or len(hits) != len(items):
+        print("affected-map: упало больше половины прогнанных файлов или не все дошли — карта ненадёжна, код 1")
         return 1
     return 0
 

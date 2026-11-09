@@ -475,6 +475,22 @@ def cli():
           p.returncode == 0 and "допишет плановый проход" in p.stderr, (p.returncode, p.stderr[-300:]))
     os.rmdir(rows_path)
     os.rename(rows_path + ".bak", rows_path)
+    # metis-0820: metrics/ закрыта для записи, как песочница окна роли — не «предупреждение … PermissionError», а
+    # строка «это не сбой»: роли принимали её за отказ task set (hermes-0018, 05.11)
+    mdir = os.path.dirname(rows_path)
+    os.rename(rows_path, rows_path + ".bak")  # строки нет — запись нужна, а папка её не пускает
+    os.chmod(mdir, 0o500)
+    try:
+        if not os.access(mdir, os.W_OK):  # root пишет и без прав — проверять нечем
+            p = run("task", "set", "metis-0906", "status=doing")
+            p = run("task", "set", "metis-0906", "status=done")
+            check("0820: metrics/ без записи — закрытие прошло, строка «это не сбой» без «предупреждение»",
+                  p.returncode == 0 and "окно роли в metrics/ не пишет" in p.stderr and "это не сбой" in p.stderr
+                  and "предупреждение · учёт" not in p.stderr and "metis-0906: done" in p.stdout,
+                  (p.returncode, p.stdout[-200:], p.stderr[-300:]))
+    finally:
+        os.chmod(mdir, 0o755)
+        os.replace(rows_path + ".bak", rows_path)
 
     p = run("metrics", "backfill", "--from", "2026-10-01", "--dry-run")
     check("CLI backfill --dry-run: строки с пометкой «оценка», файл не тронут",

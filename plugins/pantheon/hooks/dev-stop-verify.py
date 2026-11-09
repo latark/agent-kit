@@ -10,11 +10,20 @@ SubagentStop). Основа — stop-verify.sh одного из проекто�
 Вместо этого хук читает транскрипт разработчика (agent_transcript_path) и требует, чтобы проверку проекта он прогнал
 сам — в своей песочнице, через `heavy` — и чтобы последний её прогон после последней правки был зелёным. Тестам
 нужен порт или сокет, которых в окне нет, — прогоном считается и `pantheon outside test --wait N` (N > 0, без
---script): плановый проход гоняет проверку проекта вне окна на закоммиченном HEAD, код выхода — код тестов, 75 —
+--script и --sha: --sha гоняет другой коммит в копии прохода, а не эту worktree, metis-0779): плановый проход гоняет проверку проекта вне окна на закоммиченном HEAD, код выхода — код тестов, 75 —
 итога не дождался (красный).
 
+Фоновый прогон (metis-0905: роли велят долгие команды запускать с run_in_background — /clear у запустившего обрывает
+команду на переднем плане) судится по уведомлению <task-notification> с тем же tool-use-id: зелёный — только status
+completed (у `run-tests.py --affected` ещё код 3). Уведомление берётся только из записи, которую вставляет сам
+Claude Code, — type=user со строкой в message.content (агент ждал) или вложение queued_command с commandMode
+task-notification (агент был занят), — и только первое на tool-use-id: тот же текст в ответе модели, в tool_result
+или во входе инструмента не засчитывается. Уведомления ещё нет — прогон идёт: это возврат «дождись
+итога» в общем счёте (не больше трёх), а не отпуск — итог не известен.
+
 Какая проверка — по версии файлов в точке, от которой ответвилась ветка разработчика (не по его правкам):
-  1. первая строка .pantheon-verify в корне репозитория (её кладёт лид или координатор);
+  1. строка `dev: <команда>` .pantheon-verify в корне репозитория (узкая проверка исполнителя), иначе его первая
+     строка (её кладёт лид или координатор; это полный набор для записи шлюза);
   2. иначе скрипт test, а без него check из package.json — менеджером из packageManager или lock-файла;
   3. иначе pytest, если в pyproject.toml есть [tool.pytest] (через uv, если есть uv.lock).
 Нечем проверить или правок нет — не держит. Иначе — выход 2 с тем, что запустить; не больше трёх возвратов подряд
@@ -38,8 +47,9 @@ BASH_WRITES = re.compile(r"(?:^|[;&|]\s*)(?:sed\s+-i|perl\s+-[a-z]*i|mv|cp|rm|te
                          r"\S*(?:pnpm|npm|yarn|npx)\s+(?:add|remove|install|i|up|update)|"
                          r"\S*pantheon\s+exec\s+codex)\b"  # Codex правит worktree за роль — это правка
                          r"|[^<>&0-9]>{1,2}\s*[^&\s]")
-# проверка проекта вне окна (lib/outside.py): с ожиданием итога и без --script — это прогон самой проверки проекта
-OUTSIDE_TEST = re.compile(r"(?:^|[;&|]\s*)\S*pantheon\s+outside\s+test\b(?![^;&|]*--script)"
+# проверка проекта вне окна (lib/outside.py): с ожиданием итога и без --script — это прогон самой проверки проекта;
+# --sha — прогон коммита в копии прохода, а не этой worktree (metis-0779): не засчитывается
+OUTSIDE_TEST = re.compile(r"(?:^|[;&|]\s*)\S*pantheon\s+outside\s+test\b(?![^;&|]*--(?:script|sha)\b)"
                           r"(?=[^;&|]*--wait\s+[1-9])")
 
 
@@ -67,7 +77,11 @@ def verify_commands(root, base):
     """→ (как назвать, [варианты строки команды]) по файлам из точки ответвления base."""
     text = show(root, base, ".pantheon-verify")
     if text:
-        line = next((x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")), "")
+        rows = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        # строка `dev: <команда>` — узкая проверка исполнителя (metis-0653); первая строка остаётся полным набором,
+        # его берут запись шлюза и `pantheon outside` (lib/outside.py `dev:` не читает)
+        dev = next((x[4:].strip() for x in rows if x.startswith("dev:")), "")
+        line = dev or next((x for x in rows if not x.startswith("dev:")), "")
         if line:
             return line, [line]
     pkg = show(root, base, "package.json")
@@ -94,9 +108,85 @@ def norm(cmd):
     return " ".join(str(cmd).split())
 
 
+AFFECTED = re.compile(r"run-tests\.py\b.*--affected\b")
+EXIT3 = re.compile(r"\s*Exit code 3\b")
+# фоновый прогон (metis-0905): ответ Bash при запуске — «Command running in background», не итог; итог — уведомление
+# <task-notification> с тем же tool-use-id: status completed (код 0) или failed (summary «… exit code N»)
+TASK_NOTE = re.compile(r"<task-notification>.*?<tool-use-id>(toolu_[A-Za-z0-9_]+)</tool-use-id>.*?"
+                       r"<status>(\w+)</status>(?:(?:(?!</task-notification>).)*?<summary>(.*?)</summary>)?", re.S)
+EXIT_N = re.compile(r"exit code (\d+)")
+
+
+def result_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+    return ""
+
+
+def run_state(cmd, result, background, note):
+    """Прогон проверки → (зелёный, идёт ли ещё). result — (is_error, текст ответа Bash), note — (status, код) из
+    уведомления о конце фоновой команды или None. run-tests.py --affected: код 3 — «нечего гонять» (правка не задевает
+    тесты по карте), не падение."""
+    err, text = result
+    if err or not background:
+        return not (err and not (AFFECTED.search(cmd) and EXIT3.match(text))), False
+    if note is None:
+        return False, True
+    status, code = note
+    return status == "completed" or (bool(AFFECTED.search(cmd)) and code == 3), False
+
+
+def harness_text(rec, content):
+    """Текст записи, которую вставляет сам Claude Code, или "". Две формы: агент ждал — запись type user со строкой в
+    message.content; агент был занят — вложение type attachment, attachment.type queued_command с commandMode
+    task-notification и текстом в prompt."""
+    if rec.get("type") == "user":
+        return content if isinstance(content, str) else ""
+    a = rec.get("attachment")
+    if (rec.get("type") == "attachment" and isinstance(a, dict) and a.get("type") == "queued_command"
+            and a.get("commandMode") == "task-notification" and isinstance(a.get("prompt"), str)):
+        return a["prompt"]
+    return ""
+
+
+def take_notes(rec, content, notes):
+    """Уведомления о конце фоновых команд → notes {tool-use-id: (status, код)}. Только из записи, которую вставляет
+    сам Claude Code (harness_text). Тот же текст в ответе модели, в tool_result (вывод команды, прочитанный файл) или
+    во входе tool_use — подделка, не итог. На один tool-use-id — первое уведомление."""
+    content = harness_text(rec, content)
+    if "<task-notification>" not in content:
+        return
+    for tid, status, summary in TASK_NOTE.findall(content):
+        code = EXIT_N.search(summary or "")
+        notes.setdefault(tid, (status, int(code.group(1)) if code else None))
+
+
+def scan_record(d, uses, results, order, bg, notes):
+    """Одна запись транскрипта: вызовы инструментов, их ответы, уведённые в фон (backgroundTaskId) и уведомления."""
+    content = (d.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        take_notes(d, content, notes)
+        return
+    tur = d.get("toolUseResult")
+    for x in content:
+        if not isinstance(x, dict):
+            continue
+        if x.get("type") == "tool_use":
+            uses[x.get("id")] = (x.get("name"), x.get("input") or {})
+            order.append(x.get("id"))
+        elif x.get("type") == "tool_result":
+            results[x.get("tool_use_id")] = (bool(x.get("is_error")), result_text(x.get("content")))
+            if isinstance(tur, dict) and tur.get("backgroundTaskId"):
+                bg.add(x.get("tool_use_id"))
+
+
 def last_runs(transcript, variants):
-    """По транскрипту: (был ли прогон проверки после последней правки, зелёный ли последний такой прогон)."""
-    uses, results, order = {}, {}, []
+    """По транскрипту: (был ли прогон проверки после последней правки, зелёный ли последний такой прогон, идёт ли он
+    ещё в фоне). Фоновый прогон (run_in_background или уведённый в фон — backgroundTaskId) — по уведомлению о его
+    конце: зелёный — только status completed; уведомления ещё нет — прогон идёт (metis-0905)."""
+    uses, results, order, bg, notes = {}, {}, [], set(), {}
     try:
         fh = open(transcript, encoding="utf-8")
     except OSError:
@@ -107,30 +197,23 @@ def last_runs(transcript, variants):
                 d = json.loads(line)
             except ValueError:
                 continue
-            content = (d.get("message") or {}).get("content")
-            if not isinstance(content, list):
-                continue
-            for x in content:
-                if not isinstance(x, dict):
-                    continue
-                if x.get("type") == "tool_use":
-                    uses[x.get("id")] = (x.get("name"), x.get("input") or {})
-                    order.append(x.get("id"))
-                elif x.get("type") == "tool_result":
-                    results[x.get("tool_use_id")] = bool(x.get("is_error"))
+            if isinstance(d, dict):
+                scan_record(d, uses, results, order, bg, notes)
     last_edit, last_run = -1, None
     for i, uid in enumerate(order):
         name, inp = uses[uid]
         cmd = norm(inp.get("command", "")) if name == "Bash" else ""
         if name == "Bash" and (any(v in cmd for v in variants) or OUTSIDE_TEST.search(cmd)):
             if uid in results:
-                last_run = (i, not results[uid])
+                green, pending = run_state(cmd, results[uid], inp.get("run_in_background") or uid in bg,
+                                           notes.get(uid))
+                last_run = (i, green, pending)
             continue
         if name in EDIT_TOOLS or (name == "Bash" and BASH_WRITES.search(cmd)):
             last_edit = i
     if last_run is None or last_run[0] < last_edit:
-        return False, False
-    return True, last_run[1]
+        return False, False, False
+    return True, last_run[1], last_run[2]
 
 
 def counter(agent_id, value=None):
@@ -169,27 +252,40 @@ def main():
     seen = last_runs(ev.get("agent_transcript_path") or ev.get("transcript_path") or "", [norm(v) for v in variants])
     if seen is None:
         return 0  # транскрипта нет — проверить нечем, не держим
-    ran, green = seen
+    ran, green, pending = seen
     if ran and green:
         counter(agent, 0)
         return 0
     n = counter(agent) + 1
     if n > MAX_RETURNS:
         counter(agent, 0)
-        print(f"Проверка проекта «{label}» после последней правки {'красная' if ran else 'не прогнана'} — после "
-              f"{MAX_RETURNS} возвратов отпускаю. В отчёте статус «заблокировано»: что падает и почему не починить.",
-              file=sys.stderr)
+        print(release_text(label, ran, pending), file=sys.stderr)
         return 0
     counter(agent, n)
-    if ran:
-        why = (f"последний прогон проверки проекта «{label}» после правок — красный. Работа не сдана, пока проверка не "
-               "зелёная: почини и прогони снова.")
-    else:
-        why = (f"после последней правки ты не прогнал проверку проекта. Запусти `heavy {label}` (тестам нужен порт "
-               "или сокет — `pantheon outside test --wait 590` на закоммиченной ветке) и добейся зелёного результата.")
-    print(f"СТОП ({n} из {MAX_RETURNS}): {why} Если причина вне твоей задачи — опиши её в отчёте по формату «Находка» "
-          "и закончи со статусом «заблокировано».", file=sys.stderr)
+    print(f"СТОП ({n} из {MAX_RETURNS}): {why_text(label, ran, pending)} Если причина вне твоей задачи — опиши её в "
+          "отчёте по формату «Находка» и закончи со статусом «заблокировано».", file=sys.stderr)
     return 2
+
+
+def release_text(label, ran, pending):
+    """Строка «отпускаю» после MAX_RETURNS возвратов."""
+    if pending:  # фоновый прогон ещё идёт (metis-0905): отпускаю по пределу, итог не известен
+        return (f"Фоновый прогон проверки проекта «{label}» ещё идёт — после {MAX_RETURNS} возвратов отпускаю. Отчёт — "
+                "только после уведомления о его конце; без итога статус «заблокировано».")
+    return (f"Проверка проекта «{label}» после последней правки {'красная' if ran else 'не прогнана'} — после "
+            f"{MAX_RETURNS} возвратов отпускаю. В отчёте статус «заблокировано»: что падает и почему не починить.")
+
+
+def why_text(label, ran, pending):
+    """Причина возврата: прогон идёт в фоне, красный или его не было."""
+    if pending:
+        return (f"фоновый прогон проверки проекта «{label}» ещё идёт: дождись итога фонового прогона (уведомление) и "
+                "проверь его. Закончи ход строкой «жду итога <ID>», отчёт — после итога.")
+    if ran:
+        return (f"последний прогон проверки проекта «{label}» после правок — красный. Работа не сдана, пока проверка не "
+                "зелёная: почини и прогони снова.")
+    return (f"после последней правки ты не прогнал проверку проекта. Запусти `heavy {label}` (тестам нужен порт "
+            "или сокет — `pantheon outside test --wait 590` на закоммиченной ветке) и добейся зелёного результата.")
 
 
 if __name__ == "__main__":

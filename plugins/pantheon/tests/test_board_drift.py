@@ -244,4 +244,55 @@ for i, c in enumerate(bad):
     check(f"8.{i} кэш неверной формы: без трассировки, код 0", r.returncode == 0 and "Traceback" not in r.stderr
           and "· доска ·" not in r.stdout, (r.returncode, r.stderr[-300:], r.stdout[-200:]))
 
+# 9. PR пачки (ветка batch/<id>) закрыл задачу с другим parent (metis-0799): предупреждение, parent не правится
+e = Env("batch-outside")
+s1 = e.task("Пачка: первая", "--type", "story", "--status", "doing", "--done-when", "всё слито")
+s2 = e.task("Пачка: вторая", "--type", "story", "--done-when", "всё слито")
+own = e.task("Своя задача", "--parent", s1, "--mode", "single")
+other = e.task("Задача другой пачки", "--parent", s2, "--mode", "single")
+loose = e.task("Задача без пачки")
+pr = {"number": 294, "headRefName": f"batch/{s1}", "body": f"Closes {own}, {other} и {loose}",
+      "mergedAt": "2000-01-01T00:00:00Z", "oid": "a" * 40, "cross": False}
+e.cache(open_prs={"o/r": []}, merged={"o/r": [pr]})
+lines = e.drift()[1]
+check("9. PR пачки закрыл задачи другой пачки и без пачки: по строке на каждую, своя — нет",
+      len(lines) == 2 and any(other in x and f"parent — {s2}" in x for x in lines)
+      and any(loose in x and "parent — пусто" in x for x in lines) and not any(f"доска · {own}:" in x for x in lines)
+      and all("o/r#294" in x for x in lines), lines)
+with open(os.path.join(e.pan, "directions", DIR, "tasks", f"{other}.md"), encoding="utf-8") as fh:
+    check("9. parent чужой задачи не тронут", f"parent: {s2}" in fh.read())
+e.cache(open_prs={"o/r": [{"number": 300, "head": "b" * 40, "branch": f"batch/{s1}", "ids": [other], "closes": [other],
+                           "part": False, "core": False, "cross": False}]}, merged={"o/r": []})
+lines = e.drift()[1]
+check("9. открытый PR пачки тоже: строка о задаче вне состава", any(other in x and "o/r#300" in x for x in lines), lines)
+e.cache(open_prs={"o/r": []}, merged={"o/r": [dict(pr, headRefName=f"feat/{s1}")]})
+check("9. ветка не batch/<id> — не PR пачки: строк о составе нет", not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
+e.cache(open_prs={"o/r": []}, merged={"o/r": [dict(pr, body=pr["body"] + "\nчасть")]})
+check("9. PR пачки «часть» — не закрывает: строк нет", not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
+for fork in ({"cross": True}, {"cross": None}):
+    row = {k: v for k, v in dict(pr, **fork).items() if v is not None}
+    e.cache(open_prs={"o/r": []}, merged={"o/r": [row]})
+    check(f"9. PR из форка или строка кэша без cross ({fork}) — не PR пачки: строк нет",
+          not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
+# metis-0810: репозитории направления пачки ([merge_repos]) и решение координатора keep_outside — через CLI
+pol = os.path.join(e.home, ".claude", "pantheon", "policy.toml")
+os.makedirs(os.path.dirname(pol), exist_ok=True)
+with open(pol, "w", encoding="utf-8") as fh:
+    fh.write(f'[merge_repos]\n"{DIR}" = ["O/R"]\n')
+e.cache(open_prs={"o/r": []}, merged={"o/r": [pr], "x/y": [dict(pr, number=777)]})
+lines = e.drift()[1]
+check("10. [merge_repos] есть: PR пачки из репозитория направления — строки; из чужого (x/y#777) — нет (metis-0810)",
+      len(lines) == 2 and not any("x/y" in x for x in lines), lines)
+r = e.run(["task", "set", s1, f"keep_outside={other}"])
+lines = e.drift()[1]
+check("10. pantheon task set <пачка> keep_outside=<id> — предупреждения о ней больше нет, о другой — есть",
+      r.returncode == 0 and len(lines) == 1 and loose in lines[0] and not any(other in x for x in lines), (r.stderr, lines))
+r = e.run(["task", "set", own, f"keep_outside={other}"])
+check("10. keep_outside у задачи (не пачки) — отказ, код не 0, причина последней строкой",
+      r.returncode != 0 and "поле пачки" in (r.stderr.strip().splitlines() or [""])[-1], (r.returncode, r.stderr))
+os.remove(pol)
+e.set_status(s1, "done")
+e.cache(open_prs={"o/r": []}, merged={"o/r": [pr]})
+check("9. пачка закрыта — история не шумит", not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
+
 sys.exit(0 if all(results) else 1)

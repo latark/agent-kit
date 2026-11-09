@@ -13,10 +13,10 @@ import sys
 from datetime import datetime
 
 __all__ = [
-    "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL",
-    "review_accept_full", "review_accept_counts", "_review_verdict", "_review_git", "_review_state", "review_records",
+    "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "_review_verdict", "_review_git", "_review_state",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
-    "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report",
+    "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report", "NODE_MODULES_LINK", "tree_clean",
+    "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "criteria_accepted", "review_criteria_ticks",
 ]
 
 
@@ -29,39 +29,130 @@ REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
-                "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss <owner/repo>#<PR> --by <argus> --text \"…\" | sample | "
-                "status [<owner/repo> <PR>] | report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
-# перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
-# желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
-REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
-OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в шлюзе guard (metis-0176)
-RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из ran, как в шлюзе guard
+                "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый проверенный "
+                "пункт «Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
+                "<owner/repo>#<PR> --by <argus> --text \"…\" | sample | criteria <id задачи>… | status [<owner/repo> <PR>] "
+                "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
+# Правило засчитывания вердиктов (REVIEW_CHECKLIST, OPUS_RAN, RAN_MODEL, review_accept_full, review_accept_counts,
+# review_records) — в lib/review_rules.py, ядре защит (metis-0858): здесь только P.<имя>, копии правила нет.
+
+# metis-1004: вердикт argus по пункту «Готово, когда» задачи из Closes — `--criteria "<id>#<N> <хеш> да|нет <опора>"` у
+# accept и reject, флаг на пункт (разбор — tasks.parse_criterion). Хеш — tasks.criterion_hash текста пункта: правка
+# пункта после приёмки его меняет. Хук guard кладёт значения в запись полем "criteria", autoclose при слиянии PR
+# отмечает пункты с «да» из засчитанных «принять» на head слияния (criteria_accepted). Готовые строки с хешами —
+# `pantheon review criteria <id>`; в них опора — заглушка CRITERIA_STUB, её надо заменить.
+CRITERIA = "criteria"
+CRITERIA_FMT = '"<id задачи>#<номер пункта> <хеш 12 знаков> да|нет <опора: файл:строка или тест>"'
+CRITERIA_STUB = "ОПОРА"
 
 
-def review_accept_full(r):
-    """«Принять» с полным перечнем «открыл / запустил / не проверял» (Б6) — любая модель. Вне ядра шлюз guard считает
-    такое «принять» (simplify п. 9); в PR ядра нужен ещё Opus — review_accept_counts."""
-    c = r.get("checklist")
-    return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in REVIEW_CHECKLIST)
+def _review_criteria_problem(sub, items):
+    """Значения --criteria у accept|reject (metis-1004) → текст ошибки или None. Каждое — в формате CRITERIA_FMT, без
+    повторов пункта; задача есть, пункт N в её «Готово, когда» есть и не заглушка, хеш — от его нынешнего текста;
+    опора — не заглушка «ОПОРА». У accept «нет» — ошибка (пункт не выполнен — это «вернуть»); вердикт не по всем
+    пунктам можно (ревью #401 Б1): пункты вне PR («часть») и проверяемые после слияния остаются без флага, и autoclose
+    сам ставит задаче review «неотмечено N». Команда с кодом не 0 записи не даёт (хук пишет только успешную)."""
+    T = P.tasks_mod()
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    seen = {}
+    for v in items:
+        got = T.parse_criterion(v)
+        if not got:
+            return f"--{CRITERIA} «{v[:80]}» не в формате {CRITERIA_FMT}"
+        tid, n, h, verdict, basis = got
+        if basis == CRITERIA_STUB:
+            return f"--{CRITERIA} {tid}#{n}: вместо «{CRITERIA_STUB}» — опора: файл:строка или тест"
+        if n in seen.get(tid, ()):
+            return f"--{CRITERIA} {tid}#{n} указан дважды"
+        if sub == "accept" and verdict == "нет":
+            return (f"--{CRITERIA} {tid}#{n} «нет» в «принять»: пункт не выполнен — это «вернуть». Запиши `pantheon "
+                    f"review reject …` с теми же --{CRITERIA}")
+        if tid not in tasks:
+            return f"--{CRITERIA} {tid}#{n}: задачи {tid} нет (или её шапка не проходит проверку)"
+        crit = T.done_criteria(tasks[tid][2])
+        if not 1 <= n <= len(crit) or T._is_stub(crit[n - 1][1]):
+            return f"--{CRITERIA} {tid}#{n}: в «Готово, когда» задачи {tid} нет пункта {n} (пунктов {len(crit)})"
+        if T.criterion_hash(crit[n - 1][1]) != h:
+            return (f"--{CRITERIA} {tid}#{n}: хеш {h} не от нынешнего текста пункта — пункт изменён или номер не тот; "
+                    f"строки с хешами — `pantheon review criteria {tid}`")
+        seen.setdefault(tid, set()).add(n)
+    return None
 
 
-def review_accept_counts(r):
-    """«Принять» в счёт шлюза ядра (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале, а если хук
-    guard записал модели из транскрипта argus (поле models) — все они claude-opus и среди них модель из ran (тот же ID
-    или он с датой), как opus_problem шлюза guard. Поля models нет (models_note — транскрипта не было, или запись
-    старше) — судим по ran. Одно правило для шлюза владельца (merge.gate) и итога `review status` (review_tally),
-    чтобы они не разошлись (metis-0393). Шлюз ядра владельца — только для PR ядра, там Opus обязателен."""
-    c = r.get("checklist")
-    if not (review_accept_full(r) and OPUS_RAN.match(c["ran"])):
-        return False
-    if "models" not in r:
-        return True
-    seen = r["models"]
-    if not isinstance(seen, list) or not all(isinstance(m, str) and m.startswith("claude-opus") for m in seen):
-        return False   # пустой список отсеет any() ниже
-    said = RAN_MODEL.match(c["ran"])
-    said = said.group(1).lower() if said else ""
-    return any(re.fullmatch(re.escape(said) + r"(-\d{8})?", m) for m in seen)
+def review_criteria_cmd(ids):
+    """pantheon review criteria <id>… (metis-1004): пункты «Готово, когда» задач с номером, отметкой и готовой строкой
+    --criteria с хешем; argus меняет «да» на «нет», если пункт не выполнен, и «ОПОРА» — на файл:строка или тест."""
+    T = P.tasks_mod()
+    if not ids or any(not T.ID_RE.fullmatch(i) for i in ids):
+        print("pantheon review criteria <id задачи>…", file=sys.stderr)
+        return 2
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    for tid in ids:
+        if tid not in tasks:
+            print(f"pantheon review criteria: задачи {tid} нет (или её шапка не проходит проверку)", file=sys.stderr)
+            return 1
+        items = [(i, ok, x) for i, (ok, x) in enumerate(T.done_criteria(tasks[tid][2]), 1) if not T._is_stub(x)]
+        if not items:
+            print(f"{tid}: пунктов «Готово, когда» нет — --{CRITERIA} не нужен")
+        for i, ok, x in items:
+            print(f"{tid}#{i} [{'x' if ok else ' '}] {x}")
+            print(f'  --{CRITERIA} "{tid}#{i} {T.criterion_hash(x)} да {CRITERIA_STUB}"')
+    return 0
+
+
+def criteria_accepted(recs, pr, head, base, core):
+    """Пункты, которые argus принял на head слияния PR (metis-1004) → {id задачи: {номер пункта: хеш}}. recs — журнал
+    шлюза по PR (review_records). В счёт — «принять» argus на этот PR и ровно этот head, как у шлюза: последний вердикт
+    своего рецензента (пара session_id, agent_id), полный перечень, а у PR ядра (core) ещё Opus (review_accept_counts),
+    base записи — base PR (base_counts), без лживого поля «вернули» (returned_lie), позже каждого «вернуть» PR, кроме
+    снятого «принять» того же рецензента на том же head (как _floor шлюза). Последний вердикт какого-нибудь
+    рецензента на head — «вернуть» — не в счёт ничего. Пункт принят, если в засчитанных «принять» он есть, у всех —
+    «да» и один хеш. Переносов «принять» с прошлого head нет: запись другого head не отмечает ничего."""
+    T, rules = P.tasks_mod(), P.merge_mod()
+    ok = P.review_accept_counts if core else P.review_accept_full
+    head = str(head or "").lower()
+    if not REVIEW_SHA.fullmatch(head):
+        return {}
+    verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+                and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
+                and isinstance(r.get("sha"), str)]
+
+    def who(r):
+        return (r["by"].get("session_id") or "", r["by"].get("agent_id") or "")
+
+    floor = -1
+    for i, r in enumerate(verdicts):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and who(a) == who(r) and a["sha"].lower() ==
+                                             r["sha"].lower() and P.review_accept_full(a) for a in verdicts[i + 1:]):
+            floor = i
+    last = {}
+    for i, r in enumerate(verdicts):
+        if r["sha"].lower() == head:
+            last[who(r)] = (i, r)
+    if any(r["kind"] == "reject" for _, r in last.values()):
+        return {}
+    votes = {}
+    for i, r in sorted(last.values(), key=lambda x: x[0]):
+        if i <= floor or not ok(r) or not rules.base_counts(r, {"baseRefName": base}) or rules.returned_lie(r, verdicts):
+            continue
+        for v in r.get("criteria") if isinstance(r.get("criteria"), list) else []:
+            got = T.parse_criterion(v)
+            if got:
+                votes.setdefault((got[0], got[1]), []).append((got[2], got[3]))
+    out = {}
+    for (tid, n), vs in sorted(votes.items()):
+        if all(v == "да" for _, v in vs) and len({h for h, _ in vs}) == 1:
+            out.setdefault(tid, {})[n] = vs[0][0]
+    return out
+
+
+def review_criteria_ticks(repo, row):
+    """Для autoclose (metis-1004): строка кэша слитого PR (number, head, base, core) → criteria_accepted по журналу
+    шлюза. Нет head в строке (кэш до metis-1004) — пусто; нет core — как ядро (строже)."""
+    n, head = row.get("number"), str(row.get("head") or "").lower()
+    if not isinstance(n, int) or isinstance(n, bool) or not REVIEW_SHA.fullmatch(head):
+        return {}
+    return criteria_accepted(P.review_records(repo, n), n, head, row.get("base"), row.get("core") is not False)
 
 
 def _review_verdict(sub, args):
@@ -75,9 +166,9 @@ def _review_verdict(sub, args):
         a = args[i]
         if flags and a.startswith("--") and len(a) > 2:
             name, eq, val = a[2:].partition("=")
-            if name not in REVIEW_CHECKLIST:
+            if name not in P.REVIEW_CHECKLIST and name != CRITERIA:
                 return pos, {}, f"неизвестный флаг --{name}. Формат: {fmt}"
-            if name in checklist:
+            if name in checklist and name != CRITERIA:
                 return pos, {}, f"--{name} указан дважды. Формат: {fmt}"
             if not eq:
                 if i + 1 >= len(args):
@@ -86,7 +177,12 @@ def _review_verdict(sub, args):
                 val = args[i]
             if val.strip().startswith("--"):  # `--opened --ran …`: имя флага — не значение
                 return pos, {}, f"значение --{name} начинается с «--»: похоже, пропущено значение. Формат: {fmt}"
-            checklist[name] = val.strip()
+            if name == CRITERIA:  # metis-1004: по флагу на пункт, как в merge_gate.verdict_parse
+                if not val.strip():
+                    return pos, {}, f"--{CRITERIA} пустой. Формат пункта: {CRITERIA_FMT}"
+                checklist.setdefault(CRITERIA, []).append(val.strip())
+            else:
+                checklist[name] = val.strip()
         else:
             pos.append(a)
         i += 1
@@ -94,7 +190,7 @@ def _review_verdict(sub, args):
             or not REVIEW_SHA.fullmatch(pos[2].lower()):
         return pos, {}, f"аргументы не в формате {fmt} (SHA — полный: gh pr view N --json headRefOid)"
     if sub == "accept":
-        missing = [f"--{k}" for k in REVIEW_CHECKLIST if not checklist.get(k)]
+        missing = [f"--{k}" for k in P.REVIEW_CHECKLIST if not checklist.get(k)]
         if missing:
             return pos, {}, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
                              f"{fmt}. Шлюз слияния guard пускает только «принять», где сказано, что открыто, что "
@@ -112,11 +208,31 @@ def _review_git(*args):
     return r.stdout if r.returncode == 0 else None
 
 
+# Ссылка node_modules, которую разработчик кладёт в worktree для pnpm (metis-0721): в корне и в apps/*, packages/*.
+NODE_MODULES_LINK = re.compile(r"\?\? (?:(?:apps|packages)/[^/]+/)?node_modules")
+
+
+def tree_clean(status, top, ok_prefix=()):
+    """Дерево чистое по выводу `git status --porcelain` (общая для outside и review test, metis-0721). Строки с
+    ok_prefix не грязь. Неотслеживаемая СИМЛИНК node_modules в корне top и в apps/*, packages/* — тоже не грязь:
+    папка node_modules, файл с этим именем, ссылка глубже и ссылка с другим именем — грязь, как любая правка."""
+    if status is None:
+        return False
+    for ln in status.splitlines():
+        if not ln.strip() or ln.startswith(tuple(ok_prefix)):
+            continue
+        if NODE_MODULES_LINK.fullmatch(ln) and top and os.path.islink(os.path.join(top, ln[3:])):
+            continue
+        return False
+    return True
+
+
 def _review_state():
     """(HEAD, дерево чистое) текущей папки; HEAD None — не git или коммитов нет."""
     head = (_review_git("rev-parse", "HEAD") or "").strip().lower()
     status = _review_git("status", "--porcelain")
-    return (head if REVIEW_SHA.fullmatch(head) else None), (status is not None and not status.strip())
+    top = (_review_git("rev-parse", "--show-toplevel") or "").strip()
+    return (head if REVIEW_SHA.fullmatch(head) else None), tree_clean(status, top)
 
 
 REVIEW_AGENT = re.compile(r"([0-9a-f]{4,64})(?:/([0-9a-f]{4,64}))?", re.I)  # agent8[/сессия8], как в `review status`
@@ -248,47 +364,53 @@ def review_report(args):
     return 0
 
 
-def review_records(repo=None, pr=None):
-    """Записи журнала шлюза слияния (битые строки пропускаются); файл — симлинк или не читается — пусто."""
-    try:
-        fd = os.open(os.path.join(P.STATE, "merge-gate", "records.jsonl"), os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return []
-    out = []
-    with os.fdopen(fd, "rb") as fh:
-        for raw in fh:
-            try:
-                rec = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if not isinstance(rec, dict) or not isinstance(rec.get("repo"), list):
-                continue
-            if repo and repo.lower() not in [str(x).lower() for x in rec["repo"]]:
-                continue
-            if pr is not None and rec.get("pr") not in (pr, None):
-                continue
-            out.append(rec)
-    return out
+def tally_base(recs, pr):
+    """base PR для итога `review status` без gh: base последней записи вердикта PR с полем base (metis-0965) или None."""
+    got = [r.get("base") for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+           and isinstance(r.get("base"), str) and r["base"]]
+    return got[-1] if got else None
 
 
-def review_tally(recs, pr, opus_only=False):
+def review_tally(recs, pr, opus_only=False, base=None):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
     вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
     «Принять» без полного перечня не в счёт: «вернуть» того же рецензента оно не снимает. Модель не смотрим — вне
     ядра шлюз guard считает «принять» на любой модели (simplify п. 9, 27.10); opus_only=True — как для PR ядра:
-    ещё и на Opus (по --ran и по моделям транскрипта argus, review_accept_counts)."""
-    ok = review_accept_counts if opus_only else review_accept_full
-    last = {}
-    for r in recs:
-        by = r.get("by")
-        if (r.get("kind") in ("accept", "reject") and r.get("pr") == pr and isinstance(by, dict)
-                and by.get("agent_type") == "argus" and isinstance(r.get("sha"), str)):
-            if r["kind"] == "accept" and not ok(r):
-                continue
-            last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
+    ещё и на Opus (по --ran и по моделям транскрипта argus, P.review_accept_counts). Как в шлюзах (Д6 долга #388):
+    «принять» на другой base PR, чем base (base_counts, metis-0965; base None — неизвестна, не в счёт), и с полем
+    «вернули», которое называет рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт."""
+    ok = P.review_accept_counts if opus_only else P.review_accept_full
+    rules = P.merge_mod()
+    verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+                and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
+                and isinstance(r.get("sha"), str)]
+    last = {r["sha"].lower(): {} for r in verdicts}  # head с вердиктами — в итоге и тогда, когда ни один не в счёт
+    verdicts = [r for r in verdicts if r["kind"] == "reject" or ok(r) and rules.base_counts(r, {"baseRefName": base})]
+    verdicts = [r for r in verdicts if not (r["kind"] == "accept" and rules.returned_lie(r, verdicts))]
+    for r in verdicts:
+        by = r["by"]
+        last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
     return {sha: (sum(k == "accept" for k in v.values()), sum(k == "reject" for k in v.values()))
             for sha, v in last.items()}
+
+
+def carry_lines(repo, pr):
+    """Строки `review status` о записях carry.jsonl шлюза guard на PR (metis-0443): перенос «принять» шлюзом gh pr
+    merge и решение о коде head при `pantheon merge request` (его читает шлюз владельца, merge.code_facts)."""
+    out, decisions = [], P.review_decisions(repo, pr)
+    for d in P.carry_records(repo, pr):
+        sha, t = str(d.get("sha") or "")[:12], d.get("time", "?")
+        if d.get("kind") == "carry" and isinstance(d.get("from"), list):
+            src = ", ".join(str(x.get("sha") or "")[:12] for x in d["from"] if isinstance(x, dict))
+            out.append(f"{t}  carry   шлюз guard перенёс «принять» с {src or '?'} на {sha} (тот же код)")
+        elif d.get("kind") == "decision" and d in decisions:
+            why = d.get("why") if isinstance(d.get("why"), list) else []
+            out.append(f"{t}  decision  код {sha} (base {d.get('base')}): тот же — "
+                       f"{', '.join(h[:12] for h in d['same']) or 'нет'}; другой — "
+                       f"{', '.join(h[:12] for h in d['differs']) or 'нет'}"
+                       + (f"; не сверено: {'; '.join(map(str, why))}" if why else ""))
+    return out
 
 
 REVIEW_PENDING_TTL = 2 * 3600  # метка «ревью идёт» устаревает через 2 часа
@@ -318,6 +440,78 @@ def review_pending(repo, pr, recs=None):
                 and repo.lower() in [str(x).lower() for x in r.get("repo") or []]:
             return None  # вердикт на тот же sha — ревью кончилось; на другой — head сменился, метка устарела
     return d
+
+
+# metis-0513: запись tests пишет хук guard, когда команда вернулась. Инструмент Bash обрывает вызов на 600 с и хук не видит
+# конца: ожидание места heavy (очередь) и сами тесты шли молча до обрыва, записи не было, причина не видна. Бюджет —
+# меньше предела: ждать места heavy не дольше бюджета (HEAVY_WAIT_MAX — код 75 без запуска), а команда, не уложившаяся,
+# гасится со строкой «для длинного набора — pantheon outside test». PANTHEON_REVIEW_TEST_BUDGET=<с> — свой бюджет
+# (0 — без ограничения, как раньше).
+REVIEW_TEST_BUDGET = 570
+
+
+def _review_budget(env):
+    try:
+        return float(env.get("PANTHEON_REVIEW_TEST_BUDGET", REVIEW_TEST_BUDGET))
+    except ValueError:
+        return float(REVIEW_TEST_BUDGET)
+
+
+def _review_test_run(cmd):
+    """Команда `review test -- …` под бюджетом времени → (код, оборвана): 127 — не запустилась, 75 — не уложилась в
+    бюджет; оборвана — запись и проверку HEAD после неё делать незачем."""
+    env = dict(os.environ)
+    budget = _review_budget(env)
+    if budget > 0:
+        try:
+            own = float(env.get("HEAVY_WAIT_MAX") or 0)
+        except ValueError:
+            own = 0
+        env["HEAVY_WAIT_MAX"] = str(int(min(own, budget) if own > 0 else budget))
+    try:
+        proc = subprocess.Popen(cmd, env=env)
+    except OSError as e:
+        print(f"pantheon review test: команда не запустилась: {e}", file=sys.stderr)
+        return 127, True
+    try:
+        return proc.wait(timeout=budget if budget > 0 else None), False
+    except subprocess.TimeoutExpired:
+        proc.terminate()  # heavy и run-tests получают TERM и гасят дерево
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        print(f"pantheon review test: команда не уложилась в {int(budget)} с (предел вызова Bash — 600 с, ожидание места "
+              "heavy входит в него) — остановлена, записи не будет. Длинный набор — `pantheon outside test --wait 590` "
+              "из корня чистой копии", file=sys.stderr)
+        return 75, True
+
+
+def _review_test_cmd(rest):
+    if len(rest) < 3 or rest[1] != "--":
+        print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
+        return 2
+    head, clean = _review_state()
+    if head is None:
+        print("pantheon review test: папка не репозиторий git или в нём нет коммитов", file=sys.stderr)
+        return 2
+    if not clean:
+        print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
+              "а не на незакоммиченное", file=sys.stderr)
+        return 2
+    rc, over = _review_test_run(rest[2:])
+    if over:
+        return rc
+    head2, clean2 = _review_state()
+    if head2 != head or not clean2:
+        print(f"pantheon review test: команда изменила HEAD или дерево (было {head}, стало {head2 or '?'}, "
+              f"чистое: {'да' if clean2 else 'нет'}) — запись не делается", file=sys.stderr)
+        return 3
+    print(head)
+    print(f"pantheon review test: код {rc} на {head}" + (" — запись тестов сделает хук guard" if rc == 0 else
+                                                         " — тесты не прошли, записи не будет"))
+    return rc
 
 
 def review_cmd(rest):
@@ -367,33 +561,11 @@ def review_cmd(rest):
               f"шлюз метку не читает)")
         return 0
     if sub == "test":
-        if len(rest) < 3 or rest[1] != "--":
-            print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
-            return 2
-        head, clean = _review_state()
-        if head is None:
-            print("pantheon review test: папка не репозиторий git или в нём нет коммитов", file=sys.stderr)
-            return 2
-        if not clean:
-            print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
-                  "а не на незакоммиченное", file=sys.stderr)
-            return 2
-        try:
-            rc = subprocess.run(rest[2:]).returncode
-        except OSError as e:
-            print(f"pantheon review test: команда не запустилась: {e}", file=sys.stderr)
-            return 127
-        head2, clean2 = _review_state()
-        if head2 != head or not clean2:
-            print(f"pantheon review test: команда изменила HEAD или дерево (было {head}, стало {head2 or '?'}, "
-                  f"чистое: {'да' if clean2 else 'нет'}) — запись не делается", file=sys.stderr)
-            return 3
-        print(head)
-        print(f"pantheon review test: код {rc} на {head}" + (" — запись тестов сделает хук guard" if rc == 0 else
-                                                             " — тесты не прошли, записи не будет"))
-        return rc
+        return _review_test_cmd(rest)
     if sub in ("accept", "reject", "talos"):
         args, checklist, why = _review_verdict(sub, rest[1:])
+        crit = checklist.pop(CRITERIA, [])
+        why = why or (_review_criteria_problem(sub, crit) if crit else None)
         if why:
             print(f"pantheon review {sub}: {why}", file=sys.stderr)
             return 2
@@ -401,8 +573,12 @@ def review_cmd(rest):
         print(f"pantheon review {sub}: {args[0].lower()}#{args[1]} @ {args[2].lower()} — записано хуком guard, "
               f"если роль подходит ({who})")
         for k, v in checklist.items():
-            print(f"  {REVIEW_CHECKLIST[k]}: {v}")
+            print(f"  {P.REVIEW_CHECKLIST[k]}: {v}")
+        for v in crit:
+            print(f"  пункт: {v}")
         return 0
+    if sub == "criteria":
+        return review_criteria_cmd(rest[1:])
     if sub == "report":
         return review_report(rest[1:])
     if sub == "status":
@@ -436,27 +612,44 @@ def review_cmd(rest):
                 who += f" {str(by.get('agent_id') or '—')[:8]}/{str(by.get('session_id') or '—')[:8]}"
             print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
                   f"{str(r.get('sha', ''))[:12]}  {who}")
+            if r.get("kind") == "tests" and r.get("rerun_of"):
+                nf = len(r["files"]) if isinstance(r.get("files"), list) else 0
+                print(f"    дозапуск от {r['rerun_of']}, файлов {nf}")
             cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
-                                                     for k in REVIEW_CHECKLIST):
+                                                     for k in P.REVIEW_CHECKLIST):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
             elif r.get("kind") == "accept" and not core_repo:
                 pass
-            elif r.get("kind") == "accept" and not OPUS_RAN.match(cl["ran"]):
+            elif r.get("kind") == "accept" and not P.OPUS_RAN.match(cl["ran"]):
                 print("    не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт; вне ядра "
                       "шлюз его считает")
             elif r.get("kind") == "accept" and r.get("models") == []:  # metis-0413: транскрипт найден, моделей нет
                 print("    транскрипт argus найден, но моделей в нём нет — для PR ядра не в счёт; вне ядра шлюз его "
                       "считает")
-            elif r.get("kind") == "accept" and not review_accept_counts(r):
+            elif r.get("kind") == "accept" and "models" not in r and r.get("models_note") \
+                    and (r.get("by") if isinstance(r.get("by"), dict) else {}).get("agent_id"):
+                print("    транскрипт субагента argus не найден — модель не подтвердить: для PR ядра не в счёт "
+                      "(metis-0489); вне ядра шлюз его считает")
+            elif r.get("kind") == "accept" and not P.review_accept_counts(r):
                 print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — для PR ядра не в счёт; "
                       "вне ядра шлюз его считает")
-            for k, label in REVIEW_CHECKLIST.items():
+            for k, label in P.REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
+            for v in r.get("criteria") if isinstance(r.get("criteria"), list) else []:
+                print(f"    пункт: {v}")
         if args:
-            strict = review_tally(recs, int(args[1]), opus_only=True)
-            for sha, (acc, rej) in review_tally(recs, int(args[1])).items():
+            base = tally_base(recs, int(args[1]))
+            # metis-0443: что шлюз guard решил о коде head — переносы «принять» и решения при `merge request`
+            for line in carry_lines(args[0], int(args[1])):
+                print(line)
+            if any(r.get("kind") in ("accept", "reject") for r in recs):
+                print(f"base PR для итога — {base or 'неизвестна (нет записи вердикта с base)'}: по последней записи "
+                      "вердикта, gh не спрашиваем; «принять» на другой base или с полем «вернули» без «вернуть» на "
+                      "PR не в счёт, как в шлюзе")
+            strict = review_tally(recs, int(args[1]), opus_only=True, base=base)
+            for sha, (acc, rej) in review_tally(recs, int(args[1]), base=base).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
                 if core_repo and strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра — только «принять» на Opus
                     print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "

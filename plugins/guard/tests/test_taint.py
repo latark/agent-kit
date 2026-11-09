@@ -5,7 +5,8 @@
 Проверяет: когда флаг ставится и когда нет (-o -, -o ФАЙЛ, без -o, status, --quota, tg-reader), ask на каждый класс
 действий наружу, чтение без вопроса, снятие на сообщении владельца (и не на уведомлении, чужой сессии, source
 не user), deny guard
-важнее ask, флаг одной сессии не трогает другую, bypassPermissions — deny, сбой — по правилу события.
+важнее ask, флаг одной сессии не трогает другую, bypassPermissions — deny, сбой — по правилу события; в исходниках
+guard нет готовой шапки выгрузки (чтение исходника не заражает сессию, metis-0864).
 """
 import json
 import os
@@ -31,7 +32,10 @@ SHIM = os.path.join(HERE, "_guard_shim.py")
 PY = sys.executable
 
 T = "~/projects/other/tg-read/tg_read.py"
-SIG = "Переписка — строго между строками «<<<TG-0123456789ab» и «TG-0123456789ab>>>»."
+# Шапка выгрузки собирается из частей: готовая строка в исходнике ставила флаг сессии, которая читала этот файл
+# (`sed -n 1,80p test_taint.py` в субагенте — флаг на окно metis-pantheon и вопросы владельцу часами, metis-0864).
+TAG = "TG-" + "0123456789ab"
+SIG = "Переписка — строго между строками «<<<" + TAG + "» и «" + TAG + ">>>»."
 
 failed = 0
 total = 0
@@ -294,6 +298,17 @@ def test_asks():
         ("Bash cp в ~/ai/knowledge", "Bash", {"command": "cp a.md ~/ai/knowledge/wiki/a.md"}),
         ("Bash sed -i CLAUDE.md", "Bash", {"command": "sed -i '' 's/a/b/' CLAUDE.md"}),
         ("Bash rm флага tg-taint", "Bash", {"command": "rm ~/.local/state/tg-taint/s1"}),
+        ("Bash > в CLAUDE.md", "Bash", {"command": "echo x > CLAUDE.md"}),
+        ("Bash 2> в CLAUDE.md", "Bash", {"command": "ls 2> CLAUDE.md"}),
+        ("Bash &> в AGENTS.md", "Bash", {"command": "ls &> AGENTS.md"}),
+        ("Bash >&файл в CLAUDE.md", "Bash", {"command": "ls >&CLAUDE.md"}),
+        ("Bash 2>&1 > в память", "Bash", {"command": "cat CLAUDE.md 2>&1 > ~/.claude/agent-memory/a/M.md"}),
+        ("Bash >/dev/null и > в CLAUDE.md", "Bash", {"command": "ls >/dev/null; echo x >CLAUDE.md"}),
+        ("Bash >&2/файл (не дескриптор)", "Bash", {"command": "ls >&2/CLAUDE.md"}),
+        ("Bash >/dev/null.d/файл (не /dev/null)", "Bash", {"command": "ls >/dev/null.d/CLAUDE.md"}),
+        ("Bash >&1'.txt' (склейка в имя файла)", "Bash", {"command": "cat CLAUDE.md >&1'.txt'"}),
+        ("Bash >/dev/null\"x\" (склейка в имя файла)", "Bash", {"command": "cat CLAUDE.md >/dev/null\"x\""}),
+        ("Bash 2>&1\"b\" (склейка в имя файла)", "Bash", {"command": "cat CLAUDE.md 2>&1\"b\""}),
         ("Write во флаг tg-taint", "Write", {"file_path": os.path.join(home, ".local/state/tg-taint/s1")}),
     ]
     for name, tool, ti in asks:
@@ -319,6 +334,21 @@ def test_reads_pass():
         ("Bash rsync локально", "Bash", {"command": "rsync -a src/ dst/"}),
         ("Bash тесты python", "Bash", {"command": "heavy python3 -I tests/test_guard.py"}),
         ("Bash cat CLAUDE.md (чтение)", "Bash", {"command": "cat CLAUDE.md"}),
+        ("Bash cat CLAUDE.md 2>&1", "Bash", {"command": "cat CLAUDE.md 2>&1 | head"}),
+        ("Bash cat CLAUDE.md >&2", "Bash", {"command": "cat CLAUDE.md >&2"}),
+        ("Bash cat CLAUDE.md 1>&2", "Bash", {"command": "cat CLAUDE.md 1>&2"}),
+        ("Bash grep 2>/dev/null", "Bash", {"command": "grep x ~/.claude/agent-memory/a/M.md 2>/dev/null"}),
+        ("Bash ls >/dev/null", "Bash", {"command": "ls ~/ai/knowledge > /dev/null"}),
+        ("Bash cat &>/dev/null", "Bash", {"command": "cat AGENTS.md &>/dev/null"}),
+        ("Bash cat 2>>/dev/null", "Bash", {"command": "cat AGENTS.md 2>>/dev/null"}),
+        ("Bash cat >& /dev/null", "Bash", {"command": "cat AGENTS.md >& /dev/null"}),
+        ("Bash cat >&- и 3>&2-", "Bash", {"command": "cat AGENTS.md >&- 3>&2-"}),
+        ("Bash 2>&1|head", "Bash", {"command": "cat CLAUDE.md 2>&1|head"}),
+        ("Bash >/dev/null;ls", "Bash", {"command": "cat CLAUDE.md >/dev/null;ls"}),
+        ("Bash (… 2>/dev/null)", "Bash", {"command": "(cat CLAUDE.md 2>/dev/null)"}),
+        ("Bash 2>/dev/null&", "Bash", {"command": "cat CLAUDE.md 2>/dev/null&"}),
+        ("Bash >/dev/null<файл", "Bash", {"command": "cat CLAUDE.md >/dev/null<in"}),
+        ("Bash 2>&1>/dev/null", "Bash", {"command": "cat CLAUDE.md 2>&1>/dev/null"}),
         ("Bash tg_read в файл", "Bash", {"command": f"{T} history Чат -o /tmp/x.md"}),
         ("Write файла проекта", "Write", {"file_path": os.path.join(h, "projects/app/src/a.ts")}),
         ("Write в $TMPDIR", "Write", {"file_path": os.path.join(_ROOT, "draft.md")}),
@@ -496,9 +526,35 @@ def test_read_requests():
         check(f"заявки read: флаг не ставит {name}", rc == 0 and not flag(h), err[-200:])
 
 
+def test_no_signature_in_sources():
+    """Ни один текстовый файл плагина не несёт готовую шапку выгрузки: агент, который читает исходники guard
+    (cat, sed, Read), иначе заражает свою сессию, и окно роли часами ждёт «да» на gh и запись в STATUS (metis-0864)."""
+    import importlib.util
+    import re
+    spec = importlib.util.spec_from_file_location("taint_rx", TAINT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rx = re.compile(mod.DUMP_SIGNATURE_RX)
+    root = os.path.dirname(HERE)
+    hits, seen = [], 0
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in ("__pycache__", ".git")]
+        for f in files:
+            p = os.path.join(d, f)
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            seen += 1
+            if rx.search(text):
+                hits.append(os.path.relpath(p, root))
+    check("исходники guard без готовой шапки выгрузки tg_read", seen > 10 and not hits, f"{seen} файлов: {hits}")
+
+
 if __name__ == "__main__":
     for t in (test_sets, test_not_sets, test_read_requests, test_asks, test_reads_pass, test_bypass_and_deny_wins,
-              test_clear_and_sessions, test_failures, test_hooks_json):
+              test_clear_and_sessions, test_failures, test_hooks_json, test_no_signature_in_sources):
         t()
     print(f"\n{total - failed} из {total} прошли")
     sys.exit(1 if failed else 0)

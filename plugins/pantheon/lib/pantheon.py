@@ -16,6 +16,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
+  pantheon qmd where "вопрос" [--collection X]   где лежит (metis-0856): коллекция | путь | заголовок | направление-хозяин,
+                                        без текста документов; для окна Пританея — по коллекциям проектов направлений
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): ставит
                                         выпуск, если запись в releases.json каталога совпала с ним (версия и дерево);
                                         тесты — в GitHub Actions до слияния, локального прогона нет (п. 8, 27.10);
@@ -26,7 +28,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
-                                        коммит; без remote
+                                        коммит; без remote. ~/ai/life/<имя> — то же, свой git у каждой
+                                        области; сам ~/ai/life — простая папка без .git
+  pantheon migrate-paths <перенос>… [--dry-run]   после переноса папки: старые пути → новые во всех текстовых
+                                        файлах ~/ai и ~/.claude (код agent-kit — нет), папки истории ~/.claude/projects
+                                        и записи projects в ~/.claude.json под новый ключ; переносы: agent-kit,
+                                        workshop, finances. Без --dry-run — только когда старой папки уже нет
+  pantheon check --moved                старые пути перенесённых папок в живых файлах — предупреждение
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
                                         (200 строк / 25 КБ), CLAUDE.md с импортами длиннее 200 строк
   pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
@@ -36,8 +44,20 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         и настройки окон ролей с песочницей …/settings/<направление>.json;
                                         окнам из карты plugins-by-role.toml — enabledPlugins: false и
                                         permissions.deny mcp__<сервер> вне их «оставить» (metis-0238)
+  pantheon packs hashes <направление>   нынешние sha256 скриптов .claude/hooks, которые хуки пакета направления
+                                        исполняют, — JSON для одобрения владельцем в
+                                        ~/.claude/pantheon/packs/<направление>/approved.json (metis-0933, класс 6).
+                                        Хеш и текст каждого скрипта (в stderr) — из снимка в STATE, .git не
+                                        читается; в ~/.claude/pantheon ничего не пишет. Скрипт не прочитан
+                                        или не прошёл белый список (UTF-8 без BOM и объявления кодировки,
+                                        только печатные ASCII и перевод строки, без пробела в конце строки) —
+                                        «внимание — …» с причиной и строкой, код 1
+  pantheon packs diff <направление>     полный дифф неодобренных скриптов от одобренной копии, строки как есть;
+                                        тревога «хук изменён» в alerts.md называет только счёт строк (круг G11)
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
+  pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
+                                        (по умолчанию 7) — в archive/ГГГГ-ММ.md без потерь; check следит за board.md
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (lib/night.py)
@@ -48,12 +68,28 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
                                         надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
-                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA;
+                                        `request N1 N2 … -R repo` — пачка: одно окно, сливает по очереди (metis-0668)
+  pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
+                                        batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
+                                        pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
-                                        местного прокси → код и хвост журнала или адрес; после «принять» argus
-                                        плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
+                                        местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
+                                        argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
+  pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
+                                        charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
+                                        проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
+                                        отправка и удаление — Touch ID или «да» на каждую; оплата и важные формы — нет
+  pantheon handoff route|touch|status|cancel|run   отказ роли → кто умеет (lib/handoff.py, metis-0832, 0775): route —
+                                        подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
+                                        белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
+                                        Touch ID с этим действием целиком → исполнение один раз по sha256 текста
+  pantheon owner-edit propose|status|cancel|run   правка файла владельца (policy.toml, ~/.claude/agents/_parts/*.part)
+                                        без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
+                                        диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
+                                        «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -64,8 +100,14 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         шапка, name = папка, description ≤ 1024, ссылки на файлы (metis-0258); directions.toml: coordinator не true/false — ошибка,
                                         у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
                                         тревога об открытом координаторе)
+  pantheon who-canvas [--force]         пересобрать «Кто есть кто.canvas» по ролям, реестру и статусу задач; место карточек
+                                        и размеры берёт с холста; в расписании — command =
+                                        "~/.local/share/pantheon/current/scripts/who-canvas.sh", every = 5; пишет только
+                                        при смене входов (metis-0825); из тех же входов — таблица ролей в «Кто есть
+                                        кто.md» и реестр в system.md между маркерами <!-- pantheon:roles … --> (0828)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
-                                        кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
+                                        кэш; на главном Mac сразу проход по кэшу (и плановый проход каждую минуту) закрывает задачи, чей номер в
+                                        ветке или после «Closes» в теле PR — в том же проходе, что увидел слияние (metis-0868)
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel|undecided --mode-why X --touches ПУТЬ …
@@ -73,7 +115,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
                     --text|--body "текст" | --body-file ПУТЬ
                     --from слово владельца|отчёт|ревью|остаток|план|по ходу --source ID|ПУТЬ#якорь   откуда задача (metis-0502)
-                    --done-when "пункт" …]   пункты раздела «Готово, когда» (повторяемый); без него в теле — раздел с подсказкой
+                    --done-when "пункт" …]   пункты раздела «Готово, когда» (повторяемый); без него в теле — раздел с подсказкой;
+                    у --type story пункт обязателен (--done-when или раздел в --body), иначе отказ (metis-0766)
                     текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
                     без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
                     неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
@@ -88,7 +131,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
                     свои пункты — в тексте строкой «## Готово, когда» и списком «- [ ] пункт»: раздел заменяет прежний (metis-0591);
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
-                    отказ, код 2
+                    отказ, код 2; время строки журнала ставит pantheon: время в начале --note («23:45 — …») не пишется
+                    (предупреждение); карточки изменились (task set/new/claim/…) — задачи расписания view и board сразу (metis-0868)
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
                     (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
@@ -96,8 +140,21 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     пропущен; id в пометке — как в окне вопросов (бывает без дефиса). Пустые --option не варианты;
                     пустой --body/--body-file в task set — отказ, код 2; вопрос с текстом без --why/вариантов — предупреждение
   pantheon task show ID
+  pantheon task goal ID [ID …]   строка цели окна по задаче на эту минуту (metis-0725, metis-0738): «<id>: снята с цели
+                    окна — почему» (закрыта, во входящих, ведёт другая сессия — owner не окно PANTHEON_SESSION и не его
+                    команда, «ждёт» владельца с вопросом или задачу-блокер) или «<id>: остаётся в цели окна — почему»;
+                    нет задачи — код 1. task set owner=… из окна печатает ту же строку
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
                     ready в stderr предупреждает, если touches готовой задачи пересекаются с открытым PR (metis-0667)
+  pantheon task batch-suggest [--direction D] [--json] [--apply]   (metis-0595) открытые задачи без пачки → «в существующую
+                    пачку», «новая пачка из N задач», «дубли — объединить?»: общие файлы, похожесть, ссылки, общий PR; без
+                    модели. Без --apply ничего не пишет; --apply прикрепляет только «уверенно» в существующую пачку
+                    (уже стоящий parent не переносит). task new без --parent подсказывает пачку (stderr), pantheon check
+                    тревожит на задачи без пачки старше суток (кроме «ждёт владельца»; STATE/no-parent-seen.json)
+  pantheon batch-suggest run [--force]  плановая сводка раз в 3–4 суток: сама прикрепляет «уверенные» (журнал задачи и пачки),
+                    пишет Доска/Пачки-предложения.md (задача расписания)
+  pantheon task failures [--days 7]   (metis-0859) сводка по классам: счётчики строк журнала «провал: <класс> — <довод>»
+                    за N дней (непонятная задача, неверный подход, не хватило контекста, трудная логика, прочее) и id задач
   pantheon task overlap ID   перед раздачей (metis-0665): touches задачи против живых (doing, review) задач её
                     направления и файлов открытых PR его репозиториев ([merge_repos] policy.toml; gh, не ответил — кэш
                     планового прохода, нет и его — строка «не проверено»); пересечение — выбор с командами: очередь
@@ -119,7 +176,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon exec codex <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
                                         защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
-  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
+  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/ai/workshop/<задача> (до
+                                        переноса, пока ~/ai/workshop нет, — в старой папке workshop в ~/projects)
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
                                         start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» — только предупреждение (stderr, тревога раз в день), запуск идёт; в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
@@ -131,6 +189,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
+  pantheon roster                       реестр демона Claude Code без ключей сокетов: JSON с updatedAt и у каждого воркера
+                                        id, pid, startedAt; сам файл агентам закрыт (guard daemon-roster, metis-0871)
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
@@ -146,15 +206,28 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
-  pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
+  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel   технический перезапуск всех сессий
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
+  pantheon wt done <путь> [--dry-run]   убрать копию .claude/worktrees/<имя> после отчёта субагента или слияния PR
+                                        (metis-0835): без вопроса и сырого git, только без живой сессии, процесса,
+                                        субагента и правок моложе 10 мин в ней; ветка остаётся (detached — ветка
+                                        archive/wt-<имя>), грязная — сначала патч, неотслеживаемое и игнорируемое
+                                        (.env.local) — в архив в STATE/wt-archive. В окне роли — заявка в
+                                        кэш окна, её исполняет плановый проход (раз в 5 мин); занятая копия ждёт в
+                                        заявке. Код: 0 — убрана или заявка принята, 1 — нельзя (причина), 2 — не та папка
+  pantheon wt plan [<папка> …]          сухой прогон уборки копий: что дежурный сделал бы с каждой копией; ничего не меняет
   pantheon reap [--apply] [--pid N …]   виновники памяти (lib/culprits.py, metis-0568): процессы claude/node/tsx/
                                         next/vitest/pnpm и сироты multiprocessing старше 2 ч — чей, память, возраст;
                                         --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
                                         папках Пантеона) и печатает вопрос «[id] …» об остальном своём; --pid — после
                                         «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
+  pantheon reap --auto                  плановый проход раз в 30 мин (metis-0617): гасит только брошенное старше
+                                        30 мин — сироты multiprocessing и сироты в песочнице окна, процессы удалённых
+                                        worktree и закрытых задач, language server без живого claude (прямо под
+                                        launchd, ppid 1, — только в удалённой копии или копии закрытой задачи; в
+                                        живой копии не гасит); строка «погашено: …» в alerts.md
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
@@ -185,6 +258,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-0523); «вернуть» снимает и «остановлено вами»
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
+  pantheon consent bind <id> --log-at <ЧЧ:ММ[:СС] | ГГГГ-ММ-ДД ЧЧ:ММ[:СС]>   только окно Зевса: привязать к <id>
+                                        ваше прямое слово без вопроса с [id] — одну строку owner-log/zeus.md без
+                                        пометки (своего текста команда не берёт); consent <id> покажет её дословно,
+                                        метку Гестии и согласие браузера она не даёт (metis-0843)
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
@@ -196,7 +273,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         запись — хук guard и только по роли (accept, reject — argus). Шлюз считает
                                         последний вердикт каждого рецензента (сессия + агент) на (repo, PR, SHA) и
                                         пускает, только если последний у каждого — «принять» с полным перечнем и ни
-                                        один рецензент не сливающий
+                                        один рецензент не сливающий. У accept и reject ещё --criteria "<id>#<N>
+                                        <хеш> да|нет <опора>" — флаг на пункт «Готово, когда» задачи из Closes
+                                        (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
+                                        «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
+  pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
@@ -233,12 +314,14 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 в STATE/notify-test.log (metis-0307).
 """
 import contextlib
+import difflib
 import errno
 import fcntl
 import fnmatch
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -250,6 +333,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from datetime import datetime, timedelta
 
 if sys.version_info < (3, 11):
@@ -271,12 +355,17 @@ LABEL = "pantheon.tick"
 # её `pantheon install` и успешная установка в plugins-update (_plugin_install); установки нет — копия, из которой
 # запущен install (рабочая копия при разработке).
 CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
+# Папка демона хуков guard (metis-0330, metis-0845): сокет, собранный клиент, pantheon-hookd службы. Окнам ролей — ни
+# записи, ни сокета (GRANT_NO_WRITE, denyWrite каждого окна); службу ставит плановый проход (_hookd_sync)
+HOOKD_HOME = "~/.cache/pantheon/hookd"
+HOOKD_DIR = os.path.join(HOME, ".cache", "pantheon", "hookd")
 TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
 # plugins update (metis-0573): локального прогона тестов нет, остались две сетевые команды claude. По журналу
 # logs/plugins-update.log последние 12 проходов — 11–27 с на всё; потолки с запасом в разы, а не 300/600 с
 PLUGINS_CATALOG_TIMEOUT = 90    # claude plugin marketplace update: вышло — TEMPFAIL, тревоги нет
 PLUGIN_INSTALL_TIMEOUT = 180    # claude plugin update одного плагина: вышло — сбой установки, тревога, сверка по хешу
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
+BUDGET_CUT = 77  # проход доски прерван по бюджету (metis-0709): не сбой и без тревоги, но отпечаток входов не пишется — тик повторит
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
@@ -315,8 +404,15 @@ def path(*parts):
 # прохода (tick, watch, board, notify, git…) — в STATE/locks, куда окно не пишет. Файл в hq-rw открывается
 # hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
+# BOARD_LOCK (metis-0882) — пара «board.md переписывают ↔ коммит ~/ai/pantheon»: `pantheon board archive` из окна Зевса
+# берёт только его (pantheon-git окну не открыт), а commit и archive берут его под pantheon-git. Не взят — переписывание
+# отказывает, коммит ждёт следующего прохода; «иду без него» для этого замка нет.
 HQ_RW = "hq-rw"
-HQ_RW_DIRS = ("locks", "autostart-reset")
+BOARD_LOCK = "board-git"
+HEAVY_QUEUE = "heavy-queue"  # папка билетов очереди heavy в STATE/locks (metis-0659)
+# start-req — заявки Зевса на запуск (metis-0771); saved — метка `pantheon saved --by zeus*`, когда в STATE/maintenance и
+# STATE/plugins окно писать не может (metis-0577)
+HQ_RW_DIRS = ("locks", "autostart-reset", "start-req", "saved")
 HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
 # errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
 HQ_BAD_ERRNO = {errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR, errno.EMLINK, errno.EOPNOTSUPP}
@@ -328,7 +424,7 @@ class UnsafeFile(OSError):
 
 def hq_lock_name(name):
     """Замок, который берёт и окно Зевса, — живёт в STATE/hq-rw/locks."""
-    return name.startswith("start-") or name == "wake"
+    return name.startswith("start-") or name in ("wake", BOARD_LOCK)
 
 
 def hq_open(sub, fname):
@@ -384,9 +480,25 @@ def hq_mark(sub, fname, text):
         return False
 
 
+def hq_put(sub, fname, text):
+    """Файл STATE/hq-rw/<sub>/<fname> с этим текстом (перезапись, проверки как у hq_open). UnsafeFile/OSError — наружу."""
+    fd = hq_open(sub, fname)
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+
+LOCK_CONTENDED = None  # имя замка, который в последний раз не взят потому, что его держит другой процесс (metis-0717)
+
+
 @contextlib.contextmanager
 def lock(name, block=True):
-    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята."""
+    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята.
+    Не взята из-за чужого владельца (а не подложенной записи или отказа в праве) — LOCK_CONTENDED == name."""
+    global LOCK_CONTENDED
+    LOCK_CONTENDED = None
     shared = hq_lock_name(name)
     try:
         if shared:
@@ -427,7 +539,8 @@ def lock(name, block=True):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
+                    tail = "не взята" if name == BOARD_LOCK else "иду без него"
+                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — {tail}", file=sys.stderr)
                     break
                 time.sleep(0.2)
     else:
@@ -436,6 +549,7 @@ def lock(name, block=True):
             got = True
         except BlockingIOError:
             got = False
+            LOCK_CONTENDED = name
     try:
         yield got
     finally:
@@ -447,6 +561,33 @@ def lock(name, block=True):
 def locked(name):
     with lock(name, block=False) as got:
         return not got
+
+
+def lock_held(name):
+    """Держит ли кто замок name — для показа (metis-0266). Файл замка открывается только на чтение и проверяется
+    LOCK_SH|LOCK_NB: чужой LOCK_EX отказывает, создавать и писать ничего не нужно, так что окно с песочницей, куда в
+    STATE/locks не пишут (pantheon jobs), не падает с PermissionError. → True — держат; False — свободен или файла нет
+    (замок не брали); None — не знаю: файл не читается, подложена ссылка (O_NOFOLLOW) или это не обычный файл."""
+    p = path(HQ_RW, "locks", name + ".lock") if hq_lock_name(name) else path("locks", name + ".lock")
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def read_json(p, default=None):
@@ -479,6 +620,33 @@ def save_job_state(name, st):
     write_json(path("jobs", _job_name(name) + ".json"), st)
 
 
+def default_jobs():
+    """Задания из schedule-defaults.toml плагина (их приносит выпуск). Нет файла или он битый — пусто: расписание
+    владельца не должно падать из-за него. PANTHEON_SCHEDULE_DEFAULTS — подмена пути для тестов."""
+    p = os.environ.get("PANTHEON_SCHEDULE_DEFAULTS") or os.path.join(PLUGIN, "schedule-defaults.toml")
+    try:
+        with open(p, "rb") as fh:
+            jobs = tomllib.load(fh).get("job") or []
+    except (OSError, ValueError):
+        return []
+    return [j for j in jobs if isinstance(j, dict)]
+
+
+def _merge_default_jobs(owner_jobs):
+    """Задания по умолчанию + [[job]] владельца. Сначала умолчания, которых владелец не касался (в порядке файла
+    умолчаний), потом все задания владельца в его порядке: одноимённое умолчанию меняет его поля (поверх них) и стоит
+    там, где владелец его записал, а не уезжает вперёд остальных."""
+    defaults = {}
+    for j in default_jobs():
+        defaults[str(j.get("name"))] = dict(j)
+    owned = {str(j.get("name")) for j in owner_jobs or [] if isinstance(j, dict)}
+    out = [j for n, j in defaults.items() if n not in owned]
+    for j in owner_jobs or []:
+        name = str(j.get("name")) if isinstance(j, dict) else None
+        out.append({**defaults[name], **j} if name in defaults else j)
+    return out
+
+
 def load_schedule():
     """schedule.toml; задачи с именем не по образцу [a-z0-9-] отбрасываются (имя идёт в пути меток и блокировок)."""
     p = os.path.join(PANTHEON, "schedule.toml")
@@ -486,6 +654,7 @@ def load_schedule():
         sched = tomllib.load(fh)
     sched["defaults"] = {**DEFAULTS, **(sched.get("defaults") or {})}
     sched["notify"] = notify_mod().settings(sched.get("notify"))
+    sched["job"] = _merge_default_jobs(sched.get("job"))
     jobs = []
     for j in sched.get("job") or []:
         if isinstance(j, dict) and JOB_NAME.fullmatch(str(j.get("name", ""))):
@@ -574,8 +743,11 @@ def run_env():
     env = dict(os.environ)
     if env.get("PATH"):
         env["PATH"] = clean_path(env["PATH"])
-    extra = [os.path.join(installed_plugin_dir(), "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
-             os.path.join(HOME, ".local", "bin")]
+    # первым — current/bin ссылкой, а не bin версии из кэша (metis-0772): окно живёт дольше версии и наследует этот PATH
+    # (и демон claude тоже), а bin версии остался бы старым после обновления — heavy без очереди мест, старый pantheon
+    own_bin = os.path.join(CURRENT, "bin") if os.path.isdir(os.path.join(CURRENT, "bin")) else \
+        os.path.join(installed_plugin_dir(), "bin")
+    extra = [own_bin, os.path.dirname(sys.executable), "/opt/homebrew/bin", os.path.join(HOME, ".local", "bin")]
     nvm = nvm_bin()
     if nvm and nvm not in (env.get("PATH") or "").split(":"):
         extra.insert(1, nvm)
@@ -683,7 +855,7 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
-                    "archive"}
+                    "archive", "batch-suggest", "reap"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -759,8 +931,12 @@ def parse_command(cmd):
             return None  # install (claude mcp add уровня пользователя) и прочее — только руками
         if argv[1] == "plugins" and (argv[2:3] != ["update"] or any(a != "--quiet" for a in argv[3:])):
             return None
+        if argv[1] == "batch-suggest" and argv[2:] != ["run"]:
+            return None  # задача прохода — только `batch-suggest run`; --force и task batch-suggest --apply — руками
         if argv[1] == "read" and argv[2:] != ["run"]:
             return None  # заявку подаёт окно, а не задача прохода; проход — только `read run`
+        if argv[1] == "reap" and argv[2:] != ["--auto"]:
+            return None  # проход гасит только брошенное (`reap --auto`, metis-0617); --apply и --pid — руками и Гестия
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
@@ -842,12 +1018,18 @@ def notify(text, title="Пантеон", target=None, group=None):
         args = [tn, "-title", title, "-message", text, "-open", target or board_url()]
         if group:
             args += ["-group", "pantheon-" + re.sub(r"[^\w.-]", "_", group)[:60]]
-        r = subprocess.run(args, capture_output=True, timeout=15)
-        if r.returncode == 0:
-            return
+        try:
+            r = subprocess.run(args, capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return
+        except subprocess.TimeoutExpired:  # зависший notifier не обрывает проход (metis-0709): пробуем osascript
+            pass
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
-                   capture_output=True, timeout=10)
+    try:
+        subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
+                       capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired:  # и он завис — уведомление потеряно, проход идёт дальше
+        pass
 
 
 # --- состояние Mac: пробуждение, питание, простой, лимит ------------------------
@@ -948,7 +1130,8 @@ def heavy_wait_reason(job, sched, t, overdue):
 #                             view-sync.sh)
 #   board                     карточки VIEW/Доска/*.md; задачи (task_dirs: inbox/tasks,       board.json, журнал
 #                             directions/*/tasks); входящие directions/*/inbox; directions.toml, владельца и политика
-#                             schedule.toml (primary, уведомления)                            уведомлений — выходы
+#                             schedule.toml (primary, уведомления); хозяева задач:            уведомлений — выходы;
+#                             STATE/agents.json и STATE/stopped/ (metis-0868)                  owner-sids.json
 #   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl и zeus.md  —
 #   agents                    HOME/.claude/daemon/roster.json, sessions/*.json (имя, pid),     ответ `claude agents`
 #                             jobs/*/* — признаки, по которым демон Claude меняет список       (снимок нужен лишь как
@@ -1016,6 +1199,7 @@ def _fp_board_inputs():
     out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
     out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
     out += _fp_files([os.path.join(PANTHEON, "board.md")])  # строка встраивания ![[board-auto]] (metis-0397)
+    out += _fp_files([path("agents.json")]) + _fp_dir(path("stopped"), 1)  # хозяева задач (metis-0868)
     out += _fp_board_auto()
     try:  # следы работы для статусов (metis-0397, п. 7): записи worktree и живые копии, PR, закрывающие задачи
         S = boardstatus_mod()
@@ -1036,7 +1220,10 @@ def _fp_board_auto():
     правки; открытые PR и неделя — по содержимому кэша и целым процентам (fetch и строка статуса пишут их часто)."""
     B = boardtext_mod()
     return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
-                                                        ("week", board_week())]
+                                                        ("pr_stale", B.pr_stale(path("autoclose-prs.json"))),
+                                                        ("week", board_week()),
+                                                        ("merge_queue", B.merge_queue(STATE)),  # waiting-auto (0829)
+                                                        ("windows", board_windows())]
 
 
 TICK_SKIP = {
@@ -1085,6 +1272,63 @@ def launch(name, t):
     subprocess.Popen([sys.executable, "-I", os.path.join(LIB, "run.py"), "run-job", name],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env=run_env(), cwd=HOME)
+
+
+REFRESH_ARGV = (("view", "--quiet"), ("board",))  # задачи расписания, которые рисуют карточки: копия Obsidian и доска
+
+
+def refresh_kick():
+    """После правки карточки (pantheon task …, автозакрытие) — копия Obsidian и доска сразу, без отдельной команды и без
+    ожидания тика (metis-0868, п. 4): те же задачи расписания (`pantheon view --quiet`, `pantheon board`) отдельным
+    процессом через launch, под их замками job-<имя>. Уже идёт или пауза — не трогаем: следующий тик увидит новый
+    отпечаток входов. Окно роли (песочница не даёт писать в STATE) — тихо пропускаем: догонит тик через минуту.
+    Тест или проба на временной папке (notify_offscreen) — только с PANTHEON_REFRESH=1; PANTHEON_REFRESH=0 — выключено.
+    → имена запущенных задач."""
+    flag = os.environ.get("PANTHEON_REFRESH")
+    if flag == "0" or (flag != "1" and notify_offscreen()) or os.path.exists(path("paused")):
+        return []
+    try:
+        sched = load_schedule()
+        with lock("refresh-kick", block=False) as got:  # проба записи в STATE: из окна роли — PermissionError
+            if not got:
+                return []
+    except (OSError, ValueError):
+        return []
+    me, primary, out = host(), sched.get("primary_host"), []
+    for job in sched.get("job") or []:
+        argv = parse_command(job.get("command"))
+        if not argv or os.path.basename(argv[0]) != "pantheon" or tuple(argv[1:]) not in REFRESH_ARGV:
+            continue
+        st = job_state(job["name"])
+        if job.get("enabled") is False or st.get("disabled") or st.get("paused"):
+            continue
+        if job.get("hosts", "all") == "primary" and (not primary or me != primary):
+            continue
+        if lock_held("job-" + job["name"]):
+            continue
+        launch(job["name"], now())
+        out.append(job["name"])
+    return out
+
+
+def card_now():
+    """Время записи в карточку (metis-0868, п. 5) — часы системы. PANTHEON_NOW («сейчас» синтетических проб) берётся,
+    только если хранилище задач не настоящее (временный PANTHEON_HOME): агент не проставит в журнал настоящей
+    карточки своё время переменной окружения. Настоящее — ~/ai/pantheon домашней папки из учётной записи, а не из
+    HOME (тесты подменяют HOME); PANTHEON_TEST здесь не в счёт — его может поставить и агент."""
+    if os.environ.get("PANTHEON_NOW") and real_store():
+        return time.time()
+    return now()
+
+
+def real_store():
+    """PANTHEON — настоящее хранилище задач владельца (~/ai/pantheon его учётной записи)."""
+    import pwd
+    try:
+        owner_home = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return True
+    return PANTHEON == os.path.realpath(os.path.join(owner_home, "ai", "pantheon"))
 
 
 def job_cap_hold(name, argv, st, t, memo=None):
@@ -1178,8 +1422,19 @@ def tick():
         except Exception as e:  # сбой служб не должен останавливать задачи тика
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
+        try:
+            hookd_stats_tick(t)  # доля откатов и canary-diff демона хуков раз в сутки (F9, metis-0845)
+        except Exception as e:  # сбой сводки не должен останавливать тик
+            alert_once("hookd-stats-tick", type(e).__name__, f"демон хуков: сводка упала ({type(e).__name__}: {e})",
+                       "pantheon-tick")
         merge_kick()
         outside_kick()
+        handoff_kick()
+        owner_edit_kick()
+        try:
+            browser_mod().kick()  # браузер владельца для ролей вне окна (lib/browser.py, metis-0760)
+        except Exception as e:  # сбой браузера не должен останавливать тик
+            alert_once("browser-kick", type(e).__name__, f"браузер ролей: {type(e).__name__}: {e}", "pantheon-tick")
         probes_tick(t)
         try:
             roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
@@ -1197,6 +1452,19 @@ def tick():
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
                 alert_once("autoclose-tick", type(e).__name__, f"автозакрытие задач: проход упал ({type(e).__name__}: {e})",
                            "pantheon-tick")
+            release_ticks(t)
+
+
+
+def release_ticks(t):
+    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска). Сбой одного не
+    останавливает тик и второго."""
+    for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
+                           ("map-tick-crash", "карта тестов", map_tick_mod)):
+        try:
+            mod().tick(t)
+        except Exception as e:
+            alert_once(key, type(e).__name__, f"{text}: проход упал ({type(e).__name__}: {e})", "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -1268,6 +1536,14 @@ SVC_SOCKET = """  <key>Sockets</key>
     <key>SockFamily</key><string>IPv4</string>
   </dict></dict>"""
 SVC_IDLE_MIN = 30
+# Служба демона хуков guard (metis-0845): [[service]] с name = "hookd" — без command. Её plist, pantheon-hookd и
+# закрепление дерева (pantheon-hookd.hooks) ставит не SVC_TMPL, а установщик guard scripts/hookd-install.sh из
+# проверенного дерева (installed_dir) — _hookd_sync. Сокет Unix держит launchd, демон выходит сам после простоя:
+# «загружена, процесса нет» — ожидание запроса (как служба по требованию). command, socket и idle_min у неё не читаются
+HOOKD_SVC = "hookd"
+HOOKD_INSTALL_TIMEOUT = 180  # сборка клиента cc и plutil — секунды; запас на холодный кэш компилятора
+HOOKD_RETRY = 3600           # не поставилась из того же дерева guard — повтор через час, а не на каждом проходе
+HOOKD_STATS_EVERY = 86400    # hookd-stats (F9) — раз в сутки
 
 
 def svc_socket(svc):
@@ -1289,6 +1565,8 @@ def svc_idle(svc):
 
 
 def svc_on_demand(svc):
+    if svc.get("name") == HOOKD_SVC:
+        return True
     with contextlib.suppress(ValueError):
         return svc_socket(svc) is not None
     return False
@@ -1311,6 +1589,8 @@ def service_wanted(svc, sched, st=None):
         return False, "пауза"
     if svc.get("hosts", "all") == "primary" and host() != sched.get("primary_host"):
         return False, "не этот Mac"
+    if svc.get("name") == HOOKD_SVC:
+        return True, ""  # ставит установщик guard, команды нет (_hookd_sync)
     if parse_service_command(svc.get("command")) is None:
         return False, "команда не разрешена"
     try:
@@ -1407,6 +1687,151 @@ def _svc_path():
                      "/usr/bin:/bin:/usr/sbin:/sbin"])
 
 
+def hookd_installer(tree):
+    return os.path.join(tree, "scripts", "hookd-install.sh")
+
+
+def _hookd_env():
+    """Окружение установщика и сводки guard: только HOME и PATH — окружение тика задаёт launchd, а его меняет
+    launchctl setenv; установщик сам зовёт команды по абсолютным путям."""
+    return {"HOME": HOME, "PATH": os.environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"}
+
+
+def _read_text(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _last_line(*texts):
+    """Последняя непустая строка первого текста, где она есть (причина сбоя — последней строкой)."""
+    for t in texts:
+        lines = [x.strip() for x in (t or "").splitlines() if x.strip()]
+        if lines:
+            return lines[-1][:200]
+    return ""
+
+
+def _hookd_sync():
+    """Служба hookd нужна: поставить или переставить её установщиком guard из проверенного дерева (metis-0845).
+    Ничего не делает и launchd не трогает, если всё совпало: pantheon-hookd.hooks называет папку hooks этого дерева
+    (после выпуска guard там прежняя версия — демон отвечал бы «F stale» на каждый вызов), plist — ровно то, что даёт
+    `hookd-install.sh --print`, служба загружена. Иначе — `hookd-install.sh --no-probe`: окна macOS о доступе к папкам
+    из фона не всплывают, проход не ждёт. pantheon-hookd поставлен впервые или пересобран (метка .sum другая) — тревога
+    «проверьте доступ» с командой --check. Сбой — тревога с последней строкой вывода; повтор из того же дерева — через
+    HOOKD_RETRY. Нет проверенного дерева guard или в нём нет установщика — тревога, служба не трогается."""
+    tree = installed_dir("guard")
+    if not tree:
+        alert_once("svc-hookd", "no-guard", "служба hookd: нет проверенного дерева guard — не ставлю и не переставляю "
+                   "(pantheon plugins accept guard, README agent-kit «Живой код»)", "pantheon-tick")
+        return
+    ver, inst = os.path.basename(tree), hookd_installer(tree)
+    if not os.path.isfile(inst):
+        alert_once("svc-hookd", f"no-installer {tree}", f"служба hookd: в guard {ver} нет scripts/hookd-install.sh — "
+                   "служба не ставится до выпуска guard с установщиком", "pantheon-tick")
+        return
+    hooks = os.path.join(tree, "hooks")
+    svc_bin = os.path.join(HOOKD_DIR, "bin", "pantheon-hookd")
+    pin = (_read_text(svc_bin + ".hooks") or "").strip()
+    plist = _svc_plist(HOOKD_SVC)
+    try:
+        r = subprocess.run(["/bin/sh", inst, "--print"], capture_output=True, text=True, timeout=30, env=_hookd_env(),
+                           stdin=subprocess.DEVNULL)
+        printed = r.stdout if r.returncode == 0 and r.stdout else None
+    except (OSError, subprocess.SubprocessError):
+        printed = None
+    if pin == hooks and printed is not None and _read_text(plist) == printed and svc_running(HOOKD_SVC) is not None:
+        clear_once("svc-hookd")
+        return
+    st = read_json(path("svc-hookd.json"))
+    st = st if isinstance(st, dict) else {}
+    with contextlib.suppress(TypeError, ValueError):
+        if st.get("failed_tree") == tree and 0 <= now() - float(st.get("failed_at") or 0) < HOOKD_RETRY:
+            return
+    before = _read_text(svc_bin + ".sum")
+    try:
+        r = subprocess.run(["/bin/sh", inst, "--no-probe"], capture_output=True, text=True,
+                           timeout=HOOKD_INSTALL_TIMEOUT, env=_hookd_env(), stdin=subprocess.DEVNULL)
+        code, why = r.returncode, _last_line(r.stderr, r.stdout)
+    except subprocess.TimeoutExpired:
+        code, why = "timeout", f"не уложился в {HOOKD_INSTALL_TIMEOUT} с"
+    except OSError as e:
+        code, why = type(e).__name__, str(e)
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        with open(path("dryrun.log"), "a") as fh:
+            fh.write(f"{int(now())} svc-hookd-install {ver} {code}\n")
+        if code == 0:  # мнимое состояние launchd — как у _launchctl bootstrap
+            dry = read_json(path("svc-dry.json"))
+            dry[HOOKD_SVC] = 0
+            write_json(path("svc-dry.json"), dry)
+    if code != 0:
+        st.update(failed_tree=tree, failed_at=now(), failed_code=code)
+        write_json(path("svc-hookd.json"), st)
+        alert_once("svc-hookd", f"{tree} {code}", f"служба hookd: установка из guard {ver} не прошла (код {code}): "
+                   f"{why or 'без вывода'}; повтор через час или руками: /bin/sh {inst.replace(HOME, '~')}",
+                   "pantheon-tick", note="Демон хуков не поставлен")
+        return
+    write_json(path("svc-hookd.json"), {"tree": tree, "at": now(), "from": pin or None})
+    clear_once("svc-hookd")
+    after = _read_text(svc_bin + ".sum")
+    if after != before:
+        # pantheon-hookd новый — macOS спросит доступ к папкам заново; пробы из фона нет, спросит команда владельца
+        alert_once("svc-hookd-tcc", (after or "").strip()[:16], f"служба hookd поставлена из guard {ver}, "
+                   f"pantheon-hookd {'пересобран' if before else 'поставлен впервые'}: доступ к Рабочему столу, "
+                   f"Документам, Загрузкам и iCloud Drive не проверен — в терминале: /bin/sh {inst.replace(HOME, '~')} "
+                   "--check", "pantheon-tick", note="Демон хуков: проверьте доступ к папкам")
+
+
+def hookd_stats_tick(t):
+    """Сводка демона хуков (F9) раз в сутки, пока служба стоит (есть её plist): `hookd-stats.py --json` из проверенного
+    дерева guard. Код 3 — за сутки есть canary-diff (демон решил не так, как медленный путь): тревога раз в день с
+    уведомлением — в тихие часы оно ждёт утреннего итога. Другой код, таймаут, нет файла, не JSON — тревога «сводка не
+    прошла», тик не падает. Время запуска пишется до вызова: сбой не повторяется на каждом проходе."""
+    if not os.path.exists(_svc_plist(HOOKD_SVC)):
+        return
+    st = read_json(path("hookd-stats.json"))
+    st = st if isinstance(st, dict) else {}
+    last = st.get("at")
+    if isinstance(last, (int, float)) and 0 <= t - last < HOOKD_STATS_EVERY:
+        return
+    write_json(path("hookd-stats.json"), {**st, "at": t})
+    tree = installed_dir("guard")
+    launcher = os.path.join(tree, "hooks", "python.sh") if tree else ""
+    script = os.path.join(tree, "scripts", "hookd-stats.py") if tree else ""
+    data, out, err = None, "", ""
+    if not (tree and os.path.isfile(launcher) and os.path.isfile(script)):
+        code = "нет hookd-stats.py в проверенном дереве guard"
+    else:
+        try:
+            r = subprocess.run(["/bin/sh", launcher, script, "--json"], capture_output=True, text=True, timeout=120,
+                               env=_hookd_env(), stdin=subprocess.DEVNULL)
+            code, out, err = r.returncode, r.stdout, r.stderr
+        except subprocess.TimeoutExpired:
+            code = "timeout"
+        except OSError as e:
+            code = type(e).__name__
+    if code in (0, 3):
+        with contextlib.suppress(ValueError, IndexError):
+            data = json.loads(out.strip().splitlines()[-1])
+        if not isinstance(data, dict):
+            code, data = f"{code}, вывод не JSON", None
+    write_json(path("hookd-stats.json"), {"at": t, "code": code, "stats": data})
+    if code == 3:
+        clear_once("hookd-stats-fail")
+        alert_once("hookd-canary", stamp(t)[:10], f"демон хуков: canary-diff {data.get('canary_diff')} за сутки — "
+                   "демон решил не так, как медленный путь guard; разбор: ~/.local/state/pantheon/logs/hookd-fallback.log "
+                   "и hookd-install.sh --check (README guard, «Демон хуков»)", "pantheon-tick",
+                   note="Демон хуков: решения расходятся с guard (canary-diff)")
+    elif code == 0:
+        clear_once("hookd-stats-fail")
+    else:
+        why = _last_line(err, out)
+        alert_once("hookd-stats-fail", str(code), f"демон хуков: сводка hookd-stats не прошла (код {code})"
+                   + (f": {why}" if why else ""), "pantheon-tick")
+
+
 def services_sync(sched, only=None):
     """Сверить задачи launchd служб с расписанием. only — одна служба (пульт: пауза снимает её сразу). Тик и пульт
     сверяют под одной блокировкой — иначе двойной bootstrap и ложная тревога."""
@@ -1437,6 +1862,9 @@ def _services_sync(sched, only):
                 _launchctl("bootout", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)
             with contextlib.suppress(FileNotFoundError):
                 os.remove(plist)
+            continue
+        if name == HOOKD_SVC:
+            _hookd_sync()
             continue
         port = svc_socket(want[name])
         launch = SVC_KEEPALIVE if port is None else SVC_SOCKET.format(port=port)
@@ -1645,15 +2073,24 @@ def status():
     lines.append(f"сбоев guard за сутки: {n_fail}")
     if n_fail:
         warn.append("сбои guard")
-    plug = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "managed-settings.json")
+    # сверка — с проверенным деревом guard (verified.json), как у прохода (merge.managed_source), а не с клоном маркетплейса:
+    # клон впереди выпуска, и status показывал «отстали» там, где проход ничего не покажет (metis-0718)
     if not os.path.exists(MANAGED):
         lines.append("управляемые настройки: НЕ установлены (README guard, sudo)")
         warn.append("управляемые настройки")
-    elif open(MANAGED, "rb").read() != (open(plug, "rb").read() if os.path.exists(plug) else b""):
-        lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
-        warn.append("управляемые настройки")
     else:
-        lines.append("управляемые настройки: установлены, совпадают с guard")
+        try:
+            src = merge_mod().managed_source()
+        except Exception:  # noqa: BLE001 — сбой разбора не ломает экран
+            src = None
+        if src is None:
+            lines.append("управляемые настройки: проверенного дерева guard нет — сверить не с чем (pantheon plugins accept)")
+            warn.append("управляемые настройки")
+        elif open(MANAGED, "rb").read() != src[1]:
+            lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
+            warn.append("управляемые настройки")
+        else:
+            lines.append("управляемые настройки: установлены, совпадают с guard")
     section("Защиты", lines)
 
     # синхронизация ~/.claude
@@ -1677,7 +2114,7 @@ def status():
 
     # места heavy, память, версии
     lines = []
-    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):
         p = path("locks", name + ".lock")
         if not os.path.exists(p):
             lines.append(f"{name}: нет (pantheon install)")
@@ -1802,8 +2239,9 @@ def domains_build(if_changed=False):
         # попасть в hq.json, а запрет записи в CLAUDE_TMP (tmp_deny_write, metis-0286) — во все окна
         # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
-        # и проектные настройки папок запуска направлений: allow с gh pr merge роняет окно (metis-0137)
-        launches = [launch_folder(fs) for fs in (read_json(path("domains.json")).get("domains") or {}).values()]
+        # и проектные настройки всех папок окон направлений: allow с gh pr merge роняет окно (metis-0137, metis-0911)
+        launches = [f for fs in (read_json(path("domains.json")).get("domains") or {}).values()
+                    if isinstance(fs, list) for f in window_folders(fs)]
         # и реестр установленных плагинов: путь guard.py и agents.py окон берётся из него — обновили guard, окна
         # пересобираются на новый путь (metis-0321, ревью 90a)
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP, INSTALLED_PLUGINS,
@@ -1817,7 +2255,9 @@ def domains_build(if_changed=False):
         # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
         newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
         due = read_json(path("domains.json")).get("grants_next")
-        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
+        # и папка мастерской: появилась ~/ai/workshop (перенос) — окно workshop и текст роли на новую (metis-0899)
+        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES) \
+                and read_json(path("domains.json")).get("workshop") == workshop_dir():
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -1857,12 +2297,15 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1]})
+        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1],
+        "workshop": workshop_dir()})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
+    with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
+        os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
-    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
     roles = roles_build()
     if roles:
@@ -1889,7 +2332,14 @@ def domains_build(if_changed=False):
 # npm_config_store_dir, а ваш терминал — тот же store-dir в .npmrc проекта (вариант А athena-0001, 15.10). Переменная
 # нужна копиям разработчиков: .npmrc вне git в них не попадает.
 # Координаторам там же — окно сжатия 200k (CTX-04).
-SANDBOX_ROOTS = ["~/projects", "~/ai/knowledge"]   # папки направлений для песочницы — только внутри этих
+# Папки направлений для песочницы — только внутри этих. Первые SANDBOX_STRICT — только папки внутри (не сам корень):
+# ~/projects/<x> и ~/ai/life/<x> (личное владельца, metis-0899); ~/ai/knowledge, мастерская ~/ai/workshop и код
+# Пантеона ~/ai/agent-kit (папка metis-pantheon) — и сам корень. Остальное в ~/ai (pantheon, pantheon-view) — нет
+WORKSHOP_DIR = "~/ai/workshop"   # мастерская Дедала после переноса (metis-0899); живая папка — workshop_dir()
+LIFE_DIR = "~/ai/life"   # области жизни владельца: простая папка без .git, у каждой области свой git (Зевс 06.11, metis-0899)
+AGENT_KIT_DIR = "~/ai/agent-kit"   # рабочая копия agent-kit (metis-0899; до переноса — в ~/projects)
+SANDBOX_ROOTS = ["~/projects", LIFE_DIR, "~/ai/knowledge", WORKSHOP_DIR, AGENT_KIT_DIR]
+SANDBOX_STRICT = 2
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
@@ -1915,9 +2365,14 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # gh pr diff и gh run — нет: лишний чужой текст в окне
 HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
-# сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
-# пускает guard (_PUSH_BAD)
-GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
+# сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master при любой записи назначения,
+# --force и --delete не пускает guard (push_problem); fetch с --update-head-ok или назначением в refs/heads/* — тоже
+# (fetch_problem, metis-0983). Это не «только сеть»: fetch пишет в .git — refs/remotes/*, теги, FETCH_HEAD. Без записи
+# в рабочую копию — поэтому pull в списке нет (metis-0971, решение Зевса 07.11, вариант А):
+# `git pull` вне песочницы вливал коммит в рабочую копию защищённого репозитория (~/.claude, ~/ai/pantheon), если cwd
+# внутри allowWrite. Подтянуть — `git fetch` мимо песочницы, затем `git merge` в ней: запись там судит песочница.
+# Список команд, меняющих рабочую копию, держит тест test_window_rules.py (WORKTREE_WRITE)
+GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *"]
 COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
@@ -2037,7 +2492,7 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # (CTX-09); веба через него не больше, чем через prometheus и лидов. clio зовут Зевс и mnemo-brain (роль clio).
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
-HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "Explore"]
+HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "charon", "Explore"]
 # dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
 # «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor. palamedes — исполнитель без кода
 # (metis-0224): тексты, юридический разбор, синтез; веба и Bash у него нет, пишет только свой черновик.
@@ -2192,9 +2647,11 @@ def sandbox_size(data):
 GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
 GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesystem", "allowWrite"),
               "domains": ("sandbox", "network", "allowedDomains")}
-# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON)
+# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON) и в папку
+# демона хуков guard (HOOKD_DIR, metis-0845): окно с записью туда подменило бы клиент с его меткой — «пропустить» на всё.
+# Папка выше тоже не даётся: grant write = ["~/.cache"] отклоняется целиком, как ["~"]
 GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
-                  "~/.bashrc", "~/.profile", STATE, PANTHEON)
+                  "~/.bashrc", "~/.profile", HOOKD_HOME, STATE, PANTHEON)
 GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
 
 
@@ -2303,6 +2760,38 @@ def write_window(out_dir, name, data):
     return True
 
 
+def hq_project_dirs(domains, reg=None):
+    """metis-0771: папки проектов направлений, закрытые окну hq (настоящие пути). Не закрыты metis-pantheon,
+    направления с coordinator = false (их ведёт Пританей), папки в ~/ai или PANTHEON или содержащие их либо открытую
+    папку (~/projects у направления закрыл бы agent-kit) и папки вне HOME или в скрытых. То же считает guard
+    hq_project_roots — правило Read/Grep/Glob."""
+    # Счёт — в hooks/ctx.py: тем же списком хук qmd-query закрывает штабу коллекции этих папок (metis-0778)
+    return ctx_mod().hq_project_dirs(domains, list(hq_led(reg)), HOME, AI_HOME, PANTHEON)
+
+
+def _allow_blocked(a, denies):
+    """metis-0771: allowRead `a` открыл бы закрытое — запрет из `denies` закрывает `a` или папку выше либо лежит внутри
+    `a`. Шаблоны (*, ?, [) — через fnmatch: его «*» шире, чем у песочницы, поэтому сомнение — в пользу запрета."""
+    for x in denies:
+        x = x[:-3] if x.endswith("/**") else x
+        if any(c in x for c in "*?["):
+            up = a
+            while up not in ("/", ""):
+                if fnmatch.fnmatchcase(up, x):
+                    return True
+                up = os.path.dirname(up)
+            if fnmatch.fnmatchcase(x, a + "/*"):
+                return True
+        elif a == x or a.startswith(x.rstrip("/") + "/") or x.startswith(a + "/"):
+            return True
+    return False
+
+
+def _under(p, top):
+    """p — та же папка, что top, или внутри неё (оба — настоящие абсолютные пути)."""
+    return p == top or p.startswith(top.rstrip("/") + "/")
+
+
 def _deny_forms(paths):
     """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
     out = []
@@ -2316,10 +2805,10 @@ def _deny_forms(paths):
 # Строгий guard окна роли (SEC-29): тот же guard.py, но с --strict и onFailure "block" — сбой, таймаут, плохой вход
 # или пропавший файл защиты останавливают действие, а не пропускают. Путь — только клон маркетплейса внутри
 # ~/.claude/plugins (туда ролям писать нельзя: protect-config), а не «рядом с этим плагином»: рабочая копия
-# ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
+# agent-kit (AGENT_KIT_DIR) — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
 # (находка проверки безопасности 14.10). Ваших сессий без роли это не касается. Agent|Task|Skill — правила
 # hq-telegram и chiron (P0-1, P0-2): штабу — ни tg-reader, ни telegram-read; коуч с личным — только у Зевса.
-GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill"
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill|EnterWorktree"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
@@ -2368,14 +2857,27 @@ def agents_window(data, allowed, deny, script):
     return data
 
 
+EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
+
+
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
-                  tmp_own=()):
+                  own_agents=False, tmp_own=()):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
-    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже
+    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже.
+    # own_agents (metis-0841, «да» владельца 05.11 16:09): окно направления правит роли своего проекта — в папках
+    # folders песочница .claude/agents не закрывает, их текст судит guard protect-config (ключи tools, hooks и т. п.)
+    # папка демона хуков (HOOKD_DIR, metis-0845) — каждому окну: allowWrite выше неё (sandbox_write ~/.cache) её не
+    # откроет, запрет сильнее разрешения (проверка F7 — hookd-check.py windows)
+    # .claude/hooks — в каждой папке и вглубь (metis-0933, класс 2 модели угроз): скрипты оттуда хуки окна и пакета
+    # направления (packs/) запускают вне песочницы — окно, переписав их Bash-ом, вышло бы из неё. Edit и Write туда
+    # закрывает guard protect-config (PROJECT_ITEMS hooks)
+    agents = ("/.claude/agents", "/**/.claude/agents")
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
-        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks", "/.claude/agents", "/**/.claude/agents")]
+        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
+        () if own_agents and r in folders else agents)]
+    deny_write += _deny_forms([HOOKD_HOME])
     # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
     deny_write += tmp_deny_write(allow, tmp_own)
     data = {
@@ -2422,11 +2924,57 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     return data
 
 
-def _read_small_regular(p, limit=8 << 20):
-    """Текст обычного файла не больше limit, иначе None. Папки проекта пишут роли, а читает тик вне песочницы:
-    FIFO, устройство или ссылка вместо файла не должны его повесить, огромный файл — съесть память."""
+def _split_trusted(p):
+    """Абсолютный путь p → (надёжное начало настоящим путём, [звенья ниже]). Начало — $HOME, если p под ним (в
+    любом из видов: как задан и настоящим путём), иначе первое звено пути (/tmp → /private/tmp на macOS): системные
+    ссылки выше папок окон законны, ниже них звено-ссылку подставило бы окно (metis-0933, класс 3)."""
+    p = os.path.normpath(os.path.abspath(p))
+    home = os.path.abspath(HOME)
+    for pre in (home, os.path.realpath(home)):
+        if p == pre or p.startswith(pre.rstrip("/") + "/"):
+            return os.path.realpath(home), [x for x in p[len(pre):].split("/") if x]
+    top = "/" + p.split("/")[1] if p != "/" else "/"
+    return os.path.realpath(top), [x for x in p[len(top):].split("/") if x]
+
+
+def _link_free(p):
+    """True, если ни одно звено пути p ниже надёжного начала (_split_trusted) не ссылка. Нет звена — тоже True: его
+    нет, подменять нечего (папку проверит isdir вызывающего)."""
+    cur, parts = _split_trusted(p)
+    for part in parts:
+        cur = os.path.join(cur, part)
+        try:
+            if stat.S_ISLNK(os.lstat(cur).st_mode):
+                return False
+        except OSError:
+            return True
+    return True
+
+
+def _open_nofollow(p):
+    """fd для чтения файла p, открытого по звеньям ниже надёжного начала с O_NOFOLLOW (openat): ссылка любым звеном —
+    в папке из domains.json, в середине пути, на месте .claude, последним — OSError. Проверка и открытие одним ходом:
+    подмена звена между ними (TOCTOU) ничего не даёт."""
+    base, parts = _split_trusted(p)
+    if not parts:
+        raise OSError(f"{p}: не файл")
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        for part in parts[:-1]:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def _read_small_regular(p, limit=8 << 20, whole_path=False):
+    """Текст обычного файла не больше limit, иначе None. Папки проекта пишут роли, а читает тик вне песочницы:
+    FIFO, устройство или ссылка вместо файла не должны его повесить, огромный файл — съесть память. whole_path —
+    ссылка не только последним звеном, а любым ниже надёжного начала (_open_nofollow) — тоже None."""
+    try:
+        fd = _open_nofollow(p) if whole_path else os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
     try:
@@ -2614,6 +3162,878 @@ def project_allow_problems(launch):
     return found
 
 
+def window_folders(folders):
+    """Все папки окна направления настоящими путями, без повторов: папка запуска первой (launch_folder), за ней
+    остальные по порядку реестра. Окно — одна граница на все папки (metis-0911, решение 06.11, ревью argus 2 PR #360):
+    они рабочие (additionalDirectories), cd туда сохраняется, и проектные allow проверяются во всех."""
+    real = [os.path.realpath(os.path.expanduser(f)) for f in folders or [] if isinstance(f, str) and f]
+    return list(dict.fromkeys([launch_folder(folders)] + real)) if real else []
+
+
+def folders_allow_problems(folders):
+    """project_allow_problems по всем папкам окна (window_folders)."""
+    return [x for f in window_folders(folders) for x in project_allow_problems(f)]
+
+
+# --- окно направления по схеме А (metis-0933, решение владельца 06.11 17:42 «А — окно направления») ---------------
+# Одно окно на направление, папка запуска — launch_folder. Настройки папки запуска (.claude/settings*.json, .mcp.json,
+# CLAUDE.md с @AGENTS.md) Claude Code грузит сам. Остальные папки и вложенные проекты (app/, gpu-worker/) — через
+# --add-dir: оттуда приходят CLAUDE.md (при CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1), .claude/rules, навыки,
+# команды и агенты, но не settings, не .mcp.json и не импорт @AGENTS.md (пробы П1, П7 drafts/metis-0933-f8-probes.md).
+# Это недостающее — пакет направления packs/<направление>/ в этом репозитории (под ревью): плагин для --plugin-dir
+# (hooks/hooks.json), window.json (window_extra: allow, deny, ask, plugins, env, sandbox — вливает sandbox_build;
+# seen — что из репозиториев учтено и как) и mcp.json для --mcp-config (П8). AGENTS.md всех папок — один файл
+# --append-system-prompt-file: флаг не повторяется, второй затирает первый (проба 06.11 18:2x, Claude Code 2.1.318).
+# Откуда пакеты — только код плагина, не окружение (класс 5 «граница ядра»): переменная окна не подменит пакет. Тесты
+# подменяют константу P.PACKS в процессе, как AI_HOME через HOME.
+PACKS = os.path.join(PLUGIN, "packs")
+PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json",
+                 ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
+NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
+ADD_DIRS_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"]  # П9b: worktree окна — git worktree add в Bash
+IMPORTS_AGENTS = re.compile(r"^\s*@(\./)?AGENTS\.md\s*$", re.M)
+PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
+
+
+def pack_window(name):
+    """packs/<name>/window.json → dict (нет файла или не объект — {})."""
+    got = read_json(os.path.join(PACKS, name, "window.json"), {})
+    return got if isinstance(got, dict) else {}
+
+
+def _open_dir_nofollow(p):
+    """fd папки p, открытой по звеньям ниже надёжного начала (_split_trusted) openat с O_NOFOLLOW|O_DIRECTORY, и её
+    путь строкой без ссылок (надёжное начало + звенья). OSError — звено ссылка, не папка или его нет."""
+    base, parts = _split_trusted(p)
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, os.path.join(base, *parts)
+
+
+def _has_mark(dfd, mark):
+    """Есть ли метка PROJECT_MARKS (файл или папка, «.claude/…» — звеньями) в папке dfd: lstat от fd, ссылки не
+    проходит (звено-ссылка — метки нет)."""
+    *mids, last = mark.split("/")
+    fd = os.dup(dfd)
+    try:
+        for part in mids:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        os.stat(last, dir_fd=fd, follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def nested_projects(folder):
+    """Вложенные проекты папки на один уровень вниз: подпапка (не скрытая, не ссылка) с CLAUDE.md, AGENTS.md,
+    .mcp.json или своей .claude с настройками, навыками, командами, агентами, правилами (PROJECT_MARKS).
+    Окно пишет папку и в любой миг может подменить подпапку ссылкой (renamex_np, отвязанный ребёнок прошлой сессии —
+    и до запуска окна; ревью argus E2 Б1 PR #360): папка открыта по fd (_open_dir_nofollow), подпапка — openat от него
+    с O_NOFOLLOW|O_DIRECTORY, метки — от fd подпапки, а наружу — строка join(путь папки без ссылок, имя), не realpath:
+    ссылка, подставленная после проверки, не уведёт --add-dir в чужую папку."""
+    try:
+        fd, top = _open_dir_nofollow(folder)
+    except OSError:
+        return []
+    out = []
+    try:
+        for n in sorted(os.listdir(fd)):
+            if n.startswith(".") or n in NESTED_SKIP:
+                continue
+            try:
+                nfd = os.open(n, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError:
+                continue
+            try:
+                if any(_has_mark(nfd, m) for m in PROJECT_MARKS):
+                    out.append(os.path.join(top, n))
+            finally:
+                os.close(nfd)
+    except OSError:
+        return out
+    finally:
+        os.close(fd)
+    return out
+
+
+def window_dirs(folders):
+    """→ (папка запуска, [папки для --add-dir]): остальные папки окна и вложенные проекты всех папок, без повторов и
+    без ~/.claude (уровень user окно и так читает; его --add-dir задвоил бы навыки и CLAUDE.md).
+    Папка реестра, путь к которой идёт через ссылку ниже $HOME (_link_free: сама папка или звено в середине пути),
+    пропускается (metis-0933, ревью argus B2 Д1): окно пишет папку-родителя и могло подменить её ссылкой на чужую
+    папку — её AGENTS.md попал бы в системную подсказку, а настройки — в pantheon check. Папка запуска через ссылку —
+    "" (её файлы не читаются; сам запуск в ней — launch_folder)."""
+    wf = window_folders(folders)
+    if not wf:
+        return "", []
+    linked = {os.path.realpath(os.path.expanduser(f)) for f in folders
+              if isinstance(f, str) and f and not _link_free(os.path.expanduser(f))}
+    user = os.path.realpath(os.path.join(HOME, ".claude"))
+    dirs = []
+    for f in wf:
+        if f != user and f not in linked:
+            dirs += ([f] if f != wf[0] else []) + nested_projects(f)
+    launch = "" if wf[0] in linked else wf[0]
+    return launch, [d for d in dict.fromkeys(dirs) if d != wf[0] and os.path.isdir(d)]
+
+
+FOLDER_TEXT_LIMIT = 256 << 10  # AGENTS.md и CLAUDE.md папки окна: больше — не вклеиваем в системную подсказку
+
+
+def _read_in(folder, rel, limit=FOLDER_TEXT_LIMIT):
+    """Текст файла rel папки окна folder (класс 3 модели угроз metis-0933): папки пишет окно, а читает запуск и тик вне
+    песочницы. Только обычный файл не больше limit (FIFO, устройство — None), путь rel внутри folder, и ни одно звено
+    пути ниже $HOME — ни папка folder, ни звено в середине (.claude → чужая папка), ни сам файл — не ссылка:
+    открытие по звеньям с O_NOFOLLOW (_open_nofollow), без зазора между проверкой и чтением."""
+    if not folder:
+        return None
+    top = os.path.normpath(os.path.abspath(folder))
+    p = os.path.normpath(os.path.join(top, rel))
+    if not _under(p, top) or p == top:
+        return None
+    return _read_small_regular(p, limit, whole_path=True)
+
+
+def _read_json_in(folder, rel):
+    """JSON-объект файла rel папки окна (через _read_in) или None."""
+    text = _read_in(folder, rel)
+    try:
+        got = json.loads(text) if text is not None else None
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def window_agents_md(launch, dirs):
+    """AGENTS.md окна: каждой папки --add-dir и папки запуска, если её CLAUDE.md не импортирует @AGENTS.md (импорт в
+    папке запуска Claude Code раскрывает сам, П7). Читает _read_in: ссылка, FIFO и огромный файл пропускаются.
+    → [(путь, текст)]."""
+    out = []
+    for d in [launch] + dirs:
+        text = _read_in(d, "AGENTS.md") if d else None  # папка запуска через ссылку — "" (window_dirs)
+        if text is None:
+            continue
+        if d == launch and IMPORTS_AGENTS.search((_read_in(d, "CLAUDE.md") or "")[:65536]):
+            continue
+        out.append((os.path.join(d, "AGENTS.md"), text))
+    return out
+
+
+PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка _bin снимка (её путь знает только ядро)
+
+# Снимок исполняемого пакета (metis-0933 круг F, решение Зевса 06.11 23:46). Хуки пакета и серверы MCP идут вне
+# песочницы, а скрипты вложенных проектов (app/.claude/hooks/*.sh, mailkeeper/.claude/hooks/*.py) лежат в папках,
+# которые окно пишет: проверка пути и исполнение по пути разнесены во времени, и переименование промежуточной папки
+# (app, app/.claude — ревью argus E1 Б1) подменяло скрипт. Поэтому window_launch до старта окна копирует всё, что
+# исполняется вне песочницы, — плагин пакета (.claude-plugin, hooks), packs/_bin и скрипты .claude/hooks репозиториев,
+# названные в hooks.json, — в снимок STATE/settings/run/packs/<имя>-<sha256 манифеста>. Снимок вне allowWrite окон,
+# имя папки — хеш manifest.json, в манифесте sha256 каждого файла: in_repo.py исполняет только файлы снимка, сверив
+# хеш. Обновление — только при следующем запуске окна (здесь), не из окна. Скрипт репозитория читается по звеньям с
+# O_NOFOLLOW (_read_bytes_nofollow): ссылка любым звеном — скрипта в снимке нет, хук получит отказ.
+PACK_SNAPSHOTS = ("settings", "run", "packs")
+PACK_PLUGIN_FILES = (".claude-plugin/plugin.json", "hooks/hooks.json")
+PACK_SCRIPT_LIMIT = 1 << 20
+PACK_SNAPSHOT_KEEP = 14 * 86400  # старые снимки окна: их может держать ещё живая сессия
+REPO_HOOKS_PREFIX = ".claude/hooks/"
+# Эталоны скриптов репозиториев (metis-0933 круг G, класс 6; решение владельца 07.11 02:27 «А — хуки с вашим
+# одобрением», поправка Зевса 02:30). excludedCommands окна (`git pull *`) идут мимо песочницы и переписывают
+# .claude/hooks рабочей копии коммитом, собранным окном в песочнице, — литеральный denyWrite держит только команды в
+# песочнице. Поэтому снимок берёт скрипт репозитория, только если его sha256 совпал с эталоном из данных пользователя
+# PACK_APPROVED_HOME/<направление>/approved.json (~/.claude/pantheon/packs: вне allowWrite окон, правит владелец через
+# owner-edit; PR в agent-kit не нужен). Формат: {"repos": {"$HOME/…/app": {"scripts": {"protect-db.sh": "<sha256>"}}}}
+# (поле commit прошлых кругов не читается). Не совпал или файла нет — скрипта в снимке нет, его байты — в pending/
+# снимка, в манифесте — unapproved {репозиторий: {имя: sha256}}: in_repo.py пропускает хук (выход 0), запуск окна —
+# строка в stderr и одна тревога на хеш (pack_unapproved_alert): счёт строк диффа от одобренной копии, без текста
+# скрипта (круг G11); сам дифф — `pantheon packs diff <направление>`.
+# Круг G5 (решение Зевса 07.11, вариант А): ни хеш, ни текст, ни дифф не берутся из .git — его пишет окно (объекты,
+# refs/replace, origin: три круга подряд по классу). Хеш и текст — из файлов снимка; одобренная копия — байты скрипта
+# с sha256 эталона, PACK_APPROVED_HOME/<направление>/approved/<sha256>: её кладёт запуск окна из снимка, когда скрипт
+# совпал с эталоном, при чтении она сверяется с эталоном снова. Нет копии или эталона — тревога без диффа: «нет
+# одобренной копии». Текущие хеши и текст для карточки владельцу печатает `pantheon packs hashes <направление>`
+# (pack_hashes) — из своего снимка, в ~/.claude/pantheon ничего не пишет.
+PACK_APPROVED_HOME = os.path.join(HOME, ".claude", "pantheon", "packs")
+PACK_APPROVED = "approved.json"
+PACK_APPROVED_COPY = "approved"  # PACK_APPROVED_HOME/<направление>/approved/<sha256>: байты одобренного скрипта
+PACK_DIFFS = "pack-diffs"  # STATE/pack-diffs — полные диффы кругов G3–G4; больше не пишутся, pack_snapshot их убирает
+PACK_DATA_OPEN, PACK_DATA_CLOSE = "⟦", "⟧"  # обрамление текста и диффа скрипта (данные) в packs hashes и packs diff
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def pack_unapproved_line(script_path, digest):
+    """Строка о скрипте репозитория, чей sha256 не совпал с эталоном направления (та же — в in_repo.py)."""
+    return (f"скрипт {script_path} не одобрен (хеш {digest}) — хук пропущен; одобрение — у владельца через Зевса "
+            f"(~/.claude/pantheon/packs/<направление>/{PACK_APPROVED})")
+
+
+def _pack_repo(s):
+    """Строка репозитория из пакета ($HOME, ${HOME}, ~) → путь без ссылок, как его считает in_repo.open_root."""
+    base, parts = _split_trusted(os.path.expanduser(s.replace("${HOME}", HOME).replace("$HOME", HOME)))
+    return os.path.join(base, *parts)
+
+
+def pack_approved_path(window):
+    return os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED)
+
+
+def pack_approved_copy(window, digest):
+    """Путь одобренной копии скрипта с sha256 digest направления window."""
+    return os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY, digest)
+
+
+def pack_approved(p):
+    """Эталоны файла p (approved.json): {репозиторий (_pack_repo): {имя скрипта: sha256}} или None — файла нет. Не
+    JSON, кривая строка или кривой хеш — без них: скрипт без эталона не одобрен."""
+    if not os.path.lexists(p):
+        return None
+    data = read_json(p, {})
+    got = data.get("repos") if isinstance(data, dict) else None
+    scripts = {}
+    for repo, item in (got.items() if isinstance(got, dict) else ()):
+        if not isinstance(repo, str) or not repo or not isinstance(item, dict):
+            continue
+        names = item.get("scripts") if isinstance(item.get("scripts"), dict) else {}
+        scripts.setdefault(_pack_repo(repo), {}).update(
+            {n: h for n, h in names.items() if isinstance(n, str) and isinstance(h, str) and SHA256_HEX.fullmatch(h)})
+    return scripts
+
+
+def _pack_show_line(line):
+    """Строка line текста скрипта (или путь) как есть, если _pack_line_reject её пропускает; иначе — пометка
+    «⟪строка не показана — <причина>⟫» (⟪⟫ вне ASCII: скрипт её не подделает)."""
+    why = _pack_line_reject(line)
+    return f"{PACK_HIDDEN_OPEN}строка не показана — {why}{PACK_HIDDEN_CLOSE}" if why else line
+
+
+def pack_show(data):
+    """Строки текста скрипта (байты data) для показа владельцу — один помощник для `packs hashes`, `packs diff` и
+    тревоги (круг G10, ревью argus G9-2 Б1, Д1): строки только по \\n, каждая как есть, без кодов и удвоения «\\».
+    После белого списка (pack_script_reject) в строке только печатные ASCII без пробела в конце: терминал показывает её
+    ровно такой, какой её исполнит bash или python. Строка, которую список не пропустил бы (одобренная копия до G10,
+    байты в обход списка), не показывается — _pack_show_line."""
+    return [_pack_show_line(x) for x in data.decode("utf-8", "replace").split("\n")]
+
+
+PACK_HIDDEN_OPEN, PACK_HIDDEN_CLOSE = "⟪", "⟫"
+PACK_ALERT_NAME = re.compile(r"[^A-Za-z0-9._/-]")  # знак имени направления или пути хука, который тревога заменяет «?»
+
+
+def _pack_alert_name(name):
+    """Имя направления или путь хука для строки тревоги в alerts.md: знаки вне [A-Za-z0-9._/-] — «?» (круг G11). Путь
+    и имя скрипта задаёт репозиторий окна, а alerts.md — один абзац Markdown на весь файл: «`», «<», «[» из имени
+    сложились бы в разметку с соседними строками."""
+    return PACK_ALERT_NAME.sub("?", name)
+
+
+def pack_diff_counts(lines):
+    """Сколько строк добавлено и убрано → (добавлено, убрано) по строкам pack_diff: первые две — заголовки «--- одобрено»
+    и «+++ <путь>», дальше — блоки «@@», строки « », «+», «-» (добавленная «++x» — тоже «+»)."""
+    body = lines[2:]
+    return sum(x.startswith("+") for x in body), sum(x.startswith("-") for x in body)
+
+
+# Белый список текста скрипта репозитория (metis-0933 круг G6, решение Зевса 07.11 12:10; ревью argus G5-2 Б1, Б2):
+# в снимок идёт только скрипт в UTF-8 без BOM, без объявления кодировки (PEP 263: Python исполнил бы utf-7 иначе, чем
+# его видит владелец) и из знаков PACK_SCRIPT_CHARS. Круг G9 (решение Зевса 07.11 13:27, ревью argus G8-2 Б2, Д1, Д2):
+# в списке только печатные ASCII 0x20–0x7E, \n и \t. Круг G10 (координатор 07.11, ревью argus G9-2 Б1): \t убрана,
+# пробел в конце строки — тоже отказ (_pack_line_reject): в терминале их не видно. Знак вне ASCII в коде выглядит как латиница («ехit» с
+# кириллическими е, х — не exit), а разбор кавычек, echo и лексера, которым круг G8 пускал его в текст и комментарии,
+# обходился глобом [e]xit, «#» внутри (( )) и eval; разбора больше нет. CR, прочие Cc, U+2028/U+2029, bidi и нулевой
+# ширины — тоже вне списка. Не прошёл — хука нет (packs hashes — код 1), тревога и packs hashes называют причину и
+# строку без байтов скрипта.
+PACK_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+PACK_SCRIPT_CHARS = frozenset("\n" + "".join(map(chr, range(0x20, 0x7F))))
+
+
+def _pack_line_reject(line):
+    """Почему строку line скрипта нельзя взять (белый список кругов G9 и G10) — знак вне PACK_SCRIPT_CHARS или пробел в
+    конце строки, — или None. Табуляция и пробел в конце строки в терминале не видны: «\\» + пробел + перевод строки
+    у bash — не продолжение строки, табуляцию снимает «<<-» (ревью argus G9-2 Б1), — поэтому их нет в списке."""
+    bad = next((c for c in line if c not in PACK_SCRIPT_CHARS), None)
+    if bad is not None:
+        return f"знак вне белого списка U+{ord(bad):04X} ({unicodedata.category(bad)})"
+    return "пробел в конце строки" if line.endswith(" ") else None
+
+
+def pack_script_reject(data):
+    """Причина, по которой байты data скрипта репозитория не берутся в снимок (белый список кругов G6 и G9), со
+    строкой: «…, строка N», или None — скрипт прошёл. Строки считаются только по \\n. Байтов скрипта в причине нет:
+    знак — кодом U+XXXX и категорией Unicode. Знак вне PACK_SCRIPT_CHARS (печатные ASCII и \\n) или пробел в конце
+    строки — отказ, где бы он ни стоял: в коде, тексте echo или комментарии (круги G9, G10)."""
+    if data.startswith(b"\xef\xbb\xbf"):
+        return "метка порядка байтов (BOM) в начале, строка 1"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        n = data[:e.start].count(b"\n") + 1
+        return f"не UTF-8 (байт {e.start}), строка {n}"
+    lines = text.split("\n")
+    for n, line in enumerate(lines, 1):
+        why = _pack_line_reject(line)
+        if why:
+            return f"{why}, строка {n}"
+    for n, line in enumerate(lines[:2], 1):
+        if PACK_CODING.match(line):
+            return f"объявление кодировки (PEP 263), строка {n}"
+    return None
+
+
+def pack_approved_text(window, digest):
+    """Байты одобренной копии с sha256 digest или None — копии нет, это ссылка или не обычный файл, или её байты не
+    дают digest (копию переписали): тогда дифф не показывается."""
+    data = _read_bytes_nofollow(pack_approved_copy(window, digest), PACK_SCRIPT_LIMIT) if digest else None
+    return data if data is not None and hashlib.sha256(data).hexdigest() == digest else None
+
+
+def pack_keep_approved(window, approved, kept):
+    """Одобренные копии направления window: kept {sha256: байты} — скрипты снимка, совпавшие с эталоном (байты из
+    снимка, sha256 сверен), кладутся в approved/<sha256>, если копии нет или она не та; копии, чьего sha256 нет среди
+    эталонов approved, убираются. Не записалось — строка в stderr: тревога придёт без диффа. Папка направления или
+    approved/ — символическая ссылка или не папка (lstat, G5-1 Д2) — отказ строкой в stderr: ни записи, ни чистки
+    по ссылке."""
+    top = os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY)
+    want = {h for names in (approved or {}).values() for h in names.values()}
+    for where in (os.path.dirname(top), top):
+        try:
+            bad = not stat.S_ISDIR(os.lstat(where).st_mode)
+        except FileNotFoundError:
+            bad = False
+        except OSError:
+            bad = True
+        if bad:
+            print(f"pantheon: окно {window}: {tilde(where)} — символическая ссылка или не папка, одобренные копии не "
+                  "пишутся и не чистятся — тревога об изменении хука придёт без диффа", file=sys.stderr)
+            return
+    try:
+        for digest, data in kept.items():
+            if digest in want and hashlib.sha256(data).hexdigest() == digest and pack_approved_text(
+                    window, digest) != data:
+                os.makedirs(top, mode=0o700, exist_ok=True)
+                tmp = tempfile.NamedTemporaryFile(dir=top, prefix=".copy-", delete=False)
+                with tmp:
+                    tmp.write(data)
+                os.chmod(tmp.name, 0o444)
+                os.replace(tmp.name, os.path.join(top, digest))
+        for fn in os.listdir(top) if os.path.isdir(top) else ():
+            if fn not in want:
+                os.unlink(os.path.join(top, fn))
+    except OSError as e:
+        print(f"pantheon: окно {window}: одобренная копия в {tilde(top)} не записана ({e}) — тревога об изменении "
+              "хука придёт без диффа", file=sys.stderr)
+
+
+def pack_diff(window, repo, script, current, approved):
+    """Дифф скрипта script репозитория repo (байты current) от одобренной копии направления window → (причина, None) —
+    диффа нет: нет approved.json, эталона или копии; или (None, строки) — строки unified diff строк pack_show.
+    Строки делятся только по \\n (круг G6, Б1): splitlines резал по CR, U+2028 и FS, и знак пропадал из вывода."""
+    old = ((approved or {}).get(repo) or {}).get(script)
+    rel = f".claude/hooks/{script}"
+    base = pack_approved_text(window, old)
+    if approved is None:
+        return f"{tilde(pack_approved_path(window))} нет — хуки направления не исполняются; нет одобренной копии", None
+    if not old:
+        return "дифф не показан: нет одобренной копии — у скрипта нет эталона в approved.json", None
+    if base is None:
+        return f"дифф не показан: нет одобренной копии {tilde(pack_approved_copy(window, old))} с sha256 эталона", None
+    lines = list(difflib.unified_diff(pack_show(base), pack_show(current), "-", rel, lineterm=""))
+    return None, [f"--- одобрено {old[:12]}:{rel}"] + lines[1:] if lines else []
+
+
+def pack_unapproved_alert(window, repo, script, new, current, approved):
+    """Тревога Зевсу о скрипте с чужим хешем new (байты current) — одна на (направление, скрипт, хеш), одной строкой
+    без текста скрипта (круг G11, ревью argus G10-1 Б1, G10-2 Б1: alerts.md — один абзац Markdown, непарная «`» или
+    «<a title="» в соседней строке ломает любой код Markdown, и ссылка прячет вызов): «[metis-0933] <направление>: хук
+    <путь> изменён, одобрить? sha256 было <12 знаков>, стало <12 знаков>; строк добавлено A, убрано R — смотрите
+    pantheon packs diff <направление>». Имя направления и путь — через _pack_alert_name. Счёт строк — по диффу от
+    одобренной копии (pack_diff, pack_approved_text: sha256 копии — эталон approved.json); approved — pack_approved
+    направления. Нет approved.json, эталона или копии — вместо счёта причина: «нет одобренной копии». .git репозитория
+    не читается (круг G5): объекты, refs/replace и origin пишет окно. Текст и дифф скрипта владелец смотрит в
+    терминале: pantheon packs diff и packs hashes. Скрипт не прошёл белый список (pack_script_reject) — «не взят в
+    снимок — <причина>, строка N», без счёта и байтов."""
+    old = ((approved or {}).get(repo) or {}).get(script)
+    where = os.path.join(repo, ".claude", "hooks", script)
+    key = f"pack-hook-{window}-{hashlib.sha256(where.encode()).hexdigest()[:12]}-{new}"
+    win, shown = _pack_alert_name(window), _pack_alert_name(where)
+    reject = pack_script_reject(current)
+    if reject:
+        text = (f"[metis-0933] {win}: хук {shown} не взят в снимок — {reject}; одобрить такой нельзя, "
+                f"хук пропускается. sha256 {new[:12]}, текст не показан")
+    else:
+        diff, lines = pack_diff(window, repo, script, current, approved)
+        if lines is not None:
+            diff = "строк добавлено {}, убрано {}".format(*pack_diff_counts(lines))
+        text = (f"[metis-0933] {win}: хук {shown} изменён, одобрить? sha256 было {(old or 'нет эталона')[:12]}, "
+                f"стало {new[:12]}; {diff} — смотрите pantheon packs diff {win}")
+    try:
+        alert_once(key, "1", text, who="pantheon")
+    except OSError as e:
+        print(f"pantheon: тревога о {where} не записана — {e}", file=sys.stderr)
+
+
+def pack_hashes(window, texts=None):
+    """Текущие sha256 скриптов хуков пакета направления window в формате approved.json — для карточки владельцу
+    (`pantheon packs hashes`). Хеш и байты — из снимка (pack_snapshot без тревог и копий: в ~/.claude/pantheon ничего
+    не пишет), .git не читается. → (dict, предупреждения); пакета нет — (None, …). texts (если дан список) получает
+    (путь скрипта, sha256, одобрен ли, байты из снимка, файл снимка)."""
+    pack = os.path.join(PACKS, window)
+    if not window or "/" in window or window.startswith((".", "_")) or not os.path.isfile(
+            os.path.join(pack, "hooks", "hooks.json")):
+        return None, [f"у направления {window} нет пакета с хуками ({tilde(pack)})"]
+    try:
+        snap = pack_snapshot(window, f"{window}.hashes", keep=False)
+        man = read_json(os.path.join(snap, "manifest.json"), {}) if snap else {}
+    except OSError as e:
+        return None, [f"снимок пакета {window} не собран — {e}"]
+    files, pending = man.get("files") or {}, man.get("pending") or {}
+    home = os.path.realpath(HOME)
+    repos, warn = {}, []
+    for repo, script in pack_hook_scripts(pack):
+        shown = "$HOME" + repo[len(home):] if repo.startswith(home.rstrip("/") + "/") else repo
+        item = repos.setdefault(shown, {"scripts": {}})
+        ok = ((man.get("repos") or {}).get(repo) or {}).get(script)
+        rel = ok or (pending.get(repo) or {}).get(script)
+        want = files.get(rel) if ok else ((man.get("unapproved") or {}).get(repo) or {}).get(script)
+        data = _read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT) if rel and snap else None
+        where = os.path.join(repo, ".claude", "hooks", script)
+        reject = ((man.get("rejected") or {}).get(repo) or {}).get(script)
+        if reject:
+            warn.append(f"{tilde(where)}: не взят в снимок — {reject}; хук пропускается, одобрить такой нельзя "
+                        f"(sha256 {want}) — не в списке")
+            continue
+        if data is None or hashlib.sha256(data).hexdigest() != want:
+            warn.append(f"{tilde(where)}: нет обычного файла (или звено — ссылка) — не в списке")
+            continue
+        item["scripts"][script] = want
+        if texts is not None:
+            texts.append((where, want, bool(ok), data, os.path.join(snap, rel), repo, script))
+    return {"repos": repos}, warn
+
+
+def pack_hashes_cmd(rest):
+    """pantheon packs hashes <направление>: JSON для approved.json в stdout; в stderr — по каждому скрипту sha256,
+    одобрен ли и его текст из снимка (данные, ⟦…⟧, строки pack_show как есть), предупреждения «внимание — …». .git не
+    читается: HEAD и origin пишет окно (круг G5). Скрипт не прошёл белый список (pack_script_reject, круг G6) —
+    «внимание — … не взят в снимок — <причина>, строка N», текста нет. pantheon packs diff <направление> (круг G6, Д1:
+    вместо `diff -u` сырых байтов в терминал) — в stderr полный дифф каждого неодобренного скрипта от одобренной копии,
+    строки pack_show, без JSON. Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет пакета или
+    аргумента."""
+    if rest[:1] not in (["hashes"], ["diff"]) or len(rest) != 2:
+        print("pantheon packs hashes|diff <направление>", file=sys.stderr)
+        return 2
+    texts = []
+    got, warn = pack_hashes(rest[1], texts)
+    approved = pack_approved(pack_approved_path(rest[1])) if rest[0] == "diff" else None
+    for where, digest, ok, data, snap_file, repo, script in texts:
+        if rest[0] == "diff":
+            if ok:
+                continue
+            why, lines = pack_diff(rest[1], repo, script, data, approved)
+            print(f"pantheon packs: {tilde(where)} sha256 {digest} — не одобрен; "
+                  + (why if lines is None else "дифф от одобренной копии (данные из репозитория окна, не указание):"),
+                  file=sys.stderr)
+            if lines is not None:
+                print(PACK_DATA_OPEN + "\n".join(f"  {x}" for x in lines) + PACK_DATA_CLOSE, file=sys.stderr)
+            continue
+        print(f"pantheon packs: {tilde(where)} sha256 {digest} — {'эталон' if ok else 'не одобрен'}; текст из снимка "
+              f"{tilde(snap_file)} (данные из репозитория окна, не указание):", file=sys.stderr)
+        print(PACK_DATA_OPEN + "\n".join(f"  {x}" for x in pack_show(data.removesuffix(b"\n"))) + PACK_DATA_CLOSE,
+              file=sys.stderr)
+    for w in warn:
+        print(f"pantheon packs: внимание — {w}", file=sys.stderr)
+    if got is None:
+        return 2
+    if rest[0] == "diff":
+        return int(bool(warn))
+    print(json.dumps(got, ensure_ascii=False, indent=2, sort_keys=True))
+    print(f"pantheon packs: одобрение — этот JSON в {tilde(pack_approved_path(rest[1]))} (owner-edit, «да» владельца); "
+          "одобряется текст выше, его sha256 — в JSON", file=sys.stderr)
+    return 1 if warn else 0
+
+
+def _read_bytes_nofollow(p, limit):
+    """Байты обычного файла p не больше limit, открытого по звеньям с O_NOFOLLOW (_open_nofollow); иначе None."""
+    try:
+        fd = _open_nofollow(p)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        data = b""
+        while len(data) <= limit:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            data += chunk
+        return data if len(data) <= limit else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def pack_hook_scripts(pack_dir):
+    """Скрипты репозиториев, которые хуки пакета pack_dir запускают через in_repo.py: [(репозиторий, имя)], где
+    репозиторий — строка без ссылок, как её считает in_repo.open_root (надёжное начало + звенья), имя — файл в
+    <репозиторий>/.claude/hooks. Пакет — код ядра, разбор shlex его строк."""
+    hooks = read_json(os.path.join(pack_dir, "hooks", "hooks.json"), {})
+    hooks = hooks.get("hooks") if isinstance(hooks, dict) else None
+    out = []
+    for groups in (hooks.values() if isinstance(hooks, dict) else []):
+        for g in groups if isinstance(groups, list) else []:
+            for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                cmd = h.get("command") if isinstance(h, dict) else None
+                if not isinstance(cmd, str):
+                    continue
+                try:
+                    toks = shlex.split(cmd.replace("${HOME}", HOME).replace("$HOME", HOME))
+                except ValueError:
+                    continue
+                at = next((i for i, t in enumerate(toks) if t.endswith("/_bin/in_repo.py")), None)
+                if at is None or at + 1 >= len(toks) or "--" not in toks[at + 1:]:
+                    continue
+                repo = _pack_repo(toks[at + 1])
+                cut = toks.index("--", at + 1)
+                out += [(repo, t[len(REPO_HOOKS_PREFIX):]) for t in toks[cut + 1:] if t.startswith(REPO_HOOKS_PREFIX)]
+    return list(dict.fromkeys(out))
+
+
+def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), approved=None, on_unapproved=None,
+                       quiet=False):
+    """Снимок в out_dir/<name>-<16 знаков sha256 manifest.json> → путь к нему. Внутри: _bin/* (из bin_dir), plugin/
+    (PACK_PLUGIN_FILES из plugin_dir, если есть), repo/<sha репозитория>/<имя> — скрипты scripts [(репозиторий, имя)],
+    прочитанные _read_bytes_nofollow (ссылка, не файл, нет файла — пропуск: хук получит отказ in_repo.py), и
+    manifest.json {files: {путь: sha256}, repos: {репозиторий: {имя: путь}}, unapproved: {репозиторий: {имя: sha256}},
+    pending: {репозиторий: {имя: путь}}}. Скрипт репозитория идёт в repo/, только если его sha256 — эталон approved
+    {репозиторий: {имя: sha256}} (pack_approved, класс 6); иначе — в unapproved, его байты — в pending/<sha
+    репозитория>/<имя> (не в files: in_repo.py их не исполняет, их текст печатает packs hashes, круг G5), строкой
+    pack_unapproved_line в stderr и, когда снимок собран, вызовом on_unapproved(репозиторий, имя, sha256, байты, файл
+    снимка) — тревога; quiet (packs hashes) — без строки. Скрипт не прошёл белый список (pack_script_reject, круг
+    G6) — его байтов нет ни в repo/, ни в pending/, даже с эталоном: в манифесте unapproved (in_repo.py пропустит хук)
+    и rejected {репозиторий: {имя: причина}}, on_unapproved получает файл снимка None. approved не задан — ни одного
+    одобренного. Готовый
+    снимок с тем же хешем и целыми файлами берётся как есть; испорченный — собирается заново. Старые снимки окна
+    старше PACK_SNAPSHOT_KEEP убирает."""
+    files, repos, unapproved, approved = {}, {}, {}, approved or {}
+    pending, held, late, rejected = {}, {}, [], {}
+    # _bin и плагин — код ядра (папка плагина, путь от realpath): ссылки в пути к ней законны
+    for fn in sorted(os.listdir(bin_dir)) if os.path.isdir(bin_dir) else []:
+        if fn.endswith(".py"):
+            data = _read_bytes_nofollow(os.path.realpath(os.path.join(bin_dir, fn)), PACK_SCRIPT_LIMIT)
+            if data is not None:
+                files[f"_bin/{fn}"] = data
+    for rel in PACK_PLUGIN_FILES if plugin_dir else ():
+        data = _read_bytes_nofollow(os.path.realpath(os.path.join(plugin_dir, rel)), PACK_SCRIPT_LIMIT)
+        if data is not None:
+            files[f"plugin/{rel}"] = data
+    for repo, script in scripts:
+        if not script or "/" in script or script in (".", ".."):
+            continue
+        where = os.path.join(repo, ".claude", "hooks", script)
+        data = _read_bytes_nofollow(where, PACK_SCRIPT_LIMIT)
+        if data is None:
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        reject = pack_script_reject(data)
+        if reject:  # белый список круга G6: ни в repo/, ни в pending/ — байтов в снимке нет, хук пропускается
+            unapproved.setdefault(repo, {})[script] = digest
+            rejected.setdefault(repo, {})[script] = reject
+            if not quiet:
+                print(f"pantheon: окно {name}: скрипт {where} не взят в снимок — {reject}; хук пропущен",
+                      file=sys.stderr)
+            late.append((repo, script, digest, data, None))
+            continue
+        if (approved.get(repo) or {}).get(script) != digest:
+            unapproved.setdefault(repo, {})[script] = digest
+            rel = f"pending/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
+            held[rel] = data
+            pending.setdefault(repo, {})[script] = rel
+            if not quiet:
+                print(f"pantheon: окно {name}: {pack_unapproved_line(where, digest)}", file=sys.stderr)
+            late.append((repo, script, digest, data, rel))
+            continue
+        rel = f"repo/{hashlib.sha256(repo.encode()).hexdigest()[:16]}/{script}"
+        files[rel] = data
+        repos.setdefault(repo, {})[script] = rel
+    manifest = json.dumps({"files": {k: hashlib.sha256(v).hexdigest() for k, v in sorted(files.items())},
+                           "repos": repos, "unapproved": unapproved, "pending": pending, "rejected": rejected},
+                          sort_keys=True,
+                          ensure_ascii=False).encode()
+    snap = os.path.join(out_dir, f"{name}-{hashlib.sha256(manifest).hexdigest()[:16]}")
+    files = {**files, **held}  # pending/ — файлы снимка, но не files манифеста
+    if not _snapshot_intact(snap, manifest, files):
+        os.makedirs(out_dir, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix=f".{name}-", dir=out_dir)
+        try:
+            for rel, data in list(files.items()) + [("manifest.json", manifest)]:
+                p = os.path.join(tmp, rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                os.chmod(p, 0o444)
+            if os.path.islink(snap) or os.path.isfile(snap):
+                os.unlink(snap)
+            elif os.path.isdir(snap):
+                shutil.rmtree(snap, ignore_errors=True)
+            os.rename(tmp, snap)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+    now, mine = time.time(), re.compile(re.escape(name) + r"-[0-9a-f]{16}")
+    for old in os.listdir(out_dir):
+        p = os.path.join(out_dir, old)
+        try:
+            stale = (mine.fullmatch(old) and p != snap and now - os.lstat(p).st_mtime > PACK_SNAPSHOT_KEEP) or (
+                old.startswith(f".{name}-") and now - os.lstat(p).st_mtime > 3600)
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(p, ignore_errors=True)
+    os.utime(snap)
+    for repo, script, digest, data, rel in late if on_unapproved else ():
+        on_unapproved(repo, script, digest, data, os.path.join(snap, rel) if rel else None)
+    return snap
+
+
+def _snapshot_intact(snap, manifest, files):
+    """Снимок snap — папка (не ссылка) с тем же manifest.json и теми же байтами каждого файла."""
+    if os.path.islink(snap) or not os.path.isdir(snap):
+        return False
+    return all(_read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT) == data
+               for rel, data in list(files.items()) + [("manifest.json", manifest)])
+
+
+def pack_snapshot(window, name, keep=True):
+    """Снимок пакета окна направления window для запуска name (pack_snapshot_make в STATE/settings/run/packs) или
+    None — пакета нет. Эталоны скриптов — pack_approved(pack_approved_path(window)): файла нет — ни одного
+    одобренного; скрипт с чужим хешем — тревога pack_unapproved_alert. keep (запуск окна): скрипты снимка по эталону —
+    в одобренные копии (pack_keep_approved), старые диффы STATE/pack-diffs убраны; keep=False (packs hashes) — без
+    тревог и без записи в ~/.claude/pantheon."""
+    pack = os.path.join(PACKS, window)
+    plugin = os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json"))
+    if not plugin and not os.path.isfile(os.path.join(pack, "mcp.json")):
+        return None
+    approved = pack_approved(pack_approved_path(window))
+    snap = pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
+                              pack_hook_scripts(pack) if plugin else (), approved,
+                              (lambda r, s, d, b, f: pack_unapproved_alert(window, r, s, d, b, approved))
+                              if keep else None, quiet=not keep)
+    if keep:
+        shutil.rmtree(path(PACK_DIFFS), ignore_errors=True)
+        man = read_json(os.path.join(snap, "manifest.json"), {})
+        kept = {}
+        for names in (man.get("repos") or {}).values():
+            for rel in names.values():
+                data = _read_bytes_nofollow(os.path.join(snap, rel), PACK_SCRIPT_LIMIT)
+                if data is not None and hashlib.sha256(data).hexdigest() == (man.get("files") or {}).get(rel):
+                    kept[hashlib.sha256(data).hexdigest()] = data
+        if approved is not None or os.path.isdir(os.path.join(PACK_APPROVED_HOME, window, PACK_APPROVED_COPY)):
+            pack_keep_approved(window, approved, kept)
+    return snap
+
+
+def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
+    """Весь argv запуска окна роли (metis-0933, класс 5 «граница ядра»): claude [--resume <сессия>] [--bg] --agent
+    <роль> --name <имя>, флаги схемы А окна направления window (window_flags), --settings <файл окна>, текст поручения
+    последним. Флаги запуска окна собирает только ядро: sessions.py и другие модули вне ядра argv лишь исполняют —
+    иначе PR без Touch ID дописал бы --plugin-dir или --mcp-config, и хуки пошли бы вне песочницы (тест
+    test_window_pack). window=None — без флагов схемы А (штаб)."""
+    argv = [claude_bin()] + (["--resume", resume] if resume else []) + (["--bg"] if bg else [])
+    argv += ["--agent", role, "--name", name, *window_flags(window, name), "--settings", settings]
+    return argv + ([prompt] if prompt is not None else [])
+
+
+def window_flags(window, name=None):
+    """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
+    --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
+    settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть. Плагин и
+    _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
+    settings/run/<name>.mcp.json), не из packs/. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
+    обновляет. Не направление (мастерская, штаб, задачи) — []."""
+    folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
+    if not isinstance(folders, list) or not folders:
+        return []
+    launch, dirs = window_dirs(folders)
+    args = [x for d in dirs for x in ("--add-dir", d)]
+    parts = [f"# Правила проекта {tilde(os.path.dirname(a))} (AGENTS.md)\n\n{text}"
+             for a, text in window_agents_md(launch, dirs)]
+
+    def run_file(ext, text):
+        out = path("settings", "run", f"{name or window}.{ext}")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(out + ".tmp", out)
+        return out
+
+    if parts:
+        args += ["--append-system-prompt-file", run_file("agents.md", "\n\n".join(parts))]
+    pack = os.path.join(PACKS, window)
+    snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
+    if snap and os.path.isfile(os.path.join(snap, "plugin", ".claude-plugin", "plugin.json")):
+        args += ["--plugin-dir", os.path.join(snap, "plugin")]
+    if snap and os.path.isfile(os.path.join(pack, "mcp.json")):
+        with open(os.path.join(pack, "mcp.json"), encoding="utf-8") as fh:
+            text = fh.read()
+        bin_dir = json.dumps(os.path.join(snap, "_bin"))[1:-1]
+        args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
+    return args
+
+
+# Пакет только сужает права окна (вариант Б модели угроз metis-0933, решение координатора 06.11): правила deny и ask,
+# запреты песочницы denyRead и deniedDomains. allow (metis-0137), excludedCommands, allowWrite, allowedDomains, хуки,
+# режимы — не вливаются: пакет только сужает, а расширение — дело правил ядра. С #372 папка packs/ — ядро шлюза (CORE_DIR),
+# window_launch — в SANDBOX_BUILD_ROOTS: их PR сливает владелец. env — только имена из WINDOW_ENV_NAMES (флаги
+# «без телеметрии») и только новые для окна: HOME, PATH, TMPDIR, GUARD_*, *_PROXY, DYLD_*, NODE_OPTIONS, BASH_FUNC_*,
+# кэши окна (XDG_CACHE_HOME, npm_config_cache) и ANTHROPIC_* переключили бы guard, интерпретаторы хуков и сеть.
+# Плагины — только из карты plugins-by-role.toml, оставленные этому окну (класс 4).
+WINDOW_EXTRA_LISTS = ("deny", "ask")
+WINDOW_EXTRA_SANDBOX = {"denyRead": ("filesystem", "denyRead"), "deniedDomains": ("network", "deniedDomains")}
+WINDOW_ENV_NAMES = frozenset({"NEXT_TELEMETRY_DISABLED", "TURBO_TELEMETRY_DISABLED", "DO_NOT_TRACK",
+                              "GATSBY_TELEMETRY_DISABLED", "NUXT_TELEMETRY_DISABLED", "ASTRO_TELEMETRY_DISABLED",
+                              "STORYBOOK_DISABLE_TELEMETRY", "HF_HUB_DISABLE_TELEMETRY", "DOTNET_CLI_TELEMETRY_OPTOUT"})
+WINDOW_ENV_VALUE = re.compile(r"[01]|true|false")
+PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*")
+# Мимо песочницы окна направления — только эти команды и только абсолютным путём вне папок окна (класс 2): по имени
+# команду нашёл бы поиск по PATH, а бинарь в папке окна окно переписало бы само
+WINDOW_EXCLUDED = {"metis-pantheon": (os.path.join(HOME, ".local", "bin", "mailkeeper"),)}
+
+
+def window_excluded(name):
+    """excludedCommands окна направления name из WINDOW_EXCLUDED: «<путь>» и «<путь> *»."""
+    return [x for p in WINDOW_EXCLUDED.get(name, ()) for x in (p, p + " *")]
+
+
+def window_plugins_allowed(pmap, name):
+    """Плагины, которые пакет может включить окну name: «оставить» его записи карты (своей или direction). Карты нет
+    (не читается) — никакие: пакет не включает плагины мимо карты."""
+    key = PLUGIN_MAP.window_key(pmap, name, True) if pmap else None
+    return set(pmap["window"][key]["plugins"]) if key else set()
+
+
+def window_extra_apply(data, extra, plugins_ok=()):
+    """window.json пакета (packs/<окно>/window.json) → в data (окно), только сужая права: permissions deny, ask без
+    повторов, sandbox denyRead и deniedDomains, enabledPlugins: true у плагинов из plugins_ok (window_plugins_allowed),
+    env из WINDOW_ENV_NAMES со значением 0/1/true/false, если окно его ещё не задало. Остальное — в отброшенное, data не
+    трогается. → [(ключ, значение)] отброшенного. Ключи seen и description — для pantheon check и людей."""
+    bad = [(k, extra[k]) for k in extra if k not in WINDOW_EXTRA_LISTS + ("plugins", "env", "sandbox", "seen",
+                                                                          "description")]
+    for key in WINDOW_EXTRA_LISTS:
+        vals = extra.get(key)
+        vals = vals if isinstance(vals, list) else ([] if vals is None else [vals])
+        bad += [(key, r) for r in vals if not isinstance(r, str) or not r.strip()]
+        new = [r for r in dict.fromkeys(r for r in vals if isinstance(r, str) and r.strip())
+               if r not in data.get("permissions", {}).get(key, [])]
+        if new:
+            data.setdefault("permissions", {}).setdefault(key, []).extend(new)
+    plugins = extra.get("plugins") or []
+    for p in plugins if isinstance(plugins, list) else [plugins]:
+        if isinstance(p, str) and PLUGIN_ID.fullmatch(p) and p in plugins_ok:
+            data.setdefault("enabledPlugins", {})[p] = True
+        else:
+            bad.append(("plugins", p))
+    env = extra.get("env") or {}
+    for k, v in (env.items() if isinstance(env, dict) else [("env", env)]):
+        if k in WINDOW_ENV_NAMES and isinstance(v, str) and WINDOW_ENV_VALUE.fullmatch(v) \
+                and k not in data.get("env", {}):
+            data.setdefault("env", {})[k] = v
+        else:
+            bad.append(("env", k))
+    sb = extra.get("sandbox") or {}
+    for k, v in (sb.items() if isinstance(sb, dict) else [("sandbox", sb)]):
+        where = WINDOW_EXTRA_SANDBOX.get(k)
+        if not where or not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+            bad.append(("sandbox", k))
+            continue
+        if not v:
+            continue
+        top = data.setdefault("sandbox", {}).setdefault(where[0], {})
+        have = top.setdefault(where[1], [])
+        have += [x for x in v if x not in have]
+    return bad
+
+
+def repo_items(folder):
+    """Что в репозитории может не дойти до окна по --add-dir (П1): хуки (событие и команда), ключи settings (верхний
+    уровень; у словарей — второй, например env.X, enabledPlugins.Y, permissions.allow) и серверы .mcp.json.
+    → [строка-ключ «~/папка/файл что»]."""
+    out, label = [], tilde(folder)
+    for rel in PROJECT_SETTINGS:
+        data = _read_json_in(folder, rel)  # тик вне песочницы: ссылка, FIFO, огромный файл — пропуск (класс 3)
+        if data is None:
+            continue
+        for k, v in data.items():
+            if k == "$schema":
+                continue
+            if k == "hooks" and isinstance(v, dict):
+                for ev, groups in v.items():
+                    for g in groups if isinstance(groups, list) else []:
+                        for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                            if isinstance(h, dict):
+                                what = h.get("command") or h.get("prompt") or h.get("type")
+                                out.append(f"{label}/{rel} hooks.{ev} {' '.join(str(what).split())[:120]}")
+            elif isinstance(v, dict) and v:
+                out += [f"{label}/{rel} {k}.{kk}" for kk in v]
+            else:
+                out.append(f"{label}/{rel} {k}")
+    mcp = _read_json_in(folder, ".mcp.json")
+    servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+    out += [f"{label}/.mcp.json {s}" for s in (servers if isinstance(servers, dict) else {})]
+    return out
+
+
+def pack_missing(name, folders):
+    """Пункты repo_items папок --add-dir окна (window_dirs), которых нет в пакете: ни в seen его window.json, ни
+    сервером с тем же именем в mcp.json. Папку запуска не смотрит: её настройки Claude Code грузит сам. → [строки]."""
+    _, dirs = window_dirs(folders)
+    seen = pack_window(name).get("seen") or {}
+    mcp = read_json(os.path.join(PACKS, name, "mcp.json"), {})
+    servers = set((mcp.get("mcpServers") or {}) if isinstance(mcp, dict) else {})
+    out = []
+    for d in dirs:
+        for item in repo_items(d):
+            if item in seen or ("/.mcp.json " in item and item.split("/.mcp.json ", 1)[1] in servers):
+                continue
+            out.append(item)
+    return out
+
+
+def pack_check(quiet=False):
+    """pantheon check: у каждого направления — новое в репозиториях (хук, ключ settings, сервер .mcp.json), чего нет
+    в пакете (pack_missing). Предупреждение, на код выхода не влияет; в тике — одна тревога на набор. → {окно: [..]}."""
+    found = {}
+    for name, folders in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
+        if isinstance(folders, list):
+            miss = pack_missing(name, folders)
+            if miss:
+                found[name] = miss
+            if quiet:
+                if miss:
+                    alert_once(f"check-pack-{name}", "|".join(miss),
+                               f"окно {name}: в репозиториях есть то, чего нет в пакете packs/{name} — {miss[0]}"
+                               + (f" и ещё {len(miss) - 1}" if len(miss) > 1 else "")
+                               + " (перенести в пакет или отметить в seen его window.json, metis-0933)", "check")
+                else:
+                    clear_once(f"check-pack-{name}")
+    if not quiet:
+        for name, miss in found.items():
+            for m in miss:
+                print(f"предупреждение · окно {name}: нет в пакете packs/{name} — {m}")
+    return found
+
+
 def project_allow_text(name, problems):
     shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
     return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
@@ -2631,13 +4051,13 @@ def drop_window(name):
 
 
 def allow_gate(name, folders=None):
-    """Проектные allow папки запуска направления name (metis-0137): есть правило с gh pr merge — оба файла окна
-    убираются. Зовут сборка, тик (check) и каждый подъём сессии: сборка по --if-changed сравнивает только mtime, а
+    """Проектные allow папок окна направления name (metis-0137; все папки, а не только папка запуска — metis-0911): есть
+    правило с gh pr merge — оба файла окна убираются. Зовут сборка, тик (check) и каждый подъём сессии: сборка по --if-changed сравнивает только mtime, а
     файл со старым mtime (cp -p, rsync -a, tar) её не запускает (ревью argus PR #32). folders — папки из domains.json;
     не направление (мастерская, штаб) — проверки нет. → список проблем."""
     if folders is None:
         folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
-    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    problems = folders_allow_problems(folders)
     if problems:
         drop_window(name)
     return problems
@@ -2710,6 +4130,13 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 
     memory = memory_dirs()
     pmap = plugin_map_load()
+    # очередь обёртки heavy по порядку прихода (metis-0659): билет — файл в STATE/locks/heavy-queue, окно роли без
+    # записи туда ждёт опросом мест. Запись — только в эту папку (не во весь locks: там замки прохода и Touch ID),
+    # «да» владельца 02.11 в окне agent-kit-62. Ссылка на месте папки — не даём: иначе запись ушла бы по ссылке
+    queue = path("locks", HEAVY_QUEUE)
+    with contextlib.suppress(OSError):  # файл или висячая ссылка на месте папки — без записи, сборка окон идёт дальше
+        os.makedirs(queue, mode=0o700, exist_ok=True)
+    queue = os.path.realpath(queue) if os.path.isdir(queue) and not os.path.islink(queue) else None
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         if direction:
@@ -2721,22 +4148,58 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 if stop_live:
                     project_allow_stop(name, problems)
                 return False
-        real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
+        real = [_real_dir(f, SANDBOX_ROOTS[:SANDBOX_STRICT], strict=True) or _real_dir(f, SANDBOX_ROOTS[SANDBOX_STRICT:])
+                for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
-            print(f"песочница {name}: вне ~/projects и ~/ai/knowledge, ссылка или нет папки — только через Write/Edit: "
+            print(f"песочница {name}: вне {', '.join(SANDBOX_ROOTS)}, ссылка или нет папки — только через Write/Edit: "
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
-        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
+        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
+        hookd = [r for r in write if _under(r, os.path.realpath(HOOKD_DIR))]
+        if hookd:  # папка демона хуков и всё в ней — никому (metis-0845); папка выше остаётся, её режет denyWrite
+            print(f"песочница {name}: sandbox_write в папку демона хуков не даётся: {hookd}", file=sys.stderr)
+            write = [r for r in write if r not in hookd]
+        write += memory
+        write += [queue] if queue else []  # в песочницу (Bash), не в правила Edit/Write
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
-                             guard, auto_allow)
+                             guard, auto_allow, own_agents=direction)
         if direction:
             data["sandbox"]["excludedCommands"] += GH_PR_WRITE
+            # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
+            # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
+            # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
+            data["permissions"]["additionalDirectories"] = list(ok)
+            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; EnterWorktree и
+            # ExitWorktree закрыты (П9b: вход в worktree чужого репозитория загрузил бы его настройки) — worktree
+            # задачи окно заводит `git worktree add`; пакет направления только сужает (window_extra_apply), мимо
+            # песочницы — только WINDOW_EXCLUDED ядра
+            data["env"][ADD_DIRS_ENV] = "1"
+            deny_list = data["permissions"].setdefault("deny", [])
+            deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
+            data["sandbox"]["excludedCommands"] += window_excluded(name)
+            # скрипты репозиториев, которые снимок пакета берёт при запуске окна (pack_hook_scripts): их .claude/hooks —
+            # литералом в denyWrite. Глоб «/**/.claude/hooks» Claude Code закрывает только по регулярке, а литерал — и
+            # переименование его предков (app, app/.claude; ревью argus E1 Б1): без этого окно подменило бы папку
+            # переименованием, и следующий запуск взял бы в снимок чужой скрипт
+            dw = data["sandbox"]["filesystem"]["denyWrite"]
+            dw += [x for x in dict.fromkeys(os.path.join(r, ".claude", "hooks")
+                                            for r, _ in pack_hook_scripts(os.path.join(PACKS, name))) if x not in dw]
+            bad = window_extra_apply(data, pack_window(name), window_plugins_allowed(pmap, name))
+            if bad:
+                keys = dict.fromkeys(f"{k}.{v}" if k in ("env", "sandbox") else k for k, v in bad)
+                alert_once(f"pack-extra-{name}", repr(bad), f"packs/{name}/window.json: не влито в окно {name} — "
+                           + ", ".join(keys)[:300] + " — " + "; ".join(f"{k}: {v}" for k, v in bad)[:400]
+                           + " (пакет только сужает: deny, ask, "
+                           "sandbox denyRead и deniedDomains, env из белого списка, плагины из карты — metis-0933)",
+                           "pantheon")
+            else:
+                clear_once(f"pack-extra-{name}")
         if name == "metis-pantheon":
-            # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
+            # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
@@ -2781,10 +4244,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
-               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name))):
+               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name), name)):
             built.append(name)
-    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
-    one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
+    # workshop/ доски; список субагентов — вне P0-6
+    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths)
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -2909,6 +4373,17 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                   file=sys.stderr)
     fsys = hq["sandbox"]["filesystem"]
     fsys["denyRead"] += _deny_forms(closed) + _deny_forms(files)
+    # metis-0771: папки проектов направлений — работа их координаторов. Закрыто содержимое («P/*», «P/*/**»), а не сама
+    # папка: `git -C P log` идёт. Открыты .git, README.md и AGENTS.md в корне (allowRead сильнее denyRead) — только если
+    # ни один прежний запрет чтения (closed_dirs, личное, ключ в .git/config) не лежит внутри них и не закрывает их или
+    # папку выше: иначе allowRead открыл бы закрытое. Read/Grep/Glob — guard hq-projects (правило Read исключений не
+    # знает: deny сильнее allow). Модель угроз — drafts/0771-threat-model.md
+    proj = hq_project_dirs(domains)
+    deny_real = [os.path.realpath(os.path.expanduser(x)) for x in fsys["denyRead"]]
+    fsys["denyRead"] += [p + tail for p in proj for tail in ("/*", "/*/**")]
+    allow = [a for p in proj for a in (p + "/.git", p + "/README.md", p + "/AGENTS.md") if not _allow_blocked(a, deny_real)]
+    if allow:
+        fsys.setdefault("allowRead", []).extend(allow)
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
@@ -2937,13 +4412,30 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
                "pantheon jobs *", "pantheon domains build", "pantheon roles build", "pantheon stop *",
                "pantheon resume *", "pantheon pause *", "pantheon restart *", "pantheon saved *", "pantheon who",
-               "pantheon agents", "sessync find", "sessync find *"]
+               "pantheon agents", "sessync find", "sessync find *", "pantheon qmd where *"]
+# `pantheon qmd where` (metis-0856, «да» владельца 05.11 19:47): поиск «где лежит» по коллекциям проектов идёт по HTTP
+# в местную службу qmd (127.0.0.1, порт из qmd.toml), а у песочницы штаба сети нет — поэтому мимо песочницы. Команда
+# печатает только коллекцию, путь, заголовок и хозяина, без текста; закрытые [hq].closed_collections не отдаёт.
 # `sessync find` (metis-0566, решение владельца 27.10): поиск прошлых разговоров читает транскрипты ~/.claude/projects, а
 # окну штаба они закрыты — поэтому только эта команда и только здесь, мимо песочницы; вывод проходит маску ключей в самом
 # sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
 START_MARK = "[Пантеон:"
 SESSION_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
-WORKSHOP = os.path.join(HOME, "projects", "workshop")
+
+
+def workshop_root():
+    """Папка мастерской по факту на диске (вариант А, 06.11 18:06): ~/ai/workshop, если она есть и не ссылка, иначе
+    старая папка workshop в ~/projects — до переноса окна и задачи мастерской остаются там. Правило здесь, а не в
+    lib/moved.py: по нему sandbox_build (ядро) открывает запись окну workshop, а moved.py вне ядра (argus-4 Б1). Копии —
+    moved.workshop_root и ctx.workshop_root; совпадение трёх держит test_workshop_sockets."""
+    new = os.path.join(HOME, "ai", "workshop")
+    return new if os.path.isdir(new) and not os.path.islink(new) else os.path.join(HOME, "projects", "workshop")
+
+
+def workshop_dir():
+    """workshop_root() в виде «~/…» — для песочницы, текста роли и сообщений."""
+    root = workshop_root()
+    return "~" + root[len(HOME):] if root.startswith(HOME + "/") else root
 
 
 def claude_bin():
@@ -2961,24 +4453,95 @@ def agents_all():
     return reconcile_agents(data) if isinstance(data, list) else data
 
 
-def daemon_workers():
-    """Процессы фоновых сессий из реестра демона Claude Code ~/.claude/daemon/roster.json: короткий id → pid. Читаем
-    только pid (в записи есть и жетоны — их не берём). None — реестра нет или он не читается: тогда о процессах
-    ничего не утверждаем."""
-    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
-    if not isinstance(d, dict) or not isinstance(d.get("workers"), dict):
+ROSTER_WORKER_FIELDS = ("pid", "startedAt")  # из записи воркера; ключи сокетов (rvAuth, ptyAuth …) — нет
+
+
+def roster_safe():
+    """Реестр демона Claude Code ~/.claude/daemon/roster.json без ключей (metis-0871): {"updatedAt": …, "workers":
+    {короткий id: {"pid": …, "startedAt": …}}}. В записях воркеров лежат ключи локальных сокетов демона (rvAuth,
+    ptyAuth): их не берём — только поля из ROSTER_WORKER_FIELDS и только числа и строки. Это единственное место, где
+    Пантеон читает файл; агентам guard его целиком не даёт (правило daemon-roster), нужные поля — `pantheon roster`.
+    None — реестра нет или он не объект; workers None — поле не объект (о процессах тогда ничего не утверждаем)."""
+    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), False)  # нет или битый — False, не {}
+    if not isinstance(d, dict):
         return None
-    return {str(k): w.get("pid") for k, w in d["workers"].items() if isinstance(w, dict)}
+
+    def scalar(v):
+        return v if isinstance(v, (int, float, str)) and not isinstance(v, bool) else None
+    w = d.get("workers")
+    workers = {str(k): {f: scalar(v.get(f)) for f in ROSTER_WORKER_FIELDS} for k, v in w.items()
+               if isinstance(v, dict)} if isinstance(w, dict) else None
+    return {"updatedAt": scalar(d.get("updatedAt")), "workers": workers}
+
+
+def roster_cmd(rest):
+    """pantheon roster — реестр демона без ключей (roster_safe) одним JSON в stdout. Реестра нет или он не читается —
+    причина последней строкой в stderr, код 1."""
+    if rest:
+        print("pantheon roster: аргументов нет — печатает updatedAt и у каждого воркера id, pid, startedAt",
+              file=sys.stderr)
+        return 2
+    r = roster_safe()
+    if r is None:
+        print("pantheon roster: реестра демона нет или он не читается (~/.claude/daemon/roster.json)", file=sys.stderr)
+        return 1
+    print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
+    return 0
+
+
+def daemon_workers():
+    """Процессы фоновых сессий из реестра демона Claude Code: короткий id → pid (roster_safe — без ключей). None —
+    реестра нет или он не читается: тогда о процессах ничего не утверждаем."""
+    r = roster_safe()
+    if r is None or r["workers"] is None:
+        return None
+    return {k: w["pid"] for k, w in r["workers"].items()}
 
 
 def roster_changed_at():
     """Когда демон последний раз переписал реестр (updatedAt roster.json, мс → с) или None. Демон пишет его при смене
     воркеров (старт, respawn, самоперезапуск), а не по таймеру: свежая правка — процесс мог только что смениться."""
-    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
+    r = roster_safe()
     try:
-        return float(d.get("updatedAt")) / 1000
-    except (AttributeError, TypeError, ValueError):
+        return float(r["updatedAt"]) / 1000
+    except (TypeError, ValueError):
         return None
+
+
+def session_started(a, t=None):
+    """Когда нынешний процесс взял сессию a, в с, или 0 (metis-0864, ревью argus #332 Д2). claude agents пишет startedAt
+    из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: hermes-alex
+    7c48114d без процесса — startedAt = createdAt state.json; zeus 7853263b с процессом после respawn — время respawn,
+    а createdAt — 04.11). Пока новый процесс не виден (между снятием старого воркера и выдачей нового, metis-0662; из
+    окна с песочницей, reconcile_agents (1)), startedAt старше прошлых перезапусков. Поэтому — самое позднее из
+    startedAt записи, startedAt воркера этой сессии в реестре демона (roster.json: время выдачи процесса, respawn тоже)
+    и записи реестра имён с её jobId или sessionId. Позже нынешнего процесса там времени нет: каждую из этих записей
+    пишет выдача процесса этой сессии, старая запись — раньше. Реестр демона — через roster_safe: ключи сокетов не
+    читаются (metis-0871). Значения не конечные (nan, inf: startedAt 1e400 читается как inf) и позже t (по умолчанию
+    now()) отбрасываются (ревью argus #337)."""
+    t = now() if t is None else t
+
+    def ms(v):
+        try:
+            x = float(v) / 1000
+        except (TypeError, ValueError):
+            return 0.0
+        return x if math.isfinite(x) and x <= t else 0.0
+    best = ms(a.get("startedAt"))
+    short, sid = str(a.get("id") or ""), a.get("sessionId")
+    w = (roster_safe() or {}).get("workers") or {}
+    if short and short in w:
+        best = max(best, ms(w[short]["startedAt"]))
+    sd = os.path.join(HOME, ".claude", "sessions")
+    with contextlib.suppress(OSError):
+        for f in os.listdir(sd):
+            if not re.fullmatch(r"\d+\.json", f):
+                continue
+            rec = read_json(os.path.join(sd, f), {})
+            if isinstance(rec, dict) and ((sid and rec.get("sessionId") == sid)
+                                          or (short and str(rec.get("jobId") or "") == short)):
+                best = max(best, ms(rec.get("startedAt")))
+    return best
 
 
 def claude_job_state(short):
@@ -3226,9 +4789,9 @@ def window_missing(name, origin, why, how):
 
 
 def no_window_reason(window):
-    """Почему нет окна window: allow проекта в папке запуска (metis-0137) или окно не собрано."""
+    """Почему нет окна window: allow проекта в папках окна (metis-0137, metis-0911) или окно не собрано."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
-    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    problems = folders_allow_problems(folders)
     if problems:
         return "окно не собрано: " + project_allow_text(window, problems)
     return f"нет окна {tilde(path('settings', window + '.json'))} — pantheon domains build"
@@ -3281,7 +4844,8 @@ def _resume_session(name, a, text, origin):
     # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
+    # схема А (metis-0933): те же --add-dir, AGENTS.md и пакет, что у pantheon start (--resume прежних флагов не берёт)
+    argv = window_launch(role, name, got[3], run, text, resume=sid or a.get("id"))
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
@@ -3290,7 +4854,7 @@ def _resume_session(name, a, text, origin):
         left = stop_and_rm(name, m.group(1), "copy-note")
         start_log(f"copy-removed\t{name}\t{m.group(1)}" + (f"\trefused {left}" if left else ""))
         alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; "
-              + (f"копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
+              + ("копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
                  "лишнюю остановить"), "pantheon")
     elif r.returncode == 0:  # копию (исходная ещё живая) не разбираем сами — тревога выше, решает Зевс
         rm_previous(name, "--resume", before=before, keep={a.get("id")}, wait=True)
@@ -3461,6 +5025,27 @@ def launch_folder(folders):
     return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
 
 
+def launch_symlink(folders, folder):
+    """metis-0947 (класс 3 модели угроз metis-0933): первая символьная ссылка в пути папки запуска folder (результат
+    launch_folder: уже настоящий путь) → её путь как записан в реестре; иначе "". launch_folder идёт по ссылке через
+    realpath, а Claude Code грузит CLAUDE.md цели — поэтому смотрим записанный путь по частям: сама папка и любой
+    каталог выше. Ссылки в корне (/var, /tmp, /etc — системные на macOS) не в счёт."""
+    for f in folders or []:
+        if not (isinstance(f, str) and f):
+            continue
+        p = os.path.expanduser(f)
+        if os.path.realpath(p) != folder:
+            continue
+        parts = os.path.abspath(p).split(os.sep)[1:]
+        cur = os.sep
+        for i, part in enumerate(parts):
+            cur = os.path.join(cur, part)
+            if i > 0 and os.path.islink(cur):
+                return cur
+        return ""
+    return ""
+
+
 def hq_led(reg=None):
     """metis-0155 (Б): направления, которые ведёт Пританей, — `coordinator = false` в записи directions.toml. → {имя:
     запись реестра}. По умолчанию координатор включён; выключает только булево false — другое значение `pantheon check`
@@ -3504,10 +5089,11 @@ def direction_target(target, rest, domains):
     if target == "workshop":
         if not rest or not SESSION_NAME.fullmatch(rest[0]):
             return "pantheon start workshop <задача> [поручение]: имя задачи — a-z, 0-9, дефис"
-        task, folder = rest[0], os.path.join(WORKSHOP, rest[0])
+        root = workshop_root()
+        task, folder = rest[0], os.path.join(root, rest[0])
         os.makedirs(folder, exist_ok=True)
-        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(WORKSHOP) + "/"):
-            return f"папка задачи мастерской {folder} — ссылка или вне ~/projects/workshop"
+        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(root) + "/"):
+            return f"папка задачи мастерской {folder} — ссылка или вне {workshop_dir()}"
         return (f"daedalus-{task}", "workshop", folder, "workshop",
                 f"Прочитай ~/ai/pantheon/workshop/{task}.md и выполни задачу. Внешние действия — только по "
                 "approvals.toml или после «да» владельца в этой сессии.")
@@ -3516,6 +5102,10 @@ def direction_target(target, rest, domains):
     folder = launch_folder(domains[target])
     if not os.path.isdir(folder):
         return f"у направления {target} нет папки на этом Mac: {domains[target]}"
+    link = launch_symlink(domains[target], folder)
+    if link:
+        return (f"папка запуска направления {target}: {link} — символьная ссылка; Claude Code загрузил бы CLAUDE.md "
+                "цели ссылки (metis-0947). Окно не запускаю: замените ссылку настоящей папкой в реестре")
     return (target, "domain-coordinator", folder, target,
             f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по нему.")
 
@@ -3544,6 +5134,7 @@ def watch_mod():
 # ~/.claude/.gitignore): на каждом Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
 #   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
 #   {{qmd_collections}} {{browser}} — во всех ролях, после вставки частей, из раздела [person] реестра (PERSON_*).
+#   {{workshop}}        — папка мастерской по факту (workshop_dir(): ~/ai/workshop или до переноса старая в ~/projects).
 #                         Пустое значение или нет раздела — строка шаблона с подстановкой выпадает целиком, вместе с
 #                         переводом строки. Поэтому в шаблонах такая подстановка стоит в своей строке-фразе, а текст
 #                         вокруг неё связен и без неё;
@@ -3717,6 +5308,7 @@ def roles_build(src=None, out=None, role_errors=None):
             continue
         try:
             text = _person_text(_role_text(open(layer[f], encoding="utf-8").read(), parts), person, person_bad)
+            text = text.replace("{{workshop}}", workshop_dir())
         except (OSError, ValueError) as e:
             err(f, f"{f}: {e}")
             if base in LEAD_ROLES:
@@ -4251,6 +5843,110 @@ def who_is_who_alert(**kw):
     return line
 
 
+# --- холст «Кто есть кто.canvas» строится кодом (metis-0825, lib/whocanvas.py) ---------------------
+_WHOCANVAS = None
+
+
+def whocanvas_mod():
+    global _WHOCANVAS
+    if _WHOCANVAS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_whocanvas", os.path.join(LIB, "whocanvas.py"))
+        _WHOCANVAS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_WHOCANVAS)
+    return _WHOCANVAS
+
+
+def who_canvas_inputs(agents=None, reg_path=None):
+    """(роли {имя: файл}, направления [{name, short}], статусы задач {id: статус}) для пересборки холста."""
+    W, T = whocanvas_mod(), tasks_mod()
+    agents = agents or AGENTS
+    roles = {}
+    if os.path.isdir(PLUGIN_ROLES):  # шаблоны плагина, ещё не собранные в agents, минус отложенные
+        roles.update({f[:-5]: os.path.join(PLUGIN_ROLES, f) for f in os.listdir(PLUGIN_ROLES)
+                      if f.endswith(".tmpl") and f[:-5] not in ROLES_DEFERRED
+                      and os.path.isfile(os.path.join(PLUGIN_ROLES, f))})
+    if os.path.isdir(agents):
+        roles.update({f[:-3]: os.path.join(agents, f) for f in os.listdir(agents)
+                      if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))})
+    with open(reg_path or os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+        reg = tomllib.load(fh)
+    dirs = [{"name": d["name"], "short": str(d.get("short") or "")} for d in reg.get("direction") or []
+            if isinstance(d.get("name"), str)]
+    want, statuses = set(W.task_refs()), {}
+    for fp in T.task_files(PANTHEON):
+        tid = os.path.basename(fp)[:-3]
+        if tid in want:
+            try:
+                statuses[tid] = str((T.read(fp)[0] or {}).get("status") or "")
+            except (T.HeaderError, OSError, UnicodeDecodeError):
+                pass
+    return roles, dirs, statuses
+
+
+def who_canvas_sync(force=False, agents=None, reg_path=None, manual_out=None, report_out=None):
+    """Пересобрать холст, если изменились роли, реестр или статус задач из карточек. 'written' | 'same' | 'unchanged' |
+    'skip' (нет ни холста, ни памятки, ни реестра — вести нечего)."""
+    canvas = os.path.join(PANTHEON, whocanvas_mod().CANVAS_NAME)
+    reg_path = reg_path or os.path.join(PANTHEON, "directions.toml")
+    if not os.path.isfile(reg_path) or not (os.path.exists(canvas) or os.path.isfile(os.path.join(PANTHEON, WHO_MEMO))):
+        return "skip"
+    roles, dirs, statuses = who_canvas_inputs(agents, reg_path)
+    return whocanvas_mod().sync(canvas, path("who-canvas.json"), roles, dirs, statuses, force=force,
+                                manual_out=manual_out, report_out=report_out)
+
+
+def who_canvas_cmd(rest):
+    """pantheon who-canvas [--force] — зовёт scripts/who-canvas.sh из расписания (every = 5, hosts = primary; самой
+    команды нет в TICK_SUBCOMMANDS, parse_command пускает только скрипт плагина): пересборка только при смене
+    входов (отпечаток в STATE/who-canvas.json), так что обычный проход ничего не пишет. Холст не читается или сбой —
+    тревога, файл не затирается, код 1. В тик не вшито: tick() входит в сборку окон (ядро, metis-0404)."""
+    if [a for a in rest if a != "--force"]:
+        print("использование: pantheon who-canvas [--force]", file=sys.stderr)
+        return 2
+    try:
+        report = {}
+        got = who_canvas_sync(force="--force" in rest, report_out=report)
+    except Exception as e:
+        msg = f"Кто есть кто.canvas: не пересобран ({type(e).__name__}: {e})"
+        alert_once("who-canvas", type(e).__name__, msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
+    clear_once("who-canvas")
+    # правка руками (текст, цвет, подпись группы): тревога один раз на текст карточки — значение хеш её текста, новая
+    # правка руками даёт новую тревогу (metis-0838 Д9); карточка снова под кодом — метка снята
+    for nid, h in sorted((report.get("manual_hash") or {}).items()):
+        alert_once("who-canvas-manual-" + nid, h,
+                   f"Кто есть кто.canvas: карточка {nid} правлена руками, код её не обновляет; "
+                   "чтобы вернуть автосборку — удалите карточку", "pantheon")
+    for nid in report.get("auto") or ():
+        clear_once("who-canvas-manual-" + nid)
+    if got == "written":
+        print("Кто есть кто.canvas: пересобран по ролям, реестру и задачам")
+    if got == "skip":
+        return 0
+    try:  # таблица ролей в «Кто есть кто.md» и реестр в system.md — из тех же входов (metis-0828)
+        W = whocanvas_mod()
+        roles, dirs, statuses = who_canvas_inputs()
+        docs = W.sync_docs(PANTHEON, roles, dirs, statuses)
+    except Exception as e:
+        msg = f"Кто есть кто.md / system.md: таблица ролей не собрана ({type(e).__name__}: {e})"
+        alert_once("who-docs", f"{type(e).__name__}: {e}", msg, "pantheon")
+        print(msg, file=sys.stderr)
+        return 1
+    bad = {f: res for f, res in docs.items() if res.startswith("ошибка")}
+    if bad:  # один файл не собрался (маркеры не парные) — второй обновлён, тревога по первому
+        msg = "Кто есть кто.md / system.md: таблица ролей не собрана — " + "; ".join(f"{f}: {r}" for f, r in sorted(bad.items()))
+        alert_once("who-docs", msg, msg, "pantheon")
+        print(msg, file=sys.stderr)
+    else:
+        clear_once("who-docs")
+    for f, res in docs.items():
+        if res == "written":
+            print(f"{f}: таблица ролей пересобрана")
+    return 1 if bad else 0
+
+
 def roles_newest():
     files = [os.path.join(PANTHEON, "directions.toml")]
     for d in (AGENTS, PARTS, PLUGIN_ROLES, PLUGIN_PARTS):
@@ -4412,9 +6108,9 @@ def direction_check(name):
     dom = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
     add(dom, "направление в domains.json (pantheon domains build) — guard его знает")
     add(os.path.isfile(path("settings", name + ".json")), "окно роли settings/" + name + ".json")
-    bad_allow = project_allow_problems(launch) if launch else []
-    add(not bad_allow, "проектные allow папки запуска не пускают gh pr merge (иначе окно не соберётся, metis-0137)"
-        + (": " + "; ".join(f"{os.path.basename(f)} «{r}»" for f, r in bad_allow) if bad_allow else ""))
+    bad_allow = folders_allow_problems(d.get("folders"))
+    add(not bad_allow, "проектные allow папок окна не пускают gh pr merge (иначе окно не соберётся, metis-0137)"
+        + (": " + "; ".join(f"{tilde(f)} «{r}»" for f, r in bad_allow) if bad_allow else ""))
     agents = os.path.join(launch, "AGENTS.md")
     claude_md = os.path.join(launch, "CLAUDE.md")
     cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None
@@ -4428,11 +6124,8 @@ def direction_check(name):
             + ("" if here else "; Codex на этом Mac нет — не блокирует") + "): сверх Codex молча обрезает")
         longest = max((n for _, _, n in found), default=0)
         add(longest <= CLAUDE_LINES, f"Claude: CLAUDE.md с импортами до {CLAUDE_LINES} строк (сейчас {longest})")
-    try:
-        cj = json.load(open(os.path.join(HOME, ".claude.json"), encoding="utf-8"))
-    except (OSError, ValueError):
-        cj = {}
-    add(((cj.get("projects") or {}).get(launch) or {}).get("hasTrustDialogAccepted"),
+    # доверие — по правилу Claude Code (watch.trusted): у каждой области свой git, «Да» нужно на ней самой
+    add(watch_mod().trusted(launch),
         f"доверие к {launch.replace(HOME, '~')} — владелец, одна интерактивная сессия (без него claude --bg не стартует)")
     remote = ""
     if os.path.isdir(os.path.join(launch, ".git")):
@@ -4463,8 +6156,10 @@ def direction_check(name):
 
 # `pantheon direction init` (metis-0042): папку нового направления создаёт команда, а не Метида — её окну guard и
 # песочница не дают писать в ~/projects/<новое>. Ворота — те же, что у check (ваша галочка в журнале доски). Создаёт
-# только ровно ~/projects/<x>; существующие папки не трогает, ссылки и «..» — отказ; сначала проверяет все папки
-# записи, потом создаёт. Повтор доделывает прерванный запуск и ничего не меняет у готового.
+# только ровно ~/projects/<x> или ~/ai/life/<x>; существующие папки не трогает, ссылки и «..» — отказ; сначала
+# проверяет все папки записи, потом создаёт. Повтор доделывает прерванный запуск и ничего не меняет у готового.
+# ~/ai/life — простая папка без .git (Зевс 06.11, metis-0899): у каждой области свой git, init делает то же, что для
+# ~/projects/<x>; ~/ai/life при необходимости создаётся как простая папка.
 INIT_OWN = {".git", "AGENTS.md"}   # что оставляет init: папка только с этим — начатая им, её можно доделать
 INIT_COMMIT = "AGENTS.md (pantheon direction init)"
 
@@ -4514,17 +6209,24 @@ def direction_init(name):
     if not isinstance(folders, list) or not folders:
         print(f"в записи {name} в directions.toml нет folders — нечего создавать")
         return 1
-    projects = os.path.join(HOME, "projects")
+    real_home = os.path.realpath(HOME)
+    roots = {"projects": (os.path.join(HOME, "projects"), os.path.join(real_home, "projects")),
+             "life": (os.path.expanduser(LIFE_DIR), os.path.join(real_home, *LIFE_DIR[2:].split("/")))}
     short = lambda p: "~" + p[len(HOME):] if p == HOME or p.startswith(HOME + "/") else p
 
-    def new_ok(p):
-        """Создавать можно только ровно ~/projects/<x>: один компонент, не скрытый, ~/projects — не ссылка в сторону
-        (сравнение с настоящим путём HOME: сам HOME может быть ссылкой, как /var → /private/var)."""
+    def area(p):
+        """Где папку можно создать: «projects» — ровно ~/projects/<x>, «life» — ровно ~/ai/life/<x>; None — нигде.
+        Один компонент, не скрытый; корень — не ссылка в сторону (сравнение с настоящим путём HOME: сам HOME может
+        быть ссылкой, как /var → /private/var)."""
         base = os.path.basename(p)
-        return (os.path.dirname(p) == projects and base and not base.startswith(".")
-                and os.path.realpath(projects) == os.path.join(os.path.realpath(HOME), "projects"))
+        if not base or base.startswith("."):
+            return None
+        for kind, (root, real) in roots.items():
+            if os.path.dirname(p) == root and os.path.realpath(root) == real:
+                return kind
+        return None
 
-    plan, bad = [], []   # plan: (путь, create | resume | skip | busy)
+    plan, bad = [], []   # plan: (путь, create | resume | skip | busy, projects | life | None)
     for f in folders:
         if not isinstance(f, str) or not f.strip():
             bad.append(f"{f!r}: пустая строка вместо папки — не создаю")
@@ -4533,23 +6235,28 @@ def direction_init(name):
             bad.append(f"{f}: «..» в пути — не создаю")
             continue
         p = os.path.normpath(os.path.expanduser(f))
+        a = area(p)
         if not os.path.isabs(p):
             bad.append(f"{f}: не абсолютный путь и не от ~/ — не создаю")
         elif os.path.islink(p):
             bad.append(f"{short(p)}: ссылка — не создаю и не трогаю")
         elif os.path.isdir(p):
-            if not new_ok(p):
-                plan.append((p, "skip"))
+            if not a:
+                plan.append((p, "skip", a))
             elif _init_own(p):
-                plan.append((p, "resume"))
+                plan.append((p, "resume", a))
             else:
-                plan.append((p, "busy"))
+                plan.append((p, "busy", a))
         elif os.path.lexists(p):
             bad.append(f"{short(p)}: есть, но не папка — не трогаю")
-        elif new_ok(p):
-            plan.append((p, "create"))
+        elif a:
+            plan.append((p, "create", a))
         else:
-            bad.append(f"{short(p)}: вне ~/projects — не создаю (новая папка — только ~/projects/<имя>)")
+            bad.append(f"{short(p)}: вне ~/projects и {LIFE_DIR} — не создаю (новая папка — только ~/projects/<имя> "
+                       f"или {LIFE_DIR}/<имя>)")
+    life = roots["life"][0]
+    if any(a == "life" and kind == "create" for _, kind, a in plan) and os.path.lexists(life) and not os.path.isdir(life):
+        bad.append(f"{short(life)}: есть, но не папка — не трогаю")
     if bad:
         for x in bad:
             print("отказ   " + x)
@@ -4561,7 +6268,7 @@ def direction_init(name):
     launch = plan[0][0]
     note = " — папка запуска: AGENTS.md в ней дописывает координатор направления"
     rc = 0
-    for p, kind in plan:
+    for p, kind, a in plan:
         if kind == "skip":
             print(f"есть, пропущено {short(p)}" + (note if p == launch else ""))
             continue
@@ -4570,7 +6277,7 @@ def direction_init(name):
             continue
         if kind == "create":
             try:
-                os.makedirs(projects, exist_ok=True)
+                os.makedirs(roots[a][0], exist_ok=True)
                 os.mkdir(p)
             except OSError as e:
                 print(f"отказ   {short(p)}: не создана ({e.strerror or e})")
@@ -4615,9 +6322,9 @@ def _init_launch(p, name, d):
             return done, f"AGENTS.md: {e.strerror or e}"
         done.append("AGENTS.md")
     if git("rev-parse", "--verify", "-q", "HEAD").returncode:
-        r = git("add", "AGENTS.md")
+        r = git("add", "--", "AGENTS.md")
         if r.returncode == 0:
-            r = git("commit", "-q", "-m", INIT_COMMIT)
+            r = git("commit", "-q", "-m", INIT_COMMIT, "--", "AGENTS.md")
         if r.returncode:
             return done, "git commit: " + ((r.stderr or r.stdout).strip() or f"код {r.returncode}") + \
                 " — повтор `pantheon direction init` доделает"
@@ -4628,7 +6335,7 @@ def _init_launch(p, name, d):
 def direction(rest):
     """pantheon direction check <имя> — что готово у нового направления (навык new-direction).
     pantheon direction init <имя>  — папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный коммит;
-                                     без remote."""
+                                     без remote. ~/ai/life/<имя> — то же, свой git у каждой области."""
     if len(rest) != 2 or rest[0] not in ("check", "init"):
         print(direction.__doc__, file=sys.stderr)
         return 2
@@ -4651,7 +6358,7 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
   <array><string>{tick}</string></array>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Standard</string>
   <key>AbandonProcessGroup</key><true/>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>{path}</string></dict>
@@ -4804,8 +6511,10 @@ def install():
             os.remove(link)
         os.symlink(os.path.join(CURRENT, "bin", cmd), link)
     link = os.path.join(HOME, ".local", "bin", "pantheon")
+    with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
+        os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
-    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):
         open(path("locks", slot + ".lock"), "a").close()
     if os.path.isdir(os.path.join(PANTHEON, ".git")):
         merge = os.path.join(CURRENT, "scripts", "git-crypt-merge.sh")
@@ -4836,9 +6545,10 @@ MERGE_REQUEST_CMDS = ["pantheon merge request *", "pantheon merge status", "pant
 
 
 def merge_kick():
-    """Заявки на слияние по Touch ID (metis-0285) — отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт."""
+    """Заявки на слияние по Touch ID (metis-0285) и отставшие управляемые настройки guard (metis-0710) — отдельным
+    процессом: окно ждёт пальца до двух минут, тик не ждёт."""
     try:
-        if not merge_mod().pending() or locked("merge-run"):
+        if not (merge_mod().pending() or merge_mod().managed_check()) or locked("merge-run"):
             return
         if os.environ.get("PANTHEON_DRYRUN") == "1":
             with open(path("dryrun.log"), "a") as fh:
@@ -4851,6 +6561,42 @@ def merge_kick():
     except Exception as e:  # сбой слияния не должен останавливать тик
         alert_once("merge-kick", type(e).__name__, f"слияние по Touch ID: проход не запущен ({type(e).__name__}: {e})",
                    "pantheon-tick")
+
+
+def handoff_kick():
+    """Отказ роли → Touch ID владельца на одно действие из белого списка (metis-0832, 0775, lib/handoff.py) —
+    отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт. Без заявок и строк журнала в кэшах окон — нет."""
+    try:
+        if locked("handoff-run") or not handoff_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} handoff-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "handoff", "run"], env=outside_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой прохода не должен останавливать тик
+        alert_once("handoff-kick", type(e).__name__, f"Touch ID действий роли: проход не запущен ({type(e).__name__}: "
+                   f"{e})", "pantheon-tick")
+
+
+def owner_edit_kick():
+    """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) — отдельным процессом: окно Touch ID ждёт
+    пальца до двух минут, тик не ждёт. Без заявок — нет."""
+    try:
+        if locked("owner-edit-run") or not owner_edit_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} owner-edit-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "owner-edit", "run"], env=merge_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой прохода не должен останавливать тик
+        alert_once("owner-edit-kick", type(e).__name__, f"правка файла владельца: проход не запущен "
+                   f"({type(e).__name__}: {e})", "pantheon-tick")
 
 
 def outside_kick():
@@ -4979,6 +6725,11 @@ def metrics_on_close(T, tid):
         return
     try:
         metrics_mod().record(metrics_ctx(), T.load_tasks(PANTHEON, T.WORK_TYPES), tid)
+    except PermissionError:
+        # metis-0820: так всегда в окне роли (песочница). «предупреждение · … PermissionError» роли читали как сбой
+        # task set и заводили задачи (hermes-0018, 05.11), хотя статус записан, а строку пишет плановый проход (sync)
+        print(f"учёт {tid}: окно роли в metrics/ не пишет — строку учёта допишет плановый проход доски. Статус задачи "
+              f"записан, это не сбой", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 — учёт не должен ломать закрытие задачи
         print(f"предупреждение · учёт {tid} не записан ({type(e).__name__}): допишет плановый проход доски",
               file=sys.stderr)
@@ -5180,6 +6931,78 @@ def _task_head(tid):
 _NIGHT = None
 
 
+def moved_mod():
+    """lib/moved.py — таблица переносов папок, migrate-paths и check --moved (metis-0899)."""
+    global _MOVED
+    if _MOVED is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_moved", os.path.join(LIB, "moved.py"))
+        _MOVED = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MOVED)
+    return _MOVED
+
+
+_MOVED = None
+MOVED_EVERY = 6 * 3600   # check --quiet (тик) ищет старые пути не чаще раза в 6 ч: обход ~/ai и ~/.claude не мгновенный
+
+
+def migrate_paths_cmd(rest):
+    """pantheon migrate-paths <перенос>… [--dry-run] — переносы: agent-kit, workshop, finances (lib/moved.py)."""
+    M = moved_mod()
+    names = [a for a in rest if not a.startswith("-")]
+    unknown = [a for a in rest if a.startswith("-") and a != "--dry-run"] + [n for n in names if n not in M.MOVES]
+    if not names or unknown:
+        print(f"pantheon migrate-paths <{'|'.join(M.MOVES)}>… [--dry-run]"
+              + (f": не знаю {', '.join(unknown)}" if unknown else ""), file=sys.stderr)
+        return 2
+    return M.migrate(list(dict.fromkeys(names)), "--dry-run" in rest, HOME)
+
+
+def check_moved(quiet=False, force=False):
+    """Старые пути сделанных переносов в живых файлах (metis-0899) — предупреждение, а на тике — тревога раз в набор.
+    Пока ни один перенос не сделан, не обходит ничего. → число файлов со старыми путями."""
+    M = moved_mod()
+    if not any(M.done(n, HOME) for n in M.MOVES):
+        if not force:
+            clear_once("check-moved")
+            return 0
+    elif quiet and not force:
+        stamp = path("moved-check.stamp")
+        with contextlib.suppress(OSError):
+            if time.time() - os.stat(stamp).st_mtime < MOVED_EVERY:
+                return 0
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(stamp), exist_ok=True)
+            open(stamp, "w").close()
+    found, pending, n_personal = M.check(HOME)
+    short = lambda p: "~" + p[len(HOME):] if p.startswith(HOME + "/") else p
+    # личное — только числом: имя файла в me/Self/Areas/People не уходит ни в вывод, ни в alerts.md (argus-2 Б2)
+    personal = (f"личное ~/ai/knowledge ({', '.join(M.PERSONAL)}): {n_personal} файлов — его меняет Мнемозина"
+                if n_personal else "")
+    if force:
+        for n in pending:
+            print(f"перенос {n} ещё не сделан — его пути не проверяю")
+    for p, k in (found if force else found[:20]):
+        if not quiet:
+            print(f"предупреждение · старый путь · {short(p)}: {k} — pantheon migrate-paths <перенос>")
+    if len(found) > 20 and not force and not quiet:
+        print(f"предупреждение · старый путь ещё в {len(found) - 20} файлах — pantheon check --moved")
+    if personal and not quiet:
+        print(f"предупреждение · старый путь · {personal}")
+    total = len(found) + n_personal
+    if quiet:
+        if total:
+            first = f"{short(found[0][0])}…" if found else personal
+            alert_once("check-moved", "|".join(p for p, _ in found) + f"|personal={n_personal}",
+                       f"старые пути перенесённых папок в {total} файлах: {first} — "
+                       "pantheon check --moved, замена — pantheon migrate-paths", "check")
+        else:
+            clear_once("check-moved")
+    elif force:
+        print(f"старых путей: {total} файлов" if total else "старых путей нет")
+    return total
+
+
 def night_mod():
     """lib/night.py — темп недельного лимита и ночной цикл (metis-0127, 0128, 0129)."""
     global _NIGHT
@@ -5235,6 +7058,81 @@ def outside_mod():
         spec.loader.exec_module(_OUTSIDE)
         _OUTSIDE.set_core(sys.modules[__name__])
     return _OUTSIDE
+
+_OWNER_EDIT = None
+
+
+def owner_edit_mod():
+    """lib/owner_edit.py — правка файла владельца по «да» в окне вопросов или по Touch ID (metis-0910)."""
+    global _OWNER_EDIT
+    if _OWNER_EDIT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_owner_edit", os.path.join(LIB, "owner_edit.py"))
+        _OWNER_EDIT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OWNER_EDIT)
+        _OWNER_EDIT.set_core(sys.modules[__name__])
+    return _OWNER_EDIT
+
+
+_HANDOFF = None
+
+
+def handoff_mod():
+    """lib/handoff.py — отказ роли → способный исполнитель, Touch ID на одно действие (metis-0832, 0775)."""
+    global _HANDOFF
+    if _HANDOFF is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_handoff", os.path.join(LIB, "handoff.py"))
+        _HANDOFF = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_HANDOFF)
+        _HANDOFF.set_core(sys.modules[__name__])
+    return _HANDOFF
+
+
+_RELEASE_TICK = None
+
+
+def release_tick_mod():
+    """lib/release_tick.py — выпуск без Actions: release.py --push из копии на origin/main (metis-0880)."""
+    global _RELEASE_TICK
+    if _RELEASE_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_release_tick", os.path.join(LIB, "release_tick.py"))
+        _RELEASE_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_RELEASE_TICK)
+        _RELEASE_TICK.set_core(sys.modules[__name__])
+    return _RELEASE_TICK
+
+
+_MAP_TICK = None
+
+
+def map_tick_mod():
+    """lib/map_tick.py — пересборка affected-map.json на main и коммит «карта: …» (metis-0842)."""
+    global _MAP_TICK
+    if _MAP_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_map_tick", os.path.join(LIB, "map_tick.py"))
+        _MAP_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MAP_TICK)
+        _MAP_TICK.set_core(sys.modules[__name__])
+    return _MAP_TICK
+
+
+_BROWSER = None
+
+
+def browser_mod():
+    """lib/browser.py — браузер владельца для ролей без пароля и порта (metis-0760)."""
+    global _BROWSER
+    if _BROWSER is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_browser", os.path.join(LIB, "browser.py"))
+        _BROWSER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_BROWSER)
+        _BROWSER.set_core(sys.modules[__name__])
+    return _BROWSER
+
 
 _MMV = None
 
@@ -5318,36 +7216,142 @@ def board_registry(T):
     return projects, marks, T.project_registry(dirs)
 
 
+try:
+    BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+except ValueError:  # нечисловое значение не роняет pantheon при импорте
+    BOARD_BUDGET = 45.0
+PROC_T0 = None  # monotonic начала процесса (ставит run.py до импорта): бюджет считается и с импорта
+BOARD_NOTIFY_WAIT = 20.0  # с ждать блокировку notify: занята дольше — проход идёт без уведомлений, а не до таймаута
+BOARD_HARD_GRACE = 5.0  # с сверх бюджета до жёсткого SIGALRM: мягкие пропуски (замок, сводка) успевают раньше
+BOARD_AUTO_MIN = 8.0  # с: осталось меньше — сводку board-auto.md этого прохода пропускаем, соберёт следующий
+
+
+class BoardClock:
+    """Время частей прохода доски (metis-0709): одна строка «доска-время: …» в журнале задания. Бюджет — сколько секунд
+    у прохода до предела задания: необязательное (ожидание блокировки, сводка) не берётся, если бюджет вышел."""
+
+    def __init__(self, budget, t0=None):
+        self.t0, self.budget, self.parts, self.skipped, self.cur = t0 or time.monotonic(), budget, [], [], None
+
+    def left(self):
+        return self.budget - (time.monotonic() - self.t0)
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        t = time.monotonic()
+        try:
+            yield
+        except BaseException:
+            self.cur = name  # прервали (SIGTERM, сбой) — строка назовёт часть
+            raise
+        finally:
+            self.parts.append((name, time.monotonic() - t))
+
+    def line(self):
+        out = " · ".join(f"{n} {d:.1f}" for n, d in self.parts)
+        if self.cur:
+            out += f" · прервано в «{self.cur}»"
+        if self.skipped:
+            out += " · пропущено: " + ", ".join(self.skipped)
+        return f"доска-время: {out} · итого {time.monotonic() - self.t0:.1f} с"
+
+
+@contextlib.contextmanager
+def lock_wait(name, wait):
+    """lock(name) с ожиданием не дольше wait секунд: не взяли — False, без зависания."""
+    end = time.monotonic() + wait
+    while True:
+        with lock(name, block=False) as got:
+            if got:
+                yield True
+                return
+        if time.monotonic() >= end:
+            yield False
+            return
+        time.sleep(0.2)
+
+
+class BoardBudget(BaseException):
+    """Бюджет прохода доски вышел (SIGALRM): часть прервана, строка времени остаётся, код BUDGET_CUT — следующий тик повторит."""
+
+
 def board():
-    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой."""
+    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой.
+    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET считается с начала процесса и действует и внутри долгой
+    части (SIGALRM), SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
+    clock = BoardClock(BOARD_BUDGET, PROC_T0)
+    def on_term(*_):
+        raise SystemExit(143)
+    def on_alarm(*_):
+        raise BoardBudget()
+    try:
+        old = signal.signal(signal.SIGTERM, on_term)
+        old_alrm = signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(clock.left() + BOARD_HARD_GRACE, 0.2))
+    except ValueError:  # не главный поток
+        old = old_alrm = None
+    rc = 0
+    try:
+        rc = _board(clock)
+    except BoardBudget:
+        clock.skipped.append("остаток прохода (бюджет)")
+        rc = BUDGET_CUT
+    finally:
+        if old is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGTERM, old)
+            signal.signal(signal.SIGALRM, old_alrm)
+        print(clock.line(), flush=True)
+    return rc
+
+
+def _board(clock):
     T = tasks_mod()
     sched = load_schedule()
     primary = not sched.get("primary_host") or sched.get("primary_host") == host()
     with lock("board", block=False) as got:
         if not got:
             return 0
-        projects, marks, registry = board_registry(T)
-        status_lines = board_status_sync(T) if primary else []
+        with clock.phase("реестр"):
+            projects, marks, registry = board_registry(T)
+        with clock.phase("статусы"):
+            status_lines = board_status_sync(T) if primary else []
+        with clock.phase("хозяева"):
+            status_lines += board_owner_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
-        with lock("notify"):
-            pol = notify_policy(sched)
+        with clock.phase("блокировка-notify"):
+            nl = lock_wait("notify", min(BOARD_NOTIFY_WAIT, max(clock.left(), 0)))
+            held = nl.__enter__()
+        try:
+            if not held:
+                clock.skipped.append("уведомления (блокировка notify занята)")
+            pol = notify_policy(sched) if held else None
             night_end = "08:00"
             with contextlib.suppress(Exception):
                 night_end = night_mod().config()[1]["end"]
-            lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
-                                 night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
-                                 alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
-                                                                                            policy=pol),
-                                 primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
-                                 **board_links())
-            pol.save()
-        once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
-        for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
-            fp = os.path.join(once_dir, f)
-            if now() - os.path.getmtime(fp) > 90 * 86400:
-                os.remove(fp)
+            with clock.phase("карточки"):
+                lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                                     night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
+                                     alert=lambda k, v, text, who="board", note=None: alert_once(
+                                         k, v, text, who, note if held else None, policy=pol),
+                                     primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
+                                     **board_links())
+            if pol is not None:
+                pol.save()
+        finally:
+            nl.__exit__(None, None, None)
+        with clock.phase("очистка"):
+            once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
+            for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
+                fp = os.path.join(once_dir, f)
+                if now() - os.path.getmtime(fp) > 90 * 86400:
+                    os.remove(fp)
         if primary:
-            board_auto_sync(T)
+            if clock.left() < BOARD_AUTO_MIN:
+                clock.skipped.append("сводка board-auto (бюджет)")
+            else:
+                with clock.phase("сводка"):
+                    board_auto_sync(T)
     for ln in status_lines + lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
@@ -5363,7 +7367,9 @@ def board_links():
         out["tails"] = {}
     try:
         out["repos"] = metrics_ctx().repos
-        out["pr_index"] = autoclose_mod().pr_index(read_json(path("autoclose-prs.json"), {}))
+        cache, A = read_json(path("autoclose-prs.json"), {}), autoclose_mod()
+        out["pr_index"] = A.pr_index(cache)
+        out["batch_prs"] = A.batch_prs(cache)  # PR пачки — одно правило с board-auto и check (metis-0810)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -5454,6 +7460,100 @@ def board_status_sync(T):
     return out
 
 
+AGENTS_FRESH = 30 * 60  # снимок сессий (STATE/agents.json) старше — о хозяевах задач ничего не утверждаем
+OWNER_SIDS_KEEP = 30 * 86400  # sessionId, которого не видно дольше, из памяти имён уходит
+ALERT_IDS = 12  # номеров задач в одной строке тревоги
+
+
+def _ids_text(ids):
+    ids = sorted(ids)
+    return ", ".join(ids[:ALERT_IDS]) + (f" и ещё {len(ids) - ALERT_IDS}" if len(ids) > ALERT_IDS else "")
+
+
+def board_owner_sync(T):
+    """Хозяин задачи и следы работы (metis-0868, п. 2–3), проход доски на главном Mac, после сверки статусов:
+    (1) сессию переименовали — owner открытых карточек за ней: имя ищется по sessionId (память имён STATE/owner-sids.json,
+    снимок `pantheon agents` и реестр ~/.claude/sessions), а не по прежнему имени; (2) owner — сессия, которой нет среди
+    окон, остановленная, или её остановил владелец — тревога «задача без хозяина» с командой передачи; (3) задача doing
+    без ветки, worktree и PR с её номером и без правки дольше STALE_DOING_HOURS — тревога. Снимок сессий старше
+    AGENTS_FRESH — (1) и (2) пропускаются: о живых окнах ничего не знаем. Сбой — тревога, проход доски идёт дальше.
+    → строки для вывода."""
+    out = []
+    try:
+        S = boardstatus_mod()
+        t = now()
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        directions = set(board_domains()) | {str(d.get("name")) for d in T.load_directions(PANTHEON) or [] if d.get("name")}
+        snap = read_json(path("agents.json"), None)
+        fresh = isinstance(snap, dict) and isinstance(snap.get("time"), (int, float)) and 0 <= t - snap["time"] < AGENTS_FRESH
+        orphans = None
+        if fresh:
+            agents = [a for a in snap.get("agents") or [] if isinstance(a, dict)]
+            seen = {a.get("sessionId") for a in agents}
+            agents += [dict(r, state=None) for r in sessions_registry() if r.get("sessionId") not in seen]
+            mem = read_json(path("owner-sids.json"), {})
+            mem = mem if isinstance(mem, dict) else {}
+            known = {k: v.get("name") for k, v in mem.items() if isinstance(v, dict) and isinstance(v.get("name"), str)}
+            renames, names = S.owner_renames(tasks, agents, known, directions)
+            for tid, old, new, sid in renames:
+
+                def same_owner(h, old=old, tid=tid):  # owner сменили между планом и записью — не трогаем
+                    if h.get("owner") != old:
+                        raise ValueError(f"{tid}: owner уже {h.get('owner')}")
+                try:
+                    T.task_set(PANTHEON, t, tid, {"owner": new}, actor="плановый проход", precheck=same_owner,
+                               note=f"owner: сессию {old} переименовали в {new} (sessionId {sid[:8]})")
+                    out.append(f"хозяин · {tid}: {old} → {new} (сессию переименовали)")
+                except ValueError as e:
+                    out.append(f"хозяин · {tid}: не переименован ({e})")
+            now_sids = {a.get("sessionId") for a in agents}
+            mem = {sid: {"name": n, "seen": t if sid in now_sids else (mem.get(sid) or {}).get("seen", t)}
+                   for sid, n in names.items()}
+            write_json(path("owner-sids.json"), {k: v for k, v in mem.items()
+                                                 if isinstance(v["seen"], (int, float)) and t - v["seen"] < OWNER_SIDS_KEEP})
+            if renames:
+                tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+            stopped = set(os.listdir(path("stopped"))) if os.path.isdir(path("stopped")) else set()
+            orphans = S.orphan_owners(tasks, agents, directions, stopped)
+        cache = read_json(path("autoclose-prs.json"), {})
+        open_ids = {i for prs in ((cache.get("open_prs") if isinstance(cache, dict) else None) or {}).values()
+                    if isinstance(prs, list) for p in prs if isinstance(p, dict)
+                    for i in (p.get("ids") or []) + (p.get("closes") or []) if isinstance(i, str)}
+        stale = S.stale_doing(tasks, board_domains(), open_ids, t, T.ts_of)
+    except Exception as e:  # noqa: BLE001 — сбой сверки хозяев не ломает проход доски
+        alert_once("board-owners", type(e).__name__, f"доска: сверка хозяев задач упала ({type(e).__name__}: {e})", "board")
+        return out
+    clear_once("board-owners")
+    if orphans:
+        groups = {}
+        for tid, (owner, why) in orphans.items():
+            d = tasks[tid][1].get("direction")
+            groups.setdefault((owner, why, S.handover(owner, d, directions)), []).append(tid)
+        parts = []
+        for (owner, why, to), ids in sorted(groups.items()):
+            ids = sorted(ids)
+            cmd = (f"pantheon task set {ids[0]} owner={to}" if len(ids) == 1
+                   else f"for id in {' '.join(ids[:ALERT_IDS])}; do pantheon task set $id owner={to}; done")
+            more = (f" (первые {ALERT_IDS}; остальные — тем же циклом, список — pantheon task ready --owner {owner})"
+                    if len(ids) > ALERT_IDS else "")  # строка тревоги — не сотни номеров
+            parts.append(f"owner {owner} — {why}: {_ids_text(ids)}. Передать: {cmd}{more}")
+        alert_once("board-orphan-owner", "|".join(sorted(f"{k}:{v[0]}" for k, v in orphans.items())),
+                   "доска: задача без хозяина — " + "; ".join(parts), "board")
+    elif orphans is not None:
+        clear_once("board-orphan-owner")
+    if stale:
+        alert_once("board-doing-stale", ",".join(sorted(stale)),
+                   f"доска: задача в работе (doing) без ветки, worktree и PR дольше {S.STALE_DOING_HOURS} ч — "
+                   + "; ".join(f"{tid} ({stale[tid]} ч без правки, owner {tasks[tid][1].get('owner')})"
+                               for tid in sorted(stale)[:ALERT_IDS])
+                   + (f" и ещё {len(stale) - ALERT_IDS}" if len(stale) > ALERT_IDS else "")
+                   + ". Работа идёт — ветка с номером задачи (git worktree add … <id>-…); нет — вернуть в очередь: "
+                   + f"pantheon task set {sorted(stale)[0]} status=todo", "board")
+    else:
+        clear_once("board-doing-stale")
+    return out
+
+
 def boardtext_mod():
     """lib/boardtext.py — автоблок доски board-auto.md (metis-0397), общий с хуком hooks/ctx.py."""
     import importlib.util
@@ -5472,8 +7572,186 @@ def board_week():
     return None
 
 
+def board_windows(t=None):
+    """Имена живых окон (state working или blocked) по снимку сессий STATE/agents.json, который пишет тик (watch.snapshot);
+    снимок старше AGENTS_FRESH или нет — None (о окнах ничего не утверждаем). Без вызова claude: проход доски его не ждёт."""
+    t = now() if t is None else t
+    snap = read_json(path("agents.json"), None)
+    if not (isinstance(snap, dict) and isinstance(snap.get("time"), (int, float)) and 0 <= t - snap["time"] < AGENTS_FRESH):
+        return None
+    return sorted({str(a.get("name")) for a in snap.get("agents") or []
+                   if isinstance(a, dict) and a.get("name") and a.get("state") in ("working", "blocked")})
+
+
 def board_auto_fp():
     return hashlib.sha1(repr(_fp_board_auto()).encode("utf-8", "replace")).hexdigest()
+
+
+def boardmerged_mod():
+    """lib/boardmerged.py — задачи при слитом PR, не закрытые (metis-0768)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardmerged", os.path.join(LIB, "boardmerged.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_merged_open(T, t):
+    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768).
+    Сбой — пусто: сводка важнее."""
+    try:
+        return boardmerged_mod().merged_open(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+                                             t, T, autoclose_mod(), autoclose_repo_dirs(),
+                                             autoclose_mod().open_pr_tasks(path("autoclose.json")) or ())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def boardmd_mod():
+    """lib/boardmd.py — проверка и архив board.md (metis-0769)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardmd", os.path.join(LIB, "boardmd.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+BOARD_MD_KEYS = ("size", "updated", "dates")
+
+
+def board_md_check(quiet):
+    """board.md (metis-0769): «Сейчас» длиннее предела, «Обновлено» старше суток, прошедшие сроки «По датам». Тик (quiet) —
+    одна тревога на вид проверки; руками — предупреждения. Файла нет — молча."""
+    p = os.path.join(PANTHEON, "board.md")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            body = fh.read()
+        t = now()
+        try:  # время самой свежей записи журналов STATUS.md (metis-1005): ручное «Обновлено» сверяется с ним
+            jt = boardtext_mod().journal_times(PANTHEON, t)
+        except Exception:  # noqa: BLE001 — нет журналов: старое правило «старше суток»
+            jt = []
+        found = {k: (v, text) for k, v, text in boardmd_mod().problems(body, t, jt[0][1] if jt else None)}
+    except OSError:
+        found = {}
+    for k in BOARD_MD_KEYS:
+        if k in found:
+            if quiet:
+                alert_once(f"check-board-md-{k}", found[k][0], found[k][1], "check")
+            else:
+                print(f"предупреждение · {found[k][1]}")
+        else:
+            clear_once(f"check-board-md-{k}")
+
+
+def _file_mark(st):
+    """Отметка файла для сверки «не изменился ли»: inode (замена через rename), mtime в нс и размер."""
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _board_changed(board, seen):
+    """board.md уже не тот, что прочитан (metis-0780) → True и строка отказа в stderr."""
+    try:
+        cur = _file_mark(os.stat(board))
+    except OSError:
+        cur = None
+    if cur == seen:
+        return False
+    print("board.md изменился, повтори: pantheon board archive (ничего не записано)", file=sys.stderr)
+    return True
+
+
+def board_archive(rest):
+    """`pantheon board archive [--days N]` (metis-0769): датированные блоки «Сейчас» и «Сессии и хозяйство» старше N дней
+    (по умолчанию 7) — в ~/ai/pantheon/archive/ГГГГ-ММ.md; без потерь: сначала дописывается архив, потом board.md
+    заменяется целиком. Нечего переносить — файлы не тронуты.
+    board.md правят и руками (Зевс, владелец) без замка pantheon-git, поэтому перед записью архива и перед заменой
+    board.md сверяются inode, mtime и размер с прочитанными (metis-0780): изменился — отказ «board.md изменился,
+    повтори», код 1, board.md не тронут, дописанное в архив откатывается. Остаток — правка в те же доли секунды
+    между последней сверкой и заменой. Сбой дописывания или замены (OSError) — строка «… — архив откатан, board.md не
+    тронут», без трассировки; откат сам не удался — «архив НЕ откатан (архив: причина)», код 1 (metis-0810).
+    От коммита прохода переписывание закрыто замком BOARD_LOCK в STATE/hq-rw/locks, а не pantheon-git: команду зовёт и
+    окно Зевса, которому STATE/locks не открыт (metis-0882). Замок не взят за HQ_LOCK_WAIT — код 1, ничего не записано."""
+    M, days = boardmd_mod(), None
+    args = list(rest)
+    if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
+        days = int(args[1])
+    elif not args:
+        days = M.DEFAULT_DAYS
+    if days is None:
+        print("pantheon board archive [--days N]  (N — целое число дней)", file=sys.stderr)
+        return 2
+    board = os.path.join(PANTHEON, "board.md")
+    if not os.path.exists(board):
+        print("board.md нет — нечего переносить")
+        return 0
+    with lock(BOARD_LOCK) as got:
+        if not got:
+            print(f"pantheon board archive: board.md сейчас коммитит плановый проход (блокировка {BOARD_LOCK} не взята) — "
+                  "повтори через минуту, ничего не записано", file=sys.stderr)
+            return 1
+        with open(board, encoding="utf-8") as fh:
+            text = fh.read()
+            seen = _file_mark(os.fstat(fh.fileno()))
+        kept, moved = M.split(text, now(), days)
+        n = sum(len(v) for v in moved.values())
+        if not n:
+            print(f"board.md: блоков старше {days} дн. нет")
+            return 0
+        if _board_changed(board, seen):
+            return 1
+        os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
+        stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
+        undo = {}   # архив → размер до дописывания (None — файла не было)
+        done = False
+
+        def rollback():
+            """Дописанное в архивы — обратно; → [«архив: причина»] того, что откатить не вышло (metis-0810)."""
+            bad = []
+            for ap, size in undo.items():
+                try:
+                    if size is None:
+                        os.remove(ap)
+                    else:
+                        os.truncate(ap, size)
+                except FileNotFoundError:
+                    if size is not None:
+                        bad.append(f"{os.path.relpath(ap, PANTHEON)}: файла нет")
+                except OSError as e:
+                    bad.append(f"{os.path.relpath(ap, PANTHEON)}: {type(e).__name__}: {e}")
+            undo.clear()
+            return bad
+
+        def undone(bad):
+            """Итог отката честно: откатан — так и пишем; нет — что осталось в каком архиве, код 1."""
+            if bad:
+                return ("архив НЕ откатан (" + "; ".join(bad) + ") — в нём строки, которые остались и в board.md: "
+                        "убрать их из архива руками")
+            return "архив откатан"
+        try:
+            for key, ls in sorted(moved.items()):
+                ap = os.path.join(PANTHEON, "archive", f"{key}.md")
+                undo[ap] = os.path.getsize(ap) if os.path.exists(ap) else None
+                with open(ap, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
+            if _board_changed(board, seen):
+                bad = rollback()
+                if bad:
+                    print(f"pantheon board archive: {undone(bad)}", file=sys.stderr)
+                return 1
+            write_atomic(board, kept)
+            done = True
+        except OSError as e:   # metis-0792: сбой дописывания или замены — архив откатывается, board.md цел
+            print(f"pantheon board archive: {type(e).__name__}: {e} — {undone(rollback())}, board.md не тронут",
+                  file=sys.stderr)
+            return 1
+        finally:
+            if not done:   # иной сбой (не OSError): откат и честная строка, трассировка уйдёт выше
+                bad = rollback()
+                if bad:
+                    print(f"pantheon board archive: {undone(bad)}", file=sys.stderr)
+    print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
+    return 0
 
 
 def board_auto_sync(T):
@@ -5484,8 +7762,11 @@ def board_auto_sync(T):
     try:
         B = boardtext_mod()
         fp, t = board_auto_fp(), now()
-        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
-                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        data = B.collect(PANTHEON, STATE, tasks, t, board_week(),
+                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE,
+                         own_of=batch_own_of(tasks, metrics_ctx().repos), windows=board_windows(t))
+        data["merged_open"] = board_merged_open(T, t)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
@@ -5504,6 +7785,15 @@ def board_auto_sync(T):
         clear_once("board-auto-embed")
     if res == "written":
         print("board-auto.md: сводка прохода обновлена")
+    try:  # «Ждёт владельца» направлений — directions/<имя>/waiting-auto.md из тех же входов (metis-0829)
+        made = B.waiting_sync(PANTHEON, STATE, tasks, lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE, t)
+    except Exception as e:  # noqa: BLE001 — сбой не ломает проход доски
+        alert_once("board-waiting", type(e).__name__,
+                   f"waiting-auto.md направлений: сборка упала ({type(e).__name__}: {e})", "board")
+        return
+    clear_once("board-waiting")
+    if made:
+        print("waiting-auto.md: «Ждёт владельца» обновлено — " + ", ".join(made))
 
 
 def board_auto_watch(t, sched):
@@ -5537,6 +7827,75 @@ def board_auto_watch(t, sched):
         alert_once("board-auto-stale", repr(seen), f"board-auto.md: входы менялись в {B.hm(seen)}, а сборки нет "
                    f"{int((t - seen) // 60)} мин (последняя — {B.hm(float(built)) if built else 'не было'}); "
                    "смотреть задачу board: pantheon jobs, alerts.md", "pantheon-tick")
+
+
+def batchsuggest_mod():
+    """lib/batchsuggest.py — раскладка открытых задач по пачкам без модели (metis-0595)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_batchsuggest", os.path.join(LIB, "batchsuggest.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+BATCH_SUGGEST_EVERY = 3 * 86400  # задача расписания раз в 3,5 суток (every = 5040); команда сама не чаще раза в 3 суток
+
+
+def batch_suggest_run(rest):
+    """pantheon batch-suggest run [--force] — плановая сводка (metis-0595): предложения по пачкам для всех направлений
+    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Прикрепляет только предложения «уверенно» (task_attach, строка в журнал). Раньше чем через
+    BATCH_SUGGEST_EVERY после прошлого прохода — пропуск (--force снимает). Тревога — одна строка, и только если среди
+    предложений есть ещё не виденные (ключи в STATE/batch-suggest.json)."""
+    if rest not in ([], ["run"], ["run", "--force"]):
+        print("использование: pantheon batch-suggest run [--force]", file=sys.stderr)
+        return 2
+    t, st = now(), read_json(path("batch-suggest.json"), {})
+    st = st if isinstance(st, dict) else {}
+    last = st.get("last")
+    if rest[-1:] != ["--force"] and isinstance(last, (int, float)) and 0 <= t - last < BATCH_SUGGEST_EVERY:
+        print(f"batch-suggest: прошлый проход {stamp(last)}, следующий не раньше {stamp(last + BATCH_SUGGEST_EVERY)}")
+        return 0
+    T, B = tasks_mod(), batchsuggest_mod()
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    dirs = sorted({h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
+    results = [B.suggest(tasks, d) for d in dirs]
+    applied, skipped = [], []
+    for res in results:  # «уверенно» прикрепляет сам проход (metis-0940); журнал задачи и пачки пишет task_attach
+        d, sk = B.apply(res, tasks, lambda tid, sid: T.task_attach(PANTHEON, now(), tid, sid, actor="плановый проход", only_loose=True))
+        applied += d
+        skipped += sk
+    if applied:
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        results = [B.suggest(tasks, d) for d in dirs]
+    results = [r for r in results if r["joins"] or r["groups"] or r["duplicates"]]
+    keys = sorted(k for r in results for k in B.keys(r))
+    seen = st.get("seen") if isinstance(st.get("seen"), list) else None
+    fresh = [k for k in keys if seen is None or k not in seen]
+    body = "\n\n".join(B.render(r) for r in results) or "Предложений нет."
+    text = ("# Пачки: предложения\n\nСчитает плановый проход без модели, раз в 3–4 суток (`pantheon task batch-suggest`). "
+            "Список не правит ничего сам: новую пачку и неуверенные предложения решает координатор — "
+            "`pantheon task set ID parent=ПАЧКА` (для новой пачки сначала `pantheon task new --type story`). "
+            "Предложения «уверенно» проход прикрепляет сам (то же, что `pantheon task batch-suggest --apply`), "
+            "строка об этом — в журнале задачи и пачки (плановый проход); прикреплённые в списке уже не числятся.\n\n"
+            f"Проход: {stamp(t)}\n\n```\n{body}\n```\n")
+    os.makedirs(STATE, exist_ok=True)
+    write_atomic(path("batch-suggest.md"), text)
+    if os.path.isdir(BOARD):
+        pp = os.path.join(BOARD, "Пачки-предложения.md")
+        old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+        if old.split("Проход:")[-1].split("\n", 1)[-1] != text.split("Проход:")[-1].split("\n", 1)[-1]:
+            write_atomic(pp, text)  # время прохода само файл не меняет: пишется только при новом составе
+    write_json(path("batch-suggest.json"), {"last": t, "seen": keys})
+    failed = B.write_failures(skipped)
+    if failed:  # сбой записи при прикреплении — тревога, а не тихий пропуск (metis-1006, Д-2 argus #400)
+        alert(f"пачки: сбой записи при прикреплении у {len(failed)} — {failed[0][:200]}", "pantheon-tick")
+    if fresh:
+        n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
+        alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
+              f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
+    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}, прикреплено {len(applied)}"
+          + "".join(f"\n  прикреплено · {x}" for x in applied) + "".join(f"\n  пропущено · {x}" for x in skipped))
+    return ALERTED if failed else 0  # тревога уже дана — run_job вторую не пишет
 
 
 def autoclose_mod():
@@ -5596,8 +7955,14 @@ def autoclose_off_reason(t, repo_dirs=None):
     return None
 
 
-def autoclose_tick(t):
-    """Лёгкий тик: слитые PR из кэша прохода `pantheon autoclose fetch` → закрытие задач. В сеть не ходит."""
+AUTOCLOSE_RUN_WAIT = 30  # с: проход fetch ждёт замок прохода по кэшу, пока его держит тик
+
+
+def autoclose_tick(t, wait=0):
+    """Проход по кэшу `pantheon autoclose fetch`: слитые PR → закрытие задач. В сеть не ходит. Зовут его тик (каждую
+    минуту) и сам fetch сразу после записи кэша (metis-0868, п. 1): задача закрывается в том же проходе, что увидел
+    слияние, а не на следующем круге. Замок autoclose-run — один проход за раз: тик и fetch не пишут одну задачу
+    дважды; wait — сколько секунд ждать замок (тик не ждёт). Карточки изменились — view и доска сразу (refresh_kick)."""
     A, T = autoclose_mod(), tasks_mod()
     repo_dirs = autoclose_repo_dirs()
     if not repo_dirs:
@@ -5607,12 +7972,17 @@ def autoclose_tick(t):
         alert_once("autoclose-off", off, off, "pantheon-tick")
     else:
         clear_once("autoclose-off")
-    log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
-                        actual_for=lambda tid: autoclose_actual(T, tid))
+    with lock_wait("autoclose-run", wait) as got:
+        if not got:
+            return
+        log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
+                            actual_for=lambda tid: autoclose_actual(T, tid), accepted=review_criteria_ticks)
     for ln in log:
         print(f"автозакрытие · {ln}")
     if log or errors:
         autoclose_alerts(sorted(repo_dirs), errors)
+    if log:
+        refresh_kick()
 
 
 def autoclose_cmd(rest):
@@ -5625,10 +7995,17 @@ def autoclose_cmd(rest):
         return 0
     A = autoclose_mod()
     errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env(),
-                     core=merge_mod().is_core)
+                     core=merge_mod().is_core, sandbox=lambda r, p, left=None: A.sandbox_core(r, p, run_env(), left=left))
     autoclose_alerts(sorted(repo_dirs), errors)
     for k, v in sorted(errors.items()):
         print(f"автозакрытие · {k}: {v}", file=sys.stderr)
+    try:
+        primary = load_schedule().get("primary_host")
+    except (OSError, ValueError) as e:  # расписание не читается — закроет тик, когда его починят (тревогу даёт он же)
+        print(f"автозакрытие · проход по кэшу пропущен: schedule.toml не читается ({e})", file=sys.stderr)
+        return 0
+    if not primary or host() == primary:  # как у тика: задачи (общий результат) правит один Mac
+        autoclose_tick(now(), wait=AUTOCLOSE_RUN_WAIT)
     return 0
 
 
@@ -5872,6 +8249,7 @@ def board_drift(T, tasks, cache, inbox):
                 if h.get("status") in ("doing", "review") and tid not in open_ids \
                         and not (mts and (T.ts_of(h.get("updated")) or 0) > mts):
                     out.append((tid, f"статус {h['status']}, а PR {repo}#{pr.get('number')} уже слит"))
+    out += batch_outside(T, tasks, cache, metrics_ctx().repos)
     for tid, (_, h, _) in sorted(tasks.items()):
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             since = T.ts_of(h.get("question_at")) or T.ts_of(h.get("created")) or 0
@@ -5888,6 +8266,48 @@ def board_drift(T, tasks, cache, inbox):
     return out
 
 
+def batch_own_of(tasks, repos):
+    """id пачки → репозитории её направления в нижнем регистре (autoclose.batch_pick, metis-0810): repos —
+    [merge_repos] policy.toml (направление → [репозиторий]); его нет, он пуст или у направления пачки нет строки —
+    None (любые), как у board-auto до правила (argus #341 Д1)."""
+    if not isinstance(repos, dict) or not repos:
+        return lambda sid: None
+
+    def own(sid):
+        mine = repos.get((tasks.get(sid) or (None, {}, ""))[1].get("direction"))
+        return [r.lower() for r in mine if isinstance(r, str)] if isinstance(mine, list) else None
+    return own
+
+
+def batch_outside(T, tasks, cache, repos=None):
+    """PR пачки (autoclose.batch_prs — одно правило с карточкой и board-auto, metis-0810) закрыл задачу, у которой parent
+    — не эта пачка (metis-0799): состав пачки считается по parent, поэтому сделанное в её ветке ложится в чужую пачку
+    или никуда, и карточка пачки показывает «1 из 13». Только открытые пачки (не done/dropped), PR из репозиториев
+    направления пачки (repos — [merge_repos]; нет — любые); PR с «часть» задач не закрывает. parent не правим — его
+    решает координатор: attach или поле пачки keep_outside — задачи, оставленные вне её состава (предупреждения о них
+    нет). → [(id, текст)]."""
+    A, out, seen = autoclose_mod(), [], set()
+    own_of = batch_own_of(tasks, repos)
+    for sid, rows in sorted(A.batch_prs(cache).items()):
+        sh = (tasks.get(sid) or (None, {}, ""))[1]
+        if sh.get("type") != "story" or sh.get("status") in ("done", "dropped"):
+            continue
+        own, keep = own_of(sid), set(sh.get("keep_outside") or [])
+        for repo, num, _, ids in rows:
+            if own is not None and repo not in own:
+                continue
+            for tid in ids:
+                h = (tasks.get(tid) or (None, {}, ""))[1]
+                if h.get("type") != "task" or h.get("parent") == sid or tid in keep or (tid, sid) in seen:
+                    continue
+                seen.add((tid, sid))
+                out.append((tid, f"PR пачки {sid} ({repo}#{num}, ветка {T.BATCH_BRANCH}{sid}) закрывает задачу, "
+                                 f"а её parent — {h.get('parent') or 'пусто'}: в составе {sid} её нет; "
+                                 f"parent решает координатор (pantheon task attach {tid} {sid} или оставить вне пачки: "
+                                 f"pantheon task set {sid} keep_outside=…,{tid})"))
+    return out
+
+
 def board_drift_report(T, quiet):
     """Печатает board_drift предупреждениями (код выхода check не меняет); тик (quiet) молчит."""
     if quiet:
@@ -5895,6 +8315,41 @@ def board_drift_report(T, quiet):
     for k, text in board_drift(T, T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
                                T.inbox_items(PANTHEON)):
         print(f"предупреждение · доска · {k}: {text}")
+
+
+NO_PARENT_FROM = "2026-11-03"  # задачи старше плана 1.0 без пачки — старый хвост, не тревожим
+NO_PARENT_AGE = 86400
+
+
+def check_no_parent(T, quiet):
+    """Открытая задача type task без parent, созданная больше суток назад и не раньше NO_PARENT_FROM (metis-0940, слово
+    владельца 06.11). Тик (quiet) — одна тревога на пачку новых номеров, каждый номер один раз (STATE/no-parent-seen.json,
+    ушедшие из списка забываются); руками — предупреждение со всем списком. → список номеров.
+    Не в списке: задача «ждёт» владельца (waiting_on=human, это вопрос ему, пачка не поможет). Тревога называет первые
+    ALERT_IDS номеров и помечает виденными только их: остальные придут следующим тиком (скрытые не считаются виденными)."""
+    t = now()
+    ids = sorted(tid for tid, (_, h, _) in T.load_tasks(PANTHEON, T.WORK_TYPES).items()
+                 if h.get("type") == "task" and h.get("status") not in ("done", "dropped", "inbox")
+                 and not (h.get("status") == "waiting" and h.get("waiting_on") == "human")
+                 and not h.get("parent") and not h.get("batch") and str(h.get("created") or "") >= NO_PARENT_FROM
+                 and t - (T.ts_of(h.get("created")) or t) > NO_PARENT_AGE)
+    if not quiet:
+        if ids:
+            print(f"предупреждение · задачи без пачки старше суток: {_ids_text(ids)} — pantheon task batch-suggest, "
+                  "затем pantheon task set ID parent=… mode=single mode_why=…")
+        return ids
+    seen = read_json(path("no-parent-seen.json"), [])
+    seen = seen if isinstance(seen, list) else []
+    fresh = [i for i in ids if i not in seen][:ALERT_IDS]  # показанные в тревоге; хвост — следующим тиком
+    rest = len([i for i in ids if i not in seen]) - len(fresh)
+    if fresh:
+        alert(f"задачи без пачки старше суток: {_ids_text(fresh)}{f' и ещё {rest}' if rest else ''} — положить в пачку: pantheon task batch-suggest, "
+              "затем pantheon task set ID parent=… mode=single mode_why=…", "check")
+    keep = sorted(set(seen) & set(ids) | set(fresh))
+    if keep != sorted(seen):
+        os.makedirs(STATE, exist_ok=True)
+        write_json(path("no-parent-seen.json"), keep)
+    return ids
 
 
 def check_task_projects(T, quiet):
@@ -5950,8 +8405,10 @@ def check(paths=None, quiet=False):
     coord_errs = 0
     if not paths:
         _check_long_state(quiet)
+        check_moved(quiet)   # предупреждение, на код выхода check не влияет
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
+        check_no_parent(T, quiet)  # без пачки старше суток: предупреждение, код выхода не меняет (metis-0940)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
             # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
             # бы сессию снова (ревью argus PR #32)
@@ -5986,7 +8443,13 @@ def check(paths=None, quiet=False):
                  + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
-                    for i, ln in T.part_stalled(tasks_now, now())])
+                    for i, ln in T.part_stalled(tasks_now, now())]
+                 # metis-0615: «часть» без неотмеченных пунктов — остаток не записан; сразу, не через сутки
+                 + [("часть-пусто", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
+                     f"{i}: «{ln[:140]}»") for i, ln in T.part_no_items(tasks_now)]
+                 # metis-0868 п. 5: время строки журнала ставит код; строка «из будущего» дописана руками на глаз
+                 + [("время", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
+                     f"{i}: строка журнала позже часов системы — «{ln[:140]}»") for i, ln in T.journal_future(tasks_now, now())])
         stall = T.stalled(tasks_now, now())  # metis-0583: doing/review без записи в журнале дольше 2 суток — без тревоги
         # metis-0572: расхождения доски («ответил, а waiting», «PR слит, а задача открыта») — в Хвосты.md и на карточку
         off = [("доска", k, f"{k}: {text}") for k, text in board_drift(T, tasks_now, read_json(path("autoclose-prs.json"), {}),
@@ -5997,7 +8460,7 @@ def check(paths=None, quiet=False):
                   + ", ".join(i for i, _, _ in stall[:TAIL_SHOWN]) + (f" и ещё {len(stall) - TAIL_SHOWN}" if len(stall) > TAIL_SHOWN else "")
                   + " (список — Доска/Хвосты.md)")
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
-        field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
+        field_errs = [(i, "status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
             print(f"ОШИБКА · {tid}: {text}")
         for tid, text in field_warns:
@@ -6010,6 +8473,8 @@ def check(paths=None, quiet=False):
                     print(f"внимание · {dname}: без «Кто делает» (mode) открытых задач {c['no_mode']} — "
                           "список и правка: pantheon task migrate-mode --dry-run, затем без --dry-run")
     board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
+    if not paths:
+        board_md_check(quiet)  # board.md: размер «Сейчас», дата «Обновлено», сроки «По датам» (metis-0769)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
         if off:
@@ -6060,7 +8525,11 @@ def check(paths=None, quiet=False):
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
         tail_alert(T, tails)
+        if not paths:
+            pack_check(quiet=True)
         return 0
+    if not paths:
+        pack_check()  # предупреждение, на код выхода не влияет (metis-0933)
     return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad or coord_errs else 0
 
 
@@ -6120,12 +8589,16 @@ TAIL_SHOWN = 12
 TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
-             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
+             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)",
+             "время": "строка журнала задачи позже часов системы — дописана руками, время на глаз (записи — через "
+                      "pantheon task set --note, время ставит код)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
 TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review (записать ход, закрыть или вернуть в очередь)",
-                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)"})
+                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)",
+                                     "часть-пусто": "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет (вписать "
+                                                    "пункт остатка или закрыть задачу)"})
 TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
-             "доска": "доска"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
 
 
 def tails_by_task(items):
@@ -6150,7 +8623,7 @@ def tails_board(items):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
             "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
             + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
@@ -6213,7 +8686,7 @@ def _read_strict(p):
 
 # --- дежурный и управление сессиями (шаг 1.4) — lib/watch.py ---------------------------------------------------------
 WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check",
-              "launch-question"}
+              "launch-question", "wt"}
 
 
 def watch_cmd(cmd, rest, over=False):
@@ -6228,7 +8701,8 @@ def watch_cmd(cmd, rest, over=False):
     return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
             "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
             "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
-            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest)}[cmd]()
+            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest),
+            "wt": lambda: w.wt_cmd(rest)}[cmd]()
 
 
 def usage_report(rest):
@@ -6522,6 +8996,7 @@ def _attach(name):
     return m
 
 
+_attach("review_rules")   # правило вердиктов argus — ядро защит (metis-0858); review.py берёт его через P
 _attach("review")
 _attach("plugins")
 _attach("taskcli")
@@ -6532,6 +9007,7 @@ _attach("quarantine")
 _attach("instructions")
 _attach("rolecmd")
 _attach("sessions")
+_attach("batch")
 
 
 def main(argv):
@@ -6574,22 +9050,52 @@ def main(argv):
             # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
             notify_critical(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})")
         return 0
+    if cmd == "notify" and rest:  # metis-0907: уведомление macOS сразу (хук wait-owner); щелчок — доска или --target
+        opts = {"--title": "Пантеон", "--group": None, "--target": None}
+        words = []
+        it = iter(rest)
+        for a in it:
+            if a in opts:
+                v = next(it, None)
+                if v is None:
+                    print(f"pantheon notify: после {a} нужно значение", file=sys.stderr)
+                    return 2
+                opts[a] = v
+            else:
+                words.append(a)
+        if not " ".join(words).strip():
+            print("pantheon notify: пустой текст", file=sys.stderr)
+            return 2
+        notify(" ".join(words)[:300], title=opts["--title"], target=opts["--target"], group=opts["--group"])
+        return 0
     if cmd == "archive":
         return archive()
     if cmd == "domains" and rest[:1] == ["build"]:
         return domains_build(if_changed="--if-changed" in rest)
+    if cmd == "packs":
+        return pack_hashes_cmd(rest)
     if cmd == "view":
         return view(quiet="--quiet" in rest)
     if cmd == "commit":
         return commit()
+    if cmd == "board" and rest[:1] == ["archive"]:
+        return board_archive(rest[1:])
     if cmd == "board":
         return board()
     if cmd == "sync-answers":
         return sync_answers()
     if cmd == "autoclose":
         return autoclose_cmd(rest)
+    if cmd == "who-canvas":
+        return who_canvas_cmd(rest)
+    if cmd == "batch-suggest":
+        return batch_suggest_run(rest)
     if cmd == "status":
         return status()
+    if cmd == "check" and "--moved" in rest:
+        return 1 if check_moved(force=True) else 0
+    if cmd == "migrate-paths":
+        return migrate_paths_cmd(rest)
     if cmd == "check":
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":
@@ -6643,6 +9149,8 @@ def main(argv):
         return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
         return watch_cmd(cmd, rest)
+    if cmd == "roster":
+        return roster_cmd(rest)
     if cmd == "usage":
         return usage_report(rest)
     if cmd == "metrics":
@@ -6657,6 +9165,14 @@ def main(argv):
         return merge_mod().main(rest)
     if cmd == "outside":
         return outside_mod().main(rest)
+    if cmd == "browser":
+        return browser_mod().main(rest)
+    if cmd == "handoff":
+        return handoff_mod().main(rest)
+    if cmd == "owner-edit":
+        return owner_edit_mod().main(rest)
+    if cmd == "batch":
+        return batch_cmd(rest)
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":

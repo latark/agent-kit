@@ -554,15 +554,15 @@ shutil.rmtree(r_bot_net.origin)
 check("коммит выпуска, объект родителя не догрузить (origin недоступен) — флаги", r_bot_net.flags() != [],
       r_bot_net.flags())
 # мутант «всегда пропускать»: сценарии «отличается на байт» и «не слит» проходят без флагов — значит, тесты выше
-# на мутанте красные (их условие `!= []` не выполняется)
+# его убивают (их условие `!= []` не выполняется)
 mut = os.path.join(ROOT, "config-check-mutant.py")
 src = open(CHECK, encoding="utf-8").read()
 assert "def is_released(path, data):\n" in src
 with open(mut, "w", encoding="utf-8") as fh:
     fh.write(src.replace("def is_released(path, data):\n", "def is_released(path, data):\n    return True\n"))
-check("мутант «всегда пропускать»: правка в байт проходит без флагов (тест на неё красный)", r_diff.flags(mut) == [],
+check("мутант «всегда пропускать»: правка в байт проходит без флагов (мутант убит)", r_diff.flags(mut) == [],
       r_diff.flags(mut))
-check("мутант «всегда пропускать»: не слитый коммит проходит без флагов (тест красный)", r_nm.flags(mut) == [])
+check("мутант «всегда пропускать»: не слитый коммит проходит без флагов (мутант убит)", r_nm.flags(mut) == [])
 
 for tag, a, b in (("parents вместо parents[1:]", "parents[1:]", "parents"),
                   ("endswith вместо точного имени", "== OWNER_REPO", '.endswith("/agent-kit")')):
@@ -572,7 +572,7 @@ for tag, a, b in (("parents вместо parents[1:]", "parents[1:]", "parents")
     with open(mp, "w", encoding="utf-8") as fh:
         fh.write(msrc)
     probe = r_dir1 if "parents" in tag else r_evil
-    check(f"мутант «{tag}»: сценарий проходит без флагов (тест красный)", probe.flags(mp) == [], probe.flags(mp))
+    check(f"мутант «{tag}»: сценарий проходит без флагов (мутант убит)", probe.flags(mp) == [], probe.flags(mp))
 
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)

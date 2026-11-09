@@ -163,7 +163,8 @@ def test_tick():
         write_gh(gh, "latark/agent-kit", "merged", [
             pr(7, "metis-0001-autoclose", "Закрывает задачу", merged_at),
             pr(8, "feature-x", "Closes metis-0002, но только часть 1 из 2", merged_at),
-            pr(10, "metis-0003-v", "версия", merged_at, oid="1234567fffffff", files=["plugins/pantheon/.claude-plugin/plugin.json"])])
+            pr(10, "metis-0003-v", "версия", merged_at, oid="1234567fffffff",
+               files=[None, "plugins/pantheon/.claude-plugin/plugin.json"])])  # path null: fetch не падает (0674)
         write_gh(gh, "acme/site", "merged", [pr(3, "demo-0001-site", "", merged_at, oid="9999999aaaaaaa")])
         with open(os.path.join(gh, "diff.txt"), "w") as fh:
             fh.write('diff --git a/plugins/pantheon/.claude-plugin/plugin.json b/plugins/pantheon/.claude-plugin/plugin.json\n'
@@ -171,14 +172,17 @@ def test_tick():
         rf = pan(env, T0, "autoclose", "fetch")
         check("fetch: код 0, gh спрошен, кэш записан", rf.returncode == 0 and os.path.exists(os.path.join(gh, "calls.log"))
               and os.path.exists(os.path.join(state, "autoclose-prs.json")), rf.stdout + rf.stderr)
-        check("fetch ничего не закрывает", T.read(pa)[0].get("status") == "doing")
+        ha = T.read(pa)[0]
+        # metis-0868: закрытие — в том же проходе, сразу после fetch, а не на следующем тике
+        check("fetch: слитый PR с metis-0001 в ветке закрывает задачу в том же проходе", ha.get("status") == "done",
+              rf.stdout + rf.stderr + text(pa)[:400])
+        fetched = {p: text(p) for p in (pa, pb, pc, pd)}
         os.remove(os.path.join(gh, "calls.log"))
         r = pan(env, T0, "tick")
         check("лёгкий тик не зовёт gh", not os.path.exists(os.path.join(gh, "calls.log")), text(os.path.join(gh, "calls.log"))
               if os.path.exists(os.path.join(gh, "calls.log")) else "")
-        ha = T.read(pa)[0]
-        check("тик: слитый PR с metis-0001 в ветке закрывает задачу", ha.get("status") == "done" and r.returncode == 0,
-              r.stdout + r.stderr + text(pa)[:400])
+        check("тик после fetch: закрывать уже нечего, задачи не изменились",
+              r.returncode == 0 and {p: text(p) for p in (pa, pb, pc, pd)} == fetched, r.stdout + r.stderr)
         check("closed — день слияния", ha.get("closed") == day(merged_at), str(ha.get("closed")))
         check("release: PR → коммит", ha.get("release") == "PR #7 → abcdef0", str(ha.get("release")))
         check("actual: из metrics/tasks.jsonl", ha.get("actual") == "$1.50 · 450k токенов · 2.1 ч", str(ha.get("actual")))
@@ -204,6 +208,33 @@ def test_tick():
         st = json.load(open(os.path.join(state, "autoclose.json")))
         check("отметки обработанных PR в STATE", set(st["done"]) == {"latark/agent-kit#7", "latark/agent-kit#8", "latark/agent-kit#10", "acme/site#3"},
               str(st.get("done")))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_fetch_same_pass_primary_only():
+    """metis-0868, п. 1: fetch закрывает в том же проходе только на главном Mac (как тик); карточки закрыты — view
+    и доска сразу (задачи расписания), а не через минуту."""
+    tmp, home, state, gh, env = make()
+    try:
+        open(os.path.join(home, "schedule.toml"), "w").write(
+            'primary_host = "mac-a"\n\n[[job]]\nname = "view"\ncommand = "pantheon view --quiet"\nevery = "tick"\n')
+        a, pa, _ = new(env, home, T0 - 7200, "metis-pantheon", "Ядро", "--status", "doing", "--next", "x")
+        write_gh(gh, "latark/agent-kit", "merged", [pr(7, "feature", "Closes metis-0001", T0 - 3600)])
+        rb = pan(dict(env, PANTHEON_HOST="mac-b", PANTHEON_REFRESH="1"), T0, "autoclose", "fetch")
+        dry = os.path.join(state, "dryrun.log")
+        check("fetch не на главном Mac: кэш записан, задача не закрыта (закрывает главный)",
+              rb.returncode == 0 and T.read(pa)[0].get("status") == "doing" and not os.path.exists(dry), rb.stdout + rb.stderr)
+        ra = pan(dict(env, PANTHEON_REFRESH="1"), T0 + 60, "autoclose", "fetch")
+        check("fetch на главном Mac: закрыта в том же проходе, строка «автозакрытие ·» в выводе",
+              ra.returncode == 0 and T.read(pa)[0].get("status") == "done" and f"автозакрытие · {a}" in ra.stdout,
+              ra.stdout + ra.stderr)
+        check("… и копия Obsidian сразу: задача view запущена", os.path.exists(dry) and text(dry).split()[1:] == ["view"],
+              text(dry) if os.path.exists(dry) else "нет dryrun.log")
+        open(os.path.join(home, "schedule.toml"), "w").write("primary_host = [не toml\n")
+        rc = pan(env, T0 + 120, "autoclose", "fetch")
+        check("schedule.toml не читается — fetch не падает, проход по кэшу пропущен с причиной",
+              rc.returncode == 0 and "проход по кэшу пропущен: schedule.toml не читается" in rc.stderr, rc.stdout + rc.stderr)
     finally:
         shutil.rmtree(tmp, True)
 
@@ -337,6 +368,247 @@ def test_mutants():
         shutil.rmtree(tmp, True)
 
 
+def test_open_core_sandbox_build():
+    """metis-0686: сводка доски берёт «ядро» у шлюза guard — и правка функции сборки окон в pantheon.py ядро."""
+    import hashlib
+    gate = A.load_gate()
+    check("шлюз guard загружается из репозитория", gate is not None and hasattr(gate, "sandbox_build_changes"))
+    src = open(CLI, encoding="utf-8").read()
+    in_closure = src.replace("    try:\n        with open(policy_path, \"rb\") as fh:",
+                             "    _x = 1\n    try:\n        with open(policy_path, \"rb\") as fh:", 1)
+    outside = src.replace("def autoclose_cmd(rest):\n", "def autoclose_cmd(rest):\n    _y = 1\n", 1)
+    check("пробы правок отличаются от исходника", in_closure != src and outside != src)
+
+    def sha(n):
+        return hashlib.sha1(str(n).encode()).hexdigest()
+    base, head, mb, tip = sha("b"), sha("h"), sha("m"), sha("t")
+    state = {"new": src}
+    calls = []
+
+    def fake_text(args, env=None, timeout=90):
+        calls.append(args)
+        if "compare" in args[1]:
+            return mb + "\n"
+        ref = args[1].rsplit("ref=", 1)[1]
+        return state["new"] if ref == head else src
+
+    def sb(r, p):
+        return A.sandbox_core(r, p, gate=gate)
+
+    def not_core(path):
+        return False
+    real_text, real_tip = A.gh_text, A.base_tip
+    A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
+    try:
+        pp = "plugins/pantheon/lib/pantheon.py"
+        row = {"number": 7, "headRefOid": head, "baseRefOid": base, "baseRefName": "main", "files": [{"path": pp}]}
+        state["new"] = in_closure
+        check("PR правит функцию из замыкания sandbox_build → ядро", A.open_core("a/b", row, not_core, sb) is True)
+        state["new"] = outside
+        check("PR правит в pantheon.py другую функцию → не ядро", A.open_core("a/b", row, not_core, sb) is False)
+        n = len(calls)
+        only = {"number": 8, "files": [{"path": "plugins/pantheon/lib/autoclose.py"}]}
+        check("PR только с autoclose.py → не ядро, без запросов к gh",
+              A.open_core("a/b", only, not_core, sb) is False and len(calls) == n)
+        A.gh_text = lambda *a, **k: None
+        state["new"] = in_closure
+        check("файлы pantheon.py не получить → ядро (как у шлюза)", A.sandbox_core("a/b", row, gate=gate) is True)
+        check("путь ядра по списку путей остаётся ядром", A.open_core("a/b", only, lambda x: True, None) is True)
+    finally:
+        A.gh_text, A.base_tip = real_text, real_tip
+
+
+def test_open_core_sessions_launch():
+    """metis-0551, 0552: доска берёт у шлюза и запуск окон в sessions.py — снятие --settings в _start_session ядро,
+    новая функция в sessions.py — не ядро; PR с pantheon.py и sessions.py сверяет оба файла. С metis-0933 argv окна
+    собирает P.window_launch (pantheon.py): снять --settings в sessions.py — собрать argv в обход window_launch."""
+    import hashlib
+    gate = A.load_gate()
+    pp, sp = "plugins/pantheon/lib/pantheon.py", "plugins/pantheon/lib/sessions.py"
+    src = {pp: open(CLI, encoding="utf-8").read(), sp: open(os.path.join(LIB, "sessions.py"), encoding="utf-8").read()}
+    a = "P.window_launch(role, name, window, run, prompt)"
+    b = '[P.claude_bin(), "--bg", "--agent", role, "--name", name, prompt]'
+    check("в sessions.py есть запуск _start_session через window_launch", src[sp].count(a) == 1)
+
+    def sha(n):
+        return hashlib.sha1(str(n).encode()).hexdigest()
+    base, head, mb, tip = sha("b"), sha("h"), sha("m"), sha("t")
+    state = dict(src)
+    asked = []
+
+    def fake_text(args, env=None, timeout=90):
+        if "compare" in args[1]:
+            return mb + "\n"
+        path, ref = args[1].split("/contents/", 1)[1].split("?ref=", 1)
+        asked.append(path)
+        return state[path] if ref == head else src[path]
+
+    real_text, real_tip = A.gh_text, A.base_tip
+    A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
+    try:
+        row = {"number": 7, "headRefOid": head, "baseRefOid": base, "baseRefName": "main", "files": [{"path": sp}]}
+        state[sp] = src[sp].replace(a, b, 1)
+        check("PR снимает --settings в _start_session → ядро", A.sandbox_core("a/b", row, gate=gate) is True)
+        state[sp] = src[sp] + "\n\ndef _probe_0552():\n    return 1\n"
+        check("PR добавляет функцию в sessions.py → не ядро", A.sandbox_core("a/b", row, gate=gate) is False)
+        del asked[:]
+        both = dict(row, files=[{"path": pp}, {"path": sp}])
+        check("PR с pantheon.py и sessions.py без правки сборки → не ядро",
+              A.sandbox_core("a/b", both, gate=gate) is False and {pp, sp} <= set(asked), asked)
+        state[sp] = src[sp].replace(a, b, 1)
+        check("PR с pantheon.py и sessions.py, снятие --settings → ядро", A.sandbox_core("a/b", both, gate=gate) is True)
+    finally:
+        A.gh_text, A.base_tip = real_text, real_tip
+
+
+def test_board_line_core():
+    """metis-0686 п. 3: PR с правкой функции из замыкания sandbox_build проходит весь путь доски — fetch (признак шлюза)
+    → кэш autoclose-prs.json → boardtext.open_prs → pr_line: в строке «ядро → сливает владелец», слов «не ядро» нет.
+    Соседний PR с правкой другой функции pantheon.py — «не ядро»."""
+    import hashlib
+    import boardtext as B
+    gate = A.load_gate()
+    src = open(CLI, encoding="utf-8").read()
+    in_closure = src.replace("    try:\n        with open(policy_path, \"rb\") as fh:",
+                             "    _x = 1\n    try:\n        with open(policy_path, \"rb\") as fh:", 1)
+    outside = src.replace("def autoclose_cmd(rest):\n", "def autoclose_cmd(rest):\n    _y = 1\n", 1)
+    check("0686 п.3: пробы правок отличаются от исходника", in_closure != src and outside != src)
+
+    def sha(n):
+        return hashlib.sha1(str(n).encode()).hexdigest()
+    base, mb, tip, h_core, h_plain = sha("b"), sha("m"), sha("t"), sha("h1"), sha("h2")
+    by_ref = {h_core: in_closure, h_plain: outside}
+
+    def fake_text(args, env=None, timeout=90):
+        if "compare" in args[1]:
+            return mb + "\n"
+        return by_ref.get(args[1].rsplit("ref=", 1)[1], src)
+    pp = "plugins/pantheon/lib/pantheon.py"
+    tmp, home, state, gh, env = make()
+    real_text, real_tip = A.gh_text, A.base_tip
+    A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
+    try:
+        write_gh(gh, "latark/agent-kit", "open", [
+            {"number": 249, "headRefName": "metis-0686-x", "body": "", "headRefOid": h_core, "baseRefOid": base,
+             "baseRefName": "main", "files": [{"path": pp}]},
+            {"number": 250, "headRefName": "metis-0687-y", "body": "", "headRefOid": h_plain, "baseRefOid": base,
+             "baseRefName": "main", "files": [{"path": pp}]}])
+        cache = os.path.join(state, "autoclose-prs.json")
+        os.makedirs(state, exist_ok=True)
+        errs = A.fetch(cache, os.path.join(state, "s.json"), T0, ["latark/agent-kit"], env=dict(env),
+                       core=lambda path: False,
+                       sandbox=lambda r, p, left=None: A.sandbox_core(r, p, env, gate=gate, left=left))
+        rows = {p["number"]: p for p in B.open_prs(cache) or []}
+        line = B.pr_line(rows[249], {}) if 249 in rows else ""
+        plain = B.pr_line(rows[250], {}) if 250 in rows else ""
+        check("0686 п.3: строка доски PR с правкой замыкания sandbox_build — «ядро → сливает владелец», без «не ядро»",
+              not errs and "ядро → сливает владелец" in line and "не ядро" not in line, f"{errs} {line!r}")
+        check("0686 п.3: строка доски PR с правкой другой функции pantheon.py — «не ядро»",
+              "не ядро → «принять» Зевса" in plain, plain)
+    finally:
+        A.gh_text, A.base_tip = real_text, real_tip
+        shutil.rmtree(tmp, True)
+
+
+def test_stub_four_consumers():
+    """metis-0711, Д ревью #272: заглушку шаблона одинаково узнают все четыре, кто считает пункты «Готово, когда»:
+    unchecked_criteria (закрытие и autoclose), criteria_count, no_criteria (direction_summary) и task_split (остаток). Та же
+    заглушка с двойным пробелом, табуляцией и пробелами по краям — для всех «нет критериев»; рядом с настоящим пунктом —
+    для всех один пункт."""
+    tmp, home, state, gh, env = make()
+    try:
+        hint = T.DONE_WHEN_HINT
+        stubs = {"дословно": hint, "двойной пробел": hint.replace(" ", "  ", 1),
+                 "табуляция внутри": hint.replace(" ", "\t", 2), "пробелы по краям": "  " + hint + " "}
+        for n, (name, stub) in enumerate(sorted(stubs.items())):
+            tid = f"demo-02{n:02d}"
+            p = put(home, "demo", tid, status="todo", created="2026-10-27", body="Готово, когда:\n- [ ] " + stub + "\n")
+            head, body = T.read(p)
+            tasks = {tid: (p, head, body)}
+            got = {"unchecked_criteria": T.unchecked_criteria(head, body), "criteria_count": T.criteria_count(body),
+                   "no_criteria": T.direction_summary(tasks)["demo"]["no_criteria"]}
+            nid, np_ = T.task_split(home, T0, tid, "Остаток " + name)
+            got["split"] = [x for _, x in T.done_criteria(T.read(np_)[1])]
+            want = {"unchecked_criteria": 0, "criteria_count": "не заданы", "no_criteria": 1, "split": [hint]}
+            check(f"0711: заглушка ({name}) — все четыре: нет критериев", got == want, f"{got}")
+        p = put(home, "demo", "demo-0299", status="todo", created="2026-10-27",
+                body="Готово, когда:\n- [ ] " + hint.replace(" ", "  ", 1) + "\n- [ ] настоящий\n")
+        head, body = T.read(p)
+        got = {"unchecked_criteria": T.unchecked_criteria(head, body), "criteria_count": T.criteria_count(body),
+               "no_criteria": T.direction_summary({"demo-0299": (p, head, body)})["demo"]["no_criteria"]}
+        nid, np_ = T.task_split(home, T0, "demo-0299", "Остаток с пунктом")
+        got["split"] = [x for _, x in T.done_criteria(T.read(np_)[1])]
+        check("0711: заглушка рядом с настоящим пунктом — все четыре видят один пункт",
+              got == {"unchecked_criteria": 1, "criteria_count": "0 из 1", "no_criteria": 0, "split": ["настоящий"]}, f"{got}")
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_core_budget_and_rename():
+    """metis-0711: признак ядра в бюджете fetch (Д1), переименование pantheon.py (Д2), gh вершины ветки — из PANTHEON_GH (С1)."""
+    import hashlib
+    gate = A.load_gate()
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="autoclose-core-"))
+    try:
+        slow = os.path.join(tmp, "gh")
+        open(slow, "w").write("#!/bin/sh\ntouch \"$0.ran\"\nsleep 5\nexit 1\n")
+        os.chmod(slow, 0o755)
+        env = {"PATH": "/usr/bin:/bin", "PANTHEON_GH": slow}
+        pp = "plugins/pantheon/lib/pantheon.py"
+        sh = lambda n: hashlib.sha1(str(n).encode()).hexdigest()
+        row = {"number": 7, "headRefOid": sh("h"), "baseRefOid": sh("b"), "baseRefName": "main", "files": [{"path": pp}]}
+        end = time.monotonic() + 2.5
+        t0 = time.monotonic()
+        got = A.sandbox_core("a/b", row, env, gate=gate, left=lambda: end - time.monotonic())
+        el = time.monotonic() - t0
+        check("Д1: медленный gh в пределах бюджета fetch, PR — ядро", got is True and el < 4.0, f"{el:.1f} c {got}")
+        os.remove(slow + ".ran")
+        end = time.monotonic() + 0.5
+        t0 = time.monotonic()
+        got = A.sandbox_core("a/b", row, env, gate=gate, left=lambda: end - time.monotonic())
+        check("Д1: left() <= 1 — ядро без вызова gh", got is True and time.monotonic() - t0 < 1.0 and not os.path.exists(slow + ".ran"))
+
+        seen = []
+
+        def sb(r, p, left=None):
+            seen.append(left)
+            return False
+        tmp2, home, state, gh, env2 = make()
+        try:
+            write_gh(gh, "a/b", "open", [{"number": 1, "headRefName": "x", "body": "", "files": [{"path": pp}]}])
+            A.fetch(os.path.join(state, "p.json"), os.path.join(state, "s.json"), T0, ["a/b"], env=dict(env2), budget=60,
+                    core=lambda x: False, sandbox=sb)
+            check("Д1: fetch передаёт в sandbox остаток бюджета", len(seen) == 1 and callable(seen[0]) and 0 < seen[0]() <= 60, str(seen))
+        finally:
+            shutil.rmtree(tmp2, True)
+
+        n = {"gh": 0}
+        real_text = A.gh_text
+        A.gh_text = lambda *a, **k: n.__setitem__("gh", n["gh"] + 1)
+        try:
+            for name, files in (
+                    ("previous_filename = pantheon.py", [{"path": "plugins/pantheon/lib/old.py", "previous_filename": pp}]),
+                    ("pantheon.py ушёл (путь с ./ и регистром)", [{"path": "x.py", "previous_filename": "./Plugins/Pantheon/lib/pantheon.py"}]),
+                    ("changeType RENAMED, старый путь gh не отдаёт", [{"path": "plugins/pantheon/lib/other.py", "changeType": "RENAMED"}])):
+                check("Д2: переименование — ядро: " + name, A.sandbox_core("a/b", dict(row, files=files), env, gate=gate) is True)
+            check("Д2: обычная правка другого файла — не ядро",
+                  A.sandbox_core("a/b", dict(row, files=[{"path": "README.md", "changeType": "MODIFIED"}]), env, gate=gate) is False)
+        finally:
+            A.gh_text = real_text
+
+        # С1: gh вершины ветки — PANTHEON_GH, а не PATH
+        fake = os.path.join(tmp, "gh2")
+        tip = sh("t")
+        open(fake, "w").write("#!/bin/sh\necho '{\"ref\":\"refs/heads/main\",\"object\":{\"type\":\"commit\",\"sha\":\"%s\"}}'\n" % tip)
+        os.chmod(fake, 0o755)
+        check("С1: base_tip берёт gh из PANTHEON_GH (в PATH его нет)",
+              A.base_tip("a/b", "main", {"PATH": "/usr/bin:/bin", "PANTHEON_GH": fake}, gate) == tip)
+        check("С1: нет gh — None", A.base_tip("a/b", "main", {"PATH": "/nonexistent"}, gate) is None)
+        check("С1: плохое имя ветки — None", A.base_tip("a/b", "../x", {"PANTHEON_GH": fake}, gate) is None)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def test_fetch_budget():
     tmp, home, state, gh, env = make()
     try:
@@ -347,6 +619,147 @@ def test_fetch_budget():
         el = time.monotonic() - t0
         check("fetch: предел времени на весь проход, остаток репозиториев — ошибка", el < 4.5 and len(errs) == 3, f"{el:.1f} c {errs}")
         check("fetch: кэш записан даже при сбое", A.load_state(os.path.join(state, "p.json")).get("errors") == errs)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_fetch_keeps_rows_on_error():
+    """metis-0808: ошибка gh по репозиторию (401, TLS, EOF, время) оставляет его прежние слитые и открытые PR, а в кэше —
+    stale[repo] со временем последнего успеха; один завислый репозиторий не съедает проход; давний успех идёт первым."""
+    tmp, home, state, gh, env = make()
+    try:
+        cf, sf = os.path.join(state, "p.json"), os.path.join(state, "s.json")
+        repos = ["a/b", "c/d"]
+        for r in repos:
+            write_gh(gh, r, "merged", [pr(5, "metis-0808", "Closes metis-0808", T0)])
+            write_gh(gh, r, "open", [{"number": 9, "headRefName": "x", "headRefOid": "1" * 40, "body": "Closes metis-0809", "files": []}])
+        check("fetch: чистый проход — ошибок нет, stale пусто, repo_ok по обоим",
+              A.fetch(cf, sf, T0, repos, env=dict(env)) == {} and A.load_state(cf).get("stale") == {}
+              and A.load_state(cf).get("repo_ok") == {"a/b": T0, "c/d": T0})
+        good = os.path.join(gh, "gh")
+        ok_text = open(good).read()
+
+        def gh_script(body):
+            open(good, "w").write(ok_text.replace('if [ "$1 $2" = "pr list" ]; then', body + '\nif [ "$1 $2" = "pr list" ]; then', 1))
+        # 401 по всем репозиториям
+        gh_script('echo "HTTP 401: Bad credentials" >&2; exit 1')
+        errs = A.fetch(cf, sf, T0 + 600, repos, env=dict(env))
+        c = A.load_state(cf)
+        check("401 по всем репозиториям: ошибки на обоих, прежние merged и open_prs на месте",
+              sorted(errs) == repos and all("401" in v for v in errs.values())
+              and [r["number"] for r in c["merged"]["a/b"]] == [5] and c["open_prs"]["c/d"][0]["number"] == 9
+              and c["open"]["a/b"] == ["metis-0809"], (errs, c))
+        check("401: stale[repo] — время последнего успеха, не нынешнего прохода", c["stale"] == {"a/b": T0, "c/d": T0}
+              and c["fetched"] == T0 + 600 and c["repo_ok"] == {"a/b": T0, "c/d": T0}, c)
+        idx = A.pr_index(c)
+        check("401: pr_index (ссылки карточек, пачки) прежний", sorted((x["repo"], x["number"]) for x in idx.get("metis-0808", [])) == [("a/b", 5), ("c/d", 5)]
+              and sorted((x["repo"], x["number"]) for x in idx.get("metis-0809", [])) == [("a/b", 9), ("c/d", 9)], idx)
+        errs = A.fetch(cf, sf, T0 + 1200, repos, env=dict(env))
+        check("второй сбой подряд: stale не сдвигается к нынешнему проходу", A.load_state(cf)["stale"] == {"a/b": T0, "c/d": T0})
+        # сбой только открытых PR: слитые свежие, открытые прежние
+        write_gh(gh, "a/b", "merged", [pr(5, "metis-0808", "Closes metis-0808", T0), pr(6, "x", "", T0)])
+        gh_script('case "$*" in *"--state open"*) echo "TLS handshake timeout" >&2; exit 1;; esac')
+        errs = A.fetch(cf, sf, T0 + 1800, repos, env=dict(env))
+        c = A.load_state(cf)
+        check("сбой только открытых PR: слитые новые, открытые прежние, ошибка и stale по репозиторию",
+              [r["number"] for r in c["merged"]["a/b"]] == [5, 6] and c["open_prs"]["a/b"][0]["number"] == 9
+              and "открытые PR" in errs.get("a/b", "") and c["stale"].get("a/b") == T0, (errs, c["stale"]))
+        # починилось: stale и ошибки уходят, repo_ok обновлён
+        open(good, "w").write(ok_text)
+        write_gh(gh, "a/b", "open", [])
+        errs = A.fetch(cf, sf, T0 + 2400, repos, env=dict(env))
+        c = A.load_state(cf)
+        check("gh снова отвечает: ошибок и stale нет, открытых PR у a/b нет (честный ноль), repo_ok обновлён",
+              errs == {} and c["stale"] == {} and c["open_prs"]["a/b"] == [] and c["repo_ok"] == {"a/b": T0 + 2400, "c/d": T0 + 2400}, c)
+        # репозиторий без прошлых строк и сбой: пусто, stale = 0 (данных нет)
+        gh_script('echo "EOF" >&2; exit 1')
+        errs = A.fetch(cf, sf, T0 + 3000, ["n/e"], env=dict(env))
+        c = A.load_state(cf)
+        check("новый репозиторий + сбой: строк нет, stale 0 (данных нет)", c["merged"] == {} and c["stale"] == {"n/e": 0}, c)
+        open(good, "w").write(ok_text)
+        # зависший gh: бюджет на репозиторий, второй не голодает
+        A.save_state(cf, {"fetched": T0, "merged": {r: [{"number": 5}] for r in repos}, "open_prs": {}, "repo_ok": {r: T0 for r in repos}})
+        open(os.path.join(gh, "sleep"), "w").write("5")
+        open(os.path.join(gh, "calls.log"), "w").close()
+        t0 = time.monotonic()
+        errs = A.fetch(cf, sf, T0 + 3600, repos, env=dict(env), budget=60, repo_budget=1.5)
+        el = time.monotonic() - t0
+        calls = open(os.path.join(gh, "calls.log")).read()
+        check("завислый gh: на репозиторий не больше repo_budget, оба репозитория опрошены, прежние строки целы",
+              el < 8 and "--repo a/b" in calls and "--repo c/d" in calls and sorted(errs) == repos
+              and A.load_state(cf)["merged"]["c/d"] == [{"number": 5}], f"{el:.1f} c {errs}")
+        os.remove(os.path.join(gh, "sleep"))
+        # порядок: давний успех идёт первым
+        A.save_state(cf, {"fetched": T0, "merged": {}, "open_prs": {}, "repo_ok": {"a/b": T0 + 50, "c/d": T0 + 10}})
+        open(os.path.join(gh, "calls.log"), "w").close()
+        A.fetch(cf, sf, T0 + 4000, repos, env=dict(env))
+        first = [ln for ln in open(os.path.join(gh, "calls.log")).read().splitlines() if ln.startswith("pr list")]
+        check("порядок обхода: репозиторий с самым давним успехом первым", "--repo c/d" in first[0], first[:2])
+        # Б1: кэш до metis-0808 (нет repo_ok): два сбоя подряд не сдвигают «данные от» к fetched
+        A.save_state(cf, {"fetched": T0, "merged": {"a/b": [{"number": 5}]}, "open_prs": {}})
+        e2 = dict(env, PANTHEON_GH="/nonexistent/gh")
+        A.fetch(cf, sf, T0 + 600, ["a/b"], env=e2)
+        c1 = A.load_state(cf)
+        A.fetch(cf, sf, T0 + 1200, ["a/b"], env=e2)
+        c2 = A.load_state(cf)
+        check("старый кэш без repo_ok и два сбоя подряд: stale остаётся T0, repo_ok запомнен",
+              c1["stale"] == {"a/b": T0} and c2["stale"] == {"a/b": T0} and c2["repo_ok"] == {"a/b": T0}
+              and c2["merged"]["a/b"] == [{"number": 5}], (c1, c2))
+        A.save_state(cf, {"fetched": T0, "merged": {}, "open_prs": {}})
+        A.fetch(cf, sf, T0 + 600, ["a/b"], env=e2)
+        check("старый кэш без строк репозитория и сбой: stale 0, repo_ok не выдуман",
+              A.load_state(cf)["stale"] == {"a/b": 0} and "a/b" not in A.load_state(cf)["repo_ok"], A.load_state(cf))
+        # бюджет прохода кончился: репозиторий не потерял строки
+        A.save_state(cf, {"fetched": T0, "merged": {"a/b": [{"number": 5}]}, "open_prs": {}, "repo_ok": {"a/b": T0}})
+        errs = A.fetch(cf, sf, T0 + 4500, ["a/b"], env=dict(env), budget=0)
+        c = A.load_state(cf)
+        check("не хватило времени прохода: прежние строки остаются", errs == {"a/b": "не хватило времени прохода"}
+              and c["merged"]["a/b"] == [{"number": 5}] and c["stale"] == {"a/b": T0}, c)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_former_heads():
+    """metis-0726: кэш помнит бывшие head ещё открытых PR — по ним outside снимает заявку test на устаревший head."""
+    h = lambda c: c * 40  # noqa: E731
+    prev = {"open_prs": {"a/b": [{"number": 1, "head": h("1")}, {"number": 2, "head": h("2")}], "c/d": []},
+            "old_heads": {"a/b": {h("0"): 1, h("9"): 3}, "e/f": {h("5"): 4}}}
+    now = {"a/b": [{"number": 1, "head": h("a")}, {"number": 2, "head": h("2")}], "c/d": []}
+    got = A.former_heads(prev, now)
+    check("former_heads: прошлый head PR #1 и его давний бывший — в old_heads; head PR #2 не менялся — нет; PR #3 закрыт — нет",
+          got.get("a/b") == {h("0"): 1, h("1"): 1}, got)
+    check("former_heads: репозиторий, про который gh не ответил (нет в open_prs), держит прошлые", got.get("e/f") == {h("5"): 4}, got)
+    check("former_heads: нет бывших — репозитория нет", "c/d" not in got, got)
+    check("former_heads: head вернулся (force-push назад) — уже не бывший",
+          A.former_heads({"old_heads": {"a/b": {h("1"): 1}}}, {"a/b": [{"number": 1, "head": h("1")}]}) == {})
+    check("former_heads: старый кэш без old_heads и мусор — не падает",
+          A.former_heads({}, now) == {} and A.former_heads(None, now) == {} and A.former_heads({"old_heads": [1]}, now) == {})
+    many = A.former_heads({"old_heads": {"a/b": {f"{i:040x}": 1 for i in range(A.OLD_HEADS_KEEP + 5)}}}, now)
+    check("former_heads: не больше OLD_HEADS_KEEP на репозиторий, уходят старые",
+          len(many["a/b"]) == A.OLD_HEADS_KEEP and f"{0:040x}" not in many["a/b"], len(many["a/b"]))
+    tmp, home, state, gh, env = make()
+    try:
+        cf = os.path.join(state, "p.json")
+        write_gh(gh, "a/b", "merged", [])
+        write_gh(gh, "a/b", "open", [{"number": 1, "headRefName": "x", "headRefOid": h("1"), "body": "", "files": []}])
+        A.fetch(cf, os.path.join(state, "s.json"), T0, ["a/b"], env=dict(env))
+        write_gh(gh, "a/b", "open", [{"number": 1, "headRefName": "x", "headRefOid": h("2"), "body": "", "files": []}])
+        A.fetch(cf, os.path.join(state, "s.json"), T0 + 600, ["a/b"], env=dict(env))
+        c = A.load_state(cf)
+        check("fetch: новый head PR — прошлый в old_heads кэша", c.get("old_heads") == {"a/b": {h("1"): 1}}
+              and c["open_prs"]["a/b"][0]["head"] == h("2"), c.get("old_heads"))
+        # metis-0799: признак форка (isCrossRepository) — в кэше как cross; gh его не дал — считается форком
+        write_gh(gh, "a/b", "merged", [dict(pr(5, "batch/metis-0750", "", T0), isCrossRepository=False),
+                                       dict(pr(6, "batch/metis-0750", "", T0), isCrossRepository=True), pr(7, "batch/metis-0750", "", T0)])
+        write_gh(gh, "a/b", "open", [{"number": 8, "headRefName": "batch/metis-0751", "headRefOid": h("3"), "body": "",
+                                      "files": [], "isCrossRepository": False},
+                                     {"number": 9, "headRefName": "batch/metis-0751", "headRefOid": h("4"), "body": "",
+                                      "files": [], "isCrossRepository": True}])
+        A.fetch(cf, os.path.join(state, "s.json"), T0 + 1200, ["a/b"], env=dict(env))
+        c = A.load_state(cf)
+        check("fetch: cross в кэше — False только у PR из самого репозитория (слитые и открытые)",
+              [r.get("cross") for r in c["merged"]["a/b"]] == [False, True, True]
+              and [r.get("cross") for r in c["open_prs"]["a/b"]] == [False, True], (c["merged"], c["open_prs"]))
     finally:
         shutil.rmtree(tmp, True)
 
@@ -405,7 +818,7 @@ def test_batch_needs_mode():
         r = pan(env, T0, "task", "set", tid, "--batch", "ночь · 3")
         check("task set --batch, когда mode уже в шапке — принят", r.returncode == 0, r.stderr)
         y, py, _ = new(env, home, T0, "demo", "Ещё")
-        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story")
+        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story", "--done-when", "пункт")
         r = pan(env, T0, "task", "attach", y, s)
         check("task attach задачи без mode — отказ", r.returncode != 0 and "mode" in r.stderr and "parent" not in text(py), r.stderr)
         pan(env, T0, "task", "set", y, "mode=parallel")
@@ -433,7 +846,7 @@ def run_check(env, t):
 def test_check():
     tmp, home, state, gh, env = make()
     try:
-        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story", "--night", day(T0 - 3 * 86400))
+        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story", "--done-when", "пункт", "--night", day(T0 - 3 * 86400))
         # 1. задача пачки без mode — ошибка с id
         put(home, "demo", "demo-0101", status="todo", parent=s)
         r = run_check(env, T0)
@@ -535,13 +948,33 @@ def test_close_criteria():
         pf = put(home, "metis-pantheon", "metis-0015", body=two, created="2026-10-26")
         T.task_set(home, T0, "metis-0015", {"status": "done"})
         check("задача от 26.10 закрывается вручную без --force", T.read(pf)[0].get("status") == "done")
-        put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        p16 = put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
         try:
             T.task_set(home, T0, "metis-0016", {"status": "done"})
             err = ""
         except ValueError as e:
             err = str(e)
-        check("заглушка-подсказка — неотмеченный пункт", "неотмечено 1" in err, err)
+        check("заглушка-подсказка одна — не пункт, ручной done проходит (metis-0712)", err == "" and T.read(p16)[0].get("status") == "done", err)
+        p16b = put(home, "metis-pantheon", "metis-0020", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n- [ ] настоящий\n", created="2026-10-27")
+        try:
+            T.task_set(home, T0, "metis-0020", {"status": "done"})
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("заглушка рядом с настоящим пунктом: «неотмечено 1» без заглушки",
+              "неотмечено 1 " in err and T.read(p16b)[0].get("status") != "done", err)
+        p16c = put(home, "metis-pantheon", "metis-0021", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + " ещё\n", created="2026-10-27")
+        check("похожий, но не дословный текст — пункт", T.unchecked_criteria(*T.read(p16c)) == 1)
+        pq = put(home, "metis-pantheon", "metis-0022", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        pr2 = put(home, "metis-pantheon", "metis-0023", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n- [ ] настоящий\n", created="2026-10-27")
+        run_cache(home, state, T0, {"latark/agent-kit": [cpr(11, "metis-0022-x", "", T0 - 3600), cpr(12, "metis-0023-x", "", T0 - 3600)]})
+        check("слитый PR, только заглушка → done (metis-0712)", T.read(pq)[0].get("status") == "done", text(pq)[-300:])
+        check("слитый PR, заглушка + настоящий → review «неотмечено 1»", T.read(pr2)[0].get("status") == "review"
+              and "слит, неотмечено 1" in text(pr2), text(pr2)[-300:])
+        dbl = T.DONE_WHEN_HINT.replace(" ", "  ", 1)
+        p24 = put(home, "metis-pantheon", "metis-0024", body="Готово, когда:\n- [ ] " + dbl + "\n", created="2026-10-27")
+        T.task_set(home, T0, "metis-0024", {"status": "done"})
+        check("metis-0711: заглушка с двойным пробелом закрытие не держит", T.read(p24)[0].get("status") == "done")
         # остаток: task split пишет result, по нему done проходит без --force
         ph = put(home, "metis-pantheon", "metis-0017", body=two, created="2026-10-27")
         nid, _ = T.task_split(home, T0, "metis-0017", "Второе")
@@ -654,6 +1087,52 @@ def test_lists_and_checked():
         shutil.rmtree(tmp, True)
 
 
+def test_review_without_closes():
+    """metis-0615 п. 3 (случай athena-0184, PR BA #38): открытый PR без Closes и без id в ветке ставит review задачам
+    doing/waiting, названным в ветке или теле (ids); todo по упоминанию не трогает. PR с Closes ставит review и задаче в
+    waiting; waiting владельца (waiting_on human) остаётся в «Нужен ответ»; «часть» — никому."""
+    tmp, home, state, gh, env = make()
+    try:
+        R = "latark/agent-kit"
+        ps = {i: put(home, "metis-pantheon", i, status=st, **kw) for i, st, kw in (
+            ("metis-0101", "waiting", {"waiting_on": "talos"}), ("metis-0102", "doing", {}), ("metis-0103", "todo", {}),
+            ("metis-0104", "waiting", {"waiting_on": "human"}), ("metis-0105", "waiting", {"waiting_on": "talos"}),
+            ("metis-0106", "doing", {}), ("metis-0107", "todo", {}), ("metis-0108", "doing", {}),
+            ("metis-0109", "waiting", {"waiting_on": "talos"}))}
+        # ветка без префикса id (как BA #38 …-0184): номера 0101–0104 в ветке, 0108 и 0109 — только упоминание в теле
+        # («после metis-0108», «зависит от metis-0109», argus #341 Б1)
+        rows = [{"number": 38, "closes": [], "branch": "fix-0101-0102-0103-0104",
+                 "ids": ["metis-0101", "metis-0102", "metis-0103", "metis-0104", "metis-0108", "metis-0109"], "part": False},
+                {"number": 39, "closes": ["metis-0105", "metis-0107"], "ids": ["metis-0105", "metis-0106", "metis-0107"],
+                 "part": False},
+                {"number": 40, "closes": [], "ids": ["metis-0106"], "part": True}]
+        log, errs = [], {}
+        for row in rows:
+            A.review_pr(home, T0, R, row, {"metis-pantheon"}, T, log, errs)
+        st = {i: T.read(p)[0].get("status") for i, p in ps.items()}
+        check("0615: PR без Closes — waiting и doing из ветки/тела → review, строка в журнале",
+              st["metis-0101"] == "review" and st["metis-0102"] == "review"
+              and "PR #38 (latark/agent-kit) " + A.REVIEW_MARK in text(ps["metis-0101"]), (st, errs))
+        check("0615: PR без Closes — todo по упоминанию не трогает, waiting владельца (human) тоже",
+              st["metis-0103"] == "todo" and st["metis-0104"] == "waiting", st)
+        check("0615: PR с Closes — review и у waiting; упоминание рядом с Closes не в счёт; todo по Closes — review",
+              st["metis-0105"] == "review" and st["metis-0106"] == "doing" and st["metis-0107"] == "review", st)
+        check("0615: waiting → review снимает waiting_on, прежний — в строке журнала",
+              T.read(ps["metis-0101"])[0].get("waiting_on") is None and "; был waiting_on talos" in text(ps["metis-0101"]),
+              text(ps["metis-0101"])[-300:])
+        check("0615 (argus #341 Б1): PR без Closes — задача только упомянута в теле («после Y»), номера нет в ветке: "
+              "doing и waiting не трогаются, waiting_on цел",
+              st["metis-0108"] == "doing" and st["metis-0109"] == "waiting"
+              and T.read(ps["metis-0109"])[0].get("waiting_on") == "talos", st)
+        check("0615: branch_named — номер числом в имени ветки; соседний номер (0274 при ветке …-0275), ветки нет — нет",
+              A.branch_named("landing-claims-0275", ["athena-0274", "athena-0275", "athena-275", 7]) == ["athena-0275",
+                                                                                                      "athena-275"]
+              and A.branch_named(None, ["athena-0275"]) == [] and A.branch_named("x-02750", ["athena-0275"]) == [])
+        check("0615: PR «часть» без Closes review не ставит", st["metis-0106"] == "doing" and not errs, (st, errs))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_lists_and_checked()
     test_unit()
@@ -661,14 +1140,23 @@ def main():
     test_attention_on_card()
     test_close_criteria()
     test_tick()
+    test_fetch_same_pass_primary_only()
     test_old_and_errors()
     test_rules()
     test_reopen_and_eviction()
     test_mutants()
+    test_open_core_sandbox_build()
+    test_open_core_sessions_launch()
+    test_board_line_core()
+    test_stub_four_consumers()
     test_fetch_budget()
+    test_fetch_keeps_rows_on_error()
+    test_former_heads()
+    test_core_budget_and_rename()
     test_batch_needs_mode()
     test_off_warning()
     test_check()
+    test_review_without_closes()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

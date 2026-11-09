@@ -8,15 +8,34 @@
   pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
                                          test/check package.json, иначе pytest; --script — скрипт package.json
+                                         Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
+                                         новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
+                                         Заявка с --sha и обычная на одном SHA и папке не сцеплены: у --sha своя копия
+                                         (pin), у обычной — дерево папки; каждая получает свой ID (metis-0796)
+  pantheon outside test --sha SHA [--script ИМЯ] [--wait С]
+                                         та же проверка на коммите SHA (7–40 знаков, есть в клоне) в своей копии, а не
+                                         в этой папке: ветку PR не переключить в worktree окна, если .claude/ проекта
+                                         отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA
+  pantheon outside test [--sha SHA] --affected [--base REF] [--wait С]
+                                         узкий набор (metis-0734): run-tests.py из .pantheon-verify с `--affected --base
+                                         <merge-base REF и коммита>` (REF — по умолчанию origin/main, вершина берётся
+                                         при заявке). Запись tests — с этой командой, files и map: шлюз guard на
+                                         запасном пути засчитывает её только PR вне ядра защит. История копии
+                                         подменена (shallow, info/grafts, refs/replace) — гонится полный набор
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
-                                         адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120)
+                                         адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
+                                         --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
-  pantheon outside stop ID [--wait С]    погасить сервер раньше срока (из любого окна) и дождаться итога (20 с)
+  pantheon outside stop ID [--wait С]    снять свою заявку и дождаться итога (20 с): сервер гаснет раньше срока,
+                                         тест в очереди своего окна снимается сразу (итог stopped только в своей
+                                         папке, STATE окно не пишет), идущий тест гасит проход (TERM, через 5 с KILL
+                                         группе; место heavy освобождается) — итог stopped, записи tests и строки
+                                         full.jsonl нет. Чужую заявку — нет: код 1 «не из этого окна» (metis-0873)
   pantheon outside run [--serve]         проход по заявкам — только плановый проход (из окна Claude Code — отказ):
                                          без флага — тесты, --serve — серверы и сторож
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
-команды тестов, у сервера 0 — адрес готов, отказ — 1, отказ «занято» (два сервера, давление памяти) — 75, итога не
+команды тестов, у сервера 0 — адрес готов, отказ — 1, отказ «занято» (два сервера, давление памяти) — 75, снятый дубль — 75 (итог у первой заявки), итога не
 дождался — 75. Без --wait — номер заявки, итог — `pantheon outside status ID`.
 
 Сервер (metis-0614, решения владельца 01.11). Одна заявка — один сервер — своя папка — свой порт:
@@ -26,7 +45,9 @@
     правки в копию не попадают. Зависимости — `<pm> install --frozen-lockfile` (npm ci) под профилем, без heavy;
   - монорепо (workspaces в package.json или pnpm-workspace.yaml): PORT получает одно приложение — --app ИМЯ (имя
     пакета или папки), его скрипт идёт в папке приложения; одно приложение со скриптом — берётся само; `--app .` —
-    корневой скрипт; иначе отказ со списком. turbo.json проекта не правится;
+    корневой скрипт; иначе отказ со списком. turbo.json проекта не правится. Не монорепо: --app ПАПКА — папка внутри
+    корня копии с собственным package.json (корневой не нужен, metis-0790): скрипт, установка зависимостей и cwd — там;
+    «..», абсолютный путь и ссылка наружу — отказ;
   - порт — из ряда 4300–4399, не 3000, 3100–3199 (разработчики) и 3200–3299 (показ владельцу, прежний ряд);
   - не больше MAX_SERVERS (2) серверов сразу; давление памяти критичное — отказ любому, предупреждение — второму;
     отказ сразу, с причиной и кодом 75, без очереди heavy. У каждого сервера лимит памяти SERVER_MEM_MB (4 ГБ,
@@ -42,18 +63,43 @@
     filter.*, extensions.worktreeConfig, командой в core.fsmonitor или ключом-командой (*.command, *.textconv,
     *.driver, *.helper, *.program, pager.*, alias.*) — отказ (unsafe_config); git прохода — с GIT_SAFE (без
     fsmonitor, хуков, сети, подмодулей; status — --ignore-submodules=all: конфиг подмодуля окну открыт), копия —
-    git --git-dir=<клон>/.git без ~/.gitconfig. Тесты после «принять» берут копию и клон тоже через trusted_clone. Клон,
+    git --git-dir=<клон>/.git без ~/.gitconfig. Клон,
     common и gitdir проверяются один раз (resolve_dir; commondir у common, ссылки — отказ; подтверждает сам git), дальше
     папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
     <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
+  - тест на коммите (test --sha, metis-0779, run_test_at) — такая же копия <work>/test-<ID>: полное дерево, вместе с
+    .claude/ проекта; зависимости — `<pm> install` под профилем с heavy, остатки установки гаснут (reap), дальше run_test
+    в копии: HEAD не SHA заявки или дерево не чистое при любой проверке — ни прогона, ни записи; запись и перенос по
+    дереву (tree_record) — только на SHA заявки. Копия снимается после
+    прогона (reap, git worktree remove), брошенная (проход упал) — следующим проходом тестов под его замком. Запись
+    tests — на полный SHA, cwd — копия; бывший head открытого PR (stale_head) — отказ, как у test без --sha. Заявка
+    несёт pin: true; дубли (drop_dupes) её не снимают;
   - состояния: queued (заявка записана) → preparing (копия и зависимости) → starting (ждём порт) → serving →
     stopping → stopped; failed — с причиной, и при любом сбое прохода посреди заявки (копия снята, а не preparing
     до суток); копия без сервера старше WORK_ORPHAN_AGE (проход упал, Mac перезагрузился) снимается в конце круга;
-  - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна; проход ищет его во всех папках заявок, а не только в
-    папке сервера (стоп из окна координатора доходит). Нет такой заявки — `stop` так и говорит, код 1.
+  - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна. Проход исполняет его, только если он лежит в папке
+    самой заявки или в очереди терминала владельца STATE/outside/queue (own_stop, metis-0873: решение владельца
+    «сузить», и для серверов). Метку с тем же ID в папке другого окна проход убирает без исполнения и пишет в журнал
+    stop-foreign. Нет такой заявки — `stop` так и говорит, код 1; заявка чужого окна — код 1 «не из этого окна»;
+  - проход тестов сам снимает свой прогон (TestWatch): «стоп» своего окна — до запуска, между взятием и запуском,
+    во время прогона и установки зависимостей копии, после выхода команды до записи; ушедший head — обычная заявка,
+    когда HEAD папки уже не коммит прогона (грязное дерево без коммита — не повод), test --sha — когда коммит стал
+    бывшим head PR (stale_head) или в той же папке заявок ждёт заявка --sha на более новый коммит того же клона,
+    потомок этого. Снятый прогон — stopped с причиной, без записи tests и без строки full.jsonl. Заявка в очереди на
+    коммит, с которого HEAD уже ушёл, при более новой заявке той же папки из той же папки заявок — failed
+    «superseded <ID>» без прогона. Итог running раз в 30 с несёт срез процессов (procs: pid, CPU, время, команда,
+    heavy_wait) — только в своей папке заявок; в running — started, время начала (metis-0646). Установка зависимостей
+    копии не считает ожидание места heavy в свой срок (hold, metis-0862): «код -1» от очереди heavy не бывает;
+  - окно без права писать в STATE (не опознано): `test`/`serve`/`stop` — код 1 и одна строка причины (cant_write), без
+    трассировки; итог отмены в STATE не записать — заявка возвращается в очередь, а не теряется (metis-0867);
+  - новая заявка test сразу снимает из своей папки заявок ещё не начатые заявки test той же папки и той же проверки
+    (--script, --base, --sha или без), чей коммит — предок нового (replace_older, metis-0852): итог stopped «заменена
+    заявкой <ID> на <sha>» (тот же коммит git тоже считает предком). Начатую, заявки других окон и папок и не
+    предка не трогает.
 
-Куда пишет заявка. В окне роли (есть PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) —
-в соседнюю папку outside/ кэша: туда окно пишет само, а итог проход кладёт туда же, окно его читает. Вне окна — в
+Куда пишет заявка. В окне роли (кэш окна ~/Library/Caches/pantheon-sandbox/<окно> — browser.window_cache: PANTHEON_TMP
+у окон направлений и мастерской, у hq, hestia и job-* — XDG_CACHE_HOME=<кэш>/xdg, metis-0848) —
+в папку outside/ кэша: туда окно пишет само, а итог проход кладёт туда же, окно его читает. Вне окна — в
 STATE/outside/queue. Имя окна проход берёт из места папки, а не из текста заявки: окну направления можно только его
 папки из реестра (domains.json ← ~/ai/pantheon/directions.toml), очереди STATE — любые папки реестра; кэш окна не
 направления (мастерская, задачи) — отказ. Папка заявки — корень репозитория git внутри этих папок, с remote.
@@ -61,7 +107,7 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 Два прохода, оба запускает тик, когда у них есть дело; у каждого свой замок — сервер не ждёт тестов (metis-0614):
   `outside run --serve` (замок outside-serve) — серверы и сторож. Живёт, пока есть серверы или заявки serve (не дольше
   RESIDENT_MAX, потом тик зовёт заново), и каждые SWEEP_EVERY (2 с):
-  1. Сторож: срок вышел (аренда — until), есть «стоп» из любой папки заявок, процесс умер или дерево сервера больше
+  1. Сторож: срок вышел (аренда — until), есть «стоп» своего окна (own_stop), процесс умер или дерево сервера больше
      лимита памяти — состояние stopping,
      группа процессов гаснет (SIGTERM, через 5 с SIGKILL) вместе с потомками, ушедшими в свою группу (turbo ставит её
      каждой задаче), и с любым своим процессом, у которого текущая папка — копия заявки (сирота next dev, ушедший к
@@ -71,19 +117,36 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      Во время копии, установки и ожидания порта сторож продолжает смотреть серверы, «стоп» своей заявки прерывает.
   3. «Стоп» без живого сервера и заявки старше минуты — убирается.
   `outside run` (замок outside-run) — тесты:
-  1. Заявки test — по времени. Заявка удаляется до запуска: одна заявка — один запуск; битые и подложенные — отказ.
-  2. Тесты после «принять» argus: в журнале шлюза слияния (STATE/merge-gate/records.jsonl) «принять» не старше суток
-     на (repo, SHA), а записи tests на этот SHA нет — проход ищет копию: корень папки реестра или его worktree внутри
-     папок реестра с HEAD = SHA и чистым деревом (клон и worktree — через trusted_clone, как у заявок; .git-файл
-     worktree не в <клон>/.git/worktrees/<имя> — копия не берётся); нет такой, а коммит в клоне есть — временный worktree в
-     ~/Library/Caches/pantheon-outside/wt (после прогона снимается; без node_modules сначала
-     `<pm> install --frozen-lockfile`). Каждая пара (repo, SHA) — один раз (STATE/outside/auto.json); красные тесты и
-     «нет копии» — тревога.
+  -1. Сторож (watchdog, до замка, metis-0723; тик будит и его): running дольше WATCH_RUNNING (TEST_TIMEOUT + 30 мин)
+     при живом заходе — заход (SIGKILL) и его группы процессов гаснут, итог failed «сторож: дольше N мин — снято»,
+     тревога; держателя замка не определить — только тревога. queued с лежащей .req.json дольше WATCH_QUEUED (4 ч) —
+     одна тревога на заявку (метка runs/<ID>.alerted), без снятия. outside status показывает итог.
+  0. На старте итоги test: queued без .req.json старше 5 мин — failed «заявка потеряна»; running, записанный самим
+     заходом в STATE/outside/runs, — failed «заход прерван» (захода под замком больше нет; итог — минимальный объект,
+     подложенное окном не копируется; metis-0716). Порядок заявок — по времени из id, по кругу между окнами.
+  1. Заявки test — по времени, по одной (metis-0716): снимается с диска только запускаемая, очередь перечитывается
+     после каждого дела — убитый заход не теряет остальные; не снявшаяся заявка не запускается. Одна заявка — один
+     запуск; битые и подложенные — отказ. Кругов не больше MAX_ROUNDS.
+     Перед стартом (before_test, metis-0726): HEAD папки — бывший head ещё открытого PR по кэшу autoclose-prs.json
+     (old_heads, его пишет `autoclose fetch`), а у PR сейчас другой head — failed «head устарел, подай на текущий» без
+     прогона (у --script — прогон; нет кэша, он старше часа — прогон как раньше); ждущие заявки на ту же проверку (тот
+     же --script, та же папка или папка того же репозитория на том же чистом HEAD) — failed «дубль <id>».
+  2. Автопрогонов нет (решение владельца 03.11, metis-0733): тесты идут только по заявке роли, одна на итоговый head.
+     Дежурный лишь тревожит: «принять» argus старше часа (ALERT_AFTER) и не старше суток (AUTO_TTL) на (repo, SHA), где SHA —
+     head открытого PR по кэшу autoclose-prs.json (нет кэша, он старше часа или gh не ответил по репозиторию — тревоги нет),
+     а записи tests на этот SHA в журнале шлюза (STATE/merge-gate/records.jsonl) нет → P.alert с repo@sha12 и номером PR.
+     Одна тревога на (repo, SHA): метка в STATE/outside/auto.json alerted. Тик будится, пока есть неотправленная тревога.
   3. Уборка: итоги <ID>.result.json и брошенные <ID>.stop в папках заявок (кэш окна, STATE/outside/queue) старше
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
 (лимит серверов держит проход) в папке копии; окружение с нуля (HOME, PATH с node из nvm, TMPDIR — своя временная
-папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT. Профиль:
+папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT (ожидание места heavy не в счёт, не больше HEAVY_WAIT_MAX; полный набор при load выше
+LOAD_PER_CORE на ядро ждёт спада в итоге queued; красный только из-за таймаутов файлов под нагрузкой — один повтор сам, затем итог
+«таймаут под нагрузкой», код 75: metis-0901). Сторож тишины (metis-0770): лог прогона не
+растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
+sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
+гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
+вывода прогон не гасится. CPU не узнать (ни libproc, ни ps) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
 всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
 на чтение, на запись нет; STATE/outside/env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
@@ -100,10 +163,47 @@ vitest run»), строка .pantheon-verify из файла ветки (в кл
 (kind tests, repo — remote папки, pr null, sha), by.agent_type = "pantheon-outside". Пишет только проход: роль в
 своём окне STATE не пишет, а команда под профилем — тоже (deny file-write STATE). Хук guard на `pantheon review test`
 по-прежнему пишет свою запись; шлюз принимает любую из двух.
-Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl.
+Запись по дереву (metis-0732, tree_record): запись прохода несёт ещё tree (дерево коммита) и env (настоящий путь python
+команды и версия macOS). Зелёный полный набор (команда — FULL_TESTS репозитория) на коммите с тем же деревом, тем же
+env и той же командой засчитывается новому HEAD без прогона — запись той же формы с отметкой by_tree (коммит, чей
+прогон перенесён): rebase без конфликтов, правка сообщения. На тот же коммит запись уже есть — итог без прогона.
+Красный прогон записи не даёт, переносить нечего; записи хука guard (без tree) не переносятся.
+Дозапуск после красного полного набора (metis-0735, rerun_plan; «да» владельца 03.11). Каждый прогон полного набора
+(команда — FULL_TESTS, дерево чистое, HEAD тот же, без таймаута) проход пишет строкой в STATE/outside/full.jsonl:
+  {"v": 1, "time", "rid": id заявки, "repo": [owner/repo], "sha", "tree", "branch": ветка папки или null, "dir",
+   "cmd", "env", "code", "failed": [«плагин/test_x.py»] или null — итог run-tests не разобран (run_failed),
+   у красного ещё "causes": {метка: {"kind", "why", "line"}} — причина по файлу (run_causes, metis-0696; kind —
+   таймаут, сигнал, среда или провал; why — из строки FAIL раннера; line — первая строка не ok из хвоста файла), а
+   при "failed": null — "cause" (итог не разобран, код); у дозапуска ещё "rerun_of", "files", "map"}.
+Тревога по доле красных (metis-0696, alert_red_share): за сутки (RED_WINDOW) в full.jsonl больше RED_SHARE (30 %)
+красных прогонов, и всего их не меньше RED_MIN_RUNS — P.alert_daily «outside-red-share», не чаще раза в сутки, с
+разбивкой: по видам причин и по файлам (самые частые). Прогоны без "causes" (до этой правки) — «причина не записана».
+Красный прогон в журнал шлюза не идёт: там любая запись kind tests — «тесты прошли», поэтому список упавших — здесь.
+Следующая заявка полного набора на той же ветке гонит не весь набор, а `<команда> --only <файлы>`: упавшие в последнем
+полном прогоне ветки и затронутые диффом его коммит → HEAD (`git diff` двух коммитов: предок или после rebase — как
+есть) по карте affected-map.json рядом с раннером; выбор — select установленного run-tests.py, как у --affected. Опора
+— ветка папки, а не кэш autoclose (old_heads): кэш пишет fetch по расписанию, и только что закоммиченного HEAD в нём
+ещё нет; а связь с PR для верности не нужна — дифф считается от коммита опоры, каким бы он ни был. Опора — только
+прогон всего набора (без rerun_of): дозапуск гонял часть файлов, остальные на его коммите не шли, и цепочка
+накапливала бы ошибки карты от звена к звену; от настоящего прогона дифф покрывает всё после него за один шаг.
+Весь набор вместо дозапуска (причина — full_why итога), если: HEAD без ветки; полного прогона ветки нет, он зелёный,
+у него другая команда или env, нет списка упавших (старая запись, прерванный прогон), его коммита нет в клоне; дифф
+задевает файл вне карты или общий (FULL раннера), раннер, карту, bin/heavy, tests/_*.py любого плагина или
+.pantheon-verify; карта не читается или устарела (stale хоть один файл) — кроме пустого диффа опора→HEAD (тот же
+коммит или то же дерево, metis-0842): тогда карта не нужна и гонятся только упавшие; упавших больше половины; выбор — весь набор;
+run-tests.py в HEAD не знает --only; опоре больше RERUN_MAX_AGE (24 ч) или время не разобрать; сбой расчёта. Дозапуск зелёный и строки ok его вывода — ровно его файлы — запись
+tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и полями rerun_of (id заявки опоры), files (прогнанные
+метки), map (sha256 affected-map.json HEAD). Шлюз guard её засчитывает как полный набор (merge_gate.py не менялся).
+Остаток: test_hash раннера читает файл тестов целиком, без предела размера (и по ссылке) — файл-гигант в плагине растит
+память прохода; ссылки и размеры файлов дозапуск не проверяет.
+Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl (в том числе
+test-silent — прогон погашен сторожем тишины, test-silent-nocpu — лог молчит, а CPU дерева не узнать).
 """
 import contextlib
+import ctypes
+import errno
 import glob
+import hashlib
 import json
 import os
 import re
@@ -113,6 +213,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -125,7 +226,7 @@ ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 SCRIPT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,59}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHORT_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
-# --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт
+# --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт; не монорепо — папка внутри корня
 APP_RE = re.compile(r"\.|@?[A-Za-z0-9][A-Za-z0-9._-]{0,80}(/[A-Za-z0-9][A-Za-z0-9._-]{0,80})?")
 KINDS = ("test", "serve")
 FINAL = ("done", "failed", "serving", "stopped")
@@ -137,6 +238,16 @@ MAX_SERVERS = 2                     # решение владельца 01.11: �
 SERVER_MEM_MB = 4096                # и у каждого лимит 4 ГБ (владелец 01.11): RSS дерева сервера больше — сторож гасит
 SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
+# metis-0901: порог нагрузки — load (среднее за 5 мин, os.getloadavg()[1]) на ядро. Два места heavy (по -j 3 процесса
+# на файл) дают на здоровой машине 1–2 на ядро; 06.11 полный набор упал по таймаутам файлов (test_guard 720 с,
+# test_merge_gate 1200 с, …), когда load был 85–93 на 8 ядер, то есть ~11 на ядро. 3 — вдвое выше обычной загрузки двух
+# мест и почти вчетверо ниже того, где файлы уже не укладываются: выше порога полный набор не стартует, а ждёт спада.
+LOAD_PER_CORE = 3.0
+LOAD_POLL = 30                      # с: так часто ждущая спада нагрузки заявка перечитывает load и обновляет итог queued
+LOAD_WAIT_MAX = 3600                # с: ждать спада не дольше — потом идёт как есть (таймаут под нагрузкой даст один повтор)
+HEAVY_WAIT_MAX = 3600               # с: сколько ожидания места heavy не входит в TEST_TIMEOUT (дальше часы идут)
+IDLE_TIMEOUT = 900                  # с: лог прогона не растёт, а дерево процессов почти не тратит CPU — завис, гасим (metis-0770)
+IDLE_CPU = 0.01                     # доля ядра: прирост user+sys дерева за окно меньше этого — «почти не тратит»
 INSTALL_TIMEOUT = 900               # с: установка зависимостей копии сервера
 READY_SEC = 90                      # сервер должен открыть порт за это время
 KILL_WAIT = 5
@@ -144,9 +255,18 @@ SWEEP_EVERY = 2                     # с: так часто сторож смо�
 REQ_TTL = 15 * 60                   # с: заявка serve, пролежавшая дольше, не запускается
 STOP_ORPHAN_AGE = 60                # с: «стоп» без сервера и заявки старше — убирается
 WORK_ORPHAN_AGE = 600               # с: копия серверов без записи в servers.json старше — брошена, снимается
+PREPARE_SPAWN_TRIES = 3             # запусков установки при временном отказе fork/exec
+SPAWN_RETRY_ERRNO = {errno.EAGAIN, errno.ETXTBSY, errno.ENOMEM}
 STOP_WAIT = 20                      # с: `outside stop` ждёт итог по умолчанию
+SUPERSEDE_EVERY = 30                # с: так часто проход тестов сверяет head идущего прогона (metis-0873)
+PROCS_EVERY = 30                    # с: так часто итог running своего qdir получает срез процессов прогона
 RESIDENT_MAX = 3600                 # с: проход серверов живёт не дольше, потом его зовёт тик (новая версия кода)
-AUTO_TTL = 24 * 3600                # «принять» старше суток тесты сам не зовёт
+AUTO_TTL = 24 * 3600                # «принять» старше суток дежурному уже не напоминается
+ALERT_AFTER = 3600                  # с: «принять» без записи tests дольше этого — тревога дежурному (03.11)
+RERUN_MAX_AGE = 24 * 3600          # с: опора дозапуска (полный прогон) старше суток — весь набор (metis-0735)
+RED_WINDOW = 24 * 3600              # с: окно доли красных полных прогонов (metis-0696)
+RED_SHARE = 0.3                     # доля красных за окно выше — тревога с разбивкой по причинам
+RED_MIN_RUNS = 4                    # прогонов за окно меньше — доля не показательна (1 из 1 — ещё не 100 %), тревоги нет
 RESULT_TTL = 24 * 3600              # итоги <ID>.result.json и брошенные <ID>.stop в папках заявок — сутки
 WAIT_MAX = 590
 TAIL_LINES, TAIL_CHARS = 40, 4000
@@ -160,7 +280,7 @@ SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sb
 RESERVED_ENV = {"HOME", "PATH", "TMPDIR", "PORT", "CI", "LANG", "SHELL", "USER", "LOGNAME", "PWD"}
 RESERVED_ENV_PREFIX = ("PANTHEON_", "DYLD_", "LD_")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-USAGE = ("pantheon outside test [--script ИМЯ] [--wait С] | "
+USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--serve]")
 
@@ -184,14 +304,8 @@ def caches():
     return os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox")
 
 
-def wt_root():
-    """Временные worktree тестов после «принять»: вне STATE — профиль запрещает запись в STATE, а тестам нужна запись
-    в свою папку (node_modules, .next, кэши)."""
-    return os.path.join(P.HOME, "Library", "Caches", "pantheon-outside", "wt")
-
-
 def work_root():
-    """Копии серверов (metis-0614): своя папка на заявку, вне STATE по той же причине, что wt_root."""
+    """Копии серверов (metis-0614): своя папка на заявку, вне STATE: профиль запрещает запись в STATE, а серверу нужна запись в свою папку."""
     return os.path.join(os.path.realpath(P.HOME), "Library", "Caches", "pantheon-outside", "work")
 
 
@@ -215,11 +329,20 @@ def pass_env():
 
 
 def own_qdir():
-    """Папка заявок этого вызова: в окне роли — outside/ рядом с PANTHEON_TMP (кэш окна), иначе STATE/outside/queue."""
-    tmp = os.environ.get("PANTHEON_TMP")
-    if tmp:
-        return os.path.join(os.path.dirname(os.path.realpath(tmp)), "outside")
-    return root("queue")
+    """Папка заявок этого вызова: в окне роли — outside/ в кэше окна (browser.window_cache: PANTHEON_TMP у окон
+    направлений и мастерской, а у hq, hestia и job-* — только XDG_CACHE_HOME=<кэш>/xdg, metis-0848), иначе
+    STATE/outside/queue."""
+    cache = P.browser_mod().window_cache()
+    return os.path.join(cache, "outside") if cache else root("queue")
+
+
+UNKNOWN_WINDOW = ("если это окно роли, оно не опознано (нет PANTHEON_TMP и XDG_CACHE_HOME внутри кэшей окон) и "
+                  "STATE ему закрыт — перезапустить окно; из терминала владельца работает без этого")
+
+
+def cant_write(what, e):
+    """Строка отказа записи в STATE (окно роли не опознано или без права): что не записать, почему и кто может."""
+    return f"pantheon outside: {what} ({type(e).__name__}: {e}); {UNKNOWN_WINDOW}"
 
 
 def queue_dirs():
@@ -290,6 +413,15 @@ def _unlink_in(dfd, name):
         os.unlink(name, dir_fd=dfd)
 
 
+def _take_in(dfd, name):
+    """Снять файл name; True — снят этим вызовом (другой проход его уже не возьмёт), False — его уже нет."""
+    try:
+        os.unlink(name, dir_fd=dfd)
+    except OSError:
+        return False
+    return True
+
+
 def log_event(**kw):
     with contextlib.suppress(OSError):
         os.makedirs(os.path.join(P.STATE, "logs"), exist_ok=True)
@@ -320,7 +452,10 @@ def inside(p, roots):
 
 # git вне песочницы в папках, которые пишет роль: ни монитора файлов, ни хуков, ни сети, ни подмодулей (metis-0614).
 # -c перекрывает значения из конфига репозитория; фильтры и include так не снять — их отсекает unsafe_config.
-GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+# --no-replace-objects (и GIT_NO_REPLACE_OBJECTS в окружении, как у шлюза) — refs/replace в клоне не подменяют содержимое
+# копии при том же HEAD и чистом status (metis-0796, Д1); attributes клона (ident, eol, working-tree-encoding) при
+# checkout меняют байты файлов копии, но не дерево коммита и не его запись; alternates содержимое не подменяют (metis-0798, Д2)
+GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
             "-c", "submodule.recurse=false")
 
 
@@ -339,6 +474,7 @@ def checked(d, clone, common, gitdir):
 def git(d, *args, timeout=30):
     """Вывод git в папке d (без GIT_* окружения, с GIT_SAFE; Repo — через проверенный gitdir); None — сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     loc = ["-C", d] + ([f"--git-dir={d.gitdir}", f"--work-tree={d}"] if isinstance(d, Repo) else [])
     try:
         r = subprocess.run(["git", *loc, *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout,
@@ -377,7 +513,8 @@ def head_state(d):
     # без подмодулей: git status зашёл бы в каждый и прочёл его конфиг (<клон>/.git/modules/<имя>/config окну роли
     # открыт на запись) — filter.* оттуда исполнился бы вне песочницы (metis-0614)
     st = git(d, "status", "--porcelain", "--ignore-submodules=all")
-    clean = st is not None and all(ln.startswith(WORKTREES_UNTRACKED) for ln in st.splitlines() if ln.strip())
+    top = (git(d, "rev-parse", "--show-toplevel") or "").strip()
+    clean = P.tree_clean(st, top, (WORKTREES_UNTRACKED,))  # + ссылка node_modules (metis-0721)
     return (h if SHA_RE.fullmatch(h) else None), clean
 
 
@@ -437,7 +574,9 @@ def command(d, kind, script=None):
     if not text and not own:
         text, own = _show(d, "HEAD", ".pantheon-verify"), True
     if text:
-        line = next((x.strip() for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")), "")
+        # строка `dev:` — узкая проверка исполнителя для Stop-хука (metis-0653), здесь не команда проверки проекта
+        line = next((x.strip() for x in text.splitlines()
+                     if x.strip() and not x.lstrip().startswith("#") and not x.lstrip().startswith("dev:")), "")
         if line:
             words = line.split()
             while words and words[0] in ("heavy", "--server"):   # heavy проход ставит сам, снаружи профиля
@@ -510,16 +649,43 @@ def _scripts(pkg):
     return s if isinstance(s, dict) else {}
 
 
+def app_dir(d, app):
+    """--app как папка внутри корня копии d (не монорепо, metis-0790) → (реальный путь, None) или (None, причина).
+    Папка и её package.json — внутри realpath(d): ни «..», ни абсолютного пути, ни ссылки наружу."""
+    root = os.path.realpath(d)
+    if os.path.isabs(app) or ".." in app.split("/"):
+        return None, f"--app {app}: путь выходит за корень копии"
+    p = os.path.realpath(os.path.join(root, app))
+    if not inside(p, [root]) or p == root:
+        return None, f"--app {app}: папка вне корня копии (ссылка наружу или «..»)"
+    if not os.path.isdir(p):
+        return None, f"--app {app}: папка не монорепо (нет workspaces в package.json и pnpm-workspace.yaml), и папки {app} в репозитории нет"
+    pj = os.path.realpath(os.path.join(p, "package.json"))
+    if not inside(pj, [root]) or _pkg(p) is None:
+        return None, f"--app {app}: в папке {app} нет package.json (или он ведёт за корень копии) — серверу нечего запускать"
+    return p, None
+
+
 def serve_command(d, script=None, app=None):
     """Команда сервера в папке d → (argv, строка для журнала, папка запуска) или (None, причина, None).
     Монорепо: PORT получает одно приложение (metis-0614: в BA turbo пускал все, landing брал PORT, web — 3000) —
-    --app или единственное приложение со скриптом; `--app .` — корневой скрипт."""
+    --app или единственное приложение со скриптом; `--app .` — корневой скрипт. Не монорепо: --app ПАПКА внутри
+    корня с собственным package.json — скрипт и папка запуска там (metis-0790), корневой package.json не нужен."""
     name = script or "dev"
     pkg = _pkg(d)
+    ws = workspaces(d, pkg)
+    if app and app != "." and not ws:
+        p, why = app_dir(d, app)
+        if not p:
+            return None, why, None
+        apkg = _pkg(p)
+        if name not in _scripts(apkg):
+            return None, f"в package.json папки {app} нет скрипта «{name}»", None
+        pm = package_manager(p, apkg)
+        return [pm, "run", name], f"{pm} run {name}  (приложение {app})", p
     if pkg is None:
         return None, "в папке нет package.json — серверу нечего запускать", None
     pm = package_manager(d, pkg)
-    ws = workspaces(d, pkg)
     if app == "." or (not app and not ws):
         if name not in _scripts(pkg):
             return None, f"в package.json папки нет скрипта «{name}»", None
@@ -641,8 +807,46 @@ def tail(log):
 PS = "/bin/ps"   # setuid: под sandbox-exec не запускается — test_outside, идущий через `outside test`, ставит свой
 
 
+def _ps_table_libproc():
+    """{pid: (ppid, pgid, rss в КБ)} по libproc (proc_listallpids, proc_pidinfo PROC_PIDTBSDINFO и PROC_PIDTASKINFO)
+    или None: не macOS, библиотеки нет или список процессов не получен."""
+    lp = _libproc()
+    if lp is None:
+        return None
+    lib = lp[0]
+    n = lib.proc_listallpids(None, 0)
+    if n <= 0:
+        return None
+    size = n + 256
+    while True:
+        buf = (ctypes.c_int * size)()
+        got = lib.proc_listallpids(buf, ctypes.sizeof(buf))   # число pid, а не байт
+        if got <= 0:
+            return None
+        if got < len(buf) or size >= 1 << 20:
+            break
+        size *= 4                    # буфер полон — процессы могли не влезть (появились между вызовами), как _lp_pids
+    table = {}
+    for p in buf[:min(got, len(buf))]:
+        if p <= 0:
+            continue
+        b = _BSDInfo()
+        if lib.proc_pidinfo(p, 3, ctypes.c_uint64(0), ctypes.byref(b), ctypes.sizeof(b)) != ctypes.sizeof(b):
+            continue                 # ушёл за время обхода или чужой
+        t = (ctypes.c_uint64 * 12)()   # proc_taskinfo: pti_virtual_size, pti_resident_size, ...
+        ok = lib.proc_pidinfo(p, 4, ctypes.c_uint64(0), ctypes.byref(t), ctypes.sizeof(t)) == ctypes.sizeof(t)
+        table[p] = (b.ppid, b.pgid, t[1] // 1024 if ok else 0)
+    return table or None
+
+
 def ps_table():
-    """{pid: (ppid, pgid, rss в КБ)} всех процессов по ps; сбой — {}."""
+    """{pid: (ppid, pgid, rss в КБ)} процессов: на macOS по libproc (setuid /bin/ps под sandbox-exec не
+    запускается, и strays() иначе вернул бы [] — metis-0786), ps — запасной путь (Linux, нет libproc или он ничего
+    не вернул); сбой — {}. Без root на macOS libproc отдаёт только процессы своего uid и без зомби (чужие pidinfo не
+    даёт), ps — все."""
+    table = _ps_table_libproc()
+    if table is not None:
+        return table
     try:
         out = subprocess.run([PS, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
                              timeout=10).stdout
@@ -774,20 +978,195 @@ def _pid_alive(p):
         return False
 
 
-def wait_proc(proc, timeout, tick=None):
-    """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
-    «стопа» своей заявки — tick() вернул True — группа гаснет, ждём её конца (metis-0606, 0614). Тесты идут в своём
-    проходе и серверы не смотрят. TimeoutExpired — как у proc.wait."""
-    deadline = time.monotonic() + timeout
+class Silent(Exception):
+    """Лог молчал IDLE_TIMEOUT с при почти нулевом CPU дерева: группа убита (SIGKILL), why — для итога."""
+
+    def __init__(self, secs, last):
+        self.secs, self.last = secs, last
+        mins = f"{round(secs / 60)} мин" if secs >= 60 else f"{round(secs)} с"
+        self.why = f"тишина {mins}, последний вывод: {last or '(пусто)'}"
+        super().__init__(self.why)
+
+
+def _cpu_secs(text):
+    """Время процессора ps («MM:SS.ss», «H:MM:SS», «D-HH:MM:SS») → секунды или None."""
+    try:
+        days, _, rest = text.rpartition("-")
+        total = 0.0
+        for part in rest.split(":"):
+            total = total * 60 + float(part)
+        return total + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return None
+
+
+LIBPROC = "/usr/lib/libproc.dylib"   # macOS: дерево и CPU без ps (metis-0770); нет файла — запасной путь по ps
+
+
+def _libproc():
+    """(libproc, секунд в тике mach) или None: не macOS или библиотеки нет. ri_user_time и ri_system_time —
+    в тиках mach_absolute_time (на Apple Silicon тик ≠ нс: 125/3 нс), поэтому множитель — mach_timebase_info."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        lib = ctypes.CDLL(LIBPROC)
+        tb = (ctypes.c_uint32 * 2)()
+        if ctypes.CDLL(None).mach_timebase_info(tb) != 0 or not tb[1]:
+            return None
+        return lib, tb[0] / tb[1] / 1e9
+    except (OSError, AttributeError):
+        return None
+
+
+class _BSDInfo(ctypes.Structure):
+    """struct proc_bsdinfo (sys/proc_info.h), PROC_PIDTBSDINFO = 3."""
+    _fields_ = [(n, ctypes.c_uint32) for n in ("flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid",
+                                               "rgid", "svuid", "svgid", "rfu")] + \
+               [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + \
+               [(n, ctypes.c_uint32) for n in ("nfiles", "pgid", "pjobc", "tdev", "tpgid")] + \
+               [("nice", ctypes.c_int32), ("start", ctypes.c_uint64), ("ustart", ctypes.c_uint64)]
+
+
+def _lp_pids(fn, arg):
+    """[pid] из proc_listpgrppids или proc_listchildpids (они возвращают число pid, а не байт); сбой — []."""
+    n = 256
     while True:
+        buf = (ctypes.c_int * n)()
+        got = fn(int(arg), buf, ctypes.sizeof(buf))
+        if got < 0:
+            return []
+        if got < n or n >= 1 << 16:
+            return [p for p in buf[:min(got, n)] if p > 0]
+        n *= 4                       # буфер полон — список мог не влезть, берём больше
+
+
+def _tree_cpu_libproc(pid):
+    """CPU-секунды группы pid и её потомков по libproc (proc_listpgrppids, proc_listchildpids, proc_pid_rusage
+    rusage_info_v0: ri_user_time + ri_system_time) или None: не macOS, группы нет или ни одного ответа."""
+    lp = _libproc()
+    if lp is None:
+        return None
+    lib, scale = lp
+    seen, todo = set(), _lp_pids(lib.proc_listpgrppids, pid)
+    while todo:                      # то же дерево, что _tree: члены группы и все их потомки в любых группах
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo.extend(_lp_pids(lib.proc_listchildpids, p))
+    buf = ctypes.create_string_buffer(256)   # rusage_info_v0 — 96 байт: uuid[16], ri_user_time, ri_system_time, …
+    total, got = 0, False
+    for p in seen:
+        if lib.proc_pid_rusage(p, 0, buf) == 0:
+            user, sys_ = struct.unpack_from("2Q", buf, 16)
+            total, got = total + user + sys_, True
+    return total * scale if got else None
+
+
+def _tree_cpu_ps(pid):
+    """CPU-секунды группы pid и её потомков по ps (Linux; на macOS — если libproc не ответил) или None."""
+    table = ps_table()
+    pids = _tree(pid, table) if table else set()
+    if not pids:
+        return None
+    try:
+        out = subprocess.run([PS, "-axo", "pid=,time="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    total, seen = 0.0, False
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) in pids:
+            c = _cpu_secs(parts[1])
+            if c is not None:
+                total, seen = total + c, True
+    return total if seen else None
+
+
+def tree_cpu(pid):
+    """Сумма CPU-секунд группы pid и её потомков (в своих группах тоже) или None — CPU не узнать, тогда судим только
+    по тишине лога и не гасим (metis-0770). На macOS — libproc: setuid /bin/ps под sandbox-exec не запускается, и
+    сторож в прогоне под песочницей иначе не гасил бы никогда; ps — запасной путь (Linux, нет libproc). Ушедшие за
+    время опроса процессы счёт занижают — не страшно."""
+    cpu = _tree_cpu_libproc(pid)
+    return cpu if cpu is not None else _tree_cpu_ps(pid)
+
+
+def last_line(log):
+    """Последняя непустая строка лога (до 200 знаков) или ''."""
+    for ln in reversed(tail(log).splitlines()):
+        if ln.strip():
+            return ln.strip()[:200]
+    return ""
+
+
+def heavy_waiting(pid):
+    """heavy (корень группы pid) ещё ждёт место: у него нет ни одного потомка — команда не запущена (metis-0901)."""
+    table = ps_table()
+    return bool(table) and _tree(pid, table) <= {pid}
+
+
+def wait_proc(proc, timeout, tick=None, idle_log=None, hold=None):
+    """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
+    «стопа» своей заявки, у прохода тестов — TestWatch (свой «стоп» и ушедший head, metis-0873) — tick() вернул
+    True — группа гаснет, ждём её конца (metis-0606, 0614). TimeoutExpired — как у proc.wait.
+    idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с И прирост CPU-времени дерева (user+sys, tree_cpu: libproc или ps)
+    за окно меньше IDLE_CPU от окна → SIGKILL группе и её потомкам, исключение Silent. Считающий без вывода (под
+    нагрузкой «0 % CPU» по ps — не зависание) не гасится; CPU не узнать — не гасим, предупреждение в журнал.
+    hold — вызываемое «ещё ждём место heavy» (metis-0901): пока True, срок timeout не идёт (не дольше HEAVY_WAIT_MAX с в
+    сумме); первый False — команда пошла, hold больше не зовётся."""
+    deadline = time.monotonic() + timeout
+    last, held = time.monotonic(), 0.0
+    step = min(SWEEP_EVERY, max(0.1, IDLE_TIMEOUT / 4)) if idle_log else SWEEP_EVERY
+    size, grew = None, time.monotonic()
+    base = None                      # (время, CPU дерева) на первом тихом шаге после роста лога
+    warned = False
+    while True:
+        if hold:
+            now = time.monotonic()
+            if hold():
+                add = max(0.0, min(now - last, HEAVY_WAIT_MAX - held))
+                held, deadline = held + add, deadline + add
+            else:
+                hold = None
+            last = now
         try:
-            return proc.wait(timeout=max(0.01, min(SWEEP_EVERY, deadline - time.monotonic())))
+            return proc.wait(timeout=max(0.01, min(step, deadline - time.monotonic())))
         except subprocess.TimeoutExpired:
             if time.monotonic() >= deadline:
                 raise
         if tick and tick():
             kill_group(proc.pid)
             return proc.wait()
+        if idle_log:
+            now = time.monotonic()
+            try:
+                cur_size = os.stat(idle_log).st_size
+            except OSError:
+                cur_size = size
+            if cur_size != size:
+                size, grew, base = cur_size, now, None
+            elif base is None or base[1] is None:
+                base = (now, tree_cpu(proc.pid))
+                if base[1] is None and now - grew >= IDLE_TIMEOUT and not warned:
+                    warned = True    # CPU не узнать — не гасим, только предупреждение (раз за прогон)
+                    log_event(kind="test-silent-nocpu", log=idle_log,
+                              why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (libproc, ps) — не гашу")
+            elif now - grew >= IDLE_TIMEOUT and now - base[0] >= IDLE_TIMEOUT / 2:
+                cpu = tree_cpu(proc.pid)
+                if cpu is None:      # CPU не узнать — не гасим, только предупреждение (раз за прогон)
+                    if not warned:
+                        warned = True
+                        log_event(kind="test-silent-nocpu", log=idle_log,
+                                  why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (libproc, ps) — не гашу")
+                elif (cpu - base[1]) < IDLE_CPU * (now - base[0]):
+                    last = last_line(idle_log)
+                    extra = strays(proc.pid)
+                    _signal(proc.pid, extra, signal.SIGKILL)
+                    kill_group(proc.pid)
+                    proc.wait()
+                    raise Silent(now - grew, last)
+                else:
+                    base = (now, cpu)   # дерево считает без вывода (load высокий — не зависание): окно заново
 
 
 _SWEEP_ERR = []
@@ -856,8 +1235,12 @@ def read_records():
     return out
 
 
-def append_tests(repos, sha, cwd, line, window, rid):
-    """Строка tests в журнал шлюза — формат записи хука guard (merge_gate.record), by — проход."""
+def append_tests(repos, sha, cwd, line, window, rid, by_tree=None, rerun=None):
+    """Строка tests в журнал шлюза — формат записи хука guard (merge_gate.record), by — проход. Сверх него — дерево
+    коммита (tree) и скрытые входы прогона (env, run_env): по ним зелёный полный набор переносится на коммит с тем же
+    деревом (tree_record, metis-0732); by_tree — коммит, чей прогон перенесён (запись без своего прогона); rerun —
+    {rerun_of, files, map} зелёного дозапуска после красного полного набора (metis-0735, rerun_plan) или {files, map}
+    узкого прогона (test --affected, metis-0734)."""
     d = os.path.dirname(records_file())
     if os.path.islink(d):
         raise OSError("merge-gate — ссылка")
@@ -866,18 +1249,359 @@ def append_tests(repos, sha, cwd, line, window, rid):
            "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "window": window or "",
                   "request": rid},
            "cwd": cwd, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool_use_id": "", "cmd": line}
+    tree = tree_of(cwd, sha)
+    if tree:
+        rec.update(tree=tree, env=run_env(line))
+    if by_tree:
+        rec["by_tree"] = by_tree
+    if rerun:
+        rec.update({k: rerun[k] for k in ("rerun_of", "files", "map") if k in rerun})
+        rec["files"] = list(rerun["files"])
     fd = os.open(records_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        pre = os.fstat(fd).st_mtime
         os.write(fd, (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
-        post = os.fstat(fd).st_mtime
     finally:
         os.close(fd)
-    a = P.read_json(root("auto.json"), {})
-    if a.get("mtime") == pre:   # своя строка — не повод тику снова смотреть журнал; чужая новая — повод
-        a["mtime"] = post
-        P.write_json(root("auto.json"), a)
     return rec
+
+
+# --- зелёная запись по дереву (metis-0732) ------------------------------------------------------------------------
+
+def tree_of(d, sha):
+    """Дерево коммита sha (`git rev-parse <sha>^{tree}`) в папке d или None."""
+    t = (git(d, "rev-parse", "--verify", "-q", f"{sha}^{{tree}}") or "").strip().lower()
+    return t if SHA_RE.fullmatch(t) else None
+
+
+def run_env(line):
+    """Скрытые входы прогона, которых нет в дереве: настоящий путь python команды (у Homebrew в нём версия:
+    Cellar/python@3.14/3.14.0/…) по PATH окружения команды и версия macOS. Другой python или macOS — запись по дереву
+    не переносится."""
+    import platform
+    exe = None
+    for w in line.split():
+        if re.fullmatch(r"python3(\.\d+)?", os.path.basename(w)):
+            exe = w if "/" in w else shutil.which(w, path=sandbox_env("", "test")["PATH"])
+            break
+    return {"python": os.path.realpath(exe) if exe else "", "os": platform.mac_ver()[0] or platform.release()}
+
+
+def tree_record(rid, d, window, qdir, sha=None):
+    """Проверка проекта в d без прогона, если её зелёный полный набор уже есть на этом дереве (metis-0732): в журнале
+    шлюза — запись прохода (agent_type pantheon-outside) с той же командой, а она — полный набор репозитория
+    (full_tests_record), с тем же деревом (поле tree и `git rev-parse <её sha>^{tree}`), теми же скрытыми входами
+    (run_env) и репозиториями. На тот же коммит — итог done без новой записи; на другой (rebase без конфликтов, правка
+    сообщения) — запись tests на HEAD тем же путём append_tests с отметкой by_tree. Красный прогон записи не даёт —
+    переносить нечего. Дерево не чистое, такой записи нет, запись не легла — None: идёт обычный прогон. sha — коммит
+    копии test --sha (metis-0779): запись — на него, HEAD и дерево папки не читаются (дерево коммита — из объектов git)."""
+    sha, clean = (sha, True) if sha else head_state(d)
+    if not sha or not clean:
+        return None
+    repos = remotes(d)
+    argv, line = command(d, "test")
+    m = P.merge_mod()
+    if not argv or not repos or not any(m.full_tests_record(r, {"cmd": line}) for r in repos):
+        return None
+    tree = tree_of(d, sha)
+    if not tree:
+        return None
+    env = run_env(line)
+    want = {r.lower() for r in repos}
+    for rec in reversed(read_records()):
+        by = rec.get("by") if isinstance(rec.get("by"), dict) else {}
+        if (rec.get("kind") != "tests" or by.get("agent_type") != "pantheon-outside" or rec.get("cmd") != line
+                or rec.get("tree") != tree or rec.get("env") != env
+                or not want <= {str(r).lower() for r in rec["repo"]}
+                or not SHA_RE.fullmatch(rec["sha"]) or tree_of(d, rec["sha"]) != tree):
+            continue
+        src = rec["by"].get("request") or "?"
+        res = {"state": "done", "kind": "test", "sha": sha, "code": 0, "cmd": line, "dir": d, "record": True,
+               "tree": tree, "by_tree": rec["sha"]}
+        if rec["sha"] == sha:
+            res["note"] = f"запись tests на {sha[:12]} уже есть (прогон {src}) — без прогона"
+        else:
+            # дозапуск-источник переносит и свои поля: запись на новом коммите остаётся дозапуском (metis-0735)
+            rr = ({k: rec[k] for k in ("rerun_of", "files", "map")}
+                  if all(k in rec for k in ("rerun_of", "files", "map")) else None)
+            try:
+                append_tests(repos, sha, d, line, window, rid, by_tree=rec["sha"], rerun=rr)
+            except OSError:
+                return None
+            res["note"] = (f"по дереву {tree[:12]}: зелёный полный набор на {rec['sha'][:12]} (прогон {src}) — "
+                           f"запись на {sha[:12]} без прогона")
+        log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=0, record=True, by_tree=rec["sha"])
+        return save_result(qdir, rid, res)
+    return None
+
+
+# --- дозапуск после красного полного набора (metis-0735) ----------------------------------------------------------
+
+# правка этих файлов меняет сам выбор тестов или их общую опору — дозапуск не годится, весь набор: раннер и карта
+# (их путь — из команды), heavy, общие модули тестов tests/_*.py любого плагина, строка проверки .pantheon-verify
+FORCE_FULL_RE = re.compile(r"(?:^|/)bin/heavy$|(?:^|/)tests/_[^/]*\.py$|^\.pantheon-verify$")
+# строки run-tests.py (report и summary): «ok   плагин/test_x.py · …», «FAIL плагин/test_x.py · …», последняя —
+# «итого: файлов N, ok A, FAIL B…»
+REPORT_RE = re.compile(r"(ok|FAIL)\s+([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · ")
+TOTAL_RE = re.compile(r"итого: файлов (\d+), ok (\d+), FAIL (\d+)\b")
+LOG_MAX = 64 * 1024 * 1024
+_RUNNER = []
+
+
+def full_file():
+    """Журнал прогонов полного набора (metis-0735): пишет только проход, роли и команде под профилем STATE закрыт."""
+    return root("full.jsonl")
+
+
+def read_full():
+    try:
+        fd = os.open(full_file(), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    out = []
+    with os.fdopen(fd, "rb") as fh:
+        for raw in fh:
+            try:
+                e = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(e, dict) and isinstance(e.get("rid"), str) and isinstance(e.get("repo"), list):
+                out.append(e)
+    return out
+
+
+def append_full(entry):
+    d = root()
+    if os.path.islink(d):
+        raise OSError("outside — ссылка")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd = os.open(full_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, (json.dumps({"v": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry},
+                                 ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def run_failed(text):
+    """Вывод run-tests.py → (метки ok, метки FAIL), отсортированные; None — итог не разобрать. Строки файлов — только
+    до хвостов упавших («===== …»: там вывод самих файлов, и в нём бывают свои ok/FAIL), последняя непустая строка —
+    итог, и числа в нём сходятся со строками: прерванный, убитый по таймауту или чужой вывод даёт None, а не пустой
+    список упавших."""
+    lines = text.splitlines()
+    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+    m = TOTAL_RE.match(last)
+    if not m:
+        return None
+    n, n_ok, n_fail = (int(x) for x in m.groups())
+    ok, fail = set(), set()
+    for ln in lines:
+        if ln.startswith("===== "):
+            break
+        r = REPORT_RE.match(ln)
+        if r:
+            (ok if r[1] == "ok" else fail).add(r[2])
+    if ok & fail or len(ok) != n_ok or len(fail) != n_fail or n_ok + n_fail != n:
+        return None
+    return sorted(ok), sorted(fail)
+
+
+# строка FAIL раннера: «FAIL плагин/test_x.py · 12.3 с · проверок 4 · код 1» (причина — после последнего поля);
+# хвост упавшего: «===== плагин/test_x.py · причина · строки не ok: N =====»
+FAIL_LINE_RE = re.compile(r"FAIL\s+([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · [\d.]+ с · проверок \d+ · (.+?)\s*$")
+BLOCK_RE = re.compile(r"===== ([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · ")
+BLOCK_END = ("===== ", "----- последние", "медленные: ", "итого: ")
+# отказ песочницы или прав в строках упавшего — причина «среда», а не провал кода (34 из 77 красных 02.11 — «report
+# --out вне $TMPDIR», metis-0696)
+ENV_RE = re.compile(r"Operation not permitted|PermissionError|\bEPERM\b|\bEACCES\b|Read-only file system|"
+                    r"sandbox-exec|вне \$TMPDIR")
+SKIP_RE = re.compile(r"(?i)(пропущено|skip)\b")  # строка пропуска («пропущено: sandbox-exec нет») — не причина
+CAUSE_LINE = 200                    # знаков первой строки не ok в причине
+
+
+def run_causes(text):
+    """Вывод run-tests.py → {метка упавшего файла: {"kind", "why", "line"}} (metis-0696). why — причина из строки FAIL
+    раннера («таймаут», «код 1», «сигнал 9»); line — первая строка не ok из хвоста файла («===== …», до CAUSE_LINE
+    знаков) или ""; kind — «таймаут», «сигнал» (файл убит), «среда» (в строках не ok — отказ песочницы или прав:
+    ENV_RE, кроме строк пропуска SKIP_RE), иначе «провал». Строки FAIL — только до первого хвоста, как у run_failed: в хвостах свои ok/FAIL."""
+    out, blocks, cur, tails = {}, {}, None, False
+    for ln in text.splitlines():
+        if ln.startswith(BLOCK_END):
+            tails = tails or ln.startswith("===== ")
+            m = BLOCK_RE.match(ln)
+            cur = m[1] if m else None
+            if cur:
+                blocks.setdefault(cur, [])
+        elif not tails:
+            m = FAIL_LINE_RE.match(ln)
+            if m:
+                out[m[1]] = {"why": m[2], "line": ""}
+        elif cur and ln.strip():
+            blocks[cur].append(ln.strip())
+    for label, c in out.items():
+        rows = blocks.get(label) or []
+        c["line"] = rows[0][:CAUSE_LINE] if rows else ""
+        why = c["why"]
+        c["kind"] = ("таймаут" if why == "таймаут" else "сигнал" if why.startswith("сигнал")
+                     else "среда" if any(ENV_RE.search(x) and not SKIP_RE.match(x) for x in rows) else "провал")
+    return out
+
+
+def log_text(log):
+    try:
+        fd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return ""
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read(LOG_MAX).decode("utf-8", "replace")
+
+
+def runner_mod():
+    """scripts/run-tests.py установленного плагина (не ветки PR: код прохода вне песочницы — только свой): его select,
+    load_map, stale_tests и collect выбирают файлы дозапуска по карте так же, как --affected."""
+    if not _RUNNER:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_run_tests",
+                                                      os.path.join(P.PLUGIN, "scripts", "run-tests.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RUNNER.append(mod)
+    return _RUNNER[0]
+
+
+def runner_args(cmd):
+    """Команда полного набора (без heavy) → (путь run-tests.py от корня, [папки плагинов]) или None: дозапуск умеет
+    только run-tests.py с папками и ключами -j/--timeout/--log-dir — без --affected, --base и --only. Разбор — в
+    lib/fullsuite.py: тем же правилом heavy занимает место «полный» (metis-1007)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fullsuite", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                            "fullsuite.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.runner_args(cmd, strict=True)
+
+
+def branch_of(d):
+    return (git(d, "symbolic-ref", "-q", "--short", "HEAD") or "").strip() or None
+
+
+def rerun_plan(d, sha, argv, line, repos):
+    """Дозапуск вместо полного набора (metis-0735) → (план или None, почему весь набор). План — {rerun_of, prev, files,
+    map, ancestor, argv}: argv — команда полного набора с `--only <файлы>`. Опора — последний настоящий полный прогон
+    (не дозапуск) этого репозитория на той же ветке папки из журнала full.jsonl: красный, со списком упавших, с той же
+    командой и env. Файлы — упавшие в нём и затронутые диффом его коммит → HEAD (`git diff` двух коммитов как есть,
+    предок он или нет) по карте affected-map.json рядом с раннером, выбор — select раннера, как у --affected. Весь
+    набор, если дифф задевает файл вне карты или общий (FULL раннера), раннер, карту, heavy, tests/_*.py, .pantheon-verify;
+    карта не читается или устарела (хоть один файл тестов изменён после её сборки); упавших больше половины; дозапуск —
+    весь набор; run-tests.py в HEAD не знает --only. Дифф пуст (опора на том же коммите или на коммите с тем же деревом)
+    — карта не нужна (metis-0842): гонятся только упавшие, проверки карты (чтение, stale, select) пропускаются, map —
+    её sha256 или None, если её нет; прочие условия те же."""
+    parsed = runner_args(argv[2]) if argv[:2] == ["/bin/sh", "-c"] and len(argv) == 3 else None
+    if not parsed:
+        return None, "команда полного набора — не run-tests.py с папками плагинов"
+    script, dirs = parsed
+    branch = branch_of(d)
+    if not branch:
+        return None, "HEAD без ветки — прошлый полный прогон не найти"
+    want = {r.lower() for r in repos}
+    prev = next((e for e in reversed(read_full()) if e.get("branch") == branch and not e.get("rerun_of")
+                 and want <= {str(r).lower() for r in e["repo"]}), None)
+    if not prev:
+        return None, f"на ветке {branch} ещё нет полного прогона"
+    pid, psha, failed = prev["rid"], prev.get("sha"), prev.get("failed")
+    if prev.get("code") == 0:
+        return None, f"последний полный прогон ветки ({pid}) зелёный"
+    try:
+        age = time.time() - datetime.strptime(str(prev.get("time")), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except ValueError:
+        age = None
+    if age is None or age > RERUN_MAX_AGE:
+        return None, f"полному прогону {pid} больше {RERUN_MAX_AGE // 3600} ч или время не разобрать — весь набор"
+    if prev.get("cmd") != line or prev.get("env") != run_env(line):
+        return None, f"у прошлого полного прогона {pid} другая команда или env"
+    if not isinstance(failed, list) or not failed or not all(isinstance(x, str) for x in failed):
+        return None, f"в прошлом полном прогоне {pid} нет списка упавших файлов"
+    if not (isinstance(psha, str) and SHA_RE.fullmatch(psha)) or git(d, "cat-file", "-e", f"{psha}^{{commit}}") is None:
+        return None, f"коммита прошлого полного прогона {pid} нет в клоне"
+    if "--only" not in (_show(d, sha, script) or ""):
+        return None, f"{script} в HEAD не знает --only"
+    out = git(d, "diff", "--name-only", "--no-renames", "-z", psha, sha, "--")
+    if out is None:
+        return None, f"git diff {psha[:12]}..{sha[:12]} не удался"
+    changed = sorted({x for x in out.split("\0") if x})
+    mp = os.path.join(os.path.dirname(script), "affected-map.json")
+    forced = [x for x in changed if x in (script, mp) or FORCE_FULL_RE.search(x)]
+    if forced:
+        return None, f"дифф задевает {forced[0]}"
+    rt = runner_mod()
+    items = rt.collect([os.path.join(d, x) for x in dirs])
+    chosen = []
+    if changed:   # пустой дифф (тот же коммит или то же дерево) — карта не нужна: только упавшие (metis-0842)
+        amap, why = rt.load_map(os.path.join(d, mp))
+        if amap is None:
+            return None, why
+        stale = rt.stale_tests(items, amap)
+        if stale:
+            return None, f"карта устарела: {len(stale)} файлов тестов изменены после её сборки ({stale[0]})"
+        chosen, unknown, _ = rt.select(changed, d, items, amap)
+        if unknown:
+            return None, f"дифф: {unknown[0][0]} — {unknown[0][1]}"
+    labels = {lb for _, lb in items}
+    if len(failed) * 2 > len(labels):
+        return None, f"упавших в прошлом полном прогоне {len(failed)} из {len(labels)} — больше половины"
+    files = sorted({x for x in failed if x in labels} | {lb for _, lb in chosen})
+    if not files or len(files) >= len(labels):
+        return None, "дозапуск — весь набор" if files else "дозапускать нечего"
+    try:
+        with open(os.path.join(d, mp), "rb") as fh:
+            mhash = hashlib.sha256(fh.read()).hexdigest()
+    except OSError as e:
+        if changed:
+            return None, f"карту не прочесть: {e}"
+        mhash = None   # пустой дифф: выбор не по карте, хеша нет
+    return {"rerun_of": pid, "prev": psha, "files": files, "map": mhash,
+            "ancestor": git(d, "merge-base", "--is-ancestor", psha, sha) is not None,
+            # хвост-комментарий строки (« # …») срезан: иначе --only попал бы в комментарий и sh гнал весь набор
+            "argv": argv[:2] + [re.sub(r"\s#.*\Z", "", argv[2], flags=re.S) + " --only "
+                                + shlex.quote(",".join(files))]}, None
+
+
+def narrow_history_problem(d):
+    """Подменённая история папки d → почему узкий набор нельзя, иначе None. run-tests --affected считает изменённые
+    файлы git'ом в песочнице, без защит шлюза: shallow, info/grafts или refs/replace сдвинут дифф. Тогда гонится
+    полный набор (как _carry_git шлюза guard, только дёшево)."""
+    if (git(d, "rev-parse", "--is-shallow-repository") or "").strip() != "false":
+        return "неполная история (shallow) или git не ответил"
+    grafts = (git(d, "rev-parse", "--git-path", "info/grafts") or "").strip()
+    if not grafts:
+        return "git не ответил на --git-path info/grafts"
+    if os.path.lexists(os.path.join(d, grafts)):
+        return "в git есть info/grafts — история подменена"
+    replace = git(d, "for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/")
+    if replace is None or replace.strip():
+        return "в git есть refs/replace (или git не ответил) — содержимое коммитов подменено"
+    return None
+
+
+def narrow_plan(d, sha, argv, line, base):
+    """Узкий набор заявки test --affected (metis-0734) → (план или None, почему нельзя). План — {argv, line, mb, map,
+    mp}: команда проверки проекта (run-tests.py с папками плагинов, как у дозапуска — runner_args) с `--affected --base
+    <merge-base вершины base и sha>` — так раннер берёт дифф ровно от неё, а шлюз guard сверяет её с merge-base head и
+    base PR; line — она же для записи (хвост-комментарий строки — после ключей); map — sha256 карты affected-map.json
+    рядом с раннером в дереве папки (оно чистое, прогон его не меняет). Карты нет, merge-base не одна — нельзя."""
+    parsed = runner_args(argv[2]) if argv[:2] == ["/bin/sh", "-c"] and len(argv) == 3 else None
+    if not parsed:
+        return None, "--affected — только у проверки run-tests.py с папками плагинов (.pantheon-verify)"
+    mbs = (git(d, "merge-base", "--all", base, sha) or "").split()
+    if len(mbs) != 1 or not SHA_RE.fullmatch(mbs[0]):
+        return None, f"merge-base {base[:12]} и {sha[:12]} не одна или не посчитана — сделай git fetch"
+    mp = os.path.join(os.path.dirname(parsed[0]), "affected-map.json")
+    try:
+        with open(os.path.join(d, mp), "rb") as fh:
+            mhash = hashlib.sha256(fh.read()).hexdigest()
+    except OSError as e:
+        return None, f"карту {mp} не прочесть ({e}) — узкий набор не выбрать; полный — без --affected"
+    cmd = re.sub(r"\s+#.*\Z", "", argv[2], flags=re.S) + f" --affected --base {mbs[0]}"
+    return {"argv": argv[:2] + [cmd], "line": cmd + line[len(argv[2]):], "mb": mbs[0], "map": mhash, "mp": mp}, None
 
 
 # --- итоги --------------------------------------------------------------------------------------------------------
@@ -887,7 +1611,7 @@ def save_result(qdir, rid, res):
     res = {"id": rid, "updated": P.stamp(), **res}
     text = json.dumps(res, ensure_ascii=False, indent=1)
     os.makedirs(root("runs"), mode=0o700, exist_ok=True)
-    P.write_json(root("runs", rid + ".json"), res)
+    P.write_json(root("runs", rid + ".json"), {**res, "qdir": qdir} if qdir else res)   # qdir — для recover_results
     if qdir:
         dfd = _open_dir(qdir)
         if dfd is not None:
@@ -907,11 +1631,180 @@ def new_log(rid):
 
 # --- тесты --------------------------------------------------------------------------------------------------------
 
-def run_test(rid, d, script, window, qdir, roots, record=True):
+def procs_of(pid):
+    """Срез процессов прогона (группа pid и потомки): [{pid, cpu, time, cmd до 200 знаков, heavy_wait}] для итога
+    running в своём qdir — окно ps не зовёт (metis-0873). heavy_wait — heavy без детей: ждёт место. Сбой ps — []."""
+    table = ps_table()
+    pids = sorted(_tree(pid, table) | {pid}) if table else [pid]
+    try:
+        out = subprocess.run(["ps", "-o", "pid=,pcpu=,etime=,command=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    parents = {pp for pp, _g, _r in table.values()}
+    res = []
+    for ln in out.splitlines():
+        f = ln.split(None, 3)
+        if len(f) < 4 or not f[0].isdigit():
+            continue
+        p = int(f[0])
+        heavy = any(w == "heavy" or w.endswith("/heavy") for w in f[3].split()[:3])
+        res.append({"pid": p, "cpu": f[1], "time": f[2], "cmd": f[3][:200],
+                    **({"heavy_wait": True} if heavy and p not in parents else {})})
+    return res
+
+
+class TestWatch:
+    """Сторож идущего теста rid (metis-0873), tick для wait_proc и prepare. Снимает прогон, если (1) лежит «стоп» своего
+    окна (own_stop: папка заявки или очередь терминала владельца; метка из чужой папки — stop-foreign, не снимает) или
+    (2) раз в SUPERSEDE_EVERY с head ушёл: обычная заявка — HEAD папки d не sha прогона (грязное дерево без нового
+    коммита — не повод); test --sha — stale_head по свежему кэшу или более новая заявка --sha из того же qdir на тот же
+    клон, где sha — предок нового. Причина (why) ставится до того, как tick вернёт True и wait_proc погасит группу:
+    снятый прогон записи для шлюза и строки full.jsonl не даёт. Раз в PROCS_EVERY с — срез процессов в итог running."""
+
+    def __init__(self, rid, qdir, window, d, sha=None, pin=False, src=None, script=None, base=None):
+        self.rid, self.qdir, self.window, self.d, self.sha = rid, qdir, window, d, sha
+        self.pin, self.src, self.script, self.base = pin, src, script, base
+        self.why, self.by, self.where = None, [], []
+        self.running, self.pid = None, None
+        now = time.monotonic()
+        self.next_head, self.next_procs = now + SUPERSEDE_EVERY, now + PROCS_EVERY
+
+    def marker(self):
+        """Лежит своя метка «стоп» → причина поставлена, True."""
+        where = own_stop(self.rid, self.qdir)
+        if where and not self.why:
+            self.why, self.where = "заявка «стоп»", where
+            self.by = [w or "владелец" for _, w in where]
+        return bool(where)
+
+    def superseded(self):
+        if not self.sha:
+            return None
+        if not self.pin:
+            cur = head_state(self.d)[0]
+            return f"superseded: HEAD ушёл {self.sha[:12]}→{cur[:12]}" if cur and cur != self.sha else None
+        why = stale_head(self.src, self.sha) if self.src and not self.script else None
+        if why:
+            return f"superseded: {why}"
+        me = os.path.realpath(self.qdir) if self.qdir else None
+        common = getattr(self.src, "common", None)
+        for q2, w2, rid2, req2 in _queued_tests():
+            if os.path.realpath(q2) != me or rid2 <= self.rid or not req2.get("pin") \
+                    or (req2.get("script") or None) != (self.script or None) or req2.get("base") != self.base:
+                continue
+            d2, _roots = resolve_dir(req2["dir"], w2)
+            if d2 is None or not common or d2.common != common:
+                continue
+            new = resolve_sha(common, str(req2.get("sha") or ""))
+            if new and new != self.sha and git_dir(common, "merge-base", "--is-ancestor", self.sha, new) is not None:
+                return f"superseded: заявка {rid2} на {new[:12]} новее, {self.sha[:12]} — её предок"
+        return None
+
+    def __call__(self):
+        if self.why or self.marker():
+            return True
+        now = time.monotonic()
+        if now >= self.next_head:
+            self.next_head = now + SUPERSEDE_EVERY
+            why = self.superseded()
+            if why:
+                self.why = why
+                return True
+        if self.running and self.pid and now >= self.next_procs:
+            self.next_procs = now + PROCS_EVERY
+            save_result(self.qdir, self.rid, {**self.running, "procs": procs_of(self.pid)})
+        return False
+
+    def stopped(self, **kw):
+        """Итог снятого прогона: stopped, записи нет; своя метка убрана, событие stop в журнал."""
+        clear_stop(self.rid, self.where)
+        log_event(id=self.rid, kind="stop", window=self.window, why=self.why, by=self.by,
+                  **({"sha": self.sha} if self.sha else {}))
+        return save_result(self.qdir, self.rid, {"state": "stopped", "kind": "test", "why": f"снят: {self.why}",
+                                                 "record": False, **({"sha": self.sha} if self.sha else {}), **kw})
+
+
+def load_state():
+    """(load за 5 минут, порог) — порог LOAD_PER_CORE на ядро (metis-0901). Load не узнать — (0.0, порог): не ждём."""
+    limit = LOAD_PER_CORE * (os.cpu_count() or 1)
+    try:
+        return os.getloadavg()[1], limit
+    except (OSError, AttributeError):
+        return 0.0, limit
+
+
+def wait_load(qdir, rid, watch, state):
+    """Полный набор под нагрузкой не стартует (metis-0901): пока load выше порога — итог queued с причиной «жду спада
+    нагрузки (load N)», опрос раз в LOAD_POLL с, не дольше LOAD_WAIT_MAX; «стоп» и ушедший head снимают (watch).
+    state — поля итога running, чтобы queued нёс те же sha и cmd. → "stop" (снято), "waited" (ждала) или None."""
+    end, did = time.monotonic() + LOAD_WAIT_MAX, None
+    while True:
+        load, limit = load_state()
+        if load <= limit or time.monotonic() >= end:
+            return did
+        did = "waited"
+        save_result(qdir, rid, {**state, "state": "queued",
+                                "why": f"жду спада нагрузки (load {load:.0f}, порог {limit:.0f})"})
+        nxt = time.monotonic() + LOAD_POLL
+        while time.monotonic() < nxt:
+            if watch():
+                return "stop"
+            time.sleep(min(SWEEP_EVERY, LOAD_POLL))
+
+
+def overload_files(text):
+    """Красный вывод run-tests, где упали только по таймауту файла, а load выше порога (metis-0901) → [метки] или None:
+    тест не падал — машине не хватило ядер. Любой другой упавший файл или итог не разобран — None (настоящий красный)."""
+    got = run_failed(text)
+    if not got or not got[1]:
+        return None
+    causes = run_causes(text)
+    if not all(causes.get(lb, {}).get("kind") == "таймаут" for lb in got[1]):
+        return None
+    load, limit = load_state()
+    return got[1] if load > limit else None
+
+
+def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None,
+             retried=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
-    проекта: с --script записи нет."""
+    проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
+    (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
+    подменена (narrow_history_problem: shallow, info/grafts, refs/replace) — полный набор с narrow_why. src —
+    папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по ней live_test находит идущую заявку.
+    expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей сдвинула HEAD или правит дерево) —
+    ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда. watch — сторож TestWatch (снятие своим
+    «стопом» и ушедшим head, metis-0873); нет — свой. Полный набор не стартует при load выше порога (wait_load); красный
+    только из-за таймаутов файлов под нагрузкой (overload_files) — один повтор сам (retried — данные первого прогона),
+    второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901)."""
+    if watch is None:
+        watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base)
+    if watch.marker():   # «стоп» пришёл до запуска: ни переноса записи по дереву, ни прогона
+        return watch.stopped(**({"src": src} if src else {}))
+
+    def off(sha, clean):
+        """Копия ушла с коммита заявки (expect) → итог failed; иначе None."""
+        if not expect or (sha == expect and clean):
+            return None
+        why = (f"копия {d} — не чистый коммит заявки {expect[:12]} (HEAD {(sha or '?')[:12]}, "
+               f"чистое: {'да' if clean else 'нет'}) — прогона и записи нет")
+        log_event(id=rid, kind="refused", window=window, dir=d, sha=expect, why=why)
+        return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": expect, "why": why,
+                                       **({"src": src} if src else {})})
+
+    res = off(*head_state(d)) if expect else None
+    if res:
+        return res
     record = record and not script
+    # metis-0732: зелёный полный набор на этом дереве уже есть; у копии — на коммите заявки, а не на HEAD
+    res = record and tree_record(rid, d, window, qdir, sha=expect)
+    if res:
+        return res
     sha, clean = head_state(d)
+    res = off(sha, clean)   # между проверками HEAD мог сдвинуться: дальше sha — только expect
+    if res:
+        return res
     if not sha:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "why": "папка не репозиторий git или нет коммитов"})
     if not clean:
@@ -920,35 +1813,111 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
     argv, line = command(d, "test", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": line})
-    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d})
-    log, fd = new_log(rid)
+    narrow, narrow_why = None, (narrow_history_problem(d) if base else None)
+    if base and not narrow_why:
+        narrow, why = narrow_plan(d, sha, argv, line, base)
+        if not narrow:
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "base": base,
+                                           "why": f"узкий набор (--affected): {why}"})
+        argv, line = narrow["argv"], narrow["line"]
+    repos0 = remotes(d) if record else []
+    full = bool(repos0) and any(P.merge_mod().full_tests_record(r, {"cmd": line}) for r in repos0)
+    plan, full_why = None, None
+    if full:   # metis-0735: после красного полного набора — дозапуск упавших и затронутых
+        try:
+            plan, full_why = rerun_plan(d, sha, argv, line, repos0)
+        except Exception as e:   # сбой расчёта — не повод не гонять: весь набор
+            plan, full_why = None, f"дозапуск не рассчитан: {type(e).__name__}: {e}"
+    extra = {"rerun_of": plan["rerun_of"], "files": plan["files"]} if plan else \
+        ({"full_why": full_why} if full_why else {})
+    if src:
+        extra["src"] = src
+    if expect:   # test --sha: итог running несёт pin, live_test не сцепляет с ним обычную заявку (metis-0796)
+        extra["pin"] = True
+    if narrow:   # узкий набор: live_test сцепляет только заявки с той же базой
+        extra["base"] = base
+    if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
+        extra["narrow_why"] = narrow_why
+    running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+               **({"script": script} if script else {}), **extra}
+    save_result(qdir, rid, running)
+    watch.sha, watch.running = sha, running
+    if full and not plan and not narrow:   # metis-0901: узкий набор и дозапуск лёгкие, полный под нагрузкой — нет
+        waited = wait_load(qdir, rid, watch, running)
+        if waited == "stop":
+            return watch.stopped(cmd=line, **extra)
+        if waited:
+            save_result(qdir, rid, running)
+    log, fd = new_log(rid + "-retry" if retried else rid)
     tmp = tempfile.mkdtemp(prefix="outside-")
     code, timed_out = None, False
     try:
         with contextlib.suppress(OSError):
-            os.write(fd, f"$ {line}  (папка {d}, {sha})\n".encode())
+            os.write(fd, (f"$ {line}  (папка {d}, {sha})\n" + (
+                f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: "
+                f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "")).encode())
+        if watch():   # «стоп» между взятием заявки и запуском (T10a): команда не запускается
+            return watch.stopped(cmd=line, log=log, **extra)
         try:
-            proc = subprocess.Popen(wrap(argv, write_profile(roots)), cwd=d, env=sandbox_env(tmp, "test"),
+            proc = subprocess.Popen(wrap(plan["argv"] if plan else argv, write_profile(roots)), cwd=d,
+                                    env=sandbox_env(tmp, "test"),
                                     stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True)
         except OSError as e:
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": f"команда не запустилась: {e}", "log": log})
+        watch.pid = proc.pid
         try:
-            code = wait_proc(proc, TEST_TIMEOUT)
+            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=log,
+                             hold=(lambda: heavy_waiting(proc.pid)) if heavy_bin() else None)   # metis-0901
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
             code = proc.wait()
+        except Silent as e:      # завис без вывода и CPU: тот же журнал, что отказ запуска (metis-0770)
+            with contextlib.suppress(OSError):
+                os.write(fd, f"\n{e.why}\n".encode())
+            log_event(kind="test-silent", id=rid, why=e.why)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "why": e.why,
+                                           "log": log, "tail": tail(log)})
     finally:
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)
+    watch.marker()   # «стоп» пришёл, пока команда выходила с кодом, — до записи (T10c)
     sha2, clean2 = head_state(d)
-    res = {"state": "done", "kind": "test", "sha": sha, "code": code, "cmd": line, "dir": d, "log": log,
-           "tail": tail(log), "record": False}
-    if timed_out:
+    over = None
+    if code not in (0, None) and not timed_out and not watch.why and sha2 == sha and clean2:   # metis-0901
+        over = overload_files(log_text(log))
+    if over and not retried:
+        log_event(id=rid, kind="test-overload", window=window, sha=sha, files=over, load=round(load_state()[0]))
+        return run_test(rid, d, script, window, qdir, roots, record=record, src=src, expect=expect, base=base,
+                        watch=watch, retried={"log": log, "files": over})
+    res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
+           "dir": d, "log": log, "tail": tail(log), "record": False, **extra}
+    text = log_text(log) if full or narrow else ""
+    got = run_failed(text) if full or narrow else None
+    if plan:
+        res["note"] = (f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: файлов "
+                       f"{len(plan['files'])}" + ("" if plan["ancestor"] else
+                                                   "; прошлый head не предок HEAD — дифф двух коммитов как есть"))
+    if narrow:
+        res["note"] = f"узкий набор (--affected) от merge-base {narrow['mb'][:12]}" + (
+            f": файлов {len(got[0]) + len(got[1])}" if got else "")
+    if retried:
+        res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + (
+            f"повтор после «таймаут под нагрузкой» (первый прогон: {retried['log']}, файлов {len(retried['files'])})")
+    if watch.why:   # снят (metis-0873): записи tests нет, даже если команда вышла с 0 по TERM
+        res["why"] = f"снят: {watch.why}"
+    elif over:   # второй прогон тоже упал только по таймаутам под нагрузкой: не красный, а «повторить»
+        res["overload"] = True
+        res["why"] = (f"таймаут под нагрузкой (load {load_state()[0]:.0f}): файлов {len(over)} — тест не падал, "
+                      "повторить, когда машина свободна")
+    elif timed_out:
         res["why"] = f"тесты дольше {TEST_TIMEOUT} с — остановлены"
     elif sha2 != sha or not clean2:
         res["why"] = f"команда изменила HEAD или дерево (стало {sha2 or '?'}, чистое: {'да' if clean2 else 'нет'}) — записи нет"
+    elif narrow and code == 3:
+        res["why"] = ("узкий набор: по карте гонять нечего (код 3) — записи tests нет; для шлюза — полный набор, "
+                      "test без --affected")
     elif code == 0 and not record:
         res["note"] = "запись tests для шлюза — только у проверки проекта (без --script)"
     elif code == 0:
@@ -957,14 +1926,111 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
             res["why"] = f"команда «{line}» ничего не проверяет — записи tests нет"
         elif not repos:
             res["why"] = "у репозитория нет remote — записи tests нет"
+        elif plan and (not got or got[1] or got[0] != plan["files"]):
+            res["why"] = (f"дозапуск: вывод run-tests не сошёлся со списком файлов ({len(plan['files'])}) — "
+                          "записи tests нет")
+        elif narrow and (not got or got[1] or not got[0]):
+            res["why"] = "узкий набор: итог run-tests не разобран — записи tests нет"
         else:
             try:
-                append_tests(repos, sha, d, line, window, rid)
+                append_tests(repos, sha, d, line, window, rid,
+                             rerun=plan or (narrow and {"files": got[0], "map": narrow["map"]}))
                 res["record"] = True
             except OSError as e:
                 res["why"] = f"запись tests не сделана: {e}"
-    log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"])
+    if full and not timed_out and not over and not watch.why and sha2 == sha and clean2:   # снятый — не в журнал (T11)
+        # журнал полных прогонов: опора следующего дозапуска (только запись без rerun_of) и след самих дозапусков
+        entry = {"rid": rid, "repo": repos0, "sha": sha, "tree": tree_of(d, sha), "branch": branch_of(d), "dir": d,
+                 "cmd": line, "env": run_env(line), "code": code, "failed": got[1] if got else None}
+        if got and got[1]:     # причина красного по файлу (metis-0696)
+            causes = run_causes(text)
+            entry["causes"] = {lb: causes.get(lb) or {"kind": "провал", "why": "", "line": ""} for lb in got[1]}
+        elif not got and code != 0:
+            entry["cause"] = f"итог run-tests не разобран (код {code})"
+        if plan:
+            entry.update(rerun_of=plan["rerun_of"], files=plan["files"], map=plan["map"])
+        try:
+            append_full(entry)
+        except OSError as e:
+            res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + f"журнал full.jsonl: {e}"
+    if watch.why:
+        clear_stop(rid, watch.where)
+        log_event(id=rid, kind="stop", window=window, why=watch.why, by=watch.by, sha=sha, code=code)
+        return save_result(qdir, rid, res)
+    log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
+              **({"rerun_of": plan["rerun_of"]} if plan else {}))
     return save_result(qdir, rid, res)
+
+
+TEST_WORK = "test-"   # приставка копий test --sha в work_root(): drop_orphan_work (только ID) их не берёт
+
+
+def run_test_at(rid, d, req, window, qdir, roots):
+    """Проверка проекта на коммите заявки (test --sha, metis-0779) → итог. Окно роли не переключит свою worktree на
+    ветку PR, если в ней другой .claude/ проекта (запись туда закрыта), поэтому прогон идёт в своей копии: `git worktree
+    add --detach` клона d (проверен в resolve_dir) в work_root()/test-<ID>, зависимости (prepare), run_test в копии —
+    запись tests на полный SHA. Копия снимается всегда; бывший head открытого PR — отказ, как у test без --sha."""
+    script, common = req.get("script"), d.common
+    ref = req.get("sha")
+    base = {"kind": "test", "src": d, "pin": True, **({"script": script} if script else {})}
+
+    def fail(why, **kw):
+        log_event(id=rid, kind="refused", window=window, dir=d, why=why)
+        return save_result(qdir, rid, {"state": "failed", **base, "why": why, **kw})
+
+    sha = resolve_sha(common, ref) if ref else None
+    if not sha:
+        return fail(f"коммита {ref or '?'} нет в клоне {d.clone}: сделай git fetch в своей копии и повтори")
+    watch = TestWatch(rid, qdir, window, d, sha=sha, pin=True, src=d, script=script, base=req.get("base"))
+    if watch.marker():
+        return watch.stopped(**base)
+    why = None if script else stale_head(d, sha)
+    if why:
+        return fail(why, sha=sha)
+    work = os.path.join(work_root(), TEST_WORK + rid)
+    save_result(qdir, rid, {"state": "running", **base, "sha": sha, "dir": work, "started": time.strftime("%Y-%m-%d %H:%M:%S")})
+    try:
+        why = checkout(common, sha, work)
+        if why:
+            return fail(why, sha=sha)
+        _clone, wcommon, wgitdir = trusted_clone(work)
+        if wcommon != common:
+            return fail(f"копия {work} — не worktree клона {d.clone}", sha=sha)
+        w = checked(work, d.clone, common, wgitdir)
+        code = prepare(w, rid, tick=watch, timeout=INSTALL_TIMEOUT)
+        reap(work)   # остатки установки (фоновые процессы lifecycle-скриптов) не двигают HEAD во время теста
+        if watch.why:
+            return watch.stopped(**base)
+        if code not in (None, 0):
+            log = root("runs", rid + ".log")
+            return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
+        watch.d = w
+        return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha,
+                        base=req.get("base"), watch=watch)
+    finally:
+        reap(work)
+        remove_work(common, work)
+
+
+def drop_test_work():
+    """Копии test --sha (test-<ID>) в work_root() — снять: процессы в них погасить, папку удалить. Зовёт только проход
+    тестов под замком outside-run до своей очереди: прогона на копии в этот момент нет, всякая копия — от упавшего
+    прохода. Метаданные worktree в клоне остаются, их помечает prunable сам git. → число снятых."""
+    try:
+        names = os.listdir(work_root())
+    except OSError:
+        return 0
+    n = 0
+    for name in names:
+        work = os.path.join(work_root(), name)
+        if not (name.startswith(TEST_WORK) and ID_RE.fullmatch(name[len(TEST_WORK):])) or os.path.islink(work) \
+                or not os.path.isdir(work):
+            continue
+        reap(work)
+        remove_work(None, work)
+        log_event(id=name[len(TEST_WORK):], kind="work-orphan", why="копия теста без прогона снята")
+        n += 1
+    return n
 
 
 # --- серверы ------------------------------------------------------------------------------------------------------
@@ -1072,7 +2138,8 @@ def trusted_clone(d):
 def git_env():
     """Окружение git копии: только конфиг клона — ни системного, ни ~/.gitconfig, ни GIT_* тика, без вопросов."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+               GIT_NO_REPLACE_OBJECTS="1")
     return env
 
 
@@ -1254,6 +2321,22 @@ def _stop_age(rid, where, t):
     return min(ages) if ages else 0
 
 
+def own_stop(rid, qdir, stops=None):
+    """«Стоп» заявки rid от её владельца (metis-0873): метка <ID>.stop в папке самой заявки qdir или в очереди
+    терминала владельца (STATE/outside/queue). Метка с тем же ID в папке другого окна — чужая: проход её убирает,
+    не исполняет и пишет в журнал stop-foreign. → [(папка, окно)] своих меток; пусто — стопа нет."""
+    stops = stop_requests() if stops is None else stops
+    where = stops.get(rid) or []
+    mine = {os.path.realpath(p) for p in (qdir, root("queue")) if p}
+    own = [(q, w) for q, w in where if os.path.realpath(q) in mine]
+    alien = [(q, w) for q, w in where if os.path.realpath(q) not in mine]
+    if alien:
+        clear_stop(rid, alien)
+        log_event(id=rid, kind="stop-foreign", by=[w for _, w in alien],
+                  why="метка «стоп» не из папки заявки — не исполнена")
+    return own
+
+
 def busy_why(live):
     """Причина отказа новому серверу (лимит серверов, давление памяти) или None (решение владельца 01.11)."""
     if len(live) >= MAX_SERVERS:
@@ -1297,7 +2380,7 @@ def run_serve(rid, d, req, window, qdir):
     def tick():
         """Сторож других серверов и «стоп» этой заявки, пока копия, зависимости и порт."""
         sweep_quiet()
-        return rid in stop_requests()
+        return bool(own_stop(rid, qdir))
 
     try:
         with contextlib.suppress(OSError):
@@ -1311,8 +2394,10 @@ def run_serve(rid, d, req, window, qdir):
         if not argv:
             raise RuntimeError(line)
         base["cmd"] = line
-        code = prepare(work, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
-        if rid in stop_requests():
+        # не монорепо с --app ПАПКА: зависимости ставятся в папке приложения (metis-0790); монорепо — в корне
+        inst = cwd if app and app != "." and not workspaces(work, _pkg(work)) else work
+        code = prepare(inst, rid, heavy=False, tick=tick, timeout=INSTALL_TIMEOUT)
+        if own_stop(rid, qdir):
             raise Cancelled
         if code not in (None, 0):
             raise RuntimeError(f"установка зависимостей вышла с кодом {code}")
@@ -1361,7 +2446,7 @@ def run_serve(rid, d, req, window, qdir):
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
         if cancelled:
-            where = stop_requests().get(rid, [])
+            where = own_stop(rid, qdir)
             clear_stop(rid, where)
             log_event(id=rid, kind="stop", why="заявка «стоп» до запуска", by=[w for _, w in where])
             return save_result(qdir, rid, {"state": "stopped", **base, "why": "заявка «стоп» до запуска сервера",
@@ -1391,14 +2476,16 @@ def run_serve(rid, d, req, window, qdir):
 # --- серверы: сторож ----------------------------------------------------------------------------------------------
 
 def sweep(t=None, stops=None):
-    """Серверы со сроком, «стопом» из любой папки заявок или умершим процессом — погасить. → число погашенных."""
+    """Серверы со сроком, «стопом» своего окна (own_stop: папка заявки или очередь терминала владельца) или умершим
+    процессом — погасить. → число погашенных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
     srv, n, table = servers(), 0, None
     for rid, s in list(srv.items()):
         pid = int(s.get("pid") or 0)
         alien = foreign(pid, s.get("started"))
-        why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if rid in stops
+        where = own_stop(rid, s.get("qdir"), stops) if rid in stops else []
+        why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if where
                else "процесс завершился" if not pid or alien or not alive(pid) else None)
         if not why:
             table = ps_table() if table is None else table   # один ps на круг сторожа
@@ -1414,7 +2501,6 @@ def sweep(t=None, stops=None):
         orphans = reap(s.get("work"))   # свои по папке копии — и у чужого номера процесса тоже
         if s.get("tmp"):
             shutil.rmtree(s["tmp"], ignore_errors=True)
-        where = stops.get(rid, [])
         clear_stop(rid, where)
         del srv[rid]
         save_servers(srv)
@@ -1433,20 +2519,27 @@ def sweep(t=None, stops=None):
 
 
 def drop_orphan_stops(stops=None, t=None):
-    """«Стоп» без живого сервера и без заявки в очереди, старше STOP_ORPHAN_AGE, — убрать (тесты и уже погашенные
-    серверы гасить нечего; молодой — может ждать свою заявку). → число убранных."""
+    """«Стоп» без живого сервера, без заявки в очереди и без идущего теста, старше STOP_ORPHAN_AGE, — убрать (уже
+    погашенные серверы и тесты гасить нечего; молодой — может ждать свою заявку). Метку идущего теста (runs/<ID>.json:
+    test в running или preparing) не трогает — её снимет проход тестов (metis-0873). → число убранных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
     live = set(servers())
     queued = {rid for rid, _ in _queued_ids()}
     n = 0
     for rid, where in stops.items():
-        if rid in live or rid in queued or _stop_age(rid, where, t) < STOP_ORPHAN_AGE:
+        if rid in live or rid in queued or _stop_age(rid, where, t) < STOP_ORPHAN_AGE or _test_running(rid):
             continue
         clear_stop(rid, where)
         log_event(id=rid, kind="stop-unknown", by=[w for _, w in where])
         n += 1
     return n
+
+
+def _test_running(rid):
+    """Тест rid идёт: итог прохода в STATE (runs/<ID>.json, окну закрыт) — test в running или preparing."""
+    res = P.read_json(root("runs", rid + ".json"), None)
+    return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") in ("running", "preparing")
 
 
 def drop_orphan_work(t=None):
@@ -1558,11 +2651,25 @@ def _queued_ids(kinds=KINDS):
     return out
 
 
-def requests(kinds=KINDS):
+def _gone(dfd, name):
+    """Файла name в папке dfd больше нет (после unlink): заявку отдаём, только если она действительно снята."""
+    try:
+        os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def requests(kinds=KINDS, limit=None, taken=None):
     """[(время, вид, qdir, окно, id, заявка)] по всем папкам — только заявки своих проходов (kinds): чужие остаются
     лежать (metis-0614: проход тестов не съедает заявки серверов и наоборот). Битые и подложенные — удаляются с итогом
-    failed."""
-    out = []
+    failed. Отдаются самые ранние limit заявок (все, если limit не задан) и только они снимаются с диска (metis-0716:
+    убитый заход не теряет остальные); заявка, которую снять не удалось, не отдаётся — иначе проход крутился бы на ней.
+    taken — {qdir: сколько заявок окна уже взято в этом заходе}: начальный номер круга между окнами (limit=1 иначе
+    считал бы его с нуля при каждом вызове)."""
+    found = []
     for qdir, window in queue_dirs():
         dfd = _open_dir(qdir)
         if dfd is None:
@@ -1576,18 +2683,38 @@ def requests(kinds=KINDS):
                 req = _parse(text)
                 if _req_kind(req) not in kinds:
                     continue
-                _unlink_in(dfd, name)   # одна заявка — один запуск
                 if not ID_RE.fullmatch(rid):
+                    _unlink_in(dfd, name)
                     continue
                 why = check_request(req, rid)
                 if why:
+                    _unlink_in(dfd, name)
                     save_result(qdir, rid, {"state": "failed", "why": why})
                     log_event(id=rid, kind="refused", window=window, why=why)
                     continue
-                out.append((str(req.get("time") or ""), req["kind"], qdir, window, rid, req))
+                found.append((str(req.get("time") or ""), req["kind"], qdir, window, rid, req))
         finally:
             os.close(dfd)
-    out.sort(key=lambda x: x[0])
+    # порядок — по времени из id (его ставит CLI и проверяет ID_RE; req["time"] пишет клиент), по кругу между окнами:
+    # за круг одна заявка от окна (metis-0716), чтобы окно не вставало первым своими временами и не держало очередь
+    found.sort(key=lambda x: x[4])
+    seen_n, ranked = dict(taken or {}), []
+    for item in found:
+        n = seen_n.get(item[2], 0)
+        seen_n[item[2]] = n + 1
+        ranked.append((n, item[4], item))
+    ranked.sort(key=lambda x: x[:2])
+    found = [x[2] for x in ranked]
+    out = []
+    for item in found[:limit]:
+        dfd = _open_dir(item[2])
+        if dfd is None:
+            continue
+        try:
+            if _take_in(dfd, item[4] + ".req.json"):   # снял не этот вызов (окно сняло заявку) — не отдаём
+                out.append(item)
+        finally:
+            os.close(dfd)
     return out
 
 
@@ -1613,6 +2740,13 @@ def check_request(req, rid):
     sha = req.get("sha")
     if sha is not None and not (isinstance(sha, str) and SHORT_SHA_RE.fullmatch(sha)):
         return "коммит заявки — от 7 до 40 знаков 0-9a-f"
+    pin = req.get("pin")
+    if pin is not None and (pin is not True or req["kind"] != "test" or sha is None):
+        return "pin — только true, у заявки test с коммитом (test --sha)"
+    base = req.get("base")
+    if base is not None and not (isinstance(base, str) and SHA_RE.fullmatch(base) and req["kind"] == "test"
+                                 and s is None):
+        return "base — коммит из 40 знаков 0-9a-f, у заявки test без --script (test --affected)"
     app = req.get("app")
     if app is not None and not (isinstance(app, str) and APP_RE.fullmatch(app)):
         return "имя приложения не по образцу (имя пакета, @scope/имя, папка или «.»)"
@@ -1652,10 +2786,137 @@ def handle(qdir, window, rid, req):
         return save_result(qdir, rid, {"state": "failed", "kind": req["kind"], "why": roots})
     if req["kind"] == "serve":
         return run_serve(rid, d, req, window, qdir)
-    return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"))
+    if req.get("pin"):   # test --sha (metis-0779): своя копия на коммите, а не HEAD папки
+        return run_test_at(rid, d, req, window, qdir, registry(None) or roots)
+    res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
+    if res:
+        return res
+    return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"),
+                    base=req.get("base"))
 
 
-# --- тесты после «принять» ----------------------------------------------------------------------------------------
+# --- перед стартом заявки test (metis-0726) ------------------------------------------------------------------------
+
+def before_test(qdir, window, rid, req, d):
+    """Перед прогоном заявки test в папке d: HEAD — бывший head открытого PR (stale_head) — итог failed без прогона
+    (только проверка проекта: --script — для себя, не для шлюза); иначе ждущие заявки на ту же проверку снимаются
+    (drop_dupes) и идёт прогон этой. Дерево не чистое или HEAD нет — None: отказ даст run_test. Заявка подана на
+    другой коммит (HEAD ушёл), а в том же qdir ждёт более новая заявка на ту же папку и ту же проверку — failed
+    «superseded <новый ID>» без прогона (metis-0873); новой нет — прогон текущего HEAD, как раньше."""
+    sha, clean = head_state(d)
+    if not sha:
+        return None
+    newer = _newer_same(qdir, rid, req, d) if req.get("sha") and req["sha"] != sha else None
+    if newer:
+        why = f"superseded {newer}: HEAD ушёл с {str(req['sha'])[:12]}, в очереди более новая заявка {newer}"
+        log_event(id=rid, kind="refused", window=window, dir=d, sha=req["sha"], why=why)
+        return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": req["sha"], "why": why,
+                                       "superseded": newer})
+    if not clean:
+        return None
+    why = None if req.get("script") else stale_head(d, sha)
+    if why:
+        log_event(id=rid, kind="refused", window=window, dir=d, sha=sha, why=why)
+        return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": why})
+    drop_dupes(qdir, rid, req, d, sha, window)
+    return None
+
+
+def _newer_same(qdir, rid, req, d):
+    """ID более новой ждущей заявки test из той же папки заявок qdir на ту же папку d и ту же проверку (--script,
+    --base; не --sha) или None. Чужое окно своей заявкой чужую не снимет: сверка только в пределах qdir."""
+    me, q = os.path.realpath(d), os.path.realpath(qdir)
+    for q2, w2, rid2, req2 in _queued_tests():
+        if os.path.realpath(q2) != q or rid2 <= rid or req2.get("pin") \
+                or (req2.get("script") or None) != (req.get("script") or None) or req2.get("base") != req.get("base"):
+            continue
+        d2, _roots = resolve_dir(req2["dir"], w2)
+        if d2 is not None and os.path.realpath(d2) == me:
+            return rid2
+    return None
+
+
+def stale_head(d, sha, t=None):
+    """sha — бывший head ещё открытого PR репозитория папки d по кэшу `autoclose fetch` (old_heads, autoclose.
+    former_heads), а у PR сейчас другой head → причина отказа; кэша нет, он старше AUTO_HEADS_TTL, gh не ответил по
+    репозиторию, sha там нет (коммит ещё не пушили) — None: прогон как раньше."""
+    cache = _fresh_cache(t)
+    errs = {str(r).lower() for r in cache.get("errors") or {}} if isinstance(cache.get("errors"), dict) else set()
+    old = {str(r).lower(): v for r, v in (cache.get("old_heads") or {}).items() if isinstance(v, dict)} \
+        if isinstance(cache.get("old_heads"), dict) else {}
+    prs = {str(r).lower(): v for r, v in (cache.get("open_prs") or {}).items() if isinstance(v, list)} \
+        if isinstance(cache.get("open_prs"), dict) else {}
+    for repo in remotes(d):
+        num = old.get(repo, {}).get(sha)
+        if num is None or repo in errs:
+            continue
+        if any(isinstance(p, dict) and str(p.get("head") or "").lower() == sha for p in prs.get(repo, ())):
+            continue   # sha сейчас head какого-то открытого PR (бывший head #1 стал head #2; force-push назад) — не устарел
+        cur = next((str(p.get("head") or "").lower() for p in prs.get(repo, ())
+                    if isinstance(p, dict) and p.get("number") == num), "")
+        if cur and cur != sha:
+            return (f"head устарел, подай на текущий: {sha[:12]} — бывший head PR #{num} {repo}, сейчас head "
+                    f"{cur[:12]}; прогона не было")
+    return None
+
+
+def _queued_tests():
+    """[(qdir, окно, id, заявка)] ждущих заявок test в формате (check_request) — без снятия с диска."""
+    out = []
+    for qdir, window in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            for name in sorted(os.listdir(dfd)):
+                rid = name[:-len(".req.json")]
+                if not name.endswith(".req.json") or not ID_RE.fullmatch(rid):
+                    continue
+                req = _parse(_read_in(dfd, name))
+                if _req_kind(req) == "test" and not check_request(req, rid):
+                    out.append((qdir, window, rid, req))
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return out
+
+
+def drop_dupes(qdir, rid, req, d, sha, window=None):
+    """Ждущие заявки на ту же проверку, что заявка rid (её папка d на HEAD sha): тот же --script и та же папка или
+    папка того же репозитория на том же чистом HEAD. Тесты идут на HEAD папки во время прогона, поэтому они прогнали бы
+    то же самое ещё раз (metis-0726: 21 заявка на 11 worktree). Каждая снимается с диска с итогом failed «дубль
+    <rid>»; не снялась — остаётся. → число снятых."""
+    repos, me, n = set(remotes(d)), os.path.realpath(d), 0
+    for q2, w2, rid2, req2 in _queued_tests():
+        if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None) \
+                or req2.get("base") != req.get("base") \
+                or req2.get("pin"):   # test --sha идёт на своём коммите, а не на HEAD папки (metis-0779)
+            continue
+        d2, _roots = resolve_dir(req2["dir"], w2)
+        if d2 is None or not (os.path.realpath(d2) == me
+                              or head_state(d2) == (sha, True) and repos & set(remotes(d2))):
+            continue
+        dfd = _open_dir(q2)
+        if dfd is None:
+            continue
+        try:
+            _unlink_in(dfd, rid2 + ".req.json")
+            gone = _gone(dfd, rid2 + ".req.json")
+        finally:
+            os.close(dfd)
+        if gone:
+            # status чужого окна заявку rid не видит — подсказки status нет, только где искать итог
+            why = (f"дубль {rid}: та же проверка на {sha[:12]} идёт заявкой {rid} — итог у заявки {rid} в окне "
+                   f"{window or '?'}")
+            save_result(q2, rid2, {"state": "failed", "kind": "test", "sha": sha, "why": why, "dup": rid,
+                                   "dup_window": window})
+            log_event(id=rid2, kind="refused", window=w2, why=why)
+            n += 1
+    return n
+
+
+# --- «принять» без тестов: тревога ----------------------------------------------------------------------------------------
 
 def _epoch(rec):
     """Время записи или заявки в секундах: «…T…:%S%z» (журнал шлюза, заявки CLI) или «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp,
@@ -1671,107 +2932,126 @@ def _epoch(rec):
         return None
 
 
-def auto_todo(recs=None, t=None):
-    """[(repo, sha)] — «принять» argus не старше AUTO_TTL, записи tests на (repo, SHA) нет, проход ещё не брался."""
+AUTO_HEADS_TTL = 3600               # с: кэш открытых PR старше часа — «gh не ответил»: отказ stale_head и тревога стоят (metis-0716)
+
+
+def _fresh_cache(t=None):
+    """Кэш `autoclose fetch` (STATE/autoclose-prs.json), если он не старше AUTO_HEADS_TTL; иначе {}."""
     t = P.now() if t is None else t
+    cache = P.read_json(P.path("autoclose-prs.json"), {})
+    fetched = cache.get("fetched") if isinstance(cache, dict) else None
+    if isinstance(fetched, bool) or not isinstance(fetched, (int, float)) or not 0 <= t - fetched <= AUTO_HEADS_TTL:
+        return {}
+    return cache
+
+
+def open_pr_heads(t=None):
+    """{(repo, sha): номер PR} открытых PR по кэшу `autoclose fetch`; репозиторий, про который gh не ответил, кэш
+    старше AUTO_HEADS_TTL или нечитаемый — пусто (для них тревоги нет)."""
+    cache = _fresh_cache(t)
+    by_repo = cache.get("open_prs")
+    if not isinstance(by_repo, dict):
+        return {}
+    errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
+    return {(str(r).lower(), str(p.get("head") or "").lower()): p.get("number")
+            for r, prs in by_repo.items() if isinstance(prs, list) and r not in errs
+            for p in prs if isinstance(p, dict)}
+
+
+def overdue_accepts(recs=None, t=None):
+    """[(repo, sha, номер PR | None)] — «принять» argus старше ALERT_AFTER и не старше AUTO_TTL, SHA — head открытого PR
+    (по кэшу), записи tests на (repo, SHA) нет и тревога о нём ещё не подавалась (auto.json alerted). Тестов сам проход не
+    запускает (решение владельца 03.11): заявку подаёт роль; это только срок, после которого дежурному пора знать."""
+    t = P.now() if t is None else t
+    heads = open_pr_heads(t)
+    if not heads:
+        return []                   # кэша нет — журнал шлюза не читается (тик зовёт это каждый проход)
     recs = read_records() if recs is None else recs
-    done = (P.read_json(root("auto.json"), {}).get("done") or {})
+    alerted = P.read_json(root("auto.json"), {}).get("alerted") or {}
     tested = {(str(x).lower(), r["sha"].lower()) for r in recs if r.get("kind") == "tests" for x in r["repo"]}
-    out = []
+    out, seen = [], set()
     for r in recs:
         by = r.get("by") if isinstance(r.get("by"), dict) else {}
-        if r.get("kind") != "accept" or by.get("agent_type") != "argus" or not SHA_RE.fullmatch(r["sha"].lower()):
-            continue
-        e = _epoch(r)
-        if e is None or not 0 <= t - e <= AUTO_TTL:
+        e = _epoch(r) if r.get("kind") == "accept" and by.get("agent_type") == "argus" else None
+        if e is None or not ALERT_AFTER < t - e <= AUTO_TTL:
             continue
         for repo in r["repo"]:
             key = (str(repo).lower(), r["sha"].lower())
-            if key not in tested and f"{key[0]}@{key[1]}" not in done and key not in out:
-                out.append(key)
+            if key in heads and key not in tested and key not in seen and f"{key[0]}@{key[1]}" not in alerted:
+                seen.add(key)
+                out.append((*key, heads[key] if heads[key] is not None else r.get("pr")))
     return out
 
 
-def auto_due():
-    """Тику: журнал шлюза менялся с прошлого прохода — пора смотреть «принять» без тестов."""
-    try:
-        m = os.stat(records_file()).st_mtime
-    except OSError:
-        return False
-    return m != P.read_json(root("auto.json"), {}).get("mtime")
-
-
-def trusted_repo(d):
-    """trusted_clone + Repo: папка d с проверенными клоном, common и gitdir; не прошла — None."""
-    clone, common, gitdir = trusted_clone(d)
-    return checked(d, clone, common, gitdir) if clone else None
-
-
-def find_checkout(repo, sha):
-    """Копия repo на sha с чистым деревом внутри папок реестра → (папка, клон, None); нет — (None, клон|None, причина).
-    Папка и клон — Repo (metis-0614): клон реестра и worktree роли проверены trusted_clone, конфиг клона — unsafe_config,
-    git по ним — только через проверенный gitdir. Папка реестра с подложенным commondir в .git, worktree, чей .git-файл
-    ведёт не в <клон>/.git/worktrees/<имя>, — пропускаются: их git исполнил бы конфиг, который пишет роль."""
-    roots = registry(None)
-    clones = []
-    for r in roots:
-        top = trusted_repo(r)
-        if (top is None or top != top.clone or top in clones or not inside(top, roots) or unsafe_config(top.common)
-                or repo not in remotes(top)):
-            continue
-        clones.append(top)
-    for top in clones:
-        wt = git_dir(top.common, "worktree", "list", "--porcelain") or ""
-        for block in wt.split("\n\n"):
-            fields = dict(ln.split(" ", 1) for ln in block.splitlines() if " " in ln)
-            p = os.path.realpath(fields.get("worktree", ""))
-            if fields.get("HEAD", "").lower() == sha and p and inside(p, roots):
-                rp = trusted_repo(p)
-                if rp is None or rp.clone != top:
-                    continue
-                h, clean = head_state(rp)
-                if h == sha and clean:
-                    return rp, top, None
-    for top in clones:
-        if git_dir(top.common, "cat-file", "-e", f"{sha}^{{commit}}") is not None:
-            return None, top, None
-    return None, None, (f"нет копии {repo} в папках реестра" if not clones else f"коммита {sha[:12]} нет в клоне {clones[0]}")
-
-
-def run_auto(repo, sha):
-    rid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
-    d, clone, why = find_checkout(repo, sha)
-    temp = None
-    if not d and clone:
-        temp = os.path.join(wt_root(), rid)
-        why = checkout(clone.common, sha, temp)
-        d = trusted_repo(os.path.realpath(temp)) if not why else None
-        if not d:
-            why = why or f"worktree на {sha[:12]} в {clone} не прошёл проверку"
-    try:
-        if not d:
-            res = save_result(None, rid, {"state": "failed", "kind": "test", "auto": f"{repo}@{sha}", "why": why})
-        else:
-            if temp:
-                prepare(temp, rid)
-            res = run_test(rid, d, None, None, None, registry(None))
-            res["auto"] = f"{repo}@{sha}"
-            save_result(None, rid, res)
-    finally:
-        if temp:
-            git_dir(clone.common, "worktree", "remove", "--force", temp, timeout=120)
-            if os.path.isdir(temp) and inside(os.path.realpath(temp), [os.path.realpath(wt_root())]):
-                shutil.rmtree(temp, ignore_errors=True)
+def alert_overdue(t=None):
+    """Тревога дежурному про каждый просроченный «принять» без tests (overdue_accepts), одна на (repo, sha): метка пишется
+    до тревоги, повтор не шлётся. → число тревог."""
+    t = P.now() if t is None else t
+    todo = overdue_accepts(t=t)
+    if not todo:
+        return 0
     a = P.read_json(root("auto.json"), {})
-    a.setdefault("done", {})[f"{repo}@{sha}"] = {"time": P.stamp(), "id": rid, "state": res.get("state"),
-                                                "code": res.get("code"), "record": res.get("record", False)}
+    al = {k: v for k, v in (a.get("alerted") or {}).items() if isinstance(v, (int, float)) and 0 <= t - v <= 2 * AUTO_TTL}
+    for repo, sha, pr in todo:
+        al[f"{repo}@{sha}"] = t
+    a["alerted"] = al
+    os.makedirs(root(), mode=0o700, exist_ok=True)
     P.write_json(root("auto.json"), a)
-    if not res.get("record"):
-        P.alert(f"тесты после «принять» {repo}@{sha[:12]}: "
-                + (f"код {res.get('code')}" if res.get("code") is not None else "не запущены")
-                + (f" — {res['why']}" if res.get("why") else "") + f"; журнал: pantheon outside status {rid}",
-                "pantheon-outside")
-    return res
+    for repo, sha, pr in todo:
+        P.alert(f"«принять» argus {repo}@{sha[:12]}" + (f" (PR #{pr})" if pr else "") + f" без записи tests дольше "
+                f"{ALERT_AFTER // 3600} ч, head ещё открыт: тесты сами не идут — роль подаёт `pantheon outside test` "
+                "на итоговый head", "pantheon-outside")
+    return len(todo)
+
+
+# --- доля красных полных прогонов за сутки: тревога (metis-0696) ----------------------------------------------------
+
+def red_share(entries=None, t=None):
+    """Полные прогоны прохода (full.jsonl, с дозапусками) за RED_WINDOW → (всего, красных, {вид причины: число файлов},
+    {метка: {вид: число}}). Красный — код не 0. Вид — kind из causes; без causes при списке упавших — «причина не
+    записана» (записи до metis-0696); итог не разобран — «итог не разобран» без файла."""
+    t = P.now() if t is None else t
+    entries = read_full() if entries is None else entries
+    total = red = 0
+    kinds, files = {}, {}
+    for e in entries:
+        at = _epoch(e)
+        if at is None or not 0 <= t - at <= RED_WINDOW:
+            continue
+        total += 1
+        if e.get("code") == 0:
+            continue
+        red += 1
+        failed = e.get("failed") if isinstance(e.get("failed"), list) else None
+        causes = e.get("causes") if isinstance(e.get("causes"), dict) else {}
+        if not failed:
+            kinds["итог не разобран"] = kinds.get("итог не разобран", 0) + 1
+            continue
+        for lb in failed:
+            c = causes.get(lb)
+            k = str(c.get("kind") or "провал") if isinstance(c, dict) else "причина не записана"
+            kinds[k] = kinds.get(k, 0) + 1
+            per = files.setdefault(str(lb), {})
+            per[k] = per.get(k, 0) + 1
+    return total, red, kinds, files
+
+
+def alert_red_share(t=None):
+    """Тревога дежурному, если доля красных полных прогонов за сутки больше RED_SHARE (и прогонов не меньше
+    RED_MIN_RUNS): не чаще раза в сутки (P.alert_daily), с разбивкой по видам причин и по файлам. → True, если доля
+    выше порога (сама тревога в окне суток могла уже быть)."""
+    total, red, kinds, files = red_share(t=t)
+    if total < RED_MIN_RUNS or red <= RED_SHARE * total:
+        return False
+    by_kind = ", ".join(f"{k} {n}" for k, n in sorted(kinds.items(), key=lambda x: (-x[1], x[0])))
+    top = sorted(files.items(), key=lambda x: (-sum(x[1].values()), x[0]))[:5]
+    by_file = "; ".join(f"{lb} — " + ", ".join(f"{k} {n}" for k, n in sorted(v.items(), key=lambda x: (-x[1], x[0])))
+                        for lb, v in top)
+    P.alert_daily("outside-red-share",
+                  f"красных полных прогонов прохода за сутки {red} из {total} ({100 * red // total} %, порог "
+                  f"{int(RED_SHARE * 100)} %). Причины: {by_kind or '—'}" + (f". Файлы: {by_file}" if by_file else "")
+                  + ". Журнал — STATE/outside/full.jsonl (causes), выводы — runs/<rid>.log", "pantheon-outside")
+    return True
 
 
 def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
@@ -1788,40 +3068,74 @@ def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
     code = -1
     try:
         os.write(fd, f"$ {' '.join(argv)}  (зависимости свежего worktree)\n".encode())
-        proc = subprocess.Popen(wrap(argv, write_profile(registry(None)), heavy=heavy), cwd=d,
-                                env=sandbox_env(tmp, "test"), stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
-                                start_new_session=True)
+        for attempt in range(PREPARE_SPAWN_TRIES):
+            try:
+                proc = subprocess.Popen(wrap(argv, write_profile(registry(None)), heavy=heavy), cwd=d,
+                                        env=sandbox_env(tmp, "test"), stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+                                        start_new_session=True)
+                break
+            except OSError as e:
+                # под нагрузкой fork/exec даёт временный отказ (EAGAIN, ETXTBSY): повтор, а не «код -1» (metis-0731)
+                if e.errno not in SPAWN_RETRY_ERRNO or attempt == PREPARE_SPAWN_TRIES - 1:
+                    raise
+                time.sleep(1 + attempt)
         try:
-            code = wait_proc(proc, timeout, tick)
+            # metis-0862: пока heavy ждёт место, срок установки не идёт — иначе «код -1» вместо ожидания очереди
+            hold = (lambda: heavy_waiting(proc.pid)) if heavy and heavy_bin() else None
+            code = wait_proc(proc, timeout, tick, hold=hold)
         except subprocess.TimeoutExpired:
             kill_group(proc.pid)
             proc.wait()
-    except (OSError, subprocess.SubprocessError):
-        pass
+    except (OSError, subprocess.SubprocessError) as e:
+        with contextlib.suppress(OSError):   # причина в журнал: «код -1» без неё не разобрать (metis-0731)
+            os.write(fd, f"установка не запустилась: {type(e).__name__}: {e}\n".encode())
     finally:
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)
     return code
 
 
-def auto_pass(t=None):
-    try:
-        m = os.stat(records_file()).st_mtime
-    except OSError:
-        m = None
-    todo = auto_todo(t=t)
-    a = P.read_json(root("auto.json"), {})
-    a["mtime"] = m
-    os.makedirs(root(), mode=0o700, exist_ok=True)
-    P.write_json(root("auto.json"), a)
-    return [run_auto(repo, sha) for repo, sha in todo]
-
-
 # --- тик и проходы -----------------------------------------------------------------------------------------------
 
+def _zombies(t=None):
+    """Итоги, которые чинит recover_results, но заход ради них не шёл: running в runs/ (живого захода нет — замок
+    outside-run свободен) и queued без .req.json старше LOST_AFTER. → число."""
+    t = P.now() if t is None else t
+    if P.locked("outside-run"):
+        return 0                    # заход жив: running — его, queued ещё разбирается
+    n = 0
+    runs = root("runs")
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+        rid = name[:-len(".json")]
+        res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
+        if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
+            n += 1
+    for qdir, _ in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = os.listdir(dfd)
+            for name in names:
+                rid = name[:-len(".result.json")]
+                if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" in names:
+                    continue
+                res = _parse(_read_in(dfd, name, 1024 * 1024))
+                try:
+                    old = t - os.lstat(name, dir_fd=dfd).st_mtime > LOST_AFTER
+                except OSError:
+                    continue
+                if old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "queued":
+                    n += 1
+        finally:
+            os.close(dfd)
+    return n
+
+
 def pending_test():
-    """Тику: дело проходу тестов — заявки test (и битые), новые записи шлюза, старые итоги."""
-    return bool(_queued_ids(("test",))) or auto_due() or bool(_stale())
+    """Тику: дело проходу тестов — заявки test (и битые), старые итоги, «принять» без tests дольше ALERT_AFTER, сторож."""
+    return (bool(_queued_ids(("test",))) or bool(_stale()) or bool(_zombies()) or bool(overdue_accepts())
+            or bool(_watch_due()))
 
 
 def pending_serve():
@@ -1840,17 +3154,210 @@ def _in_claude():
     return False
 
 
+MAX_ROUNDS = 100                    # кругов цикла захода тестов: предел на случай, когда очередь не разбирается
+
+
+def run_test_queue():
+    """Заход прохода тестов (metis-0716): явные заявки test, по одной — самая ранняя, снимается с диска только она, после
+    каждого дела очередь читается заново (поданная за время прогона идёт следующей). Автопрогонов нет (решение владельца
+    03.11): тесты идут только по заявке роли. Заход конечен: не больше MAX_ROUNDS кругов, взятая заявка не берётся
+    второй раз."""
+    seen, taken = set(), {}
+    for _ in range(MAX_ROUNDS):
+        reqs = [r for r in requests(("test",), limit=1, taken=taken) if (r[2], r[4]) not in seen]
+        if not reqs:
+            break
+        for _t, _k, qdir, window, rid, req in reqs:
+            seen.add((qdir, rid))
+            taken[qdir] = taken.get(qdir, 0) + 1
+            handle(qdir, window, rid, req)
+
+
+LOST_AFTER = 300                    # с: итог queued без заявки старше этого — заявка потеряна (metis-0716)
+
+
+def _result_running(qdir, rid):
+    """В папке заявок qdir есть <rid>.result.json теста в состоянии running."""
+    dfd = _open_dir(qdir)
+    if dfd is None:
+        return False
+    try:
+        res = _parse(_read_in(dfd, rid + ".result.json", 1024 * 1024))
+    finally:
+        os.close(dfd)
+    return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running"
+
+
+def recover_results(t=None):
+    """Под замком outside-run (захода больше нет): итог теста queued без .req.json старше LOST_AFTER — failed «заявка
+    потеряна»; running — failed «заход прерван», но только то, что сам заход записал в STATE/outside/runs/<ID>.json
+    (файл из кэша окна роль может подложить; у старых записей без qdir итог ищется во всех папках заявок, где он
+    тоже running). Итог пишется минимальным объектом из своих полей, чужое содержимое
+    result.json не копируется. Serve не трогает: им ведёт свой проход. → число."""
+    t = P.now() if t is None else t
+    n = 0
+    qdirs = {q for q, _ in queue_dirs()}
+    for qdir in sorted(qdirs):
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = os.listdir(dfd)
+            for name in names:
+                rid = name[:-len(".result.json")]
+                if not name.endswith(".result.json") or not ID_RE.fullmatch(rid):
+                    continue
+                res = _parse(_read_in(dfd, name, 1024 * 1024))
+                if not isinstance(res, dict) or res.get("kind") != "test" or res.get("state") != "queued":
+                    continue
+                try:
+                    old = t - os.lstat(name, dir_fd=dfd).st_mtime > LOST_AFTER
+                except OSError:
+                    continue
+                if old and rid + ".req.json" not in names:
+                    why = "заявка потеряна (заход прерван до запуска), подай заново"
+                    save_result(qdir, rid, {"kind": "test", "state": "failed", "why": why})
+                    log_event(id=rid, kind="recovered", why=why)
+                    n += 1
+        finally:
+            os.close(dfd)
+    runs = root("runs")
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+        rid = name[:-len(".json")]
+        res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
+        if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
+            qd = res.get("qdir") if res.get("qdir") in qdirs else None
+            targets = [qd] if qd else [q for q in sorted(qdirs) if _result_running(q, rid)]   # старые записи без qdir
+            for q in targets or [None]:
+                save_result(q, rid, {"kind": "test", "state": "failed", "why": "заход прерван, подай заново"})
+            log_event(id=rid, kind="recovered", why="заход прерван")
+            n += 1
+    return n
+
+
+WATCH_RUNNING = TEST_TIMEOUT + HEAVY_WAIT_MAX + 1800   # с: running дольше — заход завис; не меньше предела прогона TEST_TIMEOUT (metis-0723)
+WATCH_QUEUED = 4 * 3600               # с: queued с лежащей заявкой дольше — очередь стоит, тревога без снятия (metis-0723)
+
+
+def _run_holder():
+    """Номер процесса, держащего замок outside-run (lsof по файлу замка); нет или не определить → None."""
+    try:
+        out = subprocess.run([LSOF, "-t", P.path("locks", "outside-run.lock")], capture_output=True, text=True,
+                             timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pids = [int(x) for x in out.split() if x.isdigit() and int(x) != os.getpid()]
+    return pids[0] if len(pids) == 1 else None
+
+
+def _mark(rid):
+    """Метка runs/<ID>.alerted: тревога о заявке уже была. → True, если метку поставили сейчас (первая тревога)."""
+    os.makedirs(root("runs"), mode=0o700, exist_ok=True)
+    try:
+        os.close(os.open(root("runs", rid + ".alerted"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    except OSError:
+        return False
+    return True
+
+
+def _watch_due(t=None):
+    """[(вид, папка заявок, id)] того, что сторож должен разобрать: running теста в runs/ старше WATCH_RUNNING (по mtime
+    записи захода) и queued с лежащей .req.json старше WATCH_QUEUED, о котором ещё не было тревоги."""
+    t = P.now() if t is None else t
+    out = []
+    runs = root("runs")
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+        rid = name[:-len(".json")]
+        if not name.endswith(".json") or not ID_RE.fullmatch(rid):
+            continue
+        res = P.read_json(os.path.join(runs, name), {})
+        try:
+            old = t - os.lstat(os.path.join(runs, name)).st_mtime > WATCH_RUNNING
+        except OSError:
+            continue
+        if (old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running"
+                and not os.path.lexists(root("runs", rid + ".alerted"))):
+            out.append(("running", res.get("qdir"), rid))
+    for qdir, _ in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = os.listdir(dfd)
+            for name in names:
+                rid = name[:-len(".result.json")]
+                if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" not in names:
+                    continue
+                if os.path.lexists(root("runs", rid + ".alerted")):
+                    continue
+                res = _parse(_read_in(dfd, name, 1024 * 1024))
+                try:
+                    old = t - os.lstat(name, dir_fd=dfd).st_mtime > WATCH_QUEUED
+                except OSError:
+                    continue
+                if old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "queued":
+                    out.append(("queued", qdir, rid))
+        finally:
+            os.close(dfd)
+    return out
+
+
+def watchdog(t=None):
+    """Сторож заявок test (metis-0723); зовётся до замка, чтобы видеть и живой заход. running дольше WATCH_RUNNING при
+    живом заходе: заход (SIGKILL — итога за собой он не запишет) и его группы процессов гаснут, итог failed «сторож:
+    дольше N»; замок держит не определить — только тревога. queued с лежащей заявкой дольше WATCH_QUEUED: одна тревога
+    на заявку (метка runs/<ID>.alerted), без снятия. Захода нет — running чинит recover_results. → число."""
+    t = P.now() if t is None else t
+    n = 0
+    for kind, qdir, rid in _watch_due(t):
+        if kind == "queued":
+            why = f"проверка заявок: заявка в очереди дольше {WATCH_QUEUED // 3600} ч, очередь стоит"
+            if _mark(rid):
+                P.alert(f"outside {rid}: {why} (pantheon outside status {rid})", who="outside")
+                log_event(id=rid, kind="watchdog", why=why)
+                n += 1
+            continue
+        if not P.locked("outside-run"):
+            continue                # захода нет — recover_results
+        holder = _run_holder()
+        if holder is None:
+            if _mark(rid):
+                P.alert(f"outside {rid}: running дольше {WATCH_RUNNING // 60} мин, заход не определить — снять "
+                        f"вручную", who="outside")
+            continue
+        why = f"проверка заявок: дольше {WATCH_RUNNING // 60} мин — снято"
+        table = ps_table()
+        kids = [p for p, (pp, g, _r) in table.items() if pp == holder and g == p]
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(holder, signal.SIGKILL)
+        for k in kids:
+            kill_group(k)
+        qdirs = {q for q, _ in queue_dirs()}
+        targets = [qdir] if qdir in qdirs else [q for q in sorted(qdirs) if _result_running(q, rid)]
+        for q in targets or [None]:
+            save_result(q, rid, {"kind": "test", "state": "failed", "why": why})
+        log_event(id=rid, kind="watchdog", why=why)
+        P.alert(f"outside {rid}: {why}", who="outside")
+        n += 1
+    return n
+
+
 def cmd_run():
     """Проход тестов (замок outside-run): серверы не смотрит — их ведёт свой проход (metis-0614)."""
     if _in_claude():
         return 2
+    watchdog()      # до замка: живой заход с зависшим running виден только отсюда (metis-0723)
     with P.lock("outside-run", block=False) as got:
         if not got:
             return 0
-        for _t, _k, qdir, window, rid, req in requests(("test",)):
-            handle(qdir, window, rid, req)
-        if auto_due():
-            auto_pass()
+        recover_results()
+        drop_test_work()   # копии test --sha упавшего прохода (metis-0779): под замком прогона на них нет
+        alert_overdue()
+        run_test_queue()
+        try:
+            alert_red_share()
+        except Exception as e:   # сбой подсчёта не роняет проход, но виден в журнале
+            log_event(kind="red-share-error", why=f"{type(e).__name__}: {e}")
         prune()
     return 0
 
@@ -1859,7 +3366,7 @@ def serve_round(t=None):
     """Один круг прохода серверов: сторож, заявки serve, снова сторож, уборка брошенных «стопов» и копий."""
     sweep(t)
     for _t, _k, qdir, window, rid, req in requests(("serve",)):
-        where = stop_requests().get(rid)
+        where = own_stop(rid, qdir)
         age = P.now() - (_epoch(req) or P.now())
         if where:
             clear_stop(rid, where)
@@ -1902,10 +3409,13 @@ def cmd_run_serve(once=False):
 
 # --- команды роли -------------------------------------------------------------------------------------------------
 
-def _flags(args, allowed):
+def _flags(args, allowed, bools=()):
     out, i = {}, 0
     while i < len(args):
         a = args[i]
+        if a in bools:
+            out[a], i = True, i + 1
+            continue
         if a not in allowed or i + 1 >= len(args):
             return None
         out[a] = args[i + 1]
@@ -1914,7 +3424,8 @@ def _flags(args, allowed):
 
 
 def cmd_request(kind, args):
-    f = _flags(args, {"--script", "--wait"} | ({"--minutes", "--sha", "--app"} if kind == "serve" else set()))
+    f = _flags(args, {"--script", "--wait", "--sha"} | ({"--minutes", "--app"} if kind == "serve" else {"--base"}),
+               {"--affected"} if kind == "test" else ())
     if f is None:
         err(f"pantheon outside: {USAGE}")
         return 2
@@ -1933,6 +3444,37 @@ def cmd_request(kind, args):
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
+    if f.get("--base") and not f.get("--affected"):
+        err("pantheon outside: --base — только с --affected")
+        return 2
+    if f.get("--affected"):   # metis-0734: вершина базы — здесь, merge-base с коммитом прогона считает проход
+        ref = f.get("--base") or "origin/main"
+        tip = "" if ref.startswith("-") else (git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip()
+        if not SHA_RE.fullmatch(tip.lower()):
+            err(f"pantheon outside: --base {ref} — не коммит этой копии (нет — сделай git fetch)")
+            return 2
+        req["base"] = tip.lower()
+    if kind == "test":   # metis-0706: коммит при заявке — по нему видно, что такой же тест уже ждёт или идёт
+        if f.get("--sha"):   # metis-0779: тест на этом коммите в своей копии прохода, полный SHA — здесь же
+            ref = f["--sha"].lower()
+            head = (git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip().lower() \
+                if SHORT_SHA_RE.fullmatch(ref) else ""
+            if not SHA_RE.fullmatch(head):
+                err(f"pantheon outside: --sha {f['--sha']} — не коммит этой копии (7–40 знаков 0-9a-f; "
+                    "нет — сделай git fetch)")
+                return 2
+            req["pin"] = True
+        else:
+            head, _clean = head_state(d)
+        if head:
+            req["sha"] = head
+            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")), base=req.get("base"))
+            if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
+                print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
+                if not wait:
+                    print(f"итог: pantheon outside status {prev[1]}")
+                    return 0
+                return wait_result(prev[0], prev[1], wait)
     if kind == "serve":
         req["minutes"] = minutes
         req["wait"] = wait
@@ -1962,20 +3504,115 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app") if req.get(k)}}, ensure_ascii=False, indent=1))
+                     **{k: req[k] for k in ("sha", "app", "script", "pin", "base") if req.get(k)}}, ensure_ascii=False,
+                    indent=1))
         finally:
             os.close(dfd)
     except OSError as e:
-        err(f"pantheon outside: заявку не записать ({e})")
+        err(cant_write("заявку не записать", e))
         return 1
+    if kind == "test":
+        replace_older(q, rid, req, d)
     at = f" на {req['sha'][:12]}" if req.get("sha") else ""
     print(f"заявка {rid}: {kind} в {d}{at} — её исполнит плановый проход (раз в минуту)")
     if req.get("dirty"):
         print("в папке есть незакоммиченные правки — сервер поднимется на коммите, без них")
+    if req.get("pin"):
+        print("тест — в своей копии прохода на этом коммите; папка и её дерево не нужны")
     if not wait:
         print(f"итог: pantheon outside status {rid}")
         return 0
     return wait_result(q, rid, wait)
+
+
+def replace_older(q, rid, req, d):
+    """Новая заявка test rid (папка d, коммит req["sha"]) снимает из своей папки заявок q ещё не начатые заявки test той
+    же папки и той же проверки (--script, --base, --sha или без), чей коммит — предок нового (`git merge-base
+    --is-ancestor`, metis-0852): очередь прохода строго последовательная, прогон старого head — до получаса впустую.
+    Итог снятой — stopped «заменена заявкой <ID> на <sha>». Начатую (проход уже снял её .req.json) не трогает, как и
+    заявки других окон (папок заявок), других папок и не на предке. Окно пишет итог только в свой q
+    (STATE ему закрыт), терминал владельца — save_result, как _cancel_queued_test. → [ID снятых]."""
+    sha = req.get("sha")
+    if req.get("kind") != "test" or not sha:
+        return []
+    me, out = os.path.realpath(d), []
+    dfd = _open_dir(q)
+    if dfd is None:
+        return []
+    try:
+        for name in sorted(os.listdir(dfd)):
+            rid2 = name[:-len(".req.json")]
+            if not name.endswith(".req.json") or rid2 == rid or not ID_RE.fullmatch(rid2):
+                continue
+            req2 = _parse(_read_in(dfd, name))
+            if not isinstance(req2, dict) or req2.get("kind") != "test" or check_request(req2, rid2) \
+                    or bool(req2.get("pin")) != bool(req.get("pin")) or req2.get("base") != req.get("base") \
+                    or (req2.get("script") or None) != (req.get("script") or None) \
+                    or os.path.realpath(req2["dir"]) != me:
+                continue
+            # тот же коммит git тоже считает предком: снять старую заявку ради новой на нём же — не потеря
+            old = str(req2.get("sha") or "")
+            if git(d, "merge-base", "--is-ancestor", old, sha) is None or not _take_in(dfd, name):
+                continue
+            why = f"заменена заявкой {rid} на {sha[:12]}"
+            res = {"state": "stopped", "kind": "test", "why": why, "record": False, "sha": old, "dir": req2["dir"],
+                   "replaced_by": rid}
+            if q == root("queue"):
+                save_result(q, rid2, res)
+            else:
+                with contextlib.suppress(OSError):
+                    _write_in(dfd, rid2 + ".result.json",
+                              json.dumps({"id": rid2, "updated": P.stamp(), **res}, ensure_ascii=False, indent=1))
+            out.append((rid2, old))
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
+    for rid2, old in out:
+        log_event(id=rid2, kind="stop", why=f"заменена заявкой {rid} на {sha[:12]}", sha=old)
+        print(f"{rid2}: заявка на {old[:12]} ещё не начата — снята, заменена заявкой {rid} на {sha[:12]}")
+    return [r for r, _ in out]
+
+
+def live_test(d, sha, script=None, pin=False, base=None):
+    """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
+    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json) или идёт
+    (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
+    d = os.path.realpath(d)
+    now = P.now()
+    for qdir, _w in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = sorted(os.listdir(dfd), reverse=True)
+            for name in names:
+                if not name.endswith(".result.json"):
+                    continue
+                rid = name[:-len(".result.json")]
+                try:
+                    res = json.loads(_read_in(dfd, name, 1024 * 1024) or "")
+                except ValueError:
+                    continue
+                if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
+                        or res.get("script") != script or bool(res.get("pin")) != pin or res.get("base") != base:
+                    continue
+                where = res.get("src") or res.get("dir")
+                if not isinstance(where, str) or os.path.realpath(where) != d:
+                    continue
+                if rid + ".stop" in names:   # снимается своим «стопом» — не сцеплять (metis-0873)
+                    continue
+                if res.get("state") == "queued" and (rid + ".req.json") in names:
+                    return qdir, rid
+                if res.get("state") == "running":
+                    t = _epoch({"time": res.get("updated")})
+                    if t is not None and now - t < TEST_TIMEOUT + 300:
+                        return qdir, rid
+        except OSError:
+            continue
+        finally:
+            os.close(dfd)
+    return None
 
 
 def load_result(q, rid):
@@ -1995,12 +3632,19 @@ def load_result(q, rid):
 
 def show(res):
     print(f"{res.get('id')}: {res.get('state')}" + (f", код {res['code']}" if res.get("code") is not None else "")
-          + (f", {res['sha'][:12]}" if res.get("sha") else "") + (f" — {res['cmd']}" if res.get("cmd") else ""))
+          + (f", {res['sha'][:12]}" if res.get("sha") else "") + (f" — {res['cmd']}" if res.get("cmd") else "")
+          + (f", начат {res['started']}" if res.get("started") and res.get("state") == "running" else ""))
     if res.get("kind") == "serve" and (res.get("src") or res.get("dir")):
         print(f"копия: {res.get('dir') or '—'}" + (f" (из {res['src']})" if res.get("src") else "")
               + (f", приложение {res['app']}" if res.get("app") else ""))
     if res.get("url"):
         print(f"адрес: {res['url']} до {res.get('until')} (погасить раньше: pantheon outside stop {res['id']})")
+    if res.get("rerun_of"):
+        print(f"дозапуск после красного полного набора {res['rerun_of']}: {', '.join(res.get('files') or [])}")
+    if res.get("full_why"):
+        print(f"полный набор, а не дозапуск: {res['full_why']}")
+    if res.get("narrow_why"):
+        print(f"полный набор, а не узкий (--affected): {res['narrow_why']}")
     if res.get("record"):
         print("запись tests для шлюза слияния сделана")
     if res.get("why"):
@@ -2014,8 +3658,12 @@ def show(res):
 def result_code(res):
     if res.get("state") == "serving":
         return 0
+    if res.get("state") == "failed" and res.get("dup"):
+        return 75   # снятый дубль: своего итога нет, он у первой заявки (в этом окне его не прочесть) — «итога ещё нет»
     if res.get("state") == "failed" and res.get("busy"):
         return 75   # два сервера уже идут или давление памяти — отказ «занято», как истёкшее ожидание
+    if res.get("state") == "done" and res.get("overload"):
+        return 75   # таймаут под нагрузкой (metis-0901): тест не падал, прогон надо повторить — как «итога ещё нет»
     if res.get("state") == "done" and isinstance(res.get("code"), int) and not res.get("why"):
         return res["code"]
     return 1
@@ -2073,6 +3721,52 @@ def _known(q, rid):
     return (res if isinstance(res, dict) else None), rid in servers(), rid in {r for r, _ in _queued_ids()}
 
 
+def _cancel_queued_test(q, rid):
+    """Тест, ещё лежащий заявкой в своей папке q, снимается: заявка удалена, итог stopped (metis-0706). Окно пишет итог
+    только в свой qdir: STATE окну закрыт, в нём пишет один проход (metis-0873); терминал владельца — save_result.
+    True — снят; False — не тест, не здесь или проход уже взял (тогда снимает метка «стоп»); None — итог не записать
+    (STATE закрыт), заявка возвращена и осталась в очереди, причина выведена."""
+    dfd = _open_dir(q)
+    if dfd is None:
+        return False
+    try:
+        req = _parse(_read_in(dfd, rid + ".req.json"))
+        if not isinstance(req, dict) or req.get("kind") != "test" or not _take_in(dfd, rid + ".req.json"):
+            return False
+        res = {"state": "stopped", "kind": "test", "why": "отменена до запуска", "record": False,
+               **{k: req[k] for k in ("sha", "dir") if req.get(k)}}
+        if q == root("queue"):
+            try:
+                save_result(q, rid, res)
+            except OSError as e:   # итог в STATE не записать (окно без права): заявку вернуть, а не терять без итога
+                with contextlib.suppress(OSError):
+                    _write_in(dfd, rid + ".req.json", json.dumps(req, ensure_ascii=False))
+                err(cant_write(f"{rid}: итог отмены не записать, заявка осталась в очереди", e))
+                return None
+        else:
+            with contextlib.suppress(OSError):
+                _write_in(dfd, rid + ".result.json",
+                          json.dumps({"id": rid, "updated": P.stamp(), **res}, ensure_ascii=False, indent=1))
+    finally:
+        os.close(dfd)
+    log_event(id=rid, kind="stop", why="отменена до запуска")
+    print(f"{rid}: тест был в очереди — снят, итог stopped")
+    return True
+
+
+def _mine(q, rid):
+    """Заявка rid — этого окна: свой итог или своя заявка в папке q; терминал владельца (q — очередь STATE) — любая."""
+    if q == root("queue"):
+        return True
+    dfd = _open_dir(q)
+    if dfd is None:
+        return False
+    try:
+        return any(_read_in(dfd, rid + ext, 1024 * 1024) is not None for ext in (".result.json", ".req.json"))
+    finally:
+        os.close(dfd)
+
+
 def cmd_stop(args):
     if not args or not ID_RE.fullmatch(args[0]):
         err("pantheon outside stop ID [--wait С]")
@@ -2090,11 +3784,17 @@ def cmd_stop(args):
     if not res and not live and not queued:
         print(f"{rid}: нет такой заявки — ни итога, ни сервера, ни заявки в очереди (status покажет свои)")
         return 1
-    if (res or {}).get("kind") == "test" and not live:
-        print(f"{rid}: это тесты, а не сервер — они идут до конца (не дольше {TEST_TIMEOUT // 60} мин)")
+    if not _mine(q, rid):   # metis-0873: снимает только своё окно и терминал владельца; чужую метку проход не возьмёт
+        print(f"{rid}: заявка не из этого окна — снять её может только окно, подавшее заявку, или владелец")
         return 1
+    cancelled = _cancel_queued_test(q, rid) if queued else False
+    if cancelled is None:
+        return 1
+    if cancelled:
+        return 0
     if res and res.get("state") in ("stopped", "failed", "done") and not live and not queued:
-        print(f"{rid}: уже {res['state']}" + (f" — {res['why']}" if res.get("why") else ""))
+        print(f"{rid}: уже {res['state']}" + (f" — {res['why']}" if res.get("why") else "")
+              + (" — запись tests для шлюза есть" if res.get("record") else ""))
         return 0
     dfd = _open_dir(q, create=True)
     if dfd is None:
@@ -2103,22 +3803,28 @@ def cmd_stop(args):
     try:
         _write_in(dfd, rid + ".stop", "")
     except OSError as e:
-        err(f"pantheon outside: «стоп» не записать ({e})")
+        err(cant_write("«стоп» не записать", e))
         return 1
     finally:
         os.close(dfd)
     if not wait:
-        print(f"{rid}: «стоп» записан — сервер погасит проход серверов (до {SWEEP_EVERY} с, если он идёт, иначе до "
+        print(f"{rid}: «стоп» записан — прогон погасит его проход (до {SWEEP_EVERY} с, если он идёт, иначе до "
               f"минуты); итог: pantheon outside status {rid}")
         return 0
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         time.sleep(1)
         res, live, _q = _known(q, rid)
-        if res and res.get("state") in ("stopped", "failed") and not live:
+        if res and res.get("state") in ("stopped", "failed", "done") and not live:
             show(res)
+            if res.get("state") == "done":   # проход успел закончить до метки: итог и запись — как есть
+                print(f"{rid}: уже done до «стопа»" + (" — запись tests для шлюза есть" if res.get("record") else ""))
+                dfd = _open_dir(q)
+                if dfd is not None:
+                    _unlink_in(dfd, rid + ".stop")
+                    os.close(dfd)
             return 0
-    print(f"{rid}: за {wait} с не погас (состояние: {(res or {}).get('state', '?')}) — «стоп» лежит, проход серверов "
+    print(f"{rid}: за {wait} с не погас (состояние: {(res or {}).get('state', '?')}) — «стоп» лежит, проход "
           f"погасит его на следующем круге; итог: pantheon outside status {rid}")
     return 75
 

@@ -10,7 +10,13 @@
 Неделя — неубывающий снимок: наибольший pct по seven-day и строкам week-usage того же resets_at (допуск 1 ч), resets_at и
 время — от самого свежего замера; без seven-day — по week-usage. Время замера — наибольшее now этих файлов.
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
-строка в тревогах (её Зевс несёт в сводку). Пробного запроса к модели нет. resets_at в прошлом или недели нет — новая
+строка в тревогах (её Зевс несёт в сводку). Пробный запрос (metis-0459): снимок старше snapshot_max_min (или его нет), а
+ночь одобрена («да», не пропущена, не закрыта) и идёт с start минус 30 мин до end — проход раз в 30 мин зовёт
+`claude -p ... --output-format stream-json --verbose` на Haiku (probe_run): строку статуса `claude -p` не вызывает, зато
+поток несёт rate_limit_event с unifiedWindows.five_hour и seven_day (utilization — доля 0..1, resetsAt — секунды;
+проверено живьём 02.11). probe_parse берёт из него доли, probe_save пишет five-hour и seven-day в формате строки статуса
+(«pct resets_at now», pct = доля × 100), проход мерит заново; не освежилось — тревога «зонд не освежил снимок», ночь не
+открывается. week-usage зонд не пишет. resets_at в прошлом или недели нет — новая
 неделя с неизвестным расходом: закрыто, пока строка статуса не запишет новый снимок.
 
 Линия L = 100 × (t − (resets_at − 7 д)) / 7 д — сколько процентов недели «положено» к этому моменту; запас over =
@@ -596,6 +602,107 @@ def morning(t, d, cfg):
 
 # --- проход дежурного ----------------------------------------------------------------------------------------------
 
+PROBE_GAP = 1800  # пробный запрос не чаще раза в 30 мин
+PROBE_TIMEOUT = 120
+
+
+def probe_run():
+    """Один короткий запрос к дешёвой модели с потоком событий: в нём есть rate_limit_event с долями обоих лимитов
+    (`claude -p` строку статуса не вызывает, снимок сам не пишет). → (код выхода, stdout). В тестах подменяется заглушкой
+    с сохранённым настоящим событием; настоящий claude — только вне PANTHEON_DRYRUN."""
+    import shutil
+    import subprocess
+    exe = shutil.which("claude", path=P.claude_env().get("PATH"))
+    if os.environ.get("PANTHEON_DRYRUN") == "1" or not exe:
+        return 127, ""
+    try:
+        r = subprocess.run([exe, "-p", "ok", "--model", "haiku", "--no-session-persistence", "--output-format",
+                            "stream-json", "--verbose"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, env=P.claude_env(),
+                           cwd=P.HOME, timeout=PROBE_TIMEOUT)
+        return r.returncode, r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return 124, ""
+
+
+def probe_parse(out):
+    """Последнее rate_limit_event потока stream-json → {"five_hour": (pct, resets), "seven_day": (pct, resets)}; окна без
+    числовых utilization (доля 0..1) и resetsAt в словарь не попадают. Пусто — события нет или оно не по форме."""
+    info = None
+    for ln in str(out or "").splitlines():
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "rate_limit_event" and isinstance(ev.get("rate_limit_info"), dict):
+            info = ev["rate_limit_info"]
+    wins = info.get("unifiedWindows") if info else None
+    got = {}
+    if not isinstance(wins, dict):
+        return got
+    for name in ("five_hour", "seven_day"):
+        w = wins.get(name)
+        if not isinstance(w, dict):
+            continue
+        u, r = w.get("utilization"), w.get("resetsAt")
+        if (isinstance(u, (int, float)) and not isinstance(u, bool) and 0 <= u <= 1
+                and isinstance(r, (int, float)) and not isinstance(r, bool) and r > 0):
+            got[name] = (int(round(u * 10000)) / 100, int(r))  # как pct2 строки статуса: сотые доли процента
+    return got
+
+
+def probe_save(got, t):
+    """Снимок из события зонда — в том же формате «pct resets_at now», что пишет строка статуса: five-hour и seven-day
+    (атомарно, рядом с файлом; resets_at в прошлом не пишем). → список записанных имён."""
+    written = []
+    for name, (pct, resets) in got.items():
+        if resets <= t:
+            continue
+        path = os.path.join(statusline_dir(), name.replace("_", "-"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.probe{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(f"{pct:g} {resets} {int(t)}\n")
+        os.replace(tmp, path)
+        written.append(name)
+    return written
+
+
+def probe_due(d, m, t, cfg):
+    """Нужен ли пробный запрос: снимок старше snapshot_max_min (или нет), ночь вечера d одобрена и ещё идёт."""
+    if not m["stale"]:
+        return False
+    st = load(d)
+    if st.get("answer") != "да" or st.get("skipped") or st.get("closed"):
+        return False
+    return at(d, cfg[1]["start"], cfg) - 1800 <= t < at(d, cfg[1]["end"], cfg)
+
+
+def probe(d, m, t, cfg):
+    """Пробный запрос при старом снимке (не чаще PROBE_GAP). → новое измерение недели."""
+    if not probe_due(d, m, t, cfg):
+        return m
+    path = os.path.join(P.STATE, "night", "probe.json")
+    last = 0.0
+    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
+        last = float(json.load(open(path, encoding="utf-8")).get("at") or 0)
+    if 0 <= t - last < PROBE_GAP:
+        return m
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    P.write_json(path, {"at": t})  # до запуска: упавший или зависший зонд не повторяется чаще PROBE_GAP
+    rc, out = probe_run()
+    with contextlib.suppress(OSError):
+        probe_save(probe_parse(out), t)
+    m2 = measure(t, cfg)
+    if m2["stale"]:
+        P.alert_once("night-probe", d.isoformat(), f"зонд не освежил снимок недельного лимита (код {rc}, снимок "
+                     + (f"{m2['age_min']:.0f} мин" if m2["age_min"] is not None else "не найден")
+                     + ") — ночь " + d.strftime("%d.%m") + " не открывается, пока строка статуса не запишет снимок", "night")
+    else:
+        P.clear_once("night-probe")
+    return m2
+
+
 def watch(agents=None, registry=None, doms=None, t=None):
     """Проверка «ночь» дежурного (раз в 5 мин): метрики, давность снимка, зона, вечер и ночь."""
     t = P.now() if t is None else t
@@ -605,6 +712,9 @@ def watch(agents=None, registry=None, doms=None, t=None):
         return
     m = measure(t, cfg)
     day = datetime.fromtimestamp(t).strftime("%Y-%m-%d")
+    d0 = evening(t, cfg)
+    if d0 is not None:
+        m = probe(d0, m, t, cfg)
     if m["stale"]:
         P.alert_once("limit-snapshot", day, "снимок недельного лимита "
                      + (f"не обновлялся {m['age_min']:.0f} мин" if m["age_min"] is not None else "не найден")

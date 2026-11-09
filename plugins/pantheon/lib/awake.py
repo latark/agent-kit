@@ -12,8 +12,11 @@
       сессия Пантеона стоит «rate limited · resets <время>»: после сброса + 10 мин — один `claude respawn` с толчком;
       перед ним шлюз запуска ночного модуля (night.gate("respawn")).
   возобновление ждущих сессий
-      сессия направления «ждёт вас», а в его очереди есть задача todo без блокера — разбудить (night.gate("wake")),
-      не чаще раза в час на сессию.
+      сессия направления «ждёт вас», а в его очереди есть задача todo без блокера и не на другой сессии (owner —
+      направление, его команда или пусто, как у самозапуска) — разбудить (night.gate("wake")), не чаще раза в час на
+      сессию. Не будит, пока у окна идёт работа (watch.live_work, metis-0864): ждёт разрешения или ответа на вопрос,
+      живы субагенты или фоновые задачи — respawn оборвал бы их. Отказ (wake-live, wake-gate) пишется в
+      logs/start.log, только когда причина сменилась (последняя — в awake-marks.json, ключ wake-why).
   поручения во входящих (metis-0276)
       координатор закончил ход (done, без субагентов и фоновых команд) или его сессии нет, а в inbox/ направления —
       поручение Зевса, написанное после конца его последнего хода и по вашему слову Зевсу (запись в owner-log/zeus.md
@@ -25,7 +28,6 @@
 Без sudo и pmset на запись: только `caffeinate`, `pmset -g batt`, `sysctl`, `ps`.
 """
 import contextlib
-import json
 import os
 import re
 import signal
@@ -468,15 +470,19 @@ def owner_blockers(direction):
 
 def free_task(direction, t):
     """Первая задача направления, которую можно взять: todo, без чужой аренды и незакрытых depends_on (tasks.ready), без
-    waiting_on, не названная блокером в STATUS.md. Допущение: «трогает файлы ждущего PR» выражается waiting_on/depends_on."""
+    waiting_on, не названная блокером в STATUS.md и не на другой сессии (owner — не координатор и не его команда,
+    watch.owner_elsewhere, как у самозапуска, metis-0564). Допущение: «трогает файлы ждущего PR» выражается
+    waiting_on/depends_on. metis-0708: 02.11 21:23 ждущее окно metis-pantheon подняли с «возьми metis-0272», а её вела
+    agent-kit-47 — окно верно отказалось и встало без работы."""
     try:
         T = P.tasks_mod()
         ready = T.ready(P.PANTHEON, t, direction=direction)
+        elsewhere = P.watch_mod().owner_elsewhere
     except Exception:  # noqa: BLE001
         return None
     blocked = owner_blockers(direction)
     for tid, head in ready:
-        if tid in blocked or head.get("waiting_on"):
+        if tid in blocked or head.get("waiting_on") or elsewhere(head, direction):
             continue
         return tid
     return None
@@ -486,6 +492,15 @@ def wake_waiting(agents, registry, doms, t):
     """Сессия направления «ждёт вас» (blocked), а в очереди есть задача без блокера — разбудить, не чаще раза в час."""
     marks = read_marks()
     last = marks.setdefault("wake", {})
+    said = marks.get("wake-why") if isinstance(marks.get("wake-why"), dict) else {}
+    why_now = {}  # имя → строка отказа этого прохода; в start.log — только новая (ревью argus #332 Д3)
+
+    def skip(kind, name, a, reason):
+        line = f"{kind}\t{name}\t{a.get('id')}\t{reason}"
+        why_now[name] = line
+        if said.get(name) != line:  # каждую минуту одна и та же строка засоряла start.log
+            P.start_log(line)
+
     changed = False
     for a in agents:
         name = a.get("name") or ""
@@ -498,9 +513,13 @@ def wake_waiting(agents, registry, doms, t):
         tid = free_task(name, t)
         if not tid or recheck(name) or scheduler_paused():
             continue
+        busy = P.watch_mod().live_work(a, t)  # metis-0864: respawn оборвал бы вопрос о разрешении и субагентов
+        if busy:
+            skip("wake-live", name, a, busy)
+            continue
         ok, reason = gate("wake", t, agents=agents, registry=registry)
         if not ok:
-            P.start_log(f"wake-gate\t{name}\t{a.get('id')}\t{reason}")
+            skip("wake-gate", name, a, reason)
             continue
         last[name] = t
         changed = True
@@ -510,6 +529,10 @@ def wake_waiting(agents, registry, doms, t):
             RESUMED.append(name)
         elif rc not in (P.NO_WINDOW, P.SKIPPED):
             P.alert(f"возобновление ждущих сессий: {name} не поднялась (код {rc}), задача {tid}", "watch")
+    # отказ, которого в этом проходе нет (разбудили, окно освободилось или не ждёт), забывается: вернётся — снова строка
+    if why_now != said:
+        marks["wake-why"] = why_now
+        changed = True
     if changed:
         P.write_json(marks_path(), marks)
 

@@ -24,6 +24,10 @@ def service_run(name):
         time.sleep(60)
         return 1
     svc = next((s for s in sched.get("service") or [] if s["name"] == name), None)
+    if name == P.HOOKD_SVC:
+        # демон хуков guard идёт своим plist (pantheon-hookd), его ставит установщик guard (metis-0845), не service-run
+        print(f"служба {name}: её запускает launchd через pantheon-hookd, а не service-run", file=sys.stderr)
+        return 2
     ok, why = P.service_wanted(svc, sched) if svc else (False, "нет в schedule.toml")
     if not ok:
         print(f"{P.stamp()} служба {name} не идёт: {why}", file=sys.stderr)
@@ -111,11 +115,11 @@ def run_job(name):
                 st["waiting"] = "нет сети или GitHub недоступен"
             else:
                 st.pop("waiting", None)
-                st["fails"] = 0 if rc == 0 else int(st.get("fails") or 0) + 1
+                st["fails"] = 0 if rc in (0, P.BUDGET_CUT) else int(st.get("fails") or 0) + 1
             P.save_job_state(name, st)
             if heavy:
                 P.write_json(P.path("heavy.json"), {"last_end": P.now()})
-            if rc not in (0, P.TEMPFAIL, P.ALERTED) and st["fails"] in (1, 5, 20):
+            if rc not in (0, P.TEMPFAIL, P.ALERTED, P.BUDGET_CUT) and st["fails"] in (1, 5, 20):
                 tail = (out or "").strip().splitlines()[-1:] or [""]
                 P.alert(f"задача {name} упала (код {rc}, подряд {st['fails']}): {tail[0][:200]} — журнал {log.replace(P.HOME, '~')}",
                       "pantheon-tick")
@@ -127,8 +131,11 @@ def run_job(name):
 def next_run(job, st, t):
     if job.get("enabled") is False or st.get("disabled") or st.get("paused"):
         return "—"
-    if P.locked("job-" + job["name"]):
+    held = P.lock_held("job-" + job["name"])  # metis-0266: показ замок не пишет (в песочнице окна STATE/locks только читается)
+    if held:
         return "идёт"
+    if held is None:
+        return "не знаю (блокировка не читается)"
     if st.get("waiting"):
         return "ждёт условий"
     if st.get("last_start") is None:
@@ -159,11 +166,12 @@ def jobs_show():
     for job in sched.get("job") or []:
         st = P.job_state(job["name"])
         every = "каждый плановый проход" if job.get("every", "tick") == "tick" else f"{job['every']} мин"
+        held = False
         if job.get("enabled") is False or st.get("disabled"):
             state = "выключена"
         elif st.get("paused"):
             state = f"пауза{': ' + st['paused_reason'] if st.get('paused_reason') else ''}"
-        elif P.locked("job-" + job["name"]):
+        elif (held := P.lock_held("job-" + job["name"])):
             state = "идёт"
         elif P.parse_command(job.get("command")) is None:
             state = "команда не разрешена — пропускается"
@@ -175,6 +183,8 @@ def jobs_show():
             state = f"упала, код {st['last_rc']}"
         else:
             state = "ок"
+        if held is None:  # metis-0266: замок не прочитан — «идёт» или нет, не знаем; остальное состояние выше верно
+            state += " · идёт ли сейчас — не знаю (блокировка не читается)"
         if st.get("lease_until"):
             state += f" · аренда до {P.stamp(st['lease_until'])[:10]}"
         last = P.ago(st.get("last_start")) if st.get("last_start") else "—"
@@ -189,7 +199,11 @@ def jobs_show():
         for svc in sched["service"]:
             ok, why = P.service_wanted(svc, sched)
             pid = P.svc_running(svc["name"])
-            if ok and P.svc_on_demand(svc):
+            if ok and svc["name"] == P.HOOKD_SVC:  # сокет и простой — у демона guard, не в schedule.toml
+                where = os.path.join(P.HOOKD_DIR, "hookd.sock").replace(P.HOME, "~")
+                state = (f"идёт по запросу, pid {pid}" if pid else f"по требованию: ждёт запроса на {where}"
+                         if pid == 0 else "не загружена — плановый проход поставит установщиком guard")
+            elif ok and P.svc_on_demand(svc):
                 where = f"127.0.0.1:{P.svc_socket(svc)}"
                 state = (f"идёт по запросу, pid {pid}; выйдет после простоя {int(P.svc_idle(svc) // 60)} мин" if pid
                          else f"по требованию: ждёт запроса на {where}" if pid == 0

@@ -1,16 +1,17 @@
-"""Пантеон: pantheon task … — разбор флагов и подкоманды задач (new, set, show, ready, claim, split, attach,
+"""Пантеон: pantheon task … — разбор флагов и подкоманды задач (new, set, show, goal, ready, claim, split, attach,
 migrate-*). Сами задачи и доска — lib/tasks.py.
 
 Вынесено из pantheon.py (metis-0586) без изменения поведения. P — модуль pantheon: его ставит загрузчик
 pantheon._attach до выполнения этого файла, имена из __all__ становятся именами pantheon.
 """
+import json
 import os
 import sys
 
 __all__ = [
     "TASK_NEW_VALUE_FLAGS", "TASK_NEW_BOOL_FLAGS", "TASK_SPLIT_VALUE_FLAGS", "TASK_SET_VALUE_FLAGS",
     "TASK_REPEATABLE_FLAGS", "TASK_FLAG_ALIASES", "task_repeat_error", "task_flag_error", "task_body_arg",
-    "_read_or_empty", "task_new_notify", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "task_cmd",
+    "_read_or_empty", "READ_SUBS", "_cards_fp", "_task_cmd", "task_new_notify", "goal_line", "overlap_open_prs", "no_parent_hint", "ready_overlap_lines", "overlap_lines", "batch_suggest_cmd", "task_cmd",
 ]
 
 
@@ -188,7 +189,16 @@ def overlap_open_prs(direction):
             notes.append(f"{repo}: gh не ответил ({why}), кэша планового прохода нет — проверь вручную: "
                          f"gh pr list -R {repo} --state open --json number,headRefName,files")
             continue
-        when = P.datetime.fromtimestamp(fetched).strftime("%d.%m %H:%M")
+        errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
+        stale = cache.get("stale") if isinstance(cache.get("stale"), dict) else {}
+        at = fetched
+        if repo.lower() in errs:  # metis-0808: по репозиторию строки прежние, время — последнего успеха, не нынешнего прохода
+            at = stale.get(repo.lower(), fetched)
+            if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+                notes.append(f"{repo}: gh не ответил ({why}), в кэше планового прохода данных по репозиторию нет — "
+                             f"проверь вручную: gh pr list -R {repo} --state open --json number,headRefName,files")
+                continue
+        when = P.datetime.fromtimestamp(at).strftime("%d.%m %H:%M")
         nofiles = [r.get("number") for r in rows if isinstance(r, dict) and not isinstance(r.get("files"), list)]
         notes.append(f"{repo}: gh не ответил ({why}) — открытые PR из кэша планового прохода от {when}"
                      + (f"; без списка файлов: {', '.join('#' + str(n) for n in nofiles)}" if nofiles else ""))
@@ -244,10 +254,100 @@ def ready_overlap_lines(T, rows):
     return out
 
 
+def batch_suggest_cmd(T, args, opt):
+    """pantheon task batch-suggest [--direction D] [--json] [--apply] (metis-0595): открытые задачи без пачки →
+    «в существующую пачку», «новая пачка», «дубли». Без модели и без записи; --apply прикрепляет (parent) только
+    предложения «в существующую пачку» с пометкой «уверенно»."""
+    bad = [a for i, a in enumerate(args) if a not in ("--json", "--apply", "--direction")
+           and not (i and args[i - 1] == "--direction")]
+    if bad or (("--direction" in args) and not opt("--direction")):
+        print(f"pantheon task batch-suggest: не понял «{' '.join(bad) or '--direction'}» — допустимы "
+              "--direction D, --json, --apply", file=sys.stderr)
+        return 2
+    B = P.batchsuggest_mod()
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    dirs = [opt("--direction")] if opt("--direction") else sorted(
+        {h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
+    results = [B.suggest(tasks, d) for d in dirs]
+    applied, skipped = [], []
+    if "--apply" in args:
+        for res in results:
+            d, s = B.apply(res, tasks, lambda tid, sid: T.task_attach(P.PANTHEON, P.card_now(), tid, sid, only_loose=True))
+            applied += d
+            skipped += s
+    if "--json" in args:
+        print(json.dumps({"results": results, "applied": applied, "skipped": skipped}, ensure_ascii=False, indent=1))
+    else:
+        print("\n\n".join(B.render(r) for r in results if r["open_loose"] or r["joins"] or r["groups"]) or "открытых задач без пачки нет")
+        if "--apply" in args:
+            print(f"\nприкреплено: {len(applied)}" + "".join(f"\n  {x}" for x in applied)
+                  + "".join(f"\n  пропущено · {x}" for x in skipped))
+    failed = B.write_failures(skipped)
+    if failed:  # сбой записи — не «пропущено»: код 1 и строка в stderr (metis-1006)
+        print(f"pantheon task batch-suggest: сбой записи у {len(failed)} — {failed[0]}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def no_parent_hint(T, tid, direction, mode=None):
+    """Подсказка после `task new` без --parent (metis-0940, слово владельца 06.11: задачи — по пачкам): лучшая пачка из
+    batch-suggest и готовая команда, иначе «без пачки: …». mode — значение --mode при создании: решённый режим в
+    команду не повторяется (metis-0960). Сбой подсказки задачу не ломает — пустая строка."""
+    try:
+        B = P.batchsuggest_mod()
+        j = B.best_join(B.suggest(T.load_tasks(P.PANTHEON, T.WORK_TYPES), direction), tid)
+    except Exception:  # noqa: BLE001 — подсказка не должна ронять создание
+        j = None
+    if not j:
+        return "без пачки: положите в пачку (pantheon task batch-suggest)"
+    tail = "" if T.mode_decided({"mode": mode}) else ' mode=single mode_why="почему одна задача"'
+    return (f"без пачки: кандидат {j['story']} «{j['story_title']}» ({j['score']}; {', '.join(j['reasons'])}) — "
+            f"pantheon task set {tid} parent={j['story']}{tail}")
+
+
+def goal_line(T, tid, head, tasks):
+    """Строка цели окна по задаче (metis-0725, metis-0738): «<id>: снята с цели окна — почему» или «<id>: остаётся в
+    цели окна — почему» по хранилищу на эту минуту. Окно — PANTHEON_SESSION (имя сессии роли, его ставит окно запуска):
+    задачу, которую ведёт другая сессия (owner — не окно и не его команда, watch.owner_elsewhere), цель окна не держит.
+    Флага окна нет нарочно: строку о своей цели сессия печатает только про себя."""
+    window = (os.environ.get("PANTHEON_SESSION") or "").strip()
+    out, why = T.goal_state(head, tasks, window, P.watch_mod().owner_elsewhere if window else None)
+    return f"{tid}: {T.GOAL_OUT if out else T.GOAL_IN} — {why}"
+
+
+READ_SUBS = {"show", "goal", "ready", "overlap", "failures"}  # подкоманды без записи: отпечаток карточек не нужен
+
+
+def _cards_fp(T):
+    """Отпечаток файлов задач (размер и время правки): по нему task_cmd узнаёт, что карточки изменились."""
+    out = []
+    for p in sorted(T.task_files(P.PANTHEON)):
+        try:
+            s = os.stat(p)
+            out.append((p, s.st_size, s.st_mtime_ns))
+        except OSError:
+            out.append((p, None, None))
+    return out
+
+
 def task_cmd(rest):
+    """pantheon task … Карточки изменились (любая подкоманда с записью) — копия Obsidian и доска сразу, без
+    отдельной команды (P.refresh_kick, metis-0868 п. 4)."""
+    T = P.tasks_mod()
+    if not rest or rest[0] in READ_SUBS:
+        return _task_cmd(rest)
+    before = _cards_fp(T)
+    try:
+        return _task_cmd(rest)
+    finally:
+        if _cards_fp(T) != before:
+            P.refresh_kick()
+
+
+def _task_cmd(rest):
     T = P.tasks_mod()
     if not rest:
-        print("pantheon task new|set|show|ready|claim|overlap — справка: pantheon help", file=sys.stderr)
+        print("pantheon task new|set|show|goal|ready|claim|overlap — справка: pantheon help", file=sys.stderr)
         return 2
     sub, args = rest[0], rest[1:]
 
@@ -300,12 +400,16 @@ def task_cmd(rest):
             if (opt("--type") or "task") not in T.WORK_TYPES:
                 print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
                 return 2
-            tid, p = T.task_new(P.PANTHEON, P.now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=body_text, kind=opt("--type") or "task", done_when=opt("--done-when", True) or None, **fields)
+            tid, p = T.task_new(P.PANTHEON, P.card_now(), opt("--direction"), opt("--title"), project=opt("--project"),
+                                text=body_text, kind=opt("--type") or "task", done_when=opt("--done-when", True) or None,
+                                need_story_criteria=True, **fields)
             print(f"{tid} {os.path.relpath(p, P.PANTHEON)}")
             task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
+            if (not opt("--parent") and not opt("--batch") and (opt("--type") or "task") != "story"
+                    and body_text is not None):  # --batch — старое поле пачки (metis-0505), parent с ним не ставят
+                print(no_parent_hint(T, tid, opt("--direction"), opt("--mode")), file=sys.stderr)
         elif sub == "set" and args:
             tid, changes, note, i, seen, force = args[0], {}, None, 1, set(), None
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
@@ -369,8 +473,24 @@ def task_cmd(rest):
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
                 i += step
-            p, head = T.task_set(P.PANTHEON, P.now(), tid, changes, note=note, body=new_body, force=force)
+            if note and T.note_stamp(note)[1]:  # metis-0868 п. 5: время записи ставит код, а не агент
+                print(f"предупреждение · время «{T.note_stamp(note)[1]}» в начале --note не записано: время строки "
+                      "журнала ставит pantheon (часы системы)", file=sys.stderr)
+            p, head = T.task_set(P.PANTHEON, P.card_now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
+            if "owner" in changes and (os.environ.get("PANTHEON_SESSION") or "").strip():
+                # metis-0725: owner сменили из окна — строка цели по нему (передал другой сессии — «снята», взял — «остаётся»)
+                print(goal_line(T, tid, head, T.load_tasks(P.PANTHEON, T.WORK_TYPES)))
+            elif head.get("status") == "waiting":  # metis-0714: строка для проверяющей модели цели окна (WAITING_GOAL)
+                print(f"{tid}: {T.GOAL_OUT} — ждёт " + ("ответа владельца на вопрос" if head.get("waiting_on") == "human"
+                                                       else f"задачу {head.get('waiting_on')}")
+                      if T.goal_released(head, T.load_tasks(P.PANTHEON, T.WORK_TYPES))
+                      else f"{tid}: {T.GOAL_IN} — «ждёт» снимает задачу с цели, только если waiting_on=human с question "
+                           f"или waiting_on=<id другой задачи>, которая есть, не done/dropped и, если сама ждёт, "
+                           f"снята с цели")
+            if {"status", "waiting_on", "question"} & set(changes):  # metis-0714 (argus-280b): «снята» у ждущих её — отменить
+                for did, blk, st in T.goal_held_dependents(tid, T.load_tasks(P.PANTHEON, T.WORK_TYPES)):
+                    print(f"{did}: {T.GOAL_IN} — блокер {blk} {st}" + ("" if blk == tid else f", цепочка до {tid}"))
             if changes.get("status") == "doing" and head.get("status") == "doing":
                 _warn_overlap(T, tid)
             if changes.get("status") in ("done", "dropped"):
@@ -390,6 +510,19 @@ def task_cmd(rest):
             for w in words or [{"time": "—", "kind": "нет записей"}]:
                 print(f"- {w.get('time', '')[:16].replace('T', ' ')} · {w.get('kind')} · "
                       f"{w.get('dst') or w.get('answer') or w.get('text') or w.get('title') or ''}")
+        elif sub == "goal":
+            # metis-0725, metis-0738: строка цели окна по задачам на эту минуту — блокер мог закрыть другой, owner сменить Зевс
+            if not args or any(a.startswith("-") for a in args):
+                print("pantheon task goal ID [ID …] — строка цели окна по каждой задаче", file=sys.stderr)
+                return 2
+            tasks, rc = T.load_tasks(P.PANTHEON, T.WORK_TYPES), 0
+            for tid in args:
+                if tid not in tasks:
+                    print(f"pantheon task goal: нет задачи {tid}", file=sys.stderr)
+                    rc = 1
+                    continue
+                print(goal_line(T, tid, tasks[tid][1], tasks))
+            return rc
         elif sub == "split" and args and not args[0].startswith("--"):
             err = task_flag_error("split", args[1:], TASK_SPLIT_VALUE_FLAGS)
             if err:
@@ -400,19 +533,19 @@ def task_cmd(rest):
             if not opt("--title"):
                 print("pantheon task split: нужен --title — название остатка; ничего не записано", file=sys.stderr)
                 return 2
-            tid, p = T.task_split(P.PANTHEON, P.now(), tid0, opt("--title"), done_when=opt("--done-when", True) or None,
+            tid, p = T.task_split(P.PANTHEON, P.card_now(), tid0, opt("--title"), done_when=opt("--done-when", True) or None,
                                   text=opt("--text"), mode=opt("--mode"), mode_why=opt("--mode-why"))
             print(f"{tid} {os.path.relpath(p, P.PANTHEON)} (остаток {tid0})")
             task_new_notify(T, tid, T.read(p)[0].get("direction"), opt("--title"), opt("--text"))
         elif sub == "attach" and len(args) == 2:
-            old = T.task_attach(P.PANTHEON, P.now(), args[0], args[1])
+            old = T.task_attach(P.PANTHEON, P.card_now(), args[0], args[1])
             print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))
         elif sub == "migrate-batches":
             if any(a != "--dry-run" for a in args):
                 print(f"pantheon task migrate-batches: не понял «{' '.join(args)}» — допустим только --dry-run", file=sys.stderr)
                 return 2
             dry = "--dry-run" in args
-            plan = T.migrate_batches(P.PANTHEON, P.now(), dry_run=dry)
+            plan = T.migrate_batches(P.PANTHEON, P.card_now(), dry_run=dry)
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
                 print("(--dry-run: ничего не записано)")
@@ -421,7 +554,7 @@ def task_cmd(rest):
                 print(f"pantheon task migrate-mode: не понял «{' '.join(args)}» — допустим только --dry-run", file=sys.stderr)
                 return 2
             dry = "--dry-run" in args
-            plan, failed = T.migrate_modes(P.PANTHEON, P.now(), dry_run=dry)
+            plan, failed = T.migrate_modes(P.PANTHEON, P.card_now(), dry_run=dry)
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
                 print("(--dry-run: ничего не записано)")
@@ -436,7 +569,7 @@ def task_cmd(rest):
             if dirs is None:
                 print("pantheon task migrate-project: нет читаемого directions.toml", file=sys.stderr)
                 return 1
-            plan, failed = T.migrate_projects(P.PANTHEON, P.now(), dirs, dry_run="--write" not in args)
+            plan, failed = T.migrate_projects(P.PANTHEON, P.card_now(), dirs, dry_run="--write" not in args)
             print("\n".join(plan) if plan else "переносить нечего")
             if plan and "--write" not in args:
                 print(f"(сухой прогон: {len(plan)} карточек, ничего не записано; запись — с --write)")
@@ -444,7 +577,7 @@ def task_cmd(rest):
                 print(f"не перенесено: {failed}", file=sys.stderr)
                 return 1
         elif sub == "detach" and len(args) == 1:
-            sid = T.task_detach(P.PANTHEON, P.now(), args[0])
+            sid = T.task_detach(P.PANTHEON, P.card_now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
         elif sub == "ready":
             rows = T.ready(P.PANTHEON, P.now(), opt("--direction"), opt("--owner"))
@@ -457,7 +590,7 @@ def task_cmd(rest):
             for ln in warns:
                 print(f"предупреждение · {ln}", file=sys.stderr)
         elif sub == "claim" and args and opt("--by"):
-            p, head = T.task_claim(P.PANTHEON, P.now(), args[0], opt("--by"), float(opt("--hours") or 1))
+            p, head = T.task_claim(P.PANTHEON, P.card_now(), args[0], opt("--by"), float(opt("--hours") or 1))
             print(f"{args[0]}: взята {opt('--by')} до {head.get('claimed_until')}")
             if head.get("status") == "doing":
                 _warn_overlap(T, args[0])
@@ -468,6 +601,14 @@ def task_cmd(rest):
                 return 1
             lines = overlap_lines(T, args[0])
             print("\n".join(lines) if lines else f"{args[0]}: пересечений с живыми задачами направления и открытыми PR нет")
+        elif sub == "failures":  # metis-0859: сводка классов провалов из журналов задач
+            days = int(opt("--days") or 7)
+            res = T.failure_counts(T.load_tasks(P.PANTHEON, T.WORK_TYPES), P.now(), days)
+            print(f"Провалы за {days} дн. по классам (строки «провал: <класс> — …» в журналах):")
+            for c, ids in res.items():
+                print(f"  {c}: {len(ids)}" + (f" ({', '.join(sorted(set(ids)))})" if ids else ""))
+        elif sub == "batch-suggest":
+            return batch_suggest_cmd(T, args, opt)
         else:
             print(f"pantheon task: не понял «{' '.join(rest)}»", file=sys.stderr)
             return 2

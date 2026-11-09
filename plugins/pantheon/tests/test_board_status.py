@@ -103,6 +103,32 @@ check("1. пачка done или todo при задаче doing — отметк
       and S.plan(story("doing", "todo", "done"), {}) == ([], {}))
 check("1. задача другой пачки и пачка-заметка (type stage) состав не меняют",
       S.story_target("metis-0500", dict(story("todo", "todo"), **dict([task("metis-0599", "doing", parent="metis-0600")]))) is None)
+# metis-0803: пачка пачек — вложенные пачки (parent или batch) в составе наравне с задачами
+def goal(st, *kids):
+    out = dict([task("metis-0430", st, "story")])
+    for i, (how, k) in enumerate(kids, 1):
+        tid, (p, h, b) = task(f"metis-04{30 + i}", k, "story", parent="metis-0430" if how == "parent" else None)
+        if how == "batch":
+            h["batch"] = "metis-0430"
+        out[tid] = (p, h, b)
+    return out
+
+
+check("1. пачка пачек: все вложенные пачки (parent и batch) done или dropped → done (metis-0430, metis-0803)",
+      S.story_target("metis-0430", goal("todo", ("parent", "done"), ("batch", "done"), ("parent", "dropped"))) == "done")
+check("1. пачка пачек: вложенная пачка в работе или на приёмке → doing",
+      S.story_target("metis-0430", goal("todo", ("parent", "doing"), ("batch", "done"))) == "doing"
+      and S.story_target("metis-0430", goal("todo", ("batch", "review"))) == "doing")
+check("1. пачка пачек: вложенная пачка ещё в очереди — как есть; задача и пачка вместе — по обеим",
+      S.story_target("metis-0430", goal("todo", ("parent", "done"), ("batch", "todo"))) is None
+      and S.story_target("metis-0430", dict(goal("todo", ("parent", "done")), **dict([task("metis-0439", "todo",
+                                                                                        parent="metis-0430")]))) is None)
+check("1. пачка с batch = сама себе в состав не входит",
+      S.story_want("metis-0430", {"metis-0430": ("", {"type": "story", "id": "metis-0430", "status": "done",
+                                                    "batch": "metis-0430"}, "")}) is None)
+check("1. задача с batch = пачка (не story) в состав по batch не входит — как в tasks.story_children",
+      S.story_want("metis-0430", dict(goal("todo"), **{"metis-0438": ("", {"type": "task", "status": "done",
+                                                                        "batch": "metis-0430"}, "")})) is None)
 
 
 def story_with(st, extra=None, body="", *kids):
@@ -223,19 +249,19 @@ def head(p):
     return {ln.split(":", 1)[0]: ln.split(":", 1)[1].strip() for ln in read(p).split("---")[1].splitlines() if ":" in ln}
 
 
-sid, sp = new("Пачка", "--type", "story")
+sid, sp = new("Пачка", "--type", "story", "--done-when", "пункт")
 t1, p1 = new("Через claim", "--parent", sid, "--mode", "single")
 t2, p2 = new("Через worktree", "--parent", sid, "--mode", "single")
 t3, p3 = new("Через PR", "--mode", "single")
-s2, sp2 = new("Пачка готова", "--type", "story")
+s2, sp2 = new("Пачка готова", "--type", "story", "--done-when", "пункт")
 t4, p4 = new("Последняя задача", "--parent", s2, "--mode", "single", "--status", "done")
 t5, p5 = new("PR частью", "--mode", "single")
 t6, p6 = new("Чужое направление", "--mode", "single", direction="example-site")
-s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "story")
+s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "story", "--done-when", "пункт")
 t7, p7 = new("Готовая задача приёмки", "--parent", s3, "--mode", "single", "--status", "done")
-s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story")
+s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story", "--done-when", "пункт")
 t8, p8 = new("Готовая задача очереди", "--parent", s4, "--mode", "single", "--status", "done")
-s5, sp5 = new("Пачка в работе руками", "--type", "story", "--status", "doing")  # doing не проходом (metis-0412)
+s5, sp5 = new("Пачка в работе руками", "--type", "story", "--done-when", "пункт", "--status", "doing")  # doing не проходом (metis-0412)
 t9, p9 = new("Задача пачки в работе", "--parent", s5, "--mode", "single", "--status", "doing")
 ASK = ('question: "Принять итоги ночи?"\noptions: ["А — принять итоги, все проверки зелёные", '
        '"Б — вернуть на доработку, нужен ещё круг"]\nrecommend: "А — проверки зелёные"\n')
@@ -275,7 +301,7 @@ for rnd in range(2):  # пачку закрыли руками — проход 
     rr = cli(["board"], T0 + 140 + rnd * 20)
     hand.append((head(sp).get("status"), rr.stdout))
 check("4. пачку, которую проход ставил в doing, закрыли руками — два прохода подряд статус done",
-      [h for h, _ in hand] == ["done", "done"] and f"вернули руками в done" in hand[0][1], hand)
+      [h for h, _ in hand] == ["done", "done"] and "вернули руками в done" in hand[0][1], hand)
 check("4. пачка в doing не проходом → отметка в её журнале без сдвига, проход печатает её",
       head(sp5).get("status") == "doing" and S.last_story_move(read(sp5)) == "doing"
       and f"статус · {s5}: doing, отметка в журнале" in r_first.stdout, (read(sp5), r_first.stdout))

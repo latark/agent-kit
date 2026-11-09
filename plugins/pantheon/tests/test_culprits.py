@@ -55,6 +55,11 @@ class Env:
         with open(os.path.join(self.bin, "claude"), "w") as fh:
             fh.write('#!/bin/sh\ncat "$FAKE_AGENTS"\n')
         os.chmod(os.path.join(self.bin, "claude"), 0o755)
+        self.launchctl = os.path.join(self.tmp, "launchctl.txt")  # вывод поддельного `launchctl list`
+        open(self.launchctl, "w").write("PID\tStatus\tLabel\n-\t0\tcom.apple.x\n")
+        with open(os.path.join(self.bin, "launchctl"), "w") as fh:
+            fh.write('#!/bin/sh\n[ "$1" = list ] || exit 64\ncat "$FAKE_LAUNCHCTL"\n')
+        os.chmod(os.path.join(self.bin, "launchctl"), 0o755)
         self.kills = os.path.join(self.tmp, "kills.log")
         # направление с репозиторием и тремя копиями: живая с открытой задачей, живая с закрытой, удалённая
         self.repo = os.path.join(self.home, "projects", "athena-x")
@@ -91,7 +96,8 @@ class Env:
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a",
                "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PRESSURE": "1", "PANTHEON_FAKE_LOAD": "0",
                "PANTHEON_FAKE_PROCS": json.dumps(self.procs), "PANTHEON_FAKE_KILL_LOG": self.kills,
-               "FAKE_AGENTS": self.agents_file, "TMPDIR": _ROOT}
+               "FAKE_AGENTS": self.agents_file,
+               "FAKE_LAUNCHCTL": self.launchctl, "TMPDIR": _ROOT}
         env.update(extra or {})
         return env
 
@@ -288,6 +294,314 @@ def test_watch_red_reasons():
     check(e4.alerts().count("виновники памяти") == 1, "виновник появился в том же эпизоде — тревога одна, но есть")
 
 
+def auto_set(e):
+    """Набор для reap --auto (metis-0617): что гасится и что нет. Возраст по умолчанию — 40 мин."""
+    m = 40 * 60
+    sb = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox", "athena-x", "tmp", "run1")
+    mp = "{py} -I -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=9, pipe_handle=1{n}) " \
+         "--multiprocessing-fork"
+    fw = "/Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+    guardtmp = os.path.join(e.state, "plugins", "tmp", "guard-_9i3yizq", "base", "plugins", "guard")
+    e.proc(201, mp.format(py=fw, n=1), guardtmp, age=m, ppid=1, mem=40)          # сирота mp (python.org: Python.app)
+    e.proc(218, mp.format(py="python3", n=2), guardtmp, age=m, ppid=1, mem=60)   # вторая — той же строкой
+    e.proc(202, mp.format(py="python3", n=3), guardtmp, age=10 * 60, ppid=1)     # моложе 30 мин
+    e.proc(203, "node /x/node_modules/.bin/tsx zprobe1.ts", e.wt_gone, age=m, ppid=1)     # копия удалена
+    e.proc(204, "node /x/node_modules/vitest/vitest.mjs run", e.wt_closed, age=m, ppid=1)  # задача закрыта
+    e.proc(205, "node /x/node_modules/.bin/next dev", e.wt_live, age=m)          # задача открыта — не трогаем
+    e.proc(206, "claude -p разбор", e.wt_gone, age=m, ppid=1)                     # claude — никогда
+    e.proc(207, "node server.js", "/elsewhere/project", age=m, ppid=1)            # чужое
+    e.proc(208, "/opt/homebrew/opt/node/bin/node /opt/homebrew/bin/pyright-langserver --stdio", e.wt_live, age=m,
+           ppid=1)                                                # LSP прямо под launchd в живой копии — одного ppid 1 мало
+    e.proc(261, "/opt/homebrew/opt/node/bin/node /opt/homebrew/bin/pyright-langserver --stdio", e.wt_gone, age=m,
+           ppid=1)                                                                  # ничей LSP в удалённой копии
+    e.proc(300, "claude -r 081685bd", e.wt_live, age=m, ppid=1)
+    e.proc(209, "node /opt/homebrew/bin/pyright-langserver --stdio", e.repo, age=m, ppid=300)  # родитель claude жив
+    e.proc(301, "/Applications/Visual Studio Code.app/Contents/MacOS/Electron", "/", age=m, ppid=1)
+    e.proc(210, "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/"
+                "Code Helper (Plugin) /x/typescript/lib/tsserver.js --serverMode partialSemantic", "/", age=m, ppid=301)
+    e.proc(302, "/bin/sh /usr/local/bin/lsp-wrap.sh", "/x", age=m, ppid=1)    # обёртка, её родитель умер
+    e.proc(211, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=302)  # через обёртку
+    e.proc(247, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=211)  # LSP под LSP
+    e.proc(303, "nvim notes.ts", "/x", age=m, ppid=1)
+    e.proc(212, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=303)  # родитель — редактор
+    e.proc(217, "node /opt/homebrew/bin/pyright-langserver --stdio", e.repo, age=m, ppid=999)      # родителя нет в ps
+    e.proc(213, "node /x/node_modules/.bin/vitest run", sb, age=m, ppid=1)       # сирота в песочнице окна
+    e.proc(258, "/bin/zsh -c make check", sb, age=m, ppid=1)                    # живой родитель (не наш вид)
+    e.proc(214, "node /x/node_modules/.bin/vitest run", sb, age=m, ppid=258)     # в песочнице, но родитель жив
+    e.proc(219, "claude bg-pty-host --bg-pty-host /x.sock", sb, age=m, ppid=1)   # claude в песочнице с ppid 1 — никогда
+    e.proc(215, "node /Applications/Google Chrome.app/Contents/Frameworks/x/helper.js", e.wt_gone, age=m,
+           ppid=1)                                                                  # приложение
+    e.proc(216, mp.format(py="python3", n=4), "/elsewhere/project", age=m, ppid=1)  # сирота mp вне Пантеона
+    # проверка безопасности 04.11, находка 1: слово в строке — не сервер; родитель со словом — не сервер
+    e.proc(240, "SCREEN -dmS tsserver", e.wt_live, age=m, ppid=1)
+    e.proc(242, "python3 x.py --name tsserver", e.repo, age=m, ppid=1)
+    e.proc(241, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=242)
+    # находка 2: долгоживущий node и node с cli.js Claude Code — живые хозяева, не запускалки
+    e.proc(244, "node /srv/server.js", e.repo, age=m, ppid=1)
+    e.proc(243, "node /opt/homebrew/bin/pyright-langserver --stdio", e.repo, age=m, ppid=244)
+    e.proc(246, "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume x", e.repo, age=m, ppid=1)
+    e.proc(245, "node /opt/homebrew/bin/pyright-langserver --stdio", e.repo, age=m, ppid=246)
+    # находка 3: чьё — по cwd, не по пути в командной строке; cwd нет — не гасим
+    e.proc(248, f"node /x/node_modules/.bin/tsx {e.wt_gone}/a.ts", "/elsewhere/project", age=m, ppid=1)
+    e.proc(249, f"node /x/node_modules/.bin/tsx {e.wt_gone}/b.ts", None, age=m, ppid=1)
+    e.proc(250, "pyright-langserver --stdio", "/opt/homebrew/Cellar/pyright/dist", age=m, ppid=1)  # LSP вне Пантеона
+    # находка 4: выше по цепочке живая claude или сессия из claude agents — не гасим
+    e.proc(252, "/bin/zsh -c pnpm test", e.wt_gone, age=m, ppid=300)
+    e.proc(251, "node /x/node_modules/.bin/vitest run", e.wt_gone, age=m, ppid=252)
+    e.proc(254, "node /x/agent-runner.js", e.wt_closed, age=m, ppid=1)
+    e.proc(253, "node /x/node_modules/.bin/tsx c.ts", e.wt_closed, age=m, ppid=254)
+    e.proc(255, "node /x/node_modules/.bin/vitest run", e.wt_gone, age=m, ppid=246)  # родитель — node с cli.js claude
+    e.proc(256, "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js -p x", e.wt_gone, age=m, ppid=1)
+    e.proc(257, "node /x/node_modules/.bin/tsx d.ts", e.wt_gone, age=m, ppid=4243)  # родителя нет в ps — не прослежено
+    e.proc(260, "/Applications/Foo.app/Contents/Resources/bin/sh -c serve", e.repo, age=m, ppid=1)  # sh из приложения
+    e.proc(259, "node /opt/homebrew/bin/pyright-langserver --stdio", e.repo, age=m, ppid=260)
+    # круг 2, находка 2: вид — по исполняемому файлу, слово next/pnpm в аргументах SCREEN и tmux вида не даёт
+    for i, cwd in enumerate((e.wt_closed, e.wt_gone, sb)):
+        e.proc(266 + 2 * i, "SCREEN -dmS next", cwd, age=m, ppid=1)
+        e.proc(267 + 2 * i, "tmux new -s pnpm", cwd, age=m, ppid=1)
+    # круг 2, находка 3: окно песочницы с живой сессией — по имени сессии, по settings/run/<имя>.json, по job-<роль>
+    sbw = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox")
+    for w in ("athena-live", "hq", "job-iris"):
+        os.makedirs(os.path.join(sbw, w, "tmp"), exist_ok=True)
+    e.proc(262, "node /x/node_modules/.bin/vitest run", os.path.join(sbw, "athena-live", "tmp"), age=m, ppid=1)
+    e.proc(263, "node /x/node_modules/.bin/vitest run", os.path.join(sbw, "hq", "tmp"), age=m, ppid=1)
+    os.makedirs(os.path.join(e.state, "settings", "run"), exist_ok=True)
+    json.dump({"env": {"PANTHEON_WINDOW": "hq"}}, open(os.path.join(e.state, "settings", "run", "zeus.json"), "w"))
+    e.proc(304, "claude -p --agent iris разбор", "/", age=m, ppid=1)
+    e.proc(264, "node /x/node_modules/.bin/vitest run", os.path.join(sbw, "job-iris", "tmp"), age=m, ppid=1)
+    # задачи launchd: сам процесс или его предок — не трогаем
+    e.proc(272, "node /x/node_modules/.bin/tsx e.ts", e.wt_gone, age=m, ppid=1)
+    e.proc(273, "/bin/sh /x/run-job.sh", e.wt_gone, age=m, ppid=1)
+    e.proc(274, "node /x/node_modules/.bin/tsx f.ts", e.wt_gone, age=m, ppid=273)
+    # mp: процесс с живым родителем-python — не сирота; multiprocessing в аргументах не-python — не mp
+    e.proc(305, "python3 -I tests/test_shell_diff.py", guardtmp, age=m, ppid=1)
+    e.proc(275, mp.format(py="python3", n=5), guardtmp, age=m, ppid=305)
+    e.proc(277, "SCREEN -dmS w " + mp.format(py="python3", n=6), guardtmp, age=m, ppid=1)
+    open(e.launchctl, "w").write("PID\tStatus\tLabel\n-\t0\tcom.apple.x\n272\t0\tcom.x.a\n273\t0\tcom.x.b\n")
+    json.dump([{"id": "s254", "name": "athena-dev", "pid": 254, "kind": "interactive", "state": "working"},
+               {"id": "s9001", "name": "athena-live", "pid": 9001, "kind": "interactive", "state": "working"},
+               {"id": "s9002", "name": "zeus", "pid": 9002, "kind": "interactive", "state": "working"}],
+              open(e.agents_file, "w"))
+
+
+def test_auto_kills_only_abandoned():
+    e = Env()
+    auto_set(e)
+    r = e.reap("--auto")
+    k = e.killed()
+    check(r.returncode == 0, f"reap --auto: код 0 ({r.returncode} {r.stdout[-300:]} {r.stderr[-300:]})")
+    want = {201, 218, 203, 204, 261, 211, 213, 247}
+    check(set(k) == want, f"reap --auto гасит только брошенное {sorted(want)}: {sorted(k)}; лишнее "
+          f"{sorted(set(k) - want)}, не погашено {sorted(want - set(k))}")
+    check(all(v == [int(signal.SIGTERM)] for v in k.values()), f"сигнал — SIGTERM: {k}")
+    lines = [ln for ln in e.alerts().splitlines() if "· reap --auto · погашено: " in ln]
+    check(len(lines) == 7, f"строка «погашено» на каждое гашение (две сироты mp одной строкой): {len(lines)} {lines}")
+    mp = next((ln for ln in lines if "spawn_main" in ln), "")
+    check("×2 (pid 201, 218)" in mp and "чьё: состояние Пантеона" in mp and "почему: сирота multiprocessing" in mp
+          and mp.endswith(", 100 МБ"), f"строка: что, чьё, почему, МБ (40 + 60): {mp}")
+    lsp = next((ln for ln in lines if "pid 261" in ln), "")
+    check("lsp pyright-langserver" in lsp and "без живого родителя-claude" in lsp, f"строка о language server: {lsp}")
+    vl = next((ln for ln in lines if "pid 204" in ln), "")
+    check("погашено: vitest" in vl, f"вид — по скрипту node (vitest.mjs): {vl}")
+    sbl = next((ln for ln in lines if "pid 213" in ln), "")
+    check("песочница окна" in sbl and "ppid 1" in sbl, f"строка о сироте в песочнице: {sbl}")
+    check("worktree удалён" in e.alerts() and "athena-0002 done" in e.alerts(), "причины worktree и закрытой задачи")
+    r = e.reap("--auto", extra={"PANTHEON_FAKE_PROCS": json.dumps([p for p in e.procs if p["pid"] not in want])})
+    check(r.returncode == 0 and "нет" in r.stdout and len([ln for ln in e.alerts().splitlines() if "погашено" in ln]) == 7,
+          f"нечего гасить — код 0, без строк: {r.stdout}")
+
+
+def test_auto_zeus_window_without_run_file():
+    """metis-0805, Д1: окно Зевса — сессия zeus, песочница hq, запуск с settings/hq.json, файла run/zeus.json нет.
+    Сирота (ppid 1) в песочнице hq при живом Зевсе не гасится: окно — по имени (zeus → hq), по --settings и --name
+    живого claude из ps, по реестру имён ~/.claude/sessions. Без живого Зевса — гасится (проверка чувствительна)."""
+    m = 40 * 60
+    for how in ("agents", "settings", "name", "registry", "run-settings", "none"):
+        e = Env()
+        sb = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox", "hq", "tmp")
+        os.makedirs(sb)
+        e.proc(263, "node /x/node_modules/.bin/vitest run", sb, age=m, ppid=1)
+        if how == "agents":
+            json.dump([{"id": "s9002", "name": "zeus", "pid": 9002, "kind": "background", "state": "working"}],
+                      open(e.agents_file, "w"))
+        elif how == "settings":
+            e.proc(310, f"claude --agent hq --settings {e.state}/settings/hq.json", e.pantheon, age=m, ppid=1)
+        elif how == "name":
+            e.proc(310, "/Users/x/.local/bin/claude --name zeus", e.pantheon, age=m, ppid=1)
+        elif how == "registry":
+            os.makedirs(os.path.join(e.home, ".claude", "sessions"))
+            json.dump({"pid": os.getpid(), "name": "zeus", "kind": "interactive", "cwd": e.pantheon},
+                      open(os.path.join(e.home, ".claude", "sessions", f"{os.getpid()}.json"), "w"))
+        elif how == "run-settings":  # файл запуска другого имени, окно в нём — hq
+            os.makedirs(os.path.join(e.state, "settings", "run"))
+            json.dump({"env": {"PANTHEON_WINDOW": "hq"}}, open(os.path.join(e.state, "settings", "run", "x.json"), "w"))
+            e.proc(310, f"claude --settings {e.state}/settings/run/x.json", e.pantheon, age=m, ppid=1)
+        check(not os.path.exists(os.path.join(e.state, "settings", "run", "zeus.json")), "файла run/zeus.json нет")
+        r = e.reap("--auto")
+        k = e.killed()
+        if how == "none":
+            check(set(k) == {263}, f"Д1: живого Зевса нет — сирота в песочнице hq гасится: {sorted(k)} {r.stdout[-300:]}")
+        else:
+            check(r.returncode == 0 and not k, f"Д1: живой Зевс ({how}) — сирота в песочнице hq не гасится: "
+                  f"{sorted(k)} {r.returncode} {r.stderr[-300:]}")
+
+
+def test_auto_outside_holds():
+    """metis-0805, Д3: `run.py outside` (идущий outside test, serve, проход outside run) — держатель, как claude. Его
+    дети в копии закрытой задачи не гасятся, и сирота с ppid 1 в группе его прогона (pgid) — тоже. Сирота из группы,
+    где живых хозяев нет, и ребёнок другого python-скрипта со словом outside — гасятся."""
+    m = 40 * 60
+    e = Env()
+    py = "/Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+    e.proc(320, f"{py} -I /c/pantheon/0.11.211/bin/../lib/run.py outside run", "/", age=m, ppid=1)
+    e.proc(321, f"{py} /c/pantheon/bin/heavy /usr/bin/sandbox-exec -f /s/profile.sb pnpm test", e.wt_closed, age=m,
+           ppid=320)
+    e.procs[-1]["pgid"] = 321
+    e.proc(322, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=321)     # ребёнок прогона
+    e.procs[-1]["pgid"] = 321
+    e.proc(323, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=1)       # ушёл к launchd, группа жива
+    e.procs[-1]["pgid"] = 321
+    e.proc(324, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=1)       # группы нет — брошен
+    e.procs[-1]["pgid"] = 999
+    e.proc(330, "node /x/node_modules/.bin/tsx g.ts", e.wt_closed, age=m, ppid=1)         # группа без хозяина
+    e.procs[-1]["pgid"] = 330
+    e.proc(331, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=1)
+    e.procs[-1]["pgid"] = 330
+    e.proc(326, "python3 /x/tool.py outside run", "/", age=m, ppid=1)                     # не run.py — не держатель
+    e.proc(327, "node /x/node_modules/.bin/vitest run", e.wt_closed, age=m, ppid=326)
+    e.proc(328, f"{py} -I /p/lib/run.py outside serve --wait 120", "/", age=m, ppid=1)    # serve — тоже держатель
+    e.proc(329, "node /x/node_modules/.bin/next dev", e.wt_closed, age=m, ppid=328)
+    r = e.reap("--auto")
+    k = e.killed()
+    want = {324, 330, 331, 327}
+    check(r.returncode == 0 and set(k) == want, f"Д3: держатель outside — дети и группа прогона не гасятся, гасится "
+          f"{sorted(want)}: {sorted(k)}; лишнее {sorted(set(k) - want)} {r.stderr[-300:]}")
+
+
+def test_auto_lsp_family():
+    """metis-0805, Д2: language server под щадимым родителем не гасится отдельно — решение за семью вместе.
+    typescript-language-server прямо под launchd в живой копии жив — его tsserver тоже; молодой tsserver под ничьим
+    сервером — родителя не гасим, пока ребёнок моложе AUTO_MINUTES. Ничья семья старше срока — гасится вся."""
+    m = 40 * 60
+    e = Env()
+    e.proc(340, "node /usr/local/bin/typescript-language-server --stdio", e.wt_live, age=m, ppid=1)
+    e.proc(341, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.wt_live, age=m, ppid=340)
+    e.proc(342, "/bin/sh /usr/local/bin/lsp-wrap.sh", "/x", age=m, ppid=1)
+    e.proc(343, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=342)
+    e.proc(344, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=5 * 60, ppid=343)
+    e.proc(345, "/bin/sh /usr/local/bin/lsp-wrap.sh", "/x", age=m, ppid=1)
+    e.proc(346, "node /usr/local/bin/typescript-language-server --stdio", e.repo, age=m, ppid=345)
+    e.proc(347, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=346)
+    e.proc(348, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.repo, age=m, ppid=346)
+    # metis-0815 (мутант M7c: корень — ближний предок, reversed(chain) → chain): pnpm (ppid 1) → language server →
+    # tsserver в живой копии — корень семьи pnpm, а не ближний language server; никого не гасим
+    e.proc(350, "/usr/local/bin/pnpm exec typescript-language-server --stdio", e.wt_live, age=m, ppid=1)
+    e.proc(351, "node /usr/local/bin/typescript-language-server --stdio", e.wt_live, age=m, ppid=350)
+    e.proc(352, "node /x/node_modules/typescript/lib/tsserver.js --useNodeIpc", e.wt_live, age=m, ppid=351)
+    r = e.reap("--auto")
+    k = e.killed()
+    want = {346, 347, 348}
+    check(r.returncode == 0 and set(k) == want, f"Д2: семья language server — вместе; гасится только ничья старше "
+          f"срока {sorted(want)}: {sorted(k)}; лишнее {sorted(set(k) - want)} {r.stderr[-300:]}")
+    check(not {350, 351, 352} & set(k), f"metis-0815: pnpm → language server → tsserver в живой копии — никого: {sorted(k)}")
+
+
+def test_outside_like():
+    code = ("import importlib.util, json, sys\n"
+            "spec = importlib.util.spec_from_file_location('c', sys.argv[1]); m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "cases = ['/F/Python.app/Contents/MacOS/Python -I /c/bin/../lib/run.py outside test --wait 590',"
+            " 'python3.14 -I /p/lib/run.py outside serve', 'python3 /p/lib/run.py outside', 'python3 /p/lib/run.py reap',"
+            " 'python3 /x/tool.py outside run', 'node /p/lib/run.py outside test', 'sh -c python3 run.py outside',"
+            " 'python3 -I /p/lib/run.py', '']\n"
+            "print(json.dumps([m.outside_like(a) for a in cases]))\n")
+    r = subprocess.run([PY311, "-I", "-c", code, os.path.join(ROOT, "lib", "culprits.py")], capture_output=True,
+                       text=True, timeout=30)
+    got = json.loads(r.stdout or "null")
+    check(got == [True, True, True, False, False, False, False, False, False],
+          f"outside_like — python …/run.py outside, по исполняемому файлу: {got} {r.stderr[-300:]}")
+
+
+def test_auto_usage_and_errors():
+    e = Env()
+    auto_set(e)
+    for args in (["--auto", "--apply"], ["--auto", "--pid", "203"], ["--auto", "--auto"]):
+        r = e.reap(*args)
+        check(r.returncode == 2 and not e.killed(), f"reap {' '.join(args)} — код 2: {r.returncode} {r.stderr}")
+    r = e.reap("--auto", extra={"PANTHEON_FAKE_PROCS": "не json"})
+    check(r.returncode == 3 and "не прочитан" in r.stderr.strip().splitlines()[-1] and not e.killed(),
+          f"ps не прочитан — код 3: {r.returncode} {r.stderr}")
+    keep = open(e.agents_file).read()
+    open(e.agents_file, "w").write("не json")
+    r = e.reap("--auto")
+    check(r.returncode == 3 and "сессий" in r.stderr.strip().splitlines()[-1] and not e.killed()
+          and "погашено" not in e.alerts(), f"claude agents не прочитан — проход пропущен, код 3: {r.returncode} {r.stderr}")
+    os.remove(os.path.join(e.bin, "claude"))
+    r = e.reap("--auto")
+    check(r.returncode == 3 and "сессий" in r.stderr.strip().splitlines()[-1] and not e.killed(),
+          f"claude не запустить — проход пропущен, код 3: {r.returncode} {r.stderr[-300:]}")
+    open(e.agents_file, "w").write(keep)  # список сессий верный — сбой только в коде и выводе claude
+    # круг 2, находка 1: строго — код не 0, пустой вывод, вывод из пробелов — не список
+    for body, what in (('exit 1\n', "код 1 без вывода"), ('cat "$FAKE_AGENTS"; exit 1\n', "код 1 со списком"),
+                       ('exit 0\n', "код 0 без вывода"), ('printf "  \\n\\t\\n"\n', "вывод из пробелов")):
+        open(os.path.join(e.bin, "claude"), "w").write("#!/bin/sh\n" + body)
+        os.chmod(os.path.join(e.bin, "claude"), 0o755)
+        r = e.reap("--auto")
+        check(r.returncode == 3 and "сессий" in r.stderr.strip().splitlines()[-1] and not e.killed(),
+              f"claude agents: {what} — проход пропущен, код 3: {r.returncode} {r.stderr[-300:]}")
+    open(os.path.join(e.bin, "claude"), "w").write('#!/bin/sh\ncat "$FAKE_AGENTS"\n')
+    os.chmod(os.path.join(e.bin, "claude"), 0o755)
+    open(e.agents_file, "w").write(keep)
+    keep = open(e.launchctl).read()
+    open(os.path.join(e.bin, "launchctl"), "w").write('#!/bin/sh\ncat "$FAKE_LAUNCHCTL"; exit 1\n')
+    r = e.reap("--auto")
+    check(r.returncode == 3 and "launchd" in r.stderr.strip().splitlines()[-1] and not e.killed(),
+          f"launchctl list не прочитан — проход пропущен, код 3: {r.returncode} {r.stderr[-300:]}")
+    os.remove(os.path.join(e.bin, "launchctl"))
+    open(os.path.join(e.bin, "claude"), "w").write('#!/bin/sh\n/bin/cat "$FAKE_AGENTS"\n')  # PATH без /bin
+    r = e.reap("--auto", extra={"PATH": e.bin})
+    check(r.returncode == 3 and "launchd" in r.stderr.strip().splitlines()[-1] and not e.killed(),
+          f"launchctl нет — проход пропущен, код 3: {r.returncode} {r.stderr[-300:]}")
+    open(os.path.join(e.bin, "launchctl"), "w").write('#!/bin/sh\n[ "$1" = list ] || exit 64\ncat "$FAKE_LAUNCHCTL"\n')
+    os.chmod(os.path.join(e.bin, "launchctl"), 0o755)
+    bad = os.path.join(e.tmp, "kill-dir")
+    os.makedirs(bad)
+    r = e.reap("--auto", extra={"PANTHEON_FAKE_KILL_LOG": bad})
+    check(r.returncode == 1 and "не погашен:" in r.stdout and "reap --auto: не погашены" in e.alerts()
+          and "погашено:" not in e.alerts(), f"kill не прошёл — код 1, строка «не погашены», без «погашено»: "
+          f"{r.returncode} {r.stdout[-300:]}")
+
+
+def test_tick_runs_only_auto():
+    code = ("import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('pantheon', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec); sys.modules['pantheon'] = m; spec.loader.exec_module(m)\n"
+            "print(m.parse_command('pantheon reap --auto') is not None, m.parse_command('pantheon reap --apply') is None,"
+            " m.parse_command('pantheon reap') is None, m.parse_command('pantheon reap --auto --pid 1') is None)\n")
+    e = Env()
+    r = subprocess.run([PY311, "-I", "-c", code, LIB], env=e.env(), capture_output=True, text=True, timeout=60)
+    check(r.stdout.split() == ["True"] * 4, f"плановый проход пускает только `pantheon reap --auto`: {r.stdout} "
+          f"{r.stderr[-300:]}")
+
+
+def test_watch_repeats_in_long_episode():
+    """30.10: своп выше порога сутками, проходы каждые 5 мин — эпизод продлевался, строки виновников не было."""
+    e = Env()
+    standard(e)
+    red = {"PANTHEON_FAKE_SWAP": "9"}
+    for dt in range(0, 7 * 3600 + 1, 1800):  # 7 ч красной зоны, проход раз в 30 мин (меньше EPISODE_GAP)
+        e.watch_check(T0 + dt, extra=red)
+    a = e.alerts()
+    check(a.count("виновники памяти") == 2 and "держится 6 ч" in a,
+          f"красная зона 7 ч без перерыва — вторая строка через 6 ч с «держится»: {a.count('виновники памяти')}")
+    check("pantheon reap --auto" in a, "в строке — что брошенное гасит плановый проход")
+    e2 = Env()
+    standard(e2)
+    open(os.path.join(e2.state, "culprits-last"), "w").write(f"{T0 - 300}\n")
+    e2.watch_check(T0, extra=red)
+    check(e2.alerts().count("виновники памяти") == 1, "старая метка из одного числа — тревоги в ней нет, строка есть")
+
+
 def test_kind_parse():
     code = ("import importlib.util, json, sys\n"
             "spec = importlib.util.spec_from_file_location('c', sys.argv[1]); m = importlib.util.module_from_spec(spec)\n"
@@ -295,13 +609,19 @@ def test_kind_parse():
             "cases = [('claude --agent x', None), ('/opt/homebrew/bin/node a.js', None), ('next-server (v16.0.1)', None),"
             " ('npm exec tsx /w/a.ts', None), ('node /n/pnpm/bin/pnpm.cjs dev', None), ('/usr/bin/vim x', None),"
             " ('python3 -c from multiprocessing.resource_tracker import main;main(8)', 1),"
-            " ('python3 -c from multiprocessing.resource_tracker import main;main(8)', 77)]\n"
+            " ('python3 -c from multiprocessing.resource_tracker import main;main(8)', 77),"
+            " ('/opt/homebrew/opt/node/bin/node /opt/homebrew/bin/pyright-langserver --stdio', 5),"
+            " ('node /n/typescript/lib/tsserver.js --useNodeIpc', 5), ('typescript-language-server --stdio', 5),"
+            " ('node /p/node_modules/pyright/langserver.index.js', 5), ('node /x/tsserver-helper.js', 5),"
+            " ('SCREEN -dmS tsserver', 1), ('python3 x.py --name tsserver', 1), ('node /x/run.js tsserver', 5),"
+            " ('node --max-old-space-size=3072 /c/tsserver.js', 5), ('/usr/local/bin/tsserver', 5)]\n"
             "print(json.dumps([m.kind_of(a, p) for a, p in cases] + [m._etime(x) for x in ('05:24', '2:03:04', "
             "'4-01:00:00', 'x')] + [m._mb(x) for x in ('1235M', '2G+', '512K')]))\n")
     r = subprocess.run([PY311, "-I", "-c", code, os.path.join(ROOT, "lib", "culprits.py")], capture_output=True,
                        text=True, timeout=30)
     got = json.loads(r.stdout or "null")
-    want = ["claude", "node", "next", "tsx", "pnpm", None, "python-mp", None, 324, 7384, 349200, None, 1235.0, 2048.0,
+    want = ["claude", "node", "next", "tsx", "pnpm", None, "python-mp", None, "lsp", "lsp", "lsp", "lsp", "node",
+            None, None, "node", "lsp", "lsp", 324, 7384, 349200, None, 1235.0, 2048.0,
             0.5]
     check(got == want, f"виды и разбор полей ps/top: {got}")
 

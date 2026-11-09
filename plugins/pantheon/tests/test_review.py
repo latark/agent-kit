@@ -39,6 +39,27 @@ def main():
     return 0 if all(results) else 1
 
 
+def budget_checks(pantheon, git, repo):
+    # metis-0513: бюджет под предел вызова Bash (600 с): ожидание места heavy и сами тесты не дольше бюджета
+    show = ["review", "test", "--", "sh", "-c", "echo HWM=${HEAVY_WAIT_MAX-unset}"]
+    r = pantheon(*show, cwd=repo)
+    check("test — heavy ждёт места не дольше бюджета (по умолчанию 570 с)", "HWM=570" in r.stdout, r.stdout)
+    r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "100", "HEAVY_WAIT_MAX": "900"})
+    check("test — свой HEAVY_WAIT_MAX больше бюджета урезается до бюджета", "HWM=100" in r.stdout, r.stdout)
+    r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "100", "HEAVY_WAIT_MAX": "50"})
+    check("test — свой HEAVY_WAIT_MAX меньше бюджета остаётся", "HWM=50" in r.stdout, r.stdout)
+    r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "0"})
+    check("test — бюджет 0: без ограничения, HEAVY_WAIT_MAX не ставится", "HWM=unset" in r.stdout, r.stdout)
+    head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    r = pantheon("review", "test", "--", "sleep", "60", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
+    check("test — команда дольше бюджета: остановлена, код 75, причина и совет в stderr, SHA не печатается",
+          r.returncode == 75 and "не уложилась в 1 с" in r.stderr and "outside test" in r.stderr
+          and head not in r.stdout, (r.returncode, r.stderr, r.stdout))
+    r = pantheon("review", "test", "--", "true", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
+    head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()  # прежние проверки сдвигали HEAD
+    check("test — команда в бюджете: код 0 и SHA, как раньше", r.returncode == 0 and head in r.stdout, r.stderr)
+
+
 def run_all(tmp):
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
@@ -79,10 +100,22 @@ def run_all(tmp):
     r = pantheon("review", "test", "--", "true", cwd=repo)
     check("test — грязное дерево: код 2, команда не запускалась", r.returncode == 2 and "не чистое" in r.stderr)
     git("checkout", "-q", "a.txt", cwd=repo)
+    # ссылка node_modules (metis-0721): в корне не мешает, папка с файлом — мешает
+    os.symlink("/nonexistent-target", os.path.join(repo, "node_modules"))
+    r = pantheon("review", "test", "--", "true", cwd=repo)
+    check("test — симлинк node_modules в корне: чисто, код 0", r.returncode == 0, r.stderr)
+    os.remove(os.path.join(repo, "node_modules"))
+    os.makedirs(os.path.join(repo, "node_modules"))
+    with open(os.path.join(repo, "node_modules", "f"), "w") as fh:
+        fh.write("x")
+    r = pantheon("review", "test", "--", "true", cwd=repo)
+    check("test — папка node_modules с файлом: код 2", r.returncode == 2 and "не чистое" in r.stderr)
+    shutil.rmtree(os.path.join(repo, "node_modules"))
     r = pantheon("review", "test", "--", "true", cwd=tmp)
     check("test — не git: код 2", r.returncode == 2)
     r = pantheon("review", "test", "true", cwd=repo)
     check("test без -- : код 2", r.returncode == 2)
+    budget_checks(pantheon, git, repo)
 
     cl = ["--opened", "merge_gate.py, README", "--ran", 'heavy python3 -I tests/x.py "84 из 84"', "--unchecked", "gh"]
     for kind, extra in (("accept", cl), ("reject", []), ("talos", [])):
@@ -131,12 +164,25 @@ def run_all(tmp):
     r = pantheon("review", "status", "latark/other", "17")
     check("status — фильтр по репозиторию", r.returncode == 0 and "записей нет" in r.stdout)
 
+    # metis-0735: запись tests зелёного дозапуска — в status видно, что это дозапуск
+    trec = {"v": 1, "kind": "tests", "repo": ["latark/agent-kit"], "pr": 19, "sha": SHA, "cmd": "x",
+            "by": {"agent_type": "pantheon-outside"}, "time": "2026-10-15T20:00:00", "rerun_of": "20261103-000001-abcdef",
+            "files": ["kit/test_a.py", "kit/test_b.py"], "map": "m"}
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(trec) + "\n" + json.dumps(dict(trec, pr=20, rerun_of=None)) + "\n")
+    r = pantheon("review", "status", "latark/agent-kit", "19")
+    check("status: запись tests с rerun_of — «дозапуск от <id>, файлов 2»",
+          r.returncode == 0 and "дозапуск от 20261103-000001-abcdef, файлов 2" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "20")
+    check("status: запись tests без rerun_of — строки дозапуска нет", r.returncode == 0 and "дозапуск" not in r.stdout
+          and "tests" in r.stdout, r.stdout)
+
     # metis-0393: итог по head — последний вердикт каждого argus (рецензент — сессия и agent_id, как у шлюза)
     opus = dict(full["checklist"], ran="модель: claude-opus-5-5, heavy pytest")
 
     def v(kind, sha, aid, sid="s", pr=40, who="argus", cl=opus):
         return dict(rec, kind=kind, sha=sha, pr=pr, by={"agent_type": who, "agent_id": aid, "session_id": sid},
-                    checklist=cl)
+                    checklist=cl, base="main")  # base PR на записи (metis-0965): шлюз сверяет с baseRefName
     S2, S3, S4, S5 = "b" * 40, "c" * 40, "d" * 40, "e" * 40
     sonnet = dict(opus, ran="модель: claude-sonnet-4-6, heavy pytest")
     tally = [v("reject", SHA, "aaaaaaaa11"), v("accept", SHA, "aaaaaaaa11"),  # вернул и сам же снял
@@ -157,8 +203,12 @@ def run_all(tmp):
              # claude-opus» в --ran, а по транскрипту Sonnet — не в счёт; models_note (транскрипта не было) — по --ran
              dict(v("accept", S5, "jjjjjjjj01"), models=["claude-sonnet-4-6"]),
              dict(v("accept", S5, "jjjjjjjj02"), models=["claude-opus-5-5-20261001"]),
-             dict(v("accept", S5, "jjjjjjjj03"), models_note="транскрипт argus не найден"),
+             # главная сессия argus (agent_id пуст) без транскрипта — по --ran
+             dict(v("accept", S5, "", sid="s-main03"), models_note="транскрипт argus не найден"),
              dict(v("accept", S5, "jjjjjjjj04", cl=sonnet), models_note="транскрипт argus не найден"),
+             # metis-0489: субагент (agent_id есть), свой транскрипт не найден — для ядра не в счёт, как в шлюзе guard
+             dict(v("accept", S5, "jjjjjjjj06"), models_note="транскрипт субагента argus не найден — модель не "
+                  "подтвердить"),
              # metis-0413: транскрипт найден, моделей нет (models: []) — не в счёт, как в шлюзе guard
              dict(v("accept", S5, "jjjjjjjj05"), models=[],
                   models_note="транскрипт argus найден, но моделей в нём нет — модель не подтвердить")]
@@ -180,13 +230,56 @@ def run_all(tmp):
           f"итог на {S4[:12]}: принять 1, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
     check("status: «принять» не на Opus помечено в журнале",
           sum("не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт" in ln for ln in out) == 4, r.stdout)
-    check("status: Sonnet по транскрипту argus в счёт вне ядра, для ядра — нет; models_note — по --ran",
-          f"итог на {S5[:12]}: принять 5, вернуть 0 — последний вердикт каждого argus" in out
+    check("status: Sonnet по транскрипту argus в счёт вне ядра, для ядра — нет; models_note главной сессии — по "
+          "--ran, субагента — для ядра не в счёт (metis-0489)",
+          f"итог на {S5[:12]}: принять 6, вернуть 0 — последний вердикт каждого argus" in out
           and "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in out, r.stdout)
+    check("status: транскрипт субагента не найден — помечен своей строкой (metis-0489)",
+          sum("транскрипт субагента argus не найден — модель не подтвердить: для PR ядра не в счёт" in ln
+              for ln in out) == 1, r.stdout)
     check("status: расхождение --ran с транскриптом помечено своей строкой",
           sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
     check("status: транскрипт без моделей (models: []) помечен своей строкой, а не «по --ran»",
           sum("транскрипт argus найден, но моделей в нём нет" in ln for ln in out) == 1, r.stdout)
+    # Д6 долга #388: итог — как в шлюзах: «принять» на другой base PR и с полем «вернули», которое врёт, не в счёт
+    nobase = {k: x for k, x in v("accept", S2, "nnnnnnnn01", pr=43).items() if k != "base"}
+    d6 = [v("accept", S2, "aaaaaaaa11", pr=42), dict(v("accept", S2, "bbbbbbbb22", pr=42), base="dev"),
+          dict(v("accept", S2, "cccccccc33", pr=42), returned=["zzzzzzzz/s9"]), v("reject", S2, "dddddddd44", pr=42),
+          nobase,
+          dict(v("accept", S2, "aaaaaaaa11", pr=44), base="dev"), dict(v("accept", S2, "bbbbbbbb22", pr=44), base="dev"),
+          v("reject", S2, "cccccccc33", pr=44)]
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write("".join(json.dumps(x) + "\n" for x in d6))
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    check("Д6: итог — «принять» на base dev и с «вернули» без «вернуть» на PR не в счёт: принять 1, вернуть 1",
+          f"итог на {S2[:12]}: принять 1, вернуть 1 — последний вердикт каждого argus" in r.stdout
+          and "base PR для итога — main" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "43")
+    check("Д6: ни у одной записи нет base — base неизвестна, «принять» не в счёт",
+          f"итог на {S2[:12]}: принять 0, вернуть 0" in r.stdout and "неизвестна" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "44")
+    check("Д6: base для итога — по последней записи с base (main), «принять» на dev не в счёт",
+          f"итог на {S2[:12]}: принять 0, вернуть 1" in r.stdout, r.stdout)
+    # metis-0443: решения шлюза guard о коде head и переносы «принять» — в status
+    with open(os.path.join(state, "merge-gate", "carry.jsonl"), "w") as fh:
+        fh.write(json.dumps({"v": 1, "kind": "decision", "repo": ["latark/agent-kit"], "pr": 42, "sha": S2,
+                             "base": "main", "same": [S3], "differs": [S4], "why": ["head x старше 8 последних"],
+                             "time": "2026-11-08T01:00:00+03:00"}) + "\n"
+                 + json.dumps({"v": 1, "kind": "carry", "repo": ["latark/agent-kit"], "pr": 42, "sha": S2,
+                               "from": [{"sha": S3}], "time": "2026-11-08T01:05:00+03:00"}) + "\n"
+                 + json.dumps({"v": 1, "kind": "decision", "repo": ["latark/agent-kit"], "pr": 41, "sha": S2,
+                               "base": "main", "same": [S5], "differs": [], "time": "x"}) + "\n"
+                 + json.dumps({"v": 1, "kind": "decision", "repo": ["latark/agent-kit"], "pr": 42, "sha": S2,
+                               "base": "main", "same": "битое", "differs": [], "time": "y"}) + "\n" + "не json\n")
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    out43 = r.stdout.splitlines()
+    check("0443: status показывает решение шлюза (тот же код, другой, что не сверено) и перенос «принять»",
+          f"2026-11-08T01:00:00+03:00  decision  код {S2[:12]} (base main): тот же — {S3[:12]}; другой — {S4[:12]}; "
+          "не сверено: head x старше 8 последних" in out43
+          and f"2026-11-08T01:05:00+03:00  carry   шлюз guard перенёс «принять» с {S3[:12]} на {S2[:12]} (тот же код)"
+          in out43, r.stdout)
+    check("0443: решение другого PR, битое решение и битая строка — не показаны",
+          S5[:12] not in r.stdout and "битое" not in r.stdout and sum("decision" in ln for ln in out43) == 1, r.stdout)
     # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
@@ -213,7 +306,8 @@ def run_all(tmp):
         return mod
     _M = _load("merge_for_test", os.path.join(os.path.dirname(LIB), "merge.py"))
     _P = _types.SimpleNamespace(review_records=lambda repo: [x for x in tally if x["sha"] == S5],
-                                review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts)
+                                review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts,
+                                review_decisions=lambda repo, pr: [], now=lambda: 0)   # решений шлюза нет (metis-0966)
     _M.P = _P
     # запуски Actions (metis-0633) — подмена вместо настоящего gh: тест в сеть не ходит; обязательные agent-kit зелёные;
     # fork — голова PR из форка (metis-0649), у этого PR её нет
@@ -243,7 +337,6 @@ def run_all(tmp):
 
     # metis-0158: метка «ревью идёт»
     import time as _time
-    import shutil as _sh
 
     def at(t, *args):
         return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,

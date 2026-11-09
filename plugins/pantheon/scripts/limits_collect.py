@@ -1,7 +1,6 @@
 """Шаг 1 расчёта «хватит ли Max 5x»: запросы с 03.10 -> reqs.json (только счётчики и имена инструментов).
 Запуск: cd <папка> && python3 -I limits_collect.py && python3 -I limits_sim.py"""
 import glob, json, os, datetime as dt
-from collections import defaultdict
 P = {'opus-5-5': (4, 5, 8, 0.20, 20), 'sonnet-5-5': (2, 2.5, 4, 0.10, 10), 'haiku-5-5': (0.10, 0.125, 0.20, 0.01, 0.50),
      'fable-5-1': (10, 12.5, 20, 0.25, 50), 'opus-5': (5, 6.25, 10, 0.50, 25), 'sonnet-5': (2, 2.5, 4, 0.20, 10)}
 def fam(m):

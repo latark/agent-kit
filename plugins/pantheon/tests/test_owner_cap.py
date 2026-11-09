@@ -139,18 +139,18 @@ def test_below_cap_yellow_as_without():
 
 def test_cap_only_narrows():
     """Потолок выше расхода не снимает красную и жёлтую зону, heavy_max и hard_pct (дневной metis-0275 снимал)."""
-    e = env(40.0, 30.0, sec='[limits.owner_cap]\npct = 90\n')  # красная: запас +10
+    env(40.0, 30.0, sec='[limits.owner_cap]\npct = 90\n')  # красная: запас +10
     for kind in ("wake", "autostart", "respawn"):
         ok, why = N.gate(kind, T, heavy=0)
         check(not ok and "красная зона" in why, f"потолок 90 открыл красную, {kind}: {ok} {why}")
-    e = env(40.0, 37.0, sec=f'[limits.owner_cap]\ndate = "{DAY}"\npct = 90\n')  # жёлтая, старый вид записи
+    env(40.0, 37.0, sec=f'[limits.owner_cap]\ndate = "{DAY}"\npct = 90\n')  # жёлтая, старый вид записи
     for kind in ("wake", "autostart"):
         ok, why = N.gate(kind, T, heavy=0)
         check(not ok and "жёлтая зона" in why, f"дневной потолок открыл жёлтую, {kind}: {ok} {why}")
-    e = env(40.0, 40.0, sec='[limits.owner_cap]\npct = 90\n')
+    env(40.0, 40.0, sec='[limits.owner_cap]\npct = 90\n')
     check(N.gate("wake", T, heavy=0)[0], "зелёная ниже потолка закрыта")
     check(not N.gate("autostart", T, heavy=2)[0], "потолок отменил heavy_max")
-    e = env(86.0, 85.0, sec='[limits.owner_cap]\npct = 99\n')
+    env(86.0, 85.0, sec='[limits.owner_cap]\npct = 99\n')
     ok, why = N.gate("wake", T, heavy=0)
     check(not ok and "красная зона" in why, f"hard_pct отменён потолком: {ok} {why}")
 
@@ -199,7 +199,7 @@ def test_cap_terms():
         ('since = "вчера"\n', False, "не разобрана"),
     ]
     for extra, on, word in cases:
-        e = env(50.0, 49.0, sec=CAP50 + extra)
+        env(50.0, 49.0, sec=CAP50 + extra)
         cap, note = N.cap_read(T)
         check(bool(cap) == on and word in ((cap or {}).get("scope", "") + note), f"срок {extra!r}: {cap} {note!r}")
         ok, why = N.gate("wake", T, heavy=0)
@@ -215,7 +215,7 @@ def test_cap_since_reset_day():
                                      (T, 50.0, 96.43, f'"{DAY.isoformat()} 00:00"', True),
                                      (t2, 0.2, 0.6, f'"{DAY.isoformat()}"', True),
                                      (t2, 0.2, 0.6, f'"{DAY.isoformat()} 00:00"', False)):
-        e = env(used, line, sec=CAP50 + f'until = "reset"\nsince = {since}\n', t=t)
+        env(used, line, sec=CAP50 + f'until = "reset"\nsince = {since}\n', t=t)
         cap, note = N.cap_read(t)
         check(bool(cap) == on and (on or "истёк" in note), f"since {since} в {t}: {cap} {note!r}")
         ok, why = N.gate("wake", t, heavy=0)
@@ -255,12 +255,12 @@ def test_cap_broken_records():
                 '[limits.owner_cap]\npct = true\n', '[limits.owner_cap]\npct = 0\n', '[limits.owner_cap]\npct = -5\n',
                 '[limits.owner_cap]\npct = 101\n', '[limits.owner_cap]\npct = nan\n', '[limits.owner_cap]\npct = inf\n',
                 '[limits.owner_cap]\npct = -inf\n'):
-        e = env(60.0, 59.0, sec=bad)
+        env(60.0, 59.0, sec=bad)
         check(N.owner_cap(T) is None, f"кривой потолок принят: {bad!r}")
         check(N.gate("wake", T, heavy=0)[0], f"кривой потолок закрыл: {bad!r}")
         ln = N.status_lines(T)[3]
         check(ln.startswith("Потолок владельца: не действует — запись [limits.owner_cap] не разобрана"), ln)
-    e = env(60.0, 59.0, sec='[limits]\nwarn_pp = 2\n')
+    env(60.0, 59.0, sec='[limits]\nwarn_pp = 2\n')
     check(N.owner_cap(T) is None and N.cap_read(T)[1] == "", "без раздела — пометка")
 
 
@@ -284,7 +284,7 @@ def test_status_line():
 def _cli_env(e, t, role="domain-coordinator", **kw):
     env_ = {"PATH": os.path.dirname(PY311) + ":/usr/bin:/bin", "HOME": e.home, "PANTHEON_HOME": e.pantheon,
             "PANTHEON_STATE": e.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1",
-            "TMPDIR": e.tmp, "CLAUDE_PLUGIN_ROOT": TN.ROOT}
+            "TMPDIR": e.tmp, "CLAUDE_PLUGIN_ROOT": TN.ROOT, "PANTHEON_SCHEDULE_DEFAULTS": os.devnull}
     if role is not None:
         env_["PANTHEON_ROLE"] = role
     if "TZ" in os.environ:
@@ -449,7 +449,7 @@ def test_word_launch_cap():
     """metis-0444: ответ «Да — запустить|перезапустить|вернуть» при достигнутом потолке не исполняется — причина в
     результате; ниже потолка проверка потолка не мешает."""
     W = P.watch_mod()
-    e = env(60.0, 50.0)
+    env(60.0, 50.0)
     for verb in ("запустить", "перезапустить", "вернуть"):
         res = W._word_do(verb, "athena-shop", "metis-0001", "2026-10-14 12:00:00", f"Да — {verb} athena-shop", [], [])
         check(res.startswith("не исполняю: недельный потолок владельца 50 %"), f"{verb}: {res!r}")
@@ -460,7 +460,7 @@ def test_word_launch_cap():
     finally:
         W.ONESHOT_STARTED.remove("hestia")
     check(res == "уже поднято этим проходом", f"hestia под потолком: {res!r}")
-    e = env(49.0, 49.0)
+    env(49.0, 49.0)
     W.ONESHOT_STARTED.append("athena-shop")  # дальше — «уже поднято этим проходом», без запуска
     try:
         res = W._word_do("запустить", "athena-shop", "metis-0001", "2026-10-14 12:00:00", "Да — запустить athena-shop",

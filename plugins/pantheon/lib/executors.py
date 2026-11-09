@@ -17,8 +17,8 @@ CODEX_HOME роли codex-dev — STATE/codex-dev (0700, свой вход `code
 PANTHEON_CODEX_TIMEOUT_S (общий предел, 7200), PANTHEON_CODEX_HELLO_S (hello-проба, 45), PANTHEON_CODEX_GRACE_S
 (SIGTERM → SIGKILL, 5).
 """
+import ast
 import fnmatch
-import hashlib
 import importlib.util
 import json
 import os
@@ -645,12 +645,79 @@ def protected_hit(p):
     return False
 
 
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+_BODY_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
+
+
+def _stmt_head(st):
+    """Строки (первая, последняя) заголовка инструкции st: у составной (if, for, with, def, class, try, match) — от
+    декораторов до конца условия, аргументов, баз; у инструкции без тела — она вся."""
+    if not any(getattr(st, f, None) for f in _BODY_FIELDS):
+        return st.lineno, st.end_lineno
+    first = last = st.lineno
+    for field, value in ast.iter_fields(st):
+        if field in _BODY_FIELDS:
+            continue
+        for n in value if isinstance(value, list) else [value]:
+            if isinstance(n, ast.AST) and getattr(n, "lineno", None) is not None:
+                first, last = min(first, n.lineno), max(last, n.end_lineno)
+    return first, last
+
+
+def _stmt_hits(src, lines, sign):
+    """Строки продолжения (metis-0411): инструкция, в которой есть задетая строка lines (номера с 1), а слово
+    WINDOW_WORDS — на другой её строке. Без тела (присваивание, выражение, return) — слово где угодно в ней, например
+    элемент многострочного списка `HQ_EXCLUDED = [` … `]`. Составная (if, for, with, def, match) — слово в её
+    заголовке, а задета строка заголовка или тела: многострочное условие `if (… or` / `"permissions" in d):` и правка
+    тела `if "permissions" in data:` (Д3 argus R2-1, Д4 argus R2-2 PR #394). → первая строка каждой такой инструкции со
+    знаком sign. Не разобрать — пусто: тогда остаются построчные совпадения."""
+    if not lines or src is None:
+        return []
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    text = src.splitlines()
+    out = []
+    for st in ast.walk(tree):
+        if not isinstance(st, ast.stmt):
+            continue
+        first, last = _stmt_head(st)
+        hit = [n for n in lines if first <= n <= st.end_lineno]
+        # однострочная инструкция или задет только однострочный заголовок — его видит построчное совпадение
+        if not hit or all(n == first == last for n in hit) or \
+                not WINDOW_WORDS.search("\n".join(text[first - 1:last])):
+            continue
+        out.append(f"{sign}{text[st.lineno - 1]}  # строки {st.lineno}-{st.end_lineno}")
+    return out
+
+
 def window_rules_hit(wt, base):
-    """Строки диффа pantheon.py (против base, вместе с незакоммиченным), задевающие правила окон."""
+    """Строки диффа pantheon.py (против base, вместе с незакоммиченным), задевающие правила окон: со словом
+    WINDOW_WORDS — и строки продолжения многострочной инструкции, где это слово стоит на другой строке (metis-0411)."""
     r = _git(wt, "diff", "--unified=0", base, "--", WINDOW_FILE)
     hits = [ln for ln in r.stdout.splitlines()
             if ln[:1] in "+-" and not ln.startswith(("+++", "---")) and WINDOW_WORDS.search(ln)]
+    old_lines, new_lines = set(), set()
+    for ln in r.stdout.splitlines():
+        m = HUNK.match(ln)
+        if m:
+            a, b = int(m[1]), int(m[2] if m[2] is not None else 1)
+            c, d = int(m[3]), int(m[4] if m[4] is not None else 1)
+            old_lines.update(range(a, a + b))
+            new_lines.update(range(c, c + d))
     p = os.path.join(wt, WINDOW_FILE)
+    if old_lines:
+        old = _git(wt, "show", f"{base}:{WINDOW_FILE}")
+        hits += _stmt_hits(old.stdout if old.returncode == 0 else None, old_lines, "-")
+    if new_lines:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                hits += _stmt_hits(fh.read(), new_lines, "+")
+        except OSError:
+            pass
     if os.path.isfile(p) and not _git(wt, "ls-files", "--", WINDOW_FILE).stdout.strip():
         try:  # файл новый и не в индексе — git diff его не видит, смотрим целиком
             with open(p, encoding="utf-8", errors="replace") as fh:

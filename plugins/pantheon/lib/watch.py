@@ -32,8 +32,9 @@
                             stop — метка «остановлено вами», claude stop и claude rm: сессия уходит из фоновых
                             сессий Claude Code (metis-0239), переписка остаётся
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
-  pantheon restart --prepare [причина]|--status|--go [--force]|--cancel, pantheon saved --by <имя> --state <путь>
-                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10); pantheon saved без
+  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel, pantheon saved --by <имя> --state <путь>
+                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10); --done и --status
+                            (все перезапущены, Зевс поднят заново) закрывают завершённый перезапуск (metis-0338); pantheon saved без
                             техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
   pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04);
@@ -51,6 +52,8 @@
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
 """
 import contextlib
+import errno
+import glob
 import hashlib
 import json
 import os
@@ -60,11 +63,26 @@ import stat
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import tomllib
 from datetime import date, datetime, timedelta
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
+
+
+def _load_rule():
+    """lib/live_subagent.py — правило «живой субагент», общее с хуком ctx (metis-0904); грузится рядом с этим файлом."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pantheon_live_subagent", os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_subagent.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+LIVE = _load_rule()
 
 
 def set_core(mod):
@@ -77,6 +95,7 @@ STALE_STATUS_DAYS = 2        # STATUS.md направления с задаче�
 AUTO_RM_AFTER = 2 * 3600     # уборка (metis-0250): закончила ход или остановлена дольше — claude rm
 AUTO_RM_RETRY = 86400        # rm отказал (неотправленная работа в worktree) — следующая попытка через сутки
 STATUS_MAX_LINES = 200       # STATUS.md длиннее — тревога (STATE-14)
+STALE_NOW_HOURS = 6          # раздел «Сейчас» в STATUS.md окна, у которого были ходы, старше — тревога и напоминание (metis-0707)
 SWAP_ALERT_GB = 4.0          # swap выше — тревога с открытыми подключениями (COMM-13); `pantheon status` — тот же порог
 SWAP_KEEP_DAYS = 15          # замеры swap: R-two-directions смотрит «две недели ниже порога»
 WORKTREE_DAYS = 3            # копия .claude/worktrees/* без живой сессии дольше — «забытая», тревога координатору
@@ -104,6 +123,11 @@ RESPAWN_IDLE_MIN = 15        # перезапуск после обновлен�
                              # и worktree окна — окно свободно (лид может ждать тесты; metis-0181)
 UNPAUSE_TEXT = ("[Пантеон: пауза по нагрузке снята] Тебя останавливали из-за лимита или памяти. Прочитай STATUS.md и "
                 "продолжай со следующего шага. Это не ответ владельца и не согласие.")
+STALE_NOW_TEXT = ("[Пантеон: «Сейчас» в STATUS.md устарел] Раздел «Сейчас» в STATUS.md направления не обновлялся "
+                  "больше {hours} ч, а ты работаешь. Обнови его по фактам (слитые PR, закрытые и взятые задачи) и "
+                  "продолжай. Это не ответ владельца и не согласие.")
+NOW_HEAD = re.compile(r"^##[ \t]+Сейчас\b(.*)$", re.M)
+NOW_STAMP = re.compile(r"\(\s*(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d)([\dxXхХ]|\d)\s*\)")
 
 
 def defaults():
@@ -172,6 +196,60 @@ def idle_holder(a):
         if fl and not isinstance(fl, dict):
             return False
     return True
+
+
+LIVE_SUBAGENT_MAX = LIVE.LIVE_MAX  # субагент без записи дольше — мёртв (metis-0864): ожидание outside test — до 2 ч
+
+
+def live_subagents(a, t):
+    """Живые субагенты окна по subagents/*.meta.json (metis-0864) — правило lib/live_subagent.py, общее с хуком ctx
+    (metis-0904): не закончил (finished без своей фоновой команды, stoppedByUser, сдача последним ответом), журнал или
+    meta писались после старта нынешнего процесса (+ LIVE_GRACE) или субагент запущен после старта, и не раньше
+    LIVE_MAX назад. Субагенты, оборванные перезапуском, остаются без «finished» навсегда, но их журнал старше старта
+    процесса. Старт — P.session_started (Д2 ревью #332): startedAt claude agents без видимого процесса — createdAt
+    задания, он старше прошлых перезапусков. → отсортированные имена."""
+    tp = P.transcript_path(a)
+    if not tp:
+        return []
+    started = P.session_started(a, t)
+    out = []
+    try:
+        it = os.scandir(os.path.join(tp[:-len(".jsonl")], "subagents"))
+    except OSError:
+        return []
+    with it:
+        for e in it:
+            if not (e.name.startswith("agent-") and e.name.endswith(".meta.json")):
+                continue
+            meta = P.read_json(e.path, {})
+            if not LIVE.live(meta, e.path[:-len(".meta.json")] + ".jsonl", started, t):
+                continue
+            out.append(clean_why(meta.get("name") or e.name[len("agent-"):-len(".meta.json")])[:40])
+    return sorted(out)
+
+
+def live_work(a, t):
+    """Почему окно сейчас нельзя поднимать заново (claude respawn обрывает его ход и субагентов), или None (metis-0864).
+    05.11 окно metis-pantheon четыре раза ждало вашего «да» на команду, а возобновление ждущих (wake-waiting) раз в час
+    перезапускало его: вопрос пропадал, субагенты гибли. Работа окна — ждёт разрешения или ответа на вопрос (tool_use
+    последнего ответа без tool_result, pending_tool), живые субагенты и фоновые задачи (claude agents, inFlight из state.json, meta.json
+    субагентов). Процесса нет (noProcess) — обрывать нечего."""
+    if a.get("noProcess"):
+        return None
+    if "permission" in str(a.get("waitingFor") or "").lower():
+        return "ждёт разрешения"
+    tool = pending_tool(a)
+    if tool:
+        return f"ход не закончен: {tool}"
+    if a.get("subagents") or a.get("backgroundTasks"):
+        return "субагенты или фоновые задачи (claude agents)"
+    fl = awake().session_state(a).get("inFlight")
+    if isinstance(fl, dict) and (fl.get("tasks") or fl.get("queued")):
+        return f"фоновые задачи: {fl.get('tasks') or 0}, в очереди {fl.get('queued') or 0}"
+    names = live_subagents(a, t)
+    if names:
+        return "живые субагенты: " + ", ".join(names[:5]) + (f" и ещё {len(names) - 5}" if len(names) > 5 else "")
+    return None
 
 
 def nudge_target(hold):
@@ -255,7 +333,15 @@ def agents_cmd():
     if agents is None:
         print("pantheon agents: claude agents --json не ответил")
         return P.TEMPFAIL
-    snapshot(agents, P.now())
+    try:
+        snapshot(agents, P.now())
+    except PermissionError:
+        # metis-1009: окно Пританея в песочнице не пишет STATE/agents.json — тот же список сюда, снимок обновит
+        # плановый проход (раз в 5 мин)
+        for a in agents:
+            print(f"{a.get('name') or '—'}\t{a.get('state') or a.get('status') or '—'}\t{a.get('id') or '—'}")
+        print(f"pantheon agents: сессий {len(agents)}; снимок STATE/agents.json окну не записать (песочница) — его "
+              "обновит плановый проход")
     return 0
 
 
@@ -289,7 +375,7 @@ def _watch(dry=False):
     checks = [("снимок", lambda: snapshot(agents, t)),
               ("метка перезапуска", lambda: maint_expire(t)),
               ("сессии", lambda: sessions(agents, doms, t)),
-              ("STATUS.md", lambda: status_files(doms, t)),
+              ("STATUS.md", lambda: status_files(doms, t, agents, reg)),
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
@@ -300,6 +386,7 @@ def _watch(dry=False):
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
+              ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
               ("разовые запуски", lambda: oneshots(agents, reg, doms, t)),
               # после разовых (они чистят ONESHOT_STARTED), до самозапуска: поднятое здесь самозапуск не тронет
               ("окна по вашему ответу", lambda: word_launch(agents, reg, doms, t)),
@@ -349,19 +436,32 @@ def clean_why(v):
 
 
 def pending_tool(a):
-    """Чего ждёт сессия по её журналу: последний tool_use без tool_result → «Инструмент → цель» или None."""
+    """Чего ждёт сессия по её журналу: tool_use последнего ответа (message assistant) без tool_result → «Инструмент →
+    цель» или None. Открытым считается только tool_use последнего ответа (ревью argus #332 Д1): tool_use-сирота
+    раньше в хвосте (оборванный ход, после которого сессия жила дальше) — не работа, иначе окно числилось бы занятым
+    навсегда. Один ответ — записи журнала с одним message.id (параллельные вызовы Claude Code пишет по записи на блок);
+    без id запись — отдельный ответ. Ответом считается только запись type=assistant с model ≠ <synthetic>. Записи боковой ветки (isSidechain) не в счёт."""
     tp = P.transcript_path(a)
     if not tp:
         return None
     try:
         C = P.ctx_mod()
-        used, results, order = {}, set(), []
-        for d in C.entries(C.tail_lines(tp, 1_000_000)):
-            items = (d.get("message") or {}).get("content")
+        used, results, order, last = {}, set(), [], None
+        for n, d in enumerate(C.entries(C.tail_lines(tp, 1_000_000))):
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            items = msg.get("content")
+            if msg.get("role") == "assistant" and (d.get("type") != "assistant" or msg.get("model") == "<synthetic>"):
+                continue  # ревью argus #337: ответ — только type=assistant; <synthetic> (ошибка API, прерывание) не ответ
+            if msg.get("role") == "assistant" and not d.get("isSidechain"):
+                mid = msg.get("id") or ("entry", n)
+                if mid != last:  # новый ответ: tool_use прежних ответов уже не «ход не закончен»
+                    used, order, last = {}, [], mid
+            elif msg.get("role") == "assistant":
+                continue
             for x in items if isinstance(items, list) else []:
                 if not isinstance(x, dict):
                     continue
-                if x.get("type") == "tool_use" and x.get("id"):
+                if x.get("type") == "tool_use" and x.get("id") and msg.get("role") == "assistant":
                     used[x["id"]] = x
                     order.append(x["id"])
                 elif x.get("type") == "tool_result":
@@ -537,6 +637,10 @@ def _job_time(js):
     return None
 
 
+def _base_name(name):
+    return re.sub(r" \(\d+\)$", "", name or "")
+
+
 def auto_rm(agents, doms, t):
     """Уборка (metis-0250, поручение Зевса 18.10): фоновая сессия Пантеона закончила ход или остановлена (done/stopped),
     процесса нет и в этом состоянии она дольше AUTO_RM_AFTER — `claude rm <id>` (P.rm_session, как у pantheon stop).
@@ -544,14 +648,17 @@ def auto_rm(agents, doms, t):
     тревога один раз и новая попытка через сутки. Не трогаем: при техперезапуске, паузе планировщика и паузе по нагрузке
     (их снятие продолжает остановленную сессию той же), без state.json (время неизвестно), вкладки и чужие сессии.
     Есть живая сессия того же имени — прежнюю убираем сразу, без 2 ч: в claude agents у имени одна строка (добивает то,
-    что не убрали start/wake/restart, P.rm_previous)."""
+    что не убрали start/wake/restart, P.rm_previous). Имена сравниваются без суффикса « (N)» (metis-0885): после
+    перезапуска окна новая сессия при ещё не убранной старой зовётся «zeus (2)», и старая «zeus» — лишняя строка.
+    Мёртвая «имя (N)» при живой «имя» убирается так же; живая «имя (N)» без живой «имя» не трогается."""
     if dry() or P.maintenance_active() or os.path.exists(P.path("paused")):
         return
     tried = P.read_json(P.path("auto-rm.json"), {})
     tried = {k: v for k, v in tried.items() if isinstance(v, (int, float)) and t - v < AUTO_RM_RETRY} \
         if isinstance(tried, dict) else {}
     gone = []
-    live = {a.get("name") for a in agents if a.get("kind") in (None, "background")
+    # Новая сессия при живой старой того же имени получает «zeus (2)» (metis-0885): имя сравниваем без суффикса « (N)».
+    live = {_base_name(a.get("name")) for a in agents if a.get("kind") in (None, "background")
             and a.get("state") in ("working", "blocked") and not a.get("noProcess")}
     for a in agents:
         name, sid = a.get("name") or "", str(a.get("id") or "")
@@ -560,7 +667,7 @@ def auto_rm(agents, doms, t):
                 or P.load_pause(name)):
             continue
         since = _job_time(P.claude_job_state(sid))
-        if name not in live and (since is None or t - since < AUTO_RM_AFTER):
+        if _base_name(name) not in live and (since is None or t - since < AUTO_RM_AFTER):
             continue  # у имени есть живая сессия — эта лишняя строка, убираем сразу (start/wake не добили)
         reason = P.rm_session(sid, tries=1, name=name, why="auto-rm")
         if reason is None:
@@ -619,9 +726,132 @@ def hestia_reap(agents, t):
                         "claude --resume", "watch")
 
 
-def status_files(doms, t):
+def now_section_time(text, mtime, t):
+    """Когда обновлён раздел «Сейчас» STATUS.md (metis-0707): время из заголовка «## Сейчас (ДД.ММ ЧЧ:ММ)» (минуты
+    «Мx» — последняя из возможных, чтобы не тревожить зря); заголовок есть, а даты в нём нет — mtime файла; раздела
+    нет — None (нечего считать устаревшим). Год — текущий, дата из будущего — прошлого года."""
+    m = NOW_HEAD.search(text)
+    if not m:
+        return None
+    d = NOW_STAMP.search(m.group(1))
+    if not d:
+        return mtime
+    day, mon, hh, m10, m1 = d.groups()
+    mm = int(m10) * 10 + (int(m1) if m1.isdigit() else 9)
+    now = datetime.fromtimestamp(t)
+    try:
+        stamp = datetime(now.year, int(mon), int(day), int(hh), mm)
+        if stamp.timestamp() > t + 86400:
+            stamp = stamp.replace(year=now.year - 1)
+    except ValueError:
+        return mtime  # дата не календарная — как заголовок без даты
+    return stamp.timestamp()
+
+
+def window_turned_since(name, agents, registry, since):
+    """У окна name были ходы после since: транскрипт (иначе updatedAt из state.json) любого держателя имени новее."""
+    for a in holders(name, agents, registry):
+        if not a.get("sessionId"):
+            continue
+        last = None
+        tp = P.transcript_path(a)
+        if tp:
+            with contextlib.suppress(OSError):
+                last = os.path.getmtime(tp)
+        if last is None:
+            last = awake().parse_time(awake().session_state(a).get("updatedAt"))
+        if last is not None and last >= since:
+            return True
+    return False
+
+
+def stale_now(name, text, mtime, agents, registry, t):
+    """Раздел «Сейчас» окна, которое работает, старше STALE_NOW_HOURS (metis-0707): тревога один раз на заголовок и
+    сутки и напоминание роли (STALE_NOW_TEXT) — простаивающей живой сессии, тоже раз на заголовок и сутки; работающей
+    или ждущей вас напоминание не шлём: тревога есть. Окно без ходов за срок и обновлённый «Сейчас» — отметки снимаем."""
+    key, push, fail = f"watch-now-{name}", f"watch-now-push-{name}", f"watch-now-fail-{name}"
+    stamp = now_section_time(text, mtime, t)
+    limit = STALE_NOW_HOURS * 3600
+    if stamp is None or t - stamp <= limit or not window_turned_since(name, agents, registry, t - limit):
+        P.clear_once(key)
+        P.clear_once(push)
+        P.clear_once(fail)
+        return
+    head = NOW_HEAD.search(text).group(0).strip()
+    value = f"{today(t)}-{head}"
+    hours = (t - stamp) / 3600
+    P.alert_once(key, value, f"STATUS.md {name}: раздел «Сейчас» не обновлялся {hours:.0f} ч ({head}), а окно работает "
+                 "— обновить по фактам", "watch")
+    hold = holders(name, agents, registry)
+    poke = nudge_target(hold)
+    try:
+        if poke is None or open(P.once_path(push)).read() == value:
+            return
+    except OSError:
+        if poke is None:
+            return
+    if recheck(name, True, nudge=True)():
+        return  # будить сейчас нельзя (пауза, лимит, не главный Mac) — напомним в следующем проходе
+    rc = P.resume_session(name, poke, STALE_NOW_TEXT.format(hours=STALE_NOW_HOURS), "stale-now",
+                          recheck=recheck(name, True, nudge=True))[0]
+    if rc in (P.NO_WINDOW, P.SKIPPED):
+        return
+    # отметка и при неудаче: иначе каждый проход заново будит роль и шлёт новую тревогу (не чаще раза на заголовок и сутки)
+    os.makedirs(P.path("once"), exist_ok=True)
+    open(P.once_path(push), "w").write(value)
+    if rc != 0:
+        P.alert_once(fail, value, f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
+
+
+HEAD_FRESH = 30              # STATUS.md правили недавно (секунд) — шапку «Сейчас» не переписываем: роль может писать (metis-1005)
+
+
+def retime_status(name, p, text, st, t):
+    """Шапка `## Сейчас (дата)` STATUS.md — по времени последней строки журнала, а не по ручной дате (metis-1005).
+    Переписывается только строка заголовка: замена файла (временный файл рядом и rename) с mtime прежний + 1 с, если файл не
+    менялся с чтения (inode, mtime, размер — сверка перед самой заменой) и его не правили последние HEAD_FRESH секунд. → (текст, st) после записи или прежние."""
+    N = P.boardtext_mod().nowfact()
+    new, changed = N.retime_head(text, N.journal_time(text, st.st_mtime, t))
+    if not changed or t - st.st_mtime < HEAD_FRESH:
+        return text, st
+    tmp = f"{p}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        os.chmod(tmp, st.st_mode & 0o777)
+        # mtime — прежний плюс 1 с: возраст файла и дата журнала без даты считаются по правке роли, а не по нашей замене
+        # шапки, но копия для Obsidian (rsync -t, отпечаток view: размер и mtime) замену видит — шапка той же длины
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        cur = os.stat(p)  # сверка прямо перед заменой: роль дописала файл, пока писали временный, — не трогаем
+        if (cur.st_ino, cur.st_mtime_ns, cur.st_size) != (st.st_ino, st.st_mtime_ns, st.st_size):
+            return text, st
+        os.replace(tmp, p)
+        return new, os.stat(p)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
+def manual_behind(name, text, mtime, t):
+    """Ручной раздел STATUS.md с датой старше свежего журнала больше чем на 6 ч (metis-1005): тревога владельцу файла —
+    координатору направления, один раз на набор разделов; нет такого — отметка снимается."""
+    N = P.boardtext_mod().nowfact()
+    key = f"watch-manual-{name}"
+    late = N.stale_manual(text, mtime, t)
+    if not late:
+        P.clear_once(key)
+        return
+    j = N.display(N.journal_time(text, mtime, t))
+    names = "; ".join(f"«{n}» {N.display(ts)}" for n, ts in late[:3]) + (f" и ещё {len(late) - 3}" if len(late) > 3 else "")
+    P.alert_once(key, "|".join(f"{n}@{N.display(ts)}" for n, ts in late),
+                 f"STATUS.md {name}: ручной раздел с датой старше журнала ({j}) больше {N.STALE_HOURS} ч — {names}. "
+                 f"Владелец файла — координатор {name}: обновить раздел или вынести старое в archive/", "watch")
+
+
+def status_files(doms, t, agents=(), registry=()):
     """STATUS.md направления: с задачей «В работе» давно не обновлялся — состояние могло потеряться; длиннее 200 строк
-    — координатору перенести закрытое в archive/ (STATE-14)."""
+    — координатору перенести закрытое в archive/ (STATE-14); «Сейчас» старше STALE_NOW_HOURS у работающего окна —
+    тревога и напоминание роли (metis-0707)."""
     doing = set()
     with contextlib.suppress(Exception):
         doing = {h.get("direction") for _, h, _ in P.tasks_mod().load_tasks(P.PANTHEON).values()
@@ -630,10 +860,23 @@ def status_files(doms, t):
         p = os.path.join(P.PANTHEON, "directions", name, "STATUS.md")
         try:
             st = os.stat(p)
-            n = sum(1 for _ in open(p, encoding="utf-8", errors="replace"))
+            text = open(p, encoding="utf-8", errors="replace").read()
+            n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         except OSError:
             continue
-        age = (t - st.st_mtime) / 86400
+        mtime0 = st.st_mtime  # возраст файла — по правке роли, а не по нашей замене шапки
+        try:
+            text, st = retime_status(name, p, text, st, t)
+            manual_behind(name, text, mtime0, t)
+        except Exception as ex:  # noqa: BLE001 — сбой шапки или проверки ручных разделов не обрывает остальное
+            P.alert_once(f"watch-head-err-{name}", today(t), f"STATUS.md {name}: шапка «Сейчас» из журнала не обновлена: "
+                         f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
+        try:
+            stale_now(name, text, mtime0, agents, registry, t)
+        except Exception as ex:  # сбой одного направления (таймаут resume_session и т. п.) не обрывает остальные
+            P.alert_once(f"watch-now-err-{name}", today(t), f"STATUS.md {name}: проверка «Сейчас» упала: "
+                         f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
+        age = (t - mtime0) / 86400
         if name in doing and age > STALE_STATUS_DAYS:
             P.alert_once(f"watch-status-{name}", today(t),
                          f"STATUS.md {name} не обновлялся {age:.0f} дн., а задача «В работе» есть — спросить "
@@ -770,13 +1013,13 @@ def _base_ref(root):
 
 
 WALK_LIMIT = 5000
-LINK_SKIP = ("node_modules", ".next")   # зависимости и сборка: большие, считаются отдельно (metis-0616)
+LINK_SKIP = ("node_modules", ".next", ".venv", "venv", ".turbo", ".cache")   # зависимости и сборка: большие, считаются отдельно (metis-0616)
 DEPS_LIMIT = 300000                     # записей внутри LINK_SKIP; больше — «не знаю» (None), копия не удаляется
 
 
 def outward_links(wt):
     """Символические ссылки копии, чья цель (realpath) лежит вне неё. Обход без перехода по ссылкам, папку .git
-    копии пропускаем. Записи внутри node_modules и .next (у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
+    копии пропускаем. Записи внутри LINK_SKIP (node_modules, .next, .venv и т. п.; у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
     DEPS_LIMIT, остальные — под WALK_LIMIT. Превышение любого лимита — копия считается небезопасной (None, «не знаю»)
     и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None."""
     root = os.path.realpath(wt)
@@ -858,96 +1101,740 @@ def _prune_state(root, live):
     return need, block
 
 
+# --- уборка копий .claude/worktrees (QA-05, metis-0616, metis-0835) --------------------------------------------------
+
+WT_DONE_QUIET = 600         # с: `pantheon wt done` и его заявки убирают копию, только если в ней столько нет правок
+                            # (дежурный по срокам — LIVE_SUBAGENT_MAX): правка свежее — в копии, похоже, ещё работают
+                            # (сессия сделала в неё cd, субагент без worktreePath в meta) — не трогаем (metis-0835, D1)
+WT_REQ_DAYS = 7             # заявку `pantheon wt done`, которую так и не исполнить (копия занята), снимаем через столько дней
+UNTRACKED_MAX_MB = 200      # неотслеживаемое и игнорируемое копии больше — архив не собираем, копию не убираем
+SAVE_MAX_FILES = 2000       # файлов в архив копии больше — тоже не собираем: копия цела, тревога (обход копии
+                            # outward_links и так держит её при WALK_LIMIT записей вне LINK_SKIP)
+# игнорируемое (.gitignore), которое при уборке не сохраняем: зависимости, сборка, кэши; остальное (.env.local и т. п.)
+# идёт в архив копии вместе с неотслеживаемым (metis-0835, D2)
+IGNORED_SKIP = LINK_SKIP + ("dist", "build", "out", ".output", "coverage", "target", "__pycache__", ".pytest_cache",
+                            ".mypy_cache", ".ruff_cache", ".parcel-cache", ".svelte-kit", ".nuxt", ".vercel", ".tox",
+                            ".gradle", ".DS_Store")
+WT_REQ_DIR = "wt-req"       # заявки `pantheon wt done`: STATE/wt-req (ваши сессии), <кэш окна>/wt-req (окно роли)
+AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # lock, который Claude Code вешает на копию субагента
+AGENT_DIR = re.compile(r"agent-[0-9a-f]{6,40}")
+REQ_FILE = re.compile(r"[0-9a-f]{16}\.json")
+REQ_MAX = 4096
+
+
+def wt_archive(*parts):
+    """Архив уборки копий: STATE/wt-archive/{removed-<день>.txt, patches/, untracked/}."""
+    return P.path("wt-archive", *parts)
+
+
+def _has_inside(wt, paths):
+    """Есть ли среди путей сама копия или папка внутри неё."""
+    return any(c == wt or c.startswith(wt + os.sep) for c in paths)
+
+
+def proc_cwds():
+    """Текущие папки всех процессов (lsof -d cwd), настоящими путями; None — lsof не ответил: тогда копий не убираем."""
+    try:
+        r = subprocess.run(["lsof", "-a", "-d", "cwd", "-nP", "-Fn"], capture_output=True, text=True, timeout=60,
+                           errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not r.stdout:
+        return None
+    return {os.path.realpath(ln[1:]) for ln in r.stdout.splitlines() if ln.startswith("n/")}
+
+
+def subagent_live(agent, wt, t):
+    """Субагент копии ещё работает (metis-0835): его ~/.claude/projects/*/*/subagents/[*/[*/]]<agent>.meta.json (как
+    review_find_transcripts), worktreePath — эта копия, и он живой по правилу lib/live_subagent.py, общему с хуком ctx
+    (metis-0904), при неизвестном старте процесса: не закончил (finished без своей фоновой команды, stoppedByUser, сдача
+    последним ответом), а журнал или meta писались не раньше LIVE_SUBAGENT_MAX назад. Субагент, оборванный
+    перезапуском родителя, остаётся без finished навсегда, но его журнал стареет. → True | False | None — meta не
+    найден (решает вызывающий: под замком субагента это не «мёртв»)."""
+    base = os.path.join(glob.escape(P.HOME), ".claude", "projects", "*", "*", "subagents")
+    metas = set()
+    for sub in ((), ("*",), ("*", "*")):
+        metas.update(glob.glob(os.path.join(base, *sub, glob.escape(agent) + ".meta.json")))
+    if not metas:
+        return None
+    for m in sorted(metas):
+        meta = P.read_json(m, {})
+        if not isinstance(meta, dict):
+            continue
+        wp = meta.get("worktreePath")
+        if isinstance(wp, str) and wp and os.path.realpath(wp) != wt:
+            continue
+        if LIVE.live(meta, m[:-len(".meta.json")] + ".jsonl", 0, t):  # чей процесс — не знаем: только по сроку
+            return True
+    return False
+
+
+QUIET_LIMIT = 50000   # записей копии (без LINK_SKIP) для _quiet_since; больше — «не знаю», копия считается занятой
+
+
+def _quiet_since(wt, since):
+    """Ни одна запись копии (папки и файлы, без LINK_SKIP, без перехода по ссылкам) не менялась после since. Обход
+    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем."""
+    stack, n = [wt], 0
+    while stack:
+        d = stack.pop()
+        try:
+            if os.lstat(d).st_mtime > since:
+                return False
+            with os.scandir(d) as it:
+                for e in it:
+                    n += 1
+                    if n > QUIET_LIMIT:
+                        return False
+                    st = e.stat(follow_symlinks=False)
+                    if st.st_mtime > since:
+                        return False
+                    if e.is_dir(follow_symlinks=False) and e.name not in LINK_SKIP:
+                        stack.append(e.path)
+        except OSError:
+            return False
+    return True
+
+
+def merged_branches(root):
+    """Ветки слитых PR репозитория root по кэшу `pantheon autoclose fetch` (STATE/autoclose-prs.json, ключ merged;
+    репозиторий — по origin основной копии). В сеть не ходит; кэша нет — пусто."""
+    url = _git("-C", root, "config", "--get", "remote.origin.url").stdout.strip()
+    m = re.search(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    cache = P.read_json(P.path("autoclose-prs.json"), {})
+    merged = cache.get("merged") if isinstance(cache, dict) else None
+    if not m or not isinstance(merged, dict):
+        return set()
+    out = set()
+    for repo, rows in merged.items():
+        if str(repo).lower() == m.group(1).lower() and isinstance(rows, list):
+            out |= {r["headRefName"] for r in rows if isinstance(r, dict) and isinstance(r.get("headRefName"), str)
+                    and r["headRefName"]}
+    return out
+
+
+class WtCtx:
+    """Общее на проход уборки: сессии (live — с процессом, known — все, о ком знает Claude Code), папки процессов
+    (lsof — один раз и только когда есть что решать), основная ветка и ветки слитых PR каждого репозитория."""
+
+    def __init__(self, agents, registry, t):
+        both = [a for a in list(agents) + list(registry) if isinstance(a, dict) and isinstance(a.get("cwd"), str)
+                and a.get("cwd")]
+        self.live = [os.path.realpath(a["cwd"]) for a in both if a.get("pid")]
+        self.known = [os.path.realpath(a["cwd"]) for a in both]
+        self.t = t
+        self._procs, self._base, self._prs = False, {}, {}
+
+    def procs(self):
+        if self._procs is False:
+            self._procs = proc_cwds()
+        return self._procs
+
+    def base(self, root):
+        if root not in self._base:
+            self._base[root] = _base_ref(root)
+        return self._base[root]
+
+    def prs(self, root):
+        if root not in self._prs:
+            self._prs[root] = merged_branches(root)
+        return self._prs[root]
+
+
+def merged_why(root, head, branch, base, ctx):
+    """Чистая копия со своими коммитами слита (metis-0835): PR её ветки слит (кэш gh), HEAD есть на origin или все её
+    коммиты уже в основной ветке (`git cherry` без «+»). → причина словами или None."""
+    if branch and branch in ctx.prs(root):
+        return "PR слит"
+    r = _git("-C", root, "for-each-ref", "--contains", head, "--count=1", "--format=%(refname:short)", "refs/remotes/origin")
+    if r.returncode == 0 and r.stdout.strip():
+        return f"есть на {r.stdout.strip()}"
+    if base:
+        c = _git("-C", root, "cherry", base, head)
+        if c.returncode == 0 and c.stdout.strip() and not any(ln.startswith("+") for ln in c.stdout.splitlines()):
+            return "коммиты уже в основной ветке"
+    return None
+
+
+def _git_bytes(*args, env=None, timeout=120):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", **(env or {}))
+    return subprocess.run(["git", *GIT_SAFE, *args], capture_output=True, timeout=timeout, env=env)
+
+
+def _untracked(wt, env):
+    """Неотслеживаемые файлы копии без зависимостей и кэшей (LINK_SKIP) и игнорируемые (.gitignore: .env.local и т. п.)
+    без зависимостей, сборки и кэшей (IGNORED_SKIP, metis-0835 D2) → [(путь, имя в архиве)] или None (git не ответил).
+    Вложенный репозиторий и целиком игнорируемую папку git выдаёт папкой «x/» — её файлы берём обходом без перехода по
+    ссылкам. Список длиннее SAVE_MAX_FILES обрывается (вызывающий видит превышение и копию не трогает). Ссылки,
+    устройства и каналы отсеивает _tar_regular при записи архива (O_NOFOLLOW и fstat — без гонки проверки и чтения)."""
+    out = []
+    for extra, skip in (((), LINK_SKIP), (("--ignored", "--directory"), IGNORED_SKIP)):
+        r = _git_bytes("-C", wt, "ls-files", "-o", *extra, "--exclude-standard", "-z", env=env)
+        if r.returncode != 0:
+            return None
+        for raw in r.stdout.split(b"\0"):
+            rel = os.fsdecode(raw)
+            if not rel or any(part in skip for part in rel.split("/")):
+                continue
+            p = os.path.join(wt, rel)
+            if rel.endswith("/") and os.path.isdir(p) and not os.path.islink(p.rstrip("/")):
+                for d, dirs, files in os.walk(p, followlinks=False):
+                    dirs[:] = [x for x in dirs if x not in skip]
+                    for f in files:
+                        if f not in skip:
+                            q = os.path.join(d, f)
+                            out.append((q, os.path.relpath(q, wt)))
+                    if len(out) > SAVE_MAX_FILES:
+                        return out
+            else:
+                out.append((p.rstrip("/"), rel.rstrip("/")))
+            if len(out) > SAVE_MAX_FILES:
+                return out
+    return out
+
+
+def _free_stem(name):
+    """Имя архива копии: <имя>, <имя>-2, …: прежний патч и архив той же копии не затираем."""
+    for i in range(1, 100):
+        stem = name if i == 1 else f"{name}-{i}"
+        if not (os.path.lexists(wt_archive("patches", stem + ".patch"))
+                or os.path.lexists(wt_archive("untracked", stem + ".tar.gz"))):
+            return stem
+    return f"{name}-{int(time.time())}"
+
+
+class _TooBig(Exception):
+    """Прочитанное неотслеживаемое превысило UNTRACKED_MAX_MB."""
+
+
+def _tar_regular(tf, src, arc, budget):
+    """Обычный файл src → член arc архива tf. Открывается без перехода по ссылке (O_NOFOLLOW), fstat — обычный файл,
+    иначе пропуск; размер в архиве — сколько байт прочитано, а не lstat: файл, выросший после подсчёта, предел не
+    обойдёт. → прочитано байт; больше budget — _TooBig."""
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOENT):
+            return 0  # подменён ссылкой или пропал после списка — не наш файл
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return 0
+        buf, n = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024), 0
+        with buf:
+            while chunk := fh.read(1024 * 1024):
+                n += len(chunk)
+                if n > budget:
+                    raise _TooBig()
+                buf.write(chunk)
+            buf.seek(0)
+            ti = tarfile.TarInfo(arc)
+            ti.size, ti.mtime, ti.mode = n, int(st.st_mtime), stat.S_IMODE(st.st_mode)
+            tf.addfile(ti, buf)
+    return n
+
+
+def wt_save(wt, env, clean=False):
+    """Копия до удаления (metis-0835): `git diff HEAD --binary` → wt-archive/patches/<имя>.patch, неотслеживаемое
+    (без LINK_SKIP) и игнорируемое (.env.local и т. п., без IGNORED_SKIP; у чистой копии — только оно) →
+    wt-archive/untracked/<имя>.tar.gz. → (True, [пути]; у чистой без игнорируемого — пусто) или (False, причина):
+    архив не собрался, файлов больше SAVE_MAX_FILES или больше UNTRACKED_MAX_MB, у грязной сохранить нечего (status
+    грязный, а патч и список пусты) — тогда копию не убираем, недописанные файлы архива снимаются."""
+    d = _git_bytes("-C", wt, "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv", env=env)
+    if d.returncode != 0:
+        return False, "git diff HEAD не прошёл"
+    files = _untracked(wt, env)
+    if files is None:
+        return False, "список неотслеживаемого не прочитан"
+    total = 0
+    for p, _ in files:
+        with contextlib.suppress(OSError):
+            total += os.lstat(p).st_size
+    if len(files) > SAVE_MAX_FILES:
+        return False, f"неотслеживаемых и игнорируемых файлов больше {SAVE_MAX_FILES} — архив не собираю"
+    if total > UNTRACKED_MAX_MB * 1024 * 1024:
+        return False, (f"неотслеживаемого и игнорируемого {total / 1048576:.0f} МБ — больше предела "
+                       f"{UNTRACKED_MAX_MB} МБ")
+    stem = _free_stem(os.path.basename(wt))
+    made = []
+    try:
+        if d.stdout:
+            p = wt_archive("patches", stem + ".patch")
+            os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            made.append(p)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(d.stdout)
+        if files:
+            p = wt_archive("untracked", stem + ".tar.gz")
+            os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+            budget = UNTRACKED_MAX_MB * 1024 * 1024
+            # O_EXCL: чужой файл на этом месте не затрём и не снимем; 0600 — в архиве бывают .env.local и ключи
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            made.append(p)
+            with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tf:
+                for src, arc in files:
+                    budget -= _tar_regular(tf, src, arc, budget)
+                members = len(tf.getmembers())
+            if not members:  # в списке были только ссылки и каналы — архив пуст
+                made.remove(p)
+                os.remove(p)
+    except _TooBig:
+        _unmake(made)
+        return False, f"неотслеживаемого и игнорируемого больше предела {UNTRACKED_MAX_MB} МБ (по прочитанному)"
+    except (OSError, tarfile.TarError) as e:
+        _unmake(made)
+        return False, f"архив не собрался ({getattr(e, 'strerror', None) or e})"
+    if not made and not clean:
+        return False, "грязная, а сохранить нечего: патч пуст, неотслеживаемое — только ссылки, каналы, зависимости и кэши"
+    return True, made
+
+
+def _unmake(made):
+    for p in made:
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+
+def _archive_branch(root, name, head):
+    """Ветка archive/wt-<имя> на HEAD копии без ветки (detached): коммиты не теряются. Такая ветка уже есть на другом
+    коммите — archive/wt-<имя>-2 и т. д. → имя ветки или None."""
+    for i in range(1, 20):
+        b = f"archive/wt-{name}" + (f"-{i}" if i > 1 else "")
+        cur = _git("-C", root, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}^{{commit}}")
+        if cur.returncode == 0:
+            if cur.stdout.strip() == head:
+                return b
+            continue
+        return b if _git("-C", root, "branch", b, head).returncode == 0 else None
+    return None
+
+
+def wt_journal(t, root, wt, branch, head, kind, saved):
+    """Строка убранной копии в STATE/wt-archive/removed-<день>.txt: время, репозиторий, копия, ветка, HEAD, почему,
+    архивы. → путь журнала или None (не записался — копия уже убрана, это скажет итог)."""
+    p = wt_archive(f"removed-{today(t)}.txt")
+    line = "\t".join([datetime.fromtimestamp(t).strftime("%H:%M"), root.replace(P.HOME, "~"), os.path.basename(wt),
+                      branch or "detached", head, kind, " ".join(x.replace(P.HOME, "~") for x in saved)])
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        return None
+    return p
+
+
+def wt_one(root, wt, block, ctx, requested=False, dry=False):
+    """Одна копия <root>/.claude/worktrees/<имя> (metis-0835). block — её запись `git worktree list --porcelain`.
+    → (итог, текст):
+      live    — в копии живая сессия (cwd), процесс (lsof) или работающий субагент: не трогаем ни при каком условии;
+      wait    — рано по возрасту (или lsof не ответил);
+      keep    — пора, но убрать нельзя: текст — причина для тревоги;
+      plan    — убрал бы (dry: ничего не меняет);
+      removed — убрана, текст — для сводки.
+    Сроки по mtime папки копии: пустая чистая (HEAD в основной ветке) — LIVE_SUBAGENT_MAX (копия, в которой Claude
+    Code знает сессию без процесса, — WORKTREE_CLEAN_HOURS); чистая слитая (merged_why) — WORKTREE_CLEAN_HOURS;
+    чистая неслитая и грязная — WORKTREE_DAYS. requested (`pantheon wt done`) — без сроков. Любое удаление — только
+    если в копии (все записи, кроме LINK_SKIP) нет правок моложе LIVE_SUBAGENT_MAX у дежурного и WT_DONE_QUIET у
+    `wt done` (lock субагента без meta — тоже LIVE_SUBAGENT_MAX): живую работу, которую не видно по cwd, lsof и meta
+    (сессия сделала cd в копию, субагент без worktreePath), выдают свежие правки (metis-0835, D1). Lock «claude agent …»
+    без живого субагента не держит; lock с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
+    сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; правки и
+    неотслеживаемое, а у любой копии игнорируемое вне IGNORED_SKIP (.env.local) — сначала в патч и архив (wt_save).
+    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела."""
+    t = ctx.t
+    if _has_inside(wt, ctx.live):
+        return "live", "живая сессия в копии"
+    procs = ctx.procs()
+    if procs is None:
+        return "wait", "lsof не ответил — папки процессов неизвестны"
+    if _has_inside(wt, procs):
+        return "live", "процесс с текущей папкой в копии"
+    lm = re.search(r"^locked(?: (.*))?$", block, re.M)
+    reason = (lm.group(1) or "").strip() if lm else ""
+    am = AGENT_LOCK.match(reason) if lm else None
+    name = os.path.basename(wt)
+    agent = am.group(1) if am else (name if AGENT_DIR.fullmatch(name) else None)
+    alive = subagent_live(agent, wt, t) if agent else False
+    if alive:
+        return "live", f"субагент {agent} ещё работает"
+    try:
+        age = (t - os.stat(wt).st_mtime) / 3600
+    except OSError:
+        return "wait", "копия не читается"
+    late = "keep" if requested or age > WORKTREE_DAYS * 24 else "wait"
+    if lm and not am:
+        return late, f"lock не субагента ({reason or 'без причины'})"
+    hm = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
+    bm = re.search(r"^branch refs/heads/(.+)$", block, re.M)
+    if not hm:
+        return late, "нет HEAD"
+    head, branch = hm.group(1), (bm.group(1) if bm else None)
+    env = wt_env(root, wt)
+    bad = unsafe_config(wt, env)
+    if bad:
+        return late, f"конфигурация git: {bad}"
+    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all", env=env)
+    if st.returncode != 0:
+        return late, "git status не прошёл"
+    clean = st.stdout.strip() == ""
+    base = ctx.base(root)
+    empty = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head, base).returncode == 0
+    on_origin = False  # HEAD есть на ветке origin: коммиты не потеряются и без archive/wt-<имя>
+    if clean and empty:
+        kind = "пустая"
+        need = WORKTREE_CLEAN_HOURS if _has_inside(wt, ctx.known) else LIVE_SUBAGENT_MAX / 3600
+    elif clean:
+        why = merged_why(root, head, branch, base, ctx)
+        on_origin = bool(why) and why.startswith("есть на ")
+        kind, need = (f"слитая: {why}", WORKTREE_CLEAN_HOURS) if why else ("неслитая", WORKTREE_DAYS * 24)
+    else:
+        kind, need = "грязная", WORKTREE_DAYS * 24
+    if not requested and age <= need:
+        return "wait", f"{kind}, {age:.1f} ч из {need:g}"
+    # lock называет субагента, а его meta не найден (жив ли — неизвестно) — и у `wt done` ждём, пока копия затихнет
+    quiet = WT_DONE_QUIET if requested and not (alive is None and am) else LIVE_SUBAGENT_MAX
+    since = t - quiet
+    if not _quiet_since(wt, since):
+        return "live", (f"lock субагента {agent}: meta не найден, " if alive is None and am else "") + \
+            f"в копии правки моложе {_dur(quiet)} — похоже, в ней ещё работают"
+    out = outward_links(wt)
+    if out is None or out[0]:
+        what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
+                "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0], out[1][1].replace(P.HOME, "~")))
+        return "keep", f"в ней {what}"
+    archive = branch is None and not empty and not on_origin
+    if dry:
+        return "plan", (f"убрал бы: {kind}, {age / 24:.1f} дн." + (", lock субагента снять" if am else "")
+                        + (f", сначала ветка archive/wt-{name}" if archive else "")
+                        + (", сначала патч и архив неотслеживаемого" if not clean else ""))
+    if archive:
+        made = _archive_branch(root, name, head)
+        if not made:
+            return "keep", f"ветка archive/wt-{name} не создана"
+        branch = made
+    ok, saved = wt_save(wt, env, clean=clean)
+    if not ok:
+        return "keep", saved
+    busy = _busy_now(wt, agent, t, since)
+    if busy:
+        _unmake(saved)  # копия остаётся — её архив устарел, следующая уборка соберёт заново
+        return "live", busy
+    if am and _git("-C", root, "worktree", "unlock", wt).returncode != 0:
+        return "keep", "lock субагента не снят"
+    # чистоту и состав смотрел свой status по записанному каталогу; без --force git проверил бы её ещё раз своим
+    # status — уже по конфигурации, которую мы не смотрели
+    rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=300)
+    if rm.returncode != 0:
+        return "keep", f"git worktree remove: {(rm.stderr or rm.stdout).strip()[:160]}"
+    if empty and branch:
+        _git("-C", root, "branch", "-d", branch)
+    j = wt_journal(t, root, wt, branch, head, kind, saved)
+    return "removed", f"{name} ({kind}" + (f", ветка {branch}" if branch else "") + \
+        (", архив: " + ", ".join(os.path.basename(x) for x in saved) if saved else "") + \
+        ("" if j else ", журнал не записан") + ")"
+
+
+def _dur(sec):
+    return f"{sec / 3600:g} ч" if sec >= 3600 else f"{sec / 60:g} мин"
+
+
+def _busy_now(wt, agent, t, since):
+    """Перепроверка прямо перед `git worktree remove` (metis-0835, D4): между первой проверкой и удалением прошли
+    сохранение и архив — за это время в копию мог зайти процесс, ожить субагент или лечь правка. → причина или None."""
+    procs = proc_cwds()
+    if procs is None:
+        return "lsof не ответил при перепроверке перед удалением"
+    if _has_inside(wt, procs):
+        return "процесс с текущей папкой в копии — появился во время уборки"
+    if agent and subagent_live(agent, wt, t):
+        return f"субагент {agent} ожил во время уборки"
+    if not _quiet_since(wt, since):
+        return "в копии появилась правка во время уборки — копия цела"
+    return None
+
+
+def _req_dirs(doms):
+    """[(папка заявок, папки реестра, которые ей можно)]: STATE/wt-req — ваши сессии (все папки реестра);
+    <кэш окна>/wt-req — окно роли, только папки направления с его именем (как у `pantheon outside`)."""
+    real = lambda fs: [os.path.realpath(os.path.expanduser(f)) for f in (fs if isinstance(fs, list) else [])  # noqa: E731
+                       if isinstance(f, str)]
+    out = [(P.path(WT_REQ_DIR), [r for fs in doms.values() for r in real(fs)])]
+    with contextlib.suppress(OSError):
+        for name in sorted(os.listdir(sandbox_root())):
+            d = os.path.join(sandbox_root(), name, WT_REQ_DIR)
+            with contextlib.suppress(OSError):
+                if stat.S_ISDIR(os.lstat(d).st_mode):
+                    out.append((d, real(doms.get(name))))
+    return out
+
+
+def _req_open(d):
+    """Папка заявок без перехода по ссылке → fd папки или None: подложенная ссылка на чужую папку не читается и в ней
+    ничего не удаляется (все unlink — относительно этого fd). _open_dir — общий с уборкой кэшей окон."""
+    try:
+        fd = _open_dir(d)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return fd
+
+
+def wt_requests(doms, t):
+    """Заявки `pantheon wt done` → {путь копии: [(папка заявок, имя файла)]}. Битые, подложенные (ссылка, не обычный
+    файл), старше WT_REQ_DAYS и на копию вне папок, которые этой папке заявок можно, снимаются сразу. Папка и файлы —
+    через fd папки (O_NOFOLLOW): подменённая ссылкой папка пропускается. Имена с точки — недописанные заявки окна, их
+    не трогаем."""
+    out = {}
+    for d, roots in _req_dirs(doms):
+        dfd = _req_open(d)
+        if dfd is None:
+            continue
+        try:
+            for n in os.listdir(dfd):
+                if n.startswith("."):
+                    continue
+                data = None
+                if REQ_FILE.fullmatch(n):
+                    with contextlib.suppress(OSError, ValueError):
+                        fd = os.open(n, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+                        with os.fdopen(fd, "rb") as fh:
+                            if stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                                data = json.loads(fh.read(REQ_MAX + 1)[:REQ_MAX] or b"null")
+                wt = data.get("path") if isinstance(data, dict) else None
+                when = data.get("time") if isinstance(data, dict) else None
+                ok = (isinstance(wt, str) and isinstance(when, (int, float)) and t - when <= WT_REQ_DAYS * 86400
+                      and any(os.path.dirname(os.path.realpath(wt)) == os.path.join(r, ".claude", "worktrees")
+                              for r in roots))
+                if ok:
+                    out.setdefault(os.path.realpath(wt), []).append((d, n))
+                else:
+                    with contextlib.suppress(OSError):
+                        os.unlink(n, dir_fd=dfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return out
+
+
+def _drop(items):
+    """Снять заявки [(папка, имя)] — через fd папки без перехода по ссылке."""
+    for d, n in items or ():
+        dfd = _req_open(d)
+        if dfd is None:
+            continue
+        try:
+            with contextlib.suppress(OSError):
+                os.unlink(n, dir_fd=dfd)
+        finally:
+            os.close(dfd)
+
+
+def _copies(root):
+    """Записи `git worktree list --porcelain` репозитория root, кроме основной копии: [(настоящий путь, запись)]."""
+    r = _git("-C", root, "worktree", "list", "--porcelain")
+    out = []
+    for block in r.stdout.split("\n\n"):
+        m = re.search(r"^worktree (.+)$", block, re.M)
+        if m and os.path.realpath(m.group(1)) != root:
+            out.append((os.path.realpath(m.group(1)), block))
+    return out
+
+
+def _in_worktrees(wt):
+    return os.sep + os.path.join(".claude", "worktrees") + os.sep in wt + os.sep
+
+
 def worktrees(agents, registry, doms, t):
-    """Копии .claude/worktrees/* (QA-05). Слитая в основную ветку и чистая (git status пуст), старше суток и без живой
-    сессии в ней — дежурный убирает сам: `git worktree remove` без --force (грязную git не отдаст) и `git branch -d`
-    (неслитую не удалит). Прочие без живой сессии дольше WORKTREE_DAYS — тревога координатору: в них может быть
-    неотправленная работа. Копию со ссылками наружу (outward_links) не удаляем и тревожим: старые Claude Code при
-    удалении сносили цель ссылки вне копии.
+    """Копии .claude/worktrees/* (QA-05, metis-0616, metis-0835) — решает wt_one: дежурный убирает сам пустые (почти
+    сразу), слитые (через сутки), неслитые (ветка остаётся) и грязные (сначала патч и архив) — без живой сессии,
+    процесса и субагента в копии. Заявки `pantheon wt done` (wt_requests) — без сроков, с теми же проверками; занятая
+    копия ждёт в заявке. Пора, но нельзя (ссылки наружу, чужой lock, архив не собрался …) — тревога координатору.
+    Убранное — строкой в STATE/wt-archive/removed-<день>.txt, в alerts.md — одна сводка в день.
     Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
     не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий; решает _prune_state по пути из gitdir,
     как git: недоступная копия (в том числе с chmod 000 на ней самой) или живая сессия в пропавшей папке блокирует
     prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога."""
-    live = [os.path.realpath(a["cwd"]) for a in list(agents) + list(registry) if a.get("cwd") and a.get("pid")]
+    ctx = WtCtx(agents, registry, t)
+    reqs = wt_requests(doms, t)
+    removed = []
     seen = set()
-    for name, folders in doms.items():
-        for f in folders if isinstance(folders, list) else []:
-            root = os.path.realpath(os.path.expanduser(f))
-            if root in seen or not os.path.isdir(os.path.join(root, ".git")):
-                continue
-            seen.add(root)
-            r = _git("-C", root, "worktree", "list", "--porcelain")
-            base = None
-            for block in r.stdout.split("\n\n"):
-                m = re.search(r"^worktree (.+)$", block, re.M)
-                if not m:
+    with P.lock("worktrees") as got:
+        if not got:  # lock не взят (подложенный файл и т. п.; причину печатает P.lock) — копий не трогаем (D5)
+            return
+        for name, folders in doms.items():
+            for f in folders if isinstance(folders, list) else []:
+                root = os.path.realpath(os.path.expanduser(f))
+                if root in seen or not os.path.isdir(os.path.join(root, ".git")):
                     continue
-                wt = os.path.realpath(m.group(1))
-                if wt == root:
-                    continue
-                try:
-                    os.lstat(wt)
-                except OSError:
-                    continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
-                if os.sep + os.path.join(".claude", "worktrees") + os.sep not in wt + os.sep:
-                    # копия вне штатной папки: только тревога, никогда не удаляем
-                    if any(c == wt or c.startswith(wt + os.sep) for c in live):
-                        continue
+                seen.add(root)
+                for wt, block in _copies(root):
                     try:
-                        out_age = (t - os.stat(wt).st_mtime) / 3600
+                        os.lstat(wt)
                     except OSError:
+                        continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
+                    short = wt.replace(P.HOME, "~")
+                    if not _in_worktrees(wt):
+                        # копия вне штатной папки: только тревога, никогда не удаляем
+                        if _has_inside(wt, ctx.live):
+                            continue
+                        try:
+                            out_age = (t - os.stat(wt).st_mtime) / 3600
+                        except OSError:
+                            continue
+                        if out_age > WORKTREE_DAYS * 24:
+                            P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {short} ({name}, "
+                                         f"{out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать", "watch")
                         continue
-                    if out_age > WORKTREE_DAYS * 24:
-                        P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {wt.replace(P.HOME, '~')} "
-                                     f"({name}, {out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать",
-                                     "watch")
-                    continue
-                if any(c == wt or c.startswith(wt + os.sep) for c in live):
-                    continue
-                try:
-                    age = (t - os.stat(wt).st_mtime) / 3600
-                except OSError:
-                    continue
-                head = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
-                branch = re.search(r"^branch refs/heads/(.+)$", block, re.M)
-                short = wt.replace(P.HOME, "~")
-                env = wt_env(root, wt)
-                if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block and not unsafe_config(wt, env):
-                    base = base or _base_ref(root)
-                    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all", env=env)
-                    clean = st.returncode == 0 and st.stdout.strip() == ""
-                    merged = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head.group(1),
-                                                 base).returncode == 0
-                    if clean and merged:
-                        out = outward_links(wt)
-                        if out is None or out[0]:
-                            what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
-                                    "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0],
-                                                                         out[1][1].replace(P.HOME, "~")))
-                            P.alert_once(f"watch-wt-{wt}", "links", f"копия {short} не убрана: в ней {what} — "
-                                         "координатору: убрать ссылки и удалить вручную", "watch")
-                            continue
-                        # чистота уже проверена своим status по записанному каталогу; без --force git проверил бы её
-                        # ещё раз своим status — уже по конфигурации, которую мы не смотрели
-                        rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=60)
-                        if rm.returncode == 0:
-                            if branch:
-                                _git("-C", root, "branch", "-d", branch.group(1))
-                            P.alert(f"убрана слитая чистая копия {short} ({name}"
-                                    + (f", ветка {branch.group(1)}" if branch else "") + ")", "watch")
-                            P.clear_once(f"watch-wt-{wt}")
-                            continue
-                if age > WORKTREE_DAYS * 24:
-                    P.alert_once(f"watch-wt-{wt}", "1", f"забытая копия {short} ({name}, {age / 24:.0f} дн. без "
-                                 "сессии, не слита или не чистая) — координатору: слить или убрать", "watch")
-            need_prune, blockers = _prune_state(root, live)
-            for path, ex in blockers:
-                P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
-                             f"недоступна ({ex}) — prune отложен", "watch")
-            if need_prune and not blockers:
-                # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
-                # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
-                _git("-C", root, "worktree", "prune")
+                    req = reqs.pop(wt, None)
+                    verdict, text = wt_one(root, wt, block, ctx, requested=bool(req))
+                    if verdict == "removed":
+                        removed.append(text)
+                        P.clear_once(f"watch-wt-{wt}")
+                        _drop(req)
+                    elif verdict == "keep":
+                        P.alert_once(f"watch-wt-{wt}", text, f"копия {short} ({name}) не убрана: {text} — "
+                                     "координатору: разобрать и убрать вручную", "watch")
+                        _drop(req)
+                need_prune, blockers = _prune_state(root, ctx.live)
+                for path, ex in blockers:
+                    P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
+                                 f"недоступна ({ex}) — prune отложен", "watch")
+                if need_prune and not blockers:
+                    # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
+                    # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
+                    _git("-C", root, "worktree", "prune")
+    for left in reqs.values():  # копии больше нет в списке git — заявка исполнена или не нужна
+        _drop(left)
+    if removed:
+        P.alert_once("watch-wt-removed", today(t), f"уборка копий: убрано {len(removed)} — " + "; ".join(removed[:3])
+                     + (f" и ещё {len(removed) - 3}" if len(removed) > 3 else "")
+                     + f"; журнал дня — {wt_archive('removed-' + today(t) + '.txt').replace(P.HOME, '~')}", "watch")
+
+
+def _find_copy(path, roots):
+    """Путь → (корень, копия, запись git) для копии <корень>/.claude/worktrees/<имя> одного из roots; иначе причина."""
+    wt = os.path.realpath(os.path.expanduser(path))
+    parent = os.path.dirname(wt)
+    root = os.path.dirname(os.path.dirname(parent))
+    if os.path.basename(parent) != "worktrees" or os.path.basename(os.path.dirname(parent)) != ".claude":
+        return None, f"{path}: не копия .claude/worktrees/<имя> — такие эта команда не трогает"
+    if root not in roots:
+        return None, f"{path}: репозиторий {root.replace(P.HOME, '~')} не из папок реестра (directions.toml)"
+    for w, block in _copies(root):
+        if w == wt:
+            return (root, wt, block), None
+    return None, f"{path}: такой копии нет в `git worktree list` репозитория {root.replace(P.HOME, '~')}"
+
+
+def wt_cmd(rest):
+    """pantheon wt done <путь> [--dry-run] | pantheon wt plan [<папка> …] (metis-0835).
+    done — убрать копию .claude/worktrees/<имя> сразу после отчёта субагента или слияния PR, без вопроса и без сырого
+    git: те же проверки, что у дежурного (wt_one), но без сроков. В окне роли (есть PANTHEON_TMP) запись в STATE и
+    чужие процессы закрыты — команда кладёт заявку в <кэш окна>/wt-req, её исполняет плановый проход (раз в 5 мин).
+    Вне окна — сразу; копия занята (живая сессия, субагент ещё работает, правки моложе WT_DONE_QUIET) — заявка в
+    STATE/wt-req, проход уберёт её, когда освободится. Код: 0 — убрана или заявка принята, 1 — убрать нельзя (причина
+    последней строкой), 2 — не тот вызов или не та папка. plan — сухой прогон: что дежурный сделал бы с каждой копией
+    папок (по умолчанию — всех папок реестра); ничего не меняет."""
+    if rest[:1] == ["plan"]:
+        return wt_plan(rest[1:])
+    args = [a for a in rest[1:] if a != "--dry-run"]
+    if rest[:1] != ["done"] or len(args) != 1 or args[0].startswith("-"):
+        print("использование: pantheon wt done <путь копии .claude/worktrees/<имя>> [--dry-run] | "
+              "pantheon wt plan [<папка репозитория> …]", file=sys.stderr)
+        return 2
+    dry_run = "--dry-run" in rest
+    t = P.now()
+    wt = os.path.realpath(os.path.expanduser(args[0]))
+    tmp = os.environ.get("PANTHEON_TMP")
+    if tmp and not dry_run:
+        parent = os.path.dirname(wt)
+        if os.path.basename(parent) != "worktrees" or os.path.basename(os.path.dirname(parent)) != ".claude" \
+                or not os.path.isdir(wt):
+            print(f"{args[0]}: не копия .claude/worktrees/<имя> — такие эта команда не трогает", file=sys.stderr)
+            return 2
+        d = os.path.join(os.path.dirname(os.path.realpath(tmp)), WT_REQ_DIR)
+        name = hashlib.sha1(wt.encode()).hexdigest()[:16] + ".json"
+        try:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            tmpf = os.path.join(d, f".{name}.{os.getpid()}")
+            with open(tmpf, "x", encoding="utf-8") as fh:
+                json.dump({"path": wt, "time": t}, fh)
+            os.replace(tmpf, os.path.join(d, name))
+        except OSError as e:
+            print(f"заявка не записана: {e.strerror or e}", file=sys.stderr)
+            return 1
+        print(f"заявка принята: плановый проход (раз в 5 мин) уберёт {wt.replace(P.HOME, '~')}, когда в ней нет живой "
+              "сессии, субагента и правок моложе 10 мин; грязную — сначала в патч и архив. Итог — "
+              "STATE/wt-archive/removed-<день>.txt, отказ — строкой в alerts.md")
+        return 0
+    roots = [os.path.realpath(os.path.expanduser(f)) for fs in domains().values()
+             for f in (fs if isinstance(fs, list) else []) if isinstance(f, str)]
+    found, why = _find_copy(args[0], roots)
+    if not found:
+        print(why, file=sys.stderr)
+        return 2
+    root, wt, block = found
+    agents = P.agents_all()
+    if agents is None:
+        print("claude agents --json не ответил — живые сессии неизвестны, копию не трогаю", file=sys.stderr)
+        return 1
+    with P.lock("worktrees") as got:
+        if not got:
+            print("lock уборки копий (STATE/locks/worktrees.lock) не взят — копию не трогаю", file=sys.stderr)
+            return 1
+        verdict, text = wt_one(root, wt, block, WtCtx(agents, P.sessions_registry(), t), requested=True, dry=dry_run)
+    short = wt.replace(P.HOME, "~")
+    if verdict == "removed":
+        print(f"убрана: {text}")
+        P.clear_once(f"watch-wt-{wt}")
+        return 0
+    if verdict == "plan":
+        print(f"{short}: {text}")
+        return 0
+    if verdict in ("live", "wait"):
+        if dry_run:
+            print(f"{short}: занята — {text}")
+            return 0
+        d = P.path(WT_REQ_DIR)
+        try:
+            os.makedirs(d, exist_ok=True)
+            P.write_json(os.path.join(d, hashlib.sha1(wt.encode()).hexdigest()[:16] + ".json"), {"path": wt, "time": t})
+        except OSError as e:
+            print(f"{short}: занята ({text}), заявка не записана: {e.strerror or e}", file=sys.stderr)
+            return 1
+        print(f"{short}: занята ({text}) — заявка оставлена, плановый проход уберёт копию, когда она освободится")
+        return 0
+    print(f"{short}: не убрана — {text}", file=sys.stderr)
+    return 1
+
+
+def wt_plan(folders):
+    """Сухой прогон уборки (metis-0616, 0835): для каждой копии .claude/worktrees папок — итог wt_one(dry=True) строкой
+    «итог<TAB>копия<TAB>почему». Ничего не меняет: git только читает (GIT_OPTIONAL_LOCKS=0), обход — без записи."""
+    roots = [os.path.realpath(os.path.expanduser(f)) for f in folders] or \
+        [os.path.realpath(os.path.expanduser(f)) for fs in domains().values()
+         for f in (fs if isinstance(fs, list) else []) if isinstance(f, str)]
+    agents = P.agents_all()
+    if agents is None:
+        print("предупреждение: claude agents --json не ответил — живые сессии по cwd не учтены (процессы и субагенты учтены)",
+              file=sys.stderr)
+        agents = []
+    ctx = WtCtx(agents, P.sessions_registry(), P.now())
+    for root in dict.fromkeys(roots):
+        if not os.path.isdir(os.path.join(root, ".git")):
+            continue
+        for wt, block in _copies(root):
+            if not _in_worktrees(wt) or not os.path.lexists(wt):
+                continue
+            verdict, text = wt_one(root, wt, block, ctx, dry=True)
+            print(f"{verdict}\t{wt.replace(P.HOME, '~')}\t{text}")
+    return 0
 
 
 # --- кэши песочниц (metis-0620) ---------------------------------------------------------------------------------
@@ -1059,13 +1946,45 @@ def sandbox_clean(root, t, opened, days=None):
     return removed, failed
 
 
-def sandbox_mb(root):
-    """Размер кэша песочниц, МБ (du -sk), или None."""
+SANDBOX_DU_TTL = 6 * 3600         # размер кэша пересчитываем не чаще (metis-1007): du по 6,6 ГБ — 30+ с диска на каждом проходе
+
+
+def _du_mb(root):
     try:
         r = subprocess.run(["du", "-sk", root], capture_output=True, text=True, timeout=120)
         return int(r.stdout.split()[0]) // 1024
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
+
+
+def _top_sig(root):
+    """Отпечаток верхнего уровня кэша: имена папок окон и их mtime (не глубже)."""
+    try:
+        return sorted([e.name, int(e.stat(follow_symlinks=False).st_mtime)] for e in os.scandir(root))
+    except OSError:
+        return None
+
+
+def sandbox_mb(root, force=False):
+    """Размер кэша песочниц, МБ, или None. Полный du — не на каждом проходе: прошлый размер берётся из кэша
+    (STATE/sandbox-size.json), пока он моложе SANDBOX_DU_TTL, верхний уровень кэша (имена и mtime папок окон) не
+    изменился и уборка ничего не убрала (force). Иначе du заново."""
+    sig = _top_sig(root)
+    cp = P.path("sandbox-size.json")
+    if not force and sig is not None:
+        try:
+            with open(cp, encoding="utf-8") as fh:
+                c = json.load(fh)
+            if (c.get("root") == root and c.get("sig") == sig and isinstance(c.get("mb"), int)
+                    and 0 <= time.time() - float(c.get("t")) < SANDBOX_DU_TTL):
+                return c["mb"]
+        except (OSError, ValueError, TypeError):
+            pass
+    mb = _du_mb(root)
+    if mb is not None and sig is not None:
+        with contextlib.suppress(OSError):
+            P.write_atomic(cp, json.dumps({"root": root, "sig": sig, "mb": mb, "t": time.time()}))
+    return mb
 
 
 def sandbox_sweep(t):
@@ -1075,6 +1994,7 @@ def sandbox_sweep(t):
     if not os.path.isdir(root):
         return
     opened = _open_paths()
+    removed = 0
     if opened is not None:
         removed, failed = sandbox_clean(root, t, opened)
         if removed or failed:
@@ -1084,7 +2004,7 @@ def sandbox_sweep(t):
         cap = int(os.environ.get("PANTHEON_SANDBOX_CAP_MB") or SANDBOX_CAP_MB)
     except ValueError:
         cap = SANDBOX_CAP_MB
-    mb = sandbox_mb(root)
+    mb = sandbox_mb(root, force=bool(removed))
     if mb is not None and mb > cap:
         P.alert_once("watch-sandbox-cap", today(t), f"кэши песочниц {mb} МБ при потолке {cap} МБ даже после уборки "
                      f"({root.replace(P.HOME, '~')}) — координатору: посмотреть, что держит место", "watch")
@@ -1192,6 +2112,9 @@ def pauses_clear(agents, registry, t):
                 P.alert(f"{name} после паузы не продолжена: {why}", "watch")
                 continue
             got = resume_or_start(name, agents, UNPAUSE_TEXT, origin="tick", only_resume=True, auto=True)
+            if got == P.SKIPPED:  # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — не сбой
+                P.alert(f"{name} после паузы: пропуск — {P.SKIP_WHY}", "watch")
+                continue
             P.alert(f"{name} после паузы: " + ("продолжена" if got == 0 else f"не поднялась, код {got}"), "watch")
 
 
@@ -1629,7 +2552,8 @@ def oneshots(agents, registry, doms, t):
     Запись гасится до запуска, повторный проход её не повторит. Пока нельзя (шлюз недели и ночи, сессия занята, одна
     за проход) — ждёт до срока; после срока гаснет с тревогой. Пачка ночи, изменённая после фиксации вечером, не запускается.
     Закрытый недельный запор — запись ждёт до срока (не гасится). Код возврата запуска ≠0: запись уже погашена
-    (повтора нет), владельцу — уведомление «не вышел»."""
+    (повтора нет), владельцу — уведомление «не вышел». Пропуск под блокировкой имени (код 4, metis-0708) — не сбой:
+    запись снова ждёт до срока."""
     N = P.night_mod()
     del ONESHOT_STARTED[:]
     started = False
@@ -1670,6 +2594,16 @@ def oneshots(agents, registry, doms, t):
             rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
         else:
             rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
+        if rc == P.SKIPPED:
+            # metis-0708: под блокировкой имени «не надо» (окно уже работает, его поднимает другой процесс) — задание не
+            # передано, но это не сбой: запись снова ждёт до срока, без уведомления «не вышел»
+            # тревога — только при смене причины ожидания, как у ожидания выше: тот же пропуск каждый проход (окно
+            # занято, пока запись ждёт срока) — одна строка в alerts, а не строка на проход (metis-0708, ревью argus)
+            why = f"пропуск — {P.SKIP_WHY}"
+            N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
+            if why != it.get("wait"):
+                P.alert(f"разовый запуск {oid} ждёт: {why} (срок {P.stamp(float(it['expires']))[11:]})", "watch")
+            continue
         # красная память запуск больше не откладывает ([sb-simplify] п. 5): pantheon start только предупреждает
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
         N.oneshot_update(oid, t, result=res)
@@ -2030,10 +2964,23 @@ def autostart(agents, registry, doms, t, dry=False):
                     f"перезапуск с новой целью не вышел, код {rc}"), "watch")
         elif poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
             rc = P.resume_session(d, poke, task, "tick", recheck=recheck(d, True, nudge=True))[0]
-            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
-                                    f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
+        if rc == P.SKIPPED:  # у смены цели (swap) пропуск разобран выше
+            # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — окно между проходом и подъёмом
+            # получило ввод (уже работает), его остановили или поднимает другой процесс. Не запускали: не сбой и не
+            # успех — без тревоги и счётчика (строка resume-skip — в start.log). Раньше это шло «код 4» и сбоем:
+            # 02.11 «сбой 2 из 3» у работавшего metis-pantheon и пауза 2 ч, третий пропуск остановил бы самозапуск
+            say(f"{d}: пропуск — {P.SKIP_WHY}")
+            s["pending"] = False
+            P.write_json(P.path("autostart.json"), st)
+            if not poke:
+                running.append(d)  # имя держат или поднимают — место занято
+            continue
+        if poke:
+            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
+                                    f"передать задание не вышло, код {rc}"), "watch")
+        elif not swap:
             P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
                                                                                f"не вышло, код {rc}"), "watch")
         # красная память запуск не откладывает ([sb-simplify] п. 5, metis-0523): pantheon start только предупреждает
@@ -2170,9 +3117,28 @@ def word_launch(agents, registry, doms, t):
         P.write_json(sp, st)  # после каждого поручения: проход могут оборвать, повтора запуска быть не должно
 
 
+def _word_task_exists(qid):
+    """Есть ли задача с id вопроса. Журнал не читается — да (как раньше): ссылка на карточку лишней не бывает."""
+    try:
+        T = P.tasks_mod()
+        return qid in T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    except Exception:  # noqa: BLE001 — сбой чтения доски не должен ронять запуск по ответу
+        return True
+
+
+def word_text(qid, ts, ans):
+    """Текст запуска по ответу. metis-0820: id вопроса — не всегда задача (hermes-review-1, zeus-wake-0511). Ссылка
+    «pantheon task show <id>» без карточки входила в цель окна (/goal + TASK_GOAL), задачу с цели снять было нечем —
+    проверка цели держала окно по кругу. Без карточки — ни ссылки, ни задачи в цели: так и сказано в тексте."""
+    head = f"[Пантеон: запуск по ответу владельца в окне вопросов {ts}, [{qid}] — «{ans[:80]}»] Продолжай работу; "
+    if _word_task_exists(qid):
+        return head + f"поручение и контекст — pantheon task show {qid}, свои входящие и STATUS.md."
+    return head + (f"поручение и контекст — свои входящие и STATUS.md. [{qid}] — номер вопроса, а не задачи: карточки "
+                   f"с ним нет, в цель окна задача {qid} не входит.")
+
+
 def _word_do(verb, name, qid, ts, ans, agents, registry):
-    text = (f"[Пантеон: запуск по ответу владельца в окне вопросов {ts}, [{qid}] — «{ans[:80]}»] "
-            f"Продолжай работу; поручение и контекст — pantheon task show {qid}, свои входящие и STATUS.md.")
+    text = word_text(qid, ts, ans)
     if verb == "вернуть":  # как pantheon resume: метка, имя в «остановить всё», сброс самозапуска — затем подъём
         _word_unstop(name)
     if os.path.exists(P.path("stopped", name)):
@@ -2197,6 +3163,8 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     if P.live_copies(name, agents, registry=registry):
         return "уже работает — не трогаю (перезапуск — ответ на «перезапустить»)"
     rc = resume_or_start(name, agents, text, origin="tick")
+    if rc == P.SKIPPED:  # metis-0708: под блокировкой имени «не надо» (уже работает, поднимает другой) — не сбой
+        return f"пропуск: {P.SKIP_WHY}"
     if rc == 0:
         awake().RESUMED.append(name)
         ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
@@ -2227,7 +3195,9 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
     old = [a for a in agents if alias.fullmatch(str(a.get("name") or "")) and a.get("state") in ("stopped", "failed")
            and a.get("sessionId")]
     if old:
-        a = max(old, key=lambda a: a.get("startedAt") or 0)
+        # metis-0499: если сессия записала `pantheon saved` (id в метке), продолжаем именно её, а не самую свежую по
+        # startedAt — ожившая остановленная копия с тем же именем иначе перехватила бы продолжение (как restart --go)
+        a = saved_agent(name, old, saved_sid(name), warn=False)
         fresh = P.fresh_reason(a)  # metis-0147 п. 2: контекст большой, кэш остыл — новая сессия с файла состояния
         if fresh:
             return P.fresh_start(name, a, P.fresh_text("свежий старт", name, a.get("id"), text), origin,
@@ -2607,14 +3577,28 @@ def resume(rest, who):
 # 2) `pantheon restart --status` — кто сохранился. 3) `pantheon restart --go` — сохранившиеся останавливаются и
 #    продолжаются той же сессией с её именем и окном (новые плагины, роли и Claude Code берутся при старте процесса);
 #    сессию выбирает id, записанный `pantheon saved` (metis-0421), а не самый свежий startedAt; нет id — прежний выбор;
-#    повтор --go не трогает уже перезапущенные. Зевс — интерактивная сессия владельца: его перезапуск —
-#    `pantheon start zeus --restart` во вкладке iTerm. Метка истекла — дежурный снимает её с тревогой.
+#    повтор --go не трогает уже перезапущенные; продолжение остановленной сессии (resume_or_start) тоже берёт ту, что
+#    записала `pantheon saved`, если её id в метке (metis-0499). Зевс — интерактивная сессия владельца: его перезапуск —
+#    `pantheon start zeus --restart` во вкладке iTerm; в песочнице окна штаба `pantheon saved` метку не пишет (STATE
+#    закрыт), но для zeus* это не отказ — метка ему справочная (metis-0577). 4) Завершённый перезапуск закрывают
+#    `pantheon restart --done` или `--status` (все перезапущены, Зевс поднят заново: id его сессии не тот, что в saved) —
+#    тревога «технический перезапуск завершён»; иначе метка висит до срока и снимается тревогой «не завершён» (metis-0338).
+#    Метка истекла — дежурный снимает её с тревогой.
 
 def maint_path():
     return P.path("maintenance.json")
 
 
+def hq_saved_clear():
+    """Метки окна штаба в STATE/hq-rw/saved снимаем вместе с остальными метками saved (metis-0577)."""
+    with contextlib.suppress(OSError):
+        for f in os.listdir(P.path(P.HQ_RW, "saved")):
+            with contextlib.suppress(OSError):
+                os.remove(P.path(P.HQ_RW, "saved", f))
+
+
 def maint_clear():
+    hq_saved_clear()
     with contextlib.suppress(FileNotFoundError):
         os.remove(maint_path())
     with contextlib.suppress(FileNotFoundError):
@@ -2637,7 +3621,9 @@ def maint_expire(t):
 # `pantheon plugins update` ставит plugins/respawn.json {"since", "plugins", "done"}; тик перезапускает окна Пантеона,
 # поднятые раньше since, — только свободные. «Простаивает» ≠ «свободно»: координатор idle, пока ждёт фоновых лидов, а
 # claude agents субагентов не показывает. Свободно = idle_holder и одно из: метка «можно» (pantheon saved) новее since
-# или RESPAWN_IDLE_MIN минут без записи транскрипта, журналов субагентов и worktree окна. Занятое ждёт следующего прохода.
+# или RESPAWN_IDLE_MIN минут без записи транскрипта, журналов субагентов и worktree окна; живой субагент по meta.json
+# (watch.live_subagents, metis-0864) держит окно и при метке «можно». Занятое ждёт следующего прохода, выпуски за это
+# время копятся в одной отметке respawn.json — окно перезапускается один раз.
 
 WT_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", ".turbo", ".cache", "dist", "build"}
 
@@ -2701,8 +3687,12 @@ def respawn_busy(a, doms, since, t):
     """Почему окно a сейчас нельзя перезапустить, или None — свободно."""
     if not idle_holder(a):
         return "занято"
+    subs = live_subagents(a, t)  # metis-0864: тихий субагент (ждёт тесты) не пишет журнал — простой его не видит
+    if subs:
+        return "живые субагенты: " + ", ".join(subs[:5])
     ok = P.read_json(respawn_path("respawn-ok", str(a.get("name")) + ".json"), {})
-    if isinstance(ok, dict) and float(ok.get("t") or 0) > since:
+    # metis-0499: метка с id сессии — «можно» только ей; другая живая копия с тем же именем ждёт простоя
+    if isinstance(ok, dict) and float(ok.get("t") or 0) > since and ok.get("sessionId") in (None, a.get("sessionId")):
         return None
     lim = t - RESPAWN_IDLE_MIN * 60
     tp = P.transcript_path(a)
@@ -2793,12 +3783,14 @@ def plugins_respawn(agents, doms, t):
                 for f in os.listdir(respawn_path("respawn-ok")):
                     with contextlib.suppress(OSError):
                         os.remove(respawn_path("respawn-ok", f))
+            hq_saved_clear()
 
 
-def saved_agent(name, mine, sid):
+def saved_agent(name, mine, sid, warn=True):
     """metis-0421: сессия для restart --go — та, что записала `pantheon saved` (по id), а не самая свежая по startedAt: ожившая
     остановленная копия с тем же именем иначе перехватила бы перезапуск. Записи или id нет в списке — прежний выбор
-    (самая свежая) и предупреждение в stderr."""
+    (самая свежая) и предупреждение в stderr (warn; продолжение остановленной сессии, metis-0499, молчит: метки saved
+    у неё обычно нет)."""
     if sid:
         for a in mine:
             if a.get("sessionId") == sid:
@@ -2806,8 +3798,22 @@ def saved_agent(name, mine, sid):
         why = f"сохранённой сессии {sid[:8]} нет среди сессий с этим именем"
     else:
         why = "в записи saved нет id сессии"
-    print(f"pantheon restart: {name}: {why} — беру самую свежую по startedAt", file=P.sys.stderr)
+    if warn:
+        print(f"pantheon restart: {name}: {why} — беру самую свежую по startedAt", file=P.sys.stderr)
     return max(mine, key=lambda a: a.get("startedAt") or 0)
+
+
+def saved_sid(name):
+    """metis-0499: id сессии из последней метки `pantheon saved` этого имени — техперезапуск (STATE/maintenance/<имя>.json)
+    или перезапуск после плагинов (STATE/plugins/respawn-ok/<имя>.json); None — метки или id в ней нет."""
+    if not P.SESSION_NAME.fullmatch(str(name)):
+        return None
+    for rec in (P.read_json(P.path("maintenance", name + ".json"), {}),
+                P.read_json(respawn_path("respawn-ok", name + ".json"), {}), hq_saved(name)):
+        sid = rec.get("sessionId") if isinstance(rec, dict) else None
+        if isinstance(sid, str) and re.fullmatch(r"[0-9a-f-]{8,64}", sid):
+            return sid
+    return None
 
 
 def restart(rest, who):
@@ -2842,6 +3848,11 @@ def restart(rest, who):
                 saved[f[:-5]] = P.read_json(P.path("maintenance", f), {})
             elif f.endswith(".done"):
                 done_marks.add(f[:-5])
+    for n in m.get("sessions") or []:  # окно штаба пишет метку в STATE/hq-rw/saved (metis-0577)
+        if n not in saved and hq_saved(n).get("time"):
+            saved[n] = hq_saved(n)
+    if rest[:1] == ["--done"]:  # metis-0338: перезапуск закончен — метку снять (рядом с --cancel: тот отменяет)
+        return restart_close(m, done_marks, who, "по команде --done")
     if rest[:1] == ["--status"] or not rest:
         print(f"перезапуск с {m['id'][:16]} ({m.get('reason')}), метка до {P.stamp(float(m.get('expires') or 0))[11:16]}:")
         for n in m.get("sessions") or []:
@@ -2849,6 +3860,14 @@ def restart(rest, who):
             print(f"  {n}: " + ("перезапущена" if n in done_marks else
                                 f"сохранилась {s.get('time', '')[11:16]}, состояние — {s.get('state') or '—'}" if s
                                 else "ещё нет"))
+        waiting = [n for n in m.get("sessions") or [] if not n.startswith("zeus") and n not in done_marks]
+        owner = [n for n in m.get("sessions") or [] if n.startswith("zeus")]
+        if not waiting and (not owner or zeus_renewed(owner, saved)):
+            # metis-0338: все перезапущены, а Зевс (если был) поднят заново — метка больше не нужна
+            return restart_close(m, done_marks, who, "всё перезапущено" + (", Зевс поднят заново" if owner else ""))
+        if not waiting:
+            print("осталось: Зевс — pantheon start zeus --restart во вкладке iTerm; потом pantheon restart --status "
+                  "(или --done) снимет метку")
         return 0 if all(n in saved or n in done_marks or n.startswith("zeus") for n in m.get("sessions") or []) else 1
     if rest[:1] == ["--go"]:
         force = "--force" in rest
@@ -2886,7 +3905,7 @@ def restart(rest, who):
                 skip.append(f"{n} (код {rc})")
         if not skip:
             maint_clear()
-        P.alert(f"технический перезапуск ({who}): перезапущены {', '.join(done) or 'никто'}"
+        P.alert(f"технический перезапуск {'завершён' if not skip else ''} ({who}): перезапущены {', '.join(done) or 'никто'}"
                 + (f"; не тронуты: {', '.join(skip)}" if skip else "")
                 + ("; Зевс — вы сами: pantheon start zeus --restart во вкладке iTerm" if owner else ""), "pantheon-restart")
         print(f"перезапущены: {', '.join(done) or 'никто'}" + (f"\nне тронуты: {', '.join(skip)} (--force — без отметки; "
@@ -2899,8 +3918,94 @@ def restart(rest, who):
         P.alert(f"технический перезапуск отменён ({who})", "pantheon-restart")
         print("метка снята")
         return 0
-    print("pantheon restart --prepare [причина] | --status | --go [--force] | --cancel", file=P.sys.stderr)
+    print("pantheon restart --prepare [причина] | --status | --go [--force] | --done | --cancel", file=P.sys.stderr)
     return 2
+
+
+def zeus_renewed(names, saved):
+    """metis-0338: Зевс (zeus*) поднят заново после `pantheon saved`. Признак — у каждого есть живая сессия с этим именем
+    (claude agents или реестр имён вкладок), и среди живых нет той, что записала saved (sessionId метки): после
+    `pantheon start zeus --restart` id другой. Метки с id нет — не знаем, False (тогда метку снимет --done)."""
+    agents, reg = P.agents_all() or [], P.sessions_registry()
+    for n in names:
+        sid = (saved.get(n) or {}).get("sessionId")
+        live = holders(n, agents, reg)
+        if not sid or not live or any(a.get("sessionId") == sid for a in live):
+            return False
+    return True
+
+
+def restart_close(m, done_marks, who, how):
+    """metis-0338: закрыть завершённый технический перезапуск — метка и отметки сняты, в тревогах «завершён» (а не
+    «метка снята по сроку без restart --go» через два часа)."""
+    left = [n for n in m.get("sessions") or [] if not n.startswith("zeus") and n not in done_marks]
+    maint_clear()
+    P.alert(f"технический перезапуск завершён ({who}, {how}): перезапущены "
+            f"{', '.join(n for n in m.get('sessions') or [] if n in done_marks) or 'никто'}"
+            + (f"; без перезапуска остались: {', '.join(left)} — поднять вручную: pantheon wake <имя>" if left else ""),
+            "pantheon-restart")
+    print("перезапуск завершён, метка снята" + (f"; без перезапуска: {', '.join(left)}" if left else ""))
+    return 0
+
+
+SAVED_NAME = re.compile(r"zeus[a-z0-9-]{0,36}")
+
+
+def hq_saved(name):
+    """metis-0577: метка `pantheon saved` окна штаба из STATE/hq-rw/saved (пишет само окно — только Зевс); {} — нет.
+    Папку пишет окно, а читает проход вне песочницы: ссылка, FIFO, чужой или большой файл — не читаем (O_NOFOLLOW|O_NONBLOCK,
+    обычный файл, одна ссылка, наш владелец, читаем не больше 64 КБ — длиннее не разбирается как JSON); поля проверяем по типу, а не доверяем."""
+    if not SAVED_NAME.fullmatch(str(name)):
+        return {}
+    try:
+        fd = os.open(P.path(P.HQ_RW, "saved", name + ".json"), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+            return {}
+        raw = os.read(fd, 65537)
+        rec = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, RecursionError):  # RecursionError: глубоко вложенный JSON в пределах 64 КБ
+        return {}
+    finally:
+        os.close(fd)
+    if not isinstance(rec, dict):
+        return {}
+    out = {}
+    for k in ("time", "state", "by"):
+        if isinstance(rec.get(k), str):
+            out[k] = rec[k][:300]
+    if isinstance(rec.get("sessionId"), str) and re.fullmatch(r"[0-9a-f-]{8,64}", rec["sessionId"]):
+        out["sessionId"] = rec["sessionId"]
+    return out
+
+
+def _write_mark(name, p, rec):
+    """Запись pantheon saved. Не записалась (PermissionError: песочница окна не пускает в STATE/maintenance и
+    STATE/plugins, metis-0577) — строка в stderr и False, без трассировки. Зевс (zeus*) — интерактивная сессия владельца:
+    его не перезапускает ни restart --go, ни тик, hook его не закрывает, так что метка для него справочная и её
+    отсутствие работе не мешает; остальным нужна: без метки restart --go их не тронет."""
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        P.write_json(p, rec)
+        return True
+    except OSError as e:
+        owner = name.startswith("zeus")
+        kept = None
+        if owner and SAVED_NAME.fullmatch(name):  # metis-0577: окно штаба пишет только в STATE/hq-rw — метка там
+            try:
+                P.hq_put("saved", name + ".json", json.dumps(rec, ensure_ascii=False) + "\n")
+                kept = P.tilde(P.path(P.HQ_RW, "saved", name + ".json"))
+            except OSError:
+                pass
+        print(f"pantheon saved: метка {P.tilde(p)} не записана — {type(e).__name__}: {e.strerror or e}"
+              + (f"\n{name}: его перезапуск ведёт владелец (pantheon start zeus --restart), метка ему не нужна — "
+                 "команда считается выполненной" + (f"; копия записана в {kept}" if kept else "") if owner else
+                 "\nокно не может писать в состояние Пантеона: метку поставит тот, кто вне песочницы"),
+              file=P.sys.stderr)
+        return False
 
 
 def saved_cmd(rest, who):
@@ -2924,8 +4029,12 @@ def saved_cmd(rest, who):
         print(f"pantheon saved: сессия {own} отмечает только себя, не {name}", file=P.sys.stderr)
         return 2
     if not m:
-        P.write_json(respawn_path("respawn-ok", name + ".json"), {"t": P.now(), "time": P.stamp(),
-                                                                  "state": " ".join(state.split())[:300], "by": who})
+        rec = {"t": P.now(), "time": P.stamp(), "state": " ".join(state.split())[:300], "by": who}
+        sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+        if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0499: перезапуск после плагинов продолжит эту сессию
+            rec["sessionId"] = sid
+        if not _write_mark(name, respawn_path("respawn-ok", name + ".json"), rec):
+            return 0 if name.startswith("zeus") else 1
         print(f"{name}: отмечено «можно перезапускать». Плановый проход перезапустит окно с новыми плагинами, когда оно закончит ход; "
               "работающее окно не тронет")
         return 0
@@ -2933,12 +4042,12 @@ def saved_cmd(rest, who):
         print(f"pantheon saved: {name or '(без имени)'} нет в списке перезапуска: {', '.join(m.get('sessions') or [])}",
               file=P.sys.stderr)
         return 2
-    os.makedirs(P.path("maintenance"), exist_ok=True)
     rec = {"time": P.stamp(), "state": " ".join(state.split())[:300], "by": who}
     sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
     if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0421: restart --go продолжит именно эту сессию
         rec["sessionId"] = sid
-    P.write_json(P.path("maintenance", name + ".json"), rec)
+    if not _write_mark(name, P.path("maintenance", name + ".json"), rec):
+        return 0 if name.startswith("zeus") else 1
     print(f"{name}: отмечено «сохранилась». Отчитайся Зевсу строкой (SendMessage zeus) и жди перезапуска: дальше "
           "инструменты закрыты до pantheon restart --go")
     return 0
@@ -3266,10 +4375,13 @@ def infra_check():
     except (OSError, ValueError):
         add(False, "hooks.json pantheon читается")
     add(P.agents_all() is not None, "claude agents --json отвечает")
-    plug = os.path.join(P.HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard",
-                        "managed-settings.json")
+    # с проверенным деревом guard (merge.managed_source), как у прохода, а не с клоном маркетплейса (metis-0718); дерева
+    # или поставленного файла нет — строки нет, как раньше
     with contextlib.suppress(OSError):
-        add(open(P.MANAGED, "rb").read() == open(plug, "rb").read(), "управляемые настройки совпадают с guard")
+        cur = open(P.MANAGED, "rb").read()
+        src = P.merge_mod().managed_source()
+        if src is not None:
+            add(cur == src[1], "управляемые настройки совпадают с guard")
     pol = os.path.join(P.HOME, ".claude", "pantheon", "policy.toml")
     # что закрыто штабу — [hq] policy.toml, в коде значений нет (metis-0182): без раздела штабу не закрыто ничего
     try:

@@ -7,29 +7,32 @@ COST-04, TOOL-04 на временных папках. Claude Code подмен�
 список из файла, остальные вызовы пишутся в журнал (запуски не настоящие).
 """
 import hashlib
+import re
 import json
 import shutil
 import os
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # noqa: E402
+from _py311 import PY311, mkroot  # noqa: E402
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
 import atexit as _atexit
 import os as _os
 import shutil as _shutil
-_ROOT = tempfile.mkdtemp(prefix="watch-root-")
+_ROOT = mkroot("watch-root-")
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
 RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
+NIGHT_OFF = '[night]\nask_at = "00:00"\n[limits.night]\nstart = "00:00"\nend = "00:00"\n'
 FAILS = []
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
@@ -65,6 +68,9 @@ elif a[:1] == ["rm"] and a[1:2] and a[1] in os.environ.get("FAKE_RM_REFUSE", "")
 elif a[:1] == ["--bg"] and os.environ.get("FAKE_BG_SLEEP"):
     import time
     time.sleep(float(os.environ["FAKE_BG_SLEEP"]))
+elif "--resume" in a and os.environ.get("FAKE_RESUME_RC"):
+    print("resume: failed", file=sys.stderr)
+    sys.exit(int(os.environ["FAKE_RESUME_RC"]))
 elif "--resume" in a:
     print(os.environ.get("FAKE_RESUME_OUT", "backgrounded"))
 else:
@@ -100,9 +106,7 @@ class Env:
         self.agents([])
         # ночной цикл (lib/night.py) здесь выключен: вопрос в 00:00 и конец ночи в 00:00 — ночи нет, днём только темп
         # недели; ночь и вопрос проверяет test_night.py
-        open(os.path.join(self.pantheon, "schedule.toml"), "w").write(
-            'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "00:00"\n'
-            '[limits.night]\nstart = "00:00"\nend = "00:00"\n')
+        self.schedule('primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n')
         self.doms = {}
         self.week_pct, self.snap_age = 10.0, 0  # снимок недельного лимита в run(): зелёная зона, свежий
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
@@ -114,6 +118,11 @@ class Env:
         # показывает): ~37 таких проходов — 430 с файла из 435, а в фоне тика (ProcessType Background) — за 600 с.
         # Тест, которому нужно настоящее ожидание, передаёт своё значение в extra.
         self.extra.update(QUICK)
+
+    def schedule(self, text):
+        """schedule.toml теста: text плюс выключенная ночь (вопрос и конец ночи в 00:00). Без этого ночь 23:00–08:00 по
+        умолчанию зависит от часового пояса машины, на которой идут тесты (metis-0459)."""
+        open(os.path.join(self.pantheon, "schedule.toml"), "w").write(text + NIGHT_OFF)
 
     def notify_mode(self, idle, quiet=None):
         """Простой (с) и тихие часы для политики уведомлений: quiet=None — без тихих часов (как днём),
@@ -1417,6 +1426,8 @@ def test_word_launch_0523():
     e = Env()
     e.direction("wl-dir")
     e.direction("wl-two")
+    os.makedirs(os.path.join(e.pantheon, "directions", "metis-pantheon", "tasks"), exist_ok=True)
+    e.task("metis-0523", "metis-pantheon")  # id вопроса — задача: в тексте запуска ссылка на её карточку (metis-0820)
     _zeus_answer(e, T0 - 600, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")  # до включения прохода
     e.run("watch", t=T0)
     check(not _bgs(e), f"0523: запись до включения прохода подняла окно: {e.calls()}")
@@ -1456,7 +1467,7 @@ def test_word_launch_0523():
         fh.write("[]")
     e.run("watch", t=T0 + 400 + 13 * 3600)
     check(not _bgs(e, "wl-two"), f"0523: запись старше 12 ч исполнена: {e.calls()}")
-    check("«окна по вашему ответу» упала" not in e.alerts(), f"0523: испорченный word-launch.json уронил проверку")
+    check("«окна по вашему ответу» упала" not in e.alerts(), "0523: испорченный word-launch.json уронил проверку")
     # шаблон печатает pantheon launch-question; чужой глагол, лишнее и неизвестное имя — код 2
     r = e.run("launch-question", "metis-0533", "запустить", "wl-two", t=T0)
     check(r.returncode == 0 and "вопрос: [metis-0533] Запустить wl-two?" in r.stdout
@@ -1468,6 +1479,26 @@ def test_word_launch_0523():
                                                                    ("metis-0533", "запустить", "nosuch-dir"),
                                                                    ("metis-0533", "запустить", "wl-two", "сейчас"))]
     check(bad == [2, 2, 2], f"0523: launch-question без отказа: {bad}")
+
+
+def test_word_launch_question_id_not_task_0820():
+    """metis-0820: id вопроса без карточки задачи (05.11: [hermes-review-1], [zeus-wake-0511]). Текст запуска не ссылается
+    на «pantheon task show <id>» и прямо говорит, что задачи с этим id нет: иначе он входил в цель окна (/goal) и проверка
+    цели держала окно по кругу. Так и у «запустить», и у «перезапустить» (pantheon start --restart)."""
+    e = Env()
+    e.direction("nq-dir")
+    e.direction("nq-two")
+    e.run("watch", t=T0)
+    _zeus_answer(e, T0 + 10, "[nq-review-1] Запустить nq-dir?", "Да — запустить nq-dir")
+    e.agents([bg("nq-two", "working", "nqnqnqnq-1", pid=None)])
+    _zeus_answer(e, T0 + 11, "[nq-wake-0511] Перезапустить nq-two?", "Да — перезапустить nq-two")
+    e.run("watch", t=T0 + 60, extra={"FAKE_STOP_MARK": "1"})
+    texts = {who: [c[-1] for c in _bgs(e, who)] for who in ("nq-dir", "nq-two")}
+    check(len(texts["nq-dir"]) == 1 and len(texts["nq-two"]) == 1, f"0820: окна не подняты: {e.calls()}")
+    for who, qid in (("nq-dir", "nq-review-1"), ("nq-two", "nq-wake-0511")):
+        text = texts[who][0] if texts[who] else ""
+        check("task show" not in text and f"[{qid}] — номер вопроса, а не задачи" in text
+              and f"в цель окна задача {qid} не входит" in text, f"0820: {who}: текст запуска {text!r}")
 
 
 def test_word_launch_return_restart_0523():
@@ -1957,11 +1988,44 @@ def test_oneshot_pack_and_hand_same_minute_0284():
           f"ручная запись не ушла или ушла пачка: {e.calls()}")
 
 
+_NIGHT_PROBE = r"""
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+sys.modules["pantheon_lib"] = P
+spec.loader.exec_module(P)
+N = P.night_mod()
+cfg = N.config()
+t = float(sys.argv[2])
+print(N.night_of(t, cfg), N.evening(t, cfg), N.evening(t + 7 * 3600, cfg))
+"""
+
+
+def test_schedule_night_off_0459():
+    """Тестовый schedule.toml выключает ночь: ни в каком часовом поясе T0 не ночь и не вечер (Env.schedule)."""
+    for off in (True, False):
+        e = Env()
+        if not off:  # контроль пробы: с ночью по умолчанию в поясе UTC+6 (T0 = 23:46) ночь видна
+            open(os.path.join(e.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n')
+        else:
+            e.schedule('primary_host = "mac-a"\n')
+        for tz in ("UTC", "Etc/GMT-6", "Etc/GMT+8", "Europe/Moscow"):
+            env = dict(os.environ, HOME=e.home, PANTHEON_HOME=e.pantheon, PANTHEON_STATE=e.state, TZ=tz,
+                       PANTHEON_HOST="mac-a")
+            r = subprocess.run([sys.executable, "-I", "-c", _NIGHT_PROBE, LIB, str(T0)],
+                               capture_output=True, text=True, env=env)
+            got = r.stdout.strip()
+            if off:
+                check(got == "None None None", f"в поясе {tz} T0 попал в ночь/вечер: {got!r} {r.stderr[-200:]}")
+            elif tz == "Etc/GMT-6":
+                check(got != "None None None", f"контроль: ночь по умолчанию в UTC+6 не видна: {got!r} {r.stderr[-200:]}")
+
+
 def test_isolation_and_watch_last():
     """Сбой одной проверки — тревога о ней, остальные идут; watch-last пишет время и упавшие."""
     e = Env()
     e.direction("iso-dir")
-    open(os.path.join(e.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n[defaults]\nswap_alert_gb = "x"\nlimit_max_pct = 70\n')
+    e.schedule('primary_host = "mac-a"\n[defaults]\nswap_alert_gb = "x"\nlimit_max_pct = 70\n')
     os.makedirs(e.st("swap.jsonl"))                             # запись замеров swap упадёт
     r = e.run("watch", t=T0)
     wl = json.load(open(e.st("watch-last")))
@@ -1984,6 +2048,186 @@ def test_status_long_and_swap_keep():
     rows = [json.loads(ln) for ln in open(e.st("swap.jsonl"))]
     check(len(rows) == 2 and rows[-1].get("working") == 1, f"замеры swap 15 дней: {rows}")
     check("работают сессий: 1" in e.alerts() and "claude attach" in e.alerts(), "тревога swap")
+
+
+def _now_env(name, head, turn_ago=600, mtime_ago=0, state="working", pid=None, e=None):
+    """metis-0707: STATUS.md с разделом «Сейчас» (head — заголовок целиком, None — раздела нет); окно name с транскриптом,
+    записанным turn_ago секунд назад (None — транскрипта нет), mtime файла — mtime_ago секунд назад."""
+    e = e or Env()
+    e.direction(name)
+    p = os.path.join(e.pantheon, "directions", name, "STATUS.md")
+    open(p, "w").write("# STATUS\n\n" + (head + "\n\n- шаг\n" if head else "- шаг\n"))
+    os.utime(p, (T0 - mtime_ago, T0 - mtime_ago))
+    a = bg(name, state, "%08x-1111" % (abs(hash(name)) % 16**8), pid=pid)
+    e.now_agents = getattr(e, "now_agents", []) + [a]
+    e.agents(e.now_agents)
+    if turn_ago is not None:
+        transcript(e, a, 20_000, T0 - turn_ago)
+    return e
+
+
+def _stamp(ago, minutes=None):
+    s = time.strftime("%d.%m %H:%M", time.localtime(T0 - ago))
+    return s[:-1] + minutes if minutes else s
+
+
+def test_stale_now_0707():
+    """metis-0707: «Сейчас» в STATUS.md окна, у которого были ходы за последние 6 ч, старше 6 ч — тревога; свежий,
+    без хода, без раздела — нет; без даты в заголовке — по mtime файла; «Мx» читается; напоминание роли."""
+    H = 3600
+    def alerted(e):
+        return "раздел «Сейчас» не обновлялся" in e.alerts()
+    e = _now_env("sn-fresh", f"## Сейчас ({_stamp(5 * H + 3000)})")
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: «Сейчас» 5 ч 50 мин — тревога на свежий")
+    e = _now_env("sn-old", f"## Сейчас ({_stamp(6 * H + 600)})")
+    e.run("watch", t=T0)
+    check(alerted(e) and "sn-old" in e.alerts(), f"0707: «Сейчас» 6 ч 10 мин — нет тревоги: {e.alerts()}")
+    e.run("watch", t=T0 + 300)
+    check(e.alerts().count("раздел «Сейчас» не обновлялся") == 1, "0707: тревога повторилась в следующем проходе")
+    e = _now_env("sn-notr", f"## Сейчас ({_stamp(8 * H + 600)})", turn_ago=None)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: нет транскрипта (ходов нет) — тревога")
+    e = _now_env("sn-idle", f"## Сейчас ({_stamp(9 * H)})", turn_ago=7 * H)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: старый «Сейчас», а ходов за 6 ч нет — тревога")
+    e = _now_env("sn-nodate", "## Сейчас", mtime_ago=7 * H)
+    e.run("watch", t=T0)
+    check(alerted(e), "0707: заголовок без даты, mtime 7 ч — нет тревоги")
+    e = _now_env("sn-nodate", "## Сейчас", mtime_ago=2 * H)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: заголовок без даты, mtime 2 ч — тревога")
+    e = _now_env("sn-none", None, mtime_ago=9 * H)
+    e.run("watch", t=T0)
+    check(not alerted(e), "0707: раздела «Сейчас» нет — тревога")
+    e = _now_env("sn-x", f"## Сейчас ({_stamp(7 * H, 'x')})")
+    e.run("watch", t=T0)
+    check(alerted(e), "0707: заголовок «ЧЧ:Мx» старше 6 ч — нет тревоги")
+    # напоминание роли: простаивающая живая сессия получает строку один раз; работающая — только тревога
+    e = _now_env("sn-push", f"## Сейчас ({_stamp(7 * H)})", state="done", pid=4242)
+    e.run("watch", t=T0)
+    first = [c for c in e.calls() if c[:1] == ["respawn"]]
+    e.run("watch", t=T0 + 300)
+    again = [c for c in e.calls() if c[:1] == ["respawn"]]
+    check(alerted(e) and len(first) == 1 and len(again) == 1, f"0707: напоминание простаивающей: {first} {again}")
+    e = _now_env("sn-busy", f"## Сейчас ({_stamp(7 * H)})", state="working", pid=4243)
+    e.run("watch", t=T0)
+    check(alerted(e) and not [c for c in e.calls() if c[:1] == ["respawn"]], "0707: работающей — только тревога")
+
+
+def _fact_env(name, body, mtime_ago=7200):
+    """metis-1005: окно name со STATUS.md, текст которого задаёт тест (body целиком), mtime — mtime_ago секунд назад."""
+    e = _now_env(name, "## Сейчас", mtime_ago=mtime_ago, state="done", pid=4300 + len(name))
+    p = os.path.join(e.pantheon, "directions", name, "STATUS.md")
+    open(p, "w", encoding="utf-8").write(body)
+    os.utime(p, (T0 - mtime_ago, T0 - mtime_ago))
+    return e, p
+
+
+def test_now_from_fact_1005():
+    """metis-1005: шапка «Сейчас» STATUS.md — по времени последней строки журнала; остальной текст цел; недавно правленный
+    файл и файл без журнала не трогаем; ручной раздел с датой старше журнала больше 6 ч — тревога владельцу файла."""
+    H = 3600
+    j = _stamp(3600)  # журнал: час назад
+    body = (f"# STATUS\n\n## Сейчас ({_stamp(30 * H)})\n- руками написанный шаг\n\n## Ход\n{_stamp(5 * H)} старая запись\n"
+            f"{j} свежая запись\n13:5x запись без даты\n")
+    e, p = _fact_env("nf-head", body)
+    e.run("watch", t=T0)
+    out = open(p, encoding="utf-8").read()
+    want = f"## Сейчас ({j[:-1]}x)"
+    check(want in out and out.replace(want, f"## Сейчас ({_stamp(30 * H)})") == body,
+          f"1005: шапка не по журналу или тронут остальной текст: {out!r}")
+    check(os.stat(p).st_mtime == T0 - 7200 + 1,
+          "1005: mtime после замены шапки не «прежний + 1 с»: сдвиг — возраст файла и дата журнала без даты поедут, "
+          "без сдвига — rsync копии Obsidian (размер и mtime) не увидит шапку той же длины")
+    ino = os.stat(p).st_ino
+    e.run("watch", t=T0 + 300)
+    check(os.stat(p).st_ino == ino, "1005: шапка уже верна — файл переписан второй раз")
+    e, p = _fact_env("nf-fresh", body, mtime_ago=5)
+    e.run("watch", t=T0)
+    check(open(p, encoding="utf-8").read() == body, "1005: файл правили 5 с назад — шапку переписали (гонка с ролью)")
+    nojournal = "# STATUS\n\n## Сейчас (01.01 00:0x)\n- шаг\n"
+    e, p = _fact_env("nf-nojr", nojournal)
+    e.run("watch", t=T0)
+    check(open(p, encoding="utf-8").read() == nojournal, "1005: журнала нет — шапку переписали")
+    # ручной раздел с датой
+    def alerted(e):
+        return "ручной раздел с датой старше журнала" in e.alerts()
+    sec = lambda ago: (f"# STATUS\n\n## Сейчас\n- шаг\n\n## Ждёт владельца ({_stamp(ago)})\n- вопрос\n\n"
+                       f"## Ход\n{_stamp(0)} запись\n")
+    e, p = _fact_env("nf-late", sec(7 * H))
+    e.run("watch", t=T0)
+    check(alerted(e) and "nf-late" in e.alerts() and "Ждёт владельца" in e.alerts() and "координатор nf-late" in e.alerts(),
+          f"1005: раздел старше журнала на 7 ч — нет тревоги владельцу: {e.alerts()}")
+    e.run("watch", t=T0 + 300)
+    check(e.alerts().count("ручной раздел с датой старше журнала") == 1, "1005: тревога повторилась в следующем проходе")
+    e, p = _fact_env("nf-ok", sec(5 * H))
+    e.run("watch", t=T0)
+    check(not alerted(e), f"1005: раздел старше журнала на 5 ч — тревога: {e.alerts()}")
+    e, p = _fact_env("nf-arch", "# STATUS\n\n## Ранее (01.01 10:00) — в archive/STATUS-x.md\n\n## Ход\n" + _stamp(0) + " запись\n")
+    e.run("watch", t=T0)
+    check(not alerted(e), "1005: указатель на archive/ принят за ручной раздел")
+    e, p = _fact_env("nf-upd", f"# STATUS\n\n## Открытые задачи\nОбновлено {_stamp(9 * H)}\n\n## Ход\n{_stamp(0)} запись\n")
+    e.run("watch", t=T0)
+    check(alerted(e), "1005: строка «Обновлено …» старше журнала на 9 ч — нет тревоги")
+    e, p = _fact_env("nf-nojr2", f"# STATUS\n\n## Ждёт владельца ({_stamp(40 * H)})\n- вопрос\n")
+    e.run("watch", t=T0)
+    check(not alerted(e), "1005: журнала нет — сравнивать не с чем, тревоги быть не должно")
+
+
+
+def test_retime_race_1005():
+    """metis-1005 (Д1 argus #399): роль дописала STATUS.md между чтением и заменой — файл не тронут, ручная строка цела."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w, nf = importlib.import_module("watch"), importlib.import_module("nowfact")
+    saved = w.P
+    w.P = type("Core", (), {"boardtext_mod": staticmethod(lambda: type("B", (), {"nowfact": staticmethod(lambda: nf)}))})
+    try:
+        d = tempfile.mkdtemp(prefix="race-", dir=os.environ.get("TMPDIR"))
+        p = os.path.join(d, "STATUS.md")
+        body = "## Сейчас (01.11 10:0x)\n\n## Ход\n08.11 10:00 а\n"
+        open(p, "w", encoding="utf-8").write(body)
+        os.utime(p, (T0 - 3600, T0 - 3600))
+        st = os.stat(p)
+        real_chmod = os.chmod
+
+        def chmod_and_append(path, mode):  # роль дописывает файл, пока пишется временный (Д5 argus #399)
+            real_chmod(path, mode)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write("РУЧНАЯ\n")
+        os.chmod = chmod_and_append
+        try:
+            out, _ = w.retime_status("race", p, body, st, T0)
+        finally:
+            os.chmod = real_chmod
+        check(out == body and "РУЧНАЯ" in open(p, encoding="utf-8").read(),
+              "1005: файл менялся, пока писали временный, — шапку заменили и ручная строка потеряна")
+        check(not [f for f in os.listdir(d) if f.endswith(".tmp")], "1005: временный файл остался")
+    finally:
+        w.P = saved
+
+def test_stale_now_push_fail_0707():
+    """metis-0707 (argus-277, Б и Д): напоминание не доставлено (respawn, код 1) — отметка пишется всё равно: за 3 прохода
+    один respawn и одна тревога; сбой проверки одного направления не обрывает следующие."""
+    H = 3600
+    e = _now_env("sn-fail", f"## Сейчас ({_stamp(7 * H)})", state="done", pid=4244)
+    for i in range(3):
+        e.run("watch", t=T0 + 300 * i, extra={"FAKE_RESPAWN_RC": "1", "FAKE_RESUME_RC": "1"})
+    n = len([c for c in e.calls() if c[:1] == ["respawn"]])
+    a = e.alerts().count("напоминание про «Сейчас» не доставлено (код 1)")
+    check(n == 1 and a == 1, f"0707: отказ напоминания, 3 прохода: respawn {n}, тревог {a}")
+    # Д: исключение в stale_now первого направления (непрочитанная отметка) не мешает второму
+    e = _now_env("sn-boom", f"## Сейчас ({_stamp(7 * H)})", state="done", pid=4245)
+    _now_env("sn-next", f"## Сейчас ({_stamp(7 * H)})", state="working", pid=4246, e=e)
+    safe = re.sub(r"[^\w.-]", "_", "watch-now-push-sn-boom")[:60]
+    mark = os.path.join(e.st("once"), f"{safe}-{hashlib.sha1(b'watch-now-push-sn-boom').hexdigest()[:8]}")
+    os.makedirs(e.st("once"), exist_ok=True)
+    open(mark, "wb").write(b"\xff\xfe\xfa")
+    r = e.run("watch", t=T0)
+    al = e.alerts()
+    check("sn-boom: проверка «Сейчас» упала" in al and "STATUS.md sn-next: раздел «Сейчас» не обновлялся" in al,
+          f"0707: сбой одного направления обрывает следующее: rc={r.returncode} {al[-500:]}")
 
 
 def test_culprits_wired_0568():
@@ -2066,7 +2310,7 @@ def test_revisits_repeat_and_edge():
 def test_tool04_limit_after_max_delay():
     """Задача на Claude после max_delay всё равно ждёт лимита; обычная — идёт."""
     e = Env()
-    open(os.path.join(e.pantheon, "schedule.toml"), "w").write(
+    e.schedule(
         'primary_host = "mac-a"\n[[job]]\nname = "clio-weekly"\ncommand = "claude -p --agent clio \\"проход\\""\n'
         'every = 10080\nclass = "heavy"\nclaude = true\nmax_delay = 60\n'
         '[[job]]\nname = "heavy-plain"\ncommand = "pantheon view"\nevery = 10080\nclass = "heavy"\nmax_delay = 60\n'
@@ -2150,6 +2394,15 @@ def test_owner_log_shrink_and_u2028():
     check("x.md пропал" in e.alerts(), "пропажа журнала не замечена")
 
 
+def _age_tree(w, when):
+    """Состарить копию целиком (файлы и папки без перехода по ссылкам, затем её саму): уборка копий смотрит не только
+    mtime папки, но и свежие правки внутри (metis-0835, D1), а файлы теста созданы позже T0."""
+    for d, dirs, files in os.walk(w, topdown=False):
+        for n in files + dirs:
+            os.utime(os.path.join(d, n), (when, when), follow_symlinks=False)
+    os.utime(w, (when, when))
+
+
 def test_security_0100():
     """Проверка безопасности 0.10.0: git в копии роли не исполняет конфигурацию; pause --off не выходит из pauses/;
     из сессии Claude метку и ручную паузу без вашей строки не снять; saved — только имя сессии."""
@@ -2173,7 +2426,7 @@ def test_security_0100():
     g("config", "extensions.worktreeConfig", "true")
     old = T0 - 3 * 86400
     for n in ("w-ok", "w-bad"):
-        os.utime(os.path.join(folder, ".claude", "worktrees", n), (old, old))
+        _age_tree(os.path.join(folder, ".claude", "worktrees", n), old)
     e.run("watch", t=T0)
     check(not os.path.exists(pwn), "git исполнил fsmonitor из копии роли")
     check(not os.path.exists(os.path.join(folder, ".claude", "worktrees", "w-ok")), "чистая слитая копия не убрана")
@@ -2183,7 +2436,7 @@ def test_security_0100():
     g("worktree", "add", "-q", "-b", "w3", w3)
     g("config", "filter.x\u2028y.clean", f"touch {pwn}")
     open(os.path.join(w3, ".gitattributes"), "w").write("* filter=x\u2028y\n")
-    os.utime(w3, (old, old))
+    _age_tree(w3, old)
     e.run("watch", t=T0 + 86400)
     check(not os.path.exists(pwn) and os.path.exists(w3), "фильтр с U+2028 в имени исполнился или копия убрана")
     # pause --off не выходит из pauses/
@@ -2235,7 +2488,7 @@ def test_worktree_outward_links_0101():
         check(g("status", "--porcelain", cwd=w).stdout.strip() == "", "копия не чистая для git")
     old = T0 - 3 * 86400
     for w in (out_wt, in_wt):
-        os.utime(w, (old, old))
+        _age_tree(w, old)
     e.run("watch", t=T0)
     check(os.path.exists(out_wt) and os.path.exists(os.path.join(target, "keep.txt")),
           "копия со ссылкой наружу убрана или цель тронута")
@@ -2271,6 +2524,56 @@ def _mk_wt_files(d, n):
         open(os.path.join(d, f"f{i}"), "w").close()
 
 
+def test_worktree_node_modules_0616():
+    """Сквозной (metis-0616): дежурный убирает слитую чистую копию с 6000 файлами в node_modules и .next (больше
+    WALK_LIMIT); копию со ссылкой наружу внутри node_modules не убирает и тревожит; копию с 6000 файлами вне
+    зависимостей оставляет с тревогой «обход длиннее лимита»."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    target = os.path.join(e.tmp, "outside-data")
+    os.makedirs(target)
+    open(os.path.join(target, "keep.txt"), "w").write("x")
+    old = T0 - 3 * 86400
+    wts = {}
+    for n in ("w-clean", "w-link", "w-wide", "w-dirty"):
+        wts[n] = os.path.join(folder, ".claude", "worktrees", n)
+        g("worktree", "add", "-q", "-b", n, wts[n])
+    for n in ("w-clean", "w-link", "w-dirty"):
+        w = wts[n]
+        _mk_wt_files(os.path.join(w, ".venv", "lib"), 1000)
+        _mk_wt_files(os.path.join(w, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
+        _mk_wt_files(os.path.join(w, ".next", "cache"), 3000)
+        os.symlink(os.path.join(w, "node_modules", ".pnpm", "x"), os.path.join(w, "node_modules", "inner"))
+    os.symlink(target, os.path.join(wts["w-link"], "node_modules", ".pnpm", "x", "node_modules", "out"))
+    _mk_wt_files(os.path.join(wts["w-wide"], "src"), 6000)
+    for n, w in wts.items():  # git status чист: зависимости и сборка в исключениях копии
+        ex = subprocess.run(["git", "-C", w, "rev-parse", "--git-path", "info/exclude"], capture_output=True,
+                            text=True).stdout.strip()
+        ex = ex if os.path.isabs(ex) else os.path.join(w, ex)
+        os.makedirs(os.path.dirname(ex), exist_ok=True)
+        open(ex, "a").write("node_modules\n.next\n.venv\nsrc\n")
+        if n == "w-dirty":
+            open(os.path.join(w, "work.txt"), "w").write("не закоммичено")
+            check(g("status", "--porcelain", cwd=w).stdout.strip() != "", "w-dirty чистая")
+            _age_tree(w, old)
+            continue
+        check(g("status", "--porcelain", cwd=w).stdout.strip() == "", f"{n}: копия не чистая для git")
+        _age_tree(w, old)
+    e.run("watch", t=T0)
+    check(not os.path.exists(wts["w-clean"]), "слитая чистая копия с 6000 файлами в node_modules не убрана за проход")
+    check(os.path.exists(wts["w-link"]) and os.path.exists(os.path.join(target, "keep.txt")),
+          "копия со ссылкой наружу в node_modules убрана или цель тронута")
+    check(os.path.exists(os.path.join(wts["w-dirty"], "work.txt")), "копия с незакоммиченной работой и большим node_modules убрана")
+    check("w-link" in e.alerts() and "ссылки наружу" in e.alerts(), "нет тревоги о ссылке наружу в node_modules")
+    check(os.path.exists(wts["w-wide"]) and "w-wide" in e.alerts() and "обход длиннее лимита" in e.alerts(),
+          "копия с 6000 файлами вне зависимостей убрана или нет тревоги о лимите")
+
+
 def test_outward_links_skips_node_modules_0616():
     """Копия с 6000 файлами в node_modules/.next не «небезопасна» по WALK_LIMIT; ссылка наружу на любой глубине
     node_modules (в том числе .pnpm/x/node_modules/y) находится; зависимости больше DEPS_LIMIT — None («не знаю»);
@@ -2303,6 +2606,9 @@ def test_outward_links_skips_node_modules_0616():
             check(w.outward_links(clean) is None, "зависимости больше DEPS_LIMIT не дали None")
         finally:
             w.DEPS_LIMIT = saved
+        venv = os.path.join(base, "venv-wt")
+        _mk_wt_files(os.path.join(venv, ".venv", "lib"), 6000)
+        check(w.outward_links(venv) == (0, None), f".venv с 6000 файлами: {w.outward_links(venv)}")
         plain = os.path.join(base, "plain")
         _mk_wt_files(plain, 6000)
         check(w.outward_links(plain) is None, "6000 файлов вне node_modules не дали None")
@@ -2417,7 +2723,7 @@ def test_sandbox_cap_alert_0620():
     old = T0 - 20 * 86400
     for q in (old_dir, os.path.join(old_dir, "big")):
         os.utime(q, (old, old))
-    r = e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
+    e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
     check("кэши песочниц" in e.alerts() and "потолке 1 МБ" in e.alerts(), f"нет тревоги о потолке: {e.alerts()[-400:]}")
     check(not os.path.exists(old_dir) and os.path.exists(fresh), "старое не убрано или свежее убрано")
     e2 = Env()
@@ -2566,7 +2872,7 @@ def test_worktree_keeps_unmerged_and_untracked_0184():
     open(os.path.join(path["w-untracked"], "draft.txt"), "w").write("черновик\n")
     old = T0 - 3 * 86400
     for wt in path.values():
-        os.utime(wt, (old, old))
+        _age_tree(wt, old)
     r = e.run("watch", t=T0)
     check(r.returncode == 0, f"watch упал: {r.stderr[-300:]}")
     check(not os.path.exists(path["w-clean"]), "контроль: слитая и чистая копия не убрана")
@@ -2583,7 +2889,7 @@ def test_watch_and_wake_second_instance_exits_0184():
     wt = os.path.join(folder, ".claude", "worktrees", "w-held")
     g("worktree", "add", "-q", "-b", "w-held", wt)
     old = T0 - 3 * 86400
-    os.utime(wt, (old, old))
+    _age_tree(wt, old)
     e.task("g-0001", "g-dir", status="todo")
     e.agents([{"id": "dead0001", "sessionId": "dead0001-x", "name": "g-dir", "state": "failed", "kind": "background",
                "cwd": folder, "startedAt": (T0 - 7200) * 1000}])
@@ -3123,6 +3429,253 @@ def test_autostart_nudge_guards_0212():
     check(["respawn", "c0ee7001"] in e.calls(), f"0212: без помех задание не передано: {e.calls()}")
 
 
+def test_autostart_skip_not_failure_0708():
+    """metis-0708: 02.11 21:46 проход увидел окно metis-pantheon простаивающим (working + idle между ходами), а под
+    блокировкой имени свежий claude agents показал его занятым (пришло сообщение, status busy): resume_session вернул
+    SKIPPED (код 4, resume-skip «уже работает»). Самозапуск счёл это сбоем — тревога «передать задание не вышло,
+    код 4», «сбой 2 из 3» и пауза 2 ч, третий такой пропуск остановил бы самозапуск направления. Пропуск — не сбой:
+    ни тревоги, ни счётчика, ни pending; то же у продолжения остановленной сессии (resume_or_start)."""
+    e, a = idle_env("sk-dir", "5ee70001-1")
+    nxt = os.path.join(e.tmp, "agents-next.json")
+    json.dump([dict(a, status="busy")], open(nxt, "w"))
+    e.run("watch", t=T0 + 120, extra={"FAKE_AGENTS_NEXT": nxt})
+    st = json.load(open(e.st("autostart.json"))).get("sk-dir", {})
+    check(not respawns(e) and "\tresume-skip\tsk-dir\t5ee70001\ttick\tуже работает" in _start_log(e),
+          f"0708: занятому окну передано задание: {e.calls()} {_start_log(e)!r}")
+    check("передать задание не вышло" not in e.alerts() and "сбой" not in e.alerts(),
+          f"0708: пропуск занятого окна — ложная тревога: {e.alerts()}")
+    check(not st.get("fails") and not st.get("pending") and not st.get("gave_up"),
+          f"0708: пропуск засчитан сбоем: {st}")
+    # три таких прохода подряд (каждый после паузы) — самозапуск не встаёт
+    for i in (1, 2, 3):
+        os.remove(nxt + ".seen")
+        e.run("watch", t=T0 + 120 + i * 4000, extra={"FAKE_AGENTS_NEXT": nxt})
+    st = json.load(open(e.st("autostart.json"))).get("sk-dir", {})
+    check(not st.get("fails") and not st.get("gave_up") and "остановлен после" not in e.alerts(),
+          f"0708: повторные пропуски остановили самозапуск: {st} {e.alerts()}")
+    # окно освободилось — задание передаётся, как раньше (metis-0212)
+    e.run("watch", t=T0 + 120 + 5 * 4000)
+    check(["respawn", "5ee70001"] in e.calls(), f"0708: свободному окну задание не передано: {e.calls()}")
+    # продолжение остановленной сессии: к подъёму имя уже держит новая — тоже пропуск, не «не вышло, код 4»
+    e2 = Env()
+    e2.direction("sr-dir")
+    e2.task("sr-0001", "sr-dir")
+    e2.run("watch", t=T0)
+    e2.board("sr-0001", T0 + 10)
+    e2.agents([bg("sr-dir", "stopped", "5ee70002-1")])
+    nxt2 = os.path.join(e2.tmp, "agents-next.json")
+    json.dump([bg("sr-dir", "stopped", "5ee70002-1"), bg("sr-dir", "working", "5ee70003-1", pid=45)], open(nxt2, "w"))
+    e2.run("watch", t=T0 + 120, extra={"FAKE_AGENTS_NEXT": nxt2})
+    st = json.load(open(e2.st("autostart.json"))).get("sr-dir", {})
+    check(not [c for c in e2.calls() if c[:1] in (["respawn"], ["--bg"])]
+          and "\tresume-skip\tsr-dir\t5ee70002\ttick\tуже работает" in _start_log(e2),
+          f"0708: остановленная поднята, хотя имя уже держат: {e2.calls()} {_start_log(e2)!r}")
+    check("не вышло, код 4" not in e2.alerts() and not st.get("fails") and not st.get("pending"),
+          f"0708: пропуск продолжения засчитан сбоем: {st} {e2.alerts()}")
+    # пропущенное имя держат — место занято: третье направление сверх AUTOSTART_MAX (2) в тот же проход не поднимается
+    e3 = Env()
+    for n in ("aa-dir", "bb-dir", "cc-dir"):
+        e3.direction(n)
+    for n in ("aa-dir", "bb-dir"):
+        e3.task(n[:2] + "-0001", n)
+    e3.run("watch", t=T0)
+    for n in ("aa-dir", "bb-dir"):
+        e3.board(n[:2] + "-0001", T0 + 10)
+    cc = dict(bg("cc-dir", "working", "5ee700cc-1", pid=46), status="busy")
+    e3.agents([bg("aa-dir", "stopped", "5ee700aa-1"), cc])
+    nxt3 = os.path.join(e3.tmp, "agents-next.json")
+    json.dump([bg("aa-dir", "stopped", "5ee700aa-1"), bg("aa-dir", "working", "5ee700ab-1", pid=47), cc],
+              open(nxt3, "w"))
+    e3.run("watch", t=T0 + 120, extra={"FAKE_AGENTS_NEXT": nxt3})
+    bb = json.load(open(e3.st("autostart.json"))).get("bb-dir", {})
+    check("\tresume-skip\taa-dir\t5ee700aa\ttick\tуже работает" in _start_log(e3) and not bb.get("last"),
+          f"0708: после пропуска поднято третье направление: {bb} {e3.calls()} {_start_log(e3)!r}")
+    check("самозапуск bb-dir ждёт: нет места" in e3.alerts(), f"0708: нет тревоги «нет места»: {e3.alerts()}")
+
+
+_DIRECT_LOCK_STALE = r"""
+import fcntl, importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+lp = P.path(P.HQ_RW, "locks", "start-rf-dir.lock")
+os.makedirs(os.path.dirname(lp), exist_ok=True)
+fd = os.open(lp, os.O_WRONLY | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+with P.lock("start-rf-dir", block=False) as got:       # чужой владелец: метка выставлена
+    assert not got and P.LOCK_CONTENDED == "start-rf-dir", (got, P.LOCK_CONTENDED)
+os.close(fd)
+os.unlink(lp)
+os.mkfifo(lp)                                           # подложенная запись на месте замка
+with P.lock("start-rf-dir", block=False) as got:
+    assert not got
+print(P.LOCK_CONTENDED)
+"""
+
+
+def test_start_lost_race_skip_0717():
+    """metis-0717: плановый проход проверил снимок (имя свободно) и пошёл `pantheon start --from tick`, а под блокировкой
+    имени его уже держат (другой процесс поднимает или сессия уже стоит в списке) — проигранная гонка. Раньше код 1 и
+    ложная тревога «не вышло, код 1»; теперь код 4 (P.skipped), как у resume_session после metis-0708, и строка
+    start-busy / start-skip в start.log. Владелец (--from owner) и подложенная запись замка — по-прежнему код 1."""
+    e = Env()
+    e.direction("rc-dir")
+    lk = e.st("hq-rw", "locks")
+    os.makedirs(lk, exist_ok=True)
+    lp = os.path.join(lk, "start-rc-dir.lock")
+    holder = subprocess.Popen([PY311, "-I", "-c",
+                               "import fcntl,os,sys,time\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT,0o600)\n"
+                               "fcntl.flock(fd,fcntl.LOCK_EX)\nprint('ok',flush=True)\ntime.sleep(60)", lp],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        check(holder.stdout.readline().strip() == "ok", "0717: держатель замка не взял замок")
+        r = e.run("start", "rc-dir", "--from", "tick", "задание", t=T0)
+        check(r.returncode == 4 and not _bgs(e, "rc-dir") and "\tstart-busy\trc-dir\ttick" in _start_log(e),
+              f"0717: гонка за замок имени — не код 4: {r.returncode} {r.stderr[-300:]} {_start_log(e)!r}")
+        r = e.run("start", "rc-dir", "--from", "owner", "задание", t=T0)
+        check(r.returncode == 1 and not _bgs(e, "rc-dir"), f"0717: владельцу замок занят — не код 1: {r.returncode}")
+    finally:
+        holder.kill()
+        holder.wait()
+    # живая копия под блокировкой: снимок до неё пуст, а теперь имя в списке
+    e.agents([bg("rc-dir", "working", "7170aaaa-1", pid=48)])
+    r = e.run("start", "rc-dir", "--from", "tick", "задание", t=T0 + 5)
+    check(r.returncode == 4 and not _bgs(e, "rc-dir") and "\tstart-skip\trc-dir\ttick\tуже работает" in _start_log(e),
+          f"0717: живая копия под замком — не код 4: {r.returncode} {r.stderr[-300:]} {_start_log(e)!r}")
+    r = e.run("start", "rc-dir", "--from", "owner", "задание", t=T0 + 6)
+    check(r.returncode == 1 and "уже работает" in r.stderr, f"0717: владельцу живая копия — не код 1: {r.returncode}")
+    # подложенная запись на месте замка — не гонка: код 1 даже у tick
+    e2 = Env()
+    e2.direction("rd-dir")
+    hl = e2.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    os.mkfifo(os.path.join(hl, "start-rd-dir.lock"))
+    r = e2.run("start", "rd-dir", "--from", "tick", t=T0)
+    check(r.returncode == 1 and "блокировка start-rd-dir не взята" in r.stderr, f"0717: fifo на месте замка у tick: {r.returncode} {r.stderr[-200:]}")
+    # вкладка терминала под замком (в реестре сессий, без id в claude agents): остановить её по id нельзя — не гонка, код 1
+    e3 = Env()
+    e3.direction("re-dir")
+    os.makedirs(os.path.join(e3.home, ".claude", "sessions"), exist_ok=True)
+    json.dump({"pid": os.getpid(), "sessionId": "tab-0717", "name": "re-dir", "kind": "interactive", "cwd": "/tmp"},
+              open(os.path.join(e3.home, ".claude", "sessions", f"{os.getpid()}.json"), "w"))
+    r = e3.run("start", "re-dir", "--from", "tick", "задание", t=T0)
+    check(r.returncode == 1 and "вкладке терминала" in r.stderr and "\tstart-skip\t" not in _start_log(e3),
+          f"0717: живая вкладка без id у tick — не код 1: {r.returncode} {r.stderr[-300:]} {_start_log(e3)!r}")
+    # метка LOCK_CONTENDED от прошлого lock() не переживает следующий вызов: отказ из-за подложенной записи — не гонка
+    e4 = Env()
+    r = e4.run(LIB, os.path.join(e4.state, "hq-rw", "locks"), t=T0, argv=[PY311, "-I", "-c", _DIRECT_LOCK_STALE])
+    check(r.stdout.strip() == "None", f"0717: LOCK_CONTENDED пережил следующий lock(): {r.stdout!r} {r.stderr[-300:]}")
+
+
+def test_watch_lost_race_no_alert_0717():
+    """metis-0717 п. 2: проигранная гонка за имя глазами дежурного. Самозапуск видит имя свободным (снимок пуст) и зовёт
+    `pantheon start --from tick`, а под блокировкой имени уже стоит живая копия (start-skip) или замок держит другой
+    процесс (start-busy). Код 4 — пропуск: в alerts нет «не вышло, код 1» (и никакого «не вышло»), счётчика сбоев нет."""
+    def env(name):
+        e = Env()
+        e.direction(name)
+        e.task(name[:2] + "-0001", name)
+        e.run("watch", t=T0)
+        e.board(name[:2] + "-0001", T0 + 10)
+        e.agents([])
+        return e
+    # живая копия под блокировкой: снимок прохода пуст, свежий claude agents у pantheon start её видит
+    e = env("lr-dir")
+    e.run("watch", t=T0 + 120, extra=_next_agents(e, [bg("lr-dir", "working", "7170bbbb-1", pid=49)]))
+    st = json.load(open(e.st("autostart.json"))).get("lr-dir", {})
+    check("\tstart-skip\tlr-dir\ttick\tуже работает" in _start_log(e),
+          f"0717 п.2: гонка не дошла до pantheon start под блокировкой: {_start_log(e)!r} {e.calls()}")
+    check("не вышло, код 1" not in e.alerts() and "не вышло" not in e.alerts() and "сбой" not in e.alerts(),
+          f"0717 п.2: проигранная гонка (живая копия) — тревога в alerts: {e.alerts()}")
+    check(not st.get("fails") and not st.get("pending"), f"0717 п.2: проигранная гонка засчитана сбоем: {st}")
+    # замок имени держит другой процесс
+    e2 = env("lb-dir")
+    lk = e2.st("hq-rw", "locks")
+    os.makedirs(lk, exist_ok=True)
+    holder = subprocess.Popen([PY311, "-I", "-c",
+                               "import fcntl,os,sys,time\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT,0o600)\n"
+                               "fcntl.flock(fd,fcntl.LOCK_EX)\nprint('ok',flush=True)\ntime.sleep(60)",
+                               os.path.join(lk, "start-lb-dir.lock")], stdout=subprocess.PIPE, text=True)
+    try:
+        check(holder.stdout.readline().strip() == "ok", "0717 п.2: держатель замка не взял замок")
+        e2.run("watch", t=T0 + 120)
+    finally:
+        holder.kill()
+        holder.wait()
+    st = json.load(open(e2.st("autostart.json"))).get("lb-dir", {})
+    check("\tstart-busy\tlb-dir\ttick" in _start_log(e2),
+          f"0717 п.2: гонка за замок не дошла до pantheon start: {_start_log(e2)!r} {e2.calls()}")
+    check("не вышло, код 1" not in e2.alerts() and "не вышло" not in e2.alerts() and "сбой" not in e2.alerts(),
+          f"0717 п.2: проигранная гонка (замок) — тревога в alerts: {e2.alerts()}")
+    check(not st.get("fails") and not st.get("pending"), f"0717 п.2: гонка за замок засчитана сбоем: {st}")
+
+
+def _next_agents(e, lst):
+    """FAKE_AGENTS_NEXT: свежий claude agents под блокировкой имени (повторная проверка) видит lst."""
+    p = os.path.join(e.tmp, "agents-next.json")
+    json.dump(lst, open(p, "w"))
+    if os.path.exists(p + ".seen"):
+        os.remove(p + ".seen")
+    return {"FAKE_AGENTS_NEXT": p}
+
+
+def _resumed(e, sid):
+    """Сессию sid продолжили: claude respawn или --resume."""
+    return any(c[:2] == ["respawn", sid[:8]] or ("--resume" in c and sid in c) for c in e.calls())
+
+
+def test_skip_not_failure_other_paths_0708():
+    """metis-0708, находка: пропуск под блокировкой имени (SKIPPED, код 4) — не сбой и в трёх других путях подъёма.
+    Разовый запуск: не «не вышло, код 4» и без уведомления «не вышел» — запись снова ждёт до срока и идёт, когда окно
+    освободилось. Продолжение после паузы: не «не поднялась, код 4». Запуск по ответу владельца: не «не вышло, код 4»."""
+    # разовый запуск: остановленную сессию к подъёму сменила новая (повторная проверка — resume-skip)
+    e, oid = _oneshot_env()
+    e.agents([bg("athena-a", "stopped", "5ee70010-1")])
+    held = [bg("athena-a", "stopped", "5ee70010-1"), bg("athena-a", "working", "5ee70011-1", pid=48)]
+    e.run("watch", t=T0 + 660, extra=_next_agents(e, held))
+    rec = _oneshot_rec(e, oid)
+    check(not respawns(e) and not _resumed(e, "5ee70010-1") and "не вышло, код 4" not in e.alerts() and f"разовый запуск {oid} ждёт: пропуск" in e.alerts(),
+          f"0708: разовый запуск — пропуск засчитан сбоем: {e.calls()} {e.alerts()}")
+    check(not rec.get("done_at") and "пропуск" in str(rec.get("wait")),
+          f"0708: разовый запуск после пропуска погашен: {rec}")
+    check("не вышел" not in e.sent() and f"oneshot-{oid}" not in e.queued(),
+          f"0708: уведомление «не вышел» о пропуске: {e.sent()!r} {e.queued()}")
+    # тот же пропуск ещё два прохода подряд — тревога «ждёт: пропуск» не повторяется (одна строка, а не строка на проход)
+    for dt in (690, 705):
+        e.run("watch", t=T0 + dt, extra=_next_agents(e, held))
+    n_wait = e.alerts().count(f"разовый запуск {oid} ждёт: пропуск")
+    check(n_wait == 1 and not _resumed(e, "5ee70010-1") and not _oneshot_rec(e, oid).get("done_at"),
+          f"0708: тревога «разовый запуск … ждёт: пропуск» {n_wait} раз за 3 прохода: {e.alerts()} {_oneshot_rec(e, oid)}")
+    e.run("watch", t=T0 + 720)                                 # окно свободно — запись исполняется
+    check(_resumed(e, "5ee70010-1") and _oneshot_rec(e, oid).get("done_at"),
+          f"0708: разовый запуск после пропуска не пошёл: {e.calls()} {_oneshot_rec(e, oid)}")
+    # продолжение после паузы: остановленную паузой сессию к подъёму сменила новая
+    e2 = Env()
+    e2.direction("p1-dir")
+    e2.agents([bg("p1-dir", "working", "5ee70020-1", pid=41)])
+    e2.run("pause", "p1-dir", "--reason", "limit", "лимит 80", t=T0)
+    e2.agents([bg("p1-dir", "stopped", "5ee70020-1")])
+    nxt = _next_agents(e2, [bg("p1-dir", "stopped", "5ee70020-1"), bg("p1-dir", "working", "5ee70021-1", pid=42)])
+    e2.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_LIMIT": "20", **nxt})
+    check(not any("5ee70020-1" in c for c in e2.calls() if "--resume" in c)
+          and not os.path.exists(e2.st("pauses", "p1-dir.json")),
+          f"0708: после паузы поднята остановленная, хотя имя держат: {e2.calls()}")
+    check("не поднялась, код 4" not in e2.alerts() and "p1-dir после паузы: пропуск" in e2.alerts(),
+          f"0708: пропуск после паузы — ложная тревога: {e2.alerts()}")
+    # запуск по ответу владельца: окно поднял другой процесс между снимком и блокировкой
+    e3 = Env()
+    e3.direction("wl-dir")
+    e3.agents([bg("wl-dir", "stopped", "5ee70030-1")])
+    e3.run("watch", t=T0)
+    _zeus_answer(e3, T0 + 30, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")
+    e3.run("watch", t=T0 + 60, extra=_next_agents(e3, [bg("wl-dir", "stopped", "5ee70030-1"),
+                                                         bg("wl-dir", "working", "5ee70031-1", pid=43)]))
+    wl = [r for r in _start_rows(e3) if r[1:2] == ["word-launch"]]
+    check(not _bgs(e3, "wl-dir") and not _resumed(e3, "5ee70030-1") and wl and wl[-1][-1].startswith("пропуск"),
+          f"0708: запуск по ответу — пропуск не записан: {e3.calls()} {wl}")
+    check("не вышло, код 4" not in e3.alerts(), f"0708: запуск по ответу — ложная тревога: {e3.alerts()}")
+
+
 def test_autostart_nudge_week_limit_0212():
     """metis-0212, ревью argus-43: передача задания простаивающей сессии — новое дело и ждёт недельный лимит, как
     новый запуск (gate «autostart»): жёлтая зона днём, красная, снимок старше 30 мин — ни respawn, ни новой сессии,
@@ -3199,6 +3752,92 @@ def test_plugins_respawn_live_subagent_0181():
     check(not os.path.exists(e.st("plugins", "respawn.json")), "0181: все перезапущены — отметка не снята")
     check("перезапуск после обновления плагинов (pantheon): перезапущены rs-dir" in e.alerts(),
           f"0181: нет строки в тревогах: {e.alerts()}")
+
+
+def sub_meta(tp, n, mtime, finished=False):
+    """meta.json субагента рядом с его журналом (Claude Code ставит "finished": true по его концу)."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.meta.json")
+    json.dump({"agentType": "dev-opus", "name": f"dev-{n}", **({"finished": True} if finished else {})}, open(f, "w"))
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_plugins_respawn_quiet_subagent_0864():
+    """metis-0864: субагент без «finished» в meta.json, затихший 20 мин назад (ждёт тесты), — живой: окно после выпуска
+    не перезапускается, причина видна в строке «ждёт». Субагент закончил («finished») — перезапуск. Оборванный прошлым
+    перезапуском (журнал старше старта процесса) и затихший дольше LIVE_SUBAGENT_MAX — мёртвые, окно не держат."""
+    e, a, tp = respawn_env("rq-dir", "abab0864-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    subagent(tp, T0 - 1200, n="q1")
+    sub_meta(tp, "q1", T0 - 1200)
+    e.run("watch", t=T0)
+    check(not respawned(e, "abab0864") and "rq-dir (живые субагенты: dev-q1)" in e.alerts(),
+          f"0864: тихий живой субагент — окно перезапущено или причины нет: {e.calls()} {e.alerts()[-400:]}")
+    sub_meta(tp, "q1", T0 - 1200, finished=True)
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "abab0864"), f"0864: субагент закончил — окно не перезапущено: {e.calls()}")
+    # оборванный прошлым перезапуском: журнал и meta — до старта нынешнего процесса
+    e, a, tp = respawn_env("rd-dir", "cdcd0864-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    subagent(tp, T0 - 7210, n="d1")
+    sub_meta(tp, "d1", T0 - 7210)
+    e.run("watch", t=T0)
+    check(respawned(e, "cdcd0864"), f"0864: субагент, оборванный прошлым перезапуском, держит окно: {e.calls()}")
+    e, a, tp = respawn_env("rs2-dir", "efef0864-1")
+    a["startedAt"] = (T0 - 5 * 3600) * 1000
+    e.agents([a])
+    subagent(tp, T0 - 4 * 3600, n="s1")
+    sub_meta(tp, "s1", T0 - 4 * 3600)
+    e.run("watch", t=T0)
+    check(respawned(e, "efef0864"), f"0864: субагент молчит 4 ч (больше LIVE_SUBAGENT_MAX) — держит окно: {e.calls()}")
+
+
+def sub_journal(tp, n, mtime, records):
+    """Журнал субагента своими записями (dict) с временем mtime."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.jsonl")
+    with open(f, "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_plugins_respawn_live_rule_0904():
+    """metis-0904: watch берёт правило «живой» из lib/live_subagent.py, общее с хуком ctx. Субагент с «finished», чья
+    фоновая команда ещё без итога (Bash ушёл в фон), — живой: окно не перезапускается; итог пришёл — перезапуск.
+    Субагент, запущенный в первые LIVE_GRACE с после старта процесса (первая запись журнала позже старта), — живой,
+    хотя журнал писался в пределах LIVE_GRACE."""
+    bg = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "Command running in background with ID: bq1. Output x"}]}}
+    note = {"type": "user", "message": {"role": "user", "content":
+            "<task-notification>\n<task-id>bq1</task-id>\n<status>completed</status>\n</task-notification>"}}
+    e, a, tp = respawn_env("rb-dir", "abcd0904-1")
+    a["startedAt"] = (T0 - 7200) * 1000
+    e.agents([a])
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg])
+    sub_meta(tp, "b1", T0 - 1200, finished=True)
+    e.run("watch", t=T0)
+    check(not respawned(e, "abcd0904") and "rb-dir (живые субагенты: dev-b1)" in e.alerts(),
+          f"0904: finished с фоновой командой без итога — окно перезапущено: {e.calls()} {e.alerts()[-400:]}")
+    sub_journal(tp, "b1", T0 - 1200, [{"type": "user", "message": {"role": "user", "content": "поручение"}}, bg, note])
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "abcd0904"), f"0904: итог фоновой пришёл — окно не перезапущено: {e.calls()}")
+    # запущен через 10 с после старта, журнал последний раз писался через 60 с (в пределах LIVE_GRACE)
+    e, a, tp = respawn_env("rg-dir", "dcba0904-1")
+    a["startedAt"] = (T0 - 3600) * 1000
+    e.agents([a])
+    born = datetime.fromtimestamp(T0 - 3590, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    sub_journal(tp, "g1", T0 - 3540, [{"type": "user", "timestamp": born, "message": {"role": "user", "content": "x"}}])
+    sub_meta(tp, "g1", T0 - 3590)
+    e.run("watch", t=T0)
+    check(not respawned(e, "dcba0904") and "rg-dir (живые субагенты: dev-g1)" in e.alerts(),
+          f"0904: запущенный в окне старта субагент не держит окно: {e.calls()} {e.alerts()[-400:]}")
 
 
 def test_plugins_respawn_idle_free_0181():
@@ -3450,6 +4089,37 @@ def test_auto_rm_done_stopped_0250():
     e.run("watch", t=T0 + 10 + 86400 + 60, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
     check("a8a8a8a8" in [c[1] for c in e.calls() if c[:1] == ["rm"]][n + len(again):], "через сутки повтора нет")
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
+
+
+def test_auto_rm_suffixed_live_name_0885():
+    """metis-0885: перезапуск окна (plugins-update: старая stopped; start --restart: старая done) при живой старой
+    сессии даёт новой имя «zeus (2)» — прежнюю «zeus» убираем в том же проходе, без 2 ч (свежая отметка state.json)."""
+    for old_name, state, sid in (("zeus", "stopped", "c1c1c1c1"), ("zeus", "done", "c2c2c2c2"),
+                                 ("ar-dir", "stopped", "c3c3c3c3")):
+        e = Env()
+        e.direction("ar-dir")
+        live = old_name + " (2)"
+        e.agents([bg(old_name, state, sid + "-1"), bg(live, "working", "d9d9d9d9-1", pid=os.getpid())])
+        _job(e, sid, state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+        e.run("watch", t=T0)
+        rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+        check(rms == [sid], f"0885: {old_name}/{state} при живой «{live}»: rm {rms}")
+    # мёртвая «zeus (2)» при живой «zeus» — убирается; живая «zeus (2)» без живой «zeus» — не трогается
+    e = Env()
+    e.agents([bg("zeus (2)", "stopped", "f1f1f1f1-1"), bg("zeus", "working", "f2f2f2f2-1", pid=os.getpid())])
+    _job(e, "f1f1f1f1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+    check(rms == ["f1f1f1f1"], f"0885: мёртвая «zeus (2)» при живой «zeus»: rm {rms}")
+    e = Env()
+    e.agents([bg("zeus (2)", "working", "g1g1g1g1-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: живую «zeus (2)» тронули: {e.calls()}")
+    e = Env()
+    e.agents([bg("zeus", "stopped", "e1e1e1e1-1"), bg("zeus (2)", "stopped", "e2e2e2e2-1")])
+    _job(e, "e1e1e1e1", state="done", updatedAt=_iso(T0 - 60), lastTerminalAt=_iso(T0 - 60))
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"0885: нет живой — свежая убрана: {e.calls()}")
 
 
 def _hestia_env(task_status, extra=""):
@@ -4080,13 +4750,203 @@ def test_ghost_detail_is_not_question_0662():
     check("поднята" in out and _woke(e), f"Д2: правка реестра из будущего спрятала призрак: {out}")
 
 
-if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in tests:
+def test_jobs_show_read_only_locks_0266():
+    """metis-0266: `pantheon jobs` в окне, куда в STATE/locks не пишут (песочница), не падает с PermissionError: замок
+    задачи показ открывает только на чтение. Замок держит другой процесс — «идёт»; файл замка не читается — «не знаю»,
+    а остальные строки таблицы целы."""
+    import fcntl
+    e = Env()
+    e.schedule('primary_host = "mac-a"\n[[job]]\nname = "jb-a"\ncommand = "pantheon sync-answers"\nevery = "tick"\n'
+               '[[job]]\nname = "jb-b"\ncommand = "pantheon sync-answers"\nevery = "tick"\n')
+    locks = e.st("locks")
+    os.makedirs(locks, exist_ok=True)
+    la, lb = os.path.join(locks, "job-jb-a.lock"), os.path.join(locks, "job-jb-b.lock")
+    open(la, "w").close()
+    open(lb, "w").close()
+    os.chmod(la, 0o400)  # писать в замок нельзя (как в песочнице окна): O_WRONLY → PermissionError
+    os.chmod(lb, 0o000)  # а этот и читать нельзя — «не знаю»
+    os.chmod(locks, 0o500)
+    try:
+        if os.access(la, os.W_OK):  # root обходит права — проверять нечем
+            return
+        r = e.run("jobs", t=T0)
+        check(r.returncode == 0 and "Traceback" not in r.stderr and "jb-a" in r.stdout and "jb-b" in r.stdout,
+              f"0266: jobs при замках без записи: {r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}")
+        row_b = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-b")]
+        check(row_b and "идёт ли сейчас — не знаю" in row_b[0] and "не знаю (блокировка" in row_b[0],
+              f"0266: нечитаемый замок — не «не знаю» в состоянии и в «дальше»: {row_b}")
+        row_a = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-a")]
+        check(row_a and "идёт" not in row_a[0] and "не знаю" not in row_a[0],
+              f"0266: свободный замок показан занятым: {row_a}")
+    finally:
+        os.chmod(locks, 0o700)
+        os.chmod(lb, 0o600)
+        os.chmod(la, 0o600)
+    # замок держит другой процесс — «идёт» (и тоже без записи в замок)
+    with open(la, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        os.chmod(locks, 0o500)
         try:
-            fn()
-        except Exception as ex:  # noqa: BLE001
-            FAILS.append(f"{fn.__name__}: {type(ex).__name__}: {ex}")
-            print("ОШИБКА:", fn.__name__, type(ex).__name__, ex)
-    print(f"тестов: {len(tests)}, не прошло: {len(FAILS)}")
+            r = e.run("jobs", t=T0)
+            row_a = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-a")]
+            check(r.returncode == 0 and row_a and row_a[0].count("идёт") == 2,
+                  f"0266: замок занят, а показ не «идёт»: {r.returncode} {row_a} {r.stderr[-200:]}")
+        finally:
+            os.chmod(locks, 0o700)
+    # замка нет и создать его нельзя — задача свободна, показ не падает
+    os.remove(lb)
+    os.chmod(locks, 0o500)
+    try:
+        r = e.run("jobs", t=T0)
+        row_b = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-b")]
+        check(r.returncode == 0 and row_b and "идёт" not in row_b[0] and not os.path.exists(lb),
+              f"0266: нет файла замка: {r.returncode} {row_b} {r.stderr[-200:]}")
+    finally:
+        os.chmod(locks, 0o700)
+
+
+def _maint(e, sessions, t=T0, reason="обновление"):
+    json.dump({"id": P_STAMP(t), "since": t, "expires": t + 7200, "reason": reason, "by": "test", "sessions": sessions},
+              open(e.st("maintenance.json"), "w"))
+
+
+def P_STAMP(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))
+
+
+def test_saved_zeus_in_read_only_state_0577():
+    """metis-0577: `pantheon saved --by zeus` из окна штаба (песочница не пускает писать в STATE/maintenance и STATE/plugins)
+    не падает с PermissionError: код 0, понятная строка в stderr без трассировки; для остальных окон — код 1 с той же
+    строкой (метка им нужна). Метка там, куда писать можно, по-прежнему пишется (с id сессии)."""
+    sid = "5a5a5a5a-1111-4111-8111-111111111111"
+    own = {"PANTHEON_SESSION": "zeus", "CLAUDE_CODE_SESSION_ID": sid}
+    e = Env()
+    _maint(e, ["zeus", "dev-x"])
+    md = e.st("maintenance")
+    os.makedirs(md, exist_ok=True)
+    os.chmod(md, 0o500)
+    try:
+        if os.access(md, os.W_OK):  # root обходит права — проверять нечем
+            return
+        r = e.run("saved", "--by", "zeus", "--state", "STATUS.md", extra=own)
+        check(r.returncode == 0 and "Traceback" not in r.stderr and "не записана" in r.stderr and "ведёт владелец" in r.stderr,
+              f"0577: saved zeus без записи в STATE: {r.returncode} {r.stderr[-300:]}")
+        r = e.run("saved", "--by", "dev-x", "--state", "STATUS.md", extra={**own, "PANTHEON_SESSION": "dev-x"})
+        check(r.returncode == 1 and "Traceback" not in r.stderr and "не записана" in r.stderr
+              and "ведёт владелец" not in r.stderr, f"0577: saved другого окна без записи — не отказ: {r.returncode} {r.stderr[-300:]}")
+        # перезапуск после плагинов: метка respawn-ok — тоже без трассировки
+        e2 = Env()
+        os.makedirs(e2.st("plugins"), exist_ok=True)
+        json.dump({"since": T0 - 100, "plugins": ["pantheon"], "done": []}, open(e2.st("plugins", "respawn.json"), "w"))
+        os.chmod(e2.st("plugins"), 0o500)
+        try:
+            r = e2.run("saved", "--by", "zeus", "--state", "STATUS.md", extra=own)
+            check(r.returncode == 0 and "Traceback" not in r.stderr and "не записана" in r.stderr,
+                  f"0577: saved zeus (после плагинов) без записи: {r.returncode} {r.stderr[-300:]}")
+        finally:
+            os.chmod(e2.st("plugins"), 0o700)
+    finally:
+        os.chmod(md, 0o700)
+    r = e.run("saved", "--by", "zeus", "--state", "STATUS.md", extra=own)
+    rec = json.load(open(e.st("maintenance", "zeus.json"))) if os.path.exists(e.st("maintenance", "zeus.json")) else {}
+    check(r.returncode == 0 and rec.get("sessionId") == sid and not r.stderr.strip(), f"0577: запись при праве: {r} {rec}")
+
+
+def test_restart_done_and_auto_close_0338():
+    """metis-0338: завершённый техперезапуск закрывается — `restart --done` снимает метку и пишет в тревоги «завершён»; --status
+    закрывает сам, когда все перезапущены, а Зевс (если был) поднят заново (id сессии не тот, что в его saved); пока Зевс
+    не поднят или id неизвестен — метка стоит; --go без пропущенных пишет «завершён», а не «перезапущены»."""
+    zold, znew = "20202020-0000-4000-8000-000000000001", "30303030-0000-4000-8000-000000000002"
+    # --done: метка и отметки сняты, тревога «завершён», код 0
+    e = Env()
+    _maint(e, ["mm-dir", "zeus"])
+    os.makedirs(e.st("maintenance"), exist_ok=True)
+    open(e.st("maintenance", "mm-dir.done"), "w").write("x\n")
+    r = e.run("restart", "--done", t=T0 + 60)
+    check(r.returncode == 0 and not os.path.exists(e.st("maintenance.json"))
+          and not os.listdir(e.st("maintenance")) and "технический перезапуск завершён" in e.alerts()
+          and "mm-dir" in e.alerts() and "--done" in e.alerts(), f"0338: --done: {r.returncode} {r.stderr[-200:]} {e.alerts()}")
+    check(e.run("restart", "--done", t=T0 + 70).returncode == 1, "0338: --done без метки — не «готово»")
+    # --done при неперезапущенной сессии — закрывает, но называет её
+    e = Env()
+    _maint(e, ["mm-dir"])
+    r = e.run("restart", "--done", t=T0 + 60)
+    check(r.returncode == 0 and "без перезапуска: mm-dir" in r.stdout and "остались: mm-dir" in e.alerts(),
+          f"0338: --done с остатком: {r.stdout!r} {e.alerts()}")
+
+    def zeus_case(saved_sid, live_sid, done=True):
+        e = Env()
+        e.direction("mm-dir")
+        _maint(e, ["mm-dir", "zeus"])
+        os.makedirs(e.st("maintenance"), exist_ok=True)
+        if done:
+            open(e.st("maintenance", "mm-dir.done"), "w").write("x\n")
+        json.dump({"time": "2026-10-15 10:00:00", "state": "S", "by": "zeus", **({"sessionId": saved_sid} if saved_sid else {})},
+                  open(e.st("maintenance", "zeus.json"), "w"))
+        e.agents([bg("zeus", "working", live_sid, pid=77)] if live_sid else [])
+        return e, e.run("restart", "--status", t=T0 + 60)
+    e, r = zeus_case(zold, znew)
+    check(r.returncode == 0 and not os.path.exists(e.st("maintenance.json")) and "перезапуск завершён" in r.stdout
+          and "технический перезапуск завершён" in e.alerts(), f"0338: --status, Зевс поднят заново: {r.stdout!r} {r.stderr[-200:]}")
+    for what, args in (("Зевс всё ещё старый", (zold, zold)), ("id Зевса в saved неизвестен", (None, znew)),
+                       ("Зевса нет среди живых", (zold, None))):
+        e, r = zeus_case(*args)
+        check(os.path.exists(e.st("maintenance.json")) and "Зевс" in r.stdout and "технический перезапуск завершён" not in e.alerts(),
+              f"0338: {what} — метка должна стоять: {r.stdout!r}")
+    e, r = zeus_case(zold, znew, done=False)
+    check(os.path.exists(e.st("maintenance.json")), f"0338: сессия не перезапущена — --status не закрывает: {r.stdout!r}")
+    # --go без пропущенных: тревога «завершён»
+    e = Env()
+    e.direction("mm-dir")
+    e.agents([bg("mm-dir", "working", "mmmmmmmm-1", pid=21)])
+    e.run("restart", "--prepare", "обновление", t=T0)
+    e.run("saved", "--by", "mm-dir", "--state", "STATUS.md", t=T0 + 20)
+    r = e.run("restart", "--go", t=T0 + 40, extra={"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"})
+    check(r.returncode == 0 and "технический перезапуск завершён" in e.alerts() and not os.path.exists(e.st("maintenance.json")),
+          f"0338: --go без пропущенных: {r.stdout!r} {e.alerts()!r}")
+
+
+def test_resume_picks_saved_session_0499():
+    """metis-0499: продолжение остановленной сессии (resume_or_start: wake, самозапуск) берёт ту, что записала `pantheon saved`
+    (id в метке), а не самую свежую по startedAt; метки нет или id среди остановленных нет — прежний выбор. Перезапуск
+    после плагинов: метка «можно» с id сессии относится только к ней, другая живая копия ждёт простоя."""
+    saved_id = "5a5a5a5a-1111-4111-8111-111111111111"
+    other = "bbbbbbbb-2222-4222-8222-222222222222"
+    for with_mark, want in (("maintenance", "5a5a5a5a"), ("respawn-ok", "5a5a5a5a"), (None, "bbbbbbbb"), ("gone", "bbbbbbbb")):
+        e = Env()
+        e.direction("sv-dir")
+        e.agents([bg("sv-dir", "stopped", saved_id, started=T0 - 500), bg("sv-dir", "stopped", other, started=T0 - 10)])
+        if with_mark:
+            rec = {"time": "2026-10-15 10:00:00", "state": "S", "by": "x", "t": T0 - 50,
+                   "sessionId": saved_id if with_mark != "gone" else "cccccccc-3333-4333-8333-333333333333"}
+            d = e.st("maintenance") if with_mark in ("maintenance", "gone") else e.st("plugins", "respawn-ok")
+            os.makedirs(d, exist_ok=True)
+            json.dump(rec, open(os.path.join(d, "sv-dir.json"), "w"))
+        r = e.run("wake", "sv-dir", t=T0, extra={"PANTHEON_DRYRUN": "1"})
+        check(f"[resume] sv-dir {want}" in r.stdout, f"0499: метка {with_mark}: ждали {want}: {r.stdout!r} {r.stderr[-200:]}")
+    # перезапуск после плагинов: метка «можно» с id другой копии не освобождает эту (транскрипт свежий — без метки ждёт)
+    for sid_in_mark, want in ((None, True), ("5a5a5a5a-1111-4111-8111-111111111111", True),
+                              ("bbbbbbbb-2222-4222-8222-222222222222", False)):
+        e, a, tp = respawn_env("rk-dir", "5a5a5a5a-1111-4111-8111-111111111111", state="done")
+        os.utime(tp, (T0 - 60, T0 - 60))
+        rec = {"t": T0 - 10, "time": "x", "state": "S", "by": "x"}
+        if sid_in_mark:
+            rec["sessionId"] = sid_in_mark
+        os.makedirs(e.st("plugins", "respawn-ok"), exist_ok=True)
+        json.dump(rec, open(e.st("plugins", "respawn-ok", "rk-dir.json"), "w"))
+        e.run("watch", t=T0)
+        check(respawned(e, "5a5a5a5a") == want, f"0499: метка «можно» с id {sid_in_mark}: перезапущено={not want}: {e.calls()}")
+    # saved записывает id сессии и в метку «можно»
+    e, a, tp = respawn_env("rk-dir", "5a5a5a5a-1111-4111-8111-111111111111", state="working", status="busy")
+    e.run("saved", "--by", "rk-dir", "--state", "S", t=T0,
+          extra={"PANTHEON_SESSION": "rk-dir", "CLAUDE_CODE_SESSION_ID": "5a5a5a5a-1111-4111-8111-111111111111"})
+    check(json.load(open(e.st("plugins", "respawn-ok", "rk-dir.json"))).get("sessionId") == "5a5a5a5a-1111-4111-8111-111111111111",
+          "0499: saved не записал id в метку «можно»")
+
+if __name__ == "__main__":
+    sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
+    from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
+    n = run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")], FAILS,
+                  lambda name, err: FAILS.append(f"{name}: {err}"))
+    print(f"тестов: {n}, не прошло: {len(FAILS)}")
     sys.exit(1 if FAILS else 0)
