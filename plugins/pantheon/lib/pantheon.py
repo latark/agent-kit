@@ -273,7 +273,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         запись — хук guard и только по роли (accept, reject — argus). Шлюз считает
                                         последний вердикт каждого рецензента (сессия + агент) на (repo, PR, SHA) и
                                         пускает, только если последний у каждого — «принять» с полным перечнем и ни
-                                        один рецензент не сливающий
+                                        один рецензент не сливающий. У accept и reject ещё --criteria "<id>#<N>
+                                        <хеш> да|нет <опора>" — флаг на пункт «Готово, когда» задачи из Closes
+                                        (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
+                                        «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
+  pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
@@ -7912,7 +7916,7 @@ def autoclose_tick(t, wait=0):
         if not got:
             return
         log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
-                            actual_for=lambda tid: autoclose_actual(T, tid))
+                            actual_for=lambda tid: autoclose_actual(T, tid), accepted=review_criteria_ticks)
     for ln in log:
         print(f"автозакрытие · {ln}")
     if log or errors:

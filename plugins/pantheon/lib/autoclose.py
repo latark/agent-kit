@@ -14,7 +14,12 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
 В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается (и close_checked, metis-0660).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
-строку «слит, неотмечено N», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
+строку «слит, неотмечено N (пункты …)», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
+Перед этим (metis-1004) слитый PR с Closes отмечает сам пункты, которые argus принял на head слияния: `accepted(repo,
+строка кэша)` → {id: {номер: хеш}} (review.review_criteria_ticks — засчитанные «принять» с --criteria «да»); пункт
+отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. Для этого
+fetch кладёт в строку слитого PR head (headRefOid), base (baseRefName) и core (задето ли ядро, merged_core). Ядро по
+обоим путям переименования; переименование без старого пути и список файлов, обрезанный gh (больше 100), — ядро.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing/waiting её направления review — один
 раз на PR (строка REVIEW_MARK в журнале); PR без Closes — задачам doing/waiting, названным в его ветке или теле (metis-0615).
 Обработанные PR отмечены в STATE/autoclose.json; задачу, уже закрытую этим PR (строка в журнале), второй раз не трогаем. Заодно проход запоминает, у каких
@@ -466,7 +471,9 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             keep_prev(repo, "all", "не хватило времени прохода")
             continue
         data, err = gh_json(["pr", "list", "--repo", repo, "--state", "merged", "--limit", str(LIMIT), "--json",
-                             "number,headRefName,body,mergedAt,mergeCommit,files,isCrossRepository"], env, timeout=min(90, rleft()))
+                             "number,headRefName,headRefOid,baseRefName,body,mergedAt,mergeCommit,files,changedFiles,"
+                             "isCrossRepository"],
+                            env, timeout=min(90, rleft()))
         if err or not isinstance(data, list):
             keep_prev(repo, "all", err or "ответ gh — не список")
             continue
@@ -479,6 +486,10 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                    "cross": pr.get("isCrossRepository") is not False}  # PR из форка (или gh не сказал) — не PR пачки
             # path null у файла слитого PR — пропустить, а не упасть на endswith (metis-0674)
             files = [f["path"] for f in pr.get("files") or [] if isinstance(f, dict) and isinstance(f.get("path"), str)]
+            head = str(pr.get("headRefOid") or "").lower()  # metis-1004: head слияния и base — для отметки пунктов
+            row.update(head=head if re.fullmatch(r"[0-9a-f]{40}", head) else "",
+                       base=pr.get("baseRefName") if isinstance(pr.get("baseRefName"), str) else "",
+                       core=merged_core(pr.get("files"), core, pr.get("changedFiles")))
             if f"{repo}#{pr.get('number')}" not in done and any(x.endswith(".claude-plugin/plugin.json") for x in files):
                 if rleft() <= 1:
                     errors[f"{repo}#{pr.get('number')}"] = "не хватило времени на diff"
@@ -538,6 +549,36 @@ def former_heads(prev, open_prs):
     return out
 
 
+FILES_CAP = 100   # gh pr list отдаёт не больше 100 файлов PR (files(first: 100) в GraphQL)
+
+
+def merged_core(files, core, changed=None):
+    """Задето ли ядро слитым PR (metis-1004): files — поле files строки gh pr list (path, changeType), changed — его
+    changedFiles. По путям (core) или правкой файлов сборки и запуска окон шлюза (BUILD_ROOTS: pantheon.py, sessions.py)
+    — сборку окон в них без сети не сверить, поэтому как ядро.
+    У переименования и копии — оба пути (previous_filename), а без старого пути (gh pr list его не отдаёт) — ядро,
+    как у шлюза: старое имя могло быть ядром. Список неполон — файлов changed больше полученных, а без changed
+    получено FILES_CAP и больше (обрезка gh) — ядро; файл без пути — тоже. core нет или шлюз не загрузился — ядро
+    (строже: в счёт только «принять» на Opus)."""
+    gate = load_gate()
+    if core is None or gate is None or not isinstance(files, list):
+        return True
+    rows = [f for f in files if isinstance(f, dict)]
+    known = isinstance(changed, int) and not isinstance(changed, bool)
+    if len(rows) != len(files) or (changed != len(rows) if known else len(rows) >= FILES_CAP):
+        return True
+    paths = []
+    for f in rows:
+        old = f.get("previous_filename")
+        if str(f.get("changeType") or "").upper() in ("RENAMED", "COPIED") and old is None:
+            return True
+        paths += [f.get("path")] + ([old] if old is not None else [])
+    if not all(isinstance(p, str) and p for p in paths):
+        return True
+    wants = set(getattr(gate, "BUILD_ROOTS", None) or [gate.SANDBOX_BUILD_FILE])  # как sandbox_core (metis-0552)
+    return any(core(p) or _norm_path(p) in wants for p in paths)
+
+
 def open_core(repo, p, core, sandbox, left=None):
     """Задето ли ядро открытым PR: по путям (core) или сборкой окон в pantheon.py (sandbox)."""
     if core and any(core(f.get("path") or "") for f in p.get("files") or [] if isinstance(f, dict)):
@@ -551,9 +592,10 @@ def journal_has(path, T, needle):
     return needle in (T.read(path)[1] or "")
 
 
-def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
+def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None, accepted=None):
     """Один проход по кэшу fetch, без сети. repo_dirs — {"владелец/репозиторий": {направления}}: задачу закрывает
-    только PR из репозитория её направления. T — модуль tasks.py, actual_for(tid) → строка actual или None.
+    только PR из репозитория её направления. T — модуль tasks.py, actual_for(tid) → строка actual или None,
+    accepted(repo, строка слитого PR) → {id: {номер пункта: хеш}} принятых argus пунктов (metis-1004) или None.
     → (строки журнала, ошибки). Тот же кэш второй раз не читается."""
     cache = load_state(cache_file)
     st = load_state(state_file)
@@ -571,7 +613,7 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
                 ts = merged_ts(pr.get("mergedAt"))
                 if key in done or ts is None or ts < since:
                     continue
-                if close_pr(pantheon, t, repo, pr, repo_dirs[repo], T, actual_for, log, errors):
+                if close_pr(pantheon, t, repo, pr, repo_dirs[repo], T, actual_for, log, errors, accepted):
                     done[key] = T.now_iso(t)
             open_ids.update((cache.get("open") or {}).get(repo) or [])
         for repo in sorted(repo_dirs):
@@ -638,8 +680,25 @@ def review_pr(pantheon, t, repo, pr, dirs, T, log, errors):
             errors[f"{repo}#{n}"] = f"{tid}: {e}"
 
 
-def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors):
-    """Слитый PR → закрытие его задач. → True, если PR обработан целиком (можно отметить), False — повторить."""
+def tick_accepted(pantheon, t, repo, pr, tid, task, T, accepted, log):
+    """Пункты «Готово, когда» задачи, которые argus принял на head слияния (metis-1004): accepted → {номер: хеш},
+    T.criteria_tick отмечает только пункты с тем же хешем текста. → (путь, шапка, тело) задачи после отметки."""
+    want = (accepted(repo, pr) or {}).get(tid) if accepted else None
+    if not want:
+        return task
+    head = str(pr.get("head") or "")[:12]
+    got = T.criteria_tick(pantheon, t, tid, want, "плановый проход",
+                          f"PR #{pr.get('number')} ({repo}) слит: argus принял пункты на head {head}")
+    if not got:
+        return task
+    log.append(f"{tid}: PR #{pr.get('number')} слит — отмечены пункты {', '.join(map(str, got))} по приёмке argus")
+    h, b = T.read(task[0])
+    return (task[0], h, b) if h else task
+
+
+def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=None):
+    """Слитый PR → закрытие его задач. → True, если PR обработан целиком (можно отметить), False — повторить.
+    accepted — как в run: до подсчёта неотмеченных пункты, принятые argus на head слияния, отмечаются (metis-1004)."""
     n = pr.get("number")
     tasks = T.load_tasks(pantheon, T.WORK_TYPES)
     ids = [i for i in closing_ids(pr.get("headRefName"), pr.get("body")) if i in tasks
@@ -656,9 +715,17 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors):
                     T.task_set(pantheon, t, tid, {}, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, «часть» — не закрыта")
                 continue
+            try:
+                tasks[tid] = tick_accepted(pantheon, t, repo, pr, tid, tasks[tid], T, accepted, log)
+            except Exception as e:  # noqa: BLE001 — сбой отметки не роняет весь проход: эту задачу повторим, тревога
+                ok = False
+                errors[f"{repo}#{n}"] = f"{tid}: отметка пунктов по приёмке argus: {type(e).__name__}: {e}"
+                continue
+            head = tasks[tid][1]
             left = T.unchecked_criteria(head, tasks[tid][2])
             if left:  # хвосты «Готово, когда» не теряем (metis-0503): слитый PR без «часть» — на проверку, не в done
-                note = f"PR #{n} ({repo}) слит, неотмечено {left}"
+                nums = ", ".join(map(str, T.unchecked_numbers(head, tasks[tid][2])))
+                note = f"PR #{n} ({repo}) слит, неотмечено {left} (пункты {nums})"
                 if head.get("status") != "review" or not journal_has(tasks[tid][0], T, note):
                     T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, неотмечено {left} — review")
