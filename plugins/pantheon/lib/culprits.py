@@ -769,7 +769,10 @@ def reap_auto():
     погашено; 3 — список процессов, сессий или задач launchd не прочитан (ничего не гасим)."""
     raw = ps_all()
     if raw is None:
-        print("pantheon reap --auto: список процессов не прочитан (ps) — гасить нечего", file=sys.stderr)
+        role = os.environ.get("PANTHEON_ROLE")
+        tail = (f"; в окне {role} список процессов закрыт песочницей — это задача планового прохода (раз в 30 мин), "
+                "он сделает её сам") if role else ""
+        print(f"pantheon reap --auto: список процессов не прочитан (ps) — гасить нечего{tail}", file=sys.stderr)
         return 3
     table = {q["pid"]: q for q in raw}
     procs = collect(raw)
@@ -849,7 +852,10 @@ def reap(rest):
         return 2
     procs = collect()
     if procs is None:
-        print("pantheon reap: список процессов не прочитан (ps) — гасить нечего", file=sys.stderr)
+        role = os.environ.get("PANTHEON_ROLE")
+        tail = (f"; в окне {role} список процессов закрыт песочницей — брошенное раз в 30 мин гасит плановый проход "
+                "(reap --auto), остальное выносит в вопрос его проверка «виновники памяти»") if role else ""
+        print(f"pantheon reap: список процессов не прочитан (ps) — гасить нечего{tail}", file=sys.stderr)
         return 3
     agents = None
     with contextlib.suppress(Exception):
