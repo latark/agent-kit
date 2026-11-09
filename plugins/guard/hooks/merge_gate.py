@@ -85,11 +85,11 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    лимита минут или оплаты GitHub Actions и job без раннера и шагов (ci_billing, ещё GET аннотаций и GET job на каждую
    такую), остальные обязательные — SUCCESS: вместо CI засчитывается запись tests на этот SHA с командой полного
    набора FULL_TESTS (_billing_problem, full_tests_record) — пропуск со строкой systemMessage, без записи — отказ с
-   командой, у репозитория без FULL_TESTS — отказ. PR вне ядра защит (metis-0734) засчитывает и узкую запись
+   командой, у репозитория без FULL_TESTS — отказ. Засчитывается и узкая запись
    `pantheon outside test --affected` (narrow_tests_record): FULL_TESTS с `--affected --base <SHA>`, files и map; база —
-   единственная merge-base head и base PR, карта — sha256 affected-map.json в дереве head (_narrow_problem). PR ядра —
-   только полный набор, и с Touch ID. PR пачки (ветка batch/<story>, metis-0758) у репозитория с FULL_TESTS — только
-   запись полного набора на head, и при зелёном CI: CI на PR гонит лишь затронутое (batch_tests_problem).
+   единственная merge-base head и base PR, карта — sha256 affected-map.json в дереве head (_narrow_problem). С
+   metis-1050 (решение владельца 09.11) — у любого PR, и ядра, и пачки: полный набор идёт ночью на main и слияние не
+   держит.
 Записи tests нет — отказ называет узкую команду репозитория из NARROW_TESTS (metis-0666): `--affected`
 run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
@@ -1447,8 +1447,8 @@ def _version_problem(files):
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
-# optional_checks; batch_tests_problem — metis-0758), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING,
-# CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, BATCH_BRANCH, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
+# optional_checks; narrow_tests_record, narrow_map_path — metis-1050), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
+# CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
 # test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
@@ -1635,33 +1635,11 @@ def full_tests_record(repo, rec):
     return got == need
 
 
-# PR пачки (metis-0758, решение владельца 03.11 [zeus-fast-2d]: один полный набор на пачку) — ветка head PR с этой
-# приставкой (её даёт `pantheon batch start`, lib/batch.py batch_branch)
-BATCH_BRANCH = "batch/"
-
-
-def batch_tests_problem(repo, sha, view, records):
-    """PR пачки (metis-0758): ветка head PR (headRefName ответа gh pr view) начинается с BATCH_BRANCH. Его тесты —
-    только запись полного набора FULL_TESTS на sha (full_tests_record), и при зелёном CI: пачка сводит правки
-    нескольких задач, а CI на PR и узкая запись гонят только затронутое. Есть такая запись, PR не пачки или у
-    репозитория нет строки в FULL_TESTS (полный набор не задан — как раньше) — None; записи нет — текст причины."""
-    branch = view.get("headRefName") if isinstance(view, dict) else None
-    if not isinstance(branch, str) or not branch.startswith(BATCH_BRANCH):
-        return None
-    if not FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()):
-        return None
-    if any(isinstance(r, dict) and r.get("kind") == "tests" and r.get("sha") == sha and isinstance(r.get("repo"), list)
-           and str(repo).lower() in [str(x).lower() for x in r["repo"]] and full_tests_record(repo, r)
-           for r in records):
-        return None
-    return (f"PR пачки (ветка {branch}): засчитывается только запись полного набора тестов (FULL_TESTS) на "
-            f"{sha[:12]}, а её нет — узкая запись и CI на PR гонят только затронутое")
-
-
-# узкая запись на запасном пути (metis-0734, «да» владельца 05.11): PR вне ядра — затронутые тесты вместо полного
-# набора. Схема — как у дозапуска metis-0735: cmd, files (прогнанные метки), map (sha256 карты affected-map.json);
-# база дифф — в самой команде (`--base <SHA>`), второго поля для неё нет. Не в зеркале lib/merge.py: Touch ID сливает
-# ядро, а ему нужен полный набор
+# узкая запись на запасном пути (metis-0734, «да» владельца 05.11; с metis-1050 09.11 — и для ядра и пачки):
+# затронутые тесты вместо полного набора. Схема — как у дозапуска metis-0735: cmd, files (прогнанные метки), map
+# (sha256 карты affected-map.json); база дифф — в самой команде (`--base <SHA>`), второго поля для неё нет.
+# narrow_tests_record, narrow_map_path и MAP_HASH_RE — в зеркале lib/merge.py (сверяет test_merge): проход Touch ID
+# сверяет базу и карту через GitHub API, git у него нет
 MAP_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -1856,9 +1834,9 @@ def _billing_problem(repo, pr, sha, narrow=None, base_oid=None):
     """Запасной путь (metis-0655, решение владельца 02.11): CI на head не запускался из-за лимита минут или оплаты
     GitHub Actions (ci_billing) — вместо CI засчитывается запись tests на этот SHA и этот репозиторий из журнала
     шлюза (ту же пишет хук guard на `pantheon review test` в любой сессии) с командой полного набора FULL_TESTS
-    (full_tests_record). narrow — папка слияния, если PR не задевает ядро (metis-0734): тогда годится и узкая запись
-    (narrow_tests_record), если её база — merge-base head и base PR base_oid, а карта — из дерева head
-    (_narrow_problem); у PR ядра (narrow None) — только полный набор. Есть — пропуск с предупреждением; нет, журнал не
+    (full_tests_record). narrow — папка слияния: годится и узкая запись (narrow_tests_record, metis-0734; с
+    metis-1050 — и у PR ядра), если её база — merge-base head и base PR base_oid, а карта — из дерева head
+    (_narrow_problem); без папки (narrow None) — только полный набор. Есть — пропуск с предупреждением; нет, журнал не
     читается или у репозитория нет FULL_TESTS — отказ (с командой записи, если она известна). Возврат, как у
     _ci_problem, — (текст отказа или None, предупреждения пропуска)."""
     where = f"{repo}#{pr}@{sha[:12]}"
@@ -1879,19 +1857,16 @@ def _billing_problem(repo, pr, sha, narrow=None, base_oid=None):
                       f"тестов на этом коммите) на {where}",)
     narrows = [(r, got) for r in mine for got in [narrow_tests_record(repo, r)] if got]
     note = ""
-    if narrows and narrow is None:
-        note = (" Узкая запись (--affected) на этом коммите есть, но PR задевает ядро защит — засчитывается только "
-                "полный набор.")
-    elif narrow is not None:
+    if narrow is not None:
         whys = []
         for r, (base, mp) in narrows:
             why = _narrow_problem(narrow, repo, sha, str(base_oid or ""), base, mp)
             if why is None:
                 return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный узкий прогон (затронутые "
-                              f"PR тесты, файлов {len(r['files'])}, PR не задевает ядро) на {where}",)
+                              f"PR тесты, файлов {len(r['files'])}) на {where}",)
             whys.append(why)
         note = (f" Узкая запись есть, но не засчитана: {whys[-1]}." if whys else "") + (
-            " PR не задевает ядро — годится и узкий прогон: из корня чистой копии на этом коммите "
+            " Годится и узкий прогон: из корня чистой копии на этом коммите "
             "`pantheon outside test --affected --wait 590` (затронутые тесты от merge-base с origin/main).")
     return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…», job "
             f"не стартовал). Запасной путь — местный полный прогон с записью на этом коммите (засчитывается только "
@@ -2859,27 +2834,19 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if view is None:
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
-    why = batch_tests_problem(repo, sha, view, records)  # PR пачки — только полный набор на head (metis-0758)
-    if why:
-        cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower())
-        return (f"{why}. Из корня чистой копии на {sha[:12]} запусти `pantheon outside test --wait 590` (Bash не в "
-                "фоне, timeout 600000 мс): плановый проход прогонит `.pantheon-verify` вне окна и сам напишет запись; "
-                f"код 75 — итога ещё нет, смотри `pantheon outside status <ID>`. Вариант — `pantheon review test -- "
-                f"{cmd}` не в фоне. {advice}")
-    core_why = MERGE_CORE
     if protect:
         files = pr_files()
         why = _version_problem(files)
         if why:
             return f"{why}. {MERGE_VERSION}. {advice}"
-        why = core_why = _core_problem(repo, pr, sha, view, files, cwd, tips)
+        why = _core_problem(repo, pr, sha, view, files, cwd, tips)
         # Д3 через Touch ID (metis-0285) или фразу владельца (metis-0959): его согласие на этот PR и этот SHA — строка
         # тика в owner-log. Пускает
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
-    # узкая запись тестов на запасном пути — только в защитах и только PR вне ядра (metis-0734)
-    why, notes = _ci_problem(repo, pr, sha, view, narrow=cwd if core_why is None else None)
+    # узкая запись тестов на запасном пути — в защитах, у PR ядра и пачки тоже (metis-0734, 1050)
+    why, notes = _ci_problem(repo, pr, sha, view, narrow=cwd)
     if why:
         return f"{why}. {advice}"
     if carried:
