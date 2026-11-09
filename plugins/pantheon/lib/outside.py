@@ -176,11 +176,12 @@ sandbox-exec не запускается; на Linux по ps) за окно вы
 вывода прогон не гасится. CPU не узнать (ни libproc, ни ps) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
 всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
 на чтение, на запись нет; STATE/outside/env и test-env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
-~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
-состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon, ~/Library/LaunchAgents,
-профили оболочки, ~/.gitconfig, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config и
-.git/hooks папок реестра) и сети к портам браузеров (9222, 9333–9339) и
-местного прокси (6152, 6153) на любом адресе.
+~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer; каналы
+«от владельца», metis-1026: ключи демона ~/.claude/daemon, ~/.claude/.credentials*, ~/.claude/ide и terminal-notifier —
+owner_channels), записи в состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon,
+~/Library/LaunchAgents, профили оболочки, ~/.gitconfig, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config
+и .git/hooks папок реестра; доска VIEW и сокет hookd HOOKD_DIR — metis-1026), Apple Events (osascript, System Events)
+и сети к портам браузеров (9222, 9333–9339) и местного прокси (6152, 6153) на любом адресе.
 
 Запись tests для шлюза слияния — только у проверки проекта (без --script; у serve её нет никогда): тесты кончились
 кодом 0, HEAD и дерево до и после те же, команда не пустая (true, echo… — отказ; у скрипта package.json — по его
@@ -772,6 +773,17 @@ def _q(p):
     return '"' + p.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def owner_channels(h):
+    """Каналы, через которые код прогона сказал бы «от владельца» (metis-1026, модель угроз К1, К6): ключи демона Claude
+    Code (~/.claude/daemon — control.key и roster.json дают ввод в PTY любой сессии, то есть строку в owner-log),
+    вход в аккаунт (~/.claude/.credentials*), ключи IDE (~/.claude/ide) и terminal-notifier (NOTIFIER_PATHS: по
+    щелчку выполняет команду от имени владельца вне песочницы). Правила file-read* для профиля."""
+    claude = os.path.join(h, ".claude")
+    return [f"(subpath {_q(os.path.join(claude, 'daemon'))})", f"(subpath {_q(os.path.join(claude, 'ide'))})",
+            f'(regex #"^{re.escape(os.path.join(claude, ".credentials"))}")'] + \
+           [f"(subpath {_q(x)})" for x in P.NOTIFIER_PATHS]
+
+
 def profile_text(roots=(), db_ports=()):
     """Профиль sandbox-exec: всё, кроме ключей, записи в состояние и ядро и портов браузеров и прокси. db_ports — прогон
     с ключами тестов (metis-1016): наружу только TCP на эти порты, местные адреса и DNS (сокет mDNSResponder). Хост
@@ -784,11 +796,14 @@ def profile_text(roots=(), db_ports=()):
            [f"(literal {_q(os.path.join(h, x))})" for x in secret_files] + \
            ['(regex #"/\\.env[^/]*$")', '(regex #"/secrets(/|$)")'] + \
            [f"(subpath {_q(os.path.realpath(env_dir()))})",       # dev-ключи проектов: их отдаёт окружением проход
-            f"(subpath {_q(os.path.realpath(test_env_dir()))})"]  # ключи тестов (metis-1016) — так же
+            f"(subpath {_q(os.path.realpath(test_env_dir()))})"] + \
+           owner_channels(h)                                        # ключи демона, notifier (metis-1026)
     wdirs = [P.STATE, P.PANTHEON, os.path.join(h, ".claude"), os.path.join(h, ".local", "bin"),
              os.path.join(h, ".local", "share", "pantheon"), os.path.join(h, "Library", "LaunchAgents"),
              os.path.join(h, ".config", "git"), os.path.join(h, ".nvm"),
-             os.path.join(h, "Library", "Caches", "pantheon-sandbox")]   # node владельца и кэши окон ролей
+             os.path.join(h, "Library", "Caches", "pantheon-sandbox"),   # node владельца и кэши окон ролей
+             # metis-1026 (К4, К10): галочка в доске — «ход владельца» для consent; сокет hookd — ответ guard всем
+             P.VIEW, P.HOOKD_DIR]
     wfiles = [os.path.join(h, x) for x in (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile",
                                           ".profile", ".gitconfig")]
     write = [f"(subpath {_q(os.path.realpath(x))})" for x in wdirs] + [f"(literal {_q(x)})" for x in wfiles]
@@ -809,6 +824,9 @@ def profile_text(roots=(), db_ports=()):
         '(allow file-read* (regex #"/\\.env\\.(example|sample|template)$"))',
         '(deny file-read* (regex #"/secrets(/|$)"))',   # secrets/ закрыта целиком, и шаблон в ней тоже
         '(deny mach-lookup (global-name "com.apple.SecurityServer"))',
+        # metis-1026 (К7): ввод в окна владельца через osascript и System Events
+        '(deny appleevent-send)',
+        '(deny mach-lookup (global-name "com.apple.coreservices.appleevents"))',
         "(deny file-write*\n  " + "\n  ".join(write) + ")",
         *db,
         "(deny network-outbound\n  " + "\n  ".join(net) + ")",

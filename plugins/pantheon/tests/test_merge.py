@@ -2944,13 +2944,13 @@ def test_phrase_core_touchid_only():
     b.run(t=T0 + 120, extra=AWAY, attrs={"m": {"PHRASE_CORE": True}})
     check("1026: точка возврата PHRASE_CORE (после metis-0972) — фраза снова сливает ядро", merged_once(b),
           b.outs[-1])
-    for files, want in (([CORE_FILE], False), (["README.md"], True)):
+    for files, want in (([CORE_FILE], False), (["README.md"], True), (None, False)):
         b = Box()
         b.request()
         r = subprocess.run([PY311, "-I", "-c", FINGER, REPO, str(PR), json.dumps(files)], env=b.env(T0 + 120),
                            capture_output=True, text=True, timeout=60)
         out = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else None
-        check(f"1026: finger под замком сверяет ядро заново — {files[0]}: "
+        check(f"1026: finger под замком сверяет ядро заново — {files[0] if files else 'список файлов не получен'}: "
               + ("слито" if want else "строки согласия нет, заявка ждёт"),
               out is not None and out[0] is want and (bool(b.approve_lines()) is want)
               and (b.req() is None) is want, (r.stdout, r.stderr))
