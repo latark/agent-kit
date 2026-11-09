@@ -67,15 +67,21 @@
     `outside test --script ИМЯ` этого проекта: ни проверка проекта без --script (полный набор мог бы писать в базу из
     окружения), ни установка зависимостей копии, ни сервер, ни другие проекты. Прогон с ключом — со своим профилем
     profile-db.sb: сеть наружу только TCP на порт из строки подключения (нет порта — 5432), местные адреса и DNS; в
-    PATH — pg_dump из libpq (LIBPQ_BINS, если стоит). Значения вырезаются из журнала прогона, хвоста итога и среза
+    PATH — pg_dump из libpq (LIBPQ_BINS, если стоит). Вывод такого прогона идёт в сырой журнал
+    STATE/outside/test-env/raw/<ID>.log (закрыт окнам вместе с test-env), а в runs/<ID>.log — только вычищенным после
+    выхода процесса (flush_raw, argus #410-2 Б1); брошенный сырой журнал (заход убит SIGKILL, сторож, перезагрузка)
+    удаляют recover_results и сторож (drop_raw). Значения вырезаются из журнала прогона, хвоста итога и среза
     процессов (redact: значение → <ИМЯ>, пароль → ***), в итоге и журнале outside.jsonl — только имена (keys); и в
     последней строке вывода, которую пишут why итога и событие test-silent при гашении по тишине, и в причине события
     stop (TestWatch.clean_why, argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
     на чтение (argus #410 Б2): denyRead песочницы Bash и правило Read(…/**) для Read, Grep, Glob в сборке окон
     (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
     Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
-    данные на чужой хост на том же порту; пока идёт прогон, окно роли читает окружение и командную строку процесса
-    (KERN_PROCARGS2, как у сервера); скрипт пишет роль, и закодированное значение вырезание не поймает. Это
+    данные на чужой хост на том же порту, а localhost:* открыт целиком — через местные прокси и службы (прокси
+    песочницы Claude Code, Surge, syncthing) скрипт выйдет в сеть шире порта базы (argus #410-2 С1); пока идёт
+    прогон, окно роли читает окружение и командную строку процесса (KERN_PROCARGS2, как у сервера); скрипт пишет
+    роль, поэтому он может вывести закодированное значение (вырезание его не поймает) или записать значение как есть
+    в файл worktree, который окна читают (С2). Это
     намеренный обход, граница — песочница и «да» владельца на ключ к боевой базе;
   - опора — клон реестра (metis-0614, проверка безопасности): .git-файл папки заявки принимается, только если ведёт в
     <клон>/.git/worktrees/<имя> клона из папок окна (trusted_clone, без запуска git); конфиг клона с include*,
@@ -1682,6 +1688,72 @@ def new_log(rid):
     return p, os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
 
 
+def raw_dir():
+    """Сырые журналы прогонов с ключами тестов (argus #410-2 Б1): внутри test_env_dir() — её окнам закрывает
+    WINDOW_SECRET_DIRS, прогонам и серверам — профиль. Окна читают runs/, поэтому вывод такого прогона идёт сюда, а в
+    runs/<ID>.log попадает только вычищенным (flush_raw); брошенный — убирают recover_results и сторож (drop_raw)."""
+    return os.path.join(test_env_dir(), "raw")
+
+
+def new_raw(name):
+    """Сырой журнал прогона с ключами: raw_dir()/<name>.log, новый (O_EXCL, 600) → (путь, fd)."""
+    d = raw_dir()
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    p = os.path.join(d, name + ".log")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(p)   # остаток прерванного захода с тем же ID: сырое не дописывается к сырому
+    return p, os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+
+
+def _drop_raw_file(p):
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(p)
+    with contextlib.suppress(OSError):
+        os.rmdir(os.path.dirname(p))   # пустая папка не остаётся рядом с файлами ключей
+
+
+def flush_raw(raw, fd, keys):
+    """Сырой журнал raw — вычищенным (redact) в журнал прогона fd (runs/<ID>.log), сам raw удаляется в любом случае.
+    → True; не прочитать или не дописать — False (вывод прогона потерян, но открытым не лёг никуда)."""
+    if not raw:
+        return True
+    try:
+        with open(raw, "rb") as fh:
+            text = fh.read().decode("utf-8", "surrogateescape")
+        os.write(fd, redact(text, keys).encode("utf-8", "surrogateescape"))
+        return True
+    except OSError:
+        return False
+    finally:
+        _drop_raw_file(raw)
+
+
+def drop_raw(rid=None):
+    """Брошенные сырые журналы (заход убит SIGKILL, сторож, перезагрузка): у rid — его и повтора, без rid — все.
+    Значений ключей уже не вычистить наверняка (ключ мог смениться) — файл удаляется, в runs/<ID>.log пометка.
+    → [ID] удалённых."""
+    d = raw_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    out = []
+    for name in sorted(names):
+        base = name[:-len(".log")] if name.endswith(".log") else ""
+        own = base.removesuffix("-retry")
+        if not ID_RE.fullmatch(own) or (rid and own != rid):
+            continue
+        _drop_raw_file(os.path.join(d, name))
+        with contextlib.suppress(OSError):
+            log, fd = new_log(base)
+            try:
+                os.write(fd, "\nзаход прерван: вывод прогона с ключами тестов удалён, не вычищенным не сохранён\n".encode())
+            finally:
+                os.close(fd)
+        out.append(base)
+    return out
+
+
 # --- тесты --------------------------------------------------------------------------------------------------------
 
 def procs_of(pid, keys=None):
@@ -1917,8 +1989,24 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         if waited:
             save_result(qdir, rid, running)
     log, fd = new_log(rid + "-retry" if retried else rid)
+    # argus #410-2 Б1: вывод прогона с ключами — в сырой журнал в закрытой окнам папке, в runs/ — только вычищенный
+    raw, out = None, fd
+    if keys:
+        try:
+            raw, out = new_raw(rid + "-retry" if retried else rid)
+        except OSError as e:
+            os.close(fd)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "log": log,
+                                           "why": f"сырой журнал прогона с ключами не создан: {e}", "keys": sorted(keys)})
+
+    def settle():
+        """Сырой журнал закрыть и вычищенным дописать в runs/<ID>.log (flush_raw) → True, если перенесён."""
+        with contextlib.suppress(OSError):
+            os.close(out)
+        return flush_raw(raw, fd, keys)
+
     tmp = tempfile.mkdtemp(prefix="outside-")
-    code, timed_out = None, False
+    code, timed_out, hidden = None, False, True
     try:
         with contextlib.suppress(OSError):
             os.write(fd, (f"$ {line}  (папка {d}, {sha})\n" + (
@@ -1932,30 +2020,31 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             proc = subprocess.Popen(wrap(plan["argv"] if plan else argv,
                                          write_profile(roots, db_ports(keys) if keys else ())), cwd=d,
                                     env=sandbox_env(tmp, "test", keys=keys),
-                                    stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True)
+                                    stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
         except OSError as e:
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": f"команда не запустилась: {e}", "log": log})
         watch.pid = proc.pid
         try:
-            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=log,
+            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=raw or log,
                              hold=(lambda: heavy_waiting(proc.pid)) if heavy_bin() else None)   # metis-0901
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
             code = proc.wait()
         except Silent as e:      # завис без вывода и CPU: тот же журнал, что отказ запуска (metis-0770)
+            hidden, raw = settle(), None
             with contextlib.suppress(OSError):
-                os.write(fd, f"\n{e.why}\n".encode())
+                os.write(fd, f"\n{redact(e.why, keys)}\n".encode())
             log_event(kind="test-silent", id=rid, why=redact(e.why, keys))   # последняя строка вывода (argus #410 Б1)
-            redact_log(log, keys)
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": redact(e.why, keys), "log": log, "tail": redact(tail(log), keys),
                                            **({"keys": sorted(keys)} if keys else {})})
     finally:
+        if raw:   # metis-1016: вывод с ключами — в runs/ только вычищенным, сырой удалён
+            hidden = settle()
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)
-    hidden = redact_log(log, keys)   # metis-1016: значения ключей тестов не остаются в журнале прогона
     watch.marker()   # «стоп» пришёл, пока команда выходила с кодом, — до записи (T10c)
     sha2, clean2 = head_state(d)
     over = None
@@ -2027,7 +2116,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             append_full(entry)
         except OSError as e:
             res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + f"журнал full.jsonl: {e}"
-    for knote in ([f"журнал {log} не переписан без значений ключей тестов — не показывай его целиком"]
+    for knote in ([f"вывод прогона с ключами тестов не перенесён в {log} (сырой журнал удалён) — в журнале его нет"]
                   if not hidden else []) + ([f"из файла ключей тестов не переданы (не из {', '.join(TEST_KEYS)} или "
                                              f"пустые): {', '.join(kskip)}"] if kskip else []):
         res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + knote
@@ -2396,25 +2485,6 @@ def redact(text, keys):
     for s, mark in sorted(_secrets(keys).items(), key=lambda x: -len(x[0])):
         text = text.replace(s, mark)
     return text
-
-
-def redact_log(log, keys):
-    """Журнал прогона с ключами тестов переписать без их значений (вывод команды пишет сам процесс). Сбой — False."""
-    if not keys or not log:
-        return True
-    try:
-        with open(log, "rb") as fh:
-            text = fh.read().decode("utf-8", "surrogateescape")
-        clean = redact(text, keys)
-        if clean != text:
-            tmp = f"{log}.{os.getpid()}"
-            with open(tmp, "wb") as fh:
-                fh.write(clean.encode("utf-8", "surrogateescape"))
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, log)
-        return True
-    except OSError:
-        return False
 
 
 # --- серверы: запуск ----------------------------------------------------------------------------------------------
@@ -3336,9 +3406,12 @@ def recover_results(t=None):
     потеряна»; running — failed «заход прерван», но только то, что сам заход записал в STATE/outside/runs/<ID>.json
     (файл из кэша окна роль может подложить; у старых записей без qdir итог ищется во всех папках заявок, где он
     тоже running). Итог пишется минимальным объектом из своих полей, чужое содержимое
-    result.json не копируется. Serve не трогает: им ведёт свой проход. → число."""
+    result.json не копируется. Serve не трогает: им ведёт свой проход. Сырые журналы прогонов с ключами тестов
+    (raw_dir) под замком ничьи — заход, что их писал, убит: удаляются (drop_raw, argus #410-2 Б1). → число."""
     t = P.now() if t is None else t
     n = 0
+    for rid in drop_raw():
+        log_event(id=rid, kind="recovered", why="сырой журнал прогона с ключами тестов удалён")
     qdirs = {q for q, _ in queue_dirs()}
     for qdir in sorted(qdirs):
         dfd = _open_dir(qdir)
@@ -3475,6 +3548,7 @@ def watchdog(t=None):
             os.kill(holder, signal.SIGKILL)
         for k in kids:
             kill_group(k)
+        drop_raw(rid)   # заход убит до flush_raw: сырой журнал с ключами тестов не остаётся (argus #410-2 Б1)
         qdirs = {q for q, _ in queue_dirs()}
         targets = [qdir] if qdir in qdirs else [q for q in sorted(qdirs) if _result_running(q, rid)]
         for q in targets or [None]:

@@ -119,6 +119,109 @@ check("test --script: outside.jsonl без значений, имена — ес
 _rc, _st = say("athena-x", "status", rid)
 check("status: без значений", not leaks(_st), leaks(_st))
 check("test --script: записи tests для шлюза нет", not tests_for(git(APP, "rev-parse", "HEAD")))
+check("test --script: сырой журнал после прогона удалён (папки raw нет)", not os.path.exists(O.raw_dir()),
+      os.listdir(O.raw_dir()) if os.path.isdir(O.raw_dir()) else None)
+
+# --- середина прогона и убитый заход: в runs/ значения нет ни в какой момент (argus #410-2 Б1) --------------------
+RUNS = O.root("runs")
+_real_wait = O.wait_proc
+
+
+def _read_all(d):
+    if not os.path.isdir(d):
+        return {}
+    out = {}
+    for n in os.listdir(d):
+        with contextlib.suppress(OSError):
+            with open(os.path.join(d, n), errors="replace") as fh:
+                out[n] = fh.read()
+    return out
+
+
+_mid = {}
+
+
+def _snap_wait(proc, *a, **kw):
+    proc.wait()   # вывод команды весь записан, проход его ещё не перенёс — снимок того, что видят окна
+    _mid["runs"], _mid["raw"] = _read_all(RUNS), _read_all(O.raw_dir())
+    return _real_wait(proc, *a, **kw)
+
+
+O.wait_proc = _snap_wait
+try:
+    q, rid = new_request("athena-x", APP, "test", "--script", "test")
+    run_pass()
+finally:
+    O.wait_proc = _real_wait
+res = O.load_result(q, rid) or {}
+check("середина прогона: в runs/ (журналы и итоги всех прогонов) значений нет",
+      bool(_mid.get("runs")) and not leaks(" ".join(_mid["runs"].values())),
+      {n: leaks(v) for n, v in _mid.get("runs", {}).items() if leaks(v)})
+check("середина прогона: вывод с ключом — в сыром журнале в папке ключей тестов (её закрывает WINDOW_SECRET_DIRS)",
+      O.raw_dir().startswith(TENV + os.sep) and list(_mid.get("raw", {})) == [rid + ".log"]
+      and URL_APP in _mid["raw"][rid + ".log"], list(_mid.get("raw", {})))
+check("середина прогона: после выхода вывод перенесён вычищенным, сырой удалён",
+      res.get("state") == "done" and "url=<SUPABASE_DB_URL>" in open(res["log"]).read()
+      and not leaks(open(res["log"]).read()) and not os.path.exists(O.raw_dir()), (res.get("state"), res.get("why")))
+
+# заход убит SIGKILL (сторож, перезагрузка): ни finally, ни переноса — os._exit в дочернем процессе посреди прогона
+def _die_wait(proc, *a, **kw):
+    proc.wait()
+    os._exit(9)
+
+
+q, rid = new_request("athena-x", APP, "test", "--script", "test")
+_pid = os.fork()
+if _pid == 0:
+    try:
+        O.wait_proc = _die_wait
+        run_pass()
+    finally:
+        os._exit(3)   # до _die_wait не дошло — тест увидит код 3
+_st = os.waitpid(_pid, 0)[1]
+_killed_log = open(os.path.join(RUNS, rid + ".log"), errors="replace").read() if os.path.exists(
+    os.path.join(RUNS, rid + ".log")) else ""
+_raw = os.path.join(O.raw_dir(), rid + ".log")
+check("убитый заход: процесс прохода умер посреди прогона (код 9)", os.waitstatus_to_exitcode(_st) == 9,
+      os.waitstatus_to_exitcode(_st))
+check("убитый заход: в runs/<ID>.log значений нет", not leaks(_killed_log) and "$ " in _killed_log, leaks(_killed_log))
+check("убитый заход: сырой журнал остался только в папке ключей тестов", os.path.exists(_raw)
+      and URL_APP in open(_raw).read())
+O.recover_results()
+res = O.load_result(q, rid) or {}
+_after = _read_all(RUNS)
+check("recover_results: сырой журнал удалён, папки raw нет", not os.path.exists(_raw) and not os.path.exists(O.raw_dir()),
+      os.listdir(O.raw_dir()) if os.path.isdir(O.raw_dir()) else None)
+check("recover_results: заход помечен сбоем, в runs/<ID>.log — пометка об удалении, значений в runs/ нет",
+      res.get("state") == "failed" and "удалён" in _after.get(rid + ".log", "") and not leaks(" ".join(_after.values())),
+      (res.get("state"), _after.get(rid + ".log", "")[-200:]))
+check("recover_results: событие recovered о сыром журнале", any("сырой журнал" in (e.get("why") or "")
+                                                            for e in events(rid, "recovered")), events(rid))
+
+# сторож: живой заход дольше WATCH_RUNNING — убит SIGKILL, его сырой журнал удаляется
+_wrid = "20261109-010101-bbbbbb"
+os.makedirs(O.raw_dir(), mode=0o700, exist_ok=True)
+put(O.raw_dir(), _wrid + ".log", f"url={URL_APP}\n")
+put(O.raw_dir(), "20261109-020202-cccccc.log", f"url={URL_APP}\n")   # чужой прогон: сторож его не трогает
+_holder = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+TEST_PROCS.append(_holder)
+_saved = (O._watch_due, O._run_holder, O.P.locked, O.P.alert)
+O._watch_due = lambda t=None: [("running", None, _wrid)]
+O._run_holder = lambda: _holder.pid
+O.P.locked = lambda name: True
+O.P.alert = lambda *a, **kw: None
+try:
+    _n = O.watchdog()
+finally:
+    O._watch_due, O._run_holder, O.P.locked, O.P.alert = _saved
+    _holder.wait(timeout=10)
+check("сторож: заход убит, его сырой журнал удалён, чужой — цел", _n == 1
+      and not os.path.exists(os.path.join(O.raw_dir(), _wrid + ".log"))
+      and os.path.exists(os.path.join(O.raw_dir(), "20261109-020202-cccccc.log")), _read_all(O.raw_dir()).keys())
+check("сторож: в runs/<ID>.log пометка, значения нет", "удалён" in _read_all(RUNS).get(_wrid + ".log", "")
+      and not leaks(" ".join(_read_all(RUNS).values())))
+O.drop_raw()
+check("drop_raw без ID: убраны все брошенные, папки raw нет", not os.path.exists(O.raw_dir()))
 
 # --- гашение по тишине: последняя строка вывода со строкой базы (argus #410 Б1) ------------------------------------
 # сторож тишины пишет последнюю строку вывода в why итога и события test-silent; CPU дерева — 0 (гасим наверняка, не
@@ -144,6 +247,10 @@ check("тишина: outside.jsonl без значений", not leaks(_ev), lea
 _resj = json.dumps(res) + (open(os.path.join(q, rid + ".json")).read() if os.path.exists(os.path.join(q, rid + ".json"))
                            else "")
 check("тишина: итог (why, tail) без значений", not leaks(_resj), leaks(_resj))
+_sl = [ln for ln in (res.get("tail") or "").splitlines() if "url=<SUPABASE_DB_URL>" in ln]
+check("тишина: вывод прогона перенесён до хвоста итога и до строки о тишине (вычищенным)",
+      len(_sl) == 2 and not _sl[0].startswith("тишина") and _sl[1].startswith("тишина"), res.get("tail"))
+check("тишина: сырой журнал удалён", not os.path.exists(O.raw_dir()))
 check("тишина: журнал прогона без значений", not leaks(open(res["log"]).read() if res.get("log") else "x" + PW))
 # событие stop прогона с ключами (снят «стопом» или superseded) — та же причина через clean_why
 _w = O.TestWatch("20261109-000000-aaaaaa", q, "athena-x", APP)
