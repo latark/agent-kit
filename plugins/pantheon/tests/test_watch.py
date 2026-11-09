@@ -4943,6 +4943,47 @@ def test_resume_picks_saved_session_0499():
     check(json.load(open(e.st("plugins", "respawn-ok", "rk-dir.json"))).get("sessionId") == "5a5a5a5a-1111-4111-8111-111111111111",
           "0499: saved не записал id в метку «можно»")
 
+def test_goal_dates_0829():
+    """metis-0829 п. 4: цель или бюджет в directions.toml с прошедшей датой → одна тревога координатору направления на
+    (направление, поле, дата); повтор прохода молчит; дата не прошла или дат нет — тревоги нет; новая прошедшая дата —
+    новая тревога; поле обновили — отметка снята и следующая прошедшая дата снова тревожит."""
+    e = Env()
+    toml = os.path.join(e.pantheon, "directions.toml")
+
+    def put(goal, budget=None):
+        body = f'[[direction]]\nname = "gl-dir"\ngoal = "{goal}"\n' + (f'budget = "{budget}"\n' if budget else "")
+        open(toml, "w", encoding="utf-8").write(body)
+
+    def n(what="устарела"):
+        return e.alerts().count(what)
+
+    put("выпуск сайта до 10.10")
+    e.run("watch", t=T0)
+    check(n() == 1 and "gl-dir" in e.alerts() and "цель устарела" in e.alerts() and "Координатору gl-dir" in e.alerts(),
+          f"0829: прошла дата цели — нет одной тревоги координатору: {e.alerts()!r}")
+    e.run("watch", t=T0 + 300)
+    e.run("watch", t=T0 + 600)
+    check(n() == 1, f"0829: повтор прохода дал вторую тревогу: {e.alerts()!r}")
+    put("выпуск сайта до 20.10")
+    e.run("watch", t=T0 + 900)
+    check(n() == 1, "0829: новая дата ещё не прошла — тревога на ровном месте")
+    put("выпуск сайта до 12.10")
+    e.run("watch", t=T0 + 1200)
+    check(n() == 2, f"0829: дата снова прошла (после обновления) — тревоги нет: {e.alerts()!r}")
+    put("выпуск сайта до 11.10")
+    e.run("watch", t=T0 + 1500)
+    check(n() == 3, "0829: другая прошедшая дата — новой тревоги нет")
+    put("без дат, версия 1.0")
+    e.run("watch", t=T0 + 1800)
+    check(n() == 3, "0829: в цели дат нет — тревога")
+    put("цель на сегодня " + time.strftime("%d.%m", time.localtime(T0)))
+    e.run("watch", t=T0 + 2100)
+    check(n() == 3, "0829: срок сегодня ещё не прошёл — тревога")
+    put("цель живая до 25.10", "бюджет до 09.10")
+    e.run("watch", t=T0 + 2400)
+    check(n() == 4 and "бюджет недели устарела" in e.alerts(), f"0829: бюджет с прошедшей датой — нет тревоги: {e.alerts()!r}")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
