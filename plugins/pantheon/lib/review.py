@@ -16,6 +16,7 @@ __all__ = [
     "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "_review_verdict", "_review_git", "_review_state",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
     "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report", "NODE_MODULES_LINK", "tree_clean",
+    "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "criteria_accepted", "review_criteria_ticks",
 ]
 
 
@@ -28,10 +29,130 @@ REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
-                "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss <owner/repo>#<PR> --by <argus> --text \"…\" | sample | "
-                "status [<owner/repo> <PR>] | report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
+                "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый проверенный "
+                "пункт «Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
+                "<owner/repo>#<PR> --by <argus> --text \"…\" | sample | criteria <id задачи>… | status [<owner/repo> <PR>] "
+                "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
 # Правило засчитывания вердиктов (REVIEW_CHECKLIST, OPUS_RAN, RAN_MODEL, review_accept_full, review_accept_counts,
 # review_records) — в lib/review_rules.py, ядре защит (metis-0858): здесь только P.<имя>, копии правила нет.
+
+# metis-1004: вердикт argus по пункту «Готово, когда» задачи из Closes — `--criteria "<id>#<N> <хеш> да|нет <опора>"` у
+# accept и reject, флаг на пункт (разбор — tasks.parse_criterion). Хеш — tasks.criterion_hash текста пункта: правка
+# пункта после приёмки его меняет. Хук guard кладёт значения в запись полем "criteria", autoclose при слиянии PR
+# отмечает пункты с «да» из засчитанных «принять» на head слияния (criteria_accepted). Готовые строки с хешами —
+# `pantheon review criteria <id>`; в них опора — заглушка CRITERIA_STUB, её надо заменить.
+CRITERIA = "criteria"
+CRITERIA_FMT = '"<id задачи>#<номер пункта> <хеш 12 знаков> да|нет <опора: файл:строка или тест>"'
+CRITERIA_STUB = "ОПОРА"
+
+
+def _review_criteria_problem(sub, items):
+    """Значения --criteria у accept|reject (metis-1004) → текст ошибки или None. Каждое — в формате CRITERIA_FMT, без
+    повторов пункта; задача есть, пункт N в её «Готово, когда» есть и не заглушка, хеш — от его нынешнего текста;
+    опора — не заглушка «ОПОРА». У accept «нет» — ошибка (пункт не выполнен — это «вернуть»); вердикт не по всем
+    пунктам можно (ревью #401 Б1): пункты вне PR («часть») и проверяемые после слияния остаются без флага, и autoclose
+    сам ставит задаче review «неотмечено N». Команда с кодом не 0 записи не даёт (хук пишет только успешную)."""
+    T = P.tasks_mod()
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    seen = {}
+    for v in items:
+        got = T.parse_criterion(v)
+        if not got:
+            return f"--{CRITERIA} «{v[:80]}» не в формате {CRITERIA_FMT}"
+        tid, n, h, verdict, basis = got
+        if basis == CRITERIA_STUB:
+            return f"--{CRITERIA} {tid}#{n}: вместо «{CRITERIA_STUB}» — опора: файл:строка или тест"
+        if n in seen.get(tid, ()):
+            return f"--{CRITERIA} {tid}#{n} указан дважды"
+        if sub == "accept" and verdict == "нет":
+            return (f"--{CRITERIA} {tid}#{n} «нет» в «принять»: пункт не выполнен — это «вернуть». Запиши `pantheon "
+                    f"review reject …` с теми же --{CRITERIA}")
+        if tid not in tasks:
+            return f"--{CRITERIA} {tid}#{n}: задачи {tid} нет (или её шапка не проходит проверку)"
+        crit = T.done_criteria(tasks[tid][2])
+        if not 1 <= n <= len(crit) or T._is_stub(crit[n - 1][1]):
+            return f"--{CRITERIA} {tid}#{n}: в «Готово, когда» задачи {tid} нет пункта {n} (пунктов {len(crit)})"
+        if T.criterion_hash(crit[n - 1][1]) != h:
+            return (f"--{CRITERIA} {tid}#{n}: хеш {h} не от нынешнего текста пункта — пункт изменён или номер не тот; "
+                    f"строки с хешами — `pantheon review criteria {tid}`")
+        seen.setdefault(tid, set()).add(n)
+    return None
+
+
+def review_criteria_cmd(ids):
+    """pantheon review criteria <id>… (metis-1004): пункты «Готово, когда» задач с номером, отметкой и готовой строкой
+    --criteria с хешем; argus меняет «да» на «нет», если пункт не выполнен, и «ОПОРА» — на файл:строка или тест."""
+    T = P.tasks_mod()
+    if not ids or any(not T.ID_RE.fullmatch(i) for i in ids):
+        print("pantheon review criteria <id задачи>…", file=sys.stderr)
+        return 2
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    for tid in ids:
+        if tid not in tasks:
+            print(f"pantheon review criteria: задачи {tid} нет (или её шапка не проходит проверку)", file=sys.stderr)
+            return 1
+        items = [(i, ok, x) for i, (ok, x) in enumerate(T.done_criteria(tasks[tid][2]), 1) if not T._is_stub(x)]
+        if not items:
+            print(f"{tid}: пунктов «Готово, когда» нет — --{CRITERIA} не нужен")
+        for i, ok, x in items:
+            print(f"{tid}#{i} [{'x' if ok else ' '}] {x}")
+            print(f'  --{CRITERIA} "{tid}#{i} {T.criterion_hash(x)} да {CRITERIA_STUB}"')
+    return 0
+
+
+def criteria_accepted(recs, pr, head, base, core):
+    """Пункты, которые argus принял на head слияния PR (metis-1004) → {id задачи: {номер пункта: хеш}}. recs — журнал
+    шлюза по PR (review_records). В счёт — «принять» argus на этот PR и ровно этот head, как у шлюза: последний вердикт
+    своего рецензента (пара session_id, agent_id), полный перечень, а у PR ядра (core) ещё Opus (review_accept_counts),
+    base записи — base PR (base_counts), без лживого поля «вернули» (returned_lie), позже каждого «вернуть» PR, кроме
+    снятого «принять» того же рецензента на том же head (как _floor шлюза). Последний вердикт какого-нибудь
+    рецензента на head — «вернуть» — не в счёт ничего. Пункт принят, если в засчитанных «принять» он есть, у всех —
+    «да» и один хеш. Переносов «принять» с прошлого head нет: запись другого head не отмечает ничего."""
+    T, rules = P.tasks_mod(), P.merge_mod()
+    ok = P.review_accept_counts if core else P.review_accept_full
+    head = str(head or "").lower()
+    if not REVIEW_SHA.fullmatch(head):
+        return {}
+    verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+                and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
+                and isinstance(r.get("sha"), str)]
+
+    def who(r):
+        return (r["by"].get("session_id") or "", r["by"].get("agent_id") or "")
+
+    floor = -1
+    for i, r in enumerate(verdicts):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and who(a) == who(r) and a["sha"].lower() ==
+                                             r["sha"].lower() and P.review_accept_full(a) for a in verdicts[i + 1:]):
+            floor = i
+    last = {}
+    for i, r in enumerate(verdicts):
+        if r["sha"].lower() == head:
+            last[who(r)] = (i, r)
+    if any(r["kind"] == "reject" for _, r in last.values()):
+        return {}
+    votes = {}
+    for i, r in sorted(last.values(), key=lambda x: x[0]):
+        if i <= floor or not ok(r) or not rules.base_counts(r, {"baseRefName": base}) or rules.returned_lie(r, verdicts):
+            continue
+        for v in r.get("criteria") if isinstance(r.get("criteria"), list) else []:
+            got = T.parse_criterion(v)
+            if got:
+                votes.setdefault((got[0], got[1]), []).append((got[2], got[3]))
+    out = {}
+    for (tid, n), vs in sorted(votes.items()):
+        if all(v == "да" for _, v in vs) and len({h for h, _ in vs}) == 1:
+            out.setdefault(tid, {})[n] = vs[0][0]
+    return out
+
+
+def review_criteria_ticks(repo, row):
+    """Для autoclose (metis-1004): строка кэша слитого PR (number, head, base, core) → criteria_accepted по журналу
+    шлюза. Нет head в строке (кэш до metis-1004) — пусто; нет core — как ядро (строже)."""
+    n, head = row.get("number"), str(row.get("head") or "").lower()
+    if not isinstance(n, int) or isinstance(n, bool) or not REVIEW_SHA.fullmatch(head):
+        return {}
+    return criteria_accepted(P.review_records(repo, n), n, head, row.get("base"), row.get("core") is not False)
 
 
 def _review_verdict(sub, args):
@@ -45,9 +166,9 @@ def _review_verdict(sub, args):
         a = args[i]
         if flags and a.startswith("--") and len(a) > 2:
             name, eq, val = a[2:].partition("=")
-            if name not in P.REVIEW_CHECKLIST:
+            if name not in P.REVIEW_CHECKLIST and name != CRITERIA:
                 return pos, {}, f"неизвестный флаг --{name}. Формат: {fmt}"
-            if name in checklist:
+            if name in checklist and name != CRITERIA:
                 return pos, {}, f"--{name} указан дважды. Формат: {fmt}"
             if not eq:
                 if i + 1 >= len(args):
@@ -56,7 +177,12 @@ def _review_verdict(sub, args):
                 val = args[i]
             if val.strip().startswith("--"):  # `--opened --ran …`: имя флага — не значение
                 return pos, {}, f"значение --{name} начинается с «--»: похоже, пропущено значение. Формат: {fmt}"
-            checklist[name] = val.strip()
+            if name == CRITERIA:  # metis-1004: по флагу на пункт, как в merge_gate.verdict_parse
+                if not val.strip():
+                    return pos, {}, f"--{CRITERIA} пустой. Формат пункта: {CRITERIA_FMT}"
+                checklist.setdefault(CRITERIA, []).append(val.strip())
+            else:
+                checklist[name] = val.strip()
         else:
             pos.append(a)
         i += 1
@@ -438,6 +564,8 @@ def review_cmd(rest):
         return _review_test_cmd(rest)
     if sub in ("accept", "reject", "talos"):
         args, checklist, why = _review_verdict(sub, rest[1:])
+        crit = checklist.pop(CRITERIA, [])
+        why = why or (_review_criteria_problem(sub, crit) if crit else None)
         if why:
             print(f"pantheon review {sub}: {why}", file=sys.stderr)
             return 2
@@ -446,7 +574,11 @@ def review_cmd(rest):
               f"если роль подходит ({who})")
         for k, v in checklist.items():
             print(f"  {P.REVIEW_CHECKLIST[k]}: {v}")
+        for v in crit:
+            print(f"  пункт: {v}")
         return 0
+    if sub == "criteria":
+        return review_criteria_cmd(rest[1:])
     if sub == "report":
         return review_report(rest[1:])
     if sub == "status":
@@ -505,6 +637,8 @@ def review_cmd(rest):
             for k, label in P.REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
+            for v in r.get("criteria") if isinstance(r.get("criteria"), list) else []:
+                print(f"    пункт: {v}")
         if args:
             base = tally_base(recs, int(args[1]))
             # metis-0443: что шлюз guard решил о коде head — переносы «принять» и решения при `merge request`

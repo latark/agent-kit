@@ -273,7 +273,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         запись — хук guard и только по роли (accept, reject — argus). Шлюз считает
                                         последний вердикт каждого рецензента (сессия + агент) на (repo, PR, SHA) и
                                         пускает, только если последний у каждого — «принять» с полным перечнем и ни
-                                        один рецензент не сливающий
+                                        один рецензент не сливающий. У accept и reject ещё --criteria "<id>#<N>
+                                        <хеш> да|нет <опора>" — флаг на пункт «Готово, когда» задачи из Closes
+                                        (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
+                                        «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
+  pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
@@ -361,6 +365,7 @@ TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тре
 PLUGINS_CATALOG_TIMEOUT = 90    # claude plugin marketplace update: вышло — TEMPFAIL, тревоги нет
 PLUGIN_INSTALL_TIMEOUT = 180    # claude plugin update одного плагина: вышло — сбой установки, тревога, сверка по хешу
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
+BUDGET_CUT = 77  # проход доски прерван по бюджету (metis-0709): не сбой и без тревоги, но отпечаток входов не пишется — тик повторит
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
@@ -2109,7 +2114,7 @@ def status():
 
     # места heavy, память, версии
     lines = []
-    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):
         p = path("locks", name + ".lock")
         if not os.path.exists(p):
             lines.append(f"{name}: нет (pantheon install)")
@@ -2300,7 +2305,7 @@ def domains_build(if_changed=False):
     with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
         os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
-    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
     roles = roles_build()
     if roles:
@@ -6471,7 +6476,7 @@ def install():
     with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
         os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
-    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server", "heavy-full"):
         open(path("locks", slot + ".lock"), "a").close()
     if os.path.isdir(os.path.join(PANTHEON, ".git")):
         merge = os.path.join(CURRENT, "scripts", "git-crypt-merge.sh")
@@ -7173,8 +7178,13 @@ def board_registry(T):
     return projects, marks, T.project_registry(dirs)
 
 
-BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+try:
+    BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+except ValueError:  # нечисловое значение не роняет pantheon при импорте
+    BOARD_BUDGET = 45.0
+PROC_T0 = None  # monotonic начала процесса (ставит run.py до импорта): бюджет считается и с импорта
 BOARD_NOTIFY_WAIT = 20.0  # с ждать блокировку notify: занята дольше — проход идёт без уведомлений, а не до таймаута
+BOARD_HARD_GRACE = 5.0  # с сверх бюджета до жёсткого SIGALRM: мягкие пропуски (замок, сводка) успевают раньше
 BOARD_AUTO_MIN = 8.0  # с: осталось меньше — сводку board-auto.md этого прохода пропускаем, соберёт следующий
 
 
@@ -7182,8 +7192,8 @@ class BoardClock:
     """Время частей прохода доски (metis-0709): одна строка «доска-время: …» в журнале задания. Бюджет — сколько секунд
     у прохода до предела задания: необязательное (ожидание блокировки, сводка) не берётся, если бюджет вышел."""
 
-    def __init__(self, budget):
-        self.t0, self.budget, self.parts, self.skipped, self.cur = time.monotonic(), budget, [], [], None
+    def __init__(self, budget, t0=None):
+        self.t0, self.budget, self.parts, self.skipped, self.cur = t0 or time.monotonic(), budget, [], [], None
 
     def left(self):
         return self.budget - (time.monotonic() - self.t0)
@@ -7223,22 +7233,38 @@ def lock_wait(name, wait):
         time.sleep(0.2)
 
 
+class BoardBudget(BaseException):
+    """Бюджет прохода доски вышел (SIGALRM): часть прервана, строка времени остаётся, код BUDGET_CUT — следующий тик повторит."""
+
+
 def board():
     """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой.
-    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET, SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
-    clock = BoardClock(BOARD_BUDGET)
+    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET считается с начала процесса и действует и внутри долгой
+    части (SIGALRM), SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
+    clock = BoardClock(BOARD_BUDGET, PROC_T0)
     def on_term(*_):
         raise SystemExit(143)
+    def on_alarm(*_):
+        raise BoardBudget()
     try:
         old = signal.signal(signal.SIGTERM, on_term)
+        old_alrm = signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(clock.left() + BOARD_HARD_GRACE, 0.2))
     except ValueError:  # не главный поток
-        old = None
+        old = old_alrm = None
+    rc = 0
     try:
-        return _board(clock)
+        rc = _board(clock)
+    except BoardBudget:
+        clock.skipped.append("остаток прохода (бюджет)")
+        rc = BUDGET_CUT
     finally:
         if old is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGTERM, old)
-        print(clock.line())
+            signal.signal(signal.SIGALRM, old_alrm)
+        print(clock.line(), flush=True)
+    return rc
 
 
 def _board(clock):
@@ -7822,13 +7848,16 @@ def batch_suggest_run(rest):
         if old.split("Проход:")[-1].split("\n", 1)[-1] != text.split("Проход:")[-1].split("\n", 1)[-1]:
             write_atomic(pp, text)  # время прохода само файл не меняет: пишется только при новом составе
     write_json(path("batch-suggest.json"), {"last": t, "seen": keys})
+    failed = B.write_failures(skipped)
+    if failed:  # сбой записи при прикреплении — тревога, а не тихий пропуск (metis-1006, Д-2 argus #400)
+        alert(f"пачки: сбой записи при прикреплении у {len(failed)} — {failed[0][:200]}", "pantheon-tick")
     if fresh:
         n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
         alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
               f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
     print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}, прикреплено {len(applied)}"
           + "".join(f"\n  прикреплено · {x}" for x in applied) + "".join(f"\n  пропущено · {x}" for x in skipped))
-    return 0
+    return ALERTED if failed else 0  # тревога уже дана — run_job вторую не пишет
 
 
 def autoclose_mod():
@@ -7909,7 +7938,7 @@ def autoclose_tick(t, wait=0):
         if not got:
             return
         log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
-                            actual_for=lambda tid: autoclose_actual(T, tid))
+                            actual_for=lambda tid: autoclose_actual(T, tid), accepted=review_criteria_ticks)
     for ln in log:
         print(f"автозакрытие · {ln}")
     if log or errors:

@@ -20,7 +20,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
    Строка: {"v":1,"kind","repo":[owner/repo…],"pr":N|null,"sha","by":{agent_type,agent_id,session_id},"cwd","time",
    "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}, у обоих — "models":[…] или
-   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413). Подделать запись роль не может:
+   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413); с флагами --criteria (по одному на пункт
+   «Готово, когда», metis-1004) — "criteria":[строки как есть]: шлюз их не читает, разбирает autoclose pantheon.
+   Подделать запись роль не может:
    ~/.local/state/pantheon закрыт ролям песочницей и pantheon-acl, а вид записи хук берёт из agent_type события, а не
    из текста команды. Битые строки при чтении пропускаются: битая запись может только не дать разрешения.
 2. merge_problem — правило gh pr merge: кто сливает (координатор или его лид), чьё направление, защиты, затем запор:
@@ -180,6 +182,9 @@ NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
 # перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
 CHECKLIST = ("opened", "ran", "unchecked")
 CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
+# metis-1004: вердикт argus по пункту «Готово, когда» задачи из Closes — флаг --criteria у accept и reject, по одному на
+# пункт; запись несёт их списком строк "criteria" как есть, разбирает и сверяет с карточкой pantheon (autoclose)
+CRITERIA = "criteria"
 # PR ядра: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
 # (metis-0176; вне ядра модель не проверяется — упрощение п. 9). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
 OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)
@@ -503,7 +508,8 @@ def verdict_args(args):
 def verdict_parse(kind, args):
     """Аргументы `pantheon review accept|reject|talos …` → ((repo, pr, sha), перечень {поле: значение}, None) или
     (None, None, текст ошибки). Флаги перечня (Б6) — только у accept и reject, в любом месте, `--ran X` или
-    `--ran=X`; у accept все три обязательны и непусты, у reject — по желанию (пустые не сохраняются)."""
+    `--ran=X`; у accept все три обязательны и непусты, у reject — по желанию (пустые не сохраняются). --criteria
+    (metis-1004) можно повторять: значения — списком в перечне под ключом "criteria", record выносит их в поле записи."""
     flags = kind in ("accept", "reject")
     fmt = f"`pantheon review {kind} <owner/repo> <номер PR> <SHA 40 знаков>" + (
         f" {CHECKLIST_HINT}`" if kind == "accept" else " [--opened … --ran … --unchecked …]`" if flags else "`")
@@ -514,9 +520,9 @@ def verdict_parse(kind, args):
             return None, None, f"{fmt} — аргументы не в этом формате"
         if flags and a.startswith("--") and len(a) > 2:
             name, eq, val = a[2:].partition("=")
-            if name not in CHECKLIST:
+            if name not in CHECKLIST and name != CRITERIA:
                 return None, None, f"{fmt} — неизвестный флаг --{name}"
-            if name in checklist:
+            if name in checklist and name != CRITERIA:
                 return None, None, f"{fmt} — --{name} указан дважды"
             if not eq:
                 if i + 1 >= len(args) or not isinstance(args[i + 1], str):
@@ -525,7 +531,11 @@ def verdict_parse(kind, args):
                 val = args[i]
             if val.strip().startswith("--"):  # `--opened --ran …`: имя флага — не значение (ревью argus, PR #25)
                 return None, None, f"{fmt} — значение --{name} начинается с «--»: похоже, пропущено значение"
-            checklist[name] = val.strip()
+            if name == CRITERIA:  # metis-1004: по флагу на пункт «Готово, когда»; формат судит pantheon review
+                if val.strip():
+                    checklist.setdefault(CRITERIA, []).append(val.strip())
+            else:
+                checklist[name] = val.strip()
         else:
             pos.append(a)
         i += 1
@@ -837,8 +847,11 @@ def record(event):
                   "session_id": event.get("session_id") or ""},
            "cwd": cwd, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "tool_use_id": event.get("tool_use_id") or "", "cmd": cmd}
+    crit = checklist.pop(CRITERIA, None) if rec_kind in ("accept", "reject") and checklist else None
     if rec_kind in ("accept", "reject") and checklist:
         rec["checklist"] = checklist
+    if crit:
+        rec["criteria"] = crit
     if rec_kind in ("accept", "reject"):  # модель argus — из данных сессии, а не со слов ran (metis-0176)
         models = agent_models(event)
         if models is None:  # у субагента — своя пометка: его «принять» в PR ядра не в счёт (metis-0489)

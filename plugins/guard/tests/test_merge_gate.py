@@ -29,8 +29,9 @@ HOOK_DEADLINE = 40
 HOOK_SUB_TIMEOUT = 20
 SLOW_GIT = 50  # с: «медленный git» дольше и HOOK_SUB_TIMEOUT, и HOOK_DEADLINE
 # бюджет сверки отпечатков в хуке (metis-0696, «А: запас только в тестах»): боевые 4 с под нагрузкой Mac r6 не
-# укладывал. Меньше HOOK_SUB_TIMEOUT: один зависший git (r4 шлюз) исчерпывает бюджет, и хук отказывает сам
-# раньше HOOK_DEADLINE
+# укладывал, 15 с не хватило при load 200+ в полном наборе (metis-0989, r6 ctl2) — взят предел CARRY_BUDGET_MAX.
+# Зависший git (r4 шлюз) гаснет по HOOK_SUB_TIMEOUT, остаток бюджета идёт на остальные отпечатки, хук укладывается
+# в HOOK_DEADLINE
 HOOK_CARRY_BUDGET = 15
 import tempfile
 import time
@@ -101,6 +102,7 @@ def rest_runs(view):
 class Home:
     def __init__(self, root):
         self.root = root
+        self.carry_budget = HOOK_CARRY_BUDGET  # GUARD_TEST_CARRY_BUDGET хуку; t_carry_r6 поднимает до предела
         self.core = False  # reset(): PR agent-kit#7 задевает ядро (со строкой согласия владельца) — см. CASES_CORE
         j = self.j
         for d in ("ai/pantheon", ".local/state/pantheon", ".claude/pantheon", "bin"):
@@ -277,7 +279,7 @@ class Home:
         return {"HOME": self.root, "PATH": self.j("bin") + os.pathsep + os.environ["PATH"],
                 "CLAUDE_PROJECT_DIR": self.j(pdir), "TMPDIR": "/nonexistent-tmp",
                 "GUARD_TEST_DEADLINE": str(HOOK_DEADLINE), "GUARD_TEST_SUB_TIMEOUT": str(HOOK_SUB_TIMEOUT),
-                "GUARD_TEST_CARRY_BUDGET": str(HOOK_CARRY_BUDGET)}
+                "GUARD_TEST_CARRY_BUDGET": str(self.carry_budget)}
 
     def hook(self, event, pdir, mode=(), extra_env=None):
         return subprocess.run([sys.executable, "-I", CACHED, GUARD, *mode], input=json.dumps(event), capture_output=True,
@@ -898,6 +900,39 @@ def t_checklist(h):
     h.seed(rec("accept", "latark/tg-read", 3, sha))
     merge_case("новый accept с перечнем того же argus после старого — проходит",
                h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
+
+
+def t_criteria(h):
+    """metis-1004: --criteria у accept и reject — по флагу на пункт «Готово, когда»; запись несёт их полем "criteria"
+    списком строк как есть, перечень checklist — без них; шлюз их не читает (слияние как без них). У talos флага нет."""
+    sha = h.sha["tg-read"]
+    c1, c2 = "demo-0001#1 0123456789ab да tests/t.py:12", "demo-0001#2 ba9876543210 да t_x"
+    base = f"pantheon review accept latark/tg-read 3 {sha}{CL}"
+    h.post("pantheon review test -- python3 -I tests/run.py", "dev-opus")
+    h.post(f'{base} --criteria "{c1}" --criteria="{c2}"', "argus")
+    recs = h.read()
+    check("1004: accept с двумя --criteria — запись с criteria по порядку, checklist без них",
+          len(recs) == 2 and recs[1].get("criteria") == [c1, c2] and recs[1]["checklist"] == CHECKLIST, recs)
+    merge_case("1004: accept с --criteria засчитан шлюзом как обычный", h.pre(f"gh pr merge 3 --match-head-commit {sha}"),
+               True)
+    h.reset()
+    h.post(base, "argus")
+    check("1004: accept без --criteria — поля criteria нет", "criteria" not in h.read()[0], h.read())
+    h.reset()
+    h.post(f'pantheon review reject latark/tg-read 3 {sha} --criteria "demo-0001#1 0123456789ab нет нет теста"', "argus")
+    recs = h.read()
+    check("1004: reject с --criteria — запись с criteria, без checklist",
+          len(recs) == 1 and recs[0].get("criteria") == ["demo-0001#1 0123456789ab нет нет теста"]
+          and "checklist" not in recs[0], recs)
+    h.reset()
+    for cmd in (f"{base} --criteria", f"{base} --criteria --opened x", f"pantheon review talos latark/tg-read 3 {sha} "
+                f'--criteria "{c1}"'):
+        h.post(cmd, "talos" if "talos" in cmd else "argus")
+        d, why = h.pre(cmd, role="talos" if "talos" in cmd else "argus", agent_id="a1")
+        check(f"1004: `{cmd[len(base):] if cmd.startswith(base) else 'talos --criteria'}` — отказ, записи нет",
+              d == "deny" and h.read() == [], (why, h.read()))
+    h.post(f'{base} --criteria "  "', "argus")
+    check("1004: пустой --criteria не сохраняется", "criteria" not in h.read()[0], h.read())
 
 
 EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B timeout -s KILL 60 sleep 1",
@@ -4398,6 +4433,17 @@ def t_carry_r4_gate(h):
 
 
 def t_carry_r6(h):
+    """r6 сверяет перенос по длинной истории (много вызовов git подряд): на load 200+ полного набора 15 с не хватало
+    (metis-0989, r6 ctl2). Предел CARRY_BUDGET_MAX — только здесь: от общего 15 зависит t_carry_r4_gate (зависший
+    git не должен выходить за бюджет)."""
+    h.carry_budget = _load_merge_gate("merge_gate_r6_budget").CARRY_BUDGET_MAX
+    try:
+        _t_carry_r6(h)
+    finally:
+        h.carry_budget = HOOK_CARRY_BUDGET
+
+
+def _t_carry_r6(h):
     """argus-b r2 (#134): откат force-push к точному старому head, принятому до «вернуть», после снятия «вернуть»
     правилом 3 — прямое «принять» до отсечки не засчитывается, как и перенос."""
     s = kit_history(h)
@@ -5999,7 +6045,7 @@ def t_owner_api_merge(h):
 CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_returned_empty, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_review_format, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
-         t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
+         t_pre_not_simple, t_checklist, t_criteria, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
          t_ci_required, t_batch_full, t_batch_unit, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,

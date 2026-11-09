@@ -282,6 +282,10 @@ def batch_suggest_cmd(T, args, opt):
         if "--apply" in args:
             print(f"\nприкреплено: {len(applied)}" + "".join(f"\n  {x}" for x in applied)
                   + "".join(f"\n  пропущено · {x}" for x in skipped))
+    failed = B.write_failures(skipped)
+    if failed:  # сбой записи — не «пропущено»: код 1 и строка в stderr (metis-1006)
+        print(f"pantheon task batch-suggest: сбой записи у {len(failed)} — {failed[0]}", file=sys.stderr)
+        return 1
     return 0
 
 
