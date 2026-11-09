@@ -113,7 +113,7 @@ P.HOME = home("nofile", None)
 check("3. реестра нет — None везде", P.roster_safe() is None and P.daemon_workers() is None
       and P.roster_changed_at() is None and P.session_started({"id": "abcd1234", "startedAt": 3_000}) == 3)
 
-# 4. Окно роли (metis-1026, К2): ~/.claude/daemon закрыт на чтение — снимок тика без ключей, не старше TTL
+# 4. Окно роли (metis-1026, К2): ~/.claude/daemon закрыт на чтение — снимок планового прохода без ключей, не старше TTL
 P.HOME = h
 P.STATE = os.path.join(ROOT, "state4")
 os.makedirs(P.STATE)
@@ -129,7 +129,7 @@ try:
     can_read = os.access(REAL, os.R_OK)   # root читает и 000 — тогда проверка отказа не про этот случай
     meta = {}
     got4 = P.roster_safe(meta)
-    check("4. файл закрыт (PermissionError) — снимок тика, с отметкой времени",
+    check("4. файл закрыт (PermissionError) — снимок планового прохода, с отметкой времени",
           can_read or (got4 == json.loads(snap_text) and "snapshot" in meta), (got4, meta))
     check("4. daemon_workers из снимка", can_read or P.daemon_workers() == {"abcd1234": 4242, "efgh5678": 77,
                                                                         "odd": None}, P.daemon_workers())
@@ -137,9 +137,9 @@ try:
     r = subprocess.run([PY311, "-I", RUN_PY, "roster"], capture_output=True, text=True, timeout=60,
                        env={"PATH": os.environ["PATH"], "HOME": h, "PANTHEON_HOME": os.path.join(h, "ai", "pantheon"),
                             "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT, "PANTHEON_TEST": "1", **env4})
-    check("4. pantheon roster в окне: код 0, JSON снимка, в stderr — что это снимок тика",
+    check("4. pantheon roster в окне: код 0, JSON снимка, в stderr — что это снимок планового прохода",
           can_read or (r.returncode == 0 and json.loads(r.stdout) == json.loads(snap_text)
-                       and "снимок тика" in r.stderr), (r.returncode, r.stdout, r.stderr))
+                       and "снимок планового прохода" in r.stderr), (r.returncode, r.stdout, r.stderr))
     old = time.time() - P.ROSTER_SNAPSHOT_TTL - 5
     os.utime(SNAP, (old, old))
     check("4. снимок старше TTL (тик стоит) — None, а не старые воркеры",
@@ -148,7 +148,7 @@ try:
                        env={"PATH": os.environ["PATH"], "HOME": h, "PANTHEON_HOME": os.path.join(h, "ai", "pantheon"),
                             "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT, "PANTHEON_TEST": "1", **env4})
     check("4. pantheon roster: снимок старый — код 1, причина называет снимок последней строкой",
-          can_read or (r.returncode == 1 and "снимок тика" in r.stderr.strip().splitlines()[-1]), (r.returncode, r.stderr))
+          can_read or (r.returncode == 1 and "снимок планового прохода" in r.stderr.strip().splitlines()[-1]), (r.returncode, r.stderr))
 finally:
     os.chmod(REAL, 0o600)
 P.HOME = home("nofile4", None)

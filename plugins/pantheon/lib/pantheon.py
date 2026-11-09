@@ -191,7 +191,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon roster                       реестр демона Claude Code без ключей сокетов: JSON с updatedAt и у каждого воркера
                                         id, pid, startedAt; сам файл агентам закрыт (guard daemon-roster, metis-0871), окну
-                                        роли — песочницей: там снимок тика STATE/daemon-roster.json (metis-1026)
+                                        роли — песочницей: там снимок планового прохода STATE/daemon-roster.json (metis-1026)
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
@@ -2387,7 +2387,7 @@ CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
 # закрыты, как пароль демона CDP: denyRead песочницы (Bash) и правило Read (Read, Grep, Glob)
 OUTSIDE_KEY_DIRS = (os.path.join(STATE, "outside", "env"), os.path.join(STATE, "outside", "test-env"))
 # Ключи демона Claude Code (metis-1026, К2): control.key и roster.json (rvAuth, ptyAuth) дают ввод в PTY любой сессии —
-# строку в owner-log от имени владельца. Окну роли не читать даже при открытом канале; реестр без ключей — снимок тика
+# строку в owner-log от имени владельца. Окну роли не читать даже при открытом канале; реестр без ключей — снимок планового прохода
 DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")
 WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR)
 
@@ -4480,7 +4480,7 @@ def roster_safe(meta=None):
     ptyAuth): их не берём — только поля из ROSTER_WORKER_FIELDS и только числа и строки. Это единственное место, где
     Пантеон читает файл; агентам guard его целиком не даёт (правило daemon-roster), нужные поля — `pantheon roster`.
     None — реестра нет или он не объект; workers None — поле не объект (о процессах тогда ничего не утверждаем).
-    Окну роли сам файл закрыт (metis-1026, отказ в чтении — PermissionError): тогда — снимок тика STATE/ROSTER_SNAPSHOT
+    Окну роли сам файл закрыт (metis-1026, отказ в чтении — PermissionError): тогда — снимок планового прохода STATE/ROSTER_SNAPSHOT
     (roster_snapshot), если он не старше ROSTER_SNAPSHOT_TTL; meta (словарь) получает "snapshot": mtime снимка. Реестра
     нет или он битый — None и без снимка: снимок не подменяет то, чего нет."""
     try:
@@ -4512,12 +4512,14 @@ def roster_cmd(rest):
     r = roster_safe(meta)
     if r is None:
         print("pantheon roster: реестра демона нет или он не читается (~/.claude/daemon/roster.json; окну роли — "
-              f"снимок тика {path(ROSTER_SNAPSHOT)} не старше {ROSTER_SNAPSHOT_TTL} с, metis-1026)", file=sys.stderr)
+              f"снимок планового прохода {path(ROSTER_SNAPSHOT)} не старше {ROSTER_SNAPSHOT_TTL} с, metis-1026)",
+              file=sys.stderr)
         return 1
     print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
     if "snapshot" in meta:
-        print(f"pantheon roster: снимок тика от {time.strftime('%H:%M:%S', time.localtime(meta['snapshot']))} — окну "
-              "роли ~/.claude/daemon закрыт (metis-1026)", file=sys.stderr)
+        at = time.strftime('%H:%M:%S', time.localtime(meta['snapshot']))
+        print(f"pantheon roster: снимок планового прохода от {at} — окну роли ~/.claude/daemon закрыт (metis-1026)",
+              file=sys.stderr)
     return 0
 
 
