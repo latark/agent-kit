@@ -365,6 +365,7 @@ TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тре
 PLUGINS_CATALOG_TIMEOUT = 90    # claude plugin marketplace update: вышло — TEMPFAIL, тревоги нет
 PLUGIN_INSTALL_TIMEOUT = 180    # claude plugin update одного плагина: вышло — сбой установки, тревога, сверка по хешу
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
+BUDGET_CUT = 77  # проход доски прерван по бюджету (metis-0709): не сбой и без тревоги, но отпечаток входов не пишется — тик повторит
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
@@ -7177,8 +7178,13 @@ def board_registry(T):
     return projects, marks, T.project_registry(dirs)
 
 
-BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+try:
+    BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+except ValueError:  # нечисловое значение не роняет pantheon при импорте
+    BOARD_BUDGET = 45.0
+PROC_T0 = None  # monotonic начала процесса (ставит run.py до импорта): бюджет считается и с импорта
 BOARD_NOTIFY_WAIT = 20.0  # с ждать блокировку notify: занята дольше — проход идёт без уведомлений, а не до таймаута
+BOARD_HARD_GRACE = 5.0  # с сверх бюджета до жёсткого SIGALRM: мягкие пропуски (замок, сводка) успевают раньше
 BOARD_AUTO_MIN = 8.0  # с: осталось меньше — сводку board-auto.md этого прохода пропускаем, соберёт следующий
 
 
@@ -7186,8 +7192,8 @@ class BoardClock:
     """Время частей прохода доски (metis-0709): одна строка «доска-время: …» в журнале задания. Бюджет — сколько секунд
     у прохода до предела задания: необязательное (ожидание блокировки, сводка) не берётся, если бюджет вышел."""
 
-    def __init__(self, budget):
-        self.t0, self.budget, self.parts, self.skipped, self.cur = time.monotonic(), budget, [], [], None
+    def __init__(self, budget, t0=None):
+        self.t0, self.budget, self.parts, self.skipped, self.cur = t0 or time.monotonic(), budget, [], [], None
 
     def left(self):
         return self.budget - (time.monotonic() - self.t0)
@@ -7227,22 +7233,38 @@ def lock_wait(name, wait):
         time.sleep(0.2)
 
 
+class BoardBudget(BaseException):
+    """Бюджет прохода доски вышел (SIGALRM): часть прервана, строка времени остаётся, код BUDGET_CUT — следующий тик повторит."""
+
+
 def board():
     """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой.
-    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET, SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
-    clock = BoardClock(BOARD_BUDGET)
+    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET считается с начала процесса и действует и внутри долгой
+    части (SIGALRM), SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
+    clock = BoardClock(BOARD_BUDGET, PROC_T0)
     def on_term(*_):
         raise SystemExit(143)
+    def on_alarm(*_):
+        raise BoardBudget()
     try:
         old = signal.signal(signal.SIGTERM, on_term)
+        old_alrm = signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(clock.left() + BOARD_HARD_GRACE, 0.2))
     except ValueError:  # не главный поток
-        old = None
+        old = old_alrm = None
+    rc = 0
     try:
-        return _board(clock)
+        rc = _board(clock)
+    except BoardBudget:
+        clock.skipped.append("остаток прохода (бюджет)")
+        rc = BUDGET_CUT
     finally:
         if old is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGTERM, old)
-        print(clock.line())
+            signal.signal(signal.SIGALRM, old_alrm)
+        print(clock.line(), flush=True)
+    return rc
 
 
 def _board(clock):
