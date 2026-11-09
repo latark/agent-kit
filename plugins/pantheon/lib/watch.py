@@ -376,6 +376,7 @@ def _watch(dry=False):
               ("метка перезапуска", lambda: maint_expire(t)),
               ("сессии", lambda: sessions(agents, doms, t)),
               ("STATUS.md", lambda: status_files(doms, t, agents, reg)),
+              ("цели направлений", lambda: goal_dates(t)),
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
@@ -886,6 +887,34 @@ def status_files(doms, t, agents=(), registry=()):
                          "координатору перенести закрытое в archive/ направления", "watch")
         else:
             P.clear_once(f"watch-status-long-{name}")
+
+
+GOAL_FIELDS = (("goal", "цель"), ("budget", "бюджет недели"))
+
+
+def goal_dates(t):
+    """Цель или бюджет направления в directions.toml, все даты которых прошли (metis-0829, п. 4): тревога координатору
+    направления — обновить у владельца. Один раз на (направление, поле, последняя дата): повтор прохода молчит, новая
+    дата в поле — новая тревога; поле снова актуально или пусто — отметка снимается. Пометка «устарело» на Проекты/*.md
+    — tasks.stale_mark, тот же разбор дат (reg_dates)."""
+    T = P.tasks_mod()
+    for d in T.load_directions(P.PANTHEON) or []:
+        name = d.get("name")
+        if not isinstance(name, str) or not name or name == "inbox":
+            continue
+        for field, label in GOAL_FIELDS:
+            key, text = f"watch-goal-{name}-{field}", d.get(field)
+            if not isinstance(text, str):  # список или число в TOML — не строка цели, в тревогу repr не печатаем
+                text = None
+            dates = T.reg_dates(text, t) if text not in (None, "") else []
+            last = max(dates) if dates else None
+            if last is None or datetime.fromtimestamp(t).date() <= last.date():
+                P.clear_once(key)
+                continue
+            P.alert_once(key, f"{last:%Y-%m-%d}",
+                         f"directions.toml: у направления {name} {label} устарела — дата {last:%d.%m} прошла "
+                         f"(«{T.one_line(text)[:120]}»). Координатору {name}: узнать у владельца новую и обновить "
+                         "запись в directions.toml", "watch")
 
 
 def swap_gb():
