@@ -27,7 +27,9 @@ dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))  # noqa: E731
 
 def glob_re(g, sandbox=False):
     """Шаблон пути Claude Code → regex: «**» — любые папки, «*» — внутри одного имени. sandbox — как запрет-шаблон
-    denyRead в Seatbelt (Claude Code 2.1.300): хвост «/**» срезан, совпадает и всё поддерево."""
+    denyRead и denyWrite в Seatbelt (Claude Code 2.1.300): хвост «/**» срезан, к шаблону дописано «(/.*)?» —
+    совпадает и всё поддерево. denyWrite сверен живой пробой на 2.1.319 (metis-0286, PR #287): «<p>*» закрывает
+    mv и rm -rf папки и запись вглубь (s1/scratchpad/f.txt), «<p>*/*» — запись вглубь, но не mv папки."""
     if sandbox and g.endswith("/**"):
         g = g[:-3]
     out, i = "", 0
@@ -97,7 +99,9 @@ def main():
     w_foreign = [br + "x", br[:-1], dash(tmp) + "-projects-q[x", wk + "-t1", own]
     w_temp = ["merge-root-ab12", "pytest-of-u", "tsx-501", "tmp.Xy12ab", "a[b"]  # не сессии: временные папки окон
     w_odd = br[:-1] + "[r"  # расходится со своим ровно на «[» — шаблоном не выразить
-    for n in w_mine + w_foreign + w_temp + [w_odd, dash(tmp) + "-projects-zz00000"]:
+    # окно Гестии (Д1 argus): папка запуска — её кэш (sessions.py), не папка направления
+    hs = dash(os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "hestia"))
+    for n in w_mine + w_foreign + w_temp + [w_odd, dash(tmp) + "-projects-zz00000", hs]:
         os.makedirs(os.path.join(tasks, n), exist_ok=True)
     r = build(env)
     hq1 = json.load(open(os.path.join(state, "settings", "hq.json")))
@@ -137,16 +141,42 @@ def main():
 
     def inside(n):
         return [os.path.join(tasks, n, "x.sock"), os.path.join(tasks, n, "s1", "scratchpad", "f.txt")]
+
+    def named(n):  # mv и rm -rf папки — запись её имени в корне CLAUDE_TMP (Б1 argus: `mv <чужая> tmp.moved`)
+        return [os.path.join(tasks, n)]
     check("окно направления: запись в папки чужих сессий закрыта — общий префикс имени, префикс своего, «q[x», "
           "мастерская, штаб, новые после сборки",
           all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", "-private-tmp-x01999"]
               for p in inside(n)))
-    check("окно направления: свои папки (папка направления, её worktree и подпапка) открыты на запись",
-          not any(wr_closed(sa2, p) for n in w_mine for p in inside(n)))
+    check("окно направления: имя чужой папки сессии закрыто — mv и rm -rf её нет, новую на чужой префикс не создать",
+          all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", "-private-tmp-new"]
+              for p in named(n)))
+    check("окно направления: свои папки (папка направления, её worktree и подпапка) открыты на запись, их имена "
+          "тоже — mv, rm и новая worktree или подпапка",
+          not any(wr_closed(sa2, p) for n in w_mine + [br + "--claude-worktrees-new", br + "-new"]
+                  for p in inside(n) + named(n)))
     check("окно направления: корень CLAUDE_TMP, файлы в нём и временные папки окон (tmp.*, mkdtemp, pytest, tsx) "
-          "открыты; имя на символе шаблона не закрыто",
-          not any(wr_closed(sa2, p) for p in [os.path.join(tasks, "zshAbC123"), os.path.join(tasks, br + "x")]
-                  + [q for n in w_temp + [w_odd] for q in inside(n)]))
+          "открыты вместе с именами; имя на символе шаблона не закрыто",
+          not any(wr_closed(sa2, p) for p in [os.path.join(tasks, "zshAbC123"), os.path.join(tasks, "tmp.new1")]
+                  + [q for n in w_temp + [w_odd] for q in inside(n) + named(n)]))
+    hsw = json.load(open(os.path.join(state, "settings", "hestia.json")))
+    check("Гестия: своя папка сессии (кэш окна — папка запуска) открыта, сессия направления закрыта",
+          not any(wr_closed(hsw, p) for p in inside(hs) + named(hs))
+          and all(wr_closed(hsw, p) for p in inside(br) + named(br)))
+    # Д3 argus: имя папки сессии Claude Code даёт по настоящему пути — своя папка, переданная ссылкой, открыта
+    link_br, link_home = os.path.join(tmp, "br-link"), os.path.join(tmp, "home-link")
+    os.symlink(os.path.join(tmp, "projects", "br"), link_br)
+    os.symlink(tmp, link_home)
+    code = ("import importlib.util, json, sys\n"
+            "s = importlib.util.spec_from_file_location('p', sys.argv[1]); m = importlib.util.module_from_spec(s)\n"
+            "s.loader.exec_module(m); print(json.dumps(m.tmp_deny_write([sys.argv[2]], [sys.argv[3]])))\n")
+    r = subprocess.run([PY311, "-I", "-c", code, LIB, link_br, link_home], env=env, capture_output=True, text=True,
+                       timeout=60)
+    lw = {"sandbox": {"filesystem": {"denyWrite": json.loads(r.stdout or "[]")}}}
+    check("папка окна и папка запуска ссылкой: свои сессии (по настоящему пути) открыты, чужая закрыта",
+          r.returncode == 0 and lw["sandbox"]["filesystem"]["denyWrite"]
+          and not any(wr_closed(lw, p) for n in w_mine + [dash(tmp)] for p in inside(n) + named(n))
+          and all(wr_closed(lw, p) for p in inside(br + "x") + named(br + "x")))
     wsh = json.load(open(os.path.join(state, "settings", "workshop.json")))
     check("мастерская: папка задачи ~/projects/workshop/<задача> открыта, сессия направления закрыта",
           not any(wr_closed(wsh, p) for p in inside(wk + "-t1")) and all(wr_closed(wsh, p) for p in inside(br)))
