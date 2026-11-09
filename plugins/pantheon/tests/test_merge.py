@@ -2593,6 +2593,7 @@ def test_batch_max_fallback_window_core():
 
 
 # --- согласие фразой «слей #N <hex>» (metis-0959) ---------------------------------------------------------------------
+NONCORE = ["README.md", "docs/merge.md"]   # PR вне ядра: фраза сливает только его (metis-1026)
 AWAY = {"PANTHEON_FAKE_IDLE": "900"}   # владельца нет у Mac: окна Touch ID не будет, фразе это не мешает
 CTX_HOOK = os.path.join(os.path.dirname(HERE), "hooks", "ctx.py")
 
@@ -2613,8 +2614,15 @@ def merge_recs(b):
     return [json.loads(ln) for ln in open(p)] if os.path.exists(p) else []
 
 
+def pbox(**kw):
+    """Ящик с PR вне ядра: фраза сливает только его (metis-1026 — PR ядра фразой не сливается, только Touch ID)."""
+    b = Box(**kw)
+    b.view(SHA, files=NONCORE)
+    return b
+
+
 def phrase_box(text=None, t=T0 + 60, **kw):
-    b = Box()
+    b = pbox()
     b.request()
     if text is not None:
         say(b, text, t, **kw)
@@ -2721,7 +2729,7 @@ def test_phrase_drop_names_path():
     b.run(t=T0 + 120, extra=AWAY)
     check("0980: фраза, шлюз не пройден — заявка снята, тревога «по фразе»", b.req() is None and not b.merges()
           and "по фразе: заявка снята" in b.alerts() and "по Touch ID" not in b.alerts(), b.alerts())
-    b = Box()
+    b = pbox()
     b.request()
     b.add("reject", sha=SHA, sid="s3", aid="a3")
     b.run()
@@ -2736,7 +2744,7 @@ def test_phrase_refused():
     b = phrase_box(f"слей #{PR + 1} {SHA[:7]}")
     b.run(t=T0 + 120, extra=AWAY)
     check("фраза на PR без заявки (#8 при заявке на #7 с тем же head) → строки нет", untouched(b), b.outs[-1])
-    b = Box()
+    b = pbox()
     say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
     b.run(t=T0 + 120, extra=AWAY)
     check("фраза без заявки → проход ничего не сливает", not b.merges() and not b.approve_lines(), b.outs[-1])
@@ -2788,7 +2796,7 @@ def test_phrase_ambiguous_repo():
     for name, sha, ok in (("та же фраза подходит к заявкам #7 двух репозиториев → неоднозначно, строки нет",
                            SHA[:7] + "1" * 33, False),
                           ("заявка #7 другого репозитория с другим head → фраза однозначна, слияние", SHA3, True)):
-        b = Box(repos=(REPO, "latark/other"))
+        b = pbox(repos=(REPO, "latark/other"))
         b.request()
         other = os.path.join(b.state, "merge-queue", "latark__other__7.json")
         with open(other, "w") as fh:
@@ -2799,7 +2807,7 @@ def test_phrase_ambiguous_repo():
         mine = [m for m in b.merges() if REPO in m]
         check(name, (mine == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]]) if ok
               else (not mine and not b.approve_lines()), (b.outs[-1], b.merges()))
-    b = Box(repos=(REPO, "latark/other"))
+    b = pbox(repos=(REPO, "latark/other"))
     b.request()
     with open(os.path.join(b.state, "merge-queue", "latark__other__7.json"), "w") as fh:
         json.dump({"repo": "latark/other", "pr": PR, "sha": SHA3, "by": "x", "created": T0}, fh)
@@ -2807,7 +2815,7 @@ def test_phrase_ambiguous_repo():
     b.run(t=T0 + 120, extra=AWAY)
     check("фраза на head заявки #7 другого репозитория → эта заявка #7 не слита",
           not [m for m in b.merges() if REPO in m] and not b.approve_lines(), (b.outs[-1], b.merges()))
-    b = Box()
+    b = pbox()
     b.request()
     with open(os.path.join(b.state, "merge-queue", f"latark__agent-kit__{PR + 1}.json"), "w") as fh:
         json.dump({"repo": REPO, "pr": PR + 1, "sha": SHA[:7] + "2" * 33, "by": "x", "created": T0}, fh)
@@ -2837,11 +2845,11 @@ def test_phrase_once():
 
 def test_phrase_gate_and_wait():
     b = phrase_box(f"слей #{PR} {SHA[:7]}")
-    b.view(SHA, checks=ci("SUCCESS", "PENDING"))
+    b.view(SHA, checks=ci("SUCCESS", "PENDING"), files=NONCORE)
     b.run(t=T0 + 120, extra=AWAY)
     check("фраза есть, CI идёт → ждёт, фраза не тратится", untouched(b)
           and not os.path.exists(os.path.join(b.state, "merge-phrases.json")), b.outs[-1])
-    b.view(SHA)
+    b.view(SHA, files=NONCORE)
     b.run(t=T0 + 180, extra=AWAY)
     check("CI зелёный → та же фраза сливает", merged_once(b), b.outs[-1])
     b = phrase_box(f"слей #{PR} {SHA[:7]}")
@@ -2849,7 +2857,7 @@ def test_phrase_gate_and_wait():
     b.run(t=T0 + 120, extra=AWAY)
     check("фраза есть, у argus «вернуть» → не слито, заявка снята", not b.merges() and not b.approve_lines()
           and b.req() is None, b.outs[-1])
-    b = Box()
+    b = pbox()
     b.request()
     b.set("touchid-rc", 2)
     b.run()
@@ -2857,7 +2865,7 @@ def test_phrase_gate_and_wait():
     b.run(t=T0 + 120, extra=AWAY)
     check("заявка ждёт щелчка по уведомлению — фраза сливает без щелчка", merged_once(b)
           and len(b.windows()) == 1, b.outs[-1])
-    b = Box()
+    b = pbox()
     b.request()
     b.set("gh-merge-rc", 1)
     say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
@@ -2877,6 +2885,77 @@ def test_phrase_batch_not_merged():
           and not b.approve_lines() and b.req(7) is not None and b.req(8) is not None, b.outs[-1])
 
 
+FINGER = ("import json, os, sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); "
+          "req = m.read_req(m.req_file(sys.argv[1], int(sys.argv[2]))); "
+          "ph = {'pr': req['pr'], 'hex': req['sha'][:7], 'key': 'k', 'file': 'zeus.md', 'line': 1, 'at': 'x'}; "
+          "m.find_phrase = lambda r: ph; m.gh_merge = lambda r: (0, ''); "
+          "m.check_all = lambda r, after=False: ('ok', 'ok', {}, json.loads(sys.argv[3])); "
+          "print(json.dumps(m.finger(req, None, ph)))" % LIBDIR)
+
+
+def test_phrase_core_touchid_only():
+    """metis-1026 (К3 модели угроз, решение владельца 09.11 «А»): фраза «слей #N <hex>» не сливает PR ядра — заявка
+    ждёт окна Touch ID, фраза не тратится, тревога одна на фразу. Вне ядра фраза сливает (test_phrase_*)."""
+    cases = (("файл ядра CORE_FILES", FILES), ("папка ядра CORE_DIR", ["plugins/pantheon/roles/dev.md"]),
+             ("файл сборки окон BUILD_FILES", ["plugins/pantheon/lib/pantheon.py"]),
+             ("ядро — прежнее имя переименованного", [{"filename": "docs/x.py", "status": "renamed",
+                                                         "previous_filename": "plugins/guard/hooks/guard.py"}]))
+    for name, files in cases:
+        b = Box()
+        b.view(SHA, files=files)
+        b.request()
+        say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+        b.run(t=T0 + 120, extra=AWAY)
+        recs = merge_recs(b)
+        check(f"1026: {name} + фраза, владельца нет у Mac → не слито, строки согласия нет, заявка ждёт",
+              untouched(b) and not b.windows() and "phrase" not in [r["event"] for r in recs], (b.outs[-1], recs))
+        check(f"1026: {name} — фраза не потрачена (merge-phrases.json нет)",
+              not os.path.exists(os.path.join(b.state, "merge-phrases.json")))
+    check("1026: тревога называет ядро и Touch ID", "не сливает PR ядра" in b.alerts() and "Touch ID" in b.alerts(),
+          b.alerts())
+    b.run(t=T0 + 180, extra=AWAY)
+    check("1026: повтор прохода — тревога о той же фразе одна", b.alerts().count("не сливает PR ядра") == 1, b.alerts())
+    b = Box()
+    b.request()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120)
+    check("1026: ядро + фраза, владелец у Mac → окно Touch ID, слито пальцем (how=touchid)",
+          merged_once(b) and len(b.windows()) == 1
+          and [r.get("how") for r in merge_recs(b) if r["event"] == "merged"] == ["touchid"], b.outs[-1])
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 2)
+    b.run()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY)
+    check("1026: ядро, заявка ждёт щелчка, фраза → не слито, окно второй раз не показано",
+          untouched(b) and len(b.windows()) == 1 and "ждёт щелчка" in b.outs[-1], b.outs[-1])
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 3)
+    b.run()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120)
+    check("1026: ядро, окно закрыто без ответа, фраза → повтор окна позже, а не сразу",
+          untouched(b) and len(b.windows()) == 1 and "повтор позже" in b.outs[-1], b.outs[-1])
+    b = Box()
+    b.request()
+    say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
+    b.run(t=T0 + 120, extra=AWAY, attrs={"m": {"PHRASE_CORE": True}})
+    check("1026: точка возврата PHRASE_CORE (после metis-0972) — фраза снова сливает ядро", merged_once(b),
+          b.outs[-1])
+    for files, want in (([CORE_FILE], False), (["README.md"], True)):
+        b = Box()
+        b.request()
+        r = subprocess.run([PY311, "-I", "-c", FINGER, REPO, str(PR), json.dumps(files)], env=b.env(T0 + 120),
+                           capture_output=True, text=True, timeout=60)
+        out = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else None
+        check(f"1026: finger под замком сверяет ядро заново — {files[0]}: "
+              + ("слито" if want else "строки согласия нет, заявка ждёт"),
+              out is not None and out[0] is want and (bool(b.approve_lines()) is want)
+              and (b.req() is None) is want, (r.stdout, r.stderr))
+
+
 def _hook(b, ev, wait="1"):
     env = {"PATH": "/usr/bin:/bin", "HOME": b.home, "PANTHEON_HOME": b.pantheon, "PANTHEON_STATE": b.state,
            "PANTHEON_VIEW": os.path.join(b.home, "ai", "pantheon-view"), "CLAUDE_PID": str(os.getpid()),
@@ -2892,7 +2971,7 @@ def test_phrase_not_owner_hook():
     import time as _time
     from datetime import datetime as _dt, timezone as _tz
     now = int(_time.time())
-    b = Box()
+    b = pbox()
     tr = os.path.join(b.tmp, "hq.jsonl")
     open(tr, "w").close()
 
