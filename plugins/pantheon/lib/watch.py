@@ -904,6 +904,8 @@ def goal_dates(t):
             continue
         for field, label in GOAL_FIELDS:
             key, text = f"watch-goal-{name}-{field}", d.get(field)
+            if not isinstance(text, str):  # список или число в TOML — не строка цели, в тревогу repr не печатаем
+                text = None
             dates = T.reg_dates(text, t) if text not in (None, "") else []
             last = max(dates) if dates else None
             if last is None or datetime.fromtimestamp(t).date() <= last.date():
