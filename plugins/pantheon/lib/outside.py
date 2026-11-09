@@ -70,10 +70,11 @@
     PATH — pg_dump из libpq (LIBPQ_BINS, если стоит). Вывод такого прогона идёт в сырой журнал
     STATE/outside/test-env/raw/<ID>.log (закрыт окнам вместе с test-env), а в runs/<ID>.log — только вычищенным после
     выхода процесса (flush_raw, argus #410-2 Б1); брошенный сырой журнал (заход убит SIGKILL, сторож, перезагрузка)
-    удаляют recover_results и сторож (drop_raw). Значения вырезаются из журнала прогона, хвоста итога и среза
-    процессов (redact: значение → <ИМЯ>, пароль → ***), в итоге и журнале outside.jsonl — только имена (keys); и в
-    последней строке вывода, которую пишут why итога и событие test-silent при гашении по тишине, и в причине события
-    stop (TestWatch.clean_why, argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
+    удаляют recover_results и сторож (drop_raw). Значения вырезаются из журнала прогона (целиком, до любой обрезки)
+    и среза процессов (redact: значение → <ИМЯ>, пароль → ***), в итоге и журнале outside.jsonl — только имена
+    (keys); фрагментов вывода в итоге (нет tail) и в событиях нет: при гашении по тишине why итога и события
+    test-silent — только «гашение по тишине N с», без последней строки (она обрезана до вырезания и несла бы кусок
+    пароля, argus #410-3 Б1); причина события stop — через TestWatch.clean_why (argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
     на чтение (argus #410 Б2): denyRead песочницы Bash и правило Read(…/**) для Read, Grep, Glob в сборке окон
     (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
     Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
@@ -170,7 +171,8 @@ LOAD_PER_CORE на ядро ждёт спада в итоге queued; красн
 «таймаут под нагрузкой», код 75: metis-0901). Сторож тишины (metis-0770): лог прогона не
 растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
 sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
-гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
+гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»; у прогона с ключами тестов —
+только «гашение по тишине N мин», без строки и хвоста), в журнал — запись test-silent; считающий без
 вывода прогон не гасится. CPU не узнать (ни libproc, ни ps) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
 всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
 на чтение, на запись нет; STATE/outside/env и test-env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
@@ -1038,12 +1040,15 @@ def _pid_alive(p):
 
 
 class Silent(Exception):
-    """Лог молчал IDLE_TIMEOUT с при почти нулевом CPU дерева: группа убита (SIGKILL), why — для итога."""
+    """Лог молчал IDLE_TIMEOUT с при почти нулевом CPU дерева: группа убита (SIGKILL), why — для итога. bare — причина
+    без вывода: у прогона с ключами тестов (metis-1016, argus #410-3 Б1) last обрезана до вырезания и может нести
+    кусок пароля — в итог, событие и журнал идёт только bare."""
 
     def __init__(self, secs, last):
         self.secs, self.last = secs, last
         mins = f"{round(secs / 60)} мин" if secs >= 60 else f"{round(secs)} с"
         self.why = f"тишина {mins}, последний вывод: {last or '(пусто)'}"
+        self.bare = f"гашение по тишине {mins}"
         super().__init__(self.why)
 
 
@@ -2000,9 +2005,11 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                                            "why": f"сырой журнал прогона с ключами не создан: {e}", "keys": sorted(keys)})
 
     def settle():
-        """Сырой журнал закрыть и вычищенным дописать в runs/<ID>.log (flush_raw) → True, если перенесён."""
-        with contextlib.suppress(OSError):
-            os.close(out)
+        """Сырой журнал закрыть и вычищенным дописать в runs/<ID>.log (flush_raw) → True, если перенесён. Без ключей
+        out — это fd журнала прогона: его закрывает finally, здесь нет (двойной close — EBADF, test_outside_idle)."""
+        if out != fd:
+            with contextlib.suppress(OSError):
+                os.close(out)
         return flush_raw(raw, fd, keys)
 
     tmp = tempfile.mkdtemp(prefix="outside-")
@@ -2034,12 +2041,14 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             code = proc.wait()
         except Silent as e:      # завис без вывода и CPU: тот же журнал, что отказ запуска (metis-0770)
             hidden, raw = settle(), None
+            # argus #410-3 Б1: последняя строка и хвост обрезаны до вырезания — кусок пароля redact не узнаёт. С
+            # ключами — ни строки, ни хвоста: только «гашение по тишине N с»; вывод — в runs/<ID>.log, вычищен целиком
+            why = e.bare if keys else e.why
             with contextlib.suppress(OSError):
-                os.write(fd, f"\n{redact(e.why, keys)}\n".encode())
-            log_event(kind="test-silent", id=rid, why=redact(e.why, keys))   # последняя строка вывода (argus #410 Б1)
-            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
-                                           "why": redact(e.why, keys), "log": log, "tail": redact(tail(log), keys),
-                                           **({"keys": sorted(keys)} if keys else {})})
+                os.write(fd, f"\n{why}\n".encode())
+            log_event(kind="test-silent", id=rid, why=why)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "why": why,
+                                           "log": log, **({"keys": sorted(keys)} if keys else {"tail": tail(log)})})
     finally:
         if raw:   # metis-1016: вывод с ключами — в runs/ только вычищенным, сырой удалён
             hidden = settle()
@@ -2055,7 +2064,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         return run_test(rid, d, script, window, qdir, roots, record=record, src=src, expect=expect, base=base,
                         watch=watch, retried={"log": log, "files": over})
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
-           "dir": d, "log": log, "tail": redact(tail(log), keys), "record": False, **extra}
+           "dir": d, "log": log, "record": False, **extra}
+    if not keys:   # с ключами тестов фрагментов вывода в итоге нет (argus #410-3 Б1): весь вывод — в log, вычищен
+        res["tail"] = tail(log)
     text = log_text(log) if full or narrow else ""
     got = run_failed(text) if full or narrow else None
     if plan:

@@ -4,6 +4,7 @@
 только на порт базы; pg_dump из libpq в PATH только этому прогону; значения не попадают в журнал, итог, status и
 outside.jsonl; `pantheon outside key` кладёт значение скрытым вводом. Запуск: python3.14 -I tests/test_outside_test_keys.py."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -118,6 +119,8 @@ _ev = json.dumps(events(rid))
 check("test --script: outside.jsonl без значений, имена — есть", not leaks(_ev) and "SUPABASE_DB_URL" in _ev, _ev[-300:])
 _rc, _st = say("athena-x", "status", rid)
 check("status: без значений", not leaks(_st), leaks(_st))
+check("test --script: хвоста вывода в итоге нет (фрагменты вывода с ключами — только в журнале)",
+      "tail" not in res and bool(res.get("log")), sorted(res))
 check("test --script: записи tests для шлюза нет", not tests_for(git(APP, "rev-parse", "HEAD")))
 check("test --script: сырой журнал после прогона удалён (папки raw нет)", not os.path.exists(O.raw_dir()),
       os.listdir(O.raw_dir()) if os.path.isdir(O.raw_dir()) else None)
@@ -223,35 +226,69 @@ check("сторож: в runs/<ID>.log пометка, значения нет", 
 O.drop_raw()
 check("drop_raw без ID: убраны все брошенные, папки raw нет", not os.path.exists(O.raw_dir()))
 
-# --- гашение по тишине: последняя строка вывода со строкой базы (argus #410 Б1) ------------------------------------
-# сторож тишины пишет последнюю строку вывода в why итога и события test-silent; CPU дерева — 0 (гасим наверняка, не
-# завися от libproc и ps в песочнице), IDLE_TIMEOUT — 2 с
+# --- гашение по тишине прогона с ключами: ни строки, ни хвоста вывода (argus #410 Б1, #410-3 Б1) ---------------
+# последняя строка (до 200 знаков) и хвост (до TAIL_CHARS) обрезаются до вырезания: кусок пароля redact не узнаёт.
+# Поэтому у прогона с ключами why итога и события test-silent — только «гашение по тишине N с», хвоста в итоге нет,
+# а вывод — в runs/<ID>.log, вычищенный целиком. CPU дерева — 0 (гасим наверняка, не завися от libproc и ps в
+# песочнице), IDLE_TIMEOUT — 2 с. Случаи: короткая строка; строка базы на границе 200 знаков (PROBE3 argus 3-2);
+# строка длиннее TAIL_CHARS, хвост начинается внутри пароля (PROBE4)
+_PWQ = "S3cr%2Ft-pw-xyz"
+_GRAMS = sorted({w[i:i + 4] for w in (_PWQ, PW) for i in range(len(w) - 3)})
+
+
+def frags(text):
+    """Куски пароля (по 4 знака) в тексте — ловят и обрезанное начало, и обрезанный конец."""
+    return [g for g in _GRAMS if g in (text or "")]
+
+
+_pad = "P" * (200 - len("postgresql://postgres.abcd:S3cr%2Ft"))   # граница 200 знаков — внутри пароля
+_long = 4000 + 32 - len(URL_APP)                                  # строка длиннее TAIL_CHARS: хвост — с середины пароля
+SILENT = (
+    ("короткая строка", f'echo "url=$SUPABASE_DB_URL pw={PW}"; exec sleep 31337', "url=<SUPABASE_DB_URL> pw=***"),
+    ("пароль на границе 200 знаков", f'echo "{_pad}$SUPABASE_DB_URL"; exec sleep 31337', _pad + "<SUPABASE_DB_URL>"),
+    ("строка длиннее TAIL_CHARS",
+     f'printf "%s%s\\n" "$SUPABASE_DB_URL" "$(printf "x%.0s" $(seq 1 {_long}))"; exec sleep 31337',
+     "<SUPABASE_DB_URL>" + "x" * _long),
+)
+check("тишина: строка случая «граница 200» режется last_line внутри пароля (иначе случай ничего не ловит)",
+      bool(frags(O.Silent(2, (_pad + URL_APP)[:200]).why)) and URL_APP not in (_pad + URL_APP)[:200])
 _idle, _cpu = O.IDLE_TIMEOUT, O.tree_cpu
 O.IDLE_TIMEOUT, O.tree_cpu = 2, (lambda pid: 0.0)
+_silent = []
 try:
-    commit(APP, {"package.json": json.dumps(dict(PKG, scripts=dict(
-        PKG["scripts"], test=f'echo "url=$SUPABASE_DB_URL pw={PW}"; exec sleep 31337')))}, "silent script")
-    q, rid = new_request("athena-x", APP, "test", "--script", "test")
-    run_pass()
+    for _name, _body, _want in SILENT:
+        commit(APP, {"package.json": json.dumps(dict(PKG, scripts=dict(PKG["scripts"], test=_body)))},
+               f"silent script: {_name}")
+        q, rid = new_request("athena-x", APP, "test", "--script", "test")
+        run_pass()
+        _silent.append((_name, _want, q, rid, O.load_result(q, rid) or {}))
 finally:
     O.IDLE_TIMEOUT, O.tree_cpu = _idle, _cpu
     commit(APP, {"package.json": json.dumps(pkg)}, "test script back")
-res = O.load_result(q, rid) or {}
-_sil = events(rid, "test-silent")
-check("тишина: прогон погашен сторожем, событие test-silent есть",
-      res.get("state") == "failed" and "тишина" in (res.get("why") or "") and len(_sil) == 1, (res.get("why"), _sil))
-check("тишина: в why события — последняя строка, строка базы вырезана в имя",
-      bool(_sil) and "url=<SUPABASE_DB_URL> pw=***" in _sil[0].get("why", ""), _sil)
-_ev = open(os.path.join(STATE, "logs", "outside.jsonl")).read()
-check("тишина: outside.jsonl без значений", not leaks(_ev), leaks(_ev))
-_resj = json.dumps(res) + (open(os.path.join(q, rid + ".json")).read() if os.path.exists(os.path.join(q, rid + ".json"))
-                           else "")
-check("тишина: итог (why, tail) без значений", not leaks(_resj), leaks(_resj))
-_sl = [ln for ln in (res.get("tail") or "").splitlines() if "url=<SUPABASE_DB_URL>" in ln]
-check("тишина: вывод прогона перенесён до хвоста итога и до строки о тишине (вычищенным)",
-      len(_sl) == 2 and not _sl[0].startswith("тишина") and _sl[1].startswith("тишина"), res.get("tail"))
+for _name, _want, q, rid, res in _silent:
+    _sil = events(rid, "test-silent")
+    check(f"тишина ({_name}): прогон погашен сторожем, событие test-silent одно",
+          res.get("state") == "failed" and len(_sil) == 1, (res.get("why"), _sil))
+    check(f"тишина ({_name}): why итога и события — только «гашение по тишине N с»",
+          re.fullmatch(r"гашение по тишине \d+ с", res.get("why") or "") is not None
+          and bool(_sil) and _sil[0].get("why") == res.get("why"), (res.get("why"), _sil))
+    check(f"тишина ({_name}): хвоста вывода в итоге нет, имена ключей — есть",
+          "tail" not in res and res.get("keys") == ["SUPABASE_DB_URL"], sorted(res))
+    _resj = json.dumps(res, ensure_ascii=False) + (open(os.path.join(q, rid + ".json")).read()
+                                                   if os.path.exists(os.path.join(q, rid + ".json")) else "")
+    _ev = open(os.path.join(STATE, "logs", "outside.jsonl")).read()
+    _rc, _st = say("athena-x", "status", rid)
+    _runlog = open(res["log"]).read() if res.get("log") else PW
+    for _where, _text in (("итог", _resj), ("outside.jsonl", _ev), ("status", _st), ("runs/<ID>.log", _runlog)):
+        check(f"тишина ({_name}): {_where} без значений и без кусков пароля", not leaks(_text) and not frags(_text),
+              (leaks(_text), frags(_text)))
+    _lines = _runlog.splitlines()
+    check(f"тишина ({_name}): в runs/<ID>.log вывод целиком вычищенным, за ним — строка о гашении",
+          _want in _lines and _lines.index(_want) < len(_lines) - 1 and _lines[-1] == res.get("why"),
+          [ln[:120] for ln in _lines[-3:]])
 check("тишина: сырой журнал удалён", not os.path.exists(O.raw_dir()))
-check("тишина: журнал прогона без значений", not leaks(open(res["log"]).read() if res.get("log") else "x" + PW))
+check("тишина без ключей: why с последней строкой вывода, как раньше",
+      O.Silent(2, "строка").why == "тишина 2 с, последний вывод: строка" and O.Silent(120, "").bare == "гашение по тишине 2 мин")
 # событие stop прогона с ключами (снят «стопом» или superseded) — та же причина через clean_why
 _w = O.TestWatch("20261109-000000-aaaaaa", q, "athena-x", APP)
 _w.keys, _w.why = _K, f"причина {URL_APP} {PW}"
