@@ -159,7 +159,6 @@ SKIP_NOT_MAC = {
 # тогда тоже прошли бы молча.
 QUARANTINE = {
     "pantheon/test_outside_idle.py": "metis-0989",  # «без ps молчащий sleep гасится по тишине» под нагрузкой
-    "pantheon/test_outside_cancel.py": "metis-1035",  # T11 красный и на main d4100ad, отдельно зелёный
 }
 # Окно роли (metis-0773): песочница режет запись `.claude/agents` и `.git/{config,hooks}` под папкой tmp кэша окна
 # (PANTHEON_TMP), где TMPDIR раннера. Эти файлы строят в своих временных папках поддельный HOME с ролями и репозитории
