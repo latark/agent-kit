@@ -290,6 +290,7 @@ check("1057: load_since в заявке роли (старше LOAD_WAIT_MAX) п
       held and out4.get("state") == "done" and ncalls() == n0 + 1, (held, out4))
 
 # начало ожидания, которое помнит проход, старше LOAD_WAIT_MAX: срок вышел, хоть набор взят заново — идёт сразу
+commit(T_PY + "# d1b\n", "d1b")   # прогон выше записал tests на прошлый коммит — без нового повтор шёл бы без прогона
 out5, n0 = {}, ncalls()
 D5 = O.Defer(QQ, RIDD, back, {(QQ, RIDD): time.time() - O.LOAD_WAIT_MAX - 5})
 th = threading.Thread(target=lambda: out5.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=D5)))
