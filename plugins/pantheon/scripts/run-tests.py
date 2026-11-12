@@ -143,6 +143,7 @@ NO_SUMMARY = frozenset({
     "guard/test_tg_self.py",
     "pantheon/test_board_drift.py",
     "pantheon/test_merge.py",  # «все прошли» — без числа, TEST_SUMMARY его не берёт
+    "pantheon/test_merge_light.py",  # «все прошли» — как test_merge.py (metis-1065)
     "pantheon/test_path_clean.py",
     "pantheon/test_read.py",  # «все прошли»
 })
