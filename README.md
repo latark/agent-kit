@@ -995,7 +995,8 @@
     python3 -I plugins/pantheon/tests/test_outside_cancel.py # outside, часть 3: окно снимает свой прогон, проход снимает прогон ушедшего head (metis-0873)
     python3 -I plugins/pantheon/tests/test_outside_load.py # outside под нагрузкой: ожидание спада load, один повтор после таймаутов, heavy вне TEST_TIMEOUT
     python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
-    python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
+    python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры; разрезан на части (план 1.0, Т2): test_watch_{zeus,stop,oneshot,sandbox,infra,nudge,respawn,ghost}.py, общее — tests/_watch_common.py
+    python3 -I plugins/pantheon/tests/test_merge.py   # слияние по Touch ID (lib/merge.py): палец, шлюз, заявки; части — test_merge_{window,ci,env,batch}.py, общее — tests/_merge_common.py
     python3 -I plugins/pantheon/tests/test_wt_cleanup.py   # уборка копий .claude/worktrees: слитые, lock субагента, патч и архив, pantheon wt done
     python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод и повтор, чей процесс, reap и reap --auto
     python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: плановый проход пишет probes.json, окно читает свежий, старый/битый — как раньше
