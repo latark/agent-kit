@@ -460,7 +460,7 @@ th.join(10)
 check("12. Д8: sync берёт замок — пока он занят, сборка ждёт; отпущен — доходит", waited and done == ["written"], (waited, done))
 
 # Д9 и clear_once("who-canvas"): команда целиком
-probe_f = probe.replace("p.who_canvas_cmd([])", "p.who_canvas_cmd(['--force'])") + f"""
+probe_f = probe.replace("p.who_canvas_cmd([])", "p.who_canvas_cmd(['--force'])") + """
 print("mark-canvas:", _o.path.exists(p.once_path("who-canvas")))
 print("mark-argus:", _o.path.exists(p.once_path("who-canvas-manual-argus")))
 """
