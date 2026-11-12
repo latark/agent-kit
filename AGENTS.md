@@ -9,8 +9,9 @@
   запускает `hooks/python.sh` на 3.11+, системный 3.9 не нужен. Все три плагина сразу —
   `heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools`.
   Гибрид без macOS (решение владельца 03.11, metis-0688): квота GitHub Free — 2000 минут, минута macOS = 10 Linux,
-  в ноябре она кончилась за 3 дня. Полный набор идёт локально: `pantheon outside test` пишет запись FULL_TESTS
-  на head PR; шлюз засчитывает её на запасном пути, при зелёном CI не требует: он засчитывает любую непустую запись tests, даже узкую NARROW_TESTS (README guard, merge_gate.py), так что полный набор обязателен только на запасном пути; до metis-0744 (пачка П1) подавай `pantheon outside test` на итоговый head сам. На GitHub (`.github/workflows/tests.yml`) — только лёгкая проверка PR в main:
+  в ноябре она кончилась за 3 дня. Тесты идут локально: на запасном пути шлюзу нужна запись tests на head PR —
+  узкая (`pantheon outside test --affected`) или полного набора; при зелёном CI годится любая непустая запись tests
+  (README guard, п. 8). Полный набор слияние не держит: он идёт ночью на main (ниже). На GitHub (`.github/workflows/tests.yml`) — только лёгкая проверка PR в main:
   затронутое (`--affected --base origin/main`) на ubuntu-24.04 плюс `.github/scripts/test_release.py` (правка
   `.github/` карту не задевает), до них `ruff check .` и храповик (раздел «Стандарт кода»). macOS в workflow нет, прогона на push в main нет; полный набор на GitHub — только
   вручную (workflow_dispatch, job `full`, ubuntu-24.04, на PR он SKIPPED; строка в `OPTIONAL_CHECKS` шлюза).
@@ -56,19 +57,18 @@
 7. Слияние идёт одним из трёх путей (решение владельца 02.11, metis-0655; подробно — README guard, п. 8).
    Гибрид без macOS (03.11, metis-0688) — не четвёртый путь, а состояние CI: на GitHub идёт только лёгкая проверка PR
    на Linux (затронутое и тесты выпуска), полный набор не идёт ни до, ни после слияния (кроме ручного job `full`).
-   Запись FULL_TESTS из `pantheon outside test` шлюз требует только на запасном пути; при зелёном CI он её не
-   требует, так что до metis-0744 на пути CI полный набор не обязателен — подавай `pantheon outside test` на
-   итоговый head сам. Что шлюз требует сверх CI, смотри README guard, п. 8.
+   Запись tests из `pantheon outside test` шлюз требует только на запасном пути; полный набор слияние не держит —
+   он идёт ночью на main (metis-1050). Что шлюз требует сверх CI, смотри README guard, п. 8.
    - CI: обязательные проверки зелёные на head PR, шлюз guard сверяет их сам.
    - Запасной (квота кончилась, сейчас это обычный случай) — Actions не запускаются: кончились бесплатные минуты приватного репозитория, у проверок аннотация
      «The job was not started because … spending limit …», а job без раннера и шагов. Шлюз узнаёт этот случай и
-     вместо CI требует запись полного набора тестов на том же head. Основной способ — из корня чистой копии на
-     head PR `pantheon outside test --wait 590` (Bash не в фоне, timeout 600000): плановый проход прогонит
+     вместо CI требует запись tests на том же head: узкую (ниже) или полного набора. Полный — из корня чистой копии
+     на head PR `pantheon outside test --wait 590` (Bash не в фоне, timeout 600000): плановый проход прогонит
      `.pantheon-verify` вне окна (до 2 ч) и сам напишет запись; код 75 — итога ещё нет, ждать
      `pantheon outside status <ID>`. Вариант — `pantheon review test -- heavy python3.14 -I
      plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon plugins/project-tools` не в фоне:
      фоновый прогон записи не пишет, а набор с очередью heavy бывает дольше предела Bash 600 с. Засчитывается только
-     эта команда (`FULL_TESTS` в `merge_gate.py`) и только запись на head PR.
+     эта команда (`FULL_TESTS` в `merge_gate.py`) или её узкий вариант от outside, и только запись на head PR.
      Любой PR — и ядра, и пачки, и по Touch ID (metis-0734, с metis-1050 — для всех) — сливается и по узкой записи:
      `pantheon outside test --affected --wait 590` из чистой копии на head PR. Это затронутые тесты от merge-base с
      origin/main, примерно вдвое быстрее полного набора. Шлюз сверяет базу записи с merge-base head и base PR, а карту —

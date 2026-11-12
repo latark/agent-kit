@@ -1493,9 +1493,9 @@ FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-te
 
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
-# Основной путь (CI зелёный) засчитывает любую непустую запись tests на SHA, эту тоже; запасной (CI без минут) — только
-# FULL_TESTS, а у PR вне ядра ещё узкую запись outside с базой SHA, files и map (narrow_tests_record; у этой команды
-# база — ref, а не SHA, поэтому там она не в счёт). Не в зеркале lib/merge.py: подсказка, а не правило
+# Основной путь (CI зелёный) засчитывает любую непустую запись tests на SHA, эту тоже; запасной (CI без минут) —
+# FULL_TESTS или узкую запись outside с базой SHA, files и map у любого PR (narrow_tests_record, metis-1050; у этой
+# команды база — ref, а не SHA, поэтому там она не в счёт). Не в зеркале lib/merge.py: подсказка, а не правило
 NARROW_TESTS = {"agent-kit": ("python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected --base origin/main "
                               "plugins/guard plugins/pantheon plugins/project-tools")}
 

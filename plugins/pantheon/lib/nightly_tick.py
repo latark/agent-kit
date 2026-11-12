@@ -17,7 +17,9 @@ STATE/nightly-tick.json (result), тик пишет его строкой `night
 каждого она уже есть), но называются в строке журнала и в тревоге — падения в карантине видны. На каждый упавший
 файл не из карантина — задача «Ночной полный набор: <метка> красный на main», если открытой с тем же заголовком нет.
 Красный набор или сбой (клон, код раннера без строки итога, таймаут) — тревога alert_once без critical, одна на
-состояние; зелёный её снимает. PANTHEON_DRYRUN=1 (тесты тика) — ничего не делает.
+состояние; зелёный её снимает. Код раннера 4 (WINDOW_SKIP: файлы окна пропущены) — не зелёный, а «набор не полный» с
+тревогой. Выводы прогонов (лог и папка --log-dir) — KEEP_LOGS последних ночей репозитория, старые убирает запуск
+следующего (prune_logs). PANTHEON_DRYRUN=1 (тесты тика) — ничего не делает.
 """
 import json
 import os
@@ -35,6 +37,8 @@ CHECK_EVERY = 10 * 60
 NIGHT_HOURS = range(1, 7)  # 01:00–06:59 местного времени
 RUN_TIMEOUT = 3 * 3600
 DIED_GRACE = 120  # с: «running» без живого процесса дольше этого — работник погиб
+WINDOW_SKIP = 4  # код run-tests.py (WINDOW_SKIP_CODE): зелёный, но файлы окна пропущены — набор не полный
+KEEP_LOGS = 14   # ночей: выводы старше убирает prune_logs
 RUNNER = os.path.join("plugins", "pantheon", "scripts", "run-tests.py")
 PLUGIN_DIRS = ("plugins/guard", "plugins/pantheon", "plugins/project-tools")
 REPO_NAMES = ("agent-kit",)
@@ -193,7 +197,11 @@ def summarize(res):
         why = (f"{head}: красный — {', '.join(res['fails'])}" + (f" (задачи {', '.join(tids)})" if tids else "")
                + quar + f"; {res['total']}")
         return why, why
-    if res.get("code") not in (0, 4):
+    if res.get("code") == WINDOW_SKIP:
+        why = (f"{head}: набор не полный — раннер пропустил файлы окна (код {WINDOW_SKIP}), зелёным не считаю{quar}; "
+               f"{res['total']}")
+        return why, why
+    if res.get("code") != 0:
         why = f"{head}: код раннера {res.get('code')}{quar}; {res['total']}"
         return why, why
     return f"{head}: зелёный{quar}; {res['total']}", None
@@ -226,6 +234,34 @@ def collect(t, st):
     return None
 
 
+def prune_logs(name, keep):
+    """Выводы ночных прогонов репозитория name в STATE/nightly: `<name>-<дата>.log` и папка `….log.d` — держит keep
+    последних ночей, остальные убирает. Копию `nightly/<name>` и чужие имена не трогает. → [убранные имена]."""
+    d = P.path("nightly")
+    pat = re.compile(re.escape(name) + r"-(\d{4}-\d{2}-\d{2})\.log(?:\.d)?")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    nights = sorted({m[1] for n in names for m in [pat.fullmatch(n)] if m})
+    old = set(nights[:-keep] if keep > 0 else nights)
+    gone = []
+    for n in sorted(names):
+        m = pat.fullmatch(n)
+        if not m or m[1] not in old:
+            continue
+        p = os.path.join(d, n)
+        try:
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p)
+            else:
+                os.remove(p)
+            gone.append(n)
+        except OSError:
+            continue
+    return gone
+
+
 def check(repo, t, st, night):
     """Проверка репозитория → (итог, сбой или None, запуск был)."""
     RT = P.release_tick_mod()
@@ -244,6 +280,7 @@ def check(repo, t, st, night):
     job = {"repo": repo, "copy": copy, "sha": sha, "night": night, "state": state_file(), "python": python(),
            "heavy": [P.outside_mod().heavy_bin()], "log": P.path("nightly", f"{name}-{night}.log")}
     done[repo] = {"sha": sha, "night": night}
+    prune_logs(name, KEEP_LOGS - 1)   # место под вывод этой ночи
     st["running"] = {"t": t, "sha": sha, "repo": repo}
     P.write_json(state_file(), st)
     spawn(job)
