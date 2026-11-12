@@ -438,7 +438,7 @@ def class2_links(tmp):
     pairs = [(repo.replace("$HOME", tmp), "x.sh") for _, repo, _ in cases] + [(os.path.join(proj, "real"), "x.sh")]
     snap = snap_of(tmp, "links", os.path.join(PACKS, "_bin"), pairs, home=tmp)
 
-    def hook(repo, wrapper=os.path.join(snap, "_bin", "in_repo.py")):
+    def hook(repo, wrapper=os.path.join(snap, "_bin", "in_repo.py")):  # noqa: B008 — путь snap считается один раз, намеренно
         if os.path.exists(mark):
             os.unlink(mark)
         r = subprocess.run([sys.executable, "-I", wrapper, repo, "--always", "--", "bash", ".claude/hooks/x.sh"],
