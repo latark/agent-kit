@@ -144,7 +144,7 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 LOAD_PER_CORE на ядро ждёт спада в итоге queued; красный только из-за таймаутов файлов под нагрузкой — один повтор сам, затем итог
 «таймаут под нагрузкой», код 75: metis-0901; та же заявка на том же коммите с теми же файлами ещё раз — красный, metis-0927).
 Ждёт только полный набор (решение владельца 12.11, metis-1057): пока он ждёт, другие заявки test идут вперёд — заявка
-набора возвращается в очередь с load_since, срок ожидания считается от него (Defer). Сторож тишины (metis-0770): лог прогона не
+набора возвращается в очередь, срок ожидания считается от первого начала: его помнит проход, а не заявка роли (Defer). Сторож тишины (metis-0770): лог прогона не
 растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
 sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
 гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
@@ -1748,18 +1748,18 @@ class Defer:
     """Полный набор, ждущий спада нагрузки, уступает очередь (metis-1057, решение владельца 12.11 «ждут только
     полные»): очередь прохода последовательная, и раньше узкие прогоны и проверки других проектов стояли за ним до
     LOAD_WAIT_MAX (06–10.11: 17 заявок, 432 мин). Пока он ждёт, а в очереди есть заявка test не из отложенных, заявка
-    набора возвращается на диск с полем load_since (начало ожидания: LOAD_WAIT_MAX считается от него, а не заново), итог
-    queued, и проход берёт следующую. deferred — общее для захода множество (qdir, id) отложенных: им не уступают,
-    иначе два ждущих набора передавали бы очередь друг другу по кругу."""
+    набора возвращается на диск, итог queued, и проход берёт следующую. deferred — общий для захода словарь
+    (qdir, id) → начало ожидания (time.time()): LOAD_WAIT_MAX считается от него, а не заново. Начало — только в памяти
+    прохода: заявку пишет роль, и поле в ней со старым временем снимало бы ожидание спада (находка безопасности, 12.11).
+    Отложенным не уступают, иначе два ждущих набора передавали бы очередь друг другу по кругу."""
 
     def __init__(self, qdir, rid, req, deferred):
         self.qdir, self.rid, self.req, self.deferred = qdir, rid, req, deferred
         self.yielded = False
 
     def since(self):
-        t = self.req.get("load_since") if isinstance(self.req, dict) else None
-        ok = isinstance(t, (int, float)) and not isinstance(t, bool) and 0 < t <= time.time()
-        return float(t) if ok else None
+        """Начало ожидания, если этот заход уже откладывал заявку, иначе None. Поля заявки не читаются."""
+        return self.deferred.get((self.qdir, self.rid))
 
     def others(self):
         """Есть ли в очереди другая заявка test, которой стоит уступить (не отложенная этим заходом)."""
@@ -1767,17 +1767,17 @@ class Defer:
         return any((q, r) != me and (q, r) not in self.deferred for q, _w, r, _req in _queued_tests())
 
     def back(self, state, since, why):
-        """Заявку — обратно в очередь (с load_since), итог queued. → True; не записать — False (тогда ждём дальше)."""
+        """Заявку — обратно в очередь, начало ожидания since — в deferred, итог queued. → True; не записать — False (тогда ждём дальше)."""
         dfd = _open_dir(self.qdir)
         if dfd is None:
             return False
         try:
-            _write_in(dfd, self.rid + ".req.json", json.dumps({**self.req, "load_since": since}, ensure_ascii=False))
+            _write_in(dfd, self.rid + ".req.json", json.dumps(self.req, ensure_ascii=False))
         except OSError:
             return False
         finally:
             os.close(dfd)
-        self.deferred.add((self.qdir, self.rid))
+        self.deferred[(self.qdir, self.rid)] = since
         self.yielded = True
         save_result(self.qdir, self.rid, {**state, "state": "queued", "why": why + " — вперёд пропущены другие заявки"})
         return True
@@ -3259,11 +3259,11 @@ def run_test_queue():
     03.11): тесты идут только по заявке роли. Заход конечен: не больше MAX_ROUNDS кругов, взятая заявка не берётся
     второй раз. Исключение — полный набор, уступивший очередь под нагрузкой (Defer, metis-1057): он снова на диске, его
     берут, когда других заявок нет, и тогда он ждёт спада, уступая только новым."""
-    seen, taken, deferred = set(), {}, set()
+    seen, taken, deferred = set(), {}, {}
     for _ in range(MAX_ROUNDS):
         reqs = requests(("test",), limit=1, taken=taken, skip=seen)   # deferred ⊂ seen
         if not reqs and deferred:
-            reqs = requests(("test",), limit=1, taken=taken, skip=seen - deferred)
+            reqs = requests(("test",), limit=1, taken=taken, skip=seen - set(deferred))
         if not reqs:
             break
         for _t, _k, qdir, window, rid, req in reqs:

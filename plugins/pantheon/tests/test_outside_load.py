@@ -8,7 +8,8 @@
 обычный красный без повтора; ожидание места heavy не входит в TEST_TIMEOUT (wait_proc hold и прогон с heavy-заглушкой).
 «Стоп» снимает ждущую спада заявку за секунды (metis-0927 Д1); ждущая — живая для live_test (Д2); повтор «таймаута под
 нагрузкой» на том же коммите с теми же файлами — красный (Д3). Ждущий набор уступает очередь другим заявкам и
-возвращается с load_since, заход берёт его снова после них (metis-1057, Defer, run_test_queue).
+возвращается, заход берёт его снова после них; срок ожидания — от начала, которое помнит проход, поле load_since
+заявки роли не читается (metis-1057, Defer, run_test_queue).
 sandbox-exec и heavy подменены заглушками.
 """
 import atexit
@@ -241,7 +242,7 @@ SHA_D = commit(T_PY + "# d1\n", "d1")
 LOAD[0] = 50.0
 N[0] += 1
 RIDD = f"20261106-{N[0]:06d}-abcdef"
-DEFERRED = set()
+DEFERRED = {}
 DFR = O.Defer(QQ, RIDD, {"v": 1, "id": RIDD, "kind": "test", "dir": RK, "sha": SHA_D}, DEFERRED)
 outd, n0 = {}, ncalls()
 th = threading.Thread(target=lambda: outd.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=DFR)))
@@ -260,23 +261,37 @@ back = qread(RIDD) or {}
 check("1057: в очереди появилась другая заявка — ждущий набор уступает за секунды, команда не запускалась",
       not th.is_alive() and DFR.yielded and (QQ, RIDD) in DEFERRED and ncalls() == n0
       and time.monotonic() - t0 < 5, (th.is_alive(), DFR.yielded, ncalls() - n0))
-check("1057: уступившая заявка снова в очереди с load_since (срок ожидания — от его начала), итог queued",
-      back.get("id") == RIDD and isinstance(back.get("load_since"), float) and back["load_since"] <= time.time()
+check("1057: уступившая заявка снова в очереди, начало ожидания — в памяти прохода (deferred), итог queued",
+      back.get("id") == RIDD and "load_since" not in back and isinstance(DEFERRED.get((QQ, RIDD)), float)
+      and DEFERRED[(QQ, RIDD)] <= time.time()
       and outd.get("state") == "queued" and "вперёд пропущены" in outd.get("why", ""), (back, outd))
 check("1057: уступка — в журнале событием test-defer", any(e.get("id") == RIDD for e in events("test-defer")))
 check("Д2: уступившая заявка (снова лежит .req.json) тоже живая для live_test", O.live_test(RK, SHA_D) == (QQ, RIDD))
 check("1057: отложенной заявке не уступают (иначе два ждущих набора ходили бы по кругу)",
-      not O.Defer(QQ, OTHER, {}, DEFERRED).others() and O.Defer(QQ, OTHER, {}, set()).others())
+      not O.Defer(QQ, OTHER, {}, DEFERRED).others() and O.Defer(QQ, OTHER, {}, {}).others())
 if th.is_alive():
     LOAD[0] = 1.0
     th.join(20)
     LOAD[0] = 50.0
 os.remove(os.path.join(QQ, OTHER + ".req.json"))
 
-# load_since старше LOAD_WAIT_MAX: срок вышел, хоть набор взят заново — идёт сразу
+# заявку пишет роль: поле load_since со старым временем не снимает ожидание спада (находка безопасности 12.11)
 os.remove(os.path.join(QQ, RIDD + ".req.json"))   # проход снова взял заявку
+out4, n0 = {}, ncalls()
+D4 = O.Defer(QQ, RIDD, {**back, "load_since": time.time() - O.LOAD_WAIT_MAX - 5}, {})
+th = threading.Thread(target=lambda: out4.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=D4)))
+th.start()
+th.join(1.5)
+held = th.is_alive() and ncalls() == n0 and (O.load_result(QQ, RIDD) or {}).get("state") == "queued"
+LOAD[0] = 1.0
+th.join(20)
+LOAD[0] = 50.0
+check("1057: load_since в заявке роли (старше LOAD_WAIT_MAX) под высоким load — набор не стартует, ждёт свой срок",
+      held and out4.get("state") == "done" and ncalls() == n0 + 1, (held, out4))
+
+# начало ожидания, которое помнит проход, старше LOAD_WAIT_MAX: срок вышел, хоть набор взят заново — идёт сразу
 out5, n0 = {}, ncalls()
-D5 = O.Defer(QQ, RIDD, {**back, "load_since": time.time() - O.LOAD_WAIT_MAX - 5}, set())
+D5 = O.Defer(QQ, RIDD, back, {(QQ, RIDD): time.time() - O.LOAD_WAIT_MAX - 5})
 th = threading.Thread(target=lambda: out5.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=D5)))
 th.start()
 th.join(10)
@@ -285,11 +300,10 @@ if th.is_alive():
     LOAD[0] = 1.0
     th.join(20)
     LOAD[0] = 50.0
-check("1057: load_since старше LOAD_WAIT_MAX — набор идёт сразу при высоком load, срок не начинается заново",
+check("1057: начало ожидания в памяти прохода старше LOAD_WAIT_MAX — набор идёт сразу при высоком load, срок не заново",
       fast and out5.get("state") == "done" and out5.get("code") == 0 and ncalls() == n0 + 1, (fast, out5))
-check("1057: load_since — только число из прошлого (bool, строка, будущее — нет)",
-      [O.Defer(QQ, "x", {"load_since": v}, set()).since() for v in (True, "1", time.time() + 999, -1, 5)]
-      == [None, None, None, None, 5.0])
+check("1057: начало ожидания — только из памяти прохода, поле load_since заявки не читается",
+      O.Defer(QQ, "x", {"load_since": 5}, {}).since() is None and O.Defer(QQ, "x", {}, {(QQ, "x"): 5.0}).since() == 5.0)
 
 # заход прохода целиком: набор (раньше по id) уступает узкой заявке, та идёт первой, потом набор — после спада
 _registry = O.registry
