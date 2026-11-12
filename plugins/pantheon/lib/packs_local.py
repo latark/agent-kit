@@ -157,9 +157,9 @@ def migrate(packs, plugin, map_local, directions=(), base_windows=(), stamp="", 
         if wrote:
             res["copied"].append(n)
     entries = map_entries(root, set(directions), set(base_windows)) if root and map_local else {}
-    if entries and not os.path.lexists(map_local):
-        if _write_new(map_local, map_text(entries, f"перенесено из {res['from']} {stamp}").encode()):
-            res["map"] = sorted(entries)
+    # личная карта, которая уже есть, не затирается: _write_new пишет только новый файл (O_EXCL)
+    if entries and _write_new(map_local, map_text(entries, f"перенесено из {res['from']} {stamp}").encode()):
+        res["map"] = sorted(entries)
     if mark:
         _write_new(os.path.join(packs, MARK), json.dumps({**res, "at": stamp}, ensure_ascii=False).encode())
     return res

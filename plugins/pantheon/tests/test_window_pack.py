@@ -212,6 +212,7 @@ def main():
           and "[auto_rules]" in alerts and "no-such-rule" in alerts, (rules(solo), alerts[-600:]))
 
     # --- правка пакета в данных пользователя → пересборка окна по --if-changed (плановый проход) ---
+    run("domains", "build", "--if-changed")  # прочее новое (запуски выше) — в эту сборку, следующую будит только пакет
     w = json.load(open(os.path.join(pack, "window.json")))
     put(os.path.join(pack, "window.json"), dict(w, deny=w["deny"] + ["Bash(docker rmi *)"]))
     later = os.path.getmtime(os.path.join(state, "settings", "proteus-ms.json")) + 5
@@ -420,7 +421,7 @@ def migration(tmp, env):
     put(os.path.join(user, "dir-b", "window.json"), {"description": "MINE"})
     desc = lambda d: json.load(open(os.path.join(user, d, "window.json"))).get("description")  # noqa: E731
 
-    res = pl.migrate(user, os.path.join(cache, "0.11.11"), map_local, {"dir-a", "dir-b"}, {"hq"}, "t", None, True)
+    res = pl.migrate(user, os.path.join(cache, "0.11.11"), map_local, {"dir-a", "dir-b", "hq"}, {"hq"}, "t", None, True)
     check("перенос: источник — самая новая версия с пакетами (0.11.10 новее 0.11.9 по числам), пакет скопирован",
           res["from"] == os.path.join(cache, "0.11.10") and res["copied"] == ["dir-a"] and desc("dir-a") == "NEW"
           and os.path.isfile(os.path.join(user, "dir-a", "hooks", "hooks.json")), res)
