@@ -21,6 +21,8 @@ _ROOT = tempfile.mkdtemp(prefix="test_run_tests-root-")
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)
+# журнал времени раннера (times.jsonl) — в папку теста, а не в настоящий ~/.cache
+os.environ["RUN_TESTS_CACHE"] = os.path.join(_ROOT, "cache-default")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
@@ -257,6 +259,72 @@ par, ser = R.order([("/x", "par/test_p1.py"), ("/x", "par/test_s1.py"), ("/x", "
                    slow={"par/test_p2.py": 900}, serial=("par/test_s1.py",))
 check("order: медленные первыми, серийные отдельно", [l for _, l in par] == ["par/test_p2.py", "par/test_p1.py"]
       and [l for _, l in ser] == ["par/test_s1.py"], (par, ser))
+
+# --- журнал времени (план 1.0 Т0/Т1) ---
+tc = os.path.join(_ROOT, "times-cache")
+tp = mkplugin({"test_a.py": OK2, "test_bad.py": "print('FAIL x')\nraise SystemExit(1)\n"}, "tm")
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+recs = [json.loads(x) for x in open(os.path.join(tc, "times.jsonl")).read().splitlines()]
+by = {x["label"]: x for x in recs}
+check("журнал: строка на файл, без --cache", sorted(by) == ["tm/test_a.py", "tm/test_bad.py"], (recs, r.stdout))
+check("журнал: поля label/sec/ok/time/j/load", all({"label", "sec", "ok", "time", "j", "load"} <= set(x) for x in recs)
+      and by["tm/test_a.py"]["ok"] is True and by["tm/test_bad.py"]["ok"] is False and by["tm/test_a.py"]["j"] == 2,
+      recs)
+tt = mkplugin({"test_hang.py": "import time\ntime.sleep(60)\n"}, "th")
+r = run(["--timeout", "1", tt], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+last = json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])
+check("журнал: таймаут — ok=false, sec=предел", last["label"] == "th/test_hang.py" and last["ok"] is False
+      and last["sec"] == 1.0, (last, r.stdout))
+with open(os.path.join(tc, "times.jsonl"), "a") as fh:
+    fh.write("{битая строка\n[1, 2]\n")
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+check("журнал: битая строка не мешает прогону и записи", "файлов 2, ok 1, FAIL 1" in r.stdout
+      and json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])["label"].startswith("tm/"),
+      r.stdout)
+# сбой записи (папка кэша — файл) не роняет прогон
+bad_cache = os.path.join(_ROOT, "cache-is-file")
+open(bad_cache, "w").close()
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=bad_cache))
+check("журнал: сбой записи не роняет прогон", "файлов 2, ok 1, FAIL 1" in r.stdout and r.returncode == 1,
+      (r.returncode, r.stdout))
+# обрезка: последние TIMES_KEEP на метку
+cc = os.path.join(_ROOT, "trim-cache")
+for i in range(R.TIMES_KEEP + 5):
+    R.times_put(cc, "x/test_a.py", i, True, 2, 1.0)
+R.times_put(cc, "x/test_b.py", 7, True, 2, 1.0)
+R.times_trim(cc)
+rr = R.times_read(cc)
+check("журнал: обрезка — последние TIMES_KEEP на метку", [x["sec"] for x in rr if x["label"] == "x/test_a.py"]
+      == [float(i) for i in range(5, R.TIMES_KEEP + 5)] and len([x for x in rr if x["label"] == "x/test_b.py"]) == 1,
+      rr)
+
+items = [("/x", "p/test_a.py"), ("/x", "p/test_b.py"), ("/x", "p/test_c.py"), ("/x", "p/test_d.py")]
+
+
+def hist_of(**kw):
+    return {"p/test_" + k + ".py": v for k, v in kw.items()}
+
+
+par, _ = R.order(items, slow={}, serial=(), hist=hist_of(a=[1, 1, 1], b=[50, 60, 70], c=[9, 9, 9]))
+check("order: по медиане истории, долгие первыми", [l for _, l in par] == ["p/test_b.py", "p/test_c.py", "p/test_a.py",
+                                                                      "p/test_d.py"], par)
+par, _ = R.order(items, slow={}, serial=(), hist=hist_of(a=[1, 1000, 1000], b=[40, 40, 40]))
+check("order: медиана, а не максимум и не среднее", [l for _, l in par][0] == "p/test_a.py" and
+      R.times_expected(hist_of(a=[1, 1000, 1000]), "p/test_a.py") == 1000 and
+      R.times_expected(hist_of(a=[1, 2, 3, 100]), "p/test_a.py") == 2.5, par)
+par, _ = R.order(items, slow={"p/test_c.py": 900}, serial=(), hist=hist_of(a=[500, 500], b=[5, 5, 5]))
+check("order: меньше 3 замеров — история не берётся, предел SLOW", [l for _, l in par] == [
+    "p/test_c.py", "p/test_b.py", "p/test_a.py", "p/test_d.py"], par)
+par, _ = R.order(items, slow={"p/test_c.py": 900}, serial=())
+check("order: без истории — как раньше (SLOW, затем имя)", [l for _, l in par][0] == "p/test_c.py"
+      and [l for _, l in par][1:] == ["p/test_a.py", "p/test_b.py", "p/test_d.py"], par)
+hc = os.path.join(_ROOT, "hist-cache")
+for sec, ok in ((10, True), (20, True), (30, True), (999, False)):
+    R.times_put(hc, "p/test_a.py", sec, ok, 1, None)
+check("history: красные и таймауты в медиану не идут", R.times_hist(hc) == {"p/test_a.py": [10.0, 20.0, 30.0]},
+      R.times_hist(hc))
+check("history: нет журнала — пусто", R.times_hist(os.path.join(_ROOT, "нет-такой")) == {})
+
 DRV = ("import importlib.util, sys\nspec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\nm.SERIAL = ('par/test_s1.py',)\n"
        "sys.exit(m.main(['-j', '3', sys.argv[2]]))\n")
