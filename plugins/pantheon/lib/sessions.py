@@ -593,13 +593,14 @@ def _start_req_read(dfd, fname):
 # может — песочница закрывает STATE/stopped и STATE/settings/run. `pantheon resume <направление>` и
 # `pantheon wake hestia --task <id>` в окне hq — строка в той же заявке start-req: {"resume": true} в <имя>.req,
 # {"task": id} в hestia.req. Окно пишет её только при вашем слове в owner-log/zeus.md за OWNER_WORD_WINDOW, а плановый
-# проход сверяет слово ещё раз по времени заявки (заявка не старше REQ_FRESH): без слова — тревога и ни метки, ни
-# запуска. Вернуть — метка снимается (как pantheon resume), окно поднимает разовый запуск со всеми его проверками
+# проход сверяет слово ещё раз — за OWNER_WORD_WINDOW до своих часов, а не до времени из заявки (его пишет окно);
+# заявка не старше REQ_FRESH. Без слова — тревога и ни метки, ни запуска. Слово не привязано к имени цели: guard —
+# от ошибок агента, а не от намеренного обхода (остаток, как у pantheon resume из окна по owner_word_ok). Вернуть — метка снимается (как pantheon resume), окно поднимает разовый запуск со всеми его проверками
 # (недельный потолок, занятость). Гестию поднимает `pantheon wake hestia --task <id> --from zeus` вне окна: start_gate
 # проверяет ваше слово в третий раз.
 HESTIA = "hestia"
 HESTIA_REQ_KEYS = {"target", "time", "by", "task"}
-REQ_FRESH = 30 * 60  # два OWNER_WORD_WINDOW (он определён ниже)
+REQ_FRESH = 15 * 60  # = OWNER_WORD_WINDOW (он определён ниже)
 REQ_SHAPE = ("не по образцу: строки JSON с ключами target, time, by (и cancel — id разового запуска этого направления, "
              "или resume: true), имя — как у файла")
 HESTIA_SHAPE = "не по образцу: строки JSON с ключами target, time, by, task — id задачи, имя файла hestia.req"
@@ -624,7 +625,8 @@ def _req_items(data, target):
 
 def _req_word_problem(items, t):
     """Строки заявки, которым нужно ваше слово: время заявки — не старше REQ_FRESH, и в owner-log/zeus.md есть ваша
-    запись за OWNER_WORD_WINDOW до неё. → причина отказа или None."""
+    запись за OWNER_WORD_WINDOW до часов прохода t. Время заявки пишет окно, поэтому слово меряется по t, а не по нему
+    (проверка безопасности 12.11: иначе окно сдвигало бы 15 мин назад). → причина отказа или None."""
     for x in items:
         try:
             rt = datetime.strptime(str(x.get("time")), "%Y-%m-%d %H:%M").timestamp()
@@ -632,9 +634,9 @@ def _req_word_problem(items, t):
             return "время заявки не по образцу ГГГГ-ММ-ДД ЧЧ:ММ"
         if not t - REQ_FRESH <= rt <= t + 60:
             return f"заявка от {x.get('time')} старше {REQ_FRESH // 60} мин или из будущего — подайте заново"
-        if not owner_spoke_before("zeus", rt, OWNER_WORD_WINDOW):
-            return (f"нет вашего слова: в owner-log/zeus.md нет вашей записи за {OWNER_WORD_WINDOW // 60} мин до заявки "
-                    "(сообщение сессии согласием не считается)")
+    if items and not owner_spoke_before("zeus", t, OWNER_WORD_WINDOW):
+        return (f"нет вашего слова: в owner-log/zeus.md нет вашей записи за {OWNER_WORD_WINDOW // 60} мин до прохода "
+                "(сообщение сессии согласием не считается) — скажите Зевсу ещё раз")
     return None
 
 

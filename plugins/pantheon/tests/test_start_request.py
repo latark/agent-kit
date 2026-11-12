@@ -241,6 +241,11 @@ try:
         P.night_mod().oneshot_cancel(x["id"], P.now(), "тест")
     for kw, ago, why in (({"resume": True}, 3 * 3600, "слово старше 15 мин до заявки"),
                          ({"resume": True, "time": P.stamp(P.now() - 3600)}, 3600 + 60, "заявка старше REQ_FRESH"),
+                         ({"resume": True, "time": P.stamp(P.now() - 25 * 60)}, 26 * 60,
+                          "старое время заявки и слово старше 15 мин от прохода"),
+                         ({"resume": True, "time": P.stamp(P.now() - 10 * 60)}, 20 * 60,
+                          "слово за 15 мин до времени заявки, но старше 15 мин от прохода (время пишет окно)"),
+                         ({"resume": True, "time": P.stamp(P.now() - 20 * 60)}, 60, "свежее слово, заявка старше 15 мин"),
                          ({"resume": True, "time": "x"}, 60, "время не по образцу"),
                          ({"resume": 1}, 60, "resume не true"),
                          ({"resume": True, "cancel": "at-20991231-2359-hermes-alex"}, 60, "resume вместе с cancel")):
