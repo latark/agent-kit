@@ -63,6 +63,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «Лимит» для сводки (lib/night.py)
   pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса: ночь
                                         открывается только по вашему «Да — ночь <дата>», sha256 пачки сверяется
+  pantheon limit reset-mark             отметка досрочного сброса недели (metis-1067): замеры недели до неё не
+                                        учитываются; только ваш терминал, из окна роли — отказ (lib/night.py)
   pantheon read request|run|status|cancel   чтение переписки по заявке (metis-0267, 0508, lib/read.py): папка, чаты
                                         по имени, @имени или ссылке → проход находит чаты → ваше «да» на [read-<rid>]
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
@@ -9184,6 +9186,8 @@ def main(argv):
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":
         return night_mod().main(rest)
+    if cmd == "limit":
+        return night_mod().limit_main(rest)
     if cmd == "read":
         return read_mod().main(rest)
     if cmd == "merge":
