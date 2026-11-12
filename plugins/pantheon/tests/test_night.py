@@ -259,6 +259,11 @@ def test_week_early_reset_same_window_1067():
     e3.snap(t - 7200, 6, resets)
     e3.week_usage([(t - 9000, resets, 99), (t - 600, resets, 99)])
     check(N.snapshot()["week"][0] == 99, f"поздняя строка 99 % потеряна: {N.snapshot()}")
+    # после сброса шум меряется от новой базы: 99 → 6 (сброс) → 20 → 10 (простаивающее окно) — неделя 20, а не 10
+    e4 = Env()
+    e4.week_usage([(t - 9000, resets, 99), (t - 7200, resets, 6), (t - 3600, resets, 20)])
+    e4.snap(t - 60, 10, resets)
+    check(N.snapshot()["week"][0] == 20, f"шум после сброса принят за новый сброс: {N.snapshot()}")
 
 
 def test_heavy():
