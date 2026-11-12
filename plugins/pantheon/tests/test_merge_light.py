@@ -197,8 +197,8 @@ def test_light_same_as_guard():
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(tm.HERE)), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
-    run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)], tm.FAILS,
-              lambda name, err: tm.FAILS.append(name))
-    print(f"\n{'ПРОВАЛ: ' + ', '.join(tm.FAILS) if tm.FAILS else 'все прошли'}")
+    cases = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    run_cases(cases, tm.FAILS, lambda name, err: tm.FAILS.append(name))
+    print(f"\n{'ПРОВАЛ: ' + ', '.join(tm.FAILS) if tm.FAILS else f'{len(cases)} из {len(cases)} случаев прошли'}")
     sys.stdout.flush()
     os._exit(1 if tm.FAILS else 0)
