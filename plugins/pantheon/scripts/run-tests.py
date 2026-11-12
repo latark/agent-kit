@@ -68,7 +68,10 @@ times.jsonl (минимум TIMES_MIN замеров), нет истории —
 Журнал времени (план 1.0 Т0): после каждого прогона, с --cache или без, раннер дописывает по строке на файл в
 times.jsonl в папке кэша (cache_dir()): {label, sec, ok, time, j — воркеров, load — load1 на старте}. Таймаут — тоже
 строка (ok=false, sec=предел файла). Запись — одним os.write в режиме O_APPEND; сбой записи прогон не роняет. Обрезка:
-файл больше TIMES_TRIM_BYTES (256 КБ) переписывается атомарно, на метку остаются последние TIMES_KEEP (20) строк.
+файл больше TIMES_TRIM_BYTES (256 КБ) переписывается атомарно, на метку остаются последние TIMES_KEEP_TRIM (10)
+строк, а не TIMES_KEEP (20): при ~166 метках 20 строк дают ~400 КБ, то есть выше порога, и каждая запись переписывала
+бы весь файл (строки параллельного раннера в окне «прочитал → os.replace» терялись бы); 10 на метку — ~200 КБ, запас
+до следующей обрезки — сотни записей. Медиане хватает и 10 (TIMES_KEEP — потолок замеров в медиане, если их больше).
 Журнал не читается или в нём битая строка — битая пропускается, порядок как без истории.
 
 Процессы. Файл тестов — в своей сессии и группе процессов (start_new_session). По таймауту файла гаснет вся его
@@ -442,7 +445,8 @@ def cache_dir(env=None):
 TIMES_FILE = "times.jsonl"
 TIMES_KEEP = 20  # строк на метку после обрезки (и замеров в медиане)
 TIMES_MIN = 3  # меньше зелёных замеров — истории нет, порядок по SLOW
-TIMES_TRIM_BYTES = 256 * 1024  # больше — обрезаем до TIMES_KEEP на метку
+TIMES_TRIM_BYTES = 256 * 1024  # больше — обрезаем
+TIMES_KEEP_TRIM = 10  # строк на метку после обрезки: с запасом ниже порога (медиане хватает и 10)
 
 
 def times_read(cdir):
@@ -505,7 +509,7 @@ def times_put(cdir, label, sec, ok, workers_n, load, now=None):
 
 
 def times_trim(cdir):
-    """Оставить в журнале последние TIMES_KEEP строк на метку; переписывает атомарно (os.replace)."""
+    """Оставить в журнале последние TIMES_KEEP_TRIM строк на метку; переписывает атомарно (os.replace)."""
     path = os.path.join(cdir, TIMES_FILE)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -517,7 +521,7 @@ def times_trim(cdir):
             except (ValueError, KeyError, TypeError):
                 continue  # битую строку при обрезке выбрасываем
             seen[label] = seen.get(label, 0) + 1
-            if seen[label] <= TIMES_KEEP:
+            if seen[label] <= TIMES_KEEP_TRIM:
                 keep.append(line)
         fd, tmp = tempfile.mkstemp(prefix=".times-", dir=cdir)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
