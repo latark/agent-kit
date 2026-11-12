@@ -184,7 +184,9 @@ class Env:
             env["TZ"] = os.environ["TZ"]
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([*(argv or [PY311, "-I", RUN_PY]), *args], env=env, capture_output=True, text=True, timeout=60)
+        # 180 с, а не 60 (metis-1022): проход watch при load ~40 шёл дольше минуты, и тест падал обрывом, а не проверкой
+        return subprocess.run([*(argv or [PY311, "-I", RUN_PY]), *args], env=env, capture_output=True, text=True,
+                              timeout=180)
 
     def calls(self):
         if not os.path.exists(self.log):
@@ -206,13 +208,18 @@ def test_harness_quick_waits_0359():
     # самозапуск: до правки проход ждал имени новой сессии 10 с (заглушка её не показывает) — не меньше 10 с
     e.direction("athena-q")
     e.task("athena-0009", "athena-q")
+    t = time.monotonic()
     e.run("watch", t=T0)
+    base = time.monotonic() - t   # тот же проход без самозапуска: цена процесса при нынешней нагрузке Mac
     e.board("athena-0009", T0 + 120)
     t = time.monotonic()
     e.run("watch", t=T0 + 240)
     took = time.monotonic() - t
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
-    check(len(starts) == 1 and took < 8, f"0359: самозапуск {took:.1f} с (ждёт имени по умолчанию?): {starts}")
+    # сверх прохода без самозапуска, а не в абсолюте (metis-1022): при load ~40 сам проход шёл 11 с; ожидание имени
+    # по умолчанию — 10 с сна, нагрузка его не растягивает и не прячет
+    check(len(starts) == 1 and took - base < 8,
+          f"0359: самозапуск {took:.1f} с, проход без него {base:.1f} с (ждёт имени по умолчанию?): {starts}")
 
 
 def bg(name, state, sid, pid=None, started=T0 - 100):
