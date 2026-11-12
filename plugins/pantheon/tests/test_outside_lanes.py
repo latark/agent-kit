@@ -311,6 +311,29 @@ finally:
 check("сторож: running дорожки quick дольше срока — держатель замка outside-quick снят, итог failed",
       n == 1 and asked == ["outside-quick"] and h.poll() is not None and state(qa, RW) == "failed", (n, asked, _alerts))
 
+# --- 8. ждущий спада полный набор уступает только своей дорожке: заход full передаёт Defer свою дорожку -----------------
+LOADV = [50.0]
+O.load_state = lambda: (LOADV[0], 10.0)
+O.LOAD_POLL, O.SWEEP_EVERY = 0.2, 0.1
+KD = commit(KIT, {"t.py": GREEN + "# lanes defer\n"}, "lanes defer")
+r_d = put_req(qkit, KIT)
+r_o = put_req(qother, OTHER)
+th, out = bg(O.cmd_run)
+wait_for(lambda: "жду спада" in ((O.load_result(qkit, r_d) or {}).get("why") or ""), 30)
+time.sleep(1.0)
+rd = O.load_result(qkit, r_d) or {}
+check("1081: полный набор ждёт спада в проходе full и не уступает заявке quick (её ведёт свой проход) — заход жив, "
+      "без «пропущены», заявка quick лежит", th.is_alive() and "жду спада" in rd.get("why", "")
+      and "пропущены" not in rd.get("why", "") and has_req(qother, r_o), (rd, th.is_alive()))
+LOADV[0] = 1.0
+th.join(30)
+rd = O.load_result(qkit, r_d) or {}
+check("1081: после спада полный набор идёт: done, запись tests", not th.is_alive() and rd.get("state") == "done"
+      and bool(tests_for(KD)), rd)
+O.cmd_run("quick")
+check("заявка quick после этого идёт своим проходом", state(qother, r_o) == "done", O.load_result(qother, r_o))
+O.load_state = lambda: (0.0, 10.0)
+
 if FAILS:
     for _r in [x for x in os.listdir(_ROOT) if x.startswith("lane-") and x.endswith("-started")]:
         release(_r[len("lane-"):-len("-started")])
