@@ -26,12 +26,12 @@ def check(name, ok, info=None):
 root = os.path.realpath(tempfile.mkdtemp(prefix="guard-hqproj-"))
 os.environ["HOME"] = root
 try:
-    for d in ("projects/alexbroker/docs", "projects/alexbroker/.git", "projects/agent-kit", "projects/solo",
-              "ai/pantheon/directions/hermes-alex/inbox", "ai/knowledge", ".local/state/pantheon", "links"):
+    for d in ("projects/site-b/docs", "projects/site-b/.git", "projects/agent-kit", "projects/solo",
+              "ai/pantheon/directions/hermes-siteb/inbox", "ai/knowledge", ".local/state/pantheon", "links"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
-    os.symlink(os.path.join(root, "projects/alexbroker"), os.path.join(root, "links/ab"))
+    os.symlink(os.path.join(root, "projects/site-b"), os.path.join(root, "links/ab"))
     with open(os.path.join(root, ".local/state/pantheon/domains.json"), "w") as fh:
-        json.dump({"domains": {"hermes-alex": ["~/projects/alexbroker"], "metis-pantheon": ["~/projects/agent-kit"],
+        json.dump({"domains": {"hermes-siteb": ["~/projects/site-b"], "metis-pantheon": ["~/projects/agent-kit"],
                                "mnemo-brain": ["~/ai/knowledge"], "solo-led": ["~/projects/solo"],
                                "wide": ["~/projects"]}}, fh)
     with open(os.path.join(root, "ai/pantheon/directions.toml"), "w") as fh:
@@ -39,7 +39,7 @@ try:
     spec = importlib.util.spec_from_file_location("guard_under_test", RULES)
     g = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(g)
-    P = os.path.join(root, "projects/alexbroker")
+    P = os.path.join(root, "projects/site-b")
 
     def run(tool, inp, role="hq", agent_type=None):
         if role:
@@ -53,14 +53,14 @@ try:
 
     r = run("Read", {"file_path": P + "/docs/reviews-gaps.md"})
     check("1 Read файла проекта — отказ с именем координатора, inbox и pantheon start",
-          bool(r) and "hq-projects" in r and "hermes-alex" in r
-          and "~/ai/pantheon/directions/hermes-alex/inbox/" in r and "pantheon start hermes-alex" in r, r)
+          bool(r) and "hq-projects" in r and "hermes-siteb" in r
+          and "~/ai/pantheon/directions/hermes-siteb/inbox/" in r and "pantheon start hermes-siteb" in r, r)
     r = run("Grep", {"pattern": "отзыв", "path": P + "/docs"})
-    check("2 Grep внутри проекта — отказ", bool(r) and "hermes-alex" in r, r)
+    check("2 Grep внутри проекта — отказ", bool(r) and "hermes-siteb" in r, r)
     r = run("Grep", {"pattern": "отзыв", "path": os.path.join(root, "projects")})
-    check("2 Grep выше проекта (~/projects) — отказ", bool(r) and "hermes-alex" in r, r)
+    check("2 Grep выше проекта (~/projects) — отказ", bool(r) and "hermes-siteb" in r, r)
     r = run("Glob", {"pattern": P + "/**/*.md"})
-    check("3 Glob абсолютный шаблон — отказ", bool(r) and "hermes-alex" in r, r)
+    check("3 Glob абсолютный шаблон — отказ", bool(r) and "hermes-siteb" in r, r)
     r = run("Glob", {"pattern": "**/*.html", "path": P})
     check("3 Glob с path проекта — отказ", bool(r), r)
     r = run("Read", {"file_path": P + "/docs/x.md"}, role="", agent_type="hq")
@@ -70,7 +70,7 @@ try:
     r = run("Read", {"file_path": P + "/docs/x.md"}, agent_type="palamedes")
     check("5 субагент palamedes окна hq — отказ", bool(r), r)
     r = run("Read", {"file_path": os.path.join(root, "links/ab/docs/x.md")})
-    check("7 ссылка в проект — отказ (realpath)", bool(r) and "hermes-alex" in r, r)
+    check("7 ссылка в проект — отказ (realpath)", bool(r) and "hermes-siteb" in r, r)
     for cmd in ("pantheon outside status", "pantheon merge status 290", "pantheon board", f"git -C {P} log -3",
                 f"git -C {P} rev-parse HEAD", f"cat {P}/docs/x.md"):
         r = run("Bash", {"command": cmd})
@@ -82,7 +82,7 @@ try:
     check("10 README.md не в корне — отказ", bool(r), r)
     r = run("Grep", {"pattern": "x", "path": P + "/.git"})
     check("11 Grep по .git — проходит", not r, r)
-    for p in ("ai/pantheon/directions/hermes-alex/inbox/x.md", "ai/pantheon/directions/hermes-alex/STATUS.md",
+    for p in ("ai/pantheon/directions/hermes-siteb/inbox/x.md", "ai/pantheon/directions/hermes-siteb/STATUS.md",
               "ai/knowledge/note.md"):
         r = run("Read", {"file_path": os.path.join(root, p)})
         check(f"12 открыт ~/{p}", not r, r)
