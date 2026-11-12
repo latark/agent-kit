@@ -9,6 +9,8 @@
 `five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
 Неделя — неубывающий снимок: наибольший pct по seven-day и строкам week-usage того же resets_at (допуск 1 ч), resets_at и
 время — от самого свежего замера; без seven-day — по week-usage. Время замера — наибольшее now этих файлов.
+Досрочный сброс с тем же resets_at (metis-1067): замер на RESET_DROP_PP (50) п. п. ниже максимума более ранних —
+замеры до него не учитываются; падение меньше — шум простаивающего окна, неделя не убывает.
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
 строка в тревогах (её Зевс несёт в сводку). Пробный запрос (metis-0459): снимок старше snapshot_max_min (или его нет), а
 ночь одобрена («да», не пропущена, не закрыта) и идёт с start минус 30 мин до end — проход раз в 30 мин зовёт
@@ -166,6 +168,7 @@ PACK_TASK = re.compile(r"(?<![\w-])([a-z]+-\d{4})(?![\w-])")
 ONESHOT_TTL = 3 * 3600  # разовый запуск `pantheon start --at` ждёт открытого шлюза столько, потом гаснет
 ONESHOT_KEEP = 7 * 86400  # погашенные записи хранятся столько
 THRESHOLDS = (50, 80, 100)
+RESET_DROP_PP = 50.0  # падение недели внутри окна сброса на столько п. п. — досрочный сброс (week_base, metis-1067)
 HM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 ZONES = {"green": "зелёная", "yellow": "жёлтая", "red": "красная"}
@@ -361,10 +364,27 @@ def week_lines():
     return out
 
 
+def week_base(rows):
+    """Замеры одного окна сброса [(pct, resets, now)] → те, что после последнего досрочного сброса (metis-1067).
+    Правило: по времени замера, замер на RESET_DROP_PP п. п. и больше ниже максимума всех более ранних — досрочный
+    сброс с тем же resets_at; замеры раньше него не учитываются. Падение меньше — шум простаивающего окна (его
+    старый pct, metis-0243): база остаётся, неделя не убывает. week-usage строка статуса пишет только при росте,
+    поэтому такое падение видно лишь в seven-day."""
+    rows = sorted(rows, key=lambda r: (r[2], r[0]))
+    start, top = 0, None
+    for i, r in enumerate(rows):
+        if top is not None and top - r[0] >= RESET_DROP_PP:
+            start, top = i, r[0]
+        else:
+            top = r[0] if top is None else max(top, r[0])
+    return rows[start:]
+
+
 def snapshot():
     """{"five": (pct, resets, at)|None, "week": (pct, resets, at)|None, "at": время замера|None}.
     Неделя не убывает в пределах окна сброса: pct — максимум по seven-day и строкам week-usage с тем же resets_at
-    (допуск 1 ч), resets и at — от самого свежего замера (простаивающее окно пишет старый pct позже других)."""
+    (допуск 1 ч), resets и at — от самого свежего замера (простаивающее окно пишет старый pct позже других).
+    Исключение — досрочный сброс с тем же resets_at: максимум только по замерам после него (week_base)."""
     five = _nums(_text(P.LIMIT_SNAPSHOT).strip())
     sd = _nums(_text(os.path.join(statusline_dir(), "seven-day")).strip())
     rows = [(pct, resets, now_) for now_, resets, pct in week_lines()]
@@ -375,8 +395,8 @@ def snapshot():
         # сброс с наибольшим resets_at: простаивающее окно после досрочного сброса пишет старый resets_at позже
         # новых строк, и перенос базы недели не должен идти назад (metis-0246)
         last = max(rows, key=lambda r: (round(r[1] / 3600), r[2]))
-        same = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600]
-        week = (max(same), last[1], last[2])
+        same = week_base([r for r in rows if abs(r[1] - last[1]) <= 3600])
+        week = (max(r[0] for r in same), last[1], last[2])
     ats = [x[2] for x in (five, week) if x]
     return {"five": tuple(five) if five else None, "week": week, "at": max(ats) if ats else None}
 

@@ -232,6 +232,35 @@ def test_week_monotonic_0243():
     check(N.spent(st, m2) == 13.0, f"спент при сбросе недели: {N.spent(st, m2)}")
 
 
+def test_week_early_reset_same_window_1067():
+    """Досрочный сброс с тем же resets_at (владелец 12.11): seven-day 6 % после строк week-usage до 99 % — неделя 6,
+    а не 99. Падение меньше RESET_DROP_PP — шум простаивающего окна, неделя по-прежнему максимум."""
+    t = day()
+    resets = t + 22 * 3600
+    e = Env()
+    e.snap(t - 60, 6, resets)
+    e.week_usage([(t - 86400 + 2000 * k, resets, 60 + k) for k in range(40)])  # 60..99 % за прошлые сутки
+    s = N.snapshot()
+    check(s["week"] == (6, resets, t - 60), f"досрочный сброс не обнулил базу: {s}")
+    m = N.measure(t)
+    check(m["known"] and m["used"] == 6 and m["zone"] == "green", f"measure после сброса: {m}")
+    # рост после сброса (строка позже замера со сбросом) учитывается, строки до сброса — нет
+    e.week_usage([(t - 30, resets, 8)])
+    check(N.snapshot()["week"][0] == 8, f"рост после сброса не взят: {N.snapshot()}")
+    # порог: падение ровно на RESET_DROP_PP — сброс, на 0,1 меньше — шум, максимум остаётся
+    for drop, want in ((N.RESET_DROP_PP, 49.0), (N.RESET_DROP_PP - 0.1, 99.0)):
+        e2 = Env()
+        e2.week_usage([(t - 7200, resets, 99)])
+        e2.snap(t - 60, 99 - drop, resets)
+        got = N.snapshot()["week"][0]
+        check(abs(got - want) < 1e-9, f"падение {drop}: неделя {got}, ждали {want}")
+    # замер со сбросом раньше строк week-usage — не сброс для них: порядок по времени замера
+    e3 = Env()
+    e3.snap(t - 7200, 6, resets)
+    e3.week_usage([(t - 9000, resets, 99), (t - 600, resets, 99)])
+    check(N.snapshot()["week"][0] == 99, f"поздняя строка 99 % потеряна: {N.snapshot()}")
+
+
 def test_heavy():
     e = Env()
     t = day()
