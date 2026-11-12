@@ -8,7 +8,8 @@ origin/main, красный — задача на каждый упавший ф
   [зелёный]   ночью → прогон в копии на sha origin/main, строка nightly-tick, тревога снята, задач нет;
   [красный]   FAIL файлов → задача на каждый, тревога с именами; открытая задача с тем же заголовком — не дубль;
   [карантин]  упал только файл карантина → зелёный, но в строке «карантин упал: …», задач нет;
-  [сбой]      без строки итога → тревога;
+  [сбой]      без строки итога → тревога; код 4 (файлы окна пропущены) — не зелёный, тревога;
+  [логи]      старые выводы ночей убираются, KEEP_LOGS последних и копия остаются;
   [частота]   днём — ничего; раз за ночь; тот же sha в следующую ночь — не гоняет; load выше порога — пропуск;
               живой работник — тик ждёт; PANTHEON_DRYRUN — ничего.
 """
@@ -202,6 +203,30 @@ w = World("broken", out="Traceback: всё сломалось\n", code=2)
 NT.tick(T)
 NT.tick(T + 60)
 check("без строки итога → тревога «без строки итога»", w.alerts and "без строки итога" in w.alerts[-1][1], w.alerts)
+
+w = World("winskip", out=GREEN, code=4)
+NT.tick(T)
+out = NT.tick(T + 60)
+check("код 4 (файлы окна пропущены) → не «зелёный», «набор не полный», тревога",
+      "зелёный;" not in out and "набор не полный" in out and w.alerts and "код 4" in w.alerts[-1][1], (out, w.alerts))
+
+# --- [логи] -------------------------------------------------------------------------------------------------------
+w = World("logs")
+ND = os.path.join(w.state, "nightly")
+os.makedirs(ND)
+OLD = [f"2020-01-{i:02d}" for i in range(1, NT.KEEP_LOGS + 3)]   # KEEP_LOGS + 2 старых ночей
+for n in OLD:
+    open(os.path.join(ND, f"agent-kit-{n}.log"), "w").write("x")
+    os.makedirs(os.path.join(ND, f"agent-kit-{n}.log.d"))
+open(os.path.join(ND, "other-2020-01-01.log"), "w").write("x")
+NT.tick(T)
+left = sorted(n for n in os.listdir(ND) if n.startswith("agent-kit-") and n.endswith(".log"))
+check("логи: перед запуском убраны старые — осталось KEEP_LOGS ночей (с новой), с папками --log-dir",
+      len(left) == NT.KEEP_LOGS and left[0] == f"agent-kit-{OLD[3]}.log" and NIGHT.strftime("%Y-%m-%d") in left[-1]
+      and not os.path.exists(os.path.join(ND, f"agent-kit-{OLD[2]}.log.d"))
+      and os.path.isdir(os.path.join(ND, f"agent-kit-{OLD[3]}.log.d")), left)
+check("логи: копия nightly/agent-kit и чужие имена не тронуты",
+      os.path.isdir(os.path.join(ND, "agent-kit", ".git")) and os.path.exists(os.path.join(ND, "other-2020-01-01.log")))
 
 # --- [частота] ----------------------------------------------------------------------------------------------------
 w = World("day")
