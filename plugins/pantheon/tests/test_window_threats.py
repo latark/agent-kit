@@ -4,12 +4,12 @@
 - класс 1 — ключи пакета: каждый опасный пункт window.json по одному (allow, excludedCommands, allowWrite, домены,
   сокеты, env вне белого списка и переопределение, hooks, defaultMode, плагин вне карты) не меняет окно и назван
   отброшенным;
-- класс 2 — исполняемое вне песочницы: окна metis-pantheon и proteus-morph собраны из настоящих пакетов (domains build,
+- класс 2 — исполняемое вне песочницы: окна metis-pantheon и god-proj собраны из образцов tests/fixtures/packs (domains build,
   start --dry-run); каждый исполняемый файл хуков пакета, серверов собранного mcp.json и excludedCommands окна по
   настоящему пути — вне allowWrite окна или под denyWrite; python3 — только с -I; кэш npx — вне allowWrite; npx —
   только через env_from.py: поддельные node_modules/<пакет>, .npmrc (script-shell, logs-dir) и NODE_OPTIONS в папке
   запуска не исполняются (cwd «/», npm_config_* сброшены); in_repo.py не запускает хук, если репозиторий, звено пути,
-  .claude или .claude/hooks — ссылка; .env через ссылку env_from.py не читает; хуки пакета proteus-morph на образцах
+  .claude или .claude/hooks — ссылка; .env через ссылку env_from.py не читает; хуки пакета god-proj на образцах
   tests/fixtures/morph-hooks не пишут и не читают чужое по ссылке в середине пути цели (app/app, app/api, src/shared,
   app/lnk.py): repo_hooks.py вместо check-reexport.sh и check-env-sync.sh, --plain у pre-commit;
 - класс 3 — чтение вне песочницы: AGENTS.md — ссылка на личный файл, CLAUDE.md и .claude/settings.json — FIFO,
@@ -54,7 +54,7 @@ import unicodedata
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PY = os.path.join(PLUGIN, "lib", "run.py")
-PACKS = os.path.join(PLUGIN, "packs")
+PACKS_BIN, FIXTURES = os.path.join(PLUGIN, "packs", "_bin"), os.path.join(PLUGIN, "tests", "fixtures", "packs")
 # корень — как у test_tick (9fc5026f): под run-tests TMPDIR окна закрывает запись в …/.claude/agents временного HOME
 # (domains build собирает роли туда) — тогда корень с приставкой tmp прямо в /tmp/claude-<uid>
 _base = "/tmp/claude-%d" % os.getuid()
@@ -208,7 +208,7 @@ def execs(tokens, cwd, why, wrapped=False):
             errs.append((why, f"npx {pkg} — без точной версии"))
         if not wrapped:  # Claude Code запускает сервер в папке запуска: npx взял бы её node_modules и .npmrc
             errs.append((why, f"npx {pkg} — без env_from.py: cwd — папка запуска окна"))
-    elif base not in ("mcp-grafana",):
+    elif base not in ("mcp-metrics",):
         errs.append((why, f"{base}: неизвестно, что исполняет"))
     return out, errs
 
@@ -244,21 +244,23 @@ def pack_execs(home, state, name, plugin):
 
 def class2(tmp, env, P):
     home, state = tmp, env["PANTHEON_STATE"]
-    for d in ("projects/agent-kit/.git", "projects/other/mailkeeper/.claude/hooks", ".claude/plugins/cache",
-              "projects/MorphStream/app/.claude/hooks", "projects/MorphStream/gpu-worker/.claude/hooks"):
+    for d in ("projects/agent-kit/.git", "projects/other/mailbox/.claude/hooks", ".claude/plugins/cache",
+              "projects/god-proj/app/.claude/hooks", "projects/god-proj/gpu-worker/.claude/hooks"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     for d in ("app", "gpu-worker"):
-        put(os.path.join(tmp, "projects/MorphStream", d, "AGENTS.md"), f"{d}\n")
-    for f in ("other/mailkeeper/.claude/hooks/guard_bash.py", "other/mailkeeper/.claude/hooks/guard_read.py",
-              "MorphStream/app/.claude/hooks/protect-db.sh", "MorphStream/app/.claude/hooks/pre-commit-check.sh",
-              "MorphStream/gpu-worker/.claude/hooks/pre-commit-check.sh"):
+        put(os.path.join(tmp, "projects/god-proj", d, "AGENTS.md"), f"{d}\n")
+    for f in ("other/mailbox/.claude/hooks/guard_bash.py", "other/mailbox/.claude/hooks/guard_read.py",
+              "god-proj/app/.claude/hooks/protect-db.sh", "god-proj/app/.claude/hooks/pre-commit-check.sh",
+              "god-proj/gpu-worker/.claude/hooks/pre-commit-check.sh"):
         put(os.path.join(tmp, "projects", f), "exit 0\n")
     put(os.path.join(env["PANTHEON_HOME"], "directions.toml"),
         '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit", "~/.claude", '
-        '"~/projects/other/mailkeeper"]\n[[direction]]\nname = "proteus-morph"\nfolders = ["~/projects/MorphStream"]\n')
+        '"~/projects/other/mailbox"]\n[[direction]]\nname = "god-proj"\nfolders = ["~/projects/god-proj"]\n')
+    for src, name in (("god-mail", "metis-pantheon"), ("god-proj", "god-proj")):  # пакеты пользователя — из образцов
+        shutil.copytree(os.path.join(FIXTURES, src), os.path.join(P.PACKS, name))
     r = run(env, "domains", "build")
-    check("класс 2: сборка окон с настоящими пакетами прошла", r.returncode == 0, r.stderr)
-    for name in ("metis-pantheon", "proteus-morph"):
+    check("класс 2: сборка окон с пакетами из ~/.claude/pantheon/packs прошла", r.returncode == 0, r.stderr)
+    for name in ("metis-pantheon", "god-proj"):
         r = run(env, "start", name, "x", "--from", "zeus", "--dry-run")
         check(f"класс 2: start {name} --dry-run прошёл", r.returncode == 0, (r.stdout[-500:], r.stderr))
         win = json.load(open(os.path.join(state, "settings", f"{name}.json")))
@@ -271,11 +273,9 @@ def class2(tmp, env, P):
         # класс 6: скрипты репозиториев здесь — «exit 0», не эталоны пакета: в снимок не взяты, запуск о них сказал
         man = json.load(open(os.path.join(os.path.dirname(plugin), "manifest.json"))) if plugin else {}
         want = {(os.path.join(home, x), n) for x, n in {
-            "metis-pantheon": [("projects/other/mailkeeper", "guard_bash.py"), ("projects/other/mailkeeper",
-                                                                                 "guard_read.py")],
-            "proteus-morph": [("projects/MorphStream/app", "protect-db.sh"), ("projects/MorphStream/app",
-                                                                               "pre-commit-check.sh"),
-                              ("projects/MorphStream/gpu-worker", "pre-commit-check.sh")]}[name]}
+            "metis-pantheon": [("projects/other/mailbox", "guard_bash.py"), ("projects/other/mailbox", "guard_read.py")],
+            "god-proj": [("projects/god-proj/app", "protect-db.sh"), ("projects/god-proj/app", "pre-commit-check.sh"),
+                         ("projects/god-proj/gpu-worker", "pre-commit-check.sh")]}[name]}
         got = {(rp, n) for rp, ns in man.get("unapproved", {}).items() for n in ns}
         check(f"класс 6: {name} — скрипты не по эталону пакета в снимок не взяты (unapproved), запуск окна назвал "
               "их строкой «не одобрен»", got == want and not any(man.get("repos", {}).values())
@@ -285,31 +285,31 @@ def class2(tmp, env, P):
                   for n in v["scripts"]}
         check(f"класс 6: packs hashes {name} — sha256 каждого скрипта хуков пакета и только их, из снимка; .git нет — "
               "предупреждений нет (круг G5: HEAD не читается)",
-              listed == set(P.pack_hook_scripts(os.path.join(PACKS, name))) == want and all(
+              listed == set(P.pack_hook_scripts(os.path.join(P.PACKS, name))) == want and all(
                   h == hashlib.sha256(b"exit 0\n").hexdigest() for v in hashes["repos"].values()
                   for h in v["scripts"].values()) and not warn, (listed, want, warn))
-        approved_home = os.path.join(home, ".claude", "pantheon")
+        before = tree(approved_home := os.path.join(home, ".claude", "pantheon"))
         r = run(env, "packs", "hashes", name)
         check(f"класс 6: pantheon packs hashes {name} — JSON в stdout, код 0, текст скриптов в stderr, "
-              "~/.claude/pantheon/packs не создан", r.returncode == 0 and json.loads(r.stdout) == hashes
+              "~/.claude/pantheon не изменён", r.returncode == 0 and json.loads(r.stdout) == hashes
               and r.stderr.count("не одобрен; текст из снимка") == len(want) and "  exit 0" in r.stderr
-              and not os.path.exists(os.path.join(approved_home, "packs")), (r.returncode, r.stdout[-300:], r.stderr))
+              and tree(approved_home) == before, (r.returncode, r.stdout[-300:], r.stderr))
         mcp_file = os.path.join(state, "settings", "run", f"{name}.mcp.json")
         scripts = [a for v in (json.load(open(mcp_file)).get("mcpServers", {}) if os.path.isfile(mcp_file) else {}
                                ).values() for a in v.get("args", []) if a.endswith(".py")]
         check(f"класс 2/F: {name} — скрипты серверов mcp.json (${{PANTHEON_PACK_BIN}}) — из _bin того же снимка",
               all(a.startswith(os.path.join(os.path.dirname(plugin), "_bin") + "/") for a in scripts)
               and (scripts or name == "metis-pantheon"), scripts)
-        repos = {"metis-pantheon": ["projects/other/mailkeeper"],
-                 "proteus-morph": ["projects/MorphStream/app", "projects/MorphStream/gpu-worker"]}[name]
+        repos = {"metis-pantheon": ["projects/other/mailbox"],
+                 "god-proj": ["projects/god-proj/app", "projects/god-proj/gpu-worker"]}[name]
         lit = [os.path.join(home, x, ".claude", "hooks") for x in repos]
         dw = win["sandbox"]["filesystem"].get("denyWrite", [])
         check(f"класс 2/F: {name} — .claude/hooks репозиториев снимка литералом в denyWrite (предки — не "
               "переименовать)", all(x in dw for x in lit), (lit, dw))
         out, errs, servers = pack_execs(home, state, name, plugin)
-        # в работе пакет лежит в кэше плагинов: ~/.claude/plugins/cache/<маркетплейс>/pantheon/<версия>/packs
-        prod = os.path.join(home, ".claude/plugins/cache/agent-kit/pantheon/0.0.1/packs")
-        out += [(p.replace(PACKS, prod), why + " (из кэша плагинов)") for p, why in out if p.startswith(PACKS)]
+        # в работе общий код пакетов _bin лежит в кэше плагинов: ~/.claude/plugins/cache/<маркетплейс>/pantheon/<версия>
+        prod = os.path.join(home, ".claude/plugins/cache/agent-kit/pantheon/0.0.1/packs/_bin")
+        out += [(p.replace(PACKS_BIN, prod), why + " (из кэша плагинов)") for p, why in out if p.startswith(PACKS_BIN)]
         mine = set(P.window_excluded(name))
         check(f"класс 2: {name} — excludedCommands окна от пакета — только константа ядра WINDOW_EXCLUDED",
               mine <= set(win["sandbox"].get("excludedCommands", [])), sorted(mine))
@@ -323,15 +323,15 @@ def class2(tmp, env, P):
                 out.append((exe, f"excludedCommands {c}"))
         check(f"класс 2: {name} — команды разобраны, python3 с -I, npx с версией", not errs, errs)
         check(f"класс 2: {name} — исполняемое найдено (хуки, серверы, excludedCommands)",
-              len(out) >= (8 if name == "proteus-morph" else 4) and (servers or name == "metis-pantheon"), out)
+              len(out) >= (8 if name == "god-proj" else 4) and (servers or name == "metis-pantheon"), out)
         hit = [(p, why) for p, why in out if writable(p, win, home)]
         check(f"класс 2: {name} — всё исполняемое вне allowWrite окна или под denyWrite", not hit, hit)
-    win = json.load(open(os.path.join(state, "settings", "proteus-morph.json")))
-    for p in ("projects/MorphStream/x.sh", "projects/MorphStream/app/scripts/start-grafana-mcp.sh",
-              "projects/MorphStream/app/.env.local"):
+    win = json.load(open(os.path.join(state, "settings", "god-proj.json")))
+    for p in ("projects/god-proj/x.sh", "projects/god-proj/app/scripts/start-grafana-mcp.sh",
+              "projects/god-proj/app/.env.local"):
         check(f"класс 2: самопроверка — {p} окно пишет (такой путь в хуке был бы найден)",
               writable(os.path.join(home, p), win, home), win["sandbox"]["filesystem"].get("denyWrite"))
-    _, errs = execs(["python3", os.path.join(PACKS, "_bin", "in_repo.py"), home, "--", "bash", "x.sh"], home, "t")
+    _, errs = execs(["python3", os.path.join(PACKS_BIN, "in_repo.py"), home, "--", "bash", "x.sh"], home, "t")
     _, errs2 = execs(["npx", "-y", "shadcn@latest", "mcp"], home, "t")
     _, errs3 = execs(["npx", "-y", "shadcn@4.8.2", "mcp"], home, "t")
     check("класс 2/4: самопроверка — python3 без -I, npx @latest и npx без env_from.py замечены",
@@ -339,8 +339,8 @@ def class2(tmp, env, P):
     return win
 
 
-ENV_FROM = os.path.join(PACKS, "_bin", "env_from.py")
-IN_REPO = os.path.join(PACKS, "_bin", "in_repo.py")
+ENV_FROM = os.path.join(PACKS_BIN, "env_from.py")
+IN_REPO = os.path.join(PACKS_BIN, "in_repo.py")
 
 
 def approve_now(pairs):
@@ -436,7 +436,7 @@ def class2_links(tmp):
              ("ссылка в середине пути", "$HOME/projects/midp/foreign-hooks", 2),
              (".claude — ссылка", "$HOME/projects/hk/dot", 1), (".claude/hooks — ссылка", "$HOME/projects/hk/hooks", 1))
     pairs = [(repo.replace("$HOME", tmp), "x.sh") for _, repo, _ in cases] + [(os.path.join(proj, "real"), "x.sh")]
-    snap = snap_of(tmp, "links", os.path.join(PACKS, "_bin"), pairs, home=tmp)
+    snap = snap_of(tmp, "links", PACKS_BIN, pairs, home=tmp)
 
     def hook(repo, wrapper=os.path.join(snap, "_bin", "in_repo.py")):  # noqa: B008 — путь snap считается один раз, намеренно
         if os.path.exists(mark):
@@ -470,7 +470,7 @@ def class2_links(tmp):
 
 
 FIXT = os.path.join(PLUGIN, "tests", "fixtures", "morph-hooks")
-REPO_HOOKS = os.path.join(PACKS, "_bin", "repo_hooks.py")
+REPO_HOOKS = os.path.join(PACKS_BIN, "repo_hooks.py")
 MARK = "FOREIGN-SECRET-7731"
 
 
@@ -486,9 +486,9 @@ def tree(p):
 
 
 def morph(home, link_at):
-    """Временный MorphStream с образцами хуков (tests/fixtures/morph-hooks) и чужая папка с MARK. link_at — где окно
+    """Временный god-proj с образцами хуков (tests/fixtures/morph-hooks) и чужая папка с MARK. link_at — где окно
     подложило ссылку: «app» (app/app → чужая папка, проба C1/C2), «app/api» (звено глубже) или None (без ссылок)."""
-    ms = os.path.join(home, "projects", "MorphStream")
+    ms = os.path.join(home, "projects", "god-proj")
     app, gpu, foreign = os.path.join(ms, "app"), os.path.join(ms, "gpu-worker"), os.path.join(home, "foreign")
     for d, sub in ((app, "app"), (gpu, "gpu-worker")):
         shutil.copytree(os.path.join(FIXT, sub), os.path.join(d, ".claude", "hooks"))
@@ -539,17 +539,17 @@ def run_pack_hooks(home, app, gpu, plugin_root, hooks=None):
 
 
 def class2_pack_hooks(tmp):
-    """Хуки пакета proteus-morph идут вне песочницы и не пишут и не читают вне репозитория по ссылке, которую подложило
+    """Хуки пакета god-proj идут вне песочницы и не пишут и не читают вне репозитория по ссылке, которую подложило
     окно (ревью argus C1 и C2 PR #360): app/app или app/api → чужая папка, src/shared → чужая папка, app/lnk.py
     gpu-worker → чужой файл. Чужая папка не меняется, её содержимое не попадает в вывод, git commit с такой ссылкой
     не проверяется (выход 2). Самопроверки: прежние строки (bash check-reexport.sh, pre-commit без --plain) по тем
     же ссылкам пишут и читают чужое; без ссылок замена делает то же, что check-reexport.sh."""
-    root = os.path.join(PACKS, "proteus-morph")
+    root = os.path.join(FIXTURES, "god-proj")
     for link_at in ("app", "app/api"):
         home = os.path.join(tmp, "packhooks-" + link_at.replace("/", "-"))
         app, gpu, foreign = morph(home, link_at)
         before = tree(foreign)
-        res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph", os.path.join(PACKS, "_bin"), (), root,
+        res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph", PACKS_BIN, (), root,
                                                                   home), "plugin"))
         check(f"класс 2: хуки пакета (ссылка {link_at}) — запущены на правках и git commit", len(res) >= 8, res)
         check(f"класс 2: хуки пакета (ссылка {link_at} → чужая папка) — чужая папка не изменена, файлы не созданы",
@@ -571,7 +571,7 @@ def class2_pack_hooks(tmp):
             c = re.sub(r'python3 -I "\$\{CLAUDE_PLUGIN_ROOT\}/../_bin/repo_hooks.py" reexport',
                        "bash .claude/hooks/check-reexport.sh", c)
             h["command"] = re.sub(r" --plain=\S+", "", c)
-    res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph-old", os.path.join(PACKS, "_bin"),
+    res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph-old", PACKS_BIN,
                                                               [(app, "check-reexport.sh")], root, home), "plugin"), old)
     check("класс 2: самопроверка — прежний check-reexport.sh по ссылке app/app пишет в чужую папку (проба C1/C2)",
           tree(foreign) != before, res)
@@ -580,7 +580,7 @@ def class2_pack_hooks(tmp):
     # без ссылок замена делает то же, что check-reexport.sh: новый re-export создан, устаревший обновлён
     home = os.path.join(tmp, "packhooks-plain")
     app, gpu, foreign = morph(home, None)
-    res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph-plain", os.path.join(PACKS, "_bin"), (), root,
+    res = run_pack_hooks(home, app, gpu, os.path.join(snap_of(tmp, "ph-plain", PACKS_BIN, (), root,
                                                               home), "plugin"))
     got = {f: open(os.path.join(app, "app/api", f, "route.ts")).read() if os.path.isfile(
         os.path.join(app, "app/api", f, "route.ts")) else None for f in ("x", "new")}
@@ -651,7 +651,7 @@ def class2_pack_hooks(tmp):
 def mutant_bin(tmp, name, subs):
     """Копия packs/_bin с заменами {файл: [(было, стало)]} — мутант для самопроверки; замена обязана сработать."""
     d = os.path.join(tmp, "mutant-" + name)
-    shutil.copytree(os.path.join(PACKS, "_bin"), d)
+    shutil.copytree(PACKS_BIN, d)
     for f, pairs in subs.items():
         text = open(os.path.join(d, f), encoding="utf-8").read()
         for a, b in pairs:
@@ -739,13 +739,13 @@ def class_f_hooks(tmp):
     испорченным файлом не исполняется; правка скрипта окном попадает только в следующий снимок (следующий запуск).
     Мутанты «скрипт из репозитория по пути» и «без сверки хеша» исполняют чужое."""
     home = os.path.join(tmp, "fhome")
-    app = os.path.join(home, "projects", "MorphStream", "app")
+    app = os.path.join(home, "projects", "god-proj", "app")
     log = os.path.join(tmp, "f-hooks.log")
     own_sh = 'echo OWN >> "$F_LOG"\n'
     put(os.path.join(app, ".claude", "hooks", "protect-db.sh"), own_sh)
     env = {"PATH": os.environ["PATH"], "HOME": home, "F_LOG": log}
     pairs = [(app, "protect-db.sh")]
-    good = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
+    good = snap_of(tmp, "f", PACKS_BIN, pairs)
     m_repo = snap_of(tmp, "f-repo", mutant_bin(tmp, "f-repo", {"in_repo.py": [SCRIPT_FROM_REPO]}), pairs)
     m_hash = snap_of(tmp, "f-hash", mutant_bin(tmp, "f-hash", {"in_repo.py": [NO_HASH]}), pairs)
     man = json.load(open(os.path.join(good, "manifest.json")))
@@ -773,7 +773,7 @@ def class_f_hooks(tmp):
     check("круг F: самопроверка — мутант «скрипт из репозитория по пути» после двух mv исполняет чужой", got[0] == 1, got)
     # фоном: app/.claude ↔ чужая .claude и app ↔ чужой репозиторий
     if sys.platform == "darwin":
-        put(os.path.join(home, "projects", "MorphStream", "evil", ".claude", "hooks", "protect-db.sh"),
+        put(os.path.join(home, "projects", "god-proj", "evil", ".claude", "hooks", "protect-db.sh"),
             'echo FOREIGN >> "$F_LOG"\n')
         stop, n = os.path.join(tmp, "f-hooks.stop"), 150
         res = {"снимок": [0, 0, 0], "мутант": [0, 0, 0]}
@@ -811,12 +811,12 @@ def class_f_hooks(tmp):
     put(os.path.join(app, ".claude", "hooks", "protect-db.sh"), 'echo NEW >> "$F_LOG"\n')
     own = {app: {"protect-db.sh": hashlib.sha256(own_sh.encode()).hexdigest()}}
     with contextlib.redirect_stderr(io.StringIO()):
-        unok = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs, approved=own)
+        unok = snap_of(tmp, "f", PACKS_BIN, pairs, approved=own)
     got = hook(unok)
     check("круг G: правка скрипта окном без нового эталона — в снимок не взята, хук пропущен (выход 0), не исполнен",
           got[:3] == (0, 0, 0) and "не одобрен" in got[3], got)
-    fresh = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
-    again = snap_of(tmp, "f", os.path.join(PACKS, "_bin"), pairs)
+    fresh = snap_of(tmp, "f", PACKS_BIN, pairs)
+    again = snap_of(tmp, "f", PACKS_BIN, pairs)
     check("круг F: правка скрипта с новым эталоном — новый снимок у следующего запуска (старый на месте: его держит "
           "идущая сессия), тот же снимок при тех же файлах", fresh == again != good and os.path.isdir(good)
           and hook(fresh)[:3] == (0, 0, 0) and open(log).read().split() == ["NEW"], (fresh, good))
@@ -885,7 +885,7 @@ def class_g_pull(tmp):
     направления не исполняются, та же тревога. Мутанты «без сверки», «без файла исполняем», «тревога на каждый
     запуск», «не одобрен — как нет скрипта» (in_repo.py) и «пишет approved.json» краснеют."""
     home = os.path.join(tmp, "ghome")
-    app = os.path.join(home, "projects", "MorphStream", "app")
+    app = os.path.join(home, "projects", "god-proj", "app")
     log, hooks_rel = os.path.join(tmp, "g-pull.log"), ".claude/hooks/protect-db.sh"
     own, evil = 'echo OWN >> "$G_LOG"\n', 'echo EVIL >> "$G_LOG"\n'
     put(os.path.join(app, hooks_rel), own)
@@ -893,13 +893,13 @@ def class_g_pull(tmp):
     git(app, "add", "-A")
     git(app, "commit", "-q", "-m", "свои хуки")
     head = git(app, "rev-parse", "HEAD")
-    # пакет направления gwin: хук protect-db.sh через in_repo.py, как у proteus-morph
+    # пакет направления gwin: хук protect-db.sh через in_repo.py, как у god-proj
     packs, win = os.path.join(tmp, "gpacks"), "gwin"
-    shutil.copytree(os.path.join(PACKS, "_bin"), os.path.join(packs, "_bin"))
+    shutil.copytree(PACKS_BIN, os.path.join(packs, "_bin"))
     put(os.path.join(packs, win, ".claude-plugin", "plugin.json"), {"name": "gwin"})
     put(os.path.join(packs, win, "hooks", "hooks.json"), {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
         {"type": "command", "command": 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
-                                       '"$HOME/projects/MorphStream/app" --always -- bash .claude/hooks/protect-db.sh'}]}]}})
+                                       '"$HOME/projects/god-proj/app" --always -- bash .claude/hooks/protect-db.sh'}]}]}})
     ahome = os.path.join(home, ".claude", "pantheon", "packs")
     afile = os.path.join(ahome, win, "approved.json")
     alerts = os.path.join(P.PANTHEON, "alerts.md")
@@ -933,7 +933,7 @@ def class_g_pull(tmp):
             rc = P.pack_hashes_cmd(["hashes", win])
         printed = json.loads(out.getvalue())
         wrote = tree_state(ahome) != before
-    want = {"repos": {"$HOME/projects/MorphStream/app": {
+    want = {"repos": {"$HOME/projects/god-proj/app": {
         "scripts": {"protect-db.sh": hashlib.sha256(own.encode()).hexdigest()}}}}
     check("класс 6: packs hashes — нынешние sha256 в формате approved.json (без коммита), код 0, ничего не записано; "
           "текст скрипта из снимка в ⟦…⟧, о HEAD и origin ни слова (круг G5)", rc == 0 and printed == want and not wrote
@@ -1018,7 +1018,7 @@ def class_g_pull(tmp):
     _, _, al5 = launch("g-nocopy")
     check("круг G5: одобренной копии нет — тревога без диффа («нет одобренной копии»)",
           len(al5) == 1 and "нет одобренной копии" in al5[0] and "+echo EVIL" not in al5[0], al5)
-    put(afile, {"repos": {"$HOME/projects/MorphStream/app": {"commit": commit, "scripts": {"protect-db.sh": digest}}}})
+    put(afile, {"repos": {"$HOME/projects/god-proj/app": {"commit": commit, "scripts": {"protect-db.sh": digest}}}})
     later, _, _ = launch("g")
     check("класс 6: новый эталон в approved.json (одобрение владельца) — тот же скрипт взят и исполнен",
           hook(later)[:3] == (1, 0, 0), hook(later))
@@ -1059,7 +1059,7 @@ def class_g_debts(tmp):
     # мутант строится после основной проверки: внешний мутант той же строки валит её, а не сборку самопроверки
     m3 = lambda: mutant_bin(tmp, "m3", {"in_repo.py": [  # noqa: E731
         ('if not os.path.basename(SNAP).endswith("-" + hashlib.sha256(raw).hexdigest()[:16]):', "if False:")]})
-    for label, bdir in (("снимок", lambda: os.path.join(PACKS, "_bin")), ("мутант M3", m3)):
+    for label, bdir in (("снимок", lambda: PACKS_BIN), ("мутант M3", m3)):
         bdir = bdir()
         s = snap_of(tmp, "gd-" + label[0], bdir, [(app, "x.sh")])
         man = json.load(open(os.path.join(s, "manifest.json")))
@@ -1087,18 +1087,18 @@ def class_g_debts(tmp):
                            "if not os.path.isdir(snap):")
     for label, make in (("снимок", lambda: None), ("мутант M6", m6)):
         make = make()
-        s = snap_of(tmp, "gi-" + label[0], os.path.join(PACKS, "_bin"), [(app, "x.sh")], make=make)
+        s = snap_of(tmp, "gi-" + label[0], PACKS_BIN, [(app, "x.sh")], make=make)
         man = json.load(open(os.path.join(s, "manifest.json")))
         f = os.path.join(s, man["repos"][app]["x.sh"])
         os.chmod(f, 0o644)
         put(f, "echo BROKEN\n")
-        s2 = snap_of(tmp, "gi-" + label[0], os.path.join(PACKS, "_bin"), [(app, "x.sh")], make=make)
+        s2 = snap_of(tmp, "gi-" + label[0], PACKS_BIN, [(app, "x.sh")], make=make)
         fixed = s2 == s and open(f).read() == 'echo OWN >> "$G_LOG"\n'
         copy_dir = s + ".copy"
         shutil.copytree(s, copy_dir)
         shutil.rmtree(s)
         os.symlink(copy_dir, s)
-        s3 = snap_of(tmp, "gi-" + label[0], os.path.join(PACKS, "_bin"), [(app, "x.sh")], make=make)
+        s3 = snap_of(tmp, "gi-" + label[0], PACKS_BIN, [(app, "x.sh")], make=make)
         relinked = not os.path.islink(s3) and os.path.isdir(s3)
         if label == "снимок":
             check("долг Д3: испорченный файл снимка и снимок-ссылка — собраны заново", fixed and relinked,
@@ -1306,7 +1306,7 @@ def class_g5_hashes(tmp):
     home = os.path.join(tmp, "g5h")
     app, head, own = g5_repo(home)
     packs, win = os.path.join(tmp, "g5packs"), "g5h"
-    shutil.copytree(os.path.join(PACKS, "_bin"), os.path.join(packs, "_bin"))
+    shutil.copytree(PACKS_BIN, os.path.join(packs, "_bin"))
     put(os.path.join(packs, win, ".claude-plugin", "plugin.json"), {"name": win})
     put(os.path.join(packs, win, "hooks", "hooks.json"), {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
         {"type": "command", "command": 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
@@ -1448,7 +1448,7 @@ def class_g6_list(tmp):
     """pack_script_reject и тревога «хук изменён»: каждая проба Б1 и Б2 — «не взят в снимок — <причина>, строка N»,
     без диффа и байтов скрипта; литерал «\\u000d» показан как «\\\\u000d», а не как CR; дифф делится только по \\n (Б1:
     CR одобренной копии — пометкой, строки «-# ;» нет); дифф — в pantheon packs diff, в тревоге счёт строк (G11). Настоящие
-    хуки обоих пакетов (mailkeeper, MorphStream), если есть на машине, — печать: взят или причина (круг G9). Мутанты каждой ветки краснеют."""
+    хуки пакетов пользователя (~/.claude/pantheon/packs), если есть на машине, — печать: взят или причина (круг G9). Мутанты каждой ветки краснеют."""
     for label, data, want in G6_PROBES:
         got = P.pack_script_reject(data)
         check(f"круг G6: {label} — не взят: «{want}»", got == want, got)
@@ -1458,16 +1458,16 @@ def class_g6_list(tmp):
         fn = "_pack_line_reject" if "PACK_SCRIPT_CHARS" in pair[0] else "pack_script_reject"
         with patched(**{fn: mutant_fn(getattr(P, fn), *pair)}):
             check(f"круг G6: самопроверка — мутант «{label}» пропускает пробу", not g6_reasons(P.pack_script_reject))
-    real = [os.path.join(__import__("pwd").getpwuid(os.getuid()).pw_dir, "projects", f) for f in (
-        "other/mailkeeper/.claude/hooks/guard_bash.py", "other/mailkeeper/.claude/hooks/guard_read.py",
-        "MorphStream/app/.claude/hooks/protect-db.sh", "MorphStream/app/.claude/hooks/pre-commit-check.sh",
-        "MorphStream/gpu-worker/.claude/hooks/pre-commit-check.sh")]
+    rh = __import__("pwd").getpwuid(os.getuid()).pw_dir  # пакеты пользователя на машине — данные, только чтение
+    with patched(HOME=rh):
+        real = [os.path.join(r, ".claude", "hooks", n) for d in sorted(glob.glob(os.path.join(
+            rh, ".claude", "pantheon", "packs", "*", ""))) for r, n in P.pack_hook_scripts(d)]
     real = [p for p in real if os.path.isfile(p)]
     got = {p: P.pack_script_reject(open(p, "rb").read()) for p in real}
     for p, why in got.items():  # круг G9: только ASCII — хук со знаком вне ASCII не взят, решение у координатора
         print(f"круг G9: настоящий хук {p}: {why or 'проходит белый список'}")
     if not real:
-        print("пропущено: настоящих хуков mailkeeper и MorphStream на машине нет (CI)")
+        print("пропущено: настоящих хуков пакетов пользователя на машине нет (CI)")
 
     os.makedirs(os.path.join(tmp, "g6a", "app"), exist_ok=True)
     app = os.path.realpath(os.path.join(tmp, "g6a", "app"))
@@ -1532,7 +1532,7 @@ def class_g6_hashes(tmp):
     home = os.path.join(tmp, "g6h")
     app, _, own = g5_repo(home)
     packs, win = os.path.join(tmp, "g6packs"), "g6h"
-    shutil.copytree(os.path.join(PACKS, "_bin"), os.path.join(packs, "_bin"))
+    shutil.copytree(PACKS_BIN, os.path.join(packs, "_bin"))
     put(os.path.join(packs, win, ".claude-plugin", "plugin.json"), {"name": win})
     put(os.path.join(packs, win, "hooks", "hooks.json"), {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
         {"type": "command", "command": 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
@@ -1748,7 +1748,7 @@ def class2_race(tmp):
     log = os.path.join(tmp, "race.log")
     env = {"PATH": os.environ["PATH"], "HOME": home, "RACE_LOG": log}
     snap = lambda label, b: os.path.join(snap_of(tmp, label, b, [(app, "x.sh")]), "_bin")  # noqa: E731
-    bin_dir = snap("race", os.path.join(PACKS, "_bin"))
+    bin_dir = snap("race", PACKS_BIN)
     m_in = snap("race-in", mutant_bin(tmp, "in-path", {"in_repo.py": [
         ('cmd[i] = f"/dev/fd/{sfd}"', "cmd[i] = a"), ("os.fchdir(root)", "pass"),
         ("env=env, input=raw", "env=env, cwd=repo, input=raw"), SCRIPT_FROM_REPO]}))
@@ -1820,7 +1820,7 @@ def class2_plain_after(tmp):
         "    if plain:\n        bad = [x for rel in plain for x in links_under(root, rel)]\n",
         "    if plain:\n        bad = []\n")]})
     snap = lambda label, b: os.path.join(snap_of(tmp, label, b, [(app, "pc.sh")]), "_bin")  # noqa: E731
-    for label, b in (("fd", snap("plain", os.path.join(PACKS, "_bin"))), ("мутант", snap("plain-m", m))):
+    for label, b in (("fd", snap("plain", PACKS_BIN)), ("мутант", snap("plain-m", m))):
         if os.path.lexists(os.path.join(app, "src/lnk")):
             os.unlink(os.path.join(app, "src/lnk"))
         r = subprocess.run([sys.executable, "-I", os.path.join(b, "in_repo.py"), app, "--always", "--plain=src", "--",
@@ -1919,16 +1919,16 @@ def class3_links(P, tmp):
 # --- класс 4: плагины и версии ---
 def class4(P, tmp, env):
     pmap = P.plugin_map_load(alert=False)
-    for name in ("metis-pantheon", "proteus-morph"):
+    for name in ("metis-pantheon", "god-proj"):
         win = json.load(open(os.path.join(env["PANTHEON_STATE"], "settings", f"{name}.json")))
         on = {p for p, v in (win.get("enabledPlugins") or {}).items() if v is True}
         keep = P.window_plugins_allowed(pmap, name)
         check(f"класс 4: {name} — включённые плагины окна ⊆ «оставить» карты", on <= keep, sorted(on - keep))
-        w = json.load(open(os.path.join(PACKS, name, "window.json")))
+        w = json.load(open(os.path.join(P.PACKS, name, "window.json")))
         check(f"класс 4: {name} — plugins пакета ⊆ карты окна", set(w.get("plugins") or []) <= keep,
               sorted(set(w.get("plugins") or []) - keep))
-    for name in sorted(os.listdir(PACKS)):
-        f = os.path.join(PACKS, name, "mcp.json")
+    for name in sorted(os.listdir(P.PACKS)):
+        f = os.path.join(P.PACKS, name, "mcp.json")
         if not os.path.isfile(f):
             continue
         for s, v in json.load(open(f)).get("mcpServers", {}).items():
@@ -2019,10 +2019,10 @@ def g9_passed(cases):
 
 def class_g9_ascii():
     """Класс: любой байт вне печатных ASCII и \\n (табуляция — с G10) в любом месте образцов хуков — отказ pack_script_reject (в
-    packs hashes — код 1: пробы G9_PROBES идут через class_g6_hashes). Образцы MorphStream в фикстурах — ASCII и
+    packs hashes — код 1: пробы G9_PROBES идут через class_g6_hashes). Образцы god-proj в фикстурах — ASCII и
     проходят. PACK_SCRIPT_CHARS равен эталону. Мутанты «список круга G8», «+DEL», «список выключен» краснеют."""
     samples = g9_samples()
-    check("круг G9: образцы хуков MorphStream (fixtures/morph-hooks) и Python-образец — ASCII, проходят",
+    check("круг G9: образцы хуков god-proj (fixtures/morph-hooks) и Python-образец — ASCII, проходят",
           all(text.isascii() and P.pack_script_reject(text.encode()) is None for _, text in samples) and len(samples) == 7,
           [(n, P.pack_script_reject(t.encode())) for n, t in samples])
     cases = g9_cases()
@@ -2188,7 +2188,7 @@ def class_g10(tmp):
     # (2) показ = исполняемый текст
     same = list(G10_SAME) + [t.encode() for _, t in g9_samples()]
     bad = [x for x in same if P.pack_script_reject(x) is not None or "\n".join(P.pack_show(x)) != x.decode()]
-    check(f"круг G10 (G9-2 Д1): {len(same)} скриптов (соседи C, D, E, F4, образцы MorphStream) — проходят, показ "
+    check(f"круг G10 (G9-2 Д1): {len(same)} скриптов (соседи C, D, E, F4, образцы god-proj) — проходят, показ "
           "pack_show равен исполняемому тексту байт в байт", not bad, bad[:2])
     with patched(_pack_show_line=mutant_fn(P._pack_show_line, *SHOW_BSLASH)):
         bad = [x for x in same if "\n".join(P.pack_show(x)) != x.decode()]
@@ -2243,8 +2243,8 @@ def main():
     base = {"permissions": {"allow": ["Read"], "deny": ["Bash(rm -rf *)"]}, "env": {"X": "1"},
             "sandbox": {"filesystem": {"allowWrite": ["~/p"], "denyRead": []}, "network": {}, "excludedCommands": []},
             "enabledPlugins": {}}
-    ok = P.window_plugins_allowed(P.plugin_map_load(alert=False), "proteus-morph")
-    check("класс 1: карта даёт proteus-morph плагины (иначе проверка плагина ничего не значит)", ok, ok)
+    ok = P.window_plugins_allowed(P.plugin_map_load(alert=False), "god-proj")
+    check("класс 1: карта даёт god-proj плагины (иначе проверка плагина ничего не значит)", ok, ok)
     class1(P, base, ok)
     class2(tmp, env, P)
     class4(P, tmp, env)

@@ -149,17 +149,26 @@ def main():
     check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
           "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]
           and lead.split("(1)")[0].count("`") == 4, lead.split("(1)")[0])
-    # metis-0933, решение владельца 06.11 21:55 «Б — все восемь»: правила направления в autoMode.allow его окна
-    mp, pm = w.coordinator_auto_allow(["a-org/app"], "metis-pantheon"), w.coordinator_auto_allow([], "proteus-morph")
-    check("coordinator_auto_allow(metis-pantheon): шесть команд чтения mailkeeper и uv sync — перед Review Record",
-          mp[-3:] == [w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.REVIEW_RECORD_RULE]
+    # metis-0933, решение владельца 06.11 21:55 «Б — все восемь»: правила направления в autoMode.allow его окна; какому
+    # окну какие — строка [auto_rules] policy.toml пользователя (решение владельца 12.11), в коде имён направлений нет
+    mp = w.coordinator_auto_allow(["a-org/app"], ["uv-sync", "mailkeeper-read", "uv-sync"])
+    pm = w.coordinator_auto_allow([], ["git-remote"])
+    check("coordinator_auto_allow(…, [mailkeeper-read, uv-sync]): шесть команд чтения mailkeeper и uv sync — перед "
+          "Review Record, по порядку DIRECTION_RULES, без повторов",
+          mp[-3:] == [w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.REVIEW_RECORD_RULE] and len(mp) == 6
           and all(f"`mailkeeper {c}`" in w.MAILKEEPER_READ_RULE
                   for c in ("status", "rules", "scan", "report", "plan", "logs")), mp)
-    check("coordinator_auto_allow(proteus-morph): git remote, без правила слияния (нет репозиториев)",
+    check("coordinator_auto_allow(…, [git-remote]): git remote, без правила слияния (нет репозиториев)",
           pm == ["$defaults", w.GIT_REMOTE_RULE, w.REVIEW_RECORD_RULE], pm)
-    check("правила направления — только своему окну: другое направление и без имени — без них",
-          w.coordinator_auto_allow(["a-org/app"], "zeus") == w.coordinator_auto_allow(["a-org/app"])
+    check("правила направления — только по строке [auto_rules]: без неё, не список и неизвестное имя — без них",
+          all(w.coordinator_auto_allow(["a-org/app"], r) == w.coordinator_auto_allow(["a-org/app"])
+              for r in (None, "git-remote", ["git-remotee"], [5], {"git-remote": 1}))
           and not {w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE, w.GIT_REMOTE_RULE} & set(allow))
+    check("direction_rules: кривое названо (не список, неизвестное имя, не строка), верное — нет",
+          w.direction_rules(None) == ([], []) and w.direction_rules("git-remote")[1] == ["'git-remote'"]
+          and w.direction_rules(["git-remote", "x", 5]) == ([w.GIT_REMOTE_RULE], ["'x'", "5"]))
+    check("window_rules.py: имён направлений в коде нет — только имена правил DIRECTION_RULES",
+          set(w.DIRECTION_RULES) == {"mailkeeper-read", "uv-sync", "git-remote"} and not hasattr(w, "DIRECTION_AUTO_ALLOW"))
     check("Mailkeeper Read: команды записи mailkeeper не покрыты",
           all(f"`{c}`" in w.MAILKEEPER_READ_RULE.split("does not cover")[1]
               for c in ("mailkeeper apply", "undo", "run", "auth", "daemon", "service", "on", "off", "resume",
@@ -176,9 +185,11 @@ def main():
     check("pantheon.py сам правил не определяет — только берёт из window_rules.py", not own, own)
     calls = [c for c in ast.walk(ast.parse(psrc)) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
              and c.func.id == "coordinator_auto_allow"]
-    check("sandbox_build: окну направления — coordinator_auto_allow(…, name): его правила из DIRECTION_AUTO_ALLOW",
-          len(calls) == 1 and len(calls[0].args) == 2 and isinstance(calls[0].args[1], ast.Name)
-          and calls[0].args[1].id == "name", [ast.dump(c)[:200] for c in calls])
+    a1 = calls[0].args[1] if len(calls) == 1 and len(calls[0].args) == 2 else None
+    check("sandbox_build: окну направления — coordinator_auto_allow(…, auto_rules.get(name)): его строка [auto_rules]",
+          isinstance(a1, ast.Call) and isinstance(a1.func, ast.Attribute) and a1.func.attr == "get"
+          and isinstance(a1.func.value, ast.Name) and a1.func.value.id == "auto_rules"
+          and [getattr(x, "id", None) for x in a1.args] == ["name"], [ast.dump(c)[:200] for c in calls])
 
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="window-rules-"))
     old = {k: os.environ.get(k) for k in ("HOME", "PANTHEON_HOME", "PANTHEON_STATE")}

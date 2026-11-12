@@ -11,15 +11,15 @@
         "chrome-devtools-mcp@1.10.1"
       ]
     },
-    "grafana": {
+    "metrics": {
       "command": "python3",
       "args": [
         "-I",
         "${PANTHEON_PACK_BIN}/env_from.py",
-        "${HOME}/projects/MorphStream/app/.env.local",
-        "GRAFANA_URL,GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "${HOME}/projects/god-proj/app/.env.local",
+        "METRICS_URL,METRICS_TOKEN",
         "--",
-        "${HOME}/.local/bin/mcp-grafana",
+        "${HOME}/.local/bin/mcp-metrics",
         "-t",
         "stdio"
       ]
@@ -50,22 +50,22 @@
         "mcp"
       ]
     },
-    "upstash": {
+    "queue": {
       "command": "python3",
       "args": [
         "-I",
         "${PANTHEON_PACK_BIN}/env_from.py",
-        "${HOME}/projects/MorphStream/app/.env.local",
-        "UPSTASH_EMAIL,UPSTASH_API_KEY",
+        "${HOME}/projects/god-proj/app/.env.local",
+        "QUEUE_EMAIL,QUEUE_API_KEY",
         "--",
         "npx",
         "-y",
-        "@upstash/mcp-server@0.3.0"
+        "@example/queue-mcp@0.3.0"
       ]
     },
-    "vast-ai": {
+    "docs": {
       "type": "http",
-      "url": "https://docs.vast.ai/mcp"
+      "url": "https://docs.example.com/mcp"
     }
   }
 }

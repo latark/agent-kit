@@ -92,8 +92,11 @@ REVIEW_RECORD_RULE = (
 
 # Правила autoMode.allow окна направления на команды его репозиториев, которые раньше разрешал permissions.allow
 # проекта (metis-0933: окну permissions.allow не даётся). Решение владельца 06.11 21:55 «Б — все восемь»: шесть
-# команд чтения mailkeeper, uv sync и git remote. Пакет окна права только сужает — поэтому здесь, в ядре. Имени
-# направления в тексте правил нет (решение 16.10): правило попадает только в окно своего направления.
+# команд чтения mailkeeper, uv sync и git remote. Пакет окна права только сужает — поэтому текст правил здесь, в ядре. Имени
+# направления в тексте правил нет (решение 16.10): правило попадает только в окно своего направления. Какому окну какие
+# правила — данные пользователя (решение владельца 12.11: у каждого свои направления): раздел [auto_rules]
+# ~/.claude/pantheon/policy.toml, «направление = [имена из DIRECTION_RULES]»; правит его, как и другие привилегии,
+# только владелец (owner-edit).
 MAILKEEPER_READ_RULE = (
     "Pantheon Mailkeeper Read: In this Pantheon direction window, `mailkeeper status`, `mailkeeper rules`, "
     "`mailkeeper scan`, `mailkeeper report`, `mailkeeper plan` and `mailkeeper logs` (with their own options) are the "
@@ -112,19 +115,30 @@ GIT_REMOTE_RULE = (
     "`set-url`, `rename`, `remove`, `prune`, `update`) in one of this direction's repositories is routine repository "
     "upkeep for the coordinator's task, as the project's settings allowed before. It covers only `git remote` itself: "
     "a push, a fetch from a new URL, `cd` or chained commands are judged by the built-in rules.")
-DIRECTION_AUTO_ALLOW = {"metis-pantheon": (MAILKEEPER_READ_RULE, UV_SYNC_RULE), "proteus-morph": (GIT_REMOTE_RULE,)}
+DIRECTION_RULES = {"mailkeeper-read": MAILKEEPER_READ_RULE, "uv-sync": UV_SYNC_RULE, "git-remote": GIT_REMOTE_RULE}
 
 
-def coordinator_auto_allow(repos, direction=None):
+def direction_rules(names):
+    """Строка [auto_rules] policy.toml → (тексты правил по порядку DIRECTION_RULES, без повторов; [неизвестные или
+    кривые записи]). Не список — ничего (окно без правил направления), кривое — названо, а не взято."""
+    if names is None:
+        return [], []
+    if not isinstance(names, list):
+        return [], [repr(names)]
+    bad = [repr(n) for n in names if not isinstance(n, str) or n not in DIRECTION_RULES]
+    return [r for k, r in DIRECTION_RULES.items() if k in names], bad
+
+
+def coordinator_auto_allow(repos, rules=None):
     """autoMode.allow окна координатора: "$defaults", правило слияния и правило сдачи работы лида (push рабочей ветки,
     argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
-    owner/repo; нет таких — обоих правил нет), правила направления из DIRECTION_AUTO_ALLOW (metis-0933) и правило
-    записей проверок."""
+    owner/repo; нет таких — обоих правил нет), правила направления — имена DIRECTION_RULES из его строки [auto_rules]
+    policy.toml (metis-0933; direction_rules) — и правило записей проверок."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return ["$defaults"] + gated + lead + list(DIRECTION_AUTO_ALLOW.get(direction, ())) + [REVIEW_RECORD_RULE]
+    return ["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE]
 
 
 def auto_mode(auto_allow):

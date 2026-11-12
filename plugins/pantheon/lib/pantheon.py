@@ -3769,7 +3769,8 @@ def _read_bytes_nofollow(p, limit):
 def pack_hook_scripts(pack_dir):
     """Скрипты репозиториев, которые хуки пакета pack_dir запускают через in_repo.py: [(репозиторий, имя)], где
     репозиторий — строка без ссылок, как её считает in_repo.open_root (надёжное начало + звенья), имя — файл в
-    <репозиторий>/.claude/hooks. Пакет — код ядра, разбор shlex его строк."""
+    <репозиторий>/.claude/hooks. Пакет — данные пользователя (~/.claude/pantheon/packs, окну закрыта запись), разбор
+    shlex его строк."""
     hooks = read_json(os.path.join(pack_dir, "hooks", "hooks.json"), {})
     hooks = hooks.get("hooks") if isinstance(hooks, dict) else None
     out = []
@@ -4318,6 +4319,17 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
+    # правила autoMode.allow направления (window_rules.DIRECTION_RULES) — по его строке [auto_rules] policy.toml
+    auto_rules = policy.get("auto_rules") if isinstance(policy.get("auto_rules"), dict) else {}
+    bad_rules = [f"{n} = {', '.join(WINDOW_RULES.direction_rules(v)[1])}" for n, v in sorted(auto_rules.items())
+                 if WINDOW_RULES.direction_rules(v)[1]]
+    if bad_rules:
+        print(f"policy.toml [auto_rules]: не взято — {'; '.join(bad_rules)} (имена: "
+              f"{', '.join(WINDOW_RULES.DIRECTION_RULES)})", file=sys.stderr)
+        alert_once("auto-rules-bad", repr(bad_rules), f"policy.toml [auto_rules]: не взято — {'; '.join(bad_rules)}; "
+                   f"правила направления — только {', '.join(WINDOW_RULES.DIRECTION_RULES)} (Метида)", "pantheon")
+    else:
+        clear_once("auto-rules-bad")
     built = []
     for name, folders in domains.items():
         mine = leads.get(name, [])
@@ -4328,7 +4340,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
-               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name), name)):
+               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name),
+                                                 auto_rules.get(name))):
             built.append(name)
     # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
     # workshop/ доски; список субагентов — вне P0-6

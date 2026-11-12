@@ -7,8 +7,15 @@
   --append-system-prompt-file с AGENTS.md всех этих папок (флаг не повторяется: второй затирает первый); AGENTS.md
   папки запуска, которую её CLAUDE.md импортирует, — не дублируется; --plugin-dir и --mcp-config пакета, если есть;
   всё до --settings; без пакета — без --plugin-dir;
+- пакеты — данные пользователя (решение владельца 12.11): читаются из ~/.claude/pantheon/packs/<направление>/ (HOME
+  теста); папки пакетов нет совсем — окно запускается и собирается без пакета; в плагине пакетов направлений нет,
+  только общий packs/_bin;
+- перенос из прежней версии плагина (`pantheon packs migrate`, шаг domains build): берётся самая новая версия с
+  пакетами, существующий пакет и личная карта не затираются, ссылка источника не копируется, после отметки
+  удалённый пакет не возвращается; коды выхода 0, 1 и 2; правка window.json пакета — пересборка по --if-changed;
+- [auto_rules] policy.toml: правила autoMode.allow направления по именам, неизвестное имя — тревога;
 - граница ядра (класс 5): argv запуска окна целиком собирает P.window_launch, флагов запуска (LAUNCH_FLAGS) в lib/ и
-  scripts/ вне pantheon.py нет; PANTHEON_PACKS окружения пакеты не подменяет (тест подменяет константу P.PACKS);
+  scripts/ вне pantheon.py нет; PANTHEON_PACKS окружения пакеты не подменяет;
 - `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny EnterWorktree и
   ExitWorktree, window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
   не влиты, окно собрано; мастерская — без этого;
@@ -16,9 +23,9 @@
   записи в seen и сервера в mcp.json пакета — тишина; настройки папки запуска не предупреждают; код выхода тот же;
 - обёртка packs/_bin/in_repo.py: цель вне репозитория — не запускает, внутри — cwd и CLAUDE_PROJECT_DIR репозитория,
   путь файла аргументом (--file-arg), код выхода как есть, --ok — 0; --cmd-prefix — только Bash с этим началом;
-- пакеты репозитория (packs/): JSON читается, window.json вливается без отброшенного, хуки — через in_repo.py; по
-  решению владельца 06.11 18:30 нет git push, python, pip, docker, brew в allow, bypassPermissions и токенов,
-  supabase — только с protect-db.sh.
+- образцы пакетов (tests/fixtures/packs): JSON читается, window.json вливается без отброшенного, хуки — через
+  in_repo.py; по решению владельца 06.11 18:30 нет git push, python, pip, docker, brew в allow, bypassPermissions и
+  токенов, supabase — только с protect-db.sh.
 """
 import atexit
 import json
@@ -27,12 +34,18 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
+import importlib.util
+import tomllib
 
-PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+PLUGIN = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+from _py311 import mkroot  # noqa: E402
+
 RUN_PY = os.path.join(PLUGIN, "lib", "run.py")
 IN_REPO = os.path.join(PLUGIN, "packs", "_bin", "in_repo.py")
-ROOT = os.path.realpath(tempfile.mkdtemp(prefix="winpack-"))
+FIXTURES = os.path.join(HERE, "fixtures", "packs")
+ROOT = os.path.realpath(mkroot("winpack-"))
 atexit.register(shutil.rmtree, ROOT, True)
 results = []
 
@@ -54,7 +67,8 @@ def after(argv, flag):
 
 def main():
     tmp = os.path.join(ROOT, "h")
-    home, state, packs = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state"), os.path.join(tmp, "packs")
+    home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
+    packs = os.path.join(tmp, ".claude", "pantheon", "packs")  # данные пользователя, от HOME (решение владельца 12.11)
     decoy = os.path.join(tmp, "decoy-packs")
     ms, side = os.path.join(tmp, "projects/ms"), os.path.join(tmp, "projects/side")
     put(os.path.join(ms, "CLAUDE.md"), "@AGENTS.md\n")
@@ -87,6 +101,9 @@ def main():
         "env": {"HF_HUB_DISABLE_TELEMETRY": "1", "PACK_ENV": "1", "GUARD_OFF": "1"},
         "sandbox": {"denyRead": ["~/Library/Mail"], "deniedDomains": ["mail.example"], "excludedCommands": ["mk *"]},
         "strange": 1, "seen": {}})
+    # какие правила autoMode.allow направления включены — данные пользователя: [auto_rules] его policy.toml
+    put(os.path.join(tmp, ".claude", "pantheon", "policy.toml"),
+        '[auto_rules]\nproteus-ms = ["uv-sync"]\nathena-solo = ["no-such-rule"]\n')
     bindir = os.path.join(tmp, "bin")
     put(os.path.join(bindir, "claude"), "#!/bin/sh\nexit 0\n")
     os.chmod(os.path.join(bindir, "claude"), 0o755)
@@ -95,14 +112,14 @@ def main():
            "PANTHEON_PACKS": decoy}  # класс 5: окружение не меняет, откуда пакеты, — приманка не должна попасть в argv
     put(os.path.join(decoy, "proteus-ms", ".claude-plugin/plugin.json"), {"name": "decoy"})
     os.makedirs(env["PANTHEON_CLAUDE_TMP"])
-    # пакеты теста — подменой константы P.PACKS в процессе (как AI_HOME через HOME), а не переменной окружения
-    shim = os.path.join(tmp, "run_packs.py")
-    put(shim, f"import sys\nsys.path.insert(0, {os.path.join(PLUGIN, 'lib')!r})\nimport pantheon\n"
-              f"pantheon.PACKS = {packs!r}\nsys.exit(pantheon.main(sys.argv[1:]))\n")
-    run = lambda *a: subprocess.run([sys.executable, "-I", shim, *a], env=env, capture_output=True, text=True,  # noqa: E731
-                                    timeout=120)
+    run = lambda *a: subprocess.run([sys.executable, "-I", RUN_PY, *a], env=env, capture_output=True,  # noqa: E731
+                                    text=True, timeout=120)
     r = run("domains", "build")
     check("сборка прошла", r.returncode == 0, r.stderr)
+    # прежних пакетов рядом с плагином теста нет: отметка переноса — чтобы не искать их на каждой сборке; пакет цел
+    check("сборка: прежних пакетов нет — отметка .migrated.json в папке пакетов, свой пакет не тронут",
+          os.path.isfile(os.path.join(packs, ".migrated.json"))
+          and json.load(open(os.path.join(pack, "window.json"))).get("strange") == 1, os.listdir(packs))
     real = lambda p: os.path.realpath(os.path.join(tmp, p))  # noqa: E731
 
     # --- запуск окна (pantheon start --dry-run печатает argv) ---
@@ -186,6 +203,24 @@ def main():
     check("мастерская — без переменной add-dir и без deny EnterWorktree",
           "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" not in (ws.get("env") or {})
           and "EnterWorktree" not in (ws.get("permissions") or {}).get("deny", []), ws.get("permissions"))
+    rules = lambda w: [x.split(":", 1)[0] for x in (w.get("autoMode") or {}).get("allow", [])]  # noqa: E731
+    check("[auto_rules] policy.toml: направлению — названное правило autoMode.allow, и только оно из правил направлений",
+          "Pantheon Uv Sync" in rules(win) and "Pantheon Git Remote" not in rules(win)
+          and "Pantheon Mailkeeper Read" not in rules(win), rules(win))
+    check("[auto_rules] policy.toml: неизвестное имя правила — не взято, окно собрано, тревога с этим именем",
+          not {"Pantheon Uv Sync", "Pantheon Git Remote", "Pantheon Mailkeeper Read"} & set(rules(solo))
+          and "[auto_rules]" in alerts and "no-such-rule" in alerts, (rules(solo), alerts[-600:]))
+
+    # --- правка пакета в данных пользователя → пересборка окна по --if-changed (плановый проход) ---
+    w = json.load(open(os.path.join(pack, "window.json")))
+    put(os.path.join(pack, "window.json"), dict(w, deny=w["deny"] + ["Bash(docker rmi *)"]))
+    later = os.path.getmtime(os.path.join(state, "settings", "proteus-ms.json")) + 5
+    os.utime(os.path.join(pack, "window.json"), (later, later))
+    r = run("domains", "build", "--if-changed")
+    win = json.load(open(os.path.join(state, "settings", "proteus-ms.json")))
+    check("domains build --if-changed: правка window.json пакета в ~/.claude/pantheon/packs пересобирает окно",
+          r.returncode == 0 and "Bash(docker rmi *)" in win["permissions"]["deny"], (r.stderr, win["permissions"]))
+    put(os.path.join(pack, "window.json"), w)
 
     # --- pantheon check: что из вложенных проектов не учтено в пакете ---
     r = run("check")
@@ -246,8 +281,25 @@ def main():
           shlex.split(line.rsplit(" (папка ", 1)[0])[1:] == ["--agent", "hq", "--name", "zeus", "--settings",
                                                               os.path.join(state, "settings", "hq.json")],
           (r.stdout, r.stderr))
+
+    # --- папки пакетов нет совсем (новый пользователь): окно запускается и собирается без пакета ---
+    off = os.path.join(tmp, "packs-off")
+    os.rename(packs, off)
+    r = run("start", "proteus-ms", "x", "--from", "zeus", "--dry-run")
+    check("папки ~/.claude/pantheon/packs нет — start окна без --plugin-dir, без падения",
+          r.returncode == 0 and " --settings " in r.stdout and "--plugin-dir" not in r.stdout, (r.stdout, r.stderr))
+    r = run("domains", "build")
+    win = json.load(open(os.path.join(state, "settings", "proteus-ms.json")))
+    check("папки пакетов нет — сборка окон проходит, window.json пакета не влит",
+          r.returncode == 0 and "Bash(codesign *)" not in (win["permissions"].get("ask") or []),
+          (r.stderr, win["permissions"]))
+    shutil.rmtree(packs, True)
+    os.rename(off, packs)
+
     launch_only_in_core()
-    shipped_packs(tmp)
+    no_packs_in_plugin()
+    fixture_packs(tmp)
+    migration(tmp, env)
     return all(results)
 
 
@@ -286,16 +338,21 @@ FORBIDDEN_ALLOW = ("git push", "Bash(python", "Bash(pip", "Bash(docker", "brew i
 FORBIDDEN_TEXT = ("bypassPermissions", "defaultMode", "Bearer", "hf_", "/Users/", '"enabled": false')
 
 
-def shipped_packs(tmp):
-    """Пакеты репозитория (plugins/pantheon/packs): JSON читается, window.json вливается без отброшенного, хуки — через
-    in_repo.py пакета, опасного по решению владельца нет."""
+def no_packs_in_plugin():
+    """Пакеты направлений — данные пользователя: в плагине только общий код пакетов packs/_bin, папок направлений нет."""
+    got = sorted(n for n in os.listdir(os.path.join(PLUGIN, "packs")) if n != "_bin" and not n.startswith("."))
+    check("в плагине нет пакетов направлений: plugins/pantheon/packs — только _bin", not got, got)
+
+
+def fixture_packs(tmp):
+    """Образцы пакетов (tests/fixtures/packs): JSON читается, window.json вливается без отброшенного, хуки — через
+    in_repo.py пакета, опасного по решению владельца нет. Тот же разбор пакет пользователя проходит при сборке окна."""
     os.environ.update(HOME=tmp, PANTHEON_HOME=os.path.join(tmp, "pantheon"))
     sys.path.insert(0, os.path.join(PLUGIN, "lib"))
     import pantheon as P
-    root = os.path.join(PLUGIN, "packs")
-    names = sorted(n for n in os.listdir(root) if not n.startswith(("_", ".")))
-    check("пакеты репозитория: есть proteus-morph и metis-pantheon", {"proteus-morph", "metis-pantheon"} <= set(names),
-          names)
+    root = FIXTURES
+    names = sorted(n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n)))
+    check("образцы пакетов: god-proj и god-mail", names == ["god-mail", "god-proj"], names)
     for n in names:
         texts = {}
         for dp, _, fs in os.walk(os.path.join(root, n)):
@@ -321,17 +378,100 @@ def shipped_packs(tmp):
         # metis-0933 круг E: скрипт .claude/hooks напрямую по пути окно подменило бы ссылкой — только через in_repo.py
         check(f"пакет {n}: хуки — только через in_repo.py пакета (скрипт .claude/hooks по fd), python3 — только с -I",
               cmds and all(c.startswith('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" ') for c in cmds), cmds)
-    mcp = js_of(root, "proteus-morph/mcp.json").get("mcpServers", {})
-    hooks = js_of(root, "proteus-morph/hooks/hooks.json")["hooks"]["PreToolUse"]
-    check("пакет proteus-morph: supabase — только вместе с protect-db.sh на его инструментах",
+    mcp = js_of(root, "god-proj/mcp.json").get("mcpServers", {})
+    hooks = js_of(root, "god-proj/hooks/hooks.json")["hooks"]["PreToolUse"]
+    check("пакет god-proj: supabase — только вместе с protect-db.sh на его инструментах",
           any("protect-db.sh" in h["command"] and "supabase" in g["matcher"] for g in hooks for h in g["hooks"]), hooks)
-    check("пакет proteus-morph: серверы со скриптом app/ — из папки app", all(
-        "MorphStream/app" in " ".join(s.get("args", [])) for s in mcp.values() if s.get("command") == "bash"), mcp)
+    local = [s for s in mcp.values() if "command" in s]
+    check("пакет god-proj: серверы MCP — через env_from.py пакета (python3 -I), npx — с точной версией",
+          local and all(s["command"] == "python3" and s["args"][:2] == ["-I", "${PANTHEON_PACK_BIN}/env_from.py"]
+                        for s in local)
+          and all(re.search(r"@\d+\.\d+\.\d+$", s["args"][s["args"].index("-y") + 1])
+                  for s in local if "npx" in s["args"]), mcp)
 
 
 def js_of(root, rel):
     with open(os.path.join(root, rel), encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def migration(tmp, env):
+    """Перенос пакетов из прежней версии плагина (lib/packs_local.py и `pantheon packs migrate`)."""
+    spec = importlib.util.spec_from_file_location("packs_local", os.path.join(PLUGIN, "lib", "packs_local.py"))
+    pl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pl)
+    base = os.path.join(ROOT, "mig")
+    cache = os.path.join(base, "cache", "pantheon")
+    secret = os.path.join(base, "secret.json")
+    put(secret, '{"token": "SECRET"}')
+    for ver, desc in (("0.11.9", "OLD"), ("0.11.10", "NEW")):
+        put(os.path.join(cache, ver, "packs", "dir-a", ".claude-plugin", "plugin.json"), {"name": "pack-dir-a"})
+        put(os.path.join(cache, ver, "packs", "dir-a", "window.json"), {"description": desc})
+    put(os.path.join(cache, "0.11.10", "packs", "dir-a", "hooks", "hooks.json"), {"hooks": {}})
+    os.symlink(secret, os.path.join(cache, "0.11.10", "packs", "dir-a", "mcp.json"))
+    put(os.path.join(cache, "0.11.10", "packs", "dir-b", "window.json"), {"description": "FROM-CACHE"})
+    put(os.path.join(cache, "0.11.10", "packs", "_bin", "window.json"), {})
+    put(os.path.join(cache, "0.11.10", "plugins-by-role.toml"),
+        '[window.dir-a]\nplugins = ["p@m"]\n[window.hq]\nplugins = []\n[window.stranger]\nplugins = ["q@m"]\n'
+        '[window.dir-b]\nmcp = [5]\n')
+    os.makedirs(os.path.join(cache, "0.11.11"))  # нынешняя версия — без пакетов
+    user = os.path.join(base, "user", "packs")
+    map_local = os.path.join(base, "user", "plugins-by-role.toml")
+    put(os.path.join(user, "dir-b", "window.json"), {"description": "MINE"})
+    desc = lambda d: json.load(open(os.path.join(user, d, "window.json"))).get("description")  # noqa: E731
+
+    res = pl.migrate(user, os.path.join(cache, "0.11.11"), map_local, {"dir-a", "dir-b"}, {"hq"}, "t", None, True)
+    check("перенос: источник — самая новая версия с пакетами (0.11.10 новее 0.11.9 по числам), пакет скопирован",
+          res["from"] == os.path.join(cache, "0.11.10") and res["copied"] == ["dir-a"] and desc("dir-a") == "NEW"
+          and os.path.isfile(os.path.join(user, "dir-a", "hooks", "hooks.json")), res)
+    check("перенос: пакет, который уже есть у пользователя, не затёрт и не дополнен; _bin — не направление",
+          res["kept"] == ["dir-b"] and desc("dir-b") == "MINE" and not os.path.exists(os.path.join(user, "_bin")), res)
+    check("перенос: файл-ссылка источника не копируется (O_NOFOLLOW)",
+          not os.path.lexists(os.path.join(user, "dir-a", "mcp.json")), os.listdir(os.path.join(user, "dir-a")))
+    with open(map_local, "rb") as fh:
+        got = tomllib.load(fh)
+    check("перенос: личная карта — только [window.<направление реестра>] вне карты плагина, без кривых записей",
+          res["map"] == ["dir-a"] and got == {"window": {"dir-a": {"plugins": ["p@m"]}}}, (res, got))
+    check("перенос: отметка .migrated.json", os.path.isfile(os.path.join(user, ".migrated.json")), os.listdir(user))
+    shutil.rmtree(os.path.join(user, "dir-a"))
+    res = pl.migrate(user, os.path.join(cache, "0.11.11"), map_local, {"dir-a"}, set(), "t", None, True)
+    check("после отметки шаг сборки ничего не переносит: удалённый пакет не возвращается",
+          res["copied"] == [] and not os.path.exists(os.path.join(user, "dir-a")), res)
+    put(map_local, "# моя карта\n")
+    res = pl.migrate(user, os.path.join(cache, "0.11.11"), map_local, {"dir-a"}, set(), "t", None, False)
+    check("ручной перенос (без отметки) возвращает пакет, но личную карту, которая уже есть, не затирает",
+          res["copied"] == ["dir-a"] and desc("dir-a") == "NEW" and res["map"] == []
+          and open(map_local, encoding="utf-8").read() == "# моя карта\n", res)
+    lone = os.path.join(base, "lone")
+    res = pl.migrate(os.path.join(lone, "packs"), os.path.join(lone, "plugin", "1.0"), os.path.join(lone, "map.toml"),
+                     mark=False)
+    check("прежних пакетов нет, ручной путь — источника нет, отметки нет",
+          res["from"] is None and not os.path.exists(os.path.join(lone, "packs")), res)
+    res = pl.migrate(os.path.join(lone, "packs"), os.path.join(lone, "plugin", "1.0"), os.path.join(lone, "map.toml"),
+                     mark=True)
+    check("прежних пакетов нет, шаг сборки — отметка, чтобы не искать их на каждой сборке",
+          res["from"] is None and os.path.isfile(os.path.join(lone, "packs", ".migrated.json")), res)
+
+    # --- команда `pantheon packs migrate` (HOME — свой) ---
+    mh = os.path.join(base, "home")
+    put(os.path.join(mh, "pantheon", "directions.toml"), '[[direction]]\nname = "dir-a"\nfolders = ["~/projects/a"]\n')
+    menv = dict(env, HOME=mh, PANTHEON_HOME=os.path.join(mh, "pantheon"), PANTHEON_STATE=os.path.join(mh, "state"))
+    run = lambda *a: subprocess.run([sys.executable, "-I", RUN_PY, "packs", "migrate", *a], env=menv,  # noqa: E731
+                                    capture_output=True, text=True, timeout=60)
+    dst = os.path.join(mh, ".claude", "pantheon", "packs", "dir-a", "window.json")
+    r = run("--from", os.path.join(cache, "0.11.9"))
+    check("packs migrate --from: пакет в ~/.claude/pantheon/packs, код 0",
+          r.returncode == 0 and "перенесён пакет dir-a" in r.stdout
+          and json.load(open(dst)).get("description") == "OLD", (r.returncode, r.stdout, r.stderr))
+    r = run("--from", os.path.join(cache, "0.11.10", "packs"))
+    check("packs migrate --from папки пакетов: пакет уже есть — не тронут, код 0",
+          r.returncode == 0 and "уже есть" in r.stdout and json.load(open(dst)).get("description") == "OLD",
+          (r.returncode, r.stdout, r.stderr))
+    r = run("--from", os.path.join(base, "nothing"))
+    check("packs migrate: источника нет — код 1, причина последней строкой",
+          r.returncode == 1 and "прежних пакетов нет" in (r.stderr.strip().splitlines() or [""])[-1], (r.returncode, r.stderr))
+    r = run("--frm", "x")
+    check("packs migrate: не те аргументы — код 2", r.returncode == 2, (r.returncode, r.stderr))
 
 
 if __name__ == "__main__":
