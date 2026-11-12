@@ -2664,6 +2664,7 @@ def t_delta_gate_unit(h):
     D200 = plumb(kit, [D200], {"x.py": F(b"x = 3\n")}, "x.py")
     D201 = plumb(kit, [H], {"big.py": F(b"a\n" * 201)}, "201 строка")
     Db = plumb(kit, [H], {"b.bin": F(b"\0\1\2")}, "двоичный")
+    Dn = plumb(kit, [H], {"x.py": None, "x2.py": F(b"x = 1\n")}, "переименование x.py → x2.py")
     Hr = plumb(kit, [m["M"]], {NARROW_MAP: F(NARROW_MAP_BYTES), "x.py": F(b"x = 1\n")}, "head после rebase на M")
     Dr = plumb(kit, [Hr], {"x.py": F(b"x = 2\n")}, "правка после rebase")
 
@@ -2674,6 +2675,9 @@ def t_delta_gate_unit(h):
     check("_numstat: двоичный файл — числа None", mg._numstat(gd, H, Db) == [("b.bin", None, None)],
           mg._numstat(gd, H, Db))
     check("_numstat: сбой git (нет коммита) → None", mg._numstat(gd, H, "d" * 40) is None)
+    check("_rename_problem: правка без переименования → None", mg._rename_problem(gd, H, D) is None)
+    check("_rename_problem: переименование → DELTA_RENAME", mg._rename_problem(gd, H, Dn) == mg.DELTA_RENAME)
+    check("_rename_problem: сбой → «не посчитать»", "не посчитать" in (mg._rename_problem(gd, H, "d" * 40) or ""))
 
     full = full_rec(repo, H)
 
@@ -2687,6 +2691,14 @@ def t_delta_gate_unit(h):
           np(tests=[narrow_rec(H, S)]))
     check("_narrow_problem: цепочка H → D → D2 → None", np(sha=D2, base=D, tests=[full, narrow_rec(D, H)]) is None,
           np(sha=D2, base=D, tests=[full, narrow_rec(D, H)]))
+    calls, carry_git = [], mg._carry_git
+    mg._carry_git = lambda *a: calls.append(a) or carry_git(*a)
+    try:
+        got = np(sha=D2, base=D, tests=[full, narrow_rec(D, H)])
+    finally:
+        mg._carry_git = carry_git
+    check("_narrow_problem: цепочка — git папки ищется один раз, а не на каждом звене (Д3 argus #420)",
+          got is None and len(calls) == 1, (got, len(calls)))
     chain = [full, narrow_rec(D, H), narrow_rec(D2, D)]
     check("_narrow_problem: цепочка из трёх звеньев при depth 3 → None", np(sha=D3, base=D2, tests=chain, depth=3) is None,
           np(sha=D3, base=D2, tests=chain, depth=3))
@@ -2698,6 +2710,7 @@ def t_delta_gate_unit(h):
             ("дельта задевает файл шлюза", dict(sha=Dg), "файл шлюза"),
             ("дельта 201 строка", dict(sha=D201), "201 строк"),
             ("в дельте двоичный файл", dict(sha=Db), "двоичный"),
+            ("в дельте переименование (Д1 argus #420)", dict(sha=Dn), "переименование"),
             ("база не предок head (rebase между кругами)", dict(sha=Dr), "не предок"),
             ("база — другая ветка", dict(base=m["X"]), "не предок"),
             ("карта в записи не та", dict(mp="0" * 64), "карта в записи не та")):
@@ -5723,11 +5736,20 @@ def t_request_decision(h):
     for name, change, want in (("мелкая правка вне ядра", {"e.txt": F("e\n")}, True),
                                ("правка ядра", {"plugins/guard/x.txt": F("x\n")}, False),
                                ("правка сборки окон", {"plugins/pantheon/lib/pantheon.py": F("x\n")}, False),
-                               ("правка длиннее предела", {"e.txt": F("e\n" * 201)}, False)):
+                               ("правка длиннее предела", {"e.txt": F("e\n" * 201)}, False),
+                               ("переименование вне ядра", {"d.txt": None, "d3.txt": F(pr_d)}, False)):
         qn = plumb(p, [qd], change, "PR: " + name)
         got = case(f"дельта: {name}", qn, bd, [opus(qd)])
         check(f"решение (metis-0784): {name} — код другой (differs), delta {'[qd]' if want else 'пуст'}",
               len(got) == 1 and got[0]["differs"] == [qd] and got[0].get("delta") == ([qd] if want else []), got)
+    # Д2 argus #420: head старше окна _carry_heads (CARRY_HEADS более новых head с вердиктами) — без отпечатка и не в delta
+    qn = plumb(p, [qd], {"e.txt": F("e\n")}, "PR: мелкая правка поверх старого head")
+    newer = [plumb(p, [bd], {"d.txt": F("".join(lines[:20] + [f"n{i}\n"] + lines[21:]))}, f"PR: другой код {i}")
+             for i in range(8)]
+    got = case("дельта: head вне окна сверки", qn, bd, [opus(qd)] + [rej(x, f"argus{i}", f"s-n{i}")
+                                                                    for i, x in enumerate(newer)])
+    check("решение (metis-0784): head старше 8 последних — не в delta, хоть он предок и дельта мелкая",
+          len(got) == 1 and qd not in got[0].get("delta", [qd]) and got[0].get("delta") == [], got)
     got = case("клон другого репозитория", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
     check("решение: git не сверить (не клон) — запись с пустыми same и differs и причиной", len(got) == 1
           and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)

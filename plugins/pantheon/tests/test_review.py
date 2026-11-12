@@ -137,8 +137,9 @@ def ready_checks(pantheon, journal, raw, fake, cl):
                         ([], "проверок нет")):
         _gh_state(fake, journal, S2, seeded, rollup=rollup)
         r = acc()
-        check(f"accept: записи нет, CI {why} — код 1, «CI не зелёный», совет outside test",
-              r.returncode == 1 and "CI не зелёный" in r.stderr and "outside test --affected" in r.stderr, r.stderr)
+        check(f"accept: записи нет, CI {why} — код 1, «CI не зелёный», совет outside test (не git — полный набор)",
+              r.returncode == 1 and "CI не зелёный" in r.stderr and "`pantheon outside test --wait 590`" in r.stderr
+              and "--affected" not in r.stderr, r.stderr)
     _gh_state(fake, journal, "c" * 40, seeded)
     r = acc()
     check("accept: у PR другой head — код 1, «на старом коммите»", r.returncode == 1 and "старом коммите" in r.stderr,
@@ -166,11 +167,16 @@ def delta_checks(pantheon, git, repo, journal, fake):
         git("commit", "-q", "-m", name, cwd=repo)
         return git("rev-parse", "HEAD", cwd=repo).stdout.strip()
 
+    with open(os.path.join(repo, ".pantheon-verify"), "w") as fh:
+        fh.write("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py plugins/guard\n")
     prev = commit("x.py", "a\n")
     small = commit("x.py", "a\nb\n")
     core = commit("plugins/guard/x.py", "x\n")
     build = commit("plugins/pantheon/lib/pantheon.py", "x\n")
     big = commit("y.py", "".join(f"{i}\n" for i in range(201)))
+    git("mv", "y.py", "z.py", cwd=repo)
+    git("commit", "-q", "-m", "mv", cwd=repo)
+    moved = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
 
     def delta(*recs, head=small, **kw):
         _gh_state(fake, journal, head, list(recs), **kw)
@@ -211,6 +217,14 @@ def delta_checks(pantheon, git, repo, journal, fake):
     r = delta(_rec("accept", build), _rec("tests", build), head=big, behind="0")
     check("delta: правка длиннее 200 строк — полный круг, тестам тоже не дельта (без --base)",
           "дельта 201 строк" in r.stdout and "круг: полный" in r.stdout and "--base" not in r.stdout, r.stdout)
+    r = delta(_rec("accept", big), _rec("tests", big), head=moved, behind="0")
+    check("delta: переименование (Д1 argus #420) — полный круг, тестам тоже не дельта (без --base)",
+          "переименование" in r.stdout and "круг: полный" in r.stdout and "--base" not in r.stdout, r.stdout)
+    os.rename(os.path.join(repo, ".pantheon-verify"), os.path.join(repo, ".pantheon-verify.off"))
+    r = delta(_rec("accept", prev), _rec("tests", prev))
+    check("delta: в .pantheon-verify нет run-tests.py — совет полного набора, без --affected (Д2 argus #420)",
+          "`pantheon outside test --wait 590`" in r.stdout and "--affected" not in r.stdout, r.stdout + r.stderr)
+    os.rename(os.path.join(repo, ".pantheon-verify.off"), os.path.join(repo, ".pantheon-verify"))
     r = delta(_rec("accept", "f" * 40), behind="0")
     check("delta: прошлый head не предок (rebase) — полный круг", r.returncode == 0 and "не предок" in r.stdout,
           r.stdout + r.stderr)

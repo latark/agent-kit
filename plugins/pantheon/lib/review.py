@@ -425,6 +425,21 @@ def carry_lines(repo, pr):
 # проверенного head — только дельта, без rebase: rebase рвёт дельту (прошлый head перестаёт быть предком), и круг
 # снова полный. Правила дельты — merge.delta_problem (те же, что у шлюзов guard и владельца).
 
+def _outside_test(base=None):
+    """Команда записи тестов для подсказки роли. Узкая (`--affected`, от base, если задан) — только если проверка
+    проекта (.pantheon-verify в корне git текущей папки) — run-tests.py: `outside test --affected` гоняет именно его,
+    в репозитории без него узкой нет (Д2 argus #420). Иначе — полный набор."""
+    top = (_review_git("rev-parse", "--show-toplevel") or "").strip()
+    try:
+        with open(os.path.join(top, ".pantheon-verify"), encoding="utf-8") as fh:
+            runner = "run-tests.py" in fh.read()
+    except (OSError, ValueError):
+        runner = False
+    if not top or not runner:
+        return "pantheon outside test --wait 590"
+    return "pantheon outside test --affected " + (f"--base {base} " if base else "") + "--wait 590"
+
+
 def review_ready(repo, pr, sha, M, recs, view=False):
     """Можно ли argus «принять» head sha PR repo#pr (metis-0669) → None или почему нет: на sha есть запись tests шлюза
     (любая — узкая, полная; recs — записи журнала этого репозитория) или CI на head PR зелёный (gh pr view, если view
@@ -441,7 +456,7 @@ def review_ready(repo, pr, sha, M, recs, view=False):
     if state == "ok":
         return None
     return (f"на {sha[:12]} нет записи тестов шлюза, а CI не зелёный ({why}). argus — только после зелёного CI или "
-            "записи: `pantheon outside test --affected --wait 590` из чистой копии на этом коммите (metis-0669)")
+            f"записи: `{_outside_test()}` из чистой копии на этом коммите (metis-0669)")
 
 
 def _delta_rows(old, new):
@@ -466,15 +481,18 @@ def _delta_round(M, repo, head, base_name, verdicts):
     свежем base: он не впереди head (gh compare, behind_by 0)."""
     prev = next((r["sha"] for r in reversed(verdicts) if r["sha"] != head), None)
     why = "первый круг" if prev is None else None
-    rows = None
+    rows = ren = None
     if prev and _review_git("merge-base", "--is-ancestor", prev, head) is None:
         why = (f"прошлый head {prev[:12]} не предок {head[:12]} (rebase или его нет в git папки — git fetch): дельту не "
                "посчитать")
     elif prev:
+        ren = _review_git("diff", "-z", "--name-only", "--diff-filter=R", "-M", "--no-relative",
+                          "--ignore-submodules=none", "--no-ext-diff", prev, head)
+        ren = "дельту с прошлого head не посчитать" if ren is None else M.DELTA_RENAME if ren else None
         rows = _delta_rows(prev, head)
-        why = M.delta_problem(rows, core=M.window_core)
+        why = ren or M.delta_problem(rows, core=M.window_core)
     lines = sum((a or 0) + (d or 0) for _, a, d in rows or [])
-    tests_ok = rows is not None and M.delta_problem(rows) is None
+    tests_ok = rows is not None and not ren and M.delta_problem(rows) is None
     if why:
         try:
             r = subprocess.run([M.gh_path(), "api", f"repos/{repo}/compare/{base_name}...{head}", "--jq", ".behind_by"],
@@ -524,9 +542,9 @@ def review_delta(args):
               f"{prev} {head}`; «принять» на {prev[:12]} шлюз владельца переносит со свежим «принять» другого argus "
               "(решение при `pantheon merge request`)")
     has_prev = tests_ok and any(r.get("kind") == "tests" and r.get("sha") == prev for r in recs)
-    print("тесты: из чистой копии на head `pantheon outside test --affected "
-          + (f"--base {prev} " if has_prev else "") + "--wait 590`"
-          + (" (дельта от прошлого head с записью тестов)" if has_prev else ""))
+    cmd = _outside_test(prev if has_prev else None)
+    print(f"тесты: из чистой копии на head `{cmd}`"
+          + (" (дельта от прошлого head с записью тестов)" if "--base" in cmd else ""))
     latest = {}
     for r in verdicts:
         latest[M._reviewer(r)] = r

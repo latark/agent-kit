@@ -1690,6 +1690,8 @@ def narrow_map_path(repo):
 # круг полный). DELTA_* и delta_problem — дословно те же в зеркале lib/merge.py (сверяет test_merge)
 DELTA_MAX_LINES = 200
 DELTA_DEPTH = 4
+# переименование в дельте — отказ (Д1 argus #420): git (-M) и GitHub compare (status renamed) находят его по-разному
+DELTA_RENAME = "в дельте переименование — дельтой не засчитать (git и GitHub считают его по-разному): нужен полный круг"
 DELTA_GATE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/guard_rules.py",
                     "plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/review_rules.py")
 
@@ -1734,13 +1736,24 @@ def _numstat(gd, old, new):
     return rows
 
 
+def _rename_problem(gd, old, new):
+    """Переименование в дельте old..new → DELTA_RENAME, сбой git → почему, иначе None (Д1 argus #420): _numstat
+    считает без переименований, а GitHub compare (проход владельца, delta_gh_problem) — с ними; чтобы оба шлюза судили
+    одинаково, дельта с переименованием (git diff -M, как status renamed у GitHub) не годится ни там, ни там."""
+    out = _git_bytes(gd, "diff", "-z", "--name-only", "--diff-filter=R", "-M", "--no-relative",
+                     "--ignore-submodules=none", "--no-ext-diff", old, new)
+    if out is None:
+        return "дельту с прошлого head не посчитать"
+    return DELTA_RENAME if out else None
+
+
 def _delta_link(gd, sha, base, cover, depth):
     """Узкая запись на sha посчитана от прошлого head base (metis-0784) → None или почему нет: base — предок sha,
     дельта base..sha годится для тестов (delta_problem без core), а base покрыт (cover(base, depth) — запись полного
     набора на base или узкая, годная для base сама, до DELTA_DEPTH звеньев)."""
     if _git_code(gd, "merge-base", "--is-ancestor", base, sha) != (0, b""):
         return "база не предок head — дельтой не засчитать (rebase между кругами: нужен полный круг)"
-    why = delta_problem(_numstat(gd, base, sha))
+    why = _rename_problem(gd, base, sha) or delta_problem(_numstat(gd, base, sha))
     if why:
         return why
     if depth <= 0:
@@ -1748,14 +1761,15 @@ def _delta_link(gd, sha, base, cover, depth):
     return cover(base, depth - 1)
 
 
-def _narrow_problem(cwd, repo, sha, base_oid, base, mp, tests=None, depth=DELTA_DEPTH):
+def _narrow_problem(cwd, repo, sha, base_oid, base, mp, tests=None, depth=DELTA_DEPTH, gd=None):
     """Узкая запись (база base, карта mp) годится для head sha PR с base PR base_oid → None или почему нет. Дифф
     раннера — от base: она должна быть единственной merge-base head и base PR (её считает git папки слияния): другая
     база — дифф не тот (ветка от другой ветки, старый origin/main в клоне). Карта — sha256 файла карты в дереве head:
     раннер выбирал файлы по ней, а не по своей старой копии. Git папки — _carry_git (клон repo, полная история).
     tests — записи tests репозитория из журнала: с ними база годится и как прошлый head (дельта, _delta_link,
-    metis-0784), если на нём есть запись полного набора или годная узкая."""
-    gd, why = _carry_git(cwd, repo, base_oid)
+    metis-0784), если на нём есть запись полного набора или годная узкая. gd — git папки, уже найденный звеном выше
+    по цепочке дельт: _carry_git не повторяется на каждом звене (Д3 argus #420)."""
+    gd, why = (gd, None) if gd else _carry_git(cwd, repo, base_oid)
     if why:
         return why
     if _git_bytes(gd, "cat-file", "-e", sha + "^{commit}") is None:
@@ -1769,7 +1783,7 @@ def _narrow_problem(cwd, repo, sha, base_oid, base, mp, tests=None, depth=DELTA_
             mine = [r for r in tests if r["sha"] == prev]
             if any(full_tests_record(repo, r) for r in mine):
                 return None
-            whys = [_narrow_problem(cwd, repo, prev, base_oid, *got, tests, left) for r in mine
+            whys = [_narrow_problem(cwd, repo, prev, base_oid, *got, tests, left, gd) for r in mine
                     for got in [narrow_tests_record(repo, r)] if got] or [f"на {prev[:12]} нет записи тестов"]
             return None if None in whys else whys[-1]
         delta = _delta_link(gd, sha, base, cover, depth) if tests is not None else ""
@@ -2628,6 +2642,7 @@ def _delta_heads(fp, sha, heads):
         if not fp.gd or fp._late():
             break
         if h in fp.allowed and _git_code(fp.gd, "merge-base", "--is-ancestor", h, sha) == (0, b"") \
+                and _rename_problem(fp.gd, h, sha) is None \
                 and delta_problem(_numstat(fp.gd, h, sha), core=_delta_core) is None:
             out.append(h)
     return out

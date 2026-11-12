@@ -32,8 +32,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
      base_tip — как у шлюза; main ушёл вперёд — решение не в счёт) (code_facts): «принять» с head из same
      переносится на SHA (в счёт — последний вердикт рецензента на SHA и этих head после отсечки), а «вернуть» другой
      argus снимает, только если head «вернуть» в differs. Head из delta решения (SHA — мелкая правка поверх него вне
-     ядра, metis-0784): его «принять» переносится, если после него на SHA есть «принять» другого argus (delta_backed) —
-     дельта-круг `pantheon review delta`, в ядре тоже. Решения нет или код не посчитан — строго: другой коммит —
+     ядра, metis-0784): его «принять» переносится по delta_carry — не меньше двух рецензентов, видевших весь код,
+     последним дали «принять», одно «принять» на SHA (дельта-круг `pantheon review delta`, в ядре тоже), и каждый,
+     кто вернул тот head, принял SHA. Решения нет или код не посчитан — строго: другой коммит —
      неизвестный код, «принять» не переносится, «вернуть» не снимается; правило 3 шлюза guard (третий head) проход
      не применяет. «Принять» на другой base PR (metis-0965) и с полем «вернули», которое врёт (metis-0497), не в
      счёт. Проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
@@ -730,6 +731,8 @@ def narrow_map_path(repo):
 # GitHub API (delta_gh_problem), а argus — по решению шлюза guard (поле delta, code_facts)
 DELTA_MAX_LINES = 200
 DELTA_DEPTH = 4
+# переименование в дельте — отказ (Д1 argus #420): git (-M) и GitHub compare (status renamed) находят его по-разному
+DELTA_RENAME = "в дельте переименование — дельтой не засчитать (git и GitHub считают его по-разному): нужен полный круг"
 DELTA_GATE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/guard_rules.py",
                     "plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/review_rules.py")
 
@@ -1003,26 +1006,46 @@ def held_rejects(verdicts, sha, differs=frozenset()):
     return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
 
 
-def reject_floor(verdicts):
+def reject_floor(verdicts, p=None, fresh=frozenset()):
     """Отсечка, как merge_gate._floor шлюза guard: номер последнего «вернуть», которое тот же рецензент не снял
     «принять» на том же head, или -1. «Принять», записанное до неё, не в счёт и на своём head: иначе откат force-push к
-    коду, принятому до «вернуть», прошёл бы по старым «принять» (metis-0465)."""
+    коду, принятому до «вернуть», прошёл бы по старым «принять» (metis-0465). Для переноса дельтой (delta_carry,
+    metis-0784) «вернуть» на прошлом head p снимает и «принять» того же рецензента на head кода sha (fresh): вернувший
+    сам принял исправление. У шлюза guard переноса дельтой нет — там правило прежнее."""
     floor = -1
     for i, r in enumerate(verdicts):
+        heads = {r["sha"], *fresh} if r["sha"] == p else {r["sha"]}
         if r["kind"] == "reject" and not any(a["kind"] == "accept" and _reviewer(a) == _reviewer(r)
-                                             and a["sha"] == r["sha"] for a in verdicts[i + 1:]):
+                                             and a["sha"] in heads for a in verdicts[i + 1:]):
             floor = i
     return floor
 
 
-def delta_backed(verdicts, i, sha):
-    """«Принять» verdicts[i] на прошлом head переносится на sha дельтой (metis-0784): после него на sha записано
-    «принять» другого рецензента — дельту проверил свежий argus. Сверять рецензента не нужно: «принять» того же
-    рецензента на sha позже — его последний вердикт, gate берёт его вместо переносимого (latest по рецензенту), так что
-    в счёт без свежего «принять» другого перенос не попадёт (test_gate_delta: тот же рецензент, двое на прошлом head). Отсечку reject_floor gate
-    применяет к самому переносимому вердикту, а свежее «принять» записано позже него; «вернуть» в силе отсекает
-    held_rejects раньше."""
-    return any(a["kind"] == "accept" and a["sha"] == sha for a in verdicts[i + 1:])
+def delta_carry(verdicts, sha, same, p):
+    """Перенос «принять» с прошлого head p на sha дельтой (metis-0784; sha — мелкая правка поверх p вне ядра, поле
+    delta решения шлюза guard) → засчитанные вердикты или None — перенос не годится. Берётся последний вердикт каждого
+    рецензента на p и на head кода sha (sha и same) после отсечки reject_floor (p, fresh). Годится, если 1) не меньше
+    MIN_ACCEPTS рецензентов, видевших весь код (вердикт на p или на head из same), последним дали «принять»: «принять»
+    только на sha — дельта-круг, полного круга он не заменяет; 2) хотя бы одно последнее «принять» — на head кода sha:
+    дельту проверил argus; 3) каждый, кто вернул p, позже принял head кода sha. Порядок записей «принять» не важен
+    (Б1 argus #420)."""
+    fresh = {sha, *same}
+    floor = reject_floor(verdicts, p, fresh)
+    latest, full = {}, set()
+    for i, r in enumerate(verdicts):
+        if i > floor and (r["sha"] == p or r["sha"] in fresh):
+            latest[_reviewer(r)] = r
+            if r["sha"] != sha:
+                full.add(_reviewer(r))
+    ok = [r for r in latest.values() if r["kind"] == "accept"]
+    if len([r for r in ok if _reviewer(r) in full]) < MIN_ACCEPTS:
+        return None
+    if not any(r["sha"] in fresh for r in ok):
+        return None
+    if not all(any(a["kind"] == "accept" and _reviewer(a) == _reviewer(r) and a["sha"] in fresh
+                   for a in verdicts[i + 1:]) for i, r in enumerate(verdicts) if r["kind"] == "reject" and r["sha"] == p):
+        return None
+    return ok
 
 
 def _view_problem(view, sha):
@@ -1073,13 +1096,17 @@ def gate(repo, pr, sha, view):
     floor = reject_floor(verdicts)
     # «принять» с head того же кода переносится на sha, как в шлюзе guard (_carried, metis-0396): последний вердикт
     # каждого рецензента — на sha и этих head, в счёт — записанные после отсечки. «Принять» на head из delta (sha —
-    # мелкая правка поверх вне ядра, metis-0784) — тоже, если после него на sha есть «принять» другого argus после
-    # отсечки: дельту проверил свежий рецензент, нетронутый код — прежний
+    # мелкая правка поверх вне ядра, metis-0784) — по правилу delta_carry: полный круг на нём и «принять» дельты
     latest = {}
     for i, r in enumerate(verdicts):
-        if r["sha"] == sha or r["sha"] in same or r["sha"] in delta and delta_backed(verdicts, i, sha):
+        if r["sha"] == sha or r["sha"] in same:
             latest[_reviewer(r)] = (i, r)
     counted = [r for i, r in latest.values() if i > floor]
+    for p in delta if len(counted) < MIN_ACCEPTS else ():
+        got = delta_carry(verdicts, sha, same, p)
+        if got and len(got) >= MIN_ACCEPTS:
+            counted = got
+            break
     if len(counted) < MIN_ACCEPTS:
         cut = len(latest) - len(counted)
         moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted})
@@ -1191,10 +1218,10 @@ def delta_gh_problem(repo, sha, base_name, base, recs, depth):
         if not isinstance(f, dict) or not isinstance(f.get("filename"), str):
             rows = None
             break
+        if f.get("status") == "renamed" or isinstance(f.get("previous_filename"), str):
+            return DELTA_RENAME  # как _rename_problem шлюза guard
         n = (f.get("additions"), f.get("deletions")) if isinstance(f.get("patch"), str) else (None, None)
         rows.append((f["filename"], *n))
-        if isinstance(f.get("previous_filename"), str):
-            rows.append((f["previous_filename"], 0, 0))
     why = delta_problem(rows)
     if why:
         return why
