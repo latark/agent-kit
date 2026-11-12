@@ -190,7 +190,7 @@ check("красный полный: причина по файлу в full.jsonl
 with open(r1["log"]) as fh:
     LOG1 = fh.read()
 check("run_failed: настоящий вывод run-tests — ok b–e, FAIL a",
-      O.run_failed(LOG1) == (LABELS[1:], LABELS[:1]), O.run_failed(LOG1))
+      O.run_failed(LOG1) == (LABELS[1:], LABELS[:1], []), O.run_failed(LOG1))
 
 # --- 2. красный дозапуск: упавшие и затронутые, опорой он не станет ---------------------------------------------------
 C2 = commit({"plugins/kit/lib/b.txt": "good2\n"}, "c2: b правка, a ещё красный")
@@ -257,7 +257,7 @@ git("reset", "-q", "--hard", C3)
 # --- 4. вывод дозапуска не сошёлся со списком файлов — записи нет ---------------------------------------------------
 C4 = commit({"plugins/kit/lib/c.txt": "good3\n"}, "c4: c правка")
 _rf = O.run_failed
-O.run_failed = lambda text: (lambda g: g and (g[0] + ["kit/test_zz.py"], g[1]))(_rf(text))
+O.run_failed = lambda text: (lambda g: g and (g[0] + ["kit/test_zz.py"], g[1], g[2]))(_rf(text))
 r4 = run()
 O.run_failed = _rf
 check("дозапуск зелёный, но строки ok — не ровно его файлы: записи tests нет, причина",
@@ -460,7 +460,7 @@ GOOD = ("run-tests: 2 файлов\nok   kit/test_a.py · 0.1 с · провер
         "\n===== kit/test_b.py · код 1 · последние 3 строк =====\nok   kit/test_x.py · 1 с\nFAIL kit/test_y.py · 1 с\n"
         "итого: файлов 9, ok 9, FAIL 0\n\nмедленные: …\nитого: файлов 2, ok 1, FAIL 1; проверок 2; 0 с, воркеров 1\n")
 check("run_failed: строки ok/FAIL из хвоста упавшего не в счёт", O.run_failed(GOOD) == (["kit/test_a.py"],
-                                                                                      ["kit/test_b.py"]),
+                                                                                      ["kit/test_b.py"], []),
       O.run_failed(GOOD))
 check("run_failed: нет итога (прерван) — None", O.run_failed(GOOD.rsplit("итого", 1)[0]) is None)
 check("run_failed: итог не последней строкой — None", O.run_failed(GOOD + "heavy: ещё строка\n") is None)
@@ -475,6 +475,31 @@ check("run_failed: FAIL в итоге больше FAIL-строк при сош
 check("run_failed: один файл и ok, и FAIL — None",
       O.run_failed(GOOD.replace("FAIL kit/test_b.py · 0.1", "FAIL kit/test_a.py · 0.1")) is None)
 check("run_failed: пусто — None", O.run_failed("") is None)
+# карантин раннера (metis-1050): строка «карантин <метка> · …» и «, карантин Q» в итоге; N = ok + FAIL + Q
+QUAR = ("run-tests: 3 файлов\nok   kit/test_a.py · 0.1 с · проверок 1\n"
+        "карантин kit/test_q.py · 0.1 с · проверок 1 · код 1 · задача metis-0989\n"
+        "FAIL kit/test_b.py · 0.1 с · проверок 1 · код 1\n\n===== kit/test_b.py · код 1 · строки не ok: 1 =====\nFAIL b\n"
+        "\n===== kit/test_q.py · карантин, задача metis-0989 · код 1 · строки не ok: 1 =====\nFAIL q\n"
+        "\nмедленные: …\nитого: файлов 3, ok 1, FAIL 1, карантин 1; проверок 3; 0 с, воркеров 1\n")
+check("run_failed: карантин — третьим списком, не ok и не FAIL (metis-1050)",
+      O.run_failed(QUAR) == (["kit/test_a.py"], ["kit/test_b.py"], ["kit/test_q.py"]), O.run_failed(QUAR))
+check("run_failed: карантин с «из кэша» после него — разобран",
+      O.run_failed(QUAR.replace("карантин 1;", "карантин 1, из кэша 4;")) == (["kit/test_a.py"], ["kit/test_b.py"],
+                                                                             ["kit/test_q.py"]))
+check("run_failed: строка карантина есть, а в итоге его нет — None",
+      O.run_failed(QUAR.replace("файлов 3, ok 1, FAIL 1, карантин 1", "файлов 3, ok 1, FAIL 1")) is None)
+check("run_failed: в итоге карантин, а строки нет — None",
+      O.run_failed(QUAR.replace("файлов 3, ok 1, FAIL 1, карантин 1", "файлов 4, ok 1, FAIL 1, карантин 2")) is None)
+check("run_failed: файл и в карантине, и ok — None",
+      O.run_failed(QUAR.replace("карантин kit/test_q.py · 0.1", "карантин kit/test_a.py · 0.1")) is None)
+_load = O.load_state
+O.load_state = lambda: (99.0, 10.0)
+try:
+    QOVER = QUAR.replace("FAIL kit/test_b.py · 0.1 с · проверок 1 · код 1", "FAIL kit/test_b.py · 0.1 с · проверок 1 · таймаут")
+    check("overload_files: таймаут под нагрузкой при упавшем карантине — повтор (метки FAIL без карантина)",
+          O.overload_files(QOVER) == ["kit/test_b.py"], O.overload_files(QOVER))
+finally:
+    O.load_state = _load
 
 # --- 7. run_causes: причина красного по файлу (metis-0696) ----------------------------------------------------------
 CAUSES = ("run-tests: 5 файлов\n"
