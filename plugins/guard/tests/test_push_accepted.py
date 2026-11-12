@@ -455,6 +455,45 @@ def t_light_core(h):
     passed("ядро (merge_gate.py), одно «принять» Opus high: push идёт", case(CORE_FILES, ["high"]))
 
 
+def t_light_head_swap(h):
+    """metis-1065, TOCTOU: файлы PR идут отдельным запросом — после него gh pr view ещё раз. Push в PR между запросами
+    (head другой или changedFiles другие), gh не ответил, время хука кончилось — не лёгкий: одного «принять» Opus high
+    мало, push идёт. Тот же head и число файлов — лёгкий, push остановлен."""
+    s = Push(h)
+    view = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": s.tip, "mergeable": "MERGEABLE",
+            "baseRefOid": tm.BASE, "baseRefName": "main", "changedFiles": len(LIGHT_FILES)}
+
+    def case(after, fits=True):
+        mg = tm._load_merge_gate("merge_gate_swap")
+        views = iter([[dict(view)], after])
+        calls = []
+
+        def gh(args):
+            calls.append(args[:2])
+            if args[0] == "api" and "/files" in args[1]:
+                return [dict(f) for f in LIGHT_FILES]
+            return next(views, None) if args[:2] == ["pr", "view"] else None
+        mg._gh_json = gh
+        left = iter([True, fits])
+        mg._gh_fits = lambda: next(left, False)
+        r = tm.rec("accept", REPO, 7, s.tip)
+        r["models"], r["efforts"] = ["claude-opus-5-5"], ["high"]
+        mg.read_records = lambda: [r]
+        return mg.accepted_push_problem(s.p, "origin", [("HEAD", BRANCH)]), calls
+    why, calls = case([dict(view)])
+    check("head и число файлов те же после списка файлов: лёгкий, push остановлен",
+          why and HINT in why and "(нужно 1)" in why, why)
+    check("gh pr view спрошен второй раз после файлов", calls.count(["pr", "view"]) == 2, calls)
+    other = "f" * 40
+    for name, after, fits in (("head сменился между запросами", [dict(view, headRefOid=other)], True),
+                              ("changedFiles сменилось между запросами", [dict(view, changedFiles=3)], True),
+                              ("changedFiles true вместо числа", [dict(view, changedFiles=True)], True),
+                              ("второй gh pr view не ответил", None, True),
+                              ("время хука кончилось до второго gh pr view", [dict(view)], False)):
+        why, _ = case(after, fits)
+        check(f"{name}: не лёгкий, одного «принять» мало — push идёт", why is None, why)
+
+
 def t_core_count_same():
     """CORE_ACCEPTS проверки push равно MIN_ACCEPTS шлюза владельца (pantheon merge.py): числа не разъехались."""
     want = re.search(r"^MIN_ACCEPTS = (\d+)", open(MERGE_PY, encoding="utf-8").read(), re.M)
@@ -464,7 +503,7 @@ def t_core_count_same():
 
 CASES = [t_accepted_core, t_core_one, t_core_not_opus, t_non_core_one, t_non_core_files_fail, t_reject, t_reject_floor,
          t_off_base_lie, t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url, t_force,
-         t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel, t_light_core]
+         t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel, t_light_core, t_light_head_swap]
 
 
 def main():

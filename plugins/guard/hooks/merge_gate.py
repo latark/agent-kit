@@ -1515,6 +1515,15 @@ def light_accept(r):
             and isinstance(efforts, list) and bool(efforts) and all(e == LIGHT_EFFORT for e in efforts))
 
 
+def light_same_head(view, again, sha):
+    """Список файлов PR — того же head (metis-1065, TOCTOU): REST pulls/N/files не называет коммит, поэтому после него
+    gh pr view ещё раз (again) — head тот же sha и changedFiles те же, что в view до запроса файлов. Иначе push в PR
+    пришёл между запросами: лёгким PR не считается."""
+    count = again.get("changedFiles") if isinstance(again, dict) else None
+    return (isinstance(again, dict) and str(again.get("headRefOid") or "").lower() == sha
+            and isinstance(count, int) and not isinstance(count, bool) and count == view.get("changedFiles"))
+
+
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
@@ -2712,6 +2721,16 @@ def _push_base_merged(d, repo, view, tip, new, bases):
     return old is None or cur is None or old == cur
 
 
+def _light_again(repo, pr, tip, view):
+    """Лёгкий PR ядра в правиле push (metis-1065): файлы шли параллельно с gh pr view, push в PR между запросами дал бы
+    файлы другого head — после них gh pr view ещё раз, head и changedFiles те же (light_same_head). Время хука
+    кончилось или gh не ответил — не лёгкий."""
+    if not _gh_fits():
+        return False
+    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
+    return light_same_head(view, got[0] if isinstance(got, list) and len(got) == 1 else None, tip)
+
+
 def accepted_push_problem(d, remote, pairs):
     """Текст отказа push в принятый PR или None (metis-0794). d — папка git, remote — имя remote из команды или
     @{push}, pairs — [(что отправляется, ветка назначения)] (guard_rules._push_parse)."""
@@ -2759,7 +2778,7 @@ def accepted_push_problem(d, remote, pairs):
             # лёгкий PR ядра (metis-1065): хватает одного «принять» argus Opus с effort high, как в шлюзе владельца
             if n < need and push_accepts(records, repo, pr, tip, True, view, light=True) >= 1:
                 th.join(GH_TIMEOUT)
-                if box and light_pr(box[0], view.get("changedFiles"))[0]:
+                if box and light_pr(box[0], view.get("changedFiles"))[0] and _light_again(repo, pr, tip, view):
                     n, need = push_accepts(records, repo, pr, tip, True, view, light=True), 1
             if n >= need:
                 return (f"Правило push: PR {repo}#{pr} уже принят на {tip[:12]} — «принять» argus {n} (нужно {need}), "

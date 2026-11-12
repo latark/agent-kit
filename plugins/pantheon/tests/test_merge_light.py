@@ -10,6 +10,7 @@ run-tests.py, AGENTS.md, roles/*.tmpl, код с тестом, переимен�
 дословно те же, что в шлюзе guard (merge_gate.py), — сверка по AST.
 """
 import ast
+import json
 import os
 import sys
 
@@ -17,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_merge as tm  # noqa: E402  (Box, check, поддельные gh и окно)
 
 OPUS_HIGH = {"models": ["claude-opus-5-5"], "efforts": ["high"]}
-NAMES = ("light_pr", "light_accept", "LIGHT_EFFORT", "LIGHT_TEST_RE", "LIGHT_DOC_RE", "LIGHT_NOT_RE")
+NAMES = ("light_pr", "light_accept", "light_same_head", "LIGHT_EFFORT", "LIGHT_TEST_RE", "LIGHT_DOC_RE", "LIGHT_NOT_RE")
 
 
 def added(path, n=5):
@@ -125,6 +126,50 @@ def test_light_files_missing():
              (r.returncode, r.stdout, r.stderr))
     b.run()
     tm.check("список неполон: проход не сливает и окна не показывает", not b.windows() and not b.merges(), b.outs[-1])
+
+
+# обёртка поддельного gh: после первого запроса REST pulls/N/files подменяет ответ gh pr view файлом rec/gh-view-after.json
+# — push в PR, пока шлюз читал список файлов (TOCTOU, metis-1065)
+SWAP_GH = r'''
+import os, subprocess, sys
+rec = os.environ["FAKE_REC"]
+r = subprocess.run([os.path.join(os.path.dirname(os.path.abspath(__file__)), "gh-real")] + sys.argv[1:])
+after = os.path.join(rec, "gh-view-after.json")
+if sys.argv[1:2] == ["api"] and "/files" in sys.argv[2] and os.path.exists(after):
+    os.replace(after, os.path.join(rec, "gh-view.json"))
+sys.exit(r.returncode)
+'''
+
+
+def swap_box(after):
+    """Лёгкий PR и одно «принять» Opus high; after — новый ответ gh pr view после списка файлов (None — сбой gh)."""
+    b = box([added("plugins/guard/tests/test_new.py")])
+    os.replace(os.path.join(b.bin, "gh"), os.path.join(b.bin, "gh-real"))
+    tm.script(os.path.join(b.bin, "gh"), SWAP_GH)
+    with open(os.path.join(b.rec, "gh-view.json")) as fh:
+        view = json.load(fh)
+    with open(os.path.join(b.rec, "gh-view-after.json"), "w") as fh:
+        fh.write("не json" if after is None else json.dumps(dict(view, **after)))
+    return b
+
+
+def test_light_head_swap():
+    """После списка файлов gh pr view ещё раз: head или changedFiles сменились — не лёгкий, нужно 2; gh не ответил —
+    заявка ждёт; всё то же — лёгкий (контроль обёртки)."""
+    b = swap_box({})
+    r = b.request()
+    tm.check("head и число файлов те же после списка файлов: заявка стоит без ожидания (лёгкий, одно «принять»)",
+             r.returncode == 0 and b.req() is not None and "закончатся" not in r.stdout, (r.stdout, r.stderr))
+    for name, after, why in (("head сменился между запросами", {"headRefOid": "f" * 40}, "сменились"),
+                             ("changedFiles сменилось между запросами", {"changedFiles": 2}, "сменились")):
+        b = swap_box(after)
+        r = b.request()
+        tm.check(f"{name}: не лёгкий — отказ «1 из 2», «{why}»",
+                 r.returncode != 0 and b.req() is None and "1 из 2" in r.stderr and why in r.stderr, r.stderr)
+    b = swap_box(None)
+    r = b.request()
+    tm.check("второй gh pr view не ответил: заявка ждёт сверки head, а не проходит",
+             r.returncode == 0 and "при сверке head" in r.stdout and not b.merges(), (r.stdout, r.stderr))
 
 
 def test_light_same_as_guard():

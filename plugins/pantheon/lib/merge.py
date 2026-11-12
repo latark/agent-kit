@@ -503,6 +503,15 @@ def light_accept(r):
             and isinstance(efforts, list) and bool(efforts) and all(e == LIGHT_EFFORT for e in efforts))
 
 
+def light_same_head(view, again, sha):
+    """Список файлов PR — того же head (metis-1065, TOCTOU): REST pulls/N/files не называет коммит, поэтому после него
+    gh pr view ещё раз (again) — head тот же sha и changedFiles те же, что в view до запроса файлов. Иначе push в PR
+    пришёл между запросами: лёгким PR не считается."""
+    count = again.get("changedFiles") if isinstance(again, dict) else None
+    return (isinstance(again, dict) and str(again.get("headRefOid") or "").lower() == sha
+            and isinstance(count, int) and not isinstance(count, bool) and count == view.get("changedFiles"))
+
+
 # номер версии поднимает workflow release на main после слияния (metis-0512) — как _version_problem шлюза guard:
 # совпадение ответов на общих случаях сверяет test_merge. Проход сливает PR ядра мимо хука guard, поэтому сверка здесь
 PLUGIN_MANIFEST_RE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
@@ -1095,6 +1104,14 @@ def gate(repo, pr, sha, view):
                 return "wait", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}: список файлов PR не "
                                 "получен или неполон — лёгкий ли PR ядра (хватило бы 1 argus Opus high), не проверить")
             ok, what = light_pr(raw, view.get("changedFiles"))
+            if ok:   # файлы взяты после view: push в PR между запросами — файлы другого head (TOCTOU), сверка заново
+                again = pr_view(repo, pr)
+                if not isinstance(again, dict):
+                    return "wait", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}: gh pr view не "
+                                    "ответил при сверке head после списка файлов — лёгкий ли PR ядра, не проверить")
+                ok = light_same_head(view, again, sha)
+                what = what if ok else ("head или число файлов PR сменились, пока шлюз читал список файлов, — "
+                                        "файлы могли быть другого коммита")
             need, light = (1, f" (лёгкий PR ядра: только добавленные тесты/документы, {what} — 1 argus Opus high)") \
                 if ok else (MIN_ACCEPTS, f"; PR ядра не лёгкий: {what}")
     if len(counted) < need:
