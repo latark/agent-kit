@@ -63,6 +63,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «Лимит» для сводки (lib/night.py)
   pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса: ночь
                                         открывается только по вашему «Да — ночь <дата>», sha256 пачки сверяется
+  pantheon limit reset-mark             отметка досрочного сброса недели (metis-1067): замеры недели до неё не
+                                        учитываются; только ваш терминал, из окна роли — отказ (lib/night.py)
   pantheon read request|run|status|cancel   чтение переписки по заявке (metis-0267, 0508, lib/read.py): папка, чаты
                                         по имени, @имени или ссылке → проход находит чаты → ваше «да» на [read-<rid>]
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
@@ -1457,10 +1459,11 @@ def tick():
 
 
 def release_ticks(t):
-    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска). Сбой одного не
-    останавливает тик и второго."""
+    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска), затем ночной
+    полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
-                           ("map-tick-crash", "карта тестов", map_tick_mod)):
+                           ("map-tick-crash", "карта тестов", map_tick_mod),
+                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod)):
         try:
             mod().tick(t)
         except Exception as e:
@@ -7128,6 +7131,21 @@ def map_tick_mod():
     return _MAP_TICK
 
 
+_NIGHTLY_TICK = None
+
+
+def nightly_tick_mod():
+    """lib/nightly_tick.py — ночной полный набор тестов на origin/main (metis-1050)."""
+    global _NIGHTLY_TICK
+    if _NIGHTLY_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_nightly_tick", os.path.join(LIB, "nightly_tick.py"))
+        _NIGHTLY_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NIGHTLY_TICK)
+        _NIGHTLY_TICK.set_core(sys.modules[__name__])
+    return _NIGHTLY_TICK
+
+
 _BROWSER = None
 
 
@@ -9168,6 +9186,8 @@ def main(argv):
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":
         return night_mod().main(rest)
+    if cmd == "limit":
+        return night_mod().limit_main(rest)
     if cmd == "read":
         return read_mod().main(rest)
     if cmd == "merge":

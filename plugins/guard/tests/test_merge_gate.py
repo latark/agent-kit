@@ -2602,9 +2602,8 @@ def t_narrow_gate_unit(h):
           why is None and len(notes) == 1 and "засчитан местный узкий прогон" in notes[0] and "файлов 2" in notes[0],
           (why, notes))
     why, notes = bp([good], narrow=None)
-    check("_billing_problem: PR ядра (narrow None), узкая запись → отказ «задевает ядро», команда FULL_TESTS",
-          bool(why) and "PR задевает ядро защит — засчитывается только полный набор" in why
-          and "pantheon review test -- heavy" in why and not notes, why)
+    check("_billing_problem: без папки слияния (narrow None) узкая запись не сверить → отказ, команда FULL_TESTS",
+          bool(why) and "задевает ядро" not in why and "pantheon review test -- heavy" in why and not notes, why)
     why, _ = bp([dict(good, map="0" * 64)])
     check("_billing_problem: узкая запись с чужой картой → отказ с причиной и подсказкой outside --affected",
           bool(why) and "Узкая запись есть, но не засчитана: карта в записи не та" in why
@@ -2617,13 +2616,13 @@ def t_narrow_gate_unit(h):
     why, notes = bp([dict(good, map="0" * 64), good])
     check("_billing_problem: одна узкая не годится, другая годится → пропуск", why is None and notes, (why, notes))
     why, notes = bp([full_rec(repo, H)], narrow=None)
-    check("_billing_problem: полный набор у PR ядра → пропуск, как раньше",
+    check("_billing_problem: полный набор без папки слияния → пропуск, как раньше",
           why is None and "запись полного набора" in notes[0], (why, notes))
     why, _ = bp([])
     check("_billing_problem: записей нет, PR вне ядра → подсказка outside --affected без «не засчитана»",
           bool(why) and "pantheon outside test --affected" in why and "не засчитана" not in why, why)
     why, _ = bp([], narrow=None)
-    check("_billing_problem: записей нет, PR ядра → без подсказки --affected", bool(why) and "--affected" not in why, why)
+    check("_billing_problem: записей нет, без папки слияния → без подсказки --affected", bool(why) and "--affected" not in why, why)
     why, _ = bp([narrow_rec(H, m["X"])], base_oid=m["M"])
     check("_billing_problem: база записи не merge-base → отказ «посчитан от» и «git fetch»",
           bool(why) and "узкий набор посчитан от" in why and "git fetch" in why, why)
@@ -2651,7 +2650,7 @@ def t_narrow_gate(h):
                "нет записи тестов на latark/agent-kit@")
     h.seed(rec("tests", "latark/agent-kit", None, H, "dev-opus"))
     merge_case("вне ядра, на head запись не полного и не узкого набора — отказ с подсказкой outside --affected",
-               h.pre(cmd, pdir=kit), False, "PR не задевает ядро — годится и узкий прогон: из корня чистой копии на "
+               h.pre(cmd, pdir=kit), False, "Годится и узкий прогон: из корня чистой копии на "
                "этом коммите `pantheon outside test --affected --wait 590`")
     h.seed(narrow_rec(H, m["X"]))
     merge_case("вне ядра, база записи — не merge-base head и main — отказ", h.pre(cmd, pdir=kit), False,
@@ -2666,8 +2665,8 @@ def t_narrow_gate(h):
           decision(r)[0] == "allow" and "засчитан местный узкий прогон" in msg, r.stdout + r.stderr)
     view(["README.md", "plugins/guard/hooks/merge_gate.py"])
     h.approve(f"{ts()} merge-approve latark/agent-kit#7 {H}")
-    merge_case("ядро с Touch ID, узкая запись — отказ «только полный набор»", h.pre(cmd, pdir=kit), False,
-               "PR задевает ядро защит — засчитывается только полный набор")
+    merge_case("ядро с Touch ID, узкая запись на head от merge-base — проходит (metis-1050: полный набор ночью)",
+               h.pre(cmd, pdir=kit), True)
     h.seed(full_rec("latark/agent-kit", H))
     merge_case("ядро с Touch ID, есть и полный набор — пропуск", h.pre(cmd, pdir=kit), True)
     shutil.rmtree(os.path.dirname(h.records))
@@ -2678,64 +2677,18 @@ def t_narrow_gate(h):
 
 
 def t_batch_full(h):
-    """metis-0758: PR пачки (ветка batch/<story>, [zeus-fast-2d]: один полный набор на пачку) — тесты только по
-    записи полного набора FULL_TESTS на head, и при зелёном CI: любая другая запись tests (узкая) не в счёт. Не пачка
-    или репозиторий без FULL_TESTS — любая запись, как раньше."""
+    """metis-1050 (решение владельца 09.11; было metis-0758): PR пачки (ветка batch/<story>) проверяется как любой
+    другой — при зелёном CI хватает любой записи tests на head, полного набора не требуется (он идёт ночью на main)."""
     kit, sha = "projects/agent-kit", h.sha["agent-kit"]
     cmd = f"gh pr merge 7 --match-head-commit {sha}"
     h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
-    merge_case("пачка: ветка не batch/, CI зелёный, запись не полного набора — проходит, как раньше",
-               h.pre(cmd, pdir=kit), True)
+    merge_case("пачка: ветка не batch/, CI зелёный, запись не полного набора — проходит", h.pre(cmd, pdir=kit), True)
     h.ci([AFFECTED, TRACES], name="agent-kit", headRefName="batch/metis-0754")
-    why = (f"PR пачки (ветка batch/metis-0754): засчитывается только запись полного набора тестов (FULL_TESTS) на "
-           f"{sha[:12]}, а её нет")
-    merge_case("пачка: batch/, CI зелёный, запись не полного набора — отказ с причиной", h.pre(cmd, pdir=kit), False,
-               why)
-    merge_case("пачка: отказ называет команду записи", h.pre(cmd, pdir=kit), False, "`pantheon outside test --wait 590`")
-    h.seed(full_rec("latark/agent-kit", "e" * 40), full_rec("latark/tg-read", sha),
-           full_rec("latark/agent-kit", sha, cmd=FULL_TESTS_CMD + " && true"),
-           full_rec("latark/agent-kit", sha, cmd=FULL_TESTS_CMD.replace("plugins/project-tools", "")))
-    merge_case("пачка: полный набор на другом SHA, другого репозитория, с хвостом или неполный — отказ",
-               h.pre(cmd, pdir=kit), False, why)
-    h.seed(full_rec("latark/agent-kit", sha))
-    merge_case("пачка: запись полного набора на head — проходит", h.pre(cmd, pdir=kit), True)
-    h.reset()
-    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
-    h.ci([AFFECTED, TRACES], name="agent-kit", headRefName="fix/batch/metis-0754")
-    merge_case("пачка: batch/ не в начале ветки — не пачка, проходит", h.pre(cmd, pdir=kit), True)
-    # репозиторий без строки FULL_TESTS: полного набора не задано — правило не действует, как раньше
-    tsha = h.sha["tg-read"]
-    h.seed(rec("tests", "latark/tg-read", None, tsha, "dev-opus"), rec("accept", "latark/tg-read", 3, tsha))
-    h.ci(h.view["tg-read"].get("statusCheckRollup"), name="tg-read", headRefName="batch/x-0001")
-    merge_case("пачка: tg-read (нет FULL_TESTS) — любая запись, проходит", h.pre(f"gh pr merge 3 --match-head-commit "
-                                                                                   f"{tsha}"), True)
-
-
-def t_batch_unit(h):
-    """metis-0758: batch_tests_problem напрямую — каждая ветка."""
+    merge_case("пачка: batch/, CI зелёный, запись не полного набора — проходит (metis-1050)", h.pre(cmd, pdir=kit),
+               True)
     mg = _load_merge_gate("merge_gate_batch")
-    sha = "a" * 40
-    full = full_rec("latark/agent-kit", sha)
-    view = {"headRefName": "batch/metis-0754"}
-    P = mg.batch_tests_problem
-    check("batch: не пачка — None", P("latark/agent-kit", sha, {"headRefName": "feat"}, []) is None)
-    check("batch: ветка не строка, view не словарь — None",
-          P("latark/agent-kit", sha, {"headRefName": None}, []) is None and P("latark/agent-kit", sha, None, []) is None)
-    check("batch: репозиторий без FULL_TESTS — None", P("latark/tg-read", sha, view, []) is None)
-    check("batch: запись полного набора на sha — None", P("latark/agent-kit", sha, view, [full]) is None)
-    check("batch: регистр и владелец репозитория не важны",
-          P("X/Agent-Kit", sha, view, [dict(full, repo=["x/AGENT-KIT"])]) is None)
-    got = P("latark/agent-kit", sha, view, [])
-    check("batch: записей нет — причина с веткой и SHA", isinstance(got, str) and "batch/metis-0754" in got
-          and sha[:12] in got, got)
-    bad = [dict(full, kind="accept"), dict(full, sha="b" * 40), dict(full, repo="latark/agent-kit"),
-           dict(full, repo=["latark/tg-read"]), dict(full, cmd="pantheon review test -- python3 -I x.py"), "мусор"]
-    check("batch: не tests, другой SHA, repo не список, другой репозиторий, другая команда, не словарь — причина",
-          all(isinstance(P("latark/agent-kit", sha, view, [b]), str) for b in bad),
-          [P("latark/agent-kit", sha, view, [b]) for b in bad])
-    check("BATCH_BRANCH — приставка ветки lib/batch.py", mg.BATCH_BRANCH == "batch/"
-          and 'return "batch/" + sid' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(GUARD))),
-                                                             "pantheon", "lib", "batch.py"), encoding="utf-8").read())
+    check("metis-1050: правила «пачке — только полный набор» больше нет",
+          not hasattr(mg, "batch_tests_problem") and not hasattr(mg, "BATCH_BRANCH"))
 
 
 def t_ci_verdict_unit(h):
@@ -6047,7 +6000,7 @@ CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_fu
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_criteria, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
-         t_ci_required, t_batch_full, t_batch_unit, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
+         t_ci_required, t_batch_full, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_narrow_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_returned_unit, t_returned_record, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_request_decision, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_lists_unit, t_core_sandbox]

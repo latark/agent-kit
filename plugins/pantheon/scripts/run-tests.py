@@ -70,7 +70,7 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 сигнал дальше, не оставляют сирот. Границы: внук, который сам ушёл в свою сессию (setsid), из группы файла выпадает,
 и killpg его не достаёт; SIGKILL самому раннеру обработать нельзя — идущие файлы тогда доживают свой таймаут.
 
-Итог: строка на каждый файл по мере готовности (ok / FAIL, время, число проверок), затем выводы упавших файлов
+Итог: строка на каждый файл по мере готовности (ok / FAIL / карантин — файл из QUARANTINE упал, код не портит; время, число проверок), затем выводы упавших файлов
 (все строки, кроме `ok` и пустых: упавшие проверки, трассировка и итог видны, где бы они ни были; больше NOT_OK_MAX —
 начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и последняя строка — файлов,
 ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
@@ -151,6 +151,14 @@ NO_SUMMARY = frozenset({
 # (python:3.14, не root, zip как на ubuntu-latest): остальные файлы проходят с заглушками STUBS.
 SKIP_NOT_MAC = {
     "pantheon/test_setup.py": ("установщик pantheon-setup поддерживает только macOS", None),
+}
+# Карантин (metis-1050, решение владельца 09.11): файлы, которые падают только под нагрузкой полного набора и
+# зелёные отдельно. Их падение печатается строкой `карантин <метка> · <причина> · задача <id>` и выводом в итоге, но
+# код прогона не портит: нестабильный тест не держит слияние. У каждого — задача на починку; починили — убрать из
+# списка. Большие файлы ядра (test_guard, test_hookd, test_outside) сюда целиком не кладут: их настоящие падения
+# тогда тоже прошли бы молча.
+QUARANTINE = {
+    "pantheon/test_outside_idle.py": "metis-0989",  # «без ps молчащий sleep гасится по тишине» под нагрузкой
 }
 # Окно роли (metis-0773): песочница режет запись `.claude/agents` и `.git/{config,hooks}` под папкой tmp кэша окна
 # (PANTHEON_TMP), где TMPDIR раннера. Эти файлы строят в своих временных папках поддельный HOME с ролями и репозитории
@@ -1124,8 +1132,9 @@ def main(argv):
 
 
 def report(job, log_dir):
-    mark = "ok  " if job.ok else "FAIL"
-    why = "" if job.ok else f" · {job.why}"
+    task = None if job.ok else QUARANTINE.get(job.label)
+    mark = "ok  " if job.ok else "карантин" if task else "FAIL"
+    why = "" if job.ok else f" · {job.why}" + (f" · задача {task}" if task else "")
     print(f"{mark} {job.label} · {job.sec:.1f} с · проверок {job.n}{why}", flush=True)
     if log_dir:
         with open(os.path.join(log_dir, job.label.replace("/", "__") + ".log"), "w") as fh:
@@ -1143,10 +1152,12 @@ def not_ok(out, limit=NOT_OK_MAX):
 
 
 def summary(done, total_files, n, sec, skipped=0, window_skipped=0, cached=0):
-    bad = [j for j in done if not j.ok]
-    for j in bad:
+    bad = [j for j in done if not j.ok and j.label not in QUARANTINE]
+    quar = [j for j in done if not j.ok and j.label in QUARANTINE]
+    for j in bad + quar:
         lines, total = not_ok(j.out)
-        print(f"\n===== {j.label} · {j.why} · строки не ok: {total} =====")
+        tag = f"карантин, задача {QUARANTINE[j.label]} · " if j in quar else ""
+        print(f"\n===== {j.label} · {tag}{j.why} · строки не ok: {total} =====")
         print("\n".join(lines))
         # где файл остановился (таймаут, гибель посреди строк ok) — последние строки, если ими список не кончается
         tail = [ln.rstrip() for ln in ANSI.sub("", j.out).splitlines() if ln.strip()][-TAIL:]
@@ -1156,8 +1167,9 @@ def summary(done, total_files, n, sec, skipped=0, window_skipped=0, cached=0):
     slow = sorted(done, key=lambda j: -j.sec)[:5]
     print("\nмедленные: " + ", ".join(f"{j.label} {j.sec:.0f} с" for j in slow))
     checks_sum = sum(j.n for j in done)
-    skip = (f", из кэша {cached}" if cached else "") + (f", пропущено {skipped}" if skipped else "")
-    print(f"итого: файлов {total_files}, ok {len(done) - len(bad)}, FAIL {len(bad)}{skip}; проверок {checks_sum}; "
+    skip = (f", карантин {len(quar)}" if quar else "") + (f", из кэша {cached}" if cached else "") \
+        + (f", пропущено {skipped}" if skipped else "")
+    print(f"итого: файлов {total_files}, ok {len(done) - len(bad) - len(quar)}, FAIL {len(bad)}{skip}; проверок {checks_sum}; "
           f"{sec:.0f} с, воркеров {n}", flush=True)
     if bad or len(done) != total_files:
         return 1
