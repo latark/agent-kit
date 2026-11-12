@@ -428,6 +428,33 @@ def t_files_parallel(h):
     check("gh pr view дождался запроса файлов (запросы параллельно)", waited == [True], waited)
 
 
+LIGHT_FILES = [{"filename": "plugins/guard/tests/test_new.py", "status": "added", "additions": 9, "deletions": 0},
+               {"filename": "README.md", "status": "modified", "additions": 1, "deletions": 1}]
+
+
+def t_light_core(h):
+    """metis-1065: лёгкий PR ядра (только добавленные тесты и README) — хватает одного «принять» Opus с effort high,
+    как в шлюзе владельца: push остановлен. Effort medium, без efforts, не лёгкий PR — нужно два, push идёт."""
+    def case(files, efforts):
+        h.reset()
+        s = Push(h)
+        s.pr(files)
+        r = tm.rec("accept", REPO, 7, s.tip)
+        r["models"] = ["claude-opus-5-5"]
+        if efforts is not None:
+            r["efforts"] = efforts
+        h.seed(r)
+        return s.push()
+    got = case(LIGHT_FILES, ["high"])
+    stopped("лёгкий PR ядра, одно «принять» Opus high: push остановлен", got)
+    check("лёгкий PR ядра: нужно 1", "argus 1 (нужно 1)" in got[1], got)
+    passed("лёгкий PR ядра, одно «принять» Opus medium: push идёт", case(LIGHT_FILES, ["medium"]))
+    passed("лёгкий PR ядра, одно «принять» без efforts: push идёт", case(LIGHT_FILES, None))
+    heavy = [dict(LIGHT_FILES[0], deletions=1), LIGHT_FILES[1]]
+    passed("удалённая строка в тесте — не лёгкий, одно «принять» Opus high: push идёт", case(heavy, ["high"]))
+    passed("ядро (merge_gate.py), одно «принять» Opus high: push идёт", case(CORE_FILES, ["high"]))
+
+
 def t_core_count_same():
     """CORE_ACCEPTS проверки push равно MIN_ACCEPTS шлюза владельца (pantheon merge.py): числа не разъехались."""
     want = re.search(r"^MIN_ACCEPTS = (\d+)", open(MERGE_PY, encoding="utf-8").read(), re.M)
@@ -437,7 +464,7 @@ def t_core_count_same():
 
 CASES = [t_accepted_core, t_core_one, t_core_not_opus, t_non_core_one, t_non_core_files_fail, t_reject, t_reject_floor,
          t_off_base_lie, t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url, t_force,
-         t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel]
+         t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel, t_light_core]
 
 
 def main():

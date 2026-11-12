@@ -294,6 +294,15 @@ def run_all(tmp):
     r = pantheon("review", "status", "latark/agent-kit", "40")
     check("status: репозиторий metis-pantheon в [merge_repos] — строка «для PR ядра» на месте",
           "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in r.stdout, r.stdout)
+    # metis-1065: одно «принять» на Opus в репозитории ядра — строка о лёгком PR и число «принять» Opus с effort high
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(dict(v("accept", S5, "llllllll01", pr=44), models=["claude-opus-5-5"], efforts=["high"]))
+                 + "\n" + json.dumps(dict(v("accept", S5, "mmmmmmmm01", pr=45), models=["claude-opus-5-5"],
+                                          efforts=["medium"])) + "\n")
+    for pr, n in (("44", 1), ("45", 0)):
+        r = pantheon("review", "status", "latark/agent-kit", pr)
+        check(f"1065: status #{pr} — одно «принять» на Opus: лёгкому PR ядра хватит 1 Opus high, таких {n}",
+              "нужно 2 «принять» на Opus, лёгкому" in r.stdout and f"с effort high, таких {n}" in r.stdout, r.stdout)
     os.remove(os.path.join(tmp, ".claude", "pantheon", "policy.toml"))
     # тот же журнал — шлюз владельца merge.gate (общее правило review_accept_counts): Sonnet по транскрипту не в счёт
     import importlib.util as _ilu

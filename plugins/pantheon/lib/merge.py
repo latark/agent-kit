@@ -451,6 +451,58 @@ def pr_files(repo, pr, view, raw=None):
     return paths
 
 
+# лёгкий PR ядра (metis-1065, решение владельца 12.11, Р2): хватает одного «принять» argus на Opus с effort high вместо
+# двух, если по записям REST pulls/N/files (status, deletions, filename, previous_filename — не по тексту PR) в нём
+# только добавленные строки тестов и документы, которые не инструкции агентам. Список белый: тест — файл в
+# plugins/<плагин>/tests/, добавлен или правлен без удалённых строк; документ — README*.md (любой регистр) или
+# drafts/<имя>.md. Инструкции агентам и пропуски раннера (LIGHT_NOT_RE: папки roles, skills, agents, commands, hooks,
+# template, packs, *prompts и любая с точкой в начале, AGENTS.md, CLAUDE.md, SKILL.md, *.tmpl, run-tests.py) — не
+# лёгкий при любом пути, как и удаление, переименование, копирование, пустой или неполный список. Текст LIGHT_*,
+# light_pr и light_accept в merge.py и merge_gate.py совпадает дословно — сверяет test_merge (AST)
+LIGHT_EFFORT = "high"
+LIGHT_TEST_RE = re.compile(r"plugins/[a-z0-9_-]+/tests/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+LIGHT_DOC_RE = re.compile(r"(?:(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*readme[A-Za-z0-9_.-]*|drafts/[A-Za-z0-9_-]"
+                          r"[A-Za-z0-9_.-]*)\.md", re.I)
+LIGHT_NOT_RE = re.compile(r"(?:^|/)(?:\.|(?:roles|skills|agents|commands|hooks|templates?|packs|[a-z_-]*prompts?)/)"
+                          r"|(?:^|/)(?:agents|claude|skill)\.md$|\.tmpl(?:\.|$)|(?:^|/)run-tests\.py$", re.I)
+
+
+def light_pr(files, count):
+    """Лёгкий ли PR ядра (metis-1065): (True, сколько тестов и документов) или (False, почему нет). files — записи
+    REST pulls/N/files, count — changedFiles из gh pr view: список не получен, пуст или неполон — не лёгкий."""
+    if not isinstance(files, list) or not files or not isinstance(count, int) or isinstance(count, bool) \
+            or len(files) != count or not all(isinstance(f, dict) for f in files):
+        return False, "список файлов PR не получен, пуст или неполон"
+    tests = docs = 0
+    for f in files:
+        name, status, cut = f.get("filename"), f.get("status"), f.get("deletions")
+        if not isinstance(name, str) or not name:
+            return False, "у файла PR нет имени"
+        if f.get("previous_filename") is not None or status not in ("added", "modified"):
+            return False, f"{name} — {status}: удаление, переименование и копирование не лёгкие"
+        if LIGHT_NOT_RE.search(name):
+            return False, f"{name} — инструкция агентам или пропуски раннера тестов"
+        if LIGHT_TEST_RE.fullmatch(name) and isinstance(cut, int) and not isinstance(cut, bool) and cut == 0:
+            tests += 1
+        elif LIGHT_DOC_RE.fullmatch(name):
+            docs += 1
+        elif LIGHT_TEST_RE.fullmatch(name):
+            return False, f"{name} — в тесте удалены строки ({cut})"
+        else:
+            return False, f"{name} — не тест и не документ (README*.md, drafts/*.md)"
+    return True, f"тестов {tests}, документов {docs}"
+
+
+def light_accept(r):
+    """«Принять» в счёт на лёгком PR ядра (metis-1065): хук guard нашёл транскрипт argus, модели в нём — только
+    claude-opus, effort запросов — только high (поля models и efforts). Поля нет (запись до metis-1065, транскрипта
+    нет) или список пуст — не в счёт."""
+    models, efforts = r.get("models"), r.get("efforts")
+    return (isinstance(models, list) and bool(models)
+            and all(isinstance(m, str) and m.startswith("claude-opus") for m in models)
+            and isinstance(efforts, list) and bool(efforts) and all(e == LIGHT_EFFORT for e in efforts))
+
+
 # номер версии поднимает workflow release на main после слияния (metis-0512) — как _version_problem шлюза guard:
 # совпадение ответов на общих случаях сверяет test_merge. Проход сливает PR ядра мимо хука guard, поэтому сверка здесь
 PLUGIN_MANIFEST_RE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
@@ -1031,10 +1083,24 @@ def gate(repo, pr, sha, view):
         if r["sha"] == sha or r["sha"] in same:
             latest[_reviewer(r)] = (i, r)
     counted = [r for i, r in latest.values() if i > floor]
-    if len(counted) < MIN_ACCEPTS:
+    # лёгкий PR ядра (metis-1065): одного «принять» хватает, если оно от argus Opus с effort high, а дифф PR — только
+    # добавленные тесты и документы (light_pr по REST pulls/N/files). Файлы не получены — ждём, а не пропуск
+    need, light = MIN_ACCEPTS, ""
+    if 0 < len(counted) < MIN_ACCEPTS:
+        light = ("; одного хватает лёгкому PR ядра (только добавленные тесты и документы), но лишь от argus Opus с "
+                 "effort high по транскрипту (поле efforts) — такого нет")
+        if any(light_accept(r) for r in counted):
+            raw = []
+            if pr_files(repo, pr, view, raw) is None:
+                return "wait", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}: список файлов PR не "
+                                "получен или неполон — лёгкий ли PR ядра (хватило бы 1 argus Opus high), не проверить")
+            ok, what = light_pr(raw, view.get("changedFiles"))
+            need, light = (1, f" (лёгкий PR ядра: только добавленные тесты/документы, {what} — 1 argus Opus high)") \
+                if ok else (MIN_ACCEPTS, f"; PR ядра не лёгкий: {what}")
+    if len(counted) < need:
         cut = len(latest) - len(counted)
         moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same)
-        return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}"
+        return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}" + light
                         + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
                            if cut else "")
                         + (f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
@@ -1048,7 +1114,7 @@ def gate(repo, pr, sha, view):
     state, why = billing_verdict(repo, sha, recs, runs, required, state, why, view.get("baseRefName"))
     if state != "ok":
         return state, why
-    return "ok", f"argus ×{len(latest)} ✓, {why}{warn}"
+    return "ok", f"argus ×{len(latest)} ✓{light if need < MIN_ACCEPTS else ''}, {why}{warn}"
 
 
 def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None):
