@@ -1457,10 +1457,11 @@ def tick():
 
 
 def release_ticks(t):
-    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска). Сбой одного не
-    останавливает тик и второго."""
+    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска), затем ночной
+    полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
-                           ("map-tick-crash", "карта тестов", map_tick_mod)):
+                           ("map-tick-crash", "карта тестов", map_tick_mod),
+                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod)):
         try:
             mod().tick(t)
         except Exception as e:
@@ -7126,6 +7127,21 @@ def map_tick_mod():
         spec.loader.exec_module(_MAP_TICK)
         _MAP_TICK.set_core(sys.modules[__name__])
     return _MAP_TICK
+
+
+_NIGHTLY_TICK = None
+
+
+def nightly_tick_mod():
+    """lib/nightly_tick.py — ночной полный набор тестов на origin/main (metis-1050)."""
+    global _NIGHTLY_TICK
+    if _NIGHTLY_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_nightly_tick", os.path.join(LIB, "nightly_tick.py"))
+        _NIGHTLY_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NIGHTLY_TICK)
+        _NIGHTLY_TICK.set_core(sys.modules[__name__])
+    return _NIGHTLY_TICK
 
 
 _BROWSER = None

@@ -150,6 +150,20 @@ if sys.argv[1] == "api" and "/git/ref/heads/" in sys.argv[2]:
     print(json.dumps({"ref": "refs/heads/" + sys.argv[2].split("/git/ref/heads/")[1],
                       "object": {"sha": open(t).read().strip() if os.path.exists(t) else "b" * 40, "type": "commit"}}))
     sys.exit(0)
+if sys.argv[1] == "api" and "/compare/" in sys.argv[2]:
+    # merge-base head и base (narrow_gh_problem, metis-1050): rec/gh-mb — SHA (по умолчанию c×40); gh-mb-fail — сбой
+    if os.path.exists(os.path.join(rec, "gh-mb-fail")):
+        sys.exit(1)
+    t = os.path.join(rec, "gh-mb")
+    print(open(t).read().strip() if os.path.exists(t) else "c" * 40)
+    sys.exit(0)
+if sys.argv[1] == "api" and "/contents/" in sys.argv[2]:
+    # сырой файл карты в дереве head (narrow_gh_problem, metis-1050): rec/gh-map; нет файла — код 1
+    t = os.path.join(rec, "gh-map")
+    if not os.path.exists(t):
+        sys.exit(1)
+    sys.stdout.write(open(t).read())
+    sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
     p = one("gh-files.jsonl", sys.argv[2].split("/pulls/")[1].split("/")[0])
     if not os.path.exists(p):
@@ -467,45 +481,56 @@ def test_gate_rechecked():
 
 
 def test_gate_batch():
-    """metis-0758: PR пачки (ветка batch/<story>) — тесты только по записи полного набора FULL_TESTS на head, и при
-    зелёном CI, как в шлюзе guard (batch_tests_problem); не пачка — любая запись tests, как раньше."""
-    def box(branch, cmd=None):
-        b = Box()
-        b.records = []
-        b.add("tests", who="", cmd=cmd)
-        b.add("accept", sid="s1", aid="a1")
-        b.add("accept", sid="s2", aid="a2")
-        b.view(SHA, head={"headRefName": branch})
-        b.request()
-        b.run()
-        return b
-
-    def run_only(cmd):
-        """Заявка подана на полной записи, а к проходу запись — уже не полного набора: отказ в самом проходе."""
-        b = Box()
-        b.view(SHA, head={"headRefName": "batch/metis-0754"})
-        b.request()
-        b.records = []
-        b.add("tests", who="", cmd=cmd)
-        b.add("accept", sid="s1", aid="a1")
-        b.add("accept", sid="s2", aid="a2")
-        b.run()
-        return b
-
+    """metis-1050 (было metis-0758): PR пачки (ветка batch/<story>) проходит шлюз прохода как любой другой — при
+    зелёном CI хватает любой записи tests на head, полного набора не требуется (он идёт ночью на main)."""
     narrow = "pantheon review test -- python3.14 -I plugins/pantheon/scripts/run-tests.py --affected plugins/guard"
-    b = box("batch/metis-0754")
-    check("0758: пачка, запись полного набора на head, CI зелёный — сливает", len(b.merges()) == 1,
+    b = Box()
+    b.records = []
+    b.add("tests", who="", cmd=narrow)
+    b.add("accept", sid="s1", aid="a1")
+    b.add("accept", sid="s2", aid="a2")
+    b.view(SHA, head={"headRefName": "batch/metis-0754"})
+    b.request()
+    b.run()
+    check("1050: пачка, на head только узкая запись, CI зелёный — сливает", len(b.merges()) == 1,
           (b.outs[-1], b.alerts()))
-    why = "PR пачки (ветка batch/metis-0754): засчитывается только запись полного набора тестов (FULL_TESTS)"
-    b = box("batch/metis-0754", cmd=narrow)
-    check("0758: пачка, на head только узкая запись, CI зелёный — заявки нет, причина названа",
-          not b.windows() and not b.merges() and b.req() is None and why in b.outs[-2], b.outs[-2:])
-    b = run_only(narrow)
-    check("0758: пачка, к проходу только узкая запись — окна нет, заявка снята, причина в тревоге",
-          not b.windows() and not b.merges() and b.req() is None and why in b.alerts(), (b.outs[-1], b.alerts()))
-    b = box("metis-0758-gate", cmd=narrow)
-    check("0758: не пачка, узкая запись, CI зелёный — сливает, как раньше", len(b.merges()) == 1,
-          (b.outs[-1], b.alerts()))
+
+
+def test_ci_billing_narrow():
+    """metis-1050: CI не запускался из-за лимита минут — проход засчитывает и узкую запись `--affected` (у ядра и
+    пачки тоже), если её база — merge-base head и вершины base, а карта — sha256 файла карты в дереве head
+    (narrow_gh_problem, GitHub API); иначе заявка снята с причиной."""
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    mapb = '{"v": 3}'
+    mp = hashlib.sha256(mapb.encode()).hexdigest()
+    cmd = (FULL_TESTS_CMD.split(" -- ", 1)[1].replace("heavy ", "").replace("run-tests.py", "run-tests.py --affected "
+           "--base " + "c" * 40))
+
+    def box(rec=None, setup=()):
+        b = Box()
+        b.records = []
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.add("tests", sha=SHA, who="", cmd=cmd, **{"files": ["guard/test_guard.py"], "map": mp, **(rec or {})})
+        b.request()
+        b.set("gh-map", mapb)
+        for name, value in setup:
+            b.set(name, value)
+        b.view(SHA, checks=blocked, head={"headRefName": "batch/metis-1048"})
+        b.run()
+        return b
+
+    b = box()
+    check("лимит, узкая запись от merge-base, карта head → окно и слияние", len(b.merges()) == 1
+          and "узкий прогон" in b.windows()[0][0], (b.outs[-1], b.alerts()))
+    for name, setup, rec in (("merge-base другая", (("gh-mb", "d" * 40),), None),
+                             ("сбой gh на compare", (("gh-mb-fail", ""),), None),
+                             ("вершина base не получена", (("gh-tip-fail", ""),), None),
+                             ("карта в записи не та", (), {"map": "0" * 64}),
+                             ("без files", (), {"files": []})):
+        b = box(rec, setup)
+        check(f"лимит, узкая запись — {name} → окна нет, заявка снята", not b.windows() and not b.merges()
+              and b.req() is None and "годной узкой" in b.alerts(), b.alerts())
 
 
 def test_gate_other_heads():
@@ -1387,10 +1412,11 @@ def test_ci_fork():
 
 def test_ci_matches_guard():
     """metis-0633, 0649, 0655: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, ci_billing_ids, ci_billing,
-    ci_job_unstarted, full_tests_record, required_checks, optional_checks, batch_tests_problem (metis-0758),
+    ci_job_unstarted, full_tests_record, required_checks, optional_checks, narrow_tests_record, narrow_map_path
+    (metis-1050),
     pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), base_counts (metis-0965),
     REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
-    FULL_TESTS, BATCH_BRANCH, CI_OK, CI_WAIT и CI_NONE в merge.py
+    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -1401,22 +1427,24 @@ def test_ci_matches_guard():
             if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids",
                                                              "ci_billing", "ci_job_unstarted", "full_tests_record",
                                                              "required_checks", "optional_checks",
-                                                             "batch_tests_problem", "pair_match", "returned_lie",
+                                                             "narrow_tests_record", "narrow_map_path",
+                                                             "pair_match", "returned_lie",
                                                              "returned_lifts", "base_counts"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
-                                            "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "BATCH_BRANCH", "CI_OK",
+                                            "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "MAP_HASH_RE", "CI_OK",
                                             "CI_WAIT", "CI_NONE"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
     names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "ci_job_unstarted",
-             "full_tests_record", "required_checks", "optional_checks", "batch_tests_problem", "pair_match",
+             "full_tests_record", "required_checks", "optional_checks", "narrow_tests_record", "narrow_map_path",
+             "pair_match",
              "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
              "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
-             "BATCH_BRANCH", "CI_OK", "CI_WAIT", "CI_NONE")
+             "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
