@@ -314,6 +314,61 @@ missing = [lb for lb in tuple(R.NO_SUMMARY) + tuple(R.SLOW) + tuple(R.SERIAL) if
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
 check("NO_SUMMARY, SLOW, SERIAL — только существующие файлы", not missing, missing)
 
+# --- карантин (metis-1050): упавший файл из QUARANTINE — строка «карантин», код прогона 0; другой FAIL — код 1 ---
+missing = [lb for lb, task in R.QUARANTINE.items() if not re.fullmatch(r"metis-\d{4}", task) or not os.path.exists(
+    os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("QUARANTINE — существующие файлы, у каждого задача metis-NNNN", R.QUARANTINE and not missing, missing)
+
+
+def _core_names():
+    """Ядро защит — CORE_FILES и CORE_DIR из lib/merge.py (зеркало шлюза guard, сверяет test_merge) → (папки плагинов
+    целиком, основы имён файлов ядра и папок ядра внутри плагинов)."""
+    with open(os.path.join(PLUGIN, "lib", "merge.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    got = {t.id: ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+           for t in n.targets if isinstance(t, ast.Name) and t.id in ("CORE_FILES", "CORE_DIR")}
+    whole = {d.split("/")[1] for d in got["CORE_DIR"] if d.count("/") == 1 and d.startswith("plugins/")}
+    stems = {os.path.splitext(os.path.basename(f))[0].replace("-", "_").replace(".", "_") for f in got["CORE_FILES"]}
+    stems |= {os.path.basename(d) for d in got["CORE_DIR"] if d.count("/") > 1}
+    return whole, stems
+
+
+def core_quarantine(labels):
+    """Метки карантина, которым там не место (metis-1068): файлы плагина-ядра целиком (guard/*) и тесты файлов ядра —
+    test_<основа>.py и test_<основа>_*.py для файла или папки ядра (merge.py → test_merge.py, ctx.py →
+    test_ctx_clock.py, roles → test_roles_harness.py). Их настоящее падение карантин спрятал бы, а слияние ядра держит
+    защиту."""
+    whole, stems = _core_names()
+    bad = []
+    for lb in labels:
+        plugin, name = lb.split("/", 1)
+        stem = name[len("test_"):-len(".py")] if name.startswith("test_") and name.endswith(".py") else ""
+        if plugin in whole or any(stem == s or stem.startswith(s + "_") for s in stems):
+            bad.append(lb)
+    return bad
+
+
+check("core_quarantine: guard/*, тесты файлов ядра — найдены; test_outside_idle — нет (проверка не пустая)",
+      core_quarantine(["guard/test_x.py", "pantheon/test_merge.py", "pantheon/test_ctx_clock.py",
+                       "pantheon/test_window_rules.py", "pantheon/test_roles_harness.py", "pantheon/test_answers.py",
+                       "pantheon/test_outside_idle.py", "pantheon/test_merger.py"])
+      == ["guard/test_x.py", "pantheon/test_merge.py", "pantheon/test_ctx_clock.py", "pantheon/test_window_rules.py",
+          "pantheon/test_roles_harness.py", "pantheon/test_answers.py"], _core_names())
+check("QUARANTINE — без меток guard/* и тестов файлов ядра (metis-1068)", not core_quarantine(R.QUARANTINE),
+      core_quarantine(R.QUARANTINE))
+qlabel = next(iter(R.QUARANTINE))
+qp = mkplugin({qlabel.split("/")[1]: "import sys\nprint('ok   a')\nsys.exit(1)\n", "test_fine.py": OK2},
+              qlabel.split("/")[0])
+r = run([qp])
+check("карантин: файл из списка упал — строка «карантин … задача», итог «карантин 1», код 0",
+      r.returncode == 0 and f"карантин {qlabel}" in r.stdout and f"задача {R.QUARANTINE[qlabel]}" in r.stdout
+      and "FAIL 0, карантин 1" in r.stdout, r.stdout)
+qp2 = mkplugin({qlabel.split("/")[1]: "import sys\nprint('ok   a')\nsys.exit(1)\n",
+                "test_bad.py": "import sys\nprint('ok   a')\nsys.exit(1)\n"}, qlabel.split("/")[0])
+r = run([qp2])
+check("карантин: рядом упал файл не из списка — код 1, FAIL 1", r.returncode == 1 and "FAIL 1, карантин 1" in r.stdout,
+      r.stdout)
+
 # --- --affected: карта affected-map.json и выбор по ней (metis-0451) ---
 REPO = os.path.dirname(os.path.dirname(PLUGIN))
 amap, why = R.load_map()

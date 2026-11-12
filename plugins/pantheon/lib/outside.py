@@ -199,6 +199,7 @@ env и той же командой засчитывается новому HEAD
 (команда — FULL_TESTS, дерево чистое, HEAD тот же, без таймаута) проход пишет строкой в STATE/outside/full.jsonl:
   {"v": 1, "time", "rid": id заявки, "repo": [owner/repo], "sha", "tree", "branch": ветка папки или null, "dir",
    "cmd", "env", "code", "failed": [«плагин/test_x.py»] или null — итог run-tests не разобран (run_failed),
+   "quarantine": [метки] — упавшие из карантина раннера, если были (metis-1050),
    у красного ещё "causes": {метка: {"kind", "why", "line"}} — причина по файлу (run_causes, metis-0696; kind —
    таймаут, сигнал, среда или провал; why — из строки FAIL раннера; line — первая строка не ok из хвоста файла), а
    при "failed": null — "cause" (итог не разобран, код); у дозапуска ещё "rerun_of", "files", "map"}.
@@ -1403,10 +1404,11 @@ def tree_record(rid, d, window, qdir, sha=None):
 # правка этих файлов меняет сам выбор тестов или их общую опору — дозапуск не годится, весь набор: раннер и карта
 # (их путь — из команды), heavy, общие модули тестов tests/_*.py любого плагина, строка проверки .pantheon-verify
 FORCE_FULL_RE = re.compile(r"(?:^|/)bin/heavy$|(?:^|/)tests/_[^/]*\.py$|^\.pantheon-verify$")
-# строки run-tests.py (report и summary): «ok   плагин/test_x.py · …», «FAIL плагин/test_x.py · …», последняя —
-# «итого: файлов N, ok A, FAIL B…»
-REPORT_RE = re.compile(r"(ok|FAIL)\s+([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · ")
-TOTAL_RE = re.compile(r"итого: файлов (\d+), ok (\d+), FAIL (\d+)\b")
+# строки run-tests.py (report и summary): «ok   плагин/test_x.py · …», «FAIL плагин/test_x.py · …», «карантин
+# плагин/test_x.py · …» (упал файл из QUARANTINE раннера, код не портит; metis-1050), последняя — «итого: файлов N,
+# ok A, FAIL B[, карантин Q]…», где N = A + B + Q
+REPORT_RE = re.compile(r"(ok|FAIL|карантин)\s+([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · ")
+TOTAL_RE = re.compile(r"итого: файлов (\d+), ok (\d+), FAIL (\d+)(?:, карантин (\d+))?\b")
 LOG_MAX = 64 * 1024 * 1024
 _RUNNER = []
 
@@ -1447,26 +1449,29 @@ def append_full(entry):
 
 
 def run_failed(text):
-    """Вывод run-tests.py → (метки ok, метки FAIL), отсортированные; None — итог не разобрать. Строки файлов — только
-    до хвостов упавших («===== …»: там вывод самих файлов, и в нём бывают свои ok/FAIL), последняя непустая строка —
-    итог, и числа в нём сходятся со строками: прерванный, убитый по таймауту или чужой вывод даёт None, а не пустой
-    список упавших."""
+    """Вывод run-tests.py → (метки ok, метки FAIL, метки карантина), отсортированные; None — итог не разобрать.
+    Карантин — упавшие файлы из QUARANTINE раннера (metis-1050): не ok и не FAIL, код прогона они не портят. Строки
+    файлов — только до хвостов упавших («===== …»: там вывод самих файлов, и в нём бывают свои ok/FAIL), последняя
+    непустая строка — итог, и числа в нём сходятся со строками: прерванный, убитый по таймауту или чужой вывод даёт
+    None, а не пустой список упавших."""
     lines = text.splitlines()
     last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
     m = TOTAL_RE.match(last)
     if not m:
         return None
-    n, n_ok, n_fail = (int(x) for x in m.groups())
-    ok, fail = set(), set()
+    n, n_ok, n_fail, n_quar = (int(x or 0) for x in m.groups())
+    seen = {"ok": set(), "FAIL": set(), "карантин": set()}
     for ln in lines:
         if ln.startswith("===== "):
             break
         r = REPORT_RE.match(ln)
         if r:
-            (ok if r[1] == "ok" else fail).add(r[2])
-    if ok & fail or len(ok) != n_ok or len(fail) != n_fail or n_ok + n_fail != n:
+            seen[r[1]].add(r[2])
+    ok, fail, quar = seen["ok"], seen["FAIL"], seen["карантин"]
+    if ok & fail or ok & quar or fail & quar or len(ok) != n_ok or len(fail) != n_fail or len(quar) != n_quar \
+            or n_ok + n_fail + n_quar != n:
         return None
-    return sorted(ok), sorted(fail)
+    return sorted(ok), sorted(fail), sorted(quar)
 
 
 # строка FAIL раннера: «FAIL плагин/test_x.py · 12.3 с · проверок 4 · код 1» (причина — после последнего поля);
@@ -2075,7 +2080,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                                                    "; прошлый head не предок HEAD — дифф двух коммитов как есть"))
     if narrow:
         res["note"] = f"узкий набор (--affected) от merge-base {narrow['mb'][:12]}" + (
-            f": файлов {len(got[0]) + len(got[1])}" if got else "")
+            f": файлов {len(got[0]) + len(got[1]) + len(got[2])}" if got else "")
     if retried:
         res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + (
             f"повтор после «таймаут под нагрузкой» (первый прогон: {retried['log']}, файлов {len(retried['files'])})")
@@ -2100,15 +2105,15 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             res["why"] = f"команда «{line}» ничего не проверяет — записи tests нет"
         elif not repos:
             res["why"] = "у репозитория нет remote — записи tests нет"
-        elif plan and (not got or got[1] or got[0] != plan["files"]):
+        elif plan and (not got or got[1] or sorted(got[0] + got[2]) != plan["files"]):
             res["why"] = (f"дозапуск: вывод run-tests не сошёлся со списком файлов ({len(plan['files'])}) — "
                           "записи tests нет")
-        elif narrow and (not got or got[1] or not got[0]):
+        elif narrow and (not got or got[1] or not (got[0] or got[2])):
             res["why"] = "узкий набор: итог run-tests не разобран — записи tests нет"
         else:
             try:
                 append_tests(repos, sha, d, line, window, rid,
-                             rerun=plan or (narrow and {"files": got[0], "map": narrow["map"]}))
+                             rerun=plan or (narrow and {"files": sorted(got[0] + got[2]), "map": narrow["map"]}))
                 res["record"] = True
             except OSError as e:
                 res["why"] = f"запись tests не сделана: {e}"
@@ -2116,6 +2121,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         # журнал полных прогонов: опора следующего дозапуска (только запись без rerun_of) и след самих дозапусков
         entry = {"rid": rid, "repo": repos0, "sha": sha, "tree": tree_of(d, sha), "branch": branch_of(d), "dir": d,
                  "cmd": line, "env": run_env(line), "code": code, "failed": got[1] if got else None}
+        if got and got[2]:     # упавшие из карантина раннера (metis-1050): не красный, но след остаётся
+            entry["quarantine"] = got[2]
         if got and got[1]:     # причина красного по файлу (metis-0696)
             causes = run_causes(text)
             entry["causes"] = {lb: causes.get(lb) or {"kind": "провал", "why": "", "line": ""} for lb in got[1]}

@@ -208,7 +208,7 @@ O.run_failed = _rf
 check("зелёный узкий, но итог run-tests не разобран — записи нет, причина",
       r3b.get("code") == 0 and not r3b.get("record") and "итог run-tests не разобран" in r3b.get("why", "")
       and len(tests_for(F3)) == 1, r3b)
-O.run_failed = lambda text: (lambda g: g and (g[0], g[1] + ["kit/test_zz.py"]))(_rf(text))
+O.run_failed = lambda text: (lambda g: g and (g[0], g[1] + ["kit/test_zz.py"], g[2]))(_rf(text))
 r3c = run()
 O.run_failed = _rf
 check("зелёный узкий, но в итоге есть FAIL — записи нет", not r3c.get("record") and len(tests_for(F3)) == 1, r3c)
@@ -375,6 +375,28 @@ check("check_request: base — 40 знаков у test", O.check_request(dict(ok
 for name, extra in (("короткий", {"base": M1[:12]}), ("заглавные", {"base": M1.upper()}), ("не строка", {"base": 1}),
                     ("у serve", {"base": M1, "kind": "serve"}), ("со --script", {"base": M1, "script": "t"})):
     check(f"check_request: base {name} — отказ", O.check_request(dict(ok, **extra), "r"), extra)
+
+# --- 8. карантин раннера (metis-1050): упал файл из QUARANTINE — код 0, итог разобран, запись tests есть ------------
+git("checkout", "-q", "-b", "quar", B0)
+assert RUNNER_SRC.count("QUARANTINE = {") == 1
+Q1 = commit({"tools/run-tests.py": RUNNER_SRC.replace("QUARANTINE = {", 'QUARANTINE = {"kit/test_c.py": "metis-0000",'),
+             "plugins/kit/lib/c.txt": "bad\n"}, "q1: c красный, но в карантине раннера")
+rq = run()
+recq = tests_for(Q1)
+check("узкий: упал только файл карантина — код 0, запись tests, files — c, итог разобран",
+      rq.get("code") == 0 and rq.get("record") and "не разобран" not in rq.get("why", "")
+      and "файлов 1" in rq.get("note", "") and len(recq) == 1 and recq[0].get("files") == ["kit/test_c.py"],
+      (rq, recq))
+with open(rq["log"]) as fh:
+    QLOG = fh.read()
+check("вывод настоящего раннера: строка «карантин kit/test_c.py», итог «…, карантин 1»",
+      "\nкарантин kit/test_c.py · " in QLOG and ", FAIL 0, карантин 1;" in QLOG, QLOG[-600:])
+Q2 = commit({"plugins/kit/lib/a.txt": "good-q2\n"}, "q2: своё дерево для полного набора")
+rqf = run(base=None)
+eq = next((e for e in O.read_full() if e.get("sha") == Q2), {})
+check("полный: упал только файл карантина — код 0, запись tests; full.jsonl failed [] (не null), quarantine — c",
+      rqf.get("code") == 0 and rqf.get("record") and eq.get("failed") == [] and eq.get("quarantine") == ["kit/test_c.py"]
+      and "cause" not in eq, (rqf, eq))
 
 print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
