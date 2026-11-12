@@ -12,7 +12,8 @@
      песочницы (внутри окна sandbox-exec вложенный — «пропущено: нужен macOS»).
 Проверяет: ни одна команда не печатает Traceback; код — 0..7, а при коде не 0 последняя строка вывода называет
 причину; `start <направление> "текст"` кладёт поручение во входящие направления и заявку start-req (код 0) и не
-пишет STATE/settings/run; `start --restart` — отказ (код 2) со ссылкой на start_gate, до остановки копий;
+пишет STATE/settings/run; `resume <направление>` — строка resume: true в той же заявке (metis-1066);
+`start --restart` — отказ (код 2) со ссылкой на start_gate, до остановки копий;
 `start --at-cancel` — отмена строкой в заявке, её гасит плановый проход; `agents` — список и одна строка о снимке.
 `claude` в PATH — заглушка с пустым списком сессий: тест не видит и не трогает ваших сессий.
 """
@@ -224,6 +225,10 @@ def suite(kind, prefix_of):
         if argv[:2] == ["start", "--at-cancel"]:
             data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
             check(f"{name} — код 0, строка cancel в заявке", rc == 0 and any(x.get("cancel") == ONESHOT_ID for x in data),
+                  (rc, line, data))
+        if argv == ["resume", DIRECTION]:  # metis-1066: STATE/stopped окну закрыт — заявка, её исполняет проход
+            data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
+            check(f"{name} — код 0, строка resume: true в заявке", rc == 0 and any(x.get("resume") is True for x in data),
                   (rc, line, data))
         if argv == ["agents"]:
             check(f"{name} — код 0 и одна строка о снимке", rc == 0 and "снимок" in line, (rc, line))

@@ -3203,11 +3203,16 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
 
 def _word_unstop(name):
     """Снять «остановлено вами» с направления — по вашему ответу «Да — вернуть <имя>» (как pantheon resume)."""
+    unstop(name, f"ваш ответ «Да — вернуть {name}» в окне вопросов")
+
+
+def unstop(name, why):
+    """Снять «остановлено вами» с направления, как pantheon resume: метка, имя в stopped-all.json, сброс самозапуска.
+    Зовут ответ «Да — вернуть» и заявка Зевса на возврат (metis-1066, take_start_requests); why — в тревоге."""
     _forget_autostart(name)
     try:
         os.unlink(P.path("stopped", name))
-        P.alert(f"{name}: метка «остановлено вами» снята (ваш ответ «Да — вернуть {name}» в окне вопросов)",
-                "pantheon-stop")
+        P.alert(f"{name}: метка «остановлено вами» снята ({why})", "pantheon-stop")
     except OSError:  # метки нет; не снялась иначе — она остаётся, и ниже отказ с причиной, а не падение проверки
         pass
     sp = P.path("stopped-all.json")
@@ -3581,12 +3586,21 @@ def resume(rest, who):
         print("pantheon resume <имя> | --all", file=P.sys.stderr)
         return 2
     name = rest[0]
+    if os.environ.get("PANTHEON_ROLE") == "hq":
+        # metis-1066: окну Пританея песочница закрывает STATE/stopped — заявка, метку снимет и окно поднимет проход
+        code = P.resume_request(name)
+        if code is not None:
+            return code
     _forget_autostart(name)
     try:
         os.remove(P.path("stopped", name))
     except FileNotFoundError:
         print(f"{name}: метки «остановлено вами» нет; счётчик сбоев самозапуска сброшен")
         return 0
+    except PermissionError:
+        print(f"pantheon resume: метку {name} не снять — песочница окна закрывает STATE/stopped; заявкой возвращаются "
+              "только направления из реестра, остальное — pantheon resume в вашем терминале", file=P.sys.stderr)
+        return 1
     info = P.read_json(P.path("stopped-all.json"), None)
     if info and name in (info.get("names") or []):
         info["names"].remove(name)
