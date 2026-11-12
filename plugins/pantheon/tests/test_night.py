@@ -232,38 +232,99 @@ def test_week_monotonic_0243():
     check(N.spent(st, m2) == 13.0, f"спент при сбросе недели: {N.spent(st, m2)}")
 
 
-def test_week_early_reset_same_window_1067():
-    """Досрочный сброс с тем же resets_at (владелец 12.11): seven-day 6 % после строк week-usage до 99 % — неделя 6,
-    а не 99. Падение меньше RESET_DROP_PP — шум простаивающего окна, неделя по-прежнему максимум."""
+def reset_mark(t, role=""):
+    """pantheon limit reset-mark в момент t; role — PANTHEON_ROLE окна ("" — терминал владельца). (код, stdout, stderr)."""
+    saved = {k: os.environ.get(k) for k in ("PANTHEON_NOW", "PANTHEON_ROLE")}
+    os.environ["PANTHEON_NOW"] = str(t)
+    os.environ.pop("PANTHEON_ROLE", None)
+    if role:
+        os.environ["PANTHEON_ROLE"] = role
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = N.limit_main(["reset-mark"])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return rc, out.getvalue(), err.getvalue()
+
+
+def early_reset_env(t, resets):
+    """Файлы как у строки статуса 12.11: week-usage растёт до 99 % (пишется только рост), seven-day — один файл,
+    последний замер до сброса 99 %."""
+    e = Env()
+    e.week_usage([(t - 86400 + 2000 * k, resets, 60 + k) for k in range(40)])  # 60..99 % за прошлые сутки
+    e.snap(t - 3000, 99, resets)
+    return e
+
+
+def test_week_reset_mark_1067():
+    """Досрочный сброс с тем же resets_at (владелец 12.11) — по отметке pantheon limit reset-mark: замеры до неё не
+    учитываются. Без отметки неделя — максимум, как раньше; по падению pct сброс не угадывается."""
     t = day()
     resets = t + 22 * 3600
-    e = Env()
+    # без отметки: seven-day 6 % после строк до 99 % — неделя 99 (падение — не сброс, metis-0243)
+    e = early_reset_env(t, resets)
     e.snap(t - 60, 6, resets)
-    e.week_usage([(t - 86400 + 2000 * k, resets, 60 + k) for k in range(40)])  # 60..99 % за прошлые сутки
-    s = N.snapshot()
-    check(s["week"] == (6, resets, t - 60), f"досрочный сброс не обнулил базу: {s}")
+    check(N.snapshot()["week"] == (99, resets, t - 60), f"без отметки неделя не максимум: {N.snapshot()}")
+    # отметка из терминала владельца: файл в STATE, окно — resets_at свежего замера
+    e = early_reset_env(t, resets)
+    rc, out, err = reset_mark(t - 1800)
+    mark = json.load(open(os.path.join(e.state, "limit", "reset-mark.json")))
+    check(rc == 0 and mark["at"] == t - 1800 and mark["resets_at"] == resets and "Отметка" in out,
+          f"отметка не записана: код {rc}, {mark}, {out!r} {err!r}")
+    # замеров после отметки ещё нет — неделя неизвестна, а не 99
+    check(N.snapshot()["week"] is None, f"до замера после отметки неделя известна: {N.snapshot()}")
+    check(not N.measure(t)["known"], f"до замера после отметки measure решает: {N.measure(t)}")
+    # строка статуса перезаписала seven-day: 6 % — неделя 6, зона зелёная
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"] == (6, resets, t - 60), f"отметка не обнулила базу: {N.snapshot()}")
     m = N.measure(t)
-    check(m["known"] and m["used"] == 6 and m["zone"] == "green", f"measure после сброса: {m}")
-    # рост после сброса (строка позже замера со сбросом) учитывается, строки до сброса — нет
-    e.week_usage([(t - 30, resets, 8)])
-    check(N.snapshot()["week"][0] == 8, f"рост после сброса не взят: {N.snapshot()}")
-    # порог: падение ровно на RESET_DROP_PP — сброс, на 0,1 меньше — шум, максимум остаётся
-    for drop, want in ((N.RESET_DROP_PP, 49.0), (N.RESET_DROP_PP - 0.1, 99.0)):
-        e2 = Env()
-        e2.week_usage([(t - 7200, resets, 99)])
-        e2.snap(t - 60, 99 - drop, resets)
-        got = N.snapshot()["week"][0]
-        check(abs(got - want) < 1e-9, f"падение {drop}: неделя {got}, ждали {want}")
-    # замер со сбросом раньше строк week-usage — не сброс для них: порядок по времени замера
-    e3 = Env()
-    e3.snap(t - 7200, 6, resets)
-    e3.week_usage([(t - 9000, resets, 99), (t - 600, resets, 99)])
-    check(N.snapshot()["week"][0] == 99, f"поздняя строка 99 % потеряна: {N.snapshot()}")
-    # после сброса шум меряется от новой базы: 99 → 6 (сброс) → 20 → 10 (простаивающее окно) — неделя 20, а не 10
-    e4 = Env()
-    e4.week_usage([(t - 9000, resets, 99), (t - 7200, resets, 6), (t - 3600, resets, 20)])
-    e4.snap(t - 60, 10, resets)
-    check(N.snapshot()["week"][0] == 20, f"шум после сброса принят за новый сброс: {N.snapshot()}")
+    check(m["known"] and m["used"] == 6 and m["zone"] == "green", f"measure после отметки: {m}")
+    # простаивающее окно перезаписало seven-day старым 88 после отметки — замер после отметки, берётся честно
+    e.snap(t - 30, 88, resets)
+    check(N.snapshot()["week"][0] == 88, f"замер 88 после отметки не взят: {N.snapshot()}")
+    e.snap(t - 20, 6, resets)
+    check(N.snapshot()["week"][0] == 6, f"seven-day 6 после 88: {N.snapshot()}")
+    # неделя — максимум по замерам после отметки: строка week-usage после неё тоже в счёт
+    e.week_usage([(t - 25, resets, 9)])
+    check(N.snapshot()["week"][0] == 9, f"строка week-usage после отметки не в максимуме: {N.snapshot()}")
+    # отметка того же окна с допуском 1 ч действует, другого окна (новый resets_at) — нет
+    for shift, want in ((1800, 6), (3 * 3600, 99)):
+        e = early_reset_env(t, resets)
+        P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 1800, "resets_at": resets + shift})
+        e.snap(t - 60, 6, resets)
+        check(N.snapshot()["week"][0] == want, f"отметка окна {resets + shift}: неделя {N.snapshot()}, ждали {want}")
+    # битая отметка не действует: не JSON, время не число при верном окне
+    for body in ("{", json.dumps({"at": "x", "resets_at": resets}), json.dumps({"resets_at": resets})):
+        e = early_reset_env(t, resets)
+        os.makedirs(os.path.join(e.state, "limit"))
+        open(os.path.join(e.state, "limit", "reset-mark.json"), "w").write(body)
+        e.snap(t - 60, 6, resets)
+        check((N.snapshot()["week"] or (None,))[0] == 99, f"битая отметка {body!r} подействовала: {N.snapshot()}")
+
+
+def test_reset_mark_refusals_1067():
+    """reset-mark только из терминала владельца: окно роли — отказ, код 2, файла нет; окна недели нет или оно
+    сброшено — код 1, файла нет; лишние слова — код 2."""
+    t = day()
+    resets = t + 22 * 3600
+    for role in ("dev", "hq"):
+        e = early_reset_env(t, resets)
+        rc, out, err = reset_mark(t, role)
+        check(rc == 2 and "окно роли" in err.splitlines()[-1] and not os.path.exists(N.reset_mark_path()),
+              f"окно роли {role}: код {rc}, {err!r}")
+    Env()
+    rc, _, err = reset_mark(t)
+    check(rc == 1 and "не записана" in err and not os.path.exists(N.reset_mark_path()), f"без снимка: {rc} {err!r}")
+    e = Env()
+    e.snap(t - 60, 40, t - 10)
+    rc, _, err = reset_mark(t)
+    check(rc == 1 and not os.path.exists(N.reset_mark_path()), f"окно уже сброшено: {rc} {err!r}")
+    check(N.limit_main([]) == 2 and N.limit_main(["reset-mark", "x"]) == 2, "лишние слова приняты")
 
 
 def test_heavy():
@@ -774,6 +835,16 @@ def test_status_format():
           "в справке нет pantheon night")
     r = run("status")
     check("Лимит и ночь" in r.stdout and "Неделя: 41 %" in r.stdout, f"pantheon status без раздела: код {r.returncode} {r.stdout[-800:]} {r.stderr[-600:]}")
+    # pantheon limit reset-mark (metis-1067): из окна роли — отказ без файла, из терминала владельца — отметка
+    mark = os.path.join(e.state, "limit", "reset-mark.json")
+    env["PANTHEON_ROLE"] = "dev"
+    r = run("limit", "reset-mark")
+    check(r.returncode == 2 and "окно роли" in r.stderr and not os.path.exists(mark), f"limit из окна роли: {r}")
+    del env["PANTHEON_ROLE"]
+    r = run("limit", "reset-mark")
+    check(r.returncode == 0 and json.load(open(mark))["resets_at"] == resets, f"pantheon limit reset-mark: {r}")
+    check("pantheon limit reset-mark" in run("help").stdout, "в справке нет pantheon limit reset-mark")
+    os.remove(mark)
 
 
 def _pack_env(start_line="- Старт — 04:00, но не раньше выпуска"):

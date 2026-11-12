@@ -9,8 +9,9 @@
 `five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
 Неделя — неубывающий снимок: наибольший pct по seven-day и строкам week-usage того же resets_at (допуск 1 ч), resets_at и
 время — от самого свежего замера; без seven-day — по week-usage. Время замера — наибольшее now этих файлов.
-Досрочный сброс с тем же resets_at (metis-1067): замер на RESET_DROP_PP (50) п. п. ниже максимума более ранних —
-замеры до него не учитываются; падение меньше — шум простаивающего окна, неделя не убывает.
+Досрочный сброс с тем же resets_at (metis-1067) отмечает владелец из своего терминала: `pantheon limit reset-mark`
+пишет STATE/limit/reset-mark.json (at, resets_at окна). При отметке того же окна (допуск 1 ч) замеры раньше неё не
+учитываются, неделя — максимум по замерам после неё; отметка другого окна не действует. Из окна роли — отказ (код 2).
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
 строка в тревогах (её Зевс несёт в сводку). Пробный запрос (metis-0459): снимок старше snapshot_max_min (или его нет), а
 ночь одобрена («да», не пропущена, не закрыта) и идёт с start минус 30 мин до end — проход раз в 30 мин зовёт
@@ -168,7 +169,6 @@ PACK_TASK = re.compile(r"(?<![\w-])([a-z]+-\d{4})(?![\w-])")
 ONESHOT_TTL = 3 * 3600  # разовый запуск `pantheon start --at` ждёт открытого шлюза столько, потом гаснет
 ONESHOT_KEEP = 7 * 86400  # погашенные записи хранятся столько
 THRESHOLDS = (50, 80, 100)
-RESET_DROP_PP = 50.0  # падение недели внутри окна сброса на столько п. п. — досрочный сброс (week_base, metis-1067)
 HM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 ZONES = {"green": "зелёная", "yellow": "жёлтая", "red": "красная"}
@@ -364,39 +364,48 @@ def week_lines():
     return out
 
 
-def week_base(rows):
-    """Замеры одного окна сброса [(pct, resets, now)] → те, что после последнего досрочного сброса (metis-1067).
-    Правило: по времени замера, замер на RESET_DROP_PP п. п. и больше ниже максимума всех более ранних — досрочный
-    сброс с тем же resets_at; замеры раньше него не учитываются. Падение меньше — шум простаивающего окна (его
-    старый pct, metis-0243): база остаётся, неделя не убывает. week-usage строка статуса пишет только при росте,
-    поэтому такое падение видно лишь в seven-day."""
-    rows = sorted(rows, key=lambda r: (r[2], r[0]))
-    start, top = 0, None
-    for i, r in enumerate(rows):
-        if top is not None and top - r[0] >= RESET_DROP_PP:
-            start, top = i, r[0]
-        else:
-            top = r[0] if top is None else max(top, r[0])
-    return rows[start:]
+def reset_mark_path():
+    return P.path("limit", "reset-mark.json")
+
+
+def reset_mark():
+    """Отметка досрочного сброса недели (pantheon limit reset-mark, metis-1067): (at, resets_at) или None."""
+    d = P.read_json(reset_mark_path(), {})
+    try:
+        return float(d["at"]), float(d["resets_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def week_rows():
+    """Замеры недели [(pct, resets, now)] по week-usage и seven-day и самый свежий из них (или None)."""
+    sd = _nums(_text(os.path.join(statusline_dir(), "seven-day")).strip())
+    rows = [(pct, resets, now_) for now_, resets, pct in week_lines()]
+    if sd:
+        rows.append(tuple(sd))
+    # сброс с наибольшим resets_at: простаивающее окно после досрочного сброса пишет старый resets_at позже
+    # новых строк, и перенос базы недели не должен идти назад (metis-0246)
+    return rows, (max(rows, key=lambda r: (round(r[1] / 3600), r[2])) if rows else None)
 
 
 def snapshot():
     """{"five": (pct, resets, at)|None, "week": (pct, resets, at)|None, "at": время замера|None}.
     Неделя не убывает в пределах окна сброса: pct — максимум по seven-day и строкам week-usage с тем же resets_at
     (допуск 1 ч), resets и at — от самого свежего замера (простаивающее окно пишет старый pct позже других).
-    Исключение — досрочный сброс с тем же resets_at: максимум только по замерам после него (week_base)."""
+    Досрочный сброс с тем же resets_at (metis-1067) отмечает владелец (`pantheon limit reset-mark`): при отметке
+    того же окна (допуск 1 ч) замеры с now раньше отметки не учитываются, неделя — максимум по замерам после неё; их
+    нет — неделя неизвестна. Отметка другого окна не действует. По падению pct сброс не угадывается: seven-day
+    перезаписывают и простаивающие окна со старым pct (ревью argus #417)."""
     five = _nums(_text(P.LIMIT_SNAPSHOT).strip())
-    sd = _nums(_text(os.path.join(statusline_dir(), "seven-day")).strip())
-    rows = [(pct, resets, now_) for now_, resets, pct in week_lines()]
-    if sd:
-        rows.append(tuple(sd))
+    rows, last = week_rows()
     week = None
     if rows:
-        # сброс с наибольшим resets_at: простаивающее окно после досрочного сброса пишет старый resets_at позже
-        # новых строк, и перенос базы недели не должен идти назад (metis-0246)
-        last = max(rows, key=lambda r: (round(r[1] / 3600), r[2]))
-        same = week_base([r for r in rows if abs(r[1] - last[1]) <= 3600])
-        week = (max(r[0] for r in same), last[1], last[2])
+        same = [r for r in rows if abs(r[1] - last[1]) <= 3600]
+        mark = reset_mark()
+        if mark and abs(mark[1] - last[1]) <= 3600:
+            same = [r for r in same if r[2] >= mark[0]]
+        if same:
+            week = (max(r[0] for r in same), last[1], last[2])
     ats = [x[2] for x in (five, week) if x]
     return {"five": tuple(five) if five else None, "week": week, "at": max(ats) if ats else None}
 
@@ -1366,3 +1375,33 @@ def main(rest):
         return night_ask_cmd(rest[1:])
     print("pantheon night [status|report|ask|agent-gate]", file=P.sys.stderr)
     return 2
+
+
+def limit_main(rest):
+    """`pantheon limit reset-mark` — отметка досрочного сброса недели (metis-1067, решение владельца 12.11). Только
+    терминал владельца, как --over-cap: в окне роли (PANTHEON_ROLE задан) — отказ, код 2. Окно недели по снимку
+    строки статуса неизвестно или уже сброшено — отметка не пишется, код 1. Пишет STATE/limit/reset-mark.json:
+    at (сейчас), resets_at самого свежего замера; snapshot() не учитывает замеры этого окна раньше at."""
+    if rest != ["reset-mark"]:
+        print("pantheon limit reset-mark", file=P.sys.stderr)
+        return 2
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    if role:
+        print(f"pantheon limit reset-mark: отказ — окно роли ({role}); досрочный сброс недели отмечает только владелец "
+              "из своего терминала", file=P.sys.stderr)
+        return 2
+    t = P.now()
+    _, last = week_rows()
+    if not last or last[1] <= t:
+        print("pantheon limit reset-mark: окно недели неизвестно или уже сброшено — отметка не записана; нужен свежий "
+              "снимок строки статуса", file=P.sys.stderr)
+        return 1
+    try:
+        P.write_json(reset_mark_path(), {"at": t, "resets_at": last[1], "stamp": P.stamp(t),
+                                         "week_end": P.stamp(last[1])})
+    except OSError as e:
+        print(f"pantheon limit reset-mark: отметка не записана ({e})", file=P.sys.stderr)
+        return 1
+    print(f"Отметка досрочного сброса: {P.stamp(t)}, окно недели до {P.stamp(last[1])}. Замеры до отметки не "
+          "учитываются; неделя — по замерам строки статуса после неё (свежий — в течение 5 мин).")
+    return 0
