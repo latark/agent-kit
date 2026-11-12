@@ -31,7 +31,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
      последнее решение на SHA и нынешнюю base PR, не старше REQUEST_TTL и на нынешней вершине ветки base (gh api,
      base_tip — как у шлюза; main ушёл вперёд — решение не в счёт) (code_facts): «принять» с head из same
      переносится на SHA (в счёт — последний вердикт рецензента на SHA и этих head после отсечки), а «вернуть» другой
-     argus снимает, только если head «вернуть» в differs. Решения нет или код не посчитан — строго: другой коммит —
+     argus снимает, только если head «вернуть» в differs. Head из delta решения (SHA — мелкая правка поверх него вне
+     ядра, metis-0784): его «принять» переносится, если после него на SHA есть «принять» другого argus (delta_backed) —
+     дельта-круг `pantheon review delta`, в ядре тоже. Решения нет или код не посчитан — строго: другой коммит —
      неизвестный код, «принять» не переносится, «вернуть» не снимается; правило 3 шлюза guard (третий head) проход
      не применяет. «Принять» на другой base PR (metis-0965) и с полем «вернули», которое врёт (metis-0497), не в
      счёт. Проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
@@ -42,7 +44,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
      job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
      набора FULL_TESTS (full_tests_record) или узкая `--affected` с базой и картой, сверенными с GitHub
-     (narrow_gh_problem, metis-1050 — и у ядра, и у пачки); нет такой — снята с тревогой. Аннотации или данные job красных не
+     (narrow_gh_problem, metis-1050 — и у ядра, и у пачки) или узкая от прошлого head с записью тестов при мелкой
+     дельте вне файлов шлюза (delta_gh_problem, metis-0784); нет такой — снята с тревогой. Аннотации или данные job красных не
      получены (сбой gh) — ждёт: признак лимита не проверить (ci_billing_fetch, metis-0813).
      PR не сливается с base (mergeable CONFLICTING или mergeStateStatus DIRTY) — снята с тревогой «конфликт с main»
      до окна, а при `pantheon merge request` заявки нет вовсе (metis-0987); GitHub ещё считает (UNKNOWN) или защита
@@ -722,6 +725,36 @@ def narrow_map_path(repo):
     return posixpath.join(posixpath.dirname(script), "affected-map.json") if script else None
 
 
+# дельта мелкой правки проверенного PR (metis-0784, 0669): DELTA_* и delta_problem — дословно те же, что в шлюзе guard
+# (сверяет test_merge). Шлюз guard считает дельту git папки слияния (_delta_link, _delta_heads), проход — тесты через
+# GitHub API (delta_gh_problem), а argus — по решению шлюза guard (поле delta, code_facts)
+DELTA_MAX_LINES = 200
+DELTA_DEPTH = 4
+DELTA_GATE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/guard_rules.py",
+                    "plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/review_rules.py")
+
+
+def delta_problem(rows, core=None):
+    """Дельта годится для узкого круга → None или почему нет. rows — [(путь, добавлено, удалено)] по файлам дельты,
+    у двоичного файла числа None; rows None — дельту не посчитали. core — признак ядра (путь → bool): задан — правило
+    argus (дельта не задевает ядро), не задан — правило тестов (не задевает файлы шлюза DELTA_GATE_FILES). Путь
+    сводится, как в is_core: ./, //, `..`, регистр. Двоичный файл — отказ: строки не посчитать. Строк (добавлено +
+    удалено) больше DELTA_MAX_LINES — отказ. Пустая дельта годится."""
+    if rows is None:
+        return "дельту с прошлого head не посчитать"
+    total = 0
+    for path, added, deleted in rows:
+        p = posixpath.normpath(str(path).strip("/") or ".").strip("/").casefold()
+        if core(p) if core else p in DELTA_GATE_FILES:
+            return f"дельта задевает {'ядро' if core else 'файл шлюза слияния'} {path}"
+        if not (isinstance(added, int) and isinstance(deleted, int)):
+            return f"в дельте двоичный файл {path} — строки не посчитать"
+        total += added + deleted
+    if total > DELTA_MAX_LINES:
+        return f"дельта {total} строк — больше {DELTA_MAX_LINES}"
+    return None
+
+
 def ci_verdict(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
     StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
@@ -927,8 +960,10 @@ def base_tip(repo, branch):
 
 
 def code_facts(repo, pr, sha, view):
-    """(same, differs) — head PR, чей код шлюз guard сверил с кодом sha (metis-0966, 0396, 0443, вариант А): same — тот
-    же код (отпечаток собственного диффа или слияние, merge_gate._merge_same), differs — посчитано, код другой. Берётся
+    """(same, differs, delta) — head PR, чей код шлюз guard сверил с кодом sha (metis-0966, 0396, 0443, вариант А): same
+    — тот же код (отпечаток собственного диффа или слияние, merge_gate._merge_same), differs — посчитано, код другой,
+    delta — sha лишь мелкая правка поверх head вне ядра (merge_gate._delta_heads, metis-0784; поле delta решения —
+    список строк, иначе пусто: решения старше поля его не несут). Берётся
     последнее решение (запись kind "decision" в carry.jsonl, её пишет хук guard при `pantheon merge request`, P.
     review_decisions) на sha и нынешнюю base PR, записанное не раньше REQUEST_TTL назад и на нынешней вершине ветки
     base (base_oid решения — живая вершина base_tip: main ушёл вперёд — решение о другом слиянии). Нет решения —
@@ -945,10 +980,12 @@ def code_facts(repo, pr, sha, view):
             if not tip:
                 tip.append(base_tip(repo, base))  # gh — только когда есть решение-кандидат, один раз
             if str(d.get("base_oid") or "").lower() != tip[0]:  # вершины нет (None) — тоже не та
-                return frozenset(), frozenset()
+                return frozenset(), frozenset(), frozenset()
             same, differs = set(d["same"]) - {sha}, set(d["differs"]) - {sha}
-            return frozenset(same - differs), frozenset(differs - same)
-    return frozenset(), frozenset()
+            delta = d.get("delta") if isinstance(d.get("delta"), list) else []
+            delta = {h for h in delta if isinstance(h, str)} - same - {sha}
+            return frozenset(same - differs), frozenset(differs - same), frozenset(delta)
+    return frozenset(), frozenset(), frozenset()
 
 
 def held_rejects(verdicts, sha, differs=frozenset()):
@@ -976,6 +1013,14 @@ def reject_floor(verdicts):
                                              and a["sha"] == r["sha"] for a in verdicts[i + 1:]):
             floor = i
     return floor
+
+
+def delta_backed(verdicts, i, sha):
+    """«Принять» verdicts[i] на прошлом head переносится на sha дельтой (metis-0784): после него на sha записано
+    «принять» другого рецензента — дельту проверил свежий argus. Отсечку reject_floor gate применяет к самому
+    переносимому вердикту, а свежее «принять» записано позже него; «вернуть» в силе отсекает held_rejects раньше."""
+    who = _reviewer(verdicts[i])
+    return any(a["kind"] == "accept" and a["sha"] == sha and _reviewer(a) != who for a in verdicts[i + 1:])
 
 
 def _view_problem(view, sha):
@@ -1017,7 +1062,7 @@ def gate(repo, pr, sha, view):
     verdicts = [r for r in verdicts if not (r["kind"] == "accept" and returned_lie(r, verdicts))]
     # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard; код прошлых head — из
     # решения шлюза guard при `pantheon merge request` (code_facts, metis-0966)
-    same, differs = code_facts(repo, pr, sha, view)
+    same, differs, delta = code_facts(repo, pr, sha, view)
     held = held_rejects(verdicts, sha, differs)
     if held:
         return "fail", (f"«вернуть» от argus на {', '.join(r['sha'][:12] for r in held)} в силе: оно привязано к PR, "
@@ -1025,20 +1070,24 @@ def gate(repo, pr, sha, view):
                         "кодом (код сверяет шлюз guard при `pantheon merge request` из клона репозитория)")
     floor = reject_floor(verdicts)
     # «принять» с head того же кода переносится на sha, как в шлюзе guard (_carried, metis-0396): последний вердикт
-    # каждого рецензента — на sha и этих head, в счёт — записанные после отсечки
+    # каждого рецензента — на sha и этих head, в счёт — записанные после отсечки. «Принять» на head из delta (sha —
+    # мелкая правка поверх вне ядра, metis-0784) — тоже, если после него на sha есть «принять» другого argus после
+    # отсечки: дельту проверил свежий рецензент, нетронутый код — прежний
     latest = {}
     for i, r in enumerate(verdicts):
-        if r["sha"] == sha or r["sha"] in same:
+        if r["sha"] == sha or r["sha"] in same or r["sha"] in delta and delta_backed(verdicts, i, sha):
             latest[_reviewer(r)] = (i, r)
     counted = [r for i, r in latest.values() if i > floor]
     if len(counted) < MIN_ACCEPTS:
         cut = len(latest) - len(counted)
-        moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same)
+        moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted})
         return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}"
                         + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
                            if cut else "")
                         + (f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
-                           "— сверяет шлюз guard при `pantheon merge request` из клона репозитория" if moved else ""))
+                           "— сверяет шлюз guard при `pantheon merge request` из клона репозитория; после мелкой правки "
+                           "вне ядра переносится со свежим «принять» другого argus на этом head (`pantheon review "
+                           "delta`)" if moved else ""))
     latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
@@ -1071,7 +1120,7 @@ def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None)
         return "ok", f"{BILLING_OK}{sha[:12]}"
     whys = []
     for base, mp in [got for r in mine for got in [narrow_tests_record(repo, r)] if got]:
-        bad = narrow_gh_problem(repo, sha, base_name, base, mp)
+        bad = narrow_gh_problem(repo, sha, base_name, base, mp, recs)
         if bad is None:
             return "ok", f"{BILLING_OK}{sha[:12]} (узкий прогон: затронутые PR тесты)"
         whys.append(bad)
@@ -1080,11 +1129,12 @@ def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None)
                     + (f"; узкая не засчитана: {whys[-1]}" if whys else ""))
 
 
-def narrow_gh_problem(repo, sha, base_name, base, mp):
+def narrow_gh_problem(repo, sha, base_name, base, mp, recs=None, depth=DELTA_DEPTH):
     """Узкая запись (база base, sha256 карты mp) годится для head sha PR с веткой base base_name → None или почему
     нет (metis-1050). Как _narrow_problem шлюза guard, но через GitHub API — git папки слияния у прохода нет: base —
     merge-base head и живой вершины base (base_tip; GET compare), карта — sha256 файла narrow_map_path в дереве head
-    (GET contents, сырой файл). Сбой gh — тоже причина: без сверки узкая запись не в счёт."""
+    (GET contents, сырой файл). recs — записи журнала репозитория: с ними база годится и как прошлый head (дельта,
+    delta_gh_problem, metis-0784). Сбой gh — тоже причина: без сверки узкая запись не в счёт."""
     tip = base_tip(repo, base_name)
     if not tip:
         return "вершина ветки base не получена"
@@ -1097,7 +1147,10 @@ def narrow_gh_problem(repo, sha, base_name, base, mp):
     if not SHA_RE.fullmatch(mb):
         return "merge-base head и base не получена (gh)"
     if mb != base:
-        return f"узкий набор посчитан от {base[:12]}, а merge-base head и base — {mb[:12]}"
+        delta = delta_gh_problem(repo, sha, base_name, base, recs, depth) if recs is not None else ""
+        if delta is not None:
+            return (f"узкий набор посчитан от {base[:12]}, а merge-base head и base — {mb[:12]}"
+                    + (f"; как дельта прошлого head не засчитан: {delta}" if delta else ""))
     path = narrow_map_path(repo)
     if not path:
         return "карта affected-map.json для репозитория не задана"
@@ -1112,6 +1165,45 @@ def narrow_gh_problem(repo, sha, base_name, base, mp):
     if hashlib.sha256(r.stdout).hexdigest() != mp:
         return f"карта в записи не та, что {path} в дереве head {sha[:12]}"
     return None
+
+
+def delta_gh_problem(repo, sha, base_name, base, recs, depth):
+    """Узкая запись на sha посчитана от прошлого head base (metis-0784), как _delta_link шлюза guard, через GitHub API
+    → None или почему нет. GET compare base...sha: status ahead и merge-base — сам base (base — предок sha); файлы
+    дельты — строки delta_problem без core (у переименования — оба пути; файл без patch — двоичный или большой, строки
+    не в счёт; 300 файлов — предел ответа, дельту не посчитать). base покрыт: запись полного набора на base или узкая,
+    годная для base сама (narrow_gh_problem), до DELTA_DEPTH звеньев."""
+    try:
+        r = subprocess.run([gh_path(), "api", f"repos/{repo}/compare/{base}...{sha}"], capture_output=True, text=True,
+                           timeout=GH_TIMEOUT, env=gh_env())
+        cmp = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        cmp = None
+    if not isinstance(cmp, dict):
+        return "сравнение с прошлым head не получено (gh)"
+    mbc = cmp.get("merge_base_commit") if isinstance(cmp.get("merge_base_commit"), dict) else {}
+    if cmp.get("status") != "ahead" or str(mbc.get("sha") or "").lower() != base:
+        return "база не предок head — дельтой не засчитать (rebase между кругами: нужен полный круг)"
+    files, rows = cmp.get("files"), []
+    for f in files if isinstance(files, list) and len(files) < 300 else [None]:
+        if not isinstance(f, dict) or not isinstance(f.get("filename"), str):
+            rows = None
+            break
+        n = (f.get("additions"), f.get("deletions")) if isinstance(f.get("patch"), str) else (None, None)
+        rows.append((f["filename"], *n))
+        if isinstance(f.get("previous_filename"), str):
+            rows.append((f["previous_filename"], 0, 0))
+    why = delta_problem(rows)
+    if why:
+        return why
+    if depth <= 0:
+        return f"цепочка дельт длиннее {DELTA_DEPTH}"
+    mine = [r for r in recs if r.get("kind") == "tests" and r.get("sha") == base]
+    if any(full_tests_record(repo, r) for r in mine):
+        return None
+    whys = [narrow_gh_problem(repo, base, base_name, *got, recs, depth - 1) for r in mine
+            for got in [narrow_tests_record(repo, r)] if got] or [f"на {base[:12]} нет записи тестов"]
+    return None if None in whys else whys[-1]
 
 
 # --- помощник Touch ID ----------------------------------------------------------------------------------------------

@@ -150,6 +150,15 @@ if sys.argv[1] == "api" and "/git/ref/heads/" in sys.argv[2]:
     print(json.dumps({"ref": "refs/heads/" + sys.argv[2].split("/git/ref/heads/")[1],
                       "object": {"sha": open(t).read().strip() if os.path.exists(t) else "b" * 40, "type": "commit"}}))
     sys.exit(0)
+if sys.argv[1] == "api" and "/compare/" in sys.argv[2] and "--jq" not in sys.argv:
+    # сравнение прошлого head с новым целиком (delta_gh_problem, metis-0784): rec/gh-cmp.json — {"base...sha": ответ};
+    # пары нет — код 1
+    t = os.path.join(rec, "gh-cmp.json")
+    got = json.load(open(t)).get(sys.argv[2].split("/compare/")[1]) if os.path.exists(t) else None
+    if got is None:
+        sys.exit(1)
+    print(json.dumps(got))
+    sys.exit(0)
 if sys.argv[1] == "api" and "/compare/" in sys.argv[2]:
     # merge-base head и base (narrow_gh_problem, metis-1050): rec/gh-mb — SHA (по умолчанию c×40); gh-mb-fail — сбой
     if os.path.exists(os.path.join(rec, "gh-mb-fail")):
@@ -729,6 +738,97 @@ def test_gate_decision():
     b = box([("accept", SHA2, "s1"), ("reject", SHA3, "s3"), ("accept", SHA, "s4")], {"same": [SHA2], "differs": [SHA3]})
     check("0396: «принять» на SHA2 записано до «вернуть» (отсечка) — не переносится, 1 из 2",
           not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(), b.alerts())
+
+
+def test_gate_delta():
+    """metis-0784: SHA — мелкая правка вне ядра поверх SHA2 (поле delta решения шлюза guard): «принять» на SHA2
+    переносится, только если после него на SHA есть «принять» другого argus (дельта-круг); иначе — как раньше."""
+    def box(adds, **d):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        if d:
+            b.decide(**d)
+        b.run()
+        return b
+
+    one = [("accept", SHA2, "s1"), ("accept", SHA, "s3")]
+    b = box(one, differs=[SHA2], delta=[SHA2])
+    check("0784: «принять» на SHA2 из delta и свежее «принять» другого argus на SHA — 2 из 2, сливает",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box(one, differs=[SHA2])
+    check("0784: SHA2 не в delta (код другой) — не переносится, 1 из 2", not b.merges() and "1 из 2" in b.alerts()
+          and "pantheon review delta" in b.alerts(), b.alerts())
+    for name, adds, d in (
+            ("на SHA свежего «принять» нет", [("accept", SHA2, "s1"), ("accept", SHA2, "s2")], {}),
+            ("свежее «принять» на SHA — того же рецензента", [("accept", SHA2, "s1"), ("accept", SHA, "s1")], {}),
+            ("свежее «принять» на SHA записано раньше переносимого", [("accept", SHA, "s3"), ("accept", SHA2, "s1")], {}),
+            ("поле delta не список", one, {"delta": 5}),
+            ("«принять» на SHA2 записано до «вернуть» (отсечка)",
+             [("accept", SHA2, "s1"), ("reject", SHA3, "s4"), ("accept", SHA, "s3")], {"differs": [SHA2, SHA3]})):
+        b = box(adds, **{"differs": [SHA2], "delta": [SHA2], **d})
+        got = "0 из 2" if name == "на SHA свежего «принять» нет" else "1 из 2"
+        check(f"0784: {name} — не переносится, {got}", not b.merges() and got in b.alerts(), b.alerts())
+
+
+def test_ci_billing_delta():
+    """metis-0784: CI не запускался из-за лимита минут — проход засчитывает узкую запись на SHA от прошлого head SHA2
+    (`--affected --base SHA2`), если SHA2 — предок SHA (compare: ahead, merge-base — SHA2), дельта мелкая и не задевает
+    файлы шлюза, а на SHA2 есть запись полного набора или годная узкая (delta_gh_problem)."""
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    mapb = '{"v": 3}'
+    mp = hashlib.sha256(mapb.encode()).hexdigest()
+    narrow = lambda base: (FULL_TESTS_CMD.split(" -- ", 1)[1].replace("heavy ", "")
+                           .replace("run-tests.py", "run-tests.py --affected --base " + base))
+    small = {"filename": "README.md", "additions": 3, "deletions": 1, "patch": "@@ x"}
+    good = {"status": "ahead", "merge_base_commit": {"sha": SHA2}, "files": [small]}
+
+    def box(cmp=good, prev="full", more=None):
+        b = Box()
+        b.records = []
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.add("tests", sha=SHA, who="", cmd=narrow(SHA2), files=["guard/test_guard.py"], map=mp)
+        if prev == "full":
+            b.add("tests", sha=SHA2, who="")
+        elif prev:
+            b.add("tests", sha=SHA2, who="", cmd=narrow(prev), files=["guard/test_guard.py"], map=mp)
+        b.request()
+        b.set("gh-map", mapb)
+        b.set("gh-cmp.json", json.dumps({f"{SHA2}...{SHA}": cmp, **(more or {})}))
+        b.view(SHA, checks=blocked)
+        b.run()
+        return b
+
+    b = box()
+    check("0784: лимит, узкая от прошлого head с полной записью на нём → окно и слияние", len(b.merges()) == 1
+          and "узкий прогон" in b.windows()[0][0], (b.outs[-1], b.alerts()))
+    b = box(prev="c" * 40)
+    check("0784: на прошлом head узкая от merge-base → слияние", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    gate_file = dict(small, filename="plugins/guard/hooks/merge_gate.py")
+    for name, kw in (("на прошлом head записи нет", {"prev": None}),
+                     ("сравнение не получено (gh)", {"cmp": None}),
+                     ("прошлый head не предок (diverged)", {"cmp": dict(good, status="diverged")}),
+                     ("merge-base сравнения — не прошлый head", {"cmp": dict(good, merge_base_commit={"sha": SHA3})}),
+                     ("дельта задевает файл шлюза", {"cmp": dict(good, files=[gate_file])}),
+                     ("переименование из файла шлюза", {"cmp": dict(good, files=[dict(
+                         small, previous_filename="plugins/guard/hooks/merge_gate.py", status="renamed")])}),
+                     ("дельта 201 строка", {"cmp": dict(good, files=[dict(small, additions=150, deletions=51)])}),
+                     ("файл без patch (двоичный)", {"cmp": dict(good, files=[{"filename": "a.bin", "additions": 0,
+                                                                               "deletions": 0}])}),
+                     ("300 файлов — предел ответа", {"cmp": dict(good, files=[
+                         {"filename": f"f{i}", "additions": 0, "deletions": 0, "patch": ""} for i in range(300)])}),
+                     ("цикл записей SHA ↔ SHA2", {"prev": SHA, "more": {f"{SHA}...{SHA2}": dict(
+                         good, merge_base_commit={"sha": SHA})}})):
+        b = box(**kw)
+        check(f"0784: лимит, узкая от прошлого head — {name} → окна нет, заявка снята",
+              not b.windows() and not b.merges() and "годной узкой" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(cmp=dict(good, files=[{"filename": f"f{i}", "additions": 0, "deletions": 0, "patch": ""}
+                                  for i in range(299)]))
+    check("0784: 299 файлов без строк — дельта годится, слияние", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
 
 
 def test_request_conflict_blocked():
@@ -1416,7 +1516,7 @@ def test_ci_matches_guard():
     (metis-1050),
     pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), base_counts (metis-0965),
     REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
-    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE в merge.py
+    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT, CI_NONE, delta_problem и DELTA_* (metis-0784) в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -1429,12 +1529,13 @@ def test_ci_matches_guard():
                                                              "required_checks", "optional_checks",
                                                              "narrow_tests_record", "narrow_map_path",
                                                              "pair_match", "returned_lie",
-                                                             "returned_lifts", "base_counts"):
+                                                             "returned_lifts", "base_counts", "delta_problem"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
                                             "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "MAP_HASH_RE", "CI_OK",
-                                            "CI_WAIT", "CI_NONE"):
+                                            "CI_WAIT", "CI_NONE", "DELTA_MAX_LINES", "DELTA_DEPTH",
+                                            "DELTA_GATE_FILES"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
@@ -1444,7 +1545,8 @@ def test_ci_matches_guard():
              "pair_match",
              "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
              "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
-             "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE")
+             "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE", "delta_problem", "DELTA_MAX_LINES", "DELTA_DEPTH",
+             "DELTA_GATE_FILES")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
