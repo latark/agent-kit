@@ -759,6 +759,9 @@ def test_gate_delta():
     b = box(one, differs=[SHA2], delta=[SHA2])
     check("0784: «принять» на SHA2 из delta и свежее «принять» другого argus на SHA — 2 из 2, сливает",
           len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2"), ("accept", SHA, "s1")], differs=[SHA2], delta=[SHA2])
+    check("0784: двое приняли SHA2, дельту принял один из них — его «принять» на SHA и перенос второго, 2 из 2",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
     b = box(one, differs=[SHA2])
     check("0784: SHA2 не в delta (код другой) — не переносится, 1 из 2", not b.merges() and "1 из 2" in b.alerts()
           and "pantheon review delta" in b.alerts(), b.alerts())

@@ -1017,10 +1017,12 @@ def reject_floor(verdicts):
 
 def delta_backed(verdicts, i, sha):
     """«Принять» verdicts[i] на прошлом head переносится на sha дельтой (metis-0784): после него на sha записано
-    «принять» другого рецензента — дельту проверил свежий argus. Отсечку reject_floor gate применяет к самому
-    переносимому вердикту, а свежее «принять» записано позже него; «вернуть» в силе отсекает held_rejects раньше."""
-    who = _reviewer(verdicts[i])
-    return any(a["kind"] == "accept" and a["sha"] == sha and _reviewer(a) != who for a in verdicts[i + 1:])
+    «принять» другого рецензента — дельту проверил свежий argus. Сверять рецензента не нужно: «принять» того же
+    рецензента на sha позже — его последний вердикт, gate берёт его вместо переносимого (latest по рецензенту), так что
+    в счёт без свежего «принять» другого перенос не попадёт (test_gate_delta: тот же рецензент, двое на прошлом head). Отсечку reject_floor gate
+    применяет к самому переносимому вердикту, а свежее «принять» записано позже него; «вернуть» в силе отсекает
+    held_rejects раньше."""
+    return any(a["kind"] == "accept" and a["sha"] == sha for a in verdicts[i + 1:])
 
 
 def _view_problem(view, sha):
