@@ -284,14 +284,33 @@ def test_week_reset_mark_1067():
     check(N.snapshot()["week"] == (6, resets, t - 60), f"отметка не обнулила базу: {N.snapshot()}")
     m = N.measure(t)
     check(m["known"] and m["used"] == 6 and m["zone"] == "green", f"measure после отметки: {m}")
-    # простаивающее окно перезаписало seven-day старым 88 после отметки — замер после отметки, берётся честно
-    e.snap(t - 30, 88, resets)
-    check(N.snapshot()["week"][0] == 88, f"замер 88 после отметки не взят: {N.snapshot()}")
+    mark_p = os.path.join(e.state, "limit", "reset-mark.json")
+    check(json.load(open(mark_p)).get("max") == 6, f"максимум после отметки не записан: {open(mark_p).read()}")
+    # неделя после отметки не убывает (metis-0243): seven-day 70, затем простаивающее окно перезаписало его старым 6,
+    # а week-usage строка статуса не пополняет (пишет только pct выше 99) — неделя 70 по max отметки
+    e.snap(t - 30, 70, resets)
+    check(N.snapshot()["week"][0] == 70, f"замер 70 после отметки не взят: {N.snapshot()}")
     e.snap(t - 20, 6, resets)
-    check(N.snapshot()["week"][0] == 6, f"seven-day 6 после 88: {N.snapshot()}")
-    # неделя — максимум по замерам после отметки: строка week-usage после неё тоже в счёт
-    e.week_usage([(t - 25, resets, 9)])
-    check(N.snapshot()["week"][0] == 9, f"строка week-usage после отметки не в максимуме: {N.snapshot()}")
+    check(N.snapshot()["week"] == (70, resets, t - 20), f"старый 6 опустил неделю после отметки: {N.snapshot()}")
+    m = N.measure(t)
+    check(m["used"] == 70, f"measure после 70 → 6: {m}")
+    check(json.load(open(mark_p))["max"] == 70, f"max отметки не 70: {open(mark_p).read()}")
+    # STATE не пишется (окно роли): snapshot не падает, неделя — по замеру и прежнему max
+    os.chmod(os.path.dirname(mark_p), 0o500)
+    try:
+        e.snap(t - 10, 75, resets)
+        check(N.snapshot()["week"][0] == 75, f"без записи в STATE: {N.snapshot()}")
+    finally:
+        os.chmod(os.path.dirname(mark_p), 0o700)
+    check(json.load(open(mark_p))["max"] == 70, "max записан в каталог без права записи")
+    # новая отметка того же окна — максимум заново
+    rc, _, _ = reset_mark(t - 5)
+    e.snap(t, 6, resets)
+    check(rc == 0 and N.snapshot()["week"][0] == 6, f"новая отметка не сбросила максимум: {N.snapshot()}")
+    # max отметки без замеров после неё — неделя по max, а не неизвестна и не 99
+    e = early_reset_env(t, resets)
+    P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 60, "resets_at": resets, "max": 40})
+    check(N.snapshot()["week"][0] == 40, f"max отметки без замеров после неё: {N.snapshot()}")
     # отметка того же окна с допуском 1 ч действует, другого окна (новый resets_at) — нет
     for shift, want in ((1800, 6), (3 * 3600, 99)):
         e = early_reset_env(t, resets)
@@ -305,6 +324,22 @@ def test_week_reset_mark_1067():
         open(os.path.join(e.state, "limit", "reset-mark.json"), "w").write(body)
         e.snap(t - 60, 6, resets)
         check((N.snapshot()["week"] or (None,))[0] == 99, f"битая отметка {body!r} подействовала: {N.snapshot()}")
+    # гонка процессов: другой проход успел записать больший max — меньший его не опускает; отметку сменили (новый
+    # reset-mark) — max старой отметки в новую не пишется
+    e = early_reset_env(t, resets)
+    mp = os.path.join(e.state, "limit", "reset-mark.json")
+    P.write_json(mp, {"at": t - 1800, "resets_at": resets, "max": 50})
+    N.mark_max_save((t - 1800, resets, 20.0), 30.0)
+    check(P.read_json(mp)["max"] == 50, f"меньший max опустил записанный: {P.read_json(mp)}")
+    P.write_json(mp, {"at": t - 60, "resets_at": resets})
+    N.mark_max_save((t - 1800, resets, 50.0), 80.0)
+    check("max" not in P.read_json(mp), f"max старой отметки записан в новую: {P.read_json(mp)}")
+    # кривой max — как нет: отметка действует, максимум заново
+    e = early_reset_env(t, resets)
+    P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 1800, "resets_at": resets, "max": "x"})
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"][0] == 6 and P.read_json(N.reset_mark_path())["max"] == 6,
+          f"кривой max: {N.snapshot()} {P.read_json(N.reset_mark_path())}")
 
 
 def test_reset_mark_refusals_1067():
