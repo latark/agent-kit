@@ -41,7 +41,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
      запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
      job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
-     набора FULL_TESTS (full_tests_record); нет такой — снята с тревогой. Аннотации или данные job красных не
+     набора FULL_TESTS (full_tests_record) или узкая `--affected` с базой и картой, сверенными с GitHub
+     (narrow_gh_problem, metis-1050 — и у ядра, и у пачки); нет такой — снята с тревогой. Аннотации или данные job красных не
      получены (сбой gh) — ждёт: признак лимита не проверить (ci_billing_fetch, metis-0813).
      PR не сливается с base (mergeable CONFLICTING или mergeStateStatus DIRTY) — снята с тревогой «конфликт с main»
      до окна, а при `pantheon merge request` заявки нет вовсе (metis-0987); GitHub ещё считает (UNKNOWN) или защита
@@ -504,8 +505,8 @@ def window_core(path):
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
-# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, batch_tests_problem (metis-0758),
-# REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, BATCH_BRANCH,
+# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, narrow_tests_record (metis-1050),
+# REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE,
 # CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
 # друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
@@ -679,27 +680,46 @@ def full_tests_record(repo, rec):
     return got == need
 
 
-# PR пачки (metis-0758, решение владельца 03.11 [zeus-fast-2d]: один полный набор на пачку) — ветка head PR с этой
-# приставкой (её даёт `pantheon batch start`, lib/batch.py batch_branch)
-BATCH_BRANCH = "batch/"
+# узкая запись тестов на запасном пути (metis-0734; с metis-1050 09.11 — у любого PR, и ядра, и пачки): MAP_HASH_RE,
+# narrow_tests_record и narrow_map_path — дословно те же, что в шлюзе guard (сверяет test_merge). Базу и карту шлюз guard
+# сверяет git папки слияния (_narrow_problem), проход — через GitHub API (narrow_gh_problem)
+MAP_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
-def batch_tests_problem(repo, sha, view, records):
-    """PR пачки (metis-0758): ветка head PR (headRefName ответа gh pr view) начинается с BATCH_BRANCH. Его тесты —
-    только запись полного набора FULL_TESTS на sha (full_tests_record), и при зелёном CI: пачка сводит правки
-    нескольких задач, а CI на PR и узкая запись гонят только затронутое. Есть такая запись, PR не пачки или у
-    репозитория нет строки в FULL_TESTS (полный набор не задан — как раньше) — None; записи нет — текст причины."""
-    branch = view.get("headRefName") if isinstance(view, dict) else None
-    if not isinstance(branch, str) or not branch.startswith(BATCH_BRANCH):
+def narrow_tests_record(repo, rec):
+    """Запись tests — узкий прогон этого репозитория (metis-0734) → (база, sha256 карты) или None. Команда — FULL_TESTS
+    репозитория (full_tests_record) с одним `--affected` и одним `--base <SHA из 40 знаков>` (коммит, от которого
+    раннер взял дифф: у `pantheon outside test --affected` — merge-base с base PR); files — непустой список меток, map —
+    sha256 карты, по которой выбраны файлы. Другие ключи раннера (--only, --base=…), ref вместо SHA — None."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("cmd"), str):
         return None
-    if not FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()):
+    files, mp = rec.get("files"), rec.get("map")
+    if not (isinstance(files, list) and files and all(isinstance(f, str) for f in files)) \
+            or not (isinstance(mp, str) and MAP_HASH_RE.fullmatch(mp)):
         return None
-    if any(isinstance(r, dict) and r.get("kind") == "tests" and r.get("sha") == sha and isinstance(r.get("repo"), list)
-           and str(repo).lower() in [str(x).lower() for x in r["repo"]] and full_tests_record(repo, r)
-           for r in records):
+    try:
+        words = shlex.split(re.sub(r"\s#.*\Z", "", rec["cmd"], flags=re.S))
+    except ValueError:
         return None
-    return (f"PR пачки (ветка {branch}): засчитывается только запись полного набора тестов (FULL_TESTS) на "
-            f"{sha[:12]}, а её нет — узкая запись и CI на PR гонят только затронутое")
+    # второй --base (или --affected) остаётся в rest — и full_tests_record его не примет
+    if "--affected" not in words or "--base" not in words:
+        return None
+    i, j = words.index("--base"), words.index("--affected")
+    base = words[i + 1] if i + 1 < len(words) else ""
+    if not SHA_RE.fullmatch(base):
+        return None
+    rest = [w for k, w in enumerate(words) if k not in (i, i + 1, j)]
+    return (base, mp) if full_tests_record(repo, {"cmd": shlex.join(rest)}) else None
+
+
+def narrow_map_path(repo):
+    """Путь карты affected-map.json от корня — рядом с run-tests.py команды FULL_TESTS репозитория; нет — None."""
+    try:
+        words = shlex.split(FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()) or "")
+    except ValueError:
+        return None
+    script = next((w for w in words if posixpath.basename(w) == "run-tests.py"), None)
+    return posixpath.join(posixpath.dirname(script), "affected-map.json") if script else None
 
 
 def ci_verdict(rollup, required=(), runs=None, optional=()):
@@ -982,9 +1002,6 @@ def gate(repo, pr, sha, view):
     recs = P.review_records(repo)
     if not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
         return "fail", f"нет записи тестов шлюза на {sha[:12]}"
-    why = batch_tests_problem(repo, sha, view, recs)  # PR пачки — только полный набор на head, как в шлюзе guard
-    if why:
-        return "fail", why
     verdicts = []
     for r in recs:
         by = r.get("by") if isinstance(r.get("by"), dict) else {}
@@ -1028,17 +1045,18 @@ def gate(repo, pr, sha, view):
     state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
     # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
     warn = "".join(f"; {n}" for n in notes)
-    state, why = billing_verdict(repo, sha, recs, runs, required, state, why)
+    state, why = billing_verdict(repo, sha, recs, runs, required, state, why, view.get("baseRefName"))
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, {why}{warn}"
 
 
-def billing_verdict(repo, sha, recs, runs, required, state, why):
+def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None):
     """Итог CI в gate (state, why — вердикт ci_verdict): (ok|wait|fail, текст). Зелёный — «CI ✓», идёт — как есть.
     Красный: CI не запускался из-за лимита минут или оплаты
     (metis-0655) — вместо CI засчитывается запись тестов на этот SHA с командой полного набора FULL_TESTS
-    (full_tests_record), как в шлюзе guard (_billing_problem); нет такой записи или FULL_TESTS у репозитория — fail по
+    (full_tests_record), как в шлюзе guard (_billing_problem), или узкая (narrow_tests_record, metis-1050) — её база и
+    карта сверены с GitHub (narrow_gh_problem); нет такой записи или FULL_TESTS у репозитория — fail по
     красной. Аннотации или job не получены (сбой gh) — wait: признак не проверить, а снять заявку по красной значило бы
     потерять запасной путь (metis-0813)."""
     if state != "fail":
@@ -1048,10 +1066,52 @@ def billing_verdict(repo, sha, recs, runs, required, state, why):
         return "wait", f"аннотации CI не получены (сбой gh) — лимит минут или нет, не проверить; {why}"
     if not billing:
         return "fail", why
-    if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
+    mine = [r for r in recs if r.get("kind") == "tests" and r.get("sha") == sha]
+    if any(full_tests_record(repo, r) for r in mine):
         return "ok", f"{BILLING_OK}{sha[:12]}"
+    whys = []
+    for base, mp in [got for r in mine for got in [narrow_tests_record(repo, r)] if got]:
+        bad = narrow_gh_problem(repo, sha, base_name, base, mp)
+        if bad is None:
+            return "ok", f"{BILLING_OK}{sha[:12]} (узкий прогон: затронутые PR тесты)"
+        whys.append(bad)
     return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
-                    f"(FULL_TESTS) на {sha[:12]} нет")
+                    f"(FULL_TESTS) или годной узкой (--affected) на {sha[:12]} нет"
+                    + (f"; узкая не засчитана: {whys[-1]}" if whys else ""))
+
+
+def narrow_gh_problem(repo, sha, base_name, base, mp):
+    """Узкая запись (база base, sha256 карты mp) годится для head sha PR с веткой base base_name → None или почему
+    нет (metis-1050). Как _narrow_problem шлюза guard, но через GitHub API — git папки слияния у прохода нет: base —
+    merge-base head и живой вершины base (base_tip; GET compare), карта — sha256 файла narrow_map_path в дереве head
+    (GET contents, сырой файл). Сбой gh — тоже причина: без сверки узкая запись не в счёт."""
+    tip = base_tip(repo, base_name)
+    if not tip:
+        return "вершина ветки base не получена"
+    try:
+        r = subprocess.run([gh_path(), "api", f"repos/{repo}/compare/{tip}...{sha}", "--jq", ".merge_base_commit.sha"],
+                           capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
+    except (OSError, subprocess.SubprocessError):
+        return "merge-base head и base не получена (gh)"
+    mb = r.stdout.strip().lower() if r.returncode == 0 else ""
+    if not SHA_RE.fullmatch(mb):
+        return "merge-base head и base не получена (gh)"
+    if mb != base:
+        return f"узкий набор посчитан от {base[:12]}, а merge-base head и base — {mb[:12]}"
+    path = narrow_map_path(repo)
+    if not path:
+        return "карта affected-map.json для репозитория не задана"
+    try:
+        r = subprocess.run([gh_path(), "api", f"repos/{repo}/contents/{path}?ref={sha}", "-H",
+                            "Accept: application/vnd.github.raw+json"], capture_output=True, timeout=GH_TIMEOUT,
+                           env=gh_env())
+    except (OSError, subprocess.SubprocessError):
+        return f"карта {path} в дереве head не получена (gh)"
+    if r.returncode != 0:
+        return f"карта {path} в дереве head не получена (gh)"
+    if hashlib.sha256(r.stdout).hexdigest() != mp:
+        return f"карта в записи не та, что {path} в дереве head {sha[:12]}"
+    return None
 
 
 # --- помощник Touch ID ----------------------------------------------------------------------------------------------
