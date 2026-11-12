@@ -429,7 +429,8 @@ def t_files_parallel(h):
 
 
 LIGHT_FILES = [{"filename": "plugins/guard/tests/test_new.py", "status": "added", "additions": 9, "deletions": 0},
-               {"filename": "README.md", "status": "modified", "additions": 1, "deletions": 1}]
+               {"filename": "README.md", "status": "modified", "additions": 1, "deletions": 1,
+                "patch": "@@ -1 +1 @@\n-a\n+b"}]
 
 
 def t_light_core(h):

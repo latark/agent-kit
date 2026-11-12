@@ -456,15 +456,18 @@ def pr_files(repo, pr, view, raw=None):
 # только добавленные строки тестов и документы, которые не инструкции агентам. Список белый: тест — файл в
 # plugins/<плагин>/tests/, добавлен или правлен без удалённых строк; документ — README*.md (любой регистр) или
 # drafts/<имя>.md. Инструкции агентам и пропуски раннера (LIGHT_NOT_RE: папки roles, skills, agents, commands, hooks,
+# output-styles, monitors, themes, workflows, bin, помощники tests/_*.py,
 # template, packs, *prompts и любая с точкой в начале, AGENTS.md, CLAUDE.md, SKILL.md, *.tmpl, run-tests.py) — не
 # лёгкий при любом пути, как и удаление, переименование, копирование, пустой или неполный список. Текст LIGHT_*,
-# light_pr и light_accept в merge.py и merge_gate.py совпадает дословно — сверяет test_merge (AST)
+# light_pr и light_accept в merge.py и merge_gate.py совпадает дословно — сверяет test_merge_light (AST)
 LIGHT_EFFORT = "high"
 LIGHT_TEST_RE = re.compile(r"plugins/[a-z0-9_-]+/tests/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*")
 LIGHT_DOC_RE = re.compile(r"(?:(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*readme[A-Za-z0-9_.-]*|drafts/[A-Za-z0-9_-]"
                           r"[A-Za-z0-9_.-]*)\.md", re.I)
-LIGHT_NOT_RE = re.compile(r"(?:^|/)(?:\.|(?:roles|skills|agents|commands|hooks|templates?|packs|[a-z_-]*prompts?)/)"
-                          r"|(?:^|/)(?:agents|claude|skill)\.md$|\.tmpl(?:\.|$)|(?:^|/)run-tests\.py$", re.I)
+LIGHT_NOT_RE = re.compile(r"(?:^|/)(?:\.|(?:roles|skills|agents|commands|hooks|templates?|packs|[a-z_-]*prompts?"
+                          r"|output-styles|monitors|themes|workflows|bin)/)"
+                          r"|(?:^|/)(?:agents|claude|skill)\.md$|\.tmpl(?:\.|$)|(?:^|/)run-tests\.py$"
+                          r"|plugins/[a-z0-9_-]+/tests/(?:[^/]+/)*_[^/]*\.py$", re.I)
 
 
 def light_pr(files, count):
@@ -482,6 +485,8 @@ def light_pr(files, count):
             return False, f"{name} — {status}: удаление, переименование и копирование не лёгкие"
         if LIGHT_NOT_RE.search(name):
             return False, f"{name} — инструкция агентам или пропуски раннера тестов"
+        if status == "modified" and not (isinstance(f.get("patch"), str) and f["patch"]):
+            return False, f"{name} — правка без patch (двоичный файл или большой дифф): удалённые строки не видны"
         if LIGHT_TEST_RE.fullmatch(name) and isinstance(cut, int) and not isinstance(cut, bool) and cut == 0:
             tests += 1
         elif LIGHT_DOC_RE.fullmatch(name):

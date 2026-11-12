@@ -26,7 +26,7 @@ def added(path, n=5):
 
 
 def modified(path, plus=3, minus=0):
-    return {"filename": path, "status": "modified", "additions": plus, "deletions": minus}
+    return {"filename": path, "status": "modified", "additions": plus, "deletions": minus, "patch": "@@ -1 +1 @@\n+x"}
 
 
 def box(files, accepts=(OPUS_HIGH,)):
@@ -89,6 +89,11 @@ def test_light_two():
     two_needed("другой .md (не README, не drafts)", [modified("plugins/pantheon/template/pantheon/board.md", 1, 0)],
                why="инструкция агентам")
     two_needed("план вне drafts/", [added("plugins/pantheon/docs/plan.md")], why="не тест и не документ")
+    two_needed("README в output-styles/", [added("plugins/guard/output-styles/README.md")], why="инструкция агентам")
+    two_needed("файл в monitors/", [added("plugins/guard/monitors/x.json")], why="инструкция агентам")
+    two_needed("помощник tests/_par.py", [added("plugins/guard/tests/_par.py")], why="инструкция агентам")
+    two_needed("двоичный modified без patch", [{"filename": "plugins/guard/tests/fixtures/x.bin", "status": "modified",
+                                                "additions": 0, "deletions": 0}], why="без patch")
 
 
 def test_light_accept_needed():

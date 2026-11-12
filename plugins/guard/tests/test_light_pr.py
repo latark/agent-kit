@@ -27,8 +27,10 @@ def check(name, cond, detail=""):
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f"  [{detail}]"))
 
 
-def f(name, status="modified", plus=3, minus=0, prev=None):
+def f(name, status="modified", plus=3, minus=0, prev=None, patch=True):
     r = {"filename": name, "status": status, "additions": plus, "deletions": minus}
+    if status == "modified" and patch:
+        r["patch"] = "@@ -1 +1 @@\n+x"
     if prev is not None:
         r["previous_filename"] = prev
     return r
@@ -75,9 +77,19 @@ HEAVY = [
     ("status changed", [f(T, "changed")], "changed"),
     ("deletions не число", [f(T, minus="0")], "удалены строки"),
     ("deletions — False", [f(T, minus=False)], "удалены строки"),
-    ("deletions нет", [{"filename": T, "status": "modified"}], "удалены строки"),
+    ("deletions нет", [{"filename": T, "status": "modified", "patch": "+x"}], "удалены строки"),
     ("имени нет", [{"status": "added", "deletions": 0}], "нет имени"),
     ("путь с ..", [f("plugins/guard/tests/../hooks/merge_gate.py")], "инструкция"),
+    ("README в output-styles/ (стиль ответа)", [f("plugins/guard/output-styles/README.md", "added")], "инструкция"),
+    ("файл в monitors/", [f("plugins/guard/tests/monitors/x.json", "added")], "инструкция"),
+    ("файл в themes/", [f("plugins/guard/themes/README.md", "added")], "инструкция"),
+    ("файл в workflows/", [f("plugins/guard/tests/workflows/x.yml", "added")], "инструкция"),
+    ("файл в bin/", [f("plugins/guard/tests/bin/x.sh", "added")], "инструкция"),
+    ("помощник tests/_par.py", [f("plugins/guard/tests/_par.py", "added")], "инструкция"),
+    ("помощник tests/_py311.py правлен", [f("plugins/pantheon/tests/_py311.py", plus=2)], "инструкция"),
+    ("двоичный modified без patch, deletions 0", [f("plugins/guard/tests/fixtures/x.bin", plus=0, patch=False)],
+     "без patch"),
+    ("modified с пустым patch", [{**f("plugins/guard/tests/test_x.py"), "patch": ""}], "без patch"),
 ]
 
 
