@@ -3586,11 +3586,6 @@ def resume(rest, who):
         print("pantheon resume <имя> | --all", file=P.sys.stderr)
         return 2
     name = rest[0]
-    if os.environ.get("PANTHEON_ROLE") == "hq":
-        # metis-1066: окну Пританея песочница закрывает STATE/stopped — заявка, метку снимет и окно поднимет проход
-        code = P.resume_request(name)
-        if code is not None:
-            return code
     _forget_autostart(name)
     try:
         os.remove(P.path("stopped", name))
@@ -3598,8 +3593,13 @@ def resume(rest, who):
         print(f"{name}: метки «остановлено вами» нет; счётчик сбоев самозапуска сброшен")
         return 0
     except PermissionError:
-        print(f"pantheon resume: метку {name} не снять — песочница окна закрывает STATE/stopped; заявкой возвращаются "
-              "только направления из реестра, остальное — pantheon resume в вашем терминале", file=P.sys.stderr)
+        # metis-1066: окну Пританея песочница закрывает STATE/stopped — заявка, метку снимет и окно поднимет проход
+        code = P.resume_request(name) if os.environ.get("PANTHEON_ROLE") == "hq" else None
+        if code is not None:
+            return code
+        print(f"pantheon resume: метку {name} не снять — песочница окна закрывает STATE/stopped (заявкой окно Пританея "
+              f"возвращает только направления из реестра); снять — pantheon resume {name} в вашем терминале",
+              file=P.sys.stderr)
         return 1
     info = P.read_json(P.path("stopped-all.json"), None)
     if info and name in (info.get("names") or []):

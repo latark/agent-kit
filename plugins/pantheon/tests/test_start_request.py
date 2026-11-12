@@ -225,9 +225,13 @@ try:
           (rc, out, err))
 
     word(60)
-    rc, out, err = run(W.resume, ["hermes-alex"], "zeus")
+    os.chmod(P.path("stopped"), 0o555)  # песочница окна hq: STATE/stopped закрыт (без песочницы метку снимает сам resume)
+    try:
+        rc, out, err = run(W.resume, ["hermes-alex"], "zeus")
+    finally:
+        os.chmod(P.path("stopped"), 0o755)
     data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
-    check("1066 окно hq со словом: resume → код 0, заявка {target, time, by, resume: true}, метку окно не трогает",
+    check("1066 окно hq со словом, STATE/stopped закрыт: resume → код 0, заявка {target, time, by, resume: true}",
           rc == 0 and "заявка принята" in out and len(data) == 1 and data[0].get("resume") is True
           and set(data[0]) == {"target", "time", "by", "resume"} and os.path.exists(stopped), (rc, out, err, data))
     a0 = len(alerts_text())
