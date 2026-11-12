@@ -197,6 +197,17 @@ def suite(kind, prefix_of):
     req = os.path.join(state, "hq-rw", "start-req", DIRECTION + ".req")
     runs = os.path.join(state, "settings", "run")
     for argv in CMDS:
+        if argv == ["resume", DIRECTION]:  # metis-1066: метка «остановлено вами» есть, а снять её окну не дано
+            sd = os.path.join(state, "stopped")
+            os.chmod(state, 0o700)
+            os.makedirs(sd, exist_ok=True)
+            os.chmod(sd, 0o700)
+            with open(os.path.join(sd, DIRECTION), "w") as fh:
+                fh.write("2026-11-12 16:00 владелец\n")
+            if not prefix:
+                os.chmod(os.path.join(sd, DIRECTION), 0o444)
+                os.chmod(sd, 0o555)
+                os.chmod(state, 0o555)
         rc, out, err = run(env, argv, prefix)
         line = last_line(out, err)
         rows.append((argv, rc, line))
@@ -250,6 +261,8 @@ def suite(kind, prefix_of):
           (items.get(ONESHOT_ID) or {}).get("done_at") and "отменён" in str(items[ONESHOT_ID].get("result")), (got, items))
     check(f"{kind}: проход — заявка подняла окно разовым запуском zeus-request",
           any(x.get("by") == "zeus-request" and x.get("target") == DIRECTION for x in items.values()), (got, items))
+    check(f"{kind}: проход — строка resume сняла метку «остановлено вами» (ваше слово в owner-log/zeus.md свежее)",
+          not os.path.exists(os.path.join(state, "stopped", DIRECTION)), got)
     return rows
 
 
