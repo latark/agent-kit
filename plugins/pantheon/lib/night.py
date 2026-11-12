@@ -12,7 +12,10 @@
 Досрочный сброс с тем же resets_at (metis-1067) отмечает владелец из своего терминала: `pantheon limit reset-mark`
 пишет STATE/limit/reset-mark.json (at, resets_at окна). При отметке того же окна (допуск 1 ч) замеры раньше неё не
 учитываются, неделя — максимум по замерам после неё и полю max отметки: его дописывает snapshot, и неделя после
-отметки не убывает, хотя простаивающее окно перезаписывает seven-day старым pct. Новая отметка — max заново;
+отметки не убывает, хотя простаивающее окно перезаписывает seven-day старым pct. Отметка хранит и pre — максимум
+окна до неё: замер после отметки, равный pre (допуск 0,5), — старый pct окна, простаивавшего с запроса до сброса, в
+неделю не входит (metis-1075); старый pct ниже pre от настоящего не отличить — он держит неделю, как раньше. Новая
+отметка — max заново;
 отметка другого окна не действует. Из окна роли — отказ (код 2).
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
 строка в тревогах (её Зевс несёт в сводку). Пробный запрос (metis-0459): снимок старше snapshot_max_min (или его нет), а
@@ -370,19 +373,31 @@ def reset_mark_path():
     return P.path("limit", "reset-mark.json")
 
 
+def _num_or_none(d, key):
+    try:
+        return float(d[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def reset_mark():
-    """Отметка досрочного сброса недели (pantheon limit reset-mark, metis-1067): (at, resets_at, max|None) или None.
-    max — наибольший pct недели, увиденный после отметки (его дописывает snapshot); кривой max — как нет."""
+    """Отметка досрочного сброса недели (pantheon limit reset-mark, metis-1067): (at, resets_at, max|None, pre|None)
+    или None. max — наибольший pct недели, увиденный после отметки (его дописывает snapshot); pre — наибольший pct
+    этого окна до отметки (пишет reset-mark, metis-1075). Кривые max и pre — как нет."""
     d = P.read_json(reset_mark_path(), {})
     try:
         at, resets = float(d["at"]), float(d["resets_at"])
     except (KeyError, TypeError, ValueError):
         return None
-    try:
-        top = float(d["max"])
-    except (KeyError, TypeError, ValueError):
-        top = None
-    return at, resets, top
+    return at, resets, _num_or_none(d, "max"), _num_or_none(d, "pre")
+
+
+def stale_after_mark(pct, pre):
+    """Замер после отметки — старый pct простаивающего окна (metis-1075): равен максимуму недели до отметки (допуск
+    0,5). Окно, простаивавшее с последнего запроса до сброса, пишет seven-day с этим pct и после отметки; в max он
+    прибил бы неделю к старому потолку до конца окна. Выше pre замер настоящий: старое окно больше pre не видело.
+    Без pre (отметка до metis-1075) — ничего не отсекаем, как раньше."""
+    return pre is not None and abs(pct - pre) <= 0.5
 
 
 def mark_max_save(mark, pct):
@@ -426,7 +441,8 @@ def snapshot():
         pcts = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600]
         mark = reset_mark()
         if mark and abs(mark[1] - last[1]) <= 3600:
-            seen = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600 and r[2] >= mark[0]]
+            seen = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600 and r[2] >= mark[0]
+                    and not stale_after_mark(r[0], mark[3])]
             if seen and (mark[2] is None or max(seen) > mark[2]):
                 mark_max_save(mark, max(seen))
             pcts = seen + ([mark[2]] if mark[2] is not None else [])
@@ -1407,8 +1423,9 @@ def limit_main(rest):
     """`pantheon limit reset-mark` — отметка досрочного сброса недели (metis-1067, решение владельца 12.11). Только
     терминал владельца, как --over-cap: в окне роли (PANTHEON_ROLE задан) — отказ, код 2. Окно недели по снимку
     строки статуса неизвестно или уже сброшено — отметка не пишется, код 1. Пишет STATE/limit/reset-mark.json:
-    at (сейчас), resets_at самого свежего замера, без max: snapshot() не учитывает замеры этого окна раньше at, а
-    максимум после отметки копит заново."""
+    at (сейчас), resets_at самого свежего замера, pre (максимум окна до отметки, metis-1075), без max: snapshot() не
+    учитывает замеры этого окна раньше at и замеры, равные pre (старый pct простаивающего окна), а максимум после
+    отметки копит заново."""
     if rest != ["reset-mark"]:
         print("pantheon limit reset-mark", file=P.sys.stderr)
         return 2
@@ -1418,13 +1435,15 @@ def limit_main(rest):
               "из своего терминала", file=P.sys.stderr)
         return 2
     t = P.now()
-    _, last = week_rows()
+    rows, last = week_rows()
     if not last or last[1] <= t:
         print("pantheon limit reset-mark: окно недели неизвестно или уже сброшено — отметка не записана; нужен свежий "
               "снимок строки статуса", file=P.sys.stderr)
         return 1
+    # pre — максимум окна по всем замерам до отметки (metis-1075): его старый pct простаивающего окна snapshot не берёт
+    pre = max(r[0] for r in rows if abs(r[1] - last[1]) <= 3600)
     try:
-        P.write_json(reset_mark_path(), {"at": t, "resets_at": last[1], "stamp": P.stamp(t),
+        P.write_json(reset_mark_path(), {"at": t, "resets_at": last[1], "pre": pre, "stamp": P.stamp(t),
                                          "week_end": P.stamp(last[1])})
     except OSError as e:
         print(f"pantheon limit reset-mark: отметка не записана ({e})", file=P.sys.stderr)

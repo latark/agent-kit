@@ -342,6 +342,44 @@ def test_week_reset_mark_1067():
           f"кривой max: {N.snapshot()} {P.read_json(N.reset_mark_path())}")
 
 
+def test_week_idle_window_after_mark_1075():
+    """Окно, простаивавшее с запроса до сброса, пишет seven-day со старым 99 и после отметки: max до отметки (pre)
+    хранит сама отметка, замер, равный pre, в неделю не входит. Неделя после отметки по-прежнему не убывает."""
+    t = day()
+    resets = t + 22 * 3600
+    e = early_reset_env(t, resets)
+    rc, _, err = reset_mark(t - 1800)
+    mark_p = os.path.join(e.state, "limit", "reset-mark.json")
+    check(rc == 0 and P.read_json(mark_p).get("pre") == 99, f"pre не записан: {rc} {err!r} {P.read_json(mark_p)}")
+    # простаивающее окно первым после отметки — неделя неизвестна, а не 99
+    e.snap(t - 70, 99, resets)
+    check(N.snapshot()["week"] is None, f"старый 99 первым после отметки: {N.snapshot()}")
+    # 6, затем старый 99 простаивающего окна, затем 7 — неделя 7, max отметки 7
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"][0] == 6, f"6 после отметки: {N.snapshot()}")
+    e.snap(t - 50, 99, resets)
+    check(N.snapshot()["week"] == (6, resets, t - 50), f"старый 99 прибил неделю: {N.snapshot()}")
+    e.snap(t - 40, 98.6, resets)  # допуск 0,5: 98,6 — тот же старый 99
+    check(N.snapshot()["week"][0] == 6, f"98,6 в допуске pre взят: {N.snapshot()}")
+    e.snap(t - 30, 7, resets)
+    check(N.snapshot()["week"] == (7, resets, t - 30) and N.measure(t)["used"] == 7,
+          f"неделя после 6 → 99 → 7: {N.snapshot()} {N.measure(t)}")
+    check(P.read_json(mark_p)["max"] == 7, f"max отметки: {P.read_json(mark_p)}")
+    # защита 0243 цела: 70, затем 6 — 70
+    e.snap(t - 20, 70, resets)
+    check(N.snapshot()["week"][0] == 70, f"70 после отметки не взят: {N.snapshot()}")
+    e.snap(t - 10, 6, resets)
+    check(N.snapshot()["week"][0] == 70, f"70 → 6 после отметки: {N.snapshot()}")
+    # выше pre — настоящий расход (старое окно больше pre не видело): берётся
+    e.snap(t - 5, 100, resets)
+    check(N.snapshot()["week"][0] == 100, f"замер выше pre не взят: {N.snapshot()}")
+    # отметка без pre (до metis-1075) — как раньше: старый 99 входит в неделю
+    e = early_reset_env(t, resets)
+    P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 1800, "resets_at": resets})
+    e.snap(t - 60, 99, resets)
+    check(N.snapshot()["week"][0] == 99, f"отметка без pre: {N.snapshot()}")
+
+
 def test_reset_mark_refusals_1067():
     """reset-mark только из терминала владельца: окно роли — отказ, код 2, файла нет; окна недели нет или оно
     сброшено — код 1, файла нет; лишние слова — код 2."""
