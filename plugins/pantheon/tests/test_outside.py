@@ -212,7 +212,8 @@ os.environ["PANTHEON_DRYRUN"] = "1"
 P.outside_kick()
 os.environ.pop("PANTHEON_DRYRUN")
 with open(os.path.join(STATE, "dryrun.log")) as fh:
-    check("тик зовёт `outside run`", "outside-run" in fh.read())
+    check("тик зовёт `outside run --quick`: проект без полного набора в FULL_TESTS — дорожка quick (metis-1081)",
+          "outside-quick" in fh.read())
 check("проход: код 0", run_pass() == 0)
 res = O.load_result(q, rid)
 check("итог рядом с заявкой: done, код 0, запись tests", res and res["state"] == "done" and res["code"] == 0 and res["record"], res)
@@ -1694,7 +1695,7 @@ put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=9
 put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
 P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
 _sv = (O._queued_ids, O.overdue_accepts, O._stale)
-O._queued_ids, O.overdue_accepts, O._stale = (lambda kinds=(): []), (lambda *a, **k: []), (lambda t=None: [])
+O._queued_ids, O.overdue_accepts, O._stale = (lambda *a, **k: []), (lambda *a, **k: []), (lambda t=None: [])
 check("тик: одни итоги-зомби (queued без заявки, running в runs/) — дело проходу тестов", O.pending_test() is True)
 with P.lock("outside-run", block=False):
     check("тик: заход жив (замок взят) — зомби не повод для pending_test", O.pending_test() is False)
@@ -1783,7 +1784,7 @@ check("сторож: повторные проходы (в том числе cmd
 O.save_result(qa, WR, {"state": "running", "kind": "test", "sha": "a" * 40})
 _h0 = O._run_holder
 h, kid = holder_start()
-O._run_holder = lambda: h.pid
+O._run_holder = lambda *a: h.pid
 O.watchdog()
 check("сторож: running в пределах срока при живом заходе — не тронут",
       O.load_result(qa, WR).get("state") == "running" and alive(h.pid) and alive(kid) and len(_alerts) == 1)
@@ -1803,7 +1804,7 @@ O.watchdog()
 check("сторож: захода нет (замок свободен) — running не снимает, его чинит recover_results",
       O.load_result(qa, WR).get("state") == "running" and len(_alerts) == 2)
 h, kid = holder_start()
-O._run_holder = lambda: None
+O._run_holder = lambda *a: None
 O.watchdog()
 O.watchdog()
 check("сторож: замок держит не определить — тревога раз, процесс не тронут, итог тот же",
