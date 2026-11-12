@@ -4522,7 +4522,7 @@ def roster_changed_at():
 
 def session_started(a, t=None):
     """Когда нынешний процесс взял сессию a, в с, или 0 (metis-0864, ревью argus #332 Д2). claude agents пишет startedAt
-    из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: hermes-alex
+    из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: dir-x
     7c48114d без процесса — startedAt = createdAt state.json; zeus 7853263b с процессом после respawn — время respawn,
     а createdAt — 04.11). Пока новый процесс не виден (между снятием старого воркера и выдачей нового, metis-0662; из
     окна с песочницей, reconcile_agents (1)), startedAt старше прошлых перезапусков. Поэтому — самое позднее из

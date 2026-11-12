@@ -61,8 +61,8 @@ ALL = ["workshop", "charon", "hestia", "hq", "hephaestus", "hephaestus-site", "a
        "dev-haiku", "dev-opus", "dev-sonnet", "codex-dev", "prometheus", "iris", "chiron", "momus", "tg-reader", "clio",
        "domain-coordinator"]
 roles = {r: "" for r in ALL}
-dirs = [{"name": "athena-brokerassistant", "short": "BrokerAssistant"}, {"name": "hermes-alex", "short": "alexbroker"},
-        {"name": "themis-sources", "short": "законы"}, {"name": "calliope-content", "short": "посты"}]
+dirs = [{"name": "athena-proja", "short": "ProjA"}, {"name": "hermes-siteb", "short": "site-b"},
+        {"name": "themis-repos", "short": "законы"}, {"name": "calliope-media", "short": "посты"}]
 st = {"metis-0760": "review", "metis-0765": "todo", "metis-0245": "done"}
 
 # --- 1. холст с нуля ----------------------------------------------------------------------------------------------
@@ -224,7 +224,7 @@ plug = os.path.join(tmp, "plug-roles")
 for r in ("hq", "argus", "charon"):
     write(os.path.join(tmp, ".claude", "agents", r + ".md"), f"---\nname: {r}\ndescription: Роль {r}.\n---\n")
 os.makedirs(plug, exist_ok=True)
-write(os.path.join(home, "directions.toml"), '[[direction]]\nname = "athena-brokerassistant"\nshort = "Брокер"\n')
+write(os.path.join(home, "directions.toml"), '[[direction]]\nname = "athena-proja"\nshort = "Брокер"\n')
 write(os.path.join(home, "Кто есть кто.md"), "памятка\n")
 write(os.path.join(home, "directions", "metis-pantheon", "tasks", "metis-0760.md"),
       "---\ntype: task\nid: metis-0760\ntitle: t\nstatus: review\nproject: P\ndirection: metis-pantheon\n"
@@ -297,7 +297,7 @@ check("10. группа владельца (неизвестный id) оста�
       and any(e["id"] == "e-mine" for e in bc["edges"])
       and [n["type"] for n in bc["nodes"]].index("text") > max(i for i, n in enumerate(bc["nodes"]) if n["type"] == "group"))
 cur = copy.deepcopy(c0)
-cur["nodes"].append({"id": "note", "type": "text", "text": "см. [[directions/themis-sources/STATUS|themis-sources]]",
+cur["nodes"].append({"id": "note", "type": "text", "text": "см. [[directions/themis-repos/STATUS|themis-repos]]",
                      "x": 1, "y": 1, "width": 10, "height": 10})
 check("10. заметка владельца со ссылкой на STATUS остаётся, даже когда направления нет в реестре",
       "note" in byid(W.build(cur, roles, dirs[:1], st)) and "themis" not in byid(W.build(cur, roles, dirs[:1], st)))
@@ -508,7 +508,7 @@ mt = W.memo_table(dict(roles, newbie=new_role), dirs, st2, cat)
 rows = {ln.split(" | ")[0][2:]: ln for ln in mt.splitlines()[2:]}
 check("13. таблица: строка на каждую запись каталога, авто-роль, координатор; лиды — `<имя>-<проект>`, dev — все",
       "**Аргус**, ревьюер" in rows and "**Newbie**" in rows and "Новичок Пантеона." in rows["**Newbie**"]
-      and "`athena-brokerassistant` · [[directions/athena-brokerassistant/STATUS\\|STATUS]]" in rows["**Афина**"]
+      and "`athena-proja` · [[directions/athena-proja/STATUS\\|STATUS]]" in rows["**Афина**"]
       and "`hephaestus-<проект>`" in rows["**Гефест**, лид кода"] and "`zeus`" in rows["**Зевс**, Пританей"]
       and all(f"`{r}`" in rows["**Разработчики**"] for r in ("dev-haiku", "dev-opus", "dev-sonnet", "codex-dev")),
       mt)
@@ -568,7 +568,7 @@ print("check:", p.who_is_who_check())
 r = subprocess.run([PY311, "-I", "-c", probe_d], env=env, capture_output=True, text=True, timeout=120)
 mtext, stext = open(memo_p, encoding="utf-8").read(), open(sys_p, encoding="utf-8").read()
 check("13. pantheon who-canvas: блок ролей в памятке и в system.md, ручной текст цел, сверка памятки чистая",
-      "ручной текст владельца" in mtext and W.MEMO_HEADING in mtext and "`charon`" in mtext and "`athena-brokerassistant`" in mtext
+      "ручной текст владельца" in mtext and W.MEMO_HEADING in mtext and "`charon`" in mtext and "`athena-proja`" in mtext
       and stext.startswith("# Реестр\n\n| ручная таблица |\n\n") and stext.endswith("\n\nхвост\n") and "старое" not in stext
       and "`argus`" in stext and "check: ([], [])" in r.stdout and "1: 0" in r.stdout, r.stdout + r.stderr + mtext[-600:])
 m_before = os.stat(memo_p).st_mtime_ns
