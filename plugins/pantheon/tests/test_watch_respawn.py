@@ -391,6 +391,74 @@ def test_blocked_no_zeus_only_alert_0277():
     check(not _relayed(e), f"0277: занятому ходом Зевсу передано (respawn оборвал бы ход): {e.calls()}")
 
 
+def _wait_cards(e):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+    import tasks
+    return [h for _, h, _ in tasks.load_tasks(e.pantheon).values() if "coord-x" in str(h.get("title"))]
+
+
+def test_wait_over_5min_card_and_zeus_line_1122():
+    """metis-1122: окно ждёт разрешения дольше 5 мин — карточка владельцу (окно, что просит, что делать), одна на
+    ожидание; дольше 30 мин — повтор: строка «ждёт вас N мин» в тревогах (её получает Зевс), одна; окно вышло из
+    ожидания — карточка закрыта. Пустой claude agents карточку не закрывает."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.run("watch", t=T0)
+    check(not _wait_cards(e), f"1122: карточка сразу, до 5 мин ожидания: {_wait_cards(e)}")
+    e.run("watch", t=T0 + 240)
+    check(not _wait_cards(e), "1122: карточка через 4 мин ожидания")
+    e.run("watch", t=T0 + 360)
+    cards = _wait_cards(e)
+    check(len(cards) == 1, f"1122: ожидание 6 мин — карточек не одна: {cards}")
+    h = cards[0] if cards else {}
+    opts = " ".join(map(str, h.get("options") or []))
+    check(h.get("status") == "waiting" and h.get("waiting_on") == "human" and h.get("question")
+          and "EnterWorktree → /w/wt" in str(h.get("why")) and "claude attach b10c0001" in opts,
+          f"1122: в карточке нет окна, запроса или что делать: {h}")
+    e.run("watch", t=T0 + 600)
+    check(len(_wait_cards(e)) == 1, f"1122: второй проход завёл вторую карточку: {_wait_cards(e)}")
+    check("ждёт вас 2" not in e.alerts() and " мин: " not in e.alerts(), f"1122: повтор раньше 30 мин: {e.alerts()}")
+    e.run("watch", t=T0 + 1860)
+    line = f"окно coord-x ждёт вас 31 мин: EnterWorktree → /w/wt, карточка {h.get('id')} — claude attach b10c0001"
+    check(line in e.alerts(), f"1122: через 31 мин нет строки Зевсу: {e.alerts()}")
+    e.run("watch", t=T0 + 2400)
+    check(e.alerts().count("окно coord-x ждёт вас") == 1 and len(_wait_cards(e)) == 1,
+          f"1122: повтор не склеен: {e.alerts()} {_wait_cards(e)}")
+    e.agents([])
+    e.run("watch", t=T0 + 2500)
+    check(_wait_cards(e)[0].get("status") == "waiting", "1122: пустой claude agents закрыл карточку")
+    e.agents([bg("coord-x", "working", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 2600)
+    check(_wait_cards(e)[0].get("status") == "done" and P_json(e.st("wait-cards.json")) == {},
+          f"1122: окно не ждёт — карточка не закрыта: {_wait_cards(e)}")
+    # Зевс сам на запросе — карточки нет: его окно владелец видит сам
+    e = _blocked_env()
+    e.agents([bg("zeus", "blocked", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 400)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+    import tasks
+    check(not tasks.load_tasks(e.pantheon), f"1122: карточка на окно Зевса: {tasks.load_tasks(e.pantheon)}")
+
+
+def test_wait_second_episode_repeat_notifies_1122():
+    """metis-1122 (ревью Б): повтор через 30 мин уходит и во втором ожидании того же окна — ключ once=True снят."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    check(e.sent().count("coord-x ждёт вас 31 мин") == 1, f"1122: первый повтор не ушёл: {e.sent()!r}")
+    e.agents([bg("coord-x", "working", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 2000)
+    e.agents([bg("coord-x", "blocked", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 3000)
+    e.run("watch", t=T0 + 4900)
+    check(e.sent().count("coord-x ждёт вас 31 мин") == 2, f"1122: второе ожидание без повтора: {e.sent()!r}")
+
+
+def P_json(p):
+    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
+
+
 def test_blocked_reason_fallbacks_0277():
     """metis-0277 п. 2: нет журнала — waitingFor, если он не общий «permission prompt»; нет и его — «причина
     неизвестна — claude attach <id>» без пустого места после тире."""

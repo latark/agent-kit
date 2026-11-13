@@ -387,15 +387,18 @@ def test_session_waits_reaches_you():
     d = e.sent()
     check("ждёт вас" not in a and "watch-blocked-sess0001" in e.queued(), f"«здесь»: без macOS и в очереди: {a!r}")
     check(b.count("coord-x ждёт вас") == 1, f"ушли — одна macOS: {b!r}")
-    check(c.count("coord-x ждёт вас") == 1, f"через 25 мин — второй нет: {c!r}")
-    check(d.count("coord-x ждёт вас") == 1 and "|session-coord-x" in d, f"через 65 мин — повтора нет: {d!r}")
+    check(c.count("coord-x ждёт вас") == 2 and "coord-x ждёт вас 30 мин" in c,
+          f"через 30 мин — один повтор (metis-1122): {c!r}")
+    check(d.count("coord-x ждёт вас") == 2 and "|session-coord-x" in d,
+          f"через 70 мин — второго повтора за ожидание нет: {d!r}")
     check(e.alerts().count("coord-x (sess0001) ждёт вас") == 1, "тревога в alerts.md — не разовая")
     # «готово» (сессия работает), затем снова «ждёт» — ещё одна macOS
     e.agents([bg("coord-x", "working", "sess0001-aaaa", pid=31)])
     e.run("watch", t=T0 + 4500)
     e.agents([bg("coord-x", "blocked", "sess0001-aaaa", pid=31)])
     e.run("watch", t=T0 + 4800)
-    check(e.sent().count("coord-x ждёт вас") == 2, f"снова «ждёт» после снятия — без второй macOS: {e.sent()!r}")
+    check(e.sent().count("coord-x ждёт вас") == 3,
+          f"снова «ждёт» после снятия — новая macOS «ждёт вас», повтор раньше 30 мин нет: {e.sent()!r}")
     # весь день ждут две сессии, вас нет: по одной macOS на сессию, бюджет не съеден — решение «Нужен ответ» дойдёт
     e = Env()
     e.extra["TZ"] = "Europe/Moscow"
@@ -408,8 +411,8 @@ def test_session_waits_reaches_you():
         e.run("watch", t=day + k * 1200)
     s = e.sent()
     used = json.load(open(e.st("notify.json"))).get("used")
-    check(s.count("coord-x ждёт вас") == 1 and s.count("coord-y ждёт вас") == 1 and used == 2,
-          f"день ожидания двух сессий — по одной macOS, бюджет 2: {s!r} used={used}")
+    check(s.count("coord-x ждёт вас") == 2 and s.count("coord-y ждёт вас") == 2 and s.count("ждёт вас 40 мин") == 2
+          and used == 4, f"день ожидания двух сессий — macOS и один повтор на сессию, бюджет 4: {s!r} used={used}")
     r = e.run("task", "new", "--text", "тест", "--direction", "coord-x", "--title", "Решить вечером", "--status", "waiting",
               "--waiting-on", "human", "--next", "ответ", "--question", "Что выбрать?", "--project", "coord-x",
               t=day + 11 * 3600 - 120)
