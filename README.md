@@ -264,7 +264,8 @@
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, сборка окон `sandbox_build` в
   `plugins/pantheon/lib/pantheon.py`, с metis-0598 `plugins/pantheon/hooks/ctx.py`, `plugins/pantheon/hooks/hooks.json`,
   `plugins/pantheon/lib/merge.py`, `plugins/pantheon/lib/plugin_map.py`, `plugins/pantheon/plugins-by-role.toml`,
-  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`, с metis-0951
+  с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`, с metis-1051
+  `plugins/pantheon/lib/supabase_migrate.py`, с metis-0951
   общий код пакетов `plugins/pantheon/packs/` (сами пакеты — в `~/.claude/pantheon/packs`) и запуск окна
   `window_launch` в `pantheon.py`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
