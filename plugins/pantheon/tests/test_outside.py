@@ -686,7 +686,7 @@ check("--app у не-монорепо: отказ", state(q, rid) == "failed"
 rc, _, _ = role_request("athena-x", MONO, "serve", "--app", "../x")
 check("--app не по образцу: код 2", rc == 2)
 
-# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (alexbroker: site/)
+# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (site-b: site/)
 SUB = os.path.join(HOME, "projects", "subapp")
 os.makedirs(SUB)
 git(SUB, "init", "-q", "-b", "main")
@@ -1128,9 +1128,13 @@ TEST_PROCS.append(_orphan)
 t0 = time.monotonic()
 rc, out = say("athena-x", "stop", rid_s)
 dt = time.monotonic() - t0
-check("стоп своего окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
-      rc == 0 and "stopped" in out and dt <= 10 and th_t.is_alive() and state(q, rid_t) == "running",
-      (rc, out, round(dt, 1)))
+try:   # metis-1022: при load1 ~40 на 8 ядрах стоп шёл дольше 10 с; предел растёт с load1 на ядро, не больше вчетверо
+    _slack = min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 1)))
+except OSError:
+    _slack = 1.0
+check("стоп своего окна при занятом проходе тестов: stopped за ≤10 с (× нагрузка), `stop` дождался, код 0, тест идёт",
+      rc == 0 and "stopped" in out and dt <= 10 * _slack and th_t.is_alive() and state(q, rid_t) == "running",
+      (rc, out, round(dt, 1), round(_slack, 1)))
 check("стоп: порт свободен, погашены сервер, «turbo» и задача в своей группе, копия снята",
       not port_open(port) and not any(pid_alive(p) for p in pids + [srvpid])
       and rid_s not in O.servers() and not os.path.exists(work_of(rid_s)),
@@ -1604,7 +1608,7 @@ time.sleep(1.1)   # время заявки — с точностью до се�
 rc, q, r2 = role_request("athena-x", APP, "test", "--script", "lint")
 
 
-def kill_after_first(qdir, window, rid, req):
+def kill_after_first(qdir, window, rid, req, **_kw):
     got.append(rid)
     raise SystemExit(9)   # заход убит посреди первой заявки
 
@@ -1623,7 +1627,7 @@ rc, q, r3 = role_request("athena-x", APP, "test")
 _u = O._take_in
 O._take_in = lambda dfd, name: False   # снять заявку не удаётся (или её уже сняло окно)
 got = []
-O.handle = lambda qdir, window, rid, req: got.append(rid)
+O.handle = lambda qdir, window, rid, req, **_kw: got.append(rid)
 t0 = time.time()
 O.run_test_queue()
 O.handle, O._take_in = _h, _u
@@ -1660,7 +1664,7 @@ mkreq(qa, "20261102-130002-aaaaab", EARLY)
 mkreq(qa, "20261102-130003-aaaaac", EARLY)
 mkreq(qb, "20261102-130004-bbbbbb", EARLY)
 _h, _got = O.handle, []
-O.handle = lambda qdir, window, rid, req: _got.append(rid[-6:])
+O.handle = lambda qdir, window, rid, req, **_kw: _got.append(rid[-6:])
 O.run_test_queue()
 O.handle = _h
 check("run_test_queue: круг между окнами сквозь заходы limit=1 — a1, b, a2, a3",

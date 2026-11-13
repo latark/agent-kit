@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/other/mailkeeper\" --always -- python3 -I .claude/hooks/guard_bash.py",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/other/mailbox\" --always -- python3 -I .claude/hooks/guard_bash.py",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/other/mailkeeper\" --always -- python3 -I .claude/hooks/guard_read.py",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/other/mailbox\" --always -- python3 -I .claude/hooks/guard_read.py",
             "timeout": 10,
             "onFailure": "block"
           }

@@ -23,10 +23,25 @@ from concurrent.futures import ProcessPoolExecutor
 WATCH_EVERY = 0.5
 
 
+def _owner_gone(owner):
+    """Владелец пула (pid из initargs) не существует. Нужно при forkserver (Linux, Python 3.14 по умолчанию): родитель
+    воркера — процесс forkserver, а он живёт, пока живы воркеры (держат его канал), так что ppid не меняется, когда
+    умер сам пул (проверено: воркеры и forkserver оставались с ppid 1)."""
+    if not owner or owner == 1:
+        return False
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _watch(start, owner):
     while True:
         ppid = os.getppid()
-        if ppid != start or (ppid == 1 and owner != 1):
+        if ppid != start or (ppid == 1 and owner != 1) or _owner_gone(owner):
             os._exit(0)
         time.sleep(WATCH_EVERY)
 
