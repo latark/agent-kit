@@ -52,13 +52,7 @@ def alive(pid):
         return False
     except PermissionError:
         return True
-    # зомби — уже вышел: на Linux сирота переходит к ближайшему subreaper (воркер прогона), а тот не вызывает wait,
-    # и os.kill(pid, 0) видит его живым вечно (CI ubuntu); на macOS сирот подбирает launchd, там зомби не остаётся
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            return fh.read().rpartition(b")")[2].split()[0] != b"Z"
-    except (OSError, IndexError):
-        return True
+    return True
 
 
 def sem_ok():
