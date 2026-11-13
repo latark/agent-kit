@@ -337,13 +337,13 @@ def test_hook_projects(vec):
     with open(os.path.join(h, ".claude", "pantheon", "policy.toml"), "w") as fh:
         fh.write('[hq]\nclosed_dirs = []\nclosed_collections = []\n')
     with open(os.path.join(h, ".local", "state", "pantheon", "domains.json"), "w") as fh:
-        json.dump({"domains": {"athena-broker": [os.path.join(proj, "broker")],
+        json.dump({"domains": {"athena-proja": [os.path.join(proj, "broker")],
                                "metis-pantheon": [os.path.join(proj, "agent-kit")],
                                "mnemo-brain": [os.path.join(h, "ai", "knowledge")],
                                "solo-led": [os.path.join(proj, "solo")],
                                "hidden-dir": [os.path.join(h, ".hidden", "proj")]}}, fh)
     with open(os.path.join(h, "ai", "pantheon", "directions.toml"), "w") as fh:
-        fh.write('[[direction]]\nname = "athena-broker"\n[[direction]]\nname = "solo-led"\ncoordinator = false\n')
+        fh.write('[[direction]]\nname = "athena-proja"\n[[direction]]\nname = "solo-led"\ncoordinator = false\n')
     colls = {"pantheon": "~/ai/pantheon", "knowledge": "~/ai/knowledge", "broker": "~/projects/broker",
              "brokerdocs": "~/projects/broker/docs", "wide": "~/projects", "agentkit": "~/ai/agent-kit",
              "solo": "~/projects/solo", "hidden": "~/.hidden/proj"}
@@ -362,13 +362,13 @@ def test_hook_projects(vec):
           and hook({"pattern": "qmd://broker/*.md"}, m, window="hq", home=h))
     # metis-0856: отказ называет направление-хозяина и готовую команду поручения, get — тоже отказ, но с той же подсказкой
     check("0856: отказ hq по коллекции проекта называет направление и команду поручения",
-          "broker — направление athena-broker" in out
-          and "pantheon task new --direction athena-broker" in out and "pantheon qmd where" in out, out)
+          "broker — направление athena-proja" in out
+          and "pantheon task new --direction athena-proja" in out and "pantheon qmd where" in out, out)
     outg = hook({"file": "qmd://broker/a.md"}, g, window="hq", home=h, raw=True)
     check("0856: get по коллекции проекта из hq — по-прежнему отказ, с подсказкой хозяина",
-          '"deny"' in outg and "pantheon task new --direction athena-broker" in outg, outg)
+          '"deny"' in outg and "pantheon task new --direction athena-proja" in outg, outg)
     check("0856: коллекция шире проекта (~/projects) — хозяева-направления внутри неё названы",
-          "pantheon task new --direction athena-broker" in hook({**q, "collections": ["wide"]}, window="hq", home=h,
+          "pantheon task new --direction athena-proja" in hook({**q, "collections": ["wide"]}, window="hq", home=h,
                                                                  raw=True))
     outp = hook({**q, "collections": ["pantheon"]}, window="hq", home=h, raw=True)
     check("0856: открытая коллекция — пропуск, подсказки нет", hq_open(outp) and "task new" not in outp, outp)
@@ -431,35 +431,35 @@ def test_where():
     body_line, ctx_line = "СТРОКА-ИЗ-ТЕЛА-ДОКУМЕНТА-77", "КОНТЕКСТ-КОЛЛЕКЦИИ-88"
     evil = "Заголовок\x1b[31m\n\u202eс ловушкой\u200b" + "ы" * 300
     res = [
-        {"docid": "#a1", "file": "qmd://alexbroker/docs/a%20b.md", "title": evil, "score": 0.9, "context": ctx_line,
+        {"docid": "#a1", "file": "qmd://site-b/docs/a%20b.md", "title": evil, "score": 0.9, "context": ctx_line,
          "line": 3, "snippet": "@@ -2 @@\n" + body_line},
-        {"docid": "#a2", "file": "qmd://alexbroker/x.md", "title": "Обычный", "score": 0.8, "context": ctx_line,
+        {"docid": "#a2", "file": "qmd://site-b/x.md", "title": "Обычный", "score": 0.8, "context": ctx_line,
          "line": 1, "snippet": body_line},
         {"docid": "#a3", "file": "qmd://legal/secret.md", "title": "ЗАКРЫТО-LEGAL", "snippet": body_line},
         {"docid": "#a4", "file": "qmd://pantheon/board.md", "title": "Доска", "snippet": body_line},
-        {"docid": "#a5", "file": "qmd://alexbroker/../../etc/p.md", "title": "Обход", "snippet": body_line},
+        {"docid": "#a5", "file": "qmd://site-b/../../etc/p.md", "title": "Обход", "snippet": body_line},
     ]
     fake = _Fake(res)
     try:
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             pan, state = os.path.join(home, "ai", "pantheon"), os.path.join(tmp, "state")
-            for d in (pan, state, os.path.join(home, ".claude", "pantheon"), os.path.join(home, "projects", "alexbroker")):
+            for d in (pan, state, os.path.join(home, ".claude", "pantheon"), os.path.join(home, "projects", "site-b")):
                 os.makedirs(d)
             with open(os.path.join(pan, "qmd.toml"), "w") as fh:
-                fh.write(f'port = {fake.port}\n[[collection]]\nname = "alexbroker"\npath = "~/projects/alexbroker"\n'
+                fh.write(f'port = {fake.port}\n[[collection]]\nname = "site-b"\npath = "~/projects/site-b"\n'
                          f'[[collection]]\nname = "legal"\npath = "~/projects/legal"\n'
                          f'[[collection]]\nname = "pantheon"\npath = "~/ai/pantheon"\n')
             with open(os.path.join(home, ".claude", "pantheon", "policy.toml"), "w") as fh:
                 fh.write('[hq]\nclosed_dirs = []\nclosed_collections = ["legal"]\n')
             with open(os.path.join(state, "domains.json"), "w") as fh:
-                json.dump({"domains": {"hermes-alex": [os.path.join(home, "projects", "alexbroker")]}}, fh)
-            r = run(home, pan, state, "qmd", "where", "где лежит задаток", "--collection", "alexbroker")
+                json.dump({"domains": {"hermes-siteb": [os.path.join(home, "projects", "site-b")]}}, fh)
+            r = run(home, pan, state, "qmd", "where", "где лежит задаток", "--collection", "site-b")
             out = r.stdout
             lines = out.splitlines()
             check("0856 where: код 0, строки «коллекция | путь | заголовок | хозяин»",
-                  r.returncode == 0 and any(ln.startswith("alexbroker | docs/a b.md | ") and ln.endswith(" | hermes-alex")
-                                            for ln in lines) and "alexbroker | x.md | Обычный | hermes-alex" in lines,
+                  r.returncode == 0 and any(ln.startswith("site-b | docs/a b.md | ") and ln.endswith(" | hermes-siteb")
+                                            for ln in lines) and "site-b | x.md | Обычный | hermes-siteb" in lines,
                   r.stdout + r.stderr)
             check("0856 where: строки из тела (snippet) и context в выводе нет",
                   body_line not in out and ctx_line not in out and "@@" not in out, out)
@@ -472,11 +472,11 @@ def test_where():
                   "legal" not in out and "ЗАКРЫТО" not in out and "Обход" not in out, out)
             check("0856 where: запрос — vec, rerank false, одна названная коллекция",
                   fake.body and fake.body["searches"] == [{"type": "vec", "query": "где лежит задаток"}]
-                  and fake.body["rerank"] is False and fake.body["collections"] == ["alexbroker"], fake.body)
+                  and fake.body["rerank"] is False and fake.body["collections"] == ["site-b"], fake.body)
             fake.body = None
             r = run(home, pan, state, "qmd", "where", "задаток")
             check("0856 where: без --collection — все коллекции, кроме закрытых [hq].closed_collections",
-                  r.returncode == 0 and fake.body["collections"] == ["alexbroker", "pantheon"]
+                  r.returncode == 0 and fake.body["collections"] == ["site-b", "pantheon"]
                   and "pantheon | board.md | Доска | -" in r.stdout.splitlines(), f"{fake.body} {r.stdout}")
             r = run(home, pan, state, "qmd", "where", "x", "--collection", "legal")
             check("0856 where: закрытая коллекция — код 2, службу не спрашивали", r.returncode == 2 and fake.body is not None
