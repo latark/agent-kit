@@ -364,6 +364,8 @@ def main():
                  '[merge_repos]\nathena-shop = ["acme-co/br-app"]\n'
                  'metis-pantheon = ["tools-org/sync", "acme-co/kit", "bad owner/x", "acme-co/kit`"]\n'
                  'mnemo-brain = ["acme-co/notes"]\n'
+                 # правила autoMode.allow направления — данные пользователя (решение владельца 12.11)
+                 '[auto_rules]\nmetis-pantheon = ["mailkeeper-read", "uv-sync"]\n'
                  # что закрыто штабу — только [hq] (metis-0182); выдуманный корпус lecture-notes
                  '[hq]\nclosed_dirs = ["~/projects/lecture-notes", "~/.cache/qmd", "~/.cache/lecture-notes", '
                  '"~/.claude/projects/*lecture-notes*"]\nclosed_collections = ["notes"]\n')
@@ -656,7 +658,7 @@ def main():
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
-          # metis-pantheon: ещё два правила направления — Mailkeeper Read и Uv Sync (metis-0933, владелец 06.11 21:55)
+          # metis-pantheon: ещё два правила направления из [auto_rules] policy.toml — Mailkeeper Read и Uv Sync (metis-0933)
           and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
           and all(len(am[n]) == {"athena-shop": 4, "metis-pantheon": 6}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")

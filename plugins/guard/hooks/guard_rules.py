@@ -4886,7 +4886,7 @@ def check_hq_sessync(event, tool, tool_input):
 # ТЕКУЩЕЙ папки сессии. Это проверка safetyCheck: её не снимают ни правило allow, ни permissions.additionalDirectories,
 # ни allow хука — снимает только cd в тот репозиторий. Папки направления — рабочие папки окна (additionalDirectories,
 # sandbox_build), поэтому cd туда сохраняется. Репозиторий worktree — путь до последнего `.claude/worktrees/<имя>`
-# (ревью argus PR #360): папка направления бывает контейнером репозиториев (~/projects/MorphStream не git, внутри app,
+# (ревью argus PR #360): папка направления бывает контейнером репозиториев (~/projects/<проект> не git, внутри app,
 # gpu-worker со своими worktrees). Правило:
 #   - репозиторий внутри своей папки (самая глубокая папка направлений над ним — твоя), сессия стоит в нём: ближайший
 #     .git над cwd — сам репозиторий или его worktree — пропуск: Claude Code пустит без вопроса;

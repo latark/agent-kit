@@ -28,7 +28,7 @@ def check(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else f"  [{str(detail)[:900]}]"))
 
 
-DIRS = ["metis-pantheon", "zeus", "athena-brokerassistant", "mnemo-brain", "calliope-content"]
+DIRS = ["metis-pantheon", "zeus", "athena-proja", "mnemo-brain", "calliope-media"]
 N, STORIES = 500, 20
 
 
@@ -152,7 +152,7 @@ try:
 except OSError:
     gone = True
 check("удалённый файл не читается из кэша", gone)
-other = os.path.join(PAN, "directions", "calliope-content", "tasks", "metis-0004.md")
+other = os.path.join(PAN, "directions", "calliope-media", "tasks", "metis-0004.md")
 if os.path.exists(other):
     T.read_text(other)
     os.remove(other)
