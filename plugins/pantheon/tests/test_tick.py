@@ -655,17 +655,19 @@ def main():
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
     gated = rule("athena-shop", "Pantheon Gated Merge:")
     record = rule("athena-shop", "Pantheon Review Record:")
+    consent = rule("athena-shop", "Pantheon Consent Check:")  # metis-0161: сверка согласия — координаторам
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
           # metis-pantheon: ещё два правила направления из [auto_rules] policy.toml — Mailkeeper Read и Uv Sync (metis-0933)
           and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
-          and all(len(am[n]) == {"athena-shop": 4, "metis-pantheon": 6}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
+          and len(consent) == 1 and all(am[n][-2:] == record + consent for n in ("athena-shop", "metis-pantheon", "zz"))
+          and all(len(am[n]) == {"athena-shop": 5, "metis-pantheon": 7}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
                   == record for n in ("athena-shop", "metis-pantheon"))
-          and am["zz"] == ["$defaults"] + record)
+          and am["zz"] == ["$defaults"] + record + consent)
     check("окно с доступом к личному (mnemo-brain): \"$defaults\" и только Review Record — правила слияния нет даже "
-          "при [merge_repos], его PR сливает владелец (metis-0156)",
+          "при [merge_repos], его PR сливает владелец (metis-0156); сверки согласия Consent Check тоже нет (metis-0161)",
           bool(record) and am["mnemo-brain"] == ["$defaults"] + record)
     check("правило Review Record: оговорка — после `--` только тест-раннер проекта, его судят прочие правила; merge, "
           "push, gh, sh -c/python3 -c — Self-Approval или CI Bypass (metis-0156)",

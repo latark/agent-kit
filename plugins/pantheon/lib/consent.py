@@ -278,7 +278,10 @@ def consent_bound(qid, days, text):
 # (их пишут хук ввода владельца и плановый проход), а вывода команды не читает: подделать его вызовом другой программы
 # или эхом нельзя. Заметка — только про ответ на вопрос «[id] …» (found); привязанные Зевсом слова (consent bind) и
 # пересказы других сессий согласием не становятся. Последний ответ — не «да» — заметка говорит, что согласия нет.
-NOTE_CMD = re.compile(r"\s*pantheon consent (" + CONSENT_ID.pattern + r")(?: --days (\d{1,2}(?:\.\d{1,3})?))?\s*")
+# --days — те же формы, что у consent() (любое слово, которое разбирает float); окно заметки — не больше суток (NOTE_DAYS,
+# argus #440 Д1): старое «да» на разовое действие одобрением не становится, сколько бы дней ни просил вызов.
+NOTE_CMD = re.compile(r"\s*pantheon consent (" + CONSENT_ID.pattern + r")(?: --days (\S+))?\s*")
+NOTE_DAYS = 1.0
 NOTE_MAX = 1900                 # потолок classifierContext — 2000 знаков на вызов
 NOTE_Q = 500                    # цитата вопроса — не длиннее (и не больше остатка NOTE_MAX после постоянных частей)
 NOTE_A = 200                    # ответ (текст варианта) — не длиннее
@@ -324,7 +327,10 @@ def consent_note(stream=None):
     m = NOTE_CMD.fullmatch(cmd) if isinstance(cmd, str) else None
     if not m or ev.get("hook_event_name", "PostToolUse") != "PostToolUse":
         return 0
-    qid, days = m.group(1), min(30.0, max(0.1, float(m.group(2) or 7.0)))
+    try:
+        qid, days = m.group(1), min(NOTE_DAYS, max(0.1, float(m.group(2) or NOTE_DAYS)))
+    except ValueError:  # consent() такой --days не примет (код 2) — заметки нет
+        return 0
     if os.environ.get("PANTHEON_ROLE") == "hestia":
         days = min(days, HESTIA_CONSENT_DAYS)
         if qid != os.environ.get("PANTHEON_TASK"):

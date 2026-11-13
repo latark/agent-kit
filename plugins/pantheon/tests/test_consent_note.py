@@ -46,8 +46,12 @@ STATE = os.path.join(HOME, ".local", "state", "pantheon")
 LOG = os.path.join(STATE, "owner-log")
 os.makedirs(LOG)
 os.makedirs(os.path.join(HOME, "ai", "pantheon"))
+# один пояс у теста и у CLI: время записей журнала тест пишет своим поясом, а CLI читает своим (на раннере UTC расхождение
+# с Europe/Moscow — 3 ч, CI #440)
+os.environ["TZ"] = "Europe/Moscow"
+time.tzset()
 BASE = {"PATH": "/usr/bin:/bin", "HOME": HOME, "PANTHEON_HOME": os.path.join(HOME, "ai", "pantheon"),
-        "PANTHEON_STATE": STATE, "TMPDIR": ROOT, "TZ": "Europe/Moscow"}
+        "PANTHEON_STATE": STATE, "TMPDIR": ROOT, "TZ": os.environ["TZ"]}
 
 
 def at(ago=0):
@@ -91,6 +95,13 @@ rc2, out2, _ = note("  pantheon consent metis-1032 --days 2  ")
 check("с --days и краевыми пробелами — та же заметка", ctx(out2) == c, out2)
 rc3, out3, _ = note("pantheon consent metis-1032 --days 0.0001")
 check("--days ниже 0.1 → 0.1 дня (2,4 ч): ответ минуту назад виден", "explicit approval" in ctx(out3), out3)
+# --days — те же формы, что принимает consent() (float): 7, 1e1, .5, 100, -3; кривое — consent откажет, заметки нет
+for d in ("7", "1e1", ".5", "100", "-3", "inf"):
+    rc3, out3, _ = note(f"pantheon consent metis-1032 --days {d}")
+    check(f"--days {d} → та же заметка", ctx(out3) == c, out3)
+for d in ("x", "1;ls", "1,5"):
+    rc3, out3, _ = note(f"pantheon consent metis-1032 --days {d}")
+    check(f"--days {d!r} (consent откажет) → заметки нет, код 0", rc3 == 0 and out3 is None, out3)
 
 # 2. позднее «нет» на тот же вопрос отменяет «да»
 log(" · окно вопросов", "вопрос: [metis-1032] Остановить прогон `pantheon outside stop 20261109-125636-2b95da`?\n"
@@ -253,8 +264,17 @@ rc, out, _ = note("pantheon consent metis-0409", PANTHEON_ROLE="hestia", PANTHEO
 check("Гестия: чужая задача → заметки нет", out is None, out)
 rc, out, _ = note("pantheon consent metis-0900", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0900")
 check("Гестия: ответ старше суток → заметки нет", out is None, out)
-rc, out, _ = note("pantheon consent metis-0900")
-check("не Гестия: тот же ответ двухдневной давности → одобрение (неделя)", "explicit approval" in ctx(out), out)
+# argus #440 Д1: окно заметки — не больше суток при любом --days: старое «да» на разовое действие не одобряет
+for cmd in ("pantheon consent metis-0900", "pantheon consent metis-0900 --days 7", "pantheon consent metis-0900 --days 30"):
+    rc, out, _ = note(cmd)
+    check(f"не Гестия: «да» двухдневной давности, {cmd[27:] or 'без --days'} → заметки нет (окно — сутки)",
+          rc == 0 and out is None, out)
+log(" · окно вопросов", "вопрос: [metis-0901] Запушить ветку?\nответ: Да", ago=23 * 3600)
+rc, out, _ = note("pantheon consent metis-0901")
+check("не Гестия: «да» 23 ч назад → одобрение (внутри суток)", "explicit approval" in ctx(out), out)
+cr = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-0900"], env=BASE, capture_output=True, text=True, timeout=30)
+check("сам consent() по-прежнему видит ответ за неделю (поведение не тронуто)", cr.returncode == 0
+      and "Запушить ветку" in cr.stdout, cr.stdout + cr.stderr)
 rc, out, _ = note("pantheon consent metis-0409", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0409")
 check("Гестия: своя задача, ответ свежий → одобрение", "explicit approval" in ctx(out), out)
 

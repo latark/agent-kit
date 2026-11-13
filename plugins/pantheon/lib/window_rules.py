@@ -145,16 +145,18 @@ def direction_rules(names):
     return [r for k, r in DIRECTION_RULES.items() if k in names], bad
 
 
-def coordinator_auto_allow(repos, rules=None):
+def coordinator_auto_allow(repos, rules=None, consent=True):
     """autoMode.allow окна координатора: "$defaults", правило слияния и правило сдачи работы лида (push рабочей ветки,
     argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
     owner/repo; нет таких — обоих правил нет), правила направления — имена DIRECTION_RULES из его строки [auto_rules]
-    policy.toml (metis-0933; direction_rules) — и правила записей проверок и сверки согласия (metis-0161)."""
+    policy.toml (metis-0933; direction_rules) — и правило записей проверок; сверка согласия (metis-0161) — только при
+    consent: окну с доступом к личному (mnemo-brain) её не даёт решение лида по #440 (как правило слияния, metis-0156)."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return ["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE, CONSENT_CHECK_RULE]
+    return (["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE]
+            + [CONSENT_CHECK_RULE] * bool(consent))
 
 
 def auto_mode(auto_allow):
