@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Карта стеков project-tools (TOOL-07): признак в проекте → какие MCP-серверы и плагины подключить. Правит metis-pantheon; новый инструмент — запись в tools и строка в stacks. Версии закреплены: свежие показывает `project-tools outdated`.",
+  "about": "Карта стеков project-tools (TOOL-07): признак в проекте → какие MCP-серверы и плагины подключить. Правит metis-pantheon; новый инструмент — запись в tools (с source: каталог или вендор) и строка в stacks. Признак стека: dependency (npm), python_dependency (pyproject.toml, requirements*.txt), file (имя или маска). Версии закреплены: свежие показывает `project-tools outdated`.",
   "tools": {
     "next-devtools": {
       "about": "ошибки сборки и рантайма, логи, маршруты и server actions живого dev-сервера Next.js 16+",
@@ -21,6 +21,31 @@
     "supabase": {
       "about": "MCP Supabase (удалённый, вход через OAuth): таблицы, миграции, советы безопасности",
       "plugin": "supabase@claude-plugins-official"
+    },
+    "sentry": {
+      "about": "Sentry: ошибки и трассы продакшена, поиск задач по отпечатку (вход через аккаунт Sentry)",
+      "plugin": "sentry@claude-plugins-official",
+      "source": "https://github.com/getsentry/plugin-claude — каталог claude-plugins-official, вендор Sentry"
+    },
+    "vercel": {
+      "about": "Vercel: деплои, статус сборки, логи, домены (вход через аккаунт Vercel)",
+      "plugin": "vercel@claude-plugins-official",
+      "source": "https://github.com/vercel/vercel-plugin — каталог claude-plugins-official, вендор Vercel"
+    },
+    "context7": {
+      "about": "context7: актуальная документация библиотек по версии проекта (API Next.js 16, Python-библиотек) вместо памяти модели; работает без ключа",
+      "plugin": "context7@claude-plugins-official",
+      "source": "каталог claude-plugins-official (external_plugins/context7), вендор Upstash; решение владельца 09.11: включать в проектах на Next.js и Python"
+    },
+    "pyright-lsp": {
+      "about": "Python: проверка типов и навигация по коду (языковой сервер Pyright)",
+      "plugin": "pyright-lsp@claude-plugins-official",
+      "source": "каталог claude-plugins-official, автор Anthropic"
+    },
+    "typescript-lsp": {
+      "about": "TypeScript и JavaScript: навигация и диагностика (языковой сервер)",
+      "plugin": "typescript-lsp@claude-plugins-official",
+      "source": "каталог claude-plugins-official, автор Anthropic"
     }
   },
   "stacks": [
@@ -37,7 +62,36 @@
     {
       "name": "Supabase",
       "dependency": "@supabase/supabase-js",
+      "python_dependency": "supabase",
       "tools": { "supabase": {} }
+    },
+    {
+      "name": "Sentry",
+      "dependency": ["@sentry/nextjs", "@sentry/node"],
+      "python_dependency": "sentry-sdk",
+      "tools": { "sentry": {} }
+    },
+    {
+      "name": "Vercel",
+      "file": "vercel.json",
+      "tools": { "vercel": {} }
+    },
+    {
+      "name": "Python",
+      "file": ["pyproject.toml", "requirements*.txt"],
+      "tools": { "pyright-lsp": {} }
+    },
+    {
+      "name": "Next.js или Python",
+      "dependency": "next",
+      "show_version": false,
+      "file": ["pyproject.toml", "requirements*.txt"],
+      "tools": { "context7": {} }
+    },
+    {
+      "name": "TypeScript",
+      "dependency": "typescript",
+      "tools": { "typescript-lsp": {} }
     }
   ]
 }

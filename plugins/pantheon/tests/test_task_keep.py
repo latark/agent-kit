@@ -645,6 +645,21 @@ def main():
           and gs_({"status": "todo", "owner": "x"}, None, "w", ew) == (True, "ведёт x")
           and gs_({"status": "dropped", "owner": "x"}, None, "w", ew) == (True, "закрыта (dropped)")
           and gs_(None) == (False, "статус не указан"))
+    # metis-1122 (hermes-0069): задача на проверке с acceptance=принято снята с цели окна; «вернуть» и без приёмки — в цели
+    check("goal_state: review + acceptance=принято — снята; review + вернуть и review без приёмки — в цели (hermes-0069)",
+          gs_({"id": "hermes-0069", "status": "review", "acceptance": "принято"})
+          == (True, "на проверке и принята (acceptance=принято)")
+          and gs_({"id": "hermes-0069", "status": "review", "acceptance": "вернуть"}) == (False, "на проверке")
+          and gs_({"id": "hermes-0069", "status": "doing", "acceptance": "принято"}) == (False, "в работе"))
+    gr = fresh()
+    run(env5, "task", "set", gr, "status=review")
+    held = goal(gr)
+    run(env5, "task", "set", gr, "acceptance=принято")
+    took = goal(gr)
+    check("task goal: review — «остаётся — на проверке»; после acceptance=принято — «снята — на проверке и принята»",
+          held.stdout.strip() == f"{gr}: {T.GOAL_IN} — на проверке"
+          and took.returncode == 0 and took.stdout.strip() == f"{gr}: {T.GOAL_OUT} — на проверке и принята "
+          "(acceptance=принято)", (held.stdout, held.stderr, took.stdout, took.stderr))
 
     # чистые функции
     desc = T.has_description

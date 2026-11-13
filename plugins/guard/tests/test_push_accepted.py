@@ -3,7 +3,7 @@
 argus столько, сколько нужно для слияния (ядро — два Opus, вне ядра — одно), а «вернуть» нет, guard останавливает
 подсказкой «долг — задачей, PR — к слиянию»; ролям и окнам без роли одинаково. С «вернуть», без вердиктов, при сбое
 gh, со строкой «Б: …» в новом коммите и в прочих случаях push идёт как раньше (fail-open). Хук — настоящий, gh —
-поддельный и HOME — временный из test_merge_gate.
+поддельный и HOME — временный из _merge_gate_common (общая часть тестов запора слияния).
 Запуск: python3 -I plugins/guard/tests/test_push_accepted.py   (код 0 — все прошли)
 """
 import os
@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_merge_gate as tm  # noqa: E402  (Home, rec, git — помощники запора слияния)
+import _merge_gate_common as tm  # noqa: E402  (Home, rec, git — помощники запора слияния)
 from _py311 import mkroot  # noqa: E402  (metis-0729)
 
 HERE = os.path.dirname(os.path.abspath(__file__))

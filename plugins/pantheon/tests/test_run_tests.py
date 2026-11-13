@@ -5,8 +5,10 @@
 раннер в своей сессии, как задача run_job, гасится SIGTERM / SIGHUP / SIGINT — ни файла тестов, ни его внука после."""
 import ast
 import atexit
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -21,6 +23,9 @@ _ROOT = tempfile.mkdtemp(prefix="test_run_tests-root-")
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)
+# журнал времени раннера (times.jsonl) — в папку теста, а не в настоящий ~/.cache. Это окружение процесса и всех
+# дочерних через dict(os.environ, ...); окружение, собранное с нуля (PEN), получает RUN_TESTS_CACHE само
+os.environ["RUN_TESTS_CACHE"] = os.path.join(_ROOT, "cache-default")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
@@ -257,6 +262,105 @@ par, ser = R.order([("/x", "par/test_p1.py"), ("/x", "par/test_s1.py"), ("/x", "
                    slow={"par/test_p2.py": 900}, serial=("par/test_s1.py",))
 check("order: медленные первыми, серийные отдельно", [l for _, l in par] == ["par/test_p2.py", "par/test_p1.py"]
       and [l for _, l in ser] == ["par/test_s1.py"], (par, ser))
+
+# --- журнал времени (план 1.0 Т0/Т1) ---
+tc = os.path.join(_ROOT, "times-cache")
+tp = mkplugin({"test_a.py": OK2, "test_bad.py": "print('FAIL x')\nraise SystemExit(1)\n"}, "tm")
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+recs = [json.loads(x) for x in open(os.path.join(tc, "times.jsonl")).read().splitlines()]
+by = {x["label"]: x for x in recs}
+check("журнал: строка на файл, без --cache", sorted(by) == ["tm/test_a.py", "tm/test_bad.py"], (recs, r.stdout))
+check("журнал: поля label/sec/ok/time/j/load", all({"label", "sec", "ok", "time", "j", "load"} <= set(x) for x in recs)
+      and by["tm/test_a.py"]["ok"] is True and by["tm/test_bad.py"]["ok"] is False and by["tm/test_a.py"]["j"] == 2,
+      recs)
+tt = mkplugin({"test_hang.py": "import time\ntime.sleep(60)\n"}, "th")
+r = run(["--timeout", "1", tt], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+last = json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])
+check("журнал: таймаут — ok=false, sec=предел", last["label"] == "th/test_hang.py" and last["ok"] is False
+      and last["sec"] == 1.0, (last, r.stdout))
+# предел меньше шага опроса (0.05 с): фактическое время после округления ≥ 0.1, предел округляется до 0.0 — разные
+r = run(["--timeout", "0.04", tt], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+last = json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])
+check("журнал: таймаут пишет предел файла, а не фактическое время", last["label"] == "th/test_hang.py"
+      and last["ok"] is False and last["sec"] == 0.0, (last, r.stdout))
+with open(os.path.join(tc, "times.jsonl"), "a") as fh:
+    fh.write("{битая строка\n[1, 2]\n")
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+check("журнал: битая строка не мешает прогону и записи", "файлов 2, ok 1, FAIL 1" in r.stdout
+      and json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])["label"].startswith("tm/"),
+      r.stdout)
+# сбой записи (папка кэша — файл) не роняет прогон
+bad_cache = os.path.join(_ROOT, "cache-is-file")
+open(bad_cache, "w").close()
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=bad_cache))
+check("журнал: сбой записи не роняет прогон", "файлов 2, ok 1, FAIL 1" in r.stdout and r.returncode == 1,
+      (r.returncode, r.stdout))
+# обрезка (times_trim): последние TIMES_KEEP_TRIM на метку
+cc = os.path.join(_ROOT, "trim-cache")
+for i in range(R.TIMES_KEEP + 5):
+    R.times_put(cc, "x/test_a.py", i, True, 2, 1.0)
+R.times_put(cc, "x/test_b.py", 7, True, 2, 1.0)
+R.times_trim(cc)
+rr = R.times_read(cc)
+check("журнал: обрезка — последние TIMES_KEEP_TRIM на метку", R.TIMES_KEEP_TRIM < R.TIMES_KEEP
+      and [x["sec"] for x in rr if x["label"] == "x/test_a.py"]
+      == [float(i) for i in range(R.TIMES_KEEP + 5 - R.TIMES_KEEP_TRIM, R.TIMES_KEEP + 5)]
+      and len([x for x in rr if x["label"] == "x/test_b.py"]) == 1, rr)
+# times_put обрезает сам: маленький порог — файл не растёт без предела
+_tb, _tk = R.TIMES_TRIM_BYTES, R.TIMES_KEEP_TRIM
+R.TIMES_TRIM_BYTES, R.TIMES_KEEP_TRIM = 2000, 3
+try:
+    pc = os.path.join(_ROOT, "put-trim-cache")
+    for i in range(60):
+        R.times_put(pc, "x/test_a.py", i, True, 2, 1.0)
+    n_lines = len(open(os.path.join(pc, "times.jsonl")).read().splitlines())
+    last_secs = [x["sec"] for x in R.times_read(pc)]
+    sz = os.path.getsize(os.path.join(pc, "times.jsonl"))
+finally:
+    R.TIMES_TRIM_BYTES, R.TIMES_KEEP_TRIM = _tb, _tk
+check("журнал: times_put сам обрезает при превышении порога", n_lines < 30 and sz < 2000 + 200
+      and last_secs[-1] == 59.0, (n_lines, sz, last_secs))
+
+items = [("/x", "p/test_a.py"), ("/x", "p/test_b.py"), ("/x", "p/test_c.py"), ("/x", "p/test_d.py")]
+
+
+def hist_of(**kw):
+    return {"p/test_" + k + ".py": v for k, v in kw.items()}
+
+
+par, _ = R.order(items, slow={}, serial=(), hist=hist_of(a=[1, 1, 1], b=[50, 60, 70], c=[9, 9, 9]))
+check("order: по медиане истории, долгие первыми", [l for _, l in par] == ["p/test_b.py", "p/test_c.py", "p/test_a.py",
+                                                                      "p/test_d.py"], par)
+par, _ = R.order(items, slow={}, serial=(), hist=hist_of(a=[1, 1000, 1000], b=[40, 40, 40]))
+check("order: медиана, а не максимум и не среднее", [l for _, l in par][0] == "p/test_a.py" and
+      R.times_expected(hist_of(a=[1, 1000, 1000]), "p/test_a.py") == 1000 and
+      R.times_expected(hist_of(a=[1, 2, 3, 100]), "p/test_a.py") == 2.5, par)
+par, _ = R.order(items, slow={"p/test_c.py": 900}, serial=(), hist=hist_of(a=[500, 500], b=[5, 5, 5]))
+check("order: меньше 3 замеров — история не берётся, предел SLOW", [l for _, l in par] == [
+    "p/test_c.py", "p/test_b.py", "p/test_a.py", "p/test_d.py"], par)
+par, _ = R.order(items, slow={"p/test_c.py": 900}, serial=())
+check("order: без истории — как раньше (SLOW, затем имя)", [l for _, l in par][0] == "p/test_c.py"
+      and [l for _, l in par][1:] == ["p/test_a.py", "p/test_b.py", "p/test_d.py"], par)
+hc = os.path.join(_ROOT, "hist-cache")
+for sec, ok in ((10, True), (20, True), (30, True), (999, False)):
+    R.times_put(hc, "p/test_a.py", sec, ok, 1, None)
+check("history: красные и таймауты в медиану не идут", R.times_hist(hc) == {"p/test_a.py": [10.0, 20.0, 30.0]},
+      R.times_hist(hc))
+check("history: нет журнала — пусто", R.times_hist(os.path.join(_ROOT, "нет-такой")) == {})
+
+# main() берёт порядок из журнала: файл b долгий в истории — идёт первым (-j 1: порядок печати = порядок запуска)
+oc = os.path.join(_ROOT, "order-cache")
+op = mkplugin({"test_a.py": OK2, "test_b.py": OK2}, "ord")
+for _ in range(3):
+    R.times_put(oc, "ord/test_a.py", 1, True, 1, None)
+    R.times_put(oc, "ord/test_b.py", 50, True, 1, None)
+r = run(["-j", "1", op], env=dict(os.environ, RUN_TESTS_CACHE=oc))
+ia, ib = r.stdout.find("ord/test_a.py"), r.stdout.find("ord/test_b.py")
+check("main: порядок файлов — по журналу (долгий b раньше a)", 0 <= ib < ia, r.stdout)
+r = run(["-j", "1", op], env=dict(os.environ, RUN_TESTS_CACHE=os.path.join(_ROOT, "order-empty")))
+ia, ib = r.stdout.find("ord/test_a.py"), r.stdout.find("ord/test_b.py")
+check("main: без журнала — по имени (a раньше b)", 0 <= ia < ib, r.stdout)
+
 DRV = ("import importlib.util, sys\nspec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\nm.SERIAL = ('par/test_s1.py',)\n"
        "sys.exit(m.main(['-j', '3', sys.argv[2]]))\n")
@@ -398,9 +502,10 @@ check("FULL: только существующие файлы", not gone, gone)
 # карта по прогону видит ленивую загрузку: watch.py грузит pantheon.py по требованию, по тексту test_tick его не зовёт
 for path, lb in (("plugins/pantheon/lib/watch.py", "pantheon/test_watch.py"),
                  ("plugins/guard/hooks/guard.py", "guard/test_guard.py"),
-                 ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate.py"),
+                 ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate_ci.py"),
                  ("plugins/project-tools/lib/project_tools.py", "project-tools/test_project_tools.py")):
-    check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()), sorted(amap["files"].get(path, ())))
+    check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()),
+          sorted(amap["files"].get(path, ())))
 check("карта: AGENTS.md не задевает ни один тест", amap["files"].get("AGENTS.md") == set(),
       amap["files"].get("AGENTS.md"))
 
@@ -579,6 +684,173 @@ check("--only: пустая метка — отказ без прогона", r.
 r = run(["--only", "alpha/test_b.py", "--affected", a])
 check("--only с --affected — отказ без прогона", r.returncode != 0 and "--only с --affected" in r.stdout
       and "итого" not in r.stdout, r.stdout)
+
+# --- --shard K/N: части CI на параллельных раннерах (metis-1111) ---
+def ran(out):
+    return re.findall(r"^(?:ok  |FAIL|карантин) (\S+) ·", out, re.M)
+
+
+SW = {f"p/test_{c}.py": w for c, w in zip("abcdefghij", (10, 9, 8, 7, 6, 5, 4, 3, 2, 1))}
+SIT = [("/x", lb) for lb in sorted(SW)]
+def wfn(it):
+    return SW[it[1]]
+
+
+for n in (1, 2, 3, 4, 11):
+    parts = R.shard_split(SIT, n, wfn)
+    flat = [it for p in parts for it in p]
+    check(f"shard_split на {n}: частей {n}, вместе — весь набор, без пересечений",
+          len(parts) == n and sorted(flat) == sorted(SIT) and len(flat) == len(set(flat)), parts)
+    loads = [sum(SW[lb] for _, lb in p) for p in parts]
+    check(f"shard_split на {n}: баланс — разница частей не больше самого тяжёлого файла",
+          max(loads) - min(loads) <= max(SW.values()), loads)
+check("shard_split: детерминизм — тот же вход и перемешанный вход дают те же части (как множества)",
+      R.shard_split(SIT, 3, wfn) == R.shard_split(SIT, 3, wfn)
+      and [sorted(p) for p in R.shard_split(list(reversed(SIT)), 3, wfn)] == [sorted(p) for p in R.shard_split(SIT, 3, wfn)])
+check("shard_split: жадно — 10, 9, 8 по частям 1, 2, 3, 7 — в самую лёгкую (3), при равной — в меньший номер; "
+      "внутри части — порядок входа",
+      [[lb[-4] for _, lb in p] for p in R.shard_split(SIT, 3, wfn)] == [["a", "f", "g"], ["b", "e", "h"],
+                                                                         ["c", "d", "i", "j"]],
+      R.shard_split(SIT, 3, wfn))
+eq = [("/x", f"p/test_{c}.py") for c in "dcba"]
+check("shard_split: равные веса — по метке, в часть с меньшим номером",
+      R.shard_split(eq, 2, lambda it: 1) == [[eq[1], eq[3]], [eq[0], eq[2]]], R.shard_split(eq, 2, lambda it: 1))
+check("parse_shard: 1/1, 2/4 — да; 0/2, 3/2, 1/0, a/b, 2, пусто — нет",
+      R.parse_shard("1/1") == (1, 1) and R.parse_shard(" 2/4 ") == (2, 4)
+      and all(R.parse_shard(v) is None for v in ("0/2", "3/2", "1/0", "a/b", "2", "", "1/2/3", "-1/2")))
+wp = mkplugin({"test_big.py": "x = 1\n" + "#" * 5000 + "\n", "test_small.py": "x = 1\n"}, "wplug")
+check("shard_weight: размер файла / SHARD_BYTES_PER_SEC; предел SLOW / SHARD_SLOW_DIV, если он больше",
+      R.shard_weight(wp, "wplug/test_big.py", {}) > R.shard_weight(wp, "wplug/test_small.py", {})
+      and R.shard_weight(wp, "wplug/test_small.py", {"wplug/test_small.py": 300}) == 300 / R.SHARD_SLOW_DIV
+      and R.shard_weight(wp, "wplug/test_none.py", {}) == 0, R.shard_weight(wp, "wplug/test_big.py", {}))
+
+# --- вес частей — время файла на CI из файла времён репозитория (metis-1117) ---
+TF = os.path.join(_ROOT, "shard-times.json")
+with open(TF, "w") as fh:
+    json.dump({"source": "t", "times": {"wplug/test_small.py": 50, "wplug/test_big.py": 1, "x/test_s.py": "abc",
+                                        "x/test_n.py": -1, "x/test_b.py": True}}, fh)
+tw = R.shard_times(TF)
+check("shard_times: метки с числом ≥ 0 из times; строка, bool и отрицательное — пропущены",
+      tw == {"wplug/test_small.py": 50.0, "wplug/test_big.py": 1.0}, tw)
+for body in ("{", "[]", '{"times": 5}', '{"source": "t"}'):
+    with open(TF + ".bad", "w") as fh:
+        fh.write(body)
+    check(f"shard_times: файл {body!r} — {{}}: вес по оценке, без падения", R.shard_times(TF + ".bad") == {},
+          R.shard_times(TF + ".bad"))
+check("shard_times: нет файла — {}", R.shard_times(os.path.join(_ROOT, "нет-файла.json")) == {})
+check("shard_weight: время из файла времён важнее размера и SLOW (и меньшее тоже); нет метки — оценка по размеру",
+      R.shard_weight(wp, "wplug/test_small.py", {"wplug/test_small.py": 900}, tw) == 50.0
+      and R.shard_weight(wp, "wplug/test_big.py", {}, tw) == 1.0
+      and R.shard_weight(wp, "wplug/test_big.py", {}, {"x/test_s.py": 1}) == R.shard_weight(wp, "wplug/test_big.py", {}, {})
+      > 1.0, (R.shard_weight(wp, "wplug/test_big.py", {}, tw), R.shard_weight(wp, "wplug/test_big.py", {}, {})))
+TW3 = os.path.join(_ROOT, "shard-times-3.json")
+with open(TW3, "w") as fh:
+    json.dump({"source": "t", "times": {"p/test_a.py": 10, "p/test_b.py": 6, "p/test_c.py": 5}}, fh)
+it3 = [("/нет-папки", f"p/test_{c}.py") for c in "abc"]
+_st = R.SHARD_TIMES
+R.SHARD_TIMES = TW3
+try:
+    dflt = (R.shard_weight(wp, "p/test_a.py", {}), R.shard_weigher()(it3[1]))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p1 = R.pick_shard(it3, [], 1, 2)[0]
+        p2 = R.pick_shard(it3, [], 2, 2)[0]
+finally:
+    R.SHARD_TIMES = _st
+check("shard_weight и shard_weigher без times читают файл SHARD_TIMES", dflt == (10.0, 6.0), dflt)
+# без времён у всех вес 0 (файлов нет) — всё в часть 1; по времени: 10 → 1, 6 → 2, 5 → в лёгкую 2
+check("pick_shard: части по времени из файла SHARD_TIMES — a | b, c; строка «по замеру CI 3 из 3»",
+      p1 == it3[:1] and p2 == it3[1:] and buf.getvalue().count("по замеру CI 3 из 3") == 2
+      and R.shard_split(it3, 2, lambda it: 0)[0] == it3, (p1, p2, buf.getvalue()))
+real = R.shard_times()
+labels = {lb for _, lb in R.collect([os.path.join(os.path.dirname(PLUGIN), p)
+                                     for p in ("guard", "pantheon", "project-tools")])}
+with open(R.SHARD_TIMES, encoding="utf-8") as fh:
+    real_raw = json.load(fh)
+check("файл времён репозитория (scripts/shard-times.json) читается: замер есть у 80 % файлов тестов трёх плагинов, "
+      "estimated — из times",
+      len(set(real) & labels) >= 0.8 * len(labels) and set(real_raw.get("estimated") or ()) <= set(real)
+      and real_raw.get("source"), (len(set(real) & labels), len(labels)))
+ST = os.path.join(PLUGIN, "scripts", "shard-times.py")
+STO = os.path.join(_ROOT, "st.json")
+GHLOG = ("\ufefffull-shard (1/3)\tUNKNOWN STEP\t2026-11-13T10:10:50.1Z ok   pantheon/test_run_tests.py · 104.1 с · "
+         "проверок 287\n"
+         "full-shard (2/3)\tUNKNOWN STEP\t2026-11-13T10:11:00.1Z FAIL pantheon/test_hooks.py · 600.0 с · таймаут\n"
+         "affected-shard (1/4)\tUNKNOWN STEP\t2026-11-13T10:11:00.1Z ok   guard/test_guard.py · 266.1 с · проверок 1\n"
+         "full-shard (3/3)\tUNKNOWN STEP\t2026-11-13T10:11:01.1Z ok   guard/test_guard.py · 124.3 с · проверок 1240\n"
+         "full-shard (3/3)\tUNKNOWN STEP\t2026-11-13T10:11:02.1Z ok   — guard/test_guard.py · 1 с\n")
+with open(STO, "w") as fh:
+    json.dump({"source": "old", "times": {"pantheon/test_hooks.py": 48.5, "pantheon/test_gone_zz.py": 5,
+                                          "pantheon/test_run_tests.py": 1},
+               "estimated": ["pantheon/test_run_tests.py", "pantheon/test_hooks.py"]}, fh)
+
+
+def shard_times_cli(args, text):
+    return subprocess.run([sys.executable, "-I", ST, "--out", STO, *args], input=text, capture_output=True, text=True,
+                          timeout=60)
+
+
+r = shard_times_cli(["--source", "run 1"], GHLOG)
+with open(STO) as fh:
+    st = json.load(fh)
+check("shard-times.py: строки ok job full-shard → times; FAIL и другой job — нет; прежнее время без замера остаётся, "
+      "метка без файла тестов — прочь; estimated — без замеренных; source — свой текст",
+      r.returncode == 0 and st["times"] == {"guard/test_guard.py": 124.3, "pantheon/test_hooks.py": 48.5,
+                                            "pantheon/test_run_tests.py": 104.1}
+      and st["estimated"] == ["pantheon/test_hooks.py"] and st["source"].startswith("run 1;"), (r.stdout, r.stderr, st))
+with open(STO) as fh:
+    before = fh.read()
+r = shard_times_cli([], "ничего\n" + GHLOG.replace("full-shard", "other-job"))
+check("shard-times.py: нет строк ok нужного job — код 1, причина последней строкой, файл не тронут",
+      r.returncode == 1 and "файл не тронут" in (r.stdout.strip().splitlines() or [""])[-1]
+      and open(STO).read() == before, (r.returncode, r.stdout, r.stderr))
+r = shard_times_cli(["--job", ""], "ok   pantheon/test_hooks.py · 9.5 с · проверок 3\n")
+with open(STO) as fh:
+    st = json.load(fh)
+check("shard-times.py --job '': вывод run-tests.py как есть — время берётся, estimated пуст",
+      r.returncode == 0 and st["times"]["pantheon/test_hooks.py"] == 9.5 and st["estimated"] == [], (r.stdout, st))
+whole = sorted(ran(run([a, b]).stdout))
+got, codes = [], []
+for k in (1, 2):
+    r = run(["--shard", f"{k}/2", a, b])
+    codes.append(r.returncode)
+    got.append(ran(r.stdout))
+    check(f"--shard {k}/2: строка части с числом файлов", f"run-tests: часть {k}/2 — файлов {len(got[-1])} из 3"
+          in r.stdout, r.stdout)
+check("--shard 1/2 и 2/2: код 0, вместе — весь набор, без пересечений",
+      codes == [0, 0] and sorted(got[0] + got[1]) == whole and not set(got[0]) & set(got[1]) and all(got), got)
+r = run(["--shard", "4/4", a, b])
+check("--shard 4/4 при 3 файлах: пустая часть — код 0 и строка «часть 4/4: файлов нет», без прогона",
+      r.returncode == 0 and "часть 4/4: файлов нет" in r.stdout and not ran(r.stdout) and "итого" not in r.stdout,
+      r.stdout)
+for bad in ("0/2", "3/2", "x", "1/0"):
+    r = run(["--shard", bad, a])
+    check(f"--shard {bad} — отказ без прогона, причина последней строкой",
+          r.returncode not in (0, 2, 3) and r.stdout.strip().splitlines()[-1].startswith("run-tests: --shard")
+          and "итого" not in r.stdout, r.stdout)
+r = run(["--shard", "1/2", "--only", "alpha/test_b.py", a])
+check("--shard с --only — отказ без прогона, причина последней строкой",
+      r.returncode not in (0, 2, 3) and "--only с --shard" in r.stdout.strip().splitlines()[-1]
+      and "итого" not in r.stdout, r.stdout)
+r = run(["--shard"])
+check("--shard без значения — отказ", r.returncode != 0 and "без значения" in r.stdout and "итого" not in r.stdout,
+      r.stdout)
+put(os.path.join(al, "tests", "test_new.py"), OK2)  # затронуто два файла: test_x (правка lib/x.py) и новый
+r = run_aff("--affected", "--base", "main", al)
+aff_all = sorted(ran(r.stdout))
+aff = [ran(run_aff("--affected", "--base", "main", "--shard", f"{k}/2", al).stdout) for k in (1, 2)]
+os.remove(os.path.join(al, "tests", "test_new.py"))
+check("--affected --shard: части делят выбор затронутого — вместе он весь, без пересечений",
+      len(aff_all) == 2 and sorted(aff[0] + aff[1]) == aff_all and not set(aff[0]) & set(aff[1]) and all(aff),
+      (aff_all, aff))
+PEN_SH = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux", "RUN_TESTS_CACHE": os.path.join(_ROOT, "pen-sh-cache")}
+sp = mkplugin({"test_setup.py": "print('ok a')\nraise SystemExit(1)\n", "test_a.py": OK2, "test_b.py": OK2}, "pantheon")
+r1, r2 = run(["--shard", "1/2", sp], env=PEN_SH), run(["--shard", "2/2", sp], env=PEN_SH)
+check("--shard на Linux: SKIP_NOT_MAC — строка skip и число только в части 1; части делят идущие файлы",
+      r1.returncode == 0 and r2.returncode == 0 and "skip pantheon/test_setup.py" in r1.stdout
+      and "пропущено 1" in r1.stdout and "skip " not in r2.stdout and "пропущено" not in r2.stdout
+      and sorted(ran(r1.stdout) + ran(r2.stdout)) == ["pantheon/test_a.py", "pantheon/test_b.py"],
+      (r1.stdout, r2.stdout))
 
 # --- устаревшая карта: файл тестов, изменённый после её сборки, идёт всегда (хеши в карте) ---
 Y2 = OK2 + "# правка после сборки карты\n"
@@ -932,7 +1204,7 @@ try:
 finally:
     R.fs_probe = real_probe
 # window_plan: решение для файлов, зависящих от окна (metis-0773), пробы подставлены
-WL = ["pantheon/test_roles.py", "guard/test_merge_gate.py", "pantheon/test_outside.py", "pantheon/test_board.py"]
+WL = ["pantheon/test_roles.py", "guard/test_merge_gate_ci.py", "pantheon/test_outside.py", "pantheon/test_board.py"]
 okp, no_bind = (lambda b: None), (lambda: "EPERM bind")
 pl = R.window_plan("/r", WL, probe=okp, bind=lambda: None)
 check("window_plan вне окна: корень прежний, пропускаемых нет, причины и строки нет — набор идёт как раньше",
@@ -1046,7 +1318,9 @@ check("make_stubs: на Linux только недостающие (pmset, scutil
       (d, cmds))
 check("make_stubs: pmset отвечает «AC Power»",
       "AC Power" in subprocess.run([os.path.join(d, "pmset"), "-g", "batt"], stdout=subprocess.PIPE, text=True).stdout)
-PEN = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux"}  # на PATH только sh: ни ioreg, ни pmset, ни scutil
+PEN_CACHE = os.path.join(_ROOT, "pen-cache")
+# с нуля: на PATH только sh (ни ioreg, ни pmset, ни scutil), без HOME; журнал времени — в папку теста, не в ~/.cache
+PEN = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux", "RUN_TESTS_CACHE": PEN_CACHE}
 STUB_T = ("import shutil\nok = all(shutil.which(c) for c in ('ioreg', 'pmset', 'scutil'))\n"
           "print('ok   заглушки на PATH' if ok else 'FAIL нет заглушек')\nprint('1 из 1 прошли' if ok else '0 из 1')\n"
           "raise SystemExit(0 if ok else 1)\n")
@@ -1065,6 +1339,12 @@ r = run([p], env=PEN)
 check("Linux: все файлы пропущены — код 3 «нечего гонять», а не зелёный итог",
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
+check("PEN: прогон с окружением с нуля пишет журнал в RUN_TESTS_CACHE (в _ROOT), а не в ~/.cache",
+      os.path.isfile(os.path.join(PEN_CACHE, "times.jsonl")), os.listdir(_ROOT))
+xdg = os.path.join(_ROOT, "xdg")
+r = run([mkplugin({"test_a.py": OK2}, "xd")], env={"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux", "XDG_CACHE_HOME": xdg})
+check("cache_dir: без RUN_TESTS_CACHE журнал идёт в XDG_CACHE_HOME",
+      os.path.isfile(os.path.join(xdg, "agent-kit-run-tests", "times.jsonl")), (r.returncode, r.stdout))
 
 # --- metis-0647: файл тестов — в классе раннера; RUN_TESTS_QOS=utility на macOS с taskpolicy — `taskpolicy -c utility` ---
 TP = R.TASKPOLICY
@@ -1110,12 +1390,16 @@ else:
 if _qos is not None:
     os.environ["RUN_TESTS_QOS"] = _qos
 
-# настоящая карта: test_merge_gate читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его выбрать (#288)
+# настоящая карта: test_merge_gate_ci читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его
+# выбрать (#288).
 real_map = json.load(open(os.path.join(PLUGIN, "scripts", "affected-map.json"), encoding="utf-8"))
-gate = real_map["tests"].index("guard/test_merge_gate.py")
+MG_CI = "guard/test_merge_gate_ci.py"
+gate = real_map["tests"].index(MG_CI)
+check(f"{MG_CI} есть в репозитории", os.path.isfile(os.path.join(REPO, "plugins", "guard", "tests", "test_merge_gate_ci.py")))
 for wf in ("tests.yml", "release.yml", "check-traces.yml"):
-    check(f"карта: .github/workflows/{wf} → guard/test_merge_gate.py",
-          gate in real_map["files"].get(".github/workflows/" + wf, []), real_map["files"].get(".github/workflows/" + wf))
+    check(f"карта: .github/workflows/{wf} → {MG_CI}",
+          gate in real_map["files"].get(".github/workflows/" + wf, []),
+          real_map["files"].get(".github/workflows/" + wf))
 
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)

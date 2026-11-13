@@ -7,7 +7,7 @@ Notification input): session_id, cwd, hook_event_name = "Notification", message 
 желанию, notification_type — permission_prompt | idle_prompt | auth_success | elicitation_dialog.
 
 Что делает: `pantheon alert --from <окно> "окно <окно> ждёт вас: <message> (с ЧЧ:ММ)"` — без --critical. Строку
-alerts.md Зевс получает в сводке новых тревог (ctx.py, hq_news), а «ждёт вас» он переносит на доску. Время в тексте
+alerts.md Зевс получает в сводке новых тревог (ctx.py, hq_news), а карточку владельцу при ожидании дольше 5 мин заводит дежурный (watch.py wait_cards, metis-1122). Время в тексте
 нужно потому, что alert() сливает одинаковые строки «ждёт вас» за сутки: второе ожидание того же окна за день иначе
 пропало бы. Имя окна — PANTHEON_SESSION, без неё — PANTHEON_ROLE.
 

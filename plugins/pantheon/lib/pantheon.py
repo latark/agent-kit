@@ -80,6 +80,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
+  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
+                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
@@ -97,6 +99,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
                                         диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
                                         «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
+  pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]   один ключ policy.toml той же
+                                        заявкой owner-edit (metis-1122): роль Edit/Write policy.toml не делает
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -213,7 +217,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
-  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel   технический перезапуск всех сессий
+  pantheon restart --prepare [причина]|--status|--go [--force|--owner <id>]|--done|--cancel   технический перезапуск всех сессий
+  pantheon restart --only <сессия> --owner <id>   одно окно по «да» владельца на вопрос [id] с его именем (metis-1122)
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
@@ -285,6 +290,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
                                         «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
   pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
+  pantheon review delta <owner/repo> <PR>   из клона: какой нужен круг argus — дельта от прошлого проверенного
+                                        head (мелкая правка вне ядра, без rebase) или полный на свежем base, —
+                                        команда записи тестов, пары вернувших; код 0 — head готов к argus, 1 — нет.
+                                        accept без записи tests на head и без зелёного CI — код 1 (metis-0669, 0784)
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
@@ -2392,6 +2401,19 @@ COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
 CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
+# Ключи проектов `pantheon outside` (metis-1016, argus #410 Б2): dev-ключи серверов (STATE/outside/env) и ключи тестов —
+# строка подключения к боевой базе (STATE/outside/test-env). Их читает только плановый проход вне окна; окнам ролей они
+# закрыты, как пароль демона CDP: denyRead песочницы (Bash) и правило Read (Read, Grep, Glob)
+OUTSIDE_KEY_DIRS = (os.path.join(STATE, "outside", "env"), os.path.join(STATE, "outside", "test-env"))
+WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS)
+
+
+def _home_form(p):
+    """Путь под HOME — в виде «~/…» (так пишутся правила Read), иначе как есть."""
+    for h in dict.fromkeys((HOME, os.path.realpath(HOME))):
+        if p == h or p.startswith(h + "/"):
+            return "~" + p[len(h):]
+    return p
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
 # он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
 def _window_rules():
@@ -2943,13 +2965,13 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms([CDP_TOKEN_DIR]),
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms(list(WINDOW_SECRET_DIRS)),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
-        # пароль демона CDP — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        # пароль демона CDP и ключи outside — и инструментам Read, Grep, Glob (песочница держит только Bash)
         "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
-                                 for x in _deny_forms([CDP_TOKEN_DIR.replace(HOME, "~", 1)])]},
+                                 for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS])]},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
@@ -4018,9 +4040,9 @@ def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
     settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть и прошли
-    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога). Плагин и
-    _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
-    settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
+    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога; перенос пакета не
+    кончен — ни того, ни другого, PACKS_LOCAL.window_hold, metis-1100). Плагин и _bin — из снимка pack_snapshot
+    (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл — settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
     обновляет. Не направление (мастерская, штаб, задачи) — []."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
     if not isinstance(folders, list) or not folders:
@@ -4044,7 +4066,7 @@ def window_flags(window, name=None):
         # окно запущено раньше первой сборки после выпуска 12.11: пакет ещё в прежней версии плагина (ревью argus #425
         # Д3). Итог — в stderr: stdout запуска читают как вывод команды
         packs_migrate_cmd(["migrate"], mark=True, out=sys.stderr)
-    snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
+    snap = None if PACKS_LOCAL.window_hold(PACKS, window, sys.stderr) else pack_snapshot(window, name or window)  # круг F
     plugin = os.path.join(snap, "plugin") if snap else None
     plugin = plugin if plugin and os.path.isfile(os.path.join(plugin, ".claude-plugin", "plugin.json")) else None
     text = pack_text(os.path.join(PACKS, window, "mcp.json")) if snap else None
@@ -4398,7 +4420,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
         if pmap:
-            PLUGIN_MAP.window_apply(data, pmap, name, direction)
+            PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
         write_window(out_dir, name, data)
         return True
 
@@ -4424,9 +4446,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                   ["chiron", "hestia"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
-               # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
+               # окну с доступом к личному правила слияния и сверки согласия не выдаются — его PR сливает владелец
+               # (metis-0156, metis-0161)
                auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name),
-                                                 auto_rules.get(name))):
+                                                 auto_rules.get(name), consent=name not in private_dirs)):
             built.append(name)
     # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
     # workshop/ доски; список субагентов — вне P0-6
@@ -4462,7 +4485,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         agents_window(job, mine or [JOB_NO_AGENTS],
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         if pmap:
-            PLUGIN_MAP.window_apply(job, pmap, name)
+            PLUGIN_MAP.window_apply(job, pmap, name, guard=guard)
         write_window(out_dir, name, job)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
@@ -4484,7 +4507,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs["env"]["PANTHEON_ROLE"] = "hestia"
     agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
     if pmap:
-        PLUGIN_MAP.window_apply(hs, pmap, "hestia")
+        PLUGIN_MAP.window_apply(hs, pmap, "hestia", guard=guard)
     write_window(out_dir, "hestia", hs)
     built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
@@ -4573,7 +4596,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     if pmap:
-        PLUGIN_MAP.window_apply(hq, pmap, "hq")
+        PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
     write_window(out_dir, "hq", hq)
     built.append("hq")
     for f in os.listdir(out_dir):
@@ -6282,6 +6305,12 @@ def direction_check(name):
     add(d.get("does") and d.get("does_not") and 3 <= len(d.get("examples") or []) <= 6,
         "в записи есть does, does_not и 3–5 examples (ROLE-11)")
     folders = [os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []]
+    if d.get("planned") is True and not (folders and all(os.path.isdir(f) for f in folders)):
+        # запланировано (metis-1043): записано в реестр заранее, папок и «да» на заведение ещё нет — не ошибка
+        res = [(ok, t) for ok, t in res if t.startswith(("имя", "запись в directions.toml"))]
+        res.append((True, "запланировано (planned = true в directions.toml): папок ещё нет, остальные проверки "
+                    "пропущены до заведения"))
+        return res
     add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
     launch = launch_folder(d.get("folders"))
     home_dir = os.path.join(PANTHEON, "directions", name)
@@ -6334,6 +6363,49 @@ def direction_check(name):
         short = name.split("-", 1)[-1]
         add(os.path.isfile(os.path.join(AGENTS, f"{lead}-{short}.md")), f"роль лида {lead}-{short} (pantheon roles build)")
     return res
+
+
+TOOL_REFUSAL = "Отказ: <инструмент> — причина"
+
+
+def project_tools_cmd():
+    """Команда project-tools: соседний плагин рядом (клон репозитория — тот же код, что у этого pantheon), иначе в
+    PATH (установленный плагин; версия без --json даст код 2 — предупреждения не будет). Нет — None."""
+    near = os.path.join(os.path.dirname(PLUGIN), "project-tools", "bin", "project-tools")
+    return near if os.access(near, os.X_OK) else shutil.which("project-tools")
+
+
+def direction_warnings(name):
+    """Предупреждения координатору (metis-1043), код выхода не меняют: в папке направления по карте стеков есть стек,
+    а инструмента нет (`project-tools check --json`), и в AGENTS.md проекта нет пометки отказа — строки «Отказ: …
+    <инструмент> …». Нет команды project-tools или она упала — молча: это совет, а не ворота. → [строка]."""
+    d = direction_gate(name)[1]
+    cmd = project_tools_cmd()
+    if not cmd or d.get("planned") is True:
+        return []
+    out = []
+    for folder in dict.fromkeys(os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []):
+        if not os.path.isdir(folder):
+            continue
+        try:
+            r = subprocess.run([cmd, "check", "--json", "--dir", folder], capture_output=True, text=True, timeout=60)
+            data = json.loads(r.stdout) if r.returncode == 0 else {}
+            missing = [(m["tool"], m["stack"]) for m in data.get("missing") or []]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            with open(os.path.join(folder, "AGENTS.md"), encoding="utf-8") as fh:
+                refusals = [l for l in fh.read().splitlines() if re.match(r"\W*отказ", l, re.I)]
+        except OSError:
+            refusals = []
+        todo = [(t, st) for t, st in missing
+                if not any(re.search(rf"(?<![\w-]){re.escape(t)}(?![\w-])", l) for l in refusals)]
+        if todo:
+            out.append(f"ВНИМАНИЕ {tilde(folder)}: стек есть, инструмента нет — "
+                       + ", ".join(f"{t} ({st})" for t, st in todo)
+                       + ". Подключить: навык project-tools (`project-tools check`); отказ — строка в AGENTS.md "
+                       + f"проекта «{TOOL_REFUSAL}»")
+    return out
 
 
 # `pantheon direction init` (metis-0042): папку нового направления создаёт команда, а не Метида — её окну guard и
@@ -6496,7 +6568,11 @@ def _init_launch(p, name, d):
                 f"Направление Пантеона `{name}`.\n\n"
                 f"Что делает: {d.get('does') or '—'}\n\n"
                 f"Чего не делает: {d.get('does_not') or '—'}\n\n"
-                "Команды сборки и тестов — дополнит координатор.\n")
+                "Команды сборки и тестов — дополнит координатор.\n\n"
+                "## Инструменты\n\n"
+                "Что подключено в проекте (MCP, плагины) и почему — заполняет координатор после "
+                "`project-tools check`. Не подключили инструмент, который карта стеков предлагает, — строка "
+                f"«{TOOL_REFUSAL}»: `pantheon direction check` тогда не предупреждает.\n")
         try:
             with open(agents, "x", encoding="utf-8") as fh:   # "x": не перезапишет и не пройдёт по ссылке
                 fh.write(text)
@@ -6526,6 +6602,8 @@ def direction(rest):
     res = direction_check(rest[1])
     for ok, text in res:
         print(("готово  " if ok else "НЕТ     ") + text)
+    for line in direction_warnings(rest[1]):  # предупреждение координатору: код выхода не меняет
+        print(line)
     return 0 if all(ok for ok, _ in res) else 1
 
 
@@ -6782,10 +6860,12 @@ def owner_edit_kick():
 
 
 def outside_kick():
-    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
-    тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
-    есть серверы). Сервер и «стоп» не ждут тестов (metis-0614)."""
-    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-serve", ["--serve"], "pending_serve")):
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — три отдельных процесса со своими замками: две
+    дорожки тестов (metis-1081: `outside run` — полный набор, `outside run --quick` — узкие и другие проекты; тесты идут
+    минутами и часами, дорожки — параллельно, в каждой один прогон) и проход серверов (`outside run --serve`, сторож
+    живёт, пока есть серверы). Сервер и «стоп» не ждут тестов (metis-0614). Замок занят — второй проход не зовётся."""
+    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-quick", ["--quick"], "pending_quick"),
+                            ("outside-serve", ["--serve"], "pending_serve")):
         try:
             if locked(name) or not getattr(outside_mod(), due)():
                 continue
@@ -7305,7 +7385,7 @@ _NIGHTLY_TICK = None
 
 
 def nightly_tick_mod():
-    """lib/nightly_tick.py — ночной полный набор тестов на origin/main (metis-1050)."""
+    """lib/nightly_tick.py — итог ночного полного набора на main из GitHub Actions (metis-1050, metis-1115)."""
     global _NIGHTLY_TICK
     if _NIGHTLY_TICK is None:
         import importlib.util
@@ -9372,8 +9452,12 @@ def main(argv):
         return handoff_mod().main(rest)
     if cmd == "owner-edit":
         return owner_edit_mod().main(rest)
+    if cmd == "policy":
+        return owner_edit_mod().cmd_policy(rest)
     if cmd == "batch":
         return batch_cmd(rest)
+    if cmd == "supabase":
+        return _plugin_map_mod("supabase_migrate").main(rest, STATE)
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":

@@ -65,6 +65,10 @@ with open(FAKE, "w") as fh:
 os.chmod(FAKE, 0o755)
 O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
+# нагрузка машины тесту не нужна (metis-1117, как в _outside_common.py): полный набор при load выше 3.0 × ядер ждёт
+# спада по 30 с (wait_load) — на раннере CI macos-15 файл шёл 519 с против 6 с на Linux. Раздел 6 подменяет
+# load_state на время одной проверки overload_files и возвращает эту заглушку
+O.load_state = lambda: (0.0, 24.0)
 
 
 def last_cmd():
@@ -543,7 +547,7 @@ def ent(ago, code, failed=None, causes=None):
     return e
 
 
-MG = "guard/test_merge_gate.py"
+MG = "guard/test_merge_gate_r4.py"
 RED = [ent(60, 1, [MG], {MG: {"kind": "провал", "why": "код 1", "line": "FAIL r6"}}),
        ent(120, 1, [MG, "pantheon/test_read.py"], {MG: {"kind": "таймаут"}, "pantheon/test_read.py": {"kind": "таймаут"}}),
        ent(180, -9, None)]

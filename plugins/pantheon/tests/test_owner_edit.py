@@ -1052,5 +1052,69 @@ P.owner_edit_kick()
 os.environ.pop("PANTHEON_DRYRUN")
 check("тик: заявок нет — прохода нет", rc == 0 and not reqs() and not os.path.exists(dry))
 
+# --- [policy set] metis-1122: правка policy.toml командой, а не Edit/Write роли --------------------------------------
+fresh(OLD + "\n[coordinators]\nzeus = [\"hq\"]  # штаб\n\n[other]\nx = 1\n")
+os.chmod(POLICY, 0o640)
+start = read(POLICY)
+rc, out, errs = quiet(P.main, ["policy", "set", "merge_repos", "metis-pantheon", "latark/agent-kit", "latark/other",
+                               "--task", "metis-1122", "--why", "добавить репозиторий"])
+q = reqs()
+check("policy set: заявка owner-edit, файл не тронут", rc == 0 and len(q) == 1 and read(POLICY) == start,
+      (rc, out, errs, q))
+_, req, _ = q[0] if q else (None, {}, None)
+want = start.replace('metis-pantheon = ["latark/agent-kit"]', 'metis-pantheon = ["latark/agent-kit", "latark/other"]')
+check("policy set: новый текст — только строка ключа заменена", req.get("new") == want, req.get("new"))
+check("policy set: вопрос Зевсу с [id] в выводе", f"[{req.get('id')}]" in out, out)
+IDLE[0] = 10 ** 6
+run()
+check("policy set: без «да» не применено", read(POLICY) == start)
+answer(yes_question(req), "А — Да, применить")
+run()
+check("policy set: «да» на вопрос с [id] — применено", read(POLICY) == want, (read(POLICY), journal()))
+check("policy set: права прежние", stat.S_IMODE(os.stat(POLICY).st_mode) == 0o640)
+# новый ключ — в конец своего раздела, новый раздел — в конец файла; скаляры и --list
+fresh(OLD + "\n[other]\nx = 1\n")
+for args, frag in ((["other", "y", "true"], "[other]\nx = 1\ny = true\n"),
+                   (["other", "x", "5"], "[other]\nx = 5\n"),
+                   (["fresh", "name", "zeus"], "\n[fresh]\nname = \"zeus\"\n"),
+                   (["fresh", "names", "zeus", "--list"], "\n[fresh]\nnames = [\"zeus\"]\n"),
+                   (["merge_repos", "demo-dir", "a/b"], "metis-pantheon = [\"latark/agent-kit\"]\ndemo-dir = \"a/b\"\n")):
+    for p_, _, _ in reqs():
+        os.remove(p_)
+    rc, out, errs = quiet(P.main, ["policy", "set", *args, "--task", "metis-1122"])
+    new = (reqs() or [(None, {}, None)])[0][1].get("new", "")
+    check(f"policy set {' '.join(args)}: правка на месте", rc == 0 and frag in new and new.count("[other]") <= 1,
+          (rc, errs, new))
+# отказы: многострочное значение, нет значения, не по образцу, без задачи; файл не тронут, заявки нет
+fresh('[merge_repos]\nmetis-pantheon = [\n  "latark/agent-kit",\n]\n')
+for args, why in ((["merge_repos", "metis-pantheon", "x", "--task", "metis-1122"], "нескольких строках"),
+                  (["merge_repos", "k", "--task", "metis-1122"], "вызов"),
+                  (["merge repos", "k", "v", "--task", "metis-1122"], "не по образцу"),
+                  (["merge_repos", "k", "v"], "вызов")):
+    rc, out, errs = quiet(P.main, ["policy", "set", *args])
+    check(f"policy set отказ ({why}): код не 0, причина последней строкой, заявки нет",
+          rc != 0 and why in errs.strip().splitlines()[-1] and not reqs(), (rc, errs))
+# ревью PR #437, Б1: «число» с переводом строки дописало бы чужие ключи и разделы — отказ, заявки нет
+fresh(OLD + "\n[other]\nx = 1\n")
+for val in ("1\nx = 2", "true\n[[evil]]\nrun = \"rm\"", "1\ry = 2", "on\x1b[2Kok", "5\u202e"):
+    rc, out, errs = quiet(P.main, ["policy", "set", "other", "y", val, "--task", "metis-1122"])
+    check(f"policy set {val!r}: отказ, код 2, причина последней строкой, заявки нет",
+          rc == 2 and "невидимый знак" in errs.strip().splitlines()[-1] and not reqs(), (rc, errs, reqs()))
+# сверка целиком: даже если значение прошло в текст, правка вне [section][key] — отказ
+real_lit = OE.toml_literal
+OE.toml_literal = lambda v: v
+for val, sec in (("1\nz = 2", "other"), ("1\n[[evil]]\nrun = 1", "other"), ("1\n[more]\nq = 3", "fresh")):
+    try:
+        OE.policy_text(OLD + "\n[other]\nx = 1\n", sec, "y", [val])
+        msg = ""
+    except OE.Refuse as e:
+        msg = str(e)
+    check(f"policy_text сверка {val!r}: причина — чужие ключи", "не только этим ключом" in msg, msg)
+OE.toml_literal = real_lit
+check("policy_text: обычная правка проходит сверку",
+      OE.policy_text(OLD + "\n[other]\nx = 1\n", "other", "x", ["7"]).endswith("[other]\nx = 7\n"))
+rc, out, errs = quiet(P.main, ["policy", "get"])
+check("policy без set — вызов, код 2", rc == 2 and "policy set" in errs, (rc, errs))
+
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)

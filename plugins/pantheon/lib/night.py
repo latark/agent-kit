@@ -12,7 +12,10 @@
 Досрочный сброс с тем же resets_at (metis-1067) отмечает владелец из своего терминала: `pantheon limit reset-mark`
 пишет STATE/limit/reset-mark.json (at, resets_at окна). При отметке того же окна (допуск 1 ч) замеры раньше неё не
 учитываются, неделя — максимум по замерам после неё и полю max отметки: его дописывает snapshot, и неделя после
-отметки не убывает, хотя простаивающее окно перезаписывает seven-day старым pct. Новая отметка — max заново;
+отметки не убывает, хотя простаивающее окно перезаписывает seven-day старым pct. Отметка хранит и pre — максимум
+окна до неё: замер после отметки, равный pre (допуск 0,5), — старый pct окна, простаивавшего с запроса до сброса, в
+неделю не входит (metis-1075); старый pct ниже pre от настоящего не отличить — он держит неделю, как раньше. Новая
+отметка — max заново;
 отметка другого окна не действует. Из окна роли — отказ (код 2).
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
 строка в тревогах (её Зевс несёт в сводку). Пробный запрос (metis-0459): снимок старше snapshot_max_min (или его нет), а
@@ -93,6 +96,18 @@ answer_at, answers_seen, pack_jobs, spent, last_used, resets_at, closed, last_ni
   since = "2026-10-24"     # не раньше: дата — с начала суток (для until = "reset" — по конец этих суток: запись в день
                            # сброса после его часа держит до следующего сброса), «ГГГГ-ММ-ДД ЧЧ:ММ» или дата-время TOML — с момента
   date = "2026-10-19"      # старый вид: только этот день
+
+Разрешённый расход до даты (metis-1124; пишет Зевс по слову владельца: «до <даты> можно потратить N % недели»):
+
+  [limits.allow]
+  pct = 30                 # пока неделя < pct % и t < until: зона не красная и жёлтая днём не держит запуск
+                           # (линия недели, stop_pp, warn_pp и hard_pct не мешают); на pct — стоп, как потолок
+  until = "2026-11-14 23:59"  # обязателен: дата (по конец суток), «ГГГГ-ММ-ДД ЧЧ:ММ» или дата-время TOML; после него
+                           # правило не действует само, owner_cap не трогается
+  decision = "owner-word-ref"  # строка-ссылка на слово владельца
+Кривая запись (pct не число в (0, 100], нет until или он кривой) не действует, `pantheon night status` пишет почему и
+watch — одна тревога. Строка «Разрешение до даты» — в `pantheon night status`. Действующее разрешение с pct меньше
+потолка владельца работает как потолок (agent-gate в оболочке хука смотрит только owner_cap — отдельно).
 
 Потолок только сужает: жёлтую и красную зону, heavy_max, hard_pct и ночь не снимает (решение 25.10; дневной потолок
 metis-0275 работал как разрешение). Достигнут — неделя по снимку ≥ pct при сбросе в будущем; старый снимок тоже
@@ -266,9 +281,41 @@ def cap_read(t, m=None):
         return None, f"запись [limits.owner_cap] не разобрана: {str(e)[:80]}"
 
 
+def allow_read(t):
+    """(разрешение, пометка) из [limits.allow] на момент t. Разрешение — {"pct", "decision", "until"} или None; пометка —
+    почему не действует ("" — раздела нет). metis-1124."""
+    try:
+        lim = P.load_schedule().get("limits")
+    except Exception as e:  # noqa: BLE001 — нет или битый schedule.toml: как без разрешения
+        return None, f"schedule.toml не прочитать ({type(e).__name__})"
+    c = lim.get("allow") if isinstance(lim, dict) else None
+    if c is None:
+        return None, ""
+    if not isinstance(c, dict):
+        return None, "запись [limits.allow] не разобрана: не таблица"
+    pct = c.get("pct")
+    if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not math.isfinite(pct) or not 0 < pct <= 100:
+        return None, "запись [limits.allow] не разобрана: pct — не число от 0 до 100"
+    if c.get("until") is None:
+        return None, "запись [limits.allow] не разобрана: нет until"
+    try:
+        end = _cap_moment(c["until"])[1]
+    except (ValueError, TypeError, OverflowError, OSError) as e:
+        return None, f"запись [limits.allow] не разобрана: {str(e)[:80]}"
+    if t >= end:
+        return None, f"истекло {P.stamp(end)}"
+    return {"pct": float(pct), "until": end,
+            "decision": " ".join(str(c.get("decision") or "").split())[:80]}, ""
+
+
 def owner_cap(t, m=None):
-    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None."""
-    return cap_read(t, m)[0]
+    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None. Действующее разрешение
+    [limits.allow] с pct ниже потолка (или без потолка) — тоже потолок: на его pct стоп (metis-1124)."""
+    cap = cap_read(t, m)[0]
+    al = allow_read(t)[0]
+    if al and (cap is None or al["pct"] < cap["pct"]):
+        return {"pct": al["pct"], "decision": al["decision"], "scope": f"разрешение до {P.stamp(al['until'])}"}
+    return cap
 
 
 def cap_hit(m, cap, t):
@@ -370,19 +417,31 @@ def reset_mark_path():
     return P.path("limit", "reset-mark.json")
 
 
+def _num_or_none(d, key):
+    try:
+        return float(d[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def reset_mark():
-    """Отметка досрочного сброса недели (pantheon limit reset-mark, metis-1067): (at, resets_at, max|None) или None.
-    max — наибольший pct недели, увиденный после отметки (его дописывает snapshot); кривой max — как нет."""
+    """Отметка досрочного сброса недели (pantheon limit reset-mark, metis-1067): (at, resets_at, max|None, pre|None)
+    или None. max — наибольший pct недели, увиденный после отметки (его дописывает snapshot); pre — наибольший pct
+    этого окна до отметки (пишет reset-mark, metis-1075). Кривые max и pre — как нет."""
     d = P.read_json(reset_mark_path(), {})
     try:
         at, resets = float(d["at"]), float(d["resets_at"])
     except (KeyError, TypeError, ValueError):
         return None
-    try:
-        top = float(d["max"])
-    except (KeyError, TypeError, ValueError):
-        top = None
-    return at, resets, top
+    return at, resets, _num_or_none(d, "max"), _num_or_none(d, "pre")
+
+
+def stale_after_mark(pct, pre):
+    """Замер после отметки — старый pct простаивающего окна (metis-1075): равен максимуму недели до отметки (допуск
+    0,5). Окно, простаивавшее с последнего запроса до сброса, пишет seven-day с этим pct и после отметки; в max он
+    прибил бы неделю к старому потолку до конца окна. Выше pre замер настоящий: старое окно больше pre не видело.
+    Без pre (отметка до metis-1075) — ничего не отсекаем, как раньше."""
+    return pre is not None and abs(pct - pre) <= 0.5
 
 
 def mark_max_save(mark, pct):
@@ -426,7 +485,8 @@ def snapshot():
         pcts = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600]
         mark = reset_mark()
         if mark and abs(mark[1] - last[1]) <= 3600:
-            seen = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600 and r[2] >= mark[0]]
+            seen = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600 and r[2] >= mark[0]
+                    and not stale_after_mark(r[0], mark[3])]
             if seen and (mark[2] is None or max(seen) > mark[2]):
                 mark_max_save(mark, max(seen))
             pcts = seen + ([mark[2]] if mark[2] is not None else [])
@@ -467,6 +527,10 @@ def measure(t, cfg=None):
         zone = "yellow"
     else:
         zone = "green"
+    if zone != "green":  # разрешённый расход до даты (metis-1124): ниже его pct зона не красная и не жёлтая
+        al = allow_read(t)[0]
+        if al and w[0] < al["pct"]:
+            zone = "green"
     m.update(known=True, line=line, over=over, zone=zone)
     return m
 
@@ -786,6 +850,11 @@ def watch(agents=None, registry=None, doms=None, t=None):
         P.alert_once("owner-cap-note", note, f"потолок владельца не действует: {note}", "night", note=note)
     else:
         P.clear_once("owner-cap-note")
+    note = allow_read(t)[1]
+    if note.startswith(("запись [limits.allow] не разобрана", "истекло")):  # слово владельца не должно пропасть молча
+        P.alert_once("limits-allow-note", note, f"разрешение до даты не действует: {note}", "night", note=note)
+    else:
+        P.clear_once("limits-allow-note")
     if cap_hit(m, cap, t):  # карточка и тревога — и без попытки запуска в этом проходе (одна на неделю и pct)
         cap_notice(t, m, cap)
     power_check(t, cfg)
@@ -1277,7 +1346,7 @@ def status_lines(t=None):
     m = measure(t, cfg)
     d = evening(t, cfg)
     night = night_line(load(d), d, t, cfg) if d else NIGHT_CLOSED
-    return ([week_line(m), "Ночь: " + night, snap_line(m, cfg), cap_line(t, m)]
+    return ([week_line(m), "Ночь: " + night, snap_line(m, cfg), cap_line(t, m)] + allow_lines(t, m)
             + [f"Разовый запуск {x}" for x in oneshot_lines(t)])
 
 
@@ -1293,6 +1362,21 @@ def cap_line(t, m):
     if m["used"] is None or not m["resets"] or m["resets"] <= t:
         return s + " · запас неизвестен (расхода недели нет)"
     return s + f" · запас {num(cap['pct'] - m['used'])} п.п."
+
+
+def allow_lines(t, m):
+    """Строка о разрешённом расходе до даты ([limits.allow]): действует — pct, срок, решение, запас; кривая или истёкшая —
+    почему не действует; раздела нет — пусто (metis-1124)."""
+    al, note = allow_read(t)
+    if al is None:
+        return [f"Разрешение до даты: не действует — {note}"] if note else []
+    s = f"Разрешение до даты: до {num(al['pct'])} % недели по {P.stamp(al['until'])}" + (
+        f" · решение {al['decision']}" if al["decision"] else "")
+    if m["used"] is None or not m["resets"] or m["resets"] <= t:
+        return [s + " · расход недели неизвестен"]
+    if m["used"] >= al["pct"]:
+        return [s + f" · достигнуто (неделя {num(m['used'])} %) — стоп, как потолок"]
+    return [s + f" · красная и жёлтая зоны не держат, запас {num(al['pct'] - m['used'])} п.п."]
 
 
 def agent_gate(t=None):
@@ -1357,7 +1441,7 @@ def report_lines(t=None):
     m = measure(t, cfg)
     d = last_evening(t, cfg)
     st = load(d)
-    out = [week_line(m), cap_line(t, m)]
+    out = [week_line(m), cap_line(t, m)] + allow_lines(t, m)
     nl = night_line(st, d, t, cfg, now_night=evening(t, cfg) is not None)
     al = st.get("alerts") or []
     out.append(f"Ночь {d.strftime('%d.%m')}: {nl}" + (f" · тревоги: {', '.join(f'{x} %' for x in al)}" if al else
@@ -1407,8 +1491,9 @@ def limit_main(rest):
     """`pantheon limit reset-mark` — отметка досрочного сброса недели (metis-1067, решение владельца 12.11). Только
     терминал владельца, как --over-cap: в окне роли (PANTHEON_ROLE задан) — отказ, код 2. Окно недели по снимку
     строки статуса неизвестно или уже сброшено — отметка не пишется, код 1. Пишет STATE/limit/reset-mark.json:
-    at (сейчас), resets_at самого свежего замера, без max: snapshot() не учитывает замеры этого окна раньше at, а
-    максимум после отметки копит заново."""
+    at (сейчас), resets_at самого свежего замера, pre (максимум окна до отметки, metis-1075), без max: snapshot() не
+    учитывает замеры этого окна раньше at и замеры, равные pre (старый pct простаивающего окна), а максимум после
+    отметки копит заново."""
     if rest != ["reset-mark"]:
         print("pantheon limit reset-mark", file=P.sys.stderr)
         return 2
@@ -1418,13 +1503,15 @@ def limit_main(rest):
               "из своего терминала", file=P.sys.stderr)
         return 2
     t = P.now()
-    _, last = week_rows()
+    rows, last = week_rows()
     if not last or last[1] <= t:
         print("pantheon limit reset-mark: окно недели неизвестно или уже сброшено — отметка не записана; нужен свежий "
               "снимок строки статуса", file=P.sys.stderr)
         return 1
+    # pre — максимум окна по всем замерам до отметки (metis-1075): его старый pct простаивающего окна snapshot не берёт
+    pre = max(r[0] for r in rows if abs(r[1] - last[1]) <= 3600)
     try:
-        P.write_json(reset_mark_path(), {"at": t, "resets_at": last[1], "stamp": P.stamp(t),
+        P.write_json(reset_mark_path(), {"at": t, "resets_at": last[1], "pre": pre, "stamp": P.stamp(t),
                                          "week_end": P.stamp(last[1])})
     except OSError as e:
         print(f"pantheon limit reset-mark: отметка не записана ({e})", file=P.sys.stderr)
