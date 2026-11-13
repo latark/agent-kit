@@ -500,9 +500,11 @@ check("FULL: только существующие файлы", not gone, gone)
 # карта по прогону видит ленивую загрузку: watch.py грузит pantheon.py по требованию, по тексту test_tick его не зовёт
 for path, lb in (("plugins/pantheon/lib/watch.py", "pantheon/test_watch.py"),
                  ("plugins/guard/hooks/guard.py", "guard/test_guard.py"),
-                 ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate.py"),
+                 ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate_ci.py"),
                  ("plugins/project-tools/lib/project_tools.py", "project-tools/test_project_tools.py")):
-    check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()), sorted(amap["files"].get(path, ())))
+    # файла нет в карте (новая часть test_merge_gate, metis-1119, до пересборки карты) — select гоняет его всегда
+    check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()) or lb not in amap["tests"],
+          sorted(amap["files"].get(path, ())))
 check("карта: AGENTS.md не задевает ни один тест", amap["files"].get("AGENTS.md") == set(),
       amap["files"].get("AGENTS.md"))
 
@@ -1115,7 +1117,7 @@ try:
 finally:
     R.fs_probe = real_probe
 # window_plan: решение для файлов, зависящих от окна (metis-0773), пробы подставлены
-WL = ["pantheon/test_roles.py", "guard/test_merge_gate.py", "pantheon/test_outside.py", "pantheon/test_board.py"]
+WL = ["pantheon/test_roles.py", "guard/test_merge_gate_ci.py", "pantheon/test_outside.py", "pantheon/test_board.py"]
 okp, no_bind = (lambda b: None), (lambda: "EPERM bind")
 pl = R.window_plan("/r", WL, probe=okp, bind=lambda: None)
 check("window_plan вне окна: корень прежний, пропускаемых нет, причины и строки нет — набор идёт как раньше",
@@ -1301,12 +1303,16 @@ else:
 if _qos is not None:
     os.environ["RUN_TESTS_QOS"] = _qos
 
-# настоящая карта: test_merge_gate читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его выбрать (#288)
+# настоящая карта: test_merge_gate_ci читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его
+# выбрать (#288). Части test_merge_gate (metis-1119) до пересборки карты в ней нет — тогда select гоняет её всегда
 real_map = json.load(open(os.path.join(PLUGIN, "scripts", "affected-map.json"), encoding="utf-8"))
-gate = real_map["tests"].index("guard/test_merge_gate.py")
+MG_CI = "guard/test_merge_gate_ci.py"
+gate = real_map["tests"].index(MG_CI) if MG_CI in real_map["tests"] else None
+check(f"{MG_CI} есть в репозитории", os.path.isfile(os.path.join(REPO, "plugins", "guard", "tests", "test_merge_gate_ci.py")))
 for wf in ("tests.yml", "release.yml", "check-traces.yml"):
-    check(f"карта: .github/workflows/{wf} → guard/test_merge_gate.py",
-          gate in real_map["files"].get(".github/workflows/" + wf, []), real_map["files"].get(".github/workflows/" + wf))
+    check(f"карта: .github/workflows/{wf} → {MG_CI}",
+          gate is None or gate in real_map["files"].get(".github/workflows/" + wf, []),
+          real_map["files"].get(".github/workflows/" + wf))
 
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)

@@ -1461,7 +1461,7 @@ CI_NONE = "проверки GitHub не получены"
 # набор на macos-15 на каждый PR, но слияние не держит, он в OPTIONAL_CHECKS: metis-1050, 1111), check-traces.yml — job traces на любой PR (и на push: две записи traces на одном SHA).
 # Тесты идут частями matrix (affected-shard, full-shard, metis-1111): проверки «<job> (K/N)», итог частей собирают
 # job affected и full с прежними именами; сами части — в OPTIONAL_CHECKS (ci_verdict узнаёт их по имени job и скобкам).
-# Совпадение с файлами workflows сверяет test_merge_gate. Обязательная засчитывается только по запуску Actions от
+# Совпадение с файлами workflows сверяет test_merge_gate_ci. Обязательная засчитывается только по запуску Actions от
 # события pull_request на этом head (ci_runs) и только с итогом SUCCESS: SKIPPED закрыл бы её job, который не
 # запускался, push-запуск проверяет ветку без слияния с base, а NEUTRAL у job Actions не бывает — его ставят
 # сторонние приложения проверок. Нет такого запуска — «ещё не встала», а не пропуск. Другие проверки репозитория:
@@ -1471,7 +1471,7 @@ CI_NONE = "проверки GitHub не получены"
 REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
-# test_merge_gate по файлам .github/workflows
+# test_merge_gate_ci по файлам .github/workflows
 OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-1050, 1111: полный набор на macOS идёт на каждый PR, "
                                                    "слияние не держит"),
                                   ("tests", "full-shard", "metis-1111: части full, их итог собирает job full"),
@@ -2095,7 +2095,7 @@ def owner_approved(repo, pr, sha, now=None):
 CARRY_HEADS = 8  # сколько прошлых head с вердиктами сверять (кроме нового); старые — без отпечатка
 CARRY_BUDGET = 4  # с на все отпечатки одного шлюза: дальше — без отпечатка (таймаут хука 10 с, ещё gh pr view и CI)
 # запас только в тестах (metis-0696, решение владельца 06.11 «А: запас только в тестах»): под нагрузкой Mac сверка
-# в test_merge_gate (r6) не укладывалась в 4 с. GUARD_TEST_CARRY_BUDGET=<с> ставит только тест, как
+# в test_merge_gate_r4 (r6) не укладывалась в 4 с. GUARD_TEST_CARRY_BUDGET=<с> ставит только тест, как
 # GUARD_TEST_DEADLINE у загрузчика tests/_cached_main.py; бюджет только растёт и не выше CARRY_BUDGET_MAX, чтобы
 # опечатка не повесила хук. Пусто, не число, не больше 4 — боевые CARRY_BUDGET
 CARRY_BUDGET_ENV = "GUARD_TEST_CARRY_BUDGET"

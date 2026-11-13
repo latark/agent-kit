@@ -161,7 +161,7 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github", "plugins/pantheon/packs")
 # файлы, где ядро — сборка и запуск окон по AST (BUILD_ROOTS шлюза, metis-0404, 0552): окно Touch ID называет их
 # среди ядра, как только PR их правит, — шлюз уже счёл PR ядром или не смог проверить (metis-0551); совпадение
-# с шлюзом сверяет test_merge_gate
+# с шлюзом сверяют тесты шлюза (test_merge_gate_*)
 BUILD_FILES = ("plugins/pantheon/lib/pantheon.py", "plugins/pantheon/lib/sessions.py")
 MAX_BATCH = 5                        # PR в одной пачке: их номера, SHA и ядро — в окне не длиннее 400 знаков
 # согласие фразой (metis-0959): «слей #N <hex>» — первой строкой вашего сообщения в owner-log/<окно>.md
@@ -498,7 +498,7 @@ def version_problem(files):
 
 def is_core(path):
     """Ядро — как _is_core шлюза guard: папки CORE_DIR целиком и файлы CORE_FILES, без учёта регистра; ./, //, `..`
-    в середине пути сводятся так же (posixpath.normpath, metis-0551 — совпадение сверяет test_merge_gate)."""
+    в середине пути сводятся так же (posixpath.normpath, metis-0551 — совпадение сверяют test_merge_gate_*)."""
     p = posixpath.normpath(path.strip("/") or ".").strip("/").casefold()
     return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
@@ -522,7 +522,7 @@ CI_NONE = "проверки GitHub не получены"
 # набор на macos-15 на каждый PR, но слияние не держит, он в OPTIONAL_CHECKS: metis-1050, 1111), check-traces.yml — job traces на любой PR (и на push: две записи traces на одном SHA).
 # Тесты идут частями matrix (affected-shard, full-shard, metis-1111): проверки «<job> (K/N)», итог частей собирают
 # job affected и full с прежними именами; сами части — в OPTIONAL_CHECKS (ci_verdict узнаёт их по имени job и скобкам).
-# Совпадение с файлами workflows сверяет test_merge_gate. Обязательная засчитывается только по запуску Actions от
+# Совпадение с файлами workflows сверяет test_merge_gate_ci. Обязательная засчитывается только по запуску Actions от
 # события pull_request на этом head (ci_runs) и только с итогом SUCCESS: SKIPPED закрыл бы её job, который не
 # запускался, push-запуск проверяет ветку без слияния с base, а NEUTRAL у job Actions не бывает — его ставят
 # сторонние приложения проверок. Нет такого запуска — «ещё не встала», а не пропуск. Другие проверки репозитория:
@@ -532,7 +532,7 @@ CI_NONE = "проверки GitHub не получены"
 REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
-# test_merge_gate по файлам .github/workflows
+# test_merge_gate_ci по файлам .github/workflows
 OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-1050, 1111: полный набор на macOS идёт на каждый PR, "
                                                    "слияние не держит"),
                                   ("tests", "full-shard", "metis-1111: части full, их итог собирает job full"),
