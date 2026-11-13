@@ -557,6 +557,32 @@ def test_restart_only_one_window_1122():
     check(r.returncode == 1 and "[resume]" not in r.stdout, f"ответ двухдневной давности сработал: {r.stdout!r}")
 
 
+def test_restart_only_board_tick_1137():
+    """metis-1137, несимметрия доски: галочка на карточке доски («Перезапустить окно: X?» → «Да») засчитывается
+    перезапуску окна, а гашению процессов — нет (test_consent_note.py, «несимметрия доски»). metis-1139: метка
+    restart-owner/<id>@<окно> — уже использовано, даже без строки в прежнем журнале restart-owner/<id>."""
+    go = {"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"}
+    e = Env()
+    e.direction("mt-dir")
+    e.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    with open(e.st("owner-log", "board.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"time": datetime.fromtimestamp(T0 - 60).strftime("%Y-%m-%dT%H:%M:%S"), "kind": "answer",
+                             "id": "board-1137", "question": "Перезапустить окно: mt-dir?", "answer": "Да"},
+                            ensure_ascii=False) + "\n")
+    r = e.run("restart", "--only", "mt-dir", "--owner", "board-1137", t=T0, extra=go)
+    check(r.returncode == 0 and "[resume] mt-dir a1a1a1a1" in r.stdout,
+          f"несимметрия доски: галочка на перезапуск окна не засчитана: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    e2 = Env()
+    e2.direction("mt-dir")
+    e2.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    _owner_said(e2, "excl-1139", "Перезапустить окно: mt-dir?", "Да", T0 - 60)
+    os.makedirs(e2.st("restart-owner"), exist_ok=True)
+    open(e2.st("restart-owner", "excl-1139@mt-dir"), "w").close()
+    r = e2.run("restart", "--only", "mt-dir", "--owner", "excl-1139", t=T0, extra=go)
+    check(r.returncode == 2 and "[resume]" not in r.stdout and "уже использовано" in r.stderr.strip().splitlines()[-1],
+          f"метка <id>@<окно> не засчитана как использованная: {r.returncode} {r.stdout!r} {r.stderr!r}")
+
+
 def test_restart_go_owner_forces_named_1122():
     """metis-1122: restart --go --owner <id> берёт без метки saved только окна, названные в вопросе [id] с «да»
     владельца; остальные несохранившиеся не трогает. Нет такого ответа — никто не перезапущен, код 1."""
