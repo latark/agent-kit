@@ -786,8 +786,13 @@ def test_gate_delta():
           and "1 из 2" in b.alerts(), b.alerts())
     b = box([("accept", SHA3, "s1"), ("reject", SHA2, "s2"), ("accept", SHA, "s2")], same=[SHA3], differs=[SHA2],
             delta=[SHA2])
-    check("0784: «вернуть» на SHA2 из delta снято принятием SHA — «принять» s1 на SHA3 того же кода до него в счёт",
-          len(b.merges()) == 1, b.alerts())
+    check("0784: на SHA2 полного круга нет (один вернувший), s1 принял SHA3 того же кода, что SHA — не полный круг, "
+          "1 из 2", not b.merges() and "1 из 2" in b.alerts(), b.alerts())
+    # Б argus #420 r2 (probe.py): A принял P, C — дельту на S′; отказ «1 из 2»; вливание main — S того же кода, S′ в
+    # same: «принять» на head из same — дельта-круг, ядро целиком видел один argus
+    b = box([("accept", SHA2, "s1"), ("accept", SHA3, "s3")], same=[SHA3], differs=[SHA2], delta=[SHA2])
+    check("0784: «принять» на SHA2 и «принять» дельты на SHA3, SHA3 в same после вливания main — не сливает, 1 из 2",
+          not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
     b = box([("accept", SHA3, "s1"), ("reject", SHA2, "s2"), ("accept", SHA, "s2")], same=[SHA3], differs=[SHA2])
     check("0784: то же, но SHA2 не в delta — откат к коду SHA3, принятому до «вернуть», отсечён, 1 из 2",
           not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(), b.alerts())

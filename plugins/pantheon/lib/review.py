@@ -539,8 +539,9 @@ def review_delta(args):
         print(f"круг: полный на {head[:12]} — {why}")
     else:
         print(f"круг: дельта {prev[:12]}..{head[:12]} ({lines} строк, вне ядра) — argus смотрит только `git diff "
-              f"{prev} {head}`; «принять» на {prev[:12]} шлюз владельца переносит со свежим «принять» другого argus "
-              "(решение при `pantheon merge request`)")
+              f"{prev} {head}`; «принять» на {prev[:12]} шлюз владельца переносит, если на нём полный круг "
+              f"({M.MIN_ACCEPTS} argus), на этом head есть «принять» argus, а каждый, кто вернул {prev[:12]}, принял "
+              "этот head (решение при `pantheon merge request`)")
     has_prev = tests_ok and any(r.get("kind") == "tests" and r.get("sha") == prev for r in recs)
     cmd = _outside_test(prev if has_prev else None)
     print(f"тесты: из чистой копии на head `{cmd}`"
