@@ -3,7 +3,7 @@
 [metis-1049-supabase] «А»).
 
 Серверы MCP идут вне песочницы окна, а правила permissions.deny окна закрывают только серверы из [catalog] карты
-plugins-by-role.toml. Сервер из .mcp.json проекта, пакета направления или плагина (supabase с записью в боевую базу)
+plugins-by-role.toml. Сервер из .mcp.json проекта, пакета направления или плагина (supabase с записью в базу проекта)
 шёл мимо всего. Этот хук — список «разрешено», а не «запрещено»: всё, что в нём не названо, — отказ.
 
 Запуск — хук PreToolUse окна с matcher «mcp__.*» и onFailure "block" (его пишет `pantheon domains build`,

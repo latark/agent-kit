@@ -892,6 +892,8 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
    ядро. С metis-0858 (решение владельца 05.11) — ещё то, что ядро берёт из других файлов: правило вердиктов argus
    `plugins/pantheon/lib/review_rules.py` (его зовёт merge.py) и разбор ваших ответов `plugins/pantheon/lib/answers.py`
    (его грузит ctx.py); `tests/test_core_deps.py` по AST ищет такие зависимости ядра и краснеет на источнике вне ядра.
+   С metis-1051 (решение владельца 13.11) — ещё команда миграций Supabase `plugins/pantheon/lib/supabase_migrate.py`:
+   она пишет в базу проекта, и её проверки «только из main» ослаблять мимо владельца нельзя.
    С metis-0951 (решение владельца 06.11) — ещё `plugins/pantheon/packs/**` целиком — общий код пакетов окон (сами пакеты с 12.11 — данные пользователя в `~/.claude/pantheon/packs`): их хуки и
    команды исполняются вне песочницы.
    Проверяются и новый путь, и `previous_filename`, так что вынос

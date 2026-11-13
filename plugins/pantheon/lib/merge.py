@@ -157,7 +157,7 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
               "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
-              ".claude-plugin/marketplace.json")
+              "plugins/pantheon/lib/supabase_migrate.py", ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github", "plugins/pantheon/packs")
 # файлы, где ядро — сборка и запуск окон по AST (BUILD_ROOTS шлюза, metis-0404, 0552): окно Touch ID называет их
 # среди ядра, как только PR их правит, — шлюз уже счёл PR ядром или не смог проверить (metis-0551); совпадение

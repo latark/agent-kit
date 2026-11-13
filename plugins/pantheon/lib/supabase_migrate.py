@@ -1,7 +1,7 @@
 """`pantheon supabase migrate <файл> [--dry-run]` — миграция Supabase только из слитого PR (metis-1051, ревизия
 автономности 09.11 F1, решение владельца [metis-1049-supabase] «А»).
 
-Запись в боевую базу через MCP окну закрыта (список guard mcp_gate, plugins-by-role.toml). Миграция идёт этой
+Запись в базу проекта через MCP окну закрыта (список guard mcp_gate, plugins-by-role.toml). Миграция идёт этой
 командой, и только та, что уже в origin/main:
   1. файл — supabase/migrations/<версия>_<имя>.sql внутри git-репозитория (не ссылка); иначе отказ;
   2. `git fetch origin +refs/heads/main:refs/pantheon/verified-main` — main origin в свой ref, сверка только с ним

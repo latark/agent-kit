@@ -165,6 +165,8 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               # argus шлюза владельца (review_rules.py, его зовёт merge.py) и разбор ваших ответов (answers.py, его
               # грузит ctx.py); сверяет tests/test_core_deps.py
               "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
+              # metis-1051 (решение владельца 13.11): миграции Supabase только из main — запись в базу проекта
+              "plugins/pantheon/lib/supabase_migrate.py",
               ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
 # и папки целиком: весь плагин guard (metis-0092) — код, тесты, README, настройки; общие роли Пантеона — в них
 # правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро
