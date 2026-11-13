@@ -163,6 +163,12 @@
   "plugins/guard/tests/_guard_shim.py": {
    "lines": 103
   },
+  "plugins/guard/tests/_merge_gate_common.py": {
+   "PLR0915": {
+    "kit_history": 56
+   },
+   "lines": 656
+  },
   "plugins/guard/tests/_orphan_pool.py": {
    "lines": 41
   },
@@ -236,7 +242,35 @@
   "plugins/guard/tests/test_hq_sessync.py": {
    "lines": 95
   },
-  "plugins/guard/tests/test_merge_gate.py": {
+  "plugins/guard/tests/test_merge_gate_billing.py": {
+   "PLR0915": {
+    "t_ci_billing": 82,
+    "t_ci_billing_unit": 59
+   },
+   "lines": 521
+  },
+  "plugins/guard/tests/test_merge_gate_carry.py": {
+   "PLR0915": {
+    "t_carry_gate": 109,
+    "t_request_decision": 70
+   },
+   "lines": 403
+  },
+  "plugins/guard/tests/test_merge_gate_ci.py": {
+   "PLR0912": {
+    "t_ci_verdict_unit": 14
+   },
+   "PLR0915": {
+    "t_ci": 140,
+    "t_ci_required": 203,
+    "t_ci_verdict_unit": 134
+   },
+   "lines": 731
+  },
+  "plugins/guard/tests/test_merge_gate_core.py": {
+   "lines": 487
+  },
+  "plugins/guard/tests/test_merge_gate_gh.py": {
    "C901": {
     "t_gh_out": 16,
     "t_hq_gh": 23
@@ -247,23 +281,55 @@
     "t_hq_gh": 19
    },
    "PLR0915": {
-    "kit_history": 56,
-    "t_carry_gate": 91,
-    "t_carry_r2": 81,
-    "t_carry_r4": 58,
-    "t_carry_unit": 89,
-    "t_ci": 140,
-    "t_ci_billing": 81,
-    "t_ci_billing_unit": 59,
-    "t_ci_required": 202,
-    "t_ci_verdict_unit": 126,
     "t_gh_out": 97,
     "t_gh_out_private": 67,
-    "t_hq_gh": 91,
-    "t_narrow_gate_unit": 52,
-    "t_opus_transcript": 95
+    "t_hq_gh": 91
    },
-   "lines": 4966
+   "lines": 510
+  },
+  "plugins/guard/tests/test_merge_gate_journal.py": {
+   "lines": 563
+  },
+  "plugins/guard/tests/test_merge_gate_limits.py": {
+   "PLR0912": {
+    "prod_timeouts": 13
+   },
+   "lines": 475
+  },
+  "plugins/guard/tests/test_merge_gate_narrow.py": {
+   "PLR0915": {
+    "t_delta_gate_unit": 53,
+    "t_narrow_gate_unit": 52
+   },
+   "lines": 372
+  },
+  "plugins/guard/tests/test_merge_gate_opus.py": {
+   "PLR0915": {
+    "t_opus_transcript": 106
+   },
+   "lines": 306
+  },
+  "plugins/guard/tests/test_merge_gate_r4.py": {
+   "PLR0915": {
+    "t_carry_merged": 162,
+    "t_carry_r4": 58
+   },
+   "lines": 522
+  },
+  "plugins/guard/tests/test_merge_gate_returned.py": {
+   "PLR0915": {
+    "t_carry_r2": 81,
+    "t_carry_unit": 89,
+    "t_returned_unit": 74
+   },
+   "lines": 415
+  },
+  "plugins/guard/tests/test_merge_gate_sandbox.py": {
+   "PLR0915": {
+    "t_core_lists_unit": 90,
+    "t_core_sandbox": 62
+   },
+   "lines": 433
   },
   "plugins/guard/tests/test_misc.py": {
    "lines": 71
