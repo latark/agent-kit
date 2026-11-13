@@ -502,7 +502,7 @@ def t_workflows(wfdir=WORKFLOWS):
           not macos, macos)
     # полный набор тестов (run-tests.py без --affected, прямой запуск tests/test_*.py в обход раннера) — только в job
     # full файла tests.yml с `if` на pull_request и workflow_dispatch, и только если workflow не запускается на
-    # push/schedule/_target (шлюз держит tests/full в REQUIRED_CHECKS). Комментарии отрезаются до проверки; смотрим все файлы.
+    # push/schedule/_target (tests/full в OPTIONAL_CHECKS шлюза, слияние не держит). Комментарии отрезаются до проверки; смотрим все файлы.
     full_bad = []
     for n in names:
         wtext = nocomment(open(os.path.join(wfdir, n)).read())

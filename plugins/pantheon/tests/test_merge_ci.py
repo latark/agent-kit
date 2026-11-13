@@ -86,7 +86,7 @@ def test_ci_billing():
           and [f"repos/{REPO}/actions/jobs/5001"] in [a[1:] for a in calls], calls)
     b = Box()
     b.request()
-    b.view(SHA, checks=[ci("SUCCESS", "SUCCESS")[0], blocked[1], ci("SUCCESS", "SUCCESS")[2]])
+    b.view(SHA, checks=[ci("SUCCESS", "SUCCESS")[0], blocked[1]])
     b.run()
     check("лимит только у traces, affected зелёная → окно и слияние", len(b.merges()) == 1, b.outs[-1])
     for name, checks, setup in (
@@ -179,7 +179,7 @@ def test_ci_billing_gh_fail():
               len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
     b = Box()
     b.request()
-    b.view(SHA, checks=[dict(blocked[0], notes=[billing_note("Process completed with exit code 1.")]), *blocked[1:]])
+    b.view(SHA, checks=[dict(blocked[0], notes=[billing_note("Process completed with exit code 1.")]), blocked[1]])
     b.set("gh-jobs-fail", "")
     b.run()
     check("обычная красная, данные job не получены → тоже ждёт (признак не проверить), заявка цела",
@@ -229,24 +229,21 @@ def test_ci_fork_billing():
           not b.windows() and not b.merges() and b.req() is None and "из форка" in b.alerts(), b.alerts())
 
 
-def test_ci_full_required():
-    """metis-1111: tests/full (полный набор на macos-15) — обязательная, а не необязательная (до 1111 — С1 argus #248):
-    её красная (без признака лимита) снимает заявку и на пути с зелёным CI, и на запасном при лимите минут. У agent-kit
-    необязательных проверок теперь нет; текст предупреждения о красной необязательной проверяет ci_verdict в
-    test_merge_gate (тот же разбор)."""
+def test_ci_optional_notes():
+    """С1 argus #248: красная необязательная (tests/full из OPTIONAL_CHECKS) не теряется — текст пропуска в окне
+    называет её и на обычном пути с зелёным CI, и на запасном пути при лимите минут."""
     full = dict(ci("SUCCESS")[0], name="full", conclusion="FAILURE")
     blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
-    check("лимит минут: tests/full среди заблокированных обязательных", [c["name"] for c in blocked]
-          == ["affected", "traces", "full"], blocked)
-    for how, checks in (("зелёный CI", ci("SUCCESS", "SUCCESS") + [full]),
-                        ("лимит минут, запись полного набора", blocked + [full])):
+    for how, checks, mark in (("зелёный CI", ci("SUCCESS", "SUCCESS") + [full], "CI ✓"),
+                              ("лимит минут, запись полного набора", blocked + [full], "засчитан местный прогон")):
         b = Box()
         b.request()
         b.view(SHA, checks=checks)
         b.run()
-        check(f"{how} + красная tests/full → окна нет, заявка снята с её именем",
-              not b.windows() and not b.merges() and b.req() is None and "tests/full красная" in b.alerts(),
-              (b.alerts(), b.outs[-1]))
+        w = b.windows()
+        check(f"{how} + красная tests/full → окно и слияние, в тексте окна и итог, и tests/full",
+              len(w) == 1 and len(b.merges()) == 1 and mark in w[0][0]
+              and "необязательная проверка GitHub tests/full красная: FAILURE" in w[0][0], (w, b.outs[-1]))
 
 
 def test_version_matches_guard():

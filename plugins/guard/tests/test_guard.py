@@ -150,15 +150,15 @@ def gate_fixtures(home):
                 fh.write(f"2026-10-15 20:00 · athena-shop · {repo}#{pr} ушло; откат: git revert x\n")
     os.makedirs(os.path.join(home, "fake-bin"), exist_ok=True)
     with open(os.path.join(home, "fake-bin/gh"), "w") as fh:
-        # запуски Actions на SHA_OK (metis-0633, 1111): обязательные tests/affected, tests/full и check-traces/traces зелёные от
+        # запуски Actions на SHA_OK (metis-0633): обязательные tests/affected и check-traces/traces зелёные от
         # pull_request PR 1–12 — шлюз agent-kit их требует; остальные gh api — файлы PR
         prs = [{"number": n} for n in range(1, 13)]
         wr = {"total_count": 2, "workflow_runs": [
             {"name": w, "event": "pull_request", "head_sha": SHA_OK, "check_suite_id": i, "pull_requests": prs}
             for i, w in ((1, "tests"), (2, "check-traces"))]}
-        cr = {"total_count": 3, "check_runs": [
+        cr = {"total_count": 2, "check_runs": [
             {"name": j, "status": "completed", "conclusion": "success", "head_sha": SHA_OK, "check_suite": {"id": i}}
-            for i, j in ((1, "affected"), (1, "full"), (2, "traces"))]}
+            for i, j in ((1, "affected"), (2, "traces"))]}
         fh.write("#!/bin/sh\ncase \"$1 $2\" in\n"
                  "  'api '*/actions/runs\\?*) echo '" + json.dumps(wr) + "'; exit 0 ;;\n"
                  "  'api '*/check-runs\\?*) echo '" + json.dumps(cr) + "'; exit 0 ;;\n"

@@ -1,13 +1,15 @@
 # Тесты плагинов (п. 8 страницы упрощения 27.10, metis-0571; полный набор на macOS на каждый PR — решение владельца
 # 13.11, metis-1111). Гибрид без macOS (03.11, metis-0688) снят: репозиторий публичный, стандартные раннеры GitHub,
 # включая macOS, для него бесплатны. Вернётся репозиторий в приватный (metis-1076) — вернуть гибрид: full только по
-# workflow_dispatch на Linux и строку tests/full в OPTIONAL_CHECKS шлюза. На каждый PR в main два job:
+# workflow_dispatch на Linux. На каждый PR в main два job:
 #   - affected — лёгкая проверка на Linux: ruff, храповик, тесты скриптов выпуска (.github/scripts/test_release.py:
 #     правка .github/ карту тестов плагинов не задевает) и затронутое (run-tests.py --affected по карте файл → тесты) на
 #     ubuntu-24.04 (закреплён: у latest образ меняется под ногами), Python 3.14; файлы, которым нужен macOS, раннер на
 #     Linux не гоняет, а печатает строкой «skip … пропущено» (SKIP_NOT_MAC); код 3 раннера «нечего гонять» — успех;
-#   - full — полный набор трёх плагинов на macos-15 (закреплён), Python 3.14. Оба — обязательные проверки шлюза guard
-#     (REQUIRED_CHECKS); локальный `pantheon outside test` — запасной путь, когда CI не запустился (README guard, п. 8).
+#   - full — полный набор трёх плагинов на macos-15 (закреплён), Python 3.14; до него ставится ruff, иначе храповик
+#     раннера пропускается. affected — обязательная проверка шлюза guard (REQUIRED_CHECKS), full — необязательная
+#     (OPTIONAL_CHECKS): полный набор слияние не держит (metis-1050, решение 09.11, подтверждено 13.11), красная —
+#     предупреждение. Локальный `pantheon outside test` — запасной путь, когда CI не запустился (README guard, п. 8).
 # На push в main и по расписанию тесты не запускаются; ночной полный набор на main делает плановый проход.
 # ruff (metis-0265) — первый шаг job affected, на каждый PR: правила — ruff.toml, версия и хеши колёс —
 # .github/ruff-requirements.txt. Вторым шагом — храповик (metis-0854, plugins/pantheon/scripts/lint_ratchet.py):

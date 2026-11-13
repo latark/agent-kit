@@ -518,9 +518,8 @@ CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 CI_NONE = "проверки GitHub не получены"
 # обязательные проверки (metis-0633): имя репозитория без владельца → (workflow, job, ветка base PR или None — любая).
-# Имена — из .github/workflows репозитория: tests.yml гоняет на PR в main job affected (затронутое, Linux) и job full
-# (полный набор на macos-15, metis-1111: репозиторий публичный, минуты бесплатны; при возврате в приватный, metis-1076,
-# full снова уходит в OPTIONAL_CHECKS), check-traces.yml — job traces на любой PR (и на push: две записи traces).
+# Имена — из .github/workflows репозитория: tests.yml гоняет job affected только на PR в main (job full — полный
+# набор на macos-15 на каждый PR, но слияние не держит, он в OPTIONAL_CHECKS: metis-1050, 1111), check-traces.yml — job traces на любой PR (и на push: две записи traces на одном SHA).
 # Совпадение с файлами workflows сверяет test_merge_gate. Обязательная засчитывается только по запуску Actions от
 # события pull_request на этом head (ci_runs) и только с итогом SUCCESS: SKIPPED закрыл бы её job, который не
 # запускался, push-запуск проверяет ветку без слияния с base, а NEUTRAL у job Actions не бывает — его ставят
@@ -528,12 +527,12 @@ CI_NONE = "проверки GitHub не получены"
 # красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
 # внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
 # (SUCCESS/NEUTRAL/SKIPPED).
-REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("tests", "full", "main"),
-                                 ("check-traces", "traces", None))}
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate по файлам .github/workflows
-OPTIONAL_CHECKS = {"agent-kit": ()}
+OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-1050, 1111: полный набор на macOS идёт на каждый PR, "
+                                                   "слияние не держит"),)}
 # запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
 CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
                "repos/{repo}/commits/{sha}/check-runs?per_page=100")
