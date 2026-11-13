@@ -31,6 +31,13 @@ def load():
     return m
 
 
+def load_denials():
+    spec = importlib.util.spec_from_file_location("pantheon_denials_hook", os.path.join(LIB, "denials.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def emit(event, text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
 
@@ -71,6 +78,9 @@ def cmd_fail(H, ev):
     key, _, outcome, _ = H.route(text)
     win, role = who()
     H.log(src, key, outcome, window=win, role=role)
+    if src == "sandbox":   # журнал отказов по классам (metis-1135 Д): guard отказ песочницы не видит, этот хук — видит
+        with contextlib.suppress(Exception):
+            load_denials().record("sandbox", ev, H.refusal_line(err))
     emit("PostToolUseFailure", H.hint(text, src))
 
 

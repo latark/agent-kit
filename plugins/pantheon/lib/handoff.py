@@ -195,6 +195,14 @@ def refusal_source(text):
     return None
 
 
+def refusal_line(text):
+    """Строка ошибки с признаком отказа песочницы (журнал отказов, metis-1135): остальной вывод в журнал не идёт."""
+    for ln in str(text or "").splitlines():
+        if refusal_source(ln) == "sandbox":
+            return ln.strip()
+    return ""
+
+
 def route(text):
     """(ключ, кому, итог, как передать) — первый маршрут, чей признак есть в тексте отказа и команде."""
     t = str(text or "")

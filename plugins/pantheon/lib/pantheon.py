@@ -95,6 +95,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
                                         белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
                                         Touch ID с этим действием целиком → исполнение один раз по sha256 текста
+  pantheon denials report|backfill      журнал и отчёт отказов окон по классам (lib/denials.py, metis-1135 Д)
   pantheon owner-edit propose|status|cancel|run   правка файла владельца (policy.toml, ~/.claude/agents/_parts/*.part)
                                         без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
                                         диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
@@ -1477,7 +1478,8 @@ def release_ticks(t):
     полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
                            ("map-tick-crash", "карта тестов", map_tick_mod),
-                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod)):
+                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod),
+                           ("denials-tick-crash", "отчёт отказов", denials_mod)):
         try:
             mod().tick(t)
         except Exception as e:
@@ -7396,6 +7398,15 @@ def nightly_tick_mod():
     return _NIGHTLY_TICK
 
 
+def denials_mod():
+    """lib/denials.py — журнал и отчёт отказов окон (metis-1135 Д); самостоятельный модуль."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_denials", os.path.join(LIB, "denials.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 _BROWSER = None
 
 
@@ -9450,6 +9461,8 @@ def main(argv):
         return browser_mod().main(rest)
     if cmd == "handoff":
         return handoff_mod().main(rest)
+    if cmd == "denials":
+        return denials_mod().main(rest, STATE, now())
     if cmd == "owner-edit":
         return owner_edit_mod().main(rest)
     if cmd == "policy":
