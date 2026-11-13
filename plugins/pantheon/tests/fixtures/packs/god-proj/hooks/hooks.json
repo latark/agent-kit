@@ -1,0 +1,62 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|mcp__plugin_supabase_supabase__apply_migration|mcp__plugin_supabase_supabase__execute_sql",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/app\" --always -- bash .claude/hooks/protect-db.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/app\" \"--cmd-prefix=git commit\" --plain=src,app -- bash .claude/hooks/pre-commit-check.sh"
+          },
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/gpu-worker\" \"--cmd-prefix=git commit\" --plain=app -- bash .claude/hooks/pre-commit-check.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/app\" --file-arg --ok -- python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py\" reexport"
+          },
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/app\" --file-arg --ok -- python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py\" fsd"
+          },
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/app\" --file-arg -- python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py\" env-sync"
+          },
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py\" \"$HOME/projects/god-proj/gpu-worker\" --file-arg -- python3 -I \"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py\" cuda-safety"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Check the transcript: if files under src/shared/lib/sync/ changed and the sync reviewer has not run since, return decision \"block\" with a reason; otherwise return decision \"approve\".",
+            "statusMessage": "Sync check..."
+          }
+        ]
+      }
+    ]
+  }
+}

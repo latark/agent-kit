@@ -7,6 +7,9 @@ mcp__<сервер> в disallowedTools шапки роли). Модуль без
 
 Запись карты — «оставить»: названное остаётся, остальное из [catalog] выключается. Окна или роли, которых в карте нет, и
 плагины и MCP вне [catalog] не трогаются — безопасный дефолт «всё включено».
+
+Записи окон своих направлений пользователь держит не в карте плагина, а в личной части
+~/.claude/pantheon/plugins-by-role.toml (overlay): только [window.<направление>], каталог — из карты плагина.
 """
 
 import re
@@ -52,19 +55,51 @@ def load(path, windows=None, roles=None):
             if known is not None and name not in known:
                 out["skipped"].append(f"[{kind}.{name}]")
                 continue
-            if not isinstance(entry, dict) or set(entry) - set(keys):
-                raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}")
-            keep = {}
-            for k in keys:
-                vals = entry.get(k)
-                if not isinstance(vals, list) or not all(isinstance(x, str) for x in vals):
-                    raise ValueError(f"карта плагинов: [{kind}.{name}] {k} — список строк (пустой — «ничего»)")
-                unknown = [x for x in vals if x not in out[k]]
-                if unknown:
-                    raise ValueError(f"карта плагинов: [{kind}.{name}] {k}: {unknown} нет в [catalog]")
-                keep[k] = list(vals)
-            out[kind][name] = keep
+            out[kind][name] = _entry(out, kind, name, entry, keys)
     return out
+
+
+def _entry(out, kind, name, entry, keys):
+    """Запись [kind.name] карты → {ключ: список}; ValueError — не те ключи, не список строк или имя вне каталога out."""
+    if not isinstance(entry, dict) or set(entry) - set(keys):
+        raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}")
+    keep = {}
+    for k in keys:
+        vals = entry.get(k)
+        if not isinstance(vals, list) or not all(isinstance(x, str) for x in vals):
+            raise ValueError(f"карта плагинов: [{kind}.{name}] {k} — список строк (пустой — «ничего»)")
+        unknown = [x for x in vals if x not in out[k]]
+        if unknown:
+            raise ValueError(f"карта плагинов: [{kind}.{name}] {k}: {unknown} нет в [catalog]")
+        keep[k] = list(vals)
+    return keep
+
+
+def overlay(pmap, path, allowed, system=()):
+    """Личная часть карты (решение владельца 12.11: окна направлений — личные настройки): файл path только с
+    [window.<направление>] поверх pmap, запись заменяет одноимённую. allowed — имена окон направлений реестра (None —
+    реестр не прочитан, не сверять), system — окна системы (hq, hestia, workshop, direction, job-*): их записи только в
+    карте плагина. Запись вне allowed или из system — в pmap["skipped"] с пометкой «личная часть». Каталог — из pmap:
+    личная часть его не расширяет. Нет файла — pmap как есть; битый файл или запись — ValueError (вызывающий
+    оставляет карту плагина без личной части)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = tomllib.load(fh)
+    except FileNotFoundError:
+        return pmap
+    except (OSError, ValueError) as e:
+        raise ValueError(f"личная карта плагинов {path}: {e}") from e
+    if set(raw) - {"window"} or not isinstance(raw.get("window", {}), dict):
+        raise ValueError(f"личная карта плагинов {path}: только таблицы [window.<направление>]")
+    got, skipped = {}, []
+    for name, entry in raw.get("window", {}).items():
+        if name in system or (allowed is not None and name not in allowed):
+            skipped.append(f"[window.{name}] (личная часть)")
+            continue
+        got[name] = _entry(pmap, "window", name, entry, ("plugins", "mcp"))
+    pmap["window"].update(got)  # после разбора всех записей: битая запись не оставит карту наполовину личной
+    pmap["skipped"] += skipped
+    return pmap
 
 
 def unknown_enabled(pmap, enabled):
