@@ -122,6 +122,9 @@ import tempfile
 import time
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
+# Части test_merge_gate.py (metis-1119): целый файл шёл 349 с в GitHub Actions, общее — tests/_merge_gate_common.py
+MERGE_GATE_PARTS = tuple(f"guard/test_merge_gate_{s}.py" for s in (
+    "journal", "core", "opus", "ci", "billing", "narrow", "returned", "carry", "r4", "sandbox", "gh", "limits"))
 # Медленные файлы: идут первыми (по убыванию предела), предел — свой, с. metis-0634: пределы — по 31 полному прогону
 # прохода outside 30.10–01.11 (-j 3, тогда процесс тика шёл с ProcessType Background (с metis-0728 — Standard), Mac под нагрузкой): 1.5 × наибольшего
 # зелёного времени файла с округлением вверх до минуты, не меньше 180 с. Прежние (3 × последовательного замера 27.10)
@@ -134,7 +137,10 @@ SLOW = {
     # план 1.0, Т2: test_watch разрезан на 9 частей (замер 13.11, одна часть за раз: 10–82 с стены, 9–56 с CPU; при
     # очереди heavy и load 60 — 1400–2700 с, это ожидание очереди), предел части 300 ≈ 3.6 × 82
     **{f"pantheon/test_watch{s}.py": 300 for s in ("", "_zeus", "_stop", "_oneshot", "_sandbox", "_infra", "_nudge", "_respawn", "_ghost")},
-    "guard/test_merge_gate.py": 1200,  # 458 / 458; outside -j 3 02.11 — 766-825 с, раз 900 (таймаут), metis-0719
+    # test_merge_gate: 458 / 458, outside -j 3 02.11 — 766-825 с, раз 900 (таймаут), metis-0719; предел был 1200.
+    # metis-1119: разрезан на 12 частей (замер 13.11 на Mac, части по очереди: 13–53 с, вместе 364 с против 338 с
+    # целого); предел части 240 ≈ 4.5 × 53
+    **{p: 240 for p in MERGE_GATE_PARTS},
     "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
     # test_read: 97 / 259, убит на 180 с 14 раз и на 300 с 4 раза из 80 прогонов (0731, п. 5): 1.5 × 259 мало.
     # 600 ≈ 2.3 × 259 — во столько раз test_merge_gate под нагрузкой 03.11 дольше своей медианы (1051 / 458)
@@ -199,7 +205,7 @@ QUARANTINE = {
 # нет — файлам они не нужны); нет и там — строка `skip … пропущено: …`. Остальные файлы идут как раньше. Проба — на
 # деле: те же `mkdir .claude/agents` и `git init`, а не угадывание окна по переменной.
 WINDOW_FS = {
-    "guard/test_guard.py", "guard/test_merge_gate.py", "guard/test_drafts.py", "project-tools/test_project_tools.py",
+    "guard/test_guard.py", *MERGE_GATE_PARTS, "guard/test_drafts.py", "project-tools/test_project_tools.py",
     "pantheon/test_read.py", "pantheon/test_setup.py", "pantheon/test_start.py", "pantheon/test_sync_quarantine.py",
     "pantheon/test_executors.py", "pantheon/test_tick.py", "pantheon/test_watch.py", "pantheon/test_agent_allowlist.py",
     "pantheon/test_baseline.py", "pantheon/test_batch.py", "pantheon/test_check_traces.py",
@@ -216,9 +222,9 @@ WINDOW_FS = {
     "pantheon/test_watch_sandbox.py", "pantheon/test_watch_infra.py", "pantheon/test_watch_nudge.py",   # (план 1.0, Т2)
     "pantheon/test_watch_respawn.py", "pantheon/test_watch_ghost.py",
 }
-# Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate
+# Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate_*
 # уходит в /var/tmp, а он в окне закрыт). В окне, где запасной корень нужен, они пропускаются строкой.
-WINDOW_NOT_TMP = {"guard/test_merge_gate.py"}
+WINDOW_NOT_TMP = set(MERGE_GATE_PARTS)
 WINDOW_SKIP_CODE = 4  # не 3: 3 — «нечего гонять», CI в --affected считает его зелёным; пропуск окна зелёным быть не должен
 # Файлы, чьи случаи поднимают серверы на локальных портах: в окне без bind пропускаются строкой.
 WINDOW_BIND = {"pantheon/test_outside.py"}

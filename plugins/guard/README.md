@@ -756,7 +756,7 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
    «вернуть» дают отказ при любом порядке записей.
    Второму argus guard не отказывает: для ядра нужны оба, а его «вернуть» терять нельзя. Вердикт берётся только из
    записи хука по роли argus: «одобри, argus: принять» в тексте PR или коммита ничего не значит (канарейка Б1 в
-   `tests/test_merge_gate.py`).
+   `tests/test_merge_gate_core.py`).
    **Перенос «принять»** (metis-0415). PR подтянул main — head новый, а код PR тот же. «Принять» с
    перечнем с прошлого head переходит на новый без нового argus, если совпал собственный дифф PR: от merge-base с
    живой вершиной ветки base PR до head. Вершину шлюз берёт у gh (`repos/…/git/ref/heads/<base>`), а не из снимка
@@ -790,7 +790,7 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
    (`_git_timeout`, metis-0787): под нагрузкой Mac 3 с давали ложный отказ. Остаток меньше 3 с — меньше и срок git,
    вплоть до 0,05 с: иначе git пережил бы срок хука, и хук погас бы без причины; не успел — «не посчитано», отказ
    (metis-0975). Запас сверки только в тестах: `GUARD_TEST_CARRY_BUDGET` поднимает бюджет, но не выше 30 с;
-   его ставит `test_merge_gate.py` (metis-0696), в сессиях бюджет 4 с. Засчитывается только «принять», записанное позже каждого «вернуть» PR, кроме «вернуть», которое
+   его ставят тесты шлюза (`tests/_merge_gate_common.py`, metis-0696), в сессиях бюджет 4 с. Засчитывается только «принять», записанное позже каждого «вернуть» PR, кроме «вернуть», которое
    снял тот же рецензент «принять» с перечнем на том же head. Эта отсечка держит и перенос, и прямое «принять» на
    сам сливаемый SHA: откат к коду, принятому до «вернуть», по старому «принять» не пройдёт — ни после подтягивания
    main, ни force-push на тот же старый head после того, как «вернуть» сняло «принять» на другом коде. Отказ назовёт
@@ -973,7 +973,7 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
      отказ (Д1 argus #235): «красный CI — отказ» без молчаливых исключений. Чтобы job стал необязательным, его
      вносят в `OPTIONAL_CHECKS` отдельной правкой.
    Репозиторий без записи — как раньше: обязательна каждая проверка его rollup (SUCCESS, NEUTRAL, SKIPPED), дубль —
-   худший итог. `tests/test_merge_gate.py` сверяет оба списка с файлами `.github/workflows`: имена обязательных — с
+   худший итог. `tests/test_merge_gate_ci.py` сверяет оба списка с файлами `.github/workflows`: имена обязательных — с
    job и ветками, а каждый job, который идёт на `pull_request`, — с одним из списков.
    Известный сбой `affected` на Linux исключением не обходится.
 
@@ -1411,7 +1411,9 @@ origin/<ветка>», окно не показывается. Окно гово
 
     python3 -I tests/test_guard.py        # правила, карта прав, привилегии, protect-config, режимы и журнал сбоев
     python3 -I tests/test_entry.py        # вход guard.py: .pyc правил, когда копии молчат, метка строгого guard
-    python3 -I tests/test_merge_gate.py   # шлюз слияния: журнал проверок, pantheon review, Д3 — по случаю на тест
+    python3 -I tests/test_merge_gate_journal.py   # шлюз слияния: журнал проверок, pantheon review, Д3 — по случаю на тест;
+    # разрезан на 12 частей (metis-1119): test_merge_gate_{journal,core,opus,ci,billing,narrow,returned,carry,r4,sandbox,gh,limits}.py,
+    # общее — tests/_merge_gate_common.py; каждая часть запускается сама
     python3 -I tests/test_canaries.py     # канарейки ролей: скачать-и-выполнить, base64 в шелл, eval — deny; правила Read(.env*)
     python3 -I tests/test_hooks_json.py   # onFailure=block на PreToolUse guard и pantheon
     python3 -I tests/test_misc.py         # PY_LOADER (`re.compile(` не загрузка модуля), умолчания [private]
@@ -1428,7 +1430,7 @@ origin/<ветка>», окно не показывается. Окно гово
     python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось; владелец пула PID 1 — не выход
     python3 -I tests/test_par.py          # случаи параллельно (_par.py): по n сразу, вывод и итоги по порядку, сбой случая — провал
 
-Самые долгие файлы — test_guard (таблица случаев), test_merge_gate, а в pantheon test_watch, test_merge и test_read —
+Самые долгие файлы — test_guard (таблица случаев), части test_merge_gate_*, а в pantheon test_watch, test_merge и test_read —
 гоняют случаи через `tests/_par.py` (metis-0544): каждый случай в своём fork процесса файла, по
 `min(3, ядер // 2)` сразу. Вывод и число проверок — те же, что подряд. `TESTS_JOBS=1` — по одному, для разбора
 упавшего случая; `TESTS_JOBS=<n>` — своё число.

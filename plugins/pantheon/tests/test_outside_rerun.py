@@ -547,7 +547,7 @@ def ent(ago, code, failed=None, causes=None):
     return e
 
 
-MG = "guard/test_merge_gate.py"
+MG = "guard/test_merge_gate_r4.py"
 RED = [ent(60, 1, [MG], {MG: {"kind": "провал", "why": "код 1", "line": "FAIL r6"}}),
        ent(120, 1, [MG, "pantheon/test_read.py"], {MG: {"kind": "таймаут"}, "pantheon/test_read.py": {"kind": "таймаут"}}),
        ent(180, -9, None)]
