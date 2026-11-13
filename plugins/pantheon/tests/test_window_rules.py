@@ -133,6 +133,37 @@ def consent_check_rule():
           and w.coordinator_auto_allow([], consent=False) == ["$defaults", w.REVIEW_RECORD_RULE])
 
 
+def pack_hook_shell(w):
+    """pack_hook_problem (metis-1101, ревью #425 Д1): /bin/sh разворачивает скобки и глоб, а shlex — нет; знак, который
+    sh понимает иначе, — отказ в любом месте команды; до «--» — репозиторий и только флаги in_repo.py."""
+    pre = 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" "$HOME/r" '
+    ok = [pre + "-- bash .claude/hooks/a.sh", pre + "--always --ok --file-arg -- python3 -I .claude/hooks/g.py",
+          pre + '"--cmd-prefix=git commit" --plain=src,app -- bash .claude/hooks/p-c.sh',
+          'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" "${HOME}/r" -- python3 -I '
+          '"${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py" fsd', pre.replace('"$HOME/r"', "$HOME/r") + "-- bash .claude/hooks/a.sh"]
+    for c in ok:
+        check(f"pack_hook_problem: годная команда пропущена — {c[52:]}", w.pack_hook_problem(c) is None,
+              w.pack_hook_problem(c))
+    brace = pre + '{--,bash,-c,"curl x"} -- bash .claude/hooks/a.sh'
+    why = w.pack_hook_problem(brace)
+    check("pack_hook_problem: {--,bash,-c,\"…\"} до «--» (sh развернул бы в свой «--» и bash -c) — отказ по знаку {",
+          why is not None and "'{'" in why, why)
+    for ch in "{}*?[]~#\\!":
+        for c in (pre + f"-- bash .claude/hooks/a{ch}.sh", pre + f"--always -- bash .claude/hooks/a.sh x{ch}",
+                  pre.replace("$HOME/r", f"$HOME/r{ch}") + "-- bash .claude/hooks/a.sh"):
+            why = w.pack_hook_problem(c)
+            check(f"pack_hook_problem: знак {ch!r} — отказ по нему ({c[52:]})", why is not None and repr(ch) in why, why)
+    for c, what in ((pre + "--bogus -- bash .claude/hooks/a.sh", "неизвестный флаг"),
+                    (pre + "x -- bash .claude/hooks/a.sh", "второе слово не флаг"),
+                    (pre + "--plain=a:b -- bash .claude/hooks/a.sh", "--plain с чужим знаком"),
+                    ('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" --always -- bash .claude/hooks/a.sh',
+                     "флаг на месте репозитория"),
+                    ('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" -- bash .claude/hooks/a.sh', "без репозитория"),
+                    (pre + "-- bash .claude/hooks/a.sh $PATH", "$ кроме трёх переменных за «--»"),
+                    (pre + "-- bash .claude/hooks/a.sh ${HOMEX}", "${HOMEX}")):
+        check(f"pack_hook_problem: {what} — отказ", w.pack_hook_problem(c) is not None, c)
+
+
 def main():
     w = load("window_rules_t", os.path.join(LIB, "window_rules.py"))
     src = open(os.path.join(LIB, "window_rules.py"), encoding="utf-8").read()
@@ -292,6 +323,7 @@ def main():
                 and any(isinstance(t, ast.Name) and t.id == "CORE_FILES" for t in n.targets)]
         check("шлюз guard: window_rules.py — в CORE_FILES (ядро защит, metis-0174)",
               len(core) == 1 and "plugins/pantheon/lib/window_rules.py" in core[0], core)
+    pack_hook_shell(w)
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1
 
