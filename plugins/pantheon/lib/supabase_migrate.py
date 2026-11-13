@@ -9,9 +9,10 @@
      «неоднозначно». В этом main должен быть файл по тому же пути, и его blob равен файлу на диске. Нет в main
      (новый, не слитый PR, только локальный коммит) или отличается — отказ «не из main». Применяется текст blob из
      main, а не файл с диска: подмена файла между сверкой и применением ничего не даст. git идёт без GIT_* окружения
-     (GIT_CONFIG_*, GIT_DIR и т. п. подменили бы origin). Текст из main без мета-команд psql (строка с «\\» в начале
-     или «\\» вне строк, комментариев и $$-тел: \\! запускает shell вне песочницы) и без своего BEGIN, COMMIT,
-     ROLLBACK, END, ABORT, START TRANSACTION верхнего уровня — иначе отказ;
+     (GIT_CONFIG_*, GIT_DIR и т. п. подменили бы origin). Текст из main — строгий UTF-8 без единого «\\» (мета-команды
+     psql: \\! запускает shell вне песочницы), без управляющих знаков кроме \\n и \\t, без client_encoding,
+     standard_conforming_strings, backslash_quote и без своего BEGIN, COMMIT, ROLLBACK, END, ABORT, START TRANSACTION
+     верхнего уровня — иначе отказ (check_sql); psql идёт с PGCLIENTENCODING=UTF8;
   3. база — строка подключения postgresql://… из переменной SUPABASE_DB_URL (её команда не печатает и не пишет в
      журнал); нет или не разобрана — отказ. psql и pg_dump получают её разобранной в PGHOST, PGPORT, PGUSER,
      PGPASSWORD, PGDATABASE (и PGSSLMODE) окружения подпроцесса, а не в argv: argv виден всем процессам Mac;
@@ -56,6 +57,7 @@ def _git(repo, *args, text=True):
 
 
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+FORBIDDEN_SQL = re.compile(r"client_encoding|standard_conforming_strings|backslash_quote", re.IGNORECASE)
 TXN_WORDS = ("BEGIN", "COMMIT", "ROLLBACK", "END", "ABORT", "START TRANSACTION")
 
 
@@ -96,16 +98,28 @@ def _outside_literals(sql):
 
 
 def check_sql(rel, body):
-    """Отказ миграции, которую psql исполнит не как одну транзакцию SQL: мета-команда psql (\\! — shell вне песочницы,
-    \\copy, \\i, \\o и любая другая; строка с «\\» в начале или «\\» вне строк и тел) и BEGIN, COMMIT, ROLLBACK, END,
-    ABORT, START TRANSACTION верхнего уровня (они ломают --single-transaction)."""
-    text = body.decode("utf-8", "replace")
+    """Отказ миграции, которую psql исполнит не как одну транзакцию SQL. Лексер psql не повторяем — строже его:
+    1) текст — строгий UTF-8 (psql идёт с PGCLIENTENCODING=UTF8); 2) ни одного «\\» в байтах, где бы он ни стоял
+    (мета-команды psql: \\! — shell вне песочницы, \\copy, \\i, \\o); 3) управляющих знаков нет, кроме \\n и \\t (\\r
+    psql считает концом комментария «--»); 4) нет client_encoding, standard_conforming_strings, backslash_quote
+    (меняют разбор строк); 5) нет BEGIN, COMMIT, ROLLBACK, END, ABORT, START TRANSACTION верхнего уровня (ломают
+    --single-transaction). Пункты 1–4 — по сырому тексту; разбор литералов нужен только пункту 5: его ошибка — ложный
+    отказ или пропуск COMMIT, но не исполнение мимо SQL."""
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Refused(f"{rel}: текст миграции не UTF-8 — не применяю") from None
+    if b"\\" in body:
+        raise Refused(f"{rel}: обратный слеш запрещён: мета-команды psql; E-строки пишите через chr()/U&")
+    bad = sorted({f"U+{ord(c):04X}" for c in text if (ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) < 160})
+    if bad:
+        raise Refused(f"{rel}: управляющие знаки {', '.join(bad[:5])} — разрешены только \\n и \\t, не применяю")
+    if m := FORBIDDEN_SQL.search(text):
+        raise Refused(f"{rel}: {m.group(0).lower()} в миграции запрещён — он меняет разбор строк, не применяю")
     try:
         code = _outside_literals(text)
     except Refused as e:
         raise Refused(f"{rel}: текст миграции не разобран ({e}) — не применяю") from None
-    if any(ln.lstrip().startswith("\\") for ln in text.splitlines()) or "\\" in code:
-        raise Refused(f"{rel}: в миграции мета-команда psql (строка с «\\») — \\! и другие идут мимо SQL, не применяю")
     for stmt in code.split(";"):
         words = " ".join(stmt.split()).upper()
         if any(words == w or words.startswith(w + " ") for w in TXN_WORDS):
@@ -163,7 +177,8 @@ def pg_env(url):
     if u.scheme not in URL_SCHEMES or not u.hostname or not u.username or u.fragment:
         raise Refused(f"{DB_ENV}: нужен адрес postgresql://пользователь:пароль@хост[:порт]/база")
     env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
-    env.update(PGHOST=u.hostname, PGUSER=unquote(u.username), PGDATABASE=unquote(u.path.lstrip("/")) or "postgres")
+    env.update(PGHOST=u.hostname, PGUSER=unquote(u.username), PGDATABASE=unquote(u.path.lstrip("/")) or "postgres",
+               PGCLIENTENCODING="UTF8")
     if port:
         env["PGPORT"] = str(port)
     if u.password is not None:
@@ -177,7 +192,7 @@ def pg_env(url):
 
 def _dump(env, out):
     r = subprocess.run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges"],
-                       capture_output=True, text=True, timeout=600, env=env)
+                       capture_output=True, text=True, errors="replace", timeout=600, env=env)
     if r.returncode != 0:
         raise Refused(f"pg_dump не снял схему (код {r.returncode}): {(r.stderr or '').strip()[-300:]}")
     with open(out, "w", encoding="utf-8") as fh:
@@ -187,7 +202,7 @@ def _dump(env, out):
 
 def _query(env, sql):
     r = subprocess.run(["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", sql],
-                       capture_output=True, text=True, timeout=120, env=env)
+                       capture_output=True, text=True, errors="replace", timeout=120, env=env)
     if r.returncode != 0:
         raise Refused(f"psql: запрос не выполнен (код {r.returncode}): {(r.stderr or '').strip()[-300:]}")
     return r.stdout.strip()
@@ -214,7 +229,7 @@ def apply(state, path, out=print):
     cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", sql]
     if known:
         cmd += ["-c", f"insert into supabase_migrations.schema_migrations (version) values ('{version}')"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=db)
+    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=1800, env=db)
     with open(os.path.join(run, "psql.log"), "w", encoding="utf-8") as fh:
         fh.write(r.stdout + r.stderr)
     after = _dump(db, os.path.join(run, "after.sql"))

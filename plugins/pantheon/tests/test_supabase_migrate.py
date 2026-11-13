@@ -14,6 +14,8 @@
   подвинутый вручную свой ref fetch перезаписывает;
 - строка подключения не в argv psql и pg_dump, а в PG* окружения (пароль с %-кодом, sslmode, PG* родителя сняты);
   адрес не postgresql://, без пользователя, с чужим параметром или плохим портом — отказ;
+- текст миграции (check_sql): «\\» где угодно, не UTF-8, управляющие знаки кроме \\n и \\t (\\r), client_encoding,
+  standard_conforming_strings, backslash_quote, свой BEGIN/COMMIT/ROLLBACK/START — отказ; psql с PGCLIENTENCODING=UTF8;
 - мутанты внутри теста: без проверки «есть в main», без сверки blob, без проверки «уже применена», без отказа на
   неоднозначное имя, короткое имя вместо своего ref, fetch не в свой ref, адрес в argv, psql без PG*, PG* родителя
   не сняты, чужой параметр адреса молча — тест их ловит.
@@ -67,7 +69,7 @@ BIN = os.path.join(ROOT, "bin")
 LOG = os.path.join(ROOT, "calls.log")
 SCHEMA = os.path.join(ROOT, "schema.sql")
 ENVLOG = os.path.join(ROOT, "env.log")
-PGLINE = ('echo "$0 host=$PGHOST port=$PGPORT user=$PGUSER pw=$PGPASSWORD db=$PGDATABASE ssl=$PGSSLMODE" '
+PGLINE = ('echo "$0 host=$PGHOST port=$PGPORT user=$PGUSER pw=$PGPASSWORD db=$PGDATABASE ssl=$PGSSLMODE enc=$PGCLIENTENCODING" '
           '>> "$FAKE_ENVLOG"\n')
 write(os.path.join(BIN, "pg_dump"), '#!/bin/sh\necho "pg_dump $*" >> "$FAKE_LOG"\n' + PGLINE + 'cat "$FAKE_SCHEMA"\n',
       0o755)
@@ -105,17 +107,29 @@ MAIN_SQL = "create table t (id int);\n"
 write(os.path.join(REPO, MIG), MAIN_SQL)
 write(os.path.join(REPO, "README.md"), "x\n")
 # миграции в main, которые psql исполнил бы не одной транзакцией SQL, и честная со «страшными» словами внутри литералов
-BAD_SQL = {"20260110000000_shell.sql": "create table a (i int);\n  \\! touch /tmp/pwn\n",
-           "20260111000000_inline.sql": "select 1 \\o /tmp/out\n;\n",
-           "20260112000000_begin.sql": "BEGIN;\ncreate table b (i int);\nCOMMIT;\n",
-           "20260113000000_rollback.sql": "create table c (i int);\n  rollback ;\n",
-           "20260114000000_start.sql": "start  transaction isolation level serializable;\n",
-           "20260115000000_open.sql": "select 'не закрыта;\n"}
-GOOD_SQL = ("-- begin; \\! в комментарии\n/* commit; /* вложенный */ \\i x */\n"
-            "create function f() returns int language plpgsql as $fn$\nbegin\n  return 1;\nend;\n$fn$;\n"
-            "select 'a\\b', E'c\\'d', 'it''s; commit', \"end\";\nselect $$ \\! $$;\n")
-for name, text in BAD_SQL.items():
-    write(os.path.join(REPO, "supabase/migrations", name), text)
+BAD_SQL = {  # имя → (байты, слово причины в последней строке)
+    "20260110000000_shell.sql": (b"create table a (i int);\n  \\! touch /tmp/pwn\n", "обратный слеш"),
+    "20260111000000_inline.sql": (b"select 1 \\o /tmp/out\n;\n", "обратный слеш"),
+    # обходы разбора из проверки безопасности 5501bf3f: $ после не-ASCII, \r в комментарии, кодировка, E-строки
+    "20260117000000_dollar.sql": ("select ä$$x;\n\\! id\n$$;\n".encode(), "обратный слеш"),
+    "20260118000000_cr.sql": (b"-- note\rcommit;\ncreate table d (i int);\n", "управляющие знаки"),
+    "20260119000000_ff.sql": (b"select 1;\x0c\n", "управляющие знаки"),
+    "20260120000000_sjis.sql": (b"select '\x95';\n", "не UTF-8"),
+    "20260121000000_enc.sql": (b"SET Client_Encoding TO 'SJIS';\nselect 1;\n", "client_encoding"),
+    "20260122000000_scs.sql": (b"set standard_conforming_strings = off;\n", "standard_conforming_strings"),
+    "20260123000000_bq.sql": (b"/* x */ set backslash_quote = on;\n", "backslash_quote"),
+    "20260124000000_estr.sql": (b"select E'\\';\n", "обратный слеш"),
+    "20260112000000_begin.sql": (b"BEGIN;\ncreate table b (i int);\nCOMMIT;\n", "свой BEGIN"),
+    "20260113000000_rollback.sql": (b"create table c (i int);\n  rollback ;\n", "свой ROLLBACK"),
+    "20260114000000_start.sql": (b"start  transaction isolation level serializable;\n", "свой START"),
+    "20260115000000_open.sql": ("select 'не закрыта;\n".encode(), "не разобран")}
+GOOD_SQL = ("-- begin; в комментарии\n/* commit; /* вложенный */ x */\n"
+            "create function f() returns int language plpgsql as $fn$\nbegin\n\treturn 1;\nend;\n$fn$;\n"
+            "select 'it''s; commit', \"end\", chr(92), 'приём';\nselect $$ begin; $$;\n")
+for name, (raw, _) in BAD_SQL.items():
+    os.makedirs(os.path.join(REPO, "supabase/migrations"), exist_ok=True)
+    with open(os.path.join(REPO, "supabase/migrations", name), "wb") as fh:
+        fh.write(raw)
 GOOD = "supabase/migrations/20260116000000_good.sql"
 write(os.path.join(REPO, GOOD), GOOD_SQL)
 git(REPO, "add", "-A")
@@ -189,13 +203,13 @@ envs = open(ENVLOG, encoding="utf-8").read().splitlines()
 check("строки подключения нет в argv psql и pg_dump (ни пароля, ни хоста)",
       calls.strip() and "secret" not in calls and "db.example" not in calls and "postgres" + "ql://" not in calls, calls)
 check("psql и pg_dump получили адрес разобранным в PG* окружения — каждый вызов (2 pg_dump + 3 psql)",
-      len(envs) == 5 and all(x.endswith(" host=db.example port=6543 user=u pw=secret db=postgres ssl=") for x in envs),
+      len(envs) == 5 and all(x.endswith(" host=db.example port=6543 user=u pw=secret db=postgres ssl= enc=UTF8") for x in envs),
       envs)
 code, out, err, calls = call(["migrate", p(MIG)], {"SUPABASE_DB_URL": "postgresql://u:p%40ss@db.example/app?sslmode=require",
                                                     "PGHOST": "evil.example", "PGSSLMODE": "disable"})
 envs = open(ENVLOG, encoding="utf-8").read().splitlines()
 check("пароль с %-кодом раскодирован, sslmode → PGSSLMODE, PG* родителя не протекли, порт не задан — не задан",
-      code == 0 and envs and all(x.endswith(" host=db.example port= user=u pw=p@ss db=app ssl=require") for x in envs),
+      code == 0 and envs and all(x.endswith(" host=db.example port= user=u pw=p@ss db=app ssl=require enc=UTF8") for x in envs),
       (code, err, envs))
 for bad, word in (("host=db.example user=u password=secret", "нужен адрес"), ("postgresql://db.example/x", "нужен адрес"),
                   ("postgresql://u:secret@db.example/x?options=-c%20x", "не поддержан"),
@@ -242,13 +256,12 @@ for argv in ([], ["migrate"], ["apply", p(MIG)], ["migrate", p(MIG), p(LOCAL)], 
     check(f"вызов {argv[:1] + ['…'] * (len(argv) > 1)} не тот — код 2", code == 2, (argv, code, err))
 
 # --- текст миграции: без мета-команд psql и своего управления транзакцией ---
-for name, word in zip(BAD_SQL, ("мета-команда", "мета-команда", "свой BEGIN", "свой ROLLBACK", "свой START",
-                                "не разобран")):
+for name, (_, word) in BAD_SQL.items():
     code, out, err, calls = call(["migrate", p("supabase/migrations/" + name)])
     check(f"{name} — код 1, «{word}» последней строкой, psql -f не вызывался",
           code == 1 and word in err.strip().splitlines()[-1] and " -f " not in calls, (code, err, calls))
 code, out, err, calls = call(["migrate", p(GOOD)])
-check("begin/commit/\\ внутри комментариев, строк, E-строк, \"end\" и $$-тел — не отказ, применено",
+check("begin/commit внутри комментариев, строк, \"end\" и $$-тел, табуляция, chr(92) — не отказ, применено",
       code == 0 and " -f " in calls, (code, err))
 
 # --- git без GIT_* окружения: url.<чужой>.insteadOf из GIT_CONFIG_* не подменяет origin ---
@@ -346,10 +359,25 @@ M12 = mutant("    check_sql(rel, body.stdout)\n", "")
 SHELL = p("supabase/migrations/20260110000000_shell.sql")
 check("мутант (без проверки текста миграции) отдаёт psql \\! — тест это видит",
       call(["migrate", SHELL], mod=M12)[0] == 0 and call(["migrate", SHELL])[0] == 1)
-M13 = mutant('    if any(ln.lstrip().startswith("\\\\") for ln in text.splitlines()) or "\\\\" in code:',
-             "    if False:")
-check("мутант (без отказа на «\\») пропускает \\! — тест это видит",
+M13 = mutant('    if b"\\\\" in body:', "    if False:")
+check("мутант п. 2 (без отказа на «\\») пропускает \\! — тест это видит",
       call(["migrate", SHELL], mod=M13)[0] == 0)
+M17 = mutant('text = body.decode("utf-8")\n', 'text = body.decode("utf-8", "replace")\n')
+SJIS = p("supabase/migrations/20260120000000_sjis.sql")
+check("мутант п. 1 (decode с replace) пропускает не-UTF-8 — тест это видит",
+      call(["migrate", SJIS], mod=M17)[0] == 0 and call(["migrate", SJIS])[0] == 1)
+M18 = mutant("    if bad:\n", "    if False:\n")
+CR = p("supabase/migrations/20260118000000_cr.sql")
+check("мутант п. 3 (без отказа на управляющие знаки) пропускает COMMIT за \\r в комментарии — тест это видит",
+      call(["migrate", CR], mod=M18)[0] == 0 and call(["migrate", CR])[0] == 1)
+M19 = mutant("    if m := FORBIDDEN_SQL.search(text):", "    if m := None:")
+ENC = p("supabase/migrations/20260121000000_enc.sql")
+check("мутант п. 4 (без отказа на client_encoding) пропускает смену кодировки — тест это видит",
+      call(["migrate", ENC], mod=M19)[0] == 0 and call(["migrate", ENC])[0] == 1)
+M20 = mutant(',\n               PGCLIENTENCODING="UTF8")', ")")
+call(["migrate", p(MIG)], mod=M20)
+check("мутант п. 5 (psql без PGCLIENTENCODING=UTF8) — тест это видит",
+      all(x.endswith(" enc=") for x in open(ENVLOG, encoding="utf-8").read().splitlines()))
 M14 = mutant("        if any(words == w or words.startswith(w + \" \") for w in TXN_WORDS):", "        if False:")
 BEGIN = p("supabase/migrations/20260112000000_begin.sql")
 check("мутант (без отказа на BEGIN/COMMIT) пропускает свой BEGIN — тест это видит",
