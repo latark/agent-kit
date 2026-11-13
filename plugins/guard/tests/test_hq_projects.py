@@ -76,6 +76,9 @@ try:
         r = run("Bash", {"command": cmd})
         check(f"9 Bash не судится правилом: {cmd.split(root)[0][:30]}", not r, r)
     for f in ("README.md", "AGENTS.md", "readme.md", ".git/HEAD", ".git/logs/HEAD"):
+        if sys.platform != "darwin" and f in ("README.md", "AGENTS.md"):  # ключ пути в нижнем регистре — только на macOS (IS_MAC)
+            print(f"пропущено: 10/11 открыт {f} — нужен macOS (регистронезависимая ФС)")
+            continue
         r = run("Read", {"file_path": P + "/" + f})
         check(f"10/11 открыт {f}", not r, r)
     r = run("Read", {"file_path": P + "/docs/README.md"})
