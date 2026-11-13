@@ -1046,7 +1046,7 @@ def main():
               and "«тесты — в CI»" in text)
         # Д4 argus #430: мутант — встроенный в тест (CI сам мутанты не гоняет), полный набор при ci: — Actions
         check(f"{f[:-5]}: при строке `ci:` мутант встроен в тест, а не «проверяет CI»; пункт 6 — GitHub Actions",
-              "Краснение на откате держит мутант внутри самого теста" in text
+              "Откат проверяет сам тест: он подменяет исходник и ждёт, что check упадёт — мутант убит" in text
               and "проверяет CI на PR" not in text
               and "«не проверял: полный набор — его делает GitHub Actions»" in text)
     argus_md = " ".join(read(os.path.join(out_real, "argus.md")).split())
