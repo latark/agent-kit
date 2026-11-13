@@ -36,11 +36,11 @@ def main():
     tmp = os.path.join(ROOT, "h")
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
-    for d in ("projects/legal-watch", "projects/expert-corpus", "projects/br", "ai/knowledge", "projects/workshop",
+    for d in ("projects/repo-law", "projects/repo-corp", "projects/br", "ai/knowledge", "projects/workshop",
               ".claude/pantheon"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     with open(os.path.join(home, "directions.toml"), "w") as fh:
-        fh.write('[[direction]]\nname = "themis-sources"\nfolders = ["~/projects/legal-watch", "~/projects/expert-corpus"]\n'
+        fh.write('[[direction]]\nname = "themis-repos"\nfolders = ["~/projects/repo-law", "~/projects/repo-corp"]\n'
                  '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1", "PANTHEON_CLAUDE_TMP": os.path.join(tmp, "ctmp")}  # общий /tmp/claude-<uid> меняется
@@ -50,10 +50,10 @@ def main():
     check("сборка прошла", r.returncode == 0, r.stderr)
     win = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))  # noqa: E731
     real = lambda p: os.path.realpath(os.path.join(tmp, p))  # noqa: E731
-    th, at, ws = win("themis-sources"), win("athena-shop"), win("workshop")
+    th, at, ws = win("themis-repos"), win("athena-shop"), win("workshop")
     got = (th.get("permissions") or {}).get("additionalDirectories")
     check("окно направления: все свои папки — рабочие (additionalDirectories), настоящими путями, по порядку реестра",
-          got == [real("projects/legal-watch"), real("projects/expert-corpus")], got)
+          got == [real("projects/repo-law"), real("projects/repo-corp")], got)
     check("окно направления: папок чужого направления в рабочих нет",
           real("projects/br") not in (got or []) and (at.get("permissions") or {}).get("additionalDirectories")
           == [real("projects/br")], (got, at.get("permissions")))
@@ -73,7 +73,7 @@ def main():
     b0 = built()
     ifc()
     check("--if-changed без правок — пересборки нет (иначе проверка ниже ничего не доказывает)", built() == b0)
-    second = os.path.join(tmp, "projects/expert-corpus/.claude")
+    second = os.path.join(tmp, "projects/repo-corp/.claude")
     os.makedirs(second)
     with open(os.path.join(second, "settings.json"), "w") as fh:
         json.dump({"permissions": {"allow": ["Bash(gh pr *)", "Bash(mailkeeper scan *)"]},
@@ -81,27 +81,27 @@ def main():
     os.utime(os.path.join(second, "settings.json"), (time.time() + 5,) * 2)  # новее built_ts: --if-changed заметит
     r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True,
                        text=True, timeout=120)
-    gone = not os.path.exists(os.path.join(state, "settings", "themis-sources.json"))
+    gone = not os.path.exists(os.path.join(state, "settings", "themis-repos.json"))
     check("вторая папка с allow gh pr merge — окно направления не собрано, причина названа",
-          gone and "expert-corpus/.claude/settings.json" in r.stderr and "gh pr merge" in r.stderr, (gone, r.stderr))
+          gone and "repo-corp/.claude/settings.json" in r.stderr and "gh pr merge" in r.stderr, (gone, r.stderr))
     check("чужое направление при этом собрано", os.path.exists(os.path.join(state, "settings", "athena-shop.json")))
     sys.path.insert(0, os.path.join(PLUGIN, "lib"))
     os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_NO_NOTIFY="1")
     import pantheon as P  # noqa: E402 — после HOME: модуль берёт пути при загрузке
-    folders = ["~/projects/legal-watch", "~/projects/expert-corpus", "~/projects/legal-watch"]
+    folders = ["~/projects/repo-law", "~/projects/repo-corp", "~/projects/repo-law"]
     check("window_folders: папка запуска первой, остальные по реестру, без повторов",
-          P.window_folders(folders) == [real("projects/legal-watch"), real("projects/expert-corpus")],
+          P.window_folders(folders) == [real("projects/repo-law"), real("projects/repo-corp")],
           P.window_folders(folders))
-    reason = P.no_window_reason("themis-sources")
-    check("no_window_reason называет allow второй папки", "expert-corpus" in reason and "gh pr merge" in reason, reason)
-    line = [t for ok, t in P.direction_check("themis-sources") if "gh pr merge" in t]
+    reason = P.no_window_reason("themis-repos")
+    check("no_window_reason называет allow второй папки", "repo-corp" in reason and "gh pr merge" in reason, reason)
+    line = [t for ok, t in P.direction_check("themis-repos") if "gh pr merge" in t]
     check("direction check: allow второй папки — пункт не готов, с путём",
-          len(line) == 1 and "expert-corpus/.claude/settings.json" in line[0]
-          and not dict((t, ok) for ok, t in P.direction_check("themis-sources"))[line[0]], line)
+          len(line) == 1 and "repo-corp/.claude/settings.json" in line[0]
+          and not dict((t, ok) for ok, t in P.direction_check("themis-repos"))[line[0]], line)
     os.remove(os.path.join(second, "settings.json"))
     r = subprocess.run([sys.executable, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
                        timeout=120)
-    check("allow убран — окно снова собрано", os.path.exists(os.path.join(state, "settings", "themis-sources.json")),
+    check("allow убран — окно снова собрано", os.path.exists(os.path.join(state, "settings", "themis-repos.json")),
           r.stderr)
     return all(results)
 

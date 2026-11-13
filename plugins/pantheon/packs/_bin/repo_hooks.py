@@ -16,11 +16,11 @@ O_NOFOLLOW, без «.» и «..»; звено-ссылка, не папка, н
 строкой в stdout, файл не тронут. Запись — только так же. Без fd корня (запуск не через in_repo.py) — строка отказа
 в stdout, ничего не читается.
 
-reexport — check-reexport.sh MorphStream/app: для src/app/api/<путь>/route.ts создаёт или обновляет app/api/<путь>/
+reexport — check-reexport.sh проекта app: для src/app/api/<путь>/route.ts создаёт или обновляет app/api/<путь>/
 route.ts строкой `export { GET,POST } from '@/app/api/<путь>/route'`. env-sync — check-env-sync.sh: сверяет структуру
 .env.example, .env.local и .env.production (ключи, порядок, комментарии; значения справа от «=» не сравнивает) и
 выводит расхождение; строки не вида `KEY=` (комментарии, мусор, строка без «=» — в ней может быть ключ) выводит маской.
-fsd — check-fsd.sh MorphStream/app: импорты слоя FSD правленого файла (shared, entities, features, widgets).
+fsd — check-fsd.sh проекта app: импорты слоя FSD правленого файла (shared, entities, features, widgets).
 cuda-safety — check-cuda-safety.sh gpu-worker: вызовы, которые инициализируют CUDA до fork, в правленом .py.
 Все не блокируют: выход 0 всегда. Python 3.9+."""
 import difflib

@@ -3593,7 +3593,7 @@ def t_returned_unit(h):
                 bash("t6", rep_("12345678/9abcdef0")), user("t6 без tool_result-списка"))
     check("agent_rounds: поле из первого поручения; isMeta и task-notification не поручение; отчёт — только успешный "
           "на этот PR", got == (["12345678/9abcdef0", pa], [pa]), got)
-    got = write(user(f"Полный круг PR 7"), user(f"Повторный круг, вернули: {pa}", origin={"kind": "coordinator"}),
+    got = write(user("Полный круг PR 7"), user(f"Повторный круг, вернули: {pa}", origin={"kind": "coordinator"}),
                 user("ещё глянь README", origin={"kind": "coordinator"}))
     check("agent_rounds: поле из сообщения лида (SendMessage), следующее сообщение без поля его не снимает",
           got == ([pa], []), got)
