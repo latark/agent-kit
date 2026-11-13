@@ -21,6 +21,9 @@ _ROOT = tempfile.mkdtemp(prefix="test_run_tests-root-")
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)
+# журнал времени раннера (times.jsonl) — в папку теста, а не в настоящий ~/.cache. Это окружение процесса и всех
+# дочерних через dict(os.environ, ...); окружение, собранное с нуля (PEN), получает RUN_TESTS_CACHE само
+os.environ["RUN_TESTS_CACHE"] = os.path.join(_ROOT, "cache-default")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
@@ -257,6 +260,105 @@ par, ser = R.order([("/x", "par/test_p1.py"), ("/x", "par/test_s1.py"), ("/x", "
                    slow={"par/test_p2.py": 900}, serial=("par/test_s1.py",))
 check("order: медленные первыми, серийные отдельно", [l for _, l in par] == ["par/test_p2.py", "par/test_p1.py"]
       and [l for _, l in ser] == ["par/test_s1.py"], (par, ser))
+
+# --- журнал времени (план 1.0 Т0/Т1) ---
+tc = os.path.join(_ROOT, "times-cache")
+tp = mkplugin({"test_a.py": OK2, "test_bad.py": "print('FAIL x')\nraise SystemExit(1)\n"}, "tm")
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+recs = [json.loads(x) for x in open(os.path.join(tc, "times.jsonl")).read().splitlines()]
+by = {x["label"]: x for x in recs}
+check("журнал: строка на файл, без --cache", sorted(by) == ["tm/test_a.py", "tm/test_bad.py"], (recs, r.stdout))
+check("журнал: поля label/sec/ok/time/j/load", all({"label", "sec", "ok", "time", "j", "load"} <= set(x) for x in recs)
+      and by["tm/test_a.py"]["ok"] is True and by["tm/test_bad.py"]["ok"] is False and by["tm/test_a.py"]["j"] == 2,
+      recs)
+tt = mkplugin({"test_hang.py": "import time\ntime.sleep(60)\n"}, "th")
+r = run(["--timeout", "1", tt], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+last = json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])
+check("журнал: таймаут — ok=false, sec=предел", last["label"] == "th/test_hang.py" and last["ok"] is False
+      and last["sec"] == 1.0, (last, r.stdout))
+# предел меньше шага опроса (0.05 с): фактическое время после округления ≥ 0.1, предел округляется до 0.0 — разные
+r = run(["--timeout", "0.04", tt], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+last = json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])
+check("журнал: таймаут пишет предел файла, а не фактическое время", last["label"] == "th/test_hang.py"
+      and last["ok"] is False and last["sec"] == 0.0, (last, r.stdout))
+with open(os.path.join(tc, "times.jsonl"), "a") as fh:
+    fh.write("{битая строка\n[1, 2]\n")
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=tc))
+check("журнал: битая строка не мешает прогону и записи", "файлов 2, ok 1, FAIL 1" in r.stdout
+      and json.loads(open(os.path.join(tc, "times.jsonl")).read().splitlines()[-1])["label"].startswith("tm/"),
+      r.stdout)
+# сбой записи (папка кэша — файл) не роняет прогон
+bad_cache = os.path.join(_ROOT, "cache-is-file")
+open(bad_cache, "w").close()
+r = run(["-j", "2", tp], env=dict(os.environ, RUN_TESTS_CACHE=bad_cache))
+check("журнал: сбой записи не роняет прогон", "файлов 2, ok 1, FAIL 1" in r.stdout and r.returncode == 1,
+      (r.returncode, r.stdout))
+# обрезка (times_trim): последние TIMES_KEEP_TRIM на метку
+cc = os.path.join(_ROOT, "trim-cache")
+for i in range(R.TIMES_KEEP + 5):
+    R.times_put(cc, "x/test_a.py", i, True, 2, 1.0)
+R.times_put(cc, "x/test_b.py", 7, True, 2, 1.0)
+R.times_trim(cc)
+rr = R.times_read(cc)
+check("журнал: обрезка — последние TIMES_KEEP_TRIM на метку", R.TIMES_KEEP_TRIM < R.TIMES_KEEP
+      and [x["sec"] for x in rr if x["label"] == "x/test_a.py"]
+      == [float(i) for i in range(R.TIMES_KEEP + 5 - R.TIMES_KEEP_TRIM, R.TIMES_KEEP + 5)]
+      and len([x for x in rr if x["label"] == "x/test_b.py"]) == 1, rr)
+# times_put обрезает сам: маленький порог — файл не растёт без предела
+_tb, _tk = R.TIMES_TRIM_BYTES, R.TIMES_KEEP_TRIM
+R.TIMES_TRIM_BYTES, R.TIMES_KEEP_TRIM = 2000, 3
+try:
+    pc = os.path.join(_ROOT, "put-trim-cache")
+    for i in range(60):
+        R.times_put(pc, "x/test_a.py", i, True, 2, 1.0)
+    n_lines = len(open(os.path.join(pc, "times.jsonl")).read().splitlines())
+    last_secs = [x["sec"] for x in R.times_read(pc)]
+    sz = os.path.getsize(os.path.join(pc, "times.jsonl"))
+finally:
+    R.TIMES_TRIM_BYTES, R.TIMES_KEEP_TRIM = _tb, _tk
+check("журнал: times_put сам обрезает при превышении порога", n_lines < 30 and sz < 2000 + 200
+      and last_secs[-1] == 59.0, (n_lines, sz, last_secs))
+
+items = [("/x", "p/test_a.py"), ("/x", "p/test_b.py"), ("/x", "p/test_c.py"), ("/x", "p/test_d.py")]
+
+
+def hist_of(**kw):
+    return {"p/test_" + k + ".py": v for k, v in kw.items()}
+
+
+par, _ = R.order(items, slow={}, serial=(), hist=hist_of(a=[1, 1, 1], b=[50, 60, 70], c=[9, 9, 9]))
+check("order: по медиане истории, долгие первыми", [l for _, l in par] == ["p/test_b.py", "p/test_c.py", "p/test_a.py",
+                                                                      "p/test_d.py"], par)
+par, _ = R.order(items, slow={}, serial=(), hist=hist_of(a=[1, 1000, 1000], b=[40, 40, 40]))
+check("order: медиана, а не максимум и не среднее", [l for _, l in par][0] == "p/test_a.py" and
+      R.times_expected(hist_of(a=[1, 1000, 1000]), "p/test_a.py") == 1000 and
+      R.times_expected(hist_of(a=[1, 2, 3, 100]), "p/test_a.py") == 2.5, par)
+par, _ = R.order(items, slow={"p/test_c.py": 900}, serial=(), hist=hist_of(a=[500, 500], b=[5, 5, 5]))
+check("order: меньше 3 замеров — история не берётся, предел SLOW", [l for _, l in par] == [
+    "p/test_c.py", "p/test_b.py", "p/test_a.py", "p/test_d.py"], par)
+par, _ = R.order(items, slow={"p/test_c.py": 900}, serial=())
+check("order: без истории — как раньше (SLOW, затем имя)", [l for _, l in par][0] == "p/test_c.py"
+      and [l for _, l in par][1:] == ["p/test_a.py", "p/test_b.py", "p/test_d.py"], par)
+hc = os.path.join(_ROOT, "hist-cache")
+for sec, ok in ((10, True), (20, True), (30, True), (999, False)):
+    R.times_put(hc, "p/test_a.py", sec, ok, 1, None)
+check("history: красные и таймауты в медиану не идут", R.times_hist(hc) == {"p/test_a.py": [10.0, 20.0, 30.0]},
+      R.times_hist(hc))
+check("history: нет журнала — пусто", R.times_hist(os.path.join(_ROOT, "нет-такой")) == {})
+
+# main() берёт порядок из журнала: файл b долгий в истории — идёт первым (-j 1: порядок печати = порядок запуска)
+oc = os.path.join(_ROOT, "order-cache")
+op = mkplugin({"test_a.py": OK2, "test_b.py": OK2}, "ord")
+for _ in range(3):
+    R.times_put(oc, "ord/test_a.py", 1, True, 1, None)
+    R.times_put(oc, "ord/test_b.py", 50, True, 1, None)
+r = run(["-j", "1", op], env=dict(os.environ, RUN_TESTS_CACHE=oc))
+ia, ib = r.stdout.find("ord/test_a.py"), r.stdout.find("ord/test_b.py")
+check("main: порядок файлов — по журналу (долгий b раньше a)", 0 <= ib < ia, r.stdout)
+r = run(["-j", "1", op], env=dict(os.environ, RUN_TESTS_CACHE=os.path.join(_ROOT, "order-empty")))
+ia, ib = r.stdout.find("ord/test_a.py"), r.stdout.find("ord/test_b.py")
+check("main: без журнала — по имени (a раньше b)", 0 <= ia < ib, r.stdout)
+
 DRV = ("import importlib.util, sys\nspec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\nm.SERIAL = ('par/test_s1.py',)\n"
        "sys.exit(m.main(['-j', '3', sys.argv[2]]))\n")
@@ -1046,7 +1148,9 @@ check("make_stubs: на Linux только недостающие (pmset, scutil
       (d, cmds))
 check("make_stubs: pmset отвечает «AC Power»",
       "AC Power" in subprocess.run([os.path.join(d, "pmset"), "-g", "batt"], stdout=subprocess.PIPE, text=True).stdout)
-PEN = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux"}  # на PATH только sh: ни ioreg, ни pmset, ни scutil
+PEN_CACHE = os.path.join(_ROOT, "pen-cache")
+# с нуля: на PATH только sh (ни ioreg, ни pmset, ни scutil), без HOME; журнал времени — в папку теста, не в ~/.cache
+PEN = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux", "RUN_TESTS_CACHE": PEN_CACHE}
 STUB_T = ("import shutil\nok = all(shutil.which(c) for c in ('ioreg', 'pmset', 'scutil'))\n"
           "print('ok   заглушки на PATH' if ok else 'FAIL нет заглушек')\nprint('1 из 1 прошли' if ok else '0 из 1')\n"
           "raise SystemExit(0 if ok else 1)\n")
@@ -1065,6 +1169,12 @@ r = run([p], env=PEN)
 check("Linux: все файлы пропущены — код 3 «нечего гонять», а не зелёный итог",
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
+check("PEN: прогон с окружением с нуля пишет журнал в RUN_TESTS_CACHE (в _ROOT), а не в ~/.cache",
+      os.path.isfile(os.path.join(PEN_CACHE, "times.jsonl")), os.listdir(_ROOT))
+xdg = os.path.join(_ROOT, "xdg")
+r = run([mkplugin({"test_a.py": OK2}, "xd")], env={"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux", "XDG_CACHE_HOME": xdg})
+check("cache_dir: без RUN_TESTS_CACHE журнал идёт в XDG_CACHE_HOME",
+      os.path.isfile(os.path.join(xdg, "agent-kit-run-tests", "times.jsonl")), (r.returncode, r.stdout))
 
 # --- metis-0647: файл тестов — в классе раннера; RUN_TESTS_QOS=utility на macOS с taskpolicy — `taskpolicy -c utility` ---
 TP = R.TASKPOLICY
