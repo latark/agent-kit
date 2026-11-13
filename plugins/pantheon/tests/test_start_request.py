@@ -183,7 +183,7 @@ try:
     import time as _time
     W = P.watch_mod()
     alerts = os.path.join(P.PANTHEON, "alerts.md")
-    stopped = P.path("stopped", "hermes-alex")
+    stopped = P.path("stopped", "hermes-siteb")
 
     def word(ago):
         """Ваша запись в owner-log/zeus.md ago секунд назад (её пишет хук; здесь — тест)."""
@@ -207,7 +207,7 @@ try:
 
     def req_line(**kw):
         with open(req, "w") as fh:
-            fh.write(json.dumps({"target": "hermes-alex", "time": P.stamp(P.now()), "by": "zeus", **kw}) + "\n")
+            fh.write(json.dumps({"target": "hermes-siteb", "time": P.stamp(P.now()), "by": "zeus", **kw}) + "\n")
 
     def oneshots_of(name):
         return [x for x in P.night_mod().oneshot_items() if x["target"] == name and x["by"] == "zeus-request"
@@ -219,7 +219,7 @@ try:
     with contextlib.suppress(FileNotFoundError):
         os.unlink(P.path("owner-log", "zeus.md"))
     a0 = len(alerts_text())
-    rc, out, err = run(W.resume, ["hermes-alex"], "zeus")
+    rc, out, err = run(W.resume, ["hermes-siteb"], "zeus")
     check("1066 окно hq без вашего слова: resume → код 1, тревога, заявки нет, метка на месте",
           rc == 1 and "отклонён" in alerts_text()[a0:] and not os.path.exists(req) and os.path.exists(stopped),
           (rc, out, err))
@@ -227,7 +227,7 @@ try:
     word(60)
     os.chmod(P.path("stopped"), 0o555)  # песочница окна hq: STATE/stopped закрыт (без песочницы метку снимает сам resume)
     try:
-        rc, out, err = run(W.resume, ["hermes-alex"], "zeus")
+        rc, out, err = run(W.resume, ["hermes-siteb"], "zeus")
     finally:
         os.chmod(P.path("stopped"), 0o755)
     data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
@@ -237,9 +237,9 @@ try:
     a0 = len(alerts_text())
     got = dict(P.take_start_requests(doms, P.now()))
     check("1066 проход: заявка вернуть → метка снята, разовый запуск zeus-request, сброс самозапуска",
-          not os.path.exists(stopped) and str(got.get("hermes-alex", "")).startswith("at-")
-          and len(oneshots_of("hermes-alex")) == 1 and "метка «остановлено вами» снята" in alerts_text()[a0:]
-          and os.path.exists(P.path(P.HQ_RW, "autostart-reset", "hermes-alex")), (got, alerts_text()[a0:]))
+          not os.path.exists(stopped) and str(got.get("hermes-siteb", "")).startswith("at-")
+          and len(oneshots_of("hermes-siteb")) == 1 and "метка «остановлено вами» снята" in alerts_text()[a0:]
+          and os.path.exists(P.path(P.HQ_RW, "autostart-reset", "hermes-siteb")), (got, alerts_text()[a0:]))
 
     for x in P.night_mod().oneshot_items():
         P.night_mod().oneshot_cancel(x["id"], P.now(), "тест")
@@ -252,21 +252,21 @@ try:
                          ({"resume": True, "time": P.stamp(P.now() - 20 * 60)}, 60, "свежее слово, заявка старше 15 мин"),
                          ({"resume": True, "time": "x"}, 60, "время не по образцу"),
                          ({"resume": 1}, 60, "resume не true"),
-                         ({"resume": True, "cancel": "at-20991231-2359-hermes-alex"}, 60, "resume вместе с cancel")):
+                         ({"resume": True, "cancel": "at-20991231-2359-hermes-siteb"}, 60, "resume вместе с cancel")):
         mark()
         word(ago)
         req_line(**kw)
         a0 = len(alerts_text())
         got = dict(P.take_start_requests(doms, P.now()))
         check(f"1066 проход: {why} → отклонена с тревогой, метка на месте, окно не поднято",
-              "отклонена" in alerts_text()[a0:] and not str(got.get("hermes-alex", "at-")).startswith("at-")
-              and os.path.exists(stopped) and not oneshots_of("hermes-alex"), (got, alerts_text()[a0:]))
+              "отклонена" in alerts_text()[a0:] and not str(got.get("hermes-siteb", "at-")).startswith("at-")
+              and os.path.exists(stopped) and not oneshots_of("hermes-siteb"), (got, alerts_text()[a0:]))
     word(60)
     with open(req, "w") as fh:  # обычная заявка рядом с «вернуть» без слова — вся заявка отклонена
-        fh.write(json.dumps({"target": "hermes-alex", "time": "x", "by": "zeus"}) + "\n")
+        fh.write(json.dumps({"target": "hermes-siteb", "time": "x", "by": "zeus"}) + "\n")
     got = dict(P.take_start_requests(doms, P.now()))
     check("1066 проход: обычная заявка без resume слова не требует (как раньше), метку не снимает",
-          str(got.get("hermes-alex", "")).startswith("at-") and os.path.exists(stopped), got)
+          str(got.get("hermes-siteb", "")).startswith("at-") and os.path.exists(stopped), got)
 
     check("1066 resume_request: имя, которое ведёт Пританей, — прежний путь (None)", P.resume_request("solo-led") is None)
     if os.geteuid() != 0:
