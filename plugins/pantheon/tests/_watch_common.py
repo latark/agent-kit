@@ -178,7 +178,9 @@ class Env:
             env["TZ"] = os.environ["TZ"]
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([*(argv or [PY311, "-I", RUN_PY]), *args], env=env, capture_output=True, text=True, timeout=60)
+        # 180 с, а не 60 (metis-1022): проход watch при load ~40 шёл дольше минуты, и тест падал обрывом, а не проверкой
+        return subprocess.run([*(argv or [PY311, "-I", RUN_PY]), *args], env=env, capture_output=True, text=True,
+                              timeout=180)
 
     def calls(self):
         if not os.path.exists(self.log):

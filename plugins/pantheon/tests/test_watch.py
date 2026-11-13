@@ -21,13 +21,18 @@ def test_harness_quick_waits_0359():
     # самозапуск: до правки проход ждал имени новой сессии 10 с (заглушка её не показывает) — не меньше 10 с
     e.direction("athena-q")
     e.task("athena-0009", "athena-q")
+    t = time.monotonic()
     e.run("watch", t=T0)
+    base = time.monotonic() - t   # тот же проход без самозапуска: цена процесса при нынешней нагрузке Mac
     e.board("athena-0009", T0 + 120)
     t = time.monotonic()
     e.run("watch", t=T0 + 240)
     took = time.monotonic() - t
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
-    check(len(starts) == 1 and took < 8, f"0359: самозапуск {took:.1f} с (ждёт имени по умолчанию?): {starts}")
+    # сверх прохода без самозапуска, а не в абсолюте (metis-1022): при load ~40 сам проход шёл 11 с; ожидание имени
+    # по умолчанию — 10 с сна, нагрузка его не растягивает и не прячет
+    check(len(starts) == 1 and took - base < 8,
+          f"0359: самозапуск {took:.1f} с, проход без него {base:.1f} с (ждёт имени по умолчанию?): {starts}")
 
 
 def test_autostart_only_new_sanctions():

@@ -61,8 +61,18 @@ SMOKE (линтер словаря, секунды) и строка «нечег
 временной папке прогона, окружение без PANTHEON_*, FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты идут на
 Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests в GitHub Actions на 3.14 (.github/workflows/tests.yml).
 
-Порядок: сначала медленные (SLOW, по замеру), затем остальные по имени. Файлы SERIAL идут в конце по одному, когда
-больше ничего не идёт: им параллель мешает.
+Порядок: сначала самые долгие. Ожидаемое время файла — медиана его последних зелёных замеров из журнала
+times.jsonl (минимум TIMES_MIN замеров), нет истории — предел SLOW; остальные по имени. Файлы SERIAL идут в конце по
+одному, когда больше ничего не идёт: им параллель мешает.
+
+Журнал времени (план 1.0 Т0): после каждого прогона, с --cache или без, раннер дописывает по строке на файл в
+times.jsonl в папке кэша (cache_dir()): {label, sec, ok, time, j — воркеров, load — load1 на старте}. Таймаут — тоже
+строка (ok=false, sec=предел файла). Запись — одним os.write в режиме O_APPEND; сбой записи прогон не роняет. Обрезка:
+файл больше TIMES_TRIM_BYTES (256 КБ) переписывается атомарно, на метку остаются последние TIMES_KEEP_TRIM (10)
+строк, а не TIMES_KEEP (20): при ~166 метках 20 строк дают ~400 КБ, то есть выше порога, и каждая запись переписывала
+бы весь файл (строки параллельного раннера в окне «прочитал → os.replace» терялись бы); 10 на метку — ~200 КБ, запас
+до следующей обрезки — сотни записей. Медиане хватает и 10 (TIMES_KEEP — потолок замеров в медиане, если их больше).
+Журнал не читается или в нём битая строка — битая пропускается, порядок как без истории.
 
 Процессы. Файл тестов — в своей сессии и группе процессов (start_new_session). По таймауту файла гаснет вся его
 группа (killpg SIGKILL), и после обычного выхода файла — тоже: оставленные им внуки не грузят Mac. SIGTERM, SIGHUP и SIGINT раннеру гасят группы всех идущих файлов, и раннер выходит с кодом 128 +
@@ -440,6 +450,96 @@ def cache_dir(env=None):
     return os.path.join(base, "agent-kit-run-tests")
 
 
+TIMES_FILE = "times.jsonl"
+TIMES_KEEP = 20  # строк на метку после обрезки (и замеров в медиане)
+TIMES_MIN = 3  # меньше зелёных замеров — истории нет, порядок по SLOW
+TIMES_TRIM_BYTES = 256 * 1024  # больше — обрезаем
+TIMES_KEEP_TRIM = 10  # строк на метку после обрезки: с запасом ниже порога (медиане хватает и 10)
+
+
+def times_read(cdir):
+    """Строки журнала времени как список словарей; нет файла, не читается, битая строка — пропуск."""
+    recs = []
+    try:
+        with open(os.path.join(cdir, TIMES_FILE), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(rec, dict) and isinstance(rec.get("label"), str)
+                        and isinstance(rec.get("sec"), (int, float)) and not isinstance(rec.get("sec"), bool)):
+                    recs.append(rec)
+    except OSError:
+        pass
+    return recs
+
+
+def times_hist(cdir):
+    """{метка: [sec последних зелёных замеров, старые первыми]} — не больше TIMES_KEEP на метку."""
+    hist = {}
+    for rec in times_read(cdir):
+        if rec.get("ok") is True and rec["sec"] >= 0:
+            hist.setdefault(rec["label"], []).append(float(rec["sec"]))
+    return {lb: v[-TIMES_KEEP:] for lb, v in hist.items()}
+
+
+def times_expected(hist, label):
+    """Медиана последних зелёных замеров файла или None, если их меньше TIMES_MIN."""
+    v = sorted((hist or {}).get(label) or [])
+    if len(v) < TIMES_MIN:
+        return None
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
+
+
+def times_put(cdir, label, sec, ok, workers_n, load, now=None):
+    """Дописать строку замера в журнал: один os.write при O_APPEND (параллельные раннеры строки не рвут);
+    разросся — обрезать. → True/False, сбой записи не бросает."""
+    rec = {"label": label, "sec": round(sec, 1), "ok": bool(ok),
+           "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), "j": workers_n,
+           "load": None if load is None else round(load, 2)}
+    line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+    path = os.path.join(cdir, TIMES_FILE)
+    try:
+        os.makedirs(cdir, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line)
+            size = os.fstat(fd).st_size
+        finally:
+            os.close(fd)
+        if size > TIMES_TRIM_BYTES:
+            times_trim(cdir)
+        return True
+    except OSError:
+        return False
+
+
+def times_trim(cdir):
+    """Оставить в журнале последние TIMES_KEEP_TRIM строк на метку; переписывает атомарно (os.replace)."""
+    path = os.path.join(cdir, TIMES_FILE)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+        seen, keep = {}, []
+        for line in reversed(lines):
+            try:
+                label = json.loads(line)["label"]
+            except (ValueError, KeyError, TypeError):
+                continue  # битую строку при обрезке выбрасываем
+            seen[label] = seen.get(label, 0) + 1
+            if seen[label] <= TIMES_KEEP_TRIM:
+                keep.append(line)
+        fd, tmp = tempfile.mkstemp(prefix=".times-", dir=cdir)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(line + "\n" for line in reversed(keep)))
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
 def cache_keys(items, amap, root, files_now, sums_now, mrel=None):
     """({метка: ключ} для файлов, которым можно верить кэшу, {метка: почему нельзя}). Ключ — sha256 от метки, версии и
     реализации Python, платформы, sha256 раннера и пар (путь, sha256) всех входов файла по карте, включая сам файл.
@@ -637,13 +737,19 @@ def make_stubs(root, platform=None, which=shutil.which):
     return d, missing
 
 
-def order(items, slow=None, serial=None):
-    """(параллельные, серийные): параллельные — медленные первыми (по убыванию предела в slow), затем по имени."""
+def order(items, slow=None, serial=None, hist=None):
+    """(параллельные, серийные): параллельные — долгие первыми: по убыванию ожидаемого времени (медиана зелёных
+    замеров из hist, если их хватает; иначе предел в slow), затем по имени. hist пуст — как раньше."""
     slow = SLOW if slow is None else slow
     serial = SERIAL if serial is None else serial
     par = [it for it in items if it[1] not in serial]
     ser = [it for it in items if it[1] in serial]
-    par.sort(key=lambda it: (-slow.get(it[1], 0), it[1]))
+
+    def expect(label):
+        e = times_expected(hist, label)
+        return slow.get(label, 0) if e is None else e
+
+    par.sort(key=lambda it: (-expect(it[1]), it[1]))
     return par, ser
 
 
@@ -1037,7 +1143,7 @@ def main(argv):
         if not items:
             print(f"итого: файлов 0, ok 0, FAIL 0, из кэша {len(cached)}; проверок 0; 0 с", flush=True)
             return 0
-    par, ser = order(items)
+    par, ser = order(items, hist=times_hist(cache_dir()))
     total_files = len(par) + len(ser)
     window_skipped = 0
     cpus, load = os.cpu_count(), load1()
@@ -1110,6 +1216,7 @@ def main(argv):
                 job.finish()
                 done.append(job)
                 report(job, opts["log_dir"])
+                times_put(cache_dir(), job.label, job.timeout if job.timed_out else job.sec, job.ok, n, load)
                 if cdir and job.ok and job.label in ckeys:
                     cache_put(cdir, ckeys[job.label], job.label, job.sec, job.n)
             time.sleep(0.05)

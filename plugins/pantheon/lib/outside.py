@@ -142,7 +142,9 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 (лимит серверов держит проход) в папке копии; окружение с нуля (HOME, PATH с node из nvm, TMPDIR — своя временная
 папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT (ожидание места heavy не в счёт, не больше HEAVY_WAIT_MAX; полный набор при load выше
 LOAD_PER_CORE на ядро ждёт спада в итоге queued; красный только из-за таймаутов файлов под нагрузкой — один повтор сам, затем итог
-«таймаут под нагрузкой», код 75: metis-0901). Сторож тишины (metis-0770): лог прогона не
+«таймаут под нагрузкой», код 75: metis-0901; та же заявка на том же коммите с теми же файлами ещё раз — красный, metis-0927).
+Ждёт только полный набор (решение владельца 12.11, metis-1057): пока он ждёт, другие заявки test идут вперёд — заявка
+набора возвращается в очередь, срок ожидания считается от первого начала: его помнит проход, а не заявка роли (Defer). Сторож тишины (metis-0770): лог прогона не
 растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
 sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
 гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
@@ -1739,22 +1741,69 @@ def load_state():
         return 0.0, limit
 
 
-def wait_load(qdir, rid, watch, state):
+LOAD_WHY = "жду спада нагрузки"
+
+
+class Defer:
+    """Полный набор, ждущий спада нагрузки, уступает очередь (metis-1057, решение владельца 12.11 «ждут только
+    полные»): очередь прохода последовательная, и раньше узкие прогоны и проверки других проектов стояли за ним до
+    LOAD_WAIT_MAX (06–10.11: 17 заявок, 432 мин). Пока он ждёт, а в очереди есть заявка test не из отложенных, заявка
+    набора возвращается на диск, итог queued, и проход берёт следующую. deferred — общий для захода словарь
+    (qdir, id) → начало ожидания (time.time()): LOAD_WAIT_MAX считается от него, а не заново. Начало — только в памяти
+    прохода: заявку пишет роль, и поле в ней со старым временем снимало бы ожидание спада (находка безопасности, 12.11).
+    Отложенным не уступают, иначе два ждущих набора передавали бы очередь друг другу по кругу."""
+
+    def __init__(self, qdir, rid, req, deferred):
+        self.qdir, self.rid, self.req, self.deferred = qdir, rid, req, deferred
+        self.yielded = False
+
+    def since(self):
+        """Начало ожидания, если этот заход уже откладывал заявку, иначе None. Поля заявки не читаются."""
+        return self.deferred.get((self.qdir, self.rid))
+
+    def others(self):
+        """Есть ли в очереди другая заявка test, которой стоит уступить (не отложенная этим заходом)."""
+        me = (self.qdir, self.rid)
+        return any((q, r) != me and (q, r) not in self.deferred for q, _w, r, _req in _queued_tests())
+
+    def back(self, state, since, why):
+        """Заявку — обратно в очередь, начало ожидания since — в deferred, итог queued. → True; не записать — False (тогда ждём дальше)."""
+        dfd = _open_dir(self.qdir)
+        if dfd is None:
+            return False
+        try:
+            _write_in(dfd, self.rid + ".req.json", json.dumps(self.req, ensure_ascii=False))
+        except OSError:
+            return False
+        finally:
+            os.close(dfd)
+        self.deferred[(self.qdir, self.rid)] = since
+        self.yielded = True
+        save_result(self.qdir, self.rid, {**state, "state": "queued", "why": why + " — вперёд пропущены другие заявки"})
+        return True
+
+
+def wait_load(qdir, rid, watch, state, defer=None):
     """Полный набор под нагрузкой не стартует (metis-0901): пока load выше порога — итог queued с причиной «жду спада
-    нагрузки (load N)», опрос раз в LOAD_POLL с, не дольше LOAD_WAIT_MAX; «стоп» и ушедший head снимают (watch).
-    state — поля итога running, чтобы queued нёс те же sha и cmd. → "stop" (снято), "waited" (ждала) или None."""
-    end, did = time.monotonic() + LOAD_WAIT_MAX, None
+    нагрузки (load N)», опрос раз в LOAD_POLL с, не дольше LOAD_WAIT_MAX от начала ожидания (defer.since, иначе
+    сейчас); «стоп» и ушедший head снимают (watch). state — поля итога running, чтобы queued нёс те же sha и cmd.
+    defer (Defer) — в очереди есть другая заявка test: набор уступает ей (metis-1057). → "stop" (снято), "yield"
+    (заявка снова в очереди), "waited" (ждала) или None."""
+    since = (defer.since() if defer else None) or time.time()
+    end, did = since + LOAD_WAIT_MAX, None
     while True:
         load, limit = load_state()
-        if load <= limit or time.monotonic() >= end:
+        if load <= limit or time.time() >= end:
             return did
+        why = f"{LOAD_WHY} (load {load:.0f}, порог {limit:.0f})"
         did = "waited"
-        save_result(qdir, rid, {**state, "state": "queued",
-                                "why": f"жду спада нагрузки (load {load:.0f}, порог {limit:.0f})"})
+        save_result(qdir, rid, {**state, "state": "queued", "why": why})
         nxt = time.monotonic() + LOAD_POLL
         while time.monotonic() < nxt:
             if watch():
                 return "stop"
+            if defer and defer.others() and defer.back(state, since, why):
+                return "yield"
             time.sleep(min(SWEEP_EVERY, LOAD_POLL))
 
 
@@ -1771,8 +1820,31 @@ def overload_files(text):
     return got[1] if load > limit else None
 
 
+def overload_before(sha, files, rid):
+    """ID прошлой заявки (не rid), чей итог на коммите sha — «таймаут под нагрузкой» (событие test-overload-final)
+    хотя бы одного из файлов files, или None (metis-0927 Д3). Повтор такой заявки — красный: зависший тест под
+    постоянной нагрузкой иначе давал бы код 75 «повторить» без конца. Журнал читается с хвоста (до 4 МБ)."""
+    try:
+        with open(os.path.join(P.STATE, "logs", "outside.jsonl"), "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - (4 << 20)))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    want = set(files or ())
+    for ln in reversed(lines):
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and e.get("kind") == "test-overload-final" and e.get("sha") == sha \
+                and e.get("id") != rid and isinstance(e.get("files"), list) and want & set(map(str, e["files"])):
+            return str(e.get("id"))
+    return None
+
+
 def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None,
-             retried=None):
+             retried=None, defer=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
     (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
@@ -1782,7 +1854,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда. watch — сторож TestWatch (снятие своим
     «стопом» и ушедшим head, metis-0873); нет — свой. Полный набор не стартует при load выше порога (wait_load); красный
     только из-за таймаутов файлов под нагрузкой (overload_files) — один повтор сам (retried — данные первого прогона),
-    второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901)."""
+    второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901). defer
+    (Defer) — заявка из очереди прохода: ждущий спада полный набор уступает очередь другим заявкам (metis-1057)."""
     if watch is None:
         watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base)
     if watch.marker():   # «стоп» пришёл до запуска: ни переноса записи по дереву, ни прогона
@@ -1848,9 +1921,12 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     save_result(qdir, rid, running)
     watch.sha, watch.running = sha, running
     if full and not plan and not narrow:   # metis-0901: узкий набор и дозапуск лёгкие, полный под нагрузкой — нет
-        waited = wait_load(qdir, rid, watch, running)
+        waited = wait_load(qdir, rid, watch, running, defer=defer)
         if waited == "stop":
             return watch.stopped(cmd=line, **extra)
+        if waited == "yield":   # заявка снова в очереди (Defer.back), итог queued уже записан
+            log_event(id=rid, kind="test-defer", window=window, sha=sha, load=round(load_state()[0]))
+            return load_result(qdir, rid) or {"state": "queued", "kind": "test", "sha": sha}
         if waited:
             save_result(qdir, rid, running)
     log, fd = new_log(rid + "-retry" if retried else rid)
@@ -1895,7 +1971,13 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if over and not retried:
         log_event(id=rid, kind="test-overload", window=window, sha=sha, files=over, load=round(load_state()[0]))
         return run_test(rid, d, script, window, qdir, roots, record=record, src=src, expect=expect, base=base,
-                        watch=watch, retried={"log": log, "files": over})
+                        watch=watch, retried={"log": log, "files": over}, defer=defer)
+    hang = overload_before(sha, over, rid) if over else None
+    if hang:   # metis-0927 Д3: тот же коммит, те же файлы — третий и четвёртый таймаут подряд: зависание, а не нагрузка
+        over = None
+    elif over:
+        log_event(id=rid, kind="test-overload-final", window=window, sha=sha, files=over,
+                  load=round(load_state()[0]))
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
            "dir": d, "log": log, "tail": tail(log), "record": False, **extra}
     text = log_text(log) if full or narrow else ""
@@ -1912,6 +1994,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             f"повтор после «таймаут под нагрузкой» (первый прогон: {retried['log']}, файлов {len(retried['files'])})")
     if watch.why:   # снят (metis-0873): записи tests нет, даже если команда вышла с 0 по TERM
         res["why"] = f"снят: {watch.why}"
+    elif hang:
+        res["why"] = (f"таймаут под нагрузкой и у прошлой заявки {hang} на этом коммите, те же файлы — считаю "
+                      "зависанием: красный, а не «повторить»")
     elif over:   # второй прогон тоже упал только по таймаутам под нагрузкой: не красный, а «повторить»
         res["overload"] = True
         res["why"] = (f"таймаут под нагрузкой (load {load_state()[0]:.0f}): файлов {len(over)} — тест не падал, "
@@ -1964,7 +2049,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         clear_stop(rid, watch.where)
         log_event(id=rid, kind="stop", window=window, why=watch.why, by=watch.by, sha=sha, code=code)
         return save_result(qdir, rid, res)
+    # load (за 5 мин) в конце прогона и full — журнал нагрузки для пересмотра порога LOAD_PER_CORE (metis-0927 С1)
     log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
+              load=round(load_state()[0], 1), full=bool(full and not plan and not narrow),
               **({"rerun_of": plan["rerun_of"]} if plan else {}))
     return save_result(qdir, rid, res)
 
@@ -1972,7 +2059,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
 TEST_WORK = "test-"   # приставка копий test --sha в work_root(): drop_orphan_work (только ID) их не берёт
 
 
-def run_test_at(rid, d, req, window, qdir, roots):
+def run_test_at(rid, d, req, window, qdir, roots, defer=None):
     """Проверка проекта на коммите заявки (test --sha, metis-0779) → итог. Окно роли не переключит свою worktree на
     ветку PR, если в ней другой .claude/ проекта (запись туда закрыта), поэтому прогон идёт в своей копии: `git worktree
     add --detach` клона d (проверен в resolve_dir) в work_root()/test-<ID>, зависимости (prepare), run_test в копии —
@@ -2013,7 +2100,7 @@ def run_test_at(rid, d, req, window, qdir, roots):
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
         watch.d = w
         return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha,
-                        base=req.get("base"), watch=watch)
+                        base=req.get("base"), watch=watch, defer=defer)
     finally:
         reap(work)
         remove_work(common, work)
@@ -2669,13 +2756,13 @@ def _gone(dfd, name):
     return False
 
 
-def requests(kinds=KINDS, limit=None, taken=None):
+def requests(kinds=KINDS, limit=None, taken=None, skip=()):
     """[(время, вид, qdir, окно, id, заявка)] по всем папкам — только заявки своих проходов (kinds): чужие остаются
     лежать (metis-0614: проход тестов не съедает заявки серверов и наоборот). Битые и подложенные — удаляются с итогом
     failed. Отдаются самые ранние limit заявок (все, если limit не задан) и только они снимаются с диска (metis-0716:
     убитый заход не теряет остальные); заявка, которую снять не удалось, не отдаётся — иначе проход крутился бы на ней.
     taken — {qdir: сколько заявок окна уже взято в этом заходе}: начальный номер круга между окнами (limit=1 иначе
-    считал бы его с нуля при каждом вызове)."""
+    считал бы его с нуля при каждом вызове). skip — {(qdir, id)}, которые не отдавать и не снимать (metis-1057)."""
     found = []
     for qdir, window in queue_dirs():
         dfd = _open_dir(qdir)
@@ -2686,6 +2773,8 @@ def requests(kinds=KINDS, limit=None, taken=None):
                 if not name.endswith(".req.json"):
                     continue
                 rid = name[:-len(".req.json")]
+                if (qdir, rid) in skip:
+                    continue
                 text = _read_in(dfd, name)
                 req = _parse(text)
                 if _req_kind(req) not in kinds:
@@ -2786,7 +2875,7 @@ def resolve_dir(req_dir, window):
     return d, roots
 
 
-def handle(qdir, window, rid, req):
+def handle(qdir, window, rid, req, defer=None):
     d, roots = resolve_dir(req["dir"], window)
     if d is None:
         log_event(id=rid, kind="refused", window=window, why=roots)
@@ -2794,12 +2883,12 @@ def handle(qdir, window, rid, req):
     if req["kind"] == "serve":
         return run_serve(rid, d, req, window, qdir)
     if req.get("pin"):   # test --sha (metis-0779): своя копия на коммите, а не HEAD папки
-        return run_test_at(rid, d, req, window, qdir, registry(None) or roots)
+        return run_test_at(rid, d, req, window, qdir, registry(None) or roots, defer=defer)
     res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
     if res:
         return res
     return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"),
-                    base=req.get("base"))
+                    base=req.get("base"), defer=defer)
 
 
 # --- перед стартом заявки test (metis-0726) ------------------------------------------------------------------------
@@ -3168,16 +3257,19 @@ def run_test_queue():
     """Заход прохода тестов (metis-0716): явные заявки test, по одной — самая ранняя, снимается с диска только она, после
     каждого дела очередь читается заново (поданная за время прогона идёт следующей). Автопрогонов нет (решение владельца
     03.11): тесты идут только по заявке роли. Заход конечен: не больше MAX_ROUNDS кругов, взятая заявка не берётся
-    второй раз."""
-    seen, taken = set(), {}
+    второй раз. Исключение — полный набор, уступивший очередь под нагрузкой (Defer, metis-1057): он снова на диске, его
+    берут, когда других заявок нет, и тогда он ждёт спада, уступая только новым."""
+    seen, taken, deferred = set(), {}, {}
     for _ in range(MAX_ROUNDS):
-        reqs = [r for r in requests(("test",), limit=1, taken=taken) if (r[2], r[4]) not in seen]
+        reqs = requests(("test",), limit=1, taken=taken, skip=seen)   # deferred ⊂ seen
+        if not reqs and deferred:
+            reqs = requests(("test",), limit=1, taken=taken, skip=seen - set(deferred))
         if not reqs:
             break
         for _t, _k, qdir, window, rid, req in reqs:
-            seen.add((qdir, rid))
+            seen.add((qdir, rid))   # уступившая (в deferred) снова берётся вторым запросом: skip там без неё
             taken[qdir] = taken.get(qdir, 0) + 1
-            handle(qdir, window, rid, req)
+            handle(qdir, window, rid, req, defer=Defer(qdir, rid, req, deferred))
 
 
 LOST_AFTER = 300                    # с: итог queued без заявки старше этого — заявка потеряна (metis-0716)
@@ -3583,8 +3675,9 @@ def replace_older(q, rid, req, d):
 
 def live_test(d, sha, script=None, pin=False, base=None):
     """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
-    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json) или идёт
-    (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
+    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json),
+    ждёт спада нагрузки (итог queued «жду спада нагрузки» свежее LOST_AFTER, metis-0927) или идёт (итог running свежее
+    TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
     d = os.path.realpath(d)
     now = P.now()
     for qdir, _w in queue_dirs():
@@ -3611,6 +3704,12 @@ def live_test(d, sha, script=None, pin=False, base=None):
                     continue
                 if res.get("state") == "queued" and (rid + ".req.json") in names:
                     return qdir, rid
+                # взята проходом и ждёт спада нагрузки (wait_load): .req.json нет, итог queued обновляется раз в
+                # LOAD_POLL — та же живая заявка, второй полный прогон не нужен (metis-0927 Д2)
+                if res.get("state") == "queued" and str(res.get("why") or "").startswith(LOAD_WHY):
+                    t = _epoch({"time": res.get("updated")})
+                    if t is not None and now - t < LOST_AFTER:
+                        return qdir, rid
                 if res.get("state") == "running":
                     t = _epoch({"time": res.get("updated")})
                     if t is not None and now - t < TEST_TIMEOUT + 300:
