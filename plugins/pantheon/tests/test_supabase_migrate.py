@@ -104,6 +104,20 @@ MIG = "supabase/migrations/20260101000000_init.sql"
 MAIN_SQL = "create table t (id int);\n"
 write(os.path.join(REPO, MIG), MAIN_SQL)
 write(os.path.join(REPO, "README.md"), "x\n")
+# миграции в main, которые psql исполнил бы не одной транзакцией SQL, и честная со «страшными» словами внутри литералов
+BAD_SQL = {"20260110000000_shell.sql": "create table a (i int);\n  \\! touch /tmp/pwn\n",
+           "20260111000000_inline.sql": "select 1 \\o /tmp/out\n;\n",
+           "20260112000000_begin.sql": "BEGIN;\ncreate table b (i int);\nCOMMIT;\n",
+           "20260113000000_rollback.sql": "create table c (i int);\n  rollback ;\n",
+           "20260114000000_start.sql": "start  transaction isolation level serializable;\n",
+           "20260115000000_open.sql": "select 'не закрыта;\n"}
+GOOD_SQL = ("-- begin; \\! в комментарии\n/* commit; /* вложенный */ \\i x */\n"
+            "create function f() returns int language plpgsql as $fn$\nbegin\n  return 1;\nend;\n$fn$;\n"
+            "select 'a\\b', E'c\\'d', 'it''s; commit', \"end\";\nselect $$ \\! $$;\n")
+for name, text in BAD_SQL.items():
+    write(os.path.join(REPO, "supabase/migrations", name), text)
+GOOD = "supabase/migrations/20260116000000_good.sql"
+write(os.path.join(REPO, GOOD), GOOD_SQL)
 git(REPO, "add", "-A")
 git(REPO, "commit", "-m", "init")
 git(REPO, "push", "origin", "main")
@@ -227,6 +241,25 @@ for argv in ([], ["migrate"], ["apply", p(MIG)], ["migrate", p(MIG), p(LOCAL)], 
     code, out, err, calls = call(argv)
     check(f"вызов {argv[:1] + ['…'] * (len(argv) > 1)} не тот — код 2", code == 2, (argv, code, err))
 
+# --- текст миграции: без мета-команд psql и своего управления транзакцией ---
+for name, word in zip(BAD_SQL, ("мета-команда", "мета-команда", "свой BEGIN", "свой ROLLBACK", "свой START",
+                                "не разобран")):
+    code, out, err, calls = call(["migrate", p("supabase/migrations/" + name)])
+    check(f"{name} — код 1, «{word}» последней строкой, psql -f не вызывался",
+          code == 1 and word in err.strip().splitlines()[-1] and " -f " not in calls, (code, err, calls))
+code, out, err, calls = call(["migrate", p(GOOD)])
+check("begin/commit/\\ внутри комментариев, строк, E-строк, \"end\" и $$-тел — не отказ, применено",
+      code == 0 and " -f " in calls, (code, err))
+
+# --- git без GIT_* окружения: url.<чужой>.insteadOf из GIT_CONFIG_* не подменяет origin ---
+EVIL = os.path.join(ROOT, "evil.git")
+git(ROOT, "init", "--bare", EVIL)
+git(REPO, "push", EVIL, "HEAD:refs/heads/main")  # в «чужом» main есть LOCAL
+GIT_EVIL = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.{EVIL}.insteadOf", "GIT_CONFIG_VALUE_0": ORIGIN}
+code, out, err, calls = call(["migrate", p(LOCAL), "--dry-run"], GIT_EVIL)
+check("GIT_CONFIG_* подменяет origin на чужой репозиторий — снят, LOCAL — отказ «нет в origin/main»",
+      code == 1 and "нет в origin/main" in err, (code, err))
+
 # --- main берётся только из своего ref, а не по короткому имени origin/main ---
 for ref in ("refs/tags/origin/main", "refs/heads/origin/main"):
     git(REPO, "update-ref", ref, "HEAD")  # HEAD — локальный коммит с LOCAL
@@ -271,7 +304,7 @@ write(p(MIG), MAIN_SQL + "drop table t;\n")
 check("мутант (без сверки blob) пропускает изменённый файл — тест это видит",
       call(["migrate", p(MIG), "--dry-run"], mod=M2)[0] == 0 and call(["migrate", p(MIG), "--dry-run"])[0] == 1)
 write(p(MIG), MAIN_SQL)
-M3 = mutant('if known and _query(url, f"select count(*)', 'if False and _query(url, f"select count(*)')
+M3 = mutant('if known and _query(db, f"select count(*)', 'if False and _query(db, f"select count(*)')
 check("мутант (без проверки «уже применена») применяет повторно — тест это видит",
       call(["migrate", p(MIG)], {"FAKE_COUNT": "1"}, mod=M3)[0] == 0 and call(["migrate", p(MIG)], {"FAKE_COUNT": "1"})[0] == 1)
 M4 = mutant("m = MIGRATION.fullmatch(rel)", r'm = re.fullmatch(r"(.*)()", rel)')
@@ -308,6 +341,26 @@ check("мутант (PG* родителя не сняты) — PGSSLMODE=disable
 M11 = mutant("raise Refused(f\"{DB_ENV}: параметр адреса", "continue  # raise Refused(f\"{DB_ENV}: параметр адреса")
 check("мутант (неизвестный параметр адреса пропущен молча) — тест это видит",
       call(["migrate", p(MIG)], {"SUPABASE_DB_URL": "postgresql://u:s@db.example/x?options=-c%20x"}, mod=M11)[0] == 0)
+
+M12 = mutant("    check_sql(rel, body.stdout)\n", "")
+SHELL = p("supabase/migrations/20260110000000_shell.sql")
+check("мутант (без проверки текста миграции) отдаёт psql \\! — тест это видит",
+      call(["migrate", SHELL], mod=M12)[0] == 0 and call(["migrate", SHELL])[0] == 1)
+M13 = mutant('    if any(ln.lstrip().startswith("\\\\") for ln in text.splitlines()) or "\\\\" in code:',
+             "    if False:")
+check("мутант (без отказа на «\\») пропускает \\! — тест это видит",
+      call(["migrate", SHELL], mod=M13)[0] == 0)
+M14 = mutant("        if any(words == w or words.startswith(w + \" \") for w in TXN_WORDS):", "        if False:")
+BEGIN = p("supabase/migrations/20260112000000_begin.sql")
+check("мутант (без отказа на BEGIN/COMMIT) пропускает свой BEGIN — тест это видит",
+      call(["migrate", BEGIN], mod=M14)[0] == 0 and call(["migrate", BEGIN])[0] == 1)
+M15 = mutant('if not k.startswith("GIT_")}', "}")
+check("мутант (GIT_* не сняты) берёт main чужого репозитория — тест это видит",
+      call(["migrate", p(LOCAL), "--dry-run"], GIT_EVIL, mod=M15)[0] == 0
+      and call(["migrate", p(LOCAL), "--dry-run"], GIT_EVIL)[0] == 1)
+M16 = mutant("    return \"\".join(out)", "    return sql")
+check("мутант (литералы не вырезаны) отказывает честной миграции — тест это видит",
+      call(["migrate", p(GOOD)], mod=M16)[0] == 1 and call(["migrate", p(GOOD)])[0] == 0)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

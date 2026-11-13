@@ -8,7 +8,10 @@
      (короткое имя origin/main не берётся). Есть ветка или метка refs/heads/origin/main, refs/tags/origin/main — отказ
      «неоднозначно». В этом main должен быть файл по тому же пути, и его blob равен файлу на диске. Нет в main
      (новый, не слитый PR, только локальный коммит) или отличается — отказ «не из main». Применяется текст blob из
-     main, а не файл с диска: подмена файла между сверкой и применением ничего не даст;
+     main, а не файл с диска: подмена файла между сверкой и применением ничего не даст. git идёт без GIT_* окружения
+     (GIT_CONFIG_*, GIT_DIR и т. п. подменили бы origin). Текст из main без мета-команд psql (строка с «\\» в начале
+     или «\\» вне строк, комментариев и $$-тел: \\! запускает shell вне песочницы) и без своего BEGIN, COMMIT,
+     ROLLBACK, END, ABORT, START TRANSACTION верхнего уровня — иначе отказ;
   3. база — строка подключения postgresql://… из переменной SUPABASE_DB_URL (её команда не печатает и не пишет в
      журнал); нет или не разобрана — отказ. psql и pg_dump получают её разобранной в PGHOST, PGPORT, PGUSER,
      PGPASSWORD, PGDATABASE (и PGSSLMODE) окружения подпроцесса, а не в argv: argv виден всем процессам Mac;
@@ -46,7 +49,68 @@ class Refused(Exception):
 
 
 def _git(repo, *args, text=True):
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=text, timeout=120)
+    # GIT_* окружения сняты: GIT_CONFIG_COUNT/KEY/VALUE (url.<чужой>.insteadOf), GIT_DIR, GIT_OBJECT_DIRECTORY и
+    # подобные подменили бы origin или объекты, с которыми идёт сверка
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=text, timeout=120, env=env)
+
+
+DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+TXN_WORDS = ("BEGIN", "COMMIT", "ROLLBACK", "END", "ABORT", "START TRANSACTION")
+
+
+def _outside_literals(sql):
+    """Текст SQL без комментариев, строк в кавычках и $$-тел (на их месте пробел). Refused — литерал не закрыт."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        c, two = sql[i], sql[i:i + 2]
+        if two == "--":
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+        elif two == "/*":
+            depth, i = 1, i + 2
+            while depth and i < n:
+                depth += (sql[i:i + 2] == "/*") - (sql[i:i + 2] == "*/")
+                i += 2 if sql[i:i + 2] in ("/*", "*/") else 1
+            if depth:
+                raise Refused("комментарий /* не закрыт")
+        elif c in "'\"":
+            esc = c == "'" and i > 0 and sql[i - 1] in "Ee" and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
+            i += 1
+            while i < n and not (sql[i] == c and sql[i + 1:i + 2] != c):
+                i += 2 if (sql[i] == c or (esc and sql[i] == "\\")) else 1
+            if i >= n:
+                raise Refused(f"строка {c} не закрыта")
+            i += 1
+        elif c == "$" and (m := DOLLAR.match(sql, i)) and not (i and (sql[i - 1].isalnum() or sql[i - 1] == "_")):
+            j = sql.find(m.group(0), m.end())
+            if j < 0:
+                raise Refused(f"тело {m.group(0)} не закрыто")
+            i = j + len(m.group(0))
+        else:
+            out.append(c)
+            i += 1
+            continue
+        out.append(" ")
+    return "".join(out)
+
+
+def check_sql(rel, body):
+    """Отказ миграции, которую psql исполнит не как одну транзакцию SQL: мета-команда psql (\\! — shell вне песочницы,
+    \\copy, \\i, \\o и любая другая; строка с «\\» в начале или «\\» вне строк и тел) и BEGIN, COMMIT, ROLLBACK, END,
+    ABORT, START TRANSACTION верхнего уровня (они ломают --single-transaction)."""
+    text = body.decode("utf-8", "replace")
+    try:
+        code = _outside_literals(text)
+    except Refused as e:
+        raise Refused(f"{rel}: текст миграции не разобран ({e}) — не применяю") from None
+    if any(ln.lstrip().startswith("\\") for ln in text.splitlines()) or "\\" in code:
+        raise Refused(f"{rel}: в миграции мета-команда psql (строка с «\\») — \\! и другие идут мимо SQL, не применяю")
+    for stmt in code.split(";"):
+        words = " ".join(stmt.split()).upper()
+        if any(words == w or words.startswith(w + " ") for w in TXN_WORDS):
+            raise Refused(f"{rel}: в миграции свой {words.split()[0]} верхнего уровня — ломает --single-transaction, "
+                          "убери управление транзакцией")
 
 
 def check_file(path, fetch=True):
@@ -84,6 +148,7 @@ def check_file(path, fetch=True):
     body = _git(repo, "cat-file", "blob", blob.stdout.strip(), text=False)
     if body.returncode != 0:
         raise Refused(f"{rel}: не прочитан blob {BASE}")
+    check_sql(rel, body.stdout)
     return repo, rel, head.stdout.strip(), body.stdout, m.group(1), m.group(2)
 
 

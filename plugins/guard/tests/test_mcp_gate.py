@@ -101,12 +101,13 @@ check("каждая запись mcp и mcp_extra окон настоящей к
 d = real["window"]["direction"]
 allow = G.parse(",".join(d["mcp"] + d.get("mcp_extra", [])))
 want_ok = ["mcp__qmd__query", "mcp__chrome-devtools__take_snapshot", "mcp__next-devtools__nextjs_index",
-           "mcp__supabase__list_tables", "mcp__plugin_supabase_supabase__list_tables", "mcp__upstash__redis_get",
+           "mcp__supabase__list_tables", "mcp__plugin_supabase_supabase__list_tables", "mcp__shadcn__x",
            "mcp__claude_ai_Claude_Docs__read", "mcp__plugin_context7_context7__query-docs"]
-want_no = ["mcp__plugin_supabase_supabase__execute_sql", "mcp__supabase__execute_sql","mcp__plugin_supabase_supabase__apply_migration",
+want_no = ["mcp__plugin_supabase_supabase__execute_sql", "mcp__supabase__execute_sql",
+           "mcp__plugin_supabase_supabase__apply_migration",
            "mcp__supabase__apply_migration", "mcp__supabase__deploy_edge_function", "mcp__plugin_Notion_notion__search",
            "mcp__computer-use__click", "mcp__claude_ai_Gmail__send"]
-check("окно направления: нужные серверы разрешены (chrome-devtools, next-devtools, чтение supabase, upstash)",
+check("окно направления: нужные серверы разрешены (chrome-devtools, next-devtools, shadcn, чтение supabase)",
       all(G.allowed(t, allow) for t in want_ok), [t for t in want_ok if not G.allowed(t, allow)])
 check("окно направления: запись supabase, Notion, computer-use и незнакомый сервер — нет",
       not any(G.allowed(t, allow) for t in want_no), [t for t in want_no if G.allowed(t, allow)])
@@ -114,6 +115,10 @@ sql_ok = [w for w, v in real["window"].items() for srv in ("supabase", "plugin_s
           if G.allowed(f"mcp__{srv}__execute_sql", G.parse(",".join(v.get("mcp", []) + v.get("mcp_extra", []))))]
 check("ни одно окно карты не получает execute_sql Supabase (read_only по имени сервера не проверить)", not sql_ok,
       sql_ok)
+pack_ok = [(w, srv) for w, v in real["window"].items() for srv in ("grafana", "upstash", "vast-ai")
+           if G.allowed(f"mcp__{srv}__x", G.parse(",".join(v.get("mcp", []) + v.get("mcp_extra", []))))]
+check("серверы пакета одного направления (grafana, upstash, vast-ai) — ни у одного окна общей карты, только в личной "
+      "записи окна", not pack_ok, pack_ok)
 h = real["window"]["hestia"]
 check("Гестия: ни одного MCP", not G.allowed("mcp__qmd__query", G.parse(",".join(h["mcp"] + h.get("mcp_extra", [])))))
 
