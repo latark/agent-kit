@@ -131,14 +131,74 @@ def check_plan10(texts, flat, callers):
         check(f"{f}: оценки — в единицах конвейера, не в часах" + (f" (нет: {miss})" if miss else ""), not miss)
     check("hephaestus: оценка в плане эпика — в единицах конвейера, не в часах",
           "оценка — в единицах конвейера (раздел «Оценки» ниже), не в часах" in flat.get("hephaestus-demo.md", ""))
-    # effort разработчика и исследователя (решения 10.11): high — только повтор «трудной логики», глубокая тема — Fable
-    dev_effort = ("dev-opus — Opus medium из файла роли; повтор задачи после разбора провала с классом «трудная "
-                  "логика» — dev-opus с `effort: \"high\"`, выше high не поднимай. prometheus — Sonnet medium из файла "
-                  "роли; глубокая тема (много источников, вывод меняет решение владельца) — вызов с "
-                  "`model: \"fable\"`.")
+    # effort разработчика и исследователя: dev-opus medium, после красной узкой записи или Б argus — high
+    # ([metis-plan-devopus], decisions.md; Д5 argus #426), глубокая тема — Fable
+    dev_effort = ("dev-opus — Opus medium из файла роли; после красной узкой записи тестов или блокера (Б) argus "
+                  "следующий заход — dev-opus с `effort: \"high\"` (решение [metis-plan-devopus]), выше high не "
+                  "поднимай. prometheus — Sonnet medium из файла роли; глубокая тема (много источников, вывод меняет "
+                  "решение владельца) — вызов с `model: \"fable\"`.")
     miss = [f for f in callers if dev_effort not in flat.get(f, "")]
-    check("лиды, координатор и Зевс: dev-opus medium, high — только повтор трудной логики; prometheus Sonnet, "
-          "глубокая тема — Fable" + (f" (нет у: {miss})" if miss else ""), not miss)
+    check("лиды, координатор и Зевс: dev-opus medium, high — после красной узкой записи или Б argus; prometheus "
+          "Sonnet, глубокая тема — Fable" + (f" (нет у: {miss})" if miss else ""), not miss)
+    triage = ("high и после красной узкой записи или Б argus при любом классе ([metis-plan-devopus]). Выше high не "
+              "поднимай (план 1.0, раздел 6а).")
+    triage4 = ("4. трудная логика (гонки, безопасность, алгоритм) → dev-opus с `effort: \"high\"` один раз на задачу, "
+               "не при лимите владельца на исходе;")
+    miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md")
+            if triage not in flat.get(f, "") or triage4 not in flat.get(f, "")]
+    check("лиды: разбор провала — трудная логика на dev-opus high, high и после красной записи или Б argus"
+          + (f" (нет у: {miss})" if miss else ""), not miss)
+    miss = [f for f in ("hq.md", "domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md", "argus.md")
+            if "xhigh" in texts.get(f, "")]
+    check("Зевс, координатор, лиды и argus: нет effort xhigh (выше high не поднимать, план 1.0, раздел 6а)"
+          + (f" (есть у: {miss})" if miss else ""), not miss and "hq.md" in texts)
+    # запись тестов лида: вне ядра — узкая outside test --affected (metis-0734), полный — ядро и пачки (Д4 argus #426)
+    rec = ("PR вне ядра — узкая запись: `pantheon outside test --affected --sha <head> --wait 590` (metis-0734), если "
+           "проверка в `.pantheon-verify` — `run-tests.py`; полный набор — для PR ядра и пачек.")
+    miss = [f for f in callers if f != "hq.md" and rec not in flat.get(f, "")]
+    check("координатор и лиды: запись тестов вне ядра — outside test --affected, полный — ядро и пачки"
+          + (f" (нет у: {miss})" if miss else ""), not miss)
+    # hq: prometheus на глубокой теме — Fable, исключения Fable названы (второй argus #426, Д1)
+    hq_rules = ("глубокая тема (много источников, вывод меняет решение владельца) — вызов prometheus с "
+                "`model: \"fable\"` (решение 10.11);",
+                "Fable — решения владельца 10.11: momus на Fable medium из файла роли и prometheus на глубокой теме — "
+                "вызов с `model: \"fable\"`; другой роли — только решением владельца.")
+    miss = [x[:50] for x in hq_rules if x not in flat.get("hq.md", "")]
+    check("hq.md: prometheus на глубокой теме — Fable, исключения Fable — momus и prometheus"
+          + (f" (нет: {miss})" if miss else ""), not miss)
+    # hq: Fable не «после двух неудач Opus xhigh» — выше high не поднимать (план 1.0, раздел 6а; Д6 argus #426)
+    hq = flat.get("hq.md", "")
+    check("hq.md: выше high не поднимать, Fable — momus и глубокая тема prometheus, нет xhigh",
+          "xhigh" not in hq and "Effort выше high не поднимай (план 1.0, раздел 6а): не справляется — сначала "
+          "проверка своей работы, потом effort на ступень выше, потом модель старше." in hq
+          and "другой роли — только решением владельца." in hq)
+    # повторный круг (metis-0784, argus #426): нет ответа delta — полный; в ядре дельта — только у того же вызова;
+    # --affected у outside test — только при run-tests.py в .pantheon-verify (Б1)
+    a = flat.get("argus.md", "")
+    for label, rule in (
+            ("delta не ответила — круг полный", "Команда не ответила (сбой gh, команды ещё нет) — круг полный."),
+            ("в ядре дельта — только у того же вызова, замена — полный",
+             "В ядре дельта-круг — только у того же вызова, что вернул: позвали новым argus вместо вернувшего — круг "
+             "в ядре полный."),
+            ("тесты — строка dev: .pantheon-verify, в agent-kit run-tests.py --affected от origin/main",
+             "строка `dev:` файла `.pantheon-verify` (в agent-kit — `run-tests.py --affected`, база `origin/main`), "
+             "без неё — первая строка или `heavy pnpm test`."),
+            ("accept с кодом 1 — «head не готов», лиду — подать тесты на head",
+             "Тогда в отчёте — «head не готов: <причина из вывода>», лиду — подать тесты на head; «принять» без "
+             "записи не считается."),
+            ("outside test --affected — только при run-tests.py в .pantheon-verify",
+             "Нужен порт или сокет — `pantheon outside test --wait 590`; `--affected` к нему добавляй, только если "
+             "проверка в `.pantheon-verify` — `run-tests.py`: с другой командой заявка с `--affected` откажет.")):
+        check(f"argus.md: {label}", rule in a)
+    check("argus.md: нет `pantheon outside test --affected` без условия", "outside test --affected --wait" not in a)
+    lead = ("Команда не ответила (сбой gh, команды ещё нет) — круг полный. В ядре дельта-круг ведёт только тот же "
+            "вернувший вызов: новый argus вместо него (вызов не продолжить) ведёт полный круг.",
+            "Вне ядра это не повод для полного круга: отчёт прежнего argus лежит в его транскрипте; в ядре новый argus "
+            "ведёт полный круг (выше).")
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        miss = [x[:40] for x in lead if x not in flat.get(f, "")]
+        check(f"{f}: повторный круг — delta не ответила или замена в ядре — полный"
+              + (f" (нет: {miss})" if miss else ""), not miss)
 
 
 def main():
@@ -379,9 +439,11 @@ def main():
     # и persist.part (своя фоновая команда — ждать уведомления о конце)
     # план 1.0, шаг 0 (12.11): +~1300 — оценки в единицах конвейера и effort dev-opus и prometheus (brief.part), оба
     # head, «вернули» и Р1 в поручении повторного круга (merge.part); metis-0784: +~210 — `pantheon review delta` перед
-    # повторным кругом и accept с кодом 1 без тестов и CI (merge.part)
+    # повторным кругом и accept с кодом 1 без тестов и CI (merge.part), план 1.0, пачка 0; argus #426 (план 1.0):
+    # +~350/+~440 — код 1 у accept только без тестов и CI, узкая запись вне ядра (merge.part), high после красной
+    # записи или Б (brief, triage)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 34200 and len(raw_texts["hephaestus-demo.md"]) <= 28250)  # metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 34450 and len(raw_texts["hephaestus-demo.md"]) <= 28600)  # metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -515,9 +577,11 @@ def main():
          "Одна задача — один PR (владелец 02.11); задачи на одни файлы — одной веткой или в очередь за открытым PR, "
          "ядро — пачкой до ~400 строк диффа."),
         # отдельный пункт для любого PR, ядра тоже, а не хвост пункта «Остальное» (argus-252a Б1)
-        ("любой PR: argus — при зелёном CI или записи тестов, полный круг — на свежем origin/main, иначе accept код 1",
-         "- Любой PR: argus — при зелёном CI или записи тестов шлюза на head, полный круг — на свежем `origin/main` "
-         "(metis-0669). Иначе `pantheon review accept` у argus выйдет с кодом 1 и «принять» не запишет."),
+        # код 1 у accept — только без записи тестов и без зелёного CI; свежесть main — подсказка delta (Д4 argus #426)
+        ("любой PR: argus — при зелёном CI или записи тестов, нет обоих — accept код 1, свежесть main — подсказка",
+         "- Любой PR: argus — при зелёном CI или записи тестов шлюза на head (metis-0669): нет ни того, ни другого — "
+         "`pantheon review accept` у argus выйдет с кодом 1 и «принять» не запишет. Полный круг — на свежем "
+         "`origin/main`; отставание от base видит только `pantheon review delta`, и это подсказка, а не отказ accept."),
         ("повтор: перед повторным кругом review delta — дельта и в ядре, полный — на свежем base",
          "повтор — только при новом диффе; перед повторным кругом — `pantheon review delta <owner/repo> <N>`: "
          "«дельта» — argus смотрит только правку, и в ядре, «полный» — весь дифф на свежем base;"),
@@ -591,9 +655,9 @@ def main():
          "сам."),
         ("повторный круг: шире или новые файлы — полный круг", "Дельта шире заявленной или "
          "задевает новые файлы — он сам ведёт полный круг. Тесты на новом head — запись шлюза, пункт 1 о шлюзе в разделе о слиянии твоей роли."),
-        ("вызов не продолжить — новый argus с отчётом прежнего (review report), по дельте (metis-0602)",
+        ("вызов не продолжить — новый argus с отчётом прежнего (review report), по дельте вне ядра (metis-0602)",
          "Вызов не продолжить (metis-0602): SendMessage отвечает «No transcript found» — после /clear, перезапуска, "
-         "пауза дольше сессии. Это не повод для полного круга"),
+         "пауза дольше сессии. Вне ядра это не повод для полного круга"),
         ("вызов не продолжить: argus сам вызывает review report на каждую пару из «вернули», лид файлов не передаёт",
          "файлов и отчётов в поручении не передавай: argus сам вызывает `pantheon review report <owner/repo> <N> "
          "<agent8>/<сессия8>` на каждую пару из «вернули» (в ядре — и на принявшего, которого заменяет)"),
@@ -667,9 +731,11 @@ def main():
         ("повторный круг: «дельта» и в ядре — отчёт прошлого круга и git diff прошлый..новый", "«Дельта» — прошлый "
          "head предок нового, дельта до 200 строк и не задевает ядро, файлы шлюза и сборку окон. Тогда и в ядре весь "
          "дифф PR заново не читаешь: опора — отчёт прошлого круга и дельта `git diff <прошлый head> <head>`."),
-        ("повторный круг: «полный» — весь дифф, отстаёт от base — вернуть", "«Полный» — круг по всему диффу PR, как "
-         "первый: «вне дельты новых находок не ищешь» там не действует. Head при полном круге отстаёт от base — "
-         "«вернуть» с причиной из вывода команды: сначала rebase на свежий base."),
+        # отставание от base — «head не готов», без reject (Д1 argus #426)
+        ("повторный круг: «полный» — весь дифф, отстаёт от base — head не готов, вердикта нет",
+         "«Полный» — круг по всему диффу PR, как первый: «вне дельты новых находок не ищешь» там не действует. Head "
+         "при полном круге отстаёт от base — не «вернуть»: в отчёте «head не готов: rebase на свежий base» с причиной "
+         "из вывода команды, вердикт не записываешь, как при `pantheon review accept` с кодом 1."),
         ("accept — код 1 без записи тестов и зелёного CI на head (metis-0669)", "`pantheon review accept` выходит с "
          "кодом 1 и «принять» не пишет, если на head нет записи тестов шлюза и CI head не зелёный (metis-0669)."),
         ("второй argus — только ядро; список шлюза с origin/main", "Второй независимый argus — только PR, "
