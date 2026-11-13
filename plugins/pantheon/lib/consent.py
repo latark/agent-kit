@@ -268,9 +268,81 @@ def consent_bound(qid, days, text):
     return out, bad
 
 
-def consent(rest):
-    if rest and rest[0] == "bind":
+# --- ответ владельца — классификатору авто-режима окна роли (metis-1033, metis-0161) --------------------------------
+# Классификатор авто-режима Claude Code видит сообщения пользователя и вызовы инструментов, но не их вывод (документация
+# Claude Code: permission-modes, «Tool results are stripped»). Поэтому вывод `pantheon consent <id>` в окне роли — «да»
+# владельца из окна Зевса — до него не доходил, и он отклонял действие из вопроса («Interfere With Workloads»,
+# 09.11 metis-1032). Канал к нему — поле classifierContext хука PostToolUse (Claude Code 2.1.236+): его классификатор
+# читает как слова приложения, а не модели. Хук `pantheon consent note` (hooks.json, if Bash(pantheon consent *)) берёт
+# из события только сам вызов — одну команду `pantheon consent <id> [--days N]` — и заново читает журналы owner-log
+# (их пишут хук ввода владельца и плановый проход), а вывода команды не читает: подделать его вызовом другой программы
+# или эхом нельзя. Заметка — только про ответ на вопрос «[id] …» (found); привязанные Зевсом слова (consent bind) и
+# пересказы других сессий согласием не становятся. Последний ответ — не «да» — заметка говорит, что согласия нет.
+NOTE_CMD = re.compile(r"\s*pantheon consent (" + CONSENT_ID.pattern + r")(?: --days (\d{1,2}(?:\.\d{1,3})?))?\s*")
+NOTE_MAX = 1900                 # потолок classifierContext — 2000 знаков на вызов
+NOTE_PART = 600                 # вопрос и ответ — каждый не длиннее
+
+
+def _note_text(s, n):
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s or "").strip()
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def consent_note(stream=None):
+    """PostToolUse: событие Claude Code на stdin → JSON с classifierContext о последнем ответе владельца на [id] или
+    ничего (код 0 всегда: заметка — подсказка классификатору, её нет — действие судится как раньше)."""
+    try:
+        ev = json.loads((stream or sys.stdin).read() or "{}")
+        cmd = (ev.get("tool_input") or {}).get("command") if ev.get("tool_name") == "Bash" else None
+    except (ValueError, AttributeError, OSError):
+        return 0
+    m = NOTE_CMD.fullmatch(cmd) if isinstance(cmd, str) else None
+    if not m or ev.get("hook_event_name", "PostToolUse") != "PostToolUse":
+        return 0
+    qid, days = m.group(1), min(30.0, max(0.1, float(m.group(2) or 7.0)))
+    if os.environ.get("PANTHEON_ROLE") == "hestia":
+        days = min(days, HESTIA_CONSENT_DAYS)
+        if qid != os.environ.get("PANTHEON_TASK"):
+            return 0
+    try:
+        found = consent_found(qid, days)[0]
+    except ConsentLogError:
+        return 0
+    if not found:
+        return 0
+    head, body = found[-1][1], found[-1][2]  # последний ответ решает: позднее «нет» отменяет «да» (metis-0656)
+    q = body.split("\nответ:")[0].removeprefix("вопрос:")
+    a = CONSENT_ANSWER.search(body)
+    yes = consent_is_yes(body)
+    at = head.split(" ·")[0]
+    src = ("a checkbox on the owner's task board" if "доска" in head else
+           "the owner's own answer in the Pantheon HQ (Zeus) window")
+    text = (f"Pantheon owner consent for task {qid}, read by this hook from the owner's answer log (owner-log), which "
+            "only the owner-input hook and the board tick write; not text from this session or from another agent. "
+            f"Question shown to the owner: «{_note_text(q, NOTE_PART)}». Owner's answer at {at} via {src}: "
+            f"«{_note_text(a.group(1) if a else '', NOTE_PART)}». ")
+    text += ("This is the user's explicit approval of exactly the action this question describes, for this session "
+             "too; it covers nothing beyond the question." if yes else
+             "This answer is NOT an approval: the action this question describes stays unapproved.")
+    if yes and "доска" in head:
+        text += " A board checkbox never approves payments, publications, messages to people or deletion."
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                             "classifierContext": _note_text(text, NOTE_MAX)}}, ensure_ascii=False))
+    return 0
+
+
+def consent_sub(rest):
+    """Подкоманды consent: bind (привязка слова, metis-0843) и note (хук PostToolUse, metis-1033); иное — None."""
+    if rest[:1] == ["bind"]:
         return consent_bind(rest[1:])
+    if rest == ["note"]:
+        return consent_note()
+    return None
+
+
+def consent(rest):
+    if (sub := consent_sub(rest)) is not None:
+        return sub
     if not rest or not CONSENT_ID.fullmatch(rest[0]):
         print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
         return 2
