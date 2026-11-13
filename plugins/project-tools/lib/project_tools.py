@@ -20,14 +20,18 @@ requirements*.txt, либо файл) → какие MCP-серверы и пл�
 
 Куда пишет apply (корень проекта — вершина git-репозитория, иначе папка):
   .mcp.json                     серверы из карты; чужие записи не трогает, отличие от карты меняет только --update
-  .claude/settings.local.json   enabledMcpjsonServers — тогда Claude не спрашивает одобрения; enableAllProjectMcpServers
-                                заменяет списком серверов, которые уже лежат в .mcp.json (их вы одобрили этим флагом):
-                                новый сервер из репозитория без вопроса больше не запустится
-  .claude/settings.json         enabledPlugins: плагины из карты; плагины, которые заменяет сервер из карты, — false
+  .claude/settings.json         enabledMcpjsonServers: серверы из карты поимённо — тогда Claude не спрашивает одобрения;
+                                файл общий и идёт в тот же PR, что .mcp.json: после слияния сервер одобрен в окне роли
+                                и на другом Mac без ручного шага (решение владельца 14.11, metis-1047). Имена, которых
+                                в .mcp.json нет, снимает. enableAllProjectMcpServers здесь не ставит.
+                                enabledPlugins: плагины из карты; плагины, которые заменяет сервер из карты, — false
+  .claude/settings.local.json   личный, только чистится: enableAllProjectMcpServers заменяет списком серверов, которые
+                                уже лежат в .mcp.json (их вы одобрили этим флагом), — новый сервер из репозитория без
+                                вопроса больше не запустится; снимает одобрения имён, которых в .mcp.json нет
   .codex/config.toml            блок [mcp_servers.*], если Codex установлен или папка .codex уже есть
 
 Одобрение в Claude Code — по имени сервера: после git pull под тем же именем может прийти другая команда, и она
-запустится без вопроса. Поэтому apply запоминает отпечаток каждой одобренной записи (на этом Mac, вне репозитория),
+запустится без вопроса. Общее одобрение в .claude/settings.json это не меняет: сторож — отпечатки. Поэтому apply запоминает отпечаток каждой одобренной записи (на этом Mac, вне репозитория),
 а подсказка при старте сессии говорит вам и Claude, если запись изменилась. Принять — apply --accept ИМЯ,
 отказаться — skip ИМЯ.
 """
@@ -408,6 +412,36 @@ def load_approved():
     return read_json(APPROVED)
 
 
+def plan_approvals(p, local, shared, present, rejected, approve):
+    """Одобрения .mcp.json: серверы из карты — поимённо в общий .claude/settings.json (уходит в PR вместе с
+    .mcp.json, решение владельца 14.11, metis-1047: после слияния окно роли и другой Mac запускают их без вопроса);
+    личный settings.local.json только чистится: «одобрять всё» → явный список, без имён, которых в .mcp.json нет.
+    Возвращает (новый settings.local.json, личные одобрения, общие одобрения)."""
+    new_local = dict(local)
+    local_approved = set(local.get("enabledMcpjsonServers") or [])
+    if local.get("enableAllProjectMcpServers") is True:
+        local_approved |= present - rejected
+        del new_local["enableAllProjectMcpServers"]
+        p.changes.append(".claude/settings.local.json: enableAllProjectMcpServers заменён явным списком "
+                         f"({names(present - rejected) or 'пусто'}) — новый сервер из "
+                         "репозитория больше не запустится без вашего одобрения")
+    stale = local_approved - present
+    if stale:
+        p.changes.append(f".claude/settings.local.json: сняты одобрения серверов, которых нет в .mcp.json: "
+                         f"{names(stale)}")
+    local_approved -= stale
+    if local_approved or "enabledMcpjsonServers" in local:
+        new_local["enabledMcpjsonServers"] = sorted(local_approved)
+    shared_before = set(shared.get("enabledMcpjsonServers") or [])
+    shared_approved = (shared_before | approve) & present
+    if shared_before - shared_approved:
+        p.changes.append(f".claude/settings.json: сняты одобрения серверов, которых нет в .mcp.json: "
+                         f"{names(shared_before - shared_approved)}")
+    if approve - shared_before:
+        p.changes.append(f".claude/settings.json: одобрены {names(approve - shared_before)}")
+    return new_local, local_approved, shared_approved
+
+
 def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     """Что apply запишет в проект. tolerant — для подсказки: битый ~/.claude.json не мешает."""
     cmap = load_map()
@@ -511,26 +545,9 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         doc["mcpServers"] = new_servers
         p.write(p.path(".mcp.json"), json_text(p.path(".mcp.json"), doc, True))
 
-    # одобрения: явный список вместо «одобрять всё», без имён, которых в .mcp.json нет
-    new_local = dict(local)
-    before = set(local.get("enabledMcpjsonServers") or [])
-    approved = set(before)
-    if local.get("enableAllProjectMcpServers") is True:
-        approved |= set(new_servers) - rejected
-        del new_local["enableAllProjectMcpServers"]
-        p.changes.append(".claude/settings.local.json: enableAllProjectMcpServers заменён явным списком "
-                         f"({names(set(new_servers) - rejected) or 'пусто'}) — новый сервер из "
-                         "репозитория больше не запустится без вашего одобрения")
-    approved |= approve
-    stale = approved - set(new_servers)
-    if stale:
-        p.changes.append(f".claude/settings.local.json: сняты одобрения серверов, которых нет в .mcp.json: "
-                         f"{names(stale)}")
-    approved -= stale
-    if approve - before:
-        p.changes.append(f".claude/settings.local.json: одобрены {names(approve - before)}")
-    if approved or "enabledMcpjsonServers" in local:
-        new_local["enabledMcpjsonServers"] = sorted(approved)
+    new_local, local_approved, shared_approved = plan_approvals(p, local, shared, set(new_servers), rejected,
+                                                                approve)
+    approved = local_approved | shared_approved
 
     # одобренные записи против запомненных отпечатков: подмена команды под одобренным именем
     remembered = load_approved().get(root) or {}
@@ -561,9 +578,12 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         p.notes.append(".claude/settings.json: enableAllProjectMcpServers одобряет любой сервер из репозитория — "
                        "уберите (project-tools общие настройки сам не чистит)")
 
+    new_shared = dict(shared)
     if new_shared_plugins != (shared.get("enabledPlugins") or {}):
-        new_shared = dict(shared)
         new_shared["enabledPlugins"] = new_shared_plugins
+    if shared_approved or "enabledMcpjsonServers" in shared:
+        new_shared["enabledMcpjsonServers"] = sorted(shared_approved)
+    if new_shared != shared:
         p.write(p.path(".claude", "settings.json"), json_text(p.path(".claude", "settings.json"), new_shared, False))
 
     # Codex: тот же набор серверов из карты, своим блоком
