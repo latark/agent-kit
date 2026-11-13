@@ -3,9 +3,11 @@
 
 Запуск: python3 -I plugins/pantheon/tests/test_plugin_map.py  (код выхода 0 — все прошли)
 - разбор карты: опечатка в «оставить» и плохие типы — ValueError, настоящая карта разбирается;
-- окно: карта применяется к каждому окну (направление, свой ключ mnemo-brain, workshop, hestia, hq, job-*) через
-  `domains build` на временных HOME и PANTHEON_*; у кого плагина нет в «оставить» — enabledPlugins: false и
-  permissions.deny mcp__…, кому он нужен — не выключен; окна не из карты и вне каталога плагины — не тронуты;
+- окно: карта применяется к каждому окну (направление, свой ключ направления из личной части карты, workshop, hestia,
+  hq, job-*) через `domains build` на временных HOME и PANTHEON_*; у кого плагина нет в «оставить» — enabledPlugins:
+  false и permissions.deny mcp__…, кому он нужен — не выключен; окна не из карты и вне каталога плагины — не тронуты;
+- личная часть ~/.claude/pantheon/plugins-by-role.toml (решение владельца 12.11): только [window.<направление>]
+  реестра, поверх карты плагина; окно системы и чужое имя — пропуск, битый файл — карта плагина без личной части;
 - роли: `roles build --out` на настоящих шаблонах: disallowedTools получает mcp__… каждого сервера вне «оставить»,
   прежние запреты остаются, нужный роли сервер не закрыт, роль вне карты (личный слой) — шапка как была;
 - битая карта: окна и роли собираются без неё (всё включено) и приходит тревога.
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311
 
@@ -71,16 +74,69 @@ def pantheon(env, *args):
 
 
 M = load_mod()
-MNEMO = '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/projects/kb"]\n'  # ключ [window.mnemo-brain] карты сверяется с реестром
+MNEMO = '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/projects/kb"]\n'  # ключ личной части сверяется с реестром
 real = M.load(MAP)
-mn = real["window"]["mnemo-brain"]
+# запись окна направления — в личной части карты пользователя, а не в карте плагина (решение владельца 12.11)
+LOCAL = ('[window.mnemo-brain]\nplugins = ["commit-commands@claude-plugins-official", '
+         '"claude-md-management@claude-plugins-official"]\nmcp = ["qmd", "claude_ai_Claude_Docs"]\n')
+SYSTEM = {"direction", "workshop", "hq", "hestia", "job-clio", "job-prometheus", "job-iris"}
 LSP = "pyright-lsp@claude-plugins-official"
 NOTION = "notion@anthropic-plugin-directory"
 
 # --- разбор ---
 check("настоящая карта разбирается; окна и роли в ней есть",
-      {"direction", "mnemo-brain", "workshop", "hq", "hestia", "job-clio", "job-prometheus", "job-iris"}
-      <= set(real["window"]) and {"dev-sonnet", "hestia", "momus", "talos"} <= set(real["role"]))
+      SYSTEM <= set(real["window"]) and {"dev-sonnet", "hestia", "momus", "talos"} <= set(real["role"]))
+check("в карте плагина только окна системы: записей окон направлений пользователя нет (они в личной части)",
+      set(real["window"]) == SYSTEM, sorted(set(real["window"]) - SYSTEM))
+
+
+def ov(text, allowed=None, system=SYSTEM):
+    p = os.path.join(ROOT, "local.toml")
+    if text is not None:
+        write(p, text)
+    elif os.path.exists(p):
+        os.remove(p)
+    pm = M.load(os.path.join(ROOT, "small.toml"))
+    try:
+        return M.overlay(pm, p, allowed, system)
+    except ValueError as e:
+        return str(e)
+
+
+write(os.path.join(ROOT, "small.toml"), '[catalog]\nplugins = ["a@b", "c@d"]\nmcp = ["qmd", "ctx"]\n'
+      '[window.direction]\nplugins = ["a@b"]\nmcp = ["qmd"]\n[window.hq]\nplugins = []\nmcp = []\n')
+o = ov(None)
+check("личная часть: нет файла — карта как есть", isinstance(o, dict) and set(o["window"]) == {"direction", "hq"}
+      and o["skipped"] == [], o)
+o = ov('[window.god-proj]\nplugins = ["c@d"]\nmcp = []\n', {"god-proj"})
+check("личная часть: запись окна направления из реестра добавлена поверх карты, каталог тот же",
+      isinstance(o, dict) and o["window"]["god-proj"] == {"plugins": ["c@d"], "mcp": []} and o["plugins"] == ["a@b", "c@d"]
+      and M.window_apply({}, o, "god-proj", True) == {"enabledPlugins": {"a@b": False},
+                                                     "permissions": {"deny": ["mcp__qmd", "mcp__ctx"]}}, o)
+o = ov('[window.hq]\nplugins = ["a@b", "c@d"]\nmcp = ["qmd", "ctx"]\n[window.god-x]\nplugins = []\nmcp = []\n'
+       '[window.god-proj]\nplugins = []\nmcp = []\n', {"god-proj", "hq"})
+check("личная часть: окно системы (hq) и имя вне реестра — пропущены и названы, карта hq из плагина",
+      isinstance(o, dict) and o["window"]["hq"] == {"plugins": [], "mcp": []} and "god-x" not in o["window"]
+      and "god-proj" in o["window"]
+      and o["skipped"] == ["[window.hq] (личная часть)", "[window.god-x] (личная часть)"], o)
+o = ov('[window.god-proj]\nplugins = []\nmcp = []\n', None)
+check("личная часть: реестр не прочитан (allowed None) — имена не сверяются", isinstance(o, dict)
+      and "god-proj" in o["window"], o)
+for text, what in (('[window.god-proj]\nplugins = []\nmcp = []\n[window.god-a]\nplugins = ["zz@yy"]\nmcp = []\n',
+                    "плагин вне каталога"),
+                   ('[catalog]\nplugins = ["zz@yy"]\nmcp = []\n', "свой каталог"),
+                   ('[role.argus]\nmcp = []\n', "запись роли"),
+                   ('[window.god-proj\n', "битый TOML")):
+    o = ov(text, {"god-proj", "god-a"})
+    check(f"личная часть: {what} — ValueError, карта не тронута наполовину", isinstance(o, str) and "личн" in o
+          or isinstance(o, str) and "[catalog]" in o, o)
+pm = M.load(os.path.join(ROOT, "small.toml"))
+write(os.path.join(ROOT, "half.toml"), '[window.god-proj]\nplugins = []\nmcp = []\n[window.god-a]\nplugins = ["zz@yy"]\nmcp = []\n')
+try:
+    M.overlay(pm, os.path.join(ROOT, "half.toml"), {"god-proj", "god-a"})
+except ValueError:
+    pass
+check("личная часть: битая вторая запись — первая тоже не применена", "god-proj" not in pm["window"], sorted(pm["window"]))
 
 
 def bad(text):
@@ -199,7 +255,9 @@ write(os.path.join(env["PANTHEON_HOME"], "directions.toml"),
       '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/projects/kb"]\n')
 for p in ("br", "kb", "workshop"):
     os.makedirs(os.path.join(tmp, "projects", p))
-os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
+# окно направления со своей записью — из личной части карты, с записью окна системы (её личная часть не берёт)
+write(os.path.join(tmp, ".claude", "pantheon", "plugins-by-role.toml"),
+      LOCAL + '[window.hq]\nplugins = ["notion@anthropic-plugin-directory"]\nmcp = ["qmd"]\n')
 r = pantheon(env, "domains", "build")
 check("domains build прошёл", r.returncode == 0, r.stderr[-300:])
 sdir = os.path.join(env["PANTHEON_STATE"], "settings")
@@ -207,6 +265,9 @@ wins = {n[:-5]: json.load(open(os.path.join(sdir, n))) for n in os.listdir(sdir)
 check("собраны окна: два направления, workshop, hestia, hq, job-clio, job-prometheus, job-iris",
       {"athena-shop", "mnemo-brain", "workshop", "hestia", "hq", "job-clio", "job-prometheus", "job-iris"} <= set(wins),
       sorted(wins))
+
+
+real["window"]["mnemo-brain"] = tomllib.loads(LOCAL)["window"]["mnemo-brain"]  # запись личной части
 
 
 def expect(name, key):
@@ -235,6 +296,22 @@ check("qmd у окон hq, athena-shop и job-* оставлен, у hestia за
       all("mcp__qmd" not in wins[n]["permissions"]["deny"] for n in ("hq", "athena-shop", "job-clio", "job-iris"))
       and "mcp__qmd" in wins["hestia"]["permissions"]["deny"] and "mcp__context7" in wins["hq"]["permissions"]["deny"]
       and "mcp__context7" not in wins["workshop"]["permissions"]["deny"])
+al_w = os.path.join(env["PANTHEON_HOME"], "alerts.md")
+check("личная часть: запись окна системы [window.hq] пропущена с тревогой, Notion у hq выключен по карте плагина",
+      wins["hq"]["enabledPlugins"][NOTION] is False and os.path.exists(al_w)
+      and "[window.hq] (личная часть)" in open(al_w, encoding="utf-8").read())
+write(os.path.join(tmp, ".claude", "pantheon", "plugins-by-role.toml"), "[window.mnemo-brain\n")
+r = pantheon(env, "domains", "build")
+mb = json.load(open(os.path.join(sdir, "mnemo-brain.json")))
+check("личная часть битая: код 0, причина в stderr и тревоге, окно направления по [window.direction] карты плагина",
+      r.returncode == 0 and "личная карта плагинов" in r.stderr and LSP not in mb.get("enabledPlugins", {})
+      and mb["enabledPlugins"][NOTION] is False and "личная карта плагинов" in open(al_w, encoding="utf-8").read(),
+      r.stderr[-300:])
+write(os.path.join(tmp, ".claude", "pantheon", "plugins-by-role.toml"), LOCAL)
+r = pantheon(env, "domains", "build")
+mb = json.load(open(os.path.join(sdir, "mnemo-brain.json")))
+check("личная часть исправлена: запись окна направления снова применена (LSP выключен)",
+      r.returncode == 0 and mb["enabledPlugins"].get(LSP) is False, r.stderr[-300:])
 check("прежние deny окон не потеряны (Read личного у hq, Edit у hestia)",
       any(x.startswith("Read(") for x in wins["hq"]["permissions"]["deny"]) and "Edit" in wins["hestia"]["permissions"]["deny"])
 
@@ -337,7 +414,7 @@ check("битая карта, пробная сборка ролей: код 0, 
 
 # опечатка в имени окна или роли настоящей карты (Д2): запись пропущена, тревога одна на запись, остальная карта действует
 real_map = open(MAP, encoding="utf-8").read()
-for typo, what in (("[window.mnemo-brain]", "[window.mnemo-brainn]"), ("[role.argus]", "[role.argu]")):
+for typo, what in (("[window.workshop]", "[window.workshopp]"), ("[role.argus]", "[role.argu]")):
     write(os.path.join(plug, "plugins-by-role.toml"), real_map.replace(typo, what, 1))
     tmp7 = os.path.join(ROOT, "t" + str(len(what)))
     env7 = env_for(tmp7)

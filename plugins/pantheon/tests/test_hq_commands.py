@@ -21,7 +21,6 @@ import fnmatch
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -142,6 +141,8 @@ def build(base):
            "PANTHEON_NO_NOTIFY": "1", "PANTHEON_TEST": "1", "TMPDIR": os.path.join(base, "tmp"),
            "XDG_CACHE_HOME": os.path.join(home, "Library", "Caches", "pantheon-sandbox", "hq", "xdg"),
            "PATH": os.path.join(base, "bin") + ":/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"}
+    if sys.platform != "darwin":  # имя Mac pantheon берёт у scutil, его на Linux нет — status и jobs падали бы с Traceback
+        env["PANTHEON_HOST"] = "mac-a"
     return env, home, state
 
 
@@ -227,7 +228,9 @@ def suite(kind, prefix_of):
                   (rc, line, data))
         if argv == ["agents"]:
             check(f"{name} — код 0 и одна строка о снимке", rc == 0 and "снимок" in line, (rc, line))
-        if argv == ["reap", "--auto"] and rc == 3:
+        if argv == ["reap", "--auto"] and rc == 3 and sys.platform != "darwin":
+            print("пропущено: reap --auto — текст кода 3 «задача планового прохода» — нужен macOS (launchctl list)")
+        elif argv == ["reap", "--auto"] and rc == 3:
             check(f"{name} — код 3: «задача планового прохода»", "планового прохода" in line, line)
     # metis-1013 (Д4, m16): снимок STATE/agents.json окну не записать — список сессий печатается сюда, по строке на сессию
     bin2 = os.path.join(base, "bin-agents")

@@ -1,0 +1,37 @@
+{
+  "description": "Образец окна направления для тестов: настройки репозитория other/mailbox, которых --add-dir не приносит",
+  "ask": [
+    "Bash(mailbox apply *)",
+    "Bash(mailbox undo *)",
+    "Bash(uv run --group build *)",
+    "Bash(codesign *)",
+    "Bash(launchctl *)",
+    "Bash(osascript *)"
+  ],
+  "deny": [
+    "Read(~/Library/Application Support/mailbox/state.db*)",
+    "Read(~/Library/Mail/**)",
+    "Read(~/projects/other/mailbox/**/token*.json)",
+    "Read(~/projects/other/mailbox/.env*)",
+    "Bash(sendmail *)",
+    "WebFetch(domain:mail.example.com)"
+  ],
+  "sandbox": {
+    "denyRead": [
+      "~/Library/Application Support/mailbox",
+      "~/Library/Mail",
+      "~/Library/Keychains"
+    ],
+    "deniedDomains": [
+      "mail.example.com",
+      "*.mail.example.net"
+    ]
+  },
+  "seen": {
+    "~/projects/other/mailbox/.claude/settings.json permissions.allow": "не перенесено: allow окну не даётся",
+    "~/projects/other/mailbox/.claude/settings.json permissions.ask": "перенесено: window.json ask",
+    "~/projects/other/mailbox/.claude/settings.json permissions.deny": "перенесено: window.json deny",
+    "~/projects/other/mailbox/.claude/settings.json hooks.PreToolUse python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\"": "перенесено: hooks/hooks.json (in_repo.py --always)",
+    "~/projects/other/mailbox/.claude/settings.json hooks.PreToolUse python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_read.py\"": "перенесено: hooks/hooks.json (in_repo.py --always)"
+  }
+}
