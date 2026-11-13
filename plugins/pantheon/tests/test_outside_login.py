@@ -275,6 +275,6 @@ check("scrub: значение ключа вырезается", L._scrub(f"x {P
 src = open(os.path.join(LIBDIR, "outside_login.py")).read()
 check("модуль без subprocess: пароль не в аргументах процессов", "import subprocess" not in src and "Popen(" not in src)
 
-print(f"\nитого: проверок {TOTAL[0]}, FAIL {len(FAILS)}")
+print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.stdout.flush()
 os._exit(1 if FAILS else 0)
