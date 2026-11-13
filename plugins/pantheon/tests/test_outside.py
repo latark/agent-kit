@@ -1894,14 +1894,26 @@ def _ci(conclusion, status="COMPLETED"):
 
 def _pr_view(repo, pr):
     _VIEWS.append((repo, pr))
+    if _CI.get("down"):
+        return None
     sha = _CI["sha"]
     return {"headRefOid": sha, "baseRefName": "main", "statusCheckRollup": _CI["rollup"], "isCrossRepository": False}
 
 
 _M.pr_view = _pr_view
 _M.ci_runs_fetch = lambda repo, pr, sha, fork=None: _CI["runs"]
+def _al_line(s):
+    return next((x for x in alerts().splitlines() if s in x), "")
+
+
+def _wait_since(key, ago):
+    a = P.read_json(O.root("auto.json"), {})
+    a.setdefault("ci_wait", {})[key] = time.time() - ago
+    P.write_json(O.root("auto.json"), a)
+
+
 try:
-    AK = {c: c * 40 for c in "123"}
+    AK = {c: c * 40 for c in "1234567"}
     accept(AK["1"], repo="latark/agent-kit", age=7200)
     _CI.update(sha=AK["1"], rollup=_ci("SUCCESS")[0], runs=_ci("SUCCESS")[1])
     n_al = O.alert_overdue()
@@ -1913,10 +1925,45 @@ try:
     n_al = O.alert_overdue()
     check("agent-kit: CI ещё идёт — без тревоги и без метки (проверится на следующем проходе)",
           n_al == 0 and AK["2"][:12] not in alerts() and [x[1] for x in O.overdue_accepts()] == [AK["2"]], n_al)
+    check("agent-kit: CI идёт — начало ожидания записано (auto.json ci_wait)",
+          f"latark/agent-kit@{AK['2']}" in (P.read_json(O.root("auto.json"), {}).get("ci_wait") or {}))
     _CI.update(rollup=_ci("FAILURE")[0], runs=_ci("FAILURE")[1])
     n_al = O.alert_overdue()
-    check("agent-kit: CI красный — тревога «без записи tests», как раньше",
-          n_al == 1 and alerts().count(f"latark/agent-kit@{AK['2'][:12]}") == 1, (n_al, alerts()[-300:]))
+    line = _al_line(f"latark/agent-kit@{AK['2'][:12]}")
+    check("agent-kit: CI красный — одна тревога «CI красный … чинить код», без совета `pantheon outside test` (Д3)",
+          n_al == 1 and alerts().count(f"latark/agent-kit@{AK['2'][:12]}") == 1 and "CI красный" in line
+          and "чинить код" in line and "outside test" not in line, (n_al, line))
+    accept(AK["4"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["4"], rollup=_ci("", "IN_PROGRESS")[0], runs=_ci("", "IN_PROGRESS")[1])
+    _wait_since(f"latark/agent-kit@{AK['4']}", O.CI_WAIT_MAX - 600)
+    n_al = O.alert_overdue()
+    check("agent-kit: CI идёт меньше CI_WAIT_MAX — без тревоги", n_al == 0 and AK["4"][:12] not in alerts(), n_al)
+    _wait_since(f"latark/agent-kit@{AK['4']}", O.CI_WAIT_MAX + 600)
+    n_al = O.alert_overdue()
+    line = _al_line(f"latark/agent-kit@{AK['4'][:12]}")
+    check("agent-kit: CI ждёт дольше CI_WAIT_MAX — тревога «CI не встал» с запасным `pantheon outside test` (Д3)",
+          n_al == 1 and "не встал" in line and "outside test" in line and O.overdue_accepts() == []
+          and f"latark/agent-kit@{AK['4']}" not in (P.read_json(O.root("auto.json"), {}).get("ci_wait") or {}),
+          (n_al, line))
+    accept(AK["5"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["5"], down=True)
+    n_al = O.alert_overdue()
+    check("agent-kit: gh pr view не ответил — ждать, не тревога сразу (Д3)",
+          O.ci_head_state("latark/agent-kit", 100, AK["5"]) == "wait" and n_al == 0 and AK["5"][:12] not in alerts(),
+          n_al)
+    _wait_since(f"latark/agent-kit@{AK['5']}", O.CI_WAIT_MAX + 600)
+    n_al = O.alert_overdue()
+    check("agent-kit: gh не отвечает дольше CI_WAIT_MAX — тревога «не встал или gh не отвечает» (Д3)",
+          n_al == 1 and "gh не отвечает" in _al_line(f"latark/agent-kit@{AK['5'][:12]}"), n_al)
+    _CI.pop("down")
+    _CI.update(sha="9" * 40, rollup=_ci("SUCCESS")[0], runs=_ci("SUCCESS")[1])
+    check("agent-kit: PR уже на другом head → ci_head_state None (Д3)",
+          O.ci_head_state("latark/agent-kit", 100, AK["6"]) is None)
+    accept(AK["6"], repo="latark/agent-kit", age=7200)
+    n_al = O.alert_overdue()
+    line = _al_line(f"latark/agent-kit@{AK['6'][:12]}")
+    check("agent-kit: PR на другом head — тревога «без записи tests», как у репозитория без CI",
+          n_al == 1 and "без записи tests" in line, (n_al, line))
     nv = len(_VIEWS)
     accept(AK["3"], repo="latark/al-noci", age=7200)
     n_al = O.alert_overdue()

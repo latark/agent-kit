@@ -15,7 +15,11 @@ gh подменён (nightly_tick.gh_api и gh_text отвечают из сло
   [сбой]      failure без FAIL: части не стартовали (нет steps) → тревога «не стартовали»; лог не прочитан → тревога;
               cancelled → строка без смены тревоги;
   [свежесть]  нет завершённых запусков / gh не отвечает дольше STALE → тревога STALE_KEY, свежий итог её снимает;
-  [частота]   не чаще CHECK_EVERY; PANTHEON_DRYRUN — ничего; старые ключи running/result локального набора убраны.
+  [частота]   не чаще CHECK_EVERY; PANTHEON_DRYRUN — ничего; старые ключи running/result локального набора убраны;
+  [gh]        gh_text зовёт `gh api --allow-escape-sequences`: поддельный gh без флага на логе с ANSI-кодами отказывает
+              (как gh 2.103, Б1 argus #430); parse снимает ANSI-коды и BOM;
+  [без итога] success без стартовавших частей, без строки «итого», с непрочитанным логом или без частей full-shard —
+              «итога нет», не зелёный (Д2); cancelled после итога не сбрасывает отсчёт STALE (Д1).
 """
 import atexit
 import importlib.util
@@ -59,6 +63,7 @@ def load(name, file):
 
 M = load("pantheon_merge_n", "merge.py")
 NT = load("pantheon_nightly_tick_n", "nightly_tick.py")
+REAL_GH_TEXT = NT.gh_text  # World подменяет gh_text; настоящий проверяется в [gh] с поддельным subprocess.run
 
 STAMP = "2026-11-13T22:41:07.1234567Z "
 GREEN = STAMP + "ok   guard/test_a.py · 1.0 с · проверок 3\n" + STAMP + "итого: файлов 1, ok 1, FAIL 0; проверок 3; 1 с\n"
@@ -309,6 +314,68 @@ check("parse: метка времени GitHub срезана; FAIL, каран�
       NT.parse(RED1 + QUAR) == (["guard/test_a.py"], ["pantheon/test_outside_idle.py"],
                                 ["итого: файлов 1, ok 0, FAIL 1; проверок 3; 2 с",
                                  "итого: файлов 1, ok 0, FAIL 0, карантин 1; проверок 2; 1 с"]), NT.parse(RED1 + QUAR))
+
+# --- [gh] ---------------------------------------------------------------------------------------------------------
+ESC_LOG = ("\ufeff" + STAMP + "\x1b[36;1mpython3 -I plugins/pantheon/scripts/run-tests.py\x1b[0m\n" + STAMP
+           + "\x1b[31mFAIL guard/test_a.py · 2.0 с · проверок 3 · код 1\x1b[0m\n" + STAMP
+           + "\x1b[33mкарантин pantheon/test_q.py · 1.0 с · код 1 · задача metis-0989\x1b[0m\n" + STAMP
+           + "итого: файлов 2, ok 0, FAIL 1, карантин 1; проверок 3; 2 с\n")
+GH_ARGV = []
+
+
+def _fake_gh(argv, **kw):
+    GH_ARGV.append(list(argv))
+    if "--allow-escape-sequences" not in argv:   # как gh 2.103 на настоящем логе job (проверено argus, job 131835598109)
+        return subprocess.CompletedProcess(argv, 1, "", "the response contains terminal escape sequences; pass "
+                                           "--allow-escape-sequences")
+    return subprocess.CompletedProcess(argv, 0, ESC_LOG, "")
+
+
+w = World()
+_gm = (M.gh_path, M.gh_env)
+M.gh_path, M.gh_env = (lambda: "/nonexistent/gh"), (lambda: {})
+subprocess.run = _fake_gh
+try:
+    text, err = REAL_GH_TEXT(f"repos/{REPO}/actions/jobs/1/logs")
+finally:
+    subprocess.run = _forbid
+    M.gh_path, M.gh_env = _gm
+check("gh_text: `gh api --allow-escape-sequences <endpoint>` — лог с ANSI-кодами прочитан (без флага gh отказывает)",
+      err is None and GH_ARGV and GH_ARGV[-1][1:] == ["api", "--allow-escape-sequences", f"repos/{REPO}/actions/jobs/1/logs"],
+      (err, GH_ARGV))
+check("parse: ANSI-коды и BOM сняты — FAIL, карантин и итог из лога с цветом",
+      NT.parse(text or "") == (["guard/test_a.py"], ["pantheon/test_q.py"],
+                               ["итого: файлов 2, ok 0, FAIL 1, карантин 1; проверок 3; 2 с"]), NT.parse(text or ""))
+
+# --- [без итога] ----------------------------------------------------------------------------------------------------
+NOTOTAL = STAMP + "ok   guard/test_a.py · 1.0 с · проверок 3\n"
+for name, logs, steps, drop_logs in (
+        ("части не стартовали (нет steps)", {1: "", 2: ""}, [], False),
+        ("в логе части нет строки «итого»", {1: GREEN, 2: NOTOTAL}, STEPS, False),
+        ("лог части не прочитан", {1: GREEN}, STEPS, True),
+        ("частей full-shard нет", {}, STEPS, False)):
+    w = World()
+    w.add(run(1001), logs, steps)
+    if drop_logs:
+        w.logs.clear()
+    out = NT.tick(T)
+    check(f"success, но {name} → «итога нет», не зелёный: тревога не снята и не поставлена (Д2)",
+          out and "итога нет" in out and "зелёный" not in out and NT.ALERT_KEY not in w.cleared and not w.alerts,
+          (out, w.alerts, w.cleared))
+w = World()
+w.add(run(1101), {1: GREEN})
+NT.tick(T)
+w.add(run(1102, concl="cancelled", created=iso(C0 + NT.STALE - 600)), {1: GREEN})
+w.alerts.clear()
+out = NT.tick(C0 + NT.STALE + 10)
+st = w._read_json(os.path.join(w.state, "nightly-tick.json"))
+check("cancelled после зелёного не сбрасывает отсчёт: STALE от последнего итога (C0) → тревога STALE_KEY (Д1)",
+      w.alerts and w.alerts[-1][0] == NT.STALE_KEY and out and "итога нет" in out
+      and st["done"][REPO]["final"] == C0, (out, w.alerts, st.get("done")))
+w.alerts.clear()
+NT.tick(C0 + NT.STALE + 10 + CE)
+check("и на следующем проходе (тот же запуск без итога) — тревога STALE_KEY остаётся (Д1)",
+      w.alerts and w.alerts[-1][0] == NT.STALE_KEY, w.alerts)
 check("локально ничего не запущено за весь тест", not LOCAL, LOCAL)
 
 subprocess.Popen, subprocess.run = _real_popen, _real_run

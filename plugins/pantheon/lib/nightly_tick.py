@@ -14,12 +14,14 @@ agent-kit из [merge_repos] (merge.allowed_repos). Запуски — `gh api r
 меткой времени GitHub в начале — она срезается). Упавшие файлы — строки раннера `FAIL <метка>`; файлы карантина
 (run-tests.py QUARANTINE) — строки `карантин <метка>`: раннер с ними выходит с кодом 0, задачи они не дают (у каждого
 она уже есть), но называются в строке журнала и в тревоге — падения в карантине видны.
-- success — зелёный: тревога снята.
+- success — зелёный: тревога снята; но только если все части full-shard стартовали, логи прочитаны и в каждом есть
+  строка «итого» раннера, иначе — «итога нет» (Д2 argus #430).
 - failure — на каждый упавший файл не из карантина задача «Ночной полный набор: <метка> красный на main», если
   открытой с тем же заголовком нет; тревога alert_once без critical с именами файлов. Красный без строк FAIL (части не
   стартовали — лимит или сбой Actions, таймаут, сбой установки, лог не прочитан) — тревога с причиной и ссылкой.
 - cancelled, skipped и прочее — только строка журнала, тревога не меняется: итога нет.
-Свежесть: завершённого запуска на main нет дольше STALE (48 ч) — отдельная тревога STALE_KEY (расписание выключено:
+Свежесть: запуска на main с итогом (success с итогом частей или failure) нет дольше STALE (48 ч; отсчёт — от
+created_at последнего такого запуска, cancelled и прочие без итога его не сбрасывают, Д1 argus #430) — отдельная тревога STALE_KEY (расписание выключено:
 GitHub гасит schedule публичного репозитория после 60 дней без активности; Actions недоступны; gh не отвечает).
 Свежий итог её снимает.
 
@@ -44,6 +46,7 @@ DIRECTION = "metis-pantheon"
 ALERT_KEY = "nightly-tick"
 STALE_KEY = "nightly-tick-stale"
 WHO = "pantheon-tick"
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 STAMP_RE = re.compile(r"^\ufeff?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?", re.M)
 FAIL_RE = re.compile(r"^FAIL ([\w.-]+/test_[\w.-]+\.py) ·", re.M)
 QUAR_RE = re.compile(r"^карантин ([\w.-]+/test_[\w.-]+\.py) ·", re.M)
@@ -67,7 +70,7 @@ def repos():
 
 def parse(out):
     """Вывод раннера (лог job GitHub или голый) → (упавшие метки, метки карантина, [строки итога])."""
-    out = STAMP_RE.sub("", out or "")
+    out = STAMP_RE.sub("", ANSI_RE.sub("", (out or "").replace("\ufeff", "").replace("\r\n", "\n")))
     return (sorted(set(FAIL_RE.findall(out))), sorted(set(QUAR_RE.findall(out))),
             [x.strip() for x in TOTAL_RE.findall(out)])
 
@@ -83,7 +86,9 @@ def gh_text(endpoint):
     """GET REST через gh, ответ — текст (лог job) → (текст, None) или (None, причина). Тесты подменяют."""
     M = P.merge_mod()
     try:
-        r = subprocess.run([M.gh_path(), "api", endpoint], capture_output=True, text=True, timeout=GH_TIMEOUT,
+        # --allow-escape-sequences: в логах job GitHub есть ANSI-коды (`\x1b[36;1m`), без флага gh 2.103 отказывает с
+        # кодом 1 «the response contains terminal escape sequences» (Б1 argus #430); коды снимает parse()
+        r = subprocess.run([M.gh_path(), "api", "--allow-escape-sequences", endpoint], capture_output=True, text=True, timeout=GH_TIMEOUT,
                            env=M.gh_env())
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"gh не запустился: {type(e).__name__}"
@@ -136,7 +141,7 @@ def run_result(repo, run):
     if unstarted:
         res["why"] = (f"части не стартовали ({', '.join(sorted(unstarted))}): Actions не запустились — лимит минут или "
                       "сбой GitHub")
-    fails, quar, total, lost = set(), set(), [], []
+    fails, quar, total, lost, untotal = set(), set(), [], [], []
     for j in jobs:
         if not j.get("steps"):
             continue
@@ -148,8 +153,12 @@ def run_result(repo, run):
         fails.update(f)
         quar.update(q)
         total += tot
+        if not tot:
+            untotal.append(str(j.get("name")))
     if lost and not res["why"]:
         res["why"] = "лог части не прочитать — " + "; ".join(lost)
+    if untotal and not res["why"]:
+        res["why"] = f"в логе части нет строки «итого» ({', '.join(sorted(untotal))}): раннер не дошёл до конца"
     res.update(fails=sorted(fails), quarantine=sorted(quar), total=total)
     return res
 
@@ -195,8 +204,11 @@ def summarize(res):
     quar = f"; карантин упал: {', '.join(res['quarantine'])}" if res.get("quarantine") else ""
     total = f"; {' | '.join(res['total'])}" if res.get("total") else ""
     concl = res.get("conclusion")
-    if concl == "success":
+    if concl == "success" and not res.get("why") and res.get("total"):
         return f"{head}: зелёный{quar}{total}", None, True
+    if concl == "success":   # Д2 argus #430: success без стартовавших частей или строк итога — не зелёный
+        return (f"{head}: запуск success, но итога нет — {res.get('why') or 'строк «итого» в логах частей нет'}; жду "
+                "следующего"), None, False
     if concl != "failure":
         return f"{head}: запуск {concl} — итога нет, жду следующего", None, False
     if res.get("fails"):
@@ -225,39 +237,52 @@ def _changed(st, repo, text):
     return text
 
 
-def _stale(st, repo, t, since, why):
-    """Нет свежего итога дольше STALE → тревога STALE_KEY; иначе снять. → строка журнала при смене или None."""
+def _stale_text(repo, t, since, why):
+    """Нет итога дольше STALE → тревога STALE_KEY и её текст; иначе тревога снята, None."""
     if t - since > STALE:
         text = (f"{repo}: итога ночного набора в Actions нет с {P.stamp(since)} — {why} (расписание tests.yml выключено? "
                 "Actions недоступны?)")
         P.alert_once(STALE_KEY, f"{repo} {int(since)}", "ночной полный набор: " + text[:300], WHO)
-        return _changed(st, repo, text)
+        return text
     P.clear_once(STALE_KEY)
-    return _changed(st, repo, f"{repo}: {why}")
+    return None
+
+
+def _stale(st, repo, t, since, why):
+    """Нет свежего итога дольше STALE → тревога STALE_KEY; иначе снять. → строка журнала при смене или None."""
+    return _changed(st, repo, _stale_text(repo, t, since, why) or f"{repo}: {why}")
 
 
 def check(repo, t, st):
     """Проверка репозитория → строка журнала или None (ничего нового)."""
     done = st.setdefault("done", {})
     prev = done.get(repo) if isinstance(done.get(repo), dict) else {}
+    # отсчёт свежести — от последнего запуска с итогом (Д1 argus #430); "created" — состояние до этой правки
+    since = prev.get("final", prev.get("created")) or st["first"]
     runs, err = main_runs(repo)
     if err:
-        return _stale(st, repo, t, prev.get("created") or st["first"], f"запуски {WORKFLOW} не прочитать: {err}")
+        return _stale(st, repo, t, since, f"запуски {WORKFLOW} не прочитать: {err}")
     completed = [r for r in runs if r.get("status") == "completed"]
     newest = completed[0] if completed else None
     if newest is None:
-        return _stale(st, repo, t, prev.get("created") or st["first"], "завершённых запусков на main нет")
+        return _stale(st, repo, t, since, "завершённых запусков на main нет")
     created = _ts(newest.get("created_at")) or t
     if run_key(newest) == prev.get("key"):
         going = " (идёт новый)" if runs and runs[0].get("status") != "completed" else ""
-        return _stale(st, repo, t, created, f"новых итогов нет{going}")
+        return _stale(st, repo, t, since, f"новых итогов нет{going}")
     res = run_result(repo, newest)
     text, fail, final = summarize(res)
-    done[repo] = {"key": run_key(newest), "created": created, "sha": res["sha"], "conclusion": res["conclusion"]}
-    st.setdefault("last", {})[repo] = text
+    if final:
+        since = created
+    done[repo] = {"key": run_key(newest), "created": created, "final": since, "sha": res["sha"],
+                  "conclusion": res["conclusion"]}
     if final:
         _alert(fail)
-    P.clear_once(STALE_KEY)
+        P.clear_once(STALE_KEY)
+    else:
+        stale = _stale_text(repo, t, since, "последний запуск без итога")
+        text = f"{text}; {stale}" if stale else text
+    st.setdefault("last", {})[repo] = text
     return text
 
 

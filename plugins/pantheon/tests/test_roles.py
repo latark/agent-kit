@@ -1044,6 +1044,15 @@ def main():
               "Есть строка `ci:` в `.pantheon-verify` (agent-kit) — тесты идут в CI" in text
               and "`pantheon outside test --wait 590` — только если Actions не запустились" in text
               and "«тесты — в CI»" in text)
+        # Д4 argus #430: мутант — встроенный в тест (CI сам мутанты не гоняет), полный набор при ci: — Actions
+        check(f"{f[:-5]}: при строке `ci:` мутант встроен в тест, а не «проверяет CI»; пункт 6 — GitHub Actions",
+              "Откат проверяет сам тест: он подменяет исходник и ждёт, что check упадёт — мутант убит" in text
+              and "проверяет CI на PR" not in text
+              and "«не проверял: полный набор — его делает GitHub Actions»" in text)
+    argus_md = " ".join(read(os.path.join(out_real, "argus.md")).split())
+    check("argus: при строке `ci:` мутант встроен в тест, полный набор — GitHub Actions (Д4 argus #430)",
+          "мутант — встроенный в тест (подмена исходника, check краснеет" in argus_md
+          and "его делает плановый проход или лид, а при строке `ci:` — GitHub Actions" in argus_md)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: запись тестов при строке ci: — review test с ruff, outside test — только без Actions (metis-1115)",
               "при зелёной CI запись — `pantheon review test -- uvx ruff@0.17.3 check .`; `outside test` — только если "

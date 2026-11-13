@@ -456,11 +456,48 @@ SHARD_JOBS = ("affected-shard", "affected", "full-shard", "full")
 RUN_EXPR_OK = {"${{ matrix.part }}", "${{ needs.affected-shard.result }}", "${{ needs.full-shard.result }}"}
 
 
+def _wf_nocomment(t):
+    """Текст workflow без комментариев (# в начале строки или после пробела)."""
+    return "\n".join(re.sub(r"(^|\s)#.*$", "", ln) for ln in t.splitlines())
+
+
+def _wf_runs(part):
+    """[(имя шага, [строки run, продолжения через обратную косую склеены])]: строки целиком, комментарий — отдельная строка."""
+    out = []
+    for st in re.split(r"^      - (?=name:|uses:)", part, flags=re.M)[1:]:
+        name = re.search(r"name:\s*(.+)", st)
+        m = re.search(r"^        run: (\|\n)?(.*(?:\n.*)*)", st, re.M)
+        if not m:
+            continue
+        body = [ln.strip() for ln in m.group(2).split("\n") if ln.strip()] if m.group(1) else [m.group(2).strip()]
+        lines, cur = [], ""
+        for ln in body:
+            cur += ln[:-1].rstrip() + " " if ln.endswith("\\") else ln
+            if not ln.endswith("\\"):
+                lines.append(cur)
+                cur = ""
+        out.append((name.group(1) if name else "", lines))
+    return out
+
+
+def _wf_gather(sj):
+    """Строки run собирающего job: красный, если итог частей sj не success."""
+    return [f'result="${{{{ needs.{sj}.result }}}}"', 'if [ "$result" != success ]; then',
+            f'echo "части {sj}: $result — нужна success у каждой"', "exit 1", "fi", f'echo "части {sj}: success"']
+
+
 def t_workflows(wfdir=WORKFLOWS):
     """Право contents: write — только у release.yml; сторонние Action только по полному SHA; запуск — main."""
     names = sorted(n for n in os.listdir(wfdir) if n.endswith((".yml", ".yaml")))
     write = [n for n in names if re.search(r"^\s*[a-z-]+:\s*write\b", open(os.path.join(wfdir, n)).read(), re.M)]
     check("право на запись — только release.yml", write == ["release.yml"], write)
+    _wf_release(wfdir)
+    _wf_files(wfdir, names)
+    _wf_tests(wfdir)
+
+
+def _wf_release(wfdir):
+    """release.yml: запись только у job release, Action только checkout по SHA, запуск — push в main."""
     text = open(os.path.join(wfdir, "release.yml")).read()
     rel, why = wf_parse(os.path.join(wfdir, "release.yml"))
     uses = rel["uses"] if rel else None
@@ -479,34 +516,16 @@ def t_workflows(wfdir=WORKFLOWS):
           and "if: github.ref == 'refs/heads/main'" in text, text)
     check("release.yml: запускает скрипт ядра --push", "python3 -I .github/scripts/release.py --push" in text, text)
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
-    # п. 8 (27.10) + metis-1111 (13.11, репозиторий публичный): на каждый PR в main — affected на закреплённом Linux и
-    # полный набор (job full) на macos-15; metis-1115 — полный набор и ночью по расписанию (только tests.yml, на main);
-    # на push полного набора нет. Гибрид без macOS (metis-0688) снят.
-    text = open(os.path.join(wfdir, "tests.yml")).read()
-    tst, why = wf_parse(os.path.join(wfdir, "tests.yml"))
-    uses = tst["uses"] if tst else None
-    check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
-          uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses if tst else why)
-    jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
-    parts = re.split(r"^  (?=[a-z-]+:\n)", jobs, flags=re.M)
-    job = {m.group(1): part for part in parts if (m := re.match(r"([a-z-]+):\n", part))}
-    aff = job.get("affected", "")
-    ash = job.get("affected-shard", "")
-    fsh = job.get("full-shard", "")
-    check("tests.yml: только чтение, запуск только на PR в main, по расписанию раз в сутки и вручную, Python 3.14, без "
-          "токена в checkout",
-          re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
-          and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  schedule:\n    - cron: '[^'\n]+'\n"
-                        r"  workflow_dispatch:\n\npermissions:", text, re.M)
-          and re.search(CRON_DAILY, text, re.M)
-          and text.count('python-version: "3.14"') == 3 and text.count("persist-credentials: false") == 3, text)
-    nocomment = lambda t: "\n".join(re.sub(r"(^|\s)#.*$", "", ln) for ln in t.splitlines())
+
+
+def _wf_files(wfdir, names):
+    """Все workflow: macos только у full-shard, полный набор только там, runs-on закреплён, YAML разбирается."""
     # metis-1111: macOS — ровно одна строка `    runs-on: macos-15` в job full-shard (части полного набора) файла
     # tests.yml; любое другое упоминание macos вне комментариев (runs-on у affected, у собирающего full, release.yml,
     # matrix, другой образ) — провал
     macos = []
     for n in names:
-        wtext = nocomment(open(os.path.join(wfdir, n)).read())
+        wtext = _wf_nocomment(open(os.path.join(wfdir, n)).read())
         if n == "tests.yml":
             parts = re.split(r"(?m)^(?=  [A-Za-z0-9_-]+:\s*$)", wtext)
             wtext = "".join(p.replace("    runs-on: macos-15\n", "", 1) if p.startswith("  full-shard:\n") else p
@@ -521,7 +540,7 @@ def t_workflows(wfdir=WORKFLOWS):
     # OPTIONAL_CHECKS шлюза, слияние не держит). Комментарии отрезаются до проверки; смотрим все файлы.
     full_bad = []
     for n in names:
-        wtext = nocomment(open(os.path.join(wfdir, n)).read())
+        wtext = _wf_nocomment(open(os.path.join(wfdir, n)).read())
         won, _, wjobs = wtext.partition("\njobs:\n")
         for part in re.split(r"^  (?=[A-Za-z0-9_-]+:\s*$)", wjobs, flags=re.M):
             lines = part.splitlines()
@@ -543,7 +562,7 @@ def t_workflows(wfdir=WORKFLOWS):
           "schedule и в workflow без push (комментарии не в счёт, все файлы workflows)", not full_bad, full_bad)
     # runs-on — только закреплённый Linux (или ubuntu-latest у release и check-traces) или macos-15 (где — проверка
     # macos выше): выражение, список, matrix и self-hosted не пускаем
-    ro = [(n, m) for n in names for m in re.findall(r"^\s*runs-on:\s*(.*)$", nocomment(open(os.path.join(wfdir, n)).read()), re.M)
+    ro = [(n, m) for n in names for m in re.findall(r"^\s*runs-on:\s*(.*)$", _wf_nocomment(open(os.path.join(wfdir, n)).read()), re.M)
           if not re.fullmatch(r"ubuntu-(\d\d\.\d\d|latest)|macos-15", m.strip())]
     check("workflows: runs-on — только ubuntu-NN.NN, ubuntu-latest или macos-15 (без выражений, списков, matrix)", not ro, ro)
     # YAML с «: » в простом скаляре GitHub не разбирает — workflow не запускается вовсе (так было после #192)
@@ -553,6 +572,31 @@ def t_workflows(wfdir=WORKFLOWS):
         capture_output=True, text=True) if rb else None
     check("workflows: каждый .yml разбирается как YAML (ruby -ryaml)", bad is not None and bad.returncode == 0,
           bad.stderr[-300:] if bad else "нет ruby")
+
+
+def _wf_tests(wfdir):
+    """tests.yml: триггеры, права, ключи, job и части matrix (шаги — _wf_steps)."""
+    # п. 8 (27.10) + metis-1111 (13.11, репозиторий публичный): на каждый PR в main — affected на закреплённом Linux и
+    # полный набор (job full) на macos-15; metis-1115 — полный набор и ночью по расписанию (только tests.yml, на main);
+    # на push полного набора нет. Гибрид без macOS (metis-0688) снят.
+    text = open(os.path.join(wfdir, "tests.yml")).read()
+    tst, why = wf_parse(os.path.join(wfdir, "tests.yml"))
+    uses = tst["uses"] if tst else None
+    check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
+          uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses if tst else why)
+    jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
+    parts = re.split(r"^  (?=[a-z-]+:\n)", jobs, flags=re.M)
+    job = {m.group(1): part for part in parts if (m := re.match(r"([a-z-]+):\n", part))}
+    aff = job.get("affected", "")
+    ash = job.get("affected-shard", "")
+    fsh = job.get("full-shard", "")
+    check("tests.yml: только чтение, запуск только на PR в main, по расписанию раз в сутки и вручную, Python 3.14, без "
+          "токена в checkout",
+          re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
+          and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  schedule:\n    - cron: '[^'\n]+'\n"
+                        r"  workflow_dispatch:\n\npermissions:", text, re.M)
+          and re.search(CRON_DAILY, text, re.M)
+          and text.count('python-version: "3.14"') == 3 and text.count("persist-credentials: false") == 3, text)
     # metis-0597 (долг argus B #198): ключи, if, ref, uses — из разбора YAML (wf_parse), а не регуляркой: экранированный
     # ("\x65nv"), flow ({env: x}), кавычки и merge-ключ дают тот же ключ после разбора. Все уровни, все mapping.
     keys = tst["keys"] if tst else None
@@ -572,6 +616,11 @@ def t_workflows(wfdir=WORKFLOWS):
           and re.search(r"^    timeout-minutes: 90$", fsh, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", full, re.M), job.keys())
+    _wf_steps(job, _wf_shards(job))
+
+
+def _wf_shards(job):
+    """Части matrix и собирающие job → {часть: N}."""
     # metis-1111: части matrix — fail-fast false (красная часть не гасит соседние), part: [1..N], имя «<job> (K/N)», N
     # раннера (--shard …/N) то же; affected — 4 части, full на macOS — не больше 3 (лимит macOS — 5 job на все PR).
     # Собирающий job: needs — его части, идёт при красной части (!cancelled()), но не при отмене запуска
@@ -597,29 +646,16 @@ def t_workflows(wfdir=WORKFLOWS):
               re.search(rf"^    needs: {re.escape(sj)}$", coll, re.M)
               and re.search(rf"^    if: {re.escape(cond)} && !cancelled\(\)$", coll, re.M)
               and "strategy" not in coll and "matrix" not in coll, coll)
+    return nparts
 
-    def runs(part):
-        """[(имя шага, [строки run, продолжения через обратную косую склеены])]: строки целиком, комментарий — отдельная строка."""
-        out = []
-        for st in re.split(r"^      - (?=name:|uses:)", part, flags=re.M)[1:]:
-            name = re.search(r"name:\s*(.+)", st)
-            m = re.search(r"^        run: (\|\n)?(.*(?:\n.*)*)", st, re.M)
-            if not m:
-                continue
-            body = [ln.strip() for ln in m.group(2).split("\n") if ln.strip()] if m.group(1) else [m.group(2).strip()]
-            lines, cur = [], ""
-            for ln in body:
-                cur += ln[:-1].rstrip() + " " if ln.endswith("\\") else ln
-                if not ln.endswith("\\"):
-                    lines.append(cur)
-                    cur = ""
-            out.append((name.group(1) if name else "", lines))
-        return out
 
+def _wf_steps(job, nparts):
+    """Строки run шагов affected, affected-shard, full-shard и full."""
+    aff, ash, fsh, full = (job.get(k, "") for k in ("affected", "affected-shard", "full-shard", "full"))
     call = ('python3 -I plugins/pantheon/scripts/run-tests.py --affected --base origin/main -j 3 '
             '--log-dir "$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools || code=$?')
     # metis-0265: первый шаг affected — ruff по закреплённой версии и хешам, провал не прячется
-    asteps = runs(aff)
+    asteps = _wf_runs(aff)
     lr = asteps[0][1] if asteps else []
     check("tests.yml: affected — первым шагом ruff: ставится по хешам из .github/ruff-requirements.txt, затем ровно "
           "`ruff check .` (без `|| true`, --exit-zero и других флагов)",
@@ -629,22 +665,17 @@ def t_workflows(wfdir=WORKFLOWS):
     rt = asteps[1][1] if len(asteps) > 1 else []
     check("tests.yml: affected — вторым шагом храповик: ровно `python3 -I plugins/pantheon/scripts/lint_ratchet.py`",
           rt == ["python3 -I plugins/pantheon/scripts/lint_ratchet.py"], asteps)
-    def gather(sj):
-        """Строки run собирающего job: красный, если итог частей sj не success."""
-        return [f'result="${{{{ needs.{sj}.result }}}}"', 'if [ "$result" != success ]; then',
-                f'echo "части {sj}: $result — нужна success у каждой"', "exit 1", "fi", f'echo "части {sj}: success"']
-
     ar = [ln for _, lines in asteps[2:] for ln in lines]
     check("tests.yml: affected — после ruff и храповика тесты скриптов выпуска, затем итог частей affected-shard: "
           "красный, если хоть одна часть не success (строки run целиком, без комментариев и лишних ветвей)",
-          ar == ["python3 -I .github/scripts/test_release.py", *gather("affected-shard")], ar)
-    sr = [ln for _, lines in runs(ash) for ln in lines]
+          ar == ["python3 -I .github/scripts/test_release.py", *_wf_gather("affected-shard")], ar)
+    sr = [ln for _, lines in _wf_runs(ash) for ln in lines]
     call = call.replace("-j 3 ", f"-j 3 --shard ${{{{ matrix.part }}}}/{nparts.get('affected-shard')} ", 1)
     check("tests.yml: affected-shard — раннер --affected --shard K/N по трём плагинам; код 3 — успех, остальные коды — "
           "часть красная (строки run целиком)",
           sr == ["python3 --version", "code=0", call, 'if [ "$code" -eq 3 ]; then',
                  'echo "нечего гонять: изменения не задевают тесты"', "code=0", "fi", 'exit "$code"'], sr)
-    fr = [ln for _, lines in runs(fsh) for ln in lines]
+    fr = [ln for _, lines in _wf_runs(fsh) for ln in lines]
     # metis-1111: первым шагом full-shard ставит тот же ruff по хешам, иначе храповик в run-tests.py пропускается
     check("tests.yml: full-shard — ruff по хешам из .github/ruff-requirements.txt (храповик в раннере), затем раннер "
           "--shard K/N по трём плагинам без --affected, код раннера — код части",
@@ -652,13 +683,13 @@ def t_workflows(wfdir=WORKFLOWS):
                  "python3 --version", "python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --shard "
                  f"${{{{ matrix.part }}}}/{nparts.get('full-shard')} --log-dir "
                  '"$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools'], fr)
-    gr = [ln for _, lines in runs(full) for ln in lines]
+    gr = [ln for _, lines in _wf_runs(full) for ln in lines]
     check("tests.yml: full — только итог частей full-shard: красный, если хоть одна часть не success",
-          gr == gather("full-shard") and "uses:" not in full, gr)
+          gr == _wf_gather("full-shard") and "uses:" not in full, gr)
     req = open(os.path.join(WORKFLOWS, "..", "ruff-requirements.txt"), encoding="utf-8").read()
     check("ruff-requirements.txt: ruff==<точная версия> и хеши sha256 колёс",
           re.search(r"^ruff==\d+\.\d+\.\d+ \\$", req, re.M) and len(re.findall(r"--hash=sha256:[0-9a-f]{64}", req)) >= 1, req)
-    allrun = [ln for p in job.values() for _, lines in runs(p) for ln in lines]
+    allrun = [ln for p in job.values() for _, lines in _wf_runs(p) for ln in lines]
     exprs = sorted({e for ln in allrun for e in re.findall(r"\$\{\{.*?\}\}", ln)} - RUN_EXPR_OK)
     check("tests.yml: ${{ }} в run — только matrix.part и needs.<часть>.result (инъекция)",
           allrun and not exprs and not any(ln.count("${{") != len(re.findall(r"\$\{\{.*?\}\}", ln)) for ln in allrun),
