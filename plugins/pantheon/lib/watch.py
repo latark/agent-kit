@@ -46,7 +46,9 @@
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
 уведомление; в «ждёт вас» на доске переносит штаб. Модель дежурный зовёт только одним путём: «ждёт вас» (blocked) он передаёт живому
 простаивающему Зевсу — push + `claude respawn`, раз на пункт и не чаще раза в 15 мин на сессию, за проход одним
-сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Каждая проверка идёт отдельно: сбой одной
+сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Ожидание дольше 5 мин — карточка
+владельцу «Ждёт вас» (окно, что просит, что делать), дольше 30 мин — повтор уведомления и строка Зевсу в тревогах, одна на
+ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Каждая проверка идёт отдельно: сбой одной
 — тревога «проверка X упала», остальные работают; время прохода — ~/.local/state/pantheon/watch-last (строка статуса и
 `pantheon status` показывают, что дежурный жив). Основания — исследование
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
@@ -577,11 +579,75 @@ def relay_zeus(agents, items, t):
         return ok
 
 
+WAIT_CARD_AFTER = 300     # metis-1122: окно ждёт разрешения дольше 5 мин — карточка владельцу «Ждёт вас»
+WAIT_REPEAT_AFTER = 1800  # дольше 30 мин — повтор: уведомление владельцу и строка Зевсу в тревогах
+
+
+def _wait_card(name, sid, why, since, t):
+    """Карточка владельцу (колонка «Нужен ответ», раздел доски «Ждёт вас»): какое окно, что просит, что делать.
+    → id карточки или None (сбой — тревога раз в сутки, повтор следующим проходом)."""
+    hhmm = time.strftime("%H:%M", time.localtime(since))
+    title = f"Ответить окну {name}: оно ждёт разрешения с {hhmm}"
+    attach = f"А — открыть окно и ответить на запрос: claude attach {sid}"
+    deny = "Б — отказать в окне: окно пойдёт дальше без этого действия"
+    try:
+        tid, _ = P.tasks_mod().task_new(
+            P.PANTHEON, t, "inbox", title, owner="zeus", status="waiting", waiting_on="human",
+            next=f"ответ владельца в окне {name}", question=title,
+            why=f"Окно {name} стоит на запросе разрешения: {why}. Пока ответа нет, окно не работает.",
+            options=[attach, deny], recommend=attach.split(" — ")[0] + " — запрос снимает только человек",
+            if_no_answer="Окно стоит дальше; через 30 мин ожидания — повтор уведомления и строка Зевсу.",
+            actor="плановый проход")
+    except Exception as e:  # noqa: BLE001 — дежурный не падает из-за карточки; повтор — следующим проходом
+        P.alert_daily(f"wait-card-{name}", f"карточку «окно {name} ждёт вас» не завести: {type(e).__name__}: "
+                                           f"{str(e)[:120]}", "watch")
+        return None
+    return tid
+
+
+def wait_cards(agents, waiting, t):
+    """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
+    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке). Ключ — имя окна: та же сессия или её
+    замена под тем же именем — одна карточка и один повтор (одинаковые «ждёт вас» склеиваются). Окно вышло из
+    ожидания — карточка закрывается, запись снимается. Пустой claude agents — ничего не закрываем (сбой списка, а не
+    конец ожидания). Окна Зевса нет: туда владелец смотрит сам. Пробный запуск — ничего."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1" or dry():
+        return
+    items = {name: (sid, why) for name, sid, why in waiting if not name.startswith("zeus")}
+    sp = P.path("wait-cards.json")
+    with P.lock("wait-cards"):
+        st = P.read_json(sp, {})
+        st = {k: v for k, v in st.items() if isinstance(v, dict)} if isinstance(st, dict) else {}
+        for name in [k for k in st if k not in items]:
+            if not agents:
+                break
+            rec = st.pop(name)
+            if rec.get("card"):
+                with contextlib.suppress(ValueError, OSError):
+                    P.tasks_mod().task_set(P.PANTHEON, t, rec["card"], {"status": "done",
+                                           "result": f"Окно {name} больше не ждёт разрешения"},
+                                           note="окно больше не ждёт", actor="плановый проход")
+        for name, (sid, why) in items.items():
+            rec = st.setdefault(name, {"since": t})
+            since = rec["since"] if isinstance(rec.get("since"), (int, float)) and rec["since"] <= t else t
+            rec.update(since=since, sid=sid, why=why)
+            if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
+                rec["card"] = _wait_card(name, sid, why, since, t)
+            if t - since >= WAIT_REPEAT_AFTER and not rec.get("repeated"):
+                rec["repeated"] = t
+                mins = int((t - since) // 60)
+                card = f", карточка {rec['card']}" if rec.get("card") else ""
+                P.alert(f"окно {name} ждёт вас {mins} мин: {why}{card} — claude attach {sid}", "watch")
+                P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
+                              group=f"session-{name}", once=True)
+        P.write_json(sp, st)
+
+
 def sessions(agents, doms, t=None):
     """Ждёт вас (blocked) или упала (failed) — тревога один раз на состояние сессии; уведомление — сбой «скоро»
     каждый проход, пока состояние держится (политика решает: macOS, когда вас нет, не чаще раза в час на событие).
     blocked дополнительно сразу уходит живому Зевсу (metis-0277): все ждущие прохода одним сообщением, с инструментом и
-    целью запроса."""
+    целью запроса; дольше 5 мин — карточка владельцу, дольше 30 — повтор (wait_cards, metis-1122)."""
     t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
     waiting = []  # blocked этого прохода: [(имя, sid, что ждёт)] — Зевсу одним сообщением
@@ -618,6 +684,7 @@ def sessions(agents, doms, t=None):
         if state == "blocked":
             waiting.append((name, sid, why))
     relay_zeus(agents, waiting, t)
+    wait_cards(agents, waiting, t)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
     # вышла из blocked — запись снимаем: вернётся в blocked, будет новый пункт (передача раз на пункт)
     st = P.read_json(P.path("relay.json"), {})
     if isinstance(st, dict) and st:
