@@ -956,6 +956,11 @@ CMD_ALLOWED = ("Input.dispatchMouseEvent", "Input.insertText", "Emulation.setFoc
 SEARCH_WORDS = re.compile(r"найти|поиск|искать|search|find", re.I)
 PAGE_WORDS = re.compile(r"(?:далее|дальше|следующая|следующие|назад|предыдущая|ещё|еще|показать\s+ещё|показать\s+еще|"
                         r"next|prev|previous|more|load\s+more|\d{1,4}|[›»→‹«←]|>|<)", re.I)
+# Ссылка с такой надписью что-то делает (отклик, отправка, выход, жалоба) — без поручения не нажимается (argus-439-2)
+LINK_ACT_WORDS = re.compile(r"отклик|откликн|отправ|выйти|выход|logout|log\s*out|sign\s*out|respond|apply|submit|send|"
+                            r"пожалов|жалоб|report", re.I)
+# Поле GET-формы с таким именем — личные данные, а не запрос поиска (argus-439-2, Д2)
+PERSONAL_NAME = re.compile(r"address|phone|e-?mail|\btel\b", re.I)
 FREE_TYPES = ("", "text", "search", "url", "number", "checkbox", "radio", "date",   # email и tel — не поиск
                                 "month", "week", "time", "datetime-local", "range")
 # Подпись страницы до и после отправки: адрес, число узлов, длина текста — не изменилась, значит отправка не прошла
@@ -1507,6 +1512,8 @@ def free_form(facts):
     if not all((f.get("tag") == "input" and (f.get("type") or "") in FREE_TYPES) or f.get("tag") == "select"
                for f in fields):
         return None
+    if any(PERSONAL_NAME.search(str(f.get("name") or "")) for f in fields):
+        return None
     form = facts.get("form") if isinstance(facts.get("form"), dict) else None
     if form is not None and form.get("method") == "get":
         return "форма GET"
@@ -1520,8 +1527,9 @@ def free_form(facts):
 
 
 def free_reason(facts, op, cls):
-    """Действие без поручения на читаемом сайте (metis-1120, [charon-relax]) → причина или None: нажатие ссылки (того же
-    сайта — проверяет click_kind; надпись листания — «листание»), элемент внутри role=search или GET-формы (free_form),
+    """Действие без поручения на читаемом сайте (metis-1120, [charon-relax]) → причина или None: нажатие ссылки вне формы
+    (того же сайта — проверяет click_kind; надпись листания — «листание»; отклик, отправка, выход, жалоба —
+    LINK_ACT_WORDS, по поручению), ссылка листания внутри формы — только при free_form, элемент внутри role=search или GET-формы (free_form),
     ввод в поле поиска. Кнопки отправки («Далее» мастера тоже) и флажки вне формы — по поручению и согласию. Только
     обычное (не оплата, не важная форма, не удаление); delete — всегда по поручению."""
     if cls != "ordinary" or op == "delete":
@@ -1530,7 +1538,11 @@ def free_reason(facts, op, cls):
     _, btn = target_of(facts)
     if op == "click" and btn.get("tag") == "a":
         label = " ".join(str(btn.get("label") or "").split())
-        return "листание" if PAGE_WORDS.fullmatch(label) else "ссылка"
+        if LINK_ACT_WORDS.search(label):
+            return None
+        if form is None:
+            return "листание" if PAGE_WORDS.fullmatch(label) else "ссылка"
+        return "листание" if PAGE_WORDS.fullmatch(label) and free_form(facts) else None
     if op == "type" and form is None:
         el = facts.get("el") or {}
         return "поле поиска" if el.get("type") == "search" or facts.get("srch") is True else None
@@ -2319,7 +2331,8 @@ USAGE = """pantheon browser health|open|read|eval|net|status [--browser comet|ch
                                  мессенджеры, closed в reads.toml); владельцу — уведомление «Харон читает <сайт>»
   read URL | read --here          текст и ссылки страницы
   eval URL EXPR | eval --here EXPR   выражение JS без побочных действий (forEach, hasFocus, visibilityState,
-                                 performance.getEntriesByType('resource') — можно)
+                                 только performance.getEntriesByType('resource').length;
+                                 адреса — через net)
   net URL | net --here           загрузки своей вкладки: код, размер, адрес (без cookie и заголовков)
   allow САЙТ ДЕЙСТВИЯ --task ID --why Т   поручение на сайт: click,type,submit,delete (одно «да» или Touch ID)
   click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта

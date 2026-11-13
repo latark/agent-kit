@@ -889,7 +889,20 @@ D.page(SRCH, {
                        fields=[field("fio", "Иванов", label="ФИО"), field("ph", "+7900", type_="tel")]), x=31.5),
     "#pg2": dict(facts(node("a", href=SITE + "/search?p=2", label="2")), x=32.5),
     "#card": dict(facts(node("a", href=SITE + "/item/9", label="Диван")), x=33.5),
-    "#addr": dict(facts(node("input", "text", attrs="address")), x=34.5)})
+    "#addr": dict(facts(node("input", "text", attrs="address")), x=34.5),
+    "#lsend": dict(facts(node("a", href=SITE + "/search#", label="Отправить"),
+                         fields=[field("text", "привет", type_="", tag="textarea", label="Сообщение")],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=[]), x=35.5),
+    "#lnext": dict(facts(node("a", href=SITE + "/search?p=3", label="Далее"),
+                         fields=[field("fio", "Иванов", label="ФИО")],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=[]), x=36.5),
+    "#lget": dict(facts(node("a", href=SITE + "/search?p=4", label="Далее"), fields=[QF], form=GETF,
+                        buttons=["Найти"]), x=37.5),
+    "#lresp": dict(facts(node("a", href=SITE + "/vac/1/respond", label="Откликнуться")), x=38.5),
+    "#lout": dict(facts(node("a", href=SITE + "/logout", label="Выйти")), x=39.5),
+    "#lrep": dict(facts(node("a", href=SITE + "/item/9/report", label="Пожаловаться")), x=40.5),
+    "#gaddr": dict(facts(node("button", "submit", label="Найти"), fields=[field("address", "Москва", label="Где")],
+                         form=GETF, buttons=["Найти"]), x=41.5)})
 res = act("submit", "#find", SRCH)
 check("[S1] поиск в форме GET без поручения и согласия — отправлено, нажатие одно, Touch ID не звали, поручения нет",
       res["state"] == "done" and "форма GET" in res["text"] and len(D.clicked()) == 1 and not touches()
@@ -921,6 +934,17 @@ res = act("click", "#pg2", SRCH)
 check("[S4] листание ссылкой «2» — без поручения", res["state"] == "done" and "листание" in res["text"], res)
 res = act("click", "#card", SRCH)
 check("[S4] ссылка того же сайта — без поручения", res["state"] == "done" and "ссылка" in res["text"], res)
+for sel, what in (("#lsend", "ссылка «Отправить» в POST-форме с textarea"), ("#lnext", "ссылка «Далее» в POST-форме"),
+                  ("#lresp", "ссылка «Откликнуться»"), ("#lout", "ссылка «Выйти»"), ("#lrep", "ссылка «Пожаловаться»")):
+    res = act("click", sel, SRCH)
+    check(f"[S4][argus-439-2] {what} без поручения — отказ, без нажатия",
+          res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), (sel, res))
+res = act("click", "#lget", SRCH)
+check("[S4][argus-439-2] ссылка «Далее» внутри GET-формы поиска — листание без поручения",
+      res["state"] == "done" and "листание" in res["text"], res)
+res = act("submit", "#gaddr", SRCH)
+check("[S4][argus-439-2] GET-форма с полем address — не поиск: отказ без поручения",
+      res["state"] == "refused" and "поручения" in res["why"], res)
 res = act("submit", "#note", SRCH)
 check("[S5] GET-форма с textarea — не поиск: отказ без поручения, без нажатий",
       res["state"] == "refused" and "поручения" in res["why"] and not D.cmds(), res)
