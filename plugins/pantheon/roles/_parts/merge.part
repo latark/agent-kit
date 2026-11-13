@@ -7,6 +7,8 @@ PR в основную ветку сливают только через шлю�
    долгий — `pantheon outside test --sha <head> --wait 590`, его можно в фоне: запись пишет плановый проход, и /clear
    её не теряет (metis-0905). PR вне ядра — узкая запись: `pantheon outside test --affected --sha <head> --wait 590`
    (metis-0734), если проверка в `.pantheon-verify` — `run-tests.py`; полный набор — для PR ядра и пачек.
+   Есть строка `ci:` в `.pantheon-verify` (agent-kit) — тесты идут в CI: при зелёной CI запись —
+   `pantheon review test -- uvx ruff@0.17.3 check .`; `outside test` — только если Actions не запустились (metis-1115).
 2. «Принять» от argus с перечнем «открыл / запустил / не проверял» — запись `pantheon review accept …` он делает сам.
    Шлюз считает последний вердикт каждого argus на head (metis-0158): второго не зови, пока первый не ответил;
    «вернуть» снимает только тот же argus или новый коммит. Новый коммит — заново тесты, argus и для продукта talos.

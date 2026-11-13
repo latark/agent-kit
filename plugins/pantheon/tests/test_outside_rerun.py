@@ -65,6 +65,10 @@ with open(FAKE, "w") as fh:
 os.chmod(FAKE, 0o755)
 O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
+# нагрузка машины тесту не нужна (metis-1117, как в _outside_common.py): полный набор при load выше 3.0 × ядер ждёт
+# спада по 30 с (wait_load) — на раннере CI macos-15 файл шёл 519 с против 6 с на Linux. Раздел 6 подменяет
+# load_state на время одной проверки overload_files и возвращает эту заглушку
+O.load_state = lambda: (0.0, 24.0)
 
 
 def last_cmd():

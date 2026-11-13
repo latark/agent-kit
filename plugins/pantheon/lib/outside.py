@@ -145,6 +145,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      head открытого PR по кэшу autoclose-prs.json (нет кэша, он старше часа или gh не ответил по репозиторию — тревоги нет),
      а записи tests на этот SHA в журнале шлюза (STATE/merge-gate/records.jsonl) нет → P.alert с repo@sha12 и номером PR.
      Одна тревога на (repo, SHA): метка в STATE/outside/auto.json alerted. Тик будится, пока есть неотправленная тревога.
+     У репозитория с обязательными проверками CI (agent-kit, metis-1115: тесты идут в GitHub Actions) — сначала CI на
+     head (ci_head_state): зелёный — метка без тревоги; красный — тревога «CI красный, чинить код»; идёт, не встал или
+     gh не ответил — ни метки, ни тревоги, но не дольше CI_WAIT_MAX (3 ч, начало ожидания — auto.json ci_wait), потом
+     тревога «CI не встал».
   3. Уборка: итоги <ID>.result.json и брошенные <ID>.stop в папках заявок (кэш окна, STATE/outside/queue) старше
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
@@ -274,6 +278,7 @@ STOP_WAIT = 20                      # с: `outside stop` ждёт итог по 
 SUPERSEDE_EVERY = 30                # с: так часто проход тестов сверяет head идущего прогона (metis-0873)
 PROCS_EVERY = 30                    # с: так часто итог running своего qdir получает срез процессов прогона
 RESIDENT_MAX = 3600                 # с: проход серверов живёт не дольше, потом его зовёт тик (новая версия кода)
+CI_WAIT_MAX = 3 * 3600              # с: CI на head «ждёт» (идёт, не встал, gh не ответил) дольше — тревога (Д3 #430)
 AUTO_TTL = 24 * 3600                # «принять» старше суток дежурному уже не напоминается
 ALERT_AFTER = 3600                  # с: «принять» без записи tests дольше этого — тревога дежурному (03.11)
 RERUN_MAX_AGE = 24 * 3600          # с: опора дозапуска (полный прогон) старше суток — весь набор (metis-0735)
@@ -3155,25 +3160,72 @@ def overdue_accepts(recs=None, t=None):
     return out
 
 
+def ci_head_state(repo, pr, sha):
+    """metis-1115: проверки CI на head PR у репозитория с обязательными проверками шлюза (REQUIRED_CHECKS: agent-kit —
+    affected и traces) → "ok" (зелёные: тесты прошли в Actions), "fail" (красные), "wait" (идут, ещё не встали, запуски
+    не получены, gh pr view не ответил) или None — у репозитория обязательных проверок нет (gh не спрашивается), номер
+    PR не известен, PR уже на другом head. Судит merge.ci_state, как шлюз Touch ID."""
+    M = P.merge_mod()
+    if not pr or not M.required_checks(repo, None):
+        return None
+    view = M.pr_view(repo, pr)
+    if not isinstance(view, dict):
+        return "wait"
+    if str(view.get("headRefOid") or "").lower() != str(sha).lower():
+        return None
+    runs = M.ci_runs_fetch(repo, pr, sha, M.ci_fork(view))
+    state, _, _ = M.ci_state(view.get("statusCheckRollup"), M.required_checks(repo, view.get("baseRefName")), runs,
+                             M.optional_checks(repo))
+    return state if state in ("ok", "wait", "fail") else None
+
+
+def _overdue_text(repo, sha, pr, ci, waited):
+    """Текст тревоги alert_overdue по состоянию CI на head (ci_head_state)."""
+    head = f"«принять» argus {repo}@{sha[:12]}" + (f" (PR #{pr})" if pr else "")
+    checks = f"`gh pr checks {pr} -R {repo}`" if pr else "проверки PR"
+    if ci == "fail":
+        return (f"{head}: CI красный на head — тесты упали в GitHub Actions, чинить код ({checks}); запись tests "
+                "тут не поможет")
+    if ci == "wait":
+        return (f"{head}: CI на head не встал или gh не отвечает {int(waited // 3600)} ч — проверь Actions ({checks}); "
+                "не запустились (лимит минут, сбой) — роль подаёт `pantheon outside test` на итоговый head")
+    return (f"{head} без записи tests дольше {ALERT_AFTER // 3600} ч, head ещё открыт: тесты сами не идут — роль подаёт "
+            "`pantheon outside test` на итоговый head")
+
+
 def alert_overdue(t=None):
     """Тревога дежурному про каждый просроченный «принять» без tests (overdue_accepts), одна на (repo, sha): метка пишется
-    до тревоги, повтор не шлётся. → число тревог."""
+    до тревоги, повтор не шлётся. CI на head (ci_head_state, metis-1115: тесты agent-kit идут в Actions): зелёный —
+    метка без тревоги; красный — тревога «CI красный, чинить код»; ждёт ("wait") — ни метки, ни тревоги, пока ожидание
+    (начало — auto.json ci_wait) не дольше CI_WAIT_MAX, потом тревога «CI не встал» (Д3 argus #430). → число тревог."""
     t = P.now() if t is None else t
     todo = overdue_accepts(t=t)
     if not todo:
         return 0
+    ci = {(repo, sha): ci_head_state(repo, pr, sha) for repo, sha, pr in todo}
     a = P.read_json(root("auto.json"), {})
-    al = {k: v for k, v in (a.get("alerted") or {}).items() if isinstance(v, (int, float)) and 0 <= t - v <= 2 * AUTO_TTL}
+
+    def fresh(d):
+        return {k: v for k, v in (d or {}).items() if isinstance(v, (int, float)) and 0 <= t - v <= 2 * AUTO_TTL}
+
+    al, waits = fresh(a.get("alerted")), fresh(a.get("ci_wait"))
+    fire = []
     for repo, sha, pr in todo:
-        al[f"{repo}@{sha}"] = t
-    a["alerted"] = al
+        key, state, waited = f"{repo}@{sha}", ci[(repo, sha)], 0
+        if state == "wait":
+            waited = t - waits.setdefault(key, t)
+            if waited <= CI_WAIT_MAX:
+                continue
+        al[key] = t
+        waits.pop(key, None)
+        if state != "ok":
+            fire.append((repo, sha, pr, state, waited))
+    a["alerted"], a["ci_wait"] = al, waits
     os.makedirs(root(), mode=0o700, exist_ok=True)
     P.write_json(root("auto.json"), a)
-    for repo, sha, pr in todo:
-        P.alert(f"«принять» argus {repo}@{sha[:12]}" + (f" (PR #{pr})" if pr else "") + f" без записи tests дольше "
-                f"{ALERT_AFTER // 3600} ч, head ещё открыт: тесты сами не идут — роль подаёт `pantheon outside test` "
-                "на итоговый head", "pantheon-outside")
-    return len(todo)
+    for repo, sha, pr, state, waited in fire:
+        P.alert(_overdue_text(repo, sha, pr, state, waited), "pantheon-outside")
+    return len(fire)
 
 
 # --- доля красных полных прогонов за сутки: тревога (metis-0696) ----------------------------------------------------
