@@ -14,6 +14,10 @@
   затронутое (`--affected --base origin/main`); он обязателен для шлюза. Job `full` — полный набор трёх плагинов на
   macos-15 (до него ставится ruff, чтобы шёл храповик раннера); слияние он не держит (metis-1050, решение 09.11,
   подтверждено 13.11): `tests/full` в `OPTIONAL_CHECKS`, красная — предупреждение. Прогона на push в main нет.
+  Тесты идут частями matrix (metis-1111): `affected-shard (K/4)` на Linux и `full-shard (K/3)` на macOS — раннер
+  `run-tests.py --shard K/N` делит выбор файлов жадно по весу (размер файла и `SLOW`), без пересечений; храповик —
+  только в части 1. Job `affected` и `full` с прежними именами собирают итог частей (красные, если хоть одна часть не
+  success), `affected` сам гонит ruff, храповик и `test_release.py`; части — в `OPTIONAL_CHECKS` шлюза.
   `test_release.py` это проверяет. Тесты на Mac не гоняют: проверка — в CI. Запасной путь, когда Actions не
   запустились, — запись tests на head PR: узкая (`pantheon outside test --affected`) или полного набора (README guard,
   п. 8). Станет репозиторий снова приватным (metis-1076) — job `full` вернуть на ручной запуск.

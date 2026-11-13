@@ -1,15 +1,21 @@
 # Тесты плагинов (п. 8 страницы упрощения 27.10, metis-0571; полный набор на macOS на каждый PR — решение владельца
 # 13.11, metis-1111). Гибрид без macOS (03.11, metis-0688) снят: репозиторий публичный, стандартные раннеры GitHub,
 # включая macOS, для него бесплатны. Вернётся репозиторий в приватный (metis-1076) — вернуть гибрид: full только по
-# workflow_dispatch на Linux. На каждый PR в main два job:
-#   - affected — лёгкая проверка на Linux: ruff, храповик, тесты скриптов выпуска (.github/scripts/test_release.py:
-#     правка .github/ карту тестов плагинов не задевает) и затронутое (run-tests.py --affected по карте файл → тесты) на
-#     ubuntu-24.04 (закреплён: у latest образ меняется под ногами), Python 3.14; файлы, которым нужен macOS, раннер на
-#     Linux не гоняет, а печатает строкой «skip … пропущено» (SKIP_NOT_MAC); код 3 раннера «нечего гонять» — успех;
-#   - full — полный набор трёх плагинов на macos-15 (закреплён), Python 3.14; до него ставится ruff, иначе храповик
-#     раннера пропускается. affected — обязательная проверка шлюза guard (REQUIRED_CHECKS), full — необязательная
-#     (OPTIONAL_CHECKS): полный набор слияние не держит (metis-1050, решение 09.11, подтверждено 13.11), красная —
-#     предупреждение. Локальный `pantheon outside test` — запасной путь, когда CI не запустился (README guard, п. 8).
+# workflow_dispatch на Linux. На каждый PR в main два набора, каждый — частями matrix на параллельных раннерах
+# (run-tests.py --shard K/N, metis-1111: части делят выбор файлов жадно по весу из репозитория, без пересечений):
+#   - affected-shard (K/4) — затронутое (run-tests.py --affected по карте файл → тесты) на ubuntu-24.04 (закреплён:
+#     у latest образ меняется под ногами), Python 3.14; файлы, которым нужен macOS, раннер на Linux не гоняет, а
+#     печатает строкой «skip … пропущено» (SKIP_NOT_MAC, только в части 1); код 3 раннера «нечего гонять» — успех;
+#   - affected — собирающий job с прежним именем: ruff, храповик, тесты скриптов выпуска (.github/scripts/test_release.py:
+#     правка .github/ карту тестов плагинов не задевает), затем красный, если хоть одна часть не success;
+#   - full-shard (K/3) — полный набор трёх плагинов на macos-15 (закреплён), Python 3.14; не больше трёх частей:
+#     лимит macOS — 5 job сразу на все PR. До раннера ставится ruff, иначе храповик раннера (в части 1) пропускается;
+#   - full — собирающий job с прежним именем (на Linux, без шагов тестов): красный, если хоть одна часть не success.
+# affected — обязательная проверка шлюза guard (REQUIRED_CHECKS), full — необязательная (OPTIONAL_CHECKS): полный набор
+# слияние не держит (metis-1050, решение 09.11, подтверждено 13.11), красная — предупреждение. Части — в
+# OPTIONAL_CHECKS: их итог держат собирающие job. Собирающие идут и при красной части (`!cancelled()`), а при отмене
+# запуска — нет. `fail-fast: false`: красная часть не гасит соседние. Локальный `pantheon outside test` — запасной путь,
+# когда CI не запустился (README guard, п. 8).
 # На push в main и по расписанию тесты не запускаются; ночной полный набор на main делает плановый проход.
 # ruff (metis-0265) — первый шаг job affected, на каждый PR: правила — ruff.toml, версия и хеши колёс —
 # .github/ruff-requirements.txt. Вторым шагом — храповик (metis-0854, plugins/pantheon/scripts/lint_ratchet.py):
@@ -18,6 +24,7 @@
 # с PATH, нет его — красный (run-tests.py зовёт храповик и сам, но без ruff пропускает). Не отдельным job: шлюз guard
 # считает job на PR вне REQUIRED_CHECKS и OPTIONAL_CHECKS ошибкой (Д1 argus #235), а внутри affected красный ruff и
 # так держит обязательную проверку.
+# ${{ }} в run — только matrix.part и needs.<часть>.result: их пишет сам GitHub, а не автор PR.
 # Права — только чтение; сторонних Action, кроме actions/checkout и actions/setup-python по полному SHA, нет.
 name: tests
 
@@ -34,14 +41,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  affected:
+  affected-shard:
+    name: affected-shard (${{ matrix.part }}/4)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0  # merge-base с origin/main нужен раннеру: на мелком клоне он гонит весь набор
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Затронутые тесты guard, pantheon и project-tools — часть
+        run: |
+          python3 --version
+          code=0
+          python3 -I plugins/pantheon/scripts/run-tests.py --affected --base origin/main -j 3 --shard ${{ matrix.part }}/4 \
+            --log-dir "$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools || code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "нечего гонять: изменения не задевают тесты"
+            code=0
+          fi
+          exit "$code"
+
+  affected:
+    needs: affected-shard
+    if: github.event_name == 'pull_request' && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
@@ -54,22 +90,24 @@ jobs:
         run: python3 -I plugins/pantheon/scripts/lint_ratchet.py
       - name: Тесты скриптов выпуска
         run: python3 -I .github/scripts/test_release.py
-      - name: Затронутые тесты guard, pantheon и project-tools
+      - name: Итог частей affected-shard
         run: |
-          python3 --version
-          code=0
-          python3 -I plugins/pantheon/scripts/run-tests.py --affected --base origin/main -j 3 \
-            --log-dir "$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools || code=$?
-          if [ "$code" -eq 3 ]; then
-            echo "нечего гонять: изменения не задевают тесты"
-            code=0
+          result="${{ needs.affected-shard.result }}"
+          if [ "$result" != success ]; then
+            echo "части affected-shard: $result — нужна success у каждой"
+            exit 1
           fi
-          exit "$code"
+          echo "части affected-shard: success"
 
-  full:
+  full-shard:
+    name: full-shard (${{ matrix.part }}/3)
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -79,8 +117,23 @@ jobs:
           python-version: "3.14"
       - name: ruff для храповика в run-tests.py (без него lint_ratchet пропускается; версия и хеши — как в affected)
         run: python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt
-      - name: Тесты guard, pantheon и project-tools
+      - name: Тесты guard, pantheon и project-tools — часть
         run: |
           python3 --version
-          python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --log-dir "$RUNNER_TEMP/tests" \
+          python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --shard ${{ matrix.part }}/3 --log-dir "$RUNNER_TEMP/tests" \
             plugins/guard plugins/pantheon plugins/project-tools
+
+  full:
+    needs: full-shard
+    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Итог частей full-shard
+        run: |
+          result="${{ needs.full-shard.result }}"
+          if [ "$result" != success ]; then
+            echo "части full-shard: $result — нужна success у каждой"
+            exit 1
+          fi
+          echo "части full-shard: success"
