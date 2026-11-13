@@ -2605,7 +2605,7 @@ def hq_collection_owners(name, path=None):
 
 
 def qmd_owner_hint(name):
-    """«alexbroker — направление hermes-alex: поручи `pantheon task new --direction hermes-alex …`» или ''."""
+    """«проект — направление dir-x: поручи `pantheon task new --direction dir-x …`» или ''."""
     owners = [o for o in hq_collection_owners(name) if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", o)]
     if not owners:
         return ""

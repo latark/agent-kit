@@ -119,9 +119,9 @@ check("через 121 с — вторая строка со своим врем�
       and got[1].endswith(f"(с {hhmm(T0 + 121)})"), got)
 
 # 3. окно своё у каждого: другое окно в те же 2 минуты не глушится
-r = run(home, state, session="themis-sources", t=T0 + 122)
+r = run(home, state, session="themis-repos", t=T0 + 122)
 check("другое окно в те же 2 минуты — своя строка", len(lines(home)) == 3
-      and "окно themis-sources ждёт вас" in lines(home)[2], lines(home))
+      and "окно themis-repos ждёт вас" in lines(home)[2], lines(home))
 
 # 4. без PANTHEON_SESSION имя окна — роль
 home, state = place()

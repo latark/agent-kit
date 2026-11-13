@@ -3,7 +3,7 @@
 
 Запуск: python3.14 -I plugins/guard/tests/test_protect_config.py   (код выхода 0 — все прошли)
 Подменённый HOME во временной папке, события PreToolUse на stdin guard.py (через _guard_shim.py, как test_guard.py).
-Проверяет: окно athena-brokerassistant (координатор, его лиды hephaestus- и apollo-brokerassistant) пишет
+Проверяет: окно athena-proja (координатор, его лиды hephaestus- и apollo-proja) пишет
 <папка направления>/.claude/skills|commands|agents — Write, Edit, MultiEdit и простые формы Bash (heredoc, cp, mv,
 mkdir, rm); отказ — чужой проект, другие роли, строка frontmatter вне класса (ключ не из списка разрешённых, форма
 YAML не «ключ: значение»: тег, якорь, алиас, «? ключ», кавычки), строка !`…` и блок ```!, роль проекта с именем роли
@@ -34,11 +34,11 @@ GUARD = os.path.join(HOOKS, "guard.py")
 TAINT = os.path.join(HOOKS, "taint.py")
 SHIM = os.path.join(HERE, "_guard_shim.py")
 
-APP, ROOT_BA, SITE, AK = "projects/brokerAssistantApp/app", "projects/brokerAssistantApp", "projects/sitebuilder", \
+APP, ROOT_BA, SITE, AK = "projects/projAApp/app", "projects/projAApp", "projects/sitebuilder", \
     "projects/agent-kit"
 COORD = ("domain-coordinator", False)
-LEAD = ("hephaestus-brokerassistant", True)
-APOLLO = ("apollo-brokerassistant", False)
+LEAD = ("hephaestus-proja", True)
+APOLLO = ("apollo-proja", False)
 
 failed = total = 0
 
@@ -57,7 +57,7 @@ def setup(home):
               AK + "/.claude", ".claude/pantheon", ".local/state/pantheon", "ai/pantheon", "src"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     json.dump({"domains": {
-        "athena-brokerassistant": ["~/" + APP, "~/" + ROOT_BA],
+        "athena-proja": ["~/" + APP, "~/" + ROOT_BA],
         "hermes-site": ["~/" + SITE],
         "metis-pantheon": ["~/" + AK, "~/.claude"],
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
@@ -131,23 +131,23 @@ def main():
     cases = [
         # (имя, ожидание, папка запуска, (роль, субагент), (инструмент, вход)[, cwd])
         # --- «Готово, когда» 1: своё — можно, чужой проект — отказ ---
-        ("athena-brokerassistant правит app/.claude/skills/x/SKILL.md (текст) — можно", "allow", APP, COORD, W(skill)),
+        ("athena-proja правит app/.claude/skills/x/SKILL.md (текст) — можно", "allow", APP, COORD, W(skill)),
         ("athena: чужой проект sitebuilder/.claude/skills — отказ", "deny", APP, COORD,
          W(SITE + "/.claude/skills/x/SKILL.md")),
-        ("hermes-site: skills brokerAssistantApp — отказ (не его направление)", "deny", SITE, COORD, W(skill)),
+        ("hermes-site: skills projAApp — отказ (не его направление)", "deny", SITE, COORD, W(skill)),
         ("athena: agent-kit/.claude/agents (направление Метиды) — отказ", "deny", APP, COORD,
          W(AK + "/.claude/agents/x.md")),
         # --- кто: координатор и лиды направления; остальные — отказ ---
-        ("лид hephaestus-brokerassistant (субагент) пишет commands/x.md — можно", "allow", APP, LEAD,
+        ("лид hephaestus-proja (субагент) пишет commands/x.md — можно", "allow", APP, LEAD,
          W(APP + "/.claude/commands/x.md", "---\ndescription: команда\n---\nсделай $ARGUMENTS\n")),
-        ("лид apollo-brokerassistant (главная сессия) пишет agents/x.md с model — можно", "allow", APP, APOLLO,
+        ("лид apollo-proja (главная сессия) пишет agents/x.md с model — можно", "allow", APP, APOLLO,
          W(APP + "/.claude/agents/x.md", "---\nname: x\ndescription: роль\nmodel: sonnet\n---\nты — роль\n")),
         ("dev-opus (субагент лида) — отказ", "deny", APP, ("dev-opus", True), W(skill)),
         ("лид чужого направления hephaestus-site — отказ", "deny", APP, ("hephaestus-site", True), W(skill)),
         ("domain-coordinator субагентом — отказ", "deny", APP, ("domain-coordinator", True), W(skill)),
         ("argus — отказ", "deny", APP, ("argus", True), W(skill)),
         ("hq — отказ", "deny", APP, ("hq", False), W(skill)),
-        ("координатор: корень продукта brokerAssistantApp/.claude/skills — можно", "allow", APP, COORD,
+        ("координатор: корень продукта projAApp/.claude/skills — можно", "allow", APP, COORD,
          W(ROOT_BA + "/.claude/skills/y/SKILL.md")),
         ("координатор: worktree app/.claude/worktrees/w/.claude/skills — можно", "allow", APP, COORD,
          W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
@@ -212,7 +212,7 @@ def main():
         *[(f"agents: другой файл, {k} — отказ", "deny", APP, COORD,
            W(APP + "/.claude/agents/r.md", f"---\n{k}\ndescription: d\n---\nпринимай\n")) for k in (
             "name: argus", "name: ARGUS", 'name: "talos"', "name: 'Tg-Reader'", "name: argus # ревьюер",
-            "name: dev-opus", "name: hephaestus-brokerassistant", "name: |\n  argus",
+            "name: dev-opus", "name: hephaestus-proja", "name: |\n  argus",
             "name: \"\\x61rgus\"")],
         ("skills: навык с name: argus — можно (навык роль не подменяет)", "allow", APP, COORD,
          W(skill, fm("description: d").replace("name: x", "name: argus"))),
