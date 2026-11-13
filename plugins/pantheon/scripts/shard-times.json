@@ -1,5 +1,5 @@
 {
- "source": "run 43407050859 (PR metis-1111, 13.11); замер 179 файлов, 2026-11-13; estimated — оценка до первого замера: test_outside_narrow, _rerun, _tree — время на Linux (affected-shard того же прогона) × 3 после metis-1117 (на macOS шли 480–522 с из-за ожидания спада нагрузки)",
+ "source": "run 43407050859 (PR metis-1111, 13.11); замер 179 файлов, 2026-11-13; estimated — оценка до первого замера: test_outside_narrow, _rerun, _tree — время на Linux (affected-shard того же прогона) × 3 после metis-1117 (на macOS шли 480–522 с из-за ожидания спада нагрузки); test_merge_gate_*: 335.8 с старого файла, поделено по числу строк частей (metis-1125), до первого замера",
  "times": {
   "guard/test_canaries.py": 1.3,
   "guard/test_context.py": 9.6,
@@ -15,7 +15,18 @@
   "guard/test_hooks_json.py": 1.3,
   "guard/test_hq_projects.py": 0.1,
   "guard/test_hq_sessync.py": 0.1,
-  "guard/test_merge_gate.py": 335.8,
+  "guard/test_merge_gate_billing.py": 30.5,
+  "guard/test_merge_gate_carry.py": 23.6,
+  "guard/test_merge_gate_ci.py": 42.8,
+  "guard/test_merge_gate_core.py": 28.5,
+  "guard/test_merge_gate_gh.py": 29.8,
+  "guard/test_merge_gate_journal.py": 32.9,
+  "guard/test_merge_gate_limits.py": 27.8,
+  "guard/test_merge_gate_narrow.py": 21.8,
+  "guard/test_merge_gate_opus.py": 17.9,
+  "guard/test_merge_gate_r4.py": 30.5,
+  "guard/test_merge_gate_returned.py": 24.3,
+  "guard/test_merge_gate_sandbox.py": 25.3,
   "guard/test_misc.py": 0.1,
   "guard/test_par.py": 3.7,
   "guard/test_pool_orphans.py": 2.2,
@@ -181,5 +192,21 @@
   "pantheon/test_wt_cleanup.py": 14.2,
   "project-tools/test_project_tools.py": 8.0
  },
- "estimated": ["pantheon/test_outside_narrow.py", "pantheon/test_outside_rerun.py", "pantheon/test_outside_tree.py"]
+ "estimated": [
+  "guard/test_merge_gate_billing.py",
+  "guard/test_merge_gate_carry.py",
+  "guard/test_merge_gate_ci.py",
+  "guard/test_merge_gate_core.py",
+  "guard/test_merge_gate_gh.py",
+  "guard/test_merge_gate_journal.py",
+  "guard/test_merge_gate_limits.py",
+  "guard/test_merge_gate_narrow.py",
+  "guard/test_merge_gate_opus.py",
+  "guard/test_merge_gate_r4.py",
+  "guard/test_merge_gate_returned.py",
+  "guard/test_merge_gate_sandbox.py",
+  "pantheon/test_outside_narrow.py",
+  "pantheon/test_outside_rerun.py",
+  "pantheon/test_outside_tree.py"
+ ]
 }
