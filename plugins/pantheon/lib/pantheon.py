@@ -6786,10 +6786,12 @@ def owner_edit_kick():
 
 
 def outside_kick():
-    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
-    тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
-    есть серверы). Сервер и «стоп» не ждут тестов (metis-0614)."""
-    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-serve", ["--serve"], "pending_serve")):
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — три отдельных процесса со своими замками: две
+    дорожки тестов (metis-1081: `outside run` — полный набор, `outside run --quick` — узкие и другие проекты; тесты идут
+    минутами и часами, дорожки — параллельно, в каждой один прогон) и проход серверов (`outside run --serve`, сторож
+    живёт, пока есть серверы). Сервер и «стоп» не ждут тестов (metis-0614). Замок занят — второй проход не зовётся."""
+    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-quick", ["--quick"], "pending_quick"),
+                            ("outside-serve", ["--serve"], "pending_serve")):
         try:
             if locked(name) or not getattr(outside_mod(), due)():
                 continue
