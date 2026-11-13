@@ -939,6 +939,37 @@ for sel, what in (("#lsend", "ссылка «Отправить» в POST-фор
     res = act("click", sel, SRCH)
     check(f"[S4][argus-439-2] {what} без поручения — отказ, без нажатия",
           res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), (sel, res))
+# argus-438-3: белый список ссылок (nav_link) — без поручения только переход на другую страницу того же сайта
+SPA = SITE + "/spa"
+D.page(SPA, {"#lpub": dict(facts(node("a", href=SPA + "#", label="Опубликовать"),
+                                 fields=[field("text", "привет", type_="", tag="textarea", label="Сообщение")]), x=50.5),
+             "#lsave": dict(facts(node("a", href=SPA + "#", label="Сохранить")), x=51.5),
+             "#lself": dict(facts(node("a", href=SPA, label="Обновить")), x=52.5),
+             "#lfrag": dict(facts(node("a", href=SPA + "#top", label="Наверх")), x=53.5),
+             "#ltgt": dict(facts(node("a", href=SITE + "/page3", label="Каталог", target="_self")), x=54.5),
+             "#lftp": dict(facts(node("a", href="ftp://www.avito.ru/page4", label="Архив")), x=55.5),
+             "#lempty": dict(facts(node("a", href="", label="Ещё")), x=56.5),
+             "#lclick": dict(facts(node("a", href=SITE + "/page5", label="Каталог", onclick=True)), x=60.5),
+             "#ldl": dict(facts(node("a", href=SITE + "/page6", label="Каталог", download=True)), x=61.5),
+             "#lext": dict(facts(node("a", href="https://example.com/page7", label="Каталог")), x=62.5),
+             "#lother": dict(facts(node("a", href=SITE + "/spa2#", label="Дальше")), x=57.5),
+             "#lpage2": dict(facts(node("a", href=SITE + "/page2", label="Каталог")), x=58.5),
+             "#lq": dict(facts(node("a", href=SPA + "?p=2#list", label="2")), x=59.5)})
+for sel, what in (("#lpub", "ссылка-якорь «Опубликовать» рядом с textarea без формы"),
+                  ("#lsave", "ссылка-якорь «Сохранить» без формы"), ("#lself", "ссылка на ту же страницу"),
+                  ("#lfrag", "ссылка на якорь той же страницы"), ("#ltgt", "ссылка с target"),
+                  ("#lftp", "ссылка не http(s)"), ("#lempty", "ссылка с пустым href"),
+                  ("#lother", "ссылка на другой путь с голым якорем «#»"), ("#lclick", "ссылка с onclick"),
+                  ("#ldl", "ссылка с download"), ("#lext", "ссылка на чужой сайт")):
+    res = act("click", sel, SPA)
+    check(f"[S4][argus-438-3] {what} без поручения — отказ по поручению, без нажатия",
+          res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), (sel, res))
+res = act("click", "#lpage2", SPA)
+check("[S4][argus-438-3] ссылка на /page2 того же сайта — без поручения",
+      res["state"] == "done" and "ссылка" in res["text"] and not mandates(), res)
+res = act("click", "#lq", SPA)
+check("[S4][argus-438-3] ссылка «2» на тот же путь с другим запросом — листание без поручения",
+      res["state"] == "done" and "листание" in res["text"] and not mandates(), res)
 res = act("click", "#lget", SRCH)
 check("[S4][argus-439-2] ссылка «Далее» внутри GET-формы поиска — листание без поручения",
       res["state"] == "done" and "листание" in res["text"], res)
