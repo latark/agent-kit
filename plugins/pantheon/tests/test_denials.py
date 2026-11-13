@@ -6,7 +6,7 @@
   [хук]      PermissionDenied → строка STATE/denials/<дата>.jsonl: время, окно, инструмент, класс, причина ≤200 знаков;
              текста команды и секретов в строке нет; ошибка записи — код 0 без вывода;
   [песочница] refusal.py fail на «Operation not permitted» → строка source=sandbox; обычный сбой теста — строки нет;
-  [hooks.json] PermissionDenied зовёт lib/denials.py hook;
+  [hooks.json] PermissionDenied зовёт hooks/denials.py hook;
   [отчёт]    таблицы по классам и окнам по убыванию, --since/--days/--until, плохая дата → код 2, пустой журнал;
   [backfill] из поддельного транскрипта берутся только отказы, в журнале и выводе нет остального текста; границы дат;
              повтор не дублирует; плохие аргументы → код 2;
@@ -37,9 +37,12 @@ REF = os.path.join(PLUGIN, "hooks", "refusal.py")
 PANTHEON = os.path.join(PLUGIN, "lib", "pantheon.py")
 ENV = {"HOME": HOME, "PANTHEON_STATE": STATE, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CLAUDE_PID": "4242"}
 FAILS = []
+TOTAL = [0]
+WRAP = os.path.join(PLUGIN, "hooks", "denials.py")
 
 
 def check(name, cond, extra=""):
+    TOTAL[0] += 1
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f" — {extra}"))
     if not cond:
         FAILS.append(name)
@@ -99,6 +102,11 @@ rc, out, _ = run([DEN, "hook"], "не json")
 rc2, out2, _ = run([DEN, "hook"], "[1, 2]")
 check("хук: мусор на входе — код 0, строк не добавилось", rc == 0 and rc2 == 0 and out + out2 == "" and len(journal()) == n)
 
+n = len(journal())
+rc, out, er = run([WRAP, "hook"], {"tool_name": "Bash", "tool_input": {"command": "curl x"}, "reason": "no"})
+check("обёртка hooks/denials.py hook (её зовёт hooks.json) → строка в журнале", rc == 0 and out == ""
+      and len(journal()) == n + 1 and journal()[-1].get("cls") == "curl", (rc, out, er))
+
 bad = os.path.join(ROOT, "state-is-file")
 with open(bad, "w") as fh:
     fh.write("x")
@@ -122,8 +130,8 @@ check("fail: журнал не пишется (STATE — файл) → код 0"
 with open(os.path.join(PLUGIN, "hooks", "hooks.json"), encoding="utf-8") as fh:
     HJ = json.load(fh)["hooks"]
 cmds = [h["command"] for m in HJ.get("PermissionDenied", []) for h in m["hooks"]]
-check("hooks.json: PermissionDenied зовёт lib/denials.py hook и прежний refusal.py denied",
-      any(c.endswith('lib/denials.py" hook') for c in cmds) and any(c.endswith('refusal.py" denied') for c in cmds), cmds)
+check("hooks.json: PermissionDenied зовёт hooks/denials.py hook и прежний refusal.py denied",
+      any(c.endswith('hooks/denials.py" hook') for c in cmds) and any(c.endswith('refusal.py" denied') for c in cmds), cmds)
 
 # --- отчёт -----------------------------------------------------------------------------------------------------------
 
@@ -244,5 +252,5 @@ src = open(os.path.join(PLUGIN, "lib", "pantheon.py"), encoding="utf-8").read()
 check("pantheon.py: release_ticks зовёт denials_mod, команда denials диспетчеризована",
       '"отчёт отказов", denials_mod)' in src and 'if cmd == "denials":' in src)
 
-print(f"\n{'FAIL: ' + str(len(FAILS)) if FAILS else 'все проверки прошли'}")
+print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]}")
 sys.exit(1 if FAILS else 0)

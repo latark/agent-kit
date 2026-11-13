@@ -209,7 +209,7 @@
           },
           {
             "type": "command",
-            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/lib/denials.py\" hook",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/denials.py\" hook",
             "timeout": 10
           }
         ]
