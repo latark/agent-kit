@@ -1078,7 +1078,7 @@ for args, frag in ((["other", "y", "true"], "[other]\nx = 1\ny = true\n"),
                    (["other", "x", "5"], "[other]\nx = 5\n"),
                    (["fresh", "name", "zeus"], "\n[fresh]\nname = \"zeus\"\n"),
                    (["fresh", "names", "zeus", "--list"], "\n[fresh]\nnames = [\"zeus\"]\n"),
-                   (["merge_repos", "hermes-alex", "a/b"], "metis-pantheon = [\"latark/agent-kit\"]\nhermes-alex = \"a/b\"\n")):
+                   (["merge_repos", "demo-dir", "a/b"], "metis-pantheon = [\"latark/agent-kit\"]\ndemo-dir = \"a/b\"\n")):
     for p_, _, _ in reqs():
         os.remove(p_)
     rc, out, errs = quiet(P.main, ["policy", "set", *args, "--task", "metis-1122"])
