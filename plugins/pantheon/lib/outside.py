@@ -145,6 +145,8 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      head открытого PR по кэшу autoclose-prs.json (нет кэша, он старше часа или gh не ответил по репозиторию — тревоги нет),
      а записи tests на этот SHA в журнале шлюза (STATE/merge-gate/records.jsonl) нет → P.alert с repo@sha12 и номером PR.
      Одна тревога на (repo, SHA): метка в STATE/outside/auto.json alerted. Тик будится, пока есть неотправленная тревога.
+     У репозитория с обязательными проверками CI (agent-kit, metis-1115: тесты идут в GitHub Actions) — сначала CI на
+     head (ci_head_state): зелёный — метка без тревоги, идёт — ни метки, ни тревоги до следующего прохода.
   3. Уборка: итоги <ID>.result.json и брошенные <ID>.stop в папках заявок (кэш окна, STATE/outside/queue) старше
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
@@ -3155,20 +3157,41 @@ def overdue_accepts(recs=None, t=None):
     return out
 
 
+def ci_head_state(repo, pr, sha):
+    """metis-1115: проверки CI на head PR у репозитория с обязательными проверками шлюза (REQUIRED_CHECKS: agent-kit —
+    affected и traces) → "ok" (зелёные: тесты прошли в Actions), "wait" (идут, ещё не встали, запуски не получены) или
+    None — у репозитория обязательных проверок нет (gh не спрашивается), номер PR не известен, gh pr view не ответил,
+    PR уже на другом head, CI красный. Судит merge.ci_state, как шлюз Touch ID."""
+    M = P.merge_mod()
+    if not pr or not M.required_checks(repo, None):
+        return None
+    view = M.pr_view(repo, pr)
+    if not isinstance(view, dict) or str(view.get("headRefOid") or "").lower() != str(sha).lower():
+        return None
+    runs = M.ci_runs_fetch(repo, pr, sha, M.ci_fork(view))
+    state, _, _ = M.ci_state(view.get("statusCheckRollup"), M.required_checks(repo, view.get("baseRefName")), runs,
+                             M.optional_checks(repo))
+    return state if state in ("ok", "wait") else None
+
+
 def alert_overdue(t=None):
     """Тревога дежурному про каждый просроченный «принять» без tests (overdue_accepts), одна на (repo, sha): метка пишется
-    до тревоги, повтор не шлётся. → число тревог."""
+    до тревоги, повтор не шлётся. CI на head зелёный (ci_head_state "ok", metis-1115: тесты agent-kit идут в Actions) —
+    метка без тревоги; CI идёт ("wait") — ни метки, ни тревоги: следующий проход спросит снова. → число тревог."""
     t = P.now() if t is None else t
     todo = overdue_accepts(t=t)
     if not todo:
         return 0
+    ci = {(repo, sha): ci_head_state(repo, pr, sha) for repo, sha, pr in todo}
     a = P.read_json(root("auto.json"), {})
     al = {k: v for k, v in (a.get("alerted") or {}).items() if isinstance(v, (int, float)) and 0 <= t - v <= 2 * AUTO_TTL}
     for repo, sha, pr in todo:
-        al[f"{repo}@{sha}"] = t
+        if ci[(repo, sha)] != "wait":
+            al[f"{repo}@{sha}"] = t
     a["alerted"] = al
     os.makedirs(root(), mode=0o700, exist_ok=True)
     P.write_json(root("auto.json"), a)
+    todo = [x for x in todo if ci[(x[0], x[1])] is None]
     for repo, sha, pr in todo:
         P.alert(f"«принять» argus {repo}@{sha[:12]}" + (f" (PR #{pr})" if pr else "") + f" без записи tests дольше "
                 f"{ALERT_AFTER // 3600} ч, head ещё открыт: тесты сами не идут — роль подаёт `pantheon outside test` "

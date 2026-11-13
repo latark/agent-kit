@@ -443,7 +443,7 @@ def main():
     # +~350/+~440 — код 1 у accept только без тестов и CI, узкая запись вне ядра (merge.part), high после красной
     # записи или Б (brief, triage)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 34450 and len(raw_texts["hephaestus-demo.md"]) <= 28600)  # metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
+          len(raw_texts["domain-coordinator.md"]) <= 34850 and len(raw_texts["hephaestus-demo.md"]) <= 29000)  # metis-1115: +~230/+~340 (merge.part и hephaestus: строка ci: — тесты в CI); metis-0951: +150 (packs и window_launch в ядре merge.part); metis-0900: +244 (external.part «жду вас в окне»); metis-0832: +400/+500 (handoff.part, [person]); metis-0859: +~1150 (triage.part); metis-0858: +~150 (review_rules.py, answers.py в ядре merge.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -1039,6 +1039,15 @@ def main():
         text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
         check(f"{f[:-5]}: полный набор не гоняй — только при строке `dev:`, без неё проверка — первая строка (metis-0653)",
               "Есть строка `dev:`" in text and "Строки `dev:` нет" in text)
+        # metis-1115: строка ci: — тесты agent-kit в CI, локально только её команда, outside test — запасной путь
+        check(f"{f[:-5]}: строка `ci:` — тесты в CI, локально только ruff, outside test — когда Actions не запустились",
+              "Есть строка `ci:` в `.pantheon-verify` (agent-kit) — тесты идут в CI" in text
+              and "`pantheon outside test --wait 590` — только если Actions не запустились" in text
+              and "«тесты — в CI»" in text)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: запись тестов при строке ci: — review test с ruff, outside test — только без Actions (metis-1115)",
+              "при зелёной CI запись — `pantheon review test -- uvx ruff@0.17.3 check .`; `outside test` — только если "
+              "Actions не запустились" in flat[f])
     for f in ("dev-opus", "dev-sonnet", "dev-haiku", "codex-dev"):
         text = " ".join(read(os.path.join(out_real, f + ".md")).split())
         check(f"{f}: пункт 6 самопроверки при долгом наборе — узкие тесты и «не проверял: полный набор»",

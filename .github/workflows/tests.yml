@@ -16,7 +16,10 @@
 # OPTIONAL_CHECKS: их итог держат собирающие job. Собирающие идут и при красной части (`!cancelled()`), а при отмене
 # запуска — нет. `fail-fast: false`: красная часть не гасит соседние. Локальный `pantheon outside test` — запасной путь,
 # когда CI не запустился (README guard, п. 8).
-# На push в main и по расписанию тесты не запускаются; ночной полный набор на main делает плановый проход.
+# Ночной полный набор на main (metis-1115, решение владельца 13.11: на Mac тесты agent-kit не идут) — этот же
+# workflow по расписанию (schedule, 22:00 UTC, только ветка по умолчанию — main) и вручную (workflow_dispatch на
+# main): на них идут только full-shard и full, affected — только на PR. Итог читает плановый проход
+# (plugins/pantheon/lib/nightly_tick.py) через gh: красный — задача на упавший файл и тревога. На push тесты не идут.
 # ruff (metis-0265) — первый шаг job affected, на каждый PR: правила — ruff.toml, версия и хеши колёс —
 # .github/ruff-requirements.txt. Вторым шагом — храповик (metis-0854, plugins/pantheon/scripts/lint_ratchet.py):
 # размер файлов, сложность функций и циклы импорта не растут против plugins/pantheon/scripts/lint-baseline.json
@@ -31,6 +34,8 @@ name: tests
 on:
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -101,7 +106,7 @@ jobs:
 
   full-shard:
     name: full-shard (${{ matrix.part }}/3)
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: macos-15
     timeout-minutes: 90
     strategy:
@@ -125,7 +130,7 @@ jobs:
 
   full:
     needs: full-shard
-    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && !cancelled()
+    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

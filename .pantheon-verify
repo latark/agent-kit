@@ -2,3 +2,6 @@
 python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon plugins/project-tools
 # dev: — узкая проверка исполнителя (hooks/dev-stop-verify.py, роли dev-*); запись шлюза и outside берут первую строку
 dev: python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected plugins/guard plugins/pantheon plugins/project-tools
+# ci: — тесты agent-kit идут в GitHub Actions (metis-1115): Stop-хук разработчика ждёт локально только эту команду;
+# не первой строкой — первую берут запись шлюза и outside (запасной путь, когда Actions не запустились)
+ci: uvx ruff@0.17.3 check .

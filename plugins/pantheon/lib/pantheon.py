@@ -7366,7 +7366,7 @@ _NIGHTLY_TICK = None
 
 
 def nightly_tick_mod():
-    """lib/nightly_tick.py — ночной полный набор тестов на origin/main (metis-1050)."""
+    """lib/nightly_tick.py — итог ночного полного набора на main из GitHub Actions (metis-1050, metis-1115)."""
     global _NIGHTLY_TICK
     if _NIGHTLY_TICK is None:
         import importlib.util

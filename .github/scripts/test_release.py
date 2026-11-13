@@ -444,8 +444,12 @@ def t_wf_parse_selftest():
     check("wf_parse: битый YAML — None и причина из stderr ruby", data is None and "ruby код" in why and len(why) > 20, why)
 
 
-# metis-1111: job full-shard (части полного набора) идёт на каждый PR и вручную — ровно эта строка if
-FULL_IF = r"^    if: github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch'$"
+# metis-1111: job full-shard (части полного набора) идёт на каждый PR и вручную; metis-1115: и ночью по расписанию на
+# main (ночной полный набор — в Actions, на Mac тесты agent-kit не идут) — ровно эта строка if
+FULL_IF = (r"^    if: github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch' "
+           r"\|\| github\.event_name == 'schedule'$")
+# metis-1115: расписание tests.yml — одна строка cron раз в сутки (минута и час, остальное — *)
+CRON_DAILY = r"^  schedule:\n    - cron: '\d{1,2} \d{1,2} \* \* \*'\n"
 # metis-1111: job tests.yml — части matrix и собирающие их итог с прежними именами (шлюз guard ищет affected и full)
 SHARD_JOBS = ("affected-shard", "affected", "full-shard", "full")
 # ${{ }} в run — только эти: их значения пишет сам GitHub (matrix из файла workflow, итог части), а не текст PR
@@ -476,7 +480,8 @@ def t_workflows(wfdir=WORKFLOWS):
     check("release.yml: запускает скрипт ядра --push", "python3 -I .github/scripts/release.py --push" in text, text)
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
     # п. 8 (27.10) + metis-1111 (13.11, репозиторий публичный): на каждый PR в main — affected на закреплённом Linux и
-    # полный набор (job full) на macos-15; полного набора на push и по расписанию нет. Гибрид без macOS (metis-0688) снят.
+    # полный набор (job full) на macos-15; metis-1115 — полный набор и ночью по расписанию (только tests.yml, на main);
+    # на push полного набора нет. Гибрид без macOS (metis-0688) снят.
     text = open(os.path.join(wfdir, "tests.yml")).read()
     tst, why = wf_parse(os.path.join(wfdir, "tests.yml"))
     uses = tst["uses"] if tst else None
@@ -488,9 +493,12 @@ def t_workflows(wfdir=WORKFLOWS):
     aff = job.get("affected", "")
     ash = job.get("affected-shard", "")
     fsh = job.get("full-shard", "")
-    check("tests.yml: только чтение, запуск только на PR в main, Python 3.14, без токена в checkout",
+    check("tests.yml: только чтение, запуск только на PR в main, по расписанию раз в сутки и вручную, Python 3.14, без "
+          "токена в checkout",
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
-          and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  workflow_dispatch:\n\npermissions:", text, re.M)
+          and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  schedule:\n    - cron: '[^'\n]+'\n"
+                        r"  workflow_dispatch:\n\npermissions:", text, re.M)
+          and re.search(CRON_DAILY, text, re.M)
           and text.count('python-version: "3.14"') == 3 and text.count("persist-credentials: false") == 3, text)
     nocomment = lambda t: "\n".join(re.sub(r"(^|\s)#.*$", "", ln) for ln in t.splitlines())
     # metis-1111: macOS — ровно одна строка `    runs-on: macos-15` в job full-shard (части полного набора) файла
@@ -508,8 +516,9 @@ def t_workflows(wfdir=WORKFLOWS):
     check("workflows: macos — только `runs-on: macos-15` у job full-shard в tests.yml (affected, full и release — Linux)",
           not macos, macos)
     # полный набор тестов (run-tests.py без --affected, прямой запуск tests/test_*.py в обход раннера) — только в job
-    # full-shard файла tests.yml с `if` на pull_request и workflow_dispatch, и только если workflow не запускается на
-    # push/schedule/_target (tests/full в OPTIONAL_CHECKS шлюза, слияние не держит). Комментарии отрезаются до проверки; смотрим все файлы.
+    # full-shard файла tests.yml с `if` на pull_request, workflow_dispatch и schedule, и только если workflow не
+    # запускается на push/_target, а на schedule — только tests.yml (ночной набор, metis-1115; tests/full в
+    # OPTIONAL_CHECKS шлюза, слияние не держит). Комментарии отрезаются до проверки; смотрим все файлы.
     full_bad = []
     for n in names:
         wtext = nocomment(open(os.path.join(wfdir, n)).read())
@@ -525,11 +534,13 @@ def t_workflows(wfdir=WORKFLOWS):
             if (n, jname) != ("tests.yml", "full-shard:"):
                 full_bad.append((n, "полный набор вне job full-shard файла tests.yml", jname))
             if not re.search(FULL_IF, part, re.M):
-                full_bad.append((n, "полный набор в job без if на pull_request и workflow_dispatch", jname))
-            if re.search(r"\b(push|schedule|pull_request_target)\b", won):
-                full_bad.append((n, "workflow с полным набором запускается на push/schedule", jname))
-    check("полный набор тестов — только в job full-shard файла tests.yml с if на pull_request и workflow_dispatch и в "
-          "workflow без push/schedule (комментарии не в счёт, все файлы workflows)", not full_bad, full_bad)
+                full_bad.append((n, "полный набор в job без if на pull_request, workflow_dispatch и schedule", jname))
+            if re.search(r"\b(push|pull_request_target)\b", won):
+                full_bad.append((n, "workflow с полным набором запускается на push", jname))
+            if n != "tests.yml" and re.search(r"\bschedule\b", won):
+                full_bad.append((n, "полный набор по расписанию не в tests.yml", jname))
+    check("полный набор тестов — только в job full-shard файла tests.yml с if на pull_request, workflow_dispatch и "
+          "schedule и в workflow без push (комментарии не в счёт, все файлы workflows)", not full_bad, full_bad)
     # runs-on — только закреплённый Linux (или ubuntu-latest у release и check-traces) или macos-15 (где — проверка
     # macos выше): выражение, список, matrix и self-hosted не пускаем
     ro = [(n, m) for n in names for m in re.findall(r"^\s*runs-on:\s*(.*)$", nocomment(open(os.path.join(wfdir, n)).read()), re.M)
@@ -567,7 +578,8 @@ def t_workflows(wfdir=WORKFLOWS):
     nparts = {}
     for sj, cj, cond, cap in (("affected-shard", "affected", "github.event_name == 'pull_request'", (4, 4)),
                               ("full-shard", "full", "(github.event_name == 'pull_request' || "
-                                                     "github.event_name == 'workflow_dispatch')", (1, 3))):
+                                                     "github.event_name == 'workflow_dispatch' || "
+                                                     "github.event_name == 'schedule')", (1, 3))):
         part = job.get(sj, "")
         m = re.search(r"^    strategy:\n      fail-fast: false\n      matrix:\n        part: \[([\d, ]+)\]\n", part, re.M)
         got = [int(x) for x in m.group(1).split(",")] if m else []
@@ -700,7 +712,8 @@ def t_workflows_on_bad_copies():
     full_job = ("\n  full-shard:\n%s    runs-on: %s\n    timeout-minutes: 45\n    steps:\n      - uses: actions/checkout@"
                 "11bd71901bbe5b1630ceea73d27597364c9af683\n      - run: python3 -I plugins/pantheon/scripts/run-tests.py -j 3 "
                 "plugins/guard\n")
-    disp = "    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'\n"
+    disp = ("    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || "
+            "github.event_name == 'schedule'\n")
     full_msg = "полный набор тестов — только в job"
     full_msg_all = "полный набор тестов — только в job"
     on_push_wf = ("name: full\non:\n  push:\n    branches: [main]\npermissions:\n  contents: read\njobs:\n  full:\n"
@@ -752,9 +765,16 @@ def t_workflows_on_bad_copies():
         ("push в main в tests.yml при job full", dict(tests=ins(real, "  workflow_dispatch:\n",
                                                                "  push:\n    branches: [main]\n  workflow_dispatch:\n")),
          full_msg),
-        ("schedule в tests.yml при job full", dict(tests=ins(real, "  workflow_dispatch:\n",
-                                                            "  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\n")),
-         full_msg),
+        # metis-1115: ночной полный набор — schedule в tests.yml и schedule в if full-shard; без них ночью ничего не идёт
+        ("tests.yml без schedule (ночного набора нет)", dict(tests=ins(real, "  schedule:\n    - cron: '0 22 * * *'\n", "")),
+         "tests.yml: только чтение"),
+        ("schedule tests.yml — каждый час, не раз в сутки", dict(tests=ins(real, "- cron: '0 22 * * *'", "- cron: '0 * * * *'")),
+         "tests.yml: только чтение"),
+        ("full-shard без schedule в if (ночью части не идут)",
+         dict(tests=ins(real, " || github.event_name == 'schedule'\n", "\n")), full_msg),
+        ("собирающий full без schedule в if (ночного итога нет)",
+         dict(tests=ins(real, " || github.event_name == 'schedule') && !cancelled()", ") && !cancelled()")),
+         "tests.yml: собирающий full"),
         ("tests.yml без workflow_dispatch", dict(tests=ins(real, "  workflow_dispatch:\n", "")), "tests.yml: только чтение"),
         ("лишний триггер issues в on у tests.yml", dict(tests=ins(real, "  workflow_dispatch:\n", "  workflow_dispatch:\n  issues:\n")),
          "tests.yml: только чтение"),

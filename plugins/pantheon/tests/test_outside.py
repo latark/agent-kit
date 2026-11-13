@@ -1878,6 +1878,52 @@ c_["fetched"] = time.time()
 c_["errors"] = {"latark/al-stale": "gh не ответил"}
 json.dump(c_, open(_cp, "w"))
 check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
+# metis-1115: у репозитория с обязательными проверками CI (agent-kit, REQUIRED_CHECKS) зелёный CI на head — тревоги
+# «без записи tests» нет: тесты прошли в Actions. Идёт — ждать без тревоги и без метки; красный — тревога как раньше
+_M = P.merge_mod()
+_mv = (_M.pr_view, _M.ci_runs_fetch)
+_CI = {}
+_VIEWS = []
+
+
+def _ci(conclusion, status="COMPLETED"):
+    rows = [{"workflowName": "tests", "name": "affected", "status": status, "conclusion": conclusion},
+            {"workflowName": "check-traces", "name": "traces", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    return rows, [dict(r, event="pull_request") for r in rows]
+
+
+def _pr_view(repo, pr):
+    _VIEWS.append((repo, pr))
+    sha = _CI["sha"]
+    return {"headRefOid": sha, "baseRefName": "main", "statusCheckRollup": _CI["rollup"], "isCrossRepository": False}
+
+
+_M.pr_view = _pr_view
+_M.ci_runs_fetch = lambda repo, pr, sha, fork=None: _CI["runs"]
+try:
+    AK = {c: c * 40 for c in "123"}
+    accept(AK["1"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["1"], rollup=_ci("SUCCESS")[0], runs=_ci("SUCCESS")[1])
+    n_al = O.alert_overdue()
+    check("agent-kit: CI (affected, traces) зелёный на head — тревоги «без записи tests» нет, (repo, sha) помечен",
+          n_al == 0 and AK["1"][:12] not in alerts() and O.overdue_accepts() == []
+          and _VIEWS and _VIEWS[-1][0] == "latark/agent-kit", (n_al, _VIEWS))
+    accept(AK["2"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["2"], rollup=_ci("", "IN_PROGRESS")[0], runs=_ci("", "IN_PROGRESS")[1])
+    n_al = O.alert_overdue()
+    check("agent-kit: CI ещё идёт — без тревоги и без метки (проверится на следующем проходе)",
+          n_al == 0 and AK["2"][:12] not in alerts() and [x[1] for x in O.overdue_accepts()] == [AK["2"]], n_al)
+    _CI.update(rollup=_ci("FAILURE")[0], runs=_ci("FAILURE")[1])
+    n_al = O.alert_overdue()
+    check("agent-kit: CI красный — тревога «без записи tests», как раньше",
+          n_al == 1 and alerts().count(f"latark/agent-kit@{AK['2'][:12]}") == 1, (n_al, alerts()[-300:]))
+    nv = len(_VIEWS)
+    accept(AK["3"], repo="latark/al-noci", age=7200)
+    n_al = O.alert_overdue()
+    check("репозиторий без обязательных проверок CI — gh не спрашивается, тревога как раньше",
+          n_al == 1 and len(_VIEWS) == nv and f"latark/al-noci@{AK['3'][:12]}" in alerts(), (n_al, _VIEWS[nv:]))
+finally:
+    _M.pr_view, _M.ci_runs_fetch = _mv
 if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)
