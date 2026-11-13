@@ -4,7 +4,8 @@
 #
 # Правило записи — «оставить» (keep): что названо, остаётся включённым; всё остальное из [catalog] выключается.
 # Окно или роль, которых в карте нет, и плагин или MCP, которых нет в [catalog], не трогаются: новое по умолчанию
-# включено (безопасный дефолт, при сомнении — оставить). chrome-devtools в каталоге нет: его подключают сами роли
+# включено (безопасный дефолт, при сомнении — оставить); для MCP окна в карте это правило сменил список guard (ниже,
+# metis-1051). chrome-devtools в каталоге нет: его подключают сами роли
 # (mcpServers у dev-*, talos) и project-tools по проекту — запрет сломал бы их. Плагины guard, pantheon, project-tools
 # и встроенные в каталог не входят и выключены быть не могут.
 #
@@ -17,6 +18,10 @@
 # Запись окна своего направления ([window.<направление>]) пользователь держит не здесь, а в личной части
 # ~/.claude/pantheon/plugins-by-role.toml: только таблицы [window.<направление>] с теми же ключами, каталог — отсюда.
 # Личная запись заменяет [window.direction] для этого окна; окна системы (direction, hq, hestia, workshop, job-*) — только здесь.
+#
+# Список разрешённых MCP окна (metis-1051): guard (hooks/mcp_gate.py, хук окна «mcp__.*») пускает только серверы из
+# mcp и записи mcp_extra — «сервер» (все инструменты) или «сервер__инструмент» («*» в инструменте). Остальное —
+# отказ, в том числе серверы вне каталога. Нет mcp_extra у записи — только mcp. Окно вне карты списка не получает.
 
 [catalog]
 plugins = [
@@ -51,6 +56,21 @@ plugins = [
   "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
 mcp = ["qmd", "context7", "jetbrains", "claude_ai_Claude_Docs"]
+mcp_extra = [
+  # браузер для проверки своего приложения (роли dev-*, talos — mcpServers в шапке) и инструменты проекта
+  # (project-tools: .mcp.json проектов направлений)
+  "chrome-devtools", "next-devtools", "shadcn",
+  # серверы пакета одного направления сюда не идут: их окно получает своей записью [window.<направление>] в личной
+  # части (она заменяет эту запись целиком — список выше плюс серверы пакета)
+  # MCP плагинов окна (только чтение или документация)
+  "plugin_context7_context7", "plugin_vercel_vercel", "plugin_sentry_sentry",
+  # Supabase ([metis-1049-supabase] «А»): только чтение — list_*, get_*, документация и типы. execute_sql нет ни у
+  # одного сервера: read_only в адресе сервера проекта — правка чужого .mcp.json, по одному имени сервера её не
+  # проверить (metis-1051, круг проверки безопасности). Миграции — `pantheon supabase migrate` из origin/main
+  "supabase__list_*", "supabase__get_*", "supabase__search_docs", "supabase__generate_typescript_types",
+  "plugin_supabase_supabase__list_*", "plugin_supabase_supabase__get_*", "plugin_supabase_supabase__search_docs",
+  "plugin_supabase_supabase__generate_typescript_types",
+]
 
 [window.workshop]
 plugins = [
@@ -62,6 +82,14 @@ plugins = [
   "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
 mcp = ["qmd", "context7", "jetbrains"]
+# мастерская пишет код в разных проектах: то же, что окна направлений
+mcp_extra = [
+  "chrome-devtools", "next-devtools", "shadcn",
+  "plugin_context7_context7", "plugin_vercel_vercel", "plugin_sentry_sentry",
+  "supabase__list_*", "supabase__get_*", "supabase__search_docs", "supabase__generate_typescript_types",
+  "plugin_supabase_supabase__list_*", "plugin_supabase_supabase__get_*", "plugin_supabase_supabase__search_docs",
+  "plugin_supabase_supabase__generate_typescript_types",
+]
 
 # Пританей не пишет код и не коммитит (коммитит плановый проход); читает qmd; Docs — для ревизора momus
 [window.hq]

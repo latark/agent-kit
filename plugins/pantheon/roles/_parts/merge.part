@@ -32,7 +32,7 @@ permissions окон `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/mar
 слов и хуки `plugins/pantheon/hooks/ctx.py` и `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID
 `plugins/pantheon/lib/merge.py`, карта плагинов `plugins/pantheon/lib/plugin_map.py` и
 `plugins/pantheon/plugins-by-role.toml`, правила ревью `plugins/pantheon/lib/review_rules.py` и ответы окна вопросов
-`plugins/pantheon/lib/answers.py` (metis-0858), общий код пакетов окон `plugins/pantheon/packs/` (хуки пакетов идут вне
+`plugins/pantheon/lib/answers.py` (metis-0858), миграции Supabase `plugins/pantheon/lib/supabase_migrate.py`, общий код пакетов окон `plugins/pantheon/packs/` (хуки пакетов идут вне
 песочницы, metis-0951): такой PR шлюз не сливает.
 PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugin/releases.json`: номер поднимает workflow release
 на main после слияния (metis-0512), а PR с номером шлюз не сливает совсем. Так же веди правку их сборки в

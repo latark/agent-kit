@@ -162,7 +162,23 @@ def t_core_0598(h):
                h.pre(cmd, pdir="projects/agent-kit"), True)
 
 
-VERSION_PATCH = '@@ -2 +2 @@\n-  "version": "0.11.1",\n+  "version": "0.11.2",'
+def t_core_1051(h):
+    """metis-1051 (решение владельца 13.11): команда миграций Supabase — ядро: PR, который её меняет, ждёт владельца;
+    её тест и соседний файл lib — нет. Списки ядра merge.py и window_rules.py — те же (сверяют test_merge_window и
+    test_window_rules)."""
+    sha = h.sha["agent-kit"]
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    path = "plugins/pantheon/lib/supabase_migrate.py"
+    h.gh(["README.md", path])
+    merge_case(f"защиты: metis-1051 — {path} — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+               CORE + ": PR задевает " + path)
+    h.gh(["plugins/pantheon/tests/test_supabase_migrate.py", "plugins/pantheon/lib/supabase.py"])
+    merge_case("защиты: metis-1051 — тест миграций и соседний lib/supabase.py — проходит",
+               h.pre(cmd, pdir="projects/agent-kit"), True)
+
+
+VERSION_PATCH ='@@ -2 +2 @@\n-  "version": "0.11.1",\n+  "version": "0.11.2",'
 
 
 def t_version_bump_refused(h):
@@ -480,7 +496,7 @@ def t_core_touchid(h):
                "tests/affected красная")
 
 
-CASES = [t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1, t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_core_touchid, t_core_0598, t_version_bump_refused]
+CASES = [t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1, t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_core_touchid, t_core_0598, t_core_1051, t_version_bump_refused]
 
 
 if __name__ == "__main__":
