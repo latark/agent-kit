@@ -771,7 +771,7 @@ check("Д круг 2: «да» на вопрос с « ⏎ » (как пишет
 SW_OLD = ('always = ["~/.claude/agent-memory"]\n\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n\n'
           '[private]\nroles = ["hq", "chiron"]\ncoordinators = ["mnemo-brain"]\n# Self, Areas, People\n'
           'paths = ["~/ai/knowledge/me", "~/ai/knowledge/Self", "~/ai/knowledge/People"]\n\n'
-          '[sandbox_write]\nthemis-sources = ["~/.cache/expert-corpus"]\n')
+          '[sandbox_write]\nthemis-repos = ["~/.cache/repo-corp"]\n')
 Q3 = "'" * 3
 SWALLOW = {
     "строка в многострочную строку (private.paths пропадает)":
@@ -782,7 +782,7 @@ SWALLOW = {
          .replace("# Self, Areas, People\n", f"note = {Q3}\n# Self, Areas, People\n")
          .replace('People"]\n\n[sandbox_write]', f'People"]\n{Q3}\n\n[sandbox_write]'), "private.paths"),
     "удалён заголовок [sandbox_write] (ключи уходят в [private])":
-        (SW_OLD.replace("\n[sandbox_write]\n", "\n"), "private.themis-sources"),
+        (SW_OLD.replace("\n[sandbox_write]\n", "\n"), "private.themis-repos"),
 }
 
 

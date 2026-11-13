@@ -145,6 +145,10 @@ def home(schedule):
     write(os.path.join(h, "pantheon", "schedule.toml"), schedule)
     write(os.path.join(h, "svc-sum"), "aaaa\n")
     os.makedirs(os.path.join(h, "state"))
+    # заглушка claude на случай, когда его нет в PATH (CI на Linux): pantheon status зовёт `claude agents`, а без файла
+    # падает FileNotFoundError; где claude есть в PATH, берётся он, заглушка не нужна
+    write(os.path.join(h, ".local", "bin", "claude"), "#!/bin/sh\ncase \"$1\" in agents) echo '[]';; esac\nexit 0\n")
+    os.chmod(os.path.join(h, ".local", "bin", "claude"), 0o755)
     return h
 
 

@@ -155,7 +155,7 @@ ROUTES = (
     ("browser", "Харон", re.compile(
         r"comet|chrome|cdp|devtoolsactiveport|(?<!\d)(?:9222|933[3-9])(?!\d)|браузер|avito|доступ ограничен"
         r"|chrome-devtools|claude-in-chrome", re.I), "handed",
-     "Браузер владельца (Comet, Chrome со входами) — Харон. Поручение — карточкой Зевсу: `pantheon task new " + _DIR +
+     "Браузер владельца (со входами) — Харон. Поручение — карточкой Зевсу: `pantheon task new " + _DIR +
      " --owner zeus --title \"Харону: <что прочитать>\" --text \"<адрес и что нужно>\"`; Зевс зовёт charon, итог "
      "придёт в задачу. К демону, его порту и паролю сам не подключайся."),
     ("telegram", "read", re.compile(r"telegram|tg[-_]read|(?<![\w.])t\.me/|телеграм", re.I), "handed",

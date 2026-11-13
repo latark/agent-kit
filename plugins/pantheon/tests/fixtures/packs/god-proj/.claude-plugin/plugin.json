@@ -1,0 +1,5 @@
+{
+  "name": "pack-god-proj",
+  "description": "Образец пакета окна направления для тестов: хуки проектов app и gpu-worker, которых --add-dir не приносит",
+  "version": "0.0.0"
+}
