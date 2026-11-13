@@ -132,7 +132,7 @@ def pack_hook_shell(w):
     for c, what in ((pre + "--bogus -- bash .claude/hooks/a.sh", "неизвестный флаг"),
                     (pre + "x -- bash .claude/hooks/a.sh", "второе слово не флаг"),
                     (pre + "--plain=a:b -- bash .claude/hooks/a.sh", "--plain с чужим знаком"),
-                    ('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" --always "$HOME/r" -- bash .claude/hooks/a.sh',
+                    ('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" --always -- bash .claude/hooks/a.sh',
                      "флаг на месте репозитория"),
                     ('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" -- bash .claude/hooks/a.sh', "без репозитория"),
                     (pre + "-- bash .claude/hooks/a.sh $PATH", "$ кроме трёх переменных за «--»"),

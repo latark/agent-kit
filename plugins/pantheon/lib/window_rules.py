@@ -257,7 +257,8 @@ def pack_hook_problem(cmd):
     if argv[:3] != PACK_HOOK_LEAD or "--" not in argv:
         return f"хук не через in_repo.py пакета (python3 -I \"{PACK_HOOK_BIN}in_repo.py\" … -- <скрипт>)"
     cut = argv.index("--")
-    if cut < 4 or argv[3].startswith("-") or not all(PACK_HOOK_FLAG.fullmatch(f) for f in argv[4:cut]):
+    # argv[3] — репозиторий («--» на его месте — тоже отказ), дальше до «--» — только флаги in_repo.py
+    if argv[3].startswith("-") or not all(PACK_HOOK_FLAG.fullmatch(f) for f in argv[4:cut]):
         return ("до «--» — репозиторий и только флаги in_repo.py: --always, --file-arg, --ok, --cmd-prefix=…, "
                 "--plain=<папки>")
     run = argv[cut + 1:]
