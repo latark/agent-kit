@@ -686,7 +686,7 @@ check("--app у не-монорепо: отказ", state(q, rid) == "failed"
 rc, _, _ = role_request("athena-x", MONO, "serve", "--app", "../x")
 check("--app не по образцу: код 2", rc == 2)
 
-# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (alexbroker: site/)
+# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (site-b: site/)
 SUB = os.path.join(HOME, "projects", "subapp")
 os.makedirs(SUB)
 git(SUB, "init", "-q", "-b", "main")
