@@ -493,7 +493,8 @@ def goal_state(head, tasks=None, window=None, elsewhere=None):
     `pantheon task goal`, а WAITING_GOAL велит проверяющей модели цели верить свежей такой строке. Снята: закрыта
     (done, dropped), вернули во входящие, ведёт другая сессия — elsewhere(head, window) даёт owner, если задачу ведёт
     не окно window и не его команда (watch.owner_elsewhere), — или «ждёт» по goal_released. Окно не названо — owner не
-    сверяется. Остальное — в цели: в работе, в очереди, на проверке, «ждёт» без основания или с закрытым блокером."""
+    сверяется. На проверке и принята (acceptance=принято) — снята (metis-1122): окну делать нечего, done ставит не
+    окно. Остальное — в цели: в работе, в очереди, на проверке, «ждёт» без основания или с закрытым блокером."""
     head = head or {}
     tasks = tasks or {}
     st = head.get("status")
@@ -504,6 +505,8 @@ def goal_state(head, tasks=None, window=None, elsewhere=None):
         return True, f"ведёт {o}"
     if st == "inbox":
         return True, "вернули во входящие"
+    if st == "review" and head.get("acceptance") == "принято":  # metis-1122: принята — окну делать нечего, done — не его
+        return True, "на проверке и принята (acceptance=принято)"
     if st == "waiting":
         on = str(head.get("waiting_on") or "").strip()
         if goal_released(head, tasks):
