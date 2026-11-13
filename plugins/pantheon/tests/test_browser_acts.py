@@ -874,7 +874,22 @@ D.page(SRCH, {
     "#more": dict(facts(node("button", "submit", label="Найти"), fields=[QF], form=GETF, buttons=["Найти"]), x=25.0,
                   n=3, many=["button «Найти»", "button «Найти»", "a «Найти»"]),
     "#post": dict(facts(node("button", "submit", label="Сохранить"), fields=[field("title", "x")],
-                        form={"action": SRCH, "label": ""}, buttons=["Сохранить"]), x=26.0)})
+                        form={"action": SRCH, "label": ""}, buttons=["Сохранить"]), x=26.0),
+    "#news": dict(facts(node("input", "checkbox", label="Получать рассылку")), x=27.0),
+    "#apply": dict(facts(node("button", "submit", label="Apply"),
+                         fields=[field("fio", "Иванов", label="ФИО"), field("address", "Москва", label="Адрес")],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=["Apply"]), x=28.0),
+    "#show": dict(facts(node("button", "submit", label="Show"), fields=[QF],
+                        form={"action": SRCH, "label": "", "method": "post"}, buttons=["Show"]), x=29.0),
+    "#sfind": dict(facts(node("button", "submit", label="Найти"), fields=[QF],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=["Найти"]), x=30.0),
+    "#mail": dict(facts(node("button", "submit", label="Найти"), fields=[field("e", "a@b.ru", type_="email")],
+                        form=GETF, buttons=["Найти"]), x=30.5),
+    "#wiz": dict(facts(node("button", "submit", label="Далее"),
+                       fields=[field("fio", "Иванов", label="ФИО"), field("ph", "+7900", type_="tel")]), x=31.5),
+    "#pg2": dict(facts(node("a", href=SITE + "/search?p=2", label="2")), x=32.5),
+    "#card": dict(facts(node("a", href=SITE + "/item/9", label="Диван")), x=33.5),
+    "#addr": dict(facts(node("input", "text", attrs="address")), x=34.5)})
 res = act("submit", "#find", SRCH)
 check("[S1] поиск в форме GET без поручения и согласия — отправлено, нажатие одно, Touch ID не звали, поручения нет",
       res["state"] == "done" and "форма GET" in res["text"] and len(D.clicked()) == 1 and not touches()
@@ -886,11 +901,26 @@ check("[S1] ввод в поле поиска GET-формы без поруче
 res = act("submit", "#login", SRCH)
 check("[S2] форма входа (пароль) даже с GET — отказ «важная форма», без нажатий и окна",
       res["state"] == "refused" and "важная форма" in res["why"] and not D.cmds() and not touches(), res)
-res = act("submit", "#inn", SRCH)
-check("[S3] кнопка «Найти» рядом с полем ИНН (форма без GET) — поиск без поручения",
-      res["state"] == "done" and "поиск по полю" in res["text"] and not touches(), res)
-res = act("submit", "#next", SRCH)
-check("[S4] листание «Далее» без формы — без поручения", res["state"] == "done" and "листание" in res["text"], res)
+for sel, what in (("#inn", "POST «Найти» рядом с полем ИНН"), ("#apply", "POST «Apply» с полями ФИО и address"),
+                  ("#show", "POST «Show» с полем type=search"), ("#next", "submit «Далее» вне формы"),
+                  ("#wiz", "submit «Далее» вне формы с ФИО и телефоном (шаг мастера)"),
+                  ("#mail", "GET-форма с полем email")):
+    res = act("submit", sel, SRCH)
+    check(f"[S3][charon-relax] {what} — не поиск: отказ без поручения, нажатия и окна нет",
+          res["state"] == "refused" and "поручения" in res["why"] and not D.clicked() and not touches(), res)
+res = act("click", "#news", SRCH)
+check("[S3][charon-relax] флажок «Получать рассылку» вне формы — по поручению: отказ, нажатия нет",
+      res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), res)
+res = act("submit", "#sfind", SRCH)
+check("[S3] POST с полем type=search и кнопкой «Найти» — поиск без поручения",
+      res["state"] == "done" and "поле поиска" in res["text"] and not touches(), res)
+res = act("type", "#addr", SRCH, text="Москва")
+check("[S3][charon-relax] ввод в поле address вне формы (не type=search, не role=search) — по поручению",
+      res["state"] == "refused" and "поручения" in res["why"] and not D.cmds(), res)
+res = act("click", "#pg2", SRCH)
+check("[S4] листание ссылкой «2» — без поручения", res["state"] == "done" and "листание" in res["text"], res)
+res = act("click", "#card", SRCH)
+check("[S4] ссылка того же сайта — без поручения", res["state"] == "done" and "ссылка" in res["text"], res)
 res = act("submit", "#note", SRCH)
 check("[S5] GET-форма с textarea — не поиск: отказ без поручения, без нажатий",
       res["state"] == "refused" and "поручения" in res["why"] and not D.cmds(), res)
@@ -939,6 +969,55 @@ finger(3)
 res2 = act("submit", "#send", SITE + "/items/new")
 check("[P2] страница изменилась — согласие съедено, повтор без согласия не даётся",
       res["state"] == "done" and "не изменилась" not in res["text"] and res2["state"] == "refused", (res, res2))
+D.stuck = True
+finger(0)
+res = act("submit", "#send", SITE + "/items/new")
+D.dom += 1                                        # отправка через fetch очистила поле позже: подпись другая
+finger(3)
+res2 = act("submit", "#send", SITE + "/items/new")
+check("[P3] после «не прошла» страница изменилась — повтора без согласия нет, нажатия нет",
+      "один повтор" in res["text"] and res2["state"] == "refused" and not D.clicked(), (res, res2))
+D.page(SITE + "/msg", {"#send": facts(SEND, fields=[TITLE, field("about", "Привет", type_="", tag="textarea")],
+                                      form=FORM, buttons=["Опубликовать"])})
+finger(0)
+res = act("submit", "#send", SITE + "/msg")
+finger(3)
+res2 = act("submit", "#send", SITE + "/msg")
+check("[P4] форма с textarea, страница не изменилась — повтора нет (двойное сообщение): итог без «один повтор»",
+      res["state"] == "done" and "не изменилась" in res["text"] and "один повтор" not in res["text"]
+      and res2["state"] == "refused" and not D.clicked(), (res, res2))
+TWO = [field("i1", "", type_="checkbox", checked=True), field("i2", "", type_="checkbox", checked=True)]
+D.page(SITE + "/items", {"#del2": facts(node("button", "submit", label="Удалить"), fields=TWO, form=FORM),
+                         "#del": facts(node("button", "submit", label="Удалить"), fields=TWO[:1], form=FORM)})
+res = act("delete", "#del2", SITE + "/items")
+answer(P.now() + 1, quoted(res.get("why")), "Да — удалить")
+at(P.now() + 2)
+res = act("delete", "#del2", SITE + "/items")
+res2 = act("delete", "#del2", SITE + "/items")
+check("[P5] удаление пачки по «да», страница не изменилась — итог без «один повтор», повтор без нового «да» — отказ",
+      res["state"] == "done" and "один повтор" not in res["text"] and res2["state"] == "refused"
+      and not D.clicked(), (res, res2))
+finger(0)
+res = act("delete", "#del", SITE + "/items")
+finger(3)
+res2 = act("delete", "#del", SITE + "/items")
+check("[P5] удаление одного по Touch ID, страница не изменилась — повтора без согласия нет",
+      res["state"] == "done" and "один повтор" not in res["text"] and res2["state"] == "refused"
+      and not D.clicked(), (res, res2))
+D.tab = SITE + "/items"
+bf = dict(B.page_facts("comet", "#del2", None))
+bk, _ = B.classify(bf, "delete")
+B._save("asks", "grant-batch.json", {"grant": True, "task": TASK, "browser": "comet", "window": None,
+                                     "key": B.url_key(bf["url"]), "selector": "#del2", "kind": bk,
+                                     "digest": B.form_digest(bf), "sig": B.page_sig("comet", None), "issued": P.now(),
+                                     "used": None})
+try:
+    got = B.approve("comet", None, TASK, "#del2", bf, bk)
+except (B.Blocked, B.Refuse) as e:
+    got = ("отказ", str(e)[:80])
+check("[P5] запись повтора у пачки (подложена) — approve её не берёт: нужен новый «да»",
+      bk == "delete-batch" and got[0] != "повтор", (bk, got))
+D.stuck = False
 clear_touch()
 
 # --focus у действия: эмуляция фокуса до действия и выключение после

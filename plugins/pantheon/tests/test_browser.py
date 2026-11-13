@@ -839,12 +839,19 @@ res = run(req("read", url="https://e.mail.ru/inbox", task="metis-0760"), win="hq
 check("[Q1] «да» окном вопросов на вопрос карточки — закрытый сайт по задаче читается", res["state"] == "done", res)
 
 for expr in ("[...document.querySelectorAll('a')].forEach(a => a.href)", "document.hasFocus()",
-             "document.visibilityState", "performance.getEntriesByType('resource').map(e => e.name)",
-             'performance.getEntriesByType("resource").length'):
+             "document.visibilityState", 'performance.getEntriesByType("resource").length',
+             "performance.getEntriesByType( 'resource' ).length", "performance.getEntriesByType('resource') . length"):
     check(f"[E11] eval разрешает: {expr}", B.eval_bad(expr) is None, B.eval_bad(expr))
 for expr in ("performance.getEntriesByType('navigation')", "performance.getEntriesByType(x)",
-             "performance.getEntriesByType('resource', 1)"):
-    check(f"[E11] eval: {expr} — отказ (только 'resource')", B.eval_bad(expr), expr)
+             "performance.getEntriesByType('resource', 1)",
+             "performance.getEntriesByType('resource').map(e => e.name)",
+             "performance.getEntriesByType( 'resource').map(e => e.name)",
+             "performance.getEntriesByType('resource')[0].name", "performance.getEntriesByType('resource').lengthy"):
+    check(f"[E11] eval: {expr} — отказ (адреса загрузок — только net под маской)",
+          B.eval_bad(expr) and ("net" in B.eval_bad(expr) or "navigation" in expr), (expr, B.eval_bad(expr)))
+for host in ("outlook.office.com", "outlook.office365.com", "telegram.me", "wa.me", "360.yandex.ru",
+             "messages.google.com", "finance.ozon.ru", "xn--c1aubbdcd3a.xn--p1ai"):
+    check(f"[Z2] {host} — в закрытом списке (почта, мессенджер, банк, Госуслуги)", B.closed(host), host)
 
 D.calls.clear()
 D.tab = OPEN
@@ -856,6 +863,12 @@ row = B.net_row({"name": "https://u:p@api.site.ru/a?token=SECRET&page=2&api_key=
 check("[N2] net: значения token, api_key скрыты, логин:пароль из адреса убран, page и q видны",
       "SECRET" not in row and "=K" not in row and "u:p" not in row and "page=2" in row and "q=x" in row
       and row.startswith("200 5 "), row)
+TOK = "eyJhbGciOiJIUzI1NiJ9Ab12Cd34"
+row = B.net_row({"name": f"https://cdn.site.ru/dl/{TOK}/file-name-of-report.pdf?t=abcdef0123456789xyz&x=a1b2c3d4e5f6a7b8"
+                         "c9d0e1f2&q=%D0%B4%D0%B8%D0%B2%D0%B0%D0%BD&p=2", "status": 200, "size": 1})
+check("[N2] net: t= (короткое имя, длинное значение), токен-значение, токен в пути скрыты; slug, q и p видны",
+      "abcdef0123456789xyz" not in row and "a1b2c3d4e5f6" not in row and TOK not in row
+      and "/dl/***/file-name-of-report.pdf" in row and "q=%D0" in row and "p=2" in row, row)
 check("[N3] net в CLI: net URL и net --here", B.parse(["net", OPEN])[0]["url"] == OPEN
       and B.parse(["net", "--here"])[0]["here"] is True)
 

@@ -76,13 +76,14 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   open и чтения по адресу — поле focus в /open. net — performance.getEntriesByType('resource') своей вкладки: адрес,
   код, размер; cookie и заголовков там нет, значения секретных параметров адреса (token, key, sig, session…) — ***.
 - Поиск, фильтр и листание (metis-1120) — без поручения и согласия на читаемом сайте (free_reason): форма с полями
-  только однострочными, флажками, датами и списками и GET, или role=search, или поле type=search, или кнопка
-  «найти/поиск/фильтр» рядом с полем номера, ИНН, адреса, запроса; листание — надпись «далее», «ещё», номер страницы.
-  Вход, пароль, оплата, договор, торги — отказ, как раньше (classify до free_reason). Остальное без поручения — отказ и
+  только однострочными (без email и tel), флажками, датами и списками и GET, или role=search, или поле type=search с
+  кнопкой «найти/поиск/find/search»; нажатие ссылки того же сайта (листание — ссылками). Кнопки отправки («Далее»
+  мастера тоже), флажки вне формы и POST-формы без поиска — по поручению и согласию ([charon-relax]). Вход, пароль,
+  оплата, договор, торги — отказ, как раньше (classify до free_reason). Остальное без поручения — отказ и
   карточка с вопросом поручения; «да» на неё — поручение. Селектор, который находит больше одного элемента, — отказ со
-  списком найденных; итог называет выбранный элемент. Отправка по согласию, после которой страница не изменилась
-  (адрес, число узлов, длина текста — SIG_JS), согласие не съедает: один повтор той же формы за час (запись grant в
-  asks).
+  списком найденных; итог называет выбранный элемент. Обычная отправка по согласию без textarea, после которой
+  страница не изменилась (адрес, число узлов, длина текста — SIG_JS), согласие не съедает: один повтор той же формы за
+  час, если подпись страницы с тех пор та же (запись grant в asks). Удаление повтора не даёт — только новое «да».
 - Своя вкладка на окно (metis-0774): заявка из окна идёт в /open и /eval с полем session = имя окна — демон заводит
   этому окну отдельную вкладку (первый /open), чужие окна страницу не уводят. Сессия владельца — без поля, общая
   вкладка. Вкладку проход не закрывает (/close-tab не зовёт): простаивающую демон закрывает сам через 6 ч, предел —
@@ -166,7 +167,9 @@ CLOSED_DOMAINS = (
     "vk.com", "vk.ru", "ok.ru", "facebook.com", "instagram.com", "x.com", "twitter.com", "tiktok.com", "linkedin.com",
     "threads.net",
     "web.telegram.org", "telegram.org", "t.me", "whatsapp.com", "web.whatsapp.com", "max.ru", "web.max.ru",
-    "discord.com", "slack.com", "viber.com", "signal.org", "skype.com", "messenger.com")
+    "discord.com", "slack.com", "viber.com", "signal.org", "skype.com", "messenger.com",
+    "outlook.office.com", "outlook.office365.com", "telegram.me", "wa.me", "360.yandex.ru", "messages.google.com",
+    "finance.ozon.ru", "xn--c1aubbdcd3a.xn--p1ai")
 # поддомены почты, кабинетов и входа на любом сайте: mail.example.ru, lk.example.ru, esia.gosuslugi.ru
 CLOSED_HOST_PREFIX = re.compile(r"(?:mail|webmail|email|lk|lkfl\d*|lkul\d*|cabinet|kabinet|esia|bank)\.")
 ACTS = ("click", "type", "submit", "delete")   # действия на странице — по поручению; поиск — без него (metis-1120)
@@ -205,9 +208,9 @@ EVAL_GLOBALS = frozenset(("getComputedStyle", "parseInt", "parseFloat", "Number"
                           "encodeURIComponent"))     # без объекта перед именем можно звать только эти
 EVAL_CALLBACK = {"map": 0, "filter": 0, "find": 0, "some": 0, "every": 0, "reduce": 0, "from": 1,
                  "forEach": 0}                        # аргумент-функция
-# performance.getEntriesByType — только записи загрузок страницы ('resource'): адрес, код, размер, без cookie и
-# заголовков; 'navigation', 'mark' и прочее — отказ (на исходном тексте: в остове строки пустые)
-EVAL_ENTRIES = re.compile(r"""getEntriesByType\s*\(\s*(?!(?:'resource'|"resource")\s*\))""")
+# performance.getEntriesByType — только число загрузок ('resource').length: адреса с токенами отдаёт только net под
+# маской NET_SECRET; 'navigation', 'mark', .map(e => e.name) — отказ (на исходном тексте: в остове строки пустые)
+EVAL_ENTRIES = re.compile(r"""getEntriesByType\s*\((?!\s*(?:'resource'|"resource")\s*\)\s*\.\s*length\b)""")
 EVAL_KEYWORDS = frozenset(("if", "for", "while", "switch", "catch", "function", "return", "typeof", "void", "await",
                            "async", "in", "of", "instanceof", "else", "do", "case", "yield"))
 # Кроме вызовов (их проверяет eval_calls): имена-ссылки на побочные действия и секреты, навигация, присваивание
@@ -382,7 +385,8 @@ def eval_bad(expr):
     if m:
         return f"побочное действие или секрет «{m.group(0).strip()[:40]}»"
     if EVAL_ENTRIES.search(expr):
-        return "getEntriesByType — только 'resource' (загрузки страницы: адрес, код, размер)"
+        return ("getEntriesByType — только число загрузок (getEntriesByType('resource').length); адреса, код и размер "
+                "— pantheon browser net (секреты в адресах скрыты)")
     skel, why = eval_skeleton(expr)
     if why:
         return why
@@ -947,11 +951,12 @@ TOUCH_CANCEL = "Отказать"                     # надпись кноп�
 # единственные команды /cmd демона из прохода; фокус — только у действия с --focus, и выключается в finally
 CMD_ALLOWED = ("Input.dispatchMouseEvent", "Input.insertText", "Emulation.setFocusEmulationEnabled")
 # Поиск, фильтр и листание без поручения (metis-1120): кнопка и поле поиска, листание — по надписи целиком
-SEARCH_WORDS = re.compile(r"найти|поиск|искать|search|find|фильтр|filter|применить|apply|показать|show", re.I)
-SEARCH_FIELD = re.compile(r"номер|number|\bинн\b|огрн|адрес|address|кадастр|query|^q$|search|поиск|дело|\bcase\b", re.I)
+# ([charon-relax], круг argus 438/439): POST-форма — только с полем type=search и кнопкой «найти/поиск»; «Apply»,
+# «Применить», «Показать» и поля адреса, номера, дела формы поиском не делают — отклик с полем address ушёл бы без «да»
+SEARCH_WORDS = re.compile(r"найти|поиск|искать|search|find", re.I)
 PAGE_WORDS = re.compile(r"(?:далее|дальше|следующая|следующие|назад|предыдущая|ещё|еще|показать\s+ещё|показать\s+еще|"
                         r"next|prev|previous|more|load\s+more|\d{1,4}|[›»→‹«←]|>|<)", re.I)
-FREE_TYPES = ("", "text", "search", "email", "tel", "url", "number", "checkbox", "radio", "date",
+FREE_TYPES = ("", "text", "search", "url", "number", "checkbox", "radio", "date",   # email и tel — не поиск
                                 "month", "week", "time", "datetime-local", "range")
 # Подпись страницы до и после отправки: адрес, число узлов, длина текста — не изменилась, значит отправка не прошла
 SIG_JS = ("/*charon-sig*/(() => [location.href, document.getElementsByTagName('*').length, "
@@ -1393,8 +1398,11 @@ def approve(b, win, task, sel, facts, kind):
     alive = [(n, r) for n, r in _load_all("asks") if r.get("task") == task and r.get("browser") == b
              and r.get("key") == key and r.get("selector") == sel and r.get("kind") == kind and not r.get("used")
              and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
-    for name, rec in alive:                           # metis-1120: отправка не прошла — один повтор той же формы
-        if rec.get("grant") and rec.get("digest") == dig and P.now() - rec["issued"] < RETRY_TTL:
+    grants = [(n, r) for n, r in alive if r.get("grant") and kind == "ordinary" and r.get("digest") == dig
+              and P.now() - r["issued"] < RETRY_TTL]
+    sig = page_sig(b, win) if grants else None
+    for name, rec in grants:                          # metis-1120: отправка не прошла — один повтор той же формы;
+        if sig is not None and rec.get("sig") == sig:  # только обычной и если страница с тех пор та же (fetch не очистил поле)
             rec["used"] = P.now()
             _save("asks", name, rec)
             return "повтор", P.now()
@@ -1493,8 +1501,8 @@ RETRY_TTL = 3600                              # повтор после отпр
 
 def free_form(facts):
     """Форма поиска или фильтра (metis-1120) → причина или None: поля только однострочные, флажки, даты, списки (без
-    textarea, файла, contenteditable), и метод GET, или role=search, или поле type=search, или кнопка поиска рядом с
-    полем номера, ИНН, адреса, запроса."""
+    textarea, файла, contenteditable, email и tel), и метод GET, или role=search, или поле type=search рядом с кнопкой
+    «найти/поиск/find/search». POST без этого — обычное согласие ([charon-relax])."""
     fields = [f for f in facts.get("fields") or [] if isinstance(f, dict)]
     if not all((f.get("tag") == "input" and (f.get("type") or "") in FREE_TYPES) or f.get("tag") == "select"
                for f in fields):
@@ -1504,35 +1512,28 @@ def free_form(facts):
         return "форма GET"
     if facts.get("srch") is True:
         return "поиск (role=search)"
-    if any(f.get("type") == "search" for f in fields):
-        return "поле поиска"
     _, btn = target_of(facts)
     label = " ".join(str(btn.get("label") or facts.get("elabel") or "").split())
-    if SEARCH_WORDS.search(label) and any(SEARCH_FIELD.search(str(f.get("name") or "")) or
-                                          SEARCH_FIELD.search(str(f.get("label") or "")) for f in fields):
-        return "поиск по полю"
+    if any(f.get("type") == "search" for f in fields) and SEARCH_WORDS.search(label):
+        return "поле поиска"
     return None
 
 
 def free_reason(facts, op, cls):
-    """Действие без поручения на читаемом сайте (metis-1120): поиск, фильтр, листание → причина или None. Только
+    """Действие без поручения на читаемом сайте (metis-1120, [charon-relax]) → причина или None: нажатие ссылки (того же
+    сайта — проверяет click_kind; надпись листания — «листание»), элемент внутри role=search или GET-формы (free_form),
+    ввод в поле поиска. Кнопки отправки («Далее» мастера тоже) и флажки вне формы — по поручению и согласию. Только
     обычное (не оплата, не важная форма, не удаление); delete — всегда по поручению."""
     if cls != "ordinary" or op == "delete":
         return None
     form = facts.get("form") if isinstance(facts.get("form"), dict) else None
-    if op == "type":
-        el = facts.get("el") or {}
-        if form is None:
-            name = f"{el.get('type') or ''} {el.get('attrs') or ''}"
-            return "поле поиска" if (el.get("type") == "search" or facts.get("srch") is True
-                                    or SEARCH_FIELD.search(name)) else None
-        return free_form(facts)
-    if op == "click" and form is None:
-        return "нажатие вне формы"
     _, btn = target_of(facts)
-    label = " ".join(str(btn.get("label") or facts.get("elabel") or "").split())
-    if PAGE_WORDS.fullmatch(label) and (form is None or free_form(facts)):
-        return "листание"
+    if op == "click" and btn.get("tag") == "a":
+        label = " ".join(str(btn.get("label") or "").split())
+        return "листание" if PAGE_WORDS.fullmatch(label) else "ссылка"
+    if op == "type" and form is None:
+        el = facts.get("el") or {}
+        return "поле поиска" if el.get("type") == "search" or facts.get("srch") is True else None
     return free_form(facts)
 
 
@@ -1665,10 +1666,11 @@ def act(req, win, domains):
             return "done", out, ""
         if k < 2:
             time.sleep(1)
-    if how in ("да", "Touch ID"):                 # согласие не съедено: один повтор той же формы (не из повтора)
-        _save("asks", f"grant-{secrets.token_hex(4)}.json",
+    text = any(isinstance(f, dict) and (f.get("tag") == "textarea" or f.get("ce")) for f in facts.get("fields") or [])
+    if how in ("да", "Touch ID") and kind == "ordinary" and not text and after is not None:
+        _save("asks", f"grant-{secrets.token_hex(4)}.json",   # согласие не съедено: один повтор той же отправки
               {"grant": True, "task": task, "browser": b, "window": win, "key": url_key(facts["url"]), "selector": sel,
-               "kind": kind, "digest": form_digest(facts), "issued": P.now(), "used": None})
+               "kind": kind, "digest": form_digest(facts), "sig": after, "issued": P.now(), "used": None})
         return "done", out + "; страница не изменилась — отправка, похоже, не прошла: один повтор той же командой без " \
                              "нового согласия (час)", ""
     return "done", out + "; страница не изменилась — отправка, похоже, не прошла", ""
@@ -1791,11 +1793,26 @@ NET_JS = ("/*charon-net*/(() => performance.getEntriesByType('resource').slice(-
 NET_SECRET = re.compile(r"token|auth|key|sig|session|sid|code|pass|access|secret|jwt|bearer", re.I)
 
 
+# похоже на токен: 24+ знаков, шестнадцатеричное или с заглавными, строчными и цифрами (slug из строчных — нет)
+NET_TOKENISH = re.compile(r"(?=[\w.~%+=-]{24,}$)(?:[0-9a-fA-F.-]+|(?=.*[A-Z])(?=.*[a-z])(?=.*\d)[\w.~%+=-]+)")
+
+
+def net_hide(p):
+    """Параметр адреса для net: значение у секретного имени (NET_SECRET), у короткого имени (t=, k=) из 16+ знаков
+    без %-кодов и похожее на токен — ***; короткий поиск (q=диван, p=2) виден."""
+    if "=" not in p:
+        return "***" if NET_TOKENISH.fullmatch(p) else p
+    k, v = p.split("=", 1)
+    short = len(k) <= 2 and re.fullmatch(r"[\w.~+/=-]{16,}", v, re.A)
+    return k + "=***" if v and (NET_SECRET.search(k) or short or NET_TOKENISH.fullmatch(v)) else p
+
+
 def net_row(e):
+    """Строка net: код, размер, адрес без входа; секретные значения параметров и похожие на токен куски пути скрыты."""
     u = urlsplit(str(e.get("name") or ""))
-    q = "&".join(p if "=" not in p or not NET_SECRET.search(p.split("=", 1)[0]) else p.split("=", 1)[0] + "=***"
-                 for p in u.query.split("&")) if u.query else ""
-    shown = f"{u.scheme}://{u.netloc.rsplit('@', 1)[-1]}{u.path}" + (f"?{q}" if q else "")
+    q = "&".join(net_hide(p) for p in u.query.split("&")) if u.query else ""
+    path = "/".join("***" if NET_TOKENISH.fullmatch(x) else x for x in u.path.split("/"))
+    shown = f"{u.scheme}://{u.netloc.rsplit('@', 1)[-1]}{path}" + (f"?{q}" if q else "")
     return f"{int(e.get('status') or 0)} {int(e.get('size') or 0)} {shown[:500]}"
 
 
@@ -2308,9 +2325,10 @@ USAGE = """pantheon browser health|open|read|eval|net|status [--browser comet|ch
   click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта
   type СЕЛЕКТОР ТЕКСТ --task ID  ввод в текстовое поле
   submit СЕЛЕКТОР --task ID      отправка формы: Touch ID или «да» на каждую; поиск, фильтр, листание (GET-форма,
-                                 role=search, поле номера, ИНН, адреса) — без поручения и согласия
+                                 role=search, поле type=search с кнопкой «Найти») — без поручения и согласия
   --focus                        эмуляция фокуса вкладки (open, read/eval/net по адресу, действия)
-  Селектор — ровно один элемент; не прошедшая отправка (страница не изменилась) — один повтор без нового согласия.
+  Селектор — ровно один элемент; не прошедшая обычная отправка (страница не изменилась) — один повтор без нового
+  согласия; удаление — только новое «да».
   Отказ сверх прав — сам заводит владельцу вопрос: «отправлен вопрос [id]»
   delete СЕЛЕКТОР --task ID      удаление: один элемент — Touch ID или «да», пачка — только «да»
   download URL --task ID [--to ПАПКА]   файл в <направление задачи>/inbox/<сайт или ПАПКА>/ (до 200 МБ)
