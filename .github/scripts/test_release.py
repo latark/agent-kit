@@ -782,7 +782,7 @@ def t_workflows_on_bad_copies():
     # metis-1111: части matrix и собирающие job
     ash_cut = real.split("\n  affected:\n")[0]
     cases += [
-        ("fail-fast: true у affected-shard", dict(tests=ins(real, "fail-fast: false", "fail-fast: true")),
+        ("fail-fast: true у affected-shard", dict(tests=ins(real, "\n      fail-fast: false", "\n      fail-fast: true")),
          "tests.yml: affected-shard — fail-fast"),
         ("fail-fast: true у full-shard", dict(tests=real[::-1].replace("fail-fast: false"[::-1], "fail-fast: true"[::-1], 1)[::-1]),
          "tests.yml: full-shard — fail-fast"),
