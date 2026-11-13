@@ -82,7 +82,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
   pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
                                         (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
-  pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
+  pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
