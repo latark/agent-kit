@@ -64,7 +64,7 @@ def check(name, ok, detail=""):
 TASK = "metis-0999"
 SITE = "https://www.avito.ru"
 DOMAINS = B.DEFAULT_DOMAINS + ("gosuslugi.ru", "yoomoney.ru", "example.com")
-CFG = (DOMAINS, B.DEFAULT_WINDOWS, True)
+CFG = (DOMAINS, B.DEFAULT_WINDOWS, True, ("evil.com", "evil.example.org"))   # closed — как в reads.toml (metis-1120)
 
 
 # --- поддельное окно Touch ID ---------------------------------------------------------------------------------------
@@ -126,6 +126,7 @@ class Daemon:
         self.focusable = True
         self.after = {}                 # селектор → адрес, куда уводит нажатие
         self.on_facts, self.n_facts = None, 0   # [T2] изменить страницу на n-м замере
+        self.dom, self.stuck = 0, False   # metis-1120: подпись страницы; stuck — нажатие страницу не меняет
 
     def page(self, url, els):
         self.els[url] = els
@@ -158,6 +159,8 @@ class Daemon:
                 out.setdefault("base", self.tab)
                 out["focused"] = "e.focus();" in expr and self.focusable
                 return 200, json.dumps(out)
+            if expr.startswith("/*charon-sig*/"):
+                return 200, json.dumps([self.tab, self.dom, 0])
             if expr.startswith("/*charon-point*/"):
                 if el is None:
                     return 200, json.dumps(None)
@@ -166,6 +169,8 @@ class Daemon:
             return 200, json.dumps({"value": "?"})
         if path == "/cmd":
             if body.get("method") == "Input.dispatchMouseEvent" and body["params"].get("type") == "mouseReleased":
+                if not self.stuck:
+                    self.dom += 1
                 for sel, el in (self.els.get(self.tab) or {}).items():
                     if (el["x"], el["y"]) == (body["params"]["x"], body["params"]["y"]) and sel in self.after:
                         self.tab = self.after[sel]
@@ -326,7 +331,7 @@ for site, word in (("yoomoney.ru", "платёжный"), ("gosuslugi.ru", "го
           res["state"] == "refused" and word in res["why"] and not touches(), res)
 finger(3)
 res = run(req("allow", site="evil.example.org", actions="click", why="x"))
-check("[M1] поручение на сайт, которого нельзя читать, — отказ", res["state"] == "refused" and "списке" in res["why"], res)
+check("[M1] поручение на сайт, которого нельзя читать, — отказ", res["state"] == "refused" and "закрытый сайт" in res["why"], res)
 
 # [M2] действие вне списка, [M3] другой сайт и срок
 reset_mandates()
@@ -345,7 +350,7 @@ check("[M2] поручение на example.com — на avito.ru отказ", r
 reset_mandates()
 give()
 at(T0 + 24 * 3600 + 5)
-res = act("click", "#agree", SITE + "/items/new")
+res = act("submit", "#send", SITE + "/items/new")
 check("[M3] поручение старше 24 ч — отказ", res["state"] == "refused" and "поручения" in res["why"] and not D.cmds(), res)
 at(T0)
 res = run({**req("submit", selector="#send"), "task": "metis-0998"})
@@ -798,8 +803,9 @@ try:
 except B.Fail:
     check("cmd(): метод вне CMD_ALLOWED — Fail", True)
 src = open(os.path.join(LIB, "browser.py"), encoding="utf-8").read()
-check("сырые команды: /cmd в browser.py — только внутри cmd(), список CMD_ALLOWED — две команды Input",
-      src.count('"/cmd"') == 1 and B.CMD_ALLOWED == ("Input.dispatchMouseEvent", "Input.insertText")
+check("сырые команды: /cmd в browser.py — только внутри cmd(), CMD_ALLOWED — две команды Input и фокус (--focus)",
+      src.count('"/cmd"') == 1 and B.CMD_ALLOWED == ("Input.dispatchMouseEvent", "Input.insertText",
+                                                     "Emulation.setFocusEmulationEnabled")
       and not re.search(r'"/(?:close|events|console|close-tab)"', src))
 used = set(re.findall(r'\bcmd\(\s*b,\s*"([\w.]+)"', src))
 check("сырые команды: cmd(…) в коде зовут только методы CMD_ALLOWED", used and used <= set(B.CMD_ALLOWED), used)
@@ -846,6 +852,241 @@ r = subprocess.run([PY311, "-I", RUN_PY, "browser", "submit", "#send", "--task",
                    capture_output=True, text=True, timeout=60)
 check("CLI submit из окна: заявка в ящике окна, код 0", r.returncode == 0 and os.path.isdir(qd)
       and len(os.listdir(qd)) == 1, (r.returncode, r.stdout, r.stderr))
+
+# --- metis-1120: поиск без поручения, карточка, один элемент, повтор, --focus ----------------------------------------
+reset_mandates()
+finger(3)
+clear_touch()
+SRCH = SITE + "/search"
+GETF = {"action": SRCH, "label": "", "method": "get"}
+QF = field("q", "диван", type_="search", label="Поиск")
+D.page(SRCH, {
+    "#find": facts(node("button", "submit", label="Найти"), fields=[QF], form=GETF, buttons=["Найти"]),
+    "#q": dict(facts(node("input", "search", attrs="q"), fields=[QF], form=GETF, buttons=["Найти"]), x=20.0),
+    "#login": dict(facts(node("button", "submit", label="Войти"),
+                         fields=[field("login", "me"), field("pass", "", type_="password", label="Пароль")],
+                         form=GETF, buttons=["Войти"]), x=21.0),
+    "#inn": dict(facts(node("button", "submit", label="Найти"), fields=[field("inn", "7700000000", label="ИНН")],
+                       form={"action": SRCH, "label": ""}, buttons=["Найти"]), x=22.0),
+    "#note": dict(facts(node("button", "submit", label="Найти"), fields=[QF, field("t", "x", type_="", tag="textarea")],
+                        form=GETF, buttons=["Найти"]), x=23.0),
+    "#next": dict(facts(node("button", "", label="Далее")), x=24.0),
+    "#more": dict(facts(node("button", "submit", label="Найти"), fields=[QF], form=GETF, buttons=["Найти"]), x=25.0,
+                  n=3, many=["button «Найти»", "button «Найти»", "a «Найти»"]),
+    "#post": dict(facts(node("button", "submit", label="Сохранить"), fields=[field("title", "x")],
+                        form={"action": SRCH, "label": ""}, buttons=["Сохранить"]), x=26.0),
+    "#news": dict(facts(node("input", "checkbox", label="Получать рассылку")), x=27.0),
+    "#apply": dict(facts(node("button", "submit", label="Apply"),
+                         fields=[field("fio", "Иванов", label="ФИО"), field("address", "Москва", label="Адрес")],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=["Apply"]), x=28.0),
+    "#show": dict(facts(node("button", "submit", label="Show"), fields=[QF],
+                        form={"action": SRCH, "label": "", "method": "post"}, buttons=["Show"]), x=29.0),
+    "#sfind": dict(facts(node("button", "submit", label="Найти"), fields=[QF],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=["Найти"]), x=30.0),
+    "#mail": dict(facts(node("button", "submit", label="Найти"), fields=[field("e", "a@b.ru", type_="email")],
+                        form=GETF, buttons=["Найти"]), x=30.5),
+    "#wiz": dict(facts(node("button", "submit", label="Далее"),
+                       fields=[field("fio", "Иванов", label="ФИО"), field("ph", "+7900", type_="tel")]), x=31.5),
+    "#pg2": dict(facts(node("a", href=SITE + "/search?p=2", label="2")), x=32.5),
+    "#card": dict(facts(node("a", href=SITE + "/item/9", label="Диван")), x=33.5),
+    "#addr": dict(facts(node("input", "text", attrs="address")), x=34.5),
+    "#lsend": dict(facts(node("a", href=SITE + "/search#", label="Отправить"),
+                         fields=[field("text", "привет", type_="", tag="textarea", label="Сообщение")],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=[]), x=35.5),
+    "#lnext": dict(facts(node("a", href=SITE + "/search?p=3", label="Далее"),
+                         fields=[field("fio", "Иванов", label="ФИО")],
+                         form={"action": SRCH, "label": "", "method": "post"}, buttons=[]), x=36.5),
+    "#lget": dict(facts(node("a", href=SITE + "/search?p=4", label="Далее"), fields=[QF], form=GETF,
+                        buttons=["Найти"]), x=37.5),
+    "#lresp": dict(facts(node("a", href=SITE + "/vac/1/respond", label="Откликнуться")), x=38.5),
+    "#lout": dict(facts(node("a", href=SITE + "/logout", label="Выйти")), x=39.5),
+    "#lrep": dict(facts(node("a", href=SITE + "/item/9/report", label="Пожаловаться")), x=40.5),
+    "#gaddr": dict(facts(node("button", "submit", label="Найти"), fields=[field("address", "Москва", label="Где")],
+                         form=GETF, buttons=["Найти"]), x=41.5)})
+res = act("submit", "#find", SRCH)
+check("[S1] поиск в форме GET без поручения и согласия — отправлено, нажатие одно, Touch ID не звали, поручения нет",
+      res["state"] == "done" and "форма GET" in res["text"] and len(D.clicked()) == 1 and not touches()
+      and not mandates(), res)
+check("[S1] итог называет выбранный элемент «Найти»", "«Найти»" in res.get("text", ""), res)
+res = act("type", "#q", SRCH, text="диван")
+check("[S1] ввод в поле поиска GET-формы без поручения", res["state"] == "done" and any(
+    c["method"] == "Input.insertText" for c in D.cmds()), res)
+res = act("submit", "#login", SRCH)
+check("[S2] форма входа (пароль) даже с GET — отказ «важная форма», без нажатий и окна",
+      res["state"] == "refused" and "важная форма" in res["why"] and not D.cmds() and not touches(), res)
+for sel, what in (("#inn", "POST «Найти» рядом с полем ИНН"), ("#apply", "POST «Apply» с полями ФИО и address"),
+                  ("#show", "POST «Show» с полем type=search"), ("#next", "submit «Далее» вне формы"),
+                  ("#wiz", "submit «Далее» вне формы с ФИО и телефоном (шаг мастера)"),
+                  ("#mail", "GET-форма с полем email")):
+    res = act("submit", sel, SRCH)
+    check(f"[S3][charon-relax] {what} — не поиск: отказ без поручения, нажатия и окна нет",
+          res["state"] == "refused" and "поручения" in res["why"] and not D.clicked() and not touches(), res)
+res = act("click", "#news", SRCH)
+check("[S3][charon-relax] флажок «Получать рассылку» вне формы — по поручению: отказ, нажатия нет",
+      res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), res)
+res = act("submit", "#sfind", SRCH)
+check("[S3] POST с полем type=search и кнопкой «Найти» — поиск без поручения",
+      res["state"] == "done" and "поле поиска" in res["text"] and not touches(), res)
+res = act("type", "#addr", SRCH, text="Москва")
+check("[S3][charon-relax] ввод в поле address вне формы (не type=search, не role=search) — по поручению",
+      res["state"] == "refused" and "поручения" in res["why"] and not D.cmds(), res)
+res = act("click", "#pg2", SRCH)
+check("[S4] листание ссылкой «2» — без поручения", res["state"] == "done" and "листание" in res["text"], res)
+res = act("click", "#card", SRCH)
+check("[S4] ссылка того же сайта — без поручения", res["state"] == "done" and "ссылка" in res["text"], res)
+for sel, what in (("#lsend", "ссылка «Отправить» в POST-форме с textarea"), ("#lnext", "ссылка «Далее» в POST-форме"),
+                  ("#lresp", "ссылка «Откликнуться»"), ("#lout", "ссылка «Выйти»"), ("#lrep", "ссылка «Пожаловаться»")):
+    res = act("click", sel, SRCH)
+    check(f"[S4][argus-439-2] {what} без поручения — отказ, без нажатия",
+          res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), (sel, res))
+# argus-438-3: белый список ссылок (nav_link) — без поручения только переход на другую страницу того же сайта
+SPA = SITE + "/spa"
+D.page(SPA, {"#lpub": dict(facts(node("a", href=SPA + "#", label="Опубликовать"),
+                                 fields=[field("text", "привет", type_="", tag="textarea", label="Сообщение")]), x=50.5),
+             "#lsave": dict(facts(node("a", href=SPA + "#", label="Сохранить")), x=51.5),
+             "#lself": dict(facts(node("a", href=SPA, label="Обновить")), x=52.5),
+             "#lfrag": dict(facts(node("a", href=SPA + "#top", label="Наверх")), x=53.5),
+             "#ltgt": dict(facts(node("a", href=SITE + "/page3", label="Каталог", target="_self")), x=54.5),
+             "#lftp": dict(facts(node("a", href="ftp://www.avito.ru/page4", label="Архив")), x=55.5),
+             "#lempty": dict(facts(node("a", href="", label="Ещё")), x=56.5),
+             "#lclick": dict(facts(node("a", href=SITE + "/page5", label="Каталог", onclick=True)), x=60.5),
+             "#ldl": dict(facts(node("a", href=SITE + "/page6", label="Каталог", download=True)), x=61.5),
+             "#lext": dict(facts(node("a", href="https://example.com/page7", label="Каталог")), x=62.5),
+             "#lother": dict(facts(node("a", href=SITE + "/spa2#", label="Дальше")), x=57.5),
+             "#lpage2": dict(facts(node("a", href=SITE + "/page2", label="Каталог")), x=58.5),
+             "#lq": dict(facts(node("a", href=SPA + "?p=2#list", label="2")), x=59.5)})
+for sel, what in (("#lpub", "ссылка-якорь «Опубликовать» рядом с textarea без формы"),
+                  ("#lsave", "ссылка-якорь «Сохранить» без формы"), ("#lself", "ссылка на ту же страницу"),
+                  ("#lfrag", "ссылка на якорь той же страницы"), ("#ltgt", "ссылка с target"),
+                  ("#lftp", "ссылка не http(s)"), ("#lempty", "ссылка с пустым href"),
+                  ("#lother", "ссылка на другой путь с голым якорем «#»"), ("#lclick", "ссылка с onclick"),
+                  ("#ldl", "ссылка с download"), ("#lext", "ссылка на чужой сайт")):
+    res = act("click", sel, SPA)
+    check(f"[S4][argus-438-3] {what} без поручения — отказ по поручению, без нажатия",
+          res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), (sel, res))
+res = act("click", "#lpage2", SPA)
+check("[S4][argus-438-3] ссылка на /page2 того же сайта — без поручения",
+      res["state"] == "done" and "ссылка" in res["text"] and not mandates(), res)
+res = act("click", "#lq", SPA)
+check("[S4][argus-438-3] ссылка «2» на тот же путь с другим запросом — листание без поручения",
+      res["state"] == "done" and "листание" in res["text"] and not mandates(), res)
+res = act("click", "#lget", SRCH)
+check("[S4][argus-439-2] ссылка «Далее» внутри GET-формы поиска — листание без поручения",
+      res["state"] == "done" and "листание" in res["text"], res)
+res = act("submit", "#gaddr", SRCH)
+check("[S4][argus-439-2] GET-форма с полем address — не поиск: отказ без поручения",
+      res["state"] == "refused" and "поручения" in res["why"], res)
+res = act("submit", "#note", SRCH)
+check("[S5] GET-форма с textarea — не поиск: отказ без поручения, без нажатий",
+      res["state"] == "refused" and "поручения" in res["why"] and not D.cmds(), res)
+res = act("submit", "#more", SRCH)
+check("[U1] селектор находит 3 элемента — отказ со списком найденных, без нажатий",
+      res["state"] == "refused" and "находит 3" in res["why"] and "a «Найти»" in res["why"] and not D.cmds(), res)
+
+# карточка на блок: действие без поручения — вопрос владельцу с [id]; «да» на этот вопрос — поручение
+cards0 = {k for k, v in P.tasks_mod().load_tasks(P.PANTHEON).items() if v[1].get("question")}
+res = act("submit", "#post", SRCH, why="сохранить черновик")
+got = re.search(r"отправлен вопрос \[([^\]]+)\]", res.get("why", ""))
+tasks = P.tasks_mod().load_tasks(P.PANTHEON)
+want = B.mandate_question(TASK, "avito.ru", ["submit"], "сохранить черновик")
+check("[Q2] submit без поручения не поиск — отказ и карточка владельцу: вопрос поручения целиком, ждёт человека",
+      res["state"] == "refused" and got and got.group(1) in tasks and got.group(1) not in cards0
+      and tasks[got.group(1)][1].get("question") == want and tasks[got.group(1)][1].get("waiting_on") == "human"
+      and "--why «сохранить черновик»" in res["why"], res)
+answer(P.now() - 1, want)
+finger(3)
+res = act("submit", "#post", SRCH, why="сохранить черновик")
+check("[Q2] после «да» на вопрос карточки — поручение есть, дальше согласие на отправку (вопрос с кодом)",
+      any("avito.ru__submit" in m for m in mandates()) and res["state"] == "refused" and quoted(res["why"])
+      and "Отправить форму" in quoted(res["why"]) and "отправлен вопрос [" in res["why"], (res, mandates()))
+clear_touch()
+
+# повтор после неудачной отправки: страница не изменилась — согласие не съедено, один повтор
+reset_mandates()
+give()
+D.stuck = True
+finger(0)
+res = act("submit", "#send", SITE + "/items/new")
+check("[P1] отправка по Touch ID, страница не изменилась — итог «не прошла», один повтор",
+      res["state"] == "done" and "не изменилась" in res["text"] and "один повтор" in res["text"]
+      and len(touches()) == 1, res)
+finger(3)
+res = act("submit", "#send", SITE + "/items/new")
+check("[P1] повтор той же формы — без нового согласия и окна", res["state"] == "done" and "повтору" in res["text"]
+      and len(touches()) == 1 and len(D.clicked()) == 1, res)
+res = act("submit", "#send", SITE + "/items/new")
+check("[P1] второй повтор — снова согласие (повтор не даёт повтора)", res["state"] == "refused"
+      and len(touches()) == 2 and not D.clicked(), res)
+D.stuck = False
+finger(0)
+res = act("submit", "#send", SITE + "/items/new")
+finger(3)
+res2 = act("submit", "#send", SITE + "/items/new")
+check("[P2] страница изменилась — согласие съедено, повтор без согласия не даётся",
+      res["state"] == "done" and "не изменилась" not in res["text"] and res2["state"] == "refused", (res, res2))
+D.stuck = True
+finger(0)
+res = act("submit", "#send", SITE + "/items/new")
+D.dom += 1                                        # отправка через fetch очистила поле позже: подпись другая
+finger(3)
+res2 = act("submit", "#send", SITE + "/items/new")
+check("[P3] после «не прошла» страница изменилась — повтора без согласия нет, нажатия нет",
+      "один повтор" in res["text"] and res2["state"] == "refused" and not D.clicked(), (res, res2))
+D.page(SITE + "/msg", {"#send": facts(SEND, fields=[TITLE, field("about", "Привет", type_="", tag="textarea")],
+                                      form=FORM, buttons=["Опубликовать"])})
+finger(0)
+res = act("submit", "#send", SITE + "/msg")
+finger(3)
+res2 = act("submit", "#send", SITE + "/msg")
+check("[P4] форма с textarea, страница не изменилась — повтора нет (двойное сообщение): итог без «один повтор»",
+      res["state"] == "done" and "не изменилась" in res["text"] and "один повтор" not in res["text"]
+      and res2["state"] == "refused" and not D.clicked(), (res, res2))
+TWO = [field("i1", "", type_="checkbox", checked=True), field("i2", "", type_="checkbox", checked=True)]
+D.page(SITE + "/items", {"#del2": facts(node("button", "submit", label="Удалить"), fields=TWO, form=FORM),
+                         "#del": facts(node("button", "submit", label="Удалить"), fields=TWO[:1], form=FORM)})
+res = act("delete", "#del2", SITE + "/items")
+answer(P.now() + 1, quoted(res.get("why")), "Да — удалить")
+at(P.now() + 2)
+res = act("delete", "#del2", SITE + "/items")
+res2 = act("delete", "#del2", SITE + "/items")
+check("[P5] удаление пачки по «да», страница не изменилась — итог без «один повтор», повтор без нового «да» — отказ",
+      res["state"] == "done" and "один повтор" not in res["text"] and res2["state"] == "refused"
+      and not D.clicked(), (res, res2))
+finger(0)
+res = act("delete", "#del", SITE + "/items")
+finger(3)
+res2 = act("delete", "#del", SITE + "/items")
+check("[P5] удаление одного по Touch ID, страница не изменилась — повтора без согласия нет",
+      res["state"] == "done" and "один повтор" not in res["text"] and res2["state"] == "refused"
+      and not D.clicked(), (res, res2))
+D.tab = SITE + "/items"
+bf = dict(B.page_facts("comet", "#del2", None))
+bk, _ = B.classify(bf, "delete")
+B._save("asks", "grant-batch.json", {"grant": True, "task": TASK, "browser": "comet", "window": None,
+                                     "key": B.url_key(bf["url"]), "selector": "#del2", "kind": bk,
+                                     "digest": B.form_digest(bf), "sig": B.page_sig("comet", None), "issued": P.now(),
+                                     "used": None})
+try:
+    got = B.approve("comet", None, TASK, "#del2", bf, bk)
+except (B.Blocked, B.Refuse) as e:
+    got = ("отказ", str(e)[:80])
+check("[P5] запись повтора у пачки (подложена) — approve её не берёт: нужен новый «да»",
+      bk == "delete-batch" and got[0] != "повтор", (bk, got))
+D.stuck = False
+clear_touch()
+
+# --focus у действия: эмуляция фокуса до действия и выключение после
+D.calls.clear()
+res = act("submit", "#find", SRCH, focus=True)
+foc = [c["params"]["enabled"] for c in D.cmds() if c["method"] == "Emulation.setFocusEmulationEnabled"]
+check("[F3] submit --focus: фокус включён до нажатия и выключен после", res["state"] == "done" and foc == [True, False]
+      and D.cmds()[0]["method"] == "Emulation.setFocusEmulationEnabled", (res, foc))
+res = act("submit", "#login", SRCH, focus=True)
+foc = [c["params"]["enabled"] for c in D.cmds() if c["method"] == "Emulation.setFocusEmulationEnabled"]
+check("[F3] --focus и отказ — фокус всё равно выключен", res["state"] == "refused" and foc == [True, False], foc)
+res = act("submit", "#find", SRCH)
+check("[F3] без --focus — Emulation не зовётся",
+      not any(c["method"].startswith("Emulation") for c in D.cmds()), D.cmds())
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)

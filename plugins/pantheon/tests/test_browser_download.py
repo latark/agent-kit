@@ -196,7 +196,7 @@ B.time = types.SimpleNamespace(sleep=lambda s: None, monotonic=time.monotonic, s
 T0 = time.time()
 os.environ["PANTHEON_NOW"] = str(T0)
 SITE = "rosreestr.gov.ru"
-CFG = (B.DEFAULT_DOMAINS + (SITE,), B.DEFAULT_WINDOWS, True)
+CFG = (B.DEFAULT_DOMAINS + (SITE,), B.DEFAULT_WINDOWS, True, ("example.org", "example.net"))
 B.DL_MAX = 6 * 1024 * 1024                    # предел для теста: файлы — единицы МБ, а не сотни
 B.DL_CHUNK = 1024 * 1024 + 7                  # не кратно размеру файла: последний кусок короче
 
@@ -312,11 +312,11 @@ check("файл .pdf из белого списка — как есть, без 
 # --- согласие ----------------------------------------------------------------------------------------------------------
 OTHER = "https://data.example.org/f.zip"
 serve(OTHER, b"x" * 100)
-res = run(req(OTHER), cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+res = run(req(OTHER), cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True, ("example.org", "example.net")))
 check("сайт не из списка без «да» — отказ, демон не зван, папки нет",
       res["state"] == "refused" and "/open" not in D.paths() and not os.path.exists(os.path.join(INBOX, "data.example.org")), res)
 answer(T0 - 600, "[athena-0300] Скачать набор с data.example.org?", "Да")
-res = run(req(OTHER, task="athena-0300"), cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+res = run(req(OTHER, task="athena-0300"), cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True, ("example.org", "example.net")))
 check("«да» владельца по задаче с хостом в вопросе — скачано",
       res["state"] == "done" and os.path.isfile(os.path.join(INBOX, "data.example.org", "f.zip")), res)
 REDIR = f"https://{SITE}/go.zip"
