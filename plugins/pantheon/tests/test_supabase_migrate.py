@@ -10,7 +10,13 @@
 - отказ (код 1, psql не вызывался): файла нет в origin/main (новый; закоммичен, но не слит), файл отличается от
   main, путь не supabase/migrations/…, ссылка, нет SUPABASE_DB_URL, версия уже применена;
 - psql упал — код 1, причина «откатилась»; вызов без файла — код 2; вызов через `pantheon supabase` (run.py);
-- мутанты внутри теста: без проверки «есть в main», без сверки blob, без проверки «уже применена» — тест их ловит.
+- main — только свой ref refs/pantheon/verified-main из fetch: ветка или метка origin/main — отказ «неоднозначно»,
+  подвинутый вручную свой ref fetch перезаписывает;
+- строка подключения не в argv psql и pg_dump, а в PG* окружения (пароль с %-кодом, sslmode, PG* родителя сняты);
+  адрес не postgresql://, без пользователя, с чужим параметром или плохим портом — отказ;
+- мутанты внутри теста: без проверки «есть в main», без сверки blob, без проверки «уже применена», без отказа на
+  неоднозначное имя, короткое имя вместо своего ref, fetch не в свой ref, адрес в argv, psql без PG*, PG* родителя
+  не сняты, чужой параметр адреса молча — тест их ловит.
 """
 import atexit
 import importlib.util
@@ -60,10 +66,14 @@ def git(cwd, *args):
 BIN = os.path.join(ROOT, "bin")
 LOG = os.path.join(ROOT, "calls.log")
 SCHEMA = os.path.join(ROOT, "schema.sql")
-write(os.path.join(BIN, "pg_dump"), '#!/bin/sh\necho "pg_dump $*" | sed "s/postgres:[^ ]*/URL/" >> "$FAKE_LOG"\n'
-      'cat "$FAKE_SCHEMA"\n', 0o755)
+ENVLOG = os.path.join(ROOT, "env.log")
+PGLINE = ('echo "$0 host=$PGHOST port=$PGPORT user=$PGUSER pw=$PGPASSWORD db=$PGDATABASE ssl=$PGSSLMODE" '
+          '>> "$FAKE_ENVLOG"\n')
+write(os.path.join(BIN, "pg_dump"), '#!/bin/sh\necho "pg_dump $*" >> "$FAKE_LOG"\n' + PGLINE + 'cat "$FAKE_SCHEMA"\n',
+      0o755)
 write(os.path.join(BIN, "psql"), r'''#!/bin/sh
-echo "psql $*" | sed "s/postgres:[^ ]*/URL/" >> "$FAKE_LOG"
+echo "psql $*" >> "$FAKE_LOG"
+''' + PGLINE + r'''
 file=
 sql=
 while [ $# -gt 0 ]; do
@@ -104,7 +114,7 @@ git(REPO, "commit", "-m", "local")
 NEW = "supabase/migrations/20260103000000_new.sql"  # не закоммичена вовсе
 write(os.path.join(REPO, NEW), "drop table t;\n")
 STATE = os.path.join(ROOT, "state")
-URL = "postgres://u:secret@db.example/postgres"
+URL = "postgresql://u:secret@db.example:6543/postgres"
 SRC = open(MOD, encoding="utf-8").read()
 
 
@@ -119,10 +129,11 @@ def call(argv, env=None, mod=None):
     """main модуля в этом процессе → (код, stdout, stderr, вызовы psql/pg_dump)."""
     write(SCHEMA, "create schema public;\n")
     write(LOG, "")
+    write(ENVLOG, "")
     keep = dict(os.environ)
     os.environ.update({**GIT_ENV, "PATH": BIN + os.pathsep + keep.get("PATH", ""), "FAKE_LOG": LOG,
-                       "FAKE_SCHEMA": SCHEMA, "SUPABASE_DB_URL": URL})
-    for k in ("FAKE_TABLE", "FAKE_COUNT", "FAKE_APPLY_FAIL"):
+                       "FAKE_ENVLOG": ENVLOG, "FAKE_SCHEMA": SCHEMA, "SUPABASE_DB_URL": URL})
+    for k in ("FAKE_TABLE", "FAKE_COUNT", "FAKE_APPLY_FAIL", "PGHOST", "PGPASSWORD", "PGSSLMODE"):
         os.environ.pop(k, None)
     for k, v in (env or {}).items():
         if v is None:
@@ -160,6 +171,25 @@ check("журнал: migration.sql — текст из main, before/after/schema
 check("строка подключения не попала ни в вывод, ни в журнал",
       "secret" not in out + err and not any("secret" in open(os.path.join(run, f), encoding="utf-8").read()
                                             for f in os.listdir(run)) if run else False)
+envs = open(ENVLOG, encoding="utf-8").read().splitlines()
+check("строки подключения нет в argv psql и pg_dump (ни пароля, ни хоста)",
+      calls.strip() and "secret" not in calls and "db.example" not in calls and "postgres" + "ql://" not in calls, calls)
+check("psql и pg_dump получили адрес разобранным в PG* окружения — каждый вызов (2 pg_dump + 3 psql)",
+      len(envs) == 5 and all(x.endswith(" host=db.example port=6543 user=u pw=secret db=postgres ssl=") for x in envs),
+      envs)
+code, out, err, calls = call(["migrate", p(MIG)], {"SUPABASE_DB_URL": "postgresql://u:p%40ss@db.example/app?sslmode=require",
+                                                    "PGHOST": "evil.example", "PGSSLMODE": "disable"})
+envs = open(ENVLOG, encoding="utf-8").read().splitlines()
+check("пароль с %-кодом раскодирован, sslmode → PGSSLMODE, PG* родителя не протекли, порт не задан — не задан",
+      code == 0 and envs and all(x.endswith(" host=db.example port= user=u pw=p@ss db=app ssl=require") for x in envs),
+      (code, err, envs))
+for bad, word in (("host=db.example user=u password=secret", "нужен адрес"), ("postgresql://db.example/x", "нужен адрес"),
+                  ("postgresql://u:secret@db.example/x?options=-c%20x", "не поддержан"),
+                  ("postgresql://u:secret@db.example:99999/x", "не разобран")):
+    code, out, err, calls = call(["migrate", p(MIG)], {"SUPABASE_DB_URL": bad})
+    check(f"адрес {bad.split('@')[-1][:30]!r} — код 1, «{word}», база не тронута, пароля нет в выводе",
+          code == 1 and word in err.strip().splitlines()[-1] and not calls.strip() and "secret" not in out + err,
+          (code, err, calls))
 code, out, err, calls = call(["migrate", p(MIG)], {"FAKE_TABLE": "f"})
 check("таблицы schema_migrations нет — применено без записи версии", code == 0 and "insert into" not in calls, calls)
 code, out, err, calls = call(["migrate", p(MIG), "--dry-run"], {"SUPABASE_DB_URL": None})
@@ -196,6 +226,19 @@ check("psql упал — код 1, «откатилась», схема та ж�
 for argv in ([], ["migrate"], ["apply", p(MIG)], ["migrate", p(MIG), p(LOCAL)], ["migrate", p(MIG), "--force"]):
     code, out, err, calls = call(argv)
     check(f"вызов {argv[:1] + ['…'] * (len(argv) > 1)} не тот — код 2", code == 2, (argv, code, err))
+
+# --- main берётся только из своего ref, а не по короткому имени origin/main ---
+for ref in ("refs/tags/origin/main", "refs/heads/origin/main"):
+    git(REPO, "update-ref", ref, "HEAD")  # HEAD — локальный коммит с LOCAL
+    code, out, err, calls = call(["migrate", p(MIG), "--dry-run"])
+    check(f"есть {ref} — код 1, «неоднозначно»", code == 1 and "неоднозначно" in err.strip().splitlines()[-1], err)
+    git(REPO, "update-ref", "-d", ref)
+git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")
+code, out, err, calls = call(["migrate", p(LOCAL), "--dry-run"])
+check("свой ref подвинут на локальный коммит — fetch его перезаписал из origin, LOCAL — отказ",
+      code == 1 and "нет в origin/main" in err, (code, err))
+check("refs/pantheon/verified-main после сверки — main origin", git(REPO, "rev-parse", "refs/pantheon/verified-main")
+      == git(ORIGIN, "rev-parse", "refs/heads/main"))
 
 # --- через pantheon (run.py) ---
 env = {**os.environ, **GIT_ENV, "PATH": BIN + os.pathsep + os.environ.get("PATH", ""), "PANTHEON_STATE": STATE,
@@ -234,6 +277,37 @@ check("мутант (без проверки «уже применена») пр
 M4 = mutant("m = MIGRATION.fullmatch(rel)", r'm = re.fullmatch(r"(.*)()", rel)')
 check("мутант (без проверки пути миграции) пропускает README.md из main — тест это видит",
       call(["migrate", p("README.md"), "--dry-run"], mod=M4)[0] == 0 and call(["migrate", p("README.md"), "--dry-run"])[0] == 1)
+
+M5 = mutant('    for ref in SHADOW:', '    for ref in ():')
+git(REPO, "update-ref", "refs/tags/origin/main", "HEAD")
+check("мутант (без отказа на ветку или метку origin/main) пропускает неоднозначное имя — тест это видит",
+      call(["migrate", p(MIG), "--dry-run"], mod=M5)[0] == 0 and call(["migrate", p(MIG), "--dry-run"])[0] == 1)
+SRC6 = SRC.replace('    for ref in SHADOW:', '    for ref in ():', 1).replace(
+    'VERIFIED + "^{commit}"', 'BASE + "^{commit}"', 1)
+assert SRC6.count('BASE + "^{commit}"') == 1 and "for ref in ():" in SRC6
+check("мутант (короткое имя origin/main вместо своего ref, без отказа) берёт метку с локальным коммитом, а без "
+      "мутанта — отказ «неоднозначно»", call(["migrate", p(LOCAL), "--dry-run"], mod=load(SRC6))[0] == 0
+      and "неоднозначно" in call(["migrate", p(LOCAL), "--dry-run"])[2])
+git(REPO, "update-ref", "-d", "refs/tags/origin/main")
+M7 = mutant('"fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/main:{VERIFIED}"',
+            '"fetch", "--quiet", "--no-tags", "origin", "main"')
+git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")
+check("мутант (fetch не в свой ref) оставляет подвинутый ref — тест это видит",
+      call(["migrate", p(LOCAL), "--dry-run"], mod=M7)[0] == 0 and call(["migrate", p(LOCAL), "--dry-run"])[0] == 1)
+M8 = mutant('cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", sql]',
+            'cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction", "--dbname", url, "-f", sql]')
+check("мутант (адрес в argv psql) — тест это видит", "secret" in call(["migrate", p(MIG)], mod=M8)[3])
+M9 = mutant("timeout=1800, env=db)", "timeout=1800)")
+call(["migrate", p(MIG)], mod=M9)
+check("мутант (psql без PG* окружения) — тест это видит",
+      any(x.startswith(os.path.join(BIN, "psql")) and " pw= " in x for x in open(ENVLOG, encoding="utf-8")))
+M10 = mutant('if not k.startswith("PG")}', "}")
+call(["migrate", p(MIG)], {"PGSSLMODE": "disable"}, mod=M10)
+check("мутант (PG* родителя не сняты) — PGSSLMODE=disable протёк — тест это видит",
+      "ssl=disable" in open(ENVLOG, encoding="utf-8").read())
+M11 = mutant("raise Refused(f\"{DB_ENV}: параметр адреса", "continue  # raise Refused(f\"{DB_ENV}: параметр адреса")
+check("мутант (неизвестный параметр адреса пропущен молча) — тест это видит",
+      call(["migrate", p(MIG)], {"SUPABASE_DB_URL": "postgresql://u:s@db.example/x?options=-c%20x"}, mod=M11)[0] == 0)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

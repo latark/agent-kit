@@ -125,7 +125,7 @@ def hook_run(window, tool, direction=False):
 
 for tool, want in (("mcp__chrome-devtools__click", 0), ("mcp__supabase__list_tables", 0), ("mcp__qmd__query", 0),
                    ("mcp__supabase__apply_migration", 2), ("mcp__plugin_supabase_supabase__execute_sql", 2),
-                   ("mcp__evil__x", 2)):
+                   ("mcp__supabase__execute_sql", 2), ("mcp__evil__x", 2)):
     got = hook_run("athena-x", tool, True)
     check(f"окно направления: {tool} — код {want}", got == want, got)
 check("hq: chrome-devtools — отказ, qmd — можно",

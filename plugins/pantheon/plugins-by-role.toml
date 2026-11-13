@@ -65,11 +65,10 @@ mcp_extra = [
   "grafana", "upstash", "vast-ai",
   # MCP плагинов окна (только чтение или документация)
   "plugin_context7_context7", "plugin_vercel_vercel", "plugin_sentry_sentry",
-  # Supabase ([metis-1049-supabase] «А»): только чтение. Сервер проекта (.mcp.json brokerAssistantApp, read_only в
-  # адресе) — ещё execute_sql; у плагина supabase доступ на весь аккаунт и с записью — без execute_sql. Миграции —
-  # `pantheon supabase migrate` из файлов origin/main, не через MCP
+  # Supabase ([metis-1049-supabase] «А»): только чтение — list_*, get_*, документация и типы. execute_sql нет ни у
+  # одного сервера: read_only в адресе сервера проекта — правка чужого .mcp.json, по одному имени сервера её не
+  # проверить (metis-1051, круг проверки безопасности). Миграции — `pantheon supabase migrate` из origin/main
   "supabase__list_*", "supabase__get_*", "supabase__search_docs", "supabase__generate_typescript_types",
-  "supabase__execute_sql",
   "plugin_supabase_supabase__list_*", "plugin_supabase_supabase__get_*", "plugin_supabase_supabase__search_docs",
   "plugin_supabase_supabase__generate_typescript_types",
 ]
@@ -89,7 +88,6 @@ mcp_extra = [
   "chrome-devtools", "next-devtools", "shadcn", "grafana", "upstash", "vast-ai",
   "plugin_context7_context7", "plugin_vercel_vercel", "plugin_sentry_sentry",
   "supabase__list_*", "supabase__get_*", "supabase__search_docs", "supabase__generate_typescript_types",
-  "supabase__execute_sql",
   "plugin_supabase_supabase__list_*", "plugin_supabase_supabase__get_*", "plugin_supabase_supabase__search_docs",
   "plugin_supabase_supabase__generate_typescript_types",
 ]
