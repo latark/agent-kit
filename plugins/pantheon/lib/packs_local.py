@@ -10,10 +10,14 @@
 Направление, у которого в новой папке уже есть хоть один файл пакета, не трогается; файл пишется только новым
 (O_EXCL), существующее не затирается. Пакет переносится целиком: файлы — во временную папку рядом, затем она
 переименовывается в папку направления; прерванный перенос не оставляет полпакета, отметки нет — следующая сборка
-перенесёт заново. Личные записи карты plugins-by-role.toml ([window.<направление>]) — туда же,
+перенесёт заново. Папка направления уже есть, но без файлов пакета (только approved.json и approved/) — файлы встают в
+неё по одному жёсткой ссылкой без замены, approved* не трогаются. Направление, которое есть в источнике, но не
+перенесено и не сохранено, — строка итога и тревога (pantheon.packs_migrate_cmd), отметки нет. Личные записи карты
+plugins-by-role.toml ([window.<направление>]) — туда же,
 в ~/.claude/pantheon/plugins-by-role.toml, если этого файла ещё нет. После переноса — отметка .migrated.json: пакет,
-который владелец потом удалил сам, из старой версии не вернётся. Вручную — `pantheon packs migrate [--from ПАПКА]`
-(без отметки, тоже без затирания).
+который владелец потом удалил сам, из старой версии не вернётся. Отметки нет — перенос делает и запуск окна
+направления (pantheon.window_flags): окно, запущенное раньше сборки, не стартует без пакета. Вручную —
+`pantheon packs migrate [--from ПАПКА]` (без отметки, тоже без затирания).
 
 Модуль-лист: без состояния ядра (P), пути приходят аргументами; грузит его pantheon.py по пути файла.
 """
@@ -113,25 +117,71 @@ TMP_PREFIX = "."  # временная папка пакета: .<направл
 TMP_KEEP = 3600
 
 
+def _journal(dst):
+    """Отметка начатого переноса по файлам в папку dst, которая уже есть (_copy_pack): .<направление>.linking рядом."""
+    return os.path.join(os.path.dirname(dst), f"{TMP_PREFIX}{os.path.basename(dst)}.linking")
+
+
+def unfinished(dst):
+    """Перенос в dst начат и не кончен (есть _journal): файлы пакета в dst — не пакет владельца, перенос продолжается."""
+    return os.path.lexists(_journal(dst))
+
+
 def _copy_pack(src, dst):
     """Пакет src → dst целиком (ревью argus #425 Д2): файлы PACK_FILES (_read, _write_new) — во временную папку
     рядом с dst, затем она переименовывается в dst. Прерванный перенос оставляет не полпакета в dst, а временную папку:
-    отметки нет, следующая сборка перенесёт заново. dst уже есть (не пустая папка) — не тронут. → перенесён ли."""
+    отметки нет, следующая сборка перенесёт заново. dst уже есть без файлов пакета (там только approved.json и
+    approved/, ревью argus #425 Б1) — каждый файл встаёт в dst жёсткой ссылкой (os.link: файла с этим именем нет — иначе
+    отказ, существующее не заменяется); approved* не трогаются. На время — отметка _journal: прерванный перенос
+    следующая сборка доводит. dst с файлом пакета, ссылка или не папка — не тронут. → перенесён ли."""
     parent = os.path.dirname(dst)
     os.makedirs(parent, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}{os.path.basename(dst)}.tmp-", dir=parent)
     try:
-        wrote = False
+        wrote = []
         for f in PACK_FILES:
             data = _read(os.path.join(src, f))
-            if data is not None:
-                wrote = _write_new(os.path.join(tmp, f), data) or wrote
-        if not wrote or os.path.lexists(dst):
+            if data is not None and _write_new(os.path.join(tmp, f), data):
+                wrote.append(f)
+        if not wrote:
             return False
-        os.rename(tmp, dst)
-        return True
+        if not os.path.lexists(dst) and not unfinished(dst):
+            try:
+                os.rename(tmp, dst)
+                return True
+            except OSError:  # папка появилась, пока копировали: дальше — как в уже существующую
+                pass
+        if os.path.islink(dst) or not os.path.isdir(dst) or (has_pack(dst) and not unfinished(dst)):
+            return False
+        return _link_into(tmp, dst, wrote)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _try_copy(src, dst):
+    """_copy_pack; сбой записи (OSError) — не перенесён, остальные направления переносятся дальше."""
+    try:
+        return _copy_pack(src, dst)
+    except OSError:
+        return False
+
+
+def _link_into(tmp, dst, files):
+    """Файлы files из tmp — в существующую папку dst жёсткими ссылками, без замены (см. _copy_pack). Подпапка dst —
+    ссылка: отказ, отметка _journal остаётся до следующей сборки. → все ли файлы на месте."""
+    _write_new(_journal(dst), b"")
+    for f in files:
+        to = os.path.join(dst, f)
+        sub = os.path.dirname(to)
+        if sub != dst and os.path.islink(sub):
+            return False
+        os.makedirs(sub, exist_ok=True)
+        try:
+            os.link(os.path.join(tmp, f), to, follow_symlinks=False)
+        except FileExistsError:  # уже есть (прерванный перенос или файл владельца) — не заменяется
+            pass
+    os.remove(_journal(dst))
+    return True
 
 
 def _drop_stale_tmp(packs):
@@ -181,7 +231,7 @@ def migrate(packs, plugin, map_local, directions=(), base_windows=(), stamp="", 
     """Перенос пакетов и личных записей карты в данные пользователя (см. шапку). → {"from": корень или папка
     источника или None, "copied": [направления], "kept": [направления, где пакет уже есть], "map": [окна карты]}.
     mark — автоматический путь: отметка MARK в packs после переноса; уже есть отметка — ничего не делает."""
-    res = {"from": None, "copied": [], "kept": [], "map": []}
+    res = {"from": None, "copied": [], "kept": [], "map": [], "failed": []}
     if mark and os.path.lexists(os.path.join(packs, MARK)):
         return res
     src_packs, root = legacy_root(plugin, src)
@@ -193,31 +243,34 @@ def migrate(packs, plugin, map_local, directions=(), base_windows=(), stamp="", 
     _drop_stale_tmp(packs)
     for n in names(src_packs):
         dst = os.path.join(packs, n)
-        if has_pack(dst):
+        if has_pack(dst) and not unfinished(dst):
             res["kept"].append(n)
-            continue
-        if _copy_pack(os.path.join(src_packs, n), dst):
+        elif _try_copy(os.path.join(src_packs, n), dst):
             res["copied"].append(n)
-        elif has_pack(dst):  # появился, пока копировали: не тронут
+        elif has_pack(dst) and not unfinished(dst):  # появился, пока копировали: не тронут
             res["kept"].append(n)
+        else:  # в источнике есть, не перенесён и не сохранён: не молча (ревью argus #425 Б1)
+            res["failed"].append(n)
     entries = map_entries(root, set(directions), set(base_windows)) if root and map_local else {}
     # личная карта, которая уже есть, не затирается: _write_new пишет только новый файл (O_EXCL)
     if entries and _write_new(map_local, map_text(entries, f"перенесено из {res['from']} {stamp}").encode()):
         res["map"] = sorted(entries)
-    if mark:
+    if mark and not res["failed"]:  # не перенесённое — без отметки: следующая сборка повторит
         _write_new(os.path.join(packs, MARK), json.dumps({**res, "at": stamp}, ensure_ascii=False).encode())
     return res
 
 
 def report(res, tilde, packs, map_local, quiet=False):
     """Строки итога migrate для человека. quiet (шаг сборки окон) — только когда что-то перенесено."""
-    if quiet and not (res["copied"] or res["map"]):
+    if quiet and not (res["copied"] or res["map"] or res.get("failed")):
         return []
     out = []
     if res["from"] is not None:
         out.append(f"пакеты направлений: источник {tilde(res['from'])}")
     out += [f"перенесён пакет {n} → {tilde(os.path.join(packs, n))}" for n in res["copied"]]
     out += [f"пакет {n} уже есть в {tilde(os.path.join(packs, n))} — не тронут" for n in res["kept"]]
+    out += [f"пакет {n} не перенесён в {tilde(os.path.join(packs, n))}: там не папка, ссылка или запись не удалась — "
+            "повтор на следующей сборке окон" for n in res.get("failed", ())]
     if res["map"]:
         out.append(f"личная карта плагинов {tilde(map_local)}: окна {', '.join(res['map'])}")
     if res["copied"]:  # ревью argus #425 Д1: правила направлений больше не в коде

@@ -113,7 +113,9 @@ def main():
     w = load("window_rules_t", os.path.join(LIB, "window_rules.py"))
     src = open(os.path.join(LIB, "window_rules.py"), encoding="utf-8").read()
     imports = re.findall(r"^\s*(?:import|from)\s+(\S+)", src, re.M)
-    check("window_rules.py: без ввода-вывода и чужих модулей — только re", imports == ["re"], imports)
+    # shlex — разбор команды хука пакета (pack_hook_problem, ревью argus #425 Б2): модуль стандартной библиотеки,
+    # split без ввода-вывода
+    check("window_rules.py: без ввода-вывода и чужих модулей — только re и shlex", imports == ["re", "shlex"], imports)
     check("правила на месте: COORDINATOR_ALLOW пуст (metis-0137), GATED_MERGE_RULE, REVIEW_RECORD_RULE",
           w.COORDINATOR_ALLOW == [] and w.GATED_MERGE_RULE.startswith("Pantheon Gated Merge:")
           and w.REVIEW_RECORD_RULE.startswith("Pantheon Review Record:"))

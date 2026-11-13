@@ -19,7 +19,9 @@
         "${HOME}/projects/god-proj/app/.env.local",
         "METRICS_URL,METRICS_TOKEN",
         "--",
-        "${HOME}/.local/bin/mcp-metrics",
+        "npx",
+        "-y",
+        "@example/metrics-mcp@1.2.0",
         "-t",
         "stdio"
       ]

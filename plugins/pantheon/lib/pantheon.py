@@ -3255,7 +3255,7 @@ def packs_migrate(src=None, mark=False):
     PLUGIN_MAP_LOCAL, без затирания (PACKS_LOCAL.migrate). mark — путь сборки: один раз, с отметкой."""
     wins = plugin_map_names("window")[0]
     if wins is None and mark:  # реестр не прочитан: личные записи карты не отобрать — без отметки, до следующей сборки
-        return {"from": None, "copied": [], "kept": [], "map": []}
+        return {"from": None, "copied": [], "kept": [], "map": [], "failed": []}
     wins = wins or set()
     try:
         base = set(PLUGIN_MAP.load(PLUGIN_MAP_FILE)["window"])
@@ -3264,9 +3264,11 @@ def packs_migrate(src=None, mark=False):
     return PACKS_LOCAL.migrate(PACKS, PLUGIN, PLUGIN_MAP_LOCAL, wins - plugin_map_system(), base, stamp(), src, mark)
 
 
-def packs_migrate_cmd(rest, mark=False):
-    """`pantheon packs migrate [--from ПАПКА]` и шаг domains build (mark): строки итога в stdout. → код: 0 — перенесено
-    или уже было, 1 — источника нет или запись не удалась (причина последней строкой), 2 — не те аргументы."""
+def packs_migrate_cmd(rest, mark=False, out=None):
+    """`pantheon packs migrate [--from ПАПКА]` и шаг domains build (mark): строки итога в out (stdout; запуск окна —
+    stderr). Направление из источника не перенесено и не сохранено — тревога packs-migrate-failed (ревью argus #425 Б1).
+    → код: 0 — перенесено или уже было, 1 — источника нет или запись не удалась (причина последней строкой), 2 — не
+    те аргументы."""
     if rest[1:] and (rest[1] != "--from" or len(rest) != 3):
         print("pantheon packs migrate [--from <папка плагина или пакетов>]", file=sys.stderr)
         return 2
@@ -3276,7 +3278,15 @@ def packs_migrate_cmd(rest, mark=False):
         print(f"pantheon packs: пакеты в {tilde(PACKS)} не перенесены — {e}", file=sys.stderr)
         return 1
     for line in PACKS_LOCAL.report(res, tilde, PACKS, PLUGIN_MAP_LOCAL, quiet=mark):
-        print(line)
+        print(line, file=out or sys.stdout)
+    if res["failed"]:
+        alert_once("packs-migrate-failed", repr(res["failed"]), f"пакеты направлений {', '.join(res['failed'])} не "
+                   f"перенесены из {tilde(res['from'])} в {tilde(PACKS)}: окна идут без своих хуков и MCP. Повтор — на "
+                   "каждой сборке окон; вручную — `pantheon packs migrate` (README, «После выпуска 12.11»)", "pantheon")
+        print(f"pantheon packs: не перенесены {', '.join(res['failed'])} — см. строки выше", file=sys.stderr)
+        return 1
+    if res["from"] is not None:
+        clear_once("packs-migrate-failed")
     if res["from"] is None and not mark:
         print(f"pantheon packs: прежних пакетов нет ни в версиях плагина рядом с {tilde(PLUGIN)}, ни в --from",
               file=sys.stderr)
@@ -4026,6 +4036,10 @@ def window_flags(window, name=None):
 
     if parts:
         args += ["--append-system-prompt-file", run_file("agents.md", "\n\n".join(parts))]
+    if not os.path.lexists(os.path.join(PACKS, PACKS_LOCAL.MARK)):
+        # окно запущено раньше первой сборки после выпуска 12.11: пакет ещё в прежней версии плагина (ревью argus #425
+        # Д3). Итог — в stderr: stdout запуска читают как вывод команды
+        packs_migrate_cmd(["migrate"], mark=True, out=sys.stderr)
     snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
     plugin = os.path.join(snap, "plugin") if snap else None
     plugin = plugin if plugin and os.path.isfile(os.path.join(plugin, ".claude-plugin", "plugin.json")) else None

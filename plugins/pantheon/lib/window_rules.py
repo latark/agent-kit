@@ -7,6 +7,7 @@ pantheon.py (`pantheon domains build`) по пути файла — python3 -I �
 """
 
 import re
+import shlex
 
 # permissions.allow окон координаторов — пусто (metis-0137). Раньше здесь стояло Bash(gh pr merge *) (metis-0050), но
 # правило allow срабатывает раньше классификатора режима auto, а формы --admin и --auto классификатор не судит: слияние
@@ -148,13 +149,22 @@ def auto_mode(auto_allow):
 
 # Пакет окна направления (~/.claude/pantheon/packs/<направление>, metis-0933) — данные пользователя, а его хуки и
 # серверы MCP идут вне песочницы окна. Поэтому ядро берёт плагин и mcp.json пакета в окно, только если они такого вида
-# (ревью argus #425 Б1): хук — только через in_repo.py пакета (скрипт репозитория по эталону хеша) или prompt; сервер
-# MCP — только через env_from.py пакета, а за его «--» — npx с точной версией или программа по пути, не интерпретатор
-# (скрипт из папки, которую окно пишет, вне песочницы не пойдёт); http, sse и ws — без headersHelper. Поля plugin.json,
-# которые сами запускают код мимо hooks.json, запрещены. Нарушение — плагин и MCP пакета в окно не идут, строка в
-# alerts.md (pantheon.pack_admit).
+# (ревью argus #425 Б1, Б2 и проверка безопасности #425): хук — prompt или команда, которую shlex разбирает целиком:
+# без ; & | ` ( ) < >, перевода строки и $ кроме $HOME, ${HOME} и ${CLAUDE_PLUGIN_ROOT}; это in_repo.py пакета (скрипт
+# репозитория по эталону хеша), а за его «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или
+# python3 -I ${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py (pack_hook_problem). Сервер MCP — только через env_from.py пакета, а
+# за его «--» — только npx -y <пакет>@x.y.z: программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
+# папки, которую окно пишет; http, sse и ws — без headersHelper. Поля plugin.json, которые сами запускают код мимо
+# hooks.json, запрещены. Нарушение — плагин и MCP пакета в окно не идут, строка в alerts.md (pantheon.pack_admit).
 PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"
-PACK_HOOK_PREFIX = 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
+PACK_HOOK_BIN = "${CLAUDE_PLUGIN_ROOT}/../_bin/"
+PACK_HOOK_LEAD = ["python3", "-I", PACK_HOOK_BIN + "in_repo.py"]
+# знаки оболочки, которые цепляют вторую команду, подставляют вывод или перенаправляют, и $ кроме трёх переменных
+PACK_HOOK_META = re.compile(r"[;&|`()<>\n\r]|\$(?!\{CLAUDE_PLUGIN_ROOT\}|\{HOME\}|HOME(?![A-Za-z0-9_]))")
+PACK_HOOK_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")  # одно имя файла: без /, не с точки (не ..)
+# что разрешено за «--» in_repo.py: (начало, папка скрипта, окончание имени)
+PACK_HOOK_RUN = ((["bash"], ".claude/hooks/", ""), (["python3", "-I"], ".claude/hooks/", ""),
+                 (["python3", "-I"], PACK_HOOK_BIN, ".py"))
 PACK_MCP_PREFIX = ["-I", PACK_BIN_MARK + "/env_from.py"]
 PACK_MANIFEST_EXEC = ("hooks", "mcpServers", "lspServers")
 PACK_STDIO_KEYS = {"type", "command", "args", "env"}
@@ -164,8 +174,6 @@ PACK_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 PACK_ENV_DENY = re.compile(r"PATH|HOME|TMPDIR|SHELL|ENV|BASH_ENV|ZDOTDIR|DYLD_.*|LD_.*|NODE_.*|NPM_CONFIG_.*|PYTHON.*"
                            r"|.*_PROXY|GUARD_.*|ANTHROPIC_.*|CLAUDE.*")
 NPX_PINNED = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+")
-PACK_INTERPRETER = re.compile(r"[a-z]*sh|env|python[0-9.]*|node|deno|bunx?|npx|npm|pnpm|pnpx|yarn|uvx?|pipx|ruby|perl"
-                              r"|php|osascript|java|open|xargs|exec|eval|source")
 
 
 def pack_problems(manifest, hooks, mcp):
@@ -187,8 +195,10 @@ def pack_problems(manifest, hooks, mcp):
                 for h in hs if isinstance(hs, list) else [None]:
                     kind = h.get("type") if isinstance(h, dict) else None
                     cmd = h.get("command") if kind == "command" else None
-                    if kind != "prompt" and not (isinstance(cmd, str) and cmd.startswith(PACK_HOOK_PREFIX)):
-                        out.append(f"hooks.json {ev}: хук не через in_repo.py пакета — {str(cmd or kind)[:160]}")
+                    why = "не command и не prompt" if kind not in ("command", "prompt") else (
+                        pack_hook_problem(cmd) if kind == "command" else None)
+                    if why:
+                        out.append(f"hooks.json {ev}: {why} — {str(cmd or kind)[:160]}")
     if mcp is not None:
         servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
         if not isinstance(servers, dict):
@@ -218,10 +228,30 @@ def pack_server_problem(s):
             or not all(isinstance(a, str) for a in args)):
         return f"не через env_from.py пакета (python3 -I {PACK_BIN_MARK}/env_from.py … -- <команда>): {s['command']} {args}"[:240]
     run = args[args.index("--") + 1:]
-    if run[:1] == ["npx"]:
-        if len(run) > 2 and run[1] == "-y" and NPX_PINNED.fullmatch(run[2]):
-            return None
-        return f"npx — только `npx -y <пакет>@x.y.z`: {' '.join(run)[:160]}"
-    if not run or "/" not in run[0] or PACK_INTERPRETER.fullmatch(run[0].rsplit("/", 1)[-1]):
-        return f"за «--» — не npx с точной версией и не программа по пути: {' '.join(run)[:160] or 'пусто'}"
-    return None
+    if run[:2] == ["npx", "-y"] and len(run) > 2 and NPX_PINNED.fullmatch(run[2]):
+        return None
+    return f"за «--» — только `npx -y <пакет>@x.y.z`: {' '.join(run)[:160] or 'пусто'}"
+
+
+def pack_hook_problem(cmd):
+    """Причина, по которой команда хука пакета cmd не годится (см. выше), или None."""
+    if not isinstance(cmd, str):
+        return "нет строки command"
+    bad = PACK_HOOK_META.search(cmd)
+    if bad:
+        return f"знак оболочки {bad.group()!r}: хук — одна команда без цепочек, подстановок и перенаправлений"
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return "строку не разобрать (кавычки)"
+    if argv[:3] != PACK_HOOK_LEAD or "--" not in argv:
+        return f"хук не через in_repo.py пакета (python3 -I \"{PACK_HOOK_BIN}in_repo.py\" … -- <скрипт>)"
+    run = argv[argv.index("--") + 1:]
+    for lead, folder, ext in PACK_HOOK_RUN:
+        n = len(lead)
+        if run[:n] == lead and len(run) > n and run[n].startswith(folder):
+            name = run[n][len(folder):]
+            if PACK_HOOK_NAME.fullmatch(name) and name.endswith(ext):
+                return None
+    return ("за «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или "
+            f"python3 -I {PACK_HOOK_BIN}<имя>.py")

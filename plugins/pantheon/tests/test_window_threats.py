@@ -208,7 +208,7 @@ def execs(tokens, cwd, why, wrapped=False):
             errs.append((why, f"npx {pkg} — без точной версии"))
         if not wrapped:  # Claude Code запускает сервер в папке запуска: npx взял бы её node_modules и .npmrc
             errs.append((why, f"npx {pkg} — без env_from.py: cwd — папка запуска окна"))
-    elif base not in ("mcp-metrics",):
+    else:
         errs.append((why, f"{base}: неизвестно, что исполняет"))
     return out, errs
 

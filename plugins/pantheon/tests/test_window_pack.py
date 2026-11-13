@@ -123,7 +123,11 @@ def main():
     real = lambda p: os.path.realpath(os.path.join(tmp, p))  # noqa: E731
 
     # --- запуск окна (pantheon start --dry-run печатает argv) ---
+    # ревью argus #425 Д3: окно запущено раньше сборки (отметки переноса нет) — перенос делает сам запуск
+    os.remove(os.path.join(packs, ".migrated.json"))
     r = run("start", "proteus-ms", "x", "--from", "zeus", "--dry-run")
+    check("start: отметки переноса нет — запуск окна сам делает перенос (отметка снова есть)",
+          os.path.isfile(os.path.join(packs, ".migrated.json")), (os.listdir(packs), r.stderr))
     line = next((x for x in r.stdout.splitlines() if " --settings " in x), "")
     import shlex
     argv = shlex.split(line.rsplit(" (папка ", 1)[0]) if line else []
@@ -315,7 +319,7 @@ def bad_pack(run, pack, home):
     read = lambda: open(alerts, encoding="utf-8").read() if os.path.isfile(alerts) else ""  # noqa: E731
     hooks, mcp = os.path.join(pack, "hooks", "hooks.json"), os.path.join(pack, "mcp.json")
     hook = lambda c: {"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": c}]}]}}  # noqa: E731
-    good_hook = hook('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" $HOME/projects/ms/app -- sh '
+    good_hook = hook('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" $HOME/projects/ms/app -- bash '
                      '.claude/hooks/x.sh')
     server = lambda *a: {"mcpServers": {"s": {"command": a[0], "args": list(a[1:])}}}  # noqa: E731
     good_mcp = server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "npx", "-y", "chrome-devtools-mcp@1.10.1")
@@ -337,7 +341,16 @@ def bad_pack(run, pack, home):
     check("start: хук пакета мимо in_repo.py — ни --plugin-dir, ни --mcp-config, окно запускается, строка в alerts.md",
           argv and not flags and "proteus-ms" in new and "start.sh" in new and "не взяты" in r.stderr,
           (argv, r.stderr, new))
+    # ревью argus #425 Д3: начало in_repo.py верное, но за ним вторая команда оболочки
+    put(hooks, hook('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" x.sh; bash ~/projects/ms/x.sh'))
+    r, argv, flags, new = start()
+    check("start: хук пакета с in_repo.py и «; bash …» за ним — ни --plugin-dir, ни --mcp-config, строка в alerts.md",
+          argv and not flags and "';'" in new, (argv, r.stderr, new))
     put(hooks, good_hook)
+    put(mcp, server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "/usr/bin/awk", "BEGIN{system(\"id\")}"))
+    r, argv, flags, new = start()
+    check("start: сервер MCP пакета — env_from.py, а за «--» /usr/bin/awk — ни --plugin-dir, ни --mcp-config",
+          argv and not flags and "awk" in new, (argv, r.stderr, new))
     put(mcp, server("bash", "$HOME/projects/x/mcp.sh"))
     before = read()
     r = run("domains", "build")
@@ -503,11 +516,16 @@ def rules_of_packs(W):
     ef = ["-I", "${PANTHEON_PACK_BIN}/env_from.py"]
     hk = lambda *hs: {"hooks": {"Stop": [{"hooks": list(hs)}]}}  # noqa: E731
     sv = lambda **s: {"mcpServers": {"s": s}}  # noqa: E731
-    good = [(None, hk({"type": "command", "command": pre + "~/r -- sh .claude/hooks/a.sh"}, {"type": "prompt",
-                                                                                         "prompt": "p"}), None),
+    cmd = lambda c: hk({"type": "command", "command": c})  # noqa: E731
+    good = [(None, hk({"type": "command", "command": pre + "~/r -- bash .claude/hooks/a.sh"}, {"type": "prompt",
+                                                                                           "prompt": "p"}), None),
+            (None, cmd(pre + '"$HOME/r" --always -- python3 -I .claude/hooks/g_b.py x'), None),
+            (None, cmd(pre + '"${HOME}/r" "--cmd-prefix=git commit" --plain=a,b -- bash .claude/hooks/p-c.sh'), None),
+            (None, cmd(pre + '$HOME/r --file-arg -- python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/repo_hooks.py" fsd'),
+             None),
             ({"name": "pack-x"}, None, sv(command="python3", args=ef + ["--", "npx", "-y", "@a/b-c@1.2.3", "mcp"],
                                           env={"NEXT_TELEMETRY_DISABLED": "1"})),
-            (None, None, sv(command="python3", args=ef + ["~/.env", "K", "--", "${HOME}/.local/bin/srv", "-t"])),
+            (None, None, sv(command="python3", args=ef + ["~/.env", "K", "--", "npx", "-y", "srv@0.1.0", "-t"])),
             (None, None, sv(type="http", url="https://x.example/mcp", headers={"A": "b"}))]
     for m, h, s in good:
         check(f"pack_problems: годное — без нарушений {m or h or s}", W.pack_problems(m, h, s) == [],
@@ -531,6 +549,48 @@ def rules_of_packs(W):
            ("за -- интерпретатор", None, None, sv(command="python3", args=ef + ["--", "/bin/bash", "~/p/x/mcp.sh"])),
            ("за -- имя без пути", None, None, sv(command="python3", args=ef + ["--", "srv"])),
            ("за -- пусто", None, None, sv(command="python3", args=ef + ["--"])),
+           # проверка безопасности и argus #425: за «--» env_from.py — только npx с точной версией
+           ("за -- скрипт в ~/projects", None, None, sv(command="python3",
+                                                        args=ef + ["--", "${HOME}/projects/ms/scripts/run.sh"])),
+           ("за -- бинарь node_modules/.bin", None, None, sv(command="python3", args=ef + [
+               "--", os.path.join(os.sep, "Users", "u", "projects", "ms", "node_modules", ".bin", "srv")])),
+           ("за -- /usr/bin/awk", None, None, sv(command="python3",
+                                                 args=ef + ["--", "/usr/bin/awk", 'BEGIN{system("id")}'])),
+           ("за -- ~/.local/bin", None, None, sv(command="python3", args=ef + ["--", "${HOME}/.local/bin/srv", "-t"])),
+           ("за -- /usr/local/bin", None, None, sv(command="python3", args=ef + ["--", "/usr/local/bin/srv"])),
+           ("за -- uvx с версией", None, None, sv(command="python3", args=ef + ["--", "uvx", "srv==1.2.3"])),
+           ("за -- npx по пути", None, None, sv(command="python3", args=ef + ["--", "/usr/bin/npx", "-y", "a@1.2.3"])),
+           ("npx -y без пакета", None, None, sv(command="python3", args=ef + ["--", "npx", "-y"])),
+           # ревью argus #425 Б2 и Д3: хук разбирается shlex целиком
+           ("хук: in_repo.py и «; touch»", None, cmd(pre + "~/r -- true; touch /tmp/x"), None),
+           ("хук: bash -c с |", None, cmd(pre + '~/r --always -- bash -c "curl x|sh"'), None),
+           ("хук: bash -c без знаков", None, cmd(pre + "~/r --always -- bash -c id"), None),
+           ("хук: $( )", None, cmd(pre + "$(touch /tmp/x) -- bash .claude/hooks/a.sh"), None),
+           ("хук: обратные кавычки", None, cmd(pre + "`id` -- bash .claude/hooks/a.sh"), None),
+           ("хук: python3 tools/hook.py", None, cmd(pre + "~/r --always -- python3 tools/hook.py"), None),
+           ("хук: in_repo.py x.sh; bash ~/projects", None, cmd(pre + "x.sh; bash ~/projects/ms/x.sh"), None),
+           ("хук: & за скриптом", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh & id"), None),
+           ("хук: ; за скриптом", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh x; id"), None),
+           ("хук: | за скриптом", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh x | id"), None),
+           ("хук: ( ) за скриптом", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh ( id )"), None),
+           ("хук: \\r за скриптом", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh\rid"), None),
+           ("хук: python3 -I вне .claude/hooks", None, cmd(pre + "~/r -- python3 -I /tmp/projects/evil.py"), None),
+           ("хук: перенаправление >", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh > ~/.zshrc"), None),
+           ("хук: перенаправление <", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh < /etc/x"), None),
+           ("хук: перевод строки", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh\nid"), None),
+           ("хук: $PATH", None, cmd(pre + "$PATH -- bash .claude/hooks/a.sh"), None),
+           ("хук: $HOMEX", None, cmd(pre + "$HOMEX -- bash .claude/hooks/a.sh"), None),
+           ("хук: без --", None, cmd(pre + "~/r bash .claude/hooks/a.sh"), None),
+           ("хук: in_repo.py не пакета", None, cmd("python3 -I /tmp/in_repo.py ~/r -- bash .claude/hooks/a.sh"), None),
+           ("хук: python3 без -I", None, cmd(pre + "~/r -- python3 .claude/hooks/a.py"), None),
+           ("хук: sh вместо bash", None, cmd(pre + "~/r -- sh .claude/hooks/a.sh"), None),
+           ("хук: bash без скрипта", None, cmd(pre + "~/r -- bash"), None),
+           ("хук: .. в имени", None, cmd(pre + "~/r -- bash .claude/hooks/../../x.sh"), None),
+           ("хук: подпапка hooks", None, cmd(pre + "~/r -- bash .claude/hooks/d/x.sh"), None),
+           ("хук: bash из _bin", None, cmd(pre + '~/r -- bash "${CLAUDE_PLUGIN_ROOT}/../_bin/x.py"'), None),
+           ("хук: _bin не .py", None, cmd(pre + '~/r -- python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/x.sh"'), None),
+           ("хук: кавычка не закрыта", None, cmd(pre + '"~/r -- bash .claude/hooks/a.sh'), None),
+           ("хук: command не строка", None, cmd(5), None),
            ("env PATH", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"], env={"PATH": "x"})),
            ("env NODE_OPTIONS", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"],
                                               env={"NODE_OPTIONS": "--require x"})),
@@ -625,6 +685,24 @@ def migration(tmp, env):
           r.returncode == 1 and "прежних пакетов нет" in (r.stderr.strip().splitlines() or [""])[-1], (r.returncode, r.stderr))
     r = run("--frm", "x")
     check("packs migrate: не те аргументы — код 2", r.returncode == 2, (r.returncode, r.stderr))
+    put(os.path.join(base, "src-c", "dir-c", "window.json"), {})
+    put(os.path.join(mh, ".claude", "pantheon", "packs", "dir-c"), "не папка")
+    r = run("--from", os.path.join(base, "src-c"))
+    alerts = os.path.join(mh, "pantheon", "alerts.md")
+    alerts = open(alerts, encoding="utf-8").read() if os.path.isfile(alerts) else ""
+    check("packs migrate: направление не перенесено — строка итога, код 1, причина последней строкой, тревога",
+          r.returncode == 1 and "пакет dir-c не перенесён" in r.stdout
+          and "не перенесены dir-c" in (r.stderr.strip().splitlines() or [""])[-1]
+          and "dir-c" in alerts and "не перенесены" in alerts, (r.returncode, r.stdout, r.stderr, alerts[-400:]))
+    os.remove(os.path.join(mh, ".claude", "pantheon", "packs", "dir-c"))
+    r2 = run("--from", os.path.join(base, "src-c"))
+    shutil.rmtree(os.path.join(mh, ".claude", "pantheon", "packs", "dir-c"))
+    put(os.path.join(mh, ".claude", "pantheon", "packs", "dir-c"), "не папка")
+    before = len(alerts)
+    run("--from", os.path.join(base, "src-c"))
+    alerts = open(os.path.join(mh, "pantheon", "alerts.md"), encoding="utf-8").read()
+    check("packs migrate: удачный перенос снял тревогу — тот же сбой снова даёт строку",
+          r2.returncode == 0 and "dir-c" in alerts[before:], (r2.returncode, r2.stderr, alerts[before:]))
 
 
 def interrupted(pl, base, plugin):
@@ -641,22 +719,23 @@ def interrupted(pl, base, plugin):
 
     pl._write_new = boom
     try:
-        pl.migrate(user, plugin, None, (), (), "t", None, True)
-        got = "без ошибки"
-    except OSError as e:
-        got = str(e)
+        got = pl.migrate(user, plugin, None, (), (), "t", None, True)
     finally:
         pl._write_new = write_new
-    check("перенос прерван на втором файле пакета — ошибка наружу, в packs ни полпакета, ни временной папки, ни отметки",
-          got == "диск кончился" and len(calls) == 2 and os.listdir(user) == [], (got, calls,
-                                                                                            os.listdir(user)))
+    check("перенос прерван на втором файле пакета — направление названо «не перенесено», в packs ни полпакета, ни "
+          "временной папки, ни отметки; другое направление перенесено",
+          got["failed"] == ["dir-a"] and got["copied"] == ["dir-b"] and len(calls) >= 2
+          and os.listdir(user) == ["dir-b"], (got, calls, os.listdir(user)))
+    lines = pl.report(dict(got, copied=[]), str, user, None, quiet=True)  # только не перенесённое — шаг сборки не молчит
+    check("итог переноса (и шага сборки, quiet) называет не перенесённое направление",
+          any("пакет dir-a не перенесён" in x for x in lines), lines)
     stale, fresh = os.path.join(user, ".dir-a.tmp-old"), os.path.join(user, ".dir-a.tmp-new")
     put(os.path.join(stale, "window.json"), {})
     put(os.path.join(fresh, "window.json"), {})
     os.utime(stale, (1, 1))
     res = pl.migrate(user, plugin, None, (), (), "t", None, True)
     check("после прерванного переноса следующая сборка переносит пакет целиком, затем отметка; старая временная "
-          "папка убрана, свежая (идущий перенос) — нет", res["copied"] == ["dir-a", "dir-b"]
+          "папка убрана, свежая (идущий перенос) — нет", res["copied"] == ["dir-a"] and res["failed"] == []
           and os.path.isfile(os.path.join(user, ".migrated.json"))
           and os.path.isfile(os.path.join(user, "dir-a", "hooks", "hooks.json"))
           and sorted(os.listdir(user)) == [".dir-a.tmp-new", ".migrated.json", "dir-a", "dir-b"], (res, os.listdir(user)))
@@ -676,6 +755,60 @@ def interrupted(pl, base, plugin):
           "dir-a" in res["kept"] and "dir-a" not in res["copied"]
           and json.load(open(os.path.join(user, "dir-a", "window.json"))) == {"description": "RACE"}
           and not [n for n in os.listdir(user) if n.startswith(".")], (res, os.listdir(user)))
+    existing_folder(pl, base, plugin)
+
+
+def existing_folder(pl, base, plugin):
+    """Папка направления уже есть без файлов пакета — только approved.json и approved/ (ревью argus #425 Б1): пакет
+    переносится в неё, approved* целы; прерванный перенос по файлам доводится; не папка или подпапка-ссылка — «не
+    перенесён», без отметки, ничего не записано мимо."""
+    user = os.path.join(base, "user4", "packs")
+    put(os.path.join(user, "dir-a", "approved.json"), {"ok": 1})
+    put(os.path.join(user, "dir-a", "approved", "x.sh"), "APPROVED\n")
+    res = pl.migrate(user, plugin, None, (), (), "t", None, True)
+    a = os.path.join(user, "dir-a")
+    check("папка только с approved.json и approved/: пакет перенесён, approved* целы, отметка есть, следов переноса нет",
+          res["copied"] == ["dir-a", "dir-b"] and res["failed"] == [] and os.path.isfile(os.path.join(a, "window.json"))
+          and os.path.isfile(os.path.join(a, "hooks", "hooks.json"))
+          and json.load(open(os.path.join(a, "approved.json"))) == {"ok": 1}
+          and open(os.path.join(a, "approved", "x.sh")).read() == "APPROVED\n"
+          and sorted(os.listdir(user)) == [".migrated.json", "dir-a", "dir-b"], (res, os.listdir(user)))
+    # перенос по файлам прерван после первого: отметка .dir-a.linking — следующий перенос доводит, не заменяя
+    user = os.path.join(base, "user5", "packs")
+    put(os.path.join(user, "dir-a", "approved.json"), {"ok": 1})
+    put(os.path.join(user, "dir-a", "window.json"), {"description": "HALF"})
+    put(os.path.join(user, ".dir-a.linking"), "")
+    res = pl.migrate(user, plugin, None, (), (), "t", None, True)
+    a = os.path.join(user, "dir-a")
+    check("прерванный перенос по файлам (отметка .linking) доводится: недостающие файлы встали, бывший не заменён, "
+          "отметки .linking нет", res["copied"] == ["dir-a", "dir-b"]
+          and os.path.isfile(os.path.join(a, "hooks", "hooks.json"))
+          and json.load(open(os.path.join(a, "window.json"))) == {"description": "HALF"}
+          and not os.path.lexists(os.path.join(user, ".dir-a.linking")), (res, os.listdir(user)))
+    user = os.path.join(base, "user6", "packs")
+    put(os.path.join(user, "dir-b"), "не папка")
+    outside = os.path.join(base, "outside6")
+    os.makedirs(outside)
+    put(os.path.join(user, "dir-a", "approved.json"), {})
+    os.symlink(outside, os.path.join(user, "dir-a", "hooks"))
+    res = pl.migrate(user, plugin, None, (), (), "t", None, True)
+    check("подпапка hooks — ссылка, на месте папки файл: оба направления «не перенесены», отметки нет, мимо ссылки "
+          "ничего не записано", res["failed"] == ["dir-a", "dir-b"] and res["copied"] == []
+          and not os.path.lexists(os.path.join(user, ".migrated.json")) and os.listdir(outside) == []
+          and open(os.path.join(user, "dir-b")).read() == "не папка", (res, os.listdir(user), os.listdir(outside)))
+    symlinked_version(pl, base)
+
+
+def symlinked_version(pl, base):
+    """Папка версии в кэше — ссылка (ревью argus #425 Д2): источником не берётся, даже самая новая; берётся настоящая."""
+    cache = os.path.join(base, "linked", "pantheon")
+    put(os.path.join(cache, "0.11.5", "packs", "dir-a", "window.json"), {"description": "REAL"})
+    put(os.path.join(base, "elsewhere", "packs", "dir-a", "window.json"), {"description": "LINK"})
+    os.symlink(os.path.join(base, "elsewhere"), os.path.join(cache, "0.11.99"))
+    os.makedirs(os.path.join(cache, "0.11.100"))
+    got = pl.legacy_root(os.path.join(cache, "0.11.100"))
+    check("версия-ссылка в кэше (0.11.99) не источник: берётся настоящая 0.11.5",
+          got == (os.path.join(cache, "0.11.5", "packs"), os.path.join(cache, "0.11.5")), got)
 
 
 if __name__ == "__main__":

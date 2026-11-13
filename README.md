@@ -448,10 +448,13 @@
   карты, env из белого списка, `sandbox.denyRead`, `deniedDomains`; `seen` — опись для `pantheon check`), `mcp.json`
   (серверы MCP), `.claude-plugin/plugin.json` и `hooks/hooks.json` (хуки вложенных проектов). Хуки и серверы пакета
   идут вне песочницы, поэтому ядро проверяет пакет при каждой сборке окон и каждом запуске окна
-  (`window_rules.pack_problems`): хук — только `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" …` или prompt;
-  сервер MCP — только `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- <команда>`, где команда — `npx -y
-  <пакет>@x.y.z` или программа по пути (не bash, python, node и другие интерпретаторы), без `PATH`, `NODE_*` и
-  подобных в `env`; удалённый — http, sse или ws без `headersHelper`; в `plugin.json` нет полей `hooks`, `mcpServers`,
+  (`window_rules.pack_problems`): хук — prompt или одна команда без `; & | \` ( ) < >`, перевода строки и `$`, кроме
+  `$HOME`, `${HOME}` и `${CLAUDE_PLUGIN_ROOT}`: `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" … -- <скрипт>`,
+  где скрипт — `bash .claude/hooks/<имя>`, `python3 -I .claude/hooks/<имя>` или
+  `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py"` (с аргументами); сервер MCP — только
+  `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- npx -y <пакет>@x.y.z …`: программа по пути, даже системная
+  (`/usr/bin/awk`), исполнила бы вне песочницы и то, что пишет окно. В `env` — без `PATH`, `NODE_*` и
+  подобных; удалённый — http, sse или ws без `headersHelper`; в `plugin.json` нет полей `hooks`, `mcpServers`,
   `lspServers`. Нарушение — плагин и MCP пакета в окно не идут (window.json — идёт), строка в `alerts.md`
   (тревога `pack-bad-<направление>`). Общий код пакетов — `plugins/pantheon/packs/_bin`. Своё: создайте папку с
   именем направления из реестра и нужные файлы, образцы — `plugins/pantheon/tests/fixtures/packs`; следующий плановый
@@ -460,7 +463,11 @@
   в `~/.claude/pantheon` закрыта. Перенос из прежней версии плагина: `domains build` один раз копирует пакеты и личные
   записи карты из самой новой версии в кэше, где они есть, и ставит отметку `.migrated.json`; существующее не
   затирается, пакет переносится целиком (через временную папку рядом), прерванный перенос повторяется на следующей
-  сборке. Вручную — `pantheon packs migrate [--from <папка плагина или пакетов>]` (код 1 — источника нет). Модуль —
+  сборке. Папка направления уже есть только с `approved.json` и `approved/` — файлы пакета встают в неё по одному, без
+  замены, `approved*` не трогаются. Направление не перенесено (на его месте файл, подпапка-ссылка, сбой записи) —
+  строка итога и тревога `packs-migrate-failed`, отметки нет, повтор на следующей сборке. Отметки нет — перенос делает
+  и запуск окна направления. Вручную — `pantheon packs migrate [--from <папка плагина или пакетов>]` (код 1 —
+  источника нет или направление не перенесено). Модуль —
   `lib/packs_local.py`, тест — `tests/test_window_pack.py`.
 - Правила autoMode.allow окна направления (`window_rules.DIRECTION_RULES`: `mailkeeper-read`, `uv-sync`,
   `git-remote`) включает раздел `[auto_rules]` в `~/.claude/pantheon/policy.toml`: `<направление> = ["имя", …]`.
