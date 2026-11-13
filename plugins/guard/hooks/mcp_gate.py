@@ -55,7 +55,7 @@ def allowed(tool, entries):
         if not rest.startswith(server + "__"):
             continue
         name = rest[len(server) + 2:]
-        if not name or "__" in name:
+        if not name or "__" in name or name.startswith("_"):  # «qmd___x» — сервер «qmd_», а не инструмент «_x»
             continue
         if pat is None or fnmatch.fnmatchcase(name, pat):
             return True

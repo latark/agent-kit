@@ -84,7 +84,7 @@ def _outside_literals(sql):
             if i >= n:
                 raise Refused(f"строка {c} не закрыта")
             i += 1
-        elif c == "$" and (m := DOLLAR.match(sql, i)) and not (i and (sql[i - 1].isalnum() or sql[i - 1] == "_")):
+        elif c == "$" and (m := DOLLAR.match(sql, i)) and not (i and (sql[i - 1].isalnum() or sql[i - 1] in "_$")):
             j = sql.find(m.group(0), m.end())
             if j < 0:
                 raise Refused(f"тело {m.group(0)} не закрыто")

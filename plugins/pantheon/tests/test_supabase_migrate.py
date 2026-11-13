@@ -120,6 +120,9 @@ BAD_SQL = {  # имя → (байты, слово причины в послед
     "20260123000000_bq.sql": (b"/* x */ set backslash_quote = on;\n", "backslash_quote"),
     "20260124000000_estr.sql": (b"select E'\\';\n", "обратный слеш"),
     "20260112000000_begin.sql": (b"BEGIN;\ncreate table b (i int);\nCOMMIT;\n", "свой BEGIN"),
+    "20260125000000_commit.sql": (b"create table x (i int);\ncommit;\ncreate table y (i int);\n", "свой COMMIT"),
+    # $ — знак идентификатора: a$$x$$ не открывает тело $x$, и COMMIT за ним виден (argus 14.11, Д1)
+    "20260126000000_ident.sql": (b"select 1 as a$$x$$;\nCOMMIT;\nselect 1 as b$x$;\n", "свой COMMIT"),
     "20260113000000_rollback.sql": (b"create table c (i int);\n  rollback ;\n", "свой ROLLBACK"),
     "20260114000000_start.sql": (b"start  transaction isolation level serializable;\n", "свой START"),
     "20260115000000_open.sql": ("select 'не закрыта;\n".encode(), "не разобран")}

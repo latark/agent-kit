@@ -68,6 +68,8 @@ r = run([LIST], ev("mcp__upstash__redis_delete"))
 check("сервер вне списка (upstash) — код 2", r.returncode == 2, r.stderr)
 r = run([LIST], ev("mcp__qmd__x__query"))
 check("сервер «qmd__x» под записью «qmd» не проходит — код 2", r.returncode == 2, r.stderr)
+r = run([LIST], ev("mcp__qmd___x"))
+check("сервер «qmd_» под записью «qmd» (три подчёркивания) не проходит — код 2", r.returncode == 2, r.stderr)
 r = run([LIST], ev("mcp__qmdx__query"))
 check("сервер с тем же началом имени (qmdx) — код 2", r.returncode == 2, r.stderr)
 r = run([LIST], ev("mcp__qmd__"))
@@ -132,16 +134,19 @@ def mutant(old, new):
     return load(src)
 
 
-M1 = mutant('if not name or "__" in name:', "if not name:")
+M1 = mutant('if not name or "__" in name or name.startswith("_"):', 'if not name or name.startswith("_"):')
 check("мутант (нет проверки «__» в имени инструмента) пускает сервер qmd__x — тест это видит",
       M1.allowed("mcp__qmd__x__query", M1.parse("qmd")) and not G.allowed("mcp__qmd__x__query", G.parse("qmd")))
+M1b = mutant('if not name or "__" in name or name.startswith("_"):', 'if not name or "__" in name:')
+check("мутант (имя инструмента с «_» в начале) пускает сервер qmd_ — тест это видит",
+      M1b.allowed("mcp__qmd___x", M1b.parse("qmd")) and not G.allowed("mcp__qmd___x", G.parse("qmd")))
 M2 = mutant("if pat is None or fnmatch.fnmatchcase(name, pat):", "if True:")
 check("мутант (шаблон инструмента не сверяется) пускает apply_migration — тест это видит",
       M2.allowed("mcp__supabase__apply_migration", M2.parse("supabase__list_*"))
       and not G.allowed("mcp__supabase__apply_migration", G.parse("supabase__list_*")))
 M3 = mutant('if not rest.startswith(server + "__"):', 'if not rest.startswith(server):')
 check("мутант (имя сервера без «__») пускает qmdx — тест это видит",
-      M3.allowed("mcp__qmdx__query", M3.parse("qmd")) and not G.allowed("mcp__qmdx__query", G.parse("qmd")))
+      M3.allowed("mcp__qmdxxquery", M3.parse("qmd")) and not G.allowed("mcp__qmdxxquery", G.parse("qmd")))
 M4 = mutant("    if allowed(tool, entries):\n        return 0, \"\"", "    if True:\n        return 0, \"\"")
 check("мутант (отказ пропущен) — decide даёт 0 там, где настоящий даёт 2",
       M4.decide([LIST], ev("mcp__upstash__x"))[0] == 0 and G.decide([LIST], ev("mcp__upstash__x"))[0] == 2)
