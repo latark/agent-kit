@@ -793,6 +793,12 @@ def test_push_accepted(root, client, sock):
             tpa.check = lambda name, cond, detail="", v=via: verdicts[v].append((name, bool(cond)))
             h.hook = hook_via(via)
             for case in tpa.CASES:
+                if sys.platform != "darwin" and case is tpa.t_parse_fail_open:
+                    # python.sh ищет python3.14 в /opt/homebrew/bin и /usr/local/bin независимо от PATH; на Linux он
+                    # есть только в PATH, а случай подменяет PATH на пустую папку — python.sh не находит его, код 2
+                    if via == "hookd":
+                        print("пропущено: git нет в PATH, push без аргументов — нужен macOS (python в /opt/homebrew)")
+                    continue
                 h.reset()
                 case(h)
     finally:
@@ -975,6 +981,11 @@ def test_double_failure(root, client):
     for name, body, want, text in (("python.sh нет", None, "slow-exec", "недоступны (python.sh: код 127)"),
                                    ("python.sh убивает себя kill -9", "#!/bin/sh\nkill -9 $$\n", "slow-signal",
                                     "прерван сигналом 9")):
+        if body is None and sys.platform != "darwin":
+            # нет python.sh: /bin/sh на Linux (dash) выходит с кодом 2 «cannot open», а не 127 — клиент не успевает
+            # сказать «недоступны (python.sh: код 127)»; служба хуков только для macOS
+            print(f"пропущено: двойной отказ, {name} — нужен macOS (код sh при отсутствии скрипта: dash 2, не 127)")
+            continue
         copy = os.path.join(root, "dbl-" + want[5:])
         shutil.copytree(PLUGIN, copy, ignore=shutil.ignore_patterns("__pycache__", "tests"))
         py = os.path.join(copy, "hooks", "python.sh")

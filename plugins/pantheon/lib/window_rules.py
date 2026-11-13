@@ -7,6 +7,7 @@ pantheon.py (`pantheon domains build`) по пути файла — python3 -I �
 """
 
 import re
+import shlex
 
 # permissions.allow окон координаторов — пусто (metis-0137). Раньше здесь стояло Bash(gh pr merge *) (metis-0050), но
 # правило allow срабатывает раньше классификатора режима auto, а формы --admin и --auto классификатор не судит: слияние
@@ -92,8 +93,11 @@ REVIEW_RECORD_RULE = (
 
 # Правила autoMode.allow окна направления на команды его репозиториев, которые раньше разрешал permissions.allow
 # проекта (metis-0933: окну permissions.allow не даётся). Решение владельца 06.11 21:55 «Б — все восемь»: шесть
-# команд чтения mailkeeper, uv sync и git remote. Пакет окна права только сужает — поэтому здесь, в ядре. Имени
-# направления в тексте правил нет (решение 16.10): правило попадает только в окно своего направления.
+# команд чтения mailkeeper, uv sync и git remote. Пакет окна права только сужает — поэтому текст правил здесь, в ядре. Имени
+# направления в тексте правил нет (решение 16.10): правило попадает только в окно своего направления. Какому окну какие
+# правила — данные пользователя (решение владельца 12.11: у каждого свои направления): раздел [auto_rules]
+# ~/.claude/pantheon/policy.toml, «направление = [имена из DIRECTION_RULES]»; правит его, как и другие привилегии,
+# только владелец (owner-edit).
 MAILKEEPER_READ_RULE = (
     "Pantheon Mailkeeper Read: In this Pantheon direction window, `mailkeeper status`, `mailkeeper rules`, "
     "`mailkeeper scan`, `mailkeeper report`, `mailkeeper plan` and `mailkeeper logs` (with their own options) are the "
@@ -112,21 +116,143 @@ GIT_REMOTE_RULE = (
     "`set-url`, `rename`, `remove`, `prune`, `update`) in one of this direction's repositories is routine repository "
     "upkeep for the coordinator's task, as the project's settings allowed before. It covers only `git remote` itself: "
     "a push, a fetch from a new URL, `cd` or chained commands are judged by the built-in rules.")
-DIRECTION_AUTO_ALLOW = {"metis-pantheon": (MAILKEEPER_READ_RULE, UV_SYNC_RULE), "proteus-morph": (GIT_REMOTE_RULE,)}
+DIRECTION_RULES = {"mailkeeper-read": MAILKEEPER_READ_RULE, "uv-sync": UV_SYNC_RULE, "git-remote": GIT_REMOTE_RULE}
 
 
-def coordinator_auto_allow(repos, direction=None):
+def direction_rules(names):
+    """Строка [auto_rules] policy.toml → (тексты правил по порядку DIRECTION_RULES, без повторов; [неизвестные или
+    кривые записи]). Не список — ничего (окно без правил направления), кривое — названо, а не взято."""
+    if names is None:
+        return [], []
+    if not isinstance(names, list):
+        return [], [repr(names)]
+    bad = [repr(n) for n in names if not isinstance(n, str) or n not in DIRECTION_RULES]
+    return [r for k, r in DIRECTION_RULES.items() if k in names], bad
+
+
+def coordinator_auto_allow(repos, rules=None):
     """autoMode.allow окна координатора: "$defaults", правило слияния и правило сдачи работы лида (push рабочей ветки,
     argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
-    owner/repo; нет таких — обоих правил нет), правила направления из DIRECTION_AUTO_ALLOW (metis-0933) и правило
-    записей проверок."""
+    owner/repo; нет таких — обоих правил нет), правила направления — имена DIRECTION_RULES из его строки [auto_rules]
+    policy.toml (metis-0933; direction_rules) — и правило записей проверок."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return ["$defaults"] + gated + lead + list(DIRECTION_AUTO_ALLOW.get(direction, ())) + [REVIEW_RECORD_RULE]
+    return ["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE]
 
 
 def auto_mode(auto_allow):
     """Раздел autoMode настроек окна координатора: исключения классификатора auto под шлюз слияния."""
     return {"allow": list(auto_allow)}
+
+
+# Пакет окна направления (~/.claude/pantheon/packs/<направление>, metis-0933) — данные пользователя, а его хуки и
+# серверы MCP идут вне песочницы окна. Поэтому ядро берёт плагин и mcp.json пакета в окно, только если они такого вида
+# (ревью argus #425 Б1, Б2 и проверка безопасности #425): хук — prompt или команда, которую shlex разбирает целиком:
+# без ; & | ` ( ) < >, перевода строки и $ кроме $HOME, ${HOME} и ${CLAUDE_PLUGIN_ROOT}; это in_repo.py пакета (скрипт
+# репозитория по эталону хеша), а за его «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или
+# python3 -I ${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py (pack_hook_problem). Сервер MCP — только через env_from.py пакета, а
+# за его «--» — только npx -y <пакет>@x.y.z: программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
+# папки, которую окно пишет; http, sse и ws — без headersHelper. Поля plugin.json, которые сами запускают код мимо
+# hooks.json, запрещены. Нарушение в mcp.json — MCP пакета в окно не идёт, в плагине — ни плагин, ни MCP; строка в
+# alerts.md (pantheon.pack_admit).
+PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"
+PACK_HOOK_BIN = "${CLAUDE_PLUGIN_ROOT}/../_bin/"
+PACK_HOOK_LEAD = ["python3", "-I", PACK_HOOK_BIN + "in_repo.py"]
+# знаки оболочки, которые цепляют вторую команду, подставляют вывод или перенаправляют, и $ кроме трёх переменных
+PACK_HOOK_META = re.compile(r"[;&|`()<>\n\r]|\$(?!\{CLAUDE_PLUGIN_ROOT\}|\{HOME\}|HOME(?![A-Za-z0-9_]))")
+PACK_HOOK_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")  # одно имя файла: без /, не с точки (не ..)
+# что разрешено за «--» in_repo.py: (начало, папка скрипта, окончание имени)
+PACK_HOOK_RUN = ((["bash"], ".claude/hooks/", ""), (["python3", "-I"], ".claude/hooks/", ""),
+                 (["python3", "-I"], PACK_HOOK_BIN, ".py"))
+PACK_MCP_PREFIX = ["-I", PACK_BIN_MARK + "/env_from.py"]
+PACK_MANIFEST_EXEC = ("hooks", "mcpServers", "lspServers")
+PACK_STDIO_KEYS = {"type", "command", "args", "env"}
+PACK_REMOTE_KEYS = {"type", "url", "headers"}
+PACK_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# переменные, которые меняют, что и откуда запустится, — не из пакета
+PACK_ENV_DENY = re.compile(r"PATH|HOME|TMPDIR|SHELL|ENV|BASH_ENV|ZDOTDIR|DYLD_.*|LD_.*|NODE_.*|NPM_CONFIG_.*|PYTHON.*"
+                           r"|.*_PROXY|GUARD_.*|ANTHROPIC_.*|CLAUDE.*")
+NPX_PINNED = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+")
+
+
+def pack_problems(manifest, hooks, mcp):
+    """Нарушения пакета окна (см. выше) → [причина]. manifest, hooks, mcp — разобранные plugin.json, hooks/hooks.json
+    и mcp.json пакета; None — файла нет."""
+    out = []
+    if manifest is not None:
+        if not isinstance(manifest, dict):
+            out.append("plugin.json: не объект JSON")
+        else:
+            out += [f"plugin.json: поле {k} запускает код мимо hooks.json" for k in PACK_MANIFEST_EXEC if k in manifest]
+    if hooks is not None:
+        events = hooks.get("hooks") if isinstance(hooks, dict) else None
+        if not isinstance(events, dict):
+            out.append("hooks.json: нет объекта hooks")
+        for ev, groups in (events.items() if isinstance(events, dict) else ()):
+            for g in groups if isinstance(groups, list) else [None]:
+                hs = g.get("hooks") if isinstance(g, dict) else None
+                for h in hs if isinstance(hs, list) else [None]:
+                    kind = h.get("type") if isinstance(h, dict) else None
+                    cmd = h.get("command") if kind == "command" else None
+                    why = "не command и не prompt" if kind not in ("command", "prompt") else (
+                        pack_hook_problem(cmd) if kind == "command" else None)
+                    if why:
+                        out.append(f"hooks.json {ev}: {why} — {str(cmd or kind)[:160]}")
+    if mcp is not None:
+        servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+        if not isinstance(servers, dict):
+            out.append("mcp.json: нет объекта mcpServers")
+        for n, s in (servers.items() if isinstance(servers, dict) else ()):
+            why = pack_server_problem(s)
+            if why:
+                out.append(f"mcp.json {n}: {why}")
+    return out
+
+
+def pack_server_problem(s):
+    """Причина, по которой сервер MCP пакета s не годится (см. выше), или None."""
+    if not isinstance(s, dict):
+        return "не объект JSON"
+    if "command" not in s:
+        if s.get("type") in ("http", "sse", "ws") and isinstance(s.get("url"), str) and set(s) <= PACK_REMOTE_KEYS:
+            return None
+        return f"удалённый сервер — только type http, sse или ws, url и headers; есть {sorted(s)}"
+    args, env = s.get("args"), s.get("env") or {}
+    if set(s) - PACK_STDIO_KEYS or s.get("type", "stdio") != "stdio":
+        return f"лишние поля {sorted(set(s) - PACK_STDIO_KEYS) or s.get('type')}"
+    if not isinstance(env, dict) or [k for k, v in env.items() if not isinstance(v, str)
+                                     or not PACK_ENV_NAME.fullmatch(k) or PACK_ENV_DENY.fullmatch(k)]:
+        return f"env — только свои имена, без PATH, HOME, NODE_*, PYTHON* и подобных: {env}"[:200]
+    if (s["command"] != "python3" or not isinstance(args, list) or args[:2] != PACK_MCP_PREFIX or "--" not in args
+            or not all(isinstance(a, str) for a in args)):
+        return f"не через env_from.py пакета (python3 -I {PACK_BIN_MARK}/env_from.py … -- <команда>): {s['command']} {args}"[:240]
+    run = args[args.index("--") + 1:]
+    if run[:2] == ["npx", "-y"] and len(run) > 2 and NPX_PINNED.fullmatch(run[2]):
+        return None
+    return f"за «--» — только `npx -y <пакет>@x.y.z`: {' '.join(run)[:160] or 'пусто'}"
+
+
+def pack_hook_problem(cmd):
+    """Причина, по которой команда хука пакета cmd не годится (см. выше), или None."""
+    if not isinstance(cmd, str):
+        return "нет строки command"
+    bad = PACK_HOOK_META.search(cmd)
+    if bad:
+        return f"знак оболочки {bad.group()!r}: хук — одна команда без цепочек, подстановок и перенаправлений"
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return "строку не разобрать (кавычки)"
+    if argv[:3] != PACK_HOOK_LEAD or "--" not in argv:
+        return f"хук не через in_repo.py пакета (python3 -I \"{PACK_HOOK_BIN}in_repo.py\" … -- <скрипт>)"
+    run = argv[argv.index("--") + 1:]
+    for lead, folder, ext in PACK_HOOK_RUN:
+        n = len(lead)
+        if run[:n] == lead and len(run) > n and run[n].startswith(folder):
+            name = run[n][len(folder):]
+            if PACK_HOOK_NAME.fullmatch(name) and name.endswith(ext):
+                return None
+    return ("за «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или "
+            f"python3 -I {PACK_HOOK_BIN}<имя>.py")

@@ -233,8 +233,8 @@ NO_TOUCH_CASES = [
     ("[N4] защиты: настройки в «зачем»", ("cdp-restart", "comet", "после правки ~/.claude/settings.json"), "merge",
      "guard"),
     ("[N4] защиты: hooks.json", ("worktree-remove", WT_OK, "сбросить hooks.json"), "merge", "guard"),
-    ("[N5] не показать: bidi-знак в цели", ("worktree-remove", WT_OK + "‮gnp.exe", ""), "yes", "touch"),
-    ("[N5] не показать: невидимый пробел нулевой ширины", ("worktree-remove", WT_OK + "​", ""), "yes", "touch"),
+    ("[N5] не показать: bidi-знак в цели", ("worktree-remove", WT_OK + "\u202egnp.exe", ""), "yes", "touch"),
+    ("[N5] не показать: невидимый пробел нулевой ширины", ("worktree-remove", WT_OK + "\u200b", ""), "yes", "touch"),
     ("[N5] не показать: перенос строки в «зачем»", ("cdp-restart", "comet", "a\nb"), "yes", "touch"),
     ("[N5] не показать: две цели через пробел", ("worktree-remove", WT_OK + " ~/projects/y", ""), "yes", "touch"),
     ("[N5] не показать: цель длиннее окна", ("worktree-remove", "~/projects/" + "a" * 400, ""), "yes", "touch"),
@@ -253,7 +253,7 @@ for args in [("worktree-remove", WT_OK, "убрать после слияния"
     check(f"белый список: {args[0]} {args[1]} — Touch ID может разрешить", H.touch_refusal(*args) is None,
           H.touch_refusal(*args))
 check("showable: обычный текст", H.showable("Удалить worktree ~/projects/x. Просит win."))
-for bad in ["", "a" * (H.WINDOW_MAX + 1), "a\tb", "a‍b", "a⁦b", "a b", "a\x1b[31mb", "ab"]:
+for bad in ["", "a" * (H.WINDOW_MAX + 1), "a\tb", "a\u200db", "a\u2066b", "a b", "a\x1b[31mb", "ab"]:
     check(f"showable: {bad[:12]!r} — нет", not H.showable(bad))
 
 # README guard: перечень есть, у каждого пункта — метка теста

@@ -13,6 +13,10 @@
 # computer-use, claude-in-chrome, Notion и jetbrains; Claude Docs — hq, domain-coordinator и ревизор momus;
 # context7 — только писатели и проверяющие код. Субагент окна наследует его настройки, поэтому окно держит
 # объединение нужного ему самому и всем, кого оно зовёт.
+#
+# Запись окна своего направления ([window.<направление>]) пользователь держит не здесь, а в личной части
+# ~/.claude/pantheon/plugins-by-role.toml: только таблицы [window.<направление>] с теми же ключами, каталог — отсюда.
+# Личная запись заменяет [window.direction] для этого окна; окна системы (direction, hq, hestia, workshop, job-*) — только здесь.
 
 [catalog]
 plugins = [
@@ -26,8 +30,8 @@ plugins = [
   "commit-commands@claude-plugins-official",
   "claude-md-management@claude-plugins-official",
   "notion@anthropic-plugin-directory",
-  # плагины проектов MorphStream (metis-0933, решение владельца 06.11 21:55): включает только пакет окна proteus-morph
-  # (packs/proteus-morph/window.json plugins); в «оставить» окон направлений и мастерской — чтобы там всё было как раньше
+  # плагины проектов (metis-0933, решение владельца 06.11 21:55): окну направления их включает его пакет
+  # (~/.claude/pantheon/packs/<направление>/window.json plugins); в «оставить» окон направлений и мастерской — как раньше
   "context7@claude-plugins-official", "supabase@claude-plugins-official", "vercel@claude-plugins-official",
   "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
@@ -47,11 +51,6 @@ plugins = [
   "sentry@claude-plugins-official", "nvidia-skills@claude-plugins-official",
 ]
 mcp = ["qmd", "context7", "jetbrains", "claude_ai_Claude_Docs"]
-
-# ~/ai/knowledge — одни markdown-файлы: кода, LSP и интерфейса нет
-[window.mnemo-brain]
-plugins = ["commit-commands@claude-plugins-official", "claude-md-management@claude-plugins-official"]
-mcp = ["qmd", "claude_ai_Claude_Docs"]
 
 [window.workshop]
 plugins = [

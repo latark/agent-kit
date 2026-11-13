@@ -73,7 +73,7 @@ class Daemon:
 
     def __init__(self):
         self.up, self.tab, self.calls = True, "about:blank", []
-        self.pages = {AVITO: {"title": "Авито", "text": "объявления", "links": [["Ещё", "https://www.avito.ru/y"]]},
+        self.pages = {AVITO: {"title": "Сайт-1", "text": "объявления", "links": [["Ещё", "https://www.avito.ru/y"]]},
                       "https://m.avito.ru/z": {"title": "м", "text": "м", "links": []},
                       "https://forms.yandex.ru/u/abc/": {"title": "Анкета", "text": "поля анкеты", "links": []},
                       "https://example.com/a": {"title": "Пример", "text": "пример", "links": []}}
@@ -713,7 +713,7 @@ check("[S1] окно: eval --here — /eval с session, адрес своей в
 D.calls.clear()
 D.tab = "https://example.com/a"       # общая вкладка на чужом сайте не мешает окну со своей вкладкой
 res = run(req("read", here=True), win="hq")
-check("[S1] окно: read --here смотрит свою вкладку, а не общую", res["state"] == "done" and "Авито" in res["text"], res)
+check("[S1] окно: read --here смотрит свою вкладку, а не общую", res["state"] == "done" and "Сайт-1" in res["text"], res)
 D.stabs.pop("hq")
 D.tab = AVITO
 D.calls.clear()
@@ -755,7 +755,7 @@ for bad in ("окно с пробелом", "x" * 65, ""):
 check("[S4] session_of: кириллица без пробела — отказ (демон принимает только ASCII)",
       all(_refused(n) for n in ("окно", "athenaа", "hq\u00e9", "x\u0663")))
 check("[S4] session_of: имена окон — как есть, None — None",
-      B.session_of("hq") == "hq" and B.session_of("athena-brokerassistant") == "athena-brokerassistant"
+      B.session_of("hq") == "hq" and B.session_of("athena-proja") == "athena-proja"
       and B.session_of(None) is None)
 
 # metis-0812: 429 (предел вкладок) — окно получает понятный отказ без совета «POST /close-tab», который ему не выполнить
@@ -772,7 +772,7 @@ D.sessions_mode, D.tab, D.stabs = False, "about:blank", {}
 D.calls.clear()
 res = run(req("read", url=AVITO), win="hq")
 check("[S5] старый демон: read из окна работает через общую вкладку (session игнорируется, откат не нужен)",
-      res["state"] == "done" and D.tab == AVITO and "Авито" in res["text"], res)
+      res["state"] == "done" and D.tab == AVITO and "Сайт-1" in res["text"], res)
 res = run(req("eval", here=True, expr="document.title"), win="hq")
 check("[S5] старый демон: eval --here читает адрес общей вкладки", res["state"] == "done", res)
 D.sessions_mode = False
