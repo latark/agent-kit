@@ -591,8 +591,11 @@ def t_workflows(wfdir=WORKFLOWS):
                  'if [ "$code" -eq 3 ]; then', 'echo "нечего гонять: изменения не задевают тесты"', "code=0", "fi",
                  'exit "$code"'], ar)
     fr = [ln for _, lines in runs(job.get("full", "")) for ln in lines]
-    check("tests.yml: full — раннер по трём плагинам без --affected, код раннера — код job",
-          fr == ["python3 --version", 'python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --log-dir '
+    # metis-1111: первым шагом full ставит тот же ruff по хешам, иначе храповик в run-tests.py пропускается
+    check("tests.yml: full — ruff по хешам из .github/ruff-requirements.txt (храповик в раннере), затем раннер по трём "
+          "плагинам без --affected, код раннера — код job",
+          fr == ["python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt",
+                 "python3 --version",'python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --log-dir '
                  '"$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools'], fr)
     req = open(os.path.join(WORKFLOWS, "..", "ruff-requirements.txt"), encoding="utf-8").read()
     check("ruff-requirements.txt: ruff==<точная версия> и хеши sha256 колёс",

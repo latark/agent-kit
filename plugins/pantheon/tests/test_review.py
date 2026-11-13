@@ -497,7 +497,7 @@ def run_all(tmp):
     # fork — голова PR из форка (metis-0649), у этого PR её нет
     _M.ci_runs_fetch = lambda repo, pr, sha, fork=None: [
         {"workflowName": w, "name": j, "status": "COMPLETED", "conclusion": "SUCCESS", "event": "pull_request"}
-        for w, j in (("tests", "affected"), ("check-traces", "traces"))] if (repo, pr, sha) == (
+        for w, j in (("tests", "affected"), ("tests", "full"), ("check-traces", "traces"))] if (repo, pr, sha) == (
             "latark/agent-kit", 40, S5) and fork is None else None
     view = {"state": "OPEN", "isDraft": False, "headRefOid": S5, "baseRefName": "main",
             "statusCheckRollup": [{"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
