@@ -11,6 +11,11 @@
   pantheon owner-edit status [ID]   заявки и итоги
   pantheon owner-edit cancel ID     снять свою заявку
   pantheon owner-edit run           проход — только плановый проход (из окна Claude Code — отказ)
+  pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]
+        (metis-1122) та же заявка на ~/.claude/pantheon/policy.toml, но текст собирает команда: ключ раздела = значение
+        (true/false и числа — как есть, остальное — строка; несколько значений или --list — массив). Строка ключа
+        заменена, нет ключа — дописан в конец раздела, нет раздела — раздел в конец файла; прочий текст не тронут.
+        Значение ключа на нескольких строках — отказ (правка — owner-edit propose). Применяет тот же проход.
 
 Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml и
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
@@ -816,8 +821,16 @@ def cmd_propose(args):
             new = raw_new.decode("utf-8")
         except UnicodeDecodeError:
             raise Refuse(f"{kv['--from']}: не UTF-8")
+    except Refuse as e:
+        return err(f"pantheon owner-edit propose: отказ — {e}")
+    return _propose(rel, new, kv["--task"], why, "pantheon owner-edit propose")
+
+
+def _propose(rel, new, task, why, prog, cur=None):
+    """Заявка на новый текст файла владельца (общая часть owner-edit propose и policy set) → код выхода."""
+    try:
         check_text(rel, new)
-        cur = read_target(rel)
+        cur = read_target(rel) if cur is None else cur
         try:
             old = cur.decode("utf-8")
         except UnicodeDecodeError:
@@ -825,19 +838,19 @@ def cmd_propose(args):
         if rel.endswith(".toml") and old != new:
             toml_keys(rel, old, new)
     except Refuse as e:
-        return err(f"pantheon owner-edit propose: отказ — {e}")
+        return err(f"{prog}: отказ — {e}")
     if old == new:
-        return err(f"pantheon owner-edit propose: новый текст совпадает с ~/{rel} — править нечего")
+        return err(f"{prog}: новый текст совпадает с ~/{rel} — править нечего")
     win, role = who()
     before, after = sha(cur), sha(new)
     diff = make_diff(rel, old, new)
     req = {"id": "oe-" + datetime.fromtimestamp(P.now()).strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3),
            "file": rel, "before": before, "after": after, "diff": diff, "diff_sha": diff_sha(rel, before, after, diff),
-           "new": new, "task": kv["--task"], "why": why, "role": role, "created": P.now()}
+           "new": new, "task": task, "why": why, "role": role, "created": P.now()}
     try:
         write_atomic(os.path.join(own_dir(), f"{req['id']}.req.json"), req)
     except OSError as e:
-        return err(f"pantheon owner-edit propose: заявку не записать ({e})", 3)
+        return err(f"{prog}: заявку не записать ({e})", 3)
     touch = window_text(dict(req, window=win))
     print(f"заявка {req['id']}: ~/{rel}, sha до {before[:12]}, sha диффа {req['diff_sha']}\n\n{diff}\n"
           f"Вопрос Зевсу (окно вопросов, варианты «А — Да, применить» и «Б — Нет»), строка целиком:\n  {question(req)}\n"
@@ -845,6 +858,99 @@ def cmd_propose(args):
              "Окно Touch ID правку целиком не покажет — только «да» в окне вопросов.\n")
           + f"Применит плановый проход, если ~/{rel} до того не изменится. Итог — pantheon owner-edit status {req['id']}")
     return 0
+
+
+# --- pantheon policy set: одна правка policy.toml заявкой (metis-1122) ----------------------------------------------
+
+POLICY_REL = ".claude/pantheon/policy.toml"
+POLICY_USAGE = ("pantheon policy set <раздел> <ключ> <значение>... --task ID [--why \"зачем\"] [--list]")
+SECTION_RE = re.compile(r"[A-Za-z0-9_-]{1,60}(?:\.[A-Za-z0-9_-]{1,60}){0,3}")
+KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,80}")
+HEADER_RE = re.compile(r"\s*\[\s*([^\[\]#]*?)\s*\]\s*(?:#.*)?")
+
+
+def toml_literal(v):
+    """Значение из командной строки → текст TOML: true/false и числа — как есть, остальное — строка в кавычках."""
+    try:
+        got = tomllib.loads(f"v = {v}")["v"]
+    except tomllib.TOMLDecodeError:
+        got = None
+    if isinstance(got, (bool, int, float)) and v.strip() == v:
+        return v
+    return json.dumps(v, ensure_ascii=False)
+
+
+def policy_text(old, section, key, values, as_list=False):
+    """policy.toml с ключом key раздела section = values (одно — скаляр, несколько или as_list — массив). Остальной
+    текст — как был: строка ключа заменена, нет ключа — дописан в конец раздела, нет раздела — раздел в конец файла.
+    Значение ключа на нескольких строках — Refuse: такую правку — owner-edit propose."""
+    if not SECTION_RE.fullmatch(section) or not KEY_RE.fullmatch(key):
+        raise Refuse(f"раздел {section!r} или ключ {key!r} не по образцу (латиница, цифры, «_», «-»; раздел — с «.»)")
+    if not values or any(not str(v).strip() for v in values):
+        raise Refuse("нет значения: pantheon policy set <раздел> <ключ> <значение>...")
+    lits = [toml_literal(str(v)) for v in values]
+    value = f"[{', '.join(lits)}]" if as_list or len(lits) > 1 else lits[0]
+    line = f"{key} = {value}\n"
+    lines = old.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    head = next((i for i, ln in enumerate(lines)
+                 if (m := HEADER_RE.fullmatch(ln.rstrip("\n"))) and m[1].replace(" ", "") == section), None)
+    if head is None:
+        lines += (["\n"] if lines and lines[-1].strip() else []) + [f"[{section}]\n", line]
+    else:
+        end = next((i for i in range(head + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+        kre = re.compile(r"\s*(?:" + re.escape(key) + r'|"' + re.escape(key) + r'")\s*=')
+        at = next((i for i in range(head + 1, end) if kre.match(lines[i])), None)
+        if at is not None:
+            try:
+                tomllib.loads(lines[at])
+            except tomllib.TOMLDecodeError:
+                raise Refuse(f"[{section}] {key}: значение на нескольких строках — правьте через pantheon owner-edit "
+                             "propose")
+            lines[at] = line
+        else:
+            last = max([i for i in range(head, end) if lines[i].strip()] or [head])
+            lines.insert(last + 1, line)
+    new = "".join(lines)
+    try:
+        got = tomllib.loads(new)
+        for part in section.split("."):
+            got = got[part]
+        ok = got[key] == tomllib.loads(f"v = {value}")["v"]
+    except (tomllib.TOMLDecodeError, KeyError, TypeError) as e:
+        raise Refuse(f"[{section}] {key}: правка не легла в TOML ({type(e).__name__}: {e})")
+    if not ok:
+        raise Refuse(f"[{section}] {key}: после правки значение другое — правьте через pantheon owner-edit propose")
+    return new
+
+
+def cmd_policy(rest):
+    """pantheon policy set: роль не пишет policy.toml — команда кладёт заявку owner-edit, применяет плановый проход по
+    «да» владельца на вопрос с [id] или по Touch ID (как owner-edit propose)."""
+    prog = "pantheon policy set"
+    if rest[:1] != ["set"]:
+        return err("вызов: " + POLICY_USAGE)
+    args = [a for a in rest[1:] if a != "--list"]
+    try:
+        pos, kv = parse_opts(args, ("--task", "--why"))
+    except ValueError as e:
+        return err(f"{prog}: {e}")
+    if len(pos) < 3 or not TASK_RE.fullmatch(kv.get("--task", "")):
+        return err("вызов: " + POLICY_USAGE)
+    why = " ".join(kv.get("--why", "").split())
+    try:
+        if len(why) > WHY_MAX or hidden_at(why, ""):
+            raise Refuse(f"--why длиннее {WHY_MAX} знаков или с невидимым знаком")
+        cur = read_target(POLICY_REL)
+        try:
+            old = cur.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refuse(f"~/{POLICY_REL}: не UTF-8")
+        new = policy_text(old, pos[0], pos[1], pos[2:], "--list" in rest[1:])
+    except Refuse as e:
+        return err(f"{prog}: отказ — {e}")
+    return _propose(POLICY_REL, new, kv["--task"], why, prog, cur)
 
 
 def read_result(d, rid):

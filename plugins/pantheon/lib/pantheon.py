@@ -97,6 +97,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
                                         диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
                                         «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
+  pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]   один ключ policy.toml той же
+                                        заявкой owner-edit (metis-1122): роль Edit/Write policy.toml не делает
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -9446,6 +9448,8 @@ def main(argv):
         return handoff_mod().main(rest)
     if cmd == "owner-edit":
         return owner_edit_mod().main(rest)
+    if cmd == "policy":
+        return owner_edit_mod().cmd_policy(rest)
     if cmd == "batch":
         return batch_cmd(rest)
     if cmd == "probes":
