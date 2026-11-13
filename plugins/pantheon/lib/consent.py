@@ -14,6 +14,7 @@ from datetime import datetime
 
 __all__ = [
     "HESTIA_CONSENT_DAYS", "APPROVALS", "APPROVALS_HEAD", "CONSENT_ID", "CONSENT_MAX", "CONSENT_REAP_Q",
+    "CONSENT_RESTART_Q", "restart_q_names",
     "CONSENT_ANSWER", "CONSENT_YES", "CONSENT_NO", "consent_is_yes", "ConsentLogError", "consent_found", "consent", "approvals_load", "toml_str",
     "approve",
 ]
@@ -44,6 +45,20 @@ CONSENT_MAX = 1500
 # вопрос `pantheon reap --apply` об остальном своём (lib/culprits.py): «да» на него — метка <id>.reap со списком pid
 # из вопроса, а не метка push (metis-0568: согласия на push и на гашение не путаются)
 CONSENT_REAP_Q = "Погасить процессы Пантеона"
+# вопрос о перезапуске окон без метки saved (`pantheon restart --only|--go --owner <id>`, metis-1122): только эта
+# форма — «[id] Перезапустить окна: a, b?» или «[id] Перезапустить окно: a?». Имена окон — строгий список после
+# двоеточия через запятую, до «?» в конце, без другого текста: «да» на вопрос о push или правке, где окно лишь
+# упомянуто, и «всех, кроме X» согласием на перезапуск X не бывают (Б1, Б2 argus PR #435)
+CONSENT_RESTART_Q = re.compile(r"Перезапустить окн[ао]: ([a-z0-9][a-z0-9-]{0,40}(?:, [a-z0-9][a-z0-9-]{0,40})*)\?")
+
+
+def restart_q_names(question, qid):
+    """Имена окон из вопроса «[qid] Перезапустить окна: a, b?» (строка «вопрос: …» из consent_found или текст
+    вопроса на карточке); вопрос другой формы — пустой список."""
+    q = re.sub(r"^вопрос:[ \t]*", "", (question or "").strip())
+    q = re.sub(r"^\[" + re.escape(qid) + r"\][ \t]*", "", q)
+    m = CONSENT_RESTART_Q.fullmatch(q.strip())
+    return m.group(1).split(", ") if m else []
 
 
 CONSENT_ANSWER = re.compile(r"^ответ:[ \t]*(.*)$", re.M)
