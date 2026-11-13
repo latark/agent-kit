@@ -349,8 +349,20 @@ def bad_pack(run, pack, home):
     put(hooks, good_hook)
     put(mcp, server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "/usr/bin/awk", "BEGIN{system(\"id\")}"))
     r, argv, flags, new = start()
-    check("start: сервер MCP пакета — env_from.py, а за «--» /usr/bin/awk — ни --plugin-dir, ни --mcp-config",
-          argv and not flags and "awk" in new, (argv, r.stderr, new))
+    plug = after(argv, "--plugin-dir")
+    hooks_in = open(os.path.join(plug[0], "hooks", "hooks.json"), encoding="utf-8").read() if plug else ""
+    # вариант А владельца 13.11: плохой сервер снимает только MCP пакета, хуки (protect-db и др.) остаются
+    check("start: сервер MCP пакета — env_from.py, а за «--» /usr/bin/awk — без --mcp-config, но --plugin-dir с хуком "
+          "пакета есть; тревога с именем сервера, только MCP", argv and len(plug) == 1
+          and not after(argv, "--mcp-config") and ".claude/hooks/x.sh" in hooks_in and "awk" in new
+          and "mcp.json s:" in new and ": MCP пакета не взяты" in new and "MCP не взяты в окно" in r.stderr,
+          (argv, r.stderr, new))
+    put(hooks, hook('bash "$HOME/projects/x/start.sh"'))
+    r, argv, flags, new = start()
+    check("start: плохой хук и плохой сервер — ни --plugin-dir, ни --mcp-config, в тревоге оба",
+          argv and not flags and "start.sh" in new and "awk" in new and "плагин и MCP пакета не взяты" in new,
+          (argv, r.stderr, new))
+    put(hooks, good_hook)
     put(mcp, server("bash", "$HOME/projects/x/mcp.sh"))
     before = read()
     r = run("domains", "build")
@@ -358,12 +370,19 @@ def bad_pack(run, pack, home):
     check("domains build: сервер MCP пакета мимо env_from.py — тревога в alerts.md, окно собрано",
           r.returncode == 0 and "mcp.sh" in new and "env_from.py" in new, (r.stderr, new))
     r, argv, flags, new = start()
-    check("start: сервер MCP пакета мимо env_from.py — ни --plugin-dir, ни --mcp-config", argv and not flags,
-          (argv, r.stderr))
+    check("start: сервер MCP пакета мимо env_from.py — без --mcp-config, --plugin-dir есть",
+          argv and len(after(argv, "--plugin-dir")) == 1 and not after(argv, "--mcp-config"), (argv, r.stderr))
     put(mcp, "{")
     r, argv, flags, new = start()
-    check("start: mcp.json пакета не JSON — ни --plugin-dir, ни --mcp-config, тревога", argv and not flags
+    check("start: mcp.json пакета не JSON — без --mcp-config, --plugin-dir есть, тревога",
+          argv and len(after(argv, "--plugin-dir")) == 1 and not after(argv, "--mcp-config")
           and "mcp.json: не JSON" in new, (argv, r.stderr, new))
+    put(mcp, good_mcp)
+    put(os.path.join(pack, "hooks", "hooks.json"), "{")
+    r, argv, flags, new = start()
+    check("start: hooks.json пакета не JSON — ни --plugin-dir, ни --mcp-config, тревога", argv and not flags
+          and "hooks.json: не JSON" in new, (argv, r.stderr, new))
+    put(hooks, good_hook)
     put(mcp, good_mcp)
     r, argv, flags, new = start()
     check("пакет снова годен — флаги вернулись", len(flags) == 2, (argv, r.stderr))

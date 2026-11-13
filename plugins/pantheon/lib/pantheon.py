@@ -3946,30 +3946,34 @@ def pack_text(p):
 
 def pack_admit(window, plugin_dir, mcp_text):
     """Плагин plugin_dir (None — нет) и текст mcp.json mcp_text (None — нет) пакета окна window годны для окна
-    (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Нет — строка в stderr и тревога pack-bad-<window> в alerts.md;
-    да — тревога снята."""
-    def doc(text, rel):
+    (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Плагин (хуки) и MCP проверяются раздельно (вариант А владельца
+    13.11): плохой сервер снимает только mcp.json, хуки пакета остаются; плохой плагин снимает и плагин, и MCP —
+    серверы пакета без его хуков (protect-db на supabase) не идут. Нарушение — строка в stderr и тревога
+    pack-bad-<window> в alerts.md; всё годно — тревога снята. → (плагин годен, MCP годен)."""
+    def doc(text, rel, into):
         if text is None:
             return None
         try:
             return json.loads(text)
         except ValueError:
-            bad.append(f"{rel}: не JSON")
+            into.append(f"{rel}: не JSON")
             return None
 
-    bad = []
+    plug_bad, mcp_bad = [], []
     files = [pack_text(os.path.join(plugin_dir, rel)) if plugin_dir else None for rel in PACK_PLUGIN_FILES]
-    bad += WINDOW_RULES.pack_problems(doc(files[0], "plugin.json"), doc(files[1], "hooks.json"),
-                                      doc(mcp_text, "mcp.json"))
+    plug_bad += WINDOW_RULES.pack_problems(doc(files[0], "plugin.json", plug_bad),
+                                           doc(files[1], "hooks.json", plug_bad), None)
+    mcp_bad += WINDOW_RULES.pack_problems(None, None, doc(mcp_text, "mcp.json", mcp_bad))
+    bad = plug_bad + mcp_bad
     if not bad:
         clear_once(f"pack-bad-{window}")
-        return True
-    where = tilde(os.path.join(PACKS, window))
-    print(f"pantheon: пакет {where}: плагин и MCP не взяты в окно {window} — {'; '.join(bad)[:400]}", file=sys.stderr)
-    alert_once(f"pack-bad-{window}", repr(bad), f"{where}: плагин и MCP пакета не взяты в окно {window} — "
+        return True, True
+    where, what = tilde(os.path.join(PACKS, window)), "плагин и MCP" if plug_bad else "MCP"
+    print(f"pantheon: пакет {where}: {what} не взяты в окно {window} — {'; '.join(bad)[:400]}", file=sys.stderr)
+    alert_once(f"pack-bad-{window}", repr(bad), f"{where}: {what} пакета не взяты в окно {window} — "
                + "; ".join(bad)[:500] + " (хуки — только через in_repo.py пакета, MCP — через env_from.py, npx с "
                "точной версией; README, пакеты окон направлений)", "pantheon")
-    return False
+    return not plug_bad, not plug_bad and not mcp_bad
 
 
 def pack_build_check(name):
@@ -4014,7 +4018,7 @@ def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
     settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть и прошли
-    pack_admit (не прошли — ни того, ни другого, тревога). Плагин и
+    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога). Плагин и
     _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
     settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
     обновляет. Не направление (мастерская, штаб, задачи) — []."""
@@ -4044,12 +4048,12 @@ def window_flags(window, name=None):
     plugin = os.path.join(snap, "plugin") if snap else None
     plugin = plugin if plugin and os.path.isfile(os.path.join(plugin, ".claude-plugin", "plugin.json")) else None
     text = pack_text(os.path.join(PACKS, window, "mcp.json")) if snap else None
-    # в окно — только то, что проверено: плагин снимка и этот же текст mcp.json (ревью argus #425 Б1)
-    if (plugin or text is not None) and not pack_admit(window, plugin, text):
-        return args
-    if plugin:
+    # в окно — только то, что проверено: плагин снимка и этот же текст mcp.json (ревью argus #425 Б1), каждый отдельно
+    # (вариант А владельца 13.11: плохой сервер не снимает хуки пакета)
+    plugin_ok, mcp_ok = pack_admit(window, plugin, text) if plugin or text is not None else (False, False)
+    if plugin and plugin_ok:
         args += ["--plugin-dir", plugin]
-    if text is not None:
+    if text is not None and mcp_ok:
         bin_dir = json.dumps(os.path.join(snap, "_bin"))[1:-1]
         args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
     return args

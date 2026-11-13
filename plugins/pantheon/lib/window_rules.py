@@ -155,7 +155,8 @@ def auto_mode(auto_allow):
 # python3 -I ${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py (pack_hook_problem). Сервер MCP — только через env_from.py пакета, а
 # за его «--» — только npx -y <пакет>@x.y.z: программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
 # папки, которую окно пишет; http, sse и ws — без headersHelper. Поля plugin.json, которые сами запускают код мимо
-# hooks.json, запрещены. Нарушение — плагин и MCP пакета в окно не идут, строка в alerts.md (pantheon.pack_admit).
+# hooks.json, запрещены. Нарушение в mcp.json — MCP пакета в окно не идёт, в плагине — ни плагин, ни MCP; строка в
+# alerts.md (pantheon.pack_admit).
 PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"
 PACK_HOOK_BIN = "${CLAUDE_PLUGIN_ROOT}/../_bin/"
 PACK_HOOK_LEAD = ["python3", "-I", PACK_HOOK_BIN + "in_repo.py"]

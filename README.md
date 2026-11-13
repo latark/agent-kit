@@ -455,7 +455,8 @@
   `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- npx -y <пакет>@x.y.z …`: программа по пути, даже системная
   (`/usr/bin/awk`), исполнила бы вне песочницы и то, что пишет окно. В `env` — без `PATH`, `NODE_*` и
   подобных; удалённый — http, sse или ws без `headersHelper`; в `plugin.json` нет полей `hooks`, `mcpServers`,
-  `lspServers`. Нарушение — плагин и MCP пакета в окно не идут (window.json — идёт), строка в `alerts.md`
+  `lspServers`. Нарушение в `mcp.json` — в окно не идёт только MCP пакета, хуки остаются; нарушение в плагине — ни
+  плагин, ни MCP (серверы без хуков пакета, вроде protect-db, не идут); window.json идёт всегда; строка в `alerts.md`
   (тревога `pack-bad-<направление>`). Общий код пакетов — `plugins/pantheon/packs/_bin`. Своё: создайте папку с
   именем направления из реестра и нужные файлы, образцы — `plugins/pantheon/tests/fixtures/packs`; следующий плановый
   проход (`domains build --if-changed`) пересоберёт окно, скрипты `.claude/hooks` вложенных проектов исполняются только
