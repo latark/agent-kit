@@ -406,6 +406,20 @@ def bad_pack(run, pack, home):
     for p, text in keep.items():
         put(p, text)
     put(mcp, good_mcp)
+    # metis-1100: перенос в папку пакета оборван после mcp.json, до hooks.json (отметка .<направление>.linking) — серверы
+    # пакета без его хуков (protect-db) в окно не идут: ни --mcp-config, ни --plugin-dir; отметки нет — флаги вернулись
+    journal = os.path.join(os.path.dirname(pack), ".proteus-ms.linking")
+    os.remove(hooks)
+    put(journal, "")
+    r, argv, flags, new = start()
+    check("start: перенос пакета не кончен (.linking, mcp.json есть, hooks.json нет) — ни --mcp-config, ни "
+          "--plugin-dir, окно запускается, причина в stderr", argv and not flags
+          and "перенос не закончен" in r.stderr, (argv, r.stderr))
+    os.remove(journal)
+    put(hooks, good_hook)
+    r, argv, flags, new = start()
+    check("start: перенос кончен (отметки .linking нет) — --plugin-dir и --mcp-config снова есть", len(flags) == 2,
+          (argv, r.stderr))
 
 
 def auto_rules_missing(run, user, home):
@@ -536,7 +550,7 @@ def rules_of_packs(W):
     hk = lambda *hs: {"hooks": {"Stop": [{"hooks": list(hs)}]}}  # noqa: E731
     sv = lambda **s: {"mcpServers": {"s": s}}  # noqa: E731
     cmd = lambda c: hk({"type": "command", "command": c})  # noqa: E731
-    good = [(None, hk({"type": "command", "command": pre + "~/r -- bash .claude/hooks/a.sh"}, {"type": "prompt",
+    good = [(None, hk({"type": "command", "command": pre + "$HOME/r -- bash .claude/hooks/a.sh"}, {"type": "prompt",
                                                                                            "prompt": "p"}), None),
             (None, cmd(pre + '"$HOME/r" --always -- python3 -I .claude/hooks/g_b.py x'), None),
             (None, cmd(pre + '"${HOME}/r" "--cmd-prefix=git commit" --plain=a,b -- bash .claude/hooks/p-c.sh'), None),
@@ -610,6 +624,12 @@ def rules_of_packs(W):
            ("хук: _bin не .py", None, cmd(pre + '~/r -- python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/x.sh"'), None),
            ("хук: кавычка не закрыта", None, cmd(pre + '"~/r -- bash .claude/hooks/a.sh'), None),
            ("хук: command не строка", None, cmd(5), None),
+           # metis-1101 (ревью #425 Д1): sh развернул бы скобки в свой «--» и bash -c вне песочницы; глоб, ~ и #
+           ("хук: {--,bash,-c,…} до --", None, cmd(pre + '$HOME/r {--,bash,-c,"id"} -- bash .claude/hooks/a.sh'), None),
+           ("хук: глоб за скриптом", None, cmd(pre + "$HOME/r -- bash .claude/hooks/a.sh *"), None),
+           ("хук: ~ в репозитории", None, cmd(pre + "~/r -- bash .claude/hooks/a.sh"), None),
+           ("хук: # за скриптом", None, cmd(pre + "$HOME/r -- bash .claude/hooks/a.sh #x"), None),
+           ("хук: неизвестный флаг in_repo.py", None, cmd(pre + "$HOME/r --x -- bash .claude/hooks/a.sh"), None),
            ("env PATH", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"], env={"PATH": "x"})),
            ("env NODE_OPTIONS", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"],
                                               env={"NODE_OPTIONS": "--require x"})),
@@ -804,6 +824,7 @@ def existing_folder(pl, base, plugin):
           and os.path.isfile(os.path.join(a, "hooks", "hooks.json"))
           and json.load(open(os.path.join(a, "window.json"))) == {"description": "HALF"}
           and not os.path.lexists(os.path.join(user, ".dir-a.linking")), (res, os.listdir(user)))
+    link_cut(pl, base)
     user = os.path.join(base, "user6", "packs")
     put(os.path.join(user, "dir-b"), "не папка")
     outside = os.path.join(base, "outside6")
@@ -816,6 +837,44 @@ def existing_folder(pl, base, plugin):
           and not os.path.lexists(os.path.join(user, ".migrated.json")) and os.listdir(outside) == []
           and open(os.path.join(user, "dir-b")).read() == "не папка", (res, os.listdir(user), os.listdir(outside)))
     symlinked_version(pl, base)
+
+
+def link_cut(pl, base):
+    """metis-1100: перенос по файлам в существующую папку оборван на каждом шаге — mcp.json без hooks.json не остаётся
+    (hooks.json встаёт первым, mcp.json — последним), а пока отметка .linking есть, window_hold пакет в окно не берёт."""
+    import io
+    src = os.path.join(base, "src-cut")
+    for f in pl.PACK_FILES:
+        put(os.path.join(src, "dir-x", f), {"f": f})
+    link = os.link
+    for k in range(1, len(pl.PACK_FILES) + 1):
+        user = os.path.join(base, f"cut{k}", "packs")
+        put(os.path.join(user, "dir-x", "approved.json"), {})
+        calls = []
+
+        def cut(a, b, calls=calls, k=k, **kw):
+            calls.append(b)
+            if len(calls) == k:
+                raise OSError("перенос оборван")
+            return link(a, b, **kw)
+
+        os.link = cut
+        try:
+            res = pl.migrate(user, os.path.join(base, "nothing"), None, (), (), "t", src, False)
+        finally:
+            os.link = link
+        x = os.path.join(user, "dir-x")
+        has = {f: os.path.lexists(os.path.join(x, f)) for f in pl.PACK_FILES}
+        out = io.StringIO()
+        check(f"перенос оборван на {k}-м файле из {len(calls)}: «не перенесён», mcp.json без hooks.json не остался "
+              "(hooks.json — первым)", res["failed"] == ["dir-x"] and not (has["mcp.json"] and not has["hooks/hooks.json"])
+              and not has["mcp.json"], (res, calls, has))
+        check(f"перенос оборван на {k}-м файле: отметка .linking есть — window_hold пакет в окно не берёт, причина в out",
+              pl.window_hold(user, "dir-x", out) and "перенос не закончен" in out.getvalue(), (os.listdir(user), out.getvalue()))
+    res = pl.migrate(user, os.path.join(base, "nothing"), None, (), (), "t", src, False)
+    check("следующий перенос доводит оборванный: все файлы на месте, отметки нет — window_hold пакет берёт",
+          res["copied"] == ["dir-x"] and all(os.path.isfile(os.path.join(user, "dir-x", f)) for f in pl.PACK_FILES)
+          and not pl.window_hold(user, "dir-x", io.StringIO()), (res, os.listdir(user)))
 
 
 def symlinked_version(pl, base):
