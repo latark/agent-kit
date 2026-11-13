@@ -4037,9 +4037,9 @@ def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
     settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть и прошли
-    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога). Плагин и
-    _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
-    settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
+    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога; перенос пакета не
+    кончен — ни того, ни другого, PACKS_LOCAL.window_hold, metis-1100). Плагин и _bin — из снимка pack_snapshot
+    (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл — settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
     обновляет. Не направление (мастерская, штаб, задачи) — []."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
     if not isinstance(folders, list) or not folders:
@@ -4063,7 +4063,7 @@ def window_flags(window, name=None):
         # окно запущено раньше первой сборки после выпуска 12.11: пакет ещё в прежней версии плагина (ревью argus #425
         # Д3). Итог — в stderr: stdout запуска читают как вывод команды
         packs_migrate_cmd(["migrate"], mark=True, out=sys.stderr)
-    snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
+    snap = None if PACKS_LOCAL.window_hold(PACKS, window, sys.stderr) else pack_snapshot(window, name or window)  # круг F
     plugin = os.path.join(snap, "plugin") if snap else None
     plugin = plugin if plugin and os.path.isfile(os.path.join(plugin, ".claude-plugin", "plugin.json")) else None
     text = pack_text(os.path.join(PACKS, window, "mcp.json")) if snap else None

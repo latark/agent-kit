@@ -97,6 +97,18 @@ answer_at, answers_seen, pack_jobs, spent, last_used, resets_at, closed, last_ni
                            # сброса после его часа держит до следующего сброса), «ГГГГ-ММ-ДД ЧЧ:ММ» или дата-время TOML — с момента
   date = "2026-10-19"      # старый вид: только этот день
 
+Разрешённый расход до даты (metis-1124; пишет Зевс по слову владельца: «до <даты> можно потратить N % недели»):
+
+  [limits.allow]
+  pct = 30                 # пока неделя < pct % и t < until: зона не красная и жёлтая днём не держит запуск
+                           # (линия недели, stop_pp, warn_pp и hard_pct не мешают); на pct — стоп, как потолок
+  until = "2026-11-14 23:59"  # обязателен: дата (по конец суток), «ГГГГ-ММ-ДД ЧЧ:ММ» или дата-время TOML; после него
+                           # правило не действует само, owner_cap не трогается
+  decision = "owner-word-ref"  # строка-ссылка на слово владельца
+Кривая запись (pct не число в (0, 100], нет until или он кривой) не действует, `pantheon night status` пишет почему и
+watch — одна тревога. Строка «Разрешение до даты» — в `pantheon night status`. Действующее разрешение с pct меньше
+потолка владельца работает как потолок (agent-gate в оболочке хука смотрит только owner_cap — отдельно).
+
 Потолок только сужает: жёлтую и красную зону, heavy_max, hard_pct и ночь не снимает (решение 25.10; дневной потолок
 metis-0275 работал как разрешение). Достигнут — неделя по снимку ≥ pct при сбросе в будущем; старый снимок тоже
 годится: в пределах недели расход не убывает. Кривая запись (pct не число в (0, 100], nan, until = "reset" без since,
@@ -269,9 +281,41 @@ def cap_read(t, m=None):
         return None, f"запись [limits.owner_cap] не разобрана: {str(e)[:80]}"
 
 
+def allow_read(t):
+    """(разрешение, пометка) из [limits.allow] на момент t. Разрешение — {"pct", "decision", "until"} или None; пометка —
+    почему не действует ("" — раздела нет). metis-1124."""
+    try:
+        lim = P.load_schedule().get("limits")
+    except Exception as e:  # noqa: BLE001 — нет или битый schedule.toml: как без разрешения
+        return None, f"schedule.toml не прочитать ({type(e).__name__})"
+    c = lim.get("allow") if isinstance(lim, dict) else None
+    if c is None:
+        return None, ""
+    if not isinstance(c, dict):
+        return None, "запись [limits.allow] не разобрана: не таблица"
+    pct = c.get("pct")
+    if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not math.isfinite(pct) or not 0 < pct <= 100:
+        return None, "запись [limits.allow] не разобрана: pct — не число от 0 до 100"
+    if c.get("until") is None:
+        return None, "запись [limits.allow] не разобрана: нет until"
+    try:
+        end = _cap_moment(c["until"])[1]
+    except (ValueError, TypeError, OverflowError, OSError) as e:
+        return None, f"запись [limits.allow] не разобрана: {str(e)[:80]}"
+    if t >= end:
+        return None, f"истекло {P.stamp(end)}"
+    return {"pct": float(pct), "until": end,
+            "decision": " ".join(str(c.get("decision") or "").split())[:80]}, ""
+
+
 def owner_cap(t, m=None):
-    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None."""
-    return cap_read(t, m)[0]
+    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None. Действующее разрешение
+    [limits.allow] с pct ниже потолка (или без потолка) — тоже потолок: на его pct стоп (metis-1124)."""
+    cap = cap_read(t, m)[0]
+    al = allow_read(t)[0]
+    if al and (cap is None or al["pct"] < cap["pct"]):
+        return {"pct": al["pct"], "decision": al["decision"], "scope": f"разрешение до {P.stamp(al['until'])}"}
+    return cap
 
 
 def cap_hit(m, cap, t):
@@ -483,6 +527,10 @@ def measure(t, cfg=None):
         zone = "yellow"
     else:
         zone = "green"
+    if zone != "green":  # разрешённый расход до даты (metis-1124): ниже его pct зона не красная и не жёлтая
+        al = allow_read(t)[0]
+        if al and w[0] < al["pct"]:
+            zone = "green"
     m.update(known=True, line=line, over=over, zone=zone)
     return m
 
@@ -802,6 +850,11 @@ def watch(agents=None, registry=None, doms=None, t=None):
         P.alert_once("owner-cap-note", note, f"потолок владельца не действует: {note}", "night", note=note)
     else:
         P.clear_once("owner-cap-note")
+    note = allow_read(t)[1]
+    if note.startswith(("запись [limits.allow] не разобрана", "истекло")):  # слово владельца не должно пропасть молча
+        P.alert_once("limits-allow-note", note, f"разрешение до даты не действует: {note}", "night", note=note)
+    else:
+        P.clear_once("limits-allow-note")
     if cap_hit(m, cap, t):  # карточка и тревога — и без попытки запуска в этом проходе (одна на неделю и pct)
         cap_notice(t, m, cap)
     power_check(t, cfg)
@@ -1293,7 +1346,7 @@ def status_lines(t=None):
     m = measure(t, cfg)
     d = evening(t, cfg)
     night = night_line(load(d), d, t, cfg) if d else NIGHT_CLOSED
-    return ([week_line(m), "Ночь: " + night, snap_line(m, cfg), cap_line(t, m)]
+    return ([week_line(m), "Ночь: " + night, snap_line(m, cfg), cap_line(t, m)] + allow_lines(t, m)
             + [f"Разовый запуск {x}" for x in oneshot_lines(t)])
 
 
@@ -1309,6 +1362,21 @@ def cap_line(t, m):
     if m["used"] is None or not m["resets"] or m["resets"] <= t:
         return s + " · запас неизвестен (расхода недели нет)"
     return s + f" · запас {num(cap['pct'] - m['used'])} п.п."
+
+
+def allow_lines(t, m):
+    """Строка о разрешённом расходе до даты ([limits.allow]): действует — pct, срок, решение, запас; кривая или истёкшая —
+    почему не действует; раздела нет — пусто (metis-1124)."""
+    al, note = allow_read(t)
+    if al is None:
+        return [f"Разрешение до даты: не действует — {note}"] if note else []
+    s = f"Разрешение до даты: до {num(al['pct'])} % недели по {P.stamp(al['until'])}" + (
+        f" · решение {al['decision']}" if al["decision"] else "")
+    if m["used"] is None or not m["resets"] or m["resets"] <= t:
+        return [s + " · расход недели неизвестен"]
+    if m["used"] >= al["pct"]:
+        return [s + f" · достигнуто (неделя {num(m['used'])} %) — стоп, как потолок"]
+    return [s + f" · красная и жёлтая зоны не держат, запас {num(al['pct'] - m['used'])} п.п."]
 
 
 def agent_gate(t=None):
@@ -1373,7 +1441,7 @@ def report_lines(t=None):
     m = measure(t, cfg)
     d = last_evening(t, cfg)
     st = load(d)
-    out = [week_line(m), cap_line(t, m)]
+    out = [week_line(m), cap_line(t, m)] + allow_lines(t, m)
     nl = night_line(st, d, t, cfg, now_night=evening(t, cfg) is not None)
     al = st.get("alerts") or []
     out.append(f"Ночь {d.strftime('%d.%m')}: {nl}" + (f" · тревоги: {', '.join(f'{x} %' for x in al)}" if al else
