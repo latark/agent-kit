@@ -534,8 +534,7 @@ def consent_revoke(rest):
         print(f"pantheon consent revoke <класс> — один из: {', '.join(STANDING_CLASSES)}", file=sys.stderr)
         return 2
     cls = rest[0]
-    rec = {"op": "revoke", "class": cls, "t": P.now(), "time": P.stamp(), "by": os.environ.get("PANTHEON_ROLE") or "owner",
-           "host": P.host()}
+    rec = {"op": "revoke", "class": cls, "t": P.now(), "time": P.stamp(), "by": os.environ.get("PANTHEON_ROLE") or "owner"}
     try:
         os.makedirs(P.STATE, exist_ok=True)
         fd = os.open(P.path(STANDING_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
