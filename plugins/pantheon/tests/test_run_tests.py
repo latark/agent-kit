@@ -5,8 +5,10 @@
 раннер в своей сессии, как задача run_job, гасится SIGTERM / SIGHUP / SIGINT — ни файла тестов, ни его внука после."""
 import ast
 import atexit
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -720,6 +722,92 @@ check("shard_weight: размер файла / SHARD_BYTES_PER_SEC; предел
       R.shard_weight(wp, "wplug/test_big.py", {}) > R.shard_weight(wp, "wplug/test_small.py", {})
       and R.shard_weight(wp, "wplug/test_small.py", {"wplug/test_small.py": 300}) == 300 / R.SHARD_SLOW_DIV
       and R.shard_weight(wp, "wplug/test_none.py", {}) == 0, R.shard_weight(wp, "wplug/test_big.py", {}))
+
+# --- вес частей — время файла на CI из файла времён репозитория (metis-1117) ---
+TF = os.path.join(_ROOT, "shard-times.json")
+with open(TF, "w") as fh:
+    json.dump({"source": "t", "times": {"wplug/test_small.py": 50, "wplug/test_big.py": 1, "x/test_s.py": "abc",
+                                        "x/test_n.py": -1, "x/test_b.py": True}}, fh)
+tw = R.shard_times(TF)
+check("shard_times: метки с числом ≥ 0 из times; строка, bool и отрицательное — пропущены",
+      tw == {"wplug/test_small.py": 50.0, "wplug/test_big.py": 1.0}, tw)
+for body in ("{", "[]", '{"times": 5}', '{"source": "t"}'):
+    with open(TF + ".bad", "w") as fh:
+        fh.write(body)
+    check(f"shard_times: файл {body!r} — {{}}: вес по оценке, без падения", R.shard_times(TF + ".bad") == {},
+          R.shard_times(TF + ".bad"))
+check("shard_times: нет файла — {}", R.shard_times(os.path.join(_ROOT, "нет-файла.json")) == {})
+check("shard_weight: время из файла времён важнее размера и SLOW (и меньшее тоже); нет метки — оценка по размеру",
+      R.shard_weight(wp, "wplug/test_small.py", {"wplug/test_small.py": 900}, tw) == 50.0
+      and R.shard_weight(wp, "wplug/test_big.py", {}, tw) == 1.0
+      and R.shard_weight(wp, "wplug/test_big.py", {}, {"x/test_s.py": 1}) == R.shard_weight(wp, "wplug/test_big.py", {}, {})
+      > 1.0, (R.shard_weight(wp, "wplug/test_big.py", {}, tw), R.shard_weight(wp, "wplug/test_big.py", {}, {})))
+TW3 = os.path.join(_ROOT, "shard-times-3.json")
+with open(TW3, "w") as fh:
+    json.dump({"source": "t", "times": {"p/test_a.py": 10, "p/test_b.py": 6, "p/test_c.py": 5}}, fh)
+it3 = [("/нет-папки", f"p/test_{c}.py") for c in "abc"]
+_st = R.SHARD_TIMES
+R.SHARD_TIMES = TW3
+try:
+    dflt = (R.shard_weight(wp, "p/test_a.py", {}), R.shard_weigher()(it3[1]))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p1 = R.pick_shard(it3, [], 1, 2)[0]
+        p2 = R.pick_shard(it3, [], 2, 2)[0]
+finally:
+    R.SHARD_TIMES = _st
+check("shard_weight и shard_weigher без times читают файл SHARD_TIMES", dflt == (10.0, 6.0), dflt)
+# без времён у всех вес 0 (файлов нет) — всё в часть 1; по времени: 10 → 1, 6 → 2, 5 → в лёгкую 2
+check("pick_shard: части по времени из файла SHARD_TIMES — a | b, c; строка «по замеру CI 3 из 3»",
+      p1 == it3[:1] and p2 == it3[1:] and buf.getvalue().count("по замеру CI 3 из 3") == 2
+      and R.shard_split(it3, 2, lambda it: 0)[0] == it3, (p1, p2, buf.getvalue()))
+real = R.shard_times()
+labels = {lb for _, lb in R.collect([os.path.join(os.path.dirname(PLUGIN), p)
+                                     for p in ("guard", "pantheon", "project-tools")])}
+with open(R.SHARD_TIMES, encoding="utf-8") as fh:
+    real_raw = json.load(fh)
+check("файл времён репозитория (scripts/shard-times.json) читается: замер есть у 80 % файлов тестов трёх плагинов, "
+      "estimated — из times",
+      len(set(real) & labels) >= 0.8 * len(labels) and set(real_raw.get("estimated") or ()) <= set(real)
+      and real_raw.get("source"), (len(set(real) & labels), len(labels)))
+ST = os.path.join(PLUGIN, "scripts", "shard-times.py")
+STO = os.path.join(_ROOT, "st.json")
+GHLOG = ("\ufefffull-shard (1/3)\tUNKNOWN STEP\t2026-11-13T10:10:50.1Z ok   pantheon/test_run_tests.py · 104.1 с · "
+         "проверок 287\n"
+         "full-shard (2/3)\tUNKNOWN STEP\t2026-11-13T10:11:00.1Z FAIL pantheon/test_hooks.py · 600.0 с · таймаут\n"
+         "affected-shard (1/4)\tUNKNOWN STEP\t2026-11-13T10:11:00.1Z ok   guard/test_guard.py · 266.1 с · проверок 1\n"
+         "full-shard (3/3)\tUNKNOWN STEP\t2026-11-13T10:11:01.1Z ok   guard/test_guard.py · 124.3 с · проверок 1240\n"
+         "full-shard (3/3)\tUNKNOWN STEP\t2026-11-13T10:11:02.1Z ok   — guard/test_guard.py · 1 с\n")
+with open(STO, "w") as fh:
+    json.dump({"source": "old", "times": {"pantheon/test_hooks.py": 48.5, "pantheon/test_gone_zz.py": 5,
+                                          "pantheon/test_run_tests.py": 1},
+               "estimated": ["pantheon/test_run_tests.py", "pantheon/test_hooks.py"]}, fh)
+
+
+def shard_times_cli(args, text):
+    return subprocess.run([sys.executable, "-I", ST, "--out", STO, *args], input=text, capture_output=True, text=True,
+                          timeout=60)
+
+
+r = shard_times_cli(["--source", "run 1"], GHLOG)
+with open(STO) as fh:
+    st = json.load(fh)
+check("shard-times.py: строки ok job full-shard → times; FAIL и другой job — нет; прежнее время без замера остаётся, "
+      "метка без файла тестов — прочь; estimated — без замеренных; source — свой текст",
+      r.returncode == 0 and st["times"] == {"guard/test_guard.py": 124.3, "pantheon/test_hooks.py": 48.5,
+                                            "pantheon/test_run_tests.py": 104.1}
+      and st["estimated"] == ["pantheon/test_hooks.py"] and st["source"].startswith("run 1;"), (r.stdout, r.stderr, st))
+with open(STO) as fh:
+    before = fh.read()
+r = shard_times_cli([], "ничего\n" + GHLOG.replace("full-shard", "other-job"))
+check("shard-times.py: нет строк ok нужного job — код 1, причина последней строкой, файл не тронут",
+      r.returncode == 1 and "файл не тронут" in (r.stdout.strip().splitlines() or [""])[-1]
+      and open(STO).read() == before, (r.returncode, r.stdout, r.stderr))
+r = shard_times_cli(["--job", ""], "ok   pantheon/test_hooks.py · 9.5 с · проверок 3\n")
+with open(STO) as fh:
+    st = json.load(fh)
+check("shard-times.py --job '': вывод run-tests.py как есть — время берётся, estimated пуст",
+      r.returncode == 0 and st["times"]["pantheon/test_hooks.py"] == 9.5 and st["estimated"] == [], (r.stdout, st))
 whole = sorted(ran(run([a, b]).stdout))
 got, codes = [], []
 for k in (1, 2):
