@@ -25,7 +25,7 @@ __all__ = [
     "_holder_text", "wait_name_free", "check_new_name", "start_at", "start", "_start_session", "OWNER_WORD_WINDOW",
     "OWNER_HEAD", "owner_word_heads", "owner_spoke_recently", "owner_spoke_before", "CAPACITY_SESSIONS_DONE",
     "capacity_probe", "capacity_log", "NO_WORD_WHY", "START_REQ", "START_REQ_KEYS", "start_request", "start_order", "cancel_request", "run_closed",
-    "take_start_requests",
+    "take_start_requests", "resume_request", "hestia_request", "REQ_FRESH",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
     "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake",
 ]
@@ -593,6 +593,102 @@ def _start_req_read(dfd, fname):
         os.close(fd)
 
 
+# metis-1066 (слово владельца 12.11, [metis-resume-1211]): снять «остановлено вами» и поднять Гестию окно Пританея не
+# может — песочница закрывает STATE/stopped и STATE/settings/run. `pantheon resume <направление>` и
+# `pantheon wake hestia --task <id>` в окне hq — строка в той же заявке start-req: {"resume": true} в <имя>.req,
+# {"task": id} в hestia.req. Окно пишет её только при вашем слове в owner-log/zeus.md за OWNER_WORD_WINDOW, а плановый
+# проход сверяет слово ещё раз — за OWNER_WORD_WINDOW до своих часов, а не до времени из заявки (его пишет окно);
+# заявка не старше REQ_FRESH. Без слова — тревога и ни метки, ни запуска. Слово не привязано к имени цели: guard —
+# от ошибок агента, а не от намеренного обхода (остаток, как у pantheon resume из окна по owner_word_ok). Вернуть — метка снимается (как pantheon resume), окно поднимает разовый запуск со всеми его проверками
+# (недельный потолок, занятость). Гестию поднимает `pantheon wake hestia --task <id> --from zeus` вне окна: start_gate
+# проверяет ваше слово в третий раз.
+HESTIA = "hestia"
+HESTIA_REQ_KEYS = {"target", "time", "by", "task"}
+REQ_FRESH = 15 * 60  # = OWNER_WORD_WINDOW (он определён ниже)
+REQ_SHAPE = ("не по образцу: строки JSON с ключами target, time, by (и cancel — id разового запуска этого направления, "
+             "или resume: true), имя — как у файла")
+HESTIA_SHAPE = "не по образцу: строки JSON с ключами target, time, by, task — id задачи, имя файла hestia.req"
+
+
+def _req_items(data, target):
+    """Строки заявки → (items, None) или (None, причина): JSON по образцу, target — как имя файла, by — zeus."""
+    try:
+        items = [json.loads(x) for x in data.decode().splitlines() if x.strip()]
+    except (ValueError, UnicodeDecodeError):
+        items = None
+    if not items or any(not isinstance(x, dict) or x.get("target") != target or x.get("by") != "zeus" for x in items):
+        return None, HESTIA_SHAPE if target == HESTIA else REQ_SHAPE
+    if target == HESTIA:
+        ok = all(set(x) == HESTIA_REQ_KEYS and isinstance(x["task"], str) and P.tasks_mod().ID_RE.fullmatch(x["task"])
+                 for x in items)
+        return (items, None) if ok else (None, HESTIA_SHAPE)
+    ok = all(not set(x) - START_REQ_KEYS - {"cancel", "resume"} and ("cancel" not in x or _cancel_id(x["cancel"], target))
+             and ("resume" not in x or (x["resume"] is True and "cancel" not in x)) for x in items)
+    return (items, None) if ok else (None, REQ_SHAPE)
+
+
+def _req_word_problem(items, t):
+    """Строки заявки, которым нужно ваше слово: время заявки — не старше REQ_FRESH, и в owner-log/zeus.md есть ваша
+    запись за OWNER_WORD_WINDOW до часов прохода t. Время заявки пишет окно, поэтому слово меряется по t, а не по нему
+    (проверка безопасности 12.11: иначе окно сдвигало бы 15 мин назад). → причина отказа или None."""
+    for x in items:
+        try:
+            rt = datetime.strptime(str(x.get("time")), "%Y-%m-%d %H:%M").timestamp()
+        except ValueError:
+            return "время заявки не по образцу ГГГГ-ММ-ДД ЧЧ:ММ"
+        if not t - REQ_FRESH <= rt <= t + 60:
+            return f"заявка от {x.get('time')} старше {REQ_FRESH // 60} мин или из будущего — подайте заново"
+    if items and not owner_spoke_before("zeus", t, OWNER_WORD_WINDOW):
+        return (f"нет вашего слова: в owner-log/zeus.md нет вашей записи за {OWNER_WORD_WINDOW // 60} мин до прохода "
+                "(сообщение сессии согласием не считается) — скажите Зевсу ещё раз")
+    return None
+
+
+def resume_request(target):
+    """`pantheon resume <направление>` в окне Пританея (слово владельца уже сверено) → код; None — имя не из реестра
+    или его ведёт Пританей: тогда прежний путь pantheon resume."""
+    if _start_req_problem(target, P.read_json(P.path("domains.json"), {}).get("domains") or {}):
+        return None
+    line = json.dumps({"target": target, "time": P.stamp(P.now()), "by": "zeus", "resume": True}, ensure_ascii=False)
+    if not P.hq_mark(START_REQ, target + ".req", line + "\n"):
+        print(f"pantheon resume: заявка на {target} не записана (строка выше) — метка не снята, окно не поднимется",
+              file=sys.stderr)
+        return 1
+    print(f"pantheon resume: заявка принята — плановый проход сверит ваше слово, снимет метку «остановлено вами» с "
+          f"{target} и поднимет окно")
+    return 0
+
+
+def hestia_request(tid):
+    """`pantheon wake hestia --task <id>` в окне Пританея, которому STATE/settings/run закрыт, → заявка hestia.req. Без
+    вашего слова в owner-log/zeus.md — отказ, код 2, и тревога. → 0, START_REFUSED, 1 (не записана)."""
+    if not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
+        P.alert(f"pantheon wake hestia --task {tid} из окна Пританея отклонён: нет вашего слова", "pantheon-start")
+        print(f"pantheon wake hestia: отказ — {NO_WORD_WHY}", file=sys.stderr)
+        return START_REFUSED
+    line = json.dumps({"target": HESTIA, "time": P.stamp(P.now()), "by": "zeus", "task": tid}, ensure_ascii=False)
+    if not P.hq_mark(START_REQ, HESTIA + ".req", line + "\n"):
+        print(f"pantheon wake hestia: заявка по задаче {tid} не записана (строка выше) — Гестия не поднимется",
+              file=sys.stderr)
+        return 1
+    print(f"pantheon wake hestia: заявка принята — Гестию по задаче {tid} поднимет плановый проход")
+    return 0
+
+
+def _hestia_by_request(tid):
+    """Плановый проход: Гестия по заявке Зевса — `pantheon wake hestia --task <id> --from zeus` вне окна. → итог строкой."""
+    limit = P.watch_mod().start_timeout()
+    try:
+        r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "wake", HESTIA, "--task", tid, "--from", "zeus"],
+                           capture_output=True, text=True, timeout=limit, env=P.claude_env())
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        res = "поднята" if r.returncode == 0 else f"не вышло, код {r.returncode}" + (f": {tail[-1][:160]}" if tail else "")
+    except subprocess.TimeoutExpired:
+        res = f"pantheon wake hestia не уложился в {limit:.0f} с"
+    P.alert(f"заявка Зевса: Гестия по задаче {tid} — {res}", "watch")
+    return res
+
+
 def take_start_requests(doms, t):
     """Плановый проход (вне окна): заявки Зевса → разовые запуски. Файл заявки снимается всегда; подложенный (ссылка,
     лишние ключи, чужое имя, не из реестра) — тревога без запуска. → [(имя, id разового запуска или причина)]."""
@@ -609,20 +705,19 @@ def take_start_requests(doms, t):
             data, bad = _start_req_read(dfd, fname)
             with contextlib.suppress(OSError):
                 os.unlink(fname, dir_fd=dfd)
-            bad = bad or _start_req_problem(target, doms)
+            if not bad and target != HESTIA:  # metis-1066: Гестия — служебная, её нет в реестре направлений
+                bad = _start_req_problem(target, doms)
+            items = None
             if not bad:
-                try:
-                    items = [json.loads(x) for x in data.decode().splitlines() if x.strip()]
-                except (ValueError, UnicodeDecodeError):
-                    items = None
-                if not items or any(not isinstance(x, dict) or set(x) - START_REQ_KEYS - {"cancel"}
-                                    or x.get("target") != target or x.get("by") != "zeus"
-                                    or ("cancel" in x and not _cancel_id(x["cancel"], target)) for x in items):
-                    bad = ("не по образцу: строки JSON с ключами target, time, by (и cancel — id разового запуска "
-                           "этого направления), имя — как у файла")
+                items, bad = _req_items(data, target)
+            if not bad:  # metis-1066: вернуть и Гестия — только по вашему слову в owner-log/zeus.md перед заявкой
+                bad = _req_word_problem([x for x in items if "resume" in x or "task" in x], t)
             if bad:
                 P.alert(f"заявка Зевса на запуск {target} отклонена: {bad}", "watch")
                 out.append((target, bad))
+                continue
+            if target == HESTIA:
+                out.append((target, _hestia_by_request(items[-1]["task"])))
                 continue
             for oid in dict.fromkeys(x["cancel"] for x in items if "cancel" in x):  # metis-1009: отмена — до запуска
                 done = P.night_mod().oneshot_cancel(oid, t, "заявка Зевса (pantheon start --at-cancel)")
@@ -631,6 +726,8 @@ def take_start_requests(doms, t):
                 out.append((target, f"cancel {oid}: {'отменён' if done else 'нет'}"))
             if all("cancel" in x for x in items):
                 continue
+            if any(x.get("resume") for x in items):  # metis-1066: метку «остановлено вами» — до разового запуска
+                P.watch_mod().unstop(target, "заявка Зевса pantheon resume по вашему слову в owner-log/zeus.md")
             text = (f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по "
                     "нему.")
             oid = P.night_mod().oneshot_add(target, t, text, "zeus-request", t=t)
@@ -1057,10 +1154,19 @@ def wake_hestia(rest):
     командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start.
     Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
     owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся. Недельный потолок
-    владельца Гестию не держит (CAP_FREE, решение владельца 29.10)."""
+    владельца Гестию не держит (CAP_FREE, решение владельца 29.10).
+    metis-1066: в окне Пританея, которому песочница закрывает STATE/settings/run, — заявка hestia.req (hestia_request);
+    её исполняет плановый проход вызовом с --from zeus (вне окна или в окне hq; слово сверяет start_gate)."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest  # metis-0575: зависшую прежнюю Гестию стопит и убирает (claude stop, затем rm_previous)
     args = [a for a in rest[1:] if a not in ("--dry-run", "--restart")]
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    via_zeus = args[-2:] == ["--from", "zeus"]
+    if via_zeus:
+        args = args[:-2]
+        if role not in ("", "hq"):
+            print(f"pantheon wake hestia: в окне роли ({role}) --from zeus не принимается", file=sys.stderr)
+            return 2
     tid = args[1] if len(args) == 2 and args[0] == "--task" else None
     head = None
     if tid and P.tasks_mod().ID_RE.fullmatch(tid):
@@ -1089,8 +1195,9 @@ def wake_hestia(rest):
         return 1
     # откуда запуск — как в start() (metis-0261 А, ревью argus-b5): hq → zeus, иная роль → tick, без роли → owner.
     # Поручение Гестии из окна роли — только по вашему слову в owner-log/zeus.md (как wake <имя> "задание"), иначе код 2
-    role = os.environ.get("PANTHEON_ROLE") or ""
-    origin = "zeus" if role == "hq" else "tick" if role else "owner"
+    origin = "zeus" if role == "hq" or via_zeus else "tick" if role else "owner"
+    if role == "hq" and not (dry or restart) and run_closed():
+        return hestia_request(tid)
     task = (f"Задача {tid}: прочитай её карточку (pantheon task show {tid}) и сделай ровно то, что в ней. Отчёт — по "
             "формату роли, каждое действие — строкой журнала в нём.")
     with P.lock("start-hestia", block=False) as got:
