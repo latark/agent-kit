@@ -77,7 +77,7 @@ SECRET = "sk-ABCDEF1234567890XYZ"
 LONG = "FULL-COMMAND-TEXT-MARKER " + "x" * 300
 ev = {"hook_event_name": "PermissionDenied", "tool_name": "Bash",
       "tool_input": {"command": f"FOO=1 /usr/bin/curl -H 'Authorization: Bearer {SECRET}' http://h/ {LONG}"},
-      "reason": f"curl to host not allowed, token={SECRET} in /Users/ivan/private " + "r" * 400}
+      "reason": f"curl to host not allowed, token={SECRET} in /Users/ivan/private Bearer hunter2 " + "слово " * 100}
 rc, out, _ = run([DEN, "hook"], ev, PANTHEON_TMP=os.path.join(ROOT, "caches", "win-one", "tmp"), PANTHEON_ROLE="dev-sonnet")
 rows = journal()
 r0 = rows[0] if rows else {}
@@ -88,7 +88,7 @@ check("хук: окно и роль из окружения, источник cl
 check("хук: причина ≤200 знаков", 0 < len(r0.get("reason", "")) <= 200, len(r0.get("reason", "")))
 blob = json.dumps(rows, ensure_ascii=False)
 check("хук: в строке нет секрета, текста команды и имени из домашнего пути",
-      SECRET not in blob and "FULL-COMMAND-TEXT-MARKER" not in blob and "ivan" not in blob and "Bearer" not in blob, blob)
+      SECRET not in blob and "FULL-COMMAND-TEXT-MARKER" not in blob and "ivan" not in blob and "hunter2" not in blob, blob)
 check("хук: файл журнала — по дню, права 600",
       os.path.exists(os.path.join(DENIALS, TODAY + ".jsonl"))
       and os.stat(os.path.join(DENIALS, TODAY + ".jsonl")).st_mode & 0o777 == 0o600)
