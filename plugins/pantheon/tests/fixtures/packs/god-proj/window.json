@@ -1,0 +1,31 @@
+{
+  "description": "Образец окна направления для тестов: настройки проектов app и gpu-worker, которых --add-dir не приносит",
+  "deny": [
+    "Read(~/projects/god-proj/gpu-worker/.git/config)",
+    "Bash(docker rm *)",
+    "Bash(docker rmi *)"
+  ],
+  "plugins": [
+    "frontend-design@claude-plugins-official",
+    "feature-dev@claude-plugins-official",
+    "typescript-lsp@claude-plugins-official",
+    "commit-commands@claude-plugins-official",
+    "security-guidance@claude-plugins-official",
+    "code-simplifier@claude-plugins-official",
+    "pyright-lsp@claude-plugins-official",
+    "context7@claude-plugins-official",
+    "supabase@claude-plugins-official",
+    "vercel@claude-plugins-official",
+    "sentry@claude-plugins-official",
+    "nvidia-skills@claude-plugins-official"
+  ],
+  "seen": {
+    "~/projects/god-proj/app/.claude/settings.json permissions.allow": "не перенесено: allow окну не даётся; чем заменено: autoMode окна",
+    "~/projects/god-proj/app/.claude/settings.json permissions.deny": "перенесено: window.json deny",
+    "~/projects/god-proj/app/.claude/settings.json hooks.PreToolUse bash .claude/hooks/protect-db.sh": "перенесено: hooks/hooks.json (in_repo --always)",
+    "~/projects/god-proj/app/.claude/settings.json hooks.PreToolUse bash .claude/hooks/pre-commit-check.sh": "заменено: hooks/hooks.json matcher Bash + in_repo --cmd-prefix=git commit, --plain",
+    "~/projects/god-proj/app/.claude/settings.json hooks.PostToolUse bash .claude/hooks/check-reexport.sh \"$CLAUDE_FILE_PATH\" 2>/dev/null || true": "заменено: _bin/repo_hooks.py reexport",
+    "~/projects/god-proj/app/.claude/settings.local.json enabledMcpjsonServers": "перенесено: mcp.json (серверы из списка) через packs/_bin/env_from.py",
+    "~/projects/god-proj/gpu-worker/.claude/settings.json hooks.PostToolUse bash .claude/hooks/check-cuda-safety.sh": "заменено: _bin/repo_hooks.py cuda-safety"
+  }
+}

@@ -137,7 +137,7 @@ for base, nm in ((T.PULT_FILE, "Пульт"), (T.BASE_FILE, "Доска")):
 
 # --- metis-0801: одно определение «Нужен ответ»; вопросы внутри пачки ------------------------------------------------
 W = dict(status="waiting", waiting_on="human")
-qa = store(H("athena-0075", type="story", status="doing", direction="athena-brokerassistant"),
+qa = store(H("athena-0075", type="story", status="doing", direction="athena-proja"),
            H("athena-0120", parent="athena-0075", mode="single", **W),
            H("athena-0121", parent="athena-0075", mode="single", **W),
            H("athena-0123", type="story", parent="athena-0075", status="todo"),
@@ -160,7 +160,7 @@ check("0801: «Вопросов» — число в свойствах и в в�
       T.PROP_TYPES.get("Вопросов") == "number" and "Вопросов" in T.CARD_ORDER
       and "note.Вопросов" in T.PULT_FILE and "note.Вопросов" in T.BASE_FILE)
 qa["athena-0075"][1].update(W)
-pc = T.project_counts(qa, T0, ["athena-brokerassistant", "metis-pantheon"])
+pc = T.project_counts(qa, T0, ["athena-proja", "metis-pantheon"])
 check("0801: «Ждёт вас» заметки проекта = колонка «Нужен ответ», пачки тоже (3 задачи + пачка = 4)", pc["Ждёт вас"] == 4, pc)
 check("0801: на Пульте колонка «Ждёт вас» подписана «Нужен ответ»", "note.Ждёт вас:\n    displayName: Нужен ответ" in T.PULT_FILE)
 oc = B.owner_cards(qa, lambda h: False)
@@ -250,7 +250,7 @@ check("0826: board_sync - без слитого PR в индексе разде�
 # направления пачки (own); открытый важнее слитого --------------------------------------------------------------------
 RO, RB = "latark/other", "latark/ba"
 tk10 = store(H("metis-0760", type="story", status="doing"),
-             H("metis-0761", type="story", status="doing", direction="athena-brokerassistant"),
+             H("metis-0761", type="story", status="doing", direction="athena-proja"),
              H("metis-0762", parent="metis-0760", status="doing", mode="single"),
              H("metis-0763", status="done"), H("metis-0764", status="done"), H("metis-0765", status="done"),
              H("metis-0766", status="done"))
@@ -272,7 +272,7 @@ cache10 = {"merged": {R: [mpr(900, "batch/metis-0760", "Closes metis-0762"),
                              "part": False, "cross": False}],
                         RO: [{"number": 500, "branch": "batch/metis-0760", "closes": ["metis-0765"], "part": False,
                               "cross": False}]}}
-repos10 = {"metis-pantheon": [R], "athena-brokerassistant": ["Latark/BA"]}
+repos10 = {"metis-pantheon": [R], "athena-proja": ["Latark/BA"]}
 own10 = {sid: [r.lower() for r in repos10.get(tk10[sid][1]["direction"]) or []] for sid in ("metis-0760", "metis-0761")}
 cp10 = os.path.join(ROOT, "prs10.json")
 with open(cp10, "w", encoding="utf-8") as fh:
