@@ -177,14 +177,15 @@ def window_hold(packs, window, out):
     return True
 
 
-# порядок файлов при переносе в существующую папку (_link_into, metis-1100): хуки раньше серверов — прерванный перенос
-# не оставляет mcp.json без hooks.json рядом
-LINK_ORDER = ("hooks/hooks.json", ".claude-plugin/plugin.json", "window.json", "mcp.json")
+# порядок файлов при переносе в существующую папку (_link_into, metis-1100): window.json первым — он только сужает права,
+# и оборванный перенос не оставляет окно без его запретов; хуки раньше серверов — mcp.json последним, без hooks.json
+# рядом он не остаётся. Состав = PACK_FILES (тест), иначе sorted(key=LINK_ORDER.index) падает с ValueError
+LINK_ORDER = ("window.json", "hooks/hooks.json", ".claude-plugin/plugin.json", "mcp.json")
 
 
 def _link_into(tmp, dst, files):
     """Файлы files из tmp — в существующую папку dst жёсткими ссылками, без замены (см. _copy_pack), в порядке
-    LINK_ORDER: mcp.json — последним. Подпапка dst — ссылка: отказ, отметка _journal остаётся до следующей сборки (до
+    LINK_ORDER: window.json — первым, mcp.json — последним. Подпапка dst — ссылка: отказ, отметка _journal остаётся до следующей сборки (до
     неё window_hold не берёт пакет в окно). → все ли файлы на месте."""
     _write_new(_journal(dst), b"")
     for f in sorted(files, key=LINK_ORDER.index):

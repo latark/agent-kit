@@ -843,6 +843,9 @@ def link_cut(pl, base):
     """metis-1100: перенос по файлам в существующую папку оборван на каждом шаге — mcp.json без hooks.json не остаётся
     (hooks.json встаёт первым, mcp.json — последним), а пока отметка .linking есть, window_hold пакет в окно не берёт."""
     import io
+    check("LINK_ORDER — те же файлы, что PACK_FILES; window.json первым, mcp.json последним (metis-1100)",
+          set(pl.LINK_ORDER) == set(pl.PACK_FILES) and len(pl.LINK_ORDER) == len(pl.PACK_FILES)
+          and pl.LINK_ORDER[0] == "window.json" and pl.LINK_ORDER[-1] == "mcp.json", pl.LINK_ORDER)
     src = os.path.join(base, "src-cut")
     for f in pl.PACK_FILES:
         put(os.path.join(src, "dir-x", f), {"f": f})
@@ -865,12 +868,22 @@ def link_cut(pl, base):
             os.link = link
         x = os.path.join(user, "dir-x")
         has = {f: os.path.lexists(os.path.join(x, f)) for f in pl.PACK_FILES}
+        check(f"перенос оборван на {k}-м файле: window.json уже стоит (кроме обрыва на нём самом) — окно не остаётся "
+              "без его запретов", k == 1 or has["window.json"], (k, has))
         out = io.StringIO()
         check(f"перенос оборван на {k}-м файле из {len(calls)}: «не перенесён», mcp.json без hooks.json не остался "
               "(hooks.json — первым)", res["failed"] == ["dir-x"] and not (has["mcp.json"] and not has["hooks/hooks.json"])
               and not has["mcp.json"], (res, calls, has))
         check(f"перенос оборван на {k}-м файле: отметка .linking есть — window_hold пакет в окно не берёт, причина в out",
               pl.window_hold(user, "dir-x", out) and "перенос не закончен" in out.getvalue(), (os.listdir(user), out.getvalue()))
+    sym = os.path.join(base, "cutsym", "packs", "dir-x")
+    put(os.path.join(sym, "approved.json"), {})
+    os.makedirs(os.path.join(base, "cutsym", "elsewhere"))
+    os.symlink(os.path.join(base, "cutsym", "elsewhere"), os.path.join(sym, "hooks"))
+    pl.migrate(os.path.join(base, "cutsym", "packs"), os.path.join(base, "nothing"), None, (), (), "t", src, False)
+    check("обрыв на подпапке hooks (ссылка): window.json уже стоит, hooks.json мимо ссылки не записан",
+          os.path.isfile(os.path.join(sym, "window.json")) and os.listdir(os.path.join(base, "cutsym", "elsewhere")) == [],
+          os.listdir(sym))
     res = pl.migrate(user, os.path.join(base, "nothing"), None, (), (), "t", src, False)
     check("следующий перенос доводит оборванный: все файлы на месте, отметки нет — window_hold пакет берёт",
           res["copied"] == ["dir-x"] and all(os.path.isfile(os.path.join(user, "dir-x", f)) for f in pl.PACK_FILES)
