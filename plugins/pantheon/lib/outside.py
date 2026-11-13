@@ -2126,9 +2126,15 @@ def run_test_at(rid, d, req, window, qdir, roots, defer=None):
 
 def run_lane(rid):
     """Дорожка идущего теста rid (запись прохода runs/<ID>.json: test в running или preparing) или None — не идёт.
-    Запись без lane (до metis-1081) — full: тогда был один проход под замком outside-run."""
+    Запись без lane (до metis-1081) — full: тогда был один проход под замком outside-run. Итог queued с lane — заявка
+    у прохода этой дорожки, ждёт спада нагрузки (wait_load) на готовой копии test --sha: тоже идёт, копию и метку «стоп»
+    чужой проход не снимает (ревью argus #427). queued без lane пишет окно или проход без дорожки — не идёт."""
     res = P.read_json(root("runs", rid + ".json"), None)
-    if not (isinstance(res, dict) and res.get("kind") == "test" and res.get("state") in ("running", "preparing")):
+    if not (isinstance(res, dict) and res.get("kind") == "test"):
+        return None
+    if res.get("state") == "queued":
+        return res.get("lane") if res.get("lane") in LANES else None
+    if res.get("state") not in ("running", "preparing"):
         return None
     return res.get("lane") if res.get("lane") in LANES else "full"
 
@@ -2645,7 +2651,8 @@ def sweep(t=None, stops=None):
 def drop_orphan_stops(stops=None, t=None):
     """«Стоп» без живого сервера, без заявки в очереди и без идущего теста, старше STOP_ORPHAN_AGE, — убрать (уже
     погашенные серверы и тесты гасить нечего; молодой — может ждать свою заявку). Метку идущего теста (runs/<ID>.json:
-    test в running или preparing) не трогает — её снимет проход тестов (metis-0873). → число убранных."""
+    test в running или preparing, или ждёт спада у прохода дорожки — run_lane) не трогает — её снимет проход тестов
+    (metis-0873). → число убранных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
     live = set(servers())
@@ -2661,9 +2668,9 @@ def drop_orphan_stops(stops=None, t=None):
 
 
 def _test_running(rid):
-    """Тест rid идёт: итог прохода в STATE (runs/<ID>.json, окну закрыт) — test в running или preparing."""
-    res = P.read_json(root("runs", rid + ".json"), None)
-    return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") in ("running", "preparing")
+    """Тест rid идёт: итог прохода в STATE (runs/<ID>.json, окну закрыт) — test в running или preparing, или ждёт
+    спада нагрузки у прохода своей дорожки (run_lane)."""
+    return run_lane(rid) is not None
 
 
 def drop_orphan_work(t=None):
@@ -2773,7 +2780,9 @@ def lane_of(req, window, rid):
         if len(_LANE_MEMO) > 4096:
             _LANE_MEMO.clear()
         d, _roots = resolve_dir(req["dir"], window)
-        full = d is not None and any(str(r).rsplit("/", 1)[-1] in P.merge_mod().FULL_TESTS for r in remotes(d))
+        if d is None:
+            return "quick"          # не запоминается: папка может появиться в реестре позже (ревью argus #427)
+        full = any(str(r).rsplit("/", 1)[-1] in P.merge_mod().FULL_TESTS for r in remotes(d))
         _LANE_MEMO[key] = "full" if full else "quick"
     return _LANE_MEMO[key]
 

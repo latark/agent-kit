@@ -8,7 +8,8 @@ tests, пока идёт полный набор, а полный набор п�
 дорожки выходит с 0, заявка лежит), проход full чужую дорожку не берёт; «стоп» снимает идущий прогон в обеих
 дорожках; замена заявки на предке и сцепка с идущей заявкой работают в обеих дорожках; ждущий спада полный набор
 уступает только своей дорожке (Defer); «заход прерван», уборка копий test --sha, сторож и тик берут свою дорожку;
-взятая заявка не считается потерянной проходом другой дорожки. Общая часть — _outside_common.py, kit — _outside_kit.py.
+взятая заявка не считается потерянной проходом другой дорожки; копия и метка «стоп» набора test --sha, ждущего спада,
+живут, пока идёт проход quick (ревью argus #427); lane_of не запоминает неразобранную папку. Общая часть — _outside_common.py, kit — _outside_kit.py.
 """
 import os
 import sys
@@ -332,7 +333,70 @@ check("1081: после спада полный набор идёт: done, за�
       and bool(tests_for(KD)), rd)
 O.cmd_run("quick")
 check("заявка quick после этого идёт своим проходом", state(qother, r_o) == "done", O.load_result(qother, r_o))
+
+# --- 9. ревью argus #427: полный набор test --sha ждёт спада (итог queued) — проход quick его копию не снимает ---------
+LOADV[0] = 50.0
+KS = commit(KIT, {"t.py": GREEN + "# lanes sha\n"}, "lanes sha")
+r_s = put_req(qkit, KIT, sha=KS, pin=True)
+th, out = bg(O.cmd_run)
+waiting = wait_for(lambda: "жду спада" in ((O.load_result(qkit, r_s) or {}).get("why") or ""), 30)
+WS = test_work(r_s)
+check("argus #427: набор test --sha ждёт спада — копия test-<ID> готова, в runs/ queued с lane full",
+      waiting and os.path.isdir(WS) and runs(r_s).get("state") == "queued" and runs(r_s).get("lane") == "full"
+      and O.run_lane(r_s) == "full", runs(r_s))
+r_o2 = put_req(qother, OTHER)
+rc = O.cmd_run("quick")
+check("argus #427: проход quick во время ожидания спада идёт (код 0) и копию набора не снимает",
+      rc == 0 and state(qother, r_o2) == "done" and os.path.isdir(WS), (rc, O.load_result(qother, r_o2)))
+check("argus #427: ждущий спада набор — идущий тест и для прохода серверов (метку «стоп» не уберёт как ничью)",
+      O._test_running(r_s) is True)
+LOADV[0] = 1.0
+th.join(60)
+rs = O.load_result(qkit, r_s) or {}
+check("argus #427: набор test --sha после спада — done, запись tests (без «No such file»)",
+      not th.is_alive() and rs.get("state") == "done" and rs.get("record") is True and bool(tests_for(KS)), rs)
 O.load_state = lambda: (0.0, 10.0)
+
+# queued с lane — у прохода дорожки; queued без lane (окно, проход без дорожки) — не идёт; чужая метка «стоп» на такой
+RQ, RQ0 = "20261113-666661-1a2b3c", "20261113-666662-1a2b3c"
+O._LANE.name = "full"
+O.save_result(qkit, RQ, {"state": "queued", "kind": "test", "why": "жду спада нагрузки"})
+O._LANE.name = None
+O.save_result(qkit, RQ0, {"state": "queued", "kind": "test"})
+_old = time.time() - O.STOP_ORPHAN_AGE - 60
+for _r in (RQ, RQ0):
+    open(os.path.join(qkit, _r + ".stop"), "w").close()
+    os.utime(os.path.join(qkit, _r + ".stop"), (_old, _old))
+W1, W0 = test_work(RQ), test_work(RQ0)
+os.makedirs(W1)
+os.makedirs(W0)
+O.drop_test_work("quick")
+O.drop_orphan_stops()
+check("run_lane: queued с lane — его дорожка, queued без lane — None", O.run_lane(RQ) == "full" and O.run_lane(RQ0) is None)
+check("drop_test_work(quick): копия набора, ждущего спада в full, остаётся; копия без прохода снята",
+      os.path.isdir(W1) and not os.path.exists(W0))
+check("drop_orphan_stops: метка «стоп» ждущего спада набора остаётся (её исполнит wait_load), ничья — убрана",
+      os.path.isfile(os.path.join(qkit, RQ + ".stop")) and not os.path.exists(os.path.join(qkit, RQ0 + ".stop")))
+O.drop_test_work("full")
+check("drop_test_work(full): копию своей дорожки при старте прохода снимает (проход прежний упал)", not os.path.exists(W1))
+for _r in (RQ, RQ0):
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(os.path.join(qkit, _r + ".stop"))
+    O.save_result(qkit, _r, {"state": "failed", "kind": "test", "why": "проба"})
+
+# lane_of не запоминает папку, которой нет в реестре: появится позже — дорожка пересчитается (Д1 argus #427)
+LATE = os.path.join(HOME, "projects", "late")
+r_late = "20261113-666663-1a2b3c"
+_lreq = {"v": 1, "id": r_late, "kind": "test", "dir": LATE}
+first = O.lane_of(_lreq, "metis-k", r_late)
+os.makedirs(LATE)
+git(LATE, "init", "-q", "-b", "main")
+git(LATE, "remote", "add", "origin", "git@github.com:latark/kit.git")
+_dom = P.read_json(os.path.join(STATE, "domains.json"), {})
+_dom["domains"]["metis-k"] = ["~/projects/kit", "~/projects/late"]
+P.write_json(os.path.join(STATE, "domains.json"), _dom)
+check("lane_of: папки нет в реестре — quick и не запомнено; появилась (репозиторий с FULL_TESTS) — full",
+      first == "quick" and O.lane_of(_lreq, "metis-k", r_late) == "full", (first, O.lane_of(_lreq, "metis-k", r_late)))
 
 if FAILS:
     for _r in [x for x in os.listdir(_ROOT) if x.startswith("lane-") and x.endswith("-started")]:
