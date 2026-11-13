@@ -252,7 +252,8 @@
   `plugins/pantheon/lib/pantheon.py`, с metis-0598 `plugins/pantheon/hooks/ctx.py`, `plugins/pantheon/hooks/hooks.json`,
   `plugins/pantheon/lib/merge.py`, `plugins/pantheon/lib/plugin_map.py`, `plugins/pantheon/plugins-by-role.toml`,
   с metis-0858 `plugins/pantheon/lib/review_rules.py`, `plugins/pantheon/lib/answers.py`, с metis-0951
-  `plugins/pantheon/packs/` и запуск окна `window_launch` в `pantheon.py`,
+  общий код пакетов `plugins/pantheon/packs/` (сами пакеты — в `~/.claude/pantheon/packs`) и запуск окна
+  `window_launch` в `pantheon.py`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
@@ -434,8 +435,10 @@
 - `plugins/pantheon/plugins-by-role.toml` и `lib/plugin_map.py` — карта «окно или роль × плагин и MCP» (metis-0238, слово
   владельца 17.10: отключать там, где 100% не нужно). Запись — «оставить»: названное остаётся, остальное из `[catalog]`
   выключается. Окно (`pantheon domains build`): `enabledPlugins: false` у лишних плагинов и `permissions.deny`
-  `mcp__<сервер>` у лишних MCP; ключ окна — его имя (`hq`, `hestia`, `workshop`, `job-*`, `mnemo-brain`), у остальных
-  окон направлений — запись `direction`. Роль (`pantheon roles build`): недостающие `mcp__<сервер>` дописываются в
+  `mcp__<сервер>` у лишних MCP; ключ окна — его имя (`hq`, `hestia`, `workshop`, `job-*`), у окон направлений —
+  запись `direction`. Своя запись окна направления — в личной части карты `~/.claude/pantheon/plugins-by-role.toml`:
+  там берутся только `[window.<направление реестра>]`, они заменяют `direction` для этого окна; служебные окна и
+  неизвестные имена пропускаются с тревогой, битый файл — тревога `plugin-map-local-bad`, карта плагина действует. Роль (`pantheon roles build`): недостающие `mcp__<сервер>` дописываются в
   `disallowedTools` шапки; ключ — имя шаблона. Чего нет в карте — окно, роль, плагин вне каталога — не трогается (всё
   включено); `chrome-devtools` в каталоге нет (его подключают роли и project-tools). Опечатка в «оставить» или битый файл —
   карта не применяется, тревога `plugin-map-bad`; плагины `*@agent-kit` (guard, pantheon, project-tools) в `[catalog]` —
@@ -445,6 +448,41 @@
   каталога (кроме `*@agent-kit` и `*@builtin`) — тревога `plugin-map-unknown`; `~/.claude/settings.json` отслеживает
   и `domains build --if-changed`, так что тревога приходит на ближайшем плановом проходе, а не только при ручной сборке. Тест — `tests/test_plugin_map.py`.
   Карта и `plugin_map.py` — ядро защит (metis-0598, решение владельца 30.10): PR, который их меняет, сливает владелец.
+- Пакеты окон направлений (схема А, metis-0933) — личные настройки пользователя, в плагине их нет (решение владельца
+  12.11): `~/.claude/pantheon/packs/<направление>/` с файлами `window.json` (только сужает окно: ask, deny, плагины из
+  карты, env из белого списка, `sandbox.denyRead`, `deniedDomains`; `seen` — опись для `pantheon check`), `mcp.json`
+  (серверы MCP), `.claude-plugin/plugin.json` и `hooks/hooks.json` (хуки вложенных проектов). Хуки и серверы пакета
+  идут вне песочницы, поэтому ядро проверяет пакет при каждой сборке окон и каждом запуске окна
+  (`window_rules.pack_problems`): хук — prompt или одна команда без `; & | \` ( ) < >`, перевода строки и `$`, кроме
+  `$HOME`, `${HOME}` и `${CLAUDE_PLUGIN_ROOT}`: `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" … -- <скрипт>`,
+  где скрипт — `bash .claude/hooks/<имя>`, `python3 -I .claude/hooks/<имя>` или
+  `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py"` (с аргументами); сервер MCP — только
+  `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- npx -y <пакет>@x.y.z …`: программа по пути, даже системная
+  (`/usr/bin/awk`), исполнила бы вне песочницы и то, что пишет окно. В `env` — без `PATH`, `NODE_*` и
+  подобных; удалённый — http, sse или ws без `headersHelper`; в `plugin.json` нет полей `hooks`, `mcpServers`,
+  `lspServers`. Нарушение в `mcp.json` — в окно не идёт только MCP пакета, хуки остаются; нарушение в плагине — ни
+  плагин, ни MCP (серверы без хуков пакета, вроде protect-db, не идут); window.json идёт всегда; строка в `alerts.md`
+  (тревога `pack-bad-<направление>`). Общий код пакетов — `plugins/pantheon/packs/_bin`. Своё: создайте папку с
+  именем направления из реестра и нужные файлы, образцы — `plugins/pantheon/tests/fixtures/packs`; следующий плановый
+  проход (`domains build --if-changed`) пересоберёт окно, скрипты `.claude/hooks` вложенных проектов исполняются только
+  по эталону `approved.json` той же папки (`pantheon packs hashes`). Папки нет — окно работает без пакета. Окну запись
+  в `~/.claude/pantheon` закрыта. Перенос из прежней версии плагина: `domains build` один раз копирует пакеты и личные
+  записи карты из самой новой версии в кэше, где они есть, и ставит отметку `.migrated.json`; существующее не
+  затирается, пакет переносится целиком (через временную папку рядом), прерванный перенос повторяется на следующей
+  сборке. Папка направления уже есть только с `approved.json` и `approved/` — файлы пакета встают в неё по одному, без
+  замены, `approved*` не трогаются. Направление не перенесено (на его месте файл, подпапка-ссылка, сбой записи) —
+  строка итога и тревога `packs-migrate-failed`, отметки нет, повтор на следующей сборке. Отметки нет — перенос делает
+  и запуск окна направления. Вручную — `pantheon packs migrate [--from <папка плагина или пакетов>]` (код 1 —
+  источника нет или направление не перенесено). Модуль —
+  `lib/packs_local.py`, тест — `tests/test_window_pack.py`.
+- Правила autoMode.allow окна направления (`window_rules.DIRECTION_RULES`: `mailkeeper-read`, `uv-sync`,
+  `git-remote`) включает раздел `[auto_rules]` в `~/.claude/pantheon/policy.toml`: `<направление> = ["имя", …]`.
+  Неизвестное имя — тревога `auto-rules-bad`, остальное действует; образец — `plugins/guard/policy.example.toml`.
+  **После выпуска 12.11** (пакеты ушли из плагина): до него эти правила стояли в коде у двух направлений, теперь их
+  нет, пока владелец не впишет `[auto_rules]`. Сравните с прежним кодом (`DIRECTION_AUTO_ALLOW` в
+  `lib/window_rules.py` версии до выпуска) и впишите те же имена, например `<направление Метиды> = ["mailkeeper-read",
+  "uv-sync"]` и `<направление проекта> = ["git-remote"]`. Пока раздела нет, а перенос пакетов что-то скопировал, —
+  тревога `auto-rules-missing` в `alerts.md`; то же напоминание печатает `pantheon packs migrate`.
 - `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
   (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет
   кэш `autoclose-prs.json`, а на главном Mac сразу закрывает задачи по нему — в том же проходе, а не на следующем

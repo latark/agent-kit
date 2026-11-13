@@ -49,21 +49,21 @@ try:
     P = importlib.util.module_from_spec(_spec)
     sys.modules["pantheon_startreq_test"] = P
     _spec.loader.exec_module(P)
-    doms = {"hermes-alex": ["~/projects/alexbroker"], "solo-led": ["~/projects/solo"]}
+    doms = {"hermes-siteb": ["~/projects/site-b"], "solo-led": ["~/projects/solo"]}
     P.write_json(P.path("domains.json"), {"domains": doms})
     with open(os.path.join(P.PANTHEON, "directions.toml"), "w") as fh:
-        fh.write('[[direction]]\nname = "hermes-alex"\nfolders = ["~/projects/alexbroker"]\n'
+        fh.write('[[direction]]\nname = "hermes-siteb"\nfolders = ["~/projects/site-b"]\n'
                  '[[direction]]\nname = "solo-led"\nfolders = ["~/projects/solo"]\ncoordinator = false\n')
     qdir = P.path(P.HQ_RW, "start-req")
-    req = os.path.join(qdir, "hermes-alex.req")
+    req = os.path.join(qdir, "hermes-siteb.req")
     os.environ["PANTHEON_ROLE"] = "hq"
 
-    rc, out, err = call(["hermes-alex"])
+    rc, out, err = call(["hermes-siteb"])
     check("принята: имя из реестра → 0, «заявка принята, окно поднимется на следующем проходе»",
-          rc == 0 and "заявка принята, окно hermes-alex поднимется на следующем проходе" in out, (rc, out, err))
+          rc == 0 and "заявка принята, окно hermes-siteb поднимется на следующем проходе" in out, (rc, out, err))
     data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
     check("принята: файл заявки — строка JSON {target, time, by: zeus}",
-          len(data) == 1 and set(data[0]) == {"target", "time", "by"} and data[0]["target"] == "hermes-alex"
+          len(data) == 1 and set(data[0]) == {"target", "time", "by"} and data[0]["target"] == "hermes-siteb"
           and data[0]["by"] == "zeus", data)
 
     for argv, why in ((["evil-dir"], "15 чужое имя"), (["../x"], "15 имя с путём"), (["solo-led"], "18 coordinator = false")):
@@ -72,8 +72,8 @@ try:
               and not os.path.exists(os.path.join(qdir, argv[0] + ".req")), (rc, out, err))
 
     os.unlink(req)
-    inbox = os.path.join(P.PANTHEON, "directions", "hermes-alex", "inbox")
-    rc, out, err = call(["hermes-alex", "сделай всё сам"])
+    inbox = os.path.join(P.PANTHEON, "directions", "hermes-siteb", "inbox")
+    rc, out, err = call(["hermes-siteb", "сделай всё сам"])
     got = sorted(os.listdir(inbox)) if os.path.isdir(inbox) else []
     body = open(os.path.join(inbox, got[0]), encoding="utf-8").read() if got else ""
     data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
@@ -83,8 +83,8 @@ try:
     for f in got:
         os.unlink(os.path.join(inbox, f))
     os.unlink(req)
-    for argv in (["hermes-alex", "--restart"], ["hermes-alex", "--restart", "сделай"], ["hermes-alex", "--over-cap"],
-                 ["hermes-alex", "--force", "сделай"]):
+    for argv in (["hermes-siteb", "--restart"], ["hermes-siteb", "--restart", "сделай"], ["hermes-siteb", "--over-cap"],
+                 ["hermes-siteb", "--force", "сделай"]):
         rc, out, err = call(argv + ["--dry-run"])
         check(f"16 {' '.join(argv[1:])} → не заявка и не поручение: прежний путь (start_gate)",
               "заявка принята" not in out and "была бы принята" not in out and "легло бы" not in out
@@ -103,15 +103,15 @@ try:
     away = os.path.join(_ROOT, "away")
     os.makedirs(away)
     os.symlink(away, inbox)
-    rc, out, err = call(["hermes-alex", "сделай"])
+    rc, out, err = call(["hermes-siteb", "сделай"])
     check("16 inbox — символьная ссылка → код 1, по ссылке ничего не записано, заявки нет",
           rc == 1 and not os.listdir(away) and not os.path.exists(req), (rc, out, err, os.listdir(away)))
     os.unlink(inbox)
     os.makedirs(inbox)
-    rc, out, err = call(["hermes-alex", "x" * (getattr(P, "START_ORDER_MAX", 100_000) + 1)])
+    rc, out, err = call(["hermes-siteb", "x" * (getattr(P, "START_ORDER_MAX", 100_000) + 1)])
     check("16 поручение длиннее START_ORDER_MAX → отказ, ни файла, ни заявки",
           rc != 0 and not os.listdir(inbox) and not os.path.exists(req), (rc, out, err))
-    rc, out, err = call(["hermes-alex", "--at", "23:59"])
+    rc, out, err = call(["hermes-siteb", "--at", "23:59"])
     check("16 с флагом --at → не заявка (отказ без слова), файла нет", rc != 0 and not os.path.exists(req), (rc, out, err))
     os.environ.pop("PANTHEON_ROLE")
     rc, out, err = call(["evil-dir", "--dry-run"])
@@ -119,20 +119,20 @@ try:
     os.environ["PANTHEON_ROLE"] = "hq"
 
     # проход: корректная заявка → разовый запуск; подложенные — тревога, без запуска; файлы сняты
-    call(["hermes-alex"])
+    call(["hermes-siteb"])
     with open(os.path.join(qdir, "solo-led.req"), "w") as fh:  # имя, у которого нет координатора
         fh.write(json.dumps({"target": "solo-led", "time": "x", "by": "zeus"}) + "\n")
     with open(os.path.join(qdir, "ghost.req"), "w") as fh:  # имени нет в реестре
         fh.write(json.dumps({"target": "ghost", "time": "x", "by": "zeus"}) + "\n")
     os.makedirs(os.path.join(_ROOT, "elsewhere"))
     with open(os.path.join(_ROOT, "elsewhere", "x"), "w") as fh:
-        fh.write(json.dumps({"target": "hermes-alex", "time": "x", "by": "zeus"}) + "\n")
+        fh.write(json.dumps({"target": "hermes-siteb", "time": "x", "by": "zeus"}) + "\n")
     t = P.now()
     got = dict(P.take_start_requests(doms, t))
     items = P.night_mod().oneshot_items()
     check("проход: заявка → разовый запуск by=zeus-request с поручением про STATUS.md и inbox",
-          isinstance(got.get("hermes-alex"), str) and got["hermes-alex"].startswith("at-")
-          and any(x["target"] == "hermes-alex" and x["by"] == "zeus-request" and "inbox/" in x["text"] for x in items),
+          isinstance(got.get("hermes-siteb"), str) and got["hermes-siteb"].startswith("at-")
+          and any(x["target"] == "hermes-siteb" and x["by"] == "zeus-request" and "inbox/" in x["text"] for x in items),
           (got, items))
     check("17/18 проход: заявки на solo-led и ghost отклонены, разовых запусков у них нет",
           "координатора" in got.get("solo-led", "") + P.hq_led_why("solo-led") and "реестре" in got.get("ghost", "")
@@ -140,21 +140,21 @@ try:
     check("проход: файлы заявок сняты", not [f for f in os.listdir(qdir) if f.endswith(".req")], os.listdir(qdir))
 
     with open(req, "w") as fh:  # лишний ключ — поручение в обход
-        fh.write(json.dumps({"target": "hermes-alex", "time": "x", "by": "zeus", "text": "сделай чужое"}) + "\n")
+        fh.write(json.dumps({"target": "hermes-siteb", "time": "x", "by": "zeus", "text": "сделай чужое"}) + "\n")
     with open(os.path.join(qdir, "x.req"), "w") as fh:  # имя в строке не как у файла
-        fh.write(json.dumps({"target": "hermes-alex", "time": "x", "by": "zeus"}) + "\n")
+        fh.write(json.dumps({"target": "hermes-siteb", "time": "x", "by": "zeus"}) + "\n")
     n0 = len(P.night_mod().oneshot_items())
     got = dict(P.take_start_requests(doms, t + 120))
-    check("17 подложенная заявка: лишний ключ — отказ", "не по образцу" in got.get("hermes-alex", ""), got)
+    check("17 подложенная заявка: лишний ключ — отказ", "не по образцу" in got.get("hermes-siteb", ""), got)
     check("17 подложенная заявка: имя не из реестра или не как у файла — отказ", "x" in got and not got["x"].startswith("at-"), got)
     os.symlink(os.path.join(_ROOT, "elsewhere", "x"), req)
     got = dict(P.take_start_requests(doms, t + 240))
     check("17 заявка-ссылка — отказ (O_NOFOLLOW), ссылка снята",
-          "не открыть" in got.get("hermes-alex", "") and not os.path.lexists(req), got)
+          "не открыть" in got.get("hermes-siteb", "") and not os.path.lexists(req), got)
     check("17 подложенные заявки разовых запусков не добавили", len(P.night_mod().oneshot_items()) == n0)
 
     # metis-1009: --at-cancel из окна hq — строка cancel в заявке; проход гасит разовый запуск и окно не поднимает
-    oid = P.night_mod().oneshot_add("hermes-alex", t + 5 * 3600, "позже", "zeus", t=t)
+    oid = P.night_mod().oneshot_add("hermes-siteb", t + 5 * 3600, "позже", "zeus", t=t)
     rc, out, err = call(["--at-cancel", oid], P.cancel_request)  # её зовёт start_at, когда oneshot.json закрыт
     data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
     check("cancel: в окне hq без записи oneshot.json → заявка {target, time, by, cancel}, код 0",
@@ -163,19 +163,19 @@ try:
     got = P.take_start_requests(doms, t + 360)
     items = {x["id"]: x for x in P.night_mod().oneshot_items()}
     check("cancel: проход отменил разовый запуск и не добавил новых (одна отмена — без подъёма окна)",
-          items[oid].get("done_at") and len(items) == n0 and got == [("hermes-alex", f"cancel {oid}: отменён")],
+          items[oid].get("done_at") and len(items) == n0 and got == [("hermes-siteb", f"cancel {oid}: отменён")],
           (got, items[oid]))
     rc, out, err = call(["--at-cancel", oid], P.cancel_request)
     check("cancel: отмена уже погашенного id → код 1, заявки нет", rc == 1 and "погашен" in err
           and not os.path.exists(req), (rc, out, err))
     oid2 = P.night_mod().oneshot_add("solo-led", t + 6 * 3600, "чужое", "zeus", t=t)
-    with open(req, "w") as fh:  # отмена разового запуска другого направления под заявкой hermes-alex
-        fh.write(json.dumps({"target": "hermes-alex", "time": "x", "by": "zeus", "cancel": oid2}) + "\n")
+    with open(req, "w") as fh:  # отмена разового запуска другого направления под заявкой hermes-siteb
+        fh.write(json.dumps({"target": "hermes-siteb", "time": "x", "by": "zeus", "cancel": oid2}) + "\n")
     got = dict(P.take_start_requests(doms, t + 480))
     items = {x["id"]: x for x in P.night_mod().oneshot_items()}
     check("cancel: id чужого направления — отказ «не по образцу», разовый запуск цел",
-          "не по образцу" in got.get("hermes-alex", "") and not items[oid2].get("done_at"), (got, items[oid2]))
-    rc, out, err = call(["--at-cancel", "at-20991231-2359-hermes-alex"], P.cancel_request)
+          "не по образцу" in got.get("hermes-siteb", "") and not items[oid2].get("done_at"), (got, items[oid2]))
+    rc, out, err = call(["--at-cancel", "at-20991231-2359-hermes-siteb"], P.cancel_request)
     check("cancel: несуществующий id → код 1, заявки нет", rc == 1 and not os.path.exists(req), (rc, out, err))
 
     # metis-1066: `pantheon resume <направление>` и `pantheon wake hestia --task <id>` из окна Пританея — заявка;
