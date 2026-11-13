@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_merge_gate as tm  # noqa: E402  (Home, rec, _load_merge_gate)
+import _merge_gate_common as tm  # noqa: E402  (Home, rec, _load_merge_gate; test_merge_gate разделён в main)
 from _py311 import mkroot  # noqa: E402  (metis-0729)
 
 results = []
