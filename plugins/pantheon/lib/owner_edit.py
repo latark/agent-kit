@@ -870,7 +870,13 @@ HEADER_RE = re.compile(r"\s*\[\s*([^\[\]#]*?)\s*\]\s*(?:#.*)?")
 
 
 def toml_literal(v):
-    """Значение из командной строки → текст TOML: true/false и числа — как есть, остальное — строка в кавычках."""
+    """Значение из командной строки → текст TOML: true/false и числа — как есть, остальное — строка в кавычках.
+    Перевод строки, \\r и другие знаки HIDDEN — Refuse: «число» с переводом строки дописало бы в policy.toml чужие
+    ключи и разделы (ревью PR #437, Б1)."""
+    bad = hidden_at(v, "")
+    if bad:
+        raise Refuse(f"значение {v[:40]!r}: перевод строки или невидимый знак U+{ord(bad[1]):04X} — "
+                     "одно значение пишется в одну строку")
     try:
         got = tomllib.loads(f"v = {v}")["v"]
     except tomllib.TOMLDecodeError:
@@ -913,15 +919,19 @@ def policy_text(old, section, key, values, as_list=False):
             last = max([i for i in range(head, end) if lines[i].strip()] or [head])
             lines.insert(last + 1, line)
     new = "".join(lines)
+    # сверка целиком: новый файл равен старому всюду, кроме [section][key] (ревью PR #437, Б1)
     try:
-        got = tomllib.loads(new)
+        want = tomllib.loads(old)
+        got = want
         for part in section.split("."):
-            got = got[part]
-        ok = got[key] == tomllib.loads(f"v = {value}")["v"]
-    except (tomllib.TOMLDecodeError, KeyError, TypeError) as e:
+            got = got.setdefault(part, {})
+        got[key] = tomllib.loads(f"v = {value}")["v"]
+        ok = tomllib.loads(new) == want
+    except (tomllib.TOMLDecodeError, KeyError, TypeError, AttributeError) as e:
         raise Refuse(f"[{section}] {key}: правка не легла в TOML ({type(e).__name__}: {e})")
     if not ok:
-        raise Refuse(f"[{section}] {key}: после правки значение другое — правьте через pantheon owner-edit propose")
+        raise Refuse(f"[{section}] {key}: после правки файл отличается не только этим ключом — правьте через "
+                     "pantheon owner-edit propose")
     return new
 
 

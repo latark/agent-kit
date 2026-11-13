@@ -1094,6 +1094,25 @@ for args, why in ((["merge_repos", "metis-pantheon", "x", "--task", "metis-1122"
     rc, out, errs = quiet(P.main, ["policy", "set", *args])
     check(f"policy set отказ ({why}): код не 0, причина последней строкой, заявки нет",
           rc != 0 and why in errs.strip().splitlines()[-1] and not reqs(), (rc, errs))
+# ревью PR #437, Б1: «число» с переводом строки дописало бы чужие ключи и разделы — отказ, заявки нет
+fresh(OLD + "\n[other]\nx = 1\n")
+for val in ("1\nx = 2", "true\n[[evil]]\nrun = \"rm\"", "1\ry = 2", "on\x1b[2Kok", "5\u202e"):
+    rc, out, errs = quiet(P.main, ["policy", "set", "other", "y", val, "--task", "metis-1122"])
+    check(f"policy set {val!r}: отказ, код 2, причина последней строкой, заявки нет",
+          rc == 2 and "невидимый знак" in errs.strip().splitlines()[-1] and not reqs(), (rc, errs, reqs()))
+# сверка целиком: даже если значение прошло в текст, правка вне [section][key] — отказ
+real_lit = OE.toml_literal
+OE.toml_literal = lambda v: v
+for val, sec in (("1\nz = 2", "other"), ("1\n[[evil]]\nrun = 1", "other"), ("1\n[more]\nq = 3", "fresh")):
+    try:
+        OE.policy_text(OLD + "\n[other]\nx = 1\n", sec, "y", [val])
+        msg = ""
+    except OE.Refuse as e:
+        msg = str(e)
+    check(f"policy_text сверка {val!r}: причина — чужие ключи", "не только этим ключом" in msg, msg)
+OE.toml_literal = real_lit
+check("policy_text: обычная правка проходит сверку",
+      OE.policy_text(OLD + "\n[other]\nx = 1\n", "other", "x", ["7"]).endswith("[other]\nx = 7\n"))
 rc, out, errs = quiet(P.main, ["policy", "get"])
 check("policy без set — вызов, код 2", rc == 2 and "policy set" in errs, (rc, errs))
 
