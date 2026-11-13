@@ -32,7 +32,9 @@
                             stop — метка «остановлено вами», claude stop и claude rm: сессия уходит из фоновых
                             сессий Claude Code (metis-0239), переписка остаётся
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
-  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel, pantheon saved --by <имя> --state <путь>
+  pantheon restart --prepare [причина]|--status|--go [--force|--owner <id>]|--done|--cancel, pantheon saved --by <имя> --state <путь>
+  pantheon restart --only <сессия> --owner <id>   одно окно по «да» владельца на вопрос [id] с его именем, без
+                            метки saved и общего перезапуска (metis-1122); saved --by принимает и «zeus (2)»
                             технический перезапуск всей системы (SCHED-15, слово владельца 15.10); --done и --status
                             (все перезапущены, Зевс поднят заново) закрывают завершённый перезапуск (metis-0338); pantheon saved без
                             техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
@@ -3868,7 +3870,8 @@ def restart(rest, who):
             return 1
         doms = domains()
         reg = P.sessions_registry()
-        live = sorted({a.get("name") for a in list(agents) + reg if is_pantheon(a.get("name") or "", doms)
+        # metis-1122: копия «zeus (2)» — в списке именем без номера, иначе `pantheon saved --by` её не назовёт
+        live = sorted({base_session(a.get("name")) for a in list(agents) + reg if is_pantheon(a.get("name") or "", doms)
                        and holders(a.get("name"), agents, reg)})
         why = " ".join(" ".join(rest[1:]).split()) or "технический перезапуск"
         maint_clear()
@@ -3881,6 +3884,8 @@ def restart(rest, who):
               "следующем шаге; Зевс — сообщение каждой: «сохранись, pantheon saved --by <имя> --state <путь>, отчитайся "
               "Зевсу».\nДальше: pantheon restart --status, затем pantheon restart --go")
         return 0
+    if rest[:1] == ["--only"]:
+        return restart_only(rest, who, m)
     if not m:
         print("технический перезапуск не готовится (pantheon restart --prepare)")
         return 1
@@ -3914,6 +3919,18 @@ def restart(rest, who):
         return 0 if all(n in saved or n in done_marks or n.startswith("zeus") for n in m.get("sessions") or []) else 1
     if rest[:1] == ["--go"]:
         force = "--force" in rest
+        forced = set()
+        if "--owner" in rest:  # metis-1122: без метки saved — только окна, названные в вопросе [id] с «да» владельца
+            qid = _opt(rest, "--owner") or ""
+            try:
+                forced = owner_named(qid, m.get("sessions") or [])
+            except P.ConsentLogError as e:
+                print(e, file=P.sys.stderr)
+                return 3
+            if not forced:
+                print(f"pantheon restart --go --owner {qid}: нет «да» владельца на вопрос [{qid}] с именем окна из "
+                      f"списка ({', '.join(m.get('sessions') or [])}) — никто не перезапущен", file=P.sys.stderr)
+                return 1
         agents = P.agents_all() or []
         done, skip, owner = [], [], []
         for n in m.get("sessions") or []:
@@ -3923,7 +3940,7 @@ def restart(rest, who):
             if n in done_marks:
                 done.append(n + " (раньше)")
                 continue
-            if n not in saved and not force:
+            if n not in saved and not force and n not in forced:
                 skip.append(n)
                 continue
             if os.path.exists(P.path("stopped", n)):
@@ -3961,8 +3978,99 @@ def restart(rest, who):
         P.alert(f"технический перезапуск отменён ({who})", "pantheon-restart")
         print("метка снята")
         return 0
-    print("pantheon restart --prepare [причина] | --status | --go [--force] | --done | --cancel", file=P.sys.stderr)
+    print(RESTART_USAGE, file=P.sys.stderr)
     return 2
+
+
+RESTART_USAGE = ("pantheon restart --prepare [причина] | --status | --go [--force | --owner <id>] | --done | --cancel | "
+                 "--only <сессия> --owner <id>")
+ONLY_TEXT = ("[Пантеон: окно перезапущено по слову владельца] Сессия перезапущена одна, по «да» владельца. Прочитай свой "
+             "файл состояния (STATUS.md направления или файл задачи мастерской) и продолжай со следующего шага. Запрос "
+             "разрешения, на котором окно стояло, снят — правку зоны владельца ставь заявкой, а не Edit. Это не ответ "
+             "владельца и не согласие.")
+COPY_NAME = re.compile(r"(.+?) \(\d{1,3}\)")
+
+
+def base_session(name):
+    """metis-1122: имя без номера копии — «zeus (2)» → «zeus». Claude Code нумерует копию с тем же именем; список
+    перезапуска и метки `pantheon saved` ведутся по имени без номера, поэтому годятся оба написания."""
+    s = " ".join(str(name or "").split())
+    m = COPY_NAME.fullmatch(s)
+    return m.group(1) if m else s
+
+
+def _opt(rest, k):
+    return rest[rest.index(k) + 1] if k in rest and rest.index(k) + 1 < len(rest) else None
+
+
+def owner_named(qid, names):
+    """metis-1122: окна из names, названные в вопросе «[qid] …», последний ответ владельца на который — «да» (окно
+    вопросов, ответ в чате или галочка на карточке, не старше суток). Журнал не читается — P.ConsentLogError."""
+    if not P.CONSENT_ID.fullmatch(str(qid or "")):
+        return set()
+    found = P.consent_found(qid, P.HESTIA_CONSENT_DAYS)[0]
+    final = {}
+    for _, _, body in found:  # позднее «нет» на тот же вопрос отменяет прежнее «да» (как pantheon consent)
+        final[body.split("\nответ:")[0].strip()] = body
+    out = set()
+    for q, body in final.items():
+        if P.consent_is_yes(body):
+            out |= {n for n in names if re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", q)}
+    return out
+
+
+def restart_only(rest, who, m):
+    """metis-1122: pantheon restart --only <сессия> --owner <id> — перезапуск одного окна без общего техперезапуска.
+    Нужно «да» владельца на вопрос [id], где окно названо по имени: окно может стоять на запросе разрешения, и его
+    сохранения (pantheon saved) не ждём. Зевс — сессия владельца, её поднимает он сам."""
+    name, qid = base_session(_opt(rest, "--only")), _opt(rest, "--owner") or ""
+    if not P.SESSION_NAME.fullmatch(name) or not P.CONSENT_ID.fullmatch(qid):
+        print(RESTART_USAGE, file=P.sys.stderr)
+        return 2
+    if name.startswith("zeus"):
+        print("pantheon restart --only: Зевс — ваша сессия, её поднимает владелец: pantheon start zeus --restart во "
+              "вкладке iTerm", file=P.sys.stderr)
+        return 2
+    if not is_pantheon(name, domains()):
+        print(f"pantheon restart --only: {name} — не окно Пантеона (нет в domains.json)", file=P.sys.stderr)
+        return 2
+    try:
+        ok = name in owner_named(qid, [name])
+    except P.ConsentLogError as e:
+        print(e, file=P.sys.stderr)
+        return 3
+    if not ok:
+        print(f"pantheon restart --only {name}: нет «да» владельца на вопрос [{qid}] с именем окна {name} за сутки — "
+              f"попроси Зевса спросить «[{qid}] Перезапустить окно {name}?»; ничего не перезапущено", file=P.sys.stderr)
+        return 1
+    if os.path.exists(P.path("stopped", name)):
+        print(f"pantheon restart --only {name}: окно остановлено вами (pantheon stop) — вернуть: pantheon resume {name}",
+              file=P.sys.stderr)
+        return 1
+    agents = P.agents_all()
+    if agents is None:
+        print("pantheon restart: claude agents --json не ответил", file=P.sys.stderr)
+        return 1
+    mine = [a for a in agents if base_session(a.get("name")) == name and a.get("id") and a.get("sessionId")]
+    if not mine:
+        print(f"pantheon restart --only {name}: нет фоновой сессии с этим именем — вкладка? перезапустить вручную",
+              file=P.sys.stderr)
+        return 1
+    a = saved_agent(name, mine, saved_sid(name), warn=False)
+    how = "ждала разрешения — сохранения не ждал" if a.get("state") == "blocked" else f"состояние {a.get('state') or '?'}"
+    rc = P.resume_session(name, a, ONLY_TEXT, "restart",
+                          recheck=lambda: "остановлено вами" if os.path.exists(P.path("stopped", name)) else None)[0]
+    if rc != 0:
+        print(f"pantheon restart --only {name}: перезапуск не удался, код {rc}", file=P.sys.stderr)
+        return 1
+    if m and name in (m.get("sessions") or []):  # идёт общий перезапуск — отметить, как у --go
+        os.makedirs(P.path("maintenance"), exist_ok=True)
+        P.write_atomic(P.path("maintenance", name + ".done"), P.stamp() + "\n")
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(P.path("maintenance", name + ".json"))
+    P.alert(f"окно {name} перезапущено одно ({who}, «да» владельца [{qid}]; {how})", "pantheon-restart")
+    print(f"{name}: перезапущено ({how})")
+    return 0
 
 
 def zeus_renewed(names, saved):
@@ -4063,8 +4171,10 @@ def saved_cmd(rest, who):
 
     def opt(k):
         return rest[rest.index(k) + 1] if k in rest and rest.index(k) + 1 < len(rest) else None
-    name, state = opt("--by") or P.os.environ.get("PANTHEON_SESSION") or "", opt("--state") or ""
-    own = P.os.environ.get("PANTHEON_SESSION")
+    # metis-1122: «zeus (2)» и «zeus» — одно окно: копию Claude Code нумерует, метка — по имени без номера
+    name = base_session(opt("--by") or P.os.environ.get("PANTHEON_SESSION") or "")
+    state = opt("--state") or ""
+    own = base_session(P.os.environ.get("PANTHEON_SESSION")) or None
     if not P.SESSION_NAME.fullmatch(name):
         print("pantheon saved --by <имя сессии> --state <путь>", file=P.sys.stderr)
         return 2
@@ -4081,7 +4191,7 @@ def saved_cmd(rest, who):
         print(f"{name}: отмечено «можно перезапускать». Плановый проход перезапустит окно с новыми плагинами, когда оно закончит ход; "
               "работающее окно не тронет")
         return 0
-    if name not in (m.get("sessions") or []):
+    if name not in {base_session(n) for n in m.get("sessions") or []}:
         print(f"pantheon saved: {name or '(без имени)'} нет в списке перезапуска: {', '.join(m.get('sessions') or [])}",
               file=P.sys.stderr)
         return 2
