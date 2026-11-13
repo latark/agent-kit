@@ -1479,6 +1479,8 @@ def _ui_problem(policy, name, sha, view, files):
         return f"PR сейчас на другом коммите ({view.get('headRefOid')})"
     inc = [_ui_glob(p.strip().casefold()) for p in pats if not p.strip().startswith("!")]
     exc = [_ui_glob(p.strip()[1:]) for p in pats if p.strip().startswith("!")]
+    if not inc:  # одни «!шаблоны» — ошибка политики: без путей приложения не решить, что talos не нужна (argus 14.11)
+        return f"в [merge_client_ui] {name} нет путей приложения, только исключения"
     hit = []
     for f in files:
         old = f.get("previous_filename")

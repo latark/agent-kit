@@ -70,12 +70,16 @@ def t_ui_no_section(h):
     merge_case("нет [merge_client_ui] — talos нужна, как раньше", _product(h, OUTSIDE, section=None), False,
                "нет [merge_client_ui]")
     h.reset()
-    other = '[merge_client_ui]\nhermes-alex = ["apps/**"]\n'
+    other = '[merge_client_ui]\nzephyr-demo = ["apps/**"]\n'
     merge_case("раздел только чужого направления — talos нужна", _product(h, OUTSIDE, section=other), False,
                "нет [merge_client_ui] athena-shop")
     h.reset()
     bad = '[merge_client_ui]\nathena-shop = "apps/web/**"\n'
     merge_case("раздел не списком — talos нужна", _product(h, OUTSIDE, section=bad), False, "нет [merge_client_ui]")
+    h.reset()
+    only_exc = '[merge_client_ui]\nathena-shop = ["!**/*.check.ts"]\n'
+    merge_case("в разделе одни исключения — talos нужна", _product(h, ["apps/web/app/page.tsx"], section=only_exc),
+               False, "нет путей приложения")
 
 
 def t_ui_unsure(h):
