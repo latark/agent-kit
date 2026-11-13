@@ -1449,6 +1449,46 @@ def _version_problem(files):
     return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
 
 
+def _ui_glob(pat):
+    """Шаблон [merge_client_ui] → regex пути: `**/` — ноль и больше папок, `**` — что угодно, `*` и `?` — без «/»."""
+    out, i = "", 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pat.startswith("**", i):
+            out, i = out + ".*", i + 2
+        else:
+            out, i = out + {"*": "[^/]*", "?": "[^/]"}.get(pat[i], re.escape(pat[i])), i + 1
+    return re.compile(out)
+
+
+def _ui_problem(policy, name, sha, view, files):
+    """metis-0906, 0863: нужна ли talos продукту. Пути живого приложения — [merge_client_ui] направления в policy.toml
+    владельца (не из head PR): шаблоны, «!шаблон» — исключение (тесты, документы). None — дифф вне этих путей, talos
+    не нужна; иначе причина. Без раздела, сбой gh, неполный список, другой head — нужна (как до 0906). Свой шаблон
+    без учёта регистра, исключение — с учётом: спорный путь уходит к talos."""
+    pats = policy.get("merge_client_ui")
+    pats = _str_list(pats.get(name)) if isinstance(pats, dict) and name else None
+    if not pats:
+        return f"нет [merge_client_ui] {name or '?'} в policy.toml"
+    count = view.get("changedFiles") if isinstance(view, dict) else None
+    if not isinstance(files, list) or not all(isinstance(f, dict) for f in files) or not isinstance(count, int) \
+            or isinstance(count, bool) or len(files) != count:
+        return "список файлов PR не получен или неполон"
+    if str(view.get("headRefOid") or "").lower() != sha:
+        return f"PR сейчас на другом коммите ({view.get('headRefOid')})"
+    inc = [_ui_glob(p.strip().casefold()) for p in pats if not p.strip().startswith("!")]
+    exc = [_ui_glob(p.strip()[1:]) for p in pats if p.strip().startswith("!")]
+    hit = []
+    for f in files:
+        old = f.get("previous_filename")
+        for n in [f.get("filename")] + ([old] if old is not None else []):  # переименование: и старый путь
+            p = n.strip("/") if isinstance(n, str) else None
+            if p is None or any(r.fullmatch(p.casefold()) for r in inc) and not any(r.fullmatch(p) for r in exc):
+                hit.append(str(n))
+    return f"дифф задевает живое приложение: {', '.join(hit[:5])}" if hit else None
+
+
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
@@ -2960,8 +3000,10 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         return (f"рецензент и сливающий — одна и та же сессия: «принять» должен дать отдельный argus, а среди "
                 f"рецензентов {repo}#{pr}@{sha[:12]} — и сливающий. {advice}")
     if advice == MERGE_PRODUCT:
-        if not any(mine(r, ("talos",), "talos") for r in records):
-            return (f"продукт — нет проверки talos на {repo}#{pr}@{sha[:12]}: позови talos, он проверит живое "
+        ui = None if any(mine(r, ("talos",), "talos") for r in records) else \
+            _ui_problem(policy, repo_name, sha, pr_view(), pr_files())
+        if ui:
+            return (f"продукт — нет проверки talos на {repo}#{pr}@{sha[:12]} ({ui}): позови talos, он проверит живое "
                     f"приложение и запишет `pantheon review talos {repo} {pr} {sha}` (talos не переносится "
                     f"с прошлого head). {advice}")
         if not _alert_ok(repo, pr):
