@@ -196,6 +196,14 @@ check("отказ: пароля и почты нет в выводе, журна
       PASSWORD not in out + txt and EMAIL not in out + txt, out)
 check("отказ: файла сессии нет", not os.path.exists(os.path.join(QDIR, rid + L.SESSION_SUFFIX)))
 
+# 3б. код ошибки совпал с паролем (похож на код) — вырезается из причины (_scrub в handle)
+write_env(GOOD_ENV.replace(PASSWORD, "pw_like_code_77"))
+REPLY[0] = (400, {"error_code": "pw_like_code_77"})
+code, out, rid, res = run([SID])
+check("отказ: значение ключа в коде ошибки вырезано", code == 1 and "pw_like_code_77" not in out + everything_text()
+      and "HTTP 400, ***" in (res or {}).get("why", ""), res)
+write_env(GOOD_ENV)
+
 # 4. сбой сети с паролем в тексте исключения — только имя класса
 REPLY[0] = OSError(f"connect failed {PASSWORD}")
 code, out, rid, res = run([SID])
