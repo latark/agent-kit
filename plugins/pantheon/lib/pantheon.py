@@ -6282,6 +6282,12 @@ def direction_check(name):
     add(d.get("does") and d.get("does_not") and 3 <= len(d.get("examples") or []) <= 6,
         "в записи есть does, does_not и 3–5 examples (ROLE-11)")
     folders = [os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []]
+    if d.get("planned") is True and not (folders and all(os.path.isdir(f) for f in folders)):
+        # запланировано (metis-1043): записано в реестр заранее, папок и «да» на заведение ещё нет — не ошибка
+        res = [(ok, t) for ok, t in res if t.startswith(("имя", "запись в directions.toml"))]
+        res.append((True, "запланировано (planned = true в directions.toml): папок ещё нет, остальные проверки "
+                    "пропущены до заведения"))
+        return res
     add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
     launch = launch_folder(d.get("folders"))
     home_dir = os.path.join(PANTHEON, "directions", name)
@@ -6334,6 +6340,49 @@ def direction_check(name):
         short = name.split("-", 1)[-1]
         add(os.path.isfile(os.path.join(AGENTS, f"{lead}-{short}.md")), f"роль лида {lead}-{short} (pantheon roles build)")
     return res
+
+
+TOOL_REFUSAL = "Отказ: <инструмент> — причина"
+
+
+def project_tools_cmd():
+    """Команда project-tools: соседний плагин рядом (клон репозитория — тот же код, что у этого pantheon), иначе в
+    PATH (установленный плагин; версия без --json даст код 2 — предупреждения не будет). Нет — None."""
+    near = os.path.join(os.path.dirname(PLUGIN), "project-tools", "bin", "project-tools")
+    return near if os.access(near, os.X_OK) else shutil.which("project-tools")
+
+
+def direction_warnings(name):
+    """Предупреждения координатору (metis-1043), код выхода не меняют: в папке направления по карте стеков есть стек,
+    а инструмента нет (`project-tools check --json`), и в AGENTS.md проекта нет пометки отказа — строки «Отказ: …
+    <инструмент> …». Нет команды project-tools или она упала — молча: это совет, а не ворота. → [строка]."""
+    d = direction_gate(name)[1]
+    cmd = project_tools_cmd()
+    if not cmd or d.get("planned") is True:
+        return []
+    out = []
+    for folder in dict.fromkeys(os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []):
+        if not os.path.isdir(folder):
+            continue
+        try:
+            r = subprocess.run([cmd, "check", "--json", "--dir", folder], capture_output=True, text=True, timeout=60)
+            data = json.loads(r.stdout) if r.returncode == 0 else {}
+            missing = [(m["tool"], m["stack"]) for m in data.get("missing") or []]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            with open(os.path.join(folder, "AGENTS.md"), encoding="utf-8") as fh:
+                refusals = [l for l in fh.read().splitlines() if re.match(r"\W*отказ", l, re.I)]
+        except OSError:
+            refusals = []
+        todo = [(t, st) for t, st in missing
+                if not any(re.search(rf"(?<![\w-]){re.escape(t)}(?![\w-])", l) for l in refusals)]
+        if todo:
+            out.append(f"ВНИМАНИЕ {tilde(folder)}: стек есть, инструмента нет — "
+                       + ", ".join(f"{t} ({st})" for t, st in todo)
+                       + ". Подключить: навык project-tools (`project-tools check`); отказ — строка в AGENTS.md "
+                       + f"проекта «{TOOL_REFUSAL}»")
+    return out
 
 
 # `pantheon direction init` (metis-0042): папку нового направления создаёт команда, а не Метида — её окну guard и
@@ -6496,7 +6545,11 @@ def _init_launch(p, name, d):
                 f"Направление Пантеона `{name}`.\n\n"
                 f"Что делает: {d.get('does') or '—'}\n\n"
                 f"Чего не делает: {d.get('does_not') or '—'}\n\n"
-                "Команды сборки и тестов — дополнит координатор.\n")
+                "Команды сборки и тестов — дополнит координатор.\n\n"
+                "## Инструменты\n\n"
+                "Что подключено в проекте (MCP, плагины) и почему — заполняет координатор после "
+                "`project-tools check`. Не подключили инструмент, который карта стеков предлагает, — строка "
+                f"«{TOOL_REFUSAL}»: `pantheon direction check` тогда не предупреждает.\n")
         try:
             with open(agents, "x", encoding="utf-8") as fh:   # "x": не перезапишет и не пройдёт по ссылке
                 fh.write(text)
@@ -6526,6 +6579,8 @@ def direction(rest):
     res = direction_check(rest[1])
     for ok, text in res:
         print(("готово  " if ok else "НЕТ     ") + text)
+    for line in direction_warnings(rest[1]):  # предупреждение координатору: код выхода не меняет
+        print(line)
     return 0 if all(ok for ok, _ in res) else 1
 
 
