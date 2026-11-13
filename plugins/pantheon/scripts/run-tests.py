@@ -211,6 +211,7 @@ WINDOW_FS = {
     "pantheon/test_workshop_sockets.py", "pantheon/test_tick_skip.py", "pantheon/test_map_cache.py",
     "pantheon/test_window_folders.py", "pantheon/test_window_pack.py",
     "pantheon/test_outside_tree.py", "pantheon/test_outside_cancel.py",   # части test_outside.py (metis-0750)
+    "pantheon/test_outside_test_keys.py",   # ключи тестов outside (metis-1016): git init в _outside_common
     "pantheon/test_watch_zeus.py", "pantheon/test_watch_stop.py", "pantheon/test_watch_oneshot.py",   # части test_watch.py
     "pantheon/test_watch_sandbox.py", "pantheon/test_watch_infra.py", "pantheon/test_watch_nudge.py",   # (план 1.0, Т2)
     "pantheon/test_watch_respawn.py", "pantheon/test_watch_ghost.py",

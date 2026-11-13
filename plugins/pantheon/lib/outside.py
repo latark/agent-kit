@@ -35,6 +35,8 @@
   pantheon outside run [--quick|--serve] проход по заявкам — только плановый проход (из окна Claude Code — отказ):
                                          без флага — тесты дорожки полного набора, --quick — быстрая дорожка тестов
                                          (metis-1081), --serve — серверы и сторож
+  pantheon outside key OWNER/REPO ИМЯ    ключ тестов проекта (metis-1016) — только владелец в своём терминале: значение
+                                         скрытым вводом, пусто — убрать; из окна Claude Code — отказ (ниже, «исключение»)
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
 команды тестов, у сервера 0 — адрес готов, отказ — 1, отказ «занято» (два сервера, давление памяти) — 75, снятый дубль — 75 (итог у первой заявки), итога не
 дождался — 75. Без --wait — номер заявки, итог — `pantheon outside status ID`.
@@ -59,6 +61,30 @@
     дереве и самой папки STATE/outside/env (серверы и тесты не читают ключи чужих проектов). <owner>__<repo> — из
     origin клона реестра, а не из конфига папки роли. Остаток: окружение процесса читает процесс того же пользователя
     (KERN_PROCARGS2); deny process-info* этого не закрывает (проба 01.11) — потому только dev-ключи;
+  - исключение — ключи тестов (metis-1016, athena-0297 вариант А, владелец 07.11; до слияния — «да» в журнале владельца):
+    строка подключения к базе одного проекта (TEST_KEYS: SUPABASE_DB_URL), не токен аккаунта. Лежит отдельно от
+    dev-ключей — STATE/outside/test-env/<owner>__<repo>.env (<owner>__<repo> — из origin клона, как у dev-ключей),
+    кладёт владелец командой `pantheon outside key OWNER/REPO ИМЯ` (скрытый ввод, файл 600). Получает её только
+    `outside test --script ИМЯ` этого проекта: ни проверка проекта без --script (полный набор мог бы писать в базу из
+    окружения), ни установка зависимостей копии, ни сервер, ни другие проекты. Прогон с ключом — со своим профилем
+    profile-db.sb: сеть наружу только TCP на порт из строки подключения (нет порта — 5432), местные адреса и DNS; в
+    PATH — pg_dump из libpq (LIBPQ_BINS, если стоит). Вывод такого прогона идёт в сырой журнал
+    STATE/outside/test-env/raw/<ID>.log (закрыт окнам вместе с test-env), а в runs/<ID>.log — только вычищенным после
+    выхода процесса (flush_raw, argus #410-2 Б1); брошенный сырой журнал (заход убит SIGKILL, сторож, перезагрузка)
+    удаляют recover_results и сторож (drop_raw). Значения вырезаются из журнала прогона (целиком, до любой обрезки)
+    и среза процессов (redact: значение → <ИМЯ>, пароль → ***), в итоге и журнале outside.jsonl — только имена
+    (keys); фрагментов вывода в итоге (нет tail) и в событиях нет: при гашении по тишине why итога и события
+    test-silent — только «гашение по тишине N с», без последней строки (она обрезана до вырезания и несла бы кусок
+    пароля, argus #410-3 Б1); причина события stop — через TestWatch.clean_why (argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
+    на чтение (argus #410 Б2): denyRead песочницы Bash и правило Read(…/**) для Read, Grep, Glob в сборке окон
+    (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
+    Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
+    данные на чужой хост на том же порту, а localhost:* открыт целиком — через местные прокси и службы (прокси
+    песочницы Claude Code, локальные прокси и службы синхронизации) скрипт выйдет в сеть шире порта базы (argus #410-2 С1); пока идёт
+    прогон, окно роли читает окружение и командную строку процесса (KERN_PROCARGS2, как у сервера); скрипт пишет
+    роль, поэтому он может вывести закодированное значение (вырезание его не поймает) или записать значение как есть
+    в файл worktree, который окна читают (С2). Это
+    намеренный обход, граница — песочница и «да» владельца на ключ к боевой базе;
   - опора — клон реестра (metis-0614, проверка безопасности): .git-файл папки заявки принимается, только если ведёт в
     <клон>/.git/worktrees/<имя> клона из папок окна (trusted_clone, без запуска git); конфиг клона с include*,
     filter.*, extensions.worktreeConfig, командой в core.fsmonitor или ключом-командой (*.command, *.textconv,
@@ -160,10 +186,11 @@ LOAD_PER_CORE на ядро ждёт спада в итоге queued; красн
 набора возвращается в очередь, срок ожидания считается от первого начала: его помнит проход, а не заявка роли (Defer). Сторож тишины (metis-0770): лог прогона не
 растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
 sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
-гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»), в журнал — запись test-silent; считающий без
+гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»; у прогона с ключами тестов —
+только «гашение по тишине N мин», без строки и хвоста), в журнал — запись test-silent; считающий без
 вывода прогон не гасится. CPU не узнать (ни libproc, ни ps) — не гасим, одна запись test-silent-nocpu за прогон. Профиль:
 всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
-на чтение, на запись нет; STATE/outside/env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
+на чтение, на запись нет; STATE/outside/env и test-env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
 состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon, ~/Library/LaunchAgents,
 профили оболочки, ~/.gitconfig, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config и
@@ -218,6 +245,7 @@ test-silent — прогон погашен сторожем тишины, test-
 import contextlib
 import ctypes
 import errno
+import getpass
 import glob
 import hashlib
 import json
@@ -235,6 +263,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
@@ -302,9 +331,16 @@ SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sb
 RESERVED_ENV = {"HOME", "PATH", "TMPDIR", "PORT", "CI", "LANG", "SHELL", "USER", "LOGNAME", "PWD"}
 RESERVED_ENV_PREFIX = ("PANTHEON_", "DYLD_", "LD_")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# ключи тестов (metis-1016, athena-0297 вариант А): только эти имена из STATE/outside/test-env/<owner>__<repo>.env и
+# только заявке test --script этого проекта; строка подключения одной базы, не токен аккаунта
+TEST_KEYS = ("SUPABASE_DB_URL",)
+DB_URL_RE = re.compile(r"postgres(?:ql)?://", re.I)
+DB_PORT = 5432                      # порт PostgreSQL, когда в строке подключения его нет
+# pg_dump и psql из libpq (keg-only у brew: не в /opt/homebrew/bin) — в PATH только прогона с ключами тестов
+LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
-         "status [ID] | stop ID [--wait С] | run [--quick|--serve]")
+         "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ")
 
 
 def set_core(mod):
@@ -334,6 +370,12 @@ def work_root():
 def env_dir():
     """Dev-ключи серверов по проектам (решение владельца 01.11): читает только проход, профиль их закрывает."""
     return root("env")
+
+
+def test_env_dir():
+    """Ключи тестов по проектам (metis-1016): отдельно от dev-ключей сервера, читает только проход тестов, профиль их
+    закрывает; кладёт владелец командой `pantheon outside key`."""
+    return root("test-env")
 
 
 def heavy_bin():
@@ -752,8 +794,10 @@ def _q(p):
     return '"' + p.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def profile_text(roots=()):
-    """Профиль sandbox-exec: всё, кроме ключей, записи в состояние и ядро и портов браузеров и прокси."""
+def profile_text(roots=(), db_ports=()):
+    """Профиль sandbox-exec: всё, кроме ключей, записи в состояние и ядро и портов браузеров и прокси. db_ports — прогон
+    с ключами тестов (metis-1016): наружу только TCP на эти порты, местные адреса и DNS (сокет mDNSResponder). Хост
+    sandbox-exec не сужает («host must be * or localhost», проба 09.11), поэтому порт, а не хост базы."""
     h = os.path.realpath(P.HOME)
     secret_dirs = [".ssh", ".config/cdp-daemon", ".config/gh", ".gnupg", ".aws", "Library/Keychains"]
     # ~/.npmrc — ключи реестров (_authToken); npm и pnpm без него работают: проба 28.10, metis-0573
@@ -761,7 +805,8 @@ def profile_text(roots=()):
     read = [f"(subpath {_q(os.path.join(h, x))})" for x in secret_dirs] + \
            [f"(literal {_q(os.path.join(h, x))})" for x in secret_files] + \
            ['(regex #"/\\.env[^/]*$")', '(regex #"/secrets(/|$)")'] + \
-           [f"(subpath {_q(os.path.realpath(env_dir()))})"]   # dev-ключи проектов: их отдаёт окружением проход
+           [f"(subpath {_q(os.path.realpath(env_dir()))})",       # dev-ключи проектов: их отдаёт окружением проход
+            f"(subpath {_q(os.path.realpath(test_env_dir()))})"]  # ключи тестов (metis-1016) — так же
     wdirs = [P.STATE, P.PANTHEON, os.path.join(h, ".claude"), os.path.join(h, ".local", "bin"),
              os.path.join(h, ".local", "share", "pantheon"), os.path.join(h, "Library", "LaunchAgents"),
              os.path.join(h, ".config", "git"), os.path.join(h, ".nvm"),
@@ -772,6 +817,12 @@ def profile_text(roots=()):
     for r in roots:
         write.append(f'(regex #"^{re.escape(r)}/(.*/)?\\.git/(config|hooks)(/|$)")')
     net = [f'(remote ip "*:{p}")' for p in DENY_PORTS]
+    # с ключами тестов: сначала закрыть всю сеть IP, затем открыть местные адреса и порты базы; порты браузеров и
+    # прокси закрывает правило ниже — в SBPL сильнее позднее
+    db = ['(deny network-outbound (remote ip "*:*"))',
+          '(allow network-outbound (remote ip "localhost:*"))',
+          "(allow network-outbound\n  " + "\n  ".join(f'(remote tcp "*:{int(p)}")' for p in sorted(db_ports)) + ")"
+          ] if db_ports else []
     return "\n".join([
         "(version 1)",
         "(allow default)",
@@ -781,24 +832,34 @@ def profile_text(roots=()):
         '(deny file-read* (regex #"/secrets(/|$)"))',   # secrets/ закрыта целиком, и шаблон в ней тоже
         '(deny mach-lookup (global-name "com.apple.SecurityServer"))',
         "(deny file-write*\n  " + "\n  ".join(write) + ")",
+        *db,
         "(deny network-outbound\n  " + "\n  ".join(net) + ")",
     ]) + "\n"
 
 
-def write_profile(roots):
+def write_profile(roots, db_ports=()):
+    """Профиль в STATE/outside: profile.sb, у прогона с ключами тестов — profile-db.sb (тесты идут по одному)."""
     os.makedirs(root(), mode=0o700, exist_ok=True)
-    p = root("profile.sb")
+    p = root("profile-db.sb" if db_ports else "profile.sb")
     tmp = f"{p}.{os.getpid()}"
     with open(tmp, "w") as fh:
-        fh.write(profile_text(roots))
+        fh.write(profile_text(roots, db_ports))
     os.replace(tmp, p)
     return p
 
 
+def libpq_bins():
+    """Папки libpq с исполняемым pg_dump (brew install libpq), которые есть на этом Mac."""
+    return [b for b in LIBPQ_BINS if os.access(os.path.join(b, "pg_dump"), os.X_OK)]
+
+
 def sandbox_env(tmpdir, kind, port=None, keys=None):
     """Окружение команды с нуля: ни ключей окружения тика, ни GH_*, ни переменных launchd. keys — dev-ключи проекта
-    (только у сервера), служебные имена ими не перекрываются."""
+    у сервера или ключи тестов у test --script (metis-1016: тогда ещё pg_dump из libpq в PATH); служебные имена ими
+    не перекрываются."""
     path = [x for x in [P.nvm_bin(), os.path.join(P.PLUGIN, "bin"), os.path.join(P.HOME, ".local", "bin")] if x]
+    if kind == "test" and keys:
+        path += libpq_bins()
     env = dict(keys or {})
     env.update({"HOME": os.path.realpath(P.HOME), "PATH": ":".join(path + SAFE_PATH), "LANG": "en_US.UTF-8",
                 "TMPDIR": tmpdir, "PANTHEON_STATE": P.STATE, "NEXT_TELEMETRY_DISABLED": "1", "DO_NOT_TRACK": "1"})
@@ -1001,12 +1062,15 @@ def _pid_alive(p):
 
 
 class Silent(Exception):
-    """Лог молчал IDLE_TIMEOUT с при почти нулевом CPU дерева: группа убита (SIGKILL), why — для итога."""
+    """Лог молчал IDLE_TIMEOUT с при почти нулевом CPU дерева: группа убита (SIGKILL), why — для итога. bare — причина
+    без вывода: у прогона с ключами тестов (metis-1016, argus #410-3 Б1) last обрезана до вырезания и может нести
+    кусок пароля — в итог, событие и журнал идёт только bare."""
 
     def __init__(self, secs, last):
         self.secs, self.last = secs, last
         mins = f"{round(secs / 60)} мин" if secs >= 60 else f"{round(secs)} с"
         self.why = f"тишина {mins}, последний вывод: {last or '(пусто)'}"
+        self.bare = f"гашение по тишине {mins}"
         super().__init__(self.why)
 
 
@@ -1658,11 +1722,78 @@ def new_log(rid):
     return p, os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
 
 
+def raw_dir():
+    """Сырые журналы прогонов с ключами тестов (argus #410-2 Б1): внутри test_env_dir() — её окнам закрывает
+    WINDOW_SECRET_DIRS, прогонам и серверам — профиль. Окна читают runs/, поэтому вывод такого прогона идёт сюда, а в
+    runs/<ID>.log попадает только вычищенным (flush_raw); брошенный — убирают recover_results и сторож (drop_raw)."""
+    return os.path.join(test_env_dir(), "raw")
+
+
+def new_raw(name):
+    """Сырой журнал прогона с ключами: raw_dir()/<name>.log, новый (O_EXCL, 600) → (путь, fd)."""
+    d = raw_dir()
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    p = os.path.join(d, name + ".log")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(p)   # остаток прерванного захода с тем же ID: сырое не дописывается к сырому
+    return p, os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+
+
+def _drop_raw_file(p):
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(p)
+    with contextlib.suppress(OSError):
+        os.rmdir(os.path.dirname(p))   # пустая папка не остаётся рядом с файлами ключей
+
+
+def flush_raw(raw, fd, keys):
+    """Сырой журнал raw — вычищенным (redact) в журнал прогона fd (runs/<ID>.log), сам raw удаляется в любом случае.
+    → True; не прочитать или не дописать — False (вывод прогона потерян, но открытым не лёг никуда)."""
+    if not raw:
+        return True
+    try:
+        with open(raw, "rb") as fh:
+            text = fh.read().decode("utf-8", "surrogateescape")
+        os.write(fd, redact(text, keys).encode("utf-8", "surrogateescape"))
+        return True
+    except OSError:
+        return False
+    finally:
+        _drop_raw_file(raw)
+
+
+def drop_raw(rid=None, keep=None):
+    """Брошенные сырые журналы (заход убит SIGKILL, сторож, перезагрузка): у rid — его и повтора, без rid — все.
+    Значений ключей уже не вычистить наверняка (ключ мог смениться) — файл удаляется, в runs/<ID>.log пометка.
+    keep(ID) истинно — журнал идущего прогона чужой дорожки, не трогается (metis-1081). → [ID] удалённых."""
+    d = raw_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    out = []
+    for name in sorted(names):
+        base = name[:-len(".log")] if name.endswith(".log") else ""
+        own = base.removesuffix("-retry")
+        if not ID_RE.fullmatch(own) or (rid and own != rid) or (keep and keep(own)):
+            continue
+        _drop_raw_file(os.path.join(d, name))
+        with contextlib.suppress(OSError):
+            log, fd = new_log(base)
+            try:
+                os.write(fd, "\nзаход прерван: вывод прогона с ключами тестов удалён, не вычищенным не сохранён\n".encode())
+            finally:
+                os.close(fd)
+        out.append(base)
+    return out
+
+
 # --- тесты --------------------------------------------------------------------------------------------------------
 
-def procs_of(pid):
+def procs_of(pid, keys=None):
     """Срез процессов прогона (группа pid и потомки): [{pid, cpu, time, cmd до 200 знаков, heavy_wait}] для итога
-    running в своём qdir — окно ps не зовёт (metis-0873). heavy_wait — heavy без детей: ждёт место. Сбой ps — []."""
+    running в своём qdir — окно ps не зовёт (metis-0873). heavy_wait — heavy без детей: ждёт место. Сбой ps — [].
+    keys — ключи тестов прогона (metis-1016): их значения вырезаются из команды до обрезки (pg_dump --dbname <строка>)."""
     table = ps_table()
     pids = sorted(_tree(pid, table) | {pid}) if table else [pid]
     try:
@@ -1678,7 +1809,7 @@ def procs_of(pid):
             continue
         p = int(f[0])
         heavy = any(w == "heavy" or w.endswith("/heavy") for w in f[3].split()[:3])
-        res.append({"pid": p, "cpu": f[1], "time": f[2], "cmd": f[3][:200],
+        res.append({"pid": p, "cpu": f[1], "time": f[2], "cmd": (redact(f[3], keys) if keys else f[3])[:200],
                     **({"heavy_wait": True} if heavy and p not in parents else {})})
     return res
 
@@ -1696,6 +1827,7 @@ class TestWatch:
         self.pin, self.src, self.script, self.base = pin, src, script, base
         self.why, self.by, self.where = None, [], []
         self.running, self.pid = None, None
+        self.keys = {}   # ключи тестов прогона (metis-1016): их значения вырезаются из среза процессов
         now = time.monotonic()
         self.next_head, self.next_procs = now + SUPERSEDE_EVERY, now + PROCS_EVERY
 
@@ -1742,15 +1874,22 @@ class TestWatch:
                 return True
         if self.running and self.pid and now >= self.next_procs:
             self.next_procs = now + PROCS_EVERY
-            save_result(self.qdir, self.rid, {**self.running, "procs": procs_of(self.pid)})
+            save_result(self.qdir, self.rid, {**self.running, "procs": procs_of(self.pid, self.keys)})
         return False
+
+    def clean_why(self):
+        """Причина снятия без значений ключей тестов прогона (argus #410 Б1: всё, что прогон с ключами пишет в журнал)."""
+        return redact(self.why, self.keys) if self.why and self.keys else self.why
+
+    def log_stop(self, **kw):
+        """Событие stop прогона в outside.jsonl — причина через clean_why."""
+        log_event(id=self.rid, kind="stop", window=self.window, why=self.clean_why(), by=self.by, **kw)
 
     def stopped(self, **kw):
         """Итог снятого прогона: stopped, записи нет; своя метка убрана, событие stop в журнал."""
         clear_stop(self.rid, self.where)
-        log_event(id=self.rid, kind="stop", window=self.window, why=self.why, by=self.by,
-                  **({"sha": self.sha} if self.sha else {}))
-        return save_result(self.qdir, self.rid, {"state": "stopped", "kind": "test", "why": f"снят: {self.why}",
+        self.log_stop(**({"sha": self.sha} if self.sha else {}))
+        return save_result(self.qdir, self.rid, {"state": "stopped", "kind": "test", "why": f"снят: {self.clean_why()}",
                                                  "record": False, **({"sha": self.sha} if self.sha else {}), **kw})
 
 
@@ -1921,6 +2060,10 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "base": base,
                                            "why": f"узкий набор (--affected): {why}"})
         argv, line = narrow["argv"], narrow["line"]
+    # metis-1016: ключи тестов — только скрипту (--script) проекта клона d, не проверке проекта (полный набор может
+    # писать в базу из окружения) и не установке зависимостей; имена — в итог, значения — нет
+    common = getattr(d, "common", None)
+    keys, kfile, kskip = test_keys(origin_id(common)) if script and common else ({}, None, [])
     repos0 = remotes(d) if record else []
     full = bool(repos0) and any(P.merge_mod().full_tests_record(r, {"cmd": line}) for r in repos0)
     plan, full_why = None, None
@@ -1939,10 +2082,12 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         extra["base"] = base
     if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
         extra["narrow_why"] = narrow_why
+    if keys:
+        extra["keys"] = sorted(keys)
     running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
                **({"script": script} if script else {}), **extra}
     save_result(qdir, rid, running)
-    watch.sha, watch.running = sha, running
+    watch.sha, watch.running, watch.keys = sha, running, keys
     if full and not plan and not narrow:   # metis-0901: узкий набор и дозапуск лёгкие, полный под нагрузкой — нет
         waited = wait_load(qdir, rid, watch, running, defer=defer)
         if waited == "stop":
@@ -1953,37 +2098,64 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         if waited:
             save_result(qdir, rid, running)
     log, fd = new_log(rid + "-retry" if retried else rid)
+    # argus #410-2 Б1: вывод прогона с ключами — в сырой журнал в закрытой окнам папке, в runs/ — только вычищенный
+    raw, out = None, fd
+    if keys:
+        try:
+            raw, out = new_raw(rid + "-retry" if retried else rid)
+        except OSError as e:
+            os.close(fd)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "log": log,
+                                           "why": f"сырой журнал прогона с ключами не создан: {e}", "keys": sorted(keys)})
+
+    def settle():
+        """Сырой журнал закрыть и вычищенным дописать в runs/<ID>.log (flush_raw) → True, если перенесён. Без ключей
+        out — это fd журнала прогона: его закрывает finally, здесь нет (двойной close — EBADF, test_outside_idle)."""
+        if out != fd:
+            with contextlib.suppress(OSError):
+                os.close(out)
+        return flush_raw(raw, fd, keys)
+
     tmp = tempfile.mkdtemp(prefix="outside-")
-    code, timed_out = None, False
+    code, timed_out, hidden = None, False, True
     try:
         with contextlib.suppress(OSError):
             os.write(fd, (f"$ {line}  (папка {d}, {sha})\n" + (
                 f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: "
-                f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "")).encode())
+                f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "") + (
+                f"ключи тестов: {', '.join(sorted(keys))} (файл {os.path.join(test_env_dir(), kfile)}); сеть — только "
+                f"TCP на порт {', '.join(map(str, sorted(db_ports(keys))))} и местные адреса\n" if keys else "")).encode())
         if watch():   # «стоп» между взятием заявки и запуском (T10a): команда не запускается
             return watch.stopped(cmd=line, log=log, **extra)
         try:
-            proc = subprocess.Popen(wrap(plan["argv"] if plan else argv, write_profile(roots)), cwd=d,
-                                    env=sandbox_env(tmp, "test"),
-                                    stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True)
+            proc = subprocess.Popen(wrap(plan["argv"] if plan else argv,
+                                         write_profile(roots, db_ports(keys) if keys else ())), cwd=d,
+                                    env=sandbox_env(tmp, "test", keys=keys),
+                                    stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
         except OSError as e:
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": f"команда не запустилась: {e}", "log": log})
         watch.pid = proc.pid
         try:
-            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=log,
+            code = wait_proc(proc, TEST_TIMEOUT, tick=watch, idle_log=raw or log,
                              hold=(lambda: heavy_waiting(proc.pid)) if heavy_bin() else None)   # metis-0901
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
             code = proc.wait()
         except Silent as e:      # завис без вывода и CPU: тот же журнал, что отказ запуска (metis-0770)
+            hidden, raw = settle(), None
+            # argus #410-3 Б1: последняя строка и хвост обрезаны до вырезания — кусок пароля redact не узнаёт. С
+            # ключами — ни строки, ни хвоста: только «гашение по тишине N с»; вывод — в runs/<ID>.log, вычищен целиком
+            why = e.bare if keys else e.why
             with contextlib.suppress(OSError):
-                os.write(fd, f"\n{e.why}\n".encode())
-            log_event(kind="test-silent", id=rid, why=e.why)
-            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "why": e.why,
-                                           "log": log, "tail": tail(log)})
+                os.write(fd, f"\n{why}\n".encode())
+            log_event(kind="test-silent", id=rid, why=why)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "why": why,
+                                           "log": log, **({"keys": sorted(keys)} if keys else {"tail": tail(log)})})
     finally:
+        if raw:   # metis-1016: вывод с ключами — в runs/ только вычищенным, сырой удалён
+            hidden = settle()
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)
     watch.marker()   # «стоп» пришёл, пока команда выходила с кодом, — до записи (T10c)
@@ -2002,7 +2174,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         log_event(id=rid, kind="test-overload-final", window=window, sha=sha, files=over,
                   load=round(load_state()[0]))
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
-           "dir": d, "log": log, "tail": tail(log), "record": False, **extra}
+           "dir": d, "log": log, "record": False, **extra}
+    if not keys:   # с ключами тестов фрагментов вывода в итоге нет (argus #410-3 Б1): весь вывод — в log, вычищен
+        res["tail"] = tail(log)
     text = log_text(log) if full or narrow else ""
     got = run_failed(text) if full or narrow else None
     if plan:
@@ -2068,14 +2242,18 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             append_full(entry)
         except OSError as e:
             res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + f"журнал full.jsonl: {e}"
+    for knote in ([f"вывод прогона с ключами тестов не перенесён в {log} (сырой журнал удалён) — в журнале его нет"]
+                  if not hidden else []) + ([f"из файла ключей тестов не переданы (не из {', '.join(TEST_KEYS)} или "
+                                             f"пустые): {', '.join(kskip)}"] if kskip else []):
+        res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + knote
     if watch.why:
         clear_stop(rid, watch.where)
-        log_event(id=rid, kind="stop", window=window, why=watch.why, by=watch.by, sha=sha, code=code)
+        watch.log_stop(sha=sha, code=code)
         return save_result(qdir, rid, res)
     # load (за 5 мин) в конце прогона и full — журнал нагрузки для пересмотра порога LOAD_PER_CORE (metis-0927 С1)
     log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
               load=round(load_state()[0], 1), full=bool(full and not plan and not narrow),
-              **({"rerun_of": plan["rerun_of"]} if plan else {}))
+              **({"rerun_of": plan["rerun_of"]} if plan else {}), **({"keys": sorted(keys)} if keys else {}))
     return save_result(qdir, rid, res)
 
 
@@ -2348,9 +2526,9 @@ def remove_work(common, work):
     shutil.rmtree(work, ignore_errors=True)
 
 
-def _env_file(name):
-    """Текст файла ключей name в env_dir(): обычный файл владельца, не ссылка; иначе None."""
-    dfd = _open_dir(env_dir())
+def _env_file(name, where=None):
+    """Текст файла ключей name в where (по умолчанию env_dir()): обычный файл владельца, не ссылка; иначе None."""
+    dfd = _open_dir(where or env_dir())
     if dfd is None:
         return None
     try:
@@ -2407,6 +2585,52 @@ def dev_keys(repo, app=None):
         used.append(name)
         skipped += skip
     return keys, used, skipped
+
+
+def test_keys(repo):
+    """Ключи тестов проекта repo (metis-1016) — owner/repo из origin клона реестра, как у dev_keys: только файл
+    test_env_dir()/<owner>__<repo>.env и только имена TEST_KEYS → (ключи, файл или None, пропущенные имена)."""
+    names = env_names(repo)
+    text = _env_file(names[0], test_env_dir()) if names else None
+    if text is None:
+        return {}, None, []
+    got, skipped = parse_env(text)
+    keys = {k: v for k, v in got.items() if k in TEST_KEYS and v}
+    return keys, names[0], sorted(set(skipped) | {k for k in got if k not in keys})
+
+
+def db_ports(keys):
+    """Порты баз из строк подключения ключей тестов (postgres://…, host=… port=…); порта нет — DB_PORT."""
+    ports = set()
+    for v in keys.values():
+        if DB_URL_RE.match(v):
+            hosts = v.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].rpartition("@")[2]
+            ports |= {int(m) for m in re.findall(r":(\d{1,5})(?=,|$)", hosts) if 0 < int(m) < 65536} or {DB_PORT}
+        else:
+            ports |= {int(m) for m in re.findall(r"\bport\s*=\s*(\d{1,5})\b", v) if 0 < int(m) < 65536}
+    return ports or {DB_PORT}
+
+
+def _secrets(keys):
+    """Что вырезать из журнала и среза процессов: значение ключа и пароль строки подключения (как есть и раскодированный)."""
+    out = {}
+    for k, v in keys.items():
+        if len(v) >= 6:
+            out[v] = f"<{k}>"
+        if DB_URL_RE.match(v):
+            cred = v.split("://", 1)[1].split("/", 1)[0].rpartition("@")[0]
+            pw = cred.partition(":")[2]
+            for p in {pw, urllib.parse.unquote(pw)}:
+                if len(p) >= 4:
+                    out.setdefault(p, "***")
+    return out
+
+
+def redact(text, keys):
+    """Текст без значений ключей тестов: значение → <ИМЯ>, пароль базы → ***; длинные — первыми."""
+    for s, mark in sorted(_secrets(keys).items(), key=lambda x: -len(x[0])):
+        text = text.replace(s, mark)
+    return text
 
 
 # --- серверы: запуск ----------------------------------------------------------------------------------------------
@@ -3429,11 +3653,14 @@ def recover_results(t=None, lane=None):
     потеряна»; running — failed «заход прерван», но только то, что сам заход записал в STATE/outside/runs/<ID>.json
     (файл из кэша окна роль может подложить; у старых записей без qdir итог ищется во всех папках заявок, где он
     тоже running). Итог пишется минимальным объектом из своих полей, чужое содержимое
-    result.json не копируется. Serve не трогает: им ведёт свой проход. lane — дорожка прохода (metis-1081): running
-    чинится только своей дорожки (run_lane; запись без lane — full), идущий прогон другой дорожки не трогается;
-    None — любой. → число."""
+    result.json не копируется. Serve не трогает: им ведёт свой проход. Сырые журналы прогонов с ключами тестов
+    (raw_dir) под замком ничьи — заход, что их писал, убит: удаляются (drop_raw, argus #410-2 Б1). lane — дорожка
+    прохода (metis-1081): running чинится только своей дорожки (run_lane; запись без lane — full), идущий прогон
+    другой дорожки не трогается; None — любой. → число."""
     t = P.now() if t is None else t
     n = 0
+    for rid in drop_raw(keep=lambda r: lane is not None and run_lane(r) not in (None, lane)):
+        log_event(id=rid, kind="recovered", why="сырой журнал прогона с ключами тестов удалён")
     qdirs = {q for q, _ in queue_dirs()}
     for qdir in sorted(qdirs):
         dfd = _open_dir(qdir)
@@ -3572,6 +3799,7 @@ def watchdog(t=None):
             os.kill(holder, signal.SIGKILL)
         for k in kids:
             kill_group(k)
+        drop_raw(rid)   # заход убит до flush_raw: сырой журнал с ключами тестов не остаётся (argus #410-2 Б1)
         qdirs = {q for q, _ in queue_dirs()}
         targets = [qdir] if qdir in qdirs else [q for q in sorted(qdirs) if _result_running(q, rid)]
         for q in targets or [None]:
@@ -4085,8 +4313,60 @@ def cmd_stop(args):
     return 75
 
 
+def cmd_key(args):
+    """`pantheon outside key OWNER/REPO ИМЯ` (metis-1016): ключ тестов проекта кладёт владелец в своём терминале.
+    Значение — скрытым вводом (getpass), а не аргументом (история оболочки) и не правкой файла руками; пустой ввод
+    убирает ключ. Только имена TEST_KEYS и строка postgres://…; из окна Claude Code и без терминала — отказ, код 1.
+    Файл — test_env_dir()/<owner>__<repo>.env (папка 700, файл 600, замена целиком); в выводе — только имя."""
+    if len(args) != 2:
+        err(f"pantheon outside key OWNER/REPO ИМЯ — ключ тестов проекта (имена: {', '.join(TEST_KEYS)})")
+        return 2
+    repo, name = args[0].strip().lower(), args[1]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*", repo):
+        err(f"pantheon outside key: «{args[0]}» — не OWNER/REPO (как в origin, например owner/repo)")
+        return 2
+    if name not in TEST_KEYS:
+        err(f"pantheon outside key: имя {name} не из ключей тестов ({', '.join(TEST_KEYS)})")
+        return 2
+    if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
+        err("pantheon outside key: ключ кладёт владелец в своём терминале, не окно Claude Code")
+        return 1
+    if not sys.stdin.isatty():
+        err("pantheon outside key: нужен терминал — значение вводится скрыто, не из конвейера")
+        return 1
+    try:
+        value = getpass.getpass(f"{name} для {repo} (ввод не виден; пусто — убрать ключ): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        err("pantheon outside key: отменено, файл не тронут")
+        return 1
+    if value and (not DB_URL_RE.match(value) or any(c in value for c in "\r\n\0")):
+        err(f"pantheon outside key: {name} — строка подключения postgresql://… одной строкой; файл не тронут")
+        return 1
+    d = test_env_dir()
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    if os.path.islink(d) or not os.path.isdir(d):
+        err(f"pantheon outside key: {d} — не папка; файл не тронут")
+        return 1
+    fname = env_names(repo)[0]
+    keep = [ln for ln in (_env_file(fname, d) or "").splitlines()
+            if not re.match(rf"\s*(?:export\s+)?{re.escape(name)}\s*=", ln)]
+    lines = keep + ([f"{name}='{value}'"] if value else [])
+    tmp = os.path.join(d, f".{fname}.{os.getpid()}")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(lines) + ("\n" if lines else ""))
+    os.replace(tmp, os.path.join(d, fname))
+    print(f"{'записан' if value else 'убран'} ключ тестов {name} проекта {repo}: {os.path.join(d, fname)} "
+          f"(значение не показано; его получит только `pantheon outside test --script ИМЯ` этого проекта)")
+    return 0
+
+
 def main(rest):
     sub = rest[0] if rest else ""
+    if sub == "key":
+        return cmd_key(rest[1:])
     if sub in KINDS:
         return cmd_request(sub, rest[1:])
     if sub == "status":
