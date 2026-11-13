@@ -2,7 +2,7 @@
 
 Ядро защит (metis-0598, решение владельца 30.10): PR, который меняет модуль или карту, сливает владелец. Карта задаёт,
 какие плагины и MCP окну и роли недоступны (enabledPlugins: false и правила permissions.deny mcp__<сервер> окна;
-mcp__<сервер> в disallowedTools шапки роли). Модуль без состояния и ввода-вывода, кроме чтения файла карты: его
+mcp__<сервер> в disallowedTools шапки роли). Модуль без состояния (ввод-вывод — ниже, в абзаце metis-1051): его
 грузит pantheon.py по пути файла (python3 -I не кладёт папку скрипта в путь импорта).
 
 Запись карты — «оставить»: названное остаётся, остальное из [catalog] выключается. Окна или роли, которых в карте нет, и
@@ -10,12 +10,24 @@ mcp__<сервер> в disallowedTools шапки роли). Модуль без
 
 Записи окон своих направлений пользователь держит не в карте плагина, а в личной части
 ~/.claude/pantheon/plugins-by-role.toml (overlay): только [window.<направление>], каталог — из карты плагина.
+
+Список разрешённых MCP окна (metis-1051): необязательный ключ mcp_extra записи окна — серверы и инструменты вне
+каталога («сервер» или «сервер__инструмент», в инструменте можно «*»). window_apply с guard (путь строгого guard.py
+проверенного дерева) пишет окну хук PreToolUse «mcp__.*» — hooks/mcp_gate.py того же дерева со списком mcp + mcp_extra:
+всё, что в нём не названо, guard отклоняет. В дереве guard нет mcp_gate.py (выпуск старее) — хука нет, как раньше.
+Ввод-вывод модуля — только чтение карты и проверка, что файлы хука есть.
 """
 
+import os
 import re
+import shlex
 import tomllib
 
 MCP_NAME = re.compile(r"[A-Za-z0-9_-]+")
+# запись mcp_extra: тот же образец, что ENTRY в plugins/guard/hooks/mcp_gate.py (сверяет test_mcp_gate)
+MCP_ENTRY = re.compile(r"[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*(?:__[A-Za-z0-9*-]+(?:_[A-Za-z0-9*-]+)*)?")
+MCP_GATE = "mcp_gate.py"
+MCP_MATCHER = "mcp__.*"
 PLUGIN_ID = re.compile(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+")
 # Каталог, чьи плагины карта не выключает никогда: agent-kit — сами защиты (guard), Пантеон и project-tools. Такой
 # плагин в [catalog] — ValueError: «оставить» без него выключило бы guard и pantheon во всех окнах.
@@ -60,9 +72,12 @@ def load(path, windows=None, roles=None):
 
 
 def _entry(out, kind, name, entry, keys):
-    """Запись [kind.name] карты → {ключ: список}; ValueError — не те ключи, не список строк или имя вне каталога out."""
-    if not isinstance(entry, dict) or set(entry) - set(keys):
-        raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}")
+    """Запись [kind.name] карты → {ключ: список}; ValueError — не те ключи, не список строк или имя вне каталога out.
+    У окна ещё необязательный mcp_extra (записи MCP_ENTRY, каталог не сверяется); нет ключа — пустой список."""
+    extra = kind == "window" and isinstance(entry, dict) and "mcp_extra" in entry
+    if not isinstance(entry, dict) or set(entry) - set(keys) - ({"mcp_extra"} if extra else set()):
+        raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}"
+                         + (" и mcp_extra" if kind == "window" else ""))
     keep = {}
     for k in keys:
         vals = entry.get(k)
@@ -72,6 +87,12 @@ def _entry(out, kind, name, entry, keys):
         if unknown:
             raise ValueError(f"карта плагинов: [{kind}.{name}] {k}: {unknown} нет в [catalog]")
         keep[k] = list(vals)
+    if extra:  # ключ в записи только тогда, когда он в карте: нет его — список пуст (keep.get)
+        vals = entry["mcp_extra"]
+        if not isinstance(vals, list) or not all(isinstance(x, str) and MCP_ENTRY.fullmatch(x) for x in vals):
+            raise ValueError(f"карта плагинов: [{kind}.{name}] mcp_extra — список записей «сервер» или "
+                             "«сервер__инструмент»")
+        keep["mcp_extra"] = list(vals)
     return keep
 
 
@@ -119,9 +140,10 @@ def window_key(pmap, name, direction):
     return "direction" if direction and "direction" in pmap["window"] else None
 
 
-def window_apply(data, pmap, name, direction=False):
+def window_apply(data, pmap, name, direction=False, guard=None):
     """Окно: enabledPlugins: false у плагинов каталога вне «оставить» и permissions.deny mcp__<сервер> у серверов вне
-    «оставить». Возвращает data; окна нет в карте — без изменений."""
+    «оставить»; с guard — ещё хук списка разрешённых MCP (mcp_gate_hook). Возвращает data; окна нет в карте — без
+    изменений."""
     key = window_key(pmap, name, direction)
     if key is None:
         return data
@@ -131,6 +153,26 @@ def window_apply(data, pmap, name, direction=False):
         data.setdefault("enabledPlugins", {}).update({p: False for p in off})
     rules = data.setdefault("permissions", {}).setdefault("deny", [])
     rules.extend(r for r in (f"mcp__{m}" for m in pmap["mcp"] if m not in keep["mcp"]) if r not in rules)
+    if guard:
+        mcp_gate_hook(data, guard, keep["mcp"] + keep.get("mcp_extra", []))
+    return data
+
+
+def mcp_gate_hook(data, guard, allow):
+    """Хук PreToolUse «mcp__.*» окна: hooks/mcp_gate.py рядом с guard (строгий guard.py проверенного дерева) через
+    hooks/python.sh того же дерева, список allow — одним аргументом через запятую, onFailure "block". Прежний хук
+    списка заменяется (повторная сборка без повторов). Нет mcp_gate.py или python.sh рядом с guard (дерево старее
+    metis-1051 или его нет) — data без хука: проверенного файла для него нет."""
+    hooks_dir = os.path.dirname(guard)
+    gate, launcher = os.path.join(hooks_dir, MCP_GATE), os.path.join(hooks_dir, "python.sh")
+    if not (os.path.isfile(gate) and os.path.isfile(launcher)):
+        return data
+    pre = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    pre[:] = [g for g in pre if not (g.get("matcher") == MCP_MATCHER
+                                     and any(MCP_GATE in (h.get("command") or "") for h in g.get("hooks") or []))]
+    cmd = " ".join(shlex.quote(x) for x in ("/bin/sh", launcher, gate, ",".join(dict.fromkeys(allow))))
+    pre.append({"matcher": MCP_MATCHER, "hooks": [{"type": "command", "command": cmd, "timeout": 10,
+                                                   "onFailure": "block"}]})
     return data
 
 

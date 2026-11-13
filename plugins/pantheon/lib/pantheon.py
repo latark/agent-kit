@@ -80,6 +80,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
+  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
+                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
@@ -4415,7 +4417,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
         if pmap:
-            PLUGIN_MAP.window_apply(data, pmap, name, direction)
+            PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
         write_window(out_dir, name, data)
         return True
 
@@ -4479,7 +4481,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         agents_window(job, mine or [JOB_NO_AGENTS],
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         if pmap:
-            PLUGIN_MAP.window_apply(job, pmap, name)
+            PLUGIN_MAP.window_apply(job, pmap, name, guard=guard)
         write_window(out_dir, name, job)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
@@ -4501,7 +4503,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs["env"]["PANTHEON_ROLE"] = "hestia"
     agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
     if pmap:
-        PLUGIN_MAP.window_apply(hs, pmap, "hestia")
+        PLUGIN_MAP.window_apply(hs, pmap, "hestia", guard=guard)
     write_window(out_dir, "hestia", hs)
     built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
@@ -4590,7 +4592,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     if pmap:
-        PLUGIN_MAP.window_apply(hq, pmap, "hq")
+        PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
     write_window(out_dir, "hq", hq)
     built.append("hq")
     for f in os.listdir(out_dir):
@@ -9448,6 +9450,8 @@ def main(argv):
         return owner_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
+    if cmd == "supabase":
+        return _plugin_map_mod("supabase_migrate").main(rest, STATE)
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":
