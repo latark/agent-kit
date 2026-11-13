@@ -80,7 +80,7 @@
     (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
     Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
     данные на чужой хост на том же порту, а localhost:* открыт целиком — через местные прокси и службы (прокси
-    песочницы Claude Code, Surge, syncthing) скрипт выйдет в сеть шире порта базы (argus #410-2 С1); пока идёт
+    песочницы Claude Code, локальные прокси и службы синхронизации) скрипт выйдет в сеть шире порта базы (argus #410-2 С1); пока идёт
     прогон, окно роли читает окружение и командную строку процесса (KERN_PROCARGS2, как у сервера); скрипт пишет
     роль, поэтому он может вывести закодированное значение (вырезание его не поймает) или записать значение как есть
     в файл worktree, который окна читают (С2). Это
@@ -4271,7 +4271,7 @@ def cmd_key(args):
         return 2
     repo, name = args[0].strip().lower(), args[1]
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*", repo):
-        err(f"pantheon outside key: «{args[0]}» — не OWNER/REPO (как в origin, например latark/brokerassistantapp)")
+        err(f"pantheon outside key: «{args[0]}» — не OWNER/REPO (как в origin, например owner/repo)")
         return 2
     if name not in TEST_KEYS:
         err(f"pantheon outside key: имя {name} не из ключей тестов ({', '.join(TEST_KEYS)})")
