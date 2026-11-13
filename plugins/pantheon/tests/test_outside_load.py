@@ -6,6 +6,10 @@
 не запущена, после спада идёт; красный только из-за таймаутов файлов под нагрузкой — один повтор сам, второй такой же —
 итог «таймаут под нагрузкой» (overload, код 75), не красный, не в журнал full.jsonl; другой провал или малый load —
 обычный красный без повтора; ожидание места heavy не входит в TEST_TIMEOUT (wait_proc hold и прогон с heavy-заглушкой).
+«Стоп» снимает ждущую спада заявку за секунды (metis-0927 Д1); ждущая — живая для live_test (Д2); повтор «таймаута под
+нагрузкой» на том же коммите с теми же файлами — красный (Д3). Ждущий набор уступает очередь другим заявкам и
+возвращается, заход берёт его снова после них; срок ожидания — от начала, которое помнит проход, поле load_since
+заявки роли не читается (metis-1057, Defer, run_test_queue).
 sandbox-exec и heavy подменены заглушками.
 """
 import atexit
@@ -183,15 +187,156 @@ STOP3 = os.path.join(O.root("queue"), RID3 + ".stop")   # очередь тер�
 os.makedirs(os.path.dirname(STOP3), exist_ok=True)
 with open(STOP3, "w") as fh:
     fh.write("")
-th.join(20)
+t0 = time.monotonic()
+th.join(5)
+under_load = not th.is_alive()   # снята, пока load ещё высокий (LOAD_WAIT_MAX 3600): «стоп» смотрит сам wait_load
+took = time.monotonic() - t0
 if th.is_alive():   # не снялась — отпустить, чтобы поток не жил в следующих случаях
     LOAD[0] = 1.0
     th.join(20)
     LOAD[0] = 50.0
 check("нагрузка: «стоп» в ожидании — stopped, команда не запускалась",
       not th.is_alive() and out3.get("state") == "stopped" and ncalls() == n0, (out3, ncalls() - n0))
+check("нагрузка: «стоп» снимает ждущую спада заявку за секунды, не дожидаясь спада (metis-0927 Д1)",
+      under_load and took < 5, (under_load, round(took, 1)))
 if os.path.exists(STOP3):
     os.remove(STOP3)
+
+# --- 1б. ждущий спада полный набор уступает очередь (metis-1057); сцепка с ждущей заявкой (metis-0927 Д2) ----------
+QQ = O.root("queue")   # очередь терминала владельца: её видят queue_dirs, live_test и Defer.others
+os.makedirs(QQ, exist_ok=True)
+
+
+def qreq(rid, **kw):
+    with open(os.path.join(QQ, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": RK, **kw}, fh)
+
+
+def qread(rid):
+    try:
+        with open(os.path.join(QQ, rid + ".req.json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def events(kind):
+    try:
+        with open(os.path.join(STATE, "logs", "outside.jsonl")) as fh:
+            return [e for e in map(json.loads, fh.read().splitlines()) if e.get("kind") == kind]
+    except OSError:
+        return []
+
+
+def wait_queued(rid):
+    for _ in range(80):
+        s = O.load_result(QQ, rid) or {}
+        if s.get("state") == "queued" and "жду спада нагрузки" in s.get("why", ""):
+            return s
+        time.sleep(0.1)
+    return {}
+
+
+set_mode(["green"])
+SHA_D = commit(T_PY + "# d1\n", "d1")
+LOAD[0] = 50.0
+N[0] += 1
+RIDD = f"20261106-{N[0]:06d}-abcdef"
+DEFERRED = {}
+DFR = O.Defer(QQ, RIDD, {"v": 1, "id": RIDD, "kind": "test", "dir": RK, "sha": SHA_D}, DEFERRED)
+outd, n0 = {}, ncalls()
+th = threading.Thread(target=lambda: outd.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=DFR)))
+th.start()
+wait_queued(RIDD)
+check("Д2: ждущая спада заявка (взята, .req.json нет) — живая для live_test: повторный test на тот же head к ней",
+      not os.path.exists(os.path.join(QQ, RIDD + ".req.json")) and O.live_test(RK, SHA_D) == (QQ, RIDD),
+      O.live_test(RK, SHA_D))
+time.sleep(0.6)
+check("1057: других заявок нет — набор ждёт спада, а не уступает", th.is_alive() and not DFR.yielded and not DEFERRED)
+OTHER = "20261106-900000-abcdef"
+qreq(OTHER, script="lint")
+t0 = time.monotonic()
+th.join(5)
+back = qread(RIDD) or {}
+check("1057: в очереди появилась другая заявка — ждущий набор уступает за секунды, команда не запускалась",
+      not th.is_alive() and DFR.yielded and (QQ, RIDD) in DEFERRED and ncalls() == n0
+      and time.monotonic() - t0 < 5, (th.is_alive(), DFR.yielded, ncalls() - n0))
+check("1057: уступившая заявка снова в очереди, начало ожидания — в памяти прохода (deferred), итог queued",
+      back.get("id") == RIDD and "load_since" not in back and isinstance(DEFERRED.get((QQ, RIDD)), float)
+      and DEFERRED[(QQ, RIDD)] <= time.time()
+      and outd.get("state") == "queued" and "вперёд пропущены" in outd.get("why", ""), (back, outd))
+check("1057: уступка — в журнале событием test-defer", any(e.get("id") == RIDD for e in events("test-defer")))
+check("Д2: уступившая заявка (снова лежит .req.json) тоже живая для live_test", O.live_test(RK, SHA_D) == (QQ, RIDD))
+check("1057: отложенной заявке не уступают (иначе два ждущих набора ходили бы по кругу)",
+      not O.Defer(QQ, OTHER, {}, DEFERRED).others() and O.Defer(QQ, OTHER, {}, {}).others())
+if th.is_alive():
+    LOAD[0] = 1.0
+    th.join(20)
+    LOAD[0] = 50.0
+os.remove(os.path.join(QQ, OTHER + ".req.json"))
+
+# заявку пишет роль: поле load_since со старым временем не снимает ожидание спада (находка безопасности 12.11)
+os.remove(os.path.join(QQ, RIDD + ".req.json"))   # проход снова взял заявку
+out4, n0 = {}, ncalls()
+D4 = O.Defer(QQ, RIDD, {**back, "load_since": time.time() - O.LOAD_WAIT_MAX - 5}, {})
+th = threading.Thread(target=lambda: out4.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=D4)))
+th.start()
+th.join(1.5)
+held = th.is_alive() and ncalls() == n0 and (O.load_result(QQ, RIDD) or {}).get("state") == "queued"
+LOAD[0] = 1.0
+th.join(20)
+LOAD[0] = 50.0
+check("1057: load_since в заявке роли (старше LOAD_WAIT_MAX) под высоким load — набор не стартует, ждёт свой срок",
+      held and out4.get("state") == "done" and ncalls() == n0 + 1, (held, out4))
+
+# начало ожидания, которое помнит проход, старше LOAD_WAIT_MAX: срок вышел, хоть набор взят заново — идёт сразу
+commit(T_PY + "# d1b\n", "d1b")   # прогон выше записал tests на прошлый коммит — без нового повтор шёл бы без прогона
+out5, n0 = {}, ncalls()
+D5 = O.Defer(QQ, RIDD, back, {(QQ, RIDD): time.time() - O.LOAD_WAIT_MAX - 5})
+th = threading.Thread(target=lambda: out5.update(O.run_test(RIDD, RK, None, None, QQ, [RK], defer=D5)))
+th.start()
+th.join(10)
+fast = not th.is_alive()
+if th.is_alive():
+    LOAD[0] = 1.0
+    th.join(20)
+    LOAD[0] = 50.0
+check("1057: начало ожидания в памяти прохода старше LOAD_WAIT_MAX — набор идёт сразу при высоком load, срок не заново",
+      fast and out5.get("state") == "done" and out5.get("code") == 0 and ncalls() == n0 + 1, (fast, out5))
+check("1057: начало ожидания — только из памяти прохода, поле load_since заявки не читается",
+      O.Defer(QQ, "x", {"load_since": 5}, {}).since() is None and O.Defer(QQ, "x", {}, {(QQ, "x"): 5.0}).since() == 5.0)
+
+# заход прохода целиком: набор (раньше по id) уступает узкой заявке, та идёт первой, потом набор — после спада
+_registry = O.registry
+O.registry = lambda window=None: [os.path.dirname(RK)]
+set_mode(["green"])
+SHA_Q = commit(T_PY + "# d2\n", "d2")
+N[0] += 1
+RIDF = f"20261106-{N[0]:06d}-abcdef"
+N[0] += 1
+RIDO = f"20261106-{N[0]:06d}-abcdef"
+qreq(RIDF, sha=SHA_Q)
+qreq(RIDO, sha=SHA_Q, script="lint")   # не полный набор: не ждёт спада (здесь — failed сразу, скрипта нет)
+LOAD[0] = 50.0
+n0 = ncalls()
+th = threading.Thread(target=O.run_test_queue)
+th.start()
+other = {}
+for _ in range(100):
+    other = O.load_result(QQ, RIDO) or {}
+    if other.get("state") not in (None, "queued"):
+        break
+    time.sleep(0.1)
+full_q = O.load_result(QQ, RIDF) or {}
+check("1057: заход — заявка без ожидания идёт, пока раньше поданный полный набор ждёт спада",
+      other.get("state") == "failed" and full_q.get("state") == "queued" and ncalls() == n0, (other, full_q))
+LOAD[0] = 1.0
+th.join(30)
+full_q = O.load_result(QQ, RIDF) or {}
+check("1057: тот же заход после спада берёт отложенный набор снова и гонит его — зелёный, заявки нет на диске",
+      not th.is_alive() and full_q.get("state") == "done" and full_q.get("code") == 0 and ncalls() == n0 + 1
+      and qread(RIDF) is None, (th.is_alive(), full_q, ncalls() - n0))
+O.registry = _registry
 
 # --- 2. таймаут под нагрузкой: один повтор сам, не красный --------------------------------------------------------
 O.wait_load = lambda *a, **k: None   # ожидание спада проверено выше; здесь нагрузка высока только при разборе итога
@@ -216,6 +361,22 @@ check("повтор: итог overload — код 75 («повторить»), �
 check("повтор: итог overload не пишется красной строкой в full.jsonl", len(O.read_full()) == nfull, O.read_full()[nfull:])
 check("повтор: красный прогон без overload по-прежнему код 1",
       O.result_code({"state": "done", "code": 1, "why": ""}) == 1 and O.result_code({"state": "done", "code": 0}) == 0)
+
+# metis-0927 Д3: та же заявка на том же коммите снова — опять таймауты тех же файлов: зависание, красный
+set_mode(["timeouts"])
+n0 = ncalls()
+nfull = len(O.read_full())
+rid2, res = run()
+check("Д3: повтор заявки на коммите с итогом «таймаут под нагрузкой» — снова таймауты тех же файлов: красный, код 1",
+      ncalls() == n0 + 2 and res.get("code") == 1 and not res.get("overload") and O.result_code(res) == 1
+      and "зависанием" in res.get("why", "") and rid in res.get("why", ""), (res, ncalls() - n0))
+check("Д3: такой красный пишется в full.jsonl с причинами по файлам",
+      len(O.read_full()) == nfull + 1 and O.read_full()[-1].get("code") == 1
+      and sorted(O.read_full()[-1].get("causes") or {}) == ["lk/test_a.py", "lk/test_b.py"], O.read_full()[nfull:])
+check("Д3: overload_before — только тот же коммит и пересечение файлов",
+      O.overload_before(res["sha"], ["lk/test_a.py"], "x") == rid and O.overload_before("0" * 40, ["lk/test_a.py"], "x")
+      is None and O.overload_before(res["sha"], ["lk/test_z.py"], "x") is None
+      and O.overload_before(res["sha"], ["lk/test_a.py"], rid) is None)
 
 commit(T_PY + "# c6\n", "c6")
 set_mode(["mixed", "green"])
