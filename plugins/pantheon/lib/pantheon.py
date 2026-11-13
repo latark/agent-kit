@@ -215,7 +215,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
-  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel   технический перезапуск всех сессий
+  pantheon restart --prepare [причина]|--status|--go [--force|--owner <id>]|--done|--cancel   технический перезапуск всех сессий
+  pantheon restart --only <сессия> --owner <id>   одно окно по «да» владельца на вопрос [id] с его именем (metis-1122)
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code

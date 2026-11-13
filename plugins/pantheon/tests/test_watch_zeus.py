@@ -465,6 +465,146 @@ def test_restart_go_picks_saved_session_0421():
     check("[resume] sv-dir bbbbbbbb" in r.stdout and "5a5a5a5a" in r.stderr, f"id не найден: {r.stdout!r} {r.stderr!r}")
 
 
+
+def _owner_said(e, qid, question, answer, t):
+    """Ответ владельца в owner-log/zeus.md, как его пишет хук окна вопросов: «вопрос: [qid] …» и «ответ: …»."""
+    at = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    with open(e.st("owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
+        fh.write(f"\n## {at} · окно вопросов\nвопрос: [{qid}] {question}\nответ: {answer}\n")
+
+
+def test_restart_only_one_window_1122():
+    """metis-1122: pantheon restart --only <сессия> --owner <id> перезапускает одно окно без общего перезапуска и без
+    метки saved (окно стоит на запросе разрешения), но только по «да» владельца на вопрос [id] с именем окна."""
+    go = {"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"}
+    e = Env()
+    e.direction("mt-dir")
+    e.direction("ot-dir")
+    e.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51),
+              bg("ot-dir", "working", "b2b2b2b2-2222-4222-8222-222222222222", pid=52)])
+    r = e.run("restart", "--only", "mt-dir", "--owner", "restart-1311", t=T0, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout and "нет «да» владельца" in r.stderr,
+          f"без ответа владельца окно перезапущено: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    _owner_said(e, "restart-1311", "Перезапустить окно: ot-dir?", "Да", T0 - 60)
+    r = e.run("restart", "--only", "mt-dir", "--owner", "restart-1311", t=T0, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout, f"«да» о другом окне перезапустило mt-dir: {r.stdout!r}")
+    # Б1 argus PR #435: «да» на вопрос о другом действии, где окно лишь упомянуто, — не согласие на перезапуск;
+    # и вопрос о перезапуске не строгой формы (имена не списком после двоеточия) — тоже
+    for i, q in enumerate(("Пушить ветку mt-dir в origin?", "Перезапустить окно mt-dir?",
+                           "Перезапустить окна: mt-dir и ot-dir?", "Перезапустить окна: ot-dir, mt-dir? Метиду не ждать",
+                           "Перезапустить окна: mt-dir, ot-dir — кроме mt-dir?")):
+        e1 = Env()
+        e1.direction("mt-dir")
+        e1.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+        _owner_said(e1, f"push-1311-{i}", q, "Да", T0 - 60)
+        r = e1.run("restart", "--only", "mt-dir", "--owner", f"push-1311-{i}", t=T0, extra=go)
+        check(r.returncode == 1 and "[resume]" not in r.stdout,
+              f"«да» на «{q}» перезапустило mt-dir: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    _owner_said(e, "restart-1311", "Перезапустить окна: mt-dir, ot-dir?", "А — Да", T0 - 30)
+    r = e.run("restart", "--only", "mt-dir", "--owner", "restart-1311", t=T0, extra=go)
+    check(r.returncode == 0 and "[resume] mt-dir a1a1a1a1" in r.stdout and "ot-dir" not in r.stdout
+          and "сохранения не ждал" in r.stdout, f"--only не перезапустил одно окно: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    check(not os.path.exists(e.st("maintenance.json")), "--only поставил метку общего перезапуска")
+    # Б3 argus PR #435: одно «да» — один перезапуск окна; повтор с тем же id — отказ, код 2, причина последней строкой
+    r = e.run("restart", "--only", "mt-dir", "--owner", "restart-1311", t=T0 + 5, extra=go)
+    check(r.returncode == 2 and "[resume]" not in r.stdout and "уже использовано" in r.stderr.strip().splitlines()[-1],
+          f"повтор того же «да» перезапустил окно: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    r = e.run("restart", "--only", "ot-dir", "--owner", "restart-1311", t=T0 + 6, extra=go)
+    check(r.returncode == 0 and "[resume] ot-dir b2b2b2b2" in r.stdout,
+          f"второе окно из того же списка не перезапущено: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    check(e.run("restart", "--only", "zeus", "--owner", "restart-1311", t=T0, extra=go).returncode == 2,
+          "--only перезапускает Зевса")
+    check(e.run("restart", "--only", "mt-dir", t=T0, extra=go).returncode == 2, "--only без --owner не код 2")
+    # позднее «нет» на тот же вопрос отменяет «да»
+    e3 = Env()
+    e3.direction("mt-dir")
+    e3.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    _owner_said(e3, "restart-1311", "Перезапустить окна: mt-dir, ot-dir?", "Да", T0 - 30)
+    _owner_said(e3, "restart-1311", "Перезапустить окна: mt-dir, ot-dir?", "Нет", T0 - 10)
+    r = e3.run("restart", "--only", "mt-dir", "--owner", "restart-1311", t=T0, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout, f"«нет» после «да» не отменило: {r.stdout!r}")
+    # имя-префикс: «да» на «Перезапустить окно: mt-dir2?» — не про mt-dir
+    e4 = Env()
+    e4.direction("mt-dir")
+    e4.direction("mt-dir2")
+    e4.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    _owner_said(e4, "pre-1311", "Перезапустить окно: mt-dir2?", "Да", T0 - 30)
+    r = e4.run("restart", "--only", "mt-dir", "--owner", "pre-1311", t=T0, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout, f"«да» про mt-dir2 перезапустило mt-dir: {r.stdout!r}")
+    # окно вне Пантеона (нет в domains.json) — код 2, даже при «да» и живой сессии
+    e4.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51),
+               bg("zz-out", "blocked", "c3c3c3c3-3333-4333-8333-333333333333", pid=53)])
+    _owner_said(e4, "out-1311", "Перезапустить окно: zz-out?", "Да", T0 - 30)
+    r = e4.run("restart", "--only", "zz-out", "--owner", "out-1311", t=T0, extra=go)
+    check(r.returncode == 2 and "[resume]" not in r.stdout and "не окно Пантеона" in r.stderr,
+          f"--only перезапустил окно вне Пантеона: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    # окно остановлено владельцем (метка stopped) — не трогаем, «да» не расходуется
+    _owner_said(e4, "stop-1311", "Перезапустить окно: mt-dir?", "Да", T0 - 30)
+    os.makedirs(e4.st("stopped"), exist_ok=True)
+    open(e4.st("stopped", "mt-dir"), "w").close()
+    r = e4.run("restart", "--only", "mt-dir", "--owner", "stop-1311", t=T0, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout and "остановлено вами" in r.stderr,
+          f"--only перезапустил остановленное окно: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    os.remove(e4.st("stopped", "mt-dir"))
+    r = e4.run("restart", "--only", "mt-dir", "--owner", "stop-1311", t=T0 + 1, extra=go)
+    check(r.returncode == 0 and "[resume] mt-dir" in r.stdout, f"после снятия stopped: {r.returncode} {r.stderr!r}")
+    # ответ старше суток — не согласие
+    e2 = Env()
+    e2.direction("mt-dir")
+    e2.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    _owner_said(e2, "restart-1311", "Перезапустить окно: mt-dir?", "Да", T0 - 2 * 86400)
+    r = e2.run("restart", "--only", "mt-dir", "--owner", "restart-1311", t=T0, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout, f"ответ двухдневной давности сработал: {r.stdout!r}")
+
+
+def test_restart_go_owner_forces_named_1122():
+    """metis-1122: restart --go --owner <id> берёт без метки saved только окна, названные в вопросе [id] с «да»
+    владельца; остальные несохранившиеся не трогает. Нет такого ответа — никто не перезапущен, код 1."""
+    go = {"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"}
+    e = Env()
+    e.direction("mm-dir")
+    e.direction("nn-dir")
+    e.agents([bg("mm-dir", "blocked", "mmmmmmmm-1", pid=21), bg("nn-dir", "working", "nnnnnnnn-1", pid=22)])
+    e.run("restart", "--prepare", "обновление", t=T0)
+    # к --go mm-dir живёт копией с номером («mm-dir (2)»): сессии сверяются по имени без номера, как в --only
+    e.agents([bg("mm-dir (2)", "blocked", "mmmmmmmm-1", pid=21), bg("nn-dir", "working", "nnnnnnnn-1", pid=22)])
+    r = e.run("restart", "--go", "--owner", "restart-all-1311", t=T0 + 40, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout and "никто не перезапущен" in r.stderr
+          and os.path.exists(e.st("maintenance.json")),
+          f"--owner без ответа перезапустил: {r.stdout!r} {r.stderr!r}")
+    # Б2 argus PR #435: имя в отрицании («кроме nn-dir») — не согласие; имена — только строгий список после двоеточия
+    _owner_said(e, "all-1311", "Перезапустить всех, кроме nn-dir — его не трогать?", "Да", T0 + 30)
+    r = e.run("restart", "--go", "--owner", "all-1311", t=T0 + 40, extra=go)
+    check(r.returncode == 1 and "[resume]" not in r.stdout and os.path.exists(e.st("maintenance.json")),
+          f"«кроме nn-dir» перезапустило окно: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    _owner_said(e, "restart-all-1311", "Перезапустить окна: mm-dir?", "Да", T0 + 30)
+    r = e.run("restart", "--go", "--owner", "restart-all-1311", t=T0 + 40, extra=go)
+    check("[resume] mm-dir" in r.stdout and "[resume] nn-dir" not in r.stdout and "не тронуты: nn-dir" in r.stdout,
+          f"--go --owner: {r.stdout!r} {r.stderr!r}")
+    # Б3: в новом перезапуске то же «да» окно без saved больше не берёт — код 2, причина последней строкой
+    e.run("restart", "--cancel", t=T0 + 50)
+    e.agents([bg("mm-dir", "blocked", "mmmmmmmm-1", pid=21), bg("nn-dir", "working", "nnnnnnnn-1", pid=22)])
+    e.run("restart", "--prepare", "ещё раз", t=T0 + 60)
+    r = e.run("restart", "--go", "--owner", "restart-all-1311", t=T0 + 70, extra=go)
+    check(r.returncode == 2 and "[resume]" not in r.stdout and "уже использовано" in r.stderr.strip().splitlines()[-1],
+          f"повтор --go --owner с тем же id: {r.returncode} {r.stdout!r} {r.stderr!r}")
+
+
+def test_saved_by_copy_name_1122():
+    """metis-1122 (13.11 20:58): копия «zeus (2)» — `pantheon saved --by 'zeus (2)'` и `--by zeus` оба принимаются;
+    в списке перезапуска — имя без номера."""
+    for by in ("zeus (2)", "zeus"):
+        e = Env()
+        e.direction("mm-dir")
+        e.agents([bg("mm-dir", "working", "mmmmmmmm-1", pid=21), bg("zeus (2)", "working", "zzzzzzzz-1", pid=23)])
+        e.run("restart", "--prepare", "обновление", t=T0)
+        m = json.load(open(e.st("maintenance.json")))
+        check("zeus" in m["sessions"] and "zeus (2)" not in m["sessions"], f"список с номером копии: {m['sessions']}")
+        r = e.run("saved", "--by", by, "--state", "STATUS.md", t=T0 + 20)
+        check(r.returncode == 0 and os.path.exists(e.st("maintenance", "zeus.json")),
+              f"saved --by {by!r}: {r.returncode} {r.stdout!r} {r.stderr!r}")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
