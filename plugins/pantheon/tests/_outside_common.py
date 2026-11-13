@@ -446,7 +446,9 @@ def role_request(window, cwd, *args):
 
 
 def run_pass():
-    return O.cmd_run()
+    """Обе дорожки прохода тестов (metis-1081) — одна за другой: full, затем quick. Код — первый не 0."""
+    rc = O.cmd_run()
+    return rc or O.cmd_run("quick")
 
 
 def _touch(d, rel, text="x"):

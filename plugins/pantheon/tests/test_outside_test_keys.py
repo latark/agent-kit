@@ -201,6 +201,21 @@ check("recover_results: заход помечен сбоем, в runs/<ID>.log �
 check("recover_results: событие recovered о сыром журнале", any("сырой журнал" in (e.get("why") or "")
                                                             for e in events(rid, "recovered")), events(rid))
 
+# две дорожки (metis-1081): recover_results дорожки full не удаляет сырой журнал идущего прогона дорожки quick
+_lrid = "20261109-030303-dddddd"
+os.makedirs(O.raw_dir(), mode=0o700, exist_ok=True)
+put(O.raw_dir(), _lrid + ".log", f"url={URL_APP}\n")
+put(RUNS, _lrid + ".json", json.dumps({"kind": "test", "state": "running", "lane": "quick"}))
+O.recover_results(lane="full")
+check("recover_results(full): сырой журнал идущего прогона дорожки quick цел",
+      os.path.exists(os.path.join(O.raw_dir(), _lrid + ".log")))
+O.recover_results(lane="quick")
+check("recover_results(quick): свой сырой журнал удалён", not os.path.exists(os.path.join(O.raw_dir(), _lrid + ".log")))
+_drop_leftover = os.path.join(RUNS, _lrid + ".json")
+with contextlib.suppress(FileNotFoundError):
+    os.unlink(_drop_leftover)
+    os.unlink(os.path.join(RUNS, _lrid + ".log"))
+
 # сторож: живой заход дольше WATCH_RUNNING — убит SIGKILL, его сырой журнал удаляется
 _wrid = "20261109-010101-bbbbbb"
 os.makedirs(O.raw_dir(), mode=0o700, exist_ok=True)

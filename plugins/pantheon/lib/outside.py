@@ -32,8 +32,9 @@
                                          папке, STATE окно не пишет), идущий тест гасит проход (TERM, через 5 с KILL
                                          группе; место heavy освобождается) — итог stopped, записи tests и строки
                                          full.jsonl нет. Чужую заявку — нет: код 1 «не из этого окна» (metis-0873)
-  pantheon outside run [--serve]         проход по заявкам — только плановый проход (из окна Claude Code — отказ):
-                                         без флага — тесты, --serve — серверы и сторож
+  pantheon outside run [--quick|--serve] проход по заявкам — только плановый проход (из окна Claude Code — отказ):
+                                         без флага — тесты дорожки полного набора, --quick — быстрая дорожка тестов
+                                         (metis-1081), --serve — серверы и сторож
   pantheon outside key OWNER/REPO ИМЯ    ключ тестов проекта (metis-1016) — только владелец в своём терминале: значение
                                          скрытым вводом, пусто — убрать; из окна Claude Code — отказ (ниже, «исключение»)
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
@@ -130,7 +131,7 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 папки из реестра (domains.json ← ~/ai/pantheon/directions.toml), очереди STATE — любые папки реестра; кэш окна не
 направления (мастерская, задачи) — отказ. Папка заявки — корень репозитория git внутри этих папок, с remote.
 
-Два прохода, оба запускает тик, когда у них есть дело; у каждого свой замок — сервер не ждёт тестов (metis-0614):
+Три прохода, все запускает тик, когда у них есть дело; у каждого свой замок — сервер не ждёт тестов (metis-0614):
   `outside run --serve` (замок outside-serve) — серверы и сторож. Живёт, пока есть серверы или заявки serve (не дольше
   RESIDENT_MAX, потом тик зовёт заново), и каждые SWEEP_EVERY (2 с):
   1. Сторож: срок вышел (аренда — until), есть «стоп» своего окна (own_stop), процесс умер или дерево сервера больше
@@ -142,7 +143,15 @@ STATE/outside/queue. Имя окна проход берёт из места п�
   2. Заявки serve — по времени: «стоп» до запуска — stopped без запуска; заявка старше REQ_TTL (15 мин) — failed.
      Во время копии, установки и ожидания порта сторож продолжает смотреть серверы, «стоп» своей заявки прерывает.
   3. «Стоп» без живого сервера и заявки старше минуты — убирается.
-  `outside run` (замок outside-run) — тесты:
+  `outside run` (замок outside-run) и `outside run --quick` (замок outside-quick) — тесты, две дорожки (metis-1081:
+  медиана ожидания старта в одной очереди была 24 мин). Дорожка full — проверка проекта (без --script и --affected)
+  в репозитории с полным набором в FULL_TESTS шлюза; quick — узкие (--affected), --script и другие проекты (lane_of,
+  по папке заявки; битые — full). Дорожки идут параллельно, в каждой не больше одного прогона: второй проход той же
+  дорожки замок не возьмёт, тик его и не зовёт, пока замок занят. Общий предел нагрузки — прежний: команды идут через
+  heavy (два места на Mac, полный набор — ещё жетон heavy-full), полный набор ждёт спада load (wait_load) в любой
+  дорожке. Запись в runs/ несёт lane: «заход прерван», сторож и уборка копий test --sha берут только свою дорожку
+  (запись без lane — full); взятая заявка перед снятием получает новое время итога — проход другой дорожки не сочтёт
+  её потерянной. Сторож (-1), тревоги «принять» (2) и уборка (3) — только у full. Каждый проход:
   -1. Сторож (watchdog, до замка, metis-0723; тик будит и его): running дольше WATCH_RUNNING (TEST_TIMEOUT + 30 мин)
      при живом заходе — заход (SIGKILL) и его группы процессов гаснут, итог failed «сторож: дольше N мин — снято»,
      тревога; держателя замка не определить — только тревога. queued с лежащей .req.json дольше WATCH_QUEUED (4 ч) —
@@ -168,7 +177,9 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 (лимит серверов держит проход) в папке копии; окружение с нуля (HOME, PATH с node из nvm, TMPDIR — своя временная
 папка, у тестов CI=1, у сервера PORT и dev-ключи проекта). Тесты — не дольше TEST_TIMEOUT (ожидание места heavy не в счёт, не больше HEAVY_WAIT_MAX; полный набор при load выше
 LOAD_PER_CORE на ядро ждёт спада в итоге queued; красный только из-за таймаутов файлов под нагрузкой — один повтор сам, затем итог
-«таймаут под нагрузкой», код 75: metis-0901). Сторож тишины (metis-0770): лог прогона не
+«таймаут под нагрузкой», код 75: metis-0901; та же заявка на том же коммите с теми же файлами ещё раз — красный, metis-0927).
+Ждёт только полный набор (решение владельца 12.11, metis-1057): пока он ждёт, другие заявки test его дорожки идут вперёд — заявка
+набора возвращается в очередь, срок ожидания считается от первого начала: его помнит проход, а не заявка роли (Defer). Сторож тишины (metis-0770): лог прогона не
 растёт IDLE_TIMEOUT (900 с) и CPU дерева процессов (user+sys: на macOS по libproc, без setuid /bin/ps, который под
 sandbox-exec не запускается; на Linux по ps) за окно вырос меньше IDLE_CPU (1 % ядра) → группа
 гасится SIGKILL, итог failed «тишина N мин, последний вывод: <строка>» (меньше минуты — «N с»; у прогона с ключами тестов —
@@ -246,6 +257,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from datetime import datetime
@@ -303,6 +315,10 @@ TAIL_LINES, TAIL_CHARS = 40, 4000
 REQ_MAX = 64 * 1024
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 HEAVY = "default"                   # путь heavy; "default" — PLUGIN/bin/heavy; None — без heavy (тесты)
+# дорожки прохода тестов (metis-1081) → замок своего прохода: full — полный набор репозитория с FULL_TESTS шлюза,
+# quick — узкие (--affected), --script и другие проекты; идут параллельно, в каждой не больше одного прогона
+LANES = {"full": "outside-run", "quick": "outside-quick"}
+_LANE = threading.local()           # дорожка идущего прохода (name): save_result помечает ею запись в runs/
 # пустые команды тестов (как EMPTY_TEST_PROGRAMS шлюза guard): записи tests не дают
 EMPTY = {"true", ":", "echo", "printf", "exit", "test", "[", "sleep", "yes", "false"}
 SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -319,7 +335,7 @@ DB_PORT = 5432                      # порт PostgreSQL, когда в стр�
 LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
-         "status [ID] | stop ID [--wait С] | run [--serve] | key OWNER/REPO ИМЯ")
+         "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ")
 
 
 def set_core(mod):
@@ -1676,11 +1692,14 @@ def narrow_plan(d, sha, argv, line, base):
 # --- итоги --------------------------------------------------------------------------------------------------------
 
 def save_result(qdir, rid, res):
-    """Итог — в STATE/outside/runs/<ID>.json и, если заявка из папки, в <ID>.result.json рядом с ней."""
+    """Итог — в STATE/outside/runs/<ID>.json и, если заявка из папки, в <ID>.result.json рядом с ней. Запись в runs/
+    несёт ещё qdir и дорожку прохода (lane, metis-1081): recover_results, сторож и уборка копий берут только свою."""
     res = {"id": rid, "updated": P.stamp(), **res}
     text = json.dumps(res, ensure_ascii=False, indent=1)
     os.makedirs(root("runs"), mode=0o700, exist_ok=True)
-    P.write_json(root("runs", rid + ".json"), {**res, "qdir": qdir} if qdir else res)   # qdir — для recover_results
+    lane = getattr(_LANE, "name", None)
+    P.write_json(root("runs", rid + ".json"), {**res, **({"qdir": qdir} if qdir else {}),
+                                                **({"lane": lane} if lane else {})})   # qdir — для recover_results
     if qdir:
         dfd = _open_dir(qdir)
         if dfd is not None:
@@ -1738,10 +1757,10 @@ def flush_raw(raw, fd, keys):
         _drop_raw_file(raw)
 
 
-def drop_raw(rid=None):
+def drop_raw(rid=None, keep=None):
     """Брошенные сырые журналы (заход убит SIGKILL, сторож, перезагрузка): у rid — его и повтора, без rid — все.
     Значений ключей уже не вычистить наверняка (ключ мог смениться) — файл удаляется, в runs/<ID>.log пометка.
-    → [ID] удалённых."""
+    keep(ID) истинно — журнал идущего прогона чужой дорожки, не трогается (metis-1081). → [ID] удалённых."""
     d = raw_dir()
     try:
         names = os.listdir(d)
@@ -1751,7 +1770,7 @@ def drop_raw(rid=None):
     for name in sorted(names):
         base = name[:-len(".log")] if name.endswith(".log") else ""
         own = base.removesuffix("-retry")
-        if not ID_RE.fullmatch(own) or (rid and own != rid):
+        if not ID_RE.fullmatch(own) or (rid and own != rid) or (keep and keep(own)):
             continue
         _drop_raw_file(os.path.join(d, name))
         with contextlib.suppress(OSError):
@@ -1878,22 +1897,70 @@ def load_state():
         return 0.0, limit
 
 
-def wait_load(qdir, rid, watch, state):
+LOAD_WHY = "жду спада нагрузки"
+
+
+class Defer:
+    """Полный набор, ждущий спада нагрузки, уступает очередь (metis-1057, решение владельца 12.11 «ждут только
+    полные»): очередь дорожки последовательная, и раньше узкие прогоны и проверки других проектов стояли за ним до
+    LOAD_WAIT_MAX (06–10.11: 17 заявок, 432 мин; с metis-1081 они идут своей дорожкой). Пока он ждёт, а в очереди есть заявка test не из отложенных, заявка
+    набора возвращается на диск, итог queued, и проход берёт следующую. deferred — общий для захода словарь
+    (qdir, id) → начало ожидания (time.time()): LOAD_WAIT_MAX считается от него, а не заново. Начало — только в памяти
+    прохода: заявку пишет роль, и поле в ней со старым временем снимало бы ожидание спада (находка безопасности, 12.11).
+    Отложенным не уступают, иначе два ждущих набора передавали бы очередь друг другу по кругу. lane — дорожка прохода
+    (metis-1081): уступают только заявкам своей дорожки, заявки другой идут своим проходом; None — всем."""
+
+    def __init__(self, qdir, rid, req, deferred, lane=None):
+        self.qdir, self.rid, self.req, self.deferred, self.lane = qdir, rid, req, deferred, lane
+        self.yielded = False
+
+    def since(self):
+        """Начало ожидания, если этот заход уже откладывал заявку, иначе None. Поля заявки не читаются."""
+        return self.deferred.get((self.qdir, self.rid))
+
+    def others(self):
+        """Есть ли в очереди своей дорожки другая заявка test, которой стоит уступить (не отложенная этим заходом)."""
+        me = (self.qdir, self.rid)
+        return any((q, r) != me and (q, r) not in self.deferred for q, _w, r, _req in _queued_tests(self.lane))
+
+    def back(self, state, since, why):
+        """Заявку — обратно в очередь, начало ожидания since — в deferred, итог queued. → True; не записать — False (тогда ждём дальше)."""
+        dfd = _open_dir(self.qdir)
+        if dfd is None:
+            return False
+        try:
+            _write_in(dfd, self.rid + ".req.json", json.dumps(self.req, ensure_ascii=False))
+        except OSError:
+            return False
+        finally:
+            os.close(dfd)
+        self.deferred[(self.qdir, self.rid)] = since
+        self.yielded = True
+        save_result(self.qdir, self.rid, {**state, "state": "queued", "why": why + " — вперёд пропущены другие заявки"})
+        return True
+
+
+def wait_load(qdir, rid, watch, state, defer=None):
     """Полный набор под нагрузкой не стартует (metis-0901): пока load выше порога — итог queued с причиной «жду спада
-    нагрузки (load N)», опрос раз в LOAD_POLL с, не дольше LOAD_WAIT_MAX; «стоп» и ушедший head снимают (watch).
-    state — поля итога running, чтобы queued нёс те же sha и cmd. → "stop" (снято), "waited" (ждала) или None."""
-    end, did = time.monotonic() + LOAD_WAIT_MAX, None
+    нагрузки (load N)», опрос раз в LOAD_POLL с, не дольше LOAD_WAIT_MAX от начала ожидания (defer.since, иначе
+    сейчас); «стоп» и ушедший head снимают (watch). state — поля итога running, чтобы queued нёс те же sha и cmd.
+    defer (Defer) — в очереди есть другая заявка test: набор уступает ей (metis-1057). → "stop" (снято), "yield"
+    (заявка снова в очереди), "waited" (ждала) или None."""
+    since = (defer.since() if defer else None) or time.time()
+    end, did = since + LOAD_WAIT_MAX, None
     while True:
         load, limit = load_state()
-        if load <= limit or time.monotonic() >= end:
+        if load <= limit or time.time() >= end:
             return did
+        why = f"{LOAD_WHY} (load {load:.0f}, порог {limit:.0f})"
         did = "waited"
-        save_result(qdir, rid, {**state, "state": "queued",
-                                "why": f"жду спада нагрузки (load {load:.0f}, порог {limit:.0f})"})
+        save_result(qdir, rid, {**state, "state": "queued", "why": why})
         nxt = time.monotonic() + LOAD_POLL
         while time.monotonic() < nxt:
             if watch():
                 return "stop"
+            if defer and defer.others() and defer.back(state, since, why):
+                return "yield"
             time.sleep(min(SWEEP_EVERY, LOAD_POLL))
 
 
@@ -1910,8 +1977,31 @@ def overload_files(text):
     return got[1] if load > limit else None
 
 
+def overload_before(sha, files, rid):
+    """ID прошлой заявки (не rid), чей итог на коммите sha — «таймаут под нагрузкой» (событие test-overload-final)
+    хотя бы одного из файлов files, или None (metis-0927 Д3). Повтор такой заявки — красный: зависший тест под
+    постоянной нагрузкой иначе давал бы код 75 «повторить» без конца. Журнал читается с хвоста (до 4 МБ)."""
+    try:
+        with open(os.path.join(P.STATE, "logs", "outside.jsonl"), "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - (4 << 20)))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    want = set(files or ())
+    for ln in reversed(lines):
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and e.get("kind") == "test-overload-final" and e.get("sha") == sha \
+                and e.get("id") != rid and isinstance(e.get("files"), list) and want & set(map(str, e["files"])):
+            return str(e.get("id"))
+    return None
+
+
 def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None,
-             retried=None):
+             retried=None, defer=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
     (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
@@ -1921,7 +2011,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда. watch — сторож TestWatch (снятие своим
     «стопом» и ушедшим head, metis-0873); нет — свой. Полный набор не стартует при load выше порога (wait_load); красный
     только из-за таймаутов файлов под нагрузкой (overload_files) — один повтор сам (retried — данные первого прогона),
-    второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901)."""
+    второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901). defer
+    (Defer) — заявка из очереди прохода: ждущий спада полный набор уступает очередь другим заявкам (metis-1057)."""
     if watch is None:
         watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base)
     if watch.marker():   # «стоп» пришёл до запуска: ни переноса записи по дереву, ни прогона
@@ -1993,9 +2084,12 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     save_result(qdir, rid, running)
     watch.sha, watch.running, watch.keys = sha, running, keys
     if full and not plan and not narrow:   # metis-0901: узкий набор и дозапуск лёгкие, полный под нагрузкой — нет
-        waited = wait_load(qdir, rid, watch, running)
+        waited = wait_load(qdir, rid, watch, running, defer=defer)
         if waited == "stop":
             return watch.stopped(cmd=line, **extra)
+        if waited == "yield":   # заявка снова в очереди (Defer.back), итог queued уже записан
+            log_event(id=rid, kind="test-defer", window=window, sha=sha, load=round(load_state()[0]))
+            return load_result(qdir, rid) or {"state": "queued", "kind": "test", "sha": sha}
         if waited:
             save_result(qdir, rid, running)
     log, fd = new_log(rid + "-retry" if retried else rid)
@@ -2067,7 +2161,13 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if over and not retried:
         log_event(id=rid, kind="test-overload", window=window, sha=sha, files=over, load=round(load_state()[0]))
         return run_test(rid, d, script, window, qdir, roots, record=record, src=src, expect=expect, base=base,
-                        watch=watch, retried={"log": log, "files": over})
+                        watch=watch, retried={"log": log, "files": over}, defer=defer)
+    hang = overload_before(sha, over, rid) if over else None
+    if hang:   # metis-0927 Д3: тот же коммит, те же файлы — третий и четвёртый таймаут подряд: зависание, а не нагрузка
+        over = None
+    elif over:
+        log_event(id=rid, kind="test-overload-final", window=window, sha=sha, files=over,
+                  load=round(load_state()[0]))
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
            "dir": d, "log": log, "record": False, **extra}
     if not keys:   # с ключами тестов фрагментов вывода в итоге нет (argus #410-3 Б1): весь вывод — в log, вычищен
@@ -2086,6 +2186,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
             f"повтор после «таймаут под нагрузкой» (первый прогон: {retried['log']}, файлов {len(retried['files'])})")
     if watch.why:   # снят (metis-0873): записи tests нет, даже если команда вышла с 0 по TERM
         res["why"] = f"снят: {watch.why}"
+    elif hang:
+        res["why"] = (f"таймаут под нагрузкой и у прошлой заявки {hang} на этом коммите, те же файлы — считаю "
+                      "зависанием: красный, а не «повторить»")
     elif over:   # второй прогон тоже упал только по таймаутам под нагрузкой: не красный, а «повторить»
         res["overload"] = True
         res["why"] = (f"таймаут под нагрузкой (load {load_state()[0]:.0f}): файлов {len(over)} — тест не падал, "
@@ -2142,7 +2245,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         clear_stop(rid, watch.where)
         watch.log_stop(sha=sha, code=code)
         return save_result(qdir, rid, res)
+    # load (за 5 мин) в конце прогона и full — журнал нагрузки для пересмотра порога LOAD_PER_CORE (metis-0927 С1)
     log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
+              load=round(load_state()[0], 1), full=bool(full and not plan and not narrow),
               **({"rerun_of": plan["rerun_of"]} if plan else {}), **({"keys": sorted(keys)} if keys else {}))
     return save_result(qdir, rid, res)
 
@@ -2150,7 +2255,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
 TEST_WORK = "test-"   # приставка копий test --sha в work_root(): drop_orphan_work (только ID) их не берёт
 
 
-def run_test_at(rid, d, req, window, qdir, roots):
+def run_test_at(rid, d, req, window, qdir, roots, defer=None):
     """Проверка проекта на коммите заявки (test --sha, metis-0779) → итог. Окно роли не переключит свою worktree на
     ветку PR, если в ней другой .claude/ проекта (запись туда закрыта), поэтому прогон идёт в своей копии: `git worktree
     add --detach` клона d (проверен в resolve_dir) в work_root()/test-<ID>, зависимости (prepare), run_test в копии —
@@ -2191,16 +2296,32 @@ def run_test_at(rid, d, req, window, qdir, roots):
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
         watch.d = w
         return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha,
-                        base=req.get("base"), watch=watch)
+                        base=req.get("base"), watch=watch, defer=defer)
     finally:
         reap(work)
         remove_work(common, work)
 
 
-def drop_test_work():
+def run_lane(rid):
+    """Дорожка идущего теста rid (запись прохода runs/<ID>.json: test в running или preparing) или None — не идёт.
+    Запись без lane (до metis-1081) — full: тогда был один проход под замком outside-run. Итог queued с lane — заявка
+    у прохода этой дорожки, ждёт спада нагрузки (wait_load) на готовой копии test --sha: тоже идёт, копию и метку «стоп»
+    чужой проход не снимает (ревью argus #427). queued без lane пишет окно или проход без дорожки — не идёт."""
+    res = P.read_json(root("runs", rid + ".json"), None)
+    if not (isinstance(res, dict) and res.get("kind") == "test"):
+        return None
+    if res.get("state") == "queued":
+        return res.get("lane") if res.get("lane") in LANES else None
+    if res.get("state") not in ("running", "preparing"):
+        return None
+    return res.get("lane") if res.get("lane") in LANES else "full"
+
+
+def drop_test_work(lane=None):
     """Копии test --sha (test-<ID>) в work_root() — снять: процессы в них погасить, папку удалить. Зовёт только проход
-    тестов под замком outside-run до своей очереди: прогона на копии в этот момент нет, всякая копия — от упавшего
-    прохода. Метаданные worktree в клоне остаются, их помечает prunable сам git. → число снятых."""
+    тестов под замком своей дорожки до своей очереди: прогона своей дорожки на копии в этот момент нет, её копия — от
+    упавшего прохода. Копию теста, который идёт в другой дорожке (run_lane, metis-1081), не трогает. Метаданные
+    worktree в клоне остаются, их помечает prunable сам git. → число снятых."""
     try:
         names = os.listdir(work_root())
     except OSError:
@@ -2210,6 +2331,8 @@ def drop_test_work():
         work = os.path.join(work_root(), name)
         if not (name.startswith(TEST_WORK) and ID_RE.fullmatch(name[len(TEST_WORK):])) or os.path.islink(work) \
                 or not os.path.isdir(work):
+            continue
+        if lane and run_lane(name[len(TEST_WORK):]) not in (None, lane):
             continue
         reap(work)
         remove_work(None, work)
@@ -2752,7 +2875,8 @@ def sweep(t=None, stops=None):
 def drop_orphan_stops(stops=None, t=None):
     """«Стоп» без живого сервера, без заявки в очереди и без идущего теста, старше STOP_ORPHAN_AGE, — убрать (уже
     погашенные серверы и тесты гасить нечего; молодой — может ждать свою заявку). Метку идущего теста (runs/<ID>.json:
-    test в running или preparing) не трогает — её снимет проход тестов (metis-0873). → число убранных."""
+    test в running или preparing, или ждёт спада у прохода дорожки — run_lane) не трогает — её снимет проход тестов
+    (metis-0873). → число убранных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
     live = set(servers())
@@ -2768,9 +2892,9 @@ def drop_orphan_stops(stops=None, t=None):
 
 
 def _test_running(rid):
-    """Тест rid идёт: итог прохода в STATE (runs/<ID>.json, окну закрыт) — test в running или preparing."""
-    res = P.read_json(root("runs", rid + ".json"), None)
-    return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") in ("running", "preparing")
+    """Тест rid идёт: итог прохода в STATE (runs/<ID>.json, окну закрыт) — test в running или preparing, или ждёт
+    спада нагрузки у прохода своей дорожки (run_lane)."""
+    return run_lane(rid) is not None
 
 
 def drop_orphan_work(t=None):
@@ -2862,17 +2986,46 @@ def _parse(text):
         return None
 
 
-def _queued_ids(kinds=KINDS):
-    """[(id, вид прохода)] заявок, лежащих в папках заявок, — без удаления (тику и сторожу)."""
+_LANE_MEMO = {}                     # (окно, id, папка, base, script) → дорожка: Defer.others спрашивает раз в SWEEP_EVERY
+
+
+def lane_of(req, window, rid):
+    """Дорожка заявки test (metis-1081). full — проверка проекта (без --script и --affected) в папке репозитория, у
+    которого есть полный набор в FULL_TESTS шлюза: такой прогон тяжёлый, их идёт один за другим. quick — всё прочее:
+    узкий набор, --script, проекты без FULL_TESTS, папка, которую не разобрать (отказ придёт сразу). Битая заявка
+    (check_request) — full: её снимает с итогом failed проход полного набора, а не оба сразу. Дорожка решает только
+    очередь: прогон, запись tests и отказы в обеих одни и те же."""
+    if not isinstance(req, dict) or not ID_RE.fullmatch(rid or "") or check_request(req, rid):
+        return "full"
+    if req.get("base") or req.get("script"):
+        return "quick"
+    key = (window, rid, req.get("dir"), req.get("base"), req.get("script"))
+    if key not in _LANE_MEMO:
+        if len(_LANE_MEMO) > 4096:
+            _LANE_MEMO.clear()
+        d, _roots = resolve_dir(req["dir"], window)
+        if d is None:
+            return "quick"          # не запоминается: папка может появиться в реестре позже (ревью argus #427)
+        full = any(str(r).rsplit("/", 1)[-1] in P.merge_mod().FULL_TESTS for r in remotes(d))
+        _LANE_MEMO[key] = "full" if full else "quick"
+    return _LANE_MEMO[key]
+
+
+def _queued_ids(kinds=KINDS, lane=None):
+    """[(id, вид прохода)] заявок, лежащих в папках заявок, — без удаления (тику и сторожу). lane — только заявки test
+    этой дорожки (lane_of) и, у full, ещё битые; None — все."""
     out = []
-    for qdir, _ in queue_dirs():
+    for qdir, window in queue_dirs():
         dfd = _open_dir(qdir)
         if dfd is None:
             continue
         try:
             for name in sorted(os.listdir(dfd)):
                 if name.endswith(".req.json"):
-                    k = _req_kind(_parse(_read_in(dfd, name)))
+                    req = _parse(_read_in(dfd, name))
+                    k = _req_kind(req)
+                    if k == "test" and lane and lane_of(req, window, name[:-len(".req.json")]) != lane:
+                        continue
                     if k in kinds:
                         out.append((name[:-len(".req.json")], k))
         except OSError:
@@ -2893,13 +3046,16 @@ def _gone(dfd, name):
     return False
 
 
-def requests(kinds=KINDS, limit=None, taken=None):
+def requests(kinds=KINDS, limit=None, taken=None, skip=(), lane=None):
     """[(время, вид, qdir, окно, id, заявка)] по всем папкам — только заявки своих проходов (kinds): чужие остаются
     лежать (metis-0614: проход тестов не съедает заявки серверов и наоборот). Битые и подложенные — удаляются с итогом
     failed. Отдаются самые ранние limit заявок (все, если limit не задан) и только они снимаются с диска (metis-0716:
     убитый заход не теряет остальные); заявка, которую снять не удалось, не отдаётся — иначе проход крутился бы на ней.
     taken — {qdir: сколько заявок окна уже взято в этом заходе}: начальный номер круга между окнами (limit=1 иначе
-    считал бы его с нуля при каждом вызове)."""
+    считал бы его с нуля при каждом вызове). skip — {(qdir, id)}, которые не отдавать и не снимать (metis-1057).
+    lane — дорожка прохода (metis-1081): заявки test другой дорожки остаются лежать, битые снимает только full. Перед
+    снятием итог заявки (<ID>.result.json) получает новое время: recover_results прохода другой дорожки не сочтёт
+    взятую, но ещё не начатую заявку потерянной (queued без .req.json старше LOST_AFTER)."""
     found = []
     for qdir, window in queue_dirs():
         dfd = _open_dir(qdir)
@@ -2910,9 +3066,13 @@ def requests(kinds=KINDS, limit=None, taken=None):
                 if not name.endswith(".req.json"):
                     continue
                 rid = name[:-len(".req.json")]
+                if (qdir, rid) in skip:
+                    continue
                 text = _read_in(dfd, name)
                 req = _parse(text)
                 if _req_kind(req) not in kinds:
+                    continue
+                if _req_kind(req) == "test" and lane and lane_of(req, window, rid) != lane:
                     continue
                 if not ID_RE.fullmatch(rid):
                     _unlink_in(dfd, name)
@@ -2942,6 +3102,9 @@ def requests(kinds=KINDS, limit=None, taken=None):
         if dfd is None:
             continue
         try:
+            if item[1] == "test":   # metis-1081: взятая заявка — не «потерянная» для прохода другой дорожки
+                with contextlib.suppress(OSError):
+                    os.utime(item[4] + ".result.json", dir_fd=dfd, follow_symlinks=False)
             if _take_in(dfd, item[4] + ".req.json"):   # снял не этот вызов (окно сняло заявку) — не отдаём
                 out.append(item)
         finally:
@@ -3010,7 +3173,7 @@ def resolve_dir(req_dir, window):
     return d, roots
 
 
-def handle(qdir, window, rid, req):
+def handle(qdir, window, rid, req, defer=None):
     d, roots = resolve_dir(req["dir"], window)
     if d is None:
         log_event(id=rid, kind="refused", window=window, why=roots)
@@ -3018,12 +3181,12 @@ def handle(qdir, window, rid, req):
     if req["kind"] == "serve":
         return run_serve(rid, d, req, window, qdir)
     if req.get("pin"):   # test --sha (metis-0779): своя копия на коммите, а не HEAD папки
-        return run_test_at(rid, d, req, window, qdir, registry(None) or roots)
+        return run_test_at(rid, d, req, window, qdir, registry(None) or roots, defer=defer)
     res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
     if res:
         return res
     return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"),
-                    base=req.get("base"))
+                    base=req.get("base"), defer=defer)
 
 
 # --- перед стартом заявки test (metis-0726) ------------------------------------------------------------------------
@@ -3091,8 +3254,9 @@ def stale_head(d, sha, t=None):
     return None
 
 
-def _queued_tests():
-    """[(qdir, окно, id, заявка)] ждущих заявок test в формате (check_request) — без снятия с диска."""
+def _queued_tests(lane=None):
+    """[(qdir, окно, id, заявка)] ждущих заявок test в формате (check_request) — без снятия с диска; lane — только
+    заявки этой дорожки (lane_of, metis-1081)."""
     out = []
     for qdir, window in queue_dirs():
         dfd = _open_dir(qdir)
@@ -3104,7 +3268,8 @@ def _queued_tests():
                 if not name.endswith(".req.json") or not ID_RE.fullmatch(rid):
                     continue
                 req = _parse(_read_in(dfd, name))
-                if _req_kind(req) == "test" and not check_request(req, rid):
+                if _req_kind(req) == "test" and not check_request(req, rid) \
+                        and (not lane or lane_of(req, window, rid) == lane):
                     out.append((qdir, window, rid, req))
         except OSError:
             pass
@@ -3328,19 +3493,21 @@ def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
 
 # --- тик и проходы -----------------------------------------------------------------------------------------------
 
-def _zombies(t=None):
-    """Итоги, которые чинит recover_results, но заход ради них не шёл: running в runs/ (живого захода нет — замок
-    outside-run свободен) и queued без .req.json старше LOST_AFTER. → число."""
+def _zombies(t=None, lane="full"):
+    """Итоги, которые чинит recover_results, но заход ради них не шёл: running дорожки lane в runs/ (живого захода
+    нет — замок дорожки свободен) и, у full, queued без .req.json старше LOST_AFTER. → число."""
     t = P.now() if t is None else t
-    if P.locked("outside-run"):
+    if P.locked(LANES[lane]):
         return 0                    # заход жив: running — его, queued ещё разбирается
     n = 0
     runs = root("runs")
     for name in os.listdir(runs) if os.path.isdir(runs) else ():
         rid = name[:-len(".json")]
-        res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
-        if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
+        if name.endswith(".json") and ID_RE.fullmatch(rid) and run_lane(rid) == lane \
+                and P.read_json(os.path.join(runs, name), {}).get("state") == "running":
             n += 1
+    if lane != "full":
+        return n
     for qdir, _ in queue_dirs():
         dfd = _open_dir(qdir)
         if dfd is None:
@@ -3364,9 +3531,15 @@ def _zombies(t=None):
 
 
 def pending_test():
-    """Тику: дело проходу тестов — заявки test (и битые), старые итоги, «принять» без tests дольше ALERT_AFTER, сторож."""
-    return (bool(_queued_ids(("test",))) or bool(_stale()) or bool(_zombies()) or bool(overdue_accepts())
+    """Тику: дело проходу дорожки full — её заявки test (и битые), старые итоги, «принять» без tests дольше
+    ALERT_AFTER, сторож."""
+    return (bool(_queued_ids(("test",), lane="full")) or bool(_stale()) or bool(_zombies()) or bool(overdue_accepts())
             or bool(_watch_due()))
+
+
+def pending_quick():
+    """Тику: дело проходу дорожки quick (metis-1081) — её заявки test или её прерванный running."""
+    return bool(_queued_ids(("test",), lane="quick")) or bool(_zombies(lane="quick"))
 
 
 def pending_serve():
@@ -3375,7 +3548,7 @@ def pending_serve():
 
 
 def pending():
-    return pending_test() or pending_serve()
+    return pending_test() or pending_quick() or pending_serve()
 
 
 def _in_claude():
@@ -3388,20 +3561,24 @@ def _in_claude():
 MAX_ROUNDS = 100                    # кругов цикла захода тестов: предел на случай, когда очередь не разбирается
 
 
-def run_test_queue():
+def run_test_queue(lane=None):
     """Заход прохода тестов (metis-0716): явные заявки test, по одной — самая ранняя, снимается с диска только она, после
     каждого дела очередь читается заново (поданная за время прогона идёт следующей). Автопрогонов нет (решение владельца
     03.11): тесты идут только по заявке роли. Заход конечен: не больше MAX_ROUNDS кругов, взятая заявка не берётся
-    второй раз."""
-    seen, taken = set(), {}
+    второй раз. Исключение — полный набор, уступивший очередь под нагрузкой (Defer, metis-1057): он снова на диске, его
+    берут, когда других заявок нет, и тогда он ждёт спада, уступая только новым. lane — дорожка (metis-1081): заход
+    берёт только её заявки, заявки другой дорожки идут параллельно своим проходом; None — все (одна очередь)."""
+    seen, taken, deferred = set(), {}, {}
     for _ in range(MAX_ROUNDS):
-        reqs = [r for r in requests(("test",), limit=1, taken=taken) if (r[2], r[4]) not in seen]
+        reqs = requests(("test",), limit=1, taken=taken, skip=seen, lane=lane)   # deferred ⊂ seen
+        if not reqs and deferred:
+            reqs = requests(("test",), limit=1, taken=taken, skip=seen - set(deferred), lane=lane)
         if not reqs:
             break
         for _t, _k, qdir, window, rid, req in reqs:
-            seen.add((qdir, rid))
+            seen.add((qdir, rid))   # уступившая (в deferred) снова берётся вторым запросом: skip там без неё
             taken[qdir] = taken.get(qdir, 0) + 1
-            handle(qdir, window, rid, req)
+            handle(qdir, window, rid, req, defer=Defer(qdir, rid, req, deferred, lane=lane))
 
 
 LOST_AFTER = 300                    # с: итог queued без заявки старше этого — заявка потеряна (metis-0716)
@@ -3419,16 +3596,18 @@ def _result_running(qdir, rid):
     return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running"
 
 
-def recover_results(t=None):
-    """Под замком outside-run (захода больше нет): итог теста queued без .req.json старше LOST_AFTER — failed «заявка
+def recover_results(t=None, lane=None):
+    """Под замком своей дорожки (захода больше нет): итог теста queued без .req.json старше LOST_AFTER — failed «заявка
     потеряна»; running — failed «заход прерван», но только то, что сам заход записал в STATE/outside/runs/<ID>.json
     (файл из кэша окна роль может подложить; у старых записей без qdir итог ищется во всех папках заявок, где он
     тоже running). Итог пишется минимальным объектом из своих полей, чужое содержимое
     result.json не копируется. Serve не трогает: им ведёт свой проход. Сырые журналы прогонов с ключами тестов
-    (raw_dir) под замком ничьи — заход, что их писал, убит: удаляются (drop_raw, argus #410-2 Б1). → число."""
+    (raw_dir) под замком ничьи — заход, что их писал, убит: удаляются (drop_raw, argus #410-2 Б1). lane — дорожка
+    прохода (metis-1081): running чинится только своей дорожки (run_lane; запись без lane — full), идущий прогон
+    другой дорожки не трогается; None — любой. → число."""
     t = P.now() if t is None else t
     n = 0
-    for rid in drop_raw():
+    for rid in drop_raw(keep=lambda r: lane is not None and run_lane(r) not in (None, lane)):
         log_event(id=rid, kind="recovered", why="сырой журнал прогона с ключами тестов удалён")
     qdirs = {q for q, _ in queue_dirs()}
     for qdir in sorted(qdirs):
@@ -3459,7 +3638,8 @@ def recover_results(t=None):
     for name in os.listdir(runs) if os.path.isdir(runs) else ():
         rid = name[:-len(".json")]
         res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
-        if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
+        if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running" \
+                and (lane is None or run_lane(rid) == lane):
             qd = res.get("qdir") if res.get("qdir") in qdirs else None
             targets = [qd] if qd else [q for q in sorted(qdirs) if _result_running(q, rid)]   # старые записи без qdir
             for q in targets or [None]:
@@ -3473,10 +3653,10 @@ WATCH_RUNNING = TEST_TIMEOUT + HEAVY_WAIT_MAX + 1800   # с: running дольш�
 WATCH_QUEUED = 4 * 3600               # с: queued с лежащей заявкой дольше — очередь стоит, тревога без снятия (metis-0723)
 
 
-def _run_holder():
-    """Номер процесса, держащего замок outside-run (lsof по файлу замка); нет или не определить → None."""
+def _run_holder(name="outside-run"):
+    """Номер процесса, держащего замок name (замок дорожки, LANES; lsof по файлу замка); нет или не определить → None."""
     try:
-        out = subprocess.run([LSOF, "-t", P.path("locks", "outside-run.lock")], capture_output=True, text=True,
+        out = subprocess.run([LSOF, "-t", P.path("locks", name + ".lock")], capture_output=True, text=True,
                              timeout=20).stdout
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3551,9 +3731,10 @@ def watchdog(t=None):
                 log_event(id=rid, kind="watchdog", why=why)
                 n += 1
             continue
-        if not P.locked("outside-run"):
+        lock = LANES[run_lane(rid) or "full"]   # metis-1081: заход дорожки этого прогона
+        if not P.locked(lock):
             continue                # захода нет — recover_results
-        holder = _run_holder()
+        holder = _run_holder(lock)
         if holder is None:
             if _mark(rid):
                 P.alert(f"outside {rid}: running дольше {WATCH_RUNNING // 60} мин, заход не определить — снять "
@@ -3577,23 +3758,32 @@ def watchdog(t=None):
     return n
 
 
-def cmd_run():
-    """Проход тестов (замок outside-run): серверы не смотрит — их ведёт свой проход (metis-0614)."""
+def cmd_run(lane="full"):
+    """Проход тестов дорожки lane (metis-1081; замок LANES[lane]): серверы не смотрит — их ведёт свой проход
+    (metis-0614). Дорожки идут параллельно, каждая под своим замком: второй проход той же дорожки замок не возьмёт и
+    выйдет с 0. Сторож, тревоги и уборка — только у full: у неё они были и до дорожек."""
     if _in_claude():
         return 2
-    watchdog()      # до замка: живой заход с зависшим running виден только отсюда (metis-0723)
-    with P.lock("outside-run", block=False) as got:
+    if lane == "full":
+        watchdog()      # до замка: живой заход с зависшим running виден только отсюда (metis-0723)
+    with P.lock(LANES[lane], block=False) as got:
         if not got:
             return 0
-        recover_results()
-        drop_test_work()   # копии test --sha упавшего прохода (metis-0779): под замком прогона на них нет
-        alert_overdue()
-        run_test_queue()
+        _LANE.name = lane
         try:
-            alert_red_share()
-        except Exception as e:   # сбой подсчёта не роняет проход, но виден в журнале
-            log_event(kind="red-share-error", why=f"{type(e).__name__}: {e}")
-        prune()
+            recover_results(lane=lane)
+            drop_test_work(lane)   # копии test --sha упавшего прохода (metis-0779): под замком прогона на них нет
+            if lane == "full":
+                alert_overdue()
+            run_test_queue(lane)
+            if lane == "full":
+                try:
+                    alert_red_share()
+                except Exception as e:   # сбой подсчёта не роняет проход, но виден в журнале
+                    log_event(kind="red-share-error", why=f"{type(e).__name__}: {e}")
+                prune()
+        finally:
+            _LANE.name = None
     return 0
 
 
@@ -3811,8 +4001,9 @@ def replace_older(q, rid, req, d):
 
 def live_test(d, sha, script=None, pin=False, base=None):
     """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
-    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json) или идёт
-    (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
+    metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json),
+    ждёт спада нагрузки (итог queued «жду спада нагрузки» свежее LOST_AFTER, metis-0927) или идёт (итог running свежее
+    TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
     d = os.path.realpath(d)
     now = P.now()
     for qdir, _w in queue_dirs():
@@ -3839,6 +4030,12 @@ def live_test(d, sha, script=None, pin=False, base=None):
                     continue
                 if res.get("state") == "queued" and (rid + ".req.json") in names:
                     return qdir, rid
+                # взята проходом и ждёт спада нагрузки (wait_load): .req.json нет, итог queued обновляется раз в
+                # LOAD_POLL — та же живая заявка, второй полный прогон не нужен (metis-0927 Д2)
+                if res.get("state") == "queued" and str(res.get("why") or "").startswith(LOAD_WHY):
+                    t = _epoch({"time": res.get("updated")})
+                    if t is not None and now - t < LOST_AFTER:
+                        return qdir, rid
                 if res.get("state") == "running":
                     t = _epoch({"time": res.get("updated")})
                     if t is not None and now - t < TEST_TIMEOUT + 300:
@@ -4126,6 +4323,8 @@ def main(rest):
         return cmd_stop(rest[1:])
     if sub == "run" and len(rest) == 1:
         return cmd_run()
+    if sub == "run" and rest[1:] == ["--quick"]:
+        return cmd_run("quick")
     if sub == "run" and rest[1:] == ["--serve"]:
         return cmd_run_serve()
     err(f"pantheon outside: {USAGE}")
