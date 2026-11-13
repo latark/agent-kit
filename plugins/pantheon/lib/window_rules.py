@@ -150,8 +150,9 @@ def auto_mode(auto_allow):
 # Пакет окна направления (~/.claude/pantheon/packs/<направление>, metis-0933) — данные пользователя, а его хуки и
 # серверы MCP идут вне песочницы окна. Поэтому ядро берёт плагин и mcp.json пакета в окно, только если они такого вида
 # (ревью argus #425 Б1, Б2 и проверка безопасности #425): хук — prompt или команда, которую shlex разбирает целиком:
-# без ; & | ` ( ) < >, перевода строки и $ кроме $HOME, ${HOME} и ${CLAUDE_PLUGIN_ROOT}; это in_repo.py пакета (скрипт
-# репозитория по эталону хеша), а за его «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или
+# без ; & | ` ( ) < >, перевода строки, { } * ? [ ] ~ # \ ! (metis-1101) и $ кроме $HOME, ${HOME} и
+# ${CLAUDE_PLUGIN_ROOT}; это in_repo.py пакета (скрипт репозитория по эталону хеша), до его «--» — репозиторий и только
+# флаги обёртки, а за «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или
 # python3 -I ${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py (pack_hook_problem). Сервер MCP — только через env_from.py пакета, а
 # за его «--» — только npx -y <пакет>@x.y.z: программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
 # папки, которую окно пишет; http, sse и ws — без headersHelper. Поля plugin.json, которые сами запускают код мимо
@@ -160,8 +161,15 @@ def auto_mode(auto_allow):
 PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"
 PACK_HOOK_BIN = "${CLAUDE_PLUGIN_ROOT}/../_bin/"
 PACK_HOOK_LEAD = ["python3", "-I", PACK_HOOK_BIN + "in_repo.py"]
-# знаки оболочки, которые цепляют вторую команду, подставляют вывод или перенаправляют, и $ кроме трёх переменных
-PACK_HOOK_META = re.compile(r"[;&|`()<>\n\r]|\$(?!\{CLAUDE_PLUGIN_ROOT\}|\{HOME\}|HOME(?![A-Za-z0-9_]))")
+# знаки оболочки, которые цепляют вторую команду, подставляют вывод или перенаправляют, и $ кроме трёх переменных;
+# и те, что /bin/sh разворачивает или режет иначе, чем shlex (metis-1101, ревью #425 Д1): скобки {a,b} и глоб * ? [ ]
+# превращают одно слово в несколько ({--,bash,-c,…} — свой «--» до настоящего), ~ — в путь, # — начало комментария,
+# \ и ! — экранирование и история. Три разрешённые переменные вырезаются до поиска (PACK_HOOK_VARS): их { } — не знак
+PACK_HOOK_VARS = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}|\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
+PACK_HOOK_META = re.compile(r"[;&|`()<>\n\r{}*?\[\]~#\\!$]")
+# что in_repo.py принимает до «--» после репозитория (его шапка); другое слово там — не флаг обёртки, а подложенный
+# аргумент: отказ
+PACK_HOOK_FLAG = re.compile(r"--(?:always|file-arg|ok|cmd-prefix=[^\n]+|plain=[A-Za-z0-9_.,/-]+)")
 PACK_HOOK_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")  # одно имя файла: без /, не с точки (не ..)
 # что разрешено за «--» in_repo.py: (начало, папка скрипта, окончание имени)
 PACK_HOOK_RUN = ((["bash"], ".claude/hooks/", ""), (["python3", "-I"], ".claude/hooks/", ""),
@@ -238,16 +246,22 @@ def pack_hook_problem(cmd):
     """Причина, по которой команда хука пакета cmd не годится (см. выше), или None."""
     if not isinstance(cmd, str):
         return "нет строки command"
-    bad = PACK_HOOK_META.search(cmd)
+    bad = PACK_HOOK_META.search(PACK_HOOK_VARS.sub("", cmd))
     if bad:
-        return f"знак оболочки {bad.group()!r}: хук — одна команда без цепочек, подстановок и перенаправлений"
+        return (f"знак оболочки {bad.group()!r}: хук — одна команда без цепочек, подстановок, перенаправлений, скобок "
+                "и глоба")
     try:
         argv = shlex.split(cmd)
     except ValueError:
         return "строку не разобрать (кавычки)"
     if argv[:3] != PACK_HOOK_LEAD or "--" not in argv:
         return f"хук не через in_repo.py пакета (python3 -I \"{PACK_HOOK_BIN}in_repo.py\" … -- <скрипт>)"
-    run = argv[argv.index("--") + 1:]
+    cut = argv.index("--")
+    # argv[3] — репозиторий («--» на его месте — тоже отказ), дальше до «--» — только флаги in_repo.py
+    if argv[3].startswith("-") or not all(PACK_HOOK_FLAG.fullmatch(f) for f in argv[4:cut]):
+        return ("до «--» — репозиторий и только флаги in_repo.py: --always, --file-arg, --ok, --cmd-prefix=…, "
+                "--plain=<папки>")
+    run = argv[cut + 1:]
     for lead, folder, ext in PACK_HOOK_RUN:
         n = len(lead)
         if run[:n] == lead and len(run) > n and run[n].startswith(folder):

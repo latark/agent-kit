@@ -11,7 +11,8 @@
 (O_EXCL), существующее не затирается. Пакет переносится целиком: файлы — во временную папку рядом, затем она
 переименовывается в папку направления; прерванный перенос не оставляет полпакета, отметки нет — следующая сборка
 перенесёт заново. Папка направления уже есть, но без файлов пакета (только approved.json и approved/) — файлы встают в
-неё по одному жёсткой ссылкой без замены, approved* не трогаются. Направление, которое есть в источнике, но не
+неё по одному жёсткой ссылкой без замены, approved* не трогаются; hooks.json — первым, mcp.json — последним, а пока
+перенос не кончен (отметка .<направление>.linking), запуск окна пакет не берёт (window_hold, metis-1100). Направление, которое есть в источнике, но не
 перенесено и не сохранено, — строка итога и тревога (pantheon.packs_migrate_cmd), отметки нет. Личные записи карты
 plugins-by-role.toml ([window.<направление>]) — туда же,
 в ~/.claude/pantheon/plugins-by-role.toml, если этого файла ещё нет. После переноса — отметка .migrated.json: пакет,
@@ -166,11 +167,28 @@ def _try_copy(src, dst):
         return False
 
 
+def window_hold(packs, window, out):
+    """Перенос в пакет window не кончен (_journal, metis-1100): пакет в окно не берётся — ни плагин, ни MCP, строка в
+    out. Иначе серверы пакета пошли бы в окно без его хуков (protect-db на supabase) до следующей сборки. → не брать ли."""
+    if not unfinished(os.path.join(packs, window)):
+        return False
+    print(f"pantheon: пакет {window}: перенос не закончен ({os.path.basename(_journal(os.path.join(packs, window)))})"
+          " — плагин и MCP пакета не взяты в окно; доведёт сборка или `pantheon packs migrate`", file=out)
+    return True
+
+
+# порядок файлов при переносе в существующую папку (_link_into, metis-1100): window.json первым — он только сужает права,
+# и оборванный перенос не оставляет окно без его запретов; хуки раньше серверов — mcp.json последним, без hooks.json
+# рядом он не остаётся. Состав = PACK_FILES (тест), иначе sorted(key=LINK_ORDER.index) падает с ValueError
+LINK_ORDER = ("window.json", "hooks/hooks.json", ".claude-plugin/plugin.json", "mcp.json")
+
+
 def _link_into(tmp, dst, files):
-    """Файлы files из tmp — в существующую папку dst жёсткими ссылками, без замены (см. _copy_pack). Подпапка dst —
-    ссылка: отказ, отметка _journal остаётся до следующей сборки. → все ли файлы на месте."""
+    """Файлы files из tmp — в существующую папку dst жёсткими ссылками, без замены (см. _copy_pack), в порядке
+    LINK_ORDER: window.json — первым, mcp.json — последним. Подпапка dst — ссылка: отказ, отметка _journal остаётся до следующей сборки (до
+    неё window_hold не берёт пакет в окно). → все ли файлы на месте."""
     _write_new(_journal(dst), b"")
-    for f in files:
+    for f in sorted(files, key=LINK_ORDER.index):
         to = os.path.join(dst, f)
         sub = os.path.dirname(to)
         if sub != dst and os.path.islink(sub):
