@@ -121,7 +121,7 @@ def setup(home):
 
 
 # запор слияния (guard 0.5.4): все PR 1–12 этих репозиториев проверены на SHA_OK — тесты, «принять» отдельного argus,
-# talos, строка «что ушло» с откатом; поддельный gh отдаёт PR без файлов ядра. Сам запор — в test_merge_gate.py
+# talos, строка «что ушло» с откатом; поддельный gh отдаёт PR без файлов ядра. Сам запор — в test_merge_gate_*.py
 SHA_OK = "a" * 40
 GATE_REPOS = ("latark/lecture-notes", "latark/law-feed", "latark/sitebuilder", "latark/shopkeeperapp",
               "latark/broker-landing", "latark/agent-kit", "latark/tg-read", "latark/zz-own")
@@ -652,7 +652,7 @@ def ak_dir(br):
 
 def merge_security_checks(home, cases):
     """Находка проверки безопасности 2eda45f: защиты по remote, любой сбой — отказ; лиды (metis-0054). С guard 0.5.4
-    поштучного «да» владельца нет — его заменил запор (test_merge_gate.py). Возвращает число упавших проверок."""
+    поштучного «да» владельца нет — его заменил запор (test_merge_gate_*.py). Возвращает число упавших проверок."""
     failed = 0
     ak, ec = "projects/agent-kit", "projects/lecture-notes"
 
@@ -2067,7 +2067,7 @@ def main():
         ("merge 0.5: mnemo-brain в ~/ai/knowledge — отказ", "deny", "ai/knowledge", "domain-coordinator", False,
          B("gh pr merge 1")),
         # защиты: только Метида и её лид, через запор (guard 0.5.4): поштучного «да» владельца больше нет, ядро защит
-        # (Д3) — PR ждёт слияния владельцем. Сам запор — test_merge_gate.py; здесь — кто, где и в каком репозитории
+        # (Д3) — PR ждёт слияния владельцем. Сам запор — test_merge_gate_*.py; здесь — кто, где и в каком репозитории
         ("защиты: Метида по записям запора — можно", "allow", ak, "domain-coordinator", False, B("gh pr merge 5 --squash")),
         ("защиты: Метида с --subject — можно (заголовок больше не нужен и не мешает)", "allow", ak, "domain-coordinator",
          False, B('gh pr merge 5 --squash --subject "guard 0.5.4"')),

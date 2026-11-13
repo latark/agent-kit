@@ -19,7 +19,8 @@ ignore = [
 # B023 (замыкание в цикле): проверены все 17 срабатываний, замыкание вызывается тут же в том же проходе цикла.
 # По файлам, а не глобально: новая находка в другом месте должна краснеть.
 ".github/scripts/release.py" = ["B023"]
-"plugins/guard/tests/test_merge_gate.py" = ["B023"]
+"plugins/guard/tests/test_merge_gate_ci.py" = ["B023"]  # части test_merge_gate.py (metis-1119)
+"plugins/guard/tests/test_merge_gate_gh.py" = ["B023"]
 "plugins/pantheon/scripts/baseline.py" = ["B023"]
 "plugins/pantheon/scripts/effort.py" = ["B023"]
 "plugins/pantheon/tests/test_owner_cap.py" = ["B023"]

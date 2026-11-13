@@ -60,12 +60,195 @@ def budget_checks(pantheon, git, repo):
     check("test — команда в бюджете: код 0 и SHA, как раньше", r.returncode == 0 and head in r.stdout, r.stderr)
 
 
+FAKE_GH = """#!/bin/sh
+d="$FAKE_GH_DIR"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  [ -f "$d/view.json" ] && exec cat "$d/view.json"
+  exit 1
+fi
+if [ "$1" = "api" ]; then
+  [ -f "$d/behind" ] && exec cat "$d/behind"
+  exit 1
+fi
+exit 1
+"""
+GREEN = [{"name": "affected", "workflowName": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+RED = [dict(GREEN[0], conclusion="FAILURE")]
+
+
+def _rec(kind, sha, repo="latark/agent-kit", pr=17, aid="ag000001", sid="se000001", who="argus"):
+    by = {"agent_type": who, "agent_id": aid, "session_id": sid} if kind != "tests" else {"agent_type": "pantheon-outside"}
+    return {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": sha, "by": by, "time": "2026-11-12T10:00:00",
+            **({"cmd": "x"} if kind == "tests" else {})}
+
+
+def _gh_state(fake, journal, head, recs, rollup=GREEN, behind=None):
+    with open(os.path.join(fake, "view.json"), "w") as fh:
+        json.dump({"headRefOid": head, "baseRefName": "main", "statusCheckRollup": rollup}, fh)
+    with open(journal, "w") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in recs)
+    path = os.path.join(fake, "behind")
+    if behind is None:
+        if os.path.exists(path):
+            os.remove(path)
+    else:
+        with open(path, "w") as fh:
+            fh.write(behind + "\n")
+
+
+def _fake_gh(tmp, env):
+    """Поддельный gh первым в PATH (настоящий не зовётся): pr view — view.json, api — behind (metis-0669, 0784)."""
+    fake = os.path.join(tmp, "fakegh")
+    os.makedirs(fake)
+    with open(os.path.join(fake, "gh"), "w") as fh:
+        fh.write(FAKE_GH)
+    os.chmod(os.path.join(fake, "gh"), 0o755)
+    env.update(PATH=fake + ":" + env["PATH"], FAKE_GH_DIR=fake)
+    return fake
+
+
+def _seed_tests(state):
+    """metis-0669: «принять» — только на head с записью тестов шлюза или зелёным CI; журнал с записью tests на SHA."""
+    journal = os.path.join(state, "merge-gate", "records.jsonl")
+    os.makedirs(os.path.dirname(journal))
+    seeded = json.dumps(_rec("tests", SHA)) + "\n"
+    with open(journal, "w") as fh:
+        fh.write(seeded)
+    return journal, seeded
+
+
+def ready_checks(pantheon, journal, raw, fake, cl):
+    """metis-0669: accept — только на head с записью tests шлюза (этого репозитория) или зелёным CI на head PR."""
+    S2 = "b" * 40
+    with open(journal) as fh:
+        check("сама команда журнал не пишет", fh.read() == raw)
+    seeded = [json.loads(raw)]
+
+    def acc():
+        return pantheon("review", "accept", "latark/agent-kit", "17", S2, *cl)
+
+    r = acc()
+    check("accept: записи тестов нет, gh не ответил — код 1, «не записано», CI не проверить",
+          r.returncode == 1 and "не записано" in r.stderr and "gh pr view не ответил" in r.stderr, r.stderr)
+    _gh_state(fake, journal, S2, seeded)
+    r = acc()
+    check("accept: записи нет, CI на head зелёный — код 0", r.returncode == 0 and "хуком guard" in r.stdout, r.stderr)
+    for rollup, why in ((RED, "красный"), ([dict(GREEN[0], status="IN_PROGRESS", conclusion="")], "идёт"),
+                        ([], "проверок нет")):
+        _gh_state(fake, journal, S2, seeded, rollup=rollup)
+        r = acc()
+        check(f"accept: записи нет, CI {why} — код 1, «CI не зелёный», совет outside test (не git — полный набор)",
+              r.returncode == 1 and "CI не зелёный" in r.stderr and "`pantheon outside test --wait 590`" in r.stderr
+              and "--affected" not in r.stderr, r.stderr)
+    _gh_state(fake, journal, "c" * 40, seeded)
+    r = acc()
+    check("accept: у PR другой head — код 1, «на старом коммите»", r.returncode == 1 and "старом коммите" in r.stderr,
+          r.stderr)
+    _gh_state(fake, journal, S2, seeded + [_rec("tests", S2, repo="latark/other")], rollup=RED)
+    r = acc()
+    check("accept: запись tests на том же SHA другого репозитория не в счёт — код 1", r.returncode == 1, r.stderr)
+    r = pantheon("review", "reject", "latark/agent-kit", "17", S2)
+    check("reject — без условия тестов: код 0 и при красном CI", r.returncode == 0, r.stderr)
+    _gh_state(fake, journal, S2, seeded + [_rec("tests", S2)], rollup=RED)
+    r = acc()
+    check("accept: запись tests на head есть — код 0 и при красном CI (запасной путь)", r.returncode == 0, r.stderr)
+    _gh_state(fake, journal, S2, seeded)
+    os.remove(os.path.join(fake, "view.json"))
+
+
+def delta_checks(pantheon, git, repo, journal, fake):
+    """metis-0784, 0669: `pantheon review delta` — дельта-круг от прошлого head с вердиктом argus или полный."""
+    def commit(name, body):
+        p = os.path.join(repo, name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(body)
+        git("add", name, cwd=repo)
+        git("commit", "-q", "-m", name, cwd=repo)
+        return git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+    with open(os.path.join(repo, ".pantheon-verify"), "w") as fh:
+        fh.write("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py plugins/guard\n")
+    prev = commit("x.py", "a\n")
+    small = commit("x.py", "a\nb\n")
+    core = commit("plugins/guard/x.py", "x\n")
+    build = commit("plugins/pantheon/lib/pantheon.py", "x\n")
+    big = commit("y.py", "".join(f"{i}\n" for i in range(201)))
+    git("mv", "y.py", "z.py", cwd=repo)
+    git("commit", "-q", "-m", "mv", cwd=repo)
+    moved = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+    def delta(*recs, head=small, **kw):
+        _gh_state(fake, journal, head, list(recs), **kw)
+        return pantheon("review", "delta", "latark/agent-kit", "17", cwd=repo)
+
+    r = delta(_rec("accept", prev), _rec("tests", prev))
+    check("delta: мелкая правка поверх проверенного head — дельта-круг, тесты --base прошлого head, код 0",
+          r.returncode == 0 and f"круг: дельта {prev[:12]}..{small[:12]} (1 строк" in r.stdout
+          and f"--affected --base {prev} --wait" in r.stdout and "готов к argus" in r.stdout, r.stdout + r.stderr)
+    r = delta(_rec("accept", prev))
+    check("delta: записи тестов на прошлом head нет — --affected без --base", r.returncode == 0
+          and "круг: дельта" in r.stdout and "--base" not in r.stdout, r.stdout + r.stderr)
+    r = delta(_rec("accept", prev), _rec("tests", prev, repo="latark/other"))
+    check("delta: запись тестов прошлого head другого репозитория — без --base", "--base" not in r.stdout, r.stdout)
+    r = delta(_rec("accept", prev), _rec("tests", prev), rollup=RED)
+    check("delta: CI красный и записи на head нет — код 1, «не готов к argus»", r.returncode == 1
+          and "круг: дельта" in r.stdout and "не готов к argus" in r.stderr and "CI не зелёный" in r.stderr,
+          r.stdout + r.stderr)
+    r = delta(_rec("accept", prev), _rec("tests", prev), _rec("tests", small), rollup=RED)
+    check("delta: CI красный, запись tests на head есть — код 0", r.returncode == 0, r.stdout + r.stderr)
+    aid, sid = "ab12cd34" + "0" * 24, "se12ab34" + "0" * 28
+    r = delta(_rec("reject", prev, aid=aid, sid=sid), _rec("accept", prev))
+    check("delta: вернувший argus — строка с `pantheon review report` его пары", r.returncode == 0
+          and f"вернул: ab12cd34/se12ab34 на {prev[:12]}" in r.stdout
+          and "pantheon review report latark/agent-kit 17 ab12cd34/se12ab34" in r.stdout, r.stdout + r.stderr)
+    r = delta(_rec("accept", small), _rec("tests", small), head=core, behind="0")
+    check("delta: правка ядра — полный круг; base свежий — код 0; тестам дельта годна (--base)", r.returncode == 0
+          and f"круг: полный на {core[:12]}" in r.stdout and "ядро" in r.stdout and f"--base {small}" in r.stdout,
+          r.stdout + r.stderr)
+    r = delta(_rec("accept", core), head=build, behind="0")
+    check("delta: правка сборки окон (pantheon.py) — полный круг", "круг: полный" in r.stdout, r.stdout)
+    r = delta(_rec("accept", small), head=core, behind="3")
+    check("delta: полный круг, head отстаёт от base — код 1, «rebase на свежий main»", r.returncode == 1
+          and "отстаёт на 3" in r.stdout and "rebase на свежий main" in r.stderr, r.stdout + r.stderr)
+    r = delta(_rec("accept", small), head=core)
+    check("delta: полный круг, свежесть base не проверить (gh) — код 1", r.returncode == 1
+          and "свежесть main не проверить" in r.stdout, r.stdout + r.stderr)
+    r = delta(_rec("accept", build), _rec("tests", build), head=big, behind="0")
+    check("delta: правка длиннее 200 строк — полный круг, тестам тоже не дельта (без --base)",
+          "дельта 201 строк" in r.stdout and "круг: полный" in r.stdout and "--base" not in r.stdout, r.stdout)
+    r = delta(_rec("accept", big), _rec("tests", big), head=moved, behind="0")
+    check("delta: переименование (Д1 argus #420) — полный круг, тестам тоже не дельта (без --base)",
+          "переименование" in r.stdout and "круг: полный" in r.stdout and "--base" not in r.stdout, r.stdout)
+    os.rename(os.path.join(repo, ".pantheon-verify"), os.path.join(repo, ".pantheon-verify.off"))
+    r = delta(_rec("accept", prev), _rec("tests", prev))
+    check("delta: в .pantheon-verify нет run-tests.py — совет полного набора, без --affected (Д2 argus #420)",
+          "`pantheon outside test --wait 590`" in r.stdout and "--affected" not in r.stdout, r.stdout + r.stderr)
+    os.rename(os.path.join(repo, ".pantheon-verify.off"), os.path.join(repo, ".pantheon-verify"))
+    r = delta(_rec("accept", "f" * 40), behind="0")
+    check("delta: прошлый head не предок (rebase) — полный круг", r.returncode == 0 and "не предок" in r.stdout,
+          r.stdout + r.stderr)
+    for recs, why in (([], "вердиктов нет"), ([_rec("accept", prev, who="dev-opus")], "вердикт не argus"),
+                      ([_rec("accept", prev, pr=18)], "вердикт другого PR"),
+                      ([_rec("accept", prev, repo="latark/other")], "вердикт другого репозитория"),
+                      ([_rec("accept", small)], "вердикт только на нынешнем head")):
+        r = delta(*recs, behind="0")
+        check(f"delta: {why} — первый круг, полный", "круг: полный" in r.stdout and "первый круг" in r.stdout,
+              r.stdout + r.stderr)
+    check("delta: формат — код 2", pantheon("review", "delta", "latark/agent-kit", cwd=repo).returncode == 2)
+    os.remove(os.path.join(fake, "view.json"))
+    r = pantheon("review", "delta", "latark/agent-kit", "17", cwd=repo)
+    check("delta: gh pr view не ответил — код 1", r.returncode == 1 and "не дал head" in r.stderr, r.stderr)
+
+
 def run_all(tmp):
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state, "TMPDIR": tmp, "PANTHEON_NO_NOTIFY": "1", "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    fake = _fake_gh(tmp, env)
 
     def pantheon(*args, cwd=tmp, extra=None):
         return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,
@@ -118,6 +301,7 @@ def run_all(tmp):
     budget_checks(pantheon, git, repo)
 
     cl = ["--opened", "merge_gate.py, README", "--ran", 'heavy python3 -I tests/x.py "84 из 84"', "--unchecked", "gh"]
+    journal, seeded = _seed_tests(state)
     for kind, extra in (("accept", cl), ("reject", []), ("talos", [])):
         r = pantheon("review", kind, "latark/agent-kit", "17", SHA, *extra)
         check(f"{kind} — код 0 и «записано хуком guard»", r.returncode == 0 and "хуком guard" in r.stdout)
@@ -146,10 +330,10 @@ def run_all(tmp):
         check(f"accept {' '.join(bad)[:40]} — плохой формат, код 2", r.returncode == 2 and "формате" in r.stderr)
     check("неизвестный вид — код 2", pantheon("review", "approve", "x").returncode == 2)
     check("без вида — код 2", pantheon("review").returncode == 2)
-    check("сама команда журнал не пишет", not os.path.exists(os.path.join(state, "merge-gate")))
+    ready_checks(pantheon, journal, seeded, fake, cl)
+    delta_checks(pantheon, git, repo, journal, fake)
 
-    os.makedirs(os.path.join(state, "merge-gate"))
-    rec = {"v": 1, "kind": "accept", "repo": ["latark/agent-kit"], "pr": 17, "sha": SHA,
+    rec ={"v": 1, "kind": "accept", "repo": ["latark/agent-kit"], "pr": 17, "sha": SHA,
            "by": {"agent_type": "argus", "agent_id": "x", "session_id": "s"}, "time": "2026-10-15T20:00:00"}
     full = dict(rec, pr=18, checklist={"opened": "a.py, README", "ran": "heavy pytest", "unchecked": "живой gh"})
     with open(os.path.join(state, "merge-gate", "records.jsonl"), "w") as fh:

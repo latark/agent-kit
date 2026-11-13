@@ -39,6 +39,17 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(pantheon consent *)",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" consent note",
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {

@@ -67,6 +67,18 @@ def main():
                                                            for x in win(n)["sandbox"]["filesystem"]["denyRead"]))
             check(f"{n}: пароль демона CDP закрыт правилом Read",
                   "Read(~/.config/cdp-daemon/**)" in win(n)["permissions"]["deny"])
+    # ключи outside (metis-1016, argus #410 Б2): dev-ключи серверов и ключи тестов (строка боевой базы) — всем окнам
+    # закрыты, как пароль CDP: каждая собранная роль, и denyRead песочницы, и правило Read
+    names = sorted(f[:-5] for f in os.listdir(out) if f.endswith(".json"))
+    check(f"собраны окна направления, мастерской, Гестии и штаба ({len(names)})",
+          {"athena-shop", "workshop", "hestia", "hq"} <= set(names))
+    for sub in ("env", "test-env"):
+        key_dir = os.path.join(state, "outside", sub)
+        rule = f"Read(~/state/outside/{sub}/**)"
+        bad_sb = [n for n in names if key_dir not in win(n)["sandbox"]["filesystem"]["denyRead"]]
+        bad_rd = [n for n in names if rule not in win(n).get("permissions", {}).get("deny", [])]
+        check(f"STATE/outside/{sub}: в denyRead песочницы всех окон (нет у {bad_sb})", not bad_sb)
+        check(f"STATE/outside/{sub}: правило {rule} у всех окон (нет у {bad_rd})", not bad_rd)
     for n in ("hq", "hestia", "job-clio"):
         if os.path.isfile(os.path.join(out, n + ".json")):
             net = win(n)["sandbox"]["network"]

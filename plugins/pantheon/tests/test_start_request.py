@@ -3,6 +3,8 @@
 STATE/hq-rw/start-req, а не запуск; плановый проход (take_start_requests) превращает её в разовый запуск. Имя — только
 из реестра (domains.json), не направление с coordinator = false; подложенный файл заявки — тревога без запуска.
 Строки 15–18 модели угроз (drafts/0771-threat-model.md).
+metis-1066: `pantheon resume <направление>` и `pantheon wake hestia --task <id>` в окне hq — строки resume/task в той же
+заявке; проход исполняет их только при вашей записи в owner-log/zeus.md до заявки, иначе тревога без запуска.
 
 Запуск: python3 -I plugins/pantheon/tests/test_start_request.py
 """
@@ -12,8 +14,10 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+from datetime import datetime
 
 _ROOT = os.path.realpath(tempfile.mkdtemp(prefix="startreq-"))
 tempfile.tempdir = _ROOT
@@ -80,12 +84,54 @@ try:
     for f in got:
         os.unlink(os.path.join(inbox, f))
     os.unlink(req)
-    for argv in (["hermes-siteb", "--restart"], ["hermes-siteb", "--restart", "сделай"], ["hermes-siteb", "--over-cap"],
-                 ["hermes-siteb", "--force", "сделай"]):
+    for argv in (["hermes-siteb", "--restart"], ["hermes-siteb", "--restart", "сделай"], ["hermes-siteb", "--over-cap"]):
         rc, out, err = call(argv + ["--dry-run"])
         check(f"16 {' '.join(argv[1:])} → не заявка и не поручение: прежний путь (start_gate)",
               "заявка принята" not in out and "была бы принята" not in out and "легло бы" not in out
               and not os.path.exists(req) and not os.listdir(inbox), (rc, out, err))
+    # metis-1013 (Д3): слово вида флага, которого start не знает, — отказ одной строкой; текст с «-» — поручение
+    for argv in (["hermes-siteb", "--force", "сделай"], ["hermes-siteb", "сделай", "-v"]):
+        for dry in ([], ["--dry-run"]):
+            rc, out, err = call(argv + dry)
+            check(f"16 (Д3) {' '.join(argv[1:] + dry)} → отказ код 2 «не флаг start», ни поручения, ни заявки",
+                  rc == 2 and "не флаг start" in err and "в кавычках" in err.strip().splitlines()[-1]
+                  and not os.path.exists(req) and not os.listdir(inbox), (rc, out, err))
+    for text in ("- проверь сборку", "-1 баг в сборке", "-проверь сборку"):
+        rc, out, err = call(["hermes-siteb", text])
+        got = sorted(os.listdir(inbox))
+        body = open(os.path.join(inbox, got[0]), encoding="utf-8").read() if got else ""
+        data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
+        check(f"16 (Д3) поручение «{text}» → тем же путём: файл во входящих и заявка, код 0",
+              rc == 0 and len(got) == 1 and text in body and len(data) == 1 and "заявка принята" in out,
+              (rc, out, err, got, data))
+        for f in got:
+            os.unlink(os.path.join(inbox, f))
+        if os.path.exists(req):
+            os.unlink(req)
+
+    # metis-1013 (Д4, m6): файл поручения создаётся только новым (O_EXCL) и не по ссылке (O_NOFOLLOW): имя
+    # предсказуемо при подменённых часах и os.urandom — на его месте уже лежит файл или ссылка
+    real_urandom = os.urandom
+    os.environ["PANTHEON_NOW"] = "1794000000"
+    fixed = datetime.fromtimestamp(1794000000).strftime("%Y-%m-%d-%H%M%S") + "-start-000000.md"
+    victim = os.path.join(_ROOT, "victim.txt")
+    try:
+        os.urandom = lambda n: b"\0" * n
+        with open(os.path.join(inbox, fixed), "w") as fh:
+            fh.write("старое поручение\n")
+        rc, out, err = call(["hermes-siteb", "новое"])
+        check("16 (m6) на месте имени уже есть файл → код 1, старый файл цел, заявки нет",
+              rc == 1 and open(os.path.join(inbox, fixed)).read() == "старое поручение\n" and not os.path.exists(req),
+              (rc, out, err))
+        os.unlink(os.path.join(inbox, fixed))
+        os.symlink(victim, os.path.join(inbox, fixed))
+        rc, out, err = call(["hermes-siteb", "новое"])
+        check("16 (m6) на месте имени ссылка → код 1, по ссылке ничего не создано, заявки нет",
+              rc == 1 and not os.path.exists(victim) and not os.path.exists(req), (rc, out, err))
+        os.unlink(os.path.join(inbox, fixed))
+    finally:
+        os.urandom = real_urandom
+        os.environ.pop("PANTHEON_NOW", None)
 
     def start_files():
         """Файлы поручений (…-start-….md) где угодно во временном корне теста."""
@@ -174,6 +220,228 @@ try:
           "не по образцу" in got.get("hermes-siteb", "") and not items[oid2].get("done_at"), (got, items[oid2]))
     rc, out, err = call(["--at-cancel", "at-20991231-2359-hermes-siteb"], P.cancel_request)
     check("cancel: несуществующий id → код 1, заявки нет", rc == 1 and not os.path.exists(req), (rc, out, err))
+
+    # metis-1013 (Д2): заявка на отмену подана, а запуск успел пройти до прохода — итог запуска не переписывается
+    oid3 = P.night_mod().oneshot_add("hermes-siteb", t + 7 * 3600, "успеет", "zeus", t=t)
+    rc, out, err = call(["--at-cancel", oid3], P.cancel_request)
+    check("cancel (Д2): заявка на отмену непогашенного → код 0", rc == 0 and os.path.exists(req), (rc, out, err))
+    P.night_mod().oneshot_update(oid3, t + 600, done_at=t + 600, result="запускается")  # так гасит watch.oneshots
+    P.night_mod().oneshot_update(oid3, t + 600, result="запущен")
+    got = P.take_start_requests(doms, t + 720)
+    it3 = {x["id"]: x for x in P.night_mod().oneshot_items()}[oid3]
+    check("cancel (Д2): запуск прошёл между заявкой и проходом → result «запущен» и done_at те же, отмены нет",
+          it3.get("result") == "запущен" and it3.get("done_at") == t + 600
+          and got == [("hermes-siteb", f"cancel {oid3}: нет")], (got, it3))
+
+    # metis-1013 (Д4, m14): id с именем не по образцу SESSION_NAME, даже если такая запись есть в oneshot.json, —
+    # код 2, заявка не пишется (имя файла заявки — из id)
+    bad_id = "at-20991231-2359-Bad_Name"
+    data = P.read_json(P.night_mod().oneshot_path(), {})
+    data["items"].append({"id": bad_id, "target": "Bad_Name", "at": t + 8 * 3600, "expires": t + 9 * 3600, "text": "x",
+                          "by": "zeus", "created": "x", "done_at": None, "result": None, "wait": None})
+    P.write_json(P.night_mod().oneshot_path(), data)
+    rc, out, err = call(["--at-cancel", bad_id], P.cancel_request)
+    check("cancel (m14): имя в id не по образцу → код 2 «не ручной разовый запуск», файлов заявок нет",
+          rc == 2 and "не ручной разовый запуск" in err and not os.listdir(qdir), (rc, out, err, os.listdir(qdir)))
+
+    # metis-1066: `pantheon resume <направление>` и `pantheon wake hestia --task <id>` из окна Пританея — заявка;
+    # плановый проход сверяет ваше слово в owner-log/zeus.md, снимает метку и поднимает окно
+    import time as _time
+    W = P.watch_mod()
+    alerts = os.path.join(P.PANTHEON, "alerts.md")
+    stopped = P.path("stopped", "hermes-siteb")
+
+    def word(ago):
+        """Ваша запись в owner-log/zeus.md ago секунд назад (её пишет хук; здесь — тест)."""
+        os.makedirs(P.path("owner-log"), exist_ok=True)
+        with open(P.path("owner-log", "zeus.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"## {_time.strftime('%Y-%m-%d %H:%M:%S', _time.localtime(P.now() - ago))}\n\nверни\n")
+
+    def run(fn, *a):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = fn(*a)
+        return rc, out.getvalue(), err.getvalue()
+
+    def alerts_text():
+        return open(alerts, encoding="utf-8").read() if os.path.exists(alerts) else ""
+
+    def mark():
+        os.makedirs(P.path("stopped"), exist_ok=True)
+        with open(stopped, "w") as fh:
+            fh.write("2026-11-12 16:00 владелец\n")
+
+    def req_line(**kw):
+        with open(req, "w") as fh:
+            fh.write(json.dumps({"target": "hermes-siteb", "time": P.stamp(P.now()), "by": "zeus", **kw}) + "\n")
+
+    def oneshots_of(name):
+        return [x for x in P.night_mod().oneshot_items() if x["target"] == name and x["by"] == "zeus-request"
+                and not x.get("done_at")]
+
+    for x in P.night_mod().oneshot_items():
+        P.night_mod().oneshot_cancel(x["id"], P.now(), "тест")
+    mark()
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(P.path("owner-log", "zeus.md"))
+    a0 = len(alerts_text())
+    rc, out, err = run(W.resume, ["hermes-siteb"], "zeus")
+    check("1066 окно hq без вашего слова: resume → код 1, тревога, заявки нет, метка на месте",
+          rc == 1 and "отклонён" in alerts_text()[a0:] and not os.path.exists(req) and os.path.exists(stopped),
+          (rc, out, err))
+
+    word(60)
+    os.chmod(P.path("stopped"), 0o555)  # песочница окна hq: STATE/stopped закрыт (без песочницы метку снимает сам resume)
+    try:
+        rc, out, err = run(W.resume, ["hermes-siteb"], "zeus")
+    finally:
+        os.chmod(P.path("stopped"), 0o755)
+    data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
+    check("1066 окно hq со словом, STATE/stopped закрыт: resume → код 0, заявка {target, time, by, resume: true}",
+          rc == 0 and "заявка принята" in out and len(data) == 1 and data[0].get("resume") is True
+          and set(data[0]) == {"target", "time", "by", "resume"} and os.path.exists(stopped), (rc, out, err, data))
+    a0 = len(alerts_text())
+    got = dict(P.take_start_requests(doms, P.now()))
+    check("1066 проход: заявка вернуть → метка снята, разовый запуск zeus-request, сброс самозапуска",
+          not os.path.exists(stopped) and str(got.get("hermes-siteb", "")).startswith("at-")
+          and len(oneshots_of("hermes-siteb")) == 1 and "метка «остановлено вами» снята" in alerts_text()[a0:]
+          and os.path.exists(P.path(P.HQ_RW, "autostart-reset", "hermes-siteb")), (got, alerts_text()[a0:]))
+
+    for x in P.night_mod().oneshot_items():
+        P.night_mod().oneshot_cancel(x["id"], P.now(), "тест")
+    for kw, ago, why in (({"resume": True}, 3 * 3600, "слово старше 15 мин до заявки"),
+                         ({"resume": True, "time": P.stamp(P.now() - 3600)}, 3600 + 60, "заявка старше REQ_FRESH"),
+                         ({"resume": True, "time": P.stamp(P.now() - 25 * 60)}, 26 * 60,
+                          "старое время заявки и слово старше 15 мин от прохода"),
+                         ({"resume": True, "time": P.stamp(P.now() - 10 * 60)}, 20 * 60,
+                          "слово за 15 мин до времени заявки, но старше 15 мин от прохода (время пишет окно)"),
+                         ({"resume": True, "time": P.stamp(P.now() - 20 * 60)}, 60, "свежее слово, заявка старше 15 мин"),
+                         ({"resume": True, "time": "x"}, 60, "время не по образцу"),
+                         ({"resume": 1}, 60, "resume не true"),
+                         ({"resume": True, "cancel": "at-20991231-2359-hermes-siteb"}, 60, "resume вместе с cancel")):
+        mark()
+        word(ago)
+        req_line(**kw)
+        a0 = len(alerts_text())
+        got = dict(P.take_start_requests(doms, P.now()))
+        check(f"1066 проход: {why} → отклонена с тревогой, метка на месте, окно не поднято",
+              "отклонена" in alerts_text()[a0:] and not str(got.get("hermes-siteb", "at-")).startswith("at-")
+              and os.path.exists(stopped) and not oneshots_of("hermes-siteb"), (got, alerts_text()[a0:]))
+    word(60)
+    with open(req, "w") as fh:  # обычная заявка рядом с «вернуть» без слова — вся заявка отклонена
+        fh.write(json.dumps({"target": "hermes-siteb", "time": "x", "by": "zeus"}) + "\n")
+    got = dict(P.take_start_requests(doms, P.now()))
+    check("1066 проход: обычная заявка без resume слова не требует (как раньше), метку не снимает",
+          str(got.get("hermes-siteb", "")).startswith("at-") and os.path.exists(stopped), got)
+
+    check("1066 resume_request: имя, которое ведёт Пританей, — прежний путь (None)", P.resume_request("solo-led") is None)
+    if os.geteuid() != 0:
+        os.makedirs(P.path("stopped"), exist_ok=True)
+        with open(P.path("stopped", "solo-led"), "w") as fh:
+            fh.write("x\n")
+        os.chmod(P.path("stopped"), 0o555)
+        try:
+            rc, out, err = run(W.resume, ["solo-led"], "zeus")
+        finally:
+            os.chmod(P.path("stopped"), 0o755)
+        check("1066 окно hq, имя не из реестра, STATE/stopped закрыт → код 1 и причина строкой, без трассировки",
+              rc == 1 and "песочница окна закрывает STATE/stopped" in err, (rc, out, err))
+
+    # Гестия: окно hq, которому STATE/settings/run закрыт, — заявка hestia.req
+    tdir = os.path.join(P.PANTHEON, "directions", "metis-pantheon", "tasks")
+    os.makedirs(tdir, exist_ok=True)
+    with open(os.path.join(tdir, "metis-0001.md"), "w", encoding="utf-8") as fh:
+        fh.write("---\ntype: task\nid: metis-0001\ntitle: \"Поставить выпуск\"\nstatus: todo\nproject: Пантеон\n"
+                 "direction: metis-pantheon\nowner: hestia\ncreated: 2026-11-12\nupdated: 2026-11-12T16:00:00\n"
+                 "schema_version: 1\n---\n\n# Поставить выпуск\n")
+    os.makedirs(P.path("settings", "run"), exist_ok=True)
+    with open(P.path("settings", "hestia.json"), "w") as fh:
+        fh.write("{}")
+    os.makedirs(os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox", "hestia"), exist_ok=True)
+    os.makedirs(P.AGENTS, exist_ok=True)
+    with open(os.path.join(P.AGENTS, "hestia.md"), "w") as fh:
+        fh.write("---\nname: hestia\n---\n")
+    hreq = os.path.join(qdir, "hestia.req")
+    if os.geteuid() != 0:
+        os.chmod(P.path("settings", "run"), 0o555)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(P.path("owner-log", "zeus.md"))
+            a0 = len(alerts_text())
+            rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            check("1066 wake hestia в окне hq без вашего слова → код 2, тревога, заявки нет",
+                  rc == 2 and "отклонён" in alerts_text()[a0:] and not os.path.exists(hreq), (rc, out, err))
+            word(60)
+            rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            data = [json.loads(x) for x in open(hreq).read().splitlines()] if os.path.exists(hreq) else []
+            check("1066 wake hestia в окне hq со словом → код 0, заявка {target: hestia, time, by, task}",
+                  rc == 0 and len(data) == 1 and data[0] == {"target": "hestia", "time": data[0]["time"], "by": "zeus",
+                                                             "task": "metis-0001"}, (rc, out, err, data))
+        finally:
+            os.chmod(P.path("settings", "run"), 0o755)
+        calls = []
+        G = P.take_start_requests.__globals__
+        real = G["_hestia_by_request"]
+        G["_hestia_by_request"] = lambda tid: calls.append(tid) or "поднята"
+        try:
+            got = dict(P.take_start_requests(doms, P.now()))
+            check("1066 проход: заявка Гестии → pantheon wake hestia --task metis-0001 (один вызов), файл снят",
+                  calls == ["metis-0001"] and got.get("hestia") == "поднята" and not os.path.exists(hreq), (calls, got))
+            for line, ago, why in (({"task": "metis-0001", "cancel": "x"}, 60, "лишний ключ"),
+                                   ({"task": "../etc"}, 60, "id задачи не по образцу"),
+                                   ({}, 60, "без task"),
+                                   ({"task": "metis-0001"}, 3 * 3600, "без вашего слова")):
+                word(ago)
+                with open(hreq, "w") as fh:
+                    fh.write(json.dumps({"target": "hestia", "time": P.stamp(P.now()), "by": "zeus", **line}) + "\n")
+                del calls[:]
+                a0 = len(alerts_text())
+                got = dict(P.take_start_requests(doms, P.now()))
+                check(f"1066 проход: заявка Гестии, {why} → отклонена с тревогой, Гестия не поднята",
+                      not calls and "отклонена" in alerts_text()[a0:] and got.get("hestia") != "поднята", (calls, got))
+        finally:
+            G["_hestia_by_request"] = real
+
+        class FakeSub:  # subprocess модуля sessions: argv и окружение дочернего pantheon без запуска
+            TimeoutExpired = subprocess.TimeoutExpired
+            seen = []
+            rc = 0
+
+            @classmethod
+            def run(cls, argv, **kw):
+                cls.seen.append((argv, kw.get("env") or {}))
+                return subprocess.CompletedProcess(argv, cls.rc, "", "" if cls.rc == 0 else "строка\nотказ — причина\n")
+
+        real_sub = G["subprocess"]
+        G["subprocess"] = FakeSub
+        try:
+            res = G["_hestia_by_request"]("metis-0001")
+            FakeSub.rc = 2
+            res2 = G["_hestia_by_request"]("metis-0001")
+        finally:
+            G["subprocess"] = real_sub
+        argv, env = FakeSub.seen[0] if FakeSub.seen else ([], {})
+        check("1066 _hestia_by_request: pantheon wake hestia --task <id> --from zeus, без роли окна; итог строкой",
+              argv[1:] == ["wake", "hestia", "--task", "metis-0001", "--from", "zeus"] and argv[0].endswith("/bin/pantheon")
+              and "PANTHEON_ROLE" not in env and res == "поднята" and res2 == "не вышло, код 2: отказ — причина",
+              (FakeSub.seen, res, res2))
+    os.environ["PANTHEON_ROLE"] = "domain-coordinator"
+    rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001", "--from", "zeus"])
+    check("1066 wake hestia --from zeus в окне не hq → код 2", rc == 2 and "--from zeus" in err, (rc, out, err))
+    os.environ.pop("PANTHEON_ROLE")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(P.path("owner-log", "zeus.md"))
+    real_agents, real_path = P.agents_all, os.environ.get("PATH", "")
+    P.agents_all = lambda *a, **k: []
+    os.environ["PATH"] = "/usr/bin:/bin"  # настоящий claude тест не зовёт ни при какой ошибке шлюза
+    try:
+        rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001", "--from", "zeus"])
+    finally:
+        P.agents_all = real_agents
+        os.environ["PATH"] = real_path
+    check("1066 wake hestia --from zeus вне окна без вашего слова → отказ start_gate, код 2",
+          rc == 2 and "без вашего слова" in err, (rc, out, err))
+    os.environ["PANTHEON_ROLE"] = "hq"
 finally:
     os.environ.pop("PANTHEON_ROLE", None)
     shutil.rmtree(_ROOT, ignore_errors=True)

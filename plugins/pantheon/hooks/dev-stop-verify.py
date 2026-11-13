@@ -22,6 +22,9 @@ task-notification (агент был занят), — и только перво
 итога» в общем счёте (не больше трёх), а не отпуск — итог не известен.
 
 Какая проверка — по версии файлов в точке, от которой ответвилась ветка разработчика (не по его правкам):
+  0. строка `ci: <команда>` .pantheon-verify — тесты репозитория идут в CI (GitHub Actions на PR и ночью; metis-1115,
+     agent-kit): локально хук ждёт только эту команду (линтер), итога локальных тестов не требует. Прогоном считается
+     и `pantheon outside test` — запасной путь, когда Actions не запустились;
   1. строка `dev: <команда>` .pantheon-verify в корне репозитория (узкая проверка исполнителя), иначе его первая
      строка (её кладёт лид или координатор; это полный набор для записи шлюза);
   2. иначе скрипт test, а без него check из package.json — менеджером из packageManager или lock-файла;
@@ -74,16 +77,20 @@ def show(root, rev, name):
 
 
 def verify_commands(root, base):
-    """→ (как назвать, [варианты строки команды]) по файлам из точки ответвления base."""
+    """→ (как назвать, [варианты строки команды], тесты в CI) по файлам из точки ответвления base."""
     text = show(root, base, ".pantheon-verify")
     if text:
         rows = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        # строка `ci: <команда>` — тесты идут в CI, локально только эта команда (metis-1115)
+        ci = next((x[3:].strip() for x in rows if x.startswith("ci:")), "")
+        if ci:
+            return ci, [ci], True
         # строка `dev: <команда>` — узкая проверка исполнителя (metis-0653); первая строка остаётся полным набором,
         # его берут запись шлюза и `pantheon outside` (lib/outside.py `dev:` не читает)
         dev = next((x[4:].strip() for x in rows if x.startswith("dev:")), "")
-        line = dev or next((x for x in rows if not x.startswith("dev:")), "")
+        line = dev or next((x for x in rows if not x.startswith(("dev:", "ci:"))), "")
         if line:
-            return line, [line]
+            return line, [line], False
     pkg = show(root, base, "package.json")
     if pkg:
         try:
@@ -97,11 +104,11 @@ def verify_commands(root, base):
             if not pm:
                 pm = "pnpm" if show(root, base, "pnpm-lock.yaml") is not None else \
                     "yarn" if show(root, base, "yarn.lock") is not None else "npm"
-            return f"{pm} run {script}", [f"{pm} run {script}", f"{pm} {script}"]
+            return f"{pm} run {script}", [f"{pm} run {script}", f"{pm} {script}"], False
     pyproject = show(root, base, "pyproject.toml")
     if pyproject and re.search(r"^\[tool\.pytest", pyproject, re.M):
-        return ("uv run pytest" if show(root, base, "uv.lock") is not None else "python3 -m pytest"), ["pytest"]
-    return None, []
+        return ("uv run pytest" if show(root, base, "uv.lock") is not None else "python3 -m pytest"), ["pytest"], False
+    return None, [], False
 
 
 def norm(cmd):
@@ -245,7 +252,7 @@ def main():
     dirty = bool(git(root, "status", "--porcelain", "--untracked-files=normal"))
     if not n_own and not dirty:
         return 0
-    label, variants = verify_commands(root, f"HEAD~{n_own}" if n_own else "HEAD")
+    label, variants, ci = verify_commands(root, f"HEAD~{n_own}" if n_own else "HEAD")
     if not variants:
         return 0
     agent = ev.get("agent_id") or ev.get("session_id") or ""
@@ -262,7 +269,7 @@ def main():
         print(release_text(label, ran, pending), file=sys.stderr)
         return 0
     counter(agent, n)
-    print(f"СТОП ({n} из {MAX_RETURNS}): {why_text(label, ran, pending)} Если причина вне твоей задачи — опиши её в "
+    print(f"СТОП ({n} из {MAX_RETURNS}): {why_text(label, ran, pending, ci)} Если причина вне твоей задачи — опиши её в "
           "отчёте по формату «Находка» и закончи со статусом «заблокировано».", file=sys.stderr)
     return 2
 
@@ -276,14 +283,19 @@ def release_text(label, ran, pending):
             f"{MAX_RETURNS} возвратов отпускаю. В отчёте статус «заблокировано»: что падает и почему не починить.")
 
 
-def why_text(label, ran, pending):
-    """Причина возврата: прогон идёт в фоне, красный или его не было."""
+def why_text(label, ran, pending, ci=False):
+    """Причина возврата: прогон идёт в фоне, красный или его не было. ci — тесты репозитория идут в CI (строка `ci:`)."""
     if pending:
         return (f"фоновый прогон проверки проекта «{label}» ещё идёт: дождись итога фонового прогона (уведомление) и "
                 "проверь его. Закончи ход строкой «жду итога <ID>», отчёт — после итога.")
     if ran:
         return (f"последний прогон проверки проекта «{label}» после правок — красный. Работа не сдана, пока проверка не "
                 "зелёная: почини и прогони снова.")
+    if ci:
+        return (f"после последней правки ты не прогнал локальную проверку `{label}`. Тесты этого репозитория идут в CI "
+                "(GitHub Actions на PR) — локально их не гоняй, в отчёте пиши «тесты — в CI». Запусти `" + label
+                + "` и добейся чистого результата. Actions не запустились (сбой GitHub, лимит минут) — "
+                "`pantheon outside test --wait 590` на закоммиченной ветке, причину — в отчёт.")
     return (f"после последней правки ты не прогнал проверку проекта. Запусти `heavy {label}` (тестам нужен порт "
             "или сокет — `pantheon outside test --wait 590` на закоммиченной ветке) и добейся зелёного результата.")
 
