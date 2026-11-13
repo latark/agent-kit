@@ -244,6 +244,11 @@ os.execvp(cmd[0], cmd)
 os.chmod(FAKE, 0o755)
 O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
+# Нагрузка машины тесту не нужна (metis-1117): полный набор при load (за 5 мин) выше 3.0 × ядер ждёт спада опросами по
+# LOAD_POLL (30 с) до LOAD_WAIT_MAX (wait_load). На раннере CI macos-15 (3 ядра, load 80–110) каждый прогон
+# полного набора в тесте ждал 30–130 с: test_outside_tree шёл 480 с против 6.5 с на Linux. Ожидание спада и повтор
+# «таймаут под нагрузкой» проверяют test_outside_load и test_outside_lanes со своей подменой load_state.
+O.load_state = lambda: (0.0, 24.0)
 O.READY_SEC = 15
 O.KILL_WAIT = 2
 # свой случайный ряд портов вместо 3200–3299: два test_outside сразу (argus и разработчик) иначе берут один порт, и

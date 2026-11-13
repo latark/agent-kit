@@ -285,6 +285,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
                                         «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
   pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
+  pantheon review delta <owner/repo> <PR>   из клона: какой нужен круг argus — дельта от прошлого проверенного
+                                        head (мелкая правка вне ядра, без rebase) или полный на свежем base, —
+                                        команда записи тестов, пары вернувших; код 0 — head готов к argus, 1 — нет.
+                                        accept без записи tests на head и без зелёного CI — код 1 (metis-0669, 0784)
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
@@ -2392,6 +2396,19 @@ COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
 CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
+# Ключи проектов `pantheon outside` (metis-1016, argus #410 Б2): dev-ключи серверов (STATE/outside/env) и ключи тестов —
+# строка подключения к боевой базе (STATE/outside/test-env). Их читает только плановый проход вне окна; окнам ролей они
+# закрыты, как пароль демона CDP: denyRead песочницы (Bash) и правило Read (Read, Grep, Glob)
+OUTSIDE_KEY_DIRS = (os.path.join(STATE, "outside", "env"), os.path.join(STATE, "outside", "test-env"))
+WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS)
+
+
+def _home_form(p):
+    """Путь под HOME — в виде «~/…» (так пишутся правила Read), иначе как есть."""
+    for h in dict.fromkeys((HOME, os.path.realpath(HOME))):
+        if p == h or p.startswith(h + "/"):
+            return "~" + p[len(h):]
+    return p
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
 # он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
 def _window_rules():
@@ -2943,13 +2960,13 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms([CDP_TOKEN_DIR]),
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms(list(WINDOW_SECRET_DIRS)),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
-        # пароль демона CDP — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        # пароль демона CDP и ключи outside — и инструментам Read, Grep, Glob (песочница держит только Bash)
         "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
-                                 for x in _deny_forms([CDP_TOKEN_DIR.replace(HOME, "~", 1)])]},
+                                 for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS])]},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
@@ -7362,7 +7379,7 @@ _NIGHTLY_TICK = None
 
 
 def nightly_tick_mod():
-    """lib/nightly_tick.py — ночной полный набор тестов на origin/main (metis-1050)."""
+    """lib/nightly_tick.py — итог ночного полного набора на main из GitHub Actions (metis-1050, metis-1115)."""
     global _NIGHTLY_TICK
     if _NIGHTLY_TICK is None:
         import importlib.util

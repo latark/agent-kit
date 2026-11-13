@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""Ночной полный набор на main (metis-1050, lib/nightly_tick.py): плановый проход ночью гоняет run-tests.py на свежем
-origin/main, красный — задача на каждый упавший файл и тревога, карантин назван, но задачи не даёт.
+"""Ночной полный набор на main — итог из GitHub Actions (metis-1115, lib/nightly_tick.py): плановый проход набор не
+гоняет, а читает итог запуска tests.yml по расписанию через gh; красный — задача на каждый упавший файл и тревога,
+карантин назван, но задачи не даёт.
 
 Запуск: python3 -I plugins/pantheon/tests/test_nightly_tick.py  (код выхода 0 — все прошли)
-Настоящий git на временных папках: голый «origin» с main; run-tests.py в репозитории — заглушка (вывод берёт из файла
-рядом). heavy, load, задачи и запуск работника подменены (работник зовётся прямо). Проверяет:
-  [зелёный]   ночью → прогон в копии на sha origin/main, строка nightly-tick, тревога снята, задач нет;
-  [красный]   FAIL файлов → задача на каждый, тревога с именами; открытая задача с тем же заголовком — не дубль;
-  [карантин]  упал только файл карантина → зелёный, но в строке «карантин упал: …», задач нет;
-  [сбой]      без строки итога → тревога; код 4 (файлы окна пропущены) — не зелёный, тревога;
-  [логи]      старые выводы ночей убираются, KEEP_LOGS последних и копия остаются;
-  [частота]   днём — ничего; раз за ночь; тот же sha в следующую ночь — не гоняет; load выше порога — пропуск;
-              живой работник — тик ждёт; PANTHEON_DRYRUN — ничего.
+gh подменён (nightly_tick.gh_api и gh_text отвечают из словаря), ядро pantheon — заглушка с временным STATE; сеть,
+настоящий gh и ~/.claude не трогаются. Проверяет:
+  [зелёный]   success → строка «зелёный», тревога снята, задач нет; запрос — tests.yml на main; тот же запуск второй
+              раз не разбирается; локально ничего не запускается (subprocess кроме gh не зовётся);
+  [события]   запуск на pull_request и не на main не в счёт; идущий запуск — ждать, разбирается прошлый завершённый;
+  [красный]   FAIL файлов в логах частей (с меткой времени GitHub) → задача на каждый, тревога с именами; открытая
+              задача с тем же заголовком — не дубль; перезапуск (run_attempt 2) — разбирается заново;
+  [карантин]  success и строка «карантин» → зелёный, «карантин упал: …» в строке, задач и тревоги нет;
+  [сбой]      failure без FAIL: части не стартовали (нет steps) → тревога «не стартовали»; лог не прочитан → тревога;
+              cancelled → строка без смены тревоги;
+  [свежесть]  нет завершённых запусков / gh не отвечает дольше STALE → тревога STALE_KEY, свежий итог её снимает;
+  [частота]   не чаще CHECK_EVERY; PANTHEON_DRYRUN — ничего; старые ключи running/result локального набора убраны;
+  [gh]        gh_text зовёт `gh api --allow-escape-sequences`: поддельный gh без флага на логе с ANSI-кодами отказывает
+              (как gh 2.103, Б1 argus #430); parse снимает ANSI-коды и BOM;
+  [без итога] success без стартовавших частей, без строки «итого», с непрочитанным логом или без частей full-shard —
+              «итога нет», не зелёный (Д2); cancelled после итога не сбрасывает отсчёт STALE (Д1).
 """
 import atexit
 import importlib.util
@@ -22,7 +30,7 @@ import subprocess
 import sys
 import time
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIB = os.path.join(os.path.dirname(HERE), "lib")
@@ -33,9 +41,8 @@ _ROOT = os.path.realpath(mkroot("nightly-tick-"))
 atexit.register(shutil.rmtree, _ROOT, True)
 os.environ.pop("PANTHEON_DRYRUN", None)
 REPO = "latark/agent-kit"
-NIGHT = datetime.now().replace(hour=3, minute=0, second=0, microsecond=0)
-T = int(NIGHT.timestamp())
-DAY = int(NIGHT.replace(hour=14).timestamp())
+T = int(datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc).timestamp())
+C0 = T - 5 * 3600  # время запуска по умолчанию: ночь до T
 FAILS = []
 CHECKS = []
 
@@ -55,58 +62,49 @@ def load(name, file):
 
 
 M = load("pantheon_merge_n", "merge.py")
-RT = load("pantheon_release_tick_n", "release_tick.py")
 NT = load("pantheon_nightly_tick_n", "nightly_tick.py")
+REAL_GH_TEXT = NT.gh_text  # World подменяет gh_text; настоящий проверяется в [gh] с поддельным subprocess.run
+
+STAMP = "2026-11-13T22:41:07.1234567Z "
+GREEN = STAMP + "ok   guard/test_a.py · 1.0 с · проверок 3\n" + STAMP + "итого: файлов 1, ok 1, FAIL 0; проверок 3; 1 с\n"
+RED1 = (STAMP + "FAIL guard/test_a.py · 2.0 с · проверок 3 · код 1\n" + STAMP
+        + "итого: файлов 1, ok 0, FAIL 1; проверок 3; 2 с\n")
+RED2 = (STAMP + "FAIL pantheon/test_b.py · 2.0 с · проверок 1 · код 1\n" + STAMP
+        + "итого: файлов 1, ok 0, FAIL 1; проверок 1; 2 с\n")
+QUAR = (STAMP + "карантин pantheon/test_outside_idle.py · 1.0 с · проверок 2 · код 1 · задача metis-0989\n" + STAMP
+        + "итого: файлов 1, ok 0, FAIL 0, карантин 1; проверок 2; 1 с\n")
+STEPS = [{"name": "Тесты", "conclusion": "success"}]
 
 
-def git(d, *args):
-    env = {"PATH": os.environ["PATH"], "HOME": os.path.join(_ROOT, "home"), "GIT_AUTHOR_NAME": "t",
-           "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
-    r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, env=env)
-    assert r.returncode == 0, (args, r.stderr)
-    return r.stdout.strip()
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
-# заглушка раннера: печатает stub-out, код — stub-code; argv — в stub-argv
-STUB = '''import os, sys
-here = os.path.dirname(os.path.abspath(__file__))
-open(os.path.join(here, "stub-argv"), "w").write(" ".join(sys.argv[1:]))
-print(open(os.path.join(here, "stub-out")).read())
-sys.exit(int(open(os.path.join(here, "stub-code")).read()))
-'''
-GREEN = "ok   guard/test_a.py · 1.0 с · проверок 3\nитого: файлов 1, ok 1, FAIL 0; проверок 3; 1 с, воркеров 3\n"
-RED = ("FAIL guard/test_a.py · 2.0 с · проверок 3 · код 1\nFAIL pantheon/test_b.py · 2.0 с · проверок 1 · код 1\n"
-       "итого: файлов 2, ok 0, FAIL 2; проверок 4; 2 с, воркеров 3\n")
-QUAR = ("карантин pantheon/test_outside_idle.py · 1.0 с · проверок 2 · код 1 · задача metis-0989\n"
-        "итого: файлов 1, ok 0, FAIL 0, карантин 1; проверок 2; 1 с, воркеров 3\n")
+def run(rid, concl="success", status="completed", event="schedule", branch="main", attempt=1, created=None, sha="a" * 40):
+    created = created or iso(C0)
+    return {"id": rid, "run_attempt": attempt, "status": status, "conclusion": concl if status == "completed" else None,
+            "event": event, "head_branch": branch, "created_at": created, "head_sha": sha,
+            "html_url": f"https://github.com/{REPO}/actions/runs/{rid}"}
+
+
+def jobs(rid, logs, steps=STEPS):
+    """logs — {номер части: текст лога}; job частей full-shard и собирающий full."""
+    js = [{"id": rid * 10 + k, "name": f"full-shard ({k}/{len(logs)})", "steps": steps} for k in logs]
+    return {"total_count": len(js) + 1, "jobs": js + [{"id": rid * 10 + 9, "name": "full", "steps": STEPS}]}
 
 
 class World:
-    def __init__(self, name, out=GREEN, code=0, loadavg=0.0, open_titles=()):
-        self.root = os.path.join(_ROOT, name)
-        os.makedirs(os.path.join(self.root, "home"))
+    def __init__(self, open_titles=()):
+        self.root = os.path.join(_ROOT, f"w{len(os.listdir(_ROOT))}")
+        os.makedirs(self.root)
         self.state = os.path.join(self.root, "state")
-        self.origin = os.path.join(self.root, "origin.git")
-        self.work = os.path.join(self.root, "work")
-        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin], check=True)
-        subprocess.run(["git", "init", "-q", "-b", "main", self.work], check=True)
-        sdir = os.path.join(self.work, "plugins", "pantheon", "scripts")
-        os.makedirs(sdir)
-        open(os.path.join(sdir, "run-tests.py"), "w").write(STUB)
-        open(os.path.join(sdir, "stub-out"), "w").write(out)
-        open(os.path.join(sdir, "stub-code"), "w").write(str(code))
-        open(os.path.join(self.work, ".gitignore"), "w").write("stub-argv\n")
-        git(self.work, "add", "-A")
-        git(self.work, "commit", "-q", "-m", "начало")
-        git(self.work, "remote", "add", "origin", self.origin)
-        git(self.work, "push", "-q", "origin", "main")
-        self.sha = git(self.work, "rev-parse", "HEAD")
-        self.alerts, self.cleared, self.spawned, self.tasks = [], [], [], []
+        self.alerts, self.cleared, self.tasks, self.calls = [], [], [], []
+        self.runs, self.jobs, self.logs = [], {}, {}
+        self.api_err = None
         self.open = {t: f"metis-90{i:02d}" for i, t in enumerate(open_titles)}
         tasks = types.SimpleNamespace(
             load_tasks=lambda pantheon: {tid: ("p", {"title": t, "status": "todo"}, "") for t, tid in self.open.items()},
             task_new=self._task_new)
-        outside = types.SimpleNamespace(heavy_bin=lambda: "heavy-заглушка", load_state=lambda: (loadavg, 24.0))
         core = types.SimpleNamespace(
             HOME=os.path.join(self.root, "home"), PANTHEON=os.path.join(self.root, "pantheon"),
             path=lambda *p: os.path.join(self.state, *p), now=lambda: T,
@@ -114,18 +112,36 @@ class World:
             stamp=lambda t=None: time.strftime("%Y-%m-%d %H:%M", time.localtime(t)),
             alert_once=lambda key, value, text, who="pantheon", **kw: self.alerts.append((key, text)),
             clear_once=lambda key: self.cleared.append(key),
-            pid_alive=lambda pid: pid == os.getpid(),
-            merge_mod=lambda: M, release_tick_mod=lambda: RT, outside_mod=lambda: outside, tasks_mod=lambda: tasks)
+            merge_mod=lambda: M, tasks_mod=lambda: tasks)
         M.allowed_repos = lambda: {REPO, "latark/other"}
-        RT.set_core(core)
-        RT.URL = self.origin
         NT.set_core(core)
-        NT.spawn = self._spawn
+        NT.gh_api = self.gh_api
+        NT.gh_text = self.gh_text
 
-    def _spawn(self, job):
-        self.spawned.append(job)
-        job = dict(job, heavy=[])   # heavy — заглушка: раннер зовётся прямо
-        NT.work(job)
+    def gh_api(self, endpoint):
+        self.calls.append(endpoint)
+        if self.api_err:
+            return None, self.api_err
+        if endpoint.startswith(f"repos/{REPO}/actions/workflows/tests.yml/runs?"):
+            return {"total_count": len(self.runs), "workflow_runs": list(self.runs)}, None
+        for rid, data in self.jobs.items():
+            if endpoint.startswith(f"repos/{REPO}/actions/runs/{rid}/jobs"):
+                return data, None
+        return None, f"нет ответа на {endpoint}"
+
+    def gh_text(self, endpoint):
+        self.calls.append(endpoint)
+        for jid, text in self.logs.items():
+            if endpoint == f"repos/{REPO}/actions/jobs/{jid}/logs":
+                return text, None
+        return None, "HTTP 410: логи удалены"
+
+    def add(self, r, logs=None, steps=STEPS):
+        self.runs.insert(0, r)
+        if logs is not None:
+            self.jobs[r["id"]] = jobs(r["id"], logs, steps)
+            for k, text in logs.items():
+                self.logs[r["id"] * 10 + k] = text
 
     def _task_new(self, pantheon, t, direction, title, **kw):
         tid = f"metis-91{len(self.tasks):02d}"
@@ -150,104 +166,218 @@ class World:
         p = os.path.join(self.state, "logs", "tick.log")
         return open(p).read() if os.path.exists(p) else ""
 
-    def argv(self):
-        p = os.path.join(self.state, "nightly", "agent-kit", "plugins", "pantheon", "scripts", "stub-argv")
-        return open(p).read() if os.path.exists(p) else ""
 
+# локально ничего не запускается: subprocess под запретом на время тиков (gh подменён выше)
+_real_popen, _real_run = subprocess.Popen, subprocess.run
+LOCAL = []
+
+
+def _forbid(*a, **kw):
+    LOCAL.append(a[0] if a else kw.get("args"))
+    raise AssertionError("локальный запуск из тика")
+
+
+subprocess.Popen = subprocess.run = _forbid
+CE = NT.CHECK_EVERY
 
 # --- [зелёный] ----------------------------------------------------------------------------------------------------
-w = World("green")
+w = World()
+w.add(run(101), {1: GREEN, 2: GREEN, 3: GREEN})
 out = NT.tick(T)
-check("ночью → прогон запущен на sha origin/main", w.spawned and w.spawned[0]["sha"] == w.sha and "запущен" in out,
-      (out, w.spawned))
-check("раннер — -j 3, --log-dir и все три папки плагинов",
-      w.argv().startswith("-j 3 --log-dir ") and w.argv().endswith("plugins/guard plugins/pantheon plugins/project-tools"),
-      w.argv())
-check("другой репозиторий не трогается", not os.path.exists(os.path.join(w.state, "nightly", "other")))
-out = NT.tick(T + 60)
-check("итог — строка «зелёный» в tick.log, тревога снята, задач нет",
-      "nightly-tick: latark/agent-kit" in w.tick_log() and "зелёный" in out and w.cleared and not w.tasks
-      and not w.alerts, (out, w.tick_log()))
-check("раз за ночь: следующий тик той же ночи — ничего", NT.tick(T + NT.CHECK_EVERY + 61) is None
-      and len(w.spawned) == 1)
-nxt = T + 24 * 3600
-check("следующая ночь, main тот же — не гоняет", "уже прогнан ночью" in (NT.tick(nxt) or "") and len(w.spawned) == 1)
-open(os.path.join(w.work, "x.txt"), "w").write("x")
-git(w.work, "add", "-A")
-git(w.work, "commit", "-q", "-m", "новое")
-git(w.work, "push", "-q", "origin", "main")
-out = NT.tick(nxt + 2 * 24 * 3600)
-check("ночь с новым main — гоняет снова", len(w.spawned) == 2 and "запущен" in (out or ""), out)
+check("success → строка «зелёный» в tick.log, тревога снята, задач нет",
+      out and "зелёный" in out and "nightly-tick: latark/agent-kit" in w.tick_log() and NT.ALERT_KEY in w.cleared
+      and not w.tasks and not w.alerts, (out, w.alerts))
+check("запрос — запуски tests.yml на main (gh api), других репозиториев нет",
+      w.calls[0] == f"repos/{REPO}/actions/workflows/tests.yml/runs?branch=main&per_page=30"
+      and not any("latark/other" in c for c in w.calls), w.calls)
+check("логи всех трёх частей прочитаны, собирающий full — нет",
+      sorted(c for c in w.calls if c.endswith("/logs")) == [f"repos/{REPO}/actions/jobs/{1010 + k}/logs" for k in (1, 2, 3)],
+      w.calls)
+check("локально ничего не запущено", not LOCAL, LOCAL)
+n = len(w.calls)
+check("не чаще CHECK_EVERY: следующий тик сразу — ничего, gh не зовётся", NT.tick(T + 60) is None and len(w.calls) == n)
+NT.tick(T + CE)
+check("тот же запуск второй раз не разбирается (job и логи не читаются)",
+      not any("/jobs" in c for c in w.calls[n:]), w.calls[n:])
+
+# --- [события] ----------------------------------------------------------------------------------------------------
+w = World()
+w.add(run(201), {1: GREEN})
+w.add(run(202, concl="failure", event="pull_request"), {1: RED1})
+w.add(run(203, concl="failure", branch="feature"), {1: RED1})
+w.add(run(204, status="in_progress"))
+out = NT.tick(T)
+check("pull_request и не main не в счёт, идущий — ждать: разобран прошлый завершённый (201)",
+      out and "зелёный" in out and not w.alerts and f"repos/{REPO}/actions/runs/201/jobs?per_page=100" in w.calls
+      and not any("/runs/20" + x in c for c in w.calls for x in "234"), (out, w.calls))
+w.runs[0] = run(204, concl="success", created="2026-11-14T22:00:00Z")
+w.jobs[204] = jobs(204, {1: GREEN})
+w.logs[2041] = GREEN
+out = NT.tick(T + CE)
+check("идущий завершился — разобран новый", out and "зелёный" in out and "/runs/204/jobs" in " ".join(w.calls), out)
+r = run(205, concl="success", event="workflow_dispatch", created="2026-11-15T10:00:00Z")
+w.add(r, {1: GREEN})
+out = NT.tick(T + 2 * CE)
+check("ручной запуск (workflow_dispatch) на main в счёт", out and "/runs/205/jobs" in " ".join(w.calls), out)
 
 # --- [красный] ----------------------------------------------------------------------------------------------------
-w = World("red", out=RED, code=1, open_titles=(NT.TITLE.format(label="pantheon/test_b.py"),))
-NT.tick(T)
-out = NT.tick(T + 60)
+w = World(open_titles=(NT.TITLE.format(label="pantheon/test_b.py"),))
+w.add(run(301, concl="failure"), {1: RED1, 2: RED2, 3: GREEN})
+out = NT.tick(T)
 check("красный → задача только на файл без открытой (guard/test_a.py), открытая не дублируется",
       [x[2] for x in w.tasks] == [NT.TITLE.format(label="guard/test_a.py")] and w.tasks[0][1] == "metis-pantheon", w.tasks)
-check("тревога называет оба файла и задачи", w.alerts and "guard/test_a.py" in w.alerts[-1][1]
-      and "pantheon/test_b.py" in w.alerts[-1][1] and "metis-9100" in w.alerts[-1][1] and "metis-9000" in w.alerts[-1][1],
-      w.alerts)
-check("текст задачи — sha, итог раннера и путь к логу", w.sha[:12] in w.tasks[0][3]["text"]
-      and "итого: файлов 2" in w.tasks[0][3]["text"] and ".log" in w.tasks[0][3]["text"], w.tasks)
+check("тревога называет оба файла и задачи", w.alerts and w.alerts[-1][0] == NT.ALERT_KEY
+      and "guard/test_a.py" in w.alerts[-1][1] and "pantheon/test_b.py" in w.alerts[-1][1]
+      and "metis-9100" in w.alerts[-1][1] and "metis-9000" in w.alerts[-1][1], w.alerts)
+check("текст задачи — sha, итог частей и ссылка на запуск", "a" * 12 in w.tasks[0][3]["text"]
+      and "итого: файлов 1, ok 0, FAIL 1" in w.tasks[0][3]["text"]
+      and f"https://github.com/{REPO}/actions/runs/301" in w.tasks[0][3]["text"], w.tasks)
+w.runs[0] = run(301, concl="success", attempt=2)
+w.jobs[301] = jobs(301, {1: GREEN})
+w.logs[3011] = GREEN
+out = NT.tick(T + CE)
+check("перезапуск (run_attempt 2) того же запуска разобран заново: зелёный снимает тревогу",
+      out and "зелёный" in out and NT.ALERT_KEY in w.cleared, (out, w.cleared))
 
 # --- [карантин] ---------------------------------------------------------------------------------------------------
-w = World("quar", out=QUAR, code=0)
-NT.tick(T)
-out = NT.tick(T + 60)
-check("упал только карантин → зелёный, «карантин упал: …» в строке, задач и тревоги нет",
-      "зелёный; карантин упал: pantheon/test_outside_idle.py" in out and not w.tasks and not w.alerts, (out, w.alerts))
+w = World()
+w.add(run(401), {1: GREEN, 2: QUAR})
+out = NT.tick(T)
+check("success и строка «карантин» → зелёный, «карантин упал: …» в строке, задач и тревоги нет",
+      out and "зелёный; карантин упал: pantheon/test_outside_idle.py" in out and not w.tasks and not w.alerts,
+      (out, w.alerts))
 
 # --- [сбой] -------------------------------------------------------------------------------------------------------
-w = World("broken", out="Traceback: всё сломалось\n", code=2)
+w = World()
+w.add(run(501, concl="failure"), {1: "", 2: "", 3: ""}, steps=[])
+out = NT.tick(T)
+check("части без steps (Actions не запустились) → тревога «не стартовали», логи не запрашиваются",
+      w.alerts and "не стартовали" in w.alerts[-1][1] and not any(c.endswith("/logs") for c in w.calls)
+      and not w.tasks, (w.alerts, w.calls))
+w = World()
+w.add(run(502, concl="failure"), {1: RED1})
+w.logs.clear()
+out = NT.tick(T)
+check("лог части не прочитан → тревога «лог части не прочитать» с причиной gh", w.alerts
+      and "лог части не прочитать" in w.alerts[-1][1] and "410" in w.alerts[-1][1], w.alerts)
+w = World()
+w.add(run(503, concl="failure"), {1: GREEN})
 NT.tick(T)
-NT.tick(T + 60)
-check("без строки итога → тревога «без строки итога»", w.alerts and "без строки итога" in w.alerts[-1][1], w.alerts)
+check("красный без FAIL и без причины → тревога «красный без строк FAIL»", w.alerts
+      and "без строк FAIL" in w.alerts[-1][1], w.alerts)
+w = World()
+w.add(run(504, concl="cancelled"), {1: GREEN})
+out = NT.tick(T)
+check("cancelled → строка «итога нет», тревога не ставится и не снимается",
+      out and "итога нет" in out and not w.alerts and NT.ALERT_KEY not in w.cleared, (out, w.alerts, w.cleared))
 
-w = World("winskip", out=GREEN, code=4)
+# --- [свежесть] ---------------------------------------------------------------------------------------------------
+w = World()
+out = NT.tick(T)
+check("запусков нет, срок не вышел → без тревоги", not w.alerts and NT.STALE_KEY in w.cleared, (out, w.alerts))
+out = NT.tick(T + NT.STALE + 1)
+check("запусков нет дольше STALE → тревога STALE_KEY", w.alerts and w.alerts[-1][0] == NT.STALE_KEY
+      and "итога ночного набора в Actions нет" in w.alerts[-1][1], w.alerts)
+w.add(run(601, created=iso(T + NT.STALE)), {1: GREEN})
+w.cleared.clear()
+NT.tick(T + NT.STALE + 1 + CE)
+check("свежий итог снимает STALE_KEY", NT.STALE_KEY in w.cleared, w.cleared)
+w.api_err = "gh api: HTTP 502"
+w.alerts.clear()
+NT.tick(T + NT.STALE + 1 + 2 * CE)
+check("gh не отвечает, но итог свежий → без тревоги", not w.alerts, w.alerts)
+NT.tick(T + 2 * NT.STALE + 10)
+check("gh не отвечает дольше STALE от последнего итога → тревога STALE_KEY с причиной gh",
+      w.alerts and w.alerts[-1][0] == NT.STALE_KEY and "502" in w.alerts[-1][1], w.alerts)
+w = World()
+w.add(run(701), {1: GREEN})
 NT.tick(T)
-out = NT.tick(T + 60)
-check("код 4 (файлы окна пропущены) → не «зелёный», «набор не полный», тревога",
-      "зелёный;" not in out and "набор не полный" in out and w.alerts and "код 4" in w.alerts[-1][1], (out, w.alerts))
-
-# --- [логи] -------------------------------------------------------------------------------------------------------
-w = World("logs")
-ND = os.path.join(w.state, "nightly")
-os.makedirs(ND)
-OLD = [f"2020-01-{i:02d}" for i in range(1, NT.KEEP_LOGS + 3)]   # KEEP_LOGS + 2 старых ночей
-for n in OLD:
-    open(os.path.join(ND, f"agent-kit-{n}.log"), "w").write("x")
-    os.makedirs(os.path.join(ND, f"agent-kit-{n}.log.d"))
-open(os.path.join(ND, "other-2020-01-01.log"), "w").write("x")
-NT.tick(T)
-left = sorted(n for n in os.listdir(ND) if n.startswith("agent-kit-") and n.endswith(".log"))
-check("логи: перед запуском убраны старые — осталось KEEP_LOGS ночей (с новой), с папками --log-dir",
-      len(left) == NT.KEEP_LOGS and left[0] == f"agent-kit-{OLD[3]}.log" and NIGHT.strftime("%Y-%m-%d") in left[-1]
-      and not os.path.exists(os.path.join(ND, f"agent-kit-{OLD[2]}.log.d"))
-      and os.path.isdir(os.path.join(ND, f"agent-kit-{OLD[3]}.log.d")), left)
-check("логи: копия nightly/agent-kit и чужие имена не тронуты",
-      os.path.isdir(os.path.join(ND, "agent-kit", ".git")) and os.path.exists(os.path.join(ND, "other-2020-01-01.log")))
+w.add(run(702, status="queued"))
+w.alerts.clear()
+NT.tick(C0 + NT.STALE + 10)
+check("новый запуск не завершён дольше STALE после прошлого итога → тревога STALE_KEY",
+      w.alerts and w.alerts[-1][0] == NT.STALE_KEY and "идёт новый" in w.alerts[-1][1], w.alerts)
 
 # --- [частота] ----------------------------------------------------------------------------------------------------
-w = World("day")
-check("днём — ничего", NT.tick(DAY) is None and not w.spawned)
-w = World("load", loadavg=99.0)
-check("load выше порога → пропуск", NT.tick(T) is None and not w.spawned)
-w = World("busy")
-w._write_json(os.path.join(w.state, "nightly-tick.json"), {"running": {"t": T, "pid": os.getpid(), "sha": w.sha}})
-check("живой работник → тик ждёт", NT.tick(T + 60) is None and not w.spawned)
-w._write_json(os.path.join(w.state, "nightly-tick.json"), {"running": {"t": T, "pid": 1, "sha": w.sha, "repo": REPO}})
-NT.tick(T + 120)
-check("работник погиб без итога → тревога", w.alerts and "погиб" in w.alerts[-1][1], w.alerts)
-w = World("dryrun")
+w = World()
+w._write_json(os.path.join(w.state, "nightly-tick.json"), {"running": {"t": T, "pid": 1}, "result": {"code": 1}})
+w.add(run(801), {1: GREEN})
+NT.tick(T)
+st = w._read_json(os.path.join(w.state, "nightly-tick.json"))
+check("старые ключи running/result локального набора убраны", "running" not in st and "result" not in st, st)
+w = World()
 os.environ["PANTHEON_DRYRUN"] = "1"
 out = NT.tick(T)
 os.environ.pop("PANTHEON_DRYRUN")
-check("PANTHEON_DRYRUN=1 → ничего", out is None and not w.spawned and not os.path.exists(w.state))
-check("parse: FAIL, карантин и итог", NT.parse(RED + QUAR) == (["guard/test_a.py", "pantheon/test_b.py"],
-                                                             ["pantheon/test_outside_idle.py"],
-                                                             "итого: файлов 1, ok 0, FAIL 0, карантин 1; проверок 2; 1 с, "
-                                                             "воркеров 3"), NT.parse(RED + QUAR))
+check("PANTHEON_DRYRUN=1 → ничего", out is None and not w.calls and not os.path.exists(w.state))
+check("parse: метка времени GitHub срезана; FAIL, карантин и итоги",
+      NT.parse(RED1 + QUAR) == (["guard/test_a.py"], ["pantheon/test_outside_idle.py"],
+                                ["итого: файлов 1, ok 0, FAIL 1; проверок 3; 2 с",
+                                 "итого: файлов 1, ok 0, FAIL 0, карантин 1; проверок 2; 1 с"]), NT.parse(RED1 + QUAR))
 
+# --- [gh] ---------------------------------------------------------------------------------------------------------
+ESC_LOG = ("\ufeff" + STAMP + "\x1b[36;1mpython3 -I plugins/pantheon/scripts/run-tests.py\x1b[0m\n" + STAMP
+           + "\x1b[31mFAIL guard/test_a.py · 2.0 с · проверок 3 · код 1\x1b[0m\n" + STAMP
+           + "\x1b[33mкарантин pantheon/test_q.py · 1.0 с · код 1 · задача metis-0989\x1b[0m\n" + STAMP
+           + "итого: файлов 2, ok 0, FAIL 1, карантин 1; проверок 3; 2 с\n")
+GH_ARGV = []
+
+
+def _fake_gh(argv, **kw):
+    GH_ARGV.append(list(argv))
+    if "--allow-escape-sequences" not in argv:   # как gh 2.103 на настоящем логе job (проверено argus, job 131835598109)
+        return subprocess.CompletedProcess(argv, 1, "", "the response contains terminal escape sequences; pass "
+                                           "--allow-escape-sequences")
+    return subprocess.CompletedProcess(argv, 0, ESC_LOG, "")
+
+
+w = World()
+_gm = (M.gh_path, M.gh_env)
+M.gh_path, M.gh_env = (lambda: "/nonexistent/gh"), (lambda: {})
+subprocess.run = _fake_gh
+try:
+    text, err = REAL_GH_TEXT(f"repos/{REPO}/actions/jobs/1/logs")
+finally:
+    subprocess.run = _forbid
+    M.gh_path, M.gh_env = _gm
+check("gh_text: `gh api --allow-escape-sequences <endpoint>` — лог с ANSI-кодами прочитан (без флага gh отказывает)",
+      err is None and GH_ARGV and GH_ARGV[-1][1:] == ["api", "--allow-escape-sequences", f"repos/{REPO}/actions/jobs/1/logs"],
+      (err, GH_ARGV))
+check("parse: ANSI-коды и BOM сняты — FAIL, карантин и итог из лога с цветом",
+      NT.parse(text or "") == (["guard/test_a.py"], ["pantheon/test_q.py"],
+                               ["итого: файлов 2, ok 0, FAIL 1, карантин 1; проверок 3; 2 с"]), NT.parse(text or ""))
+
+# --- [без итога] ----------------------------------------------------------------------------------------------------
+NOTOTAL = STAMP + "ok   guard/test_a.py · 1.0 с · проверок 3\n"
+for name, logs, steps, drop_logs in (
+        ("части не стартовали (нет steps)", {1: "", 2: ""}, [], False),
+        ("в логе части нет строки «итого»", {1: GREEN, 2: NOTOTAL}, STEPS, False),
+        ("лог части не прочитан", {1: GREEN}, STEPS, True),
+        ("частей full-shard нет", {}, STEPS, False)):
+    w = World()
+    w.add(run(1001), logs, steps)
+    if drop_logs:
+        w.logs.clear()
+    out = NT.tick(T)
+    check(f"success, но {name} → «итога нет», не зелёный: тревога не снята и не поставлена (Д2)",
+          out and "итога нет" in out and "зелёный" not in out and NT.ALERT_KEY not in w.cleared and not w.alerts,
+          (out, w.alerts, w.cleared))
+w = World()
+w.add(run(1101), {1: GREEN})
+NT.tick(T)
+w.add(run(1102, concl="cancelled", created=iso(C0 + NT.STALE - 600)), {1: GREEN})
+w.alerts.clear()
+out = NT.tick(C0 + NT.STALE + 10)
+st = w._read_json(os.path.join(w.state, "nightly-tick.json"))
+check("cancelled после зелёного не сбрасывает отсчёт: STALE от последнего итога (C0) → тревога STALE_KEY (Д1)",
+      w.alerts and w.alerts[-1][0] == NT.STALE_KEY and out and "итога нет" in out
+      and st["done"][REPO]["final"] == C0, (out, w.alerts, st.get("done")))
+w.alerts.clear()
+NT.tick(C0 + NT.STALE + 10 + CE)
+check("и на следующем проходе (тот же запуск без итога) — тревога STALE_KEY остаётся (Д1)",
+      w.alerts and w.alerts[-1][0] == NT.STALE_KEY, w.alerts)
+check("локально ничего не запущено за весь тест", not LOCAL, LOCAL)
+
+subprocess.Popen, subprocess.run = _real_popen, _real_run
 print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)

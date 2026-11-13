@@ -369,6 +369,155 @@ def test_gate_decision():
           not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(), b.alerts())
 
 
+def test_gate_delta():
+    """metis-0784: SHA — мелкая правка вне ядра поверх SHA2 (поле delta решения шлюза guard): «принять» на SHA2
+    переносится, только если после него на SHA есть «принять» другого argus (дельта-круг); иначе — как раньше."""
+    def box(adds, **d):
+        b = Box()
+        b.request()
+        b.records = []
+        b.add("tests", who="")
+        for kind, sha, sid in adds:
+            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+        if d:
+            b.decide(**d)
+        b.run()
+        return b
+
+    # правило delta_carry (Б1 обоих argus #420): полный круг на SHA2 (два рецензента), «принять» на SHA, вернувшие SHA2
+    # приняли SHA; одно «принять» на SHA2 и одно «принять» дельты на SHA — не сливает при любом порядке
+    one = [("accept", SHA2, "s1"), ("accept", SHA, "s3")]
+    for name, adds in (("принять SHA2, потом SHA", one), ("сначала свежее на SHA", one[::-1])):
+        b = box(adds, differs=[SHA2], delta=[SHA2])
+        check(f"0784: на SHA2 одно «принять», на SHA «принять» дельты другого ({name}) — не сливает, 1 из 2",
+              not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2"), ("accept", SHA, "s1")], differs=[SHA2], delta=[SHA2])
+    check("0784: двое приняли SHA2, дельту принял один из них — его «принять» на SHA и перенос второго, 2 из 2",
+          len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2"), ("accept", SHA, "s3")], differs=[SHA2], delta=[SHA2])
+    check("0784: двое приняли SHA2, дельту — третий — сливает (argus ×3)", len(b.merges()) == 1
+          and any("argus ×3" in w[0] for w in b.windows()), (b.outs[-1], b.alerts(), b.windows()))
+    # порядок A: s1 принял SHA2, s2 вернул SHA2 и принял SHA — сливает при любом порядке записей
+    pa1, rp2, as2 = ("accept", SHA2, "s1"), ("reject", SHA2, "s2"), ("accept", SHA, "s2")
+    for adds in ([pa1, rp2, as2], [rp2, pa1, as2], [rp2, as2, pa1]):
+        b = box(adds, differs=[SHA2], delta=[SHA2])
+        check(f"0784: s2 вернул SHA2 и принял SHA, s1 принял SHA2 (порядок {[k[0][0] + k[2][1] for k in adds]}) — "
+              "сливает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    b = box([pa1, rp2, ("accept", SHA2, "s2"), ("accept", SHA, "s3")], differs=[SHA2], delta=[SHA2])
+    check("0784: вернувший SHA2 принял снова SHA2, а не SHA — перенос не годится, 1 из 2", not b.merges()
+          and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2"), ("reject", SHA3, "s4"), ("accept", SHA, "s4")],
+            differs=[SHA2, SHA3], delta=[SHA2])
+    check("0784: «вернуть» на SHA3 вне delta, вернувший принял SHA — отсечка держит «принять» на SHA2 до него, 1 из 2",
+          not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA2, "s1"), ("reject", SHA2, "s2"), ("accept", SHA, "s2")], differs=[SHA2])
+    check("0784: то же, SHA2 не в delta — отсечка по «вернуть» s2 прежняя, 1 из 2", not b.merges()
+          and "1 из 2" in b.alerts(), b.alerts())
+    b = box([("accept", SHA3, "s1"), ("reject", SHA2, "s2"), ("accept", SHA, "s2")], same=[SHA3], differs=[SHA2],
+            delta=[SHA2])
+    check("0784: на SHA2 полного круга нет (один вернувший), s1 принял SHA3 того же кода, что SHA — не полный круг, "
+          "1 из 2", not b.merges() and "1 из 2" in b.alerts(), b.alerts())
+    # Б argus #420 r2 (probe.py): A принял P, C — дельту на S′; отказ «1 из 2»; вливание main — S того же кода, S′ в
+    # same: «принять» на head из same — дельта-круг, ядро целиком видел один argus
+    b = box([("accept", SHA2, "s1"), ("accept", SHA3, "s3")], same=[SHA3], differs=[SHA2], delta=[SHA2])
+    check("0784: «принять» на SHA2 и «принять» дельты на SHA3, SHA3 в same после вливания main — не сливает, 1 из 2",
+          not b.merges() and "1 из 2" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box([("accept", SHA3, "s1"), ("reject", SHA2, "s2"), ("accept", SHA, "s2")], same=[SHA3], differs=[SHA2])
+    check("0784: то же, но SHA2 не в delta — откат к коду SHA3, принятому до «вернуть», отсечён, 1 из 2",
+          not b.merges() and "1 из 2" in b.alerts() and "раньше «вернуть»" in b.alerts(), b.alerts())
+    b = box([("accept", SHA2, "s1"), ("reject", SHA2, "s2"), ("accept", SHA3, "s2")], differs=[SHA2, SHA3],
+            delta=[SHA2])
+    check("0784: вернувший принял другой head, не сливаемый — не сливает", not b.merges(), b.alerts())
+    b = box([("reject", SHA2, "s1"), ("accept", SHA, "s3")], differs=[SHA2], delta=[SHA2])
+    check("0784: «вернуть» на SHA2, снятое другим argus на SHA, не переносится как голос — 1 из 2", not b.merges()
+          and "1 из 2" in b.alerts(), b.alerts())
+    b = box(one, differs=[SHA2])
+    check("0784: SHA2 не в delta (код другой) — не переносится, 1 из 2", not b.merges() and "1 из 2" in b.alerts()
+          and "pantheon review delta" in b.alerts(), b.alerts())
+    for name, adds, d in (
+            ("на SHA свежего «принять» нет", [("accept", SHA2, "s1"), ("accept", SHA2, "s2")], {}),
+            ("свежее «принять» на SHA — того же рецензента", [("accept", SHA2, "s1"), ("accept", SHA, "s1")], {}),
+            ("свежее «принять» на SHA записано раньше переносимого", [("accept", SHA, "s3"), ("accept", SHA2, "s1")], {}),
+            ("поле delta не список", one, {"delta": 5}),
+            ("«принять» на SHA2 записано до «вернуть» (отсечка)",
+             [("accept", SHA2, "s1"), ("reject", SHA3, "s4"), ("accept", SHA, "s3")], {"differs": [SHA2, SHA3]})):
+        b = box(adds, **{"differs": [SHA2], "delta": [SHA2], **d})
+        got = "0 из 2" if name == "на SHA свежего «принять» нет" else "1 из 2"
+        check(f"0784: {name} — не переносится, {got}", not b.merges() and got in b.alerts(), b.alerts())
+
+
+def test_ci_billing_delta():
+    """metis-0784: CI не запускался из-за лимита минут — проход засчитывает узкую запись на SHA от прошлого head SHA2
+    (`--affected --base SHA2`), если SHA2 — предок SHA (compare: ahead, merge-base — SHA2), дельта мелкая и не задевает
+    файлы шлюза, а на SHA2 есть запись полного набора или годная узкая (delta_gh_problem)."""
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    mapb = '{"v": 3}'
+    mp = hashlib.sha256(mapb.encode()).hexdigest()
+    narrow = lambda base: (FULL_TESTS_CMD.split(" -- ", 1)[1].replace("heavy ", "")
+                           .replace("run-tests.py", "run-tests.py --affected --base " + base))
+    small = {"filename": "README.md", "additions": 3, "deletions": 1, "patch": "@@ x"}
+    good = {"status": "ahead", "merge_base_commit": {"sha": SHA2}, "files": [small]}
+
+    def box(cmp=good, prev="full", more=None, chain=()):
+        b = Box()
+        b.records = []
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2")
+        b.add("tests", sha=SHA, who="", cmd=narrow(SHA2), files=["guard/test_guard.py"], map=mp)
+        if prev == "full":
+            b.add("tests", sha=SHA2, who="")
+        elif prev:
+            b.add("tests", sha=SHA2, who="", cmd=narrow(prev), files=["guard/test_guard.py"], map=mp)
+        for head, base in chain:  # звенья цепочки дальше SHA2: узкая от base или полная (base None)
+            b.add("tests", sha=head, who="", **({} if base is None else
+                                                 {"cmd": narrow(base), "files": ["guard/test_guard.py"], "map": mp}))
+        b.request()
+        b.set("gh-map", mapb)
+        b.set("gh-cmp.json", json.dumps({f"{SHA2}...{SHA}": cmp, **(more or {})}))
+        b.view(SHA, checks=blocked)
+        b.run()
+        return b
+
+    b = box()
+    check("0784: лимит, узкая от прошлого head с полной записью на нём → окно и слияние", len(b.merges()) == 1
+          and "узкий прогон" in b.windows()[0][0], (b.outs[-1], b.alerts()))
+    b = box(prev="c" * 40)
+    check("0784: на прошлом head узкая от merge-base → слияние", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+    # цепочка дельт (Д1 argus #420): SHA ← SHA2 ← H[0] ← … ← H[k-1] с полной записью; звеньев k + 1, предел DELTA_DEPTH 4
+    H = [c * 40 for c in "d0123"]
+    for links, ok in ((4, True), (5, False)):
+        hs = H[:links - 1]
+        chain = [(hs[j], hs[j + 1] if j + 1 < len(hs) else None) for j in range(len(hs))]
+        cmps = {f"{b_}...{h_}": dict(good, merge_base_commit={"sha": b_}) for h_, b_ in [(SHA2, hs[0])] + chain[:-1]}
+        b = box(prev=hs[0], chain=chain, more=cmps)
+        check(f"0784: цепочка дельт из {links} звеньев → {'слияние' if ok else 'окна нет, «цепочка дельт длиннее»'}",
+              len(b.merges()) == 1 if ok else not b.merges() and "цепочка дельт длиннее" in b.alerts(),
+              (b.outs[-1], b.alerts()))
+    gate_file = dict(small, filename="plugins/guard/hooks/merge_gate.py")
+    for name, kw in (("на прошлом head записи нет", {"prev": None}),
+                     ("сравнение не получено (gh)", {"cmp": None}),
+                     ("прошлый head не предок (diverged)", {"cmp": dict(good, status="diverged")}),
+                     ("merge-base сравнения — не прошлый head", {"cmp": dict(good, merge_base_commit={"sha": SHA3})}),
+                     ("дельта задевает файл шлюза", {"cmp": dict(good, files=[gate_file])}),
+                     ("переименование вне ядра (Д1 argus #420)", {"cmp": dict(good, files=[dict(
+                         small, previous_filename="docs/old.md", status="renamed")])}),
+                     ("переименование из файла шлюза", {"cmp": dict(good, files=[dict(
+                         small, previous_filename="plugins/guard/hooks/merge_gate.py", status="renamed")])}),
+                     ("дельта 201 строка", {"cmp": dict(good, files=[dict(small, additions=150, deletions=51)])}),
+                     ("файл без patch (двоичный)", {"cmp": dict(good, files=[{"filename": "a.bin", "additions": 0,
+                                                                               "deletions": 0}])}),
+                     ("300 файлов — предел ответа", {"cmp": dict(good, files=[
+                         {"filename": f"f{i}", "additions": 0, "deletions": 0, "patch": ""} for i in range(300)])}),
+                     ("цикл записей SHA ↔ SHA2", {"prev": SHA, "more": {f"{SHA}...{SHA2}": dict(
+                         good, merge_base_commit={"sha": SHA})}})):
+        b = box(**kw)
+        check(f"0784: лимит, узкая от прошлого head — {name} → окна нет, заявка снята",
+              not b.windows() and not b.merges() and "годной узкой" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = box(cmp=dict(good, files=[{"filename": f"f{i}", "additions": 0, "deletions": 0, "patch": ""}
+                                  for i in range(299)]))
+    check("0784: 299 файлов без строк — дельта годится, слияние", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
+
+
 def test_request_conflict_blocked():
     """metis-0987: `pantheon merge request` с конфликтом с base заявки не ставит; BLOCKED (защита ветки base) —
     заявка ждёт, окна нет."""

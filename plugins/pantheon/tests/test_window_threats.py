@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -672,8 +673,9 @@ SCRIPT_FROM_REPO = (
 NO_HASH = ("if hashlib.sha256(_read_fd(fd, MANIFEST_LIMIT)).hexdigest() != want:", "if False:")
 SWAP_NP = r"""
 import ctypes, os, sys
-d, a, b, stop = sys.argv[1:5]
+d, a, b, stop, ready = sys.argv[1:6]
 os.chdir(d)
+open(ready, "w").close()  # chdir сделан: следующий обменщик может менять d местами (metis-1118)
 rx = ctypes.CDLL(None).renamex_np
 n = 0
 while not os.path.exists(stop):
@@ -689,7 +691,15 @@ def swap_np(d, a, b, stop):
     """Фоновый обмен d/a ↔ d/b (renamex_np, RENAME_SWAP) — как отвязанный ребёнок прошлой сессии окна."""
     if os.path.exists(stop):
         os.unlink(stop)
-    return subprocess.Popen([sys.executable, "-I", "-c", SWAP_NP, d, a, b, stop], stdout=subprocess.PIPE, text=True)
+    ready = f"{stop}.{a}.ready"
+    if os.path.exists(ready):
+        os.unlink(ready)
+    p = subprocess.Popen([sys.executable, "-I", "-c", SWAP_NP, d, a, b, stop, ready], stdout=subprocess.PIPE, text=True)
+    # ждём chdir: иначе следующий обменщик (app ↔ evil) успевает подменить d, и этот встаёт в чужую папку — 0 обменов
+    deadline = time.monotonic() + 30
+    while not os.path.exists(ready) and p.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    return p
 
 
 def swap_stop(procs, stop):

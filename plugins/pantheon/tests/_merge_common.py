@@ -140,6 +140,15 @@ if sys.argv[1] == "api" and "/git/ref/heads/" in sys.argv[2]:
     print(json.dumps({"ref": "refs/heads/" + sys.argv[2].split("/git/ref/heads/")[1],
                       "object": {"sha": open(t).read().strip() if os.path.exists(t) else "b" * 40, "type": "commit"}}))
     sys.exit(0)
+if sys.argv[1] == "api" and "/compare/" in sys.argv[2] and "--jq" not in sys.argv:
+    # сравнение прошлого head с новым целиком (delta_gh_problem, metis-0784): rec/gh-cmp.json — {"base...sha": ответ};
+    # пары нет — код 1
+    t = os.path.join(rec, "gh-cmp.json")
+    got = json.load(open(t)).get(sys.argv[2].split("/compare/")[1]) if os.path.exists(t) else None
+    if got is None:
+        sys.exit(1)
+    print(json.dumps(got))
+    sys.exit(0)
 if sys.argv[1] == "api" and "/compare/" in sys.argv[2]:
     # merge-base head и base (narrow_gh_problem, metis-1050): rec/gh-mb — SHA (по умолчанию c×40); gh-mb-fail — сбой
     if os.path.exists(os.path.join(rec, "gh-mb-fail")):

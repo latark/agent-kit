@@ -176,6 +176,9 @@ def test_review_cli():
     tmp, home, state, gh, env = make()
     try:
         put(home, "metis-0001")
+        # metis-0669: «принять» — только на head с записью тестов шлюза или зелёным CI; запись tests на H1 есть
+        write_records(state, [dict(verdict("tests", H1, cl=None, base=None), by={"agent_type": "pantheon-outside"},
+                                   cmd="x")])
         base = ["review", "accept", "latark/agent-kit", "7", H1, "--opened", "a", "--ran", "b", "--unchecked", "c"]
         ok1, ok2 = crit("metis-0001", 1, A1), crit("metis-0001", 2, A2, basis="t_two")
         r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")

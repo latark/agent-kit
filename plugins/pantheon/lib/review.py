@@ -1,5 +1,7 @@
 """Пантеон: pantheon review — записи для шлюза слияния guard (P1-4, guard 0.5.4): test, accept, reject, talos,
-begin, miss, sample, status, report (metis-0602: отчёт прежнего argus из его транскрипта).
+begin, miss, sample, status, report (metis-0602: отчёт прежнего argus из его транскрипта), delta (metis-0784: какой
+нужен круг argus — дельта от прошлого проверенного head или полный — и готов ли head). accept — только на head с
+записью тестов шлюза или зелёным CI (review_ready, metis-0669): иначе код 1, и хук guard «принять» не пишет.
 
 Вынесено из pantheon.py (metis-0586) без изменения поведения. P — модуль pantheon: его ставит загрузчик
 pantheon._attach до выполнения этого файла, имена из __all__ становятся именами pantheon (P.review_cmd и т. д.).
@@ -16,7 +18,8 @@ __all__ = [
     "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "_review_verdict", "_review_git", "_review_state",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
     "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report", "NODE_MODULES_LINK", "tree_clean",
-    "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "criteria_accepted", "review_criteria_ticks",
+    "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "criteria_accepted", "review_criteria_ticks", "review_ready",
+    "review_delta",
 ]
 
 
@@ -32,7 +35,8 @@ REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/rep
                 "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый проверенный "
                 "пункт «Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
                 "<owner/repo>#<PR> --by <argus> --text \"…\" | sample | criteria <id задачи>… | status [<owner/repo> <PR>] "
-                "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
+                "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ] | delta <owner/repo> <PR> (из клона: "
+                "дельта-круг или полный, готов ли head к argus)")
 # Правило засчитывания вердиктов (REVIEW_CHECKLIST, OPUS_RAN, RAN_MODEL, review_accept_full, review_accept_counts,
 # review_records) — в lib/review_rules.py, ядре защит (metis-0858): здесь только P.<имя>, копии правила нет.
 
@@ -409,8 +413,153 @@ def carry_lines(repo, pr):
             out.append(f"{t}  decision  код {sha} (base {d.get('base')}): тот же — "
                        f"{', '.join(h[:12] for h in d['same']) or 'нет'}; другой — "
                        f"{', '.join(h[:12] for h in d['differs']) or 'нет'}"
+                       + (f"; мелкая правка поверх (metis-0784) — {', '.join(str(h)[:12] for h in d['delta'])}"
+                          if isinstance(d.get("delta"), list) and d["delta"] else "")
                        + (f"; не сверено: {'; '.join(map(str, why))}" if why else ""))
     return out
+
+
+# --- готовность к кругу argus и дельта-круг (metis-0669, 0784) -----------------------------------------------------
+# argus смотрит PR только после зелёного CI или записи тестов шлюза на head (иначе ревью идёт по коду, который ещё
+# упадёт). Полный круг — на свежем main (base не впереди head); повторный круг после мелкой правки поверх уже
+# проверенного head — только дельта, без rebase: rebase рвёт дельту (прошлый head перестаёт быть предком), и круг
+# снова полный. Правила дельты — merge.delta_problem (те же, что у шлюзов guard и владельца).
+
+def _outside_test(base=None):
+    """Команда записи тестов для подсказки роли. Узкая (`--affected`, от base, если задан) — только если проверка
+    проекта (.pantheon-verify в корне git текущей папки) — run-tests.py: `outside test --affected` гоняет именно его,
+    в репозитории без него узкой нет (Д2 argus #420). Иначе — полный набор."""
+    top = (_review_git("rev-parse", "--show-toplevel") or "").strip()
+    try:
+        with open(os.path.join(top, ".pantheon-verify"), encoding="utf-8") as fh:
+            runner = "run-tests.py" in fh.read()
+    except (OSError, ValueError):
+        runner = False
+    if not top or not runner:
+        return "pantheon outside test --wait 590"
+    return "pantheon outside test --affected " + (f"--base {base} " if base else "") + "--wait 590"
+
+
+def review_ready(repo, pr, sha, M, recs, view=False):
+    """Можно ли argus «принять» head sha PR repo#pr (metis-0669) → None или почему нет: на sha есть запись tests шлюза
+    (любая — узкая, полная; recs — записи журнала этого репозитория) или CI на head PR зелёный (gh pr view, если view
+    не передан; M.ci_state по всем проверкам rollup). Сбой gh, PR на другом head, CI идёт или красный — причина."""
+    if any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
+        return None
+    view = M.pr_view(repo, pr) if view is False else view
+    if not isinstance(view, dict):
+        return f"на {sha[:12]} нет записи тестов шлюза, а gh pr view не ответил — CI не проверить"
+    head = str(view.get("headRefOid") or "").lower()
+    if head != sha:
+        return f"у PR head {head[:12] or '?'}, а не {sha[:12]} — ревью на старом коммите"
+    state, why, _ = M.ci_state(view.get("statusCheckRollup"))
+    if state == "ok":
+        return None
+    return (f"на {sha[:12]} нет записи тестов шлюза, а CI не зелёный ({why}). argus — только после зелёного CI или "
+            f"записи: `{_outside_test()}` из чистой копии на этом коммите (metis-0669)")
+
+
+def _delta_rows(old, new):
+    """git diff --numstat old new в текущей папке → [(путь, добавлено, удалено)] (у двоичного — None) или None."""
+    out = _review_git("diff", "--numstat", "-z", "--no-renames", "--no-relative", "--ignore-submodules=none",
+                      "--no-ext-diff", "--no-textconv", old, new)
+    if out is None or out and not out.endswith("\0"):
+        return None
+    rows = []
+    for part in out[:-1].split("\0") if out else []:
+        bits = part.split("\t", 2)
+        if len(bits) != 3 or not bits[2] or not all(b.isdigit() or b == "-" for b in bits[:2]):
+            return None
+        rows.append((bits[2], *(int(b) if b.isdigit() else None for b in bits[:2])))
+    return rows
+
+
+def _delta_round(M, repo, head, base_name, verdicts):
+    """(прошлый head или None, почему круг полный или None, строк дельты, годится ли дельта тестам, base свежий) для
+    дельта-круга: прошлый head — последний с вердиктом argus, кроме head; он — предок head в git текущей папки, дельта
+    годится по merge.delta_problem с ядром окна (window_core), тестам — без ядра (только файлы шлюза). Полный круг — на
+    свежем base: он не впереди head (gh compare, behind_by 0)."""
+    prev = next((r["sha"] for r in reversed(verdicts) if r["sha"] != head), None)
+    why = "первый круг" if prev is None else None
+    rows = ren = None
+    if prev and _review_git("merge-base", "--is-ancestor", prev, head) is None:
+        why = (f"прошлый head {prev[:12]} не предок {head[:12]} (rebase или его нет в git папки — git fetch): дельту не "
+               "посчитать")
+    elif prev:
+        ren = _review_git("diff", "-z", "--name-only", "--diff-filter=R", "-M", "--no-relative",
+                          "--ignore-submodules=none", "--no-ext-diff", prev, head)
+        ren = "дельту с прошлого head не посчитать" if ren is None else M.DELTA_RENAME if ren else None
+        rows = _delta_rows(prev, head)
+        why = ren or M.delta_problem(rows, core=M.window_core)
+    lines = sum((a or 0) + (d or 0) for _, a, d in rows or [])
+    tests_ok = rows is not None and not ren and M.delta_problem(rows) is None
+    if why:
+        try:
+            r = subprocess.run([M.gh_path(), "api", f"repos/{repo}/compare/{base_name}...{head}", "--jq", ".behind_by"],
+                               capture_output=True, text=True, timeout=M.GH_TIMEOUT, env=M.gh_env())
+            behind = r.stdout.strip() if r.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            behind = ""
+        if behind != "0":
+            why += (f"; полный круг — на свежем {base_name}: head отстаёт на {behind} коммитов — rebase на свежий "
+                    f"{base_name} до круга" if behind.isdigit() else f"; свежесть {base_name} не проверить (gh)")
+            return prev, why, lines, tests_ok, False
+    return prev, why, lines, tests_ok, True
+
+
+def _accept_unready(sub, args):
+    """metis-0669: «принять» — только на head с записью тестов или зелёным CI → причина или None (не accept — None).
+    Код не 0 у команды — хук guard «принять» не пишет."""
+    if sub != "accept":
+        return None
+    repo = args[0].lower()
+    return review_ready(repo, int(args[1]), args[2].lower(), P.merge_mod(), P.review_records(repo))
+
+
+def review_delta(args):
+    """`pantheon review delta <owner/repo> <PR>` из клона репозитория (metis-0784, 0669): какой нужен круг argus на
+    нынешнем head PR — дельта от прошлого проверенного head или полный, — какой командой писать тесты и готов ли head к
+    argus (запись тестов или зелёный CI, а для полного круга — свежий base). Код 0 — готов, 1 — нет, 2 — формат."""
+    if len(args) != 2 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1]):
+        print("pantheon review delta <owner/repo> <номер PR> — из клона репозитория", file=sys.stderr)
+        return 2
+    repo, pr, M = args[0].lower(), int(args[1]), P.merge_mod()
+    view = M.pr_view(repo, pr)
+    head = str((view or {}).get("headRefOid") or "").lower()
+    base_name = (view or {}).get("baseRefName")
+    if not REVIEW_SHA.fullmatch(head) or not isinstance(base_name, str) or not base_name:
+        print(f"pantheon review delta: gh pr view {pr} -R {repo} не дал head и base PR", file=sys.stderr)
+        return 1
+    recs = P.review_records(repo)
+    verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
+                and isinstance(r.get("sha"), str) and isinstance(r.get("by"), dict)
+                and r["by"].get("agent_type") == "argus"]
+    prev, why, lines, tests_ok, fresh = _delta_round(M, repo, head, base_name, verdicts)
+    if why:
+        print(f"круг: полный на {head[:12]} — {why}")
+    else:
+        print(f"круг: дельта {prev[:12]}..{head[:12]} ({lines} строк, вне ядра) — argus смотрит только `git diff "
+              f"{prev} {head}`; «принять» на {prev[:12]} шлюз владельца переносит, если на нём полный круг "
+              f"({M.MIN_ACCEPTS} argus), на этом head есть «принять» argus, а каждый, кто вернул {prev[:12]}, принял "
+              "этот head (решение при `pantheon merge request`)")
+    has_prev = tests_ok and any(r.get("kind") == "tests" and r.get("sha") == prev for r in recs)
+    cmd = _outside_test(prev if has_prev else None)
+    print(f"тесты: из чистой копии на head `{cmd}`"
+          + (" (дельта от прошлого head с записью тестов)" if "--base" in cmd else ""))
+    latest = {}
+    for r in verdicts:
+        latest[M._reviewer(r)] = r
+    for (sid, aid), r in latest.items():
+        if r["kind"] == "reject":
+            who = f"{aid[:8]}/{sid[:8]}" if aid else sid[:8]
+            print(f"вернул: {who or '—'} на {r['sha'][:12]} — в поручение нового argus: "
+                  f"`pantheon review report {repo} {pr} {who}`")
+    ready = review_ready(repo, pr, head, M, recs, view)
+    if ready or not fresh:
+        print(f"pantheon review delta: head {head[:12]} не готов к argus — {ready or why}", file=sys.stderr)
+        return 1
+    print(f"готов к argus: head {head[:12]}")
+    return 0
 
 
 REVIEW_PENDING_TTL = 2 * 3600  # метка «ревью идёт» устаревает через 2 часа
@@ -569,6 +718,10 @@ def review_cmd(rest):
         if why:
             print(f"pantheon review {sub}: {why}", file=sys.stderr)
             return 2
+        why = _accept_unready(sub, args)
+        if why:
+            print(f"pantheon review accept: не записано — {why}", file=sys.stderr)
+            return 1
         who = "argus" if sub != "talos" else "talos"
         print(f"pantheon review {sub}: {args[0].lower()}#{args[1]} @ {args[2].lower()} — записано хуком guard, "
               f"если роль подходит ({who})")
@@ -577,10 +730,8 @@ def review_cmd(rest):
         for v in crit:
             print(f"  пункт: {v}")
         return 0
-    if sub == "criteria":
-        return review_criteria_cmd(rest[1:])
-    if sub == "report":
-        return review_report(rest[1:])
+    if sub in ("criteria", "delta", "report"):
+        return {"criteria": review_criteria_cmd, "delta": review_delta, "report": review_report}[sub](rest[1:])
     if sub == "status":
         args = rest[1:]
         if args and (len(args) != 2 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1])):

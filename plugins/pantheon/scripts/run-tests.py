@@ -11,6 +11,19 @@
                   ok/FAIL); метки нет среди файлов папок — код 2 без прогона. Дозапуск прохода outside (metis-0735):
                   упавшие в прошлом полном прогоне и затронутые диффом; с --affected — отказ
   --cache         не гонять файл, чей ключ входов совпал с его зелёным прогоном (metis-0698; ниже «Кэш»)
+  --shard K/N     только часть K из N выбранных файлов (metis-1111, части CI на параллельных раннерах); с --only — отказ
+
+Части (--shard). После выбора файлов (весь набор или --affected) и пропуска SKIP_NOT_MAC файлы делятся на N частей
+жадно по весу (shard_split): самый тяжёлый — в самую лёгкую часть, при равенстве — в часть с меньшим номером. Вес —
+только из репозитория, одинаковый на любом раннере (metis-1117): время файла на CI macOS из scripts/shard-times.json
+(SHARD_TIMES; {"source", "times": {метка: с}, "estimated": [метки с оценкой вместо замера]}), а файла, которого там
+нет (новый), — max(размер файла / SHARD_BYTES_PER_SEC, предел SLOW / SHARD_SLOW_DIV). Файл времён обновляет
+scripts/shard-times.py из журнала CI: `gh run view <id> --log | python3 -I plugins/pantheon/scripts/shard-times.py`.
+Строка части называет, у скольких файлов вес — замер («по замеру CI K из N»).
+Журнал times.jsonl в вес не идёт: он свой на каждой машине, и части на разных раннерах поделили бы набор по-разному
+(дыры и повторы); внутри части порядок по нему, как всегда. Части не пересекаются, вместе — весь выбор. Пустая часть —
+код 0 и строка «часть K/N: файлов нет». Строки пропуска SKIP_NOT_MAC печатает и считает только часть 1. Храповик
+(с `ruff check .`) идёт только в части 1 — не N раз.
 
 Файл тестов идёт в классе QoS раннера (metis-0647): `taskpolicy -c utility` из окна роли опускал его из default вдвое
 (test_merge_gate 221–255 с против 115–122 с), а клемп launchd плановому проходу изнутри не снять. RUN_TESTS_QOS=utility
@@ -132,6 +145,11 @@ SLOW = {
     # нагрузкой); снов и git нет, ускорять нечем без потери изоляции. 600 ≈ 3.5 × 171, как у test_read
     # план 1.0, Т2: test_merge — 5 частей (замер 13.11 под heavy: 13–68 с); предел части 240 ≈ 3.5 × 68
     **{f"pantheon/test_merge{s}.py": 240 for s in ("", "_window", "_ci", "_env", "_batch")},
+    # metis-1117: test_outside_narrow / _rerun / _tree шли на CI macos-15 по 480–522 с (на Linux 6–6.5 с) — полный набор
+    # в тесте ждал спада нагрузки (wait_load, load раннера 80–110 при пороге 9); тесты подменяют load_state. Ожидаемо
+    # ≈ 20 с (Linux × 3, верх отношения macOS / Linux по журналу CI); предел 180 — не меньше 180, ≈ 9 × ожидаемого:
+    # вернётся ожидание спада — файл упадёт по таймауту, а не растянет часть до 9 мин
+    **{f"pantheon/test_outside_{s}.py": 180 for s in ("narrow", "rerun", "tree")},
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
     "pantheon/test_setup.py": 480,  # 109 / 303
     "pantheon/test_start.py": 480,  # 136 / 289
@@ -193,6 +211,7 @@ WINDOW_FS = {
     "pantheon/test_workshop_sockets.py", "pantheon/test_tick_skip.py", "pantheon/test_map_cache.py",
     "pantheon/test_window_folders.py", "pantheon/test_window_pack.py",
     "pantheon/test_outside_tree.py", "pantheon/test_outside_cancel.py",   # части test_outside.py (metis-0750)
+    "pantheon/test_outside_test_keys.py",   # ключи тестов outside (metis-1016): git init в _outside_common
     "pantheon/test_watch_zeus.py", "pantheon/test_watch_stop.py", "pantheon/test_watch_oneshot.py",   # части test_watch.py
     "pantheon/test_watch_sandbox.py", "pantheon/test_watch_infra.py", "pantheon/test_watch_nudge.py",   # (план 1.0, Т2)
     "pantheon/test_watch_respawn.py", "pantheon/test_watch_ghost.py",
@@ -753,6 +772,88 @@ def order(items, slow=None, serial=None, hist=None):
     return par, ser
 
 
+SHARD_BYTES_PER_SEC = 1000  # ~1 КБ файла тестов ≈ 1 с (test_merge_gate 487 КБ / 458 с, test_board 100 КБ / 98 с)
+SHARD_SLOW_DIV = 3  # предел SLOW ≈ 1.5–3.5 × медианы: у малых, но долгих файлов (test_shell_diff 15 КБ / 254 с)
+# Время файлов на CI macOS (metis-1117): {"source": откуда, "times": {метка: с}, "estimated": [метки — оценка, а не
+# замер]} рядом с раннером. Обновляет scripts/shard-times.py из `gh run view <id> --log`. Это данные репозитория:
+# у всех раннеров один и тот же вес, части не расходятся.
+SHARD_TIMES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shard-times.json")
+
+
+def shard_times(path=None):
+    """{метка: с} из файла времён частей (SHARD_TIMES). Нет файла, он битый или без times — {}: вес тогда — оценка по
+    размеру и SLOW. Значение не число (или bool), отрицательное — метка пропускается, остальные берутся."""
+    path = SHARD_TIMES if path is None else path
+    try:
+        with open(path, encoding="utf-8") as fh:
+            times = json.load(fh)["times"]
+        return {str(k): float(v) for k, v in times.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def shard_weight(pdir, label, slow=None, times=None):
+    """Вес файла, с — только из репозитория, без журнала машины: время из файла времён (times; None — shard_times()),
+    нет там метки — оценка max(размер / SHARD_BYTES_PER_SEC, SLOW / SHARD_SLOW_DIV)."""
+    times = shard_times() if times is None else times
+    if label in times:
+        return times[label]
+    slow = SLOW if slow is None else slow
+    try:
+        size = os.path.getsize(os.path.join(pdir, "tests", label.split("/", 1)[1]))
+    except OSError:
+        size = 0
+    return max(size / SHARD_BYTES_PER_SEC, slow.get(label, 0) / SHARD_SLOW_DIV)
+
+
+def shard_weigher(times=None):
+    """Вес элемента (папка, метка) для shard_split: файл времён читается один раз (times None — shard_times())."""
+    times = shard_times() if times is None else times
+
+    def weight(it):
+        return shard_weight(it[0], it[1], times=times)
+    return weight
+
+
+def shard_split(items, n, weight=None):
+    """[часть 1, …, часть n] — items, поделённые жадно по весу: файлы по убыванию веса (при равенстве — по метке), каждый
+    в самую лёгкую часть (при равенстве — с меньшим номером). Внутри части — порядок items. weight по умолчанию —
+    shard_weight с файлом времён, прочитанным один раз."""
+    weight = weight or shard_weigher()
+    loads, parts = [0.0] * n, [[] for _ in range(n)]
+    for it in sorted(items, key=lambda it: (-weight(it), it[1])):
+        k = min(range(n), key=lambda i: (loads[i], i))
+        loads[k] += weight(it)
+        parts[k].append(it)
+    pos = {it[1]: i for i, it in enumerate(items)}
+    return [sorted(p, key=lambda it: pos[it[1]]) for p in parts]
+
+
+def pick_shard(items, skipped, k, n, times=None):
+    """(файлы части k из n, пропуски SKIP_NOT_MAC — только у части 1) и строка о части; пустая часть — ([], …) и
+    строка «часть K/N: файлов нет» (main выходит с кодом 0). times — время файлов (None — файл SHARD_TIMES)."""
+    times = shard_times() if times is None else times
+    weight = shard_weigher(times)
+    mine = shard_split(items, n, weight)[k - 1]
+    if not mine:
+        print(f"run-tests: часть {k}/{n}: файлов нет (выбрано {len(items)}, частей {n})", flush=True)
+        return [], []
+    print(f"run-tests: часть {k}/{n} — файлов {len(mine)} из {len(items)}, оценка "
+          f"{sum(map(weight, mine)):.0f} с из {sum(map(weight, items)):.0f}; по замеру CI "
+          f"{sum(1 for it in items if it[1] in times)} из {len(items)}", flush=True)
+    return mine, (skipped if k == 1 else [])
+
+
+def parse_shard(v):
+    """«K/N» → (K, N) при 1 ≤ K ≤ N; иначе None."""
+    m = re.fullmatch(r"(\d+)/(\d+)", v.strip())
+    if not m:
+        return None
+    k, n = int(m[1]), int(m[2])
+    return (k, n) if 1 <= k <= n else None
+
+
 def checks(out):
     """(есть ли итог, число проверок, плохой итог или None). Итог — последняя непустая строка (TEST_SUMMARY); число проверок — из итога, без числа в нём — по строкам ok."""
     lines = ANSI.sub("", out).splitlines()
@@ -1010,7 +1111,7 @@ class Job:
 
 def parse(argv):
     opts = {"jobs": None, "timeout": None, "log_dir": None, "dirs": [], "affected": False, "base": None, "only": None,
-            "cache": False}
+            "cache": False, "shard": None}
     it = iter(argv)
     for a in it:
         if a in ("-h", "--help"):
@@ -1020,11 +1121,15 @@ def parse(argv):
             opts["affected"] = True
         elif a == "--cache":
             opts["cache"] = True
-        elif a in ("-j", "--jobs", "--timeout", "--log-dir", "--base", "--only"):
+        elif a in ("-j", "--jobs", "--timeout", "--log-dir", "--base", "--only", "--shard"):
             v = next(it, None)
             if v is None:
                 sys.exit(f"run-tests: {a} без значения")
-            if a == "--only":
+            if a == "--shard":
+                opts["shard"] = parse_shard(v)
+                if opts["shard"] is None:
+                    sys.exit(f"run-tests: --shard {v!r} — нужно K/N, где 1 ≤ K ≤ N")
+            elif a == "--only":
                 labels = [x.strip() for x in v.split(",")]
                 if not all(labels):
                     sys.exit(f"run-tests: --only {v!r} — пустая метка")
@@ -1049,6 +1154,8 @@ def parse(argv):
         sys.exit("run-tests: --base без --affected — полный прогон базы не требует")
     if opts["only"] is not None and opts["affected"]:
         sys.exit("run-tests: --only с --affected — выбирает что-то одно")
+    if opts["only"] is not None and opts["shard"] is not None:
+        sys.exit("run-tests: --only с --shard — дозапуск названных файлов на части не делится")
     return opts
 
 
@@ -1130,6 +1237,10 @@ def main(argv):
             print(f"skip {label} · пропущено: нужен macOS — {why}")
         print("run-tests: все выбранные файлы пропущены — нечего гонять")
         return 3
+    if opts["shard"] is not None:
+        items, skipped = pick_shard(items, skipped, *opts["shard"])
+        if not items:
+            return 0
     cdir, ckeys, cached = None, {}, {}
     if opts["cache"]:
         cdir, ckeys, cached, cline = cache_plan(items, opts["dirs"])
@@ -1319,7 +1430,8 @@ def run_all(argv):
     """main и храповик до него (и при --only: дозапуск outside пишет запись полного набора): красный храповик — код 1
     и причина последней строкой после итога."""
     opts = parse(argv)
-    res = ratchet(opts["dirs"]) if opts["dirs"] else None
+    first = opts["shard"] is None or opts["shard"][0] == 1  # части 2..N храповик не гоняют: он один на весь набор
+    res = ratchet(opts["dirs"]) if opts["dirs"] and first else None
     if res is not None:
         rc, lines = res
         if rc == 2:
