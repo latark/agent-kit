@@ -682,6 +682,87 @@ r = run(["--only", "alpha/test_b.py", "--affected", a])
 check("--only с --affected — отказ без прогона", r.returncode != 0 and "--only с --affected" in r.stdout
       and "итого" not in r.stdout, r.stdout)
 
+# --- --shard K/N: части CI на параллельных раннерах (metis-1111) ---
+def ran(out):
+    return re.findall(r"^(?:ok  |FAIL|карантин) (\S+) ·", out, re.M)
+
+
+SW = {f"p/test_{c}.py": w for c, w in zip("abcdefghij", (10, 9, 8, 7, 6, 5, 4, 3, 2, 1))}
+SIT = [("/x", lb) for lb in sorted(SW)]
+def wfn(it):
+    return SW[it[1]]
+
+
+for n in (1, 2, 3, 4, 11):
+    parts = R.shard_split(SIT, n, wfn)
+    flat = [it for p in parts for it in p]
+    check(f"shard_split на {n}: частей {n}, вместе — весь набор, без пересечений",
+          len(parts) == n and sorted(flat) == sorted(SIT) and len(flat) == len(set(flat)), parts)
+    loads = [sum(SW[lb] for _, lb in p) for p in parts]
+    check(f"shard_split на {n}: баланс — разница частей не больше самого тяжёлого файла",
+          max(loads) - min(loads) <= max(SW.values()), loads)
+check("shard_split: детерминизм — тот же вход и перемешанный вход дают те же части (как множества)",
+      R.shard_split(SIT, 3, wfn) == R.shard_split(SIT, 3, wfn)
+      and [sorted(p) for p in R.shard_split(list(reversed(SIT)), 3, wfn)] == [sorted(p) for p in R.shard_split(SIT, 3, wfn)])
+check("shard_split: жадно — 10, 9, 8 по частям 1, 2, 3, 7 — в самую лёгкую (3), при равной — в меньший номер; "
+      "внутри части — порядок входа",
+      [[lb[-4] for _, lb in p] for p in R.shard_split(SIT, 3, wfn)] == [["a", "f", "g"], ["b", "e", "h"],
+                                                                         ["c", "d", "i", "j"]],
+      R.shard_split(SIT, 3, wfn))
+eq = [("/x", f"p/test_{c}.py") for c in "dcba"]
+check("shard_split: равные веса — по метке, в часть с меньшим номером",
+      R.shard_split(eq, 2, lambda it: 1) == [[eq[1], eq[3]], [eq[0], eq[2]]], R.shard_split(eq, 2, lambda it: 1))
+check("parse_shard: 1/1, 2/4 — да; 0/2, 3/2, 1/0, a/b, 2, пусто — нет",
+      R.parse_shard("1/1") == (1, 1) and R.parse_shard(" 2/4 ") == (2, 4)
+      and all(R.parse_shard(v) is None for v in ("0/2", "3/2", "1/0", "a/b", "2", "", "1/2/3", "-1/2")))
+wp = mkplugin({"test_big.py": "x = 1\n" + "#" * 5000 + "\n", "test_small.py": "x = 1\n"}, "wplug")
+check("shard_weight: размер файла / SHARD_BYTES_PER_SEC; предел SLOW / SHARD_SLOW_DIV, если он больше",
+      R.shard_weight(wp, "wplug/test_big.py", {}) > R.shard_weight(wp, "wplug/test_small.py", {})
+      and R.shard_weight(wp, "wplug/test_small.py", {"wplug/test_small.py": 300}) == 300 / R.SHARD_SLOW_DIV
+      and R.shard_weight(wp, "wplug/test_none.py", {}) == 0, R.shard_weight(wp, "wplug/test_big.py", {}))
+whole = sorted(ran(run([a, b]).stdout))
+got, codes = [], []
+for k in (1, 2):
+    r = run(["--shard", f"{k}/2", a, b])
+    codes.append(r.returncode)
+    got.append(ran(r.stdout))
+    check(f"--shard {k}/2: строка части с числом файлов", f"run-tests: часть {k}/2 — файлов {len(got[-1])} из 3"
+          in r.stdout, r.stdout)
+check("--shard 1/2 и 2/2: код 0, вместе — весь набор, без пересечений",
+      codes == [0, 0] and sorted(got[0] + got[1]) == whole and not set(got[0]) & set(got[1]) and all(got), got)
+r = run(["--shard", "4/4", a, b])
+check("--shard 4/4 при 3 файлах: пустая часть — код 0 и строка «часть 4/4: файлов нет», без прогона",
+      r.returncode == 0 and "часть 4/4: файлов нет" in r.stdout and not ran(r.stdout) and "итого" not in r.stdout,
+      r.stdout)
+for bad in ("0/2", "3/2", "x", "1/0"):
+    r = run(["--shard", bad, a])
+    check(f"--shard {bad} — отказ без прогона, причина последней строкой",
+          r.returncode not in (0, 2, 3) and r.stdout.strip().splitlines()[-1].startswith("run-tests: --shard")
+          and "итого" not in r.stdout, r.stdout)
+r = run(["--shard", "1/2", "--only", "alpha/test_b.py", a])
+check("--shard с --only — отказ без прогона, причина последней строкой",
+      r.returncode not in (0, 2, 3) and "--only с --shard" in r.stdout.strip().splitlines()[-1]
+      and "итого" not in r.stdout, r.stdout)
+r = run(["--shard"])
+check("--shard без значения — отказ", r.returncode != 0 and "без значения" in r.stdout and "итого" not in r.stdout,
+      r.stdout)
+put(os.path.join(al, "tests", "test_new.py"), OK2)  # затронуто два файла: test_x (правка lib/x.py) и новый
+r = run_aff("--affected", "--base", "main", al)
+aff_all = sorted(ran(r.stdout))
+aff = [ran(run_aff("--affected", "--base", "main", "--shard", f"{k}/2", al).stdout) for k in (1, 2)]
+os.remove(os.path.join(al, "tests", "test_new.py"))
+check("--affected --shard: части делят выбор затронутого — вместе он весь, без пересечений",
+      len(aff_all) == 2 and sorted(aff[0] + aff[1]) == aff_all and not set(aff[0]) & set(aff[1]) and all(aff),
+      (aff_all, aff))
+PEN_SH = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux", "RUN_TESTS_CACHE": os.path.join(_ROOT, "pen-sh-cache")}
+sp = mkplugin({"test_setup.py": "print('ok a')\nraise SystemExit(1)\n", "test_a.py": OK2, "test_b.py": OK2}, "pantheon")
+r1, r2 = run(["--shard", "1/2", sp], env=PEN_SH), run(["--shard", "2/2", sp], env=PEN_SH)
+check("--shard на Linux: SKIP_NOT_MAC — строка skip и число только в части 1; части делят идущие файлы",
+      r1.returncode == 0 and r2.returncode == 0 and "skip pantheon/test_setup.py" in r1.stdout
+      and "пропущено 1" in r1.stdout and "skip " not in r2.stdout and "пропущено" not in r2.stdout
+      and sorted(ran(r1.stdout) + ran(r2.stdout)) == ["pantheon/test_a.py", "pantheon/test_b.py"],
+      (r1.stdout, r2.stdout))
+
 # --- устаревшая карта: файл тестов, изменённый после её сборки, идёт всегда (хеши в карте) ---
 Y2 = OK2 + "# правка после сборки карты\n"
 put(os.path.join(al, "tests", "test_y.py"), Y2)

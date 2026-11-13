@@ -2855,8 +2855,24 @@ def t_ci_verdict_unit(h):
     v = V([dict(AFFECTED, conclusion="FAILURE"), TRACES, lint], req, opt)
     check("ci_verdict: красные обязательная и вне списков — обе в тексте отказа",
           v[0] == "fail" and "tests/affected красная" in v[1] and "lint/lint красная" in v[1], v)
-    check("optional_checks: agent-kit — tests/full, регистр и владелец не важны, другой репозиторий — пусто",
-          opt == (("tests", "full"),) and mg.optional_checks("X/Agent-Kit") == opt
+    # metis-1111: части matrix (affected-shard, full-shard) необязательны, их итог держат собирающие affected и full
+    for name in ("full-shard (2/3)", "affected-shard (1/4)"):
+        v = V([AFFECTED, TRACES, dict(AFFECTED, name=name, conclusion="FAILURE")], req, opt)
+        check(f"ci_verdict: красная часть matrix tests/{name} — ok и предупреждение (её итог держит собирающий job)",
+              v[0] == "ok" and v[2] == [f"необязательная проверка GitHub tests/{name} красная: FAILURE"], v)
+    for name in ("full-shardx (1/3)", "full-shard 1/3", "full-shard (1/3", "lint (1/3)"):
+        v = V([AFFECTED, TRACES, dict(AFFECTED, name=name, conclusion="FAILURE")], req, opt)
+        check(f"ci_verdict: красная tests/{name} — не часть необязательного job, fail", v[0] == "fail" and v[2] == [], v)
+    v = V([AFFECTED, TRACES, dict(AFFECTED, workflowName="other", name="full-shard (1/3)", conclusion="FAILURE")],
+          req, opt)
+    check("ci_verdict: часть с именем необязательного job в другом workflow — fail", v[0] == "fail", v)
+    v = V([dict(AFFECTED, name="affected (1/4)"), TRACES], req, opt)
+    check("ci_verdict: зелёная «affected (1/4)» обязательную affected не закрывает — wait",
+          v[0] == "wait" and "tests/affected" in v[1], v)
+    check("optional_checks: agent-kit — tests/full и части full-shard, affected-shard; регистр и владелец не важны, "
+          "другой репозиторий — пусто",
+          opt == (("tests", "full"), ("tests", "full-shard"), ("tests", "affected-shard"))
+          and mg.optional_checks("X/Agent-Kit") == opt
           and mg.optional_checks("latark/tg-read") == () and mg.optional_checks(None) == (), opt)
     check("OPTIONAL_CHECKS: у каждой необязательной есть причина с номером задачи",
           all(re.search(r"\b[a-z]+-\d{4}\b", why) for rows in mg.OPTIONAL_CHECKS.values() for _, _, why in rows),
