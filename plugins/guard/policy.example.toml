@@ -85,3 +85,12 @@ modules = []
 write_subcommands = []
 scripts = []
 keychain_prefixes = []
+
+# Правила autoMode.allow окна направления (metis-0933): направление → имена правил из DIRECTION_RULES
+# (plugins/pantheon/lib/window_rules.py; текст правил — в ядре, здесь только кому). Правило покрывает только команды
+# в репозиториях своего направления; каких направлений нет в разделе — окно без этих правил. Неизвестное имя или не
+# список — не берётся, `pantheon domains build` называет его тревогой.
+#   mailkeeper-read — команды чтения и плана mailkeeper; uv-sync — `uv sync` в репозитории; git-remote — `git remote`.
+[auto_rules]
+metis-pantheon = ["mailkeeper-read", "uv-sync"]
+hermes-site = ["git-remote"]

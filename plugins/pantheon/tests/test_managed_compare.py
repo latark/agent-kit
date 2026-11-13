@@ -69,6 +69,8 @@ def box(installed, verified=True, clone=CLONE):
         json.dump({"plugins": {"guard@agent-kit": [{"scope": "user", "installPath": tree}]}}, fh)
     env = {"HOME": home, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "PANTHEON_HOME": os.path.join(home, "ai", "pantheon"),
            "PANTHEON_STATE": state, "PANTHEON_TEST": "1"}
+    if sys.platform != "darwin":  # имя Mac status берёт у scutil, его на Linux нет — подставляем, сверка настроек та же
+        env["PANTHEON_HOST"] = "mac-a"
     if verified:
         code = "import sys; sys.path.insert(0, %r); import pantheon as p; print(p._tree_hash(%r))" % (LIB, os.path.realpath(tree))
         h = subprocess.run([PY311, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=60).stdout.strip()
