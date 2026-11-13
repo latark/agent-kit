@@ -9,7 +9,7 @@
   pantheon config request <файл>=<новый текст> [<файл>=<новый текст> …] --task ID [--why "зачем"]
         заявка из окна направления: <файл> — путь в linked worktree проекта (.mcp.json, .claude/settings.json,
         .claude/settings.local.json, .claude/hooks/<путь>; FILES), <новый текст> — файл, откуда взять текст целиком.
-        Файлов — до MAX_FILES, все из одной worktree. Файла может не быть — тогда он новый (права 644). Печатает вопрос
+        Файлов — до MAX_FILES, все из одной worktree. Файла может не быть — тогда он новый (права 644, хук — 755). Печатает вопрос
         для Зевса «[<id>] …» с первыми SHORT знаками sha заявки. Заявка — config-edit/ рядом с PANTHEON_TMP (кэш окна)
   pantheon config status [ID]       заявки и итоги (в окне — свои)
   pantheon config cancel ID         снять свою заявку
@@ -18,7 +18,8 @@
 Что проверяется — и в заявке, и в проходе, и ещё раз под замком перед записью (facts):
   - окно — по папке кэша, где лежит заявка, а не из её текста; вне окна направления заявки нет;
   - worktree — linked (в корне .git — файл «gitdir: …»), основной репозиторий и сама worktree внутри папок окна по
-    domains.json. Основная копия проекта — отказ: она папка запуска окна, правка там действует сразу, мимо PR;
+    domains.json. Основная копия проекта — отказ: она папка запуска окна, правка там действует сразу, мимо PR.
+    Невидимый или bidi-знак в пути worktree или проекта — отказ: путь стоит в вопросе и окне Touch ID;
   - пути — без ссылок: каждая папка от корня worktree до файла — настоящая (O_NOFOLLOW через dir_fd);
   - файл сейчас — тот же, что при заявке (sha256 или «нет файла»), дифф и sha заявки пересчитаны и сошлись;
   - новый текст — UTF-8 без NUL и невидимых знаков, не больше NEW_MAX; .json — объект JSON;
@@ -30,12 +31,15 @@
 Подтверждение (process):
   1. «Да» в окне вопросов: последний ответ у Зевса на «[id] …» не раньше заявки; вопрос — дословно question(заявки)
      (после one_line). «Да» на другой текст — отказ; не «да» — отклонено.
-  2. Иначе Touch ID, когда владелец у Mac: окно помощника слияния с проектом, worktree, файлами, ключами JSON (что
-     влезет) и коротким sha; полный дифф — путь STATE/config-edit/diffs/<id>.diff (его проход пишет до окна). Палец —
+  2. Иначе Touch ID, когда владелец у Mac: окно помощника слияния с проектом, worktree, коротким sha и правкой
+     целиком — у .json все изменённые ключи с новыми значениями, у хука все его строки «-»/«+». Не влезает целиком
+     (WINDOW_MAX) или в тексте невидимый знак — окна нет, только «да» в окне вопросов. Полный дифф — путь
+     STATE/config-edit/diffs/<id>.diff (его проход пишет до окна). Палец —
      заявка перечитана, байты те же — строка `<время> config-edit-approve <id> <sha>` в
      owner-log/config-edit-approve.log, запись. Отказ — отклонено; время вышло — повтор через RETRY_SEC.
   3. Запись: заявка забрана переименованием, под замком facts заново, журнал STATE/logs/config-edit.jsonl открывается
-     до записи, каждый файл — атомарно (временный рядом, os.replace), права прежние, у нового — 644. Итог роли —
+     до записи, каждый файл — атомарно (временный рядом, os.replace), права прежние, у нового — 644, у
+     нового хука — 755. Итог роли —
      <id>.result.json рядом с заявкой. Итог у id уже есть в журнале — та же заявка второй раз не применяется.
 """
 import contextlib
@@ -67,7 +71,8 @@ ID_RE = re.compile(r"pc-\d{8}-\d{6}-[0-9a-f]{6}")
 SID_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}")   # как session_key в guard taint.py
 MAX_FILES = 4
 ABSENT = "absent"         # «sha до» у файла, которого нет
-NEW_MODE = 0o644
+NEW_MODE = 0o644          # права нового файла настроек
+HOOK_MODE = 0o755         # права нового файла в .claude/hooks/: хук зовут по пути
 JOURNAL = "config-edit.jsonl"
 APPROVE_LOG = "config-edit-approve.log"
 USAGE = ("pantheon config request <файл>=<новый текст> [<файл>=<новый текст> …] --task ID [--why \"зачем\"] | "
@@ -150,6 +155,11 @@ def check_owner(req):
     if os.path.realpath(root) != root:
         raise Refuse(f"{P.tilde(root)}: в пути ссылка")
     main = git_main(root)
+    for p in (root, main):   # путь — в вопросе и окне Touch ID: bidi и невидимые знаки переставили бы подпись (Д4)
+        bad = O().hidden_at(p, "")
+        if bad:
+            raise Refuse(f"{O().esc(P.tilde(p))}: в пути worktree невидимый или управляющий знак U+{ord(bad[1]):04X} — "
+                         "вопрос и окно Touch ID не покажут его честно; переименуйте папку")
     if not (_inside(root, folders) and _inside(main, folders)):
         raise Refuse(f"{P.tilde(root)}: проект не в папках окна {win} — чужой проект")
     flag = taint_flag(req.get("sid"))
@@ -211,14 +221,15 @@ def read_cur(root, rel):
 
 
 def write_file(root, rel, data):
-    """Файл rel атомарно: временный рядом (O_EXCL, без ссылок), права прежние или NEW_MODE, os.replace."""
+    """Файл rel атомарно: временный рядом (O_EXCL, без ссылок), права прежние (существующий файл —
+    права не меняются), у нового — HOOK_MODE в .claude/hooks/, иначе NEW_MODE; os.replace."""
     pfd = _parent_fd(root, rel, create=True)
     base = os.path.basename(rel)
     try:
         try:
             mode = stat.S_IMODE(os.stat(base, dir_fd=pfd, follow_symlinks=False).st_mode)
         except FileNotFoundError:
-            mode = NEW_MODE
+            mode = HOOK_MODE if rel.startswith(".claude/hooks/") else NEW_MODE   # хук зовут по пути — исполняемый
         tmp = f".{base}.config-edit.{os.getpid()}.{secrets.token_hex(3)}"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
         try:
@@ -281,11 +292,14 @@ def json_keys(f):
 
 
 def labels(req):
-    """(проект, worktree) для вопроса и окна: проект — ~/путь основного репозитория, worktree — путь от него."""
+    """(проект, worktree) для вопроса и окна: проект — ~/путь основного репозитория, worktree — путь от него. Через
+    owner_edit.mark: знак вне ASCII и русского алфавита — \\uXXXX, слово из двух алфавитов помечено (Д4); невидимые и
+    bidi-знаки в пути check_owner не пропускает."""
+    oe = O()
     main = req.get("main") or ""
     root = req["root"]
     wt = root[len(main) + 1:] if main and root.startswith(main + "/") else P.tilde(root)
-    return P.tilde(main), wt
+    return oe.mark(P.tilde(main)), oe.mark(wt)
 
 
 def file_rows(f, fix=str):
@@ -314,22 +328,29 @@ def diff_path(req):
 
 
 def window_text(req):
-    """Текст окна Touch ID: проект, worktree, файлы, ключи JSON (сколько влезет), короткий sha и путь к полному диффу.
-    Не влезает даже без ключей — None (тогда только «да» в окне вопросов)."""
+    """Текст окна Touch ID — правка целиком, или None (тогда только «да» в окне вопросов), как owner_edit.window_text.
+    Целиком — это у каждого файла: у .json — все изменённые ключи «путь: старое → новое» (json_keys), у хука — все
+    строки «-»/«+» диффа (mark). Обрезки «и ещё N» нет: палец относится к тому, что владелец видел (ревью PR #447, Б1).
+    Не влезает в WINDOW_MAX, ключи не разобрать («?») или в тексте невидимый знак — None. Файлы разделены « ⏎⏎ », строки
+    хука — « ⏎ »; внутри строки «⏎» экранирован, поэтому строка хука не подделает начало другого файла."""
     oe = O()
     proj, wt = labels(req)
-    head = (f"Записать настройки {proj} в worktree {wt} ({req.get('window')}, {req['task']}, sha {req['sha'][:oe.SHORT]}). "
-            f"Файлы: {', '.join(f['rel'] + (' (новый)' if f['before'] == ABSENT else '') for f in req['files'])}.")
-    tail = f" Дифф целиком: {P.tilde(diff_path(req))}"
-    keys = [k for f in req["files"] for k in (json_keys(f) or [])]
-    text = head + tail
-    for n in range(len(keys), 0, -1):
-        more = f" и ещё {len(keys) - n}" if n < len(keys) else ""
-        cand = head + " Ключи: " + "; ".join(keys[:n]) + more + "." + tail
-        if len(cand) <= oe.WINDOW_MAX and P.handoff_mod().showable(cand):
-            text = cand
-            break
-    return text if len(text) <= oe.WINDOW_MAX and P.handoff_mod().showable(text) else None
+    parts = []
+    for f in req["files"]:
+        kind = "новый" if f["before"] == ABSENT else "правка"
+        keys = json_keys(f)
+        if keys is not None:
+            if "?" in keys:
+                return None
+            parts.append(f"{f['rel']} ({kind}), ключей {len(keys)}: " + "; ".join(keys))
+        else:
+            rows = [oe.mark(ln).replace(oe.SEP, "\\u23ce") for ln, _ in oe.walk(f["diff"])]
+            parts.append(f"{f['rel']} ({kind}), строк {len(rows)}: " + f" {oe.SEP} ".join(rows))
+    text = (f"Записать настройки {proj} в worktree {wt} ({req.get('window')}, {req['task']}, sha "
+            f"{req['sha'][:oe.SHORT]}). " + f" {oe.SEP}{oe.SEP} ".join(parts)
+            + f". Дифф: {P.tilde(diff_path(req))}")
+    # showable: не длиннее WINDOW_MAX и без знаков handoff.BAD_CHARS — тех же, что owner_edit.HIDDEN
+    return text if P.handoff_mod().showable(text) else None
 
 
 def facts(req):
