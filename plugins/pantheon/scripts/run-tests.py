@@ -118,7 +118,9 @@ SLOW = {
     # test_watch: 575 / 791 в 27 прогонах 01-03.11 (metis-0719): 1.5 × 791 → 1200. Спящих ожиданий нет — 524 запуска
     # run.py по 0.25 с, время растёт с нагрузкой, как у test_merge_gate (0.9-1.0 его времени); 03.11 при load 17.8 —
     # test_merge_gate 1051 с, test_watch убит на 1020
-    "pantheon/test_watch.py": 1200,
+    # план 1.0, Т2: test_watch разрезан на 9 частей (замер 13.11, одна часть за раз: 10–82 с стены, 9–56 с CPU; при
+    # очереди heavy и load 60 — 1400–2700 с, это ожидание очереди), предел части 300 ≈ 3.6 × 82
+    **{f"pantheon/test_watch{s}.py": 300 for s in ("", "_zeus", "_stop", "_oneshot", "_sandbox", "_infra", "_nudge", "_respawn", "_ghost")},
     "guard/test_merge_gate.py": 1200,  # 458 / 458; outside -j 3 02.11 — 766-825 с, раз 900 (таймаут), metis-0719
     "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
     # test_read: 97 / 259, убит на 180 с 14 раз и на 300 с 4 раза из 80 прогонов (0731, п. 5): 1.5 × 259 мало.
@@ -128,7 +130,8 @@ SLOW = {
     # test_merge: 86 / 171 в прежних прогонах; замер 03.11 (metis-0783) на одном воркере при load 30-150: 143 с чистого
     # времени тестов, 386 с с очередью heavy. Время — ~200 запусков python3.11 с загрузкой pantheon (по 0.3-1 с под
     # нагрузкой); снов и git нет, ускорять нечем без потери изоляции. 600 ≈ 3.5 × 171, как у test_read
-    "pantheon/test_merge.py": 600,
+    # план 1.0, Т2: test_merge — 5 частей (замер 13.11 под heavy: 13–68 с); предел части 240 ≈ 3.5 × 68
+    **{f"pantheon/test_merge{s}.py": 240 for s in ("", "_window", "_ci", "_env", "_batch")},
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
     "pantheon/test_setup.py": 480,  # 109 / 303
     "pantheon/test_start.py": 480,  # 136 / 289
@@ -153,6 +156,8 @@ NO_SUMMARY = frozenset({
     "guard/test_tg_self.py",
     "pantheon/test_board_drift.py",
     "pantheon/test_merge.py",  # «все прошли» — без числа, TEST_SUMMARY его не берёт
+    "pantheon/test_merge_window.py", "pantheon/test_merge_ci.py", "pantheon/test_merge_env.py",   # части test_merge.py
+    "pantheon/test_merge_batch.py",   # (план 1.0, Т2): тот же итог «все прошли»
     "pantheon/test_path_clean.py",
     "pantheon/test_read.py",  # «все прошли»
 })
@@ -188,6 +193,9 @@ WINDOW_FS = {
     "pantheon/test_workshop_sockets.py", "pantheon/test_tick_skip.py", "pantheon/test_map_cache.py",
     "pantheon/test_window_folders.py", "pantheon/test_window_pack.py",
     "pantheon/test_outside_tree.py", "pantheon/test_outside_cancel.py",   # части test_outside.py (metis-0750)
+    "pantheon/test_watch_zeus.py", "pantheon/test_watch_stop.py", "pantheon/test_watch_oneshot.py",   # части test_watch.py
+    "pantheon/test_watch_sandbox.py", "pantheon/test_watch_infra.py", "pantheon/test_watch_nudge.py",   # (план 1.0, Т2)
+    "pantheon/test_watch_respawn.py", "pantheon/test_watch_ghost.py",
 }
 # Из них не годятся в запасной корень /tmp/claude-<uid>: корень HOME там — «временная папка» для guard (test_merge_gate
 # уходит в /var/tmp, а он в окне закрыт). В окне, где запасной корень нужен, они пропускаются строкой.
