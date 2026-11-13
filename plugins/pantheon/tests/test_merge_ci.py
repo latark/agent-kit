@@ -13,7 +13,7 @@ def test_ci_matches_guard():
     (metis-1050),
     pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), base_counts (metis-0965),
     REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
-    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE в merge.py
+    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT, CI_NONE, delta_problem и DELTA_* (metis-0784) в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -26,12 +26,13 @@ def test_ci_matches_guard():
                                                              "required_checks", "optional_checks",
                                                              "narrow_tests_record", "narrow_map_path",
                                                              "pair_match", "returned_lie",
-                                                             "returned_lifts", "base_counts"):
+                                                             "returned_lifts", "base_counts", "delta_problem"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
                                             "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "MAP_HASH_RE", "CI_OK",
-                                            "CI_WAIT", "CI_NONE"):
+                                            "CI_WAIT", "CI_NONE", "DELTA_MAX_LINES", "DELTA_DEPTH",
+                                            "DELTA_GATE_FILES", "DELTA_RENAME"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
@@ -41,7 +42,8 @@ def test_ci_matches_guard():
              "pair_match",
              "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
              "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
-             "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE")
+             "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE", "delta_problem", "DELTA_MAX_LINES", "DELTA_DEPTH",
+             "DELTA_GATE_FILES", "DELTA_RENAME")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:

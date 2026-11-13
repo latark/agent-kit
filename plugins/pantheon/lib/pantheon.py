@@ -285,6 +285,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
                                         «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
   pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
+  pantheon review delta <owner/repo> <PR>   из клона: какой нужен круг argus — дельта от прошлого проверенного
+                                        head (мелкая правка вне ядра, без rebase) или полный на свежем base, —
+                                        команда записи тестов, пары вернувших; код 0 — head готов к argus, 1 — нет.
+                                        accept без записи tests на head и без зелёного CI — код 1 (metis-0669, 0784)
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,

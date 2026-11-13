@@ -2628,6 +2628,111 @@ def t_narrow_gate_unit(h):
           bool(why) and "узкий набор посчитан от" in why and "git fetch" in why, why)
 
 
+def _delta_problem_checks(mg):
+    """metis-0784: delta_problem напрямую — предел строк, сумма по файлам, двоичные, файлы шлюза в любом написании, ядро."""
+    dp = mg.delta_problem
+    check("delta_problem: пустая дельта → None", dp([]) is None)
+    check("delta_problem: дельту не посчитали (None) → отказ", "не посчитать" in (dp(None) or ""))
+    check("delta_problem: 200 строк → None", dp([("a.py", 150, 50)]) is None)
+    check("delta_problem: 201 строка (добавлено + удалено) → отказ", "201 строк" in (dp([("a.py", 150, 51)]) or ""))
+    check("delta_problem: строки по файлам складываются", "201 строк" in (dp([("a.py", 200, 0), ("b.py", 0, 1)]) or ""))
+    check("delta_problem: двоичный файл → отказ", "двоичный" in (dp([("a.bin", None, None)]) or ""))
+    for p in ("plugins/guard/hooks/merge_gate.py", "./plugins//guard/hooks/../hooks/merge_gate.py",
+              "Plugins/Guard/Hooks/Merge_Gate.py", "plugins/pantheon/lib/merge.py", "plugins/guard/hooks/guard_rules.py",
+              "plugins/pantheon/lib/review_rules.py"):
+        check(f"delta_problem: файл шлюза {p} → отказ", "файл шлюза" in (dp([(p, 1, 0)]) or ""))
+    check("delta_problem: ядро, но не файл шлюза — правило тестов пускает", dp([("plugins/guard/x.py", 1, 0)]) is None)
+    core = lambda p: p.startswith("plugins/guard/")
+    check("delta_problem: с core — ядро → отказ «ядро»", "ядро" in (dp([("Plugins/Guard/x.py", 1, 0)], core) or ""))
+    check("delta_problem: с core — вне ядра → None", dp([("README.md", 1, 0)], core) is None)
+
+
+def t_delta_gate_unit(h):
+    """metis-0784: delta_problem напрямую; _narrow_problem и _billing_problem засчитывают узкую запись от прошлого head
+    (дельта поверх него), если он — предок head, на нём запись полного набора или годная узкая (цепочка до
+    DELTA_DEPTH), а дельта не задевает файлы шлюза, без двоичных и не длиннее DELTA_MAX_LINES строк."""
+    mg = _load_merge_gate("merge_gate_delta_unit")
+    m, kit, repo = narrow_history(h), h.j("projects/agent-kit"), "latark/agent-kit"
+    S, H = m["S"], m["H"]
+    F = lambda b: ("100644", b)
+    D = plumb(kit, [H], {"x.py": F(b"x = 2\n")}, "мелкая правка")
+    D2 = plumb(kit, [D], {"e.py": F(b"e\n")}, "ещё правка")
+    D3 = plumb(kit, [D2], {"f.py": F(b"f\n")}, "третья правка")
+    Dg = plumb(kit, [H], {"plugins/guard/hooks/merge_gate.py": F(b"g\n")}, "правка шлюза")
+    Dc = plumb(kit, [H], {"plugins/guard/x.py": F(b"g\n")}, "ядро, но не файл шлюза")
+    D200 = plumb(kit, [H], {"big.py": F(b"a\n" * 198)}, "198 строк + 2 строки x.py = 200")
+    D200 = plumb(kit, [D200], {"x.py": F(b"x = 3\n")}, "x.py")
+    D201 = plumb(kit, [H], {"big.py": F(b"a\n" * 201)}, "201 строка")
+    Db = plumb(kit, [H], {"b.bin": F(b"\0\1\2")}, "двоичный")
+    Dn = plumb(kit, [H], {"x.py": None, "x2.py": F(b"x = 1\n")}, "переименование x.py → x2.py")
+    Hr = plumb(kit, [m["M"]], {NARROW_MAP: F(NARROW_MAP_BYTES), "x.py": F(b"x = 1\n")}, "head после rebase на M")
+    Dr = plumb(kit, [Hr], {"x.py": F(b"x = 2\n")}, "правка после rebase")
+
+    _delta_problem_checks(mg)
+
+    gd = mg._carry_git(kit, repo, S)[0]
+    check("_numstat: строки по файлу", mg._numstat(gd, H, D) == [("x.py", 1, 1)], mg._numstat(gd, H, D))
+    check("_numstat: двоичный файл — числа None", mg._numstat(gd, H, Db) == [("b.bin", None, None)],
+          mg._numstat(gd, H, Db))
+    check("_numstat: сбой git (нет коммита) → None", mg._numstat(gd, H, "d" * 40) is None)
+    check("_rename_problem: правка без переименования → None", mg._rename_problem(gd, H, D) is None)
+    check("_rename_problem: переименование → DELTA_RENAME", mg._rename_problem(gd, H, Dn) == mg.DELTA_RENAME)
+    check("_rename_problem: сбой → «не посчитать»", "не посчитать" in (mg._rename_problem(gd, H, "d" * 40) or ""))
+
+    full = full_rec(repo, H)
+
+    def np(sha=D, base=H, tests=(full,), mp=NARROW_MAP_HASH, depth=None):
+        kw = {} if depth is None else {"depth": depth}
+        return mg._narrow_problem(kit, repo, sha, S, base, mp, None if tests is None else list(tests), **kw)
+
+    check("_narrow_problem: дельта от H с полной записью на H → None", np() is None, np())
+    check("_narrow_problem: дельта 200 строк → None", np(sha=D200) is None, np(sha=D200))
+    check("_narrow_problem: на H годная узкая запись (от merge-base) → None", np(tests=[narrow_rec(H, S)]) is None,
+          np(tests=[narrow_rec(H, S)]))
+    check("_narrow_problem: цепочка H → D → D2 → None", np(sha=D2, base=D, tests=[full, narrow_rec(D, H)]) is None,
+          np(sha=D2, base=D, tests=[full, narrow_rec(D, H)]))
+    calls, carry_git = [], mg._carry_git
+    mg._carry_git = lambda *a: calls.append(a) or carry_git(*a)
+    try:
+        got = np(sha=D2, base=D, tests=[full, narrow_rec(D, H)])
+    finally:
+        mg._carry_git = carry_git
+    check("_narrow_problem: цепочка — git папки ищется один раз, а не на каждом звене (Д3 argus #420)",
+          got is None and len(calls) == 1, (got, len(calls)))
+    chain = [full, narrow_rec(D, H), narrow_rec(D2, D)]
+    check("_narrow_problem: цепочка из трёх звеньев при depth 3 → None", np(sha=D3, base=D2, tests=chain, depth=3) is None,
+          np(sha=D3, base=D2, tests=chain, depth=3))
+    for name, kw, want in (
+            ("без записей журнала — правило дельты не действует", dict(tests=None), "узкий набор посчитан от"),
+            ("на прошлом head записи нет", dict(tests=()), "нет записи тестов"),
+            ("на прошлом head узкая запись не годна", dict(tests=[narrow_rec(H, m["X"])]), "узкий набор посчитан от"),
+            ("цепочка длиннее depth", dict(sha=D3, base=D2, tests=chain, depth=2), "цепочка дельт длиннее"),
+            ("дельта задевает файл шлюза", dict(sha=Dg), "файл шлюза"),
+            ("дельта 201 строка", dict(sha=D201), "201 строк"),
+            ("в дельте двоичный файл", dict(sha=Db), "двоичный"),
+            ("в дельте переименование (Д1 argus #420)", dict(sha=Dn), "переименование"),
+            ("база не предок head (rebase между кругами)", dict(sha=Dr), "не предок"),
+            ("база — другая ветка", dict(base=m["X"]), "не предок"),
+            ("карта в записи не та", dict(mp="0" * 64), "карта в записи не та")):
+        got = np(**kw) or ""
+        check(f"_narrow_problem: {name} → «{want}»", want in got, got)
+    check("_narrow_problem: ядро, но не файл шлюза — тесты дельтой засчитываются", np(sha=Dc) is None, np(sha=Dc))
+
+    def bp(recs, sha=D):
+        mg.read_records = lambda: recs
+        return mg._billing_problem(repo, 7, sha, kit, S)
+
+    why, notes = bp([narrow_rec(D, H), full])
+    check("_billing_problem: узкая от прошлого head с полной записью на нём → пропуск «узкий прогон»",
+          why is None and notes and "узкий прогон" in notes[0], (why, notes))
+    why, _ = bp([narrow_rec(D, H), full_rec("latark/tg-read", H)])
+    check("_billing_problem: полная запись на прошлом head другого репозитория — не в счёт",
+          bool(why) and "нет записи тестов" in why, why)
+    why, _ = bp([narrow_rec(D, H)])
+    check("_billing_problem: на прошлом head записи нет → отказ с подсказкой --base <тот head>",
+          bool(why) and "как дельта прошлого head не засчитан" in why and "--affected --base <тот head>" in why, why)
+
+
 def t_narrow_gate(h):
     """metis-0734: шлюз на запасном пути (CI без минут, ответ PR #222) пускает роль по узкой записи
     `pantheon outside test --affected` на head PR вне ядра; ядро (и с Touch ID), другой head, база не merge-base с
@@ -5626,6 +5731,25 @@ def t_request_decision(h):
     got = case("тот же и другой код", qdm, bd2, [opus(qd), rej(qx)])
     check("решение: другой код — differs, порядок — новые первыми", len(got) == 1 and got[0]["same"] == [qd]
           and got[0]["differs"] == [qx], got)
+    check("решение (metis-0784): head того же кода (same) и не предок (qx) — не в delta", got[0].get("delta") == [], got)
+    # дельта мелкой правки поверх проверенного head (metis-0784): вне ядра — в delta, ядро и сборка окон — нет
+    for name, change, want in (("мелкая правка вне ядра", {"e.txt": F("e\n")}, True),
+                               ("правка ядра", {"plugins/guard/x.txt": F("x\n")}, False),
+                               ("правка сборки окон", {"plugins/pantheon/lib/pantheon.py": F("x\n")}, False),
+                               ("правка длиннее предела", {"e.txt": F("e\n" * 201)}, False),
+                               ("переименование вне ядра", {"d.txt": None, "d3.txt": F(pr_d)}, False)):
+        qn = plumb(p, [qd], change, "PR: " + name)
+        got = case(f"дельта: {name}", qn, bd, [opus(qd)])
+        check(f"решение (metis-0784): {name} — код другой (differs), delta {'[qd]' if want else 'пуст'}",
+              len(got) == 1 and got[0]["differs"] == [qd] and got[0].get("delta") == ([qd] if want else []), got)
+    # Д2 argus #420: head старше окна _carry_heads (CARRY_HEADS более новых head с вердиктами) — без отпечатка и не в delta
+    qn = plumb(p, [qd], {"e.txt": F("e\n")}, "PR: мелкая правка поверх старого head")
+    newer = [plumb(p, [bd], {"d.txt": F("".join(lines[:20] + [f"n{i}\n"] + lines[21:]))}, f"PR: другой код {i}")
+             for i in range(8)]
+    got = case("дельта: head вне окна сверки", qn, bd, [opus(qd)] + [rej(x, f"argus{i}", f"s-n{i}")
+                                                                    for i, x in enumerate(newer)])
+    check("решение (metis-0784): head старше 8 последних — не в delta, хоть он предок и дельта мелкая",
+          len(got) == 1 and qd not in got[0].get("delta", [qd]) and got[0].get("delta") == [], got)
     got = case("клон другого репозитория", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
     check("решение: git не сверить (не клон) — запись с пустыми same и differs и причиной", len(got) == 1
           and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
@@ -6001,7 +6125,7 @@ CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_ci_fork_billing, t_fu
          t_pre_not_simple, t_checklist, t_criteria, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
          t_ci_required, t_batch_full, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
-         t_narrow_gate_unit, t_narrow_gate,
+         t_narrow_gate_unit, t_delta_gate_unit, t_narrow_gate,
          t_core_touchid, t_core_0598, t_returned_unit, t_returned_record, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_git_timeout, t_manifest_types, t_carry_merged, t_request_decision, t_carry_rej, t_version_bump_refused, t_core_sandbox_unit, t_core_lists_unit, t_core_sandbox]
 
