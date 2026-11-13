@@ -446,19 +446,30 @@
 - Пакеты окон направлений (схема А, metis-0933) — личные настройки пользователя, в плагине их нет (решение владельца
   12.11): `~/.claude/pantheon/packs/<направление>/` с файлами `window.json` (только сужает окно: ask, deny, плагины из
   карты, env из белого списка, `sandbox.denyRead`, `deniedDomains`; `seen` — опись для `pantheon check`), `mcp.json`
-  (серверы через `${PANTHEON_PACK_BIN}/env_from.py`, npx с точной версией), `.claude-plugin/plugin.json` и
-  `hooks/hooks.json` (хуки вложенных проектов только через `${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py`). Общий код
-  пакетов — `plugins/pantheon/packs/_bin`. Своё: создайте папку с именем направления из реестра и нужные файлы,
-  образцы — `plugins/pantheon/tests/fixtures/packs`; следующий плановый проход (`domains build --if-changed`)
-  пересоберёт окно, скрипты `.claude/hooks` вложенных проектов исполняются только по эталону `approved.json` той же
-  папки (`pantheon packs hashes`). Папки нет — окно работает без пакета. Окну запись в `~/.claude/pantheon` закрыта.
-  Перенос из прежней версии плагина: `domains build` один раз копирует пакеты и личные записи карты из самой новой
-  версии в кэше, где они есть, и ставит отметку `.migrated.json`; существующее не затирается. Вручную —
-  `pantheon packs migrate [--from <папка плагина или пакетов>]` (код 1 — источника нет). Модуль —
+  (серверы MCP), `.claude-plugin/plugin.json` и `hooks/hooks.json` (хуки вложенных проектов). Хуки и серверы пакета
+  идут вне песочницы, поэтому ядро проверяет пакет при каждой сборке окон и каждом запуске окна
+  (`window_rules.pack_problems`): хук — только `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" …` или prompt;
+  сервер MCP — только `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- <команда>`, где команда — `npx -y
+  <пакет>@x.y.z` или программа по пути (не bash, python, node и другие интерпретаторы), без `PATH`, `NODE_*` и
+  подобных в `env`; удалённый — http, sse или ws без `headersHelper`; в `plugin.json` нет полей `hooks`, `mcpServers`,
+  `lspServers`. Нарушение — плагин и MCP пакета в окно не идут (window.json — идёт), строка в `alerts.md`
+  (тревога `pack-bad-<направление>`). Общий код пакетов — `plugins/pantheon/packs/_bin`. Своё: создайте папку с
+  именем направления из реестра и нужные файлы, образцы — `plugins/pantheon/tests/fixtures/packs`; следующий плановый
+  проход (`domains build --if-changed`) пересоберёт окно, скрипты `.claude/hooks` вложенных проектов исполняются только
+  по эталону `approved.json` той же папки (`pantheon packs hashes`). Папки нет — окно работает без пакета. Окну запись
+  в `~/.claude/pantheon` закрыта. Перенос из прежней версии плагина: `domains build` один раз копирует пакеты и личные
+  записи карты из самой новой версии в кэше, где они есть, и ставит отметку `.migrated.json`; существующее не
+  затирается, пакет переносится целиком (через временную папку рядом), прерванный перенос повторяется на следующей
+  сборке. Вручную — `pantheon packs migrate [--from <папка плагина или пакетов>]` (код 1 — источника нет). Модуль —
   `lib/packs_local.py`, тест — `tests/test_window_pack.py`.
 - Правила autoMode.allow окна направления (`window_rules.DIRECTION_RULES`: `mailkeeper-read`, `uv-sync`,
   `git-remote`) включает раздел `[auto_rules]` в `~/.claude/pantheon/policy.toml`: `<направление> = ["имя", …]`.
   Неизвестное имя — тревога `auto-rules-bad`, остальное действует; образец — `plugins/guard/policy.example.toml`.
+  **После выпуска 12.11** (пакеты ушли из плагина): до него эти правила стояли в коде у двух направлений, теперь их
+  нет, пока владелец не впишет `[auto_rules]`. Сравните с прежним кодом (`DIRECTION_AUTO_ALLOW` в
+  `lib/window_rules.py` версии до выпуска) и впишите те же имена, например `<направление Метиды> = ["mailkeeper-read",
+  "uv-sync"]` и `<направление проекта> = ["git-remote"]`. Пока раздела нет, а перенос пакетов что-то скопировал, —
+  тревога `auto-rules-missing` в `alerts.md`; то же напоминание печатает `pantheon packs migrate`.
 - `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
   (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет
   кэш `autoclose-prs.json`, а на главном Mac сразу закрывает задачи по нему — в том же проходе, а не на следующем

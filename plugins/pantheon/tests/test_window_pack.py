@@ -283,6 +283,9 @@ def main():
                                                               os.path.join(state, "settings", "hq.json")],
           (r.stdout, r.stderr))
 
+    bad_pack(run, pack, home)
+    auto_rules_missing(run, os.path.join(tmp, ".claude", "pantheon"), home)
+
     # --- папки пакетов нет совсем (новый пользователь): окно запускается и собирается без пакета ---
     off = os.path.join(tmp, "packs-off")
     os.rename(packs, off)
@@ -302,6 +305,104 @@ def main():
     fixture_packs(tmp)
     migration(tmp, env)
     return all(results)
+
+
+def bad_pack(run, pack, home):
+    """Пакет пользователя проверяется при сборке и запуске окна (WINDOW_RULES.pack_problems, ревью argus #425 Б1): хук
+    мимо in_repo.py или сервер MCP мимо env_from.py — ни --plugin-dir, ни --mcp-config, строка в alerts.md."""
+    import shlex
+    alerts = os.path.join(home, "alerts.md")
+    read = lambda: open(alerts, encoding="utf-8").read() if os.path.isfile(alerts) else ""  # noqa: E731
+    hooks, mcp = os.path.join(pack, "hooks", "hooks.json"), os.path.join(pack, "mcp.json")
+    hook = lambda c: {"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": c}]}]}}  # noqa: E731
+    good_hook = hook('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" $HOME/projects/ms/app -- sh '
+                     '.claude/hooks/x.sh')
+    server = lambda *a: {"mcpServers": {"s": {"command": a[0], "args": list(a[1:])}}}  # noqa: E731
+    good_mcp = server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "npx", "-y", "chrome-devtools-mcp@1.10.1")
+
+    def start():
+        before = read()
+        r = run("start", "proteus-ms", "x", "--from", "zeus", "--dry-run")
+        line = next((x for x in r.stdout.splitlines() if " --settings " in x), "")
+        argv = shlex.split(line.rsplit(" (папка ", 1)[0]) if line else []
+        return r, argv, after(argv, "--plugin-dir") + after(argv, "--mcp-config"), read()[len(before):]
+
+    put(hooks, good_hook)
+    put(mcp, good_mcp)
+    r, argv, flags, new = start()
+    check("годный пакет (хук через in_repo.py, npx через env_from.py с версией) — --plugin-dir и --mcp-config, тревоги "
+          "нет", len(flags) == 2 and "не взяты в окно" not in new + r.stderr, (argv, r.stderr, new))
+    put(hooks, hook('bash "$HOME/projects/x/start.sh"'))
+    r, argv, flags, new = start()
+    check("start: хук пакета мимо in_repo.py — ни --plugin-dir, ни --mcp-config, окно запускается, строка в alerts.md",
+          argv and not flags and "proteus-ms" in new and "start.sh" in new and "не взяты" in r.stderr,
+          (argv, r.stderr, new))
+    put(hooks, good_hook)
+    put(mcp, server("bash", "$HOME/projects/x/mcp.sh"))
+    before = read()
+    r = run("domains", "build")
+    new = read()[len(before):]
+    check("domains build: сервер MCP пакета мимо env_from.py — тревога в alerts.md, окно собрано",
+          r.returncode == 0 and "mcp.sh" in new and "env_from.py" in new, (r.stderr, new))
+    r, argv, flags, new = start()
+    check("start: сервер MCP пакета мимо env_from.py — ни --plugin-dir, ни --mcp-config", argv and not flags,
+          (argv, r.stderr))
+    put(mcp, "{")
+    r, argv, flags, new = start()
+    check("start: mcp.json пакета не JSON — ни --plugin-dir, ни --mcp-config, тревога", argv and not flags
+          and "mcp.json: не JSON" in new, (argv, r.stderr, new))
+    put(mcp, good_mcp)
+    r, argv, flags, new = start()
+    check("пакет снова годен — флаги вернулись", len(flags) == 2, (argv, r.stderr))
+    # годный запуск снимает тревогу: то же нарушение снова — снова строка (иначе alert_once промолчал бы)
+    put(mcp, server("bash", "$HOME/projects/x/mcp.sh"))
+    start()
+    put(mcp, good_mcp)
+    start()
+    put(mcp, server("bash", "$HOME/projects/x/mcp.sh"))
+    r, argv, flags, new = start()
+    check("годный запуск снял тревогу: то же нарушение снова — снова строка в alerts.md", "mcp.sh" in new, new)
+    keep = {p: open(p, encoding="utf-8").read() for p in (mcp, hooks, os.path.join(pack, ".claude-plugin", "plugin.json"))}
+    for p in keep:
+        os.remove(p)
+    run("domains", "build")
+    put(mcp, keep[mcp])
+    before = read()
+    run("domains", "build")
+    check("пакет без плагина и mcp.json снял тревогу при сборке: то же нарушение снова — снова строка",
+          "mcp.sh" in read()[len(before):], read()[len(before):])
+    for p, text in keep.items():
+        put(p, text)
+    put(mcp, good_mcp)
+
+
+def auto_rules_missing(run, user, home):
+    """Перенос пакетов что-то скопировал, а раздела [auto_rules] в policy.toml нет — тревога auto-rules-missing
+    (ревью argus #425 Д1); раздел есть или ничего не переносилось — тишины."""
+    alerts, policy, mark = (os.path.join(home, "alerts.md"), os.path.join(user, "policy.toml"),
+                            os.path.join(user, "packs", ".migrated.json"))
+    read = lambda: open(alerts, encoding="utf-8").read() if os.path.isfile(alerts) else ""  # noqa: E731
+    keep_policy, keep_mark = open(policy, encoding="utf-8").read(), open(mark, encoding="utf-8").read()
+    put(policy, "")
+    before = read()
+    run("domains", "build")
+    check("перенос ничего не скопировал — без [auto_rules] тревоги нет", "auto_rules" not in read()[len(before):],
+          read()[len(before):])
+    put(mark, {"from": "x", "copied": ["proteus-ms"], "kept": [], "map": []})
+    before = read()
+    r = run("domains", "build")
+    new = read()[len(before):]
+    check("перенос скопировал пакеты, раздела [auto_rules] нет — тревога в alerts.md, окно собрано",
+          r.returncode == 0 and "нет раздела [auto_rules]" in new and "uv-sync" in new, (r.stderr, new))
+    put(policy, keep_policy)
+    open(alerts, "w").close()
+    run("domains", "build")
+    put(policy, "")
+    run("domains", "build")
+    check("раздел [auto_rules] вписан — тревога снята: без него она снова приходит",
+          read().count("нет раздела [auto_rules]") == 1, read()[-600:])
+    put(policy, keep_policy)
+    put(mark, keep_mark)
 
 
 # Флаги, которыми запуск окна подключает своё к сессии (настройки, плагин, MCP, папки, системный текст, режим прав).
@@ -347,7 +448,9 @@ def no_packs_in_plugin():
 
 def fixture_packs(tmp):
     """Образцы пакетов (tests/fixtures/packs): JSON читается, window.json вливается без отброшенного, хуки — через
-    in_repo.py пакета, опасного по решению владельца нет. Тот же разбор пакет пользователя проходит при сборке окна."""
+    in_repo.py пакета, опасного по решению владельца нет. Хуки и mcp.json проверяет и ядро — WINDOW_RULES.pack_problems,
+    им же сборка и запуск окна проверяют пакет пользователя (bad_pack); window.json пакета пользователя — только
+    window_extra_apply, остальные проверки здесь (allow, токены, supabase) — только для образцов."""
     os.environ.update(HOME=tmp, PANTHEON_HOME=os.path.join(tmp, "pantheon"))
     sys.path.insert(0, os.path.join(PLUGIN, "lib"))
     import pantheon as P
@@ -379,6 +482,9 @@ def fixture_packs(tmp):
         # metis-0933 круг E: скрипт .claude/hooks напрямую по пути окно подменило бы ссылкой — только через in_repo.py
         check(f"пакет {n}: хуки — только через in_repo.py пакета (скрипт .claude/hooks по fd), python3 — только с -I",
               cmds and all(c.startswith('python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" ') for c in cmds), cmds)
+        found = P.WINDOW_RULES.pack_problems(man, js.get(f"{n}/hooks/hooks.json"), js.get(f"{n}/mcp.json"))
+        check(f"пакет {n}: проверка ядра (pack_problems) нарушений не находит", found == [], found)
+    rules_of_packs(P.WINDOW_RULES)
     mcp = js_of(root, "god-proj/mcp.json").get("mcpServers", {})
     hooks = js_of(root, "god-proj/hooks/hooks.json")["hooks"]["PreToolUse"]
     check("пакет god-proj: supabase — только вместе с protect-db.sh на его инструментах",
@@ -389,6 +495,51 @@ def fixture_packs(tmp):
                         for s in local)
           and all(re.search(r"@\d+\.\d+\.\d+$", s["args"][s["args"].index("-y") + 1])
                   for s in local if "npx" in s["args"]), mcp)
+
+
+def rules_of_packs(W):
+    """Каждое правило WINDOW_RULES.pack_problems: нарушение названо, годное — пусто."""
+    pre = 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
+    ef = ["-I", "${PANTHEON_PACK_BIN}/env_from.py"]
+    hk = lambda *hs: {"hooks": {"Stop": [{"hooks": list(hs)}]}}  # noqa: E731
+    sv = lambda **s: {"mcpServers": {"s": s}}  # noqa: E731
+    good = [(None, hk({"type": "command", "command": pre + "~/r -- sh .claude/hooks/a.sh"}, {"type": "prompt",
+                                                                                         "prompt": "p"}), None),
+            ({"name": "pack-x"}, None, sv(command="python3", args=ef + ["--", "npx", "-y", "@a/b-c@1.2.3", "mcp"],
+                                          env={"NEXT_TELEMETRY_DISABLED": "1"})),
+            (None, None, sv(command="python3", args=ef + ["~/.env", "K", "--", "${HOME}/.local/bin/srv", "-t"])),
+            (None, None, sv(type="http", url="https://x.example/mcp", headers={"A": "b"}))]
+    for m, h, s in good:
+        check(f"pack_problems: годное — без нарушений {m or h or s}", W.pack_problems(m, h, s) == [],
+              W.pack_problems(m, h, s))
+    bad = [("plugin.json с hooks", {"name": "x", "hooks": {}}, None, None),
+           ("plugin.json с mcpServers", {"mcpServers": {}}, None, None),
+           ("plugin.json не объект", [], None, None),
+           ("hooks.json без hooks", None, {}, None),
+           ("хук bash по пути", None, hk({"type": "command", "command": 'bash "$HOME/projects/x/start.sh"'}), None),
+           ("хук agent", None, hk({"type": "agent", "prompt": "p"}), None),
+           ("группа хуков не список", None, {"hooks": {"Stop": {"hooks": []}}}, None),
+           ("mcp.json без mcpServers", None, None, {"servers": {}}),
+           ("сервер bash", None, None, sv(command="bash", args=["$HOME/projects/x/mcp.sh"])),
+           ("сервер python3 без -I", None, None, sv(command="python3", args=["${PANTHEON_PACK_BIN}/env_from.py",
+                                                                             "--", "npx", "-y", "a@1.2.3"])),
+           ("env_from без --", None, None, sv(command="python3", args=ef + ["npx", "-y", "a@1.2.3"])),
+           ("npx без версии", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@latest"])),
+           ("npx без -y", None, None, sv(command="python3", args=ef + ["--", "npx", "a@1.2.3"])),
+           ("npx -p вместо -y", None, None, sv(command="python3", args=ef + ["--", "npx", "-p", "a@1.2.3", "b"])),
+           ("команда не python3", None, None, sv(command="node", args=ef + ["--", "npx", "-y", "a@1.2.3"])),
+           ("за -- интерпретатор", None, None, sv(command="python3", args=ef + ["--", "/bin/bash", "~/p/x/mcp.sh"])),
+           ("за -- имя без пути", None, None, sv(command="python3", args=ef + ["--", "srv"])),
+           ("за -- пусто", None, None, sv(command="python3", args=ef + ["--"])),
+           ("env PATH", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"], env={"PATH": "x"})),
+           ("env NODE_OPTIONS", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"],
+                                              env={"NODE_OPTIONS": "--require x"})),
+           ("лишнее поле cwd", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"], cwd="/")),
+           ("http с headersHelper", None, None, sv(type="http", url="https://x", headersHelper="sh ~/p/h.sh")),
+           ("сервер без команды и url", None, None, sv(type="stdio")),
+           ("сервер не объект", None, None, {"mcpServers": {"s": "npx"}})]
+    for what, m, h, s in bad:
+        check(f"pack_problems: {what} — нарушение", len(W.pack_problems(m, h, s)) == 1, W.pack_problems(m, h, s))
 
 
 def js_of(root, rel):
@@ -434,6 +585,7 @@ def migration(tmp, env):
     check("перенос: личная карта — только [window.<направление реестра>] вне карты плагина, без кривых записей",
           res["map"] == ["dir-a"] and got == {"window": {"dir-a": {"plugins": ["p@m"]}}}, (res, got))
     check("перенос: отметка .migrated.json", os.path.isfile(os.path.join(user, ".migrated.json")), os.listdir(user))
+    interrupted(pl, base, os.path.join(cache, "0.11.11"))
     shutil.rmtree(os.path.join(user, "dir-a"))
     res = pl.migrate(user, os.path.join(cache, "0.11.11"), map_local, {"dir-a"}, set(), "t", None, True)
     check("после отметки шаг сборки ничего не переносит: удалённый пакет не возвращается",
@@ -461,8 +613,8 @@ def migration(tmp, env):
                                     capture_output=True, text=True, timeout=60)
     dst = os.path.join(mh, ".claude", "pantheon", "packs", "dir-a", "window.json")
     r = run("--from", os.path.join(cache, "0.11.9"))
-    check("packs migrate --from: пакет в ~/.claude/pantheon/packs, код 0",
-          r.returncode == 0 and "перенесён пакет dir-a" in r.stdout
+    check("packs migrate --from: пакет в ~/.claude/pantheon/packs, код 0, напоминание о [auto_rules] policy.toml",
+          r.returncode == 0 and "перенесён пакет dir-a" in r.stdout and "[auto_rules]" in r.stdout
           and json.load(open(dst)).get("description") == "OLD", (r.returncode, r.stdout, r.stderr))
     r = run("--from", os.path.join(cache, "0.11.10", "packs"))
     check("packs migrate --from папки пакетов: пакет уже есть — не тронут, код 0",
@@ -473,6 +625,57 @@ def migration(tmp, env):
           r.returncode == 1 and "прежних пакетов нет" in (r.stderr.strip().splitlines() or [""])[-1], (r.returncode, r.stderr))
     r = run("--frm", "x")
     check("packs migrate: не те аргументы — код 2", r.returncode == 2, (r.returncode, r.stderr))
+
+
+def interrupted(pl, base, plugin):
+    """Перенос прерван посреди пакета (ревью argus #425 Д2): ни полпакета, ни отметки; следующая сборка переносит
+    пакет целиком; временная папка прерванного переноса потом убирается; пакет, появившийся во время копирования, цел."""
+    user = os.path.join(base, "user2", "packs")
+    write_new, calls = pl._write_new, []
+
+    def boom(p, data):
+        calls.append(p)
+        if len(calls) == 2:
+            raise OSError("диск кончился")
+        return write_new(p, data)
+
+    pl._write_new = boom
+    try:
+        pl.migrate(user, plugin, None, (), (), "t", None, True)
+        got = "без ошибки"
+    except OSError as e:
+        got = str(e)
+    finally:
+        pl._write_new = write_new
+    check("перенос прерван на втором файле пакета — ошибка наружу, в packs ни полпакета, ни временной папки, ни отметки",
+          got == "диск кончился" and len(calls) == 2 and os.listdir(user) == [], (got, calls,
+                                                                                            os.listdir(user)))
+    stale, fresh = os.path.join(user, ".dir-a.tmp-old"), os.path.join(user, ".dir-a.tmp-new")
+    put(os.path.join(stale, "window.json"), {})
+    put(os.path.join(fresh, "window.json"), {})
+    os.utime(stale, (1, 1))
+    res = pl.migrate(user, plugin, None, (), (), "t", None, True)
+    check("после прерванного переноса следующая сборка переносит пакет целиком, затем отметка; старая временная "
+          "папка убрана, свежая (идущий перенос) — нет", res["copied"] == ["dir-a", "dir-b"]
+          and os.path.isfile(os.path.join(user, ".migrated.json"))
+          and os.path.isfile(os.path.join(user, "dir-a", "hooks", "hooks.json"))
+          and sorted(os.listdir(user)) == [".dir-a.tmp-new", ".migrated.json", "dir-a", "dir-b"], (res, os.listdir(user)))
+    user = os.path.join(base, "user3", "packs")
+    read = pl._read
+
+    def race(p):
+        put(os.path.join(user, "dir-a", "window.json"), {"description": "RACE"})
+        return read(p)
+
+    pl._read = race
+    try:
+        res = pl.migrate(user, plugin, None, (), (), "t", None, False)
+    finally:
+        pl._read = read
+    check("пакет появился, пока копировали, — не тронут, назван «уже есть», временной папки нет",
+          "dir-a" in res["kept"] and "dir-a" not in res["copied"]
+          and json.load(open(os.path.join(user, "dir-a", "window.json"))) == {"description": "RACE"}
+          and not [n for n in os.listdir(user) if n.startswith(".")], (res, os.listdir(user)))
 
 
 if __name__ == "__main__":

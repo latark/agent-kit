@@ -144,3 +144,84 @@ def coordinator_auto_allow(repos, rules=None):
 def auto_mode(auto_allow):
     """Раздел autoMode настроек окна координатора: исключения классификатора auto под шлюз слияния."""
     return {"allow": list(auto_allow)}
+
+
+# Пакет окна направления (~/.claude/pantheon/packs/<направление>, metis-0933) — данные пользователя, а его хуки и
+# серверы MCP идут вне песочницы окна. Поэтому ядро берёт плагин и mcp.json пакета в окно, только если они такого вида
+# (ревью argus #425 Б1): хук — только через in_repo.py пакета (скрипт репозитория по эталону хеша) или prompt; сервер
+# MCP — только через env_from.py пакета, а за его «--» — npx с точной версией или программа по пути, не интерпретатор
+# (скрипт из папки, которую окно пишет, вне песочницы не пойдёт); http, sse и ws — без headersHelper. Поля plugin.json,
+# которые сами запускают код мимо hooks.json, запрещены. Нарушение — плагин и MCP пакета в окно не идут, строка в
+# alerts.md (pantheon.pack_admit).
+PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"
+PACK_HOOK_PREFIX = 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
+PACK_MCP_PREFIX = ["-I", PACK_BIN_MARK + "/env_from.py"]
+PACK_MANIFEST_EXEC = ("hooks", "mcpServers", "lspServers")
+PACK_STDIO_KEYS = {"type", "command", "args", "env"}
+PACK_REMOTE_KEYS = {"type", "url", "headers"}
+PACK_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# переменные, которые меняют, что и откуда запустится, — не из пакета
+PACK_ENV_DENY = re.compile(r"PATH|HOME|TMPDIR|SHELL|ENV|BASH_ENV|ZDOTDIR|DYLD_.*|LD_.*|NODE_.*|NPM_CONFIG_.*|PYTHON.*"
+                           r"|.*_PROXY|GUARD_.*|ANTHROPIC_.*|CLAUDE.*")
+NPX_PINNED = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+")
+PACK_INTERPRETER = re.compile(r"[a-z]*sh|env|python[0-9.]*|node|deno|bunx?|npx|npm|pnpm|pnpx|yarn|uvx?|pipx|ruby|perl"
+                              r"|php|osascript|java|open|xargs|exec|eval|source")
+
+
+def pack_problems(manifest, hooks, mcp):
+    """Нарушения пакета окна (см. выше) → [причина]. manifest, hooks, mcp — разобранные plugin.json, hooks/hooks.json
+    и mcp.json пакета; None — файла нет."""
+    out = []
+    if manifest is not None:
+        if not isinstance(manifest, dict):
+            out.append("plugin.json: не объект JSON")
+        else:
+            out += [f"plugin.json: поле {k} запускает код мимо hooks.json" for k in PACK_MANIFEST_EXEC if k in manifest]
+    if hooks is not None:
+        events = hooks.get("hooks") if isinstance(hooks, dict) else None
+        if not isinstance(events, dict):
+            out.append("hooks.json: нет объекта hooks")
+        for ev, groups in (events.items() if isinstance(events, dict) else ()):
+            for g in groups if isinstance(groups, list) else [None]:
+                hs = g.get("hooks") if isinstance(g, dict) else None
+                for h in hs if isinstance(hs, list) else [None]:
+                    kind = h.get("type") if isinstance(h, dict) else None
+                    cmd = h.get("command") if kind == "command" else None
+                    if kind != "prompt" and not (isinstance(cmd, str) and cmd.startswith(PACK_HOOK_PREFIX)):
+                        out.append(f"hooks.json {ev}: хук не через in_repo.py пакета — {str(cmd or kind)[:160]}")
+    if mcp is not None:
+        servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+        if not isinstance(servers, dict):
+            out.append("mcp.json: нет объекта mcpServers")
+        for n, s in (servers.items() if isinstance(servers, dict) else ()):
+            why = pack_server_problem(s)
+            if why:
+                out.append(f"mcp.json {n}: {why}")
+    return out
+
+
+def pack_server_problem(s):
+    """Причина, по которой сервер MCP пакета s не годится (см. выше), или None."""
+    if not isinstance(s, dict):
+        return "не объект JSON"
+    if "command" not in s:
+        if s.get("type") in ("http", "sse", "ws") and isinstance(s.get("url"), str) and set(s) <= PACK_REMOTE_KEYS:
+            return None
+        return f"удалённый сервер — только type http, sse или ws, url и headers; есть {sorted(s)}"
+    args, env = s.get("args"), s.get("env") or {}
+    if set(s) - PACK_STDIO_KEYS or s.get("type", "stdio") != "stdio":
+        return f"лишние поля {sorted(set(s) - PACK_STDIO_KEYS) or s.get('type')}"
+    if not isinstance(env, dict) or [k for k, v in env.items() if not isinstance(v, str)
+                                     or not PACK_ENV_NAME.fullmatch(k) or PACK_ENV_DENY.fullmatch(k)]:
+        return f"env — только свои имена, без PATH, HOME, NODE_*, PYTHON* и подобных: {env}"[:200]
+    if (s["command"] != "python3" or not isinstance(args, list) or args[:2] != PACK_MCP_PREFIX or "--" not in args
+            or not all(isinstance(a, str) for a in args)):
+        return f"не через env_from.py пакета (python3 -I {PACK_BIN_MARK}/env_from.py … -- <команда>): {s['command']} {args}"[:240]
+    run = args[args.index("--") + 1:]
+    if run[:1] == ["npx"]:
+        if len(run) > 2 and run[1] == "-y" and NPX_PINNED.fullmatch(run[2]):
+            return None
+        return f"npx — только `npx -y <пакет>@x.y.z`: {' '.join(run)[:160]}"
+    if not run or "/" not in run[0] or PACK_INTERPRETER.fullmatch(run[0].rsplit("/", 1)[-1]):
+        return f"за «--» — не npx с точной версией и не программа по пути: {' '.join(run)[:160] or 'пусто'}"
+    return None

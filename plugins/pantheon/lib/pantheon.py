@@ -3413,7 +3413,7 @@ def window_agents_md(launch, dirs):
     return out
 
 
-PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка _bin снимка (её путь знает только ядро)
+PACK_BIN_MARK = WINDOW_RULES.PACK_BIN_MARK  # в mcp.json пакета — папка _bin снимка (её путь знает только ядро)
 
 # Снимок исполняемого пакета (metis-0933 круг F, решение Зевса 06.11 23:46). Хуки пакета и серверы MCP идут вне
 # песочницы, а скрипты вложенных проектов (app/.claude/hooks/*.sh, mailkeeper/.claude/hooks/*.py) лежат в папках,
@@ -3928,6 +3928,67 @@ def pack_snapshot(window, name, keep=True):
     return snap
 
 
+def pack_text(p):
+    """Текст файла пакета p (до PACK_SCRIPT_LIMIT) или None — файла нет или он не читается."""
+    data = _read_bytes_nofollow(os.path.realpath(p), PACK_SCRIPT_LIMIT) if os.path.isfile(p) else None
+    return data.decode("utf-8", "replace") if data is not None else None
+
+
+def pack_admit(window, plugin_dir, mcp_text):
+    """Плагин plugin_dir (None — нет) и текст mcp.json mcp_text (None — нет) пакета окна window годны для окна
+    (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Нет — строка в stderr и тревога pack-bad-<window> в alerts.md;
+    да — тревога снята."""
+    def doc(text, rel):
+        if text is None:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            bad.append(f"{rel}: не JSON")
+            return None
+
+    bad = []
+    files = [pack_text(os.path.join(plugin_dir, rel)) if plugin_dir else None for rel in PACK_PLUGIN_FILES]
+    bad += WINDOW_RULES.pack_problems(doc(files[0], "plugin.json"), doc(files[1], "hooks.json"),
+                                      doc(mcp_text, "mcp.json"))
+    if not bad:
+        clear_once(f"pack-bad-{window}")
+        return True
+    where = tilde(os.path.join(PACKS, window))
+    print(f"pantheon: пакет {where}: плагин и MCP не взяты в окно {window} — {'; '.join(bad)[:400]}", file=sys.stderr)
+    alert_once(f"pack-bad-{window}", repr(bad), f"{where}: плагин и MCP пакета не взяты в окно {window} — "
+               + "; ".join(bad)[:500] + " (хуки — только через in_repo.py пакета, MCP — через env_from.py, npx с "
+               "точной версией; README, пакеты окон направлений)", "pantheon")
+    return False
+
+
+def pack_build_check(name):
+    """Сборка окна направления name: плагин и mcp.json его пакета — того вида, что ядро пустит при запуске
+    (pack_admit в window_flags); нет — тревога сразу, а не только при запуске. Нет ни того, ни другого — тревога
+    снята."""
+    pack = os.path.join(PACKS, name)
+    plugin = pack if os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json")) else None
+    text = pack_text(os.path.join(pack, "mcp.json"))
+    if plugin or text is not None:
+        pack_admit(name, plugin, text)
+    else:
+        clear_once(f"pack-bad-{name}")
+
+
+def auto_rules_missing(policy):
+    """После выпуска 12.11 правила направлений — только из [auto_rules] policy.toml (ревью argus #425 Д1): установка,
+    куда перенос пакетов что-то скопировал (была прежняя версия), без этого раздела потеряла их молча — тревога
+    auto-rules-missing, пока раздела нет."""
+    moved = read_json(os.path.join(PACKS, PACKS_LOCAL.MARK), {})
+    moved = moved.get("copied") if isinstance(moved, dict) else None
+    if "auto_rules" not in policy and moved:
+        alert_once("auto-rules-missing", repr(moved), "policy.toml: нет раздела [auto_rules] — правила autoMode.allow "
+                   f"направлений ({', '.join(WINDOW_RULES.DIRECTION_RULES)}) окнам не даны; до выпуска 12.11 они стояли "
+                   "в коде. Впишите их в ~/.claude/pantheon/policy.toml (README, «После выпуска 12.11»)", "pantheon")
+    else:
+        clear_once("auto-rules-missing")
+
+
 def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
     """Весь argv запуска окна роли (metis-0933, класс 5 «граница ядра»): claude [--resume <сессия>] [--bg] --agent
     <роль> --name <имя>, флаги схемы А окна направления window (window_flags), --settings <файл окна>, текст поручения
@@ -3942,7 +4003,8 @@ def window_launch(role, name, window, settings, prompt=None, resume=None, bg=Tru
 def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
-    settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть. Плагин и
+    settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть и прошли
+    pack_admit (не прошли — ни того, ни другого, тревога). Плагин и
     _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
     settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
     обновляет. Не направление (мастерская, штаб, задачи) — []."""
@@ -3964,13 +4026,16 @@ def window_flags(window, name=None):
 
     if parts:
         args += ["--append-system-prompt-file", run_file("agents.md", "\n\n".join(parts))]
-    pack = os.path.join(PACKS, window)
     snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
-    if snap and os.path.isfile(os.path.join(snap, "plugin", ".claude-plugin", "plugin.json")):
-        args += ["--plugin-dir", os.path.join(snap, "plugin")]
-    if snap and os.path.isfile(os.path.join(pack, "mcp.json")):
-        with open(os.path.join(pack, "mcp.json"), encoding="utf-8") as fh:
-            text = fh.read()
+    plugin = os.path.join(snap, "plugin") if snap else None
+    plugin = plugin if plugin and os.path.isfile(os.path.join(plugin, ".claude-plugin", "plugin.json")) else None
+    text = pack_text(os.path.join(PACKS, window, "mcp.json")) if snap else None
+    # в окно — только то, что проверено: плагин снимка и этот же текст mcp.json (ревью argus #425 Б1)
+    if (plugin or text is not None) and not pack_admit(window, plugin, text):
+        return args
+    if plugin:
+        args += ["--plugin-dir", plugin]
+    if text is not None:
         bin_dir = json.dumps(os.path.join(snap, "_bin"))[1:-1]
         args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
     return args
@@ -4283,6 +4348,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
+            pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
@@ -4330,6 +4396,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                    f"правила направления — только {', '.join(WINDOW_RULES.DIRECTION_RULES)} (Метида)", "pantheon")
     else:
         clear_once("auto-rules-bad")
+    auto_rules_missing(policy)
     built = []
     for name, folders in domains.items():
         mine = leads.get(name, [])

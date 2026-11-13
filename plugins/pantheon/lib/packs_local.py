@@ -8,7 +8,9 @@
 окон (`pantheon domains build`) один раз копирует их из прежней версии плагина в кэше (папки версий рядом с нынешней)
 в ~/.claude/pantheon/packs: окна не теряют хуков и серверов MCP. Берётся одна версия — самая новая, где пакеты есть.
 Направление, у которого в новой папке уже есть хоть один файл пакета, не трогается; файл пишется только новым
-(O_EXCL), существующее не затирается. Личные записи карты plugins-by-role.toml ([window.<направление>]) — туда же,
+(O_EXCL), существующее не затирается. Пакет переносится целиком: файлы — во временную папку рядом, затем она
+переименовывается в папку направления; прерванный перенос не оставляет полпакета, отметки нет — следующая сборка
+перенесёт заново. Личные записи карты plugins-by-role.toml ([window.<направление>]) — туда же,
 в ~/.claude/pantheon/plugins-by-role.toml, если этого файла ещё нет. После переноса — отметка .migrated.json: пакет,
 который владелец потом удалил сам, из старой версии не вернётся. Вручную — `pantheon packs migrate [--from ПАПКА]`
 (без отметки, тоже без затирания).
@@ -19,6 +21,9 @@
 import json
 import os
 import re
+import shutil
+import tempfile
+import time
 import tomllib
 
 PACK_FILES = ("window.json", "mcp.json", ".claude-plugin/plugin.json", "hooks/hooks.json")
@@ -104,6 +109,47 @@ def _write_new(p, data):
     return True
 
 
+TMP_PREFIX = "."  # временная папка пакета: .<направление>.tmp-*, names() её не видит
+TMP_KEEP = 3600
+
+
+def _copy_pack(src, dst):
+    """Пакет src → dst целиком (ревью argus #425 Д2): файлы PACK_FILES (_read, _write_new) — во временную папку
+    рядом с dst, затем она переименовывается в dst. Прерванный перенос оставляет не полпакета в dst, а временную папку:
+    отметки нет, следующая сборка перенесёт заново. dst уже есть (не пустая папка) — не тронут. → перенесён ли."""
+    parent = os.path.dirname(dst)
+    os.makedirs(parent, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}{os.path.basename(dst)}.tmp-", dir=parent)
+    try:
+        wrote = False
+        for f in PACK_FILES:
+            data = _read(os.path.join(src, f))
+            if data is not None:
+                wrote = _write_new(os.path.join(tmp, f), data) or wrote
+        if not wrote or os.path.lexists(dst):
+            return False
+        os.rename(tmp, dst)
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _drop_stale_tmp(packs):
+    """Временные папки прерванного переноса (_copy_pack) старше TMP_KEEP — убрать."""
+    try:
+        got = os.listdir(packs)
+    except OSError:
+        return
+    for n in got:
+        p = os.path.join(packs, n)
+        try:
+            stale = n.startswith(TMP_PREFIX) and ".tmp-" in n and time.time() - os.lstat(p).st_mtime > TMP_KEEP
+        except OSError:
+            continue
+        if stale and not os.path.islink(p):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def map_entries(root, directions, base_windows):
     """Личные записи [window.<имя>] карты plugins-by-role.toml прежнего плагина root: имя — направление реестра
     (directions), которого нет в нынешней карте (base_windows). → {имя: {plugins, mcp}}."""
@@ -144,18 +190,16 @@ def migrate(packs, plugin, map_local, directions=(), base_windows=(), stamp="", 
             _write_new(os.path.join(packs, MARK), json.dumps({**res, "at": stamp}, ensure_ascii=False).encode())
         return res
     res["from"] = root or src_packs
+    _drop_stale_tmp(packs)
     for n in names(src_packs):
         dst = os.path.join(packs, n)
         if has_pack(dst):
             res["kept"].append(n)
             continue
-        wrote = False
-        for f in PACK_FILES:
-            data = _read(os.path.join(src_packs, n, f))
-            if data is not None:
-                wrote = _write_new(os.path.join(dst, f), data) or wrote
-        if wrote:
+        if _copy_pack(os.path.join(src_packs, n), dst):
             res["copied"].append(n)
+        elif has_pack(dst):  # появился, пока копировали: не тронут
+            res["kept"].append(n)
     entries = map_entries(root, set(directions), set(base_windows)) if root and map_local else {}
     # личная карта, которая уже есть, не затирается: _write_new пишет только новый файл (O_EXCL)
     if entries and _write_new(map_local, map_text(entries, f"перенесено из {res['from']} {stamp}").encode()):
@@ -176,4 +220,7 @@ def report(res, tilde, packs, map_local, quiet=False):
     out += [f"пакет {n} уже есть в {tilde(os.path.join(packs, n))} — не тронут" for n in res["kept"]]
     if res["map"]:
         out.append(f"личная карта плагинов {tilde(map_local)}: окна {', '.join(res['map'])}")
+    if res["copied"]:  # ревью argus #425 Д1: правила направлений больше не в коде
+        out.append("правила autoMode.allow направлений теперь — раздел [auto_rules] ~/.claude/pantheon/policy.toml: "
+                   "впишите его, если его нет (README, «После выпуска 12.11»)")
     return out
