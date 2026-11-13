@@ -440,6 +440,21 @@ def test_wait_over_5min_card_and_zeus_line_1122():
     check(not tasks.load_tasks(e.pantheon), f"1122: карточка на окно Зевса: {tasks.load_tasks(e.pantheon)}")
 
 
+def test_wait_second_episode_repeat_notifies_1122():
+    """metis-1122 (ревью Б): повтор через 30 мин уходит и во втором ожидании того же окна — ключ once=True снят."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    check(e.sent().count("coord-x ждёт вас 31 мин") == 1, f"1122: первый повтор не ушёл: {e.sent()!r}")
+    e.agents([bg("coord-x", "working", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 2000)
+    e.agents([bg("coord-x", "blocked", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 3000)
+    e.run("watch", t=T0 + 4900)
+    check(e.sent().count("coord-x ждёт вас 31 мин") == 2, f"1122: второе ожидание без повтора: {e.sent()!r}")
+
+
 def P_json(p):
     return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
 

@@ -622,6 +622,7 @@ def wait_cards(agents, waiting, t):
             if not agents:
                 break
             rec = st.pop(name)
+            P.clear_fault(f"wait-repeat-{name}")  # once=True: без снятия второе ожидание за 7 дней macOS не покажет
             if rec.get("card"):
                 with contextlib.suppress(ValueError, OSError):
                     P.tasks_mod().task_set(P.PANTHEON, t, rec["card"], {"status": "done",
