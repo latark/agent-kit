@@ -1459,7 +1459,7 @@ def _ui_glob(pat):
             out, i = out + ".*", i + 2
         else:
             out, i = out + {"*": "[^/]*", "?": "[^/]"}.get(pat[i], re.escape(pat[i])), i + 1
-    return re.compile(out)
+    return re.compile(out, re.DOTALL)
 
 
 def _ui_problem(policy, name, sha, view, files):
@@ -1484,7 +1484,9 @@ def _ui_problem(policy, name, sha, view, files):
         old = f.get("previous_filename")
         for n in [f.get("filename")] + ([old] if old is not None else []):  # переименование: и старый путь
             p = n.strip("/") if isinstance(n, str) else None
-            if p is None or any(r.fullmatch(p.casefold()) for r in inc) and not any(r.fullmatch(p) for r in exc):
+            # знак управления в имени (\n, \x00…) — к talos, а не мимо шаблонов (проверка безопасности 14.11)
+            if p is None or any(ord(c) < 32 or ord(c) == 127 for c in p) \
+                    or any(r.fullmatch(p.casefold()) for r in inc) and not any(r.fullmatch(p) for r in exc):
                 hit.append(str(n))
     return f"дифф задевает живое приложение: {', '.join(hit[:5])}" if hit else None
 
@@ -2903,7 +2905,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"`pantheon review test -- <команда тестов>` (запишет хук guard).{narrow_hint(repo)} Тесты долгие: запускай "
                 f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). Тестам нужен "
                 f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
-                f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --wait 120`). {advice}")
+                f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --sha {sha} --wait 120`). {advice}")
 
     def mine(r, kinds, who):
         return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr and r["sha"] == sha

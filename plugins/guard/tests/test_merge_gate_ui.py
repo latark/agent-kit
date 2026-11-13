@@ -56,7 +56,9 @@ def t_ui_inside(h):
                          ("переименование из приложения", [{"filename": "docs/x.md", "status": "renamed",
                                                            "previous_filename": "apps/web/app/page.tsx"}]),
                          ("удаление страницы", [{"filename": "apps/web/app/page.tsx", "status": "removed"}]),
-                         ("имя файла не строка", [{"filename": None, "status": "modified"}])):
+                         ("имя файла не строка", [{"filename": None, "status": "modified"}]),
+                         ("знак управления в имени", ["apps/web/\n.check.ts"]),
+                         ("перевод строки за исключением", ["docs/a.check.ts\napps/web/page.tsx"])):
         h.reset()
         merge_case(f"дифф в путях ({label}) — без talos отказ", _product(h, files), False, "живое приложение")
     h.reset()
@@ -96,7 +98,15 @@ def t_ui_alerts_stay(h):
                "нет строки «что ушло»")
 
 
-CASES = [t_ui_outside, t_ui_inside, t_ui_no_section, t_ui_unsure, t_ui_alerts_stay]
+def t_serve_sha(h):
+    """Часть metis-0903: в подсказке «нет записи тестов» dev-сервер — на проверяемом head (`--sha <head>`)."""
+    sha = h.sha["broker"]
+    d, why = h.pre(f"gh pr merge 5 --match-head-commit {sha}", pdir="projects/broker")
+    check("нет записи тестов — подсказка `pantheon outside serve --sha <head> --wait 120`",
+          d == "deny" and f"pantheon outside serve --sha {sha} --wait 120" in why, why)
+
+
+CASES = [t_ui_outside, t_ui_inside, t_ui_no_section, t_ui_unsure, t_ui_alerts_stay, t_serve_sha]
 
 
 if __name__ == "__main__":
