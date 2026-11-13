@@ -1,16 +1,14 @@
-# Тесты плагинов (п. 8 страницы упрощения 27.10, metis-0571; гибрид без macOS — решение владельца 03.11, metis-0688).
-# Квота Free — 2000 минут в месяц, минута macOS стоит как десять Linux: в ноябре она кончилась за 3 дня. Поэтому
-#   - полный набор тестов на GitHub идёт только вручную (workflow_dispatch, job full, ubuntu-24.04, без macOS); обычно
-#     его гоняют локально через `pantheon outside test` (запись FULL_TESTS на head PR, которую шлюз guard засчитывает
-#     при слиянии — README guard, п. 8). Job full нужен шлюзу: OPTIONAL_CHECKS держит строку tests/full, на PR он SKIPPED;
-#   - на каждый PR в main — только лёгкая проверка на Linux: затронутое (run-tests.py --affected по карте файл → тесты)
-#     на ubuntu-24.04 (закреплён: у latest образ меняется под ногами), Python 3.14;
-#     файлы, которым нужен macOS, раннер на Linux не гоняет, а печатает строкой «skip … пропущено» (SKIP_NOT_MAC),
-#     команды macOS (ioreg, pmset, scutil) подменяет заглушками; код 3 раннера «нечего гонять» — успех;
-#     В этом же job — тесты скриптов выпуска (.github/scripts/test_release.py): правка .github/ карту тестов плагинов не
-#     задевает, а гонять её нужно;
-#   - на push в main и по расписанию тесты не запускаются: прогона после слияния нет, красный main ловит
-#     локальный полный набор.
+# Тесты плагинов (п. 8 страницы упрощения 27.10, metis-0571; полный набор на macOS на каждый PR — решение владельца
+# 13.11, metis-1111). Гибрид без macOS (03.11, metis-0688) снят: репозиторий публичный, стандартные раннеры GitHub,
+# включая macOS, для него бесплатны. Вернётся репозиторий в приватный (metis-1076) — вернуть гибрид: full только по
+# workflow_dispatch на Linux и строку tests/full в OPTIONAL_CHECKS шлюза. На каждый PR в main два job:
+#   - affected — лёгкая проверка на Linux: ruff, храповик, тесты скриптов выпуска (.github/scripts/test_release.py:
+#     правка .github/ карту тестов плагинов не задевает) и затронутое (run-tests.py --affected по карте файл → тесты) на
+#     ubuntu-24.04 (закреплён: у latest образ меняется под ногами), Python 3.14; файлы, которым нужен macOS, раннер на
+#     Linux не гоняет, а печатает строкой «skip … пропущено» (SKIP_NOT_MAC); код 3 раннера «нечего гонять» — успех;
+#   - full — полный набор трёх плагинов на macos-15 (закреплён), Python 3.14. Оба — обязательные проверки шлюза guard
+#     (REQUIRED_CHECKS); локальный `pantheon outside test` — запасной путь, когда CI не запустился (README guard, п. 8).
+# На push в main и по расписанию тесты не запускаются; ночной полный набор на main делает плановый проход.
 # ruff (metis-0265) — первый шаг job affected, на каждый PR: правила — ruff.toml, версия и хеши колёс —
 # .github/ruff-requirements.txt. Вторым шагом — храповик (metis-0854, plugins/pantheon/scripts/lint_ratchet.py):
 # размер файлов, сложность функций и циклы импорта не растут против plugins/pantheon/scripts/lint-baseline.json
@@ -67,9 +65,9 @@ jobs:
           exit "$code"
 
   full:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:

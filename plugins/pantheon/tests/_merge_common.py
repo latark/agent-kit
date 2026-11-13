@@ -213,11 +213,16 @@ def script(path, body):
     return path
 
 
-# первые две проверки — обязательные agent-kit (REQUIRED_CHECKS, metis-0633): tests/affected и check-traces/traces
-CI_NAMES = (("tests", "affected"), ("check-traces", "traces"))
+# первые три проверки — обязательные agent-kit (REQUIRED_CHECKS, metis-0633 и metis-1111): tests/affected,
+# check-traces/traces и tests/full (полный набор на macos-15)
+CI_NAMES = (("tests", "affected"), ("check-traces", "traces"), ("tests", "full"))
 
 
 def ci(*states):
+    """Rollup по состояниям проверок в порядке CI_NAMES, дальше — other/job<i>. Ровно два состояния — affected и
+    traces, а обязательная tests/full (metis-1111) дописывается зелёной: случаи до 1111 судят первые две."""
+    if len(states) == 2:
+        states = (*states, "SUCCESS")
     return [{"__typename": "CheckRun", "workflowName": CI_NAMES[i][0] if i < len(CI_NAMES) else "other",
              "name": CI_NAMES[i][1] if i < len(CI_NAMES) else f"job{i}",
              "status": "COMPLETED" if s != "PENDING" else "IN_PROGRESS",

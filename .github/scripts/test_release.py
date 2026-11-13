@@ -444,6 +444,10 @@ def t_wf_parse_selftest():
     check("wf_parse: битый YAML — None и причина из stderr ruby", data is None and "ruby код" in why and len(why) > 20, why)
 
 
+# metis-1111: job full идёт на каждый PR и вручную — ровно эта строка if
+FULL_IF = r"^    if: github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch'$"
+
+
 def t_workflows(wfdir=WORKFLOWS):
     """Право contents: write — только у release.yml; сторонние Action только по полному SHA; запуск — main."""
     names = sorted(n for n in os.listdir(wfdir) if n.endswith((".yml", ".yaml")))
@@ -467,8 +471,8 @@ def t_workflows(wfdir=WORKFLOWS):
           and "if: github.ref == 'refs/heads/main'" in text, text)
     check("release.yml: запускает скрипт ядра --push", "python3 -I .github/scripts/release.py --push" in text, text)
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
-    # п. 8 (27.10) + гибрид 03.11 (metis-0688): на GitHub — только PR с затронутым на Linux; полный набор — локально через
-    # `pantheon outside test` (запись FULL_TESTS). macOS на GitHub нет (квота Free, минута macOS ×10), полного набора на push нет.
+    # п. 8 (27.10) + metis-1111 (13.11, репозиторий публичный): на каждый PR в main — affected на закреплённом Linux и
+    # полный набор (job full) на macos-15; полного набора на push и по расписанию нет. Гибрид без macOS (metis-0688) снят.
     text = open(os.path.join(wfdir, "tests.yml")).read()
     tst, why = wf_parse(os.path.join(wfdir, "tests.yml"))
     uses = tst["uses"] if tst else None
@@ -482,13 +486,23 @@ def t_workflows(wfdir=WORKFLOWS):
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
           and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  workflow_dispatch:\n\npermissions:", text, re.M)
           and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
-    # гибрид без macOS (03.11, metis-0688): macOS на GitHub выключен во всех workflow, полный набор на push не идёт
-    macos = [n for n in names if re.search(r"macos", re.sub(r"(?m)^\s*#.*$", "", open(os.path.join(wfdir, n)).read()), re.I)]
-    check("workflows: ни одного runs-on: macos (квота Free, минута macOS ×10)", not macos, macos)
-    # полный набор тестов (run-tests.py без --affected, прямой запуск tests/test_*.py в обход раннера) — только в job с
-    # `if: github.event_name == 'workflow_dispatch'`, и только если workflow не запускается на push/schedule/_target; на
-    # pull_request такой job SKIPPED (шлюз держит его в OPTIONAL_CHECKS). Комментарии отрезаются до проверки; смотрим все файлы.
     nocomment = lambda t: "\n".join(re.sub(r"(^|\s)#.*$", "", ln) for ln in t.splitlines())
+    # metis-1111: macOS — ровно одна строка `    runs-on: macos-15` в job full файла tests.yml; любое другое упоминание
+    # macos вне комментариев (runs-on у affected, release.yml, matrix, другой образ) — провал
+    macos = []
+    for n in names:
+        wtext = nocomment(open(os.path.join(wfdir, n)).read())
+        if n == "tests.yml":
+            parts = re.split(r"(?m)^(?=  [A-Za-z0-9_-]+:\s*$)", wtext)
+            wtext = "".join(p.replace("    runs-on: macos-15\n", "", 1) if p.startswith("  full:\n") else p
+                            for p in parts)
+        if re.search(r"macos", wtext, re.I):
+            macos.append(n)
+    check("workflows: macos — только `runs-on: macos-15` у job full в tests.yml (affected и release — Linux)",
+          not macos, macos)
+    # полный набор тестов (run-tests.py без --affected, прямой запуск tests/test_*.py в обход раннера) — только в job
+    # full файла tests.yml с `if` на pull_request и workflow_dispatch, и только если workflow не запускается на
+    # push/schedule/_target (шлюз держит tests/full в REQUIRED_CHECKS). Комментарии отрезаются до проверки; смотрим все файлы.
     full_bad = []
     for n in names:
         wtext = nocomment(open(os.path.join(wfdir, n)).read())
@@ -501,17 +515,19 @@ def t_workflows(wfdir=WORKFLOWS):
             if not is_full:
                 continue
             jname = lines[0].strip() if lines else "?"
-            if not re.search(r"^    if: github\.event_name == 'workflow_dispatch'$", part, re.M):
-                full_bad.append((n, "полный набор в job без if: workflow_dispatch", jname))
+            if (n, jname) != ("tests.yml", "full:"):
+                full_bad.append((n, "полный набор вне job full файла tests.yml", jname))
+            if not re.search(FULL_IF, part, re.M):
+                full_bad.append((n, "полный набор в job без if на pull_request и workflow_dispatch", jname))
             if re.search(r"\b(push|schedule|pull_request_target)\b", won):
                 full_bad.append((n, "workflow с полным набором запускается на push/schedule", jname))
-    check("полный набор тестов — только в job с if: github.event_name == 'workflow_dispatch' и в workflow без "
-          "push/schedule (комментарии не в счёт, все файлы workflows)", not full_bad, full_bad)
-    # runs-on — только закреплённый Linux (или ubuntu-latest у release и check-traces): выражение, список, matrix и
-    # self-hosted не пускаем
+    check("полный набор тестов — только в job full файла tests.yml с if на pull_request и workflow_dispatch и в "
+          "workflow без push/schedule (комментарии не в счёт, все файлы workflows)", not full_bad, full_bad)
+    # runs-on — только закреплённый Linux (или ubuntu-latest у release и check-traces) или macos-15 (где — проверка
+    # macos выше): выражение, список, matrix и self-hosted не пускаем
     ro = [(n, m) for n in names for m in re.findall(r"^\s*runs-on:\s*(.*)$", nocomment(open(os.path.join(wfdir, n)).read()), re.M)
-          if not re.fullmatch(r"ubuntu-(\d\d\.\d\d|latest)", m.strip())]
-    check("workflows: runs-on — только ubuntu-NN.NN или ubuntu-latest (без выражений, списков, matrix)", not ro, ro)
+          if not re.fullmatch(r"ubuntu-(\d\d\.\d\d|latest)|macos-15", m.strip())]
+    check("workflows: runs-on — только ubuntu-NN.NN, ubuntu-latest или macos-15 (без выражений, списков, matrix)", not ro, ro)
     # YAML с «: » в простом скаляре GitHub не разбирает — workflow не запускается вовсе (так было после #192)
     rb = shutil.which("ruby")
     load = "ARGV.each { |f| begin YAML.load_file(f, aliases: true) rescue ArgumentError; YAML.load_file(f) end }"
@@ -528,11 +544,14 @@ def t_workflows(wfdir=WORKFLOWS):
           keys is not None and not hit, hit if hit is not None else f"разбор YAML не удался: {why}")
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           tst is not None and not wf_step_bad(tst), tst if tst else why)
-    check("tests.yml: PR — job affected на закреплённом Linux, full — ручной на Linux (минута macOS ×10), полная история для merge-base",
+    full = job.get("full", "")
+    check("tests.yml: PR — job affected на закреплённом Linux, полная история для merge-base; full — на PR и вручную, "
+          "macos-15, timeout-minutes 90 (metis-1111)",
           tst is not None and sorted(tst["jobs"]) == ["affected", "full"] and set(job) == {"affected", "full"}
           and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff
-          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", job.get("full", ""), re.M), job.keys())
+          and re.search(FULL_IF, full, re.M) and re.search(r"^    runs-on: macos-15$", full, re.M)
+          and re.search(r"^    timeout-minutes: 90$", full, re.M), job.keys())
 
     def runs(part):
         """[(имя шага, [строки run, продолжения через обратную косую склеены])]: строки целиком, комментарий — отдельная строка."""
@@ -628,7 +647,7 @@ def t_workflows_on_bad_copies():
     full_job = ("\n  full:\n%s    runs-on: %s\n    timeout-minutes: 45\n    steps:\n      - uses: actions/checkout@"
                 "11bd71901bbe5b1630ceea73d27597364c9af683\n      - run: python3 -I plugins/pantheon/scripts/run-tests.py -j 3 "
                 "plugins/guard\n")
-    disp = "    if: github.event_name == 'workflow_dispatch'\n"
+    disp = "    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'\n"
     full_msg = "полный набор тестов — только в job"
     full_msg_all = "полный набор тестов — только в job"
     on_push_wf = ("name: full\non:\n  push:\n    branches: [main]\npermissions:\n  contents: read\njobs:\n  full:\n"
@@ -655,17 +674,28 @@ def t_workflows_on_bad_copies():
                                               "    runs-on: ubuntu-24.04\n    steps:\n      - run: ruff check .\n\n"
                                               "  affected:\n")),
          "tests.yml: PR — job affected"),
-        ("job full на macos-15 в tests.yml", dict(tests=nofull + full_job % (disp, "macos-15")),
-         "workflows: ни одного runs-on: macos"),
+        ("job full на ubuntu-24.04 (не macOS)", dict(tests=ins(real, "runs-on: macos-15", "runs-on: ubuntu-24.04")),
+         "tests.yml: PR — job affected"),
+        ("job full на macos-latest", dict(tests=ins(real, "runs-on: macos-15", "runs-on: macos-latest")),
+         "workflows: macos — только"),
+        ("job full с timeout-minutes 60", dict(tests=ins(real, "timeout-minutes: 90", "timeout-minutes: 60")),
+         "tests.yml: PR — job affected"),
         ("macos-15 в runs-on у affected", dict(tests=ins(real, "runs-on: ubuntu-24.04", "runs-on: macos-15")),
-         "workflows: ни одного runs-on: macos"),
+         "workflows: macos — только"),
         ("runs-on: macos-15 в release.yml", dict(release=ins(rel_real, "runs-on: ubuntu-latest", "runs-on: macos-15")),
-         "workflows: ни одного runs-on: macos"),
-        ("job full без if (идёт на PR)", dict(tests=nofull + full_job % ("", "ubuntu-24.04")), full_msg),
-        ("job full с if на push", dict(tests=nofull + full_job % ("    if: github.event_name == 'push'\n", "ubuntu-24.04")),
+         "workflows: macos — только"),
+        ("runs-on: macos-15 в check-traces.yml", dict(traces=ins(tr_real, "runs-on: ubuntu-latest", "runs-on: macos-15")),
+         "workflows: macos — только"),
+        ("job full без if", dict(tests=nofull + full_job % ("", "macos-15")), full_msg),
+        ("job full с if на push", dict(tests=nofull + full_job % ("    if: github.event_name == 'push'\n", "macos-15")),
          full_msg),
-        ("job full с if на pull_request", dict(tests=nofull + full_job % ("    if: github.event_name == 'pull_request'\n",
-                                                                         "ubuntu-24.04")), full_msg),
+        ("job full только на workflow_dispatch (на PR не идёт)",
+         dict(tests=nofull + full_job % ("    if: github.event_name == 'workflow_dispatch'\n", "macos-15")), full_msg),
+        ("job full только на pull_request", dict(tests=nofull + full_job % ("    if: github.event_name == 'pull_request'\n",
+                                                                           "macos-15")), full_msg),
+        ("полный набор в job affected", dict(tests=ins(real, "        run: python3 -I .github/scripts/test_release.py\n",
+                                                       "        run: python3 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard\n")),
+         full_msg),
         ("push в main в tests.yml при job full", dict(tests=ins(real, "  workflow_dispatch:\n",
                                                                "  push:\n    branches: [main]\n  workflow_dispatch:\n")),
          full_msg),
@@ -690,7 +720,7 @@ def t_workflows_on_bad_copies():
         ("runs-on: ${{ vars.RUNNER }}", dict(tests=ins(real, "runs-on: ubuntu-24.04", "runs-on: ${{ vars.RUNNER }}")),
          "workflows: runs-on — только"),
         ("matrix os: [macos-15]", dict(tests=ins(real, "    runs-on: ubuntu-24.04\n", "    strategy:\n      matrix:\n        os: [macos-15]\n    runs-on: ${{ matrix.os }}\n")),
-         "workflows: ни одного runs-on: macos"),
+         "workflows: macos — только"),
         ("runs-on: [self-hosted, linux]", dict(tests=ins(real, "runs-on: ubuntu-24.04", "runs-on: [self-hosted, linux]")),
          "workflows: runs-on — только"),
         ("второй job в release.yml", dict(release=rel_real.rstrip("\n") + "\n  evil-x:\n    runs-on: ubuntu-24.04\n"),

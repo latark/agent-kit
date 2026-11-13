@@ -660,17 +660,22 @@ def test_ci_required_names():
           [a[1:] for a in runs_calls], runs_calls)
     b = Box()
     b.request()
-    b.view(SHA, checks=ci("SUCCESS", "SUCCESS") + [dict(ci("SUCCESS", "SUCCESS", "FAILURE")[2], workflowName="tests",
-                                                         name="full")])
-    b.run()
-    check("красная необязательная (tests/full) при зелёных обязательных → окно и слияние",
-          len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
-    b = Box()
-    b.request()
     b.view(SHA, checks=ci("SUCCESS", "SUCCESS", "FAILURE"))
     b.run()
-    check("красная вне обязательных и необязательных (other/job2) → окна нет, заявка снята (Д1 argus #235)",
-          not b.windows() and not b.merges() and "other/job2 красная" in b.alerts(), b.alerts())
+    check("красная обязательная tests/full (metis-1111) при зелёных affected и traces → окна нет, заявка снята",
+          not b.windows() and not b.merges() and b.req() is None and "tests/full красная" in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS", "SUCCESS")[:2])
+    b.run()
+    check("нет обязательной tests/full (metis-1111) → окна нет, ждёт", not b.windows() and b.req() is not None,
+          b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS", "SUCCESS", "FAILURE"))
+    b.run()
+    check("красная вне обязательных и необязательных (other/job3) → окна нет, заявка снята (Д1 argus #235)",
+          not b.windows() and not b.merges() and "other/job3 красная" in b.alerts(), b.alerts())
     b = Box()
     b.request()
     b.view(SHA, checks=ci("SUCCESS", "SUCCESS") + [dict(ci("SUCCESS", "FAILURE")[1])])
