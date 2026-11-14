@@ -64,6 +64,100 @@ def test_ci_matches_guard():
           r.stdout.split() == ["wait", "wait", "ok", "fail", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
 
 
+def test_ci_state_no_workflows():
+    """metis-1207: пустой rollup у репозитория без REQUIRED_CHECKS — ok, только если каталога .github/workflows нет
+    (точный 404) или он пуст и на head PR, и на base-ветке — то же правило, что у шлюза guard (_has_workflows): любой
+    файл с любым триггером на head или на base — wait. Сбой gh, не-JSON, коммит head или ветка base не ответили 200,
+    404 не точным ответом gh последней строкой — wait (сбой не пропускает)."""
+    code = (
+        "import sys, json, importlib.util, subprocess\n"
+        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+        "s.loader.exec_module(m)\n"
+        "H = 'a' * 40\n"
+        "B = {'repos/o/app/branches/main': {'name': 'main'}, 'repos/o/app/commits/' + H: {'sha': H}}\n"
+        "def run_with(table, base='main', head=H):\n"
+        "    def fake(argv, **kw):\n"
+        "        key = argv[2]\n"
+        "        if key not in table: return subprocess.CompletedProcess(argv, 1, '', 'gh: Not Found (HTTP 404)\\n')\n"
+        "        v = table[key]\n"
+        "        if v == 'FAIL': return subprocess.CompletedProcess(argv, 1, '', 'gh: HTTP 502')\n"
+        "        if v == 'ODD404': return subprocess.CompletedProcess(argv, 1, '', 'error 404 in proxy (HTTP 502)')\n"
+        "        if v == 'NOTLAST': return subprocess.CompletedProcess(argv, 1, '', "
+        "'gh: Not Found (HTTP 404)\\nproxy: upstream reset, retry\\n')\n"
+        "        if v == 'RAW': return subprocess.CompletedProcess(argv, 0, '<html>', '')\n"
+        "        return subprocess.CompletedProcess(argv, 0, json.dumps(v), '')\n"
+        "    m.subprocess.run = fake\n"
+        "    return m.ci_state([], (), None, (), 'o/app', base, head)[0]\n"
+        "D = 'repos/o/app/contents/.github/workflows?ref='\n"
+        "out = [run_with(dict(B)), run_with({**B, D + 'main': []}),\n"
+        "  run_with({**B, D + 'main': [{'name': 'push-main.yml'}]}),\n"
+        "  run_with({**B, D + 'main': [{'name': 'README.md'}]}),\n"
+        "  run_with({**B, D + H: [{'name': 'lint.yml'}]}),\n"
+        "  run_with({**B, D + 'main': 'FAIL'}), run_with({**B, D + 'main': 'RAW'}),\n"
+        "  run_with({}), run_with({**B, D + 'main': 'ODD404'}), run_with({**B, D + 'main': 'NOTLAST'}),\n"
+        "  run_with(dict(B), base=None), run_with(dict(B), head=None), run_with(dict(B), head='abc'),\n"
+        "  run_with({'repos/o/app/branches/main': {'name': 'main'}})]\n"
+        "m.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError('нет gh'))\n"
+        "out.append(m.ci_state([], (), None, (), 'o/app', 'main', H)[0])\n"
+        "out.append(m.ci_state([], ())[0])\n"
+        "print(*out)\n" % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    want = {"каталога нет ни на head, ни на base": "ok", "на base каталог пуст": "ok",
+            "на base workflow (любой триггер, даже push только в main)": "wait",
+            "на base в каталоге не .yml (как guard: любой файл)": "wait", "workflow только на head": "wait",
+            "сбой gh на каталоге": "wait", "не-JSON": "wait", "коммит и ветка не ответили": "wait",
+            "404 не точным ответом": "wait", "(HTTP 404) не последней строкой stderr": "wait", "base нет": "wait",
+            "head нет": "wait", "head не SHA": "wait", "коммит head не ответил 200": "wait", "gh не найден": "wait",
+            "без repo/base/head — как раньше": "wait"}
+    got = r.stdout.split()
+    check("ci_state без CI: " + "; ".join(f"{k} — {v}" for k, v in want.items()),
+          got == list(want.values()), [(k, v, g) for (k, v), g in zip(want.items(), got) if v != g] or r.stdout + r.stderr)
+
+
+def test_gate_no_ci_window():
+    """metis-1207, Б1 argus #475: у репозитория без CI вердикт шлюза — «CI нет у репозитория», и в окне Touch ID тоже,
+    а не «CI ✓» (billing_verdict не подменяет NO_CI). gate передаёт ci_state repo, base и head: без них вердикт был бы
+    «проверок GitHub пока нет» — wait."""
+    code = (
+        "import sys, json, importlib.util, subprocess, types\n"
+        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+        "s.loader.exec_module(m)\n"
+        "H = 'a' * 40\n"
+        "ok = {'repos/o/app/branches/main', 'repos/o/app/commits/' + H}\n"
+        "seen = []\n"
+        "def fake(argv, **kw):\n"
+        "    seen.append(argv[2])\n"
+        "    if argv[2] in ok: return subprocess.CompletedProcess(argv, 0, '{}', '')\n"
+        "    return subprocess.CompletedProcess(argv, 1, '', 'gh: Not Found (HTTP 404)\\n')\n"
+        "m.subprocess.run = fake\n"
+        "def acc(sid): return {'kind': 'accept', 'pr': 7, 'sha': H, 'base': 'main',\n"
+        "                      'by': {'agent_type': 'argus', 'session_id': sid, 'agent_id': sid}}\n"
+        "recs = [{'kind': 'tests', 'sha': H}, acc('s1'), acc('s2')]\n"
+        "m.P = types.SimpleNamespace(review_records=lambda repo: recs, review_accept_counts=lambda r: True)\n"
+        "m.code_facts = lambda *a: (set(), set(), [])\n"
+        "view = {'headRefOid': H, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main', "
+        "'statusCheckRollup': [], 'title': 'T'}\n"
+        "state, why = m.gate('o/app', 7, H, view)\n"
+        "req = {'repo': 'o/app', 'pr': 7, 'sha': H}\n"
+        "print(json.dumps({'state': state, 'why': why, 'win': m.window_text(req, view, why, ['README.md']),\n"
+        "                  'batch': m.batch_window_text([req], [view], [why], [['README.md']]),\n"
+        "                  'head': any('ref=' + H in k for k in seen)}, ensure_ascii=False))\n"
+        % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    try:
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        got = {}
+    check("gate без CI → ok «CI нет у репозитория», не «CI ✓»",
+          got.get("state") == "ok" and "CI нет у репозитория" in got.get("why", "")
+          and "CI ✓" not in got.get("why", ""), r.stdout + r.stderr)
+    check("окно Touch ID пишет «CI нет у репозитория», не «CI ✓»",
+          "CI нет у репозитория" in got.get("win", "") and "CI ✓" not in got.get("win", ""), got)
+    check("окно пачки — тоже «CI нет у репозитория»",
+          "CI нет у репозитория" in got.get("batch", "") and "CI ✓" not in got.get("batch", ""), got)
+    check("gate смотрит workflows и на head PR", got.get("head") is True, got)
+
+
 def test_ci_billing():
     """metis-0655: CI не запускался из-за лимита минут или оплаты (FAILURE с аннотацией лимита у красных
     обязательных) — проход засчитывает вместо CI запись тестов шлюза на SHA (она нужна и так) и сливает; окно

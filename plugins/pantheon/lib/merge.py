@@ -49,7 +49,11 @@ PR ядра защит (Д3) агенты не сливают: его слива
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
-     нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
+     нет, запуски не получены — заявка ждёт. Исключение (metis-1207): у репозитория нет REQUIRED_CHECKS, проверок нет,
+     а каталога .github/workflows нет ни на head PR, ни на base-ветке (no_pr_workflows; любой workflow с любым
+     триггером — ждёт, как шлюз guard merge_gate._has_workflows) — вердикт NO_CI «CI нет у репозитория», и он же в
+     окне Touch ID. «Каталога нет» — только по точному ответу gh «(HTTP 404)» последней строкой после ответа 200 от
+     коммита head и ветки base; любой сбой gh — ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
      запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
      job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
      набора FULL_TESTS (full_tests_record) или узкая `--affected` с базой и картой, сверенными с GitHub
@@ -136,6 +140,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import urllib.parse
 import sys
 from datetime import datetime
 
@@ -185,6 +190,8 @@ PHRASES_KEEP = 24 * 3600
 # вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
 BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
 BILLING_SHORT = "CI: лимит, тесты ✓"
+# вердикт CI репозитория без .github/workflows на head и base (metis-1207): доходит до окна как есть, не «CI ✓»
+NO_CI = "CI нет у репозитория (.github/workflows нет на head и base)"
 # `pantheon merge status` (metis-0819): события merge.jsonl, с которыми заявка ушла из очереди, — за сутки, последние 20
 DONE_EVENTS = ("merged", "merge-failed", "gate", "gate-after", "expired", "refused", "no-window", "batch-broken",
                "batch-stopped", "error", "cancelled")
@@ -985,14 +992,56 @@ def ci_billing_fetch(repo, runs, required):
     return ci_billing(runs, required, notes, jobs)
 
 
-def ci_state(rollup, required=(), runs=None, optional=()):
+def _gh_json(path):
+    """GET REST gh api path → (код, разобранный JSON или None); сбой gh, таймаут, не-JSON — (None, None)."""
+    try:
+        r = subprocess.run([gh_path(), "api", path], capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if r.returncode != 0:  # «нет» — только точный ответ gh «(HTTP 404)» последней строкой, иначе сбой
+        last = (r.stderr or "").strip().splitlines()[-1:] or [""]
+        return ("404" if last[0].rstrip().endswith("(HTTP 404)") else None), None
+    try:
+        return "200", json.loads(r.stdout)
+    except ValueError:
+        return None, None
+
+
+def no_pr_workflows(repo, base, head=None):
+    """True — каталога .github/workflows нет ни на head PR, ни на base-ветке (metis-1207: проверок не встанет, ждать
+    нечего); False — есть или не определить (gh не ответил, ответ не разобран — сбой не пропускает). Правило то же, что у
+    шлюза guard (merge_gate._has_workflows): любой непустой каталог — ждать, триггеры не разбираем; иначе проход
+    показал бы окно Touch ID, а шлюз отказал бы в слиянии. Смотрим и head, и base: PR, который удаляет свои workflows,
+    не уводит заявку от CI (находка проверки безопасности #475), а PR, который их добавляет, ждёт своих проверок. Head
+    (SHA) и ветка base сначала должны ответить 200 — 404 нечитаемого репозитория, коммита или ветки не сойдёт за
+    «workflows нет»."""
+    if not isinstance(base, str) or not base or not isinstance(head, str) or not SHA_RE.fullmatch(head):
+        return False
+    return all(_workflows_absent(repo, ref, probe) for ref, probe in (
+        (head, f"repos/{repo}/commits/{head}"),
+        (base, f"repos/{repo}/branches/{urllib.parse.quote(base, safe='')}")))
+
+
+def _workflows_absent(repo, ref, probe):
+    """True — на ref нет каталога .github/workflows (точный 404) или он пуст. probe — путь REST, который сперва должен
+    ответить 200 (коммит или ветка). Каталог — через gh REST (GraphQL ролям закрыт)."""
+    if _gh_json(probe)[0] != "200":
+        return False
+    code, listing = _gh_json(f"repos/{repo}/contents/.github/workflows?ref={urllib.parse.quote(ref, safe='')}")
+    return code == "404" or (code == "200" and listing == [])
+
+
+def ci_state(rollup, required=(), runs=None, optional=(), repo=None, base=None, head=None):
     """(ok|wait|fail, текст, предупреждения о красных необязательных) по ci_verdict. Проверок нет — wait: они ещё не
-    встали; по 24 ч заявка всё равно гаснет. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait:
-    сбой gh не снимает заявку."""
+    встали; по 24 ч заявка всё равно гаснет. Исключение (metis-1207): repo, base и head переданы, обязательных проверок
+    нет, а каталога .github/workflows нет ни на head, ни на base-ветке PR (no_pr_workflows), — ok NO_CI:
+    ждать нечего. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
     if required and runs is None:
         return "wait", "запуски Actions на head PR не получены", []
     state, why, notes = ci_verdict(rollup, required, runs, optional)
     if state == "empty":
+        if not required and repo and base and head and no_pr_workflows(repo, base, head):
+            return "ok", NO_CI, notes
         return "wait", "проверок GitHub пока нет", notes
     if state == "ok":
         return "ok", f"CI ✓ ({len(rollup)})", notes
@@ -1301,7 +1350,8 @@ def gate(repo, pr, sha, view):
     latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
-    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
+    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo), repo,
+                                  view.get("baseRefName"), sha)
     # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
     warn = "".join(f"; {n}" for n in notes)
     state, why = billing_verdict(repo, sha, recs, runs, required, state, why, view.get("baseRefName"))
@@ -1311,7 +1361,8 @@ def gate(repo, pr, sha, view):
 
 
 def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None):
-    """Итог CI в gate (state, why — вердикт ci_verdict): (ok|wait|fail, текст). Зелёный — «CI ✓», идёт — как есть.
+    """Итог CI в gate (state, why — вердикт ci_state): (ok|wait|fail, текст). Зелёный — «CI ✓», CI у репозитория нет
+    (NO_CI, metis-1207) — как есть, чтобы окно Touch ID не писало «CI ✓»; идёт — как есть.
     Красный: CI не запускался из-за лимита минут или оплаты
     (metis-0655) — вместо CI засчитывается запись тестов на этот SHA с командой полного набора FULL_TESTS
     (full_tests_record), как в шлюзе guard (_billing_problem), или узкая (narrow_tests_record, metis-1050) — её база и
@@ -1319,7 +1370,7 @@ def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None)
     красной. Аннотации или job не получены (сбой gh) — wait: признак не проверить, а снять заявку по красной значило бы
     потерять запасной путь (metis-0813)."""
     if state != "fail":
-        return state, "CI ✓" if state == "ok" else why
+        return state, "CI ✓" if state == "ok" and why != NO_CI else why
     billing = ci_billing_fetch(repo, runs, required)
     if billing is None:
         return "wait", f"аннотации CI не получены (сбой gh) — лимит минут или нет, не проверить; {why}"
