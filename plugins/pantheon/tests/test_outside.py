@@ -1565,6 +1565,29 @@ check("listdir папки заявок упал: serve_round без OSError и �
 kill_all_servers()
 serve_pass()   # заявка, оставшаяся лежать, исполняется следующим кругом
 
+# stop_requests тоже читает папки заявок: сбой listdir не роняет настоящие drop_orphan_stops и pending_serve (metis-1186)
+_fd_calls2 = []
+
+
+def _listdir_boom2(path="."):
+    if isinstance(path, int):
+        _fd_calls2.append(path)
+        raise PermissionError("нет доступа")
+    return _real_listdir(path)
+
+
+os.listdir = _listdir_boom2
+try:
+    _raised, _n, _pend = None, None, None
+    try:
+        _n, _pend = O.drop_orphan_stops(), O.pending_serve()
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+check("listdir папки заявок упал: drop_orphan_stops и pending_serve без OSError",
+      _raised is None and _n == 0 and _fd_calls2, (_raised, _n, _pend, _fd_calls2))
+
 # --- брошенные копии (Д1 argus #232): копия без сервера старше WORK_ORPHAN_AGE снимается в конце круга -------------
 kill_all_servers()
 _wr = os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work")

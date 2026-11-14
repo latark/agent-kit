@@ -2678,7 +2678,7 @@ def stop_requests():
         if dfd is None:
             continue
         try:
-            for name in os.listdir(dfd):
+            for name in _listdir_safe(dfd):
                 rid = name[:-len(".stop")]
                 if not name.endswith(".stop") or not ID_RE.fullmatch(rid):
                     continue
