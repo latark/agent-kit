@@ -53,7 +53,7 @@ def check(name, ok, detail=""):
 def setup(home):
     # папки agents, commands, hooks не создаём: песочница окна закрывает их запись (**/.claude/agents), а guard судит
     # цель записи и без готовой папки
-    for d in (APP + "/.claude/skills/x", APP + "/.claude/skills/risky", ROOT_BA + "/.claude", SITE + "/.claude",
+    for d in (APP + "/.claude/skills/x", APP + "/.claude/worktrees/w/.claude/skills/x", APP + "/.claude/skills/risky", ROOT_BA + "/.claude", SITE + "/.claude",
               AK + "/.claude", ".claude/pantheon", ".local/state/pantheon", "ai/pantheon", "src"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     json.dump({"domains": {
@@ -65,6 +65,7 @@ def setup(home):
         fh.write('always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
     files = {
         APP + "/.claude/skills/x/SKILL.md": "---\nname: x\ndescription: лимиты источников\n---\nбез прокси\n",
+        APP + "/.claude/worktrees/w/.claude/skills/x/SKILL.md": "---\nname: x\ndescription: лимиты\n---\nбез прокси\n",
         APP + "/.claude/skills/risky/SKILL.md": "---\nname: r\nallowed-tools: Bash\n---\nтекст\n",
         "src/clean.md": "---\nname: c\ndescription: d\n---\nтело\n",
         "src/risky.md": "---\nname: c\nallowed-tools: Bash(*)\n---\nтело\n",
@@ -143,6 +144,42 @@ def main():
         ("лид apollo-proja (главная сессия) пишет agents/x.md с model — можно", "allow", APP, APOLLO,
          W(APP + "/.claude/agents/x.md", "---\nname: x\ndescription: роль\nmodel: sonnet\n---\nты — роль\n")),
         ("dev-opus (субагент лида) — отказ", "deny", APP, ("dev-opus", True), W(skill)),
+        # --- metis-1039: разработчик (субагент) правит навыки в worktree своего направления, тексты судят так же ---
+        *[(f"{r} (субагент): навык в своей worktree — можно", "allow", APP, (r, True),
+           W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")) for r in ("dev-sonnet", "dev-opus", "dev-haiku")],
+        ("dev-sonnet: Edit навыка в своей worktree — можно", "allow", APP, ("dev-sonnet", True),
+         E(APP + "/.claude/worktrees/w/.claude/skills/x/SKILL.md", "без прокси", "с прокси")),
+        ("dev-sonnet: worktree корня продукта projAApp — можно", "allow", APP, ("dev-sonnet", True),
+         W(ROOT_BA + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        ("dev-sonnet: основная копия app/.claude/skills — отказ", "deny", APP, ("dev-sonnet", True), W(skill)),
+        ("dev-sonnet: путь с .claude/skills до worktrees — основная копия, отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/skills/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        ("dev-sonnet: чужое направление sitebuilder (worktree) — отказ", "deny", APP, ("dev-sonnet", True),
+         W(SITE + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        ("dev-sonnet из чужого направления (запуск в sitebuilder) пишет в worktree app — отказ", "deny", SITE,
+         ("dev-sonnet", True), W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        ("dev-sonnet: worktree/.claude/agents — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/agents/x.md", "---\nname: x\ndescription: роль\n---\nроль\n")),
+        ("dev-sonnet: worktree/.claude/commands — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/commands/x.md", "---\ndescription: к\n---\nтекст\n")),
+        ("dev-sonnet: worktree/.claude/hooks — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/hooks/x.sh", "exit 0\n")),
+        ("dev-sonnet: worktree/.claude/settings.json — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/settings.json", "{}\n")),
+        ("dev-sonnet: worktree/.mcp.json — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.mcp.json", "{}\n")),
+        ("dev-sonnet: agent-kit worktree plugins/guard — отказ (направление Метиды)", "deny", APP, ("dev-sonnet", True),
+         W(AK + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        ("dev-sonnet: навык с !`cmd` — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", "---\nname: y\n---\nветка: !`git branch`\n")),
+        ("dev-sonnet: навык с блоком ```! — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", "---\nname: y\n---\n```!\nid\n```\n")),
+        ("dev-sonnet: навык с allowed-tools — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", fm("allowed-tools: Bash"))),
+        ("dev-sonnet: навык с hooks во frontmatter — отказ", "deny", APP, ("dev-sonnet", True),
+         W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", fm("hooks:\n  PreToolUse: []"))),
+        ("dev-sonnet: Bash cp -R дерева в worktree/.claude/skills — отказ (текст не виден)", "deny", APP,
+         ("dev-sonnet", True), B(f"cp -R {H('src')} {H(APP)}/.claude/worktrees/w/.claude/skills/")),
         ("лид чужого направления hephaestus-site — отказ", "deny", APP, ("hephaestus-site", True), W(skill)),
         ("domain-coordinator субагентом — отказ", "deny", APP, ("domain-coordinator", True), W(skill)),
         ("argus — отказ", "deny", APP, ("argus", True), W(skill)),

@@ -75,6 +75,22 @@ DYN_COMMAND = re.compile(r"!\s*`|```!|~~~!")
 TEXT_LIMIT = 1 << 20  # больше — текст не разбираем, отказ
 
 
+# metis-1039 («да» владельца 14.11, вариант Б): субагенты-разработчики правят навыки проекта (.claude/skills) в своей
+# worktree своего направления (<папка>/.claude/worktrees/<имя>/.claude/skills) — с теми же проверками текста, что у
+# координатора (own_text_problem). Commands, agents, hooks, settings и основная копия проекта — отказ
+DEV_ROLES = {"dev-haiku", "dev-sonnet", "dev-opus"}
+
+
+def _dev_skill_only(p):
+    """Путь — файл навыка внутри .claude/skills worktree (<…>/.claude/worktrees/<имя>/.claude/skills/…), не основной
+    копии проекта и не commands и agents."""
+    parts = [G._key(x) for x in p.split("/")]
+    for i, x in enumerate(parts[:-1]):
+        if x == ".claude" and parts[i + 1] == "skills":
+            return any(parts[j] == ".claude" and parts[j + 1] == "worktrees" and j + 2 < i for j in range(i))
+    return False
+
+
 def own_folders(role, sub, pdir):
     """Папки направления, где роль правит skills, commands и agents проекта: координатор (главная сессия
     domain-coordinator) и лид направления (hephaestus-<коротко>, apollo-<коротко> — главная сессия или субагент окна).
@@ -84,6 +100,8 @@ def own_folders(role, sub, pdir):
         return []
     if role == "domain-coordinator" and not sub:
         return folders
+    if sub and role in DEV_ROLES:
+        return folders  # metis-1039: только skills своей worktree — _dev_skill_only в check_protect_config
     short = name.split("-", 1)[1] if "-" in name else ""
     return folders if short and role in {p + short for p in G.PANTHEON_ROLE_PREFIXES} else []
 
@@ -670,7 +688,8 @@ def check_protect_config(event, tool, tool_input):
     # не даёт прав и не запускает код (own_text_problem). Копии дерева, распаковка, git checkout и clone ниже судят
     # без этого исключения: их текста не видно
     own = own_folders(role, sub, pdir) if bad else []
-    opened = [p for p in bad if own and not G._inside(p, prot) and not any(G._inside(x, [p]) for x in prot)
+    dev = sub and role in DEV_ROLES
+    opened = [p for p in bad if own and (not dev or _dev_skill_only(p)) and not G._inside(p, prot) and not any(G._inside(x, [p]) for x in prot)
               and not _settings_file(p, mk, own)]
     bad = [p for p in bad if p not in opened]
     if tool == "Bash":
