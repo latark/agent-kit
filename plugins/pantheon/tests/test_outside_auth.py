@@ -55,6 +55,7 @@ for d in (QDIR, OTHER, OWNQ):
     os.makedirs(d)
 URL = ("https://api.supabase.com/v1/oauth/authorize?response_type=code&client_id=cid-1&code_challenge=Chal-9x"
        "&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A51234%2Fcallback&state=St4te-q7Zp")
+RU = "redirect_uri=http%3A%2F%2Flocalhost%3A51234%2Fcallback"
 
 
 def check(name, cond, extra=""):
@@ -136,8 +137,9 @@ code, out, rid, res = run()
 log = read(OPEN_LOG)
 check("окно: код 0, итог done", code == 0 and (res or {}).get("state") == "done", (code, out, res))
 check("окно: open позван одним аргументом — адрес как есть", log == f"argc=1\narg={URL}\n", log)
-check("окно: уведомление «окно w просит вход в Supabase»", "Окно w просит вход в Supabase" in read(NOTIFY_LOG),
-      read(NOTIFY_LOG))
+check("окно: уведомление «окно w просит вход в Supabase» с client_id и хостом redirect_uri",
+      "Окно w просит вход в Supabase (клиент cid-1, ответ на localhost)" in read(NOTIFY_LOG), read(NOTIFY_LOG))
+check("окно: вывод команды называет client_id и хост redirect_uri", "клиент cid-1, ответ на localhost" in out, out)
 check("окно: заявка снята с диска", not os.path.exists(os.path.join(QDIR, rid + A.SUFFIX)))
 public = read(os.path.join(STATE, "outside", "runs", rid + ".json")) + read(os.path.join(STATE, "logs", "outside.jsonl"))
 check("окно: в runs/ и журнале — хост, без state и code_challenge адреса",
@@ -163,13 +165,50 @@ BAD = {
     "ключ open": "-a Calculator",
     "пусто": "",
     "длинный": URL + "&x=" + "a" * A.URL_MAX,
+    # запрос ссылки и redirect_uri (находка проверки безопасности: код доступа не должен уйти на чужой адрес)
+    "фрагмент": URL + "#x",
+    "пустой фрагмент": URL + "#",
+    "запрос не по строгому разбору": URL + "&junk",
+    "два redirect_uri": URL + "&redirect_uri=http%3A%2F%2Fevil.example.com%2Fcallback",
+    "повтор state": URL + "&state=other",
+    "без redirect_uri": URL.replace("&" + RU, ""),
+    "redirect_uri на чужой хост": URL.replace(RU, RU.replace("localhost", "evil.example.com")),
+    "redirect_uri https://evil": URL.replace(RU, "redirect_uri=https%3A%2F%2Fevil.example.com%2Fcallback"),
+    "redirect_uri https на localhost": URL.replace(RU, RU.replace("http%3A", "https%3A")),
+    "redirect_uri localhost-приставка": URL.replace(RU, RU.replace("localhost", "localhost.evil.example.com")),
+    "redirect_uri с именем пользователя": URL.replace(RU, RU.replace("localhost", "x%40localhost")),
+    "redirect_uri без порта": URL.replace(RU, RU.replace("%3A51234", "")),
+    "redirect_uri порт не числом": URL.replace(RU, RU.replace("51234", "abc")),
+    "redirect_uri не тот путь": URL.replace(RU, RU.replace("callback", "other")),
+    "redirect_uri с фрагментом": URL.replace(RU, RU + "%23x"),
+    "redirect_uri с запросом": URL.replace(RU, RU + "%3Fx%3D1"),
+    "client_id с мусором": URL.replace("client_id=cid-1", "client_id=cid%3Cscript%3E"),
+    "client_id пустой": URL.replace("client_id=cid-1", "client_id="),
+    "без client_id": URL.replace("&client_id=cid-1", ""),
+    "response_type не code": URL.replace("response_type=code", "response_type=token"),
+    "без response_type": URL.replace("response_type=code&", ""),
 }
 for what, bad in BAD.items():
-    check(f"белый список: {what} — отказ check_url", A.check_url(bad)[0] is None, A.check_url(bad))
-check("белый список: адрес Supabase OAuth — принят", A.check_url(URL) == ("api.supabase.com", None), A.check_url(URL))
-check("белый список: порт 443 и подпуть — приняты",
-      A.check_url(URL.replace("api.supabase.com", "api.supabase.com:443"))[0] == "api.supabase.com"
-      and A.check_url(URL.replace("/authorize", "/authorize/x"))[0] == "api.supabase.com")
+    check(f"белый список: {what} — отказ check_url", bad != URL and A.check_url(bad)[0] is None, A.check_url(bad))
+check("белый список: адрес Supabase OAuth — принят",
+      A.check_url(URL) == ({"host": "api.supabase.com", "client": "cid-1", "redirect": "localhost"}, None),
+      A.check_url(URL))
+check("белый список: порт 443, подпуть и ответ на 127.0.0.1 — приняты",
+      all((A.check_url(u)[0] or {}).get("host") == "api.supabase.com" for u in (
+          URL.replace("api.supabase.com", "api.supabase.com:443"), URL.replace("/authorize", "/authorize/x"),
+          URL.replace(RU, RU.replace("localhost", "127.0.0.1")))))
+LONG = "c" * 60
+check("client_id длиннее 40 — показан первыми 40 знаками",
+      (A.check_url(URL.replace("client_id=cid-1", "client_id=" + LONG))[0] or {}).get("client") == LONG[:40])
+reset()
+code, out, rid, res = run(BAD["redirect_uri на чужой хост"], rounds=False)
+check("redirect_uri на чужой хост: команда — код 2, заявки нет", code == 2 and rid is None
+      and "redirect_uri" in out.strip().splitlines()[-1], (code, out, rid))
+reset()
+rid = put(QDIR, url=BAD["два redirect_uri"])
+res = round_result(QDIR, rid)
+check("два redirect_uri: подложенная заявка — failed, open не позван",
+      res.get("state") == "failed" and not read(OPEN_LOG), (res, read(OPEN_LOG)))
 reset()
 code, out, rid, res = run(BAD["чужой хост"], rounds=False)
 check("белый список: команда — код 2, заявки нет, причина последней строкой",
