@@ -122,6 +122,19 @@ check("fail: отказ песочницы → строка source=sandbox, кл
       and rows[0].get("source") == "sandbox" and rows[0].get("cls") == "curl", (rc, rows))
 rc, out, _ = run([REF, "fail"], {"tool_name": "Bash", "tool_input": {"command": "pytest"}, "error": "AssertionError: 1 != 2"})
 check("fail: обычный сбой теста → строки нет", len(journal()) == 1, journal())
+reset()
+CMDX = "mytool --flag value-MARKER-CMD"
+rc, out, _ = run([REF, "fail"], {"tool_name": "Bash", "tool_input": {"command": "grep sandbox notes/x.md"},
+                                 "error": "Exit code 1\nnotes/x.md: sandbox password hunter2 for vpn\nx: Permission denied"})
+check("fail (Б1а): вывод со словом sandbox / permission denied и «password» → строки в журнале нет, подсказка есть",
+      journal() == [] and "Пантеон (metis-0832)" in out, (journal(), out))
+rc, out, _ = run([REF, "fail"], {"tool_name": "Bash", "tool_input": {"command": CMDX},
+                                 "error": f"{CMDX}: Operation not permitted (password=hunter2) deny(1)"})
+blob = json.dumps(journal(), ensure_ascii=False)
+check("fail (Б1б): строка отказа повторяет команду и секрет → в reason только имя признака",
+      len(journal()) == 1 and journal()[0]["reason"] == "operation not permitted" and "MARKER-CMD" not in blob
+      and "hunter2" not in blob, blob)
+reset()
 rc, out, _ = run([REF, "fail"], {"tool_name": "Bash", "tool_input": {"command": "x"}, "error": "Operation not permitted"},
                  PANTHEON_STATE=bad)
 check("fail: журнал не пишется (STATE — файл) → код 0", rc == 0, (rc, out))
@@ -205,14 +218,23 @@ os.makedirs(os.path.join(proj, "s1", "subagents"))
 with open(os.path.join(proj, "s1", "subagents", "agent-a.jsonl"), "w", encoding="utf-8") as fh:
     fh.write(json.dumps(tu("t7", "Bash", "docker run x", IN)) + "\n"
              + json.dumps(tr("t7", "denied by the auto mode classifier. Reason: docker not allowed", IN)) + "\n")
+proj2 = os.path.join(HOME, ".claude", "projects", "-Users-ivan-projects-demo-app")
+os.makedirs(os.path.join(proj2, "s2", "subagents"))
+with open(os.path.join(proj2, "s2", "subagents", "agent-b.jsonl"), "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(tu("t8", "Bash", "curl q", IN)) + "\n" + json.dumps(tr("t8", "curl: Operation not permitted", IN)) + "\n"
+             + json.dumps(tu("t9", "Bash", "ls", IN)) + "\n"
+             + json.dumps(tr("t9", "Permission for this action was denied by the auto mode classifier. Reason: only-this-"
+                             "part\nline 2 reason: tail-NOT-HERE", IN)) + "\n"
+             + json.dumps(tu("t10", "Bash", "grep sandbox x", IN)) + "\n"
+             + json.dumps(tr("t10", "x.md: sandbox password hunter2", IN)) + "\n")
 with open(os.path.join(proj, "notes.txt"), "w") as fh:
     fh.write(PRIV)
 rc, out, er = run([PANTHEON, "denials", "backfill", "--since", "2026-11-07", "--until", "2026-11-13"])
 rows = journal()
-check("backfill: код 0, в выводе только счётчики", rc == 0 and PRIV not in out + er and "новых строк отказов 3" in out
-      and "файлов 2" in out, (rc, out, er))
+check("backfill: код 0, в выводе только счётчики", rc == 0 and PRIV not in out + er and "новых строк отказов 5" in out
+      and "файлов 3" in out, (rc, out, er))
 by = {r["id"]: r for r in rows}
-check("backfill: в журнале только отказы (t1 классификатор, t2 песочница, t7 субагент)", set(by) == {"t1", "t2", "t7"},
+check("backfill: в журнале только отказы (t10 — только слово sandbox — не отказ)", set(by) == {"t1", "t2", "t7", "t8", "t9"},
       sorted(by))
 check("backfill: классы и источники", by["t1"]["cls"] == "git" and by["t1"]["source"] == "classifier"
       and by["t2"]["cls"] == "curl" and by["t2"]["source"] == "sandbox" and by["t7"]["cls"] == "docker", rows)
@@ -220,13 +242,30 @@ check("backfill: в журнале нет ни строки переписки, 
       PRIV not in json.dumps(rows, ensure_ascii=False) and "origin" not in json.dumps(rows), rows)
 check("backfill: набор полей — только поля отказа", all(set(r) <= {"t", "window", "role", "tool", "cls", "reason",
                                                                   "source", "id"} for r in rows), rows)
+check("backfill (Б2): окно субагента t7 = окно главной сессии t1 (папка проекта), не «subagents»",
+      by["t7"]["window"] == by["t1"]["window"] == "work-win-x" and all(r["window"] != "subagents" for r in rows),
+      [(r["id"], r["window"]) for r in rows])
+check("backfill (Д1): окно без users-<имя> и без «projects-»", by["t8"]["window"] == "demo-app"
+      and "ivan" not in json.dumps([r["window"] for r in rows]), by["t8"]["window"])
+check("backfill: причина песочницы — имя признака, причина классификатора — только после «Reason:» шаблона",
+      by["t8"]["reason"] == "operation not permitted" and by["t9"]["reason"].startswith("only-this-")
+      and "tail-NOT-HERE" in by["t9"]["reason"] and by["t2"]["reason"] == "operation not permitted", rows)
 rc, out, _ = run([PANTHEON, "denials", "backfill", "--since", "2026-11-07", "--until", "2026-11-13"])
-check("backfill: повтор не дублирует", "новых строк отказов 0" in out and len(journal()) == 3, (out, len(journal())))
+check("backfill: повтор не дублирует", "новых строк отказов 0" in out and len(journal()) == 5, (out, len(journal())))
 for args in (["--since", "2026-11-07"], ["--since", "2026-11-13", "--until", "2026-11-07"], ["--since", "x", "--until", "y"]):
     rc, out, er = run([PANTHEON, "denials", "backfill", *args])
     check(f"backfill: плохие аргументы {args} → код 2", rc == 2 and out == "" and er.strip(), (rc, out, er))
 rc, out, er = run([PANTHEON, "denials", "wat"])
 check("denials: неизвестная подкоманда → код 2", rc == 2, (rc, er))
+
+# --- маска секретов (argus2) ------------------------------------------------------------------------------------------
+CANARY = ["hunter2", "s3cr3tpw", "qwerty", "abc123key", "dXNlcjpwYXNz", "tok-9f8e7d"]
+for sample in ("curl -u admin:hunter2 http://h", "https://bob:s3cr3tpw@host/x", "PGPASSWORD=qwerty psql",
+               "export OPENAI_API_KEY=abc123key", "Authorization: Basic dXNlcjpwYXNz", "curl --user=a:hunter2 u",
+               "Authorization: Bearer tok-9f8e7d", "MY_SECRET_TOKEN: tok-9f8e7d"):
+    out = DM.scrub(sample)
+    check(f"scrub: «{sample}» → без значения", not any(c in out for c in CANARY), out)
+check("scrub: обычный текст не портится", DM.scrub("curl to host not allowed") == "curl to host not allowed")
 
 # --- плановый проход -------------------------------------------------------------------------------------------------
 reset()

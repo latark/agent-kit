@@ -39,16 +39,19 @@ WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 ENV_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
 SECRET_RX = (
+    re.compile(r"(?i)\b(?:basic|bearer)\s+\S+"),
+    re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]*@"),                       # https://user:pass@host
+    re.compile(r"(?<!\S)(?:-u|--user)(?:\s+|=)\S+"),                    # curl -u user:pass
+    re.compile(r"(?i)[\w-]*(?:key|secret|passw(?:or)?d|token|authorization)\s*[=:]\s*\S+"),   # PGPASSWORD=, *_KEY=
     re.compile(r"\b(?:sk|pk|ghp|gho|ghs|github_pat|xox[abpr]|AKIA|AIza)[-_A-Za-z0-9]{8,}"),
-    re.compile(r"(?i)\b(?:token|key|secret|password|passwd|authorization|api[_-]?key)\b\s*[=:]\s*\S+"),
-    re.compile(r"(?i)\bbearer\s+\S+"),
     re.compile(r"[A-Za-z0-9+/_=-]{24,}"),
     re.compile(r"/Users/[^/\s]+"),
 )
 # отказ классификатора в тексте tool_result (транскрипты); отказ песочницы — handoff.refusal_source
 CLASSIFIER_RX = re.compile(r"auto mode classifier|classifier (?:has )?(?:blocked|denied)|"
                            r"permission for this action (?:has been |was )?denied|denied by (?:the )?auto mode", re.I)
-REASON_RX = re.compile(r"reason:\s*(.+)", re.I | re.S)
+# причина — только из шаблона отказа классификатора, а не после любого «reason:» в выводе
+REASON_RX = re.compile(r"permission for this action (?:has been |was )?denied[^\n]*?\breason:\s*(.+)", re.I | re.S)
 
 
 def home():
@@ -226,7 +229,8 @@ def denial_of(text, H):
         m = REASON_RX.search(text)
         return "classifier", m.group(1) if m else ""
     if H.refusal_source(text) == "sandbox":
-        return "sandbox", H.refusal_line(text)
+        feat = H.refusal_line(text)   # без признака (одно слово «sandbox») — обычный вывод, не отказ для журнала
+        return ("sandbox", feat) if feat else None
     return None
 
 
@@ -240,10 +244,25 @@ def _ts(rec):
         return None
 
 
+def window_of(path):
+    """Окно транскрипта: папка проекта (у субагента — через два уровня выше), без домашнего пути и имени пользователя."""
+    d = os.path.dirname(path)
+    if os.path.basename(d) == "subagents":   # <проект>/<сессия>/subagents/agent-*.jsonl
+        d = os.path.dirname(os.path.dirname(d))
+    slug = lambda x: re.sub(r"[^a-z0-9-]", "-", x.lower()).strip("-")  # noqa: E731
+    name, hs = slug(os.path.basename(d)), slug(home())
+    if hs and name.startswith(hs + "-"):
+        name = name[len(hs) + 1:]
+    else:
+        name = re.sub(r"^(?:users|home)-[^-]+-", "", name)
+    name = re.sub(r"^projects-", "", name)
+    return name[-41:].lstrip("-")
+
+
 def scan_file(path, t0, t1, H, seen):
     """Отказы одного транскрипта в [t0, t1). Строки без tool_use/tool_result даже не разбираются."""
     uses, found = {}, []
-    win = re.sub(r"[^a-z0-9-]", "-", os.path.basename(os.path.dirname(path)).lower()).strip("-")[-41:].lstrip("-")
+    win = window_of(path)
     with open(path, encoding="utf-8", errors="replace") as fh:
         for ln in fh:
             has_use, has_res = '"tool_use"' in ln, '"tool_result"' in ln

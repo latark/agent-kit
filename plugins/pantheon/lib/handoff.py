@@ -195,11 +195,21 @@ def refusal_source(text):
     return None
 
 
+# признаки для журнала отказов: имя признака, а не строка вывода (в строке бывают текст, секреты, команда);
+# голые «sandbox» и «permission denied» в журнал не идут — это обычный вывод grep, тестов, JSON
+LOG_FEATURES = (("operation not permitted", re.compile(r"operation not permitted", re.I)),
+                ("deny(N)", re.compile(r"deny\(\d+\)", re.I)),
+                ("read-only file system", re.compile(r"read-only file system", re.I)),
+                ("eperm", re.compile(r"\beperm\b", re.I)))
+
+
 def refusal_line(text):
-    """Строка ошибки с признаком отказа песочницы (журнал отказов, metis-1135): остальной вывод в журнал не идёт."""
-    for ln in str(text or "").splitlines():
-        if refusal_source(ln) == "sandbox":
-            return ln.strip()
+    """Имя признака отказа песочницы для журнала (metis-1135): «operation not permitted», «deny(N)», «eperm»,
+    «read-only file system»; пусто — признака нет (строка вывода и команда в журнал не идут)."""
+    t = str(text or "")
+    for name, rx in LOG_FEATURES:
+        if rx.search(t):
+            return name
     return ""
 
 

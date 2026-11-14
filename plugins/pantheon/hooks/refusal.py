@@ -78,9 +78,10 @@ def cmd_fail(H, ev):
     key, _, outcome, _ = H.route(text)
     win, role = who()
     H.log(src, key, outcome, window=win, role=role)
-    if src == "sandbox":   # журнал отказов по классам (metis-1135 Д): guard отказ песочницы не видит, этот хук — видит
+    feat = H.refusal_line(err) if src == "sandbox" else ""
+    if feat:   # журнал отказов по классам (metis-1135 Д): guard отказ песочницы не видит, этот хук — видит
         with contextlib.suppress(Exception):
-            load_denials().record("sandbox", ev, H.refusal_line(err))
+            load_denials().record("sandbox", ev, feat)
     emit("PostToolUseFailure", H.hint(text, src))
 
 
