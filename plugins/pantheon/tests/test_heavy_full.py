@@ -7,7 +7,8 @@
 - два полных набора разом: второй ждёт жетон (75 по HEAVY_WAIT_MAX, не запускался), узкий (--affected) и одиночная
   команда в это время идут; жетон свободен — полный идёт, код выхода наружу;
 - sh -c "… run-tests.py папки" тоже полный; файла жетона нет — heavy создаёт; не создать (песочница) — идёт без него;
-- `heavy --status` показывает heavy-full.
+- `heavy --status` показывает heavy-full;
+- metis-1174: репозиторий со строкой ci: в .pantheon-verify — heavy отказывает командам тестов (код 2, без запуска), HEAVY_LOCAL_TESTS=1 — запасной путь.
 """
 import fcntl
 import os
@@ -42,7 +43,9 @@ def env_for(state, wait_max=None):
 def run(state, *cmd, wait_max=None, extra=None):
     env = env_for(state, wait_max)
     env.update(extra or {})
-    return subprocess.run([sys.executable, "-I", HEAVY, *cmd], env=env, capture_output=True, text=True, timeout=60)
+    # cwd — не репозиторий со строкой ci: (metis-1174: heavy там отказывает командам тестов)
+    return subprocess.run([sys.executable, "-I", HEAVY, *cmd], env=env, capture_output=True, text=True, timeout=60,
+                          cwd=state)
 
 
 def main():
@@ -149,6 +152,60 @@ def main():
                   f"{r.returncode} {r.stderr!r}")
         finally:
             os.chmod(locks, 0o700)
+
+        # metis-1174: репозиторий со строкой ci: в .pantheon-verify — heavy отказывает командам тестов (код 2, без запуска)
+        ci = os.path.join(tmp, "cirepo")
+        os.makedirs(os.path.join(ci, ".git"))
+        os.makedirs(os.path.join(ci, "sub", "deep"))
+        with open(os.path.join(ci, ".pantheon-verify"), "w") as fh:
+            fh.write("python3.14 -I run-tests.py plugins/x\nci: uvx ruff check .\n")
+        nci = os.path.join(tmp, "nocirepo")
+        os.makedirs(os.path.join(nci, ".git"))
+        with open(os.path.join(nci, ".pantheon-verify"), "w") as fh:
+            fh.write("python3.14 -I run-tests.py plugins/x\n# ci: только в комментарии\n")
+        wt = os.path.join(tmp, "wtrepo")  # worktree: .git — файл
+        os.makedirs(wt)
+        with open(os.path.join(wt, ".git"), "w") as fh:
+            fh.write("gitdir: /nowhere\n")
+        with open(os.path.join(wt, ".pantheon-verify"), "w") as fh:
+            fh.write("ci: true\n")
+        ftest = os.path.join(tmp, "test_fake.py")
+        with open(ftest, "w") as fh:
+            fh.write("print('ran test')\n")
+        stamp = os.path.join(tmp, "stamp")
+
+        def in_repo(cwd, *cmd, extra=None):
+            env = env_for(state, 5)
+            env.update(extra or {})
+            return subprocess.run([sys.executable, "-I", HEAVY, *cmd], env=env, cwd=cwd, capture_output=True, text=True,
+                                  timeout=60)
+
+        refuse = [[py, "-I", "plugins/guard/tests/test_x.py"], [py, ftest], ["python3.14", "-I", "scripts/run-tests.py", "x"],
+                  ["pytest", "-q"], ["uv", "run", "pytest"], [py, "-m", "unittest", "discover"], [py, "-m", "pytest"],
+                  ["env", "A=1", py, ftest], ["sh", "-c", f"{py} {ftest} 2>&1 | tail -5"],
+                  ["bash", "-c", "cd x && python3 plugins/pantheon/scripts/run-tests.py --affected plugins/x; echo $?"]]
+        for c in refuse:
+            r = in_repo(ci, *c)
+            check(f"ci:: отказ {' '.join(c)[:50]}",
+                  r.returncode == 2 and "ran test" not in r.stdout and r.stderr.splitlines()[-1].startswith(
+                      "heavy: тесты этого репозитория идут в CI (строка ci: в .pantheon-verify) — итог: gh pr checks <N>;")
+                  and r.stderr.rstrip().endswith("запасной путь — pantheon outside test"), f"{r.returncode} {r.stderr!r}")
+        r = in_repo(os.path.join(ci, "sub", "deep"), py, ftest)
+        check("ci:: из подпапки репозитория — отказ", r.returncode == 2, f"{r.returncode} {r.stderr!r}")
+        r = in_repo(wt, py, ftest)
+        check("ci:: worktree (.git — файл) — отказ", r.returncode == 2, f"{r.returncode} {r.stderr!r}")
+        r = in_repo(ci, py, ftest, extra={"HEAVY_LOCAL_TESTS": "1"})
+        check("ci:: HEAVY_LOCAL_TESTS=1 — запасной путь идёт", r.returncode == 0 and "ran test" in r.stdout,
+              f"{r.returncode} {r.stderr!r}")
+        r = in_repo(ci, py, ftest, extra={"HEAVY_LOCAL_TESTS": "0"})
+        check("ci:: HEAVY_LOCAL_TESTS=0 — не обход", r.returncode == 2, f"{r.returncode}")
+        for name, cwd, cmd in (("не тест (pnpm build-подобная)", ci, ["/bin/sh", "-c", f"echo built > {stamp}"]),
+                               ("grep по файлу теста", ci, ["grep", "x", ftest]),
+                               ("python -c", ci, [py, "-c", "print('ran test')"]),
+                               ("репозиторий без строки ci:", nci, [py, ftest]),
+                               ("вне git", tmp, [py, ftest])):
+            r = in_repo(cwd, *cmd)
+            check(f"ci:: идёт — {name}", r.returncode == 0, f"{r.returncode} {r.stderr!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(total) - len(fails)}/{len(total)} ok")

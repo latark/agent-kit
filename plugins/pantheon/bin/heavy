@@ -31,12 +31,17 @@ heavy ищет её сам: bin версии node из nvm (alias/default, за�
 outside) занимает ещё и жетон locks/heavy-full.lock — на Mac идёт один полный набор, второй ждёт в очереди так же (за
 жетон — опросом, потом за место по порядку прихода; HEAVY_WAIT_MAX и сообщения те же). Узкие команды и одиночные файлы
 жетон не берут. Нет файла жетона — heavy создаёт его сам, а в песочнице идёт без него.
+Репозиторий «только CI» (metis-1174): ближайший git-корень cwd содержит .pantheon-verify со строкой `ci:` и команда —
+запуск тестов (python … test_*.py, run-tests.py, pytest, -m unittest, в том числе в sh -c) — отказ, код 2, без запуска:
+тесты идут в GitHub Actions (итог — gh pr checks <N>). Запасной путь (Actions не запустились) — pantheon outside test:
+проход ставит HEAVY_LOCAL_TESTS=1 в окружение тестов; роли эту переменную не ставят.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
 import contextlib
 import fcntl
 import os
+import re
 import shutil
 import signal
 import stat
@@ -166,6 +171,66 @@ def is_full(argv):
         return False
 
 
+CI_ONLY_MSG = ("heavy: тесты этого репозитория идут в CI (строка ci: в .pantheon-verify) — итог: gh pr checks <N>; "
+               "запасной путь — pantheon outside test")
+PYTHON_RE = re.compile(r"python[0-9.]*\Z")
+PREFIX = ("env", "uv", "uvx", "run", "command", "exec", "time", "nice")
+
+
+def _words_are_tests(words):
+    """Одна команда (слова) — запуск тестов: pytest, python … test_*.py | run-tests.py | -m pytest/unittest."""
+    i = 0
+    while i < len(words) and (words[i] in PREFIX or ("=" in words[i] and not words[i].startswith("-"))):
+        i += 1
+    words = words[i:]
+    if not words:
+        return False
+    w0 = os.path.basename(words[0])
+    if w0 in ("pytest", "py.test"):
+        return True
+    if not PYTHON_RE.match(w0):
+        return False
+    rest = words[1:]
+    for k, w in enumerate(rest):
+        if w == "-m":
+            return k + 1 < len(rest) and rest[k + 1].split(".")[0] in ("pytest", "unittest")
+        if not w.startswith("-"):
+            b = os.path.basename(w)
+            return b == "run-tests.py" or (b.startswith("test_") and b.endswith(".py"))
+    return False
+
+
+def is_test_command(argv):
+    """argv — запуск тестов. sh -c "…" режется на сегменты (fullsuite.shell_segments). Не разобрать — не тест."""
+    try:
+        if os.path.basename(argv[0]) in ("sh", "bash", "zsh") and "-c" in argv[1:-1]:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "fullsuite", os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "fullsuite.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return any(_words_are_tests(seg) for seg in mod.shell_segments(argv[argv.index("-c") + 1]))
+        return _words_are_tests(argv)
+    except Exception:
+        return False
+
+
+def ci_only_repo(cwd=None):
+    """Ближайший git-корень cwd (.git — папка или файл worktree) с .pantheon-verify, где есть строка `ci:`."""
+    d = os.path.realpath(cwd or os.getcwd())
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            try:
+                with open(os.path.join(d, ".pantheon-verify"), encoding="utf-8") as fh:
+                    return any(ln.startswith("ci:") for ln in fh.read().splitlines())
+            except OSError:
+                return False
+        up = os.path.dirname(d)
+        if up == d:
+            return False
+        d = up
+
+
 def try_slot(names=SLOTS):
     for name in names:
         p = os.path.join(LOCKS, name + ".lock")
@@ -279,6 +344,9 @@ def main(argv):
         argv = argv[1:]
     if not argv:
         print(__doc__)
+        return 2
+    if os.environ.get("HEAVY_LOCAL_TESTS") != "1" and is_test_command(argv) and ci_only_repo():
+        print(CI_ONLY_MSG, file=sys.stderr)
         return 2
     env = tmp_env()
     found = resolve(argv, env)

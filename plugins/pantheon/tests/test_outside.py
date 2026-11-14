@@ -180,8 +180,9 @@ c = calls()[before:]
 check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
       len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
 env = c[0]["env"] if c else {}
-check("окружение с нуля: нет GH_TOKEN, есть CI=1 и свой TMPDIR",
-      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT)
+check("окружение с нуля: нет GH_TOKEN, есть CI=1, HEAVY_LOCAL_TESTS=1 (metis-1174) и свой TMPDIR",
+      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("HEAVY_LOCAL_TESTS") == "1"
+      and env.get("TMPDIR", "").startswith(_ROOT)
       and env.get("HOME") == os.path.realpath(HOME), sorted(env))
 
 # красные тесты: записи нет, хвост журнала в итоге
