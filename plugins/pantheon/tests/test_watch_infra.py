@@ -517,6 +517,35 @@ def test_who_is_who_memo():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_agents_timeout_1175():
+    """metis-1175: claude agents не ответил за срок — проход не падает трассой, строка в вывод, счёт подряд; тревога
+    только с третьего раза и со временем первого сбоя; проверки без списка сессий идут; заявка Зевса на запуск остаётся
+    в очереди; ответ сбрасывает счёт."""
+    from datetime import datetime
+    e = Env()
+    first = datetime.fromtimestamp(T0 + 60).strftime("%Y-%m-%d %H:%M")
+    slow = {"FAKE_AGENTS_SLEEP": "5", "PANTHEON_AGENTS_TIMEOUT": "0.3"}
+    req = e.st("hq-rw", "start-req", "g-dir.req")
+    os.makedirs(os.path.dirname(req), exist_ok=True)
+    open(req, "w").write("заявка\n")
+    for i in (1, 2, 3):
+        r = e.run("watch", t=T0 + 60 * i, extra=slow)
+        check("Traceback" not in r.stderr, f"таймаут {i}: трасса {r.stderr[-300:]!r}")
+        check(f"подряд {i}" in r.stdout, f"таймаут {i}: нет строки счёта ({r.stdout[-300:]!r})")
+        check(r.returncode == (76 if i == 3 else 75), f"таймаут {i}: код {r.returncode}")
+        has = "claude agents --json не ответил 3 раз подряд" in e.alerts()
+        check(has == (i == 3), f"таймаут {i}: тревога {'нет' if i == 3 else 'раньше третьего'} ({e.alerts()[-200:]!r})")
+        check(os.path.exists(req), f"таймаут {i}: заявка Зевса на запуск потеряна")
+        check(f"с {first}" in r.stdout, f"таймаут {i}: не время первого сбоя {first} ({r.stdout[-300:]!r})")
+        if i == 1:  # версия Claude Code — проверка без списка сессий, пишет cc-version
+            check(os.path.exists(e.st("cc-version")), "при неответе claude agents не шли проверки без списка сессий")
+    check(f"3 раз подряд с {first}" in e.alerts(), f"в тревоге не время первого сбоя ({e.alerts()[-200:]!r})")
+    e.run("watch", t=T0 + 240)
+    check(not os.path.exists(e.st("watch-agents-fails")), "ответ не сбросил счёт неответов")
+    r = e.run("watch", t=T0 + 300, extra=slow)
+    check("подряд 1" in r.stdout and r.returncode == 75, f"после ответа счёт не с 1 ({r.stdout[-200:]!r} {r.returncode})")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)

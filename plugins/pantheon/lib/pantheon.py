@@ -4658,8 +4658,23 @@ def claude_bin():
     return shutil.which("claude") or os.path.join(HOME, ".local", "bin", "claude")
 
 
+AGENTS_TIMEOUT = 60  # с; тесты сокращают через PANTHEON_AGENTS_TIMEOUT
+
+
+def agents_timeout():
+    try:
+        v = float(os.environ.get("PANTHEON_AGENTS_TIMEOUT") or AGENTS_TIMEOUT)
+    except ValueError:
+        return AGENTS_TIMEOUT
+    return v if v > 0 else AGENTS_TIMEOUT
+
+
 def agents_all():
-    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], env=claude_env(), capture_output=True, text=True, timeout=60)
+    """Список сессий `claude agents --json --all`; None — ответ не JSON. Таймаут и незапуск — исключение, как раньше
+    (metis-1175): вызов внутри запуска окна при таймауте должен упасть, а не решить «сессий нет» и поднять дубль.
+    Первый вызов планового прохода ловит их сам (watch._watch)."""
+    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], env=claude_env(), capture_output=True, text=True,
+                       timeout=agents_timeout())
     try:
         data = json.loads(r.stdout or "[]")
     except ValueError:
