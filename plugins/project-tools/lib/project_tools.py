@@ -4,8 +4,14 @@
 Карта ../stacks.json: признак в проекте (зависимость в package.json, pyproject.toml или
 requirements*.txt, либо файл) → какие MCP-серверы и плагины нужны.
 Команды:
-  project-tools check [--dir D] [--json]           что подключить или поправить; ничего не меняет (--json: только
-                                                   стеки и не подключённые инструменты, для pantheon direction check)
+  project-tools check [--dir D] [--json] [--no-net] [--probe]
+                                                   что подключить или поправить; ничего не меняет (--json: только
+                                                   стеки и не подключённые инструменты, для pantheon direction check).
+                                                   Раздел «Серверы MCP»: HTTP-серверы .mcp.json, одобренные вами, —
+                                                   initialize и tools/list (lib/mcp_probe.py); stdio не запускает, ключей
+                                                   не шлёт; OAuth — «не проверен — нужен вход». --no-net — без сети;
+                                                   --json проверяет сеть только с --probe (поле servers). Код выхода
+                                                   проверка сети не меняет
   project-tools apply [--dir D] [--update ИМЯ]… [--accept ИМЯ]…
                                                    записать .mcp.json, одобрения, плагины, блок Codex
   project-tools skip ИМЯ… [--dir D]                ваше «не надо»: отказ от сервера или плагина, подсказка замолкает
@@ -53,6 +59,9 @@ from collections import deque
 if sys.version_info < (3, 11):  # обёртка bin/project-tools ищет 3.11+; сюда попадает только прямой запуск
     sys.exit(0 if sys.argv[1:2] == ["hint"] else "project-tools: нужен Python 3.11 или новее (tomllib)")
 import tomllib
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # -I не кладёт папку скрипта в sys.path
+import mcp_probe  # noqa: E402 — после проверки версии и пути
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 MAP = os.path.join(PLUGIN, "stacks.json")
@@ -682,17 +691,47 @@ def guard_root(root):
         raise Broken(f"{short(root)}: это не папка проекта")
 
 
+PROBE_MARK = {"ok": "+", "auth": "?", "fail": "!", "skip": "·"}
+
+
+def probe_servers(root):
+    """Серверы .mcp.json проекта → [(имя, kind, итог)] (mcp_probe.check_servers): HTTP — по сети, только одобренные
+    и не выключенные, как их запускает Claude Code; stdio — «не запускаю»."""
+    doc = read_json_quiet(os.path.join(root, ".mcp.json"))
+    servers = doc.get("mcpServers") if isinstance(doc.get("mcpServers"), dict) else {}
+    if not servers:
+        return []
+    cj = read_json_quiet(os.path.join(HOME, ".claude.json"))
+    proj = (cj.get("projects") or {}).get(root) or {}
+    approved, off = mcp_probe.approved_names(read_json_quiet(os.path.join(root, ".claude", "settings.json")),
+                                             read_json_quiet(os.path.join(root, ".claude", "settings.local.json")),
+                                             proj, read_json_quiet(os.path.join(HOME, ".claude", "settings.json")))
+    return mcp_probe.check_servers(servers, approved, off)
+
+
+def probe_report(results):
+    if not results:
+        return
+    print("Серверы MCP (.mcp.json):")
+    for name, kind, got in results:
+        print(f"  {PROBE_MARK[got['state']]} {safe_name(name)} ({kind}): {got['why']}")
+
+
 def cmd_check(args):
     root, is_git = project_root(args.dir)
     guard_root(root)
     if args.json:
         # для `pantheon direction check`: стек есть, а инструмента нет (то, что apply подключил бы). Только имена.
         p = make_plan(root, is_git, tolerant=True)
-        print(json.dumps({"stacks": p.stacks, "missing": [{"tool": n, "stack": p.wanted[n]} for n in p.missing]},
-                         ensure_ascii=False))
+        out = {"stacks": p.stacks, "missing": [{"tool": n, "stack": p.wanted[n]} for n in p.missing]}
+        if args.probe and not args.no_net:
+            out["servers"] = [{"name": n, "kind": k, **got} for n, k, got in probe_servers(root)]
+        print(json.dumps(out, ensure_ascii=False))
         return 0
     p = make_plan(root, is_git, args.update or ())
     report(p, applied=False)
+    if not args.no_net:
+        probe_report(probe_servers(root))
     return 3 if p.changes or p.drift or p.unrecorded else 0
 
 
@@ -877,6 +916,8 @@ def main(argv=None):
         s.add_argument("--update", action="append", metavar="ИМЯ", help="заменить запись .mcp.json по карте")
         if name == "check":
             s.add_argument("--json", action="store_true", help="только стеки и не подключённые инструменты, JSON")
+            s.add_argument("--no-net", action="store_true", help="не проверять HTTP-серверы MCP по сети")
+            s.add_argument("--probe", action="store_true", help="с --json: проверить HTTP-серверы (поле servers)")
         if name == "apply":
             s.add_argument("--accept", action="append", metavar="ИМЯ",
                            help="принять изменённую после одобрения запись .mcp.json как вашу")
