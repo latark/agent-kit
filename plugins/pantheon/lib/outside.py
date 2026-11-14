@@ -2967,7 +2967,7 @@ def _stale(t=None):
         if dfd is None:
             continue
         try:
-            for name in os.listdir(dfd):
+            for name in _listdir_safe(dfd):
                 rid, _, ext = name.partition(".")
                 if ext not in ("result.json", "stop") or not ID_RE.fullmatch(rid) or rid in live:
                     continue
@@ -3586,7 +3586,7 @@ def _zombies(t=None, lane="full"):
         return 0                    # заход жив: running — его, queued ещё разбирается
     n = 0
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+    for name in _listdir_safe(runs):
         rid = name[:-len(".json")]
         if name.endswith(".json") and ID_RE.fullmatch(rid) and run_lane(rid) == lane \
                 and P.read_json(os.path.join(runs, name), {}).get("state") == "running":
@@ -3598,7 +3598,7 @@ def _zombies(t=None, lane="full"):
         if dfd is None:
             continue
         try:
-            names = os.listdir(dfd)
+            names = _listdir_safe(dfd)
             for name in names:
                 rid = name[:-len(".result.json")]
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" in names:
@@ -3700,7 +3700,7 @@ def recover_results(t=None, lane=None):
         if dfd is None:
             continue
         try:
-            names = os.listdir(dfd)
+            names = _listdir_safe(dfd)
             for name in names:
                 rid = name[:-len(".result.json")]
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid):
@@ -3720,7 +3720,7 @@ def recover_results(t=None, lane=None):
         finally:
             os.close(dfd)
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+    for name in _listdir_safe(runs):
         rid = name[:-len(".json")]
         res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
         if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running" \
@@ -3765,7 +3765,7 @@ def _watch_due(t=None):
     t = P.now() if t is None else t
     out = []
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+    for name in _listdir_safe(runs):
         rid = name[:-len(".json")]
         if not name.endswith(".json") or not ID_RE.fullmatch(rid):
             continue
@@ -3782,7 +3782,7 @@ def _watch_due(t=None):
         if dfd is None:
             continue
         try:
-            names = os.listdir(dfd)
+            names = _listdir_safe(dfd)
             for name in names:
                 rid = name[:-len(".result.json")]
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" not in names:

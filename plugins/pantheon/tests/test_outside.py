@@ -1588,6 +1588,28 @@ finally:
 check("listdir папки заявок упал: drop_orphan_stops и pending_serve без OSError",
       _raised is None and _n == 0 and _fd_calls2, (_raised, _n, _pend, _fd_calls2))
 
+# тик и уборка: сбой listdir (папки заявок и runs/) не роняет pending, pending_test, recover_results (metis-1186)
+_all_calls = []
+
+
+def _listdir_boom3(path="."):
+    _all_calls.append(path)
+    raise PermissionError("нет доступа")
+
+
+os.listdir = _listdir_boom3
+try:
+    _raised, _res3 = None, None
+    try:
+        _res3 = (O.pending(), O.pending_test(), O._stale(), O._zombies(), O._zombies(lane="quick"), O._watch_due(),
+                 O.recover_results())
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+check("listdir упал везде: pending, pending_test, _stale, _zombies, _watch_due, recover_results без OSError",
+      _raised is None and _all_calls and not _res3[2] and not _res3[3] and not _res3[5], (_raised, _res3, _all_calls))
+
 # --- брошенные копии (Д1 argus #232): копия без сервера старше WORK_ORPHAN_AGE снимается в конце круга -------------
 kill_all_servers()
 _wr = os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work")

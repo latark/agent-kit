@@ -423,7 +423,7 @@ def drop_session_files():
         if dfd is None:
             continue
         try:
-            for name in os.listdir(dfd):
+            for name in O._listdir_safe(dfd):
                 if not name.endswith(SESSION_SUFFIX):
                     continue
                 with contextlib.suppress(OSError):
