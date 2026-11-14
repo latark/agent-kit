@@ -12,24 +12,38 @@ outside, не показывая пароль роли (metis-1134).
      и публичный ключ (NEXT_PUBLIC_SUPABASE_URL / _ANON_KEY и близкие имена);
   3. Supabase Auth `POST /auth/v1/token?grant_type=password` из процесса прохода (urllib, без subprocess: пароля нет
      в аргументах процессов); адрес — только https, кроме 127.0.0.1/localhost;
-  4. сессия — cookie @supabase/ssr (`sb-<ref>-auth-token`, «base64-» + base64url JSON, куски по 3180 знаков) в файле
-     `<rid>.session.json` формата storageState (cookies, origins) с полем script — функция для evaluate_script.
-     Файл — 600, в папке заявок окна; старше SESSION_TTL проход его удаляет.
+  4. сессия — cookie @supabase/ssr (`sb-<ref>-auth-token`, «base64-» + base64url JSON, куски по 3180 знаков). Их
+     держит только приёмник входа (metis-1161): процесс прохода `python3 -I outside_login.py --receive <fd>` со
+     своим портом из ряда серверов (сокет открывает проход и отдаёт дескриптором). Сессию он получает каналом stdin —
+     ни на диске, ни в аргументах процессов её нет; в папке заявок окна файла сессии нет.
+  5. роли — одноразовый адрес входа `http://127.0.0.1:<порт приёмника>/pantheon-login/<код>` (код secrets, 32 байта).
+     Первый заход по нему — ответ 302 с Set-Cookie (те же cookie @supabase/ssr, хост 127.0.0.1: cookie не делятся по
+     портам, поэтому их видит и dev-сервер) и переход на `http://127.0.0.1:<порт сервера>/`. Второй заход — отказ 410,
+     чужой путь или код — 404; после удачного захода, через RECEIVE_TTL (10 мин) или после MAX_MISSES чужих кодов
+     приёмник выходит сам. talos просто открывает адрес (navigate_page) — без evaluate_script с токенами: его режет
+     классификатор auto (Афина, 14.11).
 В итоге роли (`<rid>.result.json`), журнале прохода (logs/outside.jsonl) и runs/<rid>.json — только «вошла / не
-вошла», причина без значений и путь к файлу сессии. Пароля и почты нет нигде, кроме тела запроса к Supabase; любая
-причина отказа проходит через _scrub (значения ключей вырезаются). Токены сессии видит роль — это сессия тестовой
-учётной записи с коротким сроком, а не пароль.
+вошла», причина без значений и адрес входа (в журнале — без кода, только порт). Пароля, почты и токенов нет нигде,
+кроме тела запроса к Supabase и памяти приёмника; любая причина отказа проходит через _scrub (значения ключей
+вырезаются). Файлы `<rid>.session.json` прежней версии (0.11.310) с токенами проход удаляет из папок заявок.
 
 Почему не форма /auth: для неё проходу нужен свой браузер, а Supabase Auth — один запрос с публичным ключом.
+Почему не прокси перед dev-сервером: cookie хоста 127.0.0.1 общие для всех портов, хватает приёмника рядом.
 """
 import base64
 import contextlib
+import hmac
+import http.server
 import json
 import os
 import re
 import secrets
+import select
+import socket
 import ssl
 import stat
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -39,8 +53,13 @@ P = None   # lib/pantheon.py
 O = None   # lib/outside.py
 
 SUFFIX = ".login.json"
-SESSION_SUFFIX = ".session.json"
-SESSION_TTL = 3 * 3600              # с: файл сессии старше — удалить (сервер живёт не дольше SERVE_MAX)
+SESSION_SUFFIX = ".session.json"    # файл сессии прежней версии (0.11.310): проход его удаляет
+RECEIVE_TTL = 10 * 60               # с: срок адреса входа и жизни приёмника
+RECEIVE_READY = 5                   # с: ждать от приёмника «готов»
+MAX_MISSES = 20                     # чужих кодов — приёмник выходит
+LOGIN_PATH = "/pantheon-login/"
+COOKIE_MAX_AGE = 400 * 24 * 3600
+STALE_CHUNKS = 5                    # кусков cookie прежней сессии стереть
 HTTP_TIMEOUT = 20                   # с
 WAIT_DEFAULT = 60                   # с: CLI ждёт итог входа по умолчанию
 CHUNK = 3180                        # @supabase/ssr MAX_CHUNK_SIZE
@@ -122,11 +141,146 @@ def session_cookies(url, session, host):
              "expires": expires, "httpOnly": False, "secure": False, "sameSite": "Lax"} for i, v in enumerate(parts)]
 
 
-def cookie_script(cookies):
-    """Функция для evaluate_script chrome-devtools на странице сервера: ставит cookie и отдаёт их число."""
-    data = json.dumps([[c["name"], c["value"]] for c in cookies])
-    return ("() => { const cs = " + data + "; for (const [n, v] of cs) document.cookie = "
-            "`${n}=${v}; path=/; max-age=34560000; samesite=lax`; return cs.length; }")
+def set_cookie_headers(cookies):
+    """[[имя, значение]] → значения Set-Cookie: cookie сессии и стирание кусков прежней (иначе @supabase/ssr склеит
+    чужие куски)."""
+    names = [n for n, _ in cookies]
+    base = names[0].rsplit(".", 1)[0] if len(names) > 1 else names[0]
+    out = [f"{n}={v}; Path=/; Max-Age={COOKIE_MAX_AGE}; SameSite=Lax" for n, v in cookies]
+    stale = ([base] if len(names) > 1 else []) + [f"{base}.{i}" for i in range(STALE_CHUNKS) if f"{base}.{i}" not in names]
+    return out + [f"{n}=; Path=/; Max-Age=0; SameSite=Lax" for n in stale]
+
+
+def answer(state, method, path, now=None):
+    """Ответ приёмника на запрос → (код HTTP, [(заголовок, значение)], тело). state: code, cookies, target, deadline,
+    used, misses — меняется: удачный заход ставит used, чужой код под LOGIN_PATH прибавляет misses."""
+    now = time.time() if now is None else now
+    if method not in ("GET", "HEAD") or not path.startswith(LOGIN_PATH):
+        return 404, [], "нет такого адреса"
+    code = path[len(LOGIN_PATH):].split("?", 1)[0]
+    if not hmac.compare_digest(code.encode(), str(state["code"]).encode()):
+        state["misses"] = state.get("misses", 0) + 1
+        return 404, [], "нет такого адреса"
+    if state.get("used"):
+        return 410, [], "адрес входа уже использован — подай pantheon outside login заново"
+    if now >= state["deadline"]:
+        return 410, [], "срок адреса входа вышел — подай pantheon outside login заново"
+    state["used"] = True
+    return 302, [("Set-Cookie", h) for h in set_cookie_headers(state["cookies"])] + [
+        ("Location", state["target"]), ("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer")], \
+        "вход: переход на сервер"
+
+
+def handler_class(state):
+    """Обработчик http.server для приёмника: ответ — answer(state, …), журнала запросов нет (в пути — код)."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _go(self, method):
+            status, headers, body = answer(state, method, self.path)
+            raw = body.encode()
+            self.send_response(status)
+            for k, v in headers + [("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", str(len(raw)))]:
+                self.send_header(k, v)
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(raw)
+
+        def do_GET(self):  # noqa: N802 — имя метода задаёт http.server
+            self._go("GET")
+
+        def do_HEAD(self):  # noqa: N802
+            self._go("HEAD")
+
+        def log_message(self, *a):   # путь с кодом не пишем никуда
+            pass
+
+    return Handler
+
+
+def receive_main(fd):
+    """Приёмник входа (процесс прохода): слушающий сокет — дескриптор fd, сессия — JSON из stdin. Готов — «ready» в
+    stdout. Выход — после удачного захода, через срок или после MAX_MISSES чужих кодов."""
+    sock = socket.socket(fileno=fd)
+    state = json.loads(sys.stdin.buffer.read(1024 * 1024).decode())
+    state.update(used=False, misses=0)
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler_class(state), bind_and_activate=False)
+    srv.socket.close()
+    srv.socket, srv.timeout = sock, 1
+    sys.stdout.write("ready\n")
+    sys.stdout.flush()
+    while not state["used"] and state["misses"] < MAX_MISSES and time.time() < state["deadline"]:
+        srv.handle_request()
+    srv.server_close()
+    return 0
+
+
+_RECEIVERS = []
+
+
+def start_receiver(cookies, target, taken=()):
+    """Поднять приёмник входа: сокет на свободном порту ряда серверов (не taken, не порты владельца), процесс
+    `outside_login.py --receive` с сессией в stdin → (порт, код, срок epoch). Сбой — OSError (причина без значений)."""
+    sock = listen_socket(taken)
+    port = sock.getsockname()[1]
+    code, deadline = spawn_receiver(sock, cookies, target)
+    return port, code, deadline
+
+
+def listen_socket(taken=()):
+    """Слушающий сокет 127.0.0.1 на первом свободном порту ряда серверов, кроме taken и портов владельца. Сбой —
+    OSError с классом последней ошибки (в окне роли — PermissionError: портов нет)."""
+    sock, last = None, None
+    for p in O.SERVER_PORTS:
+        if p in taken or p in O.OWNER_PORTS:
+            continue
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", p))   # без SO_REUSEADDR, как outside.port_free
+            s.listen(16)
+            sock = s
+            break
+        except OSError as e:
+            s.close()
+            last = e
+    if sock is None:
+        raise OSError(f"нет свободного порта {O.SERVER_PORTS.start}–{O.SERVER_PORTS.stop - 1}"
+                      + (f" ({type(last).__name__})" if last else ""))
+    return sock
+
+
+def spawn_receiver(sock, cookies, target):
+    """Процесс приёмника на сокете sock (копию прохода закрывает), сессия — в stdin, не в аргументах и не на диске →
+    (код, срок epoch). Не ответил «ready» за RECEIVE_READY — гасит и OSError."""
+    code, deadline = secrets.token_urlsafe(32), time.time() + RECEIVE_TTL
+    try:
+        proc = subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), "--receive", str(sock.fileno())],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                pass_fds=(sock.fileno(),), start_new_session=True, env={"LANG": "C.UTF-8"})
+    finally:
+        sock.close()   # копия прохода: сокет держит приёмник
+    ok = False
+    try:
+        proc.stdin.write(json.dumps({"code": code, "cookies": [[c["name"], c["value"]] for c in cookies],
+                                     "target": target, "deadline": deadline}).encode())
+        proc.stdin.close()
+        ready, _, _ = select.select([proc.stdout], [], [], RECEIVE_READY)
+        ok = bool(ready) and proc.stdout.readline().strip() == b"ready"
+    except OSError:
+        ok = False
+    finally:
+        proc.stdout.close()
+    if not ok:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.wait(5)
+        raise OSError("приёмник входа не ответил")
+    _RECEIVERS.append(proc)
+    return code, deadline
+
+
+def reap_receivers():
+    """Вышедшие приёмники — дождаться (без зомби у прохода). → число живых."""
+    _RECEIVERS[:] = [p for p in _RECEIVERS if p.poll() is None]
+    return len(_RECEIVERS)
 
 
 def sign_in(keys):
@@ -163,18 +317,6 @@ def sign_in(keys):
 
 
 # --- проход серверов -----------------------------------------------------------------------------------------------
-
-def _write_private(qdir, name, text):
-    """Файл 600 в папке заявок (outside._write_in: временный O_EXCL и rename, ссылка не пишется насквозь) → путь."""
-    dfd = O._open_dir(qdir)
-    if dfd is None:
-        raise OSError(f"{qdir} — не папка")
-    try:
-        O._write_in(dfd, name, text)
-    finally:
-        os.close(dfd)
-    return os.path.join(qdir, name)
-
 
 def check(req, rid):
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("id") != rid or req.get("kind") != "login":
@@ -219,16 +361,18 @@ def handle(qdir, window, rid, req):
         return fail(why)
     cookies = session_cookies(url, session, "127.0.0.1")
     origin = f"http://127.0.0.1:{port}"
-    text = json.dumps({"url": origin, "cookies": cookies, "origins": [], "script": cookie_script(cookies)},
-                      ensure_ascii=False, indent=1)
+    values += [c["value"] for c in cookies] + [str(session.get(k)) for k in ("access_token", "refresh_token")]
     try:
-        path = _write_private(qdir, rid + SESSION_SUFFIX, text)
+        rport, code, until = start_receiver(cookies, origin + "/",
+                                            {int(v.get("port") or 0) for v in O.servers().values()})
     except OSError as e:
-        return fail(f"файл сессии не записать: {type(e).__name__}")
-    O.log_event(id=rid, kind="login", window=window, server=sid, ok=True, cookies=len(cookies))
-    note = (f"вошла: сессия — {path} (cookie для {origin}). Открой {origin} в chrome-devtools, выполни поле script "
-            "файла через evaluate_script и перезагрузи страницу")
-    return O.save_result(qdir, rid, {"state": "done", "code": 0, **base, "session": path, "note": note})
+        return fail(f"приёмник входа не поднять: {_scrub(str(e), values)}")
+    login_url = f"http://127.0.0.1:{rport}{LOGIN_PATH}{code}"
+    O.log_event(id=rid, kind="login", window=window, server=sid, ok=True, cookies=len(cookies), receiver=rport)
+    note = (f"вошла: открой адрес входа {login_url} в chrome-devtools (navigate_page) — он один раз ставит cookie и "
+            f"ведёт на {origin}/. Адрес одноразовый, до {P.stamp(until)}; evaluate_script и файл сессии не нужны")
+    return O.save_result(qdir, rid, {"state": "done", "code": 0, **base, "login_url": login_url,
+                                     "until": P.stamp(until), "note": note})
 
 
 def _take_requests():
@@ -255,9 +399,9 @@ def _take_requests():
     return out
 
 
-def drop_old_sessions(t=None):
-    """Файлы сессий старше SESSION_TTL — удалить (обычные файлы, не ссылки). → число."""
-    t = P.now() if t is None else t
+def drop_session_files():
+    """Файлы сессий прежней версии (`<rid>.session.json` с токенами, 0.11.310) в папках заявок — удалить (обычные
+    файлы, не ссылки). → число."""
     n = 0
     for qdir, _ in O.queue_dirs():
         dfd = O._open_dir(qdir)
@@ -269,7 +413,7 @@ def drop_old_sessions(t=None):
                     continue
                 with contextlib.suppress(OSError):
                     st = os.lstat(name, dir_fd=dfd)
-                    if stat.S_ISREG(st.st_mode) and t - st.st_mtime > SESSION_TTL:
+                    if stat.S_ISREG(st.st_mode):
                         os.unlink(name, dir_fd=dfd)
                         n += 1
         finally:
@@ -278,7 +422,7 @@ def drop_old_sessions(t=None):
 
 
 def login_round():
-    """Круг прохода серверов: заявки входа, затем уборка старых файлов сессий."""
+    """Круг прохода серверов: заявки входа, затем уборка вышедших приёмников и файлов сессий прежней версии."""
     for qdir, window, rid, req in _take_requests():
         try:
             handle(qdir, window, rid, req)
@@ -286,7 +430,8 @@ def login_round():
             O.log_event(id=rid, kind="login-error", window=window, why=type(e).__name__)
             O.save_result(qdir, rid, {"state": "failed", "kind": "login",
                                       "why": f"не вошла: сбой прохода: {type(e).__name__}"})
-    drop_old_sessions()
+    reap_receivers()
+    drop_session_files()
 
 
 # --- команда роли --------------------------------------------------------------------------------------------------
@@ -331,3 +476,7 @@ def cmd_login(args):
         print(f"итог: pantheon outside status {rid}")
         return 0
     return O.wait_result(q, rid, wait)
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--receive"] and len(sys.argv) == 3 and sys.argv[2].isdigit():
+    os._exit(receive_main(int(sys.argv[2])))
