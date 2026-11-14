@@ -4414,7 +4414,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
             # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
             # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
-            data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
+            ex = data["sandbox"]["excludedCommands"]  # request|cancel уже есть у окна направления (metis-1197)
+            ex += [c for c in MERGE_REQUEST_CMDS if c not in ex]
         # окна направлений и мастерская сами поднимают dev-сервер и гоняют тесты своего проекта ([sb-simplify] 27.10):
         # Unix-сокеты (tsx IPC, профиль Chromium) — только в своём кэше окна, не в $TMPDIR (/tmp/claude-<uid> общий у
         # всех сессий). Местных портов (allowLocalBinding) нет: он открывает весь localhost — и местный прокси (выход наружу
