@@ -2,6 +2,7 @@
 """Дежурный, часть 10: claude agents ответил не JSON или не ответил за срок — запуск и подъём отказывают, а не решают
 «копий нет» и не поднимают дубль окна (metis-1192; общая часть — _watch_common.py)."""
 # ruff: noqa: F403, F405
+import contextlib
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -154,6 +155,18 @@ def test_fresh_start_not_json_1192():
         check(not _bgs(e) and skip and skip[-1].endswith("\t" + SILENT) and "Traceback" not in r.stderr,
               f"1192: свежий старт, вызов claude agents №{good + 1} не JSON: {_bgs(e)} {_start_log(e)[-400:]!r} "
               f"{r.stderr[-300:]!r}")
+    # не JSON только список в _fresh_start (вызов №3), снимок №4 отвечает (FAKE_AGENTS_BAD): пропуск, а не запуск —
+    # ловит мутант `P.agents_all() or []` на списке, который выше маскировал отказ снимка
+    e = Env()
+    e.direction("fs-dir")
+    e.task("fs-0001", "fs-dir", status="doing")
+    a = bg("fs-dir", "stopped", "3c331192-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    r = e.run("wake", t=T0, extra={"FAKE_AGENTS_COUNT": os.path.join(e.tmp, "agents-count"), "FAKE_AGENTS_BAD": "3"})
+    skip = [ln for ln in _start_log(e).splitlines() if "fresh-skip\tfs-dir" in ln]
+    check(not _bgs(e) and not [c for c in e.calls() if c[:1] == ["stop"]] and skip and skip[-1].endswith("\t" + SILENT),
+          f"1192: свежий старт, не JSON только вызов №3: {e.calls()} {_start_log(e)[-400:]!r} {r.stderr[-300:]!r}")
 
 
 def _tty_start_zeus():
@@ -180,22 +193,152 @@ def test_start_zeus_agents_not_json_1192():
               f"1192: start zeus при выводе claude agents не JSON: код {r.returncode}, {hq} {r.stderr[-300:]!r}")
 
 
-def test_goal_recheck_agents_not_json_1192():
-    """metis-1192: смена цели окна (goal_recheck) под блокировкой имени — claude agents не JSON: отказ с причиной, а не
-    «держателей нет» (раньше `or []`, и свежий старт со сменой цели шёл вслепую). Контроль — со списком без держателей
-    причина не эта."""
+def _core():
+    """pantheon и watch в этом процессе (каждый случай — в своём fork, run_cases) с временными HOME, PANTHEON_HOME,
+    PANTHEON_STATE и быстрыми PANTHEON_STOP_*. → (pantheon, watch)."""
     import importlib
     import importlib.util
-    d = tempfile.mkdtemp(prefix="goal-1192-")
+    d = tempfile.mkdtemp(prefix="agents-1192-")
     for k, sub in (("HOME", "home"), ("PANTHEON_HOME", "pantheon"), ("PANTHEON_STATE", "state")):
         os.makedirs(os.path.join(d, sub), exist_ok=True)
         os.environ[k] = os.path.join(d, sub)
+    os.environ.update({"PANTHEON_STOP_WAIT": "1", "PANTHEON_STOP_POLL": "0.01", "PANTHEON_DRYRUN": ""})
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     p = importlib.import_module("pantheon")
     spec = importlib.util.spec_from_file_location("pantheon_watch_g1192", os.path.join(ROOT, "lib", "watch.py"))
     w = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(w)
     w.set_core(p)
+    return p, w
+
+
+def _answers(*seq):
+    """Подмена agents_all: ответы по порядку, последний повторяется; n[0] — число вызовов."""
+    left, n = list(seq), [0]
+
+    def f():
+        n[0] += 1
+        return left.pop(0) if len(left) > 1 else left[0]
+    return f, n
+
+
+class _Launched(Exception):
+    pass
+
+
+def _fresh_box(p, answers, alerts, stops, launched):
+    """_fresh_start("zeus") с подменами: окно есть, имя освобождается сразу, claude stop и запуск окна — записью
+    (запуск обрывается _Launched: дальше снимок не нужен). → код или "launched"."""
+    g = p._fresh_start.__globals__  # sessions.py: свои имена модуль ищет у себя
+    g["fresh_target"] = lambda name, origin: ("hq", p.HOME, os.path.join(p.HOME, "hq.json"), "hq")
+    g["wait_name_free"] = lambda name, stopped: None
+    p.agents_all, n = _answers(*answers)
+    p.sessions_registry = lambda: []
+    p.stop_copies = lambda name, live, tag: stops.extend(x["id"] for x in live)
+    p.alert = lambda text, src=None: alerts.append(text)
+
+    def launch(*a):
+        launched.append(a)
+        raise _Launched()
+    p.window_launch = launch
+    try:
+        return p._fresh_start("zeus", {"id": "2e057e05"}, "очистка", "tick"), n[0]
+    except _Launched:
+        return "launched", n[0]
+
+
+ZLIVE = {"id": "2e057e05", "sessionId": "2e057e05-0001", "name": "zeus", "state": "blocked", "kind": "background"}
+ZDOWN = dict(ZLIVE, state="stopped")
+
+
+def test_fresh_start_live_copy_list_not_json_1192():
+    """metis-1192 (argus A, #472): свежий старт при живой копии — не JSON только список в _fresh_start, следующий вызов
+    отвечает: пропуск с причиной, без claude stop и без запуска окна. Ловит откат отказа на списке (мутант
+    `agents = P.agents_all() or []`: копий «нет», stop не идёт, снимок отвечает — окно поднялось бы рядом с живой
+    копией). Контроль — список отвечает: stop живой копии и запуск."""
+    p, _ = _core()
+    alerts, stops, launched = [], [], []
+    rc, _ = _fresh_box(p, [None, [ZLIVE]], alerts, stops, launched)
+    check(rc == p.SKIPPED and p.SKIP_WHY == SILENT and not stops and not launched and not alerts,
+          f"1192: _fresh_start, список не JSON при живой копии: {rc} {p.SKIP_WHY!r} stop={stops} {launched} {alerts}")
+    rc, _ = _fresh_box(p, [[ZLIVE], [ZDOWN]], alerts, stops, launched)
+    check(rc == "launched" and stops == ["2e057e05"], f"1192: контроль _fresh_start: {rc} stop={stops}")
+
+
+def test_fresh_start_snapshot_after_stop_waits_1192():
+    """metis-1192 (argus B, Д): копии уже погашены, снимок перед запуском не ответил — повтор до срока ожидания имени
+    (PANTHEON_STOP_WAIT), а не пропуск после первого сбоя: два сбоя и ответ — окно поднято (ловит снимок без повтора).
+    Так и не ответил — пропуск и тревога «Зевс остановлен — pantheon start zeus» с причиной (ловит пропуск без
+    тревоги), вызовов больше двух. Без остановленных копий (снимок launch_snapshot) повтора нет: один вызов."""
+    p, _ = _core()
+    alerts, stops, launched = [], [], []
+    rc, n = _fresh_box(p, [[ZLIVE], None, None, [ZDOWN]], alerts, stops, launched)
+    check(rc == "launched" and stops == ["2e057e05"] and n == 4 and not alerts,
+          f"1192: снимок после stop не повторён до ответа: {rc} вызовов {n} {alerts}")
+    alerts, stops, launched = [], [], []
+    os.environ["PANTHEON_STOP_WAIT"] = "0.2"
+    rc, n = _fresh_box(p, [[ZLIVE], None], alerts, stops, launched)
+    check(rc == p.SKIPPED and not launched and n > 2 and p.SKIP_WHY == SILENT
+          and [x for x in alerts if x.startswith("Зевс остановлен — pantheon start zeus") and SILENT in x],
+          f"1192: снимок после stop так и не ответил: {rc} вызовов {n} {alerts}")
+    p.agents_all, n = _answers(None)
+    check(p.agents_snapshot() == (None, SILENT) and n[0] == 1, f"1192: снимок без остановки повторялся: {n[0]}")
+
+
+def test_zeus_clean_skipped_not_code4_1192():
+    """metis-1192 (argus B, Д): очистка Зевса, свежий старт дал пропуск (SKIPPED: claude agents не ответил) — проход
+    «отложено» с причиной, без «очистка Зевса не вышла, код 4» (тревогу «Зевс остановлен» даёт fresh_skip). Ловит
+    откат условия `rc == P.SKIPPED` в zeus_clean. Контроль — код 1 по-прежнему «не вышла, код 1»."""
+    p, w = _core()
+    w.zeus_clean_check = lambda a, tp: ([], 160_000, {"turn": 1})
+    w.zeus_hold = lambda: None
+    p.transcript_path = lambda a: "/nonexistent/zeus.jsonl"
+    p.agents_all = lambda: [ZLIVE]
+    for rc in (p.SKIPPED, 1):
+        alerts = []
+        p.alert = lambda text, src=None, alerts=alerts: alerts.append(text)
+
+        def fresh(name, a, text, origin, recheck=None, reason=None, rc=rc):
+            recheck()
+            return p.skipped(SILENT) if rc == p.SKIPPED else rc
+        p.fresh_start = fresh
+        with contextlib.suppress(OSError):
+            os.remove(p.path("zeus-clean.json"))
+        w.zeus_clean([ZLIVE], T0)
+        last = (p.read_json(p.path("zeus-clean.json"), {}) or {}).get("last") or {}
+        if rc == 1:
+            check(any("не вышла, код 1" in x for x in alerts), f"1192: контроль — код 1 без тревоги: {alerts} {last}")
+            continue
+        check(not [x for x in alerts if "не вышла" in x] and last.get("result") == "отложено"
+              and last.get("miss") == [SILENT], f"1192: очистка Зевса при пропуске: {alerts} {last}")
+
+
+def test_start_restart_first_call_not_json_1192():
+    """metis-1192 (argus A, #472): pantheon start <имя> --restart при живой копии — не JSON только первый вызов claude
+    agents (start_agents в _start_session), остальные отвечают: отказ «claude agents --json не ответил» последней
+    строкой, без claude stop и без --bg. Ловит откат первого отказа (мутант `agents = P.agents_all() or []`: копий
+    «нет», снимок launch_snapshot отвечает — дубль окна). Контроль — все вызовы отвечают: stop и --bg."""
+    for bad in (False, True):
+        e = Env()
+        e.direction("sr-dir")
+        e.agents([bg("sr-dir", "blocked", "5af01192-1")])
+        extra = dict(ZEUS_RUN, **({"FAKE_AGENTS_COUNT": os.path.join(e.tmp, "agents-count"), "FAKE_AGENTS_BAD": "1"}
+                                  if bad else {}))
+        r = e.run("start", "sr-dir", "--from", "owner", "задание", "--restart", t=T0, extra=extra)
+        stops = [c for c in e.calls() if c[:1] == ["stop"]]
+        if not bad:
+            check(stops and _bgs(e, "sr-dir"), f"1192: контроль start --restart: {r.returncode} {e.calls()} "
+                  f"{r.stderr[-300:]!r}")
+            continue
+        check(r.returncode != 0 and not stops and not _bgs(e) and _last(r) == f"pantheon start: отказ — {SILENT}",
+              f"1192: start --restart, первый вызов не JSON: код {r.returncode} {e.calls()} {r.stderr[-300:]!r}")
+
+
+def test_goal_recheck_agents_not_json_1192():
+    """metis-1192: смена цели окна (goal_recheck) под блокировкой имени — claude agents не JSON: отказ с причиной, а не
+    «держателей нет» (раньше `or []`, и свежий старт со сменой цели шёл вслепую). Контроль — со списком без держателей
+    причина не эта."""
+    p, w = _core()
     saved = p.agents_all, p.sessions_registry
     p.sessions_registry = lambda: []
     try:

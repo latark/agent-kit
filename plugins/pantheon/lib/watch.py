@@ -2528,11 +2528,12 @@ def zeus_clean(agents, t):
                     "watch")
             event("zeus-clean", t, id=a.get("id"), tokens=n)
             return
-        if not held or held[0]:
-            # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
-            # fresh-skip уже в start.log) — проверит следующий проход
+        if not held or held[0] or rc == P.SKIPPED:
+            # имя занято другим запуском, перед остановкой условие перестало выполняться или claude agents не ответил
+            # (строка fresh-busy или fresh-skip уже в start.log; Зевс погашен — тревогу «Зевс остановлен — pantheon
+            # start zeus» дал fresh_skip, metis-1192) — проверит следующий проход, а не «не вышла, код 4»
             st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
-                          "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
+                          "result": "отложено", "miss": [(held[0] or P.SKIP_WHY) if held else "имя занято другим запуском"]}
             P.write_json(stp, st)
             return
         st["failed"] = {"sid": a["sessionId"], "t": t}

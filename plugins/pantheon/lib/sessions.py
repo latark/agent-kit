@@ -269,9 +269,9 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
         P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\tимя не освободилось после claude stop")
         P.alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
         return 1
-    before, why = agents_snapshot()
-    if why:  # копии уже остановлены: продолжит следующий проход, а не запуск с пустым снимком
-        return fresh_skip(name, a, origin, why)
+    before, why = agents_snapshot(stopped)  # копии погашены — снимок ждёт ответа до срока, а не отказ после сбоя
+    if why:  # так и не ответил — пропуск с тревогой, а не запуск с пустым снимком
+        return fresh_skip(name, a, origin, why, stopped)
     # схема А (metis-0933): --add-dir папок направления, AGENTS.md, пакет — как у pantheon start
     argv = P.window_launch(role, name, window, win, text)  # argv окна собирает только ядро (класс 5)
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
@@ -929,12 +929,21 @@ def start_agents(dry):
     return agents, 0, None
 
 
-def agents_snapshot():
+def agents_snapshot(stopped=None):
     """(id сессий, None) или (None, причина) — снимок перед `claude --bg` или `--resume` для check_new_name и
     rm_previous. claude agents не ответил (не JSON, таймаут, незапуск) — отказ (metis-1192): с пустым снимком прежние
-    сессии с этим именем сочлись бы новыми."""
-    agents, _, why = start_agents(True)
-    return (None, why) if why else ({a.get("id") for a in agents if a.get("id")}, None)
+    сессии с этим именем сочлись бы новыми. stopped — копии только что погашены (свежий старт): снимок повторяется до
+    срока ожидания имени (PANTHEON_STOP_WAIT, шаг PANTHEON_STOP_POLL — как wait_name_free), отказ — только если он так
+    и не ответил: после одного сбоя имя осталось бы без окна."""
+    wait, poll, _ = P.stop_wait_knobs()
+    end = time.monotonic() + (wait if stopped else 0)
+    while True:
+        agents, _, why = start_agents(True)
+        if not why:
+            return {a.get("id") for a in agents if a.get("id")}, None
+        if time.monotonic() >= end:
+            return None, why
+        time.sleep(poll)
 
 
 def launch_snapshot(name, role, window, origin, extra_env, run, win, cmd):
@@ -959,9 +968,14 @@ def zeus_copies(restart):
     return live, None
 
 
-def fresh_skip(name, a, origin, why):
-    """Свежий старт не сделан: строка fresh-skip в start.log, пропуск с причиной (metis-1192). → SKIPPED."""
+def fresh_skip(name, a, origin, why, stopped=None):
+    """Свежий старт не сделан: строка fresh-skip в start.log, пропуск с причиной (metis-1192). stopped — копии уже
+    погашены: тревога «<имя> остановлен — pantheon start <имя>» с причиной, иначе окно молча осталось бы без
+    сессии (у Зевса раньше — «очистка Зевса не вышла, код 4»). → SKIPPED."""
     P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+    if stopped:
+        who = "Зевс остановлен" if name == "zeus" else f"{name} остановлена"
+        P.alert(f"{who} — pantheon start {name}: свежий старт не сделан, {why}", "pantheon")
     return P.skipped(why)
 
 
