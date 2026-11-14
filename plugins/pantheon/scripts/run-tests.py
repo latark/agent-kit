@@ -125,6 +125,9 @@ TIMEOUT = 600  # с на файл; медленным — свой предел 
 # Части test_merge_gate.py (metis-1119): целый файл шёл 349 с в GitHub Actions, общее — tests/_merge_gate_common.py
 MERGE_GATE_PARTS = tuple(f"guard/test_merge_gate_{s}.py" for s in (
     "journal", "core", "opus", "ci", "billing", "narrow", "returned", "carry", "r4", "sandbox", "gh", "limits"))
+# Части test_guard.py (metis-1148, план 1.0 Т2): целый файл шёл 160–220 с локально и до 720 с под нагрузкой, общее —
+# tests/_guard_common.py, решение guard внутри процесса теста (_guard_inproc.py, Т3)
+GUARD_PARTS = tuple(f"guard/test_guard_{s}.py" for s in ("acl", "roles", "cdp", "merge", "protect", "hooks"))
 # Медленные файлы: идут первыми (по убыванию предела), предел — свой, с. metis-0634: пределы — по 31 полному прогону
 # прохода outside 30.10–01.11 (-j 3, тогда процесс тика шёл с ProcessType Background (с metis-0728 — Standard), Mac под нагрузкой): 1.5 × наибольшего
 # зелёного времени файла с округлением вверх до минуты, не меньше 180 с. Прежние (3 × последовательного замера 27.10)
@@ -141,7 +144,8 @@ SLOW = {
     # metis-1119: разрезан на 12 частей (замер 13.11 на Mac, части по очереди: 13–53 с, вместе 364 с против 338 с
     # целого); предел части 240 ≈ 4.5 × 53
     **{p: 240 for p in MERGE_GATE_PARTS},
-    "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
+    # test_guard: 336 / 442, предел был 720. metis-1148: разрезан на 6 частей (GUARD_PARTS), guard внутри процесса
+    # теста — часть 3–10 с (замер 14.11 на Mac, по одной), в SLOW не нужна: общий предел TIMEOUT
     # test_read: 97 / 259, убит на 180 с 14 раз и на 300 с 4 раза из 80 прогонов (0731, п. 5): 1.5 × 259 мало.
     # 600 ≈ 2.3 × 259 — во столько раз test_merge_gate под нагрузкой 03.11 дольше своей медианы (1051 / 458)
     "pantheon/test_read.py": 600,
@@ -205,7 +209,7 @@ QUARANTINE = {
 # нет — файлам они не нужны); нет и там — строка `skip … пропущено: …`. Остальные файлы идут как раньше. Проба — на
 # деле: те же `mkdir .claude/agents` и `git init`, а не угадывание окна по переменной.
 WINDOW_FS = {
-    "guard/test_guard.py", *MERGE_GATE_PARTS, "guard/test_drafts.py", "project-tools/test_project_tools.py",
+    *GUARD_PARTS, "guard/test_guard_inproc.py", *MERGE_GATE_PARTS, "guard/test_drafts.py", "project-tools/test_project_tools.py",
     "pantheon/test_read.py", "pantheon/test_setup.py", "pantheon/test_start.py", "pantheon/test_sync_quarantine.py",
     "pantheon/test_executors.py", "pantheon/test_tick.py", "pantheon/test_watch.py", "pantheon/test_agent_allowlist.py",
     "pantheon/test_baseline.py", "pantheon/test_batch.py", "pantheon/test_check_traces.py",

@@ -3,7 +3,8 @@
 
 Запуск: python3 -I plugins/guard/tests/test_drafts.py   (код выхода 0 — все прошли)
 
-Проверяет (обвязка и HOME во временной папке — из test_guard.py):
+Проверяет (обвязка и HOME во временной папке — из _guard_common.py; решение guard — внутри процесса теста,
+первый случай — настоящим процессом, metis-1148):
   - draft-role: из инструментов guard palamedes открыты только Read, Grep, Glob, Write, Edit, MultiEdit;
     Bash, NotebookEdit, WebFetch, Agent, Task, Skill — отказ, и у главной сессии `--agent palamedes` (без agent_id);
   - pantheon-acl: запись только в directions/<своё направление>/drafts/** — в окне координатора по папке запуска,
@@ -15,7 +16,6 @@
     открывает ничего;
   - вторая линия без draft-role (GUARD_OFF=draft-role): Bash и NotebookEdit в drafts/ — всё равно отказ.
 """
-import importlib.util
 import json
 import os
 import sys
@@ -23,9 +23,8 @@ import tempfile
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("guard_tests", os.path.join(HERE, "test_guard.py"))
-T = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(T)  # временная корневая папка и её уборка — из test_guard.py (atexit)
+sys.path.insert(0, HERE)
+import _guard_common as T  # noqa: E402  временная корневая папка и её уборка — из _guard_common.py (atexit)
 
 IS_MAC = sys.platform == "darwin"
 ROLE = "palamedes"
@@ -211,14 +210,14 @@ def main():
         ("momus: drafts/ — как было, отказ", "deny", br, True, W(D("athena-shop", "x.md")), None, None, "momus"),
     ]
     failed = 0
-    for case in cases:
+    for i, case in enumerate(cases):
         name, want, pdir, sub, (tool, ti) = case[:5]
         cwd = case[5] if len(case) > 5 else None
         penv = case[6] if len(case) > 6 else None
         role = case[7] if len(case) > 7 else ROLE
-        got = T.run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv)
+        got = T.run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv, proc=i == 0)
         failed += got != want
-        print(f"{'ok  ' if got == want else 'FAIL'} {name}: {got}")
+        print(f"{'ok  ' if got == want else 'FAIL'} {name}: {got}" + (" (процесс)" if i == 0 else ""))
 
     def raw_check(name, cond):
         nonlocal failed
