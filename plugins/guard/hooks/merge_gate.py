@@ -2717,6 +2717,9 @@ def request_decisions(event, args, cwd):
     if not cwd or args[:2] != ["merge", "request"] or not all(isinstance(a, str) for a in args):
         return
     rest = args[2:]
+    if "--restart" in rest:   # окно для перезапуска после слияния (metis-1153) — не номер PR
+        j = rest.index("--restart")
+        rest = rest[:j] + rest[j + 2:]
     if "-R" not in rest or rest.index("-R") + 1 >= len(rest):
         return
     i = rest.index("-R")
