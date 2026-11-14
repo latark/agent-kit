@@ -35,6 +35,7 @@ for k in ("PANTHEON_FAKE_LIMIT", "PANTHEON_DRYRUN", "PANTHEON_NO_NOTIFY"):
     os.environ.pop(k, None)
 # питание подменено (metis-0284): проверка 21:30–22:00 не читает настоящий pmset; test_power_0284 подставляет свой
 os.environ.update({"PANTHEON_FAKE_AC": "1", "PANTHEON_FAKE_BATT": "100"})
+os.environ["PANTHEON_GH"] = "/usr/bin/false"  # строка «минуты Actions» сводки (metis-1116) не ходит в сеть
 os.environ.update({"PANTHEON_HOST": "mac-a", "PANTHEON_FAKE_IDLE": "0", "HOME": os.path.join(_ROOT, "home0"),
                    "PANTHEON_HOME": os.path.join(_ROOT, "home0", "ai", "pantheon"),
                    "PANTHEON_STATE": os.path.join(_ROOT, "state0"), "PANTHEON_SCHEDULE_DEFAULTS": os.devnull})
@@ -915,7 +916,7 @@ def test_status_format():
         fh.write("#!/bin/sh\necho '[]'\n")
     os.chmod(os.path.join(fbin, "claude"), 0o755)
     env = {"PATH": fbin + os.pathsep + os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon, "PANTHEON_SCHEDULE_DEFAULTS": os.devnull,
-           "PANTHEON_STATE": e.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": _ROOT}
+           "PANTHEON_STATE": e.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "PANTHEON_GH": "/usr/bin/false", "TMPDIR": _ROOT}
     if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест (metis-0222)
         env["TZ"] = os.environ["TZ"]
     run = lambda *a: subprocess.run([PY311, "-I", os.path.join(LIB, "pantheon.py"), *a], env=env,  # noqa: E731
