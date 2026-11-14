@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Запуск MCP-сервера пакета окна вне папок окна (metis-0933, класс 2 модели угроз).
 
-    python3 -I env_from.py [<файл .env> <ИМЯ>[,<ИМЯ>…]] -- <команда> […]
+    python3 -I env_from.py [--chdir <папка>] [<файл .env> <ИМЯ>[,<ИМЯ>…]] -- <команда> […]
 
 MCP-сервер идёт вне песочницы, а Claude Code запускает его в папке запуска окна — её окно пишет. npx оттуда взял бы
 пакет из `node_modules/<пакет>` папки и настройки из её `.npmrc` (script-shell, registry, node-options): это код
@@ -15,16 +15,25 @@ MCP-сервер идёт вне песочницы, а Claude Code запуск
 обычный, без других жёстких ссылок, не больше 1 МБ, и путь к нему без ссылок ниже $HOME (каждое звено — openat с
 O_NOFOLLOW от fd предыдущего, файл читается по своему fd: подменённая ссылкой папка не подсунет чужой .env ни до, ни
 во время чтения; FIFO не вешает). Нет файла или имени — выход 1 с причиной в stderr; иначе exec команды (код
-выхода — её)."""
+выхода — её).
+
+`--chdir <папка>` (metis-0949) — серверу нужна папка проекта как рабочая: shadcn MCP читает components.json из
+process.cwd(), а его `--cwd` только загружает .env. Команда тогда — ровно `npx -y <пакет>@<версия> [аргументы]`: пакет
+разрешается как без ключа — `npx -y -p <пакет>@<версия> -c 'command -v <bin>'` из SAFE_CWD с тем же окружением (ни
+node_modules, ни .npmrc папки проекта npx не видит), путь бинарника (realpath) — только внутри $HOME/.npm/_npx; затем
+chdir в папку и exec `node <путь> [аргументы]`: node по абсолютному пути берёт модули рядом со скриптом, не из папки."""
 import os
 import re
 import stat
+import subprocess
 import sys
 
 LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 LIMIT = 1 << 20
 SAFE_CWD = "/"
 DROP_ENV = re.compile(r"(?i)npm_config_.*|NODE_OPTIONS|NODE_PATH")
+NPX_SPEC = re.compile(r"((?:@[a-z0-9._-]+/)?([a-z0-9._-]+))@[0-9][0-9A-Za-z.+-]*")
+RESOLVE_TIMEOUT = 300
 
 
 def open_nofollow(p):
@@ -84,7 +93,34 @@ def safe_env(base, extra):
     return env
 
 
+def npx_bin(cmd, env):
+    """Абсолютный путь бинарника пакета команды `npx -y <пакет>@<версия> …` из кэша $HOME/.npm/_npx (разрешение — из
+    SAFE_CWD) и аргументы после пакета; не та форма команды или путь вне кэша — OSError с причиной."""
+    if len(cmd) < 3 or cmd[0] != "npx" or cmd[1] not in ("-y", "--yes") or not NPX_SPEC.fullmatch(cmd[2]):
+        raise OSError("с --chdir команда — `npx -y <пакет>@<точная версия> [аргументы]`")
+    spec, name = cmd[2], NPX_SPEC.fullmatch(cmd[2]).group(2)
+    r = subprocess.run(["npx", "-y", "-p", spec, "-c", f"command -v {name}"], cwd=SAFE_CWD, env=env,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True, timeout=RESOLVE_TIMEOUT)
+    lines = (r.stdout or "").strip().splitlines()
+    if r.returncode != 0 or not lines:
+        raise OSError(f"npx не нашёл бинарник {name} пакета {spec} (код {r.returncode})")
+    path = os.path.realpath(lines[-1].strip())
+    cache = os.path.realpath(os.path.join(env["npm_config_cache"], "_npx"))
+    if not path.startswith(cache + "/") or not os.path.isfile(path):
+        raise OSError(f"бинарник {name} — {path}, не в кэше npx {cache}")
+    return path, cmd[3:]
+
+
 def main(argv):
+    chdir = None
+    if argv[:1] == ["--chdir"]:
+        if len(argv) < 2:
+            print("env_from.py: --chdir без папки", file=sys.stderr)
+            return 1
+        chdir, argv = os.path.realpath(os.path.expanduser(argv[1])), argv[2:]
+        if not os.path.isdir(chdir):
+            print(f"env_from.py: --chdir {chdir} — не папка", file=sys.stderr)
+            return 1
     if "--" not in argv or argv.index("--") not in (0, 2) or argv.index("--") == len(argv) - 1:
         print("env_from.py: нужно [<файл .env> <ИМЯ,…>] -- <команда>", file=sys.stderr)
         return 1
@@ -105,8 +141,12 @@ def main(argv):
     env = safe_env(dict(os.environ), got)
     try:
         os.chdir(SAFE_CWD)
+        if chdir is not None:
+            path, rest = npx_bin(cmd, env)
+            os.chdir(chdir)
+            cmd = ["node", path, *rest]
         os.execvpe(cmd[0], cmd, env)
-    except OSError as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"env_from.py: {cmd[0]} не запустился — {e}", file=sys.stderr)
         return 1
 
