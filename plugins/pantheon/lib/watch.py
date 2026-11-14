@@ -320,8 +320,9 @@ WAIT_REASONS = ("идёт технический", "пауза по нагруз
 
 
 def recheck(name, auto, nudge=False):
-    """Та же проверка по свежему claude agents — под блокировкой имени перед самим подъёмом."""
-    return lambda: wake_block(name, P.agents_all() or [], P.sessions_registry(), auto, nudge)
+    """Та же проверка по свежему claude agents под блокировкой имени; не JSON — отказ, а не «копий нет» (metis-1192)."""
+    return lambda: ("claude agents --json не ответил" if (agents := P.agents_all()) is None
+                    else wake_block(name, agents, P.sessions_registry(), auto, nudge))
 
 
 # --- снимок сессий (COMM-14) ---------------------------------------------------------

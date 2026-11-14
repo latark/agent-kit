@@ -27,7 +27,7 @@ __all__ = [
     "capacity_probe", "capacity_log", "NO_WORD_WHY", "START_REQ", "START_REQ_KEYS", "start_request", "start_order", "cancel_request", "run_closed",
     "take_start_requests", "resume_request", "hestia_request", "REQ_FRESH",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
-    "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake",
+    "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake", "AGENTS_SILENT", "start_agents",
 ]
 
 
@@ -903,13 +903,31 @@ def run_closed():
     return None
 
 
+AGENTS_SILENT = "claude agents --json не ответил"
+
+
+def start_agents(dry):
+    """(список сессий, код, причина отказа) для _start_session. Запуск закрыт песочницей (run_closed, кроме --dry-run) —
+    START_REFUSED; claude agents ответил не JSON (None) или не ответил за срок, не запустился — код 1 и причина
+    (metis-1192): иначе «копий нет», и запуск поднял бы дубль окна или упал трассой Python."""
+    closed = None if dry else run_closed()
+    if closed:
+        return None, START_REFUSED, closed
+    try:
+        agents = P.agents_all()
+    except subprocess.TimeoutExpired as e:
+        return None, 1, f"{AGENTS_SILENT} за {e.timeout:g} с"
+    except OSError as e:
+        return None, 1, f"{AGENTS_SILENT} (не запустился: {e})"
+    return agents, 0, None if agents is not None else AGENTS_SILENT
+
+
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
                    cmd="pantheon start", extra_env=None, again=None, over_cap=False, race_skip=False):
-    closed = None if dry else run_closed()
-    if closed:  # metis-1009: до шлюза и до остановки копий — иначе --restart погасил бы окно и не поднял новое
-        print(f"{cmd}: отказ — {closed}", file=sys.stderr)
-        return START_REFUSED
-    agents = P.agents_all()
+    agents, code, why = start_agents(dry)
+    if why:  # metis-1009, metis-1192: до шлюза и до остановки копий — иначе --restart погасил бы окно и не поднял новое
+        print(f"{cmd}: отказ — {why}", file=sys.stderr)
+        return code
     if not dry:  # metis-0261 А: слово владельца, потолок и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word, over_cap)
         if why:
@@ -1153,7 +1171,10 @@ def wake_recheck(name, state=None):
         return "пауза по нагрузке"
     if P.maintenance_active():
         return "технический перезапуск"
-    if P.live_copies(name, P.agents_all() or []):
+    agents = P.agents_all()
+    if agents is None:  # metis-1192: не JSON — «копий нет» не значит; не будим, как _wake
+        return AGENTS_SILENT
+    if P.live_copies(name, agents):
         return "уже работает"
     return None
 
