@@ -148,6 +148,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
                     отказ, код 2; время строки журнала ставит pantheon: время в начале --note («23:45 — …») не пишется
                     (предупреждение); карточки изменились (task set/new/claim/…) — задачи расписания view и board сразу (metis-0868)
+                    из окна роли в задачу чужого направления (папку не пишет) — только --note: заявкой в кэш окна, допишет
+                    плановый проход (`pantheon task run`) строкой «агент (окно X): …»; другие поля — отказ (metis-1187)
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
                     (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
@@ -1483,10 +1485,12 @@ def tick():
 
 def release_ticks(t):
     """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска), затем ночной
-    полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
+    полный набор на main (metis-1050), итог проверки MCP координаторам (metis-1047). Сбой одного не останавливает тик
+    и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
                            ("map-tick-crash", "карта тестов", map_tick_mod),
                            ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod),
+                           ("mcp-report-crash", "итог проверки MCP координаторам", mcp_report_mod),
                            ("denials-tick-crash", "отчёт отказов", denials_mod)):
         try:
             mod().tick(t)
@@ -6868,11 +6872,13 @@ def handoff_kick():
 
 def owner_edit_kick():
     """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) и настроек проекта (metis-0844,
-    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет."""
-    for cmd, mod in (("owner-edit", owner_edit_mod), ("config", config_edit_mod)):
-        run = "config-edit" if cmd == "config" else cmd
+    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет.
+    Тем же путём — заметки окон ролей в карточки чужих направлений (`pantheon task run`, lib/tasknote.py, metis-1187)."""
+    for cmd, pending in (("owner-edit", lambda: owner_edit_mod().pending()),
+                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending)):
+        run = {"config": "config-edit", "task": "task-note"}.get(cmd, cmd)
         try:
-            if locked(f"{run}-run") or not mod().pending():
+            if locked(f"{run}-run") or not pending():
                 continue
             if os.environ.get("PANTHEON_DRYRUN") == "1":
                 with open(path("dryrun.log"), "a") as fh:
@@ -7436,6 +7442,16 @@ def nightly_tick_mod():
         spec.loader.exec_module(_NIGHTLY_TICK)
         _NIGHTLY_TICK.set_core(sys.modules[__name__])
     return _NIGHTLY_TICK
+
+
+def mcp_report_mod():
+    """lib/mcp_report.py — итог проверки серверов MCP во входящие координатора (metis-1047, часть 4)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_mcp_report", os.path.join(LIB, "mcp_report.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.set_core(sys.modules[__name__])
+    return mod
 
 
 def denials_mod():
@@ -9336,6 +9352,7 @@ _attach("instructions")
 _attach("rolecmd")
 _attach("sessions")
 _attach("batch")
+_attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
 
 
 def main(argv):
