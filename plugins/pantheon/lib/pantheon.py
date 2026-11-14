@@ -2799,11 +2799,27 @@ def grants_load(text=None):
     return live, nxt, errors, expired
 
 
-def grants_apply(name, data, grants):
-    """Разрешения окна name (и «*») — в его настройки, без повторов."""
+def grant_over_own(name, g, folders):
+    """Разрешение без записи на свою папку окна и выше неё (metis-1221 п. 3): запреты GRANT_WRITE_DENY шаблоном «/**/»
+    закрыли бы и её — .claude/agents окна направления (own_agents, metis-0841) и настройки копий .claude/worktrees/*,
+    где идёт project-tools apply. Исключить поддерево из шаблона песочница не умеет, поэтому такая запись не даётся:
+    своя папка и так открыта, папку рядом дают отдельной строкой write."""
+    own = [os.path.realpath(f) for f in folders]
+    bad = [x for x in g.get("write", []) if any(
+        f == r or f.startswith(r.rstrip("/") + "/") for r in [os.path.realpath(os.path.expanduser(x))] for f in own)]
+    if not bad:
+        return g
+    print(f"песочница {name}: grants.toml write на свою папку окна или выше не даётся — закрыл бы её .claude/agents и "
+          f".claude/settings.json копий (metis-1221); выдать папку рядом: {bad}", file=sys.stderr)
+    return {**g, "write": [x for x in g["write"] if x not in bad]}
+
+
+def grants_apply(name, data, grants, folders=()):
+    """Разрешения окна name (и «*») — в его настройки, без повторов. folders — свои папки окна (grant_over_own)."""
     for g in grants:
         if g["window"] != name and not (g["window"] == "*" and not GRANT_STAR_SKIP.fullmatch(name)):
             continue
+        g = grant_over_own(name, g, folders)
         for k, keys in GRANT_KEYS.items():
             if k not in g:
                 continue
@@ -2823,9 +2839,7 @@ def grants_apply(name, data, grants):
         deny = list(fs.get("denyWrite") or [])
         for x in g.get("write", []):
             r = os.path.realpath(os.path.expanduser(x))
-            for sub in GRANT_WRITE_DENY:
-                if r + sub not in deny:
-                    deny.append(r + sub)
+            deny += [x for x in [r + sub for sub in GRANT_WRITE_DENY] + nested_pins(r) if x not in deny]
         if g.get("write"):
             fs["denyWrite"] = deny
 
@@ -2843,11 +2857,11 @@ def grants_check():
                    "снято при сборке; продлить или удалить запись (Метида)", "pantheon")
 
 
-def write_window(out_dir, name, data):
+def write_window(out_dir, name, data, folders=()):
     """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся.
     Разрешения grants.toml — сюда же; файлы запущенных сессий этого окна (settings/run/) обновляются: Claude Code
     перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска."""
-    grants_apply(name, data, grants_load()[0])
+    grants_apply(name, data, grants_load()[0], folders)
     size, key = sandbox_size(data), f"sandbox-size-{name}"
     if size > SANDBOX_SIZE_LIMIT:
         print(f"песочница {name}: {size} байт путей > {SANDBOX_SIZE_LIMIT} — окно не пересобрано", file=sys.stderr)
@@ -2979,6 +2993,11 @@ SETTINGS_FILES = ("/.claude/settings.json", "/**/.claude/settings.json", "/.clau
 GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
     "/.claude/agents", "/**/.claude/agents") + SETTINGS_FILES + (
     "/.mcp.json", "/**/.mcp.json", "/.claude/skills", "/**/.claude/skills", "/.claude/commands", "/**/.claude/commands")
+# Код git сверх .git/config и hooks (metis-1221 п. 4): config.worktree (и копий .git/worktrees/<x>/) git читает при
+# extensions.worktreeConfig; bare-репозиторий <имя>.git/{config,hooks} («*» — и пустое, .git тоже); .husky — папка
+# хуков при core.hooksPath=.husky. Свои папки — GIT_CODE от ~ и ROOT_EXEC корня и 1-го уровня (копии открыты)
+GIT_CODE = ("/**/.git/config.worktree", "/**/.git/worktrees/*/config.worktree", "/**/*.git/config", "/**/*.git/hooks")
+GRANT_WRITE_DENY += GIT_CODE + ("/.husky", "/**/.husky")
 # Свои папки окна (folders) — только корень: настройки проекта Claude Code берёт из папки запуска, из --add-dir и
 # вложенных — нет (пробы F8, metis-0933), EnterWorktree окнам закрыт. В корне — и сессии владельца без песочницы.
 # Копии .claude/worktrees/* открыты: «настрой проект» (project-tools apply) идёт там → PR → ревью → слияние → git pull
@@ -2992,6 +3011,31 @@ ROOT_LEVELS = ("", "/*")
 # .claude/skills и .claude/commands (хуки в шапке навыка запускаются вне песочницы) — там же, но только окнам без
 # own_agents: окно направления правит навыки и команды своего проекта (metis-0841, guard OWN_ITEMS) — остаток README guard
 ROOT_ITEMS = ("/.claude/skills", "/.claude/commands")
+ROOT_EXEC = ("/.husky",)
+
+
+def nested_pins(root):
+    """Литералы denyWrite, которые не дают переименовать .claude и .git подпапок первого уровня (metis-1221 п. 2).
+    Запрет шаблоном («/*/», «/**/») Seatbelt сверяет регуляркой: `mv app/.claude app/x`, запись в x и возврат имени
+    его обходят (проба 15.11 под песочницей Claude Code 2.1.325). Литерал sandbox-runtime закрывает и удаление,
+    переименование и создание каждого его предка — app/.claude и app; запись внутри них остаётся. Подпапки — с .claude
+    или .git и вложенные проекты (nested_projects: их .claude — и при отсутствии, ссылкой на её место); .git — только
+    существующая (git init во вложенной папке работает). Глубже первого уровня — остаток README guard."""
+    proj = {os.path.basename(x) for x in nested_projects(root)}
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        d = os.path.join(root, n)
+        if n.startswith(".") or os.path.islink(d) or not os.path.isdir(d):
+            continue
+        if n in proj or os.path.lexists(os.path.join(d, ".claude")):
+            out.append(d + "/.claude/settings.json")
+        if os.path.lexists(os.path.join(d, ".git")):
+            out.append(d + "/.git/hooks")
+    return out
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
@@ -3008,11 +3052,12 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     # направления (packs/) запускают вне песочницы — окно, переписав их Bash-ом, вышло бы из неё. Edit и Write туда
     # закрывает guard protect-config (PROJECT_ITEMS hooks)
     agents = ("/.claude/agents", "/**/.claude/agents")
-    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
+    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + ["~" + x for x in GIT_CODE] + [f"{r}{sub}" for r in allow for sub in (
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
         () if own_agents and r in folders else agents)] + [
         f"{r}{lv}{sub}" for r in folders for lv in ROOT_LEVELS
-        for sub in ROOT_SETTINGS + (() if own_agents else ROOT_ITEMS)]
+        for sub in ROOT_SETTINGS + ROOT_EXEC + (() if own_agents else ROOT_ITEMS)]
+    deny_write += [x for r in folders for x in nested_pins(r)]
     deny_write += _deny_forms([HOOKD_HOME])
     # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
     deny_write += tmp_deny_write(allow, tmp_own)
@@ -4499,7 +4544,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "его папок, окно его не получит", "pantheon")
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
-        write_window(out_dir, name, data)
+        write_window(out_dir, name, data, ok)
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
@@ -4564,7 +4609,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         if pmap:
             PLUGIN_MAP.window_apply(job, pmap, name, guard=guard)
-        write_window(out_dir, name, job)
+        write_window(out_dir, name, job, own)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
     # перезапускает окна. Bash пишет только в TMPDIR (кэш — папка запуска, запись в него guard не пускает); ни одной папки проекта, памяти
@@ -4675,7 +4720,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     if pmap:
         PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
-    write_window(out_dir, "hq", hq)
+    write_window(out_dir, "hq", hq, [root])
     built.append("hq")
     for f in os.listdir(out_dir):
         if f.endswith(".json") and f[:-5] not in built:
