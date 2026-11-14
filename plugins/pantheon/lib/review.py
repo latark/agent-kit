@@ -34,13 +34,14 @@ REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
                 "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый проверенный "
-                "пункт «Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
+                "пункт «Готово, когда»; пункт задачи не из Closes — если тело PR называет его «пункт N <id>») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
                 "<owner/repo>#<PR> --by <argus> --text \"…\" | sample | criteria <id задачи>… | status [<owner/repo> <PR>] "
                 "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ] | delta <owner/repo> <PR> (из клона: "
                 "дельта-круг или полный, готов ли head к argus)")
 # Правило засчитывания вердиктов (REVIEW_CHECKLIST, OPUS_RAN, RAN_MODEL, review_accept_full, review_accept_counts,
 # review_records) — в lib/review_rules.py, ядре защит (metis-0858): здесь только P.<имя>, копии правила нет.
 
+# metis-1193: и задачи не из Closes, если тело PR называет пункт «пункт N <id>» (autoclose.tick_named).
 # metis-1004: вердикт argus по пункту «Готово, когда» задачи из Closes — `--criteria "<id>#<N> <хеш> да|нет <опора>"` у
 # accept и reject, флаг на пункт (разбор — tasks.parse_criterion). Хеш — tasks.criterion_hash текста пункта: правка
 # пункта после приёмки его меняет. Хук guard кладёт значения в запись полем "criteria", autoclose при слиянии PR

@@ -137,8 +137,20 @@ def test_unit():
           A.closing_ids("x", "Это не мелочь. Закрывает metis-0004") == ["metis-0004"])
     check("find_ids: ветка и тело, без повторов, порядок",
           A.find_ids("metis-0001-fix", "Закрывает metis-0001 и demo-0002") == ["metis-0001", "demo-0002"])
-    check("is_part: слово «часть» — да, «участь» и «частью» — нет",
-          A.is_part("Это часть 1 из 2") and not A.is_part("участь") and not A.is_part("целиком"))
+    check("is_part: «часть <id>», «часть <номер>», «часть задачи <id>», «часть: <id>» — да; «участь», «частью» — нет",
+          A.is_part("Это часть metis-0002") and A.is_part("Часть №1051") and A.is_part("часть задачи 1051") and A.is_part("часть задачи metis-0050")
+          and A.is_part("часть: metis-1051") and not A.is_part("участь metis-0002") and not A.is_part("целиком"))
+    check("is_part (metis-1193, #441): слово «часть» без номера рядом — нет: «личная часть карты», «часть 1 из 2», "
+          "«часть-пусто», «часть» в конце",
+          not A.is_part("Closes metis-1051\n\nличная часть карты plugins-by-role.toml") and not A.is_part("часть 1 из 2")
+          and not A.is_part("часть-пусто") and not A.is_part("остальное — часть") and not A.is_part("часть metis-10511x"))
+    for form in ("**часть** metis-1051", "часть (metis-1051)", "часть `metis-1051`", "часть №1051", "часть № 1051",
+                 "часть #1051", "_часть_ metis-1051", "часть [metis-1051]", "часть работы metis-1051"):
+        check(f"is_part (metis-1193): разметка или одно слово между «часть» и номером — да: {form!r}", A.is_part(form))
+    for form in ("часть большой работы metis-1051", "часть карты, metis-1051", "участь metis-1051", "частьmetis-1051",
+                 "часть 100 строк", "часть 2026 года", "часть 1051", "часть работы 1051"):
+        check(f"is_part (metis-1193): два слова, запятая, «часть» внутри слова, голое число — нет: {form!r}",
+              not A.is_part(form))
     diff = ("diff --git a/plugins/pantheon/.claude-plugin/plugin.json b/plugins/pantheon/.claude-plugin/plugin.json\n"
             '-  "version": "0.11.49",\n+  "version": "0.11.50",\ndiff --git a/x.json b/x.json\n+  "version": "9"\n')
     check("plugin_versions: версия из plugin.json, чужой json не берётся", A.plugin_versions(diff) == {"pantheon": "0.11.50"})
@@ -161,8 +173,8 @@ def test_tick():
         with open(os.path.join(home, "metrics", "tasks.jsonl"), "w") as fh:
             fh.write(json.dumps({"v": 1, "id": a, "closed": day(merged_at), "usd": 1.5, "tokens_total": 450000, "hours": 2.1}) + "\n")
         write_gh(gh, "latark/agent-kit", "merged", [
-            pr(7, "metis-0001-autoclose", "Закрывает задачу", merged_at),
-            pr(8, "feature-x", "Closes metis-0002, но только часть 1 из 2", merged_at),
+            pr(7, "metis-0001-autoclose", "Закрывает задачу; личная часть карты", merged_at),  # #441: не «часть»
+            pr(8, "feature-x", "Closes metis-0002, но только часть metis-0002: 1 из 2", merged_at),
             pr(10, "metis-0003-v", "версия", merged_at, oid="1234567fffffff",
                files=[None, "plugins/pantheon/.claude-plugin/plugin.json"])])  # path null: fetch не падает (0674)
         write_gh(gh, "acme/site", "merged", [pr(3, "demo-0001-site", "", merged_at, oid="9999999aaaaaaa")])
@@ -309,7 +321,7 @@ def test_reopen_and_eviction():
               T.read(pa)[0].get("status") == "doing" and text(pa).count("закрыта по слиянию PR #1") == 1 and not log, text(pa)[-400:])
         # «часть» не задваивается после вытеснения
         pb = put(home, "metis-pantheon", "metis-0002", status="doing")
-        part = [cpr(2, "metis-0002-x", "часть 1", T0 - 3600)]
+        part = [cpr(2, "metis-0002-x", "часть metis-0002", T0 - 3600)]
         run_cache(home, state, T0 + 1300, {"latark/agent-kit": part})
         st = A.load_state(os.path.join(state, "autoclose.json"))
         st["done"] = {}
@@ -917,7 +929,7 @@ def test_close_criteria():
         pc = put(home, "metis-pantheon", "metis-0012", body="Готово, когда:\n- [x] а\n- [x] б\n", created="2026-10-27")
         pd = put(home, "metis-pantheon", "metis-0013", body=two, created="2026-10-27")
         prs = [cpr(1, "metis-0010-x", "", T0 - 3600), cpr(2, "metis-0011-x", "", T0 - 3600),
-               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть 1", T0 - 3600)]
+               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть metis-0013", T0 - 3600)]
         log, errs = run_cache(home, state, T0, {"latark/agent-kit": prs})
         ha = T.read(pa)[0]
         check("0421: PR без «часть», 1 из 2 пунктов → review, не done", ha.get("status") == "review" and not ha.get("closed"), str(ha))
@@ -1066,7 +1078,7 @@ def test_lists_and_checked():
               and T.read(pd)[0].get("status") == "done", text(pa)[-300:])
         # «часть» в теле PR из журнала: все пункты отмечены, но задача остаётся открытой, строка в журнал один раз
         pk = with_journal("metis-0050", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #46 слит\n")
-        prs3 = {"latark/agent-kit": [cpr(46, "e", "PR 1 из 2: часть задачи", T0 - 400)]}
+        prs3 = {"latark/agent-kit": [cpr(46, "e", "PR 1 из 2: часть задачи metis-0050", T0 - 400)]}
         for k in (500, 600):
             A.save_state(cache, {"fetched": T0 + k, "merged": prs3, "open": {}, "errors": {}})
             A.run(home, os.path.join(state, "autoclose.json"), cache, T0 + k, {"latark/agent-kit": {"metis-pantheon"}}, T)

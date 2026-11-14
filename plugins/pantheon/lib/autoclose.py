@@ -12,12 +12,14 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 Слитый PR закрывает такую задачу: status done, closed —
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
-В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается (и close_checked, metis-0660).
+В теле PR «часть <id>» или «часть №<номер>» — PR закрывает только часть задачи: его задачи не закрываются (и close_checked,
+metis-0660). Слово «часть» без номера рядом («личная часть карты») не в счёт (metis-1193, PART_RE).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
 строку «слит, неотмечено N (пункты …)», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
 Перед этим (metis-1004) слитый PR с Closes отмечает сам пункты, которые argus принял на head слияния: `accepted(repo,
 строка кэша)` → {id: {номер: хеш}} (review.review_criteria_ticks — засчитанные «принять» с --criteria «да»); пункт
-отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. Для этого
+отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. Пункты
+задачи не из Closes (metis-1193, tick_named) — так же, если тело PR их называет: «пункт 3 metis-1050». Для этого
 fetch кладёт в строку слитого PR head (headRefOid), base (baseRefName) и core (задето ли ядро, merged_core). Ядро по
 обоим путям переименования; переименование без старого пути и список файлов, обрезанный gh (больше 100), — ядро.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing/waiting её направления review — один
@@ -36,7 +38,15 @@ import time
 from datetime import datetime
 
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
-PART_RE = re.compile(r"(?<!\w)часть(?!\w)", re.I)
+# «часть» — только отдельным словом рядом с номером задачи: «часть metis-1051», «часть 1051», «часть задачи metis-1051»,
+# «часть: metis-1051» (metis-1193). Номер — id с префиксом или цифры после № / # / «задачи» («часть №1051», «часть
+# задачи 1051»); голое число («часть 100 строк», «часть 2026 года») — не номер. Между словом и номером — пробелы, знаки
+# разметки (* _ ` ( [ # №, двоеточие, тире) и перед id не больше одного слова («часть работы metis-1051»). Слово в
+# обычной фразе («личная часть карты», #441) PR частичным не делает.
+_PART_GAP = r"[\s*_`(\[#№:—–-]*"
+_PART_NUM = r"(?:[#№]|задачи" + _PART_GAP + r")\s*\d{3,}(?!\w)"
+PART_RE = re.compile(r"(?<![^\W_])часть(?![^\W_])" + _PART_GAP + r"(?:(?:[^\W\d_]+" + _PART_GAP + r")?" + ID_RE.pattern
+                     + r"|" + _PART_NUM + r")", re.I)
 FETCH_BUDGET = 240     # секунд на весь сетевой проход (fetch): дольше не ждём, остаток репозиториев — в следующий раз
 REPO_BUDGET = 75       # секунд на один репозиторий (metis-0808): fetch иногда 100-350 с против обычных 40 — завислый gh не съедает весь проход
 FIRST_LOOKBACK = 48 * 3600  # первый проход (нет состояния) смотрит назад на столько: старые упоминания задач не трогаем
@@ -696,6 +706,55 @@ def tick_accepted(pantheon, t, repo, pr, tid, task, T, accepted, log):
     return (task[0], h, b) if h else task
 
 
+# metis-1193: пункт задачи X, сделанный PR другой задачи (или проверяемый фактом после слияния — его принимают на
+# следующем PR), argus принимает тем же --criteria на этом PR, а тело PR называет его: «пункт 3 metis-1050», «пункты
+# 1, 2 и 4 metis-1117», «пункты 1, 2, и 4 metis-1117», «пункт 3 задачи metis-1050». Не «часть metis-X»: «часть» в теле оставляет открытыми и задачи из Closes (is_part).
+ITEM_RE = re.compile(r"(?<!\w)пункт(?:ы|ов|ах)?\s+(\d{1,3}(?:\s*(?:,\s*и|,|и)\s*\d{1,3})*)\s+(?:задачи\s+)?("
+                     + ID_RE.pattern + r")", re.I)
+
+
+def named_items(body):
+    """Пункты чужих задач, названные в теле PR (metis-1193) → {id: {номера}}."""
+    out = {}
+    for m in ITEM_RE.finditer(body or ""):
+        out.setdefault(m.group(2), set()).update(int(x) for x in re.findall(r"\d+", m.group(1)))
+    return out
+
+
+def tick_named(pantheon, t, repo, pr, dirs, skip, T, accepted, log, errors):
+    """Пункты задач вне Closes (metis-1193): отмечаются только те, что и названы в теле PR (named_items), и приняты
+    argus на head слияния (accepted, как в tick_accepted) — с той же сверкой хеша в T.criteria_tick. Одно название без
+    приёмки argus не отмечает ничего: тело PR пишет роль, запись приёмки — только хук guard. Задача — своего
+    направления, не done/dropped. → False при сбое отметки (PR повторим)."""
+    named = {tid: nums for tid, nums in named_items(pr.get("body")).items() if tid not in skip}
+    if not named or not accepted:
+        return True
+    ok, n = True, pr.get("number")
+    try:
+        got_all = accepted(repo, pr) or {}
+    except Exception as e:  # noqa: BLE001 — журнал шлюза не прочитан: PR повторим, тревога
+        errors[f"{repo}#{n}"] = f"приёмка argus для пунктов {', '.join(sorted(named))}: {type(e).__name__}: {e}"
+        return False
+    tasks = T.load_tasks(pantheon, T.WORK_TYPES)
+    for tid, nums in sorted(named.items()):
+        head = tasks.get(tid, ("", {}, ""))[1]
+        want = {k: h for k, h in (got_all.get(tid) or {}).items() if k in nums}
+        if not want or head.get("type") != "task" or head.get("direction") not in dirs \
+                or head.get("status") not in ("todo", "doing", "waiting", "review"):
+            continue
+        try:
+            got = T.criteria_tick(pantheon, t, tid, want, "плановый проход",
+                                  f"PR #{n} ({repo}) слит: argus принял пункты на head {str(pr.get('head') or '')[:12]}"
+                                  " (пункты названы в теле PR другой задачи)")
+        except Exception as e:  # noqa: BLE001 — сбой отметки не роняет проход: PR повторим, тревога
+            ok = False
+            errors[f"{repo}#{n}"] = f"{tid}: отметка пунктов по приёмке argus: {type(e).__name__}: {e}"
+            continue
+        if got:
+            log.append(f"{tid}: PR #{n} слит — отмечены пункты {', '.join(map(str, got))} по приёмке argus (не Closes)")
+    return ok
+
+
 def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=None):
     """Слитый PR → закрытие его задач. → True, если PR обработан целиком (можно отметить), False — повторить.
     accepted — как в run: до подсчёта неотмеченных пункты, принятые argus на head слияния, отмечаются (metis-1004)."""
@@ -735,7 +794,7 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=N
         except ValueError as e:  # задача изменилась или шапка не прошла проверку — PR не отмечаем, повторим
             ok = False
             errors[f"{repo}#{n}"] = f"{tid}: {e}"
-    return ok
+    return tick_named(pantheon, t, repo, pr, dirs, set(ids), T, accepted, log, errors) and ok
 
 
 def close_done(pantheon, t, tid, task, repo, pr, T, actual_for, why=""):
