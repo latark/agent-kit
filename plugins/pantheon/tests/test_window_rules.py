@@ -210,6 +210,40 @@ def root_levels(p, tmp, dw):
           denied(rw, ws + "/task/src/main.py"))
 
 
+def nested_pin_levels(p, tmp, dw):
+    """metis-1221 п. 2 и 4. Запрет шаблоном Seatbelt сверяет регуляркой: `mv app/.claude app/x`, запись и возврат имени
+    его обходят (проба 15.11 под песочницей Claude Code 2.1.325, README guard). Литерал sandbox-runtime закрывает и
+    переименование, удаление и создание каждого предка — поэтому .claude и .git подпапок первого уровня — литералами
+    (nested_pins). Код git сверх config и hooks: config.worktree, bare <имя>.git, .husky."""
+    f = os.path.join(tmp, "pins")
+    for d in ("app/.claude", "lib/.git", "proj", "plain/src", ".hidden/.claude", "real/.claude"):
+        os.makedirs(os.path.join(f, d))
+    open(os.path.join(f, "proj", "CLAUDE.md"), "w").close()
+    open(os.path.join(f, "sub.git"), "w").close()
+    os.symlink(os.path.join(f, "real"), os.path.join(f, "link"))
+    got = p.nested_pins(f)
+    want = [f + "/app/.claude/settings.json", f + "/lib/.git/hooks", f + "/proj/.claude/settings.json",
+            f + "/real/.claude/settings.json"]
+    check("nested_pins: .claude подпапки с .claude и вложенного проекта (и без .claude), .git — только существующей; "
+          "скрытые, ссылки, файлы и простые папки — нет", got == want, got)
+    check("nested_pins: нет папки — пусто", p.nested_pins(os.path.join(tmp, "nope")) == [])
+    cache = os.path.join(tmp, "cache")
+    rs = p.role_settings([f], None, [], cache, False, [])
+    check("role_settings: литералы nested_pins своей папки — в denyWrite (переименование app/.claude и lib/.git "
+          "закрыто)", set(want) <= set(dw(rs)), dw(rs))
+    rd = p.role_settings([], f, [], cache, False, [])
+    check("role_settings: nested_pins — только своим папкам (folders), не own_dir", not set(want) & set(dw(rd)), dw(rd))
+    check("role_settings: config.worktree, .git/worktrees/*/config.worktree и bare <имя>.git — от ~ (metis-1221 п. 4)",
+          {"~/**/.git/config.worktree", "~/**/.git/worktrees/*/config.worktree", "~/**/*.git/config",
+           "~/**/*.git/hooks"} <= set(dw(rs)), dw(rs))
+    check("role_settings: .husky корня и 1-го уровня своей папки закрыта, копий .claude/worktrees/* — нет",
+          {f + "/.husky", f + "/*/.husky"} <= set(dw(rs)) and not any("**" in x and x.endswith(".husky") for x in dw(rs)),
+          dw(rs))
+    check("GRANT_WRITE_DENY: config.worktree, bare <имя>.git и .husky выданной папки закрыты",
+          {"/**/.git/config.worktree", "/**/.git/worktrees/*/config.worktree", "/**/*.git/config", "/**/*.git/hooks",
+           "/.husky", "/**/.husky"} <= set(p.GRANT_WRITE_DENY), p.GRANT_WRITE_DENY)
+
+
 def main():
     w = load("window_rules_t", os.path.join(LIB, "window_rules.py"))
     src = open(os.path.join(LIB, "window_rules.py"), encoding="utf-8").read()
@@ -333,6 +367,7 @@ def main():
               dw(rs))
 
         root_levels(p, tmp, dw)
+        nested_pin_levels(p, tmp, dw)
         # хуки окна на Python — через hooks/python.sh рядом со скриптом (metis-0571); его нет — прежняя форма
         hd = os.path.join(tmp, "plug dir", "hooks")
         os.makedirs(hd)
