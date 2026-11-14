@@ -50,6 +50,26 @@ def budget_checks(pantheon, git, repo):
     check("test — свой HEAVY_WAIT_MAX меньше бюджета остаётся", "HWM=50" in r.stdout, r.stdout)
     r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "0"})
     check("test — бюджет 0: без ограничения, HEAVY_WAIT_MAX не ставится", "HWM=unset" in r.stdout, r.stdout)
+    # metis-1174: запасной путь «только CI» — HEAVY_LOCAL_TESTS=1 только команде набора шлюза (FULL_TESTS или узкий
+    # вариант --affected --base); подставной heavy печатает, что получил
+    fbin = os.path.join(os.path.dirname(repo), "fakeheavy")
+    os.makedirs(fbin, exist_ok=True)
+    with open(os.path.join(fbin, "heavy"), "w") as fh:
+        fh.write("#!/bin/sh\necho HLT=${HEAVY_LOCAL_TESTS-unset}\n")
+    os.chmod(os.path.join(fbin, "heavy"), 0o755)
+    fx = {"PATH": fbin + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"), "HEAVY_LOCAL_TESTS": "1"}
+    full = ["heavy", "python3.14", "-I", "plugins/pantheon/scripts/run-tests.py", "-j", "3", "plugins/guard",
+            "plugins/pantheon", "plugins/project-tools"]
+    r = pantheon("review", "test", "--", *full, cwd=repo, extra=fx)
+    check("test — полный набор шлюза: HEAVY_LOCAL_TESTS=1", "HLT=1" in r.stdout, r.stdout + r.stderr)
+    r = pantheon("review", "test", "--", *full[:6], "--affected", "--base", "origin/main", *full[6:], cwd=repo, extra=fx)
+    check("test — узкий вариант (--affected --base): HEAVY_LOCAL_TESTS=1", "HLT=1" in r.stdout, r.stdout + r.stderr)
+    for name, cmd in (("другая команда тестов", ["heavy", "python3.14", "-I", "plugins/x/tests/test_a.py"]),
+                      ("набор с лишним ключом", [*full, "--only", "a"]),
+                      ("не heavy", ["sh", "-c", "echo HLT=${HEAVY_LOCAL_TESTS-unset}"])):
+        r = pantheon("review", "test", "--", *cmd, cwd=repo, extra=fx)
+        check(f"test — {name}: HEAVY_LOCAL_TESTS не ставится и чужая снимается", "HLT=unset" in r.stdout,
+              r.stdout + r.stderr)
     head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     r = pantheon("review", "test", "--", "sleep", "60", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
     check("test — команда дольше бюджета: остановлена, код 75, причина и совет в stderr, SHA не печатается",

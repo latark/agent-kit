@@ -31,12 +31,25 @@ heavy ищет её сам: bin версии node из nvm (alias/default, за�
 outside) занимает ещё и жетон locks/heavy-full.lock — на Mac идёт один полный набор, второй ждёт в очереди так же (за
 жетон — опросом, потом за место по порядку прихода; HEAVY_WAIT_MAX и сообщения те же). Узкие команды и одиночные файлы
 жетон не берут. Нет файла жетона — heavy создаёт его сам, а в песочнице идёт без него.
+Репозиторий «только CI» (metis-1174): ближайший git-корень cwd или пути файла тестов команды содержит .pantheon-verify
+со строкой `ci:` и команда — запуск тестов (python [флаги] … test_*.py, run-tests.py, pytest, -m pytest/unittest; за
+обёртками VAR=x, env, nice -n 10, timeout 600, uv run --with x, uvx, и в sh/bash -c, -lc) — отказ, код 2, без запуска:
+тесты идут в GitHub Actions (итог — gh pr checks <N>). HEAVY_LOCAL_TESTS=1 снимает отказ. Сами роли её в команду не
+пишут: её ставят запасные пути с записью — плановый проход (pantheon outside test) и `pantheon review test`, когда
+команда — полный набор (FULL_TESTS шлюза) или его узкий вариант (--affected).
+  heavy --probe <команда>  проба одного мутанта для argus: в репозитории «только CI» — только один файл тестов
+                           (python [флаги] <путь>/test_*.py [аргументы]); run-tests.py, pytest, -m, sh -c, второй
+                           test_*.py — отказ, код 2. Предел — PROBE_MAX (120 с; HEAVY_PROBE_MAX может только уменьшить):
+                           дольше — группа процессов получает SIGTERM, через 5 с SIGKILL, код 124. Вне такого
+                           репозитория — любая команда с тем же пределом. Места — как у обычной команды, жетон
+                           полного набора не берёт.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
 import contextlib
 import fcntl
 import os
+import re
 import shutil
 import signal
 import stat
@@ -166,6 +179,272 @@ def is_full(argv):
         return False
 
 
+CI_ONLY_MSG = ("heavy: тесты этого репозитория идут в CI (строка ci: в .pantheon-verify) — итог: gh pr checks <N>; "
+               "запасной путь — pantheon outside test")
+PYTHON_RE = re.compile(r"python[0-9.]*\Z")
+ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+SHELLS = ("sh", "bash", "zsh", "dash")
+# обёртки перед программой: {имя: (флаги со значением, сколько позиционных слов до программы)}
+WRAPPERS = {"env": ({"-u", "--unset", "-C", "--chdir"}, 0), "time": (set(), 0), "command": (set(), 0),
+            "exec": ({"-a"}, 0), "nice": ({"-n", "--adjustment"}, 0), "heavy": (set(), 0),
+            "timeout": ({"-s", "--signal", "-k", "--kill-after"}, 1),
+            "uvx": ({"--from", "--with", "-p", "--python", "--index", "--index-url"}, 0),
+            "uv run": ({"--with", "--with-editable", "--with-requirements", "-p", "--python", "--project", "--directory",
+                        "--package", "--extra", "--group", "--env-file", "--index", "-w"}, 0)}
+UV_VALUE_OPTS = {"--directory", "--project", "--config-file", "--cache-dir", "--color", "--python", "-p"}
+PY_VALUE_SHORT = "XW"  # -X dev, -W error: значение — остаток слова или следующее слово
+PY_VALUE_LONG = {"--check-hash-based-pycs"}
+PROBE_MAX = 120  # с: предел --probe (metis-1174); HEAVY_PROBE_MAX может его только уменьшить
+PROBE_EXIT = 124
+
+
+def _skip_opts(words, i, takes, positional):
+    """Пропустить флаги обёртки (со значением — два слова) и её позиционные слова → индекс программы."""
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] == "--":
+            i += 1
+            break
+        i += 2 if words[i] in takes else 1
+    return i + positional
+
+
+def _strip_prefix(words):
+    """Слова команды без присваиваний VAR=x и обёрток (env, nice -n 10, timeout 600, uv run --with x, …)."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        name = os.path.basename(w)
+        if ASSIGN_RE.match(w):
+            i += 1
+            continue
+        if name == "uv":
+            j = i + 1
+            while j < len(words) and words[j].startswith("-"):
+                j += 2 if words[j] in UV_VALUE_OPTS else 1
+            if j >= len(words) or words[j] != "run":
+                break
+            i, name = j, "uv run"
+        elif name not in WRAPPERS:
+            break
+        takes, positional = WRAPPERS[name]
+        i = _skip_opts(words, i + 1, takes, positional)
+    return words[i:]
+
+
+def _short_py_flag(w, nxt):
+    """Слитные короткие флаги python (-IBc, -mpytest, -Xdev) → (вид, значение, съедено слов) или None (флаг без значения)."""
+    letters = w[1:]
+    for n, ch in enumerate(letters):
+        if ch in "cm" or ch in PY_VALUE_SHORT:
+            tail = letters[n + 1:]
+            value, used = (tail, 1) if tail else (nxt, 2)
+            return ("opt" if ch in PY_VALUE_SHORT else ch), value, used
+    return None
+
+
+def _py_target(words):
+    """python [флаги] … → ("script", путь, остальное) | ("m", модуль, остальное) | ("c", код, []) | (None, "", [])."""
+    rest, k = words[1:], 0
+    while k < len(rest):
+        w = rest[k]
+        if w == "--":
+            k += 1
+            break
+        if not w.startswith("-") or w == "-":
+            break
+        if w.startswith("--"):
+            k += 2 if w in PY_VALUE_LONG else 1
+            continue
+        got = _short_py_flag(w, rest[k + 1] if k + 1 < len(rest) else "")
+        if got is None:
+            k += 1
+            continue
+        kind, value, used = got
+        if kind != "opt":
+            return kind, value, rest[k + used:]
+        k += used
+    if k < len(rest) and rest[k] != "-":
+        return "script", rest[k], rest[k + 1:]
+    return None, "", []
+
+
+def _shell_cmd(words):
+    """sh/bash/zsh [-l] -c "…" (в том числе слитно -lc, -ec) → строка команды; иначе None."""
+    if not words or os.path.basename(words[0]) not in SHELLS:
+        return None
+    for k, w in enumerate(words[1:], 1):
+        if not w.startswith("-") or w.startswith("--"):
+            return None
+        if "c" in w[1:]:
+            return words[k + 1] if k + 1 < len(words) else None
+    return None
+
+
+def _segments(cmd):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "fullsuite", os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "fullsuite.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.shell_segments(cmd)
+
+
+def _is_test_file(path):
+    b = os.path.basename(path)
+    return b == "run-tests.py" or (b.startswith("test_") and b.endswith(".py"))
+
+
+def _walk(words, depth=0):
+    """Сегменты команды после обёрток, с раскрытием sh -c (до трёх уровней)."""
+    words = _strip_prefix(words)
+    cmd = _shell_cmd(words)
+    if cmd is None:
+        return [words]
+    if depth >= 3:
+        return []
+    return [seg for part in _segments(cmd) for seg in _walk(part, depth + 1)]
+
+
+def _words_are_tests(words):
+    """Одна команда (слова, без sh -c) — запуск тестов: pytest, python … test_*.py | run-tests.py | -m pytest/unittest."""
+    if not words:
+        return False
+    w0 = os.path.basename(words[0])
+    if w0 in ("pytest", "py.test"):
+        return True
+    if not PYTHON_RE.match(w0):
+        return False
+    kind, value, _ = _py_target(words)
+    if kind == "m":
+        return value.split(".")[0] in ("pytest", "unittest")
+    return kind == "script" and _is_test_file(value)
+
+
+def is_test_command(argv):
+    """argv — запуск тестов (с обёртками и sh -c). Не разобрать — не тест."""
+    try:
+        return any(_words_are_tests(seg) for seg in _walk(list(argv)))
+    except Exception:
+        return False
+
+
+def test_paths(argv):
+    """Пути файлов тестов (test_*.py, run-tests.py), которые запускает команда."""
+    try:
+        out = []
+        for seg in _walk(list(argv)):
+            if seg and PYTHON_RE.match(os.path.basename(seg[0])):
+                kind, value, _ = _py_target(seg)
+                if kind == "script" and _is_test_file(value):
+                    out.append(value)
+        return out
+    except Exception:
+        return []
+
+
+def probe_problem(argv):
+    """Почему команда не годится для --probe в репозитории «только CI»; годится (один файл test_*.py) — None."""
+    words = _strip_prefix(list(argv))
+    if not words:
+        return "пустая команда"
+    w0 = os.path.basename(words[0])
+    if w0 in SHELLS:
+        return "оболочка (sh -c) не годится"
+    if not PYTHON_RE.match(w0):
+        return f"{w0} не годится, нужен python"
+    kind, value, rest = _py_target(words)
+    if kind != "script":
+        return f"python -{kind} не годится" if kind else "нет файла тестов"
+    b = os.path.basename(value)
+    if b == "run-tests.py":
+        return "run-tests.py — это набор, а не один файл"
+    if not _is_test_file(value):
+        return f"{b} — не файл test_*.py"
+    if any(_is_test_file(a) for a in rest):
+        return "больше одного файла тестов"
+    return None
+
+
+def ci_only_repo(cwd=None):
+    """Ближайший git-корень cwd (.git — папка или файл worktree) с .pantheon-verify, где есть строка `ci:`."""
+    d = os.path.realpath(cwd or os.getcwd())
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            try:
+                with open(os.path.join(d, ".pantheon-verify"), encoding="utf-8") as fh:
+                    return any(ln.startswith("ci:") for ln in fh.read().splitlines())
+            except OSError:
+                return False
+        up = os.path.dirname(d)
+        if up == d:
+            return False
+        d = up
+
+
+def ci_target(argv):
+    """Команда трогает репозиторий «только CI»: cwd или git-корень одного из её файлов тестов (абсолютный путь из
+    другой папки — тоже)."""
+    return ci_only_repo() or any(ci_only_repo(os.path.dirname(os.path.abspath(p))) for p in test_paths(argv))
+
+
+def refusal(argv, probe_mode):
+    """Строка отказа (код 2, без запуска) или None — команда идёт."""
+    if probe_mode:
+        if not ci_target(argv):
+            return None
+        why = probe_problem(argv)
+        return None if why is None else (f"heavy: --probe в репозитории «только CI» — один файл тестов "
+                                         f"(python [флаги] <путь>/test_*.py): {why} — не запускалась")
+    if os.environ.get("HEAVY_LOCAL_TESTS") != "1" and is_test_command(argv) and ci_target(argv):
+        return CI_ONLY_MSG
+    return None
+
+
+def probe_limit():
+    try:
+        v = float(os.environ.get("HEAVY_PROBE_MAX") or PROBE_MAX)
+    except ValueError:
+        v = PROBE_MAX
+    return v if 0 < v < PROBE_MAX else PROBE_MAX
+
+
+def _kill_group(proc):
+    """SIGTERM группе процессов, через 5 с — SIGKILL."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
+
+
+def run_cmd(argv, env, limit=None):
+    """Запуск с передачей сигналов. limit — предел --probe: своя группа процессов, превысила — убита, код 124."""
+    proc = subprocess.Popen(argv, env=env, start_new_session=bool(limit))
+
+    def forward(s, _f):
+        if limit:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, s)
+        else:
+            proc.send_signal(s)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, forward)
+    if not limit:
+        return proc.wait()
+    try:
+        return proc.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        print(f"heavy: --probe дольше {limit:g} с — процесс остановлен (SIGTERM, через 5 с SIGKILL), код {PROBE_EXIT}",
+              file=sys.stderr)
+        return PROBE_EXIT
+
+
 def try_slot(names=SLOTS):
     for name in names:
         p = os.path.join(LOCKS, name + ".lock")
@@ -275,11 +554,17 @@ def main(argv):
     if argv[0] == "--status":
         return status()
     server = argv[0] == "--server"
-    if server:
+    probe_mode = argv[0] == "--probe"
+    if server or probe_mode:
         argv = argv[1:]
     if not argv:
         print(__doc__)
         return 2
+    why = refusal(argv, probe_mode)
+    if why:
+        print(why, file=sys.stderr)
+        return 2
+    limit = probe_limit() if probe_mode else None
     env = tmp_env()
     found = resolve(argv, env)
     if not found:
@@ -289,13 +574,14 @@ def main(argv):
     argv, env = found
     if not any(os.path.exists(os.path.join(LOCKS, n + ".lock")) for n in SLOTS):
         print("heavy: мест блокировки нет (pantheon install их создаёт) — запускаю без неё", file=sys.stderr)
-        return subprocess.call(argv, env=env)
+        return run_cmd(argv, env, limit)
     try:
         wait_max = float(os.environ.get("HEAVY_WAIT_MAX") or 0)
     except ValueError:
         wait_max = 0
     held, waited = [], 0
-    need = ([((FULL,), "полный набор тестов уже идёт (на Mac один)")] if not server and is_full(argv) else []) + \
+    full = not server and not probe_mode and is_full(argv)  # --probe жетон полного набора не берёт
+    need = ([((FULL,), "полный набор тестов уже идёт (на Mac один)")] if full else []) + \
         ([((SERVER,), "сервер уже запущен другой ролью")] if server else []) + \
         [(SLOTS, "оба места заняты другими тяжёлыми командами")]
     for names, what in need:
@@ -319,10 +605,7 @@ def main(argv):
                 ticket.drop()
         if fd >= 0:  # -1 — жетон полного набора создать нельзя: идём без него, как без мест
             held.append(fd)
-    proc = subprocess.Popen(argv, env=env)
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda s, _f: proc.send_signal(s))
-    code = proc.wait()
+    code = run_cmd(argv, env, limit)
     for fd in held:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)

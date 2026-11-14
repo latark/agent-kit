@@ -883,6 +883,7 @@ def sandbox_env(tmpdir, kind, port=None, keys=None):
                 "TMPDIR": tmpdir, "PANTHEON_STATE": P.STATE, "NEXT_TELEMETRY_DISABLED": "1", "DO_NOT_TRACK": "1"})
     if kind == "test":
         env["CI"] = "1"
+        env["HEAVY_LOCAL_TESTS"] = "1"  # запасной путь «только CI»: heavy не отказывает тестам прохода (metis-1174)
     if port:
         env["PORT"] = str(port)
     return env
