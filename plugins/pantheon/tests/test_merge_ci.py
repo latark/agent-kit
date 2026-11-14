@@ -64,6 +64,42 @@ def test_ci_matches_guard():
           r.stdout.split() == ["wait", "wait", "ok", "fail", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
 
 
+def test_ci_state_no_workflows():
+    """metis-1207: пустой rollup у репозитория без REQUIRED_CHECKS — ok, если на head нет workflows на pull_request
+    (проверок не появится); есть такой workflow — wait; сбой gh, не-JSON, нечитаемый файл — wait (сбой не пропускает)."""
+    code = (
+        "import sys, json, base64, importlib.util, subprocess\n"
+        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+        "s.loader.exec_module(m)\n"
+        "def wf(text): return {'encoding': 'base64', 'content': base64.b64encode(text.encode()).decode()}\n"
+        "def run_with(table):\n"
+        "    def fake(argv, **kw):\n"
+        "        key = argv[2]\n"
+        "        if key not in table: return subprocess.CompletedProcess(argv, 1, '', 'gh: Not Found (HTTP 404)')\n"
+        "        v = table[key]\n"
+        "        if v == 'FAIL': return subprocess.CompletedProcess(argv, 1, '', 'gh: HTTP 502')\n"
+        "        if v == 'RAW': return subprocess.CompletedProcess(argv, 0, '<html>', '')\n"
+        "        return subprocess.CompletedProcess(argv, 0, json.dumps(v), '')\n"
+        "    m.subprocess.run = fake\n"
+        "    return m.ci_state([], (), None, (), 'o/app', 'abc')[0]\n"
+        "D = 'repos/o/app/contents/.github/workflows'\n"
+        "L = [{'name': 'lint.yml'}, {'name': 'README.md'}]\n"
+        "out = [run_with({}),\n"
+        "  run_with({D + '?ref=abc': L, D + '/lint.yml?ref=abc': wf('on:\\n  push:\\n    branches: [main]\\n')}),\n"
+        "  run_with({D + '?ref=abc': L, D + '/lint.yml?ref=abc': wf('on:\\n  pull_request:\\n')}),\n"
+        "  run_with({D + '?ref=abc': L, D + '/lint.yml?ref=abc': wf('# on: pull_request\\non: push\\n')}),\n"
+        "  run_with({D + '?ref=abc': 'FAIL'}), run_with({D + '?ref=abc': 'RAW'}),\n"
+        "  run_with({D + '?ref=abc': L, D + '/lint.yml?ref=abc': 'FAIL'})]\n"
+        "m.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError('нет gh'))\n"
+        "out.append(m.ci_state([], (), None, (), 'o/app', 'abc')[0])\n"
+        "out.append(m.ci_state([], ())[0])\n"
+        "print(*out)\n" % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    check("ci_state без CI: нет каталога workflows — ok; только push — ok; pull_request — wait; триггер в комментарии — "
+          "ok; сбой gh, не-JSON, сбой чтения файла, gh не найден — wait; без repo/sha — wait как раньше",
+          r.stdout.split() == ["ok", "ok", "wait", "ok", "wait", "wait", "wait", "wait", "wait"], r.stdout + r.stderr)
+
+
 def test_ci_billing():
     """metis-0655: CI не запускался из-за лимита минут или оплаты (FAILURE с аннотацией лимита у красных
     обязательных) — проход засчитывает вместо CI запись тестов шлюза на SHA (она нужна и так) и сливает; окно

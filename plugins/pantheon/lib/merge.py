@@ -125,6 +125,7 @@ pass_env (PANTHEON_PYTHON — найденный тиком интерпрета
 включается. Остальной тик PANTHEON_STATE ещё берёт, а DYLD_* и прочее launchd-окружение доходит до интерпретатора
 тика: целиком это закрывает только запрет ролям launchctl setenv (metis-0298).
 """
+import base64
 import contextlib
 import hashlib
 import io
@@ -985,14 +986,59 @@ def ci_billing_fetch(repo, runs, required):
     return ci_billing(runs, required, notes, jobs)
 
 
-def ci_state(rollup, required=(), runs=None, optional=()):
+PR_TRIGGER_RE = re.compile(r"(?m)^[^#\n]*\bpull_request(_target)?\b")  # простая проверка текста; лишнее совпадение — wait
+
+
+def _gh_json(path):
+    """GET REST gh api path → (код, разобранный JSON или None); сбой gh, таймаут, не-JSON — (None, None)."""
+    try:
+        r = subprocess.run([gh_path(), "api", path], capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if r.returncode != 0:
+        return ("404" if "404" in (r.stderr or "") else None), None
+    try:
+        return "200", json.loads(r.stdout)
+    except ValueError:
+        return None, None
+
+
+def no_pr_workflows(repo, sha):
+    """True — на head sha у репозитория нет workflows, запускаемых на pull_request (metis-1207: проверок не появится);
+    False — есть или не определить (gh не ответил, ответ не разобран — сбой не пропускает). Каталог .github/workflows
+    через gh REST (GraphQL ролям закрыт): 404 — workflows нет; иначе каждый .yml/.yaml — текст и поиск триггера."""
+    code, listing = _gh_json(f"repos/{repo}/contents/.github/workflows?ref={sha}")
+    if code == "404":
+        return True
+    if code != "200" or not isinstance(listing, list):
+        return False
+    for item in listing:
+        name = str(item.get("name") or "") if isinstance(item, dict) else ""
+        if not name.lower().endswith((".yml", ".yaml")):
+            continue
+        code, body = _gh_json(f"repos/{repo}/contents/.github/workflows/{name}?ref={sha}")
+        if code != "200" or not isinstance(body, dict) or body.get("encoding") != "base64":
+            return False
+        try:
+            text = base64.b64decode(body.get("content") or "").decode("utf-8", "replace")
+        except ValueError:
+            return False
+        if PR_TRIGGER_RE.search(text):
+            return False
+    return True
+
+
+def ci_state(rollup, required=(), runs=None, optional=(), repo=None, sha=None):
     """(ok|wait|fail, текст, предупреждения о красных необязательных) по ci_verdict. Проверок нет — wait: они ещё не
-    встали; по 24 ч заявка всё равно гаснет. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait:
-    сбой gh не снимает заявку."""
+    встали; по 24 ч заявка всё равно гаснет. Исключение (metis-1207): repo и sha переданы, обязательных проверок нет, а
+    на sha нет workflows на pull_request (no_pr_workflows) — ok «CI нет у репозитория»: ждать нечего. Обязательные есть,
+    а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
     if required and runs is None:
         return "wait", "запуски Actions на head PR не получены", []
     state, why, notes = ci_verdict(rollup, required, runs, optional)
     if state == "empty":
+        if not required and repo and sha and no_pr_workflows(repo, sha):
+            return "ok", "CI нет у репозитория (workflows на pull_request не заведены)", notes
         return "wait", "проверок GitHub пока нет", notes
     if state == "ok":
         return "ok", f"CI ✓ ({len(rollup)})", notes
@@ -1301,7 +1347,7 @@ def gate(repo, pr, sha, view):
     latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
-    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
+    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo), repo, sha)
     # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
     warn = "".join(f"; {n}" for n in notes)
     state, why = billing_verdict(repo, sha, recs, runs, required, state, why, view.get("baseRefName"))
