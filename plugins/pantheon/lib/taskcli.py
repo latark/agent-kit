@@ -337,8 +337,8 @@ def task_cmd(rest):
     if not rest or rest[0] in READ_SUBS:
         return _task_cmd(rest)
     before = _cards_fp(T)
-    try:
-        return _task_cmd(rest)
+    try:  # task run — проход заметок чужих окон (lib/tasknote.py, metis-1187)
+        return P.task_note_run() if rest == ["run"] else _task_cmd(rest)
     finally:
         if _cards_fp(T) != before:
             P.refresh_kick()
@@ -476,7 +476,10 @@ def _task_cmd(rest):
             if note and T.note_stamp(note)[1]:  # metis-0868 п. 5: время записи ставит код, а не агент
                 print(f"предупреждение · время «{T.note_stamp(note)[1]}» в начале --note не записано: время строки "
                       "журнала ставит pantheon (часы системы)", file=sys.stderr)
-            p, head = T.task_set(P.PANTHEON, P.card_now(), tid, changes, note=note, body=new_body, force=force)
+            try:
+                p, head = T.task_set(P.PANTHEON, P.card_now(), tid, changes, note=note, body=new_body, force=force)
+            except PermissionError as e:  # папка чужого направления из окна роли — только заметка, заявкой (metis-1187)
+                return P.task_note_foreign(T, tid, changes, note, new_body, force, e)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
             if "owner" in changes and (os.environ.get("PANTHEON_SESSION") or "").strip():
                 # metis-0725: owner сменили из окна — строка цели по нему (передал другой сессии — «снята», взял — «остаётся»)
