@@ -4,7 +4,9 @@
 Временный git-репозиторий (корень — mkroot из _py311.py) с выдуманным плагином plugins/demo: main — база, ветка pr —
 правка. Случаи: PR только с тестами — пропуск; только с исходниками и документами — пропуск; новые тесты зелёные на
 базе — код 1 и строка «тест не ловит откат»; один упал на базе — код 0; новый тест с ImportError нового модуля — упал,
-код 0; помощник tests/_*.py берётся из HEAD; нет base — код 2; копия базы за собой убрана.
+код 0; помощник tests/_*.py берётся из HEAD; тест, который падает и на HEAD, — «не мерило», а не «ловит»;
+SKIP_NOT_MAC и QUARANTINE раннера — пропуск файла; среда без PANTHEON_*, HOME ≠ TMPDIR; таймаут (--timeout 2) — «упал»;
+внук с унаследованным stdout ожидание не держит; нет base — код 2; копии дерева за собой убраны.
 
 Запуск: python3 -I plugins/pantheon/tests/test_revert_check.py  (код выхода 0 — все прошли)
 """
@@ -13,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311, mkroot  # noqa: E402 — путь к помощнику ставится строкой выше (тесты идут с -I)
@@ -68,8 +71,8 @@ def make(name, pr_files):
     return repo
 
 
-def run(repo, *extra):
-    env = {"PATH": os.environ["PATH"], "HOME": ROOT, "TMPDIR": ROOT}
+def run(repo, *extra, env_add=None):
+    env = {"PATH": os.environ["PATH"], "HOME": ROOT, "TMPDIR": ROOT, **(env_add or {})}
     return subprocess.run([PY311, "-I", SCRIPT, "--base", "main", "--repo", repo, "--timeout", "60", *extra],
                           capture_output=True, text=True, env=env, timeout=300)
 
@@ -138,6 +141,69 @@ def t_caught():
           and "ModuleNotFoundError" in r.stdout, r.stdout + r.stderr)
 
 
+def t_notmeter():
+    # тест падает и на HEAD (среда, а не откат) — не мерило; других нет — пропуск, а не «откат ловят»
+    repo = make("notmeter", {"plugins/demo/lib.py": "def f():\n    return 2\n",
+                             "plugins/demo/tests/test_env_bad.py": DEMO_TEST.format(body="sys.exit(1)")})
+    r = run(repo)
+    check("(е) тест падает и на HEAD — «не мерило», итог «пропуск: мерила нет», код 0, без «откат ловят»",
+          r.returncode == 0 and "не мерило: падает и на HEAD — plugins/demo/tests/test_env_bad.py (код 1)" in r.stdout
+          and "упал на merge-base" not in r.stdout and "откат ловят" not in r.stdout
+          and last(r).startswith("пропуск: мерила нет"), r.stdout + r.stderr)
+    repo = make("notmeter-mix", {"plugins/demo/lib.py": LIB + "\n\ndef g():\n    return 3\n",
+                                 "plugins/demo/tests/test_env_bad.py": DEMO_TEST.format(body="sys.exit(1)"),
+                                 "plugins/demo/tests/test_green.py": DEMO_TEST.format(body="sys.exit(0)")})
+    r = run(repo)
+    check("(е) не мерило + зелёный на базе — код 1 «тест не ловит откат» только по мерилу",
+          r.returncode == 1 and last(r).startswith("тест не ловит откат: plugins/demo/tests/test_green.py зелёные"),
+          r.stdout + r.stderr)
+
+
+def t_runner_lists():
+    # SKIP_NOT_MAC (вне macOS) и QUARANTINE берутся из run-tests.py: их файлы — пропуск с причиной
+    repo = make("lists", {"plugins/pantheon/lib.py": "X = 1\n",
+                          "plugins/pantheon/tests/test_setup.py": "import sys\nsys.exit(1)\n",
+                          "plugins/pantheon/tests/test_outside_idle.py": "import sys\nsys.exit(1)\n"})
+    r = run(repo, env_add={"RUN_TESTS_PLATFORM": "linux"})
+    check("SKIP_NOT_MAC и QUARANTINE раннера — пропуск файла с причиной, итог «пропуск», код 0",
+          r.returncode == 0 and "пропуск файла: plugins/pantheon/tests/test_setup.py — нужен macOS" in r.stdout
+          and "пропуск файла: plugins/pantheon/tests/test_outside_idle.py — карантин раннера, задача metis-" in r.stdout
+          and "не мерило" not in r.stdout and last(r).startswith("пропуск: мерила нет"), r.stdout + r.stderr)
+
+
+def t_env():
+    # среда как у раннера: PANTHEON_* сняты, HOME и TMPDIR разные, NO_COLOR=1; утечка — тест падает и на HEAD
+    body = ("bad = [k for k in os.environ if k.startswith('PANTHEON_')]\n"
+            "if bad or os.environ['HOME'] == os.environ['TMPDIR'] or os.environ.get('NO_COLOR') != '1':\n"
+            "    print('среда:', bad); sys.exit(1)\nimport lib\nsys.exit(0 if lib.f() == 2 else 1)")
+    repo = make("env", {"plugins/demo/lib.py": "def f():\n    return 2\n",
+                        "plugins/demo/tests/test_env.py": DEMO_TEST.format(body=body)})
+    r = run(repo, env_add={"PANTHEON_HOST": "leak", "PANTHEON_LEAK": "1"})
+    check("PANTHEON_* сняты, HOME ≠ TMPDIR, NO_COLOR=1 — тест мерит и падает на базе, код 0",
+          r.returncode == 0 and "упал на merge-base: plugins/demo/tests/test_env.py (код 1)" in r.stdout
+          and "не мерило" not in r.stdout, r.stdout + r.stderr)
+
+
+def t_timeout():
+    # на базе файл висит — таймаут = «упал»; на HEAD f() == 2, проходит сразу
+    hang = DEMO_TEST.format(body="import lib, time\nif lib.f() == 1:\n    time.sleep(60)\nsys.exit(0)")
+    repo = make("hang", {"plugins/demo/lib.py": "def f():\n    return 2\n", "plugins/demo/tests/test_hang.py": hang})
+    t0 = time.monotonic()
+    r = run(repo, "--timeout", "2")
+    check("--timeout 2: зависший на базе тест — «упал на merge-base (таймаут)», код 0, без ожидания 60 с",
+          r.returncode == 0 and "упал на merge-base: plugins/demo/tests/test_hang.py (таймаут)" in r.stdout
+          and time.monotonic() - t0 < 40, r.stdout + r.stderr)
+    # внук с унаследованным stdout живёт 60 с, сам файл выходит с кодом 1: вывод в файл — ожидание не держится
+    kid = DEMO_TEST.format(body="import lib, subprocess\nif lib.f() == 1:\n    subprocess.Popen(['sleep', '60'])\n"
+                                "    sys.exit(1)\nsys.exit(0)")
+    repo = make("grandkid", {"plugins/demo/lib.py": "def f():\n    return 2\n", "plugins/demo/tests/test_kid.py": kid})
+    t0 = time.monotonic()
+    r = run(repo, "--timeout", "30")
+    check("внук держит stdout — итог «код 1», а не таймаут; ждёт меньше предела",
+          r.returncode == 0 and "упал на merge-base: plugins/demo/tests/test_kid.py (код 1)" in r.stdout
+          and time.monotonic() - t0 < 25, r.stdout + r.stderr)
+
+
 def t_error():
     repo = make("err", {"plugins/demo/lib.py": "def f():\n    return 2\n"})
     r = run(repo, "--base", "нет-такой-ветки")
@@ -147,7 +213,7 @@ def t_error():
 
 def main():
     try:
-        for t in (t_classify, t_skip, t_green, t_caught, t_error):
+        for t in (t_classify, t_skip, t_green, t_caught, t_notmeter, t_runner_lists, t_env, t_timeout, t_error):
             t()
     finally:
         shutil.rmtree(ROOT, ignore_errors=True)
