@@ -480,10 +480,12 @@
   нет, metis-1101): `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" <репозиторий> [флаги] -- <скрипт>`, где до
   `--` — только флаги обёртки `--always`, `--file-arg`, `--ok`, `--cmd-prefix=…`, `--plain=<папки>`, а скрипт — `bash .claude/hooks/<имя>`, `python3 -I .claude/hooks/<имя>` или
   `python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py"` (с аргументами); сервер MCP — только
-  `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- npx -y <пакет>@x.y.z …`: программа по пути, даже системная
-  (`/usr/bin/awk`), исполнила бы вне песочницы и то, что пишет окно. В `env` — без `PATH`, `NODE_*` и
+  `python3 -I ${PANTHEON_PACK_BIN}/env_from.py … -- npx -y <пакет>@x.y.z …` или `… -- ${HOME}/.local/bin/<имя> …`
+  с именем из `PACK_LOCAL_BINS` ядра (сейчас `mcp-grafana`; список, а не вся папка: `uvx`, `claude` и `pantheon`
+  оттуда запустили бы что угодно): программа по пути, даже системная (`/usr/bin/awk`), исполнила бы вне песочницы и
+  то, что пишет окно. В `env` — без `PATH`, `NODE_*` и
   подобных; удалённый — http, sse или ws без `headersHelper`; в `plugin.json` нет полей `hooks`, `mcpServers`,
-  `lspServers`. Нарушение в `mcp.json` — в окно не идёт только MCP пакета, хуки остаются; нарушение в плагине — ни
+  `lspServers`. Негодный сервер `mcp.json` в окно не идёт, остальные серверы и хуки — идут; нарушение в плагине — ни
   плагин, ни MCP (серверы без хуков пакета, вроде protect-db, не идут); window.json идёт всегда; строка в `alerts.md`
   (тревога `pack-bad-<направление>`). Общий код пакетов — `plugins/pantheon/packs/_bin`. Своё: создайте папку с
   именем направления из реестра и нужные файлы, образцы — `plugins/pantheon/tests/fixtures/packs`; следующий плановый

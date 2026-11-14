@@ -181,8 +181,10 @@ def auto_mode(auto_allow):
 # python3 -I ${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py (pack_hook_problem). Сервер MCP — только через env_from.py пакета, а
 # за его «--» — только npx -y <пакет>@x.y.z: программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
 # папки, которую окно пишет; http, sse и ws — без headersHelper. Поля plugin.json, которые сами запускают код мимо
-# hooks.json, запрещены. Нарушение в mcp.json — MCP пакета в окно не идёт, в плагине — ни плагин, ни MCP; строка в
-# alerts.md (pantheon.pack_admit).
+# hooks.json, запрещены. Бинарь из ${HOME}/.local/bin за «--» — только по имени из PACK_LOCAL_BINS (metis-1222, слово
+# владельца 15.11): окна в ~/.local не пишут, а список, а не вся папка, — потому что uvx, claude и pantheon оттуда
+# запустили бы вне песочницы что угодно. Негодный сервер mcp.json в окно не идёт, остальные идут (metis-1222); нарушение
+# в плагине — ни плагин, ни MCP; строка в alerts.md (pantheon.pack_admit).
 PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"
 PACK_HOOK_BIN = "${CLAUDE_PLUGIN_ROOT}/../_bin/"
 PACK_HOOK_LEAD = ["python3", "-I", PACK_HOOK_BIN + "in_repo.py"]
@@ -207,6 +209,10 @@ PACK_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 # переменные, которые меняют, что и откуда запустится, — не из пакета
 PACK_ENV_DENY = re.compile(r"PATH|HOME|TMPDIR|SHELL|ENV|BASH_ENV|ZDOTDIR|DYLD_.*|LD_.*|NODE_.*|NPM_CONFIG_.*|PYTHON.*"
                            r"|.*_PROXY|GUARD_.*|ANTHROPIC_.*|CLAUDE.*")
+# бинари ${HOME}/.local/bin, которые сервер пакета может запустить за «--» env_from.py: Go-сервер Grafana не ставится
+# через npx (окно proteus-morph, metis-1222)
+PACK_LOCAL_BINS = ("mcp-grafana",)
+PACK_LOCAL_RUN = {"${HOME}/.local/bin/" + b for b in PACK_LOCAL_BINS}
 NPX_PINNED = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+")
 
 
@@ -262,9 +268,16 @@ def pack_server_problem(s):
             or not all(isinstance(a, str) for a in args)):
         return f"не через env_from.py пакета (python3 -I {PACK_BIN_MARK}/env_from.py … -- <команда>): {s['command']} {args}"[:240]
     run = args[args.index("--") + 1:]
-    if run[:2] == ["npx", "-y"] and len(run) > 2 and NPX_PINNED.fullmatch(run[2]):
+    if (run[:2] == ["npx", "-y"] and len(run) > 2 and NPX_PINNED.fullmatch(run[2])) or (run[:1] and run[0] in PACK_LOCAL_RUN):
         return None
-    return f"за «--» — только `npx -y <пакет>@x.y.z`: {' '.join(run)[:160] or 'пусто'}"
+    return (f"за «--» — только `npx -y <пакет>@x.y.z` или ${{HOME}}/.local/bin/<{'|'.join(PACK_LOCAL_BINS)}>: "
+            f"{' '.join(run)[:160] or 'пусто'}")
+
+
+def pack_mcp_keep(mcp):
+    """Годные серверы разобранного mcp.json пакета → {имя: сервер} (негодные — pack_problems называет их)."""
+    servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+    return {n: s for n, s in servers.items() if pack_server_problem(s) is None} if isinstance(servers, dict) else {}
 
 
 def pack_hook_problem(cmd):
