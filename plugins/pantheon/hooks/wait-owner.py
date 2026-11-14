@@ -116,7 +116,8 @@ def question(ev):
     tool = flat(ev.get("tool_name"), 60) or "инструмент"
     ti = ev.get("tool_input") if isinstance(ev.get("tool_input"), dict) else {}
     raw = ti.get("command") or ti.get("file_path") or ti.get("path") or ti.get("url")
-    cmd = quoted(raw, CMD_MAX) if raw else "поля: " + (", ".join(sorted(ti))[:CMD_MAX] if ti else "нет")
+    keys = sorted(k for k in map(str, ti) if re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", k))   # имена полей — не текст роли
+    cmd = quoted(raw, CMD_MAX) if raw else "поля: " + (", ".join(keys)[:CMD_MAX] or "нет")
     why = quoted(ti.get("description") or ti.get("prompt"), WHY_MAX) or "окно не сказало"
     return f"{quoted(tool, 60)}: {cmd}. Зачем: {why}. Совет: {advice(tool + ' ' + str(raw or ''))}"
 
