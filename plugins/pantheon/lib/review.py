@@ -626,7 +626,14 @@ def _gate_tests_cmd(cmd, M):
             i = words.index("--base")
             del words[i:i + 2]
     line = shlex.join(words)
-    return any(M.full_tests_record(name, {"cmd": line}) for name in M.FULL_TESTS)
+    # записи по короткому имени (agent-kit) — по ключам таблицы; по хешу owner/name (metis-1116) ключ именем не служит,
+    # поэтому ещё remote текущего репозитория (Д1 argus #479)
+    names = [n for n in M.FULL_TESTS if not n.startswith("sha256:")]
+    try:
+        names += P.outside_mod().remotes(os.getcwd())
+    except Exception:   # noqa: BLE001 — без git/remote остаются короткие имена
+        pass
+    return any(M.full_tests_record(name, {"cmd": line}) for name in names)
 
 
 def _review_test_run(cmd, M=None):

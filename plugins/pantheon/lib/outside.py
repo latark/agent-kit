@@ -3037,7 +3037,8 @@ def lane_of(req, window, rid):
         d, _roots = resolve_dir(req["dir"], window)
         if d is None:
             return "quick"          # не запоминается: папка может появиться в реестре позже (ревью argus #427)
-        full = any(str(r).rsplit("/", 1)[-1] in P.merge_mod().FULL_TESTS for r in remotes(d))
+        M = P.merge_mod()
+        full = any(M.repo_entry(M.FULL_TESTS, r) for r in remotes(d))
         _LANE_MEMO[key] = "full" if full else "quick"
     return _LANE_MEMO[key]
 

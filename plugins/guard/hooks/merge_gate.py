@@ -77,7 +77,7 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR. У репозитория из REQUIRED_CHECKS (agent-kit: tests/affected на PR в main, check-traces/traces —
-   metis-0633) обязательны эти имена, и закрывает их только запуск Actions от pull_request на этом SHA с SUCCESS
+   metis-0633; приватные проекты владельца — по ключу sha256 owner/name, metis-1116) обязательны эти имена, и закрывает их только запуск Actions от pull_request на этом SHA с SUCCESS
    (два GET REST, _ci_runs): нет такого — отказ «ещё не встали», SKIPPED или красная — отказ, дубль — худший итог;
    красная необязательная — пропуск со строкой systemMessage (предупреждение едет возвратом Allow до guard_rules.main,
    а не списком модуля — metis-0650). PR из форка (isCrossRepository): pull_requests у его запусков пуст, поэтому
@@ -1595,7 +1595,7 @@ def _ui_problem(policy, name, sha, view, files):
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
-# optional_checks; narrow_tests_record, narrow_map_path — metis-1050), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
+# optional_checks, repo_entry — metis-1116; narrow_tests_record, narrow_map_path — metis-1050), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
 # CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
 # test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -1613,7 +1613,11 @@ CI_NONE = "проверки GitHub не получены"
 # красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
 # внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
 # (SUCCESS/NEUTRAL/SKIPPED).
-REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None)),
+                   # приватный проект владельца (metis-1116): ключ — sha256 owner/name, job checks на PR в develop и main
+                   # (ветки эпиков — без требования: их workflow может ещё не быть, PR ждал бы вечно — argus #479)
+                   "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
+                       ("tests", "checks", "develop"), ("tests", "checks", "main"))}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate_ci по файлам .github/workflows
@@ -1645,7 +1649,9 @@ CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
 # `pantheon review test --`. Засчитывается только запись с этой командой (full_tests_record); нет строки — запасного
 # пути у репозитория нет, отказ
 FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
-                            "plugins/pantheon plugins/project-tools")}
+                            "plugins/pantheon plugins/project-tools"),
+              # приватный проект владельца (metis-1116), ключ — sha256 owner/name
+              "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check"}
 
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
@@ -1658,14 +1664,29 @@ NARROW_TESTS = {"agent-kit": ("python3.14 -I plugins/pantheon/scripts/run-tests.
 
 def narrow_hint(repo):
     """Строка отказа «нет записи тестов» с узкой командой репозитория из NARROW_TESTS; нет строки — пусто."""
-    cmd = NARROW_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    cmd = repo_entry(NARROW_TESTS, repo)
     return (f" Узкая запись (затронутые тесты, своя worktree, без heavy): `pantheon review test -- {cmd}`." if cmd
             else "")
 
 
+def repo_entry(table, repo, default=None):
+    """Запись таблицы шлюза (REQUIRED_CHECKS, OPTIONAL_CHECKS, FULL_TESTS, NARROW_TESTS) для repo (metis-1116):
+    сначала ключ «sha256:<hex>» от полного `owner/name` в нижнем регистре (приватные репозитории владельца: их имён в
+    публичном коде нет, проверка личных следов), потом короткое имя без владельца (agent-kit, как раньше). Репозиторий
+    с тем же коротким именем у другого владельца хеш приватного не даёт, а короткое имя вида «sha256:…» по таблице не
+    ищется — ключ-хеш находит только полный `owner/name`."""
+    full = str(repo or "").lower()
+    if "/" in full:
+        key = "sha256:" + hashlib.sha256(full.encode()).hexdigest()
+        if key in table:
+            return table[key]
+    short = full.rsplit("/", 1)[-1]
+    return default if short.startswith("sha256:") else table.get(short, default)
+
+
 def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
-    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    got = repo_entry(REQUIRED_CHECKS, repo, ())
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
 
 
@@ -1682,7 +1703,7 @@ def ci_fork(view):
 
 def optional_checks(repo):
     """Необязательные (workflow, job) repo (owner/name) из OPTIONAL_CHECKS: их красная — только предупреждение."""
-    return tuple((w, j) for w, j, _ in OPTIONAL_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ()))
+    return tuple((w, j) for w, j, _ in repo_entry(OPTIONAL_CHECKS, repo, ()))
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
@@ -1776,7 +1797,7 @@ def full_tests_record(repo, rec):
     outside test` — саму команду; `heavy` впереди не важен — проход ставит его сам. Комментарий — как в bash, только
     «#» в начале слова (после пробела): хвост ` # …` снимается, а `слово#…` — часть слова, и команда уже другая.
     Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
-    want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    want = repo_entry(FULL_TESTS, repo)
     cmd = rec.get("cmd") if isinstance(rec, dict) else None
     if not want or not isinstance(cmd, str):
         return False
@@ -1828,7 +1849,7 @@ def narrow_tests_record(repo, rec):
 def narrow_map_path(repo):
     """Путь карты affected-map.json от корня — рядом с run-tests.py команды FULL_TESTS репозитория; нет — None."""
     try:
-        words = shlex.split(FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()) or "")
+        words = shlex.split(repo_entry(FULL_TESTS, repo) or "")
     except ValueError:
         return None
     script = next((w for w in words if posixpath.basename(w) == "run-tests.py"), None)
@@ -2098,7 +2119,7 @@ def _billing_problem(repo, pr, sha, narrow=None, base_oid=None):
     читается или у репозитория нет FULL_TESTS — отказ (с командой записи, если она известна). Возврат, как у
     _ci_problem, — (текст отказа или None, предупреждения пропуска)."""
     where = f"{repo}#{pr}@{sha[:12]}"
-    cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower())
+    cmd = repo_entry(FULL_TESTS, repo)
     if not cmd:
         return (f"CI на {where} не запускался (лимит минут или оплата GitHub Actions), а запасного пути у репозитория "
                 "нет: команды полного набора в FULL_TESTS (merge_gate.py) для него нет — подними лимит в GitHub "
