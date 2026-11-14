@@ -2984,6 +2984,14 @@ GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/
 # Копии .claude/worktrees/* открыты: «настрой проект» (project-tools apply) идёт там → PR → ревью → слияние → git pull
 # (metis-1221, решение владельца 15.11 «Да, корень + PR», «и .mcp.json тоже»). Остаток — README guard
 ROOT_SETTINGS = ("/.claude/settings.json", "/.claude/settings.local.json", "/.mcp.json")
+# Корень — и подпапки первого уровня (долги argus #483, metis-1221 п. 5): мастерская стартует в workshop_dir()/<задача>
+# (direction_target), а вложенные проекты (nested_projects — ровно один уровень вниз, вроде app/) владелец
+# открывает сессией без песочницы. «*» в песочнице macOS — одно звено без «/» (README sandbox-runtime, Path Syntax):
+# копии <папка>/.claude/worktrees/<x>/ (три звена) и <задача>/.claude/worktrees/<x>/ остаются открыты
+ROOT_LEVELS = ("", "/*")
+# .claude/skills и .claude/commands (хуки в шапке навыка запускаются вне песочницы) — там же, но только окнам без
+# own_agents: окно направления правит навыки и команды своего проекта (metis-0841, guard OWN_ITEMS) — остаток README guard
+ROOT_ITEMS = ("/.claude/skills", "/.claude/commands")
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
@@ -3002,7 +3010,9 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     agents = ("/.claude/agents", "/**/.claude/agents")
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
-        () if own_agents and r in folders else agents)] + [f"{r}{sub}" for r in folders for sub in ROOT_SETTINGS]
+        () if own_agents and r in folders else agents)] + [
+        f"{r}{lv}{sub}" for r in folders for lv in ROOT_LEVELS
+        for sub in ROOT_SETTINGS + (() if own_agents else ROOT_ITEMS)]
     deny_write += _deny_forms([HOOKD_HOME])
     # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
     deny_write += tmp_deny_write(allow, tmp_own)
