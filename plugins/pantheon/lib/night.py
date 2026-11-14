@@ -1450,7 +1450,7 @@ def report_lines(t=None):
     out.append(f"Сброс недели: {when(m['resets'])} (через {hours:.0f} ч)" if m["resets"] else "Сброс недели: неизвестен")
     with contextlib.suppress(Exception):  # замер ММВ не должен ронять сводку
         out.append(P.mmv_mod().line(P.STATE, t=t))
-    out.append(P.mmv_mod().actions_line(t))  # сама не бросает: сбой даёт «нет данных»
+    with contextlib.suppress(Exception): out.append(P.mmv_mod().actions_line(t))  # отдельно: сбой не убирает ММВ
     out.append(snap_line(m, cfg) + (" — снимок старше 3 ч, строка статуса не пишет?" if m["stale"] else ""))
     return out
 

@@ -173,7 +173,7 @@ ACTIONS_NONE = "минуты Actions: нет данных"
 ACTIONS_MULT = (("macos", 10), ("windows", 2))
 
 
-def _gh_json(args, timeout=20):
+def _gh_json(args, timeout=10):
     """`gh <args>` → разобранный JSON; gh нет, сбой, таймаут, код не 0 и не-JSON — None (metis-1116)."""
     exe = os.environ.get("PANTHEON_GH") or shutil.which("gh")
     if not exe:
@@ -185,7 +185,7 @@ def _gh_json(args, timeout=20):
         return None
 
 
-def _gh_usage(user, year, month, timeout=20):
+def _gh_usage(user, year, month, timeout=10):
     """Ответ billing usage: `gh api /users/<user>/settings/billing/usage?year=&month=`. Старый `.../billing/actions`
     GitHub отключил (410) — его не вызываем."""
     return _gh_json(["api", f"/users/{user}/settings/billing/usage?year={year}&month={month}"], timeout)
@@ -200,7 +200,7 @@ def _gh_user():
     if not exe:
         return None
     try:
-        r = subprocess.run([exe, "api", "user", "-q", ".login"], capture_output=True, text=True, timeout=20,
+        r = subprocess.run([exe, "api", "user", "-q", ".login"], capture_output=True, text=True, timeout=10,
                            stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
