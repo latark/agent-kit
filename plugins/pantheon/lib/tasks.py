@@ -1748,7 +1748,7 @@ def work_links(head, body, idx, repos):
             if x.get("sha"):
                 add_commit(x["repo"], x["sha"][:7])
     rel = str(head.get("release") or "")
-    lines = [(rel, True)] + [(x[2], False) for x in _journal(body)]
+    lines = [(rel, True)] + [(x[2], False) for x in _journal(body) if not x[1].startswith("агент (окно")]  # metis-1187
     for text, is_rel in lines:
         found = []
         for m in _PR_EXPLICIT.finditer(text):
