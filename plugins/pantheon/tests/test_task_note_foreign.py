@@ -19,8 +19,13 @@
   [ссылки]  «PR 12 (owner/repo) слит», github.com/owner/repo/pull/N, owner/repo#N в заметке — не PR ни для work_links,
             ни для autoclose.JOURNAL_PR_RE и metrics.MERGED_RE; work_links пропускает строки «агент (окно …)»
             (мутант tasks.py — отдельной загрузкой);
-  [тик]     owner_edit_kick зовёт `task run` только при заявке.
-Мутанты — внутри теста: tasknote.py с подменённой строкой загружается заново, и у каждого свой случай краснеет.
+  [тик]     owner_edit_kick зовёт `task run` при заявке и не зовёт без неё;
+  [сбой]    не ValueError из task_set — .taking не висит; .taking прошлого прохода — записан один раз, а если строка уже
+            в карточке — снят без повтора; папка *.req.json — пустая убрана, с содержимым — тревога, pending() False;
+            имя файла в журнале — только [a-z0-9.-];
+  [загрузка] P, поставленный pantheon._attach до exec, не затёрт (настоящий _attach и install()).
+Мутанты — внутри теста: tasknote.py с подменённой строкой загружается заново; мутант убит, только если покраснел
+именно названный случай (упавший сценарий засчитывает лишь случаи, дошедшие до проверки).
 """
 import atexit
 import contextlib
@@ -150,13 +155,15 @@ def run_pass():
     return cli("task", "run")
 
 
-def scenario():
-    """→ {случай: прошёл}. Каждый прогон — на своих карточках, очередь и журнал — пустые."""
+def scenario(res):
+    """res ← {случай: (прошёл, подробности)}; упавший сценарий оставляет в res то, что успел. Каждый прогон — на своих
+    карточках, очередь и журнал — пустые."""
     for d in (QDIR, os.path.join(STATE, "logs")):
         shutil.rmtree(d, ignore_errors=True)
     os.environ.pop("CLAUDECODE", None)
     os.environ.pop("PANTHEON_DRYRUN", None)
-    res = {}
+    res["загрузка: P, поставленный загрузчиком до exec, не затёрт"] = (
+        P.task_note_clean.__globals__.get("P") is not None, "")
     sys_tid, sys_p = new_task("metis-pantheon", "Системная")
     own_tid, own_p = new_task("athena-shop", "Своя")
     before = read(sys_p)
@@ -194,6 +201,13 @@ def scenario():
     rc, out, err = run_pass()
     card = read(sys_p)
     lines = card.split("\n")
+    os.environ["PANTHEON_DRYRUN"] = "1"
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(dry)
+    P.owner_edit_kick()
+    os.environ.pop("PANTHEON_DRYRUN")
+    res["тик: заявок нет — task-note-run не зовёт"] = (
+        not reqs() and not (os.path.exists(dry) and "task-note-run" in read(dry)), reqs())
     res["проход: строка «агент (окно athena-shop): заметка из чужого окна», заявок нет, итог done"] = (
         rc == 0 and "— агент (окно athena-shop): заметка из чужого окна: «проверила у себя, работает»" in card
         and not reqs() and [r["state"] for r in jlog()].count("done") == 3, (rc, err, card[-900:], jlog()))
@@ -299,10 +313,56 @@ def links_tail(res, sys_tid, sys_p):
     finally:
         os.unlink(QDIR)
         shutil.rmtree(victim)
+    return recover_tail(res, sys_tid, sys_p)
+
+
+def recover_tail(res, sys_tid, sys_p):
+    """Сбой после .taking, .taking прошлого прохода, не файлы в очереди, имя файла в журнале."""
+    real_set = T.task_set
+
+    def boom(*a, **k):
+        raise RuntimeError("сбой записи карточки")
+    T.task_set = boom
+    try:
+        rid = forge(sys_tid, "после сбоя")
+        rc, _, _ = run_pass()
+    finally:
+        T.task_set = real_set
+    res["проход: не ValueError из task_set — .taking не висит, заявка снова в очереди, код 1"] = (
+        rc == 1 and reqs() == [f"{rid}.req.json"] and not any(n.endswith(".taking") for n in os.listdir(QDIR)),
+        (rc, os.listdir(QDIR)))
+    os.rename(os.path.join(QDIR, f"{rid}.req.json"), os.path.join(QDIR, f"{rid}.taking"))
+    run_pass()
+    card = read(sys_p)
+    res["проход: .taking прошлого прохода — подобран и записан один раз"] = (
+        card.count("«после сбоя»") == 1 and not os.listdir(QDIR), (os.listdir(QDIR), card[-400:]))
+    forge(sys_tid, "после сбоя")  # строка уже в карточке: .taking от прохода, упавшего после записи
+    for n in reqs():
+        os.rename(os.path.join(QDIR, n), os.path.join(QDIR, n[:-len(".req.json")] + ".taking"))
+    run_pass()
+    res["проход: .taking, чья строка уже в карточке, — снят без повтора"] = (
+        read(sys_p).count("«после сбоя»") == 1 and not os.listdir(QDIR), os.listdir(QDIR))
+
+    os.makedirs(os.path.join(QDIR, "tn-20261114-120000-aaaaaa.req.json"))
+    os.makedirs(os.path.join(QDIR, "tn-20261114-120000-bbbbbb.req.json", "x"))
+    with open(os.path.join(QDIR, "Bad$Name.req.json"), "w") as fh:
+        fh.write("{")
+    pend = P.task_note_pending()
+    rc, _, err = run_pass()
+    left = sorted(os.listdir(QDIR))
+    mark = P.once_path("task-note-junk-athena-shop")
+    res["очередь: папка *.req.json — не заявка: пустая убрана, с содержимым — одна тревога, код 0"] = (
+        rc == 0 and left == ["tn-20261114-120000-bbbbbb.req.json"] and os.path.exists(mark)
+        and P.task_note_pending() is False, (rc, err, left, pend))
+    res["журнал: имя файла заявки — только [a-z0-9.-]"] = (
+        any(r.get("file") == "_ad__ame.req.json" for r in jlog()) and not any("$" in str(r.get("file")) for r in jlog()),
+        [r.get("file") for r in jlog()])
+    shutil.rmtree(QDIR)
     return res
 
 
 # Мутант → случай, который обязан покраснеть.
+JUNK = "очередь: папка *.req.json — не заявка: пустая убрана, с содержимым — одна тревога, код 0"
 MUTANTS = [
     ("if extra or not (note or \"\").strip():", "if not (note or \"\").strip():",
      "поля: status=review из чужого окна — отказ, код 1, ничего не записано"),
@@ -323,13 +383,26 @@ MUTANTS = [
     ("if _reqs(dfd):", "if False:", "тик: есть заявка — зовёт проход task-note"),
     ('min(req["created"], st.st_mtime, st.st_ctime)', 'req["created"]',
      "проход: файл старше суток, created свежий — снята по времени файла"),
-    ('and req["created"] <= P.now() + SKEW and name ==', "and name ==",
+    ('and req["created"] <= P.now() + SKEW and name in', "and name in",
      "проход: created в будущем — заявка не по образцу, снята, в карточку не попала"),
     ("os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd", "os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd",
      "проход: task-note окна — ссылка, по ней не идёт"),
     ('.replace("/", "∕")', "", "текст: «PR 12 (owner/repo) слит» и github.com/…/pull/N — не PR ни для одного разбора"),
     ("s = PR_WORD.sub(", "s = s or PR_WORD.sub(",
      "текст: «PR 12 (owner/repo) слит» и github.com/…/pull/N — не PR ни для одного разбора"),
+    ("__all__ = [", "P = None\n__all__ = [", "загрузка: P, поставленный загрузчиком до exec, не затёрт"),
+    ("                os.close(dfd)\n    return False", "                os.close(dfd)\n    return True",
+     "тик: заявок нет — task-note-run не зовёт"),
+    ('for fn, suffix in ((_recover, ".taking"), (_process, ".req.json")):',
+     'for fn, suffix in ((_process, ".req.json"),):', "проход: .taking прошлого прохода — подобран и записан один раз"),
+    ("if card and _line(T, win, req) in card[2]:", "if False:",
+     "проход: .taking, чья строка уже в карточке, — снят без повтора"),
+    ("_recover(T, win, dfd, take)        # его", "None        # его",
+     "проход: не ValueError из task_set — .taking не висит, заявка снова в очереди, код 1"),
+    ("(os.rmdir if stat.S_ISDIR(mode) else os.unlink)(n, dir_fd=dfd)", "raise OSError", JUNK),
+    ("if stat.S_ISREG(mode)]", "]", JUNK),
+    ('return re.sub(r"[^a-z0-9.-]", "_", str(name))[:80]', "return str(name)",
+     "журнал: имя файла заявки — только [a-z0-9.-]"),
 ]
 TASKS_PY = os.path.join(PLUGIN, "lib", "tasks.py")
 TASKS_FILTER = ' if not x[1].startswith("агент (окно")]'
@@ -350,20 +423,27 @@ def tasks_filter_mutant():
 
 
 def main():
+    check("загрузка через pantheon._attach: у функций tasknote P не None",
+          P.task_note_run.__globals__.get("P") is not None, "")
     install(SRC)
-    for name, (ok, detail) in scenario().items():
+    res = {}
+    scenario(res)
+    for name, (ok, detail) in res.items():
         check(name, ok, detail)
     for old, new, case in MUTANTS:
         if SRC.count(old) != 1:
             check(f"мутант «{old[:50]}»: строка в tasknote.py одна", False, SRC.count(old))
             continue
         install(SRC.replace(old, new))
+        res, why = {}, ""
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             try:
-                got = scenario().get(case, (True, ""))[0]
-            except Exception as e:  # noqa: BLE001 — мутант уронил сценарий: тоже убит
-                got = f"упал: {type(e).__name__}"
-        check(f"мутант «{new[:50] or 'убрано ' + old[:40]}» убит случаем «{case[:60]}»", got is not True, got)
+                scenario(res)
+            except Exception as e:  # noqa: BLE001 — сценарий упал: в счёт только случаи, дошедшие до проверки
+                why = f"сценарий упал: {type(e).__name__}: {e}"
+        killed = case in res and not res[case][0]  # убит, только если покраснел именно названный случай
+        check(f"мутант «{new[:50] or 'убрано ' + old[:40]}» убит случаем «{case[:60]}»", killed,
+              why or ("случай не дошёл" if case not in res else res[case][0]))
     install(SRC)
     got = tasks_filter_mutant()
     check("мутант «tasks.work_links без фильтра строк окна» убит: строка окна снова даёт PR", got is True, got)
