@@ -492,8 +492,46 @@ def test_named():
         check("1193: named_items — «пункты 1, 2 и 4 X», регистр, повтор задачи сливает номера",
               A.named_items("Пункты 1, 2 и 4 metis-0001; пункт 7 metis-0001; пункт metis-0002") == {"metis-0001": {1, 2, 4, 7}},
               A.named_items("Пункты 1, 2 и 4 metis-0001; пункт 7 metis-0001; пункт metis-0002"))
+        got = A.named_items("пункты 1, 2, и 4 metis-0001\nпункт 3 задачи metis-0002")
+        check("1193: named_items — «пункты 1, 2, и 4 X» и «пункт 3 задачи X»",
+              got == {"metis-0001": {1, 2, 4}, "metis-0002": {3}}, got)
     finally:
         shutil.rmtree(tmp, True)
+
+
+def test_named_filters():
+    """metis-1193: tick_named с подставным T — фильтр type != task и сбой T.criteria_tick внутри."""
+    import autoclose as A
+
+    class FakeT:
+        WORK_TYPES = ("task", "story")
+
+        def __init__(self, tasks, boom=False):
+            self.tasks, self.boom, self.ticked = tasks, boom, []
+
+        def load_tasks(self, pantheon, types):
+            return self.tasks
+
+        def criteria_tick(self, pantheon, t, tid, want, actor, note):
+            if self.boom:
+                raise OSError("диск")
+            self.ticked.append((tid, dict(want)))
+            return sorted(want)
+
+    head = lambda typ: {"type": typ, "direction": "metis-pantheon", "status": "review"}  # noqa: E731
+    acc = lambda repo, pr: {"metis-0041": {1: A1}, "metis-0042": {1: A1}}  # noqa: E731
+    pr = dict(mpr(41, "пункт 1 metis-0041\nпункт 1 metis-0042", H1), head=H1)
+    ft = FakeT({"metis-0041": ("/x/41.md", head("story"), ""), "metis-0042": ("/x/42.md", head("task"), "")})
+    log, errors = [], {}
+    ok = A.tick_named("/x", T0, "latark/agent-kit", pr, {"metis-pantheon"}, set(), ft, acc, log, errors)
+    check("1193: tick_named — story (type не task) не отмечается, task — отмечается",
+          ok and ft.ticked == [("metis-0042", {1: A1})], (ok, ft.ticked, errors))
+    ft = FakeT({"metis-0042": ("/x/42.md", head("task"), "")}, boom=True)
+    log, errors = [], {}
+    ok = A.tick_named("/x", T0, "latark/agent-kit", pr, {"metis-pantheon"}, set(), ft, acc, log, errors)
+    check("1193: сбой T.criteria_tick в tick_named — False, ошибка с задачей и типом в errors, строки прохода нет",
+          ok is False and "metis-0042" in errors.get("latark/agent-kit#41", "")
+          and "OSError: диск" in errors.get("latark/agent-kit#41", "") and not log, (ok, errors, log))
 
 
 def main():
@@ -504,6 +542,7 @@ def main():
     test_autoclose()
     test_tick_failure()
     test_named()
+    test_named_filters()
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1
 

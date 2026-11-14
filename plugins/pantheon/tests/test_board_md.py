@@ -130,6 +130,10 @@ txt = "\n".join(B.lines({"week": 1, "merged_open": [("metis-0001", 101, 2, "revi
 check("1193. строка сводки со списком неотмеченных пунктов: «неотмечено 2 (пункты 1, 3)»; без номеров — без скобок",
       "- metis-0001: PR #101 слит 2 дн. назад, задача review, неотмечено 2 (пункты 1, 3)" in txt
       and "- metis-0002: PR #102 слит 2 дн. назад, задача review, неотмечено 1\n" in txt + "\n", txt)
+txt = "\n".join(B.lines({"week": 1, "merged_open": [("metis-0001", 101, 2, "review", 12, tuple(range(1, 13)))]}))
+check("1193. номеров больше MAX_ITEMS — первые MAX_ITEMS и «…»",
+      f"неотмечено 12 (пункты {', '.join(map(str, range(1, B.MAX_ITEMS + 1)))} …)" in txt
+      and f", {B.MAX_ITEMS + 1}" not in txt, txt)
 txt = "\n".join(B.lines({"week": 1, "merged_open": [("metis-0001", 101, 2, "review", 1, ("1; rm",)),
                                                        ("metis-0002", 102, 2, "review", 1, (True,)),
                                                        ("metis-0003", 103, 2, "review", 1, "1")]}))

@@ -138,7 +138,7 @@ def test_unit():
     check("find_ids: ветка и тело, без повторов, порядок",
           A.find_ids("metis-0001-fix", "Закрывает metis-0001 и demo-0002") == ["metis-0001", "demo-0002"])
     check("is_part: «часть <id>», «часть <номер>», «часть задачи <id>», «часть: <id>» — да; «участь», «частью» — нет",
-          A.is_part("Это часть metis-0002") and A.is_part("Часть 1051") and A.is_part("часть задачи metis-0050")
+          A.is_part("Это часть metis-0002") and A.is_part("Часть №1051") and A.is_part("часть задачи 1051") and A.is_part("часть задачи metis-0050")
           and A.is_part("часть: metis-1051") and not A.is_part("участь metis-0002") and not A.is_part("целиком"))
     check("is_part (metis-1193, #441): слово «часть» без номера рядом — нет: «личная часть карты», «часть 1 из 2», "
           "«часть-пусто», «часть» в конце",
@@ -147,8 +147,10 @@ def test_unit():
     for form in ("**часть** metis-1051", "часть (metis-1051)", "часть `metis-1051`", "часть №1051", "часть № 1051",
                  "часть #1051", "_часть_ metis-1051", "часть [metis-1051]", "часть работы metis-1051"):
         check(f"is_part (metis-1193): разметка или одно слово между «часть» и номером — да: {form!r}", A.is_part(form))
-    for form in ("часть большой работы metis-1051", "часть карты, metis-1051", "участь metis-1051", "частьmetis-1051"):
-        check(f"is_part (metis-1193): два слова, запятая или «часть» внутри слова — нет: {form!r}", not A.is_part(form))
+    for form in ("часть большой работы metis-1051", "часть карты, metis-1051", "участь metis-1051", "частьmetis-1051",
+                 "часть 100 строк", "часть 2026 года", "часть 1051", "часть работы 1051"):
+        check(f"is_part (metis-1193): два слова, запятая, «часть» внутри слова, голое число — нет: {form!r}",
+              not A.is_part(form))
     diff = ("diff --git a/plugins/pantheon/.claude-plugin/plugin.json b/plugins/pantheon/.claude-plugin/plugin.json\n"
             '-  "version": "0.11.49",\n+  "version": "0.11.50",\ndiff --git a/x.json b/x.json\n+  "version": "9"\n')
     check("plugin_versions: версия из plugin.json, чужой json не берётся", A.plugin_versions(diff) == {"pantheon": "0.11.50"})
@@ -927,7 +929,7 @@ def test_close_criteria():
         pc = put(home, "metis-pantheon", "metis-0012", body="Готово, когда:\n- [x] а\n- [x] б\n", created="2026-10-27")
         pd = put(home, "metis-pantheon", "metis-0013", body=two, created="2026-10-27")
         prs = [cpr(1, "metis-0010-x", "", T0 - 3600), cpr(2, "metis-0011-x", "", T0 - 3600),
-               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть 0013", T0 - 3600)]
+               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть metis-0013", T0 - 3600)]
         log, errs = run_cache(home, state, T0, {"latark/agent-kit": prs})
         ha = T.read(pa)[0]
         check("0421: PR без «часть», 1 из 2 пунктов → review, не done", ha.get("status") == "review" and not ha.get("closed"), str(ha))
