@@ -27,7 +27,7 @@ __all__ = [
     "capacity_probe", "capacity_log", "NO_WORD_WHY", "START_REQ", "START_REQ_KEYS", "start_request", "start_order", "cancel_request", "run_closed",
     "take_start_requests", "resume_request", "hestia_request", "REQ_FRESH",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
-    "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake", "AGENTS_SILENT", "start_agents",
+    "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake", "AGENTS_SILENT", "start_agents", "launch_snapshot",
 ]
 
 
@@ -922,6 +922,19 @@ def start_agents(dry):
     return agents, 0, None if agents is not None else AGENTS_SILENT
 
 
+def launch_snapshot(name, role, window, origin, extra_env, run, win, cmd):
+    """(id сессий до `claude --bg`, строка отказа или None) — прямо перед запуском: файл запуска окна на месте (окно
+    пропало после проверки — прежний файл не берём) и свежий claude agents. Он не ответил (не JSON, таймаут, незапуск)
+    — отказ, как в начале запуска (metis-1192): с пустым снимком check_new_name счёл бы новыми и прежние сессии
+    с этим именем. Снимок свежий, а не первый список: между ними копии останавливались и ждали имя."""
+    if P.run_settings(name, role, window, origin, extra_env) != run:
+        return None, f"pantheon start: нет окна {win.replace(P.HOME, '~')} — pantheon domains build"
+    agents, _, why = start_agents(True)
+    if why:
+        return None, f"{cmd}: отказ — {why}"
+    return {a.get("id") for a in agents if a.get("id")}, None
+
+
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
                    cmd="pantheon start", extra_env=None, again=None, over_cap=False, race_skip=False):
     agents, code, why = start_agents(dry)
@@ -987,10 +1000,10 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    if P.run_settings(name, role, window, origin, extra_env) != run:  # окно пропало после проверки — прежний файл запуска не берём
-        print(f"pantheon start: нет окна {win.replace(P.HOME, '~')} — pantheon domains build", file=sys.stderr)
+    before, why = launch_snapshot(name, role, window, origin, extra_env, run, win, cmd)
+    if why:
+        print(why, file=sys.stderr)
         return 1
-    before = {a.get("id") for a in P.agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
     P.start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     sys.stdout.write(r.stdout)

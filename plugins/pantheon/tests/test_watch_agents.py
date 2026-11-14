@@ -50,6 +50,16 @@ def test_start_agents_not_json_refuses_1192():
     check(r.returncode != 0 and "Traceback" not in r.stderr
           and _last(r).startswith(f"pantheon start: отказ — {SILENT} (не запустился:"),
           f"1192: start при незапуске claude agents: код {r.returncode} {r.stderr[-400:]!r}")
+    # первый вызов отвечает, второй (снимок перед claude --bg, launch_snapshot) — не JSON или таймаут: окна нет, трассы нет
+    for how in ("не JSON", "таймаут"):
+        e = Env()
+        e.direction("sa-dir")
+        extra = (_not_json(e) if how == "не JSON"
+                 else {"FAKE_AGENTS_SLOW_NEXT": os.path.join(e.tmp, "agents-slow"), "PANTHEON_AGENTS_TIMEOUT": "0.3"})
+        r = e.run("start", "sa-dir", "--from", "owner", "задание", t=T0, extra=extra)
+        want = f"pantheon start: отказ — {SILENT}" + (" за 0.3 с" if how == "таймаут" else "")
+        check(r.returncode != 0 and not _bgs(e) and "Traceback" not in r.stderr and _last(r) == want,
+              f"1192: start, второй вызов claude agents ({how}): код {r.returncode}, {_bgs(e)} {r.stderr[-400:]!r}")
 
 
 def test_autostart_agents_not_json_refuses_1192():
