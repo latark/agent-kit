@@ -238,6 +238,18 @@
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$PANTHEON_ROLE\" in ''|hq) exit 0 ;; esac; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/wait-owner.py\"",
+            "async": true,
+            "timeout": 45
+          }
+        ]
+      }
     ]
   }
 }

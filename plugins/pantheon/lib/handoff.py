@@ -176,6 +176,9 @@ ROUTES = (
 ASK = ("ask", "«да» владельца", None, "handed",
        "Нужного исполнителя нет — вопрос владельцу «да/нет» через Зевса: `pantheon task new " + _DIR + " --owner zeus "
        "--question \"…\" --why \"…\" --option \"А — …\" --option \"Б — …\" --recommend \"А — потому что …\"`.")
+GRANT_HOW = ("Право окну на запись в папку, команду или домен — заявкой: `pantheon grant request --write <путь> "
+             "--days N --task <id> --why \"зачем\"` (или --allow <правило>, --domain <домен>); вопрос владельцу придёт "
+             "сам, по «да» право ляжет в grants.toml до срока. Ключи, конфиг и автозапуск так не открываются.")
 ROUTE_KEYS = tuple(r[0] for r in ROUTES) + (ASK[0],)
 
 # признаки отказа в тексте ошибки инструмента (PostToolUseFailure): обычный красный тест подсказки не получает
@@ -226,6 +229,8 @@ def hint(text, source="role"):
     """Подсказка роли: кто умеет, как передать, и запрет давать владельцу команды."""
     key, who, _, how = route(text)
     src = SOURCE_RU.get(source, source)
+    if source == "sandbox" and key == ASK[0]:   # запись или сеть мимо песочницы — заявкой на право (metis-0680)
+        who, how = "«да» владельца на право окну", GRANT_HOW
     return f"Пантеон (metis-0832): отказ ({src}) — это умеет {who}. {how} {NO_TERMINAL}"
 
 

@@ -67,7 +67,7 @@ import subprocess
 import sys
 import tomllib
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
 
@@ -77,7 +77,7 @@ def set_core(mod):
     P = mod
 
 
-FILES = re.compile(r"\.claude/pantheon/policy\.toml|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
+FILES = re.compile(r"\.claude/pantheon/(?:policy|grants)\.toml|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
 REQ_TTL = 24 * 3600       # заявка старше суток — снята: владелец не ответил
 RETRY_SEC = 600           # окно Touch ID закрыто без ответа — следующее не раньше
 PRESENT_SEC = 300         # владелец у Mac: простой меньше 5 минут
@@ -134,7 +134,7 @@ def rel_of(arg):
 def target(rel):
     """Абсолютный путь файла: только из FILES, без ссылок на пути (папки — настоящие, внутри HOME)."""
     if not FILES.fullmatch(rel or ""):
-        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, ~/.claude/agents/_parts/*.part)")
+        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, grants.toml, ~/.claude/agents/_parts/*.part)")
     home = os.path.realpath(P.HOME)
     p = os.path.join(home, rel)
     if os.path.realpath(os.path.dirname(p)) != os.path.dirname(p):
@@ -148,6 +148,8 @@ def read_target(rel):
     try:
         fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
+        if rel == GRANTS_REL:   # grants.toml заводит первая заявка pantheon grant request (metis-0680)
+            return b""
         raise Refuse(f"~/{rel}: файла нет (новые файлы — не этой командой)")
     except OSError as e:
         raise Refuse(f"~/{rel}: не читается ({e.strerror or type(e).__name__})")
@@ -963,6 +965,66 @@ def cmd_policy(rest):
     return _propose(POLICY_REL, new, kv["--task"], why, prog, cur)
 
 
+# --- pantheon grant request: право окну заявкой, а не пересказом владельцу (metis-0680) ----------------------------
+
+GRANTS_REL = ".claude/pantheon/grants.toml"
+GRANT_USAGE = ("pantheon grant request [--write <путь>]... [--allow <правило>]... [--domain <домен>]... [--days N] "
+               "--task ID --why \"зачем\"")
+GRANT_FLAGS = {"--write": "write", "--allow": "allow", "--domain": "domains"}
+GRANT_DAYS_MAX = 30
+
+
+def grant_text(old, win, lists, until, task, why):
+    """grants.toml с новой записью [[grant]] в конце; прочий текст не тронут."""
+    lines = [f"\n[[grant]]   # {task}, заявка из окна {win}", f"window = {json.dumps(win)}", f"until = \"{until}\"",
+             f"why = {json.dumps(why, ensure_ascii=False)}"]
+    lines += [f"{k} = [{', '.join(json.dumps(x, ensure_ascii=False) for x in v)}]" for k, v in lists.items() if v]
+    return (old if not old or old.endswith("\n") else old + "\n") + "\n".join(lines) + "\n"
+
+
+def cmd_grant(rest):
+    """pantheon grant request: роль не пишет grants.toml — команда кладёт заявку owner-edit с одной записью [[grant]]
+    своему окну; «да» в окне вопросов Зевса или Touch ID — проход пишет файл, сборка окна применяет право до срока."""
+    prog = "pantheon grant request"
+    if rest[:1] != ["request"]:
+        return err("вызов: " + GRANT_USAGE)
+    lists, kv, args, i = {v: [] for v in GRANT_FLAGS.values()}, {}, rest[1:], 0
+    while i < len(args):
+        a = args[i]
+        if i + 1 >= len(args) or not (a in GRANT_FLAGS or a in ("--days", "--task", "--why")) or a in kv:
+            return err(f"{prog}: {a} — неизвестный флаг, повтор или нет значения. Вызов: {GRANT_USAGE}")
+        if a in GRANT_FLAGS:
+            lists[GRANT_FLAGS[a]].append(args[i + 1])
+        else:
+            kv[a] = args[i + 1]
+        i += 2
+    why = " ".join(kv.get("--why", "").split())
+    win = who()[0]
+    try:
+        if not win:
+            raise Refuse("только из окна роли: право выдаётся окну, где идёт заявка")
+        if not TASK_RE.fullmatch(kv.get("--task", "")) or not why or not why_ok(why) or not any(lists.values()):
+            raise Refuse(f"нужны --task, --why (до {WHY_MAX} знаков) и хоть одно из --write, --allow, --domain")
+        if any(hidden_at(x, "") for v in lists.values() for x in v):
+            raise Refuse("невидимый или управляющий знак в значении")
+        days = int(kv.get("--days", "7")) if kv.get("--days", "7").isdigit() else 0
+        if not 1 <= days <= GRANT_DAYS_MAX:
+            raise Refuse(f"--days — целое от 1 до {GRANT_DAYS_MAX}")
+        until = (datetime.fromtimestamp(P.now()) + timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        cur = read_target(GRANTS_REL)
+        try:
+            old = cur.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refuse(f"~/{GRANTS_REL}: не UTF-8")
+        new = grant_text(old, win, lists, until, kv["--task"], why)
+        _, _, errors, _ = P.grants_load(new[len(old):])   # та же проверка, что у сборки окна: ключи, конфиг — нет
+        if errors:
+            raise Refuse("; ".join(errors))
+    except Refuse as e:
+        return err(f"{prog}: отказ — {e}")
+    return _propose(GRANTS_REL, new, kv["--task"], why, prog, cur)
+
+
 def read_result(d, rid):
     raw = read_file(os.path.join(d, f"{rid}.result.json"), 64 * 1024)
     with contextlib.suppress(TypeError, ValueError):
@@ -1064,7 +1126,7 @@ def apply(dfd, name, req, how, evidence):
             if how == "touchid":
                 approve_line(req)
             p = target(req["file"])
-            mode = stat.S_IMODE(os.lstat(p).st_mode)
+            mode = stat.S_IMODE(os.lstat(p).st_mode) if os.path.lexists(p) else 0o644   # grants.toml — первой заявкой
             tmp = os.path.join(os.path.dirname(p), f".{os.path.basename(p)}.owner-edit.{os.getpid()}")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as fh:

@@ -102,6 +102,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
   pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]   один ключ policy.toml той же
                                         заявкой owner-edit (metis-1122): роль Edit/Write policy.toml не делает
+  pantheon grant request [--write П]... [--allow П]... [--domain Д]... [--days N] --task ID --why "…"   право своему окну
+                                        в grants.toml той же заявкой owner-edit (metis-0680): вопрос Зевсу, «да» — до срока
   pantheon config request|status|cancel|run   .mcp.json, .claude/settings*.json, .claude/hooks/* своей worktree
                                         (lib/config_edit.py, metis-0844): заявка с новым текстом → проход вне окна пишет
                                         по «да» Зевсу на «[id] …» с sha или по Touch ID; роль коммитит сама
@@ -2737,11 +2739,13 @@ GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "
 GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
 
 
-def grants_load():
-    """grants.toml → (разрешения в силе, ближайший срок окончания в секундах или None, ошибки, истёкшие)."""
+def grants_load(text=None):
+    """grants.toml (или text — проверка заявки grant request) → (в силе, ближайший срок или None, ошибки, истёкшие)."""
     try:
-        with open(GRANTS, "rb") as fh:
-            raw = tomllib.load(fh).get("grant") or []
+        if text is None:
+            with open(GRANTS, "rb") as fh:
+                text = fh.read().decode("utf-8")
+        raw = tomllib.loads(text).get("grant") or []
     except FileNotFoundError:
         return [], None, [], []
     except (OSError, ValueError) as e:
@@ -9532,6 +9536,8 @@ def main(argv):
         return owner_edit_mod().main(rest)
     if cmd == "policy":
         return owner_edit_mod().cmd_policy(rest)
+    if cmd == "grant":
+        return owner_edit_mod().cmd_grant(rest)
     if cmd == "config":
         return config_edit_mod().main(rest)
     if cmd == "batch":

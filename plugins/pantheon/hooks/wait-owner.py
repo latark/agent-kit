@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Окно роли встало на запросе разрешения → строка в alerts.md, её видит Зевс (metis-0900).
+"""Окно роли встало на запросе разрешения → строка в alerts.md, её видит Зевс (metis-0900, 0874).
+
+PermissionRequest (metis-0874): тревога — вопросом «окно X просит разрешение — <инструмент>: <команда>. Зачем:
+<description вызова>. Совет: …»; совет — по маршрутам handoff.route (у действия свой исполнитель — отклонить и передать ему).
+Notification permission_prompt того же запроса ждёт DELAY секунд (хук асинхронный) и молчит по общей отметке «раз в
+2 минуты»; без PermissionRequest (старый Claude Code) — прежняя строка «ждёт вас: <message>».
 
 Хук Notification с matcher permission_prompt (hooks.json). Claude Code шлёт его, когда окну нужно разрешение
 владельца: правка защищённого файла, команда вне правил, окно доверия. Поля события (документация Claude Code,
@@ -24,6 +29,8 @@ alerts.md Зевс получает в сводке новых тревог (ctx
 PANTHEON_NOW — подмена часов для тестов (секунды с эпохи), PANTHEON_STATE — папка состояния.
 Python 3.11+: хуки запускает hooks/python.sh (metis-0571).
 """
+import contextlib
+import importlib.util
 import json
 import os
 import re
@@ -36,6 +43,9 @@ STATE = os.path.realpath(os.environ.get("PANTHEON_STATE") or os.path.join(HOME, 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 EVERY = 120  # секунд между тревогами одного окна
 MSG_MAX = 200
+CMD_MAX = 300   # команда в вопросе Зевсу (PermissionRequest)
+WHY_MAX = 160
+DELAY = 3.0     # Notification ждёт, чтобы богатая тревога PermissionRequest легла первой
 QUIET_ROLES = {"hq"}
 
 
@@ -67,22 +77,61 @@ def recent(name, t):
     return last <= t < last + EVERY
 
 
+def flat(v, n):
+    return " ".join(str(v or "").split())[:n]
+
+
+def advice(cmd):
+    """Совет Зевсу по маршрутам отказа (lib/handoff.py): у действия есть свой исполнитель — отклонить и передать ему;
+    иначе — смотреть команду. Сбой загрузки — общий совет: подсказка не должна ломать тревогу."""
+    try:
+        spec = importlib.util.spec_from_file_location("pantheon_handoff_wait", os.path.join(PLUGIN, "lib", "handoff.py"))
+        h = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(h)
+        key, who, _, _ = h.route(cmd)
+    except Exception:  # noqa: BLE001 — любой сбой разбора даёт общий совет
+        key, who = "ask", ""
+    if key != "ask":
+        return f"отклонить — это делает {who}, роли передать туда"
+    return "разрешить, если команда читает или пишет только в worktree роли; иначе отклонить"
+
+
+def question(ev):
+    """PermissionRequest (metis-0874): что просит окно — инструмент и команда, зачем — описание вызова, и совет."""
+    tool = flat(ev.get("tool_name"), 60) or "инструмент"
+    ti = ev.get("tool_input") if isinstance(ev.get("tool_input"), dict) else {}
+    cmd = flat(ti.get("command") or ti.get("file_path") or ti.get("path") or ti.get("url") or json.dumps(ti,
+               ensure_ascii=False), CMD_MAX)
+    why = flat(ti.get("description") or ti.get("prompt"), WHY_MAX) or "окно не сказало"
+    return f"{tool}: {cmd}. Зачем: {why}. Совет: {advice(tool + ' ' + cmd)}"
+
+
 def main():
     try:
         ev = json.load(sys.stdin)
     except ValueError:
         return 0
-    if not isinstance(ev, dict) or ev.get("notification_type") != "permission_prompt":
+    if not isinstance(ev, dict):
+        return 0
+    kind = ev.get("hook_event_name")
+    if kind != "PermissionRequest" and ev.get("notification_type") != "permission_prompt":
         return 0
     role = (os.environ.get("PANTHEON_ROLE") or "").strip()
     if not role or role in QUIET_ROLES:
         return 0
     name = " ".join((os.environ.get("PANTHEON_SESSION") or role).split())[:60]
+    if kind != "PermissionRequest":   # хук асинхронный: даём PermissionRequest того же запроса лечь первым
+        with contextlib.suppress(ValueError):
+            time.sleep(min(10.0, float(os.environ.get("PANTHEON_WAIT_OWNER_DELAY") or DELAY)))
     t = now()
     if recent(name, t):
         return 0
-    msg = " ".join(str(ev.get("message") or ev.get("title") or "запрос разрешения").split())[:MSG_MAX]
-    text = f"окно {name} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
+    if kind == "PermissionRequest":
+        msg = question(ev)
+        text = f"окно {name} просит разрешение — {msg} (с {time.strftime('%H:%M', time.localtime(t))}; ответить — в окне)"
+    else:
+        msg = flat(ev.get("message") or ev.get("title") or "запрос разрешения", MSG_MAX)
+        text = f"окно {name} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
     try:
         r = subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "alert", "--from", name, text],
                            capture_output=True, text=True, timeout=30)

@@ -1116,5 +1116,61 @@ check("policy_text: обычная правка проходит сверку",
 rc, out, errs = quiet(P.main, ["policy", "get"])
 check("policy без set — вызов, код 2", rc == 2 and "policy set" in errs, (rc, errs))
 
+# --- [grant] pantheon grant request: право окну заявкой (metis-0680) ------------------------------------------------
+GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
+
+
+def grant(*args, window="metis-pantheon"):
+    if window:
+        os.makedirs(os.path.join(CACHES, window, "tmp"), exist_ok=True)
+        os.environ["PANTHEON_TMP"] = os.path.join(CACHES, window, "tmp")
+        os.environ["PANTHEON_ROLE"] = "metis-pantheon"
+    try:
+        return quiet(P.main, ["grant", "request", *args])
+    finally:
+        os.environ.pop("PANTHEON_TMP", None)
+        os.environ.pop("PANTHEON_ROLE", None)
+
+
+fresh()
+with contextlib.suppress(FileNotFoundError):
+    os.unlink(GRANTS)
+SPOT = os.path.join(WORK, "spot")
+rc, out, errs = grant("--write", SPOT, "--task", "metis-0680", "--why", "кэш сборки", window=None)
+check("grant вне окна роли — отказ, заявки нет", rc == 2 and "окна роли" in errs.strip().splitlines()[-1]
+      and not reqs(), (rc, errs))
+for bad, why in ((["--write", "~/.ssh"], "ключи"), (["--write", SPOT, "--days", "99"], "--days"),
+                 (["--write", SPOT, "--why", ""], "--why"), (["--days", "3"], "--write"),
+                 (["--write", SPOT, "--bogus", "1"], "неизвестный")):
+    args = bad + ([] if "--why" in bad else ["--why", "кэш сборки"]) + ["--task", "metis-0680"]
+    rc, out, errs = grant(*args)
+    check(f"grant {bad}: отказ, причина последней строкой, заявки нет",
+          rc == 2 and why in errs.strip().splitlines()[-1] and not reqs(), (rc, errs))
+rc, out, errs = grant("--write", SPOT, "--domain", "example.com", "--days", "3", "--task", "metis-0680",
+                      "--why", "кэш сборки")
+q = reqs()
+check("grant из окна: заявка owner-edit на grants.toml, вопрос Зевсу в выводе", rc == 0 and len(q) == 1
+      and q[0][1]["file"] == ".claude/pantheon/grants.toml" and f"[{q[0][1]['id']}]" in out, (rc, out, errs, q))
+check("grant: файла ещё нет — роль его не писала", not os.path.exists(GRANTS))
+_, req, _ = q[0]
+answer(yes_question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+rc, out, errs = run()
+live, _, gerr, _ = P.grants_load()
+check("grant: «да» — grants.toml заведён, право окну в силе до срока", os.path.exists(GRANTS) and not gerr
+      and len(live) == 1 and live[0]["window"] == "metis-pantheon" and live[0]["write"] == [SPOT]
+      and live[0]["domains"] == ["example.com"], (out, errs, live, gerr, journal()))
+rc, out, errs = grant("--allow", "Bash(make:*)", "--task", "metis-0680", "--why", "сборка")
+_, req, _ = reqs()[0]
+answer(yes_question(req), "Б — Нет")
+run()
+check("grant: «нет» — файл прежний, итог роли не done", len(P.grants_load()[0]) == 1
+      and result(req, "metis-pantheon").get("state") != "done", result(req, "metis-pantheon"))
+H = P.handoff_mod()
+check("отказ песочницы без маршрута — подсказка pantheon grant request",
+      "pantheon grant request" in H.hint("touch /opt/x: Operation not permitted", "sandbox"))
+check("тот же текст от роли (не песочница) — прежний вопрос через Зевса",
+      "pantheon grant request" not in H.hint("touch /opt/x: Operation not permitted", "role"))
+
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
