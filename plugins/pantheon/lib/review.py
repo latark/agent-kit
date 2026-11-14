@@ -462,7 +462,7 @@ def review_ready(repo, pr, sha, M, recs, view=False):
     head = str(view.get("headRefOid") or "").lower()
     if head != sha:
         return f"у PR head {head[:12] or '?'}, а не {sha[:12]} — ревью на старом коммите"
-    state, why, _ = M.ci_state(view.get("statusCheckRollup"), repo=repo, sha=sha)
+    state, why, _ = M.ci_state(view.get("statusCheckRollup"))
     if state == "ok":
         return None
     return (f"на {sha[:12]} нет записи тестов шлюза, а CI не зелёный ({why}). argus — только после зелёного CI или "
