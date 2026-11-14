@@ -339,6 +339,11 @@ def task_cmd(rest):
     before = _cards_fp(T)
     try:  # task run — проход заметок чужих окон (lib/tasknote.py, metis-1187)
         return P.task_note_run() if rest == ["run"] else _task_cmd(rest)
+    except PermissionError as e:  # claim, split, attach… задачи чужого направления из окна роли (metis-1187)
+        print(f"pantheon task: запись не разрешена ({e.filename or e}) — окно роли пишет только папку задач своего "
+              "направления, в чужую карточку — только `pantheon task set <id> --note`. Остановлено на этой карточке: "
+              "она не тронута, запись карточек до неё (attach к чужой пачке) осталась", file=sys.stderr)
+        return 1
     finally:
         if _cards_fp(T) != before:
             P.refresh_kick()

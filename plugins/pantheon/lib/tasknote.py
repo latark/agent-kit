@@ -14,10 +14,13 @@
 
 Имя окна — имя папки кэша, где лежит заявка, а не текст заявки. Текст заметки обезврежен (clean): управляющие и
 невидимые знаки, переводы строк — пробел, «#» — «＃» (ни «## Слова владельца», ни «PR #N … →» отметок планового
-прохода), «→» — «->», ёлочки — кавычки «"», длина — до NOTE_MAX. Заявка забирается переименованием (.taking) и
-только потом пишется в карточку: повторной строки при сбое удаления нет. Нет задачи или заявка не по образцу — снята,
-итог — строка STATE/logs/task-note.jsonl; карточка занята — ждёт следующего прохода, но не дольше REQ_TTL (потом
-снята с тревогой).
+прохода), «→» — «->», «/» — «∕», слово «PR» — «P‑R» (ни «PR 12 (owner/repo) слит», ни github.com/…/pull/N: связь
+PR и коммита, слияние и закрытие по нему из такой строки не прочесть), ёлочки — кавычки «"», длина — до NOTE_MAX.
+Разбор ссылок карточки (tasks.work_links) строки «агент (окно …)» пропускает и сам. Заявка забирается
+переименованием (.taking) и только потом пишется в карточку: повторной строки при сбое удаления нет. Папку заявок
+держит окно, поэтому проход открывает её по компонентам с O_NOFOLLOW и работает только через dir_fd (open_queue).
+Нет задачи или заявка не по образцу — снята, итог — строка STATE/logs/task-note.jsonl; карточка занята — ждёт
+следующего прохода, но не дольше REQ_TTL от min(created, mtime, ctime) файла (потом снята с тревогой).
 """
 import contextlib
 import json
@@ -40,6 +43,8 @@ TASK_RE = re.compile(r"[a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}-\d{1,6}")
 NOTE_MAX = 2000
 REQ_MAX = 64 * 1024
 REQ_TTL = 24 * 3600
+SKEW = 5 * 60  # с: created позже «сейчас» больше чем на SKEW — заявка не по образцу
+PR_WORD = re.compile(r"\bpr(?![^\W\d_])", re.I)  # «PR 12», «PR#12», «PR12» — но не «print», «prod»
 HIDDEN = ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp")
 PREFIX = "заметка из чужого окна: "
 
@@ -65,7 +70,8 @@ def task_note_clean(note):
     """Текст заметки чужого окна → одна строка без разметки и отметок планового прохода (см. шапку)."""
     s = "".join(" " if unicodedata.category(c) in HIDDEN else c for c in str(note or ""))
     s = " ".join(s.split())[:NOTE_MAX]
-    s = s.replace("#", "＃").replace("→", "->").replace("«", '"').replace("»", '"')
+    s = s.replace("#", "＃").replace("→", "->").replace("«", '"').replace("»", '"').replace("/", "∕")
+    s = PR_WORD.sub(lambda m: m.group(0)[0] + "‑" + m.group(0)[1], s)  # «P‑R 12 … слит» — не номер PR
     return f"{PREFIX}«{s}»"
 
 
@@ -112,32 +118,55 @@ def task_note_foreign(T, tid, changes, note, body, force, exc):
 
 # --- проход --------------------------------------------------------------------------------------------------------
 
-def queue_dirs():
-    """[(окно, папка заявок)] — только кэши окон; окно — по имени папки, не из текста заявки."""
-    out = []
+def windows():
+    """Имена окон — папки кэша окон по образцу; окно — по имени папки, не из текста заявки."""
     with contextlib.suppress(OSError):
-        for name in sorted(os.listdir(caches())):
-            base = os.path.join(caches(), name)
-            d = os.path.join(base, SUB)
-            if WINDOW_RE.fullmatch(name) and not os.path.islink(base) and os.path.isdir(d) and not os.path.islink(d):
-                out.append((name, d))
-    return out
+        return [n for n in sorted(os.listdir(caches())) if WINDOW_RE.fullmatch(n)]
+    return []
 
 
-def _reqs(d):
+def open_queue(win):
+    """dir_fd папки заявок окна или None. Папку держит окно и может подменить ссылкой, поэтому — как
+    owner_edit.open_queue: база кэша, затем <окно> и task-note по одному компоненту с O_NOFOLLOW; дальше чтение,
+    переименование и удаление — только относительно этого fd, а не по пути."""
+    try:
+        fd = os.open(caches(), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    for part in (win, SUB):
+        try:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except OSError:
+            os.close(fd)
+            return None
+        os.close(fd)
+        fd = nfd
+    return fd
+
+
+def _reqs(dfd):
     with contextlib.suppress(OSError):
-        return sorted(n for n in os.listdir(d) if n.endswith(".req.json"))
+        return sorted(n for n in os.listdir(dfd) if n.endswith(".req.json"))
     return []
 
 
 def task_note_pending():
-    return any(_reqs(d) for _, d in queue_dirs())
+    for win in windows():
+        dfd = open_queue(win)
+        if dfd is not None:
+            try:
+                if _reqs(dfd):
+                    return True
+            finally:
+                os.close(dfd)
+    return False
 
 
-def _load(path):
-    """Свой обычный файл без ссылок, не больше REQ_MAX, заявка по образцу → dict или None."""
+def _load(name, dfd):
+    """Свой обычный файл без ссылок, не больше REQ_MAX, заявка по образцу → (dict, время заявки) или None. Время —
+    min(created, mtime, ctime): created пишет окно, а сдвинуть ctime файла оно не может; created в будущем — отказ."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
     except OSError:
         return None
     with os.fdopen(fd, "rb") as fh:
@@ -152,8 +181,8 @@ def _load(path):
     ok = isinstance(req, dict) and ID_RE.fullmatch(str(req.get("id"))) and TASK_RE.fullmatch(str(req.get("task"))) \
         and isinstance(req.get("note"), str) and req["note"].strip() \
         and isinstance(req.get("created"), (int, float)) and not isinstance(req.get("created"), bool) \
-        and os.path.basename(path) == f"{req['id']}.req.json"
-    return req if ok else None
+        and req["created"] <= P.now() + SKEW and name == f"{req['id']}.req.json"
+    return (req, min(req["created"], st.st_mtime, st.st_ctime)) if ok else None
 
 
 def _journal(rec):
@@ -163,29 +192,29 @@ def _journal(rec):
         fh.write(json.dumps(dict(rec, time=P.stamp()), ensure_ascii=False) + "\n")
 
 
-def _process(T, win, d, name):
-    path = os.path.join(d, name)
-    req = _load(path)
-    if req is None:
-        os.unlink(path)
+def _process(T, win, dfd, name):
+    got = _load(name, dfd)
+    if got is None:
+        os.unlink(name, dir_fd=dfd)
         return _journal({"window": win, "file": name, "state": "dropped", "note": "заявка не по образцу"})
-    take = path[:-len(".req.json")] + ".taking"
-    os.replace(path, take)
+    req, born = got
+    take = name[:-len(".req.json")] + ".taking"
+    os.replace(name, take, src_dir_fd=dfd, dst_dir_fd=dfd)
     if req["task"] not in T.load_tasks(P.PANTHEON, T.WORK_TYPES):
-        os.unlink(take)
+        os.unlink(take, dir_fd=dfd)
         return _journal({"id": req["id"], "window": win, "task": req["task"], "state": "dropped", "note": "нет задачи"})
     try:
         T.task_set(P.PANTHEON, P.card_now(), req["task"], {}, note=task_note_clean(T.note_stamp(req["note"])[0]),
                    actor=f"агент (окно {win})")
     except ValueError as e:
-        if P.now() - req["created"] <= REQ_TTL:
-            os.replace(take, path)  # карточка занята или не читается — следующий проход
+        if P.now() - born <= REQ_TTL:
+            os.replace(take, name, src_dir_fd=dfd, dst_dir_fd=dfd)  # карточка занята или не читается — следующий проход
             return None
-        os.unlink(take)
+        os.unlink(take, dir_fd=dfd)
         _journal({"id": req["id"], "window": win, "task": req["task"], "state": "failed", "note": str(e)[:300]})
         return P.alert_once(f"task-note-{req['id']}", "ttl", f"заметка окна {win} в {req['task']} не записана за сутки: "
                             f"{e} — заявка снята", "task-note")
-    os.unlink(take)
+    os.unlink(take, dir_fd=dfd)
     return _journal({"id": req["id"], "window": win, "task": req["task"], "state": "done"})
 
 
@@ -198,12 +227,18 @@ def task_note_run():
     with P.lock("task-note-run", block=False) as got:
         if not got:
             return 0
-        for win, d in queue_dirs():
-            for name in _reqs(d):
-                try:
-                    _process(T, win, d, name)
-                except Exception as e:  # noqa: BLE001 — одна заявка не останавливает остальные
-                    rc = 1
-                    P.alert_once("task-note-run", type(e).__name__, f"заметки чужих окон: заявка {win}/{name} — "
-                                 f"{type(e).__name__}: {e}", "task-note")
+        for win in windows():
+            dfd = open_queue(win)
+            if dfd is None:
+                continue
+            try:
+                for name in _reqs(dfd):
+                    try:
+                        _process(T, win, dfd, name)
+                    except Exception as e:  # noqa: BLE001 — одна заявка не останавливает остальные
+                        rc = 1
+                        P.alert_once("task-note-run", type(e).__name__, f"заметки чужих окон: заявка {win}/{name} — "
+                                     f"{type(e).__name__}: {e}", "task-note")
+            finally:
+                os.close(dfd)
     return rc

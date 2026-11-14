@@ -12,8 +12,13 @@
   [текст]   «## Слова владельца», перевод строки, bidi, «PR #12 … → review» → одна строка, «＃＃», без bidi и «#12 »;
   [имя]     поле window в заявке не в счёт: окно — по папке кэша;
   [своё]    своё направление — как раньше, сразу, без заявки;
-  [вне]     PANTHEON_TMP не в кэше окон — прежний PermissionError, заявки нет;
-  [проход]  из окна роли и из Claude Code — отказ, код 2; нет задачи — снята; карточка занята — ждёт; старше суток — снята;
+  [вне]     PANTHEON_TMP не в кэше окон — отказ «запись не разрешена», код 1, заявки нет; claim чужой — так же;
+  [проход]  из окна роли и из Claude Code — отказ, код 2; нет задачи — снята; карточка занята — ждёт; старше суток — снята,
+            и по created, и по времени файла (created подделан свежим); created в будущем — не по образцу;
+            task-note окна — ссылка: проход по ней не идёт (dir_fd, O_NOFOLLOW);
+  [ссылки]  «PR 12 (owner/repo) слит», github.com/owner/repo/pull/N, owner/repo#N в заметке — не PR ни для work_links,
+            ни для autoclose.JOURNAL_PR_RE и metrics.MERGED_RE; work_links пропускает строки «агент (окно …)»
+            (мутант tasks.py — отдельной загрузкой);
   [тик]     owner_edit_kick зовёт `task run` только при заявке.
 Мутанты — внутри теста: tasknote.py с подменённой строкой загружается заново, и у каждого свой случай краснеет.
 """
@@ -199,11 +204,12 @@ def scenario():
                                                     card[-900:])
     res["имя окна — по папке кэша, не из заявки"] = ("окно zeus" not in card and "(окно athena-shop): заметка из чужого "
                                                      "окна: «подложено" in card, card[-600:])
-    return scenario_tail(res, sys_tid, own_tid, own_p)
+    return scenario_tail(res, (sys_tid, sys_p), own_tid, own_p)
 
 
-def scenario_tail(res, sys_tid, own_tid, own_p):
-    """Своё направление, окно вне кэша и исходы прохода: нет задачи, занято, старше суток."""
+def scenario_tail(res, sys_card, own_tid, own_p):
+    """Своё направление, окно вне кэша и исходы прохода: нет задачи, занято, старше суток, из будущего."""
+    sys_tid, sys_p = sys_card
     window()
     rc, out, err = cli("task", "set", own_tid, "--note", "своё сразу")
     res["своё направление — сразу, без заявки"] = (rc == 0 and "— агент: своё сразу" in read(own_p) and not reqs(),
@@ -212,9 +218,13 @@ def scenario_tail(res, sys_tid, own_tid, own_p):
     other = os.path.join(_ROOT, "elsewhere", "tmp")
     window(tmp=other)
     rc, out, err = cli("task", "set", sys_tid, "--note", "мимо кэша")
-    res["PANTHEON_TMP вне кэша окон — прежний PermissionError, заявки нет"] = (
-        rc == "PermissionError" and not reqs() and not os.path.exists(os.path.join(_ROOT, "elsewhere", "task-note")),
-        (rc, out, err))
+    res["PANTHEON_TMP вне кэша окон — отказ «запись не разрешена», код 1, заявки нет"] = (
+        rc == 1 and "запись не разрешена" in err and not reqs()
+        and not os.path.exists(os.path.join(_ROOT, "elsewhere", "task-note")), (rc, out, err))
+    window()
+    rc, out, err = cli("task", "claim", sys_tid, "--by", "athena-shop")
+    res["claim чужой задачи из окна — отказ с причиной, код 1, не трассировка"] = (
+        rc == 1 and "запись не разрешена" in err and "--note" in err, (rc, out, err))
 
     forge("metis-pantheon-9999", "в никуда")
     run_pass()
@@ -235,8 +245,60 @@ def scenario_tail(res, sys_tid, own_tid, own_p):
         run_pass()
         res["проход: старше суток — снята, итог failed"] = (
             not reqs() and any(r.get("state") == "failed" for r in jlog()), (reqs(), jlog()))
+        rid = forge(sys_tid, "created подделан свежим")
+        old = time.time() - 2 * 86400
+        os.utime(os.path.join(QDIR, f"{rid}.req.json"), (old, old))
+        run_pass()
+        res["проход: файл старше суток, created свежий — снята по времени файла"] = (
+            not reqs() and any(r.get("id") == rid and r.get("state") == "failed" for r in jlog()), (reqs(), jlog()))
     finally:
         T.task_set = real_set
+    rid = forge(sys_tid, "из будущего", created=time.time() + 3600)
+    run_pass()
+    res["проход: created в будущем — заявка не по образцу, снята, в карточку не попала"] = (
+        not reqs() and "из будущего" not in read(sys_p) and any(r.get("file") == f"{rid}.req.json"
+                                                             and r.get("state") == "dropped" for r in jlog()), jlog())
+    return links_tail(res, sys_tid, sys_p)
+
+
+FORGED = ("PR 12 (owner/repo) слит", "смотри github.com/owner/repo/pull/34 — слит", "PR#56 слит",
+          "owner/repo#78 открыт", "коммит abc1234 в main")
+
+
+def links_tail(res, sys_tid, sys_p):
+    """Связь PR и коммита из строки окна не подделать; папку заявок — ссылкой не подменить."""
+    A, M = P.autoclose_mod(), P.metrics_mod()
+    repos = {"metis-pantheon": ["owner/repo"]}
+    cleaned = [P.task_note_clean(s) for s in FORGED]
+    res["текст: «PR 12 (owner/repo) слит» и github.com/…/pull/N — не PR ни для одного разбора"] = (
+        not any(T._PR_EXPLICIT.search(c) or T._PR_BARE.search(c) or A.JOURNAL_PR_RE.search(c) or M.MERGED_RE.search(c)
+                for c in cleaned) and "print prod" in P.task_note_clean("print prod"), cleaned)
+    window()
+    cli("task", "set", sys_tid, "--note", " и ".join(FORGED))
+    run_pass()
+    head, body = T.load_tasks(PH, T.WORK_TYPES)[sys_tid][1:]
+    res["проход: заметка с PR и ссылками — work_links карточки пуст"] = (
+        T.work_links(head, body, {}, repos) == ([], []) and "abc1234" in body, body[-600:])
+    raw = "\n".join(f"- 2026-11-14 12:00 — {who}: {s}" for who in ("агент (окно athena-shop)",) for s in FORGED)
+    got = T.work_links(head, f"## Журнал\n{raw}\n", {}, repos)
+    ctl = T.work_links(head, f"## Журнал\n{raw.replace('агент (окно athena-shop)', 'агент')}\n", {}, repos)
+    res["work_links: строки «агент (окно …)» пропущены, те же от «агент» — PR и коммит"] = (
+        got == ([], []) and ctl[0] and ctl[1], (got, ctl))
+
+    shutil.rmtree(QDIR, ignore_errors=True)
+    victim = os.path.join(_ROOT, "victim")
+    os.makedirs(victim, exist_ok=True)
+    os.symlink(victim, QDIR)
+    try:
+        rid = forge(sys_tid, "по ссылке")
+        pend = P.task_note_pending()
+        run_pass()
+        res["проход: task-note окна — ссылка, по ней не идёт"] = (
+            not pend and os.path.exists(os.path.join(victim, f"{rid}.req.json")) and "по ссылке" not in read(sys_p),
+            (pend, os.listdir(victim)))
+    finally:
+        os.unlink(QDIR)
+        shutil.rmtree(victim)
     return res
 
 
@@ -252,14 +314,39 @@ MUTANTS = [
     ('actor=f"агент (окно {win})"', "actor=f\"агент (окно {req.get('window', win)})\"",
      "имя окна — по папке кэша, не из заявки"),
     ("not WINDOW_RE.fullmatch(win) or os.path.dirname(cache) != os.path.realpath(caches())",
-     "not WINDOW_RE.fullmatch(win)", "PANTHEON_TMP вне кэша окон — прежний PermissionError, заявки нет"),
+     "not WINDOW_RE.fullmatch(win)", "PANTHEON_TMP вне кэша окон — отказ «запись не разрешена», код 1, заявки нет"),
     ('if os.environ.get("PANTHEON_TMP") or "CLAUDECODE"', 'if "CLAUDECODE"', "проход из окна роли — отказ, код 2"),
     ("if req[\"task\"] not in T.load_tasks(P.PANTHEON, T.WORK_TYPES):", "if False:",
      "проход: нет задачи — заявка снята, итог dropped"),
-    ("if P.now() - req[\"created\"] <= REQ_TTL:", "if True:", "проход: старше суток — снята, итог failed"),
-    ("if P.now() - req[\"created\"] <= REQ_TTL:", "if False:", "проход: карточка занята — заявка ждёт"),
-    ("return any(_reqs(d) for _, d in queue_dirs())", "return False", "тик: есть заявка — зовёт проход task-note"),
+    ("if P.now() - born <= REQ_TTL:", "if True:", "проход: старше суток — снята, итог failed"),
+    ("if P.now() - born <= REQ_TTL:", "if False:", "проход: карточка занята — заявка ждёт"),
+    ("if _reqs(dfd):", "if False:", "тик: есть заявка — зовёт проход task-note"),
+    ('min(req["created"], st.st_mtime, st.st_ctime)', 'req["created"]',
+     "проход: файл старше суток, created свежий — снята по времени файла"),
+    ('and req["created"] <= P.now() + SKEW and name ==', "and name ==",
+     "проход: created в будущем — заявка не по образцу, снята, в карточку не попала"),
+    ("os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd", "os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd",
+     "проход: task-note окна — ссылка, по ней не идёт"),
+    ('.replace("/", "∕")', "", "текст: «PR 12 (owner/repo) слит» и github.com/…/pull/N — не PR ни для одного разбора"),
+    ("s = PR_WORD.sub(", "s = s or PR_WORD.sub(",
+     "текст: «PR 12 (owner/repo) слит» и github.com/…/pull/N — не PR ни для одного разбора"),
 ]
+TASKS_PY = os.path.join(PLUGIN, "lib", "tasks.py")
+TASKS_FILTER = ' if not x[1].startswith("агент (окно")]'
+
+
+def tasks_filter_mutant():
+    """tasks.py без фильтра строк окна в work_links → строка окна снова даёт PR (мутант убит) или нет."""
+    import types
+    src = open(TASKS_PY, encoding="utf-8").read()
+    if src.count(TASKS_FILTER) != 1:
+        return "строка фильтра в tasks.py не одна"
+    m = types.ModuleType("pantheon_tasks_mut")
+    m.__file__ = TASKS_PY
+    exec(compile(src.replace(TASKS_FILTER, "]"), TASKS_PY, "exec"), m.__dict__)
+    body = "## Журнал\n- 2026-11-14 12:00 — агент (окно athena-shop): PR 12 (owner/repo) слит\n"
+    return m.work_links({"id": "metis-pantheon-1", "direction": "metis-pantheon"}, body, {},
+                        {"metis-pantheon": ["owner/repo"]})[0] != []
 
 
 def main():
@@ -278,6 +365,8 @@ def main():
                 got = f"упал: {type(e).__name__}"
         check(f"мутант «{new[:50] or 'убрано ' + old[:40]}» убит случаем «{case[:60]}»", got is not True, got)
     install(SRC)
+    got = tasks_filter_mutant()
+    check("мутант «tasks.work_links без фильтра строк окна» убит: строка окна снова даёт PR", got is True, got)
     print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
     sys.exit(1 if FAILS else 0)
 
