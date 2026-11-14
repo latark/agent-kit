@@ -424,6 +424,28 @@ def test_heavy():
     check(N.gate("respawn", t, heavy=5)[0], "respawn днём упёрся в тяжёлые")
 
 
+def test_heavy_agents_unknown_1180():
+    """metis-1180: claude agents ответил не JSON (None) — тяжёлых не сосчитать: heavy_count падает, а не считает 0, и
+    gate нового запуска не пускает (awake.gate ловит исключение отказом); переданный список — как раньше."""
+    e = Env()
+    t = day()
+    e.at_line(t, 0)
+    real = P.agents_all
+    P.agents_all = lambda: None
+    try:
+        err = None
+        try:
+            N.heavy_count()
+        except RuntimeError as ex:
+            err = ex
+        check(err is not None and "claude agents" in str(err), f"heavy_count при None: {err!r}")
+        ok, why = P.awake_mod().gate("wake", t)
+        check(not ok and "claude agents" in why, f"gate при None claude agents пустил: {ok} {why}")
+        check(N.heavy_count([], []) == 0, "heavy_count с пустым списком — не 0")
+    finally:
+        P.agents_all = real
+
+
 def test_day_rules_and_respawn():
     e = Env()
     t = day()
