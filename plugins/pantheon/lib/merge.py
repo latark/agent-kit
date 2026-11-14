@@ -345,10 +345,13 @@ def write_req(req):
 
 
 def same_req(req):
-    """Заявка в очереди всё ещё эта: тот же SHA и то же время постановки. Звать под замком merge-queue."""
+    """Заявка в очереди всё ещё эта: тот же SHA, то же время постановки и то же окно для перезапуска (metis-1153:
+    замена с другим --restart в ту же секунду — не та заявка, что показало окно Touch ID). Звать под замком
+    merge-queue."""
     p = req_file(req["repo"], req["pr"])
     cur = read_req(p) if os.path.lexists(p) else None
-    return bool(cur) and cur["sha"] == req["sha"] and cur["created"] == req["created"]
+    return bool(cur) and cur["sha"] == req["sha"] and cur["created"] == req["created"] \
+        and cur.get("restart") == req.get("restart")
 
 
 def gone(req, rc=None):

@@ -9,6 +9,7 @@ fail с причиной; общий бюджет времени; не одоб�
 попадает. Через CLI: раздел «Серверы MCP», --no-net, --json без и с --probe. Живой сервер на 127.0.0.1 — только где
 можно открыть порт (CI); в окне роли без сокетов этот случай пишет «пропущено».
 """
+import http.client
 import http.server
 import json
 import os
@@ -26,12 +27,12 @@ sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 import mcp_probe as mp  # noqa: E402
 
 FAILS = []
+OKS = []
 
 
 def check(name, ok, info=""):
     print(f"{'ok  ' if ok else 'FAIL'} {name}" + ("" if ok else f"\n     {info}"))
-    if not ok:
-        FAILS.append(name)
+    (OKS if ok else FAILS).append(name)
 
 
 INIT_OK = {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
@@ -157,14 +158,31 @@ def test_no_network_cases():
 
 def test_network_failures():
     def refused(*a):
-        raise ConnectionRefusedError(61, "Connection refused")
+        raise ConnectionRefusedError(61, "Connection refused SECRET-TEXT")
 
     def slow(*a):
-        raise TimeoutError("timed out")
+        raise TimeoutError("timed out SECRET-TEXT")
+
+    def badline(*a):
+        raise http.client.BadStatusLine("IGNORE RULES SECRET-TEXT")
+
+    def other(*a):
+        raise RuntimeError("SECRET-TEXT")
     for name, post, want in (("отказ соединения", refused, "ConnectionRefusedError"),
-                             ("таймаут", slow, "TimeoutError")):
+                             ("таймаут", slow, "TimeoutError"),
+                             ("BadStatusLine (http.client.HTTPException)", badline, "BadStatusLine"),
+                             ("любой другой сбой", other, "RuntimeError")):
         got = mp.probe(HTTP, post)
-        check(f"{name}: fail с причиной", got["state"] == "fail" and want in got["why"], got)
+        check(f"{name}: fail, в причине только имя типа, без текста ошибки",
+              got["state"] == "fail" and want in got["why"] and "SECRET" not in got["why"], got)
+    got = mp.check_servers({"x": HTTP}, None, set(), {"x": "ok"}, badline)
+    check("check_servers: сбой пробы — fail, не исключение", got[0][2]["state"] == "fail", got)
+    try:   # кривой адрес падает в urlsplit ещё до запросов — ловит check_servers
+        got = mp.check_servers({"x": {"type": "http", "url": "http://[bad/mcp"}}, None, set(), {"x": "ok"}, Fake())
+    except Exception as e:  # noqa: BLE001 — провал проверки, а не файла
+        got = [("x", "http", {"state": repr(e), "why": ""})]
+    check("check_servers: исключение пробы до сети (ValueError urlsplit) — fail с именем типа",
+          got[0][2]["state"] == "fail" and "ValueError" in got[0][2]["why"], got)
     f = Fake()
     got = mp.probe(HTTP, f, deadline=time.monotonic() + 0.1)
     check("бюджет времени вышел: запросов нет, fail", got["state"] == "fail" and not f.calls
@@ -177,8 +195,9 @@ def test_network_failures():
 def test_check_servers_approval():
     servers = {"web": HTTP, "off": dict(HTTP, url="https://off.test/"), "new": dict(HTTP, url="https://new.test/"),
                "local": {"command": "node", "args": ["x"]}}
+    pins = {"web": "ok", "off": "ok", "new": "ok"}
     f = Fake()
-    out = {n: (k, g) for n, k, g in mp.check_servers(servers, {"web", "off"}, {"off"}, f)}
+    out = {n: (k, g) for n, k, g in mp.check_servers(servers, {"web", "off"}, {"off"}, pins, f)}
     urls = {c[0] for c in f.calls}
     check("одобренный — проверен по сети", out["web"][1]["state"] == "ok" and HTTP["url"] in urls, out)
     check("выключенный — skip без сети", out["off"][1]["state"] == "skip" and "выключен" in out["off"][1]["why"]
@@ -187,8 +206,14 @@ def test_check_servers_approval():
           and "не одобрен" in out["new"][1]["why"] and "https://new.test/" not in urls, out)
     check("stdio — skip «не запускаю»", out["local"] == ("stdio", out["local"][1]) and "stdio" in out["local"][1]["why"])
     f = Fake()
-    out = {n: g for n, _, g in mp.check_servers(servers, None, set(), f)}
-    check("approved None (enableAll) — проверены все HTTP", out["new"]["state"] == "ok" and out["off"]["state"] == "ok")
+    out = {n: g for n, _, g in mp.check_servers(servers, None, set(), pins, f)}
+    check("approved None (enableAll) — проверены все HTTP с отпечатком", out["new"]["state"] == "ok"
+          and out["off"]["state"] == "ok")
+    f = Fake()
+    out = {n: g for n, _, g in mp.check_servers(servers, None, set(), {"web": "drift"}, f)}
+    check("enableAll без отпечатков на этом Mac — сети нет: «не одобрен на этом Mac», изменённый — «изменён»",
+          not f.calls and out["new"]["state"] == "skip" and "не одобрен на этом Mac" in out["new"]["why"]
+          and out["web"]["state"] == "skip" and "изменён после одобрения" in out["web"]["why"], (out, f.calls))
     on, off = mp.approved_names({"enabledMcpjsonServers": ["a"]}, {"enabledMcpjsonServers": ["b"],
                                                                    "disabledMcpjsonServers": ["c"]},
                                 {"disabledMcpServers": ["d"], "enabledMcpjsonServers": ["e"]},
@@ -202,7 +227,14 @@ def test_check_servers_approval():
 
 
 # --- CLI ---------------------------------------------------------------------------------------------------------
-def make_project(servers, settings):
+def fp(cfg):
+    """Отпечаток записи так же, как project_tools.fingerprint (сверка — тест ниже)."""
+    import hashlib
+    return hashlib.sha256(json.dumps(cfg, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def make_project(servers, settings, pins=None):
+    """pins — имя → запись, чей отпечаток «одобрен на этом Mac» (approved.json, как пишет apply)."""
     home = os.path.realpath(tempfile.mkdtemp(prefix="mcp-probe-test-"))
     os.makedirs(os.path.join(home, ".claude"))
     root = os.path.join(home, "projects", "p")
@@ -211,6 +243,11 @@ def make_project(servers, settings):
         json.dump({"mcpServers": servers}, fh)
     with open(os.path.join(root, ".claude", "settings.json"), "w") as fh:
         json.dump(settings, fh)
+    if pins:
+        d = os.path.join(home, ".local", "state", "pantheon", "project-tools")
+        os.makedirs(d)
+        with open(os.path.join(d, "approved.json"), "w") as fh:
+            json.dump({root: {n: fp(c) for n, c in pins.items()}}, fh)
     return home, root
 
 
@@ -241,6 +278,16 @@ def test_cli_section():
     home, root = make_project({}, {})
     r = cli(home, root)
     check("пустой .mcp.json — раздела нет", "Серверы MCP" not in r.stdout, r.stdout)
+    sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+    import project_tools
+    cfg = {"type": "http", "url": "https://x.test/mcp"}
+    check("fp теста совпадает с project_tools.fingerprint", fp(cfg) == project_tools.fingerprint(cfg))
+    odd = "bad\x1b[31mname"
+    home, root = make_project({odd: {"type": "http", "url": "https://x.test/mcp"}}, {})
+    r = cli(home, root, "--json", "--probe")
+    check("--json: имя сервера через safe_name (управляющих символов нет)",
+          r.returncode == 0 and "\x1b" not in r.stdout and "\\u001b" not in r.stdout
+          and "недопустимыми" in r.stdout, r.stdout)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -256,6 +303,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(302)   # 302 urllib сам перевёл бы в GET на Location — проверка, что не идём
             self.send_header("Location", "/mcp")
             self.end_headers()
+            return
+        if self.path == "/slow":   # тело по байту раз в 0.2 с: Content-Length большой, сокет не молчит
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            for _ in range(200):
+                try:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.2)
             return
         if self.path == "/oauth":
             self.send_response(401)
@@ -302,11 +362,27 @@ def test_live_server():
               (got, Handler.seen))
         got = mp.probe({"type": "http", "url": base + "/oauth", "headers": {}})
         check("живой 401 + WWW-Authenticate: нужен вход", got["state"] == "auth" and "нужен вход" in got["why"], got)
-        home, root = make_project({"live": {"type": "http", "url": base + "/mcp"}},
-                                  {"enabledMcpjsonServers": ["live"]})
+        t0 = time.monotonic()
+        got = mp.probe({"type": "http", "url": base + "/slow"}, deadline=time.monotonic() + 2)
+        took = time.monotonic() - t0
+        check("медленное тело: срок сверяется между кусками — fail не позже бюджета",
+              got["state"] == "fail" and "время проверки вышло" in got["why"] and took < 3.5, (got, took))
+        live = {"type": "http", "url": base + "/mcp"}
+        home, root = make_project({"live": live}, {"enabledMcpjsonServers": ["live"]}, pins={"live": live})
         r = cli(home, root)
-        check("check: одобренный живой сервер — «+ live (http): подключается»",
+        check("check: одобренный живой сервер с отпечатком — «+ live (http): подключается»",
               "+ live (http): подключается" in r.stdout, f"{r.stdout!r} {r.stderr!r}")
+        Handler.seen.clear()
+        home, root = make_project({"live": live}, {"enabledMcpjsonServers": ["live"]},
+                                  pins={"live": {"type": "http", "url": "https://old.test/mcp"}})
+        r = cli(home, root)
+        check("url сменили после одобрения (отпечаток не совпал): к местному серверу запросов нет",
+              "live (http): изменён после одобрения" in r.stdout and not Handler.seen, (r.stdout, Handler.seen))
+        home, root = make_project({"live": live}, {"enableAllProjectMcpServers": True,
+                                                   "enabledMcpjsonServers": ["live"]})
+        r = cli(home, root)
+        check("запись без отпечатка (одобрена только общим settings.json): запросов нет",
+              "live (http): не одобрен на этом Mac" in r.stdout and not Handler.seen, (r.stdout, Handler.seen))
     finally:
         srv.shutdown()
         srv.server_close()
@@ -319,6 +395,7 @@ if __name__ == "__main__":
                 v()
             except Exception as e:  # noqa: BLE001 — провал случая, а не всего файла
                 check(f"{k}: исключение", False, repr(e))
-    print(f"\n{'ПРОВАЛ: ' + ', '.join(FAILS) if FAILS else 'все прошли'}")
+    # итог в формате раннера (TEST_SUMMARY run-tests.py)
+    print(f"\n{'ПРОВАЛ: ' + ', '.join(FAILS) if FAILS else f'{len(OKS)} из {len(OKS)} прошли'}")
     sys.stdout.flush()
     os._exit(1 if FAILS else 0)

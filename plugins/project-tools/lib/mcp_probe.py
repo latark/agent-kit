@@ -9,13 +9,18 @@
   auth   не проверен — нужен вход: 401/403 или заголовок WWW-Authenticate (OAuth) — сервер не считается подключённым,
          вход делает владелец в окне (/mcp → Authenticate); сервер с ключом в headers .mcp.json — «нужен ключ»;
   fail   не подключается: сеть, таймаут, не HTTP 200, не MCP, ошибка JSON-RPC — причина в why;
-  skip   не проверен: stdio (процесс не запускаем — его запускает Claude Code в окне), не одобрен в настройках проекта
-         (адрес из чужого репозитория без вашего одобрения не трогаем), выключен вами, адрес из переменной окружения,
-         старый транспорт SSE, схема не http(s).
-Сеть — с таймаутом на запрос (TIMEOUT) и на весь проход (BUDGET), без ключей владельца: заголовки из .mcp.json,
-cookie и Authorization не отправляются; перенаправления не выполняются (3xx — fail); ответ читается не больше MAX_BODY.
+  skip   не проверен: stdio (процесс не запускаем — его запускает Claude Code в окне), не одобрен в настройках проекта,
+         не одобрен на этом Mac (нет отпечатка записи от `project-tools apply`), изменён после одобрения (отпечаток не
+         совпал), выключен вами, адрес из переменной окружения, старый транспорт SSE, схема не http(s).
+Сеть открывает только отпечаток на этом Mac (pins, metis-1153 круг 2): одобрение из общего .claude/settings.json или
+enableAllProjectMcpServers приходит с git pull и само по себе адрес из репозитория не трогает.
+Сеть — с таймаутом на запрос (TIMEOUT) и на весь проход (BUDGET, и на чтение тела — кусками, срок сверяется между
+ними), без ключей владельца: заголовки из .mcp.json, cookie и Authorization не отправляются; перенаправления не
+выполняются (3xx — fail); ответ читается не больше MAX_BODY. Любой сбой пробы — fail с именем типа ошибки, без её
+текста; проверка не роняет `project-tools check`.
 Только stdlib.
 """
+import http.client
 import json
 import time
 import urllib.error
@@ -28,6 +33,11 @@ BUDGET = 30            # секунд на все серверы проекта
 MAX_BODY = 1 << 20
 ACCEPT = "application/json, text/event-stream"
 CLIENT = {"name": "project-tools", "version": "1"}
+CHUNK = 16384
+
+
+class OutOfTime(Exception):
+    """Срок проверки (BUDGET или TIMEOUT запроса) вышел — в том числе посреди чтения тела."""
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -35,17 +45,33 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def read_body(r, end):
+    """Тело кусками до MAX_BODY; срок end (monotonic) сверяется между кусками: сервер, который цедит по байту, не
+    растянет проверку дальше срока (таймаут сокета — на один recv, а не на всё тело)."""
+    out = b""
+    while len(out) < MAX_BODY:
+        if time.monotonic() > end:
+            raise OutOfTime("тело не дочитано к сроку")
+        piece = r.read1(min(CHUNK, MAX_BODY - len(out))) if hasattr(r, "read1") else r.read(CHUNK)
+        if not piece:
+            break
+        out += piece
+    return out
+
+
 def http_post(url, body, headers, timeout):
-    """POST → (код HTTP, заголовки с именами в нижнем регистре, тело до MAX_BODY байт). Сбой сети — OSError."""
+    """POST → (код HTTP, заголовки с именами в нижнем регистре, тело до MAX_BODY байт). Сбой сети — OSError, срок —
+    OutOfTime, кривой ответ — http.client.HTTPException."""
+    end = time.monotonic() + timeout
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(req, timeout=timeout) as r:
-            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read(MAX_BODY)
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, read_body(r, end)
     except urllib.error.HTTPError as e:
         try:
-            data = e.read(MAX_BODY)
-        except OSError:
+            data = read_body(e, end)
+        except (OSError, OutOfTime, http.client.HTTPException):
             data = b""
         return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, data
 
@@ -116,7 +142,7 @@ def probe(cfg, post=http_post, deadline=None):
     def call(body, session, version):
         left = deadline - time.monotonic()
         if left <= 0.5:
-            raise TimeoutError("время проверки вышло")
+            raise OutOfTime("время проверки вышло")
         h = {"Content-Type": "application/json", "Accept": ACCEPT}
         if session:
             h["Mcp-Session-Id"] = session
@@ -152,8 +178,11 @@ def probe(cfg, post=http_post, deadline=None):
         if not isinstance(tools, list):
             why = f"HTTP {status}" if status != 200 else "ответ не MCP или без списка tools"
             return {"state": "fail", "why": f"не подключается: tools/list — {why}"}
-    except (OSError, TimeoutError, ValueError) as e:   # URLError, таймаут сокета, обрыв — это OSError
-        return {"state": "fail", "why": f"не подключается: {type(e).__name__}: {str(e)[:120]}"}
+    except OutOfTime:
+        return {"state": "fail", "why": "не подключается: время проверки вышло"}
+    except Exception as e:  # noqa: BLE001 — любой сбой пробы (OSError, HTTPException, кривой JSON) — fail, не падение
+        # текст ошибки в вывод не берём: в нём бывает ответ сервера, а вывод читает агент (только имя типа)
+        return {"state": "fail", "why": f"не подключается: {type(e).__name__}"}
     return {"state": "ok", "why": f"подключается: initialize и tools/list ответили, инструментов {len(tools)}",
             "tools": len(tools)}
 
@@ -172,17 +201,27 @@ def approved_names(shared, local, proj, user):
     return on, off
 
 
-def check_servers(servers, approved, off, post=http_post):
-    """Все серверы .mcp.json → [(имя, kind, итог probe)], по имени. Не одобренный и выключенный — skip без сети."""
+def check_servers(servers, approved, off, pins, post=http_post):
+    """Все серверы .mcp.json → [(имя, kind, итог probe)], по имени. pins — имя → "ok" (отпечаток записи на этом Mac
+    совпал), "drift" (не совпал); имени нет — отпечатка нет. Выключенный, не одобренный, без отпечатка или изменённый
+    после одобрения HTTP-сервер — skip без сети."""
     deadline = time.monotonic() + BUDGET
     out = []
     for name in sorted(servers):
         cfg = servers[name]
+        net = server_kind(cfg) != "stdio"
         if name in off:
             got = {"state": "skip", "why": "выключен вами — не проверяю"}
-        elif approved is not None and name not in approved and server_kind(cfg) != "stdio":
+        elif net and approved is not None and name not in approved:
             got = {"state": "skip", "why": "не одобрен в настройках проекта — адрес не трогаю"}
+        elif net and pins.get(name) == "drift":
+            got = {"state": "skip", "why": "изменён после одобрения — не проверяю (project-tools check: ⚠ выше)"}
+        elif net and pins.get(name) != "ok":
+            got = {"state": "skip", "why": "не одобрен на этом Mac — не проверяю (отпечатка нет: project-tools apply)"}
         else:
-            got = probe(cfg, post, deadline)
+            try:
+                got = probe(cfg, post, deadline)
+            except Exception as e:  # noqa: BLE001 — сбой пробы одного сервера не роняет check
+                got = {"state": "fail", "why": f"не подключается: {type(e).__name__}"}
         out.append((name, server_kind(cfg), got))
     return out

@@ -150,6 +150,30 @@ def test_no_restart_without_flag_or_finger():
     check("gh pr merge упал: перезапуска нет", not restarts(b) and "[resume]" not in r.stdout, r.stdout)
 
 
+def test_replaced_during_window():
+    """Пока открыто окно Touch ID, заявку заменили другой с другим --restart (тот же SHA, та же секунда постановки):
+    окно показывало athena-shop — не сливается и не перезапускается ни одно из окон."""
+    b = restart_box(doms=(WIN, "athena-other"))
+    ask(b, "--restart", WIN)
+    with open(os.path.join(b.rec, "swap-req"), "w") as fh:
+        fh.write(b.req_path())
+    script(b.touchid, r'''
+import json, os, sys
+rec = os.environ["FAKE_REC"]
+with open(os.path.join(rec, "touchid-argv.jsonl"), "a") as fh:
+    fh.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
+path = open(os.path.join(rec, "swap-req")).read()
+req = json.load(open(path))
+req["restart"] = "athena-other"
+json.dump(req, open(path, "w"))
+sys.exit(0)
+''')
+    r = b.run(extra=run_env(b))
+    check("заявку заменили с другим --restart во время окна: не слито, перезапуска нет",
+          not b.merges() and not restarts(b) and "[resume]" not in r.stdout and b.windows()
+          and f"перезапустить окно {WIN}" in b.windows()[0][0], f"{r.stdout!r} {b.merges()} {restarts(b)}")
+
+
 def test_phrase_merge_does_not_restart():
     b = restart_box()
     ask(b, "--restart", WIN)
@@ -197,8 +221,9 @@ def test_bad_restart_field_dropped():
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544); исключение — провал случая
-    run_cases([(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)], FAILS,
-              lambda name, err: FAILS.append(name))
-    print(f"\n{'ПРОВАЛ: ' + ', '.join(FAILS) if FAILS else 'все прошли'}")
+    cases = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    run_cases(cases, FAILS, lambda name, err: FAILS.append(name))
+    # итог в формате раннера (TEST_SUMMARY run-tests.py): «N из M … прошли» или «ПРОВАЛ: …»
+    print(f"\n{'ПРОВАЛ: ' + ', '.join(FAILS) if FAILS else f'{len(cases)} из {len(cases)} случаев прошли'}")
     sys.stdout.flush()
     os._exit(1 if FAILS else 0)
