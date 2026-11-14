@@ -56,6 +56,9 @@ for d in (QDIR, OTHER, OWNQ):
 URL = ("https://api.supabase.com/v1/oauth/authorize?response_type=code&client_id=cid-1&code_challenge=Chal-9x"
        "&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A51234%2Fcallback&state=St4te-q7Zp")
 RU = "redirect_uri=http%3A%2F%2Flocalhost%3A51234%2Fcallback"
+# ссылка, которую проход собирает заново: пары в порядке QUERY_KEYS через urlencode — её получает open, а не URL
+BUILT = ("https://api.supabase.com/v1/oauth/authorize?response_type=code&client_id=cid-1&" + RU
+         + "&state=St4te-q7Zp&code_challenge=Chal-9x&code_challenge_method=S256")
 
 
 def check(name, cond, extra=""):
@@ -136,7 +139,8 @@ reset()
 code, out, rid, res = run()
 log = read(OPEN_LOG)
 check("окно: код 0, итог done", code == 0 and (res or {}).get("state") == "done", (code, out, res))
-check("окно: open позван одним аргументом — адрес как есть", log == f"argc=1\narg={URL}\n", log)
+check("окно: open позван одним аргументом — ссылкой, собранной проходом", BUILT != URL
+      and log == f"argc=1\narg={BUILT}\n", log)
 check("окно: уведомление «окно w просит вход в Supabase» с client_id и хостом redirect_uri",
       "Окно w просит вход в Supabase (клиент cid-1, ответ на localhost)" in read(NOTIFY_LOG), read(NOTIFY_LOG))
 check("окно: вывод команды называет client_id и хост redirect_uri", "клиент cid-1, ответ на localhost" in out, out)
@@ -159,12 +163,18 @@ BAD = {
     "«.» в пути": URL.replace("/v1/oauth/authorize", "/v1/oauth/authorize/./x"),
     "«%» в пути": URL.replace("/v1/oauth/authorize", "/v1/oauth/%61uthorize"),
     "пробел": URL + " -a Calculator",
-    "обратная черта": URL + "&next=\\\\evil.example.com",
+    "обратная черта": URL.replace("state=St4te-q7Zp", "state=St4te\\q7Zp"),
+    "подпуть": URL.replace("/authorize", "/authorize/x"),
+    "чужой ключ": URL + "&prompt=none",
+    "redirect_uri[]": URL + "&redirect_uri%5B%5D=http%3A%2F%2Fevil.example.com%2Fcallback",
+    "ключ с «[»": URL.replace("state=", "state[0]="),
+    "«;» в запросе": URL.replace("&state=", ";state="),
+    "17 параметров": URL + "&scope=a" * 11,
     "не ASCII": URL.replace("api.supabase.com", "api.supab\u0430se.com"),
     "file:": "file:///Applications/Calculator.app",
     "ключ open": "-a Calculator",
     "пусто": "",
-    "длинный": URL + "&x=" + "a" * A.URL_MAX,
+    "длинный": URL.replace("state=St4te-q7Zp", "state=" + "a" * A.URL_MAX),
     # запрос ссылки и redirect_uri (находка проверки безопасности: код доступа не должен уйти на чужой адрес)
     "фрагмент": URL + "#x",
     "пустой фрагмент": URL + "#",
@@ -191,12 +201,22 @@ BAD = {
 for what, bad in BAD.items():
     check(f"белый список: {what} — отказ check_url", bad != URL and A.check_url(bad)[0] is None, A.check_url(bad))
 check("белый список: адрес Supabase OAuth — принят",
-      A.check_url(URL) == ({"host": "api.supabase.com", "client": "cid-1", "redirect": "localhost"}, None),
-      A.check_url(URL))
-check("белый список: порт 443, подпуть и ответ на 127.0.0.1 — приняты",
+      A.check_url(URL) == ({"host": "api.supabase.com", "client": "cid-1", "redirect": "localhost", "url": BUILT},
+                           None), A.check_url(URL))
+check("белый список: порт 443 и ответ на 127.0.0.1 — приняты",
       all((A.check_url(u)[0] or {}).get("host") == "api.supabase.com" for u in (
-          URL.replace("api.supabase.com", "api.supabase.com:443"), URL.replace("/authorize", "/authorize/x"),
+          URL.replace("api.supabase.com", "api.supabase.com:443"),
           URL.replace(RU, RU.replace("localhost", "127.0.0.1")))))
+check("сборка: «:443» исходной строки в собранную ссылку не идёт — она та же, что без порта",
+      (A.check_url(URL.replace("api.supabase.com", "api.supabase.com:443"))[0] or {}).get("url") == BUILT)
+check("сборка: scope и resource — в собранной ссылке по urlencode, в порядке белого списка",
+      (A.check_url(URL + "&resource=https%3A%2F%2Fmcp.supabase.com%2Fmcp&scope=a+b")[0] or {}).get("url")
+      == BUILT + "&scope=a+b&resource=https%3A%2F%2Fmcp.supabase.com%2Fmcp")
+check("17 параметров: отказ именно по числу параметров",
+      "больше 16 параметров" in str(A.check_url(BAD["17 параметров"])[1]), A.check_url(BAD["17 параметров"]))
+check("redirect_uri[] и «[»: отказ как ключ не из белого списка",
+      all("не из белого списка" in str(A.check_url(BAD[k])[1]) for k in ("redirect_uri[]", "ключ с «[»")))
+check("«;»: отказ именно по «;»", "«;»" in str(A.check_url(BAD["«;» в запросе"])[1]), A.check_url(BAD["«;» в запросе"]))
 LONG = "c" * 60
 check("client_id длиннее 40 — показан первыми 40 знаками",
       (A.check_url(URL.replace("client_id=cid-1", "client_id=" + LONG))[0] or {}).get("client") == LONG[:40])
@@ -250,7 +270,7 @@ LIVE[0] = None
 rid = put(OWNQ)
 res = round_result(OWNQ, rid)
 check("очередь STATE (ваша сессия): открыта без проверки окна", res.get("state") == "done"
-      and read(OPEN_LOG) == f"argc=1\narg={URL}\n", (res, read(OPEN_LOG)))
+      and read(OPEN_LOG) == f"argc=1\narg={BUILT}\n", (res, read(OPEN_LOG)))
 
 # 4. прочие отказы
 reset()
@@ -272,6 +292,90 @@ reset()
 codes = [run()[0] for _ in range(A.RATE_MAX + 1)]
 check("лимит: RATE_MAX открытий подряд — 0, следующее — отказ",
       codes == [0] * A.RATE_MAX + [1] and read(OPEN_LOG).count("argc=") == A.RATE_MAX, (codes, read(OPEN_LOG)))
+reset()
+got = [round_result(OTHER, put(OTHER)).get("state") for _ in range(A.RATE_MAX)]
+code, out, rid, res = run()
+check("лимит по окну: RATE_MAX открытий окна w2 не тратят лимит окна w",
+      got == ["done"] * A.RATE_MAX and code == 0 and (res or {}).get("state") == "done", (got, out, res))
+
+# 4а. возраст заявки — по времени файла и поля time: окно не омолодит заявку
+reset()
+rid = put(QDIR, age=-(A.CLOCK_SKEW + 600))
+res = round_result(QDIR, rid)
+check("время заявки в будущем: failed, open не позван", res.get("state") == "failed"
+      and "в будущем" in res.get("why", "") and not read(OPEN_LOG), res)
+
+
+def put_untimed(qdir, file_age):
+    """Заявка без поля time, файлу — возраст file_age с (отрицательный — будущее) → rid."""
+    rid = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
+    put(qdir, req={"v": 1, "id": rid, "kind": "auth", "url": URL}, rid=rid)
+    t = time.time() - file_age
+    os.utime(os.path.join(qdir, rid + A.SUFFIX), (t, t))
+    return rid
+
+
+reset()
+res = round_result(QDIR, put_untimed(QDIR, A.AUTH_TTL + 60))
+check("без поля time, старый файл: failed «устарела», open не позван", res.get("state") == "failed"
+      and "устарела" in res.get("why", "") and not read(OPEN_LOG), res)
+reset()
+res = round_result(QDIR, put_untimed(QDIR, 0))
+check("без поля time, свежий файл: открыта", res.get("state") == "done" and read(OPEN_LOG) == f"argc=1\narg={BUILT}\n",
+      (res, read(OPEN_LOG)))
+reset()
+res = round_result(QDIR, put_untimed(QDIR, -(A.CLOCK_SKEW + 600)))
+check("файл заявки из будущего: failed, open не позван", res.get("state") == "failed"
+      and "в будущем" in res.get("why", "") and not read(OPEN_LOG), res)
+reset()
+rid = put(QDIR)
+t = time.time() - (A.AUTH_TTL + 60)
+os.utime(os.path.join(QDIR, rid + A.SUFFIX), (t, t))
+res = round_result(QDIR, rid)
+check("свежее поле time, старый файл: failed «устарела» (берётся старшее)", res.get("state") == "failed"
+      and "устарела" in res.get("why", "") and not read(OPEN_LOG), res)
+reset()
+rid = put(QDIR, age=A.AUTH_TTL + 60)
+t = time.time()
+os.utime(os.path.join(QDIR, rid + A.SUFFIX), (t, t))
+res = round_result(QDIR, rid)
+check("старое поле time, свежий файл: failed «устарела»", res.get("state") == "failed"
+      and "устарела" in res.get("why", ""), res)
+
+# 4б. папку заявок не прочесть — круг входа MCP не падает (и уборка serve_round после него идёт)
+reset()
+rid = put(QDIR)
+real_listdir, calls = os.listdir, []
+
+
+def broken_listdir(path="."):
+    if isinstance(path, int):
+        calls.append(path)
+        raise PermissionError("нет доступа")
+    return real_listdir(path)
+
+
+os.listdir = broken_listdir
+try:
+    taken, err = A._take_requests(), None
+except OSError as e:
+    taken, err = None, e
+finally:
+    os.listdir = real_listdir
+check("listdir папки заявок упал: _take_requests → [], без исключения", taken == [] and err is None and calls,
+      (taken, err, calls))
+os.listdir = broken_listdir
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        A.auth_round()
+    err = None
+except OSError as e:
+    err = e
+finally:
+    os.listdir = real_listdir
+check("listdir папки заявок упал: auth_round без исключения, заявка осталась", err is None
+      and os.path.exists(os.path.join(QDIR, rid + A.SUFFIX)), err)
+round_result(QDIR, rid)
 reset()
 for args in ([], [URL, "--wait", "x"], [URL, "--bad", "1"]):
     out = io.StringIO()
