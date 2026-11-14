@@ -771,6 +771,22 @@ def t_ci_hashed(h):
     got = mg._billing_problem("someone/proj", 7, sha)[0] or ""
     check("_billing_problem: someone/proj — запасного пути нет", "запасного пути у репозитория нет" in got, got)
 
+    # metis-1116: признак «лимит минут» не привязан к agent-kit — он считается по обязательным проверкам репозитория
+    # (ci_billing_ids от required_checks), поэтому у проекта с job tests/checks (PR в develop или main) он тоже есть
+    note = [{"annotation_level": "failure", "path": ".github", "message": mg.CI_BILLING + ". Go to billing"}]
+    idle = {"runner_id": 0, "runner_name": "", "steps": []}
+    for base in ("develop", "main"):
+        req = mg.required_checks("owner-x/proj", base)
+        runs = [{"workflowName": "tests", "name": "checks", "status": "COMPLETED", "conclusion": "FAILURE",
+                 "event": "pull_request", "id": 501, "annotations": 1}] * len(req)
+        check(f"ci_billing проекта (хеш), PR в {base}: лимит минут узнан",
+              mg.ci_billing(runs, req, {501: note}, {501: idle}) is True, runs)
+    check("ci_billing проекта: job стартовал (обычная красная) — признака нет",
+          mg.ci_billing(runs, req, {501: note}, {501: dict(idle, runner_id=7, runner_name="gh", steps=[{}])}) is False)
+    check("ci_billing проекта: аннотация другая — признака нет",
+          mg.ci_billing(runs, req, {501: [dict(note[0], message="Process completed with exit code 1.")]},
+                        {501: idle}) is False)
+
 
 CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed]
 

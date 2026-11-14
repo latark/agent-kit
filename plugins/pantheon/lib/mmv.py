@@ -1,4 +1,5 @@
 """Замер минут владельца на систему (ММВ, metis-0169): только время событий, текст журналов не читается.
+Там же строка сводки «минуты Actions: N из 2000» (metis-1116, actions_line).
 
 События — поле time в owner-log/board.jsonl и заголовки «## ГГГГ-ММ-ДД ЧЧ:ММ:СС …» в owner-log/*.md (местное время).
 ММВ за день = сумма промежутков между соседними событиями, не длиннее 5 мин (длиннее — перерыв, в минуты не идёт),
@@ -10,6 +11,8 @@ import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -162,6 +165,46 @@ def line(state, days=7, t=None):
     avg = sum(r["min"] for r in rest[-days:]) / max(1, len(rest[-days:]))
     return (f"ММВ (минуты владельца): вчера {fmt(yest['min'])} мин ({_entries(yest['entries'])}), "
             f"среднее за {days} дн. {fmt(avg)} мин")
+
+
+ACTIONS_QUOTA = 2000  # включённые минуты Actions в месяц (план Free)
+ACTIONS_USER = "latark"
+ACTIONS_NONE = "минуты Actions: нет данных"
+# кратность минут к квоте: Linux 1, Windows 2, macOS 10 (docs.github.com, About billing for GitHub Actions)
+ACTIONS_MULT = (("macos", 10), ("windows", 2))
+
+
+def _gh_usage(user, year, month, timeout=20):
+    """Ответ GitHub billing usage (metis-1116): `gh api /users/<user>/settings/billing/usage?year=&month=` как словарь;
+    gh нет, сбой, таймаут, 410/403 и не-JSON — None. Старый `.../billing/actions` GitHub отключил (410, апрель 2026)."""
+    exe = os.environ.get("PANTHEON_GH") or shutil.which("gh")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "api", f"/users/{user}/settings/billing/usage?year={year}&month={month}"],
+                           capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def actions_line(t=None, usage=None):
+    """Строка сводки «минуты Actions: N из 2000» за месяц t: сумма quantity по записям product=actions в минутах с
+    кратностью SKU (macOS ×10, Windows ×2). usage — ответ _gh_usage (без него запрашивается). Нет данных, сбой gh или
+    ответ не того вида — «минуты Actions: нет данных»: сводку строка не роняет."""
+    d = _today(t)
+    user = os.environ.get("PANTHEON_GH_USER") or ACTIONS_USER
+    try:
+        data = usage if usage is not None else _gh_usage(user, d.year, d.month)
+        items = data["usageItems"]
+        total = 0.0
+        for it in items:
+            if it.get("product") == "actions" and it.get("unitType") == "Minutes":
+                sku = str(it.get("sku") or "").lower()
+                total += float(it["quantity"]) * next((k for w, k in ACTIONS_MULT if w in sku), 1)
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return ACTIONS_NONE
+    return f"минуты Actions: {round(total)} из {ACTIONS_QUOTA}"
 
 
 def main(rest, state, t=None):
