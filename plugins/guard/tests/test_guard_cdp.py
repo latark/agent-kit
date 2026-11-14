@@ -215,6 +215,11 @@ def main():
         ("cdp: prometheus curl 127.0.0.1:9333/open — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/open -d '{}'")),
         ("cdp: prometheus /cmd — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
         ("cdp: /close — отказ и workshop", "deny", ws, "workshop", False, B("curl -s -X POST 127.0.0.1:9333/close")),
+        # metis-1038: браузер с входами владельца — только у Харона (BROW-10); мастерская не запускает демон и не читает пароль
+        ("cdp: workshop запускает демон — отказ (metis-1038)", "deny", ws, "workshop", False,
+         B("node ~/.claude/tools/cdp-daemon.mjs comet")),
+        ("cdp: workshop читает пароль демона — отказ (metis-1038)", "deny", ws, "workshop", False,
+         B("cat ~/.config/cdp-daemon/token")),
         ("cdp: hq запускает демон — отказ", "deny", ".", "hq", False, B("node ~/.claude/tools/cdp-daemon.mjs chromium")),
         ("cdp: ваша сессия без роли — можно", "allow", ".", "", False, B("curl -s 127.0.0.1:9333/health")),
         *[(f"mktemp: {c!r} — запись в $TMPDIR, можно", "allow", br, "dev-sonnet", True, B(c)) for c in (
