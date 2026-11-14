@@ -1103,7 +1103,15 @@ def decision_hint(repo, pr, sha):
     why = "; ".join(str(w) for w in last.get("why") or [] if isinstance(w, str))
     if last.get("kind") == "decision-miss":
         return f"сверка кода прошлых head хуком guard не успела ({why or 'причина не названа'}) — {again}"
-    return f"сверка кода прошлых head хуком guard не досчитана ({why}) — {again}" if why else None
+    # повтор снимает только срок хука и молчание gh; «старше CARRY_HEADS», «не клон», бюджет сверки и прочее он не
+    # снимет — тогда прежний текст отказа (дельта-круг, новый круг argus)
+    retry = "; ".join(w for w in last.get("why") or [] if isinstance(w, str) and _retry_why(w))
+    return f"сверка кода прошлых head хуком guard не досчитана ({retry}) — {again}" if retry else None
+
+
+def _retry_why(why):
+    """Причина несделанной сверки, которую снимет повтор заявки (metis-1181): срок хука или gh не ответил."""
+    return "срок хука" in why or "gh" in why and any(w in why for w in ("не ответил", "не успел", "не получить"))
 
 
 def held_rejects(verdicts, sha, differs=frozenset()):

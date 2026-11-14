@@ -281,6 +281,14 @@ GIT_MARGIN = 1.5  # с до срока хука, которые git оставл
 GIT_TIMEOUT_MIN = 0.05  # с: до срока хука меньше GIT_MARGIN — git гаснет сразу, шлюз отказывает с причиной (metis-0975)
 
 
+def _hook_left():
+    """Сколько секунд до срока хука (таймер ITIMER_REAL guard_rules.set_deadline); 0 — таймера нет."""
+    try:
+        return signal.getitimer(signal.ITIMER_REAL)[0]
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
 def _git_timeout():
     """Срок одного местного git (metis-0787). Под нагрузкой Mac git бывал дольше 3 с, и шлюз отказывал «git не ответил»
     или «не клон» ложно. Под таймером хука (ITIMER_REAL, guard_rules.set_deadline) git ждёт столько, сколько осталось
@@ -2669,6 +2677,12 @@ class _Prints:
     def _late(self):
         if time.monotonic() - self.t0 > self.budget:
             self._note(f"сверка дольше {self.budget:g} с — остановлена (таймаут хука 10 с)")
+            return True
+        # до срока хука меньше GIT_MARGIN (metis-1181): git там гаснет за GIT_TIMEOUT_MIN, но на 8 head таких вызовов
+        # десятки, и вместе они дошли бы до HookTimeout — команда встала бы отказом по сроку
+        left = _hook_left()
+        if left and left < GIT_MARGIN:
+            self._note(f"срок хука: до него меньше {GIT_MARGIN:g} с — сверка остановлена")
             return True
         return False
 

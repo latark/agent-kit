@@ -350,16 +350,6 @@ def t_request_decision(h):
     got = [x for x in carry_lines(h) if x.get("kind") == "decision-miss"]
     check("решение (metis-1181): base PR неизвестна — след decision-miss с причиной", len(got) == 1
           and got[0]["pr"] == 7 and got[0]["sha"] == qdm and "gh pr view" in got[0]["why"][0], got)
-    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, решения нет, есть след
-    mg = _load_merge_gate("merge_gate_request_decision")
-    calls = []
-    mg._gh_fits = lambda *a: False
-    mg._pr_view = lambda repo, pr, *a: calls.append(("view", pr)) or {}
-    mg.append_carry = lambda r: calls.append(("carry", r))
-    mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
-    check("решение: срок хука не вмещает gh — gh pr view не зовётся, решения нет, след decision-miss (metis-1181)",
-          len(calls) == 1 and calls[0][0] == "carry" and calls[0][1]["kind"] == "decision-miss"
-          and "срок хука" in calls[0][1]["why"][0], calls)
 
 
 def t_decision_deadline(h):
@@ -376,6 +366,16 @@ def t_decision_deadline(h):
     bd2 = plumb(p, [bd], {"d.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
     qd = plumb(p, [bd], {"d.txt": F(pr_d)}, "PR: правка d.txt")
     qdm = plumb(p, [qd, bd2], {"d.txt": F("top\n" + pr_d)}, "PR: подтянул main", src=bd2)
+    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, решения нет, есть след
+    mg = _load_merge_gate("merge_gate_request_decision")
+    calls = []
+    mg._gh_fits = lambda *a: False
+    mg._pr_view = lambda repo, pr, *a: calls.append(("view", pr)) or {}
+    mg.append_carry = lambda r: calls.append(("carry", r))
+    mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
+    check("решение: срок хука не вмещает gh — gh pr view не зовётся, решения нет, след decision-miss (metis-1181)",
+          len(calls) == 1 and calls[0][0] == "carry" and calls[0][1]["kind"] == "decision-miss"
+          and "срок хука" in calls[0][1]["why"][0], calls)
     for left, want in ((5.0, "decision"), (3.0, "decision-miss")):
         mg = _load_merge_gate(f"merge_gate_decision_deadline_{int(left)}")
         mg.signal = types.SimpleNamespace(ITIMER_REAL=0, getitimer=lambda which, left=left: (left, 0.0))
@@ -450,7 +450,21 @@ def t_carry_rej(h):
          [x_rej, x_acc, tests(qam)], True)
 
 
-CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_decision_deadline, t_carry_rej]
+def t_prints_late(h):
+    """metis-1181: сверка отпечатков (_Prints._late) останавливается не только по бюджету CARRY_BUDGET, но и когда до
+    срока хука меньше GIT_MARGIN: git там гаснет за 0,05 с, но на 8 head таких вызовов десятки — до HookTimeout."""
+    import types
+    for left, want in ((1.0, True), (5.0, False), (0, False)):
+        mg = _load_merge_gate(f"merge_gate_prints_late_{int(left * 10)}")
+        mg.signal = types.SimpleNamespace(ITIMER_REAL=0, getitimer=lambda which, left=left: (left, 0.0))
+        fp = mg._Prints(None, "latark/agent-kit", "a" * 40, [], lambda: None)
+        got = fp._late()
+        check(f"metis-1181: до срока хука {left:g} с (бюджет не вышел) — сверка {'остановлена' if want else 'идёт'}",
+              got is want and (any("срок хука" in w for w in fp.why) if want else fp.why == []), (got, fp.why))
+
+
+CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_decision_deadline, t_prints_late,
+         t_carry_rej]
 
 
 if __name__ == "__main__":

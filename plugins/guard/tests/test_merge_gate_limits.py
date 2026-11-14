@@ -103,10 +103,76 @@ def t_carry_budget(h):
         mg._fingerprint = saved
 
 
+# metis-1181: решение шлюза при `pantheon merge request` зовёт gh pr view и вершину base со своим сроком
+# DECISION_GH_TIMEOUT 3 с — с общим GH_TIMEOUT 6 с второй gh под DEADLINE 8 с не помещался, решения не было (#461).
+# Срок обёрток gh — только GH_TIMEOUT или DECISION_GH_TIMEOUT; он не больше GH_TIMEOUT и с запасом PUSH_GH_MARGIN
+# меньше DEADLINE. Обёртки: имя → номер позиционного аргумента timeout; внутри них параметр timeout передаётся дальше
+# как есть, а по умолчанию он GH_TIMEOUT
+GH_WRAPS = {"_gh_json": 1, "_gh_timed": 1, "_pr_view": 2, "_base_tip": 3, "_gh_fits": 0}
+GH_NAMES = {"GH_TIMEOUT", "DECISION_GH_TIMEOUT"}
+
+
+def _decision_timeouts(c, deadline, bad):
+    """DECISION_GH_TIMEOUT = 3, не больше GH_TIMEOUT и вместе с PUSH_GH_MARGIN меньше DEADLINE (metis-1181)."""
+    dec, gh, push_margin = c.get("DECISION_GH_TIMEOUT"), c.get("GH_TIMEOUT"), c.get("PUSH_GH_MARGIN")
+    if dec != 3:
+        bad.append(f"merge_gate.py: DECISION_GH_TIMEOUT = {dec!r}, боевой 3")
+    if not all(isinstance(x, (int, float)) for x in (dec, gh, push_margin, deadline)) or dec > gh \
+            or dec + push_margin >= deadline:
+        bad.append(f"merge_gate.py: DECISION_GH_TIMEOUT {dec!r} — нужно не больше GH_TIMEOUT {gh!r} и вместе с "
+                   f"PUSH_GH_MARGIN {push_margin!r} меньше DEADLINE {deadline!r}")
+
+
+def _run_timeout(n, fname, gits, bad):
+    """timeout= у subprocess.run: _git_timeout() (в gits), GH_TIMEOUT или параметр timeout внутри _gh_json."""
+    import ast
+    for kw in n.keywords:
+        if kw.arg != "timeout":
+            continue
+        v = kw.value
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "_git_timeout" \
+                and not v.args and not v.keywords:
+            gits.append(n.lineno)
+        elif not (isinstance(v, ast.Name) and (v.id == "GH_TIMEOUT" or v.id == "timeout" and fname == "_gh_json")):
+            bad.append(f"merge_gate.py:{n.lineno}: timeout не _git_timeout() и не GH_TIMEOUT")
+
+
+def _wrap_timeout(n, ok, bad):
+    """Явный срок в вызове обёртки gh (GH_WRAPS) — имя из ok."""
+    import ast
+    i = GH_WRAPS[n.func.id]
+    given = ([n.args[i]] if len(n.args) > i else []) + [kw.value for kw in n.keywords if kw.arg == "timeout"]
+    if any(not (isinstance(v, ast.Name) and v.id in ok) for v in given):
+        bad.append(f"merge_gate.py:{n.lineno}: {n.func.id} — срок gh не GH_TIMEOUT и не DECISION_GH_TIMEOUT")
+
+
+def _timeout_calls(tree, bad):
+    """Сроки у subprocess.run и обёрток gh по всему merge_gate.py → строки вызовов с timeout=_git_timeout()."""
+    import ast
+    gits = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)] + [tree]:
+        fname = fn.name if isinstance(fn, ast.FunctionDef) else ""
+        if fname in GH_WRAPS:
+            a = fn.args
+            for arg, d in zip(a.args[len(a.args) - len(a.defaults):], a.defaults):
+                if arg.arg == "timeout" and not (isinstance(d, ast.Name) and d.id == "GH_TIMEOUT"):
+                    bad.append(f"merge_gate.py:{fn.lineno}: {fname} — timeout по умолчанию не GH_TIMEOUT")
+        ok = GH_NAMES | ({"timeout"} if fname in GH_WRAPS else set())
+        body = fn.body if fname else [n for n in fn.body if not isinstance(n, ast.FunctionDef)]
+        for n in [x for st in body for x in ast.walk(st) if isinstance(x, ast.Call)]:
+            if isinstance(n.func, ast.Attribute) and n.func.attr == "run" \
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess":
+                _run_timeout(n, fname, gits, bad)
+            elif isinstance(n.func, ast.Name) and n.func.id in GH_WRAPS:
+                _wrap_timeout(n, ok, bad)
+    return sorted(set(gits))
+
+
 def prod_timeouts(sources):
     """Боевые сроки по тексту кода (AST), без ожидания и без GUARD_TEST_* (metis-0730). sources: {имя файла: текст}.
     → список нарушений. Правила: DEADLINE в guard.py, guard_rules.py, taint.py ровно 8 с; в merge_gate.py каждый
-    timeout= у subprocess.run — вызов _git_timeout() (местный git, metis-0787) или GH_TIMEOUT, GH_TIMEOUT = 6,
+    timeout= у subprocess.run — вызов _git_timeout() (местный git, metis-0787) или GH_TIMEOUT (в _gh_json — его
+    параметр timeout), срок обёрток gh — GH_TIMEOUT или DECISION_GH_TIMEOUT = 3 (metis-1181), GH_TIMEOUT = 6,
     GIT_TIMEOUT = 3, GIT_TIMEOUT_MAX = 6; все они меньше DEADLINE, иначе хук гаснет по сроку раньше, чем успевает
     отказать сам. Мало найденных мест — тоже нарушение (разбор не пустой)."""
     import ast
@@ -132,19 +198,8 @@ def prod_timeouts(sources):
     margin = consts(tree).get("GIT_MARGIN")
     if not isinstance(margin, (int, float)) or margin < 1:
         bad.append(f"merge_gate.py: GIT_MARGIN = {margin!r}, нужен запас не меньше 1 с до срока хука")
-    gits = []
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run" \
-                and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess":
-            for kw in n.keywords:
-                if kw.arg != "timeout":
-                    continue
-                v = kw.value
-                if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "_git_timeout" \
-                        and not v.args and not v.keywords:
-                    gits.append(n.lineno)
-                elif not (isinstance(v, ast.Name) and v.id == "GH_TIMEOUT"):
-                    bad.append(f"merge_gate.py:{n.lineno}: timeout не _git_timeout() и не GH_TIMEOUT")
+    _decision_timeouts(consts(tree), consts(ast.parse(sources["guard_rules.py"])).get("DEADLINE"), bad)
+    gits = _timeout_calls(tree, bad)
     if len(gits) < 3:
         bad.append(f"merge_gate.py: timeout=_git_timeout() у subprocess.run {len(gits)}, ждали 3")
     return bad
@@ -172,6 +227,20 @@ def t_prod_timeouts(h):
             ("GIT_TIMEOUT_MAX 6 → 9", "merge_gate.py", "GIT_TIMEOUT_MAX = 6 ", "GIT_TIMEOUT_MAX = 9 "),
             ("GIT_MARGIN 1.5 → 0", "merge_gate.py", "GIT_MARGIN = 1.5 ", "GIT_MARGIN = 0 "),
             ("GH_TIMEOUT 6 → 9", "merge_gate.py", "GH_TIMEOUT = 6", "GH_TIMEOUT = 9"),
+            # metis-1181: свой срок gh решения шлюза при заявке и его передача
+            ("DECISION_GH_TIMEOUT 3 → 9", "merge_gate.py", "DECISION_GH_TIMEOUT = 3\n", "DECISION_GH_TIMEOUT = 9\n"),
+            ("_pr_view в решении — срок 9", "merge_gate.py", "_pr_view(repo, pr, DECISION_GH_TIMEOUT)",
+             "_pr_view(repo, pr, 9)"),
+            ("_base_tip в решении — срок числом", "merge_gate.py", "_base_tip(repo, base, tips, DECISION_GH_TIMEOUT)",
+             "_base_tip(repo, base, tips, timeout=7)"),
+            ("_gh_fits в решении — чужое имя", "merge_gate.py", "_gh_fits(DECISION_GH_TIMEOUT):\n        return "
+             "_decision_miss(event, repo, pr, sha,", "_gh_fits(GIT_TIMEOUT):\n        return _decision_miss(event, "
+             "repo, pr, sha,"),
+            ("_gh_json — срок по умолчанию 20", "merge_gate.py", "def _gh_json(args, timeout=GH_TIMEOUT):",
+             "def _gh_json(args, timeout=20):"),
+            ("subprocess.run в _gh_timed — timeout=timeout", "merge_gate.py",
+             "return _gh_json(args) if timeout == GH_TIMEOUT else _gh_json(args, timeout)",
+             "return subprocess.run(args, timeout=timeout)"),
             ("DEADLINE guard.py 8 → 15", "guard.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
             ("DEADLINE guard_rules.py 8 → 15", "guard_rules.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
             ("DEADLINE taint.py 8 → 15", "taint.py", "DEADLINE = 8 ", "DEADLINE = 15 ")):
