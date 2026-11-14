@@ -35,6 +35,9 @@ log = os.environ["FAKE_CLAUDE_LOG"]
 open(log, "a").write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
 a = sys.argv[1:]
 if a[:1] == ["agents"]:
+    if os.environ.get("FAKE_AGENTS_SLEEP"):  # metis-1175: claude agents не отвечает
+        import time
+        time.sleep(float(os.environ["FAKE_AGENTS_SLEEP"]))
     nxt = os.environ.get("FAKE_AGENTS_NEXT")       # первый вызов — FAKE_AGENTS, все следующие — этот файл
     if nxt and os.path.exists(nxt + ".seen"):
         print(open(nxt).read())

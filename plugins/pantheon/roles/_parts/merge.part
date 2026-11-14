@@ -1,14 +1,14 @@
 PR в основную ветку сливают только через шлюз слияния guard (merge gate). Он пустит, только если на head PR есть все
 записи:
-1. Тесты — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
+1. Тесты. Есть строка `ci:` в `.pantheon-verify` (agent-kit) — тесты только в CI: при зелёной CI запись —
+   `pantheon review test -- uvx ruff@0.17.3 check .`; `outside test` — только если Actions не запустились
+   (metis-1115). Иначе — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
    отдельным вызовом Bash, не в фоне; пустую (`true`, `echo`) шлюз не примет. В изолированной сессии переключи
    worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach <sha>`). Не `cd`: с ним guard запись не
    сделает. EnterWorktree окну направления закрыт (metis-0933). Не переключить (`.claude/`) или набор
    долгий — `pantheon outside test --sha <head> --wait 590`, его можно в фоне: запись пишет плановый проход, и /clear
    её не теряет (metis-0905). PR вне ядра — узкая запись: `pantheon outside test --affected --sha <head> --wait 590`
    (metis-0734), если проверка в `.pantheon-verify` — `run-tests.py`; полный набор — для PR ядра и пачек.
-   Есть строка `ci:` в `.pantheon-verify` (agent-kit) — тесты идут в CI: при зелёной CI запись —
-   `pantheon review test -- uvx ruff@0.17.3 check .`; `outside test` — только если Actions не запустились (metis-1115).
 2. «Принять» от argus с перечнем «открыл / запустил / не проверял» — запись `pantheon review accept …` он делает сам.
    Шлюз считает последний вердикт каждого argus на head (metis-0158): второго не зови, пока первый не ответил;
    «вернуть» снимает только тот же argus или новый коммит. Новый коммит — заново тесты, argus и для продукта talos.

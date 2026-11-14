@@ -359,6 +359,36 @@ def watch(dry=False):
         return _watch(dry)
 
 
+AGENTS_FAIL_ALERT = 3  # metis-1175: столько проходов подряд без ответа claude agents — тревога
+
+
+def agents_failed(t, failed=()):
+    """claude agents не ответил: строка в вывод прохода (watch.log), счёт подряд и время первого сбоя (число) в
+    STATE/watch-agents-fails; с AGENTS_FAIL_ALERT подряд — тревога дежурному. Проверки, которым нужен список сессий
+    (заявки на запуск, разовые запуски, самозапуск), в этом проходе не идут: заявки ждут следующего прохода."""
+    f = P.path("watch-agents-fails")
+    d = P.read_json(f, {})
+    d = d if isinstance(d, dict) else {}
+    n = (d.get("n") if isinstance(d.get("n"), int) else 0) + 1
+    first = d.get("first")
+    first = first if n > 1 and isinstance(first, (int, float)) and not isinstance(first, bool) else t
+    P.write_json(f, {"n": n, "first": first, "last": t})
+    P.write_json(P.path("watch-last"), {"time": t, "failed": ["claude agents", *failed]})
+    print(f"дежурный: claude agents --json не ответил (подряд {n}, с {P.stamp(first)}) — проверки сессий и заявки "
+          "на запуск отложены до следующего прохода, остальные идут")
+    if n < AGENTS_FAIL_ALERT:
+        return P.TEMPFAIL
+    P.alert_once("watch-agents", today(t), f"дежурный: claude agents --json не ответил {n} раз подряд с {P.stamp(first)} — "
+                 "сессии не проверены, заявки на запуск ждут в очереди", "watch")
+    return P.ALERTED
+
+
+def agents_ok():
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(P.path("watch-agents-fails"))
+    P.clear_once("watch-agents")
+
+
 def _watch(dry=False):
     t = P.now()
     if dry:
@@ -368,12 +398,13 @@ def _watch(dry=False):
             return 1
         autostart(agents, P.sessions_registry(), domains(), t, dry=True)
         return 0
-    agents = P.agents_all()
+    try:
+        agents = P.agents_all()
+    except (subprocess.TimeoutExpired, OSError):  # metis-1175: таймаут валил весь проход
+        agents = None
     if agents is None:
-        P.alert_once("watch-agents", today(t), "дежурный: claude agents --json не ответил — сессии не проверены", "watch")
-        P.write_json(P.path("watch-last"), {"time": t, "failed": ["claude agents"]})
-        return P.ALERTED
-    P.clear_once("watch-agents")
+        return agents_failed(t, run_checks(blind_checks(t), t))
+    agents_ok()
     reg = P.sessions_registry()
     doms = domains()
     checks = [("снимок", lambda: snapshot(agents, t)),
@@ -404,6 +435,24 @@ def _watch(dry=False):
               # последней: сессии, которые она уберёт, в этом проходе ещё в списке — подъём выше их уже не тронет
               ("уборка Гестии", lambda: hestia_reap(agents, t)),
               ("уборка сессий", lambda: auto_rm(agents, doms, t))]
+    failed = run_checks(checks, t)
+    P.write_json(P.path("watch-last"), {"time": t, "failed": failed})
+    return 0 if not failed else P.ALERTED
+
+
+def blind_checks(t):
+    """Проверки прохода, которым не нужен список сессий и которые не запускают окон: идут и тогда, когда claude agents
+    не ответил (metis-1175)."""
+    return [("метка перезапуска", lambda: maint_expire(t)),
+            ("цели направлений", lambda: goal_dates(t)),
+            ("кэши песочниц", lambda: sandbox_sweep(t)),
+            ("версия Claude Code", lambda: cc_version(t)),
+            ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
+            ("журналы ваших слов", lambda: daily(t))]
+
+
+def run_checks(checks, t):
+    """Прогоняет проверки по очереди; сбой одной — тревога, остальные идут. Возвращает имена упавших."""
     failed = []
     for name, fn in checks:
         try:
@@ -414,8 +463,7 @@ def _watch(dry=False):
             P.alert_once(f"watch-fail-{name}", f"{today(t)}-{type(e).__name__}",
                          f"дежурный: проверка «{name}» упала ({type(e).__name__}: {str(e)[:160]}) — остальные идут; "
                          "журнал pantheon jobs, задача watch", "watch")
-    P.write_json(P.path("watch-last"), {"time": t, "failed": failed})
-    return 0 if not failed else P.ALERTED
+    return failed
 
 
 def awake():

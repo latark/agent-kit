@@ -10,6 +10,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -611,10 +612,27 @@ def _review_budget(env):
         return float(REVIEW_TEST_BUDGET)
 
 
-def _review_test_run(cmd):
+def _gate_tests_cmd(cmd, M):
+    """Команда — полный набор шлюза (merge.FULL_TESTS) или его узкий вариант от outside (`--affected`, `--base <ref>`)."""
+    words = list(cmd)
+    if "--affected" in words:
+        words.remove("--affected")
+        if "--base" in words:
+            i = words.index("--base")
+            del words[i:i + 2]
+    line = shlex.join(words)
+    return any(M.full_tests_record(name, {"cmd": line}) for name in M.FULL_TESTS)
+
+
+def _review_test_run(cmd, M=None):
     """Команда `review test -- …` под бюджетом времени → (код, оборвана): 127 — не запустилась, 75 — не уложилась в
     бюджет; оборвана — запись и проверку HEAD после неё делать незачем."""
     env = dict(os.environ)
+    # запасной путь «только CI» (metis-1174): heavy не отказывает тестам, только если команда — набор шлюза (полный
+    # или узкий); любой другой команде переменная не ставится, и чужая HEAVY_LOCAL_TESTS снимается
+    env.pop("HEAVY_LOCAL_TESTS", None)
+    if M is not None and _gate_tests_cmd(cmd, M):
+        env["HEAVY_LOCAL_TESTS"] = "1"
     budget = _review_budget(env)
     if budget > 0:
         try:
@@ -654,7 +672,7 @@ def _review_test_cmd(rest):
         print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
               "а не на незакоммиченное", file=sys.stderr)
         return 2
-    rc, over = _review_test_run(rest[2:])
+    rc, over = _review_test_run(rest[2:], P.merge_mod())
     if over:
         return rc
     head2, clean2 = _review_state()
