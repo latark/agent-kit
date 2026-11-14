@@ -359,6 +359,35 @@ def watch(dry=False):
         return _watch(dry)
 
 
+AGENTS_FAIL_ALERT = 3  # metis-1175: столько проходов подряд без ответа claude agents — тревога
+
+
+def agents_failed(t):
+    """claude agents не ответил: строка в вывод прохода (watch.log), счёт подряд в STATE/watch-agents-fails; с
+    AGENTS_FAIL_ALERT подряд — тревога дежурному. Проверки, которым нужен список сессий (заявки на запуск, разовые
+    запуски, самозапуск), в этом проходе не идут: заявки остаются в очереди и берутся следующим проходом."""
+    f = P.path("watch-agents-fails")
+    d = P.read_json(f, {})
+    d = d if isinstance(d, dict) else {}
+    n = (d.get("n") if isinstance(d.get("n"), int) else 0) + 1
+    first = d.get("first") if n > 1 and isinstance(d.get("first"), str) else t
+    P.write_json(f, {"n": n, "first": first, "last": t})
+    P.write_json(P.path("watch-last"), {"time": t, "failed": ["claude agents"]})
+    print(f"дежурный: claude agents --json не ответил (подряд {n}, с {first}) — проверки сессий и заявки на запуск "
+          "отложены до следующего прохода")
+    if n < AGENTS_FAIL_ALERT:
+        return P.TEMPFAIL
+    P.alert_once("watch-agents", today(t), f"дежурный: claude agents --json не ответил {n} раз подряд с {first} — "
+                 "сессии не проверены, заявки на запуск ждут в очереди", "watch")
+    return P.ALERTED
+
+
+def agents_ok():
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(P.path("watch-agents-fails"))
+    P.clear_once("watch-agents")
+
+
 def _watch(dry=False):
     t = P.now()
     if dry:
@@ -370,10 +399,8 @@ def _watch(dry=False):
         return 0
     agents = P.agents_all()
     if agents is None:
-        P.alert_once("watch-agents", today(t), "дежурный: claude agents --json не ответил — сессии не проверены", "watch")
-        P.write_json(P.path("watch-last"), {"time": t, "failed": ["claude agents"]})
-        return P.ALERTED
-    P.clear_once("watch-agents")
+        return agents_failed(t)
+    agents_ok()
     reg = P.sessions_registry()
     doms = domains()
     checks = [("снимок", lambda: snapshot(agents, t)),
