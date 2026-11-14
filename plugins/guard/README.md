@@ -1458,7 +1458,11 @@ origin/<ветка>», окно не показывается. Окно гово
 
 ## Проверки
 
-    python3 -I tests/test_guard.py        # правила, карта прав, привилегии, protect-config, режимы и журнал сбоев
+    python3 -I tests/test_guard_acl.py    # правила, карта прав, привилегии, protect-config, режимы и журнал сбоев;
+    # разрезан на 6 частей (metis-1148): test_guard_{acl,roles,cdp,merge,protect,hooks}.py, общее —
+    # tests/_guard_common.py; решение guard — внутри процесса теста (tests/_guard_inproc.py: правила загружены
+    # один раз, вызов — fork со своим HOME и env), настоящий процесс — первый случай таблицы и входы хука (hooks)
+    python3 -I tests/test_guard_inproc.py # вызов guard внутри процесса: как процесс, env и HOME свои, срок гасит ребёнка
     python3 -I tests/test_entry.py        # вход guard.py: .pyc правил, когда копии молчат, метка строгого guard
     python3 -I tests/test_merge_gate_journal.py   # шлюз слияния: журнал проверок, pantheon review, Д3 — по случаю на тест;
     # разрезан на 12 частей (metis-1119): test_merge_gate_{journal,core,opus,ci,billing,narrow,returned,carry,r4,sandbox,gh,limits}.py,
@@ -1469,7 +1473,7 @@ origin/<ветка>», окно не показывается. Окно гово
     python3 -I tests/test_tg_self.py      # tg-secret не трогает файлы самого плагина guard в любой копии, но не шире
     python3 -I tests/test_taint.py        # tg-taint: флаг, ask по классам, снятие, сессии, deny важнее ask
     python3 -I tests/test_mcp_gate.py     # список разрешённых MCP окна: сервер, шаблон, плохой вход, записи карты
-    python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
+    python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash; guard внутри процесса (metis-1148)
     python3 -I tests/test_context.py      # контекст вызова: configure(), set_context против нового процесса
     python3 -I tests/test_hookd.py        # демон хуков: сверка решений с медленным путём, откаты, канарейка, сборка
     python3 -I tests/test_hookd_svc.py    # служба: pantheon-hookd, проба доступа, --fd, счёт решений, установка и --check
@@ -1480,7 +1484,7 @@ origin/<ветка>», окно не показывается. Окно гово
     python3 -I tests/test_pool_orphans.py # пул test_shell_diff (_orphan_pool.py): родитель умер — воркеров не осталось; владелец пула PID 1 — не выход
     python3 -I tests/test_par.py          # случаи параллельно (_par.py): по n сразу, вывод и итоги по порядку, сбой случая — провал
 
-Самые долгие файлы — test_guard (таблица случаев), части test_merge_gate_*, а в pantheon test_watch, test_merge и test_read —
+Самые долгие файлы — части test_guard_* (таблица случаев; с metis-1148 guard в них — внутри процесса), части test_merge_gate_*, а в pantheon test_watch, test_merge и test_read —
 гоняют случаи через `tests/_par.py` (metis-0544): каждый случай в своём fork процесса файла, по
 `min(3, ядер // 2)` сразу. Вывод и число проверок — те же, что подряд. `TESTS_JOBS=1` — по одному, для разбора
 упавшего случая; `TESTS_JOBS=<n>` — своё число.
