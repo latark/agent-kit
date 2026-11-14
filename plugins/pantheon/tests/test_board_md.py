@@ -88,8 +88,8 @@ def ago(sec):
 
 two_days = ago(2 * 86400 + 3600)
 r = mo([task("metis-0330", "doing")], cache(pr(123, two_days)))
-check("0768. слитый PR из журнала + задача doing 2 дня → запись (id, PR, дни, статус, неотмечено 2)",
-      r == [("metis-0330", 123, 2, "doing", 2)], r)
+check("0768. слитый PR из журнала + задача doing 2 дня → запись (id, PR, дни, статус, неотмечено 2, пункты 1 и 2)",
+      r == [("metis-0330", 123, 2, "doing", 2, (1, 2))], r)
 check("0768. задача done → записи нет", mo([task("metis-0330", "done")], cache(pr(123, two_days))) == [])
 check("0768. задача review тоже попадает", mo([task("metis-0271", "review")], cache(pr(123, two_days)))[0][3] == "review")
 check("0768. PR слит 12 часов назад → записи нет (тик autoclose ещё сам закроет)",
@@ -98,7 +98,9 @@ check("0768. PR не из журнала задачи → записи нет", 
 check("0768. связь по «Closes» в теле PR, журнал без номера → запись",
       mo([task("metis-0330", "doing", "# x\n\n## Журнал\n\n")], cache(pr(130, two_days, "Closes metis-0330")))[0][:2]
       == ("metis-0330", 130))
-check("0768. «часть» в теле PR → записи нет", mo([task("metis-0330", "doing")], cache(pr(123, two_days, "часть"))) == [])
+check("0768. «часть» в теле PR → записи нет", mo([task("metis-0330", "doing")], cache(pr(123, two_days, "часть metis-0330"))) == [])
+check("1193. «часть» без номера рядом («личная часть карты», #441) — не «часть»: запись есть",
+      len(mo([task("metis-0330", "doing")], cache(pr(123, two_days, "Closes metis-0330. личная часть карты")))) == 1)
 check("0768. задача с открытым PR (open_ids) → записи нет",
       mo([task("metis-0330", "doing")], cache(pr(123, two_days)), open_ids={"metis-0330"}) == [])
 check("0768. репозиторий не её направления → записи нет",
@@ -123,6 +125,16 @@ check("0768. строка блока board-auto: «metis-XXXX: PR #N слит D 
 txt = "\n".join(B.lines({"week": 1, "merged_open": [("ИГНОР\u202e", 1, 1, "doing", 1), ("metis-1", True, 1, "doing", 1),
                                                        ("metis-2", 1, 1, "done; rm", 1)]}))
 check("0768. значения не по шаблону (чужой текст, bool, статус) в блок не идут", "слит" not in txt and "ИГНОР" not in txt, txt)
+txt = "\n".join(B.lines({"week": 1, "merged_open": [("metis-0001", 101, 2, "review", 2, (1, 3)),
+                                                       ("metis-0002", 102, 2, "review", 1, ())]}))
+check("1193. строка сводки со списком неотмеченных пунктов: «неотмечено 2 (пункты 1, 3)»; без номеров — без скобок",
+      "- metis-0001: PR #101 слит 2 дн. назад, задача review, неотмечено 2 (пункты 1, 3)" in txt
+      and "- metis-0002: PR #102 слит 2 дн. назад, задача review, неотмечено 1\n" in txt + "\n", txt)
+txt = "\n".join(B.lines({"week": 1, "merged_open": [("metis-0001", 101, 2, "review", 1, ("1; rm",)),
+                                                       ("metis-0002", 102, 2, "review", 1, (True,)),
+                                                       ("metis-0003", 103, 2, "review", 1, "1")]}))
+check("1193. номера пунктов не по шаблону (текст, bool, строка вместо списка) — строка в блок не идёт",
+      "слит" not in txt, txt)
 
 # --- 0769: problems ------------------------------------------------------------------------------------------------
 def board(now="Обновлено 03.11 10:00.", extra="", dates=None):
@@ -359,8 +371,9 @@ cch = os.path.join(state, "autoclose-prs.json")
 write(cch, json.dumps({"fetched": NOW, "open_prs": {}, "merged": {"latark/agent-kit": [pr(123, two_days)]}}))
 r = cli(["board"])
 got = read(os.path.join(home, "board-auto.md"))
-check("0768. e2e pantheon board: в board-auto.md строка «ID: PR #123 слит 2 дн. назад, задача doing, неотмечено 2»",
-      f"- {tid}: PR #123 слит 2 дн. назад, задача doing, неотмечено 2" in got, r.stdout + r.stderr + got)
+check("0768. e2e pantheon board: в board-auto.md строка «ID: PR #123 слит 2 дн. назад, задача doing, неотмечено 2 "
+      "(пункты 1, 2)» (номера — metis-1193)",
+      f"- {tid}: PR #123 слит 2 дн. назад, задача doing, неотмечено 2 (пункты 1, 2)" in got, r.stdout + r.stderr + got)
 cli(["task", "set", tid, "status=done", "--force", "тест"], ts("2026-11-03 11:00"))
 r = cli(["board"], NOW + 60)
 got = read(os.path.join(home, "board-auto.md"))

@@ -3,7 +3,9 @@
 Новых запросов к gh нет: PR берутся из кэша `pantheon autoclose fetch` (STATE/autoclose-prs.json, ключ merged) и из
 журнала карточки («PR #N»); связь задачи с PR — как в autoclose.close_checked (номер из журнала, репозиторий её
 направления) плюс «Closes» в теле PR (autoclose.closing_ids). Задача doing/review, слитый PR старше суток, у PR нет
-«часть» в теле, открытого PR задачи нет → (id, номер, дней, статус, неотмечено пунктов «Готово, когда»).
+«часть» в теле, открытого PR задачи нет → (id, номер, дней, статус, неотмечено пунктов «Готово, когда», их номера).
+Номера (metis-1193) — чтобы по строке сводки было видно, какие пункты ждут приёмки argus: на PR другой задачи с
+«пункт N <id>» в теле (autoclose.tick_named) или отметки при закрытии задачи.
 
 Модули tasks (T) и autoclose (A) передаёт вызывающий: файл сам их не грузит.
 """
@@ -19,7 +21,7 @@ def _in_direction(f, direction, repo_dirs):
 def merged_open(tasks, cache, t, T, A, repo_dirs=None, open_ids=()):
     """tasks — T.load_tasks, cache — содержимое autoclose-prs.json, t — «сейчас». repo_dirs — {репозиторий: {направления}}
     (пусто или None — без привязки к направлению). open_ids — задачи с открытым PR (работа ещё идёт). → список
-    (id, номер PR, дней, статус, неотмечено), самые давние слияния первыми."""
+    (id, номер PR, дней, статус, неотмечено, номера неотмеченных), самые давние слияния первыми."""
     merged = cache.get("merged") if isinstance(cache, dict) and isinstance(cache.get("merged"), dict) else {}
     by_num, by_close = {}, {}  # номер → [(время слияния, репо, PR)]; задача → то же по «Closes»
     for repo, rows in sorted(merged.items()):
@@ -49,5 +51,6 @@ def merged_open(tasks, cache, t, T, A, repo_dirs=None, open_ids=()):
         ts, _, pr = max(found, key=lambda f: (f[0], f[1], f[2]["number"]))
         days = int((t - ts) // DAY)
         if days >= MIN_DAYS:
-            out.append((tid, pr["number"], days, head["status"], T.unchecked_criteria(head, body)))
+            out.append((tid, pr["number"], days, head["status"], T.unchecked_criteria(head, body),
+                        tuple(T.unchecked_numbers(head, body))))
     return sorted(out, key=lambda r: (-r[2], r[0]))

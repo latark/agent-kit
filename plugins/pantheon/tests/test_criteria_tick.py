@@ -10,6 +10,8 @@
 - autoclose (fetch с поддельным gh → проход по кэшу): слитый PR с Closes отмечает пункты с «да» из записи argus на head
   слияния; все отмечены — done, иначе review с номерами неотмеченных; запись другого head, пункт, которого нет в
   карточке, и пункт, изменённый после приёмки, не отмечают ничего; ядро — только «принять» на Opus.
+- metis-1193: пункт задачи вне Closes отмечается, если тело PR его называет («пункт N <id>») и argus принял его на head
+  слияния; названный без приёмки, принятый без названия, чужого направления, done, со сменой текста — не отмечается.
 
 Временные HOME, PANTHEON_HOME, PANTHEON_STATE; всё убирается в конце.
 Запуск: python3.14 -I plugins/pantheon/tests/test_criteria_tick.py  (код выхода 0 — все прошли)
@@ -355,9 +357,10 @@ def test_autoclose():
         pf = put(home, "metis-0006")   # ядро, «принять» не на Opus → ничего
         pg = put(home, "metis-0007")   # ядро, «принять» на Opus → done
         ph = put(home, "metis-0008")   # чужая задача: её пункты в записи PR 4, а в Closes её нет нигде → не тронута
+        pi = put(home, "metis-0009")   # metis-1193: вне Closes, «пункты 1 и 2 metis-0009» в теле PR 1, приняты → done
         both = lambda tid: [crit(tid, 1, A1), crit(tid, 2, A2)]  # noqa: E731
         write_records(state, [
-            verdict("accept", H1, pr=1, criteria=both("metis-0001")),
+            verdict("accept", H1, pr=1, criteria=both("metis-0001") + both("metis-0009")),
             verdict("accept", H2, pr=2, criteria=[crit("metis-0002", 1, A1)]),
             verdict("accept", "9" * 40, pr=3, criteria=both("metis-0003")),
             verdict("accept", H4, pr=4, criteria=[crit("metis-0004", 3, A1), crit("metis-0008", 1, A1),
@@ -370,7 +373,7 @@ def test_autoclose():
         open(pe, "w", encoding="utf-8").write(b)
         core = ("plugins/guard/hooks/merge_gate.py",)
         with open(os.path.join(gh, "latark_agent-kit-merged.json"), "w", encoding="utf-8") as fh:
-            json.dump([mpr(1, "Closes metis-0001", H1), mpr(2, "Closes metis-0002", H2), mpr(3, "Closes metis-0003", H3),
+            json.dump([mpr(1, "Closes metis-0001\n\nпункты 1 и 2 metis-0009", H1), mpr(2, "Closes metis-0002", H2), mpr(3, "Closes metis-0003", H3),
                        mpr(4, "Closes metis-0004", H4), mpr(5, "Closes metis-0005", H5),
                        mpr(6, "Closes metis-0006", H6, files=core), mpr(8, "Closes metis-0007", H7, files=core),
                        dict(mpr(9, "", H1), files=[{"path": "docs/gate.py", "changeType": "RENAMED"}], changedFiles=1),
@@ -406,6 +409,10 @@ def test_autoclose():
         check("ядро: «принять» не на Opus не отмечает", st(pf) == "review" and "[x]" not in text(pf), text(pf)[-400:])
         check("ядро: «принять» на Opus отмечает, задача done", st(pg) == "done" and text(pg).count("- [x]") == 2,
               text(pg)[-400:])
+        check("1193: пункты задачи вне Closes, названные в теле PR и принятые argus на head, — отмечены, задача done "
+              "(все пункты отмечены, PR в журнале)",
+              st(pi) == "done" and text(pi).count("- [x]") == 2 and "названы в теле PR другой задачи" in text(pi)
+              and "по приёмке argus (не Closes)" in r.stdout, r.stdout + r.stderr + text(pi)[-600:])
         check("строка прохода об отметке в выводе", "отмечены пункты 1, 2 по приёмке argus" in r.stdout, r.stdout)
     finally:
         shutil.rmtree(tmp, True)
@@ -439,6 +446,56 @@ def test_tick_failure():
         shutil.rmtree(tmp, True)
 
 
+def test_named():
+    """metis-1193: tick_named через close_pr с подставным accepted (без журнала шлюза): каждая ветка отбора."""
+    import autoclose as A
+    tmp, home, state, gh, env = make()
+    try:
+        os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_VIEW=os.path.join(tmp, "view"))
+        p = {i: put(home, f"metis-00{i}", status="done" if i == 26 else "review") for i in range(21, 28)}
+        b = text(p[25]).replace("- [ ] первый пункт: файл a.py", "- [ ] первый пункт: файл c.py")
+        open(p[25], "w", encoding="utf-8").write(b)
+        both = {1: A1, 2: A2}
+        acc = {f"metis-00{i}": dict(both) for i in (21, 22, 24, 25, 26, 27)}  # 23 — не принята
+
+        def run(body, dirs=("metis-pantheon",), accepted=lambda repo, pr: acc, n=21):
+            log, errors = [], {}
+            pr = dict(mpr(n, body, H1), head=H1)
+            ok = A.close_pr(home, T0, "latark/agent-kit", pr, set(dirs), T, None, log, errors, accepted)
+            return ok, log, errors
+
+        ok, log, errors = run("Closes metis-0021\nпункт 1 metis-0022\nпункты 1 и 2 metis-0023\nпункты 1, 2 metis-0024\n"
+                              "пункт 1 metis-0025\nпункты 1 и 2 metis-0026\nсм. metis-0027")
+        x = lambda i: text(p[i]).count("- [x]")  # noqa: E731
+        check("1193: названный «пункт 1» при принятых 1 и 2 — отмечен только 1", ok and x(22) == 1
+              and "- [x] первый пункт" in text(p[22]), (ok, errors, text(p[22])[-400:]))
+        check("1193: названные без приёмки argus — не отмечены", x(23) == 0, text(p[23])[-300:])
+        check("1193: «пункты 1, 2» — оба отмечены, строка прохода", x(24) == 2
+              and any("metis-0024" in s and "(не Closes)" in s for s in log), (log, text(p[24])[-300:]))
+        check("1193: текст пункта изменён после приёмки — не отмечен", x(25) == 0, text(p[25])[-300:])
+        check("1193: задача done — не тронута", x(26) == 0 and "названы" not in text(p[26]), text(p[26])[-300:])
+        check("1193: упомянута без «пункт N», хоть и принята — не отмечена", x(27) == 0, text(p[27])[-300:])
+        put(home, "metis-0022", status="review")
+        ok, log, errors = run("пункт 1 metis-0022", dirs=("other",), n=22)
+        check("1193: задача не из направления репозитория — не отмечена", ok and x(22) == 0, text(p[22])[-300:])
+        put(home, "metis-0027", status="review")
+        ok, log, errors = run("Closes metis-0027, часть metis-0027\nпункт 1 metis-0027", n=23)
+        check("1193: задача из Closes PR с «часть» по названию не отмечается (как Closes-путь)", ok and x(27) == 0,
+              text(p[27])[-300:])
+
+        def boom(repo, pr):
+            raise RuntimeError("журнал не прочитан")
+        ok, log, errors = run("пункт 1 metis-0022", accepted=boom, n=24)
+        check("1193: сбой приёмки — PR не обработан, ошибка с типом в errors",
+              ok is False and "RuntimeError: журнал не прочитан" in errors.get("latark/agent-kit#24", "")
+              and x(22) == 0, (ok, errors))
+        check("1193: named_items — «пункты 1, 2 и 4 X», регистр, повтор задачи сливает номера",
+              A.named_items("Пункты 1, 2 и 4 metis-0001; пункт 7 metis-0001; пункт metis-0002") == {"metis-0001": {1, 2, 4, 7}},
+              A.named_items("Пункты 1, 2 и 4 metis-0001; пункт 7 metis-0001; пункт metis-0002"))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_tasks_unit()
     test_review_cli()
@@ -446,6 +503,7 @@ def main():
     test_merged_core()
     test_autoclose()
     test_tick_failure()
+    test_named()
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1
 
