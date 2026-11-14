@@ -486,6 +486,15 @@ def main():
           and not any(x.startswith("pantheon merge") for x in sw["sandbox"]["excludedCommands"]),
           [w["sandbox"]["excludedCommands"] for w in (sa, sw)])
 
+    # metis-1225: worktree окна направления — мимо песочницы только `pantheon worktree add|remove`; list, прочий
+    # `pantheon worktree` и мастерская — в песочнице (у мастерской EnterWorktree)
+    wt_out = ["pantheon worktree add *", "pantheon worktree remove *"]
+    check("окно координатора: pantheon worktree add|remove мимо песочницы — ровно они; у мастерской нет (metis-1225)",
+          all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("pantheon worktree")) == wt_out
+              for w in (sa, sm, sn, sz))
+          and not any(x.startswith("pantheon worktree") for x in sw["sandbox"]["excludedCommands"]),
+          [w["sandbox"]["excludedCommands"] for w in (sa, sw)])
+
     def excluded_by(cmd, patterns):
         # как правило excludedCommands: «… *» — префикс и любые аргументы, без звёздочки — точное совпадение
         return any(cmd == x or (x.endswith(" *") and cmd.startswith(x[:-1])) for x in patterns)

@@ -111,7 +111,7 @@ def git_main(root):
         raise Refuse(f"{P.tilde(root)}: не корень git worktree (нет .git)")
     if not stat.S_ISREG(st.st_mode):
         raise Refuse(f"{P.tilde(root)}: основная копия проекта, а не worktree роли — правка в ней действует сразу, мимо "
-                     "PR; заявку — из своей worktree (git worktree add)")
+                     "PR; заявку — из своей worktree (pantheon worktree add)")
     try:
         with open(g, encoding="utf-8") as fh:
             line = fh.read(4096).strip()

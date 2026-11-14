@@ -61,6 +61,9 @@ PostToolUse (Bash:
                  репозитория своего направления и из него же (иначе Claude Code спрашивает владельца); чужое
                  направление — отказ с подсказкой pantheon start или задача ему; другой репозиторий — подсказка cd;
                  вне папки запуска настройки проекта с allow, hooks, sandbox, env — отказ и с name (metis-0911);
+  worktree-cmd — `pantheon worktree add|remove|list` (мимо песочницы окна направления) — только строкой целиком по
+                 строгому образцу: имена из букв, цифр и . _ - /, без .., цепочек, кавычек, присваивания и обёрток
+                 (metis-1225); репозиторий и путь проверяет сама команда (lib/worktree.py пантеона);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -4880,6 +4883,40 @@ def check_hq_sessync(event, tool, tool_input):
             "присваивания, env, bash -c, `;`, `&`, `|`, перенаправлений, подстановок и глобов (* ? [ ] { } ~ ^ # !).")
 
 
+# worktree-cmd (metis-1225, вариант Б владельца 15.11). Окну направления `pantheon worktree add|remove` выпущен мимо
+# песочницы (excludedCommands, WORKTREE_OUT в pantheon.py): Claude Code закрывает в ней запись в .git/worktrees.
+# Репозиторий, путь и имена проверяет сама команда (lib/worktree.py); guard держит форму строки, как hq-sessync: строка
+# целиком `pantheon worktree add <имя> [--branch B] [--base REF]`, `remove <имя>` или `list`, слова — по шаблону
+# _WT (буквы, цифры, `. _ -`, `/` между частями, без `..`). Всё остальное — отказ: `&&`, `;`, `|`, `&`,
+# перенаправления, подстановки, кавычки, префикс присваивания, env и другие обёртки, путь к пульту, лишние флаги. Иначе
+# соседняя команда или раскрытое оболочкой ушли бы мимо песочницы вместе с ней. Правило — в любой сессии: строгая форма
+# ничего не отнимает, а без окна песочницы нет.
+_WT = r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
+WORKTREE_LINE = re.compile(r"[ \t]*pantheon[ \t]+worktree[ \t]+(?:list|remove[ \t]+" + _WT + r"|add[ \t]+" + _WT
+                           + r"(?:[ \t]+--branch[ \t]+" + _WT + r")?(?:[ \t]+--base[ \t]+" + _WT + r")?)[ \t]*\Z")
+def _wt_named(n, t):
+    """Команда — пульт с первым словом worktree (сам пульт, через оболочку или python; обёртки env, nohup, sudo …
+    разбор разворачивает сам). По разобранным словам, а не по сырому тексту: упоминание в значении флага
+    (`pantheon task set … --note 'pantheon worktree add'`) правило не будит."""
+    w = _pantheon_words(n, t)
+    return w is not None and w[:1] == ["worktree"]
+
+
+def check_worktree_cmd(event, tool, tool_input):
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    _, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    if not any(_wt_named(n, t) for n, t in cmds):
+        return None
+    if WORKTREE_LINE.match(cmd) and ".." not in cmd:
+        return None
+    return ("Правило worktree-cmd: `pantheon worktree` идёт мимо песочницы, поэтому только одной строкой "
+            "`pantheon worktree add <имя> [--branch B] [--base REF]`, `pantheon worktree remove <имя>` или "
+            "`pantheon worktree list` (metis-1225): имена из букв, цифр и . _ - (/ между частями, без ..), без кавычек, "
+            "`&&`, `;`, `|`, перенаправлений, подстановок, префикса присваивания и обёрток. Папка — отдельным `cd`.")
+
+
 # worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
 # EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
 # («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
@@ -4999,7 +5036,7 @@ def check_worktree_own(event, tool, tool_input):
     if owner == win and repo is None:
         return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/<имя> репозитория "
                 f"(metis-0911). Worktree окна — только `<репозиторий>/{WORKTREES_DIR}<имя>`: `cd <репозиторий>` "
-                "отдельной командой Bash, затем EnterWorktree с name, или `git worktree add .claude/worktrees/<имя>` и "
+                "отдельной командой Bash, затем EnterWorktree с name, или `pantheon worktree add <имя>` и "
                 "EnterWorktree с этим path.")
     if owner == win:
         found = _widening([repo, wt]) if _key(repo) != _key(launch) else []
@@ -5023,6 +5060,7 @@ def check_worktree_own(event, tool, tool_input):
 def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("gh-out", check_gh_out),
                         ("hq-sessync", check_hq_sessync), ("worktree-own", check_worktree_own),
+                        ("worktree-cmd", check_worktree_cmd),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
