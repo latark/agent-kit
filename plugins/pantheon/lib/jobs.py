@@ -112,7 +112,7 @@ def run_job(name):
                 st.pop("skip_fp", None)
                 st.pop("skip_at", None)
             if rc == P.TEMPFAIL:
-                st["waiting"] = "нет сети или GitHub недоступен"
+                st["waiting"] = tempfail_reason(out)
             else:
                 st.pop("waiting", None)
                 st["fails"] = 0 if rc in (0, P.BUDGET_CUT) else int(st.get("fails") or 0) + 1
@@ -126,6 +126,16 @@ def run_job(name):
                 if job.get("notify", True):
                     P.notify_soon("job-" + name, f"Задача {name} упала (код {rc})")
             return rc
+
+
+TEMPFAIL_DEFAULT = "нет сети или GitHub недоступен"
+
+
+def tempfail_reason(out):
+    """Код 75 (TEMPFAIL) — почему задача ждёт: последняя непустая строка её вывода (metis-1180: у дежурного 75 — и
+    «claude agents не ответил», а не только сеть); вывода нет — прежняя причина, сеть или GitHub."""
+    lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
+    return lines[-1][:200] if lines else TEMPFAIL_DEFAULT
 
 
 def next_run(job, st, t):

@@ -446,7 +446,7 @@ def blind_checks(t):
     return [("метка перезапуска", lambda: maint_expire(t)),
             ("цели направлений", lambda: goal_dates(t)),
             ("кэши песочниц", lambda: sandbox_sweep(t)),
-            ("версия Claude Code", lambda: cc_version(t)),
+            ("версия Claude Code", lambda: cc_version(t, blind=True)),
             ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
             ("журналы ваших слов", lambda: daily(t))]
 
@@ -2159,12 +2159,20 @@ def sandbox_sweep(t):
         P.clear_once("watch-sandbox-cap")
 
 
-def cc_version(t):
+def cc_version(t, blind=False):
     """Claude Code сменил версию (SCOUT-05) — строка в тревоги, событие cc_updated для пересмотров и проверка опор
-    (SEC-16); не в порядке — уведомление и поручение Метиде через тревогу."""
+    (SEC-16); не в порядке — уведомление и поручение Метиде через тревогу. metis-1180: blind (claude agents не ответил)
+    — `claude --version` не дольше 15 с, таймаут — тихий пропуск (неответ считает agents_failed со своим порогом);
+    cc-version пишется после тревоги: упала проверка опор — следующий проход повторит, тревога не теряется."""
     v = os.environ.get("PANTHEON_FAKE_CC")
     if v is None:
-        r = subprocess.run([P.claude_bin(), "--version"], env=P.claude_env(), capture_output=True, text=True, timeout=60)
+        try:
+            r = subprocess.run([P.claude_bin(), "--version"], env=P.claude_env(), capture_output=True, text=True,
+                               timeout=min(15, P.agents_timeout()) if blind else 60)
+        except (subprocess.TimeoutExpired, OSError):
+            if blind:
+                return
+            raise
         v = (r.stdout.split() or [""])[0]
     if not re.fullmatch(r"\d+(?:\.\d+)+", v or ""):
         return
@@ -2174,17 +2182,16 @@ def cc_version(t):
         old = open(p).read().strip()
     if old == v:
         return
+    if old:
+        ok, lines = infra_check()
+        P.alert(f"Claude Code обновился: {old} → {v}; проверка опор: "
+                + ("в порядке" if ok else "НЕ в порядке — " + "; ".join(x for x in lines if x.startswith("НЕТ"))[:300]
+                   + " — Метиде: разобрать (pantheon infra-check)")
+                + "; журнал изменений сверяет iris", "watch")
+        event("cc_updated", t, version=v, was=old)
+        if not ok:
+            P.notify_soon("infra", f"Claude Code {v}: проверка опор не прошла — pantheon infra-check")
     P.write_atomic(p, v + "\n")
-    if not old:
-        return
-    event("cc_updated", t, version=v, was=old)
-    ok, lines = infra_check()
-    P.alert(f"Claude Code обновился: {old} → {v}; проверка опор: "
-            + ("в порядке" if ok else "НЕ в порядке — " + "; ".join(x for x in lines if x.startswith("НЕТ"))[:300]
-               + " — Метиде: разобрать (pantheon infra-check)")
-            + "; журнал изменений сверяет iris", "watch")
-    if not ok:
-        P.notify_soon("infra", f"Claude Code {v}: проверка опор не прошла — pantheon infra-check")
 
 
 def event(kind, t, **extra):
@@ -4742,6 +4749,15 @@ def _corpus_declared(hq):
     return any(c.lower() == "corpus" for c in hq.get("closed_collections") or [])
 
 
+def agents_answer():
+    """Строка infra_check «claude agents отвечает»; таймаут и незапуск — «нет» с причиной, а не трасса (metis-1180:
+    иначе cc_version теряла тревогу «обновился»)."""
+    try:
+        return P.agents_all() is not None, "claude agents --json отвечает"
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"claude agents --json отвечает ({type(e).__name__})"
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -4767,7 +4783,7 @@ def infra_check():
             "хуки pantheon: UserPromptSubmit, Stop, SessionStart, PostToolUse")
     except (OSError, ValueError):
         add(False, "hooks.json pantheon читается")
-    add(P.agents_all() is not None, "claude agents --json отвечает")
+    add(*agents_answer())
     # с проверенным деревом guard (merge.managed_source), как у прохода, а не с клоном маркетплейса (metis-0718); дерева
     # или поставленного файла нет — строки нет, как раньше
     with contextlib.suppress(OSError):

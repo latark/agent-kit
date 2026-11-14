@@ -650,8 +650,8 @@ def heavy_count(agents=None, registry=None):
     """Тяжёлых сейчас: сессии направлений Пантеона в состоянии working (и их копии «имя (2)») плюс идущие задачи
     тика класса heavy (их блокировка job-<имя> занята). registry — для совместимости контракта: у вкладок нет
     состояния, работают ли они, не видно."""
-    if agents is None:
-        agents = P.agents_all() or []
+    if agents is None and (agents := P.agents_all()) is None:  # metis-1180: не JSON — «0 тяжёлых» открыл бы gate
+        raise RuntimeError("claude agents --json не ответил — тяжёлых сессий не сосчитать")
     doms = P.read_json(P.path("domains.json"), {}).get("domains") or {}
     pats = [P.name_alias(d) for d in doms]
     n = sum(1 for a in agents if a.get("state") == "working"
