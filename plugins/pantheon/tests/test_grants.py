@@ -114,7 +114,7 @@ write = ["~/state/x"]
     dw = a["sandbox"]["filesystem"]["denyWrite"]
     check("выданная запись — .claude/hooks, .claude/agents и .git/hooks в ней закрыты (metis-1214)", all(
         data + sub in dw for sub in ("/.claude/hooks", "/**/.claude/hooks", "/.claude/agents", "/**/.claude/agents",
-                                     "/.git/hooks", "/**/.git/hooks", "/.git/config", "/**/.git/config")), dw)
+                                     "/.git/hooks", "/**/.git/hooks", "/.git/config", "/**/.git/config")))
     check("domains в силе — в allowedDomains", "registry.example.org" in a["sandbox"]["network"]["allowedDomains"])
     check("«*» — в окне направления и в мастерской",
           "Bash(make check)" in a["permissions"]["allow"] and "Bash(make check)" in win("workshop")["permissions"]["allow"])
