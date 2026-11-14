@@ -1170,7 +1170,7 @@ n_req = len(reqs())
 rc, out, errs = grant("--allow", "Edit(~/Library/LaunchAgents/**)", "--task", "metis-0680", "--why", "автозапуск")
 check("grant --allow Edit(…) — отказ: запись только ключом write (ревью #477 Б1)", rc != 0
       and "правил записи" in errs and len(reqs()) == n_req, (rc, errs))
-for rule in ('Write(~/.local/**)', 'MultiEdit(//tmp/x)', 'NotebookEdit(~/n.ipynb)', ' Edit (~/.claude/**)'):
+for rule in ('Write(~/.local/**)', 'MultiEdit(//tmp/x)', 'NotebookEdit(~/n.ipynb)', ' Edit (~/.claude/**)', 'Edit', 'write '):
     gerr = P.grants_load(f'[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nallow = [{rule!r}]\n'.replace("'", '"'))[2]
     check(f"grants_load: allow {rule!r} — ошибка, право не в силе", gerr and "правил записи" in gerr[0], gerr)
 live, _, gerr, _ = P.grants_load('[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nwrite = ["~/.CLAUDE"]\n')

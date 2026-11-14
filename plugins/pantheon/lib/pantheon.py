@@ -2736,6 +2736,7 @@ GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesyste
 # Папка выше тоже не даётся: grant write = ["~/.cache"] отклоняется целиком, как ["~"]
 GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
                   "~/.bashrc", "~/.profile", HOOKD_HOME, STATE, PANTHEON)
+GRANT_WRITE_TOOLS = {"edit", "write", "multiedit", "notebookedit"}  # имя до «(» или вся строка — и «Edit» без скобок
 GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
 
 
@@ -2769,7 +2770,7 @@ def grants_load(text=None):
             continue
         # правило Edit/Write/MultiEdit/NotebookEdit в permissions.allow Claude Code добавляет в allowWrite песочницы —
         # мимо проверки GRANT_NO_WRITE ниже; запись — только ключом write (ревью argus #477 Б1)
-        edit_a = [x for x in lists.get("allow", []) if re.match(r"\s*(?:Edit|Write|MultiEdit|NotebookEdit)\s*\(", x)]
+        edit_a = [x for x in lists.get("allow", []) if x.split("(", 1)[0].strip().casefold() in GRANT_WRITE_TOOLS]
         if edit_a:
             errors.append(f"grant {i} ({win}): allow — без правил записи, запись — ключом write: {', '.join(edit_a)}")
             continue
