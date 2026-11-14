@@ -340,12 +340,30 @@ DB_PORT = 5432                      # порт PostgreSQL, когда в стр�
 LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
-         "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ")
+         "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ | "
+         "login ID [--app ИМЯ] [--wait С]")
 
 
 def set_core(mod):
     global P
     P = mod
+
+
+_LOGIN = []
+
+
+def login_mod():
+    """lib/outside_login.py — `outside login`: вход тестовой учётной записью без показа пароля роли (metis-1134)."""
+    if not _LOGIN:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_outside_login",
+                                                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                   "outside_login.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.set_core(P, P.outside_mod())   # этот модуль: грузит его только pantheon.outside_mod (не в sys.modules)
+        _LOGIN.append(mod)
+    return _LOGIN[0]
 
 
 def err(text):
@@ -3861,6 +3879,7 @@ def serve_round(t=None):
                 log_event(id=rid, kind="serve-error", window=window, why=why)
                 save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": why})
         sweep()
+    login_mod().login_round()   # заявки входа (metis-1134): серверы уже подняты этим проходом
     drop_orphan_stops()
     drop_orphan_work()
 
@@ -4371,6 +4390,8 @@ def main(rest):
         return cmd_request(sub, rest[1:])
     if sub == "status":
         return cmd_status(rest[1:])
+    if sub == "login":
+        return login_mod().cmd_login(rest[1:])
     if sub == "stop":
         return cmd_stop(rest[1:])
     if sub == "run" and len(rest) == 1:

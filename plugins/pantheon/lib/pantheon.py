@@ -82,7 +82,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
   pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
                                         (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
-  pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
+  pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
@@ -101,6 +101,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
   pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]   один ключ policy.toml той же
                                         заявкой owner-edit (metis-1122): роль Edit/Write policy.toml не делает
+  pantheon config request|status|cancel|run   .mcp.json, .claude/settings*.json, .claude/hooks/* своей worktree
+                                        (lib/config_edit.py, metis-0844): заявка с новым текстом → проход вне окна пишет
+                                        по «да» Зевсу на «[id] …» с sha или по Touch ID; роль коммитит сама
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -6842,21 +6845,23 @@ def handoff_kick():
 
 
 def owner_edit_kick():
-    """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) — отдельным процессом: окно Touch ID ждёт
-    пальца до двух минут, тик не ждёт. Без заявок — нет."""
-    try:
-        if locked("owner-edit-run") or not owner_edit_mod().pending():
-            return
-        if os.environ.get("PANTHEON_DRYRUN") == "1":
-            with open(path("dryrun.log"), "a") as fh:
-                fh.write(f"{int(now())} owner-edit-run\n")
-            return
-        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "owner-edit", "run"], env=merge_mod().pass_env(),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except Exception as e:  # сбой прохода не должен останавливать тик
-        alert_once("owner-edit-kick", type(e).__name__, f"правка файла владельца: проход не запущен "
-                   f"({type(e).__name__}: {e})", "pantheon-tick")
+    """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) и настроек проекта (metis-0844,
+    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет."""
+    for cmd, mod in (("owner-edit", owner_edit_mod), ("config", config_edit_mod)):
+        run = "config-edit" if cmd == "config" else cmd
+        try:
+            if locked(f"{run}-run") or not mod().pending():
+                continue
+            if os.environ.get("PANTHEON_DRYRUN") == "1":
+                with open(path("dryrun.log"), "a") as fh:
+                    fh.write(f"{int(now())} {run}-run\n")
+                continue
+            subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), cmd, "run"], env=merge_mod().pass_env(),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except Exception as e:  # сбой прохода не должен останавливать тик
+            alert_once(f"{run}-kick", type(e).__name__, f"{run}: проход не запущен ({type(e).__name__}: {e})",
+                       "pantheon-tick")
 
 
 def outside_kick():
@@ -7334,6 +7339,21 @@ def owner_edit_mod():
         spec.loader.exec_module(_OWNER_EDIT)
         _OWNER_EDIT.set_core(sys.modules[__name__])
     return _OWNER_EDIT
+
+
+_CONFIG_EDIT = None
+
+
+def config_edit_mod():
+    """lib/config_edit.py — настройки, хуки и .mcp.json worktree роли по «да» или Touch ID (metis-0844)."""
+    global _CONFIG_EDIT
+    if _CONFIG_EDIT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_config_edit", os.path.join(LIB, "config_edit.py"))
+        _CONFIG_EDIT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CONFIG_EDIT)
+        _CONFIG_EDIT.set_core(sys.modules[__name__])
+    return _CONFIG_EDIT
 
 
 _HANDOFF = None
@@ -9454,6 +9474,8 @@ def main(argv):
         return owner_edit_mod().main(rest)
     if cmd == "policy":
         return owner_edit_mod().cmd_policy(rest)
+    if cmd == "config":
+        return config_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
     if cmd == "supabase":

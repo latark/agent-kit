@@ -455,6 +455,12 @@ def main():
     check("talos: dev-сервер — outside serve --sha, без checkout --detach и pnpm install (metis-0614)",
           "outside serve --sha" in flat.get("talos.md", "") and "checkout --detach" not in flat.get("talos.md", "")
           and "pnpm install" not in flat.get("talos.md", "") and "talos.md" in flat)
+    # вход talos в приложение без пароля (metis-1134): три правила
+    check("talos: вход — outside login <ID> --wait 60, поле script через evaluate_script, env и ключи не искать (metis-1134)",
+          all(x in flat.get("talos.md", "") for x in (
+              "`pantheon outside login <ID> --wait 60`", "Пароль тебе недоступен",
+              "поле `script`", "`evaluate_script`", "перезагрузи страницу",
+              "причину сообщи лиду", "`outside/env` и ключи не ищи")))
     for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
         check(f"{f}: dev.part — outside serve [--sha …] [--app …], ветку не переключать, зависимости не ставить (metis-0614)",
               "outside serve [--sha <коммит>] [--app ИМЯ]" in flat.get(f, "") and "pnpm install" not in flat.get(f, ""))
