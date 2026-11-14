@@ -519,8 +519,11 @@ def test_who_is_who_memo():
 
 def test_agents_timeout_1175():
     """metis-1175: claude agents не ответил за срок — проход не падает трассой, строка в вывод, счёт подряд; тревога
-    только с третьего раза; заявка Зевса на запуск остаётся в очереди; ответ сбрасывает счёт."""
+    только с третьего раза и со временем первого сбоя; проверки без списка сессий идут; заявка Зевса на запуск остаётся
+    в очереди; ответ сбрасывает счёт."""
+    from datetime import datetime
     e = Env()
+    first = datetime.fromtimestamp(T0 + 60).strftime("%Y-%m-%d %H:%M")
     slow = {"FAKE_AGENTS_SLEEP": "5", "PANTHEON_AGENTS_TIMEOUT": "0.3"}
     req = e.st("hq-rw", "start-req", "g-dir.req")
     os.makedirs(os.path.dirname(req), exist_ok=True)
@@ -533,6 +536,10 @@ def test_agents_timeout_1175():
         has = "claude agents --json не ответил 3 раз подряд" in e.alerts()
         check(has == (i == 3), f"таймаут {i}: тревога {'нет' if i == 3 else 'раньше третьего'} ({e.alerts()[-200:]!r})")
         check(os.path.exists(req), f"таймаут {i}: заявка Зевса на запуск потеряна")
+        check(f"с {first}" in r.stdout, f"таймаут {i}: не время первого сбоя {first} ({r.stdout[-300:]!r})")
+        if i == 1:  # версия Claude Code — проверка без списка сессий, пишет cc-version
+            check(os.path.exists(e.st("cc-version")), "при неответе claude agents не шли проверки без списка сессий")
+    check(f"3 раз подряд с {first}" in e.alerts(), f"в тревоге не время первого сбоя ({e.alerts()[-200:]!r})")
     e.run("watch", t=T0 + 240)
     check(not os.path.exists(e.st("watch-agents-fails")), "ответ не сбросил счёт неответов")
     r = e.run("watch", t=T0 + 300, extra=slow)
