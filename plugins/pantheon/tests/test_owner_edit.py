@@ -1172,5 +1172,24 @@ check("отказ песочницы без маршрута — подсказ�
 check("тот же текст от роли (не песочница) — прежний вопрос через Зевса",
       "pantheon grant request" not in H.hint("touch /opt/x: Operation not permitted", "role"))
 
+# --- [pack] mcp.json пакета окна — заявкой owner-edit (metis-0949) ---------------------------------------------------
+fresh()
+PACK = os.path.join(HOME, ".claude", "pantheon", "packs", "proteus-morph", "mcp.json")
+PACK_OLD = '{"mcpServers": {"shadcn": {"command": "python3", "args": ["mcp"]}}}\n'
+PACK_NEW = '{"mcpServers": {"shadcn": {"command": "python3", "args": ["mcp", "--cwd", "${HOME}/p/app"]}}}\n'
+write(PACK, PACK_OLD)
+rc, out, errs = propose("~/.claude/pantheon/packs/proteus-morph/mcp.json", "[1, 2]\n")
+check("mcp.json пакета — не объект JSON: отказ", rc == 2 and "объект JSON" in errs and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/pantheon/packs/proteus-morph/mcp.json", PACK_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+check("mcp.json пакета: заявка принята", rc == 0 and req.get("file") == ".claude/pantheon/packs/proteus-morph/mcp.json",
+      (rc, errs))
+answer(yes_question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("mcp.json пакета: «да» — применено", read(PACK) == PACK_NEW, journal())
+rc, out, errs = propose("~/.claude/pantheon/packs/proteus-morph/window.json", "{}\n")
+check("window.json пакета — не из списка: отказ", rc == 2 and not reqs(), (rc, errs))
+
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)

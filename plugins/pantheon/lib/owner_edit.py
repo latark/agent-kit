@@ -17,7 +17,9 @@
         заменена, нет ключа — дописан в конец раздела, нет раздела — раздел в конец файла; прочий текст не тронут.
         Значение ключа на нескольких строках — отказ (правка — owner-edit propose). Применяет тот же проход.
 
-Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml и
+Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml, grants.toml
+(metis-0680; нет файла — заводит первая заявка), packs/<направление>/mcp.json и approved.json (metis-0949: пакет окна —
+объект JSON; команда сервера по-прежнему проходит window_rules при сборке) и
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
 права и хуки — никогда. Новый текст — UTF-8 без NUL и без невидимых, управляющих и bidi-знаков (HIDDEN, кроме \\n и
 \\t; --why — тоже, и ещё не длиннее WHY_MAX и без лишних пробелов: why_ok, его повторяет и valid() прохода). .toml —
@@ -77,7 +79,7 @@ def set_core(mod):
     P = mod
 
 
-FILES = re.compile(r"\.claude/pantheon/(?:policy|grants)\.toml|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
+FILES = re.compile(r"\.claude/pantheon/(?:policy|grants)\.toml|\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/(?:mcp|approved)\.json|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
 REQ_TTL = 24 * 3600       # заявка старше суток — снята: владелец не ответил
 RETRY_SEC = 600           # окно Touch ID закрыто без ответа — следующее не раньше
 PRESENT_SEC = 300         # владелец у Mac: простой меньше 5 минут
@@ -134,7 +136,7 @@ def rel_of(arg):
 def target(rel):
     """Абсолютный путь файла: только из FILES, без ссылок на пути (папки — настоящие, внутри HOME)."""
     if not FILES.fullmatch(rel or ""):
-        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, grants.toml, ~/.claude/agents/_parts/*.part)")
+        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, grants.toml, packs/<направление>/mcp.json и approved.json, ~/.claude/agents/_parts/*.part)")
     home = os.path.realpath(P.HOME)
     p = os.path.join(home, rel)
     if os.path.realpath(os.path.dirname(p)) != os.path.dirname(p):
@@ -186,6 +188,13 @@ def check_text(rel, new):
             tomllib.loads(new)
         except tomllib.TOMLDecodeError as e:
             raise Refuse(f"новый текст ~/{rel} — не TOML: {e}")
+    if rel.endswith(".json"):   # пакет окна (metis-0949): объект JSON, иначе сборка окна его не прочтёт
+        try:
+            ok = isinstance(json.loads(new), dict)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise Refuse(f"новый текст ~/{rel} — не объект JSON")
 
 
 def make_diff(rel, old, new):
