@@ -293,23 +293,62 @@ def test_gate_base():
 
 
 
+DECISION_HELD = [("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2")]
+
+
+def _decision_box(adds, *decisions):
+    """Шлюз владельца на SHA с вердиктами adds и решениями шлюза guard decisions (metis-0966)."""
+    b = Box()
+    b.request()
+    b.records = []
+    b.add("tests", who="")
+    for kind, sha, sid in adds:
+        b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+    for d in decisions:
+        b.decide(**d)
+    b.run()
+    return b
+
+
+def test_gate_decision_hint():
+    """metis-1181: код прошлых head не сверен хуком guard — текст отказа велит повторить `pantheon merge
+    request` (сверки нет, срок хука, gh не ответил), а не звать нового argus; причины, которые повтор не снимет
+    (старше CARRY_HEADS, не клон, бюджет), — прежний текст."""
+    box, held = _decision_box, DECISION_HELD
+    b = box(held)
+    again = f"повтори `pantheon merge request {PR} -R {REPO}`"
+    check("1181: решения нет — подсказка «сверка не записана, повтори заявку», а не новый argus",
+          "сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(), b.alerts())
+    b = box(held, {"kind": "decision-miss", "sha": "", "why": ["срок хука: на gh pr view не осталось времени"]})
+    check("1181: след decision-miss — «не успела» с причиной и «повтори заявку», в силе", not b.merges()
+          and "не успела (срок хука: на gh pr view" in b.alerts() and again in b.alerts(), b.alerts())
+    b = box(held, {"why": ["gh pr view не ответил — base PR неизвестна"]})
+    check("1181: решение без фактов с причиной — «не досчитана» и «повтори заявку», в силе", not b.merges()
+          and "не досчитана (gh pr view не ответил" in b.alerts() and again in b.alerts(), b.alerts())
+    for why in ("head 0123456789ab старше 8 последних — не сверялся",
+                "папка слияния — не клон latark/agent-kit, диффы не сверить (сливай из клона latark/agent-kit)",
+                "сверка дольше 4 с — остановлена (таймаут хука 10 с)"):
+        b = box(held, {"why": [why]})
+        check(f"1181: причину «{why[:30]}…» повтор заявки не снимет — прежний текст, без «повтори заявку»",
+              not b.merges() and again not in b.alerts() and "снимает его «принять»" in b.alerts(), b.alerts())
+    b = box(held, {"why": ["head 0123456789ab старше 8 последних — не сверялся",
+                           "срок хука: до него меньше 1.5 с — сверка остановлена"]})
+    check("1181: среди причин есть срок хука — «повтори заявку» только с ней", again in b.alerts()
+          and "не досчитана (срок хука" in b.alerts() and "старше 8" not in b.alerts(), b.alerts())
+    b = box(held, {"same": [SHA2]})
+    check("1181: код сверен (тот же) — подсказки «повтори заявку» нет", again not in b.alerts(), b.alerts())
+    b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2")])
+    check("1181: «принять» не перенесено без решения — «сверка не записана, повтори заявку»",
+          "не перенесено: сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(),
+          b.alerts())
+
+
 def test_gate_decision():
     """metis-0966, 0396, 0443 (вариант А): код прошлых head — из решения шлюза guard при `pantheon merge request`
     (carry.jsonl, kind decision). Без решения другой коммит — неизвестный код: второй argus «вернуть» не снимает,
     «принять» не переносится. Решение — только на этот head, нынешнюю base PR и не старше суток."""
-    def box(adds, *decisions):
-        b = Box()
-        b.request()
-        b.records = []
-        b.add("tests", who="")
-        for kind, sha, sid in adds:
-            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
-        for d in decisions:
-            b.decide(**d)
-        b.run()
-        return b
-
-    held = [("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2")]
+    box = _decision_box
+    held = DECISION_HELD
     b = box(held)
     check("0966: «вернуть» на SHA2, два свежих «принять» других argus на SHA, решения нет (rebase с тем же кодом?) — "
           "в силе, окна нет", not b.windows() and not b.merges() and "в силе" in b.alerts()
