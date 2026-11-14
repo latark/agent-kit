@@ -1714,11 +1714,12 @@ def narrow_plan(d, sha, argv, line, base):
 
 # --- итоги --------------------------------------------------------------------------------------------------------
 
-def save_result(qdir, rid, res):
+def save_result(qdir, rid, res, private=None):
     """Итог — в STATE/outside/runs/<ID>.json и, если заявка из папки, в <ID>.result.json рядом с ней. Запись в runs/
-    несёт ещё qdir и дорожку прохода (lane, metis-1081): recover_results, сторож и уборка копий берут только свою."""
+    несёт ещё qdir и дорожку прохода (lane, metis-1081): recover_results, сторож и уборка копий берут только свою.
+    private — поля только для <ID>.result.json папки заявок (runs/ читают окна; код адреса входа, argus #453 Д)."""
     res = {"id": rid, "updated": P.stamp(), **res}
-    text = json.dumps(res, ensure_ascii=False, indent=1)
+    text = json.dumps({**res, **(private or {})}, ensure_ascii=False, indent=1)
     os.makedirs(root("runs"), mode=0o700, exist_ok=True)
     lane = getattr(_LANE, "name", None)
     P.write_json(root("runs", rid + ".json"), {**res, **({"qdir": qdir} if qdir else {}),

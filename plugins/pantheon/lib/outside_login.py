@@ -20,10 +20,12 @@ outside, не показывая пароль роли (metis-1134).
      Первый заход по нему — ответ 302 с Set-Cookie (те же cookie @supabase/ssr, хост 127.0.0.1: cookie не делятся по
      портам, поэтому их видит и dev-сервер) и переход на `http://127.0.0.1:<порт сервера>/`. Второй заход — отказ 410,
      чужой путь или код — 404; после удачного захода, через RECEIVE_TTL (10 мин) или после MAX_MISSES чужих кодов
-     приёмник выходит сам. talos просто открывает адрес (navigate_page) — без evaluate_script с токенами: его режет
-     классификатор auto (Афина, 14.11).
+     приёмник выходит сам. HEAD по верному коду — 405 без cookie: проверка ссылки код не сжигает. Срок чтения
+     запроса — REQUEST_TIMEOUT (5 с): молчащий клиент не держит однопоточный приёмник. talos просто открывает адрес
+     (navigate_page) — без evaluate_script с токенами: его режет классификатор auto (Афина, 14.11).
 В итоге роли (`<rid>.result.json`), журнале прохода (logs/outside.jsonl) и runs/<rid>.json — только «вошла / не
-вошла», причина без значений и адрес входа (в журнале — без кода, только порт). Пароля, почты и токенов нет нигде,
+вошла», причина без значений и адрес входа. Код адреса — только в `<rid>.result.json` папки заявок окна, подавшего
+заявку; в журнале и runs/<rid>.json (их читают окна) — только порт приёмника. Пароля, почты и токенов нет нигде,
 кроме тела запроса к Supabase и памяти приёмника; любая причина отказа проходит через _scrub (значения ключей
 вырезаются). Файлы `<rid>.session.json` прежней версии (0.11.310) с токенами проход удаляет из папок заявок.
 
@@ -57,6 +59,7 @@ SESSION_SUFFIX = ".session.json"    # файл сессии прежней ве�
 RECEIVE_TTL = 10 * 60               # с: срок адреса входа и жизни приёмника
 RECEIVE_READY = 5                   # с: ждать от приёмника «готов»
 MAX_MISSES = 20                     # чужих кодов — приёмник выходит
+REQUEST_TIMEOUT = 5                 # с: срок чтения запроса одним соединением (молчащий клиент не вешает приёмник)
 LOGIN_PATH = "/pantheon-login/"
 COOKIE_MAX_AGE = 400 * 24 * 3600
 STALE_CHUNKS = 5                    # кусков cookie прежней сессии стереть
@@ -153,7 +156,8 @@ def set_cookie_headers(cookies):
 
 def answer(state, method, path, now=None):
     """Ответ приёмника на запрос → (код HTTP, [(заголовок, значение)], тело). state: code, cookies, target, deadline,
-    used, misses — меняется: удачный заход ставит used, чужой код под LOGIN_PATH прибавляет misses."""
+    used, misses — меняется: удачный заход GET ставит used, чужой код под LOGIN_PATH прибавляет misses. HEAD по
+    верному коду — 405 без cookie и без used: проверка ссылки код не сжигает."""
     now = time.time() if now is None else now
     if method not in ("GET", "HEAD") or not path.startswith(LOGIN_PATH):
         return 404, [], "нет такого адреса"
@@ -165,6 +169,8 @@ def answer(state, method, path, now=None):
         return 410, [], "адрес входа уже использован — подай pantheon outside login заново"
     if now >= state["deadline"]:
         return 410, [], "срок адреса входа вышел — подай pantheon outside login заново"
+    if method == "HEAD":   # проверка ссылки (HEAD) код не сжигает: без used и без cookie (argus #453 С)
+        return 405, [("Allow", "GET"), ("Cache-Control", "no-store")], "вход — только заходом GET (navigate_page)"
     state["used"] = True
     return 302, [("Set-Cookie", h) for h in set_cookie_headers(state["cookies"])] + [
         ("Location", state["target"]), ("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer")], \
@@ -172,8 +178,12 @@ def answer(state, method, path, now=None):
 
 
 def handler_class(state):
-    """Обработчик http.server для приёмника: ответ — answer(state, …), журнала запросов нет (в пути — код)."""
+    """Обработчик http.server для приёмника: ответ — answer(state, …), журнала запросов нет (в пути — код). Срок
+    чтения запроса — REQUEST_TIMEOUT: молчащий клиент (preconnect браузера) не держит однопоточный приёмник дольше
+    (argus #453 Б); по сроку обработчик закрывает соединение без ответа."""
     class Handler(http.server.BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT   # StreamRequestHandler.setup → settimeout на принятом сокете
+
         def _go(self, method):
             status, headers, body = answer(state, method, self.path)
             raw = body.encode()
@@ -371,8 +381,10 @@ def handle(qdir, window, rid, req):
     O.log_event(id=rid, kind="login", window=window, server=sid, ok=True, cookies=len(cookies), receiver=rport)
     note = (f"вошла: открой адрес входа {login_url} в chrome-devtools (navigate_page) — он один раз ставит cookie и "
             f"ведёт на {origin}/. Адрес одноразовый, до {P.stamp(until)}; evaluate_script и файл сессии не нужны")
-    return O.save_result(qdir, rid, {"state": "done", "code": 0, **base, "login_url": login_url,
-                                     "until": P.stamp(until), "note": note})
+    # код адреса — только в итоге своей папки заявок; runs/<rid>.json читают окна, там адрес без кода (argus #453 Д)
+    public = {"state": "done", "code": 0, **base, "receiver": rport, "until": P.stamp(until),
+              "note": f"вошла: одноразовый адрес входа на порту {rport} — в итоге заявки у окна, подавшего её"}
+    return O.save_result(qdir, rid, public, private={"login_url": login_url, "note": note})
 
 
 def _take_requests():

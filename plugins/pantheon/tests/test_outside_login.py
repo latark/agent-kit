@@ -8,7 +8,8 @@
 кодом ошибки без значений; нет файла ключей, нет TALOS_PASSWORD, http к чужому хосту, сбой сети, сбой приёмника,
 чужой и несуществующий сервер — failed без запроса или без значений. Пароля и токенов нет в stdout, stderr, журнале
 прохода (logs/outside.jsonl), runs/<ID>.json, итоге и файле заявки. Ответы приёмника (answer): первый заход — 302 и
-Set-Cookie, второй и просроченный — 410, чужой код — 404. Приёмник вживую (процесс, порт) — где порт дают, иначе
+Set-Cookie, второй и просроченный — 410, чужой код — 404, HEAD — 405 без cookie (код не сожжён); молчащий клиент на
+паре сокетов не держит обработчик дольше срока чтения; кода адреса нет в runs/<ID>.json и журнале. Приёмник вживую (процесс, порт) — где порт дают, иначе
 строка «пропущено». Заявку входа берёт проход серверов (serve_round), команду — main(["login", …]); файлы сессий
 прежней версии убираются.
 """
@@ -23,6 +24,7 @@ import socket
 import ssl
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -197,6 +199,13 @@ JOURNAL = os.path.join(STATE, "logs", "outside.jsonl")
 check("вход: кода входа нет в журнале прохода, запись входа есть",
       os.path.exists(JOURNAL) and RECV_CODE not in open(JOURNAL).read() and '"receiver": 4390' in open(JOURNAL).read())
 check("вход: заявка снята", not [n for n in os.listdir(QDIR) if n.endswith(L.SUFFIX)])
+RUN_JSON = os.path.join(STATE, "outside", "runs", f"{rid}.json")
+run_rec = P.read_json(RUN_JSON, {}) if rid else {}
+check("вход: в runs/<rid>.json (его читают окна) кода адреса нет, порт приёмника и итог done есть (argus #453 Д)",
+      os.path.exists(RUN_JSON) and RECV_CODE not in open(RUN_JSON).read() and run_rec.get("state") == "done"
+      and run_rec.get("receiver") == 4390 and "login_url" not in run_rec, run_rec)
+check("вход: кода адреса нет нигде в STATE (журнал, runs), он только в итоге папки заявок окна",
+      RECV_CODE not in everything_text((STATE,)) and RECV_CODE in open(os.path.join(QDIR, rid + ".result.json")).read())
 
 # 1б. приёмник не поднялся (текст сбоя с токеном и паролем) — failed без значений
 RECV_FAIL[0] = OSError(f"bind {TOKEN} {PASSWORD}")
@@ -382,6 +391,12 @@ s5, _, _ = L.answer(st2, "GET", "/" + RECV_CODE)
 s6, _, _ = L.answer(st2, "POST", L.LOGIN_PATH + RECV_CODE)
 check("приёмник: чужой код — 404 и счёт промахов; чужой путь и POST — 404, код цел",
       s4 == 404 and not h4 and st2["misses"] == 1 and s5 == 404 and s6 == 404 and not st2["used"], st2)
+st4 = {**st0, "used": False, "misses": 0}
+s7, h7, _ = L.answer(st4, "HEAD", L.LOGIN_PATH + RECV_CODE)
+s8, h8, _ = L.answer(st4, "GET", L.LOGIN_PATH + RECV_CODE)
+check("приёмник: HEAD по верному коду — 405 без Set-Cookie и без used; следом GET входит (argus #453 С)",
+      s7 == 405 and not [k for k, _ in h7 if k == "Set-Cookie"] and dict(h7).get("Allow") == "GET"
+      and s8 == 302 and st4["used"], (s7, h7, s8))
 chunked = L.set_cookie_headers([["sb-r-auth-token.0", "a"], ["sb-r-auth-token.1", "b"]])
 check("приёмник: куски — стирается цельная cookie и лишние куски, свои не стираются",
       "sb-r-auth-token=; Path=/; Max-Age=0; SameSite=Lax" in chunked
@@ -389,10 +404,10 @@ check("приёмник: куски — стирается цельная cookie
       and any(c.startswith("sb-r-auth-token.4=;") for c in chunked), chunked)
 
 # 10б. обработчик HTTP приёмника на паре сокетов (порт не нужен): заголовки ответа, второй заход — 410
-def http_once(state, path):
+def http_once(state, path, method="GET"):
     a, b = socket.socketpair()
     with a, b:
-        b.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode())
+        b.sendall(f"{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode())
         L.handler_class(state)(a, ("127.0.0.1", 0), None)
         a.shutdown(socket.SHUT_WR)
         raw = b""
@@ -409,6 +424,41 @@ check("HTTP: первый заход — 302, Location и Set-Cookie в заго
       r1.startswith("HTTP/1.0 302") and "\r\nLocation: http://127.0.0.1:4301/\r\n" in r1
       and "\r\nSet-Cookie: sb-abcdref-auth-token=base64-AAA; Path=/;" in r1, r1[:400])
 check("HTTP: второй заход — 410 без Set-Cookie", r2.startswith("HTTP/1.0 410") and "Set-Cookie" not in r2, r2[:300])
+st5 = {**st3, "used": False, "misses": 0}
+r3 = http_once(st5, L.LOGIN_PATH + RECV_CODE, "HEAD")
+check("HTTP: HEAD — 405 без Set-Cookie, код не сожжён", r3.startswith("HTTP/1.0 405") and "Set-Cookie" not in r3
+      and not st5["used"], r3[:300])
+
+
+def silent_client(first=b""):
+    """Клиент на паре сокетов шлёт first и молчит → (обработчик вышел сам, за сколько с). Срок чтения — 1 с."""
+    a, b = socket.socketpair()
+    L.REQUEST_TIMEOUT, keep = 1, L.REQUEST_TIMEOUT
+    try:
+        handler = L.handler_class({**st3, "used": False, "misses": 0})
+    finally:
+        L.REQUEST_TIMEOUT = keep
+    def serve():
+        with contextlib.suppress(OSError):
+            handler(a, ("127.0.0.1", 0), None)
+
+    t0 = time.monotonic()
+    th = threading.Thread(target=serve, daemon=True)
+    with a, b:
+        if first:
+            b.sendall(first)
+        th.start()
+        th.join(6)
+        done, took = not th.is_alive(), time.monotonic() - t0
+        b.close()   # на откате правки — EOF, обработчик выходит и тест не висит
+        th.join(5)
+    return done, took
+
+
+done, took = silent_client()
+check("HTTP: молчащий клиент — обработчик выходит сам за срок чтения (argus #453 Б)", done and took < 4, (done, took))
+done, took = silent_client(b"GET " + (L.LOGIN_PATH + RECV_CODE).encode() + b" HTTP/1.0\r\nHost: x\r\n")
+check("HTTP: заголовки без конца — обработчик выходит сам за срок чтения", done and took < 4, (done, took))
 
 # 10в. процесс приёмника: сессия — в stdin, не в аргументах; срок вышел — выходит сам с кодом 0
 pa, pb = socket.socketpair()
