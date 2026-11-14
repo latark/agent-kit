@@ -17,6 +17,7 @@ from _py311 import PY311  # noqa: E402,F401  — Python 3.11+ и PANTHEON_TEST=1
 import atexit
 import contextlib
 import io
+import re
 import shutil
 import signal
 import tempfile
@@ -1085,6 +1086,20 @@ def test_new_order_goal():
     # metis-0725: задачу, которую ведёт другая сессия, цель не держит, даже в поручении и в чек-листе эпика
     check("её ведёт другая сессия (owner — не это окно и не его команда), даже если она в поручении, в чек-листе эпика"
           in w, f"условие цели без owner другой сессии: {w!r}")
+    # metis-1036: «заблокировано» с блокером и вопросом достигает цели при любых открытых пунктах и задачах — судья
+    # цели читал его вместе с WAITING_GOAL как «И» и возвращал окно Афины 8 раз. Ни одна фраза цели о doing/todo
+    # не держит «заблокировано»: каждая говорит о «готово», кроме самой BLOCKED_GOAL
+    b = P.BLOCKED_GOAL
+    check("«Статус: заблокировано» с названным блокером и вопросом владельцу или Зевсу достигает цели сразу" in b
+          and "при любых открытых пунктах чек-листа и задачах в работе (doing) или в очереди (todo)" in b
+          and "только для «Статус: готово»" in b and w.startswith(" Для «Статус: готово» задача уходит из цели"),
+          f"условие цели без законной остановки «заблокировано»: {b!r} {w!r}")
+    for name in ("TASK_GOAL", "COORDINATOR_GOAL"):
+        g = getattr(P, name)
+        check(g.endswith(b + w + P.NEW_ORDER_GOAL), f"{name} без условия «заблокировано» перед задачами: {g!r}")
+        held = [s for s in re.split(r"(?<=\.)\s+", g) if re.search(r"\((?:doing|todo)\)|в работе|в очереди", s)
+                and "готово" not in s and not s.startswith("«Статус: заблокировано» с названным блокером")]
+        check(not held, f"{name}: фраза о задачах держит и «заблокировано»: {held!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())
