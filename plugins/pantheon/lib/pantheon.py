@@ -2816,8 +2816,9 @@ def grants_apply(name, data, grants):
                 if x not in vals:
                     vals.append(x)
             node[keys[-1]] = vals
-        # выданная запись — с теми же запретами, что своя папка окна (role_settings): скрипты .claude/hooks хуки
-        # запускают вне песочницы, .claude/agents — роли, .git/hooks и .git/config — код git (metis-1214)
+        # выданная запись — с запретами своей папки окна (role_settings): скрипты .claude/hooks хуки запускают вне
+        # песочницы, .claude/agents — роли, .git/hooks и .git/config — код git (metis-1214); сверх них — хуки в
+        # .claude/settings*.json (SETTINGS_FILES, metis-1221)
         fs = data.setdefault("sandbox", {}).setdefault("filesystem", {})
         deny = list(fs.get("denyWrite") or [])
         for x in g.get("write", []):
@@ -2968,8 +2969,13 @@ def agents_window(data, allowed, deny, script):
 
 
 EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
+# .claude/settings*.json — в них хуки, Claude Code запускает их вне песочницы при старте сессии в этой папке (metis-1221
+# А-Д1). Пока только выданная запись: в своих папках окна туда пишет project-tools apply («настрой проект»); их —
+# отдельным PR через owner-edit (решение владельца 15.11: «выданные — сразу, свои — потом»)
+SETTINGS_FILES = ("/.claude/settings.json", "/**/.claude/settings.json", "/.claude/settings.local.json",
+                  "/**/.claude/settings.local.json")
 GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
-    "/.claude/agents", "/**/.claude/agents")
+    "/.claude/agents", "/**/.claude/agents") + SETTINGS_FILES
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
