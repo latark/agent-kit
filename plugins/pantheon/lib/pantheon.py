@@ -2767,7 +2767,14 @@ def grants_load(text=None):
             errors.append(f"grant {i} ({win}): ключи — {', '.join(GRANT_KEYS)} списками строк" +
                           (f"; лишние: {', '.join(bad)}" if bad else ""))
             continue
-        norm = lambda x: os.path.realpath(os.path.expanduser(x))  # noqa: E731
+        # правило Edit/Write/MultiEdit/NotebookEdit в permissions.allow Claude Code добавляет в allowWrite песочницы —
+        # мимо проверки GRANT_NO_WRITE ниже; запись — только ключом write (ревью argus #477 Б1)
+        edit_a = [x for x in lists.get("allow", []) if re.match(r"\s*(?:Edit|Write|MultiEdit|NotebookEdit)\s*\(", x)]
+        if edit_a:
+            errors.append(f"grant {i} ({win}): allow — без правил записи, запись — ключом write: {', '.join(edit_a)}")
+            continue
+        # macOS не различает регистр: ~/.CLAUDE — тот же ~/.claude (ревью argus #477 Д1, metis-1218)
+        norm = lambda x: os.path.realpath(os.path.expanduser(x)).casefold()  # noqa: E731
         glob_w = [x for x in lists.get("write", []) if re.search(r"[*?\[\]{}]", x) or not x.startswith(("/", "~/"))]
         if glob_w:
             errors.append(f"grant {i} ({win}): write — только путь от / или ~/ без шаблонов: {', '.join(glob_w)}")

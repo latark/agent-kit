@@ -1166,6 +1166,16 @@ answer(yes_question(req), "Б — Нет")
 run()
 check("grant: «нет» — файл прежний, итог роли не done", len(P.grants_load()[0]) == 1
       and result(req, "metis-pantheon").get("state") != "done", result(req, "metis-pantheon"))
+n_req = len(reqs())
+rc, out, errs = grant("--allow", "Edit(~/Library/LaunchAgents/**)", "--task", "metis-0680", "--why", "автозапуск")
+check("grant --allow Edit(…) — отказ: запись только ключом write (ревью #477 Б1)", rc != 0
+      and "правил записи" in errs and len(reqs()) == n_req, (rc, errs))
+for rule in ('Write(~/.local/**)', 'MultiEdit(//tmp/x)', 'NotebookEdit(~/n.ipynb)', ' Edit (~/.claude/**)'):
+    gerr = P.grants_load(f'[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nallow = [{rule!r}]\n'.replace("'", '"'))[2]
+    check(f"grants_load: allow {rule!r} — ошибка, право не в силе", gerr and "правил записи" in gerr[0], gerr)
+live, _, gerr, _ = P.grants_load('[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nwrite = ["~/.CLAUDE"]\n')
+check("grants_load: write ~/.CLAUDE — отказ без учёта регистра (metis-1218)", not live and gerr
+      and "не даётся" in gerr[0], (live, gerr))
 H = P.handoff_mod()
 check("отказ песочницы без маршрута — подсказка pantheon grant request",
       "pantheon grant request" in H.hint("touch /opt/x: Operation not permitted", "sandbox"))
