@@ -210,7 +210,7 @@ PACK_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 PACK_ENV_DENY = re.compile(r"PATH|HOME|TMPDIR|SHELL|ENV|BASH_ENV|ZDOTDIR|DYLD_.*|LD_.*|NODE_.*|NPM_CONFIG_.*|PYTHON.*"
                            r"|.*_PROXY|GUARD_.*|ANTHROPIC_.*|CLAUDE.*")
 # бинари ${HOME}/.local/bin, которые сервер пакета может запустить за «--» env_from.py: Go-сервер Grafana не ставится
-# через npx (окно proteus-morph, metis-1222)
+# через npx (metis-1222)
 PACK_LOCAL_BINS = ("mcp-grafana",)
 PACK_LOCAL_RUN = {"${HOME}/.local/bin/" + b for b in PACK_LOCAL_BINS}
 NPX_PINNED = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+")

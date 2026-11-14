@@ -4001,7 +4001,7 @@ def pack_admit(window, plugin_dir, mcp_text):
     (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Плагин (хуки) и MCP проверяются раздельно (вариант А владельца
     13.11): плохой сервер снимает только mcp.json, хуки пакета остаются; плохой плагин снимает и плагин, и MCP —
     серверы пакета без его хуков (protect-db на supabase) не идут. Негодный сервер mcp.json снимается один, годные идут
-    (metis-1222: grafana мимо npx снимала весь MCP окна proteus-morph). Нарушение — строка в stderr и тревога
+    (metis-1222: сервер мимо npx снимал весь MCP окна). Нарушение — строка в stderr и тревога
     pack-bad-<window> в alerts.md; всё годно — тревога снята. → (плагин годен, текст mcp.json для окна или None)."""
     def doc(text, rel, into):
         if text is None:
