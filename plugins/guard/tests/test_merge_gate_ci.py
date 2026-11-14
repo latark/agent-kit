@@ -786,7 +786,7 @@ def t_ci_hashed(h):
     check("ci_billing проекта: аннотация другая — признака нет",
           mg.ci_billing(runs, req, {501: [dict(note[0], message="Process completed with exit code 1.")]},
                         {501: idle}) is False)
-    # приватные проекты владельца legal-watch, content-machine, expert-corpus (metis-1116): записи по хешу, job tests
+    # три приватных проекта владельца (metis-1116): записи по хешу, job tests
     # workflow tests.yml, полный набор `uv run pytest`. Имён нет в публичном коде — записи переносятся под вымышленное имя
     real = _load_merge_gate("merge_gate_ci_real3")
     for h256, bases in (("ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898", ("develop", "main")),

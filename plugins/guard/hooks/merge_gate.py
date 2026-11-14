@@ -1618,8 +1618,8 @@ REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces",
                    # (ветки эпиков — без требования: их workflow может ещё не быть, PR ждал бы вечно — argus #479)
                    "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
                        ("tests", "checks", "develop"), ("tests", "checks", "main")),
-                   # приватные проекты владельца (metis-1116): job tests workflow tests.yml; legal-watch — PR в develop и
-                   # main, content-machine и expert-corpus — PR в main
+                   # приватные проекты владельца (metis-1116): job tests workflow tests.yml; первый — PR в develop и main,
+                   # два других — PR в main
                    "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": (
                        ("tests", "tests", "develop"), ("tests", "tests", "main")),
                    "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": (("tests", "tests", "main"),),
