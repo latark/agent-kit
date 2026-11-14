@@ -161,7 +161,7 @@
    "lines": 102
   },
   "plugins/guard/tests/_guard_shim.py": {
-   "lines": 103
+   "lines": 30
   },
   "plugins/guard/tests/_merge_gate_common.py": {
    "PLR0915": {
@@ -200,14 +200,23 @@
   "plugins/guard/tests/test_entry.py": {
    "lines": 312
   },
-  "plugins/guard/tests/test_guard.py": {
+  "plugins/guard/tests/test_guard_hooks.py": {
    "PLR0915": {
-    "failure_checks": 56,
-    "hestia_consent_checks": 52,
-    "main": 168,
+    "failure_checks": 56
+   },
+   "lines": 279
+  },
+  "plugins/guard/tests/test_guard_merge.py": {
+   "PLR0915": {
     "merge_security_checks": 109
    },
-   "lines": 2529
+   "lines": 538
+  },
+  "plugins/guard/tests/test_guard_roles.py": {
+   "PLR0915": {
+    "hestia_consent_checks": 52
+   },
+   "lines": 511
   },
   "plugins/guard/tests/test_hookd.py": {
    "PLR0915": {

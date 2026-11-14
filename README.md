@@ -1066,7 +1066,8 @@
     heavy python3 -I plugins/pantheon/scripts/affected-map.py plugins/guard plugins/pantheon plugins/project-tools  # карта заново
     heavy python3 -I plugins/pantheon/scripts/affected-map.py --update plugins/guard plugins/pantheon plugins/project-tools  # карта частями
     python3 -I plugins/pantheon/tests/test_map_cache.py  # карта частями (--update, --check), кэш --cache, дымовой файл
-    python3 -I plugins/guard/tests/test_guard.py      # карта прав ~/ai/pantheon, domain, привилегии, protect-config, режимы
+    python3 -I plugins/guard/tests/test_guard_acl.py  # карта прав ~/ai/pantheon, domain, привилегии, protect-config, режимы;
+    # части test_guard_{acl,roles,cdp,merge,protect,hooks}.py, общее — tests/_guard_common.py (metis-1148)
     python3 -I plugins/guard/tests/test_shell_diff.py # разбор Bash против настоящих zsh и bash
     python3 -I plugins/pantheon/tests/test_board.py   # задачи и доска владельца
     python3 -I plugins/pantheon/tests/test_board_text.py   # сводка доски board-auto.md, тревога свежести, archive STATUS
