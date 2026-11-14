@@ -3077,6 +3077,13 @@ def _gone(dfd, name):
     return False
 
 
+def _listdir_safe(dfd):
+    """Имена в папке dfd по порядку; папку не прочесть — [] (круг прохода серверов идёт до своей уборки, metis-1186)."""
+    with contextlib.suppress(OSError):
+        return sorted(os.listdir(dfd))
+    return []
+
+
 def requests(kinds=KINDS, limit=None, taken=None, skip=(), lane=None):
     """[(время, вид, qdir, окно, id, заявка)] по всем папкам — только заявки своих проходов (kinds): чужие остаются
     лежать (metis-0614: проход тестов не съедает заявки серверов и наоборот). Битые и подложенные — удаляются с итогом
@@ -3093,7 +3100,7 @@ def requests(kinds=KINDS, limit=None, taken=None, skip=(), lane=None):
         if dfd is None:
             continue
         try:
-            for name in sorted(os.listdir(dfd)):
+            for name in _listdir_safe(dfd):
                 if not name.endswith(".req.json"):
                     continue
                 rid = name[:-len(".req.json")]

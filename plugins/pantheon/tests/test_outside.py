@@ -1535,6 +1535,36 @@ check("сбой до копии (handle): обе заявки круга — fai
       and "сбой прохода: OSError" in _ra.get("why", "") and "сбой прохода" in _rb.get("why", "")
       and any(json.loads(x).get("kind") == "serve-error" for x in open(_log)), (_raised, _ra, _rb))
 
+# --- папку заявок не прочесть (metis-1186): OSError из listdir не роняет круг до уборки брошенных «стопов» и копий ---
+new_request("athena-x", APP, "serve")
+_real_listdir, _real_orph = os.listdir, (O.drop_orphan_stops, O.drop_orphan_work)
+_fd_calls, _orph = [], []
+
+
+def _listdir_boom(path="."):
+    if isinstance(path, int):   # папки заявок читаются по дескриптору (_open_dir)
+        _fd_calls.append(path)
+        raise PermissionError("нет доступа")
+    return _real_listdir(path)
+
+
+O.drop_orphan_stops = lambda *a, **k: _orph.append("stops")
+O.drop_orphan_work = lambda *a, **k: _orph.append("work")
+os.listdir = _listdir_boom
+try:
+    _raised = None
+    try:
+        O.serve_round()
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+    O.drop_orphan_stops, O.drop_orphan_work = _real_orph
+check("listdir папки заявок упал: serve_round без OSError и доходит до drop_orphan_stops и drop_orphan_work",
+      _raised is None and _fd_calls and _orph == ["stops", "work"], (_raised, _fd_calls, _orph))
+kill_all_servers()
+serve_pass()   # заявка, оставшаяся лежать, исполняется следующим кругом
+
 # --- брошенные копии (Д1 argus #232): копия без сервера старше WORK_ORPHAN_AGE снимается в конце круга -------------
 kill_all_servers()
 _wr = os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work")

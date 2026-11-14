@@ -395,7 +395,10 @@ def _take_requests():
         if dfd is None:
             continue
         try:
-            for name in sorted(os.listdir(dfd)):
+            names = []
+            with contextlib.suppress(OSError):   # папку не прочесть — без её заявок, круг (и уборка serve_round) идёт
+                names = sorted(os.listdir(dfd))
+            for name in names:
                 if not name.endswith(SUFFIX):
                     continue
                 rid = name[:-len(SUFFIX)]
