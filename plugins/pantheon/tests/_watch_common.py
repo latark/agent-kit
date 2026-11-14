@@ -38,6 +38,12 @@ if a[:1] == ["agents"]:
     if os.environ.get("FAKE_AGENTS_SLEEP"):  # metis-1175: claude agents не отвечает
         import time
         time.sleep(float(os.environ["FAKE_AGENTS_SLEEP"]))
+    slow = os.environ.get("FAKE_AGENTS_SLOW_NEXT")  # metis-1180: первый вызов отвечает, все следующие спят 5 с
+    if slow and os.path.exists(slow):
+        import time
+        time.sleep(5)
+    elif slow:
+        open(slow, "w").close()
     nxt = os.environ.get("FAKE_AGENTS_NEXT")       # первый вызов — FAKE_AGENTS, все следующие — этот файл
     if nxt and os.path.exists(nxt + ".seen"):
         print(open(nxt).read())

@@ -546,6 +546,193 @@ def test_agents_timeout_1175():
     check("подряд 1" in r.stdout and r.returncode == 75, f"после ответа счёт не с 1 ({r.stdout[-200:]!r} {r.returncode})")
 
 
+SLOW = {"FAKE_AGENTS_SLEEP": "5", "PANTHEON_AGENTS_TIMEOUT": "0.3"}
+
+
+def test_start_slow_agents_refuses_1180():
+    """metis-1180 (Б3 #461): claude agents не ответил за срок внутри запуска окна — запуск отказывает, а не решает
+    «сессий нет» и поднимает дубль. pantheon start напрямую; самозапуск плановым проходом, где первый вызов claude
+    agents ответил, а вызов под блокировкой имени — нет: новая сессия (start) и продолжение остановленной (recheck).
+    Те же случаи без медленного claude agents окно поднимают — сценарий настоящий."""
+    for slow in (False, True):
+        e = Env()
+        e.direction("sa-dir")
+        r = e.run("start", "sa-dir", "--from", "owner", "задание", t=T0, extra=SLOW if slow else None)
+        if slow:
+            check(r.returncode != 0 and not _bgs(e),
+                  f"1180: pantheon start при медленном claude agents: код {r.returncode}, {_bgs(e)} {r.stderr[-300:]!r}")
+        else:
+            check(_bgs(e, "sa-dir"), f"1180: контроль start не поднял окно: {r.returncode} {e.calls()} {r.stderr[-300:]!r}")
+        for stopped in (False, True):
+            e = Env()
+            e.direction("sb-dir")
+            e.task("sb-0001", "sb-dir")
+            e.run("watch", t=T0)
+            e.board("sb-0001", T0 + 10)
+            if stopped:
+                e.agents([bg("sb-dir", "stopped", "5ee71180-1")])
+            mark = os.path.join(e.tmp, "agents-slow")
+            extra = {"FAKE_AGENTS_SLOW_NEXT": mark, "PANTHEON_AGENTS_TIMEOUT": "0.3"} if slow else None
+            n0 = len(e.calls())
+            r = e.run("watch", t=T0 + 120, extra=extra)
+            got = [c for c in e.calls()[n0:] if c[:1] in (["--bg"], ["respawn"]) or "--resume" in c]
+            what = "продолжение" if stopped else "новая"
+            if slow:
+                check(not got and os.path.exists(mark), f"1180: самозапуск ({what}) поднял окно при медленном claude "
+                      f"agents под блокировкой: {got} {r.stderr[-300:]!r}")
+            else:
+                check(got, f"1180: контроль самозапуска ({what}) окна не поднял: {e.calls()[n0:]} {r.stderr[-300:]!r}")
+
+
+def _watch_inproc():
+    import importlib
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_t", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    return p, w
+
+
+class _Patched:
+    """Подмена атрибутов ядра p и переменных окружения на время случая; выход возвращает прежнее."""
+
+    def __init__(self, p, env, **attrs):
+        self.p, self.env, self.attrs = p, env, attrs
+
+    def __enter__(self):
+        self.saved = {k: getattr(self.p, k) for k in self.attrs}
+        self.env0 = {k: os.environ.get(k) for k in self.env}
+        for k, v in self.attrs.items():
+            setattr(self.p, k, v)
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.saved.items():
+            setattr(self.p, k, v)
+        for k, v in self.env0.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _raised(fn, kind=Exception):
+    try:
+        fn()
+    except kind as ex:
+        return ex
+    return None
+
+
+def test_cc_version_blind_1180():
+    """metis-1180: в проходе без ответа claude agents (blind_checks) `claude --version` ждёт не дольше срока claude
+    agents; таймаут и незапуск — тихий пропуск, а не тревога «проверка упала» мимо порога agents_failed. Вне такого
+    прохода незапуск — исключение, как раньше."""
+    p, w = _watch_inproc()
+    d = tempfile.mkdtemp(prefix="ccv-")
+    slowbin = os.path.join(d, "claude")
+    open(slowbin, "w").write(f"#!{PY311}\nimport time\ntime.sleep(5)\nprint('9.9.9 (Claude Code)')\n")
+    os.chmod(slowbin, 0o755)
+    cc = os.path.join(d, "cc-version")
+    with _Patched(p, {"PANTHEON_FAKE_CC": None, "PANTHEON_AGENTS_TIMEOUT": "0.3"}, STATE=d,
+                  claude_bin=lambda: slowbin, alert=lambda *a, **k: None, notify_soon=lambda *a, **k: None):
+        fn = dict(w.blind_checks(T0))["версия Claude Code"]
+        t0 = time.monotonic()
+        err = _raised(fn)
+        took = time.monotonic() - t0
+        check(err is None and took < 3 and not os.path.exists(cc),
+              f"1180: claude --version без ответа в проходе blind: {err!r}, {took:.1f} с, cc-version {os.path.exists(cc)}")
+        p.claude_bin = lambda: os.path.join(d, "нет-claude")
+        err = _raised(fn)
+        check(err is None, f"1180: claude не запускается в проходе blind — исключение {err!r}")
+        check(isinstance(_raised(lambda: w.cc_version(T0)), OSError),
+              "1180: вне прохода blind незапуск claude --version проглочен")
+
+
+def test_cc_version_write_after_alert_1180():
+    """metis-1180: cc-version пишется после тревоги «обновился»: упала проверка опор — версия не записана, следующий
+    проход повторяет и тревогу не теряет; после записи повторов тревоги нет."""
+    p, w = _watch_inproc()
+    d = tempfile.mkdtemp(prefix="ccv-")
+    cc = os.path.join(d, "cc-version")
+    open(cc, "w").write("2.1.200\n")
+    alerts = []
+
+    def boom():
+        raise RuntimeError("опоры")
+    with _Patched(p, {"PANTHEON_FAKE_CC": "2.1.300"}, STATE=d, alert=lambda text, who="": alerts.append(text),
+                  notify_soon=lambda *a, **k: None):
+        w.infra_check = boom
+        err = _raised(lambda: w.cc_version(T0), RuntimeError)
+        check(err is not None and open(cc).read().strip() == "2.1.200" and not alerts,
+              f"1180: упала проверка опор — cc-version {open(cc).read().strip()}, тревоги {alerts}")
+        w.infra_check = lambda: (False, ["НЕТ     claude agents --json отвечает (TimeoutExpired)"])
+        w.cc_version(T0 + 60)
+        w.cc_version(T0 + 120)
+        check(len(alerts) == 1 and "Claude Code обновился: 2.1.200 → 2.1.300" in alerts[0] and "НЕ в порядке" in alerts[0]
+              and open(cc).read().strip() == "2.1.300", f"1180: повтор после сбоя опор: {alerts} {open(cc).read()!r}")
+
+
+def test_infra_check_agents_timeout_1180():
+    """metis-1180: infra_check при таймауте claude agents — строка НЕТ с причиной, а не исключение."""
+    p, w = _watch_inproc()
+    d = tempfile.mkdtemp(prefix="infra-")
+
+    def slow_agents():
+        raise subprocess.TimeoutExpired(["claude", "agents"], 0.3)
+    with _Patched(p, {}, agents_all=slow_agents, guard_script=lambda: None, HOME=d,
+                  MANAGED=os.path.join(d, "нет-managed.json"), alert_once=lambda *a, **k: None,
+                  clear_once=lambda *a, **k: None):
+        res = []
+        err = _raised(lambda: res.append(w.infra_check()))
+        ok, lines = res[0] if res else (None, [])
+        check(err is None and not ok
+              and any(x.startswith("НЕТ") and "claude agents --json отвечает (TimeoutExpired)" in x for x in lines),
+              f"1180: infra_check при таймауте claude agents: {err!r} {ok} {lines}")
+
+
+def test_cc_update_survives_agents_timeout_1180():
+    """metis-1180: Claude Code обновился в проходе, где claude agents не отвечает (blind_checks → cc_version →
+    infra_check): тревога «обновился» с «НЕ в порядке» есть, проверка «версия Claude Code» не упала, cc-version новый."""
+    e = Env()
+    open(e.st("cc-version"), "w").write("2.1.200\n")
+    r = e.run("watch", t=T0 + 60, extra=SLOW)
+    a = e.alerts()
+    check("Claude Code обновился: 2.1.200 → 2.1.292" in a and "claude agents --json отвечает (TimeoutExpired)" in a,
+          f"1180: тревога «обновился» потеряна при таймауте claude agents: {a[-400:]!r} {r.stderr[-300:]!r}")
+    check("«версия Claude Code» упала" not in a, f"1180: проверка версии упала трассой: {a[-300:]!r}")
+    check(open(e.st("cc-version")).read().strip() == "2.1.292", "1180: cc-version не обновлён")
+
+
+def test_job_tempfail_reason_1180():
+    """metis-1180: код 75 задачи — причина из её вывода (у дежурного — «claude agents не ответил»), а не «нет сети»;
+    вывода нет — прежняя причина."""
+    p, _ = _watch_inproc()
+    reason = p.run_job.__globals__["tempfail_reason"]
+    check(reason("") == reason(None) == "нет сети или GitHub недоступен", f"1180: пустой вывод: {reason('')!r}")
+    got = reason("раз\nдва\n\n  \n")
+    check(got == "два", f"1180: не последняя непустая строка: {got!r}")
+    shadow = [x for x in ("/opt/homebrew/bin", os.path.dirname(PY311)) if os.path.exists(os.path.join(x, "claude"))]
+    if shadow:
+        print(f"пропущено: настоящий claude в {shadow[0]} раньше подменного")
+        return
+    e = Env()
+    e.schedule('primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[[job]]\nname = "watch"\n'
+               'command = "pantheon watch"\n')
+    r = e.run("run-job", "watch", t=T0 + 60, extra=SLOW)
+    st = json.load(open(e.st("jobs", "watch.json")))
+    check(r.returncode == 75 and "claude agents --json не ответил" in (st.get("waiting") or ""),
+          f"1180: причина ожидания задачи watch: {r.returncode} {st.get('waiting')!r}")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
