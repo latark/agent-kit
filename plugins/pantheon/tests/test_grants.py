@@ -118,6 +118,9 @@ write = ["~/state/x"]
     check("выданная запись — .claude/settings.json и settings.local.json в ней закрыты (metis-1221)", all(
         data + sub in dw for sub in ("/.claude/settings.json", "/**/.claude/settings.json",
                                      "/.claude/settings.local.json", "/**/.claude/settings.local.json")))
+    check("выданная запись — .mcp.json, .claude/skills и .claude/commands в ней закрыты (долги argus #482)", all(
+        data + sub in dw for sub in ("/.mcp.json", "/**/.mcp.json", "/.claude/skills", "/**/.claude/skills",
+                                     "/.claude/commands", "/**/.claude/commands")))
     check("domains в силе — в allowedDomains", "registry.example.org" in a["sandbox"]["network"]["allowedDomains"])
     check("«*» — в окне направления и в мастерской",
           "Bash(make check)" in a["permissions"]["allow"] and "Bash(make check)" in win("workshop")["permissions"]["allow"])

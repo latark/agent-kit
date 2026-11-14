@@ -2818,7 +2818,7 @@ def grants_apply(name, data, grants):
             node[keys[-1]] = vals
         # выданная запись — с запретами своей папки окна (role_settings): скрипты .claude/hooks хуки запускают вне
         # песочницы, .claude/agents — роли, .git/hooks и .git/config — код git (metis-1214); сверх них — хуки в
-        # .claude/settings*.json (SETTINGS_FILES, metis-1221)
+        # .claude/settings*.json (SETTINGS_FILES, metis-1221), .mcp.json, .claude/skills и commands
         fs = data.setdefault("sandbox", {}).setdefault("filesystem", {})
         deny = list(fs.get("denyWrite") or [])
         for x in g.get("write", []):
@@ -2974,8 +2974,16 @@ EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
 # отдельным PR через owner-edit (решение владельца 15.11: «выданные — сразу, свои — потом»)
 SETTINGS_FILES = ("/.claude/settings.json", "/**/.claude/settings.json", "/.claude/settings.local.json",
                   "/**/.claude/settings.local.json")
+# и .mcp.json (stdio-сервер стартует вне песочницы), .claude/skills и .claude/commands (хуки в шапке) — долги argus
+# #482, решение владельца 15.11 «Да, тем же PR»: выданной папке настраивать проект не нужно
 GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
-    "/.claude/agents", "/**/.claude/agents") + SETTINGS_FILES
+    "/.claude/agents", "/**/.claude/agents") + SETTINGS_FILES + (
+    "/.mcp.json", "/**/.mcp.json", "/.claude/skills", "/**/.claude/skills", "/.claude/commands", "/**/.claude/commands")
+# Свои папки окна (folders) — только корень: настройки проекта Claude Code берёт из папки запуска, из --add-dir и
+# вложенных — нет (пробы F8, metis-0933), EnterWorktree окнам закрыт. В корне — и сессии владельца без песочницы.
+# Копии .claude/worktrees/* открыты: «настрой проект» (project-tools apply) идёт там → PR → ревью → слияние → git pull
+# (metis-1221, решение владельца 15.11 «Да, корень + PR», «и .mcp.json тоже»). Остаток — README guard
+ROOT_SETTINGS = ("/.claude/settings.json", "/.claude/settings.local.json", "/.mcp.json")
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
@@ -2994,7 +3002,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     agents = ("/.claude/agents", "/**/.claude/agents")
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
-        () if own_agents and r in folders else agents)]
+        () if own_agents and r in folders else agents)] + [f"{r}{sub}" for r in folders for sub in ROOT_SETTINGS]
     deny_write += _deny_forms([HOOKD_HOME])
     # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
     deny_write += tmp_deny_write(allow, tmp_own)
