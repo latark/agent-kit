@@ -422,6 +422,10 @@ def carry_lines(repo, pr):
                        + (f"; мелкая правка поверх (metis-0784) — {', '.join(str(h)[:12] for h in d['delta'])}"
                           if isinstance(d.get("delta"), list) and d["delta"] else "")
                        + (f"; не сверено: {'; '.join(map(str, why))}" if why else ""))
+        elif d.get("kind") == "decision-miss":   # сверка не дошла до git (metis-1181)
+            why = d.get("why") if isinstance(d.get("why"), list) else []
+            out.append(f"{t}  decision  код {sha or '?'} не сверен: {'; '.join(map(str, why)) or '?'} — повтори "
+                       "`pantheon merge request`")
     return out
 
 

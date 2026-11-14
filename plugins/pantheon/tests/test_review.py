@@ -484,6 +484,14 @@ def run_all(tmp):
           in out43, r.stdout)
     check("0443: решение другого PR, битое решение и битая строка — не показаны",
           S5[:12] not in r.stdout and "битое" not in r.stdout and sum("decision" in ln for ln in out43) == 1, r.stdout)
+    with open(os.path.join(state, "merge-gate", "carry.jsonl"), "a") as fh:
+        fh.write(json.dumps({"v": 1, "kind": "decision-miss", "repo": ["latark/agent-kit"], "pr": 42, "sha": "",
+                             "why": ["срок хука: на gh pr view не осталось времени"],
+                             "time": "2026-11-08T01:10:00+03:00"}) + "\n")
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    check("1181: status показывает след несделанной сверки и велит повторить заявку",
+          "2026-11-08T01:10:00+03:00  decision  код ? не сверен: срок хука: на gh pr view не осталось времени — "
+          "повтори `pantheon merge request`" in r.stdout.splitlines(), r.stdout)
     # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:

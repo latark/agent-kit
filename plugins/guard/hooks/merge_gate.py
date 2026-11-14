@@ -1107,12 +1107,12 @@ def _alert_ok(repo, pr):
     return any(head.match(ln) and ref.search(ln) and "откат" in ln.lower() for ln in lines)
 
 
-def _gh_json(args):
+def _gh_json(args, timeout=GH_TIMEOUT):
     """Вывод gh как список JSON-значений подряд (--paginate склеивает страницы: `[..][..]` или объекты по строкам);
-    None — сбой gh или неразборный ответ."""
+    None — сбой gh или неразборный ответ. timeout — срок gh, с (решение шлюза при заявке — короче, metis-1181)."""
     env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
     try:
-        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=GH_TIMEOUT, env=env)
+        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=timeout, env=env)
         if r.returncode != 0:
             return None
         dec, text, pos, out = json.JSONDecoder(), r.stdout, 0, []
@@ -1128,6 +1128,11 @@ def _gh_json(args):
                 out.append(val)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def _gh_timed(args, timeout):
+    """_gh_json со сроком timeout; срок по умолчанию — прежний вызов с одним аргументом (его подменяют тесты)."""
+    return _gh_json(args) if timeout == GH_TIMEOUT else _gh_json(args, timeout)
 
 
 def _is_core(path, core_files):
@@ -1300,18 +1305,18 @@ def _blob(gd, rev, path):
 BRANCH_RE = re.compile(r"(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![/.])")
 
 
-def _base_tip(repo, branch, memo=None):
+def _base_tip(repo, branch, memo=None, timeout=GH_TIMEOUT):
     """Живая вершина ветки branch в repo (gh api …/git/ref/heads/<branch>) — SHA коммита или None (сбой gh, не та
     ветка, не коммит, имя ветки не по формату). memo — словарь одного шлюза (metis-0974): вершина спрашивается у gh
     один раз и для переноса «принять», и для сборки окон; сбой (None) тоже запоминается — второй запрос не пустит
-    то, чему отказал первый."""
+    то, чему отказал первый. timeout — срок gh (_gh_json)."""
     if memo is not None:
         if (repo, branch) not in memo:
-            memo[(repo, branch)] = _base_tip(repo, branch)
+            memo[(repo, branch)] = _base_tip(repo, branch, timeout=timeout)
         return memo[(repo, branch)]
     if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
         return None
-    got = _gh_json(["api", f"repos/{repo}/git/ref/heads/{branch}"])
+    got = _gh_timed(["api", f"repos/{repo}/git/ref/heads/{branch}"], timeout)
     ref = got[0] if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else {}
     obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
     sha = obj.get("sha")
@@ -1359,9 +1364,10 @@ PR_VIEW_FIELDS = ("headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRol
                   "headRefName")
 
 
-def _pr_view(repo, pr):
-    """Один gh pr view на шлюз — и для Д3, и для проверок GitHub (таймаут хука 10 с): словарь или None (сбой)."""
-    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", PR_VIEW_FIELDS])
+def _pr_view(repo, pr, timeout=GH_TIMEOUT):
+    """Один gh pr view на шлюз — и для Д3, и для проверок GitHub (таймаут хука 10 с): словарь или None (сбой).
+    timeout — срок gh (_gh_json)."""
+    got = _gh_timed(["pr", "view", str(pr), "-R", repo, "--json", PR_VIEW_FIELDS], timeout)
     data = got[0] if isinstance(got, list) and len(got) == 1 else None
     return data if isinstance(data, dict) else None
 
@@ -2707,6 +2713,8 @@ def append_carry(rec):
 # delta — head, от которых новый head — мелкая правка поверх вне ядра (_delta_heads, metis-0784): их «принять» проход
 # засчитывает вместе со свежим «принять» другого argus на новом head.
 # Чего не посчитали (не клон, сбой gh или git, бюджет, срок хука), того нет ни там, ни там: проход судит строго.
+# Не дошли до сверки (срок хука, gh pr view не ответил) — след kind "decision-miss" с причиной (metis-1181): проход
+# велит повторить заявку, а не звать нового argus.
 # Запись — факт о коде, а не вердикт: вердикты проход считает сам по records.jsonl. Пишет её только хук guard
 # (STATE закрыт ролям правилом pantheon-acl), сбой записи команду не останавливает — проход тогда судит строго.
 
@@ -2736,18 +2744,49 @@ def request_decisions(event, args, cwd):
         return
 
 
+# Срок одного gh в решении шлюза при заявке (metis-1181). Под DEADLINE 8 с хука с общим GH_TIMEOUT 6 второй gh (вершина
+# base после gh pr view) шёл, только если всё до него укладывалось в ~1,5 с, — на #461 (14.11) решения не было дважды
+# подряд, хотя вне хука оно считается за 1,8 с. gh pr view и вершина base отвечают за 0,5–1,5 с; 3 с на каждый
+# оставляют git сверки остаток срока. Срок хука (hooks.json 10 с, DEADLINE 8 с) общий для всех PreToolUse — его не
+# трогаем, чтобы не замедлять остальные команды.
+DECISION_GH_TIMEOUT = 3
+
+
+def _decision_by(event):
+    return {"agent_type": event.get("agent_type") or "", "session_id": event.get("session_id") or "",
+            "agent_id": event.get("agent_id") or ""}
+
+
+def _decision_miss(event, repo, pr, sha, why):
+    """След несделанной сверки (metis-1181): запись kind "decision-miss" в carry.jsonl — шлюз владельца (merge.py)
+    назовёт причину и велит повторить `pantheon merge request`, а не звать нового argus. Фактов о коде в ней нет:
+    review_decisions её не берёт."""
+    append_carry({"v": RECORD_V, "kind": "decision-miss", "repo": [repo], "pr": pr, "sha": sha, "why": [why],
+                  "by": _decision_by(event), "time": datetime.now().astimezone().isoformat(timespec="seconds")})
+
+
 def _decision(event, records, repo, pr, cwd, tips):
-    """Решение шлюза для repo#pr (request_decisions): gh pr view и вершина base — только если успевают до срока хука
-    (_gh_fits), git — со сроком от остатка (_git_timeout)."""
+    """Решение шлюза для repo#pr (request_decisions): gh pr view и вершина base — каждый со сроком
+    DECISION_GH_TIMEOUT и только если успевает до срока хука (_gh_fits), git — со сроком от остатка (_git_timeout).
+    Не успели или gh не ответил — след _decision_miss вместо молчаливого выхода."""
     verdicts = argus_verdicts(records, repo, pr)
-    if not verdicts or not _gh_fits():
+    if not verdicts:
         return
-    view = _pr_view(repo, pr)
+    if not _gh_fits(DECISION_GH_TIMEOUT):
+        return _decision_miss(event, repo, pr, "", "срок хука: на gh pr view не осталось времени")
+    view = _pr_view(repo, pr, DECISION_GH_TIMEOUT)
     sha = str((view or {}).get("headRefOid") or "").lower()
     base = (view or {}).get("baseRefName")
+    if not SHA_RE.fullmatch(sha) or not isinstance(base, str) or not base:
+        return _decision_miss(event, repo, pr, sha if SHA_RE.fullmatch(sha) else "",
+                              f"gh pr view не ответил за {DECISION_GH_TIMEOUT} с или без head и base PR")
     others = list(dict.fromkeys(r["sha"] for r in reversed(verdicts) if r["sha"] != sha))
-    if not SHA_RE.fullmatch(sha) or not isinstance(base, str) or not base or not others or not _gh_fits():
+    if not others:
         return
+    if not _gh_fits(DECISION_GH_TIMEOUT):
+        return _decision_miss(event, repo, pr, sha, "срок хука: на вершину ветки base не осталось времени")
+    # вершина base — здесь, со своим сроком: _Prints возьмёт её из памяти tips и gh со сроком GH_TIMEOUT не позовёт
+    _base_tip(repo, base, tips, DECISION_GH_TIMEOUT)
     fp = _Prints(cwd, repo, sha, verdicts, lambda: view, tips)
     same, differs = [], []
     fs = fp(sha)
@@ -2763,12 +2802,11 @@ def _decision(event, records, repo, pr, cwd, tips):
             same.append(h)
         elif got is False:
             differs.append(h)
-    by = {"agent_type": event.get("agent_type") or "", "session_id": event.get("session_id") or "",
-          "agent_id": event.get("agent_id") or ""}
     append_carry({"v": RECORD_V, "kind": "decision", "repo": [repo], "pr": pr, "sha": sha, "base": base,
                   "base_oid": fp.base, "same": same, "differs": differs,
                   "delta": _delta_heads(fp, sha, [h for h in others if h not in same]) if fs else [],
-                  "why": list(fp.why), "by": by, "time": datetime.now().astimezone().isoformat(timespec="seconds")})
+                  "why": list(fp.why), "by": _decision_by(event),
+                  "time": datetime.now().astimezone().isoformat(timespec="seconds")})
 
 
 def _delta_core(path):
@@ -2848,13 +2886,14 @@ PUSH_GH_MARGIN = 0.5  # с сверх GH_TIMEOUT: меньше осталось 
 PUSH_VIEW_FIELDS = "headRefOid,headRefName,baseRefOid,baseRefName,changedFiles,state,mergeable"
 
 
-def _gh_fits():
-    """Успеет ли ещё один gh до своего срока хука (таймер ITIMER_REAL guard_rules.set_deadline): нет таймера — да."""
+def _gh_fits(timeout=GH_TIMEOUT):
+    """Успеет ли ещё один gh со сроком timeout до своего срока хука (таймер ITIMER_REAL guard_rules.set_deadline):
+    нет таймера — да."""
     try:
         left = signal.getitimer(signal.ITIMER_REAL)[0]
     except (AttributeError, OSError, ValueError):
         return True
-    return not left or left > GH_TIMEOUT + PUSH_GH_MARGIN
+    return not left or left > timeout + PUSH_GH_MARGIN
 
 
 def push_accepts(records, repo, pr, sha, core, view, light=False):

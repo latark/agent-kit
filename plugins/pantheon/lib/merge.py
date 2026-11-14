@@ -1080,6 +1080,30 @@ def code_facts(repo, pr, sha, view):
     return frozenset(), frozenset(), frozenset()
 
 
+def decision_hint(repo, pr, sha):
+    """Почему у прохода нет фактов о коде прошлых head (metis-1181): текст «повтори `pantheon merge request`» или None —
+    решение хука guard на sha записано и досчитано. Берётся последняя за REQUEST_TTL запись carry.jsonl kind
+    "decision" на sha или "decision-miss" (след несделанной сверки, merge_gate._decision_miss) на sha или без head."""
+    last = None
+    for d in P.carry_records(repo, pr):
+        if d.get("kind") not in ("decision", "decision-miss") or d.get("sha") not in (sha, "") \
+                or d.get("kind") == "decision" and d.get("sha") != sha:
+            continue
+        try:
+            age = P.now() - datetime.fromisoformat(str(d.get("time"))).timestamp()
+        except ValueError:
+            continue
+        if 0 <= age <= REQUEST_TTL:
+            last = d
+    again = f"повтори `pantheon merge request {pr} -R {repo}` из клона репозитория"
+    if last is None:
+        return f"сверка кода прошлых head хуком guard не записана — {again}"
+    why = "; ".join(str(w) for w in last.get("why") or [] if isinstance(w, str))
+    if last.get("kind") == "decision-miss":
+        return f"сверка кода прошлых head хуком guard не успела ({why or 'причина не названа'}) — {again}"
+    return f"сверка кода прошлых head хуком guard не досчитана ({why}) — {again}" if why else None
+
+
 def held_rejects(verdicts, sha, differs=frozenset()):
     """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
     по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
@@ -1180,8 +1204,15 @@ def gate(repo, pr, sha, view):
     # решения шлюза guard при `pantheon merge request` (code_facts, metis-0966)
     same, differs, delta = code_facts(repo, pr, sha, view)
     held = held_rejects(verdicts, sha, differs)
+    # код прошлых head не сверен — подсказка «повтори заявку», а не нового argus (metis-1181)
     if held:
-        return "fail", (f"«вернуть» от argus на {', '.join(r['sha'][:12] for r in held)} в силе: оно привязано к PR, "
+        heads = ", ".join(r["sha"][:12] for r in held)
+        unknown = [r for r in held if r["sha"] != sha and r["sha"] not in same | differs]
+        hint = decision_hint(repo, pr, sha) if unknown else None
+        if hint:
+            return "fail", (f"«вернуть» от argus на {heads} в силе: код этого head с {sha[:12]} не сверен, а без сверки "
+                            f"свежее «принять» на {sha[:12]} его не снимает; {hint}")
+        return "fail", (f"«вернуть» от argus на {heads} в силе: оно привязано к PR, "
                         f"снимает его «принять» после него — того же рецензента или свежее на {sha[:12]} с другим "
                         "кодом (код сверяет шлюз guard при `pantheon merge request` из клона репозитория)")
     floor = reject_floor(verdicts)
@@ -1222,11 +1253,15 @@ def gate(repo, pr, sha, view):
                 if ok else (MIN_ACCEPTS, f"; PR ядра не лёгкий: {what}")
     if len(counted) < need:
         cut = len(latest) - len(counted)
-        moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted})
+        gone = {r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted}
+        moved = len(gone)
+        # код прошлых head не сверен хуком — сначала повторить заявку (metis-1181), а не звать нового argus
+        hint = decision_hint(repo, pr, sha) if gone - differs else None
         return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}" + light
                         + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
                            if cut else "")
-                        + (f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
+                        + (f"; «принять» на {moved} прошлых head не перенесено: {hint}" if hint else
+                           f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
                            "— сверяет шлюз guard при `pantheon merge request` из клона репозитория; после мелкой правки "
                            "вне ядра переносится дельта-кругом (`pantheon review delta`): на том head полный круг — "
                            f"{MIN_ACCEPTS} argus, на этом — «принять» argus, и каждый, кто вернул тот head, принял "

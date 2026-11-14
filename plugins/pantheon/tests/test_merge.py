@@ -314,9 +314,19 @@ def test_gate_decision():
     check("0966: «вернуть» на SHA2, два свежих «принять» других argus на SHA, решения нет (rebase с тем же кодом?) — "
           "в силе, окна нет", not b.windows() and not b.merges() and "в силе" in b.alerts()
           and "merge request" in b.alerts(), (b.outs[-1], b.alerts()))
+    again = f"повтори `pantheon merge request {PR} -R {REPO}`"
+    check("1181: решения нет — подсказка «сверка не записана, повтори заявку», а не новый argus",
+          "сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(), b.alerts())
+    b = box(held, {"kind": "decision-miss", "sha": "", "why": ["срок хука: на gh pr view не осталось времени"]})
+    check("1181: след decision-miss — «не успела» с причиной и «повтори заявку», в силе", not b.merges()
+          and "не успела (срок хука: на gh pr view" in b.alerts() and again in b.alerts(), b.alerts())
+    b = box(held, {"why": ["gh pr view не ответил — base PR неизвестна"]})
+    check("1181: решение без фактов с причиной — «не досчитана» и «повтори заявку», в силе", not b.merges()
+          and "не досчитана (gh pr view не ответил" in b.alerts() and again in b.alerts(), b.alerts())
     b = box(held, {"same": [SHA2]})
     check("0966: решение — у SHA2 тот же код (rebase) — «вернуть» в силе", not b.merges() and "в силе" in b.alerts(),
           b.alerts())
+    check("1181: код сверен (тот же) — подсказки «повтори заявку» нет", again not in b.alerts(), b.alerts())
     b = box(held, {"differs": [SHA2]})
     check("0966: решение — код SHA2 другой — «вернуть» снято, сливает", len(b.merges()) == 1, (b.outs[-1], b.alerts()))
     b = box(held, {"same": [SHA2], "differs": [SHA2]})
@@ -353,6 +363,9 @@ def test_gate_decision():
     b = box(moved)
     check("0396: два «принять» на SHA2, решения нет — не переносится, 0 из 2 с причиной",
           not b.merges() and "0 из 2" in b.alerts() and "не перенесено" in b.alerts(), b.alerts())
+    check("1181: «принять» не перенесено без решения — «сверка не записана, повтори заявку»",
+          "не перенесено: сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(),
+          b.alerts())
     b = box(moved, {"same": [SHA2]})
     check("0396: решение — у SHA2 тот же код — «принять» переносится, сливает", len(b.merges()) == 1,
           (b.outs[-1], b.alerts()))

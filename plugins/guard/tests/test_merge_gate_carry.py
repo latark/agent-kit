@@ -347,14 +347,62 @@ def t_request_decision(h):
         if name in ("вердиктов нет", "номер не число", "номер переменной"):
             log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
             check(f"решение: {name} — gh pr view не зовётся", "pr view" not in log, log)
-    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, записи нет
+    got = [x for x in carry_lines(h) if x.get("kind") == "decision-miss"]
+    check("решение (metis-1181): base PR неизвестна — след decision-miss с причиной", len(got) == 1
+          and got[0]["pr"] == 7 and got[0]["sha"] == qdm and "gh pr view" in got[0]["why"][0], got)
+    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, решения нет, есть след
     mg = _load_merge_gate("merge_gate_request_decision")
     calls = []
-    mg._gh_fits = lambda: False
-    mg._pr_view = lambda repo, pr: calls.append(("view", pr)) or {}
+    mg._gh_fits = lambda *a: False
+    mg._pr_view = lambda repo, pr, *a: calls.append(("view", pr)) or {}
     mg.append_carry = lambda r: calls.append(("carry", r))
     mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
-    check("решение: срок хука не вмещает gh — gh pr view не зовётся, записи нет", calls == [], calls)
+    check("решение: срок хука не вмещает gh — gh pr view не зовётся, решения нет, след decision-miss (metis-1181)",
+          len(calls) == 1 and calls[0][0] == "carry" and calls[0][1]["kind"] == "decision-miss"
+          and "срок хука" in calls[0][1]["why"][0], calls)
+
+
+def t_decision_deadline(h):
+    """metis-1181: gh решения шлюза при заявке — со своим сроком DECISION_GH_TIMEOUT (3 с), а не GH_TIMEOUT (6 с). До
+    срока хука осталось 5 с: два gh по 6 с не влезли бы (решения не было, #461 14.11), по 3 с — влезают, решение
+    записано. Осталось 3 с — не влезает и короткий: решения нет, но есть след decision-miss с причиной."""
+    import types
+    s = kit_history(h)
+    p = h.j("projects/agent-kit")
+    F = lambda t: ("100644", t.encode())
+    lines = [f"d{i}\n" for i in range(30)]
+    pr_d = "".join(lines[:20] + ["pr\n"] + lines[21:])
+    bd = plumb(p, [s["B"]], {"d.txt": F("".join(lines))}, "main: d.txt")
+    bd2 = plumb(p, [bd], {"d.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
+    qd = plumb(p, [bd], {"d.txt": F(pr_d)}, "PR: правка d.txt")
+    qdm = plumb(p, [qd, bd2], {"d.txt": F("top\n" + pr_d)}, "PR: подтянул main", src=bd2)
+    for left, want in ((5.0, "decision"), (3.0, "decision-miss")):
+        mg = _load_merge_gate(f"merge_gate_decision_deadline_{int(left)}")
+        mg.signal = types.SimpleNamespace(ITIMER_REAL=0, getitimer=lambda which, left=left: (left, 0.0))
+        calls, out = [], []
+        mg._pr_view = lambda repo, pr, timeout=mg.GH_TIMEOUT, calls=calls: calls.append(("view", timeout)) or {
+            "headRefOid": qdm, "baseRefName": "main", "baseRefOid": bd2}
+        real_tip = mg._base_tip
+
+        def tip(repo, branch, memo=None, timeout=mg.GH_TIMEOUT, real_tip=real_tip, calls=calls):
+            if memo is not None:
+                return real_tip(repo, branch, memo, timeout)
+            calls.append(("tip", timeout))
+            return bd2
+        mg._base_tip = tip
+        mg.append_carry = out.append
+        mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
+        kinds = [r.get("kind") for r in out]
+        first = out[0] if out else {}
+        check(f"metis-1181: до срока хука {left:g} с — запись {want}", kinds == [want], out)
+        if want == "decision":
+            check("metis-1181: решение — код qd тот же (same), сверка не урезана", first.get("same") == [qd]
+                  and first.get("why") == [], out)
+            check(f"metis-1181: gh pr view и вершина base — со сроком {mg.DECISION_GH_TIMEOUT} с, вершина — один раз",
+                  calls == [("view", mg.DECISION_GH_TIMEOUT), ("tip", mg.DECISION_GH_TIMEOUT)], calls)
+        else:
+            check("metis-1181: след без фактов о коде — причина «срок хука», gh не зовётся", calls == []
+                  and "срок хука" in (first.get("why") or [""])[0] and "same" not in first, (calls, out))
 
 
 def t_carry_rej(h):
@@ -402,7 +450,7 @@ def t_carry_rej(h):
          [x_rej, x_acc, tests(qam)], True)
 
 
-CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_carry_rej]
+CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_decision_deadline, t_carry_rej]
 
 
 if __name__ == "__main__":
