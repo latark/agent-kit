@@ -183,7 +183,7 @@ def main():
             ("/.claude/xyz/w/.claude/skills/y/SKILL.md", "а: не worktrees"),
             ("/x/worktrees/w/.claude/skills/y/SKILL.md", "а: worktrees не в .claude"),
             ("/.claude/worktrees/w/x/.claude/skills/y/SKILL.md", "а: пара не прямо перед .claude/skills"))],
-        # ревью #459 Б2: вложенный git-корень в папке направления (MorphStream/app) — можно; подпапка без .git — отказ
+        # ревью #459 Б2: вложенный git-корень в папке направления (<проект>/app) — можно; подпапка без .git — отказ
         ("dev-sonnet: worktree вложенного репозитория projAApp/gpu (есть .git) — можно", "allow", APP,
          ("dev-sonnet", True), W(ROOT_BA + "/gpu/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
         ("dev-sonnet: worktree в подпапке projAApp/nogit без .git — отказ", "deny", APP, ("dev-sonnet", True),

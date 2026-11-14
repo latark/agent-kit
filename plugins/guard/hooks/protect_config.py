@@ -86,8 +86,8 @@ DEV_PAIRS = {"agents", "commands", "skills", "hooks"}
 
 def _dev_skill_only(p, own):
     """Путь — внутри <папка направления>/.claude/worktrees/<имя>/.claude/skills/… (ревью #459): (а) пара
-    .claude/worktrees/<имя> стоит прямо перед .claude/skills; (б) до неё — ровно папка направления из own, а не
-    подпапка (app/x/.claude/worktrees — поддельная worktree); (в) другой пары .claude/<agents|commands|skills|hooks> в
+    .claude/worktrees/<имя> стоит прямо перед .claude/skills; (б) до неё — папка направления из own или
+    вложенный в неё git-корень с .git; обычная подпапка без .git (app/x/.claude/worktrees) — поддельная worktree; (в) другой пары .claude/<agents|commands|skills|hooks> в
     пути нет ни до, ни после (…/skills/a/.claude/agents/x.md, app/.claude/agents/q/.claude/worktrees/… — отказ)."""
     parts = [G._key(x) for x in p.split("/")]
     pairs = [i for i, x in enumerate(parts[:-1]) if x == ".claude" and parts[i + 1] in DEV_PAIRS]
@@ -101,7 +101,7 @@ def _dev_skill_only(p, own):
     prefix = "/".join(parts[:i - 3])
     if any(prefix == G._key(f).rstrip("/") for f in own):  # (б): сама папка направления
         return True
-    # (б): вложенный git-корень внутри папки направления (MorphStream/app, ревью #459 Б2) — есть <prefix>/.git
+    # (б): вложенный git-корень внутри папки направления (<проект>/app, ревью #459 Б2) — есть <prefix>/.git
     # (папка или файл worktree); обычная подпапка без .git — поддельная worktree, отказ
     real = "/".join(p.split("/")[:i - 3])
     return G._inside(real, own) and os.path.lexists(os.path.join(real, ".git"))
