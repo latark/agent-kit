@@ -499,7 +499,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
             rows.append(row)
         merged[repo] = rows
         o, oerr = (gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIMIT), "--json",
-                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files,isCrossRepository"], env,
+                            "number,headRefName,headRefOid,baseRefOid,baseRefName,body,files,isCrossRepository,mergeable"], env,
                            timeout=min(90, rleft())) if rleft() > 1 else (None, "не хватило времени прохода"))
         if isinstance(o, list):
             opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
@@ -512,6 +512,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                                "ids": find_ids(p.get("headRefName"), p.get("body")),
                                "closes": closing_ids(p.get("headRefName"), p.get("body")),
                                "part": is_part(p.get("body")),
+                               "mergeable": str(p.get("mergeable") or "")[:20],  # CONFLICTING и др. (metis-1170)
                                "core": open_core(repo, p, core, sandbox, rleft)}
                               for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
             repo_ok[repo] = t
