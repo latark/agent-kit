@@ -1617,7 +1617,13 @@ REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces",
                    # приватный проект владельца (metis-1116): ключ — sha256 owner/name, job checks на PR в develop и main
                    # (ветки эпиков — без требования: их workflow может ещё не быть, PR ждал бы вечно — argus #479)
                    "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
-                       ("tests", "checks", "develop"), ("tests", "checks", "main"))}
+                       ("tests", "checks", "develop"), ("tests", "checks", "main")),
+                   # приватные проекты владельца (metis-1116): job tests workflow tests.yml; legal-watch — PR в develop и
+                   # main, content-machine и expert-corpus — PR в main
+                   "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": (
+                       ("tests", "tests", "develop"), ("tests", "tests", "main")),
+                   "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": (("tests", "tests", "main"),),
+                   "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": (("tests", "tests", "main"),)}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate_ci по файлам .github/workflows
@@ -1651,7 +1657,9 @@ CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
 FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
                             "plugins/pantheon plugins/project-tools"),
               # приватный проект владельца (metis-1116), ключ — sha256 owner/name
-              "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check"}
+              "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check",
+              # те же проекты: тесты — `uv run pytest` (workflow tests.yml их PR)
+              "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": "uv run pytest", "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": "uv run pytest", "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": "uv run pytest"}
 
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».

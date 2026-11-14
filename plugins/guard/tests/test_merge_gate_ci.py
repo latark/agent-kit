@@ -786,6 +786,31 @@ def t_ci_hashed(h):
     check("ci_billing проекта: аннотация другая — признака нет",
           mg.ci_billing(runs, req, {501: [dict(note[0], message="Process completed with exit code 1.")]},
                         {501: idle}) is False)
+    # приватные проекты владельца legal-watch, content-machine, expert-corpus (metis-1116): записи по хешу, job tests
+    # workflow tests.yml, полный набор `uv run pytest`. Имён нет в публичном коде — записи переносятся под вымышленное имя
+    real = _load_merge_gate("merge_gate_ci_real3")
+    for h256, bases in (("ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898", ("develop", "main")),
+                        ("ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa", ("main",)),
+                        ("2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3", ("main",))):
+        k = "sha256:" + h256
+        check(f"{h256[:8]}: в таблицах шлюза — job tests на PR в {bases} и `uv run pytest`",
+              real.REQUIRED_CHECKS.get(k) == tuple(("tests", "tests", b) for b in bases)
+              and real.FULL_TESTS.get(k) == "uv run pytest", (real.REQUIRED_CHECKS.get(k), real.FULL_TESTS.get(k)))
+        fk = "sha256:" + hashlib.sha256(f"owner-y/p{h256[:4]}".encode()).hexdigest()
+        mg.REQUIRED_CHECKS[fk], mg.FULL_TESTS[fk] = real.REQUIRED_CHECKS[k], real.FULL_TESTS[k]
+        repo = f"owner-y/p{h256[:4]}"
+        for base in bases:
+            req = mg.required_checks(repo, base)
+            runs = [{"workflowName": "tests", "name": "tests", "status": "COMPLETED", "conclusion": "FAILURE",
+                     "event": "pull_request", "id": 7, "annotations": 1}]
+            check(f"{h256[:8]}: PR в {base} — признак лимита минут узнан",
+                  req == (("tests", "tests"),) and mg.ci_billing(runs, req, {7: note}, {7: idle}) is True, req)
+        mg.read_records = lambda: []
+        got = mg._billing_problem(repo, 7, sha)[0] or ""
+        check(f"{h256[:8]}: лимит без записи — отказ с `uv run pytest`", "pantheon review test -- uv run pytest`" in got, got)
+        mg.read_records = lambda repo=repo: [full_rec(repo, sha, "pantheon review test -- uv run pytest")]
+        got = mg._billing_problem(repo, 7, sha)
+        check(f"{h256[:8]}: лимит и запись `uv run pytest` на SHA — пропуск", got[0] is None and len(got[1]) == 1, got)
 
 
 CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed]

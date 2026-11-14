@@ -182,46 +182,77 @@ check(p.returncode == 0 and "2026-10-15" in p.stdout and "3,5" in p.stdout,
 rows = [json.loads(x) for x in open(os.path.join(s, "mmv.jsonl"), encoding="utf-8")]
 check(any(x["date"] == "2026-10-15" and x["min"] == 3.5 for x in rows), f"CLI пишет mmv.jsonl: {rows[:2]}")
 check(run("mmv", "--days", "x").returncode == 2, "CLI mmv --days x → код 2")
-# 10. «минуты Actions: N из 2000» (metis-1116): поддельный gh (PANTHEON_GH) отдаёт usage или падает; сеть не трогаем
+# 10. «минуты Actions: N из 2000» (metis-1116): поддельный gh (PANTHEON_GH) отвечает по аргументам; сеть не трогаем
 fake = os.path.join(home, "fake-gh")
+def A(repo, sku, q, unit="Minutes", prod="actions"):
+    return {"product": prod, "sku": sku, "quantity": q, "unitType": unit, "repositoryName": repo}
 usage = {"usageItems": [
-    {"product": "actions", "sku": "Actions Linux", "quantity": 394.0, "unitType": "Minutes"},
-    {"product": "actions", "sku": "Actions macOS 3-core", "quantity": 65.0, "unitType": "Minutes"},
-    {"product": "actions", "sku": "Actions Windows", "quantity": 5.0, "unitType": "Minutes"},
-    {"product": "copilot", "sku": "x", "quantity": 999.0, "unitType": "Requests"},
-    {"product": "actions", "sku": "Actions storage", "quantity": 7.0, "unitType": "GigabyteHours"}]}
-with open(fake, "w") as fh:
-    fh.write("#!/bin/sh\necho \"$@\" > \"$0.args\"\ncat <<'EOF'\n" + json.dumps(usage) + "\nEOF\n")
-os.chmod(fake, 0o755)
+    A("proj", "Actions Linux", 394.0), A("proj", "Actions macOS 3-core", 65.0), A("proj", "Actions Windows", 5.0),
+    A("agent-kit", "Actions Linux", 26000.0),  # публичный репозиторий: минуты бесплатны, в сумму не входят
+    A("proj", "x", 999.0, "Requests", "copilot"), A("proj", "Actions storage", 7.0, "GigabyteHours")]}
+def put_gh(usage_json, public_json='[{"name": "agent-kit"}]', login="owner-x", usage_rc=0, public_rc=0):
+    body = ("#!/bin/sh\necho \"$@\" >> \"$0.args\"\ncase \"$1 $2\" in\n"
+            "  \"api user\") echo %s;;\n  \"api /users/%s/settings/billing/usage?year=2026&month=10\")"
+            " echo '%s'; exit %d;;\n  \"repo list\") echo '%s'; exit %d;;\n  *) exit 9;;\nesac\n"
+            % (login, login, usage_json, usage_rc, public_json, public_rc))
+    with open(fake, "w") as fh:
+        fh.write(body)
+    os.chmod(fake, 0o755)
+    if os.path.exists(fake + ".args"):
+        os.unlink(fake + ".args")
+UJ = json.dumps(usage)
+OK1054 = "минуты Actions: 1054 из 2000"  # 394 + 65*10 + 5*2, публичный agent-kit не в счёте
+NONE = "минуты Actions: нет данных"
+put_gh(UJ)
 os.environ["PANTHEON_GH"] = fake
-check(M.actions_line(T16) == "минуты Actions: 1054 из 2000", M.actions_line(T16))  # 394 + 65*10 + 5*2
+os.environ.pop("PANTHEON_GH_USER", None)
+check(M.actions_line(T16) == OK1054, M.actions_line(T16))
 args = open(fake + ".args").read()
-check("/settings/billing/usage?year=2026&month=10" in args and "billing/actions" not in args, args)
-check(M.actions_line(T16, {"usageItems": []}) == "минуты Actions: 0 из 2000", "пустой usage — 0")
-for bad in ({}, {"usageItems": None}, {"usageItems": [{"product": "actions", "unitType": "Minutes", "quantity": "x"}]},
-            {"usageItems": ["x"]}, []):
-    check(M.actions_line(T16, bad) == "минуты Actions: нет данных", f"ответ {bad!r} — нет данных")
-with open(fake, "w") as fh:
-    fh.write("#!/bin/sh\necho 'gh: This endpoint has been moved. (HTTP 410)' >&2\nexit 1\n")
-check(M.actions_line(T16) == "минуты Actions: нет данных", "gh упал (код 1) — нет данных")
-with open(fake, "w") as fh:
-    fh.write("#!/bin/sh\necho not-json\n")
-check(M.actions_line(T16) == "минуты Actions: нет данных", "gh вернул не JSON — нет данных")
+check("api user -q .login" in args and "/users/owner-x/settings/billing/usage?year=2026&month=10" in args
+      and "billing/actions" not in args and "repo list owner-x --visibility public" in args, args)
+check(M.actions_line(T16, usage, {"proj"}) == "минуты Actions: 26000 из 2000",
+      "фильтр публичных: agent-kit входит, если он не публичный (откат фильтра краснит проверку выше)")
+check(M.actions_line(T16, usage, set()) == "минуты Actions: 27054 из 2000"
+      and M.actions_line(T16, usage, {"agent-kit"}) == OK1054, "подмена usage и public")
+check(M.actions_line(T16, {"usageItems": []}, set()) == "минуты Actions: 0 из 2000", "пустой usage — 0")
+check(M.actions_line(T16, {"usageItems": [{"product": "actions", "unitType": "Minutes", "quantity": 3.0,
+                                           "sku": "Actions Linux"}]}, set()) == "минуты Actions: 3 из 2000",
+      "запись без repositoryName считается")
+for bad in ({}, {"usageItems": None}, {"usageItems": [A("p", "Actions Linux", "x")]}, {"usageItems": ["x"]}, [],
+            {"usageItems": [A("p", "Actions Linux", float("nan"))]},
+            {"usageItems": [A("p", "Actions Linux", float("inf"))]}):
+    check(M.actions_line(T16, bad, set()) == NONE, f"ответ {bad!r} — нет данных")
+check(M.actions_line(T16, usage, None) == NONE, "список публичных не получен — нет данных")
+os.environ["PANTHEON_GH_USER"] = "owner-x"
+check(M.actions_line(T16) == OK1054, "PANTHEON_GH_USER подменяет логин")
+os.environ.pop("PANTHEON_GH_USER")
+put_gh(UJ, public_rc=1)
+check(M.actions_line(T16) == NONE, "gh repo list упал — нет данных")
+put_gh(UJ, public_json="не json")
+check(M.actions_line(T16) == NONE, "gh repo list вернул не JSON — нет данных")
+put_gh(UJ, usage_rc=1)
+check(M.actions_line(T16) == NONE, "gh usage упал (410) — нет данных")
+put_gh(UJ, login="")
+check(M.actions_line(T16) == NONE, "логин пуст — нет данных")
+put_gh("not-json")
+check(M.actions_line(T16) == NONE, "gh usage вернул не JSON — нет данных")
 os.environ["PANTHEON_GH"] = os.path.join(home, "no-such-gh")
-check(M.actions_line(T16) == "минуты Actions: нет данных", "gh не запускается — нет данных")
+check(M.actions_line(T16) == NONE, "gh не запускается — нет данных")
 with open(fake, "w") as fh:
     fh.write("#!/bin/sh\nsleep 5\n")
+os.chmod(fake, 0o755)
 os.environ["PANTHEON_GH"] = fake
-check(M._gh_usage("u", 2026, 10, timeout=0.5) is None, "таймаут gh — None")
+check(M._gh_json(["x"], timeout=0.5) is None, "таймаут gh — None")
 env["PANTHEON_GH"] = os.path.join(home, "no-such-gh")
 p = run("night", "report")
-check(p.returncode == 0 and "минуты Actions: нет данных" in p.stdout and "ММВ" in p.stdout,
+check(p.returncode == 0 and NONE in p.stdout and "ММВ" in p.stdout,
       f"night report без gh: код 0, строка «нет данных», ММВ на месте: {p.stdout[-400:]} {p.stderr[-300:]}")
-with open(fake, "w") as fh:
-    fh.write("#!/bin/sh\ncat <<'EOF'\n" + json.dumps(usage) + "\nEOF\n")
+put_gh(UJ)
 env["PANTHEON_GH"] = fake
+env["PANTHEON_GH_USER"] = "owner-x"
 p = run("night", "report")
-check(p.returncode == 0 and "минуты Actions: 1054 из 2000" in p.stdout, f"night report: строка минут Actions: {p.stdout[-400:]}")
+check(p.returncode == 0 and OK1054 in p.stdout, f"night report: строка минут Actions: {p.stdout[-400:]}")
+os.environ.pop("PANTHEON_GH", None)
 p = run("night", "report")
 check(p.returncode == 0 and "ММВ" in p.stdout, f"night report содержит ММВ: {p.stdout[-400:]} {p.stderr[-300:]}")
 check("вчера 3,5 мин (2 входа)" in p.stdout, f"night report: «вчера» от PANTHEON_NOW: {p.stdout[-400:]}")
