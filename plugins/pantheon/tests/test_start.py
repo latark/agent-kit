@@ -1573,6 +1573,33 @@ def main():
     r = stop("dev-11")
     check("dev-stop: `dev: true`, дописанная в коммите самой ветки, не засчитывается — выход 2",
           r.returncode == 2 and "heavy python3 -I run-tests.py --affected plugins/x" in r.stderr)
+    # metis-1115: строка `ci:` — тесты идут в CI, локально хук ждёт только её команду (линтер), а не тесты
+    open(os.path.join(repo, ".pantheon-verify"), "w").write(
+        "pnpm test\ndev: python3 -I run-tests.py --affected plugins/x\nci: uvx ruff@0.17.3 check .\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "ci-строка")
+    git("branch", "-f", "worktree-agent-4", "HEAD")
+    wt = os.path.join(tmp, "projects", "br", "wt-dev4")
+    git("worktree", "add", "-q", wt, "worktree-agent-4")
+    open(os.path.join(wt, "d.txt"), "w").write("x")
+    git("add", "-A", cwd=wt)
+    git("commit", "-q", "-m", "dev4", cwd=wt)
+    transcript(("Edit", {"file_path": "d.txt"}, False), ("Bash", {"command": "uvx ruff@0.17.3 check ."}, False))
+    r = stop("dev-12")
+    check("dev-stop: строка `ci:` — зелёный ruff после правки отпускает без локальных тестов",
+          r.returncode == 0 and not r.stderr)
+    transcript(("Edit", {"file_path": "d.txt"}, False), ("Bash", {"command": aff}, False))
+    r = stop("dev-13")
+    check("dev-stop: строка `ci:` — узкие тесты вместо её команды не в счёт, возврат называет CI и команду ruff",
+          r.returncode == 2 and "uvx ruff@0.17.3 check ." in r.stderr and "в CI" in r.stderr
+          and "heavy uvx" not in r.stderr)
+    transcript(("Edit", {"file_path": "d.txt"}, False), ("Bash", {"command": "uvx ruff@0.17.3 check ."}, True, "Exit code 1"))
+    r = stop("dev-14")
+    check("dev-stop: строка `ci:` — красный ruff держит", r.returncode == 2 and "красный" in r.stderr)
+    transcript(("Edit", {"file_path": "d.txt"}, False), ("Bash", {"command": "pantheon outside test --wait 590"}, False))
+    r = stop("dev-15")
+    check("dev-stop: строка `ci:` — запасной `pantheon outside test` (Actions не запустились) тоже прогон",
+          r.returncode == 0 and not r.stderr)
     wt = wt_old2
     wt = wt_old
     for i, c in enumerate(("pantheon outside test", "pantheon outside test --wait 0",

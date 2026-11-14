@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """project-tools — инструменты проекта по карте стеков (TOOL-07, MEM-04).
 
-Карта ../stacks.json: признак в проекте (зависимость в package.json или файл) → какие MCP-серверы и плагины нужны.
+Карта ../stacks.json: признак в проекте (зависимость в package.json, pyproject.toml или
+requirements*.txt, либо файл) → какие MCP-серверы и плагины нужны.
 Команды:
-  project-tools check [--dir D]                    что подключить или поправить; ничего не меняет
+  project-tools check [--dir D] [--json]           что подключить или поправить; ничего не меняет (--json: только
+                                                   стеки и не подключённые инструменты, для pantheon direction check)
   project-tools apply [--dir D] [--update ИМЯ]… [--accept ИМЯ]…
                                                    записать .mcp.json, одобрения, плагины, блок Codex
   project-tools skip ИМЯ… [--dir D]                ваше «не надо»: отказ от сервера или плагина, подсказка замолкает
@@ -18,18 +20,23 @@
 
 Куда пишет apply (корень проекта — вершина git-репозитория, иначе папка):
   .mcp.json                     серверы из карты; чужие записи не трогает, отличие от карты меняет только --update
-  .claude/settings.local.json   enabledMcpjsonServers — тогда Claude не спрашивает одобрения; enableAllProjectMcpServers
-                                заменяет списком серверов, которые уже лежат в .mcp.json (их вы одобрили этим флагом):
-                                новый сервер из репозитория без вопроса больше не запустится
-  .claude/settings.json         enabledPlugins: плагины из карты; плагины, которые заменяет сервер из карты, — false
+  .claude/settings.json         enabledMcpjsonServers: серверы из карты поимённо — тогда Claude не спрашивает одобрения;
+                                файл общий и идёт в тот же PR, что .mcp.json: после слияния сервер одобрен в окне роли
+                                и на другом Mac без ручного шага (решение владельца 14.11, metis-1047). Имена, которых
+                                в .mcp.json нет, снимает. enableAllProjectMcpServers здесь не ставит.
+                                enabledPlugins: плагины из карты; плагины, которые заменяет сервер из карты, — false
+  .claude/settings.local.json   личный, только чистится: enableAllProjectMcpServers заменяет списком серверов, которые
+                                уже лежат в .mcp.json (их вы одобрили этим флагом), — новый сервер из репозитория без
+                                вопроса больше не запустится; снимает одобрения имён, которых в .mcp.json нет
   .codex/config.toml            блок [mcp_servers.*], если Codex установлен или папка .codex уже есть
 
 Одобрение в Claude Code — по имени сервера: после git pull под тем же именем может прийти другая команда, и она
-запустится без вопроса. Поэтому apply запоминает отпечаток каждой одобренной записи (на этом Mac, вне репозитория),
+запустится без вопроса. Общее одобрение в .claude/settings.json это не меняет: сторож — отпечатки. Поэтому apply запоминает отпечаток каждой одобренной записи (на этом Mac, вне репозитория),
 а подсказка при старте сессии говорит вам и Claude, если запись изменилась. Принять — apply --accept ИМЯ,
 отказаться — skip ИМЯ.
 """
 import argparse
+import fnmatch
 import json
 import os
 import pwd
@@ -125,10 +132,69 @@ def package_deps(path):
     return deps
 
 
+def py_name(name):
+    """Имя Python-пакета по PEP 503: регистр, «_», «.» и «-» не различаются."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def req_name(line):
+    """Имя пакета из строки требования («supabase[x]>=2; python_version>"3.9"»); None — не требование."""
+    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+    return py_name(m.group(1)) if m else None
+
+
+def pyproject_deps(path):
+    """Имена зависимостей из pyproject.toml: [project].dependencies и optional-dependencies, [dependency-groups]
+    (строки; вложенные {include-group} пропускаются), [tool.poetry.dependencies] и группы poetry."""
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return set()
+    out = set()
+
+    def take(items):
+        for it in items if isinstance(items, list) else []:
+            if isinstance(it, str) and req_name(it):
+                out.add(req_name(it))
+
+    proj = data.get("project") if isinstance(data.get("project"), dict) else {}
+    take(proj.get("dependencies"))
+    for group in (proj.get("optional-dependencies") or {}).values() if isinstance(
+            proj.get("optional-dependencies"), dict) else []:
+        take(group)
+    groups = data.get("dependency-groups")
+    for group in groups.values() if isinstance(groups, dict) else []:
+        take(group)
+    poetry = (data.get("tool") or {}).get("poetry") if isinstance(data.get("tool"), dict) else None
+    poetry = poetry if isinstance(poetry, dict) else {}
+    tables = [poetry.get("dependencies"), poetry.get("dev-dependencies")]
+    for g in (poetry.get("group") or {}).values() if isinstance(poetry.get("group"), dict) else []:
+        tables.append(g.get("dependencies") if isinstance(g, dict) else None)
+    for t in tables:
+        if isinstance(t, dict):
+            out |= {py_name(k) for k in t if k.lower() != "python"}
+    return out
+
+
+def requirements_deps(path):
+    """Имена пакетов из requirements*.txt (без -r/-e/--флагов и комментариев)."""
+    text = read_text_quiet(path)
+    return {n for n in (req_name(line) for line in text.splitlines()) if n}
+
+
+def read_text_quiet(path):
+    try:
+        return read_text(path) or ""
+    except (OSError, ValueError):
+        return ""
+
+
 def scan(root):
-    """Зависимости из всех package.json и имена файлов до SCAN_DEPTH уровней вглубь (монорепозитории: apps/*,
-    packages/*). Скрытые папки, node_modules и сборки пропускает. → ({зависимость: [(версия, папка)]}, {файлы})."""
-    deps, files = {}, set()
+    """Зависимости из всех package.json, pyproject.toml и requirements*.txt и имена файлов до SCAN_DEPTH уровней
+    вглубь (монорепозитории: apps/*, packages/*). Скрытые папки, node_modules и сборки пропускает.
+    → ({зависимость: [(версия, папка)]}, {файлы}, {имя Python-пакета})."""
+    deps, files, pydeps = {}, set(), set()
     queue, seen = deque([(root, 0)]), 0
     while queue and seen < SCAN_LIMIT:
         folder, level = queue.popleft()
@@ -144,12 +210,16 @@ def scan(root):
                     if e.name == "package.json":
                         for name, spec in package_deps(e.path).items():
                             deps.setdefault(name, []).append((str(spec), folder))
+                    elif e.name == "pyproject.toml":
+                        pydeps |= pyproject_deps(e.path)
+                    elif re.fullmatch(r"requirements[\w.-]*\.txt", e.name):
+                        pydeps |= requirements_deps(e.path)
                 elif (e.is_dir(follow_symlinks=False) and level < SCAN_DEPTH and not e.name.startswith(".")
                       and e.name not in SKIP_DIRS):
                     queue.append((e.path, level + 1))
             except OSError:
                 continue
-    return deps, files
+    return deps, files, pydeps
 
 
 def major(spec, folder, name, root):
@@ -169,23 +239,24 @@ def major(spec, folder, name, root):
     return None
 
 
+def as_list(v):
+    return [v] if isinstance(v, str) else list(v or [])
+
+
 def detect(cmap, root):
-    """Какие стеки есть в проекте и какие инструменты им нужны. → ([подписи стеков], {инструмент: стек})."""
-    deps, files = scan(root)
+    """Какие стеки есть в проекте и какие инструменты им нужны. Признак стека — любой из: npm-зависимость
+    (`dependency`), Python-пакет из pyproject.toml или requirements*.txt (`python_dependency`), файл по имени или
+    маске (`file`). → ([подписи стеков], {инструмент: стек})."""
+    deps, files, pydeps = scan(root)
     stacks, tools = [], {}
     for st in cmap["stacks"]:
-        if st.get("dependency"):
-            found = deps.get(st["dependency"])
-            if not found:
-                continue
-            majors = [major(spec, folder, st["dependency"], root) for spec, folder in found]
-        elif st.get("file"):
-            if st["file"] not in files:
-                continue
-            majors = []
-        else:
+        found = [(n, hit) for n in as_list(st.get("dependency")) for hit in deps.get(n) or []]
+        by_file = any(fnmatch.fnmatchcase(f, pat) for pat in as_list(st.get("file")) for f in files)
+        by_py = any(py_name(n) in pydeps for n in as_list(st.get("python_dependency")))
+        if not (found or by_file or by_py):
             continue
-        known = [m for m in majors if m is not None]
+        majors = [major(spec, folder, n, root) for n, (spec, folder) in found]
+        known = [m for m in majors if m is not None] if st.get("show_version") is not False else []
         label = f"{st['name']} {max(known)}" if known else st["name"]
         stacks.append(label)
         for name, cond in st["tools"].items():
@@ -341,6 +412,36 @@ def load_approved():
     return read_json(APPROVED)
 
 
+def plan_approvals(p, local, shared, present, rejected, approve):
+    """Одобрения .mcp.json: серверы из карты — поимённо в общий .claude/settings.json (уходит в PR вместе с
+    .mcp.json, решение владельца 14.11, metis-1047: после слияния окно роли и другой Mac запускают их без вопроса);
+    личный settings.local.json только чистится: «одобрять всё» → явный список, без имён, которых в .mcp.json нет.
+    Возвращает (новый settings.local.json, личные одобрения, общие одобрения)."""
+    new_local = dict(local)
+    local_approved = set(local.get("enabledMcpjsonServers") or [])
+    if local.get("enableAllProjectMcpServers") is True:
+        local_approved |= present - rejected
+        del new_local["enableAllProjectMcpServers"]
+        p.changes.append(".claude/settings.local.json: enableAllProjectMcpServers заменён явным списком "
+                         f"({names(present - rejected) or 'пусто'}) — новый сервер из "
+                         "репозитория больше не запустится без вашего одобрения")
+    stale = local_approved - present
+    if stale:
+        p.changes.append(f".claude/settings.local.json: сняты одобрения серверов, которых нет в .mcp.json: "
+                         f"{names(stale)}")
+    local_approved -= stale
+    if local_approved or "enabledMcpjsonServers" in local:
+        new_local["enabledMcpjsonServers"] = sorted(local_approved)
+    shared_before = set(shared.get("enabledMcpjsonServers") or [])
+    shared_approved = (shared_before | approve) & present
+    if shared_before - shared_approved:
+        p.changes.append(f".claude/settings.json: сняты одобрения серверов, которых нет в .mcp.json: "
+                         f"{names(shared_before - shared_approved)}")
+    if approve - shared_before:
+        p.changes.append(f".claude/settings.json: одобрены {names(approve - shared_before)}")
+    return new_local, local_approved, shared_approved
+
+
 def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     """Что apply запишет в проект. tolerant — для подсказки: битый ~/.claude.json не мешает."""
     cmap = load_map()
@@ -444,26 +545,9 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         doc["mcpServers"] = new_servers
         p.write(p.path(".mcp.json"), json_text(p.path(".mcp.json"), doc, True))
 
-    # одобрения: явный список вместо «одобрять всё», без имён, которых в .mcp.json нет
-    new_local = dict(local)
-    before = set(local.get("enabledMcpjsonServers") or [])
-    approved = set(before)
-    if local.get("enableAllProjectMcpServers") is True:
-        approved |= set(new_servers) - rejected
-        del new_local["enableAllProjectMcpServers"]
-        p.changes.append(".claude/settings.local.json: enableAllProjectMcpServers заменён явным списком "
-                         f"({names(set(new_servers) - rejected) or 'пусто'}) — новый сервер из "
-                         "репозитория больше не запустится без вашего одобрения")
-    approved |= approve
-    stale = approved - set(new_servers)
-    if stale:
-        p.changes.append(f".claude/settings.local.json: сняты одобрения серверов, которых нет в .mcp.json: "
-                         f"{names(stale)}")
-    approved -= stale
-    if approve - before:
-        p.changes.append(f".claude/settings.local.json: одобрены {names(approve - before)}")
-    if approved or "enabledMcpjsonServers" in local:
-        new_local["enabledMcpjsonServers"] = sorted(approved)
+    new_local, local_approved, shared_approved = plan_approvals(p, local, shared, set(new_servers), rejected,
+                                                                approve)
+    approved = local_approved | shared_approved
 
     # одобренные записи против запомненных отпечатков: подмена команды под одобренным именем
     remembered = load_approved().get(root) or {}
@@ -494,9 +578,12 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         p.notes.append(".claude/settings.json: enableAllProjectMcpServers одобряет любой сервер из репозитория — "
                        "уберите (project-tools общие настройки сам не чистит)")
 
+    new_shared = dict(shared)
     if new_shared_plugins != (shared.get("enabledPlugins") or {}):
-        new_shared = dict(shared)
         new_shared["enabledPlugins"] = new_shared_plugins
+    if shared_approved or "enabledMcpjsonServers" in shared:
+        new_shared["enabledMcpjsonServers"] = sorted(shared_approved)
+    if new_shared != shared:
         p.write(p.path(".claude", "settings.json"), json_text(p.path(".claude", "settings.json"), new_shared, False))
 
     # Codex: тот же набор серверов из карты, своим блоком
@@ -598,6 +685,12 @@ def guard_root(root):
 def cmd_check(args):
     root, is_git = project_root(args.dir)
     guard_root(root)
+    if args.json:
+        # для `pantheon direction check`: стек есть, а инструмента нет (то, что apply подключил бы). Только имена.
+        p = make_plan(root, is_git, tolerant=True)
+        print(json.dumps({"stacks": p.stacks, "missing": [{"tool": n, "stack": p.wanted[n]} for n in p.missing]},
+                         ensure_ascii=False))
+        return 0
     p = make_plan(root, is_git, args.update or ())
     report(p, applied=False)
     return 3 if p.changes or p.drift or p.unrecorded else 0
@@ -782,6 +875,8 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--dir", default=os.getcwd())
         s.add_argument("--update", action="append", metavar="ИМЯ", help="заменить запись .mcp.json по карте")
+        if name == "check":
+            s.add_argument("--json", action="store_true", help="только стеки и не подключённые инструменты, JSON")
         if name == "apply":
             s.add_argument("--accept", action="append", metavar="ИМЯ",
                            help="принять изменённую после одобрения запись .mcp.json как вашу")

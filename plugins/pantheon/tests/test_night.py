@@ -232,6 +232,174 @@ def test_week_monotonic_0243():
     check(N.spent(st, m2) == 13.0, f"спент при сбросе недели: {N.spent(st, m2)}")
 
 
+def reset_mark(t, role=""):
+    """pantheon limit reset-mark в момент t; role — PANTHEON_ROLE окна ("" — терминал владельца). (код, stdout, stderr)."""
+    saved = {k: os.environ.get(k) for k in ("PANTHEON_NOW", "PANTHEON_ROLE")}
+    os.environ["PANTHEON_NOW"] = str(t)
+    os.environ.pop("PANTHEON_ROLE", None)
+    if role:
+        os.environ["PANTHEON_ROLE"] = role
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = N.limit_main(["reset-mark"])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return rc, out.getvalue(), err.getvalue()
+
+
+def early_reset_env(t, resets):
+    """Файлы как у строки статуса 12.11: week-usage растёт до 99 % (пишется только рост), seven-day — один файл,
+    последний замер до сброса 99 %."""
+    e = Env()
+    e.week_usage([(t - 86400 + 2000 * k, resets, 60 + k) for k in range(40)])  # 60..99 % за прошлые сутки
+    e.snap(t - 3000, 99, resets)
+    return e
+
+
+def test_week_reset_mark_1067():
+    """Досрочный сброс с тем же resets_at (владелец 12.11) — по отметке pantheon limit reset-mark: замеры до неё не
+    учитываются. Без отметки неделя — максимум, как раньше; по падению pct сброс не угадывается."""
+    t = day()
+    resets = t + 22 * 3600
+    # без отметки: seven-day 6 % после строк до 99 % — неделя 99 (падение — не сброс, metis-0243)
+    e = early_reset_env(t, resets)
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"] == (99, resets, t - 60), f"без отметки неделя не максимум: {N.snapshot()}")
+    # отметка из терминала владельца: файл в STATE, окно — resets_at свежего замера
+    e = early_reset_env(t, resets)
+    rc, out, err = reset_mark(t - 1800)
+    mark = json.load(open(os.path.join(e.state, "limit", "reset-mark.json")))
+    check(rc == 0 and mark["at"] == t - 1800 and mark["resets_at"] == resets and "Отметка" in out,
+          f"отметка не записана: код {rc}, {mark}, {out!r} {err!r}")
+    # замеров после отметки ещё нет — неделя неизвестна, а не 99
+    check(N.snapshot()["week"] is None, f"до замера после отметки неделя известна: {N.snapshot()}")
+    check(not N.measure(t)["known"], f"до замера после отметки measure решает: {N.measure(t)}")
+    # строка статуса перезаписала seven-day: 6 % — неделя 6, зона зелёная
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"] == (6, resets, t - 60), f"отметка не обнулила базу: {N.snapshot()}")
+    m = N.measure(t)
+    check(m["known"] and m["used"] == 6 and m["zone"] == "green", f"measure после отметки: {m}")
+    mark_p = os.path.join(e.state, "limit", "reset-mark.json")
+    check(json.load(open(mark_p)).get("max") == 6, f"максимум после отметки не записан: {open(mark_p).read()}")
+    # неделя после отметки не убывает (metis-0243): seven-day 70, затем простаивающее окно перезаписало его старым 6,
+    # а week-usage строка статуса не пополняет (пишет только pct выше 99) — неделя 70 по max отметки
+    e.snap(t - 30, 70, resets)
+    check(N.snapshot()["week"][0] == 70, f"замер 70 после отметки не взят: {N.snapshot()}")
+    e.snap(t - 20, 6, resets)
+    check(N.snapshot()["week"] == (70, resets, t - 20), f"старый 6 опустил неделю после отметки: {N.snapshot()}")
+    m = N.measure(t)
+    check(m["used"] == 70, f"measure после 70 → 6: {m}")
+    check(json.load(open(mark_p))["max"] == 70, f"max отметки не 70: {open(mark_p).read()}")
+    # STATE не пишется (окно роли): snapshot не падает, неделя — по замеру и прежнему max
+    os.chmod(os.path.dirname(mark_p), 0o500)
+    try:
+        e.snap(t - 10, 75, resets)
+        check(N.snapshot()["week"][0] == 75, f"без записи в STATE: {N.snapshot()}")
+    finally:
+        os.chmod(os.path.dirname(mark_p), 0o700)
+    check(json.load(open(mark_p))["max"] == 70, "max записан в каталог без права записи")
+    # новая отметка того же окна — максимум заново
+    rc, _, _ = reset_mark(t - 5)
+    e.snap(t, 6, resets)
+    check(rc == 0 and N.snapshot()["week"][0] == 6, f"новая отметка не сбросила максимум: {N.snapshot()}")
+    # max отметки без замеров после неё — неделя по max, а не неизвестна и не 99
+    e = early_reset_env(t, resets)
+    P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 60, "resets_at": resets, "max": 40})
+    check(N.snapshot()["week"][0] == 40, f"max отметки без замеров после неё: {N.snapshot()}")
+    # отметка того же окна с допуском 1 ч действует, другого окна (новый resets_at) — нет
+    for shift, want in ((1800, 6), (3 * 3600, 99)):
+        e = early_reset_env(t, resets)
+        P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 1800, "resets_at": resets + shift})
+        e.snap(t - 60, 6, resets)
+        check(N.snapshot()["week"][0] == want, f"отметка окна {resets + shift}: неделя {N.snapshot()}, ждали {want}")
+    # битая отметка не действует: не JSON, время не число при верном окне
+    for body in ("{", json.dumps({"at": "x", "resets_at": resets}), json.dumps({"resets_at": resets})):
+        e = early_reset_env(t, resets)
+        os.makedirs(os.path.join(e.state, "limit"))
+        open(os.path.join(e.state, "limit", "reset-mark.json"), "w").write(body)
+        e.snap(t - 60, 6, resets)
+        check((N.snapshot()["week"] or (None,))[0] == 99, f"битая отметка {body!r} подействовала: {N.snapshot()}")
+    # гонка процессов: другой проход успел записать больший max — меньший его не опускает; отметку сменили (новый
+    # reset-mark) — max старой отметки в новую не пишется
+    e = early_reset_env(t, resets)
+    mp = os.path.join(e.state, "limit", "reset-mark.json")
+    P.write_json(mp, {"at": t - 1800, "resets_at": resets, "max": 50})
+    N.mark_max_save((t - 1800, resets, 20.0), 30.0)
+    check(P.read_json(mp)["max"] == 50, f"меньший max опустил записанный: {P.read_json(mp)}")
+    P.write_json(mp, {"at": t - 60, "resets_at": resets})
+    N.mark_max_save((t - 1800, resets, 50.0), 80.0)
+    check("max" not in P.read_json(mp), f"max старой отметки записан в новую: {P.read_json(mp)}")
+    # кривой max — как нет: отметка действует, максимум заново
+    e = early_reset_env(t, resets)
+    P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 1800, "resets_at": resets, "max": "x"})
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"][0] == 6 and P.read_json(N.reset_mark_path())["max"] == 6,
+          f"кривой max: {N.snapshot()} {P.read_json(N.reset_mark_path())}")
+
+
+def test_week_idle_window_after_mark_1075():
+    """Окно, простаивавшее с запроса до сброса, пишет seven-day со старым 99 и после отметки: max до отметки (pre)
+    хранит сама отметка, замер, равный pre, в неделю не входит. Неделя после отметки по-прежнему не убывает."""
+    t = day()
+    resets = t + 22 * 3600
+    e = early_reset_env(t, resets)
+    rc, _, err = reset_mark(t - 1800)
+    mark_p = os.path.join(e.state, "limit", "reset-mark.json")
+    check(rc == 0 and P.read_json(mark_p).get("pre") == 99, f"pre не записан: {rc} {err!r} {P.read_json(mark_p)}")
+    # простаивающее окно первым после отметки — неделя неизвестна, а не 99
+    e.snap(t - 70, 99, resets)
+    check(N.snapshot()["week"] is None, f"старый 99 первым после отметки: {N.snapshot()}")
+    # 6, затем старый 99 простаивающего окна, затем 7 — неделя 7, max отметки 7
+    e.snap(t - 60, 6, resets)
+    check(N.snapshot()["week"][0] == 6, f"6 после отметки: {N.snapshot()}")
+    e.snap(t - 50, 99, resets)
+    check(N.snapshot()["week"] == (6, resets, t - 50), f"старый 99 прибил неделю: {N.snapshot()}")
+    e.snap(t - 40, 98.6, resets)  # допуск 0,5: 98,6 — тот же старый 99
+    check(N.snapshot()["week"][0] == 6, f"98,6 в допуске pre взят: {N.snapshot()}")
+    e.snap(t - 30, 7, resets)
+    check(N.snapshot()["week"] == (7, resets, t - 30) and N.measure(t)["used"] == 7,
+          f"неделя после 6 → 99 → 7: {N.snapshot()} {N.measure(t)}")
+    check(P.read_json(mark_p)["max"] == 7, f"max отметки: {P.read_json(mark_p)}")
+    # защита 0243 цела: 70, затем 6 — 70
+    e.snap(t - 20, 70, resets)
+    check(N.snapshot()["week"][0] == 70, f"70 после отметки не взят: {N.snapshot()}")
+    e.snap(t - 10, 6, resets)
+    check(N.snapshot()["week"][0] == 70, f"70 → 6 после отметки: {N.snapshot()}")
+    # выше pre — настоящий расход (старое окно больше pre не видело): берётся
+    e.snap(t - 5, 100, resets)
+    check(N.snapshot()["week"][0] == 100, f"замер выше pre не взят: {N.snapshot()}")
+    # отметка без pre (до metis-1075) — как раньше: старый 99 входит в неделю
+    e = early_reset_env(t, resets)
+    P.write_json(os.path.join(e.state, "limit", "reset-mark.json"), {"at": t - 1800, "resets_at": resets})
+    e.snap(t - 60, 99, resets)
+    check(N.snapshot()["week"][0] == 99, f"отметка без pre: {N.snapshot()}")
+
+
+def test_reset_mark_refusals_1067():
+    """reset-mark только из терминала владельца: окно роли — отказ, код 2, файла нет; окна недели нет или оно
+    сброшено — код 1, файла нет; лишние слова — код 2."""
+    t = day()
+    resets = t + 22 * 3600
+    for role in ("dev", "hq"):
+        e = early_reset_env(t, resets)
+        rc, out, err = reset_mark(t, role)
+        check(rc == 2 and "окно роли" in err.splitlines()[-1] and not os.path.exists(N.reset_mark_path()),
+              f"окно роли {role}: код {rc}, {err!r}")
+    Env()
+    rc, _, err = reset_mark(t)
+    check(rc == 1 and "не записана" in err and not os.path.exists(N.reset_mark_path()), f"без снимка: {rc} {err!r}")
+    e = Env()
+    e.snap(t - 60, 40, t - 10)
+    rc, _, err = reset_mark(t)
+    check(rc == 1 and not os.path.exists(N.reset_mark_path()), f"окно уже сброшено: {rc} {err!r}")
+    check(N.limit_main([]) == 2 and N.limit_main(["reset-mark", "x"]) == 2, "лишние слова приняты")
+
+
 def test_heavy():
     e = Env()
     t = day()
@@ -740,6 +908,16 @@ def test_status_format():
           "в справке нет pantheon night")
     r = run("status")
     check("Лимит и ночь" in r.stdout and "Неделя: 41 %" in r.stdout, f"pantheon status без раздела: код {r.returncode} {r.stdout[-800:]} {r.stderr[-600:]}")
+    # pantheon limit reset-mark (metis-1067): из окна роли — отказ без файла, из терминала владельца — отметка
+    mark = os.path.join(e.state, "limit", "reset-mark.json")
+    env["PANTHEON_ROLE"] = "dev"
+    r = run("limit", "reset-mark")
+    check(r.returncode == 2 and "окно роли" in r.stderr and not os.path.exists(mark), f"limit из окна роли: {r}")
+    del env["PANTHEON_ROLE"]
+    r = run("limit", "reset-mark")
+    check(r.returncode == 0 and json.load(open(mark))["resets_at"] == resets, f"pantheon limit reset-mark: {r}")
+    check("pantheon limit reset-mark" in run("help").stdout, "в справке нет pantheon limit reset-mark")
+    os.remove(mark)
 
 
 def _pack_env(start_line="- Старт — 04:00, но не раньше выпуска"):
@@ -1107,6 +1285,69 @@ def test_night_declined_no_repeat_0392():
     e.watch(hm("23:45"))
     st = N.load(EVENING)
     check(st["answer"] == "да" and st.get("opened_at") and len(st["answers_seen"]) == 2, f"0392: «Да» после «Нет»: {st}")
+
+
+def test_limits_allow_1124():
+    """metis-1124: [limits.allow] pct + until — внутри окна и ниже pct красная и жёлтая зоны запуск не держат; на pct — стоп,
+    как потолок; после until — прежняя зона; кривая запись не действует и названа пометкой; строка в status."""
+    base = 'primary_host = "mac-a"\n'
+    allow = '[limits.allow]\npct = 30\nuntil = "2026-10-15 15:00"\ndecision = "owner-word-ref"\n'
+    t, late = day("14:00"), day("16:00")
+    resets = t + 6 * 86400  # линия ≈ 14 %
+
+    def gate_at(e, now, over):
+        e.at_line(now, over, resets=resets)
+        return N.gate("autostart", now, heavy=0)
+
+    # без записи: красная (над линией 10 п.п.) и жёлтая (3 п.п.) днём держат
+    e0 = Env(base)
+    ok, why = gate_at(e0, t, 10)
+    check(not ok and "красная" in why, f"1124: красная без записи: {ok} {why}")
+    ok, why = gate_at(e0, t, 3)
+    check(not ok and "жёлтая" in why, f"1124: жёлтая без записи: {ok} {why}")
+    # внутри окна и ниже pct — идёт при той же красной и жёлтой
+    e = Env(base + allow)
+    check(gate_at(e, t, 10) == (True, ""), f"1124: красная в окне, ниже pct: {gate_at(e, t, 10)}")
+    check(gate_at(e, t, 3) == (True, ""), f"1124: жёлтая в окне, ниже pct: {gate_at(e, t, 3)}")
+    check(N.measure(t)["zone"] == "green", f"1124: зона в окне: {N.measure(t)['zone']}")
+    lines = N.status_lines(t)
+    al = [x for x in lines if x.startswith("Разрешение до даты")]
+    check(len(al) == 1 and "30 %" in al[0] and "owner-word-ref" in al[0] and "запас" in al[0], f"1124: status: {lines}")
+    # на pct — стоп, как потолок (причина называет 30 %)
+    ok, why = gate_at(e, t, 20)  # ≈ 34 %
+    check(not ok and "30" in why and "потолок" in why, f"1124: на pct не стоп: {ok} {why}")
+    check("достигнуто" in "".join(N.status_lines(t)), f"1124: status на pct: {N.status_lines(t)}")
+    check(N.measure(t)["zone"] == "red", f"1124: зона на pct прежняя: {N.measure(t)['zone']}")
+    line = 100.0 * (t - (resets - WEEK)) / WEEK
+    ok, why = gate_at(e, t, 30.0 - line)  # ровно pct
+    check(not ok and N.measure(t)["zone"] == "red", f"1124: ровно на pct: {ok} {why} {N.measure(t)['zone']}")
+    # после until — прежняя зона, строка говорит почему
+    ok, why = gate_at(e, late, 10)
+    check(not ok and "красная" in why, f"1124: после until: {ok} {why}")
+    check(N.measure(late)["zone"] == "red", f"1124: зона после until: {N.measure(late)['zone']}")
+    check(any("не действует — истекло" in x for x in N.status_lines(late)), f"1124: status после until: {N.status_lines(late)}")
+    # owner_cap не тронут: 95 держит своё и под разрешением, потолок ниже разрешения — первым
+    e2 = Env(base + allow + '[limits.owner_cap]\npct = 25\ndecision = "zeus-x"\n')
+    ok, why = gate_at(e2, t, 10)  # ≈ 24 % < 25 — идёт
+    check(ok, f"1124: ниже потолка 25: {why}")
+    ok, why = gate_at(e2, t, 12)  # ≈ 26 % ≥ 25 — стоп по потолку владельца
+    check(not ok and "25" in why, f"1124: потолок ниже разрешения: {ok} {why}")
+    # кривые записи: не действуют (зона прежняя), пометка в status
+    bad = (("pct = 0\nuntil = \"2026-10-15 15:00\"\n", "pct"), ("pct = 130\nuntil = \"2026-10-15 15:00\"\n", "pct"),
+           ("pct = \"30\"\nuntil = \"2026-10-15 15:00\"\n", "pct"), ("pct = true\nuntil = \"2026-10-15 15:00\"\n", "pct"),
+           ("pct = 30\n", "нет until"), ("pct = 30\nuntil = \"когда-нибудь\"\n", "не дата"))
+    for body, why_part in bad:
+        eb = Env(base + "[limits.allow]\n" + body)
+        ok, why = gate_at(eb, t, 10)
+        st = "\n".join(N.status_lines(t))
+        check(not ok and "красная" in why, f"1124: кривая запись {body!r} действует: {ok} {why}")
+        check("не действует — запись [limits.allow] не разобрана" in st and why_part in st, f"1124: пометка {body!r}: {st}")
+        eb.watch(t)
+        check("разрешение до даты не действует" in eb.alerts(), f"1124: тревога {body!r}: {eb.alerts()}")
+    # без записи строки нет
+    e0 = Env(base)
+    e0.at_line(t, 10, resets=resets)
+    check(not [x for x in N.status_lines(t) if "Разрешение" in x], f"1124: строка без записи: {N.status_lines(t)}")
 
 
 if __name__ == "__main__":

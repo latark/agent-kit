@@ -54,6 +54,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «внимание — …» с причиной и строкой, код 1
   pantheon packs diff <направление>     полный дифф неодобренных скриптов от одобренной копии, строки как есть;
                                         тревога «хук изменён» в alerts.md называет только счёт строк (круг G11)
+  pantheon packs migrate [--from ПАПКА] пакеты направлений из прежней версии плагина (или из ПАПКИ: плагин с
+                                        packs/ или сама папка пакетов) → ~/.claude/pantheon/packs/<направление>/,
+                                        личные записи карты plugins-by-role.toml → ~/.claude/pantheon/
+                                        plugins-by-role.toml; существующее не затирает. domains build делает это
+                                        сам один раз (отметка .migrated.json). Код 1 — источника нет
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon board archive [--days N]     датированные блоки board.md («Сейчас», «Сессии и хозяйство») старше N дней
@@ -63,6 +68,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «Лимит» для сводки (lib/night.py)
   pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса: ночь
                                         открывается только по вашему «Да — ночь <дата>», sha256 пачки сверяется
+  pantheon limit reset-mark             отметка досрочного сброса недели (metis-1067): замеры недели до неё не
+                                        учитываются; только ваш терминал, из окна роли — отказ (lib/night.py)
   pantheon read request|run|status|cancel   чтение переписки по заявке (metis-0267, 0508, lib/read.py): папка, чаты
                                         по имени, @имени или ссылке → проход находит чаты → ваше «да» на [read-<rid>]
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
@@ -73,7 +80,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
-  pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
+  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
+                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
+  pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
@@ -86,10 +95,16 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
                                         белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
                                         Touch ID с этим действием целиком → исполнение один раз по sha256 текста
+  pantheon denials report|backfill      журнал и отчёт отказов окон по классам (lib/denials.py, metis-1135 Д)
   pantheon owner-edit propose|status|cancel|run   правка файла владельца (policy.toml, ~/.claude/agents/_parts/*.part)
                                         без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
                                         диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
                                         «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
+  pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]   один ключ policy.toml той же
+                                        заявкой owner-edit (metis-1122): роль Edit/Write policy.toml не делает
+  pantheon config request|status|cancel|run   .mcp.json, .claude/settings*.json, .claude/hooks/* своей worktree
+                                        (lib/config_edit.py, metis-0844): заявка с новым текстом → проход вне окна пишет
+                                        по «да» Зевсу на «[id] …» с sha или по Touch ID; роль коммитит сама
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -207,7 +222,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
-  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel   технический перезапуск всех сессий
+  pantheon restart --prepare [причина]|--status|--go [--force|--owner <id>]|--done|--cancel   технический перезапуск всех сессий
+  pantheon restart --only <сессия> --owner <id>   одно окно по «да» владельца на вопрос [id] с его именем (metis-1122)
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
@@ -263,6 +279,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         ваше прямое слово без вопроса с [id] — одну строку owner-log/zeus.md без
                                         пометки (своего текста команда не берёт); consent <id> покажет её дословно,
                                         метку Гестии и согласие браузера она не даёт (metis-0843)
+  pantheon consent show <id>            строка владельца с [id] и временем за сутки; нет «да» — код 1, «нет согласия»
+                                        (metis-1135: классификатор окна верит только выводу этой команды в окне)
+  pantheon consent standing [<класс>]   согласие впредь на класс из [standing] policy.toml («да и впредь»); строгие
+                                        классы (деньги, входы, отправки людям, удаление, защиты) впредь не бывают
+  pantheon consent revoke <класс>       отозвать согласие впредь (по слову владельца)
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
@@ -279,6 +300,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
                                         «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
   pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
+  pantheon review delta <owner/repo> <PR>   из клона: какой нужен круг argus — дельта от прошлого проверенного
+                                        head (мелкая правка вне ядра, без rebase) или полный на свежем base, —
+                                        команда записи тестов, пары вернувших; код 0 — head готов к argus, 1 — нет.
+                                        accept без записи tests на head и без зелёного CI — код 1 (metis-0669, 0784)
   pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
@@ -1462,10 +1487,12 @@ def tick():
 
 
 def release_ticks(t):
-    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска). Сбой одного не
-    останавливает тик и второго."""
+    """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска), затем ночной
+    полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
-                           ("map-tick-crash", "карта тестов", map_tick_mod)):
+                           ("map-tick-crash", "карта тестов", map_tick_mod),
+                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod),
+                           ("denials-tick-crash", "отчёт отказов", denials_mod)):
         try:
             mod().tick(t)
         except Exception as e:
@@ -2238,10 +2265,13 @@ def domains_build(if_changed=False):
     такая папка пропускается с тревогой — иначе правкой реестра можно было бы отдать чужому код guard или me/."""
     reg_path = os.path.join(PANTHEON, "directions.toml")
     policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+    # пакеты направлений — данные пользователя (решение владельца 12.11): один раз перенести их из прежней версии
+    # плагина в ~/.claude/pantheon/packs, с отметкой. Перенесённые файлы новее built_ts — окна ниже пересоберутся
+    packs_migrate_cmd(["migrate"], mark=True)
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
         # и новые папки сессий: правило Read окна штаба закрывает чужие шаблонами по префиксам — новый префикс тоже должен
-        # попасть в hq.json
+        # попасть в hq.json, а запрет записи в CLAUDE_TMP (tmp_deny_write, metis-0286) — во все окна
         # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
         # и проектные настройки всех папок окон направлений: allow с gh pr merge роняет окно (metis-0137, metis-0911)
@@ -2254,8 +2284,12 @@ def domains_build(if_changed=False):
                    # и настройки владельца: enabledPlugins сверяется с каталогом карты плагинов (plugin-map-unknown
                    # приходит только при сборке, metis-0601 Д5)
                    os.path.join(HOME, ".claude", "settings.json"),
+                   # и личная часть карты плагинов: её окна направлений — в настройки окон
+                   PLUGIN_MAP_LOCAL,
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
+        # и пакеты направлений в данных пользователя: правка window.json или hooks.json — в окно (pack_window, снимок)
+        newest = max(newest, PACKS_LOCAL.newest(PACKS))
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
         # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
         newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
@@ -2414,11 +2448,13 @@ WINDOW_RULES = _window_rules()
 # защит (metis-0598, решение владельца 30.10). Окна: enabledPlugins и permissions.deny mcp__*; роли: disallowedTools
 # шапки при roles build.
 PLUGIN_MAP_FILE = os.path.join(PLUGIN, "plugins-by-role.toml")
+PLUGIN_MAP_LOCAL = os.path.join(HOME, ".claude", "pantheon", "plugins-by-role.toml")  # личная часть: окна направлений
 
 
-def _plugin_map_mod():
+def _plugin_map_mod(name="plugin_map"):
+    """Модуль-лист lib/<name>.py (без P): карта плагинов, пакеты в данных пользователя."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("pantheon_plugin_map", os.path.join(LIB, "plugin_map.py"))
+    spec = importlib.util.spec_from_file_location("pantheon_" + name, os.path.join(LIB, name + ".py"))
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -2446,7 +2482,12 @@ def plugin_map_names(kind, src=None):
         dirs = {d.get("name") for d in reg.get("direction") or [] if isinstance(d, dict)}
     except (OSError, ValueError):
         return None, None
-    return {"direction", "hq", "hestia", "workshop"} | {"job-" + r for r in JOB_ROLES} | dirs, None
+    return plugin_map_system() | dirs, None
+
+
+def plugin_map_system():
+    """Окна системы в карте плагинов (не направления): их записи — только в карте плагина, не в личной части."""
+    return {"direction", "hq", "hestia", "workshop"} | {"job-" + r for r in JOB_ROLES}
 
 
 def plugin_map_load(alert=True, kind="window", src=None):
@@ -2454,23 +2495,34 @@ def plugin_map_load(alert=True, kind="window", src=None):
     включено), а причина — в тревоге (alert) и в stderr: молча «не применено» было бы ложным «отключено». С alert ещё
     сверка с enabledPlugins пользователя (~/.claude/settings.json): включённый плагин вне каталога карта не выключает
     нигде — тревога plugin-map-unknown один раз на список; пробная сборка (alert=False) тревог не шлёт и не снимает."""
+    names = plugin_map_names(kind, src)
     try:
-        pmap = PLUGIN_MAP.load(PLUGIN_MAP_FILE, *plugin_map_names(kind, src))
+        pmap = PLUGIN_MAP.load(PLUGIN_MAP_FILE, *names)
     except ValueError as e:
         print(f"plugins-by-role: {e} — карта не применена, у окон и ролей всё включено", file=sys.stderr)
         if alert:
             alert_once("plugin-map-bad", str(e), f"{e} — карта не применена, у окон и ролей всё включено (Метида)",
                        "pantheon")
         return None
+    try:  # личная часть: окна своих направлений (решение владельца 12.11); битая — карта плагина без неё
+        if kind == "window":
+            PLUGIN_MAP.overlay(pmap, PLUGIN_MAP_LOCAL, names[0], plugin_map_system())
+        if alert and kind == "window":
+            clear_once("plugin-map-local-bad")
+    except ValueError as e:
+        print(f"plugins-by-role: {e} — личная часть не применена", file=sys.stderr)
+        if alert:
+            alert_once("plugin-map-local-bad", str(e), f"{e} — личная часть не применена, окнам направлений — "
+                       "записи карты плагина", "pantheon")
     for entry in pmap["skipped"]:  # неизвестное имя окна или роли: запись пропущена, остальная карта действует
         print(f"plugins-by-role: запись {entry} — такого окна или роли нет, пропущена (опечатка или удалённое "
-              "направление); остальная карта действует", file=sys.stderr)
+              "направление; в личной части — только окна направлений); остальная карта действует", file=sys.stderr)
     if alert:
         clear_once("plugin-map-bad")
         for entry in pmap["skipped"]:  # одна тревога на запись, повтор молчит
             alert_once("plugin-map-name-" + entry, entry, f"plugins-by-role: запись {entry} — такого окна или роли "
-                       "нет, она не применяется (опечатка или удалённое направление); остальная карта действует "
-                       "(Метида)", "pantheon")
+                       "нет, она не применяется (опечатка или удалённое направление; в личной части — только окна "
+                       "направлений); остальная карта действует (Метида)", "pantheon")
         # запись исправлена или убрана — метка снята, следующая опечатка встревожит снова
         stem = re.sub(r"[^\w.-]", "_", "plugin-map-name-")
         try:
@@ -2600,14 +2652,15 @@ GLOB_SAFE = re.compile(r"[A-Za-z0-9._-]+")
 
 def _others_globs(names, own, keep=()):
     """Папки чужих сессий среди names → немного шаблонов «<префикс>*» (и точных имён), ни один из которых не совпадает
-    со своими: own, own--claude-worktrees-* и имена на префиксы keep (они остаются открыты). Префикс — до первой
-    буквы, где имя расходится со всеми своими, поэтому тысячи guard-test-* дают один «g*»: список не растёт с числом
-    папок. Имя с символами шаблона пропускается — вернётся в skipped."""
-    wt = own + "--claude-worktrees-"
-    mine = (own, wt) + tuple(keep)
+    со своими: own (имя или список имён), own--claude-worktrees-* и имена на префиксы keep (они остаются открыты).
+    Префикс — до первой буквы, где имя расходится со всеми своими, поэтому тысячи guard-test-* дают один «g*»: список
+    не растёт с числом папок. Имя с символами шаблона пропускается — вернётся в skipped."""
+    owns = (own,) if isinstance(own, str) else tuple(own)
+    wts = tuple(o + "--claude-worktrees-" for o in owns)
+    mine = owns + wts + tuple(keep)
     out, skipped = set(), []
     for n in names:
-        if n == own or n.startswith(wt) or n.startswith(tuple(keep)):
+        if n in owns or n.startswith(wts + tuple(keep)):
             continue
         p = next((n[:i] for i in range(1, len(n) + 1) if not any(m.startswith(n[:i]) for m in mine)), None)
         x = n if p is None else p + "*"
@@ -2616,6 +2669,49 @@ def _others_globs(names, own, keep=()):
         else:
             skipped.append(n)
     return sorted(out), skipped
+
+
+def _dash(p):
+    """Имя папки сессии в CLAUDE_TMP и ~/.claude/projects, как его даёт Claude Code: настоящий путь папки запуска, где
+    всё, кроме букв и цифр, → «-»."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.expanduser(p)))
+
+
+_TMP_SKIPPED = set()
+
+
+def tmp_deny_write(tree, exact=()):
+    """denyWrite окна: папки чужих сессий в CLAUDE_TMP (metis-0286, вариант А по metis-0283, «да» владельца
+    19.10). CLAUDE_TMP — общий $TMPDIR песочниц всех окон: без запрета окно пишет, удаляет и переносит файлы в папках
+    чужих сессий (проба 0283 — перенос чужого сокета в свой кэш и connect).
+    - Чужие — только папки сессий Claude Code: их имя — путь папки запуска через «-», всегда с «-» в начале. Прочие
+      имена корня (mktemp -d — tmp.*, tempfile.mkdtemp(prefix=…), pytest-of-*, tsx-<uid>) — временные папки самих
+      окон: под шаблоном новая такая папка закрылась бы окну с момента создания, а тесты пишут в них.
+    - Свои: папки tree (allowWrite окна) вместе с поддеревом — сессия, запущенная в подпапке или своей worktree
+      (мастерская — ~/projects/workshop/<задача>); exact — только сама папка и её .claude/worktrees (задачи расписания
+      запускаются в ~). Цена: «-» в имени не отличить от «/», поэтому соседняя ~/projects/<своя>-<что-то> тоже открыта.
+    - Не перечислением папок (профиль Seatbelt — не больше 64 КБ), а шаблонами _others_globs, как denyRead штаба.
+    - Закрыто имя папки «<префикс>*», а не только содержимое: иначе `mv <чужая> tmp.x` проходит и запись внутри
+      открыта (argus, PR #287). Временные файлы Bash в корне шаблон не задевает: каждый шаблон начинается с «-» и
+      ещё одного знака, а heredoc zsh, mktemp, tempfile так имена не начинают. Одной записи хватает: Claude Code
+      дописывает к шаблону «(/.*)?», и запрет закрывает всё поддерево. Живая проба (Claude Code 2.1.319, Haiku в
+      песочнице): с одним «<префикс>*» запись в чужой папке и вглубь (s1/scratchpad/f.txt), её mv, rm -rf и mkdir
+      нового имени на чужой префикс — Operation not permitted; своя папка, её worktree, новая своя, tmp.*, файл в
+      корне — можно. Хвост «/*/**» был лишним: «/*» уже закрывал s1/scratchpad/f.txt.
+    - Цена: окно не создаёт в корне CLAUDE_TMP папку на чужой префикс. Вложенный `claude -p` из песочницы (cwd в
+      $TMPDIR/tmp.*) это не задевает: его $TMPDIR уже CLAUDE_TMP, и свои папки он кладёт в CLAUDE_TMP/claude-<uid>/,
+      а не в корень (живая проба 2.1.319: с api.anthropic.com в сети — rc 0; сеть окна его и так не пускает)."""
+    try:
+        names = [n for n in os.listdir(CLAUDE_TMP) if n.startswith("-")]
+    except OSError:
+        names = []
+    trees = [_dash(p) for p in tree]
+    globs, skipped = _others_globs(names, trees + [_dash(p) for p in exact], [t + "-" for t in trees])
+    new = [n for n in skipped if n not in _TMP_SKIPPED]
+    if new:
+        _TMP_SKIPPED.update(new)
+        print(f"песочница: имена с символами шаблона в {CLAUDE_TMP} не закрыты на запись: {new[:5]}", file=sys.stderr)
+    return [f"{CLAUDE_TMP}/{g}" for g in globs]
 
 
 def sandbox_size(data):
@@ -2847,7 +2943,7 @@ EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
-                  own_agents=False):
+                  own_agents=False, tmp_own=()):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
@@ -2864,6 +2960,8 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
         () if own_agents and r in folders else agents)]
     deny_write += _deny_forms([HOOKD_HOME])
+    # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
+    deny_write += tmp_deny_write(allow, tmp_own)
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
@@ -3164,13 +3262,16 @@ def folders_allow_problems(folders):
 # CLAUDE.md с @AGENTS.md) Claude Code грузит сам. Остальные папки и вложенные проекты (app/, gpu-worker/) — через
 # --add-dir: оттуда приходят CLAUDE.md (при CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1), .claude/rules, навыки,
 # команды и агенты, но не settings, не .mcp.json и не импорт @AGENTS.md (пробы П1, П7 drafts/metis-0933-f8-probes.md).
-# Это недостающее — пакет направления packs/<направление>/ в этом репозитории (под ревью): плагин для --plugin-dir
-# (hooks/hooks.json), window.json (window_extra: allow, deny, ask, plugins, env, sandbox — вливает sandbox_build;
-# seen — что из репозиториев учтено и как) и mcp.json для --mcp-config (П8). AGENTS.md всех папок — один файл
-# --append-system-prompt-file: флаг не повторяется, второй затирает первый (проба 06.11 18:2x, Claude Code 2.1.318).
-# Откуда пакеты — только код плагина, не окружение (класс 5 «граница ядра»): переменная окна не подменит пакет. Тесты
-# подменяют константу P.PACKS в процессе, как AI_HOME через HOME.
-PACKS = os.path.join(PLUGIN, "packs")
+# Это недостающее — пакет направления: плагин для --plugin-dir (hooks/hooks.json), window.json (window_extra: allow,
+# deny, ask, plugins, env, sandbox — вливает sandbox_build; seen — что из репозиториев учтено и как) и mcp.json для
+# --mcp-config (П8). AGENTS.md всех папок — один файл --append-system-prompt-file: флаг не повторяется, второй
+# затирает первый (проба 06.11 18:2x, Claude Code 2.1.318).
+# Пакеты — личные настройки пользователя (решение владельца 12.11): ~/.claude/pantheon/packs/<направление>/, рядом с
+# approved.json и grants.toml — вне allowWrite окон; в репозитории только общий код пакетов packs/_bin (PACKS_BIN, ядро).
+# Перенос из прежних версий плагина — lib/packs_local.py. Откуда пакеты — константа от HOME, не переменная окна
+# (класс 5 «граница ядра»): PANTHEON_PACKS и подобное пакет не подменят. Тесты — через HOME, как AI_HOME.
+PACKS = os.path.join(HOME, ".claude", "pantheon", "packs")
+PACKS_BIN = os.path.join(PLUGIN, "packs", "_bin")
 PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json",
                  ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
 NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
@@ -3181,9 +3282,56 @@ PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
 
 
 def pack_window(name):
-    """packs/<name>/window.json → dict (нет файла или не объект — {})."""
+    """~/.claude/pantheon/packs/<name>/window.json → dict (нет файла или не объект — {}: окно без пакета)."""
     got = read_json(os.path.join(PACKS, name, "window.json"), {})
     return got if isinstance(got, dict) else {}
+
+
+PACKS_LOCAL = _plugin_map_mod("packs_local")  # модуль-лист: пакеты в данных пользователя и перенос в них
+
+
+def packs_migrate(src=None, mark=False):
+    """Пакеты направлений и личные записи карты плагинов из прежней версии плагина (или src) → PACKS и
+    PLUGIN_MAP_LOCAL, без затирания (PACKS_LOCAL.migrate). mark — путь сборки: один раз, с отметкой."""
+    wins = plugin_map_names("window")[0]
+    if wins is None and mark:  # реестр не прочитан: личные записи карты не отобрать — без отметки, до следующей сборки
+        return {"from": None, "copied": [], "kept": [], "map": [], "failed": []}
+    wins = wins or set()
+    try:
+        base = set(PLUGIN_MAP.load(PLUGIN_MAP_FILE)["window"])
+    except ValueError:
+        base = set()
+    return PACKS_LOCAL.migrate(PACKS, PLUGIN, PLUGIN_MAP_LOCAL, wins - plugin_map_system(), base, stamp(), src, mark)
+
+
+def packs_migrate_cmd(rest, mark=False, out=None):
+    """`pantheon packs migrate [--from ПАПКА]` и шаг domains build (mark): строки итога в out (stdout; запуск окна —
+    stderr). Направление из источника не перенесено и не сохранено — тревога packs-migrate-failed (ревью argus #425 Б1).
+    → код: 0 — перенесено или уже было, 1 — источника нет или запись не удалась (причина последней строкой), 2 — не
+    те аргументы."""
+    if rest[1:] and (rest[1] != "--from" or len(rest) != 3):
+        print("pantheon packs migrate [--from <папка плагина или пакетов>]", file=sys.stderr)
+        return 2
+    try:
+        res = packs_migrate(rest[2] if len(rest) == 3 else None, mark)
+    except OSError as e:
+        print(f"pantheon packs: пакеты в {tilde(PACKS)} не перенесены — {e}", file=sys.stderr)
+        return 1
+    for line in PACKS_LOCAL.report(res, tilde, PACKS, PLUGIN_MAP_LOCAL, quiet=mark):
+        print(line, file=out or sys.stdout)
+    if res["failed"]:
+        alert_once("packs-migrate-failed", repr(res["failed"]), f"пакеты направлений {', '.join(res['failed'])} не "
+                   f"перенесены из {tilde(res['from'])} в {tilde(PACKS)}: окна идут без своих хуков и MCP. Повтор — на "
+                   "каждой сборке окон; вручную — `pantheon packs migrate` (README, «После выпуска 12.11»)", "pantheon")
+        print(f"pantheon packs: не перенесены {', '.join(res['failed'])} — см. строки выше", file=sys.stderr)
+        return 1
+    if res["from"] is not None:
+        clear_once("packs-migrate-failed")
+    if res["from"] is None and not mark:
+        print(f"pantheon packs: прежних пакетов нет ни в версиях плагина рядом с {tilde(PLUGIN)}, ни в --from",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def _open_dir_nofollow(p):
@@ -3315,13 +3463,13 @@ def window_agents_md(launch, dirs):
     return out
 
 
-PACK_BIN_MARK = "${PANTHEON_PACK_BIN}"  # в mcp.json пакета — папка _bin снимка (её путь знает только ядро)
+PACK_BIN_MARK = WINDOW_RULES.PACK_BIN_MARK  # в mcp.json пакета — папка _bin снимка (её путь знает только ядро)
 
 # Снимок исполняемого пакета (metis-0933 круг F, решение Зевса 06.11 23:46). Хуки пакета и серверы MCP идут вне
 # песочницы, а скрипты вложенных проектов (app/.claude/hooks/*.sh, mailkeeper/.claude/hooks/*.py) лежат в папках,
 # которые окно пишет: проверка пути и исполнение по пути разнесены во времени, и переименование промежуточной папки
 # (app, app/.claude — ревью argus E1 Б1) подменяло скрипт. Поэтому window_launch до старта окна копирует всё, что
-# исполняется вне песочницы, — плагин пакета (.claude-plugin, hooks), packs/_bin и скрипты .claude/hooks репозиториев,
+# исполняется вне песочницы, — плагин пакета (.claude-plugin, hooks), PACKS_BIN и скрипты .claude/hooks репозиториев,
 # названные в hooks.json, — в снимок STATE/settings/run/packs/<имя>-<sha256 манифеста>. Снимок вне allowWrite окон,
 # имя папки — хеш manifest.json, в манифесте sha256 каждого файла: in_repo.py исполняет только файлы снимка, сверив
 # хеш. Обновление — только при следующем запуске окна (здесь), не из окна. Скрипт репозитория читается по звеньям с
@@ -3613,7 +3761,7 @@ def pack_hashes_cmd(rest):
     строки pack_show, без JSON. Код 0 — все скрипты прочитаны, 1 — есть предупреждения, 2 — нет пакета или
     аргумента."""
     if rest[:1] not in (["hashes"], ["diff"]) or len(rest) != 2:
-        print("pantheon packs hashes|diff <направление>", file=sys.stderr)
+        print("pantheon packs hashes|diff <направление> | pantheon packs migrate [--from <папка>]", file=sys.stderr)
         return 2
     texts = []
     got, warn = pack_hashes(rest[1], texts)
@@ -3671,7 +3819,8 @@ def _read_bytes_nofollow(p, limit):
 def pack_hook_scripts(pack_dir):
     """Скрипты репозиториев, которые хуки пакета pack_dir запускают через in_repo.py: [(репозиторий, имя)], где
     репозиторий — строка без ссылок, как её считает in_repo.open_root (надёжное начало + звенья), имя — файл в
-    <репозиторий>/.claude/hooks. Пакет — код ядра, разбор shlex его строк."""
+    <репозиторий>/.claude/hooks. Пакет — данные пользователя (~/.claude/pantheon/packs, окну закрыта запись), разбор
+    shlex его строк."""
     hooks = read_json(os.path.join(pack_dir, "hooks", "hooks.json"), {})
     hooks = hooks.get("hooks") if isinstance(hooks, dict) else None
     out = []
@@ -3712,7 +3861,8 @@ def pack_snapshot_make(out_dir, name, bin_dir, plugin_dir=None, scripts=(), appr
     старше PACK_SNAPSHOT_KEEP убирает."""
     files, repos, unapproved, approved = {}, {}, {}, approved or {}
     pending, held, late, rejected = {}, {}, [], {}
-    # _bin и плагин — код ядра (папка плагина, путь от realpath): ссылки в пути к ней законны
+    # _bin — код ядра (папка плагина), плагин пакета — данные пользователя вне allowWrite окон (~/.claude/pantheon):
+    # путь от realpath, ссылки в пути к ним законны
     for fn in sorted(os.listdir(bin_dir)) if os.path.isdir(bin_dir) else []:
         if fn.endswith(".py"):
             data = _read_bytes_nofollow(os.path.realpath(os.path.join(bin_dir, fn)), PACK_SCRIPT_LIMIT)
@@ -3810,7 +3960,7 @@ def pack_snapshot(window, name, keep=True):
     if not plugin and not os.path.isfile(os.path.join(pack, "mcp.json")):
         return None
     approved = pack_approved(pack_approved_path(window))
-    snap = pack_snapshot_make(path(*PACK_SNAPSHOTS), name, os.path.join(PACKS, "_bin"), pack if plugin else None,
+    snap = pack_snapshot_make(path(*PACK_SNAPSHOTS), name, PACKS_BIN, pack if plugin else None,
                               pack_hook_scripts(pack) if plugin else (), approved,
                               (lambda r, s, d, b, f: pack_unapproved_alert(window, r, s, d, b, approved))
                               if keep else None, quiet=not keep)
@@ -3828,6 +3978,71 @@ def pack_snapshot(window, name, keep=True):
     return snap
 
 
+def pack_text(p):
+    """Текст файла пакета p (до PACK_SCRIPT_LIMIT) или None — файла нет или он не читается."""
+    data = _read_bytes_nofollow(os.path.realpath(p), PACK_SCRIPT_LIMIT) if os.path.isfile(p) else None
+    return data.decode("utf-8", "replace") if data is not None else None
+
+
+def pack_admit(window, plugin_dir, mcp_text):
+    """Плагин plugin_dir (None — нет) и текст mcp.json mcp_text (None — нет) пакета окна window годны для окна
+    (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Плагин (хуки) и MCP проверяются раздельно (вариант А владельца
+    13.11): плохой сервер снимает только mcp.json, хуки пакета остаются; плохой плагин снимает и плагин, и MCP —
+    серверы пакета без его хуков (protect-db на supabase) не идут. Нарушение — строка в stderr и тревога
+    pack-bad-<window> в alerts.md; всё годно — тревога снята. → (плагин годен, MCP годен)."""
+    def doc(text, rel, into):
+        if text is None:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            into.append(f"{rel}: не JSON")
+            return None
+
+    plug_bad, mcp_bad = [], []
+    files = [pack_text(os.path.join(plugin_dir, rel)) if plugin_dir else None for rel in PACK_PLUGIN_FILES]
+    plug_bad += WINDOW_RULES.pack_problems(doc(files[0], "plugin.json", plug_bad),
+                                           doc(files[1], "hooks.json", plug_bad), None)
+    mcp_bad += WINDOW_RULES.pack_problems(None, None, doc(mcp_text, "mcp.json", mcp_bad))
+    bad = plug_bad + mcp_bad
+    if not bad:
+        clear_once(f"pack-bad-{window}")
+        return True, True
+    where, what = tilde(os.path.join(PACKS, window)), "плагин и MCP" if plug_bad else "MCP"
+    print(f"pantheon: пакет {where}: {what} не взяты в окно {window} — {'; '.join(bad)[:400]}", file=sys.stderr)
+    alert_once(f"pack-bad-{window}", repr(bad), f"{where}: {what} пакета не взяты в окно {window} — "
+               + "; ".join(bad)[:500] + " (хуки — только через in_repo.py пакета, MCP — через env_from.py, npx с "
+               "точной версией; README, пакеты окон направлений)", "pantheon")
+    return not plug_bad, not plug_bad and not mcp_bad
+
+
+def pack_build_check(name):
+    """Сборка окна направления name: плагин и mcp.json его пакета — того вида, что ядро пустит при запуске
+    (pack_admit в window_flags); нет — тревога сразу, а не только при запуске. Нет ни того, ни другого — тревога
+    снята."""
+    pack = os.path.join(PACKS, name)
+    plugin = pack if os.path.isfile(os.path.join(pack, ".claude-plugin", "plugin.json")) else None
+    text = pack_text(os.path.join(pack, "mcp.json"))
+    if plugin or text is not None:
+        pack_admit(name, plugin, text)
+    else:
+        clear_once(f"pack-bad-{name}")
+
+
+def auto_rules_missing(policy):
+    """После выпуска 12.11 правила направлений — только из [auto_rules] policy.toml (ревью argus #425 Д1): установка,
+    куда перенос пакетов что-то скопировал (была прежняя версия), без этого раздела потеряла их молча — тревога
+    auto-rules-missing, пока раздела нет."""
+    moved = read_json(os.path.join(PACKS, PACKS_LOCAL.MARK), {})
+    moved = moved.get("copied") if isinstance(moved, dict) else None
+    if "auto_rules" not in policy and moved:
+        alert_once("auto-rules-missing", repr(moved), "policy.toml: нет раздела [auto_rules] — правила autoMode.allow "
+                   f"направлений ({', '.join(WINDOW_RULES.DIRECTION_RULES)}) окнам не даны; до выпуска 12.11 они стояли "
+                   "в коде. Впишите их в ~/.claude/pantheon/policy.toml (README, «После выпуска 12.11»)", "pantheon")
+    else:
+        clear_once("auto-rules-missing")
+
+
 def window_launch(role, name, window, settings, prompt=None, resume=None, bg=True):
     """Весь argv запуска окна роли (metis-0933, класс 5 «граница ядра»): claude [--resume <сессия>] [--bg] --agent
     <роль> --name <имя>, флаги схемы А окна направления window (window_flags), --settings <файл окна>, текст поручения
@@ -3842,9 +4057,10 @@ def window_launch(role, name, window, settings, prompt=None, resume=None, bg=Tru
 def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
-    settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть. Плагин и
-    _bin — из снимка pack_snapshot (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл —
-    settings/run/<name>.mcp.json), не из packs/. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
+    settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть и прошли
+    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога; перенос пакета не
+    кончен — ни того, ни другого, PACKS_LOCAL.window_hold, metis-1100). Плагин и _bin — из снимка pack_snapshot
+    (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл — settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
     обновляет. Не направление (мастерская, штаб, задачи) — []."""
     folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
     if not isinstance(folders, list) or not folders:
@@ -3864,13 +4080,20 @@ def window_flags(window, name=None):
 
     if parts:
         args += ["--append-system-prompt-file", run_file("agents.md", "\n\n".join(parts))]
-    pack = os.path.join(PACKS, window)
-    snap = pack_snapshot(window, name or window)  # исполняемое вне песочницы — только из снимка (круг F)
-    if snap and os.path.isfile(os.path.join(snap, "plugin", ".claude-plugin", "plugin.json")):
-        args += ["--plugin-dir", os.path.join(snap, "plugin")]
-    if snap and os.path.isfile(os.path.join(pack, "mcp.json")):
-        with open(os.path.join(pack, "mcp.json"), encoding="utf-8") as fh:
-            text = fh.read()
+    if not os.path.lexists(os.path.join(PACKS, PACKS_LOCAL.MARK)):
+        # окно запущено раньше первой сборки после выпуска 12.11: пакет ещё в прежней версии плагина (ревью argus #425
+        # Д3). Итог — в stderr: stdout запуска читают как вывод команды
+        packs_migrate_cmd(["migrate"], mark=True, out=sys.stderr)
+    snap = None if PACKS_LOCAL.window_hold(PACKS, window, sys.stderr) else pack_snapshot(window, name or window)  # круг F
+    plugin = os.path.join(snap, "plugin") if snap else None
+    plugin = plugin if plugin and os.path.isfile(os.path.join(plugin, ".claude-plugin", "plugin.json")) else None
+    text = pack_text(os.path.join(PACKS, window, "mcp.json")) if snap else None
+    # в окно — только то, что проверено: плагин снимка и этот же текст mcp.json (ревью argus #425 Б1), каждый отдельно
+    # (вариант А владельца 13.11: плохой сервер не снимает хуки пакета)
+    plugin_ok, mcp_ok = pack_admit(window, plugin, text) if plugin or text is not None else (False, False)
+    if plugin and plugin_ok:
+        args += ["--plugin-dir", plugin]
+    if text is not None and mcp_ok:
         bin_dir = json.dumps(os.path.join(snap, "_bin"))[1:-1]
         args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
     return args
@@ -3878,8 +4101,8 @@ def window_flags(window, name=None):
 
 # Пакет только сужает права окна (вариант Б модели угроз metis-0933, решение координатора 06.11): правила deny и ask,
 # запреты песочницы denyRead и deniedDomains. allow (metis-0137), excludedCommands, allowWrite, allowedDomains, хуки,
-# режимы — не вливаются: пакет только сужает, а расширение — дело правил ядра. С #372 папка packs/ — ядро шлюза (CORE_DIR),
-# window_launch — в SANDBOX_BUILD_ROOTS: их PR сливает владелец. env — только имена из WINDOW_ENV_NAMES (флаги
+# режимы — не вливаются: пакет только сужает, а расширение — дело правил ядра. С #372 папка packs/ плагина (с 12.11 —
+# только общий код _bin) — ядро шлюза (CORE_DIR), window_launch — в SANDBOX_BUILD_ROOTS: их PR сливает владелец. env — только имена из WINDOW_ENV_NAMES (флаги
 # «без телеметрии») и только новые для окна: HOME, PATH, TMPDIR, GUARD_*, *_PROXY, DYLD_*, NODE_OPTIONS, BASH_FUNC_*,
 # кэши окна (XDG_CACHE_HOME, npm_config_cache) и ANTHROPIC_* переключили бы guard, интерпретаторы хуков и сеть.
 # Плагины — только из карты plugins-by-role.toml, оставленные этому окну (класс 4).
@@ -4006,7 +4229,8 @@ def pack_check(quiet=False):
             if quiet:
                 if miss:
                     alert_once(f"check-pack-{name}", "|".join(miss),
-                               f"окно {name}: в репозиториях есть то, чего нет в пакете packs/{name} — {miss[0]}"
+                               f"окно {name}: в репозиториях есть то, чего нет в пакете "
+                               f"{tilde(os.path.join(PACKS, name))} — {miss[0]}"
                                + (f" и ещё {len(miss) - 1}" if len(miss) > 1 else "")
                                + " (перенести в пакет или отметить в seen его window.json, metis-0933)", "check")
                 else:
@@ -4014,7 +4238,7 @@ def pack_check(quiet=False):
     if not quiet:
         for name, miss in found.items():
             for m in miss:
-                print(f"предупреждение · окно {name}: нет в пакете packs/{name} — {m}")
+                print(f"предупреждение · окно {name}: нет в пакете {tilde(os.path.join(PACKS, name))} — {m}")
     return found
 
 
@@ -4175,13 +4399,14 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             bad = window_extra_apply(data, pack_window(name), window_plugins_allowed(pmap, name))
             if bad:
                 keys = dict.fromkeys(f"{k}.{v}" if k in ("env", "sandbox") else k for k, v in bad)
-                alert_once(f"pack-extra-{name}", repr(bad), f"packs/{name}/window.json: не влито в окно {name} — "
-                           + ", ".join(keys)[:300] + " — " + "; ".join(f"{k}: {v}" for k, v in bad)[:400]
+                alert_once(f"pack-extra-{name}", repr(bad), tilde(os.path.join(PACKS, name, "window.json"))
+                           + f": не влито в окно {name} — " + ", ".join(keys)[:300] + " — " + "; ".join(f"{k}: {v}" for k, v in bad)[:400]
                            + " (пакет только сужает: deny, ask, "
                            "sandbox denyRead и deniedDomains, env из белого списка, плагины из карты — metis-0933)",
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
+            pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
@@ -4213,11 +4438,23 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
         if pmap:
-            PLUGIN_MAP.window_apply(data, pmap, name, direction)
+            PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
         write_window(out_dir, name, data)
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
+    # правила autoMode.allow направления (window_rules.DIRECTION_RULES) — по его строке [auto_rules] policy.toml
+    auto_rules = policy.get("auto_rules") if isinstance(policy.get("auto_rules"), dict) else {}
+    bad_rules = [f"{n} = {', '.join(WINDOW_RULES.direction_rules(v)[1])}" for n, v in sorted(auto_rules.items())
+                 if WINDOW_RULES.direction_rules(v)[1]]
+    if bad_rules:
+        print(f"policy.toml [auto_rules]: не взято — {'; '.join(bad_rules)} (имена: "
+              f"{', '.join(WINDOW_RULES.DIRECTION_RULES)})", file=sys.stderr)
+        alert_once("auto-rules-bad", repr(bad_rules), f"policy.toml [auto_rules]: не взято — {'; '.join(bad_rules)}; "
+                   f"правила направления — только {', '.join(WINDOW_RULES.DIRECTION_RULES)} (Метида)", "pantheon")
+    else:
+        clear_once("auto-rules-bad")
+    auto_rules_missing(policy)
     built = []
     for name, folders in domains.items():
         mine = leads.get(name, [])
@@ -4227,8 +4464,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                   ["chiron", "hestia"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
-               # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
-               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name), name)):
+               # окну с доступом к личному правила слияния и сверки согласия не выдаются — его PR сливает владелец
+               # (metis-0156, metis-0161)
+               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name),
+                                                 auto_rules.get(name), consent=name not in private_dirs)):
             built.append(name)
     # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
     # workshop/ доски; список субагентов — вне P0-6
@@ -4252,7 +4491,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 print(f"песочница {name}: нет папки или ссылка — Bash туда не пишет: {p.replace(HOME, '~')}",
                       file=sys.stderr)
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
-        job = role_settings(own, None, memory, cache, False, private_paths, None, guard)
+        # тик запускает задачу в ~ (jobs.py, cwd=HOME): её папка в CLAUDE_TMP — «-<HOME>», без поддерева
+        job = role_settings(own, None, memory, cache, False, private_paths, None, guard, tmp_own=[HOME])
         job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
         job["sandbox"]["network"]["allowedDomains"] = []
         job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
@@ -4263,7 +4503,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         agents_window(job, mine or [JOB_NO_AGENTS],
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         if pmap:
-            PLUGIN_MAP.window_apply(job, pmap, name)
+            PLUGIN_MAP.window_apply(job, pmap, name, guard=guard)
         write_window(out_dir, name, job)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
@@ -4285,7 +4525,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs["env"]["PANTHEON_ROLE"] = "hestia"
     agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
     if pmap:
-        PLUGIN_MAP.window_apply(hs, pmap, "hestia")
+        PLUGIN_MAP.window_apply(hs, pmap, "hestia", guard=guard)
     write_window(out_dir, "hestia", hs)
     built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
@@ -4374,7 +4614,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     if pmap:
-        PLUGIN_MAP.window_apply(hq, pmap, "hq")
+        PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
     write_window(out_dir, "hq", hq)
     built.append("hq")
     for f in os.listdir(out_dir):
@@ -4544,7 +4784,7 @@ def roster_changed_at():
 
 def session_started(a, t=None):
     """Когда нынешний процесс взял сессию a, в с, или 0 (metis-0864, ревью argus #332 Д2). claude agents пишет startedAt
-    из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: hermes-alex
+    из записи реестра имён ~/.claude/sessions, пока процесс виден, а без него — createdAt задания (05.11: dir-x
     7c48114d без процесса — startedAt = createdAt state.json; zeus 7853263b с процессом после respawn — время respawn,
     а createdAt — 04.11). Пока новый процесс не виден (между снятием старого воркера и выдачей нового, metis-0662; из
     окна с песочницей, reconcile_agents (1)), startedAt старше прошлых перезапусков. Поэтому — самое позднее из
@@ -6134,6 +6374,12 @@ def direction_check(name):
     add(d.get("does") and d.get("does_not") and 3 <= len(d.get("examples") or []) <= 6,
         "в записи есть does, does_not и 3–5 examples (ROLE-11)")
     folders = [os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []]
+    if d.get("planned") is True and not (folders and all(os.path.isdir(f) for f in folders)):
+        # запланировано (metis-1043): записано в реестр заранее, папок и «да» на заведение ещё нет — не ошибка
+        res = [(ok, t) for ok, t in res if t.startswith(("имя", "запись в directions.toml"))]
+        res.append((True, "запланировано (planned = true в directions.toml): папок ещё нет, остальные проверки "
+                    "пропущены до заведения"))
+        return res
     add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
     launch = launch_folder(d.get("folders"))
     home_dir = os.path.join(PANTHEON, "directions", name)
@@ -6186,6 +6432,49 @@ def direction_check(name):
         short = name.split("-", 1)[-1]
         add(os.path.isfile(os.path.join(AGENTS, f"{lead}-{short}.md")), f"роль лида {lead}-{short} (pantheon roles build)")
     return res
+
+
+TOOL_REFUSAL = "Отказ: <инструмент> — причина"
+
+
+def project_tools_cmd():
+    """Команда project-tools: соседний плагин рядом (клон репозитория — тот же код, что у этого pantheon), иначе в
+    PATH (установленный плагин; версия без --json даст код 2 — предупреждения не будет). Нет — None."""
+    near = os.path.join(os.path.dirname(PLUGIN), "project-tools", "bin", "project-tools")
+    return near if os.access(near, os.X_OK) else shutil.which("project-tools")
+
+
+def direction_warnings(name):
+    """Предупреждения координатору (metis-1043), код выхода не меняют: в папке направления по карте стеков есть стек,
+    а инструмента нет (`project-tools check --json`), и в AGENTS.md проекта нет пометки отказа — строки «Отказ: …
+    <инструмент> …». Нет команды project-tools или она упала — молча: это совет, а не ворота. → [строка]."""
+    d = direction_gate(name)[1]
+    cmd = project_tools_cmd()
+    if not cmd or d.get("planned") is True:
+        return []
+    out = []
+    for folder in dict.fromkeys(os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []):
+        if not os.path.isdir(folder):
+            continue
+        try:
+            r = subprocess.run([cmd, "check", "--json", "--dir", folder], capture_output=True, text=True, timeout=60)
+            data = json.loads(r.stdout) if r.returncode == 0 else {}
+            missing = [(m["tool"], m["stack"]) for m in data.get("missing") or []]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            with open(os.path.join(folder, "AGENTS.md"), encoding="utf-8") as fh:
+                refusals = [l for l in fh.read().splitlines() if re.match(r"\W*отказ", l, re.I)]
+        except OSError:
+            refusals = []
+        todo = [(t, st) for t, st in missing
+                if not any(re.search(rf"(?<![\w-]){re.escape(t)}(?![\w-])", l) for l in refusals)]
+        if todo:
+            out.append(f"ВНИМАНИЕ {tilde(folder)}: стек есть, инструмента нет — "
+                       + ", ".join(f"{t} ({st})" for t, st in todo)
+                       + ". Подключить: навык project-tools (`project-tools check`); отказ — строка в AGENTS.md "
+                       + f"проекта «{TOOL_REFUSAL}»")
+    return out
 
 
 # `pantheon direction init` (metis-0042): папку нового направления создаёт команда, а не Метида — её окну guard и
@@ -6348,7 +6637,11 @@ def _init_launch(p, name, d):
                 f"Направление Пантеона `{name}`.\n\n"
                 f"Что делает: {d.get('does') or '—'}\n\n"
                 f"Чего не делает: {d.get('does_not') or '—'}\n\n"
-                "Команды сборки и тестов — дополнит координатор.\n")
+                "Команды сборки и тестов — дополнит координатор.\n\n"
+                "## Инструменты\n\n"
+                "Что подключено в проекте (MCP, плагины) и почему — заполняет координатор после "
+                "`project-tools check`. Не подключили инструмент, который карта стеков предлагает, — строка "
+                f"«{TOOL_REFUSAL}»: `pantheon direction check` тогда не предупреждает.\n")
         try:
             with open(agents, "x", encoding="utf-8") as fh:   # "x": не перезапишет и не пройдёт по ссылке
                 fh.write(text)
@@ -6378,6 +6671,8 @@ def direction(rest):
     res = direction_check(rest[1])
     for ok, text in res:
         print(("готово  " if ok else "НЕТ     ") + text)
+    for line in direction_warnings(rest[1]):  # предупреждение координатору: код выхода не меняет
+        print(line)
     return 0 if all(ok for ok, _ in res) else 1
 
 
@@ -6616,28 +6911,32 @@ def handoff_kick():
 
 
 def owner_edit_kick():
-    """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) — отдельным процессом: окно Touch ID ждёт
-    пальца до двух минут, тик не ждёт. Без заявок — нет."""
-    try:
-        if locked("owner-edit-run") or not owner_edit_mod().pending():
-            return
-        if os.environ.get("PANTHEON_DRYRUN") == "1":
-            with open(path("dryrun.log"), "a") as fh:
-                fh.write(f"{int(now())} owner-edit-run\n")
-            return
-        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "owner-edit", "run"], env=merge_mod().pass_env(),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except Exception as e:  # сбой прохода не должен останавливать тик
-        alert_once("owner-edit-kick", type(e).__name__, f"правка файла владельца: проход не запущен "
-                   f"({type(e).__name__}: {e})", "pantheon-tick")
+    """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) и настроек проекта (metis-0844,
+    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет."""
+    for cmd, mod in (("owner-edit", owner_edit_mod), ("config", config_edit_mod)):
+        run = "config-edit" if cmd == "config" else cmd
+        try:
+            if locked(f"{run}-run") or not mod().pending():
+                continue
+            if os.environ.get("PANTHEON_DRYRUN") == "1":
+                with open(path("dryrun.log"), "a") as fh:
+                    fh.write(f"{int(now())} {run}-run\n")
+                continue
+            subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), cmd, "run"], env=merge_mod().pass_env(),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except Exception as e:  # сбой прохода не должен останавливать тик
+            alert_once(f"{run}-kick", type(e).__name__, f"{run}: проход не запущен ({type(e).__name__}: {e})",
+                       "pantheon-tick")
 
 
 def outside_kick():
-    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
-    тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
-    есть серверы). Сервер и «стоп» не ждут тестов (metis-0614)."""
-    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-serve", ["--serve"], "pending_serve")):
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — три отдельных процесса со своими замками: две
+    дорожки тестов (metis-1081: `outside run` — полный набор, `outside run --quick` — узкие и другие проекты; тесты идут
+    минутами и часами, дорожки — параллельно, в каждой один прогон) и проход серверов (`outside run --serve`, сторож
+    живёт, пока есть серверы). Сервер и «стоп» не ждут тестов (metis-0614). Замок занят — второй проход не зовётся."""
+    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-quick", ["--quick"], "pending_quick"),
+                            ("outside-serve", ["--serve"], "pending_serve")):
         try:
             if locked(name) or not getattr(outside_mod(), due)():
                 continue
@@ -7108,6 +7407,21 @@ def owner_edit_mod():
     return _OWNER_EDIT
 
 
+_CONFIG_EDIT = None
+
+
+def config_edit_mod():
+    """lib/config_edit.py — настройки, хуки и .mcp.json worktree роли по «да» или Touch ID (metis-0844)."""
+    global _CONFIG_EDIT
+    if _CONFIG_EDIT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_config_edit", os.path.join(LIB, "config_edit.py"))
+        _CONFIG_EDIT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CONFIG_EDIT)
+        _CONFIG_EDIT.set_core(sys.modules[__name__])
+    return _CONFIG_EDIT
+
+
 _HANDOFF = None
 
 
@@ -7151,6 +7465,30 @@ def map_tick_mod():
         spec.loader.exec_module(_MAP_TICK)
         _MAP_TICK.set_core(sys.modules[__name__])
     return _MAP_TICK
+
+
+_NIGHTLY_TICK = None
+
+
+def nightly_tick_mod():
+    """lib/nightly_tick.py — итог ночного полного набора на main из GitHub Actions (metis-1050, metis-1115)."""
+    global _NIGHTLY_TICK
+    if _NIGHTLY_TICK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_nightly_tick", os.path.join(LIB, "nightly_tick.py"))
+        _NIGHTLY_TICK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NIGHTLY_TICK)
+        _NIGHTLY_TICK.set_core(sys.modules[__name__])
+    return _NIGHTLY_TICK
+
+
+def denials_mod():
+    """lib/denials.py — журнал и отчёт отказов окон (metis-1135 Д); самостоятельный модуль."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_denials", os.path.join(LIB, "denials.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 _BROWSER = None
@@ -9106,6 +9444,8 @@ def main(argv):
         return archive()
     if cmd == "domains" and rest[:1] == ["build"]:
         return domains_build(if_changed="--if-changed" in rest)
+    if cmd == "packs" and rest[:1] == ["migrate"]:
+        return packs_migrate_cmd(rest)
     if cmd == "packs":
         return pack_hashes_cmd(rest)
     if cmd == "view":
@@ -9193,6 +9533,8 @@ def main(argv):
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":
         return night_mod().main(rest)
+    if cmd == "limit":
+        return night_mod().limit_main(rest)
     if cmd == "read":
         return read_mod().main(rest)
     if cmd == "merge":
@@ -9203,10 +9545,18 @@ def main(argv):
         return browser_mod().main(rest)
     if cmd == "handoff":
         return handoff_mod().main(rest)
+    if cmd == "denials":
+        return denials_mod().main(rest, STATE, now())
     if cmd == "owner-edit":
         return owner_edit_mod().main(rest)
+    if cmd == "policy":
+        return owner_edit_mod().cmd_policy(rest)
+    if cmd == "config":
+        return config_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
+    if cmd == "supabase":
+        return _plugin_map_mod("supabase_migrate").main(rest, STATE)
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":

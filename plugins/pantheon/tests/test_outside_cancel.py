@@ -36,6 +36,9 @@ S_TPY = (f"import os, signal, sys, time\nR = {_ROOT!r}  # 0873\n"
          "while time.time() < end and not os.path.exists(os.path.join(R, 'stop0873-go')):\n    time.sleep(0.2)\n"
          "sys.exit(0)\n")
 O.SUPERSEDE_EVERY, O.PROCS_EVERY = 1, 1
+# Нагрузка Mac тесту не нужна: порог outside (3.0 × ядра) на загруженном Mac держит заявку queued, и s_start не видит
+# running (T11, metis-1035). Подмена только у теста; run_pass идёт потоком в этом процессе, O — тот же модуль.
+O.load_state = lambda: (0.0, 24.0)
 
 
 def s_pids():

@@ -12,7 +12,8 @@
      песочницы (внутри окна sandbox-exec вложенный — «пропущено: нужен macOS»).
 Проверяет: ни одна команда не печатает Traceback; код — 0..7, а при коде не 0 последняя строка вывода называет
 причину; `start <направление> "текст"` кладёт поручение во входящие направления и заявку start-req (код 0) и не
-пишет STATE/settings/run; `start --restart` — отказ (код 2) со ссылкой на start_gate, до остановки копий;
+пишет STATE/settings/run; `resume <направление>` — строка resume: true в той же заявке (metis-1066);
+`start --restart` — отказ (код 2) со ссылкой на start_gate, до остановки копий;
 `start --at-cancel` — отмена строкой в заявке, её гасит плановый проход; `agents` — список и одна строка о снимке.
 `claude` в PATH — заглушка с пустым списком сессий: тест не видит и не трогает ваших сессий.
 """
@@ -21,7 +22,6 @@ import fnmatch
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -142,6 +142,8 @@ def build(base):
            "PANTHEON_NO_NOTIFY": "1", "PANTHEON_TEST": "1", "TMPDIR": os.path.join(base, "tmp"),
            "XDG_CACHE_HOME": os.path.join(home, "Library", "Caches", "pantheon-sandbox", "hq", "xdg"),
            "PATH": os.path.join(base, "bin") + ":/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"}
+    if sys.platform != "darwin":  # имя Mac pantheon берёт у scutil, его на Linux нет — status и jobs падали бы с Traceback
+        env["PANTHEON_HOST"] = "mac-a"
     return env, home, state
 
 
@@ -196,6 +198,17 @@ def suite(kind, prefix_of):
     req = os.path.join(state, "hq-rw", "start-req", DIRECTION + ".req")
     runs = os.path.join(state, "settings", "run")
     for argv in CMDS:
+        if argv == ["resume", DIRECTION]:  # metis-1066: метка «остановлено вами» есть, а снять её окну не дано
+            sd = os.path.join(state, "stopped")
+            os.chmod(state, 0o700)
+            os.makedirs(sd, exist_ok=True)
+            os.chmod(sd, 0o700)
+            with open(os.path.join(sd, DIRECTION), "w") as fh:
+                fh.write("2026-11-12 16:00 владелец\n")
+            if not prefix:
+                os.chmod(os.path.join(sd, DIRECTION), 0o444)
+                os.chmod(sd, 0o555)
+                os.chmod(state, 0o555)
         rc, out, err = run(env, argv, prefix)
         line = last_line(out, err)
         rows.append((argv, rc, line))
@@ -225,10 +238,27 @@ def suite(kind, prefix_of):
             data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
             check(f"{name} — код 0, строка cancel в заявке", rc == 0 and any(x.get("cancel") == ONESHOT_ID for x in data),
                   (rc, line, data))
+        if argv == ["resume", DIRECTION]:  # metis-1066: STATE/stopped окну закрыт — заявка, её исполняет проход
+            data = [json.loads(x) for x in open(req).read().splitlines()] if os.path.exists(req) else []
+            check(f"{name} — код 0, строка resume: true в заявке", rc == 0 and any(x.get("resume") is True for x in data),
+                  (rc, line, data))
         if argv == ["agents"]:
             check(f"{name} — код 0 и одна строка о снимке", rc == 0 and "снимок" in line, (rc, line))
-        if argv == ["reap", "--auto"] and rc == 3:
+        if argv == ["reap", "--auto"] and rc == 3 and sys.platform != "darwin":
+            print("пропущено: reap --auto — текст кода 3 «задача планового прохода» — нужен macOS (launchctl list)")
+        elif argv == ["reap", "--auto"] and rc == 3:
             check(f"{name} — код 3: «задача планового прохода»", "планового прохода" in line, line)
+    # metis-1013 (Д4, m16): снимок STATE/agents.json окну не записать — список сессий печатается сюда, по строке на сессию
+    bin2 = os.path.join(base, "bin-agents")
+    os.makedirs(bin2, exist_ok=True)
+    with open(os.path.join(bin2, "claude"), "w") as fh:
+        fh.write("#!/bin/sh\ncase \"$1\" in agents) echo '[{\"name\": \"win-a\", \"status\": \"idle\", "
+                 "\"id\": \"abc12345\"}]';; esac\nexit 0\n")
+    os.chmod(os.path.join(bin2, "claude"), 0o755)
+    rc, out, err = run(dict(env, PATH=bin2 + ":" + env["PATH"]), ["agents"], prefix)
+    check(f"{kind}: pantheon agents (одна сессия) — код 0, строка сессии «win-a … abc12345» и «сессий 1»",
+          rc == 0 and any(x.startswith("win-a\t") and x.endswith("\tabc12345") for x in out.splitlines())
+          and "сессий 1" in out, (rc, out, err))
     if not prefix:
         unlock_state(state)
     # плановый проход вне окна: отмена гасит разовый запуск, заявка поднимает окно (разовый запуск zeus-request)
@@ -245,6 +275,8 @@ def suite(kind, prefix_of):
           (items.get(ONESHOT_ID) or {}).get("done_at") and "отменён" in str(items[ONESHOT_ID].get("result")), (got, items))
     check(f"{kind}: проход — заявка подняла окно разовым запуском zeus-request",
           any(x.get("by") == "zeus-request" and x.get("target") == DIRECTION for x in items.values()), (got, items))
+    check(f"{kind}: проход — строка resume сняла метку «остановлено вами» (ваше слово в owner-log/zeus.md свежее)",
+          not os.path.exists(os.path.join(state, "stopped", DIRECTION)), got)
     return rows
 
 
@@ -283,6 +315,50 @@ if SB is None:
     sb_rows = []
 else:
     sb_rows = suite("seatbelt", seatbelt_prefix(SB))
+
+
+
+def run_main_permission():
+    """metis-1013 (Д1, m13): run.main ловит PermissionError только в окне роли — одна строка и код 1; в терминале
+    владельца (без PANTHEON_ROLE) исключение уходит наружу, трассировка как была."""
+    env, home, _state = build(os.path.join(_ROOT, "d1"))
+    for k in [k for k in os.environ if k.startswith("PANTHEON_")]:
+        os.environ.pop(k)
+    os.environ.update({k: v for k, v in env.items() if k != "PANTHEON_ROLE"})
+    sys.path.insert(0, LIBDIR)
+    import contextlib
+    import importlib.util
+    import io
+    spec = importlib.util.spec_from_file_location("run_d1", RUN_PY)
+    R = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(R)
+    real = R.pantheon.main
+    where = os.path.join(home, ".local", "state", "pantheon", "agents.json")
+
+    def denied(argv):
+        raise PermissionError(1, "Operation not permitted", where)
+    R.pantheon.main = denied
+    try:
+        try:
+            got = ("вернул", R.main(["agents"]))
+        except PermissionError as e:
+            got = ("исключение", e.filename)
+        check("run.main без PANTHEON_ROLE: PermissionError уходит наружу (трассировка в терминале владельца)",
+              got == ("исключение", where), got)
+        os.environ["PANTHEON_ROLE"] = "hq"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = R.main(["agents"])
+        lines = err.getvalue().strip().splitlines()
+        check("run.main в окне hq: PermissionError — код 1 и одна строка «не сделано … ~/.local/state/…»",
+              rc == 1 and len(lines) == 1 and "pantheon agents: не сделано" in lines[0]
+              and "~/.local/state/pantheon/agents.json" in lines[0] and "окну hq" in lines[0], (rc, lines))
+    finally:
+        R.pantheon.main = real
+        os.environ.pop("PANTHEON_ROLE", None)
+
+
+run_main_permission()
 
 out_md = os.environ.get("HQ_AUDIT_OUT")
 if out_md:

@@ -39,6 +39,17 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(pantheon consent *)",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" consent note",
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {
@@ -194,6 +205,11 @@
           {
             "type": "command",
             "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/refusal.py\" denied",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/denials.py\" hook",
             "timeout": 10
           }
         ]

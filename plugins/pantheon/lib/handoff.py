@@ -155,7 +155,7 @@ ROUTES = (
     ("browser", "Харон", re.compile(
         r"comet|chrome|cdp|devtoolsactiveport|(?<!\d)(?:9222|933[3-9])(?!\d)|браузер|avito|доступ ограничен"
         r"|chrome-devtools|claude-in-chrome", re.I), "handed",
-     "Браузер владельца (Comet, Chrome со входами) — Харон. Поручение — карточкой Зевсу: `pantheon task new " + _DIR +
+     "Браузер владельца (со входами) — Харон. Поручение — карточкой Зевсу: `pantheon task new " + _DIR +
      " --owner zeus --title \"Харону: <что прочитать>\" --text \"<адрес и что нужно>\"`; Зевс зовёт charon, итог "
      "придёт в задачу. К демону, его порту и паролю сам не подключайся."),
     ("telegram", "read", re.compile(r"telegram|tg[-_]read|(?<![\w.])t\.me/|телеграм", re.I), "handed",
@@ -193,6 +193,24 @@ def refusal_source(text):
     if NOCMD_RX.search(t):
         return "nocmd"
     return None
+
+
+# признаки для журнала отказов: имя признака, а не строка вывода (в строке бывают текст, секреты, команда);
+# голые «sandbox» и «permission denied» в журнал не идут — это обычный вывод grep, тестов, JSON
+LOG_FEATURES = (("operation not permitted", re.compile(r"operation not permitted", re.I)),
+                ("deny(N)", re.compile(r"deny\(\d+\)", re.I)),
+                ("read-only file system", re.compile(r"read-only file system", re.I)),
+                ("eperm", re.compile(r"\beperm\b", re.I)))
+
+
+def refusal_line(text):
+    """Имя признака отказа песочницы для журнала (metis-1135): «operation not permitted», «deny(N)», «eperm»,
+    «read-only file system»; пусто — признака нет (строка вывода и команда в журнал не идут)."""
+    t = str(text or "")
+    for name, rx in LOG_FEATURES:
+        if rx.search(t):
+            return name
+    return ""
 
 
 def route(text):

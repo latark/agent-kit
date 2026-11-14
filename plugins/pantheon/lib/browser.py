@@ -1,6 +1,6 @@
 """Пантеон: браузер владельца для ролей без пароля и порта (`pantheon browser`, metis-0760, путь В).
 
-Зачем. Comet и Chrome владельца со входами управляются через демон удалённой отладки (`~/.claude/tools/cdp-daemon.mjs`,
+Зачем. Основной браузер и Chrome владельца со входами управляются через демон удалённой отладки (`~/.claude/tools/cdp-daemon.mjs`,
 порт 127.0.0.1, пароль `~/.config/cdp-daemon/token`). Окну роли пароль закрыт (denyRead), местных портов у окна нет, и
 allowLocalBinding не открываем (отказ 15.10). Поэтому окно кладёт заявку в ящик, а демон с паролем зовёт плановый проход
 вне окна — как `pantheon outside` (lib/outside.py) и `pantheon read` (lib/read.py). Роль видит только итог.
@@ -40,8 +40,12 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   другое окно (formtarget, target, <base target>), <base href> страницы другого origin — отказ.
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
-- Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
-  нет — 15 сайтов решения 15.10 и forms.yandex.ru, DEFAULT_DOMAINS). Другой сайт — если его хост есть в словах
+- Чтение (open, read, eval, net) — любой сайт, кроме закрытого списка (metis-1120, «Все 5, срочно»): почта, банки,
+  Госуслуги и госкабинеты, соцсети, мессенджеры (CLOSED_DOMAINS, поддомены mail./lk./cabinet./bank. и сайты входа
+  IMPORTANT_HOST_PREFIX), плюс `closed = [...]` в reads.toml. Сайт не из `domains` — владельцу уведомление «Харон (<окно>)
+  читает <сайт>» раз в 6 ч на окно и сайт. Закрытый сайт — отказ и карточка владельцу с вопросом (Blocked, owner_card:
+  «отправлен вопрос [id]»); «да» на этот вопрос по --task открывает его. Сайты `domains` (файла нет — 15 сайтов решения
+  15.10 и forms.yandex.ru, DEFAULT_DOMAINS) — без уведомления, если не закрыты. Закрытый сайт ещё — если его хост есть в словах
   владельца за 24 ч (решение 03.11, owner_said: журнал owner-log/*.md всех окон, его пишет хук; из ответа окном вопросов
   и в чате — только «заметка:» и «дословно:», а вопрос, метка варианта, принятая подсказка Claude, задачи, сообщения,
   страницы и доска — не слова владельца; ivan@mail.ru, путь адреса, README.md и 0.5.52 — не хост), первое чтение окном
@@ -67,8 +71,20 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   имя не из ASCII, литерал регулярного выражения. Взамен — переключатель владельца: `eval = false` в reads.toml
   запрещает eval («eval запрещён настройкой …»), health, open и read работают; ключа или файла нет — eval разрешён.
 - Сырые /cmd, /events, /console и /close демона наружу не выходят. Проход зовёт /health, /open, /eval и /cmd — только
-  с Input.dispatchMouseEvent и Input.insertText (CMD_ALLOWED, для click, type, submit, delete); /events, /console и
-  /close — нет.
+  с Input.dispatchMouseEvent, Input.insertText и Emulation.setFocusEmulationEnabled (CMD_ALLOWED, для click, type,
+  submit, delete; фокус — только с --focus, выключается после действия); /events, /console и /close — нет. --focus у
+  open и чтения по адресу — поле focus в /open. net — performance.getEntriesByType('resource') своей вкладки: адрес,
+  код, размер; cookie и заголовков там нет, значения секретных параметров адреса (token, key, sig, session…) — ***.
+- Поиск, фильтр и листание (metis-1120) — без поручения и согласия на читаемом сайте (free_reason): форма с полями
+  только однострочными (без email и tel), флажками, датами и списками и GET, или role=search, или поле type=search с
+  кнопкой «найти/поиск/find/search»; нажатие ссылки, которая уводит на другую страницу того же сайта (nav_link: другой
+  путь или запрос, не javascript:, не якорь «#», без onclick и target; листание — ссылками). Кнопки отправки («Далее»
+  мастера тоже), ссылки-якоря, флажки вне формы и POST-формы без поиска — по поручению и согласию ([charon-relax]). Вход, пароль,
+  оплата, договор, торги — отказ, как раньше (classify до free_reason). Остальное без поручения — отказ и
+  карточка с вопросом поручения; «да» на неё — поручение. Селектор, который находит больше одного элемента, — отказ со
+  списком найденных; итог называет выбранный элемент. Обычная отправка по согласию без textarea, после которой
+  страница не изменилась (адрес, число узлов, длина текста — SIG_JS), согласие не съедает: один повтор той же формы за
+  час, если подпись страницы с тех пор та же (запись grant в asks). Удаление повтора не даёт — только новое «да».
 - Своя вкладка на окно (metis-0774): заявка из окна идёт в /open и /eval с полем session = имя окна — демон заводит
   этому окну отдельную вкладку (первый /open), чужие окна страницу не уводят. Сессия владельца — без поля, общая
   вкладка. Вкладку проход не закрывает (/close-tab не зовёт): простаивающую демон закрывает сам через 6 ч, предел —
@@ -139,8 +155,26 @@ DEFAULT_DOMAINS = (
     "forms.yandex.ru",                        # формы владельца (metis-0760, «Готово, когда» шага В)
 )                                             # решение владельца 15.10 (BROW-09): 15 сайтов чтения + forms.yandex.ru
 DEFAULT_WINDOWS = ("hq",)
-ACTS = ("click", "type", "submit", "delete")   # действия на странице — только по поручению (metis-0765)
-OPS = ("health", "open", "read", "eval", "download", "allow") + ACTS
+# Закрытый список чтения (metis-1120, решение владельца 13.11 «Все 5»): почта, банки, Госуслуги и госкабинеты,
+# соцсети, мессенджеры. Остальные сайты Харон читает сам, с уведомлением «Харон читает <сайт>»; владелец дополняет
+# список ключом closed в reads.toml. Закрытый сайт — только по «да» на вопрос с его хостом по задаче или словам владельца.
+CLOSED_DOMAINS = (
+    "gmail.com", "mail.google.com", "mail.ru", "mail.yandex.ru", "outlook.com", "outlook.live.com", "live.com",
+    "hotmail.com", "icloud.com", "proton.me", "protonmail.com", "rambler.ru", "yahoo.com",
+    "sberbank.ru", "sberbank.com", "tbank.ru", "tinkoff.ru", "alfabank.ru", "vtb.ru", "raiffeisen.ru",
+    "gazprombank.ru", "psbank.ru", "sovcombank.ru", "otpbank.ru", "rshb.ru", "mkb.ru", "pochtabank.ru",
+    "gosuslugi.ru", "mos.ru", "sfr.gov.ru", "pfr.gov.ru", "fssp.gov.ru", "lk.nalog.ru", "lkfl2.nalog.ru",
+    "lkul.nalog.ru", "lkip2.nalog.ru", "lk.rosreestr.ru", "my.arbitr.ru", "lk.zakupki.gov.ru",
+    "vk.com", "vk.ru", "ok.ru", "facebook.com", "instagram.com", "x.com", "twitter.com", "tiktok.com", "linkedin.com",
+    "threads.net",
+    "web.telegram.org", "telegram.org", "t.me", "whatsapp.com", "web.whatsapp.com", "max.ru", "web.max.ru",
+    "discord.com", "slack.com", "viber.com", "signal.org", "skype.com", "messenger.com",
+    "outlook.office.com", "outlook.office365.com", "telegram.me", "wa.me", "360.yandex.ru", "messages.google.com",
+    "finance.ozon.ru", "xn--c1aubbdcd3a.xn--p1ai")
+# поддомены почты, кабинетов и входа на любом сайте: mail.example.ru, lk.example.ru, esia.gosuslugi.ru
+CLOSED_HOST_PREFIX = re.compile(r"(?:mail|webmail|email|lk|lkfl\d*|lkul\d*|cabinet|kabinet|esia|bank)\.")
+ACTS = ("click", "type", "submit", "delete")   # действия на странице — по поручению; поиск — без него (metis-1120)
+OPS = ("health", "open", "read", "eval", "net", "download", "allow") + ACTS
 ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
@@ -169,10 +203,15 @@ EVAL_CALLS = frozenset((
     "map", "filter", "slice", "join", "trim", "includes", "startsWith", "endsWith", "split", "replace", "toLowerCase",
     "toUpperCase", "indexOf", "find", "some", "every", "reduce", "keys", "values", "entries", "from", "get", "has",
     "test", "exec", "match", "format", "toString", "toFixed", "parseInt", "parseFloat", "Number", "String", "Boolean",
-    "stringify", "encodeURIComponent"))
+    "stringify", "encodeURIComponent",
+    "forEach", "hasFocus", "getEntriesByType"))   # metis-1120; getEntriesByType — только 'resource' (EVAL_ENTRIES)
 EVAL_GLOBALS = frozenset(("getComputedStyle", "parseInt", "parseFloat", "Number", "String", "Boolean",
                           "encodeURIComponent"))     # без объекта перед именем можно звать только эти
-EVAL_CALLBACK = {"map": 0, "filter": 0, "find": 0, "some": 0, "every": 0, "reduce": 0, "from": 1}  # аргумент-функция
+EVAL_CALLBACK = {"map": 0, "filter": 0, "find": 0, "some": 0, "every": 0, "reduce": 0, "from": 1,
+                 "forEach": 0}                        # аргумент-функция
+# performance.getEntriesByType — только число загрузок ('resource').length: адреса с токенами отдаёт только net под
+# маской NET_SECRET; 'navigation', 'mark', .map(e => e.name) — отказ (на исходном тексте: в остове строки пустые)
+EVAL_ENTRIES = re.compile(r"""getEntriesByType\s*\((?!\s*(?:'resource'|"resource")\s*\)\s*\.\s*length\b)""")
 EVAL_KEYWORDS = frozenset(("if", "for", "while", "switch", "catch", "function", "return", "typeof", "void", "await",
                            "async", "in", "of", "instanceof", "else", "do", "case", "yield"))
 # Кроме вызовов (их проверяет eval_calls): имена-ссылки на побочные действия и секреты, навигация, присваивание
@@ -346,6 +385,9 @@ def eval_bad(expr):
     m = EVAL_DENY.search(expr)
     if m:
         return f"побочное действие или секрет «{m.group(0).strip()[:40]}»"
+    if EVAL_ENTRIES.search(expr):
+        return ("getEntriesByType — только число загрузок (getEntriesByType('resource').length); адреса, код и размер "
+                "— pantheon browser net (секреты в адресах скрыты)")
     skel, why = eval_skeleton(expr)
     if why:
         return why
@@ -359,6 +401,55 @@ def eval_bad(expr):
 
 class Refuse(Exception):
     """Отказ по правилам (код 1, состояние refused)."""
+
+
+class Blocked(Refuse):
+    """Отказ сверх прав роли (metis-1120): handle заводит владельцу карточку-вопрос (owner_card) и дописывает её [id].
+    card — {task, question, why, yes, no}: вопрос целиком тот, «да» на который снимает этот отказ."""
+
+    def __init__(self, text, card):
+        super().__init__(text)
+        self.card = card
+
+
+CARD_TTL = 24 * 3600                          # тот же вопрос — та же карточка сутки
+
+
+def owner_card(card, win):
+    """Карточка владельцу с вопросом (механизм task new --question) → «отправлен вопрос [id]» или почему не завели.
+    Направление — у задачи заявки (если папка есть), иначе inbox. Тот же вопрос за CARD_TTL — прежняя карточка."""
+    q = " ".join(str(card["question"]).split())
+    mark = root("cards", hashlib.sha256(q.encode()).hexdigest()[:16] + ".json")
+    try:
+        with open(mark, encoding="utf-8") as fh:
+            old = json.load(fh)
+        if P.now() - float(old.get("t") or 0) < CARD_TTL and isinstance(old.get("id"), str):
+            return f"вопрос владельцу уже отправлен [{old['id']}]"
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    try:
+        T = P.tasks_mod()
+        task, direction = card.get("task"), "inbox"
+        got = T.load_tasks(P.PANTHEON).get(task) if task else None
+        d = got[1].get("direction") if got else None
+        if isinstance(d, str) and os.path.isdir(os.path.join(P.PANTHEON, "directions", d)):
+            direction = d
+        tid, _ = T.task_new(
+            P.PANTHEON, P.now(), direction, q[:120], owner="zeus", status="waiting", waiting_on="human",
+            actor="pantheon browser", question=q,
+            why=f"Харон ({win or 'ваша сессия'}) упёрся в правило: {str(card.get('why') or '')[:300]}",
+            options=[card.get("yes") or "Да — разрешить", card.get("no") or "Нет — не разрешать"],
+            recommend=card.get("recommend") or "Решаете вы: Харон без ответа ничего не делает",
+            if_no_answer="Без ответа Харон этого не сделает; заявка останется отказом",
+            text=f"Вопрос завёл pantheon browser по отказу{f' задачи {task}' if task else ''}. «Да» действует, когда "
+                 "дано на этот вопрос целиком окном вопросов или в чате с Зевсом.")
+    except Exception as e:  # карточка — дополнение к отказу, сбой её не должен прятать сам отказ
+        return f"вопрос владельцу не завести: {type(e).__name__}: {str(e)[:200]}"
+    with contextlib.suppress(OSError):
+        os.makedirs(root("cards"), exist_ok=True)
+        with open(mark, "w", encoding="utf-8") as fh:
+            json.dump({"id": tid, "t": P.now(), "q": q}, fh, ensure_ascii=False)
+    return f"отправлен вопрос [{tid}]"
 
 
 class Fail(Exception):
@@ -394,23 +485,27 @@ def daemon_log():
 
 
 def load_config():
-    """(domains, windows, eval_on): из reads.toml владельца, без файла — по умолчанию (eval разрешён). Битый файл или
-    `eval` не true/false — Fail: список и переключатель не угадываем."""
+    """(domains, windows, eval_on, closed): из reads.toml владельца, без файла — по умолчанию (eval разрешён,
+    закрыт только встроенный CLOSED_DOMAINS). domains — известные сайты (без уведомления о чтении), closed —
+    дополнение закрытого списка. Битый файл или `eval` не true/false — Fail: списки и переключатель не угадываем."""
     try:
         with open(config_path(), "rb") as fh:
             data = tomllib.load(fh)
     except FileNotFoundError:
-        return DEFAULT_DOMAINS, DEFAULT_WINDOWS, True
+        return DEFAULT_DOMAINS, DEFAULT_WINDOWS, True, ()
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise Fail(f"reads.toml не читается ({type(e).__name__}: {e}) — список сайтов неизвестен")
     doms, wins = data.get("domains", list(DEFAULT_DOMAINS)), data.get("windows", list(DEFAULT_WINDOWS))
+    shut = data.get("closed", [])
     if not (isinstance(doms, list) and all(isinstance(d, str) and d.strip() for d in doms)
+            and isinstance(shut, list) and all(isinstance(d, str) and d.strip() for d in shut)
             and isinstance(wins, list) and all(isinstance(w, str) and WINDOW_RE.fullmatch(w) for w in wins)):
-        raise Fail("reads.toml: domains и windows — списки строк")
+        raise Fail("reads.toml: domains, closed и windows — списки строк")
     eval_on = data.get("eval", True)
     if not isinstance(eval_on, bool):
         raise Fail("reads.toml: eval — true (разрешён) или false (запрещён)")
-    return tuple(d.strip().lower().strip(".") for d in doms), tuple(wins), eval_on
+    return (tuple(d.strip().lower().strip(".") for d in doms), tuple(wins), eval_on,
+            tuple(d.strip().lower().strip(".") for d in shut))
 
 
 def window_cache():
@@ -598,16 +693,32 @@ def site_word(host):
     return host[4:] if host.startswith("www.") else host
 
 
+CLOSED_EXTRA = ()                             # closed из reads.toml владельца; ставит handle на каждую заявку
+
+
+def closed(host):
+    """Сайт закрытого списка (metis-1120): встроенный CLOSED_DOMAINS, closed из reads.toml, поддомен почты, кабинета
+    или банка (CLOSED_HOST_PREFIX). Платёжный и важный сайт (вход, госкабинет) для чтения закрыт тоже."""
+    h = site_word(host)
+    return (listed(h, CLOSED_DOMAINS + tuple(CLOSED_EXTRA)) or bool(CLOSED_HOST_PREFIX.match(h))
+            or bool(IMPORTANT_HOST_PREFIX.match(h)))
+
+
 def allowed(host, domains, task):
-    """Почему сайт можно читать или None: "list" — он в списке, "task" — по задаче есть «да» владельца на вопрос с
-    этим хостом (токеном), ("owner", t) — хост в словах владельца за 24 ч (owner_said, C8; t — время записи)."""
-    if listed(host, domains):
+    """Почему сайт можно читать или None (metis-1120: список закрытых, а не открытых). Закрытый сайт (closed) — только
+    "task" (по задаче «да» владельца на вопрос с этим хостом токеном) или ("owner", t) (хост в словах владельца за
+    24 ч, owner_said, C8); иначе None. Открытый: "list" — он в domains (без уведомления), иначе "task", ("owner", t)
+    или "open" — читается с уведомлением «Харон читает <сайт>»."""
+    shut = closed(host)
+    if listed(host, domains) and not shut:
         return "list"
     site = site_word(host)
     if task and owner_yes(task, lambda q: site in question_hosts(q)) is not None:
         return "task"
     t = owner_said(site)
-    return ("owner", t) if t is not None else None
+    if t is not None:
+        return ("owner", t)
+    return None if shut else "open"
 
 
 # --- демон --------------------------------------------------------------------------------------------------------
@@ -761,12 +872,17 @@ def page_check(browser, url, domains, task, what, win=None):
     if not ok:
         blank(browser, win)
         shown = host or (url[:200] if isinstance(url, str) and url else "адрес неизвестен (демон его не дал)")
-        raise Refuse(f"{what}: {shown} — сайта нет в списке чтения или адрес не проверить; вкладка закрыта (about:blank)")
+        raise Refuse(f"{what}: {shown} — сайт закрыт для чтения (почта, банк, госкабинет, соцсеть, мессенджер или closed "
+                     "в reads.toml) или адрес не проверить; вкладка закрыта (about:blank)")
     return host
 
 
-def navigate(browser, url, domains, task, win=None):
-    out = call(browser, "/open", with_session({"url": url, "console": False}, win))
+def navigate(browser, url, domains, task, win=None, focus=False):
+    """/open в своей вкладке; focus — эмуляция фокуса (--focus, metis-1120): демон держит её до следующего /open."""
+    body = {"url": url, "console": False}
+    if focus:
+        body["focus"] = True
+    out = call(browser, "/open", with_session(body, win))
     if not isinstance(out, dict) or out.get("error"):
         raise Fail(f"переход не удался: {(out or {}).get('error') if isinstance(out, dict) else out}")
     page_check(browser, out.get("url"), domains, task, "переход увёл на", win)
@@ -788,9 +904,11 @@ READ_JS = ("(() => { const b = document.body; return { url: location.href, title
 def seen_notice(win, op, host, task, why=None):
     """Первое обращение по задаче и сайту за SEEN_TTL — уведомление владельцу (BROW-10: кто, что, сайт, задача). Сайт
     по словам владельца (why = ("owner", t), C8) — своё: первое чтение окном сайта за SEEN_TTL — «<окно> читает <сайт>
-    — по вашим словам ЧЧ:ММ»."""
-    if isinstance(why, tuple):
-        mark = root("seen", re.sub(r"[^a-z0-9.-]", "_", f"owner.{win or '-'}.{host}")[:120])
+    — по вашим словам ЧЧ:ММ». Открытый сайт вне domains (why "open", metis-1120) — «Харон (<окно>) читает <сайт>» раз
+    в SEEN_TTL на окно и сайт."""
+    if why == "open" or isinstance(why, tuple):
+        kind = "open" if why == "open" else "owner"
+        mark = root("seen", re.sub(r"[^a-z0-9.-]", "_", f"{kind}.{win or '-'}.{site_word(host)}")[:120])
         with contextlib.suppress(OSError):
             if P.now() - os.stat(mark).st_mtime < SEEN_TTL:
                 return
@@ -799,8 +917,11 @@ def seen_notice(win, op, host, task, why=None):
             with open(mark, "w", encoding="utf-8") as fh:
                 fh.write(P.stamp() + "\n")
             os.utime(mark, (P.now(), P.now()))
-        notify_owner(f"{win or 'ваша сессия'} читает {site_word(host)} — по вашим словам "
-                     + datetime.datetime.fromtimestamp(why[1]).strftime("%H:%M"))
+        if kind == "open":
+            notify_owner(f"Харон ({win or 'ваша сессия'}) читает {site_word(host)}")
+        else:
+            notify_owner(f"{win or 'ваша сессия'} читает {site_word(host)} — по вашим словам "
+                         + datetime.datetime.fromtimestamp(why[1]).strftime("%H:%M"))
         return
     key = re.sub(r"[^a-z0-9.-]", "_", f"{task or '-'}.{host}")[:120]
     mark = root("seen", key)
@@ -828,7 +949,24 @@ ACT_WORDS = {"click": "нажатия", "type": "ввод", "submit": "отпр�
 MANDATE_TTL = 24 * 3600                       # поручение живёт сутки от согласия
 ASK_TTL = 24 * 3600                           # код вопроса на отправку — сутки
 TOUCH_CANCEL = "Отказать"                     # надпись кнопки отказа в окне Touch ID (у слияния — «Не сливать»)
-CMD_ALLOWED = ("Input.dispatchMouseEvent", "Input.insertText")   # единственные команды /cmd демона из прохода
+# единственные команды /cmd демона из прохода; фокус — только у действия с --focus, и выключается в finally
+CMD_ALLOWED = ("Input.dispatchMouseEvent", "Input.insertText", "Emulation.setFocusEmulationEnabled")
+# Поиск, фильтр и листание без поручения (metis-1120): кнопка и поле поиска, листание — по надписи целиком
+# ([charon-relax], круг argus 438/439): POST-форма — только с полем type=search и кнопкой «найти/поиск»; «Apply»,
+# «Применить», «Показать» и поля адреса, номера, дела формы поиском не делают — отклик с полем address ушёл бы без «да»
+SEARCH_WORDS = re.compile(r"найти|поиск|искать|search|find", re.I)
+PAGE_WORDS = re.compile(r"(?:далее|дальше|следующая|следующие|назад|предыдущая|ещё|еще|показать\s+ещё|показать\s+еще|"
+                        r"next|prev|previous|more|load\s+more|\d{1,4}|[›»→‹«←]|>|<)", re.I)
+# Ссылка с такой надписью что-то делает (отклик, отправка, выход, жалоба) — без поручения не нажимается (argus-439-2)
+LINK_ACT_WORDS = re.compile(r"отклик|откликн|отправ|выйти|выход|logout|log\s*out|sign\s*out|respond|apply|submit|send|"
+                            r"пожалов|жалоб|report", re.I)
+# Поле GET-формы с таким именем — личные данные, а не запрос поиска (argus-439-2, Д2)
+PERSONAL_NAME = re.compile(r"address|phone|e-?mail|\btel\b", re.I)
+FREE_TYPES = ("", "text", "search", "url", "number", "checkbox", "radio", "date",   # email и tel — не поиск
+                                "month", "week", "time", "datetime-local", "range")
+# Подпись страницы до и после отправки: адрес, число узлов, длина текста — не изменилась, значит отправка не прошла
+SIG_JS = ("/*charon-sig*/(() => [location.href, document.getElementsByTagName('*').length, "
+          "document.body ? document.body.innerText.length : 0])()")
 CODE_RE = re.compile(r"[0-9a-f]{6}")
 
 # F1: оплата — поле карты, платёжный сайт или путь, надпись оплаты (у цели и у кнопок, заголовков, полей её формы)
@@ -924,7 +1062,9 @@ const buttons = f ? [...f.querySelectorAll('button,input[type=submit],input[type
 const heads = f ? [...f.querySelectorAll('legend,h1,h2,h3')].slice(0, 5).map(n => String(n.innerText).trim().slice(0, 120)) : [];
 return { url: location.href, x, y, w: r.width, h: r.height, hit, chain, el: info(e), elabel: lab(e),
   focused: document.activeElement === e, fields, buttons, heads,
-  base: document.baseURI,
+  base: document.baseURI, n: document.querySelectorAll(S).length,
+  many: [...document.querySelectorAll(S)].slice(0, 5).map(m => m.tagName.toLowerCase() + ' «' + lab(m).slice(0, 60) + '»'),
+  srch: !!(f || e).closest('[role=search],search'),
   form: f ? { action: sub && sub.hasAttribute('formaction') ? sp('formAction') : fp('action'),
               own: fp('action'),
               method: (sub && sub.hasAttribute('formmethod') ? sp('formMethod') : fp('method')).toLowerCase(),
@@ -1209,13 +1349,13 @@ def do_allow(req, win, domains):
     raw = req["site"].strip().lower()
     host = url_host(raw if "://" in raw else f"https://{raw}/")
     site, acts = site_word(host), parse_actions(req["actions"])
-    if not allowed(host, domains, task):
-        raise Refuse(f"сайта {site} нет в списке чтения, в ваших словах за 24 ч и в «да» по задаче {task} — поручение "
-                     "только на сайт, который можно читать")
-    if _host_hit(f"https://{host}/", PAY_HOSTS, PAY_HOST_PREFIX):
+    if _host_hit(f"https://{host}/", PAY_HOSTS, PAY_HOST_PREFIX):     # до allowed: закрыты они и сами (metis-1120)
         raise Refuse(f"{site} — платёжный сайт: оплата — только владелец руками, поручения нет")
     if _host_hit(f"https://{host}/", IMPORTANT_HOSTS, IMPORTANT_HOST_PREFIX):
         raise Refuse(f"{site} — сайт входа, кабинета или госсайт: важные формы — только владелец сам, поручения нет")
+    if not allowed(host, domains, task):
+        raise Refuse(f"{site} — закрытый сайт, а в ваших словах за 24 ч и в «да» по задаче {task} его нет — поручение "
+                     "только на сайт, который можно читать")
     have = [r for _, r in _load_all("mandates") if r.get("task") == task and r.get("site") == site
             and set(acts) <= set(r.get("actions") or []) and (r.get("until") or 0) > P.now()]
     if have:
@@ -1237,8 +1377,10 @@ def do_allow(req, win, domains):
                         f"{P.stamp(P.now() + MANDATE_TTL)}"), ""
     if rc == 1:
         raise Refuse(f"поручения нет: {what} — не повторяй без нового слова владельца")
-    raise Refuse(f"поручения нет ({what}). Попроси Зевса спросить окном вопросов: «{mandate_question(task, site, acts, why)}»"
-                 " с вариантами «Да — разрешить» / «Нет»; после «да» повтори allow")
+    q = mandate_question(task, site, acts, why)
+    raise Blocked(f"поручения нет ({what}). Попроси Зевса спросить окном вопросов: «{q}»"
+                  " с вариантами «Да — разрешить» / «Нет»; после «да» повтори allow",
+                  {"task": task, "question": q, "why": f"поручение на {site}: {', '.join(acts)}"})
 
 
 def ask_head(kind, task, key, code, count=0):
@@ -1259,9 +1401,18 @@ def approve(b, win, task, sel, facts, kind):
     _, btn = target_of(facts)
     label = " ".join(str(btn.get("label") or "").split())[:60]
     _prune("asks", 2 * ASK_TTL)
-    mine = [(n, r) for n, r in _load_all("asks") if r.get("task") == task and r.get("browser") == b
-            and r.get("key") == key and r.get("selector") == sel and r.get("kind") == kind and not r.get("used")
-            and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
+    alive = [(n, r) for n, r in _load_all("asks") if r.get("task") == task and r.get("browser") == b
+             and r.get("key") == key and r.get("selector") == sel and r.get("kind") == kind and not r.get("used")
+             and isinstance(r.get("issued"), (int, float)) and P.now() - r["issued"] < ASK_TTL]
+    grants = [(n, r) for n, r in alive if r.get("grant") and kind == "ordinary" and r.get("digest") == dig
+              and P.now() - r["issued"] < RETRY_TTL]
+    sig = page_sig(b, win) if grants else None
+    for name, rec in grants:                          # metis-1120: отправка не прошла — один повтор той же формы;
+        if sig is not None and rec.get("sig") == sig:  # только обычной и если страница с тех пор та же (fetch не очистил поле)
+            rec["used"] = P.now()
+            _save("asks", name, rec)
+            return "повтор", P.now()
+    mine = [(n, r) for n, r in alive if not r.get("grant")]
     stale = False
     for name, rec in sorted(mine, key=lambda x: -x[1]["issued"]):
         t = owner_yes(task, lambda q, w=ask_question(rec): same_question(q, w))  # noqa: B008 — вопрос этой записи, привязан в цикле
@@ -1292,10 +1443,11 @@ def approve(b, win, task, sel, facts, kind):
                 "digest": dig, "issued": P.now(), "used": None, "label": label,
                 "summary": form_summary(facts), "head": ask_head(kind, task, key, code, count if count >= 2 else 0)}
         _save("asks", code + ".json", same)
-    raise Refuse(("форма изменилась после вопроса — прежнее «да» не действует. " if stale else "")
-                 + f"согласия нет ({why}). Попроси Зевса спросить окном вопросов: «{ask_question(same)}» с вариантами "
-                 f"«Да — {'отправить' if kind == 'ordinary' else 'удалить'}» / «Нет»; после «да» повтори ту же команду, "
-                 "форму не меняй")
+    yes = f"Да — {'отправить' if kind == 'ordinary' else 'удалить'}"
+    raise Blocked(("форма изменилась после вопроса — прежнее «да» не действует. " if stale else "")
+                  + f"согласия нет ({why}). Попроси Зевса спросить окном вопросов: «{ask_question(same)}» с вариантами "
+                  f"«{yes}» / «Нет»; после «да» повтори ту же команду, форму не меняй",
+                  {"task": task, "question": ask_question(same), "why": why, "yes": yes, "no": "Нет"})
 
 
 def cmd(browser, method, params, win=None):
@@ -1316,6 +1468,10 @@ def page_facts(b, sel, win, focus=False):
         raise Refuse(f"элемент {sel} не виден (нулевой размер)")
     if not isinstance(facts.get("url"), str):
         raise Refuse("страница не сказала свой адрес — действие не сделано")
+    n = facts.get("n", 1)
+    if not isinstance(n, int) or n > 1:            # metis-1120: селектор не единственный — не угадываем, какой
+        many = "; ".join(str(m)[:80] for m in (facts.get("many") or [])[:5])
+        raise Refuse(f"селектор {sel} находит {n} элементов ({many}) — уточни селектор до одного; действия нет")
     return facts
 
 
@@ -1346,16 +1502,109 @@ def after_click(b, domains, task, win):
     return url
 
 
+RETRY_TTL = 3600                              # повтор после отправки, которая ничего не изменила, — час
+
+
+def free_form(facts):
+    """Форма поиска или фильтра (metis-1120) → причина или None: поля только однострочные, флажки, даты, списки (без
+    textarea, файла, contenteditable, email и tel), и метод GET, или role=search, или поле type=search рядом с кнопкой
+    «найти/поиск/find/search». POST без этого — обычное согласие ([charon-relax])."""
+    fields = [f for f in facts.get("fields") or [] if isinstance(f, dict)]
+    if not all((f.get("tag") == "input" and (f.get("type") or "") in FREE_TYPES) or f.get("tag") == "select"
+               for f in fields):
+        return None
+    if any(PERSONAL_NAME.search(str(f.get("name") or "")) for f in fields):
+        return None
+    form = facts.get("form") if isinstance(facts.get("form"), dict) else None
+    if form is not None and form.get("method") == "get":
+        return "форма GET"
+    if facts.get("srch") is True:
+        return "поиск (role=search)"
+    _, btn = target_of(facts)
+    label = " ".join(str(btn.get("label") or facts.get("elabel") or "").split())
+    if any(f.get("type") == "search" for f in fields) and SEARCH_WORDS.search(label):
+        return "поле поиска"
+    return None
+
+
+def nav_link(link, here):
+    """Белый список ссылки без поручения (metis-1120, argus-438-3): уводит на другую страницу того же сайта — http(s),
+    путь или запрос не те, что у текущей страницы, не javascript:, не пустой href и не голый якорь «#» в конце, без
+    onclick, target и download. Ссылка-якорь в SPA («Опубликовать» с href="#") делает действие скриптом — по поручению."""
+    href, here = str(link.get("href") or ""), str(here or "")
+    if href.endswith("#") or link.get("onclick") or link.get("target") or link.get("download"):
+        return False
+    a, h = _url_origin(href), _url_origin(here)
+    return bool(a and h and a[0] in ("http", "https") and site_word(a[1]) == site_word(h[1])
+                and _path_query(href) != _path_query(here))
+
+
+def free_reason(facts, op, cls):
+    """Действие без поручения на читаемом сайте (metis-1120, [charon-relax]) → причина или None: нажатие ссылки, которая
+    уводит на другую страницу того же сайта (nav_link — белый список; надпись листания — «листание»; отклик, отправка,
+    выход, жалоба — LINK_ACT_WORDS, по поручению), такая ссылка листания внутри формы — только при free_form, элемент
+    внутри role=search или GET-формы (free_form), ввод в поле поиска. Кнопки отправки («Далее» мастера тоже), ссылки-якоря
+    и флажки вне формы — по поручению и согласию. Только обычное (не оплата, не важная форма, не удаление); delete —
+    всегда по поручению."""
+    if cls != "ordinary" or op == "delete":
+        return None
+    form = facts.get("form") if isinstance(facts.get("form"), dict) else None
+    _, btn = target_of(facts)
+    if op == "click" and btn.get("tag") == "a":
+        label = " ".join(str(btn.get("label") or "").split())
+        if LINK_ACT_WORDS.search(label) or not nav_link(btn, facts.get("url")):
+            return None
+        if form is None:
+            return "листание" if PAGE_WORDS.fullmatch(label) else "ссылка"
+        return "листание" if PAGE_WORDS.fullmatch(label) and free_form(facts) else None
+    if op == "type" and form is None:
+        el = facts.get("el") or {}
+        return "поле поиска" if el.get("type") == "search" or facts.get("srch") is True else None
+    return free_form(facts)
+
+
+def page_sig(b, win):
+    sig = evaluate(b, SIG_JS, win)
+    return sig if isinstance(sig, list) else None
+
+
 def do_act(req, win, domains):
-    """click, type, submit, delete во вкладке окна: поручение, вид формы, затем по своим правилам."""
-    op, b, task, sel = req["op"], req["browser"], req["task"], req["selector"]
+    """click, type, submit, delete во вкладке окна: --focus — эмуляция фокуса на время действия; дальше act."""
+    op, b, task = req["op"], req["browser"], req["task"]
     ensure_daemon(b, f"Харон ({win or 'ваша сессия'}): {op} по задаче {task}")
+    focus = req.get("focus") is True
+    if focus:
+        cmd(b, "Emulation.setFocusEmulationEnabled", {"enabled": True}, win)
+    try:
+        return act(req, win, domains)
+    finally:
+        if focus:
+            with contextlib.suppress(Refuse, Fail, OSError):
+                cmd(b, "Emulation.setFocusEmulationEnabled", {"enabled": False}, win)
+
+
+def need_mandate(req, win, task, host, site, op, sel):
+    """Нет поручения и действие не поиск: «да» на вопрос поручения с той же целью — поручение; иначе карточка."""
+    goal = " ".join(str(req.get("why") or f"{op} {sel}").split())[:200]
+    q = mandate_question(task, site, [op], goal)
+    t = owner_yes(task, lambda x: same_question(x, q))
+    if t is not None and P.now() - t < MANDATE_TTL:
+        rec = {"task": task, "site": site, "actions": [op], "from": t, "until": t + MANDATE_TTL, "by": "да",
+               "window": win, "why": goal}
+        _save("mandates", re.sub(r"[^a-z0-9.-]", "_", f"{task}__{site}__{op}") + ".json", rec)
+        return rec
+    raise Blocked(f"{op}: поручения на {site} с действием «{ACT_WORDS[op]}» по задаче {task} нет, и это не поиск, фильтр "
+                  f"или листание — сначала pantheon browser allow {site} {op} --task {task} --why «{goal}» (одно "
+                  "разрешение на поручение)",
+                  {"task": task, "question": q, "why": f"{op} {sel} на {site} — не поиск и не листание"})
+
+
+def act(req, win, domains):
+    """Поручение или поиск (free_reason), вид формы, затем по своим правилам."""
+    op, b, task, sel = req["op"], req["browser"], req["task"], req["selector"]
     host = page_check(b, here_url(b, win), domains, task, "во вкладке", win)
     site = site_word(host)
-    if not mandate_for(task, host, op):
-        raise Refuse(f"{op}: поручения на {site} с действием «{ACT_WORDS[op]}» по задаче {task} нет — сначала "
-                     f"pantheon browser allow {site} {op} --task {task} --why «цель» (одно разрешение на поручение)")
-    seen_notice(win, op, host, task)
+    mandate = mandate_for(task, host, op)
     facts = page_facts(b, sel, win, focus=(op == "type"))
     fhost = page_check(b, facts["url"], domains, task, "при замере страница на", win)
     if site_word(fhost) != site:
@@ -1365,6 +1614,13 @@ def do_act(req, win, domains):
         raise Refuse(f"{op} {sel}: оплата ({why}) — только владелец руками; «да» и Touch ID её не разрешают")
     if cls == "important":
         raise Refuse(f"{op} {sel}: важная форма ({why}) — только владелец сам; «да» и Touch ID её не разрешают")
+    free = free_reason(facts, op, cls)           # поиск, фильтр, листание — без поручения и согласия и при поручении
+    if not mandate and not free:
+        mandate = need_mandate(req, win, task, host, site, op, sel)
+    seen_notice(win, op, host, task)
+    _, tgt = target_of(facts)
+    chosen = f"«{' '.join(str(tgt.get('label') or facts.get('elabel') or desc(tgt)).split())[:60]}»"
+    by = f" ({free}, без поручения)" if free else ""
     if op == "type":
         el = facts.get("el") or {}
         tag, typ, role = el.get("tag"), el.get("type") or "", el.get("role") or ""
@@ -1376,7 +1632,7 @@ def do_act(req, win, domains):
         if facts.get("focused") is not True:
             raise Refuse(f"поле {sel} не принимает фокус — ввод не сделан")
         cmd(b, "Input.insertText", {"text": req["text"]}, win)
-        return "done", f"введено в {sel} на {site}: {len(req['text'])} знаков", ""
+        return "done", f"введено в {sel} на {site}{by}: {len(req['text'])} знаков", ""
     if facts.get("hit") is not True:
         raise Refuse(f"{op} {sel}: точку нажатия закрыл другой элемент — нажатия нет")
     if op == "click":
@@ -1386,7 +1642,7 @@ def do_act(req, win, domains):
         if cls == "ordinary":                     # без отдельного согласия — только обычное нажатие
             point_ok(b, sel, facts, win)
             mouse_click(b, facts["x"], facts["y"], win)
-            return "done", f"нажато {sel} ({kind}) на {site}; теперь {after_click(b, domains, task, win)}", ""
+            return "done", f"нажато {sel} {chosen} ({kind}) на {site}{by}; теперь {after_click(b, domains, task, win)}", ""
         # удаляющее нажатие (надпись, атрибуты или адрес ссылки) — дальше как delete: поручение и согласие (F3)
     kind = cls if cls.startswith("delete") else "ordinary"
     if op != "click":                             # <base href> чужого origin: относительные адреса страницы — туда
@@ -1402,7 +1658,8 @@ def do_act(req, win, domains):
         except Refuse:
             raise Refuse(f"{op} {sel}: адрес отправки формы не проверить ({str(action)[:120]}) — отправки нет")
         if to != site:
-            raise Refuse(f"{op} {sel}: форма уходит на {to}, а поручение на {site} — отправки нет")
+            raise Refuse(f"{op} {sel}: форма уходит на {to}, а {'поручение' if mandate else 'вкладка'} на {site} — "
+                         "отправки нет")
         target = str(form.get("target") or "")
         if target not in ("", "_self"):           # итог отправки ушёл бы в другое окно, мимо проверок прохода
             raise Refuse(f"{op} {sel}: форма отправляется в окно «{target[:40]}», а не в эту вкладку — отправки нет")
@@ -1410,17 +1667,39 @@ def do_act(req, win, domains):
     if need != op and not mandate_for(task, host, need):
         raise Refuse(f"{op} {sel}: это {'удаление' if need == 'delete' else 'отправка формы'} ({why}), а в поручении на "
                      f"{site} «{ACT_WORDS[need]}» нет — pantheon browser allow {site} {need} --task {task}")
-    how, t = approve(b, win, task, sel, facts, kind)
+    if free:
+        how, t = "поиск", P.now()
+    else:
+        how, t = approve(b, win, task, sel, facts, kind)
     if how == "Touch ID":                         # T2: пока окно ждало пальца, страница могла смениться
         again = page_facts(b, sel, win)
         if url_key(again["url"]) != url_key(facts["url"]) or form_digest(again) != form_digest(facts):
             raise Refuse(f"{op} {sel}: страница или форма изменились, пока ждало окно Touch ID — нажатия нет")
         facts = again
     point_ok(b, sel, facts, win)
+    before = page_sig(b, win)
     mouse_click(b, facts["x"], facts["y"], win)
+    now_url = after_click(b, domains, task, win)
     what = "удалено" if kind.startswith("delete") else "отправлено"
-    return "done", (f"{what} ({sel}) на {site} по {'«да» владельца ' + P.stamp(t) if how == 'да' else 'Touch ID'}; "
-                    f"теперь {after_click(b, domains, task, win)}"), ""
+    said = {"да": f"«да» владельца {P.stamp(t)}", "Touch ID": "Touch ID", "повтор": "повтору после неудачной отправки",
+            "поиск": free or "поиску"}[how]
+    out = f"{what} ({sel} {chosen}) на {site} по {said}; теперь {now_url}"
+    if before is None:
+        return "done", out, ""
+    for k in range(3):                            # отправка ли изменила страницу: адрес, узлы, текст
+        after = page_sig(b, win)
+        if after is not None and after != before:
+            return "done", out, ""
+        if k < 2:
+            time.sleep(1)
+    text = any(isinstance(f, dict) and (f.get("tag") == "textarea" or f.get("ce")) for f in facts.get("fields") or [])
+    if how in ("да", "Touch ID") and kind == "ordinary" and not text and after is not None:
+        _save("asks", f"grant-{secrets.token_hex(4)}.json",   # согласие не съедено: один повтор той же отправки
+              {"grant": True, "task": task, "browser": b, "window": win, "key": url_key(facts["url"]), "selector": sel,
+               "kind": kind, "digest": form_digest(facts), "sig": after, "issued": P.now(), "used": None})
+        return "done", out + "; страница не изменилась — отправка, похоже, не прошла: один повтор той же командой без " \
+                             "нового согласия (час)", ""
+    return "done", out + "; страница не изменилась — отправка, похоже, не прошла", ""
 
 
 # --- выполнение заявки --------------------------------------------------------------------------------------------
@@ -1443,7 +1722,7 @@ def check_req(req):
         raise Refuse("eval: нужно выражение")
     if op in ("open",) and not req.get("url"):
         raise Refuse("open: нужен адрес")
-    if op in ("read", "eval") and not (req.get("url") or req.get("here")):
+    if op in ("read", "eval", "net") and not (req.get("url") or req.get("here")):
         raise Refuse(f"{op}: нужен адрес или --here")
     if op in ACTS + ("allow",) and not task:
         raise Refuse(f"{op}: нужен --task ID — действия только по поручению на задачу")
@@ -1453,6 +1732,10 @@ def check_req(req):
         parse_actions(req["actions"])
     if op in ACTS and not req.get("selector"):
         raise Refuse(f"{op}: нужен селектор")
+    if req.get("focus") is not None and not isinstance(req.get("focus"), bool):
+        raise Refuse("--focus — да или нет")
+    if req.get("focus") and not (op in ("open",) + ACTS or (op in ("read", "eval", "net") and req.get("url"))):
+        raise Refuse(f"{op}: --focus — только у open, read/eval/net по адресу и действий")
     if op == "type" and not isinstance(req.get("text"), str):
         raise Refuse("type: нужен текст")
     if op == "download":
@@ -1487,8 +1770,15 @@ def execute(req, win, domains, eval_on=True):
         host = url_host(url)
         why = allowed(host, domains, task)
         if not why:
-            raise Refuse(f"сайта {host} нет в списке чтения (reads.toml), в ваших словах за 24 ч и «да» владельца на "
-                         f"«[{task or 'ID'}] … {host} …» нет — список правит владелец или Зевс спрашивает по задаче")
+            site = site_word(host)
+            goal = " ".join(str(req.get("why") or "").split())[:150]
+            q = (f"[{task or 'без задачи'}] Открыть Харону закрытый сайт {site} ({op})"
+                 + (f": {goal}" if goal else "") + "?")
+            raise Blocked(f"{site} — закрытый сайт (почта, банк, госкабинет, соцсеть, мессенджер или closed в reads.toml): "
+                          f"{op} без «да» владельца по задаче или ваших слов за 24 ч не делаю"
+                          + ("" if task else "; «да» действует только с --task ID"),
+                          {"task": task, "question": q, "why": f"{op} {url[:200]} — сайт в закрытом списке",
+                           "yes": f"Да — разрешить чтение {site} по задаче на сутки", "no": "Нет — не открывать"})
     ensure_daemon(b, f"Харон ({win or 'ваша сессия'}): {op} на {host or 'текущей вкладке'}"
                      + (f", задача {task}" if task else ""))
     if op == "download":
@@ -1496,7 +1786,7 @@ def execute(req, win, domains, eval_on=True):
         return download(b, req, win, domains, host)
     if url:
         seen_notice(win, op, host, task, why)
-        out = navigate(b, url, domains, task, win)
+        out = navigate(b, url, domains, task, win, focus=req.get("focus") is True)
         if op == "open":
             return "done", f"открыто: {out.get('title') or ''} — {out.get('url') or url}" + (
                 " (загрузка не дождалась load)" if out.get("timedOut") else ""), ""
@@ -1515,6 +1805,41 @@ def execute(req, win, domains, eval_on=True):
         out = evaluate(b, req["expr"], win)
         page_check(b, here_url(b, win), domains, task, "после eval вкладка на", win)   # A6: переход скриптом до или во время
         return "done", out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, indent=1), ""
+    if op == "net":
+        out = evaluate(b, NET_JS, win)
+        page_check(b, here_url(b, win), domains, task, "после замера вкладка на", win)
+        rows = [net_row(e) for e in (out if isinstance(out, list) else []) if isinstance(e, dict)]
+        return "done", "\n".join(rows) or "(загрузок нет)", ""
+
+
+# net (metis-1120): загрузки своей вкладки — адрес, код, размер. Ни заголовков, ни cookie: performance их не знает;
+# значения секретных параметров адреса скрыты
+NET_JS = ("/*charon-net*/(() => performance.getEntriesByType('resource').slice(-300).map(e => ({name: "
+          "String(e.name).slice(0, 500), status: e.responseStatus || 0, size: e.transferSize || 0})))()")
+NET_SECRET = re.compile(r"token|auth|key|sig|session|sid|code|pass|access|secret|jwt|bearer", re.I)
+
+
+# похоже на токен: 24+ знаков, шестнадцатеричное или с заглавными, строчными и цифрами (slug из строчных — нет)
+NET_TOKENISH = re.compile(r"(?=[\w.~%+=-]{24,}$)(?:[0-9a-fA-F.-]+|(?=.*[A-Z])(?=.*[a-z])(?=.*\d)[\w.~%+=-]+)")
+
+
+def net_hide(p):
+    """Параметр адреса для net: значение у секретного имени (NET_SECRET), у короткого имени (t=, k=) из 16+ знаков
+    без %-кодов и похожее на токен — ***; короткий поиск (q=диван, p=2) виден."""
+    if "=" not in p:
+        return "***" if NET_TOKENISH.fullmatch(p) else p
+    k, v = p.split("=", 1)
+    short = len(k) <= 2 and re.fullmatch(r"[\w.~+/=-]{16,}", v, re.A)
+    return k + "=***" if v and (NET_SECRET.search(k) or short or NET_TOKENISH.fullmatch(v)) else p
+
+
+def net_row(e):
+    """Строка net: код, размер, адрес без входа; секретные значения параметров и похожие на токен куски пути скрыты."""
+    u = urlsplit(str(e.get("name") or ""))
+    q = "&".join(net_hide(p) for p in u.query.split("&")) if u.query else ""
+    path = "/".join("***" if NET_TOKENISH.fullmatch(x) else x for x in u.path.split("/"))
+    shown = f"{u.scheme}://{u.netloc.rsplit('@', 1)[-1]}{path}" + (f"?{q}" if q else "")
+    return f"{int(e.get('status') or 0)} {int(e.get('size') or 0)} {shown[:500]}"
 
 
 # --- скачивание файла (metis-0830) ----------------------------------------------------------------------------------
@@ -1785,7 +2110,7 @@ def download(b, req, win, domains, host):
         except Refuse:
             fhost = None
         if not fhost or not allowed(fhost, domains, task):
-            raise Refuse(f"файл пришёл с {final[:200] or 'неизвестного адреса'} — этого сайта нет в списке чтения")
+            raise Refuse(f"файл пришёл с {final[:200] or 'неизвестного адреса'} — это закрытый сайт (почта, банк, кабинет, соцсеть, мессенджер)")
         if not head.get("ok"):
             raise Fail(f"сайт ответил {head.get('status')} на {final[:200]} — файла нет")
         if head.get("big"):
@@ -1902,13 +2227,17 @@ def handle(text, win, cfg):
     try:
         if isinstance(cfg, Exception):
             raise cfg
-        domains, windows, eval_on = cfg
+        global CLOSED_EXTRA
+        domains, windows, eval_on = cfg[:3]
+        CLOSED_EXTRA = tuple(cfg[3]) if len(cfg) > 3 else ()
         if win is not None and win not in windows:
             raise Refuse(f"окну {win} браузер не дан (reads.toml: windows = {list(windows)}) — задачей Харону через Зевса")
         if isinstance(req, dict) and isinstance(req.get("t"), (int, float)) and P.now() - req["t"] > REQ_TTL:
             raise Fail(f"заявка старше {REQ_TTL // 60} мин — подайте заново")
         state, out, why = execute(req, win, domains, eval_on)
         res.update(state=state, code=0, text=out[:TEXT_MAX + 20000], why=why)
+    except Blocked as e:
+        res.update(state="refused", code=1, why=f"{e}; {owner_card(e.card, win)}")
     except Refuse as e:
         res.update(state="refused", code=1, why=str(e))
     except Fail as e:
@@ -2010,15 +2339,24 @@ def kick():
 
 # --- заявка из окна ------------------------------------------------------------------------------------------------
 
-USAGE = """pantheon browser health|open|read|eval|status [--browser comet|chrome] [--wait С] [--task ID]
+USAGE = """pantheon browser health|open|read|eval|net|status [--browser comet|chrome] [--wait С] [--task ID] [--focus]
   health                         демон жив, браузер подключён
-  open URL                       открыть адрес (сайты reads.toml или «да» владельца по --task)
+  open URL                       открыть адрес: любой сайт, кроме закрытых (почта, банки, госкабинеты, соцсети,
+                                 мессенджеры, closed в reads.toml); владельцу — уведомление «Харон читает <сайт>»
   read URL | read --here          текст и ссылки страницы
-  eval URL EXPR | eval --here EXPR   выражение JS без побочных действий
+  eval URL EXPR | eval --here EXPR   выражение JS без побочных действий (forEach, hasFocus, visibilityState,
+                                 только performance.getEntriesByType('resource').length;
+                                 адреса — через net)
+  net URL | net --here           загрузки своей вкладки: код, размер, адрес (без cookie и заголовков)
   allow САЙТ ДЕЙСТВИЯ --task ID --why Т   поручение на сайт: click,type,submit,delete (одно «да» или Touch ID)
   click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта
   type СЕЛЕКТОР ТЕКСТ --task ID  ввод в текстовое поле
-  submit СЕЛЕКТОР --task ID      отправка формы: Touch ID или «да» на каждую
+  submit СЕЛЕКТОР --task ID      отправка формы: Touch ID или «да» на каждую; поиск, фильтр, листание (GET-форма,
+                                 role=search, поле type=search и отправка «Найти») — без поручения и согласия
+  --focus                        эмуляция фокуса вкладки (open, read/eval/net по адресу, действия)
+  Селектор — ровно один элемент; не прошедшая обычная отправка (страница не изменилась) — один повтор без нового
+  согласия; удаление — только новое «да».
+  Отказ сверх прав — сам заводит владельцу вопрос: «отправлен вопрос [id]»
   delete СЕЛЕКТОР --task ID      удаление: один элемент — Touch ID или «да», пачка — только «да»
   download URL --task ID [--to ПАПКА]   файл в <направление задачи>/inbox/<сайт или ПАПКА>/ (до 200 МБ)
   status [ID]                    итог заявки
@@ -2038,6 +2376,8 @@ def parse(args):
             continue
         if a == "--here":
             opts["here"] = True
+        elif a == "--focus":
+            opts["focus"] = True
         else:
             pos.append(a)
         i += 1
@@ -2056,8 +2396,11 @@ def parse(args):
     req = {"v": 1, "op": op, "browser": opts["browser"], "task": opts["task"], "here": opts["here"]}
     if opts["why"] is not None:
         req["why"] = opts["why"]
+    if opts.get("focus"):
+        req["focus"] = True
     need = {"health": [], "open": ["url"], "read": [] if opts["here"] else ["url"],
-            "eval": ["expr"] if opts["here"] else ["url", "expr"], "download": ["url"], "allow": ["site", "actions"],
+            "eval": ["expr"] if opts["here"] else ["url", "expr"], "net": [] if opts["here"] else ["url"],
+            "download": ["url"], "allow": ["site", "actions"],
             "click": ["selector"], "type": ["selector", "text"], "submit": ["selector"], "delete": ["selector"]}[op]
     if "to" in opts:
         req["to"] = opts["to"]

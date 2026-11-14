@@ -73,7 +73,7 @@ class Daemon:
 
     def __init__(self):
         self.up, self.tab, self.calls = True, "about:blank", []
-        self.pages = {AVITO: {"title": "Авито", "text": "объявления", "links": [["Ещё", "https://www.avito.ru/y"]]},
+        self.pages = {AVITO: {"title": "Сайт-1", "text": "объявления", "links": [["Ещё", "https://www.avito.ru/y"]]},
                       "https://m.avito.ru/z": {"title": "м", "text": "м", "links": []},
                       "https://forms.yandex.ru/u/abc/": {"title": "Анкета", "text": "поля анкеты", "links": []},
                       "https://example.com/a": {"title": "Пример", "text": "пример", "links": []}}
@@ -151,8 +151,17 @@ def req(op, **kw):
     return r
 
 
+# metis-1120: чтение — любой сайт, кроме закрытого списка. Старые проверки отказа «не из списка» идут на хостах,
+# закрытых здесь ключом closed (как в reads.toml владельца); открытый сайт — open-site.org и подобные.
+TEST_CLOSED = (("example.com", "le.com", "example.org", "example.net", "evilavito.ru", "mail-words.ru", "readme.md",
+                "uslugi.ru", "i.ru", "slugi.ru", "evil.com")
+               + tuple(f"{w}-said.org" for w in ("zeus", "task", "board", "label", "chat", "var", "sugg", "odd", "note",
+                                                 "verb", "none", "free", "future")))
+TEST_CFG = (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True, TEST_CLOSED)
+
+
 def run(r, win=None, cfg=None):
-    return B.handle(json.dumps(r), win, cfg or (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+    return B.handle(json.dumps(r), win, cfg or TEST_CFG)
 
 
 def answer(t, q, a):
@@ -198,7 +207,7 @@ check("read: текст и ссылки", res["state"] == "done" and "объяв
 
 D.calls.clear()
 res = run(req("read", url="https://example.com/a"))
-check("чужой сайт без задачи — отказ, демон не зван", res["state"] == "refused" and "нет в списке" in res["why"]
+check("чужой сайт без задачи — отказ, демон не зван", res["state"] == "refused" and "закрытый сайт" in res["why"]
       and "/open" not in D.paths(), res)
 res = run(req("read", url="https://forms.yandex.ru/u/abc/"))
 check("forms.yandex.ru — в списке по умолчанию (metis-0760): read без задачи и без reads.toml",
@@ -444,7 +453,7 @@ DENY = {
               "document.querySelector('input').select()", "document.body.requestFullscreen()",
               "document.adoptNode(document.querySelector('form'))",
               "(r=>(r.selectNodeContents(document.body),r.deleteContents()))(document.createRange())",
-              "document.querySelector('a').classList.replace('a', 'b')", "[1].forEach(x => x)"),
+              "document.querySelector('a').classList.replace('a', 'b')"),
     "[E8] ": ("window.find('x')", "['https://evil.example/'].map(open)", "Array.from([1], open)",
               "JSON.stringify({}, open)", "'a'.replace(/a/, alert)", "const Number = open; Number('x')",
               "(Number => Number('x'))(open)", "({get: open}).get('x')", "'' + {toString: open}", "map(x => x)",
@@ -497,8 +506,8 @@ for op, kw in (("click", {"selector": "#agree"}), ("type", {"selector": "#q", "t
                ("submit", {"selector": "#send"}), ("delete", {"selector": "#del"})):
     D.calls.clear()
     res = run(req(op, task="metis-0999", **kw))
-    check(f"заявка {op} без поручения — отказ «поручения … нет», демон не нажимал (/cmd не зван)",
-          res["state"] == "refused" and "поручения" in res["why"] and "/cmd" not in D.paths(), res)
+    check(f"заявка {op} без поручения на странице без поиска — отказ, демон не нажимал (/cmd не зван)",
+          res["state"] == "refused" and "/cmd" not in D.paths(), res)
 for op in ("cmd", "close", "events", "console"):
     res = run(req(op, method="Runtime.evaluate"))
     check(f"op {op} — отказ «не того вида»", res["state"] == "refused" and "не того вида" in res["why"], res)
@@ -514,14 +523,15 @@ check("в browser.py нет вызовов /close, /events, /console демон�
 os.makedirs(os.path.join(HOME, ".claude", "pantheon"), exist_ok=True)
 READS = os.path.join(HOME, ".claude", "pantheon", "reads.toml")
 with open(READS, "w") as fh:
-    fh.write('domains = ["example.com"]\nwindows = ["hq", "charon-x"]\n')
+    fh.write('domains = ["example.com"]\nwindows = ["hq", "charon-x"]\nclosed = ["avito.ru"]\n')
 cfg = B.load_config()
-check("reads.toml: свой список сайтов и окон, без ключа eval — eval разрешён",
-      cfg == (("example.com",), ("hq", "charon-x"), True), cfg)
+check("reads.toml: свой список сайтов, окон и закрытых (closed), без ключа eval — eval разрешён",
+      cfg == (("example.com",), ("hq", "charon-x"), True, ("avito.ru",)), cfg)
 res = run(req("read", url="https://example.com/a"), "charon-x", cfg)
 check("сайт из reads.toml — можно, окно из windows — можно", res["state"] == "done", res)
 res = run(req("read", url=AVITO), "hq", cfg)
-check("сайта нет в reads.toml (avito) — отказ", res["state"] == "refused", res)
+check("[R3] closed = [avito.ru] в reads.toml — отказ «закрытый сайт»",
+      res["state"] == "refused" and "закрытый сайт" in res["why"], res)
 res = run(req("health"), "metis-pantheon", cfg)
 check("окно не из windows — отказ «задачей Харону через Зевса»", res["state"] == "refused" and "Харону" in res["why"], res)
 with open(READS, "w") as fh:
@@ -534,7 +544,7 @@ except B.Fail as e:
 check("битый reads.toml — сбой, а не список по умолчанию", got and "не читается" in got, got)
 os.remove(READS)
 # переключатель eval (решение владельца 03.11 22:06): reads.toml владельца, окну роли на запись закрыт
-check("[E10] reads.toml нет — eval разрешён", B.load_config() == (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True),
+check("[E10] reads.toml нет — eval разрешён", B.load_config() == (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True, ()),
       B.load_config())
 D.tab = AVITO
 for val, on in (("true", True), ("false", False)):
@@ -713,7 +723,7 @@ check("[S1] окно: eval --here — /eval с session, адрес своей в
 D.calls.clear()
 D.tab = "https://example.com/a"       # общая вкладка на чужом сайте не мешает окну со своей вкладкой
 res = run(req("read", here=True), win="hq")
-check("[S1] окно: read --here смотрит свою вкладку, а не общую", res["state"] == "done" and "Авито" in res["text"], res)
+check("[S1] окно: read --here смотрит свою вкладку, а не общую", res["state"] == "done" and "Сайт-1" in res["text"], res)
 D.stabs.pop("hq")
 D.tab = AVITO
 D.calls.clear()
@@ -755,7 +765,7 @@ for bad in ("окно с пробелом", "x" * 65, ""):
 check("[S4] session_of: кириллица без пробела — отказ (демон принимает только ASCII)",
       all(_refused(n) for n in ("окно", "athenaа", "hq\u00e9", "x\u0663")))
 check("[S4] session_of: имена окон — как есть, None — None",
-      B.session_of("hq") == "hq" and B.session_of("athena-brokerassistant") == "athena-brokerassistant"
+      B.session_of("hq") == "hq" and B.session_of("athena-proja") == "athena-proja"
       and B.session_of(None) is None)
 
 # metis-0812: 429 (предел вкладок) — окно получает понятный отказ без совета «POST /close-tab», который ему не выполнить
@@ -772,10 +782,110 @@ D.sessions_mode, D.tab, D.stabs = False, "about:blank", {}
 D.calls.clear()
 res = run(req("read", url=AVITO), win="hq")
 check("[S5] старый демон: read из окна работает через общую вкладку (session игнорируется, откат не нужен)",
-      res["state"] == "done" and D.tab == AVITO and "Авито" in res["text"], res)
+      res["state"] == "done" and D.tab == AVITO and "Сайт-1" in res["text"], res)
 res = run(req("eval", here=True, expr="document.title"), win="hq")
 check("[S5] старый демон: eval --here читает адрес общей вкладки", res["state"] == "done", res)
 D.sessions_mode = False
+
+# --- metis-1120: открытые сайты, закрытый список, карточка владельцу, eval, net, --focus ------------------------------
+D.sessions_mode, D.tab, D.stabs = False, "about:blank", {}
+OPEN = "https://open-site.org/list"
+D.pages[OPEN] = {"title": "Открытый", "text": "реестр", "links": []}
+open(NOTIFY, "w").close()
+D.calls.clear()
+res = run(req("read", url=OPEN), win="hq", cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+note = open(NOTIFY, encoding="utf-8").read()
+check("[R1] сайт не из списка и не закрытый — read без allow; владельцу «Харон (hq) читает open-site.org»",
+      res["state"] == "done" and "реестр" in res["text"] and "Харон (hq) читает open-site.org" in note, (res, note))
+open(NOTIFY, "w").close()
+res = run(req("read", url=OPEN), win="hq", cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+check("[R1] второе чтение того же сайта тем же окном за 6 ч — без нового уведомления",
+      res["state"] == "done" and "читает" not in open(NOTIFY, encoding="utf-8").read(), res)
+open(NOTIFY, "w").close()
+res = run(req("read", url=AVITO), win="hq", cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+check("[R1] сайт из domains — без уведомления «Харон … читает»",
+      res["state"] == "done" and "Харон (hq) читает" not in open(NOTIFY, encoding="utf-8").read(), res)
+
+
+def cards():
+    return {k: v for k, v in P.tasks_mod().load_tasks(P.PANTHEON).items() if (v[1].get("question") or "")}
+
+
+for url in ("https://e.mail.ru/inbox", "https://online.sberbank.ru/", "https://www.gosuslugi.ru/",
+            "https://vk.com/feed", "https://web.telegram.org/a/", "https://lk.some-shop.ru/orders",
+            "https://mail.some-corp.ru/"):
+    D.calls.clear()
+    res = run(req("read", url=url), win="hq", cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+    check(f"[R2] {url} — закрытый сайт: отказ, демон не зван", res["state"] == "refused" and "закрытый сайт" in res["why"]
+          and "/open" not in D.paths(), res)
+before = cards()
+res = run(req("read", url="https://e.mail.ru/inbox", task="metis-0760", why="найти письмо суда"), win="hq",
+          cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+made = {k: v for k, v in cards().items() if k not in before}
+got = re.search(r"отправлен вопрос \[([^\]]+)\]", res.get("why", ""))
+card = made.get(got.group(1)) if got else None
+check("[Q1] блок сверх прав — карточка владельцу с вопросом и [id] в отказе; хост в вопросе, ждёт человека",
+      res["state"] == "refused" and card is not None and "mail.ru" in card[1].get("question", "")
+      and card[1].get("waiting_on") == "human" and card[1].get("owner") == "zeus", (res, made))
+res2 = run(req("read", url="https://e.mail.ru/inbox", task="metis-0760", why="найти письмо суда"), win="hq",
+           cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+check("[Q1] тот же отказ ещё раз — та же карточка, новой нет",
+      got and f"[{got.group(1)}]" in res2.get("why", "") and len(cards()) == len(before) + 1, (res2, len(cards())))
+q = card[1]["question"] if card else ""
+answer(P.now() - 5, q, "Да — разрешить чтение")
+D.pages["https://e.mail.ru/inbox"] = {"title": "Почта", "text": "письма", "links": []}
+res = run(req("read", url="https://e.mail.ru/inbox", task="metis-0760"), win="hq",
+          cfg=(B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True))
+check("[Q1] «да» окном вопросов на вопрос карточки — закрытый сайт по задаче читается", res["state"] == "done", res)
+
+for expr in ("[...document.querySelectorAll('a')].forEach(a => a.href)", "document.hasFocus()",
+             "document.visibilityState", 'performance.getEntriesByType("resource").length',
+             "performance.getEntriesByType( 'resource' ).length", "performance.getEntriesByType('resource') . length"):
+    check(f"[E11] eval разрешает: {expr}", B.eval_bad(expr) is None, B.eval_bad(expr))
+for expr in ("performance.getEntriesByType('navigation')", "performance.getEntriesByType(x)",
+             "performance.getEntriesByType('resource', 1)",
+             "performance.getEntriesByType('resource').map(e => e.name)",
+             "performance.getEntriesByType( 'resource').map(e => e.name)",
+             "performance.getEntriesByType('resource')[0].name", "performance.getEntriesByType('resource').lengthy"):
+    check(f"[E11] eval: {expr} — отказ (адреса загрузок — только net под маской)",
+          B.eval_bad(expr) and ("net" in B.eval_bad(expr) or "navigation" in expr), (expr, B.eval_bad(expr)))
+for host in ("outlook.office.com", "outlook.office365.com", "telegram.me", "wa.me", "360.yandex.ru",
+             "messages.google.com", "finance.ozon.ru", "xn--c1aubbdcd3a.xn--p1ai"):
+    check(f"[Z2] {host} — в закрытом списке (почта, мессенджер, банк, Госуслуги)", B.closed(host), host)
+
+D.calls.clear()
+D.tab = OPEN
+res = run(req("net", here=True), win=None)
+evals = [c[3]["expr"] for c in D.calls if c[2] == "/eval"]
+check("[N1] net --here: своё выражение NET_JS (resource), без /cmd", res["state"] == "done" and B.NET_JS in evals
+      and "/cmd" not in D.paths(), (res, evals))
+row = B.net_row({"name": "https://u:p@api.site.ru/a?token=SECRET&page=2&api_key=K&q=x", "status": 200, "size": 5})
+check("[N2] net: значения token, api_key скрыты, логин:пароль из адреса убран, page и q видны",
+      "SECRET" not in row and "=K" not in row and "u:p" not in row and "page=2" in row and "q=x" in row
+      and row.startswith("200 5 "), row)
+TOK = "eyJhbGciOiJIUzI1NiJ9Ab12Cd34"
+row = B.net_row({"name": f"https://cdn.site.ru/dl/{TOK}/file-name-of-report.pdf?t=abcdef0123456789xyz&x=a1b2c3d4e5f6a7b8"
+                         "c9d0e1f2&q=%D0%B4%D0%B8%D0%B2%D0%B0%D0%BD&p=2", "status": 200, "size": 1})
+check("[N2] net: t= (короткое имя, длинное значение), токен-значение, токен в пути скрыты; slug, q и p видны",
+      "abcdef0123456789xyz" not in row and "a1b2c3d4e5f6" not in row and TOK not in row
+      and "/dl/***/file-name-of-report.pdf" in row and "q=%D0" in row and "p=2" in row, row)
+check("[N3] net в CLI: net URL и net --here", B.parse(["net", OPEN])[0]["url"] == OPEN
+      and B.parse(["net", "--here"])[0]["here"] is True)
+
+D.calls.clear()
+res = run(req("open", url=OPEN, focus=True), win=None)
+opens = [c[3] for c in D.calls if c[2] == "/open"]
+check("[F1] open --focus: в /open демона уходит focus: true", res["state"] == "done" and opens
+      and opens[-1].get("focus") is True, opens)
+D.calls.clear()
+run(req("open", url=OPEN), win=None)
+opens = [c[3] for c in D.calls if c[2] == "/open"]
+check("[F1] open без --focus — поля focus в /open нет", opens and "focus" not in opens[-1], opens)
+check("[F2] --focus в CLI → focus: true в заявке", B.parse(["open", OPEN, "--focus"])[0].get("focus") is True)
+res = run(req("open", url=OPEN, focus="да"), win=None)
+check("[F2] focus не bool — отказ заявки", res["state"] == "refused" and "--focus" in res["why"], res)
+res = run(req("health", focus=True), win=None)
+check("[F2] --focus у health — отказ", res["state"] == "refused" and "--focus" in res["why"], res)
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)

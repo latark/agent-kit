@@ -212,7 +212,8 @@ os.environ["PANTHEON_DRYRUN"] = "1"
 P.outside_kick()
 os.environ.pop("PANTHEON_DRYRUN")
 with open(os.path.join(STATE, "dryrun.log")) as fh:
-    check("тик зовёт `outside run`", "outside-run" in fh.read())
+    check("тик зовёт `outside run --quick`: проект без полного набора в FULL_TESTS — дорожка quick (metis-1081)",
+          "outside-quick" in fh.read())
 check("проход: код 0", run_pass() == 0)
 res = O.load_result(q, rid)
 check("итог рядом с заявкой: done, код 0, запись tests", res and res["state"] == "done" and res["code"] == 0 and res["record"], res)
@@ -686,7 +687,7 @@ check("--app у не-монорепо: отказ", state(q, rid) == "failed"
 rc, _, _ = role_request("athena-x", MONO, "serve", "--app", "../x")
 check("--app не по образцу: код 2", rc == 2)
 
-# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (alexbroker: site/)
+# metis-0790: не монорепо, без корневого package.json — приложение в подпапке (site-b: site/)
 SUB = os.path.join(HOME, "projects", "subapp")
 os.makedirs(SUB)
 git(SUB, "init", "-q", "-b", "main")
@@ -1128,9 +1129,13 @@ TEST_PROCS.append(_orphan)
 t0 = time.monotonic()
 rc, out = say("athena-x", "stop", rid_s)
 dt = time.monotonic() - t0
-check("стоп своего окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
-      rc == 0 and "stopped" in out and dt <= 10 and th_t.is_alive() and state(q, rid_t) == "running",
-      (rc, out, round(dt, 1)))
+try:   # metis-1022: при load1 ~40 на 8 ядрах стоп шёл дольше 10 с; предел растёт с load1 на ядро, не больше вчетверо
+    _slack = min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 1)))
+except OSError:
+    _slack = 1.0
+check("стоп своего окна при занятом проходе тестов: stopped за ≤10 с (× нагрузка), `stop` дождался, код 0, тест идёт",
+      rc == 0 and "stopped" in out and dt <= 10 * _slack and th_t.is_alive() and state(q, rid_t) == "running",
+      (rc, out, round(dt, 1), round(_slack, 1)))
 check("стоп: порт свободен, погашены сервер, «turbo» и задача в своей группе, копия снята",
       not port_open(port) and not any(pid_alive(p) for p in pids + [srvpid])
       and rid_s not in O.servers() and not os.path.exists(work_of(rid_s)),
@@ -1604,7 +1609,7 @@ time.sleep(1.1)   # время заявки — с точностью до се�
 rc, q, r2 = role_request("athena-x", APP, "test", "--script", "lint")
 
 
-def kill_after_first(qdir, window, rid, req):
+def kill_after_first(qdir, window, rid, req, **_kw):
     got.append(rid)
     raise SystemExit(9)   # заход убит посреди первой заявки
 
@@ -1623,7 +1628,7 @@ rc, q, r3 = role_request("athena-x", APP, "test")
 _u = O._take_in
 O._take_in = lambda dfd, name: False   # снять заявку не удаётся (или её уже сняло окно)
 got = []
-O.handle = lambda qdir, window, rid, req: got.append(rid)
+O.handle = lambda qdir, window, rid, req, **_kw: got.append(rid)
 t0 = time.time()
 O.run_test_queue()
 O.handle, O._take_in = _h, _u
@@ -1660,7 +1665,7 @@ mkreq(qa, "20261102-130002-aaaaab", EARLY)
 mkreq(qa, "20261102-130003-aaaaac", EARLY)
 mkreq(qb, "20261102-130004-bbbbbb", EARLY)
 _h, _got = O.handle, []
-O.handle = lambda qdir, window, rid, req: _got.append(rid[-6:])
+O.handle = lambda qdir, window, rid, req, **_kw: _got.append(rid[-6:])
 O.run_test_queue()
 O.handle = _h
 check("run_test_queue: круг между окнами сквозь заходы limit=1 — a1, b, a2, a3",
@@ -1690,7 +1695,7 @@ put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=9
 put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
 P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
 _sv = (O._queued_ids, O.overdue_accepts, O._stale)
-O._queued_ids, O.overdue_accepts, O._stale = (lambda kinds=(): []), (lambda *a, **k: []), (lambda t=None: [])
+O._queued_ids, O.overdue_accepts, O._stale = (lambda *a, **k: []), (lambda *a, **k: []), (lambda t=None: [])
 check("тик: одни итоги-зомби (queued без заявки, running в runs/) — дело проходу тестов", O.pending_test() is True)
 with P.lock("outside-run", block=False):
     check("тик: заход жив (замок взят) — зомби не повод для pending_test", O.pending_test() is False)
@@ -1779,7 +1784,7 @@ check("сторож: повторные проходы (в том числе cmd
 O.save_result(qa, WR, {"state": "running", "kind": "test", "sha": "a" * 40})
 _h0 = O._run_holder
 h, kid = holder_start()
-O._run_holder = lambda: h.pid
+O._run_holder = lambda *a: h.pid
 O.watchdog()
 check("сторож: running в пределах срока при живом заходе — не тронут",
       O.load_result(qa, WR).get("state") == "running" and alive(h.pid) and alive(kid) and len(_alerts) == 1)
@@ -1799,7 +1804,7 @@ O.watchdog()
 check("сторож: захода нет (замок свободен) — running не снимает, его чинит recover_results",
       O.load_result(qa, WR).get("state") == "running" and len(_alerts) == 2)
 h, kid = holder_start()
-O._run_holder = lambda: None
+O._run_holder = lambda *a: None
 O.watchdog()
 O.watchdog()
 check("сторож: замок держит не определить — тревога раз, процесс не тронут, итог тот же",
@@ -1873,6 +1878,99 @@ c_["fetched"] = time.time()
 c_["errors"] = {"latark/al-stale": "gh не ответил"}
 json.dump(c_, open(_cp, "w"))
 check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
+# metis-1115: у репозитория с обязательными проверками CI (agent-kit, REQUIRED_CHECKS) зелёный CI на head — тревоги
+# «без записи tests» нет: тесты прошли в Actions. Идёт — ждать без тревоги и без метки; красный — тревога как раньше
+_M = P.merge_mod()
+_mv = (_M.pr_view, _M.ci_runs_fetch)
+_CI = {}
+_VIEWS = []
+
+
+def _ci(conclusion, status="COMPLETED"):
+    rows = [{"workflowName": "tests", "name": "affected", "status": status, "conclusion": conclusion},
+            {"workflowName": "check-traces", "name": "traces", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    return rows, [dict(r, event="pull_request") for r in rows]
+
+
+def _pr_view(repo, pr):
+    _VIEWS.append((repo, pr))
+    if _CI.get("down"):
+        return None
+    sha = _CI["sha"]
+    return {"headRefOid": sha, "baseRefName": "main", "statusCheckRollup": _CI["rollup"], "isCrossRepository": False}
+
+
+_M.pr_view = _pr_view
+_M.ci_runs_fetch = lambda repo, pr, sha, fork=None: _CI["runs"]
+def _al_line(s):
+    return next((x for x in alerts().splitlines() if s in x), "")
+
+
+def _wait_since(key, ago):
+    a = P.read_json(O.root("auto.json"), {})
+    a.setdefault("ci_wait", {})[key] = time.time() - ago
+    P.write_json(O.root("auto.json"), a)
+
+
+try:
+    AK = {c: c * 40 for c in "1234567"}
+    accept(AK["1"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["1"], rollup=_ci("SUCCESS")[0], runs=_ci("SUCCESS")[1])
+    n_al = O.alert_overdue()
+    check("agent-kit: CI (affected, traces) зелёный на head — тревоги «без записи tests» нет, (repo, sha) помечен",
+          n_al == 0 and AK["1"][:12] not in alerts() and O.overdue_accepts() == []
+          and _VIEWS and _VIEWS[-1][0] == "latark/agent-kit", (n_al, _VIEWS))
+    accept(AK["2"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["2"], rollup=_ci("", "IN_PROGRESS")[0], runs=_ci("", "IN_PROGRESS")[1])
+    n_al = O.alert_overdue()
+    check("agent-kit: CI ещё идёт — без тревоги и без метки (проверится на следующем проходе)",
+          n_al == 0 and AK["2"][:12] not in alerts() and [x[1] for x in O.overdue_accepts()] == [AK["2"]], n_al)
+    check("agent-kit: CI идёт — начало ожидания записано (auto.json ci_wait)",
+          f"latark/agent-kit@{AK['2']}" in (P.read_json(O.root("auto.json"), {}).get("ci_wait") or {}))
+    _CI.update(rollup=_ci("FAILURE")[0], runs=_ci("FAILURE")[1])
+    n_al = O.alert_overdue()
+    line = _al_line(f"latark/agent-kit@{AK['2'][:12]}")
+    check("agent-kit: CI красный — одна тревога «CI красный … чинить код», без совета `pantheon outside test` (Д3)",
+          n_al == 1 and alerts().count(f"latark/agent-kit@{AK['2'][:12]}") == 1 and "CI красный" in line
+          and "чинить код" in line and "outside test" not in line, (n_al, line))
+    accept(AK["4"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["4"], rollup=_ci("", "IN_PROGRESS")[0], runs=_ci("", "IN_PROGRESS")[1])
+    _wait_since(f"latark/agent-kit@{AK['4']}", O.CI_WAIT_MAX - 600)
+    n_al = O.alert_overdue()
+    check("agent-kit: CI идёт меньше CI_WAIT_MAX — без тревоги", n_al == 0 and AK["4"][:12] not in alerts(), n_al)
+    _wait_since(f"latark/agent-kit@{AK['4']}", O.CI_WAIT_MAX + 600)
+    n_al = O.alert_overdue()
+    line = _al_line(f"latark/agent-kit@{AK['4'][:12]}")
+    check("agent-kit: CI ждёт дольше CI_WAIT_MAX — тревога «CI не встал» с запасным `pantheon outside test` (Д3)",
+          n_al == 1 and "не встал" in line and "outside test" in line and O.overdue_accepts() == []
+          and f"latark/agent-kit@{AK['4']}" not in (P.read_json(O.root("auto.json"), {}).get("ci_wait") or {}),
+          (n_al, line))
+    accept(AK["5"], repo="latark/agent-kit", age=7200)
+    _CI.update(sha=AK["5"], down=True)
+    n_al = O.alert_overdue()
+    check("agent-kit: gh pr view не ответил — ждать, не тревога сразу (Д3)",
+          O.ci_head_state("latark/agent-kit", 100, AK["5"]) == "wait" and n_al == 0 and AK["5"][:12] not in alerts(),
+          n_al)
+    _wait_since(f"latark/agent-kit@{AK['5']}", O.CI_WAIT_MAX + 600)
+    n_al = O.alert_overdue()
+    check("agent-kit: gh не отвечает дольше CI_WAIT_MAX — тревога «не встал или gh не отвечает» (Д3)",
+          n_al == 1 and "gh не отвечает" in _al_line(f"latark/agent-kit@{AK['5'][:12]}"), n_al)
+    _CI.pop("down")
+    _CI.update(sha="9" * 40, rollup=_ci("SUCCESS")[0], runs=_ci("SUCCESS")[1])
+    check("agent-kit: PR уже на другом head → ci_head_state None (Д3)",
+          O.ci_head_state("latark/agent-kit", 100, AK["6"]) is None)
+    accept(AK["6"], repo="latark/agent-kit", age=7200)
+    n_al = O.alert_overdue()
+    line = _al_line(f"latark/agent-kit@{AK['6'][:12]}")
+    check("agent-kit: PR на другом head — тревога «без записи tests», как у репозитория без CI",
+          n_al == 1 and "без записи tests" in line, (n_al, line))
+    nv = len(_VIEWS)
+    accept(AK["3"], repo="latark/al-noci", age=7200)
+    n_al = O.alert_overdue()
+    check("репозиторий без обязательных проверок CI — gh не спрашивается, тревога как раньше",
+          n_al == 1 and len(_VIEWS) == nv and f"latark/al-noci@{AK['3'][:12]}" in alerts(), (n_al, _VIEWS[nv:]))
+finally:
+    _M.pr_view, _M.ci_runs_fetch = _mv
 if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)

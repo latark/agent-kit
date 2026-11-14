@@ -32,7 +32,9 @@
                             stop — метка «остановлено вами», claude stop и claude rm: сессия уходит из фоновых
                             сессий Claude Code (metis-0239), переписка остаётся
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
-  pantheon restart --prepare [причина]|--status|--go [--force]|--done|--cancel, pantheon saved --by <имя> --state <путь>
+  pantheon restart --prepare [причина]|--status|--go [--force|--owner <id>]|--done|--cancel, pantheon saved --by <имя> --state <путь>
+  pantheon restart --only <сессия> --owner <id>   одно окно по «да» владельца на вопрос [id] с его именем, без
+                            метки saved и общего перезапуска (metis-1122); saved --by принимает и «zeus (2)»
                             технический перезапуск всей системы (SCHED-15, слово владельца 15.10); --done и --status
                             (все перезапущены, Зевс поднят заново) закрывают завершённый перезапуск (metis-0338); pantheon saved без
                             техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
@@ -46,7 +48,9 @@
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
 уведомление; в «ждёт вас» на доске переносит штаб. Модель дежурный зовёт только одним путём: «ждёт вас» (blocked) он передаёт живому
 простаивающему Зевсу — push + `claude respawn`, раз на пункт и не чаще раза в 15 мин на сессию, за проход одним
-сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Каждая проверка идёт отдельно: сбой одной
+сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Ожидание дольше 5 мин — карточка
+владельцу «Ждёт вас» (окно, что просит, что делать), дольше 30 мин — повтор уведомления и строка Зевсу в тревогах, одна на
+ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Каждая проверка идёт отдельно: сбой одной
 — тревога «проверка X упала», остальные работают; время прохода — ~/.local/state/pantheon/watch-last (строка статуса и
 `pantheon status` показывают, что дежурный жив). Основания — исследование
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
@@ -376,6 +380,7 @@ def _watch(dry=False):
               ("метка перезапуска", lambda: maint_expire(t)),
               ("сессии", lambda: sessions(agents, doms, t)),
               ("STATUS.md", lambda: status_files(doms, t, agents, reg)),
+              ("цели направлений", lambda: goal_dates(t)),
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
@@ -576,11 +581,76 @@ def relay_zeus(agents, items, t):
         return ok
 
 
+WAIT_CARD_AFTER = 300     # metis-1122: окно ждёт разрешения дольше 5 мин — карточка владельцу «Ждёт вас»
+WAIT_REPEAT_AFTER = 1800  # дольше 30 мин — повтор: уведомление владельцу и строка Зевсу в тревогах
+
+
+def _wait_card(name, sid, why, since, t):
+    """Карточка владельцу (колонка «Нужен ответ», раздел доски «Ждёт вас»): какое окно, что просит, что делать.
+    → id карточки или None (сбой — тревога раз в сутки, повтор следующим проходом)."""
+    hhmm = time.strftime("%H:%M", time.localtime(since))
+    title = f"Ответить окну {name}: оно ждёт разрешения с {hhmm}"
+    attach = f"А — открыть окно и ответить на запрос: claude attach {sid}"
+    deny = "Б — отказать в окне: окно пойдёт дальше без этого действия"
+    try:
+        tid, _ = P.tasks_mod().task_new(
+            P.PANTHEON, t, "inbox", title, owner="zeus", status="waiting", waiting_on="human",
+            next=f"ответ владельца в окне {name}", question=title,
+            why=f"Окно {name} стоит на запросе разрешения: {why}. Пока ответа нет, окно не работает.",
+            options=[attach, deny], recommend=attach.split(" — ")[0] + " — запрос снимает только человек",
+            if_no_answer="Окно стоит дальше; через 30 мин ожидания — повтор уведомления и строка Зевсу.",
+            actor="плановый проход")
+    except Exception as e:  # noqa: BLE001 — дежурный не падает из-за карточки; повтор — следующим проходом
+        P.alert_daily(f"wait-card-{name}", f"карточку «окно {name} ждёт вас» не завести: {type(e).__name__}: "
+                                           f"{str(e)[:120]}", "watch")
+        return None
+    return tid
+
+
+def wait_cards(agents, waiting, t):
+    """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
+    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке). Ключ — имя окна: та же сессия или её
+    замена под тем же именем — одна карточка и один повтор (одинаковые «ждёт вас» склеиваются). Окно вышло из
+    ожидания — карточка закрывается, запись снимается. Пустой claude agents — ничего не закрываем (сбой списка, а не
+    конец ожидания). Окна Зевса нет: туда владелец смотрит сам. Пробный запуск — ничего."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1" or dry():
+        return
+    items = {name: (sid, why) for name, sid, why in waiting if not name.startswith("zeus")}
+    sp = P.path("wait-cards.json")
+    with P.lock("wait-cards"):
+        st = P.read_json(sp, {})
+        st = {k: v for k, v in st.items() if isinstance(v, dict)} if isinstance(st, dict) else {}
+        for name in [k for k in st if k not in items]:
+            if not agents:
+                break
+            rec = st.pop(name)
+            P.clear_fault(f"wait-repeat-{name}")  # once=True: без снятия второе ожидание за 7 дней macOS не покажет
+            if rec.get("card"):
+                with contextlib.suppress(ValueError, OSError):
+                    P.tasks_mod().task_set(P.PANTHEON, t, rec["card"], {"status": "done",
+                                           "result": f"Окно {name} больше не ждёт разрешения"},
+                                           note="окно больше не ждёт", actor="плановый проход")
+        for name, (sid, why) in items.items():
+            rec = st.setdefault(name, {"since": t})
+            since = rec["since"] if isinstance(rec.get("since"), (int, float)) and rec["since"] <= t else t
+            rec.update(since=since, sid=sid, why=why)
+            if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
+                rec["card"] = _wait_card(name, sid, why, since, t)
+            if t - since >= WAIT_REPEAT_AFTER and not rec.get("repeated"):
+                rec["repeated"] = t
+                mins = int((t - since) // 60)
+                card = f", карточка {rec['card']}" if rec.get("card") else ""
+                P.alert(f"окно {name} ждёт вас {mins} мин: {why}{card} — claude attach {sid}", "watch")
+                P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
+                              group=f"session-{name}", once=True)
+        P.write_json(sp, st)
+
+
 def sessions(agents, doms, t=None):
     """Ждёт вас (blocked) или упала (failed) — тревога один раз на состояние сессии; уведомление — сбой «скоро»
     каждый проход, пока состояние держится (политика решает: macOS, когда вас нет, не чаще раза в час на событие).
     blocked дополнительно сразу уходит живому Зевсу (metis-0277): все ждущие прохода одним сообщением, с инструментом и
-    целью запроса."""
+    целью запроса; дольше 5 мин — карточка владельцу, дольше 30 — повтор (wait_cards, metis-1122)."""
     t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
     waiting = []  # blocked этого прохода: [(имя, sid, что ждёт)] — Зевсу одним сообщением
@@ -617,6 +687,7 @@ def sessions(agents, doms, t=None):
         if state == "blocked":
             waiting.append((name, sid, why))
     relay_zeus(agents, waiting, t)
+    wait_cards(agents, waiting, t)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
     # вышла из blocked — запись снимаем: вернётся в blocked, будет новый пункт (передача раз на пункт)
     st = P.read_json(P.path("relay.json"), {})
     if isinstance(st, dict) and st:
@@ -886,6 +957,34 @@ def status_files(doms, t, agents=(), registry=()):
                          "координатору перенести закрытое в archive/ направления", "watch")
         else:
             P.clear_once(f"watch-status-long-{name}")
+
+
+GOAL_FIELDS = (("goal", "цель"), ("budget", "бюджет недели"))
+
+
+def goal_dates(t):
+    """Цель или бюджет направления в directions.toml, все даты которых прошли (metis-0829, п. 4): тревога координатору
+    направления — обновить у владельца. Один раз на (направление, поле, последняя дата): повтор прохода молчит, новая
+    дата в поле — новая тревога; поле снова актуально или пусто — отметка снимается. Пометка «устарело» на Проекты/*.md
+    — tasks.stale_mark, тот же разбор дат (reg_dates)."""
+    T = P.tasks_mod()
+    for d in T.load_directions(P.PANTHEON) or []:
+        name = d.get("name")
+        if not isinstance(name, str) or not name or name == "inbox":
+            continue
+        for field, label in GOAL_FIELDS:
+            key, text = f"watch-goal-{name}-{field}", d.get(field)
+            if not isinstance(text, str):  # список или число в TOML — не строка цели, в тревогу repr не печатаем
+                text = None
+            dates = T.reg_dates(text, t) if text not in (None, "") else []
+            last = max(dates) if dates else None
+            if last is None or datetime.fromtimestamp(t).date() <= last.date():
+                P.clear_once(key)
+                continue
+            P.alert_once(key, f"{last:%Y-%m-%d}",
+                         f"directions.toml: у направления {name} {label} устарела — дата {last:%d.%m} прошла "
+                         f"(«{T.one_line(text)[:120]}»). Координатору {name}: узнать у владельца новую и обновить "
+                         "запись в directions.toml", "watch")
 
 
 def swap_gb():
@@ -3174,11 +3273,16 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
 
 def _word_unstop(name):
     """Снять «остановлено вами» с направления — по вашему ответу «Да — вернуть <имя>» (как pantheon resume)."""
+    unstop(name, f"ваш ответ «Да — вернуть {name}» в окне вопросов")
+
+
+def unstop(name, why):
+    """Снять «остановлено вами» с направления, как pantheon resume: метка, имя в stopped-all.json, сброс самозапуска.
+    Зовут ответ «Да — вернуть» и заявка Зевса на возврат (metis-1066, take_start_requests); why — в тревоге."""
     _forget_autostart(name)
     try:
         os.unlink(P.path("stopped", name))
-        P.alert(f"{name}: метка «остановлено вами» снята (ваш ответ «Да — вернуть {name}» в окне вопросов)",
-                "pantheon-stop")
+        P.alert(f"{name}: метка «остановлено вами» снята ({why})", "pantheon-stop")
     except OSError:  # метки нет; не снялась иначе — она остаётся, и ниже отказ с причиной, а не падение проверки
         pass
     sp = P.path("stopped-all.json")
@@ -3558,6 +3662,15 @@ def resume(rest, who):
     except FileNotFoundError:
         print(f"{name}: метки «остановлено вами» нет; счётчик сбоев самозапуска сброшен")
         return 0
+    except PermissionError:
+        # metis-1066: окну Пританея песочница закрывает STATE/stopped — заявка, метку снимет и окно поднимет проход
+        code = P.resume_request(name) if os.environ.get("PANTHEON_ROLE") == "hq" else None
+        if code is not None:
+            return code
+        print(f"pantheon resume: метку {name} не снять — песочница окна закрывает STATE/stopped (заявкой окно Пританея "
+              f"возвращает только направления из реестра); снять — pantheon resume {name} в вашем терминале",
+              file=P.sys.stderr)
+        return 1
     info = P.read_json(P.path("stopped-all.json"), None)
     if info and name in (info.get("names") or []):
         info["names"].remove(name)
@@ -3825,7 +3938,8 @@ def restart(rest, who):
             return 1
         doms = domains()
         reg = P.sessions_registry()
-        live = sorted({a.get("name") for a in list(agents) + reg if is_pantheon(a.get("name") or "", doms)
+        # metis-1122: копия «zeus (2)» — в списке именем без номера, иначе `pantheon saved --by` её не назовёт
+        live = sorted({base_session(a.get("name")) for a in list(agents) + reg if is_pantheon(a.get("name") or "", doms)
                        and holders(a.get("name"), agents, reg)})
         why = " ".join(" ".join(rest[1:]).split()) or "технический перезапуск"
         maint_clear()
@@ -3838,6 +3952,8 @@ def restart(rest, who):
               "следующем шаге; Зевс — сообщение каждой: «сохранись, pantheon saved --by <имя> --state <путь>, отчитайся "
               "Зевсу».\nДальше: pantheon restart --status, затем pantheon restart --go")
         return 0
+    if rest[:1] == ["--only"]:
+        return restart_only(rest, who, m)
     if not m:
         print("технический перезапуск не готовится (pantheon restart --prepare)")
         return 1
@@ -3871,6 +3987,25 @@ def restart(rest, who):
         return 0 if all(n in saved or n in done_marks or n.startswith("zeus") for n in m.get("sessions") or []) else 1
     if rest[:1] == ["--go"]:
         force = "--force" in rest
+        forced, reused, qid = set(), set(), ""
+        if "--owner" in rest:  # metis-1122: без метки saved — только окна, названные в вопросе [id] с «да» владельца
+            qid = _opt(rest, "--owner") or ""
+            try:
+                forced = owner_named(qid, m.get("sessions") or [])
+            except P.ConsentLogError as e:
+                print(e, file=P.sys.stderr)
+                return 3
+            if not forced:
+                print(f"pantheon restart --go --owner {qid}: нет «да» владельца на вопрос «[{qid}] Перезапустить окна: "
+                      f"…?» с окном из списка ({', '.join(m.get('sessions') or [])}) — никто не перезапущен",
+                      file=P.sys.stderr)
+                return 1
+            reused = forced & owner_used(qid)
+            if reused == forced:  # Б3 argus: одно «да» — один перезапуск каждого окна
+                print(f"pantheon restart --go --owner {qid}: «да» на [{qid}] уже использовано для окон "
+                      f"{', '.join(sorted(reused))} — новый вопрос с другим id; никто не перезапущен", file=P.sys.stderr)
+                return 2
+            forced -= reused
         agents = P.agents_all() or []
         done, skip, owner = [], [], []
         for n in m.get("sessions") or []:
@@ -3880,18 +4015,28 @@ def restart(rest, who):
             if n in done_marks:
                 done.append(n + " (раньше)")
                 continue
-            if n not in saved and not force:
-                skip.append(n)
+            if n not in saved and not force and n not in forced:
+                skip.append(n + (f" («да» на [{qid}] уже использовано)" if n in reused else ""))
                 continue
             if os.path.exists(P.path("stopped", n)):
                 skip.append(n + " (остановлена вами)")
                 continue
             # `claude respawn` перезапускает процесс той же сессии (живой или остановленной) с её флагами — новые
             # плагины, роли и Claude Code берутся при старте; текст отдаёт хук push (проверено 15.10)
-            mine = [a for a in agents if a.get("name") == n and a.get("id") and a.get("sessionId")]
+            # список хранит имена без номера копии (base_session) — сессии сверяем так же, как restart_only
+            mine = [a for a in agents if base_session(a.get("name")) == n and a.get("id") and a.get("sessionId")]
             if not mine:
                 skip.append(f"{n} (нет фоновой сессии — вкладка? перезапустить вручную)")
                 continue
+            if n not in saved and n in forced:
+                try:
+                    owner_use(qid, n)
+                except FileExistsError:  # metis-1139: тот же id в соседнем вызове успел раньше
+                    skip.append(f"{n} («да» на [{qid}] уже использовано)")
+                    continue
+                except OSError as e:
+                    skip.append(f"{n} (метку использования [{qid}] записать не удалось: {e})")
+                    continue
             rc = P.resume_session(n, saved_agent(n, mine, (saved.get(n) or {}).get("sessionId")), RESTART_TEXT, "restart",
                                   recheck=lambda n=n: "остановлено вами" if os.path.exists(P.path("stopped", n))
                                   else None)[0]
@@ -3918,8 +4063,156 @@ def restart(rest, who):
         P.alert(f"технический перезапуск отменён ({who})", "pantheon-restart")
         print("метка снята")
         return 0
-    print("pantheon restart --prepare [причина] | --status | --go [--force] | --done | --cancel", file=P.sys.stderr)
+    print(RESTART_USAGE, file=P.sys.stderr)
     return 2
+
+
+RESTART_USAGE = ("pantheon restart --prepare [причина] | --status | --go [--force | --owner <id>] | --done | --cancel | "
+                 "--only <сессия> --owner <id>")
+ONLY_TEXT = ("[Пантеон: окно перезапущено по слову владельца] Сессия перезапущена одна, по «да» владельца. Прочитай свой "
+             "файл состояния (STATUS.md направления или файл задачи мастерской) и продолжай со следующего шага. Запрос "
+             "разрешения, на котором окно стояло, снят — правку зоны владельца ставь заявкой, а не Edit. Это не ответ "
+             "владельца и не согласие.")
+COPY_NAME = re.compile(r"(.+?) \(\d{1,3}\)")
+
+
+def base_session(name):
+    """metis-1122: имя без номера копии — «zeus (2)» → «zeus». Claude Code нумерует копию с тем же именем; список
+    перезапуска и метки `pantheon saved` ведутся по имени без номера, поэтому годятся оба написания."""
+    s = " ".join(str(name or "").split())
+    m = COPY_NAME.fullmatch(s)
+    return m.group(1) if m else s
+
+
+def _opt(rest, k):
+    return rest[rest.index(k) + 1] if k in rest and rest.index(k) + 1 < len(rest) else None
+
+
+def owner_named(qid, names):
+    """metis-1122: окна из names, перечисленные в вопросе строгой формы «[qid] Перезапустить окна: a, b?»
+    (P.CONSENT_RESTART_Q), последний ответ владельца на который — «да» (окно вопросов, ответ в чате или галочка на
+    карточке, не старше суток). Имя окна в вопросе другой формы (push, правка, «всех, кроме X») — не согласие.
+    Журнал не читается — P.ConsentLogError."""
+    if not P.CONSENT_ID.fullmatch(str(qid or "")):
+        return set()
+    # Несимметрия с гашением процессов — намеренная (metis-1137): галочка на карточке доски засчитывается перезапуску
+    # окна (consent_found берёт board.jsonl), а «да» на «Погасить процессы Пантеона» галочкой не засчитывается
+    # (lib/consent.py, hestia_reap_off_board). Перезапуск обратим и окно сохраняется, гашение pid — нет. Ослабить reap
+    # до перезапуска или ужесточить перезапуск — правка защиты, только по «да» владельца; тест держит оба поведения
+    # (test_consent_note.py, «несимметрия доски»).
+    found = P.consent_found(qid, P.HESTIA_CONSENT_DAYS)[0]
+    final = {}
+    for _, _, body in found:  # позднее «нет» на тот же вопрос отменяет прежнее «да» (как pantheon consent)
+        final[body.split("\nответ:")[0].strip()] = body
+    out = set()
+    for q, body in final.items():
+        if P.consent_is_yes(body):
+            out |= set(names) & set(P.restart_q_names(q, qid))
+    return out
+
+
+def owner_used_path(qid):
+    return P.path("restart-owner", qid)
+
+
+def owner_used(qid):
+    """metis-1122 (Б3 argus): окна, которые «да» на [qid] уже перезапустило без метки saved. Одно «да» — один раз.
+    Источники: метки restart-owner/<qid>@<окно> (metis-1139) и журнал restart-owner/<qid> (прежние записи)."""
+    used = set()
+    try:
+        with open(owner_used_path(qid), encoding="utf-8") as fh:
+            used = {ln.split()[-1] for ln in fh.read().splitlines() if ln.strip()}
+    except FileNotFoundError:
+        pass
+    try:
+        names = os.listdir(os.path.dirname(owner_used_path(qid)))
+    except FileNotFoundError:
+        names = []
+    return used | {f[len(qid) + 1:] for f in names if f.startswith(qid + "@")}
+
+
+def owner_use(qid, name):
+    """Метка «[qid] использован для окна name» — до перезапуска (сбой записи — OSError, окно не трогаем).
+    metis-1139: метка restart-owner/<qid>@<окно> создаётся с O_EXCL — из двух одновременных `--only` с тем же id
+    проходит один, второй получает FileExistsError («уже использовано»); строка в журнал — после метки."""
+    os.makedirs(os.path.dirname(owner_used_path(qid)), exist_ok=True)
+    fd = os.open(owner_used_path(qid) + "@" + name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, f"{P.stamp()} {name}\n".encode("utf-8"))
+    finally:
+        os.close(fd)
+    with open(owner_used_path(qid), "a", encoding="utf-8") as fh:
+        fh.write(f"{P.stamp()} {name}\n")
+
+
+def restart_only(rest, who, m):
+    """metis-1122: pantheon restart --only <сессия> --owner <id> — перезапуск одного окна без общего техперезапуска.
+    Нужно «да» владельца на вопрос [id], где окно названо по имени: окно может стоять на запросе разрешения, и его
+    сохранения (pantheon saved) не ждём. Зевс — сессия владельца, её поднимает он сам."""
+    name, qid = base_session(_opt(rest, "--only")), _opt(rest, "--owner") or ""
+    if not P.SESSION_NAME.fullmatch(name) or not P.CONSENT_ID.fullmatch(qid):
+        print(RESTART_USAGE, file=P.sys.stderr)
+        return 2
+    if name.startswith("zeus"):
+        print("pantheon restart --only: Зевс — ваша сессия, её поднимает владелец: pantheon start zeus --restart во "
+              "вкладке iTerm", file=P.sys.stderr)
+        return 2
+    if not is_pantheon(name, domains()):
+        print(f"pantheon restart --only: {name} — не окно Пантеона (нет в domains.json)", file=P.sys.stderr)
+        return 2
+    try:
+        ok = name in owner_named(qid, [name])
+    except P.ConsentLogError as e:
+        print(e, file=P.sys.stderr)
+        return 3
+    if not ok:
+        print(f"pantheon restart --only {name}: нет «да» владельца на вопрос «[{qid}] Перезапустить окна: …?» со списком, "
+              f"где есть {name}, за сутки — попроси Зевса спросить «[{qid}] Перезапустить окно: {name}?»; ничего не "
+              "перезапущено", file=P.sys.stderr)
+        return 1
+    if name in owner_used(qid):
+        print(f"pantheon restart --only {name}: «да» на [{qid}] уже использовано для окна {name} — одно «да» на один "
+              f"перезапуск; новый вопрос с другим id. Ничего не перезапущено", file=P.sys.stderr)
+        return 2
+    if os.path.exists(P.path("stopped", name)):
+        print(f"pantheon restart --only {name}: окно остановлено вами (pantheon stop) — вернуть: pantheon resume {name}",
+              file=P.sys.stderr)
+        return 1
+    agents = P.agents_all()
+    if agents is None:
+        print("pantheon restart: claude agents --json не ответил", file=P.sys.stderr)
+        return 1
+    mine = [a for a in agents if base_session(a.get("name")) == name and a.get("id") and a.get("sessionId")]
+    if not mine:
+        print(f"pantheon restart --only {name}: нет фоновой сессии с этим именем — вкладка? перезапустить вручную",
+              file=P.sys.stderr)
+        return 1
+    a = saved_agent(name, mine, saved_sid(name), warn=False)
+    how = "ждала разрешения — сохранения не ждал" if a.get("state") == "blocked" else f"состояние {a.get('state') or '?'}"
+    try:
+        owner_use(qid, name)
+    except FileExistsError:  # metis-1139: одновременный --only с тем же id успел раньше
+        print(f"pantheon restart --only {name}: «да» на [{qid}] уже использовано для окна {name} — одно «да» на один "
+              f"перезапуск; новый вопрос с другим id. Ничего не перезапущено", file=P.sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"pantheon restart --only {name}: метку использования [{qid}] записать не удалось ({e}) — ничего не "
+              "перезапущено", file=P.sys.stderr)
+        return 3
+    rc = P.resume_session(name, a, ONLY_TEXT, "restart",
+                          recheck=lambda: "остановлено вами" if os.path.exists(P.path("stopped", name)) else None)[0]
+    if rc != 0:
+        print(f"pantheon restart --only {name}: перезапуск не удался, код {rc}; «да» на [{qid}] для {name} "
+              "израсходовано — повтор только по новому вопросу", file=P.sys.stderr)
+        return 1
+    if m and name in (m.get("sessions") or []):  # идёт общий перезапуск — отметить, как у --go
+        os.makedirs(P.path("maintenance"), exist_ok=True)
+        P.write_atomic(P.path("maintenance", name + ".done"), P.stamp() + "\n")
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(P.path("maintenance", name + ".json"))
+    P.alert(f"окно {name} перезапущено одно ({who}, «да» владельца [{qid}]; {how})", "pantheon-restart")
+    print(f"{name}: перезапущено ({how})")
+    return 0
 
 
 def zeus_renewed(names, saved):
@@ -4020,8 +4313,10 @@ def saved_cmd(rest, who):
 
     def opt(k):
         return rest[rest.index(k) + 1] if k in rest and rest.index(k) + 1 < len(rest) else None
-    name, state = opt("--by") or P.os.environ.get("PANTHEON_SESSION") or "", opt("--state") or ""
-    own = P.os.environ.get("PANTHEON_SESSION")
+    # metis-1122: «zeus (2)» и «zeus» — одно окно: копию Claude Code нумерует, метка — по имени без номера
+    name = base_session(opt("--by") or P.os.environ.get("PANTHEON_SESSION") or "")
+    state = opt("--state") or ""
+    own = base_session(P.os.environ.get("PANTHEON_SESSION")) or None
     if not P.SESSION_NAME.fullmatch(name):
         print("pantheon saved --by <имя сессии> --state <путь>", file=P.sys.stderr)
         return 2
@@ -4038,7 +4333,7 @@ def saved_cmd(rest, who):
         print(f"{name}: отмечено «можно перезапускать». Плановый проход перезапустит окно с новыми плагинами, когда оно закончит ход; "
               "работающее окно не тронет")
         return 0
-    if name not in (m.get("sessions") or []):
+    if name not in {base_session(n) for n in m.get("sessions") or []}:
         print(f"pantheon saved: {name or '(без имени)'} нет в списке перезапуска: {', '.join(m.get('sessions') or [])}",
               file=P.sys.stderr)
         return 2

@@ -23,9 +23,9 @@ RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, к�
 results = []
 
 
-def check(name, cond):
+def check(name, cond, detail=""):
     results.append(bool(cond))
-    print(("ok   " if cond else "FAIL ") + name)
+    print(("ok   " if cond else "FAIL ") + name + ("" if cond or not detail else f"\n     {detail}"))
 
 
 def write(p, text):
@@ -108,6 +108,39 @@ def main():
     check("CLAUDE.md без @AGENTS.md — не готово", "НЕТ     AGENTS.md" in run("iris-demo").stdout)
     write(os.path.join(repo, "CLAUDE.md"), "@AGENTS.md\n\nТолько для Claude.\n")
     check("CLAUDE.md, который начинается с @AGENTS.md, — готово", run("iris-demo").returncode == 0)
+
+    # metis-1043: стек есть, инструмента нет — предупреждение координатору, код выхода не меняется
+    r = run("iris-demo")
+    check("без признаков стека предупреждения нет", "ВНИМАНИЕ" not in r.stdout)
+    write(os.path.join(repo, "package.json"), json.dumps({"dependencies": {"next": "^16.0.0"}}))
+    r = run("iris-demo")
+    check("Next.js в проекте, инструментов нет — ВНИМАНИЕ с именами инструментов, код 0",
+          r.returncode == 0 and "ВНИМАНИЕ" in r.stdout and "chrome-devtools" in r.stdout and "next-devtools" in r.stdout
+          and "context7" in r.stdout and "Отказ: <инструмент>" in r.stdout, r.stdout[-300:] + r.stderr)
+    write(os.path.join(repo, "AGENTS.md"), "# demo\n\n## Инструменты\n\nОтказ: chrome-devtools — страницы смотрит Харон.\n")
+    r = run("iris-demo")
+    warn = "".join(l for l in r.stdout.splitlines() if "ВНИМАНИЕ" in l)
+    check("отказ от одного инструмента снимает предупреждение только о нём",
+          "chrome-devtools" not in warn and "next-devtools" in warn)
+    write(os.path.join(repo, "AGENTS.md"), "# demo\n\nОтказ: chrome-devtools, next-devtools и context7 — не нужны.\n")
+    check("отказ от всех названных — предупреждения нет", "ВНИМАНИЕ" not in run("iris-demo").stdout)
+    write(os.path.join(repo, "AGENTS.md"), "# demo\n\nпро chrome-devtools, next-devtools и context7 забыли.\n")
+    check("слова об инструменте без «Отказ» отказом не считаются", "ВНИМАНИЕ" in run("iris-demo").stdout)
+    os.remove(os.path.join(repo, "package.json"))
+    write(os.path.join(repo, "AGENTS.md"), "# demo\n")
+
+    # metis-1043: запись с planned = true — «запланировано», а не ошибка «папки нет»
+    with open(os.path.join(home, "directions.toml"), "a", encoding="utf-8") as fh:
+        fh.write('\n[[direction]]\nname = "iris-later"\nproject = "later"\nfolders = ["~/projects/later-not-yet"]\n'
+                 'planned = true\ndoes = "Позже"\ndoes_not = "Чужое"\nexamples = ["раз", "два", "три"]\n'
+                 '\n[[direction]]\nname = "iris-nonplan"\nproject = "np"\nfolders = ["~/projects/np-not-yet"]\n'
+                 'does = "Нет"\ndoes_not = "Чужое"\nexamples = ["раз", "два", "три"]\n')
+    r = run("iris-later")
+    check("planned = true без папок: код 0, «запланировано», ни одного «НЕТ»",
+          r.returncode == 0 and "запланировано" in r.stdout and "НЕТ" not in r.stdout, r.stdout)
+    r = run("iris-nonplan")
+    check("без planned папки нет — по-прежнему «НЕТ» и код 1",
+          r.returncode == 1 and "НЕТ     папки направления есть" in r.stdout and "запланировано" not in r.stdout)
 
     write(os.path.join(repo, "AGENTS.md"), "x" * 40000)
     out = run("iris-demo").stdout

@@ -201,6 +201,28 @@ check("recover_results: заход помечен сбоем, в runs/<ID>.log �
 check("recover_results: событие recovered о сыром журнале", any("сырой журнал" in (e.get("why") or "")
                                                             for e in events(rid, "recovered")), events(rid))
 
+# две дорожки (metis-1081): recover_results дорожки full не удаляет сырой журнал идущего прогона дорожки quick
+_lrid = "20261109-030303-dddddd"
+os.makedirs(O.raw_dir(), mode=0o700, exist_ok=True)
+put(O.raw_dir(), _lrid + ".log", f"url={URL_APP}\n")
+put(RUNS, _lrid + ".json", json.dumps({"kind": "test", "state": "running", "lane": "quick"}))
+O.recover_results(lane="full")
+check("recover_results(full): сырой журнал идущего прогона дорожки quick цел",
+      os.path.exists(os.path.join(O.raw_dir(), _lrid + ".log")))
+O.recover_results(lane="quick")
+check("recover_results(quick): свой сырой журнал удалён", not os.path.exists(os.path.join(O.raw_dir(), _lrid + ".log")))
+# сырой журнал без runs/<ID>.json (прогон без записи): дорожку не узнать — удаляется и при lane="full"
+_orid = "20261109-040404-eeeeee"
+os.makedirs(O.raw_dir(), mode=0o700, exist_ok=True)
+put(O.raw_dir(), _orid + ".log", f"url={URL_APP}\n")
+O.recover_results(lane="full")
+check("recover_results(full): сырой журнал без runs/<ID>.json удалён",
+      not os.path.exists(os.path.join(O.raw_dir(), _orid + ".log")))
+_drop_leftover = os.path.join(RUNS, _lrid + ".json")
+with contextlib.suppress(FileNotFoundError):
+    os.unlink(_drop_leftover)
+    os.unlink(os.path.join(RUNS, _lrid + ".log"))
+
 # сторож: живой заход дольше WATCH_RUNNING — убит SIGKILL, его сырой журнал удаляется
 _wrid = "20261109-010101-bbbbbb"
 os.makedirs(O.raw_dir(), mode=0o700, exist_ok=True)
@@ -210,7 +232,8 @@ _holder = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
 TEST_PROCS.append(_holder)
 _saved = (O._watch_due, O._run_holder, O.P.locked, O.P.alert)
 O._watch_due = lambda t=None: [("running", None, _wrid)]
-O._run_holder = lambda: _holder.pid
+_asked = []
+O._run_holder = lambda name="outside-run": _asked.append(name) or _holder.pid
 O.P.locked = lambda name: True
 O.P.alert = lambda *a, **kw: None
 try:
@@ -218,6 +241,7 @@ try:
 finally:
     O._watch_due, O._run_holder, O.P.locked, O.P.alert = _saved
     _holder.wait(timeout=10)
+check("сторож: спросили замок outside-run", _asked == ["outside-run"], _asked)
 check("сторож: заход убит, его сырой журнал удалён, чужой — цел", _n == 1
       and not os.path.exists(os.path.join(O.raw_dir(), _wrid + ".log"))
       and os.path.exists(os.path.join(O.raw_dir(), "20261109-020202-cccccc.log")), _read_all(O.raw_dir()).keys())
