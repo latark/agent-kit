@@ -7,6 +7,13 @@ PR ядра защит (Д3) агенты не сливают: его слива
   pantheon merge request <N> -R <owner/repo>   заявка: STATE/merge-queue/<owner>__<repo>__<N>.json (папка 0700,
                                                 файл 0600) с head SHA PR сейчас. Репозиторий — из [merge_repos]
                                                 metis-pantheon (policy.toml); шлюз проверяется сразу (кроме CI в работе)
+  pantheon merge request <N> -R <owner/repo> --restart <окно>   то же, и окно (metis-1153, вариант А владельца 14.11):
+                                                имя — из реестра окон domains.json, не Зевс (иначе заявки нет, код 2),
+                                                только у одного PR; окно Touch ID называет его, и после слияния по
+                                                этому Touch ID проход один раз перезапускает именно его
+                                                (watch.restart_merged: метка restart-owner/merge-…@<окно>, повтор той
+                                                же заявки второго перезапуска не даёт). Слито фразой — не перезапуск,
+                                                а тревога; итог — событие restart в merge.jsonl
   pantheon merge request <N1> <N2> … -R <owner/repo>   пачка (metis-0668, до MAX_BATCH PR одного репозитория):
                                                 по заявке на каждый PR с полем batch — номера в порядке слияния;
                                                 шлюз не пройден хоть у одного — заявок нет ни на один
@@ -119,6 +126,7 @@ pass_env (PANTHEON_PYTHON — найденный тиком интерпрета
 """
 import contextlib
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -181,8 +189,8 @@ DONE_EVENTS = ("merged", "merge-failed", "gate", "gate-after", "expired", "refus
                "batch-stopped", "error", "cancelled")
 DONE_SHOW = 24 * 3600
 DONE_MAX = 20
-USAGE = ("pantheon merge request <N> [<N2> …] -R <owner/repo> | cancel <N> -R <owner/repo> | run [--click] | "
-         "status")
+USAGE = ("pantheon merge request <N> [<N2> …] -R <owner/repo> | request <N> -R <owner/repo> --restart <окно> | "
+         "cancel <N> -R <owner/repo> | run [--click] | status")
 
 
 def set_core(mod):
@@ -292,6 +300,9 @@ def read_req(p):
         return None
     if "batch" in data and not valid_batch(data["batch"], data["pr"]):
         return None
+    if "restart" in data and ("batch" in data or not isinstance(data["restart"], str)
+                              or not P.SESSION_NAME.fullmatch(data["restart"])):
+        return None   # metis-1153: окно для перезапуска — только у одиночной заявки и только имя сессии
     return data
 
 
@@ -334,10 +345,13 @@ def write_req(req):
 
 
 def same_req(req):
-    """Заявка в очереди всё ещё эта: тот же SHA и то же время постановки. Звать под замком merge-queue."""
+    """Заявка в очереди всё ещё эта: тот же SHA, то же время постановки и то же окно для перезапуска (metis-1153:
+    замена с другим --restart в ту же секунду — не та заявка, что показало окно Touch ID). Звать под замком
+    merge-queue."""
     p = req_file(req["repo"], req["pr"])
     cur = read_req(p) if os.path.lexists(p) else None
-    return bool(cur) and cur["sha"] == req["sha"] and cur["created"] == req["created"]
+    return bool(cur) and cur["sha"] == req["sha"] and cur["created"] == req["created"] \
+        and cur.get("restart") == req.get("restart")
 
 
 def gone(req, rc=None):
@@ -1387,7 +1401,8 @@ def window_text(req, view, why, paths):
     more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
     hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
     title = " ".join(str(view.get("title") or "").split())[:60]
-    return (f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}), файлов {len(set(paths))}, {hit}. {why}. "
+    then = f" и затем перезапустить окно {req['restart']}" if req.get("restart") else ""   # metis-1153
+    return (f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}){then}, файлов {len(set(paths))}, {hit}. {why}. "
             f"Заголовок: «{title}»")[:400]
 
 
@@ -1869,12 +1884,30 @@ def parse_targets(args):
     return repo, [int(a) for a in rest]
 
 
+def split_restart(args):
+    """metis-1153: `--restart <окно>` из слов заявки → (остальные слова, окно или None, причина отказа или None).
+    Окно — одно, только у одиночной заявки и только из реестра окон (watch.restart_target_problem)."""
+    if "--restart" not in args:
+        return args, None, None
+    i = args.index("--restart")
+    name, rest = (args[i + 1] if i + 1 < len(args) else ""), args[:i] + args[i + 2:]
+    target = parse_targets(rest)
+    if "--restart" in rest or not name or not target:
+        return rest, name, USAGE
+    if len(target[1]) > 1:
+        return rest, name, "--restart — только у заявки на один PR, не у пачки"
+    why = P.watch_mod().restart_target_problem(name)
+    return rest, name, why and f"--restart {name[:40]}: {why}"
+
+
 def cmd_request(args):
     """Заявка на один PR или пачку (metis-0668: одно окно Touch ID на все). Пачка ставится целиком или никак: шлюз
-    не пройден хоть у одного — заявок нет ни на один."""
+    не пройден хоть у одного — заявок нет ни на один. --restart <окно> (metis-1153) — окно, которое проход
+    перезапустит один раз после слияния по Touch ID."""
+    args, restart, bad = split_restart(args)
     target = parse_targets(args)
-    if not target:
-        err(USAGE)
+    if bad or not target:
+        err(USAGE if bad in (None, USAGE) else f"pantheon merge request: {bad} — заявки нет")
         return 2
     repo, prs = target
     if repo not in allowed_repos():
@@ -1910,9 +1943,12 @@ def cmd_request(args):
     if len(prs) > 1:
         for req in reqs:
             req["batch"] = list(prs)
+    if restart:
+        reqs[0]["restart"] = restart
     with P.lock("merge-queue"):
         olds = [read_req(req_file(repo, pr)) if os.path.lexists(req_file(repo, pr)) else None for pr in prs]
-        if all(o and o["sha"] == heads[o["pr"]] and o.get("batch") == r.get("batch") for o, r in zip(olds, reqs)) \
+        if all(o and o["sha"] == heads[o["pr"]] and o.get("batch") == r.get("batch")
+               and o.get("restart") == r.get("restart") for o, r in zip(olds, reqs)) \
                 and len({o["created"] for o in olds}) == 1:
             what = f"заявка {repo}#{prs[0]} ({heads[prs[0]][:7]})" if len(prs) == 1 else \
                 f"пачка {repo} {', '.join(f'#{n}' for n in prs)}"
@@ -1926,7 +1962,8 @@ def cmd_request(args):
              else f", а у PR закончится ожидание ({'; '.join(waits)})")
     if len(prs) == 1:
         print(f"Заявка {repo}#{prs[0]} ({heads[prs[0]][:7]}) поставлена. Окно Touch ID покажет плановый проход, когда вы "
-              f"у Mac{later}; без ответа за {REQUEST_TTL // 3600} ч заявка гаснет.")
+              f"у Mac{later}; без ответа за {REQUEST_TTL // 3600} ч заявка гаснет."
+              + (f" После слияния по Touch ID проход один раз перезапустит окно {restart}." if restart else ""))
     else:
         print(f"Пачка {repo}: {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} поставлена. Одно окно Touch ID на все "
               f"покажет плановый проход, когда вы у Mac{later}; сливает по очереди, отказ одного останавливает "
@@ -2016,12 +2053,37 @@ def finger(req, rc=0, phrase=None):
         why=None if code == 0 else f"{'фраза' if phrase else 'палец'} есть, gh pr merge упал ({code}): {out}")
     if code == 0:
         notify_merged(req, phrase)
+        if req.get("restart"):
+            restart_after(req, phrase)
     if code != 0:
         P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) {'после фразы' if phrase else 'после Touch ID'} "
                 f"не прошло: {out}. Согласие записано — шлюз guard пустит слияние этого SHA в течение суток",
                 "pantheon-merge")
         return False, f"{'фраза' if phrase else 'палец'} есть, gh pr merge упал ({code})"
     return True, "слит фразой" if phrase else "слит"
+
+
+def restart_after(req, phrase):
+    """metis-1153: окно из заявки (--restart) — один раз после слияния по Touch ID (watch.restart_merged). Фраза «слей
+    #N» окна не называла — по ней не перезапускаем, тревога с тем, как перезапустить. Сбой перезапуска слияния не
+    отменяет: событие restart в merge.jsonl и тревога."""
+    name = req["restart"]
+    if phrase is not None:
+        log(req, "restart", window=name, rc=None, why="слито фразой — окно не перезапущено")
+        P.alert(f"окно {name} не перезапущено после слияния {req['repo']}#{req['pr']}: слито фразой, а она окна не "
+                f"называла; перезапуск по Touch ID — вопрос «[id] Перезапустить окно: {name}?»", "pantheon-restart")
+        return
+    said = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(said):
+            rc = P.watch_mod().restart_merged(name, req["repo"], req["pr"], req["sha"], "плановый проход")
+    except Exception as e:   # слияние уже сделано — сбой перезапуска не роняет проход
+        rc, said = 1, io.StringIO(f"сбой ({type(e).__name__}: {e})")
+    why = (said.getvalue().strip().splitlines() or [f"код {rc}"])[-1][:300] if rc != 0 else None
+    log(req, "restart", window=name, rc=rc, why=why)
+    if rc != 0:
+        P.alert(f"окно {name} не перезапущено после слияния {req['repo']}#{req['pr']} по Touch ID (код {rc}): {why}",
+                "pantheon-restart")
 
 
 def process(req, click):
@@ -2237,6 +2299,8 @@ def cmd_status():
                 marks = (" уведомление" if req.get("notified") else "") + (" повтор позже" if req.get("wait_until", 0) > t else "")
                 if req.get("batch"):
                     marks += " пачка " + ",".join("#%d" % n for n in req["batch"])
+                if req.get("restart"):   # metis-1153
+                    marks += f" затем перезапуск окна {req['restart']}"
                 if isinstance(req.get("waiting"), str):   # Д2 argus #381: почему ждёт — mark_wait прохода
                     marks += f" ждёт: {req['waiting']}"
                 rows.append(f"{req['repo']}#{req['pr']}\t{req['sha'][:12]}\t{int((t - req['created']) // 60)} мин\t"

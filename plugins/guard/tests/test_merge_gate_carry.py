@@ -321,6 +321,12 @@ def t_request_decision(h):
     got = case("два номера одного PR", qdm, bd2, [opus(qd)], cmd="pantheon merge request 7 7 -R Latark/Agent-Kit")
     check("решение: номер дважды — одна запись, repo в нижнем регистре", len(got) == 1
           and got[0]["repo"] == ["latark/agent-kit"], got)
+    # metis-1153: окно для перезапуска после слияния (--restart <окно>) — не номер PR, решение пишется как без него
+    for where in ("pantheon merge request 7 -R latark/agent-kit --restart athena-shop",
+                  "pantheon merge request --restart athena-shop 7 -R latark/agent-kit"):
+        got = case(f"--restart: {where}", qdm, bd2, [opus(qd)], cmd=where)
+        check(f"решение (metis-1153): {where} — запись есть, same=[qd]", len(got) == 1 and got[0]["pr"] == 7
+              and got[0]["same"] == [qd], got)
     for name, recs, kw in (
             ("вердикты только на head", [opus(qdm), rej(qdm)], {}),
             ("вердиктов нет", [rec("tests", "latark/agent-kit", None, qdm, "dev-opus")], {}),
