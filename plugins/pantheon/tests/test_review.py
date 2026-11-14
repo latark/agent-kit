@@ -50,6 +50,11 @@ def budget_checks(pantheon, git, repo):
     check("test — свой HEAVY_WAIT_MAX меньше бюджета остаётся", "HWM=50" in r.stdout, r.stdout)
     r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "0"})
     check("test — бюджет 0: без ограничения, HEAVY_WAIT_MAX не ставится", "HWM=unset" in r.stdout, r.stdout)
+    # metis-1174: запасной путь «только CI» — heavy не отказывает тестам, запущенным через review test
+    r = pantheon("review", "test", "--", "sh", "-c", "echo HLT=${HEAVY_LOCAL_TESTS-unset}", cwd=repo,
+                 extra={"HEAVY_LOCAL_TESTS": "0"})
+    check("test — дочернему процессу ставится HEAVY_LOCAL_TESTS=1 (heavy в репозитории с ci: не откажет)",
+          "HLT=1" in r.stdout, r.stdout)
     head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     r = pantheon("review", "test", "--", "sleep", "60", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
     check("test — команда дольше бюджета: остановлена, код 75, причина и совет в stderr, SHA не печатается",
