@@ -42,6 +42,9 @@ _NOTIFY = "уведомление владельцу о заявке: текст
 _MANAGED = ("управляемые настройки guard (metis-0710): какое дерево guard проверено — verified.json пишет плановый "
             "проход; вне задачи metis-0858 («А узко»), кандидат в ядро отдельной задачей")
 _TASKS = "карточка «Руками» об управляемых настройках: сообщение владельцу, не решение"
+_RESTART = ("перезапуск окна после слияния по Touch ID (merge request --restart, metis-1153): прав не даёт, только "
+            "перезапускает окно, названное владельцем в окне Touch ID; watch.py остаётся вне ядра (решение владельца "
+            "14.11: «Исключение с причиной»)")
 EXEMPT_NAMES = {
     PANTHEON_PY: {
         "HOME": _PATHS, "AI_HOME": _PATHS, "CURRENT": _PATHS, "STATE": _PATHS, "PANTHEON": _PATHS, "LIB": _PATHS,
@@ -50,6 +53,7 @@ EXEMPT_NAMES = {
         "_notifier": _NOTIFY, "notify_offscreen": _NOTIFY,
         "installed_dir": _MANAGED, "verified_record": _MANAGED,
         "tasks_mod": _TASKS,
+        "watch_mod": _RESTART, "SESSION_NAME": _RESTART,
     },
 }
 
