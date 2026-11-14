@@ -81,14 +81,29 @@ def flat(v, n):
     return " ".join(str(v or "").split())[:n]
 
 
+def lib(name):
+    spec = importlib.util.spec_from_file_location(f"pantheon_{name}_wait", os.path.join(PLUGIN, "lib", f"{name}.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def quoted(v, n):
+    """Текст роли в вопрос Зевсу: секреты скрыты (denials.scrub), кавычки «» роли убраны — поле «Совет:» внутри
+    кавычек не подделать (находка проверки безопасности 15.11). Сбой scrub — заглушка, а не сырой текст."""
+    try:
+        t = lib("denials").scrub(v, n)
+    except Exception:  # noqa: BLE001 — без scrub сырой текст в тревогу не идёт
+        t = "‹не показано›" if str(v or "").strip() else ""
+    t = re.sub(r"(?i)(совет|зачем)\s*:", r"\1 —", t.replace("«", '"').replace("»", '"'))   # поля вопроса — только наши
+    return f"«{t}»" if t else ""
+
+
 def advice(cmd):
     """Совет Зевсу по маршрутам отказа (lib/handoff.py): у действия есть свой исполнитель — отклонить и передать ему;
     иначе — смотреть команду. Сбой загрузки — общий совет: подсказка не должна ломать тревогу."""
     try:
-        spec = importlib.util.spec_from_file_location("pantheon_handoff_wait", os.path.join(PLUGIN, "lib", "handoff.py"))
-        h = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(h)
-        key, who, _, _ = h.route(cmd)
+        key, who, _, _ = lib("handoff").route(cmd)
     except Exception:  # noqa: BLE001 — любой сбой разбора даёт общий совет
         key, who = "ask", ""
     if key != "ask":
@@ -100,10 +115,10 @@ def question(ev):
     """PermissionRequest (metis-0874): что просит окно — инструмент и команда, зачем — описание вызова, и совет."""
     tool = flat(ev.get("tool_name"), 60) or "инструмент"
     ti = ev.get("tool_input") if isinstance(ev.get("tool_input"), dict) else {}
-    cmd = flat(ti.get("command") or ti.get("file_path") or ti.get("path") or ti.get("url") or json.dumps(ti,
-               ensure_ascii=False), CMD_MAX)
-    why = flat(ti.get("description") or ti.get("prompt"), WHY_MAX) or "окно не сказало"
-    return f"{tool}: {cmd}. Зачем: {why}. Совет: {advice(tool + ' ' + cmd)}"
+    raw = ti.get("command") or ti.get("file_path") or ti.get("path") or ti.get("url")
+    cmd = quoted(raw, CMD_MAX) if raw else "поля: " + (", ".join(sorted(ti))[:CMD_MAX] if ti else "нет")
+    why = quoted(ti.get("description") or ti.get("prompt"), WHY_MAX) or "окно не сказало"
+    return f"{quoted(tool, 60)}: {cmd}. Зачем: {why}. Совет: {advice(tool + ' ' + str(raw or ''))}"
 
 
 def main():
