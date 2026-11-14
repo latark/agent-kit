@@ -265,10 +265,8 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
             P.stop_copies(name, [x], "stop-fresh-done")
             stopped.append(x)
     why = wait_name_free(name, stopped) if stopped else None
-    if why:
-        P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\tимя не освободилось после claude stop")
-        P.alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
-        return 1
+    if why:  # копии погашены, имя не отпустили — тревога «<имя> остановлен — pantheon start <имя>» (metis-1192)
+        return fresh_skip(name, a, origin, f"имя не освободилось после claude stop: {why}", stopped)
     before, why = agents_snapshot(stopped)  # копии погашены — снимок ждёт ответа до срока, а не отказ после сбоя
     if why:  # так и не ответил — пропуск с тревогой, а не запуск с пустым снимком
         return fresh_skip(name, a, origin, why, stopped)
@@ -317,6 +315,15 @@ def _holder_text(a):
     return f"{a.get('name')} {who} ({a.get('state') or a.get('kind') or 'процесс'})"
 
 
+def _agents_or_none():
+    """P.agents_all() для опроса wait_name_free: таймаут и незапуск claude agents — None («не ответил», имя не
+    считается свободным), а не трасса Python посреди свежего старта с уже погашенными копиями (metis-1192)."""
+    try:
+        return P.agents_all()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def wait_name_free(name, stopped):
     """После claude stop: ждать, пока остановленные копии отпустят имя — в claude agents нет живых копий и в реестре
     нет живого процесса с этим именем (name_holders), и так держится settle секунд. Ожившая копия (была
@@ -327,7 +334,7 @@ def wait_name_free(name, stopped):
     ids = {a["id"] for a in stopped if a.get("id")}
     down, restopped, started, free_since = set(), set(), time.monotonic(), None
     while True:
-        agents = P.agents_all()
+        agents = _agents_or_none()
         registry = P.sessions_registry()
         live = P.live_copies(name, agents, registry)
         if agents is not None:

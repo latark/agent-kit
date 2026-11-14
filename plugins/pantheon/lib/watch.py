@@ -2478,6 +2478,24 @@ def zeus_trace(st, stp, t, a, miss, n, result):
     P.write_json(stp, st)
 
 
+def zeus_clean_failed(st, stp, t, a, n, rc, held):
+    """Свежий старт очистки Зевса не дал 0 (rc); held — причины повторной проверки под блокировкой (again)."""
+    if not held or held[0]:
+        # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
+        # fresh-skip уже в start.log) — проверит следующий проход
+        st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
+                      "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
+        P.write_json(stp, st)
+        return
+    st["failed"] = {"sid": a["sessionId"], "t": t}  # повтор — не чаще раза в час, и при пропуске тоже
+    if rc == P.SKIPPED:
+        # пропуск свежего старта (claude agents не ответил, имя не отпустили): тревогу «Зевс остановлен — pantheon
+        # start zeus» с причиной дал fresh_skip, если Зевс уже погашен, — не «не вышла, код 4» (metis-1192)
+        return zeus_trace(st, stp, t, a, [(0, P.SKIP_WHY)], n, "отложено")
+    zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
+    P.alert(f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log", "watch")
+
+
 def zeus_clean(agents, t):
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
@@ -2528,18 +2546,7 @@ def zeus_clean(agents, t):
                     "watch")
             event("zeus-clean", t, id=a.get("id"), tokens=n)
             return
-        if not held or held[0] or rc == P.SKIPPED:
-            # имя занято другим запуском, перед остановкой условие перестало выполняться или claude agents не ответил
-            # (строка fresh-busy или fresh-skip уже в start.log; Зевс погашен — тревогу «Зевс остановлен — pantheon
-            # start zeus» дал fresh_skip, metis-1192) — проверит следующий проход, а не «не вышла, код 4»
-            st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
-                          "result": "отложено", "miss": [(held[0] or P.SKIP_WHY) if held else "имя занято другим запуском"]}
-            P.write_json(stp, st)
-            return
-        st["failed"] = {"sid": a["sessionId"], "t": t}
-        zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
-        P.alert(f"очистка Зевса не вышла, код {rc} — контекст {k} тыс.; журнал start.log", "watch")
-        return
+        return zeus_clean_failed(st, stp, t, a, n, rc, held)
     zeus_trace(st, stp, t, a, miss, n, "пропуск")
     if [m for m, _ in miss] != [5]:
         return  # напоминание — только когда не хватает одного сохранения; (6) — тихо ждём следующего прохода

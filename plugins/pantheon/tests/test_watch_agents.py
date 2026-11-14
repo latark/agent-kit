@@ -287,8 +287,9 @@ def test_fresh_start_snapshot_after_stop_waits_1192():
 
 def test_zeus_clean_skipped_not_code4_1192():
     """metis-1192 (argus B, Д): очистка Зевса, свежий старт дал пропуск (SKIPPED: claude agents не ответил) — проход
-    «отложено» с причиной, без «очистка Зевса не вышла, код 4» (тревогу «Зевс остановлен» даёт fresh_skip). Ловит
-    откат условия `rc == P.SKIPPED` в zeus_clean. Контроль — код 1 по-прежнему «не вышла, код 1»."""
+    «отложено» с причиной, повтор не раньше часа (failed), без «очистка Зевса не вышла, код 4» (тревогу «Зевс
+    остановлен» даёт fresh_skip). Ловит откат ветки `rc == P.SKIPPED` в zeus_clean. Контроль — код 1 по-прежнему «не
+    вышла, код 1»."""
     p, w = _core()
     w.zeus_clean_check = lambda a, tp: ([], 160_000, {"turn": 1})
     w.zeus_hold = lambda: None
@@ -305,12 +306,50 @@ def test_zeus_clean_skipped_not_code4_1192():
         with contextlib.suppress(OSError):
             os.remove(p.path("zeus-clean.json"))
         w.zeus_clean([ZLIVE], T0)
-        last = (p.read_json(p.path("zeus-clean.json"), {}) or {}).get("last") or {}
+        st = p.read_json(p.path("zeus-clean.json"), {}) or {}
+        last = st.get("last") or {}
         if rc == 1:
             check(any("не вышла, код 1" in x for x in alerts), f"1192: контроль — код 1 без тревоги: {alerts} {last}")
             continue
         check(not [x for x in alerts if "не вышла" in x] and last.get("result") == "отложено"
-              and last.get("miss") == [SILENT], f"1192: очистка Зевса при пропуске: {alerts} {last}")
+              and last.get("miss") == [f"(0) {SILENT}"] and (st.get("failed") or {}).get("sid") == ZLIVE["sessionId"],
+              f"1192: очистка Зевса при пропуске: {alerts} {st}")
+
+
+def test_zeus_clean_agents_silent_after_stop_1192():
+    """metis-1192 (находка раунда 4): очистка Зевса, claude agents молчит (не JSON) после claude stop до конца срока
+    ожидания имени — без трассы и без запуска; тревога «Зевс остановлен — pantheon start zeus» с причиной «claude
+    agents не ответил», проход «отложено», а не «не вышла, код 1». Ловит откат fresh_skip в ветке отказа
+    wait_name_free (там был return 1 и тревога «свежий старт не сделан»)."""
+    e = zeus_env()
+    mark = os.path.join(e.tmp, "agents-silent")
+    r = e.run("watch", t=T0, extra={**ZEUS_RUN, "PANTHEON_STOP_WAIT": "0.3", "FAKE_AGENTS_SILENT_AFTER_STOP": mark})
+    stops = [c for c in e.calls() if c[:1] == ["stop"]]
+    al = e.alerts()
+    check(stops and not _bgs(e) and "Traceback" not in r.stderr and "не вышла" not in al
+          and [ln for ln in al.splitlines() if "Зевс остановлен — pantheon start zeus" in ln and "claude agents не ответил" in ln]
+          and _zeus_last(e).get("result") == "отложено",
+          f"1192: Зевс, claude agents молчит после stop: {e.calls()} {al[-500:]!r} {_zeus_last(e)} {r.stderr[-300:]!r}")
+
+
+def test_wait_name_free_agents_raises_1192():
+    """metis-1192: wait_name_free — claude agents не ответил за срок (TimeoutExpired) или не запустился (OSError):
+    «не ответил», имя не свободно, отказ текстом после срока, а не трасса Python с уже погашенными копиями. Ловит
+    откат except в _agents_or_none."""
+    import subprocess as sp
+    p, _ = _core()
+    os.environ["PANTHEON_STOP_WAIT"] = "0.05"
+    p.sessions_registry = lambda: []
+    for err in (sp.TimeoutExpired(["claude", "agents"], 15), OSError("exec format error")):
+        def boom(err=err):
+            raise err
+        p.agents_all = boom
+        try:
+            why = p.wait_name_free("zeus", [ZLIVE])
+        except (sp.TimeoutExpired, OSError) as ex:
+            why = f"трасса: {ex!r}"
+        check(isinstance(why, str) and "claude agents не ответил" in why,
+              f"1192: wait_name_free при {type(err).__name__}: {why!r}")
 
 
 def test_start_restart_first_call_not_json_1192():

@@ -34,8 +34,13 @@ import json, os, sys
 log = os.environ["FAKE_CLAUDE_LOG"]
 open(log, "a").write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
 a = sys.argv[1:]
-if a[:1] == ["agents"]:
-    cnt = os.environ.get("FAKE_AGENTS_COUNT")  # metis-1192: первые FAKE_AGENTS_GOOD вызовов — список, дальше не JSON;
+silent = os.environ.get("FAKE_AGENTS_SILENT_AFTER_STOP")  # metis-1192: после первого claude stop agents — не JSON
+if silent and a[:1] == ["stop"]:
+    open(silent, "w").close()
+if a[:1] == ["agents"] and silent and os.path.exists(silent):
+    print("Error: daemon not ready")
+elif a[:1] == ["agents"]:
+    cnt =os.environ.get("FAKE_AGENTS_COUNT")  # metis-1192: первые FAKE_AGENTS_GOOD вызовов — список, дальше не JSON;
     if cnt:                                    # FAKE_AGENTS_BAD=K[,K2] — не JSON только вызовы с этими номерами (с 1)
         n = len(open(cnt).read()) if os.path.exists(cnt) else 0
         open(cnt, "a").write(".")
