@@ -2,7 +2,7 @@ PR в основную ветку сливают только через шлю�
 записи:
 1. Тесты. Есть строка `ci:` в `.pantheon-verify` (agent-kit) — тесты только в CI: при зелёной CI запись —
    `pantheon review test -- uvx ruff@0.17.3 check .`; `outside test` — только если Actions не запустились
-   (metis-1115). Иначе — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
+   (metis-1115; так же в проектах с workflow, metis-1116). Иначе — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
    отдельным вызовом Bash, не в фоне; пустую (`true`, `echo`) шлюз не примет. В изолированной сессии переключи
    worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach <sha>`). Не `cd`: с ним guard запись не
    сделает. EnterWorktree окну направления закрыт (metis-0933). Не переключить (`.claude/`) или набор

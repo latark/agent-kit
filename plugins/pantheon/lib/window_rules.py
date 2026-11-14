@@ -71,7 +71,7 @@ LEAD_DELIVERY_RULE = (
     "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands. (2) launching the "
     "independent reviewer subagent `argus` to review that branch or PR; its verdict is recorded only by the guard "
     "hook (see Pantheon Review Record), and the session that launches it cannot record a verdict itself. (3) "
-    "`pantheon night report`: a read-only local report of the night budget and alerts; it changes nothing outside "
+    "`pantheon night report`: a read-only report of the night budget and alerts (reads local state and, read-only, the GitHub billing API for Actions minutes); it changes nothing outside "
     "the owner's own Pantheon state. (4) `gh pr create -R <owner/repo> --base <default branch> --head <branch> "
     "--title … --body …` for a branch pushed under (1), on one of this direction's repositories. A merge is still "
     "covered only by Pantheon Gated Merge; anything else is judged by the built-in rules.")
