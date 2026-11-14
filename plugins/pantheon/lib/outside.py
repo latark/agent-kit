@@ -3403,9 +3403,9 @@ def overdue_accepts(recs=None, t=None):
 
 
 def pr_watch_rows(recs=None, t=None):
-    """[{"repo", "number", "conflict", "accept_at"}] — открытые PR свежего кэша gh (open_pr_heads: repo с ошибкой gh и
-    устаревший кэш — пусто), которые конфликтуют с main (mergeable CONFLICTING) или несут «принять» argus на head без
-    записи tests (accept_at — секунды самого раннего такого «принять»). Остальные не попадают. Срок и тревогу решает
+    """[{"repo", "number", "conflict", "accept_at", "head"}] — все открытые PR свежего кэша gh (repo с ошибкой gh и
+    устаревший кэш — пусто). conflict: True — CONFLICTING, False — MERGEABLE, None — UNKNOWN; accept_at — секунды
+    самого раннего «принять» argus на head без записи tests, иначе None. Срок и тревогу решает
     tasks.stale_pr_alerts (metis-1170): тут только факты."""
     t = P.now() if t is None else t
     cache = _fresh_cache(t)
@@ -3430,9 +3430,9 @@ def pr_watch_rows(recs=None, t=None):
                 acc[key] = min(e, acc.get(key, e))
     out = []
     for key, (repo, p) in sorted(rows.items()):
-        conflict = p.get("mergeable") == "CONFLICTING"
-        if conflict or key in acc:
-            out.append({"repo": repo, "number": p["number"], "conflict": conflict, "accept_at": acc.get(key)})
+        conflict = {"CONFLICTING": True, "MERGEABLE": False}.get(p.get("mergeable"))  # иначе UNKNOWN — None
+        out.append({"repo": repo, "number": p["number"], "conflict": conflict, "accept_at": acc.get(key),
+                    "head": key[1]})
     return out
 
 

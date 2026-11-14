@@ -1892,9 +1892,10 @@ _wrec = lambda kind, sha, age, who="argus": {"v": 1, "kind": kind, "repo": ["lat
                                              "by": {"agent_type": who}, "time": _stamp(age)}
 _rows = O.pr_watch_rows([_wrec("accept", _W["q"], 90000), _wrec("accept", _W["r"], 90000), _wrec("tests", _W["r"], 80000),
                          _wrec("accept", _W["s"], 5000, who="dev-opus")], _wt)
-check("pr_watch_rows: конфликт без «принять» и «принять» без tests — в списке; с tests, не от argus, MERGEABLE, repo с ошибкой gh — нет",
-      [(r["number"], r["conflict"], r["accept_at"] is not None) for r in _rows] == [(7, True, False), (8, False, True)]
-      and abs(_rows[1]["accept_at"] - (_wt - 90000)) < 60, _rows)
+check("pr_watch_rows: все открытые PR свежего repo (conflict True/False), accept_at только у «принять» без tests, head; repo с ошибкой gh — нет",
+      [(r["number"], r["conflict"], r["accept_at"] is not None) for r in _rows]
+      == [(7, True, False), (8, False, True), (9, False, False), (10, False, False)]
+      and abs(_rows[1]["accept_at"] - (_wt - 90000)) < 60 and _rows[1]["head"] == _W["q"], _rows)
 check("pr_watch_rows: кэш старше часа — пусто", (json.dump({**json.load(open(_cp)), "fetched": _wt - 7200}, open(_cp, "w"))
                                                   or O.pr_watch_rows([], _wt)) == [])
 json.dump(c_, open(_cp, "w"))   # кэш, как он был до блока metis-1170

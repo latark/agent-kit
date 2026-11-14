@@ -90,10 +90,47 @@ check("конфликт 25 ч: тревога с ключом на repo#N, вл�
 sync(pan, "c", T0 + 26 * H, al, pr_index=idx, pr_watch=conf)
 check("ключ тревоги тот же на каждом проходе (alert_once шлёт одну на repo#N)",
       {g[0] for g in got if g[0].startswith("stalepr-")} == {"stalepr-latark/x#7"})
-sync(pan, "c", T0 + 27 * H, al, pr_index=idx, pr_watch=[])
+ok_row = [{"repo": "latark/x", "number": 7, "conflict": False, "accept_at": None}]
+sync(pan, "c", T0 + 27 * H, al, pr_index=idx, pr_watch=ok_row)
 before = len(got)
 sync(pan, "c", T0 + 60 * H, al, pr_index=idx, pr_watch=conf)
-check("конфликт снят и вернулся: отсчёт заново, тревоги сразу нет", len(got) == before, got[before:])
+check("свежий MERGEABLE сбросил отсчёт: конфликт вернулся — заново, тревоги сразу нет", len(got) == before, got[before:])
+
+# --- 3. нет данных / UNKNOWN отсчёт не сбрасывают (argus-блокер Б) -------------------------------------------------
+unk = [{"repo": "latark/x", "number": 7, "conflict": None, "accept_at": None, "head": "abc"}]
+other = [{"repo": "latark/y", "number": 1, "conflict": False, "accept_at": None}]
+for label, gap in (("gh упал (pr_watch пуст)", []), ("repo в errors / кэш старый (строк repo нет)", None),
+                   ("UNKNOWN", unk)):
+    pan = build("e-" + label[:3])
+    got.clear()
+    sync(pan, "e", T0, al, pr_index=idx, pr_watch=conf)
+    sync(pan, "e", T0 + 10 * H, al, pr_index=idx, pr_watch=other if gap is None else gap)
+    sync(pan, "e", T0 + 25 * H, al, pr_index=idx, pr_watch=conf)
+    fired = [g for g in got if g[0].startswith("stalepr-")]
+    check(f"{label}: запись цела, тревога через 25 ч приходит", len(fired) == 1 and "25 ч" in fired[0][1], got)
+pan = build("f")
+got.clear()
+sync(pan, "f", T0, al, pr_index=idx, pr_watch=conf)
+sync(pan, "f", T0 + 10 * H, al, pr_index=idx, pr_watch=other + [{"repo": "latark/x", "number": 8, "conflict": False,
+                                                                 "accept_at": None}])
+sync(pan, "f", T0 + 25 * H, al, pr_index=idx, pr_watch=conf)
+check("PR закрыт (repo свежий, PR в нём нет): запись ушла, отсчёт заново", not got, got)
+pan = build("g")
+got.clear()
+sync(pan, "g", T0, al, pr_index=idx, pr_watch=conf)
+merged_idx = {"metis-0002": [{"repo": "latark/x", "number": 7, "merged": True}]}
+sync(pan, "g", T0 + 10 * H, al, pr_index=merged_idx, pr_watch=[])
+sync(pan, "g", T0 + 25 * H, al, pr_index=idx, pr_watch=conf)
+check("PR слит (pr_index): запись ушла", not got, got)
+pan = build("h")
+got.clear()
+sync(pan, "h", T0, al, pr_index=idx, pr_watch=conf)
+sync(pan, "h", T0 + 25 * H, al, pr_index=idx, pr_watch=[{**conf[0], "head": "h1"}])
+sync(pan, "h", T0 + 26 * H, al, pr_index=idx, pr_watch=[{**conf[0], "head": "h2"}])
+vals = []
+al_v = lambda k, v, text, who="board", note=None: vals.append((k, v))
+sync(pan, "h", T0 + 27 * H, al_v, pr_index=idx, pr_watch=[{**conf[0], "head": "h3"}])
+check("значение тревоги — head PR (новый head — новое значение, не «1»)", vals == [("stalepr-latark/x#7", "h3")], vals)
 
 pan = build("d")
 got.clear()

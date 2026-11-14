@@ -3885,25 +3885,37 @@ STALE_PR = 24 * 3600  # с: открытый PR с «принять» без з�
 def stale_pr_alerts(state, tasks, pr_index, pr_watch, t, alert, done_lines):
     """Тревога владельцу задачи про открытый PR, который стоит: «принять» argus без заявки tests дольше STALE_PR или
     CONFLICTING с main дольше STALE_PR. pr_watch — [{"repo", "number", "conflict": bool, "accept_at": секунды | None}] по
-    свежему кэшу gh (pantheon.pr_watch_rows); нет данных — молчим. Начало конфликта — state["pr_conflict"] (repo#N → секунды):
-    пропало из конфликта — запись уходит. Одна тревога на repo#N (alert_once по ключу stalepr-repo#N). PR без задачи в
-    индексе — тревога идёт на доску (who="board")."""
-    seen = state.get("pr_conflict") if isinstance(state.get("pr_conflict"), dict) else {}
-    keep = {}
-    for row in pr_watch or []:
+    свежему кэшу gh (outside.pr_watch_rows; "conflict": True / False / None — UNKNOWN; "head" — sha); нет данных — молчим.
+    Начало конфликта — state["pr_conflict"] (repo#N → секунды). Запись живёт, пока нет свежего ответа: repo в errors,
+    кэш старше часа, сбой чтения (pr_watch пуст), UNKNOWN — не сбрасывают 24 ч. Уходит только по свежему
+    MERGEABLE (conflict False) или когда PR закрыт: repo в свежем кэше, а PR в нём нет, либо слит по pr_index. Одна
+    тревога на repo#N и head (alert_once по ключу stalepr-repo#N, значение — head). PR без задачи в индексе — тревога
+    идёт на доску (who="board")."""
+    rows = [r for r in pr_watch or [] if isinstance(r, dict)]
+    fresh = {str(r["repo"]).lower() for r in rows}
+    live = {f"{r['repo']}#{r['number']}".lower() for r in rows}
+    merged = {f"{x['repo']}#{x['number']}".lower() for xs in (pr_index or {}).values() for x in xs if x.get("merged")}
+    old = state.get("pr_conflict") if isinstance(state.get("pr_conflict"), dict) else {}
+    keep = {k: v for k, v in old.items() if isinstance(v, (int, float)) and k.lower() not in merged
+            and (k.rsplit("#", 1)[0].lower() not in fresh or k.lower() in live)}
+    for row in rows:
         key = f"{row['repo']}#{row['number']}"
         since = row.get("accept_at")
-        if row.get("conflict"):
-            keep[key] = seen.get(key) if isinstance(seen.get(key), (int, float)) else t
+        if row.get("conflict") is True:
+            keep.setdefault(key, t)
+        elif row.get("conflict") is False:
+            keep.pop(key, None)
+        if key in keep:
             since = keep[key] if since is None else min(since, keep[key])
         if since is None or t - since <= STALE_PR:
             continue
         tid = next((i for i, xs in sorted((pr_index or {}).items()) for x in xs
                     if not x.get("merged") and f"{x['repo']}#{x['number']}".lower() == key.lower()), None)
         h = tasks[tid][1] if tid in tasks else {}
-        why = "CONFLICTING с main" if row.get("conflict") else "«принять» argus без заявки tests"
+        why = "CONFLICTING с main" if key in keep else "«принять» argus без заявки tests"
         hours = int((t - since) // 3600)
-        alert(f"stalepr-{key}", "1", f"открытый PR {key} стоит {hours} ч: {why}" + (f" — задача {tid}" if tid else "")
+        alert(f"stalepr-{key}", str(row.get("head") or "1"),
+              f"открытый PR {key} стоит {hours} ч: {why}" + (f" — задача {tid}" if tid else "")
               + " — разобрать (ребейз или заявка tests на итоговый head)", h.get("owner") or h.get("direction") or "board")
         done_lines.append(f"{key}: PR стоит {hours} ч ({why})")
     if keep:
