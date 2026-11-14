@@ -54,6 +54,10 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill, EnterWorktree) и 
   репозитория. Каждый `-R` (и склеенный `-Rx`, `--repo=x`) сверяется со списком. Из файла не уходят личное
   (`[private] paths`) и всё под `.git` любой копии — ключ git-crypt, `config` (metis-0596: в окне mnemo-brain своя
   копия — `~/ai/knowledge` с `me/`, а главную сессию check_private не судит); шаблон оболочки в имени файла — отказ.
+  Там же мимо песочницы `pantheon merge request|cancel` (PANTHEON_MERGE_OUT, metis-1197): в песочнице gh изнутри
+  pantheon падает (TLS Go), и очередь заявок в STATE окну закрыта на запись. Кто подаёт — правило pantheon-acl, на
+  какой repo — `[merge_repos]` metis-pantheon в самом `pantheon merge request`; сбой gh pr view заявка называет кодом
+  и последней строкой stderr gh.
   Относительный путь файла — только когда в строке одна команда, сам gh: в строке из нескольких команд (`cd docs &&`,
   подоболочка, `;`, конвейер, `sh -c '…'`) и при вызове gh через любую обёртку (`env`, `sudo`, `uv --directory`,
   `pnpm -C`, `nice` …) — отказ с подсказкой «дай абсолютный путь»: ни имена команд, ни опции обёрток не разбираем. `env` с любой длинной опцией (`--…`) или с `S` среди коротких
@@ -850,9 +854,11 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
    каких «принять», кто сливает); `records.jsonl` он не меняет. Строка не записалась — отказ.
    **Решение для шлюза владельца (metis-0966, 0396, 0443, вариант А).** Проход владельца (`lib/merge.py`, PR ядра по
    Touch ID или фразе) работает без git папки слияния и код прошлых head сам не сверит. Поэтому при `pantheon merge
-   request <N>… -R <repo>` хук guard (PreToolUse, `request_decisions`) в папке команды — клоне репозитория — сверяет
-   код нового head PR с кодом каждого прошлого head с вердиктами argus теми же отпечатками и слиянием, что и перенос
-   выше. Итог — строка `kind: decision` в `carry.jsonl`: SHA, base PR (`baseRefName` и вершина), `same` — head с тем
+   request <N>… -R <repo>` хук guard (PreToolUse, `request_decisions`) в клоне репозитория сверяет код нового head PR
+   с кодом каждого прошлого head с вердиктами argus теми же отпечатками и слиянием, что и перенос выше. Клон — папка команды, если её remote — repo; иначе клон из реестра (`_merge_clone`, metis-1199): корни
+   domains.json тех направлений, у которых repo в `[merge_repos]`, — сам корень или его подпапка с именем repo, и
+   только с remote repo (папке не верим). Так заявка на PR продукта из worktree agent-kit сверяет код в клоне
+   продукта. Итог — строка `kind: decision` в `carry.jsonl`: SHA, base PR (`baseRefName` и вершина), `same` — head с тем
    же кодом, `differs` — посчитано, код другой, `why` — чего не сверили. Это факт о коде, а не вердикт: вердикты
    проход считает сам по `records.jsonl`. С решением проход переносит «принять» с head из `same` и даёт второму
    argus снять «вернуть» только на head из `differs`; без решения (команда с `cd`, не клон, сбой gh или git, срок

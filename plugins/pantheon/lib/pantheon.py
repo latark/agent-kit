@@ -2391,6 +2391,10 @@ SANDBOX_EXCLUDED = GH_PR_READ + GH_ISSUE_READ + GH_RUN_READ + ["gh repo view *",
 # `gh pr comment` (ответ ревью в PR) и `gh pr ready` (снять черновик) — без произвольного кода; текст — через
 # --body-file. `gh pr close|reopen|review`, запись в `gh issue`, `gh api`, `gh auth token`, `gh extension` — в песочнице
 GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment *", "gh pr ready *"]
+# заявка на слияние по Touch ID (metis-1197) — тоже только окнам направлений, мимо песочницы: в ней gh pr view изнутри
+# pantheon падает (TLS Go), и очередь merge-queue в STATE окну на запись закрыта. Кто подаёт и на какой repo, судит
+# guard (pantheon-acl) и сам `pantheon merge request` ([merge_repos] metis-pantheon); сливает только плановый проход
+PANTHEON_MERGE_OUT = ["pantheon merge request *", "pantheon merge cancel *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -4368,7 +4372,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
                              guard, auto_allow, own_agents=direction)
         if direction:
-            data["sandbox"]["excludedCommands"] += GH_PR_WRITE
+            data["sandbox"]["excludedCommands"] += GH_PR_WRITE + PANTHEON_MERGE_OUT
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)

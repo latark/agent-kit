@@ -477,6 +477,15 @@ def main():
           "нет (metis-0247, metis-0533)",
           all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.split()[0] == "gh") == coord_gh
               for w in (sa, sm, sn, sz)))
+    # metis-1197: заявка на слияние — мимо песочницы только в окнах направлений (в ней gh из pantheon падает, TLS Go,
+    # и очередь в STATE закрыта на запись); прочий `pantheon merge` (run) и мастерская — в песочнице
+    merge_out = ["pantheon merge request *", "pantheon merge cancel *"]
+    check("окно координатора: pantheon merge request|cancel мимо песочницы — ровно они; у мастерской нет (metis-1197)",
+          all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("pantheon merge")) == sorted(merge_out)
+              for w in (sa, sm, sn, sz))
+          and not any(x.startswith("pantheon merge") for x in sw["sandbox"]["excludedCommands"]),
+          [w["sandbox"]["excludedCommands"] for w in (sa, sw)])
+
     def excluded_by(cmd, patterns):
         # как правило excludedCommands: «… *» — префикс и любые аргументы, без звёздочки — точное совпадение
         return any(cmd == x or (x.endswith(" *") and cmd.startswith(x[:-1])) for x in patterns)

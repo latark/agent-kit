@@ -2723,8 +2723,9 @@ def append_carry(rec):
 # Шлюз владельца (pantheon/lib/merge.py, слияние PR ядра по Touch ID или фразе) работает в плановом проходе без git
 # папки слияния: «тот же код» на другом head он не сверит, и раньше другой коммит считался другим кодом — второй argus
 # снимал «вернуть» после rebase с тем же кодом, а «принять» после release.py и rebase не переносилось. Теперь при
-# `pantheon merge request` хук guard в папке, откуда заявка (клон repo), сверяет код нового head с кодом каждого
-# прошлого head с вердиктами argus — те же _Prints, что у шлюза gh pr merge, — и пишет в carry.jsonl запись kind
+# `pantheon merge request` хук guard в клоне repo (папка заявки или клон из реестра, _merge_clone, metis-1199) сверяет
+# код нового head с кодом каждого прошлого head с вердиктами argus — те же _Prints, что у шлюза gh pr merge, — и
+# пишет в carry.jsonl запись kind
 # "decision": same — head с тем же кодом (отпечаток или слияние, _merge_same), differs — посчитано, код другой,
 # delta — head, от которых новый head — мелкая правка поверх вне ядра (_delta_heads, metis-0784): их «принять» проход
 # засчитывает вместе со свежим «принять» другого argus на новом head.
@@ -2753,11 +2754,38 @@ def request_decisions(event, args, cwd):
         return
     try:
         records = read_records()
-        tips = {}
+        tips, clone = {}, []
         for pr in dict.fromkeys(int(a) for a in nums):
-            _decision(event, records or [], repo, pr, cwd, tips)
+            _decision(event, records or [], repo, pr, cwd, tips, clone)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return
+
+
+def _is_clone(d, repo):
+    """Папка d — клон repo: среди её remote есть repo (как проверяет _carry_git)."""
+    remotes = _git_remotes(d) if d else None
+    return remotes is not None and repo in {_repo_tail(r) for r in remotes}
+
+
+def _merge_clone(cwd, repo):
+    """Папка для сверки кода при `pantheon merge request` (metis-1199): папка команды, если она клон repo; иначе — клон
+    repo из реестра: корни domains.json (_merge_domains) тех направлений, у которых repo в [merge_repos] policy.toml,
+    сам корень или его подпапка с именем repo. Папке не верим: годится только та, чей remote — repo. Заявки на PR
+    продукта подаёт и сессия metis-pantheon из worktree agent-kit — без этого «вернуть» старого head не снималось
+    никогда. Клона нет — cwd (сверка запишет «не клон»)."""
+    if _is_clone(cwd, repo):
+        return cwd
+    domains = _merge_domains() or {}
+    repos = G.load_policy().get("merge_repos")
+    name = repo.split("/")[-1]
+    for direction, listed in (repos.items() if isinstance(repos, dict) else ()):
+        if repo not in {str(x).strip().lower() for x in (listed if isinstance(listed, list) else ())}:
+            continue
+        for root in domains.get(direction) or ():
+            for d in (root, os.path.join(root, name)):
+                if os.path.isdir(d) and _is_clone(d, repo):
+                    return d
+    return cwd
 
 
 # Срок одного gh в решении шлюза при заявке (metis-1181). Под DEADLINE 8 с хука с общим GH_TIMEOUT 6 второй gh (вершина
@@ -2781,7 +2809,7 @@ def _decision_miss(event, repo, pr, sha, why):
                   "by": _decision_by(event), "time": datetime.now().astimezone().isoformat(timespec="seconds")})
 
 
-def _decision(event, records, repo, pr, cwd, tips):
+def _decision(event, records, repo, pr, cwd, tips, clone=None):
     """Решение шлюза для repo#pr (request_decisions): gh pr view и вершина base — каждый со сроком
     DECISION_GH_TIMEOUT и только если успевает до срока хука (_gh_fits), git — со сроком от остатка (_git_timeout).
     Не успели или gh не ответил — след _decision_miss вместо молчаливого выхода."""
@@ -2803,7 +2831,11 @@ def _decision(event, records, repo, pr, cwd, tips):
         return _decision_miss(event, repo, pr, sha, "срок хука: на вершину ветки base не осталось времени")
     # вершина base — здесь, со своим сроком: _Prints возьмёт её из памяти tips и gh со сроком GH_TIMEOUT не позовёт
     _base_tip(repo, base, tips, DECISION_GH_TIMEOUT)
-    fp = _Prints(cwd, repo, sha, verdicts, lambda: view, tips)
+    # папка сверки — клон repo (_merge_clone, metis-1199), один раз на все PR заявки: clone — память request_decisions
+    clone = [] if clone is None else clone
+    if not clone:
+        clone.append(_merge_clone(cwd, repo))
+    fp = _Prints(clone[0], repo, sha, verdicts, lambda: view, tips)
     same, differs = [], []
     fs = fp(sha)
     for h in others if fs else []:

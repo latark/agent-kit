@@ -33,7 +33,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      рецензента или свежее другого argus на этот SHA, если код «вернуть» другой), а «принять», записанное раньше
      последнего неснятого «вернуть», не в счёт (held_rejects, reject_floor — правило шлюза guard, metis-0465).
      Код прошлых head проход сам не сверит — git папки слияния у него нет. Его сверяет хук guard при `pantheon merge
-     request` из клона репозитория (merge_gate.request_decisions, metis-0966, 0396, 0443, вариант А): запись kind
+     request` в клоне репозитория — папке заявки или клоне из реестра направлений (merge_gate.request_decisions и
+     _merge_clone, metis-0966, 0396, 0443, 1199, вариант А): запись kind
      "decision" в carry.jsonl — head с тем же кодом, что у SHA (same), и посчитанно другим (differs). Проход берёт
      последнее решение на SHA и нынешнюю base PR, не старше REQUEST_TTL и на нынешней вершине ветки base (gh api,
      base_tip — как у шлюза; main ушёл вперёд — решение не в счёт) (code_facts): «принять» с head из same
@@ -427,20 +428,39 @@ def gh_path():
     return shutil.which("gh", path=(os.environ.get("PATH") or "") + ":/opt/homebrew/bin:/usr/local/bin") or "gh"
 
 
-def pr_view(repo, pr):
+def gh_why(r):
+    """Почему gh не ответил (metis-1197): «код N: <последняя непустая строка stderr>» — строка без управляющих знаков,
+    не длиннее 200. Причину видно в отказе, а не только «не ответил»."""
+    lines = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+    last = re.sub(r"[\x00-\x1f\x7f]", " ", lines[-1]).strip()[:200] if lines else "stderr пуст"
+    return f"код {r.returncode}: {last}"
+
+
+def pr_view(repo, pr, why=None):
     """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles, isCrossRepository,
     headRepository, headRefName, mergeable, mergeStateStatus} или None — gh не ответил. isCrossRepository,
     headRepository, headRefName — голова PR из форка (ci_fork, metis-0649); последние два — сливается ли с base
-    (merge_conflict, metis-0819)."""
+    (merge_conflict, metis-0819). why — список: в него кладётся причина None (gh_why, metis-1197)."""
+    why = [] if why is None else why
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
                             "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles,"
                             "isCrossRepository,headRepository,headRefName,mergeable,mergeStateStatus"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
-        data = json.loads(r.stdout) if r.returncode == 0 else None
-    except (OSError, ValueError, subprocess.SubprocessError):
+        if r.returncode != 0:
+            why.append(gh_why(r))
+            return None
+        data = json.loads(r.stdout)
+    except subprocess.TimeoutExpired:
+        why.append(f"нет ответа за {GH_TIMEOUT} с")
         return None
-    return data if isinstance(data, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        why.append(f"{type(e).__name__}: {str(e)[:200]}")
+        return None
+    if not isinstance(data, dict):
+        why.append("ответ gh — не объект JSON")
+        return None
+    return data
 
 
 def pr_files(repo, pr, view, raw=None):
@@ -1114,16 +1134,18 @@ def _retry_why(why):
     return "срок хука" in why or "gh" in why and any(w in why for w in ("не ответил", "не успел", "не получить"))
 
 
-def held_rejects(verdicts, sha, differs=frozenset()):
+def held_rejects(verdicts, sha, differs=frozenset(), same=frozenset()):
     """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
     по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
-    снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head или на sha; 2) другого argus на
-    sha, если «вернуть» на head с другим кодом — head из differs решения шлюза guard (code_facts, metis-0966), — и у
-    «принять» с полем «вернули» — только взявшего отчёт вернувшего (returned_lifts, metis-0497). Решения нет или код
-    head «вернуть» не посчитан — второй argus «вернуть» не снимает: rebase с тем же кодом — не новый код. Третий head
+    снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head, на sha или на head того же
+    кода, что sha (same решения шлюза guard, metis-1199: вернувший принял следующий head, а потом подтянули base);
+    2) другого argus на sha, если «вернуть» на head с другим кодом — head из differs решения шлюза guard (code_facts,
+    metis-0966), — и у «принять» с полем «вернули» — только взявшего отчёт вернувшего (returned_lifts, metis-0497).
+    Решения нет или код head «вернуть» не посчитан — второй argus «вернуть» не снимает: rebase с тем же кодом — не новый код. Третий head
     (правило 3 шлюза guard) «вернуть» не снимает: строже, на sha нужны свои «принять»."""
     def lifts(a, r):
-        return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r) and a["sha"] in (r["sha"], sha)
+        return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r)
+                                          and (a["sha"] in (r["sha"], sha) or a["sha"] in same)
                                           or a["sha"] == sha != r["sha"] and r["sha"] in differs
                                           and returned_lifts(a, r))
     return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
@@ -1213,7 +1235,7 @@ def gate(repo, pr, sha, view):
     # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard; код прошлых head — из
     # решения шлюза guard при `pantheon merge request` (code_facts, metis-0966)
     same, differs, delta = code_facts(repo, pr, sha, view)
-    held = held_rejects(verdicts, sha, differs)
+    held = held_rejects(verdicts, sha, differs, same)
     # код прошлых head не сверен — подсказка «повтори заявку», а не нового argus (metis-1181)
     if held:
         heads = ", ".join(r["sha"][:12] for r in held)
@@ -1960,9 +1982,10 @@ def cmd_request(args):
         return 2
     heads, bad, waits = {}, [], []
     for pr in prs:
-        view = pr_view(repo, pr)
+        why = []
+        view = pr_view(repo, pr, why)
         if view is None:
-            err(f"pantheon merge request: gh pr view {pr} -R {repo} не ответил — заявки нет")
+            err(f"pantheon merge request: gh pr view {pr} -R {repo} не ответил ({'; '.join(why) or '?'}) — заявки нет")
             return 1
         sha = str(view.get("headRefOid") or "").lower()
         if not SHA_RE.fullmatch(sha):
