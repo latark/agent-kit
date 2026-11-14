@@ -53,7 +53,7 @@ def check(name, ok, detail=""):
 def setup(home):
     # папки agents, commands, hooks не создаём: песочница окна закрывает их запись (**/.claude/agents), а guard судит
     # цель записи и без готовой папки
-    for d in (APP + "/.claude/skills/x", APP + "/.claude/worktrees/w/.claude/skills/x", APP + "/.claude/skills/risky", ROOT_BA + "/.claude", SITE + "/.claude",
+    for d in (ROOT_BA + "/gpu/.git", ROOT_BA + "/nogit", APP + "/.claude/skills/x", APP + "/.claude/worktrees/w/.claude/skills/x", APP + "/.claude/skills/risky", ROOT_BA + "/.claude", SITE + "/.claude",
               AK + "/.claude", ".claude/pantheon", ".local/state/pantheon", "ai/pantheon", "src"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     json.dump({"domains": {
@@ -178,11 +178,16 @@ def main():
             ("/.claude/worktrees/w/.claude/skills/a/.claude/commands/x.md", "в: commands после skills"),
             ("/.claude/agents/q/.claude/worktrees/w/.claude/skills/y/SKILL.md", "в: agents до worktree"),
             ("/.claude/commands/q/.claude/worktrees/w/.claude/skills/y/SKILL.md", "в: commands до worktree"),
-            ("/x/.claude/worktrees/w/.claude/skills/y/SKILL.md", "б: поддельная worktree в подпапке"),
+            ("/x/.claude/worktrees/w/.claude/skills/y/SKILL.md", "б: поддельная worktree в подпапке без .git"),
             ("/.claude/worktrees/.claude/skills/y/SKILL.md", "а: worktrees без имени"),
             ("/.claude/xyz/w/.claude/skills/y/SKILL.md", "а: не worktrees"),
             ("/x/worktrees/w/.claude/skills/y/SKILL.md", "а: worktrees не в .claude"),
             ("/.claude/worktrees/w/x/.claude/skills/y/SKILL.md", "а: пара не прямо перед .claude/skills"))],
+        # ревью #459 Б2: вложенный git-корень в папке направления (MorphStream/app) — можно; подпапка без .git — отказ
+        ("dev-sonnet: worktree вложенного репозитория projAApp/gpu (есть .git) — можно", "allow", APP,
+         ("dev-sonnet", True), W(ROOT_BA + "/gpu/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        ("dev-sonnet: worktree в подпапке projAApp/nogit без .git — отказ", "deny", APP, ("dev-sonnet", True),
+         W(ROOT_BA + "/nogit/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
         ("dev-sonnet: навык с !`cmd` — отказ", "deny", APP, ("dev-sonnet", True),
          W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", "---\nname: y\n---\nветка: !`git branch`\n")),
         ("dev-sonnet: навык с блоком ```! — отказ", "deny", APP, ("dev-sonnet", True),

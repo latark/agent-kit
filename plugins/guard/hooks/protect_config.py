@@ -99,7 +99,12 @@ def _dev_skill_only(p, own):
     if not (parts[i - 3] == ".claude" and parts[i - 2] == "worktrees" and parts[i - 1]):  # (а)
         return False
     prefix = "/".join(parts[:i - 3])
-    return any(prefix == G._key(f).rstrip("/") for f in own)  # (б)
+    if any(prefix == G._key(f).rstrip("/") for f in own):  # (б): сама папка направления
+        return True
+    # (б): вложенный git-корень внутри папки направления (MorphStream/app, ревью #459 Б2) — есть <prefix>/.git
+    # (папка или файл worktree); обычная подпапка без .git — поддельная worktree, отказ
+    real = "/".join(p.split("/")[:i - 3])
+    return G._inside(real, own) and os.path.lexists(os.path.join(real, ".git"))
 
 
 def own_folders(role, sub, pdir):
@@ -107,7 +112,7 @@ def own_folders(role, sub, pdir):
     domain-coordinator) и лид направления (hephaestus-<коротко>, apollo-<коротко> — главная сессия или субагент окна).
     Направление — по папке запуска (domains.json). Разработчик-субагент (dev-haiku, dev-sonnet, dev-opus, metis-1039)
     тоже получает папки направления, но check_protect_config пускает его только в .claude/skills своей worktree
-    (_dev_skill_only). Иначе []: остальные роли, остальные субагенты и чужое направление."""
+    (_dev_skill_only): ровно папка направления или вложенный git-корень в ней. Иначе []: остальные роли, остальные субагенты и чужое направление."""
     name, folders = G.direction_of(G.load_domains(), pdir)
     if not name or not folders:
         return []

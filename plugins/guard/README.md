@@ -188,8 +188,9 @@ send-keys и т. п. — ввод от имени владельца), попо�
     видит — проверки текста после хода нет. После taint запись — как раньше;
   - с metis-1039 («да» владельца 14.11) разработчики `dev-haiku`, `dev-sonnet`, `dev-opus` (субагенты) правят только
     `.claude/skills` своей worktree своего направления: `<папка направления>/.claude/worktrees/<имя>/.claude/skills/…`.
-    Пара `.claude/worktrees/<имя>` стоит прямо перед `.claude/skills`, до неё — ровно папка направления из domains.json
-    (подпапка `app/x/.claude/worktrees/…` — поддельная worktree, отказ), другой пары `.claude/agents|commands|skills|hooks`
+    Пара `.claude/worktrees/<имя>` стоит прямо перед `.claude/skills`, до неё — папка направления из domains.json
+    или вложенный в неё git-корень с `.git` (`MorphStream/app`, ревью #459 Б2). Обычная подпапка без `.git`
+    (`app/x/.claude/worktrees/…`) — поддельная worktree, отказ. Другой пары `.claude/agents|commands|skills|hooks`
     в пути нет ни до, ни после (ревью #459). Текст проверяется так же, как у координатора (`own_text_problem`).
     Основная копия проекта, `.claude/commands`, `.claude/agents`, `.claude/hooks` и настройки для них закрыты; причина
     отказа советует править навык в своей worktree;
