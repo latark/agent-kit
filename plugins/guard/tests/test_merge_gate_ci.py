@@ -6,6 +6,7 @@
 """
 # ruff: noqa: F403, F405
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -724,7 +725,52 @@ def t_ci_verdict_unit(h):
           {(w, j) for w, j, _ in mg.OPTIONAL_CHECKS["agent-kit"]} <= pr_jobs, sorted(pr_jobs))
 
 
-CASES = [t_ci, t_ci_required, t_ci_verdict_unit]
+def t_ci_hashed(h):
+    """metis-1116: приватные проекты владельца — в таблицах шлюза по ключу sha256 полного owner/name (имён в публичном
+    коде нет); repo_entry сначала ищет хеш, потом короткое имя (agent-kit как раньше). Репозиторий с тем же коротким
+    именем у другого владельца хеш не даёт. Проверка на вымышленном owner-x/proj, подменой таблиц модуля."""
+    import hashlib
+    mg = _load_merge_gate("merge_gate_ci_hashed")
+    key = "sha256:" + hashlib.sha256(b"owner-x/proj").hexdigest()
+    mg.REQUIRED_CHECKS = dict(mg.REQUIRED_CHECKS, **{key: (("tests", "checks", None),)})
+    mg.FULL_TESTS = dict(mg.FULL_TESTS, **{key: "pnpm run check"})
+    want = (("tests", "checks"),)
+    check("required_checks: owner-x/proj (хеш) в develop и main, регистр не важен",
+          mg.required_checks("Owner-X/Proj", "develop") == want and mg.required_checks("owner-x/proj", "main") == want
+          and mg.required_checks("owner-x/proj", None) == want)
+    check("required_checks: то же короткое имя у другого владельца и без владельца — пусто",
+          mg.required_checks("someone/proj", "develop") == () and mg.required_checks("proj", "main") == ())
+    check("required_checks: agent-kit — прежние записи",
+          mg.required_checks("latark/agent-kit", "main") == (("tests", "affected"), ("check-traces", "traces")))
+    check("repo_entry: хеш только от полного имени — вложенный путь и сам хеш как имя не совпадают",
+          mg.repo_entry(mg.FULL_TESTS, "x/owner-x/proj") is None and mg.repo_entry(mg.FULL_TESTS, "x/" + key) is None)
+    check("в таблицах шлюза есть приватная запись по хешу: tests/checks и pnpm run check",
+          any(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and v == (("tests", "checks", None),)
+              for k, v in _load_merge_gate("merge_gate_ci_real").REQUIRED_CHECKS.items())
+          and any(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and v == "pnpm run check"
+                  for k, v in _load_merge_gate("merge_gate_ci_real2").FULL_TESTS.items()))
+    out = "pnpm run check  # package.json: npx tsx scripts/run-checks.ts"
+    for name, repo, cmd, ok in (
+            ("запись outside с хвостом «# …»", "owner-x/proj", out, True),
+            ("хук: pantheon review test -- pnpm run check", "owner-x/proj", "pantheon review test -- pnpm run check", True),
+            ("pnpm run check && x", "owner-x/proj", "pnpm run check && x", False),
+            ("другой владелец someone/proj", "someone/proj", out, False)):
+        check(f"full_tests_record по хешу: {name} → {ok}", mg.full_tests_record(repo, dict(cmd=cmd)) is ok, cmd)
+    # запасной путь при «spending limit»: запись полного набора на SHA — пропуск, другая команда — отказ
+    sha = h.sha["agent-kit"]
+    full = "pantheon review test -- pnpm run check"
+    mg.read_records = lambda: [full_rec("owner-x/proj", sha, full)]
+    got = mg._billing_problem("owner-x/proj", 7, sha)
+    check("_billing_problem по хешу: запись pnpm run check на SHA — пропуск", got[0] is None and len(got[1]) == 1, got)
+    mg.read_records = lambda: [full_rec("owner-x/proj", sha, "pantheon review test -- pnpm test")]
+    got = mg._billing_problem("owner-x/proj", 7, sha)[0] or ""
+    check("_billing_problem по хешу: запись с другой командой — отказ с `pnpm run check`", "pantheon review test -- pnpm run check`" in got, got)
+    mg.read_records = lambda: [full_rec("owner-x/proj", sha, full)]
+    got = mg._billing_problem("someone/proj", 7, sha)[0] or ""
+    check("_billing_problem: someone/proj — запасного пути нет", "запасного пути у репозитория нет" in got, got)
+
+
+CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed]
 
 
 if __name__ == "__main__":

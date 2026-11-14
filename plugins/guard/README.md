@@ -1031,6 +1031,9 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
    `tests.yml`) и `check-traces/traces` (на любой PR). Job `tests/full` — полный набор на macos-15 на каждый PR в CI
    (metis-1111), но слияние он не держит (решение 09.11, metis-1050, подтверждено 13.11): он в `OPTIONAL_CHECKS`;
    ночной полный набор на main тоже идёт в Actions — `tests.yml` по расписанию (metis-1115, ниже).
+   Приватные проекты владельца (metis-1116) — в тех же таблицах, ключ — «sha256:<hex>» от `owner/name` в нижнем регистре: имён
+   приватных репозиториев в публичном коде нет. Таблицы ищет `repo_entry`: сначала хеш полного имени, потом короткое
+   имя (agent-kit); репозиторий с тем же коротким именем у другого владельца хеш не даёт.
    Обязательную закрывает только запуск GitHub Actions от события `pull_request` на этом SHA с итогом SUCCESS:
    - Запуски шлюз берёт двумя GET REST по SHA из `--match-head-commit`: `actions/runs?head_sha=…` (событие, workflow) и
      `commits/<SHA>/check-runs` (job и итог), связь — `check_suite_id`. В rollup `gh pr view` события нет, а GraphQL —
