@@ -1483,10 +1483,12 @@ def tick():
 
 def release_ticks(t):
     """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска), затем ночной
-    полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
+    полный набор на main (metis-1050), итог проверки MCP координаторам (metis-1047). Сбой одного не останавливает тик
+    и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
                            ("map-tick-crash", "карта тестов", map_tick_mod),
                            ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod),
+                           ("mcp-report-crash", "итог проверки MCP координаторам", mcp_report_mod),
                            ("denials-tick-crash", "отчёт отказов", denials_mod)):
         try:
             mod().tick(t)
@@ -7436,6 +7438,16 @@ def nightly_tick_mod():
         spec.loader.exec_module(_NIGHTLY_TICK)
         _NIGHTLY_TICK.set_core(sys.modules[__name__])
     return _NIGHTLY_TICK
+
+
+def mcp_report_mod():
+    """lib/mcp_report.py — итог проверки серверов MCP во входящие координатора (metis-1047, часть 4)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_mcp_report", os.path.join(LIB, "mcp_report.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.set_core(sys.modules[__name__])
+    return mod
 
 
 def denials_mod():
