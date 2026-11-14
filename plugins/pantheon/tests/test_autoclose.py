@@ -144,6 +144,11 @@ def test_unit():
           "«часть-пусто», «часть» в конце",
           not A.is_part("Closes metis-1051\n\nличная часть карты plugins-by-role.toml") and not A.is_part("часть 1 из 2")
           and not A.is_part("часть-пусто") and not A.is_part("остальное — часть") and not A.is_part("часть metis-10511x"))
+    for form in ("**часть** metis-1051", "часть (metis-1051)", "часть `metis-1051`", "часть №1051", "часть № 1051",
+                 "часть #1051", "_часть_ metis-1051", "часть [metis-1051]", "часть работы metis-1051"):
+        check(f"is_part (metis-1193): разметка или одно слово между «часть» и номером — да: {form!r}", A.is_part(form))
+    for form in ("часть большой работы metis-1051", "часть карты, metis-1051", "участь metis-1051", "частьmetis-1051"):
+        check(f"is_part (metis-1193): два слова, запятая или «часть» внутри слова — нет: {form!r}", not A.is_part(form))
     diff = ("diff --git a/plugins/pantheon/.claude-plugin/plugin.json b/plugins/pantheon/.claude-plugin/plugin.json\n"
             '-  "version": "0.11.49",\n+  "version": "0.11.50",\ndiff --git a/x.json b/x.json\n+  "version": "9"\n')
     check("plugin_versions: версия из plugin.json, чужой json не берётся", A.plugin_versions(diff) == {"pantheon": "0.11.50"})
