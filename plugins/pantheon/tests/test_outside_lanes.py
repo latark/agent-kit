@@ -398,6 +398,26 @@ P.write_json(os.path.join(STATE, "domains.json"), _dom)
 check("lane_of: папки нет в реестре — quick и не запомнено; появилась (репозиторий с FULL_TESTS) — full",
       first == "quick" and O.lane_of(_lreq, "metis-k", r_late) == "full", (first, O.lane_of(_lreq, "metis-k", r_late)))
 
+# приватный проект по ключу «sha256:<hex>» полного owner/name (metis-1116, Д1 argus #479): remote в любом регистре и
+# виде адреса — full; тот же короткий proj у другого владельца — quick
+import hashlib  # noqa: E402
+M.FULL_TESTS["sha256:" + hashlib.sha256(b"owner-x/proj").hexdigest()] = "pnpm run check"
+_hdirs = {}
+for _name, _url in (("hpriv", "https://github.com/Owner-X/Proj.git"), ("hother", "git@github.com:someone/proj.git")):
+    _hd = os.path.join(HOME, "projects", _name)
+    os.makedirs(_hd)
+    git(_hd, "init", "-q", "-b", "main")
+    git(_hd, "remote", "add", "origin", _url)
+    _hdirs[_name] = _hd
+_dom = P.read_json(os.path.join(STATE, "domains.json"), {})
+_dom["domains"]["metis-k"] = _dom["domains"]["metis-k"] + ["~/projects/hpriv", "~/projects/hother"]
+P.write_json(os.path.join(STATE, "domains.json"), _dom)
+_hp = {"v": 1, "id": "20261115-666664-1a2b3c", "kind": "test", "dir": _hdirs["hpriv"]}
+_ho = {"v": 1, "id": "20261115-666665-1a2b3c", "kind": "test", "dir": _hdirs["hother"]}
+check("lane_of: приватный проект по хешу owner/name — full, someone/proj с тем же коротким именем — quick",
+      O.lane_of(_hp, "metis-k", _hp["id"]) == "full" and O.lane_of(_ho, "metis-k", _ho["id"]) == "quick",
+      (O.lane_of(_hp, "metis-k", _hp["id"]), O.lane_of(_ho, "metis-k", _ho["id"])))
+
 if FAILS:
     for _r in [x for x in os.listdir(_ROOT) if x.startswith("lane-") and x.endswith("-started")]:
         release(_r[len("lane-"):-len("-started")])

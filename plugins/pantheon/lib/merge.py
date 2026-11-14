@@ -638,8 +638,10 @@ CI_NONE = "проверки GitHub не получены"
 # внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
 # (SUCCESS/NEUTRAL/SKIPPED).
 REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None)),
-                   # приватный проект владельца (metis-1116): ключ — sha256 owner/name, job checks на PR
-                   "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (("tests", "checks", None),)}
+                   # приватный проект владельца (metis-1116): ключ — sha256 owner/name, job checks на PR в develop и main
+                   # (ветки эпиков — без требования: их workflow может ещё не быть, PR ждал бы вечно — argus #479)
+                   "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
+                       ("tests", "checks", "develop"), ("tests", "checks", "main"))}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate_ci по файлам .github/workflows

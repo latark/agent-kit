@@ -732,12 +732,14 @@ def t_ci_hashed(h):
     import hashlib
     mg = _load_merge_gate("merge_gate_ci_hashed")
     key = "sha256:" + hashlib.sha256(b"owner-x/proj").hexdigest()
-    mg.REQUIRED_CHECKS = dict(mg.REQUIRED_CHECKS, **{key: (("tests", "checks", None),)})
+    mg.REQUIRED_CHECKS = dict(mg.REQUIRED_CHECKS, **{key: (("tests", "checks", "develop"), ("tests", "checks", "main"))})
     mg.FULL_TESTS = dict(mg.FULL_TESTS, **{key: "pnpm run check"})
     want = (("tests", "checks"),)
     check("required_checks: owner-x/proj (хеш) в develop и main, регистр не важен",
           mg.required_checks("Owner-X/Proj", "develop") == want and mg.required_checks("owner-x/proj", "main") == want
-          and mg.required_checks("owner-x/proj", None) == want)
+          and mg.required_checks("owner-x/proj", None) == want + want)
+    check("required_checks: PR приватного проекта в ветку эпика — без требования (Б1 argus #479: workflow там может не быть)",
+          mg.required_checks("owner-x/proj", "batch/x") == () and mg.required_checks("owner-x/proj", "epic-1") == ())
     check("required_checks: то же короткое имя у другого владельца и без владельца — пусто",
           mg.required_checks("someone/proj", "develop") == () and mg.required_checks("proj", "main") == ())
     check("required_checks: agent-kit — прежние записи",
@@ -745,7 +747,7 @@ def t_ci_hashed(h):
     check("repo_entry: хеш только от полного имени — вложенный путь и сам хеш как имя не совпадают",
           mg.repo_entry(mg.FULL_TESTS, "x/owner-x/proj") is None and mg.repo_entry(mg.FULL_TESTS, "x/" + key) is None)
     check("в таблицах шлюза есть приватная запись по хешу: tests/checks и pnpm run check",
-          any(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and v == (("tests", "checks", None),)
+          any(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and v == (("tests", "checks", "develop"), ("tests", "checks", "main"))
               for k, v in _load_merge_gate("merge_gate_ci_real").REQUIRED_CHECKS.items())
           and any(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and v == "pnpm run check"
                   for k, v in _load_merge_gate("merge_gate_ci_real2").FULL_TESTS.items()))
