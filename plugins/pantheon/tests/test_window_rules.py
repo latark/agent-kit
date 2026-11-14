@@ -288,6 +288,13 @@ def main():
               and {proj + "/.git/config", proj + "/**/.git/hooks"} <= set(dw(rs)), dw(rs))
         check("role_settings own_agents: своя папка роли и кэш — .claude/agents закрыта",
               {own + "/.claude/agents", cache + "/**/.claude/agents"} <= set(dw(rs)), dw(rs))
+        # metis-1221: корень своей папки — settings*.json и .mcp.json закрыты; копии .claude/worktrees/* — открыты (PR)
+        root = {proj + "/.claude/settings.json", proj + "/.claude/settings.local.json", proj + "/.mcp.json"}
+        check("role_settings: корень своей папки — .claude/settings*.json и .mcp.json закрыты (metis-1221)",
+              root <= set(dw(rs)), dw(rs))
+        check("role_settings: в копиях .claude/worktrees настройки проекта не закрыты — правка идёт там через PR",
+              not any(x.endswith(("settings.json", "settings.local.json", ".mcp.json")) and "**" in x for x in dw(rs)),
+              dw(rs))
         # хуки окна на Python — через hooks/python.sh рядом со скриптом (metis-0571); его нет — прежняя форма
         hd = os.path.join(tmp, "plug dir", "hooks")
         os.makedirs(hd)
