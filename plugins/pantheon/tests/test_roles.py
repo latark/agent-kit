@@ -1074,6 +1074,17 @@ def main():
     talos_real = read(os.path.join(out_real, "talos.md"))
     check("talos: dev-сервер — pantheon outside serve --sha … --wait 120, гасит stop",
           "pantheon outside serve --sha <head PR> [--app ИМЯ] --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    # metis-0903: talos знает, откуда брать sha, и что делать при коде 75; разработчики — тоже про 75
+    talos_flat = " ".join(talos_real.split())
+    check("talos: sha — gh pr view --json headRefOid, без PR git rev-parse, нет коммита — git fetch (metis-0903)",
+          "gh pr view <N> -R <owner/repo> --json headRefOid" in talos_flat and "git rev-parse <ветка>" in talos_flat
+          and "git fetch" in talos_flat)
+    check("talos: код 75 у outside serve — pantheon outside status <ID> (metis-0903)",
+          "Код 75 — адреса нет" in talos_flat and "pantheon outside status <ID>" in talos_flat)
+    for f in devs:
+        dev_flat = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: dev.part — код 75 у serve: pantheon outside status <ID> (metis-0903)",
+              "Код 75 — адреса нет" in dev_flat and "pantheon outside status <ID>" in dev_flat)
     # metis-0900: ожидание владельца в окне роли — строка Зевсу до действия (external.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "workshop.md", "hq.md"):
         text = " ".join(read(os.path.join(out_real, f)).split())
