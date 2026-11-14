@@ -1176,6 +1176,10 @@ for rule in ('Write(~/.local/**)', 'MultiEdit(//tmp/x)', 'NotebookEdit(~/n.ipynb
 live, _, gerr, _ = P.grants_load('[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nwrite = ["~/.CLAUDE"]\n')
 check("grants_load: write ~/.CLAUDE — отказ без учёта регистра (metis-1218)", not live and gerr
       and "не даётся" in gerr[0], (live, gerr))
+for bad in ("~/r/.claude", "~/r/.claude/hooks", "~/r/.Claude/agents/x", "~/r/.git", "~/r/.git/hooks"):
+    gerr = P.grants_load(f'[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nwrite = ["{bad}"]\n')[2]
+    check(f"grants_load: write {bad} — отказ, запреты от .claude/.git встали бы не туда (metis-1214)", gerr
+          and "в .claude и .git" in gerr[0], gerr)
 H = P.handoff_mod()
 check("отказ песочницы без маршрута — подсказка pantheon grant request",
       "pantheon grant request" in H.hint("touch /opt/x: Operation not permitted", "sandbox"))

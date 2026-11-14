@@ -2786,6 +2786,11 @@ def grants_load(text=None):
         if closed:
             errors.append(f"grant {i} ({win}): запись в ключи, конфиг и автозапуск не даётся: {', '.join(closed)}")
             continue
+        # сама папка .claude или .git (или путь внутри) — запреты GRANT_WRITE_DENY от неё встали бы не туда (metis-1214)
+        inner = [x for x in lists.get("write", []) if {".claude", ".git"} & set(norm(x).split("/"))]
+        if inner:
+            errors.append(f"grant {i} ({win}): запись в .claude и .git не даётся: {', '.join(inner)}")
+            continue
         if end <= now():
             expired.append((i, win, until))
             continue
