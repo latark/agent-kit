@@ -7648,7 +7648,7 @@ def _board(clock):
                                      alert=lambda k, v, text, who="board", note=None: alert_once(
                                          k, v, text, who, note if held else None, policy=pol),
                                      primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
-                                     **board_links())
+                                     pr_watch=_pr_watch(), **board_links())
             if pol is not None:
                 pol.save()
         finally:
@@ -7670,6 +7670,14 @@ def _board(clock):
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+def _pr_watch():
+    """Открытые PR, которые стоят (outside.pr_watch_rows), для тревоги прохода доски; сбой чтения — пусто (metis-1170)."""
+    try:
+        return outside_mod().pr_watch_rows()
+    except Exception:  # тревога о PR не должна ронять проход доски
+        return []
 
 
 def board_links():

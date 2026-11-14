@@ -1878,6 +1878,26 @@ c_["fetched"] = time.time()
 c_["errors"] = {"latark/al-stale": "gh не ответил"}
 json.dump(c_, open(_cp, "w"))
 check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
+# metis-1170: pr_watch_rows — открытые PR с «принять» argus без tests или с mergeable CONFLICTING; остальные не попадают
+_W = {c: c * 40 for c in "pqrs"}
+_wt = time.time()
+json.dump({"fetched": _wt, "errors": {"latark/w-err": "gh"}, "open_prs": {
+    "latark/w-x": [{"number": 7, "head": _W["p"], "mergeable": "CONFLICTING"},
+                   {"number": 8, "head": _W["q"], "mergeable": "MERGEABLE"},
+                   {"number": 9, "head": _W["r"], "mergeable": "MERGEABLE"},
+                   {"number": 10, "head": _W["s"], "mergeable": "MERGEABLE"}],
+    "latark/w-err": [{"number": 1, "head": _W["p"], "mergeable": "CONFLICTING"}]}}, open(_cp, "w"))
+_stamp = lambda age: time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(_wt - age))
+_wrec = lambda kind, sha, age, who="argus": {"v": 1, "kind": kind, "repo": ["latark/w-x"], "pr": None, "sha": sha,
+                                             "by": {"agent_type": who}, "time": _stamp(age)}
+_rows = O.pr_watch_rows([_wrec("accept", _W["q"], 90000), _wrec("accept", _W["r"], 90000), _wrec("tests", _W["r"], 80000),
+                         _wrec("accept", _W["s"], 5000, who="dev-opus")], _wt)
+check("pr_watch_rows: конфликт без «принять» и «принять» без tests — в списке; с tests, не от argus, MERGEABLE, repo с ошибкой gh — нет",
+      [(r["number"], r["conflict"], r["accept_at"] is not None) for r in _rows] == [(7, True, False), (8, False, True)]
+      and abs(_rows[1]["accept_at"] - (_wt - 90000)) < 60, _rows)
+check("pr_watch_rows: кэш старше часа — пусто", (json.dump({**json.load(open(_cp)), "fetched": _wt - 7200}, open(_cp, "w"))
+                                                  or O.pr_watch_rows([], _wt)) == [])
+json.dump(c_, open(_cp, "w"))   # кэш, как он был до блока metis-1170
 # metis-1115: у репозитория с обязательными проверками CI (agent-kit, REQUIRED_CHECKS) зелёный CI на head — тревоги
 # «без записи tests» нет: тесты прошли в Actions. Идёт — ждать без тревоги и без метки; красный — тревога как раньше
 _M = P.merge_mod()

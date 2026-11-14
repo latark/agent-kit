@@ -3403,6 +3403,40 @@ def overdue_accepts(recs=None, t=None):
     return out
 
 
+def pr_watch_rows(recs=None, t=None):
+    """[{"repo", "number", "conflict", "accept_at"}] — открытые PR свежего кэша gh (open_pr_heads: repo с ошибкой gh и
+    устаревший кэш — пусто), которые конфликтуют с main (mergeable CONFLICTING) или несут «принять» argus на head без
+    записи tests (accept_at — секунды самого раннего такого «принять»). Остальные не попадают. Срок и тревогу решает
+    tasks.stale_pr_alerts (metis-1170): тут только факты."""
+    t = P.now() if t is None else t
+    cache = _fresh_cache(t)
+    by_repo = cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}
+    errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
+    rows = {(str(r).lower(), str(p.get("head") or "").lower()): (str(r), p)
+            for r, prs in by_repo.items() if isinstance(prs, list) and r not in errs
+            for p in prs if isinstance(p, dict) and isinstance(p.get("number"), int)}
+    if not rows:
+        return []
+    recs = read_records() if recs is None else recs
+    tested = {(str(x).lower(), r["sha"].lower()) for r in recs if r.get("kind") == "tests" for x in r["repo"]}
+    acc = {}
+    for r in recs:
+        by = r.get("by") if isinstance(r.get("by"), dict) else {}
+        e = _epoch(r) if r.get("kind") == "accept" and by.get("agent_type") == "argus" else None
+        if e is None:
+            continue
+        for repo in r["repo"]:
+            key = (str(repo).lower(), r["sha"].lower())
+            if key in rows and key not in tested:
+                acc[key] = min(e, acc.get(key, e))
+    out = []
+    for key, (repo, p) in sorted(rows.items()):
+        conflict = p.get("mergeable") == "CONFLICTING"
+        if conflict or key in acc:
+            out.append({"repo": repo, "number": p["number"], "conflict": conflict, "accept_at": acc.get(key)})
+    return out
+
+
 def ci_head_state(repo, pr, sha):
     """metis-1115: проверки CI на head PR у репозитория с обязательными проверками шлюза (REQUIRED_CHECKS: agent-kit —
     affected и traces) → "ok" (зелёные: тесты прошли в Actions), "fail" (красные), "wait" (идут, ещё не встали, запуски

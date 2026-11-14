@@ -3879,15 +3879,49 @@ def _deferral_api():
                                  "one_line": staticmethod(one_line), "task_new": staticmethod(task_new)})
 
 
+STALE_PR = 24 * 3600  # с: открытый PR с «принять» без заявки или CONFLICTING дольше — тревога владельцу задачи
+
+
+def stale_pr_alerts(state, tasks, pr_index, pr_watch, t, alert, done_lines):
+    """Тревога владельцу задачи про открытый PR, который стоит: «принять» argus без заявки tests дольше STALE_PR или
+    CONFLICTING с main дольше STALE_PR. pr_watch — [{"repo", "number", "conflict": bool, "accept_at": секунды | None}] по
+    свежему кэшу gh (pantheon.pr_watch_rows); нет данных — молчим. Начало конфликта — state["pr_conflict"] (repo#N → секунды):
+    пропало из конфликта — запись уходит. Одна тревога на repo#N (alert_once по ключу stalepr-repo#N). PR без задачи в
+    индексе — тревога идёт на доску (who="board")."""
+    seen = state.get("pr_conflict") if isinstance(state.get("pr_conflict"), dict) else {}
+    keep = {}
+    for row in pr_watch or []:
+        key = f"{row['repo']}#{row['number']}"
+        since = row.get("accept_at")
+        if row.get("conflict"):
+            keep[key] = seen.get(key) if isinstance(seen.get(key), (int, float)) else t
+            since = keep[key] if since is None else min(since, keep[key])
+        if since is None or t - since <= STALE_PR:
+            continue
+        tid = next((i for i, xs in sorted((pr_index or {}).items()) for x in xs
+                    if not x.get("merged") and f"{x['repo']}#{x['number']}".lower() == key.lower()), None)
+        h = tasks[tid][1] if tid in tasks else {}
+        why = "CONFLICTING с main" if row.get("conflict") else "«принять» argus без заявки tests"
+        hours = int((t - since) // 3600)
+        alert(f"stalepr-{key}", "1", f"открытый PR {key} стоит {hours} ч: {why}" + (f" — задача {tid}" if tid else "")
+              + " — разобрать (ребейз или заявка tests на итоговый head)", h.get("owner") or h.get("direction") or "board")
+        done_lines.append(f"{key}: PR стоит {hours} ч ({why})")
+    if keep:
+        state["pr_conflict"] = keep
+    else:
+        state.pop("pr_conflict", None)
+
+
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
                policy=None, marks=None, registry=None, night_end="08:00", open_prs=None, pr_index=None, repos=None,
-               tails=None, batch_prs=None):
+               tails=None, batch_prs=None, pr_watch=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
     (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
     уведомлений; notify — прежний параметр, не используется. registry — проекты для пульта (project_registry);
     без него — из projects и marks. pr_index — autoclose.pr_index, repos — направление → [repo]: ссылки на PR и коммиты
     в карточках; tails — {id: [текст]} хвостов последнего pantheon check (свойство «Хвост»); batch_prs —
-    autoclose.batch_prs: PR пачки по ветке batch/<id> для карточки пачки (metis-0810)."""
+    autoclose.batch_prs: PR пачки по ветке batch/<id> для карточки пачки (metis-0810). pr_watch — открытые PR для
+    тревоги о застрявшем PR (stale_pr_alerts, metis-1170)."""
     alert = alert or (lambda *a, **k: None)
     projects = projects or {}
     if registry is None:
@@ -4062,11 +4096,15 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         tasks = load_tasks(pantheon, WORK_TYPES)
 
     # 4. авторазблокировка: ждала задачу, та готова → в очередь (только главный Mac: правит источники)
+    # задаче с открытым PR (open_prs — id по кэшу gh, pr_index — открытые строки индекса) возвращается review, а не todo:
+    # иначе PR пропадает из вида (metis-1170: #414 простоял 5 дней)
+    pr_open = set(open_prs or ()) | {i for i, xs in (pr_index or {}).items() if any(not x.get("merged") for x in xs)}
     for tid, (_, h, _) in (list(tasks.items()) if primary else []):
         w = h.get("waiting_on")
         if h.get("status") == "waiting" and w in tasks and tasks[w][1].get("status") == "done":
-            task_set(pantheon, t, tid, {"status": "todo"}, note=f"разблокирована: {w} готова", actor="плановый проход")
-            done_lines.append(f"{tid}: разблокирована ({w} готова)")
+            back = "review" if tid in pr_open else "todo"
+            task_set(pantheon, t, tid, {"status": back}, note=f"разблокирована: {w} готова", actor="плановый проход")
+            done_lines.append(f"{tid}: разблокирована ({w} готова)" + (", открытый PR — review" if back == "review" else ""))
     tasks = load_tasks(pantheon, WORK_TYPES)
 
     # 5. застрявшие и просроченные — одна тревога на задачу (вам — в утренней сводке)
@@ -4075,6 +4113,10 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             alert(f"stale-{tid}", h.get("updated"), f"задача застряла: {h.get('title')} ({tid}) — в работе без движения с {h.get('updated', '')[:10]}", "board")
         if overdue(h, t):
             alert(f"overdue-{tid}", h["due"], f"просрочена: {h.get('title')} ({tid}), срок {h['due']}", "board")
+
+    # 5б. застрявший открытый PR — одна тревога владельцу задачи на repo#N (metis-1170)
+    if primary:
+        stale_pr_alerts(state, tasks, pr_index, pr_watch, t, alert, done_lines)
 
     # 5а. решения «Нужен ответ» — циклы политики уведомлений: ответ, истекло, закрыто, «долго ждёт»
     long_ids = set()
