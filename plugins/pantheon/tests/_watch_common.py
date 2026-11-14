@@ -35,6 +35,13 @@ log = os.environ["FAKE_CLAUDE_LOG"]
 open(log, "a").write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
 a = sys.argv[1:]
 if a[:1] == ["agents"]:
+    cnt = os.environ.get("FAKE_AGENTS_COUNT")  # metis-1192: первые FAKE_AGENTS_GOOD вызовов — список, дальше не JSON
+    if cnt:
+        n = len(open(cnt).read()) if os.path.exists(cnt) else 0
+        open(cnt, "a").write(".")
+        if n >= int(os.environ.get("FAKE_AGENTS_GOOD") or "1"):
+            print("Error: daemon not ready")
+            sys.exit(0)
     if os.environ.get("FAKE_AGENTS_SLEEP"):  # metis-1175: claude agents не отвечает
         import time
         time.sleep(float(os.environ["FAKE_AGENTS_SLEEP"]))

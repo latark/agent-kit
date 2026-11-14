@@ -28,6 +28,7 @@ __all__ = [
     "take_start_requests", "resume_request", "hestia_request", "REQ_FRESH",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
     "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake", "AGENTS_SILENT", "start_agents", "launch_snapshot",
+    "agents_snapshot", "zeus_copies", "fresh_skip",
 ]
 
 
@@ -247,7 +248,9 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
         text = f"{P.START_MARK} поручение от {origin}] {text}"
     if role == "domain-coordinator":
         text = "/goal " + text + " " + (goal or COORDINATOR_GOAL)  # как у pantheon start: Stop-хук с целью (DONE-02)
-    agents = P.agents_all() or []
+    agents, _, why = start_agents(True)
+    if why:  # metis-1192: не JSON или не ответил — не «копий нет»
+        return fresh_skip(name, a, origin, why)
     live = P.live_copies(name, agents)
     if any(not x.get("id") for x in live):
         why = copies_message(name, live)
@@ -266,7 +269,9 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
         P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\tимя не освободилось после claude stop")
         P.alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
         return 1
-    before = {x.get("id") for x in P.agents_all() or [] if x.get("id")}
+    before, why = agents_snapshot()
+    if why:  # копии уже остановлены: продолжит следующий проход, а не запуск с пустым снимком
+        return fresh_skip(name, a, origin, why)
     # схема А (metis-0933): --add-dir папок направления, AGENTS.md, пакет — как у pantheon start
     argv = P.window_launch(role, name, window, win, text)  # argv окна собирает только ядро (класс 5)
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
@@ -831,9 +836,9 @@ def start(rest):
             if not got:
                 print("Зевс уже запускается другой командой", file=sys.stderr)
                 return 1
-            live = P.live_copies("zeus", P.agents_all())
-            if live and (not restart or any(not a.get("id") for a in live)):
-                print(f"pantheon start: {copies_message('zeus', live)}", file=sys.stderr)
+            live, why = zeus_copies(restart)
+            if why:
+                print(why, file=sys.stderr)
                 return 1
             P.stop_copies("zeus", live)
             # execv заменяет процесс — имя после запуска не проверить, поэтому до запуска ждём, пока старый Зевс
@@ -919,20 +924,45 @@ def start_agents(dry):
         return None, 1, f"{AGENTS_SILENT} за {e.timeout:g} с"
     except OSError as e:
         return None, 1, f"{AGENTS_SILENT} (не запустился: {e})"
-    return agents, 0, None if agents is not None else AGENTS_SILENT
+    if agents is None:
+        return None, 1, AGENTS_SILENT
+    return agents, 0, None
+
+
+def agents_snapshot():
+    """(id сессий, None) или (None, причина) — снимок перед `claude --bg` или `--resume` для check_new_name и
+    rm_previous. claude agents не ответил (не JSON, таймаут, незапуск) — отказ (metis-1192): с пустым снимком прежние
+    сессии с этим именем сочлись бы новыми."""
+    agents, _, why = start_agents(True)
+    return (None, why) if why else ({a.get("id") for a in agents if a.get("id")}, None)
 
 
 def launch_snapshot(name, role, window, origin, extra_env, run, win, cmd):
     """(id сессий до `claude --bg`, строка отказа или None) — прямо перед запуском: файл запуска окна на месте (окно
-    пропало после проверки — прежний файл не берём) и свежий claude agents. Он не ответил (не JSON, таймаут, незапуск)
-    — отказ, как в начале запуска (metis-1192): с пустым снимком check_new_name счёл бы новыми и прежние сессии
-    с этим именем. Снимок свежий, а не первый список: между ними копии останавливались и ждали имя."""
+    пропало после проверки — прежний файл не берём) и свежий снимок agents_snapshot, отказ — как в начале запуска.
+    Снимок свежий, а не первый список: между ними копии останавливались и ждали имя."""
     if P.run_settings(name, role, window, origin, extra_env) != run:
         return None, f"pantheon start: нет окна {win.replace(P.HOME, '~')} — pantheon domains build"
+    before, why = agents_snapshot()
+    return before, (f"{cmd}: отказ — {why}" if why else None)
+
+
+def zeus_copies(restart):
+    """(живые копии Зевса, строка отказа или None) для pantheon start zeus под блокировкой имени. claude agents не
+    ответил — отказ, а не «копий нет» и второй Зевс (metis-1192); копии без --restart или вкладка — copies_message."""
     agents, _, why = start_agents(True)
     if why:
-        return None, f"{cmd}: отказ — {why}"
-    return {a.get("id") for a in agents if a.get("id")}, None
+        return None, f"pantheon start: отказ — {why}"
+    live = P.live_copies("zeus", agents)
+    if live and (not restart or any(not a.get("id") for a in live)):
+        return None, f"pantheon start: {copies_message('zeus', live)}"
+    return live, None
+
+
+def fresh_skip(name, a, origin, why):
+    """Свежий старт не сделан: строка fresh-skip в start.log, пропуск с причиной (metis-1192). → SKIPPED."""
+    P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+    return P.skipped(why)
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,

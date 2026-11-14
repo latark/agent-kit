@@ -319,9 +319,13 @@ WAIT_REASONS = ("идёт технический", "пауза по нагруз
                 "пятичасовой", "недельный лимит")
 
 
+# тот же текст, что sessions.AGENTS_SILENT: sessions.py ставит загрузчик с P (_attach), простым импортом его не взять
+AGENTS_SILENT = "claude agents --json не ответил"
+
+
 def recheck(name, auto, nudge=False):
     """Та же проверка по свежему claude agents под блокировкой имени; не JSON — отказ, а не «копий нет» (metis-1192)."""
-    return lambda: ("claude agents --json не ответил" if (agents := P.agents_all()) is None
+    return lambda: (AGENTS_SILENT if (agents := P.agents_all()) is None
                     else wake_block(name, agents, P.sessions_registry(), auto, nudge))
 
 
@@ -2909,8 +2913,10 @@ def goal_block(d, a, agents, registry):
 
 def goal_recheck(d, a):
     """Повторная проверка под блокировкой имени перед сменой цели, по свежему claude agents: держит имя только a —
-    иначе отказ (ревью argus: ручной запуск между снимком и блокировкой иначе погасил бы stop_copies)."""
-    return lambda: goal_block(d, a, P.agents_all() or [], P.sessions_registry())
+    иначе отказ (ревью argus: ручной запуск между снимком и блокировкой иначе погасил бы stop_copies). Не JSON —
+    отказ AGENTS_SILENT, а не «держателей нет» (metis-1192)."""
+    return lambda: (AGENTS_SILENT if (agents := P.agents_all()) is None
+                    else goal_block(d, a, agents, P.sessions_registry()))
 
 
 def autostart(agents, registry, doms, t, dry=False):
