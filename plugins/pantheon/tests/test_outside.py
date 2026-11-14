@@ -609,6 +609,31 @@ res = O.load_result(q, rid) or {}
 check("--sha: копия на этом коммите, HEAD папки не тронут", res.get("state") == "serving" and res.get("sha") == C1
       and git(work_of(rid), "rev-parse", "HEAD") == C1 and git(APP, "rev-parse", "HEAD") == HEAD, res)
 kill_all_servers()
+# 30.10 (metis-0614): две заявки из двух worktree talos одного клона на разных коммитах свелись в одну, сервер встал
+# не из папки PR #38. Обе в одном круге прохода — два сервера, каждый на коммите своей папки; «стоп» одного второй не гасит
+_wa, _wb = (os.path.join(APP, ".claude", "worktrees", n) for n in ("pair-a", "pair-b"))
+git(APP, "worktree", "add", "-q", "--detach", _wa, C1)
+git(APP, "worktree", "add", "-q", "--detach", _wb, HEAD)
+_pre = len(calls())
+qa, ra = new_request("athena-x", _wa, "serve", "--minutes", "5")
+qb, rb = new_request("athena-x", _wb, "serve", "--minutes", "5")
+serve_pass()
+resa, resb = O.load_result(qa, ra) or {}, O.load_result(qb, rb) or {}
+_srv_cwd = [x["cwd"] for x in calls()[_pre:] if x["cmd"] != ["npm", "ci"]]
+check("две заявки из двух worktree в одном круге: два сервера, у каждого свой коммит, своя папка и свой порт",
+      resa.get("state") == resb.get("state") == "serving" and resa.get("port") != resb.get("port")
+      and resa.get("sha") == C1 and resb.get("sha") == HEAD and C1 != HEAD
+      and resa.get("src") == os.path.realpath(_wa) and resb.get("src") == os.path.realpath(_wb)
+      and git(work_of(ra), "rev-parse", "HEAD") == C1 and git(work_of(rb), "rev-parse", "HEAD") == HEAD
+      and sorted(_srv_cwd) == sorted([work_of(ra), work_of(rb)]), (resa, resb, _srv_cwd))
+rc, out = say("athena-x", "stop", ra, "--wait", "0")
+serve_pass()
+check("стоп одной из двух: погашена только она, вторая отвечает",
+      state(qa, ra) == "stopped" and not port_open(resa.get("port") or 0) and ra not in O.servers()
+      and state(qb, rb) == "serving" and port_open(resb.get("port") or 0) and rb in O.servers(), (rc, out, O.servers()))
+kill_all_servers()
+for _w in (_wa, _wb):
+    git(APP, "worktree", "remove", "--force", _w)
 rc, q, rid = role_request("athena-x", APP, "serve", "--sha", "deadbeef1")
 serve_pass()
 res = O.load_result(q, rid) or {}
