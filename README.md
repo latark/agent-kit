@@ -803,6 +803,14 @@
   проход показывает владельцу окно Touch ID с действием целиком (помощник слияния) и исполняет его один раз по sha256
   текста. Где Touch ID не действует — README guard, «Touch ID: где не действует». Журнал отказов —
   `STATE/logs/handoff.jsonl`, строка «Отказы за сутки» — в сводке доски (board-auto.md).
+- `plugins/pantheon/lib/denials.py` — журнал и отчёт отказов окон (metis-1135, часть Д). Хук PermissionDenied
+  (`lib/denials.py hook`, вторая запись рядом с refusal.py denied) пишет отказ классификатора, `refusal.py fail` — отказ
+  песочницы (guard его не видит: он случается при выполнении) в `STATE/denials/<дата>.jsonl`: время, окно, роль,
+  инструмент, класс (имя инструмента, у Bash — первое слово команды), причина до 200 знаков без ключей и домашнего пути;
+  текста команды нет, сбой записи не роняет хук. `pantheon denials report [--since ДАТА] [--days N] [--until ДАТА]` — таблицы
+  по классам, окнам, источникам и топ «класс @ окно». `pantheon denials backfill --since ДАТА --until ДАТА` строит журнал
+  из транскриптов `~/.claude/projects`: только tool_result-ошибки с отказом, в вывод — счётчики; повтор не дублирует
+  (по tool_use_id). Плановый проход по понедельникам кладёт отчёт за 7 дней в `STATE/denials/report-<дата>.md`.
 - `plugins/pantheon/lib/owner_edit.py` — правка файла владельца без окна роли (metis-0910, план 0907 (а)): только
   `~/.claude/pantheon/policy.toml` и `~/.claude/agents/_parts/*.part`, уже существующие; settings.json — нет.
   `pantheon owner-edit propose <файл> --from <новый текст> --task ID` кладёт заявку (sha до, дифф, sha диффа) и печатает
