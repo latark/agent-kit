@@ -87,6 +87,10 @@ PR ядра защит (Д3) агенты не сливают: его слива
      (metis-0980). Время заголовка записи owner-log — без пояса, проход читает его в нынешнем поясе Mac: сменили пояс
      (перелёт) — возраст фраз до смены сдвинут на разницу часов, фраза старше 2 ч может ожить, свежая — погаснуть
      (остаток metis-0980 Д2: формат ctx.py не меняем).
+     PR ядра фраза не сливает (metis-1026, решение владельца 09.11 «А», PHRASE_CORE): в его файлах есть ядро
+     (window_core — как в окне Touch ID) или список файлов не получен — фраза не тратится, тревога один раз на фразу,
+     заявка ждёт окна Touch ID. Причина — ключи демона Claude Code читает код роли вне песочницы того же uid, а текст,
+     напечатанный через демон, хук пишет в owner-log как ваш. Вернуть — после metis-0972.
 
 Пачка (metis-0668, process_batch) — одно окно на все её PR: в тексте — сначала задетое ядро всех и число файлов, затем
 каждый PR с SHA и вердиктом шлюза по порядку, заголовки последними. До окна пункты 1–3 — у каждого: неполна (одну заявку сняли или заменили) или
@@ -181,6 +185,12 @@ REVOKE_RE = re.compile(r"(?:стоп[,.!]?\s+)?не\s+сливай\s+#([1-9][0-9
 OWNER_ENTRY_RE = re.compile(r"## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)")   # заголовок записи append_owner_line
 PHRASES_FILE = "merge-phrases.json"  # STATE: использованные фразы — одна фраза, одно согласие
 PHRASES_KEEP = 24 * 3600
+# metis-1026 (решение владельца 09.11 21:44, «А»): фраза не сливает PR ядра — только Touch ID. Ключи демона Claude Code
+# (~/.claude/daemon) читает любой процесс того же uid вне песочницы (код роли через excludedCommands, К3 модели угроз),
+# а текст, напечатанный в окно через демон, хук ctx.py пишет в owner-log как ваш. Ядро здесь — window_core (как окно
+# Touch ID, строже шлюза: лишний отказ фразы безопасен, пропуск — нет). Вернуть True — только после закрытия metis-0972
+# (excludedCommands не исполняют код роли) и проверки К11; тест test_phrase_core_touchid_only
+PHRASE_CORE = False
 # вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
 BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
 BILLING_SHORT = "CI: лимит, тесты ✓"
@@ -1619,6 +1629,16 @@ def find_phrase(req):
     return ph
 
 
+def phrase_core(paths):
+    """Файлы ядра PR, из-за которых фраза не даёт согласия (metis-1026, PHRASE_CORE выключен), или [] — фраза в силе.
+    Список файлов не получен (None) — фраза не в силе: ядро не исключить."""
+    if PHRASE_CORE:
+        return []
+    if paths is None:
+        return ["(список файлов PR не получен)"]
+    return [p for p in dict.fromkeys(paths) if window_core(p)]
+
+
 def mark_phrase(ph):
     """Фраза использована — до строки согласия, под замком merge-queue: одна фраза, одно согласие. Не записать —
     исключение, и ни строки согласия, ни слияния."""
@@ -2032,7 +2052,9 @@ def finger(req, rc=0, phrase=None):
             cur = find_phrase(req)
             if cur is None or cur["key"] != phrase["key"]:
                 return False, "ждёт: фраза уже не в силе"
-        state, why, _, _ = check_all(req, after=True)
+        state, why, _, paths = check_all(req, after=True)
+        if state == "ok" and phrase is not None and phrase_core(paths):
+            return False, "ждёт: фраза не сливает PR ядра (metis-1026) — нужен Touch ID"
         if state != "ok":
             os.remove(req_file(req["repo"], req["pr"]))
             bad = f"{after} условия изменились — {why}"
@@ -2094,15 +2116,23 @@ def process(req, click):
         return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     # фраза владельца «слей #N <hex>» (metis-0959) — согласие без окна: ни повтора окна, ни щелчка, ни Mac рядом
     phrase = find_phrase(req)
-    if phrase is None and not click and req.get("wait_until", 0) > t:
-        return "ждёт: окно закрыто без ответа, повтор позже"
-    if phrase is None and not click and req.get("notified"):
-        return "ждёт щелчка по уведомлению"
+    hold = None if click else ("ждёт: окно закрыто без ответа, повтор позже" if req.get("wait_until", 0) > t
+                               else "ждёт щелчка по уведомлению" if req.get("notified") else None)
+    if phrase is None and hold:
+        return hold
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
         return drop(req, "gate", why, warn=True, how="по фразе" if phrase else "по Touch ID")
     if mark_wait(req, state, why):
         return f"ждёт: {why}"
+    core = phrase_core(paths) if phrase is not None else []
+    if core:   # metis-1026: PR ядра — только Touch ID; фраза не тратится, заявка идёт обычным путём окна
+        P.alert_once("merge-phrase-core", phrase["key"],
+                     f"фраза «слей #{req['pr']}» не сливает PR ядра {req['repo']}#{req['pr']} ({req['sha'][:7]}): "
+                     f"{', '.join(core[:3])} — нужен Touch ID у Mac (metis-1026)", "pantheon-merge")
+        phrase = None
+        if hold:
+            return hold
     if phrase is not None:
         return finger(req, None, phrase)[1]
     if not click and P.idle_sec() > PRESENT_SEC:

@@ -79,6 +79,12 @@ def main():
         bad_rd = [n for n in names if rule not in win(n).get("permissions", {}).get("deny", [])]
         check(f"STATE/outside/{sub}: в denyRead песочницы всех окон (нет у {bad_sb})", not bad_sb)
         check(f"STATE/outside/{sub}: правило {rule} у всех окон (нет у {bad_rd})", not bad_rd)
+    # ключи демона Claude Code (metis-1026, К2): control.key и roster.json — ввод в PTY любой сессии от имени владельца
+    daemon = os.path.join(tmp, ".claude", "daemon")
+    bad_sb = [n for n in names if daemon not in win(n)["sandbox"]["filesystem"]["denyRead"]]
+    bad_rd = [n for n in names if "Read(~/.claude/daemon/**)" not in win(n).get("permissions", {}).get("deny", [])]
+    check(f"~/.claude/daemon: в denyRead песочницы всех окон (нет у {bad_sb})", not bad_sb)
+    check(f"~/.claude/daemon: правило Read(~/.claude/daemon/**) у всех окон (нет у {bad_rd})", not bad_rd)
     for n in ("hq", "hestia", "job-clio"):
         if os.path.isfile(os.path.join(out, n + ".json")):
             net = win(n)["sandbox"]["network"]

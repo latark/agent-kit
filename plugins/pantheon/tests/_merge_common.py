@@ -575,6 +575,7 @@ def request_batch(b, prs=(7, 8)):
 
 
 # --- согласие фразой «слей #N <hex>» (metis-0959) ---------------------------------------------------------------------
+NONCORE = ["README.md", "docs/merge.md"]   # PR вне ядра: фраза сливает только его (metis-1026)
 AWAY = {"PANTHEON_FAKE_IDLE": "900"}   # владельца нет у Mac: окна Touch ID не будет, фразе это не мешает
 CTX_HOOK = os.path.join(os.path.dirname(HERE), "hooks", "ctx.py")
 
@@ -595,8 +596,15 @@ def merge_recs(b):
     return [json.loads(ln) for ln in open(p)] if os.path.exists(p) else []
 
 
+def pbox(**kw):
+    """Ящик с PR вне ядра: фраза сливает только его (metis-1026 — PR ядра фразой не сливается, только Touch ID)."""
+    b = Box(**kw)
+    b.view(SHA, files=NONCORE)
+    return b
+
+
 def phrase_box(text=None, t=T0 + 60, **kw):
-    b = Box()
+    b = pbox()
     b.request()
     if text is not None:
         say(b, text, t, **kw)
