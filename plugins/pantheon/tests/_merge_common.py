@@ -66,6 +66,12 @@ if sys.argv[1:3] == ["pr", "view"] and os.path.exists(os.path.join(rec, "gh-view
 if sys.argv[1:3] == ["pr", "view"]:
     p = one("gh-view.json", sys.argv[3])
     if not os.path.exists(p):
+        # rec/gh-view-err — stderr сбоя и код выхода первой строкой (metis-1197: причину видно в отказе)
+        e = os.path.join(rec, "gh-view-err")
+        if os.path.exists(e):
+            code, text = open(e, encoding="utf-8").read().split("\n", 1)
+            sys.stderr.write(text)
+            sys.exit(int(code))
         sys.exit(1)
     # как настоящий gh: только поля из --json (pr_view без baseRefName не получит его и из файла, argus М41)
     raw, want = open(p).read(), sys.argv[sys.argv.index("--json") + 1].split(",") if "--json" in sys.argv else None

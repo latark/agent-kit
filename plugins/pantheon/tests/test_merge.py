@@ -207,6 +207,20 @@ def test_gate_other_heads():
     b = box(("reject", SHA, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
     check("0465: «вернуть» на SHA и два «принять» других argus после него — в силе, не перекрыто числом",
           not b.windows() and not b.merges() and "в силе" in b.alerts(), b.alerts())
+    # metis-1199: вернувший принял следующий head SHA3, у SHA тот же код (same решения шлюза guard) — «вернуть» снято
+    for name, same, rev, ok in (("тот же рецензент, SHA3 того же кода → сливает", [SHA3], "s3", True),
+                                ("тот же рецензент, решения о коде SHA3 нет → в силе", [], "s3", False),
+                                ("другой argus на SHA3 того же кода → в силе", [SHA3], "s5", False)):
+        b = Box()
+        b.request()
+        b.add("reject", sha=SHA2, sid="s3", aid="a3")
+        b.add("accept", sha=SHA3, sid=rev, aid="a" + rev[1:])
+        b.add("accept", sha=SHA, sid="s4", aid="a4")
+        if same:
+            b.decide(same=same)
+        b.run()
+        check(f"1199: «вернуть» на SHA2, «принять» на SHA3 — {name}",
+              len(b.merges()) == 1 if ok else not b.merges() and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
     b = Box()
     b.request()
     b.add("reject", sha=SHA2, pr=PR + 1, sid="s3", aid="a3")
@@ -638,6 +652,19 @@ def test_request_refusals():
     os.remove(os.path.join(b.rec, "gh-view.json"))
     r = b.request()
     check("заявка: gh не ответил → отказ", r.returncode != 0 and b.req() is None, r.stderr)
+    # metis-1197: в отказе — код gh и последняя непустая строка его stderr, без управляющих знаков и не длиннее 200
+    b = Box()
+    os.remove(os.path.join(b.rec, "gh-view.json"))
+    with open(os.path.join(b.rec, "gh-view-err"), "w", encoding="utf-8") as fh:
+        fh.write("4\nfirst line\nPost \"https://api.github.com/graphql\": tls: failed to verify\x1b[0m x509 "
+                 + "z" * 300 + "\n\n")
+    r = b.request()
+    last = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
+    why = last.split("(код 4: ", 1)[-1].rsplit(") — заявки нет", 1)[0] if "(код 4: " in last else ""
+    check("заявка: gh не ответил → код и последняя строка stderr gh в отказе",
+          r.returncode == 1 and b.req() is None and why.startswith("Post \"https://api.github.com/graphql\": tls: failed")
+          and "\x1b" not in last and "first line" not in last and len(why) == 200 and why.endswith("z")
+          and last.endswith(") — заявки нет"), r.stderr)
     b = Box()
     for args in (["merge", "request", "7"], ["merge", "request", "x", "-R", REPO], ["merge", "request", "7", "-R",
                  "../x"], ["merge", "request", "7", "-R", REPO, "--x"], ["merge", "run", "--now"], ["merge"]):

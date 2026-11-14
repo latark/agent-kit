@@ -477,6 +477,15 @@ def main():
           "нет (metis-0247, metis-0533)",
           all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.split()[0] == "gh") == coord_gh
               for w in (sa, sm, sn, sz)))
+    # metis-1197: заявка на слияние — мимо песочницы только в окнах направлений (в ней gh из pantheon падает, TLS Go,
+    # и очередь в STATE закрыта на запись); прочий `pantheon merge` (run) и мастерская — в песочнице
+    merge_out = ["pantheon merge request *", "pantheon merge cancel *"]
+    check("окно координатора: pantheon merge request|cancel мимо песочницы — ровно они; у мастерской нет (metis-1197)",
+          all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("pantheon merge")) == sorted(merge_out)
+              for w in (sa, sn, sz))
+          and not any(x.startswith("pantheon merge") for x in sw["sandbox"]["excludedCommands"]),
+          [w["sandbox"]["excludedCommands"] for w in (sa, sw)])
+
     def excluded_by(cmd, patterns):
         # как правило excludedCommands: «… *» — префикс и любые аргументы, без звёздочки — точное совпадение
         return any(cmd == x or (x.endswith(" *") and cmd.startswith(x[:-1])) for x in patterns)
@@ -499,12 +508,11 @@ def main():
           "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
           and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
     merge_ex = ["pantheon merge request *", "pantheon merge status", "pantheon merge cancel *"]
-    check("песочница: заявка на слияние по Touch ID мимо неё только в окне Метиды, `pantheon merge run` — нигде "
-          "(metis-0285)",
-          all(x in sm["sandbox"]["excludedCommands"] for x in merge_ex)
+    check("песочница: у Метиды мимо неё request|status|cancel без повторов (metis-0285, 1197), `pantheon merge run` и "
+          "`pantheon merge *` — нигде",
+          sorted(x for x in sm["sandbox"]["excludedCommands"] if x.startswith("pantheon merge")) == sorted(merge_ex)
           and not any("merge run" in x or x == "pantheon merge *" for w in (sa, sm, sw, sn, sz)
-                      for x in w["sandbox"]["excludedCommands"])
-          and not any(x.startswith("pantheon merge") for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
+                      for x in w["sandbox"]["excludedCommands"]))
     cache_a = real("Library/Caches/pantheon-sandbox/athena-shop")
     check("песочница: кэши свои у направления (папка создана), общих в записи нет",
           sa["env"]["npm_config_cache"] == os.path.join(cache_a, "npm") and os.path.isdir(cache_a)

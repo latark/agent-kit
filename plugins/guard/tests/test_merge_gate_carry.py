@@ -305,9 +305,46 @@ def t_request_decision(h):
                                                                     for i, x in enumerate(newer)])
     check("решение (metis-0784): head старше 8 последних — не в delta, хоть он предок и дельта мелкая",
           len(got) == 1 and qd not in got[0].get("delta", [qd]) and got[0].get("delta") == [], got)
+    # metis-1199: папка команды — клон другого репозитория (заявку на PR продукта подаёт сессия из worktree agent-kit):
+    # клон repo берётся из реестра — корни domains.json направлений, у которых repo в [merge_repos], по remote
     got = case("клон другого репозитория", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
-    check("решение: git не сверить (не клон) — запись с пустыми same и differs и причиной", len(got) == 1
-          and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
+    check("решение (metis-1199): папка команды — клон tg-read, клон agent-kit — из реестра: same=[qd]", len(got) == 1
+          and got[0]["same"] == [qd] and got[0]["why"] == [], got)
+    dom_f, pol_f = h.j(".local/state/pantheon/domains.json"), h.j(".claude/pantheon/policy.toml")
+    dom0, pol0 = open(dom_f).read(), open(pol_f).read()
+
+    def registry(dom, pol, name, want):
+        with open(dom_f, "w") as fh:
+            json.dump({"domains": dom}, fh)
+        with open(pol_f, "w") as fh:
+            fh.write(pol0.split("[merge_repos]")[0] + "[merge_repos]\n" + pol)
+        try:
+            got = case(f"реестр: {name}", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
+        finally:
+            with open(dom_f, "w") as fh:
+                fh.write(dom0)
+            with open(pol_f, "w") as fh:
+                fh.write(pol0)
+        d = got[0] if len(got) == 1 else {"same": None}
+        ok = d["same"] == [qd] and d["why"] == [] if want else (
+            d["same"] == [] and d["differs"] == [] and any("не клон" in w for w in d["why"]))
+        check(f"решение (metis-1199): {name}", ok, got)
+
+    kit_dirs = {"metis-pantheon": ["~/projects/tg-read", "~/projects"], "athena-shop": ["~/projects/broker"]}
+    registry(kit_dirs, 'metis-pantheon = ["latark/agent-kit"]\n',
+             "корень направления — папка над клоном, клон — её подпапка с именем repo (первый корень — не клон)", True)
+    registry({"metis-pantheon": ["~/projects/tg-read"], "athena-shop": ["~/projects/agent-kit"]},
+             'metis-pantheon = ["latark/agent-kit"]\nathena-shop = ["latark/broker"]\n',
+             "клон есть только у направления, где repo нет в [merge_repos] — не берётся, «не клон»", False)
+    registry(kit_dirs, 'metis-pantheon = ["latark/tg-read"]\nathena-shop = ["latark/broker"]\n',
+             "repo нет в [merge_repos] ни одного направления — клон не ищется, «не клон»", False)
+    git(p, "remote", "set-url", "origin", "https://github.com/latark/other")
+    try:
+        got = case("в реестре нет клона (remote не тот)", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
+    finally:
+        git(p, "remote", "set-url", "origin", "https://github.com/latark/agent-kit")
+    check("решение: git не сверить (не клон, и в реестре клона нет) — запись с пустыми same и differs и причиной",
+          len(got) == 1 and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
     alt = os.path.join(p, ".git", "objects", "info", "alternates")
     os.makedirs(os.path.dirname(alt), exist_ok=True)
     with open(alt, "w") as fh:
