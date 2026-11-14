@@ -50,10 +50,10 @@ PR ядра защит (Д3) агенты не сливают: его слива
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
      нет, запуски не получены — заявка ждёт. Исключение (metis-1207): у репозитория нет REQUIRED_CHECKS, проверок нет,
-     а workflows, от которых они встанут, нет ни на head PR, ни на base-ветке (no_pr_workflows: триггер pull_request
-     или pull_request_target, push без branches/branches-ignore) — вердикт NO_CI «CI нет у репозитория», и он же в
-     окне Touch ID. «Workflows нет» — только по точному ответу gh «(HTTP 404)» последней строкой о каталоге
-     .github/workflows после ответа 200 от коммита head и ветки base; любой сбой gh — ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
+     а каталога .github/workflows нет ни на head PR, ни на base-ветке (no_pr_workflows; любой workflow с любым
+     триггером — ждёт, как шлюз guard merge_gate._has_workflows) — вердикт NO_CI «CI нет у репозитория», и он же в
+     окне Touch ID. «Каталога нет» — только по точному ответу gh «(HTTP 404)» последней строкой после ответа 200 от
+     коммита head и ветки base; любой сбой gh — ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
      запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
      job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
      набора FULL_TESTS (full_tests_record) или узкая `--affected` с базой и картой, сверенными с GitHub
@@ -129,7 +129,6 @@ pass_env (PANTHEON_PYTHON — найденный тиком интерпрета
 включается. Остальной тик PANTHEON_STATE ещё берёт, а DYLD_* и прочее launchd-окружение доходит до интерпретатора
 тика: целиком это закрывает только запрет ролям launchctl setenv (metis-0298).
 """
-import base64
 import contextlib
 import hashlib
 import io
@@ -191,8 +190,8 @@ PHRASES_KEEP = 24 * 3600
 # вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
 BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
 BILLING_SHORT = "CI: лимит, тесты ✓"
-# вердикт CI репозитория без workflows, от которых встанут проверки PR (metis-1207): доходит до окна как есть, не «CI ✓»
-NO_CI = "CI нет у репозитория (workflows на pull_request не заведены)"
+# вердикт CI репозитория без .github/workflows на head и base (metis-1207): доходит до окна как есть, не «CI ✓»
+NO_CI = "CI нет у репозитория (.github/workflows нет на head и base)"
 # `pantheon merge status` (metis-0819): события merge.jsonl, с которыми заявка ушла из очереди, — за сутки, последние 20
 DONE_EVENTS = ("merged", "merge-failed", "gate", "gate-after", "expired", "refused", "no-window", "batch-broken",
                "batch-stopped", "error", "cancelled")
@@ -993,9 +992,6 @@ def ci_billing_fetch(repo, runs, required):
     return ci_billing(runs, required, notes, jobs)
 
 
-PR_TRIGGER_RE = re.compile(r"(?m)^[^#\n]*\bpull_request(_target)?\b")  # простая проверка текста; лишнее совпадение — wait
-
-
 def _gh_json(path):
     """GET REST gh api path → (код, разобранный JSON или None); сбой gh, таймаут, не-JSON — (None, None)."""
     try:
@@ -1011,83 +1007,34 @@ def _gh_json(path):
         return None, None
 
 
-PUSH_RE = re.compile(r"""(?:^|[\s\[,{])['"]?push['"]?\s*(?=$|[:\],}])""")
-BRANCHES_RE = re.compile(r"""\s*['"]?branches(-ignore)?['"]?\s*:""")
-
-
-def push_unfiltered(text):
-    """True — в тексте workflow есть триггер push без branches/branches-ignore (metis-1207): push ветки PR запустит его,
-    и проверки ещё встанут. Простой разбор строк, без YAML: `on: push`, `[push, …]`, `- push`, `push:` без вложенного
-    branches, `push: {…}` без branches — True; `run: git push` в шаге — тоже True (лишнее совпадение — wait)."""
-    lines = [ln.split("#", 1)[0].rstrip() for ln in text.splitlines()]
-    for i, line in enumerate(lines):
-        for m in PUSH_RE.finditer(line):
-            rest = line[m.end():].lstrip()
-            if not rest.startswith(":"):
-                return True
-            if rest[1:].strip():
-                if not re.search(r"\bbranches(-ignore)?\b", rest):
-                    return True
-                continue
-            indent = len(line) - len(line.lstrip())
-            for nxt in lines[i + 1:]:
-                if not nxt.strip():
-                    continue
-                if len(nxt) - len(nxt.lstrip()) <= indent:
-                    return True
-                if BRANCHES_RE.match(nxt):
-                    break
-            else:
-                return True
-    return False
-
-
 def no_pr_workflows(repo, base, head=None):
-    """True — ни на head PR, ни на base-ветке нет workflows, от которых встанут проверки PR (metis-1207: ждать нечего);
-    False — есть или не определить (gh не ответил, ответ не разобран — сбой не пропускает). Смотрим и head, и base, как
-    шлюз guard (merge_gate: на head или base есть .github/workflows — ждать): PR, который удаляет свои workflows, не
-    уводит заявку от CI (находка проверки безопасности #475), а PR, который их добавляет, ждёт своих проверок. Head
+    """True — каталога .github/workflows нет ни на head PR, ни на base-ветке (metis-1207: проверок не встанет, ждать
+    нечего); False — есть или не определить (gh не ответил, ответ не разобран — сбой не пропускает). Правило то же, что у
+    шлюза guard (merge_gate._has_workflows): любой непустой каталог — ждать, триггеры не разбираем; иначе проход
+    показал бы окно Touch ID, а шлюз отказал бы в слиянии. Смотрим и head, и base: PR, который удаляет свои workflows,
+    не уводит заявку от CI (находка проверки безопасности #475), а PR, который их добавляет, ждёт своих проверок. Head
     (SHA) и ветка base сначала должны ответить 200 — 404 нечитаемого репозитория, коммита или ветки не сойдёт за
     «workflows нет»."""
     if not isinstance(base, str) or not base or not isinstance(head, str) or not SHA_RE.fullmatch(head):
         return False
-    return all(_workflows_quiet(repo, ref, probe) for ref, probe in (
+    return all(_workflows_absent(repo, ref, probe) for ref, probe in (
         (head, f"repos/{repo}/commits/{head}"),
         (base, f"repos/{repo}/branches/{urllib.parse.quote(base, safe='')}")))
 
 
-def _workflows_quiet(repo, ref, probe):
-    """True — на ref нет workflow с триггером pull_request(_target) или push без branches (push_unfiltered). probe —
-    путь REST, который сперва должен ответить 200 (коммит или ветка). Каталог .github/workflows через gh REST (GraphQL
-    ролям закрыт): 404 — workflows нет; иначе каждый .yml/.yaml — текст и поиск триггера (лишнее совпадение — False)."""
+def _workflows_absent(repo, ref, probe):
+    """True — на ref нет каталога .github/workflows (точный 404) или он пуст. probe — путь REST, который сперва должен
+    ответить 200 (коммит или ветка). Каталог — через gh REST (GraphQL ролям закрыт)."""
     if _gh_json(probe)[0] != "200":
         return False
-    ref = urllib.parse.quote(ref, safe="")
-    code, listing = _gh_json(f"repos/{repo}/contents/.github/workflows?ref={ref}")
-    if code == "404":
-        return True
-    if code != "200" or not isinstance(listing, list):
-        return False
-    for item in listing:
-        name = str(item.get("name") or "") if isinstance(item, dict) else ""
-        if not name.lower().endswith((".yml", ".yaml")):
-            continue
-        code, body = _gh_json(f"repos/{repo}/contents/.github/workflows/{urllib.parse.quote(name, safe='')}?ref={ref}")
-        if code != "200" or not isinstance(body, dict) or body.get("encoding") != "base64":
-            return False
-        try:
-            text = base64.b64decode(body.get("content") or "").decode("utf-8", "replace")
-        except ValueError:
-            return False
-        if PR_TRIGGER_RE.search(text) or push_unfiltered(text):
-            return False
-    return True
+    code, listing = _gh_json(f"repos/{repo}/contents/.github/workflows?ref={urllib.parse.quote(ref, safe='')}")
+    return code == "404" or (code == "200" and listing == [])
 
 
 def ci_state(rollup, required=(), runs=None, optional=(), repo=None, base=None, head=None):
     """(ok|wait|fail, текст, предупреждения о красных необязательных) по ci_verdict. Проверок нет — wait: они ещё не
     встали; по 24 ч заявка всё равно гаснет. Исключение (metis-1207): repo, base и head переданы, обязательных проверок
-    нет, а ни на head, ни на base-ветке PR нет workflows, от которых встанут проверки (no_pr_workflows), — ok NO_CI:
+    нет, а каталога .github/workflows нет ни на head, ни на base-ветке PR (no_pr_workflows), — ok NO_CI:
     ждать нечего. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
     if required and runs is None:
         return "wait", "запуски Actions на head PR не получены", []

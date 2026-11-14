@@ -65,16 +65,14 @@ def test_ci_matches_guard():
 
 
 def test_ci_state_no_workflows():
-    """metis-1207: пустой rollup у репозитория без REQUIRED_CHECKS — ok, если ни на head PR, ни на base-ветке нет
-    workflows, от которых встанут проверки: триггер pull_request(_target) или push без branches/branches-ignore. Есть
-    такой workflow на head или на base — wait (как шлюз guard: PR, удаливший workflows, от CI не уходит, а PR,
-    добавивший их, ждёт своих проверок). Сбой gh, не-JSON, нечитаемый файл, коммит head или ветка base не ответили
-    200, 404 не точным ответом gh последней строкой — wait (сбой не пропускает)."""
+    """metis-1207: пустой rollup у репозитория без REQUIRED_CHECKS — ok, только если каталога .github/workflows нет
+    (точный 404) или он пуст и на head PR, и на base-ветке — то же правило, что у шлюза guard (_has_workflows): любой
+    файл с любым триггером на head или на base — wait. Сбой gh, не-JSON, коммит head или ветка base не ответили 200,
+    404 не точным ответом gh последней строкой — wait (сбой не пропускает)."""
     code = (
-        "import sys, json, base64, importlib.util, subprocess\n"
+        "import sys, json, importlib.util, subprocess\n"
         "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
         "s.loader.exec_module(m)\n"
-        "def wf(text): return {'encoding': 'base64', 'content': base64.b64encode(text.encode()).decode()}\n"
         "H = 'a' * 40\n"
         "B = {'repos/o/app/branches/main': {'name': 'main'}, 'repos/o/app/commits/' + H: {'sha': H}}\n"
         "def run_with(table, base='main', head=H):\n"
@@ -90,37 +88,27 @@ def test_ci_state_no_workflows():
         "        return subprocess.CompletedProcess(argv, 0, json.dumps(v), '')\n"
         "    m.subprocess.run = fake\n"
         "    return m.ci_state([], (), None, (), 'o/app', base, head)[0]\n"
-        "D = 'repos/o/app/contents/.github/workflows'\n"
-        "L = [{'name': 'lint.yml'}, {'name': 'README.md'}]\n"
-        "def on_base(text): return {**B, D + '?ref=main': L, D + '/lint.yml?ref=main': wf(text)}\n"
-        "def on_head(text): return {**B, D + '?ref=' + H: L, D + '/lint.yml?ref=' + H: wf(text)}\n"
-        "out = [run_with(dict(B)),\n"
-        "  run_with(on_base('on:\\n  push:\\n    branches: [main]\\n')),\n"
-        "  run_with(on_base('on:\\n  pull_request:\\n')),\n"
-        "  run_with(on_base('# on: pull_request\\non:\\n  push:\\n    branches-ignore: [x]\\n')),\n"
-        "  run_with({**B, D + '?ref=main': 'FAIL'}), run_with({**B, D + '?ref=main': 'RAW'}),\n"
-        "  run_with({**B, D + '?ref=main': L, D + '/lint.yml?ref=main': 'FAIL'}),\n"
-        "  run_with({}), run_with({**B, D + '?ref=main': 'ODD404'}), run_with({**B, D + '?ref=main': 'NOTLAST'}),\n"
+        "D = 'repos/o/app/contents/.github/workflows?ref='\n"
+        "out = [run_with(dict(B)), run_with({**B, D + 'main': []}),\n"
+        "  run_with({**B, D + 'main': [{'name': 'push-main.yml'}]}),\n"
+        "  run_with({**B, D + 'main': [{'name': 'README.md'}]}),\n"
+        "  run_with({**B, D + H: [{'name': 'lint.yml'}]}),\n"
+        "  run_with({**B, D + 'main': 'FAIL'}), run_with({**B, D + 'main': 'RAW'}),\n"
+        "  run_with({}), run_with({**B, D + 'main': 'ODD404'}), run_with({**B, D + 'main': 'NOTLAST'}),\n"
         "  run_with(dict(B), base=None), run_with(dict(B), head=None), run_with(dict(B), head='abc'),\n"
-        "  run_with(on_head('on:\\n  pull_request_target:\\n')),\n"
-        "  run_with({'repos/o/app/branches/main': {'name': 'main'}}),\n"
-        "  run_with(on_base('on: push\\n')), run_with(on_base('on: [push, workflow_dispatch]\\n')),\n"
-        "  run_with(on_base('on:\\n  push:\\n    tags: [v*]\\njobs:\\n  a:\\n    branches: x\\n')),\n"
-        "  run_with(on_base('on: {push: {branches: [main]}}\\n')), run_with(on_head('on:\\n  push:\\n'))]\n"
+        "  run_with({'repos/o/app/branches/main': {'name': 'main'}})]\n"
         "m.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError('нет gh'))\n"
         "out.append(m.ci_state([], (), None, (), 'o/app', 'main', H)[0])\n"
         "out.append(m.ci_state([], ())[0])\n"
         "print(*out)\n" % os.path.join(LIBDIR, "merge.py"))
     r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
-    want = {"нет каталога workflows ни на head, ни на base": "ok", "на base push только в main": "ok",
-            "на base pull_request": "wait", "триггер в комментарии, push с branches-ignore": "ok",
-            "сбой gh на каталоге": "wait", "не-JSON": "wait", "сбой чтения файла": "wait",
-            "коммит и ветка не ответили": "wait", "404 не точным ответом": "wait",
-            "(HTTP 404) не последней строкой stderr": "wait", "base нет": "wait", "head нет": "wait",
-            "head не SHA": "wait", "на head pull_request_target, на base нет": "wait",
-            "коммит head не ответил 200": "wait", "на base on: push": "wait", "на base on: [push, …]": "wait",
-            "на base push только с tags (branches у job не в счёт)": "wait", "на base {push: {branches}}": "ok",
-            "на head push без branches": "wait", "gh не найден": "wait", "без repo/base/head — как раньше": "wait"}
+    want = {"каталога нет ни на head, ни на base": "ok", "на base каталог пуст": "ok",
+            "на base workflow (любой триггер, даже push только в main)": "wait",
+            "на base в каталоге не .yml (как guard: любой файл)": "wait", "workflow только на head": "wait",
+            "сбой gh на каталоге": "wait", "не-JSON": "wait", "коммит и ветка не ответили": "wait",
+            "404 не точным ответом": "wait", "(HTTP 404) не последней строкой stderr": "wait", "base нет": "wait",
+            "head нет": "wait", "head не SHA": "wait", "коммит head не ответил 200": "wait", "gh не найден": "wait",
+            "без repo/base/head — как раньше": "wait"}
     got = r.stdout.split()
     check("ci_state без CI: " + "; ".join(f"{k} — {v}" for k, v in want.items()),
           got == list(want.values()), [(k, v, g) for (k, v), g in zip(want.items(), got) if v != g] or r.stdout + r.stderr)
