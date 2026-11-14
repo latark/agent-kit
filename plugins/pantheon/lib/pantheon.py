@@ -2786,6 +2786,11 @@ def grants_load(text=None):
         if closed:
             errors.append(f"grant {i} ({win}): запись в ключи, конфиг и автозапуск не даётся: {', '.join(closed)}")
             continue
+        # сама папка .claude или .git (или путь внутри) — запреты GRANT_WRITE_DENY от неё встали бы не туда (metis-1214)
+        inner = [x for x in lists.get("write", []) if {".claude", ".git"} & set(norm(x).split("/"))]
+        if inner:
+            errors.append(f"grant {i} ({win}): запись в .claude и .git не даётся: {', '.join(inner)}")
+            continue
         if end <= now():
             expired.append((i, win, until))
             continue
@@ -2811,6 +2816,17 @@ def grants_apply(name, data, grants):
                 if x not in vals:
                     vals.append(x)
             node[keys[-1]] = vals
+        # выданная запись — с теми же запретами, что своя папка окна (role_settings): скрипты .claude/hooks хуки
+        # запускают вне песочницы, .claude/agents — роли, .git/hooks и .git/config — код git (metis-1214)
+        fs = data.setdefault("sandbox", {}).setdefault("filesystem", {})
+        deny = list(fs.get("denyWrite") or [])
+        for x in g.get("write", []):
+            r = os.path.realpath(os.path.expanduser(x))
+            for sub in GRANT_WRITE_DENY:
+                if r + sub not in deny:
+                    deny.append(r + sub)
+        if g.get("write"):
+            fs["denyWrite"] = deny
 
 
 def grants_check():
@@ -2952,6 +2968,8 @@ def agents_window(data, allowed, deny, script):
 
 
 EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
+GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
+    "/.claude/agents", "/**/.claude/agents")
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
