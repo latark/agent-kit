@@ -226,12 +226,15 @@ def test_zeus_clean_0136():
     e.run("watch", t=T0 + 60, extra=ZEUS_RUN)                       # снова ждёт — следующий проход чистит
     check(e.alerts().count("Зевс очищен") == 1, f"после отказа проверки следующий проход не очистил: {e.calls()}")
 
-    # свежий старт не вышел: тревога одна, сессия не помечена очищенной, повтор — не раньше чем через час
+    # свежий старт не вышел (имя не отпустили после claude stop): тревога одна — «Зевс остановлен — pantheon start
+    # zeus» с причиной, а не «не вышла, код 1» (metis-1192); сессия не помечена очищенной, повтор — не раньше чем через час
     e = zeus_env()
     e.run("watch", t=T0, extra={**QUICK, "PANTHEON_STOP_WAIT": "0.1"})  # claude stop не останавливает
     e.run("watch", t=T0 + 600, extra={**QUICK, "PANTHEON_STOP_WAIT": "0.1"})
-    check(e.alerts().count("очистка Зевса не вышла") == 1 and "Зевс очищен" not in e.alerts(),
-          f"неудачная очистка: нет одной тревоги или повтор раньше часа: {e.alerts()[-500:]}")
+    check(e.alerts().count("Зевс остановлен — pantheon start zeus: свежий старт не сделан, имя не освободилось") == 1
+          and "не вышла" not in e.alerts() and "Зевс очищен" not in e.alerts()
+          and _zeus_last(e).get("result") == "пропуск" and len([c for c in e.calls() if c[:1] == ["stop"]]) == 1,
+          f"неудачная очистка: нет одной тревоги или повтор раньше часа: {e.alerts()[-500:]} {e.calls()}")
     e.run("watch", t=T0 + 3700, extra=ZEUS_RUN)
     check(e.alerts().count("Зевс очищен") == 1, f"через час после неудачи очистки нет: {e.alerts()[-400:]}")
 

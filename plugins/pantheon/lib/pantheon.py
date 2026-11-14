@@ -5080,7 +5080,10 @@ def _resume_session(name, a, text, origin):
     role = "hq" if name == "zeus" else got[1]
     # схема А (metis-0933): те же --add-dir, AGENTS.md и пакет, что у pantheon start (--resume прежних флагов не берёт)
     argv = window_launch(role, name, got[3], run, text, resume=sid or a.get("id"))
-    before = {x.get("id") for x in agents_all() or [] if x.get("id")}
+    before, why = agents_snapshot()  # sessions.py; не ответил — пропуск, а не пустой снимок (metis-1192)
+    if why:
+        start_log(f"resume-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+        return skipped(why), None
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))

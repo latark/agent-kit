@@ -319,9 +319,14 @@ WAIT_REASONS = ("идёт технический", "пауза по нагруз
                 "пятичасовой", "недельный лимит")
 
 
+# тот же текст, что sessions.AGENTS_SILENT: sessions.py ставит загрузчик с P (_attach), простым импортом его не взять
+AGENTS_SILENT = "claude agents --json не ответил"
+
+
 def recheck(name, auto, nudge=False):
-    """Та же проверка по свежему claude agents — под блокировкой имени перед самим подъёмом."""
-    return lambda: wake_block(name, P.agents_all() or [], P.sessions_registry(), auto, nudge)
+    """Та же проверка по свежему claude agents под блокировкой имени; не JSON — отказ, а не «копий нет» (metis-1192)."""
+    return lambda: (AGENTS_SILENT if (agents := P.agents_all()) is None
+                    else wake_block(name, agents, P.sessions_registry(), auto, nudge))
 
 
 # --- снимок сессий (COMM-14) ---------------------------------------------------------
@@ -2473,6 +2478,24 @@ def zeus_trace(st, stp, t, a, miss, n, result):
     P.write_json(stp, st)
 
 
+def zeus_clean_failed(st, stp, t, a, n, rc, held):
+    """Свежий старт очистки Зевса не дал 0 (rc); held — причины повторной проверки под блокировкой (again)."""
+    if not held or held[0]:
+        # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
+        # fresh-skip уже в start.log) — проверит следующий проход
+        st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
+                      "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
+        P.write_json(stp, st)
+        return
+    st["failed"] = {"sid": a["sessionId"], "t": t}  # повтор — не чаще раза в час, и при пропуске тоже
+    if rc == P.SKIPPED:
+        # пропуск свежего старта (claude agents не ответил, имя не отпустили): тревогу «Зевс остановлен — pantheon
+        # start zeus» с причиной дал fresh_skip, если Зевс уже погашен, — не «не вышла, код 4» (metis-1192)
+        return zeus_trace(st, stp, t, a, [(0, P.SKIP_WHY)], n, "отложено")
+    zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
+    P.alert(f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log", "watch")
+
+
 def zeus_clean(agents, t):
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
@@ -2523,17 +2546,7 @@ def zeus_clean(agents, t):
                     "watch")
             event("zeus-clean", t, id=a.get("id"), tokens=n)
             return
-        if not held or held[0]:
-            # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
-            # fresh-skip уже в start.log) — проверит следующий проход
-            st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
-                          "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
-            P.write_json(stp, st)
-            return
-        st["failed"] = {"sid": a["sessionId"], "t": t}
-        zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
-        P.alert(f"очистка Зевса не вышла, код {rc} — контекст {k} тыс.; журнал start.log", "watch")
-        return
+        return zeus_clean_failed(st, stp, t, a, n, rc, held)
     zeus_trace(st, stp, t, a, miss, n, "пропуск")
     if [m for m, _ in miss] != [5]:
         return  # напоминание — только когда не хватает одного сохранения; (6) — тихо ждём следующего прохода
@@ -2908,8 +2921,10 @@ def goal_block(d, a, agents, registry):
 
 def goal_recheck(d, a):
     """Повторная проверка под блокировкой имени перед сменой цели, по свежему claude agents: держит имя только a —
-    иначе отказ (ревью argus: ручной запуск между снимком и блокировкой иначе погасил бы stop_copies)."""
-    return lambda: goal_block(d, a, P.agents_all() or [], P.sessions_registry())
+    иначе отказ (ревью argus: ручной запуск между снимком и блокировкой иначе погасил бы stop_copies). Не JSON —
+    отказ AGENTS_SILENT, а не «держателей нет» (metis-1192)."""
+    return lambda: (AGENTS_SILENT if (agents := P.agents_all()) is None
+                    else goal_block(d, a, agents, P.sessions_registry()))
 
 
 def autostart(agents, registry, doms, t, dry=False):
