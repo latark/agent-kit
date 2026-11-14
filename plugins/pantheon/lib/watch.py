@@ -4031,6 +4031,9 @@ def restart(rest, who):
             if n not in saved and n in forced:
                 try:
                     owner_use(qid, n)
+                except FileExistsError:  # metis-1139: тот же id в соседнем вызове успел раньше
+                    skip.append(f"{n} («да» на [{qid}] уже использовано)")
+                    continue
                 except OSError as e:
                     skip.append(f"{n} (метку использования [{qid}] записать не удалось: {e})")
                     continue
@@ -4092,6 +4095,11 @@ def owner_named(qid, names):
     Журнал не читается — P.ConsentLogError."""
     if not P.CONSENT_ID.fullmatch(str(qid or "")):
         return set()
+    # Несимметрия с гашением процессов — намеренная (metis-1137): галочка на карточке доски засчитывается перезапуску
+    # окна (consent_found берёт board.jsonl), а «да» на «Погасить процессы Пантеона» галочкой не засчитывается
+    # (lib/consent.py, hestia_reap_off_board). Перезапуск обратим и окно сохраняется, гашение pid — нет. Ослабить reap
+    # до перезапуска или ужесточить перезапуск — правка защиты, только по «да» владельца; тест держит оба поведения
+    # (test_consent_note.py, «несимметрия доски»).
     found = P.consent_found(qid, P.HESTIA_CONSENT_DAYS)[0]
     final = {}
     for _, _, body in found:  # позднее «нет» на тот же вопрос отменяет прежнее «да» (как pantheon consent)
@@ -4108,17 +4116,31 @@ def owner_used_path(qid):
 
 
 def owner_used(qid):
-    """metis-1122 (Б3 argus): окна, которые «да» на [qid] уже перезапустило без метки saved. Одно «да» — один раз."""
+    """metis-1122 (Б3 argus): окна, которые «да» на [qid] уже перезапустило без метки saved. Одно «да» — один раз.
+    Источники: метки restart-owner/<qid>@<окно> (metis-1139) и журнал restart-owner/<qid> (прежние записи)."""
+    used = set()
     try:
         with open(owner_used_path(qid), encoding="utf-8") as fh:
-            return {ln.split()[-1] for ln in fh.read().splitlines() if ln.strip()}
+            used = {ln.split()[-1] for ln in fh.read().splitlines() if ln.strip()}
     except FileNotFoundError:
-        return set()
+        pass
+    try:
+        names = os.listdir(os.path.dirname(owner_used_path(qid)))
+    except FileNotFoundError:
+        names = []
+    return used | {f[len(qid) + 1:] for f in names if f.startswith(qid + "@")}
 
 
 def owner_use(qid, name):
-    """Метка «[qid] использован для окна name» — до перезапуска (сбой записи — OSError, окно не трогаем)."""
+    """Метка «[qid] использован для окна name» — до перезапуска (сбой записи — OSError, окно не трогаем).
+    metis-1139: метка restart-owner/<qid>@<окно> создаётся с O_EXCL — из двух одновременных `--only` с тем же id
+    проходит один, второй получает FileExistsError («уже использовано»); строка в журнал — после метки."""
     os.makedirs(os.path.dirname(owner_used_path(qid)), exist_ok=True)
+    fd = os.open(owner_used_path(qid) + "@" + name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, f"{P.stamp()} {name}\n".encode("utf-8"))
+    finally:
+        os.close(fd)
     with open(owner_used_path(qid), "a", encoding="utf-8") as fh:
         fh.write(f"{P.stamp()} {name}\n")
 
@@ -4169,6 +4191,10 @@ def restart_only(rest, who, m):
     how = "ждала разрешения — сохранения не ждал" if a.get("state") == "blocked" else f"состояние {a.get('state') or '?'}"
     try:
         owner_use(qid, name)
+    except FileExistsError:  # metis-1139: одновременный --only с тем же id успел раньше
+        print(f"pantheon restart --only {name}: «да» на [{qid}] уже использовано для окна {name} — одно «да» на один "
+              f"перезапуск; новый вопрос с другим id. Ничего не перезапущено", file=P.sys.stderr)
+        return 2
     except OSError as e:
         print(f"pantheon restart --only {name}: метку использования [{qid}] записать не удалось ({e}) — ничего не "
               "перезапущено", file=P.sys.stderr)

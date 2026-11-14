@@ -273,6 +273,11 @@ cr = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-0031"], env=dict(HS_
 check("0562: окно hestia, ответа нет (код 1) — метки нет", cr.returncode == 1 and not os.path.exists(hmark),
       cr.stdout + cr.stderr)
 cr = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-0032"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
+check("1137: окно hestia, «да» на вопрос не о push («Разрешить пакет?») — код 1, метки нет",
+      cr.returncode == 1 and "не на вопрос о push" in cr.stdout and not os.path.exists(hmark), cr.stdout + cr.stderr)
+open(os.path.join(LOG, "zeus.md"), "a").write("## %s · окно вопросов\nвопрос: [metis-0032] Отправить ветку пакета?\n"
+                                                "ответ: Да\n\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+cr = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-0032"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
 check("0562: окно hestia, ответ найден (код 0) — метка <state>/hestia-consent/<id>",
       cr.returncode == 0 and os.path.isfile(os.path.join(hmark, "metis-0032")), cr.stdout + cr.stderr)
 os.remove(os.path.join(hmark, "metis-0032"))
