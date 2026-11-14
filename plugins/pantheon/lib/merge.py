@@ -617,7 +617,9 @@ OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-1050, 1111: полны
                                                    "слияние не держит"),
                                   ("tests", "full-shard", "metis-1111: части full, их итог собирает job full"),
                                   ("tests", "affected-shard", "metis-1111: части affected, их итог собирает "
-                                                              "обязательный job affected"))}
+                                                              "обязательный job affected"),
+                                  ("tests", "revert-check", "metis-1176: тесты PR на исходниках merge-base, итог "
+                                                            "читает argus"))}
 # запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
 CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
                "repos/{repo}/commits/{sha}/check-runs?per_page=100")

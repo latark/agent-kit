@@ -565,9 +565,9 @@ def t_ci_verdict_unit(h):
     v = V([dict(AFFECTED, name="affected (1/4)"), TRACES], req, opt)
     check("ci_verdict: зелёная «affected (1/4)» обязательную affected не закрывает — wait",
           v[0] == "wait" and "tests/affected" in v[1], v)
-    check("optional_checks: agent-kit — tests/full и части full-shard, affected-shard; регистр и владелец не важны, "
+    check("optional_checks: agent-kit — tests/full, части full-shard, affected-shard и revert-check; регистр и владелец не важны, "
           "другой репозиторий — пусто",
-          opt == (("tests", "full"), ("tests", "full-shard"), ("tests", "affected-shard"))
+          opt == (("tests", "full"), ("tests", "full-shard"), ("tests", "affected-shard"), ("tests", "revert-check"))
           and mg.optional_checks("X/Agent-Kit") == opt
           and mg.optional_checks("latark/tg-read") == () and mg.optional_checks(None) == (), opt)
     check("OPTIONAL_CHECKS: у каждой необязательной есть причина с номером задачи",
