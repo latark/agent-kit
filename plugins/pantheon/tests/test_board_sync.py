@@ -263,7 +263,7 @@ def mpr(n, branch, body, **kw):
 
 cache10 = {"merged": {R: [mpr(900, "batch/metis-0760", "Closes metis-0762"),
                           mpr(400, "batch/metis-0760", "Closes metis-0762, metis-0763"),
-                          mpr(402, "batch/metis-0760", "Closes metis-0764\nчасть: остальное позже"),
+                          mpr(402, "batch/metis-0760", "Closes metis-0764\nчасть metis-0764: остальное позже"),
                           mpr(403, "batch/metis-0760", "Closes metis-0765", cross=True),
                           {k: v for k, v in mpr(406, "batch/metis-0760", "Closes metis-0765").items() if k != "cross"},
                           mpr(True, "batch/metis-0760", "Closes metis-0765"), mpr(0, "batch/metis-0760", "Closes metis-0765"),

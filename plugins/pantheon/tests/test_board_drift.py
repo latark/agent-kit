@@ -267,7 +267,7 @@ lines = e.drift()[1]
 check("9. открытый PR пачки тоже: строка о задаче вне состава", any(other in x and "o/r#300" in x for x in lines), lines)
 e.cache(open_prs={"o/r": []}, merged={"o/r": [dict(pr, headRefName=f"feat/{s1}")]})
 check("9. ветка не batch/<id> — не PR пачки: строк о составе нет", not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
-e.cache(open_prs={"o/r": []}, merged={"o/r": [dict(pr, body=pr["body"] + "\nчасть")]})
+e.cache(open_prs={"o/r": []}, merged={"o/r": [dict(pr, body=pr["body"] + f"\nчасть {other}")]})
 check("9. PR пачки «часть» — не закрывает: строк нет", not any("PR пачки" in x for x in e.drift()[1]), e.drift()[1])
 for fork in ({"cross": True}, {"cross": None}):
     row = {k: v for k, v in dict(pr, **fork).items() if v is not None}
