@@ -16,10 +16,13 @@ import io
 import json
 import os
 import shutil
+import ssl
 import stat
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -86,6 +89,7 @@ def fake_post(url, body, headers, timeout=None):
     return r
 
 
+REAL_POST_JSON = L.post_json
 L.post_json = fake_post
 
 
@@ -210,6 +214,60 @@ code, out, rid, res = run([SID])
 check("сеть: failed, причина — класс без текста",
       code == 1 and "Supabase не ответил: OSError" in (res or {}).get("why", "") and PASSWORD not in out + everything_text(),
       res)
+
+# 4б. TLS: у python.org Python нет своих CA → CA системы из SYSTEM_CA (metis-1134)
+class NoCaCtx:
+    loaded = []
+
+    def get_ca_certs(self):
+        return []
+
+    def load_verify_locations(self, cafile=None, **kw):
+        NoCaCtx.loaded.append(cafile)
+
+
+FAKE_CA = os.path.join(_ROOT, "fake-cert.pem")
+with open(FAKE_CA, "w") as fh:
+    fh.write("x")
+real_ctx, real_vp, real_ca = ssl.create_default_context, ssl.get_default_verify_paths, L.SYSTEM_CA
+ssl.create_default_context = lambda *a, **k: NoCaCtx()
+ssl.get_default_verify_paths = lambda: type("VP", (), {"cafile": "/nonexistent/cafile", "capath": "/nonexistent/capath"})()
+L.SYSTEM_CA = FAKE_CA
+try:
+    L.ssl_context()
+finally:
+    ssl.create_default_context, ssl.get_default_verify_paths, L.SYSTEM_CA = real_ctx, real_vp, real_ca
+check("TLS: контекст без CA получает cafile из SYSTEM_CA", NoCaCtx.loaded == [FAKE_CA], NoCaCtx.loaded)
+seen = {}
+
+
+class FakeResp:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n=-1):
+        return b"{}"
+
+
+real_urlopen = urllib.request.urlopen
+urllib.request.urlopen = lambda req, **kw: (seen.update(kw), FakeResp())[1]
+try:
+    REAL_POST_JSON("https://x.invalid/a", {}, {})
+finally:
+    urllib.request.urlopen = real_urlopen
+check("TLS: post_json передаёт контекст в urlopen", isinstance(seen.get("context"), ssl.SSLContext), seen)
+
+# 4в. причина с классом reason у URLError, без текста
+REPLY[0] = urllib.error.URLError(ssl.SSLCertVerificationError(f"verify failed {PASSWORD}"))
+code, out, rid, res = run([SID])
+check("сеть: URLError(SSLCertVerificationError) — причина с классом reason, без текста",
+      code == 1 and "Supabase не ответил: URLError (SSLCertVerificationError)" in (res or {}).get("why", "")
+      and PASSWORD not in out + everything_text(), res)
 
 # 5. нет env
 clear_env()

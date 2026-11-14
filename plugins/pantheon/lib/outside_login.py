@@ -28,6 +28,7 @@ import json
 import os
 import re
 import secrets
+import ssl
 import stat
 import time
 import urllib.error
@@ -47,6 +48,7 @@ EMAIL_KEY, PASSWORD_KEY = "TALOS_EMAIL", "TALOS_PASSWORD"
 URL_KEYS = ("NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL", "VITE_SUPABASE_URL", "PUBLIC_SUPABASE_URL")
 ANON_KEYS = ("NEXT_PUBLIC_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY",
              "VITE_SUPABASE_ANON_KEY", "PUBLIC_SUPABASE_ANON_KEY")
+SYSTEM_CA = "/etc/ssl/cert.pem"     # CA системы: у python.org Python своих нет (CERTIFICATE_VERIFY_FAILED); тест подменяет
 CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,59}")
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 USAGE = "pantheon outside login <ID сервера> [--app ИМЯ] [--wait С]"
@@ -57,12 +59,23 @@ def set_core(p, o):
     P, O = p, o
 
 
+def ssl_context():
+    """Контекст TLS. Нет ни одного загруженного CA (python.org Python без своих) — берём CA системы из SYSTEM_CA."""
+    ctx = ssl.create_default_context()
+    if not ctx.get_ca_certs():
+        vp = ssl.get_default_verify_paths()
+        if not (vp.cafile and os.path.exists(vp.cafile)) and not (vp.capath and os.path.isdir(vp.capath)) \
+                and os.path.isfile(SYSTEM_CA):
+            ctx.load_verify_locations(cafile=SYSTEM_CA)
+    return ctx
+
+
 def post_json(url, body, headers, timeout=HTTP_TIMEOUT):
     """POST JSON → (код HTTP, разобранный ответ или None). Сеть — только здесь (тест подменяет)."""
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 — адрес проверен в supabase_url
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as r:   # noqa: S310 — адрес проверен в supabase_url
             status, raw = r.status, r.read(1024 * 1024)
     except urllib.error.HTTPError as e:
         status, raw = e.code, e.read(64 * 1024)
@@ -134,7 +147,10 @@ def sign_in(keys):
                                  {"email": keys[EMAIL_KEY], "password": keys[PASSWORD_KEY]},
                                  {"apikey": anon, "Authorization": f"Bearer {anon}"})
     except (OSError, ValueError) as e:   # urllib.error.URLError — OSError; причина — только класс
-        return None, f"Supabase не ответил: {type(e).__name__}", url
+        why = type(e).__name__
+        if isinstance(e, urllib.error.URLError) and isinstance(e.reason, BaseException):
+            why += f" ({type(e.reason).__name__})"   # только имена классов: ни текста, ни адреса
+        return None, f"Supabase не ответил: {why}", url
     if status == 200 and isinstance(body, dict) and body.get("access_token") and body.get("refresh_token"):
         if not body.get("expires_at") and isinstance(body.get("expires_in"), int):
             body["expires_at"] = int(time.time()) + body["expires_in"]
