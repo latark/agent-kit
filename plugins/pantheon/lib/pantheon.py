@@ -2985,7 +2985,7 @@ GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/
 # (metis-1221, решение владельца 15.11 «Да, корень + PR», «и .mcp.json тоже»). Остаток — README guard
 ROOT_SETTINGS = ("/.claude/settings.json", "/.claude/settings.local.json", "/.mcp.json")
 # Корень — и подпапки первого уровня (долги argus #483, metis-1221 п. 5): мастерская стартует в workshop_dir()/<задача>
-# (direction_target), а вложенные проекты (nested_projects — ровно один уровень вниз, app/ MorphStream) владелец
+# (direction_target), а вложенные проекты (nested_projects — ровно один уровень вниз, вроде app/) владелец
 # открывает сессией без песочницы. «*» в песочнице macOS — одно звено без «/» (README sandbox-runtime, Path Syntax):
 # копии <папка>/.claude/worktrees/<x>/ (три звена) и <задача>/.claude/worktrees/<x>/ остаются открыты
 ROOT_LEVELS = ("", "/*")
