@@ -81,20 +81,33 @@ TEXT_LIMIT = 1 << 20  # больше — текст не разбираем, о�
 DEV_ROLES = {"dev-haiku", "dev-sonnet", "dev-opus"}
 
 
-def _dev_skill_only(p):
-    """Путь — файл навыка внутри .claude/skills worktree (<…>/.claude/worktrees/<имя>/.claude/skills/…), не основной
-    копии проекта и не commands и agents."""
+DEV_PAIRS = {"agents", "commands", "skills", "hooks"}
+
+
+def _dev_skill_only(p, own):
+    """Путь — внутри <папка направления>/.claude/worktrees/<имя>/.claude/skills/… (ревью #459): (а) пара
+    .claude/worktrees/<имя> стоит прямо перед .claude/skills; (б) до неё — ровно папка направления из own, а не
+    подпапка (app/x/.claude/worktrees — поддельная worktree); (в) другой пары .claude/<agents|commands|skills|hooks> в
+    пути нет ни до, ни после (…/skills/a/.claude/agents/x.md, app/.claude/agents/q/.claude/worktrees/… — отказ)."""
     parts = [G._key(x) for x in p.split("/")]
-    for i, x in enumerate(parts[:-1]):
-        if x == ".claude" and parts[i + 1] == "skills":
-            return any(parts[j] == ".claude" and parts[j + 1] == "worktrees" and j + 2 < i for j in range(i))
-    return False
+    pairs = [i for i, x in enumerate(parts[:-1]) if x == ".claude" and parts[i + 1] in DEV_PAIRS]
+    if len(pairs) != 1:  # (в)
+        return False
+    i = pairs[0]
+    if parts[i + 1] != "skills" or i < 4:
+        return False
+    if not (parts[i - 3] == ".claude" and parts[i - 2] == "worktrees" and parts[i - 1]):  # (а)
+        return False
+    prefix = "/".join(parts[:i - 3])
+    return any(prefix == G._key(f).rstrip("/") for f in own)  # (б)
 
 
 def own_folders(role, sub, pdir):
     """Папки направления, где роль правит skills, commands и agents проекта: координатор (главная сессия
     domain-coordinator) и лид направления (hephaestus-<коротко>, apollo-<коротко> — главная сессия или субагент окна).
-    Направление — по папке запуска (domains.json). Иначе []: остальные роли, субагенты и чужое направление."""
+    Направление — по папке запуска (domains.json). Разработчик-субагент (dev-haiku, dev-sonnet, dev-opus, metis-1039)
+    тоже получает папки направления, но check_protect_config пускает его только в .claude/skills своей worktree
+    (_dev_skill_only). Иначе []: остальные роли, остальные субагенты и чужое направление."""
     name, folders = G.direction_of(G.load_domains(), pdir)
     if not name or not folders:
         return []
@@ -689,7 +702,7 @@ def check_protect_config(event, tool, tool_input):
     # без этого исключения: их текста не видно
     own = own_folders(role, sub, pdir) if bad else []
     dev = sub and role in DEV_ROLES
-    opened = [p for p in bad if own and (not dev or _dev_skill_only(p)) and not G._inside(p, prot) and not any(G._inside(x, [p]) for x in prot)
+    opened = [p for p in bad if own and (not dev or _dev_skill_only(p, own)) and not G._inside(p, prot) and not any(G._inside(x, [p]) for x in prot)
               and not _settings_file(p, mk, own)]
     bad = [p for p in bad if p not in opened]
     if tool == "Bash":
@@ -705,17 +718,25 @@ def check_protect_config(event, tool, tool_input):
     if not bad and opened:
         problem = own_text_problem(event, tool, tool_input, opened, own)
         if problem:
-            return (f"Правило protect-config: роль «{role}» правит навыки, команды и роли своего проекта, но не то, что "
+            what = ("навыки (.claude/skills) своей worktree" if dev else "навыки, команды и роли своего проекта")
+            return (f"Правило protect-config: роль «{role}» правит {what}, но не то, что "
                     f"даёт права, запускает код без вопроса или подменяет роль Пантеона: "
                     f"{problem[0].replace(G.HOME, '~')} — {problem[1]}. Во frontmatter навыка и команды можно только "
                     "name, description, argument-hint, when_to_use, disable-model-invocation, user-invocable, version, "
                     "license, compatibility, metadata, у роли — name, description, model, color, effort, maxTurns, простыми строками «ключ: "
                     "значение». Остальное (allowed-tools, hooks, tools, permissionMode…), строки !`…` и ```!, роль с "
-                    "именем роли Пантеона правит только metis-pantheon после «да» владельца — опиши правку файлом в "
-                    "~/ai/pantheon/directions/metis-pantheon/inbox/.")
+                    "именем роли Пантеона правит только metis-pantheon после «да» владельца — "
+                    + ("убери это из навыка, а нужную правку опиши лиду в отчёте." if dev else
+                       "опиши правку файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/."))
         return None
     if not bad:
         return None
+    if dev and own:
+        return (f"Правило protect-config: разработчик «{role}» (субагент) правит только навыки своей worktree "
+                f"своего направления ({', '.join(p.replace(G.HOME, '~') for p in bad[:3])} — нельзя): "
+                "<папка направления>/.claude/worktrees/<имя>/.claude/skills/…, текстом через Write или Edit. "
+                "Основная копия проекта, .claude/commands, .claude/agents, .claude/hooks и настройки для него закрыты — "
+                "правь навык в своей worktree, а остальное передай лиду в отчёте.")
     return (f"Правило protect-config: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не правит защиты "
             f"({', '.join(p.replace(G.HOME, '~') for p in bad[:3])}): хуки, роли (в том числе проекта: <репо>/.claude и .claude/agents), плагины, policy.toml, настройки, "
             "sync.sh и ~/.zshrc меняет только metis-pantheon в своей сессии после «да» владельца. "

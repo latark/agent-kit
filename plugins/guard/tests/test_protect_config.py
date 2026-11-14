@@ -168,8 +168,21 @@ def main():
          W(APP + "/.claude/worktrees/w/.claude/settings.json", "{}\n")),
         ("dev-sonnet: worktree/.mcp.json — отказ", "deny", APP, ("dev-sonnet", True),
          W(APP + "/.claude/worktrees/w/.mcp.json", "{}\n")),
-        ("dev-sonnet: agent-kit worktree plugins/guard — отказ (направление Метиды)", "deny", APP, ("dev-sonnet", True),
+        ("dev-sonnet: .claude/skills в worktree agent-kit (чужое направление, Метиды) — отказ", "deny", APP,
+         ("dev-sonnet", True),
          W(AK + "/.claude/worktrees/w/.claude/skills/y/SKILL.md")),
+        # --- ревью #459: (а) .claude/worktrees/<имя> прямо перед .claude/skills, (б) до неё ровно папка направления,
+        # (в) другой пары .claude/<agents|commands|skills|hooks> в пути нет ---
+        *[(f"dev-sonnet: {rel} — отказ ({why})", "deny", APP, ("dev-sonnet", True), W(APP + rel)) for rel, why in (
+            ("/.claude/worktrees/w/.claude/skills/a/.claude/agents/x.md", "в: agents после skills"),
+            ("/.claude/worktrees/w/.claude/skills/a/.claude/commands/x.md", "в: commands после skills"),
+            ("/.claude/agents/q/.claude/worktrees/w/.claude/skills/y/SKILL.md", "в: agents до worktree"),
+            ("/.claude/commands/q/.claude/worktrees/w/.claude/skills/y/SKILL.md", "в: commands до worktree"),
+            ("/x/.claude/worktrees/w/.claude/skills/y/SKILL.md", "б: поддельная worktree в подпапке"),
+            ("/.claude/worktrees/.claude/skills/y/SKILL.md", "а: worktrees без имени"),
+            ("/.claude/xyz/w/.claude/skills/y/SKILL.md", "а: не worktrees"),
+            ("/x/worktrees/w/.claude/skills/y/SKILL.md", "а: worktrees не в .claude"),
+            ("/.claude/worktrees/w/x/.claude/skills/y/SKILL.md", "а: пара не прямо перед .claude/skills"))],
         ("dev-sonnet: навык с !`cmd` — отказ", "deny", APP, ("dev-sonnet", True),
          W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", "---\nname: y\n---\nветка: !`git branch`\n")),
         ("dev-sonnet: навык с блоком ```! — отказ", "deny", APP, ("dev-sonnet", True),
@@ -373,6 +386,13 @@ def main():
     # причина отказа своего направления называет, что не так, и кто правит
     _, why = run(home, APP, COORD, *W(skill, fm("allowed-tools: Bash")))
     check("причина: ключ назван, правит metis-pantheon", "allowed-tools" in why and "metis-pantheon" in why, why[:300])
+    _, why = run(home, APP, ("dev-sonnet", True), *W(skill))
+    check("причина dev: правь навык в своей worktree, не inbox", "своей worktree" in why and "inbox" not in why,
+          why[:300])
+    _, why = run(home, APP, ("dev-sonnet", True),
+                 *W(APP + "/.claude/worktrees/w/.claude/skills/y/SKILL.md", fm("allowed-tools: Bash")))
+    check("причина dev, текст: ключ назван, правку — лиду, не inbox",
+          "allowed-tools" in why and "лиду" in why and "inbox" not in why, why[:300])
     _, why = run(home, APP, COORD, *B("echo hi > .claude/skills/x/SKILL.md"))
     check("причина Bash: текст не разобрать — Write или Edit", "Write или Edit" in why, why[:300])
     # --- ревью #347 Б3: собранная роль Пантеона вне списков guard (charon в ~/.claude/agents) ---

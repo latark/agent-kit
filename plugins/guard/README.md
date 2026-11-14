@@ -186,6 +186,13 @@ send-keys и т. п. — ввод от имени владельца), попо�
     направления (`pantheon domains build`) не закрывает `.claude/agents` в его папках. Известный остаток → metis-0883:
     запись в `.claude/agents` и skills своего направления скриптом или git (python, `git checkout <ветка>`) guard не
     видит — проверки текста после хода нет. После taint запись — как раньше;
+  - с metis-1039 («да» владельца 14.11) разработчики `dev-haiku`, `dev-sonnet`, `dev-opus` (субагенты) правят только
+    `.claude/skills` своей worktree своего направления: `<папка направления>/.claude/worktrees/<имя>/.claude/skills/…`.
+    Пара `.claude/worktrees/<имя>` стоит прямо перед `.claude/skills`, до неё — ровно папка направления из domains.json
+    (подпапка `app/x/.claude/worktrees/…` — поддельная worktree, отказ), другой пары `.claude/agents|commands|skills|hooks`
+    в пути нет ни до, ни после (ревью #459). Текст проверяется так же, как у координатора (`own_text_problem`).
+    Основная копия проекта, `.claude/commands`, `.claude/agents`, `.claude/hooks` и настройки для них закрыты; причина
+    отказа советует править навык в своей worktree;
   - закрыта и цель выше `.claude` — сам репозиторий или папка над репозиториями, если туда ложится дерево с любыми именами:
     распаковка (`tar -x`, `unzip`, `ditto -x`), `cp -R`/`-a`, `ditto`, `scp -r`, `rsync -r`/`-a` или с источником `папка/`;
     `git clone` в `<репо>/.claude` тоже закрыт;
