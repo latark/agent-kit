@@ -4170,13 +4170,23 @@ def restart_only(rest, who, m):
               f"где есть {name}, за сутки — попроси Зевса спросить «[{qid}] Перезапустить окно: {name}?»; ничего не "
               "перезапущено", file=P.sys.stderr)
         return 1
-    if name in owner_used(qid):
-        print(f"pantheon restart --only {name}: «да» на [{qid}] уже использовано для окна {name} — одно «да» на один "
-              f"перезапуск; новый вопрос с другим id. Ничего не перезапущено", file=P.sys.stderr)
+    used = (f"«да» на [{qid}] уже использовано для окна {name} — одно «да» на один перезапуск; новый вопрос с другим "
+            "id. Ничего не перезапущено")
+    return restart_one(name, qid, ONLY_TEXT, f"pantheon restart --only {name}", used,
+                       f"«да» на [{qid}] для {name} израсходовано — повтор только по новому вопросу",
+                       f"«да» владельца [{qid}]", who, m)
+
+
+def restart_one(name, mark, text, cmd, used, spent, because, who, m=None):
+    """Перезапуск одного окна по одному согласию (общая часть restart_only и restart_merged, metis-1122, 1153): метка
+    restart-owner/<mark>@<окно> — одно согласие, один перезапуск (owner_use, O_EXCL); окно, остановленное вами, не
+    трогается; сессия — из claude agents, как у restart_only. cmd — начало строк отказа, used — причина «уже
+    перезапущено», spent — что сказать, если перезапуск после метки упал, because — чьё согласие (в тревоге). → код."""
+    if name in owner_used(mark):
+        print(f"{cmd}: {used}", file=P.sys.stderr)
         return 2
     if os.path.exists(P.path("stopped", name)):
-        print(f"pantheon restart --only {name}: окно остановлено вами (pantheon stop) — вернуть: pantheon resume {name}",
-              file=P.sys.stderr)
+        print(f"{cmd}: окно остановлено вами (pantheon stop) — вернуть: pantheon resume {name}", file=P.sys.stderr)
         return 1
     agents = P.agents_all()
     if agents is None:
@@ -4184,35 +4194,75 @@ def restart_only(rest, who, m):
         return 1
     mine = [a for a in agents if base_session(a.get("name")) == name and a.get("id") and a.get("sessionId")]
     if not mine:
-        print(f"pantheon restart --only {name}: нет фоновой сессии с этим именем — вкладка? перезапустить вручную",
-              file=P.sys.stderr)
+        print(f"{cmd}: нет фоновой сессии с этим именем — вкладка? перезапустить вручную", file=P.sys.stderr)
         return 1
     a = saved_agent(name, mine, saved_sid(name), warn=False)
     how = "ждала разрешения — сохранения не ждал" if a.get("state") == "blocked" else f"состояние {a.get('state') or '?'}"
     try:
-        owner_use(qid, name)
-    except FileExistsError:  # metis-1139: одновременный --only с тем же id успел раньше
-        print(f"pantheon restart --only {name}: «да» на [{qid}] уже использовано для окна {name} — одно «да» на один "
-              f"перезапуск; новый вопрос с другим id. Ничего не перезапущено", file=P.sys.stderr)
+        owner_use(mark, name)
+    except FileExistsError:  # metis-1139: одновременный перезапуск по тому же согласию успел раньше
+        print(f"{cmd}: {used}", file=P.sys.stderr)
         return 2
     except OSError as e:
-        print(f"pantheon restart --only {name}: метку использования [{qid}] записать не удалось ({e}) — ничего не "
-              "перезапущено", file=P.sys.stderr)
+        print(f"{cmd}: метку использования [{mark}] записать не удалось ({e}) — ничего не перезапущено",
+              file=P.sys.stderr)
         return 3
-    rc = P.resume_session(name, a, ONLY_TEXT, "restart",
+    rc = P.resume_session(name, a, text, "restart",
                           recheck=lambda: "остановлено вами" if os.path.exists(P.path("stopped", name)) else None)[0]
     if rc != 0:
-        print(f"pantheon restart --only {name}: перезапуск не удался, код {rc}; «да» на [{qid}] для {name} "
-              "израсходовано — повтор только по новому вопросу", file=P.sys.stderr)
+        print(f"{cmd}: перезапуск не удался, код {rc}; {spent}", file=P.sys.stderr)
         return 1
     if m and name in (m.get("sessions") or []):  # идёт общий перезапуск — отметить, как у --go
         os.makedirs(P.path("maintenance"), exist_ok=True)
         P.write_atomic(P.path("maintenance", name + ".done"), P.stamp() + "\n")
         with contextlib.suppress(FileNotFoundError):
             os.remove(P.path("maintenance", name + ".json"))
-    P.alert(f"окно {name} перезапущено одно ({who}, «да» владельца [{qid}]; {how})", "pantheon-restart")
+    P.alert(f"окно {name} перезапущено одно ({who}, {because}; {how})", "pantheon-restart")
     print(f"{name}: перезапущено ({how})")
     return 0
+
+
+# metis-1153 (вариант А владельца 14.11 11:49): `pantheon merge request N -R repo --restart <окно>` — окно названо в
+# заявке и в окне Touch ID; после слияния по этому Touch ID проход слияния (lib/merge.py, finger) один раз перезапускает
+# именно это окно. Метка — restart-owner/merge-<owner>__<repo>__<N>-<sha12>@<окно>: повтор той же заявки второй
+# перезапуск не даёт. Фраза «слей #N» окно не называла — по ней окно не перезапускается.
+MERGE_TEXT = ("[Пантеон: окно перезапущено после слияния] PR {pr} слит по Touch ID владельца; это окно названо в заявке на "
+              "слияние для перезапуска. Прочитай свой файл состояния и продолжай со следующего шага. Серверы MCP и "
+              "настройки папки из PR окно видит, только если его папка уже на слитом коммите (`git log -1`); не на нём — "
+              "скажи об этом в отчёте. Это не ответ владельца и не согласие на другое.")
+
+
+def restart_target_problem(name):
+    """metis-1153: можно ли назвать окно в заявке на слияние — имя сессии, не Зевс (его поднимает владелец), есть в
+    реестре окон domains.json. → None или причина отказа."""
+    if not P.SESSION_NAME.fullmatch(str(name or "")):
+        return f"«{str(name)[:40]}» — не имя окна (строчные латинские буквы, цифры и дефис)"
+    if name.startswith("zeus"):
+        return "Зевс — ваша сессия, её поднимает владелец: pantheon start zeus --restart во вкладке iTerm"
+    doms = domains()
+    if not doms:
+        return "реестр окон domains.json не прочитан (pantheon domains build)"
+    if name not in doms:
+        return f"{name} — нет в реестре окон domains.json"
+    return None
+
+
+def merge_mark(repo, pr, sha):
+    return f"merge-{repo.replace('/', '__')}__{int(pr)}-{sha[:12]}"
+
+
+def restart_merged(name, repo, pr, sha, who):
+    """metis-1153: перезапуск окна name после слияния repo#pr (sha) по Touch ID, если окно названо в заявке. Один раз
+    на слияние (метка merge_mark). → код (0 — перезапущено)."""
+    why = restart_target_problem(name)
+    cmd = f"перезапуск {name} после слияния {repo}#{pr}"
+    if why:
+        print(f"{cmd}: {why}", file=P.sys.stderr)
+        return 2
+    return restart_one(name, merge_mark(repo, pr, sha), MERGE_TEXT.format(pr=f"{repo}#{pr} ({sha[:7]})"), cmd,
+                       "окно уже перезапущено по этому слиянию — один Touch ID, один перезапуск",
+                       "перезапуск по этому слиянию израсходован — вручную: вопрос «[id] Перезапустить окно: "
+                       f"{name}?» и pantheon restart --only", f"Touch ID слияния {repo}#{pr}", who)
 
 
 def zeus_renewed(names, saved):
