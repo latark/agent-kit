@@ -616,7 +616,8 @@ def window_core(path):
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
-# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, narrow_tests_record (metis-1050),
+# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, repo_entry (metis-1116),
+# narrow_tests_record (metis-1050),
 # REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE,
 # CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
@@ -636,7 +637,8 @@ CI_NONE = "проверки GitHub не получены"
 # красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
 # внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
 # (SUCCESS/NEUTRAL/SKIPPED).
-REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None)),
+                   "brokerassistantapp/app": (("tests", "checks", None),)}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate_ci по файлам .github/workflows
@@ -668,12 +670,24 @@ CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
 # `pantheon review test --`. Засчитывается только запись с этой командой (full_tests_record); нет строки — запасного
 # пути у репозитория нет, отказ
 FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
-                            "plugins/pantheon plugins/project-tools")}
+                            "plugins/pantheon plugins/project-tools"),
+              "brokerassistantapp/app": "pnpm run check"}
+
+
+def repo_entry(table, repo, default=None):
+    """Запись таблицы шлюза (REQUIRED_CHECKS, OPTIONAL_CHECKS, FULL_TESTS, NARROW_TESTS) для repo: сначала полный
+    `owner/name` в нижнем регистре, потом короткое имя — только для ключа без «/» (agent-kit); «app» чужого
+    владельца не совпадает с ключом «brokerassistantapp/app» (metis-1116)."""
+    full = str(repo or "").lower()
+    if "/" in full and full in table:
+        return table[full]
+    short = full.rsplit("/", 1)[-1]
+    return table[short] if short in table and "/" not in short else default
 
 
 def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
-    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    got = repo_entry(REQUIRED_CHECKS, repo, ())
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
 
 
@@ -690,7 +704,7 @@ def ci_fork(view):
 
 def optional_checks(repo):
     """Необязательные (workflow, job) repo (owner/name) из OPTIONAL_CHECKS: их красная — только предупреждение."""
-    return tuple((w, j) for w, j, _ in OPTIONAL_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ()))
+    return tuple((w, j) for w, j, _ in repo_entry(OPTIONAL_CHECKS, repo, ()))
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
@@ -784,7 +798,7 @@ def full_tests_record(repo, rec):
     outside test` — саму команду; `heavy` впереди не важен — проход ставит его сам. Комментарий — как в bash, только
     «#» в начале слова (после пробела): хвост ` # …` снимается, а `слово#…` — часть слова, и команда уже другая.
     Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
-    want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    want = repo_entry(FULL_TESTS, repo)
     cmd = rec.get("cmd") if isinstance(rec, dict) else None
     if not want or not isinstance(cmd, str):
         return False
@@ -834,7 +848,7 @@ def narrow_tests_record(repo, rec):
 def narrow_map_path(repo):
     """Путь карты affected-map.json от корня — рядом с run-tests.py команды FULL_TESTS репозитория; нет — None."""
     try:
-        words = shlex.split(FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()) or "")
+        words = shlex.split(repo_entry(FULL_TESTS, repo) or "")
     except ValueError:
         return None
     script = next((w for w in words if posixpath.basename(w) == "run-tests.py"), None)

@@ -724,7 +724,46 @@ def t_ci_verdict_unit(h):
           {(w, j) for w, j, _ in mg.OPTIONAL_CHECKS["agent-kit"]} <= pr_jobs, sorted(pr_jobs))
 
 
-CASES = [t_ci, t_ci_required, t_ci_verdict_unit]
+def t_ci_ba(h):
+    """metis-1116: записи BrokerAssistantApp/app (ключ «brokerassistantapp/app») ищет repo_entry по полному
+    owner/name; короткое имя «app» чужого владельца не совпадает, а agent-kit (ключ без «/») ищется как раньше."""
+    mg = _load_merge_gate("merge_gate_ci_ba")
+    ba = (("tests", "checks"),)
+    check("required_checks: BA в develop — tests/checks", mg.required_checks("BrokerAssistantApp/app", "develop") == ba)
+    check("required_checks: BA в main — tests/checks", mg.required_checks("BrokerAssistantApp/app", "main") == ba)
+    check("required_checks: BA, base не строка — tests/checks", mg.required_checks("brokerassistantapp/app", None) == ba)
+    check("required_checks: someone/app — пусто (короткое имя «app» не ключ)",
+          mg.required_checks("someone/app", "develop") == () and mg.required_checks("app", "main") == ())
+    check("required_checks: agent-kit — прежние записи",
+          mg.required_checks("latark/agent-kit", "main") == (("tests", "affected"), ("check-traces", "traces")))
+    check("optional_checks: BA и someone/app — пусто",
+          mg.optional_checks("BrokerAssistantApp/app") == () and mg.optional_checks("someone/app") == ())
+    check("repo_entry: полный ключ только целиком, «brokerassistantapp» без имени — нет",
+          mg.repo_entry(mg.FULL_TESTS, "x/brokerassistantapp/app") is None
+          and mg.repo_entry(mg.FULL_TESTS, "brokerassistantapp/app") == "pnpm run check")
+    want = "pnpm run check  # package.json: npx tsx scripts/run-checks.ts"
+    for name, repo, cmd, ok in (
+            ("запись outside с хвостом «# …»", "BrokerAssistantApp/app", want, True),
+            ("хук: pantheon review test -- pnpm run check", "BrokerAssistantApp/app",
+             "pantheon review test -- pnpm run check", True),
+            ("pnpm run check && x", "BrokerAssistantApp/app", "pnpm run check && x", False),
+            ("чужой репозиторий x/app", "x/app", want, False)):
+        check(f"full_tests_record BA: {name} → {ok}", mg.full_tests_record(repo, dict(cmd=cmd)) is ok, cmd)
+    # запасной путь при «spending limit»: запись полного набора BA на SHA — пропуск, нет — отказ
+    sha = h.sha["agent-kit"]
+    full = "pantheon review test -- pnpm run check"
+    mg.read_records = lambda: [full_rec("brokerassistantapp/app", sha, full)]
+    got = mg._billing_problem("BrokerAssistantApp/app", 78, sha)
+    check("_billing_problem BA: есть запись pnpm run check на SHA — пропуск", got[0] is None and len(got[1]) == 1, got)
+    mg.read_records = lambda: [full_rec("brokerassistantapp/app", sha, "pantheon review test -- pnpm test")]
+    got = mg._billing_problem("BrokerAssistantApp/app", 78, sha)[0] or ""
+    check("_billing_problem BA: запись с другой командой — отказ с `pnpm run check`", "`pnpm run check`" in got, got)
+    mg.read_records = lambda: [full_rec("brokerassistantapp/app", sha, full)]
+    got = mg._billing_problem("someone/app", 78, sha)[0] or ""
+    check("_billing_problem: someone/app — запасного пути нет", "запасного пути у репозитория нет" in got, got)
+
+
+CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_ba]
 
 
 if __name__ == "__main__":

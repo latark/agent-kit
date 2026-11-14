@@ -23,7 +23,7 @@ def test_ci_matches_guard():
         for n in tree.body:
             if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids",
                                                              "ci_billing", "ci_job_unstarted", "full_tests_record",
-                                                             "required_checks", "optional_checks",
+                                                             "required_checks", "optional_checks", "repo_entry",
                                                              "narrow_tests_record", "narrow_map_path",
                                                              "pair_match", "returned_lie",
                                                              "returned_lifts", "base_counts", "delta_problem"):
@@ -38,8 +38,8 @@ def test_ci_matches_guard():
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
     names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "ci_job_unstarted",
-             "full_tests_record", "required_checks", "optional_checks", "narrow_tests_record", "narrow_map_path",
-             "pair_match",
+             "full_tests_record", "required_checks", "optional_checks", "repo_entry", "narrow_tests_record",
+             "narrow_map_path", "pair_match",
              "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
              "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
              "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE", "delta_problem", "DELTA_MAX_LINES", "DELTA_DEPTH",
@@ -62,6 +62,28 @@ def test_ci_matches_guard():
     check("ci_state: обязательные без запусков (None) — wait, запусков нет — wait, зелёные от pull_request — ok, "
           "SKIPPED — fail; пусто без обязательных — wait, зелёное — «CI ✓ (1)»",
           r.stdout.split() == ["wait", "wait", "ok", "fail", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
+
+
+def test_ci_ba_repo_entry():
+    """metis-1116: записи BrokerAssistantApp/app ищутся по полному owner/name (repo_entry), «app» чужого владельца не
+    совпадает, agent-kit (ключ без «/») — как раньше; полный набор BA — `pnpm run check`, хвост ` # …` снимается."""
+    code = (
+        "import importlib.util\n"
+        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+        "s.loader.exec_module(m)\n"
+        "w = 'pnpm run check  # package.json: npx tsx scripts/run-checks.ts'\n"
+        "r = lambda repo, cmd: m.full_tests_record(repo, {'cmd': cmd})\n"
+        "print(m.required_checks('BrokerAssistantApp/app', 'develop') == (('tests', 'checks'),), "
+        "m.required_checks('BrokerAssistantApp/app', 'main') == (('tests', 'checks'),), "
+        "m.required_checks('someone/app', 'develop') == (), len(m.required_checks('latark/agent-kit', 'main')), "
+        "r('BrokerAssistantApp/app', w), r('BrokerAssistantApp/app', 'pantheon review test -- pnpm run check'), "
+        "r('BrokerAssistantApp/app', 'pnpm run check && x'), r('x/app', w), "
+        "m.optional_checks('someone/app') == ())\n" % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    check("BA: required_checks develop/main — tests/checks, someone/app — пусто, agent-kit — 2 записи; full_tests_record "
+          "— запись outside и хука да, `&& x` и x/app нет",
+          r.stdout.split() == ["True", "True", "True", "2", "True", "True", "False", "False", "True"],
+          r.stdout + r.stderr)
 
 
 def test_ci_state_no_workflows():
