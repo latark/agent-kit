@@ -174,6 +174,42 @@ def pack_hook_shell(w):
         check(f"pack_hook_problem: {what} — отказ", w.pack_hook_problem(c) is not None, c)
 
 
+def root_levels(p, tmp, dw):
+    """metis-1221 п. 5 (долги argus #483): корень своих папок и подпапки первого уровня — папка задачи мастерской,
+    вложенный проект; копии .claude/worktrees/* открыты. Пути — как их сверяет песочница macOS (sandbox-runtime,
+    Path Syntax): «**» — любые знаки, «*» и «?» — без «/», запрет закрывает и поддерево."""
+    proj, own, cache = os.path.join(tmp, "projects/app"), os.path.join(tmp, "own"), os.path.join(tmp, "cache")
+    rs = p.role_settings([proj], own, [], cache, False, [], own_agents=True)
+
+    def denied(rs, path):
+        for g in dw(rs):
+            rx = re.escape(g).replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+            if re.fullmatch(rx + "(/.*)?", path):
+                return g
+        return None
+    for sub in ("/.mcp.json", "/.claude/settings.json", "/.claude/settings.local.json"):
+        check(f"role_settings: копия .claude/worktrees/x{sub} своей папки открыта (прямой путь)",
+              denied(rs, proj + "/.claude/worktrees/x" + sub) is None, denied(rs, proj + "/.claude/worktrees/x" + sub))
+        check(f"role_settings: вложенный проект app{sub} своей папки закрыт (nested_projects)",
+              denied(rs, proj + "/app" + sub), dw(rs))
+        check(f"role_settings: корень своей папки {sub} закрыт (прямой путь)", denied(rs, proj + sub), dw(rs))
+    check("role_settings own_agents: .claude/skills и commands корня открыты — навыки проекта правит окно (metis-0841)",
+          not denied(rs, proj + "/.claude/skills/a/SKILL.md") and not denied(rs, proj + "/.claude/commands/c.md"),
+          dw(rs))
+    ws = os.path.join(tmp, "ai/workshop")
+    rw = p.role_settings([ws], own, [], cache, False, [])
+    for sub in ("/.mcp.json", "/.claude/settings.json", "/.claude/settings.local.json", "/.claude/skills/a/SKILL.md",
+                "/.claude/commands/c.md"):
+        check(f"мастерская: папка запуска <задача>{sub} закрыта", denied(rw, ws + "/task" + sub), dw(rw))
+        check(f"мастерская: копия <задача>/.claude/worktrees/x{sub} открыта",
+              denied(rw, ws + "/task/.claude/worktrees/x" + sub) is None,
+              denied(rw, ws + "/task/.claude/worktrees/x" + sub))
+    check("без own_agents: .claude/skills и commands корня своей папки закрыты",
+          denied(rw, ws + "/.claude/skills/a/SKILL.md") and denied(rw, ws + "/.claude/commands/c.md"), dw(rw))
+    check("мастерская: обычный файл задачи открыт", denied(rw, ws + "/task/src/main.py") is None,
+          denied(rw, ws + "/task/src/main.py"))
+
+
 def main():
     w = load("window_rules_t", os.path.join(LIB, "window_rules.py"))
     src = open(os.path.join(LIB, "window_rules.py"), encoding="utf-8").read()
@@ -295,6 +331,8 @@ def main():
         check("role_settings: в копиях .claude/worktrees настройки проекта не закрыты — правка идёт там через PR",
               not any(x.endswith(("settings.json", "settings.local.json", ".mcp.json")) and "**" in x for x in dw(rs)),
               dw(rs))
+
+        root_levels(p, tmp, dw)
         # хуки окна на Python — через hooks/python.sh рядом со скриптом (metis-0571); его нет — прежняя форма
         hd = os.path.join(tmp, "plug dir", "hooks")
         os.makedirs(hd)
