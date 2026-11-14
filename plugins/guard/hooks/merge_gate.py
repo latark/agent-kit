@@ -20,7 +20,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
    Строка: {"v":1,"kind","repo":[owner/repo…],"pr":N|null,"sha","by":{agent_type,agent_id,session_id},"cwd","time",
    "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}, у обоих — "models":[…] или
-   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413); с флагами --criteria (по одному на пункт
+   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413); рядом с "models" — "efforts":[…], effort
+   запросов argus из транскрипта (agent_facts, metis-1065: лёгкий PR ядра); с флагами --criteria (по одному на пункт
    «Готово, когда», metis-1004) — "criteria":[строки как есть]: шлюз их не читает, разбирает autoclose pantheon.
    Подделать запись роль не может:
    ~/.local/state/pantheon закрыт ролям песочницей и pantheon-acl, а вид записи хук берёт из agent_type события, а не
@@ -858,10 +859,11 @@ def record(event):
     if crit:
         rec["criteria"] = crit
     if rec_kind in ("accept", "reject"):  # модель argus — из данных сессии, а не со слов ran (metis-0176)
-        models = agent_models(event)
-        if models is None:  # у субагента — своя пометка: его «принять» в PR ядра не в счёт (metis-0489)
+        facts = agent_facts(event)
+        if facts is None:  # у субагента — своя пометка: его «принять» в PR ядра не в счёт (metis-0489)
             rec["models_note"] = NO_AGENT_TRANSCRIPT if event.get("agent_id") else NO_TRANSCRIPT
         else:  # [] — транскрипт найден, моделей нет (сменился формат?): в защитах не в счёт, а не «как без транскрипта»
+            models, rec["efforts"] = facts  # metis-1065: effort запросов argus — для лёгкого PR ядра (light_accept)
             rec["models"] = models
             if not models:
                 rec["models_note"] = NO_MODELS
@@ -892,23 +894,40 @@ def agent_models(event):
     глубже, subagents/workflows/<runId>/agent-<agent_id>.jsonl (transcriptSubdir Claude Code, metis-0413); ищется и
     одна подпапка. У главной сессии (agent_id нет) — сам transcript_path. Свой файл субагента не нашёлся — None, а не
     главный transcript_path: он чужой (сессия того, кто позвал argus)."""
+    facts = agent_facts(event)
+    return None if facts is None else facts[0]
+
+
+def agent_facts(event):
+    """(модели, effort) сессии argus по её транскрипту за один проход (путь — как в agent_models) или None — транскрипта
+    нет или не прочесть. Модели — как в agent_models. Effort (metis-1065) — отсортированные значения
+    message.output_config.effort записей type "api-request-blob" (запросы Claude Code к API); [] — их нет."""
     fd = _agent_transcript(event)
     if fd is None:
         return None
-    models = set()
+    models, efforts = set(), set()
     with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            if '"assistant"' not in line:
+            blob = '"api-request-blob"' in line and '"output_config"' in line
+            if '"assistant"' not in line and not blob:
                 continue
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
-            model = msg.get("model") if isinstance(msg, dict) else None
-            if isinstance(model, str) and model.strip() and model != "<synthetic>":
-                models.add(model.strip().lower())
-    return sorted(models)
+            kind = entry.get("type") if isinstance(entry, dict) else None
+            msg = entry.get("message") if kind in ("assistant", "api-request-blob") else None
+            if not isinstance(msg, dict):
+                continue
+            if kind == "assistant":
+                model = msg.get("model")
+                if isinstance(model, str) and model.strip() and model != "<synthetic>":
+                    models.add(model.strip().lower())
+                continue
+            effort = msg.get("output_config").get("effort") if isinstance(msg.get("output_config"), dict) else None
+            if isinstance(effort, str) and effort.strip():
+                efforts.add(effort.strip().lower())
+    return sorted(models), sorted(efforts)
 
 
 def _agent_transcript(event):
@@ -1447,6 +1466,72 @@ def _version_problem(files):
         elif _touches_version(f["patch"]):
             hit.append(f"{names[0]} (меняет version)")
     return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
+
+
+# лёгкий PR ядра (metis-1065, решение владельца 12.11, Р2): хватает одного «принять» argus на Opus с effort high вместо
+# двух, если по записям REST pulls/N/files (status, deletions, filename, previous_filename — не по тексту PR) в нём
+# только добавленные строки тестов и документы, которые не инструкции агентам. Список белый: тест — файл в
+# plugins/<плагин>/tests/, добавлен или правлен без удалённых строк; документ — README*.md (любой регистр) или
+# drafts/<имя>.md. Инструкции агентам и пропуски раннера (LIGHT_NOT_RE: папки roles, skills, agents, commands, hooks,
+# output-styles, monitors, themes, workflows, bin, помощники tests/_*.py,
+# template, packs, *prompts и любая с точкой в начале, AGENTS.md, CLAUDE.md, SKILL.md, *.tmpl, run-tests.py) — не
+# лёгкий при любом пути, как и удаление, переименование, копирование, пустой или неполный список. Текст LIGHT_*,
+# light_pr и light_accept в merge.py и merge_gate.py совпадает дословно — сверяет test_merge_light (AST)
+LIGHT_EFFORT = "high"
+LIGHT_TEST_RE = re.compile(r"plugins/[a-z0-9_-]+/tests/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+LIGHT_DOC_RE = re.compile(r"(?:(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*readme[A-Za-z0-9_.-]*|drafts/[A-Za-z0-9_-]"
+                          r"[A-Za-z0-9_.-]*)\.md", re.I)
+LIGHT_NOT_RE = re.compile(r"(?:^|/)(?:\.|(?:roles|skills|agents|commands|hooks|templates?|packs|[a-z_-]*prompts?"
+                          r"|output-styles|monitors|themes|workflows|bin)/)"
+                          r"|(?:^|/)(?:agents|claude|skill)\.md$|\.tmpl(?:\.|$)|(?:^|/)run-tests\.py$"
+                          r"|plugins/[a-z0-9_-]+/tests/(?:[^/]+/)*_[^/]*\.py$", re.I)
+
+
+def light_pr(files, count):
+    """Лёгкий ли PR ядра (metis-1065): (True, сколько тестов и документов) или (False, почему нет). files — записи
+    REST pulls/N/files, count — changedFiles из gh pr view: список не получен, пуст или неполон — не лёгкий."""
+    if not isinstance(files, list) or not files or not isinstance(count, int) or isinstance(count, bool) \
+            or len(files) != count or not all(isinstance(f, dict) for f in files):
+        return False, "список файлов PR не получен, пуст или неполон"
+    tests = docs = 0
+    for f in files:
+        name, status, cut = f.get("filename"), f.get("status"), f.get("deletions")
+        if not isinstance(name, str) or not name:
+            return False, "у файла PR нет имени"
+        if f.get("previous_filename") is not None or status not in ("added", "modified"):
+            return False, f"{name} — {status}: удаление, переименование и копирование не лёгкие"
+        if LIGHT_NOT_RE.search(name):
+            return False, f"{name} — инструкция агентам или пропуски раннера тестов"
+        if status == "modified" and not (isinstance(f.get("patch"), str) and f["patch"]):
+            return False, f"{name} — правка без patch (двоичный файл или большой дифф): удалённые строки не видны"
+        if LIGHT_TEST_RE.fullmatch(name) and isinstance(cut, int) and not isinstance(cut, bool) and cut == 0:
+            tests += 1
+        elif LIGHT_DOC_RE.fullmatch(name):
+            docs += 1
+        elif LIGHT_TEST_RE.fullmatch(name):
+            return False, f"{name} — в тесте удалены строки ({cut})"
+        else:
+            return False, f"{name} — не тест и не документ (README*.md, drafts/*.md)"
+    return True, f"тестов {tests}, документов {docs}"
+
+
+def light_accept(r):
+    """«Принять» в счёт на лёгком PR ядра (metis-1065): хук guard нашёл транскрипт argus, модели в нём — только
+    claude-opus, effort запросов — только high (поля models и efforts). Поля нет (запись до metis-1065, транскрипта
+    нет) или список пуст — не в счёт."""
+    models, efforts = r.get("models"), r.get("efforts")
+    return (isinstance(models, list) and bool(models)
+            and all(isinstance(m, str) and m.startswith("claude-opus") for m in models)
+            and isinstance(efforts, list) and bool(efforts) and all(e == LIGHT_EFFORT for e in efforts))
+
+
+def light_same_head(view, again, sha):
+    """Список файлов PR — того же head (metis-1065, TOCTOU): REST pulls/N/files не называет коммит, поэтому после него
+    gh pr view ещё раз (again) — head тот же sha и changedFiles те же, что в view до запроса файлов. Иначе push в PR
+    пришёл между запросами: лёгким PR не считается."""
+    count = again.get("changedFiles") if isinstance(again, dict) else None
+    return (isinstance(again, dict) and str(again.get("headRefOid") or "").lower() == sha
+            and isinstance(count, int) and not isinstance(count, bool) and count == view.get("changedFiles"))
 
 
 def _ui_glob(pat):
@@ -2742,7 +2827,8 @@ def head_verdicts(verdicts, sha):
 # «принять» уже столько, сколько нужно для слияния, а «вернуть» нет, долг ревью (Д, С) в этот PR не тянут: он идёт
 # задачей, а PR — к слиянию (roles/_ref/merge-rounds.md, «Находки ревью: Б, Д, С»). Счёт — как у шлюза и итога
 # `pantheon review status`: последний вердикт каждого рецензента на head (head_verdicts), «принять» с перечнем (Б6),
-# в PR ядра — только на Opus (opus_problem) и их CORE_ACCEPTS, вне ядра — одно. Ядро ли — _core_problem шлюза; файлы
+# в PR ядра — только на Opus (opus_problem) и их CORE_ACCEPTS, а в лёгком PR ядра (light_pr, metis-1065) — одно
+# Opus с effort high (light_accept), как в шлюзе владельца; вне ядра — одно. Ядро ли — _core_problem шлюза; файлы
 # не получены или сборку окон не проверить — считаем ядром (нужно больше «принять», реже отказ). Файлы PR
 # запрашиваются вместе с gh pr view, параллельно (metis-0809): по очереди второй gh не укладывался в срок хука, и PR
 # вне ядра считался ядром. Принудительная отправка (--force, --force-with-lease, +ветка) судится так же: amend и
@@ -2768,15 +2854,18 @@ def _gh_fits():
     return not left or left > GH_TIMEOUT + PUSH_GH_MARGIN
 
 
-def push_accepts(records, repo, pr, sha, core, view):
+def push_accepts(records, repo, pr, sha, core, view, light=False):
     """Сколько «принять» argus засчитано на head sha PR repo#pr для слияния; 0 — есть «вернуть» в силе на sha (последний
     вердикт рецензента) или «принять» нет. core — PR ядра: «принять» не на Opus выбывает, как в шлюзе (weak). view —
     ответ gh pr view PR: «принять» на другой base PR (base_counts, metis-0965) и с полем «вернули», которое называет
-    рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт, как в шлюзе (Д6 долга #388)."""
+    рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт, как в шлюзе (Д6 долга #388). light — лёгкий
+    PR ядра (metis-1065): в счёт только «принять» Opus с effort high по транскрипту (light_accept)."""
     verdicts = [r for r in argus_verdicts(records, repo, pr) if r["kind"] != "accept" or base_counts(r, view)]
     verdicts = [r for r in verdicts if not (r["kind"] == "accept" and returned_lie(r, verdicts))]
     if core:
         verdicts = [r for r in verdicts if not (r["kind"] == "accept" and checklist_ok(r) and opus_problem(r))]
+    if light:
+        verdicts = [r for r in verdicts if r["kind"] != "accept" or light_accept(r)]
     latest, direct, _ = head_verdicts(verdicts, sha)
     if any(r["kind"] == "reject" for r in latest.values()):
         return 0
@@ -2816,6 +2905,16 @@ def _push_base_merged(d, repo, view, tip, new, bases):
     old, _ = _fingerprint(gd, old_base, tip)
     cur, _ = _fingerprint(gd, bases[-1], new)
     return old is None or cur is None or old == cur
+
+
+def _light_again(repo, pr, tip, view):
+    """Лёгкий PR ядра в правиле push (metis-1065): файлы шли параллельно с gh pr view, push в PR между запросами дал бы
+    файлы другого head — после них gh pr view ещё раз, head и changedFiles те же (light_same_head). Время хука
+    кончилось или gh не ответил — не лёгкий."""
+    if not _gh_fits():
+        return False
+    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
+    return light_same_head(view, got[0] if isinstance(got, list) and len(got) == 1 else None, tip)
 
 
 def accepted_push_problem(d, remote, pairs):
@@ -2862,6 +2961,11 @@ def accepted_push_problem(d, remote, pairs):
                 th.join(GH_TIMEOUT)
                 if box and _core_problem(repo, pr, tip, view, box[0]) is None:
                     n, need = push_accepts(records, repo, pr, tip, False, view), 1
+            # лёгкий PR ядра (metis-1065): хватает одного «принять» argus Opus с effort high, как в шлюзе владельца
+            if n < need and push_accepts(records, repo, pr, tip, True, view, light=True) >= 1:
+                th.join(GH_TIMEOUT)
+                if box and light_pr(box[0], view.get("changedFiles"))[0] and _light_again(repo, pr, tip, view):
+                    n, need = push_accepts(records, repo, pr, tip, True, view, light=True), 1
             if n >= need:
                 return (f"Правило push: PR {repo}#{pr} уже принят на {tip[:12]} — «принять» argus {n} (нужно {need}), "
                         "«вернуть» нет. Новый коммит в ветке (и amend с принудительной отправкой) сожжёт эти вердикты "

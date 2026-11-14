@@ -375,7 +375,7 @@ def tally_base(recs, pr):
     return got[-1] if got else None
 
 
-def review_tally(recs, pr, opus_only=False, base=None):
+def review_tally(recs, pr, opus_only=False, base=None, light=False):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
     вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
@@ -383,9 +383,14 @@ def review_tally(recs, pr, opus_only=False, base=None):
     ядра шлюз guard считает «принять» на любой модели (simplify п. 9, 27.10); opus_only=True — как для PR ядра:
     ещё и на Opus (по --ran и по моделям транскрипта argus, P.review_accept_counts). Как в шлюзах (Д6 долга #388):
     «принять» на другой base PR, чем base (base_counts, metis-0965; base None — неизвестна, не в счёт), и с полем
-    «вернули», которое называет рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт."""
-    ok = P.review_accept_counts if opus_only else P.review_accept_full
+    «вернули», которое называет рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт. light=True — как
+    для лёгкого PR ядра (metis-1065): ещё и effort high по транскрипту argus (light_accept шлюза владельца)."""
     rules = P.merge_mod()
+
+    def ok(r):
+        if light:
+            return P.review_accept_counts(r) and rules.light_accept(r)
+        return P.review_accept_counts(r) if opus_only else P.review_accept_full(r)
     verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
                 and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
                 and isinstance(r.get("sha"), str)]
@@ -800,11 +805,16 @@ def review_cmd(rest):
                       "вердикта, gh не спрашиваем; «принять» на другой base или с полем «вернули» без «вернуть» на "
                       "PR не в счёт, как в шлюзе")
             strict = review_tally(recs, int(args[1]), opus_only=True, base=base)
+            light = review_tally(recs, int(args[1]), base=base, light=True)
             for sha, (acc, rej) in review_tally(recs, int(args[1]), base=base).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
                 if core_repo and strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра — только «принять» на Opus
                     print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "
                           f"вернуть {strict.get(sha, (0, 0))[1]}")
+                if core_repo and strict.get(sha, (0, 0))[0] == 1:   # metis-1065: одно «принять» — хватит ли его
+                    print(f"  PR ядра: нужно 2 «принять» на Opus, лёгкому (шлюз по файлам PR: только добавленные "
+                          f"строки тестов и README*.md, drafts/*.md) — 1 на Opus с effort high, таких "
+                          f"{light.get(sha, (0, 0))[0]}")
         return 0
     print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
     return 2
