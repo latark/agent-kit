@@ -115,6 +115,9 @@ write = ["~/state/x"]
     check("выданная запись — .claude/hooks, .claude/agents и .git/hooks в ней закрыты (metis-1214)", all(
         data + sub in dw for sub in ("/.claude/hooks", "/**/.claude/hooks", "/.claude/agents", "/**/.claude/agents",
                                      "/.git/hooks", "/**/.git/hooks", "/.git/config", "/**/.git/config")))
+    check("выданная запись — .claude/settings.json и settings.local.json в ней закрыты (metis-1221)", all(
+        data + sub in dw for sub in ("/.claude/settings.json", "/**/.claude/settings.json",
+                                     "/.claude/settings.local.json", "/**/.claude/settings.local.json")))
     check("domains в силе — в allowedDomains", "registry.example.org" in a["sandbox"]["network"]["allowedDomains"])
     check("«*» — в окне направления и в мастерской",
           "Bash(make check)" in a["permissions"]["allow"] and "Bash(make check)" in win("workshop")["permissions"]["allow"])
