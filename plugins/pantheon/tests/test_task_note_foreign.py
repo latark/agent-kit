@@ -178,6 +178,14 @@ def scenario():
     os.environ.pop("CLAUDECODE")
     res["проход из Claude Code — отказ, код 2"] = (rc2 == 2 and len(reqs()) == 3, (rc2, err2))
 
+    os.environ["PANTHEON_DRYRUN"] = "1"
+    dry = os.path.join(STATE, "dryrun.log")
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(dry)
+    P.owner_edit_kick()
+    res["тик: есть заявка — зовёт проход task-note"] = (os.path.exists(dry) and "task-note-run" in read(dry), "")
+    os.environ.pop("PANTHEON_DRYRUN")
+
     rc, out, err = run_pass()
     card = read(sys_p)
     lines = card.split("\n")
@@ -250,6 +258,7 @@ MUTANTS = [
      "проход: нет задачи — заявка снята, итог dropped"),
     ("if P.now() - req[\"created\"] <= REQ_TTL:", "if True:", "проход: старше суток — снята, итог failed"),
     ("if P.now() - req[\"created\"] <= REQ_TTL:", "if False:", "проход: карточка занята — заявка ждёт"),
+    ("return any(_reqs(d) for _, d in queue_dirs())", "return False", "тик: есть заявка — зовёт проход task-note"),
 ]
 
 

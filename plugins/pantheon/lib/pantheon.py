@@ -6870,11 +6870,13 @@ def handoff_kick():
 
 def owner_edit_kick():
     """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) и настроек проекта (metis-0844,
-    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет."""
-    for cmd, mod in (("owner-edit", owner_edit_mod), ("config", config_edit_mod)):
-        run = "config-edit" if cmd == "config" else cmd
+    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет.
+    Тем же путём — заметки окон ролей в карточки чужих направлений (`pantheon task run`, lib/tasknote.py, metis-1187)."""
+    for cmd, pending in (("owner-edit", lambda: owner_edit_mod().pending()),
+                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending)):
+        run = {"config": "config-edit", "task": "task-note"}.get(cmd, cmd)
         try:
-            if locked(f"{run}-run") or not mod().pending():
+            if locked(f"{run}-run") or not pending():
                 continue
             if os.environ.get("PANTHEON_DRYRUN") == "1":
                 with open(path("dryrun.log"), "a") as fh:
