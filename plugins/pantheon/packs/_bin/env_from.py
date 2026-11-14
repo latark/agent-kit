@@ -21,7 +21,12 @@ O_NOFOLLOW от fd предыдущего, файл читается по сво
 process.cwd(), а его `--cwd` только загружает .env. Команда тогда — ровно `npx -y <пакет>@<версия> [аргументы]`: пакет
 разрешается как без ключа — `npx -y -p <пакет>@<версия> -c 'command -v <bin>'` из SAFE_CWD с тем же окружением (ни
 node_modules, ни .npmrc папки проекта npx не видит), путь бинарника (realpath) — только внутри $HOME/.npm/_npx; затем
-chdir в папку и exec `node <путь> [аргументы]`: node по абсолютному пути берёт модули рядом со скриптом, не из папки."""
+chdir в папку и exec `node <путь> [аргументы]`: node по абсолютному пути берёт модули рядом со скриптом, не из папки;
+PATH — без относительных звеньев (иначе node нашёлся бы в папке проекта). Данные папки сервер читает сам: shadcn
+грузит её .env* (dotenvx) — переменные, в том числе NODE_OPTIONS, задаёт окно; кода из папки он не исполняет (как и с
+прежним `--cwd`). Поэтому --chdir не сочетается с .env-файлом: адреса и заголовки реестров (`${ИМЯ}`) задаёт
+components.json, который пишет окно, и ключи .env ушли бы туда. Имя bin — последняя часть имени пакета (`@scope/x` →
+`x`); пакет с другим именем bin с --chdir не запускается (выход 1)."""
 import os
 import re
 import stat
@@ -86,9 +91,12 @@ def read_env(p):
 
 
 def safe_env(base, extra):
-    """Окружение команды: base без DROP_ENV, плюс extra и кэш npm $HOME/.npm."""
+    """Окружение команды: base без DROP_ENV, плюс extra и кэш npm $HOME/.npm; в PATH — только абсолютные звенья:
+    относительное (`.`, `./node_modules/.bin`, пустое) после --chdir нашло бы node и прочее в папке проекта."""
     env = {k: v for k, v in base.items() if not DROP_ENV.fullmatch(k)}
     env.update(extra)
+    if "PATH" in env:
+        env["PATH"] = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if os.path.isabs(d))
     env["npm_config_cache"] = os.path.join(os.path.abspath(base.get("HOME") or "/"), ".npm")
     return env
 
@@ -126,6 +134,10 @@ def main(argv):
         return 1
     cut = argv.index("--")
     cmd, got = argv[cut + 1:], {}
+    if chdir is not None and cut == 2:
+        print("env_from.py: --chdir без .env-файла — сервер в папке проекта раскрывает ${ИМЯ} из её конфигов "
+              "(заголовки реестров shadcn), ключи .env ушли бы на адрес, который задаёт окно", file=sys.stderr)
+        return 1
     if cut == 2:
         envfile, names = argv[0], [n for n in argv[1].split(",") if n]
         try:
