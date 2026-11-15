@@ -25,6 +25,24 @@ PermissionRequest окна (hooks.json: `pantheon perm ask`, только при
      ответа не даёт). «Разрешить» → allow этого одного вызова (без updatedInput и без новых правил), «Отказать» →
      deny с причиной, «Открыть окно», другой текст или ответ с заметкой → хук молчит, окно показывает обычный запрос.
 
+  5. Ответ в самом окне роли (Д2 argus, слово владельца 15.11 «да, нужно пофиксить») — заявка «снята» (status
+     window), хук выходит без решения, Зевсу — строка «perm-<id> снят» в очередь push (без respawn: занятого ходом
+     Зевса не обрываем, простаивающего не будим ради отмены; текст он получит при следующем старте). `perm show` и
+     `perm answer` по снятой отвечают «уже решено в окне», без allow и deny. Как это видно (разбор Claude Code
+     2.1.325): ответ в диалоге окна хук не обрывает — у хука сигнал отмены всего хода (abortController), а не
+     диалога; результат хука после ответа просто не берётся. Поэтому:
+       - «Отказать» в окне без пояснения (основная сессия) обрывает ход — хук получает SIGTERM: заявка снята;
+       - «Разрешить» и отказ с пояснением ход не обрывают — в журнале сессии (transcript_path, у субагента
+         <сессия>/subagents/agent-<id>.jsonl) у вызова с этим инструментом и входом появляется tool_result, которого
+         при заявке не было (Answered);
+       - запасной признак — окно в `claude agents` было на запросе и сошло с него (раз в RETRY с): долгая команда
+         пишет tool_result только по концу.
+     PermissionDenied Claude Code шлёт только на отказ классификатора автоматического режима, в PermissionRequest нет
+     tool_use_id — поэтому вызов узнаётся по инструменту и входу.
+  6. Дежурный (watch.sessions) по живой заявке окна (perm_live: waiting, срок не вышел, процесс хука жив) не шлёт
+     «ждёт вас» Зевсу, не пишет тревогу и не заводит карточку — владельца не спрашивают дважды. Заявка решена,
+     снята, срок вышел или хук умер — обычный путь дежурного, отсчёт ожидания с первого прохода: ничего не теряется.
+
 Нет ответа за WAIT — хук молчит: обычный запрос в окне, карточка «Ждёт вас» и напоминания дежурного (wait_cards,
 metis-1122, 1183). Галочка доски, слово владельца в окне роли, ответ на другой вопрос или с другим номером, старый
 ответ, файл заявки, вывод `pantheon perm answer` — не ответ. Любой сбой разбора, журнала или передачи — хук молчит
@@ -42,13 +60,14 @@ import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 
 # P — модуль pantheon: его ставит загрузчик pantheon._attach до exec_module (F821 для lib/ выключен в ruff.toml).
 
-__all__ = ["perm_cmd"]
+__all__ = ["perm_cmd", "perm_live"]
 
 RID = re.compile(r"perm-[0-9a-f]{8}")
 OPTIONS = ("Разрешить", "Отказать", "Открыть окно")
@@ -57,6 +76,8 @@ SKIP_TOOLS = ("AskUserQuestion", "ExitPlanMode")
 WAIT, WAIT_MAX = 600.0, 840.0
 POLL, RETRY = 2.0, 30.0
 CMD_MAX, WHY_MAX, KEEP = 300, 160, 86400
+TAIL = 4_000_000   # байт хвоста журнала сессии при заявке: вызов, ради которого спрашивают, — в самом конце
+WINDOW = "уже решено в окне"
 LABEL = re.compile(r"^(?:\((?:[а-яёa-z]|\d{1,2})\)\s*[—–.:-]?|(?:[а-яёa-z]|\d{1,2})\s*[—–.):-])\s*", re.I)
 USAGE = "pantheon perm ask | show <номер> | answer <номер> [allow|deny] | list"
 
@@ -208,6 +229,170 @@ def _prune(t):
                 os.remove(p)
 
 
+def _alive(pid):
+    """Процесс хука жив. Нет pid (заявка старого вида) — считаем живым до срока."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True   # EPERM — процесс есть, чужой
+    return True
+
+
+def perm_live(a, agents=()):
+    """Живая заявка окна a (запись claude agents) → номер или None: status waiting, срок не вышел, процесс хука жив;
+    то же окно — sessionId или короткий id; по имени без « (N)» — только если сессии заявки нет в agents (окно заменено
+    под тем же именем), иначе «zeus (2)» и «zeus» с разными sid совпали бы (ревью argus #498 Д1). Дежурный по ней не
+    шлёт «ждёт вас» и не заводит карточку (Д2 argus: владельца спрашивали дважды). Сбой чтения — None: обычный путь."""
+    t = P.now()
+    sid, short = str(a.get("sessionId") or ""), str(a.get("id") or "")
+    name = re.sub(r" \(\d+\)$", "", str(a.get("name") or ""))
+    listed = {str(x.get("sessionId")) for x in agents or () if isinstance(x, dict) and x.get("sessionId")}
+    try:
+        files = sorted(os.listdir(P.path("perm")))
+    except OSError:
+        return None
+    for f in files:
+        req = _load(f[:-5]) if f.endswith(".json") else None
+        try:
+            if not req or req.get("status") != "waiting" or float(req.get("deadline") or 0) <= t:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if not _alive(req.get("pid")):
+            continue
+        if (sid and req.get("session") == sid) or (short and req.get("attach") == short) \
+                or (name and req.get("window") == name and str(req.get("session")) not in listed):
+            return req["id"]
+    return None
+
+
+def _transcript(ev):
+    """Журнал, где лежит вызов: у субагента — <папка>/<сессия>/subagents/agent-<id>.jsonl, иначе transcript_path."""
+    tp = ev.get("transcript_path")
+    if not isinstance(tp, str) or not tp.endswith(".jsonl"):
+        return None
+    aid, sid = str(ev.get("agent_id") or ""), str(ev.get("session_id") or "")
+    if aid and re.fullmatch(r"[\w-]{1,100}", aid) and re.fullmatch(r"[\w-]{1,100}", sid):
+        return os.path.join(os.path.dirname(tp), sid, "subagents", f"agent-{aid}.jsonl")
+    return tp
+
+
+class Answered:
+    """Ответ в окне по журналу сессии: у вызова с этим инструментом и входом появился tool_result, которого не было
+    при заявке (тот же вызов, выполненный раньше, — не в счёт). Журнал читается с места прошлого чтения, неполная
+    последняя строка — в следующий раз. Признак только снимает заявку (хук молчит), allow и deny по нему не бывает."""
+
+    def __init__(self, path, tool, ti):
+        self.path, self.tool, self.ti = path, tool, ti
+        self.uses, self.done = set(), set()
+        try:
+            self.pos = max(0, os.path.getsize(path) - TAIL) if path else 0
+        except OSError:
+            self.pos = 0
+        try:
+            self.read()
+            self.ok = True
+        except Exception:  # noqa: BLE001 — журнал при заявке не прочитан: без «до» признак врал бы, выключаем
+            self.ok = False
+        self.before = self.uses & self.done
+
+    def same(self, x):
+        inp = x.get("input")
+        cmd = self.ti.get("command")
+        return x.get("name") == self.tool and isinstance(inp, dict) and (
+            inp == self.ti or (isinstance(cmd, str) and inp.get("command") == cmd))
+
+    def read(self):
+        if not self.path:
+            return
+        C = P.ctx_mod()
+        for pos, raw in C.lines_since(self.path, self.pos, with_pos=True):
+            if not raw.endswith(b"\n"):
+                break   # строку ещё дописывают
+            self.pos = pos + len(raw)
+            for d in C.entries([raw]):
+                msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+                items = msg.get("content") if isinstance(msg.get("content"), list) else []
+                for x in items:
+                    if not isinstance(x, dict):
+                        continue
+                    if x.get("type") == "tool_use" and msg.get("role") == "assistant" and x.get("id") and self.same(x):
+                        self.uses.add(x["id"])
+                    elif x.get("type") == "tool_result" and msg.get("role") == "user" and x.get("tool_use_id"):
+                        self.done.add(x["tool_use_id"])
+
+    def answered(self):
+        if not self.ok:
+            return False
+        try:
+            self.read()
+        except Exception:  # noqa: BLE001 — журнал не прочитан: не снимаем, дальше ждём как раньше
+            return False
+        return bool((self.uses & self.done) - self.before)
+
+
+class Term(BaseException):
+    """SIGTERM хуку: Claude Code оборвал ход (отказ в окне без пояснения, Esc, остановка окна). BaseException — чтобы
+    его не съели `except Exception` передачи и чтения журнала."""
+
+
+def _on_term(*_):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)   # второй сигнал не прерывает запись «снята»
+    raise Term()
+
+
+def _window_state(sid):
+    """Состояние окна по claude agents: "blocked" (на запросе), другое состояние или None (не нашли, сбой)."""
+    with contextlib.suppress(Exception):
+        for a in P.agents_all() or []:
+            if a.get("sessionId") == sid:
+                if a.get("state") == "blocked" or "permission" in str(a.get("waitingFor") or "").lower():
+                    return "blocked"
+                return str(a.get("state") or "") or None
+    return None
+
+
+def drop_text(req):
+    rid = req["id"] if RID.fullmatch(str(req.get("id") or "")) else "perm-?"
+    return (f"{P.START_MARK} запрос разрешения {rid} снят] В окне роли на запрос {rid} уже ответили. Владельца о нём не "
+            f"спрашивай; если уже спросил — его ответ ничего не изменит, `pantheon perm answer` не нужен.")
+
+
+def _drop(req):
+    """Зевсу — «perm-<id> снят» в очередь push, без respawn: занятого ходом (может, уже с окном вопросов) не обрываем,
+    простаивающего не будим ради отмены. Он получит текст при следующем старте, а до того его держит `perm show`
+    (hq.tmpl). → True, если положено.
+    push_text на main заменяет файл очереди (O_TRUNC), поэтому — под тем же замком start-zeus, что relay и relay_zeus, и
+    только в пустую очередь: файл push Зевса уже есть (чужая передача ещё не доставлена) или замок занят — «снят» не
+    пишем, чужую передачу не затираем; Зевса держит `perm show` (ревью argus #498 Б2). После #495 (push_text
+    дописывает) проверку на файл можно снять."""
+    try:
+        W = P.watch_mod()
+        if os.path.exists(P.path("stopped", "zeus")) or W.relay_block(P.now()):
+            return False
+        with P.lock("start-zeus", block=False) as got:
+            z = _zeus(W, P.agents_all()) if got else None
+            p = P.path("push", z["sessionId"] + ".txt") if z else ""
+            ok = bool(z and not os.path.exists(p) and P.push_text(z["sessionId"], drop_text(req)))
+        P.start_log(f"perm-drop\tzeus\t{(z or {}).get('id')}\t{req['id']}\t{int(ok)}")
+        return ok
+    except Exception as e:  # noqa: BLE001 — сбой передачи: заявка уже снята, perm show скажет это Зевсу
+        with contextlib.suppress(Exception):
+            P.start_log(f"perm-drop\tсбой\t{req['id']}\t{type(e).__name__}: {str(e)[:120]}")
+        return False
+
+
+def _zeus(W, ags):
+    """Окно Зевса из claude agents (имя без « (N)», фоновое, с id и sessionId) — самое новое, или None."""
+    zs = [z for z in ags or [] if W._base_name(z.get("name")) == "zeus" and z.get("id") and z.get("sessionId")
+          and z.get("kind") in (None, "background")]
+    return max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
+
+
 def relay_text(req):
     """Текст Зевсу — без текста роли: ни команды, ни описания, ни имени окна (их Зевс читает в `pantheon perm show`
     как данные). Только номер заявки, срок и что делать (проверка безопасности 15.11: инъекция в Зевса)."""
@@ -228,9 +413,7 @@ def relay(req):
         return False
 
     def pick(ags):
-        zs = [z for z in ags or [] if W._base_name(z.get("name")) == "zeus" and z.get("id") and z.get("sessionId")
-              and z.get("kind") in (None, "background")]
-        z = max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
+        z = _zeus(W, ags)
         return z if z and W.idle_holder(z) else None
     with P.lock("start-zeus", block=False) as got:
         if not got:
@@ -308,26 +491,51 @@ def ask(raw):
     tool = ev["tool_name"] if NAME.fullmatch(ev["tool_name"]) else "инструмент"
     req = {"id": rid, "window": name, "session": sid, "attach": _attach_id(sid), "tool": tool,
            "agent": _text(ev.get("agent_type"), 40), "question": expected, "options": list(OPTIONS),
-           "exact": ok, "sha256": sha, "created": t0, "deadline": t0 + wait, "status": "waiting"}
+           "exact": ok, "sha256": sha, "created": t0, "deadline": t0 + wait, "status": "waiting", "pid": os.getpid()}
+    ti = ev.get("tool_input") if isinstance(ev.get("tool_input"), dict) else {}
+    seen = Answered(_transcript(ev), ev["tool_name"], ti)
     _save(req)
-    sent = _try_relay(req)
-    if not sent:
-        with contextlib.suppress(Exception):
-            P.alert(f"окно {name} ждёт разрешения [{rid}] до {time.strftime('%H:%M', time.localtime(t0 + wait))} — "
-                    f"спросить владельца: pantheon perm show {rid}", name)
-    last, poll, retry = time.monotonic(), _env_num("PANTHEON_PERM_POLL", POLL, 60), _env_num("PANTHEON_PERM_RETRY", RETRY, 600)
-    end = time.monotonic() + wait
-    verdict, head = None, ""
-    while True:
-        try:
-            verdict, head = owner_verdict(rid, expected, t0)
-        except P.ConsentLogError as e:
-            P.start_log(f"perm\t{rid}\tжурнал: {str(e)[:120]}")
-        if verdict or time.monotonic() >= end:
-            break
-        if not sent and time.monotonic() - last >= retry:
-            last, sent = time.monotonic(), _try_relay(req)
-        time.sleep(min(poll, max(end - time.monotonic(), 0)))
+    sent, verdict, head, gone = False, None, "", ""
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+        sent = _try_relay(req)
+        if not sent:
+            with contextlib.suppress(Exception):
+                P.alert(f"окно {name} ждёт разрешения [{rid}] до {time.strftime('%H:%M', time.localtime(t0 + wait))} "
+                        f"— спросить владельца: pantheon perm show {rid}", name)
+        poll, retry = _env_num("PANTHEON_PERM_POLL", POLL, 60), _env_num("PANTHEON_PERM_RETRY", RETRY, 600)
+        last = probe = time.monotonic()
+        end, was_blocked = time.monotonic() + wait, False
+        while True:
+            if seen.answered():
+                gone = "в журнале окна есть результат вызова"
+                break
+            if sid and time.monotonic() - probe >= retry:
+                probe, state = time.monotonic(), _window_state(sid)
+                if state == "blocked":
+                    was_blocked = True
+                elif state and was_blocked:
+                    gone = f"окно сошло с запроса ({state})"
+                    break
+            try:
+                verdict, head = owner_verdict(rid, expected, t0)
+            except P.ConsentLogError as e:
+                P.start_log(f"perm\t{rid}\tжурнал: {str(e)[:120]}")
+            if verdict or time.monotonic() >= end:
+                break
+            if not sent and time.monotonic() - last >= retry:
+                last, sent = time.monotonic(), _try_relay(req)
+            time.sleep(min(poll, max(end - time.monotonic(), 0)))
+    except Term:
+        verdict, gone = None, "ход окна оборван (SIGTERM)"
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)   # решение принято: поздний сигнал не роняет запись и вывод
+    if gone:
+        # ответ в окне: решение хука Claude Code уже не возьмёт — молчим, заявку снимаем, Зевсу — «снят»
+        req.update(status="window", answered=gone, relayed=sent, done=time.time())
+        _save(req)
+        P.start_log(f"perm\t{rid}\t{name}\t{req['tool']}\twindow\t{gone}")
+        _drop(req)
+        return 0, None
     if verdict == "allow" and not ok:
         verdict = "open"  # показано не целиком — владелец одобрил не то, что выполнится: обычный запрос в окне
     req.update(status=verdict or "timeout", answered=head, relayed=sent, done=time.time())
@@ -348,6 +556,9 @@ def show(rid):
     if req is None:
         print(f"pantheon perm show: заявки {rid} нет (номер perm-<8 hex>, заявки старше суток убраны)", file=sys.stderr)
         return 1
+    if req.get("status") == "window":
+        print(f"заявка {rid}: {WINDOW} — владельца о ней не спрашивай; если уже спросил, ответ ничего не изменит")
+        return 0
     left = float(req.get("deadline") or 0) - time.time()
     state = f"ждёт ещё {int(left // 60)} мин {int(left % 60)} с" if req.get("status") == "waiting" and left > 0 \
         else f"окно уже не ждёт ({req.get('status')}) — ответ теперь только в окне: claude attach {req.get('attach')}"
@@ -369,6 +580,9 @@ def answer(rid, want):
     if req is None:
         print(f"pantheon perm answer: заявки {rid} нет — ничего не передано", file=sys.stderr)
         return 1
+    if req.get("status") == "window":
+        print(f"заявка {rid}: {WINDOW} — ничего не передано и делать ничего не нужно")
+        return 0
     try:
         verdict, head = owner_verdict(rid, req["question"], float(req.get("created") or 0))
     except P.ConsentLogError as e:
