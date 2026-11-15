@@ -15,12 +15,11 @@ import shutil
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
-import tempfile
+from _py311 import PY311, mkroot  # CLI pantheon — только на Python 3.11+; mkroot — корень временных папок (metis-0743)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
 RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
-ROOT = os.path.realpath(tempfile.mkdtemp(prefix="sandbox-size-test-"))
+ROOT = os.path.realpath(mkroot("sandbox-size-test-"))
 atexit.register(shutil.rmtree, ROOT, True)
 dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))  # noqa: E731
 

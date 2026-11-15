@@ -11,14 +11,14 @@ import re
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+from _py311 import PY311, mkroot  # CLI pantheon — только на Python 3.11+; mkroot — корень временных папок (metis-0743)
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
 import atexit as _atexit
 import os as _os
 import shutil as _shutil
-_ROOT = tempfile.mkdtemp(prefix="start-root-")
+_ROOT = mkroot("start-root-")
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
