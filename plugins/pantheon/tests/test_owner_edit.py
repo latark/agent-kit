@@ -982,6 +982,11 @@ check("R4-2 Б1: «да» в чате на вопрос без экраниро�
 PL_NEW = '[private]\npaths = ["~/ai/knowledge/Self", "~/ai/knowledge/Self-2"]\n'
 check("1252: правка с `код` — окну вопросов не годится, без знаков Markdown — годится",
       not OE.plain_ok(pb) and OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW)), OE.question(pb, plain=True))
+check("1252: белый список — «_» внутри слова и ${HOME} годятся; «&», «_» на краю, «~» не перед «/», «](» — нет",
+      OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why="через env_from и ${HOME}"))
+      and not any(OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why=w)) for w in
+                  ("a &amp; b", "_курсив_", "x ~y~", "[a](b)", "a|b", "a@b")),
+      [OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why=w)) for w in ("через env_from", "a &amp; b", "_курсив_")])
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
