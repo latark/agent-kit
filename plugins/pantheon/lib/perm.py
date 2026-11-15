@@ -242,13 +242,15 @@ def _alive(pid):
     return True
 
 
-def perm_live(a):
+def perm_live(a, agents=()):
     """Живая заявка окна a (запись claude agents) → номер или None: status waiting, срок не вышел, процесс хука жив;
-    то же окно — sessionId, короткий id или имя без « (N)». Дежурный по ней не шлёт «ждёт вас» и не заводит карточку
-    (Д2 argus: владельца спрашивали дважды). Сбой чтения — None: обычный путь дежурного, ничего не теряется."""
+    то же окно — sessionId или короткий id; по имени без « (N)» — только если сессии заявки нет в agents (окно заменено
+    под тем же именем), иначе «zeus (2)» и «zeus» с разными sid совпали бы (ревью argus #498 Д1). Дежурный по ней не
+    шлёт «ждёт вас» и не заводит карточку (Д2 argus: владельца спрашивали дважды). Сбой чтения — None: обычный путь."""
     t = P.now()
     sid, short = str(a.get("sessionId") or ""), str(a.get("id") or "")
     name = re.sub(r" \(\d+\)$", "", str(a.get("name") or ""))
+    listed = {str(x.get("sessionId")) for x in agents or () if isinstance(x, dict) and x.get("sessionId")}
     try:
         files = sorted(os.listdir(P.path("perm")))
     except OSError:
@@ -263,7 +265,7 @@ def perm_live(a):
         if not _alive(req.get("pid")):
             continue
         if (sid and req.get("session") == sid) or (short and req.get("attach") == short) \
-                or (name and req.get("window") == name):
+                or (name and req.get("window") == name and str(req.get("session")) not in listed):
             return req["id"]
     return None
 
@@ -363,13 +365,19 @@ def drop_text(req):
 def _drop(req):
     """Зевсу — «perm-<id> снят» в очередь push, без respawn: занятого ходом (может, уже с окном вопросов) не обрываем,
     простаивающего не будим ради отмены. Он получит текст при следующем старте, а до того его держит `perm show`
-    (hq.tmpl). → True, если положено. После #495 push_text дописывает, а не заменяет очередь."""
+    (hq.tmpl). → True, если положено.
+    push_text на main заменяет файл очереди (O_TRUNC), поэтому — под тем же замком start-zeus, что relay и relay_zeus, и
+    только в пустую очередь: файл push Зевса уже есть (чужая передача ещё не доставлена) или замок занят — «снят» не
+    пишем, чужую передачу не затираем; Зевса держит `perm show` (ревью argus #498 Б2). После #495 (push_text
+    дописывает) проверку на файл можно снять."""
     try:
         W = P.watch_mod()
         if os.path.exists(P.path("stopped", "zeus")) or W.relay_block(P.now()):
             return False
-        z = _zeus(W, P.agents_all())
-        ok = bool(z and P.push_text(z["sessionId"], drop_text(req)))
+        with P.lock("start-zeus", block=False) as got:
+            z = _zeus(W, P.agents_all()) if got else None
+            p = P.path("push", z["sessionId"] + ".txt") if z else ""
+            ok = bool(z and not os.path.exists(p) and P.push_text(z["sessionId"], drop_text(req)))
         P.start_log(f"perm-drop\tzeus\t{(z or {}).get('id')}\t{req['id']}\t{int(ok)}")
         return ok
     except Exception as e:  # noqa: BLE001 — сбой передачи: заявка уже снята, perm show скажет это Зевсу

@@ -684,10 +684,10 @@ def _wait_card(name, sid, why, since, t):
     return tid
 
 
-def _perm_live(a):
+def _perm_live(a, agents=()):
     """Живая заявка perm окна a (P.perm_live) → номер или None; сбой — None: обычный путь, ничего не теряется."""
     try:
-        return P.perm_live(a)
+        return P.perm_live(a, agents)
     except Exception:  # noqa: BLE001 — без заявки дежурный спрашивает сам, как до metis-1254
         return None
 
@@ -773,7 +773,7 @@ def sessions(agents, doms, t=None):
         if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
             state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
-        if state == "blocked" and not a.get("ghost") and _perm_live(a):
+        if state == "blocked" and not a.get("ghost") and _perm_live(a, agents):
             # metis-1254: запрос окна уже у Зевса заявкой perm-… (lib/perm.py) — ни тревоги, ни уведомления, ни
             # передачи, ни карточки: владельца спросили бы дважды. Отсчёт ожидания идёт (wait_cards); заявка решена,
             # снята, вышел срок или хук умер — обычный путь со следующего прохода
