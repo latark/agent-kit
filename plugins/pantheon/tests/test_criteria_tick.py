@@ -266,7 +266,7 @@ def test_accepted_unit():
         want = {"metis-0001": {1: A1, 2: A2}}
 
         def acc(recs, head=H1, base="main", core=False):
-            return P.criteria_accepted(recs, 7, head, base, core)
+            return P.criteria_accepted(recs, 7, head, base, core, P.merge_mod())
         check("«принять» на head с «да» — оба пункта", acc([verdict("accept", H1, criteria=both)]) == want)
         check("запись другого head — ничего", acc([verdict("accept", H2, criteria=both)]) == {})
         check("другой PR — ничего", acc([verdict("accept", H1, criteria=both, pr=8)]) == {})

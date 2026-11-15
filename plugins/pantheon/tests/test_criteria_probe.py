@@ -107,21 +107,28 @@ def scen_review(R, Q, state, gh):
             json.dump({"body": body, "headRefName": "feature"}, open(view, "w", encoding="utf-8"))
         return R._accept_unmarked(REPO, 7, items, R.P.merge_mod())
 
+    M = R.P.merge_mod()
+    dirs = M.repo_dirs().get(REPO)   # {"metis-pantheon"} из policy.toml поддельного HOME — как зовёт merge.py
+
+    def req(branch, body):
+        return Q.criteria_required(REPO, branch, body, dirs)
+
     def gap(body, recs):
         C.write_records(state, recs)
-        return Q.review_criteria_gap(REPO, 7, H1, {"body": body, "headRefName": "feature", "baseRefName": "main"})
+        return Q.review_criteria_gap(REPO, 7, H1, {"body": body, "headRefName": "feature", "baseRefName": "main"},
+                                     M.criteria_api())
 
     return cases([
         ("required: Closes — неотмеченные пункты задачи",
-         lambda: Q.criteria_required(REPO, "feature", "Closes metis-0001") == {"metis-0001": {1: A1, 2: A2}}),
+         lambda: req("feature", "Closes metis-0001") == {"metis-0001": {1: A1, 2: A2}}),
         ("required: «часть» — ничего",
-         lambda: Q.criteria_required(REPO, "feature", "Closes metis-0001\nчасть metis-0001") == {}),
+         lambda: req("feature", "Closes metis-0001\nчасть metis-0001") == {}),
         ("required: «пункт 2 <id>» — только он",
-         lambda: Q.criteria_required(REPO, "feature", "пункт 2 metis-0002") == {"metis-0002": {2: A2}}),
+         lambda: req("feature", "пункт 2 metis-0002") == {"metis-0002": {2: A2}}),
         ("required: задача чужого направления — нет",
-         lambda: Q.criteria_required(REPO, "feature", "Closes other-0003") == {}),
+         lambda: req("feature", "Closes other-0003") == {}),
         ("required: отмеченный пункт — не нужен",
-         lambda: Q.criteria_required(REPO, "metis-0004-x", "") == {"metis-0004": {2: A2}}),
+         lambda: req("metis-0004-x", "") == {"metis-0004": {2: A2}}),
         ("problem: «проба» без опоры — отказ «без опоры»",
          lambda: "без опоры" in (R._review_criteria_problem("accept", [f"metis-0001#2 {A2} проба"]) or "")),
         ("problem: «проба» с «ОПОРА» — что проверить вживую",
@@ -129,9 +136,9 @@ def scen_review(R, Q, state, gh):
                                                                                         "ОПОРА")]) or "")),
         ("problem: «проба» с опорой — годится", lambda: R._review_criteria_problem("accept", both) is None),
         ("accepted: «проба» в счёт, как «да»",
-         lambda: Q.criteria_accepted(rec, 7, H1, "main", False) == {"metis-0001": {1: A1, 2: A2}}),
+         lambda: Q.criteria_accepted(rec, 7, H1, "main", False, M) == {"metis-0001": {1: A1, 2: A2}}),
         ("probes: только пункт «проба» с опорой",
-         lambda: Q.criteria_probes(rec, 7, H1, "main", False) == {"metis-0001": {2: (A2, "живая сессия")}}),
+         lambda: Q.criteria_probes(rec, 7, H1, "main", False, M) == {"metis-0001": {2: (A2, "живая сессия")}}),
         ("unmarked: пункт 2 без отметки — причина называет только его",
          lambda: "metis-0001#2" in (w := unmarked("Closes metis-0001", both[:1]) or "") and "metis-0001#1" not in w),
         ("unmarked: «да» и «проба» на каждом — None", lambda: unmarked("Closes metis-0001", both) is None),
@@ -155,14 +162,14 @@ REVIEW_MUTANTS = [
 ]
 # правило отметок и отказ merge request — в ядре, review_rules.py (test_core_deps)
 RULES_MUTANTS = [
-    ("if all(v in T.CRITERION_OK for _, v, _ in vs)", 'if all(v == "да" for _, v, _ in vs)',
+    ("if all(v in CRITERION_OK for _, v, _ in vs)", 'if all(v == "да" for _, v, _ in vs)',
      "accepted: «проба» в счёт, как «да»"),
     ("for n, (h, bases) in items.items() if bases}", "for n, (h, bases) in items.items() if not bases}",
      "probes: только пункт «проба» с опорой"),
-    ("want = {} if A.is_part(body) else", "want = {} if False else", "required: «часть» — ничего"),
+    ("want = {} if is_part(body) else", "want = {} if False else", "required: «часть» — ничего"),
     ('or (dirs is not None and head.get("direction") not in dirs):', "or False:",
      "required: задача чужого направления — нет"),
-    ("for tid, nums in A.named_items(body).items():", "for tid, nums in {}.items():",
+    ("for tid, nums in named_items(body).items():", "for tid, nums in {}.items():",
      "required: «пункт 2 <id>» — только он"),
     ("if nums is None or n in nums}", "if True}", "required: «пункт 2 <id>» — только он"),
     ("for n in T.unchecked_numbers(head, text) if", "for n in range(1, len(crit) + 1) if",

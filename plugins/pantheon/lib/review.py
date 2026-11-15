@@ -126,7 +126,7 @@ def review_criteria_ticks(repo, row, fn=None):
     if not isinstance(n, int) or isinstance(n, bool) or not REVIEW_SHA.fullmatch(head):
         return {}
     return (fn or P.criteria_accepted)(P.review_records(repo, n), n, head, row.get("base"),
-                                       row.get("core") is not False)
+                                       row.get("core") is not False, P.merge_mod())
 
 
 def review_criteria_probes(repo, row):
@@ -155,7 +155,11 @@ def _accept_unmarked(repo, pr, crit, M):
     for got in filter(None, map(T.parse_criterion, crit)):
         if got[3] in T.CRITERION_OK:
             have.setdefault(got[0], {})[got[1]] = got[2]
-    need = P.criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", loaded)
+    try:
+        dirs = P.autoclose_repo_dirs().get(repo.lower())
+    except Exception:  # noqa: BLE001 — policy.toml не прочитан: строже, задачи любого направления
+        dirs = None
+    need = P.criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", dirs, loaded)
     miss = P.criteria_unmarked(need, have)
     return miss and (f"пункты «Готово, когда» без отметки: {miss}. Дай --{CRITERIA} да|проба на каждый (строки — "
                      f"`pantheon review criteria <id>`) или «вернуть» с «нет»")

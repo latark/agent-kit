@@ -46,18 +46,19 @@ import re
 import shutil
 import subprocess
 import time
+import importlib.util
 from datetime import datetime
 
-ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
-# «часть» — только отдельным словом рядом с номером задачи: «часть metis-1051», «часть 1051», «часть задачи metis-1051»,
-# «часть: metis-1051» (metis-1193). Номер — id с префиксом или цифры после № / # / «задачи» («часть №1051», «часть
-# задачи 1051»); голое число («часть 100 строк», «часть 2026 года») — не номер. Между словом и номером — пробелы, знаки
-# разметки (* _ ` ( [ # №, двоеточие, тире) и перед id не больше одного слова («часть работы metis-1051»). Слово в
-# обычной фразе («личная часть карты», #441) PR частичным не делает.
-_PART_GAP = r"[\s*_`(\[#№:—–-]*"
-_PART_NUM = r"(?:[#№]|задачи" + _PART_GAP + r")\s*\d{3,}(?!\w)"
-PART_RE = re.compile(r"(?<![^\W_])часть(?![^\W_])" + _PART_GAP + r"(?:(?:[^\W\d_]+" + _PART_GAP + r")?" + ID_RE.pattern
-                     + r"|" + _PART_NUM + r")", re.I)
+# Разбор тела и ветки PR — какие задачи PR закрывает (closing_ids, find_ids, ID_RE), «часть» (is_part, PART_RE),
+# «пункт N <id>» (named_items) — в lib/review_rules.py, ядре защит (metis-1260, решение владельца 15.11: по нему
+# шлюз merge request требует отметок argus). Здесь — те же объекты под прежними именами, копии правила нет.
+_spec = importlib.util.spec_from_file_location("pantheon_review_rules_autoclose", os.path.join(os.path.dirname(os.path.abspath(__file__)), "review_rules.py"))
+_rules = importlib.util.module_from_spec(_spec)  # ядро (metis-1260): файл рядом, путь импорта под -I не нужен
+_spec.loader.exec_module(_rules)
+ID_RE, PART_RE, ITEM_RE = _rules.ID_RE, _rules.PART_RE, _rules.ITEM_RE
+find_ids, closing_ids, is_part, named_items = _rules.find_ids, _rules.closing_ids, _rules.is_part, _rules.named_items
+
+
 FETCH_BUDGET = 240     # секунд на весь сетевой проход (fetch): дольше не ждём, остаток репозиториев — в следующий раз
 REPO_BUDGET = 75       # секунд на один репозиторий (metis-0808): fetch иногда 100-350 с против обычных 40 — завислый gh не съедает весь проход
 FIRST_LOOKBACK = 48 * 3600  # первый проход (нет состояния) смотрит назад на столько: старые упоминания задач не трогаем
@@ -67,62 +68,6 @@ NO_METRIC = "нет замера"
 REVIEW_MARK = "открыт → review"  # строка журнала задачи, которой открытый PR поставил review (тот же текст в boardstatus.py)
 VERSION_RE = re.compile(r'^\+\s*"version"\s*:\s*"([^"]+)"')
 DIFF_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)")
-
-
-def find_ids(*texts):
-    """Номера задач в порядке появления, без повторов."""
-    out = []
-    for text in texts:
-        for m in ID_RE.finditer(text or ""):
-            if m.group(0) not in out:
-                out.append(m.group(0))
-    return out
-
-
-CLOSE_RE = re.compile(r"(?<!\w)(?i:close[sd]?|fix(?:es|ed)?|resolve[sd]?|закрыва(?:ет|ю)|закры(?:л|ла|ли|то)|исправля(?:ет|ю)|исправил[аи]?)"
-                      r"\s*[:\-]?\s+(" + ID_RE.pattern + ")")
-# перед глаголом отрицание («не закрывает», «пока не закрываю», «doesn't fix», «not closing») — PR задачу не закрывает
-NEG_BEFORE_RE = re.compile(r"(?:(?<!\w)(?:не|нет|not|never|no)|n['’]t)\s+(?:\w+\s+)?$", re.I)
-
-
-# после «Closes <id>» — список (metis-0583): «, <id>», «и <id>», «and <id>», «; <id>», «& <id>». Номер без префикса
-# («Closes metis-0522, 0534 и 0535») берёт префикс прошлого id, если в нём столько же цифр и за ним конец, знак или «и»
-LIST_NEXT_RE = re.compile(r"\s*(?:,|;|&|\s(?:и|and)(?=\s))\s*(?:(" + ID_RE.pattern + r")|(?<![\w-])(\d{3,})(?=$|[\s,;.()&]))", re.I)
-BARE_END_RE = re.compile(r"\s*(?:$|[,;.()&—–-]|(?:и|and)\s)", re.I)
-
-
-def _id_list(text, pos, first):
-    """Номера после первого id списка «Closes a-1, a-2 и 0003» → [a-2, a-0003]; pos — конец первого id."""
-    out, prev = [], first
-    while True:
-        m = LIST_NEXT_RE.match(text, pos)
-        if not m:
-            return out
-        if m.group(1):
-            prev = m.group(1)
-        else:
-            pre, num = prev.rsplit("-", 1)
-            if len(m.group(2)) != len(num) or not BARE_END_RE.match(text, m.end()):
-                return out  # «Closes metis-0522, 100 тестов» — число, а не номер задачи
-            prev = f"{pre}-{m.group(2)}"
-        out.append(prev)
-        pos = m.end()
-
-
-def closing_ids(branch, body):
-    """Номера задач, которые PR закрывает: id в имени ветки или «Closes/Fixes <id>» в теле, со списком после него
-    («Closes metis-0522, metis-0534 и 0535» — все три, metis-0583). Простое упоминание («См. также», «зависит от»,
-    «часть») — нет."""
-    body = body or ""
-    ids = []
-    for m in CLOSE_RE.finditer(body):
-        if not NEG_BEFORE_RE.search(body[:m.start()]):
-            ids += [m.group(1)] + _id_list(body, m.end(1), m.group(1))
-    return find_ids(branch, *ids)
-
-
-def is_part(body):
-    return bool(PART_RE.search(body or ""))
 
 
 def part_refs(body):
@@ -780,21 +725,6 @@ def tick_accepted(pantheon, t, repo, pr, tid, task, T, accepted, log):
     log.append(f"{tid}: PR #{pr.get('number')} слит — отмечены пункты {', '.join(map(str, got))} по приёмке argus")
     h, b = T.read(task[0])
     return (task[0], h, b) if h else task
-
-
-# metis-1193: пункт задачи X, сделанный PR другой задачи (или проверяемый фактом после слияния — его принимают на
-# следующем PR), argus принимает тем же --criteria на этом PR, а тело PR называет его: «пункт 3 metis-1050», «пункты
-# 1, 2 и 4 metis-1117», «пункты 1, 2, и 4 metis-1117», «пункт 3 задачи metis-1050». Не «часть metis-X»: «часть» в теле оставляет открытыми и задачи из Closes (is_part).
-ITEM_RE = re.compile(r"(?<!\w)пункт(?:ы|ов|ах)?\s+(\d{1,3}(?:\s*(?:,\s*и|,|и)\s*\d{1,3})*)\s+(?:задачи\s+)?("
-                     + ID_RE.pattern + r")", re.I)
-
-
-def named_items(body):
-    """Пункты чужих задач, названные в теле PR (metis-1193) → {id: {номера}}."""
-    out = {}
-    for m in ITEM_RE.finditer(body or ""):
-        out.setdefault(m.group(2), set()).update(int(x) for x in re.findall(r"\d+", m.group(1)))
-    return out
 
 
 def tick_named(pantheon, t, repo, pr, dirs, skip, T, accepted, log, errors):

@@ -783,7 +783,12 @@ def done_criteria(body):
 CRITERION_HASH_LEN = 12
 _CRIT_REF = re.compile(r"(" + ID_RE.pattern + r")#([1-9][0-9]{0,2})")
 _CRIT_HASH = re.compile(r"[0-9a-f]{%d}" % CRITERION_HASH_LEN)
-CRITERION_PROBE, CRITERION_OK, CRITERION_VERDICTS = "проба", ("да", "проба"), ("да", "нет", "проба")  # OK — засчитан
+_spec = _ilu.spec_from_file_location("pantheon_review_rules_tasks", os.path.join(os.path.dirname(os.path.abspath(
+    __file__)), "review_rules.py"))
+_rules = _ilu.module_from_spec(_spec)  # metis-1260: какие отметки засчитаны — правило ядра (review_rules.py)
+_spec.loader.exec_module(_rules)
+CRITERION_PROBE, CRITERION_OK = _rules.CRITERION_PROBE, _rules.CRITERION_OK  # OK — засчитан; копии правила нет
+CRITERION_VERDICTS = ("да", "нет", "проба")
 
 
 def criterion_hash(text):

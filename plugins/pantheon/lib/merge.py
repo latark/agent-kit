@@ -142,6 +142,7 @@ import stat
 import subprocess
 import urllib.parse
 import sys
+import types
 from datetime import datetime
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
@@ -411,6 +412,25 @@ def log(req, event, **extra):
     os.makedirs(d := P.path("logs"), exist_ok=True)  # одно P.path на оба пути (храповик P., metis-1260)
     with open(os.path.join(d, "merge.jsonl"), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def repo_dirs():
+    """{репозиторий в нижнем регистре: {направления}} из [merge_repos] policy.toml — чья задача PR репозитория (metis-1260,
+    как autoclose_repo_dirs). policy.toml не читается — исключение: вызывающий берёт задачи любого направления."""
+    with open(os.path.join(P.HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+        pol = P.tomllib.load(fh)
+    out = {}
+    for d, repos in (pol.get("merge_repos") or {}).items() if isinstance(pol.get("merge_repos"), dict) else ():
+        for r in repos if isinstance(repos, list) else []:
+            if isinstance(r, str):
+                out.setdefault(r.strip().lower(), set()).add(d)
+    return out
+
+
+def criteria_api():
+    """Функции merge.py для правила отметок review_rules (metis-1260): ядро берёт их параметром, а не через P."""
+    return types.SimpleNamespace(base_counts=base_counts, returned_lie=returned_lie, pr_files=pr_files,
+                                 window_core=window_core, repo_dirs=repo_dirs)
 
 
 def allowed_repos():
@@ -2085,7 +2105,8 @@ def cmd_request(args):
             return 1
         state, why = gate(repo, pr, sha, view)
         # конфликт с base — заявки нет, BLOCKED и «GitHub ещё считает» — заявка ждёт (metis-0987), как в check_all
-        conflict = (P.review_criteria_gap(repo, pr, sha, view) or merge_conflict(view)) if state != "fail" else None
+        conflict = (P.review_criteria_gap(repo, pr, sha, view, criteria_api()) or merge_conflict(view)) \
+            if state != "fail" else None
         if conflict and (conflict[0] == "fail" or state == "ok"):
             state, why = conflict
         if state == "fail":
