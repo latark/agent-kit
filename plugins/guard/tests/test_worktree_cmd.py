@@ -94,7 +94,7 @@ try:
     old = "    if WORKTREE_LINE.match(cmd) and \"..\" not in cmd:\n"
     check("самопроверка мутантов: строка проверки одна", src.count(old) == 1)
     m = load(src.replace(old, "    if True:\n"))
-    check("мутант: без строгой строки — цепочка проходит (тест краснеет)",
+    check("мутант: без строгой строки — цепочка проходит (тест падает — мутант убит)",
           run("pantheon worktree add x && rm -rf ~", m) is None)
     m = load(src.replace(old, "    if WORKTREE_LINE.match(cmd):\n"))
     check("мутант: без проверки .. — a..b проходит", run("pantheon worktree add a..b", m) is None)

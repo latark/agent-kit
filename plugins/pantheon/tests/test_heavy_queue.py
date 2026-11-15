@@ -325,7 +325,7 @@ def main():
         check("--server при пустой очереди идёт, билетов не осталось", r.returncode == 0 and "ran" in r.stdout
               and left() == [], f"{r.returncode} {r.stderr!r} {left()}")
         # metis-0683: за жетон сервера очереди нет — сервер, ждущий жетона, билета не кладёт и обычную команду,
-        # пришедшую после него, не держит (мутант «билет на любое ожидание» здесь краснеет)
+        # пришедшую после него, не держит (мутант «билет на любое ожидание» здесь убит)
         sfd = os.open(os.path.join(locks, "heavy-server.lock"), os.O_RDONLY)
         fcntl.flock(sfd, fcntl.LOCK_EX)
         sp = subprocess.Popen([sys.executable, "-I", HEAVY, "--server", "/bin/sh", "-c", "echo srv"],

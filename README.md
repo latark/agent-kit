@@ -33,6 +33,7 @@
   (`inbox/`, `directions/*/inbox/`): строка в `.gitignore` его папки и одна тревога «данные не в git: путь, размер».
   `.gitignore` пишется по частям пути через `dir_fd` и `O_NOFOLLOW` (ссылка на любом звене — не пишем, файл прячется
   в `.git/info/exclude`); перевод строки в имени в `.gitignore` записывается как `?`. Закоммиченное не трогается.
+  Тест — `plugins/pantheon/tests/test_data_guard.py` (есть в `scripts/affected-map.json`, metis-0993).
 - Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
   `bin/pantheon-tick` сами ищут 3.11+ (`lib/find-python.sh`): `PANTHEON_PYTHON`, затем `python = "…"` из
   `STATE/config.toml` (его пишет `pantheon-setup`), затем `python3` из PATH, `python3.14`…`3.11`, Homebrew, python.org.
