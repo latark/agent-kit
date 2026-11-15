@@ -10,6 +10,8 @@
 - папка демона хуков ~/.cache/pantheon/hookd (metis-0845): grant write в неё и в папку выше (~/.cache) не даётся,
   sandbox_write policy.toml в неё — тоже, а denyWrite каждого окна её закрывает; итог сверяет проверка F7 guard
   (scripts/hookd-check.py windows).
+- metis-1221: в выданной папке закрыты config.worktree, bare <имя>.git и .husky, .git подпапок — литералом (не
+  переименовать); write на свою папку окна и выше неё не применяется, отказ — в выводе сборки.
 """
 import atexit
 import json
@@ -28,9 +30,9 @@ atexit.register(shutil.rmtree, ROOT, True)
 results = []
 
 
-def check(name, cond):
+def check(name, cond, detail=""):
     results.append(bool(cond))
-    print(("ok   " if cond else "FAIL ") + name)
+    print(("ok   " if cond else "FAIL ") + name + ("" if cond or not detail else f"  [{detail}]"))
 
 
 def py311():
@@ -41,7 +43,7 @@ def main():
     tmp = os.path.join(ROOT, "h")
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
-    for d in ("projects/br", "ai/knowledge", "ai/workshop", ".claude/pantheon", "data"):
+    for d in ("projects/br", "ai/knowledge", "ai/workshop", ".claude/pantheon", "data/sub/.git", "projects/side"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     with open(os.path.join(home, "directions.toml"), "w") as fh:
         fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
@@ -52,9 +54,12 @@ def main():
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
 
+    errs = []
+
     def build(*args):
         r = subprocess.run([py311(), "-I", RUN_PY, "domains", "build", *args], env=env, capture_output=True, text=True,
                            timeout=120)
+        errs.append(r.stderr)
         if r.returncode:
             print(r.stderr)
         return r.returncode == 0
@@ -106,6 +111,11 @@ write = ["~/.c*e"]
 window = "athena-shop"
 until = "{future}"
 write = ["~/state/x"]
+
+[[grant]]
+window = "athena-shop"
+until = "{future}"
+write = ["~/projects/br", "~/projects", "~/projects/side"]
 ''')
     check("сборка прошла", build())
     a = win("athena-shop")
@@ -121,6 +131,7 @@ write = ["~/state/x"]
     check("выданная запись — .mcp.json, .claude/skills и .claude/commands в ней закрыты (долги argus #482)", all(
         data + sub in dw for sub in ("/.mcp.json", "/**/.mcp.json", "/.claude/skills", "/**/.claude/skills",
                                      "/.claude/commands", "/**/.claude/commands")))
+    own_folder_grants(tmp, a, dw, data, errs[-1])
     check("domains в силе — в allowedDomains", "registry.example.org" in a["sandbox"]["network"]["allowedDomains"])
     check("«*» — в окне направления и в мастерской",
           "Bash(make check)" in a["permissions"]["allow"] and "Bash(make check)" in win("workshop")["permissions"]["allow"])
@@ -180,6 +191,28 @@ write = ["~/state/x"]
     check("истёкшее снято и с окна, и с сессии", "Bash(new *)" not in win("athena-shop")["permissions"].get("allow", [])
           and "Bash(new *)" not in json.load(open(os.path.join(run, "athena-shop.json")))["permissions"].get("allow", []))
 
+
+def own_folder_grants(tmp, a, dw, data, err):
+    """metis-1221 п. 2–4: код git сверх config и hooks, литералы .git подпапок, write над своей папкой окна."""
+    check("выданная запись — config.worktree, bare <имя>.git и .husky в ней закрыты (metis-1221 п. 4)", all(
+        data + sub in dw for sub in ("/**/.git/config.worktree", "/**/.git/worktrees/*/config.worktree",
+                                     "/**/*.git/config", "/**/*.git/hooks", "/.husky", "/**/.husky")))
+    check("выданная запись — .git подпапки литералом: переименование data/sub/.git закрыто (nested_pins, metis-1221 п. 2)",
+          data + "/sub/.git/hooks" in dw, [x for x in dw if x.startswith(data)])
+    # metis-1221 п. 3: write на свою папку окна и выше неё не даётся — «/**/» закрыл бы её .claude/agents
+    # (own_agents) и .claude/settings.json копий .claude/worktrees/*; папка рядом даётся
+    br, side = os.path.realpath(os.path.join(tmp, "projects/br")), os.path.realpath(os.path.join(tmp, "projects/side"))
+    top = os.path.dirname(br)
+    check("write на свою папку окна и выше — без запретов поверх неё: .claude/agents и settings.json копий открыты",
+          not any(x.startswith((top + "/**", top + "/.")) for x in dw)
+          and not {br + "/**/.claude/agents", br + "/**/.claude/settings.json"} & set(dw),
+          [x for x in dw if x.startswith(top)])
+    check("write выше своей папки окна не дан, папка рядом — дана со своими запретами",
+          top not in a["sandbox"]["filesystem"]["allowWrite"] and side in a["sandbox"]["filesystem"]["allowWrite"]
+          and side + "/**/.claude/agents" in dw, a["sandbox"]["filesystem"]["allowWrite"])
+    check("отказ write над своей папкой назван в выводе сборки с причиной",
+          "athena-shop: grants.toml write на свою папку окна или выше не даётся" in err
+          and "~/projects/br" in err and "~/projects'" in err, err[-600:])
 
 def hookd_closed():
     """Папка демона хуков (metis-0845): ни grant, ни sandbox_write не открывают её ни одному окну."""
