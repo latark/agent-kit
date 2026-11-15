@@ -31,8 +31,9 @@ import test_criteria_tick as C  # noqa: E402 — общие make, put, verdict, 
 
 T = C.T
 LIB = C.LIB
-REVIEW_PY, AUTOCLOSE_PY, BOARD_PY, PLUGINS_PY = (os.path.join(LIB, f + ".py") for f in
-                                                 ("review", "autoclose", "boardmerged", "plugins"))
+REVIEW_PY, RULES_PY, AUTOCLOSE_PY, BOARD_PY, PLUGINS_PY = (os.path.join(LIB, f + ".py") for f in
+                                                           ("review", "review_rules", "autoclose", "boardmerged",
+                                                            "plugins"))
 REPO = "latark/agent-kit"
 H1, A1, A2, T0, DAY = C.H1, C.A1, C.A2, C.T0, 86400
 crit, verdict, check, text = C.crit, C.verdict, C.check, C.text
@@ -90,7 +91,9 @@ def setup_review():
     return tmp, home, state, gh, P
 
 
-def scen_review(R, state, gh):
+def scen_review(R, Q, state, gh):
+    """R — review.py (_review_criteria_problem, _accept_unmarked), Q — review_rules.py, ядро: правило отметок и отказ
+    merge request (criteria_required, criteria_accepted, criteria_probes, review_criteria_gap)."""
     view = os.path.join(gh, "view.json")
     probe = crit("metis-0001", 2, A2, "проба", "живая сессия")
     both = [crit("metis-0001", 1, A1), probe]
@@ -106,19 +109,19 @@ def scen_review(R, state, gh):
 
     def gap(body, recs):
         C.write_records(state, recs)
-        return R.review_criteria_gap(REPO, 7, H1, {"body": body, "headRefName": "feature", "baseRefName": "main"})
+        return Q.review_criteria_gap(REPO, 7, H1, {"body": body, "headRefName": "feature", "baseRefName": "main"})
 
     return cases([
         ("required: Closes — неотмеченные пункты задачи",
-         lambda: R.criteria_required(REPO, "feature", "Closes metis-0001") == {"metis-0001": {1: A1, 2: A2}}),
+         lambda: Q.criteria_required(REPO, "feature", "Closes metis-0001") == {"metis-0001": {1: A1, 2: A2}}),
         ("required: «часть» — ничего",
-         lambda: R.criteria_required(REPO, "feature", "Closes metis-0001\nчасть metis-0001") == {}),
+         lambda: Q.criteria_required(REPO, "feature", "Closes metis-0001\nчасть metis-0001") == {}),
         ("required: «пункт 2 <id>» — только он",
-         lambda: R.criteria_required(REPO, "feature", "пункт 2 metis-0002") == {"metis-0002": {2: A2}}),
+         lambda: Q.criteria_required(REPO, "feature", "пункт 2 metis-0002") == {"metis-0002": {2: A2}}),
         ("required: задача чужого направления — нет",
-         lambda: R.criteria_required(REPO, "feature", "Closes other-0003") == {}),
+         lambda: Q.criteria_required(REPO, "feature", "Closes other-0003") == {}),
         ("required: отмеченный пункт — не нужен",
-         lambda: R.criteria_required(REPO, "metis-0004-x", "") == {"metis-0004": {2: A2}}),
+         lambda: Q.criteria_required(REPO, "metis-0004-x", "") == {"metis-0004": {2: A2}}),
         ("problem: «проба» без опоры — отказ «без опоры»",
          lambda: "без опоры" in (R._review_criteria_problem("accept", [f"metis-0001#2 {A2} проба"]) or "")),
         ("problem: «проба» с «ОПОРА» — что проверить вживую",
@@ -126,9 +129,9 @@ def scen_review(R, state, gh):
                                                                                         "ОПОРА")]) or "")),
         ("problem: «проба» с опорой — годится", lambda: R._review_criteria_problem("accept", both) is None),
         ("accepted: «проба» в счёт, как «да»",
-         lambda: R.criteria_accepted(rec, 7, H1, "main", False) == {"metis-0001": {1: A1, 2: A2}}),
+         lambda: Q.criteria_accepted(rec, 7, H1, "main", False) == {"metis-0001": {1: A1, 2: A2}}),
         ("probes: только пункт «проба» с опорой",
-         lambda: R.criteria_probes(rec, 7, H1, "main", False) == {"metis-0001": {2: (A2, "живая сессия")}}),
+         lambda: Q.criteria_probes(rec, 7, H1, "main", False) == {"metis-0001": {2: (A2, "живая сессия")}}),
         ("unmarked: пункт 2 без отметки — причина называет только его",
          lambda: "metis-0001#2" in (w := unmarked("Closes metis-0001", both[:1]) or "") and "metis-0001#1" not in w),
         ("unmarked: «да» и «проба» на каждом — None", lambda: unmarked("Closes metis-0001", both) is None),
@@ -146,6 +149,12 @@ REVIEW_MUTANTS = [
      "problem: «проба» без опоры — отказ «без опоры»"),
     ('"что проверить вживую после выпуска" if verdict == T.CRITERION_PROBE else', '"x" if False else',
      "problem: «проба» с «ОПОРА» — что проверить вживую"),
+    ('return miss and (f"пункты', 'return None and (f"пункты', "unmarked: пункт 2 без отметки — причина называет только его"),
+    ('if not isinstance(view, dict):\n        return "gh pr view', 'if False:\n        return "gh pr view',
+     "unmarked: gh не дал тело — причина «gh pr view»"),
+]
+# правило отметок и отказ merge request — в ядре, review_rules.py (test_core_deps)
+RULES_MUTANTS = [
     ("if all(v in T.CRITERION_OK for _, v, _ in vs)", 'if all(v == "да" for _, v, _ in vs)',
      "accepted: «проба» в счёт, как «да»"),
     ("for n, (h, bases) in items.items() if bases}", "for n, (h, bases) in items.items() if not bases}",
@@ -158,9 +167,6 @@ REVIEW_MUTANTS = [
     ("if nums is None or n in nums}", "if True}", "required: «пункт 2 <id>» — только он"),
     ("for n in T.unchecked_numbers(head, text) if", "for n in range(1, len(crit) + 1) if",
      "required: отмеченный пункт — не нужен"),
-    ('return miss and (f"пункты', 'return None and (f"пункты', "unmarked: пункт 2 без отметки — причина называет только его"),
-    ('if not isinstance(view, dict):\n        return "gh pr view', 'if False:\n        return "gh pr view',
-     "unmarked: gh не дал тело — причина «gh pr view»"),
     ('return miss and ("fail"', 'return None and ("fail"', "gap: нет приёмки на head — fail с пунктами"),
 ]
 
@@ -168,15 +174,18 @@ REVIEW_MUTANTS = [
 def test_review():
     tmp, home, state, gh, P = setup_review()
     try:
-        for name, ok in scen_review(load(REVIEW_PY, P=P, name="real"), state, gh).items():
+        R, Q = load(REVIEW_PY, P=P, name="real"), load(RULES_PY, P=P, name="real")
+        for name, ok in scen_review(R, Q, state, gh).items():
             check("[review] " + name, ok)
-        src = open(REVIEW_PY, encoding="utf-8").read()
-        for old, new, case in REVIEW_MUTANTS:
-            if src.count(old) != 1:
-                check(f"[review] мутант «{old[:50]}»: строка в review.py одна", False, src.count(old))
-                continue
-            got = scen_review(load(REVIEW_PY, src.replace(old, new), P), state, gh)
-            check(f"[review] мутант «{old[:50]}» убит случаем «{case}»", got.get(case) is False, got)
+        for path, muts in ((REVIEW_PY, REVIEW_MUTANTS), (RULES_PY, RULES_MUTANTS)):
+            src, base = open(path, encoding="utf-8").read(), os.path.basename(path)
+            for old, new, case in muts:
+                if src.count(old) != 1:
+                    check(f"[review] мутант «{old[:50]}»: строка в {base} одна", False, src.count(old))
+                    continue
+                m = load(path, src.replace(old, new), P)
+                got = scen_review(m, Q, state, gh) if path == REVIEW_PY else scen_review(R, m, state, gh)
+                check(f"[review] мутант {base} «{old[:50]}» убит случаем «{case}»", got.get(case) is False, got)
     finally:
         shutil.rmtree(tmp, True)
 

@@ -19,8 +19,8 @@ __all__ = [
     "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "_review_verdict", "_review_git", "_review_state",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
     "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report", "NODE_MODULES_LINK", "tree_clean",
-    "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "criteria_accepted", "review_criteria_ticks", "review_ready",
-    "review_delta", "criteria_probes", "review_criteria_probes", "criteria_required", "review_criteria_gap",
+    "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "review_criteria_ticks", "review_ready", "review_delta",
+    "review_criteria_probes",
 ]
 
 
@@ -52,6 +52,8 @@ REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/rep
 # пункту задач из Closes и пунктов «пункт N <id>» тела PR (criteria_required): нет хоть одной — код 1, записи нет
 # (_accept_unmarked); то же сверяет `pantheon merge request` по записям на head (review_criteria_gap). При слиянии
 # «да» и «проба» отмечают пункт (criteria_accepted), «проба» ещё даёт задачу-пробу (criteria_probes, autoclose).
+# Правило отметок (criteria_accepted, criteria_probes, criteria_required, criteria_unmarked, review_criteria_gap) — в
+# lib/review_rules.py, ядре защит: его зовёт шлюз merge.py (test_core_deps); здесь только P.<имя>.
 CRITERIA = "criteria"
 CRITERIA_FMT = '"<id задачи>#<номер пункта> <хеш 12 знаков> да|нет|проба <опора: файл:строка, тест; у пробы — что проверить вживую>"'
 CRITERIA_STUB = "ОПОРА"
@@ -117,134 +119,26 @@ def review_criteria_cmd(ids):
     return 0
 
 
-def criteria_accepted(recs, pr, head, base, core):
-    """Пункты, которые argus принял на head слияния PR (metis-1004) → {id задачи: {номер пункта: хеш}}. recs — журнал
-    шлюза по PR (review_records). В счёт — «принять» argus на этот PR и ровно этот head, как у шлюза: последний вердикт
-    своего рецензента (пара session_id, agent_id), полный перечень, а у PR ядра (core) ещё Opus (review_accept_counts),
-    base записи — base PR (base_counts), без лживого поля «вернули» (returned_lie), позже каждого «вернуть» PR, кроме
-    снятого «принять» того же рецензента на том же head (как _floor шлюза). Последний вердикт какого-нибудь
-    рецензента на head — «вернуть» — не в счёт ничего. Пункт принят, если в засчитанных «принять» он есть, у всех —
-    «да» или «проба» (T.CRITERION_OK, metis-1260) и один хеш. Переносов «принять» с прошлого head нет: запись другого
-    head не отмечает ничего."""
-    return {tid: {n: h for n, (h, _) in items.items()} for tid, items in _criteria_ok(recs, pr, head, base, core).items()}
-
-
-def criteria_probes(recs, pr, head, base, core):
-    """Принятые пункты (как criteria_accepted), у которых хоть одна засчитанная отметка — «проба» (metis-1260) →
-    {id задачи: {номер: (хеш, опоры проб через «; »)}}: их проверяют вживую после выпуска (autoclose.ensure_probe)."""
-    out = {}
-    for tid, items in _criteria_ok(recs, pr, head, base, core).items():
-        got = {n: (h, "; ".join(bases)) for n, (h, bases) in items.items() if bases}
-        if got:
-            out[tid] = got
-    return out
-
-
-def _criteria_ok(recs, pr, head, base, core):
-    """Общее у criteria_accepted и criteria_probes → {id: {номер: (хеш, [опоры отметок «проба»])}}."""
-    T = P.tasks_mod()
-    out = {}
-    for (tid, n), vs in sorted(_criteria_votes(recs, pr, head, base, core, T).items()):
-        if all(v in T.CRITERION_OK for _, v, _ in vs) and len({h for h, _, _ in vs}) == 1:
-            probes = list(dict.fromkeys(b for _, v, b in vs if v == T.CRITERION_PROBE))
-            out.setdefault(tid, {})[n] = (vs[0][0], probes)
-    return out
-
-
-def _criteria_votes(recs, pr, head, base, core, T):
-    """Отметки засчитанных «принять» на head (правило — criteria_accepted) → {(id, номер): [(хеш, отметка, опора)]}."""
-    rules, full = P.merge_mod(), P.review_accept_full
-    ok = P.review_accept_counts if core else full
-    head = str(head or "").lower()
-    if not REVIEW_SHA.fullmatch(head):
-        return {}
-    verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
-                and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
-                and isinstance(r.get("sha"), str)]
-
-    def who(r):
-        return (r["by"].get("session_id") or "", r["by"].get("agent_id") or "")
-
-    floor = -1
-    for i, r in enumerate(verdicts):
-        if r["kind"] == "reject" and not any(a["kind"] == "accept" and who(a) == who(r) and a["sha"].lower() ==
-                                             r["sha"].lower() and full(a) for a in verdicts[i + 1:]):
-            floor = i
-    last = {}
-    for i, r in enumerate(verdicts):
-        if r["sha"].lower() == head:
-            last[who(r)] = (i, r)
-    if any(r["kind"] == "reject" for _, r in last.values()):
-        return {}
-    votes = {}
-    for i, r in sorted(last.values(), key=lambda x: x[0]):
-        if i <= floor or not ok(r) or not rules.base_counts(r, {"baseRefName": base}) or rules.returned_lie(r, verdicts):
-            continue
-        for v in r.get("criteria") if isinstance(r.get("criteria"), list) else []:
-            got = T.parse_criterion(v)
-            if got:
-                votes.setdefault((got[0], got[1]), []).append((got[2], got[3], got[4]))
-    return votes
-
-
-def review_criteria_ticks(repo, row, fn=criteria_accepted):
+def review_criteria_ticks(repo, row, fn=None):
     """Для autoclose (metis-1004): строка кэша слитого PR (number, head, base, core) → criteria_accepted по журналу
     шлюза. Нет head в строке (кэш до metis-1004) — пусто; нет core — как ядро (строже)."""
     n, head = row.get("number"), str(row.get("head") or "").lower()
     if not isinstance(n, int) or isinstance(n, bool) or not REVIEW_SHA.fullmatch(head):
         return {}
-    return fn(P.review_records(repo, n), n, head, row.get("base"), row.get("core") is not False)
+    return (fn or P.criteria_accepted)(P.review_records(repo, n), n, head, row.get("base"),
+                                       row.get("core") is not False)
 
 
 def review_criteria_probes(repo, row):
     """Для autoclose (metis-1260): строка кэша слитого PR → criteria_probes, по тем же правилам, что review_criteria_ticks."""
-    return review_criteria_ticks(repo, row, criteria_probes)
-
-
-def _crit_tasks():
-    """(модуль tasks, задачи WORK_TYPES) — общее у criteria_required и _accept_unmarked: задачи читаются один раз."""
-    T = P.tasks_mod()
-    return T, T.load_tasks(P.PANTHEON, T.WORK_TYPES)
-
-
-def criteria_required(repo, branch, body, loaded=None):
-    """Пункты, которым нужна отметка argus в «принять» PR (metis-1260) → {id: {номер: хеш нынешнего текста}}:
-    неотмеченные пункты открытых задач из Closes и ветки (autoclose.closing_ids; у PR «часть» — нет) и пункты «пункт N
-    <id>» тела (named_items). Задача — направления репозитория PR ([merge_repos] policy.toml, как у autoclose: чужую
-    задачу PR не закрывает); политика не читается или репозитория в ней нет — любого (строже). loaded — _crit_tasks()."""
-    (T, tasks), A = loaded or _crit_tasks(), P.autoclose_mod()
-    try:
-        dirs = P.autoclose_repo_dirs().get(repo.lower())
-    except Exception:  # noqa: BLE001 — policy.toml не прочитан: строже, задачи любого направления
-        dirs = None
-    want = {} if A.is_part(body) else {tid: None for tid in A.closing_ids(branch, body)}
-    for tid, nums in A.named_items(body).items():
-        want[tid] = nums if want.get(tid, ()) is not None else None
-    out = {}
-    for tid, nums in want.items():
-        _, head, text = tasks.get(tid, ("", {}, ""))
-        if head.get("type") != "task" or head.get("status") in ("done", "dropped") \
-                or (dirs is not None and head.get("direction") not in dirs):
-            continue
-        crit = T.done_criteria(text)
-        got = {n: T.criterion_hash(crit[n - 1][1]) for n in T.unchecked_numbers(head, text) if nums is None or n in nums}
-        if got:
-            out[tid] = got
-    return out
-
-
-def _unmarked_text(need, have):
-    """Пункты need ({id: {номер: хеш}}) без отметки «да»/«проба» с тем же хешем в have → «id#N, …» или None."""
-    miss = [f"{tid}#{n}" for tid, items in sorted(need.items()) for n, h in sorted(items.items())
-            if (have.get(tid) or {}).get(n) != h]
-    return ", ".join(miss) or None
+    return review_criteria_ticks(repo, row, P.criteria_probes)
 
 
 def _accept_unmarked(repo, pr, crit, M):
     """metis-1260: «принять» без отметки на каждом пункте задач PR (criteria_required) → причина или None. crit —
     значения --criteria этой команды (формат уже проверен). Тело и ветку PR даёт gh; нет задач с неотмеченными
     пунктами — gh не зовём. Сбой gh — причина: без тела не узнать, какие пункты нужны. M — модуль merge (gh)."""
-    loaded = _crit_tasks()
+    loaded = P.criteria_tasks()
     T = loaded[0]
     if not any(T.unchecked_numbers(h, b) for _, h, b in loaded[1].values()
                if h.get("type") == "task" and h.get("status") not in ("done", "dropped")):
@@ -261,24 +155,10 @@ def _accept_unmarked(repo, pr, crit, M):
     for got in filter(None, map(T.parse_criterion, crit)):
         if got[3] in T.CRITERION_OK:
             have.setdefault(got[0], {})[got[1]] = got[2]
-    miss = _unmarked_text(criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", loaded), have)
+    need = P.criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", loaded)
+    miss = P.criteria_unmarked(need, have)
     return miss and (f"пункты «Готово, когда» без отметки: {miss}. Дай --{CRITERIA} да|проба на каждый (строки — "
                      f"`pantheon review criteria <id>`) или «вернуть» с «нет»")
-
-
-def review_criteria_gap(repo, pr, sha, view):
-    """Для `pantheon merge request` (metis-1260): у пунктов задач PR (criteria_required по телу и ветке view) нет
-    отметки «да»/«проба» в засчитанных «принять» на head sha (criteria_accepted, хеш — нынешнего текста) → ("fail",
-    причина) или None. Ядро — по файлам PR (window_core), файлы не получить — как ядро (строже)."""
-    need = criteria_required(repo, view.get("headRefName") or "", view.get("body") or "")
-    if not need:
-        return None
-    M = P.merge_mod()
-    files = M.pr_files(repo, pr, view)
-    core = files is None or any(M.window_core(f) for f in files)
-    miss = _unmarked_text(need, criteria_accepted(P.review_records(repo, pr), pr, sha, view.get("baseRefName"), core))
-    return miss and ("fail", f"у пунктов «Готово, когда» {miss} нет отметки argus да|проба на head {sha[:12]} "
-                             "(metis-1260) — нужен круг argus с --criteria на каждый")
 
 
 def _review_verdict(sub, args):
