@@ -487,6 +487,82 @@ def t_carry_rej(h):
          [x_rej, x_acc, tests(qam)], True)
 
 
+def t_same_reviewer_code(h):
+    """metis-1249 (BA #72): X вернул R, потом X принял A — исправление, в которое уже подтянут base M (merge-base A с
+    base другая, чем у R, и правило 3 _lifts не годится). Новый head N = A + подтянутый E (вершина base после M): код
+    N — код A, и «принять» X снимает своё «вернуть» и переносится (правило 4). Другой код на N, «принять» A до
+    «вернуть» или «принять» A другого argus — «вернуть» в силе."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    bx = plumb(p, [s["B"]], {"bx.txt": F("x\n")}, "base: X")
+    bm = plumb(p, [bx], {"bm.txt": F("m\n")}, "base: M")
+    be = plumb(p, [bm], {"be.txt": F("e\n")}, "base: E")
+    r = plumb(p, [bx], {"fix.txt": F("bad\n")}, "PR: правка, которую вернули")
+    a = plumb(p, [r, bm], {"fix.txt": F("good\n")}, "PR: исправление и подтянул M", src=bm)
+    n = plumb(p, [a, be], {"fix.txt": F("good\n")}, "PR: подтянул E", src=be)
+    nx = plumb(p, [a, be], {"fix.txt": F("other\n")}, "PR: подтянул E и поменял код", src=be)
+
+    def case(name, head, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, head, be)
+        h.seed(*recs)
+        merge_case(name, h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit), allow, why)
+
+    x_rej = opus(r, "x", "reject", checklist=None, session="s-x")
+    x_acc = opus(a, "x", session="s-x")
+    case("1249: X вернул R, X принял A, N = A + base — сливает", n, [x_rej, x_acc, tests(n)], True)
+    case("1249: X вернул R, X принял A, N — другой код — отказ", nx, [x_rej, x_acc, tests(nx)], False,
+         "«вернуть» (reject)")
+    case("1249: «принять» A записано до «вернуть» R — отказ", n, [x_acc, x_rej, tests(n)], False, "«вернуть» (reject)")
+    case("1249: A принял другой argus Z — «вернуть» X в силе", n, [x_rej, opus(a, "z", session="s-z"), tests(n)],
+         False, "«вернуть» (reject)")
+
+
+def t_two_bases(h):
+    """metis-1249 (BA #71, #64): develop влит и в ветку PR, и в base PR — у head и base две merge-base. Собственный
+    дифф PR — от их слияния (виртуальная merge-base): «принять» с head до подтягивания переносится, «вернуть» снято.
+    Подтягивание с подменой содержимого — другой код; базы с конфликтом — не сверено, отказ."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    bx = plumb(p, [s["B"]], {"tb-x.txt": F("x\n")}, "base: своя правка до develop")
+    dev = plumb(p, [s["B"]], {"tb-dev.txt": F("dev\n")}, "develop")
+    be = plumb(p, [bx, dev], {"tb-dev.txt": F("dev\n")}, "base: влит develop")
+    r = plumb(p, [bx], {"tb-pr.txt": F("bad\n")}, "PR: правка, которую вернули")
+    a = plumb(p, [r], {"tb-pr.txt": F("good\n")}, "PR: исправление")
+    n = plumb(p, [a, dev], {"tb-dev.txt": F("dev\n")}, "PR: влит develop")
+    evil = plumb(p, [a, dev], {"tb-dev.txt": F("dev\n"), "tb-x.txt": F("подмена\n")}, "PR: влит develop с подменой")
+    mbs = git(p, "merge-base", "--all", be, n).split()
+    check("1249: у head и base PR две merge-base", len(mbs) == 2, mbs)
+    # базы с конфликтом: develop2 добавил tb-x.txt иначе, чем base
+    dev2 = plumb(p, [s["B"]], {"tb-x.txt": F("dev2\n")}, "develop2: тот же файл иначе")
+    be2 = plumb(p, [bx, dev2], {}, "base: влит develop2, оставлен свой tb-x.txt")
+    n2 = plumb(p, [a, dev2], {}, "PR: влит develop2, оставлен свой tb-x.txt")
+
+    def case(name, head, base, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, head, base)
+        h.seed(*recs)
+        merge_case(name, h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit), allow, why)
+
+    x_rej = opus(r, "x", "reject", checklist=None, session="s-x")
+    x_acc = opus(a, "x", session="s-x")
+    case("1249: две merge-base, «принять» на A переносится на N (A + develop)", n, be, [x_acc, tests(n)], True)
+    got = [x for x in carry_lines(h) if x.get("kind") == "carry"]
+    check("1249: перенос записан", len(got) == 1 and [x.get("sha") for x in got[0].get("from", [])] == [a], got)
+    case("1249: две merge-base, X вернул R и принял A — «вернуть» снято, сливает", n, be, [x_rej, x_acc, tests(n)],
+         True)
+    case("1249: две merge-base, develop влит с подменой файла base — не переносится", evil, be,
+         [x_rej, x_acc, tests(evil)], False)
+    case("1249: базы с конфликтом (нет слияния баз) — не сверено, отказ", n2, be2, [x_rej, x_acc, tests(n2)], False,
+         "две merge-base")
+
+
 def t_prints_late(h):
     """metis-1181: сверка отпечатков (_Prints._late) останавливается не только по бюджету CARRY_BUDGET, но и когда до
     срока хука меньше GIT_MARGIN: git там гаснет за 0,05 с, но на 8 head таких вызовов десятки — до HookTimeout."""
@@ -501,7 +577,7 @@ def t_prints_late(h):
 
 
 CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_decision_deadline, t_prints_late,
-         t_carry_rej]
+         t_carry_rej, t_same_reviewer_code, t_two_bases]
 
 
 if __name__ == "__main__":
