@@ -30,6 +30,9 @@
 - «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
   карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K (пункты 1, 3)», не больше
   MAX_MERGED строк; номера неотмеченных пунктов — metis-1193;
+- «План …: расхождений с карточками пачек N» (metis-1235) — data["plan_drift"] от вызывающего (lib/plancheck.py
+  board_rows): раздел плана без карточки пачки, задача раздела не в своей пачке, пачка закрыта при открытых задачах;
+  только имя файла, номера разделов и id (plan_lines), не больше MAX_PLANS строк;
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
 - отказы ролей за сутки (metis-0832) — журнал STATE/logs/handoff.jsonl (lib/handoff.py): источник, вид → кому передано
   и итоги, только из словарей HANDOFF_*; заявка Touch ID — одна, по последнему итогу;
@@ -586,6 +589,28 @@ def now_line(data, t):
     return f"- **Сейчас {hm(t)}** · " + " · ".join(parts) + "."
 
 
+PLAN_NAME_RE = re.compile(r"[\w.-]{1,80}")
+PLAN_ITEM_RE = re.compile(r"раздел [\w+.-]{1,12}: [\w ,-]{1,160}")
+MAX_PLANS = 3  # строк «План …: расхождений N» (metis-1235)
+
+
+def plan_lines(rows):
+    """data["plan_drift"] (lib/plancheck.py board_rows: имя файла, число, короткие расхождения) → строки доски. Только
+    имя файла и строки своего шаблона (номер раздела, id, постоянные слова — SEC-13); чужая форма — пропуск."""
+    out = []
+    for row in (rows if isinstance(rows, list) else [])[:MAX_PLANS]:
+        if not (isinstance(row, (list, tuple)) and len(row) == 3 and _ok(PLAN_NAME_RE, row[0])
+                and isinstance(row[1], int) and not isinstance(row[1], bool) and isinstance(row[2], list)):
+            continue
+        if row[1] < 0:
+            out.append(f"- План {row[0]}: не прочитан — сверка с пачками не прошла.")
+            continue
+        items = [x for x in row[2] if _ok(PLAN_ITEM_RE, x)]
+        out.append(f"- План {row[0]}: расхождений с карточками пачек {row[1]}" + (": " + "; ".join(items) if items else "")
+                   + (" …" if row[1] > len(items) else "") + f" — pantheon plan check {row[0]}.md")
+    return out
+
+
 def lines(data, t=None):
     """Строки блока без штампа (в порядке важности: «Сейчас» из факта, неделя, PR, пачки, STATUS, ответы владельца)."""
     out = [now_line(data, t)] if t is not None else []
@@ -621,6 +646,7 @@ def lines(data, t=None):
                    + (f" (пункты {items})" if items else ""))
     if len(merged) > MAX_MERGED:
         out.append(f"- …и ещё слитых PR с открытой задачей: {len(merged) - MAX_MERGED}.")
+    out += plan_lines(data.get("plan_drift"))
     for sid, work, closed, total, *pr in data.get("batches") or []:
         num = pr[0] if pr and isinstance(pr[0], int) and not isinstance(pr[0], bool) else None
         out.append(f"- Пачка {sid}" + (f" (PR #{num})" if num else "") + ": "

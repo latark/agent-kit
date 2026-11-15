@@ -12,6 +12,9 @@
   карточке, и пункт, изменённый после приёмки, не отмечают ничего; ядро — только «принять» на Opus.
 - metis-1193: пункт задачи вне Closes отмечается, если тело PR его называет («пункт N <id>») и argus принял его на head
   слияния; названный без приёмки, принятый без названия, чужого направления, done, со сменой текста — не отмечается.
+- metis-1235: PR «часть» отмечает принятые пункты задач из ветки, «часть <id>» и «часть №N», но не закрывает их;
+  догон по слитым PR из журнала задачи (PR уже обработан, «принять» после слияния) отмечает пункты, отмечено всё и
+  последний PR без «часть» — done; чужое направление и приёмка другой задачи — ничего; сбой accepted — в errors.
 
 Временные HOME, PANTHEON_HOME, PANTHEON_STATE; всё убирается в конце.
 Запуск: python3.14 -I plugins/pantheon/tests/test_criteria_tick.py  (код выхода 0 — все прошли)
@@ -480,7 +483,8 @@ def test_named():
         check("1193: задача не из направления репозитория — не отмечена", ok and x(22) == 0, text(p[22])[-300:])
         put(home, "metis-0027", status="review")
         ok, log, errors = run("Closes metis-0027, часть metis-0027\nпункт 1 metis-0027", n=23)
-        check("1193: задача из Closes PR с «часть» по названию не отмечается (как Closes-путь)", ok and x(27) == 0,
+        check("1235: задача из Closes PR с «часть» — принятые пункты отмечены, задача не закрыта",
+              ok and x(27) == 2 and T.read(p[27])[0].get("status") == "review" and "«часть» — задача не закрыта" in text(p[27]),
               text(p[27])[-300:])
 
         def boom(repo, pr):
@@ -534,6 +538,98 @@ def test_named_filters():
           and "OSError: диск" in errors.get("latark/agent-kit#41", "") and not log, (ok, errors, log))
 
 
+def journal(p, line):
+    open(p, "a", encoding="utf-8").write(f"- 2026-11-09 10:00 — плановый проход: {line}\n")
+
+
+def backlog(A, home, state, p, acc, accepted, x, st, both):
+    """Догон (tick_backlog) через run по кэшу: PR в done состояния, «принять» после слияния, сбой accepted."""
+    # догон: PR уже обработаны (done состояния) — close_pr их не видит, отметки ставит tick_backlog
+    for i in (61, 62, 63, 64):
+        journal(p[i], f"PR #{i} (latark/agent-kit) слит, неотмечено 2 (пункты 1, 2)")
+    journal(p[65], "PR #65 (latark/agent-kit) слит, неотмечено 2 (пункты 1, 2)")
+    open(p[65], "w", encoding="utf-8").write(text(p[65]).replace('direction: "metis-pantheon"', 'direction: "other"'))
+    rows = [dict(mpr(i, f"Closes metis-00{i}", H1), head=H1, number=i) for i in (61, 62, 63, 64, 65)]
+    rows[3]["body"] = "часть metis-0064"
+    cache, stf = os.path.join(state, "ac-prs.json"), os.path.join(state, "ac.json")
+    json.dump({"fetched": T0, "merged": {"latark/agent-kit": rows}}, open(cache, "w", encoding="utf-8"))
+    json.dump({"since": T0 - 10, "done": {f"latark/agent-kit#{i}": "2026-11-09T10:00:00" for i in (61, 62, 63, 64, 65)}},
+              open(stf, "w", encoding="utf-8"))
+    calls = []
+
+    def acc_count(repo, pr):
+        calls.append(pr.get("number"))
+        return accepted(repo, pr)
+    log, errors = A.run(home, stf, cache, T0, {"latark/agent-kit": {"metis-pantheon"}}, T, accepted=acc_count)
+    check("1235 догон: PR в done состояния, все пункты приняты — отмечены и задача закрыта (Closes без «часть»)",
+          x(61) == 2 and st(61) == "done" and "(догон)" in text(p[61]), (log, errors, text(p[61])[-500:]))
+    check("1235 догон: принят один пункт — он отмечен, задача осталась review",
+          x(62) == 1 and st(62) == "review", text(p[62])[-400:])
+    check("1235 догон: приёмка другой задачи на том PR — ничего", x(63) == 0 and st(63) == "review", text(p[63])[-300:])
+    check("1235 догон: последний PR «часть» — пункты отмечены, задача не закрыта",
+          x(64) == 2 and st(64) == "review" and "«часть» — задача не закрыта" in text(p[64]), text(p[64])[-400:])
+    check("1235 догон: задача чужого направления — не тронута", x(65) == 0, text(p[65])[-300:])
+    check("1235 догон: accepted — один раз на PR, только PR из журналов задач с хвостом",
+          sorted(calls) == [61, 62, 63, 64] and errors == {}, (calls, errors))
+    check("1235 догон: строка прохода", any("metis-0061" in s and "(догон)" in s for s in log), log)
+
+    # «принять» записан после слияния: следующий кэш — догон отмечает
+    acc[62] = {"metis-0062": dict(both)}
+    json.dump({"fetched": T0 + 60, "merged": {"latark/agent-kit": rows}}, open(cache, "w", encoding="utf-8"))
+    log, errors = A.run(home, stf, cache, T0 + 60, {"latark/agent-kit": {"metis-pantheon"}}, T, accepted=accepted)
+    check("1235 догон: «принять» после слияния — оставшийся пункт отмечен, задача done", x(62) == 2 and st(62) == "done",
+          (log, errors, text(p[62])[-400:]))
+
+    def boom(repo, pr):
+        raise RuntimeError("журнал шлюза")
+    json.dump({"fetched": T0 + 120, "merged": {"latark/agent-kit": rows}}, open(cache, "w", encoding="utf-8"))
+    log, errors = A.run(home, stf, cache, T0 + 120, {"latark/agent-kit": {"metis-pantheon"}}, T, accepted=boom)
+    check("1235 догон: сбой accepted — ошибка с типом в errors, проход не упал",
+          "RuntimeError: журнал шлюза" in errors.get("latark/agent-kit#63", ""), errors)
+
+
+def test_part_and_backlog():
+    """metis-1235: PR «часть» отмечает принятые пункты задач, которые он называет (ветка, «часть <id>», «часть №N»), но
+    не закрывает их; догон (tick_backlog) отмечает пункты по слитым PR из журнала задачи — и по PR, обработанному до
+    выпуска (в done состояния), и по «принять», записанному после слияния; отмечено всё — close_checked закрывает."""
+    import autoclose as A
+    tmp, home, state, gh, env = make()
+    try:
+        os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_VIEW=os.path.join(tmp, "view"))
+        both = {1: A1, 2: A2}
+        p = {i: put(home, f"metis-00{i}", status="doing" if i < 60 else "review") for i in (51, 52, 53, 61, 62, 63, 64, 65)}
+        acc = {51: {"metis-0051": {1: A1}}, 52: {"metis-0052": dict(both)}, 53: {"metis-0053": dict(both)},
+               61: {"metis-0061": dict(both)}, 62: {"metis-0062": {1: A1}}, 63: {"metis-0099": dict(both)},
+               64: {"metis-0064": dict(both)}, 65: {"metis-0065": dict(both)}}
+        accepted = lambda repo, pr: acc.get(pr.get("number"), {})  # noqa: E731
+        x = lambda i: text(p[i]).count("- [x]")  # noqa: E731
+        st = lambda i: T.read(p[i])[0].get("status")  # noqa: E731
+
+        def close(n, body, branch="feature"):
+            log, errors = [], {}
+            ok = A.close_pr(home, T0, "latark/agent-kit", dict(mpr(n, body, H1, branch=branch), head=H1),
+                            {"metis-pantheon"}, T, None, log, errors, accepted)
+            return ok, log, errors
+
+        ok, log, errors = close(51, "часть metis-0051: пп. 1")
+        check("1235: PR «часть <id>» — принятый пункт отмечен, задача не закрыта, строка «часть» в журнале",
+              ok and x(51) == 1 and st(51) == "doing" and "«часть» — задача не закрыта" in text(p[51])
+              and any("metis-0051" in s and "по приёмке argus" in s for s in log), (ok, errors, log, text(p[51])[-400:]))
+        ok, log, errors = close(52, "Это часть №0052, остальное — потом")
+        check("1235: PR «часть №<номер>» — номер без префикса находит задачу, оба пункта отмечены, но не done",
+              ok and x(52) == 2 and st(52) == "doing", (ok, errors, text(p[52])[-400:]))
+        ok, log, errors = close(53, "часть metis-0051", branch="metis-0053-p1")
+        check("1235: PR «часть» с id в ветке — пункты отмечены, задача не закрыта", ok and x(53) == 2 and st(53) == "doing",
+              (ok, errors, text(p[53])[-400:]))
+        check("1235: part_refs — id, «№номер», слово без номера не в счёт",
+              A.part_refs("часть metis-0001; часть №0002; личная часть карты") == (["metis-0001"], [2]),
+              A.part_refs("часть metis-0001; часть №0002; личная часть карты"))
+
+        backlog(A, home, state, p, acc, accepted, x, st, both)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_tasks_unit()
     test_review_cli()
@@ -543,6 +639,7 @@ def main():
     test_tick_failure()
     test_named()
     test_named_filters()
+    test_part_and_backlog()
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1
 

@@ -188,6 +188,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     остаток исходной задачи — новой задачей в том же направлении: from=остаток, source=ID, тег «остаток»,
                     та же пачка; пункты — из --done-when, иначе неотмеченные из исходной; строка в журнале обеих (metis-0502)
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
+  pantheon plan check ФАЙЛ [--direction ИМЯ]   разделы «## N. Пачка …» плана против карточек story (lib/plancheck.py)
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
   pantheon executors --add codex | --remove <имя>   добавить Codex (через проверку, без входа) | убрать (Claude — отказ)
@@ -8223,6 +8224,7 @@ def board_auto_sync(T):
                          owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE,
                          own_of=batch_own_of(tasks, metrics_ctx().repos), windows=board_windows(t))
         data["merged_open"] = board_merged_open(T, t)
+        data["plan_drift"] = _plugin_map_mod("plancheck").board_rows(PANTHEON, tasks, t)  # план ↔ пачки, metis-1235
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
@@ -9644,6 +9646,8 @@ def main(argv):
         return batch_cmd(rest)
     if cmd == "supabase":
         return _plugin_map_mod("supabase_migrate").main(rest, STATE)
+    if cmd == "plan":
+        return _plugin_map_mod("plancheck").main(rest, PANTHEON, tasks_mod(), now())
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":
