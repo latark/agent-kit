@@ -286,6 +286,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         ваше прямое слово без вопроса с [id] — одну строку owner-log/zeus.md без
                                         пометки (своего текста команда не берёт); consent <id> покажет её дословно,
                                         метку Гестии и согласие браузера она не даёт (metis-0843)
+  pantheon perm show|answer|list     запрос разрешения окна роли: вопрос владельцу и его ответ (lib/perm.py)
   pantheon consent show <id>            строка владельца с [id] и временем за сутки; нет «да» — код 1, «нет согласия»
                                         (metis-1135: классификатор окна верит только выводу этой команды в окне)
   pantheon consent standing [<класс>]   согласие впредь на класс из [standing] policy.toml («да и впредь»); строгие
@@ -9481,6 +9482,7 @@ _attach("sessions")
 _attach("batch")
 _attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
 _attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
+_attach("perm")           # запрос разрешения окна роли — Зевсу, ответ владельца — окну (metis-1250)
 
 
 def main(argv):
@@ -9620,6 +9622,8 @@ def main(argv):
         return approve(rest)
     if cmd == "consent":
         return consent(rest)
+    if cmd == "perm":
+        return perm_cmd(rest)
     if cmd == "reap":
         return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
