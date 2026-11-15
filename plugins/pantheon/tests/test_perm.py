@@ -137,7 +137,19 @@ def scenario(answer, run_py=RUN_PY, agents=()):
     if req and answer:
         answer(env, req)
     rc, dec, sec, err = finish(pt)
-    return rc, dec, sec, req, env, err
+    st = {}
+    if req:
+        with open(os.path.join(env["PANTHEON_STATE"], "perm", req["id"] + ".json"), encoding="utf-8") as fh:
+            st = json.load(fh)
+    return rc, dec, sec, req, env, err, st
+
+
+def waited(r):
+    """Сколько хук ждал ответа — по заявке (created → done), без времени запуска процесса."""
+    try:
+        return float(r[6]["done"]) - float(r[6]["created"])
+    except (KeyError, TypeError, ValueError):
+        return -1.0
 
 
 def win(text="Разрешить", q=None, head=WIN, ago=0, extra=""):
@@ -150,12 +162,12 @@ def allowed(r):
 
 def silent(r, full=True):
     """Решения нет; full — ждал весь срок (не вышел раньше)."""
-    return r[0] == 0 and r[1] is None and (not full or r[2] >= float(WAIT) - 0.2)
+    return r[0] == 0 and r[1] is None and (not full or waited(r) >= float(WAIT) - 0.2)
 
 
 # --- 1. заявка, передача Зевсу, allow по owner-log -----------------------------------------------------------------
 r = scenario(win(), agents=[ZEUS])
-rc, dec, sec, req, env, err = r
+rc, dec, sec, req, env, err, st = r
 check("заявка: номер perm-<8 hex>, окно, вопрос с номером, окном и командой", req and req["id"].startswith("perm-")
       and len(req["id"]) == 13 and req["question"].startswith(f"[{req['id']}] Окно metis-pantheon просит разрешение:")
       and '"make build"' in req["question"] and req["options"] == ["Разрешить", "Отказать", "Открыть окно"], req)
@@ -166,7 +178,7 @@ check("передано Зевсу «zeus (2)»: push его сессии с в�
       and req["question"] in body and f"pantheon perm answer {req['id']}" in body
       and open(env["FAKE_LOG"]).read().strip() == "respawn abcd1234", (pushed, body))
 check("ответ «Разрешить» в окне вопросов Зевса → allow этого вызова, без updatedInput и правил", allowed(r), r[:4])
-check("allow пришёл сразу, а не по тайм-ауту", sec < float(WAIT), sec)
+check("allow пришёл сразу, а не по тайм-ауту", 0 <= waited(r) < float(WAIT) - 0.5, st)
 done = json.load(open(os.path.join(env["PANTHEON_STATE"], "perm", req["id"] + ".json"))) if req else {}
 check("заявка закрыта: status allow, relayed", done.get("status") == "allow" and done.get("relayed") is True, done)
 
@@ -175,7 +187,7 @@ check("«Отказать» → deny с причиной для модели", r
       and "Владелец отказал" in r[1].get("message", "") and "updatedInput" not in r[1], r[:4])
 r = scenario(win("Открыть окно"))
 check("«Открыть окно» → решения нет, хук выходит сразу (окно покажет обычный запрос)",
-      silent(r, full=False) and r[2] < float(WAIT) - 0.5, r[:4])
+      silent(r, full=False) and 0 <= waited(r) < float(WAIT) - 0.5 and r[6].get("status") == "open", r[:4])
 r = scenario(lambda env, req: log(env, " · ответ в чате", f"вопрос: {req['question']}\nответ: А — Разрешить\n"
                                   "вариант: А\nдословно: а"))
 check("ответ в чате Зевса «А — Разрешить» (метка варианта снята) → allow", allowed(r), r[:4])
@@ -311,6 +323,12 @@ def mutant(old, new):
     return os.path.join(d, "lib", "run.py")
 
 
+def hq_silent(m):
+    env = dict(place(), PANTHEON_ROLE="hq")
+    finish(start(env, run_py=m))
+    return not glob.glob(os.path.join(env["PANTHEON_STATE"], "perm", "*"))
+
+
 MUTANTS = (
     ('if not head.endswith(" у Зевса") or t < int(since):', "if False:",
      "ответ старше заявки", lambda m: silent(scenario(win(ago=120), run_py=m))),
@@ -324,7 +342,7 @@ MUTANTS = (
     ('verdict in ("allow", "deny")', 'verdict in ("allow",)',
      "«Отказать» → deny", lambda m: (scenario(win("Отказать"), run_py=m)[1] or {}).get("behavior") == "deny"),
     ('if not role or role == "hq":', "if not role:",
-     "окно Зевса молчит", lambda m: finish(start(dict(place(), PANTHEON_ROLE="hq"), run_py=m))[2] < 2),
+     "окно Зевса молчит", hq_silent),
     ('W._base_name(z.get("name")) == "zeus"', 'z.get("name") == "zeus"',
      "передача «zeus (2)»", lambda m: bool(glob.glob(os.path.join(scenario(win(), run_py=m, agents=[ZEUS])[4][
          "PANTHEON_STATE"], "push", "*.txt")))),
