@@ -366,18 +366,16 @@ def _drop(req):
     """Зевсу — «perm-<id> снят» в очередь push, без respawn: занятого ходом (может, уже с окном вопросов) не обрываем,
     простаивающего не будим ради отмены. Он получит текст при следующем старте, а до того его держит `perm show`
     (hq.tmpl). → True, если положено.
-    push_text на main заменяет файл очереди (O_TRUNC), поэтому — под тем же замком start-zeus, что relay и relay_zeus, и
-    только в пустую очередь: файл push Зевса уже есть (чужая передача ещё не доставлена) или замок занят — «снят» не
-    пишем, чужую передачу не затираем; Зевса держит `perm show` (ревью argus #498 Б2). После #495 (push_text
-    дописывает) проверку на файл можно снять."""
+    push_text дописывает к ещё не забранным передачам (очередь, metis-1253), поэтому «снят» встаёт и за чужой
+    передачей, не затирая её. Под тем же замком start-zeus, что relay и relay_zeus: замок занят — «снят» не пишем,
+    Зевса держит `perm show` (ревью argus #498 Б2)."""
     try:
         W = P.watch_mod()
         if os.path.exists(P.path("stopped", "zeus")) or W.relay_block(P.now()):
             return False
         with P.lock("start-zeus", block=False) as got:
             z = _zeus(W, P.agents_all()) if got else None
-            p = P.path("push", z["sessionId"] + ".txt") if z else ""
-            ok = bool(z and not os.path.exists(p) and P.push_text(z["sessionId"], drop_text(req)))
+            ok = bool(z and P.push_text(z["sessionId"], drop_text(req)))
         P.start_log(f"perm-drop\tzeus\t{(z or {}).get('id')}\t{req['id']}\t{int(ok)}")
         return ok
     except Exception as e:  # noqa: BLE001 — сбой передачи: заявка уже снята, perm show скажет это Зевсу
@@ -421,15 +419,15 @@ def relay(req):
         z = pick(P.agents_all())
         if not z:
             return False
-        pushed = P.push_text(z["sessionId"], relay_text(req))
+        text = relay_text(req)
+        pushed = P.push_text(z["sessionId"], text)
         if not pushed:
             return False
         r = subprocess.run([P.claude_bin(), "respawn", z["id"]], env=P.claude_env(), capture_output=True, text=True,
                            timeout=180)
         P.start_log(f"perm-relay\tzeus\t{z['id']}\t{req['id']}\t{r.returncode}")
         if r.returncode != 0:
-            with contextlib.suppress(OSError):
-                os.remove(pushed)
+            P.push_drop(pushed, text)  # только своя передача: чужие в очереди ждут старта Зевса (metis-1253)
             return False
         return True
 

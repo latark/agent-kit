@@ -596,8 +596,10 @@ def relay_zeus(agents, items, t):
     blocked-сессии прохода [(имя, sid, что ждёт)]: за проход не больше одной передачи, одним сообщением (второй respawn
     оборвал бы ход, который первый только что начал). Один пункт — одна передача: тот же вопрос той же сессии повторно
     не будит, новая — когда пункт сменился или сессия вышла из blocked и вернулась (запись в relay.json снимает
-    sessions()); и не чаще RELAY_EVERY на сессию. Зевса нет, остановлен или занят ходом, а также relay_block — ничего
-    (остаются тревога и уведомление). → True, если передано."""
+    sessions()); и не чаще RELAY_EVERY на сессию. Зевса нет, остановлен или занят ходом (и окно вопросов висит: state
+    blocked), очередь push полна, а также relay_block — ничего, и relay.json не пишется: пункт не отправлен и уходит
+    следующим проходом, когда Зевс свободен (metis-1253); тревога в alerts.md и уведомление остаются. → True, если
+    передано."""
     items = [i for i in items if not i[0].startswith("zeus")]
     if not items or os.path.exists(P.path("stopped", "zeus")) or relay_block(t):
         return False
@@ -641,8 +643,7 @@ def relay_zeus(agents, items, t):
         P.start_log(f"relay\tzeus\t{z['id']}\t{','.join(d[1] for d in due)}\t{r.returncode}")
         ok = r.returncode == 0
         if not ok:
-            with contextlib.suppress(OSError):
-                os.remove(pushed)
+            P.push_drop(pushed, text)  # metis-1253: только эта передача, прежние в очереди ждут старта
         st = {k: v for k, v in st.items() if (_relay_rec(v) or {"t": 0})["t"] > t - 86400}
         for _, sid, why in due:  # неудача тоже в запись: повтор не чаще RELAY_EVERY, а не каждый проход
             st[sid] = {"t": t, "item": why, "sent": ok}
