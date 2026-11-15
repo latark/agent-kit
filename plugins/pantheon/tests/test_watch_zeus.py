@@ -636,11 +636,12 @@ def test_zeus_rename_idle_1251():
     e = _zeus_copy_env(bg("zeus", "stopped", "dddddddd-1"))
     r = e.run("watch", t=T0, extra=ZEUS_RUN)
     acts = [c for c in e.calls() if c[:1] in (["stop"], ["rm"]) or "--resume" in c or c[:1] == ["--bg"]]
-    check(["rm", "dddddddd"] in acts and ["stop", "2e057e05"] in acts and len(acts) >= 3
-          and acts.index(["rm", "dddddddd"]) < acts.index(["stop", "2e057e05"]) and acts.count(["stop", "2e057e05"]) == 1
-          and len([c for c in acts if "--resume" in c]) == 1 and acts[-1][:1] == ["--resume"],
-          f"переименование: не rm мёртвой, stop, один запуск: {acts} {r.stderr[-500:]}")
-    s = acts[-1]
+    res = [i for i, c in enumerate(acts) if "--resume" in c]
+    # rm мёртвой «zeus» — один раз: zeus_rename вычёркивает её из списка прохода, уборка сессий (auto_rm) её не повторяет
+    check(acts.count(["rm", "dddddddd"]) == 1 and acts.count(["stop", "2e057e05"]) == 1 and len(res) == 1
+          and acts.index(["rm", "dddddddd"]) < acts.index(["stop", "2e057e05"]) < res[0],
+          f"переименование: не rm мёртвой < stop < один --resume: {acts} {r.stderr[-500:]}")
+    s = acts[res[0]] if res else []
     check(s[:2] == ["--resume", ZEUS_SID] and "--bg" in s and s[s.index("--agent") + 1] == "hq"
           and s[s.index("--name") + 1] == "zeus"
           and os.path.realpath(s[s.index("--settings") + 1]) == os.path.realpath(e.st("settings", "hq.json"))

@@ -425,7 +425,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
-              ("имя Зевса", lambda: zeus_rename(t)),
+              ("имя Зевса", lambda: zeus_rename(t, agents)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
@@ -2679,13 +2679,15 @@ def _zeus_tab(agents):
                for x in P.live_copies("zeus", agents))
 
 
-def zeus_rename(t):
+def zeus_rename(t, seen=None):
     """metis-1251 (слово владельца 15.11): окно Зевса всегда «zeus». Живая фоновая «zeus (N)» (Claude Code дал суффикс,
     когда «zeus» была занята) при простое Зевса, без живой «zeus» и без вкладки терминала с этим именем (_zeus_tab) — перезапуск той же переписки под именем zeus:
     P.fresh_start(resume=<sessionId>) = claude stop, ждём свободного имени, `claude --resume <сессия> --bg --agent hq
     --name zeus`, check_new_name. Простой — те же условия, что у очистки (zeus_clean_check без (1) «контекст»): не
     идёт ход, нет вопроса, всё сохранено, с конца хода ≥ ZEUS_IDLE_MIN; и защиты zeus_hold. Мёртвую «zeus» убираем
-    раньше (иначе имя занято, и новая снова стала бы «zeus (2)»). Сбой — повтор не чаще раза в ZEUS_REMIND_MIN."""
+    раньше (иначе имя занято, и новая снова стала бы «zeus (2)»); убранную вычёркиваем из seen — списка сессий прохода,
+    иначе уборка сессий (auto_rm) звала бы claude rm той же записи второй раз и тревожила бы отказом. Сбой — повтор не
+    чаще раза в ZEUS_REMIND_MIN."""
     if dry():
         return
     agents = P.agents_all() or []  # свежий список: очистка Зевса выше могла только что поднять «zeus»
@@ -2706,8 +2708,8 @@ def zeus_rename(t):
     if not tp or [m for m, _ in zeus_clean_check(a, tp)[0] if m != 1]:
         return  # ход идёт, вопрос, несохранённое, меньше 20 мин с конца хода — не трогаем
     for x in bgs:  # мёртвая «zeus» держит имя: убираем до перезапуска
-        if x.get("name") == "zeus":
-            P.rm_session(x["id"], name="zeus", why="zeus-rename")
+        if x.get("name") == "zeus" and P.rm_session(x["id"], name="zeus", why="zeus-rename") is None and seen is not None:
+            seen[:] = [s for s in seen if s.get("id") != x["id"]]  # уборка сессий ниже по проходу не зовёт rm повторно
 
     def again():
         """Под блокировкой имени, перед claude stop: те же условия по свежему claude agents."""
