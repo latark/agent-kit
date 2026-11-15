@@ -167,17 +167,43 @@ try:
     r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW)
     check("13 папка запуска со своими настройками — пропуск (окно их приняло)", r is None, r)
     r = run({"name": "themis-0100"}, cwd=LW)
-    check("13 name в папке запуска — пропуск", r is None, r)
+    check("13 name в папке запуска — отказ (вариант А владельца 15.11, metis-1225)",
+          bool(r) and "worktree-own" in r and "pantheon worktree add" in r, r)
     os.remove(f)
     r = run({"path": WT}, cwd=EC)
     check("13 настройки убраны — снова пропуск", r is None, r)
 
     r = run({"path": os.path.join(root, "projects/stray/.claude/worktrees/y")}, cwd=LW)
     check("5 вне папок направлений — отказ", bool(r) and "worktree-own" in r and "themis-repos" in r, r)
+    # вариант А владельца 15.11 (metis-1225): deny EnterWorktree снят ради path, name — отказ guard
     r = run({"name": "themis-0021"}, cwd=LW)
-    check("6 EnterWorktree с name — молчит", r is None, r)
+    check("6 EnterWorktree с name окну направления — отказ с подсказкой pantheon worktree add и path",
+          bool(r) and "worktree-own" in r and "pantheon worktree add" in r and "path" in r, r)
     r = run({"path": ""}, cwd=LW)
-    check("6 пустой path — молчит", r is None, r)
+    check("6 пустой path (Claude Code создал бы worktree сам) — отказ", bool(r) and "worktree-own" in r, r)
+    r = run({}, cwd=LW)
+    check("6 без name и path — отказ", bool(r) and "worktree-own" in r, r)
+    r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW)
+    check("6 path своей копии — пропуск", r is None, r)
+    r = run({"path": os.path.join(root, "projects/stray")}, cwd=LW)
+    check("6 path вне .claude/worktrees и вне направления — отказ", bool(r) and "worktree-own" in r, r)
+    r = run({"name": "themis-0022"}, cwd=LW, win="workshop")
+    check("6 name в мастерской (окно не из domains.json) — молчит", r is None, r)
+    r = run({"name": "themis-0023"}, cwd=LW, win="")
+    check("6 name вне окна — молчит", r is None, r)
+    src6 = open(RULES, encoding="utf-8").read()
+    old6 = """        return ("Правило worktree-own: EnterWorktree с name окну направления закрыт"""
+    check("6 самопроверка мутанта: отказ name один", src6.count(old6) == 1)
+    d6 = os.path.join(root, "hooks-mut6")
+    shutil.copytree(HOOKS, d6, ignore=shutil.ignore_patterns("__pycache__"))
+    with open(os.path.join(d6, "guard_rules.py"), "w", encoding="utf-8") as fh:
+        fh.write(src6.replace(old6, "        return None\n" + old6))
+    sp6 = importlib.util.spec_from_file_location("guard_mut6", os.path.join(d6, "guard_rules.py"))
+    m6 = importlib.util.module_from_spec(sp6)
+    sp6.loader.exec_module(m6)
+    os.environ["PANTHEON_WINDOW"] = "themis-repos"
+    check("6 мутант: без отказа name — name проходит (тест краснеет на откате)",
+          m6.check_worktree_own({"cwd": LW}, "EnterWorktree", {"name": "themis-0024"}) is None)
     r = run({"path": BA + "/.claude/worktrees/x"}, win="")
     check("7 вне окна (нет PANTHEON_WINDOW) — молчит", r is None, r)
     r = run({"path": BA + "/.claude/worktrees/x"}, win="workshop")

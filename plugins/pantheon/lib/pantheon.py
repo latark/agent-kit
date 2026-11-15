@@ -2405,7 +2405,8 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # guard (pantheon-acl) и сам `pantheon merge request` ([merge_repos] metis-pantheon); сливает только плановый проход
 PANTHEON_MERGE_OUT = ["pantheon merge request *", "pantheon merge cancel *"]
 # worktree окна направления (metis-1225, вариант Б владельца 15.11): Claude Code закрывает в песочнице запись в
-# .git/worktrees, а EnterWorktree окну закрыт (WORKTREE_TOOLS) — мимо песочницы только add и remove; репозиторий, путь
+# .git/worktrees, а EnterWorktree с name окну закрыт (guard worktree-own) — мимо песочницы только add и remove, затем
+# EnterWorktree с path (тогда коммиты в копии проходят); репозиторий, путь
 # и имена проверяет сама команда (lib/worktree.py), форму строки — guard (worktree-cmd). Мастерской нет: у неё EnterWorktree
 WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
@@ -3337,7 +3338,11 @@ PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json",
                  ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
 NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
 ADD_DIRS_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
-WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"]  # П9b: worktree окна — pantheon worktree add (metis-1225)
+# П9b после варианта А владельца 15.11 (metis-1225): EnterWorktree окну открыт — Claude Code пускает запись в
+# .git/worktrees/<id> только worktree своей сессии, и без входа окно в копии `pantheon worktree add` не закоммитит
+# (EPERM на index.lock). С name guard отказывает (worktree-own), с path — только в .claude/worktrees своего направления
+# и без настроек, расширяющих окно. ExitWorktree по-прежнему закрыт: между копиями окно ходит EnterWorktree с path
+WORKTREE_TOOLS = ["ExitWorktree"]
 IMPORTS_AGENTS = re.compile(r"^\s*@(\./)?AGENTS\.md\s*$", re.M)
 PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
 
@@ -4447,9 +4452,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
             data["permissions"]["additionalDirectories"] = list(ok)
-            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; EnterWorktree и
-            # ExitWorktree закрыты (П9b: вход в worktree чужого репозитория загрузил бы его настройки) — worktree
-            # задачи окно заводит `pantheon worktree add` (WORKTREE_OUT, metis-1225); пакет направления только сужает
+            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; ExitWorktree закрыт,
+            # EnterWorktree — только с path в свою копию (П9b, вариант А владельца 15.11: вход в чужой репозиторий
+            # загрузил бы его настройки — это держит guard worktree-own) — worktree задачи окно заводит
+            # `pantheon worktree add` (WORKTREE_OUT, metis-1225) и входит EnterWorktree с path; пакет направления только сужает
             # (window_extra_apply), мимо песочницы — только WINDOW_EXCLUDED ядра
             data["env"][ADD_DIRS_ENV] = "1"
             deny_list = data["permissions"].setdefault("deny", [])
@@ -7965,7 +7971,7 @@ def board_owner_sync(T):
                    + "; ".join(f"{tid} ({stale[tid]} ч без правки, owner {tasks[tid][1].get('owner')})"
                                for tid in sorted(stale)[:ALERT_IDS])
                    + (f" и ещё {len(stale) - ALERT_IDS}" if len(stale) > ALERT_IDS else "")
-                   + ". Работа идёт — ветка с номером задачи (pantheon worktree add <id>-…); нет — вернуть в очередь: "
+                   + ". Работа идёт — ветка с номером задачи (pantheon worktree add <id>-…, затем EnterWorktree с path); нет — вернуть в очередь: "
                    + f"pantheon task set {sorted(stale)[0]} status=todo", "board")
     else:
         clear_once("board-doing-stale")

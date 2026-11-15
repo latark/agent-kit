@@ -3,7 +3,9 @@
 `pantheon worktree add <имя> [--branch B | --detach] [--base REF]`, `pantheon worktree remove <имя> [--force]`,
 `pantheon worktree list`.
 Claude Code (2.1.325) в песочнице закрывает запись в .git/worktrees, кроме worktree своей сессии, а EnterWorktree
-окнам направлений закрыт (WORKTREE_TOOLS, П9b) — `git worktree add|remove` из Bash окна падает EPERM на полпути. Мимо
+с name окнам направлений закрыт (guard worktree-own) — `git worktree add|remove` из Bash окна падает EPERM на полпути.
+Копию заводит эта команда, а коммитить в ней окно может после EnterWorktree с path (вариант А владельца 15.11): запись в
+.git/worktrees/<id> Claude Code пускает только worktree своей сессии. Мимо
 песочницы окна идут только add и remove этой команды (WORKTREE_OUT в pantheon.py), поэтому всё, что они могут,
 ограничивает сама команда, а форму строки — guard (правило worktree-cmd, одна команда в строке):
 

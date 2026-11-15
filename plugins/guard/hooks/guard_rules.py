@@ -57,7 +57,8 @@ PostToolUse (Bash:
                  мимо песочницы (metis-0533, metis-0596);
   hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
                  (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
-  worktree-own — окну направления (PANTHEON_WINDOW из domains.json) EnterWorktree с path — только в .claude/worktrees/
+  worktree-own — окну направления (PANTHEON_WINDOW из domains.json) EnterWorktree с name закрыт (копия — `pantheon
+                 worktree add`, metis-1225), с path — только в .claude/worktrees/
                  репозитория своего направления и из него же (иначе Claude Code спрашивает владельца); чужое
                  направление — отказ с подсказкой pantheon start или задача ему; другой репозиторий — подсказка cd;
                  вне папки запуска настройки проекта с allow, hooks, sandbox, env — отказ и с name (metis-0911);
@@ -5048,18 +5049,24 @@ def check_worktree_own(event, tool, tool_input):
         return None
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     launch = _launch(doms[win])
-    if not isinstance(raw, str) or not raw:  # name: новая worktree в репозитории cwd — только сверка настроек
+    if not isinstance(raw, str) or not raw:
+        # name — новая worktree самим Claude Code, мимо проверок `pantheon worktree add`: окну направления закрыто
+        # (решение владельца 15.11, вариант А metis-1225; П9b в pantheon.py снимает deny только ради path)
         folder, owner = _owner(cwd, doms)
         repo = _git_root(cwd, folder) if owner == win else None
         found = _widening([repo]) if repo and _key(repo) != _key(launch) else []
-        return _widen_msg(repo, found) if found else None
+        if found:
+            return _widen_msg(repo, found)
+        return ("Правило worktree-own: EnterWorktree с name окну направления закрыт (metis-1225, решение владельца "
+                "15.11): копию заводит `pantheon worktree add <имя>` (из папки репозитория), затем EnterWorktree с path "
+                "`<репозиторий>/.claude/worktrees/<имя>`.")
     target = _expand(raw, cwd)
     repo, wt = _wt_repo(target)
     folder, owner = _owner(repo or target, doms)
     if owner == win and repo is None:
         return (f"Правило worktree-own: {target} — папка твоего направления, но не .claude/worktrees/<имя> репозитория "
                 f"(metis-0911). Worktree окна — только `<репозиторий>/{WORKTREES_DIR}<имя>`: `cd <репозиторий>` "
-                "отдельной командой Bash, затем EnterWorktree с name, или `pantheon worktree add <имя>` и "
+                "отдельной командой Bash, затем `pantheon worktree add <имя>` и "
                 "EnterWorktree с этим path.")
     if owner == win:
         found = _widening([repo, wt]) if _key(repo) != _key(launch) else []

@@ -574,6 +574,11 @@ answer и плановый проход, это скрипты, guard их не 
   репозитории. Иначе Claude Code задаёт владельцу вопрос «permission-root relocation»: это его проверка безопасности,
   её не снимают ни разрешения, ни additionalDirectories, ни allow хука. Поэтому папки направления — рабочие папки окна
   (`additionalDirectories` в `pantheon domains build`), и `cd` туда сохраняется.
+  - С metis-1225 (вариант А владельца 15.11) deny EnterWorktree в окне направления снят: без входа окно в копии
+    `pantheon worktree add` не закоммитит (EPERM на `.git/worktrees/<id>/index.lock` — запись туда Claude Code пускает
+    только worktree своей сессии). EnterWorktree с `name` (и без `path`) окну направления — отказ: новую worktree
+    Claude Code создал бы сам, мимо проверок команды. ExitWorktree окну по-прежнему закрыт; между копиями — EnterWorktree
+    с `path`. Порядок окна: `pantheon worktree add <имя>`, затем EnterWorktree с `path` `<репозиторий>/.claude/worktrees/<имя>`.
   - Репозиторий — путь до последнего `.claude/worktrees/<имя>`: папка направления бывает контейнером репозиториев
     (`~/projects/<проект>` не git, внутри `app` и `gpu-worker`). Он должен лежать в своей папке: самая глубокая
     папка направлений над ним — своя.
@@ -596,8 +601,9 @@ answer и плановый проход, это скрипты, guard их не 
   перенаправления, подстановки, глобы (`* ? [ ] { } ~ ^ # !`), перевод строки, путь к команде. Иначе хвост команды или
   раскрытое оболочкой ушли бы мимо песочницы вместе с `find`. Другим окнам `sessync find` мимо песочницы не выпущен.
 - **worktree-cmd (metis-1225, вариант Б владельца 15.11).** Claude Code (2.1.325) в песочнице закрывает запись в
-  `.git/worktrees`, кроме worktree своей сессии, а EnterWorktree окну направления закрыт (П9b) — `git worktree
-  add|remove` из Bash окна падает EPERM на полпути. Поэтому окну направления мимо песочницы выпущены только
+  `.git/worktrees`, кроме worktree своей сессии, а EnterWorktree с `name` окну направления закрыт (worktree-own) —
+  `git worktree add|remove` из Bash окна падает EPERM на полпути. Коммитить в копии окно может после EnterWorktree с
+  `path` (вариант А владельца 15.11). Поэтому окну направления мимо песочницы выпущены только
   `pantheon worktree add *` и `pantheon worktree remove *` (`WORKTREE_OUT` в pantheon.py); мастерской — нет, у неё
   EnterWorktree. Узко, потому что всё, что идёт мимо песочницы, ограничивает только проверка:
   - Сама команда (`lib/worktree.py` пантеона): репозиторий — тот, где стоит Bash (cwd внутри основной копии), в окне
@@ -627,6 +633,10 @@ answer и плановый проход, это скрипты, guard их не 
     `.git/config.worktree` читается только при `extensions.worktreeConfig`, а его ставят через тот же закрытый
     `.git/config`. `lfs.url` из `.lfsconfig` ветки — сетевой запрос git-lfs вне песочницы при checkout: адрес задаёт
     содержимое ветки, а не окно напрямую; граница — сетевые правила Mac (Surge), не guard.
+    Вход EnterWorktree с `path` (вариант А): в своей копии сессия пишет в её gitdir (`.git/worktrees/<id>`), то
+    есть может поправить там HEAD, index и метку `pantheon-detach`; `remove --force` тогда уберёт такую копию со всем
+    несохранённым — это копия самого окна. Настройки копии с allow, hooks, sandbox, env держит worktree-own (отказ
+    входа), а не песочница.
 - **Agent, Task и Skill при управляемых настройках.** Управляемые настройки вызывают guard только для Bash, Write,
   Edit, MultiEdit, NotebookEdit, Read, Grep, Glob и WebFetch. Поэтому эти три инструмента хук плагина проверяет и тогда,
   когда guard уже стоит в управляемых настройках. Сбой этих проверок — отказ.
