@@ -2577,7 +2577,15 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
 HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "charon", "Explore"]
-HQ_ASK_TIMEOUT = "10m"  # askUserQuestionTimeout окна Зевса (metis-1253): Claude Code берёт 60s, 5m, 10m или never
+# Письма между сессиями (SendMessage, crossSessionInbound, metis-1253; Claude Code 2.1.325): без настройки письмо
+# доходит сразу, только если класс режима разрешений у отправителя и получателя один — «bypass» (bypassPermissions
+# или plan при доступном bypass) или «prompting» (все остальные, и auto). Иначе письмо держится до одобрения в окне
+# получателя и через dialogExpiry (по умолчанию 5 мин) сбрасывается: модели не доходит, отправителю — квитанция
+# «expired». Поэтому всем окнам bypass закрыт (класс у всех один — prompting), а Зевсу срок держания снят: письмо от
+# сессии вне окон (ваш терминал в bypass) ждёт вашего одобрения, а не пропадает. crossSessionInbound не трогаем —
+# проверка класса остаётся.
+WINDOW_NO_BYPASS = "disable"   # permissions.disableBypassPermissionsMode каждого окна
+HQ_DIALOG_EXPIRY = "never"     # dialogExpiry окна Зевса: Claude Code берёт 60s, 5m, 10m или never
 # dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
 # «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor. palamedes — исполнитель без кода
 # (metis-0224): тексты, юридический разбор, синтез; веба и Bash у него нет, пишет только свой черновик.
@@ -2870,7 +2878,9 @@ def grants_check():
 def write_window(out_dir, name, data, folders=()):
     """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся.
     Разрешения grants.toml — сюда же; файлы запущенных сессий этого окна (settings/run/) обновляются: Claude Code
-    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска."""
+    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска.
+    Каждому окну bypass закрыт (metis-1253): класс режима у всех окон один, и письма между ними не держатся."""
+    data.setdefault("permissions", {})["disableBypassPermissionsMode"] = WINDOW_NO_BYPASS
     grants_apply(name, data, grants_load()[0], folders)
     size, key = sandbox_size(data), f"sandbox-size-{name}"
     if size > SANDBOX_SIZE_LIMIT:
@@ -4733,9 +4743,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
-    # metis-1253: окно вопросов Зевса без ввода 10 мин гаснет само (настройка Claude Code, по умолчанию не гаснет):
-    # ход идёт дальше, почта сессий доходит. Ответ по простою — не ответ: ctx.py answer его в owner-log не пишет
-    hq["askUserQuestionTimeout"] = HQ_ASK_TIMEOUT
+    # metis-1253: письмо сессии с другим классом режима ждёт одобрения без срока, а не сбрасывается через 5 мин.
+    # Срока у окна вопросов нет (решение владельца 15.11): askUserQuestionTimeout не ставим
+    hq["dialogExpiry"] = HQ_DIALOG_EXPIRY
     if pmap:
         PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
     write_window(out_dir, "hq", hq, [root])
@@ -5111,6 +5121,28 @@ COPY_NOTE = re.compile(r"started a copy as ([0-9a-f]{8})")
 
 
 PUSH_ONE, PUSH_TOTAL, PUSH_SEP = 4000, 8000, "\n\n"  # одна передача, вся очередь (как PUSH_MAX в ctx.py), разделитель
+PUSH_AGE = 1800  # PUSH_MAX_AGE хука: старше передачу хук не отдаёт — каждой свой срок, от её записи
+# Запись очереди (metis-1253, Д2 и Д4 argus #495): «\x1e<время записи>\n<текст>». Разделитель \x1e в тексты не попадает
+# (снимается при записи), поэтому очередь делится точно, даже если одна передача — начало другой или в ней пустые
+# строки; время у каждой передачи своё, дописывание срок прежних не продлевает. Хук ctx.py push читает так же.
+PUSH_RS = "\x1e"
+
+
+def push_records(raw, mtime):
+    """Очередь push-файла → [(время записи, текст)]. Файл без записей (прежний формат, один текст) — одна передача со
+    временем файла."""
+    if not raw.startswith(PUSH_RS):
+        return [(mtime, raw.strip())] if raw.strip() else []
+    out = []
+    for rec in raw.split(PUSH_RS)[1:]:
+        head, _, body = rec.partition("\n")
+        with contextlib.suppress(ValueError):
+            out.append((float(head), body.strip()))
+    return out
+
+
+def _push_records_text(recs):
+    return "".join(f"{PUSH_RS}{t:.0f}\n{body}" for t, body in recs)
 
 
 @contextlib.contextmanager
@@ -5121,52 +5153,56 @@ def _push_lock():
         yield
 
 
-def _push_write(p, text):
+def _push_read(p):
+    try:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return push_records(fh.read(), os.path.getmtime(p))
+    except OSError:
+        return []
+
+
+def _push_write(p, recs):
+    if not recs:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(p)
+        return
     fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
+        fh.write(_push_records_text(recs))
     os.replace(p + ".tmp", p)
+
+
+def _push_entry(text):
+    return str(text)[:PUSH_ONE].replace(PUSH_RS, "").strip()
 
 
 def push_text(session_id, text):
     """Текст, который хук ctx.py push отдаст сессии при следующем старте её процесса (SessionStart + asyncRewake):
     `claude respawn` сам хода не начинает, а команды «сказать фоновой сессии» у Claude Code нет (проверено 15.10).
-    Очередь (metis-1253): передача дописывается к ещё не забранным, хук отдаёт их разом; старше 30 мин хук не отдаёт —
-    их и не держим. Вся очередь длиннее PUSH_TOTAL — None: передача не записана, вызывающий повторит или пойдёт
-    запасным путём, а прежние не затираются. → путь очереди или None."""
+    Очередь (metis-1253): передача дописывается к ещё не забранным, хук отдаёт их разом; у каждой свой срок PUSH_AGE от
+    её записи, просроченные снимаются. Вся очередь (тексты через PUSH_SEP) длиннее PUSH_TOTAL — None: передача не
+    записана, вызывающий повторит её следующим проходом, а прежние не затираются. → путь очереди или None."""
     if not re.fullmatch(r"[0-9a-f-]{8,64}", str(session_id or "")) or not str(text).startswith(START_MARK):
         return None
     os.makedirs(path("push"), mode=0o700, exist_ok=True)
-    p, entry = path("push", session_id + ".txt"), str(text)[:PUSH_ONE].strip()
+    p, entry, now = path("push", session_id + ".txt"), _push_entry(text), time.time()
     with _push_lock():
-        old = ""
-        with contextlib.suppress(OSError):
-            if time.time() - os.path.getmtime(p) <= 1800:  # PUSH_MAX_AGE хука
-                with open(p, encoding="utf-8", errors="replace") as fh:
-                    old = fh.read().strip()
-        new = old + PUSH_SEP + entry if old else entry
-        if len(new) > PUSH_TOTAL:
+        recs = [r for r in _push_read(p) if now - r[0] <= PUSH_AGE] + [(now, entry)]
+        if len(PUSH_SEP.join(b for _, b in recs)) > PUSH_TOTAL:
             return None
-        _push_write(p, new)
+        _push_write(p, recs)
     return p
 
 
 def push_drop(p, text):
-    """Снять свою передачу из очереди p (respawn не вышел — текст уйдёт запасным путём или повтором), чужие остаются.
-    Хук уже забрал очередь — снимать нечего."""
-    entry = str(text)[:PUSH_ONE].strip()
+    """Снять свою передачу из очереди p (respawn не вышел — текст уйдёт запасным путём или повтором), чужие остаются:
+    снимается последняя передача с тем же текстом целиком. Хук уже забрал очередь — снимать нечего."""
+    entry = _push_entry(text)
     with contextlib.suppress(OSError), _push_lock():  # сбой замка — как прежний os.remove без файла
-        try:
-            with open(p, encoding="utf-8", errors="replace") as fh:
-                cur = fh.read().strip()
-        except OSError:
-            return
-        if cur == entry:
-            os.remove(p)
-            return
-        for part in (PUSH_SEP + entry, entry + PUSH_SEP):
-            if part in cur:
-                _push_write(p, cur.replace(part, "", 1))
+        recs = _push_read(p)
+        for i in range(len(recs) - 1, -1, -1):
+            if recs[i][1] == entry:
+                _push_write(p, recs[:i] + recs[i + 1:])
                 return
 
 
@@ -5240,6 +5276,14 @@ def _resume_session(name, a, text, origin):
     if not str(text).startswith(START_MARK):
         text = f"{START_MARK} поручение от {origin}] {text}"
     pushed = push_text(sid, text) if a.get("id") else None
+    if a.get("id") and not pushed and str(sid or "") and os.path.exists(path("push", f"{sid}.txt")):
+        # metis-1253 (Д3 argus #495): очередь полна — --resume по сессии, которую Claude Code ещё числит, сделал бы
+        # копию, а текст пропал бы. Пропуск: следующий проход повторит, когда хук заберёт очередь
+        start_log(f"resume-skip\t{name}\t{a['id']}\t{origin}\tочередь передач полна")
+        alert_once("push-full-" + name, sid, f"{name}: очередь передач сессии {a['id']} полна (до {PUSH_TOTAL} знаков) — "
+                   "не бужу, повтор следующим проходом, когда сессия заберёт очередь", "pantheon")
+        return skipped("очередь передач полна — повтор следующим проходом"), None
+    clear_once("push-full-" + name)
     if pushed:  # без текста respawn поднял бы сессию молча — тогда сразу запасной путь, он текст передаёт
         r = subprocess.run([claude_bin(), "respawn", a["id"]], env=claude_env(), capture_output=True, text=True, timeout=180)
         start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")

@@ -41,7 +41,7 @@ def test_argus_wake_rules():
     check(r.returncode == 0 and "пропуск: q-dir — пауза по нагрузке" in r.stdout and "поднимаю" not in r.stdout, f"wake под паузой: {r.stdout} {r.stderr}")
     e.run("pause", "--off", "--all", t=T0 + 80)
     r = e.run("wake", "q-dir", "сделай", "X", t=T0 + 90)
-    pushed = open(e.st("push", "abcdef01-1.txt")).read()
+    pushed = push_read(e.st("push", "abcdef01-1.txt"))
     check(pushed.startswith("[Пантеон: задание от владелец] сделай X"), f"текст задания без пометки: {pushed}")
     # не главный Mac
     e2 = Env()

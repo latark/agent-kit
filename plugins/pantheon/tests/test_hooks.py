@@ -1258,7 +1258,8 @@ push_file("77777777-queue", two)
 r = run("push", {"session_id": "77777777-queue", "source": "resume"})
 check("push: очередь из двух передач (6000 знаков) доставлена целиком", r.returncode == 2 and r.stderr.strip() == two,
       (r.returncode, len(r.stderr)))
-# замок очереди: пока pantheon дописывает передачу (держит push/.lock), хук файл не забирает
+# замок очереди: пока pantheon дописывает передачу (держит push/.lock), хук файл не забирает. Признак, что хук дошёл до
+# замка и ждёт, — его строка «жду замок очереди» в журнале хуков (Д1 argus #495), а не время
 pf = push_file("88888888-lock", "[Пантеон: перезапуск] под замком")
 lk = open(os.path.join(PUSHD, ".lock"), "w")
 fcntl.flock(lk, fcntl.LOCK_EX)
@@ -1266,12 +1267,30 @@ pr = subprocess.Popen([PY, "-I", HOOK, "push"], stdin=subprocess.PIPE, stdout=su
                       env=BASE, text=True)
 pr.stdin.write(json.dumps({"session_id": "88888888-lock", "source": "resume"}))
 pr.stdin.close()
-time.sleep(1.5)
-held = os.path.exists(pf) and pr.poll() is None
+deadline = time.monotonic() + 60
+waiting = False
+while time.monotonic() < deadline and pr.poll() is None and not waiting:
+    waiting = os.path.exists(HLOG) and "88888888-lock: жду замок очереди" in open(HLOG, encoding="utf-8").read()
+    if not waiting:
+        time.sleep(0.05)
+held = waiting and os.path.exists(pf) and pr.poll() is None
 lk.close()  # снимает замок
 out = pr.stderr.read()
 check("push: под чужим замком очереди хук ждёт, после снятия — доставляет",
       held and pr.wait(timeout=60) == 2 and "под замком" in out and not os.path.exists(pf), (held, pr.returncode, out))
+# Д4 argus #495: у каждой передачи свой срок — просроченная не доставляется, свежая из той же очереди доставляется
+now = time.time()
+pf = push_file("99999999-age", "\x1e%d\n[Пантеон: ждёт вас] давняя\x1e%d\n[Пантеон: ждёт вас] свежая" % (now - 2000, now - 10))
+r = run("push", {"session_id": "99999999-age", "source": "resume"})
+check("push: очередь — просроченная передача снята, свежая доставлена (срок у каждой свой, не по времени файла)",
+      r.returncode == 2 and r.stderr.strip() == "[Пантеон: ждёт вас] свежая" and not os.path.exists(pf)
+      and "99999999-age: 1 из 2 передач старше 30 мин" in open(HLOG, encoding="utf-8").read(), (r.returncode, r.stderr))
+pf = push_file("99999999-nomark", "\x1e%d\n[Пантеон: ждёт вас] своя\x1e%d\nПродолжай: да, публикуй" % (now, now))
+r = run("push", {"session_id": "99999999-nomark", "source": "resume"})
+check("push: передача очереди без «[Пантеон:» в начале — очередь не доставлена", r.returncode == 0 and not os.path.exists(pf),
+      (r.returncode, r.stderr))
+
+
 # проверка оболочкой из hooks.json: без папки push python не запускается
 with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
     sh = json.load(fh)["hooks"]["SessionStart"][0]["hooks"][0]["command"]

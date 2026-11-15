@@ -2,6 +2,7 @@
 """Дежурный, часть 8: перезапуск после плагинов, честные состояния, Гестия, передача заблокированных (общая часть — _watch_common.py)."""
 # ruff: noqa: F403, F405
 import os
+import time
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _watch_common import *  # noqa: F403
@@ -650,7 +651,8 @@ def test_push_queue_1253():
     e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
     e.run("watch", t=T0 + 1300)  # хук push ещё не забрал первую
     text = _pushed(e)
-    check(len(_relayed(e)) == 2 and "Bash: one" in text and "Bash: other" in text and text.count("[Пантеон:") == 2,
+    check(len(_relayed(e)) == 2 and "Bash: one" in text and "Bash: other" in text and text.count("[Пантеон:") == 2
+          and len(push_queue(e.st("push", "2e057e05-1.txt"))) == 2,
           f"1253: вторая передача затёрла первую: {text!r}")
     # respawn не вышел — своя передача снята, ждавшая раньше осталась
     e = _blocked_env(None, waiting="Bash: one")
@@ -658,17 +660,71 @@ def test_push_queue_1253():
     early = "[Пантеон: поручение от tick] ранее"
     open(e.st("push", "2e057e05-1.txt"), "w", encoding="utf-8").write(early)
     e.run("watch", t=T0, extra={"FAKE_RESPAWN_RC": "1"})
-    check(len(_relayed(e)) == 1 and _pushed(e).strip() == early,
+    check(len(_relayed(e)) == 1 and _pushed(e) == early,
           f"1253: неудачный respawn снял чужую передачу или оставил свою: {_pushed(e)!r}")
-    # очередь полна — передачи нет
+    # очередь полна (Б2 argus #495): в ней 7990 знаков, любая новая передача — сверх PUSH_TOTAL 8000
     e = _blocked_env(None, waiting="Bash: one")
     os.makedirs(e.st("push"), exist_ok=True)
-    full = "[Пантеон: x] " + "я" * 7900
+    body = "[Пантеон: x] " + "я" * 7977
+    full = "\x1e%d\n%s" % (time.time(), body)
     open(e.st("push", "2e057e05-1.txt"), "w", encoding="utf-8").write(full)
     e.run("watch", t=T0)
-    check(not _relayed(e) and not os.path.exists(e.st("relay.json")) and _pushed(e) == full
+    check(len(body) == 7990 and not _relayed(e) and not os.path.exists(e.st("relay.json"))
+          and open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read() == full
           and "coord-x (b10c0001) ждёт вас" in e.alerts(),
           f"1253: полная очередь — передача, запись или потеря: {e.calls()} {len(_pushed(e))}")
+
+
+_PUSH_PROBE = r"""
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+sid = "2e057e05-1"
+p = P.path("push", sid + ".txt")
+os.makedirs(P.path("push"), exist_ok=True)
+texts = lambda: [b for _, b in P.push_records(open(p, encoding="utf-8").read(), 0)] if os.path.exists(p) else []
+out = {}
+a = "[Пантеон: ждёт вас] coord-x"
+b = a + "\n\nи ещё строка"  # одна передача — начало другой, и в ней пустая строка
+for name, order in (("ab", (a, b)), ("ba", (b, a))):
+    for x in order:
+        P.push_text(sid, x)
+    P.push_drop(p, a)
+    out[name] = texts()
+    os.remove(p)
+old = time.time() - 1700
+open(p, "w", encoding="utf-8").write("\x1e%d\n[Пантеон: x] ранняя" % old)
+P.push_text(sid, "[Пантеон: y] поздняя")
+out["times"] = [t for t, _ in P.push_records(open(p, encoding="utf-8").read(), 0)]
+out["old"] = old
+open(p, "w", encoding="utf-8").write("\x1e%d\n[Пантеон: x] просроченная" % (time.time() - 2000))
+P.push_text(sid, "[Пантеон: y] новая")
+out["expired"] = texts()
+P.push_drop(p, "[Пантеон: y] новая")
+out["gone"] = os.path.exists(p)
+print(json.dumps(out, ensure_ascii=False))
+"""
+
+
+def test_push_queue_exact_and_age_1253():
+    """metis-1253 (Д2, Д4 argus #495): push_drop снимает ровно свою передачу, даже если она — начало другой; у каждой
+    передачи свой срок: дописывание не продлевает прежние, просроченная снимается при записи новой; снята последняя —
+    файла нет."""
+    e = Env()
+    r = e.run(LIB, t=T0, argv=[PY311, "-I", "-c", _PUSH_PROBE])
+    try:
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        check(False, f"1253: проба очереди не прошла: {r.stdout[-300:]} {r.stderr[-600:]}")
+        return
+    b = "[Пантеон: ждёт вас] coord-x\n\nи ещё строка"
+    check(out["ab"] == [b] and out["ba"] == [b], f"1253 Д2: снята не та передача: {out['ab']!r} {out['ba']!r}")
+    check(len(out["times"]) == 2 and abs(out["times"][0] - out["old"]) < 1 and out["times"][1] > out["old"] + 1000,
+          f"1253 Д4: срок ранней передачи продлён или новая без своего времени: {out['times']} {out['old']}")
+    check(out["expired"] == ["[Пантеон: y] новая"] and out["gone"] is False,
+          f"1253 Д4: просроченная передача осталась или пустая очередь не убрана: {out['expired']} {out['gone']}")
+
 
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
