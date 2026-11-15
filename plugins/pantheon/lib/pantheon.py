@@ -8067,11 +8067,11 @@ def boardmerged_mod():
     return m
 
 
-def board_merged_open(T, t):
-    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768).
-    Сбой — пусто: сводка важнее."""
+def board_merged_open(T, t, fn="merged_open"):
+    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768);
+    fn="merged_stuck" — висящие дольше 3 суток, для хвоста «сверка» check (metis-1255). Сбой — пусто: сводка важнее."""
     try:
-        return boardmerged_mod().merged_open(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+        return getattr(boardmerged_mod(), fn)(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
                                              t, T, autoclose_mod(), autoclose_repo_dirs(),
                                              autoclose_mod().open_pr_tasks(path("autoclose.json")) or ())
     except Exception:  # noqa: BLE001
@@ -8916,6 +8916,8 @@ def check(paths=None, quiet=False):
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                     for i, ln in T.part_stalled(tasks_now, now())]
+                 # metis-1255: PR слит, задача висит дольше 3 суток — одна тревога на задачу и PR, со списком пунктов
+                 + [("сверка", k, w) for _, k, w in board_merged_open(T, now(), "merged_stuck")]
                  # metis-0615: «часть» без неотмеченных пунктов — остаток не записан; сразу, не через сутки
                  + [("часть-пусто", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
                      f"{i}: «{ln[:140]}»") for i, ln in T.part_no_items(tasks_now)]
@@ -9062,6 +9064,8 @@ TAIL_TEXT = {"хвост": "хвост в журнале без задачи (н
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
              "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)",
+             "сверка": "PR слит больше 3 суток назад, задача не закрыта (пункты сверяет argus: pantheon review accept "
+                       "--criteria; живая проба — её итог в журнал; остаток — pantheon task split)",
              "время": "строка журнала задачи позже часов системы — дописана руками, время на глаз (записи — через "
                       "pantheon task set --note, время ставит код)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
@@ -9070,7 +9074,8 @@ TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review 
                                      "часть-пусто": "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет (вписать "
                                                     "пункт остатка или закрыть задачу)"})
 TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
-             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан",
+             "сверка": "PR слит, задача висит"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
 
 
 def tails_by_task(items):
@@ -9095,7 +9100,8 @@ def tails_board(items):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток, "
+            "задача не закрыта дольше 3 суток после слияния PR. Погасить — строка "
             "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
             + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
@@ -9128,8 +9134,9 @@ def tail_alert(T, items):
         if shown:
             more = len(fresh) - len(shown)
             alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
-                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
-                  "(pantheon task new, ссылка на файл или id в тексте)", "check")
+                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''}"
+                  + ("" if kind == "сверка" else " — завести задачу (pantheon task new, ссылка на файл или id в тексте)"),
+                  "check")
         shown_all.update(k for k, _ in shown)
         # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
         keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})

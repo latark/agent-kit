@@ -7,8 +7,13 @@
 Номера (metis-1193) — чтобы по строке сводки было видно, какие пункты ждут приёмки argus: на PR другой задачи с
 «пункт N <id>» в теле (autoclose.tick_named) или отметки при закрытии задачи.
 
+merged_stuck (metis-1255) — те же задачи, висящие дольше STUCK_DAYS суток, для тревоги pantheon check (хвост «сверка»):
+сводка board-auto.md показывает только 5 строк и не будит, а такая задача неделями ждёт пунктов «Готово, когда».
+
 Модули tasks (T) и autoclose (A) передаёт вызывающий: файл сам их не грузит.
 """
+import re
+
 DAY = 86400
 MIN_DAYS = 1  # слит минимум столько полных суток назад — иначе тик autoclose ещё сам закроет
 
@@ -54,3 +59,30 @@ def merged_open(tasks, cache, t, T, A, repo_dirs=None, open_ids=()):
             out.append((tid, pr["number"], days, head["status"], T.unchecked_criteria(head, body),
                         tuple(T.unchecked_numbers(head, body))))
     return sorted(out, key=lambda r: (-r[2], r[0]))
+
+
+STUCK_DAYS = 3  # metis-1255: задача висит после слияния столько суток — тревога (хвост «сверка»)
+NOTE_RE = re.compile(r"PR #(\d+) \([^)]*\) слит, неотмечено \d+")  # строка autoclose.close_pr при неотмеченных пунктах
+ITEM_TEXT = 60
+
+
+def merged_stuck(tasks, cache, t, T, A, repo_dirs=None, open_ids=(), days=STUCK_DAYS):
+    """Задачи, которые после слияния их PR висят дольше days суток (metis-1255) → [(id, ключ, «<id>: текст»)] для хвоста
+    «сверка» pantheon check: тревога один раз на ключ «<id>:#<PR>». Источники: строки merged_open (кэш fetch, Closes и PR
+    из журнала) и строка autoclose «PR #N (…) слит, неотмечено K» в журнале задачи review — она переживает выход PR из
+    кэша (в нём последние 100 слитых). Текст называет неотмеченные пункты: что сверить argus или проверить вживую."""
+    rows = {r[0]: (r[1], r[2]) for r in merged_open(tasks, cache, t, T, A, repo_dirs, open_ids) if r[2] >= days}
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if tid in rows or tid in open_ids or head.get("type") != "task" or head.get("status") != "review":
+            continue
+        notes = [(x[0], int(m.group(1))) for x in T._journal(body) if x[0] is not None and (m := NOTE_RE.search(x[2]))]
+        if notes and T.unchecked_numbers(head, body) and t - notes[-1][0] >= days * DAY:
+            rows[tid] = (notes[-1][1], int((t - notes[-1][0]) // DAY))
+    out = []
+    for tid, (n, d) in sorted(rows.items()):
+        head, body = tasks[tid][1], tasks[tid][2]
+        crit = T.done_criteria(body)
+        items = [f"п.{i} «{' '.join(crit[i - 1][1].split())[:ITEM_TEXT]}»" for i in T.unchecked_numbers(head, body)]
+        what = (f"неотмечено {len(items)}: " + ", ".join(items)) if items else "неотмеченных пунктов нет — закрыть или записать остаток"
+        out.append((tid, f"{tid}:#{n}", f"{tid}: PR #{n} слит {d} сут назад, задача {head.get('status')}, {what}"))
+    return out

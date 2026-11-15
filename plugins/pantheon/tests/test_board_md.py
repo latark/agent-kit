@@ -117,6 +117,40 @@ check("0768. старая задача (до CRITERIA_FROM) → неотмече
       mo([task("metis-0200", "doing", created="2026-10-01")], cache(pr(123, two_days)))[0][4] == 0)
 check("0768. кэша нет или он не объект → пусто", mo([task("metis-0330", "doing")], None) == []
       and mo([task("metis-0330", "doing")], {"merged": "x"}) == [])
+# --- 1255: merged_stuck — задача висит после слияния дольше 3 суток → хвост «сверка» с пунктами ---------------------
+def ms(tasks, cch, t=NOW, **kw):
+    return MR.merged_stuck(dict(tasks), cch, t, T, A, **kw)
+
+
+three = ago(3 * 86400 + 3600)
+r = ms([task("metis-0330", "review", created="2026-10-30")], cache(pr(123, three)))
+check("1255. кэш: PR слит 3 сут назад, review → (id, ключ id:#PR, текст с неотмеченными пунктами и их текстом)",
+      r == [("metis-0330", "metis-0330:#123",
+             "metis-0330: PR #123 слит 3 сут назад, задача review, неотмечено 2: п.1 «один», п.2 «два»")], r)
+check("1255. кэш: слит 2 сут назад — ещё не тревога (порог 3 сут), в merged_open строка есть",
+      ms([task("metis-0330", "review")], cache(pr(123, two_days))) == []
+      and len(mo([task("metis-0330", "review")], cache(pr(123, two_days)))) == 1)
+check("1255. кэш: открытый PR задачи, done, «часть» → нет",
+      ms([task("metis-0330", "review")], cache(pr(123, three)), open_ids={"metis-0330"}) == []
+      and ms([task("metis-0330", "done")], cache(pr(123, three))) == []
+      and ms([task("metis-0330", "review")], cache(pr(123, three, "часть metis-0330"))) == [])
+r = ms([task("metis-0200", "doing", created="2026-10-01")], cache(pr(123, three)))
+check("1255. старая задача без счёта пунктов — тоже тревога: «неотмеченных пунктов нет — закрыть или записать остаток»",
+      len(r) == 1 and r[0][2].endswith("задача doing, неотмеченных пунктов нет — закрыть или записать остаток"), r)
+NOTE_BODY = ("# x\n\n## Готово, когда\n\n- [x] один\n- [ ] живая проба после выпуска\n\n## Журнал\n\n"
+             "- 2026-10-31 10:00 — плановый проход: PR #422 (latark/agent-kit) слит, неотмечено 1 (пункты 2)\n")
+r = ms([task("metis-0331", "review", NOTE_BODY)], cache())
+check("1255. журнал: строка autoclose «слит, неотмечено» старше 3 сут, PR уже не в кэше → тревога по PR из строки",
+      r == [("metis-0331", "metis-0331:#422",
+             "metis-0331: PR #422 слит 3 сут назад, задача review, неотмечено 1: п.2 «живая проба после выпуска»")], r)
+check("1255. журнал: строка моложе 3 сут, задача не review, все пункты отмечены, открытый PR → нет",
+      ms([task("metis-0331", "review", NOTE_BODY)], cache(), t=ts("2026-11-03 09:00")) == []
+      and ms([task("metis-0331", "doing", NOTE_BODY)], cache()) == []
+      and ms([task("metis-0331", "review", NOTE_BODY.replace("- [ ] живая", "- [x] живая"))], cache()) == []
+      and ms([task("metis-0331", "review", NOTE_BODY)], cache(), open_ids={"metis-0331"}) == [])
+r = ms([task("metis-0332", "review", "# x\n\n## Готово, когда\n\n- [ ] " + "а" * 80 + "\n\n## Журнал\n\n")], cache(pr(7, three, "Closes metis-0332")))
+check("1255. текст пункта режется до ITEM_TEXT знаков; связь по Closes", r and "«" + "а" * MR.ITEM_TEXT + "»" in r[0][2], r)
+
 rows = [(f"metis-{i:04d}", 100 + i, 3 - (i % 2), "doing", 1) for i in range(1, 8)]
 txt = "\n".join(B.lines({"week": 1, "merged_open": rows}))
 check("0768. строка блока board-auto: «metis-XXXX: PR #N слит D дн. назад, задача doing, неотмечено K»; не больше 5 + «и ещё»",

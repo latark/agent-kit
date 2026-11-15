@@ -86,6 +86,32 @@ def lines_with(home, word):
 SUMMARY = "хвосты: слежение начато"
 
 
+def merged_stuck_e2e():
+    """metis-1255: PR слит с Closes, пункты не отмечены, задача висит в review — через 3 суток одна тревога «сверка»."""
+    tmp6, home6, state6, env6 = make()
+    t6 = datetime(2026, 11, 3, 12, 0).timestamp()
+    new(env6, "задача", t=t6)
+    run(env6, "check", "--quiet", t=t6 + 10)  # первый проход: слежение начато
+    p6 = os.path.join(home6, "directions", "metis-pantheon", "tasks", "metis-0001.md")
+    put(p6, read(p6).replace("status: todo", "status: review")
+        .replace(T.DONE_WHEN_HINT, "тест краснеет на откате\n- [ ] живая проба после выпуска").rstrip("\n")
+        + "\n- 2026-11-03 13:00 — плановый проход: PR #422 (latark/agent-kit) слит, неотмечено 2 (пункты 1, 2)\n", age_h=0)
+    run(env6, "check", "--quiet", t=t6 + 2 * 86400)
+    check("1255: висит 2 сут после слияния — тревоги «сверка» нет", not lines_with(home6, "PR слит больше 3 суток"),
+          alerts_of(home6))
+    run(env6, "check", "--quiet", t=t6 + 3 * 86400 + 7200)
+    got6 = lines_with(home6, "PR слит больше 3 суток")
+    check("1255: висит 3 сут — одна тревога с id, PR и текстом неотмеченных пунктов, без «завести задачу»",
+          len(got6) == 1 and "metis-0001: PR #422 слит 3 сут назад, задача review, неотмечено 2: п.1 «тест краснеет на "
+          "откате», п.2 «живая проба после выпуска»" in got6[0] and "завести задачу" not in got6[0], alerts_of(home6))
+    run(env6, "check", "--quiet", t=t6 + 4 * 86400)
+    bp6 = os.path.join(tmp6, "view", "Доска", "Хвосты.md")
+    check("1255: следующий проход тревогу не повторяет; хвост — в STATE/tails.json карточки",
+          len(lines_with(home6, "PR слит больше 3 суток")) == 1
+          and "PR слит, задача висит" in str(json.loads(read(os.path.join(state6, "tails.json"))).get("metis-0001")),
+          alerts_of(home6) + (read(bp6) if os.path.exists(bp6) else ""))
+
+
 def main():
     tmp, home, state, env = make()
     inbox = os.path.join(tmp, "ai", "knowledge", "inbox")
@@ -378,4 +404,5 @@ def main():
 
 
 if __name__ == "__main__":
+    merged_stuck_e2e()  # до main: main печатает итог по results и выходит
     main()

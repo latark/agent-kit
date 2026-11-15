@@ -933,7 +933,9 @@ def test_close_criteria():
         log, errs = run_cache(home, state, T0, {"latark/agent-kit": prs})
         ha = T.read(pa)[0]
         check("0421: PR без «часть», 1 из 2 пунктов → review, не done", ha.get("status") == "review" and not ha.get("closed"), str(ha))
-        check("0421: в журнале «слит, неотмечено 1»", "слит, неотмечено 1" in text(pa), text(pa)[-300:])
+        check("0421: в журнале «слит, неотмечено 1»; 1255: next — какие пункты сверить и как (argus, task split)",
+              "слит, неотмечено 1" in text(pa) and str(ha.get("next") or "").startswith("сверить пункты 2 «Готово, когда»")
+              and "--criteria" in str(ha.get("next")) and "task split" in str(ha.get("next")), text(pa)[-300:] + str(ha))
         check("задача от 26.10 закрывается как раньше", T.read(pb)[0].get("status") == "done", str(log))
         check("все пункты отмечены → done", T.read(pc)[0].get("status") == "done")
         check("«часть» остаётся как есть", T.read(pd)[0].get("status") == "doing" and "в теле «часть»" in text(pd))
