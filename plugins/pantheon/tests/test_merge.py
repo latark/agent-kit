@@ -351,6 +351,24 @@ def test_gate_decision_hint():
           and "не досчитана (срок хука" in b.alerts() and "старше 8" not in b.alerts(), b.alerts())
     b = box(held, {"same": [SHA2]})
     check("1181: код сверен (тот же) — подсказки «повтори заявку» нет", again not in b.alerts(), b.alerts())
+    # metis-1249 (BA #72): новой вершины base в клоне не было — после git fetch повтор заявки её снимет
+    b = box(held, {"why": ["коммита base PR (16151f3ae73d) нет в git папки — сделай git fetch"]})
+    check("1249: в клоне нет коммита base — «не досчитана», git fetch и «повтори заявку», в силе", not b.merges()
+          and "не досчитана (коммита base PR" in b.alerts() and "git fetch" in b.alerts() and again in b.alerts(),
+          b.alerts())
+    # metis-1249: решение записано на прошлой вершине base (в base слили PR) — повтор заявки, а не новый argus
+    b = Box()
+    b.request()
+    b.records = []
+    b.add("tests", who="")
+    for kind, sha, sid in held:
+        b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+    b.decide(differs=[SHA2])
+    open(os.path.join(b.rec, "gh-tip"), "w").write("c" * 40)
+    b.run()
+    check("1249: решение на прошлой вершине base — «вершине main bbbb…, ветка уже на cccc…» и «повтори заявку»",
+          not b.merges() and "записана на вершине main " + "b" * 12 in b.alerts() and "c" * 12 in b.alerts()
+          and again in b.alerts(), b.alerts())
     b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2")])
     check("1181: «принять» не перенесено без решения — «сверка не записана, повтори заявку»",
           "не перенесено: сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(),
