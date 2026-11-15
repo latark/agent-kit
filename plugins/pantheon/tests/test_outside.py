@@ -180,8 +180,9 @@ c = calls()[before:]
 check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
       len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
 env = c[0]["env"] if c else {}
-check("окружение с нуля: нет GH_TOKEN, есть CI=1 и свой TMPDIR",
-      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT)
+check("окружение с нуля: нет GH_TOKEN, есть CI=1, HEAVY_LOCAL_TESTS=1 (metis-1174) и свой TMPDIR",
+      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("HEAVY_LOCAL_TESTS") == "1"
+      and env.get("TMPDIR", "").startswith(_ROOT)
       and env.get("HOME") == os.path.realpath(HOME), sorted(env))
 
 # красные тесты: записи нет, хвост журнала в итоге
@@ -608,6 +609,31 @@ res = O.load_result(q, rid) or {}
 check("--sha: копия на этом коммите, HEAD папки не тронут", res.get("state") == "serving" and res.get("sha") == C1
       and git(work_of(rid), "rev-parse", "HEAD") == C1 and git(APP, "rev-parse", "HEAD") == HEAD, res)
 kill_all_servers()
+# 30.10 (metis-0614): две заявки из двух worktree talos одного клона на разных коммитах свелись в одну, сервер встал
+# не из папки PR #38. Обе в одном круге прохода — два сервера, каждый на коммите своей папки; «стоп» одного второй не гасит
+_wa, _wb = (os.path.join(APP, ".claude", "worktrees", n) for n in ("pair-a", "pair-b"))
+git(APP, "worktree", "add", "-q", "--detach", _wa, C1)
+git(APP, "worktree", "add", "-q", "--detach", _wb, HEAD)
+_pre = len(calls())
+qa, ra = new_request("athena-x", _wa, "serve", "--minutes", "5")
+qb, rb = new_request("athena-x", _wb, "serve", "--minutes", "5")
+serve_pass()
+resa, resb = O.load_result(qa, ra) or {}, O.load_result(qb, rb) or {}
+_srv_cwd = [x["cwd"] for x in calls()[_pre:] if x["cmd"] != ["npm", "ci"]]
+check("две заявки из двух worktree в одном круге: два сервера, у каждого свой коммит, своя папка и свой порт",
+      resa.get("state") == resb.get("state") == "serving" and resa.get("port") != resb.get("port")
+      and resa.get("sha") == C1 and resb.get("sha") == HEAD and C1 != HEAD
+      and resa.get("src") == os.path.realpath(_wa) and resb.get("src") == os.path.realpath(_wb)
+      and git(work_of(ra), "rev-parse", "HEAD") == C1 and git(work_of(rb), "rev-parse", "HEAD") == HEAD
+      and sorted(_srv_cwd) == sorted([work_of(ra), work_of(rb)]), (resa, resb, _srv_cwd))
+rc, out = say("athena-x", "stop", ra, "--wait", "0")
+serve_pass()
+check("стоп одной из двух: погашена только она, вторая отвечает",
+      state(qa, ra) == "stopped" and not port_open(resa.get("port") or 0) and ra not in O.servers()
+      and state(qb, rb) == "serving" and port_open(resb.get("port") or 0) and rb in O.servers(), (rc, out, O.servers()))
+kill_all_servers()
+for _w in (_wa, _wb):
+    git(APP, "worktree", "remove", "--force", _w)
 rc, q, rid = role_request("athena-x", APP, "serve", "--sha", "deadbeef1")
 serve_pass()
 res = O.load_result(q, rid) or {}
@@ -1508,6 +1534,81 @@ check("сбой до копии (handle): обе заявки круга — fai
       _raised is None and _ra.get("state") == _rb.get("state") == "failed"
       and "сбой прохода: OSError" in _ra.get("why", "") and "сбой прохода" in _rb.get("why", "")
       and any(json.loads(x).get("kind") == "serve-error" for x in open(_log)), (_raised, _ra, _rb))
+
+# --- папку заявок не прочесть (metis-1186): OSError из listdir не роняет круг до уборки брошенных «стопов» и копий ---
+new_request("athena-x", APP, "serve")
+_real_listdir, _real_orph = os.listdir, (O.drop_orphan_stops, O.drop_orphan_work)
+_fd_calls, _orph = [], []
+
+
+def _listdir_boom(path="."):
+    if isinstance(path, int):   # папки заявок читаются по дескриптору (_open_dir)
+        _fd_calls.append(path)
+        raise PermissionError("нет доступа")
+    return _real_listdir(path)
+
+
+O.drop_orphan_stops = lambda *a, **k: _orph.append("stops")
+O.drop_orphan_work = lambda *a, **k: _orph.append("work")
+os.listdir = _listdir_boom
+try:
+    _raised = None
+    try:
+        O.serve_round()
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+    O.drop_orphan_stops, O.drop_orphan_work = _real_orph
+check("listdir папки заявок упал: serve_round без OSError и доходит до drop_orphan_stops и drop_orphan_work",
+      _raised is None and _fd_calls and _orph == ["stops", "work"], (_raised, _fd_calls, _orph))
+kill_all_servers()
+serve_pass()   # заявка, оставшаяся лежать, исполняется следующим кругом
+
+# stop_requests тоже читает папки заявок: сбой listdir не роняет настоящие drop_orphan_stops и pending_serve (metis-1186)
+_fd_calls2 = []
+
+
+def _listdir_boom2(path="."):
+    if isinstance(path, int):
+        _fd_calls2.append(path)
+        raise PermissionError("нет доступа")
+    return _real_listdir(path)
+
+
+os.listdir = _listdir_boom2
+try:
+    _raised, _n, _pend = None, None, None
+    try:
+        _n, _pend = O.drop_orphan_stops(), O.pending_serve()
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+check("listdir папки заявок упал: drop_orphan_stops и pending_serve без OSError",
+      _raised is None and _n == 0 and _fd_calls2, (_raised, _n, _pend, _fd_calls2))
+
+# тик и уборка: сбой listdir (папки заявок и runs/) не роняет pending, pending_test, recover_results (metis-1186)
+_all_calls = []
+
+
+def _listdir_boom3(path="."):
+    _all_calls.append(path)
+    raise PermissionError("нет доступа")
+
+
+os.listdir = _listdir_boom3
+try:
+    _raised, _res3 = None, None
+    try:
+        _res3 = (O.pending(), O.pending_test(), O._stale(), O._zombies(), O._zombies(lane="quick"), O._watch_due(),
+                 O.recover_results())
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+check("listdir упал везде: pending, pending_test, _stale, _zombies, _watch_due, recover_results без OSError",
+      _raised is None and _all_calls and not _res3[2] and not _res3[3] and not _res3[5], (_raised, _res3, _all_calls))
 
 # --- брошенные копии (Д1 argus #232): копия без сервера старше WORK_ORPHAN_AGE снимается в конце круга -------------
 kill_all_servers()

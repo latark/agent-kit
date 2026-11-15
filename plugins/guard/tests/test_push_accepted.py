@@ -380,7 +380,66 @@ def t_base_merge(h):
     tm.git(s.p, "add", "debt.txt")
     tm.git(s.p, "commit", "-q", "--amend", "--no-edit")
     s.new = tm.git(s.p, "rev-parse", "HEAD")
-    passed("слияние, а base PR нет в git папки (отпечаток не посчитать): push идёт", s.push())
+    # metis-1249: отпечатки tip и new — от одной базы, вершины base у remote; baseRefOid нет в git — не помеха
+    stopped("слияние с правкой, baseRefOid нет в git, вершина base у remote есть: push остановлен", s.push())
+    tm.git(s.p, "update-ref", "-d", "refs/remotes/origin/main")
+    passed("слияние, а ни baseRefOid, ни вершины base в git папки (отпечаток не посчитать): push идёт", s.push())
+
+
+def _two_bases(h, fix=None):
+    """metis-1249 (BA #71, #64, #76): develop влит и в ветку PR, и в base (main): у вершины PR и base две merge-base,
+    а baseRefOid в gh — старая вершина base до вливания develop. new — слияние вершины base в ветку PR; fix — файлы,
+    которые в нём ещё поменяли (подмена под видом подтягивания base)."""
+    s = FilePush.__new__(FilePush)
+    s.h, s.p = h, h.j(KIT)
+    start = h.sha["agent-kit"]
+
+    def commit(branch, base, name, text, msg):
+        tm.git(s.p, "checkout", "-q", "-B", branch, base)
+        with open(os.path.join(s.p, name), "w") as fh:
+            fh.write(text)
+        tm.git(s.p, "add", name)
+        tm.git(s.p, "commit", "-q", "-m", msg)
+        return tm.git(s.p, "rev-parse", "HEAD")
+    bx = commit("tb-base", start, "base-x.txt", "x\n", "base: своя правка")
+    dev = commit("tb-dev", start, "dev.txt", "dev\n", "develop")
+    tm.git(s.p, "checkout", "-q", "tb-base")
+    tm.git(s.p, "merge", "-q", "--no-edit", "--no-ff", dev)
+    tm.git(s.p, "update-ref", "refs/remotes/origin/main", tm.git(s.p, "rev-parse", "HEAD"))
+    commit(BRANCH, bx, "pr.txt", "pr\n", "правка PR")
+    tm.git(s.p, "merge", "-q", "--no-edit", "--no-ff", dev)
+    s.tip = tm.git(s.p, "rev-parse", "HEAD")
+    tm.git(s.p, "update-ref", f"refs/remotes/origin/{BRANCH}", s.tip)
+    tm.git(s.p, "config", f"branch.{BRANCH}.remote", "origin")
+    tm.git(s.p, "config", f"branch.{BRANCH}.merge", f"refs/heads/{BRANCH}")
+    s.pr(CORE_FILES, baseRefOid=bx)
+    s.accepts(2)
+    s.merge_main()
+    if fix:
+        for name, text in fix.items():
+            with open(os.path.join(s.p, name), "w") as fh:
+                fh.write(text)
+            tm.git(s.p, "add", name)
+        tm.git(s.p, "commit", "-q", "--amend", "--no-edit")
+        s.new = tm.git(s.p, "rev-parse", "HEAD")
+    return s
+
+
+def t_two_bases(h):
+    """metis-1249: чистое подтягивание base при двух merge-base и устаревшем baseRefOid — push идёт (отпечаток от
+    живой вершины base, база диффа — слияние двух merge-base); подмена файла base или своего файла в слиянии — push
+    остановлен."""
+    s = _two_bases(h)
+    mbs = tm.git(s.p, "merge-base", "--all", "refs/remotes/origin/main", s.tip).split()
+    check("1249: у вершины PR и base две merge-base", len(mbs) == 2, mbs)
+    for who, role in ROLES:
+        passed(f"1249: две merge-base, старый baseRefOid, чистое слияние base — {who}: push идёт", s.push(role=role))
+    h.reset()
+    s = _two_bases(h, {"dev.txt": "подмена\n"})
+    stopped("1249: слияние base с подменой файла develop — push остановлен", s.push(role=None))
+    h.reset()
+    s = _two_bases(h, {"pr.txt": "pr, правка при слиянии\n"})
+    stopped("1249: слияние base с правкой своего файла — push остановлен", s.push(role=None))
 
 
 def t_checklist(h):
@@ -428,6 +487,73 @@ def t_files_parallel(h):
     check("gh pr view дождался запроса файлов (запросы параллельно)", waited == [True], waited)
 
 
+LIGHT_FILES = [{"filename": "plugins/guard/tests/test_new.py", "status": "added", "additions": 9, "deletions": 0},
+               {"filename": "README.md", "status": "modified", "additions": 1, "deletions": 1,
+                "patch": "@@ -1 +1 @@\n-a\n+b"}]
+
+
+def t_light_core(h):
+    """metis-1065: лёгкий PR ядра (только добавленные тесты и README) — хватает одного «принять» Opus с effort high,
+    как в шлюзе владельца: push остановлен. Effort medium, без efforts, не лёгкий PR — нужно два, push идёт."""
+    def case(files, efforts):
+        h.reset()
+        s = Push(h)
+        s.pr(files)
+        r = tm.rec("accept", REPO, 7, s.tip)
+        r["models"] = ["claude-opus-5-5"]
+        if efforts is not None:
+            r["efforts"] = efforts
+        h.seed(r)
+        return s.push()
+    got = case(LIGHT_FILES, ["high"])
+    stopped("лёгкий PR ядра, одно «принять» Opus high: push остановлен", got)
+    check("лёгкий PR ядра: нужно 1", "argus 1 (нужно 1)" in got[1], got)
+    passed("лёгкий PR ядра, одно «принять» Opus medium: push идёт", case(LIGHT_FILES, ["medium"]))
+    passed("лёгкий PR ядра, одно «принять» без efforts: push идёт", case(LIGHT_FILES, None))
+    heavy = [dict(LIGHT_FILES[0], deletions=1), LIGHT_FILES[1]]
+    passed("удалённая строка в тесте — не лёгкий, одно «принять» Opus high: push идёт", case(heavy, ["high"]))
+    passed("ядро (merge_gate.py), одно «принять» Opus high: push идёт", case(CORE_FILES, ["high"]))
+
+
+def t_light_head_swap(h):
+    """metis-1065, TOCTOU: файлы PR идут отдельным запросом — после него gh pr view ещё раз. Push в PR между запросами
+    (head другой или changedFiles другие), gh не ответил, время хука кончилось — не лёгкий: одного «принять» Opus high
+    мало, push идёт. Тот же head и число файлов — лёгкий, push остановлен."""
+    s = Push(h)
+    view = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": s.tip, "mergeable": "MERGEABLE",
+            "baseRefOid": tm.BASE, "baseRefName": "main", "changedFiles": len(LIGHT_FILES)}
+
+    def case(after, fits=True):
+        mg = tm._load_merge_gate("merge_gate_swap")
+        views = iter([[dict(view)], after])
+        calls = []
+
+        def gh(args):
+            calls.append(args[:2])
+            if args[0] == "api" and "/files" in args[1]:
+                return [dict(f) for f in LIGHT_FILES]
+            return next(views, None) if args[:2] == ["pr", "view"] else None
+        mg._gh_json = gh
+        left = iter([True, fits])
+        mg._gh_fits = lambda: next(left, False)
+        r = tm.rec("accept", REPO, 7, s.tip)
+        r["models"], r["efforts"] = ["claude-opus-5-5"], ["high"]
+        mg.read_records = lambda: [r]
+        return mg.accepted_push_problem(s.p, "origin", [("HEAD", BRANCH)]), calls
+    why, calls = case([dict(view)])
+    check("head и число файлов те же после списка файлов: лёгкий, push остановлен",
+          why and HINT in why and "(нужно 1)" in why, why)
+    check("gh pr view спрошен второй раз после файлов", calls.count(["pr", "view"]) == 2, calls)
+    other = "f" * 40
+    for name, after, fits in (("head сменился между запросами", [dict(view, headRefOid=other)], True),
+                              ("changedFiles сменилось между запросами", [dict(view, changedFiles=3)], True),
+                              ("changedFiles true вместо числа", [dict(view, changedFiles=True)], True),
+                              ("второй gh pr view не ответил", None, True),
+                              ("время хука кончилось до второго gh pr view", [dict(view)], False)):
+        why, _ = case(after, fits)
+        check(f"{name}: не лёгкий, одного «принять» мало — push идёт", why is None, why)
+
+
 def t_core_count_same():
     """CORE_ACCEPTS проверки push равно MIN_ACCEPTS шлюза владельца (pantheon merge.py): числа не разъехались."""
     want = re.search(r"^MIN_ACCEPTS = (\d+)", open(MERGE_PY, encoding="utf-8").read(), re.M)
@@ -437,7 +563,7 @@ def t_core_count_same():
 
 CASES = [t_accepted_core, t_core_one, t_core_not_opus, t_non_core_one, t_non_core_files_fail, t_reject, t_reject_floor,
          t_off_base_lie, t_no_verdicts, t_gh_fail, t_blocker_line, t_not_this_pr, t_same_commit, t_remote_url, t_force,
-         t_blocker_from_main, t_base_merge, t_checklist, t_parse_fail_open, t_files_parallel]
+         t_blocker_from_main, t_base_merge, t_two_bases, t_checklist, t_parse_fail_open, t_files_parallel, t_light_core, t_light_head_swap]
 
 
 def main():

@@ -172,6 +172,21 @@ def check_plan10(texts, flat, callers):
           "xhigh" not in hq and "Effort выше high не поднимай (план 1.0, раздел 6а): не справляется — сначала "
           "проверка своей работы, потом effort на ступень выше, потом модель старше." in hq
           and "другой роли — только решением владельца." in hq)
+    # metis-1253: вопрос владельцу — всегда окном вопросов; до окна отправить всё, после окна — прочитать пришедшее;
+    # простой окна — не ответ; текст в чате — только когда владелец просит или окно отказало
+    rules = ("всегда окном вопросов (AskUserQuestion) с вариантами, в любом ходе",
+             "до окна отправь всё, что не ждёт ответа",
+             "не ответ владельца, и хук его в журнал не пишет. По нему и по «выбранному до ухода» не действуешь",
+             "После окна, до конца хода, прочитай пришедшее за это время",
+             "Срока у окна нет: оно ждёт ответа сколько нужно",
+             "«Ждёт вас» от дежурного в это время не уходит: пункт остаётся строкой в `alerts.md`",
+             "так же после ответа на окно в ходе от сессии или прохода",
+             "владелец сам просит спросить текстом, или окно отказало")
+    miss = [x[:40] for x in rules if x not in hq]
+    check("hq.md: окно вопросов всегда, очередь до и после окна, простой не ответ (metis-1253)"
+          + (f" (нет: {miss})" if miss else ""), not miss and "только если окно открыть нельзя" not in hq
+          and "окно не открываешь" not in hq and "askUserQuestionTimeout" not in hq and "10 мин гаснет" not in hq
+          and "копятся в очереди" not in hq)
     # повторный круг (metis-0784, argus #426): нет ответа delta — полный; в ядре дельта — только у того же вызова;
     # --affected у outside test — только при run-tests.py в .pantheon-verify (Б1)
     a = flat.get("argus.md", "")
@@ -456,11 +471,13 @@ def main():
           "outside serve --sha" in flat.get("talos.md", "") and "checkout --detach" not in flat.get("talos.md", "")
           and "pnpm install" not in flat.get("talos.md", "") and "talos.md" in flat)
     # вход talos в приложение без пароля (metis-1134): три правила
-    check("talos: вход — outside login <ID> --wait 60, поле script через evaluate_script, env и ключи не искать (metis-1134)",
+    check("talos: вход — outside login <ID> --wait 60, одноразовый адрес входа через navigate_page, env и ключи не искать (metis-1134, metis-1161)",
           all(x in flat.get("talos.md", "") for x in (
               "`pantheon outside login <ID> --wait 60`", "Пароль тебе недоступен",
-              "поле `script`", "`evaluate_script`", "перезагрузи страницу",
-              "причину сообщи лиду", "`outside/env` и ключи не ищи")))
+              "одноразовый адрес входа", "`navigate_page`",
+              "причину сообщи лиду", "`outside/env` и ключи не ищи"))
+          and "поле `script`" not in flat.get("talos.md", "")
+          and "перезагрузи страницу" not in flat.get("talos.md", ""))
     for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
         check(f"{f}: dev.part — outside serve [--sha …] [--app …], ветку не переключать, зависимости не ставить (metis-0614)",
               "outside serve [--sha <коммит>] [--app ИМЯ]" in flat.get(f, "") and "pnpm install" not in flat.get(f, ""))
@@ -476,8 +493,13 @@ def main():
         "5. DOC-01: поведение поменялось — README компонента и шапка скрипта обновлены.",
         "6. Весь набор тестов проекта, а не только свой файл: все файлы `tests/` репозитория, включая соседние плагины. "
         "Основная ветка ушла вперёд — `git fetch`, прогон на временном слиянии с `origin/main` в отдельной копии "
-        "(`git worktree add` во временную папку); в свою ветку её не сливай. Общей команды прогона нет — запусти "
-        "циклом по всем файлам и сохрани в лог код каждого.",
+        "без ветки (`pantheon worktree add tmp-<задача> --detach --base origin/main`, затем EnterWorktree с path этой "
+        "копии: без входа git в ней из песочницы падает EPERM; назад — EnterWorktree с path своей); в свою ветку её не "
+        "сливай. "
+        "Общей команды прогона нет — запусти циклом по всем файлам и сохрани в лог код каждого. Лог — в своей папке "
+        "`$TMPDIR`, не в копии. После — `pantheon worktree remove tmp-<задача>`; отказ из-за файлов, которые прогон "
+        "оставил в копии, — `pantheon worktree remove tmp-<задача> --force`: --force убирает только копию, созданную "
+        "`add --detach`.",
         "В «Подробностях» отчёта — строка «Самопроверка:» по всем шести, у пункта одно из значений:",
         # формат доказательства пп. 2, 3, 6 (argus-e/f): сбой — не по зелёному прогону; у 3 откат и мутант, у 6 слияние с main
         "- «сделано (доказательство)». Пункт 2 — проба сбоя: «команда → код N (не 0), последняя строка вывода» или "
@@ -546,7 +568,8 @@ def main():
                   "У тебя пункты выполняет Codex: они уходят в поручение (шаг 1), мутанта и правки кода сам не делаешь.",
                   "Сам сверяешь только то, что видно без правки: 1 — поиск вызывающих по имени (`grep`), 5 — README и "
                   "шапку в `git diff <база>..HEAD`, 6 — свой прогон проверки на временном слиянии с основной веткой в "
-                  "отдельной копии (`git worktree add` во временную папку, слияние там), а не только на ветке.",
+                  "отдельной копии (`pantheon worktree add tmp-<задача> --detach --base origin/main`, EnterWorktree "
+                  "с path, слияние там), а не только на ветке.",
                   "Формат доказательства пунктов 2 и 6 — тот же, что выше.",
                   "По пунктам 2, 3 и 4 в строке «Самопроверка» — «по отчёту Codex: <путь к отчёту>», только если в "
                   "отчёте Codex есть ответ на этот пункт с доказательством.",
@@ -874,8 +897,9 @@ def main():
     # metis-0583: автозакрытие закрывает задачу по «Closes <id>» в теле PR — правило у тех, кто открывает и сливает PR
     closes_rule = ("Тело PR называет каждую задачу, которую он закрывает: `Closes <id>` или списком `Closes metis-0522, "
                    "metis-0534 и 0535`. Это правило — для PR в любом репозитории направления (agent-kit, BA, сайт): автозакрытие читает тела PR всех репозиториев из [merge_repos]. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
-                   "тоже (metis-0583). Слово «часть» в теле — все задачи PR остаются открытыми; если частичная только одна — отдельный "
-                   "PR или без Closes и без её номера в имени ветки.")
+                   "тоже (metis-0583). «часть <id>» (или «часть №<номер>») в теле — все задачи PR остаются открытыми; слово «часть» без "
+                   "номера рядом не в счёт (metis-1193); если частичная только одна — отдельный PR или без Closes и без её номера "
+                   "в имени ветки.")
     miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md") if closes_rule not in flat.get(f, "")]
     check("лиды и координатор: тело PR — «Closes <id>» списком, «часть» оставляет открытыми все задачи PR (metis-0583)"
           + (f" (нет у: {miss})" if miss else ""), not miss)
@@ -1020,6 +1044,10 @@ def main():
         text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
         check(f"{f[:-5]}: полный набор сам не гоняет (metis-0653)",
               "полный набор тестов репозитория" in text.lower() and "не гоняй" in text)
+    # metis-1237: пункт после слияния argus принимает на head слияния — догон metis-1235 отметит
+    atext = " ".join(read(os.path.join(out_real, "argus.md")).split())
+    check("argus: пункт после слияния — accept на head слияния, отметит плановый проход (metis-1237)",
+          "можно принять и позже, на уже слитом PR" in atext and "<head слияния> --criteria" in atext)
     # persist.part: свою фоновую команду ждут уведомлением о конце (metis-0905), субагента — так же концом хода
     persist = ("Свою фоновую команду ждут её уведомлением о конце", "закончи ход строкой «жду итога <ID>»",
                "Субагента ждут так же — концом хода")
@@ -1074,6 +1102,17 @@ def main():
     talos_real = read(os.path.join(out_real, "talos.md"))
     check("talos: dev-сервер — pantheon outside serve --sha … --wait 120, гасит stop",
           "pantheon outside serve --sha <head PR> [--app ИМЯ] --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+    # metis-0903: talos знает, откуда брать sha, и что делать при коде 75; разработчики — тоже про 75
+    talos_flat = " ".join(talos_real.split())
+    check("talos: sha — gh pr view --json headRefOid, без PR git rev-parse, нет коммита — git fetch (metis-0903)",
+          "gh pr view <N> -R <owner/repo> --json headRefOid" in talos_flat and "git rev-parse <ветка>" in talos_flat
+          and "git fetch" in talos_flat)
+    check("talos: код 75 у outside serve — pantheon outside status <ID> (metis-0903)",
+          "Код 75 — адреса нет" in talos_flat and "pantheon outside status <ID>" in talos_flat)
+    for f in devs:
+        dev_flat = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: dev.part — код 75 у serve: pantheon outside status <ID> (metis-0903)",
+              "Код 75 — адреса нет" in dev_flat and "pantheon outside status <ID>" in dev_flat)
     # metis-0900: ожидание владельца в окне роли — строка Зевсу до действия (external.part)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "workshop.md", "hq.md"):
         text = " ".join(read(os.path.join(out_real, f)).split())

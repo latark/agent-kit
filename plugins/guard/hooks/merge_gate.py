@@ -20,7 +20,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
    Строка: {"v":1,"kind","repo":[owner/repo…],"pr":N|null,"sha","by":{agent_type,agent_id,session_id},"cwd","time",
    "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}, у обоих — "models":[…] или
-   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413); с флагами --criteria (по одному на пункт
+   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413); рядом с "models" — "efforts":[…], effort
+   запросов argus из транскрипта (agent_facts, metis-1065: лёгкий PR ядра); с флагами --criteria (по одному на пункт
    «Готово, когда», metis-1004) — "criteria":[строки как есть]: шлюз их не читает, разбирает autoclose pantheon.
    Подделать запись роль не может:
    ~/.local/state/pantheon закрыт ролям песочницей и pantheon-acl, а вид записи хук берёт из agent_type события, а не
@@ -35,7 +36,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    reject на другом head — того же рецензента или другого argus, если коды reject и сливаемого SHA посчитаны и
    различаются (0415b: accept другого argus на код, равный коду reject, reject не снимает; код не посчитан — тоже);
    3) на третьем head с другим кодом от той же merge-base, если код сливаемого SHA — не код reject (_held; metis-0158:
-   два argus на одном head — accept и reject в любом порядке дают отказ). Поле «вернули» в поручении argus — слово
+   два argus на одном head — accept и reject в любом порядке дают отказ); 4) того же рецензента на третьем head с
+   тем же кодом, что у сливаемого SHA (отпечаток или слияние), и при другой merge-base (_same_code, metis-1249).
+   Поле «вернули» в поручении argus — слово
    лида, а не факт (metis-0497, Д1 ревью PR #149 r2): record пишет в вердикт субагента "returned" — пары
    agent8/сессия8 последнего «вернули: …» его поручений — и "reported" — пары успешных `pantheon review report`
    (agent_rounds). Правила 2 и 3 для другого argus с полем «вернули» снимают reject, только если его пара в
@@ -57,7 +60,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
    CARRY_BUDGET секунд (запас только в тесте — GUARD_TEST_CARRY_BUDGET), у git — таймаут _git_timeout: 3–6 с по
    остатку срока хука (metis-0787). Нет отпечатка — нет
-   переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
+   переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, больше двух
+   merge-base или две, которые сами не сливаются (две — дифф от их слияния, _virtual_base, metis-1249), вывод --raw
+   не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py и запуск окон в sessions.py по AST — metis-0404, 0552), casefold;
@@ -76,7 +81,7 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR. У репозитория из REQUIRED_CHECKS (agent-kit: tests/affected на PR в main, check-traces/traces —
-   metis-0633) обязательны эти имена, и закрывает их только запуск Actions от pull_request на этом SHA с SUCCESS
+   metis-0633; приватные проекты владельца — по ключу sha256 owner/name, metis-1116) обязательны эти имена, и закрывает их только запуск Actions от pull_request на этом SHA с SUCCESS
    (два GET REST, _ci_runs): нет такого — отказ «ещё не встали», SKIPPED или красная — отказ, дубль — худший итог;
    красная необязательная — пропуск со строкой systemMessage (предупреждение едет возвратом Allow до guard_rules.main,
    а не списком модуля — metis-0650). PR из форка (isCrossRepository): pull_requests у его запусков пуст, поэтому
@@ -278,6 +283,14 @@ GIT_TIMEOUT = 3  # с на местный git без таймера хука
 GIT_TIMEOUT_MAX = 6  # с: потолок одного местного git под таймером хука
 GIT_MARGIN = 1.5  # с до срока хука, которые git оставляет шлюзу на отказ с причиной
 GIT_TIMEOUT_MIN = 0.05  # с: до срока хука меньше GIT_MARGIN — git гаснет сразу, шлюз отказывает с причиной (metis-0975)
+
+
+def _hook_left():
+    """Сколько секунд до срока хука (таймер ITIMER_REAL guard_rules.set_deadline); 0 — таймера нет."""
+    try:
+        return signal.getitimer(signal.ITIMER_REAL)[0]
+    except (AttributeError, OSError, ValueError):
+        return 0
 
 
 def _git_timeout():
@@ -858,10 +871,11 @@ def record(event):
     if crit:
         rec["criteria"] = crit
     if rec_kind in ("accept", "reject"):  # модель argus — из данных сессии, а не со слов ran (metis-0176)
-        models = agent_models(event)
-        if models is None:  # у субагента — своя пометка: его «принять» в PR ядра не в счёт (metis-0489)
+        facts = agent_facts(event)
+        if facts is None:  # у субагента — своя пометка: его «принять» в PR ядра не в счёт (metis-0489)
             rec["models_note"] = NO_AGENT_TRANSCRIPT if event.get("agent_id") else NO_TRANSCRIPT
         else:  # [] — транскрипт найден, моделей нет (сменился формат?): в защитах не в счёт, а не «как без транскрипта»
+            models, rec["efforts"] = facts  # metis-1065: effort запросов argus — для лёгкого PR ядра (light_accept)
             rec["models"] = models
             if not models:
                 rec["models_note"] = NO_MODELS
@@ -892,23 +906,40 @@ def agent_models(event):
     глубже, subagents/workflows/<runId>/agent-<agent_id>.jsonl (transcriptSubdir Claude Code, metis-0413); ищется и
     одна подпапка. У главной сессии (agent_id нет) — сам transcript_path. Свой файл субагента не нашёлся — None, а не
     главный transcript_path: он чужой (сессия того, кто позвал argus)."""
+    facts = agent_facts(event)
+    return None if facts is None else facts[0]
+
+
+def agent_facts(event):
+    """(модели, effort) сессии argus по её транскрипту за один проход (путь — как в agent_models) или None — транскрипта
+    нет или не прочесть. Модели — как в agent_models. Effort (metis-1065) — отсортированные значения
+    message.output_config.effort записей type "api-request-blob" (запросы Claude Code к API); [] — их нет."""
     fd = _agent_transcript(event)
     if fd is None:
         return None
-    models = set()
+    models, efforts = set(), set()
     with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            if '"assistant"' not in line:
+            blob = '"api-request-blob"' in line and '"output_config"' in line
+            if '"assistant"' not in line and not blob:
                 continue
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
-            model = msg.get("model") if isinstance(msg, dict) else None
-            if isinstance(model, str) and model.strip() and model != "<synthetic>":
-                models.add(model.strip().lower())
-    return sorted(models)
+            kind = entry.get("type") if isinstance(entry, dict) else None
+            msg = entry.get("message") if kind in ("assistant", "api-request-blob") else None
+            if not isinstance(msg, dict):
+                continue
+            if kind == "assistant":
+                model = msg.get("model")
+                if isinstance(model, str) and model.strip() and model != "<synthetic>":
+                    models.add(model.strip().lower())
+                continue
+            effort = msg.get("output_config").get("effort") if isinstance(msg.get("output_config"), dict) else None
+            if isinstance(effort, str) and effort.strip():
+                efforts.add(effort.strip().lower())
+    return sorted(models), sorted(efforts)
 
 
 def _agent_transcript(event):
@@ -1088,12 +1119,12 @@ def _alert_ok(repo, pr):
     return any(head.match(ln) and ref.search(ln) and "откат" in ln.lower() for ln in lines)
 
 
-def _gh_json(args):
+def _gh_json(args, timeout=GH_TIMEOUT):
     """Вывод gh как список JSON-значений подряд (--paginate склеивает страницы: `[..][..]` или объекты по строкам);
-    None — сбой gh или неразборный ответ."""
+    None — сбой gh или неразборный ответ. timeout — срок gh, с (решение шлюза при заявке — короче, metis-1181)."""
     env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
     try:
-        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=GH_TIMEOUT, env=env)
+        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=timeout, env=env)
         if r.returncode != 0:
             return None
         dec, text, pos, out = json.JSONDecoder(), r.stdout, 0, []
@@ -1109,6 +1140,11 @@ def _gh_json(args):
                 out.append(val)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def _gh_timed(args, timeout):
+    """_gh_json со сроком timeout; срок по умолчанию — прежний вызов с одним аргументом (его подменяют тесты)."""
+    return _gh_json(args) if timeout == GH_TIMEOUT else _gh_json(args, timeout)
 
 
 def _is_core(path, core_files):
@@ -1281,18 +1317,18 @@ def _blob(gd, rev, path):
 BRANCH_RE = re.compile(r"(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![/.])")
 
 
-def _base_tip(repo, branch, memo=None):
+def _base_tip(repo, branch, memo=None, timeout=GH_TIMEOUT):
     """Живая вершина ветки branch в repo (gh api …/git/ref/heads/<branch>) — SHA коммита или None (сбой gh, не та
     ветка, не коммит, имя ветки не по формату). memo — словарь одного шлюза (metis-0974): вершина спрашивается у gh
     один раз и для переноса «принять», и для сборки окон; сбой (None) тоже запоминается — второй запрос не пустит
-    то, чему отказал первый."""
+    то, чему отказал первый. timeout — срок gh (_gh_json)."""
     if memo is not None:
         if (repo, branch) not in memo:
-            memo[(repo, branch)] = _base_tip(repo, branch)
+            memo[(repo, branch)] = _base_tip(repo, branch, timeout=timeout)
         return memo[(repo, branch)]
     if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
         return None
-    got = _gh_json(["api", f"repos/{repo}/git/ref/heads/{branch}"])
+    got = _gh_timed(["api", f"repos/{repo}/git/ref/heads/{branch}"], timeout)
     ref = got[0] if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else {}
     obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
     sha = obj.get("sha")
@@ -1340,9 +1376,10 @@ PR_VIEW_FIELDS = ("headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRol
                   "headRefName")
 
 
-def _pr_view(repo, pr):
-    """Один gh pr view на шлюз — и для Д3, и для проверок GitHub (таймаут хука 10 с): словарь или None (сбой)."""
-    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", PR_VIEW_FIELDS])
+def _pr_view(repo, pr, timeout=GH_TIMEOUT):
+    """Один gh pr view на шлюз — и для Д3, и для проверок GitHub (таймаут хука 10 с): словарь или None (сбой).
+    timeout — срок gh (_gh_json)."""
+    got = _gh_timed(["pr", "view", str(pr), "-R", repo, "--json", PR_VIEW_FIELDS], timeout)
     data = got[0] if isinstance(got, list) and len(got) == 1 else None
     return data if isinstance(data, dict) else None
 
@@ -1449,6 +1486,72 @@ def _version_problem(files):
     return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
 
 
+# лёгкий PR ядра (metis-1065, решение владельца 12.11, Р2): хватает одного «принять» argus на Opus с effort high вместо
+# двух, если по записям REST pulls/N/files (status, deletions, filename, previous_filename — не по тексту PR) в нём
+# только добавленные строки тестов и документы, которые не инструкции агентам. Список белый: тест — файл в
+# plugins/<плагин>/tests/, добавлен или правлен без удалённых строк; документ — README*.md (любой регистр) или
+# drafts/<имя>.md. Инструкции агентам и пропуски раннера (LIGHT_NOT_RE: папки roles, skills, agents, commands, hooks,
+# output-styles, monitors, themes, workflows, bin, помощники tests/_*.py,
+# template, packs, *prompts и любая с точкой в начале, AGENTS.md, CLAUDE.md, SKILL.md, *.tmpl, run-tests.py) — не
+# лёгкий при любом пути, как и удаление, переименование, копирование, пустой или неполный список. Текст LIGHT_*,
+# light_pr и light_accept в merge.py и merge_gate.py совпадает дословно — сверяет test_merge_light (AST)
+LIGHT_EFFORT = "high"
+LIGHT_TEST_RE = re.compile(r"plugins/[a-z0-9_-]+/tests/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+LIGHT_DOC_RE = re.compile(r"(?:(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*readme[A-Za-z0-9_.-]*|drafts/[A-Za-z0-9_-]"
+                          r"[A-Za-z0-9_.-]*)\.md", re.I)
+LIGHT_NOT_RE = re.compile(r"(?:^|/)(?:\.|(?:roles|skills|agents|commands|hooks|templates?|packs|[a-z_-]*prompts?"
+                          r"|output-styles|monitors|themes|workflows|bin)/)"
+                          r"|(?:^|/)(?:agents|claude|skill)\.md$|\.tmpl(?:\.|$)|(?:^|/)run-tests\.py$"
+                          r"|plugins/[a-z0-9_-]+/tests/(?:[^/]+/)*_[^/]*\.py$", re.I)
+
+
+def light_pr(files, count):
+    """Лёгкий ли PR ядра (metis-1065): (True, сколько тестов и документов) или (False, почему нет). files — записи
+    REST pulls/N/files, count — changedFiles из gh pr view: список не получен, пуст или неполон — не лёгкий."""
+    if not isinstance(files, list) or not files or not isinstance(count, int) or isinstance(count, bool) \
+            or len(files) != count or not all(isinstance(f, dict) for f in files):
+        return False, "список файлов PR не получен, пуст или неполон"
+    tests = docs = 0
+    for f in files:
+        name, status, cut = f.get("filename"), f.get("status"), f.get("deletions")
+        if not isinstance(name, str) or not name:
+            return False, "у файла PR нет имени"
+        if f.get("previous_filename") is not None or status not in ("added", "modified"):
+            return False, f"{name} — {status}: удаление, переименование и копирование не лёгкие"
+        if LIGHT_NOT_RE.search(name):
+            return False, f"{name} — инструкция агентам или пропуски раннера тестов"
+        if status == "modified" and not (isinstance(f.get("patch"), str) and f["patch"]):
+            return False, f"{name} — правка без patch (двоичный файл или большой дифф): удалённые строки не видны"
+        if LIGHT_TEST_RE.fullmatch(name) and isinstance(cut, int) and not isinstance(cut, bool) and cut == 0:
+            tests += 1
+        elif LIGHT_DOC_RE.fullmatch(name):
+            docs += 1
+        elif LIGHT_TEST_RE.fullmatch(name):
+            return False, f"{name} — в тесте удалены строки ({cut})"
+        else:
+            return False, f"{name} — не тест и не документ (README*.md, drafts/*.md)"
+    return True, f"тестов {tests}, документов {docs}"
+
+
+def light_accept(r):
+    """«Принять» в счёт на лёгком PR ядра (metis-1065): хук guard нашёл транскрипт argus, модели в нём — только
+    claude-opus, effort запросов — только high (поля models и efforts). Поля нет (запись до metis-1065, транскрипта
+    нет) или список пуст — не в счёт."""
+    models, efforts = r.get("models"), r.get("efforts")
+    return (isinstance(models, list) and bool(models)
+            and all(isinstance(m, str) and m.startswith("claude-opus") for m in models)
+            and isinstance(efforts, list) and bool(efforts) and all(e == LIGHT_EFFORT for e in efforts))
+
+
+def light_same_head(view, again, sha):
+    """Список файлов PR — того же head (metis-1065, TOCTOU): REST pulls/N/files не называет коммит, поэтому после него
+    gh pr view ещё раз (again) — head тот же sha и changedFiles те же, что в view до запроса файлов. Иначе push в PR
+    пришёл между запросами: лёгким PR не считается."""
+    count = again.get("changedFiles") if isinstance(again, dict) else None
+    return (isinstance(again, dict) and str(again.get("headRefOid") or "").lower() == sha
+            and isinstance(count, int) and not isinstance(count, bool) and count == view.get("changedFiles"))
+
+
 def _ui_glob(pat):
     """Шаблон [merge_client_ui] → regex пути: `**/` — ноль и больше папок, `**` — что угодно, `*` и `?` — без «/»."""
     out, i = "", 0
@@ -1496,7 +1599,7 @@ def _ui_problem(policy, name, sha, view, files):
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
-# optional_checks; narrow_tests_record, narrow_map_path — metis-1050), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
+# optional_checks, repo_entry — metis-1116; narrow_tests_record, narrow_map_path — metis-1050), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
 # CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
 # test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -1514,7 +1617,17 @@ CI_NONE = "проверки GitHub не получены"
 # красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
 # внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
 # (SUCCESS/NEUTRAL/SKIPPED).
-REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None)),
+                   # приватный проект владельца (metis-1116): ключ — sha256 owner/name, job checks на PR в develop и main
+                   # (ветки эпиков — без требования: их workflow может ещё не быть, PR ждал бы вечно — argus #479)
+                   "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
+                       ("tests", "checks", "develop"), ("tests", "checks", "main")),
+                   # приватные проекты владельца (metis-1116): job tests workflow tests.yml; первый — PR в develop и main,
+                   # два других — PR в main
+                   "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": (
+                       ("tests", "tests", "develop"), ("tests", "tests", "main")),
+                   "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": (("tests", "tests", "main"),),
+                   "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": (("tests", "tests", "main"),)}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate_ci по файлам .github/workflows
@@ -1522,7 +1635,9 @@ OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-1050, 1111: полны
                                                    "слияние не держит"),
                                   ("tests", "full-shard", "metis-1111: части full, их итог собирает job full"),
                                   ("tests", "affected-shard", "metis-1111: части affected, их итог собирает "
-                                                              "обязательный job affected"))}
+                                                              "обязательный job affected"),
+                                  ("tests", "revert-check", "metis-1176: тесты PR на исходниках merge-base, итог "
+                                                            "читает argus"))}
 # запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
 CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
                "repos/{repo}/commits/{sha}/check-runs?per_page=100")
@@ -1544,7 +1659,11 @@ CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
 # `pantheon review test --`. Засчитывается только запись с этой командой (full_tests_record); нет строки — запасного
 # пути у репозитория нет, отказ
 FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
-                            "plugins/pantheon plugins/project-tools")}
+                            "plugins/pantheon plugins/project-tools"),
+              # приватный проект владельца (metis-1116), ключ — sha256 owner/name
+              "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check",
+              # те же проекты: тесты — `uv run pytest` (workflow tests.yml их PR)
+              "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": "uv run pytest", "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": "uv run pytest", "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": "uv run pytest"}
 
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
@@ -1557,14 +1676,29 @@ NARROW_TESTS = {"agent-kit": ("python3.14 -I plugins/pantheon/scripts/run-tests.
 
 def narrow_hint(repo):
     """Строка отказа «нет записи тестов» с узкой командой репозитория из NARROW_TESTS; нет строки — пусто."""
-    cmd = NARROW_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    cmd = repo_entry(NARROW_TESTS, repo)
     return (f" Узкая запись (затронутые тесты, своя worktree, без heavy): `pantheon review test -- {cmd}`." if cmd
             else "")
 
 
+def repo_entry(table, repo, default=None):
+    """Запись таблицы шлюза (REQUIRED_CHECKS, OPTIONAL_CHECKS, FULL_TESTS, NARROW_TESTS) для repo (metis-1116):
+    сначала ключ «sha256:<hex>» от полного `owner/name` в нижнем регистре (приватные репозитории владельца: их имён в
+    публичном коде нет, проверка личных следов), потом короткое имя без владельца (agent-kit, как раньше). Репозиторий
+    с тем же коротким именем у другого владельца хеш приватного не даёт, а короткое имя вида «sha256:…» по таблице не
+    ищется — ключ-хеш находит только полный `owner/name`."""
+    full = str(repo or "").lower()
+    if "/" in full:
+        key = "sha256:" + hashlib.sha256(full.encode()).hexdigest()
+        if key in table:
+            return table[key]
+    short = full.rsplit("/", 1)[-1]
+    return default if short.startswith("sha256:") else table.get(short, default)
+
+
 def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
-    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    got = repo_entry(REQUIRED_CHECKS, repo, ())
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
 
 
@@ -1581,7 +1715,7 @@ def ci_fork(view):
 
 def optional_checks(repo):
     """Необязательные (workflow, job) repo (owner/name) из OPTIONAL_CHECKS: их красная — только предупреждение."""
-    return tuple((w, j) for w, j, _ in OPTIONAL_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ()))
+    return tuple((w, j) for w, j, _ in repo_entry(OPTIONAL_CHECKS, repo, ()))
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
@@ -1675,7 +1809,7 @@ def full_tests_record(repo, rec):
     outside test` — саму команду; `heavy` впереди не важен — проход ставит его сам. Комментарий — как в bash, только
     «#» в начале слова (после пробела): хвост ` # …` снимается, а `слово#…` — часть слова, и команда уже другая.
     Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
-    want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    want = repo_entry(FULL_TESTS, repo)
     cmd = rec.get("cmd") if isinstance(rec, dict) else None
     if not want or not isinstance(cmd, str):
         return False
@@ -1727,7 +1861,7 @@ def narrow_tests_record(repo, rec):
 def narrow_map_path(repo):
     """Путь карты affected-map.json от корня — рядом с run-tests.py команды FULL_TESTS репозитория; нет — None."""
     try:
-        words = shlex.split(FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()) or "")
+        words = shlex.split(repo_entry(FULL_TESTS, repo) or "")
     except ValueError:
         return None
     script = next((w for w in words if posixpath.basename(w) == "run-tests.py"), None)
@@ -1997,7 +2131,7 @@ def _billing_problem(repo, pr, sha, narrow=None, base_oid=None):
     читается или у репозитория нет FULL_TESTS — отказ (с командой записи, если она известна). Возврат, как у
     _ci_problem, — (текст отказа или None, предупреждения пропуска)."""
     where = f"{repo}#{pr}@{sha[:12]}"
-    cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower())
+    cmd = repo_entry(FULL_TESTS, repo)
     if not cmd:
         return (f"CI на {where} не запускался (лимит минут или оплата GitHub Actions), а запасного пути у репозитория "
                 "нет: команды полного набора в FULL_TESTS (merge_gate.py) для него нет — подними лимит в GitHub "
@@ -2272,14 +2406,22 @@ def _manifests(gd, entries):
 def _fingerprint(gd, base, head):
     """Отпечаток собственного диффа PR: merge-base(base, head)..head — строки git diff --raw (режимы, sha блобов и
     gitlink, статус, путь; решение владельца 25.10 23:05), сортированные по пути, кроме plugin.json плагинов — их
-    правки без строки version → (отпечаток, merge-base) или (None, почему не посчитан)."""
+    правки без строки version → (отпечаток, merge-base) или (None, почему не посчитан). Две merge-base — база
+    диффа их слияние (_virtual_base, metis-1249): тогда вторая часть ответа — SHA дерева, а не коммита."""
     if not SHA_RE.fullmatch(head) or _git_bytes(gd, "cat-file", "-e", head + "^{commit}") is None:
-        return None, f"коммита {head[:12]} нет в git папки"
+        return None, f"коммита {head[:12]} нет в git папки — сделай git fetch"
     out = _git_bytes(gd, "merge-base", "--all", base, head)
-    mbs = out.split() if out is not None else []
-    if len(mbs) != 1:
-        return None, f"у {head[:12]} и base PR нет единственной merge-base"
-    mb = mbs[0].decode("ascii", "replace")
+    mbs = [m.decode("ascii", "replace") for m in out.split()] if out is not None else []
+    if len(mbs) == 2:
+        # две merge-base (metis-1249): одна ветка — develop — влита и в head, и в base PR. Собственный дифф — от
+        # виртуальной merge-base, как у git merge: дерево слияния двух баз; конфликт или сбой — отпечатка нет
+        mb = _virtual_base(gd, *mbs)
+        if mb is None:
+            return None, f"у {head[:12]} и base PR две merge-base, а их слияние не посчитать (конфликт или сбой git)"
+    elif len(mbs) != 1:
+        return None, f"у {head[:12]} и base PR нет единственной merge-base (их {len(mbs) or 'ни одной'})"
+    else:
+        mb = mbs[0]
     entries = _raw_entries(gd, mb, head)
     if entries is None:
         return None, f"git diff --raw на {head[:12]} не ответил или не разобрать"
@@ -2308,6 +2450,26 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     из папки запуска), без системных и core.attributesFile (_git_code), с merge.renormalize=false (иначе core.autocrlf
     конфига снял бы конфликт перевода строк) и merge.default=text (драйвер по умолчанию из конфига git папки, например
     ours, — тот же обход без атрибутов, долг #388); info/attributes в git папки не выключить — с ним None. note(текст) — причина «не посчитано» для отказа (metis-0981: git старше 2.40)."""
+    got = _safe_merge_tree(gd, ("--merge-base=" + hb, head, mb), note)
+    if got is None:
+        return None
+    code, tree = got
+    if code == 1:
+        return False  # конфликт
+    entries = _raw_entries(gd, tree, sha)
+    if entries is None:
+        return None
+    if any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
+        return False
+    man = _manifests(gd, entries)
+    return None if man is None else man == []
+
+
+def _safe_merge_tree(gd, args, note=None):
+    """`git merge-tree --write-tree --no-messages <args>` без драйверов слияния из атрибутов и конфига (metis-0969,
+    долг #388: из новой пустой папки, merge.renormalize=false, merge.default=text; с info/attributes в git папки —
+    None) → (код 0 или 1 — конфликт, SHA дерева) или None — не посчитано (сбой, таймаут, git без --merge-base, чужой
+    вывод). note(текст) — причина «не посчитано» для отказа."""
     note = note or (lambda why: None)
     attrs = _git_bytes(gd, "rev-parse", "--git-path", "info/attributes")
     if attrs is None:
@@ -2319,7 +2481,7 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     try:
         with tempfile.TemporaryDirectory(prefix="guard-merge-tree-") as empty:
             got = _git_code(gd, "-c", "merge.renormalize=false", "-c", "merge.default=text", "merge-tree",
-                            "--write-tree", "--no-messages", "--merge-base=" + hb, head, mb, where=empty)
+                            "--write-tree", "--no-messages", *args, where=empty)
     except OSError:
         note("папку для git merge-tree не создать")
         return None
@@ -2330,15 +2492,16 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     tree = got[1].split(b"\n", 1)[0].strip().decode("ascii", "replace")
     if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", tree):
         return None
-    if got[0] == 1:
-        return False  # конфликт
-    entries = _raw_entries(gd, tree, sha)
-    if entries is None:
-        return None
-    if any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
-        return False
-    man = _manifests(gd, entries)
-    return None if man is None else man == []
+    return got[0], tree
+
+
+def _virtual_base(gd, mb1, mb2):
+    """Виртуальная merge-base при двух merge-base head и base PR (metis-1249): дерево слияния двух баз — так их сводит
+    и сам git merge (стратегия ort). Случай — одна ветка (develop) влита и в ветку PR, и в base: собственный дифф PR
+    от одной из баз нёс бы чужие правки другой. Конфликт при слиянии баз или сбой — None: отпечатка нет, «принять» не
+    переносится и «вернуть» не снимается (как раньше при «не одной merge-base»)."""
+    got = _safe_merge_tree(gd, (mb1, mb2))
+    return got[1] if got is not None and got[0] == 0 else None
 
 
 def _carry_heads(verdicts, sha):
@@ -2366,7 +2529,10 @@ def _lifts(a, r, sha, fp):
     вернулись к коду r и подтянули main со сдвигом строк — «вернуть» снято, а «принять» с r переносится слиянием.
     Слияние не посчитано (None: сбой, таймаут, бюджет) — не снимает (argus #375 Б2, metis-0973). Правила 2 и 3 для
     другого argus — ещё returned_lifts (metis-0497): «принять» повторного круга (поле «вернули») снимает «вернуть»
-    другого, только если взяло его отчёт."""
+    другого, только если взяло его отчёт. 4 (metis-1249, BA #72): тот же рецензент на третьем head с тем же кодом,
+    что sha (_same_code: отпечаток или слияние), — он принял ровно этот код после своего «вернуть», а потом в ветку
+    лишь подтянули base; merge-base тут может быть другой. Код sha другой или не посчитан — не снимает; код sha — код
+    самого r (_not_code_of) или это не посчитано — тоже не снимает."""
     if not checklist_ok(a):
         return False
     if _self_lift(a, r):
@@ -2382,6 +2548,8 @@ def _lifts(a, r, sha, fp):
         return bool(fr and fs) and fs[0] != fr[0] and _code_of(fp, r["sha"]) is False
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
+    if _reviewer(a) == _reviewer(r) and _same_code(fp, a["sha"], sha) and _not_code_of(fp, r["sha"], sha):
+        return True  # правило 4 (metis-1249)
     if _reviewer(a) != _reviewer(r) and not returned_lifts(a, r):
         return False
     fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
@@ -2472,6 +2640,22 @@ def _code_of(fp, head):
     True, False или None (не посчитано). У fp без merged (тесты правил) — False, как раньше."""
     merged = getattr(fp, "merged", None)
     return False if merged is None else merged(head)
+
+
+def _same_code(fp, head, sha):
+    """Код head — код sha (правило 4 _lifts, metis-1249): отпечатки посчитаны и равны или head, слитый с merge-base
+    sha, даёт ровно sha (fp.merged). Не посчитано — False."""
+    fh, fs = fp(head), fp(sha)
+    if not (fh and fs):
+        return False
+    return fh[0] == fs[0] or _code_of(fp, head) is True
+
+
+def _not_code_of(fp, head, sha):
+    """Код sha точно не код head («вернуть» правила 4): отпечатки посчитаны и разные, и head, слитый с merge-base sha,
+    не даёт sha. Не посчитано — False: сливается, может быть, ровно тот код, что вернули."""
+    fh, fs = fp(head), fp(sha)
+    return bool(fh and fs) and fh[0] != fs[0] and _code_of(fp, head) is False
 
 
 def _held(verdicts, sha, fp):
@@ -2577,6 +2761,12 @@ class _Prints:
         if time.monotonic() - self.t0 > self.budget:
             self._note(f"сверка дольше {self.budget:g} с — остановлена (таймаут хука 10 с)")
             return True
+        # до срока хука меньше GIT_MARGIN (metis-1181): git там гаснет за GIT_TIMEOUT_MIN, но на 8 head таких вызовов
+        # десятки, и вместе они дошли бы до HookTimeout — команда встала бы отказом по сроку
+        left = _hook_left()
+        if left and left < GIT_MARGIN:
+            self._note(f"срок хука: до него меньше {GIT_MARGIN:g} с — сверка остановлена")
+            return True
         return False
 
     def merged(self, head):
@@ -2616,12 +2806,15 @@ def append_carry(rec):
 # Шлюз владельца (pantheon/lib/merge.py, слияние PR ядра по Touch ID или фразе) работает в плановом проходе без git
 # папки слияния: «тот же код» на другом head он не сверит, и раньше другой коммит считался другим кодом — второй argus
 # снимал «вернуть» после rebase с тем же кодом, а «принять» после release.py и rebase не переносилось. Теперь при
-# `pantheon merge request` хук guard в папке, откуда заявка (клон repo), сверяет код нового head с кодом каждого
-# прошлого head с вердиктами argus — те же _Prints, что у шлюза gh pr merge, — и пишет в carry.jsonl запись kind
+# `pantheon merge request` хук guard в клоне repo (папка заявки или клон из реестра, _merge_clone, metis-1199) сверяет
+# код нового head с кодом каждого прошлого head с вердиктами argus — те же _Prints, что у шлюза gh pr merge, — и
+# пишет в carry.jsonl запись kind
 # "decision": same — head с тем же кодом (отпечаток или слияние, _merge_same), differs — посчитано, код другой,
 # delta — head, от которых новый head — мелкая правка поверх вне ядра (_delta_heads, metis-0784): их «принять» проход
 # засчитывает вместе со свежим «принять» другого argus на новом head.
 # Чего не посчитали (не клон, сбой gh или git, бюджет, срок хука), того нет ни там, ни там: проход судит строго.
+# Не дошли до сверки (срок хука, gh pr view не ответил) — след kind "decision-miss" с причиной (metis-1181): проход
+# велит повторить заявку, а не звать нового argus.
 # Запись — факт о коде, а не вердикт: вердикты проход считает сам по records.jsonl. Пишет её только хук guard
 # (STATE закрыт ролям правилом pantheon-acl), сбой записи команду не останавливает — проход тогда судит строго.
 
@@ -2632,6 +2825,9 @@ def request_decisions(event, args, cwd):
     if not cwd or args[:2] != ["merge", "request"] or not all(isinstance(a, str) for a in args):
         return
     rest = args[2:]
+    if "--restart" in rest:   # окно для перезапуска после слияния (metis-1153) — не номер PR
+        j = rest.index("--restart")
+        rest = rest[:j] + rest[j + 2:]
     if "-R" not in rest or rest.index("-R") + 1 >= len(rest):
         return
     i = rest.index("-R")
@@ -2641,26 +2837,88 @@ def request_decisions(event, args, cwd):
         return
     try:
         records = read_records()
-        tips = {}
+        tips, clone = {}, []
         for pr in dict.fromkeys(int(a) for a in nums):
-            _decision(event, records or [], repo, pr, cwd, tips)
+            _decision(event, records or [], repo, pr, cwd, tips, clone)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return
 
 
-def _decision(event, records, repo, pr, cwd, tips):
-    """Решение шлюза для repo#pr (request_decisions): gh pr view и вершина base — только если успевают до срока хука
-    (_gh_fits), git — со сроком от остатка (_git_timeout)."""
+def _is_clone(d, repo):
+    """Папка d — клон repo: среди её remote есть repo (как проверяет _carry_git)."""
+    remotes = _git_remotes(d) if d else None
+    return remotes is not None and repo in {_repo_tail(r) for r in remotes}
+
+
+def _merge_clone(cwd, repo):
+    """Папка для сверки кода при `pantheon merge request` (metis-1199): папка команды, если она клон repo; иначе — клон
+    repo из реестра: корни domains.json (_merge_domains) тех направлений, у которых repo в [merge_repos] policy.toml,
+    сам корень или его подпапка с именем repo. Папке не верим: годится только та, чей remote — repo. Заявки на PR
+    продукта подаёт и сессия metis-pantheon из worktree agent-kit — без этого «вернуть» старого head не снималось
+    никогда. Клона нет — cwd (сверка запишет «не клон»)."""
+    if _is_clone(cwd, repo):
+        return cwd
+    domains = _merge_domains() or {}
+    repos = G.load_policy().get("merge_repos")
+    name = repo.split("/")[-1]
+    for direction, listed in (repos.items() if isinstance(repos, dict) else ()):
+        if repo not in {str(x).strip().lower() for x in (listed if isinstance(listed, list) else ())}:
+            continue
+        for root in domains.get(direction) or ():
+            for d in (root, os.path.join(root, name)):
+                if os.path.isdir(d) and _is_clone(d, repo):
+                    return d
+    return cwd
+
+
+# Срок одного gh в решении шлюза при заявке (metis-1181). Под DEADLINE 8 с хука с общим GH_TIMEOUT 6 второй gh (вершина
+# base после gh pr view) шёл, только если всё до него укладывалось в ~1,5 с, — на #461 (14.11) решения не было дважды
+# подряд, хотя вне хука оно считается за 1,8 с. gh pr view и вершина base отвечают за 0,5–1,5 с; 3 с на каждый
+# оставляют git сверки остаток срока. Срок хука (hooks.json 10 с, DEADLINE 8 с) общий для всех PreToolUse — его не
+# трогаем, чтобы не замедлять остальные команды.
+DECISION_GH_TIMEOUT = 3
+
+
+def _decision_by(event):
+    return {"agent_type": event.get("agent_type") or "", "session_id": event.get("session_id") or "",
+            "agent_id": event.get("agent_id") or ""}
+
+
+def _decision_miss(event, repo, pr, sha, why):
+    """След несделанной сверки (metis-1181): запись kind "decision-miss" в carry.jsonl — шлюз владельца (merge.py)
+    назовёт причину и велит повторить `pantheon merge request`, а не звать нового argus. Фактов о коде в ней нет:
+    review_decisions её не берёт."""
+    append_carry({"v": RECORD_V, "kind": "decision-miss", "repo": [repo], "pr": pr, "sha": sha, "why": [why],
+                  "by": _decision_by(event), "time": datetime.now().astimezone().isoformat(timespec="seconds")})
+
+
+def _decision(event, records, repo, pr, cwd, tips, clone=None):
+    """Решение шлюза для repo#pr (request_decisions): gh pr view и вершина base — каждый со сроком
+    DECISION_GH_TIMEOUT и только если успевает до срока хука (_gh_fits), git — со сроком от остатка (_git_timeout).
+    Не успели или gh не ответил — след _decision_miss вместо молчаливого выхода."""
     verdicts = argus_verdicts(records, repo, pr)
-    if not verdicts or not _gh_fits():
+    if not verdicts:
         return
-    view = _pr_view(repo, pr)
+    if not _gh_fits(DECISION_GH_TIMEOUT):
+        return _decision_miss(event, repo, pr, "", "срок хука: на gh pr view не осталось времени")
+    view = _pr_view(repo, pr, DECISION_GH_TIMEOUT)
     sha = str((view or {}).get("headRefOid") or "").lower()
     base = (view or {}).get("baseRefName")
+    if not SHA_RE.fullmatch(sha) or not isinstance(base, str) or not base:
+        return _decision_miss(event, repo, pr, sha if SHA_RE.fullmatch(sha) else "",
+                              f"gh pr view не ответил за {DECISION_GH_TIMEOUT} с или без head и base PR")
     others = list(dict.fromkeys(r["sha"] for r in reversed(verdicts) if r["sha"] != sha))
-    if not SHA_RE.fullmatch(sha) or not isinstance(base, str) or not base or not others or not _gh_fits():
+    if not others:
         return
-    fp = _Prints(cwd, repo, sha, verdicts, lambda: view, tips)
+    if not _gh_fits(DECISION_GH_TIMEOUT):
+        return _decision_miss(event, repo, pr, sha, "срок хука: на вершину ветки base не осталось времени")
+    # вершина base — здесь, со своим сроком: _Prints возьмёт её из памяти tips и gh со сроком GH_TIMEOUT не позовёт
+    _base_tip(repo, base, tips, DECISION_GH_TIMEOUT)
+    # папка сверки — клон repo (_merge_clone, metis-1199), один раз на все PR заявки: clone — память request_decisions
+    clone = [] if clone is None else clone
+    if not clone:
+        clone.append(_merge_clone(cwd, repo))
+    fp = _Prints(clone[0], repo, sha, verdicts, lambda: view, tips)
     same, differs = [], []
     fs = fp(sha)
     for h in others if fs else []:
@@ -2675,12 +2933,11 @@ def _decision(event, records, repo, pr, cwd, tips):
             same.append(h)
         elif got is False:
             differs.append(h)
-    by = {"agent_type": event.get("agent_type") or "", "session_id": event.get("session_id") or "",
-          "agent_id": event.get("agent_id") or ""}
     append_carry({"v": RECORD_V, "kind": "decision", "repo": [repo], "pr": pr, "sha": sha, "base": base,
                   "base_oid": fp.base, "same": same, "differs": differs,
                   "delta": _delta_heads(fp, sha, [h for h in others if h not in same]) if fs else [],
-                  "why": list(fp.why), "by": by, "time": datetime.now().astimezone().isoformat(timespec="seconds")})
+                  "why": list(fp.why), "by": _decision_by(event),
+                  "time": datetime.now().astimezone().isoformat(timespec="seconds")})
 
 
 def _delta_core(path):
@@ -2742,7 +2999,8 @@ def head_verdicts(verdicts, sha):
 # «принять» уже столько, сколько нужно для слияния, а «вернуть» нет, долг ревью (Д, С) в этот PR не тянут: он идёт
 # задачей, а PR — к слиянию (roles/_ref/merge-rounds.md, «Находки ревью: Б, Д, С»). Счёт — как у шлюза и итога
 # `pantheon review status`: последний вердикт каждого рецензента на head (head_verdicts), «принять» с перечнем (Б6),
-# в PR ядра — только на Opus (opus_problem) и их CORE_ACCEPTS, вне ядра — одно. Ядро ли — _core_problem шлюза; файлы
+# в PR ядра — только на Opus (opus_problem) и их CORE_ACCEPTS, а в лёгком PR ядра (light_pr, metis-1065) — одно
+# Opus с effort high (light_accept), как в шлюзе владельца; вне ядра — одно. Ядро ли — _core_problem шлюза; файлы
 # не получены или сборку окон не проверить — считаем ядром (нужно больше «принять», реже отказ). Файлы PR
 # запрашиваются вместе с gh pr view, параллельно (metis-0809): по очереди второй gh не укладывался в срок хука, и PR
 # вне ядра считался ядром. Принудительная отправка (--force, --force-with-lease, +ветка) судится так же: amend и
@@ -2759,24 +3017,28 @@ PUSH_GH_MARGIN = 0.5  # с сверх GH_TIMEOUT: меньше осталось 
 PUSH_VIEW_FIELDS = "headRefOid,headRefName,baseRefOid,baseRefName,changedFiles,state,mergeable"
 
 
-def _gh_fits():
-    """Успеет ли ещё один gh до своего срока хука (таймер ITIMER_REAL guard_rules.set_deadline): нет таймера — да."""
+def _gh_fits(timeout=GH_TIMEOUT):
+    """Успеет ли ещё один gh со сроком timeout до своего срока хука (таймер ITIMER_REAL guard_rules.set_deadline):
+    нет таймера — да."""
     try:
         left = signal.getitimer(signal.ITIMER_REAL)[0]
     except (AttributeError, OSError, ValueError):
         return True
-    return not left or left > GH_TIMEOUT + PUSH_GH_MARGIN
+    return not left or left > timeout + PUSH_GH_MARGIN
 
 
-def push_accepts(records, repo, pr, sha, core, view):
+def push_accepts(records, repo, pr, sha, core, view, light=False):
     """Сколько «принять» argus засчитано на head sha PR repo#pr для слияния; 0 — есть «вернуть» в силе на sha (последний
     вердикт рецензента) или «принять» нет. core — PR ядра: «принять» не на Opus выбывает, как в шлюзе (weak). view —
     ответ gh pr view PR: «принять» на другой base PR (base_counts, metis-0965) и с полем «вернули», которое называет
-    рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт, как в шлюзе (Д6 долга #388)."""
+    рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт, как в шлюзе (Д6 долга #388). light — лёгкий
+    PR ядра (metis-1065): в счёт только «принять» Opus с effort high по транскрипту (light_accept)."""
     verdicts = [r for r in argus_verdicts(records, repo, pr) if r["kind"] != "accept" or base_counts(r, view)]
     verdicts = [r for r in verdicts if not (r["kind"] == "accept" and returned_lie(r, verdicts))]
     if core:
         verdicts = [r for r in verdicts if not (r["kind"] == "accept" and checklist_ok(r) and opus_problem(r))]
+    if light:
+        verdicts = [r for r in verdicts if r["kind"] != "accept" or light_accept(r)]
     latest, direct, _ = head_verdicts(verdicts, sha)
     if any(r["kind"] == "reject" for r in latest.values()):
         return 0
@@ -2802,20 +3064,34 @@ def _push_bases(d, remote, view):
 
 def _push_base_merged(d, repo, view, tip, new, bases):
     """Подтянут base без правок: в коммитах tip..new вне base есть слияние, а собственный дифф PR (отпечаток
-    _fingerprint от merge-base с base) на new тот же, что на tip, — шлюз перенесёт «принять» сам. Отпечаток не
-    посчитать (не клон, shallow, нет коммита base) — тоже да: сбой git — пропуск. Слияния нет — нет."""
+    _fingerprint от merge-base с base) на new тот же, что на tip, — шлюз перенесёт «принять» сам. Оба отпечатка — от
+    одной базы, живой вершины ветки base у remote (последний из bases; нет её — baseRefOid), как у шлюза (metis-1249):
+    baseRefOid GitHub обновляет с опозданием, и отпечаток tip от старой base нёс бы правки, уже влитые в base, — чистое
+    подтягивание выглядело бы правкой. Отпечаток не посчитать (не клон, shallow, нет коммита base) — тоже да: сбой git
+    — пропуск. Слияния нет — нет."""
     merges = _git(d, "rev-list", "--merges", f"{tip}..{new}", "--not", *bases)
     if merges is None:
         return True
     if not merges.strip():
         return False
-    old_base = str(view.get("baseRefOid") or "").lower()
-    gd, _ = _carry_git(d, repo, old_base)
-    if gd is None or not bases:
+    if not bases:
         return True
-    old, _ = _fingerprint(gd, old_base, tip)
+    gd, _ = _carry_git(d, repo, bases[-1])
+    if gd is None:
+        return True
+    old, _ = _fingerprint(gd, bases[-1], tip)
     cur, _ = _fingerprint(gd, bases[-1], new)
     return old is None or cur is None or old == cur
+
+
+def _light_again(repo, pr, tip, view):
+    """Лёгкий PR ядра в правиле push (metis-1065): файлы шли параллельно с gh pr view, push в PR между запросами дал бы
+    файлы другого head — после них gh pr view ещё раз, head и changedFiles те же (light_same_head). Время хука
+    кончилось или gh не ответил — не лёгкий."""
+    if not _gh_fits():
+        return False
+    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
+    return light_same_head(view, got[0] if isinstance(got, list) and len(got) == 1 else None, tip)
 
 
 def accepted_push_problem(d, remote, pairs):
@@ -2862,6 +3138,11 @@ def accepted_push_problem(d, remote, pairs):
                 th.join(GH_TIMEOUT)
                 if box and _core_problem(repo, pr, tip, view, box[0]) is None:
                     n, need = push_accepts(records, repo, pr, tip, False, view), 1
+            # лёгкий PR ядра (metis-1065): хватает одного «принять» argus Opus с effort high, как в шлюзе владельца
+            if n < need and push_accepts(records, repo, pr, tip, True, view, light=True) >= 1:
+                th.join(GH_TIMEOUT)
+                if box and light_pr(box[0], view.get("changedFiles"))[0] and _light_again(repo, pr, tip, view):
+                    n, need = push_accepts(records, repo, pr, tip, True, view, light=True), 1
             if n >= need:
                 return (f"Правило push: PR {repo}#{pr} уже принят на {tip[:12]} — «принять» argus {n} (нужно {need}), "
                         "«вернуть» нет. Новый коммит в ветке (и amend с принудительной отправкой) сожжёт эти вердикты "

@@ -452,6 +452,9 @@ FULL_IF = (r"^    if: github\.event_name == 'pull_request' \|\| github\.event_na
 CRON_DAILY = r"^  schedule:\n    - cron: '\d{1,2} \d{1,2} \* \* \*'\n"
 # metis-1111: job tests.yml — части matrix и собирающие их итог с прежними именами (шлюз guard ищет affected и full)
 SHARD_JOBS = ("affected-shard", "affected", "full-shard", "full")
+# metis-1176: проверка «на откате» — тесты PR на исходниках merge-base, необязательная проверка шлюза
+REVERT_JOB = "revert-check"
+REVERT_RUN = "python3 -I plugins/pantheon/scripts/revert_check.py --base origin/main"
 # ${{ }} в run — только эти: их значения пишет сам GitHub (matrix из файла workflow, итог части), а не текст PR
 RUN_EXPR_OK = {"${{ matrix.part }}", "${{ needs.affected-shard.result }}", "${{ needs.full-shard.result }}"}
 
@@ -596,7 +599,7 @@ def _wf_tests(wfdir):
           and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  schedule:\n    - cron: '[^'\n]+'\n"
                         r"  workflow_dispatch:\n\npermissions:", text, re.M)
           and re.search(CRON_DAILY, text, re.M)
-          and text.count('python-version: "3.14"') == 3 and text.count("persist-credentials: false") == 3, text)
+          and text.count('python-version: "3.14"') == 4 and text.count("persist-credentials: false") == 4, text)
     # metis-0597 (долг argus B #198): ключи, if, ref, uses — из разбора YAML (wf_parse), а не регуляркой: экранированный
     # ("\x65nv"), flow ({env: x}), кавычки и merge-ключ дают тот же ключ после разбора. Все уровни, все mapping.
     keys = tst["keys"] if tst else None
@@ -609,13 +612,21 @@ def _wf_tests(wfdir):
     full = job.get("full", "")
     check("tests.yml: PR — job affected на закреплённом Linux, полная история для merge-base; full — на PR и вручную, "
           "macos-15, timeout-minutes 90 (metis-1111); части — affected-shard и full-shard, собирающие — affected и full",
-          tst is not None and sorted(tst["jobs"]) == sorted(SHARD_JOBS) and set(job) == set(SHARD_JOBS)
+          tst is not None and sorted(tst["jobs"]) == sorted(SHARD_JOBS + (REVERT_JOB,))
+          and set(job) == set(SHARD_JOBS + (REVERT_JOB,))
           and re.search(r"^    if: github.event_name == 'pull_request'$", ash, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", ash, re.M) and "fetch-depth: 0" in ash
           and re.search(FULL_IF, fsh, re.M) and re.search(r"^    runs-on: macos-15$", fsh, re.M)
           and re.search(r"^    timeout-minutes: 90$", fsh, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", full, re.M), job.keys())
+    rv = job.get(REVERT_JOB, "")
+    rr = [ln for _, lines in _wf_runs(rv) for ln in lines]
+    check("tests.yml: revert-check — только на PR, закреплённый Linux, полная история для merge-base, ровно один run "
+          "revert_check.py --base origin/main (без || true и других флагов; metis-1176)",
+          re.search(r"^    if: github.event_name == 'pull_request'$", rv, re.M)
+          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", rv, re.M) and "fetch-depth: 0" in rv
+          and "needs:" not in rv and "strategy" not in rv and rr == [REVERT_RUN], rr)
     _wf_steps(job, _wf_shards(job))
 
 
@@ -755,6 +766,11 @@ def t_workflows_on_bad_copies():
          "tests.yml: affected — первым шагом ruff"),
         ("ruff с || true", dict(tests=ins(real, "          ruff check .", "          ruff check . || true")),
          "tests.yml: affected — первым шагом ruff"),
+        ("revert-check с || true", dict(tests=ins(real, "--base origin/main\n", "--base origin/main || true\n")),
+         "tests.yml: revert-check"),
+        ("revert-check без полной истории", dict(tests=ins(real, "fetch-depth: 0  # merge-base с origin/main: копия",
+                                                           "fetch-depth: 1  # merge-base с origin/main: копия")),
+         "tests.yml: revert-check"),
         ("ruff без закреплённых хешей", dict(tests=ins(real, " --require-hashes", "")),
          "tests.yml: affected — первым шагом ruff"),
         ("шага ruff нет в affected", dict(tests=ins(real, "          ruff check .\n", "")),

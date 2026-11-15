@@ -28,7 +28,11 @@
   question; «Руками» — остальные открытые карточки с «Кому» = Владелец; только id. Текстовые строки этих разделов в board.md блок не
   читает: пункт без карточки сюда не попадёт — заведите карточку (`pantheon task new --owner owner`);
 - «PR слит, задача открыта» (metis-0768) — data["merged_open"] от вызывающего (lib/boardmerged.py: кэш слитых PR и журнал
-  карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K», не больше MAX_MERGED строк;
+  карточки, без gh): «metis-XXXX: PR #N слит D дн. назад, задача doing/review, неотмечено K (пункты 1, 3)», не больше
+  MAX_MERGED строк; номера неотмеченных пунктов — metis-1193;
+- «План …: расхождений с карточками пачек N» (metis-1235) — data["plan_drift"] от вызывающего (lib/plancheck.py
+  board_rows): раздел плана без карточки пачки, задача раздела не в своей пачке, пачка закрыта при открытых задачах;
+  только имя файла, номера разделов и id (plan_lines), не больше MAX_PLANS строк;
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
 - отказы ролей за сутки (metis-0832) — журнал STATE/logs/handoff.jsonl (lib/handoff.py): источник, вид → кому передано
   и итоги, только из словарей HANDOFF_*; заявка Touch ID — одна, по последнему итогу;
@@ -64,6 +68,7 @@ MAX_PR, MAX_BATCH, MAX_STATUS, MAX_DECISION, MAX_IDS = 8, 3, 6, 5, 3
 MAX_WINDOWS = 8  # имён живых окон в строке «Сейчас» (metis-1005)
 MAX_JOURNAL = 3  # направлений с самой свежей записью журнала в строке «Сейчас»
 MAX_MERGED = 5  # строк «PR слит, задача открыта» (metis-0768)
+MAX_ITEMS = 10  # номеров неотмеченных пунктов в такой строке (metis-1193)
 MAX_OWNER = 10  # id карточек владельца в строке «Ждёт вас» / «Руками»
 REVIEW_RE = re.compile(r"review-([1-9]\d{0,5})-argus(?:-?([a-z]?)(\d*))?\.md")
 VERDICT_RE = re.compile(r"Вердикт\**\s*:\s*\**\s*([А-Яа-яЁё]+)")
@@ -545,10 +550,11 @@ def pr_line(p, revs):
 
 
 def _merged_ok(r):
-    """Строка merged_open (lib/boardmerged.py): id, номер PR, дни, статус, неотмечено — каждое по своему шаблону."""
+    """Строка merged_open (lib/boardmerged.py): id, номер PR, дни, статус, неотмечено и (metis-1193) номера
+    неотмеченных пунктов — каждое по своему шаблону; номеров может не быть (строка из 5 полей)."""
     ints = lambda *v: all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in v)
-    return isinstance(r, (tuple, list)) and len(r) == 5 and _ok(ID_RE, r[0]) and ints(r[1], r[2], r[4]) \
-        and r[3] in ("doing", "review")
+    return isinstance(r, (tuple, list)) and len(r) in (5, 6) and _ok(ID_RE, r[0]) and ints(r[1], r[2], r[4]) \
+        and r[3] in ("doing", "review") and (len(r) == 5 or isinstance(r[5], (tuple, list)) and ints(*r[5]))
 
 
 def pr_stale_line(stale):
@@ -583,6 +589,28 @@ def now_line(data, t):
     return f"- **Сейчас {hm(t)}** · " + " · ".join(parts) + "."
 
 
+PLAN_NAME_RE = re.compile(r"[\w.-]{1,80}")
+PLAN_ITEM_RE = re.compile(r"раздел [\w+.-]{1,12}: [\w ,-]{1,160}")
+MAX_PLANS = 3  # строк «План …: расхождений N» (metis-1235)
+
+
+def plan_lines(rows):
+    """data["plan_drift"] (lib/plancheck.py board_rows: имя файла, число, короткие расхождения) → строки доски. Только
+    имя файла и строки своего шаблона (номер раздела, id, постоянные слова — SEC-13); чужая форма — пропуск."""
+    out = []
+    for row in (rows if isinstance(rows, list) else [])[:MAX_PLANS]:
+        if not (isinstance(row, (list, tuple)) and len(row) == 3 and _ok(PLAN_NAME_RE, row[0])
+                and isinstance(row[1], int) and not isinstance(row[1], bool) and isinstance(row[2], list)):
+            continue
+        if row[1] < 0:
+            out.append(f"- План {row[0]}: не прочитан — сверка с пачками не прошла.")
+            continue
+        items = [x for x in row[2] if _ok(PLAN_ITEM_RE, x)]
+        out.append(f"- План {row[0]}: расхождений с карточками пачек {row[1]}" + (": " + "; ".join(items) if items else "")
+                   + (" …" if row[1] > len(items) else "") + f" — pantheon plan check {row[0]}.md")
+    return out
+
+
 def lines(data, t=None):
     """Строки блока без штампа (в порядке важности: «Сейчас» из факта, неделя, PR, пачки, STATUS, ответы владельца)."""
     out = [now_line(data, t)] if t is not None else []
@@ -612,10 +640,13 @@ def lines(data, t=None):
     if stale and prs is not None:
         out.append(stale)
     merged = [r for r in data.get("merged_open") or [] if _merged_ok(r)]
-    for tid, num, days, st, left in merged[:MAX_MERGED]:
-        out.append(f"- {tid}: PR #{num} слит {days} дн. назад, задача {st}, неотмечено {left}")
+    for tid, num, days, st, left, *nums in merged[:MAX_MERGED]:
+        items = ", ".join(map(str, nums[0][:MAX_ITEMS])) + (" …" if len(nums[0]) > MAX_ITEMS else "") if nums and nums[0] else ""
+        out.append(f"- {tid}: PR #{num} слит {days} дн. назад, задача {st}, неотмечено {left}"
+                   + (f" (пункты {items})" if items else ""))
     if len(merged) > MAX_MERGED:
         out.append(f"- …и ещё слитых PR с открытой задачей: {len(merged) - MAX_MERGED}.")
+    out += plan_lines(data.get("plan_drift"))
     for sid, work, closed, total, *pr in data.get("batches") or []:
         num = pr[0] if pr and isinstance(pr[0], int) and not isinstance(pr[0], bool) else None
         out.append(f"- Пачка {sid}" + (f" (PR #{num})" if num else "") + ": "

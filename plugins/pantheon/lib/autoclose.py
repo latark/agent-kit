@@ -12,12 +12,20 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 Слитый PR закрывает такую задачу: status done, closed —
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
-В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается (и close_checked, metis-0660).
+В теле PR «часть <id>» или «часть №<номер>» — PR закрывает только часть задачи: его задачи не закрываются (и close_checked,
+metis-0660). Слово «часть» без номера рядом («личная часть карты») не в счёт (metis-1193, PART_RE).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
 строку «слит, неотмечено N (пункты …)», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
+С metis-1255 он же заполняет пустой next (UNCHECKED_NEXT: какие пункты сверить; вписанный не трогает), а задача, висящая так дольше 3 суток, — хвост
+«сверка» pantheon check с тревогой один раз на задачу (boardmerged.merged_stuck).
 Перед этим (metis-1004) слитый PR с Closes отмечает сам пункты, которые argus принял на head слияния: `accepted(repo,
 строка кэша)` → {id: {номер: хеш}} (review.review_criteria_ticks — засчитанные «принять» с --criteria «да»); пункт
-отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. Для этого
+отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. С metis-1235
+так же отмечает и PR со словом «часть» — для задач из Closes, ветки и «часть <id>»/«часть №<номер>» (named_ids):
+«часть» только не даёт закрыть. Догон (tick_backlog): каждый проход по новому кэшу отмечает принятые на head слияния
+пункты задач doing/review/waiting, у которых слитый PR в журнале, — и для PR, обработанных раньше, и для «принять»,
+записанного уже после слияния; отмечено всё — закрывает close_checked. Пункты
+задачи не из Closes (metis-1193, tick_named) — так же, если тело PR их называет: «пункт 3 metis-1050». Для этого
 fetch кладёт в строку слитого PR head (headRefOid), base (baseRefName) и core (задето ли ядро, merged_core). Ядро по
 обоим путям переименования; переименование без старого пути и список файлов, обрезанный gh (больше 100), — ядро.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing/waiting её направления review — один
@@ -36,7 +44,15 @@ import time
 from datetime import datetime
 
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
-PART_RE = re.compile(r"(?<!\w)часть(?!\w)", re.I)
+# «часть» — только отдельным словом рядом с номером задачи: «часть metis-1051», «часть 1051», «часть задачи metis-1051»,
+# «часть: metis-1051» (metis-1193). Номер — id с префиксом или цифры после № / # / «задачи» («часть №1051», «часть
+# задачи 1051»); голое число («часть 100 строк», «часть 2026 года») — не номер. Между словом и номером — пробелы, знаки
+# разметки (* _ ` ( [ # №, двоеточие, тире) и перед id не больше одного слова («часть работы metis-1051»). Слово в
+# обычной фразе («личная часть карты», #441) PR частичным не делает.
+_PART_GAP = r"[\s*_`(\[#№:—–-]*"
+_PART_NUM = r"(?:[#№]|задачи" + _PART_GAP + r")\s*\d{3,}(?!\w)"
+PART_RE = re.compile(r"(?<![^\W_])часть(?![^\W_])" + _PART_GAP + r"(?:(?:[^\W\d_]+" + _PART_GAP + r")?" + ID_RE.pattern
+                     + r"|" + _PART_NUM + r")", re.I)
 FETCH_BUDGET = 240     # секунд на весь сетевой проход (fetch): дольше не ждём, остаток репозиториев — в следующий раз
 REPO_BUDGET = 75       # секунд на один репозиторий (metis-0808): fetch иногда 100-350 с против обычных 40 — завислый gh не съедает весь проход
 FIRST_LOOKBACK = 48 * 3600  # первый проход (нет состояния) смотрит назад на столько: старые упоминания задач не трогаем
@@ -102,6 +118,31 @@ def closing_ids(branch, body):
 
 def is_part(body):
     return bool(PART_RE.search(body or ""))
+
+
+def part_refs(body):
+    """Задачи, названные после «часть» (metis-1235): (id с префиксом, голые номера) — «часть metis-1221» → id,
+    «часть №1221» → число 1221. Отмечать принятые argus пункты PR «часть» должен и для них, а не только для Closes."""
+    ids, nums = [], []
+    for m in PART_RE.finditer(body or ""):
+        got = ID_RE.search(m.group(0))
+        if got:
+            ids.append(got.group(0))
+        else:
+            nums += [int(x) for x in re.findall(r"\d{3,}", m.group(0))[-1:]]
+    return find_ids(*ids), nums
+
+
+def named_ids(branch, body, tasks):
+    """Задачи, которые слитый PR называет (metis-1235): Closes и id ветки (closing_ids), затем «часть <id>» и «часть
+    №<номер>» — номер без префикса берёт задачу tasks с тем же числом, если она одна. Порядок — как в тексте."""
+    ids, nums = part_refs(body)
+    out = closing_ids(branch, body) + ids
+    for n in nums:
+        hit = [tid for tid in tasks if (m := re.search(r"-(\d+)$", tid)) and int(m.group(1)) == n]
+        if len(hit) == 1:
+            out.append(hit[0])
+    return list(dict.fromkeys(out))
 
 
 def gh_exe(env=None):
@@ -621,6 +662,7 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None, acce
             for pr in (cache.get("open_prs") or {}).get(repo) or []:
                 if isinstance(pr, dict):
                     review_pr(pantheon, t, repo, pr, repo_dirs[repo], T, log, errors)
+        tick_backlog(pantheon, t, merged, repo_dirs, T, accepted, log, errors)
         close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, open_ids)
         finished = True
     finally:  # сбой посреди прохода (не только ValueError): отметки уже обработанных PR не теряем, кэш прочтём заново
@@ -697,30 +739,83 @@ def tick_accepted(pantheon, t, repo, pr, tid, task, T, accepted, log):
     return (task[0], h, b) if h else task
 
 
+# metis-1193: пункт задачи X, сделанный PR другой задачи (или проверяемый фактом после слияния — его принимают на
+# следующем PR), argus принимает тем же --criteria на этом PR, а тело PR называет его: «пункт 3 metis-1050», «пункты
+# 1, 2 и 4 metis-1117», «пункты 1, 2, и 4 metis-1117», «пункт 3 задачи metis-1050». Не «часть metis-X»: «часть» в теле оставляет открытыми и задачи из Closes (is_part).
+ITEM_RE = re.compile(r"(?<!\w)пункт(?:ы|ов|ах)?\s+(\d{1,3}(?:\s*(?:,\s*и|,|и)\s*\d{1,3})*)\s+(?:задачи\s+)?("
+                     + ID_RE.pattern + r")", re.I)
+
+
+def named_items(body):
+    """Пункты чужих задач, названные в теле PR (metis-1193) → {id: {номера}}."""
+    out = {}
+    for m in ITEM_RE.finditer(body or ""):
+        out.setdefault(m.group(2), set()).update(int(x) for x in re.findall(r"\d+", m.group(1)))
+    return out
+
+
+def tick_named(pantheon, t, repo, pr, dirs, skip, T, accepted, log, errors):
+    """Пункты задач вне Closes (metis-1193): отмечаются только те, что и названы в теле PR (named_items), и приняты
+    argus на head слияния (accepted, как в tick_accepted) — с той же сверкой хеша в T.criteria_tick. Одно название без
+    приёмки argus не отмечает ничего: тело PR пишет роль, запись приёмки — только хук guard. Задача — своего
+    направления, не done/dropped. → False при сбое отметки (PR повторим)."""
+    named = {tid: nums for tid, nums in named_items(pr.get("body")).items() if tid not in skip}
+    if not named or not accepted:
+        return True
+    ok, n = True, pr.get("number")
+    try:
+        got_all = accepted(repo, pr) or {}
+    except Exception as e:  # noqa: BLE001 — журнал шлюза не прочитан: PR повторим, тревога
+        errors[f"{repo}#{n}"] = f"приёмка argus для пунктов {', '.join(sorted(named))}: {type(e).__name__}: {e}"
+        return False
+    tasks = T.load_tasks(pantheon, T.WORK_TYPES)
+    for tid, nums in sorted(named.items()):
+        head = tasks.get(tid, ("", {}, ""))[1]
+        want = {k: h for k, h in (got_all.get(tid) or {}).items() if k in nums}
+        if not want or head.get("type") != "task" or head.get("direction") not in dirs \
+                or head.get("status") not in ("todo", "doing", "waiting", "review"):
+            continue
+        try:
+            got = T.criteria_tick(pantheon, t, tid, want, "плановый проход",
+                                  f"PR #{n} ({repo}) слит: argus принял пункты на head {str(pr.get('head') or '')[:12]}"
+                                  " (пункты названы в теле PR другой задачи)")
+        except Exception as e:  # noqa: BLE001 — сбой отметки не роняет проход: PR повторим, тревога
+            ok = False
+            errors[f"{repo}#{n}"] = f"{tid}: отметка пунктов по приёмке argus: {type(e).__name__}: {e}"
+            continue
+        if got:
+            log.append(f"{tid}: PR #{n} слит — отмечены пункты {', '.join(map(str, got))} по приёмке argus (не Closes)")
+    return ok
+
+
+UNCHECKED_NEXT = ("сверить пункты {nums} «Готово, когда»: argus — pantheon review accept --criteria, живая проба — "
+                  "итог в журнал, остаток — pantheon task split")
+
+
 def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=None):
     """Слитый PR → закрытие его задач. → True, если PR обработан целиком (можно отметить), False — повторить.
     accepted — как в run: до подсчёта неотмеченных пункты, принятые argus на head слияния, отмечаются (metis-1004)."""
     n = pr.get("number")
     tasks = T.load_tasks(pantheon, T.WORK_TYPES)
-    ids = [i for i in closing_ids(pr.get("headRefName"), pr.get("body")) if i in tasks
+    mine = [i for i, x in tasks.items() if x[1].get("direction") in dirs]
+    ids = [i for i in named_ids(pr.get("headRefName"), pr.get("body"), mine) if i in tasks
            and tasks[i][1].get("type") == "task" and tasks[i][1].get("direction") in dirs
            and tasks[i][1].get("status") in ("todo", "doing", "waiting", "review")]
     part = is_part(pr.get("body"))
     ok = True
     for tid in ids:
-        head = tasks[tid][1]
         try:
+            try:  # metis-1235: принятые argus пункты отмечаются и у PR «часть» — «часть» только не даёт закрыть
+                tasks[tid] = tick_accepted(pantheon, t, repo, pr, tid, tasks[tid], T, accepted, log)
+            except Exception as e:  # noqa: BLE001 — сбой отметки не роняет весь проход: эту задачу повторим, тревога
+                ok = False
+                errors[f"{repo}#{n}"] = f"{tid}: отметка пунктов по приёмке argus: {type(e).__name__}: {e}"
+                continue
             if part:
                 note = f"PR #{n} ({repo}) слит, в теле «часть» — задача не закрыта"
                 if not journal_has(tasks[tid][0], T, note):
                     T.task_set(pantheon, t, tid, {}, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, «часть» — не закрыта")
-                continue
-            try:
-                tasks[tid] = tick_accepted(pantheon, t, repo, pr, tid, tasks[tid], T, accepted, log)
-            except Exception as e:  # noqa: BLE001 — сбой отметки не роняет весь проход: эту задачу повторим, тревога
-                ok = False
-                errors[f"{repo}#{n}"] = f"{tid}: отметка пунктов по приёмке argus: {type(e).__name__}: {e}"
                 continue
             head = tasks[tid][1]
             left = T.unchecked_criteria(head, tasks[tid][2])
@@ -728,7 +823,10 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=N
                 nums = ", ".join(map(str, T.unchecked_numbers(head, tasks[tid][2])))
                 note = f"PR #{n} ({repo}) слит, неотмечено {left} (пункты {nums})"
                 if head.get("status") != "review" or not journal_has(tasks[tid][0], T, note):
-                    T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
+                    # metis-1255: «Дальше» на карточке — что ждёт задача, если там пусто (вписанное человеком не
+                    # затираем); через 3 суток — тревога (boardmerged.merged_stuck)
+                    fields = {"status": "review"} | ({} if head.get("next") else {"next": UNCHECKED_NEXT.format(nums=nums)})
+                    T.task_set(pantheon, t, tid, fields, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, неотмечено {left} — review")
                 continue
             if close_done(pantheon, t, tid, tasks[tid], repo, pr, T, actual_for):
@@ -736,7 +834,7 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=N
         except ValueError as e:  # задача изменилась или шапка не прошла проверку — PR не отмечаем, повторим
             ok = False
             errors[f"{repo}#{n}"] = f"{tid}: {e}"
-    return ok
+    return tick_named(pantheon, t, repo, pr, dirs, set(ids), T, accepted, log, errors) and ok
 
 
 def close_done(pantheon, t, tid, task, repo, pr, T, actual_for, why=""):
@@ -767,12 +865,8 @@ JOURNAL_PR_RE = re.compile(r"(?:\bPR\s*#?|/pull/|(?<=[\w.-])#)(\d{1,6})\b")
 CHECKED_WHY = ", все пункты «Готово, когда» отмечены"
 
 
-def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, open_ids=()):
-    """Задача doing/review, у которой все пункты «Готово, когда» отмечены (хотя бы один), а PR из её журнала слит
-    (кэш fetch, репозиторий её направления), → done той же записью, что и по Closes (metis-0583). PR без Closes и под
-    общей веткой (simplify-*) иначе оставляли задачу висеть в doing после слияния. Без пунктов «Готово, когда» не
-    закрываем: «всё отмечено» нечем доказать; задачу с открытым PR (open_ids) — тоже: работа ещё идёт. Из нескольких
-    слитых PR журнала — последний по времени слияния; «часть» в его теле — задача остаётся открытой."""
+def merged_by_num(merged, repo_dirs):
+    """Слитые PR кэша репозиториев из repo_dirs → {номер: [(repo, строка)]}."""
     by_num = {}
     for repo, rows in sorted(merged.items()):
         if repo not in repo_dirs:
@@ -780,6 +874,59 @@ def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, op
         for pr in rows if isinstance(rows, list) else []:
             if isinstance(pr, dict) and isinstance(pr.get("number"), int) and merged_ts(pr.get("mergedAt")) is not None:
                 by_num.setdefault(pr["number"], []).append((repo, pr))
+    return by_num
+
+
+BACKLOG_FROM = ("doing", "review", "waiting")   # догон отметок (tick_backlog): задачи с хвостом пунктов
+
+
+def tick_backlog(pantheon, t, merged, repo_dirs, T, accepted, log, errors):
+    """Догон отметок (metis-1235): задача doing/review/waiting с неотмеченными пунктами, у которой в журнале PR («PR #N»),
+    слитый в репозитории её направления (кэш fetch), → пункты, которые argus принял с --criteria на head слияния этого
+    PR, отмечаются (та же сверка хеша T.criteria_tick). Приёмка любого времени: и до слияния, и после него (argus
+    принял на уже слитый head — других путей отметить пункт нет), и по PR, обработанному до выпуска этой правки (уже в
+    done состояния, вне since). Дальше close_checked закрывает задачу, если отмечено всё, а последний PR — без «часть».
+    accepted(repo, строка) зовётся один раз на PR за проход. Сбой — в errors, проход идёт дальше."""
+    if not accepted:
+        return
+    by_num = merged_by_num(merged, repo_dirs)
+    if not by_num:
+        return
+    memo = {}
+    tasks = T.load_tasks(pantheon, T.WORK_TYPES)
+    for tid, (path, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in BACKLOG_FROM or not T.unchecked_criteria(head, body):
+            continue
+        nums = sorted({int(n) for x in T._journal(body) for n in JOURNAL_PR_RE.findall(x[2])})
+        for n in nums:
+            for repo, pr in by_num.get(n, []):
+                if head.get("direction") not in repo_dirs[repo]:
+                    continue
+                key = f"{repo}#{n}"
+                try:
+                    if key not in memo:
+                        memo[key] = accepted(repo, pr) or {}
+                    want = memo[key].get(tid)
+                    if not want:
+                        continue
+                    got = T.criteria_tick(pantheon, t, tid, want, "плановый проход",
+                                          f"PR #{n} ({repo}) слит: argus принял пункты на head "
+                                          f"{str(pr.get('head') or '')[:12]} (догон)")
+                except Exception as e:  # noqa: BLE001 — сбой отметки не роняет проход: следующий кэш повторит, тревога
+                    errors[key] = f"{tid}: догон отметки по приёмке argus: {type(e).__name__}: {e}"
+                    memo.setdefault(key, {})
+                    continue
+                if got:
+                    log.append(f"{tid}: отмечены пункты {', '.join(map(str, got))} по приёмке argus на слитом PR #{n} (догон)")
+
+
+def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, open_ids=()):
+    """Задача doing/review, у которой все пункты «Готово, когда» отмечены (хотя бы один), а PR из её журнала слит
+    (кэш fetch, репозиторий её направления), → done той же записью, что и по Closes (metis-0583). PR без Closes и под
+    общей веткой (simplify-*) иначе оставляли задачу висеть в doing после слияния. Без пунктов «Готово, когда» не
+    закрываем: «всё отмечено» нечем доказать; задачу с открытым PR (open_ids) — тоже: работа ещё идёт. Из нескольких
+    слитых PR журнала — последний по времени слияния; «часть» в его теле — задача остаётся открытой."""
+    by_num = merged_by_num(merged, repo_dirs)
     if not by_num:
         return
     tasks = T.load_tasks(pantheon, T.WORK_TYPES)

@@ -45,7 +45,7 @@ def test_wake_task_needs_owner_word_0261():
     e.agents([bg("q-dir", "stopped", "abcdef01-1")])
     c0 = len(e.calls())
     r = e.run("wake", "q-dir", "сделай", "X", t=T0, extra=dict(hq, PANTHEON_FAKE_SWAP="9"))
-    pushed = open(e.st("push", "abcdef01-1.txt")).read() if os.path.exists(e.st("push", "abcdef01-1.txt")) else ""
+    pushed = push_read(e.st("push", "abcdef01-1.txt"))
     check(r.returncode == 0 and ["respawn", "abcdef01"] in e.calls()[c0:] and
           pushed.startswith("[Пантеон: задание от zeus] сделай X"), f"0261: wake со словом: {r.stdout} {r.stderr} {pushed}")
     check(_cap_rows(e)[-1]["result"] == "allowed", f"0261: wake со словом — строка замера: {_cap_rows(e)[-1]}")

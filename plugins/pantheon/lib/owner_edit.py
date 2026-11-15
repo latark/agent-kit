@@ -17,7 +17,10 @@
         заменена, нет ключа — дописан в конец раздела, нет раздела — раздел в конец файла; прочий текст не тронут.
         Значение ключа на нескольких строках — отказ (правка — owner-edit propose). Применяет тот же проход.
 
-Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml и
+Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml, grants.toml
+(metis-0680; нет файла — заводит первая заявка), packs/<направление>/mcp.json (metis-0949: пакет окна —
+объект JSON; команда сервера по-прежнему проходит window_rules при сборке; approved.json — нет: его одобрение
+по хешу пустило бы вне песочницы скрипт, который пишет сама роль, а текста скрипта владелец не видит) и
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
 права и хуки — никогда. Новый текст — UTF-8 без NUL и без невидимых, управляющих и bidi-знаков (HIDDEN, кроме \\n и
 \\t; --why — тоже, и ещё не длиннее WHY_MAX и без лишних пробелов: why_ok, его повторяет и valid() прохода). .toml —
@@ -67,7 +70,7 @@ import subprocess
 import sys
 import tomllib
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
 
@@ -77,7 +80,7 @@ def set_core(mod):
     P = mod
 
 
-FILES = re.compile(r"\.claude/pantheon/policy\.toml|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
+FILES = re.compile(r"\.claude/pantheon/(?:policy|grants)\.toml|\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/mcp\.json|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
 REQ_TTL = 24 * 3600       # заявка старше суток — снята: владелец не ответил
 RETRY_SEC = 600           # окно Touch ID закрыто без ответа — следующее не раньше
 PRESENT_SEC = 300         # владелец у Mac: простой меньше 5 минут
@@ -134,7 +137,7 @@ def rel_of(arg):
 def target(rel):
     """Абсолютный путь файла: только из FILES, без ссылок на пути (папки — настоящие, внутри HOME)."""
     if not FILES.fullmatch(rel or ""):
-        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, ~/.claude/agents/_parts/*.part)")
+        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, grants.toml, packs/<направление>/mcp.json, ~/.claude/agents/_parts/*.part)")
     home = os.path.realpath(P.HOME)
     p = os.path.join(home, rel)
     if os.path.realpath(os.path.dirname(p)) != os.path.dirname(p):
@@ -148,6 +151,8 @@ def read_target(rel):
     try:
         fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
+        if rel == GRANTS_REL:   # grants.toml заводит первая заявка pantheon grant request (metis-0680)
+            return b""
         raise Refuse(f"~/{rel}: файла нет (новые файлы — не этой командой)")
     except OSError as e:
         raise Refuse(f"~/{rel}: не читается ({e.strerror or type(e).__name__})")
@@ -184,6 +189,13 @@ def check_text(rel, new):
             tomllib.loads(new)
         except tomllib.TOMLDecodeError as e:
             raise Refuse(f"новый текст ~/{rel} — не TOML: {e}")
+    if rel.endswith(".json"):   # пакет окна (metis-0949): объект JSON, иначе сборка окна его не прочтёт
+        try:
+            ok = isinstance(json.loads(new), dict)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise Refuse(f"новый текст ~/{rel} — не объект JSON")
 
 
 def make_diff(rel, old, new):
@@ -583,17 +595,34 @@ def window_text(req):
     return text if P.handoff_mod().showable(text) and len(text) <= WINDOW_MAX else None
 
 
-def question(req):
+# metis-1252: знаки ASCII-пунктуации, которые в одной строке Markdown ничего не прячет и не меняет (белый список —
+# находка проверки безопасности PR #493); «~» — только перед «/» (путь «~/…»), «](» и «][» — ссылки — нельзя
+MD_SAFE = frozenset('/.-:[]="\',(){}$?+;#')
+MD_LINK = re.compile(r"\]\(|\]\[|~(?!/)")
+
+
+def plain_ok(req):
+    """metis-1252: вопрос без md годится окну вопросов, только если каждый знак ASCII-пунктуации в нём из MD_SAFE, «~»
+    только перед «/», «_» только внутри слова и нет «](» и «][»: тогда текст одинаков, рисует окно Markdown или нет (находки проверки
+    безопасности PR #493). Иначе — только вопрос в чате с md."""
+    q = re.sub(r"(?<=[^\W_])_+(?=[^\W_])", "", question(req, plain=True))   # «_» внутри слова (env_from) — не курсив
+    return all(c in MD_SAFE or c == "~" for c in q if c in MD_PUNCT) and not MD_LINK.search(q)
+
+
+def question(req, plain=False):
     """Вопрос для Зевса: [id], файл, sha диффа, правка строками (shown) через « ⏎ », ключи и последним — «Пояснение
     роли: …» (--why, mark): после правки и с меткой он не подделает её начало «Правка, строк 0: …» (R3-2 С). Вопрос —
     одна строка (хук окна вопросов сводит переводы строк в пробел), а SEP внутри строки правки экранирован — «ok;
     -Правило» не читается как вторая строка (ревью PR #362, круг 2, Д). Вопрос идёт в чат, а чат рисует Markdown: всё,
     что пришло из файла и от роли (путь, строки правки с разделами, ключи, --why), — через md, каждый знак ASCII-
-    пунктуации экранирован и виден буквально (R4-2 Б1). «[id]» в начале — как есть: по нему сверка ищет вопрос."""
-    why = f". Пояснение роли: {md(mark(req['why']))}" if req.get("why") else ""
-    rows = [md(r) for r in shown(req)]
-    return (f"[{req['id']}] Применить правку {md('~/' + req['file'])} (задача {req['task']}, sha диффа "
-            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req, md)
+    пунктуации экранирован и виден буквально (R4-2 Б1). «[id]» в начале — как есть: по нему сверка ищет вопрос.
+    metis-1252: plain=True — тот же вопрос без md, для окна вопросов: оно Markdown не рисует, и обратные слэши md там
+    видны, а Зевс их опускал — «да» в окне сверка отклоняла, и он уходил в вопрос текстом в чате без кнопок."""
+    fix = str if plain else md
+    why = f". Пояснение роли: {fix(mark(req['why']))}" if req.get("why") else ""
+    rows = [fix(r) for r in shown(req)]
+    return (f"[{req['id']}] Применить правку {fix('~/' + req['file'])} (задача {req['task']}, sha диффа "
+            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req, fix)
             + why)
 
 
@@ -853,9 +882,14 @@ def _propose(rel, new, task, why, prog, cur=None):
         return err(f"{prog}: заявку не записать ({e})", 3)
     touch = window_text(dict(req, window=win))
     print(f"заявка {req['id']}: ~/{rel}, sha до {before[:12]}, sha диффа {req['diff_sha']}\n\n{diff}\n"
-          f"Вопрос Зевсу (окно вопросов, варианты «А — Да, применить» и «Б — Нет»), строка целиком:\n  {question(req)}\n"
+          + (f"Вопрос Зевсу окном вопросов (AskUserQuestion, варианты «А — Да, применить» и «Б — Нет»), строка "
+             f"целиком:\n  {question(req, plain=True)}\nЕсли окно вопросов открыть нельзя — сообщением в чате, строка "
+             f"целиком:\n  {question(req)}\n" if plain_ok(req) else
+             f"Вопрос Зевсу сообщением в чате (в правке знаки Markdown — окну вопросов её не показать дословно), "
+             f"варианты «А — Да, применить» и «Б — Нет», строка целиком:\n  {question(req)}\n")
           + ("Или Touch ID: плановый проход покажет окно с этой правкой, когда владелец у Mac.\n" if touch else
-             "Окно Touch ID правку целиком не покажет — только «да» в окне вопросов.\n")
+             ("Окно Touch ID правку целиком не покажет — только «да» в окне вопросов.\n" if plain_ok(req) else
+              "Окно Touch ID правку целиком не покажет — только «да» на вопрос в чате.\n"))
           + f"Применит плановый проход, если ~/{rel} до того не изменится. Итог — pantheon owner-edit status {req['id']}")
     return 0
 
@@ -963,6 +997,66 @@ def cmd_policy(rest):
     return _propose(POLICY_REL, new, kv["--task"], why, prog, cur)
 
 
+# --- pantheon grant request: право окну заявкой, а не пересказом владельцу (metis-0680) ----------------------------
+
+GRANTS_REL = ".claude/pantheon/grants.toml"
+GRANT_USAGE = ("pantheon grant request [--write <путь>]... [--allow <правило>]... [--domain <домен>]... [--days N] "
+               "--task ID --why \"зачем\"")
+GRANT_FLAGS = {"--write": "write", "--allow": "allow", "--domain": "domains"}
+GRANT_DAYS_MAX = 30
+
+
+def grant_text(old, win, lists, until, task, why):
+    """grants.toml с новой записью [[grant]] в конце; прочий текст не тронут."""
+    lines = [f"\n[[grant]]   # {task}, заявка из окна {win}", f"window = {json.dumps(win)}", f"until = \"{until}\"",
+             f"why = {json.dumps(why, ensure_ascii=False)}"]
+    lines += [f"{k} = [{', '.join(json.dumps(x, ensure_ascii=False) for x in v)}]" for k, v in lists.items() if v]
+    return (old if not old or old.endswith("\n") else old + "\n") + "\n".join(lines) + "\n"
+
+
+def cmd_grant(rest):
+    """pantheon grant request: роль не пишет grants.toml — команда кладёт заявку owner-edit с одной записью [[grant]]
+    своему окну; «да» в окне вопросов Зевса или Touch ID — проход пишет файл, сборка окна применяет право до срока."""
+    prog = "pantheon grant request"
+    if rest[:1] != ["request"]:
+        return err("вызов: " + GRANT_USAGE)
+    lists, kv, args, i = {v: [] for v in GRANT_FLAGS.values()}, {}, rest[1:], 0
+    while i < len(args):
+        a = args[i]
+        if i + 1 >= len(args) or not (a in GRANT_FLAGS or a in ("--days", "--task", "--why")) or a in kv:
+            return err(f"{prog}: {a} — неизвестный флаг, повтор или нет значения. Вызов: {GRANT_USAGE}")
+        if a in GRANT_FLAGS:
+            lists[GRANT_FLAGS[a]].append(args[i + 1])
+        else:
+            kv[a] = args[i + 1]
+        i += 2
+    why = " ".join(kv.get("--why", "").split())
+    win = who()[0]
+    try:
+        if not win:
+            raise Refuse("только из окна роли: право выдаётся окну, где идёт заявка")
+        if not TASK_RE.fullmatch(kv.get("--task", "")) or not why or not why_ok(why) or not any(lists.values()):
+            raise Refuse(f"нужны --task, --why (до {WHY_MAX} знаков) и хоть одно из --write, --allow, --domain")
+        if any(hidden_at(x, "") for v in lists.values() for x in v):
+            raise Refuse("невидимый или управляющий знак в значении")
+        days = int(kv.get("--days", "7")) if kv.get("--days", "7").isdigit() else 0
+        if not 1 <= days <= GRANT_DAYS_MAX:
+            raise Refuse(f"--days — целое от 1 до {GRANT_DAYS_MAX}")
+        until = (datetime.fromtimestamp(P.now()) + timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        cur = read_target(GRANTS_REL)
+        try:
+            old = cur.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refuse(f"~/{GRANTS_REL}: не UTF-8")
+        new = grant_text(old, win, lists, until, kv["--task"], why)
+        _, _, errors, _ = P.grants_load(new[len(old):])   # та же проверка, что у сборки окна: ключи, конфиг — нет
+        if errors:
+            raise Refuse("; ".join(errors))
+    except Refuse as e:
+        return err(f"{prog}: отказ — {e}")
+    return _propose(GRANTS_REL, new, kv["--task"], why, prog, cur)
+
+
 def read_result(d, rid):
     raw = read_file(os.path.join(d, f"{rid}.result.json"), 64 * 1024)
     with contextlib.suppress(TypeError, ValueError):
@@ -1031,7 +1125,9 @@ def consent_decision(req):
     if not P.consent_is_yes(body):
         return "no", head
     q = one_line(body.split("\nответ:")[0].removeprefix("вопрос:"))
-    if q != one_line(question(req)):
+    # окно вопросов Markdown не рисует — там годится и вопрос без md (metis-1252); ответ в чате — только с md
+    window = head.removesuffix(" у Зевса").endswith("· " + P.answers_mod().WINDOW_NOTE)
+    if q != one_line(question(req)) and not (window and plain_ok(req) and q == one_line(question(req, plain=True))):
         return "wrong", head
     return "yes", head
 
@@ -1064,7 +1160,7 @@ def apply(dfd, name, req, how, evidence):
             if how == "touchid":
                 approve_line(req)
             p = target(req["file"])
-            mode = stat.S_IMODE(os.lstat(p).st_mode)
+            mode = stat.S_IMODE(os.lstat(p).st_mode) if os.path.lexists(p) else 0o644   # grants.toml — первой заявкой
             tmp = os.path.join(os.path.dirname(p), f".{os.path.basename(p)}.owner-edit.{os.getpid()}")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as fh:

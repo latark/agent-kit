@@ -87,7 +87,11 @@
   ctx.py maint-pre   PreToolUse там же: сохранившаяся сессия (кроме Зевса) новых шагов не делает — пропуск только
                      SendMessage, `pantheon saved` и `pantheon restart --status`.
   ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
-                     (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
+                     (кладёт pantheon; один раз, ≤ 8000 знаков, каждая передача — с пометкой «[Пантеон:»).
+                     Файл — очередь (metis-1253): записи «RS<время>, перевод строки, <текст>» (RS — символ 0x1e), передачи до старта дописываются, а
+                     не затирают друг друга, и приходят разом; срок 30 мин — у каждой свой, от её записи. Забирает
+                     очередь хук под блокировкой push/.lock, той же, что у записи pantheon; занята — строка «жду
+                     блокировку очереди» в журнале хуков. Файл прежнего формата (один текст) — по времени файла.
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
                      сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист. Реплики
                      в конце, на которые ответ был только текстом, не в счёт; если работа шла без вашего сообщения
@@ -2137,32 +2141,64 @@ def cmd_rewake(ev):
 
 PUSH = os.path.join(STATE, "push")   # <sessionId>.txt кладёт pantheon перед `claude respawn <id>`
 PUSH_MAX_AGE = 1800                  # старше — не доставляется: перезапуск, ради которого его клали, давно прошёл
-PUSH_MAX = 4000
+PUSH_MAX = 8000                      # вся очередь передач (PUSH_TOTAL в lib/pantheon.py), одна — до 4000
 PUSH_MARK = "[Пантеон:"              # с этой пометкой owner-log не примет текст за слова владельца (NOT_OWNER)
+PUSH_RS = "\x1e"                     # запись очереди «\x1e<время записи>\n<текст>» (push_records в lib/pantheon.py)
+
+
+def push_records(raw, mtime):
+    """Очередь → [(время записи, текст)]; файл без записей (прежний формат) — один текст со временем файла."""
+    if not raw.startswith(PUSH_RS):
+        return [(mtime, raw.strip())] if raw.strip() else []
+    out = []
+    for rec in raw.split(PUSH_RS)[1:]:
+        head, _, body = rec.partition("\n")
+        try:
+            out.append((float(head), body.strip()))
+        except ValueError:
+            pass
+    return out
 
 
 def cmd_push(ev):
     """SessionStart, asyncRewake: `claude respawn` возвращает сессию, но хода не начинает, а отправить ей текст из
-    CLI нечем. Файл забирается переименованием — два старта одной сессии не доставят его дважды."""
+    CLI нечем. Файл забирается переименованием — два старта одной сессии не доставят его дважды. Очередь
+    (metis-1253): у каждой передачи свой срок PUSH_MAX_AGE от её записи, просроченные не доставляются."""
     sid = ev.get("session_id") or ""
     if ev.get("agent_id") or not re.fullmatch(r"[\w-]{1,100}", sid):
         return 0
     src = os.path.join(PUSH, sid + ".txt")
     taken = "%s.taken.%d" % (src, os.getpid())
-    try:
-        os.rename(src, taken)
+    if not os.path.exists(src):
+        return 0
+    try:  # замок очереди (metis-1253): pantheon дописывает передачу под ним — забранная на полпути не потеряется
+        with open(os.open(os.path.join(PUSH, ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "w") as lk:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:  # строка в журнале — и признак для теста, что хук дошёл до замка и ждёт
+                hook_log("push", "%s: жду блокировку очереди" % sid)
+                fcntl.flock(lk, fcntl.LOCK_EX)
+            os.rename(src, taken)
     except OSError:
         return 0
     try:
-        age = time.time() - os.path.getmtime(taken)
+        mtime = os.path.getmtime(taken)
         with open(taken, encoding="utf-8", errors="replace") as f:
-            text = f.read().strip()
+            recs = push_records(f.read(), mtime)
     finally:
         os.remove(taken)
-    if age > PUSH_MAX_AGE:
+    now = time.time()
+    fresh = [body for t, body in recs if now - t <= PUSH_MAX_AGE]
+    if recs and not fresh:
         hook_log("push", "%s: файл старше %d мин — удалён без доставки (source=%s)" % (sid, PUSH_MAX_AGE // 60, ev.get("source")))
         return 0
-    if not text.startswith(PUSH_MARK) or len(text) > PUSH_MAX:
+    if len(fresh) < len(recs):
+        hook_log("push", "%s: %d из %d передач старше %d мин — удалены без доставки (source=%s)"
+                 % (sid, len(recs) - len(fresh), len(recs), PUSH_MAX_AGE // 60, ev.get("source")))
+    if not fresh:
+        return 0
+    text = "\n\n".join(fresh)
+    if any(not body.startswith(PUSH_MARK) for body in fresh) or len(text) > PUSH_MAX:
         hook_log("push", "%s: текст без «%s» в начале или длиннее %d — удалён без доставки" % (sid, PUSH_MARK, PUSH_MAX))
         return 0
     hook_log("push", "%s: доставлено (source=%s)" % (sid, ev.get("source")))

@@ -37,6 +37,8 @@
                                          (metis-1081), --serve — серверы и сторож
   pantheon outside key OWNER/REPO ИМЯ    ключ тестов проекта (metis-1016) — только владелец в своём терминале: значение
                                          скрытым вводом, пусто — убрать; из окна Claude Code — отказ (ниже, «исключение»)
+  pantheon outside login ID | auth URL   вход тестовой учётной записью (lib/outside_login.py, metis-1134); ссылка
+                                         входа MCP (OAuth) — в браузер владельца (lib/outside_auth.py, metis-1127)
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
 команды тестов, у сервера 0 — адрес готов, отказ — 1, отказ «занято» (два сервера, давление памяти) — 75, снятый дубль — 75 (итог у первой заявки), итога не
 дождался — 75. Без --wait — номер заявки, итог — `pantheon outside status ID`.
@@ -341,7 +343,7 @@ LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ | "
-         "login ID [--app ИМЯ] [--wait С]")
+         "login ID [--app ИМЯ] [--wait С] | auth URL [--wait С]")
 
 
 def set_core(mod):
@@ -349,21 +351,25 @@ def set_core(mod):
     P = mod
 
 
-_LOGIN = []
+_SUBS = {}
+
+
+def sub_mod(name):
+    """lib/outside_<name>.py: login — вход тестовой учётной записью без показа пароля роли (metis-1134), auth — ссылка
+    входа MCP из окна роли в браузер владельца (metis-1127). Грузит только pantheon.outside_mod (не в sys.modules)."""
+    if name not in _SUBS:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"pantheon_outside_{name}", os.path.join(os.path.dirname(os.path.abspath(__file__)), f"outside_{name}.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.set_core(P, P.outside_mod())
+        _SUBS[name] = mod
+    return _SUBS[name]
 
 
 def login_mod():
-    """lib/outside_login.py — `outside login`: вход тестовой учётной записью без показа пароля роли (metis-1134)."""
-    if not _LOGIN:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("pantheon_outside_login",
-                                                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                                   "outside_login.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mod.set_core(P, P.outside_mod())   # этот модуль: грузит его только pantheon.outside_mod (не в sys.modules)
-        _LOGIN.append(mod)
-    return _LOGIN[0]
+    return sub_mod("login")
 
 
 def err(text):
@@ -883,6 +889,7 @@ def sandbox_env(tmpdir, kind, port=None, keys=None):
                 "TMPDIR": tmpdir, "PANTHEON_STATE": P.STATE, "NEXT_TELEMETRY_DISABLED": "1", "DO_NOT_TRACK": "1"})
     if kind == "test":
         env["CI"] = "1"
+        env["HEAVY_LOCAL_TESTS"] = "1"  # запасной путь «только CI»: heavy не отказывает тестам прохода (metis-1174)
     if port:
         env["PORT"] = str(port)
     return env
@@ -1714,11 +1721,12 @@ def narrow_plan(d, sha, argv, line, base):
 
 # --- итоги --------------------------------------------------------------------------------------------------------
 
-def save_result(qdir, rid, res):
+def save_result(qdir, rid, res, private=None):
     """Итог — в STATE/outside/runs/<ID>.json и, если заявка из папки, в <ID>.result.json рядом с ней. Запись в runs/
-    несёт ещё qdir и дорожку прохода (lane, metis-1081): recover_results, сторож и уборка копий берут только свою."""
+    несёт ещё qdir и дорожку прохода (lane, metis-1081): recover_results, сторож и уборка копий берут только свою.
+    private — поля только для <ID>.result.json папки заявок (runs/ читают окна; код адреса входа, argus #453 Д)."""
     res = {"id": rid, "updated": P.stamp(), **res}
-    text = json.dumps(res, ensure_ascii=False, indent=1)
+    text = json.dumps({**res, **(private or {})}, ensure_ascii=False, indent=1)
     os.makedirs(root("runs"), mode=0o700, exist_ok=True)
     lane = getattr(_LANE, "name", None)
     P.write_json(root("runs", rid + ".json"), {**res, **({"qdir": qdir} if qdir else {}),
@@ -2670,7 +2678,7 @@ def stop_requests():
         if dfd is None:
             continue
         try:
-            for name in os.listdir(dfd):
+            for name in _listdir_safe(dfd):
                 rid = name[:-len(".stop")]
                 if not name.endswith(".stop") or not ID_RE.fullmatch(rid):
                     continue
@@ -2959,7 +2967,7 @@ def _stale(t=None):
         if dfd is None:
             continue
         try:
-            for name in os.listdir(dfd):
+            for name in _listdir_safe(dfd):
                 rid, _, ext = name.partition(".")
                 if ext not in ("result.json", "stop") or not ID_RE.fullmatch(rid) or rid in live:
                     continue
@@ -3029,7 +3037,8 @@ def lane_of(req, window, rid):
         d, _roots = resolve_dir(req["dir"], window)
         if d is None:
             return "quick"          # не запоминается: папка может появиться в реестре позже (ревью argus #427)
-        full = any(str(r).rsplit("/", 1)[-1] in P.merge_mod().FULL_TESTS for r in remotes(d))
+        M = P.merge_mod()
+        full = any(M.repo_entry(M.FULL_TESTS, r) for r in remotes(d))
         _LANE_MEMO[key] = "full" if full else "quick"
     return _LANE_MEMO[key]
 
@@ -3069,6 +3078,13 @@ def _gone(dfd, name):
     return False
 
 
+def _listdir_safe(dfd):
+    """Имена в папке dfd по порядку; папку не прочесть — [] (круг прохода серверов идёт до своей уборки, metis-1186)."""
+    with contextlib.suppress(OSError):
+        return sorted(os.listdir(dfd))
+    return []
+
+
 def requests(kinds=KINDS, limit=None, taken=None, skip=(), lane=None):
     """[(время, вид, qdir, окно, id, заявка)] по всем папкам — только заявки своих проходов (kinds): чужие остаются
     лежать (metis-0614: проход тестов не съедает заявки серверов и наоборот). Битые и подложенные — удаляются с итогом
@@ -3085,7 +3101,7 @@ def requests(kinds=KINDS, limit=None, taken=None, skip=(), lane=None):
         if dfd is None:
             continue
         try:
-            for name in sorted(os.listdir(dfd)):
+            for name in _listdir_safe(dfd):
                 if not name.endswith(".req.json"):
                     continue
                 rid = name[:-len(".req.json")]
@@ -3605,7 +3621,7 @@ def _zombies(t=None, lane="full"):
         return 0                    # заход жив: running — его, queued ещё разбирается
     n = 0
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+    for name in _listdir_safe(runs):
         rid = name[:-len(".json")]
         if name.endswith(".json") and ID_RE.fullmatch(rid) and run_lane(rid) == lane \
                 and P.read_json(os.path.join(runs, name), {}).get("state") == "running":
@@ -3617,7 +3633,7 @@ def _zombies(t=None, lane="full"):
         if dfd is None:
             continue
         try:
-            names = os.listdir(dfd)
+            names = _listdir_safe(dfd)
             for name in names:
                 rid = name[:-len(".result.json")]
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" in names:
@@ -3647,8 +3663,8 @@ def pending_quick():
 
 
 def pending_serve():
-    """Тику: дело проходу серверов — заявки serve, живые серверы (сторож) или «стоп»."""
-    return bool(_queued_ids(("serve",))) or bool(servers()) or bool(stop_requests())
+    """Тику: дело проходу серверов — заявки serve, живые серверы (сторож), «стоп» или ссылки входа MCP (metis-1127)."""
+    return bool(_queued_ids(("serve",))) or bool(servers()) or bool(stop_requests()) or sub_mod("auth").pending()
 
 
 def pending():
@@ -3719,7 +3735,7 @@ def recover_results(t=None, lane=None):
         if dfd is None:
             continue
         try:
-            names = os.listdir(dfd)
+            names = _listdir_safe(dfd)
             for name in names:
                 rid = name[:-len(".result.json")]
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid):
@@ -3739,7 +3755,7 @@ def recover_results(t=None, lane=None):
         finally:
             os.close(dfd)
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+    for name in _listdir_safe(runs):
         rid = name[:-len(".json")]
         res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
         if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running" \
@@ -3784,7 +3800,7 @@ def _watch_due(t=None):
     t = P.now() if t is None else t
     out = []
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+    for name in _listdir_safe(runs):
         rid = name[:-len(".json")]
         if not name.endswith(".json") or not ID_RE.fullmatch(rid):
             continue
@@ -3801,7 +3817,7 @@ def _watch_due(t=None):
         if dfd is None:
             continue
         try:
-            names = os.listdir(dfd)
+            names = _listdir_safe(dfd)
             for name in names:
                 rid = name[:-len(".result.json")]
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" not in names:
@@ -3914,6 +3930,7 @@ def serve_round(t=None):
                 save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": why})
         sweep()
     login_mod().login_round()   # заявки входа (metis-1134): серверы уже подняты этим проходом
+    sub_mod("auth").auth_round()   # ссылки входа MCP из окон — в браузер владельца (metis-1127)
     drop_orphan_stops()
     drop_orphan_work()
 
@@ -4424,8 +4441,8 @@ def main(rest):
         return cmd_request(sub, rest[1:])
     if sub == "status":
         return cmd_status(rest[1:])
-    if sub == "login":
-        return login_mod().cmd_login(rest[1:])
+    if sub in ("login", "auth"):
+        return getattr(sub_mod(sub), "cmd_" + sub)(rest[1:])
     if sub == "stop":
         return cmd_stop(rest[1:])
     if sub == "run" and len(rest) == 1:

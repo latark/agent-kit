@@ -34,7 +34,50 @@ import json, os, sys
 log = os.environ["FAKE_CLAUDE_LOG"]
 open(log, "a").write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
 a = sys.argv[1:]
-if a[:1] == ["agents"]:
+
+
+def _held(p):
+    """Держит ли другой процесс flock на файле p (блокировка имени start-<имя> у fresh_start)."""
+    import fcntl
+    try:
+        fd = os.open(p, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+silent = os.environ.get("FAKE_AGENTS_SILENT_AFTER_STOP")  # metis-1192: после первого claude stop agents — не JSON
+if silent and a[:1] == ["stop"]:
+    open(silent, "w").close()
+if a[:1] == ["agents"] and silent and os.path.exists(silent):
+    print("Error: daemon not ready")
+elif a[:1] == ["agents"] and os.environ.get("FAKE_AGENTS_LOCKED") and _held(os.environ["FAKE_AGENTS_LOCKED"]):
+    print(open(os.environ["FAKE_AGENTS_LOCKED_LIST"]).read())  # metis-1251: пока держат блокировку — другой список
+elif a[:1] == ["agents"]:
+    cnt =os.environ.get("FAKE_AGENTS_COUNT")  # metis-1192: первые FAKE_AGENTS_GOOD вызовов — список, дальше не JSON;
+    if cnt:                                    # FAKE_AGENTS_BAD=K[,K2] — не JSON только вызовы с этими номерами (с 1)
+        n = len(open(cnt).read()) if os.path.exists(cnt) else 0
+        open(cnt, "a").write(".")
+        bad = os.environ.get("FAKE_AGENTS_BAD")
+        if (str(n + 1) in bad.split(",")) if bad else n >= int(os.environ.get("FAKE_AGENTS_GOOD") or "1"):
+            print("Error: daemon not ready")
+            sys.exit(0)
+    if os.environ.get("FAKE_AGENTS_SLEEP"):  # metis-1175: claude agents не отвечает
+        import time
+        time.sleep(float(os.environ["FAKE_AGENTS_SLEEP"]))
+    slow = os.environ.get("FAKE_AGENTS_SLOW_NEXT")  # metis-1180: первый вызов отвечает, все следующие спят 5 с
+    if slow and os.path.exists(slow):
+        import time
+        time.sleep(5)
+    elif slow:
+        open(slow, "w").close()
     nxt = os.environ.get("FAKE_AGENTS_NEXT")       # первый вызов — FAKE_AGENTS, все следующие — этот файл
     if nxt and os.path.exists(nxt + ".seen"):
         print(open(nxt).read())
@@ -667,9 +710,24 @@ def _relayed(e):
     return [c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
 
 
+def push_queue(p):
+    """Очередь push-файла (metis-1253): записи «\\x1e<время>\\n<текст>» → [(время, текст)]; прежний формат — один текст
+    со временем 0. Нет файла — []. Разбор свой, не из lib: тест сверяет формат, а не повторяет код."""
+    if not os.path.exists(p):
+        return []
+    raw = open(p, encoding="utf-8").read()
+    if not raw.startswith("\x1e"):
+        return [(0.0, raw.strip())]
+    return [(float(r.partition("\n")[0]), r.partition("\n")[2].strip()) for r in raw.split("\x1e")[1:]]
+
+
+def push_read(p):
+    """Текст очереди так, как его отдаст хук: передачи через пустую строку; нет файла — ""."""
+    return "\n\n".join(b for _, b in push_queue(p))
+
+
 def _pushed(e):
-    p = e.st("push", "2e057e05-1.txt")
-    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+    return push_read(e.st("push", "2e057e05-1.txt"))
 
 
 def _two_blocked_env():

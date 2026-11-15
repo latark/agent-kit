@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 
 __all__ = [
-    "FRESH_CTX", "FRESH_IDLE_MIN", "WAKE_TEXT", "NEW_ORDER_GOAL", "WAITING_GOAL", "COORDINATOR_GOAL", "TASK_GOAL", "OPEN_STATUSES",
+    "FRESH_CTX", "FRESH_IDLE_MIN", "WAKE_TEXT", "NEW_ORDER_GOAL", "BLOCKED_GOAL", "WAITING_GOAL", "COORDINATOR_GOAL", "TASK_GOAL", "OPEN_STATUSES",
     "load_pause",
     "PUSH_MAX_AGE", "resume_session", "transcript_path", "session_context", "fresh_reason", "latest_zeus_handoff",
     "state_files", "fresh_text", "fresh_target", "fresh_start", "_fresh_start", "copies_message", "name_holders",
@@ -27,7 +27,8 @@ __all__ = [
     "capacity_probe", "capacity_log", "NO_WORD_WHY", "START_REQ", "START_REQ_KEYS", "start_request", "start_order", "cancel_request", "run_closed",
     "take_start_requests", "resume_request", "hestia_request", "REQ_FRESH",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
-    "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake",
+    "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake", "AGENTS_SILENT", "start_agents", "launch_snapshot",
+    "agents_snapshot", "zeus_copies", "fresh_skip",
 ]
 
 
@@ -59,23 +60,35 @@ NEW_ORDER_GOAL = (" Поручение Зевса или владельца, п�
 # metis-0725: задачу, которую ведёт другая сессия (owner — не окно и не его команда, как у самозапуска, metis-0564),
 # цель не держит, даже если она в поручении или в чек-листе эпика: 03.11 окно Метиды тянуло metis-0272 (owner
 # agent-kit-47). Строку «снята — ведёт <owner>» печатают `task goal` и `task set owner=…` из окна (PANTHEON_SESSION).
-WAITING_GOAL = (" Задача уходит из цели, только если `pantheon task set` или `pantheon task goal <id>` ответил строкой "
-                "«<id>: снята с цели окна» — так бывает, когда задача ждёт ответа владельца на вопрос или другую задачу, "
+# metis-1036: судья цели читал «заблокировано» и WAITING_GOAL как «И»: 09.11 окно Афины вернуло 8 раз подряд («чек-лист
+# не закрыт»), хотя отчёт «заблокировано» с блокером и вопросом, а все задачи «сняты». Поэтому «заблокировано» с
+# блокером и вопросом достигает цели, когда ВСЕ не сделанные пункты и задачи ждут названного блокера (слово владельца
+# 09.11: «когда все её задачи заблокированы и блокер назван»), строк «снята» не требует; WAITING_GOAL — только про
+# «готово». Пункт, который можно делать, и «Нужно решение: нет» цель не отпускают (argus a4c5588c, пробы (б) и (г)).
+BLOCKED_GOAL = (" «Статус: заблокировано» достигает цели, когда в поле «Нужно решение» — вопрос владельцу или Зевсу "
+                "(не «нет»), назван блокер, и вся остальная работа поручения или чек-листа — каждый не сделанный пункт "
+                "и каждая задача в работе (doing) или в очереди (todo) — ждёт этого или другого названного в отчёте "
+                "блокера (прямо или через пункт, который его ждёт) или её ведёт другая сессия. Строки «снята» и "
+                "закрытие пунктов для этого не нужны, как и отдельный перечень задач; условия ниже о задачах — только "
+                "для «готово». Пункт или задача, которую можно делать без ответа, — в цели и держит и «заблокировано»: "
+                "пока она не сделана, «заблокировано» цель не достигает.")
+WAITING_GOAL = (" Для «Статус: готово» задача уходит из цели, только если `pantheon task set` или "
+                "`pantheon task goal <id>` ответил строкой «<id>: снята с цели окна» — так бывает, когда задача ждёт ответа владельца на вопрос или другую задачу, "
                 "закрыта или её ведёт другая сессия (owner — не это окно и не его команда), даже если она в поручении, "
-                "в чек-листе эпика, в работе или в очереди. Строка «остаётся в цели окна» или её нет — задача в цели, "
-                "как в работе (doing). Верь последней такой строке по этой задаче: «остаётся» после «снята» возвращает "
-                "её в цель. «Снята» засчитывается, только если напечатана в том же ходе, что и последний отчёт сессии "
+                "в чек-листе эпика, в работе или в очереди. Строка «остаётся в цели окна» или её нет — задача в цели "
+                "«готово», как в работе (doing). Верь последней такой строке по этой задаче: «остаётся» после «снята» "
+                "возвращает её в цель. «Снята» засчитывается, только если напечатана в том же ходе, что и последний отчёт сессии "
                 "(после последнего сообщения, пришедшего в сессию): блокер мог закрыть, а owner сменить кто-то другой — "
                 "более ранняя «снята» устарела, задача в цели, пока свежая `pantheon task goal <id>` снова не скажет "
-                "«снята». Задачи в работе (doing) и в очереди (todo) — в цели.")
+                "«снята». Задачи в работе (doing) и в очереди (todo) — в цели «готово».")
 COORDINATOR_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и все "
                     "пункты чек-листа эпика в STATUS.md отмечены сделанными, либо «Статус: заблокировано» с названным "
-                    "блокером и вопросом владельцу или Зевсу." + WAITING_GOAL + NEW_ORDER_GOAL)
+                    "блокером и вопросом владельцу или Зевсу." + BLOCKED_GOAL + WAITING_GOAL + NEW_ORDER_GOAL)
 # поручение названо явно (одна задача, проверка) — цель по нему, а не по эпику: иначе Stop-хук не отпустит сессию, пока
 # не закрыт весь чек-лист, и короткая проверка разрастается в эпик (живой запуск athena-0001 15.10)
 TASK_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и выполнен "
              "критерий «готово» этого поручения, либо «Статус: заблокировано» с названным блокером и вопросом владельцу "
-             "или Зевсу. Другие задачи и пункты эпика в эту цель не входят — кроме нового поручения." + WAITING_GOAL
+             "или Зевсу. Другие задачи и пункты эпика в эту цель не входят — кроме нового поручения." + BLOCKED_GOAL + WAITING_GOAL
              + NEW_ORDER_GOAL)
 
 
@@ -206,11 +219,12 @@ def fresh_target(name, origin):
     return (role, folder, run, window) if run else P.no_window_reason(window)
 
 
-def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None):
+def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None, resume=None):
     """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
     agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log; goal —
     условие цели координатора (по умолчанию COORDINATOR_GOAL, цель эпика; смена цели самозапуска — TASK_GOAL). Та же
-    блокировка имени и повторная проверка, что у resume_session. → код."""
+    блокировка имени и повторная проверка, что у resume_session. resume — id сессии: поднять её же переписку под этим
+    именем (`claude --resume`, переименование «zeus (2)» → «zeus», metis-1251), а не чистый контекст. → код."""
     with P.lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             P.start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
@@ -219,10 +233,10 @@ def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None):
         if why:
             P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
             return P.skipped(why)
-        return _fresh_start(name, a, text, origin, reason, goal)
+        return _fresh_start(name, a, text, origin, reason, goal, resume)
 
 
-def _fresh_start(name, a, text, origin, reason=None, goal=None):
+def _fresh_start(name, a, text, origin, reason=None, goal=None, resume=None):
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
@@ -235,7 +249,9 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
         text = f"{P.START_MARK} поручение от {origin}] {text}"
     if role == "domain-coordinator":
         text = "/goal " + text + " " + (goal or COORDINATOR_GOAL)  # как у pantheon start: Stop-хук с целью (DONE-02)
-    agents = P.agents_all() or []
+    agents, _, why = start_agents(True)
+    if why:  # metis-1192: не JSON или не ответил — не «копий нет»
+        return fresh_skip(name, a, origin, why)
     live = P.live_copies(name, agents)
     if any(not x.get("id") for x in live):
         why = copies_message(name, live)
@@ -245,18 +261,18 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
     stopped = list(live)
     P.stop_copies(name, live, "stop-fresh")
     for x in agents:  # закончившая ход с живым процессом держит имя (CTX-10)
-        if x.get("name") == name and x.get("state") == "done" and x.get("pid") and x.get("id") \
+        if P.name_alias(name).fullmatch(str(x.get("name") or "")) and x.get("state") == "done" and x.get("pid") and x.get("id") \
                 and x["id"] not in {s.get("id") for s in stopped}:
             P.stop_copies(name, [x], "stop-fresh-done")
             stopped.append(x)
     why = wait_name_free(name, stopped) if stopped else None
-    if why:
-        P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\tимя не освободилось после claude stop")
-        P.alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
-        return 1
-    before = {x.get("id") for x in P.agents_all() or [] if x.get("id")}
+    if why:  # копии погашены, имя не отпустили — тревога «<имя> остановлен — pantheon start <имя>» (metis-1192)
+        return fresh_skip(name, a, origin, f"имя не освободилось после claude stop: {why}", stopped)
+    before, why = agents_snapshot(stopped)  # копии погашены — снимок ждёт ответа до срока, а не отказ после сбоя
+    if why:  # так и не ответил — пропуск с тревогой, а не запуск с пустым снимком
+        return fresh_skip(name, a, origin, why, stopped)
     # схема А (metis-0933): --add-dir папок направления, AGENTS.md, пакет — как у pantheon start
-    argv = P.window_launch(role, name, window, win, text)  # argv окна собирает только ядро (класс 5)
+    argv = P.window_launch(role, name, window, win, text, resume=resume)  # argv окна собирает только ядро (класс 5)
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
     P.start_log(f"fresh-start\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\t{reason}" if reason else ""))
     if r.returncode != 0:
@@ -300,6 +316,15 @@ def _holder_text(a):
     return f"{a.get('name')} {who} ({a.get('state') or a.get('kind') or 'процесс'})"
 
 
+def _agents_or_none():
+    """P.agents_all() для опроса wait_name_free: таймаут и незапуск claude agents — None («не ответил», имя не
+    считается свободным), а не трасса Python посреди свежего старта с уже погашенными копиями (metis-1192)."""
+    try:
+        return P.agents_all()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def wait_name_free(name, stopped):
     """После claude stop: ждать, пока остановленные копии отпустят имя — в claude agents нет живых копий и в реестре
     нет живого процесса с этим именем (name_holders), и так держится settle секунд. Ожившая копия (была
@@ -310,7 +335,7 @@ def wait_name_free(name, stopped):
     ids = {a["id"] for a in stopped if a.get("id")}
     down, restopped, started, free_since = set(), set(), time.monotonic(), None
     while True:
-        agents = P.agents_all()
+        agents = _agents_or_none()
         registry = P.sessions_registry()
         live = P.live_copies(name, agents, registry)
         if agents is not None:
@@ -819,9 +844,9 @@ def start(rest):
             if not got:
                 print("Зевс уже запускается другой командой", file=sys.stderr)
                 return 1
-            live = P.live_copies("zeus", P.agents_all())
-            if live and (not restart or any(not a.get("id") for a in live)):
-                print(f"pantheon start: {copies_message('zeus', live)}", file=sys.stderr)
+            live, why = zeus_copies(restart)
+            if why:
+                print(why, file=sys.stderr)
                 return 1
             P.stop_copies("zeus", live)
             # execv заменяет процесс — имя после запуска не проверить, поэтому до запуска ждём, пока старый Зевс
@@ -891,13 +916,83 @@ def run_closed():
     return None
 
 
+AGENTS_SILENT = "claude agents --json не ответил"
+
+
+def start_agents(dry):
+    """(список сессий, код, причина отказа) для _start_session. Запуск закрыт песочницей (run_closed, кроме --dry-run) —
+    START_REFUSED; claude agents ответил не JSON (None) или не ответил за срок, не запустился — код 1 и причина
+    (metis-1192): иначе «копий нет», и запуск поднял бы дубль окна или упал трассой Python."""
+    closed = None if dry else run_closed()
+    if closed:
+        return None, START_REFUSED, closed
+    try:
+        agents = P.agents_all()
+    except subprocess.TimeoutExpired as e:
+        return None, 1, f"{AGENTS_SILENT} за {e.timeout:g} с"
+    except OSError as e:
+        return None, 1, f"{AGENTS_SILENT} (не запустился: {e})"
+    if agents is None:
+        return None, 1, AGENTS_SILENT
+    return agents, 0, None
+
+
+def agents_snapshot(stopped=None):
+    """(id сессий, None) или (None, причина) — снимок перед `claude --bg` или `--resume` для check_new_name и
+    rm_previous. claude agents не ответил (не JSON, таймаут, незапуск) — отказ (metis-1192): с пустым снимком прежние
+    сессии с этим именем сочлись бы новыми. stopped — копии только что погашены (свежий старт): снимок повторяется до
+    срока ожидания имени (PANTHEON_STOP_WAIT, шаг PANTHEON_STOP_POLL — как wait_name_free), отказ — только если он так
+    и не ответил: после одного сбоя имя осталось бы без окна."""
+    wait, poll, _ = P.stop_wait_knobs()
+    end = time.monotonic() + (wait if stopped else 0)
+    while True:
+        agents, _, why = start_agents(True)
+        if not why:
+            return {a.get("id") for a in agents if a.get("id")}, None
+        if time.monotonic() >= end:
+            return None, why
+        time.sleep(poll)
+
+
+def launch_snapshot(name, role, window, origin, extra_env, run, win, cmd):
+    """(id сессий до `claude --bg`, строка отказа или None) — прямо перед запуском: файл запуска окна на месте (окно
+    пропало после проверки — прежний файл не берём) и свежий снимок agents_snapshot, отказ — как в начале запуска.
+    Снимок свежий, а не первый список: между ними копии останавливались и ждали имя."""
+    if P.run_settings(name, role, window, origin, extra_env) != run:
+        return None, f"pantheon start: нет окна {win.replace(P.HOME, '~')} — pantheon domains build"
+    before, why = agents_snapshot()
+    return before, (f"{cmd}: отказ — {why}" if why else None)
+
+
+def zeus_copies(restart):
+    """(живые копии Зевса, строка отказа или None) для pantheon start zeus под блокировкой имени. claude agents не
+    ответил — отказ, а не «копий нет» и второй Зевс (metis-1192); копии без --restart или вкладка — copies_message."""
+    agents, _, why = start_agents(True)
+    if why:
+        return None, f"pantheon start: отказ — {why}"
+    live = P.live_copies("zeus", agents)
+    if live and (not restart or any(not a.get("id") for a in live)):
+        return None, f"pantheon start: {copies_message('zeus', live)}"
+    return live, None
+
+
+def fresh_skip(name, a, origin, why, stopped=None):
+    """Свежий старт не сделан: строка fresh-skip в start.log, пропуск с причиной (metis-1192). stopped — копии уже
+    погашены: тревога «<имя> остановлен — pantheon start <имя>» с причиной, иначе окно молча осталось бы без
+    сессии (у Зевса раньше — «очистка Зевса не вышла, код 4»). → SKIPPED."""
+    P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+    if stopped:
+        who = "Зевс остановлен" if name == "zeus" else f"{name} остановлена"
+        P.alert(f"{who} — pantheon start {name}: свежий старт не сделан, {why}", "pantheon")
+    return P.skipped(why)
+
+
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
                    cmd="pantheon start", extra_env=None, again=None, over_cap=False, race_skip=False):
-    closed = None if dry else run_closed()
-    if closed:  # metis-1009: до шлюза и до остановки копий — иначе --restart погасил бы окно и не поднял новое
-        print(f"{cmd}: отказ — {closed}", file=sys.stderr)
-        return START_REFUSED
-    agents = P.agents_all()
+    agents, code, why = start_agents(dry)
+    if why:  # metis-1009, metis-1192: до шлюза и до остановки копий — иначе --restart погасил бы окно и не поднял новое
+        print(f"{cmd}: отказ — {why}", file=sys.stderr)
+        return code
     if not dry:  # metis-0261 А: слово владельца, потолок и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word, over_cap)
         if why:
@@ -957,10 +1052,10 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    if P.run_settings(name, role, window, origin, extra_env) != run:  # окно пропало после проверки — прежний файл запуска не берём
-        print(f"pantheon start: нет окна {win.replace(P.HOME, '~')} — pantheon domains build", file=sys.stderr)
+    before, why = launch_snapshot(name, role, window, origin, extra_env, run, win, cmd)
+    if why:
+        print(why, file=sys.stderr)
         return 1
-    before = {a.get("id") for a in P.agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
     P.start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     sys.stdout.write(r.stdout)
@@ -1141,7 +1236,10 @@ def wake_recheck(name, state=None):
         return "пауза по нагрузке"
     if P.maintenance_active():
         return "технический перезапуск"
-    if P.live_copies(name, P.agents_all() or []):
+    agents = P.agents_all()
+    if agents is None:  # metis-1192: не JSON — «копий нет» не значит; не будим, как _wake
+        return AGENTS_SILENT
+    if P.live_copies(name, agents):
         return "уже работает"
     return None
 

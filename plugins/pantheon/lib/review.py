@@ -10,6 +10,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -33,13 +34,14 @@ REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
                 "[те же флаги] (у accept и reject ещё --criteria \"<id>#<N> <хеш> да|нет <опора>\" на каждый проверенный "
-                "пункт «Готово, когда») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
+                "пункт «Готово, когда»; пункт задачи не из Closes — если тело PR называет его «пункт N <id>») | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss "
                 "<owner/repo>#<PR> --by <argus> --text \"…\" | sample | criteria <id задачи>… | status [<owner/repo> <PR>] "
                 "| report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ] | delta <owner/repo> <PR> (из клона: "
                 "дельта-круг или полный, готов ли head к argus)")
 # Правило засчитывания вердиктов (REVIEW_CHECKLIST, OPUS_RAN, RAN_MODEL, review_accept_full, review_accept_counts,
 # review_records) — в lib/review_rules.py, ядре защит (metis-0858): здесь только P.<имя>, копии правила нет.
 
+# metis-1193: и задачи не из Closes, если тело PR называет пункт «пункт N <id>» (autoclose.tick_named).
 # metis-1004: вердикт argus по пункту «Готово, когда» задачи из Closes — `--criteria "<id>#<N> <хеш> да|нет <опора>"` у
 # accept и reject, флаг на пункт (разбор — tasks.parse_criterion). Хеш — tasks.criterion_hash текста пункта: правка
 # пункта после приёмки его меняет. Хук guard кладёт значения в запись полем "criteria", autoclose при слиянии PR
@@ -375,7 +377,7 @@ def tally_base(recs, pr):
     return got[-1] if got else None
 
 
-def review_tally(recs, pr, opus_only=False, base=None):
+def review_tally(recs, pr, opus_only=False, base=None, light=False):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
     вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
@@ -383,9 +385,14 @@ def review_tally(recs, pr, opus_only=False, base=None):
     ядра шлюз guard считает «принять» на любой модели (simplify п. 9, 27.10); opus_only=True — как для PR ядра:
     ещё и на Opus (по --ran и по моделям транскрипта argus, P.review_accept_counts). Как в шлюзах (Д6 долга #388):
     «принять» на другой base PR, чем base (base_counts, metis-0965; base None — неизвестна, не в счёт), и с полем
-    «вернули», которое называет рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт."""
-    ok = P.review_accept_counts if opus_only else P.review_accept_full
+    «вернули», которое называет рецензента без «вернуть» на PR (returned_lie, metis-0497), не в счёт. light=True — как
+    для лёгкого PR ядра (metis-1065): ещё и effort high по транскрипту argus (light_accept шлюза владельца)."""
     rules = P.merge_mod()
+
+    def ok(r):
+        if light:
+            return P.review_accept_counts(r) and rules.light_accept(r)
+        return P.review_accept_counts(r) if opus_only else P.review_accept_full(r)
     verdicts = [r for r in recs if r.get("kind") in ("accept", "reject") and r.get("pr") == pr
                 and isinstance(r.get("by"), dict) and r["by"].get("agent_type") == "argus"
                 and isinstance(r.get("sha"), str)]
@@ -416,6 +423,10 @@ def carry_lines(repo, pr):
                        + (f"; мелкая правка поверх (metis-0784) — {', '.join(str(h)[:12] for h in d['delta'])}"
                           if isinstance(d.get("delta"), list) and d["delta"] else "")
                        + (f"; не сверено: {'; '.join(map(str, why))}" if why else ""))
+        elif d.get("kind") == "decision-miss":   # сверка не дошла до git (metis-1181)
+            why = d.get("why") if isinstance(d.get("why"), list) else []
+            out.append(f"{t}  decision  код {sha or '?'} не сверен: {'; '.join(map(str, why)) or '?'} — повтори "
+                       "`pantheon merge request`")
     return out
 
 
@@ -606,10 +617,34 @@ def _review_budget(env):
         return float(REVIEW_TEST_BUDGET)
 
 
-def _review_test_run(cmd):
+def _gate_tests_cmd(cmd, M):
+    """Команда — полный набор шлюза (merge.FULL_TESTS) или его узкий вариант от outside (`--affected`, `--base <ref>`)."""
+    words = list(cmd)
+    if "--affected" in words:
+        words.remove("--affected")
+        if "--base" in words:
+            i = words.index("--base")
+            del words[i:i + 2]
+    line = shlex.join(words)
+    # записи по короткому имени (agent-kit) — по ключам таблицы; по хешу owner/name (metis-1116) ключ именем не служит,
+    # поэтому ещё remote текущего репозитория (Д1 argus #479)
+    names = [n for n in M.FULL_TESTS if not n.startswith("sha256:")]
+    try:
+        names += P.outside_mod().remotes(os.getcwd())
+    except Exception:   # noqa: BLE001 — без git/remote остаются короткие имена
+        pass
+    return any(M.full_tests_record(name, {"cmd": line}) for name in names)
+
+
+def _review_test_run(cmd, M=None):
     """Команда `review test -- …` под бюджетом времени → (код, оборвана): 127 — не запустилась, 75 — не уложилась в
     бюджет; оборвана — запись и проверку HEAD после неё делать незачем."""
     env = dict(os.environ)
+    # запасной путь «только CI» (metis-1174): heavy не отказывает тестам, только если команда — набор шлюза (полный
+    # или узкий); любой другой команде переменная не ставится, и чужая HEAVY_LOCAL_TESTS снимается
+    env.pop("HEAVY_LOCAL_TESTS", None)
+    if M is not None and _gate_tests_cmd(cmd, M):
+        env["HEAVY_LOCAL_TESTS"] = "1"
     budget = _review_budget(env)
     if budget > 0:
         try:
@@ -649,7 +684,7 @@ def _review_test_cmd(rest):
         print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
               "а не на незакоммиченное", file=sys.stderr)
         return 2
-    rc, over = _review_test_run(rest[2:])
+    rc, over = _review_test_run(rest[2:], P.merge_mod())
     if over:
         return rc
     head2, clean2 = _review_state()
@@ -800,11 +835,16 @@ def review_cmd(rest):
                       "вердикта, gh не спрашиваем; «принять» на другой base или с полем «вернули» без «вернуть» на "
                       "PR не в счёт, как в шлюзе")
             strict = review_tally(recs, int(args[1]), opus_only=True, base=base)
+            light = review_tally(recs, int(args[1]), base=base, light=True)
             for sha, (acc, rej) in review_tally(recs, int(args[1]), base=base).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
                 if core_repo and strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра — только «принять» на Opus
                     print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "
                           f"вернуть {strict.get(sha, (0, 0))[1]}")
+                if core_repo and strict.get(sha, (0, 0))[0] == 1:   # metis-1065: одно «принять» — хватит ли его
+                    print(f"  PR ядра: нужно 2 «принять» на Opus, лёгкому (шлюз по файлам PR: только добавленные "
+                          f"строки тестов и README*.md, drafts/*.md) — 1 на Opus с effort high, таких "
+                          f"{light.get(sha, (0, 0))[0]}")
         return 0
     print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
     return 2

@@ -80,6 +80,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
+  pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
+                                        в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
+                                        песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
   pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
                                         (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
   pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
@@ -95,12 +98,15 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         подсказка (Харон, Гестия, outside, read, «да» через Зевса); touch — действие из
                                         белого списка (worktree-remove, deploy, cdp-restart) → проход вне окна → окно
                                         Touch ID с этим действием целиком → исполнение один раз по sha256 текста
+  pantheon denials report|backfill      журнал и отчёт отказов окон по классам (lib/denials.py, metis-1135 Д)
   pantheon owner-edit propose|status|cancel|run   правка файла владельца (policy.toml, ~/.claude/agents/_parts/*.part)
                                         без окна роли (lib/owner_edit.py, metis-0910): propose — заявка с диффом и sha
                                         диффа; проход вне окна применяет по «да» в окне вопросов Зевса на вопрос
                                         «[id] …» дословно или по Touch ID, если файл с заявки не изменился; хеши — в журнал
   pantheon policy set <раздел> <ключ> <значение>... --task ID [--why "зачем"] [--list]   один ключ policy.toml той же
                                         заявкой owner-edit (metis-1122): роль Edit/Write policy.toml не делает
+  pantheon grant request [--write П]... [--allow П]... [--domain Д]... [--days N] --task ID --why "…"   право своему окну
+                                        в grants.toml той же заявкой owner-edit (metis-0680): вопрос Зевсу, «да» — до срока
   pantheon config request|status|cancel|run   .mcp.json, .claude/settings*.json, .claude/hooks/* своей worktree
                                         (lib/config_edit.py, metis-0844): заявка с новым текстом → проход вне окна пишет
                                         по «да» Зевсу на «[id] …» с sha или по Touch ID; роль коммитит сама
@@ -147,6 +153,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
                     отказ, код 2; время строки журнала ставит pantheon: время в начале --note («23:45 — …») не пишется
                     (предупреждение); карточки изменились (task set/new/claim/…) — задачи расписания view и board сразу (metis-0868)
+                    из окна роли в задачу чужого направления (папку не пишет) — только --note: заявкой в кэш окна, допишет
+                    плановый проход (`pantheon task run`) строкой «агент (окно X): …»; другие поля — отказ (metis-1187)
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
                     (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
@@ -183,6 +191,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     остаток исходной задачи — новой задачей в том же направлении: from=остаток, source=ID, тег «остаток»,
                     та же пачка; пункты — из --done-when, иначе неотмеченные из исходной; строка в журнале обеих (metis-0502)
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
+  pantheon plan check ФАЙЛ [--direction ИМЯ]   разделы «## N. Пачка …» плана против карточек story (lib/plancheck.py)
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
   pantheon executors --add codex | --remove <имя>   добавить Codex (через проверку, без входа) | убрать (Claude — отказ)
@@ -277,6 +286,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         ваше прямое слово без вопроса с [id] — одну строку owner-log/zeus.md без
                                         пометки (своего текста команда не берёт); consent <id> покажет её дословно,
                                         метку Гестии и согласие браузера она не даёт (metis-0843)
+  pantheon perm show|answer|list     запрос разрешения окна роли: вопрос владельцу и его ответ (lib/perm.py)
+  pantheon consent show <id>            строка владельца с [id] и временем за сутки; нет «да» — код 1, «нет согласия»
+                                        (metis-1135: классификатор окна верит только выводу этой команды в окне)
+  pantheon consent standing [<класс>]   согласие впредь на класс из [standing] policy.toml («да и впредь»); строгие
+                                        классы (деньги, входы, отправки людям, удаление, защиты) впредь не бывают
+  pantheon consent revoke <класс>       отозвать согласие впредь (по слову владельца)
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
@@ -1477,10 +1492,13 @@ def tick():
 
 def release_ticks(t):
     """Выпуск без Actions (metis-0880), затем карта тестов (metis-0842: коммит «карта: …» после выпуска), затем ночной
-    полный набор на main (metis-1050). Сбой одного не останавливает тик и остальных."""
+    полный набор на main (metis-1050), итог проверки MCP координаторам (metis-1047). Сбой одного не останавливает тик
+    и остальных."""
     for key, text, mod in (("release-tick-crash", "выпуск без Actions", release_tick_mod),
                            ("map-tick-crash", "карта тестов", map_tick_mod),
-                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod)):
+                           ("nightly-tick-crash", "ночной полный набор", nightly_tick_mod),
+                           ("mcp-report-crash", "итог проверки MCP координаторам", mcp_report_mod),
+                           ("denials-tick-crash", "отчёт отказов", denials_mod)):
         try:
             mod().tick(t)
         except Exception as e:
@@ -2384,6 +2402,15 @@ SANDBOX_EXCLUDED = GH_PR_READ + GH_ISSUE_READ + GH_RUN_READ + ["gh repo view *",
 # `gh pr comment` (ответ ревью в PR) и `gh pr ready` (снять черновик) — без произвольного кода; текст — через
 # --body-file. `gh pr close|reopen|review`, запись в `gh issue`, `gh api`, `gh auth token`, `gh extension` — в песочнице
 GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment *", "gh pr ready *"]
+# заявка на слияние по Touch ID (metis-1197) — тоже только окнам направлений, мимо песочницы: в ней gh pr view изнутри
+# pantheon падает (TLS Go), и очередь merge-queue в STATE окну на запись закрыта. Кто подаёт и на какой repo, судит
+# guard (pantheon-acl) и сам `pantheon merge request` ([merge_repos] metis-pantheon); сливает только плановый проход
+PANTHEON_MERGE_OUT = ["pantheon merge request *", "pantheon merge cancel *"]
+# worktree окна направления (metis-1225, вариант Б владельца 15.11): Claude Code закрывает в песочнице запись в
+# .git/worktrees, а EnterWorktree с name окну закрыт (guard worktree-own) — мимо песочницы только add и remove, затем
+# EnterWorktree с path (тогда коммиты в копии проходят); репозиторий, путь
+# и имена проверяет сама команда (lib/worktree.py), форму строки — guard (worktree-cmd). Мастерской нет: у неё EnterWorktree
+WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -2551,6 +2578,15 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
 HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "charon", "Explore"]
+# Письма между сессиями (SendMessage, crossSessionInbound, metis-1253; Claude Code 2.1.325): без настройки письмо
+# доходит сразу, только если класс режима разрешений у отправителя и получателя один — «bypass» (bypassPermissions
+# или plan при доступном bypass) или «prompting» (все остальные, и auto). Иначе письмо держится до одобрения в окне
+# получателя и через dialogExpiry (по умолчанию 5 мин) сбрасывается: модели не доходит, отправителю — квитанция
+# «expired». Поэтому всем окнам bypass закрыт (класс у всех один — prompting), а Зевсу срок держания снят: письмо от
+# сессии вне окон (ваш терминал в bypass) ждёт вашего одобрения, а не пропадает. crossSessionInbound не трогаем —
+# проверка класса остаётся.
+WINDOW_NO_BYPASS = "disable"   # permissions.disableBypassPermissionsMode каждого окна
+HQ_DIALOG_EXPIRY = "never"     # dialogExpiry окна Зевса: Claude Code берёт 60s, 5m, 10m или never
 # dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
 # «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor. palamedes — исполнитель без кода
 # (metis-0224): тексты, юридический разбор, синтез; веба и Bash у него нет, пишет только свой черновик.
@@ -2719,14 +2755,17 @@ GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesyste
 # Папка выше тоже не даётся: grant write = ["~/.cache"] отклоняется целиком, как ["~"]
 GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
                   "~/.bashrc", "~/.profile", HOOKD_HOME, STATE, PANTHEON)
+GRANT_WRITE_TOOLS = {"edit", "write", "multiedit", "notebookedit"}  # имя до «(» или вся строка — и «Edit» без скобок
 GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
 
 
-def grants_load():
-    """grants.toml → (разрешения в силе, ближайший срок окончания в секундах или None, ошибки, истёкшие)."""
+def grants_load(text=None):
+    """grants.toml (или text — проверка заявки grant request) → (в силе, ближайший срок или None, ошибки, истёкшие)."""
     try:
-        with open(GRANTS, "rb") as fh:
-            raw = tomllib.load(fh).get("grant") or []
+        if text is None:
+            with open(GRANTS, "rb") as fh:
+                text = fh.read().decode("utf-8")
+        raw = tomllib.loads(text).get("grant") or []
     except FileNotFoundError:
         return [], None, [], []
     except (OSError, ValueError) as e:
@@ -2748,7 +2787,14 @@ def grants_load():
             errors.append(f"grant {i} ({win}): ключи — {', '.join(GRANT_KEYS)} списками строк" +
                           (f"; лишние: {', '.join(bad)}" if bad else ""))
             continue
-        norm = lambda x: os.path.realpath(os.path.expanduser(x))  # noqa: E731
+        # правило Edit/Write/MultiEdit/NotebookEdit в permissions.allow Claude Code добавляет в allowWrite песочницы —
+        # мимо проверки GRANT_NO_WRITE ниже; запись — только ключом write (ревью argus #477 Б1)
+        edit_a = [x for x in lists.get("allow", []) if x.split("(", 1)[0].strip().casefold() in GRANT_WRITE_TOOLS]
+        if edit_a:
+            errors.append(f"grant {i} ({win}): allow — без правил записи, запись — ключом write: {', '.join(edit_a)}")
+            continue
+        # macOS не различает регистр: ~/.CLAUDE — тот же ~/.claude (ревью argus #477 Д1, metis-1218)
+        norm = lambda x: os.path.realpath(os.path.expanduser(x)).casefold()  # noqa: E731
         glob_w = [x for x in lists.get("write", []) if re.search(r"[*?\[\]{}]", x) or not x.startswith(("/", "~/"))]
         if glob_w:
             errors.append(f"grant {i} ({win}): write — только путь от / или ~/ без шаблонов: {', '.join(glob_w)}")
@@ -2759,6 +2805,11 @@ def grants_load():
         if closed:
             errors.append(f"grant {i} ({win}): запись в ключи, конфиг и автозапуск не даётся: {', '.join(closed)}")
             continue
+        # сама папка .claude или .git (или путь внутри) — запреты GRANT_WRITE_DENY от неё встали бы не туда (metis-1214)
+        inner = [x for x in lists.get("write", []) if {".claude", ".git"} & set(norm(x).split("/"))]
+        if inner:
+            errors.append(f"grant {i} ({win}): запись в .claude и .git не даётся: {', '.join(inner)}")
+            continue
         if end <= now():
             expired.append((i, win, until))
             continue
@@ -2767,11 +2818,27 @@ def grants_load():
     return live, nxt, errors, expired
 
 
-def grants_apply(name, data, grants):
-    """Разрешения окна name (и «*») — в его настройки, без повторов."""
+def grant_over_own(name, g, folders):
+    """Разрешение без записи на свою папку окна и выше неё (metis-1221 п. 3): запреты GRANT_WRITE_DENY шаблоном «/**/»
+    закрыли бы и её — .claude/agents окна направления (own_agents, metis-0841) и настройки копий .claude/worktrees/*,
+    где идёт project-tools apply. Исключить поддерево из шаблона песочница не умеет, поэтому такая запись не даётся:
+    своя папка и так открыта, папку рядом дают отдельной строкой write."""
+    own = [os.path.realpath(f) for f in folders]
+    bad = [x for x in g.get("write", []) if any(
+        f == r or f.startswith(r.rstrip("/") + "/") for r in [os.path.realpath(os.path.expanduser(x))] for f in own)]
+    if not bad:
+        return g
+    print(f"песочница {name}: grants.toml write на свою папку окна или выше не даётся — закрыл бы её .claude/agents и "
+          f".claude/settings.json копий (metis-1221); выдать папку рядом: {bad}", file=sys.stderr)
+    return {**g, "write": [x for x in g["write"] if x not in bad]}
+
+
+def grants_apply(name, data, grants, folders=()):
+    """Разрешения окна name (и «*») — в его настройки, без повторов. folders — свои папки окна (grant_over_own)."""
     for g in grants:
         if g["window"] != name and not (g["window"] == "*" and not GRANT_STAR_SKIP.fullmatch(name)):
             continue
+        g = grant_over_own(name, g, folders)
         for k, keys in GRANT_KEYS.items():
             if k not in g:
                 continue
@@ -2784,6 +2851,16 @@ def grants_apply(name, data, grants):
                 if x not in vals:
                     vals.append(x)
             node[keys[-1]] = vals
+        # выданная запись — с запретами своей папки окна (role_settings): скрипты .claude/hooks хуки запускают вне
+        # песочницы, .claude/agents — роли, .git/hooks и .git/config — код git (metis-1214); сверх них — хуки в
+        # .claude/settings*.json (SETTINGS_FILES, metis-1221), .mcp.json, .claude/skills и commands
+        fs = data.setdefault("sandbox", {}).setdefault("filesystem", {})
+        deny = list(fs.get("denyWrite") or [])
+        for x in g.get("write", []):
+            r = os.path.realpath(os.path.expanduser(x))
+            deny += [x for x in [r + sub for sub in GRANT_WRITE_DENY] + nested_pins(r) if x not in deny]
+        if g.get("write"):
+            fs["denyWrite"] = deny
 
 
 def grants_check():
@@ -2799,11 +2876,13 @@ def grants_check():
                    "снято при сборке; продлить или удалить запись (Метида)", "pantheon")
 
 
-def write_window(out_dir, name, data):
+def write_window(out_dir, name, data, folders=()):
     """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся.
     Разрешения grants.toml — сюда же; файлы запущенных сессий этого окна (settings/run/) обновляются: Claude Code
-    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска."""
-    grants_apply(name, data, grants_load()[0])
+    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска.
+    Каждому окну bypass закрыт (metis-1253): класс режима у всех окон один, и письма между ними не держатся."""
+    data.setdefault("permissions", {})["disableBypassPermissionsMode"] = WINDOW_NO_BYPASS
+    grants_apply(name, data, grants_load()[0], folders)
     size, key = sandbox_size(data), f"sandbox-size-{name}"
     if size > SANDBOX_SIZE_LIMIT:
         print(f"песочница {name}: {size} байт путей > {SANDBOX_SIZE_LIMIT} — окно не пересобрано", file=sys.stderr)
@@ -2925,6 +3004,59 @@ def agents_window(data, allowed, deny, script):
 
 
 EXEC_DIRS = ("/.claude/hooks", "/**/.claude/hooks")
+# .claude/settings*.json — в них хуки, Claude Code запускает их вне песочницы при старте сессии в этой папке (metis-1221
+# А-Д1). Пока только выданная запись: в своих папках окна туда пишет project-tools apply («настрой проект»); их —
+# отдельным PR через owner-edit (решение владельца 15.11: «выданные — сразу, свои — потом»)
+SETTINGS_FILES = ("/.claude/settings.json", "/**/.claude/settings.json", "/.claude/settings.local.json",
+                  "/**/.claude/settings.local.json")
+# и .mcp.json (stdio-сервер стартует вне песочницы), .claude/skills и .claude/commands (хуки в шапке) — долги argus
+# #482, решение владельца 15.11 «Да, тем же PR»: выданной папке настраивать проект не нужно
+GRANT_WRITE_DENY = ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
+    "/.claude/agents", "/**/.claude/agents") + SETTINGS_FILES + (
+    "/.mcp.json", "/**/.mcp.json", "/.claude/skills", "/**/.claude/skills", "/.claude/commands", "/**/.claude/commands")
+# Код git сверх .git/config и hooks (metis-1221 п. 4): config.worktree (и копий .git/worktrees/<x>/) git читает при
+# extensions.worktreeConfig; bare-репозиторий <имя>.git/{config,hooks} («*» — и пустое, .git тоже); .husky — папка
+# хуков при core.hooksPath=.husky. Свои папки — GIT_CODE от ~ и ROOT_EXEC корня и 1-го уровня (копии открыты)
+GIT_CODE = ("/**/.git/config.worktree", "/**/.git/worktrees/*/config.worktree", "/**/*.git/config", "/**/*.git/hooks")
+GRANT_WRITE_DENY += GIT_CODE + ("/.husky", "/**/.husky")
+# Свои папки окна (folders) — только корень: настройки проекта Claude Code берёт из папки запуска, из --add-dir и
+# вложенных — нет (пробы F8, metis-0933), EnterWorktree окнам закрыт. В корне — и сессии владельца без песочницы.
+# Копии .claude/worktrees/* открыты: «настрой проект» (project-tools apply) идёт там → PR → ревью → слияние → git pull
+# (metis-1221, решение владельца 15.11 «Да, корень + PR», «и .mcp.json тоже»). Остаток — README guard
+ROOT_SETTINGS = ("/.claude/settings.json", "/.claude/settings.local.json", "/.mcp.json")
+# Корень — и подпапки первого уровня (долги argus #483, metis-1221 п. 5): мастерская стартует в workshop_dir()/<задача>
+# (direction_target), а вложенные проекты (nested_projects — ровно один уровень вниз, вроде app/) владелец
+# открывает сессией без песочницы. «*» в песочнице macOS — одно звено без «/» (README sandbox-runtime, Path Syntax):
+# копии <папка>/.claude/worktrees/<x>/ (три звена) и <задача>/.claude/worktrees/<x>/ остаются открыты
+ROOT_LEVELS = ("", "/*")
+# .claude/skills и .claude/commands (хуки в шапке навыка запускаются вне песочницы) — там же, но только окнам без
+# own_agents: окно направления правит навыки и команды своего проекта (metis-0841, guard OWN_ITEMS) — остаток README guard
+ROOT_ITEMS = ("/.claude/skills", "/.claude/commands")
+ROOT_EXEC = ("/.husky",)
+
+
+def nested_pins(root):
+    """Литералы denyWrite, которые не дают переименовать .claude и .git подпапок первого уровня (metis-1221 п. 2).
+    Запрет шаблоном («/*/», «/**/») Seatbelt сверяет регуляркой: `mv app/.claude app/x`, запись в x и возврат имени
+    его обходят (проба 15.11 под песочницей Claude Code 2.1.325). Литерал sandbox-runtime закрывает и удаление,
+    переименование и создание каждого его предка — app/.claude и app; запись внутри них остаётся. Подпапки — с .claude
+    или .git и вложенные проекты (nested_projects: их .claude — и при отсутствии, ссылкой на её место); .git — только
+    существующая (git init во вложенной папке работает). Глубже первого уровня — остаток README guard."""
+    proj = {os.path.basename(x) for x in nested_projects(root)}
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        d = os.path.join(root, n)
+        if n.startswith(".") or os.path.islink(d) or not os.path.isdir(d):
+            continue
+        if n in proj or os.path.lexists(os.path.join(d, ".claude")):
+            out.append(d + "/.claude/settings.json")
+        if os.path.lexists(os.path.join(d, ".git")):
+            out.append(d + "/.git/hooks")
+    return out
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
@@ -2941,9 +3073,12 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     # направления (packs/) запускают вне песочницы — окно, переписав их Bash-ом, вышло бы из неё. Edit и Write туда
     # закрывает guard protect-config (PROJECT_ITEMS hooks)
     agents = ("/.claude/agents", "/**/.claude/agents")
-    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
+    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + ["~" + x for x in GIT_CODE] + [f"{r}{sub}" for r in allow for sub in (
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks") + EXEC_DIRS + (
-        () if own_agents and r in folders else agents)]
+        () if own_agents and r in folders else agents)] + [
+        f"{r}{lv}{sub}" for r in folders for lv in ROOT_LEVELS
+        for sub in ROOT_SETTINGS + ROOT_EXEC + (() if own_agents else ROOT_ITEMS)]
+    deny_write += [x for r in folders for x in nested_pins(r)]
     deny_write += _deny_forms([HOOKD_HOME])
     # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
     deny_write += tmp_deny_write(allow, tmp_own)
@@ -3261,7 +3396,11 @@ PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json",
                  ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
 NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
 ADD_DIRS_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
-WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"]  # П9b: worktree окна — git worktree add в Bash
+# П9b после варианта А владельца 15.11 (metis-1225): EnterWorktree окну открыт — Claude Code пускает запись в
+# .git/worktrees/<id> только worktree своей сессии, и без входа окно в копии `pantheon worktree add` не закоммитит
+# (EPERM на index.lock). С name guard отказывает (worktree-own), с path — только в .claude/worktrees своего направления
+# и без настроек, расширяющих окно. ExitWorktree по-прежнему закрыт: между копиями окно ходит EnterWorktree с path
+WORKTREE_TOOLS = ["ExitWorktree"]
 IMPORTS_AGENTS = re.compile(r"^\s*@(\./)?AGENTS\.md\s*$", re.M)
 PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
 
@@ -3973,8 +4112,9 @@ def pack_admit(window, plugin_dir, mcp_text):
     """Плагин plugin_dir (None — нет) и текст mcp.json mcp_text (None — нет) пакета окна window годны для окна
     (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Плагин (хуки) и MCP проверяются раздельно (вариант А владельца
     13.11): плохой сервер снимает только mcp.json, хуки пакета остаются; плохой плагин снимает и плагин, и MCP —
-    серверы пакета без его хуков (protect-db на supabase) не идут. Нарушение — строка в stderr и тревога
-    pack-bad-<window> в alerts.md; всё годно — тревога снята. → (плагин годен, MCP годен)."""
+    серверы пакета без его хуков (protect-db на supabase) не идут. Негодный сервер mcp.json снимается один, годные идут
+    (metis-1222: сервер мимо npx снимал весь MCP окна). Нарушение — строка в stderr и тревога
+    pack-bad-<window> в alerts.md; всё годно — тревога снята. → (плагин годен, текст mcp.json для окна или None)."""
     def doc(text, rel, into):
         if text is None:
             return None
@@ -3988,17 +4128,21 @@ def pack_admit(window, plugin_dir, mcp_text):
     files = [pack_text(os.path.join(plugin_dir, rel)) if plugin_dir else None for rel in PACK_PLUGIN_FILES]
     plug_bad += WINDOW_RULES.pack_problems(doc(files[0], "plugin.json", plug_bad),
                                            doc(files[1], "hooks.json", plug_bad), None)
-    mcp_bad += WINDOW_RULES.pack_problems(None, None, doc(mcp_text, "mcp.json", mcp_bad))
+    mcp = doc(mcp_text, "mcp.json", mcp_bad)
+    mcp_bad += WINDOW_RULES.pack_problems(None, None, mcp)
+    keep = WINDOW_RULES.pack_mcp_keep(mcp)
     bad = plug_bad + mcp_bad
     if not bad:
         clear_once(f"pack-bad-{window}")
-        return True, True
+        return True, mcp_text
     where, what = tilde(os.path.join(PACKS, window)), "плагин и MCP" if plug_bad else "MCP"
+    if keep and not plug_bad:
+        bad.append(f"остальные серверы MCP взяты: {', '.join(sorted(keep))}")
     print(f"pantheon: пакет {where}: {what} не взяты в окно {window} — {'; '.join(bad)[:400]}", file=sys.stderr)
     alert_once(f"pack-bad-{window}", repr(bad), f"{where}: {what} пакета не взяты в окно {window} — "
-               + "; ".join(bad)[:500] + " (хуки — только через in_repo.py пакета, MCP — через env_from.py, npx с "
-               "точной версией; README, пакеты окон направлений)", "pantheon")
-    return not plug_bad, not plug_bad and not mcp_bad
+               + "; ".join(bad)[:500] + " (хуки — только через in_repo.py пакета, MCP — через env_from.py: npx с "
+               "точной версией или бинарь ~/.local/bin из PACK_LOCAL_BINS; README, пакеты окон направлений)", "pantheon")
+    return not plug_bad, (json.dumps({"mcpServers": keep}, ensure_ascii=False) if keep and not plug_bad else None)
 
 
 def pack_build_check(name):
@@ -4043,7 +4187,7 @@ def window_flags(window, name=None):
     """Флаги запуска окна направления window по схеме А (metis-0933) — window_launch ставит их перед `--settings`:
     --add-dir на каждую папку window_dirs, --append-system-prompt-file на общий файл AGENTS.md (пишется в
     settings/run/<name>.agents.md), --plugin-dir плагина пакета и --mcp-config его mcp.json, если они есть и прошли
-    pack_admit (плохой сервер — без --mcp-config, плохой плагин — ни того, ни другого; тревога; перенос пакета не
+    pack_admit (плохой сервер — без него в --mcp-config, плохой плагин — ни того, ни другого; тревога; перенос пакета не
     кончен — ни того, ни другого, PACKS_LOCAL.window_hold, metis-1100). Плагин и _bin — из снимка pack_snapshot
     (${PANTHEON_PACK_BIN} в mcp.json — папка _bin снимка, файл — settings/run/<name>.mcp.json), не из папки пакета. Папки --add-dir и снимок считаются один раз, до старта окна; окно их не
     обновляет. Не направление (мастерская, штаб, задачи) — []."""
@@ -4075,12 +4219,12 @@ def window_flags(window, name=None):
     text = pack_text(os.path.join(PACKS, window, "mcp.json")) if snap else None
     # в окно — только то, что проверено: плагин снимка и этот же текст mcp.json (ревью argus #425 Б1), каждый отдельно
     # (вариант А владельца 13.11: плохой сервер не снимает хуки пакета)
-    plugin_ok, mcp_ok = pack_admit(window, plugin, text) if plugin or text is not None else (False, False)
+    plugin_ok, mcp = pack_admit(window, plugin, text) if plugin or text is not None else (False, None)
     if plugin and plugin_ok:
         args += ["--plugin-dir", plugin]
-    if text is not None and mcp_ok:
+    if mcp is not None:
         bin_dir = json.dumps(os.path.join(snap, "_bin"))[1:-1]
-        args += ["--mcp-config", run_file("mcp.json", text.replace(PACK_BIN_MARK, bin_dir))]
+        args += ["--mcp-config", run_file("mcp.json", mcp.replace(PACK_BIN_MARK, bin_dir))]
     return args
 
 
@@ -4361,15 +4505,16 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
                              guard, auto_allow, own_agents=direction)
         if direction:
-            data["sandbox"]["excludedCommands"] += GH_PR_WRITE
+            data["sandbox"]["excludedCommands"] += GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
             data["permissions"]["additionalDirectories"] = list(ok)
-            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; EnterWorktree и
-            # ExitWorktree закрыты (П9b: вход в worktree чужого репозитория загрузил бы его настройки) — worktree
-            # задачи окно заводит `git worktree add`; пакет направления только сужает (window_extra_apply), мимо
-            # песочницы — только WINDOW_EXCLUDED ядра
+            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; ExitWorktree закрыт,
+            # EnterWorktree — только с path в свою копию (П9b, вариант А владельца 15.11: вход в чужой репозиторий
+            # загрузил бы его настройки — это держит guard worktree-own) — worktree задачи окно заводит
+            # `pantheon worktree add` (WORKTREE_OUT, metis-1225) и входит EnterWorktree с path; пакет направления только сужает
+            # (window_extra_apply), мимо песочницы — только WINDOW_EXCLUDED ядра
             data["env"][ADD_DIRS_ENV] = "1"
             deny_list = data["permissions"].setdefault("deny", [])
             deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
@@ -4399,7 +4544,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
             # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
             # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
-            data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
+            ex = data["sandbox"]["excludedCommands"]  # request|cancel уже есть у окна направления (metis-1197)
+            ex += [c for c in MERGE_REQUEST_CMDS if c not in ex]
         # окна направлений и мастерская сами поднимают dev-сервер и гоняют тесты своего проекта ([sb-simplify] 27.10):
         # Unix-сокеты (tsx IPC, профиль Chromium) — только в своём кэше окна, не в $TMPDIR (/tmp/claude-<uid> общий у
         # всех сессий). Местных портов (allowLocalBinding) нет: он открывает весь localhost — и местный прокси (выход наружу
@@ -4424,7 +4570,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "его папок, окно его не получит", "pantheon")
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
-        write_window(out_dir, name, data)
+        write_window(out_dir, name, data, ok)
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
@@ -4489,7 +4635,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         if pmap:
             PLUGIN_MAP.window_apply(job, pmap, name, guard=guard)
-        write_window(out_dir, name, job)
+        write_window(out_dir, name, job, own)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
     # перезапускает окна. Bash пишет только в TMPDIR (кэш — папка запуска, запись в него guard не пускает); ни одной папки проекта, памяти
@@ -4598,9 +4744,12 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
+    # metis-1253: письмо сессии с другим классом режима ждёт одобрения без срока, а не сбрасывается через 5 мин.
+    # Срока у окна вопросов нет (решение владельца 15.11): askUserQuestionTimeout не ставим
+    hq["dialogExpiry"] = HQ_DIALOG_EXPIRY
     if pmap:
         PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
-    write_window(out_dir, "hq", hq)
+    write_window(out_dir, "hq", hq, [root])
     built.append("hq")
     for f in os.listdir(out_dir):
         if f.endswith(".json") and f[:-5] not in built:
@@ -4651,8 +4800,23 @@ def claude_bin():
     return shutil.which("claude") or os.path.join(HOME, ".local", "bin", "claude")
 
 
+AGENTS_TIMEOUT = 60  # с; тесты сокращают через PANTHEON_AGENTS_TIMEOUT
+
+
+def agents_timeout():
+    try:
+        v = float(os.environ.get("PANTHEON_AGENTS_TIMEOUT") or AGENTS_TIMEOUT)
+    except ValueError:
+        return AGENTS_TIMEOUT
+    return v if v > 0 else AGENTS_TIMEOUT
+
+
 def agents_all():
-    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], env=claude_env(), capture_output=True, text=True, timeout=60)
+    """Список сессий `claude agents --json --all`; None — ответ не JSON. Таймаут и незапуск — исключение, как раньше
+    (metis-1175): вызов внутри запуска окна при таймауте должен упасть, а не решить «сессий нет» и поднять дубль.
+    Первый вызов планового прохода ловит их сам (watch._watch)."""
+    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], env=claude_env(), capture_output=True, text=True,
+                       timeout=agents_timeout())
     try:
         data = json.loads(r.stdout or "[]")
     except ValueError:
@@ -4957,18 +5121,90 @@ def run_settings(name, role, window, origin, extra_env=None):
 COPY_NOTE = re.compile(r"started a copy as ([0-9a-f]{8})")
 
 
+PUSH_ONE, PUSH_TOTAL, PUSH_SEP = 4000, 8000, "\n\n"  # одна передача, вся очередь (как PUSH_MAX в ctx.py), разделитель
+PUSH_AGE = 1800  # PUSH_MAX_AGE хука: старше передачу хук не отдаёт — каждой свой срок, от её записи
+# Запись очереди (metis-1253, Д2 и Д4 argus #495): «\x1e<время записи>\n<текст>». Разделитель \x1e в тексты не попадает
+# (снимается при записи), поэтому очередь делится точно, даже если одна передача — начало другой или в ней пустые
+# строки; время у каждой передачи своё, дописывание срок прежних не продлевает. Хук ctx.py push читает так же.
+PUSH_RS = "\x1e"
+
+
+def push_records(raw, mtime):
+    """Очередь push-файла → [(время записи, текст)]. Файл без записей (прежний формат, один текст) — одна передача со
+    временем файла."""
+    if not raw.startswith(PUSH_RS):
+        return [(mtime, raw.strip())] if raw.strip() else []
+    out = []
+    for rec in raw.split(PUSH_RS)[1:]:
+        head, _, body = rec.partition("\n")
+        with contextlib.suppress(ValueError):
+            out.append((float(head), body.strip()))
+    return out
+
+
+def _push_records_text(recs):
+    return "".join(f"{PUSH_RS}{t:.0f}\n{body}" for t, body in recs)
+
+
+@contextlib.contextmanager
+def _push_lock():
+    """Замок очереди push/ — тот же файл push/.lock берёт хук ctx.py push, пока забирает очередь (metis-1253)."""
+    with open(os.open(path("push", ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        yield
+
+
+def _push_read(p):
+    try:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return push_records(fh.read(), os.path.getmtime(p))
+    except OSError:
+        return []
+
+
+def _push_write(p, recs):
+    if not recs:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(p)
+        return
+    fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(_push_records_text(recs))
+    os.replace(p + ".tmp", p)
+
+
+def _push_entry(text):
+    return str(text)[:PUSH_ONE].replace(PUSH_RS, "").strip()
+
+
 def push_text(session_id, text):
     """Текст, который хук ctx.py push отдаст сессии при следующем старте её процесса (SessionStart + asyncRewake):
-    `claude respawn` сам хода не начинает, а команды «сказать фоновой сессии» у Claude Code нет (проверено 15.10)."""
+    `claude respawn` сам хода не начинает, а команды «сказать фоновой сессии» у Claude Code нет (проверено 15.10).
+    Очередь (metis-1253): передача дописывается к ещё не забранным, хук отдаёт их разом; у каждой свой срок PUSH_AGE от
+    её записи, просроченные снимаются. Вся очередь (тексты через PUSH_SEP) длиннее PUSH_TOTAL — None: передача не
+    записана, вызывающий повторит её следующим проходом, а прежние не затираются. → путь очереди или None."""
     if not re.fullmatch(r"[0-9a-f-]{8,64}", str(session_id or "")) or not str(text).startswith(START_MARK):
         return None
     os.makedirs(path("push"), mode=0o700, exist_ok=True)
-    p = path("push", session_id + ".txt")
-    fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(str(text)[:4000])
-    os.replace(p + ".tmp", p)
+    p, entry, now = path("push", session_id + ".txt"), _push_entry(text), time.time()
+    with _push_lock():
+        recs = [r for r in _push_read(p) if now - r[0] <= PUSH_AGE] + [(now, entry)]
+        if len(PUSH_SEP.join(b for _, b in recs)) > PUSH_TOTAL:
+            return None
+        _push_write(p, recs)
     return p
+
+
+def push_drop(p, text):
+    """Снять свою передачу из очереди p (respawn не вышел — текст уйдёт запасным путём или повтором), чужие остаются:
+    снимается последняя передача с тем же текстом целиком. Хук уже забрал очередь — снимать нечего."""
+    entry = _push_entry(text)
+    with contextlib.suppress(OSError), _push_lock():  # сбой замка — как прежний os.remove без файла
+        recs = _push_read(p)
+        for i in range(len(recs) - 1, -1, -1):
+            if recs[i][1] == entry:
+                _push_write(p, recs[:i] + recs[i + 1:])
+                return
 
 
 # Код отказа «нет окна»: сессию направления или мастерской без файла окна не поднимаем ни respawn, ни --resume, ни
@@ -5041,20 +5277,30 @@ def _resume_session(name, a, text, origin):
     if not str(text).startswith(START_MARK):
         text = f"{START_MARK} поручение от {origin}] {text}"
     pushed = push_text(sid, text) if a.get("id") else None
+    if a.get("id") and not pushed and str(sid or "") and os.path.exists(path("push", f"{sid}.txt")):
+        # metis-1253 (Д3 argus #495): очередь полна — --resume по сессии, которую Claude Code ещё числит, сделал бы
+        # копию, а текст пропал бы. Пропуск: следующий проход повторит, когда хук заберёт очередь
+        start_log(f"resume-skip\t{name}\t{a['id']}\t{origin}\tочередь передач полна")
+        alert_once("push-full-" + name, sid, f"{name}: очередь передач сессии {a['id']} полна (до {PUSH_TOTAL} знаков) — "
+                   "не бужу, повтор следующим проходом, когда сессия заберёт очередь", "pantheon")
+        return skipped("очередь передач полна — повтор следующим проходом"), None
+    clear_once("push-full-" + name)
     if pushed:  # без текста respawn поднял бы сессию молча — тогда сразу запасной путь, он текст передаёт
         r = subprocess.run([claude_bin(), "respawn", a["id"]], env=claude_env(), capture_output=True, text=True, timeout=180)
         start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")
         if r.returncode == 0:
             rm_previous(name, "respawn", keep={a["id"]}, wait=True)
             return 0, None
-        with contextlib.suppress(OSError):
-            os.remove(pushed)
+        push_drop(pushed, text)  # metis-1253: только своя передача, ждущие в очереди остаются
     # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
     # схема А (metis-0933): те же --add-dir, AGENTS.md и пакет, что у pantheon start (--resume прежних флагов не берёт)
     argv = window_launch(role, name, got[3], run, text, resume=sid or a.get("id"))
-    before = {x.get("id") for x in agents_all() or [] if x.get("id")}
+    before, why = agents_snapshot()  # sessions.py; не ответил — пропуск, а не пустой снимок (metis-1192)
+    if why:
+        start_log(f"resume-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+        return skipped(why), None
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
@@ -6846,11 +7092,13 @@ def handoff_kick():
 
 def owner_edit_kick():
     """Заявки на правку файла владельца (metis-0910, lib/owner_edit.py) и настроек проекта (metis-0844,
-    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет."""
-    for cmd, mod in (("owner-edit", owner_edit_mod), ("config", config_edit_mod)):
-        run = "config-edit" if cmd == "config" else cmd
+    lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет.
+    Тем же путём — заметки окон ролей в карточки чужих направлений (`pantheon task run`, lib/tasknote.py, metis-1187)."""
+    for cmd, pending in (("owner-edit", lambda: owner_edit_mod().pending()),
+                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending)):
+        run = {"config": "config-edit", "task": "task-note"}.get(cmd, cmd)
         try:
-            if locked(f"{run}-run") or not mod().pending():
+            if locked(f"{run}-run") or not pending():
                 continue
             if os.environ.get("PANTHEON_DRYRUN") == "1":
                 with open(path("dryrun.log"), "a") as fh:
@@ -7416,6 +7664,25 @@ def nightly_tick_mod():
     return _NIGHTLY_TICK
 
 
+def mcp_report_mod():
+    """lib/mcp_report.py — итог проверки серверов MCP во входящие координатора (metis-1047, часть 4)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_mcp_report", os.path.join(LIB, "mcp_report.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.set_core(sys.modules[__name__])
+    return mod
+
+
+def denials_mod():
+    """lib/denials.py — журнал и отчёт отказов окон (metis-1135 Д); самостоятельный модуль."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_denials", os.path.join(LIB, "denials.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 _BROWSER = None
 
 
@@ -7852,7 +8119,7 @@ def board_owner_sync(T):
                    + "; ".join(f"{tid} ({stale[tid]} ч без правки, owner {tasks[tid][1].get('owner')})"
                                for tid in sorted(stale)[:ALERT_IDS])
                    + (f" и ещё {len(stale) - ALERT_IDS}" if len(stale) > ALERT_IDS else "")
-                   + ". Работа идёт — ветка с номером задачи (git worktree add … <id>-…); нет — вернуть в очередь: "
+                   + ". Работа идёт — ветка с номером задачи (pantheon worktree add <id>-…, затем EnterWorktree с path); нет — вернуть в очередь: "
                    + f"pantheon task set {sorted(stale)[0]} status=todo", "board")
     else:
         clear_once("board-doing-stale")
@@ -7901,15 +8168,16 @@ def boardmerged_mod():
     return m
 
 
-def board_merged_open(T, t):
-    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768).
-    Сбой — пусто: сводка важнее."""
+def board_merged_open(T, t, fn="merged_open"):
+    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768);
+    fn="merged_stuck" — висящие дольше 3 суток, для хвоста «сверка» check (metis-1255). Сбой — пусто: сводка важнее;
+    у merged_stuck сбой — None: check держит прежние ключи «сверки», а не стирает их (иначе тревоги пришли бы заново)."""
     try:
-        return boardmerged_mod().merged_open(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+        return getattr(boardmerged_mod(), fn)(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
                                              t, T, autoclose_mod(), autoclose_repo_dirs(),
                                              autoclose_mod().open_pr_tasks(path("autoclose.json")) or ())
     except Exception:  # noqa: BLE001
-        return []
+        return [] if fn == "merged_open" else None
 
 
 def boardmd_mod():
@@ -8072,6 +8340,7 @@ def board_auto_sync(T):
                          owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE,
                          own_of=batch_own_of(tasks, metrics_ctx().repos), windows=board_windows(t))
         data["merged_open"] = board_merged_open(T, t)
+        data["plan_drift"] = _plugin_map_mod("plancheck").board_rows(PANTHEON, tasks, t)  # план ↔ пачки, metis-1235
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
@@ -8727,7 +8996,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
-    nobody, unlinked, tails = [], [], []
+    nobody, unlinked, tails, stuck = [], [], [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -8743,12 +9012,15 @@ def check(paths=None, quiet=False):
         # проход назвал бы одной строкой все его id (argus a2 п. 3)
         unlinked = None if any(x is None for x in srcs) else T.unlinked_decisions(
             tasks_now, srcs[0], srcs[1], srcs[2].splitlines(), now())
+        stuck = board_merged_open(T, now(), "merged_stuck")  # metis-1255; None — сбой, ключи «сверки» держит tail_alert
         tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                   for i, ln in T.tail_lines(tasks_now, now())]
                  + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                     for i, ln in T.part_stalled(tasks_now, now())]
+                 # metis-1255: PR слит, задача висит дольше 3 суток — одна тревога на задачу, со списком пунктов
+                 + [("сверка", k, w) for _, k, w in stuck or []]
                  # metis-0615: «часть» без неотмеченных пунктов — остаток не записан; сразу, не через сутки
                  + [("часть-пусто", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
                      f"{i}: «{ln[:140]}»") for i, ln in T.part_no_items(tasks_now)]
@@ -8829,7 +9101,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
-        tail_alert(T, tails)
+        tail_alert(T, tails, hold=("сверка",) if stuck is None else ())
         if not paths:
             pack_check(quiet=True)
         return 0
@@ -8895,6 +9167,8 @@ TAIL_TEXT = {"хвост": "хвост в журнале без задачи (н
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
              "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)",
+             "сверка": "PR слит больше 3 суток назад, задача не закрыта (пункты сверяет argus: pantheon review accept "
+                       "--criteria; живая проба — её итог в журнал; остаток — pantheon task split)",
              "время": "строка журнала задачи позже часов системы — дописана руками, время на глаз (записи — через "
                       "pantheon task set --note, время ставит код)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
@@ -8903,7 +9177,8 @@ TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review 
                                      "часть-пусто": "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет (вписать "
                                                     "пункт остатка или закрыть задачу)"})
 TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
-             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан",
+             "сверка": "PR слит, задача висит"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
 
 
 def tails_by_task(items):
@@ -8928,7 +9203,8 @@ def tails_board(items):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток, "
+            "задача не закрыта дольше 3 суток после слияния PR. Погасить — строка "
             "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
             + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
@@ -8937,13 +9213,14 @@ def tails_board(items):
         write_atomic(pp, text)
 
 
-def tail_alert(T, items):
+def tail_alert(T, items, hold=()):
     """Тревоги «хвосты не теряются» (metis-0504): items — [(вид, ключ, место)], вид хвост | отчёт | ревью, место — id
     задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых. Первый проход
     (файла STATE/tail-seen.json нет или он испорчен) запоминает всё и даёт одну сводную тревогу — сколько хвостов
     уже есть по видам и где список (Доска/Хвосты.md), без перечня: молча старые хвосты не пропадают (metis-0572), а
     сотня строк не становится шумом. Записи о том, чего в наборе
-    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN."""
+    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN. hold — виды,
+    чей источник в этот проход не прочитан (metis-1255): их прежние ключи остаются, тревог по ним нет."""
     p = path("tail-seen.json")
     try:
         with open(p, encoding="utf-8") as fh:
@@ -8955,14 +9232,18 @@ def tail_alert(T, items):
     t = now()
     keep, shown_all = {}, set()
     for kind in TAIL_TEXT:
+        if kind in hold:
+            keep.update({k: v for k, v in (seen or {}).items() if k.startswith(kind + "|")})
+            continue
         mine = [(f"{kind}|{k}", where) for kd, k, where in items if kd == kind]
         fresh = [(k, w) for k, w in mine if k not in seen] if seen is not None else []
         shown = fresh[:TAIL_SHOWN]
         if shown:
             more = len(fresh) - len(shown)
             alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
-                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
-                  "(pantheon task new, ссылка на файл или id в тексте)", "check")
+                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''}"
+                  + ("" if kind == "сверка" else " — завести задачу (pantheon task new, ссылка на файл или id в тексте)"),
+                  "check")
         shown_all.update(k for k, _ in shown)
         # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
         keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})
@@ -9313,6 +9594,9 @@ _attach("instructions")
 _attach("rolecmd")
 _attach("sessions")
 _attach("batch")
+_attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
+_attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
+_attach("perm")           # запрос разрешения окна роли — Зевсу, ответ владельца — окну (metis-1250)
 
 
 def main(argv):
@@ -9452,6 +9736,8 @@ def main(argv):
         return approve(rest)
     if cmd == "consent":
         return consent(rest)
+    if cmd == "perm":
+        return perm_cmd(rest)
     if cmd == "reap":
         return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
@@ -9478,16 +9764,24 @@ def main(argv):
         return browser_mod().main(rest)
     if cmd == "handoff":
         return handoff_mod().main(rest)
+    if cmd == "denials":
+        return denials_mod().main(rest, STATE, now())
     if cmd == "owner-edit":
         return owner_edit_mod().main(rest)
     if cmd == "policy":
         return owner_edit_mod().cmd_policy(rest)
+    if cmd == "grant":
+        return owner_edit_mod().cmd_grant(rest)
     if cmd == "config":
         return config_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
+    if cmd == "worktree":
+        return worktree_cmd(rest)
     if cmd == "supabase":
         return _plugin_map_mod("supabase_migrate").main(rest, STATE)
+    if cmd == "plan":
+        return _plugin_map_mod("plancheck").main(rest, PANTHEON, tasks_mod(), now())
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":

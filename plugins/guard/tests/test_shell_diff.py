@@ -6,6 +6,12 @@
 Команды меняют только временную папку: HOME подменён, пути в них — через ~ и относительные, /tmp не трогают.
 Обратное (guard отказал, оболочка ничего не изменила) — не ошибка: guard берёт надмножество; с --verbose
 такие случаи печатаются, чтобы видеть цену запаса.
+
+Решение guard (metis-1148, план 1.0 Т3) — внутри процесса воркера (_guard_inproc.call, вход guard.py: правила
+загружены один раз, каждый вызов — fork со своим HOME, окружением и аргументами), а не новый интерпретатор на вызов.
+Настоящий процесс `python3 -I _cached_main.py guard.py` — у первой команды набора (вход хука целиком) и у всех команд,
+если пул процессов в песочнице недоступен и работу раздают потоки: fork из процесса, где другие потоки зовут guard,
+небезопасен.
 """
 import hashlib
 import json
@@ -32,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _orphan_pool import process_pool  # noqa: E402 — воркеры гаснут вместе с родителем (metis-0618)
+from _guard_inproc import call  # noqa: E402 — решение guard внутри процесса (metis-1148)
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 CACHED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cached_main.py")  # guard из .pyc (metis-0544)
@@ -134,13 +141,20 @@ def snapshot(home):
     return res
 
 
-def guard_says(home, cmd, role):
+_THREADS = False  # работу раздают потоки (песочница без пула процессов): guard — только подпроцессом
+
+
+def guard_says(home, cmd, role, proc=False):
+    """Решение guard: внутри процесса (fork с загруженными правилами) или, при proc и в потоках, — подпроцессом."""
     event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd},
              "cwd": os.path.join(home, PROJECT), "agent_type": role}
     env = {"HOME": home, "PATH": os.environ["PATH"], "CLAUDE_PROJECT_DIR": os.path.join(home, PROJECT),
            "TMPDIR": os.path.join(home, "tmp")}
-    r = subprocess.run([sys.executable, "-I", CACHED, GUARD], input=json.dumps(event), capture_output=True, text=True,
-                       env=env, timeout=SUB_TIMEOUT)
+    if proc or _THREADS:
+        r = subprocess.run([sys.executable, "-I", CACHED, GUARD], input=json.dumps(event), capture_output=True,
+                           text=True, env=env, timeout=SUB_TIMEOUT)
+    else:
+        r = call([], env, json.dumps(event), entry=True, timeout=SUB_TIMEOUT)
     return "deny" if r.returncode == 2 or '"deny"' in r.stdout else "allow"  # код 2 — сбой, отказ (metis-0094)
 
 
@@ -192,9 +206,13 @@ def check(cmd):
         changed = {role: [sh for sh, ch in changes.items()
                           if any(k == p or k.startswith(p + "/") or k in ("ai", "ai/pantheon") for k in ch for p in closed)]
                    for role, closed in ROLES.items()}
-        return cmd, changed, {role: guard_says(home, cmd, role) for role in ROLES}
+        proc = cmd == PROC_CMD  # первая команда набора — настоящим процессом хука
+        return cmd, changed, {role: guard_says(home, cmd, role, proc) for role in ROLES}
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+PROC_CMD = cases()[0]
 
 
 def run_all(all_cases):
@@ -208,6 +226,8 @@ def run_all(all_cases):
         with process_pool(workers) as pool:
             return list(pool.map(check, all_cases, chunksize=8))
     except (PermissionError, OSError):
+        global _THREADS
+        _THREADS = True
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(check, all_cases))
 

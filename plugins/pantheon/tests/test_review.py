@@ -50,6 +50,26 @@ def budget_checks(pantheon, git, repo):
     check("test — свой HEAVY_WAIT_MAX меньше бюджета остаётся", "HWM=50" in r.stdout, r.stdout)
     r = pantheon(*show, cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "0"})
     check("test — бюджет 0: без ограничения, HEAVY_WAIT_MAX не ставится", "HWM=unset" in r.stdout, r.stdout)
+    # metis-1174: запасной путь «только CI» — HEAVY_LOCAL_TESTS=1 только команде набора шлюза (FULL_TESTS или узкий
+    # вариант --affected --base); подставной heavy печатает, что получил
+    fbin = os.path.join(os.path.dirname(repo), "fakeheavy")
+    os.makedirs(fbin, exist_ok=True)
+    with open(os.path.join(fbin, "heavy"), "w") as fh:
+        fh.write("#!/bin/sh\necho HLT=${HEAVY_LOCAL_TESTS-unset}\n")
+    os.chmod(os.path.join(fbin, "heavy"), 0o755)
+    fx = {"PATH": fbin + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"), "HEAVY_LOCAL_TESTS": "1"}
+    full = ["heavy", "python3.14", "-I", "plugins/pantheon/scripts/run-tests.py", "-j", "3", "plugins/guard",
+            "plugins/pantheon", "plugins/project-tools"]
+    r = pantheon("review", "test", "--", *full, cwd=repo, extra=fx)
+    check("test — полный набор шлюза: HEAVY_LOCAL_TESTS=1", "HLT=1" in r.stdout, r.stdout + r.stderr)
+    r = pantheon("review", "test", "--", *full[:6], "--affected", "--base", "origin/main", *full[6:], cwd=repo, extra=fx)
+    check("test — узкий вариант (--affected --base): HEAVY_LOCAL_TESTS=1", "HLT=1" in r.stdout, r.stdout + r.stderr)
+    for name, cmd in (("другая команда тестов", ["heavy", "python3.14", "-I", "plugins/x/tests/test_a.py"]),
+                      ("набор с лишним ключом", [*full, "--only", "a"]),
+                      ("не heavy", ["sh", "-c", "echo HLT=${HEAVY_LOCAL_TESTS-unset}"])):
+        r = pantheon("review", "test", "--", *cmd, cwd=repo, extra=fx)
+        check(f"test — {name}: HEAVY_LOCAL_TESTS не ставится и чужая снимается", "HLT=unset" in r.stdout,
+              r.stdout + r.stderr)
     head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     r = pantheon("review", "test", "--", "sleep", "60", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
     check("test — команда дольше бюджета: остановлена, код 75, причина и совет в stderr, SHA не печатается",
@@ -299,6 +319,23 @@ def run_all(tmp):
     r = pantheon("review", "test", "true", cwd=repo)
     check("test без -- : код 2", r.returncode == 2)
     budget_checks(pantheon, git, repo)
+    # metis-1116 (Д1 argus #479): запись FULL_TESTS по хешу owner/name — набор шлюза для репозитория с таким remote
+    # (`_gate_tests_cmd` берёт remote cwd), для чужого remote с тем же коротким именем — нет
+    code = (
+        "import hashlib, importlib.util, os, sys\n"
+        "s = importlib.util.spec_from_file_location('pantheon', %r); P = importlib.util.module_from_spec(s); "
+        "sys.modules['pantheon'] = P; s.loader.exec_module(P)\n"
+        "M = P.merge_mod(); M.FULL_TESTS['sha256:' + hashlib.sha256(b'owner-x/proj').hexdigest()] = 'pnpm run check'\n"
+        "R = P._attach('review')\n"
+        "out = []\n"
+        "for url in ('https://github.com/Owner-X/Proj.git', 'git@github.com:someone/proj.git'):\n"
+        "    os.system('git remote remove origin 2>/dev/null; git remote add origin ' + url)\n"
+        "    out.append(R._gate_tests_cmd(['pnpm', 'run', 'check'], M))\n"
+        "os.system('git remote remove origin')\n"
+        "print(*out)\n" % LIB)
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, env=env, cwd=repo)
+    check("test — набор шлюза по хешу owner/name: remote приватного проекта — да, someone/proj — нет",
+          r.stdout.split() == ["True", "False"], r.stdout + r.stderr)
 
     cl = ["--opened", "merge_gate.py, README", "--ran", 'heavy python3 -I tests/x.py "84 из 84"', "--unchecked", "gh"]
     journal, seeded = _seed_tests(state)
@@ -464,6 +501,14 @@ def run_all(tmp):
           in out43, r.stdout)
     check("0443: решение другого PR, битое решение и битая строка — не показаны",
           S5[:12] not in r.stdout and "битое" not in r.stdout and sum("decision" in ln for ln in out43) == 1, r.stdout)
+    with open(os.path.join(state, "merge-gate", "carry.jsonl"), "a") as fh:
+        fh.write(json.dumps({"v": 1, "kind": "decision-miss", "repo": ["latark/agent-kit"], "pr": 42, "sha": "",
+                             "why": ["срок хука: на gh pr view не осталось времени"],
+                             "time": "2026-11-08T01:10:00+03:00"}) + "\n")
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    check("1181: status показывает след несделанной сверки и велит повторить заявку",
+          "2026-11-08T01:10:00+03:00  decision  код ? не сверен: срок хука: на gh pr view не осталось времени — "
+          "повтори `pantheon merge request`" in r.stdout.splitlines(), r.stdout)
     # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
@@ -478,6 +523,15 @@ def run_all(tmp):
     r = pantheon("review", "status", "latark/agent-kit", "40")
     check("status: репозиторий metis-pantheon в [merge_repos] — строка «для PR ядра» на месте",
           "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in r.stdout, r.stdout)
+    # metis-1065: одно «принять» на Opus в репозитории ядра — строка о лёгком PR и число «принять» Opus с effort high
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(dict(v("accept", S5, "llllllll01", pr=44), models=["claude-opus-5-5"], efforts=["high"]))
+                 + "\n" + json.dumps(dict(v("accept", S5, "mmmmmmmm01", pr=45), models=["claude-opus-5-5"],
+                                          efforts=["medium"])) + "\n")
+    for pr, n in (("44", 1), ("45", 0)):
+        r = pantheon("review", "status", "latark/agent-kit", pr)
+        check(f"1065: status #{pr} — одно «принять» на Opus: лёгкому PR ядра хватит 1 Opus high, таких {n}",
+              "нужно 2 «принять» на Opus, лёгкому" in r.stdout and f"с effort high, таких {n}" in r.stdout, r.stdout)
     os.remove(os.path.join(tmp, ".claude", "pantheon", "policy.toml"))
     # тот же журнал — шлюз владельца merge.gate (общее правило review_accept_counts): Sonnet по транскрипту не в счёт
     import importlib.util as _ilu

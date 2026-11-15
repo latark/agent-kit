@@ -10,6 +10,11 @@
 - autoclose (fetch с поддельным gh → проход по кэшу): слитый PR с Closes отмечает пункты с «да» из записи argus на head
   слияния; все отмечены — done, иначе review с номерами неотмеченных; запись другого head, пункт, которого нет в
   карточке, и пункт, изменённый после приёмки, не отмечают ничего; ядро — только «принять» на Opus.
+- metis-1193: пункт задачи вне Closes отмечается, если тело PR его называет («пункт N <id>») и argus принял его на head
+  слияния; названный без приёмки, принятый без названия, чужого направления, done, со сменой текста — не отмечается.
+- metis-1235: PR «часть» отмечает принятые пункты задач из ветки, «часть <id>» и «часть №N», но не закрывает их;
+  догон по слитым PR из журнала задачи (PR уже обработан, «принять» после слияния) отмечает пункты, отмечено всё и
+  последний PR без «часть» — done; чужое направление и приёмка другой задачи — ничего; сбой accepted — в errors.
 
 Временные HOME, PANTHEON_HOME, PANTHEON_STATE; всё убирается в конце.
 Запуск: python3.14 -I plugins/pantheon/tests/test_criteria_tick.py  (код выхода 0 — все прошли)
@@ -355,9 +360,10 @@ def test_autoclose():
         pf = put(home, "metis-0006")   # ядро, «принять» не на Opus → ничего
         pg = put(home, "metis-0007")   # ядро, «принять» на Opus → done
         ph = put(home, "metis-0008")   # чужая задача: её пункты в записи PR 4, а в Closes её нет нигде → не тронута
+        pi = put(home, "metis-0009")   # metis-1193: вне Closes, «пункты 1 и 2 metis-0009» в теле PR 1, приняты → done
         both = lambda tid: [crit(tid, 1, A1), crit(tid, 2, A2)]  # noqa: E731
         write_records(state, [
-            verdict("accept", H1, pr=1, criteria=both("metis-0001")),
+            verdict("accept", H1, pr=1, criteria=both("metis-0001") + both("metis-0009")),
             verdict("accept", H2, pr=2, criteria=[crit("metis-0002", 1, A1)]),
             verdict("accept", "9" * 40, pr=3, criteria=both("metis-0003")),
             verdict("accept", H4, pr=4, criteria=[crit("metis-0004", 3, A1), crit("metis-0008", 1, A1),
@@ -370,7 +376,7 @@ def test_autoclose():
         open(pe, "w", encoding="utf-8").write(b)
         core = ("plugins/guard/hooks/merge_gate.py",)
         with open(os.path.join(gh, "latark_agent-kit-merged.json"), "w", encoding="utf-8") as fh:
-            json.dump([mpr(1, "Closes metis-0001", H1), mpr(2, "Closes metis-0002", H2), mpr(3, "Closes metis-0003", H3),
+            json.dump([mpr(1, "Closes metis-0001\n\nпункты 1 и 2 metis-0009", H1), mpr(2, "Closes metis-0002", H2), mpr(3, "Closes metis-0003", H3),
                        mpr(4, "Closes metis-0004", H4), mpr(5, "Closes metis-0005", H5),
                        mpr(6, "Closes metis-0006", H6, files=core), mpr(8, "Closes metis-0007", H7, files=core),
                        dict(mpr(9, "", H1), files=[{"path": "docs/gate.py", "changeType": "RENAMED"}], changedFiles=1),
@@ -406,6 +412,10 @@ def test_autoclose():
         check("ядро: «принять» не на Opus не отмечает", st(pf) == "review" and "[x]" not in text(pf), text(pf)[-400:])
         check("ядро: «принять» на Opus отмечает, задача done", st(pg) == "done" and text(pg).count("- [x]") == 2,
               text(pg)[-400:])
+        check("1193: пункты задачи вне Closes, названные в теле PR и принятые argus на head, — отмечены, задача done "
+              "(все пункты отмечены, PR в журнале)",
+              st(pi) == "done" and text(pi).count("- [x]") == 2 and "названы в теле PR другой задачи" in text(pi)
+              and "по приёмке argus (не Closes)" in r.stdout, r.stdout + r.stderr + text(pi)[-600:])
         check("строка прохода об отметке в выводе", "отмечены пункты 1, 2 по приёмке argus" in r.stdout, r.stdout)
     finally:
         shutil.rmtree(tmp, True)
@@ -439,6 +449,187 @@ def test_tick_failure():
         shutil.rmtree(tmp, True)
 
 
+def test_named():
+    """metis-1193: tick_named через close_pr с подставным accepted (без журнала шлюза): каждая ветка отбора."""
+    import autoclose as A
+    tmp, home, state, gh, env = make()
+    try:
+        os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_VIEW=os.path.join(tmp, "view"))
+        p = {i: put(home, f"metis-00{i}", status="done" if i == 26 else "review") for i in range(21, 28)}
+        b = text(p[25]).replace("- [ ] первый пункт: файл a.py", "- [ ] первый пункт: файл c.py")
+        open(p[25], "w", encoding="utf-8").write(b)
+        both = {1: A1, 2: A2}
+        acc = {f"metis-00{i}": dict(both) for i in (21, 22, 24, 25, 26, 27)}  # 23 — не принята
+
+        def run(body, dirs=("metis-pantheon",), accepted=lambda repo, pr: acc, n=21):
+            log, errors = [], {}
+            pr = dict(mpr(n, body, H1), head=H1)
+            ok = A.close_pr(home, T0, "latark/agent-kit", pr, set(dirs), T, None, log, errors, accepted)
+            return ok, log, errors
+
+        ok, log, errors = run("Closes metis-0021\nпункт 1 metis-0022\nпункты 1 и 2 metis-0023\nпункты 1, 2 metis-0024\n"
+                              "пункт 1 metis-0025\nпункты 1 и 2 metis-0026\nсм. metis-0027")
+        x = lambda i: text(p[i]).count("- [x]")  # noqa: E731
+        check("1193: названный «пункт 1» при принятых 1 и 2 — отмечен только 1", ok and x(22) == 1
+              and "- [x] первый пункт" in text(p[22]), (ok, errors, text(p[22])[-400:]))
+        check("1193: названные без приёмки argus — не отмечены", x(23) == 0, text(p[23])[-300:])
+        check("1193: «пункты 1, 2» — оба отмечены, строка прохода", x(24) == 2
+              and any("metis-0024" in s and "(не Closes)" in s for s in log), (log, text(p[24])[-300:]))
+        check("1193: текст пункта изменён после приёмки — не отмечен", x(25) == 0, text(p[25])[-300:])
+        check("1193: задача done — не тронута", x(26) == 0 and "названы" not in text(p[26]), text(p[26])[-300:])
+        check("1193: упомянута без «пункт N», хоть и принята — не отмечена", x(27) == 0, text(p[27])[-300:])
+        put(home, "metis-0022", status="review")
+        ok, log, errors = run("пункт 1 metis-0022", dirs=("other",), n=22)
+        check("1193: задача не из направления репозитория — не отмечена", ok and x(22) == 0, text(p[22])[-300:])
+        put(home, "metis-0027", status="review")
+        ok, log, errors = run("Closes metis-0027, часть metis-0027\nпункт 1 metis-0027", n=23)
+        check("1235: задача из Closes PR с «часть» — принятые пункты отмечены, задача не закрыта",
+              ok and x(27) == 2 and T.read(p[27])[0].get("status") == "review" and "«часть» — задача не закрыта" in text(p[27]),
+              text(p[27])[-300:])
+
+        def boom(repo, pr):
+            raise RuntimeError("журнал не прочитан")
+        ok, log, errors = run("пункт 1 metis-0022", accepted=boom, n=24)
+        check("1193: сбой приёмки — PR не обработан, ошибка с типом в errors",
+              ok is False and "RuntimeError: журнал не прочитан" in errors.get("latark/agent-kit#24", "")
+              and x(22) == 0, (ok, errors))
+        check("1193: named_items — «пункты 1, 2 и 4 X», регистр, повтор задачи сливает номера",
+              A.named_items("Пункты 1, 2 и 4 metis-0001; пункт 7 metis-0001; пункт metis-0002") == {"metis-0001": {1, 2, 4, 7}},
+              A.named_items("Пункты 1, 2 и 4 metis-0001; пункт 7 metis-0001; пункт metis-0002"))
+        got = A.named_items("пункты 1, 2, и 4 metis-0001\nпункт 3 задачи metis-0002")
+        check("1193: named_items — «пункты 1, 2, и 4 X» и «пункт 3 задачи X»",
+              got == {"metis-0001": {1, 2, 4}, "metis-0002": {3}}, got)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_named_filters():
+    """metis-1193: tick_named с подставным T — фильтр type != task и сбой T.criteria_tick внутри."""
+    import autoclose as A
+
+    class FakeT:
+        WORK_TYPES = ("task", "story")
+
+        def __init__(self, tasks, boom=False):
+            self.tasks, self.boom, self.ticked = tasks, boom, []
+
+        def load_tasks(self, pantheon, types):
+            return self.tasks
+
+        def criteria_tick(self, pantheon, t, tid, want, actor, note):
+            if self.boom:
+                raise OSError("диск")
+            self.ticked.append((tid, dict(want)))
+            return sorted(want)
+
+    head = lambda typ: {"type": typ, "direction": "metis-pantheon", "status": "review"}  # noqa: E731
+    acc = lambda repo, pr: {"metis-0041": {1: A1}, "metis-0042": {1: A1}}  # noqa: E731
+    pr = dict(mpr(41, "пункт 1 metis-0041\nпункт 1 metis-0042", H1), head=H1)
+    ft = FakeT({"metis-0041": ("/x/41.md", head("story"), ""), "metis-0042": ("/x/42.md", head("task"), "")})
+    log, errors = [], {}
+    ok = A.tick_named("/x", T0, "latark/agent-kit", pr, {"metis-pantheon"}, set(), ft, acc, log, errors)
+    check("1193: tick_named — story (type не task) не отмечается, task — отмечается",
+          ok and ft.ticked == [("metis-0042", {1: A1})], (ok, ft.ticked, errors))
+    ft = FakeT({"metis-0042": ("/x/42.md", head("task"), "")}, boom=True)
+    log, errors = [], {}
+    ok = A.tick_named("/x", T0, "latark/agent-kit", pr, {"metis-pantheon"}, set(), ft, acc, log, errors)
+    check("1193: сбой T.criteria_tick в tick_named — False, ошибка с задачей и типом в errors, строки прохода нет",
+          ok is False and "metis-0042" in errors.get("latark/agent-kit#41", "")
+          and "OSError: диск" in errors.get("latark/agent-kit#41", "") and not log, (ok, errors, log))
+
+
+def journal(p, line):
+    open(p, "a", encoding="utf-8").write(f"- 2026-11-09 10:00 — плановый проход: {line}\n")
+
+
+def backlog(A, home, state, p, acc, accepted, x, st, both):
+    """Догон (tick_backlog) через run по кэшу: PR в done состояния, «принять» после слияния, сбой accepted."""
+    # догон: PR уже обработаны (done состояния) — close_pr их не видит, отметки ставит tick_backlog
+    for i in (61, 62, 63, 64):
+        journal(p[i], f"PR #{i} (latark/agent-kit) слит, неотмечено 2 (пункты 1, 2)")
+    journal(p[65], "PR #65 (latark/agent-kit) слит, неотмечено 2 (пункты 1, 2)")
+    open(p[65], "w", encoding="utf-8").write(text(p[65]).replace('direction: "metis-pantheon"', 'direction: "other"'))
+    rows = [dict(mpr(i, f"Closes metis-00{i}", H1), head=H1, number=i) for i in (61, 62, 63, 64, 65)]
+    rows[3]["body"] = "часть metis-0064"
+    cache, stf = os.path.join(state, "ac-prs.json"), os.path.join(state, "ac.json")
+    json.dump({"fetched": T0, "merged": {"latark/agent-kit": rows}}, open(cache, "w", encoding="utf-8"))
+    json.dump({"since": T0 - 10, "done": {f"latark/agent-kit#{i}": "2026-11-09T10:00:00" for i in (61, 62, 63, 64, 65)}},
+              open(stf, "w", encoding="utf-8"))
+    calls = []
+
+    def acc_count(repo, pr):
+        calls.append(pr.get("number"))
+        return accepted(repo, pr)
+    log, errors = A.run(home, stf, cache, T0, {"latark/agent-kit": {"metis-pantheon"}}, T, accepted=acc_count)
+    check("1235 догон: PR в done состояния, все пункты приняты — отмечены и задача закрыта (Closes без «часть»)",
+          x(61) == 2 and st(61) == "done" and "(догон)" in text(p[61]), (log, errors, text(p[61])[-500:]))
+    check("1235 догон: принят один пункт — он отмечен, задача осталась review",
+          x(62) == 1 and st(62) == "review", text(p[62])[-400:])
+    check("1235 догон: приёмка другой задачи на том PR — ничего", x(63) == 0 and st(63) == "review", text(p[63])[-300:])
+    check("1235 догон: последний PR «часть» — пункты отмечены, задача не закрыта",
+          x(64) == 2 and st(64) == "review" and "«часть» — задача не закрыта" in text(p[64]), text(p[64])[-400:])
+    check("1235 догон: задача чужого направления — не тронута", x(65) == 0, text(p[65])[-300:])
+    check("1235 догон: accepted — один раз на PR, только PR из журналов задач с хвостом",
+          sorted(calls) == [61, 62, 63, 64] and errors == {}, (calls, errors))
+    check("1235 догон: строка прохода", any("metis-0061" in s and "(догон)" in s for s in log), log)
+
+    # «принять» записан после слияния: следующий кэш — догон отмечает
+    acc[62] = {"metis-0062": dict(both)}
+    json.dump({"fetched": T0 + 60, "merged": {"latark/agent-kit": rows}}, open(cache, "w", encoding="utf-8"))
+    log, errors = A.run(home, stf, cache, T0 + 60, {"latark/agent-kit": {"metis-pantheon"}}, T, accepted=accepted)
+    check("1235 догон: «принять» после слияния — оставшийся пункт отмечен, задача done", x(62) == 2 and st(62) == "done",
+          (log, errors, text(p[62])[-400:]))
+
+    def boom(repo, pr):
+        raise RuntimeError("журнал шлюза")
+    json.dump({"fetched": T0 + 120, "merged": {"latark/agent-kit": rows}}, open(cache, "w", encoding="utf-8"))
+    log, errors = A.run(home, stf, cache, T0 + 120, {"latark/agent-kit": {"metis-pantheon"}}, T, accepted=boom)
+    check("1235 догон: сбой accepted — ошибка с типом в errors, проход не упал",
+          "RuntimeError: журнал шлюза" in errors.get("latark/agent-kit#63", ""), errors)
+
+
+def test_part_and_backlog():
+    """metis-1235: PR «часть» отмечает принятые пункты задач, которые он называет (ветка, «часть <id>», «часть №N»), но
+    не закрывает их; догон (tick_backlog) отмечает пункты по слитым PR из журнала задачи — и по PR, обработанному до
+    выпуска (в done состояния), и по «принять», записанному после слияния; отмечено всё — close_checked закрывает."""
+    import autoclose as A
+    tmp, home, state, gh, env = make()
+    try:
+        os.environ.update(HOME=tmp, PANTHEON_HOME=home, PANTHEON_STATE=state, PANTHEON_VIEW=os.path.join(tmp, "view"))
+        both = {1: A1, 2: A2}
+        p = {i: put(home, f"metis-00{i}", status="doing" if i < 60 else "review") for i in (51, 52, 53, 61, 62, 63, 64, 65)}
+        acc = {51: {"metis-0051": {1: A1}}, 52: {"metis-0052": dict(both)}, 53: {"metis-0053": dict(both)},
+               61: {"metis-0061": dict(both)}, 62: {"metis-0062": {1: A1}}, 63: {"metis-0099": dict(both)},
+               64: {"metis-0064": dict(both)}, 65: {"metis-0065": dict(both)}}
+        accepted = lambda repo, pr: acc.get(pr.get("number"), {})  # noqa: E731
+        x = lambda i: text(p[i]).count("- [x]")  # noqa: E731
+        st = lambda i: T.read(p[i])[0].get("status")  # noqa: E731
+
+        def close(n, body, branch="feature"):
+            log, errors = [], {}
+            ok = A.close_pr(home, T0, "latark/agent-kit", dict(mpr(n, body, H1, branch=branch), head=H1),
+                            {"metis-pantheon"}, T, None, log, errors, accepted)
+            return ok, log, errors
+
+        ok, log, errors = close(51, "часть metis-0051: пп. 1")
+        check("1235: PR «часть <id>» — принятый пункт отмечен, задача не закрыта, строка «часть» в журнале",
+              ok and x(51) == 1 and st(51) == "doing" and "«часть» — задача не закрыта" in text(p[51])
+              and any("metis-0051" in s and "по приёмке argus" in s for s in log), (ok, errors, log, text(p[51])[-400:]))
+        ok, log, errors = close(52, "Это часть №0052, остальное — потом")
+        check("1235: PR «часть №<номер>» — номер без префикса находит задачу, оба пункта отмечены, но не done",
+              ok and x(52) == 2 and st(52) == "doing", (ok, errors, text(p[52])[-400:]))
+        ok, log, errors = close(53, "часть metis-0051", branch="metis-0053-p1")
+        check("1235: PR «часть» с id в ветке — пункты отмечены, задача не закрыта", ok and x(53) == 2 and st(53) == "doing",
+              (ok, errors, text(p[53])[-400:]))
+        check("1235: part_refs — id, «№номер», слово без номера не в счёт",
+              A.part_refs("часть metis-0001; часть №0002; личная часть карты") == (["metis-0001"], [2]),
+              A.part_refs("часть metis-0001; часть №0002; личная часть карты"))
+
+        backlog(A, home, state, p, acc, accepted, x, st, both)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_tasks_unit()
     test_review_cli()
@@ -446,6 +637,9 @@ def main():
     test_merged_core()
     test_autoclose()
     test_tick_failure()
+    test_named()
+    test_named_filters()
+    test_part_and_backlog()
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if results and all(results) else 1
 

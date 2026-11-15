@@ -752,6 +752,43 @@ check("consent в окне Гестии: «да» на гашение, позж�
 for ans, want in (("А - Да", True), ("А – Да", True), ("Ё — да", True), ("ё - Да, пушить", True)):
     got = P.consent_is_yes(f"вопрос: [x-1] Пушим?\nответ: {ans}")
     check(f"consent_is_yes: «ответ: {ans}» → да", got is want, got)
+# metis-1139: «да» с оговоркой — не полное «да»; «Да и впредь — класс …» — полное
+for ans, want in (("Да, кроме mt-dir", False), ("А — Да, только ветку fix", False), ("Да, если тесты зелёные", False),
+                  ("Да, без --force", False), ("1. Да — частично", False), ("Да, but later", False),
+                  ("Да, only main", False), ("Да, unless red", False), ("Да, except main", False),
+                  ("Б — Да и впредь — класс push-pr", True), ("Да — запушить, ноутбук", True),
+                  ("Да — только-что собранную", True)):
+    got = P.consent_is_yes(f"вопрос: [x-1] Пушим?\nответ: {ans}")
+    check(f"consent_is_yes (metis-1139): «ответ: {ans}» → {'да' if want else 'не да'}", got is want, got)
+# metis-1137: метка push Гестии — только по «да» на вопрос о push или записи в PR
+for qid, q, want in (("metis-0747", "[metis-0747] Перезапустить окна: mt-dir, push-x?", False),
+                     ("metis-0748", "[metis-0748] Перезапустить окно: mt-dir?", False),
+                     ("metis-0749", "[metis-0749] Пересобрать роли?", False),
+                     ("metis-0750", "[metis-0750] Открыть PR ветки fix?", True),
+                     ("metis-0751", "[metis-0751] Отправить ветку fix на GitHub?", True)):
+    fresh()
+    open(os.path.join(LOG, "zeus.md"), "w").write(win(q, "А — Да", 60))
+    cr = consent(qid, PANTHEON_ROLE="hestia", PANTHEON_TASK=qid)
+    mark = os.path.join(state, "hestia-consent", qid)
+    check(f"consent в окне Гестии (metis-1137): «да» на «{q[13:]}» → " + ("метка push" if want else "код 1, метки нет"),
+          (cr.returncode == 0) == want and os.path.isfile(mark) == want
+          and (want or "не на вопрос о push" in cr.stdout), cr.stdout + cr.stderr)
+    check(f"consent вне Гестии (metis-1137): «да» на «{q[13:]}» → код 0, метки нет",
+          consent(qid).returncode == 0 and os.path.isfile(mark) == want)
+A = P.answers_mod()
+SQ = [("А", "Да, пушить"), ("Б", "Да и впредь — класс push-pr"), ("В", "Нет")]
+for reply, want in (("да и впредь", 1), ("Да и впредь.", 1), ("давай да и впредь", 1), ("да", 0), ("а", 0), ("б", 1),
+                    ("нет", 2), ("да и впредь, кроме main", None), ("да и впредь?", None)):
+    got = A.pick(reply, "metis-0752", SQ)
+    check(f"pick (metis-1135): «{reply}» на «Да / Да и впредь / Нет» → {want}", got == want, got)
+check("pick: «да и впредь», а такого варианта нет или их два → не выбор; «да» на один вариант «Да и впредь» — не выбор",
+      A.pick("да и впредь", "x-1", [("А", "Да"), ("Б", "Нет")]) is None
+      and A.pick("да и впредь", "x-1", [("А", "Да и впредь — класс a"), ("Б", "Да и впредь — класс b")]) is None
+      and A.pick("да", "x-1", [("А", "Да и впредь — класс push-pr")]) is None)
+log, r = case("standing", lambda tr: tr.say("[metis-0752] Пушим ветку?\nА — Да, пушить\nБ — Да и впредь — класс "
+                                            "push-pr\nВ — Нет").end_turn(), "да и впредь")
+check("хук: «да и впредь» в чате → «ответ: Б — Да и впредь — класс push-pr»",
+      "· ответ в чате\nвопрос: [metis-0752] Пушим ветку?\nответ: Б — Да и впредь — класс push-pr\n" in log, log)
 now = time.time()
 stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 60))
 
@@ -780,6 +817,16 @@ check("ночь: у ответа в чате лишняя строка → от�
 
 # запуск окон: вопрос launch-question и «да» в чате
 W = P.watch_mod()
+# metis-1139: метка использования «да» на перезапуск окна — O_EXCL: второй одновременный --only с тем же id получает
+# FileExistsError (restart_only → код 2), а не второй перезапуск
+W.owner_use("excl-1139", "mt-dir")
+try:
+    W.owner_use("excl-1139", "mt-dir")
+    excl = False
+except FileExistsError:
+    excl = True
+check("1139: вторая метка restart-owner/<id>@<окно> — FileExistsError (O_EXCL)", excl)
+check("1139: owner_used видит окно по метке", "mt-dir" in W.owner_used("excl-1139"), W.owner_used("excl-1139"))
 P.write_atomic(P.path("word-launch-since"), f"{int(now - 3600)}\n")
 lq, lyes, _ = W.launch_question("metis-0711", "запустить", "alpha")
 zeus_write(("ответ в чате", f"вопрос: {lq}\nответ: {lyes}\nвариант: 1\nдословно: 1"))

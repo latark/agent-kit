@@ -114,15 +114,15 @@ def agent_of(dry_out):
 
 def guard_probe(role):
     """Блокеры argus PR #125: окно лида — главная сессия (agent_id нет) с agent_type из --agent. Настоящий guard на
-    фикстурах test_guard: такая сессия пишет STATUS.md своего направления и проходит шлюз gh pr merge; контроль —
+    фикстурах _guard_common (guard через настоящий процесс, proc=True): такая сессия пишет STATUS.md своего направления и проходит шлюз gh pr merge; контроль —
     agent_type лида (hephaestus-shop) главной сессией: guard отказывает. guard не меняется — только читается и
     запускается. В копии одного плагина guard рядом нет — пропуск."""
     gtests = os.path.join(os.path.dirname(ROOT), "guard", "tests")
-    if not os.path.isfile(os.path.join(gtests, "test_guard.py")):
+    if not os.path.isfile(os.path.join(gtests, "_guard_common.py")):
         print("skip проба guard: guard/tests рядом нет (копия одного плагина)")
         return
     sys.path.insert(0, gtests)
-    import test_guard as G  # noqa: E402
+    import _guard_common as G  # noqa: E402  (разрез test_guard.py, metis-1148)
     ghome = os.path.realpath(tempfile.mkdtemp(prefix="coord-guard-"))
     G.setup(ghome)
     G.merge_fixtures(ghome)
@@ -130,8 +130,8 @@ def guard_probe(role):
     penv = {"PANTHEON_ROLE": "domain-coordinator", "PANTHEON_SESSION": "hephaestus-shop"}
 
     def probe(r):
-        return [G.run(ghome, br, r, "Write", {"file_path": st, "content": "x"}, penv=penv),
-                G.run(ghome, br, r, "Bash", {"command": "gh pr merge 1"}, penv=penv)]
+        return [G.run(ghome, br, r, "Write", {"file_path": st, "content": "x"}, penv=penv, proc=True),
+                G.run(ghome, br, r, "Bash", {"command": "gh pr merge 1"}, penv=penv, proc=True)]
     got, ctl = probe(role), probe("hephaestus-shop")
     check(f"guard: главная сессия окна (agent_type {role!r} из --agent) пишет STATUS.md направления и проходит "
           "шлюз gh pr merge; agent_type лида главной сессией — отказ в обоих (контроль)",

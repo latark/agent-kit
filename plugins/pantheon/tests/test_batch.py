@@ -281,6 +281,62 @@ check("слит PR пачки: metis-0901 done, metis-0902 открыта (revie
       ok and not errs and tk["metis-0901"][1]["status"] == "done" and tk["metis-0902"][1]["status"] == "review"
       and tk["metis-0900"][1]["status"] == "doing", f"{log} {errs}")
 
+# metis-1226: start через общую pantheon worktree add; fetch без сети — имеющийся origin/main; песочница — подсказка
+def mutant_lib(old, new):
+    d = os.path.join(tmp, "mutlib-" + str(len(os.listdir(tmp))))
+    shutil.copytree(LIB, d, ignore=shutil.ignore_patterns("__pycache__"))
+    f = os.path.join(d, "batch.py")
+    src = open(f, encoding="utf-8").read()
+    assert src.count(old) == 1, old
+    open(f, "w", encoding="utf-8").write(src.replace(old, new))
+    return d
+
+
+def cli_lib(lib, cwd, *a):
+    return subprocess.run([PY311, "-I", os.path.join(lib, "run.py"), *a], cwd=cwd, env=env, capture_output=True,
+                          text=True)
+
+
+for n in ("0910", "0911", "0912", "0913"):
+    card(os.path.join(tdir, f"metis-{n}.md"), {"type": "story", "id": f"metis-{n}", "title": f'"Пачка {n}"',
+                                              "status": "doing", **base}, "## Готово, когда\n\n- [ ] слита")
+git(repo, "remote", "set-url", "origin", os.path.join(tmp, "no-such-origin.git"))  # сети нет: fetch падает
+r = cli(repo, "batch", "start", "metis-0910")
+wt10 = os.path.join(repo, ".claude", "worktrees", "batch-metis-0910")
+check("start без сети: код 0, предупреждение про fetch, копия от имеющегося origin/main", r.returncode == 0
+      and "fetch" in r.stderr and "имеющийся origin/main" in r.stderr and os.path.isdir(wt10)
+      and git(wt10, "rev-parse", "HEAD") == git(repo, "rev-parse", "origin/main"), r.stdout + r.stderr)
+m = mutant_lib('    if have.returncode != 0:\n        print(f"pantheon batch start: origin/',
+               '    if have.returncode != 0 or f.returncode != 0:\n        print(f"pantheon batch start: origin/')
+r = cli_lib(m, repo, "batch", "start", "metis-0913")
+check("мутант: fetch без сети снова провал — тест выше краснеет", r.returncode == 1
+      and not os.path.isdir(os.path.join(repo, ".claude", "worktrees", "batch-metis-0913")), r.stderr)
+git(repo, "remote", "set-url", "origin", origin)
+
+common_wt = os.path.join(repo, ".git", "worktrees")
+os.chmod(common_wt, 0o555)  # как песочница окна: запись в .git/worktrees закрыта
+try:
+    r = cli(repo, "batch", "start", "metis-0911")
+    m = mutant_lib("    if not _wt_writable(root):\n", "    if False:\n")
+    rm = cli_lib(m, repo, "batch", "start", "metis-0912")
+finally:
+    os.chmod(common_wt, 0o755)
+hint = "pantheon worktree add batch-metis-0911 --branch batch/metis-0911 --base origin/main"
+no_br = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/batch/metis-0911"], cwd=repo).returncode
+check("start в песочнице: код 1, точная подсказка pantheon worktree add, ветки не создано", r.returncode == 1
+      and hint in r.stderr and no_br != 0, r.stderr)
+check("мутант: без пробы записи — подсказки нет (тест выше краснеет)",
+      "pantheon worktree add batch-metis-0912 --branch" not in rm.stderr,
+      rm.stderr)
+r = subprocess.run([PY311, "-I", RUN_PY, *hint.split()[1:]], cwd=repo, env=env, capture_output=True, text=True)
+check("подсказанная команда проходит", r.returncode == 0, r.stderr)
+r = cli(repo, "batch", "start", "metis-0911")
+h11 = T.read(os.path.join(tdir, "metis-0911.md"))[0]
+check("повтор start после pantheon worktree add — код 0, ветка записана в карточку", r.returncode == 0
+      and h11.get("branch") == "batch/metis-0911", r.stdout + r.stderr)
+r = cli(repo, "batch", "start", "metis-0911")
+check("третий start — ветка уже в карточке: код 1, «уже есть»", r.returncode == 1 and "уже есть" in r.stderr, r.stderr)
+
 r = subprocess.run([PY311, "-I", RUN_PY, "help"], env=env, capture_output=True, text=True)
 check("справка называет batch start|pr", "batch start|pr" in r.stdout)
 

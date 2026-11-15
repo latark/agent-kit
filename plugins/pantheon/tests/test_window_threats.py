@@ -238,7 +238,9 @@ def pack_execs(home, state, name, plugin):
         out, errs = out + o, errs + e
         if "npx" in [v["command"]] + v.get("args", []):  # кэш задаёт env_from.py: $HOME/.npm
             out.append((os.path.join(home, ".npm"), f"mcp {s}: кэш npx"))
-        if "env_from.py" in " ".join(v.get("args", [])):
+        # cwd сервера: без --chdir — env_from.SAFE_CWD; с --chdir — папка проекта, её окно пишет, но для сервера это
+        # только данные (node по абсолютному пути из кэша npx, PATH без относительных звеньев — class2_chdir)
+        if "env_from.py" in " ".join(v.get("args", [])) and "--chdir" not in v.get("args", []):
             out.append(("/", f"mcp {s}: cwd сервера (env_from.SAFE_CWD)"))
     return out, errs, sorted(mcp)
 
@@ -414,6 +416,80 @@ def class2_npx(tmp):
           "без NODE_OPTIONS", r.returncode == 0 and got.get("cwd") == "/" and "NODE_OPTIONS" not in got.get("env", {})
           and npm == {"npm_config_cache": os.path.join(home, ".npm")}, (r.returncode, got.get("cwd"), npm, r.stderr))
 
+
+def class2_chdir(tmp):
+    """env_from.py --chdir (metis-0949): сервер npx-пакета работает в папке проекта (shadcn MCP читает components.json
+    из process.cwd()), а пакет разрешается из SAFE_CWD — подставной npx пишет, откуда его позвали, и отдаёт бинарник
+    из кэша $HOME/.npm/_npx. Бинарник вне кэша, команда без точной версии, не папка — выход 1, сервер не запущен."""
+    if not shutil.which("node"):
+        print("     пропущено: нет node — класс 2, env_from.py --chdir")
+        return
+    home = os.path.join(tmp, "chdirhome")
+    proj = os.path.join(home, "projects", "ui")
+    os.makedirs(proj)
+    put(os.path.join(proj, "components.json"), "{}")
+    cache_pkg = os.path.join(home, ".npm", "_npx", "abc", "node_modules")
+    srv = os.path.join(cache_pkg, "fakeui", "cli.js")
+    out_mark = os.path.join(tmp, "chdir-server.json")
+    put(srv, "require('fs').writeFileSync(%s, JSON.stringify({cwd: process.cwd(), argv: process.argv.slice(2), path: process.env.PATH}))\n"
+        % json.dumps(out_mark))
+    os.makedirs(os.path.join(cache_pkg, ".bin"))
+    os.symlink("../fakeui/cli.js", os.path.join(cache_pkg, ".bin", "fakeui"))
+    outside = os.path.join(tmp, "outside-cli.js")
+    put(outside, "require('fs').writeFileSync(%s, 'outside')\n" % json.dumps(out_mark))
+    fbin, npx_mark = os.path.join(tmp, "chdirbin"), os.path.join(tmp, "chdir-npx.json")
+    put(os.path.join(fbin, "npx"), "#!/bin/sh\nprintf '{\"cwd\": \"%%s\", \"args\": \"%%s\"}' \"$(pwd)\" \"$*\" > %s\n"
+        "echo installing >&2\necho \"$FAKE_NPX_BIN\"\n" % shlex.quote(npx_mark))
+    os.chmod(os.path.join(fbin, "npx"), 0o755)
+
+    def run(args, bin_path, path_head=""):
+        for p in (out_mark, npx_mark):
+            if os.path.exists(p):
+                os.unlink(p)
+        env = {"PATH": path_head + fbin + os.pathsep + os.environ["PATH"], "HOME": home, "FAKE_NPX_BIN": bin_path,
+               "NODE_OPTIONS": "--require=/nonexistent.js"}
+        r = subprocess.run([sys.executable, "-I", ENV_FROM, *args], cwd=tmp, env=env, capture_output=True, text=True,
+                           timeout=60)
+        srv_got = json.load(open(out_mark)) if os.path.isfile(out_mark) and open(out_mark).read() != "outside" else (
+            "outside" if os.path.isfile(out_mark) else None)
+        return r, srv_got, json.load(open(npx_mark)) if os.path.isfile(npx_mark) else None
+
+    good = os.path.join(cache_pkg, ".bin", "fakeui")
+    r, got, npx = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3", "mcp", "-x"], good)
+    check("класс 2: env_from.py --chdir — сервер в папке проекта с аргументами, пакет разрешён из «/» (npx -p … -c)",
+          r.returncode == 0 and isinstance(got, dict) and got["cwd"] == os.path.realpath(proj)
+          and got["argv"] == ["mcp", "-x"]
+          and npx is not None and npx["cwd"] == "/" and npx["args"] == "-y -p fakeui@1.2.3 -c command -v fakeui",
+          (r.returncode, got, npx, r.stderr[-400:]))
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], outside)
+    check("класс 2: env_from.py --chdir — бинарник вне кэша $HOME/.npm/_npx не запущен, выход 1",
+          r.returncode == 1 and got is None and "не в кэше npx" in r.stderr, (r.returncode, got, r.stderr[-400:]))
+    planted = os.path.join(tmp, "chdir-planted")
+    put(os.path.join(proj, "node_modules", ".bin", "node"), f"#!/bin/sh\ntouch {shlex.quote(planted)}\n")
+    os.chmod(os.path.join(proj, "node_modules", ".bin", "node"), 0o755)
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], good,
+                    "./node_modules/.bin" + os.pathsep + os.pathsep)
+    check("класс 2: env_from.py --chdir — относительное звено PATH: node из папки проекта не запущен, сервер — настоящий, в его PATH только абсолютные звенья",
+          r.returncode == 0 and not os.path.exists(planted) and isinstance(got, dict)
+          and got["cwd"] == os.path.realpath(proj) and all(os.path.isabs(d) for d in got["path"].split(os.pathsep)), (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], good,
+                    os.path.join(proj, "node_modules", ".bin") + os.pathsep)
+    check("класс 2: env_from.py --chdir — node в папке проекта по абсолютному звену PATH: не запущен, выход 1",
+          r.returncode == 1 and not os.path.exists(planted) and got is None and "папке --chdir" in r.stderr,
+          (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
+    inj, dotenv = os.path.join(tmp, "chdir-injected"), os.path.join(tmp, "chdir-dotenv")
+    put(dotenv, "X=1\n")
+    for name, args in (("без точной версии", ["--chdir", proj, "--", "npx", "-y", "fakeui"]),
+                       ("оболочка в имени пакета", ["--chdir", proj, "--", "npx", "-y", f"fakeui;touch${{IFS}}{inj}@1.2.3"]),
+                       ("$(…) в имени пакета", ["--chdir", proj, "--", "npx", "-y", f"fakeui$(touch${{IFS}}{inj})@1.2.3"]),
+                       ("не npx", ["--chdir", proj, "--", "node", good]),
+                       ("вместе с .env-файлом", ["--chdir", proj, dotenv, "X", "--",
+                                                 "npx", "-y", "fakeui@1.2.3"]),
+                       ("папки нет", ["--chdir", os.path.join(proj, "nope"), "--", "npx", "-y", "fakeui@1.2.3"])):
+        r, got, npx = run(args, good)
+        check(f"класс 2: env_from.py --chdir — {name}: выход 1, ничего не запущено",
+              r.returncode == 1 and got is None and npx is None and not os.path.exists(inj),
+              (r.returncode, got, npx, r.stderr[-400:]))
 
 def class2_links(tmp):
     """Хук чужой папки не исполняется, если репозиторий, звено пути, его .claude или .claude/hooks подменены ссылкой
@@ -2259,6 +2335,7 @@ def main():
     class2(tmp, env, P)
     class4(P, tmp, env)
     class2_npx(tmp)
+    class2_chdir(tmp)
     class2_links(tmp)
     class2_pack_hooks(os.path.join(ROOT, "h2"))
     class2_race(os.path.join(ROOT, "h2"))

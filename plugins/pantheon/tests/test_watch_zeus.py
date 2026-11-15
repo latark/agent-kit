@@ -2,6 +2,8 @@
 """Дежурный, часть 2: держатели, продолжение сессии, уборка Зевса, пересоздание (общая часть — _watch_common.py)."""
 # ruff: noqa: F403, F405
 import os
+import shutil
+import time
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _watch_common import *  # noqa: F403
@@ -68,16 +70,32 @@ def test_holders_registry_and_live_copies():
     e.run("watch", t=T0 + 120)
     check(["respawn", "dddddddd"] in e.calls(), f"самозапуск не через respawn: {e.calls()}")
     pushed = e.st("push", "dddddddd-1.txt")
-    check(os.path.exists(pushed) and open(pushed).read().startswith("[Пантеон:"), "текст для хука push")
+    check(os.path.exists(pushed) and push_read(pushed).startswith("[Пантеон:"), "текст для хука push")
     check(oct(os.stat(pushed).st_mode & 0o777) == "0o600", "права push-файла")
     # respawn не вышел (сессию удалили из списка) — --resume с именем и окном
     e.agents([bg("zz-dir", "stopped", "dddddddd-2", started=T0 + 1)])
     json.dump({}, open(e.st("autostart.json"), "w"))
+    early = "[Пантеон: поручение от tick] ранее"  # metis-1253: ждавшая в очереди передача неудачным respawn не снимается
+    open(e.st("push", "dddddddd-2.txt"), "w", encoding="utf-8").write(early)
     e.run("watch", t=T0 + 99999, extra={"FAKE_RESPAWN_RC": "1"})
     res = [c for c in e.calls() if "--resume" in c]
     check(res and res[-1][res[-1].index("--name") + 1] == "zz-dir" and "--settings" in res[-1],
           f"resume без --name/--settings: {res}")
-    check(not os.path.exists(e.st("push", "dddddddd-2.txt")), "push-файл остался после неудачного respawn")
+    left = push_read(e.st("push", "dddddddd-2.txt"))
+    check(left == early, f"неудачный respawn: своя передача осталась или снята чужая: {left!r}")
+    # metis-1253 (Д3 argus #495): очередь передач полна — ни respawn, ни --resume по сессии, которую Claude Code ещё
+    # числит (копия, текст пропал бы): пропуск с тревогой, повтор следующим проходом
+    e.agents([bg("zz-dir", "stopped", "dddddddd-3", started=T0 + 2)])
+    json.dump({}, open(e.st("autostart.json"), "w"))
+    full = "\x1e%d\n[Пантеон: поручение от tick] %s" % (time.time(), "я" * 7960)  # 7990 знаков: любая новая передача — сверх 8000
+    open(e.st("push", "dddddddd-3.txt"), "w", encoding="utf-8").write(full)
+    c0 = len(e.calls())
+    e.run("watch", t=T0 + 199999)
+    new = e.calls()[c0:]
+    check(not [c for c in new if c[:1] == ["respawn"] or "--resume" in c or "--bg" in c]
+          and open(e.st("push", "dddddddd-3.txt"), encoding="utf-8").read() == full
+          and "очередь передач сессии dddddddd полна" in e.alerts(),
+          f"1253 Д3: полная очередь — подъём или потеря: {new} {e.alerts()[-300:]}")
 
 
 def test_resume_or_start_fresh():
@@ -226,12 +244,15 @@ def test_zeus_clean_0136():
     e.run("watch", t=T0 + 60, extra=ZEUS_RUN)                       # снова ждёт — следующий проход чистит
     check(e.alerts().count("Зевс очищен") == 1, f"после отказа проверки следующий проход не очистил: {e.calls()}")
 
-    # свежий старт не вышел: тревога одна, сессия не помечена очищенной, повтор — не раньше чем через час
+    # свежий старт не вышел (имя не отпустили после claude stop): тревога одна — «Зевс остановлен — pantheon start
+    # zeus» с причиной, а не «не вышла, код 1» (metis-1192); сессия не помечена очищенной, повтор — не раньше чем через час
     e = zeus_env()
     e.run("watch", t=T0, extra={**QUICK, "PANTHEON_STOP_WAIT": "0.1"})  # claude stop не останавливает
     e.run("watch", t=T0 + 600, extra={**QUICK, "PANTHEON_STOP_WAIT": "0.1"})
-    check(e.alerts().count("очистка Зевса не вышла") == 1 and "Зевс очищен" not in e.alerts(),
-          f"неудачная очистка: нет одной тревоги или повтор раньше часа: {e.alerts()[-500:]}")
+    check(e.alerts().count("Зевс остановлен — pantheon start zeus: свежий старт не сделан, имя не освободилось") == 1
+          and "не вышла" not in e.alerts() and "Зевс очищен" not in e.alerts()
+          and _zeus_last(e).get("result") == "пропуск" and len([c for c in e.calls() if c[:1] == ["stop"]]) == 1,
+          f"неудачная очистка: нет одной тревоги или повтор раньше часа: {e.alerts()[-500:]} {e.calls()}")
     e.run("watch", t=T0 + 3700, extra=ZEUS_RUN)
     check(e.alerts().count("Зевс очищен") == 1, f"через час после неудачи очистки нет: {e.alerts()[-400:]}")
 
@@ -557,6 +578,32 @@ def test_restart_only_one_window_1122():
     check(r.returncode == 1 and "[resume]" not in r.stdout, f"ответ двухдневной давности сработал: {r.stdout!r}")
 
 
+def test_restart_only_board_tick_1137():
+    """metis-1137, несимметрия доски: галочка на карточке доски («Перезапустить окно: X?» → «Да») засчитывается
+    перезапуску окна, а гашению процессов — нет (test_consent_note.py, «несимметрия доски»). metis-1139: метка
+    restart-owner/<id>@<окно> — уже использовано, даже без строки в прежнем журнале restart-owner/<id>."""
+    go = {"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"}
+    e = Env()
+    e.direction("mt-dir")
+    e.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    with open(e.st("owner-log", "board.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"time": datetime.fromtimestamp(T0 - 60).strftime("%Y-%m-%dT%H:%M:%S"), "kind": "answer",
+                             "id": "board-1137", "question": "Перезапустить окно: mt-dir?", "answer": "Да"},
+                            ensure_ascii=False) + "\n")
+    r = e.run("restart", "--only", "mt-dir", "--owner", "board-1137", t=T0, extra=go)
+    check(r.returncode == 0 and "[resume] mt-dir a1a1a1a1" in r.stdout,
+          f"несимметрия доски: галочка на перезапуск окна не засчитана: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    e2 = Env()
+    e2.direction("mt-dir")
+    e2.agents([bg("mt-dir", "blocked", "a1a1a1a1-1111-4111-8111-111111111111", pid=51)])
+    _owner_said(e2, "excl-1139", "Перезапустить окно: mt-dir?", "Да", T0 - 60)
+    os.makedirs(e2.st("restart-owner"), exist_ok=True)
+    open(e2.st("restart-owner", "excl-1139@mt-dir"), "w").close()
+    r = e2.run("restart", "--only", "mt-dir", "--owner", "excl-1139", t=T0, extra=go)
+    check(r.returncode == 2 and "[resume]" not in r.stdout and "уже использовано" in r.stderr.strip().splitlines()[-1],
+          f"метка <id>@<окно> не засчитана как использованная: {r.returncode} {r.stdout!r} {r.stderr!r}")
+
+
 def test_restart_go_owner_forces_named_1122():
     """metis-1122: restart --go --owner <id> берёт без метки saved только окна, названные в вопросе [id] с «да»
     владельца; остальные несохранившиеся не трогает. Нет такого ответа — никто не перезапущен, код 1."""
@@ -588,6 +635,162 @@ def test_restart_go_owner_forces_named_1122():
     r = e.run("restart", "--go", "--owner", "restart-all-1311", t=T0 + 70, extra=go)
     check(r.returncode == 2 and "[resume]" not in r.stdout and "уже использовано" in r.stderr.strip().splitlines()[-1],
           f"повтор --go --owner с тем же id: {r.returncode} {r.stdout!r} {r.stderr!r}")
+
+
+def _zeus_copy_env(*extra_agents, **kw):
+    """zeus_env, где живой Зевс зовётся «zeus (2)» (окно 663ef576, metis-1251); контекст 100 тыс. — очистка не нужна."""
+    e = zeus_env(**{"tokens": 100_000, **kw})
+    z = json.load(open(e.agents_file))
+    z[0]["name"] = "zeus (2)"
+    e.agents(z + list(extra_agents))
+    return e
+
+
+def test_zeus_rename_idle_1251():
+    """metis-1251: живая «zeus (2)» без «zeus», Зевс простаивает — claude stop, затем `claude --resume <та же сессия>
+    --bg --agent hq --name zeus` с окном штаба (переписка та же, не чистый контекст); след в start.log, одна тревога;
+    повторный проход ничего не делает. Мёртвая «zeus» перед этим убирается (claude rm)."""
+    e = _zeus_copy_env(bg("zeus", "stopped", "dddddddd-1"))
+    r = e.run("watch", t=T0, extra=ZEUS_RUN)
+    acts = [c for c in e.calls() if c[:1] in (["stop"], ["rm"]) or "--resume" in c or c[:1] == ["--bg"]]
+    res = [i for i, c in enumerate(acts) if "--resume" in c]
+    # rm мёртвой «zeus» — один раз: zeus_rename вычёркивает её из списка прохода, уборка сессий (auto_rm) её не повторяет
+    check(acts.count(["rm", "dddddddd"]) == 1 and acts.count(["stop", "2e057e05"]) == 1 and len(res) == 1
+          and acts.index(["rm", "dddddddd"]) < acts.index(["stop", "2e057e05"]) < res[0],
+          f"переименование: не rm мёртвой < stop < один --resume: {acts} {r.stderr[-500:]}")
+    s = acts[res[0]] if res else []
+    check(s[:2] == ["--resume", ZEUS_SID] and "--bg" in s and s[s.index("--agent") + 1] == "hq"
+          and s[s.index("--name") + 1] == "zeus"
+          and os.path.realpath(s[s.index("--settings") + 1]) == os.path.realpath(e.st("settings", "hq.json"))
+          and s[-1].startswith("[Пантеон: переименование]"), f"запуск не --resume той же сессии под zeus: {s}")
+    log = _start_log(e)
+    check("zeus-rename\t2e057e05\tzeus (2)\t0" in log and "fresh-start\tzeus\t2e057e05\ttick\t0" in log
+          and "name-unseen\tzeus" in log, f"нет следа переименования и проверки имени (check_new_name): {log}")
+    check(e.alerts().count("Зевс переименован") == 1, f"нет одной тревоги: {e.alerts()[-400:]}")
+    check(os.path.exists(e.zeus_transcript), "транскрипт Зевса пропал")
+    n = len(e.calls())
+    e.run("watch", t=T0 + 600, extra=ZEUS_RUN)  # «zeus (2)» уже остановлена, список тот же — повтора нет
+    check(len([c for c in e.calls()[n:] if "--resume" in c or c[:1] == ["--bg"]]) == 0
+          and e.alerts().count("Зевс переименован") == 1, f"повторный проход снова переименовал: {e.calls()[n:]}")
+    # Д1 argus: «zeus (2)» закончила ход (done), процесс жив — fresh_start гасит её строкой stop-fresh-done (name_alias,
+    # а не точное имя: иначе копия держит имя, и новая снова стала бы «zeus (N)»)
+    e = _zeus_copy_env(state="done")
+    z = json.load(open(e.agents_file))
+    z[0]["pid"] = 77
+    e.agents(z)
+    r = e.run("watch", t=T0, extra=ZEUS_RUN)
+    log = _start_log(e)
+    check("stop-fresh-done\tzeus\tzeus (2)\t2e057e05" in log and ["stop", "2e057e05"] in e.calls()
+          and len([c for c in e.calls() if c[:2] == ["--resume", ZEUS_SID]]) == 1,
+          f"done с живым процессом не остановлена копией: {e.calls()} {log} {r.stderr[-300:]}")
+
+
+def test_zeus_rename_not_touched_1251():
+    """metis-1251: не трогаем, пока идёт ход, открыт вопрос AskUserQuestion, не сохранено, с конца хода < 20 мин, при
+    живой «zeus», защитах zeus_hold, когда «zeus (N)» — не фоновая и когда «zeus (N)» две; после сбоя повтор не чаще
+    раза в час."""
+    ask = [_tool("AskUserQuestion", "toolu_ask1", {"questions": []}, T0 - 2980)]
+    fresh_turn = [{"type": "user", "timestamp": _iso(T0 - 700), "message": {"role": "user", "content": "и что?"}},
+                  _answer(T0 - 600)]
+    cases = [("идёт ход (working)", dict(state="working")),
+             ("открыт вопрос", dict(extra_entries=ask)),
+             ("не сохранено", dict(saved=False)),
+             ("ответил 10 мин назад", dict(extra_entries=fresh_turn, saved=T0 - 500))]
+    for what, kw in cases:
+        e = _zeus_copy_env(**kw)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+        check(not zeus_actions(e) and "переименован" not in e.alerts(), f"{what}: Зевса тронули: {e.calls()}")
+    e = _zeus_copy_env(bg("zeus", "blocked", "zzzzzzzz-9", pid=77))  # живая «zeus» есть — «zeus (2)» не трогаем
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "переименован" not in e.alerts(), f"при живой zeus: {e.calls()}")
+    e = _zeus_copy_env()
+    os.makedirs(e.st("stopped"), exist_ok=True)
+    open(e.st("stopped", "zeus"), "w").write("вы\n")  # остановлен вами
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "переименован" not in e.alerts(), f"остановлен вами: {e.calls()}")
+    e = _zeus_copy_env()  # Д3 argus: «zeus (2)» открыта не фоном (вкладка с id в claude agents) — решает человек
+    z = json.load(open(e.agents_file))
+    z[0]["kind"] = "interactive"
+    e.agents(z)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "переименован" not in e.alerts(), f"не фоновая «zeus (2)»: {e.calls()}")
+    e = _zeus_copy_env()  # Д3 argus: две «zeus (N)» штаба — какую переименовать, решает человек (len(zs) != 1)
+    z = json.load(open(e.agents_file))
+    e.agents(z + [{**z[0], "name": "zeus (3)", "id": "3e057e05", "sessionId": "3e057e05-0003"}])
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "переименован" not in e.alerts(), f"две «zeus (N)»: {e.calls()}")
+    e = _zeus_copy_env()  # claude stop не останавливает: имя не освободилось — сбой, повтор не раньше часа
+    quick = {**QUICK, "PANTHEON_STOP_WAIT": "0.1"}
+    e.run("watch", t=T0, extra=quick)
+    e.run("watch", t=T0 + 600, extra=quick)
+    check(len([c for c in e.calls() if c[:1] == ["stop"]]) == 1, f"повтор после сбоя раньше часа: {e.calls()}")
+    e.run("watch", t=T0 + 3700, extra=quick)
+    check(len([c for c in e.calls() if c[:1] == ["stop"]]) == 2, f"через час повтора нет: {e.calls()}")
+
+
+def test_zeus_rename_recheck_1251():
+    """metis-1251, Д2 argus: повторная проверка под блокировкой имени (again) смотрит свежий claude agents. Пока
+    fresh_start держит блокировку start-zeus, заглушка отдаёт другой список: Зевс начал ход (working) — fresh-skip,
+    claude stop нет; появилась вкладка без id с копией имени — тоже fresh-skip, а не fresh-tab с тревогами."""
+    for what, extra in (("начал ход", {"state": "working", "status": "busy"}), ("вкладка без id", None)):
+        e = _zeus_copy_env()
+        z = json.load(open(e.agents_file))
+        now = [{**z[0], **extra}] if extra else z + [{"sessionId": "tab-3", "name": "zeus (3)", "kind": "interactive",
+                                                      "pid": 77, "cwd": e.pantheon}]
+        busy = os.path.join(e.tmp, "agents-locked.json")
+        json.dump(now, open(busy, "w"))
+        lk = e.st("hq-rw", "locks", "start-zeus.lock")
+        r = e.run("watch", t=T0, extra={**ZEUS_RUN, "FAKE_AGENTS_LOCKED": lk, "FAKE_AGENTS_LOCKED_LIST": busy})
+        log = _start_log(e)
+        skip = [ln for ln in log.splitlines() if "fresh-skip\tzeus\t2e057e05\ttick\t" in ln
+                and ("идёт ход" in ln if extra else "«zeus» уже есть" in ln)]
+        check(skip and not zeus_actions(e) and "fresh-tab" not in log and "zeus-rename\t2e057e05\tzeus (2)\t4" in log
+              and "переименован" not in e.alerts() and "свежий старт не сделан" not in e.alerts(),
+              f"{what}: повторная проверка не остановила: {e.calls()} {log} {r.stderr[-300:]}")
+
+
+def test_zeus_rename_tab_1251():
+    """metis-1251, Д4 argus: у владельца открыта вкладка терминала «zeus» (её нет в claude agents, только в реестре
+    ~/.claude/sessions) — «zeus (2)» не переименовываем: ни claude stop, ни fresh-tab, ни тревог, и через час тоже."""
+    e = _zeus_copy_env()
+    d = os.path.join(e.home, ".claude", "sessions")
+    os.makedirs(d, exist_ok=True)
+    json.dump({"pid": os.getpid(), "sessionId": "tab-zeus", "name": "zeus", "kind": "interactive", "cwd": e.pantheon},
+              open(os.path.join(d, f"{os.getpid()}.json"), "w"))
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    e.run("watch", t=T0 + 3700, extra=ZEUS_RUN)
+    log, al = _start_log(e), e.alerts()
+    check(not zeus_actions(e) and "fresh-tab" not in log and "zeus-rename" not in log and "переименован" not in al
+          and "свежий старт не сделан" not in al and "переименование Зевса" not in al,
+          f"вкладка «zeus»: {zeus_actions(e)} {log} {al[-400:]}")
+
+
+def test_zeus_rename_other_cwd_1251():
+    """metis-1251, находка проверки безопасности: «zeus (2)» не в папке Пантеона — не окно штаба, под --agent hq
+    не перезапускаем и не чистим."""
+    e = zeus_env(tokens=160_000)
+    z = json.load(open(e.agents_file))
+    src = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in z[0]["cwd"]))
+    dst = os.path.join(e.home, ".claude", "projects", "-tmp")
+    os.makedirs(dst, exist_ok=True)
+    for n in os.listdir(src):  # журнал тот же и под /tmp: без проверки папки окно прошло бы в перезапуск
+        shutil.copy(os.path.join(src, n), os.path.join(dst, n))
+    z[0]["name"], z[0]["cwd"] = "zeus (2)", "/tmp"
+    e.agents(z)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    hq = [c for c in e.calls() if "--agent" in c and "hq" in c]
+    check(not hq and "Зевс переименован" not in e.alerts() and "Зевс очищен" not in e.alerts(),
+          f"чужая «zeus (2)» перезапущена как штаб: {hq} {e.alerts()[-300:]}")
+
+
+def test_zeus_clean_copy_name_1251():
+    """metis-1251: очистка Зевса видит «zeus (2)» (_base_name) — при полном контексте и простое чистит и её."""
+    e = zeus_env()
+    z = json.load(open(e.agents_file))
+    z[0]["name"] = "zeus (2)"
+    e.agents(z)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(e.alerts().count("Зевс очищен") == 1, f"«zeus (2)» не очищена: {e.calls()} {e.alerts()[-300:]}")
 
 
 def test_saved_by_copy_name_1122():

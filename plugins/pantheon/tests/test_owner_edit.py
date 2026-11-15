@@ -972,11 +972,47 @@ check("R4-2 Б1 (probe2): путь в обратных кавычках — ст
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
-answer(seen(OE.question(req)) if req else "", "А — Да, применить")   # «да» на то, что видно, без «\» — не дословно
+answer(seen(OE.question(req)) if req else "", "А — Да, применить", head="ответ в чате")   # в чате без «\» — не дословно
 IDLE[0] = 10 ** 6
 run()
-check("R4-2 Б1: «да» на вопрос без экранирования — отказ, файл не тронут",
+check("R4-2 Б1: «да» в чате на вопрос без экранирования — отказ, файл не тронут",
       rc == 0 and read(POLICY) == PB_OLD and result(req).get("state") == "refused", (rc, errs, result(req)))
+# metis-1252: окно вопросов Markdown не рисует — «да» на вопрос без «\» (question plain) там согласие, если в вопросе
+# нет знаков, которые Markdown прячет (иначе — только чат с md: находка проверки безопасности PR #493)
+PL_NEW = '[private]\npaths = ["~/ai/knowledge/Self", "~/ai/knowledge/Self-2"]\n'
+check("1252: правка с `код` — окну вопросов не годится, без знаков Markdown — годится",
+      not OE.plain_ok(pb) and OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW)), OE.question(pb, plain=True))
+check("1252: белый список — «_» внутри слова и ${HOME} годятся; «&», «_» на краю, «~» не перед «/», «](» — нет",
+      OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why="через env_from и ${HOME}"))
+      and not any(OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why=w)) for w in
+                  ("a &amp; b", "_курсив_", "x ~y~", "[a](b)", "[a][b]", "a|b", "a@b")),
+      [OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why=w)) for w in ("через env_from", "a &amp; b", "_курсив_")])
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+answer(OE.question(req, plain=True) if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне без «\\» на правку со знаками Markdown — отказ, окна в propose нет", read(POLICY) == PB_OLD
+      and result(req).get("state") == "refused" and "окном вопросов" not in out, (errs, result(req), out))
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PL_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+check("1252: propose даёт Зевсу вопрос для окна без «\\» и для чата с «\\»",
+      bool(req) and OE.question(req, plain=True) in out and OE.question(req) in out
+      and "\\" not in OE.question(req, plain=True).split("Правка")[1], out)
+answer(OE.question(req, plain=True) if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне вопросов на вопрос без «\\» — применено", read(POLICY) == PL_NEW, (errs, journal()))
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PL_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+answer(OE.question(req, plain=True).replace("Self-2", "Self-3") if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне на другой текст без «\\» — отказ", read(POLICY) == PB_OLD
+      and result(req).get("state") == "refused", (errs, result(req)))
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
@@ -1115,6 +1151,98 @@ check("policy_text: обычная правка проходит сверку",
       OE.policy_text(OLD + "\n[other]\nx = 1\n", "other", "x", ["7"]).endswith("[other]\nx = 7\n"))
 rc, out, errs = quiet(P.main, ["policy", "get"])
 check("policy без set — вызов, код 2", rc == 2 and "policy set" in errs, (rc, errs))
+
+# --- [grant] pantheon grant request: право окну заявкой (metis-0680) ------------------------------------------------
+GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
+
+
+def grant(*args, window="metis-pantheon"):
+    if window:
+        os.makedirs(os.path.join(CACHES, window, "tmp"), exist_ok=True)
+        os.environ["PANTHEON_TMP"] = os.path.join(CACHES, window, "tmp")
+        os.environ["PANTHEON_ROLE"] = "metis-pantheon"
+    try:
+        return quiet(P.main, ["grant", "request", *args])
+    finally:
+        os.environ.pop("PANTHEON_TMP", None)
+        os.environ.pop("PANTHEON_ROLE", None)
+
+
+fresh()
+with contextlib.suppress(FileNotFoundError):
+    os.unlink(GRANTS)
+SPOT = os.path.join(WORK, "spot")
+rc, out, errs = grant("--write", SPOT, "--task", "metis-0680", "--why", "кэш сборки", window=None)
+check("grant вне окна роли — отказ, заявки нет", rc == 2 and "окна роли" in errs.strip().splitlines()[-1]
+      and not reqs(), (rc, errs))
+for bad, why in ((["--write", "~/.ssh"], "ключи"), (["--write", SPOT, "--days", "99"], "--days"),
+                 (["--write", SPOT, "--why", ""], "--why"), (["--days", "3"], "--write"),
+                 (["--write", SPOT, "--bogus", "1"], "неизвестный")):
+    args = bad + ([] if "--why" in bad else ["--why", "кэш сборки"]) + ["--task", "metis-0680"]
+    rc, out, errs = grant(*args)
+    check(f"grant {bad}: отказ, причина последней строкой, заявки нет",
+          rc == 2 and why in errs.strip().splitlines()[-1] and not reqs(), (rc, errs))
+rc, out, errs = grant("--write", SPOT, "--domain", "example.com", "--days", "3", "--task", "metis-0680",
+                      "--why", "кэш сборки")
+q = reqs()
+check("grant из окна: заявка owner-edit на grants.toml, вопрос Зевсу в выводе", rc == 0 and len(q) == 1
+      and q[0][1]["file"] == ".claude/pantheon/grants.toml" and f"[{q[0][1]['id']}]" in out, (rc, out, errs, q))
+check("grant: файла ещё нет — роль его не писала", not os.path.exists(GRANTS))
+_, req, _ = q[0]
+answer(yes_question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+rc, out, errs = run()
+live, _, gerr, _ = P.grants_load()
+check("grant: «да» — grants.toml заведён, право окну в силе до срока", os.path.exists(GRANTS) and not gerr
+      and len(live) == 1 and live[0]["window"] == "metis-pantheon" and live[0]["write"] == [SPOT]
+      and live[0]["domains"] == ["example.com"], (out, errs, live, gerr, journal()))
+rc, out, errs = grant("--allow", "Bash(make:*)", "--task", "metis-0680", "--why", "сборка")
+_, req, _ = reqs()[0]
+answer(yes_question(req), "Б — Нет")
+run()
+check("grant: «нет» — файл прежний, итог роли не done", len(P.grants_load()[0]) == 1
+      and result(req, "metis-pantheon").get("state") != "done", result(req, "metis-pantheon"))
+n_req = len(reqs())
+rc, out, errs = grant("--allow", "Edit(~/Library/LaunchAgents/**)", "--task", "metis-0680", "--why", "автозапуск")
+check("grant --allow Edit(…) — отказ: запись только ключом write (ревью #477 Б1)", rc != 0
+      and "правил записи" in errs and len(reqs()) == n_req, (rc, errs))
+for rule in ('Write(~/.local/**)', 'MultiEdit(//tmp/x)', 'NotebookEdit(~/n.ipynb)', ' Edit (~/.claude/**)', 'Edit', 'write '):
+    gerr = P.grants_load(f'[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nallow = [{rule!r}]\n'.replace("'", '"'))[2]
+    check(f"grants_load: allow {rule!r} — ошибка, право не в силе", gerr and "правил записи" in gerr[0], gerr)
+live, _, gerr, _ = P.grants_load('[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nwrite = ["~/.CLAUDE"]\n')
+check("grants_load: write ~/.CLAUDE — отказ без учёта регистра (metis-1218)", not live and gerr
+      and "не даётся" in gerr[0], (live, gerr))
+for bad in ("~/r/.claude", "~/r/.claude/hooks", "~/r/.Claude/agents/x", "~/r/.git", "~/r/.git/hooks"):
+    gerr = P.grants_load(f'[[grant]]\nwindow = "x"\nuntil = "2099-01-01"\nwrite = ["{bad}"]\n')[2]
+    check(f"grants_load: write {bad} — отказ, запреты от .claude/.git встали бы не туда (metis-1214)", gerr
+          and "в .claude и .git" in gerr[0], gerr)
+H = P.handoff_mod()
+check("отказ песочницы без маршрута — подсказка pantheon grant request",
+      "pantheon grant request" in H.hint("touch /opt/x: Operation not permitted", "sandbox"))
+check("тот же текст от роли (не песочница) — прежний вопрос через Зевса",
+      "pantheon grant request" not in H.hint("touch /opt/x: Operation not permitted", "role"))
+
+# --- [pack] mcp.json пакета окна — заявкой owner-edit (metis-0949) ---------------------------------------------------
+fresh()
+PACK = os.path.join(HOME, ".claude", "pantheon", "packs", "demo-pack", "mcp.json")
+PACK_OLD = '{"mcpServers": {"shadcn": {"command": "python3", "args": ["mcp"]}}}\n'
+PACK_NEW = '{"mcpServers": {"shadcn": {"command": "python3", "args": ["mcp", "--cwd", "${HOME}/p/app"]}}}\n'
+write(PACK, PACK_OLD)
+rc, out, errs = propose("~/.claude/pantheon/packs/demo-pack/mcp.json", "[1, 2]\n")
+check("mcp.json пакета — не объект JSON: отказ", rc == 2 and "объект JSON" in errs and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/pantheon/packs/demo-pack/mcp.json", PACK_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+check("mcp.json пакета: заявка принята", rc == 0 and req.get("file") == ".claude/pantheon/packs/demo-pack/mcp.json",
+      (rc, errs))
+answer(yes_question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("mcp.json пакета: «да» — применено", read(PACK) == PACK_NEW, journal())
+rc, out, errs = propose("~/.claude/pantheon/packs/demo-pack/window.json", "{}\n")
+check("window.json пакета — не из списка: отказ", rc == 2 and not reqs(), (rc, errs))
+write(os.path.join(HOME, ".claude", "pantheon", "packs", "demo-pack", "approved.json"), "{}\n")
+rc, out, errs = propose("~/.claude/pantheon/packs/demo-pack/approved.json", '{"a": "0"}\n')
+check("approved.json пакета — не из списка: отказ", rc == 2 and "не из списка" in errs and not reqs(), (rc, errs))
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)

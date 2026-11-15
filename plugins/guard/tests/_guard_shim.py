@@ -4,100 +4,27 @@
     python3 -I _guard_shim.py <путь к guard.py> [--strict|--managed]   (stdin — событие хука)
 
 Грузится модуль правил guard_rules.py рядом с guard.py (metis-0148: guard.py — короткий вход, его решения «молчать»
-проверяет test_entry.py), запуск — его же вход run_hook. Правила не меняются; подменяется только обвязка:
+проверяет test_entry.py), запуск — его же вход run_hook. Правила не меняются; подменяется только обвязка — подмены
+patch() из _guard_inproc.py (metis-1148: тот же текст подмен у вызова внутри процесса теста, а не копия):
 1. Временный HOME тестов лежит в $TMPDIR, а в окне агента это /tmp/claude-<uid>: guard считает /tmp и /private/tmp
    временными корнями (TEMP_ROOTS) и разрешает запись во всё, что внутри, — в том числе в ~/ai/pantheon тестового HOME.
    Для путей внутри HOME теста корни, в которых лежит сам HOME, из TEMP_ROOTS не берутся. Пути вне HOME
    (/tmp/out.txt и т. п.) остаются временными, как в боевом guard. Если HOME не внутри временной папки — ничего не меняется.
 2. Разрешение имён (check_cdp_role: «WebFetch в интернет») ходит в сеть; в песочнице DNS нет, и guard закрывает
    «не разрешилось». Имена разрешаются в публичный адрес (93.184.216.34, example.com: TEST-NET у ipaddress считается частным), IP-адреса — сами в себя.
+3. Искусственный сбой (metis-0094): GUARD_SHIM_BOOM=<имя>[,<имя>] — функция модуля guard (или merge_gate.record)
+   бросает исключение; GUARD_SHIM_HANG=<имя> — висит 15 с, а срок guard (DEADLINE) — GUARD_SHIM_DEADLINE секунд.
+4. Без GUARD_SHIM_HANG сроки guard (DEADLINE 8 с) и его git/gh (3 и 6 с) не короче 45 и 40 с (metis-0763): тест
+   проверяет правила, а не скорость машины; боевой код не меняется.
+5. GUARD_SHIM_MANAGED — файл управляемых настроек вместо настоящего.
 """
-import importlib.util
 import os
-import socket
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _guard_inproc import load_rules, patch  # noqa: E402
+
 path, sys.argv = sys.argv[1], [sys.argv[1]] + sys.argv[2:]
-rules = os.path.join(os.path.dirname(path), "guard_rules.py")
-
-_real_getaddrinfo = socket.getaddrinfo
-
-
-def _getaddrinfo(host, port, *a, **kw):
-    try:
-        socket.inet_pton(socket.AF_INET, host)
-        return _real_getaddrinfo(host, port, *a, **kw)
-    except (OSError, TypeError):
-        pass
-    try:
-        socket.inet_pton(socket.AF_INET6, host)
-        return _real_getaddrinfo(host, port, *a, **kw)
-    except (OSError, TypeError):
-        pass
-    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 0))]
-
-
-socket.getaddrinfo = _getaddrinfo
-
-spec = importlib.util.spec_from_file_location("guard", rules)
-g = importlib.util.module_from_spec(spec)
-sys.modules["guard"] = g
-spec.loader.exec_module(g)
-
-_home = g._key(os.path.realpath(os.environ["HOME"]))
-_orig_inside = g._inside
-
-
-def _inside(p, roots):
-    if g._key(p).startswith(_home.rstrip("/") + "/") or g._key(p) == _home:
-        roots = [r for r in roots
-                 if not (r in g.TEMP_ROOTS and (_home + "/").startswith(g._key(r).rstrip("/") + "/"))]
-    return _orig_inside(p, roots)
-
-
-g._inside = _inside
-
-
-# Искусственный сбой (metis-0094): GUARD_SHIM_BOOM=<имя>[,<имя>] — функция модуля guard (или merge_gate.record)
-# бросает исключение; GUARD_SHIM_HANG=<имя> — висит 15 с, а срок guard (DEADLINE) — GUARD_SHIM_DEADLINE секунд.
-def _target(name):
-    obj, attr = g, name
-    if "." in name:
-        mod, attr = name.split(".", 1)
-        obj = getattr(g, mod)
-    return obj, attr
-
-
-def _boom(*a, **kw):
-    raise RuntimeError("искусственный сбой")
-
-
-def _hang(*a, **kw):
-    import time
-    time.sleep(15)
-
-
-for _name in filter(None, os.environ.get("GUARD_SHIM_BOOM", "").split(",")):
-    setattr(*_target(_name), _boom)
-if os.environ.get("GUARD_SHIM_HANG"):
-    setattr(*_target(os.environ["GUARD_SHIM_HANG"]), _hang)
-    g.DEADLINE = float(os.environ.get("GUARD_SHIM_DEADLINE") or 1)
-else:
-    # metis-0763: срок guard (DEADLINE 8 с) и сроки его git/gh (3 и 6 с) — боевые, под нагрузкой полного набора (-j 3
-    # и чужие сессии) их не хватало: проверка «Метида по записям запора — можно» получала deny (fail closed). Тест
-    # проверяет правила, а не скорость машины, поэтому здесь сроки не короче 45 с; боевой код не меняется, а проверка
-    # самого срока (GUARD_SHIM_HANG выше) идёт со своим коротким.
-    g.DEADLINE = max(g.DEADLINE, 45)
-    import subprocess
-    _real_run = subprocess.run
-
-    def _run(*a, **kw):
-        if kw.get("timeout") is not None:
-            kw["timeout"] = max(kw["timeout"], 40)
-        return _real_run(*a, **kw)
-
-    subprocess.run = _run
-if os.environ.get("GUARD_SHIM_MANAGED"):  # файл управляемых настроек вместо настоящего
-    g.MANAGED_FILE, g.MARKET_GUARD = os.environ["GUARD_SHIM_MANAGED"], path
-
+g = load_rules(path)
+patch(g, path)
 g.run_hook()  # тот же вход, что в блоке __main__ guard.py: сбой — код 2 с причиной в stderr
