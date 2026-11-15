@@ -5,7 +5,11 @@
             задача чужого направления — нет; _review_criteria_problem: «проба» без опоры и с «ОПОРА» — отказ;
             criteria_accepted засчитывает «проба», criteria_probes — только её с опорой; _accept_unmarked: пункт без
             отметки — причина с его номером, сбой gh — причина; review_criteria_gap (merge request) — «fail» без
-            приёмки на head, None с приёмкой на Opus и у «часть».
+            приёмки на head, None с приёмкой на Opus и у «часть»; файлов PR нет — как ядро (не Opus не в счёт), не ядро
+            — в счёт; policy.toml не прочитан — задача любого направления (metis-1266). criteria_dirs — одно приведение
+            регистра для accept и merge request: policy.toml «Latark/Agent-Kit» находится по repo любого регистра.
+            Правило идёт через настоящие T.* (load_tasks, done_criteria, unchecked_numbers, criterion_hash,
+            parse_criterion): граница ядра для них — эти случаи (test_core_deps, исключение tasks_mod).
 - [autoclose] close_pr: «да» и «проба» → задача done, «проба» → задача-проба (source, тег, пункт с опорой, PR) в
             waiting выпуска плагина, повторный проход второй не заводит; хеш не сошёлся — пробы нет; PR без плагинов —
             сразу todo; выпуск не в строке кэша — released(repo); сбой probes — PR повторим. probe_release: версия та
@@ -113,10 +117,28 @@ def scen_review(R, Q, state, gh):
     def req(branch, body):
         return Q.criteria_required(REPO, branch, body, dirs)
 
-    def gap(body, recs):
+    def gap(body, recs, **over):
+        """over — подмена функций merge.py у правила (pr_files, window_core, repo_dirs), остальное — настоящее."""
         C.write_records(state, recs)
-        return Q.review_criteria_gap(REPO, 7, H1, {"body": body, "headRefName": "feature", "baseRefName": "main"},
-                                     M.criteria_api())
+        api = types.SimpleNamespace(**{**vars(M.criteria_api()), **over})
+        return Q.review_criteria_gap(REPO, 7, H1, {"body": body, "headRefName": "feature", "baseRefName": "main"}, api)
+
+    def boom():
+        raise OSError("policy.toml не читается")
+
+    pol = os.path.join(os.environ["HOME"], ".claude", "pantheon", "policy.toml")
+
+    def mixed(fn):
+        """policy.toml со смешанным регистром репозитория (metis-1266) на время fn."""
+        old = open(pol, encoding="utf-8").read()
+        open(pol, "w", encoding="utf-8").write('[merge_repos]\nmetis-pantheon = ["Latark/Agent-Kit"]\n')
+        try:
+            return fn()
+        finally:
+            open(pol, "w", encoding="utf-8").write(old)
+
+    no_files, not_core = (lambda *a: None), {"pr_files": lambda *a: ["README.md"], "window_core": lambda f: False}
+    sonnet = [verdict("accept", H1, criteria=both)]   # перечень CL — не на Opus
 
     return cases([
         ("required: Closes — неотмеченные пункты задачи",
@@ -148,6 +170,17 @@ def scen_review(R, Q, state, gh):
         ("gap: «да» и «проба» на Opus (ядро: файлы не узнать) — None",
          lambda: gap("Closes metis-0001", [verdict("accept", H1, criteria=both, cl=C.OPUS)]) is None),
         ("gap: «часть» — None", lambda: gap("часть metis-0001", []) is None),
+        # metis-1266: ветки review_criteria_gap и criteria_dirs
+        ("gap: файлов PR нет — как ядро: «принять» не на Opus не в счёт",
+         lambda: (gap("Closes metis-0001", sonnet, pr_files=no_files) or ("",))[0] == "fail"),
+        ("gap: файлы есть, не ядро — «принять» не на Opus в счёт",
+         lambda: gap("Closes metis-0001", sonnet, **not_core) is None),
+        ("gap: policy.toml не прочитан — задача любого направления",
+         lambda: "other-0003#1" in (gap("Closes other-0003", [], repo_dirs=boom) or ("", ""))[1]),
+        ("dirs: policy.toml со смешанным регистром — направления по repo любого регистра",
+         lambda: mixed(lambda: Q.criteria_dirs("LATARK/agent-kit", M)) == {"metis-pantheon"}),
+        ("unmarked: policy.toml со смешанным регистром — задача чужого направления не нужна",
+         lambda: mixed(lambda: unmarked("Closes other-0003", [])) is None),
     ])
 
 
@@ -159,6 +192,7 @@ REVIEW_MUTANTS = [
     ('return miss and (f"пункты', 'return None and (f"пункты', "unmarked: пункт 2 без отметки — причина называет только его"),
     ('if not isinstance(view, dict):\n        return "gh pr view', 'if False:\n        return "gh pr view',
      "unmarked: gh не дал тело — причина «gh pr view»"),
+    ('P.criteria_dirs(repo, M),', 'None,', "unmarked: policy.toml со смешанным регистром — задача чужого направления не нужна"),
 ]
 # правило отметок и отказ merge request — в ядре, review_rules.py (test_core_deps)
 RULES_MUTANTS = [
@@ -175,6 +209,13 @@ RULES_MUTANTS = [
     ("for n in T.unchecked_numbers(head, text) if", "for n in range(1, len(crit) + 1) if",
      "required: отмеченный пункт — не нужен"),
     ('return miss and ("fail"', 'return None and ("fail"', "gap: нет приёмки на head — fail с пунктами"),
+    # metis-1266: файлов нет — ядро; policy.toml не прочитан — None, а не пустое множество; регистр — lower
+    ("core = files is None or any(", "core = files is not None and any(",
+     "gap: файлов PR нет — как ядро: «принять» не на Opus не в счёт"),
+    ("задачи любого направления\n        return None", "задачи любого направления\n        return set()",
+     "gap: policy.toml не прочитан — задача любого направления"),
+    ("return M.repo_dirs().get(str(repo).lower())", "return M.repo_dirs().get(str(repo))",
+     "dirs: policy.toml со смешанным регистром — направления по repo любого регистра"),
 ]
 
 

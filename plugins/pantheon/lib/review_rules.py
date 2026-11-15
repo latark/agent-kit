@@ -20,7 +20,7 @@ import re
 
 __all__ = ["REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL", "review_accept_full", "review_accept_counts", "review_records",
            "carry_records", "review_decisions", "criteria_accepted", "criteria_probes", "criteria_tasks",
-           "criteria_required", "criteria_unmarked", "review_criteria_gap"]
+           "criteria_required", "criteria_dirs", "criteria_unmarked", "review_criteria_gap"]
 
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
@@ -201,7 +201,7 @@ CRITERION_PROBE, CRITERION_OK = "проба", ("да", "проба")
 # отметка нужна (criteria_required) и отказ `pantheon merge request` без них (review_criteria_gap, его зовёт
 # merge.py) — здесь, в ядре: обычный PR в review.py ослаблял бы шлюз ядра (test_core_deps). Вне ядра — только данные
 # карточек задач и разбор значения --criteria (tasks.py через P.tasks_mod); направления репозитория из policy.toml даёт
-# вызывающий (merge.repo_dirs через M или autoclose_repo_dirs в review.py) параметром dirs.
+# вызывающий параметром M (merge.repo_dirs, приведение регистра — criteria_dirs, одно на accept и merge request).
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -304,6 +304,16 @@ def criteria_required(repo, branch, body, dirs, loaded=None):
     return out
 
 
+def criteria_dirs(repo, M):
+    """Направления репозитория PR для criteria_required (metis-1266) — одно место и для `review accept`
+    (review._accept_unmarked), и для `merge request` (review_criteria_gap): M.repo_dirs() (merge.py, ключи в нижнем
+    регистре) по repo в нижнем регистре. policy.toml не прочитан — None: строже, задачи любого направления."""
+    try:
+        return M.repo_dirs().get(str(repo).lower())
+    except Exception:  # noqa: BLE001 — policy.toml не прочитан: строже, задачи любого направления
+        return None
+
+
 def criteria_unmarked(need, have):
     """Пункты need ({id: {номер: хеш}}) без отметки «да»/«проба» с тем же хешем в have → «id#N, …» или None."""
     miss = [f"{tid}#{n}" for tid, items in sorted(need.items()) for n, h in sorted(items.items())
@@ -316,11 +326,7 @@ def review_criteria_gap(repo, pr, sha, view, M):
     отметки «да»/«проба» в засчитанных «принять» на head sha (criteria_accepted, хеш — нынешнего текста) → ("fail",
     причина) или None. Ядро — по файлам PR (window_core), файлы не получить — как ядро (строже). M — функции merge.py
     (base_counts, returned_lie, pr_files, window_core, repo_dirs): зовёт merge.py, файл ядра."""
-    try:
-        dirs = M.repo_dirs().get(repo.lower())
-    except Exception:  # noqa: BLE001 — policy.toml не прочитан: строже, задачи любого направления
-        dirs = None
-    need = criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", dirs)
+    need = criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", criteria_dirs(repo, M))
     if not need:
         return None
     files = M.pr_files(repo, pr, view)
