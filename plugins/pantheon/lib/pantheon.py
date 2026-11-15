@@ -8067,15 +8067,16 @@ def boardmerged_mod():
     return m
 
 
-def board_merged_open(T, t):
-    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768).
-    Сбой — пусто: сводка важнее."""
+def board_merged_open(T, t, fn="merged_open"):
+    """Строки «PR слит, задача открыта» для board-auto.md: кэш autoclose fetch и журнал карточки, без gh (metis-0768);
+    fn="merged_stuck" — висящие дольше 3 суток, для хвоста «сверка» check (metis-1255). Сбой — пусто: сводка важнее;
+    у merged_stuck сбой — None: check держит прежние ключи «сверки», а не стирает их (иначе тревоги пришли бы заново)."""
     try:
-        return boardmerged_mod().merged_open(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+        return getattr(boardmerged_mod(), fn)(T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
                                              t, T, autoclose_mod(), autoclose_repo_dirs(),
                                              autoclose_mod().open_pr_tasks(path("autoclose.json")) or ())
     except Exception:  # noqa: BLE001
-        return []
+        return [] if fn == "merged_open" else None
 
 
 def boardmd_mod():
@@ -8894,7 +8895,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
-    nobody, unlinked, tails = [], [], []
+    nobody, unlinked, tails, stuck = [], [], [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -8910,12 +8911,15 @@ def check(paths=None, quiet=False):
         # проход назвал бы одной строкой все его id (argus a2 п. 3)
         unlinked = None if any(x is None for x in srcs) else T.unlinked_decisions(
             tasks_now, srcs[0], srcs[1], srcs[2].splitlines(), now())
+        stuck = board_merged_open(T, now(), "merged_stuck")  # metis-1255; None — сбой, ключи «сверки» держит tail_alert
         tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                   for i, ln in T.tail_lines(tasks_now, now())]
                  + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                     for i, ln in T.part_stalled(tasks_now, now())]
+                 # metis-1255: PR слит, задача висит дольше 3 суток — одна тревога на задачу, со списком пунктов
+                 + [("сверка", k, w) for _, k, w in stuck or []]
                  # metis-0615: «часть» без неотмеченных пунктов — остаток не записан; сразу, не через сутки
                  + [("часть-пусто", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}",
                      f"{i}: «{ln[:140]}»") for i, ln in T.part_no_items(tasks_now)]
@@ -8996,7 +9000,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
-        tail_alert(T, tails)
+        tail_alert(T, tails, hold=("сверка",) if stuck is None else ())
         if not paths:
             pack_check(quiet=True)
         return 0
@@ -9062,6 +9066,8 @@ TAIL_TEXT = {"хвост": "хвост в журнале без задачи (н
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
              "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)",
+             "сверка": "PR слит больше 3 суток назад, задача не закрыта (пункты сверяет argus: pantheon review accept "
+                       "--criteria; живая проба — её итог в журнал; остаток — pantheon task split)",
              "время": "строка журнала задачи позже часов системы — дописана руками, время на глаз (записи — через "
                       "pantheon task set --note, время ставит код)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
@@ -9070,7 +9076,8 @@ TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review 
                                      "часть-пусто": "PR слит с «часть», а неотмеченных пунктов «Готово, когда» нет (вписать "
                                                     "пункт остатка или закрыть задачу)"})
 TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
-             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+             "доска": "доска", "время": "время журнала", "часть-пусто": "PR слит с «часть», остаток не записан",
+             "сверка": "PR слит, задача висит"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
 
 
 def tails_by_task(items):
@@ -9095,7 +9102,8 @@ def tails_board(items):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "слитый PR «часть» без движения или без пунктов остатка, задача doing/review без записи в журнале дольше 2 суток, "
+            "задача не закрыта дольше 3 суток после слияния PR. Погасить — строка "
             "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
             + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
@@ -9104,13 +9112,14 @@ def tails_board(items):
         write_atomic(pp, text)
 
 
-def tail_alert(T, items):
+def tail_alert(T, items, hold=()):
     """Тревоги «хвосты не теряются» (metis-0504): items — [(вид, ключ, место)], вид хвост | отчёт | ревью, место — id
     задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых. Первый проход
     (файла STATE/tail-seen.json нет или он испорчен) запоминает всё и даёт одну сводную тревогу — сколько хвостов
     уже есть по видам и где список (Доска/Хвосты.md), без перечня: молча старые хвосты не пропадают (metis-0572), а
     сотня строк не становится шумом. Записи о том, чего в наборе
-    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN."""
+    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN. hold — виды,
+    чей источник в этот проход не прочитан (metis-1255): их прежние ключи остаются, тревог по ним нет."""
     p = path("tail-seen.json")
     try:
         with open(p, encoding="utf-8") as fh:
@@ -9122,14 +9131,18 @@ def tail_alert(T, items):
     t = now()
     keep, shown_all = {}, set()
     for kind in TAIL_TEXT:
+        if kind in hold:
+            keep.update({k: v for k, v in (seen or {}).items() if k.startswith(kind + "|")})
+            continue
         mine = [(f"{kind}|{k}", where) for kd, k, where in items if kd == kind]
         fresh = [(k, w) for k, w in mine if k not in seen] if seen is not None else []
         shown = fresh[:TAIL_SHOWN]
         if shown:
             more = len(fresh) - len(shown)
             alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
-                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
-                  "(pantheon task new, ссылка на файл или id в тексте)", "check")
+                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''}"
+                  + ("" if kind == "сверка" else " — завести задачу (pantheon task new, ссылка на файл или id в тексте)"),
+                  "check")
         shown_all.update(k for k, _ in shown)
         # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
         keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})
