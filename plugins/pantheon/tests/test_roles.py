@@ -50,6 +50,21 @@ REG = ('[[direction]]\nname = "iris-demo"\nproject = "demo"\nfolders = ["~/proje
        'does = "Демо"\ndoes_not = "Чужое — соседям"\nexamples = ["раз", "два", "три"]\n')
 
 
+def check_marks(out_real, devs):
+    """Пункты «Готово, когда» у argus и в самопроверке исполнителей (selfcheck.part): metis-1237 — пункт после слияния
+    argus принимает на head слияния (догон metis-1235 отметит); metis-1260 — три отметки на каждом пункте."""
+    atext = " ".join(read(os.path.join(out_real, "argus.md")).split())
+    check("argus: пункт после слияния — accept на head слияния, отметит плановый проход (metis-1237)",
+          "можно принять и позже, на уже слитом PR" in atext and "<head слияния> --criteria" in atext)
+    check("argus: три отметки да/нет/проба, без отметки accept — код 1, «проба» — задача после выпуска (metis-1260)",
+          all(x in atext for x in ("«проба» — пункт проверяется только вживую после выпуска", "Каждый пункт — отметка",
+                                   "выходит с кодом 1", "проба после выпуска»")))
+    for f in devs:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: самопроверка — у каждого пункта «Готово, когда» одна отметка да/нет/проба (metis-1260)",
+              "у каждого — одна отметка: «да»" in text and "«проба» (проверить можно только вживую" in text)
+
+
 def check_longrun(out_real, devs, flat):
     """metis-0905: долгие команды субагентов — в фоне, итог — уведомлением о конце; лиды не принимают
     промежуточное уведомление за отчёт."""
@@ -1029,10 +1044,7 @@ def main():
         text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
         check(f"{f[:-5]}: полный набор сам не гоняет (metis-0653)",
               "полный набор тестов репозитория" in text.lower() and "не гоняй" in text)
-    # metis-1237: пункт после слияния argus принимает на head слияния — догон metis-1235 отметит
-    atext = " ".join(read(os.path.join(out_real, "argus.md")).split())
-    check("argus: пункт после слияния — accept на head слияния, отметит плановый проход (metis-1237)",
-          "можно принять и позже, на уже слитом PR" in atext and "<head слияния> --criteria" in atext)
+    check_marks(out_real, devs)
     # persist.part: свою фоновую команду ждут уведомлением о конце (metis-0905), субагента — так же концом хода
     persist = ("Свою фоновую команду ждут её уведомлением о конце", "закончи ход строкой «жду итога <ID>»",
                "Субагента ждут так же — концом хода")

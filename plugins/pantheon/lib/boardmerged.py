@@ -10,6 +10,7 @@
 merged_stuck (metis-1255) — задачи review, висящие дольше STUCK_DAYS суток после слияния PR (связь только по Closes,
 ветке или строке autoclose в журнале), для тревоги pantheon check (хвост «сверка»):
 сводка board-auto.md показывает только 5 строк и не будит, а такая задача неделями ждёт пунктов «Готово, когда».
+С metis-1260 туда же — задачи «живая проба после выпуска», ждущие выпуска плагина дольше STUCK_DAYS (probes_stuck).
 
 Модули tasks (T) и autoclose (A) передаёт вызывающий: файл сам их не грузит.
 """
@@ -88,7 +89,7 @@ def merged_stuck(tasks, cache, t, T, A, repo_dirs=None, open_ids=(), days=STUCK_
                 d = (tasks.get(tid) or (None, {}, ""))[1].get("direction")
                 if _in_direction((ts, repo), d, repo_dirs):
                     by_close.setdefault(tid, []).append((ts, pr["number"]))
-    out = []
+    out = probes_stuck(tasks, t, T, A, days)
     for tid, (_, head, body) in sorted(tasks.items()):
         if head.get("type") != "task" or head.get("status") != "review" or tid in open_ids:
             continue
@@ -101,4 +102,21 @@ def merged_stuck(tasks, cache, t, T, A, repo_dirs=None, open_ids=(), days=STUCK_
         crit = T.done_criteria(body)
         items = ", ".join(f"п.{i} «{' '.join(crit[i - 1][1].split())[:ITEM_TEXT]}»" for i in nums)
         out.append((tid, tid, f"{tid}: PR #{n} слит {int((t - ts) // DAY)} сут назад, неотмечено {len(nums)}: {items}"))
+    return out
+
+
+def probes_stuck(tasks, t, T, A, days=STUCK_DAYS):
+    """Задачи-пробы (metis-1260, autoclose.ensure_probe), которые ждут выпуска плагина (waiting, тег A.PROBE_TAG,
+    waiting_on вида A.PROBE_WAIT) дольше days суток от первой строки журнала, → [(id, ключ, текст)] для того же хвоста
+    «сверка»: выпуск не вышел или проход его не увидел — проба не висит молча. Модуль A без PROBE_TAG (старый) — пусто."""
+    tag, wait_re = getattr(A, "PROBE_TAG", None), getattr(A, "PROBE_WAIT_RE", None)
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()) if tag and wait_re else []:
+        on = str(head.get("waiting_on") or "")
+        if head.get("type") != "task" or head.get("status") != "waiting" or tag not in (head.get("tags") or []) \
+                or not wait_re.fullmatch(on):
+            continue
+        first = next((x[0] for x in T._journal(body) if x[0] is not None), None)
+        if first is not None and t - first >= days * DAY:
+            out.append((tid, tid, f"{tid}: живая проба ждёт выпуска {int((t - first) // DAY)} сут — {on}"))
     return out

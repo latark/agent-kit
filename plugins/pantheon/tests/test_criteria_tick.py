@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Автоотметка «Готово, когда» по вердикту argus (metis-1004).
 
-- `pantheon review accept|reject … --criteria "<id>#<N> <хеш> да|нет <опора>"`: формат, хеш от нынешнего текста пункта,
-  у accept — без «нет», вердикт можно не по всем пунктам; `pantheon review criteria <id>` печатает готовые флаги; status
-  показывает пункты записи.
+- `pantheon review accept|reject … --criteria "<id>#<N> <хеш> да|нет|проба <опора>"`: формат, хеш от нынешнего текста
+  пункта, у accept — без «нет», «проба» — с опорой; metis-1260: accept без отметки на пункте задачи из Closes — код 1 и
+  пункты последней строкой, у PR «часть» — код 0; `pantheon review criteria <id>` печатает готовые флаги; status
+  показывает пункты записи. Пробы, выпуск и сверка заявки — test_criteria_probe.py.
 - criteria_accepted: только «принять» на head слияния, по правилу шлюза (последний вердикт рецензента, перечень, Opus у
   ядра, base, позже «вернуть»); «нет» или разный хеш у двух argus — пункт не принят; строка кэша без core — как ядро.
 - merged_core: оба пути переименования, переименование без старого пути и список файлов, обрезанный gh, — ядро.
@@ -61,6 +62,11 @@ for a in "$@"; do
   case "$prev" in --repo) repo="$a";; --state) state="$a";; esac
   prev="$a"
 done
+if [ "$1 $2" = "pr view" ]; then
+  [ -f "$d/view.json" ] && cat "$d/view.json" && exit 0
+  exit 1
+fi
+case "$1 $2" in "api repos/"*"/contents/"*) [ -f "$d/releases.json" ] && cat "$d/releases.json" && exit 0; exit 1;; esac
 if [ "$1 $2" = "pr list" ]; then
   f="$d/$(echo "$repo" | tr / _)-$state.json"
   [ -f "$f" ] && cat "$f" || echo "[]"
@@ -187,10 +193,24 @@ def test_review_cli():
         base = ["review", "accept", "latark/agent-kit", "7", H1, "--opened", "a", "--ran", "b", "--unchecked", "c"]
         ok1, ok2 = crit("metis-0001", 1, A1), crit("metis-0001", 2, A2, basis="t_two")
         r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")
+        last = (r.stderr.strip().splitlines() or [""])[-1]
+        check("1260: у задач есть неотмеченные пункты, а gh не дал тело PR — код 1, причина последней строкой",
+              r.returncode == 1 and "gh pr view" in last, r.stdout + r.stderr)
+        view = os.path.join(gh, "view.json")
+        json.dump({"body": "Closes metis-0001", "headRefName": "feature"}, open(view, "w", encoding="utf-8"))
+        r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")
         check("accept с вердиктом по каждому пункту — код 0, пункты напечатаны",
               r.returncode == 0 and f"пункт: {ok1}" in r.stdout and f"пункт: {ok2}" in r.stdout, r.stdout + r.stderr)
         r = pan(env, *base, "--criteria", ok1)
-        check("accept с вердиктом не по всем пунктам (часть, после слияния) — код 0", r.returncode == 0
+        last = (r.stderr.strip().splitlines() or [""])[-1]
+        check("1260: accept без отметки на пункте 2 задачи из Closes — код 1, последняя строка называет только его",
+              r.returncode == 1 and "metis-0001#2" in last and "metis-0001#1" not in last and "пункт:" not in r.stdout,
+              r.stdout + r.stderr)
+        r = pan(env, *base, "--criteria", ok1, "--criteria", crit("metis-0001", 2, A2, "проба", "pantheon check вживую"))
+        check("1260: «да» и «проба» с опорой на каждом пункте — код 0", r.returncode == 0, r.stdout + r.stderr)
+        json.dump({"body": "часть metis-0001", "headRefName": "feature"}, open(view, "w", encoding="utf-8"))
+        r = pan(env, *base, "--criteria", ok1)
+        check("accept с вердиктом не по всем пунктам у PR «часть» — код 0", r.returncode == 0
               and f"пункт: {ok1}" in r.stdout, r.stdout + r.stderr)
         cases = [
             ([ok1, crit("metis-0001", 2, A2, "нет")], "это «вернуть»"),
@@ -200,6 +220,8 @@ def test_review_cli():
             ([ok1, ok1, ok2], "указан дважды"),
             ([ok1, crit("metis-0001", 2, A2, basis="ОПОРА")], "вместо «ОПОРА»"),
             (["metis-0001#1 да"], "не в формате"),
+            ([ok1, f"metis-0001#2 {A2} проба"], "«проба» без опоры"),
+            ([ok1, crit("metis-0001", 2, A2, "проба", "ОПОРА")], "что проверить вживую"),
         ]
         for items, why in cases:
             args = [x for v in items for x in ("--criteria", v)]

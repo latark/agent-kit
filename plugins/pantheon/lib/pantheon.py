@@ -304,9 +304,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         последний вердикт каждого рецензента (сессия + агент) на (repo, PR, SHA) и
                                         пускает, только если последний у каждого — «принять» с полным перечнем и ни
                                         один рецензент не сливающий. У accept и reject ещё --criteria "<id>#<N>
-                                        <хеш> да|нет <опора>" — флаг на пункт «Готово, когда» задачи из Closes
-                                        (metis-1004): хеш — от текста пункта, у accept вердикт по каждому и без
-                                        «нет». При слиянии autoclose сам отмечает пункты с «да» на head слияния
+                                        <хеш> да|нет|проба <опора>" — флаг на пункт «Готово, когда» задачи из Closes
+                                        (metis-1004, 1260): у accept — на каждый пункт, без «нет»; без отметки — код 1.
+                                        При слиянии autoclose отмечает «да» и «проба», «проба» → задача-проба
   pantheon review criteria <id>…        пункты «Готово, когда» с номером и готовым флагом --criteria с хешем
   pantheon review delta <owner/repo> <PR>   из клона: какой нужен круг argus — дельта от прошлого проверенного
                                         head (мелкая правка вне ядра, без rebase) или полный на свежем base, —
@@ -8448,8 +8448,8 @@ def autoclose_tick(t, wait=0):
     with lock_wait("autoclose-run", wait) as got:
         if not got:
             return
-        log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
-                            actual_for=lambda tid: autoclose_actual(T, tid), accepted=review_criteria_ticks)
+        log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T, accepted=review_criteria_ticks,
+                            actual_for=lambda tid: autoclose_actual(T, tid), probes=review_criteria_probes, released=plugins_released)
     for ln in log:
         print(f"автозакрытие · {ln}")
     if log or errors:
