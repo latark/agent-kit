@@ -222,12 +222,17 @@ def _scen_autoclose(A, home, state):
 
     def boom(repo, pr):
         raise RuntimeError("журнал шлюза")
+
+    def waiting_on(tid):
+        """waiting_on пробы сразу после создания: probe_release ниже переводит пробы в todo, и task_set стирает поле."""
+        return probes_of(home, tid)[0][1].get("waiting_on")
     steps = [
         ("ok1", lambda: close(1, released={"pantheon": "0.11.356"})[0]),
         ("ok1b", lambda: close(1, released={"pantheon": "0.11.356"})[0]),
         ("c2", lambda: close(2, released={"pantheon": "0.11.356"})),
         ("c3", lambda: close(3, plugins=())),
-        ("c4", lambda: close(4, rel=lambda repo: {"pantheon": "0.11.300"})),
+        ("w1", lambda: waiting_on("metis-0001")),
+        ("c4", lambda: close(4, rel=lambda repo: {"pantheon": "0.11.300"})), ("w4", lambda: waiting_on("metis-0004")),
         ("c6", lambda: close(6, released={}, probes=boom)),
         ("r_none", lambda: release(None)), ("r_old", lambda: release("0.11.355")), ("r_same", lambda: release("0.11.356")),
         ("r_new", lambda: release("0.11.357")),
@@ -245,7 +250,7 @@ def _scen_autoclose(A, home, state):
     out = cases([
         ("close_pr: «да» и «проба» — задача done", lambda: st(1) == "done"),
         ("close_pr: «проба» → проба ждёт выпуска pantheon после 0.11.356",
-         lambda: one("metis-0001")[1].get("waiting_on") == wait and isinstance(res["r_none"], dict)
+         lambda: res["w1"] == wait and isinstance(res["r_none"], dict)
          and res["r_none"].get("status") == "waiting"),
         ("проба: source, тег, from, пункт с опорой, PR в теле",
          lambda: (h := one("metis-0001")[1]).get("source") == "metis-0001" and "проба" in h.get("tags")
@@ -259,7 +264,7 @@ def _scen_autoclose(A, home, state):
         ("PR без плагинов — проба сразу todo с next",
          lambda: one("metis-0003")[1].get("status") == "todo" and one("metis-0003")[1].get("next") == A.PROBE_NEXT),
         ("выпуска нет в строке кэша — released(repo) при создании",
-         lambda: one("metis-0004")[1].get("waiting_on") == "выпуск latark/agent-kit: pantheon после 0.11.300"),
+         lambda: res["w4"] == "выпуск latark/agent-kit: pantheon после 0.11.300"),
         ("сбой probes — PR повторим, ошибка в errors",
          lambda: res["c6"][0] is False and "RuntimeError: журнал шлюза" in res["c6"][1].get(f"{REPO}#6", "")),
         ("probe_release: старше — ждёт", lambda: res["r_old"].get("status") == "waiting"),
