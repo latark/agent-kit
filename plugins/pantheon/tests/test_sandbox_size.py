@@ -108,6 +108,15 @@ def main():
     fs = hq1["sandbox"]["filesystem"]
     check("сборка прошла, hq.json собран", r.returncode == 0 and fs["denyRead"])
     sa1 = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
+    # metis-1253: у окна вопросов срока нет (решение владельца 15.11); письмо сессии другого класса режима Зевс держит
+    # без срока; bypass закрыт каждому окну — класс режима у всех один
+    wins = {f: json.load(open(os.path.join(state, "settings", f))) for f in os.listdir(os.path.join(state, "settings"))
+            if f.endswith(".json")}
+    open_bypass = sorted(f for f, w in wins.items()
+                         if (w.get("permissions") or {}).get("disableBypassPermissionsMode") != "disable")
+    check(f"metis-1253: окно вопросов без срока, письма Зевсу без срока, bypass закрыт всем окнам (открыт: {open_bypass})",
+          "askUserQuestionTimeout" not in hq1 and hq1.get("dialogExpiry") == "never" and "dialogExpiry" not in sa1
+          and len(wins) >= 2 and not open_bypass)
     check("имя с символом шаблона не закрыто, а названо в выводе сборки; битого шаблона в denyWrite нет",
           "[r" in r.stderr and not any("[" in x for x in sa1["sandbox"]["filesystem"]["denyWrite"]))
 

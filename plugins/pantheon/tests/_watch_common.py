@@ -710,9 +710,24 @@ def _relayed(e):
     return [c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
 
 
+def push_queue(p):
+    """Очередь push-файла (metis-1253): записи «\\x1e<время>\\n<текст>» → [(время, текст)]; прежний формат — один текст
+    со временем 0. Нет файла — []. Разбор свой, не из lib: тест сверяет формат, а не повторяет код."""
+    if not os.path.exists(p):
+        return []
+    raw = open(p, encoding="utf-8").read()
+    if not raw.startswith("\x1e"):
+        return [(0.0, raw.strip())]
+    return [(float(r.partition("\n")[0]), r.partition("\n")[2].strip()) for r in raw.split("\x1e")[1:]]
+
+
+def push_read(p):
+    """Текст очереди так, как его отдаст хук: передачи через пустую строку; нет файла — ""."""
+    return "\n\n".join(b for _, b in push_queue(p))
+
+
 def _pushed(e):
-    p = e.st("push", "2e057e05-1.txt")
-    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+    return push_read(e.st("push", "2e057e05-1.txt"))
 
 
 def _two_blocked_env():

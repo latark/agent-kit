@@ -3,6 +3,7 @@
 # ruff: noqa: F403, F405
 import os
 import shutil
+import time
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _watch_common import *  # noqa: F403
@@ -69,16 +70,32 @@ def test_holders_registry_and_live_copies():
     e.run("watch", t=T0 + 120)
     check(["respawn", "dddddddd"] in e.calls(), f"самозапуск не через respawn: {e.calls()}")
     pushed = e.st("push", "dddddddd-1.txt")
-    check(os.path.exists(pushed) and open(pushed).read().startswith("[Пантеон:"), "текст для хука push")
+    check(os.path.exists(pushed) and push_read(pushed).startswith("[Пантеон:"), "текст для хука push")
     check(oct(os.stat(pushed).st_mode & 0o777) == "0o600", "права push-файла")
     # respawn не вышел (сессию удалили из списка) — --resume с именем и окном
     e.agents([bg("zz-dir", "stopped", "dddddddd-2", started=T0 + 1)])
     json.dump({}, open(e.st("autostart.json"), "w"))
+    early = "[Пантеон: поручение от tick] ранее"  # metis-1253: ждавшая в очереди передача неудачным respawn не снимается
+    open(e.st("push", "dddddddd-2.txt"), "w", encoding="utf-8").write(early)
     e.run("watch", t=T0 + 99999, extra={"FAKE_RESPAWN_RC": "1"})
     res = [c for c in e.calls() if "--resume" in c]
     check(res and res[-1][res[-1].index("--name") + 1] == "zz-dir" and "--settings" in res[-1],
           f"resume без --name/--settings: {res}")
-    check(not os.path.exists(e.st("push", "dddddddd-2.txt")), "push-файл остался после неудачного respawn")
+    left = push_read(e.st("push", "dddddddd-2.txt"))
+    check(left == early, f"неудачный respawn: своя передача осталась или снята чужая: {left!r}")
+    # metis-1253 (Д3 argus #495): очередь передач полна — ни respawn, ни --resume по сессии, которую Claude Code ещё
+    # числит (копия, текст пропал бы): пропуск с тревогой, повтор следующим проходом
+    e.agents([bg("zz-dir", "stopped", "dddddddd-3", started=T0 + 2)])
+    json.dump({}, open(e.st("autostart.json"), "w"))
+    full = "\x1e%d\n[Пантеон: поручение от tick] %s" % (time.time(), "я" * 7960)  # 7990 знаков: любая новая передача — сверх 8000
+    open(e.st("push", "dddddddd-3.txt"), "w", encoding="utf-8").write(full)
+    c0 = len(e.calls())
+    e.run("watch", t=T0 + 199999)
+    new = e.calls()[c0:]
+    check(not [c for c in new if c[:1] == ["respawn"] or "--resume" in c or "--bg" in c]
+          and open(e.st("push", "dddddddd-3.txt"), encoding="utf-8").read() == full
+          and "очередь передач сессии dddddddd полна" in e.alerts(),
+          f"1253 Д3: полная очередь — подъём или потеря: {new} {e.alerts()[-300:]}")
 
 
 def test_resume_or_start_fresh():
