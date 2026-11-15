@@ -425,6 +425,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("имя Зевса", lambda: zeus_rename(t, agents)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
@@ -2596,10 +2597,19 @@ def zeus_clean_failed(st, stp, t, a, n, rc, held):
     P.alert(f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log", "watch")
 
 
+def _hq_copy(a):
+    """«zeus (N)» — окно штаба, только если оно в папке Пантеона: иное окно с таким именем (роль назвала себя «zeus»)
+    не перезапускаем под --agent hq (находка проверки безопасности, metis-1251). Точное «zeus» — как раньше."""
+    if a.get("name") == "zeus":
+        return True
+    cwd = a.get("cwd")
+    return isinstance(cwd, str) and bool(cwd) and os.path.realpath(cwd) == os.path.realpath(P.PANTHEON)
+
+
 def zeus_clean(agents, t):
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
-    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
+    zs = [a for a in agents if _base_name(a.get("name")) == "zeus" and _hq_copy(a) and a.get("id") and a.get("sessionId")
           and a.get("state") not in ("stopped", "failed")]
     if not zs:
         if (st.get("last") or {}).get("result") != "нет Зевса":
@@ -2659,6 +2669,70 @@ def zeus_clean(agents, t):
             "тогда очистка пройдёт сама", "watch")
     st["remind"] = {"t": t, "sid": a["sessionId"], "turn": info["turn"]}
     P.write_json(stp, st)
+
+
+def _zeus_tab(agents):
+    """Живая «zeus» или вкладка терминала с этим именем или его копией (P.live_copies: claude agents и реестр
+    ~/.claude/sessions). Интерактивной вкладки нет в фоновых сессиях, а fresh_start отказал бы на ней (fresh-tab, код 1)
+    — и каждый час две тревоги (находка argus Д4, metis-1251)."""
+    return any(x.get("name") == "zeus" or not x.get("id") or x.get("kind") == "interactive"
+               for x in P.live_copies("zeus", agents))
+
+
+def zeus_rename(t, seen=None):
+    """metis-1251 (слово владельца 15.11): окно Зевса всегда «zeus». Живая фоновая «zeus (N)» (Claude Code дал суффикс,
+    когда «zeus» была занята) при простое Зевса, без живой «zeus» и без вкладки терминала с этим именем (_zeus_tab) — перезапуск той же переписки под именем zeus:
+    P.fresh_start(resume=<sessionId>) = claude stop, ждём свободного имени, `claude --resume <сессия> --bg --agent hq
+    --name zeus`, check_new_name. Простой — те же условия, что у очистки (zeus_clean_check без (1) «контекст»): не
+    идёт ход, нет вопроса, всё сохранено, с конца хода ≥ ZEUS_IDLE_MIN; и защиты zeus_hold. Мёртвую «zeus» убираем
+    раньше (иначе имя занято, и новая снова стала бы «zeus (2)»); убранную вычёркиваем из seen — списка сессий прохода,
+    иначе уборка сессий (auto_rm) звала бы claude rm той же записи второй раз и тревожила бы отказом. Сбой — повтор не
+    чаще раза в ZEUS_REMIND_MIN."""
+    if dry():
+        return
+    agents = P.agents_all() or []  # свежий список: очистка Зевса выше могла только что поднять «zeus»
+    bgs = [a for a in agents if a.get("id") and a.get("kind") in (None, "background")]
+    alive = [a for a in bgs if a.get("state") not in ("stopped", "failed")]  # как в zeus_clean: done — ждёт ввода
+    if any(a.get("name") == "zeus" and (a.get("state") != "done" or a.get("pid")) for a in alive) \
+            or _zeus_tab(agents):
+        return
+    zs = [a for a in alive if re.fullmatch(r"zeus \(\d+\)", str(a.get("name") or "")) and a.get("sessionId")
+          and _hq_copy(a)]
+    if len(zs) != 1 or zeus_hold():
+        return
+    a, stp = zs[0], P.path("zeus-rename.json")
+    st = P.read_json(stp, {}) or {}
+    if t - float(st.get("failed") or 0) < ZEUS_REMIND_MIN * 60:
+        return
+    tp = P.transcript_path(a)
+    if not tp or [m for m, _ in zeus_clean_check(a, tp)[0] if m != 1]:
+        return  # ход идёт, вопрос, несохранённое, меньше 20 мин с конца хода — не трогаем
+    for x in bgs:  # мёртвая «zeus» держит имя: убираем до перезапуска
+        if x.get("name") == "zeus" and P.rm_session(x["id"], name="zeus", why="zeus-rename") is None and seen is not None:
+            seen[:] = [s for s in seen if s.get("id") != x["id"]]  # уборка сессий ниже по проходу не зовёт rm повторно
+
+    def again():
+        """Под блокировкой имени, перед claude stop: те же условия по свежему claude agents."""
+        now = P.agents_all() or []
+        mine = [x for x in now if x.get("sessionId") == a["sessionId"] and _hq_copy(x)]
+        if not mine or any(x.get("name") == "zeus" and x.get("state") not in ("stopped", "failed") for x in now) \
+                or _zeus_tab(now):
+            return "Зевса нет в claude agents или «zeus» уже есть"
+        return zeus_hold() or "; ".join(s_ for n_, s_ in zeus_clean_check(mine[0], tp)[0] if n_ != 1) or None
+
+    text = (f"{P.START_MARK} переименование] Окно перезапущено под именем zeus (было «{a.get('name')}»), разговор тот же. "
+            "Продолжай с того места, где остановился; ничего заново не начинай. Это не слова владельца и не согласие.")
+    rc = P.fresh_start("zeus", a, text, "tick", recheck=again, reason=f"переименование «{a.get('name')}» → zeus",
+                       resume=a["sessionId"])
+    P.start_log(f"zeus-rename\t{a.get('id')}\t{a.get('name')}\t{rc}")
+    if rc == 0:
+        P.alert(f"Зевс переименован: «{a.get('name')}» → zeus, переписка та же (claude attach zeus)", "watch")
+        event("zeus-rename", t, id=a.get("id"))
+        return
+    st["failed"] = t
+    P.write_json(stp, st)
+    if rc != P.SKIPPED:
+        P.alert(f"переименование Зевса «{a.get('name')}» → zeus не вышло, код {rc}; журнал start.log", "watch")
 
 
 # --- самозапуск координаторов (SCHED-09, решение владельца 15.10) --------------------------------------

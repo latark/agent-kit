@@ -219,11 +219,12 @@ def fresh_target(name, origin):
     return (role, folder, run, window) if run else P.no_window_reason(window)
 
 
-def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None):
+def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None, resume=None):
     """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
     agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log; goal —
     условие цели координатора (по умолчанию COORDINATOR_GOAL, цель эпика; смена цели самозапуска — TASK_GOAL). Та же
-    блокировка имени и повторная проверка, что у resume_session. → код."""
+    блокировка имени и повторная проверка, что у resume_session. resume — id сессии: поднять её же переписку под этим
+    именем (`claude --resume`, переименование «zeus (2)» → «zeus», metis-1251), а не чистый контекст. → код."""
     with P.lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             P.start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
@@ -232,10 +233,10 @@ def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None):
         if why:
             P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
             return P.skipped(why)
-        return _fresh_start(name, a, text, origin, reason, goal)
+        return _fresh_start(name, a, text, origin, reason, goal, resume)
 
 
-def _fresh_start(name, a, text, origin, reason=None, goal=None):
+def _fresh_start(name, a, text, origin, reason=None, goal=None, resume=None):
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
@@ -260,7 +261,7 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
     stopped = list(live)
     P.stop_copies(name, live, "stop-fresh")
     for x in agents:  # закончившая ход с живым процессом держит имя (CTX-10)
-        if x.get("name") == name and x.get("state") == "done" and x.get("pid") and x.get("id") \
+        if P.name_alias(name).fullmatch(str(x.get("name") or "")) and x.get("state") == "done" and x.get("pid") and x.get("id") \
                 and x["id"] not in {s.get("id") for s in stopped}:
             P.stop_copies(name, [x], "stop-fresh-done")
             stopped.append(x)
@@ -271,7 +272,7 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None):
     if why:  # так и не ответил — пропуск с тревогой, а не запуск с пустым снимком
         return fresh_skip(name, a, origin, why, stopped)
     # схема А (metis-0933): --add-dir папок направления, AGENTS.md, пакет — как у pantheon start
-    argv = P.window_launch(role, name, window, win, text)  # argv окна собирает только ядро (класс 5)
+    argv = P.window_launch(role, name, window, win, text, resume=resume)  # argv окна собирает только ядро (класс 5)
     r = subprocess.run(argv, cwd=folder, env=P.claude_env(), capture_output=True, text=True, timeout=180)
     P.start_log(f"fresh-start\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\t{reason}" if reason else ""))
     if r.returncode != 0:
