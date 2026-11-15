@@ -111,7 +111,7 @@ def fake_tasks():
             head("metis-0007", status="done"),
             head("metis-0008"),
             head("metis-0010", parent="metis-0102"),
-            head("athena-0003", direction="athena-brokerassistant")]
+            head("athena-0003", direction="athena-demo")]
     return {h["id"]: (f"/x/{h['id']}.md", h, "") for h in rows}
 
 
@@ -179,7 +179,7 @@ def make():
         os.makedirs(d)
     with open(os.path.join(home, "directions.toml"), "w", encoding="utf-8") as fh:
         fh.write('[[direction]]\nname = "metis-pantheon"\nproject = "Пантеон"\n\n'
-                 '[[direction]]\nname = "athena-brokerassistant"\nproject = "BrokerAssistant"\n')
+                 '[[direction]]\nname = "athena-demo"\nproject = "DemoApp"\n')
     for _, h, _ in fake_tasks().values():
         write_task(home, h)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
@@ -224,7 +224,7 @@ def test_cli():
               r.returncode == 2 and "не прочитан" in r.stderr.strip().splitlines()[-1], (r.returncode, r.stderr))
         r = pan(env, "plan", "check")
         check("CLI: без файла — код 2 и формат", r.returncode == 2 and "pantheon plan check" in r.stderr, r.stderr)
-        r = pan(env, "plan", "check", plan, "--direction", "athena-brokerassistant")
+        r = pan(env, "plan", "check", plan, "--direction", "athena-demo")
         check("CLI: --direction — голые номера берутся у этого направления",
               r.returncode == 1 and "athena-0003" in r.stdout, r.stdout)
     finally:
