@@ -306,7 +306,8 @@ wt10 = os.path.join(repo, ".claude", "worktrees", "batch-metis-0910")
 check("start без сети: код 0, предупреждение про fetch, копия от имеющегося origin/main", r.returncode == 0
       and "fetch" in r.stderr and "имеющийся origin/main" in r.stderr and os.path.isdir(wt10)
       and git(wt10, "rev-parse", "HEAD") == git(repo, "rev-parse", "origin/main"), r.stdout + r.stderr)
-m = mutant_lib("    if have.returncode != 0:\n", "    if have.returncode != 0 or f.returncode != 0:\n")
+m = mutant_lib('    if have.returncode != 0:\n        print(f"pantheon batch start: origin/',
+               '    if have.returncode != 0 or f.returncode != 0:\n        print(f"pantheon batch start: origin/')
 r = cli_lib(m, repo, "batch", "start", "metis-0913")
 check("мутант: fetch без сети снова провал — тест выше краснеет", r.returncode == 1
       and not os.path.isdir(os.path.join(repo, ".claude", "worktrees", "batch-metis-0913")), r.stderr)

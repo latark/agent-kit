@@ -201,7 +201,7 @@ try:
     check("13 мутант: копия папки запуска без проверки — её hooks проходят (тест краснеет на откате)",
           m13.check_worktree_own({"cwd": LW}, "EnterWorktree", {"path": LA}) is None)
     with open(os.path.join(d13, "guard_rules.py"), "w", encoding="utf-8") as fh:
-        fh.write(src13.replace("if not _same_as_launch(x[0], launch)", "if True"))
+        fh.write(src13.replace("if not _same_as_launch(x[0], launch)", "if False"))
     sp13b = importlib.util.spec_from_file_location("guard_mut13b", os.path.join(d13, "guard_rules.py"))
     m13b = importlib.util.module_from_spec(sp13b)
     sp13b.loader.exec_module(m13b)

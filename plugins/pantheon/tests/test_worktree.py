@@ -402,8 +402,8 @@ check("мутант: без _verify_copy — копия со ссылкой в g
 for pair in (('    planted = [n for n in ("config", "config.worktree")', '    planted = [n for n in ()'),
              ("    planted += [n for n in os.listdir(gd) if os.path.islink(os.path.join(gd, n))]\n", "")):
     check("самопроверка мутанта: строка проверки gitdir одна", wsrc.count(pair[0]) == 1, pair[0])
-t5 = tamper("tw-5", planted_worktree_config)
-r = cli(mine, "remove", "tw-5", "--force", lib=mutant('    planted = [n for n in ("config", "config.worktree")',
+t5 = tamper("tw-c5", planted_worktree_config)  # tw-0…tw-5 заняты циклом выше
+r = cli(mine, "remove", "tw-c5", "--force", lib=mutant('    planted = [n for n in ("config", "config.worktree")',
                                                        '    planted = [n for n in ()'))
 check("мутант: без проверки config в gitdir — копия с config.worktree убрана", r.returncode == 0
       and not os.path.exists(t5), r.stderr)
@@ -452,7 +452,8 @@ git(wide, "checkout", "-q", "-b", "wide-1")
 open(os.path.join(wide, ".claude", "settings.json"), "w").write(wide_json)
 git(wide, "add", ".claude/settings.json")
 git(wide, "commit", "-q", "-m", "wide")
-git(wide, "checkout", "-q", "main")
+git(wide, "checkout", "-q", "main")  # git убрал опустевшую .claude
+os.makedirs(os.path.join(wide, ".claude"), exist_ok=True)
 for args in (["w1", "--branch", "wide-1"], ["w2", "--detach", "--base", "wide-1"], ["w3", "--base", "wide-1"]):
     r = cli(wide, "add", *args)
     check(f"add {' '.join(args)}: в дереве .claude/settings.json с hooks — отказ 2, копии нет", r.returncode == 2
