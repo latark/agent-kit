@@ -237,6 +237,48 @@ run(home, state, ev=dict(PR, tool_name="mcp__x__y", tool_input={"token": "s3cr3t
 check("незнакомый инструмент — только имена полей, без значений", lines(home) and "поля: q, token" in lines(home)[0]
       and "s3cr3t" not in lines(home)[0] and lines(home)[0].count("Совет:") == 1, lines(home))
 
+# 10а. С1: AskUserQuestion / ExitPlanMode — не просьба разрешить команду: короткий текст, без «поля: …» и «Совет»
+for tool, want_txt in (("AskUserQuestion", "окно ждёт ответа на вопрос"), ("ExitPlanMode", "окно ждёт решения по плану")):
+    home, state = place()
+    r = run(home, state, ev=dict(PR, tool_name=tool, tool_input={"questions": [{"question": "Какой вариант?"}]}))
+    got = lines(home)
+    check(f"{tool} → «{want_txt}», без «поля:», «Совет» и текста вопроса", r.returncode == 0 and len(got) == 1
+          and f"окно metis-pantheon ждёт вас: {want_txt} (с {hhmm(T0)})" in got[0] and "поля" not in got[0]
+          and "Совет" not in got[0] and "Какой вариант" not in got[0], (r.stderr, got))
+    check(f"{tool} — уведомление macOS отправлено", len(sent(state)) == 1 and want_txt in sent(state)[0], sent(state))
+
+# 10б. Д2: отметка стоит уже во время alert (иначе повтор в это окно шлёт дубль). Подменный plugin root: bin/pantheon
+# пишет, есть ли отметка в момент вызова alert; хук копируется туда же (PLUGIN считается от пути хука).
+STUB = os.path.join(ROOT, "stub-root")
+os.makedirs(os.path.join(STUB, "hooks"))
+os.makedirs(os.path.join(STUB, "bin"))
+shutil.copy(HOOK, os.path.join(STUB, "hooks", "wait-owner.py"))
+with open(os.path.join(STUB, "bin", "pantheon"), "w") as fh:
+    fh.write('#!/bin/sh\nif [ "$1" = alert ]; then\n  if [ -e "$MARK" ]; then echo present >> "$OUT"; else echo absent >> "$OUT"; fi\n'
+             '  exit "${ALERT_RC:-0}"\nfi\nexit 0\n')
+os.chmod(os.path.join(STUB, "bin", "pantheon"), 0o755)
+
+
+def run_stub(state, out, rc=0, t=T0):
+    env = {"PATH": "/usr/bin:/bin", "HOME": ROOT, "TMPDIR": ROOT, "PANTHEON_STATE": state, "PANTHEON_NOW": str(t),
+           "PANTHEON_ROLE": "workshop", "PANTHEON_SESSION": "w1", "PANTHEON_WAIT_OWNER_DELAY": "0", "OUT": out,
+           "MARK": os.path.join(state, "ctx", "wait-owner", "w1"), "ALERT_RC": str(rc)}
+    return subprocess.run([sys.executable, "-I", os.path.join(STUB, "hooks", "wait-owner.py")], input=json.dumps(EV),
+                          capture_output=True, text=True, env=env, timeout=60)
+
+
+home, state = place()
+out = os.path.join(ROOT, "stub-out-1")
+run_stub(state, out)
+run_stub(state, out, t=T0 + 1)
+rec = open(out).read().split() if os.path.exists(out) else []
+check("отметка «раз в 2 мин» уже стоит, когда идёт alert; два быстрых вызова — один alert", rec == ["present"], rec)
+out = os.path.join(ROOT, "stub-out-2")
+run_stub(state, out, rc=1, t=T0 + 500)
+check("alert упал (код 1) → отметка снята", not os.path.exists(os.path.join(state, "ctx", "wait-owner", "w1")))
+run_stub(state, out, rc=0, t=T0 + 501)
+check("после сбоя следующий вызов снова шлёт alert", open(out).read().split() == ["present", "present"], open(out).read())
+
 # 10. сбой уведомления (PANTHEON_NOTIFY_LOG — папка): код 0, строка alert есть, запись в журнал хука
 home, state = place()
 r = run(home, state, notify_log=ROOT)
