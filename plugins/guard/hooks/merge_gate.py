@@ -36,7 +36,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    reject на другом head — того же рецензента или другого argus, если коды reject и сливаемого SHA посчитаны и
    различаются (0415b: accept другого argus на код, равный коду reject, reject не снимает; код не посчитан — тоже);
    3) на третьем head с другим кодом от той же merge-base, если код сливаемого SHA — не код reject (_held; metis-0158:
-   два argus на одном head — accept и reject в любом порядке дают отказ). Поле «вернули» в поручении argus — слово
+   два argus на одном head — accept и reject в любом порядке дают отказ); 4) того же рецензента на третьем head с
+   тем же кодом, что у сливаемого SHA (отпечаток или слияние), и при другой merge-base (_same_code, metis-1249).
+   Поле «вернули» в поручении argus — слово
    лида, а не факт (metis-0497, Д1 ревью PR #149 r2): record пишет в вердикт субагента "returned" — пары
    agent8/сессия8 последнего «вернули: …» его поручений — и "reported" — пары успешных `pantheon review report`
    (agent_rounds). Правила 2 и 3 для другого argus с полем «вернули» снимают reject, только если его пара в
@@ -58,7 +60,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
    CARRY_BUDGET секунд (запас только в тесте — GUARD_TEST_CARRY_BUDGET), у git — таймаут _git_timeout: 3–6 с по
    остатку срока хука (metis-0787). Нет отпечатка — нет
-   переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
+   переноса: папка слияния не клон репозитория PR, shallow, info/grafts, нет коммита base или head, больше двух
+   merge-base или две, которые сами не сливаются (две — дифф от их слияния, _virtual_base, metis-1249), вывод --raw
+   не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py и запуск окон в sessions.py по AST — metis-0404, 0552), casefold;
@@ -2402,14 +2406,22 @@ def _manifests(gd, entries):
 def _fingerprint(gd, base, head):
     """Отпечаток собственного диффа PR: merge-base(base, head)..head — строки git diff --raw (режимы, sha блобов и
     gitlink, статус, путь; решение владельца 25.10 23:05), сортированные по пути, кроме plugin.json плагинов — их
-    правки без строки version → (отпечаток, merge-base) или (None, почему не посчитан)."""
+    правки без строки version → (отпечаток, merge-base) или (None, почему не посчитан). Две merge-base — база
+    диффа их слияние (_virtual_base, metis-1249): тогда вторая часть ответа — SHA дерева, а не коммита."""
     if not SHA_RE.fullmatch(head) or _git_bytes(gd, "cat-file", "-e", head + "^{commit}") is None:
-        return None, f"коммита {head[:12]} нет в git папки"
+        return None, f"коммита {head[:12]} нет в git папки — сделай git fetch"
     out = _git_bytes(gd, "merge-base", "--all", base, head)
-    mbs = out.split() if out is not None else []
-    if len(mbs) != 1:
-        return None, f"у {head[:12]} и base PR нет единственной merge-base"
-    mb = mbs[0].decode("ascii", "replace")
+    mbs = [m.decode("ascii", "replace") for m in out.split()] if out is not None else []
+    if len(mbs) == 2:
+        # две merge-base (metis-1249): одна ветка — develop — влита и в head, и в base PR. Собственный дифф — от
+        # виртуальной merge-base, как у git merge: дерево слияния двух баз; конфликт или сбой — отпечатка нет
+        mb = _virtual_base(gd, *mbs)
+        if mb is None:
+            return None, f"у {head[:12]} и base PR две merge-base, а их слияние не посчитать (конфликт или сбой git)"
+    elif len(mbs) != 1:
+        return None, f"у {head[:12]} и base PR нет единственной merge-base (их {len(mbs) or 'ни одной'})"
+    else:
+        mb = mbs[0]
     entries = _raw_entries(gd, mb, head)
     if entries is None:
         return None, f"git diff --raw на {head[:12]} не ответил или не разобрать"
@@ -2438,6 +2450,26 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     из папки запуска), без системных и core.attributesFile (_git_code), с merge.renormalize=false (иначе core.autocrlf
     конфига снял бы конфликт перевода строк) и merge.default=text (драйвер по умолчанию из конфига git папки, например
     ours, — тот же обход без атрибутов, долг #388); info/attributes в git папки не выключить — с ним None. note(текст) — причина «не посчитано» для отказа (metis-0981: git старше 2.40)."""
+    got = _safe_merge_tree(gd, ("--merge-base=" + hb, head, mb), note)
+    if got is None:
+        return None
+    code, tree = got
+    if code == 1:
+        return False  # конфликт
+    entries = _raw_entries(gd, tree, sha)
+    if entries is None:
+        return None
+    if any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
+        return False
+    man = _manifests(gd, entries)
+    return None if man is None else man == []
+
+
+def _safe_merge_tree(gd, args, note=None):
+    """`git merge-tree --write-tree --no-messages <args>` без драйверов слияния из атрибутов и конфига (metis-0969,
+    долг #388: из новой пустой папки, merge.renormalize=false, merge.default=text; с info/attributes в git папки —
+    None) → (код 0 или 1 — конфликт, SHA дерева) или None — не посчитано (сбой, таймаут, git без --merge-base, чужой
+    вывод). note(текст) — причина «не посчитано» для отказа."""
     note = note or (lambda why: None)
     attrs = _git_bytes(gd, "rev-parse", "--git-path", "info/attributes")
     if attrs is None:
@@ -2449,7 +2481,7 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     try:
         with tempfile.TemporaryDirectory(prefix="guard-merge-tree-") as empty:
             got = _git_code(gd, "-c", "merge.renormalize=false", "-c", "merge.default=text", "merge-tree",
-                            "--write-tree", "--no-messages", "--merge-base=" + hb, head, mb, where=empty)
+                            "--write-tree", "--no-messages", *args, where=empty)
     except OSError:
         note("папку для git merge-tree не создать")
         return None
@@ -2460,15 +2492,16 @@ def _merge_same(gd, head, hb, mb, sha, note=None):
     tree = got[1].split(b"\n", 1)[0].strip().decode("ascii", "replace")
     if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", tree):
         return None
-    if got[0] == 1:
-        return False  # конфликт
-    entries = _raw_entries(gd, tree, sha)
-    if entries is None:
-        return None
-    if any(not PLUGIN_JSON_RE.fullmatch(e[5]) for e in entries):
-        return False
-    man = _manifests(gd, entries)
-    return None if man is None else man == []
+    return got[0], tree
+
+
+def _virtual_base(gd, mb1, mb2):
+    """Виртуальная merge-base при двух merge-base head и base PR (metis-1249): дерево слияния двух баз — так их сводит
+    и сам git merge (стратегия ort). Случай — одна ветка (develop) влита и в ветку PR, и в base: собственный дифф PR
+    от одной из баз нёс бы чужие правки другой. Конфликт при слиянии баз или сбой — None: отпечатка нет, «принять» не
+    переносится и «вернуть» не снимается (как раньше при «не одной merge-base»)."""
+    got = _safe_merge_tree(gd, (mb1, mb2))
+    return got[1] if got is not None and got[0] == 0 else None
 
 
 def _carry_heads(verdicts, sha):
@@ -2496,7 +2529,10 @@ def _lifts(a, r, sha, fp):
     вернулись к коду r и подтянули main со сдвигом строк — «вернуть» снято, а «принять» с r переносится слиянием.
     Слияние не посчитано (None: сбой, таймаут, бюджет) — не снимает (argus #375 Б2, metis-0973). Правила 2 и 3 для
     другого argus — ещё returned_lifts (metis-0497): «принять» повторного круга (поле «вернули») снимает «вернуть»
-    другого, только если взяло его отчёт."""
+    другого, только если взяло его отчёт. 4 (metis-1249, BA #72): тот же рецензент на третьем head с тем же кодом,
+    что sha (_same_code: отпечаток или слияние), — он принял ровно этот код после своего «вернуть», а потом в ветку
+    лишь подтянули base; merge-base тут может быть другой. Код sha другой или не посчитан — не снимает; код sha — код
+    самого r (_not_code_of) или это не посчитано — тоже не снимает."""
     if not checklist_ok(a):
         return False
     if _self_lift(a, r):
@@ -2512,6 +2548,8 @@ def _lifts(a, r, sha, fp):
         return bool(fr and fs) and fs[0] != fr[0] and _code_of(fp, r["sha"]) is False
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
+    if _reviewer(a) == _reviewer(r) and _same_code(fp, a["sha"], sha) and _not_code_of(fp, r["sha"], sha):
+        return True  # правило 4 (metis-1249)
     if _reviewer(a) != _reviewer(r) and not returned_lifts(a, r):
         return False
     fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
@@ -2602,6 +2640,22 @@ def _code_of(fp, head):
     True, False или None (не посчитано). У fp без merged (тесты правил) — False, как раньше."""
     merged = getattr(fp, "merged", None)
     return False if merged is None else merged(head)
+
+
+def _same_code(fp, head, sha):
+    """Код head — код sha (правило 4 _lifts, metis-1249): отпечатки посчитаны и равны или head, слитый с merge-base
+    sha, даёт ровно sha (fp.merged). Не посчитано — False."""
+    fh, fs = fp(head), fp(sha)
+    if not (fh and fs):
+        return False
+    return fh[0] == fs[0] or _code_of(fp, head) is True
+
+
+def _not_code_of(fp, head, sha):
+    """Код sha точно не код head («вернуть» правила 4): отпечатки посчитаны и разные, и head, слитый с merge-base sha,
+    не даёт sha. Не посчитано — False: сливается, может быть, ровно тот код, что вернули."""
+    fh, fs = fp(head), fp(sha)
+    return bool(fh and fs) and fh[0] != fs[0] and _code_of(fp, head) is False
 
 
 def _held(verdicts, sha, fp):
@@ -3010,18 +3064,22 @@ def _push_bases(d, remote, view):
 
 def _push_base_merged(d, repo, view, tip, new, bases):
     """Подтянут base без правок: в коммитах tip..new вне base есть слияние, а собственный дифф PR (отпечаток
-    _fingerprint от merge-base с base) на new тот же, что на tip, — шлюз перенесёт «принять» сам. Отпечаток не
-    посчитать (не клон, shallow, нет коммита base) — тоже да: сбой git — пропуск. Слияния нет — нет."""
+    _fingerprint от merge-base с base) на new тот же, что на tip, — шлюз перенесёт «принять» сам. Оба отпечатка — от
+    одной базы, живой вершины ветки base у remote (последний из bases; нет её — baseRefOid), как у шлюза (metis-1249):
+    baseRefOid GitHub обновляет с опозданием, и отпечаток tip от старой base нёс бы правки, уже влитые в base, — чистое
+    подтягивание выглядело бы правкой. Отпечаток не посчитать (не клон, shallow, нет коммита base) — тоже да: сбой git
+    — пропуск. Слияния нет — нет."""
     merges = _git(d, "rev-list", "--merges", f"{tip}..{new}", "--not", *bases)
     if merges is None:
         return True
     if not merges.strip():
         return False
-    old_base = str(view.get("baseRefOid") or "").lower()
-    gd, _ = _carry_git(d, repo, old_base)
-    if gd is None or not bases:
+    if not bases:
         return True
-    old, _ = _fingerprint(gd, old_base, tip)
+    gd, _ = _carry_git(d, repo, bases[-1])
+    if gd is None:
+        return True
+    old, _ = _fingerprint(gd, bases[-1], tip)
     cur, _ = _fingerprint(gd, bases[-1], new)
     return old is None or cur is None or old == cur
 

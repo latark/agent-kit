@@ -519,6 +519,61 @@ def P_json(p):
     return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
 
 
+def _perm_req(e, **kw):
+    """Заявка perm окна coord-x, как её пишет хук lib/perm.py: ждёт до T0+600, процесс хука — этот тест (жив)."""
+    req = dict({"id": "perm-0000aaaa", "window": "coord-x", "session": BLK_SID, "attach": BLK_SID[:8],
+                "tool": "EnterWorktree", "question": "[perm-0000aaaa] вопрос", "options": [], "exact": False,
+                "created": T0 - 10, "deadline": T0 + 600, "status": "waiting", "pid": os.getpid()}, **kw)
+    os.makedirs(e.st("perm"), exist_ok=True)
+    with open(e.st("perm", req["id"] + ".json"), "w", encoding="utf-8") as fh:
+        json.dump(req, fh, ensure_ascii=False)
+
+
+def _dead_pid():
+    p = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    p.wait()
+    return p.pid
+
+
+def test_wait_perm_live_no_double_1254():
+    """metis-1254 (Д2 argus): запрос окна уже у Зевса живой заявкой perm — дежурный не передаёт «ждёт вас», не пишет
+    тревогу и не заводит карточку: владельца не спрашивают дважды. Заявка снята в окне, срок вышел или хук умер —
+    обычный путь: передача и карточка сразу (ожидание считалось с первого прохода), ничего не теряется."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e)
+    e.run("watch", t=T0)
+    check(not _relayed(e) and "coord-x (b10c0001) ждёт вас" not in e.alerts(), f"1254: живая заявка, а Зевсу передано: {e.calls()} "
+          f"{e.alerts()}")
+    e.run("watch", t=T0 + 360)
+    check(not _wait_cards(e), f"1254: живая заявка, а карточка заведена: {_wait_cards(e)}")
+    _perm_req(e, pid=_dead_pid())                                  # хук умер — заявка повисла
+    e.run("watch", t=T0 + 400)
+    check(len(_relayed(e)) == 1 and "coord-x (b10c0001) ждёт вас" in e.alerts(),
+          f"1254: хук умер — нет передачи или тревоги: {e.calls()} {e.alerts()}")
+    check(len(_wait_cards(e)) == 1, f"1254: хук умер — карточки нет сразу (ожидание с T0): {_wait_cards(e)}")
+    for label, kw, t in (("срок вышел", {}, T0 + 700), ("снята в окне", {"status": "window"}, T0 + 400),
+                         ("решена", {"status": "allow"}, T0 + 400)):
+        e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+        _perm_req(e, **kw)
+        e.run("watch", t=t)
+        check(len(_relayed(e)) == 1 and "coord-x (b10c0001) ждёт вас" in e.alerts(), f"1254: {label} — нет обычной передачи: {e.calls()}")
+    # заявка другого окна не прикрывает coord-x
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e, window="coord-y", session="other-sid", attach="other")
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"1254: заявка чужого окна заглушила coord-x: {e.calls()}")
+    # окно узнаётся и по имени (сессия заменена под тем же именем)
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e, session="old-sid", attach="old")
+    e.run("watch", t=T0)
+    check(not _relayed(e), f"1254: заявка того же окна по имени не узнана: {e.calls()}")
+    # имя совпало, но сессия заявки — другое живое окно из списка (Зевс): по имени не прикрываем (ревью #498 Д1)
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e, session="2e057e05-1", attach="other")
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"1254: заявка чужой живой сессии под тем же именем заглушила coord-x: {e.calls()}")
+
+
 def test_blocked_reason_fallbacks_0277():
     """metis-0277 п. 2: нет журнала — waitingFor, если он не общий «permission prompt»; нет и его — «причина
     неизвестна — claude attach <id>» без пустого места после тире."""

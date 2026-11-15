@@ -1181,10 +1181,12 @@ def code_facts(repo, pr, sha, view):
     return frozenset(), frozenset(), frozenset()
 
 
-def decision_hint(repo, pr, sha):
+def decision_hint(repo, pr, sha, view=None):
     """Почему у прохода нет фактов о коде прошлых head (metis-1181): текст «повтори `pantheon merge request`» или None —
     решение хука guard на sha записано и досчитано. Берётся последняя за REQUEST_TTL запись carry.jsonl kind
-    "decision" на sha или "decision-miss" (след несделанной сверки, merge_gate._decision_miss) на sha или без head."""
+    "decision" на sha или "decision-miss" (след несделанной сверки, merge_gate._decision_miss) на sha или без head.
+    view — ответ gh pr view: решение записано на прошлой вершине ветки base (в base с тех пор слили PR) — code_facts
+    его не берёт, и текст велит повторить заявку, а не звать нового argus (metis-1249, BA #72)."""
     last = None
     for d in P.carry_records(repo, pr):
         if d.get("kind") not in ("decision", "decision-miss") or d.get("sha") not in (sha, "") \
@@ -1202,6 +1204,13 @@ def decision_hint(repo, pr, sha):
     why = "; ".join(str(w) for w in last.get("why") or [] if isinstance(w, str))
     if last.get("kind") == "decision-miss":
         return f"сверка кода прошлых head хуком guard не успела ({why or 'причина не названа'}) — {again}"
+    base = view.get("baseRefName") if isinstance(view, dict) else None
+    old = str(last.get("base_oid") or "").lower()
+    if old and isinstance(base, str) and base and last.get("base") == base:
+        tip = base_tip(repo, base)
+        if tip and tip != old:
+            return (f"сверка кода прошлых head записана на вершине {base} {old[:12]}, а ветка уже на {tip[:12]} — "
+                    f"{again}")
     # повтор снимает только срок хука и молчание gh; «старше CARRY_HEADS», «не клон», бюджет сверки и прочее он не
     # снимет — тогда прежний текст отказа (дельта-круг, новый круг argus)
     retry = "; ".join(w for w in last.get("why") or [] if isinstance(w, str) and _retry_why(w))
@@ -1209,8 +1218,10 @@ def decision_hint(repo, pr, sha):
 
 
 def _retry_why(why):
-    """Причина несделанной сверки, которую снимет повтор заявки (metis-1181): срок хука или gh не ответил."""
-    return "срок хука" in why or "gh" in why and any(w in why for w in ("не ответил", "не успел", "не получить"))
+    """Причина несделанной сверки, которую снимет повтор заявки (metis-1181): срок хука или gh не ответил; коммита нет
+    в git клона — после git fetch (metis-1249, BA #72: новой вершины base в клоне не было)."""
+    return "срок хука" in why or "git fetch" in why \
+        or "gh" in why and any(w in why for w in ("не ответил", "не успел", "не получить"))
 
 
 def held_rejects(verdicts, sha, differs=frozenset(), same=frozenset()):
@@ -1319,7 +1330,7 @@ def gate(repo, pr, sha, view):
     if held:
         heads = ", ".join(r["sha"][:12] for r in held)
         unknown = [r for r in held if r["sha"] != sha and r["sha"] not in same | differs]
-        hint = decision_hint(repo, pr, sha) if unknown else None
+        hint = decision_hint(repo, pr, sha, view) if unknown else None
         if hint:
             return "fail", (f"«вернуть» от argus на {heads} в силе: код этого head с {sha[:12]} не сверен, а без сверки "
                             f"свежее «принять» на {sha[:12]} его не снимает; {hint}")
@@ -1367,7 +1378,7 @@ def gate(repo, pr, sha, view):
         gone = {r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted}
         moved = len(gone)
         # код прошлых head не сверен хуком — сначала повторить заявку (metis-1181), а не звать нового argus
-        hint = decision_hint(repo, pr, sha) if gone - differs else None
+        hint = decision_hint(repo, pr, sha, view) if gone - differs else None
         return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}" + light
                         + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
                            if cut else "")

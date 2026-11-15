@@ -237,7 +237,7 @@ def _fresh_box(p, answers, alerts, stops, launched):
     p.stop_copies = lambda name, live, tag: stops.extend(x["id"] for x in live)
     p.alert = lambda text, src=None: alerts.append(text)
 
-    def launch(*a):
+    def launch(*a, resume=None):
         launched.append(a)
         raise _Launched()
     p.window_launch = launch

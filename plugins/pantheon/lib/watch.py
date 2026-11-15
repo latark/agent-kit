@@ -50,7 +50,9 @@
 простаивающему Зевсу — push + `claude respawn`, раз на пункт и не чаще раза в 15 мин на сессию, за проход одним
 сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Ожидание дольше 5 мин — карточка
 владельцу «Ждёт вас» (окно, что просит, что делать), дольше 30 мин — повтор уведомления и строка Зевсу в тревогах, одна на
-ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Каждая проверка идёт отдельно: сбой одной
+ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Запрос уже у Зевса живой заявкой
+perm (lib/perm.py, perm_live) — ни тревоги, ни передачи, ни карточки, пока заявка ждёт; решена, снята, срок вышел или
+хук умер — обычный путь, отсчёт ожидания с первого прохода (metis-1254). Каждая проверка идёт отдельно: сбой одной
 — тревога «проверка X упала», остальные работают; время прохода — ~/.local/state/pantheon/watch-last (строка статуса и
 `pantheon status` показывают, что дежурный жив). Основания — исследование
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
@@ -425,6 +427,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("имя Зевса", lambda: zeus_rename(t, agents)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
@@ -683,7 +686,15 @@ def _wait_card(name, sid, why, since, t):
     return tid
 
 
-def wait_cards(agents, waiting, t):
+def _perm_live(a, agents=()):
+    """Живая заявка perm окна a (P.perm_live) → номер или None; сбой — None: обычный путь, ничего не теряется."""
+    try:
+        return P.perm_live(a, agents)
+    except Exception:  # noqa: BLE001 — без заявки дежурный спрашивает сам, как до metis-1254
+        return None
+
+
+def wait_cards(agents, waiting, t, covered=frozenset()):
     """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
     (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке), дальше — каждый час только строка Зевсу,
     без macOS: часовые уведомления съели бы дневной бюджет (metis-1183). Окно на
@@ -722,6 +733,8 @@ def wait_cards(agents, waiting, t):
             rec.update(since=since, sid=sid, why=why)
             if why != UNKNOWN_WHY:
                 rec["known"] = why
+            if name in covered:
+                continue   # metis-1254: запрос у Зевса заявкой perm — карточки и повтора нет, отсчёт since идёт
             if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
                 rec["card"] = _wait_card(name, sid, why, since, t)
             last = rec.get("repeated")
@@ -745,6 +758,7 @@ def sessions(agents, doms, t=None):
     t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
     waiting = []  # blocked этого прохода: [(имя, sid, что ждёт)] — Зевсу одним сообщением
+    covered = set()  # имена окон, чей запрос уже у Зевса живой заявкой perm (metis-1254)
     for a in agents:
         name, sid, state = a.get("name") or "", a.get("id") or a.get("sessionId") or "", a.get("state")
         if not sid or not is_pantheon(name, doms):
@@ -761,6 +775,13 @@ def sessions(agents, doms, t=None):
         if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
             state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
+        if state == "blocked" and not a.get("ghost") and _perm_live(a, agents):
+            # metis-1254: запрос окна уже у Зевса заявкой perm-… (lib/perm.py) — ни тревоги, ни уведомления, ни
+            # передачи, ни карточки: владельца спросили бы дважды. Отсчёт ожидания идёт (wait_cards); заявка решена,
+            # снята, вышел срок или хук умер — обычный путь со следующего прохода
+            covered.add(name)
+            waiting.append((name, sid, why))
+            continue
         if a.get("ghost"):  # metis-0651: процесс умер, запись осталась — одна тревога на сессию, пока призрак виден
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
@@ -777,8 +798,8 @@ def sessions(agents, doms, t=None):
                       group=f"session-{name}", once=True)
         if state == "blocked":
             waiting.append((name, sid, why))
-    relay_zeus(agents, waiting, t)
-    wait_cards(agents, waiting, t)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
+    relay_zeus(agents, [w for w in waiting if w[0] not in covered], t)
+    wait_cards(agents, waiting, t, covered)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
     # вышла из blocked — запись снимаем: вернётся в blocked, будет новый пункт (передача раз на пункт)
     st = P.read_json(P.path("relay.json"), {})
     if isinstance(st, dict) and st:
@@ -2597,10 +2618,19 @@ def zeus_clean_failed(st, stp, t, a, n, rc, held):
     P.alert(f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log", "watch")
 
 
+def _hq_copy(a):
+    """«zeus (N)» — окно штаба, только если оно в папке Пантеона: иное окно с таким именем (роль назвала себя «zeus»)
+    не перезапускаем под --agent hq (находка проверки безопасности, metis-1251). Точное «zeus» — как раньше."""
+    if a.get("name") == "zeus":
+        return True
+    cwd = a.get("cwd")
+    return isinstance(cwd, str) and bool(cwd) and os.path.realpath(cwd) == os.path.realpath(P.PANTHEON)
+
+
 def zeus_clean(agents, t):
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
-    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
+    zs = [a for a in agents if _base_name(a.get("name")) == "zeus" and _hq_copy(a) and a.get("id") and a.get("sessionId")
           and a.get("state") not in ("stopped", "failed")]
     if not zs:
         if (st.get("last") or {}).get("result") != "нет Зевса":
@@ -2660,6 +2690,70 @@ def zeus_clean(agents, t):
             "тогда очистка пройдёт сама", "watch")
     st["remind"] = {"t": t, "sid": a["sessionId"], "turn": info["turn"]}
     P.write_json(stp, st)
+
+
+def _zeus_tab(agents):
+    """Живая «zeus» или вкладка терминала с этим именем или его копией (P.live_copies: claude agents и реестр
+    ~/.claude/sessions). Интерактивной вкладки нет в фоновых сессиях, а fresh_start отказал бы на ней (fresh-tab, код 1)
+    — и каждый час две тревоги (находка argus Д4, metis-1251)."""
+    return any(x.get("name") == "zeus" or not x.get("id") or x.get("kind") == "interactive"
+               for x in P.live_copies("zeus", agents))
+
+
+def zeus_rename(t, seen=None):
+    """metis-1251 (слово владельца 15.11): окно Зевса всегда «zeus». Живая фоновая «zeus (N)» (Claude Code дал суффикс,
+    когда «zeus» была занята) при простое Зевса, без живой «zeus» и без вкладки терминала с этим именем (_zeus_tab) — перезапуск той же переписки под именем zeus:
+    P.fresh_start(resume=<sessionId>) = claude stop, ждём свободного имени, `claude --resume <сессия> --bg --agent hq
+    --name zeus`, check_new_name. Простой — те же условия, что у очистки (zeus_clean_check без (1) «контекст»): не
+    идёт ход, нет вопроса, всё сохранено, с конца хода ≥ ZEUS_IDLE_MIN; и защиты zeus_hold. Мёртвую «zeus» убираем
+    раньше (иначе имя занято, и новая снова стала бы «zeus (2)»); убранную вычёркиваем из seen — списка сессий прохода,
+    иначе уборка сессий (auto_rm) звала бы claude rm той же записи второй раз и тревожила бы отказом. Сбой — повтор не
+    чаще раза в ZEUS_REMIND_MIN."""
+    if dry():
+        return
+    agents = P.agents_all() or []  # свежий список: очистка Зевса выше могла только что поднять «zeus»
+    bgs = [a for a in agents if a.get("id") and a.get("kind") in (None, "background")]
+    alive = [a for a in bgs if a.get("state") not in ("stopped", "failed")]  # как в zeus_clean: done — ждёт ввода
+    if any(a.get("name") == "zeus" and (a.get("state") != "done" or a.get("pid")) for a in alive) \
+            or _zeus_tab(agents):
+        return
+    zs = [a for a in alive if re.fullmatch(r"zeus \(\d+\)", str(a.get("name") or "")) and a.get("sessionId")
+          and _hq_copy(a)]
+    if len(zs) != 1 or zeus_hold():
+        return
+    a, stp = zs[0], P.path("zeus-rename.json")
+    st = P.read_json(stp, {}) or {}
+    if t - float(st.get("failed") or 0) < ZEUS_REMIND_MIN * 60:
+        return
+    tp = P.transcript_path(a)
+    if not tp or [m for m, _ in zeus_clean_check(a, tp)[0] if m != 1]:
+        return  # ход идёт, вопрос, несохранённое, меньше 20 мин с конца хода — не трогаем
+    for x in bgs:  # мёртвая «zeus» держит имя: убираем до перезапуска
+        if x.get("name") == "zeus" and P.rm_session(x["id"], name="zeus", why="zeus-rename") is None and seen is not None:
+            seen[:] = [s for s in seen if s.get("id") != x["id"]]  # уборка сессий ниже по проходу не зовёт rm повторно
+
+    def again():
+        """Под блокировкой имени, перед claude stop: те же условия по свежему claude agents."""
+        now = P.agents_all() or []
+        mine = [x for x in now if x.get("sessionId") == a["sessionId"] and _hq_copy(x)]
+        if not mine or any(x.get("name") == "zeus" and x.get("state") not in ("stopped", "failed") for x in now) \
+                or _zeus_tab(now):
+            return "Зевса нет в claude agents или «zeus» уже есть"
+        return zeus_hold() or "; ".join(s_ for n_, s_ in zeus_clean_check(mine[0], tp)[0] if n_ != 1) or None
+
+    text = (f"{P.START_MARK} переименование] Окно перезапущено под именем zeus (было «{a.get('name')}»), разговор тот же. "
+            "Продолжай с того места, где остановился; ничего заново не начинай. Это не слова владельца и не согласие.")
+    rc = P.fresh_start("zeus", a, text, "tick", recheck=again, reason=f"переименование «{a.get('name')}» → zeus",
+                       resume=a["sessionId"])
+    P.start_log(f"zeus-rename\t{a.get('id')}\t{a.get('name')}\t{rc}")
+    if rc == 0:
+        P.alert(f"Зевс переименован: «{a.get('name')}» → zeus, переписка та же (claude attach zeus)", "watch")
+        event("zeus-rename", t, id=a.get("id"))
+        return
+    st["failed"] = t
+    P.write_json(stp, st)
+    if rc != P.SKIPPED:
+        P.alert(f"переименование Зевса «{a.get('name')}» → zeus не вышло, код {rc}; журнал start.log", "watch")
 
 
 # --- самозапуск координаторов (SCHED-09, решение владельца 15.10) --------------------------------------

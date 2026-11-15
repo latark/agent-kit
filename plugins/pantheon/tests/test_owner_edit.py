@@ -972,11 +972,47 @@ check("R4-2 Б1 (probe2): путь в обратных кавычках — ст
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
-answer(seen(OE.question(req)) if req else "", "А — Да, применить")   # «да» на то, что видно, без «\» — не дословно
+answer(seen(OE.question(req)) if req else "", "А — Да, применить", head="ответ в чате")   # в чате без «\» — не дословно
 IDLE[0] = 10 ** 6
 run()
-check("R4-2 Б1: «да» на вопрос без экранирования — отказ, файл не тронут",
+check("R4-2 Б1: «да» в чате на вопрос без экранирования — отказ, файл не тронут",
       rc == 0 and read(POLICY) == PB_OLD and result(req).get("state") == "refused", (rc, errs, result(req)))
+# metis-1252: окно вопросов Markdown не рисует — «да» на вопрос без «\» (question plain) там согласие, если в вопросе
+# нет знаков, которые Markdown прячет (иначе — только чат с md: находка проверки безопасности PR #493)
+PL_NEW = '[private]\npaths = ["~/ai/knowledge/Self", "~/ai/knowledge/Self-2"]\n'
+check("1252: правка с `код` — окну вопросов не годится, без знаков Markdown — годится",
+      not OE.plain_ok(pb) and OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW)), OE.question(pb, plain=True))
+check("1252: белый список — «_» внутри слова и ${HOME} годятся; «&», «_» на краю, «~» не перед «/», «](» — нет",
+      OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why="через env_from и ${HOME}"))
+      and not any(OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why=w)) for w in
+                  ("a &amp; b", "_курсив_", "x ~y~", "[a](b)", "[a][b]", "a|b", "a@b")),
+      [OE.plain_ok(mkreq(TOML_REL, PB_OLD, PL_NEW, why=w)) for w in ("через env_from", "a &amp; b", "_курсив_")])
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+answer(OE.question(req, plain=True) if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне без «\\» на правку со знаками Markdown — отказ, окна в propose нет", read(POLICY) == PB_OLD
+      and result(req).get("state") == "refused" and "окном вопросов" not in out, (errs, result(req), out))
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PL_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+check("1252: propose даёт Зевсу вопрос для окна без «\\» и для чата с «\\»",
+      bool(req) and OE.question(req, plain=True) in out and OE.question(req) in out
+      and "\\" not in OE.question(req, plain=True).split("Правка")[1], out)
+answer(OE.question(req, plain=True) if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне вопросов на вопрос без «\\» — применено", read(POLICY) == PL_NEW, (errs, journal()))
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PL_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+answer(OE.question(req, plain=True).replace("Self-2", "Self-3") if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне на другой текст без «\\» — отказ", read(POLICY) == PB_OLD
+      and result(req).get("state") == "refused", (errs, result(req)))
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)

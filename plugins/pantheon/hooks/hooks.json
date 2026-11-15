@@ -249,6 +249,15 @@
             "timeout": 45
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$PANTHEON_ROLE\" in ''|hq) exit 0 ;; esac; exec \"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" perm ask",
+            "timeout": 900
+          }
+        ]
       }
     ]
   }
