@@ -457,9 +457,11 @@ def blind_checks(t):
 
 
 def run_checks(checks, t):
-    """Прогоняет проверки по очереди; сбой одной — тревога, остальные идут. Возвращает имена упавших."""
+    """Прогоняет проверки по очереди; сбой одной — тревога, остальные идут. Возвращает имена упавших. Проверка дольше
+    CHECK_SLOW — строка с её временем в вывод прохода (watch.log, metis-1236): долгий проход виден по шагам."""
     failed = []
     for name, fn in checks:
+        start = time.monotonic()
         try:
             fn()
             P.clear_once(f"watch-fail-{name}")
@@ -468,7 +470,22 @@ def run_checks(checks, t):
             P.alert_once(f"watch-fail-{name}", f"{today(t)}-{type(e).__name__}",
                          f"дежурный: проверка «{name}» упала ({type(e).__name__}: {str(e)[:160]}) — остальные идут; "
                          "журнал pantheon jobs, задача watch", "watch")
+        took = time.monotonic() - start
+        if took >= check_slow():
+            print(f"дежурный: проверка «{name}» шла {took:.0f} с", flush=True)
     return failed
+
+
+CHECK_SLOW = 20.0   # с: проверка дольше — строкой в watch.log (metis-1236)
+
+
+def check_slow():
+    """Порог строки о долгой проверке, с; PANTHEON_CHECK_SLOW — подмена для тестов."""
+    with contextlib.suppress(ValueError, TypeError):
+        v = float(os.environ.get("PANTHEON_CHECK_SLOW") or CHECK_SLOW)
+        if v >= 0:
+            return v
+    return CHECK_SLOW
 
 
 def awake():
@@ -1169,14 +1186,26 @@ LINK_SKIP = ("node_modules", ".next", ".venv", "venv", ".turbo", ".cache")   # �
 DEPS_LIMIT = 300000                     # записей внутри LINK_SKIP; больше — «не знаю» (None), копия не удаляется
 
 
-def outward_links(wt):
+class _OutOfTime(Exception):
+    """Срок уборки копий в этом проходе вышел (WT_BUDGET, metis-1236): копия и остальные — в следующий проход."""
+
+
+def _over(deadline):
+    """Срок вышел (time.monotonic) — _OutOfTime; deadline None — без срока (`pantheon wt done|plan`)."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise _OutOfTime()
+
+
+def outward_links(wt, deadline=None):
     """Символические ссылки копии, чья цель (realpath) лежит вне неё. Обход без перехода по ссылкам, папку .git
     копии пропускаем. Записи внутри LINK_SKIP (node_modules, .next, .venv и т. п.; у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
     DEPS_LIMIT, остальные — под WALK_LIMIT. Превышение любого лимита — копия считается небезопасной (None, «не знаю»)
-    и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None."""
+    и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None. deadline вышел посреди
+    обхода — _OutOfTime (metis-1236: обход node_modules под нагрузкой диска не держит проход до таймаута)."""
     root = os.path.realpath(wt)
     n, first, seen, deps = 0, None, 0, 0
     for d, dirs, files in os.walk(root, followlinks=False):
+        _over(deadline)
         if d == root and ".git" in dirs:
             dirs.remove(".git")
         inside = any(part in LINK_SKIP for part in os.path.relpath(d, root).split(os.sep))
@@ -1267,6 +1296,19 @@ SAVE_MAX_FILES = 2000       # файлов в архив копии больше
 IGNORED_SKIP = LINK_SKIP + ("dist", "build", "out", ".output", "coverage", "target", "__pycache__", ".pytest_cache",
                             ".mypy_cache", ".ruff_cache", ".parcel-cache", ".svelte-kit", ".nuxt", ".vercel", ".tox",
                             ".gradle", ".DS_Store")
+WT_BUDGET = 120.0           # с на уборку копий за проход (metis-1236): срок прохода 600 с, после копий ещё ~20 проверок
+WT_DEFERRED = "wt-deferred.json"   # STATE: копии, до которых проход не дошёл по сроку, — следующий начинает с них
+
+
+def wt_budget():
+    """Срок уборки копий за проход, с; PANTHEON_WT_BUDGET — подмена (тесты, ручная проба), неверное — WT_BUDGET."""
+    with contextlib.suppress(ValueError, TypeError):
+        v = float(os.environ.get("PANTHEON_WT_BUDGET") or WT_BUDGET)
+        if v >= 0:
+            return v
+    return WT_BUDGET
+
+
 WT_REQ_DIR = "wt-req"       # заявки `pantheon wt done`: STATE/wt-req (ваши сессии), <кэш окна>/wt-req (окно роли)
 AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # lock, который Claude Code вешает на копию субагента
 AGENT_DIR = re.compile(r"agent-[0-9a-f]{6,40}")
@@ -1324,11 +1366,12 @@ def subagent_live(agent, wt, t):
 QUIET_LIMIT = 50000   # записей копии (без LINK_SKIP) для _quiet_since; больше — «не знаю», копия считается занятой
 
 
-def _quiet_since(wt, since):
+def _quiet_since(wt, since, deadline=None):
     """Ни одна запись копии (папки и файлы, без LINK_SKIP, без перехода по ссылкам) не менялась после since. Обход
-    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем."""
+    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем. deadline вышел — _OutOfTime."""
     stack, n = [wt], 0
     while stack:
+        _over(deadline)
         d = stack.pop()
         try:
             if os.lstat(d).st_mtime > since:
@@ -1578,7 +1621,7 @@ def wt_journal(t, root, wt, branch, head, kind, saved):
     return p
 
 
-def wt_one(root, wt, block, ctx, requested=False, dry=False):
+def wt_one(root, wt, block, ctx, requested=False, dry=False, deadline=None):
     """Одна копия <root>/.claude/worktrees/<имя> (metis-0835). block — её запись `git worktree list --porcelain`.
     → (итог, текст):
       live    — в копии живая сессия (cwd), процесс (lsof) или работающий субагент: не трогаем ни при каком условии;
@@ -1595,7 +1638,9 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     без живого субагента не держит; lock с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
     сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; правки и
     неотслеживаемое, а у любой копии игнорируемое вне IGNORED_SKIP (.env.local) — сначала в патч и архив (wt_save).
-    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела."""
+    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела.
+    deadline (time.monotonic, metis-1236) — срок обходов до первой правки (свежие правки, ссылки наружу): вышел —
+    _OutOfTime, копия цела и ждёт следующего прохода; после начала сохранения срок не проверяется."""
     t = ctx.t
     if _has_inside(wt, ctx.live):
         return "live", "живая сессия в копии"
@@ -1649,10 +1694,10 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     # lock называет субагента, а его meta не найден (жив ли — неизвестно) — и у `wt done` ждём, пока копия затихнет
     quiet = WT_DONE_QUIET if requested and not (alive is None and am) else LIVE_SUBAGENT_MAX
     since = t - quiet
-    if not _quiet_since(wt, since):
+    if not _quiet_since(wt, since, deadline):
         return "live", (f"lock субагента {agent}: meta не найден, " if alive is None and am else "") + \
             f"в копии правки моложе {_dur(quiet)} — похоже, в ней ещё работают"
-    out = outward_links(wt)
+    out = outward_links(wt, deadline)
     if out is None or out[0]:
         what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
                 "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0], out[1][1].replace(P.HOME, "~")))
@@ -1811,58 +1856,93 @@ def worktrees(agents, registry, doms, t):
     Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
     не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий; решает _prune_state по пути из gitdir,
     как git: недоступная копия (в том числе с chmod 000 на ней самой) или живая сессия в пропавшей папке блокирует
-    prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога."""
+    prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога.
+    Срок (metis-1236): на все копии прохода — wt_budget() секунд, обходы внутри копии тоже его смотрят. Не успевшие —
+    по порядку в STATE/wt-deferred.json, следующий проход начинает с них; первая копия прохода идёт без срока, так что
+    каждый проход продвигает очередь. Заявки `wt done` отложенных копий ждут. Причина: уборка копий под нагрузкой
+    диска держала проход до таймаута 600 с (run-job watch, rc 124), а с ним — все проверки после неё."""
     ctx = WtCtx(agents, registry, t)
     reqs = wt_requests(doms, t)
     removed = []
-    seen = set()
+    seen = []
+    deferred = []
     with P.lock("worktrees") as got:
         if not got:  # lock не взят (подложенный файл и т. п.; причину печатает P.lock) — копий не трогаем (D5)
             return
+        items = []
         for name, folders in doms.items():
             for f in folders if isinstance(folders, list) else []:
                 root = os.path.realpath(os.path.expanduser(f))
                 if root in seen or not os.path.isdir(os.path.join(root, ".git")):
                     continue
-                seen.add(root)
-                for wt, block in _copies(root):
-                    try:
-                        os.lstat(wt)
-                    except OSError:
-                        continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
-                    short = wt.replace(P.HOME, "~")
-                    if not _in_worktrees(wt):
-                        # копия вне штатной папки: только тревога, никогда не удаляем
-                        if _has_inside(wt, ctx.live):
-                            continue
-                        try:
-                            out_age = (t - os.stat(wt).st_mtime) / 3600
-                        except OSError:
-                            continue
-                        if out_age > WORKTREE_DAYS * 24:
-                            P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {short} ({name}, "
-                                         f"{out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать", "watch")
-                        continue
-                    req = reqs.pop(wt, None)
-                    verdict, text = wt_one(root, wt, block, ctx, requested=bool(req))
-                    if verdict == "removed":
-                        removed.append(text)
-                        P.clear_once(f"watch-wt-{wt}")
-                        _drop(req)
-                    elif verdict == "keep":
-                        P.alert_once(f"watch-wt-{wt}", text, f"копия {short} ({name}) не убрана: {text} — "
-                                     "координатору: разобрать и убрать вручную", "watch")
-                        _drop(req)
-                need_prune, blockers = _prune_state(root, ctx.live)
-                for path, ex in blockers:
-                    P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
-                                 f"недоступна ({ex}) — prune отложен", "watch")
-                if need_prune and not blockers:
-                    # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
-                    # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
-                    _git("-C", root, "worktree", "prune")
-    for left in reqs.values():  # копии больше нет в списке git — заявка исполнена или не нужна
-        _drop(left)
+                seen.append(root)
+                items += [(name, root, wt, block) for wt, block in _copies(root)]
+        before = P.read_json(P.path(WT_DEFERRED), [])
+        order = {x: n for n, x in enumerate(before if isinstance(before, list) else []) if isinstance(x, str)}
+        # отложенные прошлым проходом — первыми и в своём порядке, прочие — после них в прежнем порядке (sort стабилен)
+        items.sort(key=lambda x: order.get(x[2], len(order)))
+        budget = wt_budget()
+        start = time.monotonic()
+        deadline = start + budget
+        ran = False  # первая копия прохода, дошедшая до wt_one, — без срока: каждый проход хоть одну доводит
+        for i, (name, root, wt, block) in enumerate(items):
+            if ran and time.monotonic() > deadline:
+                deferred = [x[2] for x in items[i:]]
+                break
+            try:
+                os.lstat(wt)
+            except OSError:
+                continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
+            short = wt.replace(P.HOME, "~")
+            if not _in_worktrees(wt):
+                # копия вне штатной папки: только тревога, никогда не удаляем
+                if _has_inside(wt, ctx.live):
+                    continue
+                try:
+                    out_age = (t - os.stat(wt).st_mtime) / 3600
+                except OSError:
+                    continue
+                if out_age > WORKTREE_DAYS * 24:
+                    P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {short} ({name}, "
+                                 f"{out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать", "watch")
+                continue
+            req = reqs.pop(wt, None)
+            try:
+                verdict, text = wt_one(root, wt, block, ctx, requested=bool(req), deadline=deadline if ran else None)
+            except _OutOfTime:
+                if req:
+                    reqs[wt] = req
+                deferred = [x[2] for x in items[i:]]
+                break
+            ran = True
+            if verdict == "removed":
+                removed.append(text)
+                P.clear_once(f"watch-wt-{wt}")
+                _drop(req)
+            elif verdict == "keep":
+                P.alert_once(f"watch-wt-{wt}", text, f"копия {short} ({name}) не убрана: {text} — "
+                             "координатору: разобрать и убрать вручную", "watch")
+                _drop(req)
+        for root in seen:
+            need_prune, blockers = _prune_state(root, ctx.live)
+            for path, ex in blockers:
+                P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
+                             f"недоступна ({ex}) — prune отложен", "watch")
+            if need_prune and not blockers:
+                # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
+                # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
+                _git("-C", root, "worktree", "prune")
+        if deferred:
+            P.write_json(P.path(WT_DEFERRED), deferred)
+            print(f"уборка копий: срок {budget:g} с вышел за {time.monotonic() - start:.0f} с — отложено "
+                  f"{len(deferred)} из {len(items)}, следующий проход начнёт с них")
+        elif before:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(P.path(WT_DEFERRED))
+    wait = set(deferred)
+    for wt, left in reqs.items():  # копии больше нет в списке git — заявка исполнена или не нужна; отложенная ждёт
+        if wt not in wait:
+            _drop(left)
     if removed:
         P.alert_once("watch-wt-removed", today(t), f"уборка копий: убрано {len(removed)} — " + "; ".join(removed[:3])
                      + (f" и ещё {len(removed) - 3}" if len(removed) > 3 else "")
