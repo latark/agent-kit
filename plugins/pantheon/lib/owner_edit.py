@@ -595,17 +595,20 @@ def window_text(req):
     return text if P.handoff_mod().showable(text) and len(text) <= WINDOW_MAX else None
 
 
-def question(req):
+def question(req, plain=False):
     """Вопрос для Зевса: [id], файл, sha диффа, правка строками (shown) через « ⏎ », ключи и последним — «Пояснение
     роли: …» (--why, mark): после правки и с меткой он не подделает её начало «Правка, строк 0: …» (R3-2 С). Вопрос —
     одна строка (хук окна вопросов сводит переводы строк в пробел), а SEP внутри строки правки экранирован — «ok;
     -Правило» не читается как вторая строка (ревью PR #362, круг 2, Д). Вопрос идёт в чат, а чат рисует Markdown: всё,
     что пришло из файла и от роли (путь, строки правки с разделами, ключи, --why), — через md, каждый знак ASCII-
-    пунктуации экранирован и виден буквально (R4-2 Б1). «[id]» в начале — как есть: по нему сверка ищет вопрос."""
-    why = f". Пояснение роли: {md(mark(req['why']))}" if req.get("why") else ""
-    rows = [md(r) for r in shown(req)]
-    return (f"[{req['id']}] Применить правку {md('~/' + req['file'])} (задача {req['task']}, sha диффа "
-            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req, md)
+    пунктуации экранирован и виден буквально (R4-2 Б1). «[id]» в начале — как есть: по нему сверка ищет вопрос.
+    metis-1252: plain=True — тот же вопрос без md, для окна вопросов: оно Markdown не рисует, и обратные слэши md там
+    видны, а Зевс их опускал — «да» в окне сверка отклоняла, и он уходил в вопрос текстом в чате без кнопок."""
+    fix = str if plain else md
+    why = f". Пояснение роли: {fix(mark(req['why']))}" if req.get("why") else ""
+    rows = [fix(r) for r in shown(req)]
+    return (f"[{req['id']}] Применить правку {fix('~/' + req['file'])} (задача {req['task']}, sha диффа "
+            f"{req['diff_sha'][:SHORT]})? Правка, строк {len(rows)}: " + f" {SEP} ".join(rows) + keys_text(req, fix)
             + why)
 
 
@@ -865,7 +868,9 @@ def _propose(rel, new, task, why, prog, cur=None):
         return err(f"{prog}: заявку не записать ({e})", 3)
     touch = window_text(dict(req, window=win))
     print(f"заявка {req['id']}: ~/{rel}, sha до {before[:12]}, sha диффа {req['diff_sha']}\n\n{diff}\n"
-          f"Вопрос Зевсу (окно вопросов, варианты «А — Да, применить» и «Б — Нет»), строка целиком:\n  {question(req)}\n"
+          f"Вопрос Зевсу окном вопросов (AskUserQuestion, варианты «А — Да, применить» и «Б — Нет»), строка целиком:\n"
+          f"  {question(req, plain=True)}\n"
+          f"Если окно вопросов открыть нельзя — сообщением в чате, строка целиком:\n  {question(req)}\n"
           + ("Или Touch ID: плановый проход покажет окно с этой правкой, когда владелец у Mac.\n" if touch else
              "Окно Touch ID правку целиком не покажет — только «да» в окне вопросов.\n")
           + f"Применит плановый проход, если ~/{rel} до того не изменится. Итог — pantheon owner-edit status {req['id']}")
@@ -1103,7 +1108,9 @@ def consent_decision(req):
     if not P.consent_is_yes(body):
         return "no", head
     q = one_line(body.split("\nответ:")[0].removeprefix("вопрос:"))
-    if q != one_line(question(req)):
+    # окно вопросов Markdown не рисует — там годится и вопрос без md (metis-1252); ответ в чате — только с md
+    window = head.removesuffix(" у Зевса").endswith("· " + P.answers_mod().WINDOW_NOTE)
+    if q != one_line(question(req)) and not (window and q == one_line(question(req, plain=True))):
         return "wrong", head
     return "yes", head
 

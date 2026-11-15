@@ -972,11 +972,30 @@ check("R4-2 Б1 (probe2): путь в обратных кавычках — ст
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
-answer(seen(OE.question(req)) if req else "", "А — Да, применить")   # «да» на то, что видно, без «\» — не дословно
+answer(seen(OE.question(req)) if req else "", "А — Да, применить", head="ответ в чате")   # в чате без «\» — не дословно
 IDLE[0] = 10 ** 6
 run()
-check("R4-2 Б1: «да» на вопрос без экранирования — отказ, файл не тронут",
+check("R4-2 Б1: «да» в чате на вопрос без экранирования — отказ, файл не тронут",
       rc == 0 and read(POLICY) == PB_OLD and result(req).get("state") == "refused", (rc, errs, result(req)))
+# metis-1252: окно вопросов Markdown не рисует — «да» на вопрос без «\» (question plain) там согласие
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+check("1252: propose даёт Зевсу вопрос для окна без «\\» и для чата с «\\»",
+      bool(req) and OE.question(req, plain=True) in out and OE.question(req) in out
+      and "\\" not in OE.question(req, plain=True).split("Правка")[1], out)
+answer(OE.question(req, plain=True) if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне вопросов на вопрос без «\\» — применено", read(POLICY) == PB_NEW, (errs, journal()))
+fresh(policy=PB_OLD)
+rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+answer(OE.question(req, plain=True).replace("Self", "Selg") if req else "", "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("1252: «да» в окне на другой текст без «\\» — отказ", read(POLICY) == PB_OLD
+      and result(req).get("state") == "refused", (errs, result(req)))
 fresh(policy=PB_OLD)
 rc, out, errs = propose("~/.claude/pantheon/policy.toml", PB_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
