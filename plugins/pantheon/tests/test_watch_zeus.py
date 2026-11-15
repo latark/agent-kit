@@ -2,6 +2,7 @@
 """Дежурный, часть 2: держатели, продолжение сессии, уборка Зевса, пересоздание (общая часть — _watch_common.py)."""
 # ruff: noqa: F403, F405
 import os
+import shutil
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _watch_common import *  # noqa: F403
@@ -684,6 +685,24 @@ def test_zeus_rename_not_touched_1251():
     check(len([c for c in e.calls() if c[:1] == ["stop"]]) == 1, f"повтор после сбоя раньше часа: {e.calls()}")
     e.run("watch", t=T0 + 3700, extra=quick)
     check(len([c for c in e.calls() if c[:1] == ["stop"]]) == 2, f"через час повтора нет: {e.calls()}")
+
+
+def test_zeus_rename_other_cwd_1251():
+    """metis-1251, находка проверки безопасности: «zeus (2)» не в папке Пантеона — не окно штаба, под --agent hq
+    не перезапускаем и не чистим."""
+    e = zeus_env(tokens=160_000)
+    z = json.load(open(e.agents_file))
+    src = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in z[0]["cwd"]))
+    dst = os.path.join(e.home, ".claude", "projects", "-tmp")
+    os.makedirs(dst, exist_ok=True)
+    for n in os.listdir(src):  # журнал тот же и под /tmp: без проверки папки окно прошло бы в перезапуск
+        shutil.copy(os.path.join(src, n), os.path.join(dst, n))
+    z[0]["name"], z[0]["cwd"] = "zeus (2)", "/tmp"
+    e.agents(z)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    hq = [c for c in e.calls() if "--agent" in c and "hq" in c]
+    check(not hq and "Зевс переименован" not in e.alerts() and "Зевс очищен" not in e.alerts(),
+          f"чужая «zeus (2)» перезапущена как штаб: {hq} {e.alerts()[-300:]}")
 
 
 def test_zeus_clean_copy_name_1251():
