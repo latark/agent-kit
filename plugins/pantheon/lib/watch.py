@@ -425,6 +425,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("имя Зевса", lambda: zeus_rename(t)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
@@ -2596,7 +2597,7 @@ def zeus_clean_failed(st, stp, t, a, n, rc, held):
 def zeus_clean(agents, t):
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
-    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
+    zs = [a for a in agents if _base_name(a.get("name")) == "zeus" and a.get("id") and a.get("sessionId")
           and a.get("state") not in ("stopped", "failed")]
     if not zs:
         if (st.get("last") or {}).get("result") != "нет Зевса":
@@ -2656,6 +2657,57 @@ def zeus_clean(agents, t):
             "тогда очистка пройдёт сама", "watch")
     st["remind"] = {"t": t, "sid": a["sessionId"], "turn": info["turn"]}
     P.write_json(stp, st)
+
+
+def zeus_rename(t):
+    """metis-1251 (слово владельца 15.11): окно Зевса всегда «zeus». Живая фоновая «zeus (N)» (Claude Code дал суффикс,
+    когда «zeus» была занята) при простое Зевса и без живой «zeus» — перезапуск той же переписки под именем zeus:
+    P.fresh_start(resume=<sessionId>) = claude stop, ждём свободного имени, `claude --resume <сессия> --bg --agent hq
+    --name zeus`, check_new_name. Простой — те же условия, что у очистки (zeus_clean_check без (1) «контекст»): не
+    идёт ход, нет вопроса, всё сохранено, с конца хода ≥ ZEUS_IDLE_MIN; и защиты zeus_hold. Мёртвую «zeus» убираем
+    раньше (иначе имя занято, и новая снова стала бы «zeus (2)»). Сбой — повтор не чаще раза в ZEUS_REMIND_MIN."""
+    if dry():
+        return
+    agents = P.agents_all() or []  # свежий список: очистка Зевса выше могла только что поднять «zeus»
+    bgs = [a for a in agents if a.get("id") and a.get("kind") in (None, "background")]
+    alive = [a for a in bgs if a.get("state") not in ("stopped", "failed")]  # как в zeus_clean: done — ждёт ввода
+    if any(a.get("name") == "zeus" and (a.get("state") != "done" or a.get("pid")) for a in alive):
+        return
+    zs = [a for a in alive if re.fullmatch(r"zeus \(\d+\)", str(a.get("name") or "")) and a.get("sessionId")]
+    if len(zs) != 1 or zeus_hold():
+        return
+    a, stp = zs[0], P.path("zeus-rename.json")
+    st = P.read_json(stp, {}) or {}
+    if t - float(st.get("failed") or 0) < ZEUS_REMIND_MIN * 60:
+        return
+    tp = P.transcript_path(a)
+    if not tp or [m for m, _ in zeus_clean_check(a, tp)[0] if m != 1]:
+        return  # ход идёт, вопрос, несохранённое, меньше 20 мин с конца хода — не трогаем
+    for x in bgs:  # мёртвая «zeus» держит имя: убираем до перезапуска
+        if x.get("name") == "zeus":
+            P.rm_session(x["id"], name="zeus", why="zeus-rename")
+
+    def again():
+        """Под блокировкой имени, перед claude stop: те же условия по свежему claude agents."""
+        now = P.agents_all() or []
+        mine = [x for x in now if x.get("sessionId") == a["sessionId"]]
+        if not mine or any(x.get("name") == "zeus" and x.get("state") not in ("stopped", "failed") for x in now):
+            return "Зевса нет в claude agents или «zeus» уже есть"
+        return zeus_hold() or "; ".join(s_ for n_, s_ in zeus_clean_check(mine[0], tp)[0] if n_ != 1) or None
+
+    text = (f"{P.START_MARK} переименование] Окно перезапущено под именем zeus (было «{a.get('name')}»), разговор тот же. "
+            "Продолжай с того места, где остановился; ничего заново не начинай. Это не слова владельца и не согласие.")
+    rc = P.fresh_start("zeus", a, text, "tick", recheck=again, reason=f"переименование «{a.get('name')}» → zeus",
+                       resume=a["sessionId"])
+    P.start_log(f"zeus-rename\t{a.get('id')}\t{a.get('name')}\t{rc}")
+    if rc == 0:
+        P.alert(f"Зевс переименован: «{a.get('name')}» → zeus, переписка та же (claude attach zeus)", "watch")
+        event("zeus-rename", t, id=a.get("id"))
+        return
+    st["failed"] = t
+    P.write_json(stp, st)
+    if rc != P.SKIPPED:
+        P.alert(f"переименование Зевса «{a.get('name')}» → zeus не вышло, код {rc}; журнал start.log", "watch")
 
 
 # --- самозапуск координаторов (SCHED-09, решение владельца 15.10) --------------------------------------

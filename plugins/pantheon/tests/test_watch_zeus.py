@@ -619,6 +619,83 @@ def test_restart_go_owner_forces_named_1122():
           f"повтор --go --owner с тем же id: {r.returncode} {r.stdout!r} {r.stderr!r}")
 
 
+def _zeus_copy_env(*extra_agents, **kw):
+    """zeus_env, где живой Зевс зовётся «zeus (2)» (окно 663ef576, metis-1251); контекст 100 тыс. — очистка не нужна."""
+    e = zeus_env(**{"tokens": 100_000, **kw})
+    z = json.load(open(e.agents_file))
+    z[0]["name"] = "zeus (2)"
+    e.agents(z + list(extra_agents))
+    return e
+
+
+def test_zeus_rename_idle_1251():
+    """metis-1251: живая «zeus (2)» без «zeus», Зевс простаивает — claude stop, затем `claude --resume <та же сессия>
+    --bg --agent hq --name zeus` с окном штаба (переписка та же, не чистый контекст); след в start.log, одна тревога;
+    повторный проход ничего не делает. Мёртвая «zeus» перед этим убирается (claude rm)."""
+    e = _zeus_copy_env(bg("zeus", "stopped", "dddddddd-1"))
+    r = e.run("watch", t=T0, extra=ZEUS_RUN)
+    acts = [c for c in e.calls() if c[:1] in (["stop"], ["rm"]) or "--resume" in c or c[:1] == ["--bg"]]
+    check(["rm", "dddddddd"] in acts and ["stop", "2e057e05"] in acts and len(acts) >= 3
+          and acts.index(["rm", "dddddddd"]) < acts.index(["stop", "2e057e05"]) and acts.count(["stop", "2e057e05"]) == 1
+          and len([c for c in acts if "--resume" in c]) == 1 and acts[-1][:1] == ["--resume"],
+          f"переименование: не rm мёртвой, stop, один запуск: {acts} {r.stderr[-500:]}")
+    s = acts[-1]
+    check(s[:2] == ["--resume", ZEUS_SID] and "--bg" in s and s[s.index("--agent") + 1] == "hq"
+          and s[s.index("--name") + 1] == "zeus"
+          and os.path.realpath(s[s.index("--settings") + 1]) == os.path.realpath(e.st("settings", "hq.json"))
+          and s[-1].startswith("[Пантеон: переименование]"), f"запуск не --resume той же сессии под zeus: {s}")
+    log = _start_log(e)
+    check("zeus-rename\t2e057e05\tzeus (2)\t0" in log and "fresh-start\tzeus\t2e057e05\ttick\t0" in log
+          and "name-unseen\tzeus" in log, f"нет следа переименования и проверки имени (check_new_name): {log}")
+    check(e.alerts().count("Зевс переименован") == 1, f"нет одной тревоги: {e.alerts()[-400:]}")
+    check(os.path.exists(e.zeus_transcript), "транскрипт Зевса пропал")
+    n = len(e.calls())
+    e.run("watch", t=T0 + 600, extra=ZEUS_RUN)  # «zeus (2)» уже остановлена, список тот же — повтора нет
+    check(len([c for c in e.calls()[n:] if "--resume" in c or c[:1] == ["--bg"]]) == 0
+          and e.alerts().count("Зевс переименован") == 1, f"повторный проход снова переименовал: {e.calls()[n:]}")
+
+
+def test_zeus_rename_not_touched_1251():
+    """metis-1251: не трогаем, пока идёт ход, открыт вопрос AskUserQuestion, не сохранено, с конца хода < 20 мин, при
+    живой «zeus», защитах zeus_hold и когда «zeus (N)» — не фоновая; после сбоя повтор не чаще раза в час."""
+    ask = [_tool("AskUserQuestion", "toolu_ask1", {"questions": []}, T0 - 2980)]
+    fresh_turn = [{"type": "user", "timestamp": _iso(T0 - 700), "message": {"role": "user", "content": "и что?"}},
+                  _answer(T0 - 600)]
+    cases = [("идёт ход (working)", dict(state="working")),
+             ("открыт вопрос", dict(extra_entries=ask)),
+             ("не сохранено", dict(saved=False)),
+             ("ответил 10 мин назад", dict(extra_entries=fresh_turn, saved=T0 - 500))]
+    for what, kw in cases:
+        e = _zeus_copy_env(**kw)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+        check(not zeus_actions(e) and "переименован" not in e.alerts(), f"{what}: Зевса тронули: {e.calls()}")
+    e = _zeus_copy_env(bg("zeus", "blocked", "zzzzzzzz-9", pid=77))  # живая «zeus» есть — «zeus (2)» не трогаем
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "переименован" not in e.alerts(), f"при живой zeus: {e.calls()}")
+    e = _zeus_copy_env()
+    os.makedirs(e.st("stopped"), exist_ok=True)
+    open(e.st("stopped", "zeus"), "w").write("вы\n")  # остановлен вами
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "переименован" not in e.alerts(), f"остановлен вами: {e.calls()}")
+    e = _zeus_copy_env()  # claude stop не останавливает: имя не освободилось — сбой, повтор не раньше часа
+    quick = {**QUICK, "PANTHEON_STOP_WAIT": "0.1"}
+    e.run("watch", t=T0, extra=quick)
+    e.run("watch", t=T0 + 600, extra=quick)
+    check(len([c for c in e.calls() if c[:1] == ["stop"]]) == 1, f"повтор после сбоя раньше часа: {e.calls()}")
+    e.run("watch", t=T0 + 3700, extra=quick)
+    check(len([c for c in e.calls() if c[:1] == ["stop"]]) == 2, f"через час повтора нет: {e.calls()}")
+
+
+def test_zeus_clean_copy_name_1251():
+    """metis-1251: очистка Зевса видит «zeus (2)» (_base_name) — при полном контексте и простое чистит и её."""
+    e = zeus_env()
+    z = json.load(open(e.agents_file))
+    z[0]["name"] = "zeus (2)"
+    e.agents(z)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(e.alerts().count("Зевс очищен") == 1, f"«zeus (2)» не очищена: {e.calls()} {e.alerts()[-300:]}")
+
+
 def test_saved_by_copy_name_1122():
     """metis-1122 (13.11 20:58): копия «zeus (2)» — `pantheon saved --by 'zeus (2)'` и `--by zeus` оба принимаются;
     в списке перезапуска — имя без номера."""
