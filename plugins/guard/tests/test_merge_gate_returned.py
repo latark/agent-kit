@@ -306,6 +306,9 @@ def t_carry_unit(h):
     check("правило 4: код P9 не посчитан — в силе", held(rj, opus(P9, "y"), f=dict(prints, **{P9: None})) == [R])
     check("правило 4: код S не посчитан — в силе", held(rj, opus(P9, "y"), f=dict(p4, **{S: None})) == [R])
     check("правило 4: другой argus принял P9 с кодом S — в силе", held(rj, opus(P9, "x"), f=p4) == [R])
+    check("правило 4: код S — код самого R (117-b7 K2) — в силе",
+          held(rj, opus(P9, "y"), f=dict(p4, **{R: ("f-s", "mb1")})) == [R])
+    check("правило 4: код R не посчитан — в силе", held(rj, opus(P9, "y"), f=dict(p4, **{R: None})) == [R])
     check("правило 4: тот же рецензент на P9 без перечня — в силе", held(rj, opus(P9, "y", checklist=None), f=p4) == [R])
     check("accept без перечня другого argus на S reject с R не снимает", held(rj, opus(S, "x", checklist=None)) == [R])
     # переносится только accept с перечнем на head с тем же отпечатком

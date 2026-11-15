@@ -2531,7 +2531,8 @@ def _lifts(a, r, sha, fp):
     другого argus — ещё returned_lifts (metis-0497): «принять» повторного круга (поле «вернули») снимает «вернуть»
     другого, только если взяло его отчёт. 4 (metis-1249, BA #72): тот же рецензент на третьем head с тем же кодом,
     что sha (_same_code: отпечаток или слияние), — он принял ровно этот код после своего «вернуть», а потом в ветку
-    лишь подтянули base; merge-base тут может быть другой. Код sha другой или не посчитан — не снимает."""
+    лишь подтянули base; merge-base тут может быть другой. Код sha другой или не посчитан — не снимает; код sha — код
+    самого r (_not_code_of) или это не посчитано — тоже не снимает."""
     if not checklist_ok(a):
         return False
     if _self_lift(a, r):
@@ -2547,7 +2548,7 @@ def _lifts(a, r, sha, fp):
         return bool(fr and fs) and fs[0] != fr[0] and _code_of(fp, r["sha"]) is False
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
-    if _reviewer(a) == _reviewer(r) and _same_code(fp, a["sha"], sha):
+    if _reviewer(a) == _reviewer(r) and _same_code(fp, a["sha"], sha) and _not_code_of(fp, r["sha"], sha):
         return True  # правило 4 (metis-1249)
     if _reviewer(a) != _reviewer(r) and not returned_lifts(a, r):
         return False
@@ -2648,6 +2649,13 @@ def _same_code(fp, head, sha):
     if not (fh and fs):
         return False
     return fh[0] == fs[0] or _code_of(fp, head) is True
+
+
+def _not_code_of(fp, head, sha):
+    """Код sha точно не код head («вернуть» правила 4): отпечатки посчитаны и разные, и head, слитый с merge-base sha,
+    не даёт sha. Не посчитано — False: сливается, может быть, ровно тот код, что вернули."""
+    fh, fs = fp(head), fp(sha)
+    return bool(fh and fs) and fh[0] != fs[0] and _code_of(fp, head) is False
 
 
 def _held(verdicts, sha, fp):
