@@ -22,13 +22,14 @@ process.cwd(), а его `--cwd` только загружает .env. Кома�
 разрешается как без ключа — `npx -y -p <пакет>@<версия> -c 'command -v <bin>'` из SAFE_CWD с тем же окружением (ни
 node_modules, ни .npmrc папки проекта npx не видит), путь бинарника (realpath) — только внутри $HOME/.npm/_npx; затем
 chdir в папку и exec `node <путь> [аргументы]`: node по абсолютному пути берёт модули рядом со скриптом, не из папки;
-PATH — без относительных звеньев (иначе node нашёлся бы в папке проекта). Данные папки сервер читает сам: shadcn
+node ищется по PATH ещё из SAFE_CWD и не из папки --chdir, а в PATH сервера — только абсолютные звенья. Данные папки сервер читает сам: shadcn
 грузит её .env* (dotenvx) — переменные, в том числе NODE_OPTIONS, задаёт окно; кода из папки он не исполняет (как и с
 прежним `--cwd`). Поэтому --chdir не сочетается с .env-файлом: адреса и заголовки реестров (`${ИМЯ}`) задаёт
 components.json, который пишет окно, и ключи .env ушли бы туда. Имя bin — последняя часть имени пакета (`@scope/x` →
 `x`); пакет с другим именем bin с --chdir не запускается (выход 1)."""
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -96,7 +97,7 @@ def safe_env(base, extra):
     env = {k: v for k, v in base.items() if not DROP_ENV.fullmatch(k)}
     env.update(extra)
     if "PATH" in env:
-        env["PATH"] = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if os.path.isabs(d))
+        env["PATH"] = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if os.path.isabs(d)) or os.defpath
     env["npm_config_cache"] = os.path.join(os.path.abspath(base.get("HOME") or "/"), ".npm")
     return env
 
@@ -135,7 +136,7 @@ def main(argv):
     cut = argv.index("--")
     cmd, got = argv[cut + 1:], {}
     if chdir is not None and cut == 2:
-        print("env_from.py: --chdir без .env-файла — сервер в папке проекта раскрывает ${ИМЯ} из её конфигов "
+        print("env_from.py: --chdir вместе с .env-файлом запрещён — сервер в папке проекта раскрывает ${ИМЯ} из её конфигов "
               "(заголовки реестров shadcn), ключи .env ушли бы на адрес, который задаёт окно", file=sys.stderr)
         return 1
     if cut == 2:
@@ -155,8 +156,12 @@ def main(argv):
         os.chdir(SAFE_CWD)
         if chdir is not None:
             path, rest = npx_bin(cmd, env)
+            node = shutil.which("node", path=env.get("PATH") or os.defpath)  # ещё из SAFE_CWD
+            node = node and os.path.realpath(node)
+            if not node or node == chdir or node.startswith(chdir + "/"):
+                raise OSError(f"node не найден по PATH или лежит в папке --chdir ({node})")
             os.chdir(chdir)
-            cmd = ["node", path, *rest]
+            os.execve(node, [node, path, *rest], env)
         os.execvpe(cmd[0], cmd, env)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"env_from.py: {cmd[0]} не запустился — {e}", file=sys.stderr)

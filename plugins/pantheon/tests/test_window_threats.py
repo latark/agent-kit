@@ -431,7 +431,7 @@ def class2_chdir(tmp):
     cache_pkg = os.path.join(home, ".npm", "_npx", "abc", "node_modules")
     srv = os.path.join(cache_pkg, "fakeui", "cli.js")
     out_mark = os.path.join(tmp, "chdir-server.json")
-    put(srv, "require('fs').writeFileSync(%s, JSON.stringify({cwd: process.cwd(), argv: process.argv.slice(2)}))\n"
+    put(srv, "require('fs').writeFileSync(%s, JSON.stringify({cwd: process.cwd(), argv: process.argv.slice(2), path: process.env.PATH}))\n"
         % json.dumps(out_mark))
     os.makedirs(os.path.join(cache_pkg, ".bin"))
     os.symlink("../fakeui/cli.js", os.path.join(cache_pkg, ".bin", "fakeui"))
@@ -457,7 +457,8 @@ def class2_chdir(tmp):
     good = os.path.join(cache_pkg, ".bin", "fakeui")
     r, got, npx = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3", "mcp", "-x"], good)
     check("класс 2: env_from.py --chdir — сервер в папке проекта с аргументами, пакет разрешён из «/» (npx -p … -c)",
-          r.returncode == 0 and got == {"cwd": os.path.realpath(proj), "argv": ["mcp", "-x"]}
+          r.returncode == 0 and isinstance(got, dict) and got["cwd"] == os.path.realpath(proj)
+          and got["argv"] == ["mcp", "-x"]
           and npx is not None and npx["cwd"] == "/" and npx["args"] == "-y -p fakeui@1.2.3 -c command -v fakeui",
           (r.returncode, got, npx, r.stderr[-400:]))
     r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], outside)
@@ -468,9 +469,14 @@ def class2_chdir(tmp):
     os.chmod(os.path.join(proj, "node_modules", ".bin", "node"), 0o755)
     r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], good,
                     "./node_modules/.bin" + os.pathsep + os.pathsep)
-    check("класс 2: env_from.py --chdir — относительное звено PATH: node из папки проекта не запущен, сервер — настоящий",
+    check("класс 2: env_from.py --chdir — относительное звено PATH: node из папки проекта не запущен, сервер — настоящий, в его PATH только абсолютные звенья",
           r.returncode == 0 and not os.path.exists(planted) and isinstance(got, dict)
-          and got["cwd"] == os.path.realpath(proj), (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
+          and got["cwd"] == os.path.realpath(proj) and all(os.path.isabs(d) for d in got["path"].split(os.pathsep)), (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], good,
+                    os.path.join(proj, "node_modules", ".bin") + os.pathsep)
+    check("класс 2: env_from.py --chdir — node в папке проекта по абсолютному звену PATH: не запущен, выход 1",
+          r.returncode == 1 and not os.path.exists(planted) and got is None and "папке --chdir" in r.stderr,
+          (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
     inj, dotenv = os.path.join(tmp, "chdir-injected"), os.path.join(tmp, "chdir-dotenv")
     put(dotenv, "X=1\n")
     for name, args in (("без точной версии", ["--chdir", proj, "--", "npx", "-y", "fakeui"]),
