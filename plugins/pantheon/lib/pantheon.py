@@ -80,6 +80,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
+  pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
+                                        в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
+                                        песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
   pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
                                         (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
   pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
@@ -2402,6 +2405,11 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # pantheon падает (TLS Go), и очередь merge-queue в STATE окну на запись закрыта. Кто подаёт и на какой repo, судит
 # guard (pantheon-acl) и сам `pantheon merge request` ([merge_repos] metis-pantheon); сливает только плановый проход
 PANTHEON_MERGE_OUT = ["pantheon merge request *", "pantheon merge cancel *"]
+# worktree окна направления (metis-1225, вариант Б владельца 15.11): Claude Code закрывает в песочнице запись в
+# .git/worktrees, а EnterWorktree с name окну закрыт (guard worktree-own) — мимо песочницы только add и remove, затем
+# EnterWorktree с path (тогда коммиты в копии проходят); репозиторий, путь
+# и имена проверяет сама команда (lib/worktree.py), форму строки — guard (worktree-cmd). Мастерской нет: у неё EnterWorktree
+WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -3376,7 +3384,11 @@ PROJECT_MARKS = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/settings.json",
                  ".claude/skills", ".claude/commands", ".claude/agents", ".claude/rules")
 NESTED_SKIP = {"node_modules", "dist", "build", "venv", "target"}
 ADD_DIRS_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
-WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"]  # П9b: worktree окна — git worktree add в Bash
+# П9b после варианта А владельца 15.11 (metis-1225): EnterWorktree окну открыт — Claude Code пускает запись в
+# .git/worktrees/<id> только worktree своей сессии, и без входа окно в копии `pantheon worktree add` не закоммитит
+# (EPERM на index.lock). С name guard отказывает (worktree-own), с path — только в .claude/worktrees своего направления
+# и без настроек, расширяющих окно. ExitWorktree по-прежнему закрыт: между копиями окно ходит EnterWorktree с path
+WORKTREE_TOOLS = ["ExitWorktree"]
 IMPORTS_AGENTS = re.compile(r"^\s*@(\./)?AGENTS\.md\s*$", re.M)
 PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
 
@@ -4481,15 +4493,16 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
                              guard, auto_allow, own_agents=direction)
         if direction:
-            data["sandbox"]["excludedCommands"] += GH_PR_WRITE + PANTHEON_MERGE_OUT
+            data["sandbox"]["excludedCommands"] += GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
             data["permissions"]["additionalDirectories"] = list(ok)
-            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; EnterWorktree и
-            # ExitWorktree закрыты (П9b: вход в worktree чужого репозитория загрузил бы его настройки) — worktree
-            # задачи окно заводит `git worktree add`; пакет направления только сужает (window_extra_apply), мимо
-            # песочницы — только WINDOW_EXCLUDED ядра
+            # схема А (metis-0933): CLAUDE.md папок --add-dir (window_launch) — в контекст окна; ExitWorktree закрыт,
+            # EnterWorktree — только с path в свою копию (П9b, вариант А владельца 15.11: вход в чужой репозиторий
+            # загрузил бы его настройки — это держит guard worktree-own) — worktree задачи окно заводит
+            # `pantheon worktree add` (WORKTREE_OUT, metis-1225) и входит EnterWorktree с path; пакет направления только сужает
+            # (window_extra_apply), мимо песочницы — только WINDOW_EXCLUDED ядра
             data["env"][ADD_DIRS_ENV] = "1"
             deny_list = data["permissions"].setdefault("deny", [])
             deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
@@ -8004,7 +8017,7 @@ def board_owner_sync(T):
                    + "; ".join(f"{tid} ({stale[tid]} ч без правки, owner {tasks[tid][1].get('owner')})"
                                for tid in sorted(stale)[:ALERT_IDS])
                    + (f" и ещё {len(stale) - ALERT_IDS}" if len(stale) > ALERT_IDS else "")
-                   + ". Работа идёт — ветка с номером задачи (git worktree add … <id>-…); нет — вернуть в очередь: "
+                   + ". Работа идёт — ветка с номером задачи (pantheon worktree add <id>-…, затем EnterWorktree с path); нет — вернуть в очередь: "
                    + f"pantheon task set {sorted(stale)[0]} status=todo", "board")
     else:
         clear_once("board-doing-stale")
@@ -9467,6 +9480,7 @@ _attach("rolecmd")
 _attach("sessions")
 _attach("batch")
 _attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
+_attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
 
 
 def main(argv):
@@ -9644,6 +9658,8 @@ def main(argv):
         return config_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
+    if cmd == "worktree":
+        return worktree_cmd(rest)
     if cmd == "supabase":
         return _plugin_map_mod("supabase_migrate").main(rest, STATE)
     if cmd == "plan":

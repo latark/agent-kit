@@ -16,8 +16,8 @@
 - [auto_rules] policy.toml: правила autoMode.allow направления по именам, неизвестное имя — тревога;
 - граница ядра (класс 5): argv запуска окна целиком собирает P.window_launch, флагов запуска (LAUNCH_FLAGS) в lib/ и
   scripts/ вне pantheon.py нет; PANTHEON_PACKS окружения пакеты не подменяет;
-- `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny EnterWorktree и
-  ExitWorktree, window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
+- `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny ExitWorktree
+  (EnterWorktree открыт — вариант А владельца 15.11, name закрывает guard), window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
   не влиты, окно собрано; мастерская — без этого;
 - `pantheon check`: хук и сервер .mcp.json вложенного проекта без строки в пакете — «предупреждение · окно …»; после
   записи в seen и сервера в mcp.json пакета — тишина; настройки папки запуска не предупреждают; код выхода тот же;
@@ -176,8 +176,11 @@ def main():
     perms = win.get("permissions") or {}
     check("env CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1",
           (win.get("env") or {}).get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD") == "1", win.get("env"))
-    check("deny EnterWorktree и ExitWorktree (П9b)",
-          {"EnterWorktree", "ExitWorktree"} <= set(perms.get("deny") or []), perms.get("deny"))
+    # П9b после варианта А владельца 15.11 (metis-1225): EnterWorktree открыт (name закрывает guard worktree-own,
+    # path — только своя копия), ExitWorktree закрыт
+    check("deny ExitWorktree, EnterWorktree не в deny (П9b, вариант А)",
+          "ExitWorktree" in (perms.get("deny") or []) and "EnterWorktree" not in (perms.get("deny") or []),
+          perms.get("deny"))
     check("window.json: ask и deny пакета влиты",
           perms.get("ask") == ["Bash(codesign *)"]
           and "Bash(docker rm *)" in perms.get("deny", []), perms)
@@ -200,8 +203,8 @@ def main():
           and "env.GUARD_OFF" in alerts,
           alerts[-800:])
     solo = json.load(open(os.path.join(state, "settings", "athena-solo.json")))
-    check("окно без пакета: deny EnterWorktree тоже есть, allow пакета — нет",
-          "EnterWorktree" in solo["permissions"]["deny"] and "Bash(uv sync *)" not in solo["permissions"].get("allow", []),
+    check("окно без пакета: deny ExitWorktree тоже есть, EnterWorktree нет, allow пакета — нет",
+          "ExitWorktree" in solo["permissions"]["deny"] and "EnterWorktree" not in solo["permissions"]["deny"] and "Bash(uv sync *)" not in solo["permissions"].get("allow", []),
           solo["permissions"])
     ws = json.load(open(os.path.join(state, "settings", "workshop.json")))
     check("мастерская — без переменной add-dir и без deny EnterWorktree",
