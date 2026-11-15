@@ -155,11 +155,9 @@ def _accept_unmarked(repo, pr, crit, M):
     for got in filter(None, map(T.parse_criterion, crit)):
         if got[3] in T.CRITERION_OK:
             have.setdefault(got[0], {})[got[1]] = got[2]
-    try:
-        dirs = P.autoclose_repo_dirs().get(repo.lower())
-    except Exception:  # noqa: BLE001 — policy.toml не прочитан: строже, задачи любого направления
-        dirs = None
-    need = P.criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", dirs, loaded)
+    # направления — тем же criteria_dirs, что у merge request (metis-1266: одно приведение регистра ключей policy.toml)
+    need = P.criteria_required(repo, view.get("headRefName") or "", view.get("body") or "", P.criteria_dirs(repo, M),
+                               loaded)
     miss = P.criteria_unmarked(need, have)
     return miss and (f"пункты «Готово, когда» без отметки: {miss}. Дай --{CRITERIA} да|проба на каждый (строки — "
                      f"`pantheon review criteria <id>`) или «вернуть» с «нет»")
@@ -794,7 +792,7 @@ def review_cmd(rest):
             print("pantheon review status: записей нет")
         # строки про Opus — только там, где бывает ядро: репозиторий metis-pantheon в [merge_repos] или неизвестный
         # (строже); у репозитория продукта шлюз считает «принять» на любой модели, и эти строки только путают
-        dirs = P.autoclose_repo_dirs().get(args[0].lower()) if args else None
+        dirs = P.criteria_dirs(args[0], P.merge_mod()) if args else None
         core_repo = not dirs or "metis-pantheon" in dirs
         for r in recs:
             by = r.get("by") if isinstance(r.get("by"), dict) else {}

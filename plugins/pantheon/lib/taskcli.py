@@ -6,6 +6,7 @@ pantheon._attach до выполнения этого файла, имена и�
 """
 import json
 import os
+import re
 import sys
 
 __all__ = [
@@ -70,8 +71,38 @@ def task_flag_error(sub, args, value_flags, bool_flags=()):
     return None
 
 
-def task_body_arg(sub, opt):
-    """Текст из --text, --body, --body-file (в этом порядке, через пустую строку) → (текст или None, ошибка или None)."""
+# metis-1266: пункт раздела без чекбокса — «1. …», «2) …», «- …», «* …», или номер с чекбоксом «1. [x] …»;
+# done_criteria такой не видит, argus не отметит
+_DW_LOOSE = re.compile(r"^(\s*)(?:\d{1,3}[.)]\s+(\[[ xXхХ]\])|\d{1,3}[.)]|[-*])\s+(?!\[[ xXхХ]\])(\S.*?)\s*$")
+
+
+def checklist_done_when(T, text):
+    """Раздел «Готово, когда» в новом тексте задачи (`task new`, `task set --body`; T — модуль tasks): пункты
+    нумерованным или простым списком без чекбокса → «- [ ] …», номер с чекбоксом «1. [x] …» → «- [x] …», строка с отступом после такого пункта — его продолжение
+    (склеивается через пробел). Раздел начинается и кончается, как у T.done_criteria: строкой «Готово, когда» и
+    заголовком или строкой не из списка. → (текст, сколько пунктов приведено). Старые карточки не переразбираются:
+    зовут только с новым текстом (metis-1266)."""
+    out, on, n, last = [], False, 0, None
+    for ln in (text or "").split("\n"):
+        m = _DW_LOOSE.match(ln) if on and not T._DW_ITEM.match(ln) else None
+        if not on:
+            on = bool(T._DW_LINE.match(ln))
+        elif m:
+            ln, last, n = f"{m.group(1)}- {m.group(2) or '[ ]'} {m.group(3)}", len(out), n + 1
+        elif T._DW_ITEM.match(ln):
+            last = None
+        elif last is not None and ln.strip() and ln[:1].isspace():
+            out[last] += " " + ln.strip()
+            continue
+        elif ln.strip():
+            on, last = False, None
+        out.append(ln)
+    return "\n".join(out), n
+
+
+def task_body_arg(sub, opt, T):
+    """Текст из --text, --body, --body-file (в этом порядке, через пустую строку) → (текст или None, ошибка или None).
+    Пункты «Готово, когда» без чекбокса — приведены к «- [ ] …» (checklist_done_when) со строкой об этом в stderr."""
     parts = [opt("--text"), opt("--body")]
     bf = opt("--body-file")
     if bf:
@@ -81,7 +112,14 @@ def task_body_arg(sub, opt):
         except (OSError, UnicodeDecodeError) as e:
             return None, f"pantheon task {sub}: --body-file {bf} не читается ({getattr(e, 'strerror', None) or e})"
     parts = [x for x in parts if x and x.strip()]
-    return ("\n\n".join(x.strip() for x in parts) if parts else None), None
+    if not parts:
+        return None, None
+    # metis-1266: пункты «Готово, когда» списком без чекбокса argus не отметил бы — приводим к «- [ ] …» и говорим
+    text, n = checklist_done_when(T, "\n\n".join(x.strip() for x in parts))
+    if n:
+        print(f"pantheon task {sub}: пунктов «Готово, когда» без чекбокса — {n}, записаны как «- [ ] …»: argus "
+              "отмечает и autoclose закрывает только такие", file=sys.stderr)
+    return text, None
 
 
 def _read_or_empty(p):
@@ -367,7 +405,7 @@ def _task_cmd(rest):
             if err:
                 print(err, file=sys.stderr)
                 return 2
-            body_text, err = task_body_arg("new", opt)
+            body_text, err = task_body_arg("new", opt, T)
             if err:
                 print(err, file=sys.stderr)
                 return 2
@@ -431,7 +469,7 @@ def _task_cmd(rest):
                     j += 2
                 else:
                     j += 1
-            new_body, err = task_body_arg("set", opt)
+            new_body, err = task_body_arg("set", opt, T)
             if err:
                 print(err, file=sys.stderr)
                 return 2
