@@ -77,17 +77,14 @@ def norm(q):
 CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
 NAME = re.compile(r"[A-Za-z0-9_.:-]{1,60}")
 # allow — только то, что выглядит ровно так, как выполнится (проверки безопасности 15.11: невидимое, двойники
-# латиницы и знаков оболочки, смена направления). Вне кавычек — только печатный ASCII. Внутри '…' и "…" ещё кириллица
-# (сообщения коммитов, заметки): только буквы Lu/Ll, NFKC не меняет, направление L. Слово с кириллицей не смешано с
-# латиницей и не сплошь из двойников латиницы («аррlе», «сurl»). Остальное — «показана не целиком», обычный запрос.
+# allow — только то, что выглядит ровно так, как выполнится (проверки безопасности 15.11: невидимое, двойники
+# латиницы и знаков оболочки, смена направления). Вне кавычек — только печатный ASCII. Внутри '…' и "…" ещё русские
+# буквы А–я и Ёё (сообщения коммитов, заметки), и только как слова текста: токен (между пробелами) с ними — русские
+# буквы и дефис, знаки препинания лишь по краям. Значит, ни адреса, ни пути, ни имени с русской буквой не выйдет:
+# «аррlе.com», «а.ру/х», «ѕh» — нет (латиница, цифра, «.», «/», «@» внутри). Остальное — «показана не целиком».
 ASCII = re.compile(r"[\x20-\x7e]")
-TWINS = frozenset("аеорсухкіјѕӏһԁԛԝүАВЕКМНОРСТХІЈЅԚԜҮ")
-
-
-def _cyr_ok(c):
-    import unicodedata as u
-    return (u.category(c) in ("Lu", "Ll") and "CYRILLIC" in u.name(c, "") and u.normalize("NFKC", c) == c
-            and u.bidirectional(c) == "L")
+RU = frozenset("абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+WORD_RU = re.compile(r"[(\"'«]*[а-яА-ЯёЁ]+(?:-[а-яА-ЯёЁ]+)*[.,:;!?)\"'»]*")
 
 
 def shown(cmd):
@@ -95,7 +92,7 @@ def shown(cmd):
     q = None
     esc = False
     for c in cmd:
-        if not ASCII.fullmatch(c) and not (q and _cyr_ok(c)):
+        if not ASCII.fullmatch(c) and not (q and c in RU):
             return False
         if esc:
             esc = False
@@ -107,10 +104,7 @@ def shown(cmd):
             q = None
     if q is not None or esc:
         return False
-    for w in re.findall(r"[^\W\d_]+", cmd):
-        if any(not c.isascii() for c in w) and (any(c.isascii() for c in w) or all(c in TWINS for c in w)):
-            return False
-    return True
+    return all(WORD_RU.fullmatch(t) for t in cmd.split(" ") if any(c in RU for c in t))
 # поля Bash, которые не меняют того, что выполнится; флаги вне песочницы и в фоне — пометкой в вопросе
 BASH_KEYS = {"command", "description", "timeout", "dangerouslyDisableSandbox", "run_in_background"}
 
