@@ -111,7 +111,7 @@ def shown(cmd):
             continue
         if q:
             cur.append(c)
-    if q is not None or esc:
+    if q is not None or esc or ("$'" in cmd and any(c in RU for c in cmd)):  # $'…' bash разбирает иначе
         return False
     if not all(WORD_RU.fullmatch(t) for t in cmd.split(" ") if any(c in RU for c in t)):
         return False
@@ -293,6 +293,11 @@ def ask(raw):
         return 0, None
     t0 = time.time()
     _prune(t0)
+    # флаг tg-taint сессии (guard: читала сырой Telegram) — вопрос окна несёт его предупреждение, а во входе
+    # PermissionRequest причины нет: через Зевса владелец разрешил бы, не видя её. Молчим — обычный запрос в окне
+    sid0 = str(ev.get("session_id") or "")
+    if sid0 and os.path.lexists(os.path.join(os.environ.get("HOME") or "", ".local", "state", "tg-taint", sid0)):
+        return 0, None
     rid = "perm-" + os.urandom(4).hex()
     while os.path.exists(req_path(rid)):
         rid = "perm-" + os.urandom(4).hex()

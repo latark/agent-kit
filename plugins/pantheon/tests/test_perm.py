@@ -270,6 +270,7 @@ NOT_EXACT = {
     "кириллица вне кавычек": bash("echo привет"),
     "русское слово из одних двойников (имя ветки ≈ top)": bash("git push origin 'тор'"),
     "склейка кавычек из двойников": bash("git push origin 'т''ор'"),
+    "$'…' рядом с русскими буквами": bash("echo $'\\''; git push origin тор #'"),
     "русские буквы в адресе": bash("curl 'https://\u0430\u0440\u0435.\u0440\u0443/x'"),
     "двойник знака оболочки (；)": bash("echo 'a\uff1bb'"),
     "незакрытая кавычка": bash("echo 'выпуск"),
@@ -406,6 +407,16 @@ def hq_silent(m):
     return not glob.glob(os.path.join(env["PANTHEON_STATE"], "perm", "*"))
 
 
+def taint_silent(m):
+    env = place()
+    d = os.path.join(env["HOME"], ".local", "state", "tg-taint")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, EV["session_id"]), "w") as fh:
+        fh.write('{"source": "test"}')
+    rc, dec, _s, _e = finish(start(env, run_py=m))
+    return rc == 0 and dec is None and not glob.glob(os.path.join(env["PANTHEON_STATE"], "perm", "*"))
+
+
 def job_silent(m):
     env = dict(place(), PANTHEON_WINDOW="job-clio")
     finish(start(env, run_py=m))
@@ -413,6 +424,7 @@ def job_silent(m):
 
 
 check("задача расписания (PANTHEON_WINDOW=job-…, claude -p) — молчит, заявки нет", job_silent(RUN_PY))
+check("флаг tg-taint сессии — молчит, заявки нет (предупреждение видно только в окне)", taint_silent(RUN_PY))
 r = scenario(win(ago=30))
 check("подделка: ответ за 30 с до заявки — не ответ", silent(r), r[:4])
 
@@ -457,6 +469,10 @@ MUTANTS = (
          "неразрывный пробел", "слово из одних двойников латиницы", "кириллица вне кавычек",
          "двойник знака оболочки (；)", "незакрытая кавычка", "русские буквы в адресе",
          "русское слово из одних двойников (имя ветки ≈ top)", "склейка кавычек из двойников"))),
+    ("""or ("$'" in cmd and any(c in RU for c in cmd))""", "",
+     "$'…' рядом с русскими буквами", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[
+         "$'…' рядом с русскими буквами"]))),
+    ("if sid0 and os.path.lexists(", "if False and os.path.lexists(", "флаг tg-taint", taint_silent),
     ("_text(cmd, len(cmd)) == cmd", "True",
      "секрет скрыт в показе", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT["секрет скрыт в показе"]))),
     ('v = CTRL.sub(" ", str(v or ""))', 'v = str(v or "")',
