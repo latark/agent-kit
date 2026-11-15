@@ -481,14 +481,33 @@ code, out = cli(zeus, "answer", r[3]["id"])
 check("perm answer по снятой (владелец ответил и Зевсу) — код 0, «уже решено в окне», ничего не передано",
       code == 0 and "уже решено в окне" in out and "разрешить" not in out.lower() and "отказ" not in out, out)
 def kept(r):
-    """Снята, но очередь Зевса не пуста (передачу ещё не забрали): «снят» не пишем, текст передачи цел."""
+    """Снята, очередь Зевса не пуста (передачу ещё не забрали): «снят» дописан за ней, текст передачи цел."""
     body = dropped(r[4]) if r[3] else ""
-    return gone(r) and r[3]["id"] in body and f"{r[3]['id']} снят]" not in body
+    return (gone(r) and f"запрос разрешения {r[3]['id']}]" in body and f"{r[3]['id']} снят]" in body
+            and body.index(f"запрос разрешения {r[3]['id']}]") < body.index(f"{r[3]['id']} снят]"))
 
 
 r = in_window(taken=False)
-check("очередь push Зевса занята передачей — «снят» не пишется, чужой текст цел (push_text на main — O_TRUNC)",
+check("очередь push Зевса занята передачей — «снят» дописан за ней, её текст цел (очередь push, metis-1253)",
       kept(r), r[:4] + (r[6], dropped(r[4])))
+
+
+def relay_failed(run_py=RUN_PY):
+    """respawn Зевса не вышел (код 1), в очереди его push уже чужая передача: своя снята, чужая цела, заявка ждёт."""
+    env = place([ZEUS])
+    env["FAKE_RC"] = "1"
+    os.makedirs(os.path.join(env["PANTHEON_STATE"], "push"), exist_ok=True)
+    with open(os.path.join(env["PANTHEON_STATE"], "push", ZEUS["sessionId"] + ".txt"), "w", encoding="utf-8") as fh:
+        fh.write("[Пантеон: чужая передача] ждёт старта Зевса")
+    pt = start(env, run_py=run_py)
+    req = req_of(env)
+    rc, dec, _s, _e = finish(pt)
+    body = dropped(env)
+    return (bool(req) and rc == 0 and dec is None and "чужая передача" in body
+            and f"запрос разрешения {req['id']}]" not in body and "respawn abcd1234" in open(env["FAKE_LOG"]).read())
+
+
+check("respawn Зевса не вышел — своя передача снята из очереди, чужая цела (push_drop, metis-1253)", relay_failed())
 r = in_window(held=True)
 check("замок start-zeus занят — «снят» не пишется (очередь пишут только под замком), заявка снята",
       gone(r) and f"{r[3]['id']} снят]" not in dropped(r[4]), r[:4] + (r[6], dropped(r[4])))
@@ -634,10 +653,10 @@ MUTANTS = (
     ('if req.get("status") == "window":\n        print(f"заявка {rid}: {WINDOW} — ничего',
      'if False:\n        print(f"заявка {rid}: {WINDOW} — ничего',
      "perm answer по снятой", lambda m: window_says(m, "answer")),
-    ('ok = bool(z and not os.path.exists(p) and P.push_text(z["sessionId"], drop_text(req)))', "ok = False",
+    ('ok = bool(z and P.push_text(z["sessionId"], drop_text(req)))', "ok = False",
      "«снят» Зевсу", lambda m: (lambda r: bool(r[3]) and f"{r[3]['id']} снят]" in dropped(r[4]))(in_window(run_py=m))),
-    ("not os.path.exists(p) and ", "",
-     "занятая очередь Зевса не затирается", lambda m: kept(in_window(taken=False, run_py=m))),
+    ("P.push_drop(pushed, text)  #", "os.remove(pushed)  #",
+     "respawn не вышел — снята только своя передача", lambda m: relay_failed(run_py=m)),
     ("z = _zeus(W, P.agents_all()) if got else None", "z = _zeus(W, P.agents_all())",
      "замок start-zeus занят — «снят» не пишется", lambda m: (lambda r: gone(r) and f"{r[3]['id']} снят]" not in dropped(
          r[4]))(in_window(held=True, run_py=m))),
