@@ -73,11 +73,14 @@ def test_holders_registry_and_live_copies():
     # respawn не вышел (сессию удалили из списка) — --resume с именем и окном
     e.agents([bg("zz-dir", "stopped", "dddddddd-2", started=T0 + 1)])
     json.dump({}, open(e.st("autostart.json"), "w"))
+    early = "[Пантеон: поручение от tick] ранее"  # metis-1253: ждавшая в очереди передача неудачным respawn не снимается
+    open(e.st("push", "dddddddd-2.txt"), "w", encoding="utf-8").write(early)
     e.run("watch", t=T0 + 99999, extra={"FAKE_RESPAWN_RC": "1"})
     res = [c for c in e.calls() if "--resume" in c]
     check(res and res[-1][res[-1].index("--name") + 1] == "zz-dir" and "--settings" in res[-1],
           f"resume без --name/--settings: {res}")
-    check(not os.path.exists(e.st("push", "dddddddd-2.txt")), "push-файл остался после неудачного respawn")
+    left = open(e.st("push", "dddddddd-2.txt"), encoding="utf-8").read() if os.path.exists(e.st("push", "dddddddd-2.txt")) else ""
+    check(left.strip() == early, f"неудачный respawn: своя передача осталась или снята чужая: {left!r}")
 
 
 def test_resume_or_start_fresh():

@@ -108,6 +108,9 @@ def main():
     fs = hq1["sandbox"]["filesystem"]
     check("сборка прошла, hq.json собран", r.returncode == 0 and fs["denyRead"])
     sa1 = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
+    check("metis-1253: окно вопросов Зевса гаснет по простою 10 мин, у окон направлений настройки нет",
+          hq1.get("askUserQuestionTimeout") == "10m" and "askUserQuestionTimeout" not in sa1,
+          (hq1.get("askUserQuestionTimeout"), sa1.get("askUserQuestionTimeout")))
     check("имя с символом шаблона не закрыто, а названо в выводе сборки; битого шаблона в denyWrite нет",
           "[r" in r.stderr and not any("[" in x for x in sa1["sandbox"]["filesystem"]["denyWrite"]))
 

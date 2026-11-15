@@ -2577,6 +2577,7 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
 HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "charon", "Explore"]
+HQ_ASK_TIMEOUT = "10m"  # askUserQuestionTimeout окна Зевса (metis-1253): Claude Code берёт 60s, 5m, 10m или never
 # dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
 # «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor. palamedes — исполнитель без кода
 # (metis-0224): тексты, юридический разбор, синтез; веба и Bash у него нет, пишет только свой черновик.
@@ -4732,6 +4733,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
+    # metis-1253: окно вопросов Зевса без ввода 10 мин гаснет само (настройка Claude Code, по умолчанию не гаснет):
+    # ход идёт дальше, почта сессий доходит. Ответ по простою — не ответ: ctx.py answer его в owner-log не пишет
+    hq["askUserQuestionTimeout"] = HQ_ASK_TIMEOUT
     if pmap:
         PLUGIN_MAP.window_apply(hq, pmap, "hq", guard=guard)
     write_window(out_dir, "hq", hq, [root])
@@ -5106,18 +5110,64 @@ def run_settings(name, role, window, origin, extra_env=None):
 COPY_NOTE = re.compile(r"started a copy as ([0-9a-f]{8})")
 
 
+PUSH_ONE, PUSH_TOTAL, PUSH_SEP = 4000, 8000, "\n\n"  # одна передача, вся очередь (как PUSH_MAX в ctx.py), разделитель
+
+
+@contextlib.contextmanager
+def _push_lock():
+    """Замок очереди push/ — тот же файл push/.lock берёт хук ctx.py push, пока забирает очередь (metis-1253)."""
+    with open(os.open(path("push", ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        yield
+
+
+def _push_write(p, text):
+    fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(p + ".tmp", p)
+
+
 def push_text(session_id, text):
     """Текст, который хук ctx.py push отдаст сессии при следующем старте её процесса (SessionStart + asyncRewake):
-    `claude respawn` сам хода не начинает, а команды «сказать фоновой сессии» у Claude Code нет (проверено 15.10)."""
+    `claude respawn` сам хода не начинает, а команды «сказать фоновой сессии» у Claude Code нет (проверено 15.10).
+    Очередь (metis-1253): передача дописывается к ещё не забранным, хук отдаёт их разом; старше 30 мин хук не отдаёт —
+    их и не держим. Вся очередь длиннее PUSH_TOTAL — None: передача не записана, вызывающий повторит или пойдёт
+    запасным путём, а прежние не затираются. → путь очереди или None."""
     if not re.fullmatch(r"[0-9a-f-]{8,64}", str(session_id or "")) or not str(text).startswith(START_MARK):
         return None
     os.makedirs(path("push"), mode=0o700, exist_ok=True)
-    p = path("push", session_id + ".txt")
-    fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(str(text)[:4000])
-    os.replace(p + ".tmp", p)
+    p, entry = path("push", session_id + ".txt"), str(text)[:PUSH_ONE].strip()
+    with _push_lock():
+        old = ""
+        with contextlib.suppress(OSError):
+            if time.time() - os.path.getmtime(p) <= 1800:  # PUSH_MAX_AGE хука
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    old = fh.read().strip()
+        new = old + PUSH_SEP + entry if old else entry
+        if len(new) > PUSH_TOTAL:
+            return None
+        _push_write(p, new)
     return p
+
+
+def push_drop(p, text):
+    """Снять свою передачу из очереди p (respawn не вышел — текст уйдёт запасным путём или повтором), чужие остаются.
+    Хук уже забрал очередь — снимать нечего."""
+    entry = str(text)[:PUSH_ONE].strip()
+    with contextlib.suppress(OSError), _push_lock():  # сбой замка — как прежний os.remove без файла
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                cur = fh.read().strip()
+        except OSError:
+            return
+        if cur == entry:
+            os.remove(p)
+            return
+        for part in (PUSH_SEP + entry, entry + PUSH_SEP):
+            if part in cur:
+                _push_write(p, cur.replace(part, "", 1))
+                return
 
 
 # Код отказа «нет окна»: сессию направления или мастерской без файла окна не поднимаем ни respawn, ни --resume, ни
@@ -5196,8 +5246,7 @@ def _resume_session(name, a, text, origin):
         if r.returncode == 0:
             rm_previous(name, "respawn", keep={a["id"]}, wait=True)
             return 0, None
-        with contextlib.suppress(OSError):
-            os.remove(pushed)
+        push_drop(pushed, text)  # metis-1253: только своя передача, ждущие в очереди остаются
     # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]

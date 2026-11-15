@@ -87,7 +87,9 @@
   ctx.py maint-pre   PreToolUse там же: сохранившаяся сессия (кроме Зевса) новых шагов не делает — пропуск только
                      SendMessage, `pantheon saved` и `pantheon restart --status`.
   ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
-                     (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
+                     (кладёт pantheon; один раз, не старше 30 мин, ≤ 8000 знаков, только с пометкой «[Пантеон:»).
+                     Файл — очередь (metis-1253): передачи до старта дописываются, а не затирают друг друга, и
+                     приходят разом; забирает его хук под блокировкой push/.lock, той же, что у записи pantheon.
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
                      сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист. Реплики
                      в конце, на которые ответ был только текстом, не в счёт; если работа шла без вашего сообщения
@@ -2137,7 +2139,7 @@ def cmd_rewake(ev):
 
 PUSH = os.path.join(STATE, "push")   # <sessionId>.txt кладёт pantheon перед `claude respawn <id>`
 PUSH_MAX_AGE = 1800                  # старше — не доставляется: перезапуск, ради которого его клали, давно прошёл
-PUSH_MAX = 4000
+PUSH_MAX = 8000                      # вся очередь передач (PUSH_TOTAL в lib/pantheon.py), одна — до 4000
 PUSH_MARK = "[Пантеон:"              # с этой пометкой owner-log не примет текст за слова владельца (NOT_OWNER)
 
 
@@ -2149,8 +2151,10 @@ def cmd_push(ev):
         return 0
     src = os.path.join(PUSH, sid + ".txt")
     taken = "%s.taken.%d" % (src, os.getpid())
-    try:
-        os.rename(src, taken)
+    try:  # замок очереди (metis-1253): pantheon дописывает передачу под ним — забранная на полпути не потеряется
+        with open(os.open(os.path.join(PUSH, ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            os.rename(src, taken)
     except OSError:
         return 0
     try:

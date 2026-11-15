@@ -558,6 +558,55 @@ def test_relay_once_per_item_0277():
     check(len(_relayed(e)) == 3, f"0277: вернулась в blocked — передачи нет: {e.calls()}")
 
 
+
+def test_relay_zeus_busy_retry_1253():
+    """metis-1253: Зевс занят ходом или стоит на окне вопросов (state blocked) — пункт не отправлен: relay.json не
+    пишется, тревога в alerts.md есть, а следующий проход (раньше RELAY_EVERY) отдаёт его, как только Зевс свободен."""
+    for label, upd in (("занят ходом", dict(state="working", status="busy")),
+                       ("окно вопросов", dict(state="blocked", waitingFor="AskUserQuestion"))):
+        e = _blocked_env(None, waiting="Bash: one")
+        z = bg("zeus", "done", "2e057e05-1", pid=32)
+        z.update(upd)
+        e.agents([bg("coord-x", "blocked", BLK_SID, pid=31) | {"waitingFor": "Bash: one"}, z])
+        e.run("watch", t=T0)
+        check(not _relayed(e) and not os.path.exists(e.st("relay.json")) and "coord-x (b10c0001) ждёт вас" in e.alerts(),
+              f"1253 {label}: передано, записано как отправленное или нет тревоги: {e.calls()} {e.alerts()[-300:]}")
+        e.agents([bg("coord-x", "blocked", BLK_SID, pid=31) | {"waitingFor": "Bash: one"},
+                  bg("zeus", "done", "2e057e05-1", pid=32)])
+        e.run("watch", t=T0 + 60)
+        check(len(_relayed(e)) == 1 and "Bash: one" in _pushed(e),
+              f"1253 {label}: Зевс освободился — пункт не передан следующим проходом: {e.calls()}")
+
+
+def test_push_queue_1253():
+    """metis-1253: передачи до старта Зевса копятся очередью (вторая не затирает первую); неудачный respawn снимает
+    только свою передачу; очередь полна — передачи нет, relay.json не пишется, тревога остаётся."""
+    e = _blocked_env(None, waiting="Bash: one")
+    e.run("watch", t=T0)
+    b = bg("coord-x", "blocked", BLK_SID, pid=31) | {"waitingFor": "Bash: other"}
+    e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1300)  # хук push ещё не забрал первую
+    text = _pushed(e)
+    check(len(_relayed(e)) == 2 and "Bash: one" in text and "Bash: other" in text and text.count("[Пантеон:") == 2,
+          f"1253: вторая передача затёрла первую: {text!r}")
+    # respawn не вышел — своя передача снята, ждавшая раньше осталась
+    e = _blocked_env(None, waiting="Bash: one")
+    os.makedirs(e.st("push"), exist_ok=True)
+    early = "[Пантеон: поручение от tick] ранее"
+    open(e.st("push", "2e057e05-1.txt"), "w", encoding="utf-8").write(early)
+    e.run("watch", t=T0, extra={"FAKE_RESPAWN_RC": "1"})
+    check(len(_relayed(e)) == 1 and _pushed(e).strip() == early,
+          f"1253: неудачный respawn снял чужую передачу или оставил свою: {_pushed(e)!r}")
+    # очередь полна — передачи нет
+    e = _blocked_env(None, waiting="Bash: one")
+    os.makedirs(e.st("push"), exist_ok=True)
+    full = "[Пантеон: x] " + "я" * 7900
+    open(e.st("push", "2e057e05-1.txt"), "w", encoding="utf-8").write(full)
+    e.run("watch", t=T0)
+    check(not _relayed(e) and not os.path.exists(e.st("relay.json")) and _pushed(e) == full
+          and "coord-x (b10c0001) ждёт вас" in e.alerts(),
+          f"1253: полная очередь — передача, запись или потеря: {e.calls()} {len(_pushed(e))}")
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)

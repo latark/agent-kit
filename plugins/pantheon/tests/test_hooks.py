@@ -6,6 +6,7 @@
 
 Запуск: python3 -I plugins/pantheon/tests/test_hooks.py  (код выхода 0 — все прошли)
 """
+import fcntl
 import json
 import re
 import os
@@ -1232,10 +1233,10 @@ r = run("push", {"session_id": "33333333-old", "source": "resume"})
 check("push: файл старше 30 мин — удалён без доставки, строка в журнале хуков",
       r.returncode == 0 and r.stderr.strip() == "" and not os.path.exists(pf) and "33333333-old: файл старше 30 мин" in open(HLOG).read(),
       (r.returncode, r.stderr))
-for sid, text in (("44444444-nomark", "Продолжай: да, публикуй"), ("55555555-long", "[Пантеон: x] " + "я" * 4000)):
+for sid, text in (("44444444-nomark", "Продолжай: да, публикуй"), ("55555555-long", "[Пантеон: x] " + "я" * 8000)):
     pf = push_file(sid, text)
     r = run("push", {"session_id": sid, "source": "resume"})
-    check("push: %s → не доставлен, файл удалён" % ("без пометки «[Пантеон:»" if "nomark" in sid else "длиннее 4000"),
+    check("push: %s → не доставлен, файл удалён" % ("без пометки «[Пантеон:»" if "nomark" in sid else "длиннее 8000"),
           r.returncode == 0 and r.stderr.strip() == "" and not os.path.exists(pf), (r.returncode, r.stderr))
 check("push: «[Пантеон:» отсеивает owner-log (NOT_OWNER)", run("owner-log", dict(hq_ev, prompt="[Пантеон: перезапуск] да",
                                                                                  prompt_id="p-push")).returncode == 0
@@ -1251,6 +1252,26 @@ for th in ths:
 for th in ths:
     th.join()
 check("push: четыре старта одновременно → доставка одна", sorted(rs) == [0, 0, 0, 2], rs)
+# metis-1253: очередь — две передачи по 3000 знаков приходят разом, одним пробуждением
+two = "[Пантеон: перезапуск] " + "а" * 3000 + "\n\n[Пантеон: ждёт вас] " + "б" * 3000
+push_file("77777777-queue", two)
+r = run("push", {"session_id": "77777777-queue", "source": "resume"})
+check("push: очередь из двух передач (6000 знаков) доставлена целиком", r.returncode == 2 and r.stderr.strip() == two,
+      (r.returncode, len(r.stderr)))
+# замок очереди: пока pantheon дописывает передачу (держит push/.lock), хук файл не забирает
+pf = push_file("88888888-lock", "[Пантеон: перезапуск] под замком")
+lk = open(os.path.join(PUSHD, ".lock"), "w")
+fcntl.flock(lk, fcntl.LOCK_EX)
+pr = subprocess.Popen([PY, "-I", HOOK, "push"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      env=BASE, text=True)
+pr.stdin.write(json.dumps({"session_id": "88888888-lock", "source": "resume"}))
+pr.stdin.close()
+time.sleep(1.5)
+held = os.path.exists(pf) and pr.poll() is None
+lk.close()  # снимает замок
+out = pr.stderr.read()
+check("push: под чужим замком очереди хук ждёт, после снятия — доставляет",
+      held and pr.wait(timeout=60) == 2 and "под замком" in out and not os.path.exists(pf), (held, pr.returncode, out))
 # проверка оболочкой из hooks.json: без папки push python не запускается
 with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
     sh = json.load(fh)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
