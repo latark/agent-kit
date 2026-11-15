@@ -455,6 +455,65 @@ def test_wait_second_episode_repeat_notifies_1122():
     check(e.sent().count("coord-x ждёт вас 31 мин") == 2, f"1122: второе ожидание без повтора: {e.sent()!r}")
 
 
+def test_wait_new_request_new_card_1183():
+    """metis-1183: окно не выходило из ожидания между проходами, но запрос другой — прежняя карточка закрыта, новая
+    через 5 мин нового ожидания, повтор через 30 мин уже от нового запроса (было: 20 ч тишины)."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    first = _wait_cards(e)
+    check(len(first) == 1, f"1183: нет первой карточки: {first}")
+    tp = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID + ".jsonl")
+    with open(tp, "w") as fh:
+        fh.write(json.dumps(_tool("Bash", "tu2", {"command": "grep x y"}, T0 + 3000), ensure_ascii=False) + "\n")
+    e.run("watch", t=T0 + 3060)
+    cards = _wait_cards(e)
+    check([c.get("status") for c in cards] == ["done"], f"1183: прежняя карточка не закрыта или новая раньше 5 мин: {cards}")
+    e.run("watch", t=T0 + 3060 + 360)
+    cards = _wait_cards(e)
+    check(sorted(c.get("status") for c in cards) == ["done", "waiting"]
+          and any("Bash → grep x y" in str(c.get("why")) for c in cards), f"1183: нет новой карточки: {cards}")
+    e.run("watch", t=T0 + 3060 + 1860)
+    check("окно coord-x ждёт вас 31 мин: Bash → grep x y" in e.alerts(), f"1183: нет повтора нового запроса: {e.alerts()}")
+
+
+def test_wait_hourly_reminder_1183():
+    """metis-1183: пока окно ждёт — после повтора через 30 мин напоминание каждый час строкой Зевсу, а не одно;
+    macOS — только на первом повторе (ревью argus #492, Б1: часовые съели бы дневной бюджет уведомлений)."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    e.run("watch", t=T0 + 1860 + 1800)
+    check(e.alerts().count("окно coord-x ждёт вас") == 1, f"1183: напоминание раньше часа: {e.alerts()}")
+    e.run("watch", t=T0 + 1860 + 3660)
+    check(e.alerts().count("окно coord-x ждёт вас") == 2 and "ждёт вас 92 мин" in e.alerts(),
+          f"1183: нет часового напоминания: {e.alerts()}")
+    sent = e.sent()
+    check("ждёт вас 31 мин" in sent and "ждёт вас 92 мин" not in sent,
+          f"1183: macOS не на первом повторе или на часовом: {sent!r}")
+
+
+def test_wait_unknown_keeps_known_1183():
+    """metis-1183, ревью argus #492 Д1: проход с «причиной неизвестна» (журнал не прочитан) не перетирает известный
+    запрос — следующий другой запрос всё равно новое ожидание."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    tp = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID + ".jsonl")
+    os.remove(tp)
+    e.run("watch", t=T0 + 1920)
+    check([c.get("status") for c in _wait_cards(e)] == ["waiting"], f"1183: неизвестная причина закрыла карточку: "
+          f"{_wait_cards(e)}")
+    with open(tp, "w") as fh:
+        fh.write(json.dumps(_tool("Bash", "tu2", {"command": "grep x y"}, T0 + 1950), ensure_ascii=False) + "\n")
+    e.run("watch", t=T0 + 1980)
+    check([c.get("status") for c in _wait_cards(e)] == ["done"], f"1183: другой запрос после неизвестной причины — не "
+          f"новое ожидание: {_wait_cards(e)}")
+
+
 def P_json(p):
     return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
 
@@ -513,26 +572,30 @@ def test_relay_maintenance_paused_0277():
     _relay_stops(paused, "пауза планировщика")
 
 
-def test_relay_limits_0277():
-    """metis-0277: пятичасовой, недельный лимит и потолок владельца — передачи нет; потолок выше расхода пускает."""
-    _relay_stops(lambda e: None, "пятичасовой лимит", extra={"PANTHEON_FAKE_LIMIT": "90"})
-
+def test_relay_limits_do_not_stop_1183():
+    """metis-1183 (слово владельца 15.11): пятичасовой, недельный лимит и потолок владельца передачу Зевсу не держат —
+    запрос разрешения не должен стоять молча (прежде metis-0277 их держал, окно стояло сутки)."""
     def week(e):
         e.week_pct = 90.0
-    _relay_stops(week, "недельный лимит (красная зона)")
 
-    day = time.strftime("%Y-%m-%d", time.localtime(T0))
+    def cap(e):
+        day = time.strftime("%Y-%m-%d", time.localtime(T0))
+        with open(os.path.join(e.pantheon, "schedule.toml"), "a") as fh:
+            fh.write(f'\n[limits.owner_cap]\ndate = "{day}"\npct = 5\ndecision = "t"\n')
+    for what, setup, extra in (("пятичасовой", lambda e: None, {"PANTHEON_FAKE_LIMIT": "90"}),
+                               ("недельный", week, None), ("потолок владельца", cap, None)):
+        e = _two_blocked_env()
+        setup(e)
+        e.run("watch", t=T0, extra=extra)
+        check(len(_relayed(e)) == 1, f"1183: {what} лимит закрыл передачу Зевсу: {e.calls()}")
 
-    def cap(pct):
-        def f(e):
-            with open(os.path.join(e.pantheon, "schedule.toml"), "a") as fh:
-                fh.write(f'\n[limits.owner_cap]\ndate = "{day}"\npct = {pct}\ndecision = "t"\n')
-        return f
-    _relay_stops(cap(5), "потолок владельца")
+
+def test_relay_to_renamed_zeus_1183():
+    """metis-1183: окно Зевса после перезапуска зовётся «zeus (2)» — передача доходит и до него (с 05.11 молчала)."""
     e = _two_blocked_env()
-    cap(50)(e)
+    e.agents([a for a in json.load(open(e.agents_file)) if a["name"] != "zeus"] + [bg("zeus (2)", "done", "2e057e05-1", pid=32)])
     e.run("watch", t=T0)
-    check(len(_relayed(e)) == 1, f"0277: потолок выше расхода закрыл передачу: {e.calls()}")
+    check(len(_relayed(e)) == 1 and "coord-x" in _pushed(e), f"1183: «zeus (2)» не получил передачу: {e.calls()}")
 
 
 def test_relay_once_per_item_0277():
