@@ -332,7 +332,7 @@ SCENARIOS = [
 def run(fn, src=SRC):
     try:
         return fn(load(src))
-    except Exception as e:  # noqa: BLE001 — мутант может уронить сценарий: это тоже «красный»
+    except Exception as e:  # noqa: BLE001 — мутант может уронить сценарий: это тоже убитый мутант
         return False, f"{type(e).__name__}: {e}"
 
 
@@ -363,7 +363,7 @@ MUTANTS = [
 for name, old, new, fn in MUTANTS:
     mutant = SRC.replace(old, new, 1)
     ok, info = run(fn, mutant) if mutant != SRC else (True, "подмена не нашлась")
-    check(f"[мутанты] {name}: откат краснит сценарий", mutant != SRC and not ok, info)
+    check(f"[мутанты] {name}: откат роняет сценарий (мутант убит)", mutant != SRC and not ok, info)
 
 print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)
