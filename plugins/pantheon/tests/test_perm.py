@@ -265,7 +265,11 @@ NOT_EXACT = {
     "секрет скрыт в показе": bash("curl -H 'Authorization: Bearer abcdef123' https://example.com"),
     "невидимый знак в команде": bash("make\u200b build"),
     "пустая буква U+3164 (вне списка CTRL)": bash("make\u3164build"),
-    "латиница и кириллица в одном слове": bash("curl https://ex\u0430mple.com"),
+    "латиница и кириллица в одном слове": bash("curl 'https://ex\u0430mple.com'"),
+    "слово из одних двойников латиницы": bash("curl '\u0430\u0440\u0440\u04cf\u0435.com'"),
+    "кириллица вне кавычек": bash("echo привет"),
+    "двойник знака оболочки (；)": bash("echo 'a\uff1bb'"),
+    "незакрытая кавычка": bash("echo 'выпуск"),
     "комбинируемая метка": bash("echo e\u0301"),
     "неразрывный пробел": bash("make\u00a0build"),
     "двойной пробел (показ схлопнул бы)": bash("make  build"),
@@ -284,6 +288,9 @@ def not_exact(r):
 for label, ev in NOT_EXACT.items():
     r = scenario(win(), ev=ev)
     check(f"показ ≠ одобряемое: {label} — «Разрешить» не allow, обычный запрос в окне", not_exact(r), r[:4] + (r[6],))
+r = scenario(win(), ev=bash("git commit -m 'выпуск: правка окна'"))
+check("кириллица в кавычках (сообщение коммита) — команда целиком, «Разрешить» → allow",
+      allowed(r) and r[6].get("exact") is True, r[:4])
 r = scenario(win("Отказать"), ev=NOT_EXACT["многострочная команда"])
 check("показано не целиком, «Отказать» → deny всё равно", (r[1] or {}).get("behavior") == "deny", r[:4])
 r = scenario(win(), ev=bash("make build", dangerouslyDisableSandbox=True, run_in_background=True))
@@ -430,7 +437,8 @@ MUTANTS = (
     ("and shown(cmd) and", "and",
      "невидимое и смесь письменностей", lambda m: all(not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[k])) for k in (
          "пустая буква U+3164 (вне списка CTRL)", "латиница и кириллица в одном слове", "комбинируемая метка",
-         "неразрывный пробел"))),
+         "неразрывный пробел", "слово из одних двойников латиницы", "кириллица вне кавычек",
+         "двойник знака оболочки (；)", "незакрытая кавычка"))),
     ('"→" not in cmd', "True",
      "стрелка в команде", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[
          "стрелка в команде (вопрос её заменит)"]))),

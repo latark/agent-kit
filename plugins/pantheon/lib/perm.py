@@ -16,7 +16,7 @@ PermissionRequest окна (hooks.json: `pantheon perm ask`, только при
      читает журнал и печатает, что окно получит. В конце вопроса — «(проверка <12 hex>)», начало sha256 точного
      tool_input: ответ привязан к тому вызову, который выполнится.
      «Разрешить» даёт allow, только если показанная команда — вся команда дословно (exact): Bash с известными полями,
-     одна строка только из видимых знаков (shown), не длиннее CMD_MAX, scrub ничего не скрыл. Иначе (Write, Edit, длинная или
+     одна строка: ASCII, кириллица — только в кавычках (shown), не длиннее CMD_MAX, scrub ничего не скрыл. Иначе (Write, Edit, длинная или
      многострочная команда, секрет) вопрос говорит об этом, «Разрешить» → обычный запрос в окне, «Отказать» работает.
   4. Хук ждёт до WAIT с (по умолчанию 600; PANTHEON_PERM_WAIT, не больше WAIT_MAX — тайм-аут хука в hooks.json 900 с)
      и каждые POLL с читает журнал ваших слов owner-log/zeus.md (consent_found, как `pantheon consent`). Засчитывается
@@ -76,26 +76,39 @@ def norm(q):
 
 CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
 NAME = re.compile(r"[A-Za-z0-9_.:-]{1,60}")
-# allow — только видимые знаки (проверка безопасности 15.11: невидимое в команде): буквы, цифры, знаки и символы любой
-# письменности (кириллица в сообщениях коммитов — да) и обычный пробел; нет — управляющим, форматным, частным, пустым
-# (Cc, Cf, Co, Cn), разделителям кроме пробела (Zs, Zl, Zp), комбинируемым меткам (M*), буквам, которые рисуются
-# пустотой, и не-NFC. Слово, где латиница смешана с кириллицей или греческим (exаmple.com с русской «а»), — тоже нет.
-BLANK = frozenset("\u115f\u1160\u3164\uffa0\u2800\u180e\u17b4\u17b5")
-WORD = re.compile(r"[^\W\d_]+")
+# allow — только то, что выглядит ровно так, как выполнится (проверки безопасности 15.11: невидимое, двойники
+# латиницы и знаков оболочки, смена направления). Вне кавычек — только печатный ASCII. Внутри '…' и "…" ещё кириллица
+# (сообщения коммитов, заметки): только буквы Lu/Ll, NFKC не меняет, направление L. Слово с кириллицей не смешано с
+# латиницей и не сплошь из двойников латиницы («аррlе», «сurl»). Остальное — «показана не целиком», обычный запрос.
+ASCII = re.compile(r"[\x20-\x7e]")
+TWINS = frozenset("аеорсухкіјѕӏһԁԛԝүАВЕКМНОРСТХІЈЅԚԜҮ")
+
+
+def _cyr_ok(c):
+    import unicodedata as u
+    return (u.category(c) in ("Lu", "Ll") and "CYRILLIC" in u.name(c, "") and u.normalize("NFKC", c) == c
+            and u.bidirectional(c) == "L")
 
 
 def shown(cmd):
-    """Команда выглядит ровно так, как выполнится: каждый знак видим, письменности в словах не смешаны."""
-    import unicodedata as u
-    if u.normalize("NFC", cmd) != cmd:
-        return False
+    """Команда выглядит ровно так, как выполнится: см. выше. Незакрытая кавычка — нет."""
+    q = None
+    esc = False
     for c in cmd:
-        if c != " " and (c in BLANK or u.category(c)[0] in "CZM"):
+        if not ASCII.fullmatch(c) and not (q and _cyr_ok(c)):
             return False
-    for w in WORD.findall(cmd):
-        kinds = {("latin" if "LATIN" in n else "cyr" if "CYRILLIC" in n else "greek" if "GREEK" in n else "other")
-                 for n in (u.name(c, "") for c in w)}
-        if "latin" in kinds and kinds & {"cyr", "greek"}:
+        if esc:
+            esc = False
+        elif c == "\\" and q != "'":
+            esc = True
+        elif q is None and c in "'\"":
+            q = c
+        elif c == q:
+            q = None
+    if q is not None or esc:
+        return False
+    for w in re.findall(r"[^\W\d_]+", cmd):
+        if any(not c.isascii() for c in w) and (any(c.isascii() for c in w) or all(c in TWINS for c in w)):
             return False
     return True
 # поля Bash, которые не меняют того, что выполнится; флаги вне песочницы и в фоне — пометкой в вопросе
@@ -122,7 +135,7 @@ def input_sha(ti):
 
 def exact(tool, ti):
     """Показанная команда — вся команда дословно: только Bash, только известные поля, команда-строка без переводов
-    строк, только видимые знаки без смеси письменностей в слове (shown), не длиннее CMD_MAX, scrub и замена кавычек
+    строк, только видимое и без двойников (shown), не длиннее CMD_MAX, scrub и замена кавычек
     ничего не меняют. Иначе allow не бывает:
     владелец одобрил бы не то, что выполнится (Write и Edit — содержимое не показано; проверка безопасности 15.11)."""
     cmd = ti.get("command")
