@@ -566,21 +566,16 @@ def blocked_why(a):
 
 
 def relay_block(t):
-    """Почему «ждёт вас» сейчас нельзя передавать Зевсу, или None. Передача — ход Зевса, то есть расход модели, поэтому
-    те же запреты, что у автоматического подъёма (wake_block): техперезапуск (SCHED-15), пауза планировщика, пятичасовой
-    лимит, недельный и недельный потолок владельца — оба в night.gate("respawn") ([limits.owner_cap], metis-0403)."""
+    """Почему «ждёт вас» сейчас нельзя передавать Зевсу, или None: техперезапуск (SCHED-15), пауза планировщика, пробный
+    запуск. Лимиты передачу не держат (слово владельца 15.11, metis-1183): запрос разрешения, о котором Зевс не узнал,
+    стоял сутки молча; передача — один короткий ход Зевса раз на пункт, а окно без ответа стоит целиком. t — не нужен."""
+    del t
     if os.environ.get("PANTHEON_DRYRUN") == "1" or dry():
         return "пробный запуск"
     if P.maintenance_active():
         return "идёт технический перезапуск"
     if os.path.exists(P.path("paused")):
         return "весь планировщик на паузе"
-    pct, lim = P.limit_pct(), threshold("limit_max_pct", 70)
-    if pct is not None and pct >= lim:
-        return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
-    ok, why = P.night_mod().gate("respawn", t)
-    if not ok:
-        return f"недельный лимит: {why}"
     return None
 
 
@@ -614,7 +609,8 @@ def relay_zeus(agents, items, t):
         return False
 
     def pick(ags):
-        zs = [z for z in ags if z.get("name") == "zeus" and z.get("id") and z.get("sessionId")
+        # metis-1183: после перезапуска окно Зевса зовётся «zeus (2)» — по точному имени передача молчала с 05.11
+        zs = [z for z in ags if _base_name(z.get("name")) == "zeus" and z.get("id") and z.get("sessionId")
               and z.get("kind") in (None, "background")]
         z = max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
         return z if z and idle_holder(z) else None
@@ -653,6 +649,15 @@ def relay_zeus(agents, items, t):
 
 WAIT_CARD_AFTER = 300     # metis-1122: окно ждёт разрешения дольше 5 мин — карточка владельцу «Ждёт вас»
 WAIT_REPEAT_AFTER = 1800  # дольше 30 мин — повтор: уведомление владельцу и строка Зевсу в тревогах
+WAIT_REMIND_EVERY = 3600  # metis-1183: дальше — напоминание каждый час, пока окно ждёт (один повтор молчал 20 ч)
+UNKNOWN_WHY = "причина неизвестна"
+
+
+def _new_wait(rec, why):
+    """metis-1183: окно на другом запросе — новое ожидание, хотя между проходами оно из ожидания не выходило (владелец
+    ответил на прежний за минуту между проходами). «Причина неизвестна» с любой стороны — не смена: журнал не прочитан."""
+    old = rec.get("known") or rec.get("why")   # последнее известное: «причина неизвестна» его не перетирает (Д1)
+    return bool(old) and old != why and UNKNOWN_WHY not in (old, why)
 
 
 def _wait_card(name, sid, why, since, t):
@@ -679,7 +684,9 @@ def _wait_card(name, sid, why, since, t):
 
 def wait_cards(agents, waiting, t):
     """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
-    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке). Ключ — имя окна: та же сессия или её
+    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке), дальше — каждый час только строка Зевсу,
+    без macOS: часовые уведомления съели бы дневной бюджет (metis-1183). Окно на
+    другом запросе — новое ожидание: прежняя карточка закрыта, отсчёт заново (_new_wait). Ключ — имя окна: та же сессия или её
     замена под тем же именем — одна карточка и один повтор (одинаковые «ждёт вас» склеиваются). Окно вышло из
     ожидания — карточка закрывается, запись снимается. Пустой claude agents — ничего не закрываем (сбой списка, а не
     конец ожидания). Окна Зевса нет: туда владелец смотрит сам. Пробный запуск — ничего."""
@@ -701,18 +708,31 @@ def wait_cards(agents, waiting, t):
                                            "result": f"Окно {name} больше не ждёт разрешения"},
                                            note="окно больше не ждёт", actor="плановый проход")
         for name, (sid, why) in items.items():
+            if name in st and _new_wait(st[name], why):
+                old = st.pop(name)
+                P.clear_fault(f"wait-repeat-{name}")
+                if old.get("card"):
+                    with contextlib.suppress(ValueError, OSError):
+                        P.tasks_mod().task_set(P.PANTHEON, t, old["card"], {"status": "done", "result":
+                                               f"Окно {name} перешло к другому запросу — новая карточка"},
+                                               note="окно на другом запросе", actor="плановый проход")
             rec = st.setdefault(name, {"since": t})
             since = rec["since"] if isinstance(rec.get("since"), (int, float)) and rec["since"] <= t else t
             rec.update(since=since, sid=sid, why=why)
+            if why != UNKNOWN_WHY:
+                rec["known"] = why
             if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
                 rec["card"] = _wait_card(name, sid, why, since, t)
-            if t - since >= WAIT_REPEAT_AFTER and not rec.get("repeated"):
+            last = rec.get("repeated")
+            if t - since >= WAIT_REPEAT_AFTER and (not isinstance(last, (int, float)) or t - last >= WAIT_REMIND_EVERY):
+                first = not isinstance(last, (int, float))
                 rec["repeated"] = t
                 mins = int((t - since) // 60)
                 card = f", карточка {rec['card']}" if rec.get("card") else ""
                 P.alert(f"окно {name} ждёт вас {mins} мин: {why}{card} — claude attach {sid}", "watch")
-                P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
-                              group=f"session-{name}", once=True)
+                if first:  # macOS — один раз на ожидание; часовые — строкой Зевсу, дневной бюджет уведомлений цел
+                    P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
+                                  group=f"session-{name}", once=True)
         P.write_json(sp, st)
 
 
