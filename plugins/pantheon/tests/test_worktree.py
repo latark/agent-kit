@@ -10,6 +10,9 @@
   (git worktree add --detach мимо команды) и копия посреди merge/rebase/bisect — отказ 2, файлы целы;
 - вложенные папки направлений: владелец репозитория — самая глубокая (Д3);
 - git зовётся с GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна (F2);
+- фоновая проверка #488: копия, где окно подменило .git, commondir, положило config, config.worktree или ссылку в
+  gitdir, — remove отказ 2 до git; cwd в подменённой копии — репозиторий по папкам; add не заводит копию, в дереве
+  которой .claude/settings*.json с расширяющими ключами (кроме файла как у основной копии); ключи — те же, что у guard;
 - отказ: `..`, ведущий `-`, абсолютный путь, лишние флаги и --force; ссылка на месте .claude, .claude/worktrees и звена
   имени; remove папки, которая не worktree; cwd вне основной копии; репозиторий чужого направления и вне папок
   направлений (PANTHEON_WINDOW из domains.json);
@@ -23,6 +26,7 @@
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -326,6 +330,163 @@ check("git: GIT_CONFIG_NOSYSTEM=1, GIT_DIR окна снят", e.get("GIT_CONFIG
 nosys = '    env["GIT_CONFIG_NOSYSTEM"] = "1"\n'
 check("самопроверка мутанта: строка NOSYSTEM одна", wsrc.count(nosys) == 1)
 check("мутант: без NOSYSTEM — проверка выше краснеет", git_env(wsrc.replace(nosys, "")).get("GIT_CONFIG_NOSYSTEM") != "1")
+
+# фоновая проверка #488, HIGH 1 (вариант А): окно в копии пишет её .git и gitdir — remove проверяет их по файлам
+# и git над подменённой копией не зовёт
+VERIFY = "    if os.path.realpath(target) in listed:\n        gd = _verify_copy(repo, target)\n"
+check("самопроверка мутанта: проверка копии в remove одна", wsrc.count(VERIFY) == 1)
+no_verify = mutant(VERIFY, "    if True:\n        gd = gitdir_of(target)\n",
+                   "def _small(p, limit=4096):\n",
+                   "def gitdir_of(t):\n    return os.path.realpath(_git(['rev-parse', '--absolute-git-dir'], t)"
+                   ".stdout.strip())\n\n\ndef _small(p, limit=4096):\n")
+
+
+def tamper(name, how):
+    """Своя копия без ветки с неотслеживаемым файлом, затем подмена how(копия, gitdir)."""
+    cli(mine, "add", name, "--detach")
+    t = wt(mine, name)
+    open(os.path.join(t, "keep.txt"), "w").write("x\n")
+    how(t, gitdir(t))
+    return t
+
+
+def planted_worktree_config(t, gd):
+    open(os.path.join(gd, "config.worktree"), "w").write("[core]\n\tsshCommand = touch /nowhere\n")
+
+
+def planted_config(t, gd):
+    open(os.path.join(gd, "config"), "w").write("[core]\n\tpager = touch /nowhere\n")
+
+
+def wrong_commondir(t, gd):
+    open(os.path.join(gd, "commondir"), "w").write(os.path.join(other, ".git") + "\n")
+
+
+def link_in_gitdir(t, gd):
+    os.symlink(os.path.join(other, ".git", "config"), os.path.join(gd, "info-link"))
+
+
+def fake_gitdir(t, gd):
+    fake = os.path.join(ROOT, "fake-" + os.path.basename(t), ".git", "worktrees", "x")
+    os.makedirs(fake)
+    for f in ("HEAD", "commondir", "gitdir"):
+        shutil.copy(os.path.join(gd, f), os.path.join(fake, f))
+    open(os.path.join(fake, "config.worktree"), "w").write("[core]\n\tsshCommand = touch /nowhere\n")
+    open(os.path.join(t, ".git"), "w").write(f"gitdir: {fake}\n")
+
+
+def dotgit_link(t, gd):
+    os.remove(os.path.join(t, ".git"))
+    os.symlink(os.path.join(mine, ".git"), os.path.join(t, ".git"))
+
+
+for i, (how, word) in enumerate(((planted_worktree_config, "config.worktree"), (planted_config, "config"),
+                                 (wrong_commondir, "не сходятся"), (link_in_gitdir, "info-link"),
+                                 (fake_gitdir, "не gitdir копии"), (dotgit_link, "не обычный файл"))):
+    t = tamper(f"tw-{i}", how)
+    r = cli(mine, "remove", f"tw-{i}", "--force")
+    check(f"remove --force копии, где окно подменило {how.__name__} — отказ 2, файлы целы", r.returncode == 2
+          and word in r.stderr and os.path.exists(os.path.join(t, "keep.txt")), r.stderr)
+    r = cli(mine, "remove", f"tw-{i}")
+    check(f"remove без --force той же копии ({how.__name__}) — отказ 2 до git", r.returncode == 2 and word in r.stderr,
+          r.stderr)
+r = cli(mine, "remove", "tw-0", "--force", lib=no_verify)
+check("мутант: без _verify_copy — копия с подложенным config.worktree убрана git мимо песочницы", r.returncode == 0
+      and not os.path.exists(wt(mine, "tw-0")), r.stderr)
+r = cli(mine, "remove", "tw-1", "--force", lib=no_verify)
+check("мутант: без _verify_copy — копия с подложенным config убрана", r.returncode == 0
+      and not os.path.exists(wt(mine, "tw-1")), r.stderr)
+r = cli(mine, "remove", "tw-3", "--force", lib=no_verify)
+check("мутант: без _verify_copy — копия со ссылкой в gitdir убрана", r.returncode == 0
+      and not os.path.exists(wt(mine, "tw-3")), r.stderr)
+for pair in (('    planted = [n for n in ("config", "config.worktree")', '    planted = [n for n in ()'),
+             ("    planted += [n for n in os.listdir(gd) if os.path.islink(os.path.join(gd, n))]\n", "")):
+    check("самопроверка мутанта: строка проверки gitdir одна", wsrc.count(pair[0]) == 1, pair[0])
+t5 = tamper("tw-5", planted_worktree_config)
+r = cli(mine, "remove", "tw-5", "--force", lib=mutant('    planted = [n for n in ("config", "config.worktree")',
+                                                       '    planted = [n for n in ()'))
+check("мутант: без проверки config в gitdir — копия с config.worktree убрана", r.returncode == 0
+      and not os.path.exists(t5), r.stderr)
+t6 = tamper("tw-6", link_in_gitdir)
+r = cli(mine, "remove", "tw-6", "--force",
+        lib=mutant("    planted += [n for n in os.listdir(gd) if os.path.islink(os.path.join(gd, n))]\n", ""))
+check("мутант: без проверки ссылок в gitdir — копия со ссылкой убрана", r.returncode == 0 and not os.path.exists(t6),
+      r.stderr)
+BACK = "            or not back or os.path.realpath(os.path.join(gd, back)) != os.path.realpath(dotgit)):\n"
+check("самопроверка мутанта: строка commondir/gitdir одна", wsrc.count(BACK) == 1)
+t7 = tamper("tw-7", wrong_commondir)
+r = cli(mine, "remove", "tw-7", "--force", lib=mutant("    if (os.path.dirname(gd) != wts or not cdir or "
+                                                       "os.path.realpath(os.path.join(gd, cdir)) != common\n" + BACK,
+                                                       "    if False:\n"))
+check("мутант: без сверки commondir и gitdir — отказа «не сходятся» нет", "не сходятся" not in r.stderr, r.stderr)
+# cwd в копии с подменённым .git: репозиторий ищется по папкам, git в копии не зовётся
+t8 = tamper("tw-8", lambda t, gd: open(os.path.join(t, ".git"), "w").write(f"gitdir: {os.path.join(other, '.git')}\n"))
+r = cli(t8, "add", "from-tampered")
+check("add из копии с .git на чужой репозиторий — worktree в основной копии по папкам", r.returncode == 0
+      and os.path.isdir(wt(mine, "from-tampered")) and not os.path.exists(wt(other, "from-tampered")), r.stderr)
+OLD_REPO = ('''    r = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
+    common = r.stdout.strip().rstrip("/")
+    if r.returncode != 0 or not common:
+        raise Refuse("текущая папка не в git-репозитории")
+    common = os.path.realpath(common)
+    if os.path.basename(common) != ".git" or not os.path.isdir(common):
+        raise Refuse("не .git")
+    repo = os.path.dirname(common)
+    if not _under(os.path.realpath(cwd), repo):
+        raise Refuse("текущая папка вне основной копии")
+    return repo
+''')
+NEW_REPO = "    d, seen_file = os.path.realpath(cwd), False\n"
+check("самопроверка мутанта: поиск по папкам один", wsrc.count(NEW_REPO) == 1)
+r = cli(t8, "add", "from-tampered-2", lib=mutant(NEW_REPO, OLD_REPO + NEW_REPO))
+check("мутант: репозиторий по git в cwd — из подменённой копии git читает чужой gitdir, worktree в mine нет",
+      not os.path.exists(wt(mine, "from-tampered-2")), r.stdout + r.stderr)
+r = cli(ROOT, "add", "z2")
+check("cwd вне репозитория по-прежнему — отказ «не в git»", r.returncode == 2 and "не в git" in r.stderr, r.stderr)
+
+# фоновая проверка #488, HIGH 2: add не заводит копию, в дереве которой настройки, расширяющие окно
+wide = mkrepo(os.path.join(home, "projects", "mine", "wide"))
+os.makedirs(os.path.join(wide, ".claude"))
+wide_json = json.dumps({"hooks": {"PreToolUse": [{"hooks": []}]}, "permissions": {"allow": ["Bash(*)"]}})
+git(wide, "checkout", "-q", "-b", "wide-1")
+open(os.path.join(wide, ".claude", "settings.json"), "w").write(wide_json)
+git(wide, "add", ".claude/settings.json")
+git(wide, "commit", "-q", "-m", "wide")
+git(wide, "checkout", "-q", "main")
+for args in (["w1", "--branch", "wide-1"], ["w2", "--detach", "--base", "wide-1"], ["w3", "--base", "wide-1"]):
+    r = cli(wide, "add", *args)
+    check(f"add {' '.join(args)}: в дереве .claude/settings.json с hooks — отказ 2, копии нет", r.returncode == 2
+          and "hooks" in r.stderr and "permissions.allow" in r.stderr and not os.path.exists(wt(wide, args[0])),
+          r.stderr)
+check("отказ по настройкам не завёл ветку w3", subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/w3"],
+                                                              cwd=wide).returncode != 0)
+open(os.path.join(wide, ".claude", "settings.json"), "w").write(wide_json)
+r = cli(wide, "add", "w4", "--detach", "--base", "wide-1")
+check("add: настройки дерева байт в байт как у основной копии — код 0", r.returncode == 0
+      and os.path.isdir(wt(wide, "w4")), r.stderr)
+open(os.path.join(wide, ".claude", "settings.json"), "w").write(wide_json + "\n")
+r = cli(wide, "add", "w5", "--detach", "--base", "wide-1")
+check("add: у основной копии файл отличается — отказ 2", r.returncode == 2 and not os.path.exists(wt(wide, "w5")),
+      r.stderr)
+os.remove(os.path.join(wide, ".claude", "settings.json"))
+r = cli(wide, "add", "w6", "--detach", "--base", "main")
+check("add: в дереве нет настроек — код 0", r.returncode == 0, r.stderr)
+TREE = "    found = _tree_settings(repo, rev)\n"
+check("самопроверка мутанта: проверка дерева одна", wsrc.count(TREE) == 1)
+r = cli(wide, "add", "w7", "--branch", "wide-1", lib=mutant(TREE, "    found = []\n"))
+check("мутант: без проверки настроек дерева — копия с hooks заведена", r.returncode == 0
+      and os.path.isdir(wt(wide, "w7")), r.stderr)
+grules = open(os.path.join(os.path.dirname(os.path.dirname(LIB)), "guard", "hooks", "guard_rules.py"),
+              encoding="utf-8").read()
+
+
+def consts(src):
+    return [re.sub(r"\s+", "", m) for m in re.findall(r"^(?:WIDEN_KEYS|SAFE_PERMISSIONS|SAFE_SANDBOX) = \([^)]*\)", src,
+                                                       re.M)]
+
+
+check("ключи настроек — те же, что у guard worktree-own", consts(wsrc) == consts(grules) and len(consts(wsrc)) == 3,
+      consts(wsrc))
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)

@@ -166,6 +166,48 @@ try:
     f = settings(LW, {"hooks": {"Stop": [{"hooks": []}]}, "permissions": {"allow": ["Bash(ls)"]}})
     r = run({"path": LW + "/.claude/worktrees/a"}, cwd=LW)
     check("13 папка запуска со своими настройками — пропуск (окно их приняло)", r is None, r)
+    # фоновая проверка #488 (HIGH 2): копия в репозитории папки запуска проверяется всегда — кроме файлов, байт в байт
+    # равных настройкам папки запуска
+    LA = LW + "/.claude/worktrees/a"
+    fa = settings(LA, {"hooks": {"PreToolUse": [{"hooks": []}]}, "permissions": {"allow": ["Bash(*)"]}})
+    r = run({"path": LA}, cwd=LW)
+    check("13 копия в папке запуска со своими расширяющими настройками — отказ",
+          bool(r) and "worktree-own" in r and "hooks" in r and fa in r, r)
+    with open(f, "rb") as src, open(fa, "wb") as dst:
+        dst.write(src.read())
+    r = run({"path": LA}, cwd=LW)
+    check("13 копия в папке запуска с настройками байт в байт как у папки запуска — пропуск", r is None, r)
+    fl = settings(LA, {"env": {"X": "1"}}, "settings.local.json")
+    r = run({"path": LA}, cwd=LW)
+    check("13 settings.local.json копии, которого нет у папки запуска — отказ", bool(r) and fl in r, r)
+    os.remove(fl)
+    settings(LA, {"hooks": {"PreToolUse": [{"hooks": []}]}})
+    src13 = open(RULES, encoding="utf-8").read()
+    old13 = """        dirs = [wt] + ([target] if _key(target) != _key(wt) else [])
+        if _key(repo) == _key(launch):
+            found = [x for x in _widening(dirs) if not _same_as_launch(x[0], launch)]
+        else:
+            found = _widening([repo] + dirs)
+"""
+    check("13 самопроверка мутанта: проверка копии одна", src13.count(old13) == 1)
+    d13 = os.path.join(root, "hooks-mut13")
+    shutil.copytree(HOOKS, d13, ignore=shutil.ignore_patterns("__pycache__"))
+    with open(os.path.join(d13, "guard_rules.py"), "w", encoding="utf-8") as fh:
+        fh.write(src13.replace(old13, "        found = _widening([repo, wt]) if _key(repo) != _key(launch) else []\n"))
+    sp13 = importlib.util.spec_from_file_location("guard_mut13", os.path.join(d13, "guard_rules.py"))
+    m13 = importlib.util.module_from_spec(sp13)
+    sp13.loader.exec_module(m13)
+    os.environ["PANTHEON_WINDOW"] = "themis-repos"
+    check("13 мутант: копия папки запуска без проверки — её hooks проходят (тест краснеет на откате)",
+          m13.check_worktree_own({"cwd": LW}, "EnterWorktree", {"path": LA}) is None)
+    with open(os.path.join(d13, "guard_rules.py"), "w", encoding="utf-8") as fh:
+        fh.write(src13.replace("if not _same_as_launch(x[0], launch)", "if True"))
+    sp13b = importlib.util.spec_from_file_location("guard_mut13b", os.path.join(d13, "guard_rules.py"))
+    m13b = importlib.util.module_from_spec(sp13b)
+    sp13b.loader.exec_module(m13b)
+    check("13 мутант: сравнение с папкой запуска всегда «равно» — hooks копии проходят",
+          m13b.check_worktree_own({"cwd": LW}, "EnterWorktree", {"path": LA}) is None)
+    shutil.rmtree(LA + "/.claude")
     r = run({"name": "themis-0100"}, cwd=LW)
     check("13 name в папке запуска — отказ (вариант А владельца 15.11, metis-1225)",
           bool(r) and "worktree-own" in r and "pantheon worktree add" in r, r)

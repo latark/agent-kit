@@ -5032,6 +5032,19 @@ def _widening(dirs):
     return found
 
 
+def _same_as_launch(f, launch):
+    """Файл .claude/settings*.json копии байт в байт равен тому же файлу папки запуска (окно его уже приняло)."""
+    base = os.path.join(launch, ".claude", os.path.basename(f))
+    try:
+        if os.path.islink(f) or os.path.islink(base):
+            return False
+        with open(f, "rb") as a, open(base, "rb") as b:
+            x, y = a.read((1 << 20) + 1), b.read((1 << 20) + 1)
+        return len(x) <= 1 << 20 and x == y  # больше 1 МБ — не «равен»: хвост за пределом чтения не сравнён
+    except OSError:
+        return False
+
+
 def _widen_msg(repo, found):
     shown = "; ".join(f"{f}: {', '.join(k for g, k in found if g == f)}" for f in dict.fromkeys(f for f, _ in found))
     return (f"Правило worktree-own: EnterWorktree в {repo} загрузил бы в окно настройки проекта ({shown}) — это не папка "
@@ -5069,7 +5082,13 @@ def check_worktree_own(event, tool, tool_input):
                 "отдельной командой Bash, затем `pantheon worktree add <имя>` и "
                 "EnterWorktree с этим path.")
     if owner == win:
-        found = _widening([repo, wt]) if _key(repo) != _key(launch) else []
+        # копия проверяется всегда (фоновая проверка #488): в репозитории папки запуска — кроме файлов, байт в байт
+        # равных настройкам папки запуска (их окно уже приняло при запуске)
+        dirs = [wt] + ([target] if _key(target) != _key(wt) else [])
+        if _key(repo) == _key(launch):
+            found = [x for x in _widening(dirs) if not _same_as_launch(x[0], launch)]
+        else:
+            found = _widening([repo] + dirs)
         if found:
             return _widen_msg(repo, found)
         root = _git_root(cwd, repo)
