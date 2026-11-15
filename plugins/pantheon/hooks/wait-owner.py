@@ -24,8 +24,10 @@ alerts.md Зевс получает в сводке новых тревог (ctx
     (часы ушли назад) окно не продлевает.
 После успешного alert хук шлёт `pantheon notify` — уведомление macOS владельцу сразу, щелчок открывает доску; сбой
 уведомления — строка в журнал, хук цел, предел «раз в 2 мин на окно» общий с alert (metis-0907).
-Сбой `pantheon alert` (код не 0, нет файла, таймаут) — строка в STATE/logs/ctx-hooks.log, отметка не ставится:
-следующий запрос разрешения попробует снова. Хук всегда выходит с кодом 0 и ничего не печатает в окно.
+PermissionRequest на AskUserQuestion / ExitPlanMode — не просьба разрешить команду: тревога «окно ждёт вас: окно ждёт
+ответа на вопрос / решения по плану» без полей вызова (metis-0874 С1).
+Отметка ставится ДО `pantheon alert` (повтор, пока alert идёт, молчит — одна тревога); сбой alert (код не 0, нет файла,
+таймаут) — строка в STATE/logs/ctx-hooks.log и отметка снимается: следующий запрос разрешения попробует снова. Хук всегда выходит с кодом 0 и ничего не печатает в окно.
 PANTHEON_NOW — подмена часов для тестов (секунды с эпохи), PANTHEON_STATE — папка состояния.
 Python 3.11+: хуки запускает hooks/python.sh (metis-0571).
 """
@@ -47,6 +49,8 @@ CMD_MAX = 300   # команда в вопросе Зевсу (PermissionRequest
 WHY_MAX = 160
 DELAY = 3.0     # Notification ждёт, чтобы богатая тревога PermissionRequest легла первой
 QUIET_ROLES = {"hq"}
+# инструменты-вопросы: PermissionRequest приходит и на них, но это не просьба разрешить команду
+ASK_TOOLS = {"AskUserQuestion": "окно ждёт ответа на вопрос", "ExitPlanMode": "окно ждёт решения по плану"}
 
 
 def now():
@@ -142,26 +146,36 @@ def main():
     t = now()
     if recent(name, t):
         return 0
-    if kind == "PermissionRequest":
+    if kind == "PermissionRequest" and ev.get("tool_name") in ASK_TOOLS:   # вопрос владельцу, а не команда (metis-0874 С1)
+        msg = ASK_TOOLS[ev["tool_name"]]
+        text = f"окно {name} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
+    elif kind == "PermissionRequest":
         msg = question(ev)
         text = f"окно {name} просит разрешение — {msg} (с {time.strftime('%H:%M', time.localtime(t))}; ответить — в окне)"
     else:
         msg = flat(ev.get("message") or ev.get("title") or "запрос разрешения", MSG_MAX)
         text = f"окно {name} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
-    try:
-        r = subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "alert", "--from", name, text],
-                           capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError) as e:
-        log(f"{name}\tpantheon alert: {type(e).__name__}: {e}")
-        return 0
-    if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
-        log(f"{name}\tpantheon alert: код {r.returncode}: {tail[0][:200]}")
-        return 0
+    # отметка — ДО alert (metis-0874 Д2): повтор, пока alert идёт, видит её и молчит; сбой alert отметку снимает
     p = mark_path(name)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as fh:
         fh.write(str(t))
+
+    def unmark():
+        with contextlib.suppress(OSError):
+            os.unlink(p)
+    try:
+        r = subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "alert", "--from", name, text],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        unmark()
+        log(f"{name}\tpantheon alert: {type(e).__name__}: {e}")
+        return 0
+    if r.returncode != 0:
+        unmark()
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
+        log(f"{name}\tpantheon alert: код {r.returncode}: {tail[0][:200]}")
+        return 0
     # уведомление macOS тем же путём, что у Пантеона (щелчок открывает доску); сбой его — в журнал, хук цел (metis-0907)
     try:
         r = subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "notify", "--title", "Окно ждёт вас",
