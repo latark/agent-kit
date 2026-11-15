@@ -309,7 +309,7 @@ check("start без сети: код 0, предупреждение про fetc
 m = mutant_lib('    if have.returncode != 0:\n        print(f"pantheon batch start: origin/',
                '    if have.returncode != 0 or f.returncode != 0:\n        print(f"pantheon batch start: origin/')
 r = cli_lib(m, repo, "batch", "start", "metis-0913")
-check("мутант: fetch без сети снова провал — тест выше краснеет", r.returncode == 1
+check("мутант: fetch без сети снова провал — мутант убит тестом выше", r.returncode == 1
       and not os.path.isdir(os.path.join(repo, ".claude", "worktrees", "batch-metis-0913")), r.stderr)
 git(repo, "remote", "set-url", "origin", origin)
 
@@ -325,7 +325,7 @@ hint = "pantheon worktree add batch-metis-0911 --branch batch/metis-0911 --base 
 no_br = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/batch/metis-0911"], cwd=repo).returncode
 check("start в песочнице: код 1, точная подсказка pantheon worktree add, ветки не создано", r.returncode == 1
       and hint in r.stderr and no_br != 0, r.stderr)
-check("мутант: без пробы записи — подсказки нет (тест выше краснеет)",
+check("мутант: без пробы записи — подсказки нет (мутант убит тестом выше)",
       "pantheon worktree add batch-metis-0912 --branch" not in rm.stderr,
       rm.stderr)
 r = subprocess.run([PY311, "-I", RUN_PY, *hint.split()[1:]], cwd=repo, env=env, capture_output=True, text=True)

@@ -260,10 +260,10 @@ def mutant(old, new, *more):
 
 m = mutant('or ".." in x or', "or")
 r = cli(mine, "add", "a..b", "--branch", "mut-ab", lib=m)
-check("мутант: без проверки .. — a..b проходит (тест выше краснеет)", r.returncode == 0, r.stderr)
+check("мутант: без проверки .. — a..b проходит (мутант убит тестом выше)", r.returncode == 0, r.stderr)
 m = mutant("        if os.path.islink(p):\n", "        if False:\n")
 r = cli(lnk, "add", "seg/y2", lib=m)
-check("мутант: без проверки ссылок — отказ уже не «ссылка» (тест звена краснеет)", "ссылка" not in r.stderr, r.stderr)
+check("мутант: без проверки ссылок — отказ уже не «ссылка» (мутант убит тестом звена)", "ссылка" not in r.stderr, r.stderr)
 m = mutant("        if os.path.islink(p):\n", "        if False:\n",
            "    if not _under(parent, base) or os.path.realpath(base) != base:\n", "    if False:\n")
 r = cli(lnk, "add", "seg/y3", lib=m)
@@ -329,7 +329,7 @@ e = git_env(wsrc)
 check("git: GIT_CONFIG_NOSYSTEM=1, GIT_DIR окна снят", e.get("GIT_CONFIG_NOSYSTEM") == "1" and "GIT_DIR" not in e, e)
 nosys = '    env["GIT_CONFIG_NOSYSTEM"] = "1"\n'
 check("самопроверка мутанта: строка NOSYSTEM одна", wsrc.count(nosys) == 1)
-check("мутант: без NOSYSTEM — проверка выше краснеет", git_env(wsrc.replace(nosys, "")).get("GIT_CONFIG_NOSYSTEM") != "1")
+check("мутант: без NOSYSTEM — мутант убит проверкой выше", git_env(wsrc.replace(nosys, "")).get("GIT_CONFIG_NOSYSTEM") != "1")
 
 # фоновая проверка #488, HIGH 1 (вариант А): окно в копии пишет её .git и gitdir — remove проверяет их по файлам
 # и git над подменённой копией не зовёт

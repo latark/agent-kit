@@ -198,7 +198,7 @@ try:
     m13 = importlib.util.module_from_spec(sp13)
     sp13.loader.exec_module(m13)
     os.environ["PANTHEON_WINDOW"] = "themis-repos"
-    check("13 мутант: копия папки запуска без проверки — её hooks проходят (тест краснеет на откате)",
+    check("13 мутант: копия папки запуска без проверки — её hooks проходят (мутант убит тестом на откате)",
           m13.check_worktree_own({"cwd": LW}, "EnterWorktree", {"path": LA}) is None)
     with open(os.path.join(d13, "guard_rules.py"), "w", encoding="utf-8") as fh:
         fh.write(src13.replace("if not _same_as_launch(x[0], launch)", "if False"))
@@ -244,7 +244,7 @@ try:
     m6 = importlib.util.module_from_spec(sp6)
     sp6.loader.exec_module(m6)
     os.environ["PANTHEON_WINDOW"] = "themis-repos"
-    check("6 мутант: без отказа name — name проходит (тест краснеет на откате)",
+    check("6 мутант: без отказа name — name проходит (мутант убит тестом на откате)",
           m6.check_worktree_own({"cwd": LW}, "EnterWorktree", {"name": "themis-0024"}) is None)
     r = run({"path": BA + "/.claude/worktrees/x"}, win="")
     check("7 вне окна (нет PANTHEON_WINDOW) — молчит", r is None, r)

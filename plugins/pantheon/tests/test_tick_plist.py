@@ -42,7 +42,7 @@ check("plist тика: ProcessType Standard", tick_ok(SRC), process_type(templat
 check("plist тика: нет слова Background", "Background" not in (template(SRC, "PLIST_TMPL") or "Background"))
 check("plist служб: ProcessType Background (службы фоновые)", process_type(template(SRC, "SVC_TMPL")) == "Background",
       process_type(template(SRC, "SVC_TMPL")))
-# мутанты: проверка должна краснеть, если в шаблоне тика снова Background или ProcessType убран
+# мутанты: проверка должна убивать мутант, если в шаблоне тика снова Background или ProcessType убран
 STD = "<key>ProcessType</key><string>Standard</string>"
 BG = "<key>ProcessType</key><string>Background</string>"
 mutant = SRC.replace(STD, BG, 1)
