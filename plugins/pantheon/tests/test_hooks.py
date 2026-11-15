@@ -1259,7 +1259,7 @@ r = run("push", {"session_id": "77777777-queue", "source": "resume"})
 check("push: очередь из двух передач (6000 знаков) доставлена целиком", r.returncode == 2 and r.stderr.strip() == two,
       (r.returncode, len(r.stderr)))
 # замок очереди: пока pantheon дописывает передачу (держит push/.lock), хук файл не забирает. Признак, что хук дошёл до
-# замка и ждёт, — его строка «жду замок очереди» в журнале хуков (Д1 argus #495), а не время
+# замка и ждёт, — его строка «жду блокировку очереди» в журнале хуков (Д1 argus #495), а не время
 pf = push_file("88888888-lock", "[Пантеон: перезапуск] под замком")
 lk = open(os.path.join(PUSHD, ".lock"), "w")
 fcntl.flock(lk, fcntl.LOCK_EX)
@@ -1270,7 +1270,7 @@ pr.stdin.close()
 deadline = time.monotonic() + 60
 waiting = False
 while time.monotonic() < deadline and pr.poll() is None and not waiting:
-    waiting = os.path.exists(HLOG) and "88888888-lock: жду замок очереди" in open(HLOG, encoding="utf-8").read()
+    waiting = os.path.exists(HLOG) and "88888888-lock: жду блокировку очереди" in open(HLOG, encoding="utf-8").read()
     if not waiting:
         time.sleep(0.05)
 held = waiting and os.path.exists(pf) and pr.poll() is None

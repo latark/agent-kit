@@ -769,7 +769,8 @@ def main():
           and know + "/.git/config" in jc["sandbox"]["filesystem"]["denyWrite"])
     check("окно задачи: строгий guard-хук, роль окна в env, без координаторских правил",
           all(w["hooks"]["PreToolUse"][:1] == sa["hooks"]["PreToolUse"][:1] and w["env"]["PANTHEON_ROLE"] == r
-              and set(w.get("permissions", {})) == {"deny"} and "autoCompactWindow" not in w
+              and set(w.get("permissions", {})) == {"deny", "disableBypassPermissionsMode"}
+              and w["permissions"]["disableBypassPermissionsMode"] == "disable" and "autoCompactWindow" not in w
               for w, r in ((jc, "clio"), (jp, "prometheus"), (ji, "iris"))))
     check("окно задачи: autoMode координатора нет — исключения классификатора только у окон направлений (metis-0098)",
           all("autoMode" not in w for w in (jc, jp, ji)))
