@@ -776,14 +776,19 @@ def done_criteria(body):
     return out
 
 
-# metis-1004: вердикт argus по пункту «Готово, когда» — одно значение `--criteria "<id>#<N> <хеш> да|нет <опора>"` у
-# `pantheon review accept|reject`, по флагу на пункт. N — номер пункта в разделе (с 1, как done_criteria), хеш —
-# criterion_hash текста пункта (дословно, без отметки [ ]/[x]): правка текста после приёмки меняет хеш, и отметки нет.
-# Опора — файл:строка или тест, любое непустое. Хеши и готовые строки печатает `pantheon review criteria <id>`.
+# metis-1004: вердикт argus по пункту «Готово, когда» — одно значение `--criteria "<id>#<N> <хеш> да|нет|проба <опора>"`
+# у `pantheon review accept|reject`, по флагу на пункт. N — номер пункта в разделе (с 1, как done_criteria), хеш —
+# criterion_hash текста пункта (дословно, без [ ]/[x]): правка текста меняет хеш. Опора — файл:строка или тест; у «проба»
+# (metis-1260: вживую после выпуска, отмечается как «да», autoclose.ensure_probe) — что проверить. `review criteria <id>`.
 CRITERION_HASH_LEN = 12
 _CRIT_REF = re.compile(r"(" + ID_RE.pattern + r")#([1-9][0-9]{0,2})")
 _CRIT_HASH = re.compile(r"[0-9a-f]{%d}" % CRITERION_HASH_LEN)
-CRITERION_VERDICTS = ("да", "нет")
+_spec = _ilu.spec_from_file_location("pantheon_review_rules_tasks", os.path.join(os.path.dirname(os.path.abspath(
+    __file__)), "review_rules.py"))
+_rules = _ilu.module_from_spec(_spec)  # metis-1260: какие отметки засчитаны — правило ядра (review_rules.py)
+_spec.loader.exec_module(_rules)
+CRITERION_PROBE, CRITERION_OK = _rules.CRITERION_PROBE, _rules.CRITERION_OK  # OK — засчитан; копии правила нет
+CRITERION_VERDICTS = ("да", "нет", "проба")
 
 
 def criterion_hash(text):
@@ -792,7 +797,7 @@ def criterion_hash(text):
 
 
 def parse_criterion(value):
-    """Значение --criteria → (id задачи, номер пункта, хеш, «да»|«нет», опора) или None — не в формате. Слова через
+    """Значение --criteria → (id задачи, номер пункта, хеш, «да»|«нет»|«проба», опора) или None — не в формате. Слова через
     пробелы, опора — остаток строки (в ней могут быть пробелы и «:»)."""
     parts = value.split(None, 3) if isinstance(value, str) else []
     if len(parts) != 4:
