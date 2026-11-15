@@ -928,14 +928,19 @@ def test_close_criteria():
         pb = put(home, "metis-pantheon", "metis-0011", body=two, created="2026-10-26")
         pc = put(home, "metis-pantheon", "metis-0012", body="Готово, когда:\n- [x] а\n- [x] б\n", created="2026-10-27")
         pd = put(home, "metis-pantheon", "metis-0013", body=two, created="2026-10-27")
+        pe = put(home, "metis-pantheon", "metis-0014", body=two, created="2026-10-27", next="ждёт выпуска guard")
         prs = [cpr(1, "metis-0010-x", "", T0 - 3600), cpr(2, "metis-0011-x", "", T0 - 3600),
-               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть metis-0013", T0 - 3600)]
+               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть metis-0013", T0 - 3600),
+               cpr(5, "metis-0014-x", "", T0 - 3600)]
         log, errs = run_cache(home, state, T0, {"latark/agent-kit": prs})
         ha = T.read(pa)[0]
         check("0421: PR без «часть», 1 из 2 пунктов → review, не done", ha.get("status") == "review" and not ha.get("closed"), str(ha))
-        check("0421: в журнале «слит, неотмечено 1»; 1255: next — какие пункты сверить и как (argus, task split)",
+        check("0421: в журнале «слит, неотмечено 1»; 1255: next — какие пункты сверить и как (argus, task split); "
+              "вписанный next не затирается, статус review",
               "слит, неотмечено 1" in text(pa) and str(ha.get("next") or "").startswith("сверить пункты 2 «Готово, когда»")
-              and "--criteria" in str(ha.get("next")) and "task split" in str(ha.get("next")), text(pa)[-300:] + str(ha))
+              and "--criteria" in str(ha.get("next")) and "task split" in str(ha.get("next"))
+              and T.read(pe)[0].get("next") == "ждёт выпуска guard" and T.read(pe)[0].get("status") == "review",
+              text(pa)[-300:] + str(ha) + str(T.read(pe)[0]))
         check("задача от 26.10 закрывается как раньше", T.read(pb)[0].get("status") == "done", str(log))
         check("все пункты отмечены → done", T.read(pc)[0].get("status") == "done")
         check("«часть» остаётся как есть", T.read(pd)[0].get("status") == "doing" and "в теле «часть»" in text(pd))

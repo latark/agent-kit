@@ -16,8 +16,8 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 metis-0660). Слово «часть» без номера рядом («личная часть карты») не в счёт (metis-1193, PART_RE).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
 строку «слит, неотмечено N (пункты …)», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
-С metis-1255 он же ставит next (UNCHECKED_NEXT: какие пункты сверить), а задача, висящая так дольше 3 суток, — хвост
-«сверка» pantheon check с тревогой один раз на задачу и PR (boardmerged.merged_stuck).
+С metis-1255 он же заполняет пустой next (UNCHECKED_NEXT: какие пункты сверить; вписанный не трогает), а задача, висящая так дольше 3 суток, — хвост
+«сверка» pantheon check с тревогой один раз на задачу (boardmerged.merged_stuck).
 Перед этим (metis-1004) слитый PR с Closes отмечает сам пункты, которые argus принял на head слияния: `accepted(repo,
 строка кэша)` → {id: {номер: хеш}} (review.review_criteria_ticks — засчитанные «принять» с --criteria «да»); пункт
 отмечается, только если хеш его нынешнего текста тот же (T.criteria_tick). Отмечены все — done, как обычно. С metis-1235
@@ -822,9 +822,10 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors, accepted=N
                 nums = ", ".join(map(str, T.unchecked_numbers(head, tasks[tid][2])))
                 note = f"PR #{n} ({repo}) слит, неотмечено {left} (пункты {nums})"
                 if head.get("status") != "review" or not journal_has(tasks[tid][0], T, note):
-                    # metis-1255: «Дальше» на карточке — что ждёт задача; через 3 суток — тревога (boardmerged.merged_stuck)
-                    T.task_set(pantheon, t, tid, {"status": "review", "next": UNCHECKED_NEXT.format(nums=nums)},
-                               actor="плановый проход", note=note)
+                    # metis-1255: «Дальше» на карточке — что ждёт задача, если там пусто (вписанное человеком не
+                    # затираем); через 3 суток — тревога (boardmerged.merged_stuck)
+                    fields = {"status": "review"} | ({} if head.get("next") else {"next": UNCHECKED_NEXT.format(nums=nums)})
+                    T.task_set(pantheon, t, tid, fields, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, неотмечено {left} — review")
                 continue
             if close_done(pantheon, t, tid, tasks[tid], repo, pr, T, actual_for):
