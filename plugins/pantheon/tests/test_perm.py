@@ -265,7 +265,9 @@ NOT_EXACT = {
     "секрет скрыт в показе": bash("curl -H 'Authorization: Bearer abcdef123' https://example.com"),
     "невидимый знак в команде": bash("make\u200b build"),
     "пустая буква U+3164 (вне списка CTRL)": bash("make\u3164build"),
-    "не ASCII (кириллица)": bash("echo привет"),
+    "латиница и кириллица в одном слове": bash("curl https://ex\u0430mple.com"),
+    "комбинируемая метка": bash("echo e\u0301"),
+    "неразрывный пробел": bash("make\u00a0build"),
     "двойной пробел (показ схлопнул бы)": bash("make  build"),
     "Bash с неизвестным полем": bash("make build", extra_flag=True),
     "Write: содержимое не показано": dict(EV, tool_name="Write", tool_input={"file_path": "/tmp/x", "content": "rm"}),
@@ -425,11 +427,13 @@ MUTANTS = (
     ("len(cmd) <= CMD_MAX", "True",
      "команда длиннее показа", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[
          "команда длиннее показа"]))),
-    ("SHOWN.fullmatch(cmd) is not None", "True",
-     "стрелка, пустая буква U+3164 и не ASCII", lambda m: all(not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[k]))
-                                                         for k in ("стрелка в команде (вопрос её заменит)",
-                                                                   "пустая буква U+3164 (вне списка CTRL)",
-                                                                   "не ASCII (кириллица)"))),
+    ("and shown(cmd) and", "and",
+     "невидимое и смесь письменностей", lambda m: all(not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[k])) for k in (
+         "пустая буква U+3164 (вне списка CTRL)", "латиница и кириллица в одном слове", "комбинируемая метка",
+         "неразрывный пробел"))),
+    ('"→" not in cmd', "True",
+     "стрелка в команде", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[
+         "стрелка в команде (вопрос её заменит)"]))),
     ("_text(cmd, len(cmd)) == cmd", "True",
      "секрет скрыт в показе", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT["секрет скрыт в показе"]))),
     ('v = CTRL.sub(" ", str(v or ""))', 'v = str(v or "")',
