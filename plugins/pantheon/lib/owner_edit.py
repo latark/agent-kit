@@ -595,6 +595,17 @@ def window_text(req):
     return text if P.handoff_mod().showable(text) and len(text) <= WINDOW_MAX else None
 
 
+# знаки, которые Markdown прячет или меняет; одиночная «~» — в каждом пути «~/…», её зачёркивание знаков не прячет
+MD_ACTIVE = re.compile(r"[`*<\\]|~~|\]\(|(?<!\w)_|_(?!\w)")
+
+
+def plain_ok(req):
+    """metis-1252: вопрос без md годится окну вопросов, только если в нём нет знаков, которые Markdown прячет или
+    меняет (код, курсив, «~~», HTML, ссылка, «\\»): тогда текст одинаков, рисует окно Markdown или нет
+    (находка проверки безопасности PR #493). Иначе — только вопрос в чате с md."""
+    return not MD_ACTIVE.search(question(req, plain=True))
+
+
 def question(req, plain=False):
     """Вопрос для Зевса: [id], файл, sha диффа, правка строками (shown) через « ⏎ », ключи и последним — «Пояснение
     роли: …» (--why, mark): после правки и с меткой он не подделает её начало «Правка, строк 0: …» (R3-2 С). Вопрос —
@@ -868,9 +879,11 @@ def _propose(rel, new, task, why, prog, cur=None):
         return err(f"{prog}: заявку не записать ({e})", 3)
     touch = window_text(dict(req, window=win))
     print(f"заявка {req['id']}: ~/{rel}, sha до {before[:12]}, sha диффа {req['diff_sha']}\n\n{diff}\n"
-          f"Вопрос Зевсу окном вопросов (AskUserQuestion, варианты «А — Да, применить» и «Б — Нет»), строка целиком:\n"
-          f"  {question(req, plain=True)}\n"
-          f"Если окно вопросов открыть нельзя — сообщением в чате, строка целиком:\n  {question(req)}\n"
+          + (f"Вопрос Зевсу окном вопросов (AskUserQuestion, варианты «А — Да, применить» и «Б — Нет»), строка "
+             f"целиком:\n  {question(req, plain=True)}\nЕсли окно вопросов открыть нельзя — сообщением в чате, строка "
+             f"целиком:\n  {question(req)}\n" if plain_ok(req) else
+             f"Вопрос Зевсу сообщением в чате (в правке знаки Markdown — окну вопросов её не показать дословно), "
+             f"варианты «А — Да, применить» и «Б — Нет», строка целиком:\n  {question(req)}\n")
           + ("Или Touch ID: плановый проход покажет окно с этой правкой, когда владелец у Mac.\n" if touch else
              "Окно Touch ID правку целиком не покажет — только «да» в окне вопросов.\n")
           + f"Применит плановый проход, если ~/{rel} до того не изменится. Итог — pantheon owner-edit status {req['id']}")
@@ -1110,7 +1123,7 @@ def consent_decision(req):
     q = one_line(body.split("\nответ:")[0].removeprefix("вопрос:"))
     # окно вопросов Markdown не рисует — там годится и вопрос без md (metis-1252); ответ в чате — только с md
     window = head.removesuffix(" у Зевса").endswith("· " + P.answers_mod().WINDOW_NOTE)
-    if q != one_line(question(req)) and not (window and q == one_line(question(req, plain=True))):
+    if q != one_line(question(req)) and not (window and plain_ok(req) and q == one_line(question(req, plain=True))):
         return "wrong", head
     return "yes", head
 
