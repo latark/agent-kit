@@ -81,8 +81,9 @@ NAME = re.compile(r"[A-Za-z0-9_.:-]{1,60}")
 # латиницы и знаков оболочки, смена направления). Вне кавычек — только печатный ASCII. Внутри '…' и "…" ещё русские
 # буквы А–я и Ёё (сообщения коммитов, заметки), и только как слова текста: токен (между пробелами) с ними — русские
 # буквы и дефис, знаки препинания лишь по краям. Значит, ни адреса, ни пути, ни имени с русской буквой не выйдет:
-# «аррlе.com», «а.ру/х», «ѕh» — нет (латиница, цифра, «.», «/», «@» внутри). И в токене есть буква без латинского
-# двойника (не из TWINS_RU): имя ветки или файла «тор» (≈ top), «сах» — нет. Остальное — «показана не целиком».
+# «аррlе.com», «а.ру/х», «ѕh» — нет (латиница, цифра, «.», «/», «@» внутри). Строка в кавычках без пробела — это
+# имя (ветки, файла, аргумента): в ней нужна буква без латинского двойника (не из TWINS_RU), «тор» (≈ top) — нет;
+# текст из нескольких слов («правка, тест.») — свободно. Остальное — «показана не целиком».
 ASCII = re.compile(r"[\x20-\x7e]")
 RU = frozenset("абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
 TWINS_RU = frozenset("аеорсухктАВЕКМНОРСТХ")
@@ -93,6 +94,7 @@ def shown(cmd):
     """Команда выглядит ровно так, как выполнится: см. выше. Незакрытая кавычка — нет."""
     q = None
     esc = False
+    segs, cur = [], []
     for c in cmd:
         if not ASCII.fullmatch(c) and not (q and c in RU):
             return False
@@ -101,13 +103,19 @@ def shown(cmd):
         elif c == "\\" and q != "'":
             esc = True
         elif q is None and c in "'\"":
-            q = c
+            q, cur = c, []
+            continue
         elif c == q:
             q = None
+            segs.append("".join(cur))
+            continue
+        if q:
+            cur.append(c)
     if q is not None or esc:
         return False
-    return all(WORD_RU.fullmatch(t) and any(c in RU and c not in TWINS_RU for c in t)
-               for t in cmd.split(" ") if any(c in RU for c in t))
+    if not all(WORD_RU.fullmatch(t) for t in cmd.split(" ") if any(c in RU for c in t)):
+        return False
+    return all(any(c in RU and c not in TWINS_RU for c in g) for g in segs if " " not in g and any(c in RU for c in g))
 # поля Bash, которые не меняют того, что выполнится; флаги вне песочницы и в фоне — пометкой в вопросе
 BASH_KEYS = {"command", "description", "timeout", "dangerouslyDisableSandbox", "run_in_background"}
 
