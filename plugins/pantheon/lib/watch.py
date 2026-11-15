@@ -657,7 +657,7 @@ UNKNOWN_WHY = "причина неизвестна"
 def _new_wait(rec, why):
     """metis-1183: окно на другом запросе — новое ожидание, хотя между проходами оно из ожидания не выходило (владелец
     ответил на прежний за минуту между проходами). «Причина неизвестна» с любой стороны — не смена: журнал не прочитан."""
-    old = rec.get("why")
+    old = rec.get("known") or rec.get("why")   # последнее известное: «причина неизвестна» его не перетирает (Д1)
     return bool(old) and old != why and UNKNOWN_WHY not in (old, why)
 
 
@@ -685,7 +685,8 @@ def _wait_card(name, sid, why, since, t):
 
 def wait_cards(agents, waiting, t):
     """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
-    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке), дальше — каждый час (metis-1183). Окно на
+    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке), дальше — каждый час только строка Зевсу,
+    без macOS: часовые уведомления съели бы дневной бюджет (metis-1183). Окно на
     другом запросе — новое ожидание: прежняя карточка закрыта, отсчёт заново (_new_wait). Ключ — имя окна: та же сессия или её
     замена под тем же именем — одна карточка и один повтор (одинаковые «ждёт вас» склеиваются). Окно вышло из
     ожидания — карточка закрывается, запись снимается. Пустой claude agents — ничего не закрываем (сбой списка, а не
@@ -719,18 +720,20 @@ def wait_cards(agents, waiting, t):
             rec = st.setdefault(name, {"since": t})
             since = rec["since"] if isinstance(rec.get("since"), (int, float)) and rec["since"] <= t else t
             rec.update(since=since, sid=sid, why=why)
+            if why != UNKNOWN_WHY:
+                rec["known"] = why
             if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
                 rec["card"] = _wait_card(name, sid, why, since, t)
             last = rec.get("repeated")
             if t - since >= WAIT_REPEAT_AFTER and (not isinstance(last, (int, float)) or t - last >= WAIT_REMIND_EVERY):
-                if isinstance(last, (int, float)):
-                    P.clear_fault(f"wait-repeat-{name}")  # once=True: без снятия часовое напоминание macOS не покажет
+                first = not isinstance(last, (int, float))
                 rec["repeated"] = t
                 mins = int((t - since) // 60)
                 card = f", карточка {rec['card']}" if rec.get("card") else ""
                 P.alert(f"окно {name} ждёт вас {mins} мин: {why}{card} — claude attach {sid}", "watch")
-                P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
-                              group=f"session-{name}", once=True)
+                if first:  # macOS — один раз на ожидание; часовые — строкой Зевсу, дневной бюджет уведомлений цел
+                    P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
+                                  group=f"session-{name}", once=True)
         P.write_json(sp, st)
 
 

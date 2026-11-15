@@ -479,7 +479,8 @@ def test_wait_new_request_new_card_1183():
 
 
 def test_wait_hourly_reminder_1183():
-    """metis-1183: пока окно ждёт — после повтора через 30 мин напоминание каждый час (строка и macOS), а не одно."""
+    """metis-1183: пока окно ждёт — после повтора через 30 мин напоминание каждый час строкой Зевсу, а не одно;
+    macOS — только на первом повторе (ревью argus #492, Б1: часовые съели бы дневной бюджет уведомлений)."""
     e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
     e.notify_mode(7200)
     e.run("watch", t=T0)
@@ -489,7 +490,28 @@ def test_wait_hourly_reminder_1183():
     e.run("watch", t=T0 + 1860 + 3660)
     check(e.alerts().count("окно coord-x ждёт вас") == 2 and "ждёт вас 92 мин" in e.alerts(),
           f"1183: нет часового напоминания: {e.alerts()}")
-    check(e.sent().count("coord-x ждёт вас") >= 2, f"1183: часовое напоминание без macOS: {e.sent()!r}")
+    sent = e.sent()
+    check("ждёт вас 31 мин" in sent and "ждёт вас 92 мин" not in sent,
+          f"1183: macOS не на первом повторе или на часовом: {sent!r}")
+
+
+def test_wait_unknown_keeps_known_1183():
+    """metis-1183, ревью argus #492 Д1: проход с «причиной неизвестна» (журнал не прочитан) не перетирает известный
+    запрос — следующий другой запрос всё равно новое ожидание."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    tp = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID + ".jsonl")
+    os.remove(tp)
+    e.run("watch", t=T0 + 1920)
+    check([c.get("status") for c in _wait_cards(e)] == ["waiting"], f"1183: неизвестная причина закрыла карточку: "
+          f"{_wait_cards(e)}")
+    with open(tp, "w") as fh:
+        fh.write(json.dumps(_tool("Bash", "tu2", {"command": "grep x y"}, T0 + 1950), ensure_ascii=False) + "\n")
+    e.run("watch", t=T0 + 1980)
+    check([c.get("status") for c in _wait_cards(e)] == ["done"], f"1183: другой запрос после неизвестной причины — не "
+          f"новое ожидание: {_wait_cards(e)}")
 
 
 def P_json(p):

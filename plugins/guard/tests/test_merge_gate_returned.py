@@ -294,6 +294,22 @@ def t_carry_unit(h):
     check("reject на S, тот же argus принял P с тем же кодом (117-b7 K2) — в силе", held(rs, opus(P, "y")) == [S])
     check("reject на S, тот же argus принял X с тем же кодом (117-b7 K2) — в силе", held(rs, opus(X, "y")) == [S])
     check("reject на S, тот же argus принял S — снят", held(rs, opus(S, "y")) == [])
+    # правило 4 (metis-1249, BA #72): тот же рецензент после своего «вернуть» принял третий head с кодом S, а merge-base
+    # у того head другая (в ветку подтянули base) — правило 3 не годится, «вернуть» снято
+    P9 = "4" * 40
+    p4 = dict(prints, **{P9: ("f-s", "mb9")})
+    check("правило 4: тот же рецензент принял P9 с кодом S (другая merge-base) — снят",
+          held(rj, opus(P9, "y"), f=p4) == [])
+    check("правило 4: «принять» P9 записано раньше «вернуть» — в силе", held(opus(P9, "y"), rj, f=p4) == [R])
+    check("правило 4: тот же рецензент принял P9 с другим кодом (другая merge-base) — в силе",
+          held(rj, opus(P9, "y"), f=dict(prints, **{P9: ("f-a", "mb9")})) == [R])
+    check("правило 4: код P9 не посчитан — в силе", held(rj, opus(P9, "y"), f=dict(prints, **{P9: None})) == [R])
+    check("правило 4: код S не посчитан — в силе", held(rj, opus(P9, "y"), f=dict(p4, **{S: None})) == [R])
+    check("правило 4: другой argus принял P9 с кодом S — в силе", held(rj, opus(P9, "x"), f=p4) == [R])
+    check("правило 4: код S — код самого R (117-b7 K2) — в силе",
+          held(rj, opus(P9, "y"), f=dict(p4, **{R: ("f-s", "mb1")})) == [R])
+    check("правило 4: код R не посчитан — в силе", held(rj, opus(P9, "y"), f=dict(p4, **{R: None})) == [R])
+    check("правило 4: тот же рецензент на P9 без перечня — в силе", held(rj, opus(P9, "y", checklist=None), f=p4) == [R])
     check("accept без перечня другого argus на S reject с R не снимает", held(rj, opus(S, "x", checklist=None)) == [R])
     # переносится только accept с перечнем на head с тем же отпечатком
     car = mg._carried([opus(P, "x"), opus(R, "z"), opus(X, "w", checklist=None), opus(S, "v")], S,
@@ -312,7 +328,8 @@ def t_carry_unit(h):
 
 def t_carry_r2(h):
     """Замечания argus к #134 (metis-0415 r2): core.worktree не сужает дифф до .git/ (п.1), «принять», записанное
-    раньше снятого «вернуть», не переносится (п.2), criss-cross — две merge-base — без отпечатка (п.3)."""
+    раньше снятого «вернуть», не переносится (п.2), criss-cross — две merge-base — отпечаток от их слияния, а при
+    конфликте баз без отпечатка (п.3, metis-1249)."""
     s = kit_history(h)
     mg = _load_merge_gate("merge_gate_carry_r2")
     kit = h.j("projects/agent-kit")
@@ -382,8 +399,40 @@ def t_carry_r2(h):
     mbs = git(kit, "merge-base", "--all", base2, head2).split()
     check("п.3: крест слияний — две merge-base", len(mbs) == 2, mbs)
     got = mg._fingerprint(gd, base2, head2)
-    check("п.3: две merge-base — отпечатка нет, «принять» не переносится",
-          got[0] is None and "единственной merge-base" in got[1], got)
+    # metis-1249: две merge-base — база диффа их слияние (виртуальная merge-base, как у git merge): собственный дифф
+    # head2 — только cc-pr.py, как у того же коммита поверх base2 (одна merge-base)
+    H.br("t-cc-pr3", base2)
+    head3 = H.put({"cc-pr.py": "p = 1\n"}, "PR: та же правка от base2")
+    git(kit, "checkout", "-q", "-f", "main")
+    git(kit, "clean", "-qfdx")
+    want = mg._fingerprint(gd, base2, head3)
+    vt = git(kit, "merge-tree", "--write-tree", *mbs)
+    check("п.3 metis-1249: две merge-base — отпечаток от их слияния, как у той же правки от одной базы",
+          got[0] is not None and got[0] == want[0] and got[1] == vt and want[1] == base2, (got, want, vt))
+    # те же две базы, но head2 ещё правит code.py — отпечаток другой
+    H.br("t-cc-pr4", head2)
+    head4 = H.put({"code.py": CODE.format(4)}, "PR: правка code.py поверх слияния")
+    git(kit, "checkout", "-q", "-f", "main")
+    git(kit, "clean", "-qfdx")
+    got4 = mg._fingerprint(gd, base2, head4)
+    check("п.3 metis-1249: две merge-base и своя правка сверху — отпечаток другой",
+          got4[0] is not None and got4[0] != got[0], (got4, got))
+    # базы, которые сами не сливаются (add/add одного файла с разным текстом), — отпечатка нет
+    H.br("t-cx-main", s["B"])
+    x2 = H.put({"cx.py": "m = 1\n"}, "main: cx.py")
+    H.br("t-cx-pr", s["B"])
+    y2 = H.put({"cx.py": "p = 2\n"}, "PR: cx.py иначе")
+    H.br("t-cx-main2", x2)
+    git(kit, "merge", "-q", "--no-edit", "--no-ff", "-X", "ours", y2)
+    base5 = git(kit, "rev-parse", "HEAD")
+    H.br("t-cx-pr2", y2)
+    git(kit, "merge", "-q", "--no-edit", "--no-ff", "-X", "ours", x2)
+    head5 = H.put({"cc-pr.py": "p = 1\n"}, "PR: правка")
+    git(kit, "checkout", "-q", "-f", "main")
+    git(kit, "clean", "-qfdx")
+    got5 = mg._fingerprint(gd, base5, head5)
+    check("п.3 metis-1249: две merge-base, их слияние с конфликтом — отпечатка нет",
+          got5[0] is None and "две merge-base" in got5[1], got5)
     # п.4: вставка после 5-го и 6-го блока периодического файла — у patch-id без номеров строк одна и та же
     per = ["A\n", " x\n"] * 20
     H.br("t-per", s["B"])
