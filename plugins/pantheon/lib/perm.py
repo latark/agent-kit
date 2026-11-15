@@ -281,8 +281,9 @@ def ask(raw):
     """Хук PermissionRequest окна роли. → (код, решение или None). Решения нет — Claude Code покажет обычный запрос."""
     role = (os.environ.get("PANTHEON_ROLE") or "").strip()
     # задача расписания (`claude -p --settings job-<роль>`): окна нет, «Открыть окно» не к чему, ждать нельзя — молчим,
-    # запрос отклонит сам Claude Code (проба argus 15.11: в -p хук PermissionRequest зовётся и ждёт синхронно)
-    if not role or role == "hq" or (os.environ.get("PANTHEON_WINDOW") or "").startswith("job-"):
+    # запрос отклонит сам Claude Code (проба argus 15.11: в -p хук PermissionRequest зовётся и ждёт синхронно).
+    # Признак окна — PANTHEON_SESSION: его ставит run_settings каждому окну, а сборка окна задачи — нет (только роль)
+    if not role or role == "hq" or not (os.environ.get("PANTHEON_SESSION") or "").strip():
         return 0, None
     ev = json.loads(raw)
     if not isinstance(ev, dict) or ev.get("hook_event_name") != "PermissionRequest" \

@@ -418,12 +418,14 @@ def taint_silent(m):
 
 
 def job_silent(m):
-    env = dict(place(), PANTHEON_WINDOW="job-clio")
+    env = place()   # env как у сборки окна задачи (settings/job-<роль>.json): роль есть, окна — нет
+    env.pop("PANTHEON_SESSION", None)
+    env.pop("PANTHEON_WINDOW", None)
     finish(start(env, run_py=m))
     return not glob.glob(os.path.join(env["PANTHEON_STATE"], "perm", "*"))
 
 
-check("задача расписания (PANTHEON_WINDOW=job-…, claude -p) — молчит, заявки нет", job_silent(RUN_PY))
+check("задача расписания (роль без PANTHEON_SESSION, claude -p) — молчит, заявки нет", job_silent(RUN_PY))
 check("флаг tg-taint сессии — молчит, заявки нет (предупреждение видно только в окне)", taint_silent(RUN_PY))
 r = scenario(win(ago=30))
 check("подделка: ответ за 30 с до заявки — не ответ", silent(r), r[:4])
@@ -444,7 +446,7 @@ MUTANTS = (
      "«Отказать» → deny", lambda m: (scenario(win("Отказать"), run_py=m)[1] or {}).get("behavior") == "deny"),
     ('if not role or role == "hq" or', "if not role or",
      "окно Зевса молчит", hq_silent),
-    ('or (os.environ.get("PANTHEON_WINDOW") or "").startswith("job-")', "",
+    ('or not (os.environ.get("PANTHEON_SESSION") or "").strip()', "",
      "задача расписания молчит", job_silent),
     ('W._base_name(z.get("name")) == "zeus"', 'z.get("name") == "zeus"',
      "передача «zeus (2)»", lambda m: bool(glob.glob(os.path.join(scenario(win(), run_py=m, agents=[ZEUS])[4][
