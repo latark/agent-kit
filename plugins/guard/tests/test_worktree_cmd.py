@@ -70,6 +70,11 @@ try:
            # F1: разбор строку не понял — сырая строка с пультом всё равно должна совпасть с образцом
            "pantheon worktree add x (", "pantheon worktree add x {", "pantheon worktree add x 'oops",
            "'pantheon' worktree add x", "~/.local/bin/pantheon.py worktree add x (", "pantheon  worktree\tadd x )",
+           # продолжение строки и обратные слэши (фоновая проверка #488): нормализация до сырой проверки
+           "pantheon \\\nworktree add x", "pantheon \\\nworktree add x (", "pantheon worktree \\\nadd x; id",
+           "pan\\theon worktree add x (", "p'ant'heon worktree add x (",
+           # разбор упал целиком, а пульт не первым словом — слова pantheon и worktree в тексте
+           "echo $(pantheon worktree add x", "echo `pantheon worktree add x", "echo ok (pantheon worktree add x",
            "pantheon worktree add /tmp/x", "pantheon worktree add ~/x", "pantheon worktree add x*",
            "pantheon worktree move a b", "pantheon worktree prune", "pantheon worktree", "pantheon worktree add",
            "PATH=/tmp pantheon worktree add x", "GIT_DIR=/x pantheon worktree add x", "env pantheon worktree add x",
@@ -96,11 +101,22 @@ try:
     m = load(src.replace('    return w is not None and w[:1] == ["worktree"]\n', "    return False\n"))
     check("мутант: правило не узнаёт пульт — env и цепочка после echo проходят",
           run("env pantheon worktree add x", m) is None and run("echo a; pantheon worktree add x; id", m) is None)
-    raw = "    raw = any(WORKTREE_RAW.match(ln) for ln in cmd.splitlines() or [\"\"])\n"
+    raw = "    raw = any(WORKTREE_RAW.match(ln) for ln in norm.splitlines() or [\"\"])\n"
     check("самопроверка мутантов: строка сырой проверки одна", src.count(raw) == 1)
-    m = load(src.replace(raw, "    raw = False\n"))
-    check("мутант F1: без сырой проверки — `pantheon worktree add x (` проходит (разбор её не понял)",
+    fl0 = "        failed = not cmds and targets == [UNRESOLVED]\n"
+    m = load(src.replace(raw, "    raw = False\n").replace(fl0, "        failed = False\n"))
+    check("мутант F1: без сырой проверки и отказа при сбое разбора — `pantheon worktree add x (` проходит",
           run("pantheon worktree add x (", m) is None)
+    nrm = "    norm = _wt_norm(cmd)\n"
+    check("самопроверка мутантов: строка нормализации одна", src.count(nrm) == 1)
+    m = load(src.replace(nrm, "    norm = cmd\n"))
+    check("мутант: без нормализации — `pan\\theon worktree add x (` проходит",
+          run("pan\\theon worktree add x (", m) is None)
+    fl = "        failed = not cmds and targets == [UNRESOLVED]\n"
+    check("самопроверка мутантов: строка сбоя разбора одна", src.count(fl) == 1)
+    m = load(src.replace(fl, "        failed = False\n"))
+    check("мутант: без отказа при сбое разбора — `echo $(pantheon worktree add x` проходит",
+          run("echo $(pantheon worktree add x", m) is None)
     m = load(src.replace("|--detach)){0,3})", "|--detach)){0,4})"))
     check("мутант Д2: четыре флага вместо трёх — образец пропускает",
           run("pantheon worktree add x --detach --base a --branch b --detach", m) is None)

@@ -4898,8 +4898,19 @@ WORKTREE_LINE = re.compile(r"[ \t]*pantheon[ \t]+worktree[ \t]+(?:list|remove[ \
                            + r"|--detach)){0,3})[ \t]*\Z")
 # сырая строка (metis-1225 F1): разбор не понял строку (`pantheon worktree add x (`) — пульт не найден, а Claude Code
 # по префиксу всё равно выпустит её мимо песочницы. Поэтому любая строка, где первое слово — pantheon (или путь к нему,
-# в кавычках или без) и следующее — worktree, обязана целиком совпасть с WORKTREE_LINE
+# в кавычках или без) и следующее — worktree, обязана целиком совпасть с WORKTREE_LINE. Строки — после нормализации
+# (_wt_norm: склеены продолжения `\`+перевод строки, убраны кавычки и обратные слэши), иначе `pantheon \<перевод>
+# worktree …` и `pan\theon worktree …` обходили бы проверку по физическим строкам. Разбор упал целиком — отказ, если в
+# нормализованном тексте есть слова pantheon и worktree
 WORKTREE_RAW = re.compile(r"""\s*["']?(?:[^\s"']*/)?pantheon(?:\.py)?["']?\s+["']?worktree(?![A-Za-z0-9_-])""")
+WORKTREE_WORDS = re.compile(r"(?<![\w-])pantheon(?:\.py)?(?![\w-])")
+
+
+def _wt_norm(cmd):
+    """Текст для сырой проверки: продолжения строки склеены, кавычки и обратные слэши убраны."""
+    return re.sub(r"[\"'\\]", "", re.sub(r"\\\r?\n", "", cmd))
+
+
 def _wt_named(n, t):
     """Команда — пульт с первым словом worktree (сам пульт, через оболочку или python; обёртки env, nohup, sudo …
     разбор разворачивает сам). По разобранным словам, а не по сырому тексту: упоминание в значении флага
@@ -4912,10 +4923,13 @@ def check_worktree_cmd(event, tool, tool_input):
     if tool != "Bash":
         return None
     cmd = tool_input.get("command") or ""
-    raw = any(WORKTREE_RAW.match(ln) for ln in cmd.splitlines() or [""])
+    norm = _wt_norm(cmd)
+    raw = any(WORKTREE_RAW.match(ln) for ln in norm.splitlines() or [""])
     if not raw:
-        _, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
-        if not any(_wt_named(n, t) for n, t in cmds):
+        targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+        failed = not cmds and targets == [UNRESOLVED]
+        if not (failed and WORKTREE_WORDS.search(norm) and re.search(r"(?<![\w-])worktree(?![\w-])", norm)) \
+                and not any(_wt_named(n, t) for n, t in cmds):
             return None
     if WORKTREE_LINE.match(cmd) and ".." not in cmd:
         return None

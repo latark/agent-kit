@@ -18,8 +18,9 @@ Claude Code (2.1.325) в песочнице закрывает запись в .
 - add --detach — копия без ветки (как `git worktree add --detach`): временная копия для прогона на слиянии не
   оставляет ветку, и повтор с тем же именем после remove проходит;
 - remove — только зарегистрированная worktree под `.claude/worktrees/`, без --force: грязную git не уберёт. --force —
-  только у копии без ветки (detached): закоммитить в ней нечего, неотслеживаемый вывод прогона убирается вместе с ней;
-  копию на ветке --force не убирает никогда;
+  только у копии, которую создала сама эта команда с --detach (метка DETACH_MARK в gitdir копии — туда окну из
+  песочницы не записать), и не во время rebase, merge, bisect (rebase-merge, rebase-apply, MERGE_HEAD, BISECT_LOG):
+  чужие detached-копии (outside, revert_check, другие сессии) и копию на ветке --force не убирает никогда;
 - git — с GIT_CONFIG_NOSYSTEM=1: системный gitconfig мимо песочницы не читается (глобальный ~/.gitconfig читается —
   в нём git-lfs владельца; остаток — README guard).
 Остаток: подмена звена пути между проверкой и git (TOCTOU) — намеренный обход, граница — песочница (README guard).
@@ -37,6 +38,8 @@ WT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)
 WT_MAX = 120
 GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+DETACH_MARK = "pantheon-detach"  # метка в gitdir копии: её создал `pantheon worktree add --detach`
+BUSY = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "BISECT_LOG")
 USAGE = ("pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list — "
          "worktree репозитория "
          "текущей папки в <репозиторий>/.claude/worktrees/<имя>")
@@ -131,6 +134,13 @@ def _add(repo, name, branch, base):
         if r.returncode != 0:
             print(f"pantheon worktree add: git worktree add не прошёл: {r.stderr.strip()[-400:]}", file=sys.stderr)
             return 1
+        gd = _gitdir(target)
+        if not gd:
+            print(f"pantheon worktree add: копия {P.tilde(target)} создана, но метка не записана (gitdir не найден) — "
+                  "remove --force её не уберёт", file=sys.stderr)
+            return 1
+        with open(os.path.join(gd, DETACH_MARK), "w", encoding="utf-8") as fh:
+            fh.write("pantheon worktree add --detach\n")
         print(f"worktree {P.tilde(target)} — без ветки, от {base or 'HEAD'}")
         return 0
     if _git(["check-ref-format", "--branch", branch], repo).returncode != 0:
@@ -163,6 +173,13 @@ def _listed(repo):
     return out
 
 
+def _gitdir(target):
+    """Настоящий gitdir копии (<repo>/.git/worktrees/<id>) или None."""
+    r = _git(["rev-parse", "--absolute-git-dir"], target)
+    d = r.stdout.strip()
+    return os.path.realpath(d) if r.returncode == 0 and d and os.path.isdir(d) else None
+
+
 def _remove(repo, name, force=False):
     target = _target(repo, name, create=False)
     if not os.path.isdir(target) or os.path.islink(target):
@@ -174,9 +191,18 @@ def _remove(repo, name, force=False):
     if force and not detached:
         raise Refuse(f"{P.tilde(target)} — на ветке: --force только у копии без ветки (add --detach); "
                      "закоммить или убери изменения сам")
+    gd = _gitdir(target) if force else None
+    if force and not (gd and os.path.isfile(os.path.join(gd, DETACH_MARK))):
+        raise Refuse(f"{P.tilde(target)} — копия без ветки, но создана не `pantheon worktree add --detach` (метки нет): "
+                     "--force только у своих временных копий")
+    busy = [b for b in BUSY if gd and os.path.lexists(os.path.join(gd, b))]
+    if force and busy:
+        raise Refuse(f"{P.tilde(target)} — идёт {', '.join(busy)}: --force не убирает копию посреди rebase, merge или "
+                     "bisect — доведи или прерви их сам")
     r = _git(["worktree", "remove", *(["--force"] if force else []), target], repo)
     if r.returncode != 0:
-        hint = (" — копия без ветки: `pantheon worktree remove " + name + " --force`") if detached else \
+        mine = detached and (g := _gitdir(target)) and os.path.isfile(os.path.join(g, DETACH_MARK))
+        hint = (" — своя копия без ветки: `pantheon worktree remove " + name + " --force`") if mine else \
             " (без --force: незакоммиченное не удаляется)"
         print(f"pantheon worktree remove: git worktree remove не прошёл{hint}: {r.stderr.strip()[-400:]}",
               file=sys.stderr)

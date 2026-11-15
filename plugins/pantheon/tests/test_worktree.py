@@ -6,6 +6,8 @@
 - add --detach: копия без ветки, ветки с именем копии нет, повтор с тем же именем после remove проходит; remove копии
   без ветки с неотслеживаемым выводом — отказ с подсказкой --force, remove --force её убирает; --force у копии на
   ветке — отказ 2, грязная копия цела;
+- --force — только у своей копии (метка pantheon-detach в gitdir, её пишет add --detach): чужая detached-копия
+  (git worktree add --detach мимо команды) и копия посреди merge/rebase/bisect — отказ 2, файлы целы;
 - вложенные папки направлений: владелец репозитория — самая глубокая (Д3);
 - git зовётся с GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна (F2);
 - отказ: `..`, ведущий `-`, абсолютный путь, лишние флаги и --force; ссылка на месте .claude, .claude/worktrees и звена
@@ -140,6 +142,29 @@ check("повтор add tmp-9 --detach после remove (флаги в друг
       and os.path.isdir(wt(mine, "tmp-9")), r.stderr)
 r = cli(mine, "remove", "tmp-9")
 check("remove чистой копии без ветки — код 0 без --force", r.returncode == 0, r.stderr)
+def gitdir(p):
+    return git(p, "rev-parse", "--absolute-git-dir")
+
+
+r = cli(mine, "add", "tmp-8", "--detach")
+check("add --detach пишет метку pantheon-detach в gitdir копии", r.returncode == 0
+      and os.path.isfile(os.path.join(gitdir(wt(mine, "tmp-8")), "pantheon-detach")), r.stderr)
+git(mine, "worktree", "add", "-q", "--detach", wt(mine, "ext-1"), "main")  # чужая копия без ветки: outside, сессия
+open(os.path.join(wt(mine, "ext-1"), "unsaved.txt"), "w").write("x\n")
+r = cli(mine, "remove", "ext-1", "--force")
+check("remove --force чужой detached-копии (метки нет) — отказ 2, файл цел", r.returncode == 2 and "метки нет" in r.stderr
+      and os.path.exists(os.path.join(wt(mine, "ext-1"), "unsaved.txt")), r.stderr)
+r = cli(mine, "remove", "ext-1")
+check("remove чужой грязной detached без --force — код 1, подсказки --force нет", r.returncode == 1
+      and "--force`" not in r.stderr, r.stderr)
+open(os.path.join(wt(mine, "tmp-8"), "run.log"), "w").write("x\n")
+for busy in ("MERGE_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply"):
+    bp = os.path.join(gitdir(wt(mine, "tmp-8")), busy)
+    os.makedirs(bp) if busy.startswith("rebase") else open(bp, "w").write(git(mine, "rev-parse", "HEAD") + "\n")
+    r = cli(mine, "remove", "tmp-8", "--force")
+    check(f"remove --force своей копии во время {busy} — отказ 2, копия цела", r.returncode == 2 and busy in r.stderr
+          and os.path.isdir(wt(mine, "tmp-8")), r.stderr)
+    shutil.rmtree(bp) if busy.startswith("rebase") else os.remove(bp)
 r = cli(mine, "remove", "h1", "--force")
 check("remove --force копии на ветке — отказ 2, грязный файл цел", r.returncode == 2 and "на ветке" in r.stderr
       and os.path.exists(os.path.join(wt(mine, "h1"), "dirty.txt")), r.stderr)
@@ -253,12 +278,22 @@ r = cli(deep, "add", "d3", extra={"PANTHEON_WINDOW": "hermes-z"})
 r2 = cli(deep, "add", "d4", lib=m, extra={"PANTHEON_WINDOW": "hermes-z"})
 check("мутант: владелец — самая мелкая папка — окно глубокой получает отказ", r.returncode == 0 and r2.returncode == 2,
       r2.stderr)
-m = mutant("    if force and not detached:\n", "    if False:\n")
+m = mutant("    if force and not detached:\n", "    if False:\n",
+           "    if force and not (gd and os.path.isfile(os.path.join(gd, DETACH_MARK))):\n", "    if False:\n")
 git(mine, "worktree", "add", "-q", wt(mine, "fb"), "-b", "fb-1")
 open(os.path.join(wt(mine, "fb"), "dirty.txt"), "w").write("x\n")
 r = cli(mine, "remove", "fb", "--force", lib=m)
-check("мутант: --force без проверки ветки — грязная копия на ветке убрана", r.returncode == 0
+check("мутант: --force без проверок ветки и метки — грязная копия на ветке убрана", r.returncode == 0
       and not os.path.exists(wt(mine, "fb")), r.stderr)
+m = mutant("    if force and not (gd and os.path.isfile(os.path.join(gd, DETACH_MARK))):\n", "    if False:\n")
+r = cli(mine, "remove", "ext-1", "--force", lib=m)
+check("мутант: --force без метки — чужая detached-копия с несохранённым убрана", r.returncode == 0
+      and not os.path.exists(wt(mine, "ext-1")), r.stderr)
+open(os.path.join(gitdir(wt(mine, "tmp-8")), "MERGE_HEAD"), "w").write(git(mine, "rev-parse", "HEAD") + "\n")
+m = mutant("    if force and busy:\n", "    if False:\n")
+r = cli(mine, "remove", "tmp-8", "--force", lib=m)
+check("мутант: --force без проверки merge — копия посреди merge убрана", r.returncode == 0
+      and not os.path.exists(wt(mine, "tmp-8")), r.stderr)
 m = mutant("    if branch is None:\n", "    if False:\n")
 r = cli(mine, "add", "tmp-m", "--detach", lib=m)
 check("мутант: --detach без своей ветви кода — копии без ветки нет", r.returncode != 0
