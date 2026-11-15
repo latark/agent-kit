@@ -24,6 +24,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -173,6 +174,11 @@ def silent(r, full=True):
     return r[0] == 0 and r[1] is None and (not full or waited(r) >= float(WAIT) - 0.2)
 
 
+def texts(raw):
+    """Тексты передач очереди push без заголовков записей «\x1e<время>\n» (очередь, metis-1253)."""
+    return re.sub(r"\x1e\d+\n", "", raw)
+
+
 # --- 1. заявка, передача Зевсу, allow по owner-log -----------------------------------------------------------------
 r = scenario(win(), agents=[ZEUS])
 rc, dec, sec, req, env, err, st = r
@@ -180,7 +186,7 @@ check("заявка: номер perm-<8 hex>, окно, вопрос с номе
       and len(req["id"]) == 13 and req["question"].startswith(f"[{req['id']}] Окно metis-pantheon просит разрешение:")
       and '"make build"' in req["question"] and req["options"] == ["Разрешить", "Отказать", "Открыть окно"], req)
 pushed = glob.glob(os.path.join(env["PANTHEON_STATE"], "push", "*.txt")) if req else []
-body = open(pushed[0], encoding="utf-8").read() if pushed else ""
+body = texts(open(pushed[0], encoding="utf-8").read()) if pushed else ""
 check("передано Зевсу «zeus (2)»: push его сессии с номером, perm show и perm answer, respawn его id",
       pushed and pushed[0].endswith(ZEUS["sessionId"] + ".txt") and body.startswith("[Пантеон:")
       and f"pantheon perm show {req['id']}" in body and f"pantheon perm answer {req['id']}" in body
@@ -462,7 +468,7 @@ LONG = "10"   # с: ожидание в сценариях, где ответ п
 
 def dropped(env):
     p = os.path.join(env["PANTHEON_STATE"], "push", ZEUS["sessionId"] + ".txt")
-    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+    return texts(open(p, encoding="utf-8").read()) if os.path.exists(p) else ""
 
 
 r = in_window()
