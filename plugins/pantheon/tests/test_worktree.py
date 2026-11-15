@@ -3,6 +3,11 @@
 
 - успех во временном репозитории: add (ветка = имя от HEAD, --branch/--base, уже есть ветка), list, remove; из worktree
   сессии (cwd в .claude/worktrees/<другая>) новая ложится в основную копию;
+- add --detach: копия без ветки, ветки с именем копии нет, повтор с тем же именем после remove проходит; remove копии
+  без ветки с неотслеживаемым выводом — отказ с подсказкой --force, remove --force её убирает; --force у копии на
+  ветке — отказ 2, грязная копия цела;
+- вложенные папки направлений: владелец репозитория — самая глубокая (Д3);
+- git зовётся с GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна (F2);
 - отказ: `..`, ведущий `-`, абсолютный путь, лишние флаги и --force; ссылка на месте .claude, .claude/worktrees и звена
   имени; remove папки, которая не worktree; cwd вне основной копии; репозиторий чужого направления и вне папок
   направлений (PANTHEON_WINDOW из domains.json);
@@ -109,11 +114,35 @@ check("remove: незакоммиченное — git отказал, код 1, 
 for bad in (["add", "../x"], ["add", "a/../b"], ["add", "a..b"], ["add", "-x"], ["add", "/tmp/x"], ["add", "a/"],
             ["add", "x", "--branch", "../main"], ["add", "x", "--base", "-c"], ["add", "x", "--force"],
             ["add", "x", "--branch"], ["add", "x", "--branch", "a", "--branch", "b"], ["add"], ["add", "x.lock"],
-            ["remove", "h1", "--force"], ["remove", "../mine"], ["remove"], ["list", "x"], ["move", "a", "b"], []):
+            ["remove", "h1", "--force"], ["remove", "../mine"], ["remove"], ["list", "x"], ["move", "a", "b"], [],
+            ["add", "x", "--detach", "--branch", "b"], ["add", "x", "--detach", "--detach"], ["remove", "--force", "h1"],
+            ["add", "x", "--detach", "--base", "no-such-ref"]):
     r = cli(mine, *bad)
     check(f"отказ: worktree {' '.join(bad) or '(пусто)'} → код 2", r.returncode == 2 and r.stderr.strip(), r.stderr)
 check("отказы ничего не создали", sorted(os.listdir(os.path.join(mine, ".claude", "worktrees"))) == ["b", "h1",
                                                                                                    "metis-1-a"])
+
+# --detach (Б2) и remove --force только у копии без ветки (Д3)
+r = cli(mine, "add", "tmp-9", "--detach", "--base", "main")
+check("add --detach: код 0, HEAD без ветки, ветки tmp-9 нет", r.returncode == 0
+      and git(wt(mine, "tmp-9"), "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+      and subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/tmp-9"], cwd=mine).returncode != 0,
+      r.stdout + r.stderr)
+open(os.path.join(wt(mine, "tmp-9"), "run.log"), "w").write("вывод прогона\n")
+r = cli(mine, "remove", "tmp-9")
+check("remove копии без ветки с неотслеживаемым — код 1, подсказка --force, папка цела", r.returncode == 1
+      and "pantheon worktree remove tmp-9 --force" in r.stderr and os.path.isdir(wt(mine, "tmp-9")), r.stderr)
+r = cli(mine, "remove", "tmp-9", "--force")
+check("remove --force копии без ветки — код 0, папки нет", r.returncode == 0 and not os.path.exists(wt(mine, "tmp-9"))
+      and wt(mine, "tmp-9") not in listed(mine), r.stdout + r.stderr)
+r = cli(mine, "add", "tmp-9", "--base", "main", "--detach")
+check("повтор add tmp-9 --detach после remove (флаги в другом порядке) — код 0", r.returncode == 0
+      and os.path.isdir(wt(mine, "tmp-9")), r.stderr)
+r = cli(mine, "remove", "tmp-9")
+check("remove чистой копии без ветки — код 0 без --force", r.returncode == 0, r.stderr)
+r = cli(mine, "remove", "h1", "--force")
+check("remove --force копии на ветке — отказ 2, грязный файл цел", r.returncode == 2 and "на ветке" in r.stderr
+      and os.path.exists(os.path.join(wt(mine, "h1"), "dirty.txt")), r.stderr)
 
 # отказ: ссылки
 lnk = mkrepo(os.path.join(home, "projects", "mine", "sub-l"))  # вложенный репозиторий внутри своей папки
@@ -155,6 +184,19 @@ check("окно themis-x: репозиторий вне папок направ�
       and "вне папок направлений" in r.stderr and not os.path.exists(wt(stray, "z")), r.stderr)
 r = cli(mine, "add", "own-1", extra={"PANTHEON_WINDOW": "themis-x"})
 check("окно themis-x: свой репозиторий — код 0", r.returncode == 0 and os.path.isdir(wt(mine, "own-1")), r.stderr)
+# вложенные папки направлений (Д3): mine/deep — направление hermes-z, глубже themis-x — владелец оно
+deep = mkrepo(os.path.join(mine, "deep"))
+json.dump({"domains": {"themis-x": ["~/projects/mine"], "athena-y": ["~/projects/other"],
+                       "hermes-z": ["~/projects/mine/deep"]}}, open(os.path.join(state, "domains.json"), "w"))
+r = cli(deep, "add", "d1", extra={"PANTHEON_WINDOW": "themis-x"})
+check("вложенное направление: окно внешнего (themis-x) — отказ, владелец hermes-z", r.returncode == 2
+      and "hermes-z" in r.stderr and not os.path.exists(wt(deep, "d1")), r.stderr)
+r = cli(deep, "add", "d2", extra={"PANTHEON_WINDOW": "hermes-z"})
+check("вложенное направление: окно самой глубокой папки — код 0", r.returncode == 0 and os.path.isdir(wt(deep, "d2")),
+      r.stderr)
+r = cli(mine, "add", "own-2", extra={"PANTHEON_WINDOW": "hermes-z"})
+check("вложенное направление: внешний репозиторий окну hermes-z — отказ", r.returncode == 2 and "themis-x" in r.stderr,
+      r.stderr)
 r = cli(mine, "add", "env-1", extra={"GIT_DIR": os.path.join(other, ".git"), "GIT_WORK_TREE": other})
 check("GIT_DIR окна не уводит: worktree в репозитории cwd", r.returncode == 0 and os.path.isdir(wt(mine, "env-1"))
       and not os.path.exists(wt(other, "env-1")), r.stderr)
@@ -204,6 +246,51 @@ check("мутант: без проверки направления — чужо
 m = mutant('"-c", "core.hooksPath=/dev/null", ', "")
 r = cli(other, "add", "hk2", lib=m)
 check("мутант: без core.hooksPath=/dev/null — хук окна исполнен", os.path.exists(marker), r.stderr)
+
+m = mutant("    owner = max(hits, key=lambda x: len(x[0]))[1] if hits else None\n",
+           "    owner = min(hits, key=lambda x: len(x[0]))[1] if hits else None\n")
+r = cli(deep, "add", "d3", extra={"PANTHEON_WINDOW": "hermes-z"})
+r2 = cli(deep, "add", "d4", lib=m, extra={"PANTHEON_WINDOW": "hermes-z"})
+check("мутант: владелец — самая мелкая папка — окно глубокой получает отказ", r.returncode == 0 and r2.returncode == 2,
+      r2.stderr)
+m = mutant("    if force and not detached:\n", "    if False:\n")
+git(mine, "worktree", "add", "-q", wt(mine, "fb"), "-b", "fb-1")
+open(os.path.join(wt(mine, "fb"), "dirty.txt"), "w").write("x\n")
+r = cli(mine, "remove", "fb", "--force", lib=m)
+check("мутант: --force без проверки ветки — грязная копия на ветке убрана", r.returncode == 0
+      and not os.path.exists(wt(mine, "fb")), r.stderr)
+m = mutant("    if branch is None:\n", "    if False:\n")
+r = cli(mine, "add", "tmp-m", "--detach", lib=m)
+check("мутант: --detach без своей ветви кода — копии без ветки нет", r.returncode != 0
+      or git(wt(mine, "tmp-m"), "rev-parse", "--abbrev-ref", "HEAD") != "HEAD", r.stdout + r.stderr)
+
+
+# F2: GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна — по самому вызову git (системный gitconfig в тесте не подменить)
+def git_env(src):
+    seen = {}
+
+    class Run:
+        @staticmethod
+        def run(args, **kw):
+            seen.update(kw.get("env") or {})
+            return subprocess.CompletedProcess(args, 0, "", "")
+    ns = {"__name__": "wt_under_test"}
+    exec(compile(src, "worktree.py", "exec"), ns)
+    ns["subprocess"] = Run
+    os.environ["GIT_DIR"] = "/nowhere"
+    try:
+        ns["_git"](["status"], ROOT)
+    finally:
+        del os.environ["GIT_DIR"]
+    return seen
+
+
+wsrc = open(os.path.join(LIB, "worktree.py"), encoding="utf-8").read()
+e = git_env(wsrc)
+check("git: GIT_CONFIG_NOSYSTEM=1, GIT_DIR окна снят", e.get("GIT_CONFIG_NOSYSTEM") == "1" and "GIT_DIR" not in e, e)
+nosys = '    env["GIT_CONFIG_NOSYSTEM"] = "1"\n'
+check("самопроверка мутанта: строка NOSYSTEM одна", wsrc.count(nosys) == 1)
+check("мутант: без NOSYSTEM — проверка выше краснеет", git_env(wsrc.replace(nosys, "")).get("GIT_CONFIG_NOSYSTEM") != "1")
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)

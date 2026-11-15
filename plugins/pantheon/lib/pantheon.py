@@ -80,7 +80,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
-  pantheon worktree add <имя> [--branch B] [--base REF] | remove <имя> | list   worktree репозитория текущей папки
+  pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
                                         в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
                                         песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
   pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после

@@ -48,6 +48,10 @@ try:
     OK = ("pantheon worktree add metis-1225-x", "pantheon worktree add a/b --branch metis-1-y --base origin/main",
           "pantheon worktree add t1 --base main", "pantheon worktree add t1 --branch b1", "pantheon worktree remove t1",
           "pantheon worktree list", "  pantheon   worktree  add  x  ", "pantheon task show metis-1225",
+          # Д2: флаги в любом порядке; --detach; remove --force (detached проверяет сама команда)
+          "pantheon worktree add x --base HEAD --branch b", "pantheon worktree add tmp-1 --detach --base origin/main",
+          "pantheon worktree add tmp-1 --base origin/main --detach", "pantheon worktree add tmp-1 --detach",
+          "pantheon worktree remove tmp-1 --force",
           "git worktree list", "echo worktree", "pantheon merge request 5 -R o/r",
           "pantheon task set metis-1 --note 'pantheon worktree add x — сделано'")
     for cmd in OK:
@@ -60,8 +64,12 @@ try:
            "pantheon worktree add $X", "pantheon worktree add 'x'", 'pantheon worktree add "x"',
            "pantheon worktree add ../x", "pantheon worktree add a/../b", "pantheon worktree add a..b",
            "pantheon worktree add x --branch ../main", "pantheon worktree add x --base a..b",
-           "pantheon worktree add -x", "pantheon worktree add x --force", "pantheon worktree remove x --force",
-           "pantheon worktree remove -f x", "pantheon worktree add x --base HEAD --branch b",
+           "pantheon worktree add -x", "pantheon worktree add x --force", "pantheon worktree remove x --force --force",
+           "pantheon worktree remove -f x", "pantheon worktree remove --force x",
+           "pantheon worktree add x --detach --base a --branch b --detach", "pantheon worktree add x --detach=1",
+           # F1: разбор строку не понял — сырая строка с пультом всё равно должна совпасть с образцом
+           "pantheon worktree add x (", "pantheon worktree add x {", "pantheon worktree add x 'oops",
+           "'pantheon' worktree add x", "~/.local/bin/pantheon.py worktree add x (", "pantheon  worktree\tadd x )",
            "pantheon worktree add /tmp/x", "pantheon worktree add ~/x", "pantheon worktree add x*",
            "pantheon worktree move a b", "pantheon worktree prune", "pantheon worktree", "pantheon worktree add",
            "PATH=/tmp pantheon worktree add x", "GIT_DIR=/x pantheon worktree add x", "env pantheon worktree add x",
@@ -86,8 +94,16 @@ try:
     m = load(src.replace(old, "    if WORKTREE_LINE.match(cmd):\n"))
     check("мутант: без проверки .. — a..b проходит", run("pantheon worktree add a..b", m) is None)
     m = load(src.replace('    return w is not None and w[:1] == ["worktree"]\n', "    return False\n"))
-    check("мутант: правило не узнаёт пульт — env и цепочка проходят",
-          run("env pantheon worktree add x", m) is None and run("pantheon worktree add x; id", m) is None)
+    check("мутант: правило не узнаёт пульт — env и цепочка после echo проходят",
+          run("env pantheon worktree add x", m) is None and run("echo a; pantheon worktree add x; id", m) is None)
+    raw = "    raw = any(WORKTREE_RAW.match(ln) for ln in cmd.splitlines() or [\"\"])\n"
+    check("самопроверка мутантов: строка сырой проверки одна", src.count(raw) == 1)
+    m = load(src.replace(raw, "    raw = False\n"))
+    check("мутант F1: без сырой проверки — `pantheon worktree add x (` проходит (разбор её не понял)",
+          run("pantheon worktree add x (", m) is None)
+    m = load(src.replace("|--detach)){0,3})", "|--detach)){0,4})"))
+    check("мутант Д2: четыре флага вместо трёх — образец пропускает",
+          run("pantheon worktree add x --detach --base a --branch b --detach", m) is None)
 finally:
     shutil.rmtree(root, True)
 

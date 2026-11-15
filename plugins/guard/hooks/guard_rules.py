@@ -4886,14 +4886,20 @@ def check_hq_sessync(event, tool, tool_input):
 # worktree-cmd (metis-1225, вариант Б владельца 15.11). Окну направления `pantheon worktree add|remove` выпущен мимо
 # песочницы (excludedCommands, WORKTREE_OUT в pantheon.py): Claude Code закрывает в ней запись в .git/worktrees.
 # Репозиторий, путь и имена проверяет сама команда (lib/worktree.py); guard держит форму строки, как hq-sessync: строка
-# целиком `pantheon worktree add <имя> [--branch B] [--base REF]`, `remove <имя>` или `list`, слова — по шаблону
+# целиком `pantheon worktree add <имя> [--branch B | --detach] [--base REF]` (флаги в любом порядке, повтор и
+# --branch вместе с --detach отвергает сама команда), `remove <имя> [--force]` или `list`, слова — по шаблону
 # _WT (буквы, цифры, `. _ -`, `/` между частями, без `..`). Всё остальное — отказ: `&&`, `;`, `|`, `&`,
 # перенаправления, подстановки, кавычки, префикс присваивания, env и другие обёртки, путь к пульту, лишние флаги. Иначе
 # соседняя команда или раскрытое оболочкой ушли бы мимо песочницы вместе с ней. Правило — в любой сессии: строгая форма
 # ничего не отнимает, а без окна песочницы нет.
 _WT = r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
-WORKTREE_LINE = re.compile(r"[ \t]*pantheon[ \t]+worktree[ \t]+(?:list|remove[ \t]+" + _WT + r"|add[ \t]+" + _WT
-                           + r"(?:[ \t]+--branch[ \t]+" + _WT + r")?(?:[ \t]+--base[ \t]+" + _WT + r")?)[ \t]*\Z")
+WORKTREE_LINE = re.compile(r"[ \t]*pantheon[ \t]+worktree[ \t]+(?:list|remove[ \t]+" + _WT + r"(?:[ \t]+--force)?"
+                           + r"|add[ \t]+" + _WT + r"(?:[ \t]+(?:--branch[ \t]+" + _WT + r"|--base[ \t]+" + _WT
+                           + r"|--detach)){0,3})[ \t]*\Z")
+# сырая строка (metis-1225 F1): разбор не понял строку (`pantheon worktree add x (`) — пульт не найден, а Claude Code
+# по префиксу всё равно выпустит её мимо песочницы. Поэтому любая строка, где первое слово — pantheon (или путь к нему,
+# в кавычках или без) и следующее — worktree, обязана целиком совпасть с WORKTREE_LINE
+WORKTREE_RAW = re.compile(r"""\s*["']?(?:[^\s"']*/)?pantheon(?:\.py)?["']?\s+["']?worktree(?![A-Za-z0-9_-])""")
 def _wt_named(n, t):
     """Команда — пульт с первым словом worktree (сам пульт, через оболочку или python; обёртки env, nohup, sudo …
     разбор разворачивает сам). По разобранным словам, а не по сырому тексту: упоминание в значении флага
@@ -4906,13 +4912,16 @@ def check_worktree_cmd(event, tool, tool_input):
     if tool != "Bash":
         return None
     cmd = tool_input.get("command") or ""
-    _, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
-    if not any(_wt_named(n, t) for n, t in cmds):
-        return None
+    raw = any(WORKTREE_RAW.match(ln) for ln in cmd.splitlines() or [""])
+    if not raw:
+        _, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+        if not any(_wt_named(n, t) for n, t in cmds):
+            return None
     if WORKTREE_LINE.match(cmd) and ".." not in cmd:
         return None
     return ("Правило worktree-cmd: `pantheon worktree` идёт мимо песочницы, поэтому только одной строкой "
-            "`pantheon worktree add <имя> [--branch B] [--base REF]`, `pantheon worktree remove <имя>` или "
+            "`pantheon worktree add <имя> [--branch B | --detach] [--base REF]`, `pantheon worktree remove <имя> "
+            "[--force]` или "
             "`pantheon worktree list` (metis-1225): имена из букв, цифр и . _ - (/ между частями, без ..), без кавычек, "
             "`&&`, `;`, `|`, перенаправлений, подстановок, префикса присваивания и обёрток. Папка — отдельным `cd`.")
 

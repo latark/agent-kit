@@ -1,6 +1,7 @@
 """Пантеон: worktree окна направления (metis-1225, вариант Б владельца 15.11).
 
-`pantheon worktree add <имя> [--branch B] [--base REF]`, `pantheon worktree remove <имя>`, `pantheon worktree list`.
+`pantheon worktree add <имя> [--branch B | --detach] [--base REF]`, `pantheon worktree remove <имя> [--force]`,
+`pantheon worktree list`.
 Claude Code (2.1.325) в песочнице закрывает запись в .git/worktrees, кроме worktree своей сессии, а EnterWorktree
 окнам направлений закрыт (WORKTREE_TOOLS, П9b) — `git worktree add|remove` из Bash окна падает EPERM на полпути. Мимо
 песочницы окна идут только add и remove этой команды (WORKTREE_OUT в pantheon.py), поэтому всё, что они могут,
@@ -14,7 +15,13 @@ Claude Code (2.1.325) в песочнице закрывает запись в .
   ссылки, настоящий путь родителя — внутри `.claude/worktrees` настоящего репозитория;
 - аргументов git насквозь нет: git зовётся с фиксированным PATH, без GIT_* окна, с core.hooksPath=/dev/null и
   core.fsmonitor=false (хук post-checkout из папки окна, например .husky, мимо песочницы не исполнится);
-- remove — только зарегистрированная worktree под `.claude/worktrees/`, без --force: грязную git не уберёт.
+- add --detach — копия без ветки (как `git worktree add --detach`): временная копия для прогона на слиянии не
+  оставляет ветку, и повтор с тем же именем после remove проходит;
+- remove — только зарегистрированная worktree под `.claude/worktrees/`, без --force: грязную git не уберёт. --force —
+  только у копии без ветки (detached): закоммитить в ней нечего, неотслеживаемый вывод прогона убирается вместе с ней;
+  копию на ветке --force не убирает никогда;
+- git — с GIT_CONFIG_NOSYSTEM=1: системный gitconfig мимо песочницы не читается (глобальный ~/.gitconfig читается —
+  в нём git-lfs владельца; остаток — README guard).
 Остаток: подмена звена пути между проверкой и git (TOCTOU) — намеренный обход, граница — песочница (README guard).
 
 P — модуль pantheon: его ставит загрузчик pantheon._attach до выполнения этого файла.
@@ -30,7 +37,8 @@ WT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)
 WT_MAX = 120
 GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
-USAGE = ("pantheon worktree add <имя> [--branch B] [--base REF] | remove <имя> | list — worktree репозитория "
+USAGE = ("pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list — "
+         "worktree репозитория "
          "текущей папки в <репозиторий>/.claude/worktrees/<имя>")
 
 
@@ -48,6 +56,7 @@ def _ok_name(x, what):
 def _git(args, cwd):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["PATH"] = GIT_PATH
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     return subprocess.run(["git", *GIT_SAFE, *args], cwd=cwd, env=env, capture_output=True, text=True)
 
 
@@ -110,9 +119,20 @@ def _branch_exists(repo, b):
 
 
 def _add(repo, name, branch, base):
+    """branch None — копия без ветки (--detach) от base или HEAD."""
     target = _target(repo, name, create=False)
     if os.path.lexists(target):
         raise Refuse(f"{P.tilde(target)} уже есть — другое имя или `pantheon worktree remove {name}`")
+    if branch is None:
+        if _git(["rev-parse", "--verify", "--quiet", (base or "HEAD") + "^{commit}"], repo).returncode != 0:
+            raise Refuse(f"база «{base or 'HEAD'}» — не коммит")
+        target = _target(repo, name, create=True)
+        r = _git(["worktree", "add", "--detach", target, base or "HEAD"], repo)
+        if r.returncode != 0:
+            print(f"pantheon worktree add: git worktree add не прошёл: {r.stderr.strip()[-400:]}", file=sys.stderr)
+            return 1
+        print(f"worktree {P.tilde(target)} — без ветки, от {base or 'HEAD'}")
+        return 0
     if _git(["check-ref-format", "--branch", branch], repo).returncode != 0:
         raise Refuse(f"ветка «{branch}» — не имя ветки git")
     have = _branch_exists(repo, branch)
@@ -131,23 +151,37 @@ def _add(repo, name, branch, base):
 
 
 def _listed(repo):
+    """{настоящий путь: без ветки (detached)} по `git worktree list --porcelain`."""
     r = _git(["worktree", "list", "--porcelain"], repo)
-    return [os.path.realpath(ln[9:]) for ln in r.stdout.splitlines() if ln.startswith("worktree ")] \
-        if r.returncode == 0 else []
+    out, cur = {}, None
+    for ln in r.stdout.splitlines() if r.returncode == 0 else []:
+        if ln.startswith("worktree "):
+            cur = os.path.realpath(ln[9:])
+            out[cur] = False
+        elif ln == "detached" and cur:
+            out[cur] = True
+    return out
 
 
-def _remove(repo, name):
+def _remove(repo, name, force=False):
     target = _target(repo, name, create=False)
     if not os.path.isdir(target) or os.path.islink(target):
         raise Refuse(f"{P.tilde(target)} — нет такой папки worktree")
-    if os.path.realpath(target) not in _listed(repo):
+    listed = _listed(repo)
+    if os.path.realpath(target) not in listed:
         raise Refuse(f"{P.tilde(target)} — не worktree этого репозитория (git worktree list)")
-    r = _git(["worktree", "remove", target], repo)
+    detached = listed[os.path.realpath(target)]
+    if force and not detached:
+        raise Refuse(f"{P.tilde(target)} — на ветке: --force только у копии без ветки (add --detach); "
+                     "закоммить или убери изменения сам")
+    r = _git(["worktree", "remove", *(["--force"] if force else []), target], repo)
     if r.returncode != 0:
-        print(f"pantheon worktree remove: git worktree remove не прошёл (без --force: незакоммиченное не "
-              f"удаляется): {r.stderr.strip()[-400:]}", file=sys.stderr)
+        hint = (" — копия без ветки: `pantheon worktree remove " + name + " --force`") if detached else \
+            " (без --force: незакоммиченное не удаляется)"
+        print(f"pantheon worktree remove: git worktree remove не прошёл{hint}: {r.stderr.strip()[-400:]}",
+              file=sys.stderr)
         return 1
-    print(f"worktree {P.tilde(target)} убрана (ветка осталась)")
+    print(f"worktree {P.tilde(target)} убрана" + ("" if detached else " (ветка осталась)"))
     return 0
 
 
@@ -156,13 +190,19 @@ def _parse_add(rest):
         raise Refuse("нужно имя worktree")
     name, opts, it = _ok_name(rest[0], "имя"), {}, iter(rest[1:])
     for a in it:
-        if a not in ("--branch", "--base") or a in opts:
-            raise Refuse(f"лишнее слово «{a}» — только --branch B и --base REF, по разу")
+        if a not in ("--branch", "--base", "--detach") or a in opts:
+            raise Refuse(f"лишнее слово «{a}» — только --branch B или --detach и --base REF, по разу")
+        if a == "--detach":
+            opts[a] = True
+            continue
         v = next(it, None)
         if v is None:
             raise Refuse(f"после {a} нужно значение")
         opts[a] = _ok_name(v, "ветка" if a == "--branch" else "база")
-    return name, opts.get("--branch") or name, opts.get("--base")
+    if "--detach" in opts and "--branch" in opts:
+        raise Refuse("--detach и --branch вместе нельзя: копия либо без ветки, либо на ветке")
+    branch = None if "--detach" in opts else (opts.get("--branch") or name)
+    return name, branch, opts.get("--base")
 
 
 def worktree_cmd(rest, cwd=None):
@@ -174,11 +214,11 @@ def worktree_cmd(rest, cwd=None):
             repo = _repo(cwd)
             _own(repo)
             return _add(repo, name, branch, base)
-        if sub == "remove" and len(rest) == 1:
+        if sub == "remove" and (len(rest) == 1 or (len(rest) == 2 and rest[1] == "--force")):
             name = _ok_name(rest[0], "имя")
             repo = _repo(cwd)
             _own(repo)
-            return _remove(repo, name)
+            return _remove(repo, name, force=len(rest) == 2)
         if sub == "list" and not rest:
             repo = _repo(cwd)
             base = os.path.join(repo, ".claude", "worktrees")

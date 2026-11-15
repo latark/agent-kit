@@ -1,7 +1,8 @@
 """Пантеон: пачка — одна ветка и один PR (metis-0757, решение владельца 03.11 [zeus-fast-2d]).
 
 `pantheon batch start <story>` — ветка batch/<story> от origin/main и worktree .claude/worktrees/batch-<story> в
-репозитории текущей папки. `pantheon batch pr <story>` — один PR этой ветки в main (уже открыт — обновляет его тело).
+репозитории текущей папки — общей командой `pantheon worktree add` (metis-1226). fetch без сети — предупреждение и
+имеющийся origin/main; в песочнице окна — подсказка `pantheon worktree add …` и повтор start, который запомнит ветку. `pantheon batch pr <story>` — один PR этой ветки в main (уже открыт — обновляет его тело).
 Closes в теле — только задачам пачки, чей номер есть в коммитах ветки от origin/main (сообщение коммита или имя влитой
 ветки): по Closes плановый проход (lib/autoclose.py) ставит задаче review при открытом PR и done при слиянии, и
 недоделанная задача не должна закрыться вместе с пачкой. Остальные открытые — списком «не вошли», без Closes.
@@ -131,24 +132,69 @@ def _root(cwd):
     return os.path.dirname(r.stdout.strip().rstrip("/"))
 
 
-def _start(sid, cwd):
+def _wt_branch(root, wt):
+    """Ветка worktree по пути wt (refs/heads/… без приставки) или None — такой worktree у репозитория нет."""
+    r = _git(["worktree", "list", "--porcelain"], root)
+    cur = None
+    for ln in r.stdout.splitlines() if r.returncode == 0 else []:
+        if ln.startswith("worktree "):
+            cur = os.path.realpath(ln[9:])
+        elif ln.startswith("branch refs/heads/") and cur == os.path.realpath(wt):
+            return ln[len("branch refs/heads/"):]
+    return None
+
+
+def _wt_writable(root):
+    """Можно ли писать в .git/worktrees: в песочнице окна Claude Code закрывает её (EPERM), git упал бы на полпути."""
+    r = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root)
+    d = os.path.join(r.stdout.strip().rstrip("/"), "worktrees")
+    probe = os.path.join(d, f".pantheon-probe-{os.getpid()}")
+    try:
+        os.makedirs(d, exist_ok=True)
+        os.mkdir(probe)
+        os.rmdir(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _start(sid, cwd, head=None):
+    """Ветка batch/<sid> от origin/main и копия batch-<sid> — через общую команду pantheon worktree add (metis-1226):
+    те же проверки пути и имени. fetch без сети — не провал: берётся имеющийся origin/main. В песочнице окна (запись в
+    .git/worktrees закрыта) — подсказка `pantheon worktree add …` (она идёт мимо песочницы) и повтор start: ветка и
+    копия уже есть, а в карточке ветки нет — start её запоминает."""
     root = _root(cwd)
     if not root:
         print("pantheon batch start: текущая папка не в git-репозитории", file=sys.stderr)
         return 2
-    br = batch_branch(sid)
+    br, name = batch_branch(sid), "batch-" + sid
+    wt = os.path.join(root, ".claude", "worktrees", name)
     if _git(["rev-parse", "--verify", "--quiet", "refs/heads/" + br], root).returncode == 0:
-        print(f"pantheon batch start: ветка {br} уже есть — работай в ней", file=sys.stderr)
+        if _wt_branch(root, wt) == br and (head or {}).get("branch") != br:
+            _remember(sid, {"branch": br}, f"ветка пачки {br}")
+            print(f"ветка {br} и копия {wt} уже есть — ветка записана в карточку пачки\nPR — pantheon batch pr {sid}")
+            return 0
+        hint = "" if _wt_branch(root, wt) == br else f" (копии нет — `pantheon worktree add {name} --branch {br}`)"
+        print(f"pantheon batch start: ветка {br} уже есть — работай в ней{hint}", file=sys.stderr)
         return 1
     f = _git(["fetch", "-q", "origin", BASE], root)
+    have = _git(["rev-parse", "--verify", "--quiet", "origin/" + BASE + "^{commit}"], root)
+    if have.returncode != 0:
+        print(f"pantheon batch start: origin/{BASE} нет, и git fetch не прошёл: {f.stderr.strip()[:300]}",
+              file=sys.stderr)
+        return 1
     if f.returncode != 0:
-        print(f"pantheon batch start: git fetch origin {BASE} не прошёл: {f.stderr.strip()[:300]}", file=sys.stderr)
+        print(f"pantheon batch start: git fetch origin {BASE} не прошёл ({f.stderr.strip()[:200]}) — беру имеющийся "
+              f"origin/{BASE} {have.stdout.strip()[:12]}, он может отставать", file=sys.stderr)
+    cmd = ["add", name, "--branch", br, "--base", "origin/" + BASE]
+    if not _wt_writable(root):
+        print(f"pantheon batch start: запись в .git/worktrees закрыта (песочница окна) — создай копию командой\n"
+              f"  pantheon worktree {' '.join(cmd)}\nи повтори pantheon batch start {sid}: он запишет ветку в карточку",
+              file=sys.stderr)
         return 1
-    wt = os.path.join(root, ".claude", "worktrees", "batch-" + sid)
-    a = _git(["worktree", "add", "-q", "-b", br, wt, "origin/" + BASE], root)
-    if a.returncode != 0:
-        print(f"pantheon batch start: git worktree add не прошёл: {a.stderr.strip()[:300]}", file=sys.stderr)
-        return 1
+    rc = P.worktree_cmd(cmd, cwd=root)
+    if rc != 0:
+        return rc
     _remember(sid, {"branch": br}, f"ветка пачки {br}")
     print(f"ветка {br} от origin/{BASE}, копия {wt}\nзадачи пачки — коммитами или слияниями в неё, узкие тесты; "
           f"PR — pantheon batch pr {sid}")
@@ -205,4 +251,4 @@ def batch_cmd(args, cwd=None):
     if tasks is None:
         print(f"pantheon batch {sub}: {why}", file=sys.stderr)
         return 1
-    return _start(sid, cwd) if sub == "start" else _pr(sid, tasks, cwd, dry)
+    return _start(sid, cwd, tasks[sid][1]) if sub == "start" else _pr(sid, tasks, cwd, dry)
