@@ -2671,9 +2671,17 @@ def zeus_clean(agents, t):
     P.write_json(stp, st)
 
 
+def _zeus_tab(agents):
+    """Живая «zeus» или вкладка терминала с этим именем или его копией (P.live_copies: claude agents и реестр
+    ~/.claude/sessions). Интерактивной вкладки нет в фоновых сессиях, а fresh_start отказал бы на ней (fresh-tab, код 1)
+    — и каждый час две тревоги (находка argus Д4, metis-1251)."""
+    return any(x.get("name") == "zeus" or not x.get("id") or x.get("kind") == "interactive"
+               for x in P.live_copies("zeus", agents))
+
+
 def zeus_rename(t):
     """metis-1251 (слово владельца 15.11): окно Зевса всегда «zeus». Живая фоновая «zeus (N)» (Claude Code дал суффикс,
-    когда «zeus» была занята) при простое Зевса и без живой «zeus» — перезапуск той же переписки под именем zeus:
+    когда «zeus» была занята) при простое Зевса, без живой «zeus» и без вкладки терминала с этим именем (_zeus_tab) — перезапуск той же переписки под именем zeus:
     P.fresh_start(resume=<sessionId>) = claude stop, ждём свободного имени, `claude --resume <сессия> --bg --agent hq
     --name zeus`, check_new_name. Простой — те же условия, что у очистки (zeus_clean_check без (1) «контекст»): не
     идёт ход, нет вопроса, всё сохранено, с конца хода ≥ ZEUS_IDLE_MIN; и защиты zeus_hold. Мёртвую «zeus» убираем
@@ -2683,7 +2691,8 @@ def zeus_rename(t):
     agents = P.agents_all() or []  # свежий список: очистка Зевса выше могла только что поднять «zeus»
     bgs = [a for a in agents if a.get("id") and a.get("kind") in (None, "background")]
     alive = [a for a in bgs if a.get("state") not in ("stopped", "failed")]  # как в zeus_clean: done — ждёт ввода
-    if any(a.get("name") == "zeus" and (a.get("state") != "done" or a.get("pid")) for a in alive):
+    if any(a.get("name") == "zeus" and (a.get("state") != "done" or a.get("pid")) for a in alive) \
+            or _zeus_tab(agents):
         return
     zs = [a for a in alive if re.fullmatch(r"zeus \(\d+\)", str(a.get("name") or "")) and a.get("sessionId")
           and _hq_copy(a)]
@@ -2704,7 +2713,8 @@ def zeus_rename(t):
         """Под блокировкой имени, перед claude stop: те же условия по свежему claude agents."""
         now = P.agents_all() or []
         mine = [x for x in now if x.get("sessionId") == a["sessionId"] and _hq_copy(x)]
-        if not mine or any(x.get("name") == "zeus" and x.get("state") not in ("stopped", "failed") for x in now):
+        if not mine or any(x.get("name") == "zeus" and x.get("state") not in ("stopped", "failed") for x in now) \
+                or _zeus_tab(now):
             return "Зевса нет в claude agents или «zeus» уже есть"
         return zeus_hold() or "; ".join(s_ for n_, s_ in zeus_clean_check(mine[0], tp)[0] if n_ != 1) or None
 
