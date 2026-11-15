@@ -406,9 +406,21 @@ def hq_silent(m):
     return not glob.glob(os.path.join(env["PANTHEON_STATE"], "perm", "*"))
 
 
+def job_silent(m):
+    env = dict(place(), PANTHEON_WINDOW="job-clio")
+    finish(start(env, run_py=m))
+    return not glob.glob(os.path.join(env["PANTHEON_STATE"], "perm", "*"))
+
+
+check("задача расписания (PANTHEON_WINDOW=job-…, claude -p) — молчит, заявки нет", job_silent(RUN_PY))
+r = scenario(win(ago=30))
+check("подделка: ответ за 30 с до заявки — не ответ", silent(r), r[:4])
+
 MUTANTS = (
-    ('if not head.endswith(" у Зевса") or t < int(since):', "if False:",
-     "ответ старше заявки", lambda m: silent(scenario(win(ago=120), run_py=m))),
+    ("or t < int(since):", ":",
+     "ответ раньше заявки, но в окне поиска", lambda m: silent(scenario(win(ago=30), run_py=m))),
+    ('not head.endswith(" у Зевса") or ', "",
+     "галочка доски с верным вопросом", lambda m: silent(scenario(board, run_py=m))),
     ('norm(lines[0][8:]).rstrip("*_ ") != norm(expected)', "False",
      "другой вопрос с тем же номером", lambda m: silent(scenario(win(q=lambda q: q["question"].replace(
          "make build", "rm -rf ~")), run_py=m))),
@@ -418,8 +430,10 @@ MUTANTS = (
      "ответ с заметкой", lambda m: scenario(win(extra="\nзаметка: x"), run_py=m)[1] is None),
     ('verdict in ("allow", "deny")', 'verdict in ("allow",)',
      "«Отказать» → deny", lambda m: (scenario(win("Отказать"), run_py=m)[1] or {}).get("behavior") == "deny"),
-    ('if not role or role == "hq":', "if not role:",
+    ('if not role or role == "hq" or', "if not role or",
      "окно Зевса молчит", hq_silent),
+    ('or (os.environ.get("PANTHEON_WINDOW") or "").startswith("job-")', "",
+     "задача расписания молчит", job_silent),
     ('W._base_name(z.get("name")) == "zeus"', 'z.get("name") == "zeus"',
      "передача «zeus (2)»", lambda m: bool(glob.glob(os.path.join(scenario(win(), run_py=m, agents=[ZEUS])[4][
          "PANTHEON_STATE"], "push", "*.txt")))),
@@ -443,9 +457,6 @@ MUTANTS = (
          "неразрывный пробел", "слово из одних двойников латиницы", "кириллица вне кавычек",
          "двойник знака оболочки (；)", "незакрытая кавычка", "русские буквы в адресе",
          "русское слово из одних двойников (имя ветки ≈ top)", "склейка кавычек из двойников"))),
-    ('"→" not in cmd', "True",
-     "стрелка в команде", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[
-         "стрелка в команде (вопрос её заменит)"]))),
     ("_text(cmd, len(cmd)) == cmd", "True",
      "секрет скрыт в показе", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT["секрет скрыт в показе"]))),
     ('v = CTRL.sub(" ", str(v or ""))', 'v = str(v or "")',

@@ -145,7 +145,7 @@ def exact(tool, ti):
     владелец одобрил бы не то, что выполнится (Write и Edit — содержимое не показано; проверка безопасности 15.11)."""
     cmd = ti.get("command")
     return (tool == "Bash" and set(ti) <= BASH_KEYS and isinstance(cmd, str) and cmd.strip() != ""
-            and len(cmd) <= CMD_MAX and "→" not in cmd and shown(cmd) and _text(cmd, len(cmd)) == cmd)
+            and len(cmd) <= CMD_MAX and shown(cmd) and _text(cmd, len(cmd)) == cmd)
 
 
 def question(rid, name, ev):
@@ -280,7 +280,9 @@ def decision(verdict, rid):
 def ask(raw):
     """Хук PermissionRequest окна роли. → (код, решение или None). Решения нет — Claude Code покажет обычный запрос."""
     role = (os.environ.get("PANTHEON_ROLE") or "").strip()
-    if not role or role == "hq":
+    # задача расписания (`claude -p --settings job-<роль>`): окна нет, «Открыть окно» не к чему, ждать нельзя — молчим,
+    # запрос отклонит сам Claude Code (проба argus 15.11: в -p хук PermissionRequest зовётся и ждёт синхронно)
+    if not role or role == "hq" or (os.environ.get("PANTHEON_WINDOW") or "").startswith("job-"):
         return 0, None
     ev = json.loads(raw)
     if not isinstance(ev, dict) or ev.get("hook_event_name") != "PermissionRequest" \
