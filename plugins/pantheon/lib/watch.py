@@ -50,7 +50,9 @@
 простаивающему Зевсу — push + `claude respawn`, раз на пункт и не чаще раза в 15 мин на сессию, за проход одним
 сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Ожидание дольше 5 мин — карточка
 владельцу «Ждёт вас» (окно, что просит, что делать), дольше 30 мин — повтор уведомления и строка Зевсу в тревогах, одна на
-ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Каждая проверка идёт отдельно: сбой одной
+ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Запрос уже у Зевса живой заявкой
+perm (lib/perm.py, perm_live) — ни тревоги, ни передачи, ни карточки, пока заявка ждёт; решена, снята, срок вышел или
+хук умер — обычный путь, отсчёт ожидания с первого прохода (metis-1254). Каждая проверка идёт отдельно: сбой одной
 — тревога «проверка X упала», остальные работают; время прохода — ~/.local/state/pantheon/watch-last (строка статуса и
 `pantheon status` показывают, что дежурный жив). Основания — исследование
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
@@ -682,7 +684,15 @@ def _wait_card(name, sid, why, since, t):
     return tid
 
 
-def wait_cards(agents, waiting, t):
+def _perm_live(a):
+    """Живая заявка perm окна a (P.perm_live) → номер или None; сбой — None: обычный путь, ничего не теряется."""
+    try:
+        return P.perm_live(a)
+    except Exception:  # noqa: BLE001 — без заявки дежурный спрашивает сам, как до metis-1254
+        return None
+
+
+def wait_cards(agents, waiting, t, covered=frozenset()):
     """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
     (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке), дальше — каждый час только строка Зевсу,
     без macOS: часовые уведомления съели бы дневной бюджет (metis-1183). Окно на
@@ -721,6 +731,8 @@ def wait_cards(agents, waiting, t):
             rec.update(since=since, sid=sid, why=why)
             if why != UNKNOWN_WHY:
                 rec["known"] = why
+            if name in covered:
+                continue   # metis-1254: запрос у Зевса заявкой perm — карточки и повтора нет, отсчёт since идёт
             if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
                 rec["card"] = _wait_card(name, sid, why, since, t)
             last = rec.get("repeated")
@@ -744,6 +756,7 @@ def sessions(agents, doms, t=None):
     t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
     waiting = []  # blocked этого прохода: [(имя, sid, что ждёт)] — Зевсу одним сообщением
+    covered = set()  # имена окон, чей запрос уже у Зевса живой заявкой perm (metis-1254)
     for a in agents:
         name, sid, state = a.get("name") or "", a.get("id") or a.get("sessionId") or "", a.get("state")
         if not sid or not is_pantheon(name, doms):
@@ -760,6 +773,13 @@ def sessions(agents, doms, t=None):
         if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
             state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
+        if state == "blocked" and not a.get("ghost") and _perm_live(a):
+            # metis-1254: запрос окна уже у Зевса заявкой perm-… (lib/perm.py) — ни тревоги, ни уведомления, ни
+            # передачи, ни карточки: владельца спросили бы дважды. Отсчёт ожидания идёт (wait_cards); заявка решена,
+            # снята, вышел срок или хук умер — обычный путь со следующего прохода
+            covered.add(name)
+            waiting.append((name, sid, why))
+            continue
         if a.get("ghost"):  # metis-0651: процесс умер, запись осталась — одна тревога на сессию, пока призрак виден
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
@@ -776,8 +796,8 @@ def sessions(agents, doms, t=None):
                       group=f"session-{name}", once=True)
         if state == "blocked":
             waiting.append((name, sid, why))
-    relay_zeus(agents, waiting, t)
-    wait_cards(agents, waiting, t)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
+    relay_zeus(agents, [w for w in waiting if w[0] not in covered], t)
+    wait_cards(agents, waiting, t, covered)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
     # вышла из blocked — запись снимаем: вернётся в blocked, будет новый пункт (передача раз на пункт)
     st = P.read_json(P.path("relay.json"), {})
     if isinstance(st, dict) and st:

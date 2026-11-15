@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -345,8 +346,8 @@ check("битое событие — код 0, решения нет", rc == 0 a
 # --- 5. pantheon perm answer / show ------------------------------------------------------------------------------
 
 
-def cli(env, *args):
-    r = subprocess.run([PY311, "-I", RUN_PY, "perm", *args], env=env, capture_output=True, text=True, timeout=60)
+def cli(env, *args, run_py=RUN_PY):
+    r = subprocess.run([PY311, "-I", run_py, "perm", *args], env=env, capture_output=True, text=True, timeout=60)
     return r.returncode, r.stdout + r.stderr
 
 
@@ -384,6 +385,127 @@ for role in ("hq", ""):
                         capture_output=True, text=True, timeout=10)
     check(f"оболочка хука при PANTHEON_ROLE={role or '«»'} — выход 0 до запуска pantheon", r2.returncode == 0
           and r2.stdout == "" and r2.stderr == "", (r2.returncode, r2.stderr))
+
+# --- 6б. ответ в самом окне роли — заявка снята (metis-1254, Д2 argus) ---------------------------------------------
+
+
+def use(tid):
+    return {"type": "assistant", "message": {"role": "assistant", "id": "m-" + tid, "model": "claude-x", "content": [
+        {"type": "tool_use", "id": tid, "name": "Bash", "input": EV["tool_input"]}]}}
+
+
+def result(tid):
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}}
+
+
+def rows(tp, *recs):
+    with open(tp, "a", encoding="utf-8") as fh:
+        for x in recs:
+            fh.write(json.dumps(x, ensure_ascii=False) + "\n")
+
+
+def state(env, req):
+    with open(os.path.join(env["PANTHEON_STATE"], "perm", req["id"] + ".json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def in_window(answer=True, prior=False, run_py=RUN_PY, agents=(ZEUS,)):
+    """Журнал окна: вызов tu1 ждёт разрешения (prior — тот же вызов tu0 уже выполнялся раньше); answer — владелец
+    ответил в окне, в журнале появился tool_result tu1. → (код, решение, с, req, env, stderr, заявка)."""
+    env = place(agents)
+    tp = os.path.join(env["TMPDIR"], "s-role.jsonl")
+    rows(tp, *((use("tu0"), result("tu0")) if prior else ()), use("tu1"))
+    pt = start(env, dict(EV, transcript_path=tp), run_py=run_py)
+    req = req_of(env)
+    if req and answer:
+        time.sleep(0.3)
+        with open(tp, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(result("tu1"))[:20])   # строку ещё дописывают: неполная — не в счёт
+            fh.flush()
+            time.sleep(0.5)
+            fh.write(json.dumps(result("tu1"))[20:] + "\n")
+    rc, dec, sec, err = finish(pt)
+    return rc, dec, sec, req, env, err, (state(env, req) if req else {})
+
+
+def gone(r, wait=WAIT):
+    """Хук вышел без решения раньше срока, заявка «снята: ответ в окне»."""
+    return (r[0] == 0 and r[1] is None and r[6].get("status") == "window" and 0 <= waited(r) < float(wait) - 0.3)
+
+
+LONG = "10"   # с: ожидание в сценариях, где ответ приходит через claude agents (опрос раз в 0,2 с)
+
+
+def dropped(env):
+    p = os.path.join(env["PANTHEON_STATE"], "push", ZEUS["sessionId"] + ".txt")
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+
+r = in_window()
+check("ответ в окне (в журнале сессии tool_result этого вызова) — хук молчит сразу, заявка снята (window)", gone(r),
+      r[:4] + (r[6],))
+body = dropped(r[4]) if r[3] else ""
+check("Зевсу — «perm-<id> снят» в очередь push, без второго respawn (relay был один)",
+      r[3] and f"{r[3]['id']} снят]" in body and body.startswith("[Пантеон:")
+      and open(r[4]["FAKE_LOG"]).read().strip() == "respawn abcd1234", body)
+zeus = dict(r[4], PANTHEON_ROLE="hq", PANTHEON_SESSION="zeus")
+code, out = cli(zeus, "show", r[3]["id"])
+check("perm show по снятой — «уже решено в окне», без вопроса и вариантов", code == 0 and "уже решено в окне" in out
+      and r[3]["question"] not in out and "Разрешить" not in out, out)
+log(r[4], WIN, f"вопрос: {r[3]['question']}\nответ: Разрешить")
+code, out = cli(zeus, "answer", r[3]["id"])
+check("perm answer по снятой (владелец ответил и Зевсу) — код 0, «уже решено в окне», ничего не передано",
+      code == 0 and "уже решено в окне" in out and "разрешить" not in out.lower() and "отказ" not in out, out)
+r = in_window(answer=False, prior=True)
+check("тот же вызов, выполненный раньше (tool_result до заявки), — не ответ: ждёт весь срок, timeout",
+      silent(r) and r[6].get("status") == "timeout", r[:4] + (r[6],))
+r = in_window(prior=True)
+check("тот же вызов раньше и ответ на нынешний — снята", gone(r), r[:4] + (r[6],))
+
+
+def sigterm(run_py=RUN_PY):
+    """Отказ в окне без пояснения: Claude Code обрывает ход — хук получает SIGTERM."""
+    env = place([ZEUS])
+    pt = start(env, run_py=run_py)
+    req = req_of(env)
+    time.sleep(0.3)
+    pt[0].send_signal(signal.SIGTERM)
+    rc, dec, sec, err = finish(pt)
+    return rc, dec, sec, req, env, err, (state(env, req) if req else {})
+
+
+r = sigterm()
+check("SIGTERM хуку (ход окна оборван) — код 0, решения нет, заявка снята", gone(r) and "SIGTERM" in str(
+    r[6].get("answered")), r[:4] + (r[6],))
+check("SIGTERM: Зевсу — «снят»", r[3] and f"{r[3]['id']} снят]" in dropped(r[4]), dropped(r[4]))
+
+ROLE_WIN = {"name": "metis-pantheon", "id": "r0le0001", "sessionId": "s-role", "kind": "background",
+            "state": "blocked", "waitingFor": "permission prompt", "startedAt": 2}
+
+
+def left_prompt(first="blocked", run_py=RUN_PY):
+    """Окно в claude agents было на запросе (first) и сошло с него: долгая команда пишет tool_result только по концу."""
+    env = dict(place([dict(ROLE_WIN, state=first)]), PANTHEON_PERM_RETRY="0.2",
+               PANTHEON_PERM_WAIT=LONG if first == "blocked" else WAIT)
+    pt = start(env, run_py=run_py)
+    req = req_of(env)
+    time.sleep(1.0)
+    with open(env["FAKE_AGENTS"], "w") as fh:
+        json.dump([dict(ROLE_WIN, state="working", waitingFor="")], fh)
+    rc, dec, sec, err = finish(pt)
+    return rc, dec, sec, req, env, err, (state(env, req) if req else {})
+
+
+r = left_prompt()
+check("окно в claude agents сошло с запроса — заявка снята", gone(r, LONG) and "сошло с запроса" in str(r[6].get("answered")),
+      r[:4] + (r[6],))
+r = left_prompt(first="working")
+check("окно в claude agents ни разу не было на запросе — не снята (запрос мог ещё не отрисоваться), timeout",
+      silent(r) and r[6].get("status") == "timeout", r[:4] + (r[6],))
+r = scenario(None)
+check("заявка пишет pid хука (по нему дежурный видит, что хук умер)", isinstance(r[6].get("pid"), int)
+      and r[6]["pid"] > 0, r[6])
 
 # --- 7. мутанты: откат каждой проверки ловит свой сценарий ----------------------------------------------------------
 PERM_PY = os.path.join(LIB, "perm.py")
@@ -430,7 +552,41 @@ check("флаг tg-taint сессии — молчит, заявки нет (п�
 r = scenario(win(ago=30))
 check("подделка: ответ за 30 с до заявки — не ответ", silent(r), r[:4])
 
+def window_says(m, cmd):
+    """Снятая заявка (ответ в окне) и `pantheon perm <cmd>` из того же lib: «уже решено в окне», код 0."""
+    r = in_window(run_py=m)
+    if not r[3]:
+        return False
+    zeus = dict(r[4], PANTHEON_ROLE="hq", PANTHEON_SESSION="zeus")
+    code, out = cli(zeus, cmd, r[3]["id"], run_py=m)
+    return code == 0 and "уже решено в окне" in out
+
+
 MUTANTS = (
+    ("if seen.answered():", "if False:",
+     "ответ в окне по журналу сессии", lambda m: gone(in_window(run_py=m))),
+    ("return bool((self.uses & self.done) - self.before)", "return bool(self.uses & self.done)",
+     "тот же вызов раньше — не ответ", lambda m: in_window(answer=False, prior=True, run_py=m)[6].get("status")
+     == "timeout"),
+    ('if not raw.endswith(b"\\n"):', "if False:",
+     "неполная строка журнала — дочитать потом", lambda m: gone(in_window(run_py=m))),
+    ("        signal.signal(signal.SIGTERM, _on_term)\n", "\n",
+     "SIGTERM — заявка снята", lambda m: gone(sigterm(run_py=m))),
+    ("elif state and was_blocked:", "elif state:",
+     "окно не было на запросе — не снята", lambda m: left_prompt(first="working", run_py=m)[6].get("status")
+     == "timeout"),
+    ("elif state and was_blocked:", "elif False:",
+     "окно сошло с запроса — снята", lambda m: gone(left_prompt(run_py=m), LONG)),
+    ('if req.get("status") == "window":\n        print(f"заявка {rid}: {WINDOW} — владельца',
+     'if False:\n        print(f"заявка {rid}: {WINDOW} — владельца',
+     "perm show по снятой", lambda m: window_says(m, "show")),
+    ('if req.get("status") == "window":\n        print(f"заявка {rid}: {WINDOW} — ничего',
+     'if False:\n        print(f"заявка {rid}: {WINDOW} — ничего',
+     "perm answer по снятой", lambda m: window_says(m, "answer")),
+    ('ok = bool(z and P.push_text(z["sessionId"], drop_text(req)))', "ok = False",
+     "«снят» Зевсу", lambda m: (lambda r: bool(r[3]) and f"{r[3]['id']} снят]" in dropped(r[4]))(in_window(run_py=m))),
+    ('"pid": os.getpid()}', '"pid": 0}',
+     "pid хука в заявке", lambda m: bool(scenario(None, run_py=m)[6].get("pid"))),
     ("or t < int(since):", ":",
      "ответ раньше заявки, но в окне поиска", lambda m: silent(scenario(win(ago=30), run_py=m))),
     ('not head.endswith(" у Зевса") or ', "",
