@@ -143,14 +143,17 @@ def _accept_unmarked(repo, pr, crit, M):
     if not any(T.unchecked_numbers(h, b) for _, h, b in loaded[1].values()
                if h.get("type") == "task" and h.get("status") not in ("done", "dropped")):
         return None
+    why = ""
     try:
-        r = subprocess.run([M.gh_path(), "pr", "view", str(pr), "-R", repo, "--json", "body,headRefName"],
-                           capture_output=True, text=True, timeout=M.GH_TIMEOUT, env=M.gh_env())
+        # M.gh_run: при сбое TLS (x509 в песочнице окна) — повторы с паузой (metis-1273)
+        r = M.gh_run(["pr", "view", str(pr), "-R", repo, "--json", "body,headRefName"])
         view = json.loads(r.stdout) if r.returncode == 0 else None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        view = None
+        why = "" if r.returncode == 0 else f" ({M.gh_why(r)})"
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        view, why = None, f" ({type(e).__name__})"
     if not isinstance(view, dict):
-        return "gh pr view не дал тело PR — не проверить, у всех ли пунктов «Готово, когда» есть отметка; повтори"
+        return (f"gh pr view не дал тело PR{why} — не проверить, у всех ли пунктов «Готово, когда» есть отметка; "
+                "повтори")
     have = {}
     for got in filter(None, map(T.parse_criterion, crit)):
         if got[3] in T.CRITERION_OK:
@@ -206,11 +209,18 @@ def _review_verdict(sub, args):
     return pos, {k: v for k, v in checklist.items() if v}, None
 
 
+# как outside.GIT_SAFE (импорт из outside дал бы цикл): git окна с закрытой Связкой идёт мимо песочницы (metis-1279),
+# значит конфиг и объекты репозитория не должны запускать код (fsmonitor, hooks) и подменять объекты (replace).
+REVIEW_GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c",
+                   "protocol.allow=never", "-c", "submodule.recurse=false")
+
+
 def _review_git(*args):
-    """Вывод git в текущей папке (без переменных GIT_*); None — не репозиторий или сбой."""
+    """Вывод git в текущей папке (без переменных GIT_*, с REVIEW_GIT_SAFE); None — не репозиторий или сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=30, env=env)
+        r = subprocess.run(["git", *REVIEW_GIT_SAFE, *args], capture_output=True, text=True, timeout=30,
+                           env=env)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -508,8 +518,7 @@ def _delta_round(M, repo, head, base_name, verdicts):
     tests_ok = rows is not None and not ren and M.delta_problem(rows) is None
     if why:
         try:
-            r = subprocess.run([M.gh_path(), "api", f"repos/{repo}/compare/{base_name}...{head}", "--jq", ".behind_by"],
-                               capture_output=True, text=True, timeout=M.GH_TIMEOUT, env=M.gh_env())
+            r = M.gh_run(["api", f"repos/{repo}/compare/{base_name}...{head}", "--jq", ".behind_by"])
             behind = r.stdout.strip() if r.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError):
             behind = ""

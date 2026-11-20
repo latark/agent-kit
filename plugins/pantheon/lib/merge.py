@@ -146,6 +146,7 @@ import stat
 import subprocess
 import urllib.parse
 import sys
+import time
 import types
 from datetime import datetime
 
@@ -473,6 +474,24 @@ def gh_why(r):
     return f"код {r.returncode}: {last}"
 
 
+# сбой проверки сертификата у gh (Go → Security.framework → trustd): в песочнице окна роли плавает (metis-1273)
+GH_TLS = re.compile(r"x509:|tls: failed to verify|OSStatus -26276")
+GH_TLS_RETRIES = 2
+GH_TLS_PAUSE = 2.0
+
+
+def gh_run(args, timeout=None):
+    """gh <args> → CompletedProcess (stdout, stderr — текст). Код не 0 и в stderr сбой TLS (GH_TLS) — до GH_TLS_RETRIES
+    повторов с паузой GH_TLS_PAUSE с (metis-1273); иная ошибка и успех — без повтора. Исключения subprocess (нет gh,
+    таймаут) — вызывающему, как у голого subprocess.run."""
+    for i in range(GH_TLS_RETRIES + 1):
+        r = subprocess.run([gh_path(), *args], capture_output=True, text=True, timeout=timeout or GH_TIMEOUT,
+                           env=gh_env())
+        if r.returncode == 0 or i == GH_TLS_RETRIES or not GH_TLS.search(r.stderr or ""):
+            return r
+        time.sleep(GH_TLS_PAUSE)
+
+
 def pr_view(repo, pr, why=None):
     """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles, isCrossRepository,
     headRepository, headRefName, mergeable, mergeStateStatus, body} или None — gh не ответил. isCrossRepository,
@@ -480,10 +499,9 @@ def pr_view(repo, pr, why=None):
     (merge_conflict, metis-0819); body — review_criteria_gap (metis-1260). why — список: причина None (gh_why, 1197)."""
     why = [] if why is None else why
     try:
-        r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
-                            "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles,"
-                            "isCrossRepository,headRepository,headRefName,mergeable,mergeStateStatus,body"],
-                           capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
+        r = gh_run(["pr", "view", str(pr), "-R", repo, "--json",
+                    "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles,"
+                    "isCrossRepository,headRepository,headRefName,mergeable,mergeStateStatus,body"])
         if r.returncode != 0:
             why.append(gh_why(r))
             return None
