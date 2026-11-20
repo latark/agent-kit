@@ -90,6 +90,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
+  pantheon secret put <направление> <ИМЯ> [--app ИМЯ] | list <направление>   ключ проекта скрытым вводом в
+                                        терминале владельца (lib/outside_secret.py, metis-1135); его получат
+                                        outside serve и login вне окна роли, в выводе только имя
   pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
@@ -4606,7 +4609,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             built.append(name)
     # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
     # workshop/ доски; список субагентов — вне P0-6
-    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # сверка согласия классификатору (metis-1135 п. 1, [auto-1135-consent] «везде») — и мастерской, Гестии и штабу
+    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths,
+        auto_allow=WINDOW_RULES.consent_auto_allow())
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -4647,7 +4652,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
     # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
-    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
+    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard, WINDOW_RULES.consent_auto_allow())
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
     hs["sandbox"]["network"]["allowedDomains"] = []  # сети у песочницы нет; наружу — только excludedCommands + guard
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
@@ -4682,7 +4687,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
-    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
+    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard, WINDOW_RULES.consent_auto_allow())
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     # [sb-simplify] п. 5 (metis-0523): замки имён сессий и метки сброса самозапуска — в STATE/hq-rw/{locks,autostart-reset}:
@@ -9772,8 +9777,8 @@ def main(argv):
         return read_mod().main(rest)
     if cmd == "merge":
         return merge_mod().main(rest)
-    if cmd == "outside":
-        return outside_mod().main(rest)
+    if cmd in ("outside", "secret"):   # secret — ключ проекта направления скрытым вводом владельца (metis-1135)
+        return outside_mod().main(rest if cmd == "outside" else ["secret", *rest])
     if cmd == "browser":
         return browser_mod().main(rest)
     if cmd == "handoff":
