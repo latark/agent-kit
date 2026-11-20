@@ -428,15 +428,16 @@ def main():
         ("private: ls ~/ai/knowledge — можно", "allow", br, "prometheus", True, B(f"ls {home}/ai/knowledge")),
         # metis-0823: обход папки выше — отказ, только если читает me/ или журнал; список имён и исключения — можно
         *[(f"0823 private: {n} — можно", "allow", d, r, True, x) for n, d, r, x in (
-            ("grep -r --exclude-dir=me", br, "argus", B(f"grep -rn налог {home}/ai/knowledge --exclude-dir=me")),
-            ("rg -g '!me'", br, "argus", B(f"rg налог {home}/ai/knowledge -g '!me'")),
+            ("grep -r --exclude-dir каждой личной папки", br, "argus",
+             B(f"grep -rn налог {home}/ai/knowledge --exclude-dir=me --exclude-dir=Self --exclude-dir=Areas "
+               "--exclude-dir=People")),
+            ("rg -g '!…' каждой личной папки", br, "argus",
+             B(f"rg налог {home}/ai/knowledge -g '!me' -g '!Self' -g '!Areas' -g '!People'")),
             ("find -name", br, "prometheus", B(f"find {home}/ai/knowledge -name '*.md'")),
             ("fd", br, "prometheus", B(f"fd md {home}/ai/knowledge")),
             ("grep без -r — каталог не читает", br, "argus", B(f"grep налог {home}/ai/knowledge")),
             ("Glob **/*.md по папке выше", br, "prometheus",
              ("Glob", {"pattern": "**/*.md", "path": os.path.join(home, "ai", "knowledge")})),
-            ("Grep с glob !me/**", br, "prometheus",
-             ("Grep", {"pattern": "налог", "path": os.path.join(home, "ai", "knowledge"), "glob": "!me/**"})),
             ("шаблон поиска — путь, а не цель", br, "argus", B(f"grep -rn {home}/ai plugins/")),
             ("шаблон после -m 1", br, "argus", B(f"grep -rn -m 1 {home}/ai plugins/")),
             ("путь в тексте заметки", br, "argus", B(f'pantheon task set shop-0001 --note "см. {home}/ai/knowledge/me"')),
@@ -446,6 +447,17 @@ def main():
         )],
         *[(f"0823 private: {n} — отказ", "deny", d, r, True, x) for n, d, r, x in (
             ("grep -r без исключения", br, "argus", B(f"grep -r налог {home}/ai/knowledge")),
+            # metis-0894: Self/, Areas/, People/ — личное по умолчанию, без строки в policy.toml
+            ("grep -r --exclude-dir=me — Self/, Areas/, People/ не исключены", br, "argus",
+             B(f"grep -rn налог {home}/ai/knowledge --exclude-dir=me")),
+            ("rg -g '!me' — Areas/ не исключена", br, "argus", B(f"rg налог {home}/ai/knowledge -g '!me'")),
+            ("Grep с glob !me/** — People/ не исключена", br, "prometheus",
+             ("Grep", {"pattern": "налог", "path": os.path.join(home, "ai", "knowledge"), "glob": "!me/**"})),
+            ("cat Self/", br, "argus", B(f"cat {home}/ai/knowledge/Self/profile.md")),
+            ("Read Areas/", br, "argus", R(K("Areas/health.md"))),
+            ("Write People/", br, "dev-sonnet", W(K("People/x.md"))),
+            ("Glob в Self/", br, "prometheus",
+             ("Glob", {"pattern": "Self/*.md", "path": os.path.join(home, "ai", "knowledge")})),
             ("grep -r --exclude=me — шаблон файла, не папки (находка №2)", br, "argus",
              B(f"grep -r налог {home}/ai/knowledge --exclude=me")),
             ("grep -r --exclude-dir=raw — me/ не исключена", br, "argus",

@@ -193,9 +193,11 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill, EnterWorktree) и 
 guard ловит **ошибки агента**: запись чужой памяти ролей и Edit/Write в `~/.*` и `~/Library` мимо protect-config (domain), правку чужого файла Пританея, файла задачи
 мимо `pantheon task` и доски или журнала ваших слов любой сессией Claude (pantheon-acl), пульт (кроме запуска окон), `pantheon approve` и `pantheon merge run` ролью, правку защит не той ролью (protect-config), чтение ключей
 (tg-secret; ролям из демона tg-readd — только `status` и `kickstart`; реестр демона Claude Code `roster.json` целиком — daemon-roster, поля без ключей — `pantheon roster`), пометки об авторстве Claude; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
+`Self/`, `Areas/`, `People/` в `~/ai/knowledge` — по умолчанию, и без строки в policy.toml (metis-0894),
 ключи git-crypt, журнал Пританея — только hq, chiron в окне Пританея и mnemo-brain; ключи — никому из ролей; обход папки выше
-(metis-0823): поиск — `grep -r`, `rg`, `ag`, `ack`, Grep, `find -exec` — отказ, только если внутри `me/` или журнал и они не
-исключены (`--exclude-dir=me`, `rg -g '!me'`, Grep с glob `!me/**`, журнал — `--exclude-dir=owner-log`), ключ git-crypt поиск
+(metis-0823): поиск — `grep -r`, `rg`, `ag`, `ack`, Grep, `find -exec` — отказ, только если внутри личная папка или журнал и
+они не исключены — каждая (`--exclude-dir=me --exclude-dir=Self …`, `rg -g '!me' -g '!Self' …`, журнал —
+`--exclude-dir=owner-log`; отказ называет все личные папки), ключ git-crypt поиск
 не выводит; копирование — `tar`, `zip`, `rsync`, `cp`, `ditto` — отказ, если внутри любое личное; список имён — `find`, `fd`,
 `rg --files`, `ls`, Glob — проходит, если вывод не уходит в конвейер или `$(…)`; текст сообщений и шаблон поиска (`grep -rn /Users/ …`) путём не считаются), Telegram
 и коуча chiron вне своего окна, Гестию субагентом и вне её окна, gh pr окна Пританея не по своему репозиторию (hq-telegram, chiron, hestia, hq-gh — раздел «Окно Пританея»), выгрузку личного чата Telegram в окне любой роли (tg-role), браузер владельца

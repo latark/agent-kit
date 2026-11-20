@@ -34,7 +34,7 @@ PostToolUse (Bash:
                  или называет их (metis-0823);
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
-  private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron (только в окне штаба,
+  private      — личное (me/, Self/, Areas/, People/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron (только в окне штаба,
                  PANTHEON_ROLE=hq, P0-2) и mnemo-brain (SEC-11); hq и chiron закрыты лишь ключи — отказ на явный путь
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
                  остальным обход папки выше — отказ, только если читает me/ или журнал (grep -r без --exclude-dir=me)
@@ -2709,12 +2709,13 @@ def check_pantheon(event, tool, tool_input):
 # --- private, cdp-role, push, terminal (шаг 1.2) ------------------------------------
 # Касаются ролей Пантеона и любых субагентов, как pantheon-acl: встроенный субагент координатора иначе обходил бы
 # правило. Ваши сессии без роли не ограничены.
-#   private  (SEC-11, SEC-21) — личное из [private] policy.toml (me/, ключи git-crypt, журнал штаба) читают и пишут
+#   private  (SEC-11, SEC-21) — личное из [private] policy.toml (me/, Self/, Areas/, People/ — metis-0894, ключи
+#            git-crypt, журнал штаба) читают и пишут
 #            только роли из [private].roles (hq, chiron) и главная сессия координатора из [private].coordinators
 #            (mnemo-brain). Read, Grep, Glob, правки и Bash — по явным путям: это защита от случайности; в окнах
 #            ролей Bash к личному закрыт ещё и песочницей (denyRead). Обход папки выше (metis-0823, _walk_reads):
-#            поиск (grep -r, rg, Grep, find -exec) — отказ, только если внутри me/ или журнал и они не исключены
-#            (--exclude-dir=me, rg -g '!me', glob «!me/**»): ключ git-crypt — двоичный, поиск его не выводит;
+#            поиск (grep -r, rg, Grep, find -exec) — отказ, только если внутри личная папка или журнал и они не
+#            исключены — каждая (--exclude-dir=me --exclude-dir=Self …, rg -g '!me' -g '!Self' …): ключ git-crypt — двоичный, поиск его не выводит;
 #            копирование (tar, zip, rsync, cp, ditto) — отказ, если внутри любое личное; список имён (find, fd,
 #            rg --files, ls, Glob) — можно, если вывод никуда не уходит: в конвейере (| xargs, | while read) или в
 #            $(…), `…`, <(…) — отказ, как до 0823 (bash_fed). Слова-текст (echo, git commit -m, pantheon task
@@ -2756,8 +2757,11 @@ def check_pantheon(event, tool, tool_input):
 #            помечает как ваш (origin.kind: human), и журнал ваших слов принял бы его за ваши слова.
 
 READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead", "WebFetch"}
+# metis-0894: сведения владельца — не только me/, но и Self/ (профиль, цели), Areas/ (здоровье, финансы), People/
+# (люди); решение владельца 06.11 «А — закрыть на месте». Список папок — тот же, что PERSONAL в lib/moved.py pantheon
 DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
-                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
+                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/Self", "~/ai/knowledge/Areas", "~/ai/knowledge/People",
+                             "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
                              "~/.local/state/pantheon/owner-log/zeus.md"]}
 # команды, которые обходят папку целиком: путь-предок личной папки для них — то же, что сама папка
 RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "gtar", "zip", "rsync", "cp", "gcp",
@@ -3161,11 +3165,27 @@ def check_private(event, tool, tool_input):
         return (f"Правило private: ключ git-crypt ({hits[0].replace(HOME, '~')}) роли «{role}» закрыт — коммитит не "
                 "она. Поиск по папке выше (grep -r, Grep) можно: назови путь мимо .git/git-crypt.")
     return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
-            f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал Пританея — только hq, chiron (в окне Пританея) и "
-            "mnemo-brain. Поиск по папке выше — исключи личное: grep -r --exclude-dir=me, rg -g '!me', Grep с glob "
-            "«!me/**» (журнал — --exclude-dir=owner-log) или сузь путь: raw/, wiki/, inbox/. Список имён (find, fd, "
+            f"({hits[0].replace(HOME, '~')}). {_private_hint(priv)} Список имён (find, fd, "
             "rg --files, ls, Glob) по папке выше проходит, если его вывод никуда не уходит: find в конвейере "
             "(| xargs, | while read) или в $(…) — отказ.")
+
+
+def _private_hint(priv):
+    """Отказ private называет все личные пути из [private] и как исключить каждую папку при поиске (metis-0894): после
+    Self/, Areas/, People/ одно --exclude-dir=me уже не проходит."""
+    content = _private_content(priv)
+    dirs = [p for p in content if "/owner-log/" not in p + "/"]
+    names = ", ".join(p.replace(HOME, "~") + "/" for p in dirs)
+    text = (f"Личное — {names + ', ' if names else ''}ключи git-crypt и журнал Пританея: только hq, chiron (в окне "
+            "Пританея) и mnemo-brain.")
+    base = list(dict.fromkeys(os.path.basename(p) for p in dirs))
+    if not base:
+        return text + " Поиск по папке выше — исключи журнал: --exclude-dir=owner-log, или сузь путь."
+    grep = " ".join(f"--exclude-dir={b}" for b in base)
+    rg = " ".join(f"-g '!{b}'" for b in base)
+    glob = f", Grep с glob «!{base[0]}/**»" if len(base) == 1 else ""
+    return (text + f" Поиск по папке выше — исключи каждую личную папку: grep -r {grep}, rg {rg}{glob} (журнал — "
+            "--exclude-dir=owner-log) или сузь путь: raw/, wiki/, inbox/.")
 
 
 FAKE_IP_NET = "198.18.0.0/15"  # сеть прокси с подменой адресов; ipaddress грузится в _local_url (metis-0330)

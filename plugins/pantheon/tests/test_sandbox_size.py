@@ -245,8 +245,16 @@ def main():
           if any("guard.py" in h.get("command", "") for h in g.get("hooks") or [])]  # без хука agents.py (P0-6)
     check("строгий guard окон штаба и направления: matcher с Agent|Task|Skill (hq-telegram, chiron)",
           len(gm) == 2 and all({"Agent", "Task", "Skill", "Bash", "Read"} <= set(m.split("|")) for m in gm))
+    # metis-0894: личные папки — me, Self, Areas, People (PERSONAL), два ключа git-crypt и owner-log: 7 путей, каждый
+    # в двух видах («~/…» и настоящий путь, _deny_forms) = 14; плюс 4 шаблона notifier и 4 служебные папки окон.
+    # Было 16, стало 22: рост — по два запрета на каждый новый личный путь, размножения нет (дублей нет).
+    # Порог 30 — запас на пару путей; десятки и сотни записей — это уже раздувание
+    dr = sa["sandbox"]["filesystem"]["denyRead"]
     check("окно направления: allowRead нет, запретов чтения — единицы (координаторы не раздуваются)",
-          "allowRead" not in sa["sandbox"]["filesystem"] and len(sa["sandbox"]["filesystem"]["denyRead"]) < 20)
+          "allowRead" not in sa["sandbox"]["filesystem"] and len(dr) < 30)
+    check("окно направления: в denyRead нет дублей, личные me/Self/Areas/People закрыты («~/…» и настоящий путь)",
+          len(dr) == len(set(dr)) and all(f"~/ai/knowledge/{x}" in dr and os.path.realpath(os.path.join(tmp, "ai/knowledge", x)) in dr
+                                          for x in ("me", "Self", "Areas", "People")))
 
     # [hq] (metis-0182): без раздела — штабу из policy ничего не закрыто; битый раздел — окно штаба не пересобрано,
     # прежний файл на месте, одна тревога; остальные окна собираются; исправили — пересобрано, тревога снята
