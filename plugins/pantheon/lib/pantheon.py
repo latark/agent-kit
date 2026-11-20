@@ -90,6 +90,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
+                                        serve --env NEXT_PUBLIC_ИМЯ=значение — публичный флаг в окружение dev-сервера
   pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
@@ -3107,6 +3108,11 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "enabled": True,
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
+            # macOS: доступ к com.apple.trustd — без него gh (Go, Security.framework), запущенный процессом в
+            # песочнице (pantheon review accept), падает на x509 OSStatus -26276 (metis-1273, «да» владельца 20.11
+            # «А — доступ к trustd»). Настройка Claude Code sandbox.enableWeakerNetworkIsolation; сеть и папки не шире.
+            # Окна без сети (hq, hestia, job-*) флаг снимают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL)
+            "enableWeakerNetworkIsolation": True,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else []),
             "filesystem": {
                 "allowWrite": allow,
@@ -4544,6 +4550,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
+            # metis-1279: пакет закрыл песочнице Связку — gh шлюза (review accept|delta) мимо неё (window_rules)
+            ex = data["sandbox"]["excludedCommands"]
+            ex += WINDOW_RULES.review_gh_out(data["sandbox"].get("filesystem", {}).get("denyRead"), HOME, ex)
             pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
@@ -4634,6 +4643,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         job = role_settings(own, None, memory, cache, False, private_paths, None, guard, tmp_own=[HOME])
         job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
         job["sandbox"]["network"]["allowedDomains"] = []
+        # окно без сети: trustd ходит наружу мимо прокси (AIA/OCSP/CRL) — канал выноса; флаг не даём (metis-1273)
+        job["sandbox"].pop("enableWeakerNetworkIsolation", None)
         job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
         job["env"]["PANTHEON_ROLE"] = role  # хукам: роль окна, как у штаба
         # субагенты (P0-6): главная сессия задачи зовёт только своих (хук agents.py); deny — все известные типы,
@@ -4654,6 +4665,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
     hs["sandbox"]["network"]["allowedDomains"] = []  # сети у песочницы нет; наружу — только excludedCommands + guard
+    hs["sandbox"].pop("enableWeakerNetworkIsolation", None)  # trustd мимо прокси — не окну без сети (metis-1273)
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
     hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
     # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
@@ -4694,6 +4706,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # (STATE/locks), журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
     hq["sandbox"]["filesystem"]["allowWrite"] += hq_state_dirs()
     hq["sandbox"]["network"]["allowedDomains"] = []
+    hq["sandbox"].pop("enableWeakerNetworkIsolation", None)  # trustd мимо прокси, а штабу открыто личное (metis-1273)
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
     # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
     # файлов: Read (Claude Code применяет его и к Grep, Glob) и cat/grep в песочнице

@@ -70,6 +70,19 @@ def budget_checks(pantheon, git, repo):
         r = pantheon("review", "test", "--", *cmd, cwd=repo, extra=fx)
         check(f"test — {name}: HEAVY_LOCAL_TESTS не ставится и чужая снимается", "HLT=unset" in r.stdout,
               r.stdout + r.stderr)
+    # metis-1279: git review delta идёт мимо песочницы — _review_git зовёт git с защитой, как outside.GIT_SAFE
+    gdir = os.path.join(os.path.dirname(repo), "fakegit")
+    os.makedirs(gdir, exist_ok=True)
+    glog = os.path.join(gdir, "argv.log")
+    with open(os.path.join(gdir, "git"), "w") as fh:
+        fh.write(f'#!/bin/sh\necho "$@" >> "{glog}"\nexit 1\n')
+    os.chmod(os.path.join(gdir, "git"), 0o755)
+    pantheon("review", "test", "--", "true", cwd=repo,
+             extra={"PATH": gdir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")})
+    seen = open(glog).read().splitlines() if os.path.exists(glog) else []
+    need = ("--no-replace-objects", "core.fsmonitor=false", "core.hooksPath=/dev/null", "protocol.allow=never")
+    check("_review_git: каждый вызов git с защитой GIT_SAFE (--no-replace-objects, fsmonitor, hooksPath, protocol)",
+          bool(seen) and all(all(n in ln for n in need) for ln in seen), "\n".join(seen))
     head = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     r = pantheon("review", "test", "--", "sleep", "60", cwd=repo, extra={"PANTHEON_REVIEW_TEST_BUDGET": "1"})
     check("test — команда дольше бюджета: остановлена, код 75, причина и совет в stderr, SHA не печатается",

@@ -16,11 +16,20 @@ outside, не показывая пароль роли (metis-1134).
      держит только приёмник входа (metis-1161): процесс прохода `python3 -I outside_login.py --receive <fd>` со
      своим портом из ряда серверов (сокет открывает проход и отдаёт дескриптором). Сессию он получает каналом stdin —
      ни на диске, ни в аргументах процессов её нет; в папке заявок окна файла сессии нет.
+  3а. почта сессии (user.email ответа и claim email в access_token) = TALOS_EMAIL, без учёта регистра (metis-1289):
+     не совпала или её нет — failed, приёмника нет, cookie никуда не уходят. Так роль не получает сессию другой
+     учётной записи, даже если Supabase ответил 200.
   5. роли — одноразовый адрес входа `http://127.0.0.1:<порт приёмника>/pantheon-login/<код>` (код secrets, 32 байта).
-     Первый заход по нему — ответ 302 с Set-Cookie (те же cookie @supabase/ssr, хост 127.0.0.1: cookie не делятся по
-     портам, поэтому их видит и dev-сервер) и переход на `http://127.0.0.1:<порт сервера>/`. Второй заход — отказ 410,
-     чужой путь или код — 404; после удачного захода, через RECEIVE_TTL (10 мин) или после MAX_MISSES чужих кодов
-     приёмник выходит сам. HEAD по верному коду — 405 без cookie: проверка ссылки код не сжигает. Срок чтения
+     Вход — в два шага (metis-1289): первый заход — 302 на `<адрес>/set` с `Clear-Site-Data: "cookies"`, браузер
+     стирает все cookie хоста 127.0.0.1 (всех портов: прежняя сессия любой учётной записи уходит); второй — 302 с
+     Set-Cookie (те же cookie @supabase/ssr, хост 127.0.0.1: cookie не делятся по портам, поэтому их видит и
+     dev-сервер) и переход на `http://127.0.0.1:<порт сервера>/`. Шаг /set без первого шага — 409 без cookie. Любой
+     отказ GET (повторный заход — 410, чужой код или путь — 404, срок вышел — 410) тоже несёт Clear-Site-Data:
+     неудачный или повторный вход оставляет браузер без сессии, а не с той, что в нём была. После удачного входа
+     приёмник ещё USED_GRACE (2 мин) отвечает на повтор 410 со стиранием, а не обрывом соединения: роль, у которой
+     переход не дождался медленной сборки, повтором не продолжит с непроверенной сессией. Выход — после этого срока,
+     через RECEIVE_TTL (10 мин) или после MAX_MISSES чужих кодов. HEAD по верному коду — 405 без cookie и без
+     стирания: проверка ссылки код не сжигает. Срок чтения
      запроса — REQUEST_TIMEOUT (5 с): молчащий клиент не держит однопоточный приёмник. talos просто открывает адрес
      (navigate_page) — без evaluate_script с токенами: его режет классификатор auto (Афина, 14.11).
 В итоге роли (`<rid>.result.json`), журнале прохода (logs/outside.jsonl) и runs/<rid>.json — только «вошла / не
@@ -59,6 +68,9 @@ SESSION_SUFFIX = ".session.json"    # файл сессии прежней ве�
 RECEIVE_TTL = 10 * 60               # с: срок адреса входа и жизни приёмника
 RECEIVE_READY = 5                   # с: ждать от приёмника «готов»
 MAX_MISSES = 20                     # чужих кодов — приёмник выходит
+USED_GRACE = 120                    # с: после входа приёмник ещё отвечает на повтор 410 со стиранием cookie
+SET_STEP = "/set"                   # второй шаг входа: после Clear-Site-Data — Set-Cookie
+CLEAR = ("Clear-Site-Data", '"cookies"')   # стереть cookie хоста 127.0.0.1 (все порты) — прежнюю сессию
 REQUEST_TIMEOUT = 5                 # с: срок чтения запроса одним соединением (молчащий клиент не вешает приёмник)
 LOGIN_PATH = "/pantheon-login/"
 COOKIE_MAX_AGE = 400 * 24 * 3600
@@ -156,25 +168,41 @@ def set_cookie_headers(cookies):
 
 def answer(state, method, path, now=None):
     """Ответ приёмника на запрос → (код HTTP, [(заголовок, значение)], тело). state: code, cookies, target, deadline,
-    used, misses — меняется: удачный заход GET ставит used, чужой код под LOGIN_PATH прибавляет misses. HEAD по
-    верному коду — 405 без cookie и без used: проверка ссылки код не сжигает."""
+    used, misses, cleared, used_at — меняется: первый шаг GET ставит cleared, второй (SET_STEP) — used и used_at, чужой
+    код под LOGIN_PATH прибавляет misses. Отказ на GET несёт Clear-Site-Data: неудачный или повторный вход оставляет
+    браузер без сессии (metis-1289). HEAD по верному коду — 405 без cookie, без стирания и без used: проверка ссылки
+    код не сжигает."""
     now = time.time() if now is None else now
+    # стирание — только на GET под LOGIN_PATH: запрос браузера мимо входа (/favicon.ico) сессию не трогает
+    wipe = [CLEAR] if method == "GET" and path.startswith(LOGIN_PATH) else []
+
+    def refuse(status, text):
+        return status, wipe + [("Cache-Control", "no-store")], text + " — cookie сайта стёрты; подай pantheon " \
+            "outside login заново и открой новый адрес; приложение до входа не открывай"
+
     if method not in ("GET", "HEAD") or not path.startswith(LOGIN_PATH):
-        return 404, [], "нет такого адреса"
-    code = path[len(LOGIN_PATH):].split("?", 1)[0]
+        return refuse(404, "нет такого адреса")
+    rest = path[len(LOGIN_PATH):].split("?", 1)[0]
+    step2 = rest.endswith(SET_STEP)
+    code = rest[:-len(SET_STEP)] if step2 else rest
     if not hmac.compare_digest(code.encode(), str(state["code"]).encode()):
         state["misses"] = state.get("misses", 0) + 1
-        return 404, [], "нет такого адреса"
+        return refuse(404, "нет такого адреса")
     if state.get("used"):
-        return 410, [], "адрес входа уже использован — подай pantheon outside login заново"
+        return refuse(410, "адрес входа уже использован")
     if now >= state["deadline"]:
-        return 410, [], "срок адреса входа вышел — подай pantheon outside login заново"
+        return refuse(410, "срок адреса входа вышел")
     if method == "HEAD":   # проверка ссылки (HEAD) код не сжигает: без used и без cookie (argus #453 С)
         return 405, [("Allow", "GET"), ("Cache-Control", "no-store")], "вход — только заходом GET (navigate_page)"
-    state["used"] = True
+    nocache = [("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer")]
+    if not step2:   # шаг 1: стереть все cookie хоста (прежнюю сессию любой учётной записи), затем шаг 2
+        state["cleared"] = True
+        return 302, [CLEAR, ("Location", LOGIN_PATH + code + SET_STEP)] + nocache, "вход: cookie стёрты, шаг 2"
+    if not state.get("cleared"):   # шаг 2 без стирания — cookie не ставим
+        return refuse(409, "вход начинается с адреса входа без /set")
+    state["used"], state["used_at"] = True, now
     return 302, [("Set-Cookie", h) for h in set_cookie_headers(state["cookies"])] + [
-        ("Location", state["target"]), ("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer")], \
-        "вход: переход на сервер"
+        ("Location", state["target"])] + nocache, "вход: переход на сервер"
 
 
 def handler_class(state):
@@ -208,16 +236,19 @@ def handler_class(state):
 
 def receive_main(fd):
     """Приёмник входа (процесс прохода): слушающий сокет — дескриптор fd, сессия — JSON из stdin. Готов — «ready» в
-    stdout. Выход — после удачного захода, через срок или после MAX_MISSES чужих кодов."""
+    stdout. Выход — через grace с после удачного захода (до того повтор — 410 со стиранием cookie), через срок или
+    после MAX_MISSES чужих кодов."""
     sock = socket.socket(fileno=fd)
     state = json.loads(sys.stdin.buffer.read(1024 * 1024).decode())
-    state.update(used=False, misses=0)
+    state.update(used=False, misses=0, cleared=False)
+    grace = state.get("grace", USED_GRACE)
     srv = http.server.HTTPServer(("127.0.0.1", 0), handler_class(state), bind_and_activate=False)
     srv.socket.close()
     srv.socket, srv.timeout = sock, 1
     sys.stdout.write("ready\n")
     sys.stdout.flush()
-    while not state["used"] and state["misses"] < MAX_MISSES and time.time() < state["deadline"]:
+    while state["misses"] < MAX_MISSES and time.time() < state["deadline"] \
+            and not (state["used"] and time.time() >= state["used_at"] + grace):
         srv.handle_request()
     srv.server_close()
     return 0
@@ -270,7 +301,7 @@ def spawn_receiver(sock, cookies, target):
     ok = False
     try:
         proc.stdin.write(json.dumps({"code": code, "cookies": [[c["name"], c["value"]] for c in cookies],
-                                     "target": target, "deadline": deadline}).encode())
+                                     "target": target, "deadline": deadline, "grace": USED_GRACE}).encode())
         proc.stdin.close()
         ready, _, _ = select.select([proc.stdout], [], [], RECEIVE_READY)
         ok = bool(ready) and proc.stdout.readline().strip() == b"ready"
@@ -291,6 +322,36 @@ def reap_receivers():
     """Вышедшие приёмники — дождаться (без зомби у прохода). → число живых."""
     _RECEIVERS[:] = [p for p in _RECEIVERS if p.poll() is None]
     return len(_RECEIVERS)
+
+
+def _jwt_claims(token):
+    """Середина JWT без проверки подписи (её проверяет Supabase) → dict или None."""
+    try:
+        mid = str(token).split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(mid + "=" * (-len(mid) % 4)))
+    except (IndexError, ValueError):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def session_identity(body, expected):
+    """Почта сессии = TALOS_EMAIL (без регистра) → None, иначе причина без значений (metis-1289).
+
+    Сверяются user.email ответа и claim email в access_token, если он есть; нет user.email или токен не разобрать —
+    отказ: непроверенная сессия роли не выдаётся."""
+    want = str(expected or "").strip().lower()
+    user = body.get("user") if isinstance(body.get("user"), dict) else {}
+    got = user.get("email")
+    if not want or not isinstance(got, str) or not got.strip():
+        return "почту сессии не проверить: в ответе Supabase нет user.email — вход остановлен"
+    claims = _jwt_claims(body.get("access_token"))
+    if claims is None:
+        return "почту сессии не проверить: access_token не разобрать — вход остановлен"
+    seen = [got] + ([claims["email"]] if "email" in claims else [])
+    if any(not isinstance(e, str) or e.strip().lower() != want for e in seen):
+        return "почта сессии не совпала с TALOS_EMAIL — вход остановлен, cookie не выданы; " \
+               "проверь, что TALOS_EMAIL и TALOS_PASSWORD — от тестовой учётной записи"
+    return None
 
 
 def sign_in(keys):
@@ -316,6 +377,9 @@ def sign_in(keys):
             why += f" ({type(e.reason).__name__})"   # только имена классов: ни текста, ни адреса
         return None, f"Supabase не ответил: {why}", url
     if status == 200 and isinstance(body, dict) and body.get("access_token") and body.get("refresh_token"):
+        why = session_identity(body, keys[EMAIL_KEY])
+        if why:   # чужая или непроверяемая учётная запись: ни cookie, ни приёмника (metis-1289)
+            return None, why, url
         if not body.get("expires_at") and isinstance(body.get("expires_in"), int):
             body["expires_at"] = int(time.time()) + body["expires_in"]
         return body, None, url
@@ -379,8 +443,10 @@ def handle(qdir, window, rid, req):
         return fail(f"приёмник входа не поднять: {_scrub(str(e), values)}")
     login_url = f"http://127.0.0.1:{rport}{LOGIN_PATH}{code}"
     O.log_event(id=rid, kind="login", window=window, server=sid, ok=True, cookies=len(cookies), receiver=rport)
-    note = (f"вошла: открой адрес входа {login_url} в chrome-devtools (navigate_page) — он один раз ставит cookie и "
-            f"ведёт на {origin}/. Адрес одноразовый, до {P.stamp(until)}; evaluate_script и файл сессии не нужны")
+    note = (f"вошла: открой адрес входа {login_url} в chrome-devtools (navigate_page) — он стирает cookie 127.0.0.1, "
+            f"ставит cookie сессии и ведёт на {origin}/. Адрес одноразовый, до {P.stamp(until)}; evaluate_script и "
+            "файл сессии не нужны. Адрес не привёл в приложение (отказ, 404, 410, таймаут) — стоп: приложение без "
+            "входа не открывай, подай login заново")
     # код адреса — только в итоге своей папки заявок; runs/<rid>.json читают окна, там адрес без кода (argus #453 Д)
     public = {"state": "done", "code": 0, **base, "receiver": rport, "until": P.stamp(until),
               "note": f"вошла: одноразовый адрес входа на порту {rport} — в итоге заявки у окна, подавшего её"}

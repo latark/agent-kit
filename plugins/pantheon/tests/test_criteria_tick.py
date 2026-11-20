@@ -63,6 +63,12 @@ for a in "$@"; do
   prev="$a"
 done
 if [ "$1 $2" = "pr view" ]; then
+  n=$(cat "$d/tls" 2>/dev/null || echo 0)
+  if [ "$n" -gt 0 ]; then
+    echo $((n - 1)) > "$d/tls"
+    echo "tls: failed to verify certificate: x509: OSStatus -26276" >&2
+    exit 1
+  fi
   [ -f "$d/view.json" ] && cat "$d/view.json" && exit 0
   exit 1
 fi
@@ -192,15 +198,30 @@ def test_review_cli():
                                    cmd="x")])
         base = ["review", "accept", "latark/agent-kit", "7", H1, "--opened", "a", "--ran", "b", "--unchecked", "c"]
         ok1, ok2 = crit("metis-0001", 1, A1), crit("metis-0001", 2, A2, basis="t_two")
+        calls = os.path.join(gh, "calls.log")
+        views = lambda: sum(ln.startswith("pr view ") for ln in open(calls)) if os.path.exists(calls) else 0  # noqa: E731
+        n0 = views()
         r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")
         last = (r.stderr.strip().splitlines() or [""])[-1]
         check("1260: у задач есть неотмеченные пункты, а gh не дал тело PR — код 1, причина последней строкой",
               r.returncode == 1 and "gh pr view" in last, r.stdout + r.stderr)
+        check("1273: ошибка gh не TLS — без повтора (один gh pr view)", views() - n0 == 1, views() - n0)
         view = os.path.join(gh, "view.json")
         json.dump({"body": "Closes metis-0001", "headRefName": "feature"}, open(view, "w", encoding="utf-8"))
+        tls = os.path.join(gh, "tls")
+        open(tls, "w").write("5")
+        n0 = views()
         r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")
-        check("accept с вердиктом по каждому пункту — код 0, пункты напечатаны",
-              r.returncode == 0 and f"пункт: {ok1}" in r.stdout and f"пункт: {ok2}" in r.stdout, r.stdout + r.stderr)
+        last = (r.stderr.strip().splitlines() or [""])[-1]
+        check("1273: gh падает на x509 и после повторов — код 1, три попытки, причина gh (x509) последней строкой",
+              r.returncode == 1 and views() - n0 == 3 and "x509" in last and "gh pr view" in last,
+              (views() - n0, r.stdout + r.stderr))
+        open(tls, "w").write("2")
+        n0 = views()
+        r = pan(env, *base, "--criteria", ok1, f"--criteria={ok2}")
+        check("1273: два сбоя TLS (x509) у gh pr view, третья попытка ответила — accept код 0, пункты напечатаны",
+              r.returncode == 0 and views() - n0 == 3 and f"пункт: {ok1}" in r.stdout and f"пункт: {ok2}" in r.stdout,
+              (views() - n0, r.stdout + r.stderr))
         r = pan(env, *base, "--criteria", ok1)
         last = (r.stderr.strip().splitlines() or [""])[-1]
         check("1260: accept без отметки на пункте 2 задачи из Closes — код 1, последняя строка называет только его",
