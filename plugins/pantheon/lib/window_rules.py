@@ -64,8 +64,8 @@ GATED_MERGE_RULE = (
 LEAD_DELIVERY_RULE = (
     "Pantheon Lead Delivery: In a Pantheon direction window (a coordinator main session or its lead subagent "
     "`hephaestus-*` or `apollo-*`), the following steps of the coordinator's written assignment are the delegated "
-    "task itself, NOT Auto-Mode Bypass: (1) `git push origin <commit-or-branch>:refs/heads/<branch>` or `git push "
-    "origin <branch>` (optionally `-u`) to the `origin` remote of one of this direction's repositories ({repos}), "
+    "task itself, NOT Auto-Mode Bypass: (1) `pantheon git push origin HEAD:<branch>` or `pantheon git push "
+    "origin <branch>` (bare `git push` is refused by guard, metis-0972) to the `origin` remote of one of this direction's repositories ({repos}), "
     "where <branch> is a work branch and not `main`, `master` or the repository's default branch. It does not "
     "cover `--force`, `-f`, `--force-with-lease`, a `+` refspec, deleting a branch (`--delete`, `:<branch>`), "
     "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands. (2) launching the "

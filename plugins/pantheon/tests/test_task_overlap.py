@@ -161,9 +161,9 @@ def pure():
           and "задача metis-0655 (doing, PR #248): " + GATE in text
           and f"PR #248 latark/agent-kit (ветка ci-billing-0655, metis-0655): {GATE}, {MERGE}" in text, text)
     for frag in ("gh pr view 248 -R latark/agent-kit --json state,mergedAt",
-                 "git fetch origin && git switch -c metis-0001 origin/main",
+                 "pantheon git fetch origin && git switch -c metis-0001 origin/main",
                  "pantheon task set metis-0001 status=todo depends_on=metis-0009,metis-0655",
-                 "git fetch origin && git switch -c metis-0001 origin/ci-billing-0655",
+                 "pantheon git fetch origin && git switch -c metis-0001 origin/ci-billing-0655",
                  "gh pr create -R latark/agent-kit --base ci-billing-0655",
                  "argus — только дельта своего PR: git diff origin/ci-billing-0655...HEAD",
                  "после слияния #248 (--merge): gh pr edit <свой N> -R latark/agent-kit --base main — head тот же",

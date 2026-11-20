@@ -1780,7 +1780,7 @@ def narrow_plan(d, sha, argv, line, base):
         return None, "--affected — только у проверки run-tests.py с папками плагинов (.pantheon-verify)"
     mbs = (git(d, "merge-base", "--all", base, sha) or "").split()
     if len(mbs) != 1 or not SHA_RE.fullmatch(mbs[0]):
-        return None, f"merge-base {base[:12]} и {sha[:12]} не одна или не посчитана — сделай git fetch"
+        return None, f"merge-base {base[:12]} и {sha[:12]} не одна или не посчитана — сделай pantheon git fetch"
     mp = os.path.join(os.path.dirname(parsed[0]), "affected-map.json")
     try:
         with open(os.path.join(d, mp), "rb") as fh:
@@ -2447,7 +2447,7 @@ def run_test_at(rid, d, req, window, qdir, roots, defer=None):
 
     sha = resolve_sha(common, ref) if ref else None
     if not sha:
-        return fail(f"коммита {ref or '?'} нет в клоне {d.clone}: сделай git fetch в своей копии и повтори")
+        return fail(f"коммита {ref or '?'} нет в клоне {d.clone}: сделай pantheon git fetch в своей копии и повтори")
     watch = TestWatch(rid, qdir, window, d, sha=sha, pin=True, src=d, script=script, base=req.get("base"), app=app)
     if watch.marker():
         return watch.stopped(**base)
@@ -2905,7 +2905,7 @@ def run_serve(rid, d, req, window, qdir):
         return fail("в заявке нет коммита — подай заново: pantheon outside serve")
     sha = resolve_sha(common, ref)
     if not sha:
-        return fail(f"коммита {ref} нет в клоне {clone}: сделай git fetch в своей копии и повтори")
+        return fail(f"коммита {ref} нет в клоне {clone}: сделай pantheon git fetch в своей копии и повтори")
     work = os.path.join(work_root(), rid)
     base.update({"sha": sha, "dir": work})
     save_result(qdir, rid, {"state": "preparing", **base})
@@ -4167,7 +4167,7 @@ def cmd_request(kind, args):
         ref = f.get("--base") or "origin/main"
         tip = "" if ref.startswith("-") else (git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip()
         if not SHA_RE.fullmatch(tip.lower()):
-            err(f"pantheon outside: --base {ref} — не коммит этой копии (нет — сделай git fetch)")
+            err(f"pantheon outside: --base {ref} — не коммит этой копии (нет — сделай pantheon git fetch)")
             return 2
         req["base"] = tip.lower()
     if kind == "test":   # metis-0706: коммит при заявке — по нему видно, что такой же тест уже ждёт или идёт
@@ -4177,7 +4177,7 @@ def cmd_request(kind, args):
                 if SHORT_SHA_RE.fullmatch(ref) else ""
             if not SHA_RE.fullmatch(head):
                 err(f"pantheon outside: --sha {f['--sha']} — не коммит этой копии (7–40 знаков 0-9a-f; "
-                    "нет — сделай git fetch)")
+                    "нет — сделай pantheon git fetch)")
                 return 2
             req["pin"] = True
         else:

@@ -682,6 +682,27 @@ answer и плановый проход, это скрипты, guard их не 
     `gitdir` и `HEAD` копий, кода из них не исполняет. Исключение настроек «байт в байт как у папки запуска»
     сверяет с файлом папки запуска на момент входа, а не на момент старта окна: поменял владелец файл папки запуска
     после старта — копия с новым содержимым пройдёт без пересборки окна. Файл больше 1 МБ равным не считается.
+- **git-out (metis-0972, вариант А+Б владельца 20.11).** Голый git мимо песочницы исполнял хуки и конфиг копии:
+  `.git`-файл на папку git с другим именем, `core.fsmonitor`, `core.sshCommand`, include, `refs/replace` и другие
+  пути модели угроз (reviews/threat-model-0972-git-outside.md). Поэтому голых `git push|fetch|pull` в
+  `excludedCommands` окна нет; мимо песочницы идут только `pantheon git push` и `pantheon git fetch` (`GIT_OUT` в
+  pantheon.py, у окна с SSH-remote). Гестия — исключение: её `git push` по consent (check_hestia).
+  - Обёртка (`lib/gitout.py` пантеона): папка git — настоящая (каталог `.git` или сверенная worktree основной копии),
+    явные `--git-dir`/`--work-tree`, `--no-replace-objects`, `-c core.hooksPath=/dev/null`, `core.fsmonitor=false`,
+    `core.sshCommand=ssh`, `core.pager=cat`, протоколы — только https и ssh, `--no-recurse-submodules`, push —
+    `--no-verify`. Окружение без `GIT_*`, `XDG_CONFIG_HOME`, `PAGER`, `SSH_ASKPASS`, PATH фиксирован,
+    `GIT_CONFIG_NOSYSTEM=1`. Отказ кодом 2, если в config копии есть include, includeIf, url.*, credential.*,
+    remote.*.uploadpack|receivepack|pushurl|proxy|mirror, core.hooksPath|fsmonitor|sshCommand|pager и подобное, а
+    также alternates, grafts и config.worktree. remote — только имя, его URL — только github.com/<владелец>/<репо>.
+    Флагов нет; push — только рабочая ветка (`HEAD:<ветка>`, `<ветка>[:<ветка>]`, без +, удаления, main и master),
+    fetch пишет только refs/remotes/* и теги. git в `~/ai/pantheon` (архив, `P.git`) — `git_hard` с теми же `-c`.
+  - guard (правило git-out): строка с `pantheon git` — целиком `pantheon git push|fetch` и простые слова, без флагов,
+    кавычек, `..`, цепочек, перенаправлений, подстановок, присваивания и обёрток. В окне (PANTHEON_ROLE, кроме hestia)
+    голый `git push|fetch|pull` — отказ с подсказкой, и тогда, когда слово до подкоманды не вычислить или разбор не
+    понял строку со словами git и push|fetch|pull. `pantheon git …` судят и правила push/fetch, как голый git.
+  - Остаток: подмена файлов копии между проверкой и git (TOCTOU) — намеренный обход, граница — песочница. Хуки
+    pre-push проектов (git-lfs) вне песочницы не идут. Remote не на GitHub обёртка не пускает. gh-чтение (`pr view`,
+    `checks`) читает локальный config копии, но кода не исполняет.
 - **Agent, Task и Skill при управляемых настройках.** Управляемые настройки вызывают guard только для Bash, Write,
   Edit, MultiEdit, NotebookEdit, Read, Grep, Glob и WebFetch. Поэтому эти три инструмента хук плагина проверяет и тогда,
   когда guard уже стоит в управляемых настройках. Сбой этих проверок — отказ.
