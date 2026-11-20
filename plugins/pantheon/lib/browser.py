@@ -981,6 +981,11 @@ EXPAND_DENY = re.compile(r"сохран|опубликов|принять|при
                          r"\border\b|\bbook\b|\bcall\b|\bwrite\b|message|contact|\blike\b|favou?rite|follow|subscri|"
                          r"share|\bvote\b|\bcancel\b|upload|\bjoin\b|invite", re.I)
 EXPAND_STOP = ("a", "input", "select", "option", "textarea", "label", "form")   # их нажатие — не раскрытие
+# Раскрытие — только по разрешающему признаку (находка проверки безопасности на e894d272): у цели aria-expanded или
+# aria-controls, role=tab, тег summary, или надпись из этого списка. Пустая надпись — не раскрытие
+EXPAND_WORDS = re.compile(r"подробн|показать|развернуть|раскрыть|свернуть|хронолог|электронное\s+дело|документ|"
+                          r"\bещ[её]\b|истори|сведени|информац|детал|материал|карточк|вкладк|"
+                          r"\bmore\b|details?\b|\bshow\b|expand|collapse|history|documents?\b|\binfo\b", re.I)
 FREE_TYPES = ("", "text", "search", "url", "number", "checkbox", "radio", "date",   # email и tel — не поиск
                                 "month", "week", "time", "datetime-local", "range")
 # Подпись страницы до и после отправки: адрес, число узлов, длина текста — не изменилась, значит отправка не прошла
@@ -1054,6 +1059,7 @@ const lab = n => String(n.innerText || n.value || at(n, 'aria-label') || at(n, '
 const inter = n => /^(A|BUTTON|INPUT|SELECT|OPTION|TEXTAREA|LABEL|SUMMARY)$/.test(n.tagName) || n.hasAttribute('role')
   || n.hasAttribute('onclick') || n.hasAttribute('contenteditable');
 const info = n => { const c = n.tagName === 'LABEL' ? n.control : null; return { tag: n.tagName.toLowerCase(),
+  fa: n.hasAttribute('form'), ax: n.hasAttribute('aria-expanded') || n.hasAttribute('aria-controls'),
   type: at(n, 'type').toLowerCase(), role: at(n, 'role').toLowerCase(),
   href: n.tagName === 'A' && n.hasAttribute('href') ? n.href : '', onclick: n.hasAttribute('onclick'),
   target: at(n, 'target').toLowerCase(), download: n.hasAttribute('download'), ce: n.hasAttribute('contenteditable'),
@@ -1061,7 +1067,9 @@ const info = n => { const c = n.tagName === 'LABEL' ? n.control : null; return {
   attrs: [at(n, 'aria-label'), at(n, 'title'), at(n, 'value'), at(n, 'id'), at(n, 'name'), at(n, 'class')]
     .join(' ').slice(0, 300) }; };
 const chain = []; for (let n = hit ? p : e; n && n.nodeType === 1 && chain.length < 40; n = n.parentElement) chain.push(info(n));
-const f = (e.form && e.form.tagName === 'FORM') ? e.form : e.closest('form');
+let t = e; for (let n = hit ? p : e; n && n.nodeType === 1; n = n.parentElement) if (inter(n)) { t = n; break; }
+const fo = n => (n.form && n.form.tagName === 'FORM') ? n.form : null;
+const f = fo(t) || fo(e) || t.closest('form') || e.closest('form');
 const sb = (hit ? p : e).closest('button,input[type=submit],input[type=image]'), sub = f && sb && sb.form === f ? sb : null;
 const bt = document.querySelector('base[target]'), sp = k => String(sub[k] || '');
 const fp = k => { const d = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, k); return d && d.get ? String(d.get.call(f)) : ''; };
@@ -1238,18 +1246,14 @@ def classify(facts, op):
         name = f"{f.get('name') or ''} {f.get('label') or ''}"
         if f.get("type") == "password" or f.get("auto") in IMPORTANT_AUTO or IMPORTANT_FIELD.search(name):
             return "important", f"поле «{name.strip()[:60] or f.get('type')}» — пароль или код"
-    # metis-1268: форма поиска (free_form) и нажатие вне формы (ссылка, раскрытие блока) — чтение: слова важной формы
-    # у поиска — только в надписи нажимаемой кнопки (у type — нет: ввод ничего не отправляет), а не в заголовках и
-    # подписях полей («Поиск торгов», «Номер торгов» на площадке), и площадка торгов или реестр их не закрывает
-    search = search_button(facts, op) and free_form(facts, op) is not None
-    reading = search or (op == "click" and form is None)
+    # metis-1268: на реестре и площадке торгов чтение — поиск, раскрытие блока и ссылка-переход (registry_read);
+    # слова важной формы ниже проверяются у поиска так же, как у любой формы: в надписи, заголовках и подписях полей
+    reading = registry_read(facts, op)
     for u in urls:
         if _host_hit(u, IMPORTANT_HOSTS, IMPORTANT_HOST_PREFIX) or IMPORTANT_PATH.search(_path_of(u)):
             return "important", f"адрес входа, кабинета или госсайта {u[:120]}"
         if not reading and _host_hit(u, REGISTRY_HOSTS, NO_PREFIX):
             return "important", f"форма площадки торгов или реестра, не поиск: {u[:120]}"
-    if search:
-        text = "" if op == "type" else str(btn.get("label") or facts.get("elabel") or "")
     m = IMPORTANT_WORDS.search(text)
     if m:
         return "important", f"надпись «{m.group(0).strip()}»"
@@ -1577,21 +1581,42 @@ def free_form(facts, op="submit"):
 
 
 def expand_click(facts):
-    """Раскрытие блока, вкладки или списка без формы (metis-1268: КАД «Электронное дело», «полная хронология» — div с
-    обработчиком) → причина или None. Цель — не ссылка, не поле, не label; в цепочке от точки нажатия нет формы и
-    ссылки; надпись цели и интерактивных предков без слов действия (EXPAND_DENY, LINK_ACT_WORDS), атрибуты — без
-    LINK_ACT_WORDS. Классификатор (оплата, вход, удаление) — до этого; после нажатия адрес сверяется (after_click)."""
+    """Раскрытие блока, вкладки или списка без формы (metis-1268: КАД «Электронное дело», «Полная хронология») → причина
+    или None. Разрешающий признак цели обязателен: aria-expanded или aria-controls, role=tab, тег summary или надпись
+    из EXPAND_WORDS; пустая надпись — нет. Цель — не ссылка, не поле, не label, не contenteditable, не кнопка
+    type=submit и без атрибута form=; формы нет ни у цели, ни в цепочке выше, ссылки выше нет; надпись цели и
+    интерактивных предков без слов действия (EXPAND_DENY, LINK_ACT_WORDS), атрибуты — без LINK_ACT_WORDS.
+    Классификатор (оплата, вход, удаление) — до этого; после нажатия адрес сверяется (after_click)."""
     if facts.get("form") is not None:
         return None
     chain = [n for n in facts.get("chain") or [] if isinstance(n, dict)]
     i, n = target_of(facts)
-    if n.get("tag") in EXPAND_STOP or n.get("ce") or any(a.get("tag") in ("a", "form") for a in chain):
+    if (n.get("tag") in EXPAND_STOP or n.get("ce") or n.get("fa") or n.get("type") == "submit"
+            or any(a.get("tag") in ("a", "form") for a in chain)):
         return None
-    labels = [_label(facts)] + [str(a.get("label") or "") for a in chain[(i or 0) + 1:] if interactive(a)]
+    label = _label(facts)
+    if not label:
+        return None
+    labels = [label] + [str(a.get("label") or "") for a in chain[(i or 0) + 1:] if interactive(a)]
     text = " | ".join(labels)
     if EXPAND_DENY.search(text) or LINK_ACT_WORDS.search(text) or LINK_ACT_WORDS.search(str(n.get("attrs") or "")):
         return None
+    if not (n.get("ax") or n.get("role") == "tab" or n.get("tag") == "summary" or EXPAND_WORDS.search(label)):
+        return None
     return "раскрытие блока"
+
+
+def registry_read(facts, op):
+    """Чтение на реестре или площадке торгов (metis-1268, находка проверки на e894d272): click — раскрытие блока
+    (expand_click) или ссылка-переход того же сайта (nav_link); поиск — free_form (GET, role=search, поле поиска, кнопка
+    поиска; слова важной формы classify проверяет после). Остальное там — важная форма."""
+    if op == "click":
+        _, btn = target_of(facts)
+        if btn.get("tag") == "a":
+            return nav_link(btn, facts.get("url")) and not LINK_ACT_WORDS.search(str(btn.get("label") or ""))
+        if expand_click(facts):
+            return True
+    return free_form(facts, op) is not None
 
 
 def nav_link(link, here):
