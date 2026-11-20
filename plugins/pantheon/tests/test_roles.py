@@ -493,6 +493,9 @@ def main():
               "причину сообщи лиду", "`outside/env` и ключи не ищи"))
           and "поле `script`" not in flat.get("talos.md", "")
           and "перезагрузи страницу" not in flat.get("talos.md", ""))
+    check("talos: адрес входа не открыл приложение — стоп, без входа не открывать, «заблокировано» (metis-1292)",
+          all(x in flat.get("talos.md", "") for x in (
+              "Адрес входа не открыл приложение", "без входа не открывай", "«заблокировано» с причиной")))
     for f in ("dev-opus.md", "dev-sonnet.md", "dev-haiku.md"):
         check(f"{f}: dev.part — outside serve [--sha …] [--app …], ветку не переключать, зависимости не ставить (metis-0614)",
               "outside serve [--sha <коммит>] [--app ИМЯ]" in flat.get(f, "") and "pnpm install" not in flat.get(f, ""))
