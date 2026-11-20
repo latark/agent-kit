@@ -1,4 +1,5 @@
 """Замер минут владельца на систему (ММВ, metis-0169): только время событий, текст журналов не читается.
+Там же строка сводки «минуты Actions: N из 2000» (metis-1116, actions_line).
 
 События — поле time в owner-log/board.jsonl и заголовки «## ГГГГ-ММ-ДД ЧЧ:ММ:СС …» в owner-log/*.md (местное время).
 ММВ за день = сумма промежутков между соседними событиями, не длиннее 5 мин (длиннее — перерыв, в минуты не идёт),
@@ -10,6 +11,8 @@ import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -162,6 +165,82 @@ def line(state, days=7, t=None):
     avg = sum(r["min"] for r in rest[-days:]) / max(1, len(rest[-days:]))
     return (f"ММВ (минуты владельца): вчера {fmt(yest['min'])} мин ({_entries(yest['entries'])}), "
             f"среднее за {days} дн. {fmt(avg)} мин")
+
+
+ACTIONS_QUOTA = 2000  # включённые минуты Actions в месяц (план Free)
+ACTIONS_NONE = "минуты Actions: нет данных"
+# кратность минут к квоте: Linux 1, Windows 2, macOS 10 (docs.github.com, About billing for GitHub Actions)
+ACTIONS_MULT = (("macos", 10), ("windows", 2))
+
+
+def _gh_json(args, timeout=10):
+    """`gh <args>` → разобранный JSON; gh нет, сбой, таймаут, код не 0 и не-JSON — None (metis-1116)."""
+    exe = os.environ.get("PANTHEON_GH") or shutil.which("gh")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _gh_usage(user, year, month, timeout=10):
+    """Ответ billing usage: `gh api /users/<user>/settings/billing/usage?year=&month=`. Старый `.../billing/actions`
+    GitHub отключил (410) — его не вызываем."""
+    return _gh_json(["api", f"/users/{user}/settings/billing/usage?year={year}&month={month}"], timeout)
+
+
+def _gh_user():
+    """Логин владельца: PANTHEON_GH_USER (подмена) или `gh api user -q .login`; не получен — None."""
+    env = os.environ.get("PANTHEON_GH_USER")
+    if env:
+        return env
+    exe = os.environ.get("PANTHEON_GH") or shutil.which("gh")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "api", "user", "-q", ".login"], capture_output=True, text=True, timeout=10,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def _gh_public(user):
+    """Имена публичных репозиториев user (`gh repo list <user> --visibility public --json name`); ошибка — None."""
+    got = _gh_json(["repo", "list", user, "--visibility", "public", "--limit", "1000", "--json", "name"])
+    if not isinstance(got, list):
+        return None
+    return {r["name"] for r in got if isinstance(r, dict) and isinstance(r.get("name"), str)}
+
+
+def actions_line(t=None, usage=None, public=None):
+    """Строка сводки «минуты Actions: N из 2000» за месяц t: сумма quantity по записям product=actions в минутах
+    с кратностью SKU (macOS ×10, Windows ×2). Публичные репозитории исключены: их минуты бесплатны и квоту не едят,
+    а billing/usage их тоже перечисляет (repositoryName ∈ public; запись без repositoryName считается). Край: видимость
+    берётся на сегодня — репозиторий, сменивший её посреди месяца, весь месяц считается по новой. Минуты организаций
+    (организации владельца) идут по их счёту и в строку не входят (запрос только `/users/<login>`).
+    usage и public (множество имён) — подмена для теста; без них запрашиваются. Любой сбой (gh, логин, список
+    репозиториев, вид ответа, NaN/Infinity) — «минуты Actions: нет данных»: сводку строка не роняет."""
+    d = _today(t)
+    try:
+        if usage is None:
+            user = _gh_user()
+            usage = _gh_usage(user, d.year, d.month) if user else None
+            public = _gh_public(user) if usage is not None else None
+        if public is None:
+            return ACTIONS_NONE
+        total = 0.0
+        for it in usage["usageItems"]:
+            if it.get("product") == "actions" and it.get("unitType") == "Minutes" \
+                    and it.get("repositoryName") not in public:
+                sku = str(it.get("sku") or "").lower()
+                total += float(it["quantity"]) * next((k for w, k in ACTIONS_MULT if w in sku), 1)
+        shown = round(total)
+    except (TypeError, KeyError, ValueError, AttributeError, OverflowError):
+        return ACTIONS_NONE
+    return f"минуты Actions: {shown} из {ACTIONS_QUOTA}"
 
 
 def main(rest, state, t=None):

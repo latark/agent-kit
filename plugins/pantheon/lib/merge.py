@@ -33,7 +33,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      рецензента или свежее другого argus на этот SHA, если код «вернуть» другой), а «принять», записанное раньше
      последнего неснятого «вернуть», не в счёт (held_rejects, reject_floor — правило шлюза guard, metis-0465).
      Код прошлых head проход сам не сверит — git папки слияния у него нет. Его сверяет хук guard при `pantheon merge
-     request` из клона репозитория (merge_gate.request_decisions, metis-0966, 0396, 0443, вариант А): запись kind
+     request` в клоне репозитория — папке заявки или клоне из реестра направлений (merge_gate.request_decisions и
+     _merge_clone, metis-0966, 0396, 0443, 1199, вариант А): запись kind
      "decision" в carry.jsonl — head с тем же кодом, что у SHA (same), и посчитанно другим (differs). Проход берёт
      последнее решение на SHA и нынешнюю base PR, не старше REQUEST_TTL и на нынешней вершине ветки base (gh api,
      base_tip — как у шлюза; main ушёл вперёд — решение не в счёт) (code_facts): «принять» с head из same
@@ -48,7 +49,11 @@ PR ядра защит (Д3) агенты не сливают: его слива
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
-     нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
+     нет, запуски не получены — заявка ждёт. Исключение (metis-1207): у репозитория нет REQUIRED_CHECKS, проверок нет,
+     а каталога .github/workflows нет ни на head PR, ни на base-ветке (no_pr_workflows; любой workflow с любым
+     триггером — ждёт, как шлюз guard merge_gate._has_workflows) — вердикт NO_CI «CI нет у репозитория», и он же в
+     окне Touch ID. «Каталога нет» — только по точному ответу gh «(HTTP 404)» последней строкой после ответа 200 от
+     коммита head и ветки base; любой сбой gh — ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
      запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
      job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
      набора FULL_TESTS (full_tests_record) или узкая `--affected` с базой и картой, сверенными с GitHub
@@ -139,7 +144,9 @@ import shlex
 import shutil
 import stat
 import subprocess
+import urllib.parse
 import sys
+import types
 from datetime import datetime
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
@@ -194,6 +201,8 @@ PHRASE_CORE = False
 # вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
 BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
 BILLING_SHORT = "CI: лимит, тесты ✓"
+# вердикт CI репозитория без .github/workflows на head и base (metis-1207): доходит до окна как есть, не «CI ✓»
+NO_CI = "CI нет у репозитория (.github/workflows нет на head и base)"
 # `pantheon merge status` (metis-0819): события merge.jsonl, с которыми заявка ушла из очереди, — за сутки, последние 20
 DONE_EVENTS = ("merged", "merge-failed", "gate", "gate-after", "expired", "refused", "no-window", "batch-broken",
                "batch-stopped", "error", "cancelled")
@@ -410,9 +419,28 @@ def drop(req, event, why=None, warn=False, how="по Touch ID"):
 def log(req, event, **extra):
     rec = {"time": P.stamp(), "repo": req.get("repo"), "pr": req.get("pr"), "sha": req.get("sha"), "event": event}
     rec.update({k: v for k, v in extra.items() if isinstance(v, (int, float, bool, str)) or v is None})
-    os.makedirs(P.path("logs"), exist_ok=True)
-    with open(P.path("logs", "merge.jsonl"), "a", encoding="utf-8") as fh:
+    os.makedirs(d := P.path("logs"), exist_ok=True)  # одно P.path на оба пути (храповик P., metis-1260)
+    with open(os.path.join(d, "merge.jsonl"), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def repo_dirs():
+    """{репозиторий в нижнем регистре: {направления}} из [merge_repos] policy.toml — чья задача PR репозитория (metis-1260,
+    как autoclose_repo_dirs). policy.toml не читается — исключение: вызывающий берёт задачи любого направления."""
+    with open(os.path.join(P.HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+        pol = P.tomllib.load(fh)
+    out = {}
+    for d, repos in (pol.get("merge_repos") or {}).items() if isinstance(pol.get("merge_repos"), dict) else ():
+        for r in repos if isinstance(repos, list) else []:
+            if isinstance(r, str):
+                out.setdefault(r.strip().lower(), set()).add(d)
+    return out
+
+
+def criteria_api():
+    """Функции merge.py для правила отметок review_rules (metis-1260): ядро берёт их параметром, а не через P."""
+    return types.SimpleNamespace(base_counts=base_counts, returned_lie=returned_lie, pr_files=pr_files,
+                                 window_core=window_core, repo_dirs=repo_dirs)
 
 
 def allowed_repos():
@@ -437,20 +465,39 @@ def gh_path():
     return shutil.which("gh", path=(os.environ.get("PATH") or "") + ":/opt/homebrew/bin:/usr/local/bin") or "gh"
 
 
-def pr_view(repo, pr):
+def gh_why(r):
+    """Почему gh не ответил (metis-1197): «код N: <последняя непустая строка stderr>» — строка без управляющих знаков,
+    не длиннее 200. Причину видно в отказе, а не только «не ответил»."""
+    lines = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+    last = re.sub(r"[\x00-\x1f\x7f]", " ", lines[-1]).strip()[:200] if lines else "stderr пуст"
+    return f"код {r.returncode}: {last}"
+
+
+def pr_view(repo, pr, why=None):
     """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles, isCrossRepository,
-    headRepository, headRefName, mergeable, mergeStateStatus} или None — gh не ответил. isCrossRepository,
+    headRepository, headRefName, mergeable, mergeStateStatus, body} или None — gh не ответил. isCrossRepository,
     headRepository, headRefName — голова PR из форка (ci_fork, metis-0649); последние два — сливается ли с base
-    (merge_conflict, metis-0819)."""
+    (merge_conflict, metis-0819); body — review_criteria_gap (metis-1260). why — список: причина None (gh_why, 1197)."""
+    why = [] if why is None else why
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
                             "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles,"
-                            "isCrossRepository,headRepository,headRefName,mergeable,mergeStateStatus"],
+                            "isCrossRepository,headRepository,headRefName,mergeable,mergeStateStatus,body"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
-        data = json.loads(r.stdout) if r.returncode == 0 else None
-    except (OSError, ValueError, subprocess.SubprocessError):
+        if r.returncode != 0:
+            why.append(gh_why(r))
+            return None
+        data = json.loads(r.stdout)
+    except subprocess.TimeoutExpired:
+        why.append(f"нет ответа за {GH_TIMEOUT} с")
         return None
-    return data if isinstance(data, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        why.append(f"{type(e).__name__}: {str(e)[:200]}")
+        return None
+    if not isinstance(data, dict):
+        why.append("ответ gh — не объект JSON")
+        return None
+    return data
 
 
 def pr_files(repo, pr, view, raw=None):
@@ -599,7 +646,8 @@ def window_core(path):
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
-# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, narrow_tests_record (metis-1050),
+# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, repo_entry (metis-1116),
+# narrow_tests_record (metis-1050),
 # REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE,
 # CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
@@ -619,7 +667,17 @@ CI_NONE = "проверки GitHub не получены"
 # красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
 # внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
 # (SUCCESS/NEUTRAL/SKIPPED).
-REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None)),
+                   # приватный проект владельца (metis-1116): ключ — sha256 owner/name, job checks на PR в develop и main
+                   # (ветки эпиков — без требования: их workflow может ещё не быть, PR ждал бы вечно — argus #479)
+                   "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
+                       ("tests", "checks", "develop"), ("tests", "checks", "main")),
+                   # приватные проекты владельца (metis-1116): job tests workflow tests.yml; первый — PR в develop и main,
+                   # два других — PR в main
+                   "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": (
+                       ("tests", "tests", "develop"), ("tests", "tests", "main")),
+                   "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": (("tests", "tests", "main"),),
+                   "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": (("tests", "tests", "main"),)}
 # необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
 # номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
 # test_merge_gate_ci по файлам .github/workflows
@@ -651,12 +709,31 @@ CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
 # `pantheon review test --`. Засчитывается только запись с этой командой (full_tests_record); нет строки — запасного
 # пути у репозитория нет, отказ
 FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
-                            "plugins/pantheon plugins/project-tools")}
+                            "plugins/pantheon plugins/project-tools"),
+              # приватный проект владельца (metis-1116), ключ — sha256 owner/name
+              "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check",
+              # те же проекты: тесты — `uv run pytest` (workflow tests.yml их PR)
+              "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": "uv run pytest", "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": "uv run pytest", "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": "uv run pytest"}
+
+
+def repo_entry(table, repo, default=None):
+    """Запись таблицы шлюза (REQUIRED_CHECKS, OPTIONAL_CHECKS, FULL_TESTS, NARROW_TESTS) для repo (metis-1116):
+    сначала ключ «sha256:<hex>» от полного `owner/name` в нижнем регистре (приватные репозитории владельца: их имён в
+    публичном коде нет, проверка личных следов), потом короткое имя без владельца (agent-kit, как раньше). Репозиторий
+    с тем же коротким именем у другого владельца хеш приватного не даёт, а короткое имя вида «sha256:…» по таблице не
+    ищется — ключ-хеш находит только полный `owner/name`."""
+    full = str(repo or "").lower()
+    if "/" in full:
+        key = "sha256:" + hashlib.sha256(full.encode()).hexdigest()
+        if key in table:
+            return table[key]
+    short = full.rsplit("/", 1)[-1]
+    return default if short.startswith("sha256:") else table.get(short, default)
 
 
 def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
-    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    got = repo_entry(REQUIRED_CHECKS, repo, ())
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
 
 
@@ -673,7 +750,7 @@ def ci_fork(view):
 
 def optional_checks(repo):
     """Необязательные (workflow, job) repo (owner/name) из OPTIONAL_CHECKS: их красная — только предупреждение."""
-    return tuple((w, j) for w, j, _ in OPTIONAL_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ()))
+    return tuple((w, j) for w, j, _ in repo_entry(OPTIONAL_CHECKS, repo, ()))
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
@@ -767,7 +844,7 @@ def full_tests_record(repo, rec):
     outside test` — саму команду; `heavy` впереди не важен — проход ставит его сам. Комментарий — как в bash, только
     «#» в начале слова (после пробела): хвост ` # …` снимается, а `слово#…` — часть слова, и команда уже другая.
     Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
-    want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    want = repo_entry(FULL_TESTS, repo)
     cmd = rec.get("cmd") if isinstance(rec, dict) else None
     if not want or not isinstance(cmd, str):
         return False
@@ -817,7 +894,7 @@ def narrow_tests_record(repo, rec):
 def narrow_map_path(repo):
     """Путь карты affected-map.json от корня — рядом с run-tests.py команды FULL_TESTS репозитория; нет — None."""
     try:
-        words = shlex.split(FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower()) or "")
+        words = shlex.split(repo_entry(FULL_TESTS, repo) or "")
     except ValueError:
         return None
     script = next((w for w in words if posixpath.basename(w) == "run-tests.py"), None)
@@ -975,14 +1052,56 @@ def ci_billing_fetch(repo, runs, required):
     return ci_billing(runs, required, notes, jobs)
 
 
-def ci_state(rollup, required=(), runs=None, optional=()):
+def _gh_json(path):
+    """GET REST gh api path → (код, разобранный JSON или None); сбой gh, таймаут, не-JSON — (None, None)."""
+    try:
+        r = subprocess.run([gh_path(), "api", path], capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if r.returncode != 0:  # «нет» — только точный ответ gh «(HTTP 404)» последней строкой, иначе сбой
+        last = (r.stderr or "").strip().splitlines()[-1:] or [""]
+        return ("404" if last[0].rstrip().endswith("(HTTP 404)") else None), None
+    try:
+        return "200", json.loads(r.stdout)
+    except ValueError:
+        return None, None
+
+
+def no_pr_workflows(repo, base, head=None):
+    """True — каталога .github/workflows нет ни на head PR, ни на base-ветке (metis-1207: проверок не встанет, ждать
+    нечего); False — есть или не определить (gh не ответил, ответ не разобран — сбой не пропускает). Правило то же, что у
+    шлюза guard (merge_gate._has_workflows): любой непустой каталог — ждать, триггеры не разбираем; иначе проход
+    показал бы окно Touch ID, а шлюз отказал бы в слиянии. Смотрим и head, и base: PR, который удаляет свои workflows,
+    не уводит заявку от CI (находка проверки безопасности #475), а PR, который их добавляет, ждёт своих проверок. Head
+    (SHA) и ветка base сначала должны ответить 200 — 404 нечитаемого репозитория, коммита или ветки не сойдёт за
+    «workflows нет»."""
+    if not isinstance(base, str) or not base or not isinstance(head, str) or not SHA_RE.fullmatch(head):
+        return False
+    return all(_workflows_absent(repo, ref, probe) for ref, probe in (
+        (head, f"repos/{repo}/commits/{head}"),
+        (base, f"repos/{repo}/branches/{urllib.parse.quote(base, safe='')}")))
+
+
+def _workflows_absent(repo, ref, probe):
+    """True — на ref нет каталога .github/workflows (точный 404) или он пуст. probe — путь REST, который сперва должен
+    ответить 200 (коммит или ветка). Каталог — через gh REST (GraphQL ролям закрыт)."""
+    if _gh_json(probe)[0] != "200":
+        return False
+    code, listing = _gh_json(f"repos/{repo}/contents/.github/workflows?ref={urllib.parse.quote(ref, safe='')}")
+    return code == "404" or (code == "200" and listing == [])
+
+
+def ci_state(rollup, required=(), runs=None, optional=(), repo=None, base=None, head=None):
     """(ok|wait|fail, текст, предупреждения о красных необязательных) по ci_verdict. Проверок нет — wait: они ещё не
-    встали; по 24 ч заявка всё равно гаснет. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait:
-    сбой gh не снимает заявку."""
+    встали; по 24 ч заявка всё равно гаснет. Исключение (metis-1207): repo, base и head переданы, обязательных проверок
+    нет, а каталога .github/workflows нет ни на head, ни на base-ветке PR (no_pr_workflows), — ok NO_CI:
+    ждать нечего. Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
     if required and runs is None:
         return "wait", "запуски Actions на head PR не получены", []
     state, why, notes = ci_verdict(rollup, required, runs, optional)
     if state == "empty":
+        if not required and repo and base and head and no_pr_workflows(repo, base, head):
+            return "ok", NO_CI, notes
         return "wait", "проверок GitHub пока нет", notes
     if state == "ok":
         return "ok", f"CI ✓ ({len(rollup)})", notes
@@ -1092,16 +1211,61 @@ def code_facts(repo, pr, sha, view):
     return frozenset(), frozenset(), frozenset()
 
 
-def held_rejects(verdicts, sha, differs=frozenset()):
+def decision_hint(repo, pr, sha, view=None):
+    """Почему у прохода нет фактов о коде прошлых head (metis-1181): текст «повтори `pantheon merge request`» или None —
+    решение хука guard на sha записано и досчитано. Берётся последняя за REQUEST_TTL запись carry.jsonl kind
+    "decision" на sha или "decision-miss" (след несделанной сверки, merge_gate._decision_miss) на sha или без head.
+    view — ответ gh pr view: решение записано на прошлой вершине ветки base (в base с тех пор слили PR) — code_facts
+    его не берёт, и текст велит повторить заявку, а не звать нового argus (metis-1249, BA #72)."""
+    last = None
+    for d in P.carry_records(repo, pr):
+        if d.get("kind") not in ("decision", "decision-miss") or d.get("sha") not in (sha, "") \
+                or d.get("kind") == "decision" and d.get("sha") != sha:
+            continue
+        try:
+            age = P.now() - datetime.fromisoformat(str(d.get("time"))).timestamp()
+        except ValueError:
+            continue
+        if 0 <= age <= REQUEST_TTL:
+            last = d
+    again = f"повтори `pantheon merge request {pr} -R {repo}` из клона репозитория"
+    if last is None:
+        return f"сверка кода прошлых head хуком guard не записана — {again}"
+    why = "; ".join(str(w) for w in last.get("why") or [] if isinstance(w, str))
+    if last.get("kind") == "decision-miss":
+        return f"сверка кода прошлых head хуком guard не успела ({why or 'причина не названа'}) — {again}"
+    base = view.get("baseRefName") if isinstance(view, dict) else None
+    old = str(last.get("base_oid") or "").lower()
+    if old and isinstance(base, str) and base and last.get("base") == base:
+        tip = base_tip(repo, base)
+        if tip and tip != old:
+            return (f"сверка кода прошлых head записана на вершине {base} {old[:12]}, а ветка уже на {tip[:12]} — "
+                    f"{again}")
+    # повтор снимает только срок хука и молчание gh; «старше CARRY_HEADS», «не клон», бюджет сверки и прочее он не
+    # снимет — тогда прежний текст отказа (дельта-круг, новый круг argus)
+    retry = "; ".join(w for w in last.get("why") or [] if isinstance(w, str) and _retry_why(w))
+    return f"сверка кода прошлых head хуком guard не досчитана ({retry}) — {again}" if retry else None
+
+
+def _retry_why(why):
+    """Причина несделанной сверки, которую снимет повтор заявки (metis-1181): срок хука или gh не ответил; коммита нет
+    в git клона — после git fetch (metis-1249, BA #72: новой вершины base в клоне не было)."""
+    return "срок хука" in why or "git fetch" in why \
+        or "gh" in why and any(w in why for w in ("не ответил", "не успел", "не получить"))
+
+
+def held_rejects(verdicts, sha, differs=frozenset(), same=frozenset()):
     """«Вернуть» argus на PR (любой head), которые в силе для слияния sha (metis-0465). verdicts — вердикты argus PR
     по порядку записи, «принять» — только засчитанные (review_accept_counts). Правило шлюза guard (merge_gate._lifts):
-    снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head или на sha; 2) другого argus на
-    sha, если «вернуть» на head с другим кодом — head из differs решения шлюза guard (code_facts, metis-0966), — и у
-    «принять» с полем «вернули» — только взявшего отчёт вернувшего (returned_lifts, metis-0497). Решения нет или код
-    head «вернуть» не посчитан — второй argus «вернуть» не снимает: rebase с тем же кодом — не новый код. Третий head
+    снимает «принять», записанное после «вернуть», 1) того же рецензента на том же head, на sha или на head того же
+    кода, что sha (same решения шлюза guard, metis-1199: вернувший принял следующий head, а потом подтянули base);
+    2) другого argus на sha, если «вернуть» на head с другим кодом — head из differs решения шлюза guard (code_facts,
+    metis-0966), — и у «принять» с полем «вернули» — только взявшего отчёт вернувшего (returned_lifts, metis-0497).
+    Решения нет или код head «вернуть» не посчитан — второй argus «вернуть» не снимает: rebase с тем же кодом — не новый код. Третий head
     (правило 3 шлюза guard) «вернуть» не снимает: строже, на sha нужны свои «принять»."""
     def lifts(a, r):
-        return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r) and a["sha"] in (r["sha"], sha)
+        return a["kind"] == "accept" and (_reviewer(a) == _reviewer(r)
+                                          and (a["sha"] in (r["sha"], sha) or a["sha"] in same)
                                           or a["sha"] == sha != r["sha"] and r["sha"] in differs
                                           and returned_lifts(a, r))
     return [r for i, r in enumerate(verdicts) if r["kind"] == "reject" and not any(lifts(a, r) for a in verdicts[i + 1:])]
@@ -1191,9 +1355,16 @@ def gate(repo, pr, sha, view):
     # «вернуть» привязано к PR, на каком бы head оно ни было (metis-0465), как в шлюзе guard; код прошлых head — из
     # решения шлюза guard при `pantheon merge request` (code_facts, metis-0966)
     same, differs, delta = code_facts(repo, pr, sha, view)
-    held = held_rejects(verdicts, sha, differs)
+    held = held_rejects(verdicts, sha, differs, same)
+    # код прошлых head не сверен — подсказка «повтори заявку», а не нового argus (metis-1181)
     if held:
-        return "fail", (f"«вернуть» от argus на {', '.join(r['sha'][:12] for r in held)} в силе: оно привязано к PR, "
+        heads = ", ".join(r["sha"][:12] for r in held)
+        unknown = [r for r in held if r["sha"] != sha and r["sha"] not in same | differs]
+        hint = decision_hint(repo, pr, sha, view) if unknown else None
+        if hint:
+            return "fail", (f"«вернуть» от argus на {heads} в силе: код этого head с {sha[:12]} не сверен, а без сверки "
+                            f"свежее «принять» на {sha[:12]} его не снимает; {hint}")
+        return "fail", (f"«вернуть» от argus на {heads} в силе: оно привязано к PR, "
                         f"снимает его «принять» после него — того же рецензента или свежее на {sha[:12]} с другим "
                         "кодом (код сверяет шлюз guard при `pantheon merge request` из клона репозитория)")
     floor = reject_floor(verdicts)
@@ -1234,11 +1405,15 @@ def gate(repo, pr, sha, view):
                 if ok else (MIN_ACCEPTS, f"; PR ядра не лёгкий: {what}")
     if len(counted) < need:
         cut = len(latest) - len(counted)
-        moved = len({r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted})
+        gone = {r["sha"] for r in verdicts if r["kind"] == "accept"} - {sha} - same - {r["sha"] for r in counted}
+        moved = len(gone)
+        # код прошлых head не сверен хуком — сначала повторить заявку (metis-1181), а не звать нового argus
+        hint = decision_hint(repo, pr, sha, view) if gone - differs else None
         return "fail", (f"«принять» от argus на Opus — {len(counted)} из {MIN_ACCEPTS}" + light
                         + (f"; ещё {cut} записано раньше «вернуть» на другом head — не в счёт (откат к принятому коду)"
                            if cut else "")
-                        + (f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
+                        + (f"; «принять» на {moved} прошлых head не перенесено: {hint}" if hint else
+                           f"; «принять» на {moved} прошлых head не перенесено: код не сверен с {sha[:12]} или другой "
                            "— сверяет шлюз guard при `pantheon merge request` из клона репозитория; после мелкой правки "
                            "вне ядра переносится дельта-кругом (`pantheon review delta`): на том head полный круг — "
                            f"{MIN_ACCEPTS} argus, на этом — «принять» argus, и каждый, кто вернул тот head, принял "
@@ -1246,7 +1421,8 @@ def gate(repo, pr, sha, view):
     latest = counted
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
-    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
+    state, why, notes = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo), repo,
+                                  view.get("baseRefName"), sha)
     # красные необязательные (OPTIONAL_CHECKS) — в тексте пропуска, и на запасном пути тоже (С1 argus #248)
     warn = "".join(f"; {n}" for n in notes)
     state, why = billing_verdict(repo, sha, recs, runs, required, state, why, view.get("baseRefName"))
@@ -1256,7 +1432,8 @@ def gate(repo, pr, sha, view):
 
 
 def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None):
-    """Итог CI в gate (state, why — вердикт ci_verdict): (ok|wait|fail, текст). Зелёный — «CI ✓», идёт — как есть.
+    """Итог CI в gate (state, why — вердикт ci_state): (ok|wait|fail, текст). Зелёный — «CI ✓», CI у репозитория нет
+    (NO_CI, metis-1207) — как есть, чтобы окно Touch ID не писало «CI ✓»; идёт — как есть.
     Красный: CI не запускался из-за лимита минут или оплаты
     (metis-0655) — вместо CI засчитывается запись тестов на этот SHA с командой полного набора FULL_TESTS
     (full_tests_record), как в шлюзе guard (_billing_problem), или узкая (narrow_tests_record, metis-1050) — её база и
@@ -1264,7 +1441,7 @@ def billing_verdict(repo, sha, recs, runs, required, state, why, base_name=None)
     красной. Аннотации или job не получены (сбой gh) — wait: признак не проверить, а снять заявку по красной значило бы
     потерять запасной путь (metis-0813)."""
     if state != "fail":
-        return state, "CI ✓" if state == "ok" else why
+        return state, "CI ✓" if state == "ok" and why != NO_CI else why
     billing = ci_billing_fetch(repo, runs, required)
     if billing is None:
         return "wait", f"аннотации CI не получены (сбой gh) — лимит минут или нет, не проверить; {why}"
@@ -1937,9 +2114,10 @@ def cmd_request(args):
         return 2
     heads, bad, waits = {}, [], []
     for pr in prs:
-        view = pr_view(repo, pr)
+        why = []
+        view = pr_view(repo, pr, why)
         if view is None:
-            err(f"pantheon merge request: gh pr view {pr} -R {repo} не ответил — заявки нет")
+            err(f"pantheon merge request: gh pr view {pr} -R {repo} не ответил ({'; '.join(why) or '?'}) — заявки нет")
             return 1
         sha = str(view.get("headRefOid") or "").lower()
         if not SHA_RE.fullmatch(sha):
@@ -1947,7 +2125,8 @@ def cmd_request(args):
             return 1
         state, why = gate(repo, pr, sha, view)
         # конфликт с base — заявки нет, BLOCKED и «GitHub ещё считает» — заявка ждёт (metis-0987), как в check_all
-        conflict = merge_conflict(view) if state != "fail" else None
+        conflict = (P.review_criteria_gap(repo, pr, sha, view, criteria_api()) or merge_conflict(view)) \
+            if state != "fail" else None
         if conflict and (conflict[0] == "fail" or state == "ok"):
             state, why = conflict
         if state == "fail":

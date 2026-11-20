@@ -305,9 +305,46 @@ def t_request_decision(h):
                                                                     for i, x in enumerate(newer)])
     check("решение (metis-0784): head старше 8 последних — не в delta, хоть он предок и дельта мелкая",
           len(got) == 1 and qd not in got[0].get("delta", [qd]) and got[0].get("delta") == [], got)
+    # metis-1199: папка команды — клон другого репозитория (заявку на PR продукта подаёт сессия из worktree agent-kit):
+    # клон repo берётся из реестра — корни domains.json направлений, у которых repo в [merge_repos], по remote
     got = case("клон другого репозитория", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
-    check("решение: git не сверить (не клон) — запись с пустыми same и differs и причиной", len(got) == 1
-          and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
+    check("решение (metis-1199): папка команды — клон tg-read, клон agent-kit — из реестра: same=[qd]", len(got) == 1
+          and got[0]["same"] == [qd] and got[0]["why"] == [], got)
+    dom_f, pol_f = h.j(".local/state/pantheon/domains.json"), h.j(".claude/pantheon/policy.toml")
+    dom0, pol0 = open(dom_f).read(), open(pol_f).read()
+
+    def registry(dom, pol, name, want):
+        with open(dom_f, "w") as fh:
+            json.dump({"domains": dom}, fh)
+        with open(pol_f, "w") as fh:
+            fh.write(pol0.split("[merge_repos]")[0] + "[merge_repos]\n" + pol)
+        try:
+            got = case(f"реестр: {name}", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
+        finally:
+            with open(dom_f, "w") as fh:
+                fh.write(dom0)
+            with open(pol_f, "w") as fh:
+                fh.write(pol0)
+        d = got[0] if len(got) == 1 else {"same": None}
+        ok = d["same"] == [qd] and d["why"] == [] if want else (
+            d["same"] == [] and d["differs"] == [] and any("не клон" in w for w in d["why"]))
+        check(f"решение (metis-1199): {name}", ok, got)
+
+    kit_dirs = {"metis-pantheon": ["~/projects/tg-read", "~/projects"], "athena-shop": ["~/projects/broker"]}
+    registry(kit_dirs, 'metis-pantheon = ["latark/agent-kit"]\n',
+             "корень направления — папка над клоном, клон — её подпапка с именем repo (первый корень — не клон)", True)
+    registry({"metis-pantheon": ["~/projects/tg-read"], "athena-shop": ["~/projects/agent-kit"]},
+             'metis-pantheon = ["latark/agent-kit"]\nathena-shop = ["latark/broker"]\n',
+             "клон есть только у направления, где repo нет в [merge_repos] — не берётся, «не клон»", False)
+    registry(kit_dirs, 'metis-pantheon = ["latark/tg-read"]\nathena-shop = ["latark/broker"]\n',
+             "repo нет в [merge_repos] ни одного направления — клон не ищется, «не клон»", False)
+    git(p, "remote", "set-url", "origin", "https://github.com/latark/other")
+    try:
+        got = case("в реестре нет клона (remote не тот)", qdm, bd2, [opus(qd)], cwd="projects/tg-read")
+    finally:
+        git(p, "remote", "set-url", "origin", "https://github.com/latark/agent-kit")
+    check("решение: git не сверить (не клон, и в реестре клона нет) — запись с пустыми same и differs и причиной",
+          len(got) == 1 and got[0]["same"] == [] and got[0]["differs"] == [] and got[0]["why"], got)
     alt = os.path.join(p, ".git", "objects", "info", "alternates")
     os.makedirs(os.path.dirname(alt), exist_ok=True)
     with open(alt, "w") as fh:
@@ -347,14 +384,62 @@ def t_request_decision(h):
         if name in ("вердиктов нет", "номер не число", "номер переменной"):
             log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
             check(f"решение: {name} — gh pr view не зовётся", "pr view" not in log, log)
-    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, записи нет
+    got = [x for x in carry_lines(h) if x.get("kind") == "decision-miss"]
+    check("решение (metis-1181): base PR неизвестна — след decision-miss с причиной", len(got) == 1
+          and got[0]["pr"] == 7 and got[0]["sha"] == qdm and "gh pr view" in got[0]["why"][0], got)
+
+
+def t_decision_deadline(h):
+    """metis-1181: gh решения шлюза при заявке — со своим сроком DECISION_GH_TIMEOUT (3 с), а не GH_TIMEOUT (6 с). До
+    срока хука осталось 5 с: два gh по 6 с не влезли бы (решения не было, #461 14.11), по 3 с — влезают, решение
+    записано. Осталось 3 с — не влезает и короткий: решения нет, но есть след decision-miss с причиной."""
+    import types
+    s = kit_history(h)
+    p = h.j("projects/agent-kit")
+    F = lambda t: ("100644", t.encode())
+    lines = [f"d{i}\n" for i in range(30)]
+    pr_d = "".join(lines[:20] + ["pr\n"] + lines[21:])
+    bd = plumb(p, [s["B"]], {"d.txt": F("".join(lines))}, "main: d.txt")
+    bd2 = plumb(p, [bd], {"d.txt": F("top\n" + "".join(lines))}, "main: строка над правкой PR")
+    qd = plumb(p, [bd], {"d.txt": F(pr_d)}, "PR: правка d.txt")
+    qdm = plumb(p, [qd, bd2], {"d.txt": F("top\n" + pr_d)}, "PR: подтянул main", src=bd2)
+    # срок хука (GUARD_TEST_DEADLINE тест только поднимает) — подменой _gh_fits: gh не зовётся, решения нет, есть след
     mg = _load_merge_gate("merge_gate_request_decision")
     calls = []
-    mg._gh_fits = lambda: False
-    mg._pr_view = lambda repo, pr: calls.append(("view", pr)) or {}
+    mg._gh_fits = lambda *a: False
+    mg._pr_view = lambda repo, pr, *a: calls.append(("view", pr)) or {}
     mg.append_carry = lambda r: calls.append(("carry", r))
     mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
-    check("решение: срок хука не вмещает gh — gh pr view не зовётся, записи нет", calls == [], calls)
+    check("решение: срок хука не вмещает gh — gh pr view не зовётся, решения нет, след decision-miss (metis-1181)",
+          len(calls) == 1 and calls[0][0] == "carry" and calls[0][1]["kind"] == "decision-miss"
+          and "срок хука" in calls[0][1]["why"][0], calls)
+    for left, want in ((5.0, "decision"), (3.0, "decision-miss")):
+        mg = _load_merge_gate(f"merge_gate_decision_deadline_{int(left)}")
+        mg.signal = types.SimpleNamespace(ITIMER_REAL=0, getitimer=lambda which, left=left: (left, 0.0))
+        calls, out = [], []
+        mg._pr_view = lambda repo, pr, timeout=mg.GH_TIMEOUT, calls=calls: calls.append(("view", timeout)) or {
+            "headRefOid": qdm, "baseRefName": "main", "baseRefOid": bd2}
+        real_tip = mg._base_tip
+
+        def tip(repo, branch, memo=None, timeout=mg.GH_TIMEOUT, real_tip=real_tip, calls=calls):
+            if memo is not None:
+                return real_tip(repo, branch, memo, timeout)
+            calls.append(("tip", timeout))
+            return bd2
+        mg._base_tip = tip
+        mg.append_carry = out.append
+        mg._decision({}, [opus(qd)], "latark/agent-kit", 7, p, {})
+        kinds = [r.get("kind") for r in out]
+        first = out[0] if out else {}
+        check(f"metis-1181: до срока хука {left:g} с — запись {want}", kinds == [want], out)
+        if want == "decision":
+            check("metis-1181: решение — код qd тот же (same), сверка не урезана", first.get("same") == [qd]
+                  and first.get("why") == [], out)
+            check(f"metis-1181: gh pr view и вершина base — со сроком {mg.DECISION_GH_TIMEOUT} с, вершина — один раз",
+                  calls == [("view", mg.DECISION_GH_TIMEOUT), ("tip", mg.DECISION_GH_TIMEOUT)], calls)
+        else:
+            check("metis-1181: след без фактов о коде — причина «срок хука», gh не зовётся", calls == []
+                  and "срок хука" in (first.get("why") or [""])[0] and "same" not in first, (calls, out))
 
 
 def t_carry_rej(h):
@@ -402,7 +487,97 @@ def t_carry_rej(h):
          [x_rej, x_acc, tests(qam)], True)
 
 
-CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_carry_rej]
+def t_same_reviewer_code(h):
+    """metis-1249 (BA #72): X вернул R, потом X принял A — исправление, в которое уже подтянут base M (merge-base A с
+    base другая, чем у R, и правило 3 _lifts не годится). Новый head N = A + подтянутый E (вершина base после M): код
+    N — код A, и «принять» X снимает своё «вернуть» и переносится (правило 4). Другой код на N, «принять» A до
+    «вернуть» или «принять» A другого argus — «вернуть» в силе."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    bx = plumb(p, [s["B"]], {"bx.txt": F("x\n")}, "base: X")
+    bm = plumb(p, [bx], {"bm.txt": F("m\n")}, "base: M")
+    be = plumb(p, [bm], {"be.txt": F("e\n")}, "base: E")
+    r = plumb(p, [bx], {"fix.txt": F("bad\n")}, "PR: правка, которую вернули")
+    a = plumb(p, [r, bm], {"fix.txt": F("good\n")}, "PR: исправление и подтянул M", src=bm)
+    n = plumb(p, [a, be], {"fix.txt": F("good\n")}, "PR: подтянул E", src=be)
+    nx = plumb(p, [a, be], {"fix.txt": F("other\n")}, "PR: подтянул E и поменял код", src=be)
+
+    def case(name, head, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, head, be)
+        h.seed(*recs)
+        merge_case(name, h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit), allow, why)
+
+    x_rej = opus(r, "x", "reject", checklist=None, session="s-x")
+    x_acc = opus(a, "x", session="s-x")
+    case("1249: X вернул R, X принял A, N = A + base — сливает", n, [x_rej, x_acc, tests(n)], True)
+    case("1249: X вернул R, X принял A, N — другой код — отказ", nx, [x_rej, x_acc, tests(nx)], False,
+         "«вернуть» (reject)")
+    case("1249: «принять» A записано до «вернуть» R — отказ", n, [x_acc, x_rej, tests(n)], False, "«вернуть» (reject)")
+    case("1249: A принял другой argus Z — «вернуть» X в силе", n, [x_rej, opus(a, "z", session="s-z"), tests(n)],
+         False, "«вернуть» (reject)")
+
+
+def t_two_bases(h):
+    """metis-1249 (BA #71, #64): develop влит и в ветку PR, и в base PR — у head и base две merge-base. Собственный
+    дифф PR — от их слияния (виртуальная merge-base): «принять» с head до подтягивания переносится, «вернуть» снято.
+    Подтягивание с подменой содержимого — другой код; базы с конфликтом — не сверено, отказ."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    p = h.j(kit)
+    F = lambda t: ("100644", t.encode())
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    bx = plumb(p, [s["B"]], {"tb-x.txt": F("x\n")}, "base: своя правка до develop")
+    dev = plumb(p, [s["B"]], {"tb-dev.txt": F("dev\n")}, "develop")
+    be = plumb(p, [bx, dev], {"tb-dev.txt": F("dev\n")}, "base: влит develop")
+    r = plumb(p, [bx], {"tb-pr.txt": F("bad\n")}, "PR: правка, которую вернули")
+    a = plumb(p, [r], {"tb-pr.txt": F("good\n")}, "PR: исправление")
+    n = plumb(p, [a, dev], {"tb-dev.txt": F("dev\n")}, "PR: влит develop")
+    evil = plumb(p, [a, dev], {"tb-dev.txt": F("dev\n"), "tb-x.txt": F("подмена\n")}, "PR: влит develop с подменой")
+    mbs = git(p, "merge-base", "--all", be, n).split()
+    check("1249: у head и base PR две merge-base", len(mbs) == 2, mbs)
+    # базы с конфликтом: develop2 добавил tb-x.txt иначе, чем base
+    dev2 = plumb(p, [s["B"]], {"tb-x.txt": F("dev2\n")}, "develop2: тот же файл иначе")
+    be2 = plumb(p, [bx, dev2], {}, "base: влит develop2, оставлен свой tb-x.txt")
+    n2 = plumb(p, [a, dev2], {}, "PR: влит develop2, оставлен свой tb-x.txt")
+
+    def case(name, head, base, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, head, base)
+        h.seed(*recs)
+        merge_case(name, h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit), allow, why)
+
+    x_rej = opus(r, "x", "reject", checklist=None, session="s-x")
+    x_acc = opus(a, "x", session="s-x")
+    case("1249: две merge-base, «принять» на A переносится на N (A + develop)", n, be, [x_acc, tests(n)], True)
+    got = [x for x in carry_lines(h) if x.get("kind") == "carry"]
+    check("1249: перенос записан", len(got) == 1 and [x.get("sha") for x in got[0].get("from", [])] == [a], got)
+    case("1249: две merge-base, X вернул R и принял A — «вернуть» снято, сливает", n, be, [x_rej, x_acc, tests(n)],
+         True)
+    case("1249: две merge-base, develop влит с подменой файла base — не переносится", evil, be,
+         [x_rej, x_acc, tests(evil)], False)
+    case("1249: базы с конфликтом (нет слияния баз) — не сверено, отказ", n2, be2, [x_rej, x_acc, tests(n2)], False,
+         "две merge-base")
+
+
+def t_prints_late(h):
+    """metis-1181: сверка отпечатков (_Prints._late) останавливается не только по бюджету CARRY_BUDGET, но и когда до
+    срока хука меньше GIT_MARGIN: git там гаснет за 0,05 с, но на 8 head таких вызовов десятки — до HookTimeout."""
+    import types
+    for left, want in ((1.0, True), (5.0, False), (0, False)):
+        mg = _load_merge_gate(f"merge_gate_prints_late_{int(left * 10)}")
+        mg.signal = types.SimpleNamespace(ITIMER_REAL=0, getitimer=lambda which, left=left: (left, 0.0))
+        fp = mg._Prints(None, "latark/agent-kit", "a" * 40, [], lambda: None)
+        got = fp._late()
+        check(f"metis-1181: до срока хука {left:g} с (бюджет не вышел) — сверка {'остановлена' if want else 'идёт'}",
+              got is want and (any("срок хука" in w for w in fp.why) if want else fp.why == []), (got, fp.why))
+
+
+CASES = [t_carry_gate, t_carry_opus, t_carry_product, t_request_decision, t_decision_deadline, t_prints_late,
+         t_carry_rej, t_same_reviewer_code, t_two_bases]
 
 
 if __name__ == "__main__":

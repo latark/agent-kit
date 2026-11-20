@@ -367,6 +367,27 @@ check("уборка: файл сессии прежней версии удал�
 os.unlink(link)
 check("scrub: значение ключа вырезается", L._scrub(f"x {PASSWORD} y", [PASSWORD, "ab"]) == "x *** y")
 
+# 9б. папку заявок не прочесть — _take_requests входа → [], без исключения (metis-1186: круг идёт до уборки serve_round)
+_real_ld, _ld_calls = os.listdir, []
+
+
+def _ld_boom(path="."):
+    if isinstance(path, int):
+        _ld_calls.append(path)
+        raise PermissionError("нет доступа")
+    return _real_ld(path)
+
+
+os.listdir = _ld_boom
+try:
+    _taken, _err = L._take_requests(), None
+except OSError as e:
+    _taken, _err = None, e
+finally:
+    os.listdir = _real_ld
+check("listdir папки заявок упал: login._take_requests → [], без исключения", _taken == [] and _err is None
+      and _ld_calls, (_taken, _err, _ld_calls))
+
 # 10. приёмник: ответы (без сети) — первый заход ставит cookie и ведёт на сервер, второй и просроченный — отказ
 ck = [["sb-abcdref-auth-token", "base64-AAA"]]
 st0 = {"code": RECV_CODE, "cookies": ck, "target": "http://127.0.0.1:4301/", "deadline": time.time() + 60,

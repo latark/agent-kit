@@ -207,6 +207,20 @@ def test_gate_other_heads():
     b = box(("reject", SHA, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2"))
     check("0465: «вернуть» на SHA и два «принять» других argus после него — в силе, не перекрыто числом",
           not b.windows() and not b.merges() and "в силе" in b.alerts(), b.alerts())
+    # metis-1199: вернувший принял следующий head SHA3, у SHA тот же код (same решения шлюза guard) — «вернуть» снято
+    for name, same, rev, ok in (("тот же рецензент, SHA3 того же кода → сливает", [SHA3], "s3", True),
+                                ("тот же рецензент, решения о коде SHA3 нет → в силе", [], "s3", False),
+                                ("другой argus на SHA3 того же кода → в силе", [SHA3], "s5", False)):
+        b = Box()
+        b.request()
+        b.add("reject", sha=SHA2, sid="s3", aid="a3")
+        b.add("accept", sha=SHA3, sid=rev, aid="a" + rev[1:])
+        b.add("accept", sha=SHA, sid="s4", aid="a4")
+        if same:
+            b.decide(same=same)
+        b.run()
+        check(f"1199: «вернуть» на SHA2, «принять» на SHA3 — {name}",
+              len(b.merges()) == 1 if ok else not b.merges() and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
     b = Box()
     b.request()
     b.add("reject", sha=SHA2, pr=PR + 1, sid="s3", aid="a3")
@@ -293,23 +307,80 @@ def test_gate_base():
 
 
 
+DECISION_HELD = [("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2")]
+
+
+def _decision_box(adds, *decisions):
+    """Шлюз владельца на SHA с вердиктами adds и решениями шлюза guard decisions (metis-0966)."""
+    b = Box()
+    b.request()
+    b.records = []
+    b.add("tests", who="")
+    for kind, sha, sid in adds:
+        b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+    for d in decisions:
+        b.decide(**d)
+    b.run()
+    return b
+
+
+def test_gate_decision_hint():
+    """metis-1181: код прошлых head не сверен хуком guard — текст отказа велит повторить `pantheon merge
+    request` (сверки нет, срок хука, gh не ответил), а не звать нового argus; причины, которые повтор не снимет
+    (старше CARRY_HEADS, не клон, бюджет), — прежний текст."""
+    box, held = _decision_box, DECISION_HELD
+    b = box(held)
+    again = f"повтори `pantheon merge request {PR} -R {REPO}`"
+    check("1181: решения нет — подсказка «сверка не записана, повтори заявку», а не новый argus",
+          "сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(), b.alerts())
+    b = box(held, {"kind": "decision-miss", "sha": "", "why": ["срок хука: на gh pr view не осталось времени"]})
+    check("1181: след decision-miss — «не успела» с причиной и «повтори заявку», в силе", not b.merges()
+          and "не успела (срок хука: на gh pr view" in b.alerts() and again in b.alerts(), b.alerts())
+    b = box(held, {"why": ["gh pr view не ответил — base PR неизвестна"]})
+    check("1181: решение без фактов с причиной — «не досчитана» и «повтори заявку», в силе", not b.merges()
+          and "не досчитана (gh pr view не ответил" in b.alerts() and again in b.alerts(), b.alerts())
+    for why in ("head 0123456789ab старше 8 последних — не сверялся",
+                "папка слияния — не клон latark/agent-kit, диффы не сверить (сливай из клона latark/agent-kit)",
+                "сверка дольше 4 с — остановлена (таймаут хука 10 с)"):
+        b = box(held, {"why": [why]})
+        check(f"1181: причину «{why[:30]}…» повтор заявки не снимет — прежний текст, без «повтори заявку»",
+              not b.merges() and again not in b.alerts() and "снимает его «принять»" in b.alerts(), b.alerts())
+    b = box(held, {"why": ["head 0123456789ab старше 8 последних — не сверялся",
+                           "срок хука: до него меньше 1.5 с — сверка остановлена"]})
+    check("1181: среди причин есть срок хука — «повтори заявку» только с ней", again in b.alerts()
+          and "не досчитана (срок хука" in b.alerts() and "старше 8" not in b.alerts(), b.alerts())
+    b = box(held, {"same": [SHA2]})
+    check("1181: код сверен (тот же) — подсказки «повтори заявку» нет", again not in b.alerts(), b.alerts())
+    # metis-1249 (BA #72): новой вершины base в клоне не было — после git fetch повтор заявки её снимет
+    b = box(held, {"why": ["коммита base PR (16151f3ae73d) нет в git папки — сделай git fetch"]})
+    check("1249: в клоне нет коммита base — «не досчитана», git fetch и «повтори заявку», в силе", not b.merges()
+          and "не досчитана (коммита base PR" in b.alerts() and "git fetch" in b.alerts() and again in b.alerts(),
+          b.alerts())
+    # metis-1249: решение записано на прошлой вершине base (в base слили PR) — повтор заявки, а не новый argus
+    b = Box()
+    b.request()
+    b.records = []
+    b.add("tests", who="")
+    for kind, sha, sid in held:
+        b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
+    b.decide(differs=[SHA2])
+    open(os.path.join(b.rec, "gh-tip"), "w").write("c" * 40)
+    b.run()
+    check("1249: решение на прошлой вершине base — «вершине main bbbb…, ветка уже на cccc…» и «повтори заявку»",
+          not b.merges() and "записана на вершине main " + "b" * 12 in b.alerts() and "c" * 12 in b.alerts()
+          and again in b.alerts(), b.alerts())
+    b = box([("accept", SHA2, "s1"), ("accept", SHA2, "s2")])
+    check("1181: «принять» не перенесено без решения — «сверка не записана, повтори заявку»",
+          "не перенесено: сверка кода прошлых head хуком guard не записана" in b.alerts() and again in b.alerts(),
+          b.alerts())
+
+
 def test_gate_decision():
     """metis-0966, 0396, 0443 (вариант А): код прошлых head — из решения шлюза guard при `pantheon merge request`
     (carry.jsonl, kind decision). Без решения другой коммит — неизвестный код: второй argus «вернуть» не снимает,
     «принять» не переносится. Решение — только на этот head, нынешнюю base PR и не старше суток."""
-    def box(adds, *decisions):
-        b = Box()
-        b.request()
-        b.records = []
-        b.add("tests", who="")
-        for kind, sha, sid in adds:
-            b.add(kind, sha=sha, sid=sid, aid="a" + sid[1:])
-        for d in decisions:
-            b.decide(**d)
-        b.run()
-        return b
-
-    held = [("reject", SHA2, "s3"), ("accept", SHA, "s1"), ("accept", SHA, "s2")]
+    box = _decision_box
+    held = DECISION_HELD
     b = box(held)
     check("0966: «вернуть» на SHA2, два свежих «принять» других argus на SHA, решения нет (rebase с тем же кодом?) — "
           "в силе, окна нет", not b.windows() and not b.merges() and "в силе" in b.alerts()
@@ -599,6 +670,19 @@ def test_request_refusals():
     os.remove(os.path.join(b.rec, "gh-view.json"))
     r = b.request()
     check("заявка: gh не ответил → отказ", r.returncode != 0 and b.req() is None, r.stderr)
+    # metis-1197: в отказе — код gh и последняя непустая строка его stderr, без управляющих знаков и не длиннее 200
+    b = Box()
+    os.remove(os.path.join(b.rec, "gh-view.json"))
+    with open(os.path.join(b.rec, "gh-view-err"), "w", encoding="utf-8") as fh:
+        fh.write("4\nfirst line\nPost \"https://api.github.com/graphql\": tls: failed to verify\x1b[0m x509 "
+                 + "z" * 300 + "\n\n")
+    r = b.request()
+    last = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
+    why = last.split("(код 4: ", 1)[-1].rsplit(") — заявки нет", 1)[0] if "(код 4: " in last else ""
+    check("заявка: gh не ответил → код и последняя строка stderr gh в отказе",
+          r.returncode == 1 and b.req() is None and why.startswith("Post \"https://api.github.com/graphql\": tls: failed")
+          and "\x1b" not in last and "first line" not in last and len(why) == 200 and why.endswith("z")
+          and last.endswith(") — заявки нет"), r.stderr)
     b = Box()
     for args in (["merge", "request", "7"], ["merge", "request", "x", "-R", REPO], ["merge", "request", "7", "-R",
                  "../x"], ["merge", "request", "7", "-R", REPO, "--x"], ["merge", "run", "--now"], ["merge"]):

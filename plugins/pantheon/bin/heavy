@@ -37,6 +37,15 @@ outside) занимает ещё и жетон locks/heavy-full.lock — на Ma
 тесты идут в GitHub Actions (итог — gh pr checks <N>). HEAVY_LOCAL_TESTS=1 снимает отказ. Сами роли её в команду не
 пишут: её ставят запасные пути с записью — плановый проход (pantheon outside test) и `pantheon review test`, когда
 команда — полный набор (FULL_TESTS шлюза) или его узкий вариант (--affected).
+Проверка проекта в окне роли (metis-1188): в окне нет местных портов (tsx IPC, сервер в тестах — EPERM), а в worktree
+часто нет node_modules. Поэтому в окне роли (PANTHEON_TMP или XDG_CACHE_HOME внутри кэшей окон, как у outside), из
+корня репозитория без строки ci:, команда проверки проекта — слово в слово первая строка .pantheon-verify (без
+heavy) или `<pm> [run] <скрипт>` без аргументов, где скрипт test/check (test:*, check:*) package.json корня, — не
+идёт в окне: heavy подаёт `pantheon outside test --sha <HEAD> [--script <скрипт>] --wait 590` (HEAVY_OUTSIDE_WAIT
+уменьшает), печатает его вывод и выходит с его кодом (код тестов; 75 — итога пока нет, строка «смотри pantheon
+outside status <ID>»). Незакоммиченные правки или неотслеживаемые файлы (кроме .claude/worktrees/ и ссылки
+node_modules) — отказ, код 2: прогон шёл бы на коммите без них. Нет коммитов — тоже 2. HEAVY_IN_WINDOW=1 — в окне,
+как раньше. Вне окна роли, --server, --probe и прочие команды — как раньше.
   heavy --probe <команда>  проба одного мутанта для argus: в репозитории «только CI» — только один файл тестов
                            (python [флаги] <путь>/test_*.py [аргументы]); run-tests.py, pytest, -m, sh -c, второй
                            test_*.py — отказ, код 2. Предел — PROBE_MAX (120 с; HEAVY_PROBE_MAX может только уменьшить):
@@ -400,6 +409,145 @@ def refusal(argv, probe_mode):
     return None
 
 
+OUTSIDE_WAIT = 590  # с: --wait заявки вне окна (предел outside; у Bash окна предел 600 с)
+OUTSIDE_ID_RE = re.compile(r"заявка (\d{8}-\d{6}-[0-9a-f]{6})")
+PMS = ("pnpm", "npm", "yarn", "bun")
+CHECK_SCRIPTS = ("test", "check")  # скрипты package.json, которые — проверка проекта (и их test:*, check:*)
+NODE_MODULES_LINK = re.compile(r"\?\? (?:(?:apps|packages)/[^/]+/)?node_modules")  # как review.tree_clean
+
+
+def in_role_window():
+    """Окно роли — как browser.window_cache: PANTHEON_TMP (окна направлений и мастерской) или XDG_CACHE_HOME=<кэш>/xdg
+    внутри кэшей окон ~/Library/Caches/pantheon-sandbox (hq, hestia, job-*)."""
+    if os.environ.get("PANTHEON_TMP"):
+        return True
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if not xdg:
+        return False
+    x = os.path.realpath(xdg)
+    caches = os.path.realpath(os.path.join(os.path.expanduser("~"), "Library", "Caches", "pantheon-sandbox"))
+    return os.path.basename(x) == "xdg" and os.path.dirname(os.path.dirname(x)) == caches
+
+
+def _git(d, *args):
+    try:
+        r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def verify_words(top):
+    """Команда проверки проекта — первая строка .pantheon-verify (без комментариев и `dev:`, как у outside) словами,
+    без ведущих heavy/--server; нет или не разобрать — None."""
+    import shlex
+    try:
+        with open(os.path.join(top, ".pantheon-verify"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    line = next((x.strip() for x in text.splitlines()
+                 if x.strip() and not x.lstrip().startswith(("#", "dev:"))), "")
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        return None
+    while words and words[0] in ("heavy", "--server"):
+        words = words[1:]
+    return words or None
+
+
+def check_script(words, top):
+    """`<pm> [run] <скрипт>` без аргументов, где скрипт — test/check (или test:*, check:*) package.json корня → имя."""
+    if not words or os.path.basename(words[0]) not in PMS:
+        return None
+    rest = words[1:]
+    if rest[:1] in (["run"], ["run-script"]):
+        rest = rest[1:]
+    if len(rest) != 1:
+        return None
+    name = rest[0]
+    try:
+        import json
+        with open(os.path.join(top, "package.json"), encoding="utf-8") as fh:
+            scripts = json.load(fh).get("scripts") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(scripts, dict) or name not in scripts or name.split(":")[0] not in CHECK_SCRIPTS:
+        return None
+    return name
+
+
+def outside_plan(argv):
+    """Окно роли, корень репозитория без строки ci:, команда — проверка проекта → (корень, ключи outside test):
+    [] — первая строка .pantheon-verify, ["--script", имя] — скрипт package.json. Иначе None — команда идёт как раньше.
+    HEAVY_IN_WINDOW=1 — в окне, как раньше (проверке не нужны местные порты)."""
+    if os.environ.get("HEAVY_IN_WINDOW") == "1" or not in_role_window():
+        return None
+    top = (_git(os.getcwd(), "rev-parse", "--show-toplevel") or "").strip()
+    if not top or os.path.realpath(top) != os.path.realpath(os.getcwd()) or ci_only_repo(top):
+        return None
+    words = list(argv)
+    if words == verify_words(top):
+        return top, []
+    name = check_script(words, top)
+    return (top, ["--script", name]) if name else None
+
+
+def dirty(top):
+    """Незакоммиченное в дереве (правки и неотслеживаемое; .claude/worktrees/ и ссылка node_modules не в счёт) →
+    первые строки, чистое — "". Состояние не прочесть — "?"."""
+    st = _git(top, "status", "--porcelain", "--ignore-submodules=all")
+    if st is None:
+        return "?"
+    bad = [ln for ln in st.splitlines() if ln.strip() and not ln.startswith("?? .claude/worktrees/")
+           and not (NODE_MODULES_LINK.fullmatch(ln) and os.path.islink(os.path.join(top, ln[3:])))]
+    return ", ".join(ln[3:] for ln in bad[:3]) + (f" и ещё {len(bad) - 3}" if len(bad) > 3 else "")
+
+
+def run_outside(argv, top, opts):
+    """Проверка проекта в окне роли — заявкой `pantheon outside test --sha <HEAD> --wait` вне окна (metis-1188): в окне
+    нет местных портов, а в worktree — node_modules. Вывод outside — как есть, код выхода — его (код тестов)."""
+    cmd = " ".join(argv)
+    head = (_git(top, "rev-parse", "HEAD") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        print(f"heavy: в {top} нет коммитов — прогону вне окна не на чем идти; не запускалась", file=sys.stderr)
+        return 2
+    why = dirty(top)
+    if why:
+        print(f"heavy: в {top} незакоммиченные правки ({why}) — прогон вне окна идёт на коммите и их не увидит; "
+              f"закоммить и повтори heavy {cmd} или HEAVY_IN_WINDOW=1 heavy {cmd} (в окне, без местных портов)",
+              file=sys.stderr)
+        return 2
+    try:
+        wait = int(os.environ.get("HEAVY_OUTSIDE_WAIT") or OUTSIDE_WAIT)
+    except ValueError:
+        wait = OUTSIDE_WAIT
+    wait = wait if 0 < wait < OUTSIDE_WAIT else OUTSIDE_WAIT
+    pantheon = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pantheon")
+    print(f"heavy: окно роли — «{cmd}» идёт вне окна: pantheon outside test на {head[:12]} (ждать до {wait} с)",
+          file=sys.stderr)
+    rid = None
+    try:
+        proc = subprocess.Popen([pantheon, "outside", "test", "--sha", head, *opts, "--wait", str(wait)], cwd=top,
+                                stdout=subprocess.PIPE, encoding="utf-8", errors="replace")
+        for ln in proc.stdout:
+            sys.stdout.write(ln)
+            sys.stdout.flush()
+            m = rid is None and OUTSIDE_ID_RE.search(ln)
+            if m:
+                rid = m.group(1)
+        code = proc.wait()
+    except OSError as e:
+        print(f"heavy: pantheon outside не запустился ({e}) — проверка не шла", file=sys.stderr)
+        return 1
+    if code == WAIT_EXIT:
+        st = f"pantheon outside status {rid}" if rid else "pantheon outside status"
+        print(f"heavy: итога вне окна пока нет (код 75) — смотри {st}; повтор heavy {cmd} на том же коммите новой "
+              "заявки не подаст, а дождётся идущей", file=sys.stderr)
+    return code
+
+
 def probe_limit():
     try:
         v = float(os.environ.get("HEAVY_PROBE_MAX") or PROBE_MAX)
@@ -564,7 +712,10 @@ def main(argv):
     if why:
         print(why, file=sys.stderr)
         return 2
-    limit = probe_limit() if probe_mode else None
+    plan = None if server or probe_mode else outside_plan(argv)
+    if plan:
+        return run_outside(argv, *plan)
+    limit =probe_limit() if probe_mode else None
     env = tmp_env()
     found = resolve(argv, env)
     if not found:

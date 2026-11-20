@@ -50,7 +50,9 @@
 простаивающему Зевсу — push + `claude respawn`, раз на пункт и не чаще раза в 15 мин на сессию, за проход одним
 сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Ожидание дольше 5 мин — карточка
 владельцу «Ждёт вас» (окно, что просит, что делать), дольше 30 мин — повтор уведомления и строка Зевсу в тревогах, одна на
-ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Каждая проверка идёт отдельно: сбой одной
+ожидание окна; вышло из ожидания — карточка закрыта, wait-cards.json (metis-1122). Запрос уже у Зевса живой заявкой
+perm (lib/perm.py, perm_live) — ни тревоги, ни передачи, ни карточки, пока заявка ждёт; решена, снята, срок вышел или
+хук умер — обычный путь, отсчёт ожидания с первого прохода (metis-1254). Каждая проверка идёт отдельно: сбой одной
 — тревога «проверка X упала», остальные работают; время прохода — ~/.local/state/pantheon/watch-last (строка статуса и
 `pantheon status` показывают, что дежурный жив). Основания — исследование
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
@@ -319,9 +321,14 @@ WAIT_REASONS = ("идёт технический", "пауза по нагруз
                 "пятичасовой", "недельный лимит")
 
 
+# тот же текст, что sessions.AGENTS_SILENT: sessions.py ставит загрузчик с P (_attach), простым импортом его не взять
+AGENTS_SILENT = "claude agents --json не ответил"
+
+
 def recheck(name, auto, nudge=False):
-    """Та же проверка по свежему claude agents — под блокировкой имени перед самим подъёмом."""
-    return lambda: wake_block(name, P.agents_all() or [], P.sessions_registry(), auto, nudge)
+    """Та же проверка по свежему claude agents под блокировкой имени; не JSON — отказ, а не «копий нет» (metis-1192)."""
+    return lambda: (AGENTS_SILENT if (agents := P.agents_all()) is None
+                    else wake_block(name, agents, P.sessions_registry(), auto, nudge))
 
 
 # --- снимок сессий (COMM-14) ---------------------------------------------------------
@@ -420,6 +427,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("имя Зевса", lambda: zeus_rename(t, agents)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("заявки Зевса на запуск", lambda: P.take_start_requests(doms, t)),  # metis-0771: до разовых
@@ -446,15 +454,17 @@ def blind_checks(t):
     return [("метка перезапуска", lambda: maint_expire(t)),
             ("цели направлений", lambda: goal_dates(t)),
             ("кэши песочниц", lambda: sandbox_sweep(t)),
-            ("версия Claude Code", lambda: cc_version(t)),
+            ("версия Claude Code", lambda: cc_version(t, blind=True)),
             ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
             ("журналы ваших слов", lambda: daily(t))]
 
 
 def run_checks(checks, t):
-    """Прогоняет проверки по очереди; сбой одной — тревога, остальные идут. Возвращает имена упавших."""
+    """Прогоняет проверки по очереди; сбой одной — тревога, остальные идут. Возвращает имена упавших. Проверка дольше
+    CHECK_SLOW — строка с её временем в вывод прохода (watch.log, metis-1236): долгий проход виден по шагам."""
     failed = []
     for name, fn in checks:
+        start = time.monotonic()
         try:
             fn()
             P.clear_once(f"watch-fail-{name}")
@@ -463,7 +473,22 @@ def run_checks(checks, t):
             P.alert_once(f"watch-fail-{name}", f"{today(t)}-{type(e).__name__}",
                          f"дежурный: проверка «{name}» упала ({type(e).__name__}: {str(e)[:160]}) — остальные идут; "
                          "журнал pantheon jobs, задача watch", "watch")
+        took = time.monotonic() - start
+        if took >= check_slow():
+            print(f"дежурный: проверка «{name}» шла {took:.0f} с", flush=True)
     return failed
+
+
+CHECK_SLOW = 20.0   # с: проверка дольше — строкой в watch.log (metis-1236)
+
+
+def check_slow():
+    """Порог строки о долгой проверке, с; PANTHEON_CHECK_SLOW — подмена для тестов."""
+    with contextlib.suppress(ValueError, TypeError):
+        v = float(os.environ.get("PANTHEON_CHECK_SLOW") or CHECK_SLOW)
+        if v >= 0:
+            return v
+    return CHECK_SLOW
 
 
 def awake():
@@ -544,21 +569,16 @@ def blocked_why(a):
 
 
 def relay_block(t):
-    """Почему «ждёт вас» сейчас нельзя передавать Зевсу, или None. Передача — ход Зевса, то есть расход модели, поэтому
-    те же запреты, что у автоматического подъёма (wake_block): техперезапуск (SCHED-15), пауза планировщика, пятичасовой
-    лимит, недельный и недельный потолок владельца — оба в night.gate("respawn") ([limits.owner_cap], metis-0403)."""
+    """Почему «ждёт вас» сейчас нельзя передавать Зевсу, или None: техперезапуск (SCHED-15), пауза планировщика, пробный
+    запуск. Лимиты передачу не держат (слово владельца 15.11, metis-1183): запрос разрешения, о котором Зевс не узнал,
+    стоял сутки молча; передача — один короткий ход Зевса раз на пункт, а окно без ответа стоит целиком. t — не нужен."""
+    del t
     if os.environ.get("PANTHEON_DRYRUN") == "1" or dry():
         return "пробный запуск"
     if P.maintenance_active():
         return "идёт технический перезапуск"
     if os.path.exists(P.path("paused")):
         return "весь планировщик на паузе"
-    pct, lim = P.limit_pct(), threshold("limit_max_pct", 70)
-    if pct is not None and pct >= lim:
-        return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
-    ok, why = P.night_mod().gate("respawn", t)
-    if not ok:
-        return f"недельный лимит: {why}"
     return None
 
 
@@ -576,8 +596,10 @@ def relay_zeus(agents, items, t):
     blocked-сессии прохода [(имя, sid, что ждёт)]: за проход не больше одной передачи, одним сообщением (второй respawn
     оборвал бы ход, который первый только что начал). Один пункт — одна передача: тот же вопрос той же сессии повторно
     не будит, новая — когда пункт сменился или сессия вышла из blocked и вернулась (запись в relay.json снимает
-    sessions()); и не чаще RELAY_EVERY на сессию. Зевса нет, остановлен или занят ходом, а также relay_block — ничего
-    (остаются тревога и уведомление). → True, если передано."""
+    sessions()); и не чаще RELAY_EVERY на сессию. Зевса нет, остановлен или занят ходом (и окно вопросов висит: state
+    blocked), очередь push полна, а также relay_block — ничего, и relay.json не пишется: пункт не отправлен и уходит
+    следующим проходом, когда Зевс свободен (metis-1253); тревога в alerts.md и уведомление остаются. → True, если
+    передано."""
     items = [i for i in items if not i[0].startswith("zeus")]
     if not items or os.path.exists(P.path("stopped", "zeus")) or relay_block(t):
         return False
@@ -592,7 +614,8 @@ def relay_zeus(agents, items, t):
         return False
 
     def pick(ags):
-        zs = [z for z in ags if z.get("name") == "zeus" and z.get("id") and z.get("sessionId")
+        # metis-1183: после перезапуска окно Зевса зовётся «zeus (2)» — по точному имени передача молчала с 05.11
+        zs = [z for z in ags if _base_name(z.get("name")) == "zeus" and z.get("id") and z.get("sessionId")
               and z.get("kind") in (None, "background")]
         z = max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
         return z if z and idle_holder(z) else None
@@ -620,8 +643,7 @@ def relay_zeus(agents, items, t):
         P.start_log(f"relay\tzeus\t{z['id']}\t{','.join(d[1] for d in due)}\t{r.returncode}")
         ok = r.returncode == 0
         if not ok:
-            with contextlib.suppress(OSError):
-                os.remove(pushed)
+            P.push_drop(pushed, text)  # metis-1253: только эта передача, прежние в очереди ждут старта
         st = {k: v for k, v in st.items() if (_relay_rec(v) or {"t": 0})["t"] > t - 86400}
         for _, sid, why in due:  # неудача тоже в запись: повтор не чаще RELAY_EVERY, а не каждый проход
             st[sid] = {"t": t, "item": why, "sent": ok}
@@ -631,6 +653,15 @@ def relay_zeus(agents, items, t):
 
 WAIT_CARD_AFTER = 300     # metis-1122: окно ждёт разрешения дольше 5 мин — карточка владельцу «Ждёт вас»
 WAIT_REPEAT_AFTER = 1800  # дольше 30 мин — повтор: уведомление владельцу и строка Зевсу в тревогах
+WAIT_REMIND_EVERY = 3600  # metis-1183: дальше — напоминание каждый час, пока окно ждёт (один повтор молчал 20 ч)
+UNKNOWN_WHY = "причина неизвестна"
+
+
+def _new_wait(rec, why):
+    """metis-1183: окно на другом запросе — новое ожидание, хотя между проходами оно из ожидания не выходило (владелец
+    ответил на прежний за минуту между проходами). «Причина неизвестна» с любой стороны — не смена: журнал не прочитан."""
+    old = rec.get("known") or rec.get("why")   # последнее известное: «причина неизвестна» его не перетирает (Д1)
+    return bool(old) and old != why and UNKNOWN_WHY not in (old, why)
 
 
 def _wait_card(name, sid, why, since, t):
@@ -655,9 +686,19 @@ def _wait_card(name, sid, why, since, t):
     return tid
 
 
-def wait_cards(agents, waiting, t):
+def _perm_live(a, agents=()):
+    """Живая заявка perm окна a (P.perm_live) → номер или None; сбой — None: обычный путь, ничего не теряется."""
+    try:
+        return P.perm_live(a, agents)
+    except Exception:  # noqa: BLE001 — без заявки дежурный спрашивает сам, как до metis-1254
+        return None
+
+
+def wait_cards(agents, waiting, t, covered=frozenset()):
     """metis-1122: ожидание разрешения дольше WAIT_CARD_AFTER — карточка владельцу, дольше WAIT_REPEAT_AFTER — повтор
-    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке). Ключ — имя окна: та же сессия или её
+    (уведомление и строка «ждёт вас» в тревогах, её Зевс получает в сводке), дальше — каждый час только строка Зевсу,
+    без macOS: часовые уведомления съели бы дневной бюджет (metis-1183). Окно на
+    другом запросе — новое ожидание: прежняя карточка закрыта, отсчёт заново (_new_wait). Ключ — имя окна: та же сессия или её
     замена под тем же именем — одна карточка и один повтор (одинаковые «ждёт вас» склеиваются). Окно вышло из
     ожидания — карточка закрывается, запись снимается. Пустой claude agents — ничего не закрываем (сбой списка, а не
     конец ожидания). Окна Зевса нет: туда владелец смотрит сам. Пробный запуск — ничего."""
@@ -679,18 +720,33 @@ def wait_cards(agents, waiting, t):
                                            "result": f"Окно {name} больше не ждёт разрешения"},
                                            note="окно больше не ждёт", actor="плановый проход")
         for name, (sid, why) in items.items():
+            if name in st and _new_wait(st[name], why):
+                old = st.pop(name)
+                P.clear_fault(f"wait-repeat-{name}")
+                if old.get("card"):
+                    with contextlib.suppress(ValueError, OSError):
+                        P.tasks_mod().task_set(P.PANTHEON, t, old["card"], {"status": "done", "result":
+                                               f"Окно {name} перешло к другому запросу — новая карточка"},
+                                               note="окно на другом запросе", actor="плановый проход")
             rec = st.setdefault(name, {"since": t})
             since = rec["since"] if isinstance(rec.get("since"), (int, float)) and rec["since"] <= t else t
             rec.update(since=since, sid=sid, why=why)
+            if why != UNKNOWN_WHY:
+                rec["known"] = why
+            if name in covered:
+                continue   # metis-1254: запрос у Зевса заявкой perm — карточки и повтора нет, отсчёт since идёт
             if t - since >= WAIT_CARD_AFTER and not rec.get("card"):
                 rec["card"] = _wait_card(name, sid, why, since, t)
-            if t - since >= WAIT_REPEAT_AFTER and not rec.get("repeated"):
+            last = rec.get("repeated")
+            if t - since >= WAIT_REPEAT_AFTER and (not isinstance(last, (int, float)) or t - last >= WAIT_REMIND_EVERY):
+                first = not isinstance(last, (int, float))
                 rec["repeated"] = t
                 mins = int((t - since) // 60)
                 card = f", карточка {rec['card']}" if rec.get("card") else ""
                 P.alert(f"окно {name} ждёт вас {mins} мин: {why}{card} — claude attach {sid}", "watch")
-                P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
-                              group=f"session-{name}", once=True)
+                if first:  # macOS — один раз на ожидание; часовые — строкой Зевсу, дневной бюджет уведомлений цел
+                    P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
+                                  group=f"session-{name}", once=True)
         P.write_json(sp, st)
 
 
@@ -702,6 +758,7 @@ def sessions(agents, doms, t=None):
     t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
     waiting = []  # blocked этого прохода: [(имя, sid, что ждёт)] — Зевсу одним сообщением
+    covered = set()  # имена окон, чей запрос уже у Зевса живой заявкой perm (metis-1254)
     for a in agents:
         name, sid, state = a.get("name") or "", a.get("id") or a.get("sessionId") or "", a.get("state")
         if not sid or not is_pantheon(name, doms):
@@ -718,6 +775,13 @@ def sessions(agents, doms, t=None):
         if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
             state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
+        if state == "blocked" and not a.get("ghost") and _perm_live(a, agents):
+            # metis-1254: запрос окна уже у Зевса заявкой perm-… (lib/perm.py) — ни тревоги, ни уведомления, ни
+            # передачи, ни карточки: владельца спросили бы дважды. Отсчёт ожидания идёт (wait_cards); заявка решена,
+            # снята, вышел срок или хук умер — обычный путь со следующего прохода
+            covered.add(name)
+            waiting.append((name, sid, why))
+            continue
         if a.get("ghost"):  # metis-0651: процесс умер, запись осталась — одна тревога на сессию, пока призрак виден
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
@@ -734,8 +798,8 @@ def sessions(agents, doms, t=None):
                       group=f"session-{name}", once=True)
         if state == "blocked":
             waiting.append((name, sid, why))
-    relay_zeus(agents, waiting, t)
-    wait_cards(agents, waiting, t)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
+    relay_zeus(agents, [w for w in waiting if w[0] not in covered], t)
+    wait_cards(agents, waiting, t, covered)  # metis-1122: дольше 5 мин — карточка владельцу, дольше 30 — повтор
     # вышла из blocked — запись снимаем: вернётся в blocked, будет новый пункт (передача раз на пункт)
     st = P.read_json(P.path("relay.json"), {})
     if isinstance(st, dict) and st:
@@ -1164,14 +1228,26 @@ LINK_SKIP = ("node_modules", ".next", ".venv", "venv", ".turbo", ".cache")   # �
 DEPS_LIMIT = 300000                     # записей внутри LINK_SKIP; больше — «не знаю» (None), копия не удаляется
 
 
-def outward_links(wt):
+class _OutOfTime(Exception):
+    """Срок уборки копий в этом проходе вышел (WT_BUDGET, metis-1236): копия и остальные — в следующий проход."""
+
+
+def _over(deadline):
+    """Срок вышел (time.monotonic) — _OutOfTime; deadline None — без срока (`pantheon wt done|plan`)."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise _OutOfTime()
+
+
+def outward_links(wt, deadline=None):
     """Символические ссылки копии, чья цель (realpath) лежит вне неё. Обход без перехода по ссылкам, папку .git
     копии пропускаем. Записи внутри LINK_SKIP (node_modules, .next, .venv и т. п.; у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
     DEPS_LIMIT, остальные — под WALK_LIMIT. Превышение любого лимита — копия считается небезопасной (None, «не знаю»)
-    и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None."""
+    и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None. deadline вышел посреди
+    обхода — _OutOfTime (metis-1236: обход node_modules под нагрузкой диска не держит проход до таймаута)."""
     root = os.path.realpath(wt)
     n, first, seen, deps = 0, None, 0, 0
     for d, dirs, files in os.walk(root, followlinks=False):
+        _over(deadline)
         if d == root and ".git" in dirs:
             dirs.remove(".git")
         inside = any(part in LINK_SKIP for part in os.path.relpath(d, root).split(os.sep))
@@ -1262,6 +1338,19 @@ SAVE_MAX_FILES = 2000       # файлов в архив копии больше
 IGNORED_SKIP = LINK_SKIP + ("dist", "build", "out", ".output", "coverage", "target", "__pycache__", ".pytest_cache",
                             ".mypy_cache", ".ruff_cache", ".parcel-cache", ".svelte-kit", ".nuxt", ".vercel", ".tox",
                             ".gradle", ".DS_Store")
+WT_BUDGET = 120.0           # с на уборку копий за проход (metis-1236): срок прохода 600 с, после копий ещё ~20 проверок
+WT_DEFERRED = "wt-deferred.json"   # STATE: копии, до которых проход не дошёл по сроку, — следующий начинает с них
+
+
+def wt_budget():
+    """Срок уборки копий за проход, с; PANTHEON_WT_BUDGET — подмена (тесты, ручная проба), неверное — WT_BUDGET."""
+    with contextlib.suppress(ValueError, TypeError):
+        v = float(os.environ.get("PANTHEON_WT_BUDGET") or WT_BUDGET)
+        if v >= 0:
+            return v
+    return WT_BUDGET
+
+
 WT_REQ_DIR = "wt-req"       # заявки `pantheon wt done`: STATE/wt-req (ваши сессии), <кэш окна>/wt-req (окно роли)
 AGENT_LOCK = re.compile(r"claude agent (agent-[0-9a-f]{6,40}) \(pid \d+")   # lock, который Claude Code вешает на копию субагента
 AGENT_DIR = re.compile(r"agent-[0-9a-f]{6,40}")
@@ -1319,11 +1408,12 @@ def subagent_live(agent, wt, t):
 QUIET_LIMIT = 50000   # записей копии (без LINK_SKIP) для _quiet_since; больше — «не знаю», копия считается занятой
 
 
-def _quiet_since(wt, since):
+def _quiet_since(wt, since, deadline=None):
     """Ни одна запись копии (папки и файлы, без LINK_SKIP, без перехода по ссылкам) не менялась после since. Обход
-    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем."""
+    длиннее QUIET_LIMIT или ошибка чтения — False: при сомнении копию не трогаем. deadline вышел — _OutOfTime."""
     stack, n = [wt], 0
     while stack:
+        _over(deadline)
         d = stack.pop()
         try:
             if os.lstat(d).st_mtime > since:
@@ -1573,7 +1663,7 @@ def wt_journal(t, root, wt, branch, head, kind, saved):
     return p
 
 
-def wt_one(root, wt, block, ctx, requested=False, dry=False):
+def wt_one(root, wt, block, ctx, requested=False, dry=False, deadline=None):
     """Одна копия <root>/.claude/worktrees/<имя> (metis-0835). block — её запись `git worktree list --porcelain`.
     → (итог, текст):
       live    — в копии живая сессия (cwd), процесс (lsof) или работающий субагент: не трогаем ни при каком условии;
@@ -1590,7 +1680,9 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     без живого субагента не держит; lock с другой причиной — держит. Ветку не удаляем (кроме `branch -d` пустой: git
     сам откажет, если она не слита); detached со своими коммитами — сначала ветка archive/wt-<имя>; правки и
     неотслеживаемое, а у любой копии игнорируемое вне IGNORED_SKIP (.env.local) — сначала в патч и архив (wt_save).
-    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела."""
+    Прямо перед `git worktree remove` — перепроверка (_busy_now: процесс, субагент, правки); копия ожила — цела.
+    deadline (time.monotonic, metis-1236) — срок обходов до первой правки (свежие правки, ссылки наружу): вышел —
+    _OutOfTime, копия цела и ждёт следующего прохода; после начала сохранения срок не проверяется."""
     t = ctx.t
     if _has_inside(wt, ctx.live):
         return "live", "живая сессия в копии"
@@ -1644,10 +1736,10 @@ def wt_one(root, wt, block, ctx, requested=False, dry=False):
     # lock называет субагента, а его meta не найден (жив ли — неизвестно) — и у `wt done` ждём, пока копия затихнет
     quiet = WT_DONE_QUIET if requested and not (alive is None and am) else LIVE_SUBAGENT_MAX
     since = t - quiet
-    if not _quiet_since(wt, since):
+    if not _quiet_since(wt, since, deadline):
         return "live", (f"lock субагента {agent}: meta не найден, " if alive is None and am else "") + \
             f"в копии правки моложе {_dur(quiet)} — похоже, в ней ещё работают"
-    out = outward_links(wt)
+    out = outward_links(wt, deadline)
     if out is None or out[0]:
         what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
                 "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0], out[1][1].replace(P.HOME, "~")))
@@ -1806,58 +1898,93 @@ def worktrees(agents, registry, doms, t):
     Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
     не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий; решает _prune_state по пути из gitdir,
     как git: недоступная копия (в том числе с chmod 000 на ней самой) или живая сессия в пропавшей папке блокирует
-    prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога."""
+    prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога.
+    Срок (metis-1236): на все копии прохода — wt_budget() секунд, обходы внутри копии тоже его смотрят. Не успевшие —
+    по порядку в STATE/wt-deferred.json, следующий проход начинает с них; первая копия прохода идёт без срока, так что
+    каждый проход продвигает очередь. Заявки `wt done` отложенных копий ждут. Причина: уборка копий под нагрузкой
+    диска держала проход до таймаута 600 с (run-job watch, rc 124), а с ним — все проверки после неё."""
     ctx = WtCtx(agents, registry, t)
     reqs = wt_requests(doms, t)
     removed = []
-    seen = set()
+    seen = []
+    deferred = []
     with P.lock("worktrees") as got:
         if not got:  # lock не взят (подложенный файл и т. п.; причину печатает P.lock) — копий не трогаем (D5)
             return
+        items = []
         for name, folders in doms.items():
             for f in folders if isinstance(folders, list) else []:
                 root = os.path.realpath(os.path.expanduser(f))
                 if root in seen or not os.path.isdir(os.path.join(root, ".git")):
                     continue
-                seen.add(root)
-                for wt, block in _copies(root):
-                    try:
-                        os.lstat(wt)
-                    except OSError:
-                        continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
-                    short = wt.replace(P.HOME, "~")
-                    if not _in_worktrees(wt):
-                        # копия вне штатной папки: только тревога, никогда не удаляем
-                        if _has_inside(wt, ctx.live):
-                            continue
-                        try:
-                            out_age = (t - os.stat(wt).st_mtime) / 3600
-                        except OSError:
-                            continue
-                        if out_age > WORKTREE_DAYS * 24:
-                            P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {short} ({name}, "
-                                         f"{out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать", "watch")
-                        continue
-                    req = reqs.pop(wt, None)
-                    verdict, text = wt_one(root, wt, block, ctx, requested=bool(req))
-                    if verdict == "removed":
-                        removed.append(text)
-                        P.clear_once(f"watch-wt-{wt}")
-                        _drop(req)
-                    elif verdict == "keep":
-                        P.alert_once(f"watch-wt-{wt}", text, f"копия {short} ({name}) не убрана: {text} — "
-                                     "координатору: разобрать и убрать вручную", "watch")
-                        _drop(req)
-                need_prune, blockers = _prune_state(root, ctx.live)
-                for path, ex in blockers:
-                    P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
-                                 f"недоступна ({ex}) — prune отложен", "watch")
-                if need_prune and not blockers:
-                    # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
-                    # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
-                    _git("-C", root, "worktree", "prune")
-    for left in reqs.values():  # копии больше нет в списке git — заявка исполнена или не нужна
-        _drop(left)
+                seen.append(root)
+                items += [(name, root, wt, block) for wt, block in _copies(root)]
+        before = P.read_json(P.path(WT_DEFERRED), [])
+        order = {x: n for n, x in enumerate(before if isinstance(before, list) else []) if isinstance(x, str)}
+        # отложенные прошлым проходом — первыми и в своём порядке, прочие — после них в прежнем порядке (sort стабилен)
+        items.sort(key=lambda x: order.get(x[2], len(order)))
+        budget = wt_budget()
+        start = time.monotonic()
+        deadline = start + budget
+        ran = False  # первая копия прохода, дошедшая до wt_one, — без срока: каждый проход хоть одну доводит
+        for i, (name, root, wt, block) in enumerate(items):
+            if ran and time.monotonic() > deadline:
+                deferred = [x[2] for x in items[i:]]
+                break
+            try:
+                os.lstat(wt)
+            except OSError:
+                continue  # пропавшую или недоступную копию дальше не трогаем; prune решает _prune_state
+            short = wt.replace(P.HOME, "~")
+            if not _in_worktrees(wt):
+                # копия вне штатной папки: только тревога, никогда не удаляем
+                if _has_inside(wt, ctx.live):
+                    continue
+                try:
+                    out_age = (t - os.stat(wt).st_mtime) / 3600
+                except OSError:
+                    continue
+                if out_age > WORKTREE_DAYS * 24:
+                    P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {short} ({name}, "
+                                 f"{out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать", "watch")
+                continue
+            req = reqs.pop(wt, None)
+            try:
+                verdict, text = wt_one(root, wt, block, ctx, requested=bool(req), deadline=deadline if ran else None)
+            except _OutOfTime:
+                if req:
+                    reqs[wt] = req
+                deferred = [x[2] for x in items[i:]]
+                break
+            ran = True
+            if verdict == "removed":
+                removed.append(text)
+                P.clear_once(f"watch-wt-{wt}")
+                _drop(req)
+            elif verdict == "keep":
+                P.alert_once(f"watch-wt-{wt}", text, f"копия {short} ({name}) не убрана: {text} — "
+                             "координатору: разобрать и убрать вручную", "watch")
+                _drop(req)
+        for root in seen:
+            need_prune, blockers = _prune_state(root, ctx.live)
+            for path, ex in blockers:
+                P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
+                             f"недоступна ({ex}) — prune отложен", "watch")
+            if need_prune and not blockers:
+                # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
+                # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
+                _git("-C", root, "worktree", "prune")
+        if deferred:
+            P.write_json(P.path(WT_DEFERRED), deferred)
+            print(f"уборка копий: срок {budget:g} с вышел за {time.monotonic() - start:.0f} с — отложено "
+                  f"{len(deferred)} из {len(items)}, следующий проход начнёт с них")
+        elif before:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(P.path(WT_DEFERRED))
+    wait = set(deferred)
+    for wt, left in reqs.items():  # копии больше нет в списке git — заявка исполнена или не нужна; отложенная ждёт
+        if wt not in wait:
+            _drop(left)
     if removed:
         P.alert_once("watch-wt-removed", today(t), f"уборка копий: убрано {len(removed)} — " + "; ".join(removed[:3])
                      + (f" и ещё {len(removed) - 3}" if len(removed) > 3 else "")
@@ -2159,12 +2286,20 @@ def sandbox_sweep(t):
         P.clear_once("watch-sandbox-cap")
 
 
-def cc_version(t):
+def cc_version(t, blind=False):
     """Claude Code сменил версию (SCOUT-05) — строка в тревоги, событие cc_updated для пересмотров и проверка опор
-    (SEC-16); не в порядке — уведомление и поручение Метиде через тревогу."""
+    (SEC-16); не в порядке — уведомление и поручение Метиде через тревогу. metis-1180: blind (claude agents не ответил)
+    — `claude --version` не дольше 15 с, таймаут — тихий пропуск (неответ считает agents_failed со своим порогом);
+    cc-version пишется после тревоги: упала проверка опор — следующий проход повторит, тревога не теряется."""
     v = os.environ.get("PANTHEON_FAKE_CC")
     if v is None:
-        r = subprocess.run([P.claude_bin(), "--version"], env=P.claude_env(), capture_output=True, text=True, timeout=60)
+        try:
+            r = subprocess.run([P.claude_bin(), "--version"], env=P.claude_env(), capture_output=True, text=True,
+                               timeout=min(15, P.agents_timeout()) if blind else 60)
+        except (subprocess.TimeoutExpired, OSError):
+            if blind:
+                return
+            raise
         v = (r.stdout.split() or [""])[0]
     if not re.fullmatch(r"\d+(?:\.\d+)+", v or ""):
         return
@@ -2174,17 +2309,16 @@ def cc_version(t):
         old = open(p).read().strip()
     if old == v:
         return
+    if old:
+        ok, lines = infra_check()
+        P.alert(f"Claude Code обновился: {old} → {v}; проверка опор: "
+                + ("в порядке" if ok else "НЕ в порядке — " + "; ".join(x for x in lines if x.startswith("НЕТ"))[:300]
+                   + " — Метиде: разобрать (pantheon infra-check)")
+                + "; журнал изменений сверяет iris", "watch")
+        event("cc_updated", t, version=v, was=old)
+        if not ok:
+            P.notify_soon("infra", f"Claude Code {v}: проверка опор не прошла — pantheon infra-check")
     P.write_atomic(p, v + "\n")
-    if not old:
-        return
-    event("cc_updated", t, version=v, was=old)
-    ok, lines = infra_check()
-    P.alert(f"Claude Code обновился: {old} → {v}; проверка опор: "
-            + ("в порядке" if ok else "НЕ в порядке — " + "; ".join(x for x in lines if x.startswith("НЕТ"))[:300]
-               + " — Метиде: разобрать (pantheon infra-check)")
-            + "; журнал изменений сверяет iris", "watch")
-    if not ok:
-        P.notify_soon("infra", f"Claude Code {v}: проверка опор не прошла — pantheon infra-check")
 
 
 def event(kind, t, **extra):
@@ -2466,10 +2600,37 @@ def zeus_trace(st, stp, t, a, miss, n, result):
     P.write_json(stp, st)
 
 
+def zeus_clean_failed(st, stp, t, a, n, rc, held):
+    """Свежий старт очистки Зевса не дал 0 (rc); held — причины повторной проверки под блокировкой (again)."""
+    if not held or held[0]:
+        # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
+        # fresh-skip уже в start.log) — проверит следующий проход
+        st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
+                      "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
+        P.write_json(stp, st)
+        return
+    st["failed"] = {"sid": a["sessionId"], "t": t}  # повтор — не чаще раза в час, и при пропуске тоже
+    if rc == P.SKIPPED:
+        # пропуск свежего старта (claude agents не ответил, имя не отпустили): тревогу «Зевс остановлен — pantheon
+        # start zeus» с причиной дал fresh_skip, если Зевс уже погашен, — не «не вышла, код 4» (metis-1192)
+        return zeus_trace(st, stp, t, a, [(0, P.SKIP_WHY)], n, "отложено")
+    zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
+    P.alert(f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log", "watch")
+
+
+def _hq_copy(a):
+    """«zeus (N)» — окно штаба, только если оно в папке Пантеона: иное окно с таким именем (роль назвала себя «zeus»)
+    не перезапускаем под --agent hq (находка проверки безопасности, metis-1251). Точное «zeus» — как раньше."""
+    if a.get("name") == "zeus":
+        return True
+    cwd = a.get("cwd")
+    return isinstance(cwd, str) and bool(cwd) and os.path.realpath(cwd) == os.path.realpath(P.PANTHEON)
+
+
 def zeus_clean(agents, t):
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
-    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
+    zs = [a for a in agents if _base_name(a.get("name")) == "zeus" and _hq_copy(a) and a.get("id") and a.get("sessionId")
           and a.get("state") not in ("stopped", "failed")]
     if not zs:
         if (st.get("last") or {}).get("result") != "нет Зевса":
@@ -2516,17 +2677,7 @@ def zeus_clean(agents, t):
                     "watch")
             event("zeus-clean", t, id=a.get("id"), tokens=n)
             return
-        if not held or held[0]:
-            # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
-            # fresh-skip уже в start.log) — проверит следующий проход
-            st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
-                          "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
-            P.write_json(stp, st)
-            return
-        st["failed"] = {"sid": a["sessionId"], "t": t}
-        zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
-        P.alert(f"очистка Зевса не вышла, код {rc} — контекст {k} тыс.; журнал start.log", "watch")
-        return
+        return zeus_clean_failed(st, stp, t, a, n, rc, held)
     zeus_trace(st, stp, t, a, miss, n, "пропуск")
     if [m for m, _ in miss] != [5]:
         return  # напоминание — только когда не хватает одного сохранения; (6) — тихо ждём следующего прохода
@@ -2539,6 +2690,70 @@ def zeus_clean(agents, t):
             "тогда очистка пройдёт сама", "watch")
     st["remind"] = {"t": t, "sid": a["sessionId"], "turn": info["turn"]}
     P.write_json(stp, st)
+
+
+def _zeus_tab(agents):
+    """Живая «zeus» или вкладка терминала с этим именем или его копией (P.live_copies: claude agents и реестр
+    ~/.claude/sessions). Интерактивной вкладки нет в фоновых сессиях, а fresh_start отказал бы на ней (fresh-tab, код 1)
+    — и каждый час две тревоги (находка argus Д4, metis-1251)."""
+    return any(x.get("name") == "zeus" or not x.get("id") or x.get("kind") == "interactive"
+               for x in P.live_copies("zeus", agents))
+
+
+def zeus_rename(t, seen=None):
+    """metis-1251 (слово владельца 15.11): окно Зевса всегда «zeus». Живая фоновая «zeus (N)» (Claude Code дал суффикс,
+    когда «zeus» была занята) при простое Зевса, без живой «zeus» и без вкладки терминала с этим именем (_zeus_tab) — перезапуск той же переписки под именем zeus:
+    P.fresh_start(resume=<sessionId>) = claude stop, ждём свободного имени, `claude --resume <сессия> --bg --agent hq
+    --name zeus`, check_new_name. Простой — те же условия, что у очистки (zeus_clean_check без (1) «контекст»): не
+    идёт ход, нет вопроса, всё сохранено, с конца хода ≥ ZEUS_IDLE_MIN; и защиты zeus_hold. Мёртвую «zeus» убираем
+    раньше (иначе имя занято, и новая снова стала бы «zeus (2)»); убранную вычёркиваем из seen — списка сессий прохода,
+    иначе уборка сессий (auto_rm) звала бы claude rm той же записи второй раз и тревожила бы отказом. Сбой — повтор не
+    чаще раза в ZEUS_REMIND_MIN."""
+    if dry():
+        return
+    agents = P.agents_all() or []  # свежий список: очистка Зевса выше могла только что поднять «zeus»
+    bgs = [a for a in agents if a.get("id") and a.get("kind") in (None, "background")]
+    alive = [a for a in bgs if a.get("state") not in ("stopped", "failed")]  # как в zeus_clean: done — ждёт ввода
+    if any(a.get("name") == "zeus" and (a.get("state") != "done" or a.get("pid")) for a in alive) \
+            or _zeus_tab(agents):
+        return
+    zs = [a for a in alive if re.fullmatch(r"zeus \(\d+\)", str(a.get("name") or "")) and a.get("sessionId")
+          and _hq_copy(a)]
+    if len(zs) != 1 or zeus_hold():
+        return
+    a, stp = zs[0], P.path("zeus-rename.json")
+    st = P.read_json(stp, {}) or {}
+    if t - float(st.get("failed") or 0) < ZEUS_REMIND_MIN * 60:
+        return
+    tp = P.transcript_path(a)
+    if not tp or [m for m, _ in zeus_clean_check(a, tp)[0] if m != 1]:
+        return  # ход идёт, вопрос, несохранённое, меньше 20 мин с конца хода — не трогаем
+    for x in bgs:  # мёртвая «zeus» держит имя: убираем до перезапуска
+        if x.get("name") == "zeus" and P.rm_session(x["id"], name="zeus", why="zeus-rename") is None and seen is not None:
+            seen[:] = [s for s in seen if s.get("id") != x["id"]]  # уборка сессий ниже по проходу не зовёт rm повторно
+
+    def again():
+        """Под блокировкой имени, перед claude stop: те же условия по свежему claude agents."""
+        now = P.agents_all() or []
+        mine = [x for x in now if x.get("sessionId") == a["sessionId"] and _hq_copy(x)]
+        if not mine or any(x.get("name") == "zeus" and x.get("state") not in ("stopped", "failed") for x in now) \
+                or _zeus_tab(now):
+            return "Зевса нет в claude agents или «zeus» уже есть"
+        return zeus_hold() or "; ".join(s_ for n_, s_ in zeus_clean_check(mine[0], tp)[0] if n_ != 1) or None
+
+    text = (f"{P.START_MARK} переименование] Окно перезапущено под именем zeus (было «{a.get('name')}»), разговор тот же. "
+            "Продолжай с того места, где остановился; ничего заново не начинай. Это не слова владельца и не согласие.")
+    rc = P.fresh_start("zeus", a, text, "tick", recheck=again, reason=f"переименование «{a.get('name')}» → zeus",
+                       resume=a["sessionId"])
+    P.start_log(f"zeus-rename\t{a.get('id')}\t{a.get('name')}\t{rc}")
+    if rc == 0:
+        P.alert(f"Зевс переименован: «{a.get('name')}» → zeus, переписка та же (claude attach zeus)", "watch")
+        event("zeus-rename", t, id=a.get("id"))
+        return
+    st["failed"] = t
+    P.write_json(stp, st)
+    if rc != P.SKIPPED:
+        P.alert(f"переименование Зевса «{a.get('name')}» → zeus не вышло, код {rc}; журнал start.log", "watch")
 
 
 # --- самозапуск координаторов (SCHED-09, решение владельца 15.10) --------------------------------------
@@ -2901,8 +3116,10 @@ def goal_block(d, a, agents, registry):
 
 def goal_recheck(d, a):
     """Повторная проверка под блокировкой имени перед сменой цели, по свежему claude agents: держит имя только a —
-    иначе отказ (ревью argus: ручной запуск между снимком и блокировкой иначе погасил бы stop_copies)."""
-    return lambda: goal_block(d, a, P.agents_all() or [], P.sessions_registry())
+    иначе отказ (ревью argus: ручной запуск между снимком и блокировкой иначе погасил бы stop_copies). Не JSON —
+    отказ AGENTS_SILENT, а не «держателей нет» (metis-1192)."""
+    return lambda: (AGENTS_SILENT if (agents := P.agents_all()) is None
+                    else goal_block(d, a, agents, P.sessions_registry()))
 
 
 def autostart(agents, registry, doms, t, dry=False):
@@ -4742,6 +4959,15 @@ def _corpus_declared(hq):
     return any(c.lower() == "corpus" for c in hq.get("closed_collections") or [])
 
 
+def agents_answer():
+    """Строка infra_check «claude agents отвечает»; таймаут и незапуск — «нет» с причиной, а не трасса (metis-1180:
+    иначе cc_version теряла тревогу «обновился»)."""
+    try:
+        return P.agents_all() is not None, "claude agents --json отвечает"
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"claude agents --json отвечает ({type(e).__name__})"
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -4767,7 +4993,7 @@ def infra_check():
             "хуки pantheon: UserPromptSubmit, Stop, SessionStart, PostToolUse")
     except (OSError, ValueError):
         add(False, "hooks.json pantheon читается")
-    add(P.agents_all() is not None, "claude agents --json отвечает")
+    add(*agents_answer())
     # с проверенным деревом guard (merge.managed_source), как у прохода, а не с клоном маркетплейса (metis-0718); дерева
     # или поставленного файла нет — строки нет, как раньше
     with contextlib.suppress(OSError):

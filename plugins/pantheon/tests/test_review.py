@@ -319,6 +319,23 @@ def run_all(tmp):
     r = pantheon("review", "test", "true", cwd=repo)
     check("test без -- : код 2", r.returncode == 2)
     budget_checks(pantheon, git, repo)
+    # metis-1116 (Д1 argus #479): запись FULL_TESTS по хешу owner/name — набор шлюза для репозитория с таким remote
+    # (`_gate_tests_cmd` берёт remote cwd), для чужого remote с тем же коротким именем — нет
+    code = (
+        "import hashlib, importlib.util, os, sys\n"
+        "s = importlib.util.spec_from_file_location('pantheon', %r); P = importlib.util.module_from_spec(s); "
+        "sys.modules['pantheon'] = P; s.loader.exec_module(P)\n"
+        "M = P.merge_mod(); M.FULL_TESTS['sha256:' + hashlib.sha256(b'owner-x/proj').hexdigest()] = 'pnpm run check'\n"
+        "R = P._attach('review')\n"
+        "out = []\n"
+        "for url in ('https://github.com/Owner-X/Proj.git', 'git@github.com:someone/proj.git'):\n"
+        "    os.system('git remote remove origin 2>/dev/null; git remote add origin ' + url)\n"
+        "    out.append(R._gate_tests_cmd(['pnpm', 'run', 'check'], M))\n"
+        "os.system('git remote remove origin')\n"
+        "print(*out)\n" % LIB)
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, env=env, cwd=repo)
+    check("test — набор шлюза по хешу owner/name: remote приватного проекта — да, someone/proj — нет",
+          r.stdout.split() == ["True", "False"], r.stdout + r.stderr)
 
     cl = ["--opened", "merge_gate.py, README", "--ran", 'heavy python3 -I tests/x.py "84 из 84"', "--unchecked", "gh"]
     journal, seeded = _seed_tests(state)
@@ -484,6 +501,14 @@ def run_all(tmp):
           in out43, r.stdout)
     check("0443: решение другого PR, битое решение и битая строка — не показаны",
           S5[:12] not in r.stdout and "битое" not in r.stdout and sum("decision" in ln for ln in out43) == 1, r.stdout)
+    with open(os.path.join(state, "merge-gate", "carry.jsonl"), "a") as fh:
+        fh.write(json.dumps({"v": 1, "kind": "decision-miss", "repo": ["latark/agent-kit"], "pr": 42, "sha": "",
+                             "why": ["срок хука: на gh pr view не осталось времени"],
+                             "time": "2026-11-08T01:10:00+03:00"}) + "\n")
+    r = pantheon("review", "status", "latark/agent-kit", "42")
+    check("1181: status показывает след несделанной сверки и велит повторить заявку",
+          "2026-11-08T01:10:00+03:00  decision  код ? не сверен: срок хука: на gh pr view не осталось времени — "
+          "повтори `pantheon merge request`" in r.stdout.splitlines(), r.stdout)
     # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:

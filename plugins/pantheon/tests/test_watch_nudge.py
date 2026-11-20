@@ -37,7 +37,7 @@ def test_autostart_nudges_idle_holder_0212():
     check(["respawn", "f1ee7001"] in e.calls(), f"0212: перезапущенной сессии задание не передано: {e.calls()}")
     check(not [c for c in e.calls() if c[:1] == ["--bg"]], f"0212: вместо передачи задания новая сессия: {e.calls()}")
     pushed = e.st("push", "f1ee7001-1.txt")
-    text = open(pushed).read() if os.path.exists(pushed) else ""
+    text = push_read(pushed)
     check(text.startswith("[Пантеон: поручение от tick] Самозапуск дежурным") and "fl-0001" in text,
           f"0212: текст задания не тот, что у самозапуска: {text!r}")
     check(f"fl-dir: {RESTARTED} — передал задание" in e.alerts(), f"0212: нет тревоги: {e.alerts()}")

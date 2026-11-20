@@ -250,7 +250,7 @@ def t_core_lists_unit(h):
     real_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(GUARD))), "pantheon", "lib", "sessions.py")
     real = open(real_path, encoding="utf-8").read()
     check("настоящий sessions.py: без правки — пусто", mg.sandbox_build_changes(real, real, path=P) == [])
-    for name, a, b in (("_fresh_start", "P.window_launch(role, name, window, win, text)",
+    for name, a, b in (("_fresh_start", "P.window_launch(role, name, window, win, text, resume=resume)",
                         '[P.claude_bin(), "--bg", "--agent", role, "--name", name, text]'),
                        ("start", 'P.window_launch("hq", "zeus", None, P.path("settings", "hq.json"), bg=False)',
                         '[P.claude_bin(), "--agent", "hq", "--name", "zeus"]'),

@@ -15,7 +15,7 @@ __all__ = [
     "_unchecked_path", "verified_write", "_plugins_journal", "_version_newer", "_plugins_installed", "_catalog_root",
     "_plugins_catalog", "_plugins_respawn_mark", "_plugin_install", "plugins_update", "_memory_pressure",
     "_current_sync", "_release_problem", "_gh_bin", "_main_ci_check", "_plugins_update", "plugins_accept",
-    "plugins_cmd",
+    "plugins_cmd", "plugins_released",
 ]
 
 
@@ -79,14 +79,39 @@ def _plugins_installed():
     return out
 
 
-def _catalog_root():
-    """Корень клона каталога agent-kit (installLocation из known_marketplaces.json, иначе папка по умолчанию)."""
+def _known_entry():
+    """Запись каталога agent-kit в known_marketplaces.json (словарь) или None."""
     known = P.read_json(os.path.join(P.HOME, ".claude", "plugins", "known_marketplaces.json"))
     entry = known.get(P.MARKETPLACE) if isinstance(known, dict) else None
-    loc = entry.get("installLocation") if isinstance(entry, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def _catalog_root():
+    """Корень клона каталога agent-kit (installLocation из known_marketplaces.json, иначе папка по умолчанию)."""
+    entry = _known_entry()
+    loc = entry.get("installLocation") if entry else None
     if not isinstance(loc, str) or not os.path.isdir(loc):
         loc = os.path.join(P.HOME, ".claude", "plugins", "marketplaces", P.MARKETPLACE)
     return os.path.realpath(loc)
+
+
+def plugins_released(repo):
+    """Для autoclose (metis-1260, задача-проба ждёт выпуска): {плагин: версия} из .claude-plugin/releases.json клона
+    каталога agent-kit — если repo и есть репозиторий каталога (source.repo в known_marketplaces.json). Другой
+    репозиторий, нет записи каталога или файла — None: выпуск не узнать, проба ждёт."""
+    entry = _known_entry()
+    src = entry.get("source") if entry else None
+    if not isinstance(src, dict) or str(src.get("repo") or "").lower() != str(repo or "").lower():
+        return None
+    try:
+        with open(os.path.join(_catalog_root(), ".claude-plugin", "releases.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    rows = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(rows, dict) or not rows:
+        return None
+    return {k: str(v["version"]) for k, v in rows.items() if isinstance(v, dict) and v.get("version")}
 
 
 def _plugins_catalog():

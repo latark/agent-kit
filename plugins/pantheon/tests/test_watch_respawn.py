@@ -2,6 +2,7 @@
 """Дежурный, часть 8: перезапуск после плагинов, честные состояния, Гестия, передача заблокированных (общая часть — _watch_common.py)."""
 # ruff: noqa: F403, F405
 import os
+import time
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _watch_common import *  # noqa: F403
@@ -455,8 +456,122 @@ def test_wait_second_episode_repeat_notifies_1122():
     check(e.sent().count("coord-x ждёт вас 31 мин") == 2, f"1122: второе ожидание без повтора: {e.sent()!r}")
 
 
+def test_wait_new_request_new_card_1183():
+    """metis-1183: окно не выходило из ожидания между проходами, но запрос другой — прежняя карточка закрыта, новая
+    через 5 мин нового ожидания, повтор через 30 мин уже от нового запроса (было: 20 ч тишины)."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    first = _wait_cards(e)
+    check(len(first) == 1, f"1183: нет первой карточки: {first}")
+    tp = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID + ".jsonl")
+    with open(tp, "w") as fh:
+        fh.write(json.dumps(_tool("Bash", "tu2", {"command": "grep x y"}, T0 + 3000), ensure_ascii=False) + "\n")
+    e.run("watch", t=T0 + 3060)
+    cards = _wait_cards(e)
+    check([c.get("status") for c in cards] == ["done"], f"1183: прежняя карточка не закрыта или новая раньше 5 мин: {cards}")
+    e.run("watch", t=T0 + 3060 + 360)
+    cards = _wait_cards(e)
+    check(sorted(c.get("status") for c in cards) == ["done", "waiting"]
+          and any("Bash → grep x y" in str(c.get("why")) for c in cards), f"1183: нет новой карточки: {cards}")
+    e.run("watch", t=T0 + 3060 + 1860)
+    check("окно coord-x ждёт вас 31 мин: Bash → grep x y" in e.alerts(), f"1183: нет повтора нового запроса: {e.alerts()}")
+
+
+def test_wait_hourly_reminder_1183():
+    """metis-1183: пока окно ждёт — после повтора через 30 мин напоминание каждый час строкой Зевсу, а не одно;
+    macOS — только на первом повторе (ревью argus #492, Б1: часовые съели бы дневной бюджет уведомлений)."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    e.run("watch", t=T0 + 1860 + 1800)
+    check(e.alerts().count("окно coord-x ждёт вас") == 1, f"1183: напоминание раньше часа: {e.alerts()}")
+    e.run("watch", t=T0 + 1860 + 3660)
+    check(e.alerts().count("окно coord-x ждёт вас") == 2 and "ждёт вас 92 мин" in e.alerts(),
+          f"1183: нет часового напоминания: {e.alerts()}")
+    sent = e.sent()
+    check("ждёт вас 31 мин" in sent and "ждёт вас 92 мин" not in sent,
+          f"1183: macOS не на первом повторе или на часовом: {sent!r}")
+
+
+def test_wait_unknown_keeps_known_1183():
+    """metis-1183, ревью argus #492 Д1: проход с «причиной неизвестна» (журнал не прочитан) не перетирает известный
+    запрос — следующий другой запрос всё равно новое ожидание."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.notify_mode(7200)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 1860)
+    tp = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID + ".jsonl")
+    os.remove(tp)
+    e.run("watch", t=T0 + 1920)
+    check([c.get("status") for c in _wait_cards(e)] == ["waiting"], f"1183: неизвестная причина закрыла карточку: "
+          f"{_wait_cards(e)}")
+    with open(tp, "w") as fh:
+        fh.write(json.dumps(_tool("Bash", "tu2", {"command": "grep x y"}, T0 + 1950), ensure_ascii=False) + "\n")
+    e.run("watch", t=T0 + 1980)
+    check([c.get("status") for c in _wait_cards(e)] == ["done"], f"1183: другой запрос после неизвестной причины — не "
+          f"новое ожидание: {_wait_cards(e)}")
+
+
 def P_json(p):
     return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
+
+
+def _perm_req(e, **kw):
+    """Заявка perm окна coord-x, как её пишет хук lib/perm.py: ждёт до T0+600, процесс хука — этот тест (жив)."""
+    req = dict({"id": "perm-0000aaaa", "window": "coord-x", "session": BLK_SID, "attach": BLK_SID[:8],
+                "tool": "EnterWorktree", "question": "[perm-0000aaaa] вопрос", "options": [], "exact": False,
+                "created": T0 - 10, "deadline": T0 + 600, "status": "waiting", "pid": os.getpid()}, **kw)
+    os.makedirs(e.st("perm"), exist_ok=True)
+    with open(e.st("perm", req["id"] + ".json"), "w", encoding="utf-8") as fh:
+        json.dump(req, fh, ensure_ascii=False)
+
+
+def _dead_pid():
+    p = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    p.wait()
+    return p.pid
+
+
+def test_wait_perm_live_no_double_1254():
+    """metis-1254 (Д2 argus): запрос окна уже у Зевса живой заявкой perm — дежурный не передаёт «ждёт вас», не пишет
+    тревогу и не заводит карточку: владельца не спрашивают дважды. Заявка снята в окне, срок вышел или хук умер —
+    обычный путь: передача и карточка сразу (ожидание считалось с первого прохода), ничего не теряется."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e)
+    e.run("watch", t=T0)
+    check(not _relayed(e) and "coord-x (b10c0001) ждёт вас" not in e.alerts(), f"1254: живая заявка, а Зевсу передано: {e.calls()} "
+          f"{e.alerts()}")
+    e.run("watch", t=T0 + 360)
+    check(not _wait_cards(e), f"1254: живая заявка, а карточка заведена: {_wait_cards(e)}")
+    _perm_req(e, pid=_dead_pid())                                  # хук умер — заявка повисла
+    e.run("watch", t=T0 + 400)
+    check(len(_relayed(e)) == 1 and "coord-x (b10c0001) ждёт вас" in e.alerts(),
+          f"1254: хук умер — нет передачи или тревоги: {e.calls()} {e.alerts()}")
+    check(len(_wait_cards(e)) == 1, f"1254: хук умер — карточки нет сразу (ожидание с T0): {_wait_cards(e)}")
+    for label, kw, t in (("срок вышел", {}, T0 + 700), ("снята в окне", {"status": "window"}, T0 + 400),
+                         ("решена", {"status": "allow"}, T0 + 400)):
+        e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+        _perm_req(e, **kw)
+        e.run("watch", t=t)
+        check(len(_relayed(e)) == 1 and "coord-x (b10c0001) ждёт вас" in e.alerts(), f"1254: {label} — нет обычной передачи: {e.calls()}")
+    # заявка другого окна не прикрывает coord-x
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e, window="coord-y", session="other-sid", attach="other")
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"1254: заявка чужого окна заглушила coord-x: {e.calls()}")
+    # окно узнаётся и по имени (сессия заменена под тем же именем)
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e, session="old-sid", attach="old")
+    e.run("watch", t=T0)
+    check(not _relayed(e), f"1254: заявка того же окна по имени не узнана: {e.calls()}")
+    # имя совпало, но сессия заявки — другое живое окно из списка (Зевс): по имени не прикрываем (ревью #498 Д1)
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    _perm_req(e, session="2e057e05-1", attach="other")
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"1254: заявка чужой живой сессии под тем же именем заглушила coord-x: {e.calls()}")
 
 
 def test_blocked_reason_fallbacks_0277():
@@ -513,26 +628,30 @@ def test_relay_maintenance_paused_0277():
     _relay_stops(paused, "пауза планировщика")
 
 
-def test_relay_limits_0277():
-    """metis-0277: пятичасовой, недельный лимит и потолок владельца — передачи нет; потолок выше расхода пускает."""
-    _relay_stops(lambda e: None, "пятичасовой лимит", extra={"PANTHEON_FAKE_LIMIT": "90"})
-
+def test_relay_limits_do_not_stop_1183():
+    """metis-1183 (слово владельца 15.11): пятичасовой, недельный лимит и потолок владельца передачу Зевсу не держат —
+    запрос разрешения не должен стоять молча (прежде metis-0277 их держал, окно стояло сутки)."""
     def week(e):
         e.week_pct = 90.0
-    _relay_stops(week, "недельный лимит (красная зона)")
 
-    day = time.strftime("%Y-%m-%d", time.localtime(T0))
+    def cap(e):
+        day = time.strftime("%Y-%m-%d", time.localtime(T0))
+        with open(os.path.join(e.pantheon, "schedule.toml"), "a") as fh:
+            fh.write(f'\n[limits.owner_cap]\ndate = "{day}"\npct = 5\ndecision = "t"\n')
+    for what, setup, extra in (("пятичасовой", lambda e: None, {"PANTHEON_FAKE_LIMIT": "90"}),
+                               ("недельный", week, None), ("потолок владельца", cap, None)):
+        e = _two_blocked_env()
+        setup(e)
+        e.run("watch", t=T0, extra=extra)
+        check(len(_relayed(e)) == 1, f"1183: {what} лимит закрыл передачу Зевсу: {e.calls()}")
 
-    def cap(pct):
-        def f(e):
-            with open(os.path.join(e.pantheon, "schedule.toml"), "a") as fh:
-                fh.write(f'\n[limits.owner_cap]\ndate = "{day}"\npct = {pct}\ndecision = "t"\n')
-        return f
-    _relay_stops(cap(5), "потолок владельца")
+
+def test_relay_to_renamed_zeus_1183():
+    """metis-1183: окно Зевса после перезапуска зовётся «zeus (2)» — передача доходит и до него (с 05.11 молчала)."""
     e = _two_blocked_env()
-    cap(50)(e)
+    e.agents([a for a in json.load(open(e.agents_file)) if a["name"] != "zeus"] + [bg("zeus (2)", "done", "2e057e05-1", pid=32)])
     e.run("watch", t=T0)
-    check(len(_relayed(e)) == 1, f"0277: потолок выше расхода закрыл передачу: {e.calls()}")
+    check(len(_relayed(e)) == 1 and "coord-x" in _pushed(e), f"1183: «zeus (2)» не получил передачу: {e.calls()}")
 
 
 def test_relay_once_per_item_0277():
@@ -556,6 +675,110 @@ def test_relay_once_per_item_0277():
     e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
     e.run("watch", t=T0 + 1400 + 1000)
     check(len(_relayed(e)) == 3, f"0277: вернулась в blocked — передачи нет: {e.calls()}")
+
+
+
+def test_relay_zeus_busy_retry_1253():
+    """metis-1253: Зевс занят ходом или стоит на окне вопросов (state blocked) — пункт не отправлен: relay.json не
+    пишется, тревога в alerts.md есть, а следующий проход (раньше RELAY_EVERY) отдаёт его, как только Зевс свободен."""
+    for label, upd in (("занят ходом", dict(state="working", status="busy")),
+                       ("окно вопросов", dict(state="blocked", waitingFor="AskUserQuestion"))):
+        e = _blocked_env(None, waiting="Bash: one")
+        z = bg("zeus", "done", "2e057e05-1", pid=32)
+        z.update(upd)
+        e.agents([bg("coord-x", "blocked", BLK_SID, pid=31) | {"waitingFor": "Bash: one"}, z])
+        e.run("watch", t=T0)
+        check(not _relayed(e) and not os.path.exists(e.st("relay.json")) and "coord-x (b10c0001) ждёт вас" in e.alerts(),
+              f"1253 {label}: передано, записано как отправленное или нет тревоги: {e.calls()} {e.alerts()[-300:]}")
+        e.agents([bg("coord-x", "blocked", BLK_SID, pid=31) | {"waitingFor": "Bash: one"},
+                  bg("zeus", "done", "2e057e05-1", pid=32)])
+        e.run("watch", t=T0 + 60)
+        check(len(_relayed(e)) == 1 and "Bash: one" in _pushed(e),
+              f"1253 {label}: Зевс освободился — пункт не передан следующим проходом: {e.calls()}")
+
+
+def test_push_queue_1253():
+    """metis-1253: передачи до старта Зевса копятся очередью (вторая не затирает первую); неудачный respawn снимает
+    только свою передачу; очередь полна — передачи нет, relay.json не пишется, тревога остаётся."""
+    e = _blocked_env(None, waiting="Bash: one")
+    e.run("watch", t=T0)
+    b = bg("coord-x", "blocked", BLK_SID, pid=31) | {"waitingFor": "Bash: other"}
+    e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1300)  # хук push ещё не забрал первую
+    text = _pushed(e)
+    check(len(_relayed(e)) == 2 and "Bash: one" in text and "Bash: other" in text and text.count("[Пантеон:") == 2
+          and len(push_queue(e.st("push", "2e057e05-1.txt"))) == 2,
+          f"1253: вторая передача затёрла первую: {text!r}")
+    # respawn не вышел — своя передача снята, ждавшая раньше осталась
+    e = _blocked_env(None, waiting="Bash: one")
+    os.makedirs(e.st("push"), exist_ok=True)
+    early = "[Пантеон: поручение от tick] ранее"
+    open(e.st("push", "2e057e05-1.txt"), "w", encoding="utf-8").write(early)
+    e.run("watch", t=T0, extra={"FAKE_RESPAWN_RC": "1"})
+    check(len(_relayed(e)) == 1 and _pushed(e) == early,
+          f"1253: неудачный respawn снял чужую передачу или оставил свою: {_pushed(e)!r}")
+    # очередь полна (Б2 argus #495): в ней 7990 знаков, любая новая передача — сверх PUSH_TOTAL 8000
+    e = _blocked_env(None, waiting="Bash: one")
+    os.makedirs(e.st("push"), exist_ok=True)
+    body = "[Пантеон: x] " + "я" * 7977
+    full = "\x1e%d\n%s" % (time.time(), body)
+    open(e.st("push", "2e057e05-1.txt"), "w", encoding="utf-8").write(full)
+    e.run("watch", t=T0)
+    check(len(body) == 7990 and not _relayed(e) and not os.path.exists(e.st("relay.json"))
+          and open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read() == full
+          and "coord-x (b10c0001) ждёт вас" in e.alerts(),
+          f"1253: полная очередь — передача, запись или потеря: {e.calls()} {len(_pushed(e))}")
+
+
+_PUSH_PROBE = r"""
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+sid = "2e057e05-1"
+p = P.path("push", sid + ".txt")
+os.makedirs(P.path("push"), exist_ok=True)
+texts = lambda: [b for _, b in P.push_records(open(p, encoding="utf-8").read(), 0)] if os.path.exists(p) else []
+out = {}
+a = "[Пантеон: ждёт вас] coord-x"
+b = a + "\n\nи ещё строка"  # одна передача — начало другой, и в ней пустая строка
+for name, order in (("ab", (a, b)), ("ba", (b, a))):
+    for x in order:
+        P.push_text(sid, x)
+    P.push_drop(p, a)
+    out[name] = texts()
+    os.remove(p)
+old = time.time() - 1700
+open(p, "w", encoding="utf-8").write("\x1e%d\n[Пантеон: x] ранняя" % old)
+P.push_text(sid, "[Пантеон: y] поздняя")
+out["times"] = [t for t, _ in P.push_records(open(p, encoding="utf-8").read(), 0)]
+out["old"] = old
+open(p, "w", encoding="utf-8").write("\x1e%d\n[Пантеон: x] просроченная" % (time.time() - 2000))
+P.push_text(sid, "[Пантеон: y] новая")
+out["expired"] = texts()
+P.push_drop(p, "[Пантеон: y] новая")
+out["gone"] = os.path.exists(p)
+print(json.dumps(out, ensure_ascii=False))
+"""
+
+
+def test_push_queue_exact_and_age_1253():
+    """metis-1253 (Д2, Д4 argus #495): push_drop снимает ровно свою передачу, даже если она — начало другой; у каждой
+    передачи свой срок: дописывание не продлевает прежние, просроченная снимается при записи новой; снята последняя —
+    файла нет."""
+    e = Env()
+    r = e.run(LIB, t=T0, argv=[PY311, "-I", "-c", _PUSH_PROBE])
+    try:
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        check(False, f"1253: проба очереди не прошла: {r.stdout[-300:]} {r.stderr[-600:]}")
+        return
+    b = "[Пантеон: ждёт вас] coord-x\n\nи ещё строка"
+    check(out["ab"] == [b] and out["ba"] == [b], f"1253 Д2: снята не та передача: {out['ab']!r} {out['ba']!r}")
+    check(len(out["times"]) == 2 and abs(out["times"][0] - out["old"]) < 1 and out["times"][1] > out["old"] + 1000,
+          f"1253 Д4: срок ранней передачи продлён или новая без своего времени: {out['times']} {out['old']}")
+    check(out["expired"] == ["[Пантеон: y] новая"] and out["gone"] is False,
+          f"1253 Д4: просроченная передача осталась или пустая очередь не убрана: {out['expired']} {out['gone']}")
 
 
 if __name__ == "__main__":

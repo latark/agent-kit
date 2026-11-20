@@ -16,8 +16,8 @@
 - [auto_rules] policy.toml: правила autoMode.allow направления по именам, неизвестное имя — тревога;
 - граница ядра (класс 5): argv запуска окна целиком собирает P.window_launch, флагов запуска (LAUNCH_FLAGS) в lib/ и
   scripts/ вне pantheon.py нет; PANTHEON_PACKS окружения пакеты не подменяет;
-- `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny EnterWorktree и
-  ExitWorktree, window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
+- `pantheon domains build`: окно направления — CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, deny ExitWorktree
+  (EnterWorktree открыт — вариант А владельца 15.11, name закрывает guard), window.json пакета (ask, deny, plugins, env, sandbox); allow (metis-0137) и неизвестный ключ —
   не влиты, окно собрано; мастерская — без этого;
 - `pantheon check`: хук и сервер .mcp.json вложенного проекта без строки в пакете — «предупреждение · окно …»; после
   записи в seen и сервера в mcp.json пакета — тишина; настройки папки запуска не предупреждают; код выхода тот же;
@@ -176,8 +176,11 @@ def main():
     perms = win.get("permissions") or {}
     check("env CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1",
           (win.get("env") or {}).get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD") == "1", win.get("env"))
-    check("deny EnterWorktree и ExitWorktree (П9b)",
-          {"EnterWorktree", "ExitWorktree"} <= set(perms.get("deny") or []), perms.get("deny"))
+    # П9b после варианта А владельца 15.11 (metis-1225): EnterWorktree открыт (name закрывает guard worktree-own,
+    # path — только своя копия), ExitWorktree закрыт
+    check("deny ExitWorktree, EnterWorktree не в deny (П9b, вариант А)",
+          "ExitWorktree" in (perms.get("deny") or []) and "EnterWorktree" not in (perms.get("deny") or []),
+          perms.get("deny"))
     check("window.json: ask и deny пакета влиты",
           perms.get("ask") == ["Bash(codesign *)"]
           and "Bash(docker rm *)" in perms.get("deny", []), perms)
@@ -200,8 +203,8 @@ def main():
           and "env.GUARD_OFF" in alerts,
           alerts[-800:])
     solo = json.load(open(os.path.join(state, "settings", "athena-solo.json")))
-    check("окно без пакета: deny EnterWorktree тоже есть, allow пакета — нет",
-          "EnterWorktree" in solo["permissions"]["deny"] and "Bash(uv sync *)" not in solo["permissions"].get("allow", []),
+    check("окно без пакета: deny ExitWorktree тоже есть, EnterWorktree нет, allow пакета — нет",
+          "ExitWorktree" in solo["permissions"]["deny"] and "EnterWorktree" not in solo["permissions"]["deny"] and "Bash(uv sync *)" not in solo["permissions"].get("allow", []),
           solo["permissions"])
     ws = json.load(open(os.path.join(state, "settings", "workshop.json")))
     check("мастерская — без переменной add-dir и без deny EnterWorktree",
@@ -357,6 +360,18 @@ def bad_pack(run, pack, home):
           and not after(argv, "--mcp-config") and ".claude/hooks/x.sh" in hooks_in and "awk" in new
           and "mcp.json s:" in new and ": MCP пакета не взяты" in new and "MCP не взяты в окно" in r.stderr,
           (argv, r.stderr, new))
+    # metis-1222: один негодный сервер не снимает остальные — годный идёт в --mcp-config, тревога называет негодный
+    two = {"mcpServers": {**good_mcp["mcpServers"], "awk": server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py",
+                                                                    "--", "/usr/bin/awk", "x")["mcpServers"]["s"]}}
+    put(mcp, two)
+    r, argv, flags, new = start()
+    cfg = after(argv, "--mcp-config")
+    got = json.load(open(cfg[0], encoding="utf-8"))["mcpServers"] if cfg else {}
+    check("start: годный и негодный сервер — в --mcp-config только годный (с путём _bin снимка), --plugin-dir есть; "
+          "тревога называет awk", len(after(argv, "--plugin-dir")) == 1 and list(got) == ["s"]
+          and "${PANTHEON_PACK_BIN}" not in json.dumps(got) and "mcp.json awk:" in new and "остальные серверы MCP взяты: s" in new,
+          (argv, got, r.stderr, new))
+    put(mcp, server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "/usr/bin/awk", "BEGIN{system(\"id\")}"))
     put(hooks, hook('bash "$HOME/projects/x/start.sh"'))
     r, argv, flags, new = start()
     check("start: плохой хук и плохой сервер — ни --plugin-dir, ни --mcp-config, в тревоге оба",
@@ -559,7 +574,10 @@ def rules_of_packs(W):
             ({"name": "pack-x"}, None, sv(command="python3", args=ef + ["--", "npx", "-y", "@a/b-c@1.2.3", "mcp"],
                                           env={"NEXT_TELEMETRY_DISABLED": "1"})),
             (None, None, sv(command="python3", args=ef + ["~/.env", "K", "--", "npx", "-y", "srv@0.1.0", "-t"])),
-            (None, None, sv(type="http", url="https://x.example/mcp", headers={"A": "b"}))]
+            (None, None, sv(type="http", url="https://x.example/mcp", headers={"A": "b"})),
+            # metis-1222: Go-сервер Grafana — бинарь ${HOME}/.local/bin по имени из PACK_LOCAL_BINS
+            (None, None, sv(command="python3", args=ef + ["${HOME}/.env", "K", "--", "${HOME}/.local/bin/mcp-grafana",
+                                                          "-t", "stdio"]))]
     for m, h, s in good:
         check(f"pack_problems: годное — без нарушений {m or h or s}", W.pack_problems(m, h, s) == [],
               W.pack_problems(m, h, s))
@@ -590,6 +608,11 @@ def rules_of_packs(W):
            ("за -- /usr/bin/awk", None, None, sv(command="python3",
                                                  args=ef + ["--", "/usr/bin/awk", 'BEGIN{system("id")}'])),
            ("за -- ~/.local/bin", None, None, sv(command="python3", args=ef + ["--", "${HOME}/.local/bin/srv", "-t"])),
+           # metis-1222: из ~/.local/bin — только имя из списка, не uvx, claude, pantheon и не обход пути
+           *[(f"за -- {x}", None, None, sv(command="python3", args=ef + ["--", x, "-t", "stdio"])) for x in (
+               "${HOME}/.local/bin/uvx", "${HOME}/.local/bin/claude", "${HOME}/.local/bin/pantheon",
+               "${HOME}/.local/bin/mcp-grafana/../uvx", "${HOME}/.local/bin/mcp-grafana-x", "$HOME/.local/bin/mcp-grafana",
+               "~/.local/bin/mcp-grafana", "${HOME}/projects/.local/bin/mcp-grafana", "mcp-grafana")],
            ("за -- /usr/local/bin", None, None, sv(command="python3", args=ef + ["--", "/usr/local/bin/srv"])),
            ("за -- uvx с версией", None, None, sv(command="python3", args=ef + ["--", "uvx", "srv==1.2.3"])),
            ("за -- npx по пути", None, None, sv(command="python3", args=ef + ["--", "/usr/bin/npx", "-y", "a@1.2.3"])),
@@ -639,6 +662,12 @@ def rules_of_packs(W):
            ("сервер не объект", None, None, {"mcpServers": {"s": "npx"}})]
     for what, m, h, s in bad:
         check(f"pack_problems: {what} — нарушение", len(W.pack_problems(m, h, s)) == 1, W.pack_problems(m, h, s))
+    good_s, bad_s = good[-1][2]["mcpServers"]["s"], bad[-1][3]
+    mixed = {"mcpServers": {"ok": good_s, "awk": sv(command="python3", args=ef + ["--", "/usr/bin/awk"])["mcpServers"][
+        "s"], "x": "npx"}}
+    check("pack_mcp_keep: из mcp.json остаются только годные серверы (metis-1222)",
+          W.pack_mcp_keep(mixed) == {"ok": good_s} and W.pack_mcp_keep(bad_s) == {} and W.pack_mcp_keep(None) == {},
+          W.pack_mcp_keep(mixed))
 
 
 def js_of(root, rel):

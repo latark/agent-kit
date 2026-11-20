@@ -650,8 +650,8 @@ def heavy_count(agents=None, registry=None):
     """Тяжёлых сейчас: сессии направлений Пантеона в состоянии working (и их копии «имя (2)») плюс идущие задачи
     тика класса heavy (их блокировка job-<имя> занята). registry — для совместимости контракта: у вкладок нет
     состояния, работают ли они, не видно."""
-    if agents is None:
-        agents = P.agents_all() or []
+    if agents is None and (agents := P.agents_all()) is None:  # metis-1180: не JSON — «0 тяжёлых» открыл бы gate
+        raise RuntimeError("claude agents --json не ответил — тяжёлых сессий не сосчитать")
     doms = P.read_json(P.path("domains.json"), {}).get("domains") or {}
     pats = [P.name_alias(d) for d in doms]
     n = sum(1 for a in agents if a.get("state") == "working"
@@ -1446,13 +1446,11 @@ def report_lines(t=None):
     al = st.get("alerts") or []
     out.append(f"Ночь {d.strftime('%d.%m')}: {nl}" + (f" · тревоги: {', '.join(f'{x} %' for x in al)}" if al else
                                                        (" · тревог нет" if st.get("opened_at") else "")))
-    if m["resets"]:
-        hours = max(0.0, (m["resets"] - t) / 3600)
-        out.append(f"Сброс недели: {when(m['resets'])} (через {hours:.0f} ч)")
-    else:
-        out.append("Сброс недели: неизвестен")
+    hours = max(0.0, ((m["resets"] or t) - t) / 3600)
+    out.append(f"Сброс недели: {when(m['resets'])} (через {hours:.0f} ч)" if m["resets"] else "Сброс недели: неизвестен")
     with contextlib.suppress(Exception):  # замер ММВ не должен ронять сводку
         out.append(P.mmv_mod().line(P.STATE, t=t))
+    with contextlib.suppress(Exception): out.append(P.mmv_mod().actions_line(t))  # отдельно: сбой не убирает ММВ
     out.append(snap_line(m, cfg) + (" — снимок старше 3 ч, строка статуса не пишет?" if m["stale"] else ""))
     return out
 

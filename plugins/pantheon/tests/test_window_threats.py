@@ -20,13 +20,13 @@
 - круг F (решение Зевса 06.11 23:46) — класс «проверили путь в папке окна, потом исполняем»: хуки и серверы пакета
   исполняются только из снимка (pack_snapshot_make), снятого до старта окна, с проверкой sha256; фоновая подмена и
   переименование промежуточной папки (app, app/.claude — пробы E1 Б1, два mv) не меняют исполняемого, а app ↔ ссылка
-  через renamex_np (проба E2 r7) не меняет ни одной папки --add-dir (nested_projects по fd). Мутанты краснеют;
+  через renamex_np (проба E2 r7) не меняет ни одной папки --add-dir (nested_projects по fd). Мутанты убиты;
 - класс 6 (круг G, решение владельца 07.11 02:27) — мимо песочницы пишет исключённая команда: коммит, собранный
   окном низкоуровневыми git, приходит в .claude/hooks через `git pull . <ветка>`; снимок берёт скрипт репозитория,
   только если его sha256 — эталон направления (~/.claude/pantheon/packs/<направление>/approved.json, поправка Зевса
   02:30), иначе хук пропущен (in_repo.py, выход 0) и Зевсу одна тревога на хеш с диффом; нет файла — скрипты
   направления не исполняются; `pantheon packs hashes` печатает хеши и текст из снимка и ничего не пишет. Долги F1 Д1–Д3 — мутанты
-  M5, M3, M6 краснеют;
+  M5, M3, M6 убиты;
 - круг G5 (решение Зевса 07.11, вариант А; ревью argus G3-2 П1, П4, Д1, Д2, G3-1 Д1–Д3) — .git, который пишет окно, в
   одобрении не участвует: хеш и текст `packs hashes` — из снимка, дифф `packs diff` и счёт строк тревоги — от одобренной копии
   ~/.claude/pantheon/packs/<направление>/approved/<sha256>; подделка объектов, refs/replace и origin не меняет ни
@@ -238,7 +238,9 @@ def pack_execs(home, state, name, plugin):
         out, errs = out + o, errs + e
         if "npx" in [v["command"]] + v.get("args", []):  # кэш задаёт env_from.py: $HOME/.npm
             out.append((os.path.join(home, ".npm"), f"mcp {s}: кэш npx"))
-        if "env_from.py" in " ".join(v.get("args", [])):
+        # cwd сервера: без --chdir — env_from.SAFE_CWD; с --chdir — папка проекта, её окно пишет, но для сервера это
+        # только данные (node по абсолютному пути из кэша npx, PATH без относительных звеньев — class2_chdir)
+        if "env_from.py" in " ".join(v.get("args", [])) and "--chdir" not in v.get("args", []):
             out.append(("/", f"mcp {s}: cwd сервера (env_from.SAFE_CWD)"))
     return out, errs, sorted(mcp)
 
@@ -414,6 +416,80 @@ def class2_npx(tmp):
           "без NODE_OPTIONS", r.returncode == 0 and got.get("cwd") == "/" and "NODE_OPTIONS" not in got.get("env", {})
           and npm == {"npm_config_cache": os.path.join(home, ".npm")}, (r.returncode, got.get("cwd"), npm, r.stderr))
 
+
+def class2_chdir(tmp):
+    """env_from.py --chdir (metis-0949): сервер npx-пакета работает в папке проекта (shadcn MCP читает components.json
+    из process.cwd()), а пакет разрешается из SAFE_CWD — подставной npx пишет, откуда его позвали, и отдаёт бинарник
+    из кэша $HOME/.npm/_npx. Бинарник вне кэша, команда без точной версии, не папка — выход 1, сервер не запущен."""
+    if not shutil.which("node"):
+        print("     пропущено: нет node — класс 2, env_from.py --chdir")
+        return
+    home = os.path.join(tmp, "chdirhome")
+    proj = os.path.join(home, "projects", "ui")
+    os.makedirs(proj)
+    put(os.path.join(proj, "components.json"), "{}")
+    cache_pkg = os.path.join(home, ".npm", "_npx", "abc", "node_modules")
+    srv = os.path.join(cache_pkg, "fakeui", "cli.js")
+    out_mark = os.path.join(tmp, "chdir-server.json")
+    put(srv, "require('fs').writeFileSync(%s, JSON.stringify({cwd: process.cwd(), argv: process.argv.slice(2), path: process.env.PATH}))\n"
+        % json.dumps(out_mark))
+    os.makedirs(os.path.join(cache_pkg, ".bin"))
+    os.symlink("../fakeui/cli.js", os.path.join(cache_pkg, ".bin", "fakeui"))
+    outside = os.path.join(tmp, "outside-cli.js")
+    put(outside, "require('fs').writeFileSync(%s, 'outside')\n" % json.dumps(out_mark))
+    fbin, npx_mark = os.path.join(tmp, "chdirbin"), os.path.join(tmp, "chdir-npx.json")
+    put(os.path.join(fbin, "npx"), "#!/bin/sh\nprintf '{\"cwd\": \"%%s\", \"args\": \"%%s\"}' \"$(pwd)\" \"$*\" > %s\n"
+        "echo installing >&2\necho \"$FAKE_NPX_BIN\"\n" % shlex.quote(npx_mark))
+    os.chmod(os.path.join(fbin, "npx"), 0o755)
+
+    def run(args, bin_path, path_head=""):
+        for p in (out_mark, npx_mark):
+            if os.path.exists(p):
+                os.unlink(p)
+        env = {"PATH": path_head + fbin + os.pathsep + os.environ["PATH"], "HOME": home, "FAKE_NPX_BIN": bin_path,
+               "NODE_OPTIONS": "--require=/nonexistent.js"}
+        r = subprocess.run([sys.executable, "-I", ENV_FROM, *args], cwd=tmp, env=env, capture_output=True, text=True,
+                           timeout=60)
+        srv_got = json.load(open(out_mark)) if os.path.isfile(out_mark) and open(out_mark).read() != "outside" else (
+            "outside" if os.path.isfile(out_mark) else None)
+        return r, srv_got, json.load(open(npx_mark)) if os.path.isfile(npx_mark) else None
+
+    good = os.path.join(cache_pkg, ".bin", "fakeui")
+    r, got, npx = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3", "mcp", "-x"], good)
+    check("класс 2: env_from.py --chdir — сервер в папке проекта с аргументами, пакет разрешён из «/» (npx -p … -c)",
+          r.returncode == 0 and isinstance(got, dict) and got["cwd"] == os.path.realpath(proj)
+          and got["argv"] == ["mcp", "-x"]
+          and npx is not None and npx["cwd"] == "/" and npx["args"] == "-y -p fakeui@1.2.3 -c command -v fakeui",
+          (r.returncode, got, npx, r.stderr[-400:]))
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], outside)
+    check("класс 2: env_from.py --chdir — бинарник вне кэша $HOME/.npm/_npx не запущен, выход 1",
+          r.returncode == 1 and got is None and "не в кэше npx" in r.stderr, (r.returncode, got, r.stderr[-400:]))
+    planted = os.path.join(tmp, "chdir-planted")
+    put(os.path.join(proj, "node_modules", ".bin", "node"), f"#!/bin/sh\ntouch {shlex.quote(planted)}\n")
+    os.chmod(os.path.join(proj, "node_modules", ".bin", "node"), 0o755)
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], good,
+                    "./node_modules/.bin" + os.pathsep + os.pathsep)
+    check("класс 2: env_from.py --chdir — относительное звено PATH: node из папки проекта не запущен, сервер — настоящий, в его PATH только абсолютные звенья",
+          r.returncode == 0 and not os.path.exists(planted) and isinstance(got, dict)
+          and got["cwd"] == os.path.realpath(proj) and all(os.path.isabs(d) for d in got["path"].split(os.pathsep)), (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
+    r, got, _ = run(["--chdir", proj, "--", "npx", "-y", "fakeui@1.2.3"], good,
+                    os.path.join(proj, "node_modules", ".bin") + os.pathsep)
+    check("класс 2: env_from.py --chdir — node в папке проекта по абсолютному звену PATH: не запущен, выход 1",
+          r.returncode == 1 and not os.path.exists(planted) and got is None and "папке --chdir" in r.stderr,
+          (r.returncode, got, os.path.exists(planted), r.stderr[-400:]))
+    inj, dotenv = os.path.join(tmp, "chdir-injected"), os.path.join(tmp, "chdir-dotenv")
+    put(dotenv, "X=1\n")
+    for name, args in (("без точной версии", ["--chdir", proj, "--", "npx", "-y", "fakeui"]),
+                       ("оболочка в имени пакета", ["--chdir", proj, "--", "npx", "-y", f"fakeui;touch${{IFS}}{inj}@1.2.3"]),
+                       ("$(…) в имени пакета", ["--chdir", proj, "--", "npx", "-y", f"fakeui$(touch${{IFS}}{inj})@1.2.3"]),
+                       ("не npx", ["--chdir", proj, "--", "node", good]),
+                       ("вместе с .env-файлом", ["--chdir", proj, dotenv, "X", "--",
+                                                 "npx", "-y", "fakeui@1.2.3"]),
+                       ("папки нет", ["--chdir", os.path.join(proj, "nope"), "--", "npx", "-y", "fakeui@1.2.3"])):
+        r, got, npx = run(args, good)
+        check(f"класс 2: env_from.py --chdir — {name}: выход 1, ничего не запущено",
+              r.returncode == 1 and got is None and npx is None and not os.path.exists(inj),
+              (r.returncode, got, npx, r.stderr[-400:]))
 
 def class2_links(tmp):
     """Хук чужой папки не исполняется, если репозиторий, звено пути, его .claude или .claude/hooks подменены ссылкой
@@ -893,7 +969,7 @@ def class_g_pull(tmp):
     Зевсу одна тревога на хеш со старым и новым sha256 и диффом от одобренной копии approved/<sha256> (её кладёт
     запуск окна по эталону, круг G5). Нет approved.json — скрипты
     направления не исполняются, та же тревога. Мутанты «без сверки», «без файла исполняем», «тревога на каждый
-    запуск», «не одобрен — как нет скрипта» (in_repo.py) и «пишет approved.json» краснеют."""
+    запуск», «не одобрен — как нет скрипта» (in_repo.py) и «пишет approved.json» убиты."""
     home = os.path.join(tmp, "ghome")
     app = os.path.join(home, "projects", "god-proj", "app")
     log, hooks_rel = os.path.join(tmp, "g-pull.log"), ".claude/hooks/protect-db.sh"
@@ -1200,7 +1276,7 @@ def class_g5_alert(tmp):
     - объекты, refs/replace и origin в .git подделаны — строка тревоги та же байт в байт;
     - копия переписана (sha256 не эталон) — дифф не показан; строки с ESC и сменой направления письма в packs diff —
       пометкой «строка не показана»; тревога — счёт строк без текста скрипта (круг G11), STATE/pack-diffs не пишется;
-    - pack_keep_approved кладёт копию только по эталону и убирает копии без эталона. Мутанты каждой защиты краснеют."""
+    - pack_keep_approved кладёт копию только по эталону и убирает копии без эталона. Мутанты каждой защиты убиты."""
     app, head, own = g5_repo(os.path.join(tmp, "g5a"))
     win, ahome = "g5win", os.path.join(tmp, "g5a", "approved-home")
     was = hashlib.sha256(own.encode()).hexdigest()
@@ -1312,7 +1388,7 @@ def class_g5_hashes(tmp):
     в stderr — sha256 и текст каждого скрипта из снимка в ⟦…⟧, знаки кодом; .git не читается — подделанные объекты,
     refs/replace и origin не меняют ни кода, ни одной строки вывода, а злой текст рабочей копии виден владельцу.
     Строк «pantheon packs:» из скрипта не подделать. Скрипта нет — «внимание», код 1; пакета нет — код 2. В
-    ~/.claude/pantheon ничего не пишет; запуск окна убирает старые STATE/pack-diffs. Мутанты краснеют."""
+    ~/.claude/pantheon ничего не пишет; запуск окна убирает старые STATE/pack-diffs. Мутанты убиты."""
     home = os.path.join(tmp, "g5h")
     app, head, own = g5_repo(home)
     packs, win = os.path.join(tmp, "g5packs"), "g5h"
@@ -1458,7 +1534,7 @@ def class_g6_list(tmp):
     """pack_script_reject и тревога «хук изменён»: каждая проба Б1 и Б2 — «не взят в снимок — <причина>, строка N»,
     без диффа и байтов скрипта; литерал «\\u000d» показан как «\\\\u000d», а не как CR; дифф делится только по \\n (Б1:
     CR одобренной копии — пометкой, строки «-# ;» нет); дифф — в pantheon packs diff, в тревоге счёт строк (G11). Настоящие
-    хуки пакетов пользователя (~/.claude/pantheon/packs), если есть на машине, — печать: взят или причина (круг G9). Мутанты каждой ветки краснеют."""
+    хуки пакетов пользователя (~/.claude/pantheon/packs), если есть на машине, — печать: взят или причина (круг G9). Мутанты каждой ветки убиты."""
     for label, data, want in G6_PROBES:
         got = P.pack_script_reject(data)
         check(f"круг G6: {label} — не взят: «{want}»", got == want, got)
@@ -1538,7 +1614,7 @@ def class_g6_hashes(tmp):
     """Белый список на уровне снимка и `pantheon packs hashes|diff`: проба Б1/Б2 в рабочей копии — код 1, «внимание —
     … не взят в снимок — <причина>, строка N», в JSON скрипта нет, байтов в снимке нет (ни repo/, ни pending/), даже
     если владелец одобрил её sha256; запуск окна — тревога с причиной, одобренная копия не кладётся. Литерал «\\u000d» и
-    CR дают разный вывод. packs diff — полный дифф через _pack_data, без JSON. Мутанты краснеют."""
+    CR дают разный вывод. packs diff — полный дифф через _pack_data, без JSON. Мутанты убиты."""
     home = os.path.join(tmp, "g6h")
     app, _, own = g5_repo(home)
     packs, win = os.path.join(tmp, "g6packs"), "g6h"
@@ -2030,7 +2106,7 @@ def g9_passed(cases):
 def class_g9_ascii():
     """Класс: любой байт вне печатных ASCII и \\n (табуляция — с G10) в любом месте образцов хуков — отказ pack_script_reject (в
     packs hashes — код 1: пробы G9_PROBES идут через class_g6_hashes). Образцы god-proj в фикстурах — ASCII и
-    проходят. PACK_SCRIPT_CHARS равен эталону. Мутанты «список круга G8», «+DEL», «список выключен» краснеют."""
+    проходят. PACK_SCRIPT_CHARS равен эталону. Мутанты «список круга G8», «+DEL», «список выключен» убиты."""
     samples = g9_samples()
     check("круг G9: образцы хуков god-proj (fixtures/morph-hooks) и Python-образец — ASCII, проходят",
           all(text.isascii() and P.pack_script_reject(text.encode()) is None for _, text in samples) and len(samples) == 7,
@@ -2095,7 +2171,7 @@ NO_NEW_HASH = ("стало {new[:12]};", "стало;")  # G11: тревога �
 def class_g9_alert(tmp):
     """Тревога «хук изменён» (ревью argus G8-2 Б1): отступ 4 и 8 у Python-хука — разные тревоги (новый sha256) и
     разный дифф в packs diff, отступ — как есть; табуляция — отказ (круг G10). Текста скрипта в тревоге нет (G11).
-    Мутант «тревога без нового хеша» краснеет."""
+    Мутант «тревога без нового хеша» убит."""
     base = b"import os\n\n\ndef f(c):\n    if c:\n        return\n    os.system('true')\n"
     alert, diff = g10_alert_fn(tmp, "g9", base, "guard.py")
     dead = base.replace(b"return\n", b"return\n        os.system('rm -rf x')\n")
@@ -2183,10 +2259,10 @@ def g11_leaks(line, data):
 def class_g10(tmp):
     """Круг G10: (1) табуляция и пробел в конце строки — отказ (пробы C, D, F4 — G10_PROBES, через class_g6_*), мутанты
     «+\\t в списке» и «без пробела в конце» пропускают; (2) показ pack_show — ровно исполняемый текст, без удвоения «\\»
-    (проба E и соседи C, D, F4), мутант «удвоить \\» краснеет; (3) круг G11: тревога о хуке (F1, F2, F4, &num;, <!--,
+    (проба E и соседи C, D, F4), мутант «удвоить \\» убит; (3) круг G11: тревога о хуке (F1, F2, F4, &num;, <!--,
     «`») — без текста скрипта, и в отрисовке ВСЕГО alerts.md с непарной «`» и «<a title=\"» в строках выше; код виден
-    в packs diff; мутант «код снова в тревоге» краснеет; (4) имена вне [A-Za-z0-9._/-] — «?», счёт строк без
-    заголовков; мутанты «имя без замены» и «заголовки в счёте» краснеют."""
+    в packs diff; мутант «код снова в тревоге» убит; (4) имена вне [A-Za-z0-9._/-] — «?», счёт строк без
+    заголовков; мутанты «имя без замены» и «заголовки в счёте» убиты."""
     for label, data, want in G10_PROBES:
         check(f"{label} — отказ «{want}»", P.pack_script_reject(data) == want, P.pack_script_reject(data))
     with patched(PACK_SCRIPT_CHARS=P.PACK_SCRIPT_CHARS | {"\t"}):
@@ -2259,6 +2335,7 @@ def main():
     class2(tmp, env, P)
     class4(P, tmp, env)
     class2_npx(tmp)
+    class2_chdir(tmp)
     class2_links(tmp)
     class2_pack_hooks(os.path.join(ROOT, "h2"))
     class2_race(os.path.join(ROOT, "h2"))

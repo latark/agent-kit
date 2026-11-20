@@ -581,6 +581,107 @@ def test_lock_refused_does_nothing():
     check(os.path.isdir(wt), "D5: lock уборки не взят, а копия убрана")
 
 
+def deferred(e):
+    p = e.st("wt-deferred.json")
+    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
+
+
+def test_budget_defers_rest_1236():
+    """metis-1236: срок уборки копий за проход вышел (PANTHEON_WT_BUDGET=0) — первая копия доведена, остальные
+    отложены в STATE/wt-deferred.json со строкой в выводе, а не держат проход до таймаута 600 с; следующий проход
+    доводит отложенную и снимает файл. Проверка дольше порога (PANTHEON_CHECK_SLOW=0) — строкой с её временем."""
+    e, folder, g = repo()
+    a, b = copy(folder, g, "w-bud-a"), copy(folder, g, "w-bud-b")
+    for wt in (a, b):
+        age(wt, 4 * 3600)
+    e.extra.update({"PANTHEON_WT_BUDGET": "0", "PANTHEON_CHECK_SLOW": "0"})
+    r = e.run("watch", t=T0)
+    check(r.returncode == 0, f"срок: watch упал: {r.stderr[-300:]}")
+    left = [w for w in (a, b) if os.path.exists(w)]
+    check(len(left) == 1, f"срок 0 с: убрано не ровно одна копия из двух (осталось {left})")
+    check(deferred(e) == left, f"срок: отложенная копия не записана: {deferred(e)!r} при {left}")
+    check("уборка копий: срок 0 с вышел" in r.stdout and "отложено 1 из 2" in r.stdout,
+          f"срок: нет строки об отложенных: {r.stdout[-400:]!r}")
+    check("проверка «worktree» шла" in r.stdout, f"нет строки о времени проверки: {r.stdout[-400:]!r}")
+    r = e.run("watch", t=T0)
+    check(not any(os.path.exists(w) for w in (a, b)), "срок: второй проход не довёл отложенную копию")
+    check(deferred(e) is None, f"срок: файл отложенных не снят после пустой очереди: {deferred(e)!r}")
+
+
+def test_budget_deferred_first_and_request_kept_1236():
+    """metis-1236: отложенная прошлым проходом копия идёт первой; заявка `wt done` копии, до которой срок не дошёл,
+    не снимается (её исполнит следующий проход)."""
+    e, folder, g = repo()
+    a, b = copy(folder, g, "w-ord-a"), copy(folder, g, "w-ord-b")
+    for wt in (a, b):
+        age(wt, 4 * 3600)
+    json.dump([b], open(e.st("wt-deferred.json"), "w"))
+    rq = e.st("wt-req")
+    os.makedirs(rq, exist_ok=True)
+    req = os.path.join(rq, "0123456789abcdef.json")
+    json.dump({"path": a, "time": T0 - 60}, open(req, "w"))
+    e.extra["PANTHEON_WT_BUDGET"] = "0"
+    e.run("watch", t=T0)
+    check(not os.path.exists(b) and os.path.exists(a), "срок: отложенная копия не пошла первой")
+    check(deferred(e) == [a], f"срок: очередь после прохода не та: {deferred(e)!r}")
+    check(os.path.exists(req), "срок: заявка wt done отложенной копии снята, а копия цела")
+    e.run("watch", t=T0)
+    check(not os.path.exists(a) and not os.path.exists(req), "срок: заявка отложенной копии не исполнена следующим")
+
+
+def test_walk_deadline_1236():
+    """metis-1236: обходы копии (свежие правки, ссылки наружу) смотрят срок — вышел, _OutOfTime; без срока — как
+    прежде. Срок вышел посреди wt_one не первой копии — копия и остальные в очередь, проход не падает."""
+    import contextlib
+    import time
+    import types
+    sys.path.insert(0, os.path.join(W.ROOT, "lib"))
+    import watch  # noqa: E402
+    e, folder, g = repo()
+    a, b, c = copy(folder, g, "w-dl-a"), copy(folder, g, "w-dl-b"), copy(folder, g, "w-dl-c")
+    os.makedirs(os.path.join(a, "sub", "deep"))
+    past = time.monotonic() - 1
+    for fn, args in ((watch._quiet_since, (a, 0)), (watch.outward_links, (a,))):
+        try:
+            fn(*args, deadline=past)
+            check(False, f"{fn.__name__}: срок вышел, а обход дошёл до конца")
+        except watch._OutOfTime:
+            pass
+    check(watch._quiet_since(a, 0) is False and watch.outward_links(a) == (0, None), "без срока обходы сломались")
+
+    @contextlib.contextmanager
+    def taken(name, block=True):
+        yield True
+
+    noop = lambda *a, **k: None  # noqa: E731
+    store = {}
+    calls = []
+
+    def one(root, wt, block, ctx, requested=False, dry=False, deadline=None):
+        calls.append((wt, deadline))
+        if len(calls) == 2:
+            raise watch._OutOfTime()
+        return "wait", "рано"
+
+    saved_p, saved_one = watch.P, watch.wt_one
+    watch.set_core(types.SimpleNamespace(HOME=e.home, path=lambda *a: e.st(*a), lock=taken, alert_once=noop,
+                                         clear_once=noop, alert=noop, read_json=lambda p, d=None: store.get(p, d),
+                                         write_json=lambda p, v: store.__setitem__(p, v)))
+    watch.wt_one = one
+    try:
+        watch.worktrees([], [], {"g-dir": [folder]}, T0)
+    finally:
+        watch.set_core(saved_p)
+        watch.wt_one = saved_one
+    check(calls[0][1] is None and calls[1][1] is not None, f"срок: первая копия не без срока или вторая без: {calls}")
+    check(len(calls) == 2, f"срок: после _OutOfTime уборка пошла дальше: {calls}")
+    listed = [w for w, _ in watch._copies(os.path.realpath(folder))]  # порядок git (на Linux — не по имени)
+    check(sorted(listed) == sorted([a, b, c]) and [w for w, _ in calls] == listed[:2],
+          f"срок: копии не в порядке git: {calls} при {listed}")
+    check(store.get(e.st("wt-deferred.json")) == listed[1:],
+          f"срок: копия, на которой вышел срок, и остальные не в очереди: {store} при {listed}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:

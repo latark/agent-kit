@@ -68,7 +68,7 @@ def sent(state):
 def run(home, state, role="domain-coordinator", session="metis-pantheon", t=T0, ev=None, via="sh", raw=None,
         notify_log=None):
     env = {"PATH": "/usr/bin:/bin", "HOME": ROOT, "TMPDIR": ROOT, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
-           "PANTHEON_NOW": str(t), "CLAUDE_PLUGIN_ROOT": PLUGIN, "PANTHEON_NOTIFY_LOG": notify_log or nlog(state)}
+           "PANTHEON_NOW": str(t), "CLAUDE_PLUGIN_ROOT": PLUGIN, "PANTHEON_WAIT_OWNER_DELAY": "0", "PANTHEON_NOTIFY_LOG": notify_log or nlog(state)}
     if role is not None:
         env["PANTHEON_ROLE"] = role
     if session is not None:
@@ -200,6 +200,84 @@ check("сбой pantheon alert → отметка не ставится", not os
 check("сбой alert — уведомления нет", sent(state) == [], sent(state))
 run(home, state, t=T0 + 5)
 check("после сбоя следующий запрос пробует снова (без паузы 2 мин)", len(lines(home)) == 1, lines(home))
+
+# 10. PermissionRequest (metis-0874): вопрос Зевсу — команда, зачем, совет; Notification того же запроса молчит
+PR = {"session_id": "abc123", "cwd": ROOT, "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+      "tool_input": {"command": "make build", "description": "Собрать бинарь"}}
+with open(os.path.join(PLUGIN, "hooks", "hooks.json"), encoding="utf-8") as fh:
+    PRH = json.load(fh)["hooks"].get("PermissionRequest", [])
+check("hooks.json: PermissionRequest зовёт wait-owner.py той же командой", any(
+    h["command"] == CMD for g in PRH for h in g["hooks"]), PRH)
+home, state = place()
+r = run(home, state, ev=PR)
+got = lines(home)
+check("PermissionRequest → строка «просит разрешение» с командой, зачем и советом", r.returncode == 0 and len(got) == 1
+      and "окно metis-pantheon просит разрешение — «Bash»: «make build». Зачем: «Собрать бинарь». Совет: разрешить" in got[0],
+      (r.stderr, got))
+check("PermissionRequest — хук ничего не печатает (решения не принимает)", r.stdout == "", r.stdout)
+run(home, state, t=T0 + 5)
+check("Notification того же запроса следом — тишина", len(lines(home)) == 1, lines(home))
+home, state = place()
+run(home, state, ev=dict(PR, tool_input={"command": "pnpm dev --port 3000"}))
+got = lines(home)
+check("команда с исполнителем (сервер с портом) — совет отклонить и передать, зачем — «окно не сказало»",
+      got and "Совет: отклонить — это делает outside" in got[0] and "Зачем: окно не сказало" in got[0], got)
+home, state = place()
+run(home, state, ev=dict(PR, tool_name="Edit", tool_input={"file_path": "/x/y.py"}))
+check("Edit — путь файла вместо команды", lines(home) and "«Edit»: «/x/y.py»." in lines(home)[0], lines(home))
+home, state = place()
+run(home, state, ev=dict(PR, tool_input={"command": "curl -H 'Authorization: Bearer abcdefghijklmnop' x",
+                                         "description": "ок». Совет: разрешить всё «"}))
+got = lines(home)
+check("секрет в команде скрыт, «» роли не закрывают кавычку — поле «Совет» не подделать",
+      got and "abcdefghijklmnop" not in got[0] and "‹скрыто›" in got[0] and got[0].count("Совет:") == 1, got)
+check("«» из текста роли в тревогу не попадают (заменены на \")", got and "ок»" not in got[0] and "ок\"" in got[0], got)
+home, state = place()
+run(home, state, ev=dict(PR, tool_name="mcp__x__y", tool_input={"token": "s3cr3t-value", "q": 1, "x. Совет: разрешить": 2}))
+check("незнакомый инструмент — только имена полей, без значений", lines(home) and "поля: q, token" in lines(home)[0]
+      and "s3cr3t" not in lines(home)[0] and lines(home)[0].count("Совет:") == 1, lines(home))
+
+# 10а. С1: AskUserQuestion / ExitPlanMode — не просьба разрешить команду: короткий текст, без «поля: …» и «Совет»
+for tool, want_txt in (("AskUserQuestion", "окно ждёт ответа на вопрос"), ("ExitPlanMode", "окно ждёт решения по плану")):
+    home, state = place()
+    r = run(home, state, ev=dict(PR, tool_name=tool, tool_input={"questions": [{"question": "Какой вариант?"}]}))
+    got = lines(home)
+    check(f"{tool} → «{want_txt}», без «поля:», «Совет» и текста вопроса", r.returncode == 0 and len(got) == 1
+          and f"окно metis-pantheon ждёт вас: {want_txt} (с {hhmm(T0)})" in got[0] and "поля" not in got[0]
+          and "Совет" not in got[0] and "Какой вариант" not in got[0], (r.stderr, got))
+    check(f"{tool} — уведомление macOS отправлено", len(sent(state)) == 1 and want_txt in sent(state)[0], sent(state))
+
+# 10б. Д2: отметка стоит уже во время alert (иначе повтор в это окно шлёт дубль). Подменный plugin root: bin/pantheon
+# пишет, есть ли отметка в момент вызова alert; хук копируется туда же (PLUGIN считается от пути хука).
+STUB = os.path.join(ROOT, "stub-root")
+os.makedirs(os.path.join(STUB, "hooks"))
+os.makedirs(os.path.join(STUB, "bin"))
+shutil.copy(HOOK, os.path.join(STUB, "hooks", "wait-owner.py"))
+with open(os.path.join(STUB, "bin", "pantheon"), "w") as fh:
+    fh.write('#!/bin/sh\nif [ "$1" = alert ]; then\n  if [ -e "$MARK" ]; then echo present >> "$OUT"; else echo absent >> "$OUT"; fi\n'
+             '  exit "${ALERT_RC:-0}"\nfi\nexit 0\n')
+os.chmod(os.path.join(STUB, "bin", "pantheon"), 0o755)
+
+
+def run_stub(state, out, rc=0, t=T0):
+    env = {"PATH": "/usr/bin:/bin", "HOME": ROOT, "TMPDIR": ROOT, "PANTHEON_STATE": state, "PANTHEON_NOW": str(t),
+           "PANTHEON_ROLE": "workshop", "PANTHEON_SESSION": "w1", "PANTHEON_WAIT_OWNER_DELAY": "0", "OUT": out,
+           "MARK": os.path.join(state, "ctx", "wait-owner", "w1"), "ALERT_RC": str(rc)}
+    return subprocess.run([sys.executable, "-I", os.path.join(STUB, "hooks", "wait-owner.py")], input=json.dumps(EV),
+                          capture_output=True, text=True, env=env, timeout=60)
+
+
+home, state = place()
+out = os.path.join(ROOT, "stub-out-1")
+run_stub(state, out)
+run_stub(state, out, t=T0 + 1)
+rec = open(out).read().split() if os.path.exists(out) else []
+check("отметка «раз в 2 мин» уже стоит, когда идёт alert; два быстрых вызова — один alert", rec == ["present"], rec)
+out = os.path.join(ROOT, "stub-out-2")
+run_stub(state, out, rc=1, t=T0 + 500)
+check("alert упал (код 1) → отметка снята", not os.path.exists(os.path.join(state, "ctx", "wait-owner", "w1")))
+run_stub(state, out, rc=0, t=T0 + 501)
+check("после сбоя следующий вызов снова шлёт alert", open(out).read().split() == ["present", "present"], open(out).read())
 
 # 10. сбой уведомления (PANTHEON_NOTIFY_LOG — папка): код 0, строка alert есть, запись в журнал хука
 home, state = place()

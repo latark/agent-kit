@@ -1535,6 +1535,81 @@ check("сбой до копии (handle): обе заявки круга — fai
       and "сбой прохода: OSError" in _ra.get("why", "") and "сбой прохода" in _rb.get("why", "")
       and any(json.loads(x).get("kind") == "serve-error" for x in open(_log)), (_raised, _ra, _rb))
 
+# --- папку заявок не прочесть (metis-1186): OSError из listdir не роняет круг до уборки брошенных «стопов» и копий ---
+new_request("athena-x", APP, "serve")
+_real_listdir, _real_orph = os.listdir, (O.drop_orphan_stops, O.drop_orphan_work)
+_fd_calls, _orph = [], []
+
+
+def _listdir_boom(path="."):
+    if isinstance(path, int):   # папки заявок читаются по дескриптору (_open_dir)
+        _fd_calls.append(path)
+        raise PermissionError("нет доступа")
+    return _real_listdir(path)
+
+
+O.drop_orphan_stops = lambda *a, **k: _orph.append("stops")
+O.drop_orphan_work = lambda *a, **k: _orph.append("work")
+os.listdir = _listdir_boom
+try:
+    _raised = None
+    try:
+        O.serve_round()
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+    O.drop_orphan_stops, O.drop_orphan_work = _real_orph
+check("listdir папки заявок упал: serve_round без OSError и доходит до drop_orphan_stops и drop_orphan_work",
+      _raised is None and _fd_calls and _orph == ["stops", "work"], (_raised, _fd_calls, _orph))
+kill_all_servers()
+serve_pass()   # заявка, оставшаяся лежать, исполняется следующим кругом
+
+# stop_requests тоже читает папки заявок: сбой listdir не роняет настоящие drop_orphan_stops и pending_serve (metis-1186)
+_fd_calls2 = []
+
+
+def _listdir_boom2(path="."):
+    if isinstance(path, int):
+        _fd_calls2.append(path)
+        raise PermissionError("нет доступа")
+    return _real_listdir(path)
+
+
+os.listdir = _listdir_boom2
+try:
+    _raised, _n, _pend = None, None, None
+    try:
+        _n, _pend = O.drop_orphan_stops(), O.pending_serve()
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+check("listdir папки заявок упал: drop_orphan_stops и pending_serve без OSError",
+      _raised is None and _n == 0 and _fd_calls2, (_raised, _n, _pend, _fd_calls2))
+
+# тик и уборка: сбой listdir (папки заявок и runs/) не роняет pending, pending_test, recover_results (metis-1186)
+_all_calls = []
+
+
+def _listdir_boom3(path="."):
+    _all_calls.append(path)
+    raise PermissionError("нет доступа")
+
+
+os.listdir = _listdir_boom3
+try:
+    _raised, _res3 = None, None
+    try:
+        _res3 = (O.pending(), O.pending_test(), O._stale(), O._zombies(), O._zombies(lane="quick"), O._watch_due(),
+                 O.recover_results())
+    except OSError as e:
+        _raised = e
+finally:
+    os.listdir = _real_listdir
+check("listdir упал везде: pending, pending_test, _stale, _zombies, _watch_due, recover_results без OSError",
+      _raised is None and _all_calls and not _res3[2] and not _res3[3] and not _res3[5], (_raised, _res3, _all_calls))
+
 # --- брошенные копии (Д1 argus #232): копия без сервера старше WORK_ORPHAN_AGE снимается в конце круга -------------
 kill_all_servers()
 _wr = os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work")
@@ -1904,6 +1979,27 @@ c_["fetched"] = time.time()
 c_["errors"] = {"latark/al-stale": "gh не ответил"}
 json.dump(c_, open(_cp, "w"))
 check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
+# metis-1170: pr_watch_rows — открытые PR с «принять» argus без tests или с mergeable CONFLICTING; остальные не попадают
+_W = {c: c * 40 for c in "pqrs"}
+_wt = time.time()
+json.dump({"fetched": _wt, "errors": {"latark/w-err": "gh"}, "open_prs": {
+    "latark/w-x": [{"number": 7, "head": _W["p"], "mergeable": "CONFLICTING"},
+                   {"number": 8, "head": _W["q"], "mergeable": "MERGEABLE"},
+                   {"number": 9, "head": _W["r"], "mergeable": "MERGEABLE"},
+                   {"number": 10, "head": _W["s"], "mergeable": "MERGEABLE"}],
+    "latark/w-err": [{"number": 1, "head": _W["p"], "mergeable": "CONFLICTING"}]}}, open(_cp, "w"))
+_stamp = lambda age: time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(_wt - age))
+_wrec = lambda kind, sha, age, who="argus": {"v": 1, "kind": kind, "repo": ["latark/w-x"], "pr": None, "sha": sha,
+                                             "by": {"agent_type": who}, "time": _stamp(age)}
+_rows = O.pr_watch_rows([_wrec("accept", _W["q"], 90000), _wrec("accept", _W["r"], 90000), _wrec("tests", _W["r"], 80000),
+                         _wrec("accept", _W["s"], 5000, who="dev-opus")], _wt)
+check("pr_watch_rows: все открытые PR свежего repo (conflict True/False), accept_at только у «принять» без tests, head; repo с ошибкой gh — нет",
+      [(r["number"], r["conflict"], r["accept_at"] is not None) for r in _rows]
+      == [(7, True, False), (8, False, True), (9, False, False), (10, False, False)]
+      and abs(_rows[1]["accept_at"] - (_wt - 90000)) < 60 and _rows[1]["head"] == _W["q"], _rows)
+check("pr_watch_rows: кэш старше часа — пусто", (json.dump({**json.load(open(_cp)), "fetched": _wt - 7200}, open(_cp, "w"))
+                                                  or O.pr_watch_rows([], _wt)) == [])
+json.dump(c_, open(_cp, "w"))   # кэш, как он был до блока metis-1170
 # metis-1115: у репозитория с обязательными проверками CI (agent-kit, REQUIRED_CHECKS) зелёный CI на head — тревоги
 # «без записи tests» нет: тесты прошли в Actions. Идёт — ждать без тревоги и без метки; красный — тревога как раньше
 _M = P.merge_mod()
