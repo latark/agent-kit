@@ -21,7 +21,10 @@ libproc с тем же выводом, вместе с rss (O.PS); что он �
 test_outside_cancel.py. Общая часть (заглушка, ps-shim, помощники) — tests/_outside_common.py, репозиторий kit —
 tests/_outside_kit.py: каждый файл получает свой временный корень, STATE и HOME, общего состояния нет.
 """
+import contextlib
+import io
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +257,37 @@ check("--script: прогон есть, код 0, записи tests нет", re
 os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
 check("--script: --wait даёт код команды 0", O.wait_result(q, rid, 3) == 0)
 os.environ.pop("PANTHEON_TMP")
+# metis-1262: .print-out/ прогона --script остаётся в STATE/outside/runs/<ID>/ (копия work/test-… снимается сразу)
+_cmd_art = O.command
+_ART = ("import os; os.makedirs('apps/web/.print-out/sub', exist_ok=True); "
+        "open('apps/web/.print-out/analysis-preview.pdf','wb').write(b'%PDF-1'); "
+        "open('apps/web/.print-out/sub/n.txt','w').write('n'); "
+        "os.symlink('/etc/hosts', 'apps/web/.print-out/link'); "
+        "os.makedirs('node_modules/x/.print-out', exist_ok=True); open('node_modules/x/.print-out/no.pdf','w').write('no')")
+O.command = lambda d, kind, script=None: ([sys.executable, "-c", _ART], "npm run pdf:analysis") if script == "lint" else _cmd_art(d, kind, script)
+rc, q, rid = role_request("athena-x", APP, "test", "--script", "lint")
+run_pass()
+res = O.load_result(q, rid) or {}
+_ad = os.path.join(STATE, "outside", "runs", rid)
+_pdf = os.path.join(_ad, "apps/web/.print-out/analysis-preview.pdf")
+check("--script: .print-out скопирован в runs/<ID>/, путь в итоге и в status",
+      res.get("artifacts") == _ad and os.path.isfile(_pdf) and open(_pdf, "rb").read() == b"%PDF-1"
+      and "apps/web/.print-out/analysis-preview.pdf" in res.get("artifact_files", []), res)
+check("--script: ссылка и node_modules не скопированы, права 600/700",
+      not os.path.lexists(os.path.join(_ad, "apps/web/.print-out/link"))
+      and not os.path.exists(os.path.join(_ad, "node_modules"))
+      and oct(os.stat(_pdf).st_mode & 0o777) == "0o600" and oct(os.stat(_ad).st_mode & 0o777) == "0o700", res)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    O.show(res)
+check("status/show называет папку артефактов", f"артефакты прогона: {_ad}" in _buf.getvalue(), _buf.getvalue())
+_old_max, O.ARTIFACT_MAX = O.ARTIFACT_MAX, 3
+_od, _of, _ow = O.save_artifacts(rid + "x", APP)
+O.ARTIFACT_MAX = _old_max
+check("предел размера: сверх него не копируется, причина названа", not _of and _od is None and "предел" in (_ow or ""), (_od, _of, _ow))
+O.command = _cmd_art
+shutil.rmtree(os.path.join(APP, "apps"), ignore_errors=True)
+shutil.rmtree(os.path.join(APP, "node_modules"), ignore_errors=True)
 rc, _, _ = role_request("athena-x", APP, "test", "--script", "a;rm")
 check("имя скрипта не по образцу: код 2", rc == 2)
 rc, _, _ = role_request("athena-x", os.path.join(APP, "node_modules") if os.path.isdir(os.path.join(APP, "node_modules")) else _ROOT, "test")

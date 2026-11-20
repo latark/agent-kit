@@ -7,7 +7,8 @@
 
   pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
-                                         test/check package.json, иначе pytest; --script — скрипт package.json
+                                         test/check package.json, иначе pytest; --script — скрипт package.json;
+                                         файлы из .print-out/ (PDF) после --script — в STATE/outside/runs/<ID>/, путь в status (metis-1262)
                                          Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
                                          новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
                                          Заявка с --sha и обычная на одном SHA и папке не сцеплены: у --sha своя копия
@@ -1760,6 +1761,49 @@ def save_result(qdir, rid, res, private=None):
     return res
 
 
+ARTIFACT_DIR = ".print-out"            # папка артефактов прогона test --script (PDF от pdf:analysis), metis-1262
+ARTIFACT_MAX = 50 * 1024 * 1024        # общий предел скопированного за прогон, байт
+ARTIFACT_SKIP = {"node_modules", ".git", ".claude"}
+
+
+def save_artifacts(rid, d):
+    """test --script: файлы из .print-out/ (в любом месте дерева d) → STATE/outside/runs/<ID>/<путь от d>, пока копия d
+    не снята (metis-1262, BA #75: PDF исчезал вместе с work/test-…). Только обычные файлы (ссылки и устройства — нет),
+    всего не больше ARTIFACT_MAX, папки 700, файлы 600. → (папка или None, список путей от неё, причина пропуска или
+    None); сбой копирования итог прогона не портит — причина идёт в artifacts_why."""
+    out, got, total, why = root("runs", rid), [], 0, None
+    for base, dirs, files in os.walk(d, followlinks=False):
+        dirs[:] = sorted(x for x in dirs if x not in ARTIFACT_SKIP)
+        if os.path.basename(base) != ARTIFACT_DIR:
+            continue
+        for sub, _, names in os.walk(base, followlinks=False):
+            for name in sorted(names):
+                src = os.path.join(sub, name)
+                try:
+                    st = os.lstat(src)
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    if total + st.st_size > ARTIFACT_MAX:
+                        why = f"предел {ARTIFACT_MAX // 1048576} МБ: {os.path.relpath(src, d)} и дальше не скопированы"
+                        return (out if got else None), got, why
+                    dst = os.path.join(out, os.path.relpath(src, d))
+                    os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+                    sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(dst)
+                        dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                        with os.fdopen(dfd, "wb") as w, os.fdopen(sfd, "rb", closefd=False) as r:
+                            shutil.copyfileobj(r, w)
+                    finally:
+                        os.close(sfd)
+                    total += st.st_size
+                    got.append(os.path.relpath(src, d))
+                except OSError as e:
+                    why = f"{os.path.relpath(src, d)} не скопирован: {e.strerror or e}"
+    return (out if got else None), got, why
+
+
 def new_log(rid):
     os.makedirs(root("runs"), mode=0o700, exist_ok=True)
     p = root("runs", rid + ".log")
@@ -2219,6 +2263,12 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                   load=round(load_state()[0]))
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
            "dir": d, "log": log, "record": False, **extra}
+    if script and not watch.why:   # metis-1262: артефакты --script (.print-out) — до того, как копию d снимут
+        adir, afiles, awhy = save_artifacts(rid, d)
+        if adir:
+            res["artifacts"], res["artifact_files"] = adir, afiles
+        if awhy:
+            res["artifacts_why"] = awhy
     if not keys:   # с ключами тестов фрагментов вывода в итоге нет (argus #410-3 Б1): весь вывод — в log, вычищен
         res["tail"] = tail(log)
     text = log_text(log) if full or narrow else ""
@@ -4221,6 +4271,10 @@ def show(res):
         print("запись tests для шлюза слияния сделана")
     if res.get("why"):
         print(f"причина: {res['why']}")
+    if res.get("artifacts"):
+        print(f"артефакты прогона: {res['artifacts']} ({', '.join(res.get('artifact_files') or [])})")
+    if res.get("artifacts_why"):
+        print(f"артефакты прогона: {res['artifacts_why']}")
     if res.get("note"):
         print(res["note"])
     if res.get("tail"):
