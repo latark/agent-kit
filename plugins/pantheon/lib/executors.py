@@ -54,6 +54,7 @@ BUSY = 4                  # другой запуск держит CODEX_HOME р
 # Решение владельца 20.11 (metis-1272, «без своей песочницы в окне») заменяет «без bypass» только для запуска ВНУТРИ
 # окна роли: вложенный Seatbelt в профиле окна не пишет в репозиторий (живая проба W=1), поэтому там Codex идёт с
 # `--sandbox danger-full-access`, а границу держит песочница окна. Вне окна — workspace-write, как было.
+# Согласие владельца — [codex-1272-window], ответ «А — да, так (совет)» 20.11 17:00, `pantheon consent codex-1272-window`.
 SANDBOX_OUTSIDE = "workspace-write"
 SANDBOX_WINDOW = "danger-full-access"
 # Приложения и плагины аккаунта ChatGPT (коннекторы) отключены: песочница CLI не ограничивает права подключённых к
@@ -65,14 +66,16 @@ SANDBOX_WINDOW = "danger-full-access"
 #   apps._default.enabled=false — приложения аккаунта выключены по умолчанию (в дополнение к features.apps);
 #   web_search="disabled" — живой и кэшированный веб-поиск Codex выключен (значения: disabled|cached|indexed|live);
 #   shell_environment_policy.inherit="core" — команды Codex получают только PATH/HOME/USER/…, без остального окружения;
-#   shell_environment_policy.exclude — регулярка по именам KEY/SECRET/TOKEN (запас поверх inherit=core).
+#   shell_environment_policy.exclude — glob по именам *KEY*, *SECRET*, *TOKEN* (запас поверх inherit=core). У Codex
+#   это glob, не регулярка (EnvironmentVariablePattern = WildMatchPattern, new_case_insensitive): регистр
+#   не важен, строчные варианты не нужны; регулярка «(?i)(…)» как glob не совпала бы ни с одним именем (metis-1272).
 EXEC_FLAGS = ["exec", "--json", "--ephemeral", "--sandbox", SANDBOX_OUTSIDE,
               "-c", "features.shell_snapshot=false",
               "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
               "-c", "apps._default.enabled=false",
               "-c", 'web_search="disabled"',
               "-c", 'shell_environment_policy.inherit="core"',
-              "-c", 'shell_environment_policy.exclude=["(?i)(KEY|SECRET|TOKEN)"]']
+              "-c", 'shell_environment_policy.exclude=["*KEY*","*SECRET*","*TOKEN*"]']
 
 
 def in_window(env=None):

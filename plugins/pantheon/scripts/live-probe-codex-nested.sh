@@ -63,7 +63,7 @@ netcheck() {
   rm -f "$R/env-codex.txt" "$R/allow-codex.txt" "$R/deny-codex.txt"
   printf '%s\n' "$NETTASK" | (cd "$R" && env "$CANARY_NAME=canary-1272" TMPDIR="$T/tmp" sandbox-exec -f "$PROFILE" codex exec --sandbox danger-full-access --skip-git-repo-check \
     -c 'apps._default.enabled=false' -c 'web_search="disabled"' -c 'shell_environment_policy.inherit="core"' \
-    -c 'shell_environment_policy.exclude=["(?i)(KEY|SECRET|TOKEN)"]' -) > "$out" 2>&1
+    -c 'shell_environment_policy.exclude=["*KEY*","*SECRET*","*TOKEN*"]' -) > "$out" 2>&1
   echo "== D+ (закалка, внутри профиля окна): codex rc=$? (вывод — $out)"
   if [ ! -s "$R/env-codex.txt" ]; then echo "   env не снят (Codex не выполнил команду) — не проверено"; bad=1
   elif grep -Eiq 'KEY|SECRET|TOKEN' "$R/env-codex.txt"; then echo "   ПРОВАЛ: в env команды Codex есть имя с KEY/SECRET/TOKEN:"; grep -Ei 'KEY|SECRET|TOKEN' "$R/env-codex.txt" | cut -d= -f1; bad=3

@@ -732,7 +732,7 @@ def tests():
     check("1272 А+: закалка Codex — приложения по умолчанию, веб-поиск, окружение команд (-c парами)",
           {("-c", "apps._default.enabled=false"), ("-c", 'web_search="disabled"'),
            ("-c", 'shell_environment_policy.inherit="core"'),
-           ("-c", 'shell_environment_policy.exclude=["(?i)(KEY|SECRET|TOKEN)"]')} <= pairs, a)
+           ("-c", 'shell_environment_policy.exclude=["*KEY*","*SECRET*","*TOKEN*"]')} <= pairs, a)
     r, a = kind_run(["--kind", "code"], env={"PANTHEON_ROLE": "codex-dev"})
     pairs_w = {(a[i], a[i + 1]) for i in range(len(a) - 1)}
     check("1272 А+: закалка и внутри окна (danger-full-access)",
