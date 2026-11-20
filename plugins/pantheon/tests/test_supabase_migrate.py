@@ -15,6 +15,11 @@
 - репозиторий без main (metis-1295): ветку по умолчанию develop называет сервер (ls-remote --symref) — сверка с
   refs/pantheon/verified-develop, несливый файл — отказ «не из ветки по умолчанию», локальный origin/HEAD на другую
   ветку (git remote set-head) не влияет, метка origin/develop — «неоднозначно», сервер ветку не назвал — отказ;
+- git мимо песочницы (metis-1295, возврат argus #521): .git-файл «gitdir:» на свой gd с core.sshCommand — отказ, команда
+  не выполнилась; .git/config с uploadpack, sshCommand, gitProxy, credential.helper, filter, include, url, protocol —
+  отказ без PWNED; хук reference-transaction не исполняется; звено-ссылка в середине пути на чужой клон — отказ;
+  репозиторий — от текущей папки, файл другого репозитория и «..» — отказ; окно направления — только свой репозиторий
+  (domains.json), битая карта — отказ; мутанты каждой из этих проверок;
 - строка подключения не в argv psql и pg_dump, а в PG* окружения (пароль с %-кодом, sslmode, PG* родителя сняты);
   адрес не postgresql://, без пользователя, с чужим параметром или плохим портом — отказ;
 - текст миграции (check_sql): «\\» где угодно, не UTF-8, управляющие знаки кроме \\n и \\t (\\r), client_encoding,
@@ -103,6 +108,9 @@ esac
 # origin и рабочая копия
 ORIGIN = os.path.join(ROOT, "origin.git")
 REPO = os.path.join(ROOT, "repo")
+REPO2 = os.path.join(ROOT, "repo2")
+R3, GD3, R4, R5 = (os.path.join(ROOT, n) for n in ("r3", "gd3", "r4", "r5"))
+REPOS = [REPO, REPO2, R3, R4, R5]
 git(ROOT, "init", "--bare", ORIGIN)
 git(ROOT, "clone", ORIGIN, REPO)
 MIG = "supabase/migrations/20260101000000_init.sql"
@@ -159,15 +167,29 @@ def load(src=SRC):
     return m
 
 
-def call(argv, env=None, mod=None):
-    """main модуля в этом процессе → (код, stdout, stderr, вызовы psql/pg_dump)."""
+def call(argv, env=None, mod=None, cwd=None):
+    """main модуля в этом процессе → (код, stdout, stderr, вызовы psql/pg_dump). Текущая папка — cwd, без него —
+    репозиторий файла из argv (команда берёт репозиторий от текущей папки, metis-1295)."""
+    if cwd is None:
+        hit = [r for r in REPOS for a in argv[1:] if a.startswith(r + os.sep)]
+        cwd = hit[0] if hit else REPO
+    here = os.getcwd()
+    os.chdir(cwd)
+    try:
+        return _call(argv, env, mod)
+    finally:
+        os.chdir(here)
+
+
+def _call(argv, env, mod):
     write(SCHEMA, "create schema public;\n")
     write(LOG, "")
     write(ENVLOG, "")
     keep = dict(os.environ)
     os.environ.update({**GIT_ENV, "PATH": BIN + os.pathsep + keep.get("PATH", ""), "FAKE_LOG": LOG,
                        "FAKE_ENVLOG": ENVLOG, "FAKE_SCHEMA": SCHEMA, "SUPABASE_DB_URL": URL})
-    for k in ("FAKE_TABLE", "FAKE_COUNT", "FAKE_APPLY_FAIL", "PGHOST", "PGPASSWORD", "PGSSLMODE"):
+    for k in ("FAKE_TABLE", "FAKE_COUNT", "FAKE_APPLY_FAIL", "PGHOST", "PGPASSWORD", "PGSSLMODE",
+              "PANTHEON_WINDOW"):
         os.environ.pop(k, None)
     for k, v in (env or {}).items():
         if v is None:
@@ -294,7 +316,6 @@ check("refs/pantheon/verified-main после сверки — main origin", git
 
 # --- репозиторий без main: ветка по умолчанию develop со слов сервера (metis-1295) ---
 ORIGIN2 = os.path.join(ROOT, "origin2.git")
-REPO2 = os.path.join(ROOT, "repo2")
 git(ROOT, "init", "--bare", "--initial-branch=develop", ORIGIN2)
 git(ROOT, "clone", ORIGIN2, REPO2)
 write(os.path.join(REPO2, MIG), MAIN_SQL)
@@ -342,17 +363,86 @@ check("сервер не назвал ветку по умолчанию — к�
       code == 1 and "однозначно" in err.strip().splitlines()[-1], (code, err))
 git(ORIGIN2, "symbolic-ref", "HEAD", "refs/heads/develop")
 
+# --- git мимо песочницы: .git и его конфиг пишет окно (metis-1295, возврат argus #521) ---
+PWNED = os.path.join(ROOT, "PWNED")
+# r3/.git — файл «gitdir: ../gd3», в gd3/config core.sshCommand и origin по ssh: без проверки ls-remote исполнил бы его
+git(ROOT, "clone", ORIGIN, R3)
+shutil.move(os.path.join(R3, ".git"), GD3)
+write(os.path.join(R3, ".git"), "gitdir: ../gd3\n")
+git(R3, "config", "core.sshCommand", f"touch {PWNED} #")
+git(R3, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
+code, out, err, calls = call(["migrate", os.path.join(R3, MIG), "--dry-run"])
+check("r3/.git — файл gitdir: на свой gd3 с core.sshCommand — код 1, «настоящая папка .git», команда не выполнилась",
+      code == 1 and "настоящая папка .git" in err.strip().splitlines()[-1] and not os.path.exists(PWNED), (code, err))
+# r4 — настоящая .git, но конфиг задаёт команду или транспорт
+git(ROOT, "clone", ORIGIN, R4)
+UPLOAD = f"touch {PWNED}; git-upload-pack"
+for key, val in (("remote.origin.uploadPack", UPLOAD), ("core.sshCommand", f"touch {PWNED} #"),
+                 ("core.gitProxy", "x"), ("credential.helper", f"!touch {PWNED}"), ("filter.x.clean", "x"),
+                 ("include.path", os.devnull), ("url.file:///x.insteadOf", ORIGIN), ("protocol.ext.allow", "always")):
+    git(R4, "config", key, val)
+    code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"])
+    check(f".git/config с {key} — код 1, ключ в причине последней строкой, команда не выполнилась",
+          code == 1 and key.lower() in err.strip().splitlines()[-1] and not os.path.exists(PWNED), (code, err))
+    git(R4, "config", "--unset", key)
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"])
+check("r4 без опасных ключей (remote.origin.url, branch.*) — код 0", code == 0, (code, err))
+# хук .git/hooks/reference-transaction: fetch пишет свой ref — без core.hooksPath=/dev/null хук исполнился бы
+write(os.path.join(R4, ".git", "hooks", "reference-transaction"), f"#!/bin/sh\ntouch {PWNED}\n", 0o755)
+git(R4, "update-ref", "-d", "refs/pantheon/verified-main")
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"])
+check("хук reference-transaction в .git/hooks на fetch не исполнен, код 0", code == 0 and not os.path.exists(PWNED),
+      (code, err))
+# r5/supabase — ссылка на чужой клон (его origin — evil.git, где LOCAL «слит»): репозиторий берётся от текущей папки,
+# звено-ссылка в середине пути — отказ; раньше realpath файла уводил в чужой репозиторий с чужим origin, код 0
+EVILREPO = os.path.join(ROOT, "evilrepo")
+git(ROOT, "clone", EVIL, EVILREPO)
+git(ROOT, "clone", ORIGIN, R5)
+shutil.rmtree(os.path.join(R5, "supabase"))
+os.symlink(os.path.join(EVILREPO, "supabase"), os.path.join(R5, "supabase"))
+code, out, err, calls = call(["migrate", os.path.join(R5, LOCAL), "--dry-run"])
+check("r5/supabase — ссылка на чужой репозиторий: код 1, «ссылка» последней строкой",
+      code == 1 and "ссылка" in err.strip().splitlines()[-1], (code, err))
+code, out, err, calls = call(["migrate", "supabase/migrations/20260102000000_local.sql", "--dry-run"], cwd=R5)
+check("тот же путь относительным от r5 — код 1, «ссылка»", code == 1 and "ссылка" in err.strip().splitlines()[-1],
+      (code, err))
+code, out, err, calls = call(["migrate", os.path.join(REPO2, MIG), "--dry-run"], cwd=REPO)
+check("файл другого репозитория, текущая папка — repo: код 1, «вне репозитория текущей папки»",
+      code == 1 and "вне репозитория текущей папки" in err.strip().splitlines()[-1], (code, err))
+code, out, err, calls = call(["migrate", "supabase/../supabase/migrations/20260101000000_init.sql", "--dry-run"],
+                             cwd=REPO)
+check("путь с «..» — код 1", code == 1 and "«..»" in err.strip().splitlines()[-1], (code, err))
+code, out, err, calls = call(["migrate", MIG, "--dry-run"], cwd=os.path.join(REPO, "supabase"))
+check("текущая папка внутри репозитория, путь от неё не туда — отказ, не догадка", code == 1, (code, err))
+code, out, err, calls = call(["migrate", MIG, "--dry-run"], cwd=REPO)
+check("относительный путь от корня репозитория — код 0", code == 0 and "проверено" in out, (code, err))
+# окно направления — только свой репозиторий (domains.json в STATE)
+DOMAINS = os.path.join(STATE, "domains.json")
+write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"]}}' % (REPO, R4))
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})
+check("окно w-a, репозиторий направления w-b — код 1, «направления w-b»",
+      code == 1 and "направления w-b" in err.strip().splitlines()[-1], (code, err))
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-b"})
+check("окно w-b, свой репозиторий — код 0", code == 0, (code, err))
+code, out, err, calls = call(["migrate", os.path.join(R3, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"}, cwd=ROOT)
+check("окно w-a, текущая папка вне репозитория — код 1", code == 1, (code, err))
+write(DOMAINS, "{")
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-b"})
+check("карта направлений битая при окне — код 1, «не прочитана»",
+      code == 1 and "не прочитана" in err.strip().splitlines()[-1], (code, err))
+write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"]}}' % (REPO, R4))
+
 # --- через pantheon (run.py) ---
 env = {**os.environ, **GIT_ENV, "PATH": BIN + os.pathsep + os.environ.get("PATH", ""), "PANTHEON_STATE": STATE,
        "PANTHEON_HOME": os.path.join(ROOT, "pantheon"), "PANTHEON_NO_NOTIFY": "1",
        "PANTHEON_CLAUDE_TMP": os.path.join(ROOT, "ctmp")}
 os.makedirs(env["PANTHEON_CLAUDE_TMP"], exist_ok=True)
 r = subprocess.run([PY311, "-I", os.path.join(LIB, "run.py"), "supabase", "migrate", p(LOCAL), "--dry-run"], env=env,
-                   capture_output=True, text=True, timeout=120)
+                   capture_output=True, text=True, timeout=120, cwd=REPO)
 check("pantheon supabase migrate: отказ файлу не из main — код 1, причина последней строкой",
       r.returncode == 1 and "нет в origin/main" in r.stderr.strip().splitlines()[-1], (r.returncode, r.stderr[-300:]))
 r = subprocess.run([PY311, "-I", os.path.join(LIB, "run.py"), "supabase", "migrate", p(MIG), "--dry-run"], env=env,
-                   capture_output=True, text=True, timeout=120)
+                   capture_output=True, text=True, timeout=120, cwd=REPO)
 check("pantheon supabase migrate --dry-run файла из main — код 0", r.returncode == 0 and "проверено" in r.stdout,
       (r.returncode, r.stderr[-300:]))
 
@@ -459,6 +549,40 @@ check("мутант (без отказа на неназванную ветку)
       "однозначно" not in call(["migrate", p2(MIG), "--dry-run"], mod=M23)[2]
       and "однозначно" in call(["migrate", p2(MIG), "--dry-run"])[2])
 git(ORIGIN2, "symbolic-ref", "HEAD", "refs/heads/develop")
+
+# мутанты защиты git мимо песочницы (metis-1295, возврат argus #521)
+M24 = mutant('"-c", "core.hooksPath=/dev/null", ', "")
+git(R4, "update-ref", "-d", "refs/pantheon/verified-main")
+call(["migrate", os.path.join(R4, MIG), "--dry-run"], mod=M24)
+check("мутант (без core.hooksPath=/dev/null) исполняет хук reference-transaction окна — тест это видит",
+      os.path.exists(PWNED))
+if os.path.exists(PWNED):
+    os.remove(PWNED)
+os.remove(os.path.join(R4, ".git", "hooks", "reference-transaction"))
+M25 = mutant("    check_config(repo)\n    m = MIGRATION", "    m = MIGRATION")
+git(R4, "config", "remote.origin.uploadPack", UPLOAD)
+call(["migrate", os.path.join(R4, MIG), "--dry-run"], mod=M25)
+check("мутант (без проверки конфига) исполняет remote.origin.uploadpack окна — тест это видит", os.path.exists(PWNED))
+if os.path.exists(PWNED):
+    os.remove(PWNED)
+git(R4, "config", "--unset", "remote.origin.uploadPack")
+M26 = mutant("            if os.path.islink(dotgit) or not os.path.isdir(dotgit) or", "            if False and")
+check("мутант (.git-файл gitdir: принят) — причина уже не «настоящая папка .git» — тест это видит",
+      "настоящая папка .git" not in call(["migrate", os.path.join(R3, MIG), "--dry-run"], mod=M26)[2]
+      and "настоящая папка .git" in call(["migrate", os.path.join(R3, MIG), "--dry-run"])[2])
+M27 = mutant("        if os.path.islink(cur):", "        if False:")
+check("мутант (ссылка в середине пути не проверена) — причина уже не «ссылка» — тест это видит",
+      "ссылка" not in call(["migrate", os.path.join(R5, LOCAL), "--dry-run"], mod=M27)[2]
+      and "ссылка" in call(["migrate", os.path.join(R5, LOCAL), "--dry-run"])[2])
+M28 = mutant("    repo = _repo_root(cwd)\n", "    repo = _repo_root(os.path.dirname(os.path.realpath(os.path.join(cwd, path))))\n"
+             "    cwd = repo\n    path = os.path.relpath(os.path.realpath(os.path.join(os.getcwd(), path)), repo)\n")
+check("мутант (репозиторий от realpath файла) уводит в чужой клон через ссылку и пропускает несливый LOCAL — тест "
+      "это видит", call(["migrate", os.path.join(R5, LOCAL), "--dry-run"], mod=M28)[0] == 0
+      and call(["migrate", os.path.join(R5, LOCAL), "--dry-run"])[0] == 1)
+M29 = mutant("    own_repo(state, repo)\n", "")
+check("мутант (без проверки направления) пускает окно w-a в репозиторий w-b — тест это видит",
+      call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"}, mod=M29)[0] == 0
+      and call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})[0] == 1)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

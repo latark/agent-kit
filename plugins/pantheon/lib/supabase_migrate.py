@@ -4,7 +4,14 @@
 Запись в базу проекта через MCP окну закрыта (список guard mcp_gate, plugins-by-role.toml). Миграция идёт этой
 командой, и только та, что уже в ветке по умолчанию origin (main, а в репозитории без main — например develop,
 metis-1295):
-  1. файл — supabase/migrations/<версия>_<имя>.sql внутри git-репозитория (не ссылка); иначе отказ;
+  1. файл — supabase/migrations/<версия>_<имя>.sql внутри git-репозитория текущей папки (не папки файла); ни одно
+     звено от корня репозитория до файла — не ссылка, без «..»; иначе отказ. Первая .git над текущей папкой —
+     настоящая папка (не файл «gitdir:», не ссылка, без commondir), git зовётся с явным --git-dir на неё; иначе
+     отказ. В окне направления (PANTHEON_WINDOW в domains.json из STATE) репозиторий — только своего направления. Конфиг репозитория (scope local и worktree) с ключами, которые запускают команду или меняют
+     транспорт (UNSAFE_CONFIG: core.sshCommand, core.gitProxy, remote.*.uploadpack, credential.*, filter.*, url.*,
+     include.* и др.), — отказ. Каждый git — с GIT_SAFE (core.hooksPath=/dev/null, core.fsmonitor=false,
+     core.sshCommand=ssh, protocol.ext.allow=never), GIT_CONFIG_NOSYSTEM=1 и своим PATH; hash-object — без фильтров
+     (metis-1295, возврат argus #521: команда идёт мимо песочницы, а .git пишет окно);
   2. ветку по умолчанию называет сервер: `git ls-remote --symref origin HEAD`, строка «ref: refs/heads/<ветка>\\tHEAD»
      ровно одна, имя проходит git check-ref-format — иначе отказ. Локальный refs/remotes/origin/HEAD не берётся: его
      агент двигает `git remote set-head`. Затем `git fetch origin +refs/heads/<ветка>:refs/pantheon/verified-<ветка>`
@@ -37,6 +44,7 @@ DNS ей закрыт), а psql к базе — тоже прямое TCP; по 
 владельца 20.11), а форму строки без цепочек держит guard (supabase-migrate-cmd).
 """
 import difflib
+import json
 import os
 import re
 import subprocess
@@ -57,11 +65,58 @@ class Refused(Exception):
     """Отказ с причиной для владельца и роли."""
 
 
+GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# как GIT_SAFE в worktree.py: хуки (.git/hooks — reference-transaction на fetch) и fsmonitor из папки окна мимо
+# песочницы не исполняются; ssh — свой, протокол ext:: закрыт (metis-1295, возврат argus #521)
+GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.sshCommand=ssh",
+            "-c", "protocol.ext.allow=never"]
+# ключи конфига репозитория (scope local и worktree), которые запускают команду или подменяют транспорт: файл
+# .git/config пишет окно, а команда идёт мимо песочницы — такой конфиг — отказ, а не перебивка
+UNSAFE_CONFIG = re.compile(
+    r"(core\.(sshcommand|gitproxy|fsmonitor|hookspath|askpass|alternaterefscommand|worktree|editor|pager)"
+    r"|(credential|filter|protocol|url|include|includeif|gpg|uploadpack|receivepack|sequence)\..*"
+    r"|remote\..*\.(uploadpack|receivepack|vcs)|(diff|merge)\..*\.(textconv|command|driver))", re.IGNORECASE)
+
+
 def _git(repo, *args, text=True):
     # GIT_* окружения сняты: GIT_CONFIG_COUNT/KEY/VALUE (url.<чужой>.insteadOf), GIT_DIR, GIT_OBJECT_DIRECTORY и
-    # подобные подменили бы origin или объекты, с которыми идёт сверка
+    # подобные подменили бы origin или объекты, с которыми идёт сверка. Системный gitconfig не читается
+    # (GIT_CONFIG_NOSYSTEM), PATH свой. git-dir задан явно (<repo>/.git, его проверил _repo_root): поиск git не идёт
+    # по .git-файлам и «голым» папкам, которые положило окно
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=text, timeout=120, env=env)
+    env.update(PATH=GIT_PATH, GIT_CONFIG_NOSYSTEM="1")
+    return subprocess.run(["git", *GIT_SAFE, "--git-dir=" + os.path.join(repo, ".git"), "--work-tree=" + repo,
+                           "-C", repo, *args], capture_output=True, text=text, timeout=120, env=env)
+
+
+def _repo_root(start):
+    """Корень репозитория над папкой start: первая встреченная вверх .git — настоящая папка (не ссылка, не файл
+    «gitdir:», без commondir), как _repo в worktree.py. Refused — иначе: gitdir из .git-файла окно кладёт куда
+    угодно со своим config (core.sshCommand, uploadpack), а git здесь идёт мимо песочницы."""
+    d = os.path.realpath(start)
+    while True:
+        dotgit = os.path.join(d, ".git")
+        if os.path.lexists(dotgit):
+            if os.path.islink(dotgit) or not os.path.isdir(dotgit) or os.path.lexists(os.path.join(dotgit, "commondir")):
+                raise Refused(f"{dotgit}: не настоящая папка .git (файл gitdir:, ссылка или worktree) — миграция "
+                              "только из основной копии репозитория")
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            raise Refused(f"{start}: не в git-репозитории")
+        d = up
+
+
+def check_config(repo):
+    """Отказ, если конфиг репозитория (scope local и worktree, с include) задаёт команду или транспорт: UNSAFE_CONFIG."""
+    r = _git(repo, "config", "--list", "--show-scope", "-z")
+    if r.returncode != 0:
+        raise Refused(f"{repo}: конфиг git не прочитан ({(r.stderr or '').strip()[-200:]})")
+    bad = sorted({key for scope, _, rest in (e.partition("\t") for e in r.stdout.split("\0") if e)
+                  for key in [rest.split("\n", 1)[0]] if scope in ("local", "worktree") and UNSAFE_CONFIG.fullmatch(key)})
+    if bad:
+        raise Refused(f"{repo}/.git/config задаёт {', '.join(bad[:5])} — команда идёт мимо песочницы, с таким "
+                      "конфигом не запускаю git (убери ключи: git config --unset …)")
 
 
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
@@ -151,17 +206,53 @@ def default_branch(repo):
     return name
 
 
-def check_file(path, fetch=True):
+def own_repo(state, repo):
+    """В окне направления (PANTHEON_WINDOW есть в domains.json) — репозиторий только своего направления: самая глубокая
+    папка направлений над ним, как _own в worktree.py (модуль-лист без P — копия). Карта не прочитана — отказ."""
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    if not win or not state:
+        return
+    try:
+        with open(os.path.join(state, "domains.json"), encoding="utf-8") as fh:
+            doms = json.load(fh).get("domains") or {}
+    except (OSError, ValueError, AttributeError) as e:
+        raise Refused(f"карта направлений domains.json не прочитана ({type(e).__name__}) — чей репозиторий, не знаю")
+    if not isinstance(doms, dict) or not isinstance(doms.get(win), list):
+        return
+    hits = [(os.path.realpath(os.path.expanduser(f)), n) for n, fs in doms.items() if isinstance(fs, list)
+            for f in fs if isinstance(f, str) and f]
+    hits = [(f, n) for f, n in hits if repo == f or repo.startswith(f.rstrip("/") + "/")]
+    owner = max(hits, key=lambda x: len(x[0]))[1] if hits else None
+    if owner != win:
+        raise Refused(f"{repo} — " + (f"репозиторий направления {owner}" if owner else "вне папок направлений")
+                      + f", а окно — {win}: миграция только из своего репозитория")
+
+
+def locate(path, state=None):
+    """Репозиторий текущей папки (не папки файла: ссылкой в пути подставился бы чужой репозиторий с чужим origin) и
+    путь файла в нём. Ни одно звено от корня репозитория до файла — не ссылка, без «..». Refused — иначе."""
+    cwd = os.getcwd()  # физический путь, ссылок в нём нет
+    repo = _repo_root(cwd)
+    own_repo(state, repo)
+    full = os.path.join(cwd, path)
+    if ".." in path.split(os.sep) or not full.startswith(repo.rstrip("/") + "/"):
+        raise Refused(f"{path}: вне репозитория текущей папки {repo} (или с «..») — cd в свой репозиторий")
+    rel = os.path.relpath(os.path.normpath(full), repo)
+    cur = repo
+    for part in rel.split(os.sep):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise Refused(f"{path}: звено {rel[:len(cur) - len(repo) - 1]} — ссылка; миграция только по настоящему пути")
+    if not os.path.isfile(cur):
+        raise Refused(f"{path}: нет такого файла")
+    return repo, rel
+
+
+def check_file(path, fetch=True, state=None):
     """Сверка файла с веткой по умолчанию origin → (репозиторий, путь в нём, sha коммита ветки, текст миграции из
     ветки в байтах, версия, имя, «origin/<ветка>»). Refused — файл не из этой ветки или не миграция Supabase."""
-    if os.path.islink(path) or not os.path.isfile(path):
-        raise Refused(f"{path}: нет такого файла (или это ссылка)")
-    real = os.path.realpath(path)
-    top = _git(os.path.dirname(real), "rev-parse", "--show-toplevel")
-    if top.returncode != 0:
-        raise Refused(f"{path}: не в git-репозитории")
-    repo = os.path.realpath(top.stdout.strip())
-    rel = os.path.relpath(real, repo)
+    repo, rel = locate(path, state)
+    check_config(repo)
     m = MIGRATION.fullmatch(rel)
     if not m:
         raise Refused(f"{rel}: не миграция Supabase — нужен файл supabase/migrations/<версия>_<имя>.sql")
@@ -182,7 +273,7 @@ def check_file(path, fetch=True):
     if blob.returncode != 0:
         raise Refused(f"{rel}: файла нет в {base} (не из ветки по умолчанию) — миграция не из слитого PR, применять "
                       "нельзя (сначала слияние)")
-    mine = _git(repo, "hash-object", "--", rel)
+    mine = _git(repo, "hash-object", "--no-filters", "--", rel)  # без clean-фильтров из .gitattributes окна
     if mine.returncode != 0 or mine.stdout.strip() != blob.stdout.strip():
         raise Refused(f"{rel}: файл на диске отличается от {base} — применяется только слитый текст (git checkout "
                       f"{base} -- {rel} или новый PR)")
@@ -241,7 +332,7 @@ def apply(state, path, out=print):
     if not url:
         raise Refused(f"нет строки подключения {DB_ENV} — база не названа, миграция не применена")
     db = pg_env(url)
-    repo, rel, sha, body, version, name, base = check_file(path)
+    repo, rel, sha, body, version, name, base = check_file(path, state=state)
     run = os.path.join(state, "logs", "supabase-migrate", f"{time.strftime('%Y%m%d-%H%M%S')}-{version}")
     os.makedirs(run, mode=0o700, exist_ok=True)
     sql = os.path.join(run, "migration.sql")
@@ -283,7 +374,7 @@ def main(argv, state):
         return 2
     try:
         if "--dry-run" in argv:
-            _, rel, sha, body, _, _, base = check_file(files[0])
+            _, rel, sha, body, _, _, base = check_file(files[0], state=state)
             print(f"проверено: {rel} = {base} {sha[:12]} ({len(body)} байт); база не тронута (--dry-run)")
         else:
             apply(state, files[0])
