@@ -2075,7 +2075,7 @@ def status():
             # metis-0250: «ждёт вас» без процесса и без вопроса — не ждёт, а снята Claude Code (reconcile_agents)
             k = "gone" if a.get("noProcess") else a.get("state") or "?"
             if k in ("blocked", "failed") and stale_ask(a.get("waitingFor")):
-                k = "stale"   # metis-1248: «подтвердить #N по Touch ID», а заявок на #N нет — вопрос устарел
+                k = "stale"   # metis-1248: «подтвердить #N по Touch ID», а #N слит или закрыт — вопрос устарел
             by.setdefault(k, []).append(a)
         order = ("interactive", "working", "blocked", "failed", "gone", "stale", "done", "stopped")
         word = {"interactive": "открыты в терминале", "working": "фоновые работают", "blocked": "ждут вас",
@@ -4997,7 +4997,7 @@ def reconcile_agents(data, workers=None):
             # ниже он ляжет в waitingFor упавшей); noProcess вопроса не имеет по определению (ревью argus-249a Б1)
             q = a.get("waitingFor") or js.get("needs")
             if a["state"] == "blocked" and not a.get("noProcess") and q and not stale_ask(q):
-                a["asks"] = True   # metis-1248: устаревший вопрос (Touch ID по слитому PR) — не вопрос
+                a["asks"] = True   # metis-1248: устаревший вопрос (Touch ID по слитому или закрытому PR) — не вопрос
             if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
                 a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
             a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
@@ -5023,7 +5023,8 @@ def just_listed(a, grace=60, since=None):
 
 
 def stale_ask(text):
-    """Вопрос окна устарел (metis-1248): «подтвердить #N по Touch ID», а заявок на эти PR нет (merge.touchid_stale).
+    """Вопрос окна устарел (metis-1248, 1183): «подтвердить #N по Touch ID», а все эти PR слиты или закрыты
+    (merge.touchid_stale: заявка в очереди — живой; без сети и кэша — живой).
     Сбой — не устарел: вопрос остаётся виден."""
     try:
         return bool(merge_mod().touchid_stale(text))

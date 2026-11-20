@@ -796,7 +796,7 @@ def sessions(agents, doms, t=None):
         if sub and (a.get("state") != "blocked" or why.startswith(("Agent", "Task", UNKNOWN_WHY))):
             why = clean_why(sub["why"])   # окно ждёт субагента: что просит он, а не «Agent → …»
         elif state == "blocked" and not a.get("ghost") and P.stale_ask(why):
-            # metis-1248: вопрос «подтвердить #N по Touch ID», а заявки на #N уже нет (слит, закрыт) — не «ждёт вас»
+            # metis-1248, 1183: вопрос «подтвердить #N по Touch ID», а #N слит или закрыт (по gh) — не «ждёт вас»
             P.clear_once(key)
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))
             continue

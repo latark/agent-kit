@@ -641,23 +641,82 @@ def test_subagent_wait_card_and_zeus_1183():
           f"{e.calls()} {_wait_cards(e)}")
 
 
-def test_stale_touchid_not_waiting_1248():
-    """metis-1248: «подтвердить #N по Touch ID», а заявок на #N в очереди слияния нет (PR слит или закрыт) — ни строки
-    в pantheon status «ждут вас», ни тревоги и передачи Зевсу; заявка на #N есть — вопрос по-прежнему виден."""
+def _touchid_env(gh=None, log=True):
+    """Окно coord-x спрашивает «подтвердить #61 и #62 по Touch ID»; журнал merge.jsonl — заявка latark/demo#61 пачкой
+    с #62 (log); gh — заглушка: {номер: состояние} или None — gh не отвечает (нет сети). Вызовы gh — в gh.log."""
     e = _blocked_env(None, waiting="подтвердить #61 и #62 по Touch ID")
+    if log:
+        os.makedirs(e.st("logs"), exist_ok=True)
+        with open(e.st("logs", "merge.jsonl"), "w") as fh:
+            fh.write(json.dumps({"time": "2026-10-15T07:00:00", "repo": "latark/demo", "pr": 61, "sha": "a" * 40,
+                                 "event": "request", "batch": "61,62"}) + "\n")
+    _touchid_gh(e, gh)
+    return e
+
+
+def _touchid_gh(e, gh):
+    d = os.path.join(e.tmp, "gh-state")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    for n, st in (gh or {}).items():
+        open(os.path.join(d, str(n)), "w").write(st)
+    p = os.path.join(e.bin, "gh")
+    open(p, "w").write(f'#!/bin/sh\necho "$@" >> "{e.tmp}/gh.log"\n'
+                       f'[ "$1 $2" = "pr view" ] && [ -f "{d}/$3" ] || exit 1\n'
+                       f'printf \'{{"state": "%s"}}\' "$(cat "{d}/$3")"\n')
+    os.chmod(p, 0o755)
+
+
+def _gh_calls(e):
+    p = os.path.join(e.tmp, "gh.log")
+    return open(p).read().splitlines() if os.path.exists(p) else []
+
+
+def test_stale_touchid_not_waiting_1248():
+    """metis-1248, 1183: «подтвердить #N по Touch ID» устарел, только если каждый #N слит или закрыт (gh или событие
+    merged журнала) — тогда ни строки в pantheon status «ждут вас», ни тревоги и передачи Зевсу. Нет заявки в очереди —
+    не довод: PR открыт, gh не отвечает (без сети и кэша), репозиторий неизвестен — вопрос виден. Заявка на #N есть —
+    вопрос виден, gh не спрашивается. Слитый в кэше — устарел и без сети."""
+    live = "ждут вас: coord-x — подтвердить #61 и #62 по Touch ID"
+    e = _touchid_env({61: "MERGED", 62: "CLOSED"})
     out = e.run("status", t=T0).stdout
-    check("подтвердить #61" not in out and "вопрос устарел: 1" in out, f"1248: устаревший Touch ID в status: {out}")
+    check("подтвердить #61" not in out and "вопрос устарел: 1" in out, f"1248: слит и закрыт — вопрос в status: {out}")
     e.run("watch", t=T0)
     check(") ждёт вас" not in e.alerts() and not _relayed(e), f"1248: устаревший Touch ID — тревога или Зевсу: "
           f"{e.alerts()} {e.calls()}")
-    # заявка на #62 в очереди (пачкой с #61) — вопрос живой
-    e = _blocked_env(None, waiting="подтвердить #61 и #62 по Touch ID")
+    check(any("pr view 61 -R latark/demo --json state" in c for c in _gh_calls(e)), f"1183: gh не спрошен: {_gh_calls(e)}")
+    # кэш: слитый и закрытый помнится — gh пропал (нет сети), вопрос всё равно устарел, gh больше не зовётся
+    _touchid_gh(e, None)
+    n = len(_gh_calls(e))
+    out = e.run("status", t=T0 + 3600).stdout
+    check("вопрос устарел: 1" in out and len(_gh_calls(e)) == n, f"1183: кэш слитого не взят: {out} {_gh_calls(e)}")
+    # событие merged журнала — слит без gh
+    e = _touchid_env({62: "CLOSED"})
+    with open(e.st("logs", "merge.jsonl"), "a") as fh:
+        fh.write(json.dumps({"time": "2026-10-15T08:00:00", "repo": "latark/demo", "pr": 61, "sha": "a" * 40,
+                             "event": "merged"}) + "\n")
+    out = e.run("status", t=T0).stdout
+    check("вопрос устарел: 1" in out and not any(" 61 " in c for c in _gh_calls(e)),
+          f"1183: событие merged журнала не взято: {out} {_gh_calls(e)}")
+    # заявки нет, но PR открыт; gh не отвечает (нет сети); репозиторий неизвестен (нет журнала) — вопрос живой
+    for label, env in (("#62 открыт", _touchid_env({61: "MERGED", 62: "OPEN"})), ("gh не отвечает", _touchid_env(None)),
+                       ("нет журнала заявок", _touchid_env({61: "MERGED", 62: "MERGED"}, log=False))):
+        out = env.run("status", t=T0).stdout
+        check(live in out, f"1183: {label} — вопрос скрыт: {out}")
+        env.run("watch", t=T0)
+        check("coord-x (b10c0001) ждёт вас: подтвердить #61" in env.alerts(), f"1183: {label} — нет тревоги: {env.alerts()}")
+    # репозиторий в тексте («owner/repo#N») — без журнала
+    e = _blocked_env(None, waiting="подтвердить latark/demo#61 по Touch ID")
+    _touchid_gh(e, {61: "MERGED"})
+    check("вопрос устарел: 1" in e.run("status", t=T0).stdout, "1183: owner/repo#N в тексте не взят")
+    # заявка на #62 в очереди (пачкой с #61) — вопрос живой, gh не спрошен
+    e = _touchid_env({61: "MERGED", 62: "MERGED"})
     q = e.st("merge-queue")
     os.makedirs(q, mode=0o700)
     with open(os.path.join(q, "latark__demo__61.json"), "w") as fh:
         json.dump({"repo": "latark/demo", "pr": 61, "sha": "a" * 40, "created": T0 - 60, "batch": [61, 62]}, fh)
     out = e.run("status", t=T0).stdout
-    check("ждут вас: coord-x — подтвердить #61 и #62 по Touch ID" in out, f"1248: живая заявка — вопрос скрыт: {out}")
+    check(live in out and not _gh_calls(e), f"1248: живая заявка — вопрос скрыт или gh спрошен: {out} {_gh_calls(e)}")
     e.run("watch", t=T0)
     check("coord-x (b10c0001) ждёт вас: подтвердить #61" in e.alerts(), f"1248: живая заявка — нет тревоги: {e.alerts()}")
     # без Touch ID или без номера — судить не о чем, вопрос виден
