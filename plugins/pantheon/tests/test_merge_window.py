@@ -456,11 +456,19 @@ def test_window_text_author_and_budget():
     three = [["plugins/guard/hooks/merge_gate.py"], ["plugins/pantheon/lib/window_rules.py"],
              ["plugins/guard/hooks/protect_config.py"], [], []]
     real = [{**r, "pr": 1500 + i} for i, r in enumerate(reqs)]   # четырёхзначные номера: следующие сотни PR
-    for whys in (["argus ×2 ✓, CI ✓"] * 4 + [tfull], ["argus ×2 ✓, CI ✓"] * 4 + [m.BILLING_OK + SHA[:12]]):
+    ok, light = "argus ×2 ✓, CI ✓", ("argus ×1 ✓ (лёгкий PR ядра: только добавленные тесты/документы, тестов 2, "
+                                     "документов 1 — 1 argus Opus high), CI ✓")
+    for whys in ([ok] * 4 + [tfull], [ok] * 4 + [m.BILLING_OK + SHA[:12]], [ok, tfull, m.BILLING_OK + SHA[:12], light, ok]):
         t = m.batch_window_text(real, views, whys, three)
-        check("MAX_BATCH, 3 области, вердикты разные: фраза у каждого PR, проверки короче (argus #517 Б5)",
-              len(t) <= 400 and t.count("«окно") == 5 and "Проверки: #1504 " in t
-              and t.endswith("; у остальных argus ×2 ✓, CI ✓."), t)
+        check("MAX_BATCH, 3 области, вердикты разные: каждый вердикт — сжатый, но целиком (argus #517 Б1/Б6)",
+              len(t) <= 400 and all(f"#{1500 + i} metis-12%02d ({'%07d' % i})" % i in t for i in range(5))
+              and all(m.short_why(w) in t for w in whys) and ("tests/full ✗" in t) == (tfull in whys)
+              and ("CI: лимит, тесты ✓" in t) == any(m.BILLING_OK in w for w in whys), t)
+    t = m.batch_window_text(real, views, [ok] * 5, three)
+    check("MAX_BATCH, 3 области, один вердикт: фраза у каждого PR", len(t) <= 400 and t.count("«окно") == 5, t)
+    t = m.batch_window_text(real[:3], views[:3], [ok, tfull, light], three[:3])
+    check("3 PR, три разных вердикта: фраза у каждого и вердикты целиком",
+          len(t) <= 400 and t.count("«окно") == 3 and "(лёгкий), CI ✓" in t and "tests/full ✗" in t, t)
     t = m.batch_window_text(reqs, [{"body": "Closes abcdefghijkl-12%03d" % i} for i in range(5)],
                             ["слово %d " % i * 20 for i in range(5)], [[c] for c in every][:5] + [every])
     check("MAX_BATCH, длинные задачи и разные вердикты: SHA, «Слить по очереди» и вердикт каждого — в окне",
