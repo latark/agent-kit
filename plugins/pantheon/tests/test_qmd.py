@@ -185,7 +185,8 @@ def test_qmd_config():
         open(os.path.join(home, ".claude", "pantheon", "policy.toml"), "w").write(
             '[private]\npaths = ["~/ai/pantheon/.git/git-crypt"]\n')
         for ok_toml in ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nmask = "Inbox/research-*.md"\n',
-                        '[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nignore = ["me/**"]\n',
+                        '[[collection]]\nname = "k"\npath = "~/ai/knowledge"\n'
+                        'ignore = ["me/**", "Self/**", "Areas/**", "People/**"]\n',
                         '[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nmask = "Inbox/*.md"\n'
                         '[[collection]]\nname = "p"\npath = "~/ai/pantheon"\n'):
             open(os.path.join(pan, "qmd.toml"), "w").write(ok_toml)
@@ -215,6 +216,11 @@ def test_qmd_config():
                          ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nmask = "**/*.md,Inbox/*.md"\n',
                           "маска с ** накрывает me/"),
                          ('[[collection]]\nname = "k"\npath = "~/ai/knowledge/me/fin"\n', "коллекция внутри me/"),
+                         # metis-0894: Self, Areas, People — личное и без policy.toml (в нём здесь только ключ)
+                         ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nignore = ["me/**"]\n',
+                          "исключена только me/ — Self/, Areas/, People/ накрыты"),
+                         ('[[collection]]\nname = "k"\npath = "~/ai/knowledge/Areas"\n', "коллекция = Areas/"),
+                         ('[[collection]]\nname = "k"\npath = "~/ai/knowledge/People/x"\n', "коллекция внутри People/"),
                          ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nignore = ["me/"]\n',
                           "ignore «me/» fast-glob не исключает"),
                          ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nmask = "ME/**/*.md"\n',

@@ -115,8 +115,9 @@ def load():
 
 
 def private_paths():
-    """Личные пути из [private] policy.toml (SEC-11) и ~/ai/knowledge/me — всегда, даже без policy.toml."""
-    out = {os.path.realpath(os.path.join(P.AI_HOME, "knowledge", "me"))}
+    """Личные пути из [private] policy.toml (SEC-11) и личные папки ~/ai/knowledge (me, Self, Areas, People —
+    PERSONAL из lib/moved.py, metis-0894) — всегда, даже без policy.toml."""
+    out = {os.path.realpath(os.path.join(P.AI_HOME, "knowledge", x)) for x in P.moved_mod().PERSONAL}
     with contextlib.suppress(OSError, ValueError):
         with open(os.path.join(P.HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
             for x in (tomllib.load(fh).get("private") or {}).get("paths") or []:

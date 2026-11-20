@@ -11,7 +11,7 @@ import sys
 import time
 
 __all__ = [
-    "service_run", "run_job", "next_run", "jobs_show",
+    "service_run", "run_job", "run_direction_job", "next_run", "jobs_show",
 ]
 
 
@@ -49,6 +49,8 @@ def run_job(name):
     job = next((j for j in sched.get("job") or [] if j["name"] == name), None)
     if not job:
         return 2
+    if P.direction_job(job) is not None:
+        return run_direction_job(name, job)
     argv = P.parse_command(job.get("command"))
     if argv is None:
         return 2
@@ -128,6 +130,41 @@ def run_job(name):
             return rc
 
 
+def run_direction_job(name, job):
+    """metis-0886: задача направления — не процесс `claude -p`, а разовый запуск окна координатора (STATE/oneshot.json,
+    lib/night.py), как заявка Зевса на `pantheon start`: окно поднимает дежурный своим проходом (oneshots в watch.py) —
+    тем же start, с теми же шлюзами недели и занятости, папкой из реестра и окном прав направления. Направления нет в
+    реестре (domains.json), нет папки или координатора — запуск не ставится: одна тревога, код ALERTED, срок сдвигается."""
+    _, text, _ = P.direction_job(job)
+    with P.lock("job-" + name, block=False) as got:
+        if not got:
+            return 0
+        t = P.now()
+        st = P.job_state(name)
+        bad = P.direction_job_problem(job)
+        if bad:
+            P.alert_once("job-dir-" + name, bad, f"задача {name} не идёт: окно направления не поднять — {bad}",
+                         "pantheon-tick", note=f"Задача {name} не идёт: окно направления не поднять")
+            st.update(last_start=t, last_end=t, last_rc=P.ALERTED, fails=int(st.get("fails") or 0) + 1)
+            st.pop("waiting", None)
+            P.save_job_state(name, st)
+            return P.ALERTED
+        P.clear_once("job-dir-" + name)
+        d = job["direction"]
+        oid = P.night_mod().oneshot_add(d, t, text, "job", t=t, job=name)
+        os.makedirs(P.path("logs"), exist_ok=True)
+        log = P.path("logs", name + ".log")
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"--- {P.stamp()} rc=0 окно {d}: разовый запуск {oid}\n")
+        P.trim_log(log)
+        st.update(last_start=t, last_end=t, last_rc=0, fails=0)
+        st.pop("waiting", None)
+        st.pop("running", None)
+        P.save_job_state(name, st)
+        P.alert(f"задача {name}: окно {d} — разовый запуск {oid} (поднимет дежурный)", "pantheon-tick")
+        return 0
+
+
 TEMPFAIL_DEFAULT = "нет сети или GitHub недоступен"
 
 
@@ -183,7 +220,9 @@ def jobs_show():
             state = f"пауза{': ' + st['paused_reason'] if st.get('paused_reason') else ''}"
         elif (held := P.lock_held("job-" + job["name"])):
             state = "идёт"
-        elif P.parse_command(job.get("command")) is None:
+        elif P.direction_job(job) is not None and P.direction_job_problem(job):
+            state = f"окно направления не поднять: {P.direction_job_problem(job)} — пропускается"
+        elif P.direction_job(job) is None and P.parse_command(job.get("command")) is None:
             state = "команда не разрешена — пропускается"
         elif P.job_window_problem(P.parse_command(job.get("command"))):
             state = f"не идёт: {P.job_window_problem(P.parse_command(job.get('command')))} (pantheon domains build)"

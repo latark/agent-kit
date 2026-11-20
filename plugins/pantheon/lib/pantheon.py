@@ -1007,6 +1007,37 @@ def parse_command(cmd):
     return None
 
 
+def direction_job(job):
+    """metis-0886 (вариант А владельца 06.11): задача расписания окном координатора направления — `direction = "<имя>"`
+    и `text = "<поручение>"` вместо command. → None — у задачи нет direction (обычная команда, parse_command); иначе
+    (направление, поручение, причина отказа или None). Папку окна задача не называет: её берёт start из реестра
+    (domains.json из directions.toml, первая существующая папка, metis-0899). Новых профилей прав нет — окно то же,
+    что у координатора."""
+    d = job.get("direction")
+    if d is None:
+        return None
+    text = job.get("text")
+    if not isinstance(d, str) or not SESSION_NAME.fullmatch(d) or d == "workshop":
+        return "", "", f"direction {str(d)[:40]!r} — не имя направления"
+    if job.get("command") is not None:
+        return d, "", "у задачи направления нет command — только direction и text"
+    if not isinstance(text, str) or not text.strip():
+        return d, "", "нет поручения (text)"
+    return d, f"Задание расписания {job.get('name')}: {text.strip()}", None
+
+
+def direction_job_problem(job):
+    """Причина, по которой задача направления не идёт (вид задачи, нет направления в реестре, нет папки, координатора
+    нет — coordinator = false), или None. Для обычной задачи — None."""
+    dj = direction_job(job)
+    if dj is None:
+        return None
+    if dj[2]:
+        return dj[2]
+    got = start_target(dj[0], [])
+    return got if isinstance(got, str) else None
+
+
 APP = os.path.join(HOME, "Applications", "Доска.app")
 
 
@@ -1431,7 +1462,13 @@ def tick():
                     continue
                 if me != primary:
                     continue
-            if parse_command(job.get("command")) is None:
+            if direction_job(job) is not None:  # окно направления (metis-0886): не claude -p и не команда
+                bad = direction_job_problem(job)
+                if bad:
+                    alert_once("baddir-" + name, bad, f"задача {name}: окно направления не поднять — {bad}; пропущена",
+                               "pantheon-tick", note=f"Задача {name} пропущена: окно направления не поднять")
+                    continue
+            elif parse_command(job.get("command")) is None:
                 alert_once("badcmd-" + name, job.get("command"), f"задача {name}: команда не разрешённого вида "
                            "(только pantheon …, claude -p …, скрипт плагина; без ; & | $ > <) — пропущена",
                            "pantheon-tick", note=f"Задача {name} пропущена: команда не разрешена")
@@ -2020,7 +2057,9 @@ def status():
         st = job_state(job["name"])
         if job.get("enabled") is False or st.get("disabled"):
             continue
-        if parse_command(job.get("command")) is None:
+        if direction_job(job) is not None and direction_job_problem(job):
+            bad = f"окно направления не поднять: {direction_job_problem(job)}"
+        elif direction_job(job) is None and parse_command(job.get("command")) is None:
             bad = "команда не разрешена"
         elif job_window_problem(parse_command(job.get("command"))):
             bad = job_window_problem(parse_command(job.get("command")))
@@ -3268,8 +3307,10 @@ def pnpm_store_check(name, folders, store):
 
 # [private] из policy.toml читается по правилу guard 0.5.9 (metis-0163): окно и guard не должны расходиться во мнении,
 # у кого личное. Умолчание — то же, что DEFAULT_PRIVATE у guard.
+# metis-0894: личные папки — все из PERSONAL (lib/moved.py): me, Self, Areas, People
 DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
-                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
+                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/Self", "~/ai/knowledge/Areas", "~/ai/knowledge/People",
+                             "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
                              "~/.local/state/pantheon/owner-log/zeus.md"]}
 
 
@@ -8836,6 +8877,42 @@ def check_coordinators(quiet):
     return len(errs)
 
 
+def check_private_cover(quiet):
+    """metis-0894: личная папка ~/ai/knowledge/<x> из PERSONAL (lib/moved.py) есть на диске, а [private] paths
+    policy.toml её не покрывает — сведения владельца открыты окнам ролей. Предупреждение (тик — тревога один раз на
+    набор), код выхода check не меняет. Имя папки берём из списка ~/ai/knowledge: в окне роли сама папка под denyRead.
+    → список непокрытых папок."""
+    try:
+        with open(os.path.join(HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+            policy = tomllib.load(fh)
+    except (OSError, ValueError):
+        policy = {}
+    covered = [os.path.realpath(os.path.join(HOME, p[2:]) if p.startswith("~/") else p)
+               for p in private_conf(policy)["paths"]]
+    kn = os.path.join(AI_HOME, "knowledge")
+    try:
+        names = set(os.listdir(kn))
+    except OSError:
+        return []
+    bare = []
+    for x in moved_mod().PERSONAL:
+        if x not in names:
+            continue
+        d = os.path.realpath(os.path.join(kn, x))
+        if not any(d == c or d.startswith(c + os.sep) for c in covered):
+            bare.append(x)
+    text = (f"личное ~/ai/knowledge/{{{','.join(bare)}}} не покрыто [private] paths policy.toml — окна ролей его "
+            "читают; добавить пути в [private] paths (или убрать строку paths: умолчание закрывает все)")
+    if not quiet:
+        if bare:
+            print(f"предупреждение · {text}")
+    elif bare:
+        alert_once("check-private-cover", ",".join(bare), text, "check")
+    else:
+        clear_once("check-private-cover")
+    return bare
+
+
 SKILL_DIRS = [d for d in (os.environ.get("PANTHEON_SKILL_DIRS") or "").split(os.pathsep) if d] or [
     os.path.join(PLUGIN, "skills"), os.path.join(HOME, ".claude", "skills")]
 
@@ -9088,6 +9165,7 @@ def check(paths=None, quiet=False):
         _check_long_state(quiet)
         check_moved(quiet)   # предупреждение, на код выхода check не влияет
         check_layout(quiet)  # папка вне карты «что где» — предупреждение (metis-0899)
+        check_private_cover(quiet)  # личная папка вне [private] paths — предупреждение (metis-0894)
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
         check_no_parent(T, quiet)  # без пачки старше суток: предупреждение, код выхода не меняет (metis-0940)
