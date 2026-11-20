@@ -13,7 +13,8 @@ def test_ci_matches_guard():
     (metis-1050),
     pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), base_counts (metis-0965),
     REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
-    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT, CI_NONE, delta_problem и DELTA_* (metis-0784) в merge.py
+    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT, CI_NONE, delta_problem и DELTA_* (metis-0784), ci_full_tests и
+    CI_FULL_TESTS (metis-1305), ci_full_files_problem (metis-1306) в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -25,6 +26,7 @@ def test_ci_matches_guard():
                                                              "ci_billing", "ci_job_unstarted", "full_tests_record",
                                                              "required_checks", "optional_checks", "repo_entry",
                                                              "narrow_tests_record", "narrow_map_path",
+                                                             "ci_full_tests", "ci_full_files_problem",
                                                              "pair_match", "returned_lie",
                                                              "returned_lifts", "base_counts", "delta_problem"):
                 got[n.name] = ast.dump(n)
@@ -32,7 +34,7 @@ def test_ci_matches_guard():
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
                                             "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "MAP_HASH_RE", "CI_OK",
                                             "CI_WAIT", "CI_NONE", "DELTA_MAX_LINES", "DELTA_DEPTH",
-                                            "DELTA_GATE_FILES", "DELTA_RENAME"):
+                                            "DELTA_GATE_FILES", "DELTA_RENAME", "CI_FULL_TESTS"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
@@ -43,7 +45,7 @@ def test_ci_matches_guard():
              "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
              "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
              "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE", "delta_problem", "DELTA_MAX_LINES", "DELTA_DEPTH",
-             "DELTA_GATE_FILES", "DELTA_RENAME")
+             "DELTA_GATE_FILES", "DELTA_RENAME", "ci_full_tests", "CI_FULL_TESTS", "ci_full_files_problem")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
@@ -182,6 +184,86 @@ def test_gate_no_ci_window():
     check("окно пачки — тоже «CI нет у репозитория»",
           "CI нет у репозитория" in got.get("batch", "") and "CI ✓" not in got.get("batch", ""), got)
     check("gate смотрит workflows и на head PR", got.get("head") is True, got)
+
+
+def test_gate_ci_full():
+    """metis-1305, Б2 argus #523: у репозитория из CI_FULL_TESTS gate() без записи tests пускает, только если все
+    обязательные проверки для base PR — SUCCESS запуска от pull_request на head (ci_full_tests). Ветка эпика
+    (обязательных нет) при зелёном rollup, красная или дубль с красной — fail, идёт — wait; agent-kit без записи — fail
+    сразу. metis-1306 (Д1 argus #523): PR меняет .github/ или пути команды полного набора из строки CI_FULL_TESTS —
+    fail без записи, ok с записью; файлы PR не получены — wait. Проект вымышленный (owner-x/proj), таблицы подменены,
+    как в тестах шлюза guard."""
+    code = (
+        "import sys, json, importlib.util, subprocess, types, hashlib\n"
+        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+        "s.loader.exec_module(m)\n"
+        "H = 'a' * 40\n"
+        "m.subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, '', 'gh: Not Found (HTTP 404)\\n')\n"
+        "key = 'sha256:' + hashlib.sha256(b'owner-x/proj').hexdigest()\n"
+        "m.REQUIRED_CHECKS = dict(m.REQUIRED_CHECKS, **{key: (('tests', 'checks', 'develop'), "
+        "('tests', 'checks', 'main'))})\n"
+        "m.CI_FULL_TESTS = {key: ('metis-1305: проба', ('scripts', '.npmrc', '.pnpmfile.cjs', 'pnpm-workspace.yaml', "
+        "'pnpm-lock.yaml'), ('package.json',))}\n"
+        "m.code_facts = lambda *a: (set(), set(), [])\n"
+        "def run(concl='SUCCESS', status='COMPLETED', w='tests', j='checks'):\n"
+        "    return {'workflowName': w, 'name': j, 'status': status, 'conclusion': concl, 'event': 'pull_request'}\n"
+        "def gate(repo, base, runs, tests=False, files=('src/a.ts',)):\n"
+        "    m.pr_files = lambda *a, **k: None if files is None else list(files)\n"
+        "    def acc(sid): return {'kind': 'accept', 'pr': 7, 'sha': H, 'base': base,\n"
+        "                          'by': {'agent_type': 'argus', 'session_id': sid, 'agent_id': sid}}\n"
+        "    recs = ([{'kind': 'tests', 'sha': H}] if tests else []) + [acc('s1'), acc('s2')]\n"
+        "    m.P = types.SimpleNamespace(review_records=lambda repo: recs, review_accept_counts=lambda r: True)\n"
+        "    m.ci_runs_fetch = lambda *a, **k: runs\n"
+        "    rollup = [{k: v for k, v in c.items() if k != 'event'} for c in runs]\n"
+        "    view = {'headRefOid': H, 'state': 'OPEN', 'isDraft': False, 'baseRefName': base,\n"
+        "            'statusCheckRollup': rollup, 'title': 'T'}\n"
+        "    return list(m.gate(repo, 7, H, view))\n"
+        "kit = [run(w=w, j=j) for w, j in m.required_checks('latark/agent-kit', 'main')]\n"
+        "print(json.dumps({'ok_dev': gate('owner-x/proj', 'develop', [run()]),\n"
+        "    'ok_main': gate('owner-x/proj', 'main', [run()]),\n"
+        "    'epic': gate('owner-x/proj', 'epic-1', [run()]),\n"
+        "    'red': gate('owner-x/proj', 'develop', [run('FAILURE')]),\n"
+        "    'dup': gate('owner-x/proj', 'develop', [run(), run('FAILURE')]),\n"
+        "    'pend': gate('owner-x/proj', 'develop', [run('', 'IN_PROGRESS')]),\n"
+        "    'kit': gate('latark/agent-kit', 'main', kit),\n"
+        "    'epic_tests': gate('owner-x/proj', 'epic-1', [run()], tests=True),\n"
+        "    'wf': gate('owner-x/proj', 'develop', [run()], files=('src/a.ts', '.github/workflows/tests.yml')),\n"
+        "    'pkg': gate('owner-x/proj', 'develop', [run()], files=('package.json',)),\n"
+        "    'rc': gate('owner-x/proj', 'develop', [run()], files=('scripts/run-checks.ts',)),\n"
+        "    'apkg': gate('owner-x/proj', 'develop', [run()], files=('apps/web/package.json',)),\n"
+        "    'sfoo': gate('owner-x/proj', 'develop', [run()], files=('scripts/foo.ts',)),\n"
+        "    'lock': gate('owner-x/proj', 'develop', [run()], files=('pnpm-lock.yaml',)),\n"
+        "    'wf_tests': gate('owner-x/proj', 'develop', [run()], tests=True, files=('.github/workflows/tests.yml',)),\n"
+        "    'pkg_tests': gate('owner-x/proj', 'develop', [run()], tests=True, files=('package.json',)),\n"
+        "    'nofiles': gate('owner-x/proj', 'develop', [run()], files=None)}, ensure_ascii=False))\n"
+        % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    try:
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        got = {}
+    st = {k: v[0] for k, v in got.items()}
+    want = {"ok_dev": "ok", "ok_main": "ok", "epic": "fail", "red": "fail", "dup": "fail", "pend": "wait",
+            "kit": "fail", "epic_tests": "ok", "wf": "fail", "pkg": "fail", "rc": "fail", "apkg": "fail",
+            "sfoo": "fail", "lock": "fail", "wf_tests": "ok",
+            "pkg_tests": "ok", "nofiles": "wait"}
+    check("gate CI_FULL_TESTS без записи tests: обязательные SUCCESS — ok; ветка эпика, красная, дубль с красной — "
+          "fail; идёт — wait; agent-kit — fail; запись есть — ok", st == want,
+          {k: (want.get(k), got.get(k)) for k in want if st.get(k) != want[k]} or r.stdout + r.stderr)
+    check("gate: ветка эпика без записи — отказ называет CI_FULL_TESTS",
+          "нет записи тестов шлюза" in (got.get("epic") or ["", ""])[1]
+          and "CI_FULL_TESTS" in (got.get("epic") or ["", ""])[1], got.get("epic"))
+    check("gate: agent-kit без записи — прежний отказ «нет записи тестов шлюза»",
+          (got.get("kit") or ["", ""])[1] == "нет записи тестов шлюза на " + "a" * 12, got.get("kit"))
+    for k, f in (("wf", ".github/workflows/tests.yml"), ("pkg", "package.json"), ("rc", "scripts/run-checks.ts"),
+                 ("apkg", "apps/web/package.json"), ("sfoo", "scripts/foo.ts"), ("lock", "pnpm-lock.yaml")):
+        check(f"gate: CI зелёный, записи нет, PR меняет {f} — отказ «нет записи тестов шлюза» с причиной (metis-1306)",
+              (got.get(k) or ["", ""])[1] == f"нет записи тестов шлюза на {'a' * 12} (PR меняет {f} — CI не засчитан)",
+              got.get(k))
+    check("gate: файлы PR не получены — wait «не получен»", "не получен" in (got.get("nofiles") or ["", ""])[1],
+          got.get("nofiles"))
+    check("gate: дубль с красной — отказ по красной обязательной",
+          "FAILURE" in (got.get("dup") or ["", ""])[1], got.get("dup"))
 
 
 def test_ci_billing():

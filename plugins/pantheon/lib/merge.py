@@ -37,7 +37,9 @@ REQUEST_TTL — заявка остаётся, тревога повторяет
      тревога «не слит N ч» повторяется раз в REQUEST_TTL (nag), пока PR не сольют или заявку не снимут (слово
      владельца 20.11 «конечно, нужно повторять же ее»).
   2. PR сейчас (gh pr view): не OPEN, черновик или head не тот SHA, что в заявке, — снята (новый коммит — новая заявка).
-  3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
+  3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA (у
+     репозитория из CI_FULL_TESTS её заменяет SUCCESS всех обязательных проверок, ci_full_tests — metis-1305, кроме PR,
+     который меняет .github/ или пути команды полного набора, ci_full_files_problem — metis-1306); у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
      меньше двух, «вернуть» нет. «Вернуть» на любом head PR в силе, пока его не сняло «принять» после него (того же
@@ -677,7 +679,7 @@ def window_core(path):
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
 # ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, repo_entry (metis-1116),
-# narrow_tests_record (metis-1050),
+# narrow_tests_record (metis-1050), ci_full_tests и CI_FULL_TESTS (metis-1305), ci_full_files_problem (metis-1306),
 # REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE,
 # CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
@@ -744,6 +746,17 @@ FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-te
               "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check",
               # те же проекты: тесты — `uv run pytest` (workflow tests.yml их PR)
               "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": "uv run pytest", "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": "uv run pytest", "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": "uv run pytest"}
+# репозитории, у которых обязательный job CI сам гоняет полный набор тестов (metis-1305, слово владельца 20.11): ключ —
+# как в REQUIRED_CHECKS → почему CI = полный набор. Для них SUCCESS всех обязательных проверок на head (ci_full_tests)
+# засчитывается вместо записи tests на этом SHA. agent-kit здесь нет: его обязательный job affected — затронутые
+# тесты, а не полный набор. Значение — (почему, пути, имена файлов): workflow PR из того же репозитория GitHub берёт с
+# head PR, поэтому PR, задевающий .github/, пути (файл или папка от корня) или файл с одним из имён в любой папке, —
+# всё, что задаёт команду полного набора и её зависимости, — CI вместо записи не получает: ci_full_files_problem
+# (metis-1306, Д1 argus #523). Белого списка «только исходники» нет: иначе почти каждый PR снова требовал бы запись
+CI_FULL_TESTS = {"sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
+    "metis-1305: обязательный job tests/checks гоняет `pnpm check` — тот же полный набор, что FULL_TESTS "
+    "(`pnpm run check`)", ("scripts", ".npmrc", ".pnpmfile.cjs", "pnpm-workspace.yaml", "pnpm-lock.yaml"),
+    ("package.json",))}
 
 
 def repo_entry(table, repo, default=None):
@@ -765,6 +778,46 @@ def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
     got = repo_entry(REQUIRED_CHECKS, repo, ())
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
+
+
+def ci_full_tests(repo, base, runs):
+    """Зелёный CI репозитория — полный набор тестов (metis-1305): repo есть в CI_FULL_TESTS, обязательные проверки для
+    base PR (required_checks) есть, и у каждой все запуски Actions от pull_request на этом head (runs — ответ ci_runs)
+    завершены с SUCCESS (дубль — худший итог). True — запись tests на этом SHA не нужна; иначе False, как раньше."""
+    required = required_checks(repo, base) if repo_entry(CI_FULL_TESTS, repo) else ()
+    if not required or not isinstance(runs, list):
+        return False
+    got = {}
+    for c in runs:
+        if isinstance(c, dict) and c.get("event") == "pull_request":
+            key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+            ok = (str(c.get("status") or "").upper() == "COMPLETED"
+                  and str(c.get("conclusion") or "").upper() == "SUCCESS")
+            got[key] = got.get(key, True) and ok
+    return all(got.get(tuple(r)) is True for r in required)
+
+
+def ci_full_files_problem(repo, paths):
+    """Почему зелёный CI не засчитан вместо записи tests (metis-1306, Д1 argus #523), или None. paths — пути файлов PR
+    (и previous_filename) или None — список не получен или неполон. Workflow PR из того же репозитория GitHub берёт с
+    head PR: PR, который меняет .github/, пути из строки CI_FULL_TESTS (файл или папка от корня) или файл с именем из
+    неё в любой папке (без учёта регистра и ведущих «./» и «/»), мог подменить проверку пустым шагом — тогда нужна
+    запись tests."""
+    entry = repo_entry(CI_FULL_TESTS, repo)
+    if not entry:
+        return "репозитория нет в CI_FULL_TESTS"
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return "список файлов PR не получен или неполон — меняет ли PR workflow или команду полного набора, не проверить"
+    extra = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else ()
+    names = {x.casefold() for x in (entry[2] if isinstance(entry, tuple) and len(entry) > 2 else ())}
+    guarded = [g.strip("/").casefold() for g in (".github", *extra)]
+    for p in paths:
+        n = p.strip("/").casefold()
+        while n.startswith("./"):
+            n = n[2:].lstrip("/")
+        if n.rsplit("/", 1)[-1] in names or any(n == g or n.startswith(g + "/") for g in guarded):
+            return f"PR меняет {p} — CI не засчитан"
+    return None
 
 
 def ci_fork(view):
@@ -1367,7 +1420,9 @@ def gate(repo, pr, sha, view):
     if why:
         return why
     recs = P.review_records(repo)
-    if not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs):
+    no_tests = not any(r.get("kind") == "tests" and r.get("sha") == sha for r in recs)
+    # metis-1305: у репозитория из CI_FULL_TESTS запись заменяет зелёный обязательный CI — решается ниже, после CI
+    if no_tests and not repo_entry(CI_FULL_TESTS, repo):
         return "fail", f"нет записи тестов шлюза на {sha[:12]}"
     verdicts = []
     for r in recs:
@@ -1458,6 +1513,18 @@ def gate(repo, pr, sha, view):
     state, why = billing_verdict(repo, sha, recs, runs, required, state, why, view.get("baseRefName"))
     if state != "ok":
         return state, why
+    if no_tests and not ci_full_tests(repo, view.get("baseRefName"), runs):
+        return "fail", (f"нет записи тестов шлюза на {sha[:12]}, а зелёный CI вместо неё не засчитан: не все "
+                        "обязательные проверки — SUCCESS запуска от pull_request на этом коммите (CI_FULL_TESTS)")
+    if no_tests:
+        # metis-1306 (Д1 argus #523): PR правит workflow или команду полного набора — CI вместо записи не засчитан
+        paths = pr_files(repo, pr, view)
+        if paths is None:
+            return "wait", (f"нет записи тестов шлюза на {sha[:12]}: список файлов PR не получен или неполон — меняет "
+                            "ли PR workflow или команду полного набора (CI_FULL_TESTS), не проверить")
+        hit = ci_full_files_problem(repo, paths)
+        if hit:
+            return "fail", f"нет записи тестов шлюза на {sha[:12]} ({hit})"
     return "ok", f"argus ×{len(latest)} ✓{light if need < MIN_ACCEPTS else ''}, {why}{warn}"
 
 
