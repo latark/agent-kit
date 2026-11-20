@@ -112,10 +112,17 @@ def check_config(repo):
     r = _git(repo, "config", "--list", "--show-scope", "-z")
     if r.returncode != 0:
         raise Refused(f"{repo}: конфиг git не прочитан ({(r.stderr or '').strip()[-200:]})")
-    bad = sorted({key for scope, _, rest in (e.partition("\t") for e in r.stdout.split("\0") if e)
-                  for key in [rest.split("\n", 1)[0]] if scope in ("local", "worktree") and UNSAFE_CONFIG.fullmatch(key)})
-    if bad:
-        raise Refused(f"{repo}/.git/config задаёт {', '.join(bad[:5])} — команда идёт мимо песочницы, с таким "
+    # -z: «scope\0key\nvalue\0» — область и запись разделены NUL
+    parts = r.stdout.split("\0")
+    if parts and parts[-1] == "":
+        parts.pop()
+    if len(parts) % 2:
+        raise Refused(f"{repo}: вывод git config --show-scope не разобран — с таким конфигом не запускаю git")
+    unsafe = sorted({key for scope, entry in zip(parts[0::2], parts[1::2], strict=True)
+                     for key in [entry.split("\n", 1)[0]]
+                     if scope in ("local", "worktree") and UNSAFE_CONFIG.fullmatch(key)})
+    if unsafe:
+        raise Refused(f"{repo}/.git/config задаёт {', '.join(unsafe[:5])} — команда идёт мимо песочницы, с таким "
                       "конфигом не запускаю git (убери ключи: git config --unset …)")
 
 

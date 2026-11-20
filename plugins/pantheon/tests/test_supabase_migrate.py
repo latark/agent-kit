@@ -66,7 +66,9 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAM
 
 
 def git(cwd, *args):
-    r = subprocess.run(["git", "-c", "init.defaultBranch=main", *args], cwd=cwd, capture_output=True, text=True,
+    # хуки окна — только для проверяемой команды: подготовка теста (update-ref) свой хук не исполняет
+    r = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
+                       capture_output=True, text=True,
                        env={**os.environ, **GIT_ENV}, timeout=60)
     assert r.returncode == 0, (args, r.stderr)
     return r.stdout
