@@ -202,7 +202,8 @@ def test_gate_ci_full():
         "key = 'sha256:' + hashlib.sha256(b'owner-x/proj').hexdigest()\n"
         "m.REQUIRED_CHECKS = dict(m.REQUIRED_CHECKS, **{key: (('tests', 'checks', 'develop'), "
         "('tests', 'checks', 'main'))})\n"
-        "m.CI_FULL_TESTS = {key: ('metis-1305: проба', ('package.json', 'scripts/run-checks.ts'))}\n"
+        "m.CI_FULL_TESTS = {key: ('metis-1305: проба', ('scripts', '.npmrc', '.pnpmfile.cjs', 'pnpm-workspace.yaml', "
+        "'pnpm-lock.yaml'), ('package.json',))}\n"
         "m.code_facts = lambda *a: (set(), set(), [])\n"
         "def run(concl='SUCCESS', status='COMPLETED', w='tests', j='checks'):\n"
         "    return {'workflowName': w, 'name': j, 'status': status, 'conclusion': concl, 'event': 'pull_request'}\n"
@@ -229,6 +230,9 @@ def test_gate_ci_full():
         "    'wf': gate('owner-x/proj', 'develop', [run()], files=('src/a.ts', '.github/workflows/tests.yml')),\n"
         "    'pkg': gate('owner-x/proj', 'develop', [run()], files=('package.json',)),\n"
         "    'rc': gate('owner-x/proj', 'develop', [run()], files=('scripts/run-checks.ts',)),\n"
+        "    'apkg': gate('owner-x/proj', 'develop', [run()], files=('apps/web/package.json',)),\n"
+        "    'sfoo': gate('owner-x/proj', 'develop', [run()], files=('scripts/foo.ts',)),\n"
+        "    'lock': gate('owner-x/proj', 'develop', [run()], files=('pnpm-lock.yaml',)),\n"
         "    'wf_tests': gate('owner-x/proj', 'develop', [run()], tests=True, files=('.github/workflows/tests.yml',)),\n"
         "    'pkg_tests': gate('owner-x/proj', 'develop', [run()], tests=True, files=('package.json',)),\n"
         "    'nofiles': gate('owner-x/proj', 'develop', [run()], files=None)}, ensure_ascii=False))\n"
@@ -240,7 +244,8 @@ def test_gate_ci_full():
         got = {}
     st = {k: v[0] for k, v in got.items()}
     want = {"ok_dev": "ok", "ok_main": "ok", "epic": "fail", "red": "fail", "dup": "fail", "pend": "wait",
-            "kit": "fail", "epic_tests": "ok", "wf": "fail", "pkg": "fail", "rc": "fail", "wf_tests": "ok",
+            "kit": "fail", "epic_tests": "ok", "wf": "fail", "pkg": "fail", "rc": "fail", "apkg": "fail",
+            "sfoo": "fail", "lock": "fail", "wf_tests": "ok",
             "pkg_tests": "ok", "nofiles": "wait"}
     check("gate CI_FULL_TESTS без записи tests: обязательные SUCCESS — ok; ветка эпика, красная, дубль с красной — "
           "fail; идёт — wait; agent-kit — fail; запись есть — ok", st == want,
@@ -250,7 +255,8 @@ def test_gate_ci_full():
           and "CI_FULL_TESTS" in (got.get("epic") or ["", ""])[1], got.get("epic"))
     check("gate: agent-kit без записи — прежний отказ «нет записи тестов шлюза»",
           (got.get("kit") or ["", ""])[1] == "нет записи тестов шлюза на " + "a" * 12, got.get("kit"))
-    for k, f in (("wf", ".github/workflows/tests.yml"), ("pkg", "package.json"), ("rc", "scripts/run-checks.ts")):
+    for k, f in (("wf", ".github/workflows/tests.yml"), ("pkg", "package.json"), ("rc", "scripts/run-checks.ts"),
+                 ("apkg", "apps/web/package.json"), ("sfoo", "scripts/foo.ts"), ("lock", "pnpm-lock.yaml")):
         check(f"gate: CI зелёный, записи нет, PR меняет {f} — отказ «нет записи тестов шлюза» с причиной (metis-1306)",
               (got.get(k) or ["", ""])[1] == f"нет записи тестов шлюза на {'a' * 12} (PR меняет {f} — CI не засчитан)",
               got.get(k))

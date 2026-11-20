@@ -822,7 +822,8 @@ def t_ci_full_tests(h):
     mg = _load_merge_gate("merge_gate_ci_full")
     key = "sha256:" + hashlib.sha256(b"owner-x/proj").hexdigest()
     mg.REQUIRED_CHECKS = dict(mg.REQUIRED_CHECKS, **{key: (("tests", "checks", "develop"), ("tests", "checks", "main"))})
-    mg.CI_FULL_TESTS = {key: ("metis-1305: проба", ("package.json", "scripts/run-checks.ts"))}
+    mg.CI_FULL_TESTS = {key: ("metis-1305: проба", ("scripts", ".npmrc", ".pnpmfile.cjs", "pnpm-workspace.yaml",
+                                                   "pnpm-lock.yaml"), ("package.json",))}
     real = _load_merge_gate("merge_gate_ci_full_real")
     check("CI_FULL_TESTS: в таблице одна запись — по хешу, с номером metis-1305; agent-kit нет",
           len(real.CI_FULL_TESTS) == 1 and all(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and "metis-1305" in v[0]
@@ -831,9 +832,10 @@ def t_ci_full_tests(h):
     check("CI_FULL_TESTS: ключ — проект с job tests/checks и полным набором `pnpm run check`",
           all(real.REQUIRED_CHECKS.get(k) == (("tests", "checks", "develop"), ("tests", "checks", "main"))
               and real.FULL_TESTS.get(k) == "pnpm run check" for k in real.CI_FULL_TESTS), real.CI_FULL_TESTS)
-    check("CI_FULL_TESTS: пути команды полного набора — package.json и scripts/run-checks.ts (metis-1306)",
-          all(v[1] == ("package.json", "scripts/run-checks.ts") for v in real.CI_FULL_TESTS.values()),
-          real.CI_FULL_TESTS)
+    check("CI_FULL_TESTS: пути команды полного набора — scripts/, .npmrc, .pnpmfile.cjs, pnpm-workspace.yaml, "
+          "pnpm-lock.yaml и любой package.json (metis-1306)",
+          all(v[1:] == (("scripts", ".npmrc", ".pnpmfile.cjs", "pnpm-workspace.yaml", "pnpm-lock.yaml"),
+                        ("package.json",)) for v in real.CI_FULL_TESTS.values()), real.CI_FULL_TESTS)
 
     # ci_full_files_problem (metis-1306, Д1 argus #523): PR правит workflow или команду полного набора — CI не в счёт
     for name, paths, hit in (
@@ -843,10 +845,17 @@ def t_ci_full_tests(h):
             ("action в .github", [".github/actions/x/action.yml"], ".github/actions/x/action.yml"),
             ("package.json", ["package.json"], "package.json"),
             ("scripts/run-checks.ts", ["scripts/run-checks.ts"], "scripts/run-checks.ts"),
+            ("любой файл scripts/", ["scripts/foo.ts"], "scripts/foo.ts"),
+            ("pnpm-lock.yaml", ["pnpm-lock.yaml"], "pnpm-lock.yaml"),
+            ("pnpm-workspace.yaml", ["pnpm-workspace.yaml"], "pnpm-workspace.yaml"),
+            (".npmrc", [".npmrc"], ".npmrc"),
+            (".pnpmfile.cjs", [".pnpmfile.cjs"], ".pnpmfile.cjs"),
+            ("package.json в подпапке монорепо", ["apps/web/package.json"], "apps/web/package.json"),
+            ("Package.JSON в packages/", ["packages/x/Package.JSON"], "packages/x/Package.JSON"),
             ("регистр и ./", ["./.GitHub/Workflows/t.yml"], "./.GitHub/Workflows/t.yml"),
             ("ведущий /", ["/package.json"], "/package.json"),
-            ("похожее имя — не путь из списка", ["package.json.bak", "scripts/run-checks.tsx", ".githubx"], None),
-            ("package.json в подпапке — не корневой", ["web/package.json"], None)):
+            ("похожее имя — не путь из списка", ["package.json.bak", "scriptsx/a.ts", ".githubx", "src/scripts/a.ts",
+                                                 "web/pnpm-lock.yaml.md"], None)):
         got = mg.ci_full_files_problem("owner-x/proj", paths)
         check(f"ci_full_files_problem: {name} → {hit}",
               got is None if hit is None else (got == f"PR меняет {hit} — CI не засчитан"), got)
@@ -939,7 +948,8 @@ def t_ci_full_tests(h):
     check("gate_problem: проект, база epic-1, запись tests есть — пропуск без «засчитан CI»",
           not isinstance(got, str) and not any("засчитан" in n for n in (got or ("", ()))[1]), got)
     # metis-1306 (Д1 argus #523): PR меняет workflow или команду полного набора — CI вместо записи не засчитан
-    for f in (".github/workflows/tests.yml", "package.json", "scripts/run-checks.ts"):
+    for f in (".github/workflows/tests.yml", "package.json", "scripts/run-checks.ts", "apps/web/package.json",
+              "scripts/foo.ts", "pnpm-lock.yaml"):
         got = gate("develop", [ok], files=("src/a.ts", f))
         check(f"gate_problem: проект, CI зелёный, записи нет, PR меняет {f} — отказ «нет записи тестов» с причиной",
               isinstance(got, str) and got.startswith(f"нет записи тестов на owner-x/proj@{sha[:12]}")

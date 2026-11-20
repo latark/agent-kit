@@ -749,12 +749,14 @@ FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-te
 # репозитории, у которых обязательный job CI сам гоняет полный набор тестов (metis-1305, слово владельца 20.11): ключ —
 # как в REQUIRED_CHECKS → почему CI = полный набор. Для них SUCCESS всех обязательных проверок на head (ci_full_tests)
 # засчитывается вместо записи tests на этом SHA. agent-kit здесь нет: его обязательный job affected — затронутые
-# тесты, а не полный набор. Значение — (почему, пути команды полного набора): workflow PR из того же репозитория GitHub
-# берёт с head PR, поэтому PR, задевающий .github/ или эти пути (файл или папка), CI вместо записи не получает —
-# ci_full_files_problem (metis-1306, Д1 argus #523)
+# тесты, а не полный набор. Значение — (почему, пути, имена файлов): workflow PR из того же репозитория GitHub берёт с
+# head PR, поэтому PR, задевающий .github/, пути (файл или папка от корня) или файл с одним из имён в любой папке, —
+# всё, что задаёт команду полного набора и её зависимости, — CI вместо записи не получает: ci_full_files_problem
+# (metis-1306, Д1 argus #523). Белого списка «только исходники» нет: иначе почти каждый PR снова требовал бы запись
 CI_FULL_TESTS = {"sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
     "metis-1305: обязательный job tests/checks гоняет `pnpm check` — тот же полный набор, что FULL_TESTS "
-    "(`pnpm run check`)", ("package.json", "scripts/run-checks.ts"))}
+    "(`pnpm run check`)", ("scripts", ".npmrc", ".pnpmfile.cjs", "pnpm-workspace.yaml", "pnpm-lock.yaml"),
+    ("package.json",))}
 
 
 def repo_entry(table, repo, default=None):
@@ -798,20 +800,22 @@ def ci_full_tests(repo, base, runs):
 def ci_full_files_problem(repo, paths):
     """Почему зелёный CI не засчитан вместо записи tests (metis-1306, Д1 argus #523), или None. paths — пути файлов PR
     (и previous_filename) или None — список не получен или неполон. Workflow PR из того же репозитория GitHub берёт с
-    head PR: PR, который меняет .github/ или пути команды полного набора из строки CI_FULL_TESTS (файл или папка, без
-    учёта регистра и ведущих «./» и «/»), мог подменить проверку пустым шагом — тогда нужна запись tests."""
+    head PR: PR, который меняет .github/, пути из строки CI_FULL_TESTS (файл или папка от корня) или файл с именем из
+    неё в любой папке (без учёта регистра и ведущих «./» и «/»), мог подменить проверку пустым шагом — тогда нужна
+    запись tests."""
     entry = repo_entry(CI_FULL_TESTS, repo)
     if not entry:
         return "репозитория нет в CI_FULL_TESTS"
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         return "список файлов PR не получен или неполон — меняет ли PR workflow или команду полного набора, не проверить"
     extra = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else ()
+    names = {x.casefold() for x in (entry[2] if isinstance(entry, tuple) and len(entry) > 2 else ())}
     guarded = [g.strip("/").casefold() for g in (".github", *extra)]
     for p in paths:
         n = p.strip("/").casefold()
         while n.startswith("./"):
             n = n[2:].lstrip("/")
-        if any(n == g or n.startswith(g + "/") for g in guarded):
+        if n.rsplit("/", 1)[-1] in names or any(n == g or n.startswith(g + "/") for g in guarded):
             return f"PR меняет {p} — CI не засчитан"
     return None
 
