@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zlib
 from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +54,12 @@ def check(name, cond, extra=""):
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f"  {extra}"))
 
 
+def write_bytes(p, data):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "wb") as fh:
+        fh.write(data)
+
+
 def write(p, text, mode=None):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
@@ -65,10 +72,10 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAM
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "HOME": ROOT}
 
 
-def git(cwd, *args):
+def git(cwd, *args, input=None):
     # хуки окна — только для проверяемой команды: подготовка теста (update-ref) свой хук не исполняет
     r = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
-                       capture_output=True, text=True,
+                       capture_output=True, text=True, input=input,
                        env={**os.environ, **GIT_ENV}, timeout=60)
     assert r.returncode == 0, (args, r.stderr)
     return r.stdout
@@ -395,6 +402,116 @@ git(R4, "update-ref", "-d", "refs/pantheon/verified-main")
 code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"])
 check("хук reference-transaction в .git/hooks на fetch не исполнен, код 0", code == 0 and not os.path.exists(PWNED),
       (code, err))
+
+# хранилище объектов (.git/objects, refs/replace) пишет окно, cat-file хеш не сверяет (metis-1295, второй argus #521)
+EVIL_SQL = b"drop table everything;\n"
+GOOD_BLOB = git(REPO, "rev-parse", f"refs/pantheon/verified-main:{MIG}").strip()
+EVIL_BLOB = git(REPO, "hash-object", "-w", "--stdin", input=EVIL_SQL.decode()).strip()
+OK_DRY = f"({len(MAIN_SQL.encode())} байт)"
+
+
+def plant(sha, kind, body):
+    """Свой zlib-объект под именем sha (loose-файл, как пишет окно) → (путь, прежние байты или None)."""
+    pth = os.path.join(REPO, ".git", "objects", sha[:2], sha[2:])
+    old = open(pth, "rb").read() if os.path.exists(pth) else None
+    if old is not None:
+        os.remove(pth)  # клон по локальному пути делит объекты с origin ссылками — не писать в общий файл
+    write_bytes(pth, zlib.compress(b"%s %d\0" % (kind, len(body)) + body))
+    return pth, old
+
+
+def unplant(pth, old):
+    os.remove(pth)
+    if old is not None:
+        write_bytes(pth, old)
+
+
+git(REPO, "replace", GOOD_BLOB, EVIL_BLOB)
+check("подготовка: git replace подменяет слитый blob для cat-file", git(REPO, "cat-file", "blob", GOOD_BLOB).encode()
+      == EVIL_SQL)
+code, out, err, calls = call(["migrate", p(MIG), "--dry-run"])
+check("git replace <слитый blob> <свой> не действует — код 0, прочитан слитый текст", code == 0 and OK_DRY in out,
+      (code, out, err))
+REPLACE_OUT = (code, out)
+git(REPO, "replace", "-d", GOOD_BLOB)
+LOOSE = plant(GOOD_BLOB, b"blob", EVIL_SQL)
+check("подготовка: свой loose-объект под именем слитого blob читается cat-file",
+      git(REPO, "cat-file", "blob", GOOD_BLOB).encode() == EVIL_SQL)
+code, out, err, calls = call(["migrate", p(MIG), "--dry-run"])
+check("подменённый loose-объект слитого blob — код 1, «подменено» последней строкой",
+      code == 1 and "подменено" in err.strip().splitlines()[-1], (code, err))
+unplant(*LOOSE)
+# дерево supabase/migrations под своим именем указывает файл на чужой blob, на диске — тот же чужой текст
+DIR_TREE = git(REPO, "rev-parse", "refs/pantheon/verified-main:supabase/migrations").strip()
+RAW = subprocess.run(["git", "cat-file", "tree", DIR_TREE], cwd=REPO, capture_output=True, check=True).stdout
+assert RAW.count(bytes.fromhex(GOOD_BLOB)) == 1
+TREE = plant(DIR_TREE, b"tree", RAW.replace(bytes.fromhex(GOOD_BLOB), bytes.fromhex(EVIL_BLOB)))
+write_bytes(p(MIG), EVIL_SQL)
+check("подготовка: rev-parse через подменённое дерево даёт чужой blob",
+      git(REPO, "rev-parse", f"refs/pantheon/verified-main:{MIG}").strip() == EVIL_BLOB)
+code, out, err, calls = call(["migrate", p(MIG), "--dry-run"])
+check("подменённое дерево (файл на диске = чужой blob) — код 1, «подменено» последней строкой",
+      code == 1 and "подменено" in err.strip().splitlines()[-1], (code, err))
+unplant(*TREE)
+write(p(MIG), MAIN_SQL)
+
+# подмодуль: fetch по умолчанию (on-demand) идёт и в подмодуль, а его config ($GIT_DIR/modules/<имя>/config) пишет
+# окно и check_config его не видит — uploadpack оттуда исполнился бы мимо песочницы (metis-1295, первый argus #521, Б1)
+GF = ("-c", "protocol.file.allow=always")
+SUBO, SUBW, ORIGIN7, W7, R7 = (os.path.join(ROOT, n) for n in ("sub.git", "subw", "origin7.git", "w7", "r7"))
+git(ROOT, "init", "--bare", SUBO)
+git(ROOT, "init", SUBW)
+write(os.path.join(SUBW, "a"), "a\n")
+git(SUBW, "add", "a")
+git(SUBW, "commit", "-m", "a")
+git(SUBW, "push", SUBO, "HEAD:main")
+git(ROOT, "init", "--bare", ORIGIN7)
+git(ROOT, "init", W7)
+write(os.path.join(W7, MIG), MAIN_SQL)
+git(W7, *GF, "submodule", "add", SUBO, "sub")
+git(W7, "add", "-A")
+git(W7, "commit", "-m", "init")
+git(W7, "push", ORIGIN7, "HEAD:main")
+git(ROOT, "clone", ORIGIN7, R7)
+git(R7, *GF, "submodule", "update", "--init")
+SUBCFG = os.path.join(R7, ".git", "modules", "sub", "config")
+git(R7, "config", "-f", SUBCFG, "protocol.file.allow", "always")
+git(R7, "config", "-f", SUBCFG, "remote.origin.uploadpack", UPLOAD)
+write(os.path.join(SUBW, "a"), "b\n")  # новый коммит подмодуля в origin7: fetch on-demand пошёл бы за ним
+git(SUBW, "commit", "-am", "b")
+git(SUBW, "push", SUBO, "HEAD:main")
+git(os.path.join(W7, "sub"), *GF, "pull", "origin", "main")
+git(W7, "commit", "-am", "bump")
+git(W7, "push", ORIGIN7, "HEAD:main")
+R7M = os.path.join(ROOT, "r7m")  # копия до fetch — для мутанта: после fetch идти в подмодуль уже не за чем
+shutil.copytree(R7, R7M, symlinks=True)
+if os.path.exists(PWNED):
+    os.remove(PWNED)
+code, out, err, calls = call(["migrate", os.path.join(R7, MIG), "--dry-run"], cwd=R7)
+check("uploadpack в config подмодуля (.git/modules/sub/config) на fetch не исполнен, код 0",
+      code == 0 and not os.path.exists(PWNED), (code, err))
+# .git/commondir: git возьмёт config и объекты из папки, которую назвал файл окна
+write(os.path.join(R4, ".git", "commondir"), "../../r3\n")
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"])
+check("r4/.git/commondir — код 1, «настоящая папка .git» последней строкой",
+      code == 1 and "настоящая папка .git" in err.strip().splitlines()[-1], (code, err))
+os.remove(os.path.join(R4, ".git", "commondir"))
+# PATH: git ищется только в GIT_PATH — свой git первым в PATH не исполнен
+FAKEBIN, GITMARK = os.path.join(ROOT, "fakegit"), os.path.join(ROOT, "GITMARK")
+REAL_GIT = shutil.which("git")
+write(os.path.join(FAKEBIN, "git"), f'#!/bin/sh\ntouch {GITMARK}\nexec {REAL_GIT} "$@"\n', 0o755)
+FAKE_PATH = {"PATH": FAKEBIN + os.pathsep + BIN + os.pathsep + os.environ.get("PATH", "")}
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], FAKE_PATH)
+check("свой git первым в PATH не исполнен, код 0", code == 0 and not os.path.exists(GITMARK), (code, err))
+# файл подменён на ссылку после locate: хеш с диска — отказ Refused, а не трассировка и не текст по ссылке
+LINKED = os.path.join(ROOT, "linked.sql")
+os.symlink(p(MIG), LINKED)
+try:
+    load()._file_hash(LINKED, 40)
+    LINK_ERR = ""
+except Exception as e:  # проверяется именно класс исключения
+    LINK_ERR = type(e).__name__
+check("хеш файла-ссылки — Refused «не прочитан»", LINK_ERR == "Refused", LINK_ERR)
 # r5/supabase — ссылка на чужой клон (его origin — evil.git, где LOCAL «слит»): репозиторий берётся от текущей папки,
 # звено-ссылка в середине пути — отказ; раньше realpath файла уводил в чужой репозиторий с чужим origin, код 0
 EVILREPO = os.path.join(ROOT, "evilrepo")
@@ -433,6 +550,13 @@ code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"
 check("карта направлений битая при окне — код 1, «не прочитана»",
       code == 1 and "не прочитана" in err.strip().splitlines()[-1], (code, err))
 write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"]}}' % (REPO, R4))
+# вложенный репозиторий в репозитории направления: его .git/config (origin) окно задаёт при клоне (metis-1295, Д1)
+NESTED = os.path.join(R4, "nested")
+git(ROOT, "clone", ORIGIN, NESTED)
+code, out, err, calls = call(["migrate", os.path.join(NESTED, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-b"},
+                             cwd=NESTED)
+check("окно w-b, репозиторий вложен в r4 — код 1, «вложенный» последней строкой",
+      code == 1 and "вложенный" in err.strip().splitlines()[-1], (code, err))
 
 # --- через pantheon (run.py) ---
 env = {**os.environ, **GIT_ENV, "PATH": BIN + os.pathsep + os.environ.get("PATH", ""), "PANTHEON_STATE": STATE,
@@ -456,11 +580,11 @@ def mutant(old, new):
     return load(src)
 
 
-M1 = mutant('blob = _git(repo, "rev-parse", "--verify", "--quiet", f"{head.stdout.strip()}:{rel}")',
-            'blob = _git(repo, "rev-parse", "--verify", "--quiet", f"HEAD:{rel}")')
+M1 = mutant("    blob, body = _blob_at(repo, sha, rel)",
+            '    blob, body = _blob_at(repo, _git(repo, "rev-parse", "HEAD").stdout.strip(), rel)')
 check("мутант (сверка с HEAD вместо origin/main) пропускает локальный коммит — тест это видит",
       call(["migrate", p(LOCAL), "--dry-run"], mod=M1)[0] == 0 and call(["migrate", p(LOCAL), "--dry-run"])[0] == 1)
-M2 = mutant("if mine.returncode != 0 or mine.stdout.strip() != blob.stdout.strip():", "if mine.returncode != 0:")
+M2 = mutant("if _file_hash(os.path.join(repo, rel), len(blob)) != blob:", "if False:")
 write(p(MIG), MAIN_SQL + "drop table t;\n")
 check("мутант (без сверки blob) пропускает изменённый файл — тест это видит",
       call(["migrate", p(MIG), "--dry-run"], mod=M2)[0] == 0 and call(["migrate", p(MIG), "--dry-run"])[0] == 1)
@@ -477,17 +601,23 @@ git(REPO, "update-ref", "refs/tags/origin/main", "HEAD")
 check("мутант (без отказа на ветку или метку origin/main) пропускает неоднозначное имя — тест это видит",
       call(["migrate", p(MIG), "--dry-run"], mod=M5)[0] == 0 and call(["migrate", p(MIG), "--dry-run"])[0] == 1)
 SRC6 = SRC.replace('    for ref in (s + branch for s in SHADOW):', '    for ref in ():', 1).replace(
-    'verified + "^{commit}"', 'base + "^{commit}"', 1)
-assert SRC6.count('base + "^{commit}"') == 1 and "for ref in ():" in SRC6
+    'verified + "^{commit}"', 'base + "^{commit}"', 1).replace("    if sha != tip:", "    if False:", 1)
+assert SRC6.count('base + "^{commit}"') == 1 and "for ref in ():" in SRC6 and "if sha != tip" not in SRC6
 check("мутант (короткое имя origin/main вместо своего ref, без отказа) берёт метку с локальным коммитом, а без "
       "мутанта — отказ «неоднозначно»", call(["migrate", p(LOCAL), "--dry-run"], mod=load(SRC6))[0] == 0
       and "неоднозначно" in call(["migrate", p(LOCAL), "--dry-run"])[2])
 git(REPO, "update-ref", "-d", "refs/tags/origin/main")
-M7 = mutant('"fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/{branch}:{verified}"',
-            '"fetch", "--quiet", "--no-tags", "origin", "main"')
+M7 = mutant('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/heads/{branch}:{verified}"',
+            '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", "main"')
 git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")
-check("мутант (fetch не в свой ref) оставляет подвинутый ref — тест это видит",
-      call(["migrate", p(LOCAL), "--dry-run"], mod=M7)[0] == 0 and call(["migrate", p(LOCAL), "--dry-run"])[0] == 1)
+check("мутант (fetch не в свой ref) оставляет подвинутый ref — его ловит сверка с ls-remote «не равен»",
+      "не равен" in call(["migrate", p(LOCAL), "--dry-run"], mod=M7)[2]
+      and "нет в origin/main" in call(["migrate", p(LOCAL), "--dry-run"])[2])
+SRC32 = SRC.replace('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/heads/{branch}:{verified}"',
+                    '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", "main"', 1).replace("    if sha != tip:", "    if False:", 1)
+assert "if sha != tip" not in SRC32 and "{branch}:{verified}" not in SRC32
+check("мутант (ref не сверен с коммитом из ls-remote) — ref, подвинутый окном на свой коммит, пропускает LOCAL — "
+      "тест это видит", call(["migrate", p(LOCAL), "--dry-run"], mod=load(SRC32))[0] == 0)
 M8 = mutant('cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", sql]',
             'cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction", "--dbname", url, "-f", sql]')
 check("мутант (адрес в argv psql) — тест это видит", "secret" in call(["migrate", p(MIG)], mod=M8)[3])
@@ -503,7 +633,7 @@ M11 = mutant("raise Refused(f\"{DB_ENV}: параметр адреса", "contin
 check("мутант (неизвестный параметр адреса пропущен молча) — тест это видит",
       call(["migrate", p(MIG)], {"SUPABASE_DB_URL": "postgresql://u:s@db.example/x?options=-c%20x"}, mod=M11)[0] == 0)
 
-M12 = mutant("    check_sql(rel, body.stdout)\n", "")
+M12 = mutant("    check_sql(rel, body)\n", "")
 SHELL = p("supabase/migrations/20260110000000_shell.sql")
 check("мутант (без проверки текста миграции) отдаёт psql \\! — тест это видит",
       call(["migrate", SHELL], mod=M12)[0] == 0 and call(["migrate", SHELL])[0] == 1)
@@ -538,11 +668,12 @@ M16 = mutant("    return \"\".join(out)", "    return sql")
 check("мутант (литералы не вырезаны) отказывает честной миграции — тест это видит",
       call(["migrate", p(GOOD)], mod=M16)[0] == 1 and call(["migrate", p(GOOD)])[0] == 0)
 
-M21 = mutant("    branch = default_branch(repo)\n", '    branch = "main"\n')
+M21 = mutant("    branch, tip = default_branch(repo)\n", '    branch, tip = "main", default_branch(repo)[1]\n')
 check("мутант (всегда main) отказывает репозиторию без main — тест это видит",
       call(["migrate", p2(MIG), "--dry-run"], mod=M21)[0] == 1 and call(["migrate", p2(MIG), "--dry-run"])[0] == 0)
-M22 = mutant("    return name\n", '    return _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")'
-             '.stdout.strip().removeprefix("origin/")\n')
+M22 = mutant("    return name, tip\n", '    b = _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")'
+             '.stdout.strip().removeprefix("origin/")\n'
+             '    return b, _git(repo, "rev-parse", "refs/remotes/origin/" + b).stdout.strip()\n')
 check("мутант (ветка из локального origin/HEAD) берёт feature и пропускает несливый LOCAL — тест это видит",
       call(["migrate", p2(LOCAL), "--dry-run"], mod=M22)[0] == 0 and call(["migrate", p2(LOCAL), "--dry-run"])[0] == 1)
 M23 = mutant("    if not name or _git(", "    if False and _git(")
@@ -585,6 +716,49 @@ M29 = mutant("    own_repo(state, repo)\n", "")
 check("мутант (без проверки направления) пускает окно w-a в репозиторий w-b — тест это видит",
       call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"}, mod=M29)[0] == 0
       and call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})[0] == 1)
+
+# мутанты хранилища объектов (metis-1295, второй argus #521)
+SRC30 = SRC.replace('"git", "--no-replace-objects", ', '"git", ', 1).replace(', GIT_NO_REPLACE_OBJECTS="1"', "", 1)
+assert "no-replace-objects" not in SRC30 and "GIT_NO_REPLACE_OBJECTS" not in SRC30
+git(REPO, "replace", GOOD_BLOB, EVIL_BLOB)
+check("мутант (замены объектов действуют) — git replace меняет итог — тест это видит",
+      call(["migrate", p(MIG), "--dry-run"], mod=load(SRC30))[:2] != REPLACE_OUT)
+git(REPO, "replace", "-d", GOOD_BLOB)
+M31 = mutant("    if r.returncode != 0 or not algo or algo(", "    if r.returncode != 0 or not algo or False and algo(")
+LOOSE = plant(GOOD_BLOB, b"blob", EVIL_SQL)
+code, out, err, calls = call(["migrate", p(MIG), "--dry-run"], mod=M31)
+check("мутант (объект не сверен с хешем) — подменённый loose-объект проходит, код 0 — тест это видит",
+      code == 0 and f"({len(EVIL_SQL)} байт)" in out, (code, out, err))
+unplant(*LOOSE)
+TREE = plant(DIR_TREE, b"tree", RAW.replace(bytes.fromhex(GOOD_BLOB), bytes.fromhex(EVIL_BLOB)))
+write_bytes(p(MIG), EVIL_SQL)
+check("мутант (объект не сверен с хешем) — подменённое дерево проходит — тест это видит",
+      call(["migrate", p(MIG), "--dry-run"], mod=M31)[0] == 0)
+unplant(*TREE)
+write(p(MIG), MAIN_SQL)
+
+# мутанты подмодулей, вложенного репозитория, commondir и PATH (metis-1295, первый argus #521)
+SRC33 = SRC.replace('"--no-recurse-submodules", ', "", 1).replace(', "-c", "submodule.recurse=false"', "", 1)
+assert "no-recurse-submodules" not in SRC33 and "submodule.recurse" not in SRC33
+if os.path.exists(PWNED):
+    os.remove(PWNED)
+call(["migrate", os.path.join(R7M, MIG), "--dry-run"], cwd=R7M, mod=load(SRC33))
+check("мутант (fetch идёт в подмодули) исполняет uploadpack из config подмодуля — тест это видит",
+      os.path.exists(PWNED))
+if os.path.exists(PWNED):
+    os.remove(PWNED)
+M34 = mutant("    while d != top:", "    while False:")
+check("мутант (вложенный репозиторий не проверен) пускает r4/nested — тест это видит",
+      call(["migrate", os.path.join(NESTED, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-b"}, cwd=NESTED, mod=M34)[0]
+      == 0)
+M35 = mutant(' or os.path.lexists(os.path.join(dotgit, "commondir")):', ":")
+write(os.path.join(R4, ".git", "commondir"), "../../r3\n")
+check("мутант (commondir не проверен) — причина уже не «настоящая папка .git» — тест это видит",
+      "настоящая папка .git" not in call(["migrate", os.path.join(R4, MIG), "--dry-run"], mod=M35)[2])
+os.remove(os.path.join(R4, ".git", "commondir"))
+M36 = mutant("    env.update(PATH=GIT_PATH, ", "    env.update(")
+call(["migrate", os.path.join(R4, MIG), "--dry-run"], FAKE_PATH, mod=M36)
+check("мутант (PATH окружения) исполняет свой git первым в PATH — тест это видит", os.path.exists(GITMARK))
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
