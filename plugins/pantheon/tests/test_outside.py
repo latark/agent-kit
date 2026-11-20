@@ -445,9 +445,29 @@ check("сервер в servers.json: копия, клон, коммит, пап�
 check("ключей нет — пометка, куда их класть", "latark__app.env" in res.get("note", ""), res)
 check("тик: живой сервер — сторожу есть дело, тестам нет", O.pending_serve() and not O.pending_test())
 
-rc, q2, rid2 = role_request("athena-x", APP, "serve")
+# metis-1277: --env — только NEXT_PUBLIC_*, печатный ASCII ≤ 200 без перевода строки; отказ — код 2, заявки нет
+_nreq = len([n for n in os.listdir(q) if n.endswith(".req.json")])
+for _bad in (["--env", "SECRET=1"], ["--env", "NEXT_PUBLIC_x=1"], ["--env", "NEXT_PUBLIC_A=a\nb"],
+             ["--env", "NEXT_PUBLIC_A=" + "x" * 201], ["--env", "NEXT_PUBLIC_A"], ["--env", "NEXT_PUBLIC_A=é"]):
+    _rc, _out = say("athena-x", "serve", *_bad)
+    check(f"serve {_bad[1][:30]!r}: отказ, код 2, заявки нет", _rc == 2
+          and len([n for n in os.listdir(q) if n.endswith(".req.json")]) == _nreq, (_rc, _out))
+check("serve --env: ровно 200 знаков и пустое значение допустимы",
+      O.env_check({"NEXT_PUBLIC_A": "x" * 200, "NEXT_PUBLIC_B": ""}) is None)
+check("check_request: env с чужим именем в заявке — отказ", O.check_request(
+    {"v": 1, "id": "i", "kind": "serve", "dir": "/x", "env": {"SECRET": "1"}}, "i") is not None)
+before2 = len(calls())
+rc, q2, rid2 = role_request("athena-x", APP, "serve", "--env", "NEXT_PUBLIC_X=1", "--env", "NEXT_PUBLIC_FLAG=a b")
+check("serve --env: заявка принята, пары в заявке", rc == 0 and (O.load_result(q2, rid2) or {}).get("env")
+      == {"NEXT_PUBLIC_X": "1", "NEXT_PUBLIC_FLAG": "a b"})
 serve_pass()
 res2 = O.load_result(q2, rid2) or {}
+_c2 = calls()[before2:]
+check("serve --env: значения — в окружении процесса сервера, не установки зависимостей",
+      _c2 and _c2[-1]["env"].get("NEXT_PUBLIC_X") == "1" and _c2[-1]["env"].get("NEXT_PUBLIC_FLAG") == "a b"
+      and "NEXT_PUBLIC_X" not in _c2[0]["env"] and "NEXT_PUBLIC_X" not in os.environ, _c2)
+check("serve --env: имена и значения — в outside.jsonl", any(
+    e.get("env") == {"NEXT_PUBLIC_X": "1", "NEXT_PUBLIC_FLAG": "a b"} for e in events(rid2, "serve")), events(rid2))
 check("второй сервер — другой порт и своя копия", res2.get("state") == "serving" and res2.get("port") != port
       and res2.get("dir") == work_of(rid2) and work_of(rid2) != W, res2)
 
@@ -572,9 +592,29 @@ os.environ["PANTHEON_FAKE_PRESSURE"] = "2"
 rc, q, rid = role_request("athena-x", APP, "serve")
 serve_pass()
 check("давление «предупреждение», серверов нет — первый поднимается", state(q, rid) == "serving")
-rc, q2, rid2 = role_request("athena-x", APP, "serve")
+# metis-1277: --env — только NEXT_PUBLIC_*, печатный ASCII ≤ 200 без перевода строки; отказ — код 2, заявки нет
+_nreq = len([n for n in os.listdir(q) if n.endswith(".req.json")])
+for _bad in (["--env", "SECRET=1"], ["--env", "NEXT_PUBLIC_x=1"], ["--env", "NEXT_PUBLIC_A=a\nb"],
+             ["--env", "NEXT_PUBLIC_A=" + "x" * 201], ["--env", "NEXT_PUBLIC_A"], ["--env", "NEXT_PUBLIC_A=é"]):
+    _rc, _out = say("athena-x", "serve", *_bad)
+    check(f"serve {_bad[1][:30]!r}: отказ, код 2, заявки нет", _rc == 2
+          and len([n for n in os.listdir(q) if n.endswith(".req.json")]) == _nreq, (_rc, _out))
+check("serve --env: ровно 200 знаков и пустое значение допустимы",
+      O.env_check({"NEXT_PUBLIC_A": "x" * 200, "NEXT_PUBLIC_B": ""}) is None)
+check("check_request: env с чужим именем в заявке — отказ", O.check_request(
+    {"v": 1, "id": "i", "kind": "serve", "dir": "/x", "env": {"SECRET": "1"}}, "i") is not None)
+before2 = len(calls())
+rc, q2, rid2 = role_request("athena-x", APP, "serve", "--env", "NEXT_PUBLIC_X=1", "--env", "NEXT_PUBLIC_FLAG=a b")
+check("serve --env: заявка принята, пары в заявке", rc == 0 and (O.load_result(q2, rid2) or {}).get("env")
+      == {"NEXT_PUBLIC_X": "1", "NEXT_PUBLIC_FLAG": "a b"})
 serve_pass()
 res2 = O.load_result(q2, rid2) or {}
+_c2 = calls()[before2:]
+check("serve --env: значения — в окружении процесса сервера, не установки зависимостей",
+      _c2 and _c2[-1]["env"].get("NEXT_PUBLIC_X") == "1" and _c2[-1]["env"].get("NEXT_PUBLIC_FLAG") == "a b"
+      and "NEXT_PUBLIC_X" not in _c2[0]["env"] and "NEXT_PUBLIC_X" not in os.environ, _c2)
+check("serve --env: имена и значения — в outside.jsonl", any(
+    e.get("env") == {"NEXT_PUBLIC_X": "1", "NEXT_PUBLIC_FLAG": "a b"} for e in events(rid2, "serve")), events(rid2))
 check("давление «предупреждение» и один сервер идёт — второму отказ, код 75", res2.get("state") == "failed"
       and "предупреждение" in res2.get("why", "") and O.result_code(res2) == 75 and set(O.servers()) == {rid}, res2)
 os.environ["PANTHEON_FAKE_PRESSURE"] = "1"

@@ -87,6 +87,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
+                                        serve --env NEXT_PUBLIC_ИМЯ=значение — публичный флаг в окружение dev-сервера
   pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),

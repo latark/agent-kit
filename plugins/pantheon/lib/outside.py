@@ -22,10 +22,12 @@
                                          при заявке). Запись tests — с этой командой, files и map: шлюз guard на
                                          запасном пути засчитывает её только PR вне ядра защит. История копии
                                          подменена (shallow, info/grafts, refs/replace) — гонится полный набор
-  pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
+  pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--env ИМЯ=значение]... [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120);
-                                         --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790)
+                                         --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790);
+                                         --env ИМЯ=значение (можно несколько, ≤ 20) — флаг в окружение сервера (metis-1277): имя
+                                         только NEXT_PUBLIC_[A-Z0-9_]+, значение — печатный ASCII до 200 знаков без секретов
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    снять свою заявку и дождаться итога (20 с): сервер гаснет раньше срока,
                                          тест в очереди своего окна снимается сразу (итог stopped только в своей
@@ -273,6 +275,39 @@ SCRIPT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,59}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHORT_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 # --app: имя пакета (@scope/имя) или папки приложения монорепо; «.» — корневой скрипт; не монорепо — папка внутри корня
+ENV_NAME_RE = re.compile(r"NEXT_PUBLIC_[A-Z0-9_]+")   # metis-1277: --env — только публичные флаги сборки
+ENV_VALUE_RE = re.compile(r"[ -~]{0,200}")           # печатный ASCII, без перевода строки и управляющих
+ENV_MAX = 20
+
+
+def env_check(env):
+    """Пары --env заявки serve (dict ИМЯ → значение) → причина отказа или None (metis-1277)."""
+    if not isinstance(env, dict) or len(env) > ENV_MAX:
+        return f"env — не больше {ENV_MAX} пар ИМЯ=значение"
+    for k, v in env.items():
+        if not (isinstance(k, str) and ENV_NAME_RE.fullmatch(k)):
+            return f"--env {str(k)[:40]}: имя — только NEXT_PUBLIC_ и заглавные буквы, цифры, _ (секреты сюда не идут)"
+        if not (isinstance(v, str) and ENV_VALUE_RE.fullmatch(v)):
+            return f"--env {k}: значение — печатные ASCII до 200 знаков, без перевода строки"
+    return None
+
+
+def split_env_args(args):
+    """args без пар --env ИМЯ=значение → (args, dict пар, причина отказа или None)."""
+    rest, pairs, i = [], {}, 0
+    while i < len(args):
+        if args[i] == "--env":
+            if i + 1 >= len(args) or "=" not in args[i + 1]:
+                return rest, pairs, "--env — ИМЯ=значение"
+            k, _, v = args[i + 1].partition("=")
+            pairs[k] = v
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    return rest, pairs, env_check(pairs)
+
+
 APP_RE = re.compile(r"\.|@?[A-Za-z0-9][A-Za-z0-9._-]{0,80}(/[A-Za-z0-9][A-Za-z0-9._-]{0,80})?")
 KINDS = ("test", "serve")
 FINAL = ("done", "failed", "serving", "stopped")
@@ -339,7 +374,7 @@ DB_PORT = 5432                      # порт PostgreSQL, когда в стр�
 # pg_dump и psql из libpq (keg-only у brew: не в /opt/homebrew/bin) — в PATH только прогона с ключами тестов
 LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
-         "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
+         "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--env ИМЯ=значение]... [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ | "
          "login ID [--app ИМЯ] [--wait С]")
 
@@ -2732,7 +2767,8 @@ def busy_why(live):
 def run_serve(rid, d, req, window, qdir):
     """Сервер заявки rid из папки заявки d: своя копия на коммите, зависимости, порт из ряда → итог."""
     script, app, minutes = req.get("script"), req.get("app"), req.get("minutes", SERVE_MIN)
-    base = {"kind": "serve", "src": d, **({"app": app} if app else {})}
+    envp = req.get("env") or {}   # metis-1277: публичные NEXT_PUBLIC_*, только в окружение процесса сервера
+    base = {"kind": "serve", "src": d, **({"app": app} if app else {}), **({"env": envp} if envp else {})}
 
     def fail(why, **kw):
         log_event(id=rid, kind="serve", window=window, dir=d, ok=False, why=why)
@@ -2792,7 +2828,7 @@ def run_serve(rid, d, req, window, qdir):
         save_result(qdir, rid, {"state": "starting", **base, "port": port})
         try:
             proc = subprocess.Popen(wrap(argv, write_profile(registry(None)), heavy=False), cwd=cwd,
-                                    env=sandbox_env(tmp, "serve", port, keys), stdin=subprocess.DEVNULL, stdout=fd,
+                                    env={**sandbox_env(tmp, "serve", port, keys), **envp}, stdin=subprocess.DEVNULL, stdout=fd,
                                     stderr=fd, start_new_session=True)
         except OSError as e:
             raise RuntimeError(f"сервер не запустился: {e}") from e
@@ -2836,7 +2872,7 @@ def run_serve(rid, d, req, window, qdir):
                 **({"app": app} if app else {})}
     save_servers(srv)
     log_event(id=rid, kind="serve", window=window, dir=d, work=work, sha=sha, port=port, ok=True, minutes=minutes,
-              keys=sorted(keys))
+              keys=sorted(keys), **({"env": envp} if envp else {}))
     notes = []
     if not used:
         notes.append(f"dev-ключей нет: их кладут в {os.path.join(env_dir(), (env_names(origin_id(common), app) or ['<owner>__<repo>.env'])[0])} "
@@ -3167,6 +3203,12 @@ def check_request(req, rid):
     app = req.get("app")
     if app is not None and not (isinstance(app, str) and APP_RE.fullmatch(app)):
         return "имя приложения не по образцу (имя пакета, @scope/имя, папка или «.»)"
+    if req.get("env") is not None:
+        if req["kind"] != "serve":
+            return "env — только у заявки serve"
+        why = env_check(req["env"])
+        if why:
+            return why
     if req.get("time") is not None and (_epoch(req) or 0) > P.now() + FUTURE_SLACK:
         return "время заявки — позже, чем сейчас на часах прохода"
     return None
@@ -3920,6 +3962,12 @@ def _flags(args, allowed, bools=()):
 
 
 def cmd_request(kind, args):
+    envp = {}
+    if kind == "serve":
+        args, envp, why = split_env_args(args)
+        if why:
+            err(f"pantheon outside: {why}")
+            return 2
     f = _flags(args, {"--script", "--wait", "--sha"} | ({"--minutes", "--app"} if kind == "serve" else {"--base"}),
                {"--affected"} if kind == "test" else ())
     if f is None:
@@ -3976,6 +4024,8 @@ def cmd_request(kind, args):
         req["wait"] = wait
         if f.get("--app"):
             req["app"] = f["--app"]
+        if envp:
+            req["env"] = envp
         if f.get("--sha"):
             req["sha"] = f["--sha"].lower()
         else:   # коммит фиксируется при заявке: копия сервера — на нём, что бы ни случилось с папкой потом
@@ -4000,7 +4050,7 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app", "script", "pin", "base") if req.get(k)}}, ensure_ascii=False,
+                     **{k: req[k] for k in ("sha", "app", "script", "pin", "base", "env") if req.get(k)}}, ensure_ascii=False,
                     indent=1))
         finally:
             os.close(dfd)
