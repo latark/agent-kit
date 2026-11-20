@@ -23,10 +23,10 @@ def test_batch_one_window_merges_all():
                                                   and "la_code" in r for r in ws), ws)
     w = b.windows()
     text = w[0][0] if w else ""
-    check("пачка: одно окно на оба PR — номер, SHA и вердикт каждого, ядро, заголовки последними, не длиннее 400",
-          len(w) == 1 and f"#7 {SHA[:7]} argus ×2 ✓, CI ✓; #8 {SHA2[:7]} argus ×2 ✓, CI ✓." in text
-          and f"ядро: {CORE_FILE}" in text and text.index("ядро") < text.index("Заголовки: #7 «PR 7»; #8 «PR 8»")
-          and len(text) <= 400, w)
+    check("пачка: одно окно на оба PR — номер, SHA и фраза каждого, области ядра, проверки, не длиннее 400 (metis-1281)",
+          len(w) == 1 and text == f"Авторы: #7 ({SHA[:7]}) «PR 7»; #8 ({SHA2[:7]}) «PR 8». По файлам PR "
+          f"задевает: шлюз слияния. Слить по очереди в {REPO}, отказ — стоп. "
+          "Проверки: у всех argus ×2 ✓, CI ✓.", w)
     check("пачка: оба слиты по очереди, каждый с --match-head-commit своего head",
           b.merges() == [merge_argv(7), merge_argv(8)], b.merges())
     lines = b.approve_lines()
@@ -115,9 +115,9 @@ def test_batch_broken_before_window():
     request_batch(b)
     b.request(pr=8, t=T0 + 5)   # одиночная заявка на #8 заменила заявку пачки
     b.run(t=T0 + 10)
-    check("заявку #8 пачки заменили одиночной → #7 снята (пачка неполна), одиночная #8 слита своим окном",
-          b.merges() == [merge_argv(8)] and b.req(7) is None and len(b.windows()) == 1
-          and b.windows()[0][0].startswith(f"Слить {REPO}#8"), (b.outs[-1], b.merges()))
+    check("заявку #8 пачки заменили одиночной → #7 снята (пачка неполна), одиночная #8 вне ядра — без окна, ждёт "
+          "(metis-1280)", not b.merges() and b.req(7) is None and b.req(8) is not None and not b.windows()
+          and "#8: ждёт: вне ядра" in b.outs[-1], (b.outs[-1], b.merges()))
 
 
 def test_batch_gate_before_window():
@@ -234,13 +234,13 @@ def test_batch_max_fallback_window_core():
     text = w[0][0] if w else ""
     check("MAX_BATCH PR, запасной путь: пачка поставлена, окно одно, вердикт запасного пути в нём",
           r.returncode == 0 and len(w) == 1 and "лимит" in text, (r.stdout + r.stderr, w, b.outs[-1]))
-    check("MAX_BATCH PR, запасной путь: в окне ядро и число файлов, номер и SHA каждого PR, не длиннее 400",
-          "ядро: " in text and CORE_FILE in text and "Файлов 6" in text and len(text) <= 400
-          and all(f"#{pr} {shas[pr][:7]}" in text for pr in prs), text)
-    check("MAX_BATCH PR, запасной путь: ядро — до вердиктов", "ядро: " in text and "лимит" in text
-          and text.index("ядро: ") < text.index("лимит"), text)
-    check("MAX_BATCH PR, запасной путь: вердикт каждого — коротко и целиком",
-          all(f"#{pr} {shas[pr][:7]} argus ×2 ✓, CI: лимит, тесты ✓" in text for pr in prs), text)
+    check("MAX_BATCH PR, запасной путь: в окне области ядра и число файлов, номер и SHA каждого PR, не длиннее 400",
+          "По файлам PR задевает: шлюз слияния, защита настроек, список плагинов, хуки Пантеона" in text
+          and f"Слить по очереди в {REPO}" in text and len(text) <= 400 and all(f"#{pr} ({shas[pr][:7]})" in text for pr in prs), text)
+    check("MAX_BATCH PR, запасной путь: ядро — до вердиктов", "задевает: " in text and "лимит" in text
+          and text.index("задевает: ") < text.index("лимит"), text)
+    check("MAX_BATCH PR, запасной путь: вердикт у всех одинаковый — одной строкой, коротко и целиком",
+          text.endswith("Проверки: у всех argus ×2 ✓, CI: лимит, тесты ✓."), text)
     # вердикты длинные и не запасного пути: короче делит их место поровну — номер и SHA последнего PR не обрезаны
     code = ("import importlib.util, json, sys\n"
             "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
@@ -254,9 +254,9 @@ def test_batch_max_fallback_window_core():
         text = json.loads(r.stdout)
     except ValueError:
         text = ""
-    check("MAX_BATCH PR, длинные вердикты: ядро, номер и SHA каждого PR в окне, не длиннее 400",
-          "ядро: " in text and CORE_FILE in text and len(text) <= 400
-          and all(f"#{1000 + i} {'%07d' % i}" in text for i in range(5)), text or r.stderr)
+    check("MAX_BATCH PR, длинные вердикты: области ядра, номер и SHA каждого PR, «Слить по очереди» — в окне, ≤ 400",
+          "По файлам PR задевает: шлюз слияния" in text and "Слить по очереди в latark/agent-kit" in text and len(text) <= 400
+          and all(f"#{1000 + i} ({'%07d' % i})" in text for i in range(5)), text or r.stderr)
 
 
 def test_phrase_merges_full_sha():
@@ -484,8 +484,8 @@ def test_phrase_gate_and_wait():
     b.run()
     say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
     b.run(t=T0 + 120, extra=AWAY)
-    check("заявка ждёт щелчка по уведомлению — фраза сливает без щелчка", merged_once(b)
-          and len(b.windows()) == 1, b.outs[-1])
+    check("PR вне ядра: окна Touch ID нет (metis-1280), заявка ждёт — фраза сливает", merged_once(b)
+          and not b.windows(), b.outs[-1])
     b = pbox()
     b.request()
     b.set("gh-merge-rc", 1)
@@ -624,6 +624,44 @@ def test_phrase_not_owner_hook():
     b.run(t=now + 10, extra=AWAY)
     check("хук: ваша фраза → слияние этого SHA", merged_once(b) and len(b.approve_lines()) == 1, b.outs[-1])
 
+
+
+def test_batch_all_light_no_window():
+    """metis-1280: пачка вся вне ядра — окна нет ни у одного PR, слияний нет, обе заявки ждут координатора
+    (argus #519 Б2: ветка all(light) без теста); слитый мимо окна PR пачки снимается тихо."""
+    b = batch_box()
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE)
+    b.view(BATCH_SHA[8], pr=8, title="PR 8", files=NONCORE)
+    r = request_batch(b)
+    check("пачка вне ядра: заявки поставлены, строки про окно нет, подсказка «окна не будет»", r.returncode == 0
+          and "Вне ядра" in r.stdout and "Одно окно" not in r.stdout, r.stdout + r.stderr)
+    b.set("touchid-rc", 0)
+    b.run()
+    check("пачка вне ядра: окна нет, слияний нет, у обоих «ждёт: вне ядра»", not b.windows() and not b.merges()
+          and b.req(7) is not None and b.req(8) is not None and b.outs[-1].count("вне ядра — без Touch ID") >= 2,
+          b.outs[-1])
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE, state="MERGED")
+    b.run(t=T0 + 60)
+    check("PR пачки вне ядра слит координатором: снят тихо, второй отвязан от пачки и ждёт", b.req(7) is None
+          and b.req(8) is not None and "batch" not in b.req(8) and "заявка снята" not in b.alerts(),
+          b.outs[-1] + b.alerts())
+    b.run(t=T0 + 120)
+    check("следующий проход: #8 — одиночная заявка вне ядра, ждёт; «пачка неполна» и тревоги нет",
+          b.req(8) is not None and "batch-broken" not in b.log() and "заявки сняты" not in b.alerts()
+          and "вне ядра — без Touch ID" in b.outs[-1], b.outs[-1] + b.alerts())
+
+
+def test_batch_all_light_nag():
+    """Пачка вне ядра не слита за сутки: заявки остаются, тревога по каждому PR повторяется (слово владельца 20.11)."""
+    b = batch_box()
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE)
+    b.view(BATCH_SHA[8], pr=8, title="PR 8", files=NONCORE)
+    request_batch(b)
+    b.run()
+    b.run(t=T0 + 25 * 3600)
+    check("пачка вне ядра за сутки не слита: обе заявки остаются, тревога по каждому PR", b.req(7) is not None
+          and b.req(8) is not None and "expired" not in b.log() and b.alerts().count("PR вне ядра") == 2,
+          b.outs[-1] + b.alerts())
 
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
