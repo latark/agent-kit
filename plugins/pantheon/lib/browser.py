@@ -39,7 +39,7 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   площадки торгов (REGISTRY_HOSTS: fedresurs, torgi.gov.ru, ЭТП) — поиск только с кнопкой поиска, ссылки и раскрытие
   блоков (registry_read), любая другая форма там — важная (metis-1268). Нажатие — вид только по тегу, без интерактивных
   предков (click_kind); раскрытие блока (expand_click, metis-1268) — только по признаку: aria-expanded/aria-controls,
-  role=tab, summary или надпись EXPAND_WORDS, без формы, ссылки, label, form= и кнопки submit в цепочке; без согласия —
+  role=tab, summary или надпись EXPAND_WORDS, без формы-владельца, ссылки, label и form= в цепочке; без согласия —
   только обычный класс, удаляющее нажатие — как delete; прокрутка мгновенная, точка сверяется перед нажатием (point_js). Форма уходит на другой сайт или в
   другое окно (formtarget, target, <base target>), <base href> страницы другого origin — отказ.
 
@@ -86,7 +86,7 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   любой формы: в надписи, заголовках и подписях полей («Поиск торгов», «Номер торгов» — важная, «Поиск лотов» — нет);
   ввод в однострочное поле вне формы (номер дела) — без поручения; раскрытие блока, вкладки, списка без формы
   (expand_click: признак aria-expanded/aria-controls, role=tab, summary или надпись EXPAND_WORDS; пустая надпись,
-  ссылка, поле, label, form=, button submit или без type в цепочке — нет; надпись без слов действия EXPAND_DENY —
+  ссылка, поле, label, form= или форма-владелец у кнопки в цепочке — нет; надпись без слов действия EXPAND_DENY —
   «Сохранить», «Да», «Показать телефон»…); нажатие ссылки, которая уводит на другую страницу того же сайта (nav_link: другой
   путь или запрос, не javascript:, не якорь «#», без onclick и target; листание — ссылками). Кнопки отправки («Далее»
   мастера тоже), ссылки-якоря, флажки вне формы и POST-формы без поиска — по поручению и согласию ([charon-relax]). Вход, пароль,
@@ -1586,17 +1586,16 @@ def free_form(facts, op="submit"):
 
 def _expand_unsafe(a):
     """Узел цепочки, из-за которого нажатие — не раскрытие (находка проверки на 69631a78): ссылка, поле, label, форма,
-    contenteditable, атрибут form=, button type submit или без type (по умолчанию submit), input submit/image."""
-    tag, typ = a.get("tag"), a.get("type") or ""
-    return bool(tag in EXPAND_STOP or a.get("ce") or a.get("fa") or a.get("ctag")
-                or (tag == "button" and typ in ("", "submit")) or (tag == "input" and typ in ("submit", "image")))
+    contenteditable, атрибут form=. button без type или type=submit без формы-владельца (form= нет, facts.form — None,
+    формы в цепочке нет) ничего не отправляет — не опасен (решение координатора 20.11)."""
+    return bool(a.get("tag") in EXPAND_STOP or a.get("ce") or a.get("fa") or a.get("ctag"))
 
 
 def expand_click(facts):
     """Раскрытие блока, вкладки или списка без формы (metis-1268: КАД «Электронное дело», «Полная хронология») → причина
     или None. Разрешающий признак цели обязателен: aria-expanded или aria-controls, role=tab, тег summary или надпись
     из EXPAND_WORDS; пустая надпись — нет. Ни цель, ни узел цепочки над точкой нажатия не опасен (_expand_unsafe:
-    ссылка, поле, label, форма, form=, кнопка submit или без type); формы у цели нет (FACTS_JS берёт и форму-владельца
+    ссылка, поле, label, форма, form=; кнопка submit или без type — только без формы-владельца); формы у цели нет (FACTS_JS берёт и форму-владельца
     предка button/input и label.control); надпись цели и интерактивных предков без слов действия (EXPAND_DENY,
     LINK_ACT_WORDS), атрибуты — без LINK_ACT_WORDS. Поэтому раскрытие перекрывает отказ click_kind «вложен в
     интерактивный предок» только при безопасных предках. Классификатор (оплата, вход, удаление) — до этого; после
@@ -2468,7 +2467,7 @@ USAGE = """pantheon browser health|open|read|eval|net|status [--browser comet|ch
   allow САЙТ ДЕЙСТВИЯ --task ID --why Т   поручение на сайт: click,type,submit,delete (одно «да» или Touch ID)
   click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта; раскрытие блока или
                                  вкладки вне формы (aria-expanded, role=tab, summary, «Подробнее»; не «Сохранить»,
-                                 «Да», «Показать телефон», не button submit) — без поручения
+                                 «Да», «Показать телефон», не кнопка формы) — без поручения
   type СЕЛЕКТОР ТЕКСТ --task ID  ввод в текстовое поле; однострочное поле вне формы и поле поиска — без поручения
   submit СЕЛЕКТОР --task ID      отправка формы: Touch ID или «да» на каждую; поиск, фильтр, листание (GET-форма,
                                  role=search, поле type=search, кнопка «Найти»/«Поиск …» и в POST, и вне формы)

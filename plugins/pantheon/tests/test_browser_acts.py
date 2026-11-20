@@ -381,11 +381,14 @@ D.page(K, {
     "#div-word": dict(facts(node("div", role="button", label="Сообщения")), x=13.3),
     "#ax-empty": dict(facts(node("div", role="button", label="", ax=True)), x=13.4),
     "#btn-fa": dict(facts(node("button", "button", label="Подробнее", fa=True, ax=True)), x=13.5),
-    "#btn-sub": dict(facts(node("button", "", label="Подробнее", ax=True)), x=13.6),
+    "#btn-ax": dict(facts(node("button", "", label="Подробнее", ax=True)), x=13.6),
+    "#btn-sub-fa": dict(facts(node("button", "", label="Подробнее", ax=True, fa=True)), x=13.61),
+    "#btn-sub-form": dict(facts(node("button", "", label="Подробнее", ax=True),
+                                form={"action": SITE + "/k", "label": "", "method": "get"}), x=13.62),
     "#phone": dict(facts(node("div", role="button", label="Показать телефон")), x=13.7),
     "#in-submit": dict(facts(node("span", role="button", label="Подробнее", ax=True),
                              chain=[node("span", role="button", label="Подробнее", ax=True),
-                                    node("button", "submit", label="Подробнее"), node("body")]), x=13.8),
+                                    node("button", "submit", label="Подробнее", fa=True), node("body")]), x=13.8),
     "#in-label": dict(facts(node("span", role="button", label="Подробнее", ax=True),
                             chain=[node("span", role="button", label="Подробнее", ax=True),
                                    node("label", ctag="input", ctype="checkbox", label="Подробнее"), node("body")]),
@@ -421,13 +424,14 @@ for sel, label, word in (
     check(f"[{label}] click {sel} — отказ ({word}), нажатия нет",
           res["state"] == "refused" and word in res["why"] and not D.clicked(), res)
 for sel, what in (("#div-tab", "role=tab «Сообщения»"), ("#div-ax", "aria-expanded «Фильтры»"),
-                  ("#summary", "summary «Условия продажи»")):
+                  ("#summary", "summary «Условия продажи»"), ("#btn-ax", "button без type вне формы, aria-expanded")):
     res = act("click", sel, K)
     check(f"[K6][metis-1268] click {sel} — {what} без формы: раскрытие блока по разрешающему признаку, нажато",
           res["state"] == "done" and "(раскрытие)" in res["text"] and len(D.clicked()) == 1, res)
 for sel, what in (("#div-word", "надпись не из EXPAND_WORDS, признака нет"), ("#ax-empty", "пустая надпись"),
-                  ("#btn-fa", "кнопка с атрибутом form="), ("#btn-sub", "button без type (submit)"),
-                  ("#phone", "«Показать телефон»"), ("#in-submit", "предок — button submit"),
+                  ("#btn-fa", "кнопка с атрибутом form="), ("#btn-sub-fa", "button без type с form="),
+                  ("#btn-sub-form", "button без type в форме"),
+                  ("#phone", "«Показать телефон»"), ("#in-submit", "предок — button submit с form="),
                   ("#in-label", "предок — label")):
     res = act("click", sel, K)
     check(f"[K6][metis-1268] click {sel} — {what}: не раскрытие, отказ, нажатия нет",
