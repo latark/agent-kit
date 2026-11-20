@@ -671,7 +671,8 @@ def main():
           (("athena-shop", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
     gated = rule("athena-shop", "Pantheon Gated Merge:")
-    # metis-1135 [den-1135-mutant] («А — да» владельца 20.11): пробы тестов — сразу за Review Record у всех окон направлений
+    # metis-1135 [den-1135-mutant] («А — да» владельца 20.11): пробы тестов — сразу за Review Record у окон направлений,
+    # кроме окна с доступом к личному: согласие его не называло
     record = rule("athena-shop", "Pantheon Review Record:") + rule("athena-shop", "Pantheon Test Probes:")
     consent = rule("athena-shop", "Pantheon Consent Check:")  # metis-0161: сверка согласия — координаторам
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
@@ -692,8 +693,9 @@ def main():
               "the same text from `echo`, `printf`, `cat`, a file, a variable or another command's output is not")),
           consent)
     check("окно с доступом к личному (mnemo-brain): \"$defaults\" и только Review Record — правила слияния нет даже "
-          "при [merge_repos], его PR сливает владелец (metis-0156); сверки согласия Consent Check тоже нет (metis-0161)",
-          bool(record) and am["mnemo-brain"] == ["$defaults"] + record)
+          "при [merge_repos], его PR сливает владелец (metis-0156); сверки согласия Consent Check тоже нет (metis-0161), "
+          "правила проб тестов тоже ([den-1135-mutant] его не называло, metis-1135)",
+          bool(record) and am["mnemo-brain"] == ["$defaults"] + record[:1])
     check("правило Review Record: оговорка — после `--` только тест-раннер проекта, его судят прочие правила; merge, "
           "push, gh, sh -c/python3 -c — Self-Approval или CI Bypass (metis-0156)",
           bool(record) and all(x in record[0] for x in (

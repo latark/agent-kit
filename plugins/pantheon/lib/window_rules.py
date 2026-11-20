@@ -171,13 +171,15 @@ def coordinator_auto_allow(repos, rules=None, consent=True):
     argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
     owner/repo; нет таких — обоих правил нет), правила направления — имена DIRECTION_RULES из его строки [auto_rules]
     policy.toml (metis-0933; direction_rules) — и правило записей проверок; сверка согласия (metis-0161) — только при
-    consent: окну с доступом к личному (mnemo-brain) её не даёт решение лида по #440 (как правило слияния, metis-0156)."""
+    consent: окну с доступом к личному (mnemo-brain) её не даёт решение лида по #440 (как правило слияния, metis-0156).
+    Правило проб тестов (MUTANT_PROBE_RULE) — тоже только при consent: согласие [den-1135-mutant] окна с доступом к
+    личному не называло (metis-1135, находка argus на eec5d6d2)."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return (["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE, MUTANT_PROBE_RULE]
-            + [CONSENT_CHECK_RULE] * bool(consent))
+    return (["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE]
+            + [MUTANT_PROBE_RULE, CONSENT_CHECK_RULE] * bool(consent))
 
 
 def consent_auto_allow():

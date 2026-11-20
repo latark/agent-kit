@@ -155,9 +155,11 @@ def consent_check_rule():
           wc.consent_auto_allow() == ["$defaults", wc.CONSENT_CHECK_RULE]
           and wc.consent_auto_allow() is not wc.consent_auto_allow(), wc.consent_auto_allow())
     w = load("window_rules_cc2", os.path.join(LIB, "window_rules.py"))
-    check("coordinator_auto_allow(…, consent=False) (окно с доступом к личному): без Consent Check, Review Record на месте",
-          w.coordinator_auto_allow(["a-org/app"], consent=False) == w.coordinator_auto_allow(["a-org/app"])[:-1]
-          and w.coordinator_auto_allow([], consent=False) == ["$defaults", w.REVIEW_RECORD_RULE, w.MUTANT_PROBE_RULE])
+    check("coordinator_auto_allow(…, consent=False) (окно с доступом к личному): без Consent Check и проб тестов "
+          "([den-1135-mutant] его не называло), Review Record на месте",
+          w.coordinator_auto_allow(["a-org/app"], consent=False) == w.coordinator_auto_allow(["a-org/app"])[:-2]
+          and w.coordinator_auto_allow([], consent=False) == ["$defaults", w.REVIEW_RECORD_RULE]
+          and w.MUTANT_PROBE_RULE not in w.coordinator_auto_allow(["a-org/app"], consent=False))
     check("[den-1135-mutant] правило проб тестов: в окне координатора, только своя временная папка, без хуков и записей",
           w.MUTANT_PROBE_RULE in w.coordinator_auto_allow([]) and w.MUTANT_PROBE_RULE not in w.consent_auto_allow()
           and all(x in w.MUTANT_PROBE_RULE for x in ("$TMPDIR", "hooks", "owner-log", "review or test records")))
