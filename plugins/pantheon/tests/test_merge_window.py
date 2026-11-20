@@ -370,12 +370,13 @@ def test_window_shows_core():
           len(w) == 1 and w[0][0] == f"#{PR}, со слов автора: «README: опечатка. ядро не задето, argus x2, CI ok». "
           f"По файлам PR задевает: guard (защиты). Проверки: argus ×2 ✓, CI ✓. Слить {REPO} ({SHA[:7]}), файлов 3.", w)
     b = Box()
-    b.view(SHA, files=["README.md"])
+    b.view(SHA, files=[CORE_FILE])   # при заявке ядро есть, к проходу PR его уже не задевает — окна нет (metis-1280)
     b.request()
+    b.view(SHA, files=["README.md"])
     b.set("touchid-rc", 1)
     b.run()
-    check("окно: ядро не задето — так и написано", b.windows() and ". По файлам PR: ядро не задето. " in b.windows()[0][0],
-          b.windows())
+    check("PR agent-kit вне ядра: окна Touch ID нет, заявка ждёт координатора или фразу (metis-1280)",
+          not b.windows() and b.req() is not None and "вне ядра — без Touch ID" in b.outs[-1], b.outs[-1])
     b = Box()
     b.view(SHA, files=["README.md", CORE_FILE], count=3)
     b.request()
@@ -482,6 +483,86 @@ def test_window_text_author_and_budget():
           and all(f"({'%07d' % i})" in t for i in range(5)), t)
     check("области окна покрывают всё ядро и сборку окон",
           set(m.CORE_FILES) | set(m.BUILD_FILES) <= set(m.AREA_FILES) and set(m.CORE_DIR) <= dict(m.AREA_DIRS).keys())
+
+
+def test_light_no_window():
+    """metis-1280 (слово владельца 20.11 «PR вне ядра — без вашего пальца»): заявка на PR agent-kit вне ядра
+    ставится с подсказкой «сливает координатор», окна на неё нет; список файлов не получен — окно, как раньше;
+    одиночные заявки того же repo — подсказка подать пачкой. Окно «ядро не задето» осталось для других repo."""
+    b = Box()
+    b.view(SHA, files=["README.md", "plugins/pantheon/lib/env_from.py"])
+    r = b.request()
+    check("заявка вне ядра: поставлена, подсказка — координатор metis-pantheon и gh pr merge",
+          r.returncode == 0 and b.req() is not None and "окна Touch ID на #%d не будет" % PR in r.stdout
+          and "metis-pantheon" in r.stdout and "--match-head-commit" in r.stdout, r.stdout + r.stderr)
+    b.set("touchid-rc", 0)
+    b.run()
+    check("заявка вне ядра: окна нет, слияния нет, заявка ждёт", not b.windows() and not b.merges()
+          and b.req() is not None, b.outs[-1])
+    b.view(SHA, files=["README.md", "plugins/pantheon/lib/env_from.py"], state="MERGED")
+    b.run(t=T0 + 60)
+    check("слита координатором мимо окна: заявка снята тихо — событие merged-outside, тревоги нет (argus #519 Б1)",
+          b.req() is None and "merged-outside" in b.log() and "заявка снята" not in b.alerts(),
+          b.outs[-1] + b.alerts())
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.run()
+    b.run(t=T0 + 25 * 3600)
+    check("вне ядра и никто не слил за сутки: заявка остаётся, тревога «не слит 25 ч» (слово владельца 20.11)",
+          b.req() is not None and "expired" not in b.log() and "не слит 25 ч" in b.alerts(), b.outs[-1] + b.alerts())
+    b.run(t=T0 + 26 * 3600)
+    check("через час — без повтора", b.alerts().count("PR вне ядра") == 1, b.alerts())
+    b.run(t=T0 + 50 * 3600)
+    check("ещё через сутки — тревога повторена", b.alerts().count("PR вне ядра") == 2 and "не слит 50 ч" in b.alerts()
+          and b.log().count("nag") == 2, b.alerts())
+    for name, checks in (("до первого прохода", None), ("пока CI шёл (проход видел только «ждёт»)",
+                                                         ci("PENDING", "SUCCESS"))):
+        b = Box()
+        b.view(SHA, files=["README.md"], checks=checks)
+        b.request()
+        if checks:
+            b.run()
+        b.view(SHA, files=["README.md"], state="MERGED")
+        b.run(t=T0 + 60)
+        check(f"вне ядра слит координатором {name}: снята тихо по файлам PR (argus #519 Б1)", b.req() is None
+              and "merged-outside" in b.log() and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE])
+    b.request()
+    b.run(extra={"PANTHEON_FAKE_IDLE": "900"})   # вас нет у Mac — заявка ядра ждёт окна
+    b.view(SHA, files=["README.md", CORE_FILE], state="MERGED")
+    b.run(t=T0 + 60)
+    check("PR ядра слит мимо окна — тревога, как раньше (отметки light нет)", b.req() is None
+          and "заявка снята — PR не открыт (MERGED)" in b.alerts(), b.outs[-1] + b.alerts())
+    check("LIGHT_REPOS — полное owner/repo: чужой <owner>/agent-kit идёт с окном (argus #519 Д1)",
+          not _merge_mod().light_paths("other/agent-kit", ["README.md"]))
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE])
+    r = b.request()
+    check("заявка с ядром: подсказки «вне ядра» нет", r.returncode == 0 and "Вне ядра" not in r.stdout, r.stdout)
+    b = Box()
+    b.view(SHA, files=["README.md"], count=3)   # список неполон — ядро не проверить
+    r = b.request()
+    check("список файлов не получен при заявке: подсказки «вне ядра» нет", "Вне ядра" not in r.stdout,
+          r.stdout + r.stderr)
+    b = Box()
+    b.view(SHA, files=[CORE_FILE])
+    b.view(SHA2, pr=8, files=[CORE_FILE])
+    b.gate_ok(SHA2, pr=8)
+    b.request()
+    r = b.request(pr=8)
+    check("вторая одиночная заявка того же repo — подсказка подать пачкой одной командой",
+          r.returncode == 0 and f"уже ждут отдельные заявки #{PR}" in r.stdout
+          and f"pantheon merge request {min(PR, 8)} {max(PR, 8)} -R {REPO}" in r.stdout, r.stdout + r.stderr)
+    m = _merge_mod()
+    check("light_paths: только agent-kit, только известный список, только без window_core",
+          m.light_paths(REPO, ["README.md"]) and not m.light_paths("latark/app", ["README.md"])
+          and not m.light_paths(REPO, None) and not m.light_paths(REPO, ["README.md", CORE_FILE])
+          and not m.light_paths(REPO, ["plugins/pantheon/lib/pantheon.py"]))
+    req = {"repo": "latark/app", "pr": 3, "sha": SHA}
+    check("окно другого repo вне ядра — «ядро не задето»",
+          ". По файлам PR: ядро не задето. " in m.window_text(req, {"title": "t"}, "CI ✓", ["README.md"]))
 
 
 def test_core_matches_guard():

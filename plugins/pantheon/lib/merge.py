@@ -23,8 +23,19 @@ PR ядра защит (Д3) агенты не сливают: его слива
                                  слитые за сутки с причиной из logs/merge.jsonl (metis-0819)
   pantheon merge cancel <N> -R <owner/repo>    снять заявку (из пачки — вместе со всей пачкой)
 
+Вне ядра — без Touch ID (metis-1280, слово владельца 20.11): PR repo из LIGHT_REPOS (полное имя), у которого ни один
+файл (и previous_filename) не в ядре (light_paths по свежему pr_files на каждом проходе), и без --restart — окна нет.
+Проход ставит заявке отметку light и ждёт: сливает координатор metis-pantheon шлюзом guard или фраза владельца «слей
+#N». Слит на head заявки мимо окна (light_merged: по отметке или, если проход её не успел поставить, по файлам PR) —
+снята тихо (merged-outside), PR пачки — тоже, а остальные заявки пачки отвязаны от неё (unbatch). Не слит за
+REQUEST_TTL — заявка остаётся, тревога повторяется раз в REQUEST_TTL (nag). Хоть один PR пачки в ядре или --restart —
+окно Touch ID, как раньше. Отметка light только глушит тревогу о снятии: слить ядро она не даёт — окно решают свежие
+файлы PR, слияние проверяет шлюз guard.
+
 Проход по каждой заявке (одна заявка — одно применение):
-  1. Старше REQUEST_TTL (24 ч) — снята.
+  1. Старше REQUEST_TTL (24 ч) — снята с тревогой. Кроме заявки вне ядра (отметка light, ниже): она не снимается,
+     тревога «не слит N ч» повторяется раз в REQUEST_TTL (nag), пока PR не сольют или заявку не снимут (слово
+     владельца 20.11 «конечно, нужно повторять же ее»).
   2. PR сейчас (gh pr view): не OPEN, черновик или head не тот SHA, что в заявке, — снята (новый коммит — новая заявка).
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
@@ -2298,7 +2309,11 @@ def cmd_request(args):
         log(req, "request", batch=",".join(map(str, prs)) if len(prs) > 1 else None)
     later = ("" if not waits else f" и {'; '.join(waits)} закончатся" if len(prs) == 1
              else f", а у PR закончится ожидание ({'; '.join(waits)})")
-    if len(prs) == 1:
+    light = light_hint(repo, prs, restart)
+    if light:   # окна не будет — строка про окно не нужна (argus #519 Д1)
+        print(f"{'Заявка' if len(prs) == 1 else 'Пачка'} {repo} {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} "
+              f"поставлена.")
+    elif len(prs) == 1:
         print(f"Заявка {repo}#{prs[0]} ({heads[prs[0]][:7]}) поставлена. Окно Touch ID покажет плановый проход, когда вы "
               f"у Mac{later}; без ответа за {REQUEST_TTL // 3600} ч заявка гаснет."
               + (f" После слияния по Touch ID проход один раз перезапустит окно {restart}." if restart else ""))
@@ -2306,7 +2321,97 @@ def cmd_request(args):
         print(f"Пачка {repo}: {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} поставлена. Одно окно Touch ID на все "
               f"покажет плановый проход, когда вы у Mac{later}; сливает по очереди, отказ одного останавливает "
               f"следующие; без ответа за {REQUEST_TTL // 3600} ч пачка гаснет.")
+    for hint in (light, batch_hint(repo, prs)):
+        if hint:
+            print(hint)
     return 0
+
+
+# Окно Touch ID — для ядра (metis-1280, слово владельца 20.11 «PR вне ядра — без вашего пальца … да это нужно
+# сделать»): PR agent-kit, который не задевает ни ядро, ни сборку окон (window_core), сливает координатор
+# MERGE_DIRECTION шлюзом guard. Заявка на него ставится (фраза владельца «слей #N <hex>» сливает её, metis-0959), но
+# окна Touch ID проход на неё не показывает. Список файлов не получен — как раньше: окно, проход сверит файлы сам.
+LIGHT_REPOS = ("latark/agent-kit",)   # полное owner/repo: чужой <owner>/agent-kit — с окном (argus #519 Д1)
+
+
+def light_paths(repo, paths):
+    """PR repo из LIGHT_REPOS, список файлов получен и ни один файл не window_core — окно Touch ID ему не нужно.
+    Заявка с --restart идёт с окном и вне ядра: перезапуск окна делает проход после своего слияния (argus #519 Б2)."""
+    return repo in LIGHT_REPOS and paths is not None and not any(window_core(x) for x in paths)
+
+
+def light_merged(req, view):
+    """PR заявки вне ядра слит на её head мимо окна (координатор шлюзом guard или аварийно владелец) — снять тихо, без
+    тревоги «по Touch ID» (argus #519 Б1). Вне ядра — по отметке light прохода или, если проход её не успел поставить
+    (слили до первого прохода, пока CI шёл), по файлам PR сейчас; заявка с --restart — не лёгкая."""
+    if req.get("restart") or not isinstance(view, dict) or str(view.get("state") or "").upper() != "MERGED" \
+            or str(view.get("headRefOid") or "").lower() != req["sha"]:
+        return False
+    return bool(req.get("light")) or light_paths(req["repo"], pr_files(req["repo"], req["pr"], view))
+
+
+def nag(req, t):
+    """Заявка вне ядра (отметка light) не слита за REQUEST_TTL: заявка остаётся, тревога — каждые REQUEST_TTL, пока PR
+    не сольют (light_merged снимет тихо) или заявку не снимут (слово владельца 20.11 «конечно, нужно повторять же ее»:
+    застрявший PR вне ядра не должен пропадать молча)."""
+    hours = int((t - req["created"]) // 3600)
+    req["nagged"] = t
+    keep(req)
+    log(req, "nag", hours=hours)
+    P.alert(f"PR вне ядра {req['repo']}#{req['pr']} ({req['sha'][:7]}) не слит {hours} ч: сливает координатор "
+            f"{MERGE_DIRECTION} шлюзом guard или ваша фраза «слей #{req['pr']}»; не нужен — "
+            f"pantheon merge cancel {req['pr']} -R {req['repo']}", "pantheon-merge")
+    return f"ждёт: вне ядра, не слита {hours} ч — тревога повторена"
+
+
+def unbatch(reqs):
+    """Отвязать заявки от пачки (PR пачки вне ядра слит мимо окна): дальше каждая — одиночная, без «пачка неполна».
+    Только если в очереди та же заявка (same_req)."""
+    with P.lock("merge-queue"):
+        for r in reqs:
+            if same_req(r):
+                r.pop("batch", None)
+                write_req(r)
+
+
+def mark_light(req):
+    """Отметка «вне ядра» — в файл заявки, только если её ещё нет (light_merged узнаёт по ней слитый мимо окна PR)."""
+    if not req.get("light"):
+        req["light"] = True
+        keep(req)
+
+
+def light_wait():
+    """Итог прохода для заявки вне ядра без фразы: окна нет, заявка ждёт координатора или фразу; срока у неё нет —
+    раз в REQUEST_TTL повтор тревоги (nag)."""
+    return (f"ждёт: вне ядра — без Touch ID (metis-1280): сливает координатор {MERGE_DIRECTION} шлюзом guard или "
+            f"ваша фраза «слей #N»")
+
+
+def light_hint(repo, prs, restart=None):
+    """Подсказка при заявке: все PR вне ядра и без --restart — окна не будет, кому сливать."""
+    if restart:
+        return None
+    for pr in prs:
+        view = pr_view(repo, pr)
+        if not light_paths(repo, pr_files(repo, pr, view) if view else None):
+            return None
+    return (f"Вне ядра: окна Touch ID на {', '.join(f'#{n}' for n in prs)} не будет (metis-1280). Сливает "
+            f"координатор {MERGE_DIRECTION} шлюзом guard: gh pr merge N -R {repo} --match-head-commit <sha> --merge; "
+            f"из другого окна — передайте ему номер PR. Заявка ждёт его или фразу владельца «слей #N»; "
+            f"не слит за {REQUEST_TTL // 3600} ч — тревога, раз в {REQUEST_TTL // 3600} ч, пока не сольют или не снимут.")
+
+
+def batch_hint(repo, prs):
+    """Подсказка собрать пачку (metis-1280, [zeus-fast-2d]): у repo уже ждут одиночные заявки — каждая станет своим
+    окном Touch ID. Основная схема — пачка = ветка batch/<story> = один PR; окно на несколько PR — запасной путь."""
+    others = sorted(q["pr"] for q in queue() if q.get("repo") == repo and not q.get("batch") and q["pr"] not in prs)
+    if not others:
+        return None
+    every = " ".join(str(n) for n in sorted(set(others) | set(prs)))
+    return (f"Подсказка: у {repo} уже ждут отдельные заявки {', '.join(f'#{n}' for n in others)} — каждая станет своим "
+            f"окном Touch ID. Одно окно на все: pantheon merge request {every} -R {repo} (до {MAX_BATCH} PR; "
+            f"заявки заменятся пачкой). Дальше задачи одной story — в одну ветку: pantheon batch start <story-id>.")
 
 
 def merge_conflict(view):
@@ -2428,7 +2533,9 @@ def restart_after(req, phrase):
 
 def process(req, click):
     t = P.now()
-    if t - req["created"] > REQUEST_TTL:
+    if req.get("light") and t - req.get("nagged", req["created"]) > REQUEST_TTL:
+        return nag(req, t)   # вне ядра не слита за сутки — не снимать, а повторять тревогу (слово владельца 20.11)
+    if not req.get("light") and t - req["created"] > REQUEST_TTL:
         return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     # фраза владельца «слей #N <hex>» (metis-0959) — согласие без окна: ни повтора окна, ни щелчка, ни Mac рядом
     phrase = find_phrase(req)
@@ -2438,6 +2545,8 @@ def process(req, click):
         return hold
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
+        if light_merged(req, view):
+            return drop(req, "merged-outside", "PR вне ядра слит без окна")
         return drop(req, "gate", why, warn=True, how="по фразе" if phrase else "по Touch ID")
     if mark_wait(req, state, why):
         return f"ждёт: {why}"
@@ -2451,6 +2560,9 @@ def process(req, click):
             return hold
     if phrase is not None:
         return finger(req, None, phrase)[1]
+    if not req.get("restart") and light_paths(req["repo"], paths):
+        mark_light(req)
+        return light_wait()
     if not click and P.idle_sec() > PRESENT_SEC:
         return "ждёт: вас нет у Mac"
     text = window_text(req, view, why, paths)
@@ -2503,24 +2615,37 @@ def process_batch(reqs, click):
         have = {r["pr"] for r in reqs}
         miss = ", ".join("#%d" % n for n in batch if n not in have)
         return drop_batch(reqs, "batch-broken", f"пачка неполна: заявку на {miss} сняли или заменили", warn=True)
-    if t - reqs[0]["created"] > REQUEST_TTL:
+    if all(r.get("light") for r in reqs):
+        if t - max(r.get("nagged", r["created"]) for r in reqs) > REQUEST_TTL:
+            return [(r, nag(r, t)) for r in reqs]
+    elif t - reqs[0]["created"] > REQUEST_TTL:
         return drop_batch(reqs, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     if not click and max(r.get("wait_until", 0) for r in reqs) > t:
         return [(r, "ждёт: окно закрыто без ответа, повтор позже") for r in reqs]
     if not click and any(r.get("notified") for r in reqs):
         return [(r, "ждёт щелчка по уведомлению") for r in reqs]
-    views, whys, paths, waits = [], [], [], []
+    views, whys, paths, waits, light = [], [], [], [], []
     for r in reqs:
         state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
         if state == "fail":
+            if light_merged(r, view):   # слит мимо окна PR пачки вне ядра — снять его тихо, остальные ждут дальше
+                rest = [x for x in reqs if x is not r]
+                unbatch(rest)
+                return [(r, drop(r, "merged-outside", "PR вне ядра слит без окна"))] + [
+                    (x, "ждёт: отвязана от пачки — следующий проход") for x in rest]
             return drop_batch(reqs, "gate", f"#{r['pr']}: {why}", warn=True)
         if mark_wait(r, state, why):
             waits.append(f"#{r['pr']}: {why}")
         views.append(view)
         whys.append(why)
         paths.append(files or [])
+        light.append(not r.get("restart") and light_paths(r["repo"], files))
     if waits:
         return [(r, "ждёт: " + "; ".join(waits)) for r in reqs]
+    if all(light):   # metis-1280: пачка вся вне ядра — окна нет; хоть один PR ядра — окно на всю пачку, как раньше
+        for r in reqs:
+            mark_light(r)
+        return [(r, light_wait()) for r in reqs]
     if not click and P.idle_sec() > PRESENT_SEC:
         return [(r, "ждёт: вас нет у Mac") for r in reqs]
     text = batch_window_text(reqs, views, whys, paths)
