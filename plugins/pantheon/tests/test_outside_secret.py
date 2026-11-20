@@ -3,6 +3,7 @@
 вводом в своём терминале; из окна Claude Code и без терминала — отказ, код 1, файл не тронут. Значения нет ни в выводе,
 ни в подсказке ввода, ни в `list`; файл — тот, что читает dev_keys (serve и login вне окна роли), 600 в папке 700.
 Запуск: python3.14 -I tests/test_outside_secret.py."""
+import json
 import os
 import sys
 
@@ -131,6 +132,99 @@ try:
 finally:
     os.unlink(ENV)
     os.rename(_pth, ENV)
+
+# --- ask / run: ввод владельцем в окне Touch ID со скрытым полем (metis-1135) --------------------------------------
+_win = os.path.join(HOME, "Library", "Caches", "pantheon-sandbox", "athena-x")
+os.makedirs(os.path.join(_win, "tmp"), exist_ok=True)
+_calls = []
+_touch, _val = [0], [VALUE]
+S.touch_window = lambda t: (_calls.append(("touch", t)), _touch[0])[1]
+S.ask_value = lambda t: (_calls.append(("ask", t)), _val[0])[1]
+S.P.idle_sec = lambda: 0
+S.P.merge_mod().clean_env = lambda: None    # окружение теста; сам clean_env — test_merge_env.py
+QD = os.path.join(_win, "secret")
+
+
+def ask(*args):
+    os.environ["PANTHEON_TMP"] = os.path.join(_win, "tmp")
+    try:
+        return secret("ask", *args)
+    finally:
+        os.environ.pop("PANTHEON_TMP")
+
+
+def run():
+    return secret("run")
+
+
+def results():
+    return sorted((json.load(open(os.path.join(QD, f))) for f in os.listdir(QD) if f.endswith(".result.json")),
+                  key=lambda r: r["time"])
+
+
+rc, out = ask("athena-x", "API_KEY")
+check("ask: без --task — код 2, заявки нет", rc == 2 and not os.path.isdir(QD), (rc, out))
+rc, out = ask("athena-x", "PATH", "--task", "athena-0001")
+check("ask: служебное имя — код 2", rc == 2, (rc, out))
+rc, out = ask("athena-x", "API_KEY", "--task", "athena-0001")
+reqs = [f for f in os.listdir(QD) if f.endswith(".req.json")]
+check("ask: из окна роли — заявка в кэше окна, без значения", rc == 0 and len(reqs) == 1
+      and VALUE not in open(os.path.join(QD, reqs[0])).read(), (rc, out, reqs))
+os.environ["CLAUDECODE"] = "1"
+try:
+    rc, out = run()
+finally:
+    os.environ.pop("CLAUDECODE")
+check("run: из окна Claude Code — отказ, код 1, окон не было", rc == 1 and not _calls, (rc, out))
+S.P.idle_sec = lambda: 10_000
+rc, out = run()
+check("run: владельца нет у Mac — окна нет, заявка ждёт", rc == 0 and not _calls and S.pending(), _calls)
+S.P.idle_sec = lambda: 0
+_touch[0] = 1
+rc, out = run()
+check("run: отказ в окне Touch ID — отклонено, окна ввода не было, файл не тронут",
+      [c[0] for c in _calls] == ["touch"] and results()[-1]["status"] == "declined" and "API_KEY" not in text(DEV)
+      and not S.pending(), (_calls, results()))
+_calls.clear()
+_touch[0] = 0
+ask("athena-x", "API_KEY", "--task", "athena-0001")
+_val[0] = None
+run()
+check("run: окно ввода закрыто без ответа — ждёт повтора, файл не тронут",
+      results()[-1]["status"] == "waiting" and "API_KEY" not in text(DEV) and not S.pending(), results())
+for f in os.listdir(QD):
+    if f.endswith(".result.json") and json.load(open(os.path.join(QD, f)))["status"] == "waiting":
+        os.unlink(os.path.join(QD, f))
+_calls.clear()
+_val[0] = VALUE
+rc, out = run()
+logs = open(os.path.join(STATE, "logs", "secret.jsonl")).read()
+check("run: палец и ввод — ключ записан, dev_keys отдаёт его; значения нет ни в выводе, ни в итоге, ни в журнале",
+      rc == 0 and O.dev_keys("latark/app")[0].get("API_KEY") == VALUE and VALUE not in out and VALUE not in logs
+      and all(VALUE not in json.dumps(r) for r in results()) and results()[-1]["status"] == "done"
+      and [c[0] for c in _calls] == ["touch", "ask"] and all(VALUE not in c[1] for c in _calls), (out, results()))
+check("run: заявка снята после итога", not [f for f in os.listdir(QD) if f.endswith(".req.json")], os.listdir(QD))
+rc, out = ask("athena-x", "API_KEY", "--task", "athena-0001")
+rid = out.split()[1].rstrip(":")
+_p = os.path.join(QD, f"{rid}.req.json")
+_r = json.load(open(_p))
+_r["created"] -= 2 * 86400
+json.dump(_r, open(_p, "w"))
+_calls.clear()
+run()
+check("run: заявка старше суток — снята без окон", not _calls and json.load(open(os.path.join(QD, f"{rid}.result.json")))
+      ["status"] == "dropped" and not os.path.exists(_p), results())
+_calls.clear()
+ask("athena-x", "API_KEY", "--task", "athena-0001")
+_real_q = os.path.join(HOME, "secret-real-q")
+os.rename(QD, _real_q)
+os.symlink(_real_q, QD)
+try:
+    run()
+    check("run: папка очереди окна — ссылка, проход её не читает, окон не было", not _calls, _calls)
+finally:
+    os.unlink(QD)
+    os.rename(_real_q, QD)
 
 print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
