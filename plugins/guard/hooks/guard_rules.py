@@ -65,6 +65,8 @@ PostToolUse (Bash:
   worktree-cmd — `pantheon worktree add|remove|list` (мимо песочницы окна направления) — только строкой целиком по
                  строгому образцу: имена из букв, цифр и . _ - /, без .., цепочек, кавычек, присваивания и обёрток
                  (metis-1225); репозиторий и путь проверяет сама команда (lib/worktree.py пантеона);
+  git-out      — `pantheon git push|fetch` (мимо песочницы) — только строкой целиком из простых слов; в окне
+                 (кроме hestia) голый git push|fetch|pull — отказ с подсказкой обёртки (metis-0972);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -3775,6 +3777,13 @@ GH_ALIAS_MERGE = ("Правило push: gh alias со словом merge — а�
                   "него не gh pr merge), metis-0663. Сливай самой командой gh pr merge.")
 
 
+def _git_out_as_git(name, texts):
+    """`pantheon git push|fetch …` (metis-0972) судится как `git push|fetch …`: те же правила push и fetch, что у
+    голого git, — обёртка сама держит refspec, а guard проверяет ещё раз."""
+    w = _pantheon_words(name, texts)
+    return ("git", w[1:]) if w is not None and w[:1] == ["git"] else (name, texts)
+
+
 def check_owner_merge(event, tool_input):
     """Сессия без роли (окно владельца): из правил push — только CI перед слиянием PR (решение владельца 01.11,
     metis-0633, merge_gate.owner_ci_problem): gh pr merge и gh api с записью на …/pulls/N/merge — те же проверки
@@ -3790,6 +3799,7 @@ def check_owner_merge(event, tool_input):
     said = "merge" in cmd.casefold()
     notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
+        name, texts = _git_out_as_git(name, texts)
         if name == "git":  # push в принятый PR (metis-0794) — и окнам без роли, как ролям
             # главная сессия окна (PANTHEON_ROLE есть, agent_type нет): fetch у окна мимо песочницы — в refs/heads/*
             # не пишет, как у ролей (metis-0983, Д1 argus #378)
@@ -3803,8 +3813,8 @@ def check_owner_merge(event, tool_input):
             why = (push_problem(texts, cwd, moved) if win and win != "hestia" and window_push_judged(texts, cwd)
                    else None)
             if why:
-                return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`git push origin "
-                        "HEAD:refs/heads/<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
+                return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`pantheon git push origin "
+                        "HEAD:<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
                         "удаление веток — только владелец.")
             why = push_accepted(texts, cwd, moved)
             if why:
@@ -3916,6 +3926,7 @@ def check_push(event, tool, tool_input):
             can_push = False
     notes = []  # предупреждения пропуска шлюза слияния (metis-0650): возврат Allow, а не состояние модуля
     for name, texts in cmds:
+        name, texts = _git_out_as_git(name, texts)
         if name == "gh" and _gh_parse(texts)[0]:
             return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а без него не понять, "
                     "слияние это или нет. Пиши подкоманду gh и флаги перед ней словами.")
@@ -3960,7 +3971,7 @@ def check_push(event, tool, tool_input):
         why = fetch_problem(texts) if name == "git" else None
         if why:
             return (f"Правило fetch: {why}. Ролям fetch пишет только refs/remotes/* и теги — локальную ветку сдвигают "
-                    "merge, rebase или switch в своей копии: `git fetch origin main`, затем `git merge origin/main`.")
+                    "merge, rebase или switch в своей копии: `pantheon git fetch origin main`, затем `git merge origin/main`.")
         if name == "?" and "push" not in texts:
             continue
         if name == "?" or (parsed and parsed[1] == "push"):
@@ -4961,6 +4972,68 @@ def check_worktree_cmd(event, tool, tool_input):
             "`&&`, `;`, `|`, перенаправлений, подстановок, префикса присваивания и обёрток. Папка — отдельным `cd`.")
 
 
+# git-out (metis-0972, вариант А+Б владельца 20.11): голого git push|fetch|pull в excludedCommands окна больше нет —
+# мимо песочницы идёт только обёртка `pantheon git push|fetch` (lib/gitout.py пантеона: без хуков и конфига копии,
+# remote — только GitHub, refspec — рабочие ветки). Обёртку — только одной строкой из простых слов, как worktree-cmd:
+# соседняя команда или раскрытое оболочкой ушли бы мимо песочницы вместе с ней (в любой сессии). В окне (PANTHEON_ROLE,
+# кроме hestia — у неё своё правило по consent) голый git push|fetch|pull — отказ с подсказкой: опции git guard больше
+# не разбирает, а строку, которую разбор не понял, со словами git и push|fetch|pull тоже не пускает.
+_GO_WORD = r"[A-Za-z0-9_][A-Za-z0-9_./:-]*"
+GIT_OUT_LINE = re.compile(r"[ \t]*pantheon[ \t]+git[ \t]+(?:push|fetch)(?:[ \t]+" + _GO_WORD + r")*[ \t]*\Z")
+GIT_OUT_RAW = re.compile(r"""\s*["']?(?:[^\s"']*/)?pantheon(?:\.py)?["']?\s+["']?git(?![A-Za-z0-9_-])""")
+GIT_NET = ("push", "fetch", "pull")
+GIT_NET_WORDS = re.compile(r"(?<![\w-])(?:push|fetch|pull)(?![\w-])")
+GIT_WORD = re.compile(r"(?<![\w-])git(?![\w-])")
+GIT_OUT_FORM = ("Правило git-out: `pantheon git` идёт мимо песочницы, поэтому только одной строкой `pantheon git push "
+                "<remote> <ветка>[:<ветка>]` или `pantheon git fetch [<remote> [<ref>…]]` (metis-0972): слова из букв, "
+                "цифр и _ . / : -, без флагов, кавычек, `..`, `&&`, `;`, `|`, перенаправлений, подстановок, "
+                "присваивания и обёрток. Папка — отдельным `cd`.")
+GIT_OUT_BARE = ("Правило git-out: окно отправляет и получает только через обёртку (metis-0972) — `pantheon git push "
+                "origin HEAD:<ветка>` и `pantheon git fetch [origin [main]]`; голый git {sub} мимо песочницы исполнял бы "
+                "хуки и конфиг копии. pull — это fetch, затем `git merge origin/<ветка>` в своей копии.")
+
+
+def _git_out_named(n, t):
+    w = _pantheon_words(n, t)
+    return w is not None and w[:1] == ["git"]
+
+
+def check_git_out(event, tool, tool_input):
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    norm = _wt_norm(cmd)
+    targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    failed = not cmds and targets == [UNRESOLVED]
+    raw = any(GIT_OUT_RAW.match(ln) for ln in norm.splitlines() or [""])
+    if raw or any(_git_out_named(n, t) for n, t in cmds) or (
+            failed and WORKTREE_WORDS.search(norm) and GIT_WORD.search(norm)):
+        if GIT_OUT_LINE.match(cmd) and ".." not in cmd:
+            return None
+        return GIT_OUT_FORM
+    win = window_role()
+    if not win or win == "hestia":
+        return None
+    if failed and GIT_WORD.search(norm) and GIT_NET_WORDS.search(norm):
+        return GIT_OUT_BARE.format(sub="push|fetch|pull")
+    for n, t in cmds:
+        base = os.path.basename((n or "").rstrip("/"))
+        if base == "?" or n == "?":
+            if any(x in GIT_NET for x in t if x):
+                return GIT_OUT_BARE.format(sub="push|fetch|pull")
+            continue
+        if base != "git":
+            continue
+        p = _git_sub(t)
+        if p is None:
+            if None in t or any(x in GIT_NET for x in t if x):
+                return GIT_OUT_BARE.format(sub="push|fetch|pull")
+            continue
+        if p[1] in GIT_NET:
+            return GIT_OUT_BARE.format(sub=p[1])
+    return None
+
+
 # worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
 # EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
 # («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
@@ -5130,6 +5203,7 @@ def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("gh-out", check_gh_out),
                         ("hq-sessync", check_hq_sessync), ("worktree-own", check_worktree_own),
                         ("worktree-cmd", check_worktree_cmd),
+                        ("git-out", check_git_out),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:

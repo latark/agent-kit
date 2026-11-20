@@ -43,7 +43,7 @@ import stat
 import subprocess
 import sys
 
-__all__ = ["WT_NAME", "worktree_cmd"]
+__all__ = ["WT_NAME", "worktree_cmd", "wt_repo", "wt_own", "wt_verify_copy", "WtRefuse"]
 
 WT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
 WT_MAX = 120
@@ -374,3 +374,7 @@ def worktree_cmd(rest, cwd=None):
     except (Refuse, OSError) as e:
         print(f"pantheon worktree {sub}: {e}", file=sys.stderr)
         return 2
+
+
+# проверки папки git — и для `pantheon git push|fetch` (gitout.py, metis-0972)
+wt_repo, wt_own, wt_verify_copy, WtRefuse = _repo, _own, _verify_copy, Refuse

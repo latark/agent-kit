@@ -2239,8 +2239,8 @@ def jobs_set(action, name, arg=None):
 
 
 def git(*args, check=True):
-    return subprocess.run(["git", "-C", PANTHEON, *args], capture_output=True, text=True, check=check,
-                          env=run_env())
+    """git в ~/ai/pantheon: без хуков и GIT_* окна, папка .git — настоящая (git_hard в gitout.py, metis-0972)."""
+    return git_hard(PANTHEON, list(args), check=check)
 
 
 def clear_push_failures():
@@ -2430,8 +2430,12 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("",
 # в рабочую копию — поэтому pull в списке нет (metis-0971, решение Зевса 07.11, вариант А):
 # `git pull` вне песочницы вливал коммит в рабочую копию защищённого репозитория (~/.claude, ~/ai/pantheon), если cwd
 # внутри allowWrite. Подтянуть — `git fetch` мимо песочницы, затем `git merge` в ней: запись там судит песочница.
-# Список команд, меняющих рабочую копию, держит тест test_window_rules.py (WORKTREE_WRITE)
-GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *"]
+# Список команд, меняющих рабочую копию, держит тест test_window_rules.py (WORKTREE_WRITE).
+# Голого git мимо песочницы нет (metis-0972, вариант А владельца 20.11): git исполнял бы хуки, fsmonitor, sshCommand и
+# конфиг папки окна (gitfile, commondir, include) вне её. Мимо песочницы — только обёртка `pantheon git push|fetch`
+# (gitout.py: настоящая папка git, конфиг без опасных ключей, remote — github.com, хуков нет), голый git push|fetch
+# окна guard отказывает (правило git-out)
+GIT_OUT = ["pantheon git push", "pantheon git push *", "pantheon git fetch", "pantheon git fetch *"]
 COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
@@ -3107,7 +3111,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "enabled": True,
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
-            "excludedCommands": SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else []),
+            "excludedCommands": SANDBOX_EXCLUDED + (GIT_OUT if ssh else []),
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
@@ -9694,6 +9698,7 @@ _attach("sessions")
 _attach("batch")
 _attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
 _attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
+_attach("gitout")         # git push|fetch окна мимо песочницы — без хуков и конфига папки (metis-0972)
 _attach("perm")           # запрос разрешения окна роли — Зевсу, ответ владельца — окну (metis-1250)
 
 
@@ -9876,6 +9881,8 @@ def main(argv):
         return batch_cmd(rest)
     if cmd == "worktree":
         return worktree_cmd(rest)
+    if cmd == "git":
+        return git_cmd(rest)
     if cmd == "supabase":
         return _plugin_map_mod("supabase_migrate").main(rest, STATE)
     if cmd == "plan":
