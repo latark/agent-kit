@@ -152,7 +152,7 @@ def test_ghost_alive_proofs_0657_0662():
 
 def test_ghost_question_and_noprocess_0662():
     """metis-0662 Д2/С1: призрак с вопросом не поднимается без ответа владельца — ни wake <имя>, ни общий wake, ни
-    самозапуск; тревога советует claude attach, как и отказ pantheon start. Д1: призрак без вопроса (noProcess) — без
+    самозапуск; тревога и wake отсылают в окно Зевса, а не к claude attach (metis-1248: там пусто). Д1: призрак без вопроса (noProcess) — без
     тревоги, как у metis-0250, а wake его поднимает."""
     t = T0 + 60
     e = _ghost_env("zz-gq", updated=T0 - 1000)
@@ -161,10 +161,10 @@ def test_ghost_question_and_noprocess_0662():
     e.agents([rec])
     e.run("watch", t=t)
     line = [ln for ln in e.alerts().splitlines() if "процесс умер" in ln]
-    check(line and "claude attach cccccccc" in line[0] and "pantheon wake" not in line[0],
+    check(line and "в окно Зевса" in line[0] and "claude attach" not in line[0] and "pantheon wake" not in line[0],
           f"0662 С1: тревога призрака с вопросом советует не то, что start: {line}")
     out = e.run("wake", "zz-gq", t=t).stdout
-    check("ждёт вашего ответа" in out and "claude attach cccccccc" in out and not _woke(e),
+    check("ждёт вашего ответа" in out and "в окно Зевса" in out and "claude attach" not in out and not _woke(e),
           f"0662 Д2: wake <имя> поднял призрак с вопросом: {out} {e.calls()}")
     out = e.run("wake", t=t).stdout
     check("ждёт вашего ответа" in out and not _woke(e), f"0662 Д2: общий wake поднял призрак с вопросом: {out}")

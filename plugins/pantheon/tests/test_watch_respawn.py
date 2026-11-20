@@ -158,6 +158,12 @@ def test_status_blocked_without_process_0250():
     check([c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
           and "hmhmhmhm" in open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read(),
           f"призрак с вопросом: Зевсу не передано: {e.calls()}")
+    # metis-1248: вопрос призрака — через окно Зевса (спросить владельца, ответ сообщением), а не claude attach
+    ztext = open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read()
+    check("SendMessage hm-dir" in ztext and "claude attach hmhmhmhm" not in ztext,
+          f"1248: Зевсу о призраке — claude attach вместо окна Зевса: {ztext!r}")
+    check("в окно Зевса" in e.alerts() and "claude attach hmhmhmhm" not in e.alerts(),
+          f"1248: тревога призрака советует claude attach: {e.alerts()}")
     # ревью argus Б2: следующие проходы (и через 20 мин) не повторяют ни уведомление, ни передачу Зевсу
     for dt in (60, 120, 180, 1200):
         e.run("watch", t=T0 + dt)
@@ -572,6 +578,91 @@ def test_wait_perm_live_no_double_1254():
     _perm_req(e, session="2e057e05-1", attach="other")
     e.run("watch", t=T0)
     check(len(_relayed(e)) == 1, f"1254: заявка чужой живой сессии под тем же именем заглушила coord-x: {e.calls()}")
+
+
+SUB_IN = {"command": "grep -n osascript merge.py", "description": "прочитать"}
+
+
+def _sub_env(result=False, **kw):
+    """metis-1183 (14.11): окно coord-x в claude agents работает (ждёт субагента Agent), а его субагент dev-opus стоит на
+    запросе разрешения Bash; хук PermissionRequest кончил без решения (timeout) — заявка perm с agent_id."""
+    e = _blocked_env(("Agent", {"description": "поручение dev-opus"}))
+    e.agents([bg("coord-x", "working", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    d = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID, "subagents")
+    os.makedirs(d, exist_ok=True)
+    rows = [_tool("Bash", "su1", SUB_IN, T0 - 20)] + ([_result("su1", T0 - 5)] if result else [])
+    with open(os.path.join(d, "agent-a1b2.jsonl"), "w") as fh:
+        fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    sha = hashlib.sha256(json.dumps(SUB_IN, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    _perm_req(e, **dict({"tool": "Bash", "agent": "dev-opus", "agent_id": "a1b2", "sha256": sha, "status": "timeout",
+                         "deadline": T0 - 5}, **kw))
+    return e
+
+
+def test_subagent_wait_card_and_zeus_1183():
+    """metis-1183, 1122 п. 2–3: субагент окна стоит на запросе разрешения, а claude agents зовёт окно работающим —
+    дежурный видит это по заявке perm субагента: строка «ждёт вас» с субагентом и запросом Зевсу (передача и тревога),
+    дольше 5 мин — карточка владельцу. Вызов уже с результатом, заявка решена или чужого окна — ничего; живая заявка
+    (хук ещё ждёт, Зевс спрошен) — без передачи и карточки (metis-1254)."""
+    e = _sub_env()
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check(len(_relayed(e)) == 1 and "субагент dev-opus: Bash (запрос perm-0000aaaa)" in text
+          and "Agent →" not in text, f"1183: Зевсу не передан запрос субагента: {e.calls()} {text!r}")
+    check("coord-x (b10c0001) ждёт вас: субагент dev-opus: Bash" in e.alerts(), f"1183: нет строки «ждёт вас»: {e.alerts()}")
+    check(not _wait_cards(e), f"1183: карточка раньше 5 мин: {_wait_cards(e)}")
+    e.run("watch", t=T0 + 360)
+    cards = _wait_cards(e)
+    check(len(cards) == 1 and "субагент dev-opus: Bash" in str(cards[0].get("why"))
+          and cards[0].get("waiting_on") == "human", f"1183: ожидание субагента 6 мин — нет карточки владельцу: {cards}")
+    # субагент получил ответ (tool_result) — окно больше не ждёт: карточка закрыта
+    d = os.path.join(e.home, ".claude", "projects", "-tmp", BLK_SID, "subagents", "agent-a1b2.jsonl")
+    with open(d, "a") as fh:
+        fh.write(json.dumps(_result("su1", T0 + 400), ensure_ascii=False) + "\n")
+    e.run("watch", t=T0 + 420)
+    check([c.get("status") for c in _wait_cards(e)] == ["done"], f"1183: ответ получен — карточка не закрыта: {_wait_cards(e)}")
+    for label, env in (("вызов с результатом", _sub_env(result=True)), ("решена", _sub_env(status="allow")),
+                       ("без agent_id", _sub_env(agent_id="")), ("другой вход", _sub_env(sha256="0" * 64)),
+                       ("чужое окно", _sub_env(session="other-sid", attach="other"))):
+        env.run("watch", t=T0)
+        env.run("watch", t=T0 + 360)
+        check(not _relayed(env) and "ждёт вас" not in env.alerts() and not _wait_cards(env),
+              f"1183: {label} — окно объявлено ждущим: {env.calls()} {env.alerts()} {_wait_cards(env)}")
+    # хук ещё ждёт (живая заявка) — Зевс спрошен заявкой: ни передачи, ни карточки; хук кончил — обычный путь
+    e = _sub_env(status="waiting", deadline=T0 + 600)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 360)
+    check(not _relayed(e) and not _wait_cards(e), f"1254/1183: живая заявка, а спросили дважды: {e.calls()}")
+    _perm_req(e, tool="Bash", agent="dev-opus", agent_id="a1b2", status="timeout", deadline=T0 - 5,
+              sha256=hashlib.sha256(json.dumps(SUB_IN, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+    e.run("watch", t=T0 + 420)
+    check(len(_relayed(e)) == 1 and len(_wait_cards(e)) == 1, f"1183: хук кончил — нет передачи или карточки сразу: "
+          f"{e.calls()} {_wait_cards(e)}")
+
+
+def test_stale_touchid_not_waiting_1248():
+    """metis-1248: «подтвердить #N по Touch ID», а заявок на #N в очереди слияния нет (PR слит или закрыт) — ни строки
+    в pantheon status «ждут вас», ни тревоги и передачи Зевсу; заявка на #N есть — вопрос по-прежнему виден."""
+    e = _blocked_env(None, waiting="подтвердить #61 и #62 по Touch ID")
+    out = e.run("status", t=T0).stdout
+    check("подтвердить #61" not in out and "вопрос устарел: 1" in out, f"1248: устаревший Touch ID в status: {out}")
+    e.run("watch", t=T0)
+    check("ждёт вас" not in e.alerts() and not _relayed(e), f"1248: устаревший Touch ID — тревога или Зевсу: "
+          f"{e.alerts()} {e.calls()}")
+    # заявка на #62 в очереди (пачкой с #61) — вопрос живой
+    e = _blocked_env(None, waiting="подтвердить #61 и #62 по Touch ID")
+    q = e.st("merge-queue")
+    os.makedirs(q, mode=0o700)
+    with open(os.path.join(q, "latark__demo__61.json"), "w") as fh:
+        json.dump({"repo": "latark/demo", "pr": 61, "sha": "a" * 40, "created": T0 - 60, "batch": [61, 62]}, fh)
+    out = e.run("status", t=T0).stdout
+    check("ждут вас: coord-x — подтвердить #61 и #62 по Touch ID" in out, f"1248: живая заявка — вопрос скрыт: {out}")
+    e.run("watch", t=T0)
+    check("coord-x (b10c0001) ждёт вас: подтвердить #61" in e.alerts(), f"1248: живая заявка — нет тревоги: {e.alerts()}")
+    # без Touch ID или без номера — судить не о чем, вопрос виден
+    for w in ("подтвердить #61", "подтвердить по Touch ID"):
+        e = _blocked_env(None, waiting=w)
+        check(f"ждут вас: coord-x — {w}" in e.run("status", t=T0).stdout, f"1248: «{w}» скрыт")
 
 
 def test_blocked_reason_fallbacks_0277():

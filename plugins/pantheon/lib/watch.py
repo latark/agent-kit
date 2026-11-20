@@ -296,7 +296,7 @@ def wake_block(name, agents, registry, auto, nudge=False):
     alias = P.name_alias(name)
     asks = [a for a in agents if P.asks_owner(a) and alias.fullmatch(str(a.get("name") or ""))]
     if asks:
-        return f"ждёт вашего ответа (процесс умер, вопрос остался): claude attach {asks[0].get('id')}"
+        return f"{GHOST_ASK} (процесс умер)"
     hold = holders(name, agents, registry)
     if hold and not (nudge and nudge_target(hold)):
         return "уже работает"
@@ -501,6 +501,8 @@ def gave_up_note(d, s):
     return f"Самозапуск {d} встал: {s.get('fails')} сбоя подряд"
 
 
+# metis-1248: вопрос окна с умершим процессом — через окно Зевса, а не claude attach (там пусто: вопрос жил в процессе)
+GHOST_ASK = "ждёт вашего ответа — вопрос передан в окно Зевса"
 RELAY_EVERY = 900  # metis-0277: «ждёт вас» уходит живому Зевсу не чаще раза в 15 мин на сессию и раз на пункт
 WHY_LIMIT = 120
 GENERIC_WHY = re.compile(r"(?:permission(?: prompt)?|input needed|waiting(?: for (?:input|permission))?|blocked)\W*",
@@ -630,12 +632,18 @@ def relay_zeus(agents, items, t):
         z = pick(fresh) if fresh else None
         if not z:
             return False
+        ghosts = {str(a.get("id") or a.get("sessionId")) for a in agents if a.get("ghost")}
+
+        def how(name, sid):
+            # metis-1248: у призрака вопрос жил в умершем процессе — claude attach покажет пустое окно
+            return (f"процесс умер: спроси владельца окном вопросов, ответ передай сообщением SendMessage {name}"
+                    if sid in ghosts else f"claude attach {sid}")
         if len(due) == 1:
             name, sid, why = due[0]
-            text = f"{P.START_MARK} {name} ({sid}) ждёт вас: {why} — claude attach {sid}"
+            text = f"{P.START_MARK} {name} ({sid}) ждёт вас: {why} — {how(name, sid)}"
         else:
             text = f"{P.START_MARK} ждут вас {len(due)} сессии: " + "; ".join(
-                f"{name} ({sid}): {why} — claude attach {sid}" for name, sid, why in due)
+                f"{name} ({sid}): {why} — {how(name, sid)}" for name, sid, why in due)
         pushed = P.push_text(z["sessionId"], text)
         if not pushed:
             return False
@@ -691,6 +699,14 @@ def _perm_live(a, agents=()):
     try:
         return P.perm_live(a, agents)
     except Exception:  # noqa: BLE001 — без заявки дежурный спрашивает сам, как до metis-1254
+        return None
+
+
+def _perm_wait(a, agents=()):
+    """Запрос разрешения субагента окна a (P.perm_wait, metis-1183) → {"id", "why", "live"} или None; сбой — None."""
+    try:
+        return P.perm_wait(a, agents)
+    except Exception:  # noqa: BLE001 — без заявки субагента дежурный видит окно, как до metis-1183
         return None
 
 
@@ -764,6 +780,12 @@ def sessions(agents, doms, t=None):
         if not sid or not is_pantheon(name, doms):
             continue
         key = f"watch-state-{sid}"
+        # metis-1183: субагент окна стоит на запросе разрешения, а claude agents зовёт окно работающим — то же «ждёт
+        # вас», что у окна: тревога, Зевсу, карточка через 5 мин (заявка perm субагента, P.perm_wait)
+        sub = _perm_wait(a, agents) if state in ("working", "done", "blocked") and not a.get("noProcess") \
+            and not a.get("ghost") else None
+        if sub and state != "blocked":
+            state = "blocked"
         # metis-0250: снятая Claude Code без вопроса — не «ждёт вас» и без тревоги, и призраком тоже (metis-0662 Д1):
         # ждать ей нечего, а поднимают её самозапуск, wake и pantheon start (заменяет новой)
         if state not in word or a.get("noProcess"):
@@ -771,6 +793,13 @@ def sessions(agents, doms, t=None):
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
         why = blocked_why(a) if state == "blocked" else clean_why(a.get("waitingFor"))
+        if sub and (a.get("state") != "blocked" or why.startswith(("Agent", "Task", UNKNOWN_WHY))):
+            why = clean_why(sub["why"])   # окно ждёт субагента: что просит он, а не «Agent → …»
+        elif state == "blocked" and not a.get("ghost") and P.stale_ask(why):
+            # metis-1248: вопрос «подтвердить #N по Touch ID», а заявки на #N уже нет (слит, закрыт) — не «ждёт вас»
+            P.clear_once(key)
+            P.clear_fault(*(f"watch-{s}-{sid}" for s in word))
+            continue
         ghost_asks = P.asks_owner(a)  # вопрос — needs или waitingFor записи, а не detail задания (argus-249a Б1)
         if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
             state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
@@ -786,7 +815,7 @@ def sessions(agents, doms, t=None):
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
                          # metis-0662 С1: с вопросом wake и start не поднимают — совет тот же, что у отказа start
-                         + (f" — ждёт вашего ответа: claude attach {sid}" if ghost_asks
+                         + (f" — {GHOST_ASK}" if ghost_asks
                             else f" — имя свободно, поднять: pantheon wake {name}"), "watch")
             if not ghost_asks:
                 continue
