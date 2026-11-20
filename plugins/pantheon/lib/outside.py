@@ -67,7 +67,9 @@
     origin клона реестра, а не из конфига папки роли. Остаток: окружение процесса читает процесс того же пользователя
     (KERN_PROCARGS2); deny process-info* этого не закрывает (проба 01.11) — потому только dev-ключи;
   - исключение — ключи тестов (metis-1016, athena-0297 вариант А, владелец 07.11; до слияния — «да» в журнале владельца):
-    строка подключения к базе одного проекта (TEST_KEYS: SUPABASE_DB_URL), не токен аккаунта. Лежит отдельно от
+    строка подключения к базе одного проекта (TEST_KEYS: SUPABASE_DB_URL) и, с 20.11 (metis-1293-key, вариант Б
+    владельца: скриптам вроде analysis:queue нужен API тестового проекта), его адрес NEXT_PUBLIC_SUPABASE_URL и
+    SUPABASE_SECRET_KEY; не токен аккаунта. Значения не попадают в журнал, status и вывод. Лежит отдельно от
     dev-ключей — STATE/outside/test-env/<owner>__<repo>.env (<owner>__<repo> — из origin клона, как у dev-ключей),
     кладёт владелец командой `pantheon outside key OWNER/REPO ИМЯ` (скрытый ввод, файл 600). Получает её только
     `outside test --script ИМЯ` этого проекта: ни проверка проекта без --script (полный набор мог бы писать в базу из
@@ -370,9 +372,10 @@ SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sb
 RESERVED_ENV = {"HOME", "PATH", "TMPDIR", "PORT", "CI", "LANG", "SHELL", "USER", "LOGNAME", "PWD"}
 RESERVED_ENV_PREFIX = ("PANTHEON_", "DYLD_", "LD_")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# ключи тестов (metis-1016, athena-0297 вариант А): только эти имена из STATE/outside/test-env/<owner>__<repo>.env и
-# только заявке test --script этого проекта; строка подключения одной базы, не токен аккаунта
-TEST_KEYS = ("SUPABASE_DB_URL",)
+# ключи тестов (metis-1016, athena-0297 вариант А; metis-1293-key вариант Б, владелец 20.11): только эти имена из
+# STATE/outside/test-env/<owner>__<repo>.env и только заявке test --script этого проекта; строка подключения одной
+# тестовой базы, адрес и секретный ключ API тестового проекта Supabase, не токен аккаунта
+TEST_KEYS = ("SUPABASE_DB_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SECRET_KEY")
 DB_URL_RE = re.compile(r"postgres(?:ql)?://", re.I)
 DB_PORT = 5432                      # порт PostgreSQL, когда в строке подключения его нет
 # pg_dump и psql из libpq (keg-only у brew: не в /opt/homebrew/bin) — в PATH только прогона с ключами тестов
@@ -4492,8 +4495,14 @@ def cmd_key(args):
     except (EOFError, KeyboardInterrupt):
         err("pantheon outside key: отменено, файл не тронут")
         return 1
-    if value and (not DB_URL_RE.match(value) or any(c in value for c in "\r\n\0")):
+    if value and any(c in value for c in "\r\n\0"):
+        err(f"pantheon outside key: {name} — значение одной строкой; файл не тронут")
+        return 1
+    if value and name == "SUPABASE_DB_URL" and not DB_URL_RE.match(value):
         err(f"pantheon outside key: {name} — строка подключения postgresql://… одной строкой; файл не тронут")
+        return 1
+    if value and name == "NEXT_PUBLIC_SUPABASE_URL" and not re.match(r"https?://\S+$", value):
+        err(f"pantheon outside key: {name} — адрес проекта https://… одной строкой; файл не тронут")
         return 1
     d = test_env_dir()
     os.makedirs(d, mode=0o700, exist_ok=True)

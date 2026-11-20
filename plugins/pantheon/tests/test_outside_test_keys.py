@@ -482,6 +482,55 @@ finally:
     os.unlink(TENV)
     os.rename(_pth, TENV)
 
+# --- metis-1293-key (вариант Б, владелец 20.11): скрипт получает ещё адрес и секретный ключ API тестового проекта -----
+SB_URL, SB_SECRET = "https://projx-1293.supabase.co", "sb_secret_Zq9xK3mP7vLw"
+check("TEST_KEYS: три имени (строка базы, адрес, секретный ключ)",
+      O.TEST_KEYS == ("SUPABASE_DB_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SECRET_KEY"), O.TEST_KEYS)
+put(TENV, "latark__other.env", f"SUPABASE_DB_URL={URL_OTHER}\nNEXT_PUBLIC_SUPABASE_URL={SB_URL}\n"
+    f"SUPABASE_SECRET_KEY='{SB_SECRET}'\nSUPABASE_ACCESS_TOKEN=sbp_tok_not_for_tests\nSTRIPE_KEY=sk_live_other\n")
+_k3, _f3, _skip3 = O.test_keys("latark/other")
+check("test_keys: из test-env — все три, чужие имена не проходят и названы в пропущенных",
+      _k3 == {"SUPABASE_DB_URL": URL_OTHER, "NEXT_PUBLIC_SUPABASE_URL": SB_URL, "SUPABASE_SECRET_KEY": SB_SECRET}
+      and _skip3 == ["STRIPE_KEY", "SUPABASE_ACCESS_TOKEN"], (sorted(_k3), _skip3))
+_rd = O.redact(f"u={SB_URL} k={SB_SECRET}", _k3)
+check("redact: адрес и секретный ключ → <ИМЯ>", SB_URL not in _rd and SB_SECRET not in _rd
+      and "<NEXT_PUBLIC_SUPABASE_URL>" in _rd and "<SUPABASE_SECRET_KEY>" in _rd, _rd)
+commit(OTHER, {"package.json": json.dumps({"name": "other", "scripts": {
+    "test": 'echo "u=$NEXT_PUBLIC_SUPABASE_URL k=$SUPABASE_SECRET_KEY d=$SUPABASE_DB_URL s=$STRIPE_KEY"'}})}, "o3")
+n0 = len(calls())
+q, rid = new_request("metis-y", OTHER, "test", "--script", "test")
+run_pass()
+res = O.load_result(q, rid) or {}
+c = last_call(n0)
+env = c.get("env", {})
+check("test --script: скрипт получает все три ключа из test-env, чужое имя — нет",
+      env.get("NEXT_PUBLIC_SUPABASE_URL") == SB_URL and env.get("SUPABASE_SECRET_KEY") == SB_SECRET
+      and env.get("SUPABASE_DB_URL") == URL_OTHER and "STRIPE_KEY" not in env
+      and "SUPABASE_ACCESS_TOKEN" not in env, sorted(env))
+_l3 = open(res["log"]).read() if res.get("log") else ""
+_all3 = (SB_URL, SB_SECRET, URL_OTHER, "0ther-only-pw")
+_ev3, _rj3 = json.dumps(events(rid)), json.dumps(res)
+_rc3, _st3 = say("metis-y", "status", rid)
+check("test --script: значений нет в журнале прогона, итоге, outside.jsonl и status; в журнале — метки имён",
+      res.get("state") == "done" and "u=<NEXT_PUBLIC_SUPABASE_URL> k=<SUPABASE_SECRET_KEY>" in _l3
+      and not any(v in t for v in _all3 for t in (_l3, _rj3, _ev3, _st3))
+      and res.get("keys") == ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_DB_URL", "SUPABASE_SECRET_KEY"],
+      (res.get("state"), res.get("why"), res.get("keys"), _l3[-300:]))
+_answer[0] = "https://p.supabase.co"
+rc, out = key("latark/keytest", "NEXT_PUBLIC_SUPABASE_URL")
+check("key: NEXT_PUBLIC_SUPABASE_URL принимается, значение не показано", rc == 0 and "https://p.supabase.co" not in out
+      and "NEXT_PUBLIC_SUPABASE_URL='https://p.supabase.co'" in open(KF).read(), (rc, out))
+_answer[0] = "sb_secret_Aa1Bb2Cc3"
+rc, out = key("latark/keytest", "SUPABASE_SECRET_KEY")
+check("key: SUPABASE_SECRET_KEY принимается, значение не показано", rc == 0 and "sb_secret_Aa1Bb2Cc3" not in out
+      and "SUPABASE_SECRET_KEY='sb_secret_Aa1Bb2Cc3'" in open(KF).read(), (rc, out))
+_answer[0] = "postgres://not-https"
+rc, out = key("latark/keytest", "NEXT_PUBLIC_SUPABASE_URL")
+check("key: адрес не http(s) — код 1", rc == 1 and "postgres://not-https" not in out, (rc, out))
+_answer[0] = "line1\nline2"
+rc, out = key("latark/keytest", "SUPABASE_SECRET_KEY")
+check("key: ключ в две строки — код 1, файл не тронут", rc == 1 and "line2" not in open(KF).read(), (rc, out))
+
 # --- синтаксис профиля настоящим sandbox-exec (65 — ошибка разбора; 71 — профиль цел, но песочница во вложенной) ---
 _prof = O.write_profile((), {5432})
 _sx = "/usr/bin/sandbox-exec"
