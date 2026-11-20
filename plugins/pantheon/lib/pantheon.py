@@ -84,8 +84,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
                                         в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
                                         песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
-  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
-                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
+  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из ветки по умолчанию origin, со сверкой схемы
+                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL; окну
+                                        направления мимо песочницы, одной командой в строке (guard
+                                        supabase-migrate-cmd, metis-1295)
   pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
@@ -2466,6 +2468,11 @@ PANTHEON_MERGE_OUT = ["pantheon merge request *", "pantheon merge cancel *"]
 # EnterWorktree с path (тогда коммиты в копии проходят); репозиторий, путь
 # и имена проверяет сама команда (lib/worktree.py), форму строки — guard (worktree-cmd). Мастерской нет: у неё EnterWorktree
 WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
+# миграция Supabase окна направления (metis-1295, вариант А владельца 20.11, consent metis-1295-net): в песочнице
+# ls-remote и fetch по ssh падают «Could not resolve hostname» (ssh идёт мимо прокси, DNS песочнице закрыт), а psql к
+# базе — прямое TCP. Мимо неё только migrate; прочий `pantheon supabase` — в песочнице. Файл, ветку по умолчанию origin
+# и SQL проверяет сама команда (lib/supabase_migrate.py), форму строки без цепочек — guard (supabase-migrate-cmd)
+SUPABASE_MIGRATE_OUT = ["pantheon supabase migrate *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -3113,7 +3120,8 @@ def nested_pins(root):
         if n in proj or os.path.lexists(os.path.join(d, ".claude")):
             out.append(d + "/.claude/settings.json")
         if os.path.lexists(os.path.join(d, ".git")):
-            out.append(d + "/.git/hooks")
+            # и .git/config: по нему supabase migrate узнаёт закреплённый репозиторий (record_origins, metis-1295)
+            out += [d + "/.git/hooks", d + "/.git/config"]
     return out
 
 
@@ -4509,6 +4517,24 @@ def project_allow_stop(name, problems):
     return [a["id"] for a in ids]
 
 
+def _record_origins(name, folders, data, repos):
+    """origin репозиториев окна направления для supabase migrate — по сборке, не по .git/config окна (metis-1295)."""
+    try:
+        _plugin_map_mod("supabase_migrate").record_origins(
+            STATE, name, folders, data["sandbox"]["filesystem"]["denyWrite"], repos)
+    except Exception as e:  # noqa: BLE001 — любой сбой записи: сборка окна не падает, а старый список не остаётся
+        stale = os.path.join(STATE, "repo-origins", name + ".json")  # ORIGINS в supabase_migrate
+        try:
+            os.remove(stale)  # устаревший список — migrate довёл бы до закреплённого origin, которого уже нет
+            note = "старый список удалён"
+        except FileNotFoundError:
+            note = "старого списка нет"
+        except OSError as e2:
+            note = f"старый список не удалён ({e2})"
+        print(f"песочница {name}: список репозиториев для supabase migrate не записан ({e}); {note} — migrate в окне "
+              "откажет", file=sys.stderr)
+
+
 def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
     leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6). stop_live — путь тика
@@ -4578,7 +4604,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
                              guard, auto_allow, own_agents=direction)
         if direction:
-            data["sandbox"]["excludedCommands"] += GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
+            data["sandbox"]["excludedCommands"] += (GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
+                                                    + SUPABASE_MIGRATE_OUT)
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
@@ -4647,6 +4674,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
         write_window(out_dir, name, data, ok)
+        if direction:
+            _record_origins(name, ok, data, merge_repos.get(name))
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
