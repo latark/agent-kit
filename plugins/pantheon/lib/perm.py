@@ -42,6 +42,10 @@ PermissionRequest окна (hooks.json: `pantheon perm ask`, только при
   6. Дежурный (watch.sessions) по живой заявке окна (perm_live: waiting, срок не вышел, процесс хука жив) не шлёт
      «ждёт вас» Зевсу, не пишет тревогу и не заводит карточку — владельца не спрашивают дважды. Заявка решена,
      снята, срок вышел или хук умер — обычный путь дежурного, отсчёт ожидания с первого прохода: ничего не теряется.
+  7. Субагент окна (metis-1183): claude agents зовёт окно работающим, а субагент стоит на запросе. Заявка хранит
+     agent_id; perm_wait находит её, пока хук ждёт или пока вызов в журнале субагента без tool_result после конца
+     хука, — и дежурный ведёт окно как «ждёт вас»: тревога, Зевсу, карточка через 5 мин, повторы (watch.sessions).
+  В вопросе владельцу — команда, «Зачем» (описание вызова) и «Совет» (advice: маршрут handoff.route, metis-0874).
 
 Нет ответа за WAIT — хук молчит: обычный запрос в окне, карточка «Ждёт вас» и напоминания дежурного (wait_cards,
 metis-1122, 1183). Галочка доски, слово владельца в окне роли, ответ на другой вопрос или с другим номером, старый
@@ -67,9 +71,10 @@ import time
 
 # P — модуль pantheon: его ставит загрузчик pantheon._attach до exec_module (F821 для lib/ выключен в ruff.toml).
 
-__all__ = ["perm_cmd", "perm_live"]
+__all__ = ["perm_cmd", "perm_live", "perm_wait"]
 
 RID = re.compile(r"perm-[0-9a-f]{8}")
+AID = re.compile(r"[\w-]{1,100}")   # agent_id субагента: имя его журнала agent-<id>.jsonl
 OPTIONS = ("Разрешить", "Отказать", "Открыть окно")
 VERDICT = {"разрешить": "allow", "отказать": "deny", "открыть окно": "open"}
 SKIP_TOOLS = ("AskUserQuestion", "ExitPlanMode")
@@ -184,8 +189,22 @@ def question(rid, name, ev):
                                            ("run_in_background", "в фоне")) if ok and ti.get(k))
     tail = "Разрешить это одно действие?" if ok else ("Команда показана не целиком — «Разрешить» откроет обычный "
                                                       "запрос в окне; отказать можно отсюда. Ответ?")
-    q = f'[{rid}] Окно {who} просит разрешение: {tool} — "{what}"{flags}. Зачем: "{why}". {tail} (проверка {sha[:12]})'
+    q = (f'[{rid}] Окно {who} просит разрешение: {tool} — "{what}"{flags}. Зачем: "{why}". Совет: '
+         f'{advice(tool, raw)}. {tail} (проверка {sha[:12]})')
     return norm(q), ok, sha
+
+
+def advice(tool, raw):
+    """Совет владельцу в вопросе (metis-0874 п. 1): у действия свой исполнитель (маршруты handoff.route) — отказать и
+    передать ему; иначе — разрешить, если действие в пределах worktree роли. Текст совета — наш, не текст роли; сбой
+    разбора — общий совет, вопрос не ломается."""
+    try:
+        key, who, _, _ = P.handoff_mod().route(f"{tool} {raw or ''}")
+    except Exception:  # noqa: BLE001 — любой сбой разбора даёт общий совет
+        key, who = "ask", ""
+    if key != "ask":
+        return f"отказать — это делает {_text(who, 60)}, роль передаст туда"
+    return "разрешить, если действие только читает или пишет в worktree роли; иначе отказать"
 
 
 def owner_verdict(rid, expected, since):
@@ -270,13 +289,76 @@ def perm_live(a, agents=()):
     return None
 
 
+def _sub_open(a, req):
+    """Вызов субагента из заявки всё ещё без ответа: в его журнале (<журнал окна без .jsonl>/subagents/agent-<id>.jsonl)
+    есть tool_use с этим инструментом и тем же sha256 входа, а tool_result на него нет. Журнала или вызова нет, сбой
+    чтения — False: «ждёт вас» говорим только о том, что видно."""
+    tp, aid = P.transcript_path(a), str(req.get("agent_id") or "")
+    if not tp or not tp.endswith(".jsonl") or not AID.fullmatch(aid):
+        return False
+    path = os.path.join(tp[:-len(".jsonl")], "subagents", f"agent-{aid}.jsonl")
+    uses, done = set(), set()
+    try:
+        C = P.ctx_mod()
+        for d in C.entries(C.tail_lines(path, TAIL)):
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
+                if not isinstance(x, dict):
+                    continue
+                if (x.get("type") == "tool_use" and msg.get("role") == "assistant" and x.get("id")
+                        and x.get("name") == req.get("tool") and isinstance(x.get("input"), dict)
+                        and input_sha(x["input"]) == req.get("sha256")):
+                    uses.add(x["id"])
+                elif x.get("type") == "tool_result" and x.get("tool_use_id"):
+                    done.add(x["tool_use_id"])
+    except Exception:  # noqa: BLE001 — журнал не прочитан: не утверждаем, что ждёт
+        return False
+    return bool(uses - done)
+
+
+def perm_wait(a, agents=()):
+    """Запрос разрешения субагента окна a (metis-1183, 14.11: dev-opus в окне Метиды стоял невидимо): claude agents
+    показывает окно работающим, а субагент стоит на запросе. → {"id", "why", "live"} или None.
+    Источник — заявка perm того же окна (как perm_live) с agent_id: хук PermissionRequest зовётся и в субагенте. Ждёт,
+    если заявка жива (хук ждёт ответа: live, Зевс уже спрошен) или хук кончил без решения (timeout, «Открыть окно»,
+    хук умер, срок вышел), а вызов в журнале субагента всё ещё без tool_result (_sub_open). Решена (allow, deny) или
+    снята в окне — не ждёт. Заявки основной сессии (без agent_id) — не здесь: их видит claude agents (blocked)."""
+    t = P.now()
+    sid, short = str(a.get("sessionId") or ""), str(a.get("id") or "")
+    try:
+        files = sorted(os.listdir(P.path("perm")), reverse=True)
+    except OSError:
+        return None
+    best = None
+    for f in files:
+        req = _load(f[:-5]) if f.endswith(".json") else None
+        if not req or not req.get("agent_id") or not ((sid and req.get("session") == sid)
+                                                      or (short and req.get("attach") == short)):
+            continue
+        try:
+            created, deadline = float(req.get("created") or 0), float(req.get("deadline") or 0)
+        except (TypeError, ValueError):
+            continue
+        status = req.get("status")
+        if status not in ("waiting", "timeout", "open") or t - created > KEEP:
+            continue
+        live = status == "waiting" and deadline > t and _alive(req.get("pid"))
+        if not live and not _sub_open(a, req):
+            continue
+        if best is None or created > best[0]:
+            who = f"субагент {req.get('agent')}" if req.get("agent") else "субагент"
+            best = (created, {"id": req["id"], "live": live,
+                              "why": f"{who}: {req.get('tool')} (запрос {req['id']})"})
+    return best[1] if best else None
+
+
 def _transcript(ev):
     """Журнал, где лежит вызов: у субагента — <папка>/<сессия>/subagents/agent-<id>.jsonl, иначе transcript_path."""
     tp = ev.get("transcript_path")
     if not isinstance(tp, str) or not tp.endswith(".jsonl"):
         return None
     aid, sid = str(ev.get("agent_id") or ""), str(ev.get("session_id") or "")
-    if aid and re.fullmatch(r"[\w-]{1,100}", aid) and re.fullmatch(r"[\w-]{1,100}", sid):
+    if aid and AID.fullmatch(aid) and AID.fullmatch(sid):
         return os.path.join(os.path.dirname(tp), sid, "subagents", f"agent-{aid}.jsonl")
     return tp
 
@@ -487,8 +569,10 @@ def ask(raw):
     sid = str(ev.get("session_id") or "")
     expected, ok, sha = question(rid, name, ev)
     tool = ev["tool_name"] if NAME.fullmatch(ev["tool_name"]) else "инструмент"
+    aid = str(ev.get("agent_id") or "")
     req = {"id": rid, "window": name, "session": sid, "attach": _attach_id(sid), "tool": tool,
-           "agent": _text(ev.get("agent_type"), 40), "question": expected, "options": list(OPTIONS),
+           "agent": _text(ev.get("agent_type"), 40), "agent_id": aid if AID.fullmatch(aid) else "",
+           "question": expected, "options": list(OPTIONS),
            "exact": ok, "sha256": sha, "created": t0, "deadline": t0 + wait, "status": "waiting", "pid": os.getpid()}
     ti = ev.get("tool_input") if isinstance(ev.get("tool_input"), dict) else {}
     seen = Answered(_transcript(ev), ev["tool_name"], ti)
