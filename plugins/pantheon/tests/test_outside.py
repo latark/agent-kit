@@ -710,8 +710,10 @@ check("1293: у приложения нет скрипта — отказ", res.
 rc, _, _ = role_request("athena-x", MONO2, "test", "--app", "web")
 check("1293: --app без --script — код 2", rc == 2)
 rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "../x")
-check("1293: --app ../x — отказ при заявке или в проходе", rc == 2 or (run_pass() or True) and
-      (O.load_result(q, rid) or {}).get("state") == "failed", O.load_result(q, rid))
+if rc != 2:   # заявка встала — отказ в проходе; при отказе заявки (rc 2) rid нет и итога нет
+    run_pass()
+check("1293: --app ../x — отказ при заявке или в проходе",
+      rc == 2 or (O.load_result(q, rid) or {}).get("state") == "failed", rc if rid is None else O.load_result(q, rid))
 check("1293: check_request — app у test без script отказ, со script — норм",
       O.check_request({"v": 1, "id": "r", "kind": "test", "dir": "/x", "app": "web"}, "r")
       and O.check_request({"v": 1, "id": "r", "kind": "test", "dir": "/x", "app": "web", "script": "probe"}, "r") is None)

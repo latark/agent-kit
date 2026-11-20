@@ -2267,7 +2267,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         log_event(id=rid, kind="test-overload-final", window=window, sha=sha, files=over,
                   load=round(load_state()[0]))
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
-           "dir": d, "log": log, "record": False, **extra}
+           "dir": d, "log": log, "record": False, **({"script": script} if script else {}),
+           **({"app": app} if app else {}), **extra}
     if not keys:   # с ключами тестов фрагментов вывода в итоге нет (argus #410-3 Б1): весь вывод — в log, вычищен
         res["tail"] = tail(log)
     text = log_text(log) if full or narrow else ""
