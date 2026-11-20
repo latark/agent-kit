@@ -100,6 +100,35 @@ def excluded_no_worktree_write(p, tmp):
                 origins[n] = json.load(fh).get("repos")
     check("sandbox_build: окнам направлений — STATE/repo-origins/<окно>.json (папка не репозиторий — пусто), "
           "мастерской — нет (metis-1295)", origins == {"alpha-test": {}, "metis-pantheon": {}}, origins)
+    # долг argus круга 4: сбой записи списка не оставляет старый — migrate закрывается отказом «не прочитан»
+    stale = p.path("repo-origins", "alpha-test.json")
+    with open(stale, "w", encoding="utf-8") as fh:
+        json.dump({"repos": {"/x/old": "https://github.com/t/r.git"}}, fh)
+    sm = p._plugin_map_mod("supabase_migrate")  # pinned_remote читает файл списка; сам модуль pantheon грузит заново
+    saved_mod, saved_win = p._plugin_map_mod, os.environ.get("PANTHEON_WINDOW")
+
+    class _Boom:
+        @staticmethod
+        def record_origins(*a, **k):
+            raise ValueError("сбой записи (проба)")
+    p._plugin_map_mod = lambda name="plugin_map": _Boom
+    os.environ["PANTHEON_WINDOW"] = "alpha-test"
+    try:
+        p._record_origins("alpha-test", [], {"sandbox": {"filesystem": {"denyWrite": []}}}, None)
+        gone = not os.path.exists(stale)
+        try:
+            sm.pinned_remote(p.STATE, "/x/old")
+            refused = ""
+        except sm.Refused as e:
+            refused = str(e)
+    finally:
+        p._plugin_map_mod = saved_mod
+        if saved_win is None:
+            os.environ.pop("PANTHEON_WINDOW", None)
+        else:
+            os.environ["PANTHEON_WINDOW"] = saved_win
+    check("_record_origins: сбой записи (любое исключение) — старый список окна удалён, сборка не падает, "
+          "pinned_remote отказывает «не прочитан»", gone and "не прочитан" in refused, (gone, refused))
     out = p.path("settings")
     windows, auto = {}, {}
     for f in sorted(os.listdir(out)):

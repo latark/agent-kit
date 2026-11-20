@@ -4481,8 +4481,16 @@ def _record_origins(name, folders, data, repos):
     try:
         _plugin_map_mod("supabase_migrate").record_origins(
             STATE, name, folders, data["sandbox"]["filesystem"]["denyWrite"], repos)
-    except (OSError, subprocess.SubprocessError) as e:
-        print(f"песочница {name}: список репозиториев для supabase migrate не записан ({e}) — migrate в окне "
+    except Exception as e:  # noqa: BLE001 — любой сбой записи: сборка окна не падает, а старый список не остаётся
+        stale = os.path.join(STATE, "repo-origins", name + ".json")  # ORIGINS в supabase_migrate
+        try:
+            os.remove(stale)  # устаревший список — migrate довёл бы до закреплённого origin, которого уже нет
+            note = "старый список удалён"
+        except FileNotFoundError:
+            note = "старого списка нет"
+        except OSError as e2:
+            note = f"старый список не удалён ({e2})"
+        print(f"песочница {name}: список репозиториев для supabase migrate не записан ({e}); {note} — migrate в окне "
               "откажет", file=sys.stderr)
 
 
