@@ -190,7 +190,7 @@ REVIEW_MUTANTS = [
     ('"что проверить вживую после выпуска" if verdict == T.CRITERION_PROBE else', '"x" if False else',
      "problem: «проба» с «ОПОРА» — что проверить вживую"),
     ('return miss and (f"пункты', 'return None and (f"пункты', "unmarked: пункт 2 без отметки — причина называет только его"),
-    ('if not isinstance(view, dict):\n        return "gh pr view', 'if False:\n        return "gh pr view',
+    ('if not isinstance(view, dict):\n        return (f"gh pr view', 'if False:\n        return (f"gh pr view',
      "unmarked: gh не дал тело — причина «gh pr view»"),
     ('P.criteria_dirs(repo, M),', 'None,', "unmarked: policy.toml со смешанным регистром — задача чужого направления не нужна"),
 ]
