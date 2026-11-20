@@ -14,7 +14,8 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   pantheon browser read (URL|--here) [--task ID]         текст страницы и ссылки (до 200 КБ)
   pantheon browser eval (URL|--here) EXPR [--task ID]    выражение JS в изолированном мире, без побочных действий
   pantheon browser allow САЙТ ДЕЙСТВИЯ --task ID --why Т поручение: click,type,submit,delete на сайте (metis-0765)
-  pantheon browser click СЕЛЕКТОР --task ID              флажок, переключатель, label к ним, ссылка того же сайта
+  pantheon browser click СЕЛЕКТОР --task ID              флажок, переключатель, label к ним, ссылка того же сайта,
+                                                         раскрытие блока или вкладки вне формы (metis-1268)
   pantheon browser type СЕЛЕКТОР ТЕКСТ --task ID         ввод в текстовое поле или textarea
   pantheon browser submit СЕЛЕКТОР --task ID             отправка формы: Touch ID или «да» владельца на каждую
   pantheon browser delete СЕЛЕКТОР --task ID             удаление: один элемент — Touch ID или «да», пачка — «да»
@@ -34,9 +35,11 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   (код привязан к сайту, пути и запросу адреса, селектору и отпечатку формы — поля, действующие адрес, метод и окно
   отправки — в момент вопроса; одно «да» — одна отправка). Удаление пачки — только «да». Оплата и важная форма (вход,
   пароль, смена почты или телефона, договор, торги, перевод, удаление аккаунта, госкабинеты) — отказ всегда: только
-  владелец сам (classify, PAY_*, IMPORTANT_*; адреса — страница, formaction или action формы, href ссылки). Нажатие —
-  вид только по тегу, без интерактивных предков (click_kind); без согласия — только обычный класс, удаляющее нажатие
-  — как delete; прокрутка мгновенная, точка сверяется перед нажатием (point_js). Форма уходит на другой сайт или в
+  владелец сам (classify, PAY_*, IMPORTANT_*; адреса — страница, formaction или action формы, href ссылки). Реестры и
+  площадки торгов (REGISTRY_HOSTS: fedresurs, torgi.gov.ru, ЭТП) — поиск, ссылки и раскрытие блоков как везде, любая
+  другая форма там — важная (metis-1268). Нажатие — вид только по тегу, без интерактивных предков (click_kind); div,
+  кнопка или вкладка вне формы и ссылки без слов действия — раскрытие блока (expand_click, metis-1268); без согласия —
+  только обычный класс, удаляющее нажатие — как delete; прокрутка мгновенная, точка сверяется перед нажатием (point_js). Форма уходит на другой сайт или в
   другое окно (formtarget, target, <base target>), <base href> страницы другого origin — отказ.
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
@@ -77,7 +80,11 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   код, размер; cookie и заголовков там нет, значения секретных параметров адреса (token, key, sig, session…) — ***.
 - Поиск, фильтр и листание (metis-1120) — без поручения и согласия на читаемом сайте (free_reason): форма с полями
   только однострочными (без email и tel), флажками, датами и списками и GET, или role=search, или поле type=search с
-  кнопкой «найти/поиск/find/search»; нажатие ссылки, которая уводит на другую страницу того же сайта (nav_link: другой
+  кнопкой «найти/поиск/find/search», или кнопка поиска (SEARCH_BUTTON: надпись целиком «Найти», «Поиск лотов») — с
+  ней и POST, и поля вне формы, и пустая textarea (КАД, А-КОСТА, metis-1268); слова важной формы у поиска — только в
+  надписи кнопки, а не в заголовках и подписях полей («Поиск торгов»); ввод в однострочное поле вне формы (номер
+  дела) — без поручения; раскрытие блока, вкладки, списка без формы (expand_click: не ссылка, не поле, без формы и
+  ссылки выше, надпись без слов действия EXPAND_DENY — «Сохранить», «Да», «Добавить»…); нажатие ссылки, которая уводит на другую страницу того же сайта (nav_link: другой
   путь или запрос, не javascript:, не якорь «#», без onclick и target; листание — ссылками). Кнопки отправки («Далее»
   мастера тоже), ссылки-якоря, флажки вне формы и POST-формы без поиска — по поручению и согласию ([charon-relax]). Вход, пароль,
   оплата, договор, торги — отказ, как раньше (classify до free_reason). Остальное без поручения — отказ и
@@ -962,6 +969,18 @@ LINK_ACT_WORDS = re.compile(r"отклик|откликн|отправ|выйт�
                             r"пожалов|жалоб|report", re.I)
 # Поле GET-формы с таким именем — личные данные, а не запрос поиска (argus-439-2, Д2)
 PERSONAL_NAME = re.compile(r"address|phone|e-?mail|\btel\b", re.I)
+# Кнопка поиска (metis-1268, слово владельца 20.11): надпись целиком — «Найти», «Поиск лотов», «Find cases»; с ней
+# форма POST и поля вне формы (КАД: кнопка «Найти» вне form, пустое поле участника — textarea) — поиск
+SEARCH_BUTTON = re.compile(r"(?:найти|поиск|искать|search|find)(?:\s+\S+){0,2}", re.I)
+# Раскрытие блока или вкладки без формы (metis-1268: КАД «Электронное дело» — div с обработчиком): надпись с таким
+# словом что-то делает (сохранить, подтвердить, «Да» диалога, добавить в избранное) — по поручению, как раньше
+EXPAND_DENY = re.compile(r"сохран|опубликов|принять|приня[тл]|подтверд|согласен|согласи|\bда\b|\bок\b|\bok\b|"
+                         r"\byes\b|продолж|готово|далее|дальше|добав|подписа|заказать|забронир|записать|позвон|"
+                         r"написать|напишите|избранн|лайк|нрав|подел|проголос|оценить|отменить|загрузить|прикреп|"
+                         r"вступ|пригла|\bsave\b|publish|accept|confirm|agree|continue|\bnext\b|\bdone\b|\badd\b|"
+                         r"\border\b|\bbook\b|\bcall\b|\bwrite\b|message|contact|\blike\b|favou?rite|follow|subscri|"
+                         r"share|\bvote\b|\bcancel\b|upload|\bjoin\b|invite", re.I)
+EXPAND_STOP = ("a", "input", "select", "option", "textarea", "label", "form")   # их нажатие — не раскрытие
 FREE_TYPES = ("", "text", "search", "url", "number", "checkbox", "radio", "date",   # email и tel — не поиск
                                 "month", "week", "time", "datetime-local", "range")
 # Подпись страницы до и после отправки: адрес, число узлов, длина текста — не изменилась, значит отправка не прошла
@@ -984,9 +1003,11 @@ PAY_WORDS = re.compile(r"оплат|оплач|заплат|купить|пок�
                        re.I)
 # F2: важная форма — вход и пароль, смена контактов, договор и подпись, торги, перевод, удаление аккаунта, госкабинеты
 IMPORTANT_HOSTS = ("gosuslugi.ru", "nalog.gov.ru", "nalog.ru", "sfr.gov.ru", "pfr.gov.ru", "rosreestr.gov.ru",
-                   "rosreestr.ru", "my.arbitr.ru", "mos.ru", "fssp.gov.ru", "zakupki.gov.ru", "torgi.gov.ru",
-                   "fedresurs.ru", "sberbank-ast.ru", "roseltorg.ru", "fabrikant.ru", "rts-tender.ru", "lot-online.ru",
-                   "etpgpb.ru", "b2b-center.ru", "m-ets.ru")
+                   "rosreestr.ru", "my.arbitr.ru", "mos.ru", "fssp.gov.ru")
+# Реестры и площадки торгов (metis-1268): поиск, ссылки и раскрытие блоков там — чтение, как на любом сайте; любая
+# другая форма (заявка, ставка, жалоба) — важная, как раньше, когда они стояли в IMPORTANT_HOSTS
+REGISTRY_HOSTS = ("fedresurs.ru", "zakupki.gov.ru", "torgi.gov.ru", "sberbank-ast.ru", "roseltorg.ru", "fabrikant.ru",
+                  "rts-tender.ru", "lot-online.ru", "etpgpb.ru", "b2b-center.ru", "m-ets.ru")
 IMPORTANT_HOST_PREFIX = re.compile(r"(?:id|login|auth|oauth|sso|passport|account|accounts|signin|esia|lk)[.-]")
 IMPORTANT_PATH = re.compile(r"/(?:login|logon|signin|sign-in|sign_in|auth|oauth|sso|register|registration|signup|"
                             r"sign-up|password|passwd|reset|recover|restore|security|2fa|otp|verify|verification)"
@@ -1151,6 +1172,9 @@ def same_site(href, host):
         return False
 
 
+NO_PREFIX = re.compile(r"(?!)")                # у _host_hit без проверки приставки хоста
+
+
 def _host_hit(u, hosts, prefix):
     try:
         h = url_host(u)
@@ -1214,9 +1238,18 @@ def classify(facts, op):
         name = f"{f.get('name') or ''} {f.get('label') or ''}"
         if f.get("type") == "password" or f.get("auto") in IMPORTANT_AUTO or IMPORTANT_FIELD.search(name):
             return "important", f"поле «{name.strip()[:60] or f.get('type')}» — пароль или код"
+    # metis-1268: форма поиска (free_form) и нажатие вне формы (ссылка, раскрытие блока) — чтение: слова важной формы
+    # у поиска — только в надписи нажимаемой кнопки (у type — нет: ввод ничего не отправляет), а не в заголовках и
+    # подписях полей («Поиск торгов», «Номер торгов» на площадке), и площадка торгов или реестр их не закрывает
+    search = search_button(facts, op) and free_form(facts, op) is not None
+    reading = search or (op == "click" and form is None)
     for u in urls:
         if _host_hit(u, IMPORTANT_HOSTS, IMPORTANT_HOST_PREFIX) or IMPORTANT_PATH.search(_path_of(u)):
             return "important", f"адрес входа, кабинета или госсайта {u[:120]}"
+        if not reading and _host_hit(u, REGISTRY_HOSTS, NO_PREFIX):
+            return "important", f"форма площадки торгов или реестра, не поиск: {u[:120]}"
+    if search:
+        text = "" if op == "type" else str(btn.get("label") or facts.get("elabel") or "")
     m = IMPORTANT_WORDS.search(text)
     if m:
         return "important", f"надпись «{m.group(0).strip()}»"
@@ -1505,12 +1538,28 @@ def after_click(b, domains, task, win):
 RETRY_TTL = 3600                              # повтор после отправки, которая ничего не изменила, — час
 
 
-def free_form(facts):
+def _label(facts):
+    _, btn = target_of(facts)
+    return " ".join(str(btn.get("label") or facts.get("elabel") or "").split())
+
+
+def search_button(facts, op):
+    """Есть ли кнопка поиска (SEARCH_BUTTON, надпись целиком, без слов действия LINK_ACT_WORDS и EXPAND_DENY): у submit
+    и click — нажимаемая, у type — одна из кнопок формы (metis-1268)."""
+    labels = ([" ".join(str(b).split()) for b in facts.get("buttons") or []] if op == "type" else [_label(facts)])
+    return any(SEARCH_BUTTON.fullmatch(x) and not LINK_ACT_WORDS.search(x) and not EXPAND_DENY.search(x)
+               for x in labels)
+
+
+def free_form(facts, op="submit"):
     """Форма поиска или фильтра (metis-1120) → причина или None: поля только однострочные, флажки, даты, списки (без
-    textarea, файла, contenteditable, email и tel), и метод GET, или role=search, или поле type=search рядом с кнопкой
-    «найти/поиск/find/search». POST без этого — обычное согласие ([charon-relax])."""
+    файла, contenteditable, email и tel), и метод GET, или role=search, или поле type=search рядом с кнопкой
+    «найти/поиск/find/search», или кнопка поиска (search_button, metis-1268): с ней и форма POST, и поля вне формы, и
+    пустая textarea (поле участника КАД) — поиск. POST без этого — обычное согласие ([charon-relax])."""
     fields = [f for f in facts.get("fields") or [] if isinstance(f, dict)]
+    sbtn = search_button(facts, op)
     if not all((f.get("tag") == "input" and (f.get("type") or "") in FREE_TYPES) or f.get("tag") == "select"
+               or (sbtn and f.get("tag") == "textarea" and not str(f.get("value") or "").strip())
                for f in fields):
         return None
     if any(PERSONAL_NAME.search(str(f.get("name") or "")) for f in fields):
@@ -1520,11 +1569,29 @@ def free_form(facts):
         return "форма GET"
     if facts.get("srch") is True:
         return "поиск (role=search)"
-    _, btn = target_of(facts)
-    label = " ".join(str(btn.get("label") or facts.get("elabel") or "").split())
-    if any(f.get("type") == "search" for f in fields) and SEARCH_WORDS.search(label):
+    if any(f.get("type") == "search" for f in fields) and SEARCH_WORDS.search(_label(facts)):
         return "поле поиска"
+    if sbtn:
+        return "кнопка поиска"
     return None
+
+
+def expand_click(facts):
+    """Раскрытие блока, вкладки или списка без формы (metis-1268: КАД «Электронное дело», «полная хронология» — div с
+    обработчиком) → причина или None. Цель — не ссылка, не поле, не label; в цепочке от точки нажатия нет формы и
+    ссылки; надпись цели и интерактивных предков без слов действия (EXPAND_DENY, LINK_ACT_WORDS), атрибуты — без
+    LINK_ACT_WORDS. Классификатор (оплата, вход, удаление) — до этого; после нажатия адрес сверяется (after_click)."""
+    if facts.get("form") is not None:
+        return None
+    chain = [n for n in facts.get("chain") or [] if isinstance(n, dict)]
+    i, n = target_of(facts)
+    if n.get("tag") in EXPAND_STOP or n.get("ce") or any(a.get("tag") in ("a", "form") for a in chain):
+        return None
+    labels = [_label(facts)] + [str(a.get("label") or "") for a in chain[(i or 0) + 1:] if interactive(a)]
+    text = " | ".join(labels)
+    if EXPAND_DENY.search(text) or LINK_ACT_WORDS.search(text) or LINK_ACT_WORDS.search(str(n.get("attrs") or "")):
+        return None
+    return "раскрытие блока"
 
 
 def nav_link(link, here):
@@ -1557,10 +1624,19 @@ def free_reason(facts, op, cls):
         if form is None:
             return "листание" if PAGE_WORDS.fullmatch(label) else "ссылка"
         return "листание" if PAGE_WORDS.fullmatch(label) and free_form(facts) else None
+    if op == "click" and form is None and expand_click(facts):
+        return "раскрытие блока"
     if op == "type" and form is None:
         el = facts.get("el") or {}
-        return "поле поиска" if el.get("type") == "search" or facts.get("srch") is True else None
-    return free_form(facts)
+        if el.get("type") == "search" or facts.get("srch") is True:
+            return "поле поиска"
+        # metis-1268: однострочное поле вне формы (номер дела на КАД) — ввод ничего не отправляет; отправка — своя
+        # проверка; textarea и поле адреса, почты, телефона — по поручению
+        if (el.get("tag") == "input" and (el.get("type") or "") in ("", "text", "number")
+                and not PERSONAL_NAME.search(str(el.get("attrs") or ""))):
+            return "поле вне формы"
+        return None
+    return free_form(facts, op)
 
 
 def page_sig(b, win):
@@ -1637,6 +1713,8 @@ def act(req, win, domains):
         raise Refuse(f"{op} {sel}: точку нажатия закрыл другой элемент — нажатия нет")
     if op == "click":
         kind, why = click_kind(facts, host)
+        if why and cls == "ordinary" and expand_click(facts):
+            kind, why = "раскрытие", None          # metis-1268: div, кнопка, вкладка без формы — чтение
         if why:
             raise Refuse(f"click {sel}: {why} (pantheon browser submit — с согласием владельца на каждую отправку)")
         if cls == "ordinary":                     # без отдельного согласия — только обычное нажатие
@@ -2349,10 +2427,12 @@ USAGE = """pantheon browser health|open|read|eval|net|status [--browser comet|ch
                                  адреса — через net)
   net URL | net --here           загрузки своей вкладки: код, размер, адрес (без cookie и заголовков)
   allow САЙТ ДЕЙСТВИЯ --task ID --why Т   поручение на сайт: click,type,submit,delete (одно «да» или Touch ID)
-  click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта
-  type СЕЛЕКТОР ТЕКСТ --task ID  ввод в текстовое поле
+  click СЕЛЕКТОР --task ID       флажок, переключатель, label к ним, ссылка того же сайта; раскрытие блока или
+                                 вкладки вне формы (div, кнопка без «Сохранить», «Да», «Отправить») — без поручения
+  type СЕЛЕКТОР ТЕКСТ --task ID  ввод в текстовое поле; однострочное поле вне формы и поле поиска — без поручения
   submit СЕЛЕКТОР --task ID      отправка формы: Touch ID или «да» на каждую; поиск, фильтр, листание (GET-форма,
-                                 role=search, поле type=search и отправка «Найти») — без поручения и согласия
+                                 role=search, поле type=search, кнопка «Найти»/«Поиск …» и в POST, и вне формы)
+                                 — без поручения и согласия
   --focus                        эмуляция фокуса вкладки (open, read/eval/net по адресу, действия)
   Селектор — ровно один элемент; не прошедшая обычная отправка (страница не изменилась) — один повтор без нового
   согласия; удаление — только новое «да».
