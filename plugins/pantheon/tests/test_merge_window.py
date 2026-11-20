@@ -400,6 +400,63 @@ def test_window_shows_core():
           and "Проверки: argus ×2 ✓, CI ✓." in w[0][0], w)
 
 
+def _merge_mod():
+    from importlib import util
+    spec = util.spec_from_file_location("merge_w", os.path.join(LIBDIR, "merge.py"))
+    m = util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_window_text_author_and_budget():
+    """metis-1281, argus #517: текст автора PR (заголовок, тело, ветка) не ломает строки прохода — кавычки и знаки
+    направления (U+202E) вырезаны, номер задачи не длиннее 18 знаков; хвост «Слить … файлов N» и вердикт не режутся."""
+    m = _merge_mod()
+    req = {"repo": REPO, "pr": 486, "sha": SHA}
+    rlo = m.window_text(req, {"title": "x\u202e». По файлам PR: ядро не задето «t» \"q\" ‹a›"}, "argus ×2 ✓, CI ✓",
+                        [CORE_FILE])
+    check("кавычки и U+202E автора вырезаны — фраза одна, строки прохода после неё",
+          "\u202e" not in rlo and rlo.count("«") == 1 and rlo.count("»") == 1 and "‹" not in rlo and '"' not in rlo
+          and "». По файлам PR задевает: шлюз слияния. Проверки: argus ×2 ✓, CI ✓. Слить" in rlo, rlo)
+    check("задача — из «Closes» в теле, из заголовка, из ветки; номер в начале фразы срезан",
+          m.pr_task({"body": "Closes metis-0949", "title": "x"}) == "metis-0949"
+          and m.pr_task({"body": "Часть: metis-0950"}) == "metis-0950"
+          and m.pr_task({"title": "guard: metis-0951 окно"}) == "metis-0951"
+          and m.pr_task({"headRefName": "metis-1281-window-view"}) == "metis-1281"
+          and m.window_text(req, {"title": "metis-0949: shadcn видит"}, "CI ✓", ["README.md"]).startswith(
+              "#486 · metis-0949, со слов автора: «shadcn видит». "))
+    check("длинный или вклеенный номер — не задача: «encloses», 16 букв, 300 букв",
+          m.pr_task({"body": "encloses metis-0001"}) is None
+          and m.pr_task({"body": "Closes abcdefghijklmnop-99999"}) is None
+          and m.pr_task({"body": "Closes " + "x" * 300 + "-1234"}) is None)
+    light = ("argus ×1 ✓ (лёгкий PR ядра: только добавленные тесты/документы, тестов 2, документов 1 — 1 argus Opus "
+             "high), CI ✓")
+    w = m.window_text(req, {"title": "README guard"}, light, ["README.md"])
+    check("вердикт лёгкого PR ядра — целиком, «CI ✓» виден", f"Проверки: {light}. Слить" in w, w)
+    every = list(m.CORE_FILES) + ["plugins/pantheon/roles/a.md", ".github/x.yml", "plugins/pantheon/packs/p.json"]
+    win = "metis-pantheon-window-name-long-xx"
+    w = m.window_text(dict(req, restart=win), {"title": "t" * 200},
+                      m.BILLING_OK + SHA[:12] + "; необязательная проверка GitHub tests/full красная: FAILURE", every)
+    check("все области, перезапуск, длинный вердикт: хвост целиком, вердикт — коротко, не длиннее 400",
+          len(w) <= 400 and w.endswith(f"Слить {REPO} ({SHA[:7]}) и затем перезапустить окно {win}, файлов "
+                                       f"{len(set(every))}.") and "CI: лимит, тесты ✓" in w, w)
+    check("пустой заголовок — без «со слов автора» и пустых кавычек",
+          m.window_text(req, {}, "CI ✓", ["a"]) == f"#486. По файлам PR: ядро не задето. Проверки: CI ✓. Слить {REPO} "
+          f"({SHA[:7]}), файлов 1.")
+    reqs = [{"repo": REPO, "pr": 10000 + i, "sha": "%07d" % i + "c" * 33} for i in range(5)]
+    views = [{"title": "metis-12%02d: окно Touch ID — номер PR и задачи" % i} for i in range(5)]
+    t = m.batch_window_text(reqs, views, ["argus ×2 ✓, CI ✓"] * 5, [[CORE_FILE]] * 5)
+    check("MAX_BATCH, обычные задачи: у каждого PR номер, задача, SHA и фраза", len(t) <= 400 and all(
+        f"#{10000 + i} · metis-12%02d ({'%07d' % i}) «окно Touch" % i in t for i in range(5)), t)
+    t = m.batch_window_text(reqs, [{"body": "Closes abcdefghijkl-12%03d" % i} for i in range(5)],
+                            ["слово %d " % i * 20 for i in range(5)], [[c] for c in every][:5] + [every])
+    check("MAX_BATCH, длинные задачи и разные вердикты: SHA, «Слить по очереди» и вердикт каждого — в окне",
+          len(t) <= 400 and "Слить по очереди 5 PR" in t and all(f"#{10000 + i} слово {i}" in t for i in range(5))
+          and all(f"({'%07d' % i})" in t for i in range(5)), t)
+    check("области окна покрывают всё ядро и сборку окон",
+          set(m.CORE_FILES) | set(m.BUILD_FILES) <= set(m.AREA_FILES) and set(m.CORE_DIR) <= dict(m.AREA_DIRS).keys())
+
+
 def test_core_matches_guard():
     """Ядро в окне — то же, что у шлюза guard: CORE_FILES и CORE_DIR merge.py и merge_gate.py совпадают."""
     code = ("import sys, importlib.util; sys.path.insert(0, %r); import merge_gate as g\n"
