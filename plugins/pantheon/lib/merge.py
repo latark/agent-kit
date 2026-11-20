@@ -23,8 +23,19 @@ PR ядра защит (Д3) агенты не сливают: его слива
                                  слитые за сутки с причиной из logs/merge.jsonl (metis-0819)
   pantheon merge cancel <N> -R <owner/repo>    снять заявку (из пачки — вместе со всей пачкой)
 
+Вне ядра — без Touch ID (metis-1280, слово владельца 20.11): PR repo из LIGHT_REPOS (полное имя), у которого ни один
+файл (и previous_filename) не в ядре (light_paths по свежему pr_files на каждом проходе), и без --restart — окна нет.
+Проход ставит заявке отметку light и ждёт: сливает координатор metis-pantheon шлюзом guard или фраза владельца «слей
+#N». Слит на head заявки мимо окна (light_merged: по отметке или, если проход её не успел поставить, по файлам PR) —
+снята тихо (merged-outside), PR пачки — тоже, а остальные заявки пачки отвязаны от неё (unbatch). Не слит за
+REQUEST_TTL — заявка остаётся, тревога повторяется раз в REQUEST_TTL (nag). Хоть один PR пачки в ядре или --restart —
+окно Touch ID, как раньше. Отметка light только глушит тревогу о снятии: слить ядро она не даёт — окно решают свежие
+файлы PR, слияние проверяет шлюз guard.
+
 Проход по каждой заявке (одна заявка — одно применение):
-  1. Старше REQUEST_TTL (24 ч) — снята.
+  1. Старше REQUEST_TTL (24 ч) — снята с тревогой. Кроме заявки вне ядра (отметка light, ниже): она не снимается,
+     тревога «не слит N ч» повторяется раз в REQUEST_TTL (nag), пока PR не сольют или заявку не снимут (слово
+     владельца 20.11 «конечно, нужно повторять же ее»).
   2. PR сейчас (gh pr view): не OPEN, черновик или head не тот SHA, что в заявке, — снята (новый коммит — новая заявка).
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
@@ -147,6 +158,7 @@ import subprocess
 import urllib.parse
 import sys
 import time
+import unicodedata
 import types
 from datetime import datetime
 
@@ -1595,57 +1607,175 @@ def build_helper(quiet=True):
         return None
 
 
-def window_text(req, view, why, paths):
-    """Текст окна: сначала задетые файлы ядра (их владелец и подтверждает), заголовок автора PR — последним, в
-    кавычках и коротко: он не перекроет список."""
-    core = [p for p in dict.fromkeys(paths) if window_core(p)]
+# Что задевает PR — словами для окна Touch ID (metis-1281, [metis-1281-view]): файл ядра или сборки окон → название
+# области. Сначала точные файлы, потом папки; путь не из списка — сам путь (окно не молчит о ядре без названия).
+AREA_FILES = {
+    "plugins/guard/hooks/merge_gate.py": "шлюз слияния", "plugins/pantheon/lib/merge.py": "шлюз слияния",
+    "plugins/guard/hooks/protect_config.py": "защита настроек", "plugins/guard/managed-settings.json":
+    "управляемые настройки", "plugins/pantheon/lib/window_rules.py": "правила окон",
+    "plugins/pantheon/hooks/ctx.py": "хуки Пантеона", "plugins/pantheon/hooks/hooks.json": "хуки Пантеона",
+    "plugins/pantheon/lib/plugin_map.py": "плагины ролей", "plugins/pantheon/plugins-by-role.toml": "плагины ролей",
+    "plugins/pantheon/lib/review_rules.py": "правила ревью", "plugins/pantheon/lib/answers.py": "ответы владельца",
+    "plugins/pantheon/lib/supabase_migrate.py": "миграции Supabase", ".claude-plugin/marketplace.json":
+    "список плагинов", "plugins/pantheon/lib/pantheon.py": "сборка окон", "plugins/pantheon/lib/sessions.py":
+    "сборка окон"}
+AREA_DIRS = (("plugins/guard", "guard (защиты)"), ("plugins/pantheon/roles", "правила ролей"),
+             (".github", "CI GitHub"), ("plugins/pantheon/packs", "пакеты окон"))
+TASK_RE = re.compile(r"(?<![a-z0-9-])([a-z]{2,12}-\d{3,5})(?![0-9])")   # номер задачи: не длиннее 18 знаков
+TITLE_MAX = 70                       # фраза «что меняет» одного PR в окне
+AREAS_MAX = 150                      # «Задевает: …» — места хватает всегда, остальное «и ещё N»
+QUOTES = "\"„‚«»≪≫《》「」『』｢｣＂〝〞〟"   # и похожие на кавычки окна знаки других категорий (Po, Ps, Pe, Sm)
+PHRASE_MIN = 10                      # короче — фраза ничего не говорит: номер PR без неё
+
+
+def area(path):
+    """Название области ядра для окна: файл из AREA_FILES, папка из AREA_DIRS, иначе сам путь (как в is_core)."""
+    p = posixpath.normpath(path.strip("/") or ".").strip("/").casefold()
+    for f, name in AREA_FILES.items():
+        if p == f.casefold():
+            return name
+    for d, name in AREA_DIRS:
+        if p == d.casefold() or p.startswith(d.casefold() + "/"):
+            return name
+    return path
+
+
+def areas_text(paths, room=AREAS_MAX):
+    """«По файлам PR задевает: шлюз слияния, правила ролей» — области ядра и сборки окон PR (window_core), каждая
+    один раз; не влезло — «и ещё N»; ядра нет — «По файлам PR: ядро не задето». Строку считает проход по файлам PR,
+    а не автор — так и подписана: на неё владелец опирается, фраза автора рядом — только в кавычках."""
+    names = list(dict.fromkeys(area(p) for p in dict.fromkeys(paths) if window_core(p)))
+    if not names:
+        return "По файлам PR: ядро не задето"
     shown, size = [], 0
-    for p in core:
-        if shown and size + len(p) > 200:
+    for x in names:
+        if shown and size + len(x) > room:
             break
-        shown.append(p)
-        size += len(p) + 2
-    more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
-    hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
-    title = " ".join(str(view.get("title") or "").split())[:60]
+        shown.append(x)
+        size += len(x) + 2
+    more = f" и ещё {len(names) - len(shown)}" if len(names) > len(shown) else ""
+    return f"По файлам PR задевает: {', '.join(shown)}{more}"
+
+
+def plain(text):
+    """Текст для окна в одну строку: без управляющих и форматирующих знаков Unicode (Cc, Cf — в том числе U+202E и
+    U+2066–2069: иначе текст автора переворачивает строки прохода после себя, SEC-28) и без кавычек (Pi, Pf, «"»,
+    «„»): текст автора не закроет кавычку окна."""
+    t = "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in str(text or ""))
+    t = "".join(c for c in t if unicodedata.category(c) not in ("Cf", "Pi", "Pf") and c not in QUOTES)
+    return " ".join(t.split())
+
+
+def pr_task(view):
+    """Задача PR для окна: «Closes/Часть <id>» в теле, иначе первый <id> в заголовке, иначе в имени ветки; нет — None.
+    Номер — со слов автора PR, поэтому не длиннее 18 знаков (TASK_RE): метка не вытеснит строки прохода."""
+    m = re.search(r"(?<!\w)(?:closes|часть):?\s+([a-z]{2,12}-\d{3,5})(?![0-9])", plain(view.get("body")).casefold())
+    if m:
+        return m.group(1)
+    for field in ("title", "headRefName"):
+        m = TASK_RE.search(plain(view.get(field)).casefold())
+        if m:
+            return m.group(1)
+    return None
+
+
+def pr_phrase(view, task, room=TITLE_MAX):
+    """«Что меняет» — заголовок автора PR (plain) без номера задачи в начале, не длиннее room: длинный — по границе
+    слова с «…»; room меньше PHRASE_MIN — пусто."""
+    t = plain(view.get("title"))
+    if task:
+        t = re.sub(r"^" + re.escape(task) + r"\s*[:·—-]?\s*", "", t, flags=re.I)
+    if room < PHRASE_MIN:
+        return ""
+    if len(t) > room:
+        cut = t[:room - 1]
+        t = (cut.rsplit(" ", 1)[0] if " " in cut[PHRASE_MIN // 2:] else cut).rstrip(" ,.:;—-") + "…"
+    return t
+
+
+def pr_label(req, task):
+    """«#486 · metis-0949» — номер PR и задача, без задачи — только номер."""
+    return f"#{req['pr']} · {task}" if task else f"#{req['pr']}"
+
+
+def short_why(why, room=400):
+    """Вердикт шлюза в окне коротко, по смыслу, а не срезом: запасной путь — BILLING_SHORT, красная необязательная
+    проверка — «<имя> ✗», узкий прогон — «(узкий)», лёгкий PR ядра — «(лёгкий)»; в одну строку. Срез до room — только последнее средство для
+    вердикта, которого шлюз не пишет (argus #517 Б1/Б6: «CI: ли» владельцу не скажет, что CI не шёл)."""
+    t = re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, plain(why))
+    t = re.sub(r"необязательная проверка GitHub (\S+) красная: [A-Z_]+", r"\1 ✗", t)
+    t = re.sub(r" \(узкий прогон: [^)]*\)", " (узкий)", t)
+    return re.sub(r" \(лёгкий PR ядра:[^)]*\)", " (лёгкий)", t)[:max(room, 0)]
+
+
+def window_text(req, view, why, paths):
+    """Текст окна одного PR (metis-1281, [metis-1281-view] владельца 20.11): «#N · задача, со слов автора: «что
+    меняет». По файлам PR задевает: области ядра словами. Проверки: вердикт шлюза. Слить repo (sha7)[ и затем
+    перезапустить окно X], файлов N.» Не длиннее 400. Место — по старшинству: метка, области и «Слить …» целиком,
+    вердикт — остаток (не влез целиком — запасной путь коротко); фраза автора — что осталось (нет места или пустая —
+    без «со слов автора»)."""
+    task = pr_task(view)
+    label = pr_label(req, task)
     then = f" и затем перезапустить окно {req['restart']}" if req.get("restart") else ""   # metis-1153
-    return (f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}){then}, файлов {len(set(paths))}, {hit}. {why}. "
-            f"Заголовок: «{title}»")[:400]
+    hit = f". {areas_text(paths)}. Проверки: "
+    end = f". Слить {req['repo']} ({req['sha'][:7]}){then}, файлов {len(set(paths))}."
+    said = ", со слов автора: «»"
+    room = 400 - len(label) - len(hit) - len(end) - len(said)   # строки прохода вытесняют фразу автора, не наоборот
+    verdict = plain(why) if len(plain(why)) <= room else short_why(why, room)   # не влез — запасной путь коротко
+    phrase = pr_phrase(view, task, min(TITLE_MAX, 400 - len(label) - len(hit) - len(verdict) - len(end) - len(said)))
+    head = f"{label}, со слов автора: «{phrase}»" if phrase else label
+    return f"{head}{hit}{verdict}{end}"[:400]
+
+
+def batch_window_text(reqs, views, whys, paths):
+    """Текст окна пачки (metis-0668; вид — metis-1281, [metis-1281-view]): по PR в порядке слияния «#N · задача
+    (sha7) «что меняет»» (метка «#N задача (sha7)»), затем области ядра всех PR словами, «Слить по очереди» и проверки шлюза — группой у PR с
+    одинаковым вердиктом. Не длиннее 400 знаков — предел помощника окна. Место — по старшинству (строки прохода
+    важнее текста роли): номера, SHA, «Слить по очереди» и проверки — сжатый вердикт шлюза целиком (short_why: «CI:
+    лимит, тесты ✓», «tests/full ✗», «(лёгкий)»); не влезают — области короче («и ещё N»), затем метки без номеров
+    задач (задача не длиннее 18 знаков, TASK_RE); фразам авторов — остаток поровну, короче PHRASE_MIN — без фраз.
+    Срез проверок — только для вердикта, которого шлюз не пишет и который не влез и так."""
+    n = len(reqs)
+    tasks = [pr_task(v) for v in views]
+    every = [x for p in paths for x in p]
+    end = f" Слить по очереди в {reqs[0]['repo']}, отказ — стоп."   # число PR видно по меткам
+    groups = {}                      # вердикт → номера PR: у пачки обычно один-два разных вердикта
+    for r, w in zip(reqs, whys):
+        groups.setdefault(short_why(w), []).append(f"#{r['pr']}")   # SHA прогона запасного пути не делит
+    if len(groups) > 1:   # самая большая группа — «у остальных» последней: номера в окне уже есть, место — фразам
+        big = max(groups, key=lambda w: len(groups[w]))
+        groups = {**{w: prs for w, prs in groups.items() if w != big}, big: groups[big]}
+    heads = [f"{', '.join(prs)} " for prs in groups.values()]
+    if len(groups) == 1:
+        heads = ["у всех "]
+    elif len(groups[big]) > 1:   # «у остальных» — только вместо двух и больше номеров: одного он не короче
+        heads[-1] = "у остальных "
+    # проверки — сжатый вердикт целиком (строки прохода важнее текста роли, SEC-28): не влезают — области короче
+    # («и ещё N»), затем метки без номеров задач; фразам авторов — только остаток
+    checks = " Проверки: " + "; ".join(h + w for h, w in zip(heads, groups)) + "."
+    for named, areas_room in ((1, 70), (1, 40), (1, 20), (1, 0), (0, 0)):
+        labels = [f"#{r['pr']}{' ' + t if named and t else ''} ({r['sha'][:7]})" for r, t in zip(reqs, tasks)]
+        hit = areas_text(every, areas_room)
+        base = len(end) + len(hit) + 2 + sum(len(x) + 2 for x in labels)
+        if base + len(checks) <= 400:
+            break
+    else:   # вердикты не от шлюза и длинные: последнее средство — поровну срезом
+        per_why = max((400 - base - len(" Проверки: .") - sum(len(h) + 2 for h in heads)) // len(heads), 0)
+        checks = " Проверки: " + "; ".join((h + short_why(w, per_why)).rstrip(" ;,.") for h, w in zip(heads, groups)) + "."
+    lead = "Авторы: "                # фразы в кавычках — текст ролей; области ниже считает проход по файлам
+    per = min(TITLE_MAX, (400 - base - len(checks) - len(lead)) // n - 3)
+    while True:   # фразы — остаток: не влезло целиком — короче, пока не влезет или не станет короче PHRASE_MIN
+        said = [pr_phrase(v, t, per) for v, t in zip(views, tasks)]
+        items = "; ".join(f"{x} «{p}»" if p else x for x, p in zip(labels, said))
+        text = f"{lead if any(said) else ''}{items}. {hit}.{end}{checks}"
+        if len(text) <= 400 or not any(said):
+            return text[:400]
+        per -= 1
 
 
 def nums(reqs):
     """«#7, #8» — номера PR заявок."""
     return ", ".join("#%d" % r["pr"] for r in reqs)
-
-
-def batch_window_text(reqs, views, whys, paths):
-    """Текст окна пачки (metis-0668): сначала задетые файлы ядра всех PR и число файлов — их владелец и
-    подтверждает, затем номер, SHA и вердикт шлюза каждого PR в порядке слияния (его пишет проход, не автор PR),
-    заголовки авторов — последними, в кавычках и коротко. Не длиннее 400 знаков — предел помощника окна. Ядро и
-    номера с SHA всех PR влезают при MAX_BATCH PR и любых вердиктах (argus-263a Б1): ядру — место за вычетом номеров
-    и коротких вердиктов, вердиктам — что осталось, поровну, вердикт запасного пути — коротко (BILLING_SHORT)."""
-    n = len(reqs)
-    head = f"Слить по очереди {n} PR {reqs[0]['repo']}, отказ шлюза у одного останавливает следующие."
-    every = [x for p in paths for x in p]
-    core = [x for x in dict.fromkeys(every) if window_core(x)]
-    pre = [f"#{r['pr']} {r['sha'][:7]}" for r in reqs]
-    fixed = len(" Вердикты: .") + sum(len(x) + 3 for x in pre)   # «#N sha7 » и «; » у каждого
-    room = max(400 - len(head) - fixed - n * len(f"argus ×2 ✓, {BILLING_SHORT}") - 40, 60)
-    shown, size = [], 0
-    for x in core:
-        if shown and size + len(x) > room:
-            break
-        shown.append(x)
-        size += len(x) + 2
-    more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
-    hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
-    top = f"{head} Файлов {len(set(every))}, {hit}."
-    per = min(48, max((400 - len(top) - fixed) // n, 0))
-    short = [re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, " ".join(str(w).split()))[:per]
-             for w in whys]
-    items = "; ".join(f"{x} {w}".rstrip() for x, w in zip(pre, short))
-    titles = "; ".join(f"#{r['pr']} «{' '.join(str(v.get('title') or '').split())[:40]}»" for r, v in zip(reqs, views))
-    return f"{top} Вердикты: {items}. Заголовки: {titles}"[:400]
 
 
 def window_info(out):
@@ -2179,7 +2309,11 @@ def cmd_request(args):
         log(req, "request", batch=",".join(map(str, prs)) if len(prs) > 1 else None)
     later = ("" if not waits else f" и {'; '.join(waits)} закончатся" if len(prs) == 1
              else f", а у PR закончится ожидание ({'; '.join(waits)})")
-    if len(prs) == 1:
+    light = light_hint(repo, prs, restart)
+    if light:   # окна не будет — строка про окно не нужна (argus #519 Д1)
+        print(f"{'Заявка' if len(prs) == 1 else 'Пачка'} {repo} {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} "
+              f"поставлена.")
+    elif len(prs) == 1:
         print(f"Заявка {repo}#{prs[0]} ({heads[prs[0]][:7]}) поставлена. Окно Touch ID покажет плановый проход, когда вы "
               f"у Mac{later}; без ответа за {REQUEST_TTL // 3600} ч заявка гаснет."
               + (f" После слияния по Touch ID проход один раз перезапустит окно {restart}." if restart else ""))
@@ -2187,7 +2321,97 @@ def cmd_request(args):
         print(f"Пачка {repo}: {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} поставлена. Одно окно Touch ID на все "
               f"покажет плановый проход, когда вы у Mac{later}; сливает по очереди, отказ одного останавливает "
               f"следующие; без ответа за {REQUEST_TTL // 3600} ч пачка гаснет.")
+    for hint in (light, batch_hint(repo, prs)):
+        if hint:
+            print(hint)
     return 0
+
+
+# Окно Touch ID — для ядра (metis-1280, слово владельца 20.11 «PR вне ядра — без вашего пальца … да это нужно
+# сделать»): PR agent-kit, который не задевает ни ядро, ни сборку окон (window_core), сливает координатор
+# MERGE_DIRECTION шлюзом guard. Заявка на него ставится (фраза владельца «слей #N <hex>» сливает её, metis-0959), но
+# окна Touch ID проход на неё не показывает. Список файлов не получен — как раньше: окно, проход сверит файлы сам.
+LIGHT_REPOS = ("latark/agent-kit",)   # полное owner/repo: чужой <owner>/agent-kit — с окном (argus #519 Д1)
+
+
+def light_paths(repo, paths):
+    """PR repo из LIGHT_REPOS, список файлов получен и ни один файл не window_core — окно Touch ID ему не нужно.
+    Заявка с --restart идёт с окном и вне ядра: перезапуск окна делает проход после своего слияния (argus #519 Б2)."""
+    return repo in LIGHT_REPOS and paths is not None and not any(window_core(x) for x in paths)
+
+
+def light_merged(req, view):
+    """PR заявки вне ядра слит на её head мимо окна (координатор шлюзом guard или аварийно владелец) — снять тихо, без
+    тревоги «по Touch ID» (argus #519 Б1). Вне ядра — по отметке light прохода или, если проход её не успел поставить
+    (слили до первого прохода, пока CI шёл), по файлам PR сейчас; заявка с --restart — не лёгкая."""
+    if req.get("restart") or not isinstance(view, dict) or str(view.get("state") or "").upper() != "MERGED" \
+            or str(view.get("headRefOid") or "").lower() != req["sha"]:
+        return False
+    return bool(req.get("light")) or light_paths(req["repo"], pr_files(req["repo"], req["pr"], view))
+
+
+def nag(req, t):
+    """Заявка вне ядра (отметка light) не слита за REQUEST_TTL: заявка остаётся, тревога — каждые REQUEST_TTL, пока PR
+    не сольют (light_merged снимет тихо) или заявку не снимут (слово владельца 20.11 «конечно, нужно повторять же ее»:
+    застрявший PR вне ядра не должен пропадать молча)."""
+    hours = int((t - req["created"]) // 3600)
+    req["nagged"] = t
+    keep(req)
+    log(req, "nag", hours=hours)
+    P.alert(f"PR вне ядра {req['repo']}#{req['pr']} ({req['sha'][:7]}) не слит {hours} ч: сливает координатор "
+            f"{MERGE_DIRECTION} шлюзом guard или ваша фраза «слей #{req['pr']}»; не нужен — "
+            f"pantheon merge cancel {req['pr']} -R {req['repo']}", "pantheon-merge")
+    return f"ждёт: вне ядра, не слита {hours} ч — тревога повторена"
+
+
+def unbatch(reqs):
+    """Отвязать заявки от пачки (PR пачки вне ядра слит мимо окна): дальше каждая — одиночная, без «пачка неполна».
+    Только если в очереди та же заявка (same_req)."""
+    with P.lock("merge-queue"):
+        for r in reqs:
+            if same_req(r):
+                r.pop("batch", None)
+                write_req(r)
+
+
+def mark_light(req):
+    """Отметка «вне ядра» — в файл заявки, только если её ещё нет (light_merged узнаёт по ней слитый мимо окна PR)."""
+    if not req.get("light"):
+        req["light"] = True
+        keep(req)
+
+
+def light_wait():
+    """Итог прохода для заявки вне ядра без фразы: окна нет, заявка ждёт координатора или фразу; срока у неё нет —
+    раз в REQUEST_TTL повтор тревоги (nag)."""
+    return (f"ждёт: вне ядра — без Touch ID (metis-1280): сливает координатор {MERGE_DIRECTION} шлюзом guard или "
+            f"ваша фраза «слей #N»")
+
+
+def light_hint(repo, prs, restart=None):
+    """Подсказка при заявке: все PR вне ядра и без --restart — окна не будет, кому сливать."""
+    if restart:
+        return None
+    for pr in prs:
+        view = pr_view(repo, pr)
+        if not light_paths(repo, pr_files(repo, pr, view) if view else None):
+            return None
+    return (f"Вне ядра: окна Touch ID на {', '.join(f'#{n}' for n in prs)} не будет (metis-1280). Сливает "
+            f"координатор {MERGE_DIRECTION} шлюзом guard: gh pr merge N -R {repo} --match-head-commit <sha> --merge; "
+            f"из другого окна — передайте ему номер PR. Заявка ждёт его или фразу владельца «слей #N»; "
+            f"не слит за {REQUEST_TTL // 3600} ч — тревога, раз в {REQUEST_TTL // 3600} ч, пока не сольют или не снимут.")
+
+
+def batch_hint(repo, prs):
+    """Подсказка собрать пачку (metis-1280, [zeus-fast-2d]): у repo уже ждут одиночные заявки — каждая станет своим
+    окном Touch ID. Основная схема — пачка = ветка batch/<story> = один PR; окно на несколько PR — запасной путь."""
+    others = sorted(q["pr"] for q in queue() if q.get("repo") == repo and not q.get("batch") and q["pr"] not in prs)
+    if not others:
+        return None
+    every = " ".join(str(n) for n in sorted(set(others) | set(prs)))
+    return (f"Подсказка: у {repo} уже ждут отдельные заявки {', '.join(f'#{n}' for n in others)} — каждая станет своим "
+            f"окном Touch ID. Одно окно на все: pantheon merge request {every} -R {repo} (до {MAX_BATCH} PR; "
+            f"заявки заменятся пачкой). Дальше задачи одной story — в одну ветку: pantheon batch start <story-id>.")
 
 
 def merge_conflict(view):
@@ -2309,7 +2533,9 @@ def restart_after(req, phrase):
 
 def process(req, click):
     t = P.now()
-    if t - req["created"] > REQUEST_TTL:
+    if req.get("light") and t - req.get("nagged", req["created"]) > REQUEST_TTL:
+        return nag(req, t)   # вне ядра не слита за сутки — не снимать, а повторять тревогу (слово владельца 20.11)
+    if not req.get("light") and t - req["created"] > REQUEST_TTL:
         return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     # фраза владельца «слей #N <hex>» (metis-0959) — согласие без окна: ни повтора окна, ни щелчка, ни Mac рядом
     phrase = find_phrase(req)
@@ -2319,6 +2545,8 @@ def process(req, click):
         return hold
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
+        if light_merged(req, view):
+            return drop(req, "merged-outside", "PR вне ядра слит без окна")
         return drop(req, "gate", why, warn=True, how="по фразе" if phrase else "по Touch ID")
     if mark_wait(req, state, why):
         return f"ждёт: {why}"
@@ -2332,6 +2560,9 @@ def process(req, click):
             return hold
     if phrase is not None:
         return finger(req, None, phrase)[1]
+    if not req.get("restart") and light_paths(req["repo"], paths):
+        mark_light(req)
+        return light_wait()
     if not click and P.idle_sec() > PRESENT_SEC:
         return "ждёт: вас нет у Mac"
     text = window_text(req, view, why, paths)
@@ -2384,24 +2615,37 @@ def process_batch(reqs, click):
         have = {r["pr"] for r in reqs}
         miss = ", ".join("#%d" % n for n in batch if n not in have)
         return drop_batch(reqs, "batch-broken", f"пачка неполна: заявку на {miss} сняли или заменили", warn=True)
-    if t - reqs[0]["created"] > REQUEST_TTL:
+    if all(r.get("light") for r in reqs):
+        if t - max(r.get("nagged", r["created"]) for r in reqs) > REQUEST_TTL:
+            return [(r, nag(r, t)) for r in reqs]
+    elif t - reqs[0]["created"] > REQUEST_TTL:
         return drop_batch(reqs, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     if not click and max(r.get("wait_until", 0) for r in reqs) > t:
         return [(r, "ждёт: окно закрыто без ответа, повтор позже") for r in reqs]
     if not click and any(r.get("notified") for r in reqs):
         return [(r, "ждёт щелчка по уведомлению") for r in reqs]
-    views, whys, paths, waits = [], [], [], []
+    views, whys, paths, waits, light = [], [], [], [], []
     for r in reqs:
         state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
         if state == "fail":
+            if light_merged(r, view):   # слит мимо окна PR пачки вне ядра — снять его тихо, остальные ждут дальше
+                rest = [x for x in reqs if x is not r]
+                unbatch(rest)
+                return [(r, drop(r, "merged-outside", "PR вне ядра слит без окна"))] + [
+                    (x, "ждёт: отвязана от пачки — следующий проход") for x in rest]
             return drop_batch(reqs, "gate", f"#{r['pr']}: {why}", warn=True)
         if mark_wait(r, state, why):
             waits.append(f"#{r['pr']}: {why}")
         views.append(view)
         whys.append(why)
         paths.append(files or [])
+        light.append(not r.get("restart") and light_paths(r["repo"], files))
     if waits:
         return [(r, "ждёт: " + "; ".join(waits)) for r in reqs]
+    if all(light):   # metis-1280: пачка вся вне ядра — окна нет; хоть один PR ядра — окно на всю пачку, как раньше
+        for r in reqs:
+            mark_light(r)
+        return [(r, light_wait()) for r in reqs]
     if not click and P.idle_sec() > PRESENT_SEC:
         return [(r, "ждёт: вас нет у Mac") for r in reqs]
     text = batch_window_text(reqs, views, whys, paths)

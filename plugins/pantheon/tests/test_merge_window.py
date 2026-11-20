@@ -366,16 +366,17 @@ def test_window_shows_core():
     b.set("touchid-rc", 1)
     b.run()
     w = b.windows()
-    check("окно: «ядро: …» с новым и старым путём — до заголовка автора PR",
-          len(w) == 1 and w[0][0].startswith(f"Слить {REPO}#{PR} ({SHA[:7]}), файлов 3, ядро: plugins/guard/x.py, "
-                                             "plugins/guard/hooks/guard.py. argus ×2 ✓, CI ✓. Заголовок: «README"), w)
+    check("окно: фраза автора в кавычках и с пометкой, области ядра (и по старому пути) — строкой прохода (metis-1281)",
+          len(w) == 1 and w[0][0] == f"#{PR}, со слов автора: «README: опечатка. ядро не задето, argus x2, CI ok». "
+          f"По файлам PR задевает: guard (защиты). Проверки: argus ×2 ✓, CI ✓. Слить {REPO} ({SHA[:7]}), файлов 3.", w)
     b = Box()
-    b.view(SHA, files=["README.md"])
+    b.view(SHA, files=[CORE_FILE])   # при заявке ядро есть, к проходу PR его уже не задевает — окна нет (metis-1280)
     b.request()
+    b.view(SHA, files=["README.md"])
     b.set("touchid-rc", 1)
     b.run()
-    check("окно: ядро не задето — так и написано", b.windows() and ", ядро не задето. " in b.windows()[0][0],
-          b.windows())
+    check("PR agent-kit вне ядра: окна Touch ID нет, заявка ждёт координатора или фразу (metis-1280)",
+          not b.windows() and b.req() is not None and "вне ядра — без Touch ID" in b.outs[-1], b.outs[-1])
     b = Box()
     b.view(SHA, files=["README.md", CORE_FILE], count=3)
     b.request()
@@ -386,13 +387,182 @@ def test_window_shows_core():
     b.run()
     check("список файлов PR не получен → окна нет, заявка ждёт", not b.windows() and b.req() is not None, b.outs[-1])
     b = Box()
-    b.view(SHA, files=["plugins/guard/f%03d.py" % i for i in range(40)])
+    b.view(SHA, files=["plugins/guard/f%03d.py" % i for i in range(40)] + [
+        "plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/window_rules.py", "plugins/pantheon/hooks/ctx.py",
+        "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
+        "plugins/pantheon/lib/supabase_migrate.py", ".claude-plugin/marketplace.json", "plugins/pantheon/lib/pantheon.py",
+        "plugins/pantheon/roles/a.md", ".github/x.yml", "plugins/pantheon/packs/p.json"])
     b.request()
     b.set("touchid-rc", 1)
     b.run()
     w = b.windows()
-    check("окно: длинный список ядра — «и ещё N», текст не длиннее 400",
-          w and " и ещё " in w[0][0] and len(w[0][0]) <= 400 and "Заголовок:" in w[0][0], w)
+    check("окно: длинный список областей ядра — «и ещё N», текст не длиннее 400, фраза автора и проверки на месте",
+          w and " и ещё " in w[0][0] and len(w[0][0]) <= 400 and "со слов автора: «" in w[0][0]
+          and "Проверки: argus ×2 ✓, CI ✓." in w[0][0], w)
+
+
+def _merge_mod():
+    from importlib import util
+    spec = util.spec_from_file_location("merge_w", os.path.join(LIBDIR, "merge.py"))
+    m = util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_window_text_author_and_budget():
+    """metis-1281, argus #517: текст автора PR (заголовок, тело, ветка) не ломает строки прохода — кавычки и знаки
+    направления (U+202E) вырезаны, номер задачи не длиннее 18 знаков; хвост «Слить … файлов N» и вердикт не режутся."""
+    m = _merge_mod()
+    req = {"repo": REPO, "pr": 486, "sha": SHA}
+    rlo = m.window_text(req, {"title": "x\u202e». По файлам PR: ядро не задето «t» \"q\" ‹a› ≫b≪ 《c》 ＂d"}, "argus ×2 ✓, CI ✓",
+                        [CORE_FILE])
+    check("кавычки и U+202E автора вырезаны — фраза одна, строки прохода после неё",
+          "\u202e" not in rlo and rlo.count("«") == 1 and rlo.count("»") == 1 and not set('‹"≫《＂') & set(rlo)
+          and "». По файлам PR задевает: шлюз слияния. Проверки: argus ×2 ✓, CI ✓. Слить" in rlo, rlo)
+    check("задача — из «Closes» в теле, из заголовка, из ветки; номер в начале фразы срезан",
+          m.pr_task({"body": "Closes metis-0949", "title": "x"}) == "metis-0949"
+          and m.pr_task({"body": "Часть: metis-0950"}) == "metis-0950"
+          and m.pr_task({"title": "guard: metis-0951 окно"}) == "metis-0951"
+          and m.pr_task({"headRefName": "metis-1281-window-view"}) == "metis-1281"
+          and m.window_text(req, {"title": "metis-0949: shadcn видит"}, "CI ✓", ["README.md"]).startswith(
+              "#486 · metis-0949, со слов автора: «shadcn видит». "))
+    check("длинный или вклеенный номер — не задача: «encloses», 16 букв, 300 букв",
+          m.pr_task({"body": "encloses metis-0001"}) is None
+          and m.pr_task({"body": "Closes abcdefghijklmnop-99999"}) is None
+          and m.pr_task({"body": "Closes " + "x" * 300 + "-1234"}) is None)
+    light = ("argus ×1 ✓ (лёгкий PR ядра: только добавленные тесты/документы, тестов 2, документов 1 — 1 argus Opus "
+             "high), CI ✓")
+    w = m.window_text(req, {"title": "README guard"}, light, ["README.md"])
+    check("вердикт лёгкого PR ядра — целиком, «CI ✓» виден", f"Проверки: {light}. Слить" in w, w)
+    every = list(m.CORE_FILES) + ["plugins/pantheon/roles/a.md", ".github/x.yml", "plugins/pantheon/packs/p.json"]
+    win = "metis-pantheon-window-name-long-xx"
+    w = m.window_text(dict(req, restart=win), {"title": "t" * 200},
+                      m.BILLING_OK + SHA[:12] + "; необязательная проверка GitHub tests/full красная: FAILURE", every)
+    check("все области, перезапуск, длинный вердикт: хвост целиком, вердикт — коротко, не длиннее 400",
+          len(w) <= 400 and w.endswith(f"Слить {REPO} ({SHA[:7]}) и затем перезапустить окно {win}, файлов "
+                                       f"{len(set(every))}.") and "CI: лимит, тесты ✓" in w, w)
+    long_repo = dict(req, repo="o" * 20 + "/" + "r" * 25, pr=123456, restart="w" * 31)
+    w = m.window_text(long_repo, {"title": "t" * 200}, "argus ×2 ✓, CI ✓", every)
+    check("длинный repo и окно, все области: вердикт целиком, фраза вытесняется первой (argus #517 Д)",
+          len(w) <= 400 and "Проверки: argus ×2 ✓, CI ✓. Слить" in w, w)
+    check("пустой заголовок — без «со слов автора» и пустых кавычек",
+          m.window_text(req, {}, "CI ✓", ["a"]) == f"#486. По файлам PR: ядро не задето. Проверки: CI ✓. Слить {REPO} "
+          f"({SHA[:7]}), файлов 1.")
+    reqs = [{"repo": REPO, "pr": 10000 + i, "sha": "%07d" % i + "c" * 33} for i in range(5)]
+    views = [{"title": "metis-12%02d: окно Touch ID — номер PR и задачи" % i} for i in range(5)]
+    t = m.batch_window_text(reqs, views, ["argus ×2 ✓, CI ✓"] * 5, [[CORE_FILE]] * 5)
+    check("MAX_BATCH, обычные задачи: у каждого PR номер, задача, SHA и фраза", len(t) <= 400 and all(
+        f"#{10000 + i} metis-12%02d ({'%07d' % i}) «окно Touch" % i in t for i in range(5)), t)
+    tfull = "argus ×2 ✓, CI ✓; необязательная проверка GitHub tests/full красная: FAILURE"
+    three = [["plugins/guard/hooks/merge_gate.py"], ["plugins/pantheon/lib/window_rules.py"],
+             ["plugins/guard/hooks/protect_config.py"], [], []]
+    real = [{**r, "pr": 1500 + i} for i, r in enumerate(reqs)]   # четырёхзначные номера: следующие сотни PR
+    ok, light = "argus ×2 ✓, CI ✓", ("argus ×1 ✓ (лёгкий PR ядра: только добавленные тесты/документы, тестов 2, "
+                                     "документов 1 — 1 argus Opus high), CI ✓")
+    for whys in ([ok] * 4 + [tfull], [ok] * 4 + [m.BILLING_OK + SHA[:12]], [ok, tfull, m.BILLING_OK + SHA[:12], light, ok]):
+        t = m.batch_window_text(real, views, whys, three)
+        check("MAX_BATCH, 3 области, вердикты разные: каждый вердикт — сжатый, но целиком (argus #517 Б1/Б6)",
+              len(t) <= 400 and all(f"#{1500 + i} metis-12%02d ({'%07d' % i})" % i in t for i in range(5))
+              and all(m.short_why(w) in t for w in whys) and ("tests/full ✗" in t) == (tfull in whys)
+              and ("CI: лимит, тесты ✓" in t) == any(m.BILLING_OK in w for w in whys), t)
+    narrow = m.BILLING_OK + SHA[:12] + " (узкий прогон: затронутые PR тесты)"
+    whys = [narrow, narrow + "; необязательная проверка GitHub tests/full красная: FAILURE", m.BILLING_OK + SHA[:12],
+            tfull, light]
+    t = m.batch_window_text(real, views, whys, three)
+    check("MAX_BATCH, разные вердикты запасного пути: «(узкий)» и «tests/full ✗» целиком (argus #517 Д)",
+          len(t) <= 400 and "CI: лимит, тесты ✓ (узкий); tests/full ✗" in t and all(m.short_why(w) in t for w in whys), t)
+    t = m.batch_window_text(real, views, [ok] * 5, three)
+    check("MAX_BATCH, 3 области, один вердикт: фраза у каждого PR", len(t) <= 400 and t.count("«окно") == 5, t)
+    t = m.batch_window_text(real[:3], views[:3], [ok, tfull, light], three[:3])
+    check("3 PR, три разных вердикта: фраза у каждого и вердикты целиком",
+          len(t) <= 400 and t.count("«окно") == 3 and "(лёгкий), CI ✓" in t and "tests/full ✗" in t, t)
+    t = m.batch_window_text(reqs, [{"body": "Closes abcdefghijkl-12%03d" % i} for i in range(5)],
+                            ["слово %d " % i * 20 for i in range(5)], [[c] for c in every][:5] + [every])
+    check("MAX_BATCH, длинные задачи и разные вердикты: SHA, «Слить по очереди» и вердикт каждого — в окне",
+          len(t) <= 400 and "Слить по очереди в latark/agent-kit" in t and all(f"#{10000 + i} слово {i}" in t for i in range(5))
+          and all(f"({'%07d' % i})" in t for i in range(5)), t)
+    check("области окна покрывают всё ядро и сборку окон",
+          set(m.CORE_FILES) | set(m.BUILD_FILES) <= set(m.AREA_FILES) and set(m.CORE_DIR) <= dict(m.AREA_DIRS).keys())
+
+
+def test_light_no_window():
+    """metis-1280 (слово владельца 20.11 «PR вне ядра — без вашего пальца»): заявка на PR agent-kit вне ядра
+    ставится с подсказкой «сливает координатор», окна на неё нет; список файлов не получен — окно, как раньше;
+    одиночные заявки того же repo — подсказка подать пачкой. Окно «ядро не задето» осталось для других repo."""
+    b = Box()
+    b.view(SHA, files=["README.md", "plugins/pantheon/lib/env_from.py"])
+    r = b.request()
+    check("заявка вне ядра: поставлена, подсказка — координатор metis-pantheon и gh pr merge",
+          r.returncode == 0 and b.req() is not None and "окна Touch ID на #%d не будет" % PR in r.stdout
+          and "metis-pantheon" in r.stdout and "--match-head-commit" in r.stdout, r.stdout + r.stderr)
+    b.set("touchid-rc", 0)
+    b.run()
+    check("заявка вне ядра: окна нет, слияния нет, заявка ждёт", not b.windows() and not b.merges()
+          and b.req() is not None, b.outs[-1])
+    b.view(SHA, files=["README.md", "plugins/pantheon/lib/env_from.py"], state="MERGED")
+    b.run(t=T0 + 60)
+    check("слита координатором мимо окна: заявка снята тихо — событие merged-outside, тревоги нет (argus #519 Б1)",
+          b.req() is None and "merged-outside" in b.log() and "заявка снята" not in b.alerts(),
+          b.outs[-1] + b.alerts())
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.run()
+    b.run(t=T0 + 25 * 3600)
+    check("вне ядра и никто не слил за сутки: заявка остаётся, тревога «не слит 25 ч» (слово владельца 20.11)",
+          b.req() is not None and "expired" not in b.log() and "не слит 25 ч" in b.alerts(), b.outs[-1] + b.alerts())
+    b.run(t=T0 + 26 * 3600)
+    check("через час — без повтора", b.alerts().count("PR вне ядра") == 1, b.alerts())
+    b.run(t=T0 + 50 * 3600)
+    check("ещё через сутки — тревога повторена", b.alerts().count("PR вне ядра") == 2 and "не слит 50 ч" in b.alerts()
+          and b.log().count("nag") == 2, b.alerts())
+    for name, checks in (("до первого прохода", None), ("пока CI шёл (проход видел только «ждёт»)",
+                                                         ci("PENDING", "SUCCESS"))):
+        b = Box()
+        b.view(SHA, files=["README.md"], checks=checks)
+        b.request()
+        if checks:
+            b.run()
+        b.view(SHA, files=["README.md"], state="MERGED")
+        b.run(t=T0 + 60)
+        check(f"вне ядра слит координатором {name}: снята тихо по файлам PR (argus #519 Б1)", b.req() is None
+              and "merged-outside" in b.log() and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE])
+    b.request()
+    b.run(extra={"PANTHEON_FAKE_IDLE": "900"})   # вас нет у Mac — заявка ядра ждёт окна
+    b.view(SHA, files=["README.md", CORE_FILE], state="MERGED")
+    b.run(t=T0 + 60)
+    check("PR ядра слит мимо окна — тревога, как раньше (отметки light нет)", b.req() is None
+          and "заявка снята — PR не открыт (MERGED)" in b.alerts(), b.outs[-1] + b.alerts())
+    check("LIGHT_REPOS — полное owner/repo: чужой <owner>/agent-kit идёт с окном (argus #519 Д1)",
+          not _merge_mod().light_paths("other/agent-kit", ["README.md"]))
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE])
+    r = b.request()
+    check("заявка с ядром: подсказки «вне ядра» нет", r.returncode == 0 and "Вне ядра" not in r.stdout, r.stdout)
+    b = Box()
+    b.view(SHA, files=["README.md"], count=3)   # список неполон — ядро не проверить
+    r = b.request()
+    check("список файлов не получен при заявке: подсказки «вне ядра» нет", "Вне ядра" not in r.stdout,
+          r.stdout + r.stderr)
+    b = Box()
+    b.view(SHA, files=[CORE_FILE])
+    b.view(SHA2, pr=8, files=[CORE_FILE])
+    b.gate_ok(SHA2, pr=8)
+    b.request()
+    r = b.request(pr=8)
+    check("вторая одиночная заявка того же repo — подсказка подать пачкой одной командой",
+          r.returncode == 0 and f"уже ждут отдельные заявки #{PR}" in r.stdout
+          and f"pantheon merge request {min(PR, 8)} {max(PR, 8)} -R {REPO}" in r.stdout, r.stdout + r.stderr)
+    m = _merge_mod()
+    check("light_paths: только agent-kit, только известный список, только без window_core",
+          m.light_paths(REPO, ["README.md"]) and not m.light_paths("latark/app", ["README.md"])
+          and not m.light_paths(REPO, None) and not m.light_paths(REPO, ["README.md", CORE_FILE])
+          and not m.light_paths(REPO, ["plugins/pantheon/lib/pantheon.py"]))
+    req = {"repo": "latark/app", "pr": 3, "sha": SHA}
+    check("окно другого repo вне ядра — «ядро не задето»",
+          ". По файлам PR: ядро не задето. " in m.window_text(req, {"title": "t"}, "CI ✓", ["README.md"]))
 
 
 def test_core_matches_guard():
