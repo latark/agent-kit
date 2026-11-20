@@ -822,15 +822,39 @@ def t_ci_full_tests(h):
     mg = _load_merge_gate("merge_gate_ci_full")
     key = "sha256:" + hashlib.sha256(b"owner-x/proj").hexdigest()
     mg.REQUIRED_CHECKS = dict(mg.REQUIRED_CHECKS, **{key: (("tests", "checks", "develop"), ("tests", "checks", "main"))})
-    mg.CI_FULL_TESTS = {key: "metis-1305: проба"}
+    mg.CI_FULL_TESTS = {key: ("metis-1305: проба", ("package.json", "scripts/run-checks.ts"))}
     real = _load_merge_gate("merge_gate_ci_full_real")
     check("CI_FULL_TESTS: в таблице одна запись — по хешу, с номером metis-1305; agent-kit нет",
-          len(real.CI_FULL_TESTS) == 1 and all(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and "metis-1305" in v
+          len(real.CI_FULL_TESTS) == 1 and all(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and "metis-1305" in v[0]
                                                for k, v in real.CI_FULL_TESTS.items())
           and real.repo_entry(real.CI_FULL_TESTS, "latark/agent-kit") is None, real.CI_FULL_TESTS)
     check("CI_FULL_TESTS: ключ — проект с job tests/checks и полным набором `pnpm run check`",
           all(real.REQUIRED_CHECKS.get(k) == (("tests", "checks", "develop"), ("tests", "checks", "main"))
               and real.FULL_TESTS.get(k) == "pnpm run check" for k in real.CI_FULL_TESTS), real.CI_FULL_TESTS)
+    check("CI_FULL_TESTS: пути команды полного набора — package.json и scripts/run-checks.ts (metis-1306)",
+          all(v[1] == ("package.json", "scripts/run-checks.ts") for v in real.CI_FULL_TESTS.values()),
+          real.CI_FULL_TESTS)
+
+    # ci_full_files_problem (metis-1306, Д1 argus #523): PR правит workflow или команду полного набора — CI не в счёт
+    for name, paths, hit in (
+            ("только код", ["src/a.ts", "README.md"], None),
+            ("пустой список", [], None),
+            ("workflow", ["src/a.ts", ".github/workflows/tests.yml"], ".github/workflows/tests.yml"),
+            ("action в .github", [".github/actions/x/action.yml"], ".github/actions/x/action.yml"),
+            ("package.json", ["package.json"], "package.json"),
+            ("scripts/run-checks.ts", ["scripts/run-checks.ts"], "scripts/run-checks.ts"),
+            ("регистр и ./", ["./.GitHub/Workflows/t.yml"], "./.GitHub/Workflows/t.yml"),
+            ("ведущий /", ["/package.json"], "/package.json"),
+            ("похожее имя — не путь из списка", ["package.json.bak", "scripts/run-checks.tsx", ".githubx"], None),
+            ("package.json в подпапке — не корневой", ["web/package.json"], None)):
+        got = mg.ci_full_files_problem("owner-x/proj", paths)
+        check(f"ci_full_files_problem: {name} → {hit}",
+              got is None if hit is None else (got == f"PR меняет {hit} — CI не засчитан"), got)
+    for name, paths in (("None (gh не ответил)", None), ("путь не строка", ["a", 1])):
+        got = mg.ci_full_files_problem("owner-x/proj", paths)
+        check(f"ci_full_files_problem: {name} — причина «не получен»", got is not None and "не получен" in got, got)
+    check("ci_full_files_problem: репозиторий не из CI_FULL_TESTS — причина, а не пропуск",
+          mg.ci_full_files_problem("latark/agent-kit", []) is not None)
 
     def run(concl="SUCCESS", status="COMPLETED", event="pull_request", name="checks"):
         return {"workflowName": "tests", "name": name, "status": status, "conclusion": concl, "event": event}
@@ -889,11 +913,12 @@ def t_ci_full_tests(h):
     mg.G = types.SimpleNamespace(allow=lambda notes: ("allow", tuple(notes)))
     policy = {"merge_repos": {"metis-pantheon": ["owner-x/proj"]}}
 
-    def gate(base, runs, tests=False):
+    def gate(base, runs, tests=False, files=("src/a.ts",)):
         mg._ci_runs = lambda *a, **k: runs
+        mg._pr_files = lambda *a, **k: None if files is None else [{"filename": f} for f in files]
         rollup = [{k: v for k, v in c.items() if k != "event"} for c in runs]
         mg._pr_view = lambda *a, **k: {"headRefOid": sha, "baseRefOid": BASE, "baseRefName": base,
-                                       "statusCheckRollup": rollup, "changedFiles": 1}
+                                       "statusCheckRollup": rollup, "changedFiles": len(files or ())}
         recs = [rec("accept", "owner-x/proj", 7, sha, base=base)]
         if tests:
             recs.insert(0, rec("tests", "owner-x/proj", None, sha, "dev-opus"))
@@ -913,6 +938,19 @@ def t_ci_full_tests(h):
     got = gate("epic-1", [ok], tests=True)
     check("gate_problem: проект, база epic-1, запись tests есть — пропуск без «засчитан CI»",
           not isinstance(got, str) and not any("засчитан" in n for n in (got or ("", ()))[1]), got)
+    # metis-1306 (Д1 argus #523): PR меняет workflow или команду полного набора — CI вместо записи не засчитан
+    for f in (".github/workflows/tests.yml", "package.json", "scripts/run-checks.ts"):
+        got = gate("develop", [ok], files=("src/a.ts", f))
+        check(f"gate_problem: проект, CI зелёный, записи нет, PR меняет {f} — отказ «нет записи тестов» с причиной",
+              isinstance(got, str) and got.startswith(f"нет записи тестов на owner-x/proj@{sha[:12]}")
+              and f"PR меняет {f} — CI не засчитан" in got, got)
+        got = gate("develop", [ok], tests=True, files=("src/a.ts", f))
+        check(f"gate_problem: проект, PR меняет {f}, запись tests есть — пропуск",
+              not isinstance(got, str) and not any("засчитан" in n for n in (got or ("", ()))[1]), got)
+    got = gate("develop", [ok], files=None)
+    check("gate_problem: проект, CI зелёный, записи нет, файлы PR не получены — отказ «не получен»",
+          isinstance(got, str) and got.startswith(f"нет записи тестов на owner-x/proj@{sha[:12]}")
+          and "не получен" in got, got)
 
     # шлюз целиком: agent-kit, CI зелёный, «принять» есть, записи tests нет — отказ, как раньше
     kit = "projects/agent-kit"

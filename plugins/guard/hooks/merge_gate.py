@@ -102,6 +102,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
 run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
 У репозитория из CI_FULL_TESTS (обязательный job CI сам гоняет полный набор — metis-1305) запись не нужна, если все
 его обязательные проверки для base PR — SUCCESS запуска от pull_request на этом head (ci_full_tests); agent-kit там нет.
+Кроме PR, который меняет .github/ или пути команды полного набора из строки CI_FULL_TESTS (workflow GitHub берёт с head
+PR): ему нужна запись tests, как всем (ci_full_files_problem, metis-1306).
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
 транскрипту субагента в PreToolUse/PostToolUse (agent_transcript_path — только в SubagentStop), он выводится из входа
 хука — transcript_path, session_id, agent_id — по раскладке Claude Code. Это защита от ошибки шаблона и от запуска
@@ -1391,6 +1393,16 @@ def _pr_files(repo, pr):
     return _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
 
 
+def _pr_paths(files, count):
+    """Пути ответа _pr_files (filename и previous_filename) или None — список не получен, не из записей, путь не
+    строка или записей не столько, сколько changedFiles (count) у gh pr view (metis-1306)."""
+    if not isinstance(files, list) or not all(isinstance(f, dict) for f in files) or not isinstance(count, int) \
+            or isinstance(count, bool) or len(files) != count:
+        return None
+    paths = [f.get(k) for f in files for k in ("filename", "previous_filename") if f.get(k) is not None]
+    return paths if all(isinstance(p, str) for p in paths) else None
+
+
 _FETCH = object()  # _core_problem без files: список запросить здесь
 
 
@@ -1602,7 +1614,7 @@ def _ui_problem(policy, name, sha, view, files):
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
 # optional_checks, repo_entry — metis-1116; narrow_tests_record, narrow_map_path — metis-1050; ci_full_tests,
-# CI_FULL_TESTS — metis-1305), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
+# CI_FULL_TESTS — metis-1305; ci_full_files_problem — metis-1306), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
 # CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
 # test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -1670,10 +1682,12 @@ FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-te
 # репозитории, у которых обязательный job CI сам гоняет полный набор тестов (metis-1305, слово владельца 20.11): ключ —
 # как в REQUIRED_CHECKS → почему CI = полный набор. Для них SUCCESS всех обязательных проверок на head (ci_full_tests)
 # засчитывается вместо записи tests на этом SHA. agent-kit здесь нет: его обязательный job affected — затронутые
-# тесты, а не полный набор
+# тесты, а не полный набор. Значение — (почему, пути команды полного набора): workflow PR из того же репозитория GitHub
+# берёт с head PR, поэтому PR, задевающий .github/ или эти пути (файл или папка), CI вместо записи не получает —
+# ci_full_files_problem (metis-1306, Д1 argus #523)
 CI_FULL_TESTS = {"sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
     "metis-1305: обязательный job tests/checks гоняет `pnpm check` — тот же полный набор, что FULL_TESTS "
-    "(`pnpm run check`)")}
+    "(`pnpm run check`)", ("package.json", "scripts/run-checks.ts"))}
 
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
@@ -1727,6 +1741,27 @@ def ci_full_tests(repo, base, runs):
                   and str(c.get("conclusion") or "").upper() == "SUCCESS")
             got[key] = got.get(key, True) and ok
     return all(got.get(tuple(r)) is True for r in required)
+
+
+def ci_full_files_problem(repo, paths):
+    """Почему зелёный CI не засчитан вместо записи tests (metis-1306, Д1 argus #523), или None. paths — пути файлов PR
+    (и previous_filename) или None — список не получен или неполон. Workflow PR из того же репозитория GitHub берёт с
+    head PR: PR, который меняет .github/ или пути команды полного набора из строки CI_FULL_TESTS (файл или папка, без
+    учёта регистра и ведущих «./» и «/»), мог подменить проверку пустым шагом — тогда нужна запись tests."""
+    entry = repo_entry(CI_FULL_TESTS, repo)
+    if not entry:
+        return "репозитория нет в CI_FULL_TESTS"
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return "список файлов PR не получен или неполон — меняет ли PR workflow или команду полного набора, не проверить"
+    extra = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else ()
+    guarded = [g.strip("/").casefold() for g in (".github", *extra)]
+    for p in paths:
+        n = p.strip("/").casefold()
+        while n.startswith("./"):
+            n = n[2:].lstrip("/")
+        if any(n == g or n.startswith(g + "/") for g in guarded):
+            return f"PR меняет {p} — CI не засчитан"
+    return None
 
 
 def ci_fork(view):
@@ -3349,6 +3384,11 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
+    if no_tests is not None:
+        # metis-1306 (Д1 argus #523): PR правит workflow или команду полного набора — CI вместо записи не засчитан
+        why = ci_full_files_problem(repo, _pr_paths(pr_files(), view.get("changedFiles")))
+        if why:
+            return f"{no_tests} ({why}). {advice}"
     # узкая запись тестов на запасном пути — в защитах, у PR ядра и пачки тоже (metis-0734, 1050)
     why, notes = _ci_problem(repo, pr, sha, view, narrow=cwd, no_tests=no_tests)
     if why:
