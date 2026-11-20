@@ -1801,6 +1801,22 @@ ARTIFACT_MAX = 50 * 1024 * 1024        # общий предел скопиро�
 ARTIFACT_SKIP = {"node_modules", ".git", ".claude"}
 
 
+def _mkdirs700(path, top):
+    """Создаёт path и каждую недостающую папку между top (включая) и path с правами 700: os.makedirs(mode=) ставит их
+    только конечной, промежуточные идут по umask (755)."""
+    chain = []
+    while path != top and path != os.path.dirname(path) and not os.path.isdir(path):
+        chain.append(path)
+        path = os.path.dirname(path)
+    if not os.path.isdir(top):
+        os.makedirs(top, mode=0o700, exist_ok=True)
+        os.chmod(top, 0o700)
+    for p in reversed(chain):
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(p, 0o700)
+        os.chmod(p, 0o700)
+
+
 def save_artifacts(rid, d):
     """test --script: файлы из .print-out/ (в любом месте дерева d) → STATE/outside/runs/<ID>/<путь от d>, пока копия d
     не снята (metis-1262, BA #75: PDF исчезал вместе с work/test-…). Только обычные файлы (ссылки и устройства — нет),
@@ -1822,7 +1838,7 @@ def save_artifacts(rid, d):
                         why = f"предел {ARTIFACT_MAX // 1048576} МБ: {os.path.relpath(src, d)} и дальше не скопированы"
                         return (out if got else None), got, why
                     dst = os.path.join(out, os.path.relpath(src, d))
-                    os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+                    _mkdirs700(os.path.dirname(dst), out)
                     sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
                     try:
                         with contextlib.suppress(FileNotFoundError):

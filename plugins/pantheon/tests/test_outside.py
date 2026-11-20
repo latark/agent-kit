@@ -276,7 +276,11 @@ check("--script: .print-out скопирован в runs/<ID>/, путь в ит
 check("--script: ссылка и node_modules не скопированы, права 600/700",
       not os.path.lexists(os.path.join(_ad, "apps/web/.print-out/link"))
       and not os.path.exists(os.path.join(_ad, "node_modules"))
-      and oct(os.stat(_pdf).st_mode & 0o777) == "0o600" and oct(os.stat(_ad).st_mode & 0o777) == "0o700", res)
+      and oct(os.stat(_pdf).st_mode & 0o777) == "0o600" and oct(os.stat(_ad).st_mode & 0o777) == "0o700"
+      and all(oct(os.stat(os.path.join(_ad, x)).st_mode & 0o777) == "0o700"
+              for x in ("apps", "apps/web", "apps/web/.print-out", "apps/web/.print-out/sub"))
+      and os.path.isdir(os.path.join(os.path.dirname(_ad)))
+      and oct(os.stat(os.path.dirname(_ad)).st_mode & 0o777) == "0o700", res)
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
     O.show(res)
