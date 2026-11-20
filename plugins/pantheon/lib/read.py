@@ -91,10 +91,13 @@ FIELDS; by — имя окна по папке кэша, а не из файла
      Хеш согласия — от request.json и chats.json вместе (consent_hash): названия входят в хеш, владелец соглашается
      на этот список чатов, а не на указания.
   1. requested → согласие: ответ владельца в окне вопросов или в чате Зевса (owner-log/zeus.md, пометка «окно вопросов»
-     или «ответ в чате», её пишет хук, не роли) на вопрос, который начинается с [read-<rid>], не раньше времени
-     заявки; в тексте вопроса — хеш,
-     пересчитанный из request.json и chats.json сейчас, id каждого чата и обе даты. Последний такой ответ решает:
-     «Да…» — выгрузка, «Нет…» — заявка удаляется. Ответа нет за REQUEST_TTL — заявка удаляется.
+     или «ответ в чате», её пишет хук, не роли) на вопрос, который начинается с [read-<rid>] (или с нескольких
+     номеров подряд «[read-a] [read-b] …» — ответ идёт каждой), не раньше времени заявки. Вопрос — полный (в нём
+     хеш, пересчитанный из request.json и chats.json сейчас, id каждого чата и обе даты) или короткий, своими словами
+     и без хеша (metis-1135, hermes-0069): тогда хеш сверяет проход сам по своему вопросу в state.json — в нём тот же
+     хеш, что сейчас, а ответ не раньше этого вопроса. Хеш в вопросе есть, но не тот, — ответ не в счёт. Метка
+     варианта («А — Да») снимается. Последний такой ответ решает: «Да…» — выгрузка, «Нет…» — заявка удаляется.
+     Ответа нет за REQUEST_TTL — заявка удаляется.
   2. Выгрузка: по чату K — `export … -o <папка>/raw-K.md -- <id>`, argv из заявки и chats.json. Пределы под папку:
      больше MAX_MESSAGES сообщений или MAX_DUMP_BYTES байт во всех выгрузках вместе — отказ с числами (refused
      too-big), выгрузки удаляются, читателя нет: молча ничего не обрезается. Ни одного сообщения — отказ empty.
@@ -467,6 +470,14 @@ def question(req, chats, h):
               f"{short(os.path.join(folder(req['rid']), LIST_MD))}, хеш {h}")
 
 
+def short_question(req, chats):
+    """Короткий вопрос владельцу без хеша и id чатов (metis-1135): «да» на него проход сверяет со своим вопросом
+    question() из state.json (consent). Путь к названиям чатов — в нём же."""
+    return (f"[read-{req['rid']}] Разрешить выгрузку {len(chats)} чат(ов) за {req['since']} — {req['until']} для "
+            f"{req['direction']}, без вложений? Названия чатов — файл "
+            f"{short(os.path.join(folder(req['rid']), LIST_MD))}")
+
+
 def write_names(d, name, head, rows):
     """Файл с названиями чатов от источника для владельца: 0600, шапка выгрузки, названия между метками TG- — сессию,
     открывшую файл, помечает guard tg-taint. → путь."""
@@ -796,30 +807,33 @@ def take_queues():
 
 # --- ответы владельца -------------------------------------------------------------------------------------------------
 
+QUESTION_IDS = re.compile(r"вопрос:[ \t]*((?:\[[a-z0-9][a-z0-9-]{0,60}\][ \t,]*)+)(.*?)\nответ:", re.I | re.S)
+
+
 def owner_answers(qid):
     """[(время, вопрос после «[qid]», ответ)] из owner-log/zeus.md: только выбор в окне вопросов или в чате (metis-0405)
-    на вопрос «[qid] …»."""
+    на вопрос «[qid] …». Вопрос — весь текст до строки «ответ:», и на несколько строк. Несколько заявок одним вопросом
+    — «[read-a] [read-b] …» в начале (metis-1135, hermes-0069): ответ идёт каждой из них."""
     try:
         with open(P.path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
     except (OSError, UnicodeDecodeError):
         return []
-    own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\](.*)", re.I)
     out = []
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
         if not P.answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
-        q = own.match(body)
+        q = QUESTION_IDS.match(body)
         a = re.search(r"^ответ: (.*)$", body, re.M)
-        if not q or not a:
+        if not q or not a or qid.lower() not in [x.lower() for x in re.findall(r"\[([^\]]+)\]", q.group(1))]:
             continue
         try:
             t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
         except ValueError:
             continue
-        out.append((t, q.group(1), a.group(1).strip()))
+        out.append((t, q.group(2), a.group(1).strip()))
     return sorted(out, key=lambda x: x[0])
 
 
@@ -831,18 +845,35 @@ def _has_chat(text, chat):
     return re.search(r"(?<![\w-])" + re.escape(chat) + r"(?![\w])", text) is not None
 
 
-def consent(req, chats):
-    """«да» | «нет» | None: последний ответ владельца на [read-<rid>] после заявки, в вопросе которого — хеш согласия
-    (пересчитанный сейчас из заявки и списка чатов), id каждого чата и обе даты."""
+HASH_TOKEN = re.compile(r"(?<![\w-])(?:хеш|хэш|hash)\W{0,3}[0-9a-f]{6,}", re.I)   # хеш, названный в вопросе
+# метка варианта перед его текстом — «А — Да», «1. Да», «(б) Нет» (как CONSENT_LABEL в lib/consent.py)
+ANSWER_LABEL = re.compile(r"(?:\((?:[а-яёa-z]|\d{1,2})\)\s*[—–.:-]?|(?:[а-яёa-z]|\d{1,2})\s*[—–.):-])\s*", re.I)
+
+
+def consent(req, chats, st=None):
+    """«да» | «нет» | None: последний ответ владельца на [read-<rid>] после заявки. Вопрос годится в двух видах:
+      - полный: в нём хеш согласия (пересчитанный сейчас из заявки и списка чатов), id каждого чата и обе даты;
+      - короткий (metis-1135, hermes-0069 16.11: «да» без хеша не засчиталось, и Зевс задал четыре огромных вопроса
+        заново): «[read-<rid>] …» своими словами, без хеша. Тогда хеш сверяет проход сам — по своему вопросу из
+        state.json (st["question"], его пишет проход, роли STATE не пишут): в нём должен быть тот же хеш, что
+        пересчитан сейчас, то есть заявка и список чатов с тех пор не менялись; ответ — не раньше этого вопроса
+        (resolved_at). Хеш в коротком вопросе есть, но не тот, — вопрос не годится: владелец видел другую заявку.
+    Владелец хеша не повторяет ни в каком виде: он лишь в тексте вопроса, который задаёт Зевс."""
     h = consent_hash(req, chats)
+    asked = str((st or {}).get("question") or "")
+    own = asked.startswith(f"[read-{req['rid']}] ") and _has_hash(asked, h)
+    asked_at = int((st or {}).get("resolved_at") or 0)
     last = None
     for t, q, a in owner_answers("read-" + req["rid"]):
         if t < req["created"]:
             continue
-        if not (_has_hash(q, h) and all(_has_chat(q, c["id"]) for c in chats)
-                and req["since"] in q and req["until"] in q):
+        full = (_has_hash(q, h) and all(_has_chat(q, c["id"]) for c in chats)
+                and req["since"] in q and req["until"] in q)
+        short_q = own and t >= asked_at and not HASH_TOKEN.search(q)
+        if not (full or short_q):
             continue
-        w = re.split(r"[\s,.!—–-]+", a.lower(), maxsplit=1)[0]
+        lab = ANSWER_LABEL.match(a)
+        w = re.split(r"[\s,.!—–-]+", (a[lab.end():] if lab else a).lower(), maxsplit=1)[0]
         if w in ("да", "нет"):
             last = w
     return last
@@ -1095,7 +1126,10 @@ def ask_card(rid, req, chats, q):
             f"{req['since']} — {req['until']}. Плановый проход нашёл по указаниям чатов: {len(chats)}, "
             f"{count_text(chats)}. Названий чатов в карточке нет: они от чужих людей, путь к ним владелец видит в "
             "самом вопросе. Зевсу и ролям файлы заявки не открывать.\n\n"
-            "Спросить владельца окном вопросов, вопрос дословно (варианты «Да — выгрузить и разобрать» и «Нет»):\n\n"
+            "Спросить владельца окном вопросов (варианты «Да — выгрузить и разобрать» и «Нет») коротко:\n\n"
+            f"{short_question(req, chats)}\n\n"
+            "Хеш и id чатов повторять не нужно: проход сам сверяет «да» со своим вопросом по номеру заявки. Несколько "
+            "заявок — одним вопросом, номера подряд в начале: «[read-…] [read-…] …». Полный вопрос, если нужен:\n\n"
             f"{q}\n\n"
             f"«Да» — выгрузку и один разбор на все чаты сделает плановый проход. Без ответа заявка удалится через "
             f"{REQUEST_TTL // 86400} дн. после подачи.")
@@ -1774,7 +1808,7 @@ def process(rid):
             fail(rid, st, "chats-bad", "chats-bad")
             return "список чатов заявки пропал или не по образцу — сбой, выгрузки нет"
     if phase == "requested":
-        ans = consent(req, chats)
+        ans = consent(req, chats, st)
         if ans is None:
             return "ждёт согласия владельца"
         if ans == "нет":
@@ -1787,7 +1821,7 @@ def process(rid):
         if t - int(st.get("reading_at") or 0) > READING_TTL:
             fail(rid, st, "reading-expired", "reading-expired", parts=st.get("parts"), done=st.get("parts_done"))
             return "разбор частями не закончен за срок — сбой, выгрузки удалены"
-        if st.get("req_hash") != consent_hash(req, chats) or consent(req, chats) != "да":
+        if st.get("req_hash") != consent_hash(req, chats) or consent(req, chats, st) != "да":
             fail(rid, st, "request-changed", "request-changed")
             return "заявка изменилась после согласия или согласие снято — выгрузки удалены, разбора нет"
         return read_parts(rid, req, chats, st)
@@ -1797,7 +1831,7 @@ def process(rid):
             log(rid, "expired")
             return "разбор устарел — удалён"
         # request.json или chats.json могли измениться после согласия (направление, чаты): заново хеш и согласие на него
-        if st.get("req_hash") != consent_hash(req, chats) or consent(req, chats) != "да":
+        if st.get("req_hash") != consent_hash(req, chats) or consent(req, chats, st) != "да":
             fail(rid, st, "request-changed", "request-changed")
             return "заявка изменилась после согласия или согласие снято — ничего не передано"
         got = approval(rid, req, st)

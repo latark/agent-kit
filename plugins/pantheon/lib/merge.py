@@ -2519,6 +2519,109 @@ def pending():
         return False
 
 
+TOUCHID_WORD = re.compile(r"touch\s*id", re.I)
+PR_NUM = re.compile(r"#([1-9][0-9]{0,8})\b")
+
+
+REPO_PR = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,8})\b")
+PR_STATE_FILE = "merge-pr-state.json"   # кэш состояния PR для touchid_stale (metis-1183/1248)
+PR_FINAL = ("MERGED", "CLOSED")
+PR_STATE_TTL = {"OPEN": 600, "?": 300}   # открытый — 10 мин, gh не ответил — 5 мин; слитый и закрытый — навсегда
+PR_STATE_KEEP = 30 * 86400
+PR_STATE_TIMEOUT = 10                    # проход watch не ждёт gh дольше
+
+
+def _request_repos(nums):
+    """{номер PR: {репозиторий}} по заявкам журнала logs/merge.jsonl (событие request, номер у заявки или её пачки) и
+    {(репозиторий, номер)} со слиянием (событие merged): вопрос «подтвердить #N по Touch ID» бывает только по заявке,
+    поэтому её репозиторий — тот, о котором вопрос. Журнал не читается — пусто."""
+    repos, merged = {}, set()
+    try:
+        with open(os.path.join(P.STATE, "logs", "merge.jsonl"), encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return repos, merged
+    for ln in lines:
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or not REPO_RE.fullmatch(str(rec.get("repo") or "")):
+            continue
+        prs = {rec.get("pr")} | {int(x) for x in str(rec.get("batch") or "").split(",") if PR_RE.fullmatch(x.strip())}
+        for n in prs & nums:
+            if rec.get("event") == "request":
+                repos.setdefault(n, set()).add(rec["repo"])
+            elif rec.get("event") == "merged" and n == rec.get("pr"):
+                merged.add((rec["repo"], n))
+    return repos, merged
+
+
+def pr_state(repo, pr, cache):
+    """Состояние PR по gh (OPEN, MERGED, CLOSED) или "?" — gh не ответил (нет сети, нет входа). cache — словарь кэша
+    {"repo#N": {"state", "at"}}, его меняет вызов: слитый и закрытый хранится, открытый и "?" — PR_STATE_TTL."""
+    key, t = f"{repo}#{pr}", P.now()
+    c = cache.get(key)
+    if isinstance(c, dict) and (c.get("state") in PR_FINAL
+                                or t - float(c.get("at") or 0) < PR_STATE_TTL.get(c.get("state"), 0)):
+        return c["state"]
+    st = "?"
+    try:
+        r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json", "state"], capture_output=True,
+                           text=True, timeout=PR_STATE_TIMEOUT, env=gh_env())
+        data = json.loads(r.stdout) if r.returncode == 0 else None
+        if isinstance(data, dict) and str(data.get("state") or "").upper() in ("OPEN",) + PR_FINAL:
+            st = str(data["state"]).upper()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    cache[key] = {"state": st, "at": t}
+    return st
+
+
+def touchid_stale(text):
+    """metis-1248, 1183: вопрос окна «подтвердить #N по Touch ID» устарел — каждый #N из текста слит или закрыт. Заявка
+    на #N в merge-queue — не устарел, gh не спрашиваем. Без заявки — не довод (её снимают и у открытого PR): репозиторий
+    #N — из текста («owner/repo#N») или из заявок журнала merge.jsonl, состояние — событие merged журнала или gh
+    (pr_state, кэш STATE/merge-pr-state.json). Репозиторий не найден, gh не ответил и кэша нет, PR открыт — не устарел.
+    Текст без «Touch ID» или без #N — не устарел (судить не о чем); очередь не читается — тоже."""
+    s = str(text or "")
+    nums = {int(n) for n in PR_NUM.findall(s)}
+    if not nums or not TOUCHID_WORD.search(s):
+        return False
+    r = root()
+    try:
+        files = os.listdir(r) if _real_dir(r) else (None if os.path.lexists(r) else [])
+    except OSError:
+        files = None
+    if files is None:
+        return False
+    live = set()
+    for f in files:
+        req = read_req(os.path.join(r, f)) if FILE_RE.fullmatch(f) else None
+        if req:
+            live.add(req["pr"])
+            live.update(n for n in req.get("batch") or () if isinstance(n, int))
+    if nums & live:
+        return False
+    repos, merged = _request_repos(nums)
+    for repo, n in REPO_PR.findall(s):
+        repos.setdefault(int(n), set()).add(repo.lower())
+    if any(not repos.get(n) for n in nums):
+        return False
+    cp = os.path.join(P.STATE, PR_STATE_FILE)
+    cache = P.read_json(cp, {})
+    cache = cache if isinstance(cache, dict) else {}
+    before = json.dumps(cache, sort_keys=True)
+    stale = all((repo, n) in merged or pr_state(repo, n, cache) in PR_FINAL
+                for n in sorted(nums) for repo in sorted(repos[n]))
+    t = P.now()
+    cache = {k: v for k, v in cache.items() if isinstance(v, dict) and t - float(v.get("at") or 0) < PR_STATE_KEEP}
+    if json.dumps(cache, sort_keys=True) != before:
+        with contextlib.suppress(OSError):
+            P.write_json(cp, cache)
+    return stale
+
+
 def cmd_status():
     r, rows, t = root(), [], P.now()
     if _real_dir(r):

@@ -166,8 +166,9 @@ check("тело: задачи пачки по порядку, закрытая �
 
 sys.path.insert(0, LIB)
 import autoclose as AC  # noqa: E402  — тот же разбор, что у планового прохода
+# metis-1232: id пачки из ветки batch/<id> — не закрываемая задача (story закрывается по составу, batch.py)
 check("autoclose: тело с «не вошли» закрывает только metis-0901 (и id пачки из ветки — не задача)",
-      AC.closing_ids("batch/metis-0900", out.split("\n\n", 1)[1]) == ["metis-0900", "metis-0901"],
+      AC.closing_ids("batch/metis-0900", out.split("\n\n", 1)[1]) == ["metis-0901"],
       str(AC.closing_ids("batch/metis-0900", out)))
 
 git(wt, "switch", "-q", "-c", "metis-0902-vtoraya")
@@ -211,7 +212,7 @@ check("«часть metis-0902» в коммите → Closes только metis
 check("тело без слова «часть» (и из заголовка задачи): autoclose.is_part — нет",
       not AC.is_part(body) and "ч. работы" in body, body)
 check("autoclose по телу закрывает только metis-0901",
-      AC.closing_ids("batch/metis-0900", body) == ["metis-0900", "metis-0901"], str(AC.closing_ids("batch/metis-0900", body)))
+      AC.closing_ids("batch/metis-0900", body) == ["metis-0901"], str(AC.closing_ids("batch/metis-0900", body)))
 
 # metis-0767: Closes только задачам с отмеченными «Готово, когда»; [ ] и заглушка — «не целиком», в stderr «неотмечено N»
 HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
