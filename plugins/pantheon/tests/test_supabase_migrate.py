@@ -20,6 +20,11 @@
   отказ без PWNED; хук reference-transaction не исполняется; звено-ссылка в середине пути на чужой клон — отказ;
   репозиторий — от текущей папки, файл другого репозитория и «..» — отказ; окно направления — только свой репозиторий
   (domains.json), битая карта — отказ; мутанты каждой из этих проверок;
+- origin окна — только из списка сборки (STATE/repo-origins/<окно>.json, record_origins; возврат двух argus #521):
+  новый репозиторий окна со своим origin в папке направления, которая сама не репозиторий, и bare-репозиторий,
+  переименованный в .git, — отказ «нет в списке»; подменённый remote.origin.url закреплённого репозитория не влияет
+  (ls-remote и fetch по закреплённому адресу); закреплённый локальный адрес и нет списка — отказ; record_origins
+  берёт только папку с .git/config в denyWrite и origin из merge_repos; мутант на каждую ветку;
 - строка подключения не в argv psql и pg_dump, а в PG* окружения (пароль с %-кодом, sslmode, PG* родителя сняты);
   адрес не postgresql://, без пользователя, с чужим параметром или плохим портом — отказ;
 - текст миграции (check_sql): «\\» где угодно, не UTF-8, управляющие знаки кроме \\n и \\t (\\r), client_encoding,
@@ -31,6 +36,7 @@
 import atexit
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -535,9 +541,27 @@ code, out, err, calls = call(["migrate", MIG, "--dry-run"], cwd=os.path.join(REP
 check("текущая папка внутри репозитория, путь от неё не туда — отказ, не догадка", code == 1, (code, err))
 code, out, err, calls = call(["migrate", MIG, "--dry-run"], cwd=REPO)
 check("относительный путь от корня репозитория — код 0", code == 0 and "проверено" in out, (code, err))
-# окно направления — только свой репозиторий (domains.json в STATE)
+# окно направления — только свой репозиторий (domains.json в STATE) и origin только из списка сборки окна
+# (STATE/repo-origins/<окно>.json, record_origins; metis-1295, возврат двух argus #521). Закреплённый адрес — GitHub
+# (локальный — отказ); в тесте его подменяет на голый origin рядом url.insteadOf глобального конфига (HOME=ROOT):
+# его окно не пишет, а конфиг репозитория с url.* — отказ check_config
+PIN_URL = "https://github.com/t/r4.git"
+write(os.path.join(ROOT, ".gitconfig"), f'[url "{ORIGIN}"]\n\tinsteadOf = {PIN_URL}\n')
+PINS = os.path.join(STATE, "repo-origins")
+
+
+def pins(win, repos):
+    write(os.path.join(PINS, win + ".json"), json.dumps({"repos": repos}))
+
+
+DIR_C = os.path.join(ROOT, "dir-c")  # папка направления w-c, сама не репозиторий
+APP, BARED = os.path.join(DIR_C, "app"), os.path.join(DIR_C, "x")
+NESTED = os.path.join(R4, "nested")
+pins("w-a", {REPO: PIN_URL})
+pins("w-b", {R4: PIN_URL, NESTED: PIN_URL})
+pins("w-c", {})
 DOMAINS = os.path.join(STATE, "domains.json")
-write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"]}}' % (REPO, R4))
+write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"], "w-c": ["%s"]}}' % (REPO, R4, DIR_C))
 code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})
 check("окно w-a, репозиторий направления w-b — код 1, «направления w-b»",
       code == 1 and "направления w-b" in err.strip().splitlines()[-1], (code, err))
@@ -549,19 +573,76 @@ write(DOMAINS, "{")
 code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-b"})
 check("карта направлений битая при окне — код 1, «не прочитана»",
       code == 1 and "не прочитана" in err.strip().splitlines()[-1], (code, err))
-write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"]}}' % (REPO, R4))
+write(DOMAINS, '{"domains": {"w-a": ["%s"], "w-b": ["%s"], "w-c": ["%s"]}}' % (REPO, R4, DIR_C))
 # вложенный репозиторий в репозитории направления: его .git/config (origin) окно задаёт при клоне (metis-1295, Д1)
-NESTED = os.path.join(R4, "nested")
 git(ROOT, "clone", ORIGIN, NESTED)
 code, out, err, calls = call(["migrate", os.path.join(NESTED, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-b"},
                              cwd=NESTED)
 check("окно w-b, репозиторий вложен в r4 — код 1, «вложенный» последней строкой",
       code == 1 and "вложенный" in err.strip().splitlines()[-1], (code, err))
+# папка направления — не репозиторий: окно делает в ней свой репозиторий со своим origin (evil.git, где LOCAL «слит»)
+git(ROOT, "clone", EVIL, APP)
+W_C = {"PANTHEON_WINDOW": "w-c"}
+code, out, err, calls = call(["migrate", os.path.join(APP, LOCAL), "--dry-run"], W_C, cwd=APP)
+check("окно w-c, новый репозиторий в папке направления (не репозиторий) со своим origin — код 1, «нет в списке»",
+      code == 1 and "нет в списке" in err.strip().splitlines()[-1], (code, err))
+# bare-репозиторий с origin evil, переименованный в .git: литерал <x>/.git/config в denyWrite его бы не пустил,
+# а x — не из сборки, его в списке нет
+git(ROOT, "clone", "--bare", EVIL, os.path.join(BARED, "g"))
+os.rename(os.path.join(BARED, "g"), os.path.join(BARED, ".git"))
+git(BARED, "config", "core.bare", "false")
+git(BARED, "checkout", "-f", "main")
+check("подготовка: bare-клон evil, переименованный в .git, — рабочая копия с LOCAL",
+      os.path.isfile(os.path.join(BARED, LOCAL)))
+code, out, err, calls = call(["migrate", os.path.join(BARED, LOCAL), "--dry-run"], W_C, cwd=BARED)
+check("окно w-c, bare-репозиторий переименован в .git — код 1, «нет в списке»",
+      code == 1 and "нет в списке" in err.strip().splitlines()[-1], (code, err))
+# закреплённый r4: окно меняет remote.origin.url на evil и кладёт LOCAL — ls-remote и fetch всё равно по закреплённому
+git(R4, "remote", "set-url", "origin", EVIL)
+write(os.path.join(R4, LOCAL), "drop table t;\n")
+W_B = {"PANTHEON_WINDOW": "w-b"}
+code, out, err, calls = call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B)
+check("окно w-b, remote.origin.url r4 подменён на evil — сверка по закреплённому адресу: код 1, «не из ветки»",
+      code == 1 and "не из ветки по умолчанию" in err.strip().splitlines()[-1], (code, err))
+code, out, err, calls = call(["migrate", os.path.join(R4, MIG), "--dry-run"], W_B)
+check("окно w-b, слитый файл r4 при подменённом remote — код 0", code == 0, (code, err))
+pins("w-b", {R4: EVIL, NESTED: PIN_URL})
+code, out, err, calls = call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B)
+check("закреплённый адрес — локальный путь — код 1, «локальный»",
+      code == 1 and "локальный" in err.strip().splitlines()[-1], (code, err))
+pins("w-b", {R4: PIN_URL, NESTED: PIN_URL})
+git(R4, "remote", "set-url", "origin", ORIGIN)
+code, out, err, calls = call(["migrate", p(MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-z"}, cwd=REPO)
+check("списка окна нет — код 1, «не прочитан»", code == 1 and "не прочитан" in err.strip().splitlines()[-1],
+      (code, err))
+RM = load()
+check("remote_ok: сетевые адреса — да, локальные, file://, «::» и «-» — нет",
+      all(RM.remote_ok(u) for u in (PIN_URL, "ssh://git@github.com/t/r.git", "git@github.com:t/r.git"))
+      and not any(RM.remote_ok(u) for u in (EVIL, "./x", "x", "file:///x", "FILE://x", "ext::sh -c x", "-u.x:y",
+                                            "git@h:/abs", "", None)))
+check("github_repo: только github.com, регистр не важен",
+      RM.github_repo("https://github.com/T/R4.git") == "t/r4" and RM.github_repo("git@github.com:t/r4") == "t/r4"
+      and RM.github_repo("https://github.comx/t/r4") == "" and RM.github_repo(EVIL) == "")
+# record_origins (сборка окна): закреплён только репозиторий с <папка>/.git/config в denyWrite и origin из merge_repos
+TOP = os.path.join(ROOT, "top")
+REC = {n: os.path.join(TOP, n) for n in ("a", "b", "c", "d")}
+for n, url in (("a", "https://github.com/T/R4.git"), ("b", "https://github.com/t/other.git"), ("c", ORIGIN),
+               ("d", PIN_URL)):
+    git(ROOT, "clone", ORIGIN, REC[n])
+    git(REC[n], "remote", "set-url", "origin", url)
+REC_DENY = [REC[n] + "/.git/config" for n in "abc"]  # d — не закреплён: так выглядит .git, созданная окном
+REC_STATE = os.path.join(ROOT, "state-rec")
+REC_OUT = RM.record_origins(REC_STATE, "w-r", [TOP], REC_DENY, ["t/r4"])
+check("record_origins: закреплён только a (github из merge_repos, .git/config в denyWrite), список в STATE",
+      REC_OUT == {REC["a"]: "https://github.com/T/R4.git"}
+      and json.load(open(os.path.join(REC_STATE, "repo-origins", "w-r.json"), encoding="utf-8"))["repos"] == REC_OUT,
+      REC_OUT)
 
 # --- через pantheon (run.py) ---
 env = {**os.environ, **GIT_ENV, "PATH": BIN + os.pathsep + os.environ.get("PATH", ""), "PANTHEON_STATE": STATE,
        "PANTHEON_HOME": os.path.join(ROOT, "pantheon"), "PANTHEON_NO_NOTIFY": "1",
        "PANTHEON_CLAUDE_TMP": os.path.join(ROOT, "ctmp")}
+env.pop("PANTHEON_WINDOW", None)  # окно, из которого идёт тест, — не окно теста: у него нет списка в STATE теста
 os.makedirs(env["PANTHEON_CLAUDE_TMP"], exist_ok=True)
 r = subprocess.run([PY311, "-I", os.path.join(LIB, "run.py"), "supabase", "migrate", p(LOCAL), "--dry-run"], env=env,
                    capture_output=True, text=True, timeout=120, cwd=REPO)
@@ -607,14 +688,14 @@ check("мутант (короткое имя origin/main вместо своег
       "мутанта — отказ «неоднозначно»", call(["migrate", p(LOCAL), "--dry-run"], mod=load(SRC6))[0] == 0
       and "неоднозначно" in call(["migrate", p(LOCAL), "--dry-run"])[2])
 git(REPO, "update-ref", "-d", "refs/tags/origin/main")
-M7 = mutant('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/heads/{branch}:{verified}"',
-            '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", "main"')
+M7 = mutant('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", remote, f"+refs/heads/{branch}:{verified}"',
+            '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", remote, "main"')
 git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")
 check("мутант (fetch не в свой ref) оставляет подвинутый ref — его ловит сверка с ls-remote «не равен»",
       "не равен" in call(["migrate", p(LOCAL), "--dry-run"], mod=M7)[2]
       and "нет в origin/main" in call(["migrate", p(LOCAL), "--dry-run"])[2])
-SRC32 = SRC.replace('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/heads/{branch}:{verified}"',
-                    '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", "main"', 1).replace("    if sha != tip:", "    if False:", 1)
+SRC32 = SRC.replace('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", remote, f"+refs/heads/{branch}:{verified}"',
+                    '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", remote, "main"', 1).replace("    if sha != tip:", "    if False:", 1)
 assert "if sha != tip" not in SRC32 and "{branch}:{verified}" not in SRC32
 git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")  # настоящий вызов выше вернул ref — снова двигаем
 check("мутант (ref не сверен с коммитом из ls-remote) — ref, подвинутый окном на свой коммит, пропускает LOCAL — "
@@ -669,7 +750,7 @@ M16 = mutant("    return \"\".join(out)", "    return sql")
 check("мутант (литералы не вырезаны) отказывает честной миграции — тест это видит",
       call(["migrate", p(GOOD)], mod=M16)[0] == 1 and call(["migrate", p(GOOD)])[0] == 0)
 
-M21 = mutant("    branch, tip = default_branch(repo)\n", '    branch, tip = "main", default_branch(repo)[1]\n')
+M21 = mutant("    branch, tip = default_branch(repo, remote)\n", '    branch, tip = "main", default_branch(repo, remote)[1]\n')
 check("мутант (всегда main) отказывает репозиторию без main — тест это видит",
       call(["migrate", p2(MIG), "--dry-run"], mod=M21)[0] == 1 and call(["migrate", p2(MIG), "--dry-run"])[0] == 0)
 M22 = mutant("    return name, tip\n", '    b = _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")'
@@ -714,9 +795,47 @@ check("мутант (репозиторий от realpath файла) уводи
       "это видит", call(["migrate", os.path.join(R5, LOCAL), "--dry-run"], mod=M28)[0] == 0
       and call(["migrate", os.path.join(R5, LOCAL), "--dry-run"])[0] == 1)
 M29 = mutant("    own_repo(state, repo)\n", "")
-check("мутант (без проверки направления) пускает окно w-a в репозиторий w-b — тест это видит",
-      call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"}, mod=M29)[0] == 0
-      and call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})[0] == 1)
+check("мутант (без проверки направления) — причина уже не «направления w-b» — тест это видит",
+      "направления w-b" not in call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"},
+                                    mod=M29)[2]
+      and "направления w-b" in call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})[2])
+
+# мутанты origin из списка сборки окна (metis-1295, возврат двух argus #521)
+M37 = mutant('    if not isinstance(url, str):\n        raise', '    if not isinstance(url, str):\n        return "origin"\n'
+             "        raise")
+check("мутант (репозиторий не из списка — origin его config) пускает новый репозиторий окна с origin evil — тест это "
+      "видит", call(["migrate", os.path.join(APP, LOCAL), "--dry-run"], W_C, cwd=APP, mod=M37)[0] == 0
+      and call(["migrate", os.path.join(BARED, LOCAL), "--dry-run"], W_C, cwd=BARED, mod=M37)[0] == 0)
+M38 = mutant("    except (OSError, ValueError, AttributeError) as e:\n        raise Refused(f\"список",
+             "    except (OSError, ValueError, AttributeError) as e:\n        return \"origin\"\n        raise Refused(f\"список")
+check("мутант (списка нет — origin config) — окно без списка проходит — тест это видит",
+      call(["migrate", p(MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-z"}, cwd=REPO, mod=M38)[0] == 0)
+M39 = mutant("    return url\n\n\ndef own_repo", '    return "origin"\n\n\ndef own_repo')
+git(R4, "remote", "set-url", "origin", EVIL)
+check("мутант (ls-remote и fetch по remote из config, не по закреплённому) пропускает LOCAL с origin evil — тест это "
+      "видит", call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B, mod=M39)[0] == 0
+      and call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B)[0] == 1)
+M40 = mutant("    if not remote_ok(url):\n        raise Refused(f\"закреплённый", "    if False:\n        raise Refused(f\"закреплённый")
+pins("w-b", {R4: EVIL, NESTED: PIN_URL})
+check("мутант (локальный закреплённый адрес принят) пропускает LOCAL из evil — тест это видит",
+      call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B, mod=M40)[0] == 0)
+pins("w-b", {R4: PIN_URL, NESTED: PIN_URL})
+git(R4, "remote", "set-url", "origin", ORIGIN)
+os.remove(os.path.join(R4, LOCAL))
+M41 = mutant('    if not isinstance(url, str) or not url or url.startswith("-") or "::" in url', "    if False")
+check("мутант remote_ok (без отказа на «-», «::», пустое) — тест это видит",
+      any(M41.remote_ok(u) for u in ("-u.x:y", "ext::sh -c x")))
+M42 = mutant('        return url.split("://", 1)[0].lower() in ("https", "ssh")', "        return True")
+check("мутант remote_ok (любая схема, file://) — тест это видит", M42.remote_ok("file:///x"))
+M43 = mutant('or os.path.join(dotgit, "config") not in pinned ', "")
+check("мутант record_origins (без литерала .git/config в denyWrite) закрепляет d — тест это видит",
+      REC["d"] in M43.record_origins(REC_STATE, "w-m", [TOP], REC_DENY, ["t/r4"]))
+M44 = mutant("            if github_repo(url) and github_repo(url) in want:", "            if url:")
+check("мутант record_origins (origin не из merge_repos) закрепляет b и c — тест это видит",
+      {REC["b"], REC["c"]} <= set(M44.record_origins(REC_STATE, "w-m", [TOP], REC_DENY, ["t/r4"])))
+M45 = mutant("        for d in [top] + [os.path.join(top, n) for n in names]:", "        for d in [top]:")
+check("мутант record_origins (без подпапок первого уровня) не закрепляет a — тест это видит",
+      M45.record_origins(REC_STATE, "w-m", [TOP], REC_DENY, ["t/r4"]) == {})
 
 # мутанты хранилища объектов (metis-1295, второй argus #521)
 SRC30 = SRC.replace('"git", "--no-replace-objects", ', '"git", ').replace(', GIT_NO_REPLACE_OBJECTS="1"', "")

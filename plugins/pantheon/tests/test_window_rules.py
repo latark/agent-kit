@@ -3,6 +3,7 @@
 модуль ядра защит. Модуль грузится сам по пути файла (python3 -I), pantheon.py берёт правила из него и сам их не
 определяет; сборка autoMode и permissions окна та же; шлюз guard считает файл ядром."""
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -91,6 +92,14 @@ def excluded_no_worktree_write(p, tmp):
     if not ws_ssh:
         print("пропущено: мастерская с SSH-remote — окно не даёт записать .git/config во временном HOME")
     built = p.sandbox_build(folders, os.path.join(tmp, "no-policy.toml"))
+    # metis-1295: origin репозиториев окна для supabase migrate — список сборки в STATE, а не .git/config окна
+    origins = {}
+    for n in ("alpha-test", "metis-pantheon", "workshop"):
+        with contextlib.suppress(OSError, ValueError):
+            with open(p.path("repo-origins", n + ".json"), encoding="utf-8") as fh:
+                origins[n] = json.load(fh).get("repos")
+    check("sandbox_build: окнам направлений — STATE/repo-origins/<окно>.json (папка не репозиторий — пусто), "
+          "мастерской — нет (metis-1295)", origins == {"alpha-test": {}, "metis-pantheon": {}}, origins)
     out = p.path("settings")
     windows, auto = {}, {}
     for f in sorted(os.listdir(out)):
@@ -252,7 +261,7 @@ def nested_pin_levels(p, tmp, dw):
     open(os.path.join(f, "sub.git"), "w").close()
     os.symlink(os.path.join(f, "real"), os.path.join(f, "link"))
     got = p.nested_pins(f)
-    want = [f + "/app/.claude/settings.json", f + "/lib/.git/hooks", f + "/proj/.claude/settings.json",
+    want = [f + "/app/.claude/settings.json", f + "/lib/.git/hooks", f + "/lib/.git/config", f + "/proj/.claude/settings.json",
             f + "/real/.claude/settings.json"]
     check("nested_pins: .claude подпапки с .claude и вложенного проекта (и без .claude), .git — только существующей; "
           "скрытые, ссылки, файлы и простые папки — нет", got == want, got)

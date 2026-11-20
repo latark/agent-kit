@@ -8,7 +8,11 @@ metis-1295):
      звено от корня репозитория до файла — не ссылка, без «..»; иначе отказ. Первая .git над текущей папкой —
      настоящая папка (не файл «gitdir:», не ссылка, без commondir), git зовётся с явным --git-dir на неё; иначе
      отказ. В окне направления (PANTHEON_WINDOW в domains.json из STATE) репозиторий — только своего направления и не
-     вложенный в другой репозиторий до папки направления. Конфиг репозитория (scope local и worktree) с ключами, которые запускают команду или меняют
+     вложенный в другой репозиторий до папки направления. Origin окна — не из .git/config (свой git init или
+     bare-репозиторий, переименованный в .git, задал бы его), а адрес из STATE/repo-origins/<окно>.json: его пишет
+     сборка окна (record_origins из sandbox_build) — репозитории папок направления и их подпапок первого уровня с
+     <папка>/.git/config литералом в denyWrite и origin из [merge_repos] направления; ls-remote и fetch — по этому
+     адресу. Репозитория нет в списке, списка нет или адрес локальный (путь, file://) — отказ. Конфиг репозитория (scope local и worktree) с ключами, которые запускают команду или меняют
      транспорт (UNSAFE_CONFIG: core.sshCommand, core.gitProxy, remote.*.uploadpack, credential.*, filter.*, url.*,
      include.* и др.), — отказ. Каждый git — с GIT_SAFE (core.hooksPath=/dev/null, core.fsmonitor=false,
      core.sshCommand=ssh, protocol.ext.allow=never, submodule.recurse=false; fetch — --no-recurse-submodules),
@@ -262,11 +266,12 @@ def check_sql(rel, body):
                           "убери управление транзакцией")
 
 
-def default_branch(repo):
-    """(ветка по умолчанию, sha её коммита) со слов сервера (`ls-remote --symref origin HEAD`), а не локальный
+def default_branch(repo, remote="origin"):
+    """(ветка по умолчанию, sha её коммита) со слов сервера remote (`ls-remote --symref <remote> HEAD`; в окне — адрес из
+    pinned_remote, а не origin из .git/config окна), а не локальный
     refs/remotes/origin/HEAD: его двигает `git remote set-head`. Refused — нет ответа, ответ неоднозначен или имя
     не ветка."""
-    r = _git(repo, "ls-remote", "--symref", "origin", "HEAD")
+    r = _git(repo, "ls-remote", "--symref", remote, "HEAD")
     if r.returncode != 0:
         raise Refused(f"не узнал ветку по умолчанию origin ({(r.stderr or '').strip()[-200:]}) — без неё сверить нельзя")
     heads = [ln.split("\t")[0].removeprefix("ref: ") for ln in r.stdout.splitlines()
@@ -281,6 +286,83 @@ def default_branch(repo):
     if len(tip) not in HASHES or tip.strip("0123456789abcdef"):
         raise Refused(f"сервер origin не назвал коммит ветки {name} однозначно ({tips[:3]}) — сверить не с чем")
     return name, tip
+
+
+def remote_ok(url):
+    """Адрес origin — сетевой: https://, ssh:// или scp-вид «хост:путь». Локальный путь, file://, «транспорт::»,
+    знак «-» в начале — нет: такой origin окно кладёт рядом со своим main."""
+    if not isinstance(url, str) or not url or url.startswith("-") or "::" in url or any(c in url for c in "\0\r\n"):
+        return False
+    if "://" in url:
+        return url.split("://", 1)[0].lower() in ("https", "ssh")
+    return bool(re.fullmatch(r"[A-Za-z0-9._@-]+:[^/].*", url))
+
+
+GITHUB = re.compile(r"(?:https://(?:[^@/]+@)?github\.com/|ssh://(?:[^@/]+@)?github\.com(?::\d+)?/"
+                    r"|(?:[^@/:]+@)?github\.com:/?)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?")
+
+
+def github_repo(url):
+    """«владелец/имя» репозитория GitHub в нижнем регистре по адресу origin, "" — адрес не GitHub."""
+    m = GITHUB.fullmatch(url) if remote_ok(url) else None
+    return f"{m.group(1)}/{m.group(2)}".lower() if m else ""
+
+
+ORIGINS = "repo-origins"  # STATE/repo-origins/<окно>.json — закреплённые репозитории окна и их origin
+
+
+def record_origins(state, name, folders, deny_write, repos):
+    """Сборка окна направления (sandbox_build) → STATE/repo-origins/<name>.json: {"repos": {папка: адрес origin}}.
+    Берутся папки направления и их подпапки первого уровня, у которых .git — настоящая папка, а <папка>/.git/config
+    литералом в denyWrite окна (окно не переименует и не создаст такую .git), и адрес origin — репозиторий GitHub из
+    [merge_repos] направления (repos): репозиторий, который окно создало до сборки, со своим origin сюда не попадёт.
+    STATE окну не пишется; migrate в окне берёт origin только отсюда (metis-1295, возврат argus #521) → словарь."""
+    pinned, want, out = set(deny_write), {r.lower() for r in repos or () if isinstance(r, str)}, {}
+    for top in folders:
+        try:
+            names = sorted(n for n in os.listdir(top) if not n.startswith("."))
+        except OSError:
+            continue
+        for d in [top] + [os.path.join(top, n) for n in names]:
+            dotgit = os.path.join(d, ".git")
+            if (d in out or os.path.islink(d) or os.path.join(dotgit, "config") not in pinned or os.path.islink(dotgit)
+                    or not os.path.isdir(dotgit) or os.path.lexists(os.path.join(dotgit, "commondir"))):
+                continue
+            r = _git(d, "config", "--file", os.path.join(dotgit, "config"), "--get", "remote.origin.url")
+            url = r.stdout.strip() if r.returncode == 0 else ""
+            if github_repo(url) and github_repo(url) in want:
+                out[d] = url
+    path = os.path.join(state, ORIGINS, name + ".json")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
+        json.dump({"_comment": "pantheon domains build (sandbox_build): репозитории окна для supabase migrate. Руками "
+                   "не править.", "repos": out}, fh, ensure_ascii=False, indent=1)
+    os.replace(path + ".tmp", path)
+    return out
+
+
+def pinned_remote(state, repo):
+    """Адрес, с которым сверяется ветка по умолчанию. Вне окна — origin репозитория. В окне — только закреплённый
+    при сборке окна (record_origins): .git/config окна не источник доверия — свой git init или bare-репозиторий,
+    переименованный в .git, задал бы origin окна. Refused — списка нет, репозитория в нём нет или адрес локальный."""
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    if not win or not state:
+        return "origin"
+    path = os.path.join(state, ORIGINS, win + ".json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            pins = json.load(fh).get("repos")
+    except (OSError, ValueError, AttributeError) as e:
+        raise Refused(f"список закреплённых репозиториев окна {win} не прочитан ({type(e).__name__}) — origin не "
+                      "сверить (пересобрать окна: pantheon domains build)") from None
+    url = pins.get(repo) if isinstance(pins, dict) else None
+    if not isinstance(url, str):
+        raise Refused(f"{repo} нет в списке закреплённых репозиториев окна {win} ({path}): новый или не из "
+                      "[merge_repos] направления — его origin задало бы окно; миграция только из репозитория, "
+                      "закреплённого при сборке окна (pantheon domains build)")
+    if not remote_ok(url):
+        raise Refused(f"закреплённый origin {repo} — локальный путь или file:// ({url[:80]}) — сверять не с чем")
+    return url
 
 
 def own_repo(state, repo):
@@ -335,18 +417,19 @@ def check_file(path, fetch=True, state=None):
     """Сверка файла с веткой по умолчанию origin → (репозиторий, путь в нём, sha коммита ветки, текст миграции из
     ветки в байтах, версия, имя, «origin/<ветка>»). Refused — файл не из этой ветки или не миграция Supabase."""
     repo, rel = locate(path, state)
+    remote = pinned_remote(state, repo)
     check_config(repo)
     m = MIGRATION.fullmatch(rel)
     if not m:
         raise Refused(f"{rel}: не миграция Supabase — нужен файл supabase/migrations/<версия>_<имя>.sql")
-    branch, tip = default_branch(repo)
+    branch, tip = default_branch(repo, remote)
     base, verified = "origin/" + branch, VERIFIED + branch
     for ref in (s + branch for s in SHADOW):  # ветка или метка «origin/<ветка>» затеняет удалённую ветку — отказ
         if _git(repo, "show-ref", "--verify", "--quiet", ref).returncode == 0:
             raise Refused(f"в {repo} есть {ref} — имя {base} неоднозначно, удали его (git update-ref -d {ref})")
     if fetch:
         # без подмодулей: их config ($GIT_DIR/modules/<имя>/config) пишет окно, а он не сверен (check_config)
-        f = _git(repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/heads/{branch}:{verified}")
+        f = _git(repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", remote, f"+refs/heads/{branch}:{verified}")
         if f.returncode != 0:
             raise Refused(f"не удалось обновить {base} ({(f.stderr or '').strip()[-200:]}) — без свежей ветки по "
                           "умолчанию сверить нельзя")

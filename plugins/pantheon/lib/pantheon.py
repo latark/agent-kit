@@ -3081,7 +3081,8 @@ def nested_pins(root):
         if n in proj or os.path.lexists(os.path.join(d, ".claude")):
             out.append(d + "/.claude/settings.json")
         if os.path.lexists(os.path.join(d, ".git")):
-            out.append(d + "/.git/hooks")
+            # и .git/config: по нему supabase migrate узнаёт закреплённый репозиторий (record_origins, metis-1295)
+            out += [d + "/.git/hooks", d + "/.git/config"]
     return out
 
 
@@ -4475,6 +4476,16 @@ def project_allow_stop(name, problems):
     return [a["id"] for a in ids]
 
 
+def _record_origins(name, folders, data, repos):
+    """origin репозиториев окна направления для supabase migrate — по сборке, не по .git/config окна (metis-1295)."""
+    try:
+        _plugin_map_mod("supabase_migrate").record_origins(
+            STATE, name, folders, data["sandbox"]["filesystem"]["denyWrite"], repos)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"песочница {name}: список репозиториев для supabase migrate не записан ({e}) — migrate в окне "
+              "откажет", file=sys.stderr)
+
+
 def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
     leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6). stop_live — путь тика
@@ -4614,6 +4625,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
         write_window(out_dir, name, data, ok)
+        if direction:
+            _record_origins(name, ok, data, merge_repos.get(name))
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
