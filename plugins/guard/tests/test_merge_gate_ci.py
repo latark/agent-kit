@@ -889,8 +889,36 @@ def t_ci_full_tests(h):
                h.pre(f"gh pr merge 7 --match-head-commit {sha}", pdir=kit), False,
                f"нет записи тестов на latark/agent-kit@{sha[:12]}")
 
+    # шлюз целиком в процессе (gate_problem), проект из CI_FULL_TESTS: gh, журнал и allow — подменой; «принять» argus
+    # на этот head есть, protect нет. Хук-подпроцесс берёт настоящие таблицы, а имени проекта в публичном коде нет
+    def gate(repo, base, runs, tests=False):
+        recs = [rec("accept", repo, 7, sha, base=base)] + ([rec("tests", repo, 7, sha)] if tests else [])
+        rollup = [{k: v for k, v in c.items() if k != "event"} for c in runs]
+        view = {"headRefOid": sha, "baseRefOid": BASE, "baseRefName": base, "statusCheckRollup": rollup}
+        mg.read_records, mg._ci_runs = (lambda: recs), (lambda *a, **k: runs)
+        mg._pr_view = lambda *a, **k: view
+        mg.allow = lambda notes: ("allow", tuple(notes))
+        return mg.gate_problem({"session_id": "s-merge", "agent_id": ""}, {"merge_repos": {"d": [repo]}}, "d",
+                               [repo], [7], False, [sha], "ADVICE", False)
 
-CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed, t_ci_full_tests]
+    got = gate("owner-x/proj", "develop", [ok])
+    check("gate_problem: проект из CI_FULL_TESTS, обязательные SUCCESS, записи tests нет — пропуск «засчитан CI»",
+          isinstance(got, tuple) and got[0] == "allow" and any("засчитан зелёный обязательный CI" in n for n in got[1]),
+          got)
+    got = gate("owner-x/proj", "develop", [run("FAILURE")])
+    check("gate_problem: проект, обязательная красная, записи нет — отказ", isinstance(got, str) and "FAILURE" in got, got)
+    got = gate("owner-x/proj", "epic-1", [ok])
+    check("gate_problem: проект, PR в ветку эпика (обязательных нет), записи нет — отказ «нет записи тестов»",
+          isinstance(got, str) and got.startswith("нет записи тестов на owner-x/proj") and got.endswith("ADVICE"), got)
+    got = gate("owner-y/proj", "develop", [ok])
+    check("gate_problem: репозиторий без строки CI_FULL_TESTS, CI зелёный, записи нет — отказ «нет записи тестов»",
+          isinstance(got, str) and got.startswith("нет записи тестов на owner-y/proj") and got.endswith("ADVICE"), got)
+    got = gate("owner-x/proj", "develop", [ok], tests=True)
+    check("gate_problem: проект с записью tests — пропуск без строки «засчитан CI»",
+          got is None or (isinstance(got, tuple) and not any("засчитан" in n for n in got[1])), got)
+
+
+CASES =[t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed, t_ci_full_tests]
 
 
 if __name__ == "__main__":
