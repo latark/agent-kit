@@ -794,6 +794,13 @@ def main():
               for t in ("general-purpose", "claude", "Explore", "argus", "dev-sonnet", "hq", "domain-coordinator")))
     check("окно штаба: кэши задач (выдача из веба) закрыты для чтения",
           any(x.endswith("pantheon-sandbox/job-prometheus") for x in load("hq")["sandbox"]["filesystem"]["denyRead"]))
+    # metis-1273: gh из процесса в песочнице (pantheon review accept) без trustd падает на x509 OSStatus -26276
+    built_names = sorted(f[:-5] for f in os.listdir(os.path.join(state, "settings")) if f.endswith(".json"))
+    no_trustd = [n for n in built_names if "sandbox" in load(n) and load(n)["sandbox"].get("enableWeakerNetworkIsolation") is not True]
+    check("все окна с песочницей (направления, workshop, hq, hestia, задачи): enableWeakerNetworkIsolation — доступ к "
+          "trustd для gh (metis-1273)",
+          not no_trustd and {"athena-shop", "metis-pantheon", "workshop", "hq", "hestia", "job-clio"} <= set(built_names),
+          (no_trustd, built_names))
     os.remove(os.path.join(state, "settings", "job-iris.json"))
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True)
     check("domains build --if-changed: пропавшее окно задачи пересобирается",

@@ -3099,6 +3099,10 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "enabled": True,
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
+            # macOS: доступ к com.apple.trustd — без него gh (Go, Security.framework), запущенный процессом в
+            # песочнице (pantheon review accept), падает на x509 OSStatus -26276 (metis-1273, «да» владельца 20.11
+            # «А — доступ к trustd»). Настройка Claude Code sandbox.enableWeakerNetworkIsolation; сеть и папки не шире
+            "enableWeakerNetworkIsolation": True,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else []),
             "filesystem": {
                 "allowWrite": allow,
