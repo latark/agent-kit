@@ -84,8 +84,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
                                         в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
                                         песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
-  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
-                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
+  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из ветки по умолчанию origin, со сверкой схемы
+                                        (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL; окну
+                                        направления мимо песочницы, одной командой в строке (guard
+                                        supabase-migrate-cmd, metis-1295)
   pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
@@ -1007,6 +1009,37 @@ def parse_command(cmd):
     return None
 
 
+def direction_job(job):
+    """metis-0886 (вариант А владельца 06.11): задача расписания окном координатора направления — `direction = "<имя>"`
+    и `text = "<поручение>"` вместо command. → None — у задачи нет direction (обычная команда, parse_command); иначе
+    (направление, поручение, причина отказа или None). Папку окна задача не называет: её берёт start из реестра
+    (domains.json из directions.toml, первая существующая папка, metis-0899). Новых профилей прав нет — окно то же,
+    что у координатора."""
+    d = job.get("direction")
+    if d is None:
+        return None
+    text = job.get("text")
+    if not isinstance(d, str) or not SESSION_NAME.fullmatch(d) or d == "workshop":
+        return "", "", f"direction {str(d)[:40]!r} — не имя направления"
+    if job.get("command") is not None:
+        return d, "", "у задачи направления нет command — только direction и text"
+    if not isinstance(text, str) or not text.strip():
+        return d, "", "нет поручения (text)"
+    return d, f"Задание расписания {job.get('name')}: {text.strip()}", None
+
+
+def direction_job_problem(job):
+    """Причина, по которой задача направления не идёт (вид задачи, нет направления в реестре, нет папки, координатора
+    нет — coordinator = false), или None. Для обычной задачи — None."""
+    dj = direction_job(job)
+    if dj is None:
+        return None
+    if dj[2]:
+        return dj[2]
+    got = start_target(dj[0], [])
+    return got if isinstance(got, str) else None
+
+
 APP = os.path.join(HOME, "Applications", "Доска.app")
 
 
@@ -1431,7 +1464,13 @@ def tick():
                     continue
                 if me != primary:
                     continue
-            if parse_command(job.get("command")) is None:
+            if direction_job(job) is not None:  # окно направления (metis-0886): не claude -p и не команда
+                bad = direction_job_problem(job)
+                if bad:
+                    alert_once("baddir-" + name, bad, f"задача {name}: окно направления не поднять — {bad}; пропущена",
+                               "pantheon-tick", note=f"Задача {name} пропущена: окно направления не поднять")
+                    continue
+            elif parse_command(job.get("command")) is None:
                 alert_once("badcmd-" + name, job.get("command"), f"задача {name}: команда не разрешённого вида "
                            "(только pantheon …, claude -p …, скрипт плагина; без ; & | $ > <) — пропущена",
                            "pantheon-tick", note=f"Задача {name} пропущена: команда не разрешена")
@@ -2020,7 +2059,9 @@ def status():
         st = job_state(job["name"])
         if job.get("enabled") is False or st.get("disabled"):
             continue
-        if parse_command(job.get("command")) is None:
+        if direction_job(job) is not None and direction_job_problem(job):
+            bad = f"окно направления не поднять: {direction_job_problem(job)}"
+        elif direction_job(job) is None and parse_command(job.get("command")) is None:
             bad = "команда не разрешена"
         elif job_window_problem(parse_command(job.get("command"))):
             bad = job_window_problem(parse_command(job.get("command")))
@@ -2427,6 +2468,11 @@ PANTHEON_MERGE_OUT = ["pantheon merge request *", "pantheon merge cancel *"]
 # EnterWorktree с path (тогда коммиты в копии проходят); репозиторий, путь
 # и имена проверяет сама команда (lib/worktree.py), форму строки — guard (worktree-cmd). Мастерской нет: у неё EnterWorktree
 WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
+# миграция Supabase окна направления (metis-1295, вариант А владельца 20.11, consent metis-1295-net): в песочнице
+# ls-remote и fetch по ssh падают «Could not resolve hostname» (ssh идёт мимо прокси, DNS песочнице закрыт), а psql к
+# базе — прямое TCP. Мимо неё только migrate; прочий `pantheon supabase` — в песочнице. Файл, ветку по умолчанию origin
+# и SQL проверяет сама команда (lib/supabase_migrate.py), форму строки без цепочек — guard (supabase-migrate-cmd)
+SUPABASE_MIGRATE_OUT = ["pantheon supabase migrate *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -3078,7 +3124,8 @@ def nested_pins(root):
         if n in proj or os.path.lexists(os.path.join(d, ".claude")):
             out.append(d + "/.claude/settings.json")
         if os.path.lexists(os.path.join(d, ".git")):
-            out.append(d + "/.git/hooks")
+            # и .git/config: по нему supabase migrate узнаёт закреплённый репозиторий (record_origins, metis-1295)
+            out += [d + "/.git/hooks", d + "/.git/config"]
     return out
 
 
@@ -4474,6 +4521,24 @@ def project_allow_stop(name, problems):
     return [a["id"] for a in ids]
 
 
+def _record_origins(name, folders, data, repos):
+    """origin репозиториев окна направления для supabase migrate — по сборке, не по .git/config окна (metis-1295)."""
+    try:
+        _plugin_map_mod("supabase_migrate").record_origins(
+            STATE, name, folders, data["sandbox"]["filesystem"]["denyWrite"], repos)
+    except Exception as e:  # noqa: BLE001 — любой сбой записи: сборка окна не падает, а старый список не остаётся
+        stale = os.path.join(STATE, "repo-origins", name + ".json")  # ORIGINS в supabase_migrate
+        try:
+            os.remove(stale)  # устаревший список — migrate довёл бы до закреплённого origin, которого уже нет
+            note = "старый список удалён"
+        except FileNotFoundError:
+            note = "старого списка нет"
+        except OSError as e2:
+            note = f"старый список не удалён ({e2})"
+        print(f"песочница {name}: список репозиториев для supabase migrate не записан ({e}); {note} — migrate в окне "
+              "откажет", file=sys.stderr)
+
+
 def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
     leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6). stop_live — путь тика
@@ -4543,7 +4608,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
                              guard, auto_allow, own_agents=direction)
         if direction:
-            data["sandbox"]["excludedCommands"] += GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
+            data["sandbox"]["excludedCommands"] += (GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
+                                                    + SUPABASE_MIGRATE_OUT)
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
@@ -4612,6 +4678,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         if pmap:
             PLUGIN_MAP.window_apply(data, pmap, name, direction, guard)
         write_window(out_dir, name, data, ok)
+        if direction:
+            _record_origins(name, ok, data, merge_repos.get(name))
         return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
@@ -6521,7 +6589,8 @@ def roles_newest():
 def owner_approved(name, days=14):
     """Ваше «да» новому направлению: в журнале доски owner-log/board.jsonl (его пишет тик по вашей галочке, роли туда
     не пишут) ответ «Да…» на вопрос «Завести направление <имя>?»; ответу не больше days дней. Текст вопроса тик берёт
-    из отмеченной вами карточки (её рисует тик) — правка файла задачи до или после ответа ничего не меняет."""
+    из отмеченной вами карточки (её рисует тик) — правка файла задачи до или после ответа ничего не меняет. Второй
+    источник — ваш ответ в окне вопросов Зевса в owner-log/zeus.md (owner_approved_zeus, metis-1271)."""
     since = now() - days * 86400
     # вопрос — ровно «Завести направление <имя>?» в начале, без скрытого Obsidian текста (%%…%%, <!-- -->, теги):
     # имя должно быть там, где вы его видите; ответ — «Да» отдельным словом («Давай позже» — не согласие)
@@ -6529,8 +6598,8 @@ def owner_approved(name, days=14):
     yes = re.compile(r"да(?![а-яёa-z0-9])", re.I)
     try:
         lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
-    except OSError:
-        return False
+    except (OSError, UnicodeDecodeError):
+        lines = []   # доски нет или не читается — остаётся ответ в окне вопросов (metis-1271)
     for line in lines:
         try:
             rec = json.loads(line)
@@ -6540,6 +6609,34 @@ def owner_approved(name, days=14):
         q = rec.get("question")
         if (rec.get("kind") == "answer" and ts >= since and isinstance(q, str) and ask.match(q.strip())
                 and not re.search(r"%%|<", q) and yes.match(str(rec.get("answer") or "").strip())):
+            return True
+    return owner_approved_zeus(name, since)
+
+
+# вопрос Зевса окном вопросов (metis-1271): «[<id>] Завести направление <имя>?» или «Завести направления a, b и c — …?»
+DIRECTION_ASK_ZEUS = re.compile(r"вопрос: \[[a-z0-9][a-z0-9-]{0,40}\][ \t]*Завести направлени[ея] ")
+
+
+def owner_approved_zeus(name, since):
+    """Ваше «да» новому направлению в owner-log/zeus.md (пишет хук, роли туда не пишут): запись с пометкой «окно
+    вопросов» или «ответ в чате» (answers.is_answer_head), вопрос «[<id>] Завести направлени(е|я) …», имя целым словом
+    в части вопроса до первого «?», без скрытого текста (%%, <), ответ — «да» по consent_is_yes и не раньше since.
+    Записи без пометки (ваш набранный ввод, цитаты), «ответ в чате не распознан» — не согласие. Журнал не читается —
+    False."""
+    try:
+        text = zeus_log_text("direction " + name)
+    except ConsentLogError:
+        return False
+    A = answers_mod()
+    word = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+    for at, rest, body in log_entries(text):
+        try:
+            t = time.mktime(time.strptime(at, "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        q = body.split("\nответ:")[0]
+        if (t >= since and A.is_answer_head(rest) and DIRECTION_ASK_ZEUS.match(body)
+                and word.search(q.split("?", 1)[0]) and not re.search(r"%%|<", q) and consent_is_yes(body)):
             return True
     return False
 
@@ -6643,8 +6740,10 @@ def direction_gate(name):
             and "Ваши слова" in l]
     add(said, "ваше «да» в decisions.md: строка с именем направления и «Ваши слова»")
     # decisions.md пишет Зевс — сама строка не доказательство; текст реплики тоже (простое «да» подошло бы к любому
-    # вопросу). Доказательство — ваша галочка на карточке «Завести направление <имя>?» в журнале доски.
-    add(owner_approved(name), "ваша галочка «Да…» на карточке с этим именем в журнале доски (не старше 14 дней)")
+    # вопросу). Доказательство — ваша галочка на карточке «Завести направление <имя>?» в журнале доски или ваш выбор
+    # «Да…» в окне вопросов Зевса на вопрос «[<id>] Завести направлени(е|я) …» (owner-log/zeus.md, metis-1271).
+    add(owner_approved(name), "ваше «Да…» в окне вопросов или галочка на карточке с этим именем "
+                              "(не старше 14 дней)")
     try:
         with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
             reg = {d.get("name"): d for d in tomllib.load(fh).get("direction") or []}

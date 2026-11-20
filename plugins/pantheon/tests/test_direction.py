@@ -63,8 +63,8 @@ def main():
                                       capture_output=True, text=True)
 
     r = run("iris-demo")
-    check("галочки на доске нет — «НЕТ»: строку decisions.md пишет Зевс, сама она не доказательство",
-          r.returncode == 1 and "НЕТ     ваша галочка" in r.stdout)
+    check("ни галочки, ни ответа в окне вопросов — «НЕТ»: строку decisions.md пишет Зевс, сама она не доказательство",
+          r.returncode == 1 and "НЕТ     ваше «Да…» в окне вопросов или галочка" in r.stdout)
     import time
     iso = lambda days: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - days * 86400))
     blog = os.path.join(state, "owner-log", "board.jsonl")
@@ -87,6 +87,52 @@ def main():
     write(blog, rec(0, "Завести направление iris-demo?", "Да — завести"))
     r = run("iris-demo")
     check("всё готово — код 0, ни одного «НЕТ»", r.returncode == 0 and "НЕТ" not in r.stdout)
+
+    # metis-1271: ваш выбор «Да…» в окне вопросов Зевса (owner-log/zeus.md) засчитывается наравне с галочкой
+    write(blog, "")
+    zlog = os.path.join(state, "owner-log", "zeus.md")
+    stamp = lambda days: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - days * 86400))
+    zrec = lambda q, a, days=0, head="· окно вопросов": f"## {stamp(days)} {head}\nвопрос: {q}\nответ: {a}\n\n"
+    sample = ("[metis-0895] Завести направления nike-career (карьера), asclepius-health (здоровье) и peitho-english "
+              "(английский) — папки в ~/ai/life со своим git и строки в directions.toml? Иначе iris-demo подождёт")
+    gate = lambda name: "готово  ваше «Да…» в окне вопросов" in run(name).stdout
+    check("ответа нет ни на доске, ни в окне вопросов — «НЕТ» с новым текстом строки",
+          "НЕТ     ваше «Да…» в окне вопросов или галочка" in run("iris-demo").stdout)
+    write(zlog, zrec(sample, "А — да, все три (совет)"))
+    check("окно вопросов: образец 20.11 («А — да, все три (совет)») засчитан для всех трёх имён",
+          all(gate(n) for n in ("nike-career", "asclepius-health", "peitho-english")))
+    check("окно вопросов: имя после первого «?» не засчитывается", not gate("iris-demo"))
+    check("окно вопросов: имя-префикс (nike-career-x, nike) не засчитывается",
+          not gate("nike-career-x") and not gate("nike"))
+    write(zlog, zrec(sample.replace("nike-career ", "nike-career-x "), "А — да, все три (совет)"))
+    check("окно вопросов: в вопросе nike-career-x — nike-career не засчитан", not gate("nike-career"))
+    write(zlog, zrec(sample, "Б — нет"))
+    check("окно вопросов: ответ «Б — нет» не засчитывается", not gate("nike-career"))
+    write(zlog, zrec(sample, "А — да, все три (совет)", head="").replace(" \n", "\n", 1))
+    check("запись без пометки (ваш набранный ввод) не засчитывается", not gate("nike-career"))
+    write(zlog, zrec(sample, "А — да, все три (совет)", head="· ответ в чате не распознан"))
+    check("запись «ответ в чате не распознан» не засчитывается", not gate("nike-career"))
+    write(zlog, zrec(sample, "А — да, все три (совет)", days=20))
+    check("окно вопросов: ответ старше 14 дней не засчитывается", not gate("nike-career"))
+    write(zlog, zrec(sample.replace("(карьера)", "%%(карьера)%%"), "А — да, все три (совет)"))
+    check("окно вопросов: %% в вопросе — не засчитывается", not gate("nike-career"))
+    write(zlog, zrec(sample.replace("(карьера)", "<!-- x -->"), "А — да, все три (совет)"))
+    check("окно вопросов: «<» в вопросе — не засчитывается", not gate("nike-career"))
+    write(zlog, zrec("[metis-0001] Сделать обзор недели nike-career?", "Да"))
+    check("окно вопросов: «Да» на другой вопрос не засчитывается", not gate("nike-career"))
+    write(zlog, zrec("Завести направление nike-career?", "Да"))
+    check("окно вопросов: вопрос без [id] не засчитывается", not gate("nike-career"))
+    write(zlog, zrec("[metis-0896] Завести направление iris-demo?", "Да — завести"))
+    r = run("iris-demo")
+    check("окно вопросов без галочки на доске: всё готово — код 0", r.returncode == 0 and "НЕТ" not in r.stdout,
+          r.stdout[-300:])
+    os.chmod(zlog, 0)
+    r = run("iris-demo")
+    check("журнал окна вопросов не читается — «НЕТ», без падения",
+          r.returncode == 1 and "НЕТ     ваше «Да…»" in r.stdout and "Traceback" not in r.stderr, r.stderr[-300:])
+    os.chmod(zlog, 0o600)
+    os.remove(zlog)
+    write(blog, rec(0, "Завести направление iris-demo?", "Да — завести"))
 
     write(decisions, "| 15.10.2026 | Новое направление `iris-demo` — совет Зевса | — |\n")
     r = run("iris-demo")
@@ -185,7 +231,7 @@ def test_init():
 
     r = run("init", "iris-new")
     check("init: галочки владельца нет — код 1, «НЕТ» как у check, папка не создана",
-          r.returncode == 1 and "НЕТ     ваша галочка" in r.stdout and not os.path.lexists(newx))
+          r.returncode == 1 and "НЕТ     ваше «Да…» в окне вопросов или галочка" in r.stdout and not os.path.lexists(newx))
     iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
     write(os.path.join(state, "owner-log", "board.jsonl"), json.dumps(
         {"time": iso, "kind": "answer", "id": "x-0001", "answer": "Да — завести",

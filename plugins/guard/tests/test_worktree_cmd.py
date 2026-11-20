@@ -39,6 +39,23 @@ def load(src=None):
     return m
 
 
+def fn_span(src, name):
+    """Границы текста функции name в src: от `def name(` до следующего `def` верхнего уровня. Мутанты правила ищут и
+    подменяют строки только здесь: соседнее supabase-migrate-cmd (metis-1295) повторяет те же строки."""
+    a = src.index(f"\ndef {name}(") + 1
+    return a, src.index("\ndef ", a)
+
+
+def fn_count(src, name, old):
+    a, b = fn_span(src, name)
+    return src[a:b].count(old)
+
+
+def fn_replace(src, name, old, new):
+    a, b = fn_span(src, name)
+    return src[:a] + src[a:b].replace(old, new) + src[b:]
+
+
 try:
     g = load()
 
@@ -92,29 +109,29 @@ try:
 
     src = open(RULES, encoding="utf-8").read()
     old = "    if WORKTREE_LINE.match(cmd) and \"..\" not in cmd:\n"
-    check("самопроверка мутантов: строка проверки одна", src.count(old) == 1)
-    m = load(src.replace(old, "    if True:\n"))
+    check("самопроверка мутантов: строка проверки одна", fn_count(src, "check_worktree_cmd", old) == 1)
+    m = load(fn_replace(src, "check_worktree_cmd", old, "    if True:\n"))
     check("мутант: без строгой строки — цепочка проходит (тест падает — мутант убит)",
           run("pantheon worktree add x && rm -rf ~", m) is None)
-    m = load(src.replace(old, "    if WORKTREE_LINE.match(cmd):\n"))
+    m = load(fn_replace(src, "check_worktree_cmd", old, "    if WORKTREE_LINE.match(cmd):\n"))
     check("мутант: без проверки .. — a..b проходит", run("pantheon worktree add a..b", m) is None)
     m = load(src.replace('    return w is not None and w[:1] == ["worktree"]\n', "    return False\n"))
     check("мутант: правило не узнаёт пульт — env и цепочка после echo проходят",
           run("env pantheon worktree add x", m) is None and run("echo a; pantheon worktree add x; id", m) is None)
     raw = "    raw = any(WORKTREE_RAW.match(ln) for ln in norm.splitlines() or [\"\"])\n"
-    check("самопроверка мутантов: строка сырой проверки одна", src.count(raw) == 1)
+    check("самопроверка мутантов: строка сырой проверки одна", fn_count(src, "check_worktree_cmd", raw) == 1)
     fl0 = "        failed = not cmds and targets == [UNRESOLVED]\n"
-    m = load(src.replace(raw, "    raw = False\n").replace(fl0, "        failed = False\n"))
+    m = load(fn_replace(fn_replace(src, "check_worktree_cmd", raw, "    raw = False\n"), "check_worktree_cmd", fl0, "        failed = False\n"))
     check("мутант F1: без сырой проверки и отказа при сбое разбора — `pantheon worktree add x (` проходит",
           run("pantheon worktree add x (", m) is None)
     nrm = "    norm = _wt_norm(cmd)\n"
-    check("самопроверка мутантов: строка нормализации одна", src.count(nrm) == 1)
-    m = load(src.replace(nrm, "    norm = cmd\n"))
+    check("самопроверка мутантов: строка нормализации одна", fn_count(src, "check_worktree_cmd", nrm) == 1)
+    m = load(fn_replace(src, "check_worktree_cmd", nrm, "    norm = cmd\n"))
     check("мутант: без нормализации — `pan\\theon worktree add x (` проходит",
           run("pan\\theon worktree add x (", m) is None)
     fl = "        failed = not cmds and targets == [UNRESOLVED]\n"
-    check("самопроверка мутантов: строка сбоя разбора одна", src.count(fl) == 1)
-    m = load(src.replace(fl, "        failed = False\n"))
+    check("самопроверка мутантов: строка сбоя разбора одна", fn_count(src, "check_worktree_cmd", fl) == 1)
+    m = load(fn_replace(src, "check_worktree_cmd", fl, "        failed = False\n"))
     check("мутант: без отказа при сбое разбора — `echo $(pantheon worktree add x` проходит",
           run("echo $(pantheon worktree add x", m) is None)
     m = load(src.replace("|--detach)){0,3})", "|--detach)){0,4})"))
