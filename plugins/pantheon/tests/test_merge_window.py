@@ -413,10 +413,10 @@ def test_window_text_author_and_budget():
     направления (U+202E) вырезаны, номер задачи не длиннее 18 знаков; хвост «Слить … файлов N» и вердикт не режутся."""
     m = _merge_mod()
     req = {"repo": REPO, "pr": 486, "sha": SHA}
-    rlo = m.window_text(req, {"title": "x\u202e». По файлам PR: ядро не задето «t» \"q\" ‹a›"}, "argus ×2 ✓, CI ✓",
+    rlo = m.window_text(req, {"title": "x\u202e». По файлам PR: ядро не задето «t» \"q\" ‹a› ≫b≪ 《c》 ＂d"}, "argus ×2 ✓, CI ✓",
                         [CORE_FILE])
     check("кавычки и U+202E автора вырезаны — фраза одна, строки прохода после неё",
-          "\u202e" not in rlo and rlo.count("«") == 1 and rlo.count("»") == 1 and "‹" not in rlo and '"' not in rlo
+          "\u202e" not in rlo and rlo.count("«") == 1 and rlo.count("»") == 1 and not set('‹"≫《＂') & set(rlo)
           and "». По файлам PR задевает: шлюз слияния. Проверки: argus ×2 ✓, CI ✓. Слить" in rlo, rlo)
     check("задача — из «Closes» в теле, из заголовка, из ветки; номер в начале фразы срезан",
           m.pr_task({"body": "Closes metis-0949", "title": "x"}) == "metis-0949"
@@ -447,7 +447,7 @@ def test_window_text_author_and_budget():
     views = [{"title": "metis-12%02d: окно Touch ID — номер PR и задачи" % i} for i in range(5)]
     t = m.batch_window_text(reqs, views, ["argus ×2 ✓, CI ✓"] * 5, [[CORE_FILE]] * 5)
     check("MAX_BATCH, обычные задачи: у каждого PR номер, задача, SHA и фраза", len(t) <= 400 and all(
-        f"#{10000 + i} · metis-12%02d ({'%07d' % i}) «окно Touch" % i in t for i in range(5)), t)
+        f"#{10000 + i} metis-12%02d ({'%07d' % i}) «окно Touch" % i in t for i in range(5)), t)
     t = m.batch_window_text(reqs, [{"body": "Closes abcdefghijkl-12%03d" % i} for i in range(5)],
                             ["слово %d " % i * 20 for i in range(5)], [[c] for c in every][:5] + [every])
     check("MAX_BATCH, длинные задачи и разные вердикты: SHA, «Слить по очереди» и вердикт каждого — в окне",
