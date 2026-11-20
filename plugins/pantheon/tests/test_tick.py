@@ -911,8 +911,9 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
           rc_link != 0 and not os.path.exists(calls))
     os.remove(win("clio"))
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
-    # run_env ставит /opt/homebrew/bin и папку python перед PATH: настоящий claude там перехватил бы подменный
-    shadow = [d for d in ("/opt/homebrew/bin", os.path.dirname(sys.executable)) if os.path.exists(os.path.join(d, "claude"))]
+    # run_env ставит /opt/homebrew/bin и папку python перед PATH: настоящий claude там перехватил бы подменный. Папка
+    # python — та, на которой идёт run-job (PY311, без claude рядом — metis-1308), а не интерпретатор самого теста
+    shadow = [d for d in ("/opt/homebrew/bin", os.path.dirname(PY311)) if os.path.exists(os.path.join(d, "claude"))]
     if shadow:
         print(f"skip run-job с окном: настоящий claude в {shadow[0]} раньше подменного")
     else:

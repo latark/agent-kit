@@ -18,7 +18,27 @@ if sys.version_info < (3, 11):
 # STATE/notify-test.log, а не на экран владельца (metis-0307). Тест со своим окружением с нуля защищает сам
 # notify: временный PANTHEON_STATE или HOME тоже уводят уведомление в файл.
 os.environ["PANTHEON_TEST"] = "1"
-PY311 = sys.executable
+
+
+def python_without_claude(exe):
+    """Путь интерпретатора для подпроцессов теста, в папке которого нет настоящего `claude` (metis-1308) → путь.
+
+    run_env (lib/pantheon.py) ставит папку sys.executable в PATH окон и дочерних `pantheon start` раньше PATH теста —
+    раньше папки подменного claude. Тест, запущенный python3.14 из ~/.local/bin (uv кладёт туда ссылку рядом с
+    настоящим claude), отдавал дочернему start настоящий claude: самозапуск звал `claude --bg` мимо подмены, и окно в
+    журнале подмены не появлялось. Тогда берётся realpath интерпретатора — тот же Python из своей папки. И там есть
+    claude — код 1 и причина: подмена не изолирована, проверять нечего."""
+    if not os.path.lexists(os.path.join(os.path.dirname(exe), "claude")):
+        return exe
+    real = os.path.realpath(exe)
+    if os.path.lexists(os.path.join(os.path.dirname(real), "claude")):
+        print(f"FAIL рядом с интерпретатором теста {real} лежит claude — подменный claude тестов не изолирован "
+              "(metis-1308): запустите тесты другим python3.14")
+        sys.exit(1)
+    return real
+
+
+PY311 = python_without_claude(sys.executable)
 
 
 # Запасные корни тестов в окне роли: свой TMPDIR песочницы Claude Code. «%d» — uid.
