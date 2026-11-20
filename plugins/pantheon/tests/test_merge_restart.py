@@ -131,6 +131,19 @@ def test_touchid_restarts_once():
     check("повтор: метка проверена до поиска сессии — claude agents второй раз не вызван", len(agents) == 1, agents)
 
 
+def test_light_with_restart_keeps_window():
+    """metis-1280: PR вне ядра без окна, но с --restart — окно остаётся: перезапуск делает проход после своего
+    слияния, координатор мимо окна его не сделает (argus #519 Б2)."""
+    b = restart_box()
+    b.view(SHA, files=NONCORE)
+    r = ask(b, "--restart", WIN)
+    check("--restart вне ядра: подсказки «окна не будет» нет", r.returncode == 0 and "Вне ядра" not in r.stdout,
+          r.stdout + r.stderr)
+    b.run(extra=run_env(b))
+    check("--restart вне ядра: окно, слияние и перезапуск, как раньше", len(b.windows()) == 1 and merged_once(b)
+          and len(restarts(b)) == 1, f"{b.outs[-1]} {restarts(b)}")
+
+
 def test_no_restart_without_flag_or_finger():
     b = restart_box()
     ask(b)
@@ -176,6 +189,7 @@ sys.exit(0)
 
 def test_phrase_merge_does_not_restart():
     b = restart_box()
+    b.view(SHA, files=NONCORE)   # фраза сливает только PR вне ядра (metis-1026); PR ядра — только Touch ID
     ask(b, "--restart", WIN)
     say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
     r = b.run(t=T0 + 120, extra=dict(run_env(b), **AWAY))

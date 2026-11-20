@@ -21,7 +21,10 @@ libproc с тем же выводом, вместе с rss (O.PS); что он �
 test_outside_cancel.py. Общая часть (заглушка, ps-shim, помощники) — tests/_outside_common.py, репозиторий kit —
 tests/_outside_kit.py: каждый файл получает свой временный корень, STATE и HOME, общего состояния нет.
 """
+import contextlib
+import io
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +257,41 @@ check("--script: прогон есть, код 0, записи tests нет", re
 os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
 check("--script: --wait даёт код команды 0", O.wait_result(q, rid, 3) == 0)
 os.environ.pop("PANTHEON_TMP")
+# metis-1262: .print-out/ прогона --script остаётся в STATE/outside/runs/<ID>/ (копия work/test-… снимается сразу)
+_cmd_art = O.command
+_ART = ("import os; os.makedirs('apps/web/.print-out/sub', exist_ok=True); "
+        "open('apps/web/.print-out/analysis-preview.pdf','wb').write(b'%PDF-1'); "
+        "open('apps/web/.print-out/sub/n.txt','w').write('n'); "
+        "os.symlink('/etc/hosts', 'apps/web/.print-out/link'); "
+        "os.makedirs('node_modules/x/.print-out', exist_ok=True); open('node_modules/x/.print-out/no.pdf','w').write('no')")
+O.command = lambda d, kind, script=None: ([sys.executable, "-c", _ART], "npm run pdf:analysis") if script == "lint" else _cmd_art(d, kind, script)
+rc, q, rid = role_request("athena-x", APP, "test", "--script", "lint")
+run_pass()
+res = O.load_result(q, rid) or {}
+_ad = os.path.join(STATE, "outside", "runs", rid)
+_pdf = os.path.join(_ad, "apps/web/.print-out/analysis-preview.pdf")
+check("--script: .print-out скопирован в runs/<ID>/, путь в итоге и в status",
+      res.get("artifacts") == _ad and os.path.isfile(_pdf) and open(_pdf, "rb").read() == b"%PDF-1"
+      and "apps/web/.print-out/analysis-preview.pdf" in res.get("artifact_files", []), res)
+check("--script: ссылка и node_modules не скопированы, права 600/700",
+      not os.path.lexists(os.path.join(_ad, "apps/web/.print-out/link"))
+      and not os.path.exists(os.path.join(_ad, "node_modules"))
+      and oct(os.stat(_pdf).st_mode & 0o777) == "0o600" and oct(os.stat(_ad).st_mode & 0o777) == "0o700"
+      and all(oct(os.stat(os.path.join(_ad, x)).st_mode & 0o777) == "0o700"
+              for x in ("apps", "apps/web", "apps/web/.print-out", "apps/web/.print-out/sub"))
+      and os.path.isdir(os.path.join(os.path.dirname(_ad)))
+      and oct(os.stat(os.path.dirname(_ad)).st_mode & 0o777) == "0o700", res)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    O.show(res)
+check("status/show называет папку артефактов", f"артефакты прогона: {_ad}" in _buf.getvalue(), _buf.getvalue())
+_old_max, O.ARTIFACT_MAX = O.ARTIFACT_MAX, 3
+_od, _of, _ow = O.save_artifacts(rid + "x", APP)
+O.ARTIFACT_MAX = _old_max
+check("предел размера: сверх него не копируется, причина названа", not _of and _od is None and "предел" in (_ow or ""), (_od, _of, _ow))
+O.command = _cmd_art
+shutil.rmtree(os.path.join(APP, "apps"), ignore_errors=True)
+shutil.rmtree(os.path.join(APP, "node_modules"), ignore_errors=True)
 rc, _, _ = role_request("athena-x", APP, "test", "--script", "a;rm")
 check("имя скрипта не по образцу: код 2", rc == 2)
 rc, _, _ = role_request("athena-x", os.path.join(APP, "node_modules") if os.path.isdir(os.path.join(APP, "node_modules")) else _ROOT, "test")
@@ -446,9 +484,29 @@ check("сервер в servers.json: копия, клон, коммит, пап�
 check("ключей нет — пометка, куда их класть", "latark__app.env" in res.get("note", ""), res)
 check("тик: живой сервер — сторожу есть дело, тестам нет", O.pending_serve() and not O.pending_test())
 
-rc, q2, rid2 = role_request("athena-x", APP, "serve")
+# metis-1277: --env — только NEXT_PUBLIC_*, печатный ASCII ≤ 200 без перевода строки; отказ — код 2, заявки нет
+_nreq = len([n for n in os.listdir(q) if n.endswith(".req.json")])
+for _bad in (["--env", "SECRET=1"], ["--env", "NEXT_PUBLIC_x=1"], ["--env", "NEXT_PUBLIC_A=a\nb"],
+             ["--env", "NEXT_PUBLIC_A=" + "x" * 201], ["--env", "NEXT_PUBLIC_A"], ["--env", "NEXT_PUBLIC_A=é"]):
+    _rc, _out = say("athena-x", "serve", *_bad)
+    check(f"serve {_bad[1][:30]!r}: отказ, код 2, заявки нет", _rc == 2
+          and len([n for n in os.listdir(q) if n.endswith(".req.json")]) == _nreq, (_rc, _out))
+check("serve --env: ровно 200 знаков и пустое значение допустимы",
+      O.env_check({"NEXT_PUBLIC_A": "x" * 200, "NEXT_PUBLIC_B": ""}) is None)
+check("check_request: env с чужим именем в заявке — отказ", O.check_request(
+    {"v": 1, "id": "i", "kind": "serve", "dir": "/x", "env": {"SECRET": "1"}}, "i") is not None)
+before2 = len(calls())
+rc, q2, rid2 = role_request("athena-x", APP, "serve", "--env", "NEXT_PUBLIC_X=1", "--env", "NEXT_PUBLIC_FLAG=a b")
+check("serve --env: заявка принята, пары в заявке", rc == 0 and (O.load_result(q2, rid2) or {}).get("env")
+      == {"NEXT_PUBLIC_X": "1", "NEXT_PUBLIC_FLAG": "a b"})
 serve_pass()
 res2 = O.load_result(q2, rid2) or {}
+_c2 = calls()[before2:]
+check("serve --env: значения — в окружении процесса сервера, не установки зависимостей",
+      _c2 and _c2[-1]["env"].get("NEXT_PUBLIC_X") == "1" and _c2[-1]["env"].get("NEXT_PUBLIC_FLAG") == "a b"
+      and "NEXT_PUBLIC_X" not in _c2[0]["env"] and "NEXT_PUBLIC_X" not in os.environ, _c2)
+check("serve --env: имена и значения — в outside.jsonl", any(
+    e.get("env") == {"NEXT_PUBLIC_X": "1", "NEXT_PUBLIC_FLAG": "a b"} for e in events(rid2, "serve")), events(rid2))
 check("второй сервер — другой порт и своя копия", res2.get("state") == "serving" and res2.get("port") != port
       and res2.get("dir") == work_of(rid2) and work_of(rid2) != W, res2)
 
@@ -662,8 +720,41 @@ commit(MONO, {"package.json": json.dumps({"name": "root", "workspaces": ["apps/*
               "apps/landing/package.json": json.dumps({"name": "landing", "scripts": {"dev": "next dev --port ${PORT:-3100}"}}),
               "apps/lib/package.json": json.dumps({"name": "lib", "scripts": {"build": "tsc"}})}, "m1")
 P.write_json(os.path.join(STATE, "domains.json"),
-             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono"],
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/mono2"],
                           "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+# metis-1293: test --script X --app web — скрипт приложения монорепо, запуск в его папке
+MONO2 = os.path.join(HOME, "projects", "mono2")
+os.makedirs(MONO2)
+git(MONO2, "init", "-q", "-b", "main")
+git(MONO2, "remote", "add", "origin", "https://github.com/latark/mono2.git")
+commit(MONO2, {"package.json": json.dumps({"name": "root", "workspaces": ["apps/*"]}),
+               "apps/web/package.json": json.dumps({"name": "@m/web", "scripts": {"probe": "pwd"}}),
+               "apps/other/package.json": json.dumps({"name": "other", "scripts": {"nope": "pwd"}})}, "m2")
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "web")
+run_pass()
+res = O.load_result(q, rid) or {}
+check("1293: test --script probe --app web в монорепо — скрипт apps/web, в его папке", rc == 0
+      and res.get("state") == "done" and res.get("code") == 0 and res.get("app") == "web"
+      and os.path.join("apps", "web") in res.get("tail", "") and "apps/other" not in res.get("tail", "")
+      and "(приложение apps/web)" in res.get("cmd", ""), res)
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "@m/web")
+run_pass()
+res = O.load_result(q, rid) or {}
+check("1293: --app по имени пакета", res.get("state") == "done" and res.get("code") == 0, res)
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "other")
+run_pass()
+res = O.load_result(q, rid) or {}
+check("1293: у приложения нет скрипта — отказ", res.get("state") == "failed" and "нет скрипта" in res.get("why", ""), res)
+rc, _, _ = role_request("athena-x", MONO2, "test", "--app", "web")
+check("1293: --app без --script — код 2", rc == 2)
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "../x")
+if rc != 2:   # заявка встала — отказ в проходе; при отказе заявки (rc 2) rid нет и итога нет
+    run_pass()
+check("1293: --app ../x — отказ при заявке или в проходе",
+      rc == 2 or (O.load_result(q, rid) or {}).get("state") == "failed", rc if rid is None else O.load_result(q, rid))
+check("1293: check_request — app у test без script отказ, со script — норм",
+      O.check_request({"v": 1, "id": "r", "kind": "test", "dir": "/x", "app": "web"}, "r")
+      and O.check_request({"v": 1, "id": "r", "kind": "test", "dir": "/x", "app": "web", "script": "probe"}, "r") is None)
 rc, q, rid = role_request("athena-x", MONO, "serve")
 serve_pass()
 res = O.load_result(q, rid) or {}

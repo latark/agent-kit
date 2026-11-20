@@ -35,6 +35,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         и записи projects в ~/.claude.json под новый ключ; переносы: agent-kit,
                                         workshop, finances. Без --dry-run — только когда старой папки уже нет
   pantheon check --moved                старые пути перенесённых папок в живых файлах — предупреждение
+  pantheon layout                       карта «что где» и папки вне неё (lib/layout.py, metis-0899)
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
                                         (200 строк / 25 КБ), CLAUDE.md с импортами длиннее 200 строк
   pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
@@ -90,6 +91,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
+                                        serve --env NEXT_PUBLIC_ИМЯ=значение — публичный флаг в окружение dev-сервера
+  pantheon secret put <направление> <ИМЯ> [--app ИМЯ] | list <направление>   ключ проекта скрытым вводом в
+                                        терминале владельца (lib/outside_secret.py, metis-1135); его получат
+                                        outside serve и login вне окна роли, в выводе только имя; ask … --task ID —
+                                        заявка из окна: владелец вводит ключ в окне Touch ID со скрытым полем
   pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
@@ -194,9 +200,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon plan check ФАЙЛ [--direction ИМЯ]   разделы «## N. Пачка …» плана против карточек story (lib/plancheck.py)
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
+  pantheon executors login              вход Codex роли (device-auth с её CODEX_HOME), проверка, добавление в набор
   pantheon executors --add codex | --remove <имя>   добавить Codex (через проверку, без входа) | убрать (Claude — отказ)
   pantheon executors pick <id задачи> [--kind mechanics|code|hard]   кто пишет задачу: dev-* или codex-dev
-  pantheon exec codex <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
+  pantheon exec codex [--kind K] <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
                                         защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/ai/workshop/<задача> (до
@@ -2073,10 +2080,14 @@ def status():
                 by.setdefault("interactive", []).append(a)
                 continue
             # metis-0250: «ждёт вас» без процесса и без вопроса — не ждёт, а снята Claude Code (reconcile_agents)
-            by.setdefault("gone" if a.get("noProcess") else a.get("state") or "?", []).append(a)
-        order = ("interactive", "working", "blocked", "failed", "gone", "done", "stopped")
+            k = "gone" if a.get("noProcess") else a.get("state") or "?"
+            if k in ("blocked", "failed") and stale_ask(a.get("waitingFor")):
+                k = "stale"   # metis-1248: «подтвердить #N по Touch ID», а #N слит или закрыт — вопрос устарел
+            by.setdefault(k, []).append(a)
+        order = ("interactive", "working", "blocked", "failed", "gone", "stale", "done", "stopped")
         word = {"interactive": "открыты в терминале", "working": "фоновые работают", "blocked": "ждут вас",
-                "failed": "упали", "gone": "без процесса", "done": "закончили ход", "stopped": "остановлены"}
+                "failed": "упали", "gone": "без процесса", "done": "закончили ход", "stopped": "остановлены",
+                "stale": "вопрос устарел"}
         lines.append(" · ".join(f"{word.get(k, k)}: {len(by[k])}" for k in sorted(by, key=lambda k: (
             order.index(k) if k in order else 9))) or "фоновых сессий нет")
         for k in ("blocked", "failed", "gone"):
@@ -3103,6 +3114,14 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "COREPACK_HOME": os.path.join(cache, "corepack"),
             "UV_CACHE_DIR": os.path.join(cache, "uv"),
             "PIP_CACHE_DIR": os.path.join(cache, "pip"),
+            # uv tool (uvx) кладёт .tmp рядом с инструментами — общий ~/.local/share/uv/tools песочница закрывает
+            # ([den-1135-gitenv], metis-1135: ~15 отказов uvx ruff за 2 недели)
+            "UV_TOOL_DIR": os.path.join(cache, "uv-tools"),
+            # git switch -c / checkout -b от origin/* пишет branch.<имя>.remote|merge в общий .git/config — песочница
+            # закрывает, ветка остаётся без отслеживания ([den-1135-gitenv]: ~35 отказов); config не ослабляется
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "branch.autoSetupMerge",
+            "GIT_CONFIG_VALUE_0": "false",
             "NEXT_TELEMETRY_DISABLED": "1",
             "TURBO_TELEMETRY_DISABLED": "1",
             "DO_NOT_TRACK": "1",
@@ -3111,6 +3130,11 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "enabled": True,
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
+            # macOS: доступ к com.apple.trustd — без него gh (Go, Security.framework), запущенный процессом в
+            # песочнице (pantheon review accept), падает на x509 OSStatus -26276 (metis-1273, «да» владельца 20.11
+            # «А — доступ к trustd»). Настройка Claude Code sandbox.enableWeakerNetworkIsolation; сеть и папки не шире.
+            # Окна без сети (hq, hestia, job-*) флаг снимают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL)
+            "enableWeakerNetworkIsolation": True,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_OUT if ssh else []),
             "filesystem": {
                 "allowWrite": allow,
@@ -4550,6 +4574,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
+            # metis-1279: пакет закрыл песочнице Связку — gh шлюза (review accept|delta) мимо неё (window_rules)
+            ex = data["sandbox"]["excludedCommands"]
+            ex += WINDOW_RULES.review_gh_out(data["sandbox"].get("filesystem", {}).get("denyRead"), HOME, ex)
             pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
@@ -4616,7 +4643,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             built.append(name)
     # мастерская пишет в папку запуска (workshop_dir()/<задача>: ~/ai/workshop, до переноса старая в ~/projects) и в
     # workshop/ доски; список субагентов — вне P0-6
-    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # сверка согласия классификатору (metis-1135 п. 1, [auto-1135-consent] «везде») — и мастерской, Гестии и штабу
+    one("workshop", [workshop_dir()], os.path.join(PANTHEON, "workshop"), None, private_paths,
+        auto_allow=WINDOW_RULES.consent_auto_allow())
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -4640,6 +4669,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         job = role_settings(own, None, memory, cache, False, private_paths, None, guard, tmp_own=[HOME])
         job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
         job["sandbox"]["network"]["allowedDomains"] = []
+        # окно без сети: trustd ходит наружу мимо прокси (AIA/OCSP/CRL) — канал выноса; флаг не даём (metis-1273)
+        job["sandbox"].pop("enableWeakerNetworkIsolation", None)
         job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
         job["env"]["PANTHEON_ROLE"] = role  # хукам: роль окна, как у штаба
         # субагенты (P0-6): главная сессия задачи зовёт только своих (хук agents.py); deny — все известные типы,
@@ -4657,9 +4688,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
     # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
-    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
+    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard, WINDOW_RULES.consent_auto_allow())
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
     hs["sandbox"]["network"]["allowedDomains"] = []  # сети у песочницы нет; наружу — только excludedCommands + guard
+    hs["sandbox"].pop("enableWeakerNetworkIsolation", None)  # trustd мимо прокси — не окну без сети (metis-1273)
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
     hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
     # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
@@ -4692,7 +4724,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
-    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
+    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard, WINDOW_RULES.consent_auto_allow())
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     # [sb-simplify] п. 5 (metis-0523): замки имён сессий и метки сброса самозапуска — в STATE/hq-rw/{locks,autostart-reset}:
@@ -4700,6 +4732,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # (STATE/locks), журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
     hq["sandbox"]["filesystem"]["allowWrite"] += hq_state_dirs()
     hq["sandbox"]["network"]["allowedDomains"] = []
+    hq["sandbox"].pop("enableWeakerNetworkIsolation", None)  # trustd мимо прокси, а штабу открыто личное (metis-1273)
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
     # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
     # файлов: Read (Claude Code применяет его и к Grep, Glob) и cat/grep в песочнице
@@ -5041,8 +5074,9 @@ def reconcile_agents(data, workers=None):
                 and not in_reg and not just_listed(a, since=roster_at)):
             # вопрос — needs задания или исходный waitingFor claude agents, а не detail (он в state.json есть всегда:
             # ниже он ляжет в waitingFor упавшей); noProcess вопроса не имеет по определению (ревью argus-249a Б1)
-            if a["state"] == "blocked" and not a.get("noProcess") and (a.get("waitingFor") or js.get("needs")):
-                a["asks"] = True
+            q = a.get("waitingFor") or js.get("needs")
+            if a["state"] == "blocked" and not a.get("noProcess") and q and not stale_ask(q):
+                a["asks"] = True   # metis-1248: устаревший вопрос (Touch ID по слитому или закрытому PR) — не вопрос
             if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
                 a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
             a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
@@ -5065,6 +5099,16 @@ def just_listed(a, grace=60, since=None):
     if since and since > now() + 300:
         since = None
     return now() - max(t, since or 0) < grace
+
+
+def stale_ask(text):
+    """Вопрос окна устарел (metis-1248, 1183): «подтвердить #N по Touch ID», а все эти PR слиты или закрыты
+    (merge.touchid_stale: заявка в очереди — живой; без сети и кэша — живой).
+    Сбой — не устарел: вопрос остаётся виден."""
+    try:
+        return bool(merge_mod().touchid_stale(text))
+    except Exception:  # noqa: BLE001 — сбой разбора очереди не прячет вопрос
+        return False
 
 
 def asks_owner(a):
@@ -6625,7 +6669,10 @@ def direction_check(name):
         res.append((True, "запланировано (planned = true в directions.toml): папок ещё нет, остальные проверки "
                     "пропущены до заведения"))
         return res
-    add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
+    add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac: "
+        + (", ".join(tilde(f) for f in folders) or "folders пуст"))
+    off = [f for f in d.get("folders") or [] if not layout_folder_ok(f)]
+    add(not off, "папки по карте «что где» (pantheon layout)" + (": вне карты " + ", ".join(off) if off else ""))
     launch = launch_folder(d.get("folders"))
     home_dir = os.path.join(PANTHEON, "directions", name)
     add(all(os.path.exists(os.path.join(home_dir, x)) for x in ("STATUS.md", "inbox", "tasks")),
@@ -7160,7 +7207,8 @@ def owner_edit_kick():
     lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет.
     Тем же путём — заметки окон ролей в карточки чужих направлений (`pantheon task run`, lib/tasknote.py, metis-1187)."""
     for cmd, pending in (("owner-edit", lambda: owner_edit_mod().pending()),
-                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending)):
+                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending),
+                         ("secret", lambda: outside_mod().sub_mod("secret").pending())):   # ввод ключа (1135)
         run = {"config": "config-edit", "task": "task-note"}.get(cmd, cmd)
         try:
             if locked(f"{run}-run") or not pending():
@@ -9081,6 +9129,7 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         check_moved(quiet)   # предупреждение, на код выхода check не влияет
+        check_layout(quiet)  # папка вне карты «что где» — предупреждение (metis-0899)
         check_private_cover(quiet)  # личная папка вне [private] paths — предупреждение (metis-0894)
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
@@ -9700,6 +9749,7 @@ _attach("tasknote")       # заметка в карточку чужого на
 _attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
 _attach("gitout")         # git push|fetch окна мимо песочницы — без хуков и конфига папки (metis-0972)
 _attach("perm")           # запрос разрешения окна роли — Зевсу, ответ владельца — окну (metis-1250)
+_attach("layout")         # карта «что где» и папки вне раскладки (metis-0899)
 
 
 def main(argv):
@@ -9790,6 +9840,8 @@ def main(argv):
         return 1 if check_moved(force=True) else 0
     if cmd == "migrate-paths":
         return migrate_paths_cmd(rest)
+    if cmd == "layout":
+        return layout_cmd(rest)
     if cmd == "check":
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":
@@ -9861,8 +9913,8 @@ def main(argv):
         return read_mod().main(rest)
     if cmd == "merge":
         return merge_mod().main(rest)
-    if cmd == "outside":
-        return outside_mod().main(rest)
+    if cmd in ("outside", "secret"):   # secret — ключ проекта направления скрытым вводом владельца (metis-1135)
+        return outside_mod().main(rest if cmd == "outside" else ["secret", *rest])
     if cmd == "browser":
         return browser_mod().main(rest)
     if cmd == "handoff":

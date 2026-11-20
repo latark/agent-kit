@@ -140,7 +140,7 @@ class Env:
                 return ""
         return "caffeinate"
 
-    def gate(self, kind, t, agents=None, registry=None, heavy=None):
+    def gate(self, kind, t, agents=None, registry=None, heavy=None, target=None):
         self.gate_calls.append(kind)
         return self.gate_ok
 
@@ -1003,8 +1003,8 @@ class Inbox:
         self.rc = rc
         self._saved = (W.start_new, P.night_mod, os.environ.get("PANTHEON_FAKE_LIMIT"))
         W.start_new = self.start
-        P.night_mod = lambda: types.SimpleNamespace(gate=lambda kind, t, agents=None, registry=None, heavy=None:
-                                                    (True, ""))
+        P.night_mod = lambda: types.SimpleNamespace(gate=lambda kind, t, agents=None, registry=None, heavy=None,
+                                                    target=None: (True, ""))
         os.environ["PANTHEON_FAKE_LIMIT"] = "0"
         del W.ONESHOT_STARTED[:]
         self.packs = []

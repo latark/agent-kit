@@ -135,6 +135,14 @@ def test_unit():
     check("closing_ids: отрицание у одной фразы не гасит другую", A.closing_ids("x", "Не закрывает metis-0002. Closes metis-0003") == ["metis-0003"])
     check("closing_ids: «Закрывает id» после «не» в другом предложении — закрывает",
           A.closing_ids("x", "Это не мелочь. Закрывает metis-0004") == ["metis-0004"])
+    # metis-1232: id в имени ветки пачки — story, её задачей PR не считаем; обычная ветка — как раньше
+    check("closing_ids: batch/metis-0001 с «Closes metis-0002» — только metis-0002",
+          A.closing_ids("batch/metis-0001", "Closes metis-0002") == ["metis-0002"])
+    check("closing_ids: batch/metis-0001 без Closes — пусто", A.closing_ids("batch/metis-0001", "Пачка") == [])
+    check("closing_ids: обычная ветка metis-0003-x — id из ветки берётся",
+          A.closing_ids("metis-0003-x", "Closes metis-0002") == ["metis-0003", "metis-0002"])
+    check("named_ids: batch/metis-0001 — story не называется, «Closes» и «часть» — да",
+          A.named_ids("batch/metis-0001", "Closes metis-0002, часть metis-0004", {}) == ["metis-0002", "metis-0004"])
     check("find_ids: ветка и тело, без повторов, порядок",
           A.find_ids("metis-0001-fix", "Закрывает metis-0001 и demo-0002") == ["metis-0001", "demo-0002"])
     check("is_part: «часть <id>», «часть <номер>», «часть задачи <id>», «часть: <id>» — да; «участь», «частью» — нет",

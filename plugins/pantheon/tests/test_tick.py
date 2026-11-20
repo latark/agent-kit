@@ -95,6 +95,48 @@ max_delay = 180
 '''
 
 
+def keychain_gate(check, tmp, env, load):
+    """metis-1279: окна со Связкой, закрытой пакетом, и без запрета — excludedCommands review accept|delta."""
+    # metis-1279: пакет закрыл песочнице Связку (denyRead ~/Library/Keychains) — gh шлюза (review accept|delta) мимо
+    # неё; пакет с другим запретом и окно без пакета — без этих команд
+    gate_out = ["pantheon review accept", "pantheon review accept *", "pantheon review delta", "pantheon review delta *"]
+    packs = os.path.join(tmp, ".claude", "pantheon", "packs")
+    for n, deny in (("metis-pantheon", ["~/Library/Keychains/"]), ("mnemo-brain", ["~/Library/Mail"]),
+                    ("zz", [os.path.join(tmp, "Library", "Keychains", "login.keychain-db")])):
+        os.makedirs(os.path.join(packs, n), exist_ok=True)
+        open(os.path.join(packs, n, "window.json"), "w").write(json.dumps({"sandbox": {"denyRead": deny}}))
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
+    exc = lambda n: load(n)["sandbox"]["excludedCommands"]  # noqa: E731
+    check("окно с закрытой Связкой (пакет, ~ и абсолютный путь): pantheon review accept|delta мимо песочницы, report — "
+          "нет (metis-1279)",
+          all(c in exc(n) for n in ("metis-pantheon", "zz") for c in gate_out)
+          and not any("review report" in c for n in ("metis-pantheon", "zz") for c in exc(n)),
+          [exc(n) for n in ("metis-pantheon", "zz")])
+    check("окна без запрета Связки (другой denyRead, без пакета): review accept|delta остаются в песочнице (metis-1279)",
+          not any(c.startswith("pantheon review") for n in ("mnemo-brain", "athena-shop", "workshop") for c in exc(n)),
+          [exc(n) for n in ("mnemo-brain", "athena-shop")])
+    for n in ("metis-pantheon", "mnemo-brain", "zz"):
+        os.remove(os.path.join(packs, n, "window.json"))
+        os.rmdir(os.path.join(packs, n))
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
+    check("пакет убран — review accept|delta снова в песочнице (metis-1279)",
+          not any(c.startswith("pantheon review") for c in exc("metis-pantheon")))
+    kc_probe = f"""
+import json, sys
+sys.path.insert(0, {os.path.dirname(LIB)!r})
+import pantheon as p
+h = "/h/u"
+cases = [["~/Library/Keychains"], ["//h/u/Library/Keychains/**"], ["/h/u/Library/Keychains/*"], ["~/Library"],
+         ["~/Library/Keychains/login.keychain-db"], ["~/Library/Mail/../Keychains"],
+         ["~/Library/KeychainsX"], ["~/Library/Mail", "/h/other/Library/Keychains"], [], None, ["Library/Keychains"], [""]]
+print(json.dumps([p.WINDOW_RULES.keychain_denied(c, h) for c in cases]))
+"""
+    got = subprocess.run([PY311, "-I", "-c", kc_probe], env=env, capture_output=True, text=True)
+    check("keychain_denied: любая форма пути к Связке, её предок и путь внутри — да; соседние и чужой home — нет "
+          "(metis-1279)",
+          got.stdout.strip() == json.dumps([True] * 6 + [False] * 6), (got.stdout, got.stderr[-300:]))
+
+
 def main():
     results = []
 
@@ -672,17 +714,19 @@ def main():
           (("athena-shop", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
     gated = rule("athena-shop", "Pantheon Gated Merge:")
-    record = rule("athena-shop", "Pantheon Review Record:")
+    # metis-1135 [den-1135-mutant] («А — да» владельца 20.11): пробы тестов — сразу за Review Record у окон направлений,
+    # кроме окна с доступом к личному: согласие его не называло
+    record = rule("athena-shop", "Pantheon Review Record:") + rule("athena-shop", "Pantheon Test Probes:")
     consent = rule("athena-shop", "Pantheon Consent Check:")  # metis-0161: сверка согласия — координаторам
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
-          all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
+          all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 2
           # metis-pantheon: ещё два правила направления из [auto_rules] policy.toml — Mailkeeper Read и Uv Sync (metis-0933)
           and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
-          and len(consent) == 1 and all(am[n][-2:] == record + consent for n in ("athena-shop", "metis-pantheon", "zz"))
-          and all(len(am[n]) == {"athena-shop": 5, "metis-pantheon": 7}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
+          and len(consent) == 1 and all(am[n][-3:] == record + consent for n in ("athena-shop", "metis-pantheon", "zz"))
+          and all(len(am[n]) == {"athena-shop": 6, "metis-pantheon": 8}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
-                  == record for n in ("athena-shop", "metis-pantheon"))
+                  == record[:1] for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record + consent)
     check("сборка окна (metis-1135 А): правило Consent Check в autoMode окна называет `pantheon consent show` и "
           "`standing` и не считает санкцией echo, файл и чужой вывод",
@@ -692,8 +736,9 @@ def main():
               "the same text from `echo`, `printf`, `cat`, a file, a variable or another command's output is not")),
           consent)
     check("окно с доступом к личному (mnemo-brain): \"$defaults\" и только Review Record — правила слияния нет даже "
-          "при [merge_repos], его PR сливает владелец (metis-0156); сверки согласия Consent Check тоже нет (metis-0161)",
-          bool(record) and am["mnemo-brain"] == ["$defaults"] + record)
+          "при [merge_repos], его PR сливает владелец (metis-0156); сверки согласия Consent Check тоже нет (metis-0161), "
+          "правила проб тестов тоже ([den-1135-mutant] его не называло, metis-1135)",
+          bool(record) and am["mnemo-brain"] == ["$defaults"] + record[:1])
     check("правило Review Record: оговорка — после `--` только тест-раннер проекта, его судят прочие правила; merge, "
           "push, gh, sh -c/python3 -c — Self-Approval или CI Bypass (metis-0156)",
           bool(record) and all(x in record[0] for x in (
@@ -715,8 +760,13 @@ def main():
                                                       "--match-head-commit", "checklist", "plugins/guard/",
                                                       "plugins/pantheon/roles/", "window_rules.py", "owner to merge them himself", "`--admin`, `--auto`", "`gh api`",
                                                       "still judged by Merge Without Review")))
-    check("штаб и мастерская: autoMode в окне нет — классификатор у них со встроенными правилами (metis-0098)",
-          "autoMode" not in hq and "autoMode" not in sw)
+    # metis-1135 п. 1 ([auto-1135-consent] «А+Б — везде»): штабу, мастерской и Гестии — "$defaults" и только сверка
+    # согласия; правил слияния, сдачи лида и записи проверок у них нет (metis-0098)
+    hs = load("hestia")
+    check("штаб, мастерская и Гестия: autoMode.allow — \"$defaults\" и Consent Check, ничего больше (metis-1135 п. 1)",
+          len(consent) == 1 and all((w.get("autoMode") or {}).get("allow") == ["$defaults"] + consent
+                                    for w in (hq, sw, hs)),
+          {n: (w.get("autoMode") or {}).get("allow", [])[:1] for n, w in (("hq", hq), ("workshop", sw), ("hestia", hs))})
     mem_a = real(".claude/agent-memory/argus")
     wins = (sa, sm, sw, hq)
     check("память субагентов в песочнице всех окон: роль с memory: настоящим путём, папка создана (metis-0051)",
@@ -795,6 +845,19 @@ def main():
               for t in ("general-purpose", "claude", "Explore", "argus", "dev-sonnet", "hq", "domain-coordinator")))
     check("окно штаба: кэши задач (выдача из веба) закрыты для чтения",
           any(x.endswith("pantheon-sandbox/job-prometheus") for x in load("hq")["sandbox"]["filesystem"]["denyRead"]))
+    # metis-1273: gh из процесса в песочнице (pantheon review accept) без trustd падает на x509 OSStatus -26276
+    built_names = sorted(f[:-5] for f in os.listdir(os.path.join(state, "settings")) if f.endswith(".json"))
+    # Окна без сети (hq, hestia, job-*) флага не получают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL) — канал выноса
+    offline = [n for n in built_names if n in ("hq", "hestia") or n.startswith("job-")]
+    online = [n for n in built_names if n not in offline and "sandbox" in load(n)]
+    trustd = lambda n: load(n)["sandbox"].get("enableWeakerNetworkIsolation")  # noqa: E731
+    check("окна направлений и workshop: enableWeakerNetworkIsolation — доступ к trustd для gh (metis-1273)",
+          all(trustd(n) is True for n in online) and {"athena-shop", "metis-pantheon", "workshop"} <= set(online),
+          [(n, trustd(n)) for n in online])
+    check("окна без сети (hq, hestia, job-*): флага trustd нет — канал мимо прокси закрыт (metis-1273)",
+          all(trustd(n) is None for n in offline) and {"hq", "hestia", "job-clio", "job-iris"} <= set(offline),
+          [(n, trustd(n)) for n in offline])
+    keychain_gate(check, tmp, env, load)
     os.remove(os.path.join(state, "settings", "job-iris.json"))
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True)
     check("domains build --if-changed: пропавшее окно задачи пересобирается",
@@ -849,8 +912,9 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
           rc_link != 0 and not os.path.exists(calls))
     os.remove(win("clio"))
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
-    # run_env ставит /opt/homebrew/bin и папку python перед PATH: настоящий claude там перехватил бы подменный
-    shadow = [d for d in ("/opt/homebrew/bin", os.path.dirname(sys.executable)) if os.path.exists(os.path.join(d, "claude"))]
+    # run_env ставит /opt/homebrew/bin и папку python перед PATH: настоящий claude там перехватил бы подменный. Папка
+    # python — та, на которой идёт run-job (PY311, без claude рядом — metis-1308), а не интерпретатор самого теста
+    shadow = [d for d in ("/opt/homebrew/bin", os.path.dirname(PY311)) if os.path.exists(os.path.join(d, "claude"))]
     if shadow:
         print(f"skip run-job с окном: настоящий claude в {shadow[0]} раньше подменного")
     else:

@@ -7,8 +7,11 @@
 сессии и токенов нет (metis-1161), пароль ушёл только в тело запроса; отказ Supabase (пароль в ответе) → failed с
 кодом ошибки без значений; нет файла ключей, нет TALOS_PASSWORD, http к чужому хосту, сбой сети, сбой приёмника,
 чужой и несуществующий сервер — failed без запроса или без значений. Пароля и токенов нет в stdout, stderr, журнале
-прохода (logs/outside.jsonl), runs/<ID>.json, итоге и файле заявки. Ответы приёмника (answer): первый заход — 302 и
-Set-Cookie, второй и просроченный — 410, чужой код — 404, HEAD — 405 без cookie (код не сожжён); молчащий клиент на
+прохода (logs/outside.jsonl), runs/<ID>.json, итоге и файле заявки. Почта сессии (user.email и claim email токена)
+≠ TALOS_EMAIL или не проверить → failed без приёмника (metis-1289); chrome-devtools-mcp в карте стеков — --isolated.
+Ответы приёмника (answer): шаг 1 — 302 на шаг 2 с Clear-Site-Data, шаг 2 — 302 и Set-Cookie, шаг 2 без шага 1 —
+409; повтор, просрочка, чужой код — 410/404 с Clear-Site-Data; HEAD — 405 без cookie и стирания (код не сожжён);
+приёмник вживую после входа отвечает 410 в срок USED_GRACE, затем выходит; молчащий клиент на
 паре сокетов не держит обработчик дольше срока чтения; кода адреса нет в runs/<ID>.json и журнале. Приёмник вживую (процесс, порт) — где порт дают, иначе
 строка «пропущено». Заявку входа берёт проход серверов (serve_round), команду — main(["login", …]); файлы сессий
 прежней версии убираются.
@@ -110,7 +113,13 @@ def fake_receiver(cookies, target, taken=()):
 
 REAL_START_RECEIVER = L.start_receiver
 L.start_receiver = fake_receiver
-TOKEN = "at-" + "x" * 40
+def jwt(claims):
+    """access_token вида JWT: заголовок.claims.подпись (подпись не проверяется — её проверяет Supabase)."""
+    part = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJIUzI1NiJ9." + part + ".sig-" + "x" * 30
+
+
+TOKEN = jwt({"sub": "u1", "email": EMAIL, "role": "authenticated"})
 
 
 def write_env(text, name="own__repo.env"):
@@ -342,6 +351,41 @@ check("чужой сервер: failed, запроса нет", code == 1 and "�
 code, out, rid, res = run(["20261113-220000-cccccc"])
 check("нет сервера: failed, подсказка serve", code == 1 and "pantheon outside serve" in (res or {}).get("why", ""), res)
 
+# 7б. почта сессии ≠ TALOS_EMAIL или её не проверить — failed, приёмника нет, почт в выводе нет (metis-1289)
+OWNER = "owner-person@example.test"
+
+
+def refused(reply, name, word):
+    REPLY[0] = reply
+    n = len(RECV)
+    code, out, rid, res = run([SID])
+    why = (res or {}).get("why", "")
+    check(name, code == 1 and (res or {}).get("state") == "failed" and word in why and len(RECV) == n
+          and OWNER not in out + everything_text() and EMAIL not in out + everything_text(), (code, why))
+
+
+refused((200, {**session(), "user": {"id": "u2", "email": OWNER}}),
+        "почта: user.email чужой учётной записи — failed, приёмника нет, почт нет в выводе", "не совпала с TALOS_EMAIL")
+refused((200, {**session(), "access_token": jwt({"sub": "u2", "email": OWNER})}),
+        "почта: claim email в access_token чужой — failed, приёмника нет", "не совпала с TALOS_EMAIL")
+refused((200, {k: v for k, v in session().items() if k != "user"}),
+        "почта: нет user в ответе — не проверить, failed, приёмника нет", "не проверить")
+refused((200, {**session(), "access_token": "opaque-token"}),
+        "почта: access_token не JWT — не проверить, failed, приёмника нет", "не проверить")
+REPLY[0] = (200, {**session(), "user": {"id": "u1", "email": " " + EMAIL.upper()},
+                  "access_token": jwt({"sub": "u1"})})
+code, out, rid, res = run([SID])
+check("почта: та же почта в другом регистре, токен без claim email — вход", code == 0
+      and (res or {}).get("state") == "done", res)
+REPLY[0] = (200, session())
+
+# 7в. профиль браузера роли — временный на процесс MCP (--isolated): без cookie владельца (metis-1289)
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "project-tools", "stacks.json")) as fh:
+    _stacks = fh.read()
+check("браузер: chrome-devtools-mcp в карте стеков — с --isolated (временный профиль, не постоянный)",
+      '"chrome-devtools-mcp@' in _stacks and all('"--isolated"' in ln for ln in _stacks.splitlines()
+                                                 if '"chrome-devtools-mcp@' in ln and '"args"' in ln), _stacks[:200])
+
 # 8. команда: плохой ID — код 2 без заявки; без кругов — заявка лежит, в ней только ID сервера
 out = io.StringIO()
 with contextlib.redirect_stderr(out), contextlib.redirect_stdout(out):
@@ -388,36 +432,52 @@ finally:
 check("listdir папки заявок упал: login._take_requests → [], без исключения", _taken == [] and _err is None
       and _ld_calls, (_taken, _err, _ld_calls))
 
-# 10. приёмник: ответы (без сети) — первый заход ставит cookie и ведёт на сервер, второй и просроченный — отказ
+# 10. приёмник: ответы (без сети) — шаг 1 стирает cookie (Clear-Site-Data) и ведёт на шаг 2, шаг 2 ставит cookie и
+# ведёт на сервер; повтор, просрочка, чужой код — отказ со стиранием cookie (metis-1289)
 ck = [["sb-abcdref-auth-token", "base64-AAA"]]
 st0 = {"code": RECV_CODE, "cookies": ck, "target": "http://127.0.0.1:4301/", "deadline": time.time() + 60,
        "used": False, "misses": 0}
+CLR = ("Clear-Site-Data", '"cookies"')
 s, h, _ = L.answer(st0, "GET", L.LOGIN_PATH + RECV_CODE)
+check("приёмник: шаг 1 — 302 на шаг 2, Clear-Site-Data, без Set-Cookie, код не сожжён",
+      s == 302 and dict(h).get("Location") == L.LOGIN_PATH + RECV_CODE + L.SET_STEP and CLR in h
+      and "Set-Cookie" not in dict(h) and not st0["used"] and st0.get("cleared"), h)
+s, h, _ = L.answer(st0, "GET", L.LOGIN_PATH + RECV_CODE + L.SET_STEP)
 hd = dict(h)
 setc = [v for k, v in h if k == "Set-Cookie"]
-check("приёмник: первый заход — 302 на / сервера, Set-Cookie сессии",
-      s == 302 and hd.get("Location") == "http://127.0.0.1:4301/" and setc
+check("приёмник: шаг 2 — 302 на / сервера, Set-Cookie сессии, used",
+      s == 302 and hd.get("Location") == "http://127.0.0.1:4301/" and setc and st0["used"]
       and setc[0].startswith("sb-abcdref-auth-token=base64-AAA; Path=/;") and "SameSite=Lax" in setc[0], h)
 check("приёмник: прежние куски .0–.4 стираются (Max-Age=0)",
       "sb-abcdref-auth-token.0=; Path=/; Max-Age=0; SameSite=Lax" in setc and len(setc) == 1 + L.STALE_CHUNKS, setc)
-s2, h2, b2 = L.answer(st0, "GET", L.LOGIN_PATH + RECV_CODE)
-check("приёмник: второй заход по коду — 410 без cookie", s2 == 410 and not h2 and "уже использован" in b2, (s2, h2))
-st1 = {**st0, "used": False, "deadline": time.time() - 1}
+for path in (L.LOGIN_PATH + RECV_CODE, L.LOGIN_PATH + RECV_CODE + L.SET_STEP):
+    s2, h2, b2 = L.answer(st0, "GET", path)
+    check(f"приёмник: повтор {path[-4:]} — 410, Clear-Site-Data, без cookie",
+          s2 == 410 and CLR in h2 and "Set-Cookie" not in dict(h2) and "уже использован" in b2, (s2, h2))
+st6 = {**st0, "used": False, "cleared": False}
+s9, h9, _ = L.answer(st6, "GET", L.LOGIN_PATH + RECV_CODE + L.SET_STEP)
+check("приёмник: шаг 2 без шага 1 — 409, Clear-Site-Data, без cookie, не used",
+      s9 == 409 and CLR in h9 and "Set-Cookie" not in dict(h9) and not st6["used"], (s9, h9))
+st1 = {**st0, "used": False, "cleared": False, "deadline": time.time() - 1}
 s3, h3, b3 = L.answer(st1, "GET", L.LOGIN_PATH + RECV_CODE)
-check("приёмник: просроченный код — 410 без cookie, не помечен использованным",
-      s3 == 410 and not h3 and "срок" in b3 and not st1["used"], (s3, h3))
-st2 = {**st0, "used": False, "misses": 0}
+check("приёмник: просроченный код — 410, Clear-Site-Data, без cookie, не помечен использованным",
+      s3 == 410 and CLR in h3 and "Set-Cookie" not in dict(h3) and "срок" in b3 and not st1["used"], (s3, h3))
+st2 = {**st0, "used": False, "cleared": False, "misses": 0}
 s4, h4, _ = L.answer(st2, "GET", L.LOGIN_PATH + RECV_CODE[:-1] + "z")
-s5, _, _ = L.answer(st2, "GET", "/" + RECV_CODE)
+s5, h5, _ = L.answer(st2, "GET", "/" + RECV_CODE)
 s6, _, _ = L.answer(st2, "POST", L.LOGIN_PATH + RECV_CODE)
-check("приёмник: чужой код — 404 и счёт промахов; чужой путь и POST — 404, код цел",
-      s4 == 404 and not h4 and st2["misses"] == 1 and s5 == 404 and s6 == 404 and not st2["used"], st2)
-st4 = {**st0, "used": False, "misses": 0}
+check("приёмник: чужой код — 404 со стиранием и счёт промахов; чужой путь — 404 без стирания, POST — 404; код цел",
+      s4 == 404 and CLR in h4 and st2["misses"] == 1 and s5 == 404 and CLR not in h5 and s6 == 404
+      and not st2["used"] and not st2["cleared"], st2)
+st4 = {**st0, "used": False, "cleared": False, "misses": 0}
 s7, h7, _ = L.answer(st4, "HEAD", L.LOGIN_PATH + RECV_CODE)
-s8, h8, _ = L.answer(st4, "GET", L.LOGIN_PATH + RECV_CODE)
-check("приёмник: HEAD по верному коду — 405 без Set-Cookie и без used; следом GET входит (argus #453 С)",
+s7b, h7b, _ = L.answer(st4, "HEAD", L.LOGIN_PATH + "nope")
+s8, _, _ = L.answer(st4, "GET", L.LOGIN_PATH + RECV_CODE)
+s8b, _, _ = L.answer(st4, "GET", L.LOGIN_PATH + RECV_CODE + L.SET_STEP)
+check("приёмник: HEAD — 405/404 без Set-Cookie, без стирания и без used; следом GET входит (argus #453 С)",
       s7 == 405 and not [k for k, _ in h7 if k == "Set-Cookie"] and dict(h7).get("Allow") == "GET"
-      and s8 == 302 and st4["used"], (s7, h7, s8))
+      and CLR not in h7 and s7b == 404 and CLR not in h7b and s8 == 302 and s8b == 302 and st4["used"],
+      (s7, h7, s7b, h7b, s8, s8b))
 chunked = L.set_cookie_headers([["sb-r-auth-token.0", "a"], ["sb-r-auth-token.1", "b"]])
 check("приёмник: куски — стирается цельная cookie и лишние куски, свои не стираются",
       "sb-r-auth-token=; Path=/; Max-Age=0; SameSite=Lax" in chunked
@@ -439,12 +499,16 @@ def http_once(state, path, method="GET"):
 
 st3 = {"code": RECV_CODE, "cookies": ck, "target": "http://127.0.0.1:4301/", "deadline": time.time() + 60,
        "used": False, "misses": 0}
-r1 = http_once(st3, L.LOGIN_PATH + RECV_CODE)
+r0 = http_once(st3, L.LOGIN_PATH + RECV_CODE)
+r1 = http_once(st3, L.LOGIN_PATH + RECV_CODE + L.SET_STEP)
 r2 = http_once(st3, L.LOGIN_PATH + RECV_CODE)
-check("HTTP: первый заход — 302, Location и Set-Cookie в заголовках",
+check("HTTP: шаг 1 — 302 на шаг 2 с Clear-Site-Data в заголовках, без Set-Cookie",
+      r0.startswith("HTTP/1.0 302") and '\r\nClear-Site-Data: "cookies"\r\n' in r0 and "Set-Cookie" not in r0, r0[:400])
+check("HTTP: шаг 2 — 302, Location и Set-Cookie в заголовках",
       r1.startswith("HTTP/1.0 302") and "\r\nLocation: http://127.0.0.1:4301/\r\n" in r1
       and "\r\nSet-Cookie: sb-abcdref-auth-token=base64-AAA; Path=/;" in r1, r1[:400])
-check("HTTP: второй заход — 410 без Set-Cookie", r2.startswith("HTTP/1.0 410") and "Set-Cookie" not in r2, r2[:300])
+check("HTTP: повтор — 410 с Clear-Site-Data, без Set-Cookie", r2.startswith("HTTP/1.0 410")
+      and '\r\nClear-Site-Data: "cookies"\r\n' in r2 and "Set-Cookie" not in r2, r2[:300])
 st5 = {**st3, "used": False, "misses": 0}
 r3 = http_once(st5, L.LOGIN_PATH + RECV_CODE, "HEAD")
 check("HTTP: HEAD — 405 без Set-Cookie, код не сожжён", r3.startswith("HTTP/1.0 405") and "Set-Cookie" not in r3
@@ -522,6 +586,7 @@ def fetch(url):
         return None, type(e).__name__
 
 
+L.USED_GRACE = 2   # приёмник живёт после входа 2 с вместо 120: проверка повтора и выхода
 live_cookies = L.session_cookies("https://abcdref.supabase.co", session(), "127.0.0.1")
 try:
     port, code, until = L.start_receiver(live_cookies, "http://127.0.0.1:4301/", {4301})
@@ -535,12 +600,19 @@ if port:
     s, hd = fetch(f"http://127.0.0.1:{port}{L.LOGIN_PATH}{code}x")
     check("вживую: чужой код — 404", s == 404, s)
     s, hd = fetch(f"http://127.0.0.1:{port}{L.LOGIN_PATH}{code}")
-    check("вживую: адрес входа — 302 на сервер с cookie сессии",
+    check("вживую: адрес входа — 302 на шаг 2 с Clear-Site-Data",
+          s == 302 and hd.get("Location") == f"{L.LOGIN_PATH}{code}{L.SET_STEP}"
+          and hd.get("Clear-Site-Data") == '"cookies"', (s, hd))
+    s, hd = fetch(f"http://127.0.0.1:{port}{L.LOGIN_PATH}{code}{L.SET_STEP}")
+    check("вживую: шаг 2 — 302 на сервер с cookie сессии",
           s == 302 and hd.get("Location") == "http://127.0.0.1:4301/"
           and any(v.startswith("sb-abcdref-auth-token=base64-") for v in hd.get_all("Set-Cookie") or []), (s, hd))
-    proc.wait(5)
+    s2, hd2 = fetch(f"http://127.0.0.1:{port}{L.LOGIN_PATH}{code}")
+    check("вживую: повтор в срок grace — приёмник жив, 410 с Clear-Site-Data (не «отказ порта»)",
+          s2 == 410 and hd2.get("Clear-Site-Data") == '"cookies"' and proc.poll() is None, (s2, proc.poll()))
+    proc.wait(L.USED_GRACE + 5)
     s2, _ = fetch(f"http://127.0.0.1:{port}{L.LOGIN_PATH}{code}")
-    check("вживую: после входа приёмник вышел, второй заход — отказ", proc.returncode == 0 and s2 != 302, (s2, proc.returncode))
+    check("вживую: после grace приёмник вышел, заход — отказ", proc.returncode == 0 and s2 != 302, (s2, proc.returncode))
     L.RECEIVE_TTL, ttl = 0, L.RECEIVE_TTL
     port, code, _ = L.start_receiver(live_cookies, "http://127.0.0.1:4301/", {4301})
     L.RECEIVE_TTL = ttl

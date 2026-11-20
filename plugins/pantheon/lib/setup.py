@@ -459,13 +459,13 @@ def step_codex():
         report("Codex", "пропуск", "модуль исполнителей не найден")
         return False
     try:
-        res = fn(interactive=True, live_probe=True)
+        res = fn(interactive=True)
     except Exception as e:  # noqa: BLE001 — чужой модуль: любая ошибка — строка итога, установка идёт дальше
         report("Codex", "не вышло", f"{type(e).__name__}: {e}")
         return False
     if res == getattr(mod, "UNAVAILABLE", 3) and not isinstance(res, bool):
         # Codex — только дополнение (решение 175): недоступен — установка рабочая, задачи идут на Claude
-        report("Codex", "пропуск", "не добавлен (причина выше), задачи пойдут на Claude; позже: `pantheon-setup --add codex`")
+        report("Codex", "пропуск", "не добавлен (причина выше), задачи пойдут на Claude; позже: `pantheon executors login`")
         return False
     if res is False or (isinstance(res, int) and not isinstance(res, bool) and res != 0):
         report("Codex", "не вышло", "проверка окружения не прошла (подробности выше)")
@@ -516,7 +516,7 @@ def main(argv):
     if os.path.exists(PANTHEON) and (not os.path.isdir(PANTHEON) or os.listdir(PANTHEON)):
         print(f"pantheon-setup: {PANTHEON} уже есть и не пуст — установка ничего не меняет. Если Пантеон нужен "
               "заново, переименуйте или уберите эту папку сами. Добавить к готовой установке Codex или "
-              "резервную копию: `pantheon-setup --add codex`, `pantheon-setup --add backup`.", file=sys.stderr)
+              "резервную копию: `pantheon executors login`, `pantheon-setup --add backup`.", file=sys.stderr)
         return 1
     if not shutil.which("claude"):
         print("pantheon-setup: сначала поставьте Claude Code (https://claude.com/claude-code) и запустите снова.",
@@ -540,7 +540,7 @@ def main(argv):
     if want:
         step_codex()
     else:
-        report("Codex", "пропуск", "не выбран (позже: `pantheon-setup --add codex`)")
+        report("Codex", "пропуск", "не выбран (позже: `pantheon executors login`)")
     print()
     if failures:
         print("Не вышло: " + ", ".join(failures) + ". Исправьте причину и запустите нужный шаг руками "

@@ -349,6 +349,116 @@ def test_hook_agent_gate():
           f"сбой хука: {r.returncode} {r.stdout!r} {r.stderr[-300:]!r}")
 
 
+def _fake_plugin(e):
+    """Поддельный плагин: bin/pantheon только отмечает запуск."""
+    fake = os.path.join(e.tmp, "fakeplugin")
+    os.makedirs(os.path.join(fake, "bin"))
+    with open(os.path.join(fake, "bin", "pantheon"), "w") as fh:
+        fh.write("#!/bin/sh\necho STARTED \"$@\"\n")
+    os.chmod(os.path.join(fake, "bin", "pantheon"), 0o755)
+    return fake
+
+
+ALLOW30 = '[limits.allow]\npct = 30\nuntil = "2030-01-01"\ndecision = "owner-word-ref"\n'
+
+
+def test_hook_agent_gate_allow_only_1128():
+    """metis-1128: в schedule.toml один [limits.allow] без owner_cap — оболочка хука запускает agent-gate, и на pct разрешения
+    субагент из окна координатора отказан; ниже pct и без обеих записей — не запускает и не отказывает."""
+    sh = _hook_cmd()
+    run = lambda env_: subprocess.run(["sh", "-c", sh], input=EVENT, env=env_, capture_output=True,  # noqa: E731
+                                      text=True, timeout=60)
+    e = env(34.0, 34.0, sec=ALLOW30)
+    fake = _fake_plugin(e)
+    r = run(_cli_env(e, T, role="domain-coordinator", CLAUDE_PLUGIN_ROOT=fake))
+    check(r.stdout.strip() == "STARTED night agent-gate", f"1128: один [limits.allow] — хук не зовёт pantheon: {r.stdout!r}")
+    r = run(_cli_env(e, T, role="domain-coordinator"))
+    try:
+        out = json.loads(r.stdout)["hookSpecificOutput"]
+    except (ValueError, KeyError, TypeError):
+        out = {}
+    check(r.returncode == 0 and out.get("permissionDecision") == "deny" and "потолок владельца 30 %" in
+          out.get("permissionDecisionReason", ""), f"1128: на pct разрешения хук не отказал: {r.stdout!r} {r.stderr[-300:]!r}")
+    e2 = env(25.0, 25.0, sec=ALLOW30)
+    r = run(_cli_env(e2, T, role="domain-coordinator"))
+    check(r.returncode == 0 and r.stdout == "", f"1128: ниже pct разрешения хук отказал: {r.stdout!r}")
+    e3 = env(34.0, 34.0, sec="")
+    r = run(_cli_env(e3, T, role="domain-coordinator", CLAUDE_PLUGIN_ROOT=_fake_plugin(e3)))
+    check(r.returncode == 0 and r.stdout == "", f"1128: без обеих записей хук зовёт pantheon: {r.stdout!r}")
+
+
+def with_session(name, fn):
+    old = os.environ.get("PANTHEON_SESSION")
+    os.environ["PANTHEON_SESSION"] = name
+    try:
+        return fn()
+    finally:
+        if old is None:
+            os.environ.pop("PANTHEON_SESSION", None)
+        else:
+            os.environ["PANTHEON_SESSION"] = old
+
+
+def test_allow_target_1128():
+    """metis-1128 (hermes-0069): разрешение с target и decision открывает именно названный запуск — выше потолка владельца
+    и при красной зоне; остальным запускам (другое направление, без имени) не действует; без decision, с кривым target,
+    после until и на своём pct — не открывает."""
+    cap90 = '[limits.owner_cap]\npct = 90\ndecision = "zeus-limit"\n'
+    cap100 = '[limits.owner_cap]\npct = 100\ndecision = "zeus-limit"\n'
+    al = ('[limits.allow]\npct = 100\nuntil = "2030-01-01"\ndecision = "limit-0069-1611"\n'
+          'target = ["dir-alpha", "dir-beta"]\n')
+    # 16.11: потолок 90 достигнут (неделя 95), слово «обоих сейчас» — названным открыто, остальным стоп
+    env(95.0, 95.0, sec=cap90 + al)
+    for tg in ("dir-alpha", "dir-beta"):
+        for kind in ("autostart", "wake", "respawn"):
+            ok, why = N.gate(kind, T, heavy=0, target=tg)
+            check(ok, f"1128: {tg} {kind} выше потолка при разрешении: {why}")
+        check(N.launch_cap("tick", t=T, target=tg) is None, f"1128: launch_cap {tg} отказал")
+    for tg in (None, "", "dir-gamma"):
+        ok, why = N.gate("autostart", T, heavy=0, target=tg)
+        check(not ok and "потолок владельца 90 %" in why, f"1128: {tg!r} не названо, а запуск открыт: {ok} {why}")
+        check(N.launch_cap("tick", t=T, target=tg) is not None, f"1128: launch_cap {tg!r} открыт")
+    check(with_session("dir-alpha", lambda: with_role("domain-coordinator", lambda: N.agent_gate(T))) is None,
+          "1128: субагенты окна dir-alpha отказаны при разрешении на него")
+    for ses in ("dir-gamma", ""):
+        why = with_session(ses, lambda: with_role("domain-coordinator", lambda: N.agent_gate(T)))  # noqa: B023
+        check(why and "потолок владельца 90 %" in why, f"1128: окно {ses!r} не названо, а субагенты открыты: {why!r}")
+    lines = N.status_lines(T)
+    check(any(x.startswith("Разрешение до даты") and "только для dir-alpha, dir-beta" in x and
+              "limit-0069-1611" in x for x in lines), f"1128: status: {lines}")
+    # неделя дошла до pct разрешения — стоп и для названных
+    # metis-1128: линия 100 ставила сброс недели ровно на T — measure() считал неделю новой, расход неизвестным
+    env(100.0, 95.0, sec=cap90 + al)
+    ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
+    check(not ok and "потолок владельца 100 %" in why, f"1128: на pct разрешения названному открыто: {ok} {why}")
+    # красная зона при потолке 100 (hard_pct): названному запуск открыт, остальным красная держит
+    env(90.0, 90.0, sec=cap100 + al)
+    check(N.measure(T, target="dir-alpha")["zone"] == "green" and N.measure(T)["zone"] == "red"
+          and N.measure(T, target="x")["zone"] == "red", "1128: зоны target")
+    for kind in ("autostart", "wake", "respawn"):
+        check(N.gate(kind, T, heavy=0, target="dir-alpha") == (True, ""), f"1128: красная держит названного, {kind}")
+        ok, why = N.gate(kind, T, heavy=0, target="dir-gamma")
+        check(not ok and "красная" in why, f"1128: красная не держит чужого, {kind}: {ok} {why}")
+    ok, why = N.gate("autostart", T, heavy=0)
+    check(not ok and "красная" in why, f"1128: красная не держит запуск без имени: {ok} {why}")
+    # после until, кривая запись, нет decision — не открывает
+    bad = (('until = "2020-01-01"\n', "истекло"), ('until = "2030-01-01"\ntarget = 5\n', "target"),
+           ('until = "2030-01-01"\ntarget = []\n', "target"), ('until = "2030-01-01"\ntarget = ["a", 3]\n', "target"))
+    for body, why_part in bad:
+        env(90.0, 90.0, sec=cap100 + "[limits.allow]\npct = 100\ndecision = \"x-1\"\n"
+            + body + ("" if "target" in body else 'target = "dir-alpha"\n'))
+        ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
+        st = "\n".join(N.status_lines(T))
+        check(not ok and "красная" in why and why_part in st, f"1128: {body!r}: {ok} {why} {st}")
+    env(90.0, 90.0, sec=cap100 + '[limits.allow]\npct = 100\nuntil = "2030-01-01"\ntarget = "dir-alpha"\n')
+    ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
+    check(not ok and "красная" in why and "нет decision" in "\n".join(N.status_lines(T)), f"1128: без decision: {ok} {why}")
+    # target строкой
+    env(90.0, 90.0, sec=cap100 + '[limits.allow]\npct = 100\nuntil = "2030-01-01"\ndecision = "x-1"\n'
+        'target = "dir-alpha"\n')
+    check(N.gate("autostart", T, heavy=0, target="dir-alpha") == (True, ""), "1128: target строкой")
+
+
 def test_launch_cap():
     """metis-0444: launch_cap — причина отказа ручному запуску по origin; --over-cap снимает только у owner; ниже
     потолка и без него — None; достигнут — карточка одна; сбой расчёта — не отказ, строка в stderr и тревога."""
