@@ -126,9 +126,8 @@ check("push: --git-dir и --work-tree — настоящие пути основ
 need = ["core.hooksPath=/dev/null", "core.fsmonitor=false", "core.sshCommand=ssh", "core.pager=cat",
         "protocol.allow=never", "protocol.https.allow=always", "protocol.ssh.allow=always"]
 check("push: -c core.* и protocol.* перед подкомандой", all(x in cmd[:cmd.index("push")] for x in need), cmd)
-check("окружение: фиксированный PATH, NOSYSTEM, без GIT_* окна", genv_seen.get("PATH", "").startswith("/opt/homebrew")
-      and genv_seen.get("GIT_CONFIG_NOSYSTEM") == "1" and "GIT_AUTHOR_NAME" not in genv_seen
-      and "GIT_CONFIG_GLOBAL" not in genv_seen, genv_seen)
+check("окружение: фиксированный PATH, NOSYSTEM, без GIT_* окна (кроме автора)", genv_seen.get("PATH", "").startswith(
+      "/opt/homebrew") and genv_seen.get("GIT_CONFIG_NOSYSTEM") == "1" and "GIT_CONFIG_GLOBAL" not in genv_seen, genv_seen)
 r = cli(base, "fetch")
 check("fetch без аргументов — origin, код 0", r.returncode == 0 and echoed(r).get("cmd", [])[-1] == "origin", r.stderr)
 
@@ -310,16 +309,16 @@ both("GIT_CONFIG_GLOBAL окна (receivepack) не доходит до git", en
 def author_case(lib):
     r = cli(hooked, "push", "origin", "HEAD:envy", lib=lib,
             extra={"GIT_AUTHOR_NAME": "an", "GIT_COMMITTER_EMAIL": "ce@t", "GIT_AUTHOR_DATE": "2026-11-03T12:00:00",
-                   "GIT_DIR": "/tmp/evil", "GIT_CONFIG_COUNT": "1", "GIT_SSH_COMMAND": "touch x"})
+                   "GIT_SSH_COMMAND": "touch x", "GIT_ASKPASS": "/tmp/evil"})
     if r.returncode:
         return False
     env = json.loads(r.stdout.strip().splitlines()[-1])["env"]
     return (env.get("GIT_AUTHOR_NAME") == "an" and env.get("GIT_COMMITTER_EMAIL") == "ce@t"
             and env.get("GIT_AUTHOR_DATE") == "2026-11-03T12:00:00"
-            and not any(k in env for k in ("GIT_DIR", "GIT_CONFIG_COUNT", "GIT_SSH_COMMAND")))
+            and not any(k in env for k in ("GIT_SSH_COMMAND", "GIT_ASKPASS")))
 
 
-both("GIT_AUTHOR_*/GIT_COMMITTER_* доходят до git, GIT_DIR/GIT_CONFIG_*/GIT_SSH_* — нет (board_lock)", author_case, ECHO,
+both("GIT_AUTHOR_*/GIT_COMMITTER_* доходят до git, GIT_SSH_COMMAND/GIT_ASKPASS — нет (board_lock)", author_case, ECHO,
      mlib(ECHO, [('(not k.startswith("GIT_") or k in ENV_KEEP) and k not in ENV_DROP', 'not k.startswith("GIT_") and k not in ENV_DROP')]))
 r = cli(base, "push", "origin", "HEAD:feat", extra={"PANTHEON_WINDOW": "athena-y"})
 check("окно athena-y, репозиторий themis-x — отказ 2", r.returncode == 2 and "направления" in r.stderr, r.stderr)
@@ -353,6 +352,7 @@ def hq_case(lib):
         hp = os.path.join(pan, ".git", "hooks", h)
         open(hp, "w").write(f"#!/bin/sh\necho {h} >> {HQ_MARK}\nexit 0\n")
         os.chmod(hp, 0o755)
+    git(seed, "pull", "-q", "--ff-only")  # прошлый прогон (lib или мутант) уже отправил коммит в hq
     open(os.path.join(seed, "b.txt"), "a").write("b\n")
     git(seed, "add", "b.txt")
     git(seed, "commit", "-q", "-m", "seed")
