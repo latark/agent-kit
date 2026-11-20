@@ -31,9 +31,10 @@ def test_finger_merges_exact_sha():
     check("заявка: окна и слияния нет — только плановый проход", not b.windows() and not b.merges(), b.calls("gh"))
     r = b.run()
     w = b.windows()
-    check("палец: одно окно «Слить repo#N (sha7), файлов N, ядро: <файлы>. argus ×2 ✓, CI ✓. Заголовок: «…»»",
-          len(w) == 1 and w[0][0] == f"Слить {REPO}#{PR} ({SHA[:7]}), файлов 2, ядро: {CORE_FILE}. argus ×2 ✓, "
-          f"CI ✓. Заголовок: «{TITLE}»" and w[0][1] == "120", w)
+    check("палец: одно окно «#N, со слов автора: «…». По файлам PR задевает: …. Проверки: …. Слить repo (sha7), "
+          "файлов N.» (metis-1281)",
+          len(w) == 1 and w[0][0] == f"#{PR}, со слов автора: «{TITLE}». По файлам PR задевает: шлюз слияния. "
+          f"Проверки: argus ×2 ✓, CI ✓. Слить {REPO} ({SHA[:7]}), файлов 2." and w[0][1] == "120", w)
     check("палец: gh pr merge N -R repo --match-head-commit <sha> --merge — ровно один раз",
           b.merges() == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]], b.merges())
     check("gh: GH_REPO и GH_HOST из окружения убраны",
