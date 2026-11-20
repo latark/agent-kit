@@ -336,12 +336,12 @@ run()
 check("ответ в чате Зевсу — согласие", read(POLICY) == NEW)
 
 fresh()
-for bad in ("~/.claude/settings.json", "~/.claude/agents/_parts/names.md", "~/.claude/agents/names.part",
+for bad in ("~/.claude/settings.local.json", "~/.claude/agents/_parts/names.md", "~/.claude/agents/names.part",
             "~/.claude/agents/_parts/../names.part", "/etc/hosts"):
-    write(os.path.join(HOME, ".claude", "settings.json"), "{}\n")
+    write(os.path.join(HOME, ".claude", "settings.local.json"), "{}\n")
     rc, _, errs = propose(bad, NEW)
     check(f"путь вне списка ({bad}) — отказ, заявки нет", rc == 2 and not reqs() and "не из списка" in errs, (rc, errs))
-check("settings.json не тронут", read(os.path.join(HOME, ".claude", "settings.json")) == "{}\n")
+check("settings.local.json не тронут", read(os.path.join(HOME, ".claude", "settings.local.json")) == "{}\n")
 
 fresh()
 real = os.path.join(_ROOT, "elsewhere")
@@ -378,14 +378,14 @@ run()
 check("новый текст подменён при том же sha диффа — не применено", read(POLICY) == OLD
       and result(req).get("state") == "refused", result(req))
 fresh()
-settings = os.path.join(HOME, ".claude", "settings.json")
+settings = os.path.join(HOME, ".claude", "settings.local.json")
 write(settings, OLD)
 propose("~/.claude/pantheon/policy.toml", NEW)
 path0, req, _ = reqs()[0]
 IDLE[0] = 10 ** 6
-diff = OE.make_diff(".claude/settings.json", OLD, NEW)
-evil = dict(req, file=".claude/settings.json", diff=diff,
-            diff_sha=OE.diff_sha(".claude/settings.json", req["before"], req["after"], diff))
+diff = OE.make_diff(".claude/settings.local.json", OLD, NEW)
+evil = dict(req, file=".claude/settings.local.json", diff=diff,
+            diff_sha=OE.diff_sha(".claude/settings.local.json", req["before"], req["after"], diff))
 write(path0, json.dumps(evil))
 answer(OE.question(evil), "А — Да, применить")
 run()
@@ -423,9 +423,9 @@ run()
 check("решает последний ответ: «да», потом «нет» — отклонено", read(POLICY) == OLD
       and result(req).get("state") == "declined", result(req))
 
-check("путь вне списка: rel_of и target отказывают сами", OE.rel_of("~/.claude/settings.json") is None
+check("путь вне списка: rel_of и target отказывают сами", OE.rel_of("~/.claude/settings.local.json") is None
       and OE.rel_of(os.path.join(HOME, ".claude", "pantheon", "policy.toml")) == ".claude/pantheon/policy.toml"
-      and raises(OE.target, ".claude/settings.json") and raises(OE.target, "../.claude/pantheon/policy.toml"))
+      and raises(OE.target, ".claude/settings.local.json") and raises(OE.target, "../.claude/pantheon/policy.toml"))
 fresh()
 os.link(POLICY, os.path.join(WORK, "hard"))
 rc, _, errs = propose("~/.claude/pantheon/policy.toml", NEW)
@@ -1243,6 +1243,30 @@ check("window.json пакета — не из списка: отказ", rc == 2
 write(os.path.join(HOME, ".claude", "pantheon", "packs", "demo-pack", "approved.json"), "{}\n")
 rc, out, errs = propose("~/.claude/pantheon/packs/demo-pack/approved.json", '{"a": "0"}\n')
 check("approved.json пакета — не из списка: отказ", rc == 2 and "не из списка" in errs and not reqs(), (rc, errs))
+
+# --- [settings] ~/.claude/settings.json — только autoMode.environment (metis-1135, [auto-1135-consent]) ------------
+fresh()
+SET = os.path.join(HOME, ".claude", "settings.json")
+SET_OLD = '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a"]}}\n'
+write(SET, SET_OLD)
+rc, out, errs = propose("~/.claude/settings.json",
+                        '{"permissions": {"allow": ["Read", "Bash"]}, "autoMode": {"environment": ["a"]}}\n')
+check("settings.json: правка прав — отказ", rc == 2 and "только autoMode.environment" in errs and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/settings.json",
+                        '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a"], "allow": ["x"]}}\n')
+check("settings.json: другой ключ autoMode — отказ", rc == 2 and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/settings.json",
+                        '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a", 1]}}\n')
+check("settings.json: environment не из строк — отказ", rc == 2 and "список строк" in errs and not reqs(), (rc, errs))
+SET_NEW = '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a", "Согласие [id] — из consent show"]}}\n'
+rc, out, errs = propose("~/.claude/settings.json", SET_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+check("settings.json: строка environment — заявка принята", rc == 0 and req.get("file") == ".claude/settings.json",
+      (rc, errs))
+answer(yes_question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("settings.json: «да» — применено", read(SET) == SET_NEW, journal())
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
