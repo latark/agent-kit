@@ -682,8 +682,39 @@ commit(MONO, {"package.json": json.dumps({"name": "root", "workspaces": ["apps/*
               "apps/landing/package.json": json.dumps({"name": "landing", "scripts": {"dev": "next dev --port ${PORT:-3100}"}}),
               "apps/lib/package.json": json.dumps({"name": "lib", "scripts": {"build": "tsc"}})}, "m1")
 P.write_json(os.path.join(STATE, "domains.json"),
-             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono"],
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/mono", "~/projects/mono2"],
                           "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+# metis-1293: test --script X --app web — скрипт приложения монорепо, запуск в его папке
+MONO2 = os.path.join(HOME, "projects", "mono2")
+os.makedirs(MONO2)
+git(MONO2, "init", "-q", "-b", "main")
+git(MONO2, "remote", "add", "origin", "https://github.com/latark/mono2.git")
+commit(MONO2, {"package.json": json.dumps({"name": "root", "workspaces": ["apps/*"]}),
+               "apps/web/package.json": json.dumps({"name": "@m/web", "scripts": {"probe": "pwd"}}),
+               "apps/other/package.json": json.dumps({"name": "other", "scripts": {"nope": "pwd"}})}, "m2")
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "web")
+run_pass()
+res = O.load_result(q, rid) or {}
+check("1293: test --script probe --app web в монорепо — скрипт apps/web, в его папке", rc == 0
+      and res.get("state") == "done" and res.get("code") == 0 and res.get("app") == "web"
+      and os.path.join("apps", "web") in res.get("tail", "") and "apps/other" not in res.get("tail", "")
+      and "(приложение apps/web)" in res.get("cmd", ""), res)
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "@m/web")
+run_pass()
+res = O.load_result(q, rid) or {}
+check("1293: --app по имени пакета", res.get("state") == "done" and res.get("code") == 0, res)
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "other")
+run_pass()
+res = O.load_result(q, rid) or {}
+check("1293: у приложения нет скрипта — отказ", res.get("state") == "failed" and "нет скрипта" in res.get("why", ""), res)
+rc, _, _ = role_request("athena-x", MONO2, "test", "--app", "web")
+check("1293: --app без --script — код 2", rc == 2)
+rc, q, rid = role_request("athena-x", MONO2, "test", "--script", "probe", "--app", "../x")
+check("1293: --app ../x — отказ при заявке или в проходе", rc == 2 or (run_pass() or True) and
+      (O.load_result(q, rid) or {}).get("state") == "failed", O.load_result(q, rid))
+check("1293: check_request — app у test без script отказ, со script — норм",
+      O.check_request({"v": 1, "id": "r", "kind": "test", "dir": "/x", "app": "web"}, "r")
+      and O.check_request({"v": 1, "id": "r", "kind": "test", "dir": "/x", "app": "web", "script": "probe"}, "r") is None)
 rc, q, rid = role_request("athena-x", MONO, "serve")
 serve_pass()
 res = O.load_result(q, rid) or {}
