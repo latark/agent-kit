@@ -440,6 +440,10 @@ def test_window_text_author_and_budget():
     check("все области, перезапуск, длинный вердикт: хвост целиком, вердикт — коротко, не длиннее 400",
           len(w) <= 400 and w.endswith(f"Слить {REPO} ({SHA[:7]}) и затем перезапустить окно {win}, файлов "
                                        f"{len(set(every))}.") and "CI: лимит, тесты ✓" in w, w)
+    long_repo = dict(req, repo="o" * 20 + "/" + "r" * 25, pr=123456, restart="w" * 31)
+    w = m.window_text(long_repo, {"title": "t" * 200}, "argus ×2 ✓, CI ✓", every)
+    check("длинный repo и окно, все области: вердикт целиком, фраза вытесняется первой (argus #517 Д)",
+          len(w) <= 400 and "Проверки: argus ×2 ✓, CI ✓. Слить" in w, w)
     check("пустой заголовок — без «со слов автора» и пустых кавычек",
           m.window_text(req, {}, "CI ✓", ["a"]) == f"#486. По файлам PR: ядро не задето. Проверки: CI ✓. Слить {REPO} "
           f"({SHA[:7]}), файлов 1.")
@@ -448,10 +452,19 @@ def test_window_text_author_and_budget():
     t = m.batch_window_text(reqs, views, ["argus ×2 ✓, CI ✓"] * 5, [[CORE_FILE]] * 5)
     check("MAX_BATCH, обычные задачи: у каждого PR номер, задача, SHA и фраза", len(t) <= 400 and all(
         f"#{10000 + i} metis-12%02d ({'%07d' % i}) «окно Touch" % i in t for i in range(5)), t)
+    tfull = "argus ×2 ✓, CI ✓; необязательная проверка GitHub tests/full красная: FAILURE"
+    three = [["plugins/guard/hooks/merge_gate.py"], ["plugins/pantheon/lib/window_rules.py"],
+             ["plugins/guard/hooks/protect_config.py"], [], []]
+    real = [{**r, "pr": 1500 + i} for i, r in enumerate(reqs)]   # четырёхзначные номера: следующие сотни PR
+    for whys in (["argus ×2 ✓, CI ✓"] * 4 + [tfull], ["argus ×2 ✓, CI ✓"] * 4 + [m.BILLING_OK + SHA[:12]]):
+        t = m.batch_window_text(real, views, whys, three)
+        check("MAX_BATCH, 3 области, вердикты разные: фраза у каждого PR, проверки короче (argus #517 Б5)",
+              len(t) <= 400 and t.count("«окно") == 5 and "Проверки: #1504 " in t
+              and t.endswith("; у остальных argus ×2 ✓, CI ✓."), t)
     t = m.batch_window_text(reqs, [{"body": "Closes abcdefghijkl-12%03d" % i} for i in range(5)],
                             ["слово %d " % i * 20 for i in range(5)], [[c] for c in every][:5] + [every])
     check("MAX_BATCH, длинные задачи и разные вердикты: SHA, «Слить по очереди» и вердикт каждого — в окне",
-          len(t) <= 400 and "Слить по очереди 5 PR" in t and all(f"#{10000 + i} слово {i}" in t for i in range(5))
+          len(t) <= 400 and "Слить по очереди в latark/agent-kit" in t and all(f"#{10000 + i} слово {i}" in t for i in range(5))
           and all(f"({'%07d' % i})" in t for i in range(5)), t)
     check("области окна покрывают всё ядро и сборку окон",
           set(m.CORE_FILES) | set(m.BUILD_FILES) <= set(m.AREA_FILES) and set(m.CORE_DIR) <= dict(m.AREA_DIRS).keys())

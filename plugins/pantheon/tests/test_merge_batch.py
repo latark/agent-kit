@@ -25,7 +25,7 @@ def test_batch_one_window_merges_all():
     text = w[0][0] if w else ""
     check("пачка: одно окно на оба PR — номер, SHA и фраза каждого, области ядра, проверки, не длиннее 400 (metis-1281)",
           len(w) == 1 and text == f"Авторы: #7 ({SHA[:7]}) «PR 7»; #8 ({SHA2[:7]}) «PR 8». По файлам PR "
-          f"задевает: шлюз слияния. Слить по очереди 2 PR {REPO} (файлов 3), отказ — стоп. "
+          f"задевает: шлюз слияния. Слить по очереди в {REPO}, отказ — стоп. "
           "Проверки: у всех argus ×2 ✓, CI ✓.", w)
     check("пачка: оба слиты по очереди, каждый с --match-head-commit своего head",
           b.merges() == [merge_argv(7), merge_argv(8)], b.merges())
@@ -236,7 +236,7 @@ def test_batch_max_fallback_window_core():
           r.returncode == 0 and len(w) == 1 and "лимит" in text, (r.stdout + r.stderr, w, b.outs[-1]))
     check("MAX_BATCH PR, запасной путь: в окне области ядра и число файлов, номер и SHA каждого PR, не длиннее 400",
           "По файлам PR задевает: шлюз слияния, защита настроек, список плагинов, хуки Пантеона" in text
-          and "(файлов 6)" in text and len(text) <= 400 and all(f"#{pr} ({shas[pr][:7]})" in text for pr in prs), text)
+          and f"Слить по очереди в {REPO}" in text and len(text) <= 400 and all(f"#{pr} ({shas[pr][:7]})" in text for pr in prs), text)
     check("MAX_BATCH PR, запасной путь: ядро — до вердиктов", "задевает: " in text and "лимит" in text
           and text.index("задевает: ") < text.index("лимит"), text)
     check("MAX_BATCH PR, запасной путь: вердикт у всех одинаковый — одной строкой, коротко и целиком",
@@ -255,7 +255,7 @@ def test_batch_max_fallback_window_core():
     except ValueError:
         text = ""
     check("MAX_BATCH PR, длинные вердикты: области ядра, номер и SHA каждого PR, «Слить по очереди» — в окне, ≤ 400",
-          "По файлам PR задевает: шлюз слияния" in text and "Слить по очереди 5 PR" in text and len(text) <= 400
+          "По файлам PR задевает: шлюз слияния" in text and "Слить по очереди в latark/agent-kit" in text and len(text) <= 400
           and all(f"#{1000 + i} ({'%07d' % i})" in text for i in range(5)), text or r.stderr)
 
 

@@ -1688,15 +1688,17 @@ def pr_label(req, task):
 
 
 def short_why(why, room):
-    """Вердикт шлюза для окна пачки: запасной путь — коротко (BILLING_SHORT), в одну строку, не длиннее room."""
-    return re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, plain(why))[:max(room, 0)]
+    """Вердикт шлюза для окна пачки: запасной путь — коротко (BILLING_SHORT), красная необязательная проверка —
+    «<имя> ✗», в одну строку, не длиннее room."""
+    t = re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, plain(why))
+    return re.sub(r"необязательная проверка GitHub (\S+) красная: [A-Z_]+", r"\1 ✗", t)[:max(room, 0)]
 
 
 def window_text(req, view, why, paths):
     """Текст окна одного PR (metis-1281, [metis-1281-view] владельца 20.11): «#N · задача, со слов автора: «что
     меняет». По файлам PR задевает: области ядра словами. Проверки: вердикт шлюза. Слить repo (sha7)[ и затем
     перезапустить окно X], файлов N.» Не длиннее 400. Место — по старшинству: метка, области и «Слить …» целиком,
-    вердикт — остаток, но не меньше чем на 30 знаков фразы; фраза автора — что осталось (нет места или пустая —
+    вердикт — остаток (не влез целиком — запасной путь коротко); фраза автора — что осталось (нет места или пустая —
     без «со слов автора»)."""
     task = pr_task(view)
     label = pr_label(req, task)
@@ -1704,7 +1706,7 @@ def window_text(req, view, why, paths):
     hit = f". {areas_text(paths)}. Проверки: "
     end = f". Слить {req['repo']} ({req['sha'][:7]}){then}, файлов {len(set(paths))}."
     said = ", со слов автора: «»"
-    room = 400 - len(label) - len(hit) - len(end) - len(said) - 30
+    room = 400 - len(label) - len(hit) - len(end) - len(said)   # строки прохода вытесняют фразу автора, не наоборот
     verdict = plain(why) if len(plain(why)) <= room else short_why(why, room)   # не влез — запасной путь коротко
     phrase = pr_phrase(view, task, min(TITLE_MAX, 400 - len(label) - len(hit) - len(verdict) - len(end) - len(said)))
     head = f"{label}, со слов автора: «{phrase}»" if phrase else label
@@ -1717,16 +1719,24 @@ def batch_window_text(reqs, views, whys, paths):
     одинаковым вердиктом. Не длиннее 400 знаков — предел помощника окна. Место — по старшинству: номера, задачи, SHA,
     области и «Слить по очереди» при MAX_BATCH PR влезают всегда (argus-263a Б1; задача не длиннее 18 знаков,
     TASK_RE; не хватает проверкам — области короче, затем без номеров задач); проверкам — до 60 знаков на группу, но
-    не меньше len(BILLING_SHORT) («CI: лимит, тесты ✓» целиком у каждой); фразам авторов —
+    не меньше len(BILLING_SHORT) («CI: лимит, тесты ✓» целиком у каждой), а не влезают фразы — проверки короче до
+    этого предела; фразам авторов —
     остаток поровну, короче PHRASE_MIN — номер без фразы."""
     n = len(reqs)
     tasks = [pr_task(v) for v in views]
     every = [x for p in paths for x in p]
-    end = f" Слить по очереди {n} PR {reqs[0]['repo']} (файлов {len(set(every))}), отказ — стоп."
+    end = f" Слить по очереди в {reqs[0]['repo']}, отказ — стоп."   # число PR видно по меткам
     groups = {}                      # вердикт → номера PR: у пачки обычно один-два разных вердикта
     for r, w in zip(reqs, whys):
         groups.setdefault(short_why(w, 400), []).append(f"#{r['pr']}")   # SHA прогона запасного пути не делит
-    heads = ["у всех "] if len(groups) == 1 else [f"{', '.join(prs)} " for prs in groups.values()]
+    if len(groups) > 1:   # самая большая группа — «у остальных» последней: номера в окне уже есть, место — фразам
+        big = max(groups, key=lambda w: len(groups[w]))
+        groups = {**{w: prs for w, prs in groups.items() if w != big}, big: groups[big]}
+    heads = [f"{', '.join(prs)} " for prs in groups.values()]
+    if len(groups) == 1:
+        heads = ["у всех "]
+    elif len(groups[big]) > 1:   # «у остальных» — только вместо двух и больше номеров: одного он не короче
+        heads[-1] = "у остальных "
     # проверкам не хватает и 14 знаков на группу — области короче («и ещё N»), затем метки без номеров задач
     for named, areas_room in ((1, 70), (1, 40), (1, 20), (1, 0), (0, 0)):
         labels = [f"#{r['pr']}{' ' + t if named and t else ''} ({r['sha'][:7]})" for r, t in zip(reqs, tasks)]
@@ -1735,10 +1745,14 @@ def batch_window_text(reqs, views, whys, paths):
         room_w = 400 - base - len(" Проверки: .") - sum(len(h) + 2 for h in heads)
         if room_w // len(heads) >= len(BILLING_SHORT):
             break
-    per_why = max(min(60, room_w // len(heads)), len(BILLING_SHORT))   # строки прохода — раньше фраз авторов
-    checks = " Проверки: " + "; ".join((h + short_why(w, per_why)).rstrip() for h, w in zip(heads, groups)) + "."
     lead = "Авторы: "                # фразы в кавычках — текст ролей; области ниже считает проход по файлам
-    per = min(TITLE_MAX, (400 - base - len(checks) - len(lead)) // n - 3)
+    # проверкам — до 60 знаков на группу, но фраза у каждого PR (metis-1281#1) важнее хвоста длинного вердикта:
+    # не влезает фраза в PHRASE_MIN — проверки короче, до len(BILLING_SHORT); и тогда нет — PR без фраз
+    for per_why in range(max(min(60, room_w // len(heads)), len(BILLING_SHORT)), len(BILLING_SHORT) - 1, -1):
+        checks = " Проверки: " + "; ".join((h + short_why(w, per_why)).rstrip(" ;,.") for h, w in zip(heads, groups)) + "."
+        per = min(TITLE_MAX, (400 - base - len(checks) - len(lead)) // n - 3)
+        if per >= PHRASE_MIN:
+            break
     while True:   # фразы — остаток: не влезло целиком — короче, пока не влезет или не станет короче PHRASE_MIN
         said = [pr_phrase(v, t, per) for v, t in zip(views, tasks)]
         items = "; ".join(f"{x} «{p}»" if p else x for x, p in zip(labels, said))
