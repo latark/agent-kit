@@ -2318,6 +2318,30 @@ P.write_json(os.path.join(STATE, "domains.json"),
              {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
 
 
+# --- 5d. metis-1311: профиль песочницы пишут потоки одного процесса (дорожки прохода) — без «No such file» --------
+_pt, _perrs = O.profile_text, []
+O.profile_text = lambda roots=(), db_ports=(): "(version 1)\n" + "; x\n" * 20000  # длинный профиль: окно гонки шире
+
+
+def _pw():
+    for _ in range(100):
+        try:
+            _pp = O.write_profile([])
+            if not os.path.isfile(_pp):
+                _perrs.append("нет файла профиля сразу после write_profile")
+        except OSError as _e:
+            _perrs.append(str(_e))
+
+
+_pths = [threading.Thread(target=_pw) for _ in range(6)]
+[_t.start() for _t in _pths]
+[_t.join() for _t in _pths]
+O.profile_text = _pt
+check("write_profile из нескольких потоков: ни одной ошибки, профиль на месте (metis-1311)", not _perrs, _perrs[:2])
+_pleft = [x for x in os.listdir(O.root()) if x.startswith("profile.sb.")]
+check("write_profile: временных файлов profile.sb.* не остаётся (metis-1311)", not _pleft, _pleft)
+
+
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()
 _left = [p for p in fake_pids() if still_alive(p)]
