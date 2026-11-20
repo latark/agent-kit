@@ -331,3 +331,41 @@ def pack_hook_problem(cmd):
                 return None
     return ("за «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или "
             f"python3 -I {PACK_HOOK_BIN}<имя>.py")
+
+
+# gh шлюза из окна с закрытой Связкой (metis-1279, «А — да» владельца 20.11, metis-1273-auth): пакет окна (почтовый у
+# metis-pantheon) кладёт ~/Library/Keychains в denyRead, и gh внутри `pantheon review accept|delta` в песочнице не
+# читает токен (HTTP 401). Мимо песочницы — только подкоманды review, которые зовут gh (accept: review_ready и
+# _accept_unmarked, delta: pr_view и compare), и только окнам с этим запретом; токен остаётся в Связке, проверки шлюза
+# те же. report gh не зовёт (журнал шлюза и транскрипты) — его здесь нет. Пакет так ничего не расширяет сам: denyRead
+# только сужает, а команды — константа ядра
+REVIEW_GH_OUT = [f"pantheon review {c}{tail}" for c in ("accept", "delta") for tail in ("", " *")]
+
+
+def keychain_denied(deny_read, home):
+    """Закрывает ли denyRead песочницы Связку пользователя home/Library/Keychains — в любой форме пути: «~/…»,
+    абсолютный, «//абсолютный», с хвостом «/», «/*», «/**»; сама папка, её предок или путь внутри неё."""
+    kc = home.rstrip("/") + "/Library/Keychains"
+    for x in deny_read if isinstance(deny_read, list) else []:
+        p = x.strip() if isinstance(x, str) else ""
+        while p.endswith(("/**", "/*")):
+            p = p.rsplit("/", 1)[0]
+        p = home + p[1:] if p == "~" or p.startswith("~/") else p
+        if not p.startswith("/"):
+            continue
+        segs = []
+        for seg in p.split("/"):  # нормализация вручную: «..» снимает сегмент, «.» и пустые пропускаются
+            if seg == "..":
+                if segs:
+                    segs.pop()
+            elif seg not in ("", "."):
+                segs.append(seg)
+        p = "/" + "/".join(segs)
+        if p == kc or kc.startswith(p.rstrip("/") + "/") or p.startswith(kc + "/"):
+            return True
+    return False
+
+
+def review_gh_out(deny_read, home, have=()):
+    """excludedCommands окна при закрытой Связке: REVIEW_GH_OUT без уже имеющихся в have; Связка открыта — []."""
+    return [c for c in REVIEW_GH_OUT if c not in have] if keychain_denied(deny_read, home) else []
