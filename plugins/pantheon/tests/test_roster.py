@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # noqa: E402
@@ -86,6 +87,10 @@ check("2. аргумент — код 2 и подсказка", r.returncode == 
 
 # 3. Функции Пантеона в процессе: те же поля через roster_safe
 os.environ["HOME"] = h
+for k in [k for k in os.environ if k.startswith("PANTHEON_")]:   # тик в части 4 — только во временной папке
+    os.environ.pop(k)
+os.environ.update({"PANTHEON_STATE": os.path.join(ROOT, "state3"), "PANTHEON_HOME": os.path.join(h, "ai", "pantheon"),
+                   "PANTHEON_NO_NOTIFY": "1", "PANTHEON_TEST": "1"})
 sys.path.insert(0, LIB)
 P = importlib.import_module("pantheon")
 P.HOME = h
@@ -107,6 +112,77 @@ check("3. workers не объект — daemon_workers None, updatedAt есть"
 P.HOME = home("nofile", None)
 check("3. реестра нет — None везде", P.roster_safe() is None and P.daemon_workers() is None
       and P.roster_changed_at() is None and P.session_started({"id": "abcd1234", "startedAt": 3_000}) == 3)
+
+# 4. Окно роли (metis-1026, К2): ~/.claude/daemon закрыт на чтение — снимок планового прохода без ключей, не старше TTL
+P.HOME = h
+P.STATE = os.path.join(ROOT, "state4")
+os.makedirs(P.STATE)
+SNAP = os.path.join(P.STATE, P.ROSTER_SNAPSHOT)
+P.roster_snapshot()
+snap_text = open(SNAP).read()
+check("4. тик пишет снимок: те же поля, что roster_safe, ключей нет",
+      json.loads(snap_text) == P.roster_safe() and not any(x in snap_text for x in (SECRET_RV, SECRET_PTY, SECRET_TOP)),
+      snap_text)
+REAL = os.path.join(h, ".claude", "daemon", "roster.json")
+os.chmod(REAL, 0)   # как denyRead окна: открыть файл — PermissionError
+try:
+    can_read = os.access(REAL, os.R_OK)   # root читает и 000 — тогда проверка отказа не про этот случай
+    meta = {}
+    got4 = P.roster_safe(meta)
+    check("4. файл закрыт (PermissionError) — снимок планового прохода, с отметкой времени",
+          can_read or (got4 == json.loads(snap_text) and "snapshot" in meta), (got4, meta))
+    check("4. daemon_workers из снимка", can_read or P.daemon_workers() == {"abcd1234": 4242, "efgh5678": 77,
+                                                                        "odd": None}, P.daemon_workers())
+    env4 = {"PANTHEON_STATE": P.STATE}
+    r = subprocess.run([PY311, "-I", RUN_PY, "roster"], capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ["PATH"], "HOME": h, "PANTHEON_HOME": os.path.join(h, "ai", "pantheon"),
+                            "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT, "PANTHEON_TEST": "1", **env4})
+    check("4. pantheon roster в окне: код 0, JSON снимка, в stderr — что это снимок планового прохода",
+          can_read or (r.returncode == 0 and json.loads(r.stdout) == json.loads(snap_text)
+                       and "снимок планового прохода" in r.stderr), (r.returncode, r.stdout, r.stderr))
+    old = time.time() - P.ROSTER_SNAPSHOT_TTL - 5
+    os.utime(SNAP, (old, old))
+    check("4. снимок старше TTL (тик стоит) — None, а не старые воркеры",
+          can_read or (P.roster_safe() is None and P.daemon_workers() is None), P.roster_safe())
+    r = subprocess.run([PY311, "-I", RUN_PY, "roster"], capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ["PATH"], "HOME": h, "PANTHEON_HOME": os.path.join(h, "ai", "pantheon"),
+                            "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT, "PANTHEON_TEST": "1", **env4})
+    check("4. pantheon roster: снимок старый — код 1, причина называет снимок последней строкой",
+          can_read or (r.returncode == 1 and "снимок планового прохода" in r.stderr.strip().splitlines()[-1]), (r.returncode, r.stderr))
+finally:
+    os.chmod(REAL, 0o600)
+P.HOME = home("nofile4", None)
+P.roster_snapshot()
+check("4. реестра нет — снимок снят (окна не видят старых воркеров)", not os.path.exists(SNAP))
+P.roster_snapshot()
+check("4. реестра нет и снимка нет — тик не падает", not os.path.exists(SNAP))
+write = P.write_json
+P.write_json = lambda p, d: (_ for _ in ()).throw(AssertionError("снимок переписан без нужды"))
+P.HOME = h
+try:
+    P.write_json = write
+    P.roster_snapshot()
+    P.write_json = lambda p, d: (_ for _ in ()).throw(AssertionError("снимок переписан без нужды"))
+    P.roster_snapshot()
+    check("4. снимок свежий и тот же — не переписывается каждый тик", True)
+except AssertionError as e:
+    check("4. снимок свежий и тот же — не переписывается каждый тик", False, e)
+finally:
+    P.write_json = write
+P.HOME = home("changed4", {"updatedAt": 3_000, "workers": {"new9": {"pid": 99, "startedAt": 2_000}}})
+P.roster_snapshot()   # снимок свежий, но реестр сменился (respawn) — переписать сразу, а не через TTL/3
+check("4. реестр сменился — свежий снимок переписан", json.load(open(SNAP)) == P.roster_safe(), open(SNAP).read())
+P.HOME = h
+os.remove(SNAP)
+open(os.path.join(P.STATE, "paused"), "w").close()   # тик на паузе задач — снимок всё равно нужен окнам
+P.tick()
+check("4. тик (и на паузе) кладёт снимок", os.path.exists(SNAP) and json.load(open(SNAP)) == P.roster_safe())
+for tag, roster in (("missing4", None), ("broken4", "{not json")):
+    P.HOME = home(tag, roster)
+    P.write_json(SNAP, {"updatedAt": 1, "workers": {"old1": {"pid": 1, "startedAt": 1}}})
+    meta = {}
+    check(f"4. реестр {tag} (не отказ в чтении), свежий снимок есть — снимок не подставляется",
+          P.roster_safe(meta) is None and not meta, meta)
 
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
