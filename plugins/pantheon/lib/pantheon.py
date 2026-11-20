@@ -2068,10 +2068,14 @@ def status():
                 by.setdefault("interactive", []).append(a)
                 continue
             # metis-0250: «ждёт вас» без процесса и без вопроса — не ждёт, а снята Claude Code (reconcile_agents)
-            by.setdefault("gone" if a.get("noProcess") else a.get("state") or "?", []).append(a)
-        order = ("interactive", "working", "blocked", "failed", "gone", "done", "stopped")
+            k = "gone" if a.get("noProcess") else a.get("state") or "?"
+            if k in ("blocked", "failed") and stale_ask(a.get("waitingFor")):
+                k = "stale"   # metis-1248: «подтвердить #N по Touch ID», а заявок на #N нет — вопрос устарел
+            by.setdefault(k, []).append(a)
+        order = ("interactive", "working", "blocked", "failed", "gone", "stale", "done", "stopped")
         word = {"interactive": "открыты в терминале", "working": "фоновые работают", "blocked": "ждут вас",
-                "failed": "упали", "gone": "без процесса", "done": "закончили ход", "stopped": "остановлены"}
+                "failed": "упали", "gone": "без процесса", "done": "закончили ход", "stopped": "остановлены",
+                "stale": "вопрос устарел"}
         lines.append(" · ".join(f"{word.get(k, k)}: {len(by[k])}" for k in sorted(by, key=lambda k: (
             order.index(k) if k in order else 9))) or "фоновых сессий нет")
         for k in ("blocked", "failed", "gone"):
@@ -4976,8 +4980,9 @@ def reconcile_agents(data, workers=None):
                 and not in_reg and not just_listed(a, since=roster_at)):
             # вопрос — needs задания или исходный waitingFor claude agents, а не detail (он в state.json есть всегда:
             # ниже он ляжет в waitingFor упавшей); noProcess вопроса не имеет по определению (ревью argus-249a Б1)
-            if a["state"] == "blocked" and not a.get("noProcess") and (a.get("waitingFor") or js.get("needs")):
-                a["asks"] = True
+            q = a.get("waitingFor") or js.get("needs")
+            if a["state"] == "blocked" and not a.get("noProcess") and q and not stale_ask(q):
+                a["asks"] = True   # metis-1248: устаревший вопрос (Touch ID по слитому PR) — не вопрос
             if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
                 a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
             a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
@@ -5000,6 +5005,15 @@ def just_listed(a, grace=60, since=None):
     if since and since > now() + 300:
         since = None
     return now() - max(t, since or 0) < grace
+
+
+def stale_ask(text):
+    """Вопрос окна устарел (metis-1248): «подтвердить #N по Touch ID», а заявок на эти PR нет (merge.touchid_stale).
+    Сбой — не устарел: вопрос остаётся виден."""
+    try:
+        return bool(merge_mod().touchid_stale(text))
+    except Exception:  # noqa: BLE001 — сбой разбора очереди не прячет вопрос
+        return False
 
 
 def asks_owner(a):

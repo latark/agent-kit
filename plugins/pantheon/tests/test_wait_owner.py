@@ -237,6 +237,18 @@ run(home, state, ev=dict(PR, tool_name="mcp__x__y", tool_input={"token": "s3cr3t
 check("незнакомый инструмент — только имена полей, без значений", lines(home) and "поля: q, token" in lines(home)[0]
       and "s3cr3t" not in lines(home)[0] and lines(home)[0].count("Совет:") == 1, lines(home))
 
+# 10в. metis-1183/0907: запрос субагента окна (agent_id в событии) — строка и уведомление macOS называют субагента
+home, state = place()
+r = run(home, state, ev=dict(PR, agent_id="a1b2", agent_type="dev-opus"))
+got = lines(home)
+check("субагент: «окно X (субагент «dev-opus») просит разрешение» в тревоге и в уведомлении macOS",
+      r.returncode == 0 and got and "окно metis-pantheon (субагент «dev-opus») просит разрешение — «Bash»" in got[0]
+      and len(sent(state)) == 1 and "metis-pantheon (субагент «dev-opus»): «Bash»" in sent(state)[0], (got, sent(state)))
+home, state = place()
+run(home, state, ev=dict(PR, agent_type="dev-opus"))
+check("без agent_id — запрос самого окна, без пометки субагента", lines(home) and "субагент" not in lines(home)[0],
+      lines(home))
+
 # 10а. С1: AskUserQuestion / ExitPlanMode — не просьба разрешить команду: короткий текст, без «поля: …» и «Совет»
 for tool, want_txt in (("AskUserQuestion", "окно ждёт ответа на вопрос"), ("ExitPlanMode", "окно ждёт решения по плану")):
     home, state = place()

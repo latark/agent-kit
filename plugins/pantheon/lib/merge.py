@@ -2471,6 +2471,35 @@ def pending():
         return False
 
 
+TOUCHID_WORD = re.compile(r"touch\s*id", re.I)
+PR_NUM = re.compile(r"#([1-9][0-9]{0,8})\b")
+
+
+def touchid_stale(text):
+    """metis-1248: вопрос окна «подтвердить #N по Touch ID» устарел — ни у одного #N из текста нет заявки в очереди.
+    Окно Touch ID бывает только по заявке, а заявка уходит из merge-queue, когда PR слит, закрыт или она снята: без неё
+    подтверждать нечего (15.11: «подтвердить #61 и #62», оба слиты накануне). Текст без «Touch ID» или без #N — не
+    устарел (судить не о чем); очередь не читается — тоже не устарел. Номер берётся у заявки и у её пачки."""
+    s = str(text or "")
+    nums = {int(n) for n in PR_NUM.findall(s)}
+    if not nums or not TOUCHID_WORD.search(s):
+        return False
+    r = root()
+    try:
+        files = os.listdir(r) if _real_dir(r) else (None if os.path.lexists(r) else [])
+    except OSError:
+        files = None
+    if files is None:
+        return False
+    live = set()
+    for f in files:
+        req = read_req(os.path.join(r, f)) if FILE_RE.fullmatch(f) else None
+        if req:
+            live.add(req["pr"])
+            live.update(n for n in req.get("batch") or () if isinstance(n, int))
+    return not nums & live
+
+
 def cmd_status():
     r, rows, t = root(), [], P.now()
     if _real_dir(r):
