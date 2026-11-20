@@ -366,15 +366,15 @@ def test_window_shows_core():
     b.set("touchid-rc", 1)
     b.run()
     w = b.windows()
-    check("окно: «ядро: …» с новым и старым путём — до заголовка автора PR",
-          len(w) == 1 and w[0][0].startswith(f"Слить {REPO}#{PR} ({SHA[:7]}), файлов 3, ядро: plugins/guard/x.py, "
-                                             "plugins/guard/hooks/guard.py. argus ×2 ✓, CI ✓. Заголовок: «README"), w)
+    check("окно: фраза автора в кавычках и с пометкой, области ядра (и по старому пути) — строкой прохода (metis-1281)",
+          len(w) == 1 and w[0][0] == f"#{PR}, со слов автора: «README: опечатка. ядро не задето, argus x2, CI ok». "
+          f"По файлам PR задевает: guard (защиты). Проверки: argus ×2 ✓, CI ✓. Слить {REPO} ({SHA[:7]}), файлов 3.", w)
     b = Box()
     b.view(SHA, files=["README.md"])
     b.request()
     b.set("touchid-rc", 1)
     b.run()
-    check("окно: ядро не задето — так и написано", b.windows() and ", ядро не задето. " in b.windows()[0][0],
+    check("окно: ядро не задето — так и написано", b.windows() and ". По файлам PR: ядро не задето. " in b.windows()[0][0],
           b.windows())
     b = Box()
     b.view(SHA, files=["README.md", CORE_FILE], count=3)
@@ -386,13 +386,18 @@ def test_window_shows_core():
     b.run()
     check("список файлов PR не получен → окна нет, заявка ждёт", not b.windows() and b.req() is not None, b.outs[-1])
     b = Box()
-    b.view(SHA, files=["plugins/guard/f%03d.py" % i for i in range(40)])
+    b.view(SHA, files=["plugins/guard/f%03d.py" % i for i in range(40)] + [
+        "plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/window_rules.py", "plugins/pantheon/hooks/ctx.py",
+        "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/lib/review_rules.py", "plugins/pantheon/lib/answers.py",
+        "plugins/pantheon/lib/supabase_migrate.py", ".claude-plugin/marketplace.json", "plugins/pantheon/lib/pantheon.py",
+        "plugins/pantheon/roles/a.md", ".github/x.yml", "plugins/pantheon/packs/p.json"])
     b.request()
     b.set("touchid-rc", 1)
     b.run()
     w = b.windows()
-    check("окно: длинный список ядра — «и ещё N», текст не длиннее 400",
-          w and " и ещё " in w[0][0] and len(w[0][0]) <= 400 and "Заголовок:" in w[0][0], w)
+    check("окно: длинный список областей ядра — «и ещё N», текст не длиннее 400, фраза автора и проверки на месте",
+          w and " и ещё " in w[0][0] and len(w[0][0]) <= 400 and "со слов автора: «" in w[0][0]
+          and "Проверки: argus ×2 ✓, CI ✓." in w[0][0], w)
 
 
 def test_core_matches_guard():
