@@ -930,10 +930,17 @@ def write_profile(roots, db_ports=()):
     """Профиль в STATE/outside: profile.sb, у прогона с ключами тестов — profile-db.sb (тесты идут по одному)."""
     os.makedirs(root(), mode=0o700, exist_ok=True)
     p = root("profile-db.sb" if db_ports else "profile.sb")
-    tmp = f"{p}.{os.getpid()}"
-    with open(tmp, "w") as fh:
-        fh.write(profile_text(roots, db_ports))
-    os.replace(tmp, p)
+    # metis-1311: дорожки прохода — потоки одного процесса, и имя «.<pid>» у них общее: один os.replace уносит файл
+    # другого, второй падает «No such file … profile.sb.<pid>». Временный файл — свой у каждого вызова (mkstemp).
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(p) + ".", dir=root())
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(profile_text(roots, db_ports))
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
     return p
 
 
