@@ -307,7 +307,7 @@ both("GIT_CONFIG_GLOBAL окна (receivepack) не доходит до git", en
 
 
 def author_case(lib):
-    r = cli(hooked, "push", "origin", "HEAD:envy", lib=lib,
+    r = cli(base, "push", "origin", "HEAD:envy", lib=lib,  # ECHO: remote — GitHub
             extra={"GIT_AUTHOR_NAME": "an", "GIT_COMMITTER_EMAIL": "ce@t", "GIT_AUTHOR_DATE": "2026-11-03T12:00:00",
                    "GIT_SSH_COMMAND": "touch x", "GIT_ASKPASS": "/tmp/evil"})
     if r.returncode:
