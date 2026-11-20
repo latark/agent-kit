@@ -24,7 +24,8 @@ alerts.md Зевс получает в сводке новых тревог (ctx
     (часы ушли назад) окно не продлевает.
 После успешного alert хук шлёт `pantheon notify` — уведомление macOS владельцу сразу, щелчок открывает доску; сбой
 уведомления — строка в журнал, хук цел, предел «раз в 2 мин на окно» общий с alert (metis-0907).
-PermissionRequest на AskUserQuestion / ExitPlanMode — не просьба разрешить команду: тревога «окно ждёт вас: окно ждёт
+Запрос субагента окна (в событии agent_id) — «окно X (субагент «тип») …»: окно в claude agents работает, а стоит
+его субагент (metis-1183). PermissionRequest на AskUserQuestion / ExitPlanMode — не просьба разрешить команду: тревога «окно ждёт вас: окно ждёт
 ответа на вопрос / решения по плану» без полей вызова (metis-0874 С1).
 Отметка ставится ДО `pantheon alert` (повтор, пока alert идёт, молчит — одна тревога); сбой alert (код не 0, нет файла,
 таймаут) — строка в STATE/logs/ctx-hooks.log и отметка снимается: следующий запрос разрешения попробует снова. Хук всегда выходит с кодом 0 и ничего не печатает в окно.
@@ -146,15 +147,19 @@ def main():
     t = now()
     if recent(name, t):
         return 0
+    # metis-1183: запрос субагента окна (в событии agent_id и agent_type) — так и сказать: окно в claude agents
+    # числится работающим, и без этой пометки владелец ищет запрос не там
+    sub = flat(ev.get("agent_type"), 40) if ev.get("agent_id") else ""
+    who = f"{name} (субагент {quoted(sub, 40) or 'без имени'})" if ev.get("agent_id") else name
     if kind == "PermissionRequest" and ev.get("tool_name") in ASK_TOOLS:   # вопрос владельцу, а не команда (metis-0874 С1)
         msg = ASK_TOOLS[ev["tool_name"]]
-        text = f"окно {name} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
+        text = f"окно {who} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
     elif kind == "PermissionRequest":
         msg = question(ev)
-        text = f"окно {name} просит разрешение — {msg} (с {time.strftime('%H:%M', time.localtime(t))}; ответить — в окне)"
+        text = f"окно {who} просит разрешение — {msg} (с {time.strftime('%H:%M', time.localtime(t))}; ответить — в окне)"
     else:
         msg = flat(ev.get("message") or ev.get("title") or "запрос разрешения", MSG_MAX)
-        text = f"окно {name} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
+        text = f"окно {who} ждёт вас: {msg} (с {time.strftime('%H:%M', time.localtime(t))})"
     # отметка — ДО alert (metis-0874 Д2): повтор, пока alert идёт, видит её и молчит; сбой alert отметку снимает
     p = mark_path(name)
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -179,7 +184,7 @@ def main():
     # уведомление macOS тем же путём, что у Пантеона (щелчок открывает доску); сбой его — в журнал, хук цел (metis-0907)
     try:
         r = subprocess.run([os.path.join(PLUGIN, "bin", "pantheon"), "notify", "--title", "Окно ждёт вас",
-                            "--group", f"wait-owner-{name}", f"{name}: {msg}"],
+                            "--group", f"wait-owner-{name}", f"{who}: {msg}"],
                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]

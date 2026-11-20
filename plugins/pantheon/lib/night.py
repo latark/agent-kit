@@ -105,9 +105,15 @@ answer_at, answers_seen, pack_jobs, spent, last_used, resets_at, closed, last_ni
   until = "2026-11-14 23:59"  # обязателен: дата (по конец суток), «ГГГГ-ММ-ДД ЧЧ:ММ» или дата-время TOML; после него
                            # правило не действует само, owner_cap не трогается
   decision = "owner-word-ref"  # строка-ссылка на слово владельца
-Кривая запись (pct не число в (0, 100], нет until или он кривой) не действует, `pantheon night status` пишет почему и
-watch — одна тревога. Строка «Разрешение до даты» — в `pantheon night status`. Действующее разрешение с pct меньше
-потолка владельца работает как потолок (agent-gate в оболочке хука смотрит только owner_cap — отдельно).
+  target = "dir-alpha"   # необязателен (metis-1128): строка или список имён — разрешение только на запуск этих направлений
+                           # (pantheon start, wake, самозапуск, разовый запуск и субагенты из окна с таким PANTHEON_SESSION);
+                           # для них оно заменяет и красную, и жёлтую зону, и потолок владельца — в том числе выше него
+                           # (слово «обоих сейчас сверх потолка»); остальным не действует. Без decision не разбирается
+Кривая запись (pct не число в (0, 100], нет until или он кривой, target не строка и не список строк) не действует,
+`pantheon night status` пишет почему и watch — одна тревога. Строка «Разрешение до даты» — в `pantheon night status`.
+Действующее разрешение без target с pct меньше потолка владельца работает как потолок. Оболочка хука agent-gate
+запускает python, если в schedule.toml есть owner_cap или limits.allow (metis-1128: раньше только owner_cap, и при одном
+[limits.allow] стоп по pct субагентов не держал).
 
 Потолок только сужает: жёлтую и красную зону, heavy_max, hard_pct и ночь не снимает (решение 25.10; дневной потолок
 metis-0275 работал как разрешение). Достигнут — неделя по снимку ≥ pct при сбросе в будущем; старый снимок тоже
@@ -304,16 +310,34 @@ def allow_read(t):
         return None, f"запись [limits.allow] не разобрана: {str(e)[:80]}"
     if t >= end:
         return None, f"истекло {P.stamp(end)}"
-    return {"pct": float(pct), "until": end,
-            "decision": " ".join(str(c.get("decision") or "").split())[:80]}, ""
+    tg = c.get("target")
+    if tg is not None and not (isinstance(tg, str) and tg.strip()) and not (
+            isinstance(tg, list) and tg and all(isinstance(x, str) and x.strip() for x in tg)):
+        return None, "запись [limits.allow] не разобрана: target — не строка и не список строк"
+    targets = None if tg is None else tuple(x.strip() for x in ([tg] if isinstance(tg, str) else tg))
+    decision = " ".join(str(c.get("decision") or "").split())[:80]
+    if targets and not decision:  # разрешение на названный запуск — только по слову владельца с [id]
+        return None, "запись [limits.allow] не разобрана: у разрешения с target нет decision ([id] слова владельца)"
+    return {"pct": float(pct), "until": end, "targets": targets, "decision": decision}, ""
 
 
-def owner_cap(t, m=None):
-    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None. Действующее разрешение
-    [limits.allow] с pct ниже потолка (или без потолка) — тоже потолок: на его pct стоп (metis-1124)."""
-    cap = cap_read(t, m)[0]
+def allow_for(t, target=None):
+    """Действующее разрешение [limits.allow] для запуска target (имя направления или окна) или None. Разрешение без
+    target — для всех запусков; с target — только для названных: остальным оно не действует (metis-1128, слово владельца
+    с [id] открывает именно названный запуск)."""
     al = allow_read(t)[0]
-    if al and (cap is None or al["pct"] < cap["pct"]):
+    if al and al["targets"] and (not target or target not in al["targets"]):
+        return None
+    return al
+
+
+def owner_cap(t, m=None, target=None):
+    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None. Действующее разрешение
+    [limits.allow] с pct ниже потолка (или без потолка) — тоже потолок: на его pct стоп (metis-1124). Разрешение с
+    target для запуска target заменяет потолок и выше него: слово владельца с [id] на именно этот запуск (metis-1128)."""
+    cap = cap_read(t, m)[0]
+    al = allow_for(t, target)
+    if al and (cap is None or al["pct"] < cap["pct"] or (al["targets"] and al["pct"] != cap["pct"])):
         return {"pct": al["pct"], "decision": al["decision"], "scope": f"разрешение до {P.stamp(al['until'])}"}
     return cap
 
@@ -496,7 +520,7 @@ def snapshot():
     return {"five": tuple(five) if five else None, "week": week, "at": max(ats) if ats else None}
 
 
-def measure(t, cfg=None):
+def measure(t, cfg=None, target=None):
     """Состояние недели на момент t: known (можно ли решать по снимку), why (почему нет), stale (строка в тревоги),
     age_min, used, resets, line, over, zone."""
     lim = (cfg or config())[0]
@@ -528,7 +552,7 @@ def measure(t, cfg=None):
     else:
         zone = "green"
     if zone != "green":  # разрешённый расход до даты (metis-1124): ниже его pct зона не красная и не жёлтая
-        al = allow_read(t)[0]
+        al = allow_for(t, target)
         if al and w[0] < al["pct"]:
             zone = "green"
     m.update(known=True, line=line, over=over, zone=zone)
@@ -664,17 +688,18 @@ def heavy_count(agents=None, registry=None):
     return n
 
 
-def gate(kind, t, agents=None, registry=None, heavy=None):
+def gate(kind, t, agents=None, registry=None, heavy=None, target=None):
     """Можно ли сейчас начать новое: (ok, reason). kind — autostart (самозапуск), wake (подъём уснувшей), respawn
-    (продолжение прерванной). reason — короткая фраза, почему нельзя (или пустая)."""
+    (продолжение прерванной). reason — короткая фраза, почему нельзя (или пустая). target — имя направления: разрешение
+    [limits.allow] с target действует только для него (metis-1128)."""
     if kind not in KINDS:
         return False, f"неизвестный вид запуска {kind}"
     cfg = config()
-    m = measure(t, cfg)
+    m = measure(t, cfg, target)
     d = night_of(t, cfg)
     # недельный потолок владельца (metis-0403) — первым и для всех трёх видов, днём и ночью: только сужает, поэтому
     # ниже зоны и ночь проверяются как без него. Старый снимок годится: расход недели не убывает
-    cap = owner_cap(t, m)
+    cap = owner_cap(t, m, target)
     if cap_hit(m, cap, t):
         cap_notice(t, m, cap)
         return False, cap_why(m, cap)
@@ -1371,11 +1396,14 @@ def allow_lines(t, m):
     if al is None:
         return [f"Разрешение до даты: не действует — {note}"] if note else []
     s = f"Разрешение до даты: до {num(al['pct'])} % недели по {P.stamp(al['until'])}" + (
+        f" · только для {', '.join(al['targets'])}" if al["targets"] else "") + (
         f" · решение {al['decision']}" if al["decision"] else "")
     if m["used"] is None or not m["resets"] or m["resets"] <= t:
         return [s + " · расход недели неизвестен"]
     if m["used"] >= al["pct"]:
         return [s + f" · достигнуто (неделя {num(m['used'])} %) — стоп, как потолок"]
+    if al["targets"]:
+        return [s + f" · для названных красная и жёлтая зоны и потолок не держат, запас {num(al['pct'] - m['used'])} п.п."]
     return [s + f" · красная и жёлтая зоны не держат, запас {num(al['pct'] - m['used'])} п.п."]
 
 
@@ -1388,7 +1416,7 @@ def agent_gate(t=None):
         return None
     t = P.now() if t is None else t
     m = measure(t)
-    cap = owner_cap(t, m)
+    cap = owner_cap(t, m, (os.environ.get("PANTHEON_SESSION") or "").strip() or None)  # окно названо в [limits.allow]
     if not cap_hit(m, cap, t):
         return None
     if role == "hq":  # Зевс — он: отвечает владельцу сам, без субагентов
@@ -1400,7 +1428,7 @@ def agent_gate(t=None):
             "где остановилась и что ждёт запуска. Поднять потолок может только владелец — вопрос ему уже на доске.")
 
 
-def launch_cap(origin, over=False, t=None):
+def launch_cap(origin, over=False, t=None, target=None):
     """Ручной запуск и задача `claude -p` тика при достигнутом потолке (metis-0444): причина отказа или None.
     origin — owner (ваш терминал), zeus (окно штаба), tick (плановый проход и другие окна ролей). over — флаг
     --over-cap: снимает отказ только у owner. Достигнут — ещё карточка и тревога (cap_notice, одна на неделю и pct).
@@ -1408,7 +1436,7 @@ def launch_cap(origin, over=False, t=None):
     t = P.now() if t is None else t
     try:
         m = measure(t)
-        cap = owner_cap(t, m)
+        cap = owner_cap(t, m, target)
         if not cap_hit(m, cap, t) or (over and origin == "owner"):
             return None
         cap_notice(t, m, cap)

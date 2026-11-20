@@ -85,6 +85,19 @@ def test_marked_items_request():
           and b.req()["sha"] == SHA, b.outs[-1])
 
 
+def test_batch_branch_story_not_required():
+    """metis-1232: у PR пачки (ветка batch/<story>) пунктов story не требуют; Closes-задачи — как обычно."""
+    b = box()
+    b.view(SHA, head={"body": "Closes metis-0002", "headRefName": f"batch/{TID}"})
+    r = b.request()
+    check("merge request: ветка batch/metis-0001, пункт story не отмечен, «Closes metis-0002» — заявка стоит",
+          r.returncode == 0 and b.req() and b.req()["sha"] == SHA, b.outs[-1])
+    b2 = box()
+    b2.view(SHA, head={"body": f"Closes {TID}", "headRefName": f"batch/{TID}"})
+    ok, out = unmarked_refused(b2)
+    check("merge request: ветка batch/…, но «Closes metis-0001» с неотмеченным пунктом — по-прежнему отказ", ok, out)
+
+
 def test_mutant_no_gap_call():
     b = box()
     run_py = mutant_plugin(b.tmp)

@@ -139,7 +139,8 @@ CODEX_PHRASES = [
     " его вывода.",
     "Папку `tmp-codex-<ветка>` без хвоста заводит обёртка для своих логов — поручение туда не клади.",
     "Поручение лида или координатора — дословно в файл `<своя папка>/brief.md`, без своих добавлений.",
-    "`pantheon exec codex <папка worktree> \"<своя папка>/brief.md\"`.",
+    # metis-1272: вид задачи (--kind) выбирает модель Codex — флаг в команде шаблона
+    "`pantheon exec codex --kind <вид> <папка worktree> \"<своя папка>/brief.md\"`.",
 ]
 codex = flat(templates.get("codex-dev", ""))
 for phrase in CODEX_PHRASES:
