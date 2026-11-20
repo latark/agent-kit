@@ -379,6 +379,9 @@ ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # STATE/outside/test-env/<owner>__<repo>.env и только заявке test --script этого проекта; строка подключения одной
 # тестовой базы, адрес и секретный ключ API тестового проекта Supabase, не токен аккаунта
 TEST_KEYS = ("SUPABASE_DB_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SECRET_KEY")
+# живут только в test-env: `pantheon secret put|ask` их не кладёт; адрес и секретный ключ serve берёт из
+# STATE/outside/env, им secret put нужен (metis-1293)
+TEST_ONLY_KEYS = ("SUPABASE_DB_URL",)
 DB_URL_RE = re.compile(r"postgres(?:ql)?://", re.I)
 DB_PORT = 5432                      # порт PostgreSQL, когда в строке подключения его нет
 API_PORT = 443                      # HTTPS API тестового проекта: открыт, когда в прогоне есть SUPABASE_SECRET_KEY (metis-1294)
