@@ -464,6 +464,12 @@ def test_window_text_author_and_budget():
               len(t) <= 400 and all(f"#{1500 + i} metis-12%02d ({'%07d' % i})" % i in t for i in range(5))
               and all(m.short_why(w) in t for w in whys) and ("tests/full ✗" in t) == (tfull in whys)
               and ("CI: лимит, тесты ✓" in t) == any(m.BILLING_OK in w for w in whys), t)
+    narrow = m.BILLING_OK + SHA[:12] + " (узкий прогон: затронутые PR тесты)"
+    whys = [narrow, narrow + "; необязательная проверка GitHub tests/full красная: FAILURE", m.BILLING_OK + SHA[:12],
+            tfull, light]
+    t = m.batch_window_text(real, views, whys, three)
+    check("MAX_BATCH, разные вердикты запасного пути: «(узкий)» и «tests/full ✗» целиком (argus #517 Д)",
+          len(t) <= 400 and "CI: лимит, тесты ✓ (узкий); tests/full ✗" in t and all(m.short_why(w) in t for w in whys), t)
     t = m.batch_window_text(real, views, [ok] * 5, three)
     check("MAX_BATCH, 3 области, один вердикт: фраза у каждого PR", len(t) <= 400 and t.count("«окно") == 5, t)
     t = m.batch_window_text(real[:3], views[:3], [ok, tfull, light], three[:3])
