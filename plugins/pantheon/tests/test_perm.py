@@ -267,8 +267,15 @@ r = scenario(win(extra="\nзаметка: только в worktree"))
 check("ответ с заметкой — не allow, решения нет", r[0] == 0 and r[1] is None, r[:4])
 if os.geteuid() != 0:
     def unreadable(env, req):
+        # Хук читает журнал в цикле, пока мы пишем. Если сначала дописать ответ, а потом закрыть чтение, на
+        # нагруженном раннере хук успевает прочитать ответ между записью и chmod и отдаёт allow (metis-1307).
+        # Поэтому чтение закрываем ДО записи: 0o200 — писать владельцу можно, читать нельзя; после записи — 0.
+        jp = os.path.join(env["PANTHEON_STATE"], "owner-log", "zeus.md")
+        with open(jp, "a", encoding="utf-8"):
+            pass
+        os.chmod(jp, 0o200)
         log(env, WIN, f"вопрос: {req['question']}\nответ: Разрешить")
-        os.chmod(os.path.join(env["PANTHEON_STATE"], "owner-log", "zeus.md"), 0)
+        os.chmod(jp, 0)
     r = scenario(unreadable)
     check("журнал не читается — не allow (обычный запрос)", silent(r), r[:4])
 else:
