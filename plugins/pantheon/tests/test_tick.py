@@ -540,6 +540,24 @@ def main():
     def excluded_by(cmd, patterns):
         # как правило excludedCommands: «… *» — префикс и любые аргументы, без звёздочки — точное совпадение
         return any(cmd == x or (x.endswith(" *") and cmd.startswith(x[:-1])) for x in patterns)
+
+    # metis-1295 (вариант А владельца 20.11, consent metis-1295-net): мимо песочницы окна направления только
+    # `pantheon supabase migrate *`; прочий `pantheon supabase` и мастерская — в песочнице. Цепочки с migrate по
+    # префиксу Claude Code выпустил бы — их режет guard (supabase-migrate-cmd, plugins/guard/tests/test_supabase_migrate_cmd.py)
+    check("окно координатора: pantheon supabase мимо песочницы — ровно migrate; у мастерской нет (metis-1295)",
+          all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("pantheon supabase"))
+              == ["pantheon supabase migrate *"] for w in (sa, sm, sn, sz))
+          and not any(x.startswith("pantheon supabase") for x in sw["sandbox"]["excludedCommands"]),
+          [w["sandbox"]["excludedCommands"] for w in (sa, sw)])
+    sb_ok = ["pantheon supabase migrate supabase/migrations/1_x.sql", "pantheon supabase migrate a.sql --dry-run"]
+    sb_bad = ["pantheon supabase", "pantheon supabase migrate", "pantheon supabase status", "pantheon supabase db push",
+              "pantheon supabase migrations a.sql", "pantheon supabase-migrate a.sql", "pantheon supabasemigrate a.sql",
+              "pantheon supabase  migrate a.sql", "pantheon migrate a.sql"]
+    check("окно координатора: migrate мимо песочницы, соседи `pantheon supabase` — в ней (metis-1295)",
+          all(excluded_by(c, w["sandbox"]["excludedCommands"]) for c in sb_ok for w in (sa, sm, sn, sz))
+          and not any(excluded_by(c, w["sandbox"]["excludedCommands"]) for c in sb_bad for w in (sa, sm, sn, sz))
+          and not any(excluded_by(c, sw["sandbox"]["excludedCommands"]) for c in sb_ok),
+          [x for x in sa["sandbox"]["excludedCommands"] if "supabase" in x])
     exc = sa["sandbox"]["excludedCommands"]
     ok_forms = ["gh pr create --title t --body-file b.md", "gh pr edit 5 --body-file b.md",
                 "gh pr comment 5 --body-file b.md", "gh pr ready 5", "gh pr status", "gh pr view 5 --json state",

@@ -65,6 +65,9 @@ PostToolUse (Bash:
   worktree-cmd — `pantheon worktree add|remove|list` (мимо песочницы окна направления) — только строкой целиком по
                  строгому образцу: имена из букв, цифр и . _ - /, без .., цепочек, кавычек, присваивания и обёрток
                  (metis-1225); репозиторий и путь проверяет сама команда (lib/worktree.py пантеона);
+  supabase-migrate-cmd — `pantheon supabase migrate` (мимо песочницы окна направления) — только строкой
+                 `pantheon supabase migrate <файл> [--dry-run]`: путь относительный, из букв, цифр и . _ - /, без ..,
+                 цепочек, кавычек, присваивания и обёрток (metis-1295); файл и SQL проверяет сама команда;
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -4941,6 +4944,47 @@ def check_worktree_cmd(event, tool, tool_input):
             "`&&`, `;`, `|`, перенаправлений, подстановок, префикса присваивания и обёрток. Папка — отдельным `cd`.")
 
 
+# supabase-migrate-cmd (metis-1295, вариант А владельца 20.11, consent metis-1295-net). Окну направления `pantheon
+# supabase migrate` выпущен мимо песочницы (excludedCommands, SUPABASE_MIGRATE_OUT в pantheon.py): в ней ssh к origin
+# и psql к базе не ходят. Файл, ветку по умолчанию origin и SQL проверяет сама команда (lib/supabase_migrate.py); guard
+# держит форму строки, как worktree-cmd: строка целиком `pantheon supabase migrate <файл> [--dry-run]` (--dry-run и до
+# файла), файл — относительный путь по шаблону _SBF (буквы, цифры, `. _ -`, `/` между частями, звено не с точки, без
+# `..`). Всё остальное — отказ: `&&`, `;`, `|`, `&`, перенаправления, подстановки, кавычки, присваивание, обёртки, путь
+# к пульту, лишние флаги. Иначе соседняя команда ушла бы мимо песочницы вместе с ней. Прочий `pantheon supabase` идёт
+# в песочнице, правило его не трогает. Сырая проверка и нормализация — те же, что у worktree-cmd (_wt_norm).
+_SBF = r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*"
+SUPABASE_MIGRATE_LINE = re.compile(r"[ \t]*pantheon[ \t]+supabase[ \t]+migrate[ \t]+(?:--dry-run[ \t]+" + _SBF
+                                   + r"|" + _SBF + r"(?:[ \t]+--dry-run)?)[ \t]*\Z")
+SUPABASE_MIGRATE_RAW = re.compile(r"""\s*(?:[^\s]*/)?pantheon(?:\.py)?\s+supabase\s+migrate(?![A-Za-z0-9_-])""")
+
+
+def _sb_named(n, t):
+    """Команда — пульт со словами `supabase migrate` (сам пульт, через оболочку или python; обёртки разворачивает
+    разбор). Упоминание в значении флага другой команды правило не будит."""
+    w = _pantheon_words(n, t)
+    return w is not None and w[:2] == ["supabase", "migrate"]
+
+
+def check_supabase_migrate_cmd(event, tool, tool_input):
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    norm = _wt_norm(cmd)
+    raw = any(SUPABASE_MIGRATE_RAW.match(ln) for ln in norm.splitlines() or [""])
+    if not raw:
+        targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+        failed = not cmds and targets == [UNRESOLVED]
+        words = WORKTREE_WORDS.search(norm) and re.search(r"(?<![\w-])supabase(?![\w-])", norm) \
+            and re.search(r"(?<![\w-])migrate(?![\w-])", norm)
+        if not (failed and words) and not any(_sb_named(n, t) for n, t in cmds):
+            return None
+    if SUPABASE_MIGRATE_LINE.match(cmd) and ".." not in cmd:
+        return None
+    return ("Правило supabase-migrate-cmd: `pantheon supabase migrate` идёт мимо песочницы, поэтому только одной "
+            "строкой `pantheon supabase migrate <файл> [--dry-run]` (metis-1295): путь к файлу относительный, из букв, "
+            "цифр и . _ - (/ между частями, без ..), без кавычек, `&&`, `;`, `|`, перенаправлений, подстановок, "
+            "префикса присваивания и обёрток. Папка — отдельным `cd`.")
+
 # worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
 # EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
 # («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
@@ -5110,6 +5154,7 @@ def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("gh-out", check_gh_out),
                         ("hq-sessync", check_hq_sessync), ("worktree-own", check_worktree_own),
                         ("worktree-cmd", check_worktree_cmd),
+                        ("supabase-migrate-cmd", check_supabase_migrate_cmd),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:

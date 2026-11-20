@@ -32,7 +32,9 @@ metis-1295):
 Код 0 — применено (или --dry-run прошёл); 1 — отказ или сбой, причина последней строкой stderr; 2 — не тот вызов.
 Модуль-лист без P: STATE передаёт pantheon.py. Инструменты — git, psql и pg_dump из PATH.
 Сеть: в песочнице окна ls-remote и fetch по ssh падают «Could not resolve hostname» (ssh идёт мимо прокси песочницы,
-DNS ей закрыт), а psql к базе — тоже прямое TCP; по https через прокси git проходит.
+DNS ей закрыт), а psql к базе — тоже прямое TCP; по https через прокси git проходит. Поэтому окну направления
+`pantheon supabase migrate *` выпущен мимо песочницы (SUPABASE_MIGRATE_OUT в pantheon.py, metis-1295, вариант А
+владельца 20.11), а форму строки без цепочек держит guard (supabase-migrate-cmd).
 """
 import difflib
 import os
