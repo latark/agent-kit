@@ -3244,8 +3244,10 @@ def pnpm_store_check(name, folders, store):
 
 # [private] из policy.toml читается по правилу guard 0.5.9 (metis-0163): окно и guard не должны расходиться во мнении,
 # у кого личное. Умолчание — то же, что DEFAULT_PRIVATE у guard.
+# metis-0894: личные папки — все из PERSONAL (lib/moved.py): me, Self, Areas, People
 DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
-                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
+                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/Self", "~/ai/knowledge/Areas", "~/ai/knowledge/People",
+                             "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
                              "~/.local/state/pantheon/owner-log/zeus.md"]}
 
 
@@ -8788,6 +8790,42 @@ def check_coordinators(quiet):
     return len(errs)
 
 
+def check_private_cover(quiet):
+    """metis-0894: личная папка ~/ai/knowledge/<x> из PERSONAL (lib/moved.py) есть на диске, а [private] paths
+    policy.toml её не покрывает — сведения владельца открыты окнам ролей. Предупреждение (тик — тревога один раз на
+    набор), код выхода check не меняет. Имя папки берём из списка ~/ai/knowledge: в окне роли сама папка под denyRead.
+    → список непокрытых папок."""
+    try:
+        with open(os.path.join(HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+            policy = tomllib.load(fh)
+    except (OSError, ValueError):
+        policy = {}
+    covered = [os.path.realpath(os.path.join(HOME, p[2:]) if p.startswith("~/") else p)
+               for p in private_conf(policy)["paths"]]
+    kn = os.path.join(AI_HOME, "knowledge")
+    try:
+        names = set(os.listdir(kn))
+    except OSError:
+        return []
+    bare = []
+    for x in moved_mod().PERSONAL:
+        if x not in names:
+            continue
+        d = os.path.realpath(os.path.join(kn, x))
+        if not any(d == c or d.startswith(c + os.sep) for c in covered):
+            bare.append(x)
+    text = (f"личное ~/ai/knowledge/{{{','.join(bare)}}} не покрыто [private] paths policy.toml — окна ролей его "
+            "читают; добавить пути в [private] paths (или убрать строку paths: умолчание закрывает все)")
+    if not quiet:
+        if bare:
+            print(f"предупреждение · {text}")
+    elif bare:
+        alert_once("check-private-cover", ",".join(bare), text, "check")
+    else:
+        clear_once("check-private-cover")
+    return bare
+
+
 SKILL_DIRS = [d for d in (os.environ.get("PANTHEON_SKILL_DIRS") or "").split(os.pathsep) if d] or [
     os.path.join(PLUGIN, "skills"), os.path.join(HOME, ".claude", "skills")]
 
@@ -9039,6 +9077,7 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         check_moved(quiet)   # предупреждение, на код выхода check не влияет
+        check_private_cover(quiet)  # личная папка вне [private] paths — предупреждение (metis-0894)
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
         check_no_parent(T, quiet)  # без пачки старше суток: предупреждение, код выхода не меняет (metis-0940)
