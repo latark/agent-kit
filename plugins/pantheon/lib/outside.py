@@ -5,9 +5,10 @@
 плановый проход (launchd, вне песочницы окон) запускает проверку проекта под своим профилем sandbox-exec и отдаёт
 результат. Образец — `pantheon merge request|run`: заявка роли → проход тика отдельным процессом.
 
-  pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
+  pantheon outside test [--script ИМЯ [--app ИМЯ]] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
                                          test/check package.json, иначе pytest; --script — скрипт package.json;
+                                         --app ИМЯ (только с --script) — скрипт приложения монорепо или папки внутри корня, как у serve (metis-1293)
                                          файлы из .print-out/ (PDF) после --script — в STATE/outside/runs/<ID>/, путь в status (metis-1262)
                                          Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
                                          новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
@@ -67,7 +68,9 @@
     origin клона реестра, а не из конфига папки роли. Остаток: окружение процесса читает процесс того же пользователя
     (KERN_PROCARGS2); deny process-info* этого не закрывает (проба 01.11) — потому только dev-ключи;
   - исключение — ключи тестов (metis-1016, athena-0297 вариант А, владелец 07.11; до слияния — «да» в журнале владельца):
-    строка подключения к базе одного проекта (TEST_KEYS: SUPABASE_DB_URL), не токен аккаунта. Лежит отдельно от
+    строка подключения к базе одного проекта (TEST_KEYS: SUPABASE_DB_URL) и, с 20.11 (metis-1293-key, вариант Б
+    владельца: скриптам вроде analysis:queue нужен API тестового проекта), его адрес NEXT_PUBLIC_SUPABASE_URL и
+    SUPABASE_SECRET_KEY; не токен аккаунта. Значения не попадают в журнал, status и вывод. Лежит отдельно от
     dev-ключей — STATE/outside/test-env/<owner>__<repo>.env (<owner>__<repo> — из origin клона, как у dev-ключей),
     кладёт владелец командой `pantheon outside key OWNER/REPO ИМЯ` (скрытый ввод, файл 600). Получает её только
     `outside test --script ИМЯ` этого проекта: ни проверка проекта без --script (полный набор мог бы писать в базу из
@@ -83,6 +86,8 @@
     пароля, argus #410-3 Б1); причина события stop — через TestWatch.clean_why (argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
     на чтение (argus #410 Б2): denyRead песочницы Bash и правило Read(…/**) для Read, Grep, Glob в сборке окон
     (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
+    С SUPABASE_SECRET_KEY в окружении профиль выпускает ещё TCP 443 (metis-1294, решение владельца 20.11): REST API
+    проекта идёт по HTTPS, а sandbox-exec по хосту не умеет, поэтому открыт весь 443, не один хост проекта.
     Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
     данные на чужой хост на том же порту, а localhost:* открыт целиком — через местные прокси и службы (прокси
     песочницы Claude Code, локальные прокси и службы синхронизации) скрипт выйдет в сеть шире порта базы (argus #410-2 С1); пока идёт
@@ -370,14 +375,19 @@ SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sb
 RESERVED_ENV = {"HOME", "PATH", "TMPDIR", "PORT", "CI", "LANG", "SHELL", "USER", "LOGNAME", "PWD"}
 RESERVED_ENV_PREFIX = ("PANTHEON_", "DYLD_", "LD_")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# ключи тестов (metis-1016, athena-0297 вариант А): только эти имена из STATE/outside/test-env/<owner>__<repo>.env и
-# только заявке test --script этого проекта; строка подключения одной базы, не токен аккаунта
-TEST_KEYS = ("SUPABASE_DB_URL",)
+# ключи тестов (metis-1016, athena-0297 вариант А; metis-1293-key вариант Б, владелец 20.11): только эти имена из
+# STATE/outside/test-env/<owner>__<repo>.env и только заявке test --script этого проекта; строка подключения одной
+# тестовой базы, адрес и секретный ключ API тестового проекта Supabase, не токен аккаунта
+TEST_KEYS = ("SUPABASE_DB_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SECRET_KEY")
+# живут только в test-env: `pantheon secret put|ask` их не кладёт; адрес и секретный ключ serve берёт из
+# STATE/outside/env, им secret put нужен (metis-1293)
+TEST_ONLY_KEYS = ("SUPABASE_DB_URL",)
 DB_URL_RE = re.compile(r"postgres(?:ql)?://", re.I)
 DB_PORT = 5432                      # порт PostgreSQL, когда в строке подключения его нет
+API_PORT = 443                      # HTTPS API тестового проекта: открыт, когда в прогоне есть SUPABASE_SECRET_KEY (metis-1294)
 # pg_dump и psql из libpq (keg-only у brew: не в /opt/homebrew/bin) — в PATH только прогона с ключами тестов
 LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
-USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--affected [--base REF]] [--wait С] | "
+USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ [--app ИМЯ]] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--env ИМЯ=значение]... [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ | "
          "login ID [--app ИМЯ] [--wait С] | auth URL [--wait С]")
@@ -1962,9 +1972,9 @@ class TestWatch:
     клон, где sha — предок нового. Причина (why) ставится до того, как tick вернёт True и wait_proc погасит группу:
     снятый прогон записи для шлюза и строки full.jsonl не даёт. Раз в PROCS_EVERY с — срез процессов в итог running."""
 
-    def __init__(self, rid, qdir, window, d, sha=None, pin=False, src=None, script=None, base=None):
+    def __init__(self, rid, qdir, window, d, sha=None, pin=False, src=None, script=None, base=None, app=None):
         self.rid, self.qdir, self.window, self.d, self.sha = rid, qdir, window, d, sha
-        self.pin, self.src, self.script, self.base = pin, src, script, base
+        self.pin, self.src, self.script, self.base, self.app = pin, src, script, base, app
         self.why, self.by, self.where = None, [], []
         self.running, self.pid = None, None
         self.keys = {}   # ключи тестов прогона (metis-1016): их значения вырезаются из среза процессов
@@ -1992,7 +2002,8 @@ class TestWatch:
         common = getattr(self.src, "common", None)
         for q2, w2, rid2, req2 in _queued_tests():
             if os.path.realpath(q2) != me or rid2 <= self.rid or not req2.get("pin") \
-                    or (req2.get("script") or None) != (self.script or None) or req2.get("base") != self.base:
+                    or (req2.get("script") or None) != (self.script or None) or req2.get("app") != self.app \
+                    or req2.get("base") != self.base:
                 continue
             d2, _roots = resolve_dir(req2["dir"], w2)
             if d2 is None or not common or d2.common != common:
@@ -2146,7 +2157,7 @@ def overload_before(sha, files, rid):
 
 
 def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=None, base=None, watch=None,
-             retried=None, defer=None):
+             retried=None, defer=None, app=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет. base — вершина базы заявки test --affected (metis-0734): гонится узкий набор
     (narrow_plan), запись tests — с его командой и полями files (прогнанные метки) и map; не выйдет — failed; история
@@ -2159,7 +2170,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     второй такой же — итог «таймаут под нагрузкой» (overload, код 75: повторить), не красный (metis-0901). defer
     (Defer) — заявка из очереди прохода: ждущий спада полный набор уступает очередь другим заявкам (metis-1057)."""
     if watch is None:
-        watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base)
+        watch = TestWatch(rid, qdir, window, d, pin=bool(expect), src=src, script=script, base=base, app=app)
     if watch.marker():   # «стоп» пришёл до запуска: ни переноса записи по дереву, ни прогона
         return watch.stopped(**({"src": src} if src else {}))
 
@@ -2190,7 +2201,11 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if not clean:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha,
                                        "why": "дерево не чистое — тесты идут на коммит: закоммить правки"})
-    argv, line = command(d, "test", script)
+    cwd = d
+    if app:   # metis-1293: скрипт приложения монорепо (или папки внутри корня) — разбор как у serve, запуск в папке приложения
+        argv, line, cwd = serve_command(d, script, app)
+    else:
+        argv, line = command(d, "test", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": line})
     narrow, narrow_why = None, (narrow_history_problem(d) if base else None)
@@ -2225,7 +2240,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if keys:
         extra["keys"] = sorted(keys)
     running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
-               **({"script": script} if script else {}), **extra}
+               **({"script": script} if script else {}), **({"app": app} if app else {}), **extra}
     save_result(qdir, rid, running)
     watch.sha, watch.running, watch.keys = sha, running, keys
     if full and not plan and not narrow:   # metis-0901: узкий набор и дозапуск лёгкие, полный под нагрузкой — нет
@@ -2264,12 +2279,14 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                 f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: "
                 f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "") + (
                 f"ключи тестов: {', '.join(sorted(keys))} (файл {os.path.join(test_env_dir(), kfile)}); сеть — только "
-                f"TCP на порт {', '.join(map(str, sorted(db_ports(keys))))} и местные адреса\n" if keys else "")).encode())
+                f"TCP на порт {', '.join(map(str, sorted(db_ports(keys))))}"
+                f"{' (443 — API проекта, хост не сужается)' if API_PORT in db_ports(keys) else ''} и местные адреса\n"
+                if keys else "")).encode())
         if watch():   # «стоп» между взятием заявки и запуском (T10a): команда не запускается
             return watch.stopped(cmd=line, log=log, **extra)
         try:
             proc = subprocess.Popen(wrap(plan["argv"] if plan else argv,
-                                         write_profile(roots, db_ports(keys) if keys else ())), cwd=d,
+                                         write_profile(roots, db_ports(keys) if keys else ())), cwd=cwd,
                                     env=sandbox_env(tmp, "test", keys=keys),
                                     stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
         except OSError as e:
@@ -2306,7 +2323,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     if over and not retried:
         log_event(id=rid, kind="test-overload", window=window, sha=sha, files=over, load=round(load_state()[0]))
         return run_test(rid, d, script, window, qdir, roots, record=record, src=src, expect=expect, base=base,
-                        watch=watch, retried={"log": log, "files": over}, defer=defer)
+                        watch=watch, retried={"log": log, "files": over}, defer=defer, app=app)
     hang = overload_before(sha, over, rid) if over else None
     if hang:   # metis-0927 Д3: тот же коммит, те же файлы — третий и четвёртый таймаут подряд: зависание, а не нагрузка
         over = None
@@ -2314,7 +2331,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         log_event(id=rid, kind="test-overload-final", window=window, sha=sha, files=over,
                   load=round(load_state()[0]))
     res = {"state": "stopped" if watch.why else "done", "kind": "test", "sha": sha, "code": code, "cmd": line,
-           "dir": d, "log": log, "record": False, **extra}
+           "dir": d, "log": log, "record": False, **({"script": script} if script else {}),
+           **({"app": app} if app else {}), **extra}
     if script and not watch.why:   # metis-1262: артефакты --script (.print-out) — до того, как копию d снимут
         adir, afiles, awhy = save_artifacts(rid, d)
         if adir:
@@ -2411,9 +2429,10 @@ def run_test_at(rid, d, req, window, qdir, roots, defer=None):
     ветку PR, если в ней другой .claude/ проекта (запись туда закрыта), поэтому прогон идёт в своей копии: `git worktree
     add --detach` клона d (проверен в resolve_dir) в work_root()/test-<ID>, зависимости (prepare), run_test в копии —
     запись tests на полный SHA. Копия снимается всегда; бывший head открытого PR — отказ, как у test без --sha."""
-    script, common = req.get("script"), d.common
+    script, common, app = req.get("script"), d.common, req.get("app")
     ref = req.get("sha")
-    base = {"kind": "test", "src": d, "pin": True, **({"script": script} if script else {})}
+    base = {"kind": "test", "src": d, "pin": True, **({"script": script} if script else {}),
+            **({"app": app} if app else {})}
 
     def fail(why, **kw):
         log_event(id=rid, kind="refused", window=window, dir=d, why=why)
@@ -2422,7 +2441,7 @@ def run_test_at(rid, d, req, window, qdir, roots, defer=None):
     sha = resolve_sha(common, ref) if ref else None
     if not sha:
         return fail(f"коммита {ref or '?'} нет в клоне {d.clone}: сделай git fetch в своей копии и повтори")
-    watch = TestWatch(rid, qdir, window, d, sha=sha, pin=True, src=d, script=script, base=req.get("base"))
+    watch = TestWatch(rid, qdir, window, d, sha=sha, pin=True, src=d, script=script, base=req.get("base"), app=app)
     if watch.marker():
         return watch.stopped(**base)
     why = None if script else stale_head(d, sha)
@@ -2447,7 +2466,7 @@ def run_test_at(rid, d, req, window, qdir, roots, defer=None):
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
         watch.d = w
         return run_test(rid, w, script, window, qdir, roots, record=not script, src=d, expect=sha,
-                        base=req.get("base"), watch=watch, defer=defer)
+                        base=req.get("base"), watch=watch, defer=defer, app=app)
     finally:
         reap(work)
         remove_work(common, work)
@@ -2754,7 +2773,10 @@ def db_ports(keys):
             ports |= {int(m) for m in re.findall(r":(\d{1,5})(?=,|$)", hosts) if 0 < int(m) < 65536} or {DB_PORT}
         else:
             ports |= {int(m) for m in re.findall(r"\bport\s*=\s*(\d{1,5})\b", v) if 0 < int(m) < 65536}
-    return ports or {DB_PORT}
+    ports = ports or {DB_PORT}
+    if "SUPABASE_SECRET_KEY" in keys:   # metis-1294: REST API проекта — HTTPS; sandbox по хосту не умеет, открыт весь 443
+        ports.add(API_PORT)
+    return ports
 
 
 def _secrets(keys):
@@ -3151,7 +3173,7 @@ def lane_of(req, window, rid):
         return "full"
     if req.get("base") or req.get("script"):
         return "quick"
-    key = (window, rid, req.get("dir"), req.get("base"), req.get("script"))
+    key = (window, rid, req.get("dir"), req.get("base"), req.get("script"), req.get("app"))
     if key not in _LANE_MEMO:
         if len(_LANE_MEMO) > 4096:
             _LANE_MEMO.clear()
@@ -3304,6 +3326,8 @@ def check_request(req, rid):
     app = req.get("app")
     if app is not None and not (isinstance(app, str) and APP_RE.fullmatch(app)):
         return "имя приложения не по образцу (имя пакета, @scope/имя, папка или «.»)"
+    if app is not None and req["kind"] == "test" and s is None:
+        return "app у заявки test — только вместе со скриптом (--app с --script)"
     if req.get("env") is not None:
         if req["kind"] != "serve":
             return "env — только у заявки serve"
@@ -3352,7 +3376,7 @@ def handle(qdir, window, rid, req, defer=None):
     if res:
         return res
     return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"),
-                    base=req.get("base"), defer=defer)
+                    base=req.get("base"), defer=defer, app=req.get("app"))
 
 
 # --- перед стартом заявки test (metis-0726) ------------------------------------------------------------------------
@@ -3388,7 +3412,7 @@ def _newer_same(qdir, rid, req, d):
     me, q = os.path.realpath(d), os.path.realpath(qdir)
     for q2, w2, rid2, req2 in _queued_tests():
         if os.path.realpath(q2) != q or rid2 <= rid or req2.get("pin") \
-                or (req2.get("script") or None) != (req.get("script") or None) or req2.get("base") != req.get("base"):
+                or (req2.get("script") or None) != (req.get("script") or None) or req2.get("app") != req.get("app") or req2.get("base") != req.get("base"):
             continue
         d2, _roots = resolve_dir(req2["dir"], w2)
         if d2 is not None and os.path.realpath(d2) == me:
@@ -3451,7 +3475,7 @@ def drop_dupes(qdir, rid, req, d, sha, window=None):
     <rid>»; не снялась — остаётся. → число снятых."""
     repos, me, n = set(remotes(d)), os.path.realpath(d), 0
     for q2, w2, rid2, req2 in _queued_tests():
-        if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None) \
+        if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None) or req2.get("app") != req.get("app") \
                 or req2.get("base") != req.get("base") \
                 or req2.get("pin"):   # test --sha идёт на своём коммите, а не на HEAD папки (metis-0779)
             continue
@@ -4104,7 +4128,7 @@ def cmd_request(kind, args):
         if why:
             err(f"pantheon outside: {why}")
             return 2
-    f = _flags(args, {"--script", "--wait", "--sha"} | ({"--minutes", "--app"} if kind == "serve" else {"--base"}),
+    f = _flags(args, {"--script", "--wait", "--sha", "--app"} | ({"--minutes"} if kind == "serve" else {"--base"}),
                {"--affected"} if kind == "test" else ())
     if f is None:
         err(f"pantheon outside: {USAGE}")
@@ -4124,6 +4148,11 @@ def cmd_request(kind, args):
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
+    if kind == "test" and f.get("--app"):   # metis-1293: приложение монорепо для скрипта; без --script — отказ
+        if not f.get("--script"):
+            err("pantheon outside: --app у test — только вместе с --script")
+            return 2
+        req["app"] = f["--app"]
     if f.get("--base") and not f.get("--affected"):
         err("pantheon outside: --base — только с --affected")
         return 2
@@ -4148,7 +4177,7 @@ def cmd_request(kind, args):
             head, _clean = head_state(d)
         if head:
             req["sha"] = head
-            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")), base=req.get("base"))
+            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")), base=req.get("base"), app=req.get("app"))
             if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
                 print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
                 if not wait:
@@ -4229,7 +4258,7 @@ def replace_older(q, rid, req, d):
             req2 = _parse(_read_in(dfd, name))
             if not isinstance(req2, dict) or req2.get("kind") != "test" or check_request(req2, rid2) \
                     or bool(req2.get("pin")) != bool(req.get("pin")) or req2.get("base") != req.get("base") \
-                    or (req2.get("script") or None) != (req.get("script") or None) \
+                    or (req2.get("script") or None) != (req.get("script") or None) or req2.get("app") != req.get("app") \
                     or os.path.realpath(req2["dir"]) != me:
                 continue
             # тот же коммит git тоже считает предком: снять старую заявку ради новой на нём же — не потеря
@@ -4256,7 +4285,7 @@ def replace_older(q, rid, req, d):
     return [r for r, _ in out]
 
 
-def live_test(d, sha, script=None, pin=False, base=None):
+def live_test(d, sha, script=None, pin=False, base=None, app=None):
     """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
     metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json),
     ждёт спада нагрузки (итог queued «жду спада нагрузки» свежее LOST_AFTER, metis-0927) или идёт (итог running свежее
@@ -4278,7 +4307,8 @@ def live_test(d, sha, script=None, pin=False, base=None):
                 except ValueError:
                     continue
                 if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
-                        or res.get("script") != script or bool(res.get("pin")) != pin or res.get("base") != base:
+                        or res.get("script") != script or res.get("app") != app or bool(res.get("pin")) != pin \
+                        or res.get("base") != base:
                     continue
                 where = res.get("src") or res.get("dir")
                 if not isinstance(where, str) or os.path.realpath(where) != d:
@@ -4548,8 +4578,14 @@ def cmd_key(args):
     except (EOFError, KeyboardInterrupt):
         err("pantheon outside key: отменено, файл не тронут")
         return 1
-    if value and (not DB_URL_RE.match(value) or any(c in value for c in "\r\n\0")):
+    if value and any(c in value for c in "\r\n\0"):
+        err(f"pantheon outside key: {name} — значение одной строкой; файл не тронут")
+        return 1
+    if value and name == "SUPABASE_DB_URL" and not DB_URL_RE.match(value):
         err(f"pantheon outside key: {name} — строка подключения postgresql://… одной строкой; файл не тронут")
+        return 1
+    if value and name == "NEXT_PUBLIC_SUPABASE_URL" and not re.match(r"https?://\S+$", value):
+        err(f"pantheon outside key: {name} — адрес проекта https://… одной строкой; файл не тронут")
         return 1
     d = test_env_dir()
     os.makedirs(d, mode=0o700, exist_ok=True)
