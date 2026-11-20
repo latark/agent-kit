@@ -12,6 +12,9 @@
 - psql упал — код 1, причина «откатилась»; вызов без файла — код 2; вызов через `pantheon supabase` (run.py);
 - main — только свой ref refs/pantheon/verified-main из fetch: ветка или метка origin/main — отказ «неоднозначно»,
   подвинутый вручную свой ref fetch перезаписывает;
+- репозиторий без main (metis-1295): ветку по умолчанию develop называет сервер (ls-remote --symref) — сверка с
+  refs/pantheon/verified-develop, несливый файл — отказ «не из ветки по умолчанию», локальный origin/HEAD на другую
+  ветку (git remote set-head) не влияет, метка origin/develop — «неоднозначно», сервер ветку не назвал — отказ;
 - строка подключения не в argv psql и pg_dump, а в PG* окружения (пароль с %-кодом, sslmode, PG* родителя сняты);
   адрес не postgresql://, без пользователя, с чужим параметром или плохим портом — отказ;
 - текст миграции (check_sql): «\\» где угодно, не UTF-8, управляющие знаки кроме \\n и \\t (\\r), client_encoding,
@@ -289,6 +292,56 @@ check("свой ref подвинут на локальный коммит — fe
 check("refs/pantheon/verified-main после сверки — main origin", git(REPO, "rev-parse", "refs/pantheon/verified-main")
       == git(ORIGIN, "rev-parse", "refs/heads/main"))
 
+# --- репозиторий без main: ветка по умолчанию develop со слов сервера (metis-1295) ---
+ORIGIN2 = os.path.join(ROOT, "origin2.git")
+REPO2 = os.path.join(ROOT, "repo2")
+git(ROOT, "init", "--bare", "--initial-branch=develop", ORIGIN2)
+git(ROOT, "clone", ORIGIN2, REPO2)
+write(os.path.join(REPO2, MIG), MAIN_SQL)
+git(REPO2, "add", "-A")
+git(REPO2, "commit", "-m", "init")
+git(REPO2, "push", "origin", "HEAD:refs/heads/develop")  # имя локальной ветки клона пустого репозитория — по версии git
+write(os.path.join(REPO2, LOCAL), "drop table t;\n")  # закоммичена, в develop не слита, лежит в ветке feature
+git(REPO2, "add", LOCAL)
+git(REPO2, "commit", "-m", "local")
+git(REPO2, "push", "origin", "HEAD:refs/heads/feature")
+git(REPO2, "fetch", "origin")
+assert "main" not in git(ORIGIN2, "branch", "--list")
+
+
+def p2(rel):
+    return os.path.join(REPO2, rel)
+
+
+code, out, err, calls = call(["migrate", p2(MIG), "--dry-run"])
+check("без main, по умолчанию develop: файл из develop — код 0, «= origin/develop»",
+      code == 0 and f"проверено: {MIG} = origin/develop" in out, (code, out, err))
+check("свой ref refs/pantheon/verified-develop — develop origin, verified-main не заведён",
+      git(REPO2, "rev-parse", "refs/pantheon/verified-develop") == git(ORIGIN2, "rev-parse", "refs/heads/develop")
+      and "verified-main" not in git(REPO2, "for-each-ref", "refs/pantheon"))
+code, out, err, calls = call(["migrate", p2(MIG)])
+check("без main: применено из origin/develop, source.txt с веткой", code == 0 and "из origin/develop" in out
+      and " -f " in calls, (code, out, err))
+code, out, err, calls = call(["migrate", p2(LOCAL), "--dry-run"])
+check("без main: файл не слит в develop — код 1, «не из ветки по умолчанию» последней строкой",
+      code == 1 and "не из ветки по умолчанию" in err.strip().splitlines()[-1] and "origin/develop" in err, (code, err))
+git(REPO2, "remote", "set-head", "origin", "feature")  # локальный origin/HEAD → feature, где LOCAL есть
+assert git(REPO2, "symbolic-ref", "refs/remotes/origin/HEAD").strip() == "refs/remotes/origin/feature"
+code, out, err, calls = call(["migrate", p2(LOCAL), "--dry-run"])
+check("локальный origin/HEAD на feature (git remote set-head) не влияет — LOCAL всё равно отказ, сверка с develop",
+      code == 1 and "не из ветки по умолчанию" in err and "origin/develop" in err, (code, err))
+git(REPO2, "update-ref", "refs/tags/origin/develop", "HEAD")
+code, out, err, calls = call(["migrate", p2(MIG), "--dry-run"])
+check("без main: есть refs/tags/origin/develop — код 1, «неоднозначно»",
+      code == 1 and "неоднозначно" in err.strip().splitlines()[-1], err)
+git(REPO2, "update-ref", "-d", "refs/tags/origin/develop")
+# HEAD сервера отцеплен от ветки: ls-remote --symref даёт «<sha>\tHEAD» без строки «ref:» — ветку не назвать
+git(ORIGIN2, "update-ref", "--no-deref", "HEAD", "develop")
+code, out, err, calls = call(["migrate", p2(MIG), "--dry-run"])
+check("сервер не назвал ветку по умолчанию — код 1, «однозначно» последней строкой, без догадки",
+      code == 1 and "однозначно" in err.strip().splitlines()[-1], (code, err))
+git(ORIGIN2, "symbolic-ref", "HEAD", "refs/heads/develop")
+
 # --- через pantheon (run.py) ---
 env = {**os.environ, **GIT_ENV, "PATH": BIN + os.pathsep + os.environ.get("PATH", ""), "PANTHEON_STATE": STATE,
        "PANTHEON_HOME": os.path.join(ROOT, "pantheon"), "PANTHEON_NO_NOTIFY": "1",
@@ -327,18 +380,18 @@ M4 = mutant("m = MIGRATION.fullmatch(rel)", r'm = re.fullmatch(r"(.*)()", rel)')
 check("мутант (без проверки пути миграции) пропускает README.md из main — тест это видит",
       call(["migrate", p("README.md"), "--dry-run"], mod=M4)[0] == 0 and call(["migrate", p("README.md"), "--dry-run"])[0] == 1)
 
-M5 = mutant('    for ref in SHADOW:', '    for ref in ():')
+M5 = mutant('    for ref in (s + branch for s in SHADOW):', '    for ref in ():')
 git(REPO, "update-ref", "refs/tags/origin/main", "HEAD")
 check("мутант (без отказа на ветку или метку origin/main) пропускает неоднозначное имя — тест это видит",
       call(["migrate", p(MIG), "--dry-run"], mod=M5)[0] == 0 and call(["migrate", p(MIG), "--dry-run"])[0] == 1)
-SRC6 = SRC.replace('    for ref in SHADOW:', '    for ref in ():', 1).replace(
-    'VERIFIED + "^{commit}"', 'BASE + "^{commit}"', 1)
-assert SRC6.count('BASE + "^{commit}"') == 1 and "for ref in ():" in SRC6
+SRC6 = SRC.replace('    for ref in (s + branch for s in SHADOW):', '    for ref in ():', 1).replace(
+    'verified + "^{commit}"', 'base + "^{commit}"', 1)
+assert SRC6.count('base + "^{commit}"') == 1 and "for ref in ():" in SRC6
 check("мутант (короткое имя origin/main вместо своего ref, без отказа) берёт метку с локальным коммитом, а без "
       "мутанта — отказ «неоднозначно»", call(["migrate", p(LOCAL), "--dry-run"], mod=load(SRC6))[0] == 0
       and "неоднозначно" in call(["migrate", p(LOCAL), "--dry-run"])[2])
 git(REPO, "update-ref", "-d", "refs/tags/origin/main")
-M7 = mutant('"fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/main:{VERIFIED}"',
+M7 = mutant('"fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/{branch}:{verified}"',
             '"fetch", "--quiet", "--no-tags", "origin", "main"')
 git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")
 check("мутант (fetch не в свой ref) оставляет подвинутый ref — тест это видит",
@@ -392,6 +445,20 @@ check("мутант (GIT_* не сняты) берёт main чужого реп�
 M16 = mutant("    return \"\".join(out)", "    return sql")
 check("мутант (литералы не вырезаны) отказывает честной миграции — тест это видит",
       call(["migrate", p(GOOD)], mod=M16)[0] == 1 and call(["migrate", p(GOOD)])[0] == 0)
+
+M21 = mutant("    branch = default_branch(repo)\n", '    branch = "main"\n')
+check("мутант (всегда main) отказывает репозиторию без main — тест это видит",
+      call(["migrate", p2(MIG), "--dry-run"], mod=M21)[0] == 1 and call(["migrate", p2(MIG), "--dry-run"])[0] == 0)
+M22 = mutant("    return name\n", '    return _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")'
+             '.stdout.strip().removeprefix("origin/")\n')
+check("мутант (ветка из локального origin/HEAD) берёт feature и пропускает несливый LOCAL — тест это видит",
+      call(["migrate", p2(LOCAL), "--dry-run"], mod=M22)[0] == 0 and call(["migrate", p2(LOCAL), "--dry-run"])[0] == 1)
+M23 = mutant("    if not name or _git(", "    if False and _git(")
+git(ORIGIN2, "update-ref", "--no-deref", "HEAD", "develop")
+check("мутант (без отказа на неназванную ветку) — причина уже не «однозначно» — тест это видит",
+      "однозначно" not in call(["migrate", p2(MIG), "--dry-run"], mod=M23)[2]
+      and "однозначно" in call(["migrate", p2(MIG), "--dry-run"])[2])
+git(ORIGIN2, "symbolic-ref", "HEAD", "refs/heads/develop")
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

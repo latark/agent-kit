@@ -83,7 +83,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
                                         в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
                                         песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
-  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из origin/main, со сверкой схемы до и после
+  pantheon supabase migrate <файл> [--dry-run]   миграция Supabase только из ветки по умолчанию origin, со сверкой схемы
                                         (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL
   pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не

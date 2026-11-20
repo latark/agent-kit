@@ -2,14 +2,18 @@
 автономности 09.11 F1, решение владельца [metis-1049-supabase] «А»).
 
 Запись в базу проекта через MCP окну закрыта (список guard mcp_gate, plugins-by-role.toml). Миграция идёт этой
-командой, и только та, что уже в origin/main:
+командой, и только та, что уже в ветке по умолчанию origin (main, а в репозитории без main — например develop,
+metis-1295):
   1. файл — supabase/migrations/<версия>_<имя>.sql внутри git-репозитория (не ссылка); иначе отказ;
-  2. `git fetch origin +refs/heads/main:refs/pantheon/verified-main` — main origin в свой ref, сверка только с ним
-     (короткое имя origin/main не берётся). Есть ветка или метка refs/heads/origin/main, refs/tags/origin/main — отказ
-     «неоднозначно». В этом main должен быть файл по тому же пути, и его blob равен файлу на диске. Нет в main
-     (новый, не слитый PR, только локальный коммит) или отличается — отказ «не из main». Применяется текст blob из
-     main, а не файл с диска: подмена файла между сверкой и применением ничего не даст. git идёт без GIT_* окружения
-     (GIT_CONFIG_*, GIT_DIR и т. п. подменили бы origin). Текст из main — строгий UTF-8 без единого «\\» (мета-команды
+  2. ветку по умолчанию называет сервер: `git ls-remote --symref origin HEAD`, строка «ref: refs/heads/<ветка>\\tHEAD»
+     ровно одна, имя проходит git check-ref-format — иначе отказ. Локальный refs/remotes/origin/HEAD не берётся: его
+     агент двигает `git remote set-head`. Затем `git fetch origin +refs/heads/<ветка>:refs/pantheon/verified-<ветка>`
+     — эта ветка origin в свой ref, сверка только с ним (короткое имя origin/<ветка> не берётся). Есть ветка или метка
+     refs/heads/origin/<ветка>, refs/tags/origin/<ветка> — отказ «неоднозначно». В этой ветке должен быть файл по тому
+     же пути, и его blob равен файлу на диске. Нет в ней (новый, не слитый PR, только локальный коммит) или
+     отличается — отказ «не из ветки по умолчанию». Применяется текст blob из ветки, а не файл с диска: подмена файла
+     между сверкой и применением ничего не даст. git идёт без GIT_* окружения
+     (GIT_CONFIG_*, GIT_DIR и т. п. подменили бы origin). Текст из ветки — строгий UTF-8 без единого «\\» (мета-команды
      psql: \\! запускает shell вне песочницы), без управляющих знаков кроме \\n и \\t, без client_encoding,
      standard_conforming_strings, backslash_quote и без своего BEGIN, COMMIT, ROLLBACK, END, ABORT, START TRANSACTION
      верхнего уровня — иначе отказ (check_sql); psql идёт с PGCLIENTENCODING=UTF8;
@@ -20,12 +24,15 @@
      (если она есть) версии ещё нет — иначе отказ «уже применена»; применение `psql --single-transaction
      -v ON_ERROR_STOP=1` (сбой — откат всей миграции) вместе с записью версии в schema_migrations; `pg_dump` после.
      Изменение схемы печатается счётом строк, полный дифф и оба снимка — в папке журнала
-     ~/.local/state/pantheon/logs/supabase-migrate/<время>-<версия>/ (там же migration.sql с хешем коммита main).
+     ~/.local/state/pantheon/logs/supabase-migrate/<время>-<версия>/ (там же migration.sql и source.txt с веткой и
+     хешем её коммита).
      Схема не изменилась — строка «схема не изменилась» (миграция данных так и выглядит).
 --dry-run — только шаги 1–2: что будет применено, без базы.
 
 Код 0 — применено (или --dry-run прошёл); 1 — отказ или сбой, причина последней строкой stderr; 2 — не тот вызов.
 Модуль-лист без P: STATE передаёт pantheon.py. Инструменты — git, psql и pg_dump из PATH.
+Сеть: в песочнице окна ls-remote и fetch по ssh падают «Could not resolve hostname» (ssh идёт мимо прокси песочницы,
+DNS ей закрыт), а psql к базе — тоже прямое TCP; по https через прокси git проходит.
 """
 import difflib
 import os
@@ -38,9 +45,8 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 USAGE = "pantheon supabase migrate <supabase/migrations/<версия>_<имя>.sql> [--dry-run]"
 MIGRATION = re.compile(r"supabase/migrations/(\d{1,20})_([A-Za-z0-9_.-]+)\.sql")
 DB_ENV = "SUPABASE_DB_URL"
-BASE = "origin/main"
-VERIFIED = "refs/pantheon/verified-main"  # свой ref: main origin пишет сюда только эта команда
-SHADOW = ("refs/heads/origin/main", "refs/tags/origin/main")
+VERIFIED = "refs/pantheon/verified-"  # + ветка: свой ref, ветку origin пишет сюда только эта команда
+SHADOW = ("refs/heads/origin/", "refs/tags/origin/")  # + ветка: затеняют короткое имя origin/<ветка>
 URL_SCHEMES = ("postgres", "postgresql")
 URL_PARAMS = {"sslmode": "PGSSLMODE"}  # других параметров в адресе нет — отказ, а не молчаливый пропуск
 
@@ -127,9 +133,25 @@ def check_sql(rel, body):
                           "убери управление транзакцией")
 
 
+def default_branch(repo):
+    """Ветка по умолчанию origin со слов сервера (`ls-remote --symref origin HEAD`), а не локальный
+    refs/remotes/origin/HEAD: его двигает `git remote set-head`. Refused — нет ответа, ответ неоднозначен или имя
+    не ветка."""
+    r = _git(repo, "ls-remote", "--symref", "origin", "HEAD")
+    if r.returncode != 0:
+        raise Refused(f"не узнал ветку по умолчанию origin ({(r.stderr or '').strip()[-200:]}) — без неё сверить нельзя")
+    heads = [ln.split("\t")[0].removeprefix("ref: ") for ln in r.stdout.splitlines()
+             if ln.startswith("ref: ") and ln.split("\t")[1:] == ["HEAD"]]
+    name = heads[0].removeprefix("refs/heads/") if len(heads) == 1 and heads[0].startswith("refs/heads/") else ""
+    if not name or _git(repo, "check-ref-format", "refs/heads/" + name).returncode != 0:
+        raise Refused(f"сервер origin не назвал ветку по умолчанию однозначно (ls-remote --symref: {heads[:3]}) — "
+                      "сверить не с чем")
+    return name
+
+
 def check_file(path, fetch=True):
-    """Сверка файла с origin/main → (репозиторий, путь в нём, sha коммита main, текст миграции из main в байтах,
-    версия, имя). Refused — файл не из main или не миграция Supabase."""
+    """Сверка файла с веткой по умолчанию origin → (репозиторий, путь в нём, sha коммита ветки, текст миграции из
+    ветки в байтах, версия, имя, «origin/<ветка>»). Refused — файл не из этой ветки или не миграция Supabase."""
     if os.path.islink(path) or not os.path.isfile(path):
         raise Refused(f"{path}: нет такого файла (или это ссылка)")
     real = os.path.realpath(path)
@@ -141,29 +163,32 @@ def check_file(path, fetch=True):
     m = MIGRATION.fullmatch(rel)
     if not m:
         raise Refused(f"{rel}: не миграция Supabase — нужен файл supabase/migrations/<версия>_<имя>.sql")
-    for ref in SHADOW:  # ветка или метка «origin/main» затеняет удалённую ветку в коротком имени — отказ
+    branch = default_branch(repo)
+    base, verified = "origin/" + branch, VERIFIED + branch
+    for ref in (s + branch for s in SHADOW):  # ветка или метка «origin/<ветка>» затеняет удалённую ветку — отказ
         if _git(repo, "show-ref", "--verify", "--quiet", ref).returncode == 0:
-            raise Refused(f"в {repo} есть {ref} — имя {BASE} неоднозначно, удали его (git update-ref -d {ref})")
+            raise Refused(f"в {repo} есть {ref} — имя {base} неоднозначно, удали его (git update-ref -d {ref})")
     if fetch:
-        f = _git(repo, "fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/main:{VERIFIED}")
+        f = _git(repo, "fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/{branch}:{verified}")
         if f.returncode != 0:
-            raise Refused(f"не удалось обновить {BASE} ({(f.stderr or '').strip()[-200:]}) — без свежего main "
-                          "сверить нельзя")
-    head = _git(repo, "rev-parse", "--verify", "--quiet", VERIFIED + "^{commit}")
+            raise Refused(f"не удалось обновить {base} ({(f.stderr or '').strip()[-200:]}) — без свежей ветки по "
+                          "умолчанию сверить нельзя")
+    head = _git(repo, "rev-parse", "--verify", "--quiet", verified + "^{commit}")
     if head.returncode != 0:
-        raise Refused(f"в {repo} нет {VERIFIED} ({BASE})")
+        raise Refused(f"в {repo} нет {verified} ({base})")
     blob = _git(repo, "rev-parse", "--verify", "--quiet", f"{head.stdout.strip()}:{rel}")
     if blob.returncode != 0:
-        raise Refused(f"{rel}: файла нет в {BASE} — миграция не из слитого PR, применять нельзя (сначала слияние)")
+        raise Refused(f"{rel}: файла нет в {base} (не из ветки по умолчанию) — миграция не из слитого PR, применять "
+                      "нельзя (сначала слияние)")
     mine = _git(repo, "hash-object", "--", rel)
     if mine.returncode != 0 or mine.stdout.strip() != blob.stdout.strip():
-        raise Refused(f"{rel}: файл на диске отличается от {BASE} — применяется только слитый текст (git checkout "
-                      f"{BASE} -- {rel} или новый PR)")
+        raise Refused(f"{rel}: файл на диске отличается от {base} — применяется только слитый текст (git checkout "
+                      f"{base} -- {rel} или новый PR)")
     body = _git(repo, "cat-file", "blob", blob.stdout.strip(), text=False)
     if body.returncode != 0:
-        raise Refused(f"{rel}: не прочитан blob {BASE}")
+        raise Refused(f"{rel}: не прочитан blob {base}")
     check_sql(rel, body.stdout)
-    return repo, rel, head.stdout.strip(), body.stdout, m.group(1), m.group(2)
+    return repo, rel, head.stdout.strip(), body.stdout, m.group(1), m.group(2), base
 
 
 def pg_env(url):
@@ -214,14 +239,14 @@ def apply(state, path, out=print):
     if not url:
         raise Refused(f"нет строки подключения {DB_ENV} — база не названа, миграция не применена")
     db = pg_env(url)
-    repo, rel, sha, body, version, name = check_file(path)
+    repo, rel, sha, body, version, name, base = check_file(path)
     run = os.path.join(state, "logs", "supabase-migrate", f"{time.strftime('%Y%m%d-%H%M%S')}-{version}")
     os.makedirs(run, mode=0o700, exist_ok=True)
     sql = os.path.join(run, "migration.sql")
     with open(sql, "wb") as fh:
         fh.write(body)
     with open(os.path.join(run, "source.txt"), "w", encoding="utf-8") as fh:
-        fh.write(f"{repo}\n{rel}\n{BASE} {sha}\n")
+        fh.write(f"{repo}\n{rel}\n{base} {sha}\n")
     before = _dump(db, os.path.join(run, "before.sql"))
     known = _query(db, "select to_regclass('supabase_migrations.schema_migrations') is not null") == "t"
     if known and _query(db, f"select count(*) from supabase_migrations.schema_migrations where version = '{version}'") != "0":
@@ -241,7 +266,7 @@ def apply(state, path, out=print):
         raise Refused(f"{rel}: psql упал (код {r.returncode}), транзакция откатилась; {same}; журнал — {run}")
     plus = sum(1 for x in diff if x.startswith("+") and not x.startswith("+++"))
     minus = sum(1 for x in diff if x.startswith("-") and not x.startswith("---"))
-    out(f"применено: {rel} из {BASE} {sha[:12]} ({name})")
+    out(f"применено: {rel} из {base} {sha[:12]} ({name})")
     out(f"схема: +{plus} −{minus} строк, дифф — {os.path.join(run, 'schema.diff')}" if diff else "схема не изменилась")
     return run
 
@@ -256,8 +281,8 @@ def main(argv, state):
         return 2
     try:
         if "--dry-run" in argv:
-            _, rel, sha, body, _, _ = check_file(files[0])
-            print(f"проверено: {rel} = {BASE} {sha[:12]} ({len(body)} байт); база не тронута (--dry-run)")
+            _, rel, sha, body, _, _, base = check_file(files[0])
+            print(f"проверено: {rel} = {base} {sha[:12]} ({len(body)} байт); база не тронута (--dry-run)")
         else:
             apply(state, files[0])
     except Refused as e:
