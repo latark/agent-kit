@@ -122,7 +122,7 @@ _UNSET = object()
 _NIGHT = _UNSET
 
 
-def gate(kind, t, agents=None, registry=None):
+def gate(kind, t, agents=None, registry=None, target=None):
     """(можно ли, причина отказа). Шлюз запуска сломался или его нет — отказ, а не «можно»."""
     try:
         mod = night_mod()
@@ -131,7 +131,7 @@ def gate(kind, t, agents=None, registry=None):
     if mod is None:
         return False, "ночной модуль не найден"
     try:
-        ok, why = mod.gate(kind, t, agents=agents, registry=registry, heavy=None)
+        ok, why = mod.gate(kind, t, agents=agents, registry=registry, heavy=None, target=target)
     except Exception as e:  # noqa: BLE001
         return False, f"шлюз запуска упал ({type(e).__name__}: {str(e)[:100]})"
     return bool(ok), why
@@ -436,7 +436,7 @@ def limit_resume(agents, registry, doms, t):
         why = recheck(name) or ("планировщик на паузе" if scheduler_paused() else None)
         if why:
             continue
-        ok, reason = gate("respawn", t, agents=agents, registry=registry)
+        ok, reason = gate("respawn", t, agents=agents, registry=registry, target=name)
         if not ok:
             P.start_log(f"limit-gate\t{name}\t{a.get('id')}\t{reason}")
             continue
@@ -517,7 +517,7 @@ def wake_waiting(agents, registry, doms, t):
         if busy:
             skip("wake-live", name, a, busy)
             continue
-        ok, reason = gate("wake", t, agents=agents, registry=registry)
+        ok, reason = gate("wake", t, agents=agents, registry=registry, target=name)
         if not ok:
             skip("wake-gate", name, a, reason)
             continue
@@ -723,7 +723,7 @@ def inbox_wake(agents, registry, doms, t):
         if not why and not hold and len(running) + len(shop) >= W.SESSIONS_MAX:
             why = f"нет места: сессий Пантеона {len(running) + len(shop)} из {W.SESSIONS_MAX}"
         if not why:
-            ok, gw = gate("wake", t, agents=agents, registry=registry)
+            ok, gw = gate("wake", t, agents=agents, registry=registry, target=d)
             why = None if ok else f"недельный лимит: {gw}"
         if not why and (started or RESUMED or W.ONESHOT_STARTED):  # общая с самозапуском и разовыми запусками
             why = "одна сессия за проход — в следующий"

@@ -1195,7 +1195,7 @@ def start_gate(target, origin, agents, need_word=False, over_cap=False):
     elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
-    elif target not in CAP_FREE and (cap := P.night_mod().launch_cap(origin, over_cap)):
+    elif target not in CAP_FREE and (cap := P.night_mod().launch_cap(origin, over_cap, target=target)):
         code, why = START_REFUSED, cap
     elif m["red"] or m["unknown"]:
         # [sb-simplify] п. 5 (metis-0523): своп и давление памяти — только предупреждение, запуск не откладывается.

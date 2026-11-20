@@ -311,7 +311,7 @@ def wake_block(name, agents, registry, auto, nudge=False):
             return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
         # темп недели и ночь (metis-0127): любой автоматический подъём — как продолжение (днём только темп, ночью —
         # открытая ночь с бюджетом); самозапуск по задаче сверх того проверяет autostart()
-        ok, why = P.night_mod().gate("respawn", P.now(), agents, registry)
+        ok, why = P.night_mod().gate("respawn", P.now(), agents, registry, target=name)
         if not ok:
             return f"недельный лимит: {why}"
     return None
@@ -2941,7 +2941,7 @@ def oneshots(agents, registry, doms, t):
         poke = nudge_target(hold)
         why = wake_block(d, agents, registry, auto=True, nudge=bool(poke))
         if not why:
-            ok, gw = N.gate("autostart", t, [a for a in agents if a not in hold], registry)
+            ok, gw = N.gate("autostart", t, [a for a in agents if a not in hold], registry, target=d)
             why = None if ok else f"недельный лимит: {gw}"
         if not why and started:
             why = "одна сессия за проход — в следующий"
@@ -3247,7 +3247,7 @@ def autostart(agents, registry, doms, t, dry=False):
         # новое дело: жёлтая зона днём, тяжёлые, ночь и её бюджет, утро после 04:00 (metis-0127); передача задания —
         # тоже новое дело, а простаивающий держатель тяжёлым не считается (его working остался от прежнего процесса)
         if not why:
-            ok, gw = P.night_mod().gate("autostart", t, [a for a in agents if a not in hold], registry)
+            ok, gw = P.night_mod().gate("autostart", t, [a for a in agents if a not in hold], registry, target=d)
             why = None if ok else f"недельный лимит: {gw}"
         nxt = float(s.get("next") or float(s.get("last") or 0) + AUTOSTART_BACKOFF)
         if not why and t < nxt and (not swap or s.get("swap") == swap["a"].get("id")):
@@ -3509,7 +3509,7 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
         return ("не исполняю: «остановлено вами» — снимает ответ «Да — вернуть " + name + "» или ваша команда "
                 "pantheon resume")
     # metis-0444: недельный потолок держит и запуск по ответу — сверх потолка только ваш терминал (--over-cap)
-    cap = None if name in P.CAP_FREE else P.night_mod().launch_cap("tick")  # Гестию потолок не держит (29.10)
+    cap = None if name in P.CAP_FREE else P.night_mod().launch_cap("tick", target=name)  # Гестию потолок не держит (29.10)
     if cap:
         return f"не исполняю: {cap}"
     if verb == "перезапустить":
@@ -4866,7 +4866,7 @@ def wake_one(rest, who="владелец", over=False):
     word = not (extra and os.environ.get("PANTHEON_ROLE")) or owner_word_ok()
     # metis-0444: недельный потолок владельца — отказ, код 2 (--over-cap снимает его только в вашем терминале)
     role = os.environ.get("PANTHEON_ROLE") or ""
-    cap = P.night_mod().launch_cap("zeus" if role == "hq" else "tick" if role else "owner", over) if word else None
+    cap = P.night_mod().launch_cap("zeus" if role == "hq" else "tick" if role else "owner", over, target=name) if word else None
     P.capacity_note(name, "wake", agents, "allowed" if word and not cap else "refused")
     if cap:
         print(f"pantheon wake {name}: отказ — {cap}; claude не запускался", file=P.sys.stderr)
