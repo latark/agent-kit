@@ -2306,7 +2306,52 @@ def cmd_request(args):
         print(f"Пачка {repo}: {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} поставлена. Одно окно Touch ID на все "
               f"покажет плановый проход, когда вы у Mac{later}; сливает по очереди, отказ одного останавливает "
               f"следующие; без ответа за {REQUEST_TTL // 3600} ч пачка гаснет.")
+    for hint in (light_hint(repo, prs), batch_hint(repo, prs)):
+        if hint:
+            print(hint)
     return 0
+
+
+# Окно Touch ID — для ядра (metis-1280, слово владельца 20.11 «PR вне ядра — без вашего пальца … да это нужно
+# сделать»): PR agent-kit, который не задевает ни ядро, ни сборку окон (window_core), сливает координатор
+# MERGE_DIRECTION шлюзом guard. Заявка на него ставится (фраза владельца «слей #N <hex>» сливает её, metis-0959), но
+# окна Touch ID проход на неё не показывает. Список файлов не получен — как раньше: окно, проход сверит файлы сам.
+LIGHT_REPOS = ("agent-kit",)
+
+
+def light_paths(repo, paths):
+    """PR repo из LIGHT_REPOS, список файлов получен и ни один файл не window_core — окно Touch ID ему не нужно."""
+    return repo.split("/")[-1] in LIGHT_REPOS and paths is not None and not any(window_core(x) for x in paths)
+
+
+def light_wait():
+    """Итог прохода для заявки вне ядра без фразы: окна нет, заявка ждёт фразу или гаснет за REQUEST_TTL."""
+    return (f"ждёт: вне ядра — без Touch ID (metis-1280): сливает координатор {MERGE_DIRECTION} шлюзом guard или "
+            f"ваша фраза «слей #N»")
+
+
+def light_hint(repo, prs):
+    """Подсказка при заявке: все PR вне ядра — окна не будет, кому сливать."""
+    for pr in prs:
+        view = pr_view(repo, pr)
+        if not light_paths(repo, pr_files(repo, pr, view) if view else None):
+            return None
+    return (f"Вне ядра: окна Touch ID на {', '.join(f'#{n}' for n in prs)} не будет (metis-1280). Сливает "
+            f"координатор {MERGE_DIRECTION} шлюзом guard: gh pr merge N -R {repo} --match-head-commit <sha> --merge; "
+            f"из другого окна — передайте ему номер PR. Заявка ждёт фразу владельца «слей #N» до "
+            f"{REQUEST_TTL // 3600} ч.")
+
+
+def batch_hint(repo, prs):
+    """Подсказка собрать пачку (metis-1280, [zeus-fast-2d]): у repo уже ждут одиночные заявки — каждая станет своим
+    окном Touch ID. Основная схема — пачка = ветка batch/<story> = один PR; окно на несколько PR — запасной путь."""
+    others = sorted(q["pr"] for q in queue() if q.get("repo") == repo and not q.get("batch") and q["pr"] not in prs)
+    if not others:
+        return None
+    every = " ".join(str(n) for n in sorted(set(others) | set(prs)))
+    return (f"Подсказка: у {repo} уже ждут отдельные заявки {', '.join(f'#{n}' for n in others)} — каждая станет своим "
+            f"окном Touch ID. Одно окно на все: pantheon merge request {every} -R {repo} (до {MAX_BATCH} PR; "
+            f"заявки заменятся пачкой). Дальше задачи одной story — в одну ветку: pantheon batch start <story-id>.")
 
 
 def merge_conflict(view):
@@ -2451,6 +2496,8 @@ def process(req, click):
             return hold
     if phrase is not None:
         return finger(req, None, phrase)[1]
+    if light_paths(req["repo"], paths):
+        return light_wait()
     if not click and P.idle_sec() > PRESENT_SEC:
         return "ждёт: вас нет у Mac"
     text = window_text(req, view, why, paths)
@@ -2509,7 +2556,7 @@ def process_batch(reqs, click):
         return [(r, "ждёт: окно закрыто без ответа, повтор позже") for r in reqs]
     if not click and any(r.get("notified") for r in reqs):
         return [(r, "ждёт щелчка по уведомлению") for r in reqs]
-    views, whys, paths, waits = [], [], [], []
+    views, whys, paths, waits, light = [], [], [], [], []
     for r in reqs:
         state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
         if state == "fail":
@@ -2519,8 +2566,11 @@ def process_batch(reqs, click):
         views.append(view)
         whys.append(why)
         paths.append(files or [])
+        light.append(light_paths(r["repo"], files))
     if waits:
         return [(r, "ждёт: " + "; ".join(waits)) for r in reqs]
+    if all(light):   # metis-1280: пачка вся вне ядра — окна нет; хоть один PR ядра — окно на всю пачку, как раньше
+        return [(r, light_wait()) for r in reqs]
     if not click and P.idle_sec() > PRESENT_SEC:
         return [(r, "ждёт: вас нет у Mac") for r in reqs]
     text = batch_window_text(reqs, views, whys, paths)
