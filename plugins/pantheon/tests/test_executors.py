@@ -60,7 +60,20 @@ with open(os.path.join(GITBIN, "git"), "w") as fh:
     fh.write(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {GITLOG}\nexec {REAL_GIT} \"$@\"\n")
 os.chmod(os.path.join(GITBIN, "git"), 0o755)
 BASE_PATH = os.environ.get("PATH", "/usr/bin:/bin")
-ENV = {"PATH": f"{GITBIN}:{BIN}:{BASE_PATH}", "HOME": HOME, "USER": "tester", "LANG": "C.UTF-8",
+
+
+def probe_script(name, summary):
+    """Подмена живой пробы (PANTHEON_LIVE_PROBE): печатает CODEX_HOME и строку итога."""
+    p = os.path.join(TMP, name)
+    with open(p, "w") as fh:
+        fh.write(f'#!/bin/bash\necho "== N"\necho "CH=$CODEX_HOME"\necho "итог: {summary} (…)"\n')
+    return p
+
+
+# проба по умолчанию — как живая 20.11: вложенный Seatbelt не пишет (W=1), danger-full-access работает (D=0)
+PROBE_OK = probe_script("probe-ok.sh", "N=0 W=1 D=0")
+ENV = {"PANTHEON_LIVE_PROBE": PROBE_OK,
+"PATH": f"{GITBIN}:{BIN}:{BASE_PATH}", "HOME": HOME, "USER": "tester", "LANG": "C.UTF-8",
        "PANTHEON_HOME": PH, "PANTHEON_STATE": STATE, "PANTHEON_VIEW": os.path.join(TMP, "view"),
        "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": TMPD,
        # чужие секреты вызывающего — не должны дойти до Codex
@@ -235,7 +248,7 @@ def tests():
     check("Codex нет: check → код 3, «Codex недоступен», reason «нет на PATH»",
           r.returncode == 3 and "Codex недоступен" in r.stderr and cfg()["codex"]["reason"] == "нет на PATH"
           and cfg()["codex"]["enabled"] is False, r.stdout + r.stderr)
-    r = py("sys.exit(m.add_codex(interactive=True, live_probe=True))", env=nopath)
+    r = py("sys.exit(m.add_codex(interactive=True))", env=nopath)
     check("Codex нет: add_codex → инструкция, код 3, набор без codex",
           r.returncode == 3 and "npm install -g @openai/codex" in r.stdout and "Codex не добавлен" in r.stdout
           and (cfg().get("executors") or {}).get("set", ["claude"]) == ["claude"], r.stdout + r.stderr)
@@ -326,27 +339,39 @@ def tests():
 
     # --- add_codex с входом и живой пробой ----------------------------------------------------------------------
     set_cfg("")
-    probe_ok = os.path.join(TMP, "probe-ok.sh")
-    probe_bad = os.path.join(TMP, "probe-bad.sh")
-    open(probe_ok, "w").write('#!/bin/bash\necho "== N"\necho "CH=$CODEX_HOME"\n'
-                              'echo "итог: N=0 W=0 D=1 (0 — работает и держит границу)"\n')
-    open(probe_bad, "w").write('#!/bin/bash\necho "итог: N=0 W=1 D=0 (…)"\n')
     scenario({"login": 1, "device_auth": 0})
-    r = py(f"m.PROBE = {probe_ok!r}\nsys.exit(m.add_codex(interactive=True, live_probe=True))")
+    r = py("sys.exit(m.add_codex(interactive=True))")
     dev = [x for x in calls() if x["argv"][:2] == ["login", "--device-auth"]]
     check("add_codex(interactive): `codex login --device-auth` с CODEX_HOME роли, без ключей хоста",
           dev and dev[0]["codex_home"] == CH and dev[0]["openai_api_key"] == "", calls())
     check("add_codex(live_probe): итог пробы в выводе, CODEX_HOME роли передан, набор [claude, codex], код 0",
-          r.returncode == 0 and "итог: N=0 W=0 D=1" in r.stdout and f"CH={CH}" in r.stdout
+          r.returncode == 0 and "итог: N=0 W=1 D=0" in r.stdout and f"CH={CH}" in r.stdout
           and cfg()["executors"]["set"] == ["claude", "codex"], r.stdout + r.stderr)
+    # metis-1272: условие пробы — N=0 и D=0; W не условие. Проба обязательна на обоих путях (add_codex и CLI)
+    for summary, want in (("N=0 W=0 D=0", 0), ("N=0 W=1 D=0", 0), ("N=0 W=1 D=3", 3), ("N=0 W=0 D=1", 3),
+                          ("N=1 W=0 D=0", 3)):
+        probe = probe_script("probe-case.sh", summary)
+        for how in ("py", "cli"):
+            set_cfg("")
+            scenario({})
+            if how == "py":
+                r = py("sys.exit(m.add_codex(interactive=False))", env={"PANTHEON_LIVE_PROBE": probe})
+            else:
+                r = run("executors", "--add", "codex", env={"PANTHEON_LIVE_PROBE": probe})
+            added = "codex" in (cfg().get("executors") or {}).get("set", [])
+            check(f"1272: проба {summary} ({how}) → код {want}, Codex {'в наборе' if want == 0 else 'не добавлен'}",
+                  r.returncode == want and added == (want == 0) and f"итог: {summary}" in r.stdout
+                  and (want == 0 or "нужны N=0 и D=0" in r.stdout), (r.returncode, r.stdout, r.stderr))
     set_cfg("")
     scenario({})
-    r = py(f"m.PROBE = {probe_bad!r}\nsys.exit(m.add_codex(interactive=False, live_probe=True))")
-    check("add_codex: живая проба W≠0 → не добавлен, код 3, итог в выводе",
-          r.returncode == 3 and "итог: N=0 W=1 D=0" in r.stdout
-          and (cfg().get("executors") or {}).get("set", ["claude"]) == ["claude"], r.stdout + r.stderr)
+    probe_none = os.path.join(TMP, "probe-none.sh")
+    with open(probe_none, "w") as fh:
+        fh.write("#!/bin/bash\necho нет итога\n")
+    r = run("executors", "--add", "codex", env={"PANTHEON_LIVE_PROBE": probe_none})
+    check("1272: проба без строки итога → не добавлен, код 3", r.returncode == 3
+          and "codex" not in (cfg().get("executors") or {}).get("set", []), r.stdout)
     scenario({"device_auth": 1, "login": 1})
-    r = py("sys.exit(m.add_codex(interactive=True, live_probe=False))")
+    r = py("sys.exit(m.add_codex(interactive=True))")
     check("add_codex: вход не выполнен → код 3, не добавлен", r.returncode == 3 and "вход не выполнен" in r.stdout,
           r.stdout)
 
@@ -670,14 +695,14 @@ def tests():
               dead and head(wt) == h0 and free, (dead, head(wt) == h0, free))
 
     # --- metis-1272: модель и effort по виду задачи -------------------------------------------------------------------
-    def kind_run(kind_args, models=None, cfg_text=CODEX_ON):
+    def kind_run(kind_args, models=None, cfg_text=CODEX_ON, env=None):
         set_cfg(cfg_text)
         sc = {"exec": [ok_step()]}
         if models is not None:
             sc.update(models)
         scenario(sc)
         w = new_wt()
-        r = run("exec", "codex", *kind_args, w, BRIEF)
+        r = run("exec", "codex", *kind_args, w, BRIEF, env=env)
         ec = calls("exec")
         return r, (ec[0]["argv"] if ec else [])
 
@@ -694,6 +719,25 @@ def tests():
               and a[a.index(f"model_reasoning_effort={want[1]}") - 1] == "-c", (r.stdout, r.stderr, a))
     check("1272: в отчёте обёртки — вид, модель и effort",
           "вид: hard, модель: gpt-6.2-astra, effort: high" in r.stdout, r.stdout)
+    def sandbox(a):
+        return a[a.index("--sandbox") + 1] if "--sandbox" in a else None
+
+    r, a = kind_run(["--kind", "code"])
+    check("1272: вне окна (нет PANTHEON_ROLE) — --sandbox workspace-write", r.returncode == 0
+          and sandbox(a) == "workspace-write" and "danger-full-access" not in a, a)
+    pairs = {(a[i], a[i + 1]) for i in range(len(a) - 1)}
+    check("1272: запуск отключает приложения и плагины аккаунта (-c features.apps/plugins/remote_plugin=false)",
+          {("-c", "features.apps=false"), ("-c", "features.plugins=false"),
+           ("-c", "features.remote_plugin=false")} <= pairs, a)
+    r, a = kind_run(["--kind", "code"], env={"PANTHEON_ROLE": "codex-dev"})
+    check("1272: внутри окна (PANTHEON_ROLE) — --sandbox danger-full-access; модель и effort на месте",
+          r.returncode == 0 and sandbox(a) == "danger-full-access" and "workspace-write" not in a
+          and flags(a) == ("gpt-6.2-sol", "medium"), a)
+    r, a = kind_run(["--kind", "code"], env={"PANTHEON_ROLE": "codex-dev", "MY_SECRET": "s"})
+    ec = calls("exec")
+    check("1272: внутри окна env Codex по-прежнему без секретов",
+          ec and "MY_SECRET" not in ec[0]["env"] and "GH_TOKEN" not in ec[0]["env"]
+          and ec[0]["openai_api_key"] == "", ec)
     r, a = kind_run([])
     check("1272: без --kind — вид code (sol medium)", r.returncode == 0 and flags(a) == ("gpt-6.2-sol", "medium"), a)
     r, a = kind_run(["--kind", "magic"])

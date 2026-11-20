@@ -51,8 +51,29 @@ UNAVAILABLE = 3           # код «Codex недоступен»: задачи 
 BUSY = 4                  # другой запуск держит CODEX_HOME роли
 
 # Флаги запуска (доклад prometheus, разд. 1 и 4; решение Зевса 16.10 — без network_access и без bypass).
-EXEC_FLAGS = ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write",
-              "-c", "features.shell_snapshot=false"]
+# Решение владельца 20.11 (metis-1272, «без своей песочницы в окне») заменяет «без bypass» только для запуска ВНУТРИ
+# окна роли: вложенный Seatbelt в профиле окна не пишет в репозиторий (живая проба W=1), поэтому там Codex идёт с
+# `--sandbox danger-full-access`, а границу держит песочница окна. Вне окна — workspace-write, как было.
+SANDBOX_OUTSIDE = "workspace-write"
+SANDBOX_WINDOW = "danger-full-access"
+# Приложения и плагины аккаунта ChatGPT (коннекторы) отключены: песочница CLI не ограничивает права подключённых к
+# аккаунту сервисов (GHSA-gqqj, CONNECTORS_HINT). `features.apps` — переключатель коннекторов в `codex features list`
+# 0.170; plugins и remote_plugin — как в HELLO_FLAGS.
+EXEC_FLAGS = ["exec", "--json", "--ephemeral", "--sandbox", SANDBOX_OUTSIDE,
+              "-c", "features.shell_snapshot=false",
+              "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false"]
+
+
+def in_window(env=None):
+    """Идёт ли вызов внутри окна роли: окна Пантеона ставят PANTHEON_ROLE (тот же признак, что у `pantheon start`)."""
+    return bool((os.environ if env is None else env).get("PANTHEON_ROLE"))
+
+
+def exec_flags(env=None):
+    """EXEC_FLAGS с песочницей по месту запуска: в окне danger-full-access, вне его workspace-write."""
+    flags = list(EXEC_FLAGS)
+    flags[flags.index("--sandbox") + 1] = SANDBOX_WINDOW if in_window(env) else SANDBOX_OUTSIDE
+    return flags
 HELLO_TEXT = "Respond with hello."
 HELLO_FLAGS = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
                "-c", "features.plugins=false", "-c", "features.remote_plugin=false", "-c", "project_doc_max_bytes=0"]
@@ -571,8 +592,8 @@ CONNECTORS_HINT = ("Проверьте подключённые приложен
 
 def run_live_probe(env, out):
     """scripts/live-probe-codex-nested.sh с CODEX_HOME роли → (код, строка итога)."""
-    try:
-        r = subprocess.run(["bash", PROBE], capture_output=True, text=True, env=env, timeout=1800,
+    try:  # PANTHEON_LIVE_PROBE — подмена скрипта в тестах
+        r = subprocess.run(["bash", os.environ.get("PANTHEON_LIVE_PROBE") or PROBE], capture_output=True, text=True, env=env, timeout=1800,
                            stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, f"живая проба не прошла: {e}"
@@ -582,13 +603,14 @@ def run_live_probe(env, out):
     if not m:
         return 1, "живая проба: нет строки итога"
     line = f"итог: N={m.group(1)} W={m.group(2)} D={m.group(3)}"
-    # обёртка запускает Codex с workspace-write внутри окна — нужны N=0 (Codex работает) и W=0 (вложенный Seatbelt)
-    return (0 if m.group(1) == "0" and m.group(2) == "0" else 1), line
+    # решение владельца 20.11: внутри окна Codex идёт с danger-full-access — нужны N=0 (Codex работает) и D=0 (так он
+    # пишет в репозиторий и не пишет вне его); W (вложенный Seatbelt) больше не условие
+    return (0 if m.group(1) == "0" and m.group(3) == "0" else 1), line
 
 
-def add_codex(interactive=False, live_probe=False, out=None):
-    """Добавить Codex к набору (pantheon-setup --add codex, pantheon executors --add codex | login).
-    interactive — `codex login --device-auth` с CODEX_HOME роли; live_probe — живая проба вложенной песочницы.
+def add_codex(interactive=False, out=None):
+    """Добавить Codex к набору (pantheon-setup --add codex, pantheon executors --add codex | login). Живая проба
+    (N=0 и D=0) обязательна на любом пути. interactive — `codex login --device-auth` с CODEX_HOME роли.
     → 0 — добавлен, 3 — не добавлен (понятный текст уже выведен, установка идёт дальше)."""
     out = out or (lambda s: print(s))
     exe = codex_bin()
@@ -614,13 +636,13 @@ def add_codex(interactive=False, live_probe=False, out=None):
     if code != 0:
         out("Codex не добавлен.")
         return UNAVAILABLE
-    if live_probe:
-        pc, line = run_live_probe(env, out)
-        out(line)
-        if pc != 0:
-            _disable("живая проба вложенной песочницы")
-            out("Codex не добавлен: живая проба не прошла (нужны N=0 и W=0). Итог — Зевсу.")
-            return UNAVAILABLE
+    pc, line = run_live_probe(env, out)
+    out(line)
+    if pc != 0:
+        _disable("живая проба песочницы")
+        out("Codex не добавлен: живая проба не прошла (нужны N=0 и D=0: пишет в репозиторий, вне него не пишет). "
+            "Итог — Зевсу.")
+        return UNAVAILABLE
     out(CONNECTORS_HINT)
     names = _write_set(executor_set() + ["codex"])
     out("набор: " + ", ".join(names))
@@ -917,7 +939,7 @@ def _exec_locked(wt, brief, out, err, task_kind="code"):
     mflags, model, effort, warns = model_flags(task_kind, env)
     for w in warns:
         err(f"предупреждение: {w}")
-    argv = [exe, *EXEC_FLAGS, *mflags, "-"]
+    argv = [exe, *exec_flags(), *mflags, "-"]
     idle, total = _num("PANTHEON_CODEX_IDLE_S", 1800), _num("PANTHEON_CODEX_TIMEOUT_S", 7200)
     logs, kind, text, parsed = [], "failed", "", None
     for attempt in (1, 2):
@@ -1006,9 +1028,9 @@ def cli(rest, task_head=None):
             if rest[1] != "codex":
                 print(f"исполнителя «{rest[1]}» нет; известны: {', '.join(KNOWN)}", file=sys.stderr)
                 return 2
-            return add_codex(interactive=False, live_probe=False)
+            return add_codex(interactive=False)
         if rest == ["login"]:  # вход роли codex-dev: device-auth с её CODEX_HOME, проверка, добавление в набор
-            return add_codex(interactive=True, live_probe=False)
+            return add_codex(interactive=True)
         if rest[:1] == ["--remove"] and len(rest) == 2:
             code, text = remove(rest[1])
             print(text, file=sys.stderr if code else sys.stdout)
