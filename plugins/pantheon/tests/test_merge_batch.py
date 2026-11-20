@@ -115,9 +115,9 @@ def test_batch_broken_before_window():
     request_batch(b)
     b.request(pr=8, t=T0 + 5)   # одиночная заявка на #8 заменила заявку пачки
     b.run(t=T0 + 10)
-    check("заявку #8 пачки заменили одиночной → #7 снята (пачка неполна), одиночная #8 слита своим окном",
-          b.merges() == [merge_argv(8)] and b.req(7) is None and len(b.windows()) == 1
-          and b.windows()[0][0].startswith("#8, со слов автора: "), (b.outs[-1], b.merges()))
+    check("заявку #8 пачки заменили одиночной → #7 снята (пачка неполна), одиночная #8 вне ядра — без окна, ждёт "
+          "(metis-1280)", not b.merges() and b.req(7) is None and b.req(8) is not None and not b.windows()
+          and "#8: ждёт: вне ядра" in b.outs[-1], (b.outs[-1], b.merges()))
 
 
 def test_batch_gate_before_window():
@@ -484,8 +484,8 @@ def test_phrase_gate_and_wait():
     b.run()
     say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
     b.run(t=T0 + 120, extra=AWAY)
-    check("заявка ждёт щелчка по уведомлению — фраза сливает без щелчка", merged_once(b)
-          and len(b.windows()) == 1, b.outs[-1])
+    check("PR вне ядра: окна Touch ID нет (metis-1280), заявка ждёт — фраза сливает", merged_once(b)
+          and not b.windows(), b.outs[-1])
     b = pbox()
     b.request()
     b.set("gh-merge-rc", 1)
