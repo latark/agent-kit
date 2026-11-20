@@ -47,6 +47,12 @@ if args[:2] == ["login", "--device-auth"]:
         scen["login"] = 0
         json.dump(scen, open(os.path.join(home, "stub-scenario.json"), "w", encoding="utf-8"))
     sys.exit(rc)
+if args == ["debug", "models"]:  # каталог моделей: сценарий "models": {slug: [effort…]}, по умолчанию две модели
+    cat = scen.get("models") or {"gpt-6.2-sol": ["low", "medium", "high", "xhigh"],
+                                 "gpt-6.2-astra": ["low", "medium", "high", "xhigh"]}
+    print(json.dumps({"models": [{"slug": k, "supported_reasoning_levels": [{"effort": e} for e in v]}
+                                 for k, v in cat.items()]}))
+    sys.exit(int(scen.get("models_rc", 0)))
 if args[:1] != ["exec"]:
     print(f"stub: не знаю {args}", file=sys.stderr)
     sys.exit(2)
