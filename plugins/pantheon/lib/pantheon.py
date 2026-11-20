@@ -1001,6 +1001,37 @@ def parse_command(cmd):
     return None
 
 
+def direction_job(job):
+    """metis-0886 (вариант А владельца 06.11): задача расписания окном координатора направления — `direction = "<имя>"`
+    и `text = "<поручение>"` вместо command. → None — у задачи нет direction (обычная команда, parse_command); иначе
+    (направление, поручение, причина отказа или None). Папку окна задача не называет: её берёт start из реестра
+    (domains.json из directions.toml, первая существующая папка, metis-0899). Новых профилей прав нет — окно то же,
+    что у координатора."""
+    d = job.get("direction")
+    if d is None:
+        return None
+    text = job.get("text")
+    if not isinstance(d, str) or not SESSION_NAME.fullmatch(d) or d == "workshop":
+        return "", "", f"direction {str(d)[:40]!r} — не имя направления"
+    if job.get("command") is not None:
+        return d, "", "у задачи направления нет command — только direction и text"
+    if not isinstance(text, str) or not text.strip():
+        return d, "", "нет поручения (text)"
+    return d, f"Задание расписания {job.get('name')}: {text.strip()}", None
+
+
+def direction_job_problem(job):
+    """Причина, по которой задача направления не идёт (вид задачи, нет направления в реестре, нет папки, координатора
+    нет — coordinator = false), или None. Для обычной задачи — None."""
+    dj = direction_job(job)
+    if dj is None:
+        return None
+    if dj[2]:
+        return dj[2]
+    got = start_target(dj[0], [])
+    return got if isinstance(got, str) else None
+
+
 APP = os.path.join(HOME, "Applications", "Доска.app")
 
 
@@ -1425,7 +1456,13 @@ def tick():
                     continue
                 if me != primary:
                     continue
-            if parse_command(job.get("command")) is None:
+            if direction_job(job) is not None:  # окно направления (metis-0886): не claude -p и не команда
+                bad = direction_job_problem(job)
+                if bad:
+                    alert_once("baddir-" + name, bad, f"задача {name}: окно направления не поднять — {bad}; пропущена",
+                               "pantheon-tick", note=f"Задача {name} пропущена: окно направления не поднять")
+                    continue
+            elif parse_command(job.get("command")) is None:
                 alert_once("badcmd-" + name, job.get("command"), f"задача {name}: команда не разрешённого вида "
                            "(только pantheon …, claude -p …, скрипт плагина; без ; & | $ > <) — пропущена",
                            "pantheon-tick", note=f"Задача {name} пропущена: команда не разрешена")
@@ -2014,7 +2051,9 @@ def status():
         st = job_state(job["name"])
         if job.get("enabled") is False or st.get("disabled"):
             continue
-        if parse_command(job.get("command")) is None:
+        if direction_job(job) is not None and direction_job_problem(job):
+            bad = f"окно направления не поднять: {direction_job_problem(job)}"
+        elif direction_job(job) is None and parse_command(job.get("command")) is None:
             bad = "команда не разрешена"
         elif job_window_problem(parse_command(job.get("command"))):
             bad = job_window_problem(parse_command(job.get("command")))
