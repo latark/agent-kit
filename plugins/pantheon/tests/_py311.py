@@ -52,12 +52,15 @@ def isolate_path(path, root, tools=REAL_TOOLS):
     """PATH теста без настоящих tools (metis-1308) → строка PATH. Папка PATH, где лежит claude или codex, заменяется
     зеркалом в root: ссылки на все её файлы, кроме tools. node, pnpm и python3.14 из той же папки остаются на PATH,
     а `shutil.which("codex")` теста «Codex нет» ничего не находит. Пример: codex из npm лежит в bin nvm рядом с node,
-    и тест «Codex нет: add_codex» звал настоящий codex — тот шёл входить в OpenAI и вис до TimeoutExpired."""
+    и тест «Codex нет: add_codex» звал настоящий codex — тот шёл входить в OpenAI и вис до TimeoutExpired.
+    root — папка или функция, которая её создаёт: её зовут при первом зеркале, нечего зеркалить — папки нет (metis-1309)."""
     out = []
     for d in (path or "").split(":"):
         if not d or not os.path.isdir(d) or not _has_tool(d, tools):
             out.append(d)
             continue
+        if callable(root):  # папка зеркал создаётся, только когда зеркалить есть что (metis-1309)
+            root = root()
         mirror = os.path.join(root, f"bin{len(out)}")
         os.makedirs(mirror)
         try:
@@ -72,22 +75,37 @@ def isolate_path(path, root, tools=REAL_TOOLS):
 
 
 def isolate_env(environ, root, tools=REAL_TOOLS):
-    """Окружение процесса теста без настоящих tools (metis-1308): PATH — isolate_path, NVM_DIR — пустая папка в root.
+    """Окружение процесса теста без настоящих tools (metis-1308): PATH — isolate_path, NVM_DIR — путь, которого нет.
     run_env ставит bin nvm (NVM_DIR, иначе HOME/.nvm) первым в PATH дочерних процессов, если его нет в PATH: после
-    зеркала его там нет, и настоящий codex из nvm вернулся бы раньше всего. Пустой NVM_DIR — nvm_bin() ничего не
-    добавляет, node берётся из зеркала. Меняет environ на месте."""
+    зеркала его там нет, и настоящий codex из nvm вернулся бы раньше всего. NVM_DIR под /dev/null: nvm_bin() не читает
+    versions/node и ничего не добавляет, node берётся из зеркала, а папка для этого не нужна (metis-1309).
+    root — папка или функция, создающая её по первой надобности. Меняет environ на месте."""
     if environ.get("PATH"):
         environ["PATH"] = isolate_path(environ["PATH"], root, tools)
-    nvm = os.path.join(root, "nvm")
-    os.makedirs(nvm, exist_ok=True)
-    environ["NVM_DIR"] = nvm
+    environ["NVM_DIR"] = os.path.join(os.devnull, "nvm")
 
 
-_ISOLATED = tempfile.mkdtemp(prefix="py311-path-")
-_OWNER = os.getpid()
-# зеркало убирает только процесс, который его создал: копия процесса (fork) с sys.exit не сносит его у соседей
-atexit.register(lambda: os.getpid() == _OWNER and shutil.rmtree(_ISOLATED, True))
-isolate_env(os.environ, _ISOLATED)
+MIRROR_PREFIX = "py311-path-"  # по этому началу run-tests.py (sweep_py311_mirrors) находит папки зеркал; дальше — pid
+_mirror = {"root": None, "owner": None}
+
+
+def mirror_root():
+    """Папка зеркал PATH → путь; создаётся при первом вызове (metis-1309). Имя `py311-path-<pid>-…`: по pid создателя
+    run-tests.py при старте узнаёт, жив ли он, и убирает папки после SIGKILL (таймаут раннера), куда atexit не доходит.
+    Папку убирает atexit только процесс-создатель: копия (fork) с sys.exit не сносит её у соседей."""
+    if _mirror["root"] is None:
+        _mirror["owner"] = os.getpid()
+        _mirror["root"] = tempfile.mkdtemp(prefix=f"{MIRROR_PREFIX}{_mirror['owner']}-")
+        atexit.register(_drop_mirror)
+    return _mirror["root"]
+
+
+def _drop_mirror():
+    if os.getpid() == _mirror["owner"]:
+        shutil.rmtree(_mirror["root"], True)
+
+
+isolate_env(os.environ, mirror_root)
 PY311 = python_without_claude(sys.executable)
 
 

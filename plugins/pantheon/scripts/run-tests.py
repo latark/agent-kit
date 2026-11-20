@@ -106,6 +106,8 @@ outside (только упавшие файлы) тоже пишет запис�
 (scripts/lint-ratchet-mode, сейчас так) — храповик сам отдаёт код 0 и строку «предупреждение», код тестов тот же. Красный
 (режим fail) — код 1 и его причина последней строкой после итога; нет ruff закреплённой версии (код 2) — строка «skip lint_ratchet · пропущено» и код тестов;
 папка не в репозитории с храповиком (временные плагины тестов раннера) — без строки.
+При старте раннер убирает брошенные папки `py311-path-<pid>-*` в TMPDIR (sweep_py311_mirrors, metis-1309): тест, убитый
+SIGKILL по таймауту, их не убрал. Свои (uid, не ссылка), создатель мёртв или папка старше суток.
 Только stdlib.
 """
 import hashlib
@@ -116,6 +118,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -276,6 +279,47 @@ class Interrupted(Exception):
     def __init__(self, signum):
         super().__init__(signum)
         self.signum = signum
+
+
+MIRROR_PREFIX = "py311-path-"  # папки зеркал PATH из tests/_py311.py: `py311-path-<pid создателя>-…` (metis-1309)
+MIRROR_MAX_AGE = 24 * 3600  # с; дольше — папка брошена, даже если pid занят чужим процессом, и без pid в имени
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # EPERM: процесс есть, только чужой — не трогаем
+        return True
+    return True
+
+
+def sweep_py311_mirrors(tmp=None, now=None, alive=_pid_alive):
+    """Убирает брошенные папки зеркал PATH `py311-path-*` в TMPDIR → сколько убрано (metis-1309). Процесс теста,
+    убитый SIGKILL (таймаут раннера), atexit не отрабатывает, и папка остаётся. Только свои: папка (не ссылка),
+    владелец — этот uid. Моложе MIRROR_MAX_AGE и процесс-создатель из имени жив (или pid в имени нет) — не трогается."""
+    tmp = tmp or tempfile.gettempdir()
+    now = time.time() if now is None else now
+    n = 0
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return 0
+    for name in names:
+        path = os.path.join(tmp, name)
+        m = re.fullmatch(re.escape(MIRROR_PREFIX) + r"(\d+)-.+", name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not name.startswith(MIRROR_PREFIX) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            continue
+        if now - st.st_mtime < MIRROR_MAX_AGE and (not m or alive(int(m[1]))):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        n += not os.path.lexists(path)
+    return n
 
 
 def workers(cpus, load):
@@ -1457,4 +1501,5 @@ def run_all(argv):
 
 
 if __name__ == "__main__":
+    sweep_py311_mirrors()
     sys.exit(run_all(sys.argv[1:]))
