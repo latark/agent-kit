@@ -1088,7 +1088,8 @@ const fp = k => { const d = Object.getOwnPropertyDescriptor(HTMLFormElement.prot
 const flab = n => String((n.labels && n.labels[0] && n.labels[0].innerText) || at(n, 'aria-label') || at(n, 'placeholder')
   || '').trim().slice(0, 80);
 const nodes = f ? [...f.elements, ...f.querySelectorAll('[contenteditable]')]
-  : [...document.querySelectorAll('input,select,textarea,[contenteditable]')].filter(n => !n.closest('form') && !n.form);
+  : [...document.querySelectorAll('input,select,textarea,[contenteditable]')].filter(n => !n.closest('form') && !n.form)
+    .filter(n => n.getClientRects().length || String(n.value || n.innerText || '').trim());  // metis-1268: скрытый пустой виджет (КАД: отзыв с email) — не поле поиска
 const fields = nodes.filter(n => /^(INPUT|SELECT|TEXTAREA)$/.test(n.tagName) || n.hasAttribute('contenteditable'))
   .filter(n => at(n, 'type').toLowerCase() !== 'hidden').slice(0, 300).map(n => {
   const tag = n.tagName.toLowerCase(), type = at(n, 'type').toLowerCase(); let value = '';

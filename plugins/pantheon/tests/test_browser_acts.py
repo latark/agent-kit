@@ -445,6 +445,8 @@ res = act("click", "#cb", K)
 check("[K4] точку закрыл другой элемент к моменту нажатия — отказ", res["state"] == "refused" and "закрыл" in res["why"]
       and not D.clicked(), res)
 D.point_hit = True
+check("[S8][metis-1268] FACTS_JS: поля вне формы — только видимые или непустые (скрытый виджет отзыва КАД с email "
+      "не делает «Найти» личной формой)", "n.getClientRects().length || String(n.value" in B.facts_js("#a"))
 check("[K4] прокрутка в FACTS_JS мгновенная (behavior: 'instant'), без smooth",
       "behavior: 'instant'" in B.facts_js("#a") and "smooth" not in B.facts_js("#a"))
 res = act("click", "#leave", K)
