@@ -3100,6 +3100,14 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "COREPACK_HOME": os.path.join(cache, "corepack"),
             "UV_CACHE_DIR": os.path.join(cache, "uv"),
             "PIP_CACHE_DIR": os.path.join(cache, "pip"),
+            # uv tool (uvx) кладёт .tmp рядом с инструментами — общий ~/.local/share/uv/tools песочница закрывает
+            # ([den-1135-gitenv], metis-1135: ~15 отказов uvx ruff за 2 недели)
+            "UV_TOOL_DIR": os.path.join(cache, "uv-tools"),
+            # git switch -c / checkout -b от origin/* пишет branch.<имя>.remote|merge в общий .git/config — песочница
+            # закрывает, ветка остаётся без отслеживания ([den-1135-gitenv]: ~35 отказов); config не ослабляется
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "branch.autoSetupMerge",
+            "GIT_CONFIG_VALUE_0": "false",
             "NEXT_TELEMETRY_DISABLED": "1",
             "TURBO_TELEMETRY_DISABLED": "1",
             "DO_NOT_TRACK": "1",

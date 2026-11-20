@@ -119,8 +119,8 @@ def excluded_no_worktree_write(p, tmp):
 
 
 def tail_rules(w):
-    """Последние правила каждого окна с autoMode: Review Record и сверка согласия (metis-0161)."""
-    return [w.REVIEW_RECORD_RULE, w.CONSENT_CHECK_RULE]
+    """Последние правила каждого окна с autoMode: Review Record, пробы тестов ([den-1135-mutant]) и сверка согласия."""
+    return [w.REVIEW_RECORD_RULE, w.MUTANT_PROBE_RULE, w.CONSENT_CHECK_RULE]
 
 
 def consent_check_rule():
@@ -157,7 +157,10 @@ def consent_check_rule():
     w = load("window_rules_cc2", os.path.join(LIB, "window_rules.py"))
     check("coordinator_auto_allow(…, consent=False) (окно с доступом к личному): без Consent Check, Review Record на месте",
           w.coordinator_auto_allow(["a-org/app"], consent=False) == w.coordinator_auto_allow(["a-org/app"])[:-1]
-          and w.coordinator_auto_allow([], consent=False) == ["$defaults", w.REVIEW_RECORD_RULE])
+          and w.coordinator_auto_allow([], consent=False) == ["$defaults", w.REVIEW_RECORD_RULE, w.MUTANT_PROBE_RULE])
+    check("[den-1135-mutant] правило проб тестов: в окне координатора, только своя временная папка, без хуков и записей",
+          w.MUTANT_PROBE_RULE in w.coordinator_auto_allow([]) and w.MUTANT_PROBE_RULE not in w.consent_auto_allow()
+          and all(x in w.MUTANT_PROBE_RULE for x in ("$TMPDIR", "hooks", "owner-log", "review or test records")))
 
 
 def pack_hook_shell(w):
@@ -275,7 +278,7 @@ def main():
     allow = w.coordinator_auto_allow(["b-org/kit", "a-org/app", "bad owner", 5, "a-org/app", "-x/y"])
     check("coordinator_auto_allow: \"$defaults\" первым, слияние по owner/repo (сортировка, без дублей и мусора), "
           "Review Record и Consent Check последними",
-          allow[0] == "$defaults" and len(allow) == 5 and "(`a-org/app`, `b-org/kit`)" in allow[1]
+          allow[0] == "$defaults" and len(allow) == 6 and "(`a-org/app`, `b-org/kit`)" in allow[1]
           and "bad owner" not in allow[1] and "-x/y" not in allow[1] and allow[3:] == tail_rules(w), allow)
     for repos in ([], None, "a-org/app", ["bad owner"]):
         got = w.coordinator_auto_allow(repos)
@@ -309,7 +312,7 @@ def main():
     pm = w.coordinator_auto_allow([], ["git-remote"])
     check("coordinator_auto_allow(…, [mailkeeper-read, uv-sync]): шесть команд чтения mailkeeper и uv sync — перед "
           "Review Record, по порядку DIRECTION_RULES, без повторов",
-          mp[-4:] == [w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE] + tail_rules(w) and len(mp) == 7
+          mp[-5:] == [w.MAILKEEPER_READ_RULE, w.UV_SYNC_RULE] + tail_rules(w) and len(mp) == 8
           and all(f"`mailkeeper {c}`" in w.MAILKEEPER_READ_RULE
                   for c in ("status", "rules", "scan", "report", "plan", "logs")), mp)
     check("coordinator_auto_allow(…, [git-remote]): git remote, без правила слияния (нет репозиториев)",
@@ -359,6 +362,10 @@ def main():
                   "coordinator_auto_allow")))
         rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [],
                              auto_allow=p.coordinator_auto_allow(["a-org/app"]))
+        env = rs.get("env") or {}
+        check("[den-1135-gitenv] env окна: UV_TOOL_DIR в кэше окна, branch.autoSetupMerge=false через GIT_CONFIG_*",
+              env.get("UV_TOOL_DIR") == os.path.join(tmp, "cache", "uv-tools") and env.get("GIT_CONFIG_COUNT") == "1"
+              and env.get("GIT_CONFIG_KEY_0") == "branch.autoSetupMerge" and env.get("GIT_CONFIG_VALUE_0") == "false", env)
         check("role_settings: autoMode окна — из window_rules.auto_mode",
               rs.get("autoMode") == {"allow": w.coordinator_auto_allow(["a-org/app"])}, rs.get("autoMode"))
         rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [])

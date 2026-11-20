@@ -143,6 +143,15 @@ GIT_REMOTE_RULE = (
     "`set-url`, `rename`, `remove`, `prune`, `update`) in one of this direction's repositories is routine repository "
     "upkeep for the coordinator's task, as the project's settings allowed before. It covers only `git remote` itself: "
     "a push, a fetch from a new URL, `cd` or chained commands are judged by the built-in rules.")
+# [den-1135-mutant] (metis-1135, «А — да» владельца 20.11): мутационные пробы и тесты во временной папке задачи
+# классификатор принимал за обход надзора (~8 ложных отказов за 2 недели) — правило окна координатора и его субагентов.
+MUTANT_PROBE_RULE = (
+    "Pantheon Test Probes: In this Pantheon direction window and its subagents, running the project's tests or a "
+    "mutation probe (a script that temporarily changes a copy of the code to check that a test fails, then restores "
+    "it) is routine verification, not undermining oversight, when the script and the changed copy live in the task's "
+    "own temporary folder ($TMPDIR, a `tmp-*` folder there, or the task's own worktree) and it only runs tests. It does "
+    "not cover changing hooks, settings, `.claude/`, the owner-log, `pantheon consent`, review or test records, or "
+    "anything outside that folder and worktree; those are judged by the built-in rules.")
 DIRECTION_RULES = {"mailkeeper-read": MAILKEEPER_READ_RULE, "uv-sync": UV_SYNC_RULE, "git-remote": GIT_REMOTE_RULE}
 
 
@@ -167,7 +176,7 @@ def coordinator_auto_allow(repos, rules=None, consent=True):
     names = ", ".join(f"`{r}`" for r in ok)
     gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
     lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
-    return (["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE]
+    return (["$defaults"] + gated + lead + direction_rules(rules)[0] + [REVIEW_RECORD_RULE, MUTANT_PROBE_RULE]
             + [CONSENT_CHECK_RULE] * bool(consent))
 
 
