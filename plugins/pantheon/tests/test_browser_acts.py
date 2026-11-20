@@ -1275,5 +1275,43 @@ finger(3)
 clear_touch()
 reset_mandates()
 
+# metis-1268 (находка argus на eec5d6d2): на площадке торгов кнопка с aria-expanded или словом «документ» — не раскрытие,
+# если в надписи глагол действия; законное раскрытие там — признак И надпись раскрытия вместе
+TG = "https://torgi.gov.ru/new/public/lots/lot/1"
+FRL = "https://fedresurs.ru/bidding/0f3c"
+D.page(TG, {
+    "#tpart": dict(facts(node("button", "", label="Участвовать", ax=True)), x=89.1),
+    "#trev": dict(facts(node("button", "", label="Отозвать", ax=True)), x=89.2),
+    "#tdocs": dict(facts(node("button", "", label="Документы")), x=89.3)})
+D.page(FRL, {
+    "#freq": dict(facts(node("button", "", label="Запросить документы")), x=89.4),
+    "#freq-ax": dict(facts(node("button", "", label="Запросить документы", ax=True)), x=89.5),
+    "#flot": dict(facts(node("button", "", label="Сведения о лоте", ax=True)), x=89.6)})
+finger(0)
+for sel, url, what in (("#tpart", TG, "torgi.gov.ru: «Участвовать» с aria-expanded"),
+                       ("#trev", TG, "torgi.gov.ru: «Отозвать» с aria-expanded"),
+                       ("#tdocs", TG, "torgi.gov.ru: «Документы» без признака раскрытия (только слово)"),
+                       ("#freq", FRL, "fedresurs: «Запросить документы»"),
+                       ("#freq-ax", FRL, "fedresurs: «Запросить документы» с aria-expanded")):
+    res = act("click", sel, url)
+    check(f"[S9][metis-1268] {what} — не раскрытие: «важная форма», нажатия нет, и с пальцем",
+          res["state"] == "refused" and "важная форма" in res["why"] and not D.clicked() and not touches(), (sel, res))
+finger(3)
+res = act("click", "#flot", FRL)
+check("[S9][metis-1268] fedresurs: «Сведения о лоте» с aria-expanded — раскрытие без поручения, нажато",
+      res["state"] == "done" and "раскрытие" in res["text"] and len(D.clicked()) == 1 and not mandates(), res)
+for lab in ("Участвовать", "Отозвать", "Запросить документы", "Сформировать документ", "Архивировать документы",
+            "Подать заявку", "Сделать ставку", "Оплатить задаток"):
+    f = facts(node("button", "", label=lab, ax=True))
+    check(f"[K6][metis-1268] «{lab}» с aria-expanded вне площадки — не раскрытие (EXPAND_DENY)",
+          B.expand_click(dict(f, url="https://kad.arbitr.ru/Card/1")) is None, lab)
+check("[K6][metis-1268] «Условия доставки» — раскрытие (ставк только с начала слова)",
+      B.expand_click(dict(facts(node("button", "", label="Условия доставки", ax=True)), url=K)) is not None)
+for lab in ("Участвовать", "Отозвать"):
+    check(f"[F2][metis-1268] «{lab}» — важная надпись на любом сайте",
+          B.classify(dict(facts(node("button", "", label=lab)), url=K), "click")[0] == "important", lab)
+clear_touch()
+reset_mandates()
+
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)

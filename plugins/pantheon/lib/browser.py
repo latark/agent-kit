@@ -39,7 +39,8 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   площадки торгов (REGISTRY_HOSTS: fedresurs, torgi.gov.ru, ЭТП) — поиск только с кнопкой поиска, ссылки и раскрытие
   блоков (registry_read), любая другая форма там — важная (metis-1268). Нажатие — вид только по тегу, без интерактивных
   предков (click_kind); раскрытие блока (expand_click, metis-1268) — только по признаку: aria-expanded/aria-controls,
-  role=tab, summary или надпись EXPAND_WORDS, без формы-владельца, ссылки, label и form= в цепочке; без согласия —
+  role=tab, summary или надпись EXPAND_WORDS (на REGISTRY_HOSTS — признак и надпись вместе), без формы-владельца,
+  ссылки, label и form= в цепочке; глаголы действия (участвовать, отозвать, запросить, заявка…) — не раскрытие; без согласия —
   только обычный класс, удаляющее нажатие — как delete; прокрутка мгновенная, точка сверяется перед нажатием (point_js). Форма уходит на другой сайт или в
   другое окно (formtarget, target, <base target>), <base href> страницы другого origin — отказ.
 
@@ -980,9 +981,16 @@ SEARCH_BUTTON = re.compile(r"(?:найти|поиск|искать|search|find)(
 EXPAND_DENY = re.compile(r"сохран|опубликов|принять|приня[тл]|подтверд|согласен|согласи|\bда\b|\bок\b|\bok\b|"
                          r"\byes\b|продолж|готово|далее|дальше|добав|подписа|заказать|забронир|записать|позвон|"
                          r"написать|напишите|избранн|лайк|нрав|подел|проголос|оценить|отменить|загрузить|прикреп|"
-                         r"вступ|пригла|\bsave\b|publish|accept|confirm|agree|continue|\bnext\b|\bdone\b|\badd\b|"
+                         r"вступ|пригла|участв|отозв|запрос|сформир|архивир|в\s+архив|подат|подач|оплат|"
+                         r"(?<![а-яё])ставк|заявк|\bsave\b|publish|accept|confirm|agree|continue|\bnext\b|\bdone\b|\badd\b|"
                          r"\border\b|\bbook\b|\bcall\b|\bwrite\b|message|contact|\blike\b|favou?rite|follow|subscri|"
-                         r"share|\bvote\b|\bcancel\b|upload|\bjoin\b|invite|телефон|контакт", re.I)   # «Показать телефон» — не раскрытие
+                         r"share|\bvote\b|\bcancel\b|upload|\bjoin\b|invite|withdraw|request|\bbid\b|participat|"
+                         r"телефон|контакт", re.I)   # «Показать телефон» — не раскрытие
+# metis-1268 (находка argus на eec5d6d2): глаголы действия площадки торгов — участвовать, отозвать, запросить,
+# сформировать, архивировать, подать, подписать, оплатить, ставка, заявка — в EXPAND_DENY: раскрытие с ними нигде не
+# проходит. На REGISTRY_HOSTS раскрытие — только признак (aria-expanded/aria-controls, role=tab, summary) И надпись
+# EXPAND_WORDS или REGISTRY_TAB_WORDS одновременно
+REGISTRY_TAB_WORDS = re.compile(r"сообщени|публикац", re.I)   # вкладки fedresurs «Сообщения», «Публикации»
 EXPAND_STOP = ("a", "input", "select", "option", "textarea", "label", "form")   # их нажатие — не раскрытие
 # Раскрытие — только по разрешающему признаку (находка проверки безопасности на e894d272): у цели aria-expanded или
 # aria-controls, role=tab, тег summary, или надпись из этого списка. Пустая надпись — не раскрытие
@@ -1028,7 +1036,7 @@ IMPORTANT_WORDS = re.compile(r"""(?ix)
     \bвойти\b|\bвход\b|log\s?in\b|sign\s?in\b|авториз|регистрац|зарегистр|sign\s?up\b|парол|password
   | (?:смен|измен|привяз|отвяз|change\b|update\b)\w*\s+(?:\w+\s+)?(?:почт|e-?mail|телефон|номер|phone|парол|password)
   | договор|контракт|оферт|подписа|подпис[ьи]\b|\bэцп\b|электронн\w*\s+подпис|sign\s+(?:contract|document)
-  | заявк\w*\s+на\s+участие|подать\s+заявк|(?<![а-яё])торг|аукцион|(?<![а-яё])ставк|задат|\bbid\b
+  | заявк\w*\s+на\s+участие|подать\s+заявк|(?<![а-яё])участвова|отозва|(?<![а-яё])торг|аукцион|(?<![а-яё])ставк|задат|\bbid\b
   | перевест|перевод\w*\s+(?:денег|средств|на\s+карт|по\s+номер)|вывод\s+средств|вывести\s+(?:деньги|средства)
   | withdraw|transfer
   | удал\w*\s+(?:аккаунт|профил|учётн|учетн|кабинет)|delete\s+(?:my\s+)?account|close\s+account
@@ -1594,7 +1602,8 @@ def _expand_unsafe(a):
 def expand_click(facts):
     """Раскрытие блока, вкладки или списка без формы (metis-1268: КАД «Электронное дело», «Полная хронология») → причина
     или None. Разрешающий признак цели обязателен: aria-expanded или aria-controls, role=tab, тег summary или надпись
-    из EXPAND_WORDS; пустая надпись — нет. Ни цель, ни узел цепочки над точкой нажатия не опасен (_expand_unsafe:
+    из EXPAND_WORDS; на REGISTRY_HOSTS — признак (кроме надписи) И надпись EXPAND_WORDS или REGISTRY_TAB_WORDS вместе;
+    пустая надпись — нет. Ни цель, ни узел цепочки над точкой нажатия не опасен (_expand_unsafe:
     ссылка, поле, label, форма, form=; кнопка submit или без type — только без формы-владельца); формы у цели нет (FACTS_JS берёт и форму-владельца
     предка button/input и label.control); надпись цели и интерактивных предков без слов действия (EXPAND_DENY,
     LINK_ACT_WORDS), атрибуты — без LINK_ACT_WORDS. Поэтому раскрытие перекрывает отказ click_kind «вложен в
@@ -1613,7 +1622,12 @@ def expand_click(facts):
     text = " | ".join(labels)
     if EXPAND_DENY.search(text) or LINK_ACT_WORDS.search(text) or LINK_ACT_WORDS.search(str(n.get("attrs") or "")):
         return None
-    if not (n.get("ax") or n.get("role") == "tab" or n.get("tag") == "summary" or EXPAND_WORDS.search(label)):
+    sign = bool(n.get("ax") or n.get("role") == "tab" or n.get("tag") == "summary")
+    if _host_hit(str(facts.get("url") or ""), REGISTRY_HOSTS, NO_PREFIX):
+        # metis-1268 (находка argus на eec5d6d2): на реестре и площадке торгов — признак И надпись раскрытия
+        if not (sign and (EXPAND_WORDS.search(label) or REGISTRY_TAB_WORDS.search(label))):
+            return None
+    elif not (sign or EXPAND_WORDS.search(label)):
         return None
     return "раскрытие блока"
 
