@@ -13,7 +13,7 @@
 - конфиг репозитория читается без include (`--no-includes`), и ключи, которыми git исполняет код или уводит данные,
   — отказ: include, includeIf, url.*.insteadOf, remote.*.uploadpack|receivepack|pushurl|proxy|vcs|mirror,
   credential.*, core.hooksPath|fsmonitor|sshCommand|pager|gitProxy|askPass|alternateRefsCommand|editor|worktree,
-  protocol.*, http.*proxy, extensions.worktreeConfig;
+  protocol.*, http.* (любой), extensions.worktreeConfig;
 - remote — имя из конфига (не `.`, не путь и не адрес), его url — только github.com по https или ssh, звенья пути
   без ведущей точки (`/./`, `..`) — локальный путь и чужой хост не пройдут;
 - push: ветка назначения — `X`, `heads/X` или `refs/heads/X`, не main и не master в любом регистре, без `+`, без
@@ -53,9 +53,9 @@ PROTECTED = {"main", "master"}
 BAD_KEY = re.compile(r"(?:include|includeif)\..*|url\..*\.(?:insteadof|pushinsteadof)"
                      r"|remote\..*\.(?:uploadpack|receivepack|pushurl|proxy|vcs|mirror)|credential\..*"
                      r"|core\.(?:hookspath|fsmonitor|sshcommand|pager|gitproxy|askpass|alternaterefscommand|editor|worktree)"
-                     r"|protocol\..*|http\..*proxy.*|extensions\.worktreeconfig"
-                     r"|http\..*(?:sslverify|curloptresolve|sslcainfo|sslcapath)"
-                     r"|fetch\.bundleuri|extensions\.partialclone|remote\..*\.promisor")  # подмена адреса и TLS (argus #507)
+                     r"|protocol\..*|extensions\.worktreeconfig"
+                     r"|http\..*"   # любой http.* копии: прокси, TLS, адрес, cookie, заголовки (argus и проверка безопасности #507)
+                     r"|fetch\.bundleuri|extensions\.partialclone|remote\..*\.promisor")  # bundle и promisor: скачивание мимо сети песочницы (argus #507)
 FOREIGN_OBJECTS = ("objects/info/alternates", "objects/info/http-alternates", "info/grafts")
 USAGE = ("pantheon git push <remote> <источник>:<ветка>... | fetch [<remote> [<refspec>...]] — "
          "git мимо песочницы без хуков и конфига папки окна")

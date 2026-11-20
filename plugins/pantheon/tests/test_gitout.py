@@ -190,9 +190,11 @@ conf_case("insteadof", [("url./tmp/x.insteadOf", "https://github.com/")], "url\\
 conf_case("recvpack", [("remote.origin.receivepack", f"touch {MARK}")],
           "uploadpack|receivepack|", "remote.*.receivepack в конфиге — отказ")
 conf_case("sslverify", [("http.https://github.com/.sslVerify", "false")],
-          "|http\\..*(?:sslverify|curloptresolve|sslcainfo|sslcapath)", "http.*.sslVerify в конфиге — отказ")
+          "|http\\..*", "http.*.sslVerify в конфиге — отказ")
 conf_case("resolve", [("http.curloptResolve", "github.com:443:127.0.0.1")],
-          "|http\\..*(?:sslverify|curloptresolve|sslcainfo|sslcapath)", "http.curloptResolve в конфиге — отказ")
+          "|http\\..*", "http.curloptResolve в конфиге — отказ")
+conf_case("cookie", [("http.saveCookies", "true"), ("http.cookieFile", "/tmp/x")],
+          "|http\\..*", "http.saveCookies/cookieFile в конфиге — отказ")
 conf_case("bundle", [("fetch.bundleURI", "https://example.com/x.bundle")],
           "|fetch\\.bundleuri|extensions\\.partialclone|remote\\..*\\.promisor", "fetch.bundleURI в конфиге — отказ")
 
