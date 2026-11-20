@@ -176,6 +176,7 @@ sys.exit(0)
 
 def test_phrase_merge_does_not_restart():
     b = restart_box()
+    b.view(SHA, files=NONCORE)   # фраза сливает только PR вне ядра (metis-1026); PR ядра — только Touch ID
     ask(b, "--restart", WIN)
     say(b, f"слей #{PR} {SHA[:7]}", T0 + 60)
     r = b.run(t=T0 + 120, extra=dict(run_env(b), **AWAY))
