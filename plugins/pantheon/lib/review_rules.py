@@ -166,12 +166,17 @@ def _id_list(text, pos, first):
 def closing_ids(branch, body):
     """Номера задач, которые PR закрывает: id в имени ветки или «Closes/Fixes <id>» в теле, со списком после него
     («Closes metis-0522, metis-0534 и 0535» — все три, metis-0583). Простое упоминание («См. также», «зависит от»,
-    «часть») — нет."""
+    «часть») — нет.
+    Ветка пачки `batch/<story-id>` (metis-1232): id в ней — это story, а не задача PR. Её пунктов «Готово, когда» PR
+    пачки выполнить не может, и закрывать её при слиянии нельзя (batch.py: статус story идёт по составу), поэтому из
+    имени такой ветки номер не берётся; задачи пачки — только по Closes в теле (их кладёт `pantheon batch pr`)."""
     body = body or ""
     ids = []
     for m in CLOSE_RE.finditer(body):
         if not NEG_BEFORE_RE.search(body[:m.start()]):
             ids += [m.group(1)] + _id_list(body, m.end(1), m.group(1))
+    if (branch or "").startswith("batch/"):
+        return find_ids(*ids)
     return find_ids(branch, *ids)
 
 

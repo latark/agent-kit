@@ -15,6 +15,11 @@
     version = ""                   # `codex --version` последней проверки
     checked = ""                   # когда проверяли
 
+    [codex.models]                 # вид задачи → «модель effort» (metis-1272); нет записи — умолчания executors.py
+    mechanics = "gpt-6.2-sol low"
+    code = "gpt-6.2-sol medium"
+    hard = "gpt-6.2-astra high"
+
 Пути — от STATE (env PANTHEON_STATE), как в pantheon.py: тесты подменяют его временной папкой.
 """
 import contextlib
@@ -68,8 +73,13 @@ def dumps(data):
              [k for k, v in data.items() if isinstance(v, dict) and k not in ORDER]
     for t in tables:
         out.append(f"[{t}]")
-        out += [f"{k} = {_val(v)}" for k, v in data[t].items() if v is not None]
+        out += [f"{k} = {_val(v)}" for k, v in data[t].items() if v is not None and not isinstance(v, dict)]
         out.append("")
+        for sub, sv in data[t].items():  # вложенная таблица [codex.models]: без неё update() портил её в строку
+            if isinstance(sv, dict):
+                out.append(f"[{t}.{sub}]")
+                out += [f"{k} = {_val(v)}" for k, v in sv.items() if v is not None]
+                out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
 
 

@@ -198,7 +198,20 @@ SHA = hashlib.sha256(json.dumps(EV["tool_input"], sort_keys=True, ensure_ascii=F
 check("заявка привязана к sha256 точного tool_input: поле sha256 и «(проверка <12 hex>)» в вопросе",
       req and req.get("sha256") == SHA and req["question"].endswith(f"(проверка {SHA[:12]})")
       and req.get("exact") is True, req)
+check("вопрос владельцу (metis-0874 п. 1): команда, «Зачем» с описанием вызова и «Совет», одним полем «Совет:»",
+      req and 'Зачем: "Собрать бинарь". Совет: разрешить, если' in req["question"]
+      and req["question"].count("Совет:") == 1, req)
 check("ответ «Разрешить» в окне вопросов Зевса → allow этого вызова, без updatedInput и правил", allowed(r), r[:4])
+r_dev = scenario(None, ev=dict(EV, tool_input={"command": "pnpm dev --port 3000"}))
+check("команда с исполнителем (сервер с портом) — совет отказать и передать outside",
+      r_dev[3] and "Совет: отказать — это делает outside" in r_dev[3]["question"], r_dev[3])
+r_sub = scenario(None, ev=dict(EV, agent_id="a1b2", agent_type="dev-opus"))
+check("субагент (metis-1183): заявка хранит agent_id, в вопросе — «(субагент dev-opus)»", r_sub[3]
+      and r_sub[3].get("agent_id") == "a1b2" and "Окно metis-pantheon (субагент dev-opus) просит" in r_sub[3]["question"],
+      r_sub[3])
+r_bad = scenario(None, ev=dict(EV, agent_id="../x"))
+check("agent_id не по образцу — не хранится (из него строится путь журнала)", r_bad[3] and r_bad[3].get("agent_id") == "",
+      r_bad[3])
 check("allow пришёл сразу, а не по тайм-ауту", 0 <= waited(r) < float(WAIT) - 0.5, st)
 done = json.load(open(os.path.join(env["PANTHEON_STATE"], "perm", req["id"] + ".json"))) if req else {}
 check("заявка закрыта: status allow, relayed", done.get("status") == "allow" and done.get("relayed") is True, done)
@@ -714,6 +727,11 @@ MUTANTS = (
      "$'…' рядом с русскими буквами", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT[
          "$'…' рядом с русскими буквами"]))),
     ("if sid0 and os.path.lexists(", "if False and os.path.lexists(", "флаг tg-taint", taint_silent),
+    ('"agent_id": aid if AID.fullmatch(aid) else ""', '"agent_id": aid',
+     "agent_id не по образцу", lambda m: scenario(None, run_py=m, ev=dict(EV, agent_id="../x"))[3].get("agent_id") == ""),
+    ("    if key != \"ask\":\n        return f\"отказать", "    if False:\n        return f\"отказать",
+     "совет по маршруту", lambda m: "Совет: отказать — это делает outside" in scenario(None, run_py=m, ev=dict(
+         EV, tool_input={"command": "pnpm dev --port 3000"}))[3]["question"]),
     ("_text(cmd, len(cmd)) == cmd", "True",
      "секрет скрыт в показе", lambda m: not_exact(scenario(win(), run_py=m, ev=NOT_EXACT["секрет скрыт в показе"]))),
     ('v = CTRL.sub(" ", str(v or ""))', 'v = str(v or "")',
