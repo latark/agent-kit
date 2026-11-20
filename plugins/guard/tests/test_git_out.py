@@ -152,6 +152,7 @@ def main():
         else:
             os.environ["PANTHEON_ROLE"] = saved
         shutil.rmtree(root, ignore_errors=True)
+    print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if results and all(results) else 1
 
 

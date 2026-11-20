@@ -506,7 +506,7 @@ def _delta_round(M, repo, head, base_name, verdicts):
     why = "первый круг" if prev is None else None
     rows = ren = None
     if prev and _review_git("merge-base", "--is-ancestor", prev, head) is None:
-        why = (f"прошлый head {prev[:12]} не предок {head[:12]} (rebase или его нет в git папки — git fetch): дельту не "
+        why = (f"прошлый head {prev[:12]} не предок {head[:12]} (rebase или его нет в git папки — pantheon git fetch): дельту не "
                "посчитать")
     elif prev:
         ren = _review_git("diff", "-z", "--name-only", "--diff-filter=R", "-M", "--no-relative",

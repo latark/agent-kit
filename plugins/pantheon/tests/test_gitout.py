@@ -173,12 +173,12 @@ def conf_case(name, entries, bad_part, label):
     both(label, refused(p, "push", "origin", "HEAD:feat"), ECHO, mlib(ECHO, [(bad_part, "")]))
 
 
-conf_case("fsm", [("core.fsmonitor", f"touch {MARK}")], "fsmonitor|", "2 core.fsmonitor в конфиге — отказ")
+conf_case("fsm", [("core.fsmonitor", f"touch {MARK}")], "|fsmonitor|sshcommand", "2 core.fsmonitor в конфиге — отказ")
 flag_case("core.fsmonitor=false", [('"-c", "core.fsmonitor=false", ', "")])
 conf_case("sshc", [("core.sshCommand", f"touch {MARK}")], "sshcommand|", "3 core.sshCommand в конфиге — отказ")
 flag_case("core.sshCommand=ssh", [('"-c", "core.sshCommand=ssh", ', "")])
 conf_case("hpath", [("core.hooksPath", ".husky")], "hookspath|", "4 core.hooksPath в конфиге — отказ")
-conf_case("pager", [("core.pager", f"touch {MARK}")], "|pager", "5 core.pager в конфиге — отказ")
+conf_case("pager", [("core.pager", f"touch {MARK}")], "|pager|gitproxy", "5 core.pager в конфиге — отказ")
 flag_case("core.pager=cat", [('"-c", "core.pager=cat", ', "")])
 conf_case("incif", [("includeIf.gitdir:/.path", os.path.join(ROOT, "evil.cfg"))], "(?:include|includeif)\\..*|",
           "8 includeIf в конфиге — отказ")
@@ -188,7 +188,7 @@ conf_case("cred", [("credential.helper", f"!touch {MARK}")], "|credential\\..*",
 conf_case("insteadof", [("url./tmp/x.insteadOf", "https://github.com/")], "url\\..*\\.(?:insteadof|pushinsteadof)",
           "url.*.insteadOf в конфиге — отказ")
 conf_case("recvpack", [("remote.origin.receivepack", f"touch {MARK}")],
-          "uploadpack|receivepack|", "remote.*.receivepack в конфиге — отказ")
+          "(?:uploadpack|receivepack|", "remote.*.receivepack в конфиге — отказ")
 conf_case("sslverify", [("http.https://github.com/.sslVerify", "false")],
           "|http\\..*", "http.*.sslVerify в конфиге — отказ")
 conf_case("resolve", [("http.curloptResolve", "github.com:443:127.0.0.1")],
@@ -304,7 +304,23 @@ def env_case(lib):
 
 
 both("GIT_CONFIG_GLOBAL окна (receivepack) не доходит до git", env_case, EXEC,
-     mlib(EXEC, [('if not k.startswith("GIT_") and k not in ENV_DROP', "if k not in ENV_DROP")]))
+     mlib(EXEC, [('if (not k.startswith("GIT_") or k in ENV_KEEP) and k not in ENV_DROP', "if k not in ENV_DROP")]))
+
+
+def author_case(lib):
+    r = cli(hooked, "push", "origin", "HEAD:envy", lib=lib,
+            extra={"GIT_AUTHOR_NAME": "an", "GIT_COMMITTER_EMAIL": "ce@t", "GIT_AUTHOR_DATE": "2026-11-03T12:00:00",
+                   "GIT_DIR": "/tmp/evil", "GIT_CONFIG_COUNT": "1", "GIT_SSH_COMMAND": "touch x"})
+    if r.returncode:
+        return False
+    env = json.loads(r.stdout.strip().splitlines()[-1])["env"]
+    return (env.get("GIT_AUTHOR_NAME") == "an" and env.get("GIT_COMMITTER_EMAIL") == "ce@t"
+            and env.get("GIT_AUTHOR_DATE") == "2026-11-03T12:00:00"
+            and not any(k in env for k in ("GIT_DIR", "GIT_CONFIG_COUNT", "GIT_SSH_COMMAND")))
+
+
+both("GIT_AUTHOR_*/GIT_COMMITTER_* доходят до git, GIT_DIR/GIT_CONFIG_*/GIT_SSH_* — нет (board_lock)", author_case, ECHO,
+     mlib(ECHO, [('(not k.startswith("GIT_") or k in ENV_KEEP) and k not in ENV_DROP', 'not k.startswith("GIT_") and k not in ENV_DROP')]))
 r = cli(base, "push", "origin", "HEAD:feat", extra={"PANTHEON_WINDOW": "athena-y"})
 check("окно athena-y, репозиторий themis-x — отказ 2", r.returncode == 2 and "направления" in r.stderr, r.stderr)
 r = cli(base, "push", "origin", "HEAD:feat", lib=mlib(ECHO, [("        P.wt_own(repo)\n", "")]),

@@ -1551,12 +1551,12 @@ def overlap_text(tid, head, cross_tasks, cross_prs, notes=()):
         n, repo, br = pr.get("number"), pr.get("repo") or "<репозиторий>", pr.get("branch") or "<ветка PR>"
         lines += [f"  А — очередь: ждать слияния PR #{n}, затем начать от свежего main.",
                   f"      gh pr view {n} -R {repo} --json state,mergedAt",
-                  "      git fetch origin && git switch -c " + tid + " origin/main"]
+                  "      pantheon git fetch origin && git switch -c " + tid + " origin/main"]
         closes = [i for i in pr.get("closes") or [] if i != tid]
         if closes:
             lines.append(f"      пока ждёт: pantheon task set {tid} status=todo depends_on={dep(closes[0])}")
         lines += [f"  Б — ветка от ветки (stacked PR): начать от ветки PR #{n}, свой PR — с базой его ветки.",
-                  f"      git fetch origin && git switch -c {tid} origin/{br}",
+                  f"      pantheon git fetch origin && git switch -c {tid} origin/{br}",
                   f"      gh pr create -R {repo} --base {br} --title … --body-file …",
                   f"      argus — только дельта своего PR: git diff origin/{br}...HEAD",
                   f"      после слияния #{n} (--merge): gh pr edit <свой N> -R {repo} --base main — head тот же, записи "

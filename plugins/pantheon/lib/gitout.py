@@ -22,7 +22,7 @@
   обновляет ветки и при явном refspec); флагов нет, --update-head-ok в том числе;
 - git зовётся с --no-replace-objects, -c core.hooksPath=/dev/null, core.fsmonitor=false, core.sshCommand=ssh,
   core.pager=cat, protocol.allow=never (кроме https и ssh), --no-recurse-submodules, у push --no-verify; окружение —
-  без GIT_*, XDG_CONFIG_HOME, PAGER и SSH_ASKPASS, с фиксированным PATH, GIT_CONFIG_NOSYSTEM=1,
+  без GIT_* (кроме GIT_AUTHOR_*/GIT_COMMITTER_* NAME, EMAIL, DATE), XDG_CONFIG_HOME, PAGER и SSH_ASKPASS, с фиксированным PATH, GIT_CONFIG_NOSYSTEM=1,
   GIT_NO_REPLACE_OBJECTS=1 и GIT_TERMINAL_PROMPT=0. Глобальный ~/.gitconfig читается (вход gh для github.com).
 
 git_hard — тот же git без хуков для ~/ai/pantheon (P.git: archive.py commit, pull и push идут мимо песочницы из
@@ -43,6 +43,8 @@ __all__ = ["git_cmd", "git_hard"]
 GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 HARD = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.sshCommand=ssh", "-c", "core.pager=cat", "-c", "submodule.recurse=false"]
 NET = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always"]
+ENV_KEEP = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+            "GIT_COMMITTER_DATE")  # автор и время коммита: кода не исполняют (metis-0972, test_board_lock)
 ENV_DROP = ("XDG_CONFIG_HOME", "PAGER", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE")
 NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"
 SEG = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}"
@@ -66,7 +68,7 @@ class Refuse(Exception):
 
 
 def _env(system=False):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k not in ENV_DROP}
+    env = {k: v for k, v in os.environ.items() if (not k.startswith("GIT_") or k in ENV_KEEP) and k not in ENV_DROP}
     env.update(PATH=GIT_PATH, GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
     if not system:
         env["GIT_CONFIG_NOSYSTEM"] = "1"
