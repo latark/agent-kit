@@ -1399,7 +1399,7 @@ Touch ID, снять её — `pantheon merge cancel`. Тревога о сня�
 - Вторая запись `tests` — от планового прохода Пантеона (`pantheon outside test` и тесты после «принять» argus,
   `plugins/pantheon/lib/outside.py`, [sb-simplify] п. 7), `by.agent_type` = `pantheon-outside`. Её пишет только
   проход вне окон: роли STATE закрыт, а команде под его профилем `sandbox-exec` — тоже. Запись есть только у проверки
-  проекта (`.pantheon-verify`, иначе test/check package.json, иначе pytest), с `--script` (в монорепо `--app ИМЯ` — скрипт приложения, metis-1293) и у dev-сервера её нет; команда
+  проекта (`.pantheon-verify`, иначе test/check package.json, иначе pytest), с `--script` и у dev-сервера её нет; команда
   видна в поле `cmd` — у скрипта package.json с телом, у строки `.pantheon-verify` из файла ветки — с пометкой.
   Берётся первая некомментарная строка `.pantheon-verify` (полный набор); строка `dev: <команда>` (metis-0653) —
   узкая проверка исполнителя для Stop-хука pantheon, ни проход вне окна, ни запись шлюза её не читают.
