@@ -376,5 +376,5 @@ def hq_case(lib):
 both("14 archive commit: коммит, pull и push прошли, хуки и fsmonitor не исполнились", hq_case, LIB,
      mlib(LIB, [('f"--work-tree={repo}", *HARD, *args]', 'f"--work-tree={repo}", *args]')]))
 
-print(f"\n{sum(results)}/{len(results)} прошли")
+print(f"\n{sum(results)}/{len(results)} прошли", flush=True)  # os._exit не сбрасывает буфер stdout
 os._exit(0 if all(results) else 1)
