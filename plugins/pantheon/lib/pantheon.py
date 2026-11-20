@@ -92,7 +92,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
   pantheon secret put <направление> <ИМЯ> [--app ИМЯ] | list <направление>   ключ проекта скрытым вводом в
                                         терминале владельца (lib/outside_secret.py, metis-1135); его получат
-                                        outside serve и login вне окна роли, в выводе только имя
+                                        outside serve и login вне окна роли, в выводе только имя; ask … --task ID —
+                                        заявка из окна: владелец вводит ключ в окне Touch ID со скрытым полем
   pantheon browser health|open|read|eval|allow|click|type|submit|delete|status|run   браузер владельца для роли
                                         charon без пароля и порта (lib/browser.py, metis-0760, 0765): заявка из окна →
                                         проход вне окна; чтение — сайты reads.toml; действия — по поручению (allow),
@@ -7115,7 +7116,8 @@ def owner_edit_kick():
     lib/config_edit.py) — отдельным процессом: окно Touch ID ждёт пальца до двух минут, тик не ждёт. Без заявок — нет.
     Тем же путём — заметки окон ролей в карточки чужих направлений (`pantheon task run`, lib/tasknote.py, metis-1187)."""
     for cmd, pending in (("owner-edit", lambda: owner_edit_mod().pending()),
-                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending)):
+                         ("config", lambda: config_edit_mod().pending()), ("task", task_note_pending),
+                         ("secret", lambda: outside_mod().sub_mod("secret").pending())):   # ввод ключа (1135)
         run = {"config": "config-edit", "task": "task-note"}.get(cmd, cmd)
         try:
             if locked(f"{run}-run") or not pending():
