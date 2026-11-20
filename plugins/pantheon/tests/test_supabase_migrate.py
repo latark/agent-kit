@@ -739,7 +739,7 @@ REC_DENY = [REC[n] + "/.git/config" for n in "abc"]  # d — не закрепл
 REC_STATE = os.path.join(ROOT, "state-rec")
 REC_OUT = RM.record_origins(REC_STATE, "w-r", [TOP], REC_DENY, ["t/r4"])
 check("record_origins: закреплён только a (github из merge_repos, .git/config в denyWrite), список в STATE",
-      REC_OUT == {REC["a"]: "https://github.com/T/R4.git"}
+      REC_OUT == {REC["a"]: "https://github.com/t/r4.git"}  # канонический адрес, не записанная строка (круг 5)
       and json.load(open(os.path.join(REC_STATE, "repo-origins", "w-r.json"), encoding="utf-8"))["repos"] == REC_OUT,
       REC_OUT)
 
@@ -912,12 +912,12 @@ M38 = mutant("    except (OSError, ValueError, AttributeError) as e:\n        ra
              "        raise Refused(f\"список")
 check("мутант (списка нет — origin config) — окно без списка проходит — тест это видит",
       call(["migrate", p(MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-z"}, cwd=REPO, mod=M38)[0] == 0)
-M39 = mutant("    return url\n\n\ndef own_repo", '    return _config_origin(gitdir, repo)\n\n\ndef own_repo')
+M39 = mutant("    return canon\n\n\ndef own_repo", '    return _config_origin(gitdir, repo)\n\n\ndef own_repo')
 git(R4, "remote", "set-url", "origin", EVIL)
 check("мутант (ls-remote и fetch по remote из config, не по закреплённому) пропускает LOCAL с origin evil — тест это "
       "видит", call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B, mod=M39)[0] == 0
       and call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B)[0] == 1)
-M40 = mutant("    if not remote_ok(url):\n        raise Refused(f\"закреплённый", "    if False:\n        raise Refused(f\"закреплённый")
+M40 = mutant("    canon = github_url(url)  #", "    canon = url  #")  # сырой закреплённый адрес вместо канонического
 pins("w-b", {R4: EVIL, NESTED: PIN_URL})
 check("мутант (локальный закреплённый адрес принят) пропускает LOCAL из evil — тест это видит",
       call(["migrate", os.path.join(R4, LOCAL), "--dry-run"], W_B, mod=M40)[0] == 0)

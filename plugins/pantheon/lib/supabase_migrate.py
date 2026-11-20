@@ -10,8 +10,11 @@ metis-1295):
      STATE) репозиторий — только своего направления и не вложенный в другой репозиторий до папки направления.
      Адрес origin в окне — не из .git/config окна, а из STATE/repo-origins/<окно>.json: его пишет сборка окна
      (record_origins из sandbox_build) — репозитории папок направления и их подпапок первого уровня с
-     <папка>/.git/config литералом в denyWrite и origin из [merge_repos] направления. Репозитория нет в списке, списка
-     нет или адрес локальный (путь, file://) — отказ. Вне окна (команду зовёт владелец) — remote.origin.url
+     <папка>/.git/config литералом в denyWrite и origin из [merge_repos] направления. В список и в git идёт не
+     записанный окном адрес, а канонический, собранный из owner/name (github_url): https://github.com/<o>/<n>.git
+     или git@github.com:<o>/<n>.git; имя пользователя, owner и name — только [A-Za-z0-9._-], без «..» («?@», «#@»,
+     «\\@», «%40», пробел, второй «@» — не GitHub; круг 5 argus #521). Репозитория нет в списке, списка нет или
+     адрес не такой (путь, file://, другой хост) — отказ. Вне окна (команду зовёт владелец) — remote.origin.url
      репозитория: сетевой адрес или абсолютный путь;
   2. git окна в сверке не участвует (класс обходов metis-1295, решение владельца 21.11 metis-1295-class): ни его
      .git/config (remote.<адрес>.url, url.*.insteadOf, http.proxy, http.sslVerify, http.sslCAInfo,
@@ -298,14 +301,31 @@ def remote_ok(url):
     return bool(re.fullmatch(r"[A-Za-z0-9._@-]+:[^/].*", url))
 
 
-GITHUB = re.compile(r"(?:https://(?:[^@/]+@)?github\.com/|ssh://(?:[^@/]+@)?github\.com(?::\d+)?/"
-                    r"|(?:[^@/:]+@)?github\.com:/?)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?")
+# Адрес GitHub: хост ровно github.com, имя пользователя (если есть) и owner/name — только [A-Za-z0-9._-]. Знаки
+# «?», «#», «\», «%», пробел и второй «@» в имени пользователя не проходят: с ними git видит другой хост, чем этот
+# разбор (https://evil?@github.com/… — git идёт на evil, возврат argus #521, круг 5).
+_PART = r"[A-Za-z0-9._-]+"
+GITHUB = re.compile(rf"(?:https://(?:{_PART}@)?github\.com/|ssh://(?:{_PART}@)?github\.com(?::\d+)?/"
+                    rf"|(?:{_PART}@)?github\.com:/?)({_PART})/({_PART}?)(?:\.git)?/?")
 
 
 def github_repo(url):
-    """«владелец/имя» репозитория GitHub в нижнем регистре по адресу origin, "" — адрес не GitHub."""
+    """«владелец/имя» репозитория GitHub в нижнем регистре по адресу origin, "" — адрес не GitHub (или «.»/«..»
+    в owner или name)."""
     m = GITHUB.fullmatch(url) if remote_ok(url) else None
-    return f"{m.group(1)}/{m.group(2)}".lower() if m else ""
+    if not m or any(".." in g or g == "." for g in m.groups()):
+        return ""
+    return f"{m.group(1)}/{m.group(2)}".lower()
+
+
+def github_url(url):
+    """Канонический адрес репозитория GitHub, собранный из owner/name (github_repo), а не сырой адрес origin:
+    https://github.com/<owner>/<name>.git для https, git@github.com:<owner>/<name>.git для ssh и scp-вида.
+    "" — адрес не GitHub. Только он идёт в git окна (record_origins, pinned_remote; metis-1295, круг 5 argus #521)."""
+    repo = github_repo(url)
+    if not repo:
+        return ""
+    return f"https://github.com/{repo}.git" if url.startswith("https://") else f"git@github.com:{repo}.git"
 
 
 ORIGINS = "repo-origins"  # STATE/repo-origins/<окно>.json — закреплённые репозитории окна и их origin
@@ -331,7 +351,7 @@ def record_origins(state, name, folders, deny_write, repos):
             r = _git(dotgit, "config", "--file", os.path.join(dotgit, "config"), "--get", "remote.origin.url")
             url = r.stdout.strip() if r.returncode == 0 else ""
             if github_repo(url) and github_repo(url) in want:
-                out[d] = url
+                out[d] = github_url(url)  # канонический, сырой адрес окна в список не идёт
     path = os.path.join(state, ORIGINS, name + ".json")
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     with open(path + ".tmp", "w", encoding="utf-8") as fh:
@@ -355,8 +375,9 @@ def _config_origin(gitdir, repo):
 def pinned_remote(state, repo, gitdir=None):
     """Адрес, с которым сверяется ветка по умолчанию. Вне окна — remote.origin.url репозитория (_config_origin через
     свой bare gitdir). В окне — только закреплённый при сборке окна (record_origins): .git/config окна не источник
-    доверия — свой git init или bare-репозиторий, переименованный в .git, задал бы origin окна. Refused — списка нет,
-    репозитория в нём нет или адрес локальный."""
+    доверия — свой git init или bare-репозиторий, переименованный в .git, задал бы origin окна. Из записи — только
+    канонический адрес github_url, сырая строка в git не идёт. Refused — списка нет, репозитория в нём нет или адрес
+    не GitHub (локальный, другой хост)."""
     win = os.environ.get("PANTHEON_WINDOW") or ""
     if not win or not state:
         if not gitdir:
@@ -374,9 +395,11 @@ def pinned_remote(state, repo, gitdir=None):
         raise Refused(f"{repo} нет в списке закреплённых репозиториев окна {win} ({path}): новый или не из "
                       "[merge_repos] направления — его origin задало бы окно; миграция только из репозитория, "
                       "закреплённого при сборке окна (pantheon domains build)")
-    if not remote_ok(url):
-        raise Refused(f"закреплённый origin {repo} — локальный путь или file:// ({url[:80]}) — сверять не с чем")
-    return url
+    canon = github_url(url)  # в git — только адрес, собранный из owner/name, а не записанная строка
+    if not canon:
+        raise Refused(f"закреплённый origin {repo} — локальный путь, file:// или не адрес github.com/<владелец>/<имя> "
+                      f"({url[:80]!r}) — сверять не с чем")
+    return canon
 
 
 def own_repo(state, repo):
