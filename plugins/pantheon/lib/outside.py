@@ -356,7 +356,8 @@ _SUBS = {}
 
 def sub_mod(name):
     """lib/outside_<name>.py: login — вход тестовой учётной записью без показа пароля роли (metis-1134), auth — ссылка
-    входа MCP из окна роли в браузер владельца (metis-1127). Грузит только pantheon.outside_mod (не в sys.modules)."""
+    входа MCP из окна роли в браузер владельца (metis-1127), secret — ключ проекта направления скрытым вводом владельца
+    (`pantheon secret put`, metis-1135). Грузит только pantheon.outside_mod (не в sys.modules)."""
     if name not in _SUBS:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -4441,7 +4442,7 @@ def main(rest):
         return cmd_request(sub, rest[1:])
     if sub == "status":
         return cmd_status(rest[1:])
-    if sub in ("login", "auth"):
+    if sub in ("login", "auth", "secret"):
         return getattr(sub_mod(sub), "cmd_" + sub)(rest[1:])
     if sub == "stop":
         return cmd_stop(rest[1:])

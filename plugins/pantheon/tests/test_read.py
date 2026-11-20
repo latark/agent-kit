@@ -440,8 +440,11 @@ def test_request_ok():
           (q or "").startswith(f"[read-{rid}] Разрешить выгрузку: чатов 1 — {CHAT} 10 сообщ.; "
                                "всего 10 сообщ.; 2026-10-18 — 2026-10-18, без вложений")
           and re.search(rf", названия чатов — файл \S+/read/{rid}/list\.md, хеш [0-9a-f]{{12}}$", q), q)
-    check("request: в карточке Зевса нет пути к list.md вне вопроса и просьбы его открыть",
-          b.zeus_cards().count("list.md") == 1 and "открывает" not in b.zeus_cards(), b.zeus_cards())
+    check("request: в карточке Зевса путь к list.md только в двух вопросах (короткий и полный), просьбы открыть нет",
+          b.zeus_cards().count("list.md") == 2 and "открывает" not in b.zeus_cards(), b.zeus_cards())
+    check("request: в карточке короткий вопрос [read-rid] без хеша — «да» на него проход сверит сам (metis-1135)",
+          f"[read-{rid}] Разрешить выгрузку 1 чат(ов) за 2026-10-18 — 2026-10-18 для demo-dir, без вложений?"
+          in b.zeus_cards() and "Хеш и id чатов повторять не нужно" in b.zeus_cards(), b.zeus_cards())
     lp = os.path.join(d, "list.md")
     names = b.names(rid)
     check("request: названия — в list.md 0600 с шапкой выгрузки, между метками",
@@ -495,6 +498,59 @@ def test_foreign_hash():
     b2.answer(T0 + 60, q2.replace(CHAT, "-1009999999"), "Да")
     b2.run(T0 + 120)
     check("другой чат в вопросе: выгрузки нет", not b2.exports())
+
+
+def test_short_question_yes():
+    """«Да» на короткий вопрос «[read-<rid>] …» без хеша — выгрузка: хеш проход сверяет по своему вопросу из state
+    (metis-1135, hermes-0069). Метка варианта «А — Да» снимается."""
+    b, rid, q = test_request_ok()
+    b.answer(T0 + 60, f"[read-{rid}] Разрешить выгрузку переписки для demo-dir?", "А — Да, выгрузить")
+    r = b.run(T0 + 120)
+    check("короткий вопрос, «А — Да»: выгрузка идёт", len(b.exports()) == 1, r.stdout + r.stderr)
+
+
+def test_short_question_multiline_and_batch():
+    """Вопрос на несколько строк и несколько заявок одним вопросом «[read-a] [read-b] …» — ответ идёт каждой."""
+    b, rid, q = test_request_ok()
+    r2, rid2, q2 = b.request(specs=(("--chat", VERA),))
+    b.answer(T0 + 60, f"[read-{rid}] [read-{rid2}] Разрешить выгрузку двух заявок?\nПервая — demo-dir,\nвторая — тоже",
+             "Да")
+    r = b.run(T0 + 120)
+    check("две заявки одним вопросом на несколько строк: выгружены обе", len(b.exports()) == 2, r.stdout + r.stderr)
+
+
+def test_short_question_guards():
+    """Короткий вопрос не годится: ответ раньше вопроса прохода; заявка или список чатов изменились после вопроса;
+    в коротком вопросе назван чужой хеш; «Нет» после «Да» — решает последний."""
+    b, rid, q = test_request_ok()
+    b.answer(T0 + 5, f"[read-{rid}] Разрешить выгрузку?", "Да")      # заявка T0, вопрос прохода — T0+10
+    b.run(T0 + 120)
+    check("короткий «да» раньше вопроса прохода: выгрузки нет", not b.exports())
+    b2, rid2, q2 = test_request_ok()
+    b2.answer(T0 + 60, f"[read-{rid2}] Разрешить выгрузку? хеш 000000000000", "Да")
+    b2.run(T0 + 120)
+    check("короткий вопрос с чужим хешем: выгрузки нет", not b2.exports())
+    b3, rid3, q3 = test_request_ok()
+    b3.answer(T0 + 60, f"[read-{rid3}] Разрешить выгрузку?", "Да")
+    p = os.path.join(b3.folder(rid3), "chats.json")
+    chats = json.load(open(p))
+    chats.append(dict(chats[0], id=VERA))
+    os.chmod(p, 0o600)
+    with open(p, "w") as fh:
+        json.dump(chats, fh)
+    b3.run(T0 + 120)
+    check("список чатов изменён после вопроса: короткий «да» не в счёт, выгрузки нет", not b3.exports())
+    b4, rid4, q4 = test_request_ok()
+    b4.answer(T0 + 60, f"[read-{rid4}] Разрешить выгрузку?", "Да")
+    b4.answer(T0 + 70, f"[read-{rid4}] Разрешить выгрузку?", "Б — Нет")
+    r = b4.run(T0 + 120)
+    check("короткий вопрос: «Б — Нет» после «Да» — выгрузки нет, заявка удалена",
+          not b4.exports() and not os.path.exists(b4.folder(rid4)), r.stdout + r.stderr)
+    b5, rid5, q5 = test_request_ok()
+    b5.answer(T0 + 60, f"[read-{rid5}x] Разрешить выгрузку?", "Да")
+    b5.answer(T0 + 60, f"Про [read-{rid5}] Разрешить выгрузку?", "Да")   # номер не в начале
+    b5.run(T0 + 120)
+    check("короткий вопрос: чужой номер и номер не в начале — выгрузки нет", not b5.exports())
 
 
 def test_answer_before_request():

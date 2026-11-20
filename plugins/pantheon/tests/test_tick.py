@@ -714,8 +714,13 @@ def main():
                                                       "--match-head-commit", "checklist", "plugins/guard/",
                                                       "plugins/pantheon/roles/", "window_rules.py", "owner to merge them himself", "`--admin`, `--auto`", "`gh api`",
                                                       "still judged by Merge Without Review")))
-    check("штаб и мастерская: autoMode в окне нет — классификатор у них со встроенными правилами (metis-0098)",
-          "autoMode" not in hq and "autoMode" not in sw)
+    # metis-1135 п. 1 ([auto-1135-consent] «А+Б — везде»): штабу, мастерской и Гестии — "$defaults" и только сверка
+    # согласия; правил слияния, сдачи лида и записи проверок у них нет (metis-0098)
+    hs = load("hestia")
+    check("штаб, мастерская и Гестия: autoMode.allow — \"$defaults\" и Consent Check, ничего больше (metis-1135 п. 1)",
+          len(consent) == 1 and all((w.get("autoMode") or {}).get("allow") == ["$defaults"] + consent
+                                    for w in (hq, sw, hs)),
+          {n: (w.get("autoMode") or {}).get("allow", [])[:1] for n, w in (("hq", hq), ("workshop", sw), ("hestia", hs))})
     mem_a = real(".claude/agent-memory/argus")
     wins = (sa, sm, sw, hq)
     check("память субагентов в песочнице всех окон: роль с memory: настоящим путём, папка создана (metis-0051)",
