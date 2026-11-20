@@ -35,6 +35,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         и записи projects в ~/.claude.json под новый ключ; переносы: agent-kit,
                                         workshop, finances. Без --dry-run — только когда старой папки уже нет
   pantheon check --moved                старые пути перенесённых папок в живых файлах — предупреждение
+  pantheon layout                       карта «что где» и папки вне неё (lib/layout.py, metis-0899)
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
                                         (200 строк / 25 КБ), CLAUDE.md с импортами длиннее 200 строк
   pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
@@ -6664,7 +6665,10 @@ def direction_check(name):
         res.append((True, "запланировано (planned = true в directions.toml): папок ещё нет, остальные проверки "
                     "пропущены до заведения"))
         return res
-    add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
+    add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac: "
+        + (", ".join(tilde(f) for f in folders) or "folders пуст"))
+    off = [f for f in d.get("folders") or [] if not layout_folder_ok(f)]
+    add(not off, "папки по карте «что где» (pantheon layout)" + (": вне карты " + ", ".join(off) if off else ""))
     launch = launch_folder(d.get("folders"))
     home_dir = os.path.join(PANTHEON, "directions", name)
     add(all(os.path.exists(os.path.join(home_dir, x)) for x in ("STATUS.md", "inbox", "tasks")),
@@ -9121,6 +9125,7 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         check_moved(quiet)   # предупреждение, на код выхода check не влияет
+        check_layout(quiet)  # папка вне карты «что где» — предупреждение (metis-0899)
         check_private_cover(quiet)  # личная папка вне [private] paths — предупреждение (metis-0894)
         coord_errs = check_coordinators(quiet)
         coord_errs += check_task_projects(T, quiet)
@@ -9739,6 +9744,7 @@ _attach("batch")
 _attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
 _attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
 _attach("perm")           # запрос разрешения окна роли — Зевсу, ответ владельца — окну (metis-1250)
+_attach("layout")         # карта «что где» и папки вне раскладки (metis-0899)
 
 
 def main(argv):
@@ -9829,6 +9835,8 @@ def main(argv):
         return 1 if check_moved(force=True) else 0
     if cmd == "migrate-paths":
         return migrate_paths_cmd(rest)
+    if cmd == "layout":
+        return layout_cmd(rest)
     if cmd == "check":
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":

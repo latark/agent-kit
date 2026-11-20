@@ -226,5 +226,12 @@ finally:
     os.unlink(QD)
     os.rename(_real_q, QD)
 
+# --- metis-1293: ключи Supabase для serve принимаются, строка базы тестов — нет ----------------------------------
+check("name_problem: SUPABASE_SECRET_KEY и NEXT_PUBLIC_SUPABASE_URL принимаются (serve берёт их из env)",
+      S.name_problem("SUPABASE_SECRET_KEY") is None and S.name_problem("NEXT_PUBLIC_SUPABASE_URL") is None,
+      (S.name_problem("SUPABASE_SECRET_KEY"), S.name_problem("NEXT_PUBLIC_SUPABASE_URL")))
+check("name_problem: SUPABASE_DB_URL по-прежнему отказ (ключ тестов, кладёт outside key)",
+      "outside key" in (S.name_problem("SUPABASE_DB_URL") or ""), S.name_problem("SUPABASE_DB_URL"))
+
 print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)

@@ -14,8 +14,8 @@
 
 Значение — только скрытым вводом (getpass) в терминале владельца: не аргументом (история оболочки), не из конвейера и
 не из окна Claude Code (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT) — там отказ с кодом 1, файл не тронут. Пустой ввод убирает
-ключ. Имя — переменная окружения, не служебная (RESERVED_ENV, PANTHEON_…, DYLD_…, LD_…) и не ключ тестов (TEST_KEYS
-кладёт `pantheon outside key`). Значение — одна строка. Файл — папка 700, файл 600, замена целиком (O_EXCL и rename),
+ключ. Имя — переменная окружения, не служебная (RESERVED_ENV, PANTHEON_…, DYLD_…, LD_…) и не ключ только тестов (TEST_ONLY_KEYS:
+SUPABASE_DB_URL; адрес и секретный ключ Supabase для serve — обычные; строку базы кладёт `pantheon outside key`). Значение — одна строка. Файл — папка 700, файл 600, замена целиком (O_EXCL и rename),
 свои строки файла сохраняются. Ошибка разбора — код 2, отказ — код 1, причина последней строкой.
 
 ask/run (metis-1135, «ввод через окно Touch ID со скрытым полем»): заявка — <id>.req.json в очереди (в окне роли —
@@ -120,7 +120,7 @@ def name_problem(name):
         return f"«{name}» — не имя переменной окружения (латиница, цифры, _)"
     if name in O.RESERVED_ENV or name.startswith(O.RESERVED_ENV_PREFIX):
         return f"{name} — служебное имя, окружение сервера его не отдаст"
-    if name in O.TEST_KEYS:
+    if name in O.TEST_ONLY_KEYS:
         return f"{name} — ключ тестов, его кладёт `pantheon outside key OWNER/REPO {name}`"
     return None
 
