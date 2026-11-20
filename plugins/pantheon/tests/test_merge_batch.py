@@ -650,6 +650,19 @@ def test_batch_all_light_no_window():
           b.req(8) is not None and "batch-broken" not in b.log() and "заявки сняты" not in b.alerts()
           and "вне ядра — без Touch ID" in b.outs[-1], b.outs[-1] + b.alerts())
 
+
+def test_batch_all_light_nag():
+    """Пачка вне ядра не слита за сутки: заявки остаются, тревога по каждому PR повторяется (слово владельца 20.11)."""
+    b = batch_box()
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE)
+    b.view(BATCH_SHA[8], pr=8, title="PR 8", files=NONCORE)
+    request_batch(b)
+    b.run()
+    b.run(t=T0 + 25 * 3600)
+    check("пачка вне ядра за сутки не слита: обе заявки остаются, тревога по каждому PR", b.req(7) is not None
+          and b.req(8) is not None and "expired" not in b.log() and b.alerts().count("PR вне ядра") == 2,
+          b.outs[-1] + b.alerts())
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544); исключение — провал случая

@@ -2339,6 +2339,20 @@ def light_merged(req, view):
     return bool(req.get("light")) or light_paths(req["repo"], pr_files(req["repo"], req["pr"], view))
 
 
+def nag(req, t):
+    """Заявка вне ядра (отметка light) не слита за REQUEST_TTL: заявка остаётся, тревога — каждые REQUEST_TTL, пока PR
+    не сольют (light_merged снимет тихо) или заявку не снимут (слово владельца 20.11 «конечно, нужно повторять же ее»:
+    застрявший PR вне ядра не должен пропадать молча)."""
+    hours = int((t - req["created"]) // 3600)
+    req["nagged"] = t
+    keep(req)
+    log(req, "nag", hours=hours)
+    P.alert(f"PR вне ядра {req['repo']}#{req['pr']} ({req['sha'][:7]}) не слит {hours} ч: сливает координатор "
+            f"{MERGE_DIRECTION} шлюзом guard или ваша фраза «слей #{req['pr']}»; не нужен — "
+            f"pantheon merge cancel {req['pr']} -R {req['repo']}", "pantheon-merge")
+    return f"ждёт: вне ядра, не слита {hours} ч — тревога повторена"
+
+
 def unbatch(reqs):
     """Отвязать заявки от пачки (PR пачки вне ядра слит мимо окна): дальше каждая — одиночная, без «пачка неполна».
     Только если в очереди та же заявка (same_req)."""
@@ -2507,9 +2521,10 @@ def restart_after(req, phrase):
 
 def process(req, click):
     t = P.now()
-    if t - req["created"] > REQUEST_TTL:
-        return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True,
-                    how="вне ядра — сливает координатор, не слил" if req.get("light") else "по Touch ID")
+    if req.get("light") and t - req.get("nagged", req["created"]) > REQUEST_TTL:
+        return nag(req, t)   # вне ядра не слита за сутки — не снимать, а повторять тревогу (слово владельца 20.11)
+    if not req.get("light") and t - req["created"] > REQUEST_TTL:
+        return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     # фраза владельца «слей #N <hex>» (metis-0959) — согласие без окна: ни повтора окна, ни щелчка, ни Mac рядом
     phrase = find_phrase(req)
     hold = None if click else ("ждёт: окно закрыто без ответа, повтор позже" if req.get("wait_until", 0) > t
@@ -2588,7 +2603,10 @@ def process_batch(reqs, click):
         have = {r["pr"] for r in reqs}
         miss = ", ".join("#%d" % n for n in batch if n not in have)
         return drop_batch(reqs, "batch-broken", f"пачка неполна: заявку на {miss} сняли или заменили", warn=True)
-    if t - reqs[0]["created"] > REQUEST_TTL:
+    if all(r.get("light") for r in reqs):
+        if t - max(r.get("nagged", r["created"]) for r in reqs) > REQUEST_TTL:
+            return [(r, nag(r, t)) for r in reqs]
+    elif t - reqs[0]["created"] > REQUEST_TTL:
         return drop_batch(reqs, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True)
     if not click and max(r.get("wait_until", 0) for r in reqs) > t:
         return [(r, "ждёт: окно закрыто без ответа, повтор позже") for r in reqs]

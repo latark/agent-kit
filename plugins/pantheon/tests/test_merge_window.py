@@ -509,8 +509,13 @@ def test_light_no_window():
     b.request()
     b.run()
     b.run(t=T0 + 25 * 3600)
-    check("вне ядра и никто не слил за сутки: заявка снята, тревога «сливает координатор, не слил»", b.req() is None
-          and "expired" in b.log() and "сливает координатор, не слил" in b.alerts(), b.outs[-1] + b.alerts())
+    check("вне ядра и никто не слил за сутки: заявка остаётся, тревога «не слит 25 ч» (слово владельца 20.11)",
+          b.req() is not None and "expired" not in b.log() and "не слит 25 ч" in b.alerts(), b.outs[-1] + b.alerts())
+    b.run(t=T0 + 26 * 3600)
+    check("через час — без повтора", b.alerts().count("PR вне ядра") == 1, b.alerts())
+    b.run(t=T0 + 50 * 3600)
+    check("ещё через сутки — тревога повторена", b.alerts().count("PR вне ядра") == 2 and "не слит 50 ч" in b.alerts()
+          and b.log().count("nag") == 2, b.alerts())
     for name, checks in (("до первого прохода", None), ("пока CI шёл (проход видел только «ждёт»)",
                                                          ci("PENDING", "SUCCESS"))):
         b = Box()
