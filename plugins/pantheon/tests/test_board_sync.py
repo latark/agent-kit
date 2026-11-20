@@ -72,7 +72,7 @@ cache = {"merged": {R: [{"number": 294, "headRefName": "batch/metis-0750", "body
                            "cross": True}]}}
 idx = A.pr_index(cache)
 check("0799: pr_index хранит ветку PR (слитый — headRefName, открытый — branch)",
-      idx["metis-0750"][0]["branch"] == "batch/metis-0750" and idx["metis-0751"][0]["branch"] == "batch/metis-0751", idx)
+      idx["metis-0688"][0]["branch"] == "batch/metis-0750" and 294 not in [r["number"] for r in idx.get("metis-0750", [])] and idx["metis-0751"][0]["branch"] == "batch/metis-0751", idx)
 bprs = A.batch_prs(cache)
 bp = T.batch_pr("metis-0750", bprs, [R])
 check("0799: batch_pr — PR с ветки batch/<id>, слит, закрытые им задачи без самой пачки; ветка metis-0750-old — не PR пачки",

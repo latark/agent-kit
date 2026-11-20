@@ -21,7 +21,9 @@
 (metis-0680; нет файла — заводит первая заявка), packs/<направление>/mcp.json (metis-0949: пакет окна —
 объект JSON; команда сервера по-прежнему проходит window_rules при сборке; approved.json — нет: его одобрение
 по хешу пустило бы вне песочницы скрипт, который пишет сама роль, а текста скрипта владелец не видит) и
-~/.claude/agents/_parts/<имя>.part — только уже существующие. settings.json здесь нет: autoMode.environment — PR-2,
+~/.claude/agents/_parts/<имя>.part — только уже существующие. ~/.claude/settings.json — только список
+autoMode.environment (metis-1135, [auto-1135-consent] «А+Б везде»: строка окнам, запущенным владельцем руками): весь
+прочий JSON — тот же по смыслу, список — строки (settings_env_only, и в propose, и в проходе); остальное в settings.json —
 права и хуки — никогда. Новый текст — UTF-8 без NUL и без невидимых, управляющих и bidi-знаков (HIDDEN, кроме \\n и
 \\t; --why — тоже, и ещё не длиннее WHY_MAX и без лишних пробелов: why_ok, его повторяет и valid() прохода). .toml —
 сравнение по смыслу (toml_keys): старый и новый текст разобраны tomllib, каждый изменённый ключ правит своя строка
@@ -80,7 +82,8 @@ def set_core(mod):
     P = mod
 
 
-FILES = re.compile(r"\.claude/pantheon/(?:policy|grants)\.toml|\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/mcp\.json|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
+SETTINGS_REL = ".claude/settings.json"   # только autoMode.environment (settings_env_only, metis-1135)
+FILES = re.compile(r"\.claude/settings\.json|\.claude/pantheon/(?:policy|grants)\.toml|\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/mcp\.json|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
 REQ_TTL = 24 * 3600       # заявка старше суток — снята: владелец не ответил
 RETRY_SEC = 600           # окно Touch ID закрыто без ответа — следующее не раньше
 PRESENT_SEC = 300         # владелец у Mac: простой меньше 5 минут
@@ -137,7 +140,7 @@ def rel_of(arg):
 def target(rel):
     """Абсолютный путь файла: только из FILES, без ссылок на пути (папки — настоящие, внутри HOME)."""
     if not FILES.fullmatch(rel or ""):
-        raise Refuse(f"{rel}: не из списка файлов владельца (policy.toml, grants.toml, packs/<направление>/mcp.json, ~/.claude/agents/_parts/*.part)")
+        raise Refuse(f"{rel}: не из списка файлов владельца (settings.json — autoMode.environment, policy.toml, grants.toml, packs/<направление>/mcp.json, ~/.claude/agents/_parts/*.part)")
     home = os.path.realpath(P.HOME)
     p = os.path.join(home, rel)
     if os.path.realpath(os.path.dirname(p)) != os.path.dirname(p):
@@ -164,6 +167,37 @@ def read_target(rel):
     if len(data) > NEW_MAX:
         raise Refuse(f"~/{rel}: больше {NEW_MAX // 1024} КБ")
     return data
+
+
+def settings_env_only(old, new):
+    """~/.claude/settings.json: правка — только списка autoMode.environment (строки), прочее — то же по смыслу JSON.
+    Права, хуки, песочница и остальные ключи autoMode этой заявкой не меняются никогда. Иначе Refuse."""
+    def bad_const(c):
+        raise ValueError(c)
+    try:   # NaN/Infinity — не JSON для Claude Code (проверка безопасности f25264b8)
+        a, b = (json.loads(t, parse_constant=bad_const) for t in (old, new))
+    except ValueError:
+        raise Refuse(f"~/{SETTINGS_REL}: не JSON") from None
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        raise Refuse(f"~/{SETTINGS_REL}: не объект JSON")
+    env = (b.get("autoMode") or {}).get("environment") if isinstance(b.get("autoMode"), dict) else None
+    if not isinstance(env, list) or not all(isinstance(x, str) for x in env):
+        raise Refuse(f"~/{SETTINGS_REL}: autoMode.environment — не список строк")
+    for x in env:   # строка видна владельцу как есть: без \\u-кодов, невидимых знаков и переводов строки
+        if len(x) > 2000 or hidden_at(x, keep="") or json.dumps(x, ensure_ascii=False) not in new:
+            raise Refuse(f"~/{SETTINGS_REL}: строка autoMode.environment длиннее 2000 знаков, с невидимым знаком "
+                         "или записана \\u-кодами — в вопросе её не видно")
+
+    def rest(o):
+        o = json.loads(json.dumps(o))
+        if isinstance(o.get("autoMode"), dict):
+            o["autoMode"].pop("environment", None)
+            if not o["autoMode"]:
+                o.pop("autoMode")
+        return o
+    if json.dumps(rest(a), sort_keys=True) != json.dumps(rest(b), sort_keys=True):   # true ≠ 1 (проверка безопасности)
+        raise Refuse(f"~/{SETTINGS_REL}: меняется не только autoMode.environment — права, хуки и прочие ключи "
+                     "этой заявкой не правятся")
 
 
 def hidden_at(text, keep="\n\t"):
@@ -640,6 +674,8 @@ def facts(req):
         raise Refuse("заявка не сходится с файлом и новым текстом (дифф или sha диффа) — не применяю")
     if req["file"].endswith(".toml"):
         toml_keys(req["file"], old, req["new"], diff)   # и у заявки, положенной в очередь мимо propose (R2 Б1)
+    if req["file"] == SETTINGS_REL:
+        settings_env_only(old, req["new"])
     return cur
 
 
@@ -866,6 +902,8 @@ def _propose(rel, new, task, why, prog, cur=None):
             raise Refuse(f"~/{rel}: не UTF-8")
         if rel.endswith(".toml") and old != new:
             toml_keys(rel, old, new)
+        if rel == SETTINGS_REL:
+            settings_env_only(old, new)
     except Refuse as e:
         return err(f"{prog}: отказ — {e}")
     if old == new:
