@@ -414,13 +414,13 @@ def test_allow_target_1128():
             ok, why = N.gate(kind, T, heavy=0, target=tg)
             check(ok, f"1128: {tg} {kind} выше потолка при разрешении: {why}")
         check(N.launch_cap("tick", t=T, target=tg) is None, f"1128: launch_cap {tg} отказал")
-    for tg in (None, "", "proteus-morph"):
+    for tg in (None, "", "dir-gamma"):
         ok, why = N.gate("autostart", T, heavy=0, target=tg)
         check(not ok and "потолок владельца 90 %" in why, f"1128: {tg!r} не названо, а запуск открыт: {ok} {why}")
         check(N.launch_cap("tick", t=T, target=tg) is not None, f"1128: launch_cap {tg!r} открыт")
     check(with_session("dir-alpha", lambda: with_role("domain-coordinator", lambda: N.agent_gate(T))) is None,
           "1128: субагенты окна dir-alpha отказаны при разрешении на него")
-    for ses in ("proteus-morph", ""):
+    for ses in ("dir-gamma", ""):
         why = with_session(ses, lambda: with_role("domain-coordinator", lambda: N.agent_gate(T)))  # noqa: B023
         check(why and "потолок владельца 90 %" in why, f"1128: окно {ses!r} не названо, а субагенты открыты: {why!r}")
     lines = N.status_lines(T)
@@ -436,7 +436,7 @@ def test_allow_target_1128():
           and N.measure(T, target="x")["zone"] == "red", "1128: зоны target")
     for kind in ("autostart", "wake", "respawn"):
         check(N.gate(kind, T, heavy=0, target="dir-alpha") == (True, ""), f"1128: красная держит названного, {kind}")
-        ok, why = N.gate(kind, T, heavy=0, target="proteus-morph")
+        ok, why = N.gate(kind, T, heavy=0, target="dir-gamma")
         check(not ok and "красная" in why, f"1128: красная не держит чужого, {kind}: {ok} {why}")
     ok, why = N.gate("autostart", T, heavy=0)
     check(not ok and "красная" in why, f"1128: красная не держит запуск без имени: {ok} {why}")
