@@ -729,7 +729,15 @@ def tests():
     check("1272: запуск отключает приложения и плагины аккаунта (-c features.apps/plugins/remote_plugin=false)",
           {("-c", "features.apps=false"), ("-c", "features.plugins=false"),
            ("-c", "features.remote_plugin=false")} <= pairs, a)
+    check("1272 А+: закалка Codex — приложения по умолчанию, веб-поиск, окружение команд (-c парами)",
+          {("-c", "apps._default.enabled=false"), ("-c", 'web_search="disabled"'),
+           ("-c", 'shell_environment_policy.inherit="core"'),
+           ("-c", 'shell_environment_policy.exclude=["(?i)(KEY|SECRET|TOKEN)"]')} <= pairs, a)
     r, a = kind_run(["--kind", "code"], env={"PANTHEON_ROLE": "codex-dev"})
+    pairs_w = {(a[i], a[i + 1]) for i in range(len(a) - 1)}
+    check("1272 А+: закалка и внутри окна (danger-full-access)",
+          {("-c", 'web_search="disabled"'), ("-c", 'shell_environment_policy.inherit="core"'),
+           ("-c", "apps._default.enabled=false")} <= pairs_w, a)
     check("1272: внутри окна (PANTHEON_ROLE) — --sandbox danger-full-access; модель и effort на месте",
           r.returncode == 0 and sandbox(a) == "danger-full-access" and "workspace-write" not in a
           and flags(a) == ("gpt-6.2-sol", "medium"), a)

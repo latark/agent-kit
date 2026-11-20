@@ -59,9 +59,20 @@ SANDBOX_WINDOW = "danger-full-access"
 # Приложения и плагины аккаунта ChatGPT (коннекторы) отключены: песочница CLI не ограничивает права подключённых к
 # аккаунту сервисов (GHSA-gqqj, CONNECTORS_HINT). `features.apps` — переключатель коннекторов в `codex features list`
 # 0.170; plugins и remote_plugin — как в HELLO_FLAGS.
+# Закалка «А+» (решение владельца 20.11, metis-1272; исследование ~/ai/knowledge/Inbox/research-2026-11-20-codex-window-network.md,
+# F1): Codex в окне идёт с danger-full-access, поэтому всё, что он может сам, режем конфигом. Ключи сверены с 0.170
+# (`codex --strict-config -c <ключ> doctor`: неизвестный ключ — warn, неверное значение — «config could not be loaded»):
+#   apps._default.enabled=false — приложения аккаунта выключены по умолчанию (в дополнение к features.apps);
+#   web_search="disabled" — живой и кэшированный веб-поиск Codex выключен (значения: disabled|cached|indexed|live);
+#   shell_environment_policy.inherit="core" — команды Codex получают только PATH/HOME/USER/…, без остального окружения;
+#   shell_environment_policy.exclude — регулярка по именам KEY/SECRET/TOKEN (запас поверх inherit=core).
 EXEC_FLAGS = ["exec", "--json", "--ephemeral", "--sandbox", SANDBOX_OUTSIDE,
               "-c", "features.shell_snapshot=false",
-              "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false"]
+              "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
+              "-c", "apps._default.enabled=false",
+              "-c", 'web_search="disabled"',
+              "-c", 'shell_environment_policy.inherit="core"',
+              "-c", 'shell_environment_policy.exclude=["(?i)(KEY|SECRET|TOKEN)"]']
 
 
 def in_window(env=None):
