@@ -100,6 +100,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    (_delta_link, delta_problem).
 Записи tests нет — отказ называет узкую команду репозитория из NARROW_TESTS (metis-0666): `--affected`
 run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
+У репозитория из CI_FULL_TESTS (обязательный job CI сам гоняет полный набор — metis-1305) запись не нужна, если все
+его обязательные проверки для base PR — SUCCESS запуска от pull_request на этом head (ci_full_tests); agent-kit там нет.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
 транскрипту субагента в PreToolUse/PostToolUse (agent_transcript_path — только в SubagentStop), он выводится из входа
 хука — transcript_path, session_id, agent_id — по раскладке Claude Code. Это защита от ошибки шаблона и от запуска
@@ -1599,7 +1601,8 @@ def _ui_problem(policy, name, sha, view, files):
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
 # друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
-# optional_checks, repo_entry — metis-1116; narrow_tests_record, narrow_map_path — metis-1050), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
+# optional_checks, repo_entry — metis-1116; narrow_tests_record, narrow_map_path — metis-1050; ci_full_tests,
+# CI_FULL_TESTS — metis-1305), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API,
 # CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет
 # test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -1664,6 +1667,13 @@ FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-te
               "sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": "pnpm run check",
               # те же проекты: тесты — `uv run pytest` (workflow tests.yml их PR)
               "sha256:ea51b160bc4a631ff36215d83bbdfbcdfca1d6496f30408026dc44b8aee56898": "uv run pytest", "sha256:ff077cd309a506e3835b53e229c77417d13fbf97aed0d793097efe33656b07fa": "uv run pytest", "sha256:2a5649de52b60fec685194d24a1a9818a344298f3894e77ce924907fe3f51ed3": "uv run pytest"}
+# репозитории, у которых обязательный job CI сам гоняет полный набор тестов (metis-1305, слово владельца 20.11): ключ —
+# как в REQUIRED_CHECKS → почему CI = полный набор. Для них SUCCESS всех обязательных проверок на head (ci_full_tests)
+# засчитывается вместо записи tests на этом SHA. agent-kit здесь нет: его обязательный job affected — затронутые
+# тесты, а не полный набор
+CI_FULL_TESTS = {"sha256:c129d5351fda6914367cfb5dad1f34db32d2d3d4d78e01d8057e4ed318541e35": (
+    "metis-1305: обязательный job tests/checks гоняет `pnpm check` — тот же полный набор, что FULL_TESTS "
+    "(`pnpm run check`)")}
 
 # узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
 # карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
@@ -1700,6 +1710,23 @@ def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
     got = repo_entry(REQUIRED_CHECKS, repo, ())
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
+
+
+def ci_full_tests(repo, base, runs):
+    """Зелёный CI репозитория — полный набор тестов (metis-1305): repo есть в CI_FULL_TESTS, обязательные проверки для
+    base PR (required_checks) есть, и у каждой все запуски Actions от pull_request на этом head (runs — ответ ci_runs)
+    завершены с SUCCESS (дубль — худший итог). True — запись tests на этом SHA не нужна; иначе False, как раньше."""
+    required = required_checks(repo, base) if repo_entry(CI_FULL_TESTS, repo) else ()
+    if not required or not isinstance(runs, list):
+        return False
+    got = {}
+    for c in runs:
+        if isinstance(c, dict) and c.get("event") == "pull_request":
+            key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+            ok = (str(c.get("status") or "").upper() == "COMPLETED"
+                  and str(c.get("conclusion") or "").upper() == "SUCCESS")
+            got[key] = got.get(key, True) and ok
+    return all(got.get(tuple(r)) is True for r in required)
 
 
 def ci_fork(view):
@@ -2169,7 +2196,7 @@ def _billing_problem(repo, pr, sha, narrow=None, base_oid=None):
             f"heavy бывает дольше 600 с).{note} Затем повтори слияние"), ()
 
 
-def _ci_problem(repo, pr, sha, data, owner=False, narrow=None):
+def _ci_problem(repo, pr, sha, data, owner=False, narrow=None, no_tests=None):
     """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
     check-traces). data — ответ _pr_view; его rollup — проверки коммита headRefOid, а он сверяется с SHA из
     --match-head-commit: PR на другом коммите — отказ. Разбор — ci_verdict с обязательными проверками репозитория
@@ -2185,7 +2212,10 @@ def _ci_problem(repo, pr, sha, data, owner=False, narrow=None):
     base она есть (ревью argus 0297b). Сбой любого запроса — отказ; base спрашивается, только когда rollup пуст и на
     head папки нет. owner — путь без роли (owner_ci_problem): записей там не просят, а в текстах отказа — аварийный
     путь OWNER_EMERGENCY вместо «сливает владелец» (Д2, Д4' argus #235). narrow — папка слияния PR вне ядра: на
-    запасном пути годится и узкая запись (metis-0734, _billing_problem). Возврат — (текст отказа или None,
+    запасном пути годится и узкая запись (metis-0734, _billing_problem). no_tests — текст отказа «нет записи тестов»,
+    когда записи tests на SHA нет, а репозиторий в CI_FULL_TESTS (metis-1305): CI зелёный, но не все обязательные
+    проверки — SUCCESS запуска от pull_request на этом head (ci_full_tests), — отказ этим текстом; иначе пропуск со
+    строкой «засчитан CI». Возврат — (текст отказа или None,
     предупреждения пропуска): их несёт возврат, а не модуль (metis-0650)."""
     head = data.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha:
@@ -2214,6 +2244,11 @@ def _ci_problem(repo, pr, sha, data, owner=False, narrow=None):
         return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями", ()
     if state == "wait":
         return f"{text} на {repo}#{pr}@{sha[:12]} — {CI_WATCH.format(pr=pr, repo=repo)}", ()
+    if no_tests is not None:
+        # metis-1305: записи tests нет — пускает только зелёный обязательный CI с полным набором (CI_FULL_TESTS)
+        if not (state == "ok" and ci_full_tests(repo, data.get("baseRefName"), runs)):
+            return no_tests, ()
+        notes = [*notes, "записи tests нет — засчитан зелёный обязательный CI с полным набором тестов (CI_FULL_TESTS)"]
     if state == "empty":
         base = data.get("baseRefOid")
         if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
@@ -3183,12 +3218,17 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if records is None:
         return ("журнал проверок ~/.local/state/pantheon/merge-gate/records.jsonl не читается (симлинк или сбой) — "
                 f"записи не сверить. {MERGE_OWNER}")
+    no_tests = None
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
-        return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
-                f"`pantheon review test -- <команда тестов>` (запишет хук guard).{narrow_hint(repo)} Тесты долгие: запускай "
-                f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). Тестам нужен "
-                f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
-                f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --sha {sha} --wait 120`). {advice}")
+        no_tests = (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
+                    f"`pantheon review test -- <команда тестов>` (запишет хук guard).{narrow_hint(repo)} Тесты долгие: "
+                    f"запускай `pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). "
+                    f"Тестам нужен порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же "
+                    f"копии (запись tests сделает плановый проход; dev-сервер — `pantheon outside serve --sha {sha} "
+                    f"--wait 120`)")
+        # metis-1305: у репозитория из CI_FULL_TESTS запись заменяет зелёный обязательный CI — решает _ci_problem ниже
+        if not repo_entry(CI_FULL_TESTS, repo):
+            return f"{no_tests}. {advice}"
 
     def mine(r, kinds, who):
         return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr and r["sha"] == sha
@@ -3310,7 +3350,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
     # узкая запись тестов на запасном пути — в защитах, у PR ядра и пачки тоже (metis-0734, 1050)
-    why, notes = _ci_problem(repo, pr, sha, view, narrow=cwd)
+    why, notes = _ci_problem(repo, pr, sha, view, narrow=cwd, no_tests=no_tests)
     if why:
         return f"{why}. {advice}"
     if carried:

@@ -813,7 +813,84 @@ def t_ci_hashed(h):
         check(f"{h256[:8]}: лимит и запись `uv run pytest` на SHA — пропуск", got[0] is None and len(got[1]) == 1, got)
 
 
-CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed]
+def t_ci_full_tests(h):
+    """metis-1305: у репозитория из CI_FULL_TESTS (обязательный job CI сам гоняет полный набор) зелёный обязательный
+    CI — SUCCESS запуска от pull_request на head — засчитывается вместо записи tests; идёт, красный, нет обязательных
+    для base PR — отказ, как раньше. agent-kit в таблице нет: без записи — отказ «нет записи тестов» и при зелёном CI.
+    Проект — вымышленный owner-x/proj, подменой таблиц модуля (как t_ci_hashed)."""
+    import hashlib
+    mg = _load_merge_gate("merge_gate_ci_full")
+    key = "sha256:" + hashlib.sha256(b"owner-x/proj").hexdigest()
+    mg.REQUIRED_CHECKS = dict(mg.REQUIRED_CHECKS, **{key: (("tests", "checks", "develop"), ("tests", "checks", "main"))})
+    mg.CI_FULL_TESTS = {key: "metis-1305: проба"}
+    real = _load_merge_gate("merge_gate_ci_full_real")
+    check("CI_FULL_TESTS: в таблице одна запись — по хешу, с номером metis-1305; agent-kit нет",
+          len(real.CI_FULL_TESTS) == 1 and all(re.fullmatch(r"sha256:[0-9a-f]{64}", k) and "metis-1305" in v
+                                               for k, v in real.CI_FULL_TESTS.items())
+          and real.repo_entry(real.CI_FULL_TESTS, "latark/agent-kit") is None, real.CI_FULL_TESTS)
+    check("CI_FULL_TESTS: ключ — проект с job tests/checks и полным набором `pnpm run check`",
+          all(real.REQUIRED_CHECKS.get(k) == (("tests", "checks", "develop"), ("tests", "checks", "main"))
+              and real.FULL_TESTS.get(k) == "pnpm run check" for k in real.CI_FULL_TESTS), real.CI_FULL_TESTS)
+
+    def run(concl="SUCCESS", status="COMPLETED", event="pull_request", name="checks"):
+        return {"workflowName": "tests", "name": name, "status": status, "conclusion": concl, "event": event}
+
+    ok = run()
+    for name, repo, base, runs, want in (
+            ("проект, PR в develop, SUCCESS", "owner-x/proj", "develop", [ok], True),
+            ("проект, PR в main, SUCCESS (регистр имени не важен)", "Owner-X/Proj", "main", [ok], True),
+            ("проект, идёт", "owner-x/proj", "develop", [run("", "IN_PROGRESS")], False),
+            ("проект, красная", "owner-x/proj", "develop", [run("FAILURE")], False),
+            ("проект, SKIPPED", "owner-x/proj", "develop", [run("SKIPPED")], False),
+            ("проект, дубль: зелёная и красная", "owner-x/proj", "develop", [ok, run("FAILURE")], False),
+            ("проект, только push", "owner-x/proj", "develop", [run(event="push")], False),
+            ("проект, запусков нет", "owner-x/proj", "develop", [], False),
+            ("проект, запуски не получены (строка)", "owner-x/proj", "develop", "не получены", False),
+            ("проект, PR в ветку эпика — обязательных нет", "owner-x/proj", "epic-1", [ok], False),
+            ("тот же проект у другого владельца", "someone/proj", "develop", [ok], False),
+            ("agent-kit с зелёными обязательными", "latark/agent-kit", "main",
+             [{"workflowName": w, "name": j, "status": "COMPLETED", "conclusion": "SUCCESS", "event": "pull_request"}
+              for w, j in mg.required_checks("latark/agent-kit", "main")], False)):
+        check(f"ci_full_tests: {name} → {want}", mg.ci_full_tests(repo, base, runs) is want, runs)
+
+    # _ci_problem с no_tests (записи tests нет): запуски — подменой _ci_runs, gh не зовётся
+    sha, nt = h.sha["agent-kit"], "нет записи тестов (проба)"
+
+    def problem(repo, base, runs, no_tests=nt):
+        mg._ci_runs = lambda *a, **k: runs
+        rollup = [{k: v for k, v in c.items() if k != "event"} for c in runs]
+        view = {"headRefOid": sha, "baseRefOid": BASE, "baseRefName": base, "statusCheckRollup": rollup}
+        return mg._ci_problem(repo, 7, sha, view, no_tests=no_tests)
+
+    got = problem("owner-x/proj", "develop", [ok])
+    check("_ci_problem: проект, обязательные SUCCESS, записи нет — пропуск со строкой «засчитан CI»",
+          got[0] is None and any("засчитан зелёный обязательный CI" in n for n in got[1]), got)
+    got = problem("owner-x/proj", "develop", [run("", "IN_PROGRESS")])
+    check("_ci_problem: проект, обязательная идёт, записи нет — отказ «ещё идут»",
+          got[0] is not None and "ещё идут" in got[0], got)
+    got = problem("owner-x/proj", "develop", [run("FAILURE")])
+    check("_ci_problem: проект, обязательная красная, записи нет — отказ «почини»",
+          got[0] is not None and "красная: FAILURE" in got[0], got)
+    got = problem("owner-x/proj", "epic-1", [ok])
+    check("_ci_problem: проект, PR в ветку эпика (обязательных нет), записи нет — отказ «нет записи тестов»",
+          got[0] == nt, got)
+    got = problem("latark/agent-kit", "main",
+                  [{"workflowName": w, "name": j, "status": "COMPLETED", "conclusion": "SUCCESS",
+                    "event": "pull_request"} for w, j in mg.required_checks("latark/agent-kit", "main")])
+    check("_ci_problem: agent-kit, CI зелёный, записи нет — отказ «нет записи тестов»", got[0] == nt, got)
+    got = problem("owner-x/proj", "develop", [ok], no_tests=None)
+    check("_ci_problem: запись есть (no_tests нет) — пропуск без строки «засчитан CI»",
+          got[0] is None and not any("засчитан" in n for n in got[1]), got)
+
+    # шлюз целиком: agent-kit, CI зелёный, «принять» есть, записи tests нет — отказ, как раньше
+    kit = "projects/agent-kit"
+    h.seed(rec("accept", "latark/agent-kit", 7, sha))
+    merge_case("CI_FULL_TESTS: agent-kit с зелёным CI без записи tests — отказ «нет записи тестов»",
+               h.pre(f"gh pr merge 7 --match-head-commit {sha}", pdir=kit), False,
+               f"нет записи тестов на latark/agent-kit@{sha[:12]}")
+
+
+CASES = [t_ci, t_ci_required, t_ci_verdict_unit, t_ci_hashed, t_ci_full_tests]
 
 
 if __name__ == "__main__":

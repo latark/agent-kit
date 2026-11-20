@@ -13,7 +13,8 @@ def test_ci_matches_guard():
     (metis-1050),
     pair_match, returned_lie, returned_lifts (поле «вернули», metis-0497), base_counts (metis-0965),
     REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
-    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT, CI_NONE, delta_problem и DELTA_* (metis-0784) в merge.py
+    FULL_TESTS, MAP_HASH_RE, CI_OK, CI_WAIT, CI_NONE, delta_problem и DELTA_* (metis-0784), ci_full_tests и
+    CI_FULL_TESTS (metis-1305) в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -25,14 +26,14 @@ def test_ci_matches_guard():
                                                              "ci_billing", "ci_job_unstarted", "full_tests_record",
                                                              "required_checks", "optional_checks", "repo_entry",
                                                              "narrow_tests_record", "narrow_map_path",
-                                                             "pair_match", "returned_lie",
+                                                             "ci_full_tests", "pair_match", "returned_lie",
                                                              "returned_lifts", "base_counts", "delta_problem"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
                                             "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS", "MAP_HASH_RE", "CI_OK",
                                             "CI_WAIT", "CI_NONE", "DELTA_MAX_LINES", "DELTA_DEPTH",
-                                            "DELTA_GATE_FILES", "DELTA_RENAME"):
+                                            "DELTA_GATE_FILES", "DELTA_RENAME", "CI_FULL_TESTS"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
@@ -43,7 +44,7 @@ def test_ci_matches_guard():
              "returned_lie", "returned_lifts", "base_counts", "REQUIRED_CHECKS",
              "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_JOBS_API", "FULL_TESTS",
              "MAP_HASH_RE", "CI_OK", "CI_WAIT", "CI_NONE", "delta_problem", "DELTA_MAX_LINES", "DELTA_DEPTH",
-             "DELTA_GATE_FILES", "DELTA_RENAME")
+             "DELTA_GATE_FILES", "DELTA_RENAME", "ci_full_tests", "CI_FULL_TESTS")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
