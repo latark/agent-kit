@@ -85,6 +85,8 @@
     пароля, argus #410-3 Б1); причина события stop — через TestWatch.clean_why (argus #410 Б1). Окнам ролей обе папки ключей (STATE/outside/env и test-env) закрыты
     на чтение (argus #410 Б2): denyRead песочницы Bash и правило Read(…/**) для Read, Grep, Glob в сборке окон
     (pantheon.py: WINDOW_SECRET_DIRS в role_settings — все роли: направления, мастерская, задачи, Гестия, штаб).
+    С SUPABASE_SECRET_KEY в окружении профиль выпускает ещё TCP 443 (metis-1294, решение владельца 20.11): REST API
+    проекта идёт по HTTPS, а sandbox-exec по хосту не умеет, поэтому открыт весь 443, не один хост проекта.
     Остатки: хост базы sandbox-exec не сужает («host must be * or localhost», проба 09.11) — скрипт может послать
     данные на чужой хост на том же порту, а localhost:* открыт целиком — через местные прокси и службы (прокси
     песочницы Claude Code, локальные прокси и службы синхронизации) скрипт выйдет в сеть шире порта базы (argus #410-2 С1); пока идёт
@@ -378,6 +380,7 @@ ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 TEST_KEYS = ("SUPABASE_DB_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SECRET_KEY")
 DB_URL_RE = re.compile(r"postgres(?:ql)?://", re.I)
 DB_PORT = 5432                      # порт PostgreSQL, когда в строке подключения его нет
+API_PORT = 443                      # HTTPS API тестового проекта: открыт, когда в прогоне есть SUPABASE_SECRET_KEY (metis-1294)
 # pg_dump и psql из libpq (keg-only у brew: не в /opt/homebrew/bin) — в PATH только прогона с ключами тестов
 LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ [--app ИМЯ]] [--affected [--base REF]] [--wait С] | "
@@ -2212,7 +2215,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
                 f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: "
                 f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "") + (
                 f"ключи тестов: {', '.join(sorted(keys))} (файл {os.path.join(test_env_dir(), kfile)}); сеть — только "
-                f"TCP на порт {', '.join(map(str, sorted(db_ports(keys))))} и местные адреса\n" if keys else "")).encode())
+                f"TCP на порт {', '.join(map(str, sorted(db_ports(keys))))}"
+                f"{' (443 — API проекта, хост не сужается)' if API_PORT in db_ports(keys) else ''} и местные адреса\n"
+                if keys else "")).encode())
         if watch():   # «стоп» между взятием заявки и запуском (T10a): команда не запускается
             return watch.stopped(cmd=line, log=log, **extra)
         try:
@@ -2697,7 +2702,10 @@ def db_ports(keys):
             ports |= {int(m) for m in re.findall(r":(\d{1,5})(?=,|$)", hosts) if 0 < int(m) < 65536} or {DB_PORT}
         else:
             ports |= {int(m) for m in re.findall(r"\bport\s*=\s*(\d{1,5})\b", v) if 0 < int(m) < 65536}
-    return ports or {DB_PORT}
+    ports = ports or {DB_PORT}
+    if "SUPABASE_SECRET_KEY" in keys:   # metis-1294: REST API проекта — HTTPS; sandbox по хосту не умеет, открыт весь 443
+        ports.add(API_PORT)
+    return ports
 
 
 def _secrets(keys):

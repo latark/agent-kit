@@ -59,6 +59,20 @@ check("db_ports: без порта — 5432", O.db_ports({"SUPABASE_DB_URL": "po
 check("db_ports: несколько хостов", O.db_ports({"SUPABASE_DB_URL": "postgresql://u:p@a:5433,b:5434/db"}) == {5433, 5434})
 check("db_ports: порт 0 и нечисло — 5432", O.db_ports({"SUPABASE_DB_URL": "postgresql://u:p@h:0/db"}) == {5432})
 check("db_ports: строка ключ=значение", O.db_ports({"SUPABASE_DB_URL": "host=h port=6000 user=u"}) == {6000})
+# metis-1294: с SUPABASE_SECRET_KEY профиль выпускает и 443, без него — только порт базы
+_k3 = {"SUPABASE_DB_URL": URL_APP, "SUPABASE_SECRET_KEY": "sb-secret-key-value"}
+check("db_ports: с SUPABASE_SECRET_KEY — порт базы и 443", O.db_ports(_k3) == {6543, 443}, O.db_ports(_k3))
+check("db_ports: только адрес API без секретного ключа — без 443",
+      443 not in O.db_ports({"SUPABASE_DB_URL": URL_APP, "NEXT_PUBLIC_SUPABASE_URL": "https://x.supabase.co"}))
+check("db_ports: без SUPABASE_SECRET_KEY и без порта — 5432, 443 нет",
+      O.db_ports({"SUPABASE_DB_URL": "postgres://u:pw@h/db"}) == {5432})
+_p443 = O.profile_text((), O.db_ports(_k3))
+check("профиль с SUPABASE_SECRET_KEY содержит TCP 443 и порт базы",
+      '(remote tcp "*:443")' in _p443 and '(remote tcp "*:6543")' in _p443, _p443)
+check("профиль без SUPABASE_SECRET_KEY не содержит 443",
+      '(remote tcp "*:443")' not in O.profile_text((), O.db_ports({"SUPABASE_DB_URL": URL_APP})))
+check("профиль без ключей тестов не менялся: нет ни 443, ни remote tcp",
+      '(remote tcp "*:443")' not in O.profile_text(()) and O.profile_text(()) == O.profile_text((), ()))
 
 # --- вырезание значений ------------------------------------------------------------------------------------------
 _K = {"SUPABASE_DB_URL": URL_APP}
