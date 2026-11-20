@@ -406,10 +406,10 @@ def test_allow_target_1128():
     cap90 = '[limits.owner_cap]\npct = 90\ndecision = "zeus-limit"\n'
     cap100 = '[limits.owner_cap]\npct = 100\ndecision = "zeus-limit"\n'
     al = ('[limits.allow]\npct = 100\nuntil = "2030-01-01"\ndecision = "limit-0069-1611"\n'
-          'target = ["hermes-alex", "athena-brokerassistant"]\n')
+          'target = ["dir-alpha", "dir-beta"]\n')
     # 16.11: потолок 90 достигнут (неделя 95), слово «обоих сейчас» — названным открыто, остальным стоп
     env(95.0, 95.0, sec=cap90 + al)
-    for tg in ("hermes-alex", "athena-brokerassistant"):
+    for tg in ("dir-alpha", "dir-beta"):
         for kind in ("autostart", "wake", "respawn"):
             ok, why = N.gate(kind, T, heavy=0, target=tg)
             check(ok, f"1128: {tg} {kind} выше потолка при разрешении: {why}")
@@ -418,24 +418,24 @@ def test_allow_target_1128():
         ok, why = N.gate("autostart", T, heavy=0, target=tg)
         check(not ok and "потолок владельца 90 %" in why, f"1128: {tg!r} не названо, а запуск открыт: {ok} {why}")
         check(N.launch_cap("tick", t=T, target=tg) is not None, f"1128: launch_cap {tg!r} открыт")
-    check(with_session("hermes-alex", lambda: with_role("domain-coordinator", lambda: N.agent_gate(T))) is None,
-          "1128: субагенты окна hermes-alex отказаны при разрешении на него")
+    check(with_session("dir-alpha", lambda: with_role("domain-coordinator", lambda: N.agent_gate(T))) is None,
+          "1128: субагенты окна dir-alpha отказаны при разрешении на него")
     for ses in ("proteus-morph", ""):
         why = with_session(ses, lambda: with_role("domain-coordinator", lambda: N.agent_gate(T)))  # noqa: B023
         check(why and "потолок владельца 90 %" in why, f"1128: окно {ses!r} не названо, а субагенты открыты: {why!r}")
     lines = N.status_lines(T)
-    check(any(x.startswith("Разрешение до даты") and "только для hermes-alex, athena-brokerassistant" in x and
+    check(any(x.startswith("Разрешение до даты") and "только для dir-alpha, dir-beta" in x and
               "limit-0069-1611" in x for x in lines), f"1128: status: {lines}")
     # неделя дошла до pct разрешения — стоп и для названных
     env(100.0, 100.0, sec=cap90 + al)
-    ok, why = N.gate("autostart", T, heavy=0, target="hermes-alex")
+    ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
     check(not ok and "потолок владельца 100 %" in why, f"1128: на pct разрешения названному открыто: {ok} {why}")
     # красная зона при потолке 100 (hard_pct): названному запуск открыт, остальным красная держит
     env(90.0, 90.0, sec=cap100 + al)
-    check(N.measure(T, target="hermes-alex")["zone"] == "green" and N.measure(T)["zone"] == "red"
+    check(N.measure(T, target="dir-alpha")["zone"] == "green" and N.measure(T)["zone"] == "red"
           and N.measure(T, target="x")["zone"] == "red", "1128: зоны target")
     for kind in ("autostart", "wake", "respawn"):
-        check(N.gate(kind, T, heavy=0, target="hermes-alex") == (True, ""), f"1128: красная держит названного, {kind}")
+        check(N.gate(kind, T, heavy=0, target="dir-alpha") == (True, ""), f"1128: красная держит названного, {kind}")
         ok, why = N.gate(kind, T, heavy=0, target="proteus-morph")
         check(not ok and "красная" in why, f"1128: красная не держит чужого, {kind}: {ok} {why}")
     ok, why = N.gate("autostart", T, heavy=0)
@@ -445,17 +445,17 @@ def test_allow_target_1128():
            ('until = "2030-01-01"\ntarget = []\n', "target"), ('until = "2030-01-01"\ntarget = ["a", 3]\n', "target"))
     for body, why_part in bad:
         env(90.0, 90.0, sec=cap100 + "[limits.allow]\npct = 100\ndecision = \"x-1\"\n"
-            + body + ("" if "target" in body else 'target = "hermes-alex"\n'))
-        ok, why = N.gate("autostart", T, heavy=0, target="hermes-alex")
+            + body + ("" if "target" in body else 'target = "dir-alpha"\n'))
+        ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
         st = "\n".join(N.status_lines(T))
         check(not ok and "красная" in why and why_part in st, f"1128: {body!r}: {ok} {why} {st}")
-    env(90.0, 90.0, sec=cap100 + '[limits.allow]\npct = 100\nuntil = "2030-01-01"\ntarget = "hermes-alex"\n')
-    ok, why = N.gate("autostart", T, heavy=0, target="hermes-alex")
+    env(90.0, 90.0, sec=cap100 + '[limits.allow]\npct = 100\nuntil = "2030-01-01"\ntarget = "dir-alpha"\n')
+    ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
     check(not ok and "красная" in why and "нет decision" in "\n".join(N.status_lines(T)), f"1128: без decision: {ok} {why}")
     # target строкой
     env(90.0, 90.0, sec=cap100 + '[limits.allow]\npct = 100\nuntil = "2030-01-01"\ndecision = "x-1"\n'
-        'target = "hermes-alex"\n')
-    check(N.gate("autostart", T, heavy=0, target="hermes-alex") == (True, ""), "1128: target строкой")
+        'target = "dir-alpha"\n')
+    check(N.gate("autostart", T, heavy=0, target="dir-alpha") == (True, ""), "1128: target строкой")
 
 
 def test_launch_cap():

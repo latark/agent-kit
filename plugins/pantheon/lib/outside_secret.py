@@ -7,7 +7,7 @@
   pantheon secret status [ID]   заявки этого окна и итоги (без значений)
   pantheon secret run           проход заявок — только плановый проход (из окна Claude Code — отказ)
 
-Направление — имя окна из domains.json (например athena-brokerassistant). Его папки дают owner/repo по origin клона
+Направление — имя окна из domains.json (например dir-beta). Его папки дают owner/repo по origin клона
 (как у outside serve), файл — STATE/outside/env/<owner>__<repo>.env (у --app — <owner>__<repo>__<app>.env): тот же,
 что читает проход для `pantheon outside serve` и `outside login` (dev_keys). Сервер и вход получают ключ в окружении
 вне окна роли; окну папка закрыта профилем (WINDOW_SECRET_DIRS), а в выводе команды — только имя, не значение.
