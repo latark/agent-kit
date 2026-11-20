@@ -141,6 +141,7 @@ _touch, _val = [0], [VALUE]
 S.touch_window = lambda t: (_calls.append(("touch", t)), _touch[0])[1]
 S.ask_value = lambda t: (_calls.append(("ask", t)), _val[0])[1]
 S.P.idle_sec = lambda: 0
+S.P.merge_mod().clean_env = lambda: None    # окружение теста; сам clean_env — test_merge_env.py
 QD = os.path.join(_win, "secret")
 
 
@@ -213,6 +214,17 @@ _calls.clear()
 run()
 check("run: заявка старше суток — снята без окон", not _calls and json.load(open(os.path.join(QD, f"{rid}.result.json")))
       ["status"] == "dropped" and not os.path.exists(_p), results())
+_calls.clear()
+ask("athena-x", "API_KEY", "--task", "athena-0001")
+_real_q = os.path.join(HOME, "secret-real-q")
+os.rename(QD, _real_q)
+os.symlink(_real_q, QD)
+try:
+    run()
+    check("run: папка очереди окна — ссылка, проход её не читает, окон не было", not _calls, _calls)
+finally:
+    os.unlink(QD)
+    os.rename(_real_q, QD)
 
 print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)

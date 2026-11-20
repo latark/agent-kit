@@ -240,8 +240,28 @@ def valid(req, fname):
         and (req.get("repo") is None or REPO_RE.fullmatch(str(req["repo"])) is not None)
 
 
-def read_json(d, fname):
-    raw = E().read_file(os.path.join(d, fname), limit=64 * 1024)
+def open_queue(win):
+    """Папка очереди → fd или None: каждая часть пути после корня (STATE, кэш окон) — O_NOFOLLOW, дальше файлы в ней
+    — только через этот fd (dir_fd), как owner_edit.open_queue: папку, подменённую ссылкой после открытия, проход не
+    видит."""
+    base, parts = (P.path(), ("secret", "queue")) if win is None else (E().caches(), (win, "secret"))
+    try:
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for part in parts:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def read_json(d, fname, dir_fd=None):
+    raw = E().read_file(fname if dir_fd is not None else os.path.join(d, fname), limit=64 * 1024, dir_fd=dir_fd)
     with contextlib.suppress(ValueError, TypeError):
         return json.loads(raw)
     return None
@@ -311,7 +331,7 @@ def ask_value(text):
     return out[1:].strip() if out.startswith("=") else None
 
 
-def settle(d, req, win, status, why=""):
+def settle(fd, req, win, status, why=""):
     res = {"id": req["id"], "status": status, "name": req["name"], "repo": req.get("repo"), "app": req.get("app"),
            "direction": req["direction"], "task": req["task"], "window": win, "why": why, "time": time.time()}
     if status == "waiting":
@@ -320,29 +340,29 @@ def settle(d, req, win, status, why=""):
         os.makedirs(P.path("logs"), exist_ok=True)
         with open(P.path("logs", "secret.jsonl"), "a") as fh:
             fh.write(json.dumps(res, ensure_ascii=False) + "\n")
-    E().write_atomic(os.path.join(d, f"{req['id']}.result.json"), res)
+    E().write_atomic(f"{req['id']}.result.json", res, dir_fd=fd)
     if status in FINAL:
         with contextlib.suppress(OSError):
-            os.unlink(os.path.join(d, f"{req['id']}.req.json"))
+            os.unlink(f"{req['id']}.req.json", dir_fd=fd)
 
 
-def handle(d, win, fname):
-    """Одна заявка → итог или None (ждёт: владельца нет у Mac, окно закрыто без ответа недавно)."""
-    req = read_json(d, fname)
+def handle(fd, win, fname):
+    """Одна заявка (папка — fd очереди) → итог или None (ждёт: владельца нет у Mac, окно закрыто без ответа недавно)."""
+    req = read_json(None, fname, dir_fd=fd)
     if not valid(req, fname):
         with contextlib.suppress(OSError):
-            os.unlink(os.path.join(d, fname))
+            os.unlink(fname, dir_fd=fd)
         return "refused"
-    prev = read_json(d, f"{req['id']}.result.json") or {}
+    prev = read_json(None, f"{req['id']}.result.json", dir_fd=fd) or {}
     if prev.get("status") in FINAL or prev.get("retry_after", 0) > time.time():
         return None
     with contextlib.suppress(OSError):
-        if time.time() - min(req["created"], os.stat(os.path.join(d, fname)).st_ctime) > REQ_TTL:
-            settle(d, req, win, "dropped", "владелец не ответил за сутки")
+        if time.time() - min(req["created"], os.stat(fname, dir_fd=fd, follow_symlinks=False).st_ctime) > REQ_TTL:
+            settle(fd, req, win, "dropped", "владелец не ответил за сутки")
             return "dropped"
     repo, code = pick_repo("run", req["direction"], req.get("repo"))
     if code is not None:
-        settle(d, req, win, "refused", "проект не из направления")
+        settle(fd, req, win, "refused", "проект не из направления")
         return "refused"
     if P.idle_sec() > E().PRESENT_SEC:
         return None
@@ -351,35 +371,42 @@ def handle(d, win, fname):
     rc = touch_window(f"Ввести ключ {req['name']} проекта {repo}{app} направления {req['direction']} — задача "
                       f"{req['task']}, {where}. Значение введёте в следующем окне, роль его не увидит.")
     if rc == 3:
-        settle(d, req, win, "waiting", "окно Touch ID закрыто без ответа")
+        settle(fd, req, win, "waiting", "окно Touch ID закрыто без ответа")
         return None
     if rc != 0:
-        settle(d, req, win, "declined" if rc == 1 else "failed",
+        settle(fd, req, win, "declined" if rc == 1 else "failed",
                "отказ в окне Touch ID" if rc == 1 else "окно Touch ID не показать")
         return "declined" if rc == 1 else "failed"
     value = ask_value(f"{req['name']} для {repo}{app} (задача {req['task']}). Ввод не виден; значение получат "
                       "`outside serve` и `outside login` вне окна роли.")
     if value is None:
-        settle(d, req, win, "waiting", "окно ввода закрыто без ответа")
+        settle(fd, req, win, "waiting", "окно ввода закрыто без ответа")
         return None
     if not value or any(c in value for c in "\r\n\0"):
-        settle(d, req, win, "declined", "отмена или пустой ввод" if not value else "значение не одной строкой")
+        settle(fd, req, win, "declined", "отмена или пустой ввод" if not value else "значение не одной строкой")
         return "declined"
     if write_key(O.env_names(repo, req.get("app"))[-1], req["name"], value) is None:
-        settle(d, req, win, "failed", "файл ключей не записан")
+        settle(fd, req, win, "failed", "файл ключей не записан")
         return "failed"
-    settle(d, req, win, "done", "ключ записан")
+    settle(fd, req, win, "done", "ключ записан")
     return "done"
 
 
 def pending():
-    for d, _ in queue_dirs():
-        with contextlib.suppress(OSError):
-            for f in os.listdir(d):
+    for _, win in queue_dirs():
+        fd = open_queue(win)
+        if fd is None:
+            continue
+        try:
+            for f in os.listdir(fd):
                 if f.endswith(".req.json"):
-                    res = read_json(d, f.replace(".req.json", ".result.json")) or {}
+                    res = read_json(None, f.replace(".req.json", ".result.json"), dir_fd=fd) or {}
                     if res.get("status") not in FINAL and res.get("retry_after", 0) <= time.time():
                         return True
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
     return False
 
 
@@ -390,14 +417,25 @@ def cmd_run(args):
     if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
         err("pantheon secret run: проход — только плановый проход, не окно Claude Code")
         return 1
+    why = P.merge_mod().clean_env()   # HOME, STATE и PATH — с нуля, не из launchd-окружения (как owner-edit run)
+    if why:
+        err(f"pantheon secret run: {why} — окружение прохода подменено, прохода нет")
+        return 1
     with P.lock("secret-run", block=False) as got:
         if not got:
             return 0
-        for d, win in queue_dirs():
-            with contextlib.suppress(OSError):
-                for f in sorted(os.listdir(d)):
+        for _, win in queue_dirs():
+            fd = open_queue(win)
+            if fd is None:
+                continue
+            try:
+                for f in sorted(os.listdir(fd)):
                     if f.endswith(".req.json"):
-                        handle(d, win, f)
+                        handle(fd, win, f)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
     return 0
 
 
