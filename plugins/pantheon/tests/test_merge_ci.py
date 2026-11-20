@@ -185,6 +185,64 @@ def test_gate_no_ci_window():
     check("gate смотрит workflows и на head PR", got.get("head") is True, got)
 
 
+def test_gate_ci_full():
+    """metis-1305, Б2 argus #523: у репозитория из CI_FULL_TESTS gate() без записи tests пускает, только если все
+    обязательные проверки для base PR — SUCCESS запуска от pull_request на head (ci_full_tests). Ветка эпика
+    (обязательных нет) при зелёном rollup, красная или дубль с красной — fail, идёт — wait; agent-kit без записи — fail
+    сразу. Проект вымышленный (owner-x/proj), таблицы подменены, как в тестах шлюза guard."""
+    code = (
+        "import sys, json, importlib.util, subprocess, types, hashlib\n"
+        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+        "s.loader.exec_module(m)\n"
+        "H = 'a' * 40\n"
+        "m.subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, '', 'gh: Not Found (HTTP 404)\\n')\n"
+        "key = 'sha256:' + hashlib.sha256(b'owner-x/proj').hexdigest()\n"
+        "m.REQUIRED_CHECKS = dict(m.REQUIRED_CHECKS, **{key: (('tests', 'checks', 'develop'), "
+        "('tests', 'checks', 'main'))})\n"
+        "m.CI_FULL_TESTS = {key: 'metis-1305: проба'}\n"
+        "m.code_facts = lambda *a: (set(), set(), [])\n"
+        "def run(concl='SUCCESS', status='COMPLETED', w='tests', j='checks'):\n"
+        "    return {'workflowName': w, 'name': j, 'status': status, 'conclusion': concl, 'event': 'pull_request'}\n"
+        "def gate(repo, base, runs, tests=False):\n"
+        "    def acc(sid): return {'kind': 'accept', 'pr': 7, 'sha': H, 'base': base,\n"
+        "                          'by': {'agent_type': 'argus', 'session_id': sid, 'agent_id': sid}}\n"
+        "    recs = ([{'kind': 'tests', 'sha': H}] if tests else []) + [acc('s1'), acc('s2')]\n"
+        "    m.P = types.SimpleNamespace(review_records=lambda repo: recs, review_accept_counts=lambda r: True)\n"
+        "    m.ci_runs_fetch = lambda *a, **k: runs\n"
+        "    rollup = [{k: v for k, v in c.items() if k != 'event'} for c in runs]\n"
+        "    view = {'headRefOid': H, 'state': 'OPEN', 'isDraft': False, 'baseRefName': base,\n"
+        "            'statusCheckRollup': rollup, 'title': 'T'}\n"
+        "    return list(m.gate(repo, 7, H, view))\n"
+        "kit = [run(w=w, j=j) for w, j in m.required_checks('latark/agent-kit', 'main')]\n"
+        "print(json.dumps({'ok_dev': gate('owner-x/proj', 'develop', [run()]),\n"
+        "    'ok_main': gate('owner-x/proj', 'main', [run()]),\n"
+        "    'epic': gate('owner-x/proj', 'epic-1', [run()]),\n"
+        "    'red': gate('owner-x/proj', 'develop', [run('FAILURE')]),\n"
+        "    'dup': gate('owner-x/proj', 'develop', [run(), run('FAILURE')]),\n"
+        "    'pend': gate('owner-x/proj', 'develop', [run('', 'IN_PROGRESS')]),\n"
+        "    'kit': gate('latark/agent-kit', 'main', kit),\n"
+        "    'epic_tests': gate('owner-x/proj', 'epic-1', [run()], tests=True)}, ensure_ascii=False))\n"
+        % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    try:
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        got = {}
+    st = {k: v[0] for k, v in got.items()}
+    want = {"ok_dev": "ok", "ok_main": "ok", "epic": "fail", "red": "fail", "dup": "fail", "pend": "wait",
+            "kit": "fail", "epic_tests": "ok"}
+    check("gate CI_FULL_TESTS без записи tests: обязательные SUCCESS — ok; ветка эпика, красная, дубль с красной — "
+          "fail; идёт — wait; agent-kit — fail; запись есть — ok", st == want,
+          {k: (want.get(k), got.get(k)) for k in want if st.get(k) != want[k]} or r.stdout + r.stderr)
+    check("gate: ветка эпика без записи — отказ называет CI_FULL_TESTS",
+          "нет записи тестов шлюза" in (got.get("epic") or ["", ""])[1]
+          and "CI_FULL_TESTS" in (got.get("epic") or ["", ""])[1], got.get("epic"))
+    check("gate: agent-kit без записи — прежний отказ «нет записи тестов шлюза»",
+          (got.get("kit") or ["", ""])[1] == "нет записи тестов шлюза на " + "a" * 12, got.get("kit"))
+    check("gate: дубль с красной — отказ по красной обязательной",
+          "FAILURE" in (got.get("dup") or ["", ""])[1], got.get("dup"))
+
+
 def test_ci_billing():
     """metis-0655: CI не запускался из-за лимита минут или оплаты (FAILURE с аннотацией лимита у красных
     обязательных) — проход засчитывает вместо CI запись тестов шлюза на SHA (она нужна и так) и сливает; окно

@@ -882,6 +882,38 @@ def t_ci_full_tests(h):
     check("_ci_problem: запись есть (no_tests нет) — пропуск без строки «засчитан CI»",
           got[0] is None and not any("засчитан" in n for n in got[1]), got)
 
+    # gate_problem целиком (Б1 argus #523): «принять» argus на head есть, gh — подменой _pr_view и _ci_runs. Ловит
+    # мутанты: no_tests не передан в _ci_problem (ветка эпика прошла бы без записи) и безусловный ранний отказ «нет
+    # записи тестов» (проект не прошёл бы при зелёном CI)
+    import types
+    mg.G = types.SimpleNamespace(allow=lambda notes: ("allow", tuple(notes)))
+    policy = {"merge_repos": {"metis-pantheon": ["owner-x/proj"]}}
+
+    def gate(base, runs, tests=False):
+        mg._ci_runs = lambda *a, **k: runs
+        rollup = [{k: v for k, v in c.items() if k != "event"} for c in runs]
+        mg._pr_view = lambda *a, **k: {"headRefOid": sha, "baseRefOid": BASE, "baseRefName": base,
+                                       "statusCheckRollup": rollup, "changedFiles": 1}
+        recs = [rec("accept", "owner-x/proj", 7, sha, base=base)]
+        if tests:
+            recs.insert(0, rec("tests", "owner-x/proj", None, sha, "dev-opus"))
+        mg.read_records = lambda: recs
+        return mg.gate_problem({"session_id": "s-merge", "agent_id": "m1"}, policy, "metis-pantheon",
+                               ["owner-x/proj"], [7], False, [sha], "СОВЕТ", False)
+
+    got = gate("develop", [ok])
+    check("gate_problem: проект, база develop, обязательные SUCCESS, записи tests нет — пропуск «засчитан CI»",
+          isinstance(got, tuple) and any("засчитан зелёный обязательный CI" in n for n in got[1]), got)
+    got = gate("epic-1", [ok])
+    check("gate_problem: проект, база epic-1 (обязательных нет), rollup зелёный, записи нет — отказ «нет записи тестов»",
+          isinstance(got, str) and got.startswith(f"нет записи тестов на owner-x/proj@{sha[:12]}"), got)
+    got = gate("develop", [ok, run("FAILURE")])
+    check("gate_problem: проект, дубль обязательной с красной, записи нет — отказ по красной",
+          isinstance(got, str) and "красная: FAILURE" in got, got)
+    got = gate("epic-1", [ok], tests=True)
+    check("gate_problem: проект, база epic-1, запись tests есть — пропуск без «засчитан CI»",
+          not isinstance(got, str) and not any("засчитан" in n for n in (got or ("", ()))[1]), got)
+
     # шлюз целиком: agent-kit, CI зелёный, «принять» есть, записи tests нет — отказ, как раньше
     kit = "projects/agent-kit"
     h.seed(rec("accept", "latark/agent-kit", 7, sha))
