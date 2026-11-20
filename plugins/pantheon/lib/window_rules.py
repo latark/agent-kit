@@ -6,7 +6,6 @@
 pantheon.py (`pantheon domains build`) по пути файла — python3 -I не кладёт папку скрипта в путь импорта.
 """
 
-import posixpath
 import re
 import shlex
 
@@ -331,7 +330,14 @@ def keychain_denied(deny_read, home):
         p = home + p[1:] if p == "~" or p.startswith("~/") else p
         if not p.startswith("/"):
             continue
-        p = posixpath.normpath("/" + p.lstrip("/"))
+        segs = []
+        for seg in p.split("/"):  # нормализация вручную: «..» снимает сегмент, «.» и пустые пропускаются
+            if seg == "..":
+                if segs:
+                    segs.pop()
+            elif seg not in ("", "."):
+                segs.append(seg)
+        p = "/" + "/".join(segs)
         if p == kc or kc.startswith(p.rstrip("/") + "/") or p.startswith(kc + "/"):
             return True
     return False

@@ -209,11 +209,18 @@ def _review_verdict(sub, args):
     return pos, {k: v for k, v in checklist.items() if v}, None
 
 
+# как outside.GIT_SAFE (импорт из outside дал бы цикл): git окна с закрытой Связкой идёт мимо песочницы (metis-1279),
+# значит конфиг и объекты репозитория не должны запускать код (fsmonitor, hooks) и подменять объекты (replace).
+REVIEW_GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c",
+                   "protocol.allow=never", "-c", "submodule.recurse=false")
+
+
 def _review_git(*args):
-    """Вывод git в текущей папке (без переменных GIT_*); None — не репозиторий или сбой."""
+    """Вывод git в текущей папке (без переменных GIT_*, с REVIEW_GIT_SAFE); None — не репозиторий или сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=30, env=env)
+        r = subprocess.run(["git", *REVIEW_GIT_SAFE, *args], capture_output=True, text=True, timeout=30,
+                           env=env)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
