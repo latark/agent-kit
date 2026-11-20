@@ -6471,7 +6471,8 @@ def roles_newest():
 def owner_approved(name, days=14):
     """Ваше «да» новому направлению: в журнале доски owner-log/board.jsonl (его пишет тик по вашей галочке, роли туда
     не пишут) ответ «Да…» на вопрос «Завести направление <имя>?»; ответу не больше days дней. Текст вопроса тик берёт
-    из отмеченной вами карточки (её рисует тик) — правка файла задачи до или после ответа ничего не меняет."""
+    из отмеченной вами карточки (её рисует тик) — правка файла задачи до или после ответа ничего не меняет. Второй
+    источник — ваш ответ в окне вопросов Зевса в owner-log/zeus.md (owner_approved_zeus, metis-1271)."""
     since = now() - days * 86400
     # вопрос — ровно «Завести направление <имя>?» в начале, без скрытого Obsidian текста (%%…%%, <!-- -->, теги):
     # имя должно быть там, где вы его видите; ответ — «Да» отдельным словом («Давай позже» — не согласие)
@@ -6479,8 +6480,8 @@ def owner_approved(name, days=14):
     yes = re.compile(r"да(?![а-яёa-z0-9])", re.I)
     try:
         lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
-    except OSError:
-        return False
+    except (OSError, UnicodeDecodeError):
+        lines = []   # доски нет или не читается — остаётся ответ в окне вопросов (metis-1271)
     for line in lines:
         try:
             rec = json.loads(line)
@@ -6490,6 +6491,34 @@ def owner_approved(name, days=14):
         q = rec.get("question")
         if (rec.get("kind") == "answer" and ts >= since and isinstance(q, str) and ask.match(q.strip())
                 and not re.search(r"%%|<", q) and yes.match(str(rec.get("answer") or "").strip())):
+            return True
+    return owner_approved_zeus(name, since)
+
+
+# вопрос Зевса окном вопросов (metis-1271): «[<id>] Завести направление <имя>?» или «Завести направления a, b и c — …?»
+DIRECTION_ASK_ZEUS = re.compile(r"вопрос: \[[a-z0-9][a-z0-9-]{0,40}\][ \t]*Завести направлени[ея] ")
+
+
+def owner_approved_zeus(name, since):
+    """Ваше «да» новому направлению в owner-log/zeus.md (пишет хук, роли туда не пишут): запись с пометкой «окно
+    вопросов» или «ответ в чате» (answers.is_answer_head), вопрос «[<id>] Завести направлени(е|я) …», имя целым словом
+    в части вопроса до первого «?», без скрытого текста (%%, <), ответ — «да» по consent_is_yes и не раньше since.
+    Записи без пометки (ваш набранный ввод, цитаты), «ответ в чате не распознан» — не согласие. Журнал не читается —
+    False."""
+    try:
+        text = zeus_log_text("direction " + name)
+    except ConsentLogError:
+        return False
+    A = answers_mod()
+    word = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+    for at, rest, body in log_entries(text):
+        try:
+            t = time.mktime(time.strptime(at, "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        q = body.split("\nответ:")[0]
+        if (t >= since and A.is_answer_head(rest) and DIRECTION_ASK_ZEUS.match(body)
+                and word.search(q.split("?", 1)[0]) and not re.search(r"%%|<", q) and consent_is_yes(body)):
             return True
     return False
 
@@ -6593,8 +6622,10 @@ def direction_gate(name):
             and "Ваши слова" in l]
     add(said, "ваше «да» в decisions.md: строка с именем направления и «Ваши слова»")
     # decisions.md пишет Зевс — сама строка не доказательство; текст реплики тоже (простое «да» подошло бы к любому
-    # вопросу). Доказательство — ваша галочка на карточке «Завести направление <имя>?» в журнале доски.
-    add(owner_approved(name), "ваша галочка «Да…» на карточке с этим именем в журнале доски (не старше 14 дней)")
+    # вопросу). Доказательство — ваша галочка на карточке «Завести направление <имя>?» в журнале доски или ваш выбор
+    # «Да…» в окне вопросов Зевса на вопрос «[<id>] Завести направлени(е|я) …» (owner-log/zeus.md, metis-1271).
+    add(owner_approved(name), "ваше «Да…» в окне вопросов или галочка на карточке с этим именем "
+                              "(не старше 14 дней)")
     try:
         with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
             reg = {d.get("name"): d for d in tomllib.load(fh).get("direction") or []}

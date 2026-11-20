@@ -17,7 +17,7 @@ __all__ = [
     "CONSENT_RESTART_Q", "restart_q_names", "CONSENT_PUSH_Q", "push_question", "CONSENT_BUT", "consent_last",
     "STANDING_CLASSES", "STANDING_STRICT", "standing_strict", "standing_policy", "standing_class", "standing_state",
     "CONSENT_ANSWER", "CONSENT_YES", "CONSENT_NO", "consent_is_yes", "ConsentLogError", "consent_found", "consent", "approvals_load", "toml_str",
-    "approve",
+    "approve", "zeus_log_text", "log_entries",
 ]
 
 
