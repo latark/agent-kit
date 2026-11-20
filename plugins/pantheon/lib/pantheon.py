@@ -4541,6 +4541,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
+            # metis-1279: пакет закрыл песочнице Связку — gh шлюза (review accept|delta) мимо неё (window_rules)
+            ex = data["sandbox"]["excludedCommands"]
+            ex += WINDOW_RULES.review_gh_out(data["sandbox"].get("filesystem", {}).get("denyRead"), HOME, ex)
             pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
