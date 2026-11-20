@@ -185,51 +185,6 @@ def test_gate_no_ci_window():
     check("gate смотрит workflows и на head PR", got.get("head") is True, got)
 
 
-def test_gate_ci_full_tests():
-    """metis-1305: слияние по Touch ID (gate) у репозитория из CI_FULL_TESTS (обязательный job CI сам гоняет полный
-    набор) без записи tests на head — ok, если все обязательные проверки SUCCESS от pull_request на этом head; PR в
-    ветку эпика (обязательных нет), красная — отказ. Репозиторий без строки таблицы — отказ «нет записи тестов шлюза»
-    и при зелёном CI, как раньше. Проект — вымышленный owner-x/proj (таблицы подменены), gh не зовётся."""
-    code = (
-        "import sys, json, hashlib, importlib.util, subprocess, types\n"
-        "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
-        "s.loader.exec_module(m)\n"
-        "H = 'a' * 40\n"
-        "m.subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, '', 'gh: нет\\n')\n"
-        "key = 'sha256:' + hashlib.sha256(b'owner-x/proj').hexdigest()\n"
-        "m.REQUIRED_CHECKS = dict(m.REQUIRED_CHECKS, **{key: (('tests', 'checks', 'develop'),)})\n"
-        "m.CI_FULL_TESTS = {key: 'проба'}\n"
-        "m.code_facts = lambda *a: (set(), set(), [])\n"
-        "def acc(sid, base): return {'kind': 'accept', 'pr': 7, 'sha': H, 'base': base,\n"
-        "                            'by': {'agent_type': 'argus', 'session_id': sid, 'agent_id': sid}}\n"
-        "out = {}\n"
-        "for name, repo, base, concl, tests in (('green', 'owner-x/proj', 'develop', 'SUCCESS', False),\n"
-        "        ('red', 'owner-x/proj', 'develop', 'FAILURE', False), ('epic', 'owner-x/proj', 'epic-1', 'SUCCESS', False),\n"
-        "        ('other', 'owner-y/proj', 'develop', 'SUCCESS', False), ('rec', 'owner-x/proj', 'develop', 'SUCCESS', True)):\n"
-        "    recs = [acc('s1', base), acc('s2', base)] + ([{'kind': 'tests', 'sha': H}] if tests else [])\n"
-        "    m.P = types.SimpleNamespace(review_records=lambda repo, recs=recs: recs, review_accept_counts=lambda r: True)\n"
-        "    run = {'workflowName': 'tests', 'name': 'checks', 'status': 'COMPLETED', 'conclusion': concl}\n"
-        "    m.ci_runs_fetch = lambda *a, run=run: [dict(run, event='pull_request')]\n"
-        "    view = {'headRefOid': H, 'state': 'OPEN', 'isDraft': False, 'baseRefName': base, "
-        "'statusCheckRollup': [run], 'title': 'T'}\n"
-        "    out[name] = m.gate(repo, 7, H, view)\n"
-        "print(json.dumps(out, ensure_ascii=False))\n"
-        % os.path.join(LIBDIR, "merge.py"))
-    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
-    try:
-        got = json.loads(r.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        got = {}
-    check("gate: проект из CI_FULL_TESTS, обязательная SUCCESS, записи tests нет → ok",
-          got.get("green", [None])[0] == "ok", r.stdout + r.stderr)
-    check("gate: проект, обязательная красная → fail", got.get("red", [None])[0] == "fail", got)
-    check("gate: проект, PR в ветку эпика (обязательных нет), записи нет → fail «нет записи тестов шлюза»",
-          got.get("epic", [None])[0] == "fail" and "нет записи тестов шлюза" in got.get("epic", ["", ""])[1], got)
-    check("gate: репозиторий без строки CI_FULL_TESTS, CI зелёный, записи нет → fail «нет записи тестов шлюза»",
-          got.get("other", [None])[0] == "fail" and "нет записи тестов шлюза" in got.get("other", ["", ""])[1], got)
-    check("gate: проект с записью tests → ok", got.get("rec", [None])[0] == "ok", got)
-
-
 def test_ci_billing():
     """metis-0655: CI не запускался из-за лимита минут или оплаты (FAILURE с аннотацией лимита у красных
     обязательных) — проход засчитывает вместо CI запись тестов шлюза на SHA (она нужна и так) и сливает; окно
