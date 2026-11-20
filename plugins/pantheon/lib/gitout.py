@@ -53,7 +53,8 @@ PROTECTED = {"main", "master"}
 BAD_KEY = re.compile(r"(?:include|includeif)\..*|url\..*\.(?:insteadof|pushinsteadof)"
                      r"|remote\..*\.(?:uploadpack|receivepack|pushurl|proxy|vcs|mirror)|credential\..*"
                      r"|core\.(?:hookspath|fsmonitor|sshcommand|pager|gitproxy|askpass|alternaterefscommand|editor|worktree)"
-                     r"|protocol\..*|http\..*proxy.*|extensions\.worktreeconfig")
+                     r"|protocol\..*|http\..*proxy.*|extensions\.worktreeconfig"
+                     r"|http\..*(?:sslverify|curloptresolve|sslcainfo|sslcapath)")  # подмена адреса и TLS (argus #507)
 FOREIGN_OBJECTS = ("objects/info/alternates", "objects/info/http-alternates", "info/grafts")
 USAGE = ("pantheon git push <remote> <источник>:<ветка>... | fetch [<remote> [<refspec>...]] — "
          "git мимо песочницы без хуков и конфига папки окна")

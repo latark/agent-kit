@@ -335,6 +335,7 @@ def main():
                  "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands",
                  "not `main`, `master` or the repository's default branch",
                  "to the `origin` remote of one of this direction's repositories (",
+                 "(1) `pantheon git push origin HEAD:<branch>` or `pantheon git push ",  # metis-0972: голый git push guard запрещает
                  "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)"):
         check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
     check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",

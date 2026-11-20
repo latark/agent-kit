@@ -189,6 +189,10 @@ conf_case("insteadof", [("url./tmp/x.insteadOf", "https://github.com/")], "url\\
           "url.*.insteadOf в конфиге — отказ")
 conf_case("recvpack", [("remote.origin.receivepack", f"touch {MARK}")],
           "uploadpack|receivepack|", "remote.*.receivepack в конфиге — отказ")
+conf_case("sslverify", [("http.https://github.com/.sslVerify", "false")],
+          "|http\\..*(?:sslverify|curloptresolve|sslcainfo|sslcapath)", "http.*.sslVerify в конфиге — отказ")
+conf_case("resolve", [("http.curloptResolve", "github.com:443:127.0.0.1")],
+          "|http\\..*(?:sslverify|curloptresolve|sslcainfo|sslcapath)", "http.curloptResolve в конфиге — отказ")
 
 # --- 6. gitfile и --separate-git-dir, подменённый .git копии, ссылка
 sep_wt = os.path.join(ROOT, "sepwt")
