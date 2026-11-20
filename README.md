@@ -869,6 +869,11 @@
   `SANDBOX_ROOTS`: подпапки `~/projects` и `~/ai/life`, а также `~/ai/knowledge`, `~/ai/workshop`, `~/ai/agent-kit`.
   `pantheon direction init` заводит папку в `~/projects/<имя>` или в `~/ai/life/<имя>`: в обоих случаях свой git
   (`git init`, main, AGENTS.md, локальный коммит). Сам `~/ai/life` — простая папка без `.git`, создаётся при первом направлении.
+- Карта «что где» (`lib/layout.py`, metis-0899): `pantheon layout` печатает её и папки вне неё (код 1 — такие есть).
+  Вне раскладки: `~/ai/<x>` не из карты, `.git` у самой `~/ai/life`, область `~/ai/life/<x>` без своего git или
+  ссылкой, `~/projects/<x>` не из папок `directions.toml` (кроме `other/`, `archive/` и старой папки несделанного
+  переноса), папка направления вне карты или в `~/projects/archive`. `pantheon check` — предупреждение, в плановом
+  проходе — тревога `check-layout`; `pantheon direction check` — строка «папки по карте». Код `check` не меняет.
 - `board_drift` в `plugins/pantheon/lib/pantheon.py` — проверка доски в `pantheon check` (metis-0441): три
   расхождения, видимые в Obsidian. Статус задачи против PR (кэш `autoclose-prs.json`): PR открыт и закрывает задачу (`closes`, не «часть <id>»), а задача todo/done; PR слит
   (закрывающий, не «часть <id>»), а задача doing/review. Вопрос владельцу отвечен (окно вопросов, ответ в чате или галочка, как у
