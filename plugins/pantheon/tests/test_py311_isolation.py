@@ -190,6 +190,134 @@ def test_py311_import_isolates_process_env_1308():
     check(codex is None and node and nvm_dir != nvm, f"1308: импорт _py311 — {r.stdout[-300:]!r} {r.stderr[-300:]!r}")
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+RUN_TESTS = os.path.join(ROOT, "scripts", "run-tests.py")
+MIRROR_RE = "py311-path-"
+
+
+def _import_py311(e, path, body="", tmp=None):
+    """Подпроцесс, который импортирует _py311 с данным PATH и TMPDIR (по умолчанию e.tmp/mirror-tmp), выполняет body и
+    печатает: «DIRS <json: папки py311-path-* в TMPDIR на момент после body>» → (результат, TMPDIR)."""
+    tmp = tmp or os.path.join(e.tmp, "mirror-tmp")
+    os.makedirs(tmp, exist_ok=True)
+    code = ("import json, os, sys; sys.path.insert(0, sys.argv[1]); import _py311\n" + body +
+            "\nprint('DIRS', json.dumps(sorted(n for n in os.listdir(sys.argv[2]) if n.startswith('py311-path-'))), "
+            "flush=True)\n")
+    env = {"PATH": path, "HOME": e.home, "TMPDIR": tmp}
+    r = subprocess.run([PY_REAL, "-I", "-c", code, HERE, tmp], env=env, capture_output=True, text=True, timeout=60)
+    return r, tmp
+
+
+def _dirs(r):
+    for line in r.stdout.splitlines():
+        if line.startswith("DIRS "):
+            return json.loads(line[5:])
+    return ["нет строки DIRS: " + r.stdout[-200:] + r.stderr[-300:]]
+
+
+def _tools_dir(e, name="tools-bin", tool="codex"):
+    d = os.path.join(e.tmp, name)
+    os.makedirs(d, exist_ok=True)
+    for n in (tool, "node"):
+        open(os.path.join(d, n), "w").close()
+    return d
+
+
+def test_mirror_dir_only_when_tools_on_path_1309():
+    """metis-1309: нечего зеркалить (в PATH нет claude и codex) — папки py311-path-* нет совсем; есть codex — одна папка
+    с pid процесса в имени, пока процесс жив."""
+    e = Env()
+    clean = os.path.join(e.tmp, "clean-bin")
+    os.makedirs(clean)
+    r, _ = _import_py311(e, f"{clean}:/usr/bin:/bin")
+    check(_dirs(r) == [], f"1309: без claude/codex в PATH создана папка: {_dirs(r)}")
+    r, _ = _import_py311(e, f"{_tools_dir(e)}:/usr/bin:/bin", "print('PID', os.getpid())")
+    pid = next((ln.split()[1] for ln in r.stdout.splitlines() if ln.startswith("PID ")), "?")
+    got = _dirs(r)
+    check(len(got) == 1 and got[0].startswith(f"{MIRROR_RE}{pid}-"), f"1309: с codex в PATH — {got}, pid {pid}")
+
+
+def test_mirror_dir_gone_after_exit_and_fork_keeps_it_1309():
+    """metis-1309: после выхода процесса папки зеркала нет (atexit); копия процесса (fork) с sys.exit её не сносит у
+    родителя (проверка pid создателя)."""
+    e = Env()
+    path = f"{_tools_dir(e)}:/usr/bin:/bin"
+    body = ("kids = os.fork()\n"
+            "if kids == 0:\n    sys.exit(0)\n"
+            "os.waitpid(kids, 0)\n"
+            "print('AFTER_FORK', json.dumps(sorted(n for n in os.listdir(sys.argv[2]) if n.startswith('py311-path-'))))\n")
+    r, tmp = _import_py311(e, path, body)
+    after_fork = next((json.loads(ln[11:]) for ln in r.stdout.splitlines() if ln.startswith("AFTER_FORK ")), None)
+    check(after_fork and len(after_fork) == 1, f"1309: fork-копия снесла папку родителя: {after_fork} {r.stderr[-300:]!r}")
+    left = [n for n in os.listdir(tmp) if n.startswith(MIRROR_RE)]
+    check(not left, f"1309: после выхода процесса папка осталась: {left}")
+
+
+def _load_runner():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_tests_1309", RUN_TESTS)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _dead_pid():
+    p = subprocess.Popen([PY_REAL, "-I", "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def test_sweep_py311_mirrors_only_abandoned_own_dirs_1309():
+    """metis-1309: чистка раннера убирает папки мёртвого создателя, старше суток (даже при живом pid) и без pid в имени
+    старше суток; не трогает живого создателя, свежую без pid, ссылку, файл и чужие по имени."""
+    e = Env()
+    tmp = os.path.join(e.tmp, "sweep-tmp")
+    os.makedirs(tmp)
+    R = _load_runner()
+    now = 2_000_000_000.0
+    old = now - R.MIRROR_MAX_AGE - 10
+
+    def mk(name, mtime=now, kind="dir"):
+        p = os.path.join(tmp, name)
+        if kind == "dir":
+            os.makedirs(os.path.join(p, "bin0"))
+            os.symlink("/usr/bin/env", os.path.join(p, "bin0", "env"))
+        else:
+            open(p, "w").close()
+        os.utime(p, (mtime, mtime))
+        return p
+    mk(f"{MIRROR_RE}{_dead_pid()}-dead")
+    mk(f"{MIRROR_RE}{os.getpid()}-live")
+    mk(f"{MIRROR_RE}{os.getpid()}-live-old", old)
+    mk(f"{MIRROR_RE}nopid1", old)
+    mk(f"{MIRROR_RE}nopid2")
+    mk("other-dir")
+    mk(f"{MIRROR_RE}file", kind="file")
+    target = os.path.join(e.tmp, "link-target")
+    os.makedirs(target)
+    open(os.path.join(target, "keep"), "w").close()
+    os.symlink(target, os.path.join(tmp, f"{MIRROR_RE}{_dead_pid()}-link"))
+    n = R.sweep_py311_mirrors(tmp, now)
+    left = sorted(os.listdir(tmp))
+    want = sorted([f"{MIRROR_RE}{os.getpid()}-live", f"{MIRROR_RE}nopid2", "other-dir", f"{MIRROR_RE}file"]
+                  + [x for x in left if x.endswith("-link")])
+    check(left == want and n == 3 and os.path.exists(os.path.join(target, "keep")),
+          f"1309: чистка — осталось {left}, убрано {n}, ждали {want} и 3")
+
+
+def test_run_tests_start_sweeps_killed_mirror_1309():
+    """metis-1309, целиком: процесс теста убит SIGKILL — папка зеркала остаётся; запуск run-tests.py её убирает."""
+    e = Env()
+    tmp = os.path.join(e.tmp, "kill-tmp")
+    r, _ = _import_py311(e, f"{_tools_dir(e)}:/usr/bin:/bin", "os.kill(os.getpid(), 9)", tmp)
+    left = [n for n in os.listdir(tmp) if n.startswith(MIRROR_RE)]
+    check(r.returncode == -9 and len(left) == 1, f"1309: после SIGKILL ждали одну папку: {r.returncode} {left}")
+    r = subprocess.run([PY_REAL, "-I", RUN_TESTS], env={"PATH": "/usr/bin:/bin", "HOME": e.home, "TMPDIR": tmp},
+                       capture_output=True, text=True, timeout=60)
+    left = [n for n in os.listdir(tmp) if n.startswith(MIRROR_RE)]
+    check(not left, f"1309: run-tests при старте не убрал папку: {left} {r.stderr[-300:]!r}")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
