@@ -427,7 +427,8 @@ def test_allow_target_1128():
     check(any(x.startswith("Разрешение до даты") and "только для dir-alpha, dir-beta" in x and
               "limit-0069-1611" in x for x in lines), f"1128: status: {lines}")
     # неделя дошла до pct разрешения — стоп и для названных
-    env(100.0, 100.0, sec=cap90 + al)
+    # metis-1128: линия 100 ставила сброс недели ровно на T — measure() считал неделю новой, расход неизвестным
+    env(100.0, 95.0, sec=cap90 + al)
     ok, why = N.gate("autostart", T, heavy=0, target="dir-alpha")
     check(not ok and "потолок владельца 100 %" in why, f"1128: на pct разрешения названному открыто: {ok} {why}")
     # красная зона при потолке 100 (hard_pct): названному запуск открыт, остальным красная держит

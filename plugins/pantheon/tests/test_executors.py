@@ -815,6 +815,9 @@ def tests():
     set_cfg("")
 
     # --- вызов --------------------------------------------------------------------------------------------------------
+    # metis-1272: блоки выше кончают set_cfg("") — Codex снова в наборе, иначе exec отказал бы кодом 3, а не проверкой папки
+    set_cfg(CODEX_ON)
+    scenario({})
     r = run("exec", "codex", TMP, BRIEF)
     check("exec не в папке git → код 2", r.returncode == 2, r.stderr)
     r = run("exec", "claude", TMP, BRIEF)

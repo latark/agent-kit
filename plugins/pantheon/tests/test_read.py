@@ -963,9 +963,11 @@ def test_approval_other_direction():
     b.answer(T0 + 1200, okq.replace("demo-dir", "other-dir"), "все")
     r = b.run(T0 + 1300)
     check("-ok с чужим направлением: ничего не передано", _no_delivery(b) and "ждёт решения" in r.stdout, r.stdout)
-    b.answer(T0 + 1400, f"[read-{rid}] Разрешить выгрузку: …", "Нет")   # без хеша заявки — не в счёт
+    # metis-1135: короткий вопрос без хеша теперь в счёт (хеш сверяет проход по своему вопросу), и «Нет» на него
+    # снимает согласие; не в счёт — вопрос с чужим хешем: владелец видел другую заявку
+    b.answer(T0 + 1400, f"[read-{rid}] Разрешить выгрузку: … хеш deadbeef0123", "Нет")
     r = b.run(T0 + 1500)
-    check("согласие без хеша не снимает разрешение", b.st(rid)["phase"] == "summarized", r.stdout)
+    check("согласие с чужим хешем не снимает разрешение", b.st(rid)["phase"] == "summarized", r.stdout)
 
 
 def test_summary_changed():

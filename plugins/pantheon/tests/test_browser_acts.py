@@ -1182,7 +1182,11 @@ check("[S6][metis-1120] КАД: «Найти» вне формы (пустая t
       res["state"] == "done" and "кнопка поиска" in res["text"] and len(D.clicked()) == 1 and not touches()
       and not mandates(), res)
 res = act("click", "#find", KAD)
-check("[S6][metis-1268] КАД: «Найти» через click — тоже без поручения", res["state"] == "done" and D.clicked(), res)
+# metis-1268 (87f6fc89): кнопка без формы-владельца раскрывается через click только по признаку раскрытия; у «Найти» его
+# нет — поиск идёт через submit (выше, без поручения), click отвечает «это submit» и не жмёт
+check("[S6][metis-1268] КАД: «Найти» через click — отказ «это submit», нажатия нет, поиск — через submit",
+      res["state"] == "refused" and "это submit" in res["why"] and "pantheon browser submit" in res["why"]
+      and not D.clicked(), res)
 res = act("submit", "#find-who", KAD)
 check("[S6] КАД: textarea участника заполнена — не свободный поиск: отказ по поручению, нажатия нет",
       res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), res)

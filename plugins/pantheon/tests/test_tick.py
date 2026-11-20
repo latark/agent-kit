@@ -671,17 +671,18 @@ def main():
           (("athena-shop", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
     gated = rule("athena-shop", "Pantheon Gated Merge:")
-    record = rule("athena-shop", "Pantheon Review Record:")
+    # metis-1135 [den-1135-mutant] («А — да» владельца 20.11): пробы тестов — сразу за Review Record у всех окон направлений
+    record = rule("athena-shop", "Pantheon Review Record:") + rule("athena-shop", "Pantheon Test Probes:")
     consent = rule("athena-shop", "Pantheon Consent Check:")  # metis-0161: сверка согласия — координаторам
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
-          all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
+          all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 2
           # metis-pantheon: ещё два правила направления из [auto_rules] policy.toml — Mailkeeper Read и Uv Sync (metis-0933)
           and len(rule("metis-pantheon", "Pantheon Mailkeeper Read:")) == 1 and len(rule("metis-pantheon", "Pantheon Uv Sync:")) == 1
-          and len(consent) == 1 and all(am[n][-2:] == record + consent for n in ("athena-shop", "metis-pantheon", "zz"))
-          and all(len(am[n]) == {"athena-shop": 5, "metis-pantheon": 7}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
+          and len(consent) == 1 and all(am[n][-3:] == record + consent for n in ("athena-shop", "metis-pantheon", "zz"))
+          and all(len(am[n]) == {"athena-shop": 6, "metis-pantheon": 8}[n] and len(rule(n, "Pantheon Gated Merge:")) == 1
                   and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
-                  == record for n in ("athena-shop", "metis-pantheon"))
+                  == record[:1] for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record + consent)
     check("сборка окна (metis-1135 А): правило Consent Check в autoMode окна называет `pantheon consent show` и "
           "`standing` и не считает санкцией echo, файл и чужой вывод",

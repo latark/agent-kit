@@ -626,7 +626,8 @@ def test_subagent_wait_card_and_zeus_1183():
                        ("чужое окно", _sub_env(session="other-sid", attach="other"))):
         env.run("watch", t=T0)
         env.run("watch", t=T0 + 360)
-        check(not _relayed(env) and "ждёт вас" not in env.alerts() and not _wait_cards(env),
+        # строка тревоги «<окно> (<id>) ждёт вас», а не голое «ждёт вас»: оно есть в шапке файла тревог (metis-1183)
+        check(not _relayed(env) and ") ждёт вас" not in env.alerts() and not _wait_cards(env),
               f"1183: {label} — окно объявлено ждущим: {env.calls()} {env.alerts()} {_wait_cards(env)}")
     # хук ещё ждёт (живая заявка) — Зевс спрошен заявкой: ни передачи, ни карточки; хук кончил — обычный путь
     e = _sub_env(status="waiting", deadline=T0 + 600)
@@ -647,7 +648,7 @@ def test_stale_touchid_not_waiting_1248():
     out = e.run("status", t=T0).stdout
     check("подтвердить #61" not in out and "вопрос устарел: 1" in out, f"1248: устаревший Touch ID в status: {out}")
     e.run("watch", t=T0)
-    check("ждёт вас" not in e.alerts() and not _relayed(e), f"1248: устаревший Touch ID — тревога или Зевсу: "
+    check(") ждёт вас" not in e.alerts() and not _relayed(e), f"1248: устаревший Touch ID — тревога или Зевсу: "
           f"{e.alerts()} {e.calls()}")
     # заявка на #62 в очереди (пачкой с #61) — вопрос живой
     e = _blocked_env(None, waiting="подтвердить #61 и #62 по Touch ID")
