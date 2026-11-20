@@ -2330,10 +2330,23 @@ def light_paths(repo, paths):
 
 
 def light_merged(req, view):
-    """Заявка вне ядра (отметка light — проход уже видел её без окна) и PR слит на её head: слил координатор шлюзом
-    guard или аварийно владелец — снять тихо, без тревоги «по Touch ID» (argus #519 Б1)."""
-    return (req.get("light") and isinstance(view, dict) and str(view.get("state") or "").upper() == "MERGED"
-            and str(view.get("headRefOid") or "").lower() == req["sha"])
+    """PR заявки вне ядра слит на её head мимо окна (координатор шлюзом guard или аварийно владелец) — снять тихо, без
+    тревоги «по Touch ID» (argus #519 Б1). Вне ядра — по отметке light прохода или, если проход её не успел поставить
+    (слили до первого прохода, пока CI шёл), по файлам PR сейчас; заявка с --restart — не лёгкая."""
+    if req.get("restart") or not isinstance(view, dict) or str(view.get("state") or "").upper() != "MERGED" \
+            or str(view.get("headRefOid") or "").lower() != req["sha"]:
+        return False
+    return bool(req.get("light")) or light_paths(req["repo"], pr_files(req["repo"], req["pr"], view))
+
+
+def unbatch(reqs):
+    """Отвязать заявки от пачки (PR пачки вне ядра слит мимо окна): дальше каждая — одиночная, без «пачка неполна».
+    Только если в очереди та же заявка (same_req)."""
+    with P.lock("merge-queue"):
+        for r in reqs:
+            if same_req(r):
+                r.pop("batch", None)
+                write_req(r)
 
 
 def mark_light(req):
@@ -2495,7 +2508,8 @@ def restart_after(req, phrase):
 def process(req, click):
     t = P.now()
     if t - req["created"] > REQUEST_TTL:
-        return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=not req.get("light"))   # вне ядра — дело координатора
+        return drop(req, "expired", f"{REQUEST_TTL // 3600} ч без ответа", warn=True,
+                    how="вне ядра — сливает координатор, не слил" if req.get("light") else "по Touch ID")
     # фраза владельца «слей #N <hex>» (metis-0959) — согласие без окна: ни повтора окна, ни щелчка, ни Mac рядом
     phrase = find_phrase(req)
     hold = None if click else ("ждёт: окно закрыто без ответа, повтор позже" if req.get("wait_until", 0) > t
@@ -2585,8 +2599,10 @@ def process_batch(reqs, click):
         state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
         if state == "fail":
             if light_merged(r, view):   # слит мимо окна PR пачки вне ядра — снять его тихо, остальные ждут дальше
+                rest = [x for x in reqs if x is not r]
+                unbatch(rest)
                 return [(r, drop(r, "merged-outside", "PR вне ядра слит без окна"))] + [
-                    (x, "ждёт: следующий проход") for x in reqs if x is not r]
+                    (x, "ждёт: отвязана от пачки — следующий проход") for x in rest]
             return drop_batch(reqs, "gate", f"#{r['pr']}: {why}", warn=True)
         if mark_wait(r, state, why):
             waits.append(f"#{r['pr']}: {why}")

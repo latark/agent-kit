@@ -509,8 +509,19 @@ def test_light_no_window():
     b.request()
     b.run()
     b.run(t=T0 + 25 * 3600)
-    check("вне ядра и никто не слил за сутки: заявка снята без тревоги владельцу", b.req() is None
-          and "expired" in b.log() and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
+    check("вне ядра и никто не слил за сутки: заявка снята, тревога «сливает координатор, не слил»", b.req() is None
+          and "expired" in b.log() and "сливает координатор, не слил" in b.alerts(), b.outs[-1] + b.alerts())
+    for name, checks in (("до первого прохода", None), ("пока CI шёл (проход видел только «ждёт»)",
+                                                         ci("PENDING", "SUCCESS"))):
+        b = Box()
+        b.view(SHA, files=["README.md"], checks=checks)
+        b.request()
+        if checks:
+            b.run()
+        b.view(SHA, files=["README.md"], state="MERGED")
+        b.run(t=T0 + 60)
+        check(f"вне ядра слит координатором {name}: снята тихо по файлам PR (argus #519 Б1)", b.req() is None
+              and "merged-outside" in b.log() and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
     b = Box()
     b.view(SHA, files=["README.md", CORE_FILE])
     b.request()

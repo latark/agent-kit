@@ -642,8 +642,13 @@ def test_batch_all_light_no_window():
           b.outs[-1])
     b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE, state="MERGED")
     b.run(t=T0 + 60)
-    check("PR пачки вне ядра слит координатором: снят тихо, второй ждёт", b.req(7) is None and b.req(8) is not None
-          and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
+    check("PR пачки вне ядра слит координатором: снят тихо, второй отвязан от пачки и ждёт", b.req(7) is None
+          and b.req(8) is not None and "batch" not in b.req(8) and "заявка снята" not in b.alerts(),
+          b.outs[-1] + b.alerts())
+    b.run(t=T0 + 120)
+    check("следующий проход: #8 — одиночная заявка вне ядра, ждёт; «пачка неполна» и тревоги нет",
+          b.req(8) is not None and "batch-broken" not in b.log() and "заявки сняты" not in b.alerts()
+          and "вне ядра — без Touch ID" in b.outs[-1], b.outs[-1] + b.alerts())
 
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
