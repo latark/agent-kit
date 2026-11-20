@@ -172,8 +172,10 @@ def read_target(rel):
 def settings_env_only(old, new):
     """~/.claude/settings.json: правка — только списка autoMode.environment (строки), прочее — то же по смыслу JSON.
     Права, хуки, песочница и остальные ключи autoMode этой заявкой не меняются никогда. Иначе Refuse."""
-    try:
-        a, b = json.loads(old), json.loads(new)
+    def bad_const(c):
+        raise ValueError(c)
+    try:   # NaN/Infinity — не JSON для Claude Code (проверка безопасности f25264b8)
+        a, b = (json.loads(t, parse_constant=bad_const) for t in (old, new))
     except ValueError:
         raise Refuse(f"~/{SETTINGS_REL}: не JSON") from None
     if not isinstance(a, dict) or not isinstance(b, dict):
@@ -181,6 +183,10 @@ def settings_env_only(old, new):
     env = (b.get("autoMode") or {}).get("environment") if isinstance(b.get("autoMode"), dict) else None
     if not isinstance(env, list) or not all(isinstance(x, str) for x in env):
         raise Refuse(f"~/{SETTINGS_REL}: autoMode.environment — не список строк")
+    for x in env:   # строка видна владельцу как есть: без \\u-кодов, невидимых знаков и переводов строки
+        if len(x) > 2000 or hidden_at(x, keep="") or json.dumps(x, ensure_ascii=False) not in new:
+            raise Refuse(f"~/{SETTINGS_REL}: строка autoMode.environment длиннее 2000 знаков, с невидимым знаком "
+                         "или записана \\u-кодами — в вопросе её не видно")
 
     def rest(o):
         o = json.loads(json.dumps(o))
@@ -189,7 +195,7 @@ def settings_env_only(old, new):
             if not o["autoMode"]:
                 o.pop("autoMode")
         return o
-    if rest(a) != rest(b):
+    if json.dumps(rest(a), sort_keys=True) != json.dumps(rest(b), sort_keys=True):   # true ≠ 1 (проверка безопасности)
         raise Refuse(f"~/{SETTINGS_REL}: меняется не только autoMode.environment — права, хуки и прочие ключи "
                      "этой заявкой не правятся")
 

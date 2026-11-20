@@ -1258,6 +1258,18 @@ check("settings.json: другой ключ autoMode — отказ", rc == 2 an
 rc, out, errs = propose("~/.claude/settings.json",
                         '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a", 1]}}\n')
 check("settings.json: environment не из строк — отказ", rc == 2 and "список строк" in errs and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/settings.json",
+                        '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a", "\\u0420\\u0430\\u0437"]}}\n')
+check("settings.json: строка \\u-кодами — отказ", rc == 2 and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/settings.json",
+                        '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a", "x\u200by"]}}\n')
+check("settings.json: невидимый знак в строке — отказ", rc == 2 and not reqs(), (rc, errs))
+write(SET, '{"sandbox": {"enabled": true}, "autoMode": {"environment": ["a"]}}\n')
+rc, out, errs = propose("~/.claude/settings.json", '{"sandbox": {"enabled": 1}, "autoMode": {"environment": ["a", "b"]}}\n')
+check("settings.json: true → 1 рядом — отказ", rc == 2 and not reqs(), (rc, errs))
+rc, out, errs = propose("~/.claude/settings.json", '{"sandbox": {"enabled": true, "x": NaN}, "autoMode": {"environment": ["a", "b"]}}\n')
+check("settings.json: NaN — отказ", rc == 2 and not reqs(), (rc, errs))
+write(SET, SET_OLD)
 SET_NEW = '{"permissions": {"allow": ["Read"]}, "autoMode": {"environment": ["a", "Согласие [id] — из consent show"]}}\n'
 rc, out, errs = propose("~/.claude/settings.json", SET_NEW)
 _, req, _ = reqs()[0] if reqs() else (None, {}, None)
