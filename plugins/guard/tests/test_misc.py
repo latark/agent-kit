@@ -65,6 +65,22 @@ try:
     check("paths = [5] — после фильтра пусто: умолчание", paths({"paths": [5]}) == D["paths"])
     check("paths = строка — умолчание", paths({"paths": "~/ai/knowledge/me"}) == D["paths"])
     check('paths = ["~/x"] — только он', paths({"paths": ["~/x"]}) == ["~/x"])
+
+    # --- metis-0894: Self, Areas, People — личное по умолчанию; отказ называет каждую папку ---
+    personal = [f"~/ai/knowledge/{x}" for x in ("me", "Self", "Areas", "People")]
+    check("умолчание paths: me, Self, Areas, People", all(x in D["paths"] for x in personal), D["paths"])
+    hint = g._private_hint(g._norm(D["paths"]))
+    check("отказ private называет все личные папки",
+          all(x + "/" in hint for x in personal) and "журнал Пританея" in hint, hint)
+    check("подсказка исключает каждую папку: grep и rg",
+          all(f"--exclude-dir={x}" in hint and f"-g '!{x}'" in hint for x in ("me", "Self", "Areas", "People"))
+          and "--exclude-dir=owner-log" in hint and "«!me/**»" not in hint, hint)
+    one = g._private_hint(g._norm(["~/ai/knowledge/me", "~/.local/state/pantheon/owner-log/zeus.md"]))
+    check("одна личная папка — подсказка Grep с glob «!me/**», журнал не в списке папок",
+          "«!me/**»" in one and "--exclude-dir=zeus.md" not in one and "zeus.md/" not in one, one)
+    keys = g._private_hint(g._norm(["~/ai/pantheon/.git/git-crypt"]))
+    check("только ключ — подсказка без --exclude-dir папок", "--exclude-dir=" not in keys.replace(
+        "--exclude-dir=owner-log", "") and "Личное — ключи" in keys, keys)
 finally:
     shutil.rmtree(root, ignore_errors=True)
 

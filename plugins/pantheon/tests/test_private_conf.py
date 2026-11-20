@@ -69,9 +69,19 @@ def main():
     got = conf_all(cases)
     default = got[-1]
     c = got[:-1]
-    check("умолчание: roles, coordinators и четыре пути как у guard 0.5.9",
+    check("умолчание: roles, coordinators и семь путей (metis-0894: + Self, Areas, People)",
           default["roles"] == DEFAULT_ROLES and default["coordinators"] == DEFAULT_COORD
-          and len(default["paths"]) == 4 and "~/ai/knowledge/me" in default["paths"])
+          and len(default["paths"]) == 7 and "~/ai/knowledge/me" in default["paths"])
+    # metis-0894: каждая личная папка из PERSONAL (lib/moved.py) закрыта умолчанием, не только строкой policy.toml
+    moved_py = os.path.join(os.path.dirname(LIB), "moved.py")
+    personal = None
+    with open(moved_py, encoding="utf-8") as fh:
+        for node in ast.parse(fh.read()).body:
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "PERSONAL" for t in node.targets):
+                personal = ast.literal_eval(node.value)
+    check("умолчание paths покрывает каждую папку PERSONAL (me, Self, Areas, People)",
+          personal and set(personal) >= {"me", "Self", "Areas", "People"}
+          and all(f"~/ai/knowledge/{x}" in default["paths"] for x in personal))
     check("ключа [private] нет — всё по умолчанию", c[0] == default)
     check("[private] не таблица (строка, список) — всё по умолчанию", c[1] == default and c[2] == default)
     check("значение не список (строка, число, таблица) — умолчание по каждому ключу", c[3] == default)
@@ -111,6 +121,10 @@ def main():
     check("без policy.toml-ключа: окно mnemo-brain личное читает, окно athena-shop — нет (умолчание guard)",
           r.returncode == 0 and "~/ai/knowledge/me" not in reads(win("mnemo-brain"))
           and "~/ai/knowledge/me" in reads(win("athena-shop")) and "~/ai/knowledge/me" in reads(win("workshop")))
+    check("без policy.toml-ключа: Self, Areas, People закрыты окну athena-shop и мастерской, mnemo-brain — открыты "
+          "(metis-0894)",
+          all(f"~/ai/knowledge/{x}" in reads(win("athena-shop")) and f"~/ai/knowledge/{x}" in reads(win("workshop"))
+              and f"~/ai/knowledge/{x}" not in reads(win("mnemo-brain")) for x in ("Self", "Areas", "People")))
     r, win, tmp = build("empty", '[private]\ncoordinators = []\n')
     check("coordinators = [] — никого: и окно mnemo-brain личное не читает",
           "~/ai/knowledge/me" in reads(win("mnemo-brain")))
@@ -121,6 +135,43 @@ def main():
     check("свои coordinators и paths: athena-shop читает, mnemo-brain и мастерская — нет; путь без ~/ пропущен",
           "~/projects/lone" not in reads(win("athena-shop")) and "~/projects/lone" in reads(win("mnemo-brain"))
           and "~/projects/lone" in reads(win("workshop")) and "no-tilde" not in json.dumps(win("workshop")))
+
+    # --- metis-0894: check — личная папка есть, а [private] paths её не покрывают -------------------------------------
+    def cover(tag, private_toml, quiet=False):
+        tmp = os.path.join(ROOT, "cover-" + tag)
+        home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
+        for d in ("ai/pantheon", "ai/knowledge/me", "ai/knowledge/Self", "ai/knowledge/Areas/sub", "ai/knowledge/raw",
+                  ".claude/pantheon"):
+            os.makedirs(os.path.join(tmp, d), exist_ok=True)
+        with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
+            fh.write(private_toml)
+        env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+               "PANTHEON_NO_NOTIFY": "1"}
+        r = subprocess.run([py311(), "-I", RUN_PY, "check", *(["--quiet"] if quiet else [])], env=env,
+                           capture_output=True, text=True, timeout=120)
+        al = os.path.join(home, "alerts.md")
+        return r.stdout + r.stderr, (open(al, encoding="utf-8").read() if os.path.isfile(al) else "")
+
+    # тексты ролей о личном называют каждую папку PERSONAL, а не только me/
+    for role in ("chiron", "clio", "momus"):
+        with open(os.path.join(PLUGIN, "roles", role + ".tmpl"), encoding="utf-8") as fh:
+            tmpl = fh.read()
+        check(f"роль {role}: текст о личном называет каждую папку PERSONAL",
+              personal and all(f"{x}/" in tmpl for x in personal))
+
+    warn = "не покрыто [private] paths"
+    out, _ = cover("narrow", '[private]\npaths = ["~/ai/knowledge/me"]\n')
+    check("check: Self/ и Areas/ есть, а paths = только me/ — предупреждение с обеими, без People (её нет) и me",
+          "предупреждение · личное ~/ai/knowledge/{Self,Areas} " + warn in out and "People" not in out)
+    out, _ = cover("default", "")
+    check("check: [private] paths нет — умолчание покрывает все, предупреждения нет", warn not in out)
+    out, _ = cover("parent", '[private]\npaths = ["~/ai/knowledge"]\n')
+    check("check: paths = вся ~/ai/knowledge — папки внутри покрыты, предупреждения нет", warn not in out)
+    out, _ = cover("sibling", '[private]\npaths = ["~/ai/knowledge/Sel", "~/ai/knowledge/me", "~/ai/knowledge/Areas"]\n')
+    check("check: ~/ai/knowledge/Sel — не предок Self/ (сравнение по частям пути)",
+          "{Self} " + warn in out)
+    _, al = cover("quiet", '[private]\npaths = ["~/ai/knowledge/me", "~/ai/knowledge/Areas"]\n', quiet=True)
+    check("check --quiet: тревога в alerts.md о непокрытой Self/", "{Self} " + warn in al)
 
     # умолчание окна и умолчание guard не расходятся: guard_rules.py (правила guard, metis-0148) только читаем (ast)
     # Проверка установки (plugins-update) берёт копию одного плагина pantheon: соседнего guard там нет — сверку

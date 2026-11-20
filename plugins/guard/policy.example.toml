@@ -19,7 +19,7 @@ clio = ["~/ai/knowledge"]
 [private]
 roles = ["hq", "chiron"]
 coordinators = ["mnemo-brain"]
-paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt", "~/.local/state/pantheon/owner-log/zeus.md"]
+paths = ["~/ai/knowledge/me", "~/ai/knowledge/Self", "~/ai/knowledge/Areas", "~/ai/knowledge/People", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt", "~/.local/state/pantheon/owner-log/zeus.md"]
 
 # Куда ещё пишут команды в песочнице окна направления (SEC-19): только кэши своих инструментов внутри
 # ~/.cache или ~/Library/Caches. Папки направления берутся из реестра, остальное закрыто.
