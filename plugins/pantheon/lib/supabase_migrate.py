@@ -5,69 +5,75 @@
 командой, и только та, что уже в ветке по умолчанию origin (main, а в репозитории без main — например develop,
 metis-1295):
   1. файл — supabase/migrations/<версия>_<имя>.sql внутри git-репозитория текущей папки (не папки файла); ни одно
-     звено от корня репозитория до файла — не ссылка, без «..»; иначе отказ. Первая .git над текущей папкой —
-     настоящая папка (не файл «gitdir:», не ссылка, без commondir), git зовётся с явным --git-dir на неё; иначе
-     отказ. В окне направления (PANTHEON_WINDOW в domains.json из STATE) репозиторий — только своего направления и не
-     вложенный в другой репозиторий до папки направления. Origin окна — не из .git/config (свой git init или
-     bare-репозиторий, переименованный в .git, задал бы его), а адрес из STATE/repo-origins/<окно>.json: его пишет
-     сборка окна (record_origins из sandbox_build) — репозитории папок направления и их подпапок первого уровня с
-     <папка>/.git/config литералом в denyWrite и origin из [merge_repos] направления; ls-remote и fetch — по этому
-     адресу. Репозитория нет в списке, списка нет или адрес локальный (путь, file://) — отказ. Конфиг репозитория (scope local и worktree) с ключами, которые запускают команду или меняют
-     транспорт (UNSAFE_CONFIG: core.sshCommand, core.gitProxy, remote.*.uploadpack, credential.*, filter.*, url.*,
-     include.* и др.), — отказ. Каждый git — с GIT_SAFE (core.hooksPath=/dev/null, core.fsmonitor=false,
-     core.sshCommand=ssh, protocol.ext.allow=never, submodule.recurse=false; fetch — --no-recurse-submodules),
-     GIT_CONFIG_NOSYSTEM=1, без замен объектов (--no-replace-objects,
-     GIT_NO_REPLACE_OBJECTS) и со своим PATH (metis-1295, возврат argus #521: команда идёт мимо песочницы, а .git
-     пишет окно);
-  2. ветку по умолчанию называет сервер: `git ls-remote --symref origin HEAD`, строка «ref: refs/heads/<ветка>\\tHEAD»
-     ровно одна, имя проходит git check-ref-format — иначе отказ. Локальный refs/remotes/origin/HEAD не берётся: его
-     агент двигает `git remote set-head`. Затем `git fetch origin +refs/heads/<ветка>:refs/pantheon/verified-<ветка>`
-     — эта ветка origin в свой ref, сверка только с ним (короткое имя origin/<ветка> не берётся), и он равен коммиту,
-     который назвал ls-remote, — иначе отказ. Есть ветка или метка
-     refs/heads/origin/<ветка>, refs/tags/origin/<ветка> — отказ «неоднозначно». В этой ветке должен быть файл по тому
-     же пути, и его blob равен файлу на диске. Нет в ней (новый, не слитый PR, только локальный коммит) или
-     отличается — отказ «не из ветки по умолчанию». Объекты (коммит, деревья, blob) читаются cat-file, и каждый
-     сверяется со своим хешем в Python, хеш файла с диска — тоже в Python: .git/objects пишет окно, cat-file хеш не
-     сверяет. Не совпал — отказ «хранилище объектов подменено». Применяется текст blob из ветки, а не файл с диска:
-     подмена файла между сверкой и применением ничего не даст. git идёт без GIT_* окружения
-     (GIT_CONFIG_*, GIT_DIR и т. п. подменили бы origin). Текст из ветки — строгий UTF-8 без единого «\\» (мета-команды
+     звено от корня репозитория до файла — не ссылка, без «..»; первая .git над текущей папкой — настоящая папка (не
+     файл «gitdir:», не ссылка, без commondir); иначе отказ. В окне направления (PANTHEON_WINDOW в domains.json из
+     STATE) репозиторий — только своего направления и не вложенный в другой репозиторий до папки направления.
+     Адрес origin в окне — не из .git/config окна, а из STATE/repo-origins/<окно>.json: его пишет сборка окна
+     (record_origins из sandbox_build) — репозитории папок направления и их подпапок первого уровня с
+     <папка>/.git/config литералом в denyWrite и origin из [merge_repos] направления. Репозитория нет в списке, списка
+     нет или адрес локальный (путь, file://) — отказ. Вне окна (команду зовёт владелец) — remote.origin.url
+     репозитория: сетевой адрес или абсолютный путь;
+  2. git окна в сверке не участвует (класс обходов metis-1295, решение владельца 21.11 metis-1295-class): ни его
+     .git/config (remote.<адрес>.url, url.*.insteadOf, http.proxy, http.sslVerify, http.sslCAInfo,
+     http.curloptResolve, uploadpack, sshCommand…), ни хуки, ни refs, ни объекты, ни refs/replace. На каждый вызов
+     migrate делает свой bare-репозиторий под STATE (STATE/supabase-migrate/git/bare-*: STATE окну не пишется;
+     git init --bare --template= — конфиг пустой, его пишет сам git init) и удаляет его после сверки. Каждый git —
+     с --git-dir на этот bare, GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_NOSYSTEM=1, GIT_NO_REPLACE_OBJECTS=1 и
+     --no-replace-objects, без GIT_* вызывающего (GIT_DIR, GIT_CONFIG_* и т. п.), со своим PATH и GIT_SAFE
+     (core.hooksPath=/dev/null, core.fsmonitor=false, core.sshCommand=ssh, protocol.ext.allow=never,
+     submodule.recurse=false). Чёрного списка ключей конфига окна нет: конфиг окна git migrate не читает, список
+     запретов был бы неполон (круг 4 argus #521 нашёл http.*);
+  3. ветку по умолчанию называет сервер: `git ls-remote --symref <адрес> HEAD` в своём bare, строка
+     «ref: refs/heads/<ветка>\\tHEAD» ровно одна, имя проходит git check-ref-format — иначе отказ. Затем
+     `git fetch --depth=1 <адрес> +refs/heads/<ветка>:refs/pantheon/verified-<ветка>` в тот же bare; ref равен
+     коммиту, который назвал ls-remote, — иначе отказ «не равен» (ветка сдвинулась между ними). В этой ветке должен
+     быть файл по тому же пути, и его blob равен файлу на диске. Нет в ней (новый, не слитый PR, только локальный
+     коммит) или отличается — отказ «не из ветки по умолчанию». Объекты (коммит, деревья, blob) читаются cat-file из
+     своего bare, и каждый сверяется со своим хешем в Python, хеш файла с диска — тоже в Python (без git). Не совпал —
+     отказ «хранилище объектов подменено». Применяется текст blob из ветки, а не файл с диска: подмена файла между
+     сверкой и применением ничего не даст. Текст из ветки — строгий UTF-8 без единого «\\» (мета-команды
      psql: \\! запускает shell вне песочницы), без управляющих знаков кроме \\n и \\t, без client_encoding,
      standard_conforming_strings, backslash_quote и без своего BEGIN, COMMIT, ROLLBACK, END, ABORT, START TRANSACTION
      верхнего уровня — иначе отказ (check_sql); psql идёт с PGCLIENTENCODING=UTF8;
-  3. база — строка подключения postgresql://… из переменной SUPABASE_DB_URL (её команда не печатает и не пишет в
+  4. база — строка подключения postgresql://… из переменной SUPABASE_DB_URL (её команда не печатает и не пишет в
      журнал); нет или не разобрана — отказ. psql и pg_dump получают её разобранной в PGHOST, PGPORT, PGUSER,
      PGPASSWORD, PGDATABASE (и PGSSLMODE) окружения подпроцесса, а не в argv: argv виден всем процессам Mac;
-  4. сверка схемы до и после: `pg_dump --schema-only` до применения; в таблице supabase_migrations.schema_migrations
+  5. сверка схемы до и после: `pg_dump --schema-only` до применения; в таблице supabase_migrations.schema_migrations
      (если она есть) версии ещё нет — иначе отказ «уже применена»; применение `psql --single-transaction
      -v ON_ERROR_STOP=1` (сбой — откат всей миграции) вместе с записью версии в schema_migrations; `pg_dump` после.
      Изменение схемы печатается счётом строк, полный дифф и оба снимка — в папке журнала
      ~/.local/state/pantheon/logs/supabase-migrate/<время>-<версия>/ (там же migration.sql и source.txt с веткой и
      хешем её коммита).
      Схема не изменилась — строка «схема не изменилась» (миграция данных так и выглядит).
---dry-run — только шаги 1–2: что будет применено, без базы.
+--dry-run — только шаги 1–3: что будет применено, без базы.
 
 Код 0 — применено (или --dry-run прошёл); 1 — отказ или сбой, причина последней строкой stderr; 2 — не тот вызов.
-Модуль-лист без P: STATE передаёт pantheon.py. Инструменты — git, psql и pg_dump из PATH.
+Модуль-лист без P: STATE передаёт pantheon.py. Инструменты — git (из GIT_PATH), psql и pg_dump из PATH.
+Учётных данных git берёт только то, что не из конфига: ssh — ключи ~/.ssh и агент; https к закрытому репозиторию
+без помощника учётных данных (он в глобальном конфиге, а тот пуст) не пройдёт — отказ с причиной git.
 Сеть: в песочнице окна ls-remote и fetch по ssh падают «Could not resolve hostname» (ssh идёт мимо прокси песочницы,
 DNS ей закрыт), а psql к базе — тоже прямое TCP; по https через прокси git проходит. Поэтому окну направления
 `pantheon supabase migrate *` выпущен мимо песочницы (SUPABASE_MIGRATE_OUT в pantheon.py, metis-1295, вариант А
 владельца 20.11), а форму строки без цепочек держит guard (supabase-migrate-cmd).
 """
+
 import difflib
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 USAGE = "pantheon supabase migrate <supabase/migrations/<версия>_<имя>.sql> [--dry-run]"
 MIGRATION = re.compile(r"supabase/migrations/(\d{1,20})_([A-Za-z0-9_.-]+)\.sql")
 DB_ENV = "SUPABASE_DB_URL"
-VERIFIED = "refs/pantheon/verified-"  # + ветка: свой ref, ветку origin пишет сюда только эта команда
-SHADOW = ("refs/heads/origin/", "refs/tags/origin/")  # + ветка: затеняют короткое имя origin/<ветка>
+VERIFIED = "refs/pantheon/verified-"  # + ветка: ref в своём bare (не в .git окна), пишет его только fetch команды
+BARES = ("supabase-migrate", "git")  # STATE/supabase-migrate/git/bare-* — свой bare на вызов, удаляется после сверки
 URL_SCHEMES = ("postgres", "postgresql")
 URL_PARAMS = {"sslmode": "PGSSLMODE"}  # других параметров в адресе нет — отказ, а не молчаливый пропуск
 
@@ -81,37 +87,51 @@ GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 # песочницы не исполняются; ssh — свой, протокол ext:: закрыт (metis-1295, возврат argus #521)
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.sshCommand=ssh",
             "-c", "protocol.ext.allow=never", "-c", "submodule.recurse=false"]
-# ключи конфига репозитория (scope local и worktree), которые запускают команду или подменяют транспорт: файл
-# .git/config пишет окно, а команда идёт мимо песочницы — такой конфиг — отказ, а не перебивка
-UNSAFE_CONFIG = re.compile(
-    r"(core\.(sshcommand|gitproxy|fsmonitor|hookspath|askpass|alternaterefscommand|worktree|editor|pager)"
-    r"|(credential|filter|protocol|url|include|includeif|gpg|uploadpack|receivepack|sequence)\..*"
-    r"|remote\..*\.(uploadpack|receivepack|vcs)|(diff|merge)\..*\.(textconv|command|driver))", re.IGNORECASE)
+# Чёрного списка ключей конфига окна (UNSAFE_CONFIG до metis-1295-class) нет: git этой команды .git окна не читает
+# вовсе (решение владельца 21.11), а список запретов неполон по природе — круг 4 argus #521 нашёл http.* и
+# remote.<адрес>.url. Глобальный конфиг — пустой (GIT_GLOBAL), системный не читается, локальный — конфиг своего bare.
+GIT_GLOBAL = os.devnull
 
 
-def _git(repo, *args, text=True):
-    # GIT_* окружения сняты: GIT_CONFIG_COUNT/KEY/VALUE (url.<чужой>.insteadOf), GIT_DIR, GIT_OBJECT_DIRECTORY и
-    # подобные подменили бы origin или объекты, с которыми идёт сверка. Системный gitconfig не читается
-    # (GIT_CONFIG_NOSYSTEM), PATH свой. git-dir задан явно (<repo>/.git, его проверил _repo_root): поиск git не идёт
-    # по .git-файлам и «голым» папкам, которые положило окно
+def _env():
+    """Окружение git команды: GIT_* вызывающего сняты (GIT_DIR, GIT_CONFIG_COUNT/KEY/VALUE, GIT_OBJECT_DIRECTORY и
+    подобные подменили бы адрес или объекты), глобальный конфиг пуст, системный не читается, замен объектов нет."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    # замены объектов (refs/replace пишет окно: git replace <слитый blob> <свой>) не действуют
-    env.update(PATH=GIT_PATH, GIT_CONFIG_NOSYSTEM="1", GIT_NO_REPLACE_OBJECTS="1")
-    return subprocess.run(["git", "--no-replace-objects", *GIT_SAFE, "--git-dir=" + os.path.join(repo, ".git"),
-                           "--work-tree=" + repo, "-C", repo, *args], capture_output=True, text=text, timeout=120,
-                          env=env)
+    env.update(PATH=GIT_PATH, GIT_CONFIG_GLOBAL=GIT_GLOBAL, GIT_CONFIG_NOSYSTEM="1", GIT_NO_REPLACE_OBJECTS="1")
+    return env
+
+
+def _git(gitdir, *args, text=True):
+    """git с --git-dir=gitdir (свой bare команды) и -C gitdir: поиск репозитория не идёт по папке окна."""
+    return subprocess.run(["git", "--no-replace-objects", *GIT_SAFE, "--git-dir=" + gitdir, "-C", gitdir, *args],
+                          capture_output=True, text=text, timeout=120, env=_env())
+
+
+def _new_bare(state):
+    """Свой пустой bare-репозиторий под STATE (окну не пишется): init --bare --template= — без хуков и шаблонов,
+    конфиг пишет сам git init. Refused — STATE нет или init не прошёл."""
+    if not state:
+        raise Refused("нет STATE — своему репозиторию сверки негде быть")
+    root = os.path.join(state, *BARES)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    bare = tempfile.mkdtemp(prefix="bare-", dir=root)
+    r = _git(bare, "init", "--quiet", "--bare", "--template=")
+    if r.returncode != 0:
+        shutil.rmtree(bare, ignore_errors=True)
+        raise Refused(f"свой репозиторий сверки не создан ({(r.stderr or '').strip()[-200:]})")
+    return bare
 
 
 HASHES = {40: hashlib.sha1, 64: hashlib.sha256}  # длина sha → алгоритм (object-format sha1 и sha256)
 
 
-def _object(repo, kind, sha):
-    """Объект kind по sha, сверенный со своим хешем. .git/objects пишет окно, а cat-file хеш не сверяет: свой
-    zlib-объект под именем слитого (loose-файл) или подменённое дерево выдали бы чужой текст. Refused — иначе."""
-    r = _git(repo, "cat-file", kind, sha, text=False)
+def _object(gitdir, kind, sha):
+    """Объект kind по sha из gitdir, сверенный со своим хешем: cat-file хеш не сверяет, а свой объект под именем
+    слитого (loose-файл) или подменённое дерево выдали бы чужой текст. Пояс к своему bare. Refused — иначе."""
+    r = _git(gitdir, "cat-file", kind, sha, text=False)
     algo = HASHES.get(len(sha))
     if r.returncode != 0 or not algo or algo(b"%s %d\0" % (kind.encode(), len(r.stdout)) + r.stdout).hexdigest() != sha:
-        raise Refused(f"объект {kind} {sha[:12]} в {repo}/.git не прочитан или не совпал со своим хешем — хранилище "
+        raise Refused(f"объект {kind} {sha[:12]} в {gitdir} не прочитан или не совпал со своим хешем — хранилище "
                       "объектов подменено, сверять не с чем (git fsck)")
     return r.stdout
 
@@ -130,22 +150,22 @@ def _tree_entry(tree, name, n):
     return None
 
 
-def _blob_at(repo, commit, rel):
-    """(sha, текст) обычного файла rel в коммите commit; (None, None) — файла нет. Каждый объект цепочки — коммит,
-    деревья, blob — сверен со своим хешем (_object), начиная с sha коммита со слов сервера."""
-    head = _object(repo, "commit", commit).split(b"\n", 1)[0]
+def _blob_at(gitdir, commit, rel):
+    """(sha, текст) обычного файла rel в коммите commit из gitdir; (None, None) — файла нет. Каждый объект цепочки —
+    коммит, деревья, blob — сверен со своим хешем (_object), начиная с sha коммита со слов сервера."""
+    head = _object(gitdir, "commit", commit).split(b"\n", 1)[0]
     if not head.startswith(b"tree "):
         raise Refused(f"коммит {commit[:12]} не разобран — сверять не с чем")
     sha, n = head[5:].decode("ascii", "replace"), len(commit) // 2
     parts = rel.split(os.sep)
     for i, part in enumerate(parts):
-        entry = _tree_entry(_object(repo, "tree", sha), os.fsencode(part), n)
+        entry = _tree_entry(_object(gitdir, "tree", sha), os.fsencode(part), n)
         if entry is None:
             return None, None
         mode, sha = entry
         if mode not in ((b"100644", b"100755") if i == len(parts) - 1 else (b"40000",)):
             return None, None
-    return sha, _object(repo, "blob", sha)
+    return sha, _object(gitdir, "blob", sha)
 
 
 def _file_hash(path, n):
@@ -174,25 +194,6 @@ def _repo_root(start):
         if up == d:
             raise Refused(f"{start}: не в git-репозитории")
         d = up
-
-
-def check_config(repo):
-    """Отказ, если конфиг репозитория (scope local и worktree, с include) задаёт команду или транспорт: UNSAFE_CONFIG."""
-    r = _git(repo, "config", "--list", "--show-scope", "-z")
-    if r.returncode != 0:
-        raise Refused(f"{repo}: конфиг git не прочитан ({(r.stderr or '').strip()[-200:]})")
-    # -z: «scope\0key\nvalue\0» — область и запись разделены NUL
-    parts = r.stdout.split("\0")
-    if parts and parts[-1] == "":
-        parts.pop()
-    if len(parts) % 2:
-        raise Refused(f"{repo}: вывод git config --show-scope не разобран — с таким конфигом не запускаю git")
-    unsafe = sorted({key for scope, entry in zip(parts[0::2], parts[1::2], strict=True)
-                     for key in [entry.split("\n", 1)[0]]
-                     if scope in ("local", "worktree") and UNSAFE_CONFIG.fullmatch(key)})
-    if unsafe:
-        raise Refused(f"{repo}/.git/config задаёт {', '.join(unsafe[:5])} — команда идёт мимо песочницы, с таким "
-                      "конфигом не запускаю git (убери ключи: git config --unset …)")
 
 
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
@@ -266,18 +267,17 @@ def check_sql(rel, body):
                           "убери управление транзакцией")
 
 
-def default_branch(repo, remote="origin"):
-    """(ветка по умолчанию, sha её коммита) со слов сервера remote (`ls-remote --symref <remote> HEAD`; в окне — адрес из
-    pinned_remote, а не origin из .git/config окна), а не локальный
-    refs/remotes/origin/HEAD: его двигает `git remote set-head`. Refused — нет ответа, ответ неоднозначен или имя
-    не ветка."""
-    r = _git(repo, "ls-remote", "--symref", remote, "HEAD")
+def default_branch(gitdir, url):
+    """(ветка по умолчанию, sha её коммита) со слов сервера url (`ls-remote --symref <url> HEAD` в своём bare gitdir;
+    адрес — из pinned_remote), а не локальный refs/remotes/origin/HEAD окна: его двигает `git remote set-head`.
+    Refused — нет ответа, ответ неоднозначен или имя не ветка."""
+    r = _git(gitdir, "ls-remote", "--symref", url, "HEAD")
     if r.returncode != 0:
         raise Refused(f"не узнал ветку по умолчанию origin ({(r.stderr or '').strip()[-200:]}) — без неё сверить нельзя")
     heads = [ln.split("\t")[0].removeprefix("ref: ") for ln in r.stdout.splitlines()
              if ln.startswith("ref: ") and ln.split("\t")[1:] == ["HEAD"]]
     name = heads[0].removeprefix("refs/heads/") if len(heads) == 1 and heads[0].startswith("refs/heads/") else ""
-    if not name or _git(repo, "check-ref-format", "refs/heads/" + name).returncode != 0:
+    if not name or _git(gitdir, "check-ref-format", "refs/heads/" + name).returncode != 0:
         raise Refused(f"сервер origin не назвал ветку по умолчанию однозначно (ls-remote --symref: {heads[:3]}) — "
                       "сверить не с чем")
     tips = [ln.split("\t")[0] for ln in r.stdout.splitlines()
@@ -328,7 +328,7 @@ def record_origins(state, name, folders, deny_write, repos):
             if (d in out or os.path.islink(d) or os.path.join(dotgit, "config") not in pinned or os.path.islink(dotgit)
                     or not os.path.isdir(dotgit) or os.path.lexists(os.path.join(dotgit, "commondir"))):
                 continue
-            r = _git(d, "config", "--file", os.path.join(dotgit, "config"), "--get", "remote.origin.url")
+            r = _git(dotgit, "config", "--file", os.path.join(dotgit, "config"), "--get", "remote.origin.url")
             url = r.stdout.strip() if r.returncode == 0 else ""
             if github_repo(url) and github_repo(url) in want:
                 out[d] = url
@@ -341,13 +341,27 @@ def record_origins(state, name, folders, deny_write, repos):
     return out
 
 
-def pinned_remote(state, repo):
-    """Адрес, с которым сверяется ветка по умолчанию. Вне окна — origin репозитория. В окне — только закреплённый
-    при сборке окна (record_origins): .git/config окна не источник доверия — свой git init или bare-репозиторий,
-    переименованный в .git, задал бы origin окна. Refused — списка нет, репозитория в нём нет или адрес локальный."""
+def _config_origin(gitdir, repo):
+    """Вне окна (команду зовёт владелец) — remote.origin.url из <repo>/.git/config: только этот ключ, файлом
+    (`config --file`, без include) через свой bare gitdir; остальной конфиг репозитория git не читает. Адрес —
+    сетевой (remote_ok) или абсолютный путь. Refused — иначе."""
+    r = _git(gitdir, "config", "--file", os.path.join(repo, ".git", "config"), "--get", "remote.origin.url")
+    url = r.stdout.strip() if r.returncode == 0 else ""
+    if not (remote_ok(url) or (url.startswith("/") and not any(c in url for c in "\0\r\n"))):
+        raise Refused(f"{repo}: remote.origin.url не задан или не адрес ({url[:80]!r}) — сверять не с чем")
+    return url
+
+
+def pinned_remote(state, repo, gitdir=None):
+    """Адрес, с которым сверяется ветка по умолчанию. Вне окна — remote.origin.url репозитория (_config_origin через
+    свой bare gitdir). В окне — только закреплённый при сборке окна (record_origins): .git/config окна не источник
+    доверия — свой git init или bare-репозиторий, переименованный в .git, задал бы origin окна. Refused — списка нет,
+    репозитория в нём нет или адрес локальный."""
     win = os.environ.get("PANTHEON_WINDOW") or ""
     if not win or not state:
-        return "origin"
+        if not gitdir:
+            raise Refused("нет своего репозитория сверки — origin не прочитать")
+        return _config_origin(gitdir, repo)
     path = os.path.join(state, ORIGINS, win + ".json")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -413,34 +427,42 @@ def locate(path, state=None):
     return repo, rel
 
 
-def check_file(path, fetch=True, state=None):
+def _fetch_verified(bare, url):
+    """ls-remote и fetch ветки по умолчанию url в свой bare → (ветка, sha коммита, сверенный с ls-remote)."""
+    branch, tip = default_branch(bare, url)
+    base, verified = "origin/" + branch, VERIFIED + branch
+    # без подмодулей и меток; --depth=1 — нужен только коммит ветки, объекты свои, а не из .git окна
+    f = _git(bare, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--depth=1", url,
+             f"+refs/heads/{branch}:{verified}")
+    if f.returncode != 0:
+        raise Refused(f"не удалось получить {base} ({(f.stderr or '').strip()[-200:]}) — без свежей ветки по "
+                      "умолчанию сверить нельзя")
+    head = _git(bare, "rev-parse", "--verify", "--quiet", verified + "^{commit}")
+    if head.returncode != 0:
+        raise Refused(f"после fetch нет {verified} ({base})")
+    sha = head.stdout.strip()
+    if sha != tip:  # ветка сдвинулась между ls-remote и fetch: сверка шла бы не с тем коммитом, что назвал сервер
+        raise Refused(f"{verified} ({sha[:12]}) не равен {base} со слов сервера ({tip[:12]}) — ветка сдвинулась "
+                      "между ls-remote и fetch, повтори команду")
+    return branch, sha
+
+
+def check_file(path, state=None):
     """Сверка файла с веткой по умолчанию origin → (репозиторий, путь в нём, sha коммита ветки, текст миграции из
-    ветки в байтах, версия, имя, «origin/<ветка>»). Refused — файл не из этой ветки или не миграция Supabase."""
+    ветки в байтах, версия, имя, «origin/<ветка>»). Refused — файл не из этой ветки или не миграция Supabase.
+    git идёт только в свой bare под STATE (_new_bare), .git окна — ни конфиг, ни refs, ни объекты — не читается."""
     repo, rel = locate(path, state)
-    remote = pinned_remote(state, repo)
-    check_config(repo)
     m = MIGRATION.fullmatch(rel)
     if not m:
         raise Refused(f"{rel}: не миграция Supabase — нужен файл supabase/migrations/<версия>_<имя>.sql")
-    branch, tip = default_branch(repo, remote)
-    base, verified = "origin/" + branch, VERIFIED + branch
-    for ref in (s + branch for s in SHADOW):  # ветка или метка «origin/<ветка>» затеняет удалённую ветку — отказ
-        if _git(repo, "show-ref", "--verify", "--quiet", ref).returncode == 0:
-            raise Refused(f"в {repo} есть {ref} — имя {base} неоднозначно, удали его (git update-ref -d {ref})")
-    if fetch:
-        # без подмодулей: их config ($GIT_DIR/modules/<имя>/config) пишет окно, а он не сверен (check_config)
-        f = _git(repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", remote, f"+refs/heads/{branch}:{verified}")
-        if f.returncode != 0:
-            raise Refused(f"не удалось обновить {base} ({(f.stderr or '').strip()[-200:]}) — без свежей ветки по "
-                          "умолчанию сверить нельзя")
-    head = _git(repo, "rev-parse", "--verify", "--quiet", verified + "^{commit}")
-    if head.returncode != 0:
-        raise Refused(f"в {repo} нет {verified} ({base})")
-    sha = head.stdout.strip()
-    if sha != tip:  # ref пишет и окно: подвинутый после fetch ref увёл бы сверку на свой коммит
-        raise Refused(f"{verified} ({sha[:12]}) не равен {base} со слов сервера ({tip[:12]}) — ref подвинут или ветка "
-                      "сдвинулась между ls-remote и fetch, повтори команду")
-    blob, body = _blob_at(repo, sha, rel)
+    bare = _new_bare(state)
+    try:
+        url = pinned_remote(state, repo, bare)
+        branch, sha = _fetch_verified(bare, url)
+        blob, body = _blob_at(bare, sha, rel)
+    finally:
+        shutil.rmtree(bare, ignore_errors=True)
+    base = "origin/" + branch
     if blob is None:
         raise Refused(f"{rel}: файла нет в {base} (не из ветки по умолчанию) — миграция не из слитого PR, применять "
                       "нельзя (сначала слияние)")

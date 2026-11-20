@@ -61,7 +61,8 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill, EnterWorktree) и 
   предка. Поэтому корень своих и выданных папок держит, и регистр тоже (`.CLAUDE/settings.json`, `.claude/SETTINGS.json`).
   На первом уровне литералы ставит `nested_pins` для подпапок с `.claude`, с `.git` и для вложенных проектов (metis-1221).
   Глубже (`<папка>/a/b/.git/hooks`, `.claude/worktrees/<x>/.claude/hooks`) переименование звена не закрыто.
-  `pantheon supabase migrate` этот остаток не задевает: origin он берёт из списка сборки окна, а не из `.git/config`.
+  `pantheon supabase migrate` этот остаток не задевает: origin он берёт из списка сборки окна, а git его `.git` окна не
+  читает вовсе — ни конфиг, ни refs, ни объекты (свой bare под STATE, metis-1295-class).
 - **Код git вне `.git/config` и `hooks`** (metis-1221). Закрыты `config.worktree`, `.git/worktrees/*/config.worktree`,
   bare-репозиторий `<имя>.git/{config,hooks}` и `.husky` в корне и на первом уровне своих папок (в выданных — всюду).
   Не закрыты: bare-репозиторий без суффикса `.git` и `core.hooksPath` на другую папку. Переписать сам `core.hooksPath`
@@ -709,24 +710,32 @@ answer и плановый проход, это скрипты, guard их не 
 - Supabase по решению владельца [metis-1049-supabase] «А» — только чтение: `list_*`, `get_*`, документация и типы.
   `execute_sql` закрыт у всех серверов: по имени сервера не проверить, что у него `read_only` в адресе. Миграции идут
   командой `pantheon supabase migrate`: она берёт файл только из своей копии ветки по умолчанию origin
-  (`refs/pantheon/verified-<ветка>`, ветку называет сервер), строку подключения передаёт psql через переменные PG*,
+  (`refs/pantheon/verified-<ветка>` своего bare-репозитория, ветку называет сервер), строку подключения передаёт psql
+  через переменные PG*,
   а не в аргументах, и сверяет схему до и после.
   Окну направления она выпущена мимо песочницы — только `pantheon supabase migrate *` (`SUPABASE_MIGRATE_OUT` в
   pantheon.py; metis-1295, вариант А владельца 20.11, consent metis-1295-net): в песочнице ssh к origin падает
   «Could not resolve hostname» (ssh идёт мимо прокси, DNS закрыт), а psql к базе — прямое TCP. Раз команда вне
-  песочницы, а `.git` пишет окно, git в ней — только в основной копии: репозиторий берётся от текущей папки, а не от
-  файла; первая `.git` над ней — настоящая папка (файл `gitdir:`, ссылка, commondir — отказ), `--git-dir` на неё
-  явно; ни одно звено от корня репозитория до файла — не ссылка, без `..`; в окне направления репозиторий — только
-  своего направления (`domains.json`, как `_own` в worktree; карта не прочитана — отказ) и не вложенный в другой
-  репозиторий до папки направления. Конфиг репозитория с ключами, которые запускают команду или меняют транспорт
-  (core.sshCommand, core.gitProxy, uploadpack, credential.*, filter.*, url.*, protocol.*, include.* и др.), —
-  отказ; каждый git — с `core.hooksPath=/dev/null`, `core.fsmonitor=false`, `core.sshCommand=ssh`,
-  `protocol.ext.allow=never`, `submodule.recurse=false`, `--no-replace-objects`, `GIT_CONFIG_NOSYSTEM=1` и своим
-  PATH; fetch — с `--no-recurse-submodules`: config подмодуля (`.git/modules/<имя>/config`) пишет окно, а проверка
-  конфига его не видит. Хранилище объектов и refs тоже пишет окно, а `cat-file` хеш не сверяет, поэтому свой ref
-  после fetch должен совпасть с коммитом, который назвал `ls-remote` (иначе отказ «не равен»), а коммит, деревья и
-  blob миграции по цепочке от него сверяются со своими хешами в Python, как и хеш файла с диска (иначе отказ
-  «подменено»): свой loose-объект, подменённое дерево или `git replace` не подсунут чужой текст. `.git/config` окна
+  песочницы, а `.git` пишет окно, `.git` окна в сверке не участвует вовсе (решение владельца 21.11, consent
+  metis-1295-class: круги 1–4 argus #521 находили всё новые ключи конфига окна, последним — `[remote "<адрес>"] url=`
+  и `http.proxy`, `http.sslVerify`, `http.sslCAInfo`, `http.curloptResolve`). На каждый вызов команда делает свой
+  bare-репозиторий под STATE (`STATE/supabase-migrate/git/bare-*`, `git init --bare --template=`: конфиг пустой, его
+  пишет сам git init, хуков нет; STATE окну не пишется) и после сверки удаляет его. `ls-remote`, `fetch --depth=1` и
+  чтение объектов идут только в него: `--git-dir` на свой bare, окружение без `GIT_*` вызывающего (`GIT_DIR`,
+  `GIT_CONFIG_*` и др.), `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_NO_REPLACE_OBJECTS=1`, свой PATH и
+  `-c core.hooksPath=/dev/null`, `core.fsmonitor=false`, `core.sshCommand=ssh`, `protocol.ext.allow=never`,
+  `submodule.recurse=false`, `--no-replace-objects`; fetch — с `--no-recurse-submodules` и `--no-tags`. Конфиг,
+  хуки, refs, объекты, `refs/replace` и config подмодулей окна git не видит. Чёрного списка ключей (`UNSAFE_CONFIG`)
+  больше нет: конфиг окна не читается, а список запретов неполон по природе (круг 4 нашёл `http.*`). Репозиторий
+  окна нужен только как место файла: берётся от текущей папки, а не от файла; первая `.git` над ней — настоящая папка
+  (файл `gitdir:`, ссылка, commondir — отказ); ни одно звено от корня репозитория до файла — не ссылка, без `..`; в
+  окне направления репозиторий — только своего направления (`domains.json`, как `_own` в worktree; карта не прочитана
+  — отказ) и не вложенный в другой репозиторий до папки направления. Вне окна (команду зовёт владелец) адрес origin —
+  `remote.origin.url` из `<репозиторий>/.git/config`, прочитанный `git config --file` без include. Свой ref после
+  fetch должен совпасть с коммитом, который назвал `ls-remote` (иначе отказ «не равен»), а коммит, деревья и blob
+  миграции по цепочке от него сверяются со своими хешами в Python, как и хеш файла с диска (иначе отказ «подменено»
+  или «отличается»). Учётных данных git берёт только то, что не из конфига: ssh — ключи `~/.ssh` и агент; https к
+  закрытому репозиторию без помощника учётных данных не пройдёт — отказ с причиной git. `.git/config` окна
   не источник доверия к origin (возврат двух argus #521): свой `git init` с `remote add` в папке направления, которая
   сама не репозиторий, или bare-репозиторий, переименованный в `.git`, задал бы любой origin. Поэтому адрес origin
   берётся из `STATE/repo-origins/<окно>.json`, а не из конфига. Этот список пишет сборка окна (`record_origins` из
@@ -736,9 +745,8 @@ answer и плановый проход, это скрипты, guard их не 
   до сборки, со своим origin в список не попадёт. `ls-remote` и `fetch` идут по закреплённому адресу, подменённый
   `remote.origin.url` на них не влияет. Репозитория нет в списке, списка нет или адрес локальный (путь, `file://`) —
   отказ; окно без направления списка не получает и тоже получает отказ. Новый репозиторий в окне — только после
-  `pantheon domains build`. `objects/info/alternates` и `packed-refs` окно пишет, но подменить ими текст нельзя: объекты
-  сверяются с хешем от коммита со слов сервера. Ключ, которого нет в списке UNSAFE_CONFIG и который всё же
-  исполняет команду, — тоже остаток (список запретов, а не разрешений). Прочий
+  `pantheon domains build`. `objects/info/alternates` и `packed-refs` окна git не читает: объекты и refs — в своём
+  bare. Прочий
   `pantheon supabase` и мастерская — в песочнице. Форму строки держит правило supabase-migrate-cmd, как
   worktree-cmd: строка целиком `pantheon supabase migrate <файл> [--dry-run]`, путь относительный из букв, цифр и
   `. _ -` (`/` между частями, звено не с точки, без `..`). Цепочки (`&&`, `;`, `|`, `&`), перенаправления,
