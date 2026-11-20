@@ -147,6 +147,7 @@ import subprocess
 import urllib.parse
 import sys
 import time
+import unicodedata
 import types
 from datetime import datetime
 
@@ -1595,57 +1596,175 @@ def build_helper(quiet=True):
         return None
 
 
-def window_text(req, view, why, paths):
-    """Текст окна: сначала задетые файлы ядра (их владелец и подтверждает), заголовок автора PR — последним, в
-    кавычках и коротко: он не перекроет список."""
-    core = [p for p in dict.fromkeys(paths) if window_core(p)]
+# Что задевает PR — словами для окна Touch ID (metis-1281, [metis-1281-view]): файл ядра или сборки окон → название
+# области. Сначала точные файлы, потом папки; путь не из списка — сам путь (окно не молчит о ядре без названия).
+AREA_FILES = {
+    "plugins/guard/hooks/merge_gate.py": "шлюз слияния", "plugins/pantheon/lib/merge.py": "шлюз слияния",
+    "plugins/guard/hooks/protect_config.py": "защита настроек", "plugins/guard/managed-settings.json":
+    "управляемые настройки", "plugins/pantheon/lib/window_rules.py": "правила окон",
+    "plugins/pantheon/hooks/ctx.py": "хуки Пантеона", "plugins/pantheon/hooks/hooks.json": "хуки Пантеона",
+    "plugins/pantheon/lib/plugin_map.py": "плагины ролей", "plugins/pantheon/plugins-by-role.toml": "плагины ролей",
+    "plugins/pantheon/lib/review_rules.py": "правила ревью", "plugins/pantheon/lib/answers.py": "ответы владельца",
+    "plugins/pantheon/lib/supabase_migrate.py": "миграции Supabase", ".claude-plugin/marketplace.json":
+    "список плагинов", "plugins/pantheon/lib/pantheon.py": "сборка окон", "plugins/pantheon/lib/sessions.py":
+    "сборка окон"}
+AREA_DIRS = (("plugins/guard", "guard (защиты)"), ("plugins/pantheon/roles", "правила ролей"),
+             (".github", "CI GitHub"), ("plugins/pantheon/packs", "пакеты окон"))
+TASK_RE = re.compile(r"(?<![a-z0-9-])([a-z]{2,12}-\d{3,5})(?![0-9])")   # номер задачи: не длиннее 18 знаков
+TITLE_MAX = 70                       # фраза «что меняет» одного PR в окне
+AREAS_MAX = 150                      # «Задевает: …» — места хватает всегда, остальное «и ещё N»
+QUOTES = "\"„‚«»≪≫《》「」『』｢｣＂〝〞〟"   # и похожие на кавычки окна знаки других категорий (Po, Ps, Pe, Sm)
+PHRASE_MIN = 10                      # короче — фраза ничего не говорит: номер PR без неё
+
+
+def area(path):
+    """Название области ядра для окна: файл из AREA_FILES, папка из AREA_DIRS, иначе сам путь (как в is_core)."""
+    p = posixpath.normpath(path.strip("/") or ".").strip("/").casefold()
+    for f, name in AREA_FILES.items():
+        if p == f.casefold():
+            return name
+    for d, name in AREA_DIRS:
+        if p == d.casefold() or p.startswith(d.casefold() + "/"):
+            return name
+    return path
+
+
+def areas_text(paths, room=AREAS_MAX):
+    """«По файлам PR задевает: шлюз слияния, правила ролей» — области ядра и сборки окон PR (window_core), каждая
+    один раз; не влезло — «и ещё N»; ядра нет — «По файлам PR: ядро не задето». Строку считает проход по файлам PR,
+    а не автор — так и подписана: на неё владелец опирается, фраза автора рядом — только в кавычках."""
+    names = list(dict.fromkeys(area(p) for p in dict.fromkeys(paths) if window_core(p)))
+    if not names:
+        return "По файлам PR: ядро не задето"
     shown, size = [], 0
-    for p in core:
-        if shown and size + len(p) > 200:
+    for x in names:
+        if shown and size + len(x) > room:
             break
-        shown.append(p)
-        size += len(p) + 2
-    more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
-    hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
-    title = " ".join(str(view.get("title") or "").split())[:60]
+        shown.append(x)
+        size += len(x) + 2
+    more = f" и ещё {len(names) - len(shown)}" if len(names) > len(shown) else ""
+    return f"По файлам PR задевает: {', '.join(shown)}{more}"
+
+
+def plain(text):
+    """Текст для окна в одну строку: без управляющих и форматирующих знаков Unicode (Cc, Cf — в том числе U+202E и
+    U+2066–2069: иначе текст автора переворачивает строки прохода после себя, SEC-28) и без кавычек (Pi, Pf, «"»,
+    «„»): текст автора не закроет кавычку окна."""
+    t = "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in str(text or ""))
+    t = "".join(c for c in t if unicodedata.category(c) not in ("Cf", "Pi", "Pf") and c not in QUOTES)
+    return " ".join(t.split())
+
+
+def pr_task(view):
+    """Задача PR для окна: «Closes/Часть <id>» в теле, иначе первый <id> в заголовке, иначе в имени ветки; нет — None.
+    Номер — со слов автора PR, поэтому не длиннее 18 знаков (TASK_RE): метка не вытеснит строки прохода."""
+    m = re.search(r"(?<!\w)(?:closes|часть):?\s+([a-z]{2,12}-\d{3,5})(?![0-9])", plain(view.get("body")).casefold())
+    if m:
+        return m.group(1)
+    for field in ("title", "headRefName"):
+        m = TASK_RE.search(plain(view.get(field)).casefold())
+        if m:
+            return m.group(1)
+    return None
+
+
+def pr_phrase(view, task, room=TITLE_MAX):
+    """«Что меняет» — заголовок автора PR (plain) без номера задачи в начале, не длиннее room: длинный — по границе
+    слова с «…»; room меньше PHRASE_MIN — пусто."""
+    t = plain(view.get("title"))
+    if task:
+        t = re.sub(r"^" + re.escape(task) + r"\s*[:·—-]?\s*", "", t, flags=re.I)
+    if room < PHRASE_MIN:
+        return ""
+    if len(t) > room:
+        cut = t[:room - 1]
+        t = (cut.rsplit(" ", 1)[0] if " " in cut[PHRASE_MIN // 2:] else cut).rstrip(" ,.:;—-") + "…"
+    return t
+
+
+def pr_label(req, task):
+    """«#486 · metis-0949» — номер PR и задача, без задачи — только номер."""
+    return f"#{req['pr']} · {task}" if task else f"#{req['pr']}"
+
+
+def short_why(why, room=400):
+    """Вердикт шлюза в окне коротко, по смыслу, а не срезом: запасной путь — BILLING_SHORT, красная необязательная
+    проверка — «<имя> ✗», узкий прогон — «(узкий)», лёгкий PR ядра — «(лёгкий)»; в одну строку. Срез до room — только последнее средство для
+    вердикта, которого шлюз не пишет (argus #517 Б1/Б6: «CI: ли» владельцу не скажет, что CI не шёл)."""
+    t = re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, plain(why))
+    t = re.sub(r"необязательная проверка GitHub (\S+) красная: [A-Z_]+", r"\1 ✗", t)
+    t = re.sub(r" \(узкий прогон: [^)]*\)", " (узкий)", t)
+    return re.sub(r" \(лёгкий PR ядра:[^)]*\)", " (лёгкий)", t)[:max(room, 0)]
+
+
+def window_text(req, view, why, paths):
+    """Текст окна одного PR (metis-1281, [metis-1281-view] владельца 20.11): «#N · задача, со слов автора: «что
+    меняет». По файлам PR задевает: области ядра словами. Проверки: вердикт шлюза. Слить repo (sha7)[ и затем
+    перезапустить окно X], файлов N.» Не длиннее 400. Место — по старшинству: метка, области и «Слить …» целиком,
+    вердикт — остаток (не влез целиком — запасной путь коротко); фраза автора — что осталось (нет места или пустая —
+    без «со слов автора»)."""
+    task = pr_task(view)
+    label = pr_label(req, task)
     then = f" и затем перезапустить окно {req['restart']}" if req.get("restart") else ""   # metis-1153
-    return (f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}){then}, файлов {len(set(paths))}, {hit}. {why}. "
-            f"Заголовок: «{title}»")[:400]
+    hit = f". {areas_text(paths)}. Проверки: "
+    end = f". Слить {req['repo']} ({req['sha'][:7]}){then}, файлов {len(set(paths))}."
+    said = ", со слов автора: «»"
+    room = 400 - len(label) - len(hit) - len(end) - len(said)   # строки прохода вытесняют фразу автора, не наоборот
+    verdict = plain(why) if len(plain(why)) <= room else short_why(why, room)   # не влез — запасной путь коротко
+    phrase = pr_phrase(view, task, min(TITLE_MAX, 400 - len(label) - len(hit) - len(verdict) - len(end) - len(said)))
+    head = f"{label}, со слов автора: «{phrase}»" if phrase else label
+    return f"{head}{hit}{verdict}{end}"[:400]
+
+
+def batch_window_text(reqs, views, whys, paths):
+    """Текст окна пачки (metis-0668; вид — metis-1281, [metis-1281-view]): по PR в порядке слияния «#N · задача
+    (sha7) «что меняет»» (метка «#N задача (sha7)»), затем области ядра всех PR словами, «Слить по очереди» и проверки шлюза — группой у PR с
+    одинаковым вердиктом. Не длиннее 400 знаков — предел помощника окна. Место — по старшинству (строки прохода
+    важнее текста роли): номера, SHA, «Слить по очереди» и проверки — сжатый вердикт шлюза целиком (short_why: «CI:
+    лимит, тесты ✓», «tests/full ✗», «(лёгкий)»); не влезают — области короче («и ещё N»), затем метки без номеров
+    задач (задача не длиннее 18 знаков, TASK_RE); фразам авторов — остаток поровну, короче PHRASE_MIN — без фраз.
+    Срез проверок — только для вердикта, которого шлюз не пишет и который не влез и так."""
+    n = len(reqs)
+    tasks = [pr_task(v) for v in views]
+    every = [x for p in paths for x in p]
+    end = f" Слить по очереди в {reqs[0]['repo']}, отказ — стоп."   # число PR видно по меткам
+    groups = {}                      # вердикт → номера PR: у пачки обычно один-два разных вердикта
+    for r, w in zip(reqs, whys):
+        groups.setdefault(short_why(w), []).append(f"#{r['pr']}")   # SHA прогона запасного пути не делит
+    if len(groups) > 1:   # самая большая группа — «у остальных» последней: номера в окне уже есть, место — фразам
+        big = max(groups, key=lambda w: len(groups[w]))
+        groups = {**{w: prs for w, prs in groups.items() if w != big}, big: groups[big]}
+    heads = [f"{', '.join(prs)} " for prs in groups.values()]
+    if len(groups) == 1:
+        heads = ["у всех "]
+    elif len(groups[big]) > 1:   # «у остальных» — только вместо двух и больше номеров: одного он не короче
+        heads[-1] = "у остальных "
+    # проверки — сжатый вердикт целиком (строки прохода важнее текста роли, SEC-28): не влезают — области короче
+    # («и ещё N»), затем метки без номеров задач; фразам авторов — только остаток
+    checks = " Проверки: " + "; ".join(h + w for h, w in zip(heads, groups)) + "."
+    for named, areas_room in ((1, 70), (1, 40), (1, 20), (1, 0), (0, 0)):
+        labels = [f"#{r['pr']}{' ' + t if named and t else ''} ({r['sha'][:7]})" for r, t in zip(reqs, tasks)]
+        hit = areas_text(every, areas_room)
+        base = len(end) + len(hit) + 2 + sum(len(x) + 2 for x in labels)
+        if base + len(checks) <= 400:
+            break
+    else:   # вердикты не от шлюза и длинные: последнее средство — поровну срезом
+        per_why = max((400 - base - len(" Проверки: .") - sum(len(h) + 2 for h in heads)) // len(heads), 0)
+        checks = " Проверки: " + "; ".join((h + short_why(w, per_why)).rstrip(" ;,.") for h, w in zip(heads, groups)) + "."
+    lead = "Авторы: "                # фразы в кавычках — текст ролей; области ниже считает проход по файлам
+    per = min(TITLE_MAX, (400 - base - len(checks) - len(lead)) // n - 3)
+    while True:   # фразы — остаток: не влезло целиком — короче, пока не влезет или не станет короче PHRASE_MIN
+        said = [pr_phrase(v, t, per) for v, t in zip(views, tasks)]
+        items = "; ".join(f"{x} «{p}»" if p else x for x, p in zip(labels, said))
+        text = f"{lead if any(said) else ''}{items}. {hit}.{end}{checks}"
+        if len(text) <= 400 or not any(said):
+            return text[:400]
+        per -= 1
 
 
 def nums(reqs):
     """«#7, #8» — номера PR заявок."""
     return ", ".join("#%d" % r["pr"] for r in reqs)
-
-
-def batch_window_text(reqs, views, whys, paths):
-    """Текст окна пачки (metis-0668): сначала задетые файлы ядра всех PR и число файлов — их владелец и
-    подтверждает, затем номер, SHA и вердикт шлюза каждого PR в порядке слияния (его пишет проход, не автор PR),
-    заголовки авторов — последними, в кавычках и коротко. Не длиннее 400 знаков — предел помощника окна. Ядро и
-    номера с SHA всех PR влезают при MAX_BATCH PR и любых вердиктах (argus-263a Б1): ядру — место за вычетом номеров
-    и коротких вердиктов, вердиктам — что осталось, поровну, вердикт запасного пути — коротко (BILLING_SHORT)."""
-    n = len(reqs)
-    head = f"Слить по очереди {n} PR {reqs[0]['repo']}, отказ шлюза у одного останавливает следующие."
-    every = [x for p in paths for x in p]
-    core = [x for x in dict.fromkeys(every) if window_core(x)]
-    pre = [f"#{r['pr']} {r['sha'][:7]}" for r in reqs]
-    fixed = len(" Вердикты: .") + sum(len(x) + 3 for x in pre)   # «#N sha7 » и «; » у каждого
-    room = max(400 - len(head) - fixed - n * len(f"argus ×2 ✓, {BILLING_SHORT}") - 40, 60)
-    shown, size = [], 0
-    for x in core:
-        if shown and size + len(x) > room:
-            break
-        shown.append(x)
-        size += len(x) + 2
-    more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
-    hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
-    top = f"{head} Файлов {len(set(every))}, {hit}."
-    per = min(48, max((400 - len(top) - fixed) // n, 0))
-    short = [re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, " ".join(str(w).split()))[:per]
-             for w in whys]
-    items = "; ".join(f"{x} {w}".rstrip() for x, w in zip(pre, short))
-    titles = "; ".join(f"#{r['pr']} «{' '.join(str(v.get('title') or '').split())[:40]}»" for r, v in zip(reqs, views))
-    return f"{top} Вердикты: {items}. Заголовки: {titles}"[:400]
 
 
 def window_info(out):
