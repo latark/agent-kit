@@ -79,7 +79,12 @@
   `[executors] set` (Claude всегда, Codex — дополнение) и `[codex]` (состояние проверки). Читает и пишет только
   `lib/pconfig.py` (`load`, `update`).
 - Исполнители (`lib/executors.py`): `pantheon executors` — набор и состояние, `check` — проверка Codex (на PATH, вход,
-  hello-проба), `--add codex`, `--remove codex`, `pick <id задачи>` — кто пишет задачу. `pantheon exec codex <папка
+  hello-проба), `login` (вход Codex роли: device-auth с её CODEX_HOME; работает из любой папки, в отличие от
+  `pantheon-setup`, которого нет в PATH), `--add codex`, `--remove codex`, `pick <id задачи>` — кто пишет задачу.
+  Модель и effort Codex — по виду задачи (`[codex.models]` в `config.toml`, значение «модель effort»; умолчания:
+  mechanics — gpt-6.2-sol low, code — gpt-6.2-sol medium, hard — gpt-6.2-astra high); модели нет в каталоге
+  `codex debug models` — запуск без `-m` и предупреждение. Codex недоступен — задача уходит на `KINDS[вид]`:
+  dev-haiku, dev-sonnet или dev-opus. `pantheon exec codex [--kind mechanics|code|hard] <папка
   worktree> <файл поручения>` — запуск Codex в worktree; коды выхода: 0 — коммит есть, 1 — отказ (ошибка хода,
   защищённые пути, нет изменений), 2 — неверный вызов или worktree не чистый (игнорируемое не в счёт), 3 — Codex
   недоступен (задачу на dev-*), 4 — занят.

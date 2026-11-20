@@ -6,8 +6,9 @@
   - доступность Codex: в наборе, `[codex] enabled`, `disabled_until` не наступил, codex на PATH;
   - `check_codex()` — проверка окружения: codex на PATH → вход есть (`codex login status` с CODEX_HOME роли) →
     hello-проба 45 с; итог — в `[codex]`;
-  - `add_codex()` — шаг `pantheon-setup --add codex` и `pantheon executors --add codex`;
-  - `pick(head, kind)` — кто пишет задачу (roles/_parts/executor.part);
+  - `add_codex()` — шаги `pantheon-setup --add codex`, `pantheon executors --add codex` и `pantheon executors login` (вход);
+  - `pick(head, kind)` — кто пишет задачу (roles/_parts/executor.part); Codex недоступен — замена KINDS[kind];
+  - `kind_model()`/`model_flags()` — модель и effort Codex по виду задачи ([codex.models], каталог `codex debug models`);
   - `exec_codex()` — обёртка `pantheon exec codex <worktree> <файл поручения>` по образцу Paperclip codex_local
     (доклад prometheus 16.10, `research-2026-10-16-paperclip-codex-parity.md`, и поправки 17.10).
 
@@ -43,7 +44,9 @@ PROBE = os.path.join(PLUGIN, "scripts", "live-probe-codex-nested.sh")
 
 KINDS = {"mechanics": "dev-haiku", "code": "dev-sonnet", "hard": "dev-opus"}
 KNOWN = ("claude", "codex")
-FALLBACK = "dev-sonnet"   # executor.part: Codex недоступен → та же задача dev-sonnet
+# Модель и effort Codex по виду задачи (metis-1272): STATE/config.toml [codex.models], значение «модель effort».
+# Замена при недоступном Codex — KINDS[вид]: механика → dev-haiku, код → dev-sonnet, сложное → dev-opus.
+DEFAULT_MODELS = {"mechanics": "gpt-6.2-sol low", "code": "gpt-6.2-sol medium", "hard": "gpt-6.2-astra high"}
 UNAVAILABLE = 3           # код «Codex недоступен»: задачи идут на dev-*
 BUSY = 4                  # другой запуск держит CODEX_HOME роли
 
@@ -242,12 +245,67 @@ def pick(head, kind=None, cfg=None):
     if ex == "codex":
         if ok:
             return "codex-dev", None
-        return FALLBACK, f"задача закреплена за Codex, но он недоступен ({why}) — исполнитель {FALLBACK}"
+        return dev, f"задача закреплена за Codex, но он недоступен ({why}) — исполнитель {dev}"
     if ex != "auto":
         raise ValueError(f"executor «{ex}» — не из auto, claude, codex")
     if ok and kind in ("mechanics", "code"):
         return "codex-dev", None
     return dev, None
+
+
+# --- модель Codex по виду задачи -----------------------------------------------------------------------------------
+
+def kind_model(kind, cfg=None):
+    """→ (модель, effort или None) для вида задачи: [codex.models] kind = "модель effort", иначе умолчание."""
+    if kind not in KINDS:
+        raise ValueError(f"вид задачи «{kind}» — не из {', '.join(KINDS)}")
+    cfg = load() if cfg is None else cfg
+    models = (cfg.get("codex") or {}).get("models")
+    val = models.get(kind) if isinstance(models, dict) else None
+    parts = val.split() if isinstance(val, str) else []
+    if not parts:
+        parts = DEFAULT_MODELS[kind].split()
+    return parts[0], (parts[1] if len(parts) > 1 else None)
+
+
+def catalog(env):
+    """Каталог моделей `codex debug models` → {slug: [поддерживаемые effort]}; не прочитан — None."""
+    exe = codex_bin()
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "debug", "models"], capture_output=True, text=True, timeout=30, env=env,
+                           stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout)
+        got = {}
+        for m in data["models"]:
+            levels = m.get("supported_reasoning_levels") or []
+            got[m["slug"]] = [x["effort"] for x in levels if isinstance(x, dict) and "effort" in x]
+        return got
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def model_flags(kind, env, cfg=None):
+    """→ (флаги codex, модель, effort, предупреждения). Модели нет в каталоге или каталог не прочитан — без `-m` и без
+    effort (умолчание Codex) и с предупреждением, не отказ; effort вне списка модели — без него."""
+    model, effort = kind_model(kind, cfg)
+    cat = catalog(env)
+    if cat is None:
+        return [], None, None, [f"каталог моделей Codex не прочитан (`codex debug models`) — «{model}» не проверена, "
+                                "запуск с умолчанием Codex (без -m)"]
+    if model not in cat:
+        return [], None, None, [f"модели «{model}» (вид {kind}) нет в каталоге Codex — запуск с умолчанием Codex "
+                                "(без -m)"]
+    flags, warns = ["-m", model], []
+    if effort and cat[model] and effort not in cat[model]:
+        warns.append(f"effort «{effort}» не поддержан моделью {model} ({', '.join(cat[model])}) — без него")
+        effort = None
+    if effort:
+        flags += ["-c", f"model_reasoning_effort={effort}"]
+    return flags, model, effort, warns
 
 
 # --- запуск процесса с монитором тишины ------------------------------------------------------------------------
@@ -495,7 +553,7 @@ def check_codex(out=None):
         _disable("нет входа")
         return UNAVAILABLE, ("Codex недоступен: нет входа в CODEX_HOME роли (" + codex_home() + ")"
                              + (f": {detail[0]}" if detail else "") + " — задачи идут на dev-*. Вход: "
-                             "pantheon-setup --add codex")
+                             "pantheon executors login")
     res, why = hello_probe(env)
     if res != "passed":
         _disable("нужен вход" if res == "auth_required" else f"hello-проба: {res}")
@@ -506,7 +564,7 @@ def check_codex(out=None):
 
 
 INSTALL_HINT = ("Codex не найден на PATH. Поставить: `npm install -g @openai/codex` (или `brew install --cask codex`), "
-                "затем снова `pantheon-setup --add codex`. Codex не добавлен; установка идёт дальше, задачи — на Claude.")
+                "затем снова `pantheon executors login`. Codex не добавлен; установка идёт дальше, задачи — на Claude.")
 CONNECTORS_HINT = ("Проверьте подключённые приложения и коннекторы аккаунта Codex роли (chatgpt.com → Настройки → "
                    "Приложения/Connectors): песочница CLI не ограничивает права аккаунта (GHSA-gqqj). Лишнее — отключите.")
 
@@ -529,7 +587,7 @@ def run_live_probe(env, out):
 
 
 def add_codex(interactive=False, live_probe=False, out=None):
-    """Добавить Codex к набору (pantheon-setup --add codex, pantheon executors --add codex).
+    """Добавить Codex к набору (pantheon-setup --add codex, pantheon executors --add codex | login).
     interactive — `codex login --device-auth` с CODEX_HOME роли; live_probe — живая проба вложенной песочницы.
     → 0 — добавлен, 3 — не добавлен (понятный текст уже выведен, установка идёт дальше)."""
     out = out or (lambda s: print(s))
@@ -549,7 +607,7 @@ def add_codex(interactive=False, live_probe=False, out=None):
             rc = 1
         if rc != 0:
             _disable("нет входа")
-            out(f"Codex не добавлен: вход не выполнен (код {rc}). Повторить: pantheon-setup --add codex")
+            out(f"Codex не добавлен: вход не выполнен (код {rc}). Повторить: pantheon executors login")
             return UNAVAILABLE
     code, text = check_codex(out)
     out(text)
@@ -779,8 +837,9 @@ def _take_lock():
     return fh
 
 
-def exec_codex(worktree, brief_path, out=None, err=None):
-    """pantheon exec codex <worktree> <файл поручения>. Коды: 0 — коммит есть; 1 — отказ (ошибка хода, защищённые
+def exec_codex(worktree, brief_path, out=None, err=None, kind="code"):
+    """pantheon exec codex [--kind mechanics|code|hard] <worktree> <файл поручения>: вид задачи выбирает модель и
+    effort (kind_model, model_flags). Коды: 0 — коммит есть; 1 — отказ (ошибка хода, защищённые
     пути, нет изменений); 2 — неверный вызов или worktree не чистый; 3 — Codex недоступен (задачу на dev-*); 4 — занят."""
     out = out or (lambda s: print(s, flush=True))
     err = err or (lambda s: print(s, file=sys.stderr, flush=True))
@@ -807,7 +866,7 @@ def exec_codex(worktree, brief_path, out=None, err=None):
         return BUSY
     old = _trap_signals()
     try:
-        return _exec_locked(wt, brief, out, err)
+        return _exec_locked(wt, brief, out, err, kind)
     except Interrupted as e:
         err(f"прервано ({e}): Codex остановлен, изменения не закоммичены — проверь worktree {wt}")
         return 1
@@ -841,7 +900,7 @@ def _restore_signals(old):
         signal.signal(s, h if h is not None else signal.SIG_DFL)
 
 
-def _exec_locked(wt, brief, out, err):
+def _exec_locked(wt, brief, out, err, task_kind="code"):
     before = snapshot(wt)  # снимок под замком, до любого вызова codex
     dirty = dirty_paths(before)
     if dirty:  # чужие правки не должны попасть в коммит под трейлером Executor: codex
@@ -855,7 +914,10 @@ def _exec_locked(wt, brief, out, err):
     d = _branch_dir(wt)
     tag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
     report = os.path.join(d, f"report-{tag}.md")
-    argv = [exe, *EXEC_FLAGS, "-"]
+    mflags, model, effort, warns = model_flags(task_kind, env)
+    for w in warns:
+        err(f"предупреждение: {w}")
+    argv = [exe, *EXEC_FLAGS, *mflags, "-"]
     idle, total = _num("PANTHEON_CODEX_IDLE_S", 1800), _num("PANTHEON_CODEX_TIMEOUT_S", 7200)
     logs, kind, text, parsed = [], "failed", "", None
     for attempt in (1, 2):
@@ -867,7 +929,8 @@ def _exec_locked(wt, brief, out, err):
         if kind != "crash" or attempt == 2:
             break
         err(f"Codex упал посреди хода ({text}) — один повтор")
-    out(f"исполнитель: codex {ver}, лог: {logs[-1]}")
+    out(f"исполнитель: codex {ver}, вид: {task_kind}, модель: {model or 'умолчание Codex'}, "
+        f"effort: {effort or 'умолчание Codex'}, лог: {logs[-1]}")
     if len(logs) > 1:
         out(f"первая попытка: {logs[0]}")
     with open(report, "w", encoding="utf-8") as fh:
@@ -886,7 +949,7 @@ def _exec_locked(wt, brief, out, err):
         return 1
     if kind == "auth":
         _disable("нужен вход")
-        err(f"Codex недоступен: нужен вход ({text}) — Codex выключен, задачу на dev-*. Вход: pantheon-setup --add codex")
+        err(f"Codex недоступен: нужен вход ({text}) — Codex выключен, задачу на dev-*. Вход: pantheon executors login")
         return UNAVAILABLE
     if kind in ("limit", "demand"):
         until = (_again_at(text) if kind == "limit" else None) or \
@@ -927,7 +990,7 @@ def show():
 
 
 def cli(rest, task_head=None):
-    """pantheon executors [check | --add codex | --remove <имя> | pick <id> [--kind …]]."""
+    """pantheon executors [check | login | --add codex | --remove <имя> | pick <id> [--kind …]]."""
     try:
         if not rest:
             print(show())
@@ -944,6 +1007,8 @@ def cli(rest, task_head=None):
                 print(f"исполнителя «{rest[1]}» нет; известны: {', '.join(KNOWN)}", file=sys.stderr)
                 return 2
             return add_codex(interactive=False, live_probe=False)
+        if rest == ["login"]:  # вход роли codex-dev: device-auth с её CODEX_HOME, проверка, добавление в набор
+            return add_codex(interactive=True, live_probe=False)
         if rest[:1] == ["--remove"] and len(rest) == 2:
             code, text = remove(rest[1])
             print(text, file=sys.stderr if code else sys.stdout)
@@ -966,17 +1031,32 @@ def cli(rest, task_head=None):
     except ValueError as e:
         print(f"pantheon executors: {e}", file=sys.stderr)
         return 2
-    print("pantheon executors [check | --add codex | --remove <имя> | pick <id задачи> [--kind mechanics|code|hard]]",
+    print("pantheon executors [check | login | --add codex | --remove <имя> | pick <id задачи> [--kind mechanics|code|hard]]",
           file=sys.stderr)
     return 2
 
 
 def exec_cli(rest):
-    if len(rest) != 3 or rest[0] != "codex":
-        print("pantheon exec codex <папка worktree> <файл поручения>", file=sys.stderr)
+    usage = "pantheon exec codex [--kind mechanics|code|hard] <папка worktree> <файл поручения>"
+    args, kind = list(rest[1:]), "code"
+    if rest[:1] != ["codex"]:
+        print(usage, file=sys.stderr)
+        return 2
+    if "--kind" in args:
+        i = args.index("--kind")
+        if i + 1 >= len(args):
+            print(usage, file=sys.stderr)
+            return 2
+        kind = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 2:
+        print(usage, file=sys.stderr)
+        return 2
+    if kind not in KINDS:
+        print(f"pantheon exec codex: вид задачи «{kind}» — не из {', '.join(KINDS)}", file=sys.stderr)
         return 2
     try:
-        return exec_codex(rest[1], rest[2])
+        return exec_codex(args[0], args[1], kind=kind)
     except ValueError as e:  # битый config.toml
         print(f"pantheon exec codex: {e}", file=sys.stderr)
         return 2

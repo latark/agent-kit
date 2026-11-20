@@ -68,10 +68,10 @@ ENV = {"PATH": f"{GITBIN}:{BIN}:{BASE_PATH}", "HOME": HOME, "USER": "tester", "L
        "LC_ALL": "C.UTF-8", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
-def run(*a, env=None, timeout=120, inp=None):
+def run(*a, env=None, timeout=120, inp=None, cwd=None):
     e = dict(ENV, **(env or {}))
     e = {k: v for k, v in e.items() if v is not None}
-    return subprocess.run([PY311, "-I", RUN_PY, *a], env=e, capture_output=True, text=True, timeout=timeout, input=inp)
+    return subprocess.run([PY311, "-I", RUN_PY, *a], env=e, capture_output=True, text=True, timeout=timeout, input=inp, cwd=cwd)
 
 
 def py(code, env=None, timeout=120):
@@ -359,8 +359,10 @@ def tests():
     open(GITLOG, "w").close()
     r = exec_codex(wt)
     lines = r.stdout.splitlines()
-    m = re.match(r"^исполнитель: codex 0\.130\.0, лог: (\S+)$", lines[0]) if lines else None
-    check("успех: код 0, первая строка «исполнитель: codex <версия>, лог: <путь>»", r.returncode == 0 and m,
+    m = re.match(r"^исполнитель: codex 0\.130\.0, вид: code, модель: gpt-6\.2-sol, effort: medium, лог: (\S+)$",
+                 lines[0]) if lines else None
+    check("успех: код 0, первая строка «исполнитель: codex <версия>, вид, модель, effort, лог: <путь>»",
+          r.returncode == 0 and m,
           r.stdout + r.stderr)
     log = m.group(1) if m else ""
     check("лог JSONL — в $TMPDIR/tmp-codex-<ветка>/ и содержит события",
@@ -667,6 +669,99 @@ def tests():
         check(f"{name} обёртке → группа Codex мертва (заглушка и её дочерний), коммита нет, замок снят",
               dead and head(wt) == h0 and free, (dead, head(wt) == h0, free))
 
+    # --- metis-1272: модель и effort по виду задачи -------------------------------------------------------------------
+    def kind_run(kind_args, models=None, cfg_text=CODEX_ON):
+        set_cfg(cfg_text)
+        sc = {"exec": [ok_step()]}
+        if models is not None:
+            sc.update(models)
+        scenario(sc)
+        w = new_wt()
+        r = run("exec", "codex", *kind_args, w, BRIEF)
+        ec = calls("exec")
+        return r, (ec[0]["argv"] if ec else [])
+
+    def flags(a):  # модель и effort из argv запуска
+        m = a[a.index("-m") + 1] if "-m" in a else None
+        e = next((x.split("=", 1)[1] for x in a if x.startswith("model_reasoning_effort=")), None)
+        return m, e
+
+    for k, want in (("mechanics", ("gpt-6.2-sol", "low")), ("code", ("gpt-6.2-sol", "medium")),
+                    ("hard", ("gpt-6.2-astra", "high"))):
+        r, a = kind_run(["--kind", k])
+        check(f"1272: exec codex --kind {k} → -m и effort {want}, `-c model_reasoning_effort=` парой",
+              r.returncode == 0 and flags(a) == want and a[-1] == "-"
+              and a[a.index(f"model_reasoning_effort={want[1]}") - 1] == "-c", (r.stdout, r.stderr, a))
+    check("1272: в отчёте обёртки — вид, модель и effort",
+          "вид: hard, модель: gpt-6.2-astra, effort: high" in r.stdout, r.stdout)
+    r, a = kind_run([])
+    check("1272: без --kind — вид code (sol medium)", r.returncode == 0 and flags(a) == ("gpt-6.2-sol", "medium"), a)
+    r, a = kind_run(["--kind", "magic"])
+    check("1272: чужой вид → код 2, Codex не запускался", r.returncode == 2 and "вид задачи" in r.stderr and not a,
+          r.stderr)
+    r = run("exec", "codex", "--kind")
+    check("1272: --kind без значения → код 2", r.returncode == 2, r.stderr)
+    r, a = kind_run(["--kind", "mechanics"],
+                    cfg_text=CODEX_ON + '\n[codex.models]\nmechanics = "gpt-6.2-astra xhigh"\ncode = "gpt-6.2-sol"\n')
+    check("1272: [codex.models] в config.toml переопределяет умолчание", flags(a) == ("gpt-6.2-astra", "xhigh"), a)
+    r, a = kind_run(["--kind", "code"], cfg_text=CODEX_ON + '\n[codex.models]\ncode = "gpt-6.2-sol"\n')
+    check("1272: в записи только модель — -m есть, effort не передаётся", flags(a) == ("gpt-6.2-sol", None), a)
+    r, a = kind_run(["--kind", "code"], cfg_text=CODEX_ON + '\n[codex.models]\ncode = "gpt-9-nope medium"\n',
+                    models=None)
+    check("1272: модели нет в каталоге → предупреждение, код 0, запуск без -m и без effort",
+          r.returncode == 0 and "-m" not in a and flags(a) == (None, None) and "предупреждение" in r.stderr
+          and "gpt-9-nope" in r.stderr and "нет в каталоге" in r.stderr and "модель: умолчание Codex" in r.stdout,
+          (r.returncode, r.stdout, r.stderr, a))
+    r, a = kind_run(["--kind", "code"], models={"models": {"gpt-6.2-astra": ["high"]}})
+    check("1272: каталог без нужной модели (sol нет) → без -m, предупреждение",
+          r.returncode == 0 and "-m" not in a and "нет в каталоге" in r.stderr, (r.stderr, a))
+    r, a = kind_run(["--kind", "code"], models={"models_rc": 1})
+    check("1272: каталог не прочитан (`codex debug models` упал) → без -m, предупреждение, не отказ",
+          r.returncode == 0 and "-m" not in a and "каталог моделей Codex не прочитан" in r.stderr, (r.stderr, a))
+    r, a = kind_run(["--kind", "code"], models={"models": {"gpt-6.2-sol": ["low", "high"]}})
+    check("1272: effort вне списка модели → -m есть, effort не передан, предупреждение",
+          flags(a) == ("gpt-6.2-sol", None) and "не поддержан" in r.stderr, (r.stderr, a))
+    cat_calls = [x for x in calls() if x["argv"] == ["debug", "models"]]
+    check("1272: каталог читается с CODEX_HOME роли", cat_calls and cat_calls[0]["codex_home"] == CH, calls())
+
+    # pconfig.update не портит вложенную таблицу [codex.models] (раньше dict превращался в строку)
+    set_cfg(CODEX_ON + '\n[codex.models]\nhard = "gpt-6.2-astra max"\n')
+    scenario({})
+    run("executors", "check")
+    check("1272: после `executors check` [codex.models] цела, таблица читается как таблица",
+          (cfg().get("codex") or {}).get("models") == {"hard": "gpt-6.2-astra max"} and cfg()["codex"]["enabled"] is True,
+          cfg())
+
+    # замена по виду: executor codex при недоступном Codex → KINDS[вид], не всегда dev-sonnet
+    set_cfg("")
+    got = {k: run("executors", "pick", t_codex, "--kind", k) for k in ("mechanics", "code", "hard")}
+    check("1272: executor codex, Codex недоступен: hard → dev-opus, mechanics → dev-haiku, code → dev-sonnet",
+          {k: v.stdout.strip() for k, v in got.items()} ==
+          {"mechanics": "dev-haiku", "code": "dev-sonnet", "hard": "dev-opus"}
+          and all("предупреждение" in v.stderr and v.stdout.strip() in v.stderr for v in got.values()),
+          {k: (v.stdout, v.stderr) for k, v in got.items()})
+    check("1272: FALLBACK в executors.py нет", "FALLBACK" not in open(EXE, encoding="utf-8").read())
+
+    # подсказка о входе — команда, которая запускается из любой папки
+    set_cfg("")
+    scenario({"login": 1})
+    r = run("executors", "--add", "codex")
+    mh = re.search(r"Вход: (pantheon executors login)\b", r.stdout)
+    check("1272: подсказка «Вход: pantheon executors login», а не pantheon-setup",
+          mh and "pantheon-setup" not in r.stdout, r.stdout)
+    scenario({"login": 1, "device_auth": 0})
+    other = os.path.join(TMP, "elsewhere")
+    os.makedirs(other, exist_ok=True)
+    r = run(*(mh.group(1).split()[1:] if mh else ["?"]), cwd=other)
+    dev = [x for x in calls() if x["argv"][:2] == ["login", "--device-auth"]]
+    check("1272: команда из подсказки запускается из другой папки: device-auth с CODEX_HOME роли, Codex в наборе",
+          r.returncode == 0 and dev and dev[0]["codex_home"] == CH
+          and "codex" in (cfg().get("executors") or {}).get("set", []), (r.returncode, r.stdout, r.stderr))
+    r = py("print(m.INSTALL_HINT)")
+    check("1272: INSTALL_HINT тоже без pantheon-setup", "pantheon executors login" in r.stdout
+          and "pantheon-setup" not in r.stdout, r.stdout)
+    set_cfg("")
+
     # --- вызов --------------------------------------------------------------------------------------------------------
     r = run("exec", "codex", TMP, BRIEF)
     check("exec не в папке git → код 2", r.returncode == 2, r.stderr)
@@ -674,7 +769,7 @@ def tests():
     check("exec не codex → справка, код 2", r.returncode == 2, r.stderr)
     r = run("help")
     check("справка pantheon: строки executors и exec codex", "pantheon executors" in r.stdout
-          and "pantheon exec codex <worktree> <файл поручения>" in r.stdout)
+          and "pantheon exec codex [--kind K] <worktree> <файл поручения>" in r.stdout)
 
     # --- список защищённых путей = roles/_parts/protected.part ----------------------------------------------------------
     import importlib.util

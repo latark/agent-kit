@@ -194,9 +194,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon plan check ФАЙЛ [--direction ИМЯ]   разделы «## N. Пачка …» плана против карточек story (lib/plancheck.py)
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
+  pantheon executors login              вход Codex роли (device-auth с её CODEX_HOME), проверка, добавление в набор
   pantheon executors --add codex | --remove <имя>   добавить Codex (через проверку, без входа) | убрать (Claude — отказ)
   pantheon executors pick <id задачи> [--kind mechanics|code|hard]   кто пишет задачу: dev-* или codex-dev
-  pantheon exec codex <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
+  pantheon exec codex [--kind K] <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
                                         защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/ai/workshop/<задача> (до
