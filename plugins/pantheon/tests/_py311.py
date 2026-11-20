@@ -5,6 +5,7 @@
     from _py311 import PY311
 Тесты идут только на Python 3.11+ (AGENTS.md «Как проверять», CI — 3.14). Старше — код 1 и одна строка: pantheon.py
 без tomllib не идёт, а молчаливый пропуск прятал бы непроверенное."""
+import atexit
 import os
 import shutil
 import sys
@@ -20,24 +21,73 @@ if sys.version_info < (3, 11):
 os.environ["PANTHEON_TEST"] = "1"
 
 
-def python_without_claude(exe):
-    """Путь интерпретатора для подпроцессов теста, в папке которого нет настоящего `claude` (metis-1308) → путь.
+# Настоящие инструменты, которые тесты подменяют заглушкой или ждут «нет на PATH» (metis-1308): настоящий claude
+# поднимает окна, настоящий codex идёт входить в OpenAI. Ни один тест их звать не должен.
+REAL_TOOLS = ("claude", "codex")
+
+
+def _has_tool(d, tools=REAL_TOOLS):
+    return any(os.path.lexists(os.path.join(d, t)) for t in tools)
+
+
+def python_without_claude(exe, tools=REAL_TOOLS):
+    """Путь интерпретатора для подпроцессов теста, в папке которого нет настоящих `claude` и `codex` (metis-1308) → путь.
 
     run_env (lib/pantheon.py) ставит папку sys.executable в PATH окон и дочерних `pantheon start` раньше PATH теста —
     раньше папки подменного claude. Тест, запущенный python3.14 из ~/.local/bin (uv кладёт туда ссылку рядом с
     настоящим claude), отдавал дочернему start настоящий claude: самозапуск звал `claude --bg` мимо подмены, и окно в
     журнале подмены не появлялось. Тогда берётся realpath интерпретатора — тот же Python из своей папки. И там есть
-    claude — код 1 и причина: подмена не изолирована, проверять нечего."""
-    if not os.path.lexists(os.path.join(os.path.dirname(exe), "claude")):
+    claude или codex — код 1 и причина: подмена не изолирована, проверять нечего."""
+    if not _has_tool(os.path.dirname(exe), tools):
         return exe
     real = os.path.realpath(exe)
-    if os.path.lexists(os.path.join(os.path.dirname(real), "claude")):
-        print(f"FAIL рядом с интерпретатором теста {real} лежит claude — подменный claude тестов не изолирован "
+    if _has_tool(os.path.dirname(real), tools):
+        print(f"FAIL рядом с интерпретатором теста {real} лежит claude или codex — подмена тестов не изолирована "
               "(metis-1308): запустите тесты другим python3.14")
         sys.exit(1)
     return real
 
 
+def isolate_path(path, root, tools=REAL_TOOLS):
+    """PATH теста без настоящих tools (metis-1308) → строка PATH. Папка PATH, где лежит claude или codex, заменяется
+    зеркалом в root: ссылки на все её файлы, кроме tools. node, pnpm и python3.14 из той же папки остаются на PATH,
+    а `shutil.which("codex")` теста «Codex нет» ничего не находит. Пример: codex из npm лежит в bin nvm рядом с node,
+    и тест «Codex нет: add_codex» звал настоящий codex — тот шёл входить в OpenAI и вис до TimeoutExpired."""
+    out = []
+    for d in (path or "").split(":"):
+        if not d or not os.path.isdir(d) or not _has_tool(d, tools):
+            out.append(d)
+            continue
+        mirror = os.path.join(root, f"bin{len(out)}")
+        os.makedirs(mirror)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            names = []
+        for n in names:
+            if n not in tools:
+                os.symlink(os.path.join(d, n), os.path.join(mirror, n))
+        out.append(mirror)
+    return ":".join(out)
+
+
+def isolate_env(environ, root, tools=REAL_TOOLS):
+    """Окружение процесса теста без настоящих tools (metis-1308): PATH — isolate_path, NVM_DIR — пустая папка в root.
+    run_env ставит bin nvm (NVM_DIR, иначе HOME/.nvm) первым в PATH дочерних процессов, если его нет в PATH: после
+    зеркала его там нет, и настоящий codex из nvm вернулся бы раньше всего. Пустой NVM_DIR — nvm_bin() ничего не
+    добавляет, node берётся из зеркала. Меняет environ на месте."""
+    if environ.get("PATH"):
+        environ["PATH"] = isolate_path(environ["PATH"], root, tools)
+    nvm = os.path.join(root, "nvm")
+    os.makedirs(nvm, exist_ok=True)
+    environ["NVM_DIR"] = nvm
+
+
+_ISOLATED = tempfile.mkdtemp(prefix="py311-path-")
+_OWNER = os.getpid()
+# зеркало убирает только процесс, который его создал: копия процесса (fork) с sys.exit не сносит его у соседей
+atexit.register(lambda: os.getpid() == _OWNER and shutil.rmtree(_ISOLATED, True))
+isolate_env(os.environ, _ISOLATED)
 PY311 = python_without_claude(sys.executable)
 
 
