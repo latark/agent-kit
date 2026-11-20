@@ -625,6 +625,26 @@ def test_phrase_not_owner_hook():
     check("хук: ваша фраза → слияние этого SHA", merged_once(b) and len(b.approve_lines()) == 1, b.outs[-1])
 
 
+
+def test_batch_all_light_no_window():
+    """metis-1280: пачка вся вне ядра — окна нет ни у одного PR, слияний нет, обе заявки ждут координатора
+    (argus #519 Б2: ветка all(light) без теста); слитый мимо окна PR пачки снимается тихо."""
+    b = batch_box()
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE)
+    b.view(BATCH_SHA[8], pr=8, title="PR 8", files=NONCORE)
+    r = request_batch(b)
+    check("пачка вне ядра: заявки поставлены, строки про окно нет, подсказка «окна не будет»", r.returncode == 0
+          and "Вне ядра" in r.stdout and "Одно окно" not in r.stdout, r.stdout + r.stderr)
+    b.set("touchid-rc", 0)
+    b.run()
+    check("пачка вне ядра: окна нет, слияний нет, у обоих «ждёт: вне ядра»", not b.windows() and not b.merges()
+          and b.req(7) is not None and b.req(8) is not None and b.outs[-1].count("вне ядра — без Touch ID") >= 2,
+          b.outs[-1])
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE, state="MERGED")
+    b.run(t=T0 + 60)
+    check("PR пачки вне ядра слит координатором: снят тихо, второй ждёт", b.req(7) is None and b.req(8) is not None
+          and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544); исключение — провал случая

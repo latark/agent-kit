@@ -499,6 +499,28 @@ def test_light_no_window():
     b.run()
     check("заявка вне ядра: окна нет, слияния нет, заявка ждёт", not b.windows() and not b.merges()
           and b.req() is not None, b.outs[-1])
+    b.view(SHA, files=["README.md", "plugins/pantheon/lib/env_from.py"], state="MERGED")
+    b.run(t=T0 + 60)
+    check("слита координатором мимо окна: заявка снята тихо — событие merged-outside, тревоги нет (argus #519 Б1)",
+          b.req() is None and "merged-outside" in b.log() and "заявка снята" not in b.alerts(),
+          b.outs[-1] + b.alerts())
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.run()
+    b.run(t=T0 + 25 * 3600)
+    check("вне ядра и никто не слил за сутки: заявка снята без тревоги владельцу", b.req() is None
+          and "expired" in b.log() and "заявка снята" not in b.alerts(), b.outs[-1] + b.alerts())
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE])
+    b.request()
+    b.run(extra={"PANTHEON_FAKE_IDLE": "900"})   # вас нет у Mac — заявка ядра ждёт окна
+    b.view(SHA, files=["README.md", CORE_FILE], state="MERGED")
+    b.run(t=T0 + 60)
+    check("PR ядра слит мимо окна — тревога, как раньше (отметки light нет)", b.req() is None
+          and "заявка снята — PR не открыт (MERGED)" in b.alerts(), b.outs[-1] + b.alerts())
+    check("LIGHT_REPOS — полное owner/repo: чужой <owner>/agent-kit идёт с окном (argus #519 Д1)",
+          not _merge_mod().light_paths("other/agent-kit", ["README.md"]))
     b = Box()
     b.view(SHA, files=["README.md", CORE_FILE])
     r = b.request()
