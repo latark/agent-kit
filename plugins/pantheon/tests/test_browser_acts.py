@@ -102,9 +102,10 @@ finger(3)
 # --- поддельный демон с фактами страниц ------------------------------------------------------------------------------
 
 def node(tag, type_="", role="", label="", attrs="", href="", onclick=False, target="", download=False, ce=False,
-         ctag="", ctype=""):
+         ctag="", ctype="", fa=False, ax=False):
     return {"tag": tag, "type": type_, "role": role, "href": href, "onclick": onclick, "target": target,
-            "download": download, "ce": ce, "ctag": ctag, "ctype": ctype, "label": label, "attrs": attrs}
+            "download": download, "ce": ce, "ctag": ctag, "ctype": ctype, "label": label, "attrs": attrs, "fa": fa,
+            "ax": ax}
 
 
 def field(name, value="", type_="text", tag="input", label="", auto="", checked=False):
@@ -374,7 +375,24 @@ D.page(K, {
     "#cb-in-onclick": dict(facts(chk, chain=[chk, node("div", onclick=True), node("body")]), x=10.0),
     "#cb-in-role": dict(facts(chk, chain=[chk, node("div", role="button"), node("body")]), x=11.0),
     "#div": dict(facts(node("div", label=""), chain=[node("div"), node("body")]), x=12.0),
-    "#div-tab": dict(facts(node("div", role="tab", label="Вкладка")), x=13.0),
+    "#div-tab": dict(facts(node("div", role="tab", label="Сообщения")), x=13.0),
+    "#div-ax": dict(facts(node("div", role="button", label="Фильтры", ax=True)), x=13.1),
+    "#summary": dict(facts(node("summary", label="Условия продажи")), x=13.2),
+    "#div-word": dict(facts(node("div", role="button", label="Сообщения")), x=13.3),
+    "#ax-empty": dict(facts(node("div", role="button", label="", ax=True)), x=13.4),
+    "#btn-fa": dict(facts(node("button", "button", label="Подробнее", fa=True, ax=True)), x=13.5),
+    "#btn-ax": dict(facts(node("button", "", label="Подробнее", ax=True)), x=13.6),
+    "#btn-sub-fa": dict(facts(node("button", "", label="Подробнее", ax=True, fa=True)), x=13.61),
+    "#btn-sub-form": dict(facts(node("button", "", label="Подробнее", ax=True),
+                                form={"action": SITE + "/k", "label": "", "method": "get"}), x=13.62),
+    "#phone": dict(facts(node("div", role="button", label="Показать телефон")), x=13.7),
+    "#in-submit": dict(facts(node("span", role="button", label="Подробнее", ax=True),
+                             chain=[node("span", role="button", label="Подробнее", ax=True),
+                                    node("button", "submit", label="Подробнее", fa=True), node("body")]), x=13.8),
+    "#in-label": dict(facts(node("span", role="button", label="Подробнее", ax=True),
+                            chain=[node("span", role="button", label="Подробнее", ax=True),
+                                   node("label", ctag="input", ctype="checkbox", label="Подробнее"), node("body")]),
+                      x=13.9),
     "#ext": dict(facts(node("a", href="https://evil.com/x", label="туда")), x=14.0),
     "#js": dict(facts(node("a", href="javascript:void(0)", label="js")), x=15.0),
     "#blank": dict(facts(node("a", href=SITE + "/y", target="_blank", label="новое окно")), x=16.0),
@@ -399,12 +417,25 @@ for sel, kind in (("#radio", "radio"), ("#label", "checkbox"), ("#link", "link")
 for sel, label, word in (
         ("#span-in-btn", "K1", "submit"), ("#btn-role-cb", "K2", "роль его не расширяет"),
         ("#cb-role-button", "K2", "submit"), ("#cb-in-a", "K3", "вложен"), ("#cb-in-onclick", "K3", "вложен"),
-        ("#cb-in-role", "K3", "вложен"), ("#div", "K6", "нет флажка"), ("#div-tab", "K2", "submit"),
+        ("#cb-in-role", "K3", "вложен"), ("#div", "K6", "нет флажка"),
         ("#ext", "K5", "не на avito.ru"), ("#js", "K5", "не на"), ("#blank", "K5", "submit"), ("#dl", "K5", "submit"),
         ("#a-onclick", "K2", "submit"), ("#a-role-btn", "K2", "submit"), ("#cover", "K4", "закрыл")):
     res = act("click", sel, K)
     check(f"[{label}] click {sel} — отказ ({word}), нажатия нет",
           res["state"] == "refused" and word in res["why"] and not D.clicked(), res)
+for sel, what in (("#div-tab", "role=tab «Сообщения»"), ("#div-ax", "aria-expanded «Фильтры»"),
+                  ("#summary", "summary «Условия продажи»"), ("#btn-ax", "button без type вне формы, aria-expanded")):
+    res = act("click", sel, K)
+    check(f"[K6][metis-1268] click {sel} — {what} без формы: раскрытие блока по разрешающему признаку, нажато",
+          res["state"] == "done" and "(раскрытие)" in res["text"] and len(D.clicked()) == 1, res)
+for sel, what in (("#div-word", "надпись не из EXPAND_WORDS, признака нет"), ("#ax-empty", "пустая надпись"),
+                  ("#btn-fa", "кнопка с атрибутом form="), ("#btn-sub-fa", "button без type с form="),
+                  ("#btn-sub-form", "button без type в форме"),
+                  ("#phone", "«Показать телефон»"), ("#in-submit", "предок — button submit с form="),
+                  ("#in-label", "предок — label")):
+    res = act("click", sel, K)
+    check(f"[K6][metis-1268] click {sel} — {what}: не раскрытие, отказ, нажатия нет",
+          res["state"] == "refused" and not D.clicked(), (sel, res))
 D.point_shift = 3.0
 res = act("click", "#cb", K)
 check("[K4] рамка сдвинулась после замера (плавная прокрутка, анимация) — отказ, нажатия нет",
@@ -914,7 +945,10 @@ check("[S1] ввод в поле поиска GET-формы без поруче
 res = act("submit", "#login", SRCH)
 check("[S2] форма входа (пароль) даже с GET — отказ «важная форма», без нажатий и окна",
       res["state"] == "refused" and "важная форма" in res["why"] and not D.cmds() and not touches(), res)
-for sel, what in (("#inn", "POST «Найти» рядом с полем ИНН"), ("#apply", "POST «Apply» с полями ФИО и address"),
+res = act("submit", "#inn", SRCH)
+check("[S3][metis-1268] POST с кнопкой «Найти» и полем ИНН — поиск без поручения (кнопка поиска)",
+      res["state"] == "done" and "кнопка поиска" in res["text"] and not touches() and not mandates(), res)
+for sel, what in (("#apply", "POST «Apply» с полями ФИО и address"),
                   ("#show", "POST «Show» с полем type=search"), ("#next", "submit «Далее» вне формы"),
                   ("#wiz", "submit «Далее» вне формы с ФИО и телефоном (шаг мастера)"),
                   ("#mail", "GET-форма с полем email")):
@@ -999,6 +1033,28 @@ res = act("submit", "#post", SRCH, why="сохранить черновик")
 check("[Q2] после «да» на вопрос карточки — поручение есть, дальше согласие на отправку (вопрос с кодом)",
       any("avito.ru__submit" in m for m in mandates()) and res["state"] == "refused" and quoted(res["why"])
       and "Отправить форму" in quoted(res["why"]) and "отправлен вопрос [" in res["why"], (res, mandates()))
+got = re.search(r"отправлен вопрос \[([^\]]+)\]", res.get("why", ""))
+check("[Q2][metis-1120] вопрос на отправку — тоже карточка владельцу с [id], ждёт человека",
+      got and P.tasks_mod().load_tasks(P.PANTHEON).get(got.group(1), (None, {}))[1].get("waiting_on") == "human", res)
+answer(P.now() + 1, quoted(res["why"]), "Да — отправить")
+at(P.now() + 2)
+clear_touch()
+res = act("submit", "#post", SRCH, why="сохранить черновик")
+check("[Q2][metis-1120] после «да» на карточку отправки — отправлено той же командой, без allow от Зевса и окна",
+      res["state"] == "done" and "«да» владельца" in res["text"] and len(D.clicked()) == 1 and not touches()
+, res)
+reset_mandates()
+res = act("click", "#news", SRCH, why="подписаться на рассылку")
+got = re.search(r"отправлен вопрос \[([^\]]+)\]", res.get("why", ""))
+want = B.mandate_question(TASK, "avito.ru", ["click"], "подписаться на рассылку")
+check("[Q2][metis-1120] click без поручения — отказ и карточка владельцу с [id] на вопрос поручения",
+      res["state"] == "refused" and got and P.tasks_mod().load_tasks(P.PANTHEON).get(got.group(1), (None, {}))[1]
+      .get("question") == want and not D.clicked(), res)
+answer(P.now() + 1, want)
+at(P.now() + 2)
+res = act("click", "#news", SRCH, why="подписаться на рассылку")
+check("[Q2][metis-1120] после «да» на карточку — та же команда нажала, без ручного allow (поручение по «да»)",
+      res["state"] == "done" and len(D.clicked()) == 1 and any("avito.ru__click" in m for m in mandates()), res)
 clear_touch()
 
 # повтор после неудачной отправки: страница не изменилась — согласие не съедено, один повтор
@@ -1087,6 +1143,133 @@ check("[F3] --focus и отказ — фокус всё равно выключ�
 res = act("submit", "#find", SRCH)
 check("[F3] без --focus — Emulation не зовётся",
       not any(c["method"].startswith("Emulation") for c in D.cmds()), D.cmds())
+
+# --- metis-1268, metis-1120: КАД, А-КОСТА, fedresurs — поиск и раскрытие блоков без поручения ------------------------
+reset_mandates()
+clear_touch()
+KAD = "https://kad.arbitr.ru/"
+KCARD = KAD + "Card/0f3c"
+KFIELDS = [field("", "", type_="", tag="textarea", label="название, ИНН или ОГРН"), field("judge", "", label="Судья"),
+           field("court", "", label="Суд"), field("case", "А28-9941/2024", label="Номер дела")]
+D.page(KAD, {
+    "#num": dict(facts(node("input", "text", attrs="b-form-case sug-cases"), fields=KFIELDS), x=70.5),
+    "#find": dict(facts(node("button", "submit", label="Найти"), fields=KFIELDS), x=71.5),
+    "#find-who": dict(facts(node("button", "submit", label="Найти"),
+                            fields=[dict(KFIELDS[0], value="ООО Ромашка")] + KFIELDS[1:]), x=72.5),
+    "#login": dict(facts(node("button", "submit", label="Войти"),
+                         fields=[field("login", "me"), field("pass", "", type_="password", label="Пароль")],
+                         form={"action": KAD + "Account/Login", "label": "", "method": "post"}, buttons=["Войти"]),
+                   x=73.5),
+    "#login-get": dict(facts(node("button", "submit", label="Войти"), fields=[field("login", "me")],
+                             form={"action": KAD, "label": "", "method": "get"}, buttons=["Войти"]), x=74.5)})
+ED = node("div", attrs="b-case-chrono-button js-case-chrono-button js-case-chrono-button--ed")
+D.page(KCARD, {
+    "#ed": dict(facts(ED, chain=[node("span"), ED, node("div"), node("body")]), elabel="Электронное дело", x=75.5),
+    "#chrono": dict(facts(node("div", role="button", label="Полная хронология", attrs="js-collapse")), x=76.5),
+    "#yes": dict(facts(node("div", role="button", label="Да")), x=77.5),
+    "#save": dict(facts(node("button", "", label="Сохранить")), x=78.5),
+    "#send": dict(facts(node("div", role="button", label="", attrs="js-send-btn")), x=79.5),
+    "#in-form": dict(facts(node("div", role="button", label="Подробнее"),
+                           chain=[node("div", role="button", label="Подробнее"), node("form"), node("body")]), x=80.5),
+    "#in-link": dict(facts(node("span"), chain=[node("span"), node("a", href="https://evil.com/x", label="тут"),
+                                                node("body")]), elabel="тут", x=81.5)})
+res = act("type", "#num", KAD, text="А28-9941/2024")
+check("[S6][metis-1120] КАД: ввод номера дела в поле вне формы — без поручения и allow",
+      res["state"] == "done" and "поле вне формы" in res["text"] and any(
+          c["method"] == "Input.insertText" for c in D.cmds()) and not mandates(), res)
+res = act("submit", "#find", KAD)
+check("[S6][metis-1120] КАД: «Найти» вне формы (пустая textarea участника) — поиск без поручения, allow и Touch ID",
+      res["state"] == "done" and "кнопка поиска" in res["text"] and len(D.clicked()) == 1 and not touches()
+      and not mandates(), res)
+res = act("click", "#find", KAD)
+check("[S6][metis-1268] КАД: «Найти» через click — тоже без поручения", res["state"] == "done" and D.clicked(), res)
+res = act("submit", "#find-who", KAD)
+check("[S6] КАД: textarea участника заполнена — не свободный поиск: отказ по поручению, нажатия нет",
+      res["state"] == "refused" and "поручения" in res["why"] and not D.clicked(), res)
+for sel in ("#login", "#login-get"):
+    finger(0)
+    res = act("submit", sel, KAD)
+    check(f"[S6][F2][metis-1120] КАД: форма входа {sel} — отказ «важная форма» и с пальцем, нажатия и окна нет",
+          res["state"] == "refused" and "важная форма" in res["why"] and not D.cmds() and not touches(), res)
+finger(3)
+for sel, what in (("#ed", "div «Электронное дело» с обработчиком"), ("#chrono", "div[role=button] «Полная хронология»")):
+    res = act("click", sel, KCARD)
+    check(f"[S7][metis-1268] КАД: {what} — раскрытие блока без поручения, нажато",
+          res["state"] == "done" and "раскрытие" in res["text"] and len(D.clicked()) == 1 and not mandates(), res)
+for sel, what in (("#yes", "«Да» диалога"), ("#save", "кнопка «Сохранить» без формы"),
+                  ("#send", "кнопка без надписи с классом send"), ("#in-form", "div внутри формы"),
+                  ("#in-link", "span внутри ссылки на чужой сайт")):
+    res = act("click", sel, KCARD)
+    check(f"[S7][metis-1268] {what} — не раскрытие: отказ, нажатия нет", res["state"] == "refused"
+          and not D.clicked(), (sel, res))
+
+AK = "https://akosta.info/lots.xhtml"
+AKF = {"action": AK, "label": "searchForm", "method": "post"}
+AKFIELDS = [field("searchForm:inn", "", label="ИНН должника"), field("searchForm:lot", "77", label="Номер лота")]
+AKTORG = [field("searchForm:torgNumber", "", label="Номер торгов"), field("searchForm:lot", "77", label="Номер лота")]
+D.page(AK, {
+    "#lot": dict(facts(node("input", "text", attrs="searchForm:lot"), fields=AKFIELDS, form=AKF,
+                       buttons=["Найти", "Сбросить"], heads=["Поиск лотов"]), x=82.5),
+    "#lfind": dict(facts(node("button", "submit", label="Найти"), fields=AKFIELDS, form=AKF,
+                         buttons=["Найти", "Сбросить"], heads=["Поиск лотов"]), x=83.5),
+    "#lfind-torg": dict(facts(node("button", "submit", label="Найти"), fields=AKFIELDS, form=AKF,
+                              buttons=["Найти", "Сбросить"], heads=["Поиск торгов"]), x=83.7),
+    "#lfind-lab": dict(facts(node("button", "submit", label="Найти"), fields=AKTORG, form=AKF,
+                             buttons=["Найти", "Сбросить"], heads=["Поиск лотов"]), x=83.9),
+    "#lbid": dict(facts(node("button", "submit", label="Сделать ставку"), fields=[field("price", "100", type_="number")],
+                        form=AKF, buttons=["Сделать ставку"], heads=["Торги по лоту 77"]), x=84.5),
+    "#lreq": dict(facts(node("button", "submit", label="Отправить"), fields=[field("note", "x")], form=AKF,
+                        buttons=["Отправить"], heads=["Заявка на участие в торгах"]), x=85.5),
+    "#lget": dict(facts(node("button", "submit", label="Показать"), fields=[field("lot", "77")],
+                        form={"action": AK, "label": "", "method": "get"}, buttons=["Показать"],
+                        heads=["Заявка на участие в торгах"]), x=85.9)})
+res = act("type", "#lot", AK, text="77")
+check("[S8][metis-1268] А-КОСТА: ввод номера лота в форму «Поиск лотов» — не важная форма, без поручения",
+      res["state"] == "done" and not mandates(), res)
+res = act("submit", "#lfind", AK)
+check("[S8][metis-1268] А-КОСТА: «Найти» в POST-форме поиска торгов — поиск без поручения и согласия",
+      res["state"] == "done" and "кнопка поиска" in res["text"] and len(D.clicked()) == 1 and not touches(), res)
+for sel, what in (("#lbid", "«Сделать ставку»"), ("#lreq", "заявка на участие (заголовок формы)"),
+                  ("#lfind-torg", "«Найти» под заголовком «Поиск торгов» (слово важной формы в заголовке)"),
+                  ("#lfind-lab", "«Найти» с полем «Номер торгов» (слово важной формы в подписи поля)"),
+                  ("#lget", "GET-форма «Показать» под заголовком заявки (не кнопка поиска)")):
+    finger(0)
+    res = act("submit", sel, AK)
+    check(f"[S8][F2] А-КОСТА: {what} — по-прежнему «важная форма», и с пальцем", res["state"] == "refused"
+          and "важная форма" in res["why"] and not D.cmds() and not touches(), res)
+finger(3)
+
+FR = "https://fedresurs.ru/search/entity"
+D.page(FR, {
+    "#ffind": dict(facts(node("button", "", label="Найти"), fields=[field("searchString", "7700000000")]), x=86.5),
+    "#ftab": dict(facts(node("div", role="tab", label="Сообщения")), x=87.5),
+    "#fnav": dict(facts(node("a", href="https://fedresurs.ru/companies/0f3c", label="ООО Ромашка")), x=87.7),
+    "#fsrch": dict(facts(node("button", "submit", label="Показать"), fields=[field("searchString", "7700000000")],
+                         form={"action": FR, "label": "", "method": "post"}, buttons=["Показать"]), srch=True, x=87.9),
+    "#fpost": dict(facts(node("button", "submit", label="Направить"), fields=[field("text", "x")],
+                         form={"action": FR, "label": "", "method": "post"}, buttons=["Направить"]), x=88.5)})
+check("[S9][metis-1268] fedresurs.ru читается (не закрытый сайт, с уведомлением)",
+      B.allowed("fedresurs.ru", DOMAINS, None) == "open" and not B.closed("bankrot.fedresurs.ru"))
+res = act("submit", "#ffind", FR)
+check("[S9][metis-1268] fedresurs: поиск по ИНН — без поручения, не «госсайт»",
+      res["state"] == "done" and "кнопка поиска" in res["text"], res)
+res = act("click", "#ftab", FR)
+check("[S9][metis-1268] fedresurs: вкладка «Сообщения» — раскрытие без поручения", res["state"] == "done", res)
+res = act("click", "#fnav", FR)
+check("[S9][metis-1268] fedresurs: ссылка на карточку того же сайта — переход без поручения",
+      res["state"] == "done" and len(D.clicked()) == 1 and not mandates(), res)
+finger(0)
+res = act("submit", "#fsrch", FR)
+check("[S9][metis-1268] fedresurs: POST role=search без кнопки поиска («Показать») — «важная форма», не чтение",
+      res["state"] == "refused" and "важная форма" in res["why"] and not D.cmds() and not touches(), res)
+res = act("submit", "#fpost", FR)
+check("[S9][F2] fedresurs: форма не поиск — «важная форма» (площадка или реестр), и с пальцем",
+      res["state"] == "refused" and "важная форма" in res["why"] and "реестр" in res["why"] and not touches(), res)
+res = run(req("allow", site="fedresurs.ru", actions="click,type", why="прочитать карточку должника"))
+check("[S9][metis-1268] allow на fedresurs.ru — поручение даётся (не «госсайт»)", res["state"] == "done", res)
+finger(3)
+clear_touch()
+reset_mandates()
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)
