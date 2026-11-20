@@ -616,6 +616,7 @@ check("мутант (fetch не в свой ref) оставляет подвин
 SRC32 = SRC.replace('"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/heads/{branch}:{verified}"',
                     '"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", "main"', 1).replace("    if sha != tip:", "    if False:", 1)
 assert "if sha != tip" not in SRC32 and "{branch}:{verified}" not in SRC32
+git(REPO, "update-ref", "refs/pantheon/verified-main", "HEAD")  # настоящий вызов выше вернул ref — снова двигаем
 check("мутант (ref не сверен с коммитом из ls-remote) — ref, подвинутый окном на свой коммит, пропускает LOCAL — "
       "тест это видит", call(["migrate", p(LOCAL), "--dry-run"], mod=load(SRC32))[0] == 0)
 M8 = mutant('cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", sql]',
@@ -718,8 +719,8 @@ check("мутант (без проверки направления) пуска�
       and call(["migrate", os.path.join(R4, MIG), "--dry-run"], {"PANTHEON_WINDOW": "w-a"})[0] == 1)
 
 # мутанты хранилища объектов (metis-1295, второй argus #521)
-SRC30 = SRC.replace('"git", "--no-replace-objects", ', '"git", ', 1).replace(', GIT_NO_REPLACE_OBJECTS="1"', "", 1)
-assert "no-replace-objects" not in SRC30 and "GIT_NO_REPLACE_OBJECTS" not in SRC30
+SRC30 = SRC.replace('"git", "--no-replace-objects", ', '"git", ').replace(', GIT_NO_REPLACE_OBJECTS="1"', "")
+assert '"--no-replace-objects"' not in SRC30 and 'GIT_NO_REPLACE_OBJECTS="1"' not in SRC30
 git(REPO, "replace", GOOD_BLOB, EVIL_BLOB)
 check("мутант (замены объектов действуют) — git replace меняет итог — тест это видит",
       call(["migrate", p(MIG), "--dry-run"], mod=load(SRC30))[:2] != REPLACE_OUT)
@@ -739,7 +740,7 @@ write(p(MIG), MAIN_SQL)
 
 # мутанты подмодулей, вложенного репозитория, commondir и PATH (metis-1295, первый argus #521)
 SRC33 = SRC.replace('"--no-recurse-submodules", ', "", 1).replace(', "-c", "submodule.recurse=false"', "", 1)
-assert "no-recurse-submodules" not in SRC33 and "submodule.recurse" not in SRC33
+assert '"--no-recurse-submodules"' not in SRC33 and '"submodule.recurse=false"' not in SRC33
 if os.path.exists(PWNED):
     os.remove(PWNED)
 call(["migrate", os.path.join(R7M, MIG), "--dry-run"], cwd=R7M, mod=load(SRC33))
