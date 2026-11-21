@@ -380,6 +380,7 @@ def _load_merge_gate(name):
     mg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mg)
     mg.subprocess = _SlowSubprocess()  # только этот модуль: подпроцессы самого теста — с прежними сроками
+    sys.modules["gh_deadline"].subprocess = _SlowSubprocess()  # gh шлюза — в модуле-листе рядом (metis-1326)
     return mg
 
 

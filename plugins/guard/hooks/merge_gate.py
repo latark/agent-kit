@@ -131,6 +131,11 @@ from datetime import datetime
 # модуль guard_rules.py: его _mg() присваивает G при первом обращении к этому модулю (metis-0330: merge_gate грузится
 # лениво). Прямой `import merge_gate` после `import guard_rules` (тесты, pantheon) берёт загруженный guard_rules сразу
 G = sys.modules.get("guard_rules")
+# срок gh шлюза (metis-1146) — в модуле-листе рядом (metis-1326); папка модуля в sys.path и при загрузке через
+# importlib (тесты, pantheon autoclose)
+if os.path.dirname(os.path.realpath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from gh_deadline import GH_TIMEOUT, _gh_in_time, _gh_proc, _hook_left  # noqa: E402
 
 MERGE_CLOSED = ("слияние делает лид направления (hephaestus-*, apollo-* субагентом) или главная сессия его "
                 "координатора. Вместо него отправь свою ветку, открой PR (gh pr create) и в отчёте лиду напиши, что "
@@ -185,7 +190,6 @@ CORE_DIR = ("plugins/guard", "plugins/pantheon/roles",
             # metis-0951 (решение владельца 06.11, metis-0933): пакеты окон направлений — их хуки и команды
             # исполняются вне песочницы
             "plugins/pantheon/packs")
-GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPO_RE = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+")
 PR_RE = re.compile(r"[1-9][0-9]{0,8}")
@@ -287,14 +291,6 @@ GIT_TIMEOUT = 3  # с на местный git без таймера хука
 GIT_TIMEOUT_MAX = 6  # с: потолок одного местного git под таймером хука
 GIT_MARGIN = 1.5  # с до срока хука, которые git оставляет шлюзу на отказ с причиной
 GIT_TIMEOUT_MIN = 0.05  # с: до срока хука меньше GIT_MARGIN — git гаснет сразу, шлюз отказывает с причиной (metis-0975)
-
-
-def _hook_left():
-    """Сколько секунд до срока хука (таймер ITIMER_REAL guard_rules.set_deadline); 0 — таймера нет."""
-    try:
-        return signal.getitimer(signal.ITIMER_REAL)[0]
-    except (AttributeError, OSError, ValueError):
-        return 0
 
 
 def _git_timeout():
@@ -1121,54 +1117,6 @@ def _alert_ok(repo, pr):
     ref = re.compile(r"(?<![\w.-])" + re.escape(repo) + "#" + str(pr) + r"(?!\d)", re.I)
     head = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} · ")
     return any(head.match(ln) and ref.search(ln) and "откат" in ln.lower() for ln in lines)
-
-
-GH_MARGIN = 1.5  # metis-1146: запас до срока хука на отказ шлюза после gh
-GH_MIN = 0.5  # metis-1146: срок короче — gh не запускаем, вызов не уложился
-_GH_LATE = None  # metis-1146: список вызовов gh, не уложившихся в срок хука, — только внутри _gh_in_time
-
-
-def _gh_budget(timeout):
-    """Срок вызова gh внутри шлюза (metis-1146): не дольше остатка DEADLINE хука минус GH_MARGIN; None — не
-    уложится. Вне _gh_in_time (запись, push) и без таймера — timeout как есть."""
-    left = _hook_left()
-    if _GH_LATE is None or not left:
-        return timeout
-    t = min(timeout, left - GH_MARGIN)
-    return t if t >= GH_MIN else None
-
-
-def _gh_proc(args, timeout=GH_TIMEOUT):
-    """subprocess.run gh без GH_REPO/GH_HOST со сроком из _gh_budget; None — не уложился в срок или сбой запуска.
-    Не уложившийся вызов шлюза пишется в _GH_LATE: _gh_in_time тогда откажет (metis-1146)."""
-    timeout = _gh_budget(timeout)
-    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
-    try:
-        if timeout is None:
-            raise subprocess.TimeoutExpired(["gh"] + args, 0)
-        return subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        if _GH_LATE is not None:
-            _GH_LATE.append(" ".join(args[:2]))
-        return None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-
-
-def _gh_in_time(fn, *a, **kw):
-    """fn (решение шлюза) со сроком gh из остатка DEADLINE хука (metis-1146). Хоть один вызов gh не уложился —
-    отказ «GitHub не ответил вовремя», даже если fn пропустил бы: без ответа GitHub шлюз закрыт."""
-    global _GH_LATE
-    _GH_LATE = []
-    try:
-        why = fn(*a, **kw)
-        late = list(_GH_LATE)
-    finally:
-        _GH_LATE = None
-    if not late:
-        return why
-    return (f"GitHub не ответил вовремя (gh {', gh '.join(late)}): шлюз не уложился в срок хука guard и без "
-            f"ответа GitHub не пускает — повтори слияние через минуту. Что ещё не сверено: {why or 'ничего'}")
 
 
 def _gh_json(args, timeout=GH_TIMEOUT):

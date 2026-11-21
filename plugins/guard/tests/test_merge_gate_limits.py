@@ -210,7 +210,9 @@ def prod_timeouts(sources):
         got = consts(ast.parse(sources[name])).get("DEADLINE")
         if got != 8:
             bad.append(f"{name}: DEADLINE = {got!r}, боевой 8")
-    tree = ast.parse(sources["merge_gate.py"])
+    # срок gh шлюза (GH_TIMEOUT, _gh_proc, _gh_budget, _gh_in_time) — в gh_deadline.py рядом (metis-1326): правила те
+    # же, что для merge_gate.py, поэтому оба файла разбираются одним деревом
+    tree = ast.parse(sources["merge_gate.py"] + "\n" + sources["gh_deadline.py"])
     gh = consts(tree).get("GH_TIMEOUT")
     if gh != 6:
         bad.append(f"merge_gate.py: GH_TIMEOUT = {gh!r}, боевой 6")
@@ -235,7 +237,7 @@ def t_prod_timeouts(h):
     Читаем значения из кода, ничего не ждём. Мутанты — на копиях текста в самом случае."""
     hooks = os.path.dirname(GUARD)
     sources = {}
-    for n in ("guard.py", "guard_rules.py", "taint.py", "merge_gate.py"):
+    for n in ("guard.py", "guard_rules.py", "taint.py", "merge_gate.py", "gh_deadline.py"):
         with open(os.path.join(hooks, n), encoding="utf-8") as fh:
             sources[n] = fh.read()
     got = prod_timeouts(sources)
@@ -250,7 +252,7 @@ def t_prod_timeouts(h):
             ("GIT_TIMEOUT 3 → 15", "merge_gate.py", "GIT_TIMEOUT = 3 ", "GIT_TIMEOUT = 15 "),
             ("GIT_TIMEOUT_MAX 6 → 9", "merge_gate.py", "GIT_TIMEOUT_MAX = 6 ", "GIT_TIMEOUT_MAX = 9 "),
             ("GIT_MARGIN 1.5 → 0", "merge_gate.py", "GIT_MARGIN = 1.5 ", "GIT_MARGIN = 0 "),
-            ("GH_TIMEOUT 6 → 9", "merge_gate.py", "GH_TIMEOUT = 6", "GH_TIMEOUT = 9"),
+            ("GH_TIMEOUT 6 → 9", "gh_deadline.py", "GH_TIMEOUT = 6", "GH_TIMEOUT = 9"),
             # metis-1181: свой срок gh решения шлюза при заявке и его передача
             ("DECISION_GH_TIMEOUT 3 → 9", "merge_gate.py", "DECISION_GH_TIMEOUT = 3\n", "DECISION_GH_TIMEOUT = 9\n"),
             ("_pr_view в решении — срок 9", "merge_gate.py", "_pr_view(repo, pr, DECISION_GH_TIMEOUT)",
@@ -266,9 +268,9 @@ def t_prod_timeouts(h):
              "return _gh_json(args) if timeout == GH_TIMEOUT else _gh_json(args, timeout)",
              "return subprocess.run(args, timeout=timeout)"),
             # metis-1146: срок gh шлюза — из остатка DEADLINE, не уложился — отказ
-            ("_gh_proc без _gh_budget", "merge_gate.py", "timeout = _gh_budget(timeout)", "timeout = timeout"),
-            ("GH_MARGIN 1.5 → 0", "merge_gate.py", "GH_MARGIN = 1.5 ", "GH_MARGIN = 0 "),
-            ("GH_MIN 0.5 → 0", "merge_gate.py", "GH_MIN = 0.5 ", "GH_MIN = 0 "),
+            ("_gh_proc без _gh_budget", "gh_deadline.py", "timeout = _gh_budget(timeout)", "timeout = timeout"),
+            ("GH_MARGIN 1.5 → 0", "gh_deadline.py", "GH_MARGIN = 1.5 ", "GH_MARGIN = 0 "),
+            ("GH_MIN 0.5 → 0", "gh_deadline.py", "GH_MIN = 0.5 ", "GH_MIN = 0 "),
             ("merge_problem без _gh_in_time", "merge_gate.py", "return _gh_in_time(gate_problem, ", "return gate_problem("),
             ("owner_ci_problem без _gh_in_time", "merge_gate.py", "return _gh_in_time(_owner_ci_view, ",
              "return _owner_ci_view("),
@@ -328,6 +330,7 @@ def t_gh_budget(h):
     пропуском. Вне шлюза (запись, push) и без таймера срок как задан."""
     import signal
     mg = _load_merge_gate("merge_gate_gh_budget")
+    gd = sys.modules["gh_deadline"]  # срок gh шлюза — в модуле-листе рядом (metis-1326)
     seen = []
 
     class Rec:
@@ -340,22 +343,22 @@ def t_gh_budget(h):
                 raise subprocess.TimeoutExpired(argv, kw["timeout"])
             return subprocess.CompletedProcess(argv, 0, "[]", "")
 
-    mg.subprocess = Rec
+    gd.subprocess = Rec
     old = signal.signal(signal.SIGALRM, lambda *a: None)
     try:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        mg._GH_LATE = []
-        check("gh: без таймера хука — срок как задан", mg._gh_budget(6) == 6, mg._gh_budget(6))
+        gd._GH_LATE = []
+        check("gh: без таймера хука — срок как задан", gd._gh_budget(6) == 6, gd._gh_budget(6))
         signal.setitimer(signal.ITIMER_REAL, 3)
-        mg._GH_LATE = None
-        check("gh: вне шлюза — срок как задан и при малом остатке", mg._gh_budget(6) == 6, mg._gh_budget(6))
-        mg._GH_LATE = []
+        gd._GH_LATE = None
+        check("gh: вне шлюза — срок как задан и при малом остатке", gd._gh_budget(6) == 6, gd._gh_budget(6))
+        gd._GH_LATE = []
         for left, want in ((7.5, 6), (5, 3.5), (2.5, 1), (1.9, None), (1, None)):
             signal.setitimer(signal.ITIMER_REAL, left)
-            got = mg._gh_budget(6)
+            got = gd._gh_budget(6)
             ok = got is None if want is None else got is not None and abs(got - want) < 0.3 and got < left
             check(f"gh: в шлюзе до срока хука {left} с — срок {want}", ok, got)
-        mg._GH_LATE = None
+        gd._GH_LATE = None
         signal.setitimer(signal.ITIMER_REAL, 7.5)
         seen.clear()
         got = mg._gh_in_time(lambda: (mg._gh_json(["pr", "view"]), None)[1])
@@ -371,9 +374,19 @@ def t_gh_budget(h):
         check("gh: остаток меньше запаса — gh не запускается, отказ с причиной решения",
               not seen and isinstance(got, str) and got.startswith("GitHub не ответил вовремя")
               and got.endswith("красная проверка"), (seen, got))
-        check("gh: после шлюза счёт опозданий снят", mg._GH_LATE is None, mg._GH_LATE)
+        # metis-1326: готовый отказ решения (красный CI) — своей причиной, а не «что ещё не сверено»
+        check("1326: готовый отказ — «отказ шлюза и по сверенному», без «Что ещё не сверено»",
+              isinstance(got, str) and "Отказ шлюза и по сверенному: красная проверка" in got
+              and "не сверено" not in got, got)
+        signal.setitimer(signal.ITIMER_REAL, 1)
+        got = mg._gh_in_time(lambda: (mg._has_workflows("o/r", "s"), None)[1])
+        check("1326: не уложился, решение — пропуск: отказ GitHub без хвоста «не сверено: ничего»",
+              isinstance(got, str) and got.endswith("повтори слияние через минуту.") and "не сверено" not in got,
+              got)
+        check("gh: после шлюза счёт опозданий снят", gd._GH_LATE is None, gd._GH_LATE)
     finally:
-        mg._GH_LATE = None
+        gd._GH_LATE = None
+        gd.subprocess = _SlowSubprocess()
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
 
@@ -399,7 +412,9 @@ def t_gh_deadline(h):
     took = time.monotonic() - t0
     merge_case("1146: медленный GitHub — отказ «GitHub не ответил вовремя»", got, False, "GitHub не ответил вовремя")
     check("1146: отказ шлюза, а не гибель хука по сроку", "проверка не уложилась" not in got[1], got)
-    check("1146: отказ раньше DEADLINE 8 с", took < 8, took)
+    # metis-1326: took — с запуском интерпретатора и загрузкой guard, а DEADLINE 8 с считается внутри хука; запас на
+    # медленный раннер — 4 с. gh workflows без срока висел бы 30 с — и такой хук всё равно попадётся
+    check("1146: отказ раньше DEADLINE 8 с (и запуска хука)", took < 12, took)
 
 
 def t_manifest_types(h):
