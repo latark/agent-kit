@@ -286,6 +286,34 @@ def edge_cases():
     check("запись после сбоя: заменено, права ~/.claude.json прежние (0600)",
           rc == 0 and f"{home}/ai/workshop/a" in read(cj) and read(task) == "~/ai/workshop\n"
           and (os.stat(cj).st_mode & 0o777) == 0o600)
+    # окно, открытое до переноса, при выходе вернуло старый ключ: claude_json (его зовёт тик) чинит только ~/.claude.json
+    write(cj, json.dumps({"projects": {f"{home}/{WS}/b": {"y": 2}}}))
+    write(task, f"~/{WS}\n")
+    log = []
+    n, rc = M.claude_json(["workshop"], False, home, out=log.append)
+    check("тик: старый ключ ~/.claude.json — под новым путём, текстовые файлы не тронуты",
+          n == 1 and rc == 0 and f"{home}/ai/workshop/b" in read(cj) and f"{WS}/b" not in read(cj)
+          and read(task) == f"~/{WS}\n")
+    n, rc = M.claude_json(["workshop"], False, home, out=log.append)
+    check("тик: повтор — замен нет", n == 0 and rc == 0)
+    # Claude Code переписал файл между чтением и заменой — не трогаем, чиним в следующий раз
+    write(cj, json.dumps({"projects": {f"{home}/{WS}/c": {}}}))
+    real_read = M.read_text
+    calls = []
+
+    def racing(p):
+        calls.append(p)
+        if len(calls) == 2:   # повторное чтение перед заменой: файл уже другой
+            write(cj, json.dumps({"projects": {f"{home}/{WS}/c": {}, "/other": {}}}))
+        return real_read(p)
+    M.read_text = racing
+    try:
+        log = []
+        n, rc = M.claude_json(["workshop"], False, home, out=log.append)
+    finally:
+        M.read_text = real_read
+    check("тик: файл изменился во время замены — не перезаписан, запись Claude Code цела",
+          rc == 0 and "/other" in read(cj) and any("изменился во время замены" in x for x in log))
     _shutil.rmtree(tmp, True)
 
 

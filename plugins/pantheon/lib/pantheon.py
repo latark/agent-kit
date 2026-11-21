@@ -7685,10 +7685,30 @@ def migrate_paths_cmd(rest):
     return M.migrate(list(dict.fromkeys(names)), "--dry-run" in rest, HOME)
 
 
+def fix_moved_claude_json():
+    """Каждый тик: старые ключи сделанных переносов в ~/.claude.json — сразу под новый путь (шаг 2 migrate-paths).
+    Окно Claude Code, открытое до переноса, при выходе пишет файл из своей памяти и возвращает старые записи projects
+    (доверие, mcpServers); ждать 6 ч до тревоги check --moved и ручного migrate-paths незачем (владелец 21.11). Файл
+    читается за миллисекунды, замена — только при находке и только если файл не изменился с чтения. → число замен."""
+    M = moved_mod()
+    done = [n for n in M.MOVES if M.done(n, HOME)]
+    if not done:
+        return 0
+    lines = []
+    n, _ = M.claude_json(done, False, HOME, out=lines.append)
+    if n or lines:
+        print("moved: " + "; ".join(lines))
+    return n
+
+
 def check_moved(quiet=False, force=False):
     """Старые пути сделанных переносов в живых файлах (metis-0899) — предупреждение, а на тике — тревога раз в набор.
-    Пока ни один перенос не сделан, не обходит ничего. → число файлов со старыми путями."""
+    Пока ни один перенос не сделан, не обходит ничего. ~/.claude.json на тике чинит fix_moved_claude_json.
+    → число файлов со старыми путями."""
     M = moved_mod()
+    if quiet and not force:
+        with contextlib.suppress(Exception):   # починка — попутно: её сбой не мешает проверке
+            fix_moved_claude_json()
     if not any(M.done(n, HOME) for n in M.MOVES):
         if not force:
             clear_once("check-moved")

@@ -247,6 +247,37 @@ def _walk_json(v, rs, conflicts):
     return v, 0
 
 
+def claude_json(names, dry_run, home, out=print):
+    """Шаг 2 migrate-paths: записи projects в ~/.claude.json — под новый путь. → (замен, код: 0 или 1).
+    Его же зовёт плановый проход (pantheon.fix_moved_claude_json): окно Claude Code, открытое до переноса, при выходе
+    пишет ~/.claude.json из своей памяти и возвращает старые ключи (21.11, слово владельца «нужно сразу пофиксить»)."""
+    cj_path, cj_n, rc = os.path.join(home, ".claude.json"), 0, 0
+    raw = read_text(cj_path) if os.path.isfile(cj_path) and not os.path.islink(cj_path) else None
+    if raw is None:
+        return 0, 0
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        out("сбой    ~/.claude.json: не JSON — не трогаю")
+        return 0, 1
+    conflicts = []
+    new, cj_n = _walk_json(data, rules(names, home), conflicts)
+    for c in conflicts:
+        out(f"конфликт ~/.claude.json: запись {c} уже есть — старая оставлена под прежним ключом")
+        rc = 1
+    if cj_n:
+        out(f"~/.claude.json: {cj_n}")
+        if not dry_run and read_text(cj_path) != raw:
+            out("~/.claude.json изменился во время замены (пишет Claude Code) — не трогаю, повтор при следующем запуске")
+        elif not dry_run:
+            try:
+                _replace_file(cj_path, (json.dumps(new, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+            except OSError as e:
+                out(f"сбой    ~/.claude.json: {e.strerror or e}")
+                rc = 1
+    return cj_n, rc
+
+
 def migrate(names, dry_run, home, out=print):
     """pantheon migrate-paths. → код выхода: 0 — сделано (или план при --dry-run), 1 — отказ, конфликт или сбой."""
     short = lambda p: "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
@@ -287,28 +318,8 @@ def migrate(names, dry_run, home, out=print):
                         out(f"сбой    история {key}: {e.strerror or e}")
                         rc = 1
     # 2. ~/.claude.json
-    cj_path, cj_n = os.path.join(home, ".claude.json"), 0
-    raw = read_text(cj_path) if os.path.isfile(cj_path) and not os.path.islink(cj_path) else None
-    if raw is not None:
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            out("сбой    ~/.claude.json: не JSON — не трогаю")
-            data, rc = None, 1
-        if data is not None:
-            conflicts = []
-            new, cj_n = _walk_json(data, rs, conflicts)
-            for c in conflicts:
-                out(f"конфликт ~/.claude.json: запись {c} уже есть — старая оставлена под прежним ключом")
-                rc = 1
-            if cj_n:
-                out(f"~/.claude.json: {cj_n}")
-                if not dry_run:
-                    try:
-                        _replace_file(cj_path, (json.dumps(new, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-                    except OSError as e:
-                        out(f"сбой    ~/.claude.json: {e.strerror or e}")
-                        rc = 1
+    cj_n, cj_rc = claude_json(names, dry_run, home, out)
+    rc = rc or cj_rc
     # 3. текстовые файлы
     n_files = n_rep = 0
     for p in files(home):
