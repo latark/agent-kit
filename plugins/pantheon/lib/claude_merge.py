@@ -23,8 +23,8 @@ pack). После слияния каждый защищённый путь св
 своего bare со сверкой хеша (на базе пути нет — удаляется под .claude/skills|commands|agents). Не вышло, HEAD
 сдвинулся во время слияния или копия подменена — откат: `git merge --abort` (его код — в причине), затем защищённые
 пути снова своей записью: версия HEAD, если её blob есть в своём bare, иначе удаление по тем же правилам, иначе путь —
-в отказе. После каждой своей записи — `update-index -q --refresh`: иначе устаревший stat в индексе не даст роли (и
-откату) `git merge --abort`.
+в отказе. После своей записи — `update-index -- <пути>` тех, чья запись в индексе равна записанной (restat): иначе
+устаревший stat не даст роли (и откату) `git merge --abort`.
 """
 import os
 import secrets
@@ -176,8 +176,9 @@ def write_link(top_fd, rel, target):
 
 def settle(d, base, want, rels):
     """Привести rels на диске к want ({путь: (режим, sha)}, нет записи — пути быть не должно) своей записью: blob — из
-    своего bare со сверкой хеша, удаление — только под skills|commands|agents → (сделано, отказы)."""
-    done, bad = [], []
+    своего bare со сверкой хеша, удаление — только под skills|commands|agents → (сделано, отказы). Записанное, чья
+    запись в индексе та же, — restat."""
+    done, bad, wrote = [], [], {}
     for rel in rels:
         entry = want.get(rel)
         disk = C.disk_state(d.top, rel, len(base.tip))
@@ -193,19 +194,41 @@ def settle(d, base, want, rels):
                 else:
                     C.write_file(d.top, rel, data, C.FILE_MODES[entry[0]])
                 done.append(f"{rel}: записан из своего bare ({entry[1][:12]})")
+                wrote[rel] = entry
             elif disk != ("none",) and C.deletable(rel):
                 C.delete_file(d.top, rel)
                 done.append(f"{rel}: удалён своей записью")
+            elif disk == ("none",):
+                bad.append(f"{rel}: файла нет, а проверенной версии (blob {entry[1][:12]}) в своём bare нет — верни "
+                           "его checkout")
             else:
                 bad.append(f"{rel}: проверенной версии нет на {base.name}, а убрать его claude-sync не может")
         except OSError as e:
             bad.append(f"{rel}: не записан ({type(e).__name__}: {e.strerror or e})")
+    restat(d, wrote)
     return done, bad
 
 
+def restat(d, wrote):
+    """Stat в индексе — к файлам, которые записали мы, если запись индекса (стадия 0, режим и sha) равна записанной.
+    `update-index --refresh` тут не помогает: при другом размере (git записал подложенный blob) git считает файл
+    изменённым без сверки содержимого, и merge --abort роли отказывает «not uptodate». Содержимое в индексе не
+    меняется: на диске ровно тот blob, что уже записан в индексе."""
+    if not wrote:
+        return
+    raw = C._run(d, "ls-files", "-s", "-z", "--", *wrote).stdout
+    same = []
+    for item in _lines(raw):
+        meta, _, rel = item.partition("\t")
+        bits = meta.split()
+        if len(bits) == 3 and bits[2] == "0" and tuple(bits[:2]) == tuple(wrote.get(rel, ())):
+            same.append(rel)
+    if same:
+        C._run(d, "update-index", "--", *same, timeout=300)
+
+
 def refresh(d):
-    """Индекс — к stat файлов, которые записали мы (содержимое не индексируется): иначе merge --abort и reset --merge
-    роли откажут «not uptodate»."""
+    """Индекс — к stat рабочего дерева (содержимое не индексируется) перед merge --abort."""
     C._run(d, "update-index", "-q", "--refresh", timeout=300)
 
 
@@ -216,7 +239,6 @@ def abort(d, base, head, rels, why):
     note = "" if r.returncode == 0 else (f"; git merge --abort не прошёл (код {r.returncode}: "
                                          f"{os.fsdecode(r.stderr or b'').strip()[-200:]})")
     _, bad = settle(d, base, head, rels)
-    refresh(d)
     tail = ("; защищённые пути не возвращены: " + "; ".join(bad)) if bad else \
         "; защищённые пути возвращены к HEAD своей записью"
     raise C.Refused(f"{why} — слияние отменено{note}{tail}")
@@ -239,7 +261,6 @@ def git_merge(d, base, plan):
         return
     bad = settle(d, base, plan["head"], plan["rels"])[1]
     bad += settle(d, base, {rel: plan["theirs"][rel] for rel in plan["drop"]}, plan["drop"])[1]
-    refresh(d)
     tail = os.fsdecode(r.stderr or b"").strip().splitlines()
     why = ("git merge ничего не слил (Already up to date), MERGE_HEAD нет" if r.returncode == 0 else
            f"git merge не прошёл (код {r.returncode}): {(tail or [''])[-1][-200:]}")
@@ -249,14 +270,13 @@ def git_merge(d, base, plan):
 def after_merge(d, base, plan, out):
     """После merge: HEAD тот же, копия та же, защищённые пути — своей записью из своего bare; иначе откат."""
     head, rels = plan["head"], plan["rels"]
-    if _rev(d) != plan["head_sha"]:
-        abort(d, base, head, rels, "HEAD копии сдвинулся во время слияния")
-    try:
+    try:   # сначала копия: при чужом commondir git берёт ветки из него (GIT_COMMON_DIR их не покрывает) — HEAD не тот
         C.check_repo(d)
     except C.Refused as e:
         abort(d, base, head, rels, str(e))
+    if _rev(d) != plan["head_sha"]:
+        abort(d, base, head, rels, "HEAD копии сдвинулся во время слияния")
     done, bad = settle(d, base, plan["theirs"], rels)
-    refresh(d)
     if bad:
         abort(d, base, head, rels, "после слияния защищённые пути не привести к базе: " + "; ".join(bad))
     conflicts = sorted({p.split("\t", 1)[-1] for p in _lines(C._out(d, "ls-files", "-u", "-z"))})

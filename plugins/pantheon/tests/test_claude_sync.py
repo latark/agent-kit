@@ -22,7 +22,7 @@ worktree окна .claude/worktrees/agent-x на ветке feat. После «�
   - --merge против окна, которое пишет объекты и .git клона: подложенный коммит (другие родители), дерево, blob — отказ;
     blob подложен после проверки — путь переписан из своего bare; merge упал без MERGE_HEAD — убранные файлы и
     ссылка возвращены; HEAD сдвинулся до или во время слияния, commondir или звено пути подменены — отказ или откат,
-    чужого на диске нет; git берёт GIT_COMMON_DIR, а не commondir окна.
+    чужого на диске нет; конфиг и атрибуты git берёт из GIT_COMMON_DIR, а не из commondir окна.
 Плюс привязка в outside.py: вид claude-sync идёт проходу серверов, check_request его принимает, лишний флаг — код 2.
 """
 import atexit
@@ -529,6 +529,9 @@ with open(os.path.join(GITDIR, "commondir")) as fh:
 EVILC, MARK2 = os.path.join(ROOT, "evilc"), os.path.join(ROOT, "filter-ran")
 put(EVILC, "config", f"[core]\n\trepositoryformatversion = 0\n[filter \"evil\"]\n\tsmudge = touch '{MARK2}'\n")
 put(EVILC, "info/attributes", "* filter=evil\n")
+for name in ("objects", "refs", "packed-refs"):   # ветки и объекты — те же: git с чужим commondir дошёл бы до слияния
+    if os.path.lexists(os.path.join(CLONE, ".git", name)):
+        os.symlink(os.path.join(CLONE, ".git", name), os.path.join(EVILC, name))
 
 
 def cc_swap(d):
@@ -561,7 +564,7 @@ M.check_clean = cc_swap
 res = handle(merge=True)
 M.check_clean, C.check_repo = check_clean, check_repo
 put(GITDIR, "commondir", CDIR)
-check("--merge: и без сверки git берёт проверенный common (GIT_COMMON_DIR), а не commondir окна",
+check("--merge: и без сверки конфиг и атрибуты — из проверенного common (GIT_COMMON_DIR): фильтр окна не запущен",
       res.get("state") == "done" and (read(GITDIR, "MERGE_HEAD") or "").strip() == TIP and not os.path.exists(MARK2),
       res)
 back_to_m1()
