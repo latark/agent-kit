@@ -510,7 +510,7 @@ git_merge = M.git_merge
 
 def gm_drift(d, base, plan):
     git_merge(d, base, plan)
-    SH.append(plant(A1, b"blob", b"EVIL\n"))   # merge --abort запишет версию HEAD из клона — подложенную
+    SH.append(plant(A1, b"blob", b"EVIL\n"))   # версия HEAD пути, который поменяла база, — подложена в клоне
     drift()
 
 
@@ -518,9 +518,55 @@ M.git_merge = gm_drift
 res = handle(merge=True)
 M.git_merge = git_merge
 unplant(SH.pop())
-check("--merge: HEAD сдвинулся во время слияния — откат, чужого на диске нет",
+check("--merge: HEAD сдвинулся во время слияния, blob HEAD подложен — откат: на диске снимок, ветка на head_sha",
       refused_with(res, "сдвинулся во время слияния", "отменено")
-      and read(WT, ".claude/skills/a/SKILL.md") != "EVIL\n", res)
+      and read(WT, ".claude/skills/a/SKILL.md") == "A1\n" and git(WT, "rev-parse", "refs/heads/m1") == M1, res)
+back_to_m1()
+
+SETTINGS = read(WT, ".claude/settings.local.json")
+
+
+def window_commit():
+    """Коммит окна C поверх HEAD: свой settings.local.json и хук — во временном индексе, не трогая индекс копии."""
+    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(ROOT, "window.index"))
+    run = lambda *a, data=None: subprocess.run(["git", "-C", WT, *a], input=data, env=env, capture_output=True,   # noqa: E731
+                                               text=True, check=True).stdout.strip()
+    run("read-tree", "HEAD")
+    for rel, text in ((".claude/settings.local.json", "{\"evil\": 1}\n"), (".claude/hooks/x.sh", "echo evil\n")):
+        run("update-index", "--add", "--cacheinfo", f"100644,{run('hash-object', '-w', '--stdin', data=text)},{rel}")
+    return run("commit-tree", run("write-tree"), "-p", "HEAD", "-m", "окно")
+
+
+def gm_ref(d, base, plan):
+    git_merge(d, base, plan)
+    git(WT, "update-ref", "refs/heads/m1", window_commit())   # окно двигает ref, ждавши MERGE_HEAD
+    put(WT, ".claude/settings.local.json", "{\"evil\": 1}\n")
+    put(WT, ".claude/hooks/x.sh", "echo evil\n")
+
+
+M.git_merge = gm_ref
+res = handle(merge=True)
+M.git_merge = git_merge
+check("--merge: ref ветки сдвинут на коммит окна — откат: новых настроек и хука нет, бывшие — как до прохода",
+      refused_with(res, "сдвинулся во время слияния", "отменено")
+      and not os.path.lexists(os.path.join(WT, ".claude/hooks/x.sh"))
+      and read(WT, ".claude/settings.local.json") == SETTINGS and git(WT, "rev-parse", "refs/heads/m1") == M1
+      and read(WT, ".claude/skills/a/SKILL.md") == "A1\n", res)
+back_to_m1()
+
+
+def gm_extra(d, base, plan):
+    git_merge(d, base, plan)
+    put(WT, ".claude/hooks/y.sh", "echo late\n")   # появился под защищёнными путями во время слияния
+
+
+M.git_merge = gm_extra
+res = handle(merge=True)
+M.git_merge = git_merge
+check("--merge: успех, а под защищёнными путями лишний файл — удалён, игнорируемое до прохода на месте",
+      res.get("state") == "done" and mh() and not os.path.lexists(os.path.join(WT, ".claude/hooks/y.sh"))
+      and read(WT, ".claude/settings.local.json") == SETTINGS
+      and any(".claude/hooks/y.sh: удалён" in x for x in res.get("synced") or []), res)
 back_to_m1()
 
 # --- commondir подменён: до слияния, во время, и git его не читает (GIT_COMMON_DIR) --------------------------------

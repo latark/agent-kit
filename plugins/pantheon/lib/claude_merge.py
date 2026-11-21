@@ -18,16 +18,23 @@ claude_sync.Base), и оставляет роли конфликты. Итог: 
   - .git, commondir или gitdir-файл копии, звено пути или HEAD сменились после проверки (сверка перед каждой записью).
 git — без GIT_*, глобальный конфиг /dev/null, core.hooksPath=/dev/null, rerere выключен, ident прохода свой.
 
-Итог защищённых путей git не определяет: объекты клона и индекс пишет окно (свободный объект под чужим SHA перекрывает
-pack). После слияния каждый защищённый путь сверяется по хешу содержимого диска и, если не равен базе, пишется из
-своего bare со сверкой хеша (на базе пути нет — удаляется под .claude/skills|commands|agents). Не вышло, HEAD
-сдвинулся во время слияния или копия подменена — откат: `git merge --abort` (его код — в причине), затем защищённые
-пути снова своей записью: версия HEAD, если её blob есть в своём bare, иначе удаление по тем же правилам, иначе путь —
-в отказе. После своей записи — `update-index -- <пути>` тех, чья запись в индексе равна записанной (restat): иначе
-устаревший stat не даст роли (и откату) `git merge --abort`.
+Итог защищённых путей git не определяет: объекты клона, индекс и ветки пишет окно (свободный объект под чужим SHA
+перекрывает pack, ref ветки окно двигает само или через commondir). Правило: при успехе под защищёнными путями ровно
+база, при любом сбое — байт в байт то, что было до прохода.
+  - До merge — снимок всех защищённых путей диска (свой обход без ссылок, содержимое и права в памяти, до SNAP_MAX).
+  - После merge каждый путь базы сверяется по хешу и, если не равен, пишется из своего bare со сверкой хеша; новое под
+    защищёнными путями, чего нет ни на базе, ни в снимке, — удаляется.
+  - Сбой merge, сдвиг HEAD или ref, подмена копии, не вышло привести — откат без `git merge --abort` (он записал бы
+    дерево живого HEAD — коммит окна): commondir — снова проверенный, ref ветки — на head_sha, индекс —
+    `read-tree --reset head_sha` без записи файлов, MERGE_* убраны, незащищённые файлы — checkout-index; затем все
+    защищённые пути — к снимку своей записью, новое под ними (и настройки, и хуки: их до прохода не было) удаляется.
+  - После своей записи — `update-index -- <пути>`, чья запись индекса равна записанной (restat): иначе устаревший stat
+    (другой размер) не даст роли `git merge --abort`.
 """
+import errno
 import os
 import secrets
+import stat
 
 C = None   # claude_sync (ставит claude_sync.mm)
 ATTRS = ".gitattributes"
@@ -40,6 +47,7 @@ BUILTIN = {"merge": {"text", "binary", "union"}, "filter": set(),
 MERGE_CFG = ("-c", "rerere.enabled=false", "-c", "merge.verifySignatures=false",
              "-c", "user.name=pantheon-outside", "-c", "user.email=outside@localhost")
 LINK = "120000"
+SNAP_MAX = 64 << 20   # снимок защищённых путей в памяти — до 64 МБ
 
 
 def _lines(raw):
@@ -198,14 +206,11 @@ def settle(d, base, want, rels):
             elif disk != ("none",) and C.deletable(rel):
                 C.delete_file(d.top, rel)
                 done.append(f"{rel}: удалён своей записью")
-            elif disk == ("none",):
-                bad.append(f"{rel}: файла нет, а проверенной версии (blob {entry[1][:12]}) в своём bare нет — верни "
-                           "его checkout")
             else:
                 bad.append(f"{rel}: проверенной версии нет на {base.name}, а убрать его claude-sync не может")
         except OSError as e:
             bad.append(f"{rel}: не записан ({type(e).__name__}: {e.strerror or e})")
-    restat(d, wrote)
+    done += restat(d, wrote)
     return done, bad
 
 
@@ -213,9 +218,9 @@ def restat(d, wrote):
     """Stat в индексе — к файлам, которые записали мы, если запись индекса (стадия 0, режим и sha) равна записанной.
     `update-index --refresh` тут не помогает: при другом размере (git записал подложенный blob) git считает файл
     изменённым без сверки содержимого, и merge --abort роли отказывает «not uptodate». Содержимое в индексе не
-    меняется: на диске ровно тот blob, что уже записан в индексе."""
+    меняется: на диске ровно тот blob, что уже записан в индексе. → строки итога (сбой update-index)."""
     if not wrote:
-        return
+        return []
     raw = C._run(d, "ls-files", "-s", "-z", "--", *wrote).stdout
     same = []
     for item in _lines(raw):
@@ -223,32 +228,156 @@ def restat(d, wrote):
         bits = meta.split()
         if len(bits) == 3 and bits[2] == "0" and tuple(bits[:2]) == tuple(wrote.get(rel, ())):
             same.append(rel)
-    if same:
-        C._run(d, "update-index", "--", *same, timeout=300)
+    r = C._run(d, "update-index", "--", *same, timeout=300) if same else None
+    if r is not None and r.returncode != 0:
+        return [f"индекс: update-index не прошёл (код {r.returncode}) — git status покажет записанные пути "
+                "изменёнными, сделай git update-index --refresh"]
+    return []
 
 
-def refresh(d):
-    """Индекс — к stat рабочего дерева (содержимое не индексируется) перед merge --abort."""
+# --- снимок защищённых путей и откат к нему -----------------------------------------------------------------------
+
+def grab(top, rel):
+    """Путь на диске без перехода по ссылкам: None — нет, ("file", байты, права), ("link", цель), ("other",) — папка,
+    fifo и т. п., ("blocked",) — звено пути ссылка или файл."""
+    parts = rel.split("/")
+    try:
+        pfd = C._open_parent(top, parts)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            return ("blocked",)
+        raise
+    try:
+        try:
+            st = os.stat(parts[-1], dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            return ("link", os.fsencode(os.readlink(parts[-1], dir_fd=pfd)))
+        if not stat.S_ISREG(st.st_mode):
+            return ("other",)
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+        with os.fdopen(fd, "rb") as fh:
+            return ("file", fh.read(), stat.S_IMODE(st.st_mode) & 0o777)
+    finally:
+        os.close(pfd)
+
+
+def snapshot(d, pats, drop):
+    """Все защищённые пути диска (свой обход) и убираемые неотслеживаемые → {путь: grab}; больше SNAP_MAX байт, папка
+    или fifo под защищённым путём — отказ до слияния."""
+    snap, size = {}, 0
+    for rel in sorted(set(C.walk(d.top, lambda r: C.protected(r, pats))) | set(drop)):
+        st = grab(d.top, rel)
+        if st is None:
+            continue
+        if st[0] not in ("file", "link"):
+            raise C.Refused(f"{rel}: не файл и не ссылка — снимок защищённых путей не снять, приведи руками")
+        size += len(st[1])
+        if size > SNAP_MAX:
+            raise C.Refused(f"защищённые пути больше {SNAP_MAX >> 20} МБ — снимок для отката не снять, слияния нет")
+        snap[rel] = st
+    return snap
+
+
+def put(top, rel, st):
+    if st[0] == "link":
+        write_link(top, rel, os.fsdecode(st[1]))
+    else:
+        C.write_file(top, rel, st[1], st[2])
+
+
+def to_snapshot(d, plan):
+    """Защищённые пути и убранные файлы — байт в байт к снимку своей записью: нового под защищёнными путями (и
+    настроек, и хуков — их до прохода не было) — удалить, бывшее — вернуть → отказы."""
+    snap, bad = plan["snap"], []
+    for rel in sorted(set(C.walk(d.top, lambda r: C.protected(r, plan["pats"]))) - set(snap)):
+        try:
+            C.delete_file(d.top, rel)
+        except OSError as e:
+            bad.append(f"{rel}: не удалён ({type(e).__name__})")
+    for rel, st in sorted(snap.items()):
+        try:
+            if grab(d.top, rel) != st:
+                put(d.top, rel, st)
+        except OSError as e:
+            bad.append(f"{rel}: не возвращён ({type(e).__name__})")
+    return bad
+
+
+def repair(d):
+    """Копия для git отката: commondir — снова проверенный (его пишет окно), затем check_repo → None или причина."""
+    try:
+        C.check_repo(d)
+        return None
+    except C.Refused:
+        pass
+    path = os.path.join(d.gitdir, "commondir") if d.gitdir != d.common else None
+    try:
+        if path and not os.path.islink(path):
+            tmp = f"{path}.claude-sync-{secrets.token_hex(4)}"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(os.path.relpath(d.common, d.gitdir) + "\n")
+            os.replace(tmp, path)
+        C.check_repo(d)
+        return None
+    except (OSError, C.Refused) as e:
+        return f"копия подменена ({e}) — ветку и индекс не трогал"
+
+
+def git_back(d, plan):
+    """Ветка — на head_sha (ref могло сдвинуть окно, merge --abort записал бы его дерево), индекс — дерево head_sha
+    без записи файлов, MERGE_* — убрать; незащищённые файлы, которые слияние поменяло, — checkout-index, созданные —
+    удалить → строки сбоев."""
+    notes, sha = [], plan["head_sha"]
+    steps = ([("symbolic-ref", "HEAD", plan["branch"]), ("update-ref", "-m", "claude-sync: откат", plan["branch"], sha)]
+             if plan["branch"] else [("update-ref", "--no-deref", "HEAD", sha)]) + [("read-tree", "--reset", sha)]
+    for step in steps:
+        r = C._run(d, *step, timeout=300)
+        if r.returncode != 0:
+            notes.append(f"git {step[0]} не прошёл (код {r.returncode})")
+    for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"):
+        if os.path.lexists(os.path.join(d.gitdir, name)):
+            os.unlink(os.path.join(d.gitdir, name))
     C._run(d, "update-index", "-q", "--refresh", timeout=300)
+    pats = plan["pats"]
+    back = [p for p in _lines(C._run(d, "diff-files", "--name-only", "-z").stdout) if not C.protected(p, pats)]
+    if back:
+        r = C._run(d, "checkout-index", "-f", "-z", "--stdin", data=b"".join(os.fsencode(p) + b"\0" for p in back),
+                   timeout=300)
+        if r.returncode != 0:
+            notes.append(f"git checkout-index не прошёл (код {r.returncode})")
+    for rel in plan["created"]:
+        if grab(d.top, rel) is not None:
+            try:
+                C.delete_file(d.top, rel)
+            except OSError as e:
+                notes.append(f"{rel}: не удалён ({type(e).__name__})")
+    if _rev(d) != sha:
+        notes.append(f"HEAD не вернулся на {sha[:12]}")
+    return notes
 
 
-def abort(d, base, head, rels, why):
-    """Откат: git merge --abort (его итог — в причине), затем защищённые пути к HEAD своей записью → Refused."""
-    refresh(d)
-    r = C._run(d, "merge", "--abort", timeout=300)
-    note = "" if r.returncode == 0 else (f"; git merge --abort не прошёл (код {r.returncode}: "
-                                         f"{os.fsdecode(r.stderr or b'').strip()[-200:]})")
-    _, bad = settle(d, base, head, rels)
+def rollback(d, plan, why):
+    """Откат без git merge --abort: копия, ветка и индекс — к head_sha (если копия не подменена), защищённые пути —
+    к снимку своей записью → Refused с честной причиной."""
+    why_repo = repair(d)
+    notes = [why_repo] if why_repo else git_back(d, plan)
+    bad = to_snapshot(d, plan)
+    if not why_repo:
+        C._run(d, "update-index", "-q", "--refresh", timeout=300)
     tail = ("; защищённые пути не возвращены: " + "; ".join(bad)) if bad else \
-        "; защищённые пути возвращены к HEAD своей записью"
-    raise C.Refused(f"{why} — слияние отменено{note}{tail}")
+        "; защищённые пути возвращены к снимку до прохода"
+    raise C.Refused(f"{why} — слияние отменено" + "".join(f"; {x}" for x in notes) + tail)
 
 
 # --- слияние ------------------------------------------------------------------------------------------------------
 
 def git_merge(d, base, plan):
-    """Убрать равные базе неотслеживаемые файлы и слить коммит базы; без MERGE_HEAD — своей записью вернуть
-    защищённые пути к HEAD и убранные файлы, отказ с причиной."""
+    """Убрать равные базе неотслеживаемые файлы и слить коммит базы; без MERGE_HEAD — откат к снимку, отказ."""
     C.check_repo(d)
     if _rev(d) != plan["head_sha"]:
         raise C.Refused("HEAD копии сдвинулся после проверки — повтори claude-sync --merge")
@@ -259,36 +388,57 @@ def git_merge(d, base, plan):
                "-m", f"Merge {base.name} {base.tip[:12]} (claude-sync --merge)", base.tip, timeout=600)
     if os.path.lexists(os.path.join(d.gitdir, "MERGE_HEAD")):
         return
-    bad = settle(d, base, plan["head"], plan["rels"])[1]
-    bad += settle(d, base, {rel: plan["theirs"][rel] for rel in plan["drop"]}, plan["drop"])[1]
     tail = os.fsdecode(r.stderr or b"").strip().splitlines()
-    why = ("git merge ничего не слил (Already up to date), MERGE_HEAD нет" if r.returncode == 0 else
-           f"git merge не прошёл (код {r.returncode}): {(tail or [''])[-1][-200:]}")
-    raise C.Refused(why + ("; не возвращены: " + "; ".join(bad) if bad else ""))
+    rollback(d, plan, "git merge ничего не слил (Already up to date), MERGE_HEAD нет" if r.returncode == 0 else
+             f"git merge не прошёл (код {r.returncode}): {(tail or [''])[-1][-200:]}")
+
+
+def exact(d, base, plan):
+    """После своей записи: под защищёнными путями ровно база, плюс бывшее до прохода не из базы (игнорируемое) — как в
+    снимке; новое — удалить → (сделано, отказы)."""
+    theirs, snap, done, bad = plan["theirs"], plan["snap"], [], []
+    for rel in C.walk(d.top, lambda r: C.protected(r, plan["pats"])):
+        if rel in theirs:
+            continue
+        try:
+            if rel not in snap:
+                C.delete_file(d.top, rel)
+                done.append(f"{rel}: удалён — появился во время слияния, его нет ни на базе, ни до прохода")
+            elif grab(d.top, rel) != snap[rel]:
+                put(d.top, rel, snap[rel])
+                done.append(f"{rel}: возвращён к снимку до прохода")
+        except OSError as e:
+            bad.append(f"{rel}: не приведён ({type(e).__name__})")
+    for rel in plan["rels"]:
+        if rel in theirs and not C.same(theirs[rel], C.disk_state(d.top, rel, len(base.tip))):
+            bad.append(f"{rel}: не равен базе")
+    return done, bad
 
 
 def after_merge(d, base, plan, out):
-    """После merge: HEAD тот же, копия та же, защищённые пути — своей записью из своего bare; иначе откат."""
-    head, rels = plan["head"], plan["rels"]
+    """После merge: копия та же, HEAD тот же, защищённые пути — ровно база своей записью; иначе откат к снимку."""
     try:   # сначала копия: при чужом commondir git берёт ветки из него (GIT_COMMON_DIR их не покрывает) — HEAD не тот
         C.check_repo(d)
     except C.Refused as e:
-        abort(d, base, head, rels, str(e))
+        rollback(d, plan, str(e))
     if _rev(d) != plan["head_sha"]:
-        abort(d, base, head, rels, "HEAD копии сдвинулся во время слияния")
-    done, bad = settle(d, base, plan["theirs"], rels)
+        rollback(d, plan, "HEAD копии сдвинулся во время слияния")
+    done, bad = settle(d, base, plan["theirs"], plan["rels"])
     if bad:
-        abort(d, base, head, rels, "после слияния защищённые пути не привести к базе: " + "; ".join(bad))
+        rollback(d, plan, "после слияния защищённые пути не привести к базе: " + "; ".join(bad))
+    more, bad = exact(d, base, plan)
+    if bad:
+        rollback(d, plan, "после слияния под защищёнными путями не только база: " + "; ".join(bad))
     conflicts = sorted({p.split("\t", 1)[-1] for p in _lines(C._out(d, "ls-files", "-u", "-z"))})
     out.update(conflicts=conflicts, merged=f"{base.name} {base.tip[:12]}")
     out["synced"] += [f"{rel}: удалён (неотслеживаемый, равен {base.name})" for rel in plan["drop"]]
-    out["synced"] += [f"{x} — после git merge не был равен базе" for x in done]
+    out["synced"] += [f"{x} — после git merge не был равен базе" for x in done] + more
     return out
 
 
 def merge(d):
     """Режим --merge → {"synced", "refused", "base", "conflicts", "merged"}; Refused — отказ (без слияния или с
-    откатом)."""
+    откатом к снимку)."""
     why = C.in_progress(d.gitdir)
     if why:
         raise C.Refused(why)
@@ -316,8 +466,12 @@ def merge(d):
         if out["refused"]:
             raise C.Refused("защищённые пути не приведены к HEAD: " + "; ".join(out["refused"]))
         check_clean(d)
-        plan = {"head_sha": head_sha, "head": head, "theirs": theirs, "drop": drop,
-                "rels": sorted(r for r in set(theirs) | set(head) if C.protected(r, pats))}
+        ref = C._run(d, "symbolic-ref", "-q", "HEAD")
+        plan = {"head_sha": head_sha, "head": head, "theirs": theirs, "drop": drop, "pats": pats,
+                "branch": ref.stdout.decode().strip() if ref.returncode == 0 else None,
+                "rels": sorted(r for r in set(theirs) | set(head) if C.protected(r, pats)),
+                "created": sorted(r for r in set(theirs) - set(head) - set(drop) if not C.protected(r, pats)),
+                "snap": snapshot(d, pats, drop)}
         git_merge(d, base, plan)
         return after_merge(d, base, plan, out)
     finally:
