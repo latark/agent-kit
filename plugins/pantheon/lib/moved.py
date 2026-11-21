@@ -1,9 +1,16 @@
 """Перенос папок системы (metis-0899): одна таблица «старый путь → новый» на две команды.
 
 `pantheon migrate-paths <перенос>… [--dry-run]` — разовый шаг после того, как папку перенесли:
-  1. папки истории ~/.claude/projects/<ключ> — под новый ключ: сама папка и её настоящие подпапки (ключ соседней
-     папки вроде `agent-kit-old` — нет: в ключе «/» и «-» одинаковы, подпапку сверяет диск); папки старых worktree,
-     `<ключ>--claude-worktrees-…`, — нет: решение плана 0899;
+  1. папки истории ~/.claude/projects/<ключ> — под новый ключ (только переименование папок: транскрипты *.jsonl не
+     переписываются и поле cwd внутри не меняется — инвариант sessync «транскрипты только дописываются»): сама папка;
+     её настоящие подпапки (ключ соседней папки вроде `agent-kit-old` — нет: в ключе «/» и «-» одинаковы, подпапку
+     сверяет диск); папки старых worktree `<ключ>--claude-worktrees-<имя>`; для мастерской ещё ключи `<ключ>-<хвост>`,
+     у которых папки нет ни на старом, ни на новом месте (удалённые задачи), если хвост не принадлежит живой соседней
+     папке. Ключ, где старый ключ стоит не в начале (вложенный `-Users-x--claude-projects--Users-x-…`), — нет. Новая
+     папка уже есть — слияние по файлам: переносятся файлы и подпапки, которых там нет; файл с тем же именем не
+     трогается («конфликт файл …», код 1); старая папка удаляется, только если опустела. --dry-run печатает план
+     (папок, слияний, конфликтов) и ничего не меняет; без него — отказ, пока идёт sessync (`pgrep -f "sessync _run"`):
+     он увидит переименование как удаление старых путей и выгрузку новых;
   2. записи projects в ~/.claude.json (доверие, mcpServers, allowedTools) — под новый путь;
   3. старые пути → новые во всех текстовых файлах ~/ai и ~/.claude, в том числе в архивах и закрытых задачах (Зевс
      06.11 06:06). Код agent-kit (рабочая копия на старом и новом месте) — нет: его пути меняет PR через шлюз.
@@ -26,6 +33,7 @@ workshop_root(home) — папка мастерской по факту на д�
 import json
 import os
 import re
+import subprocess
 
 # Таблица переносов: имя → (старый, новый) — части пути от HOME. Части, а не «~/…» целиком: так таблица не попадает
 # ни под замену, ни под check --moved.
@@ -41,6 +49,10 @@ CLAUDE_SKIP = {"projects", "plugins", "file-history", "shell-snapshots", "debug"
                "history.jsonl"}
 PERSONAL = ("me", "Self", "Areas", "People")   # ~/ai/knowledge/<x> — меняет Мнемозина
 MAX_BYTES = 8 << 20
+WT_MARK = "--claude-worktrees-"   # ключ папки истории worktree: <ключ папки>--claude-worktrees-<имя>
+DELETED_TASKS = {"workshop"}      # переносы, у которых под папкой жили задачи, удалённые с диска (ключи без папки)
+SESSYNC_WARN = ("sessync увидит переименование как удаление старых путей и выгрузку новых; если сторож удалений "
+                "остановит — `sessync deletes`, разрешить — `sessync deletes --apply` (владелец)")
 
 
 def keyify(p):
@@ -87,6 +99,13 @@ def _is_sub(d, rest, skip=()):
     return False
 
 
+def _ambiguous(key, sib):
+    """Ключ может принадлежать живой соседней папке (…-agent-kit-old рядом с agent-kit): sib — {родитель: имя самой
+    папки}; имя папки при сверке пропускается."""
+    return any(key.startswith(keyify(par) + "-") and _is_sub(par, key[len(keyify(par)):], skip={own})
+               for par, own in sib.items())
+
+
 def sub_keys(name, home):
     """Хвосты ключей истории ~/.claude/projects, которые — настоящие подпапки переносимой папки (старой или новой —
     какая есть на диске): «-plugins-guard» для …-agent-kit-plugins-guard. Ключ соседней папки (…-agent-kit-old,
@@ -104,8 +123,7 @@ def sub_keys(name, home):
             rest = key[len(pre):]
             if not key.startswith(pre + "-") or rest.startswith("--") or not _is_sub(base, rest):
                 continue
-            if any(key.startswith(keyify(par) + "-") and _is_sub(par, key[len(keyify(par)):], skip={own})
-                   for par, own in sib.items()):
+            if _ambiguous(key, sib):
                 continue   # соседняя живая папка с тем же ключом: чья история — не понять, не трогаю
             out.add(rest)
     return out
@@ -114,8 +132,8 @@ def sub_keys(name, home):
 def rules(names, home, subs=None):
     """[(regex, замена)] по таблице: пути от ~, $HOME, /Users/<имя> и самого HOME; ключи истории -Users-<имя>-…
     Конец пути — не буква, не «-» и не «.буква» (точка в конце фразы — конец пути). Ключ истории — целиком: сама папка
-    или её подпапка из subs ({перенос: хвосты}, по умолчанию sub_keys), а не любой ключ с тем же началом. Ключ worktree
-    (`<ключ>--claude-worktrees-…`) не меняется: такие папки истории не переносятся."""
+    или её подпапка из subs ({перенос: хвосты}, по умолчанию sub_keys) или worktree (`<ключ>--claude-worktrees-<имя>`:
+    его папка истории переименовывается вместе), а не любой ключ с тем же началом."""
     homes = sorted({home, os.path.realpath(home)}, key=len, reverse=True)
     pre = "|".join([re.escape(h) for h in homes] + [r"~", r"\$HOME", r"\$\{HOME\}", r"/Users/[A-Za-z0-9._-]+"])
     kpre = "|".join([re.escape(keyify(h)) for h in homes] + [r"-Users-[A-Za-z0-9_-]+?"])
@@ -125,7 +143,8 @@ def rules(names, home, subs=None):
         out.append((re.compile(rf"(?P<pre>{pre})/{re.escape('/'.join(old))}(?![\w-]|\.\w)"),
                     r"\g<pre>/" + "/".join(new)))
         tails = sorted(subs[n] if subs is not None and n in subs else sub_keys(n, home), key=len, reverse=True)
-        sub = "(?P<sub>" + "|".join(re.escape(t) for t in tails) + ")?" if tails else "(?P<sub>)"
+        alts = [re.escape(WT_MARK) + "[A-Za-z0-9-]+"] + [re.escape(t) for t in tails]   # worktree и подпапки
+        sub = "(?P<sub>" + "|".join(alts) + ")?"
         out.append((re.compile(rf"(?P<pre>{kpre}){re.escape(keyify('/' + '/'.join(old)))}{sub}(?![A-Za-z0-9_.-])"),
                     r"\g<pre>" + keyify("/" + "/".join(new)) + r"\g<sub>"))
     return out
@@ -247,70 +266,140 @@ def _walk_json(v, rs, conflicts):
     return v, 0
 
 
-def migrate(names, dry_run, home, out=print):
-    """pantheon migrate-paths. → код выхода: 0 — сделано (или план при --dry-run), 1 — отказ, конфликт или сбой."""
-    short = lambda p: "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
-    head = "--dry-run: ничего не меняю, только план" if dry_run else "перенос путей"
-    out(f"{head}: " + ", ".join(f"{short(paths(n, home)[0])} → {short(paths(n, home)[1])}" for n in names))
-    not_done = [n for n in names if not done(n, home)]
-    for n in not_done:
-        old, new = paths(n, home)
-        why = "старая папка ещё на месте" if os.path.lexists(old) else "новой папки нет"
-        out(("внимание " if dry_run else "отказ   ") + f"{n}: {why} — сначала перенести папку {short(old)} → {short(new)}")
-    if not_done and not dry_run:
-        out("ничего не изменено: перенос папок не сделан")
-        return 1
-    rs = rules(names, home)
-    rc = 0
-    # 1. папки истории
+def sessync_running():
+    """Идёт ли sessync (`pgrep -f "sessync _run"`): переименование папок истории он увидит как удаление и выгрузку."""
+    try:
+        r = subprocess.run(["pgrep", "-f", "sessync _run"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
+def history_renames(name, home):
+    """[(ключ, новый ключ, вид)] папок истории ~/.claude/projects одного переноса: сама папка, настоящая подпапка,
+    worktree и (для DELETED_TASKS) удалённая задача — хвост, которого нет на диске ни под старым, ни под новым местом
+    и который не принадлежит живой соседней папке. Ключ, где старый ключ не в начале, не попадает."""
     projects = os.path.join(home, ".claude", "projects")
-    renamed = 0
-    if os.path.isdir(projects) and not os.path.islink(projects):
-        for n in names:
-            ok, nk = (keyify(p) for p in paths(n, home))
-            subs = sub_keys(n, home)   # только целый компонент пути: …-agent-kit-old — соседняя папка, не подпапка
-            for key in sorted(os.listdir(projects)):
-                if key != ok and not (key.startswith(ok + "-") and key[len(ok):] in subs):
-                    continue
-                target = nk + key[len(ok):]
-                src, dst = os.path.join(projects, key), os.path.join(projects, target)
-                if os.path.lexists(dst):
-                    out(f"конфликт история {key} → {target}: новая папка уже есть — не переношу")
-                    rc = 1
-                    continue
-                out(f"история {key} → {target}")
-                renamed += 1
-                if not dry_run:
-                    try:
-                        os.rename(src, dst)
-                    except OSError as e:
-                        out(f"сбой    история {key}: {e.strerror or e}")
-                        rc = 1
-    # 2. ~/.claude.json
-    cj_path, cj_n = os.path.join(home, ".claude.json"), 0
-    raw = read_text(cj_path) if os.path.isfile(cj_path) and not os.path.islink(cj_path) else None
-    if raw is not None:
+    if not os.path.isdir(projects) or os.path.islink(projects):
+        return []
+    old, new = paths(name, home)
+    ok, nk = keyify(old), keyify(new)
+    subs = sub_keys(name, home)   # только целый компонент пути: …-agent-kit-old — соседняя папка, не подпапка
+    sib = {os.path.dirname(x): os.path.basename(x) for x in (old, new)}
+    out = []
+    for key in sorted(os.listdir(projects)):
+        rest = key[len(ok):]
+        if key == ok:
+            kind = "папка"
+        elif not key.startswith(ok + "-"):
+            continue
+        elif rest in subs:
+            kind = "подпапка"
+        elif rest.startswith(WT_MARK) and len(rest) > len(WT_MARK):
+            kind = "worktree"
+        elif (name in DELETED_TASKS and not rest.startswith("--") and not any(_is_sub(b, rest) for b in (old, new))
+              and not _ambiguous(key, sib)):
+            kind = "удалённая задача"
+        else:
+            continue
+        out.append((key, nk + rest, kind))
+    return out
+
+
+def _is_dir(p):
+    return os.path.isdir(p) and not os.path.islink(p)
+
+
+def _merge(src, dst, dry_run, out, projects, tally):
+    """Слияние папки src в существующую dst по файлам: чего в dst нет — переносится, одноимённый файл не трогается
+    (конфликт), общие подпапки — рекурсивно. src удаляется, только если опустела. tally: moved, conflicts, failed."""
+    rel = lambda q: os.path.relpath(q, projects)
+    for x in sorted(os.listdir(src)):
+        s, d = os.path.join(src, x), os.path.join(dst, x)
+        if _is_dir(s) and _is_dir(d):
+            _merge(s, d, dry_run, out, projects, tally)
+        elif os.path.lexists(d):
+            out(f"конфликт файл {rel(d)}: уже есть — не трогаю, старый остаётся в {rel(s)}")
+            tally["conflicts"] += 1
+        else:
+            tally["moved"] += 1
+            if not dry_run:
+                try:
+                    os.rename(s, d)
+                except OSError as e:
+                    out(f"сбой    история {rel(s)}: {e.strerror or e}")
+                    tally["failed"] += 1
+    if not dry_run:
         try:
-            data = json.loads(raw)
-        except ValueError:
-            out("сбой    ~/.claude.json: не JSON — не трогаю")
-            data, rc = None, 1
-        if data is not None:
-            conflicts = []
-            new, cj_n = _walk_json(data, rs, conflicts)
-            for c in conflicts:
-                out(f"конфликт ~/.claude.json: запись {c} уже есть — старая оставлена под прежним ключом")
+            os.rmdir(src)   # опустела — убрать; нет — остаётся
+        except OSError:
+            pass
+
+
+def _history_one(src, dst, key, target, kind, dry_run, out, projects, t):
+    """Одна папка истории: переименование, слияние (новая уже есть) или конфликт (новая не папка)."""
+    if not os.path.lexists(dst):
+        out(f"история {key} → {target} ({kind})")
+        t["renamed"] += 1
+        if not dry_run:
+            try:
+                os.rename(src, dst)
+            except OSError as e:
+                out(f"сбой    история {key}: {e.strerror or e}")
+                t["failed"] += 1
+    elif _is_dir(src) and _is_dir(dst):
+        before = dict(t)
+        _merge(src, dst, dry_run, out, projects, t)
+        out(f"слияние история {key} → {target} ({kind}): перенесено {t['moved'] - before['moved']}, "
+            f"конфликтов {t['conflicts'] - before['conflicts']}")
+        t["merged"] += 1
+    else:
+        out(f"конфликт история {key} → {target}: новая не папка — не переношу")
+        t["conflicts"] += 1
+
+
+def _history_step(names, home, dry_run, out):
+    """Шаг 1: папки истории. → счётчики renamed, merged, conflicts, failed, moved; транскрипты не читаются и не
+    переписываются."""
+    projects = os.path.join(home, ".claude", "projects")
+    t = {"renamed": 0, "merged": 0, "conflicts": 0, "failed": 0, "moved": 0}
+    for n in names:
+        for key, target, kind in history_renames(n, home):
+            _history_one(os.path.join(projects, key), os.path.join(projects, target), key, target, kind,
+                         dry_run, out, projects, t)
+    return t
+
+
+def _claude_json_step(rs, home, dry_run, out):
+    """Шаг 2: ~/.claude.json. → (число замен, код выхода)."""
+    cj_path, rc = os.path.join(home, ".claude.json"), 0
+    raw = read_text(cj_path) if os.path.isfile(cj_path) and not os.path.islink(cj_path) else None
+    if raw is None:
+        return 0, 0
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        out("сбой    ~/.claude.json: не JSON — не трогаю")
+        return 0, 1
+    conflicts = []
+    new, cj_n = _walk_json(data, rs, conflicts)
+    for c in conflicts:
+        out(f"конфликт ~/.claude.json: запись {c} уже есть — старая оставлена под прежним ключом")
+        rc = 1
+    if cj_n:
+        out(f"~/.claude.json: {cj_n}")
+        if not dry_run:
+            try:
+                _replace_file(cj_path, (json.dumps(new, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+            except OSError as e:
+                out(f"сбой    ~/.claude.json: {e.strerror or e}")
                 rc = 1
-            if cj_n:
-                out(f"~/.claude.json: {cj_n}")
-                if not dry_run:
-                    try:
-                        _replace_file(cj_path, (json.dumps(new, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-                    except OSError as e:
-                        out(f"сбой    ~/.claude.json: {e.strerror or e}")
-                        rc = 1
-    # 3. текстовые файлы
-    n_files = n_rep = 0
+    return cj_n, rc
+
+
+def _text_step(rs, home, dry_run, out, short):
+    """Шаг 3: текстовые файлы. → (файлов, замен, код выхода)."""
+    n_files = n_rep = rc = 0
     for p in files(home):
         text = read_text(p)
         if text is None:
@@ -327,9 +416,36 @@ def migrate(names, dry_run, home, out=print):
             except OSError as e:
                 out(f"сбой    {short(p)}: {e.strerror or e}")
                 rc = 1
+    return n_files, n_rep, rc
+
+
+def migrate(names, dry_run, home, out=print):
+    """pantheon migrate-paths. → код выхода: 0 — сделано (или план при --dry-run), 1 — отказ, конфликт или сбой."""
+    short = lambda p: "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
+    head = "--dry-run: ничего не меняю, только план" if dry_run else "перенос путей"
+    out(f"{head}: " + ", ".join(f"{short(paths(n, home)[0])} → {short(paths(n, home)[1])}" for n in names))
+    not_done = [n for n in names if not done(n, home)]
+    for n in not_done:
+        old, new = paths(n, home)
+        why = "старая папка ещё на месте" if os.path.lexists(old) else "новой папки нет"
+        out(("внимание " if dry_run else "отказ   ") + f"{n}: {why} — сначала перенести папку {short(old)} → {short(new)}")
+    if not_done and not dry_run:
+        out("ничего не изменено: перенос папок не сделан")
+        return 1
+    if not dry_run and sessync_running():
+        out('отказ   идёт sessync (pgrep -f "sessync _run") — остановить его и повторить; ничего не изменено')
+        return 1
+    rs = rules(names, home)
+    h = _history_step(names, home, dry_run, out)               # 1. папки истории
+    cj_n, rc2 = _claude_json_step(rs, home, dry_run, out)      # 2. ~/.claude.json
+    n_files, n_rep, rc3 = _text_step(rs, home, dry_run, out, short)   # 3. текстовые файлы
+    rc = 1 if (h["conflicts"] or h["failed"] or rc2 or rc3) else 0
     out(f"личное ~/ai/knowledge/{{{','.join(PERSONAL)}}} не тронуто — его меняет Мнемозина")
-    out(f"итог: файлов {n_files}, замен {n_rep}, папок истории {renamed}, замен в ~/.claude.json {cj_n}"
-        + (" — --dry-run, ничего не изменено" if dry_run else ""))
+    if dry_run:
+        out(f"план истории: папок {h['renamed']}, слияний {h['merged']}, конфликтов {h['conflicts']}")
+    out(f"итог: файлов {n_files}, замен {n_rep}, папок истории {h['renamed']}, замен в ~/.claude.json {cj_n}, "
+        f"слияний {h['merged']}, конфликтов {h['conflicts']}" + (" — --dry-run, ничего не изменено" if dry_run else ""))
+    out("внимание: " + SESSYNC_WARN)
     return rc
 
 
