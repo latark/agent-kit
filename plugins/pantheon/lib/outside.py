@@ -16,7 +16,7 @@
                                          та же проверка на коммите SHA (7–40 знаков, есть в клоне) в своей копии, а не
                                          в этой папке: ветку PR не переключить в worktree окна, если .claude/ проекта
                                          отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA.
-                                         Застряли файлы .claude/ после checkout/merge (EPERM) — claude-sync ниже
+                                         Застряли файлы .claude/ после checkout (EPERM) — claude-sync; merge develop упал EPERM на .claude/ → claude-sync --merge
   pantheon outside test [--sha SHA] --affected [--base REF] [--wait С]
                                          узкий набор (metis-0734): run-tests.py из .pantheon-verify с `--affected --base
                                          <merge-base REF и коммита>` (REF — по умолчанию origin/main, вершина берётся
@@ -28,8 +28,8 @@
                                          --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790);
                                          --env ИМЯ=значение (можно несколько, ≤ 20) — флаг в окружение сервера (metis-1277): имя
                                          только NEXT_PUBLIC_[A-Z0-9_]+, значение — печатный ASCII до 200 знаков без секретов
-  pantheon outside claude-sync [--wait С] защищённые пути копии (.claude/skills|commands|agents|hooks, settings*.json,
-                                         .mcp.json) — к HEAD, если он равен ветке по умолчанию origin (lib/claude_sync.py)
+  pantheon outside claude-sync [--merge] [--wait С] защищённые пути копии (.claude/skills|hooks…, settings*.json) — к HEAD,
+                                         если он равен ветке по умолчанию origin; --merge — слить её SHA (lib/claude_sync.py)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    снять свою заявку и дождаться итога (20 с): сервер гаснет раньше срока,
                                          тест в очереди своего окна снимается сразу (итог stopped только в своей
@@ -390,7 +390,7 @@ LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ [--app ИМЯ]] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--env ИМЯ=значение]... [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ | "
-         "login ID [--app ИМЯ] [--wait С] | auth URL [--wait С] | claude-sync [--wait С]")
+         "login ID [--app ИМЯ] [--wait С] | auth URL [--wait С] | claude-sync [--merge] [--wait С]")
 
 
 def set_core(mod):

@@ -13,7 +13,12 @@ worktree окна .claude/worktrees/agent-x на ветке feat. После «�
   - не проходить ссылку в звене пути (файл за ссылкой не тронут);
   - не менять индекс git копии;
   - отказать всей заявке при незаконченном rebase (и merge) без изменений;
-  - отказать папке не из реестра окна.
+  - отказать папке не из реестра окна;
+  - не удалять игнорируемые файлы и файлы вне .claude/skills|commands|agents: окно добавило settings.local.json в
+    индекс или положило хук, которого нет ни в HEAD, ни на main, — файл на месте, отказ;
+  - --merge: слить SHA ветки по умолчанию со слов сервера (git merge --no-commit) и оставить конфликты — и отказать
+    без изменений, если коммита нет в клоне или он подменён, ветка меняет защищённые пути, код грязный,
+    неотслеживаемый файл не равен базе, в info/attributes свой драйвер, merge не закончен; хуки клона не запускаются.
 Плюс привязка в outside.py: вид claude-sync идёт проходу серверов, check_request его принимает, лишний флаг — код 2.
 """
 import atexit
@@ -23,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -97,7 +103,7 @@ os.makedirs(SEED)
 git(SEED, "init", "-q", "-b", "main")
 BASE_FILES = {".claude/skills/a/SKILL.md": "A1\n", ".claude/settings.json": "{\"s\": 1}\n",
               ".claude/commands/c.md": "C1\n", ".claude/hooks/h.sh": "echo ok\n", "README.md": "r1\n",
-              ".gitignore": ".claude/settings.local.json\n"}
+              ".gitignore": ".claude/settings.local.json\n.claude/skills/local/\n"}
 for rel, text in BASE_FILES.items():
     put(SEED, rel, text)
 git(SEED, "add", "-A")
@@ -126,6 +132,7 @@ def stuck():
     put(WT, ".claude/skills/stale/SKILL.md", "STALE\n")         # нет ни в HEAD, ни на main → удалить
     put(WT, "README.md", "r-dirty\n")                          # вне защищённых путей — не трогать
     put(WT, ".claude/settings.local.json", "{\"mine\": 1}\n")  # игнорируется — не трогать
+    put(WT, ".claude/skills/local/SKILL.md", "LOCAL\n")       # игнорируемый навык — не удалять
     shutil.rmtree(os.path.join(WT, ".claude", "hooks"))
     os.makedirs(EXT, exist_ok=True)
     put(EXT, "h.sh", "evil\n")
@@ -137,10 +144,10 @@ os.makedirs(QDIR)
 N = [0]
 
 
-def handle(window="athena-x", d=WT):
+def handle(window="athena-x", d=WT, merge=False):
     N[0] += 1
     rid = f"20261122-120000-{N[0]:06x}"
-    req = {"v": 1, "id": rid, "kind": "claude-sync", "dir": d}
+    req = {"v": 1, "id": rid, "kind": "claude-sync", "dir": d, **({"merge": True} if merge else {})}
     check(f"check_request принимает claude-sync ({rid})", O.check_request(req, rid) is None, O.check_request(req, rid))
     return O.handle(QDIR, window, rid, req)
 
@@ -150,6 +157,7 @@ check("вид claude-sync — проходу серверов", O._req_kind({"ki
 check("вид test — проходу тестов", O._req_kind({"kind": "test"}) == "test")
 check("лишний флаг — код 2", O.main(["claude-sync", "--sha", "abc1234"]) == 2)
 check("--wait не число — код 2", O.main(["claude-sync", "--wait", "x"]) == 2)
+check("--merge с лишним флагом — код 2", O.main(["claude-sync", "--merge", "--sha", "abc1234"]) == 2)
 
 # --- шаблоны песочницы ---------------------------------------------------------------------------------------------
 check("защищены навык, команда, агент, хук, настройки, .mcp.json на любой глубине",
@@ -159,6 +167,15 @@ check("защищены навык, команда, агент, хук, наст
 check("не защищены README, .claude/other, вложенные копии .claude/worktrees/*",
       not any(C.protected(p) for p in ("README.md", ".claude/other.md", ".claude/worktrees/x/.claude/skills/a",
                                        "src/settings.json", "../.mcp.json")))
+check("удалять можно только навыки, команды и агентов",
+      all(C.deletable(p) for p in (".claude/skills/x/SKILL.md", ".claude/commands/c.md", "a/.claude/agents/x.md")))
+check("настройки, .mcp.json, хуки, .husky и настройки внутри навыка — не удаляются",
+      not any(C.deletable(p) for p in (".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
+                                       ".claude/hooks/h.sh", ".husky/pre-commit", ".claude/skills/x/.claude/settings.json",
+                                       ".claude/skills/x/.claude/hooks/h.sh")))
+check("свой драйвер в атрибутах найден, встроенные — нет",
+      C.bad_attrs("# c\n* merge=evil\n*.py diff=python\n*.bin -diff binary\n[attr]m filter=lfs\nx merge=union", "f")
+      == ["f: merge=evil", "f: filter=lfs"], C.bad_attrs("* merge=evil\n[attr]m filter=lfs", "f"))
 
 # --- папка не окна ------------------------------------------------------------------------------------------------
 stuck()
@@ -204,6 +221,8 @@ check("нет ни в HEAD, ни на main — удалён вместе с пу
       not os.path.lexists(os.path.join(WT, ".claude/skills/stale")), synced)
 check("вне защищённых путей — не тронут", read(WT, "README.md") == "r-dirty\n")
 check("игнорируемый settings.local.json — не тронут", read(WT, ".claude/settings.local.json") == "{\"mine\": 1}\n")
+check("игнорируемый навык не удалён, игнорируемые — без отказа",
+      read(WT, ".claude/skills/local/SKILL.md") == "LOCAL\n" and not [x for x in refused if "local" in x], refused)
 check("ссылка в звене пути не пройдена: файл за ней не тронут, ссылка на месте, отказ",
       read(EXT, "h.sh") == "evil\n" and os.path.islink(os.path.join(WT, ".claude", "hooks"))
       and any(x.startswith(".claude/hooks/h.sh:") for x in refused), refused)
@@ -220,6 +239,114 @@ git(WT, "checkout", "-q", "--", ".claude")
 res = handle()
 check("всё совпадает с HEAD — done, код 0, без сети", res.get("state") == "done" and res.get("code") == 0
       and not res.get("synced") and not res.get("refused"), res)
+
+# --- окно добавило settings.local.json в индекс и положило свой хук: не удалять, отказ ----------------------------
+git(WT, "add", "-f", ".claude/settings.local.json")
+put(WT, ".claude/hooks/new.sh", "echo mine\n")
+res = handle()
+refused = res.get("refused") or []
+check("settings.local.json в индексе (и в .gitignore) — не удалён, отказ",
+      read(WT, ".claude/settings.local.json") == "{\"mine\": 1}\n" and res.get("code") == 1
+      and any(x.startswith(".claude/settings.local.json:") for x in refused), res)
+check("хук, которого нет ни в HEAD, ни на main, — не удалён, отказ", read(WT, ".claude/hooks/new.sh") == "echo mine\n"
+      and any(x.startswith(".claude/hooks/new.sh:") for x in refused), refused)
+git(WT, "rm", "-q", "--cached", ".claude/settings.local.json")
+os.unlink(os.path.join(WT, ".claude/hooks/new.sh"))
+git(WT, "checkout", "-q", "--", "README.md")
+
+# --- --merge: сервер ушёл вперёд ----------------------------------------------------------------------------------
+MAIN0 = git(SEED, "rev-parse", "HEAD")
+for rel, text in ((".claude/skills/a/SKILL.md", "A2\n"), (".claude/skills/new/SKILL.md", "N\n"),
+                  ("newfile.txt", "NEW\n"), ("README.md", "r2\n")):
+    put(SEED, rel, text)
+git(SEED, "add", "-A")
+git(SEED, "commit", "-q", "-m", "main: дальше")
+git(SEED, "push", "-q", SERVER, "main")
+TIP = git(SEED, "rev-parse", "HEAD")
+
+
+def mh():
+    return os.path.lexists(os.path.join(GITDIR, "MERGE_HEAD"))
+
+
+def refused_with(res, *words):
+    return res.get("state") == "failed" and all(w in str(res.get("why")) for w in words) and not mh()
+
+
+res = handle(merge=True)
+check("--merge: коммита базы нет в клоне — отказ «сначала fetch»", refused_with(res, "pantheon git fetch"), res)
+
+body = subprocess.run(["git", "-C", WT, "cat-file", "commit", FEAT], capture_output=True, check=True).stdout
+FAKE = os.path.join(CLONE, ".git", "objects", TIP[:2], TIP[2:])
+os.makedirs(os.path.dirname(FAKE), exist_ok=True)
+with open(FAKE, "wb") as fh:
+    fh.write(zlib.compress(b"commit %d\0" % len(body) + body))
+res = handle(merge=True)
+check("--merge: под SHA базы в клоне чужой коммит — отказ, слияния нет", refused_with(res, "не совпало с сервером"),
+      res)
+os.unlink(FAKE)
+git(CLONE, "fetch", "-q", "origin")
+
+res = handle(merge=True)
+check("--merge: ветка меняет защищённые пути — отказ без слияния",
+      refused_with(res, "меняет защищённые пути", ".claude/commands/c.md"), res)
+
+git(WT, "checkout", "-q", "-b", "m1", MAIN0)
+put(WT, "src.txt", "s1\n")
+git(WT, "add", "src.txt")
+git(WT, "commit", "-q", "-m", "m1: код")
+
+put(WT, "src.txt", "dirty\n")
+res = handle(merge=True)
+check("--merge: незакоммиченный код — отказ", refused_with(res, "незакоммиченные", "src.txt"), res)
+git(WT, "checkout", "-q", "--", "src.txt")
+
+put(WT, "newfile.txt", "OTHER\n")
+res = handle(merge=True)
+check("--merge: неотслеживаемый файл не равен базе — отказ, файл на месте",
+      refused_with(res, "newfile.txt") and read(WT, "newfile.txt") == "OTHER\n", res)
+
+ATTR = os.path.join(CLONE, ".git", "info", "attributes")
+put(os.path.dirname(ATTR), "attributes", "* merge=evil\n")
+res = handle(merge=True)
+check("--merge: свой драйвер в info/attributes — отказ", refused_with(res, "свой драйвер", "merge=evil"), res)
+os.unlink(ATTR)
+
+put(WT, "newfile.txt", "NEW\n")
+put(WT, ".claude/skills/new/SKILL.md", "N\n")
+HOOKS, MARK = os.path.join(CLONE, ".git", "hooks"), os.path.join(ROOT, "hook-ran")
+NAMES = ("reference-transaction", "post-merge", "pre-merge-commit", "post-checkout", "post-index-change")
+for h in NAMES:
+    put(HOOKS, h, f"#!/bin/sh\necho {h} >> '{MARK}'\n")
+    os.chmod(os.path.join(HOOKS, h), 0o755)
+res = handle(merge=True)
+for h in NAMES:
+    os.unlink(os.path.join(HOOKS, h))
+check("--merge: слито без конфликтов — код 0, MERGE_HEAD = SHA сервера",
+      res.get("state") == "done" and res.get("code") == 0 and (read(GITDIR, "MERGE_HEAD") or "").strip() == TIP
+      and "без конфликтов" in str(res.get("note")), res)
+check("--merge: защищённые пути и код — как на базе", read(WT, ".claude/skills/a/SKILL.md") == "A2\n"
+      and read(WT, ".claude/skills/new/SKILL.md") == "N\n" and read(WT, "README.md") == "r2\n"
+      and read(WT, "src.txt") == "s1\n")
+check("--merge: неотслеживаемые, равные базе, убраны и слиты", read(WT, "newfile.txt") == "NEW\n"
+      and any("неотслеживаемый" in x for x in res.get("synced") or []), res)
+check("--merge: хуки клона не запущены", not os.path.exists(MARK), read(ROOT, "hook-ran"))
+check("--merge: игнорируемые не тронуты", read(WT, ".claude/settings.local.json") == "{\"mine\": 1}\n"
+      and read(WT, ".claude/skills/local/SKILL.md") == "LOCAL\n")
+
+res = handle(merge=True)
+check("--merge при незаконченном merge — отказ «закончи или отмени»",
+      res.get("state") == "failed" and "закончи или отмени" in str(res.get("why")), res)
+git(WT, "merge", "--abort")
+
+put(WT, "README.md", "mine\n")
+git(WT, "commit", "-q", "-am", "m1: свой README")
+res = handle(merge=True)
+check("--merge: конфликт оставлен роли — код 1, MERGE_HEAD есть, README в списке",
+      res.get("state") == "done" and res.get("code") == 1 and res.get("conflicts") == ["README.md"] and mh()
+      and "<<<<<<<" in (read(WT, "README.md") or ""), res)
+check("--merge: при конфликте защищённые пути — как на базе", read(WT, ".claude/skills/a/SKILL.md") == "A2\n")
+git(WT, "merge", "--abort")
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} проверок")
 if FAILS:
