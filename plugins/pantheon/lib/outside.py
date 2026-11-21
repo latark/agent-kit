@@ -598,12 +598,12 @@ GIT_SAFE = ("--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.ho
 class Repo(str):
     """Папка заявки после trusted_clone (resolve_dir): клон, его .git (common) и gitdir папки проверены один раз, git по
     ней идёт с --git-dir=<gitdir> --work-tree=<папка> — .git-файл, который пишет роль, больше не читается."""
-    clone = common = gitdir = None
+    clone = common = gitdir = ident = None   # ident — (st_ino, st_dev) папки при проверке, claude-sync сверяет его
 
 
 def checked(d, clone, common, gitdir):
     r = Repo(d)
-    r.clone, r.common, r.gitdir = clone, common, gitdir
+    r.clone, r.common, r.gitdir, r.ident = clone, common, gitdir, os.stat(d)[1:3]
     return r
 
 

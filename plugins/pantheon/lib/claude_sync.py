@@ -23,15 +23,12 @@ STATE/outside/claude-sync, объекты сверены с хешем (lib/supa
 Запись — во временный файл рядом и os.replace; индекс git не пишется. Незаконченный merge, rebase, cherry-pick или
 revert — отказ «закончи или отмени …» без изменений.
 
-С --merge проход сам делает в копии `git merge --no-ff --no-commit -s ort -X no-renames <SHA ветки по умолчанию со слов
-сервера>` и оставляет роли конфликты. До слияния — отказ без изменений, если: коммита нет в клоне (сначала fetch) или
-его дерево в клоне не совпало с сервером, а blob защищённых путей и .gitattributes — со своим хешем; незаконченная
-операция git; ветка со времени merge-base меняет защищённые пути; в .gitattributes (HEAD, базы, диска) или
-info/attributes есть merge=, filter= или diff= не из встроенных; защищённые пути не приводятся правилом выше; индекс
-или рабочее дерево отличаются от HEAD; неотслеживаемый файл, который слияние перезапишет, не равен базе байт в байт
-(равный удаляется). git — без GIT_*, глобальный конфиг /dev/null, core.hooksPath=/dev/null, rerere выключен. После —
-сверка: защищённые пути на диске равны базе, иначе `git merge --abort` и отказ. Итог: «слито без конфликтов» (код 0)
-или список конфликтных файлов (код 1, MERGE_HEAD на месте).
+Папка копии открывается звено за звеном от «/» без ссылок (d.top) и сверяется с inode, который запомнил resolve_dir
+(Repo.ident). git идёт с --git-dir — проверенный gitdir, GIT_COMMON_DIR — проверенный common (commondir окна не
+читается) и рабочим деревом «.» в d.top (os.fchdir в дочернем процессе). После Base и перед каждой записью check_repo
+сверяет путь, inode, .git, commondir и gitdir-файл: сменились — отказ.
+
+С --merge — git merge проверенного SHA вне песочницы, правила — в шапке lib/claude_merge.py.
 """
 import errno
 import fnmatch
@@ -39,6 +36,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -60,14 +58,6 @@ FILE_MODES = {"100644": 0o644, "100755": 0o755}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 SOFT = ("skills", "commands", "agents")   # удаление — только здесь: пропажа файла снимает возможность, не защиту
 WALK_MAX = 300000
-ATTRS = ".gitattributes"
-# встроенные драйверы git: свой merge=/filter=/diff= — команда из конфига, её git запустил бы вне песочницы
-BUILTIN = {"merge": {"text", "binary", "union"}, "filter": set(),
-           "diff": {"ada", "bash", "bibtex", "cpp", "csharp", "css", "dts", "elixir", "fortran", "fountain", "golang",
-                    "html", "java", "kotlin", "markdown", "matlab", "objc", "pascal", "perl", "php", "python", "ruby",
-                    "rust", "scheme", "tex"}}
-MERGE_CFG = ("-c", "rerere.enabled=false", "-c", "merge.verifySignatures=false")   # rr-cache окно пишет само
-
 
 def set_core(core, outside):
     global P, O
@@ -93,12 +83,15 @@ class Refused(Exception):
 
 
 def _run(d, *args, data=None, timeout=60):
-    """git в копии d (Repo — через проверенный gitdir): GIT_SAFE (хуки /dev/null), окружение git_env (без GIT_*,
-    глобальный и системный конфиг выключены) → CompletedProcess с байтами. Refused — git не запустился."""
-    loc = ["-C", d] + ([f"--git-dir={d.gitdir}", f"--work-tree={d}"] if isinstance(d, O.Repo) else [])
+    """git в копии d (Repo): --git-dir — проверенный gitdir, GIT_COMMON_DIR — проверенный common (commondir, который
+    пишет окно, git не читает), рабочее дерево — «.» в папке d.top (os.fchdir в дочернем процессе, не путь строкой),
+    GIT_SAFE (хуки /dev/null), git_env (без GIT_*, глобальный и системный конфиг выключены) → CompletedProcess с
+    байтами. Refused — git не запустился."""
+    top = d.top
     try:
-        return subprocess.run(["git", *loc, *O.GIT_SAFE, *args], input=data, capture_output=True, timeout=timeout,
-                              env=O.git_env())
+        return subprocess.run(["git", f"--git-dir={d.gitdir}", "--work-tree=.", *O.GIT_SAFE, *args], input=data,
+                              capture_output=True, timeout=timeout, env=dict(O.git_env(), GIT_COMMON_DIR=d.common),
+                              pass_fds=(top,), preexec_fn=lambda: os.fchdir(top))
     except (OSError, subprocess.SubprocessError) as e:
         raise Refused(f"git {args[-1] if args else ''} не запустился ({type(e).__name__})") from None
 
@@ -196,10 +189,10 @@ def _open_parent(top_fd, parts, create=False):
         raise
 
 
-def walk(top_fd, keep, limit=WALK_MAX):
+def walk(top_fd, keep, limit=None):
     """Файлы и ссылки на диске копии, где keep(rel): свой обход от корня — звенья открыты O_NOFOLLOW, по ссылкам не
     идёт, .git и вложенные копии .claude/worktrees/* не обходит. Refused — записей больше limit."""
-    found, todo, seen = [], [""], 0
+    found, todo, seen, limit = [], [""], 0, limit or WALK_MAX
     while todo:
         pre = todo.pop()
         try:
@@ -337,6 +330,13 @@ class Base:
     def blob(self, sha):
         return sm()._object(self.bare, "blob", sha)
 
+    def has(self, sha):
+        try:
+            self.blob(sha)
+        except sm().Refused:
+            return False
+        return True
+
     def listing(self):
         """Сырой ls-tree -r -z всей ветки из своего bare (объекты пришли fetch, index-pack сверил их хеши)."""
         r = sm()._git(self.bare, "ls-tree", "-r", "-z", "--full-tree", self.tip, text=False)
@@ -432,205 +432,118 @@ def sync(d, base=None, skip=()):
         raise Refused(why)
     pats = patterns()
     entries = head_entries(d, pats)
-    top_fd = os.open(str(d), DIR_FLAGS)
+    top_fd = d.top
+    n = len(next(iter(entries.values()))[1]) if entries else 40
+    extra = [rel for rel in walk(top_fd, lambda rel: protected(rel, pats)) if rel not in entries]
+    cand = sorted((set(entries) | (set(extra) - ignored(d, extra))) - set(skip))
+    differ = [(rel, entries.get(rel), disk_state(top_fd, rel, n)) for rel in cand]
+    differ = [x for x in differ if not same(x[1], x[2])]
+    if not differ:
+        return {"synced": [], "refused": [], "base": None}
+    own = base is None
+    base = Base(d) if own else base
     try:
-        n = len(next(iter(entries.values()))[1]) if entries else 40
-        extra = [rel for rel in walk(top_fd, lambda rel: protected(rel, pats)) if rel not in entries]
-        cand = sorted((set(entries) | (set(extra) - ignored(d, extra))) - set(skip))
-        differ = [(rel, entries.get(rel), disk_state(top_fd, rel, n)) for rel in cand]
-        differ = [x for x in differ if not same(x[1], x[2])]
-        if not differ:
-            return {"synced": [], "refused": [], "base": None}
-        own = base is None
-        base = Base(d) if own else base
-        try:
-            out = {"synced": [], "refused": [], "base": f"{base.name} {base.tip[:12]}"}
-            for rel, entry, disk in differ:
-                act = decide(rel, entry, disk, base)
-                if act[0] == "refuse":
-                    out["refused"].append(f"{rel}: {act[1]}")
-                    continue
-                try:
-                    out["synced"].append(apply(top_fd, rel, act, base))
-                except OSError as e:
-                    out["refused"].append(f"{rel}: не записан ({type(e).__name__}: {e.strerror or e})")
-            return out
-        finally:
-            if own:
-                base.close()
+        check_repo(d)
+        out = {"synced": [], "refused": [], "base": f"{base.name} {base.tip[:12]}"}
+        for rel, entry, disk in differ:
+            act = decide(rel, entry, disk, base)
+            if act[0] == "refuse":
+                out["refused"].append(f"{rel}: {act[1]}")
+                continue
+            try:
+                out["synced"].append(apply(top_fd, rel, act, base))
+            except OSError as e:
+                out["refused"].append(f"{rel}: не записан ({type(e).__name__}: {e.strerror or e})")
+        return out
     finally:
-        os.close(top_fd)
+        if own:
+            base.close()
 
 
-# --- --merge: слияние проверенной ветки по умолчанию --------------------------------------------------------------
+# --- копия та же, что проверил resolve_dir -----------------------------------------------------------------------
 
-def bad_attrs(text, where):
-    """Строки merge=/filter=/diff= со своим драйвером в тексте .gitattributes → ["где: ключ=значение"]."""
-    bad = []
-    for line in text.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        for tok in s.split()[1:]:
-            key, eq, val = tok.partition("=")
-            if eq and key in BUILTIN and val not in BUILTIN[key]:
-                bad.append(f"{where}: {key}={val}")
-    return bad
+def open_top(path):
+    """fd папки path, открытой звено за звеном от «/» без перехода по ссылке (OSError ELOOP — звено стало ссылкой)."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in [x for x in path.split("/") if x]:
+            nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
-def _read_plain(path):
+def _ident(fd):
+    st = os.fstat(fd)
+    return st.st_ino, st.st_dev
+
+
+def _read_plain(path, dir_fd=None):
     """Текст обычного файла без перехода по ссылке; None — файла нет. Ссылка или не файл — Refused."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
     except OSError as e:
-        raise Refused(f"{path} не прочитан ({type(e).__name__}) — ссылка вместо файла атрибутов") from None
+        raise Refused(f"{path} не прочитан ({type(e).__name__}) — ссылка вместо файла") from None
     with os.fdopen(fd, "rb") as fh:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             raise Refused(f"{path} — не обычный файл")
         return fh.read().decode("utf-8", "replace")
 
 
-def check_attrs(d, top_fd, head, theirs, base):
-    """Отказ, если какой-либо .gitattributes (HEAD, базы, диска) или info/attributes назначает свой драйвер."""
-    bad = []
-    for rel, (mode, sha) in head.items():
-        if rel.rsplit("/", 1)[-1] == ATTRS and mode in FILE_MODES:
-            bad += bad_attrs(os.fsdecode(_out(d, "cat-file", "blob", sha)), f"HEAD:{rel}")
-    for rel, (mode, sha) in theirs.items():
-        if rel.rsplit("/", 1)[-1] == ATTRS and mode in FILE_MODES:
-            bad += bad_attrs(base.blob(sha).decode("utf-8", "replace"), f"{base.name}:{rel}")
-    for rel in walk(top_fd, lambda r: r.rsplit("/", 1)[-1] == ATTRS):
-        parts = rel.split("/")
-        pfd = _open_parent(top_fd, parts)
-        try:
-            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-        except OSError:
-            bad.append(f"{rel}: ссылка или не файл")
-            continue
-        finally:
-            os.close(pfd)
-        with os.fdopen(fd, "rb") as fh:
-            bad += bad_attrs(fh.read().decode("utf-8", "replace"), rel)
-    for gd in dict.fromkeys((d.common, d.gitdir)):
-        text = _read_plain(os.path.join(gd, "info", "attributes"))
-        bad += bad_attrs(text or "", os.path.join(gd, "info", "attributes"))
-    if bad:
-        raise Refused("свой драйвер git в атрибутах — слияние запустило бы его вне песочницы: " + "; ".join(bad))
-
-
-def check_objects(d, base, theirs, pats):
-    """Коммит базы есть в клоне, его дерево в клоне равно дереву сервера, а blob защищённых путей и .gitattributes в
-    хранилище клона совпадают со своим хешем (cat-file хеш не сверяет: объект под чужим именем окно подложило бы)."""
-    if _run(d, "cat-file", "-e", base.tip + "^{commit}").returncode != 0:
-        raise Refused(f"в клоне нет коммита {base.tip[:12]} ({base.name}) — сначала pantheon git fetch, потом повтори")
-    if _out(d, "ls-tree", "-r", "-z", "--full-tree", base.tip) != base.listing():
-        raise Refused(f"дерево {base.tip[:12]} в клоне не совпало с сервером — хранилище объектов подменено (git fsck)")
-    shas = sorted({sha for rel, (mode, sha) in theirs.items() if mode in FILE_MODES or mode == "120000"
-                   if protected(rel, pats) or rel.rsplit("/", 1)[-1] == ATTRS})
-    raw = _out(d, "cat-file", "--batch", data=b"".join(s.encode() + b"\n" for s in shas), timeout=300) if shas else b""
-    i = 0
-    for sha in shas:
-        nl = raw.find(b"\n", i)
-        head = raw[i:nl].split() if nl >= 0 else []
-        if len(head) != 3 or head[0].decode() != sha or head[1] != b"blob":
-            raise Refused(f"blob {sha[:12]} в клоне не прочитан — сначала pantheon git fetch")
-        size = int(head[2])
-        body = raw[nl + 1:nl + 1 + size]
-        if _blob_hash(body, len(sha)) != sha:
-            raise Refused(f"blob {sha[:12]} в клоне не совпал со своим хешем — хранилище объектов подменено (git fsck)")
-        i = nl + 2 + size
-
-
-def _lines(raw):
-    return [os.fsdecode(x) for x in raw.split(b"\0") if x]
-
-
-def check_clean(d):
-    """Индекс и рабочее дерево равны HEAD (кроме защищённых путей, их привёл sync): иначе — отказ «грязный код»."""
-    _run(d, "update-index", "-q", "--refresh")
-    dirty = _lines(_out(d, "diff-index", "--cached", "--name-only", "-z", "--no-renames", "HEAD"))
-    dirty += _lines(_out(d, "diff-files", "--name-only", "-z"))
-    if dirty:
-        raise Refused("в копии незакоммиченные изменения — закоммить или убери их, потом повтори: "
-                      + ", ".join(sorted(set(dirty))[:20]))
-
-
-def untracked_overwrites(top_fd, head, theirs):
-    """Файлы на диске по путям, которые слияние создаст: равные базе байт в байт → в удаление, прочие — отказ."""
-    drop, bad = [], []
-    for rel, entry in sorted(theirs.items()):
-        if rel in head or entry[0] == "160000":
-            continue
-        disk = disk_state(top_fd, rel, len(entry[1]))
-        if disk == ("none",):
-            continue
-        (drop if same(entry, disk) else bad).append(rel)
-    if bad:
-        raise Refused("неотслеживаемые файлы, которые слияние перезапишет, отличаются от базы — убери или закоммить: "
-                      + ", ".join(bad[:20]))
-    return drop
-
-
-def git_merge(d, base, top_fd, drop):
-    """Убрать равные базе неотслеживаемые файлы и слить коммит базы; сбой без MERGE_HEAD — вернуть убранные."""
-    for rel in drop:
-        delete_file(top_fd, rel)
-    r = _run(d, *MERGE_CFG, "merge", "--no-ff", "--no-commit", "--no-overwrite-ignore", "--no-autostash",
-             "--no-verify", "--no-edit", "--no-stat", "-s", "ort", "-X", "no-renames",
-             "-m", f"Merge {base.name} {base.tip[:12]} (claude-sync --merge)", base.tip, timeout=600)
-    if os.path.lexists(os.path.join(d.gitdir, "MERGE_HEAD")):
-        return
-    for rel in drop:
-        e = base.entry(rel)
-        if e and e[0] in FILE_MODES:
-            write_file(top_fd, rel, base.blob(e[1]), FILE_MODES[e[0]])
-    tail = os.fsdecode(r.stderr or b"").strip().splitlines()
-    raise Refused(f"git merge не прошёл (код {r.returncode}): {(tail or [''])[-1][-200:]}")
-
-
-def merge(d):
-    """Режим --merge → {"synced", "refused", "base", "conflicts", "merged"}; Refused — отказ без слияния."""
-    why = in_progress(d.gitdir)
-    if why:
-        raise Refused(why)
-    pats = patterns()
-    base = Base(d)
-    top_fd = os.open(str(d), DIR_FLAGS)
+def check_repo(d):
+    """Копия — та, что проверил resolve_dir: путь открывается без ссылок в тот же inode, что d.top и d.ident, .git ведёт
+    в тот же gitdir, а его commondir и gitdir-файл — в тот же common и обратно. Зовётся после Base и перед каждой
+    записью: окно могло подменить звено пути или commondir (свой config с filter/alternates). Иначе — Refused."""
     try:
-        theirs = parse_tree(base.listing())
-        check_objects(d, base, theirs, pats)
-        mb = _out(d, "merge-base", "HEAD", base.tip, why=f"merge-base HEAD и {base.name}").decode().strip()
-        label = f"{base.name} {base.tip[:12]}"
-        if mb == base.tip:
-            return {"synced": [], "refused": [], "base": label, "conflicts": [], "merged": None}
-        mine = [p for p in _lines(_out(d, "diff-tree", "-r", "--no-renames", "--name-only", "-z", mb, "HEAD"))
-                if protected(p, pats)]
-        if mine:
-            raise Refused(f"ветка со времени {mb[:12]} меняет защищённые пути — их приносит только PR в базу, "
-                          "слияние не даст их проверить: " + ", ".join(mine[:20]))
-        head = tree_entries(d)
-        check_attrs(d, top_fd, head, theirs, base)
-        drop = untracked_overwrites(top_fd, head, theirs)
-        out = sync(d, base, skip=set(theirs) - set(head))
-        if out["refused"]:
-            raise Refused("защищённые пути не приведены к HEAD: " + "; ".join(out["refused"]))
-        check_clean(d)
-        git_merge(d, base, top_fd, drop)
-        conflicts = sorted({p.split("\t", 1)[-1] for p in _lines(_out(d, "ls-files", "-u", "-z"))})
-        wrong = [rel for rel in sorted(set(theirs) | set(head)) if protected(rel, pats)
-                 and not same(theirs.get(rel), disk_state(top_fd, rel, len(base.tip)))]
-        if wrong:
-            _run(d, "merge", "--abort")
-            raise Refused("после слияния защищённые пути не равны базе — слияние отменено (git merge --abort): "
-                          + ", ".join(wrong[:20]))
-        out.update(conflicts=conflicts, merged=label)
-        out["synced"] += [f"{rel}: удалён (неотслеживаемый, равен {base.name})" for rel in drop]
-        return out
+        fd = open_top(str(d))
+    except OSError as e:
+        raise Refused(f"путь копии {d} не открыть без ссылок ({type(e).__name__}) — звено пути подменено") from None
+    try:
+        same_dir = _ident(fd) == _ident(d.top) == tuple(d.ident or ())
     finally:
-        os.close(top_fd)
-        base.close()
+        os.close(fd)
+    if not same_dir:
+        raise Refused(f"папка {d} — уже не та, что проверена (сменился inode): звено пути подменено")
+    dotgit = os.path.join(str(d), ".git")
+    if d.gitdir == d.common:
+        ok = d.gitdir == dotgit and stat.S_ISDIR(os.stat(".git", dir_fd=d.top, follow_symlinks=False).st_mode)
+    else:
+        m = re.fullmatch(r"gitdir: *(\S[^\n]*?) *\n?", _read_plain(".git", d.top) or "")
+        cdir = (_read_plain(os.path.join(d.gitdir, "commondir")) or "").strip()
+        back = (_read_plain(os.path.join(d.gitdir, "gitdir")) or "").strip()
+        ok = bool(m and cdir and back and os.path.realpath(os.path.join(str(d), m.group(1))) == d.gitdir
+                  and os.path.realpath(os.path.join(d.gitdir, cdir)) == d.common
+                  and os.path.realpath(os.path.join(d.gitdir, back)) == os.path.realpath(dotgit)
+                  and not any(os.path.islink(x) for x in (d.common, os.path.dirname(d.gitdir), d.gitdir)))
+    if not ok or os.path.lexists(os.path.join(d.common, "commondir")):
+        raise Refused(f".git, commondir или gitdir копии {d} изменены после проверки — git взял бы чужой конфиг")
+
+
+_MM = []
+
+
+class _Me:
+    """Этот модуль для claude_merge.py: атрибуты читаются живыми (тест подменяет Base, check_repo)."""
+
+    def __getattr__(self, name):
+        return globals()[name]
+
+
+def mm():
+    """lib/claude_merge.py — режим --merge (до 800 строк на файл)."""
+    if not _MM:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_merge.py")
+        spec = importlib.util.spec_from_file_location("pantheon_claude_merge", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.C = _Me()
+        _MM.append(mod)
+    return _MM[0]
 
 
 def _note(out, merging):
@@ -648,11 +561,21 @@ def run(rid, d, req, window, qdir):
     """Заявка claude-sync прохода серверов (handle в outside.py, папка уже проверена resolve_dir) → итог."""
     merging = req.get("merge") is True
     try:
-        out = merge(d) if merging else sync(d)
+        d.top = open_top(str(d))
+    except OSError as e:
+        d.top, out = None, e
+    try:
+        if d.top is None:
+            raise Refused(f"путь копии {d} не открыть без ссылок ({type(out).__name__}) — звено пути подменено")
+        check_repo(d)
+        out = mm().merge(d) if merging else sync(d)
     except (Refused, sm().Refused, OSError) as e:
         why = str(e) if not isinstance(e, OSError) else f"сбой файловой системы: {type(e).__name__}: {e}"
         O.log_event(id=rid, kind=KIND, window=window, dir=d, ok=False, why=why, merge=merging)
         return O.save_result(qdir, rid, {"state": "failed", "kind": KIND, "dir": d, "why": why})
+    finally:
+        if d.top is not None:
+            os.close(d.top)
     code = 1 if out["refused"] or out.get("conflicts") else 0
     O.log_event(id=rid, kind=KIND, window=window, dir=d, ok=not code, synced=len(out["synced"]),
                 refused=len(out["refused"]), merge=merging)

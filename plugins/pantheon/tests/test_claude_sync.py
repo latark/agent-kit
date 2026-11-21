@@ -18,7 +18,11 @@ worktree окна .claude/worktrees/agent-x на ветке feat. После «�
     индекс или положило хук, которого нет ни в HEAD, ни на main, — файл на месте, отказ;
   - --merge: слить SHA ветки по умолчанию со слов сервера (git merge --no-commit) и оставить конфликты — и отказать
     без изменений, если коммита нет в клоне или он подменён, ветка меняет защищённые пути, код грязный,
-    неотслеживаемый файл не равен базе, в info/attributes свой драйвер, merge не закончен; хуки клона не запускаются.
+    неотслеживаемый файл не равен базе, в info/attributes свой драйвер, merge не закончен; хуки клона не запускаются;
+  - --merge против окна, которое пишет объекты и .git клона: подложенный коммит (другие родители), дерево, blob — отказ;
+    blob подложен после проверки — путь переписан из своего bare; merge упал без MERGE_HEAD — убранные файлы и
+    ссылка возвращены; HEAD сдвинулся до или во время слияния, commondir или звено пути подменены — отказ или откат,
+    чужого на диске нет; git берёт GIT_COMMON_DIR, а не commondir окна.
 Плюс привязка в outside.py: вид claude-sync идёт проходу серверов, check_request его принимает, лишний флаг — код 2.
 """
 import atexit
@@ -53,6 +57,7 @@ import pantheon as P  # noqa: E402
 
 O = P.outside_mod()
 C = O.sub_mod("claude-sync")
+M = C.mm()
 FAILS, TOTAL = [], [0]
 
 
@@ -174,8 +179,8 @@ check("настройки, .mcp.json, хуки, .husky и настройки в�
                                        ".claude/hooks/h.sh", ".husky/pre-commit", ".claude/skills/x/.claude/settings.json",
                                        ".claude/skills/x/.claude/hooks/h.sh")))
 check("свой драйвер в атрибутах найден, встроенные — нет",
-      C.bad_attrs("# c\n* merge=evil\n*.py diff=python\n*.bin -diff binary\n[attr]m filter=lfs\nx merge=union", "f")
-      == ["f: merge=evil", "f: filter=lfs"], C.bad_attrs("* merge=evil\n[attr]m filter=lfs", "f"))
+      M.bad_attrs("# c\n* merge=evil\n*.py diff=python\n*.bin -diff binary\n[attr]m filter=lfs\nx merge=union", "f")
+      == ["f: merge=evil", "f: filter=lfs"], M.bad_attrs("* merge=evil\n[attr]m filter=lfs", "f"))
 
 # --- папка не окна ------------------------------------------------------------------------------------------------
 stuck()
@@ -259,6 +264,7 @@ MAIN0 = git(SEED, "rev-parse", "HEAD")
 for rel, text in ((".claude/skills/a/SKILL.md", "A2\n"), (".claude/skills/new/SKILL.md", "N\n"),
                   ("newfile.txt", "NEW\n"), ("README.md", "r2\n")):
     put(SEED, rel, text)
+os.symlink("README.md", os.path.join(SEED, "link.txt"))
 git(SEED, "add", "-A")
 git(SEED, "commit", "-q", "-m", "main: дальше")
 git(SEED, "push", "-q", SERVER, "main")
@@ -282,8 +288,9 @@ os.makedirs(os.path.dirname(FAKE), exist_ok=True)
 with open(FAKE, "wb") as fh:
     fh.write(zlib.compress(b"commit %d\0" % len(body) + body))
 res = handle(merge=True)
-check("--merge: под SHA базы в клоне чужой коммит — отказ, слияния нет", refused_with(res, "не совпало с сервером"),
-      res)
+# git одних версий читает подложенный коммит (сверка сырого объекта), других — не находит его (нет коммита): оба отказ
+check("--merge: под SHA базы в клоне чужой коммит — отказ, слияния нет",
+      refused_with(res, "не совпал с сервером") or refused_with(res, "нет коммита"), res)
 os.unlink(FAKE)
 git(CLONE, "fetch", "-q", "origin")
 
@@ -312,8 +319,266 @@ res = handle(merge=True)
 check("--merge: свой драйвер в info/attributes — отказ", refused_with(res, "свой драйвер", "merge=evil"), res)
 os.unlink(ATTR)
 
-put(WT, "newfile.txt", "NEW\n")
-put(WT, ".claude/skills/new/SKILL.md", "N\n")
+M1 = git(WT, "rev-parse", "HEAD")
+A1 = git(WT, "rev-parse", MAIN0 + ":.claude/skills/a/SKILL.md")
+A2 = git(WT, "rev-parse", TIP + ":.claude/skills/a/SKILL.md")
+os.unlink(os.path.join(WT, "newfile.txt"))
+
+
+def untracked():
+    """Неотслеживаемые файлы, равные базе: файл, навык и ссылка (их слияние создаст)."""
+    put(WT, "newfile.txt", "NEW\n")
+    put(WT, ".claude/skills/new/SKILL.md", "N\n")
+    link = os.path.join(WT, "link.txt")
+    if os.path.lexists(link):
+        os.unlink(link)
+    os.symlink("README.md", link)
+
+
+def back_to_m1():
+    if mh():
+        git(WT, "merge", "--abort")
+    git(WT, "reset", "-q", "--hard", M1)
+
+
+# --- ветка уже на базе — сливать нечего ---------------------------------------------------------------------------
+git(WT, "checkout", "-q", "-b", "attip", TIP)
+res = handle(merge=True)
+check("--merge: HEAD уже на базе — done, код 0, «сливать нечего», без MERGE_HEAD",
+      res.get("state") == "done" and res.get("code") == 0 and "сливать нечего" in str(res.get("note")) and not mh(), res)
+git(WT, "checkout", "-q", "m1")
+git(WT, "branch", "-q", "-D", "attip")
+
+# --- изменение только в индексе (рабочее дерево равно индексу) — diff-index ----------------------------------------
+put(WT, "src.txt", "staged\n")
+git(WT, "add", "src.txt")
+res = handle(merge=True)
+check("--merge: изменение только в индексе — отказ «незакоммиченные»", refused_with(res, "незакоммиченные", "src.txt"),
+      res)
+back_to_m1()
+
+# --- .gitattributes: в HEAD и неотслеживаемый на диске -------------------------------------------------------------
+put(WT, ".gitattributes", "* merge=evil\n")
+git(WT, "add", ".gitattributes")
+git(WT, "commit", "-q", "-m", "m1: атрибуты")
+res = handle(merge=True)
+check("--merge: свой драйвер в .gitattributes HEAD — отказ", refused_with(res, "HEAD:.gitattributes", "merge=evil"), res)
+back_to_m1()
+put(WT, "sub/.gitattributes", "*.txt filter=evil\n")
+res = handle(merge=True)
+check("--merge: свой драйвер в неотслеживаемом sub/.gitattributes — отказ",
+      refused_with(res, "sub/.gitattributes", "filter=evil"), res)
+shutil.rmtree(os.path.join(WT, "sub"))
+
+# --- sync: пути нет в HEAD, а на базе есть; папка на месте файла -------------------------------------------------
+put(WT, ".claude/skills/new/SKILL.md", "X\n")
+os.unlink(os.path.join(WT, ".claude/commands/c.md"))
+os.mkdir(os.path.join(WT, ".claude/commands/c.md"))
+res = handle()
+refused = res.get("refused") or []
+check("sync: пути нет в HEAD, а на базе есть — отказ, файл не тронут",
+      read(WT, ".claude/skills/new/SKILL.md") == "X\n"
+      and any(x.startswith(".claude/skills/new/SKILL.md: пути нет в HEAD, а на") for x in refused), res)
+check("sync: на месте файла папка — отказ, папка на месте", os.path.isdir(os.path.join(WT, ".claude/commands/c.md"))
+      and any(x.startswith(".claude/commands/c.md:") and "папка" in x for x in refused), refused)
+os.rmdir(os.path.join(WT, ".claude/commands/c.md"))
+shutil.rmtree(os.path.join(WT, ".claude/skills/new"))
+back_to_m1()
+
+# --- обход больше WALK_MAX — отказ --------------------------------------------------------------------------------
+walk_max, C.WALK_MAX = C.WALK_MAX, 3
+res = handle()
+C.WALK_MAX = walk_max
+check("sync: файлов больше WALK_MAX — отказ всей заявке", res.get("state") == "failed"
+      and "больше 3 файлов" in str(res.get("why")), res)
+
+# --- объекты клона подменены: родители коммита, дерево, blob под честным коммитом ----------------------------------
+OBJS = os.path.join(CLONE, ".git", "objects")
+
+
+def plant(sha, kind, body):
+    """Свободный объект под чужим SHA (git хеш при чтении не сверяет, свободный перекрывает pack) → (путь, старое)."""
+    p = os.path.join(OBJS, sha[:2], sha[2:])
+    old = None
+    if os.path.exists(p):
+        with open(p, "rb") as fh:
+            old = fh.read()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".t", "wb") as fh:
+        fh.write(zlib.compress(b"%s %d\0" % (kind, len(body)) + body))
+    os.replace(p + ".t", p)
+    return p, old
+
+
+def unplant(po):
+    p, old = po
+    if old is None:
+        os.unlink(p)
+        return
+    with open(p + ".t", "wb") as fh:
+        fh.write(old)
+    os.replace(p + ".t", p)
+
+
+raw = subprocess.run(["git", "-C", WT, "cat-file", "commit", TIP], capture_output=True, check=True).stdout
+po = plant(TIP, b"commit", b"".join(x for x in raw.splitlines(True) if not x.startswith(b"parent ")))
+res = handle(merge=True)
+unplant(po)
+check("--merge: коммит базы с тем же деревом, но без родителей — отказ", refused_with(res, "не совпал с сервером"), res)
+other = subprocess.run(["git", "-C", WT, "cat-file", "tree", MAIN0 + "^{tree}"], capture_output=True, check=True).stdout
+po = plant(git(WT, "rev-parse", TIP + "^{tree}"), b"tree", other)
+res = handle(merge=True)
+unplant(po)
+check("--merge: дерево базы в клоне подменено — отказ", refused_with(res, "дерево", "не совпало с сервером"), res)
+po = plant(A2, b"blob", b"EVIL\n")
+res = handle(merge=True)
+unplant(po)
+check("--merge: blob навыка под честным коммитом подменён — отказ", refused_with(res, "не совпал со своим хешем"), res)
+
+# --- merge не прошёл (MERGE_HEAD нет): убранные файлы и ссылка возвращены своей записью ----------------------------
+untracked()
+cfg = M.MERGE_CFG
+M.MERGE_CFG = tuple("merge.verifySignatures=true" if x == "merge.verifySignatures=false" else x for x in cfg)
+res = handle(merge=True)
+M.MERGE_CFG = cfg
+check("--merge: git merge упал без MERGE_HEAD — отказ с кодом", refused_with(res, "не прошёл (код"), res)
+check("--merge: после сбоя убранные неотслеживаемые возвращены — файл, навык и ссылка",
+      read(WT, "newfile.txt") == "NEW\n" and read(WT, ".claude/skills/new/SKILL.md") == "N\n"
+      and os.path.islink(os.path.join(WT, "link.txt")) and os.readlink(os.path.join(WT, "link.txt")) == "README.md")
+back_to_m1()
+
+# --- после git merge на диске чужое: итог защищённых путей — своя запись из своего bare ----------------------------
+SH = []
+check_clean = M.check_clean
+
+
+def cc_shadow(d):
+    check_clean(d)
+    SH.append(plant(A2, b"blob", b"EVIL\n"))   # окно подложило blob после проверки объектов
+
+
+M.check_clean = cc_shadow
+res = handle(merge=True)
+M.check_clean = check_clean
+unplant(SH.pop())
+check("--merge: git записал подложенный blob — путь переписан из своего bare, слияние есть",
+      res.get("state") == "done" and mh() and read(WT, ".claude/skills/a/SKILL.md") == "A2\n"
+      and any("после git merge не был равен базе" in x for x in res.get("synced") or []), res)
+back_to_m1()
+
+
+def drift():
+    tree = git(WT, "rev-parse", "HEAD^{tree}")
+    git(WT, "update-ref", "HEAD", git(WT, "commit-tree", tree, "-p", "HEAD", "-m", "drift"))
+
+
+def cc_drift(d):
+    check_clean(d)
+    drift()
+
+
+M.check_clean = cc_drift
+res = handle(merge=True)
+M.check_clean = check_clean
+check("--merge: HEAD сдвинулся до слияния — отказ, слияния нет",
+      refused_with(res, "сдвинулся после проверки") and "отменено" not in str(res.get("why")), res)
+back_to_m1()
+git_merge = M.git_merge
+
+
+def gm_drift(d, base, plan):
+    git_merge(d, base, plan)
+    SH.append(plant(A1, b"blob", b"EVIL\n"))   # merge --abort запишет версию HEAD из клона — подложенную
+    drift()
+
+
+M.git_merge = gm_drift
+res = handle(merge=True)
+M.git_merge = git_merge
+unplant(SH.pop())
+check("--merge: HEAD сдвинулся во время слияния — откат, чужого на диске нет",
+      refused_with(res, "сдвинулся во время слияния", "отменено")
+      and read(WT, ".claude/skills/a/SKILL.md") != "EVIL\n", res)
+back_to_m1()
+
+# --- commondir подменён: до слияния, во время, и git его не читает (GIT_COMMON_DIR) --------------------------------
+with open(os.path.join(GITDIR, "commondir")) as fh:
+    CDIR = fh.read()
+EVILC, MARK2 = os.path.join(ROOT, "evilc"), os.path.join(ROOT, "filter-ran")
+put(EVILC, "config", f"[core]\n\trepositoryformatversion = 0\n[filter \"evil\"]\n\tsmudge = touch '{MARK2}'\n")
+put(EVILC, "info/attributes", "* filter=evil\n")
+
+
+def cc_swap(d):
+    check_clean(d)
+    put(GITDIR, "commondir", EVILC + "\n")
+
+
+def gm_swap(d, base, plan):
+    git_merge(d, base, plan)
+    put(GITDIR, "commondir", EVILC + "\n")
+
+
+M.check_clean = cc_swap
+res = handle(merge=True)
+M.check_clean = check_clean
+put(GITDIR, "commondir", CDIR)
+check("--merge: commondir подменён до слияния — отказ без слияния, фильтр не запущен",
+      refused_with(res, "изменены после проверки") and "отменено" not in str(res.get("why"))
+      and not os.path.exists(MARK2), res)
+back_to_m1()
+M.git_merge = gm_swap
+res = handle(merge=True)
+M.git_merge = git_merge
+put(GITDIR, "commondir", CDIR)
+check("--merge: commondir подменён во время слияния — откат", refused_with(res, "изменены после проверки", "отменено")
+      and not os.path.exists(MARK2), res)
+back_to_m1()
+check_repo, C.check_repo = C.check_repo, (lambda d: None)
+M.check_clean = cc_swap
+res = handle(merge=True)
+M.check_clean, C.check_repo = check_clean, check_repo
+put(GITDIR, "commondir", CDIR)
+check("--merge: и без сверки git берёт проверенный common (GIT_COMMON_DIR), а не commondir окна",
+      res.get("state") == "done" and (read(GITDIR, "MERGE_HEAD") or "").strip() == TIP and not os.path.exists(MARK2),
+      res)
+back_to_m1()
+
+# --- звено пути подменено после проверки (ссылка, другая папка) --------------------------------------------------
+Base = C.Base
+WTS = os.path.join(CLONE, ".claude", "worktrees")
+
+
+def link_parent():
+    os.rename(WTS, WTS + ".real")
+    os.symlink(WTS + ".real", WTS)
+
+
+def unlink_parent():
+    os.unlink(WTS)
+    os.rename(WTS + ".real", WTS)
+
+
+def other_dir():
+    os.rename(WT, WT + ".moved")
+    os.mkdir(WT)
+
+
+def back_dir():
+    os.rmdir(WT)
+    os.rename(WT + ".moved", WT)
+
+
+for swap, undo, word, name in ((link_parent, unlink_parent, "подменено", "звено пути стало ссылкой"),
+                               (other_dir, back_dir, "сменился inode", "на месте копии другая папка")):
+    C.Base = lambda d, swap=swap: (Base(d), swap())[0]
+    res = handle(merge=True)
+    C.Base = Base
+    undo()
+    check(f"--merge: {name} после Base — отказ без записи", refused_with(res, word)
+          and read(WT, ".claude/skills/a/SKILL.md") == "A1\n", res)
+
+untracked()
 HOOKS, MARK = os.path.join(CLONE, ".git", "hooks"), os.path.join(ROOT, "hook-ran")
 NAMES = ("reference-transaction", "post-merge", "pre-merge-commit", "post-checkout", "post-index-change")
 for h in NAMES:
@@ -328,7 +593,8 @@ check("--merge: слито без конфликтов — код 0, MERGE_HEAD 
 check("--merge: защищённые пути и код — как на базе", read(WT, ".claude/skills/a/SKILL.md") == "A2\n"
       and read(WT, ".claude/skills/new/SKILL.md") == "N\n" and read(WT, "README.md") == "r2\n"
       and read(WT, "src.txt") == "s1\n")
-check("--merge: неотслеживаемые, равные базе, убраны и слиты", read(WT, "newfile.txt") == "NEW\n"
+check("--merge: неотслеживаемые, равные базе (и навык не из HEAD — skip в sync), убраны и слиты",
+      read(WT, "newfile.txt") == "NEW\n" and os.readlink(os.path.join(WT, "link.txt")) == "README.md"
       and any("неотслеживаемый" in x for x in res.get("synced") or []), res)
 check("--merge: хуки клона не запущены", not os.path.exists(MARK), read(ROOT, "hook-ran"))
 check("--merge: игнорируемые не тронуты", read(WT, ".claude/settings.local.json") == "{\"mine\": 1}\n"
@@ -347,6 +613,16 @@ check("--merge: конфликт оставлен роли — код 1, MERGE_H
       and "<<<<<<<" in (read(WT, "README.md") or ""), res)
 check("--merge: при конфликте защищённые пути — как на базе", read(WT, ".claude/skills/a/SKILL.md") == "A2\n")
 git(WT, "merge", "--abort")
+
+# --- свой драйвер в .gitattributes базы -----------------------------------------------------------------------------
+put(SEED, "sub/.gitattributes", "*.txt diff=evil\n")
+git(SEED, "add", "-A")
+git(SEED, "commit", "-q", "-m", "main: атрибуты")
+git(SEED, "push", "-q", SERVER, "main")
+git(CLONE, "fetch", "-q", "origin")
+res = handle(merge=True)
+check("--merge: свой драйвер в .gitattributes базы — отказ",
+      refused_with(res, "origin/main:sub/.gitattributes", "diff=evil"), res)
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} проверок")
 if FAILS:
