@@ -7696,8 +7696,15 @@ def fix_moved_claude_json():
         return 0
     lines = []
     n, _ = M.claude_json(done, False, HOME, out=lines.append)
-    if n or lines:
-        print("moved: " + "; ".join(lines))
+    # конфликт ключей сам не чинится и повторялся бы каждые 5 мин: строка — при замене или когда набор сменился
+    text, last = "; ".join(lines), path("moved-claude-json.last")
+    if n or (lines and text != _read_text(last)):
+        print("moved: " + text)
+    with contextlib.suppress(OSError):
+        if lines:
+            write_atomic(last, text)
+        else:
+            os.remove(last)
     return n
 
 
@@ -7707,8 +7714,10 @@ def check_moved(quiet=False, force=False):
     → число файлов со старыми путями."""
     M = moved_mod()
     if quiet and not force:
-        with contextlib.suppress(Exception):   # починка — попутно: её сбой не мешает проверке
+        try:
             fix_moved_claude_json()
+        except Exception as e:   # починка — попутно: её сбой не мешает проверке, но виден в logs/check.log
+            print(f"moved: сбой починки ~/.claude.json: {type(e).__name__}: {e}")
     if not any(M.done(n, HOME) for n in M.MOVES):
         if not force:
             clear_once("check-moved")
