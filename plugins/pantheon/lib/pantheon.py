@@ -7685,10 +7685,39 @@ def migrate_paths_cmd(rest):
     return M.migrate(list(dict.fromkeys(names)), "--dry-run" in rest, HOME)
 
 
+def fix_moved_claude_json():
+    """Каждый тик: старые ключи сделанных переносов в ~/.claude.json — сразу под новый путь (шаг 2 migrate-paths).
+    Окно Claude Code, открытое до переноса, при выходе пишет файл из своей памяти и возвращает старые записи projects
+    (доверие, mcpServers); ждать 6 ч до тревоги check --moved и ручного migrate-paths незачем (владелец 21.11). Файл
+    читается за миллисекунды, замена — только при находке и только если файл не изменился с чтения. → число замен."""
+    M = moved_mod()
+    done = [n for n in M.MOVES if M.done(n, HOME)]
+    if not done:
+        return 0
+    lines = []
+    n, _ = M.claude_json(done, False, HOME, out=lines.append)
+    # конфликт ключей сам не чинится и повторялся бы каждые 5 мин: строка — при замене или когда набор сменился
+    text, last = "; ".join(lines), path("moved-claude-json.last")
+    if n or (lines and text != _read_text(last)):
+        print("moved: " + text)
+    with contextlib.suppress(OSError):
+        if lines:
+            write_atomic(last, text)
+        else:
+            os.remove(last)
+    return n
+
+
 def check_moved(quiet=False, force=False):
     """Старые пути сделанных переносов в живых файлах (metis-0899) — предупреждение, а на тике — тревога раз в набор.
-    Пока ни один перенос не сделан, не обходит ничего. → число файлов со старыми путями."""
+    Пока ни один перенос не сделан, не обходит ничего. ~/.claude.json на тике чинит fix_moved_claude_json.
+    → число файлов со старыми путями."""
     M = moved_mod()
+    if quiet and not force:
+        try:
+            fix_moved_claude_json()
+        except Exception as e:   # починка — попутно: её сбой не мешает проверке, но виден в logs/check.log
+            print(f"moved: сбой починки ~/.claude.json: {type(e).__name__}: {e}")
     if not any(M.done(n, HOME) for n in M.MOVES):
         if not force:
             clear_once("check-moved")

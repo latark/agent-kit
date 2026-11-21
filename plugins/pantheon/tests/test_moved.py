@@ -144,6 +144,10 @@ def main():
     r = run("check", "--moved")
     check("check --moved до переноса: старые пути не ищет, код 0",
           r.returncode == 0 and "перенос agent-kit ещё не сделан" in r.stdout and "старых путей нет" in r.stdout)
+    cj_before = read(cj)
+    r = run("check", "--quiet")
+    check("check --quiet до переноса: ~/.claude.json не тронут (чинит только сделанные переносы)",
+          read(cj) == cj_before and "moved:" not in r.stdout)
 
     # перенос папок (его делает плановый проход), затем check и migrate
     os.makedirs(os.path.join(tmp, "ai", "life"))
@@ -239,6 +243,24 @@ def main():
     check("конфликт ~/.claude.json: обе записи на месте, код 1",
           r.returncode == 1 and "конфликт ~/.claude.json" in r.stdout
           and data["projects"] == {f"{tmp}/{FIN}": {"a": 1}, f"{tmp}/ai/life/finances": {"b": 2}})
+    # тик (check --quiet) сам чинит ключи, которые вернуло окно, открытое до переноса; check --moved — только смотрит
+    write(cj, json.dumps({"projects": {f"{tmp}/{AK}": {"hasTrustDialogAccepted": True}, "/other": {}}}))
+    cj_before = read(cj)
+    run("check", "--moved")
+    check("check --moved: ~/.claude.json не переписывает", read(cj) == cj_before)
+    r = run("check", "--quiet")
+    data = json.load(open(cj, encoding="utf-8"))
+    check("check --quiet: старый ключ ~/.claude.json — под новым путём, строка moved: в выводе",
+          data["projects"] == {f"{tmp}/ai/agent-kit": {"hasTrustDialogAccepted": True}, "/other": {}}
+          and "moved: ~/.claude.json: 1" in r.stdout)
+    write(cj, json.dumps({"projects": {f"{tmp}/{FIN}": {"a": 1}, f"{tmp}/ai/life/finances": {"b": 2}}}))
+    r1, r2 = run("check", "--quiet"), run("check", "--quiet")
+    check("check --quiet: конфликт — обе записи целы, строка один раз, а не каждый проход",
+          "moved: конфликт ~/.claude.json" in r1.stdout and "moved:" not in r2.stdout
+          and len(json.load(open(cj, encoding="utf-8"))["projects"]) == 2)
+    write(cj, "{не json")
+    r = run("check", "--quiet")
+    check("check --quiet: битый ~/.claude.json — не тронут, строка о сбое", read(cj) == "{не json" and "moved: сбой" in r.stdout)
 
     edge_cases()
     history_cases()
@@ -297,6 +319,34 @@ def edge_cases():
     check("запись после сбоя: заменено, права ~/.claude.json прежние (0600)",
           rc == 0 and f"{home}/ai/workshop/a" in read(cj) and read(task) == "~/ai/workshop\n"
           and (os.stat(cj).st_mode & 0o777) == 0o600)
+    # окно, открытое до переноса, при выходе вернуло старый ключ: claude_json (его зовёт тик) чинит только ~/.claude.json
+    write(cj, json.dumps({"projects": {f"{home}/{WS}/b": {"y": 2}}}))
+    write(task, f"~/{WS}\n")
+    log = []
+    n, rc = M.claude_json(["workshop"], False, home, out=log.append)
+    check("тик: старый ключ ~/.claude.json — под новым путём, текстовые файлы не тронуты",
+          n == 1 and rc == 0 and f"{home}/ai/workshop/b" in read(cj) and f"{WS}/b" not in read(cj)
+          and read(task) == f"~/{WS}\n")
+    n, rc = M.claude_json(["workshop"], False, home, out=log.append)
+    check("тик: повтор — замен нет", n == 0 and rc == 0)
+    # Claude Code переписал файл между чтением и заменой — не трогаем, чиним в следующий раз
+    write(cj, json.dumps({"projects": {f"{home}/{WS}/c": {}}}))
+    real_read = M.read_text
+    calls = []
+
+    def racing(p):
+        calls.append(p)
+        if len(calls) == 2:   # повторное чтение перед заменой: файл уже другой
+            write(cj, json.dumps({"projects": {f"{home}/{WS}/c": {}, "/other": {}}}))
+        return real_read(p)
+    M.read_text = racing
+    try:
+        log = []
+        n, rc = M.claude_json(["workshop"], False, home, out=log.append)
+    finally:
+        M.read_text = real_read
+    check("тик: файл изменился во время замены — не перезаписан, запись Claude Code цела",
+          n == 0 and rc == 1 and "/other" in read(cj) and any("изменился во время замены" in x for x in log))
     _shutil.rmtree(tmp, True)
 
 
