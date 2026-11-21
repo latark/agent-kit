@@ -335,7 +335,7 @@ def edge_cases():
     finally:
         M.read_text = real_read
     check("тик: файл изменился во время замены — не перезаписан, запись Claude Code цела",
-          rc == 0 and "/other" in read(cj) and any("изменился во время замены" in x for x in log))
+          n == 0 and rc == 1 and "/other" in read(cj) and any("изменился во время замены" in x for x in log))
     _shutil.rmtree(tmp, True)
 
 

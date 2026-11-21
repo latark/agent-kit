@@ -280,6 +280,7 @@ def claude_json(names, dry_run, home, out=print):
                                      expect=raw):
                     out("~/.claude.json изменился во время замены (пишет Claude Code) — не трогаю, "
                         "повтор при следующем запуске")
+                    cj_n, rc = 0, 1   # замены не было: ручной migrate-paths не кончается кодом 0
             except OSError as e:
                 out(f"сбой    ~/.claude.json: {e.strerror or e}")
                 rc = 1
