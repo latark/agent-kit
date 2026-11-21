@@ -150,8 +150,10 @@ def rules(names, home, subs=None):
     return out
 
 
-def _replace_file(p, data):
-    """Запись целиком: временный файл рядом, fsync, права прежнего файла, os.replace. Сбой — прежний файл цел."""
+def _replace_file(p, data, expect=None):
+    """Запись целиком: временный файл рядом, fsync, права прежнего файла, os.replace. Сбой — прежний файл цел.
+    expect — текст, из которого собран data: файл к мгновению перед os.replace стал другим (его пишет Claude Code) —
+    замены нет, временный файл убран. → True, если заменён."""
     import tempfile
     mode = os.stat(p).st_mode & 0o7777
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix="." + os.path.basename(p) + ".", suffix=".moved")
@@ -161,7 +163,11 @@ def _replace_file(p, data):
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, mode)
+        if expect is not None and read_text(p) != expect:
+            os.unlink(tmp)
+            return False
         os.replace(tmp, p)
+        return True
     except BaseException:
         try:
             os.unlink(tmp)
@@ -375,6 +381,13 @@ def _history_step(names, home, dry_run, out):
     return t
 
 
+def claude_json(names, dry_run, home, out=print):
+    """Шаг 2 migrate-paths для переносов names. → (замен, код: 0 или 1). Его же зовёт плановый проход
+    (pantheon.fix_moved_claude_json): окно Claude Code, открытое до переноса, при выходе пишет ~/.claude.json из своей
+    памяти и возвращает старые ключи (21.11, слово владельца «нужно сразу пофиксить»)."""
+    return _claude_json_step(rules(names, home), home, dry_run, out)
+
+
 def _claude_json_step(rs, home, dry_run, out):
     """Шаг 2: ~/.claude.json. → (число замен, код выхода)."""
     cj_path, rc = os.path.join(home, ".claude.json"), 0
@@ -395,7 +408,12 @@ def _claude_json_step(rs, home, dry_run, out):
         out(f"~/.claude.json: {cj_n}")
         if not dry_run:
             try:
-                _replace_file(cj_path, (json.dumps(new, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+                # сверка — после fsync, прямо перед os.replace: окно гонки с записью Claude Code — микросекунды
+                if not _replace_file(cj_path, (json.dumps(new, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+                                     expect=raw):
+                    out("~/.claude.json изменился во время замены (пишет Claude Code) — не трогаю, "
+                        "повтор при следующем запуске")
+                    cj_n, rc = 0, 1   # замены не было: ручной migrate-paths не кончается кодом 0
             except OSError as e:
                 out(f"сбой    ~/.claude.json: {e.strerror or e}")
                 rc = 1
