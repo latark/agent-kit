@@ -51,7 +51,7 @@ PERSONAL = ("me", "Self", "Areas", "People")   # ~/ai/knowledge/<x> — меня
 MAX_BYTES = 8 << 20
 WT_MARK = "--claude-worktrees-"   # ключ папки истории worktree: <ключ папки>--claude-worktrees-<имя>
 DELETED_TASKS = {"workshop"}      # переносы, у которых под папкой жили задачи, удалённые с диска (ключи без папки)
-SESSYNC_WARN = ("sessync увидит переименование как удаление старых путей и выгрузку новых; если сторож удалений "
+SESSYNC_WARN = ("sessync увидит переименование как удаление старых путей и выгрузку новых; если проверка удалений "
                 "остановит — `sessync deletes`, разрешить — `sessync deletes --apply` (владелец)")
 
 
@@ -267,7 +267,12 @@ def _walk_json(v, rs, conflicts):
 
 
 def sessync_running():
-    """Идёт ли sessync (`pgrep -f "sessync _run"`): переименование папок истории он увидит как удаление и выгрузку."""
+    """Идёт ли sessync: папка блокировки ${XDG_STATE_HOME:-~/.local/state}/sessync/lock (её берёт любой запуск,
+    и ручной `sessync`, `sessync deletes --apply`) или фоновый `sessync _run`. Переименование папок истории он увидит
+    как удаление и выгрузку."""
+    st = os.environ.get("XDG_STATE_HOME") or os.path.join(os.environ.get("HOME", ""), ".local", "state")
+    if os.path.lexists(os.path.join(st, "sessync", "lock")):
+        return True
     try:
         r = subprocess.run(["pgrep", "-f", "sessync _run"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):

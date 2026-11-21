@@ -344,9 +344,12 @@ def history_cases():
 
 
 def probe_cases(M):
-    """sessync_running: разбор ответа pgrep."""
+    """sessync_running: папка блокировки sessync и разбор ответа pgrep."""
     real_run = M.subprocess.run
     res =lambda code, so: type("R", (), {"returncode": code, "stdout": so})()
+    st = tempfile.mkdtemp()
+    real_xdg = os.environ.get("XDG_STATE_HOME")
+    os.environ["XDG_STATE_HOME"] = st
     try:
         M.subprocess.run = lambda *a, **k: res(0, "123\n")
         yes = M.sessync_running()
@@ -359,8 +362,17 @@ def probe_cases(M):
             raise OSError(2, "нет pgrep")
         M.subprocess.run = nopgrep
         err = M.sessync_running()
+        os.makedirs(os.path.join(st, "sessync", "lock"))
+        M.subprocess.run = lambda *a, **k: res(1, "")
+        locked = M.sessync_running()   # ручной sessync без _run: держит только папку блокировки
     finally:
         M.subprocess.run = real_run
+        if real_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = real_xdg
+        _shutil.rmtree(st, True)
+    check("sessync_running: папка блокировки sessync есть — да (и без pgrep _run)", locked)
     check("sessync_running: pgrep нашёл — да; пусто, код 1, pgrep нет — нет", yes and not (empty or no or err))
 
 
