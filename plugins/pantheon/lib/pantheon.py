@@ -5182,8 +5182,19 @@ def stale_ask(text):
 def asks_owner(a):
     """Призрак с вопросом владельцу (metis-0651, 0662): процесс умер, а вопрос остался. Поднимает его ответ владельца
     (claude attach), а не wake и не самозапуск — как отказ pantheon start. Флаг asks ставит reconcile_agents: был
-    blocked, не noProcess, есть needs задания или waitingFor из claude agents (detail вопросом не считается)."""
-    return bool(a.get("ghost") and a.get("asks"))
+    blocked, не noProcess, есть needs задания или waitingFor из claude agents (detail вопросом не считается).
+    metis-1322: ваш ответ «Да — запустить|перезапустить <имя>» в окне вопросов — тоже ответ: метка asks-answered/<id>
+    (её пишет только плановый проход по сверенной записи owner-log, watch.word_answer_ghosts) снимает «ждёт вас»."""
+    return bool(a.get("ghost") and a.get("asks")) and not asks_answered(a)
+
+
+ASKS_ANSWERED_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def asks_answered(a):
+    """У призрака есть метка «владелец ответил» (metis-1322). id не по шаблону — метки нет: путь из записи не строим."""
+    aid = str(a.get("id") or "")
+    return bool(ASKS_ANSWERED_ID.fullmatch(aid)) and os.path.exists(path("asks-answered", aid))
 
 
 def pid_alive(pid):

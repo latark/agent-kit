@@ -188,6 +188,52 @@ def test_ghost_question_and_noprocess_0662():
     check("поднята" in out and _woke(e2, "ffffffff"), f"0662 Д1: wake не поднял noProcess-призрак: {out}")
 
 
+def test_ghost_question_owner_launch_answer_1322():
+    """metis-1322 (22.11: три окна стояли призраками «ждёт вас», ответы «Да — запустить» владельца их не поднимали):
+    ваш ответ «Да — запустить <имя>» в окне вопросов снимает «ждёт вас» с призрака этого направления, умершего до
+    ответа, — метка asks-answered/<id>; тот же проход его поднимает, а дальше wake и start видят обычный призрак.
+    Призрак моложе ответа и призрак другого направления ответ не снимает; без ответа — по-прежнему пропуск."""
+    t = T0 + 60
+    e = _ghost_env("zz-ga", updated=T0 - 1000)
+    e.direction("zz-gb")
+    e.task("zz-0001", "zz-ga", status="doing")
+    e.task("zz-0003", "zz-gb", status="doing")
+    rec = dict(bg("zz-ga", "blocked", "cccccccc-1"), waitingFor="какую базу брать?")
+    other = dict(bg("zz-gb", "blocked", "eeeeeeee-1"), waitingFor="и тут вопрос")
+    e.agents([rec, other])
+    e.run("watch", t=t)
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("ждёт вашего ответа" in out and not _woke(e), f"1322: контроль — без ответа призрак поднят: {out}")
+    _zeus_answer(e, t + 30, "[zz-0001] Запустить zz-ga?", "Да — запустить zz-ga")
+    e.agents([rec, other])
+    e.run("watch", t=t + 60)
+    check(_woke(e) or _bgs(e, "zz-ga"), f"1322: ответ «Да — запустить» не поднял призрак с вопросом: {e.calls()}")
+    check(os.path.exists(e.st("asks-answered", "cccccccc")), "1322: нет метки asks-answered у призрака")
+    check(not os.path.exists(e.st("asks-answered", "eeeeeeee")), "1322: снят вопрос другого направления")
+    rows = [r for r in _start_rows(e) if r[1:2] == ["asks-answered"]]
+    check(len(rows) == 1 and rows[0][2:4] == ["zz-ga", "cccccccc"], f"1322: строка start.log: {rows}")
+    wl = [r for r in _start_rows(e) if r[1:2] == ["word-launch"]]
+    check(wl and "ждёт вашего ответа" not in wl[-1][-1], f"1322: запуск по ответу упёрся в «ждёт вас»: {wl}")
+    # дальше wake видит обычный призрак: продолжает ту же сессию
+    open(e.log, "w").close()
+    e.agents([rec])
+    out = e.run("wake", "zz-ga", t=t + 120).stdout
+    check("ждёт вашего ответа" not in out and _woke(e), f"1322: wake после ответа не поднял: {out} {e.calls()}")
+    # другое направление по-прежнему ждёт ответа
+    e.agents([other])
+    out = e.run("wake", "zz-gb", t=t + 120).stdout
+    check("ждёт вашего ответа" in out and not _woke(e, "eeeeeeee"), f"1322: чужой призрак поднят: {out}")
+    # сессия, начатая после ответа, — её вопрос этот ответ не закрывает
+    e3 = _ghost_env("zz-gc", updated=T0 - 1000)
+    e3.task("zz-0004", "zz-gc", status="doing")
+    e3.run("watch", t=t)
+    _zeus_answer(e3, t + 30, "[zz-0004] Запустить zz-gc?", "Да — запустить zz-gc")
+    e3.agents([dict(bg("zz-gc", "blocked", "dddddddd-1", started=t + 40), waitingFor="а эту?")])
+    e3.run("watch", t=t + 200)
+    check(not os.path.exists(e3.st("asks-answered", "dddddddd")) and not _woke(e3, "dddddddd"),
+          f"1322: снят вопрос сессии моложе ответа: {e3.calls()}")
+
+
 def test_registry_stale_record_249():
     """Ревью argus #249. Д1: запись реестра имён с тем же sessionId, но не того процесса — файл назван другим pid
     (pid 1 жив всегда) или время старта процесса не совпало с procStart — призрака не прячет; ps не дал ответа (metis-0679/0690) — «не знаю»: призрака не утверждаем, живого не гасим; совпало —

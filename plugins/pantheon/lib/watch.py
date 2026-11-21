@@ -3541,6 +3541,7 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     cap = None if name in P.CAP_FREE else P.night_mod().launch_cap("tick", target=name)  # Гестию потолок не держит (29.10)
     if cap:
         return f"не исполняю: {cap}"
+    word_answer_ghosts(name, agents, qid, ts)
     if verb == "перезапустить":
         try:
             r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", "tick", "--restart",
@@ -3563,6 +3564,45 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
         ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
         return "поднято"
     return f"не вышло, код {rc}"
+
+
+ASKS_ANSWERED_DAYS = 14
+
+
+def word_answer_ghosts(name, agents, qid, ts):
+    """metis-1322: ваш ответ «Да — запустить|перезапустить <имя>» снимает «ждёт вас» с призраков этого направления,
+    умерших до ответа: метка asks-answered/<id> (P.asks_answered). Без неё призрак с вопросом не поднимали ни wake, ни
+    этот же запуск по ответу (wake_block), ни pantheon start — ответ ложился во входящие, а окно стояло. Метка — на
+    запись claude agents, а не на имя: новый вопрос новой сессии она не снимает. Старше ASKS_ANSWERED_DAYS — убираются.
+    → [id] отмеченных."""
+    try:
+        t_ans = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
+    except (TypeError, ValueError):
+        return []
+    alias = P.name_alias(name)
+    out = []
+    for a in agents or []:
+        aid = str(a.get("id") or "")
+        if not (P.asks_owner(a) and alias.fullmatch(str(a.get("name") or ""))
+                and P.ASKS_ANSWERED_ID.fullmatch(aid)):
+            continue
+        try:
+            born = float(a.get("startedAt")) / 1000
+        except (TypeError, ValueError):
+            born = None
+        if born is None or born > t_ans:  # сессия моложе ответа — её вопрос этим ответом не закрыт
+            continue
+        os.makedirs(P.path("asks-answered"), exist_ok=True)  # STATE: окна туда не пишут — метку роли не подделать
+        P.write_atomic(P.path("asks-answered", aid), f"{name}\t{qid}\t{ts}\n")
+        out.append(aid)
+        P.start_log(f"asks-answered\t{name}\t{aid}\tответ [{qid}] {ts}: «ждёт вас» снято")
+    d = P.path("asks-answered")
+    with contextlib.suppress(OSError):
+        for f in os.listdir(d):
+            with contextlib.suppress(OSError):
+                if P.now() - os.stat(os.path.join(d, f)).st_mtime > ASKS_ANSWERED_DAYS * 86400:
+                    os.unlink(os.path.join(d, f))
+    return out
 
 
 def _word_unstop(name):
