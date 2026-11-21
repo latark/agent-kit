@@ -126,13 +126,16 @@ def main():
           and "--dry-run, ничего не изменено" in out)
     check("--dry-run: в плане карточка (закрытая), роль, автопамять, код agent-kit, история, ~/.claude.json",
           "~/ai/pantheon/directions/metis-pantheon/tasks/metis-0001.md: 5" in out and "~/.claude/agents/x.md: 1" in out
-          and "MEMORY.md: 1" in out and f"~/{AK}/README.md" not in out and "plugins/guard" not in out
+          and "MEMORY.md: 2" in out and f"~/{AK}/README.md" not in out and "plugins/guard" not in out
           and f"история {key(AK)} → {key('ai/agent-kit')}" in out and "~/.claude.json: 3" in out
           and f"история {key(f'{WS}/avito')} → {key('ai/workshop/avito')}" in out)
     check("--dry-run: транскрипты, history.jsonl, .git, плагины, worktree, личное, двоичное — вне плана",
           "s1.jsonl" not in out and "history.jsonl" not in out and ".git" not in out and "plugins/cache" not in out
-          and "worktrees/a1" not in out and "money.md" not in out and "bin.dat" not in out
-          and "--claude-worktrees-a1 →" not in out)
+          and "worktrees/a1" not in out and "money.md" not in out and "bin.dat" not in out)
+    check("--dry-run: папка истории worktree — в плане, план истории и предупреждение про sessync в конце",
+          f"история {key(AK)}--claude-worktrees-a1 → {key('ai/agent-kit')}--claude-worktrees-a1 (worktree)" in out
+          and "план истории: папок" in out and out.rstrip().splitlines()[-1].startswith("внимание: sessync увидит")
+          and "sessync deletes --apply" in out.rstrip().splitlines()[-1])
     check("--dry-run ничего не меняет на диске", snapshot(tmp) == before)
     r = run("migrate-paths", "agent-kit")
     check("без --dry-run до переноса — отказ, код 1, ничего не изменено",
@@ -163,13 +166,17 @@ def main():
     check("pantheon check: старые пути — строкой «предупреждение», на код выхода не влияют",
           "предупреждение · старый путь" in r.stdout)
 
-    write(os.path.join(tmp, ".claude", "projects", key("ai/workshop/avito"), "keep.jsonl"), "{}\n")
+    new_av = os.path.join(tmp, ".claude", "projects", key("ai/workshop/avito"))
+    write(os.path.join(new_av, "keep.jsonl"), "{}\n")
+    write(os.path.join(new_av, "s3.jsonl"), "другой\n")   # одноимённый файл: конфликт, прежний остаётся
     tr_before = read(transcript)
     r = run("migrate-paths", "agent-kit", "workshop", "finances")
     out = r.stdout
-    check("конфликт истории: новая папка уже есть — не перенесена, код 1, остальное сделано",
-          r.returncode == 1 and f"конфликт история {key(f'{WS}/avito')}" in out
-          and os.path.isfile(ws_hist) and os.path.isdir(os.path.join(tmp, ".claude", "projects", key("ai/agent-kit"))))
+    check("слияние истории: одноимённый файл — конфликт, код 1, файл и старая папка на месте, остальное сделано",
+          r.returncode == 1 and f"конфликт файл {key('ai/workshop/avito')}/s3.jsonl" in out
+          and read(os.path.join(new_av, "s3.jsonl")) == "другой\n" and os.path.isfile(ws_hist)
+          and os.path.isfile(os.path.join(new_av, "keep.jsonl"))
+          and os.path.isdir(os.path.join(tmp, ".claude", "projects", key("ai/agent-kit"))))
     text = read(task)
     check("карточка: все виды путей заменены, похожие — нет",
           "touches: [~/ai/agent-kit/plugins/x.py]" in text and "см. ~/ai/agent-kit." in text
@@ -193,8 +200,11 @@ def main():
           key("ai/agent-kit/plugins") in notes and key(AK + "-old") in notes and key(P + "/workshop_notes") in notes)
     mem = read(os.path.join(tmp, ".claude", "projects", key("ai/agent-kit"), "memory", "MEMORY.md"))
     check("автопамять: папка под новым ключом, ключ в тексте заменён, ключ worktree — нет",
-          f"projects/{key('ai/agent-kit')}/" in mem and f"{key(AK)}--claude-worktrees-a1" in mem)
-    check("история worktree не перенесена", os.path.isfile(wt_hist))
+          f"projects/{key('ai/agent-kit')}/" in mem and f"{key('ai/agent-kit')}--claude-worktrees-a1" in mem
+          and key(AK) not in mem)
+    new_wt = os.path.join(tmp, ".claude", "projects", key("ai/agent-kit") + "--claude-worktrees-a1", "s2.jsonl")
+    check("история worktree перенесена под новый ключ, транскрипт внутри побайтно тот же",
+          not os.path.lexists(os.path.dirname(wt_hist)) and read(new_wt) == "{}\n")
     check("транскрипт, history.jsonl, .git, плагины, worktree, личное, двоичное — не тронуты",
           read(transcript.replace(key(AK), key("ai/agent-kit"))) == tr_before
           and f"{tmp}/{AK}" in read(os.path.join(tmp, ".claude", "history.jsonl"))
@@ -253,6 +263,7 @@ def main():
     check("check --quiet: битый ~/.claude.json — не тронут, строка о сбое", read(cj) == "{не json" and "moved: сбой" in r.stdout)
 
     edge_cases()
+    history_cases()
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 
@@ -337,6 +348,153 @@ def edge_cases():
     check("тик: файл изменился во время замены — не перезаписан, запись Claude Code цела",
           n == 0 and rc == 1 and "/other" in read(cj) and any("изменился во время замены" in x for x in log))
     _shutil.rmtree(tmp, True)
+
+
+def history_cases():
+    """Папки истории (metis-0899): worktree, удалённые задачи, соседи, слияние, dry-run, sessync, повтор."""
+    M = load_moved()
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="moved-hist-"))
+    home = os.path.join(tmp, "h")
+    key = lambda rel: re.sub(r"[^A-Za-z0-9]", "-", home + "/" + rel)
+    proj = os.path.join(home, ".claude", "projects")
+    hp = lambda rel, *more: os.path.join(proj, key(rel), *more)
+    for rel in ("ai/agent-kit", "ai/workshop", "ai/life/finances", f"{P}/workshop-keep", f"{P}/agent-kit-old"):
+        os.makedirs(os.path.join(home, rel))
+    raw = b'{"cwd": "/old/\xd0\xbf\xd1\x83\xd1\x82\xd1\x8c"}\r\n\n{"x": 1}'   # без перевода строки в конце
+    for rel in (f"{AK}--claude-worktrees-w1", f"{FIN}--claude-worktrees-f1", f"{WS}--claude-worktrees-k1",
+                f"{WS}-push-probe", f"{WS}-keep", f"{AK}-old", f"{AK}-v2"):
+        write(hp(rel, "s.jsonl"), raw, "wb")
+    nested = "-Users-x--claude-projects-" + key(f"{WS}-foo")   # старый ключ не в начале
+    write(os.path.join(proj, nested, "s.jsonl"), raw, "wb")
+    write(os.path.join(home, "ai", "n.md"), f"{key(AK)}--claude-worktrees-w1 и {key(AK)}-old\n")
+    before = snapshot(home)
+
+    # --dry-run: план есть, диск не тронут
+    log = []
+    rc = M.migrate(["agent-kit", "workshop", "finances"], True, home, out=log.append)
+    plan = [x for x in log if x.startswith("план истории")]
+    check("history --dry-run: план (папок 4, слияний 0, конфликтов 0), предупреждение последней строкой, диск тот же",
+          rc == 0 and plan == ["план истории: папок 4, слияний 0, конфликтов 0"] and "sessync deletes --apply" in log[-1]
+          and snapshot(home) == before)
+
+    # sessync идёт: реальный запуск — отказ, код 1, диск тот же; dry-run не отказывает
+    real = M.sessync_running
+    M.sessync_running = lambda: True
+    try:
+        log = []
+        rc = M.migrate(["agent-kit", "workshop", "finances"], False, home, out=log.append)
+        rc_dry = M.migrate(["agent-kit"], True, home, out=lambda x: None)
+    finally:
+        M.sessync_running = real
+    check("sessync идёт: отказ, код 1, ничего не изменено; --dry-run при этом работает",
+          rc == 1 and any("идёт sessync" in x for x in log) and snapshot(home) == before and rc_dry == 0)
+    probe_cases(M)
+    history_real_cases(M, home, hp, key, nested, raw, real)
+    _shutil.rmtree(tmp, True)
+
+
+def probe_cases(M):
+    """sessync_running: папка блокировки sessync и разбор ответа pgrep."""
+    real_run = M.subprocess.run
+    res =lambda code, so: type("R", (), {"returncode": code, "stdout": so})()
+    st = tempfile.mkdtemp()
+    real_xdg = os.environ.get("XDG_STATE_HOME")
+    os.environ["XDG_STATE_HOME"] = st
+    try:
+        M.subprocess.run = lambda *a, **k: res(0, "123\n")
+        yes = M.sessync_running()
+        M.subprocess.run = lambda *a, **k: res(0, "\n")
+        empty = M.sessync_running()
+        M.subprocess.run = lambda *a, **k: res(1, "")
+        no = M.sessync_running()
+
+        def nopgrep(*a, **k):
+            raise OSError(2, "нет pgrep")
+        M.subprocess.run = nopgrep
+        err = M.sessync_running()
+        os.makedirs(os.path.join(st, "sessync", "lock"))
+        M.subprocess.run = lambda *a, **k: res(1, "")
+        locked = M.sessync_running()   # ручной sessync без _run: держит только папку блокировки
+    finally:
+        M.subprocess.run = real_run
+        if real_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = real_xdg
+        _shutil.rmtree(st, True)
+    check("sessync_running: папка блокировки sessync есть — да (и без pgrep _run)", locked)
+    check("sessync_running: pgrep нашёл — да; пусто, код 1, pgrep нет — нет", yes and not (empty or no or err))
+
+
+def history_real_cases(M, home, hp, key, nested, raw, real):
+    """Реальный запуск: worktree, удалённая задача, соседи, текст, повтор, затем слияние."""
+    proj = os.path.join(home, ".claude", "projects")
+
+    # реальный запуск
+    M.sessync_running = lambda: False
+    try:
+        log = []
+        rc = M.migrate(["agent-kit", "workshop", "finances"], False, home, out=log.append)
+    finally:
+        M.sessync_running = real
+    moved_ok = lambda rel: os.path.isfile(hp(rel, "s.jsonl")) and open(hp(rel, "s.jsonl"), "rb").read() == raw
+    check("worktree: папки agent-kit, finances, workshop — под новым ключом, jsonl байт-в-байт тот же, старых нет",
+          rc == 0 and moved_ok("ai/agent-kit--claude-worktrees-w1") and moved_ok("ai/life/finances--claude-worktrees-f1")
+          and moved_ok("ai/workshop--claude-worktrees-k1")
+          and not any(os.path.lexists(hp(r)) for r in (f"{AK}--claude-worktrees-w1", f"{FIN}--claude-worktrees-f1",
+                                                       f"{WS}--claude-worktrees-k1")))
+    check("удалённая задача мастерской (папки нет нигде) — под новым ключом",
+          moved_ok("ai/workshop-push-probe") and not os.path.lexists(hp(f"{WS}-push-probe")))
+    check("сосед с живой папкой (workshop-keep), agent-kit-old, agent-kit-v2 и вложенный ключ — на месте",
+          moved_ok(f"{WS}-keep") and moved_ok(f"{AK}-old") and moved_ok(f"{AK}-v2")
+          and os.path.isfile(os.path.join(proj, nested, "s.jsonl"))
+          and not any(os.path.lexists(hp(r)) for r in ("ai/workshop-keep", "ai/agent-kit-old", "ai/agent-kit-v2")))
+    check("ключи worktree в тексте заменены, сосед — нет",
+          read(os.path.join(home, "ai", "n.md")) == f"{key('ai/agent-kit')}--claude-worktrees-w1 и {key(AK)}-old\n")
+
+    # повтор после сделанного: ничего не делает, код 0
+    snap = snapshot(home)
+    M.sessync_running = lambda: False
+    try:
+        log = []
+        rc = M.migrate(["agent-kit", "workshop", "finances"], False, home, out=log.append)
+    finally:
+        M.sessync_running = real
+    check("повторный запуск после переноса идемпотентен: код 0, диск тот же, папок 0",
+          rc == 0 and snapshot(home) == snap and any("папок истории 0," in x for x in log))
+
+    merge_cases(M, home, hp, real)
+
+
+def merge_cases(M, home, hp, real):
+    """Слияние папки истории, когда новая уже есть."""
+    write(hp("ai/workshop-m", "a.jsonl"), b"new-a", "wb")
+    write(hp("ai/workshop-m", "sub", "x.jsonl"), b"new-x", "wb")
+    write(hp(f"{WS}-m", "a.jsonl"), b"OLD-a", "wb")           # одноимённый — конфликт
+    write(hp(f"{WS}-m", "b.jsonl"), b"old-b", "wb")           # нового нет — переносится
+    write(hp(f"{WS}-m", "sub", "y.jsonl"), b"old-y", "wb")    # в общей подпапке — переносится
+    write(hp(f"{WS}-m", "sub", "x.jsonl"), b"OLD-x", "wb")    # в общей подпапке одноимённый — конфликт
+    M.sessync_running = lambda: False
+    try:
+        log = []
+        rc = M.migrate(["workshop"], False, home, out=log.append)
+    finally:
+        M.sessync_running = real
+    rd = lambda rel, *m: open(hp(rel, *m), "rb").read()
+    check("слияние: недостающее перенесено, одноимённые не перезаписаны, конфликт — код 1, старая папка осталась",
+          rc == 1 and rd("ai/workshop-m", "a.jsonl") == b"new-a" and rd("ai/workshop-m", "b.jsonl") == b"old-b"
+          and rd("ai/workshop-m", "sub", "y.jsonl") == b"old-y" and rd("ai/workshop-m", "sub", "x.jsonl") == b"new-x"
+          and rd(f"{WS}-m", "a.jsonl") == b"OLD-a" and rd(f"{WS}-m", "sub", "x.jsonl") == b"OLD-x"
+          and not os.path.lexists(hp(f"{WS}-m", "b.jsonl")) and sum(x.startswith("конфликт файл") for x in log) == 2)
+    # без конфликтов старая папка исчезает
+    os.remove(hp(f"{WS}-m", "a.jsonl"))
+    os.remove(hp(f"{WS}-m", "sub", "x.jsonl"))
+    M.sessync_running = lambda: False
+    try:
+        rc = M.migrate(["workshop"], False, home, out=lambda x: None)
+    finally:
+        M.sessync_running = real
+    check("слияние без конфликтов: старая папка удалена (опустела), код 0", rc == 0 and not os.path.lexists(hp(f"{WS}-m")))
 
 
 if __name__ == "__main__":
