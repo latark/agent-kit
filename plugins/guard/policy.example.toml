@@ -8,7 +8,7 @@ always = ["~/.claude/agent-memory"]
 # Координатор с привилегией: роль domain-coordinator, запущенная в одной из этих папок.
 [coordinators]
 mnemo-brain = ["~/ai/knowledge"]
-metis-pantheon = ["~/projects/agent-kit", "~/projects/mac-setup", "~/projects/pixel-agents", "~/.claude"]
+metis-pantheon = ["~/ai/agent-kit", "~/projects/mac-setup", "~/projects/pixel-agents", "~/.claude"]
 
 # Куда ещё пишет роль (правило domain).
 [agent_extra]
