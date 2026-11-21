@@ -1472,6 +1472,7 @@ def _wake(dry, over=False):
             P.alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
             failed += 1
         else:
+            P.asks_clear(a)  # metis-1322 Б1: ответ владельца закрыл один подъём
             print(f"поднимаю: {line}")
     if not done:
         print("будить некого")

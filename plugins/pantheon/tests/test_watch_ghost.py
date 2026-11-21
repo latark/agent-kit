@@ -208,17 +208,26 @@ def test_ghost_question_owner_launch_answer_1322():
     e.agents([rec, other])
     e.run("watch", t=t + 60)
     check(_woke(e) or _bgs(e, "zz-ga"), f"1322: ответ «Да — запустить» не поднял призрак с вопросом: {e.calls()}")
-    check(os.path.exists(e.st("asks-answered", "cccccccc")), "1322: нет метки asks-answered у призрака")
-    check(not os.path.exists(e.st("asks-answered", "eeeeeeee")), "1322: снят вопрос другого направления")
     rows = [r for r in _start_rows(e) if r[1:2] == ["asks-answered"]]
-    check(len(rows) == 1 and rows[0][2:4] == ["zz-ga", "cccccccc"], f"1322: строка start.log: {rows}")
+    check(len(rows) == 1 and rows[0][2:4] == ["zz-ga", "cccccccc"], f"1322: метка не поставлена (start.log): {rows}")
+    check(not os.path.exists(e.st("asks-answered", "eeeeeeee")), "1322: снят вопрос другого направления")
     wl = [r for r in _start_rows(e) if r[1:2] == ["word-launch"]]
     check(wl and "ждёт вашего ответа" not in wl[-1][-1], f"1322: запуск по ответу упёрся в «ждёт вас»: {wl}")
-    # дальше wake видит обычный призрак: продолжает ту же сессию
+    sent = " ".join(x for c in e.calls() for x in c) + "".join(
+        push_read(os.path.join(e.st("push"), f)) for f in (os.listdir(e.st("push")) if os.path.isdir(e.st("push")) else []))
+    check("«какую базу брать?»" in sent and "ответа на это нет" in sent,
+          f"1322: поднятое окно не знает, что его вопрос без ответа: {sent[-400:]}")
+    # ревью argus Б1: ответ закрывает один подъём — respawn сохраняет id, и новый вопрос той же сессии снова «ждёт вас»
+    check(not os.path.exists(e.st("asks-answered", "cccccccc")), "1322 Б1: метка пережила подъём")
     open(e.log, "w").close()
-    e.agents([rec])
-    out = e.run("wake", "zz-ga", t=t + 120).stdout
-    check("ждёт вашего ответа" not in out and _woke(e), f"1322: wake после ответа не поднял: {out} {e.calls()}")
+    e.agents([dict(rec, startedAt=(t + 3600) * 1000, waitingFor="второй вопрос")])
+    out = e.run("wake", "zz-ga", t=t + 3700).stdout
+    check("ждёт вашего ответа" in out and not _woke(e), f"1322 Б1: новый вопрос той же сессии снят старым ответом: {out}")
+    # метка без подъёма (запуск не прошёл) — wake её использует и снимает
+    open(e.st("asks-answered", "cccccccc"), "w").close()
+    out = e.run("wake", "zz-ga", t=t + 3700).stdout
+    check(_woke(e) and not os.path.exists(e.st("asks-answered", "cccccccc")),
+          f"1322: wake с меткой не поднял или метку не снял: {out}")
     # другое направление по-прежнему ждёт ответа
     e.agents([other])
     out = e.run("wake", "zz-gb", t=t + 120).stdout
