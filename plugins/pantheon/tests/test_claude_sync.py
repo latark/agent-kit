@@ -464,6 +464,28 @@ unplant(SH.pop())
 check("--merge: git записал подложенный blob — путь переписан из своего bare, слияние есть",
       res.get("state") == "done" and mh() and read(WT, ".claude/skills/a/SKILL.md") == "A2\n"
       and any("после git merge не был равен базе" in x for x in res.get("synced") or []), res)
+r = subprocess.run(["git", "-C", WT, "merge", "--abort"], capture_output=True, text=True)
+check("--merge: после своей записи индекс освежён — роль может git merge --abort", r.returncode == 0, r.stderr)
+back_to_m1()
+
+settle, SETTLE = M.settle, []
+
+
+def settle_bad(d, base, want, rels):
+    done, bad = settle(d, base, want, rels)
+    if not SETTLE:   # первая — приведение к базе после слияния: путь записан, но «не вышло» — откат
+        SETTLE.append(1)
+        bad = bad + ["x: проба отката"]
+    return done, bad
+
+
+M.check_clean, M.settle = cc_shadow, settle_bad
+res = handle(merge=True)
+M.check_clean, M.settle = check_clean, settle
+unplant(SH.pop())
+check("--merge: откат после своей записи — merge --abort прошёл (индекс освежён), чужого на диске нет",
+      refused_with(res, "не привести к базе", "отменено") and "abort не прошёл" not in str(res.get("why"))
+      and read(WT, ".claude/skills/a/SKILL.md") != "EVIL\n", res)
 back_to_m1()
 
 

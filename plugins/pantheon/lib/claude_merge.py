@@ -23,7 +23,8 @@ pack). После слияния каждый защищённый путь св
 своего bare со сверкой хеша (на базе пути нет — удаляется под .claude/skills|commands|agents). Не вышло, HEAD
 сдвинулся во время слияния или копия подменена — откат: `git merge --abort` (его код — в причине), затем защищённые
 пути снова своей записью: версия HEAD, если её blob есть в своём bare, иначе удаление по тем же правилам, иначе путь —
-в отказе.
+в отказе. После каждой своей записи — `update-index -q --refresh`: иначе устаревший stat в индексе не даст роли (и
+откату) `git merge --abort`.
 """
 import os
 import secrets
@@ -106,11 +107,16 @@ def check_objects(d, base, theirs, pats):
     if r.returncode != 0 or r.stdout != C.sm()._object(base.bare, "commit", base.tip):
         raise C.Refused(f"коммит {base.tip[:12]} в клоне не совпал с сервером (дерево или родители) — хранилище "
                         "объектов подменено (git fsck)")
-    if C._out(d, "ls-tree", "-r", "-z", "--full-tree", base.tip) != base.listing():
+    r = C._run(d, "ls-tree", "-r", "-z", "--full-tree", base.tip)   # git, сам заметивший подмену, — тоже отказ
+    if r.returncode != 0 or r.stdout != base.listing():
         raise C.Refused(f"дерево {base.tip[:12]} в клоне не совпало с сервером — хранилище объектов подменено (git fsck)")
     shas = sorted({sha for rel, (mode, sha) in theirs.items() if mode in C.FILE_MODES or mode == LINK
                    if C.protected(rel, pats) or rel.rsplit("/", 1)[-1] == ATTRS})
-    raw = C._out(d, "cat-file", "--batch", data=b"".join(s.encode() + b"\n" for s in shas), timeout=300) if shas else b""
+    r = C._run(d, "cat-file", "--batch", data=b"".join(s.encode() + b"\n" for s in shas), timeout=300) if shas else None
+    if r is not None and r.returncode != 0:
+        raise C.Refused(f"blob базы в клоне не совпал со своим хешем (git: код {r.returncode}) — хранилище объектов "
+                        "подменено (git fsck)")
+    raw = r.stdout if r is not None else b""
     i = 0
     for sha in shas:
         nl = raw.find(b"\n", i)
@@ -197,12 +203,20 @@ def settle(d, base, want, rels):
     return done, bad
 
 
+def refresh(d):
+    """Индекс — к stat файлов, которые записали мы (содержимое не индексируется): иначе merge --abort и reset --merge
+    роли откажут «not uptodate»."""
+    C._run(d, "update-index", "-q", "--refresh", timeout=300)
+
+
 def abort(d, base, head, rels, why):
     """Откат: git merge --abort (его итог — в причине), затем защищённые пути к HEAD своей записью → Refused."""
+    refresh(d)
     r = C._run(d, "merge", "--abort", timeout=300)
     note = "" if r.returncode == 0 else (f"; git merge --abort не прошёл (код {r.returncode}: "
                                          f"{os.fsdecode(r.stderr or b'').strip()[-200:]})")
     _, bad = settle(d, base, head, rels)
+    refresh(d)
     tail = ("; защищённые пути не возвращены: " + "; ".join(bad)) if bad else \
         "; защищённые пути возвращены к HEAD своей записью"
     raise C.Refused(f"{why} — слияние отменено{note}{tail}")
@@ -225,6 +239,7 @@ def git_merge(d, base, plan):
         return
     bad = settle(d, base, plan["head"], plan["rels"])[1]
     bad += settle(d, base, {rel: plan["theirs"][rel] for rel in plan["drop"]}, plan["drop"])[1]
+    refresh(d)
     tail = os.fsdecode(r.stderr or b"").strip().splitlines()
     why = ("git merge ничего не слил (Already up to date), MERGE_HEAD нет" if r.returncode == 0 else
            f"git merge не прошёл (код {r.returncode}): {(tail or [''])[-1][-200:]}")
@@ -241,6 +256,7 @@ def after_merge(d, base, plan, out):
     except C.Refused as e:
         abort(d, base, head, rels, str(e))
     done, bad = settle(d, base, plan["theirs"], rels)
+    refresh(d)
     if bad:
         abort(d, base, head, rels, "после слияния защищённые пути не привести к базе: " + "; ".join(bad))
     conflicts = sorted({p.split("\t", 1)[-1] for p in _lines(C._out(d, "ls-files", "-u", "-z"))})
