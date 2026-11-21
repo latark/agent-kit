@@ -4,7 +4,8 @@
 // подделать.
 //   pantheon-touchid "<текст окна>" [секунд ожидания, по умолчанию 120] [надпись кнопки отказа, по умолчанию «Не сливать»]
 // Код выхода: 0 — владелец подтвердил; 1 — отказ или кнопка отказа; 2 — окно не показать (нет Touch ID и пароля,
-// не сессия владельца: LAError.notInteractive); 3 — ответа нет за время ожидания (окно закрыто); 64 — вызов не тот.
+// не сессия владельца: LAError.notInteractive); 3 — ответа нет: время ожидания вышло или окно закрыла система
+// (LAError.systemCancel, appCancel — экран заблокирован, сон); 64 — вызов не тот.
 // В stderr — одна строка «код LAError: описание» для журнала, без текста окна.
 // В stdout при кодах 0–3 — одна строка JSON (metis-0921) для merge.jsonl: {"biometry": "touchID"|"faceID"|"opticID"|
 // "none", "la_code": код LAError при отказе или null, "shown_sec": сколько секунд окно было открыто}. Кодов выхода
@@ -70,7 +71,13 @@ ctx.evaluatePolicy(policy, localizedReason: args[1]) { ok, err in
         let e = err as NSError?
         laCode = e?.code
         say("\(e?.code ?? 0): \(e?.localizedDescription ?? "отказ")")
-        code = (e?.code == LAError.notInteractive.rawValue) ? 2 : 1
+        switch e?.code {
+        case LAError.notInteractive.rawValue: code = 2
+        // окно закрыла система или другое приложение (экран заблокирован, сон, смена пользователя) — это не
+        // ответ владельца, а «ответа нет»: заявка ждёт следующего прохода (22.11: la_code -4, окно 0 с — «вы отказали»)
+        case LAError.systemCancel.rawValue, LAError.appCancel.rawValue: code = 3
+        default: code = 1
+        }
     }
     done.signal()
 }
