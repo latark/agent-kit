@@ -1123,13 +1123,60 @@ def _alert_ok(repo, pr):
     return any(head.match(ln) and ref.search(ln) and "откат" in ln.lower() for ln in lines)
 
 
+GH_MARGIN = 1.5  # metis-1146: запас до срока хука на отказ шлюза после gh
+GH_MIN = 0.5  # metis-1146: срок короче — gh не запускаем, вызов не уложился
+_GH_LATE = None  # metis-1146: список вызовов gh, не уложившихся в срок хука, — только внутри _gh_in_time
+
+
+def _gh_budget(timeout):
+    """Срок вызова gh внутри шлюза (metis-1146): не дольше остатка DEADLINE хука минус GH_MARGIN; None — не
+    уложится. Вне _gh_in_time (запись, push) и без таймера — timeout как есть."""
+    left = _hook_left()
+    if _GH_LATE is None or not left:
+        return timeout
+    t = min(timeout, left - GH_MARGIN)
+    return t if t >= GH_MIN else None
+
+
+def _gh_proc(args, timeout=GH_TIMEOUT):
+    """subprocess.run gh без GH_REPO/GH_HOST со сроком из _gh_budget; None — не уложился в срок или сбой запуска.
+    Не уложившийся вызов шлюза пишется в _GH_LATE: _gh_in_time тогда откажет (metis-1146)."""
+    timeout = _gh_budget(timeout)
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
+    try:
+        if timeout is None:
+            raise subprocess.TimeoutExpired(["gh"] + args, 0)
+        return subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        if _GH_LATE is not None:
+            _GH_LATE.append(" ".join(args[:2]))
+        return None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _gh_in_time(fn, *a, **kw):
+    """fn (решение шлюза) со сроком gh из остатка DEADLINE хука (metis-1146). Хоть один вызов gh не уложился —
+    отказ «GitHub не ответил вовремя», даже если fn пропустил бы: без ответа GitHub шлюз закрыт."""
+    global _GH_LATE
+    _GH_LATE = []
+    try:
+        why = fn(*a, **kw)
+        late = list(_GH_LATE)
+    finally:
+        _GH_LATE = None
+    if not late:
+        return why
+    return (f"GitHub не ответил вовремя (gh {', gh '.join(late)}): шлюз не уложился в срок хука guard и без "
+            f"ответа GitHub не пускает — повтори слияние через минуту. Что ещё не сверено: {why or 'ничего'}")
+
+
 def _gh_json(args, timeout=GH_TIMEOUT):
     """Вывод gh как список JSON-значений подряд (--paginate склеивает страницы: `[..][..]` или объекты по строкам);
     None — сбой gh или неразборный ответ. timeout — срок gh, с (решение шлюза при заявке — короче, metis-1181)."""
-    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
     try:
-        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=timeout, env=env)
-        if r.returncode != 0:
+        r = _gh_proc(args, timeout)
+        if r is None or r.returncode != 0:
             return None
         dec, text, pos, out = json.JSONDecoder(), r.stdout, 0, []
         while True:
@@ -2125,11 +2172,8 @@ def ci_verdict(rollup, required=(), runs=None, optional=()):
 
 def _has_workflows(repo, sha):
     """Есть ли на коммите папка .github/workflows: True, False (ответ 404) или None (сбой gh или сети)."""
-    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
-    try:
-        r = subprocess.run(["gh", "api", f"repos/{repo}/contents/.github/workflows?ref={sha}"], capture_output=True,
-                           text=True, timeout=GH_TIMEOUT, env=env)
-    except (OSError, subprocess.SubprocessError):
+    r = _gh_proc(["api", f"repos/{repo}/contents/.github/workflows?ref={sha}"])
+    if r is None:
         return None
     if r.returncode == 0:
         try:
@@ -3444,7 +3488,11 @@ def owner_ci_problem(cwd, moved, args):
             return f"не понять репозиторий папки — укажи -R <owner/repo>. {OWNER_CI}"
     if len(tails) != 1:
         return f"репозиторий не один ({', '.join(sorted(tails))}) — укажи -R <owner/repo>. {OWNER_CI}"
-    repo = tails.pop()
+    return _gh_in_time(_owner_ci_view, tails.pop(), pr, heads)
+
+
+def _owner_ci_view(repo, pr, heads):
+    """Хвост owner_ci_problem: gh pr view и CI — под сроком хука _gh_in_time (metis-1146)."""
     view = _pr_view(repo, pr)
     if view is None:
         return f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — повтори позже. {OWNER_CI}"
@@ -3724,4 +3772,5 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
             return f"без чужого репозитория (-R): только из [merge_repos] своего направления. {advice}"
         if not numbers:
             return f"с -R PR указывай номером. {advice}"
-    return gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=cwd)
+    return _gh_in_time(gate_problem, event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect,
+                       cwd=cwd)

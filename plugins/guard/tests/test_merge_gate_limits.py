@@ -108,7 +108,7 @@ def t_carry_budget(h):
 # Срок обёрток gh — только GH_TIMEOUT или DECISION_GH_TIMEOUT; он не больше GH_TIMEOUT и с запасом PUSH_GH_MARGIN
 # меньше DEADLINE. Обёртки: имя → номер позиционного аргумента timeout; внутри них параметр timeout передаётся дальше
 # как есть, а по умолчанию он GH_TIMEOUT
-GH_WRAPS = {"_gh_json": 1, "_gh_timed": 1, "_pr_view": 2, "_base_tip": 3, "_gh_fits": 0}
+GH_WRAPS = {"_gh_proc": 1, "_gh_json": 1, "_gh_timed": 1, "_pr_view": 2, "_base_tip": 3, "_gh_fits": 0}
 GH_NAMES = {"GH_TIMEOUT", "DECISION_GH_TIMEOUT"}
 
 
@@ -124,7 +124,7 @@ def _decision_timeouts(c, deadline, bad):
 
 
 def _run_timeout(n, fname, gits, bad):
-    """timeout= у subprocess.run: _git_timeout() (в gits), GH_TIMEOUT или параметр timeout внутри _gh_json."""
+    """timeout= у subprocess.run: _git_timeout() (в gits), GH_TIMEOUT или параметр timeout внутри _gh_proc."""
     import ast
     for kw in n.keywords:
         if kw.arg != "timeout":
@@ -133,7 +133,7 @@ def _run_timeout(n, fname, gits, bad):
         if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "_git_timeout" \
                 and not v.args and not v.keywords:
             gits.append(n.lineno)
-        elif not (isinstance(v, ast.Name) and (v.id == "GH_TIMEOUT" or v.id == "timeout" and fname == "_gh_json")):
+        elif not (isinstance(v, ast.Name) and (v.id == "GH_TIMEOUT" or v.id == "timeout" and fname == "_gh_proc")):
             bad.append(f"merge_gate.py:{n.lineno}: timeout не _git_timeout() и не GH_TIMEOUT")
 
 
@@ -144,6 +144,29 @@ def _wrap_timeout(n, ok, bad):
     given = ([n.args[i]] if len(n.args) > i else []) + [kw.value for kw in n.keywords if kw.arg == "timeout"]
     if any(not (isinstance(v, ast.Name) and v.id in ok) for v in given):
         bad.append(f"merge_gate.py:{n.lineno}: {n.func.id} — срок gh не GH_TIMEOUT и не DECISION_GH_TIMEOUT")
+
+
+def _gh_budget_used(tree, c, bad):
+    """metis-1146: срок gh шлюза — из остатка DEADLINE хука. _gh_proc первой строкой берёт срок у _gh_budget, запас
+    GH_MARGIN не меньше 1 с, GH_MIN больше 0 и меньше запаса; решение шлюза (gate_problem) и хвост проверки CI без
+    роли (_owner_ci_view) идут под _gh_in_time — он отказывает, если gh не уложился."""
+    import ast
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    proc = fns.get("_gh_proc")
+    first = ast.unparse(proc.body[1]) if proc and len(proc.body) > 1 else ""
+    if first != "timeout = _gh_budget(timeout)":
+        bad.append(f"merge_gate.py: _gh_proc не начинается с timeout = _gh_budget(timeout): {first!r}")
+    margin, low = c.get("GH_MARGIN"), c.get("GH_MIN")
+    if not all(isinstance(x, (int, float)) for x in (margin, low)) or margin < 1 or not 0 < low < margin:
+        bad.append(f"merge_gate.py: GH_MARGIN {margin!r} — нужно не меньше 1 с, GH_MIN {low!r} — больше 0 и меньше")
+    for where, fn in (("merge_problem", "gate_problem"), ("owner_ci_problem", "_owner_ci_view")):
+        calls = [n for n in ast.walk(fns[where]) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_gh_in_time" and n.args and isinstance(n.args[0], ast.Name)
+                 and n.args[0].id == fn] if where in fns else []
+        direct = [n for n in ast.walk(fns[where]) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == fn] if where in fns else [1]
+        if not calls or direct:
+            bad.append(f"merge_gate.py: {where} зовёт {fn} не через _gh_in_time")
 
 
 def _timeout_calls(tree, bad):
@@ -199,6 +222,7 @@ def prod_timeouts(sources):
     if not isinstance(margin, (int, float)) or margin < 1:
         bad.append(f"merge_gate.py: GIT_MARGIN = {margin!r}, нужен запас не меньше 1 с до срока хука")
     _decision_timeouts(consts(tree), consts(ast.parse(sources["guard_rules.py"])).get("DEADLINE"), bad)
+    _gh_budget_used(tree, consts(tree), bad)
     gits = _timeout_calls(tree, bad)
     if len(gits) < 3:
         bad.append(f"merge_gate.py: timeout=_git_timeout() у subprocess.run {len(gits)}, ждали 3")
@@ -241,6 +265,13 @@ def t_prod_timeouts(h):
             ("subprocess.run в _gh_timed — timeout=timeout", "merge_gate.py",
              "return _gh_json(args) if timeout == GH_TIMEOUT else _gh_json(args, timeout)",
              "return subprocess.run(args, timeout=timeout)"),
+            # metis-1146: срок gh шлюза — из остатка DEADLINE, не уложился — отказ
+            ("_gh_proc без _gh_budget", "merge_gate.py", "timeout = _gh_budget(timeout)", "timeout = timeout"),
+            ("GH_MARGIN 1.5 → 0", "merge_gate.py", "GH_MARGIN = 1.5 ", "GH_MARGIN = 0 "),
+            ("GH_MIN 0.5 → 0", "merge_gate.py", "GH_MIN = 0.5 ", "GH_MIN = 0 "),
+            ("merge_problem без _gh_in_time", "merge_gate.py", "return _gh_in_time(gate_problem, ", "return gate_problem("),
+            ("owner_ci_problem без _gh_in_time", "merge_gate.py", "return _gh_in_time(_owner_ci_view, ",
+             "return _owner_ci_view("),
             ("DEADLINE guard.py 8 → 15", "guard.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
             ("DEADLINE guard_rules.py 8 → 15", "guard_rules.py", "DEADLINE = 8 ", "DEADLINE = 15 "),
             ("DEADLINE taint.py 8 → 15", "taint.py", "DEADLINE = 8 ", "DEADLINE = 15 ")):
@@ -289,6 +320,86 @@ def t_git_timeout(h):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
+
+
+def t_gh_budget(h):
+    """metis-1146: срок gh внутри шлюза (_gh_in_time) — остаток DEADLINE хука минус GH_MARGIN, не дольше заданного;
+    меньше GH_MIN — gh не запускается. Не уложившийся gh — отказ «GitHub не ответил вовремя», даже если решение было
+    пропуском. Вне шлюза (запись, push) и без таймера срок как задан."""
+    import signal
+    mg = _load_merge_gate("merge_gate_gh_budget")
+    seen = []
+
+    class Rec:
+        SubprocessError, TimeoutExpired = subprocess.SubprocessError, subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append(kw.get("timeout"))
+            if kw.get("timeout", 99) < 2:
+                raise subprocess.TimeoutExpired(argv, kw["timeout"])
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+
+    mg.subprocess = Rec
+    old = signal.signal(signal.SIGALRM, lambda *a: None)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        mg._GH_LATE = []
+        check("gh: без таймера хука — срок как задан", mg._gh_budget(6) == 6, mg._gh_budget(6))
+        signal.setitimer(signal.ITIMER_REAL, 3)
+        mg._GH_LATE = None
+        check("gh: вне шлюза — срок как задан и при малом остатке", mg._gh_budget(6) == 6, mg._gh_budget(6))
+        mg._GH_LATE = []
+        for left, want in ((7.5, 6), (5, 3.5), (2.5, 1), (1.9, None), (1, None)):
+            signal.setitimer(signal.ITIMER_REAL, left)
+            got = mg._gh_budget(6)
+            ok = got is None if want is None else got is not None and abs(got - want) < 0.3 and got < left
+            check(f"gh: в шлюзе до срока хука {left} с — срок {want}", ok, got)
+        mg._GH_LATE = None
+        signal.setitimer(signal.ITIMER_REAL, 7.5)
+        seen.clear()
+        got = mg._gh_in_time(lambda: (mg._gh_json(["pr", "view"]), None)[1])
+        check("gh: уложился — решение шлюза как есть, срок по остатку", got is None and seen and 5 < seen[0] <= 6,
+              (got, seen))
+        signal.setitimer(signal.ITIMER_REAL, 3)
+        got = mg._gh_in_time(lambda: (mg._gh_json(["pr", "view"]), None)[1])
+        check("gh: не уложился (1.5 с при остатке 3) — отказ GitHub, а не пропуск",
+              isinstance(got, str) and "GitHub не ответил вовремя (gh pr view)" in got, got)
+        signal.setitimer(signal.ITIMER_REAL, 1)
+        seen.clear()
+        got = mg._gh_in_time(lambda: "красная проверка" if mg._has_workflows("o/r", "s") is None else "")
+        check("gh: остаток меньше запаса — gh не запускается, отказ с причиной решения",
+              not seen and isinstance(got, str) and got.startswith("GitHub не ответил вовремя")
+              and got.endswith("красная проверка"), (seen, got))
+        check("gh: после шлюза счёт опозданий снят", mg._GH_LATE is None, mg._GH_LATE)
+    finally:
+        mg._GH_LATE = None
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def t_gh_deadline(h):
+    """metis-1146: gh pr merge с медленным GitHub под боевым DEADLINE 8 с — отказ «GitHub не ответил вовремя», а не
+    гибель хука по сроку (HookTimeout, «guard: сбоев за сутки»). gh pr view отвечает за 3 с, запрос workflows (пустой
+    rollup) висит 30 с: прежний GH_TIMEOUT 6 с на него выводил хук за 8 с."""
+    import time
+    sha = h.sha["tg-read"]
+    h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"), rec("accept", "latark/tg-read", 7, sha))
+    h.ci([])
+    slow = h.j("slowgh")
+    os.makedirs(slow, exist_ok=True)
+    with open(os.path.join(slow, "gh"), "w") as fh:
+        fh.write('#!/bin/sh\ncase "$*" in\n"pr view "*) sleep 3;;\n*contents/.github/workflows*) exec sleep 30;;\n'
+                 f'esac\nexec "{h.j("bin/gh")}" "$@"\n')
+    os.chmod(os.path.join(slow, "gh"), 0o755)
+    env = {"PATH": slow + os.pathsep + h.j("bin") + os.pathsep + os.environ["PATH"], "GUARD_TEST_DEADLINE": "",
+           "GUARD_TEST_SUB_TIMEOUT": "x"}
+    t0 = time.monotonic()
+    got = h.pre(f"gh pr merge 7 --match-head-commit {sha}", extra_env=env)
+    took = time.monotonic() - t0
+    merge_case("1146: медленный GitHub — отказ «GitHub не ответил вовремя»", got, False, "GitHub не ответил вовремя")
+    check("1146: отказ шлюза, а не гибель хука по сроку", "проверка не уложилась" not in got[1], got)
+    check("1146: отказ раньше DEADLINE 8 с", took < 8, took)
 
 
 def t_manifest_types(h):
@@ -537,7 +648,8 @@ def t_owner_api_merge(h):
                h.pre("gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", role=None, pdir="projects/tg-read"), True)
 
 
-CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_full_tests_verify, t_owner_api_merge, t_git_timeout, t_manifest_types]
+CASES = [t_test_floors, t_carry_budget, t_prod_timeouts, t_full_tests_verify, t_owner_api_merge, t_git_timeout,
+         t_gh_budget, t_gh_deadline, t_manifest_types]
 
 
 if __name__ == "__main__":
