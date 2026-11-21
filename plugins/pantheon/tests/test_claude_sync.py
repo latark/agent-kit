@@ -528,7 +528,8 @@ SETTINGS = read(WT, ".claude/settings.local.json")
 
 def window_commit():
     """Коммит окна C поверх HEAD: свой settings.local.json и хук — во временном индексе, не трогая индекс копии."""
-    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(ROOT, "window.index"))
+    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(ROOT, "window.index"), GIT_AUTHOR_NAME="окно",
+               GIT_AUTHOR_EMAIL="w@localhost", GIT_COMMITTER_NAME="окно", GIT_COMMITTER_EMAIL="w@localhost")
     run = lambda *a, data=None: subprocess.run(["git", "-C", WT, *a], input=data, env=env, capture_output=True,   # noqa: E731
                                                text=True, check=True).stdout.strip()
     run("read-tree", "HEAD")
