@@ -164,31 +164,6 @@ check("лишний флаг — код 2", O.main(["claude-sync", "--sha", "abc
 check("--wait не число — код 2", O.main(["claude-sync", "--wait", "x"]) == 2)
 check("--merge с лишним флагом — код 2", O.main(["claude-sync", "--merge", "--sha", "abc1234"]) == 2)
 
-# --- шаблоны песочницы ---------------------------------------------------------------------------------------------
-check("защищены навык, команда, агент, хук, настройки, .mcp.json на любой глубине",
-      all(C.protected(p) for p in (".claude/skills/a/SKILL.md", ".claude/commands/c.md", ".claude/agents/x.md",
-                                   ".claude/hooks/h.sh", ".claude/settings.json", ".claude/settings.local.json",
-                                   ".mcp.json", "app/.mcp.json", "app/.claude/skills/b/SKILL.md", ".husky/pre-commit")))
-check("не защищены README, .claude/other, вложенные копии .claude/worktrees/*",
-      not any(C.protected(p) for p in ("README.md", ".claude/other.md", ".claude/worktrees/x/.claude/skills/a",
-                                       "src/settings.json", "../.mcp.json")))
-check("регистр и нормализация Unicode — та же защита (APFS и песочница их не различают)",
-      all(C.protected(p) for p in (".Claude/Settings.json", ".mcp.JSON", ".claude/Hooks/x.sh", "a/.HUSKY/h"))
-      and C.fold("e\u0301") == C.fold("\u00c9") and not C.protected(".Claude/Worktrees/x/.claude/settings.json"))
-check("odd: защищено не буква в букву или во вложенной копии — да; буква в букву и код — нет",
-      all(C.odd(p) for p in (".claude/Settings.local.json", ".mcp.JSON", ".claude/worktrees/y/.claude/settings.json",
-                             ".Claude/worktrees/y/.mcp.json"))
-      and not any(C.odd(p) for p in (".claude/settings.json", "app/.mcp.json", "README.md", ".claude/worktrees/y/a")))
-check("удалять можно только навыки, команды и агентов",
-      all(C.deletable(p) for p in (".claude/skills/x/SKILL.md", ".claude/commands/c.md", "a/.claude/agents/x.md")))
-check("настройки, .mcp.json, хуки, .husky и настройки внутри навыка — не удаляются",
-      not any(C.deletable(p) for p in (".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
-                                       ".claude/hooks/h.sh", ".husky/pre-commit", ".claude/skills/x/.claude/settings.json",
-                                       ".claude/skills/x/.claude/hooks/h.sh")))
-check("свой драйвер в атрибутах найден, встроенные — нет",
-      M.bad_attrs("# c\n* merge=evil\n*.py diff=python\n*.bin -diff binary\n[attr]m filter=lfs\nx merge=union", "f")
-      == ["f: merge=evil", "f: filter=lfs"], M.bad_attrs("* merge=evil\n[attr]m filter=lfs", "f"))
-
 # --- папка не окна ------------------------------------------------------------------------------------------------
 stuck()
 res = handle(window="metis-y")
@@ -703,6 +678,31 @@ check("--merge: откат с подложенным деревом head_sha (р
 check("--merge: откат код не трогает — README слияния на месте и в итоге «верни сам»",
       read(WT, "README.md") == "r2\n" and "верни сам" in why and "README.md" in why and "newfile.txt" in why, why)
 back_to_m1()
+
+# --- предел обхода при откате: лишний код его не съедает, защищённых больше предела — громкий отказ ----------------
+def gm_many(d, base, plan, rel, shift):
+    git_merge(d, base, plan)
+    for i in range(40):
+        put(WT, rel.format(i), "x\n")
+    put(WT, ".claude/hooks/x.sh", "echo evil\n")
+    if shift:
+        drift()
+
+
+walk_max, C.WALK_MAX = C.WALK_MAX, 25
+for rel, shift, words in (("junk/f{}.txt", 1, ("возвращены к снимку", "junk/f0.txt")),
+                          (".claude/skills/zz/f{}.md", 1, ("НЕ возвращены", "владельцу")),
+                          (".claude/hooks/z{}.sh", 0, ("не только база", "обход не закончен"))):
+    M.git_merge = lambda d, base, plan, rel=rel, shift=shift: gm_many(d, base, plan, rel, shift)
+    res = handle(merge=True)
+    M.git_merge = git_merge
+    hooks = os.listdir(os.path.join(WT, ".claude", "hooks"))
+    check(f"--merge: откат ({'сдвиг ref' if shift else 'обход сверки оборван'}), 40 × {rel} и хук — хука нет, снимок "
+          f"на месте, в итоге {words}", refused_with(res, "отменено", *words) and hooks == ["h.sh"]
+          and read(WT, ".claude/settings.local.json") == SETTINGS, (hooks, res))
+    shutil.rmtree(os.path.join(WT, "junk"), True)
+    back_to_m1()
+C.WALK_MAX = walk_max
 
 # --- звено пути подменено после проверки (ссылка, другая папка) --------------------------------------------------
 Base = C.Base

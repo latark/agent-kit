@@ -219,9 +219,10 @@ def _open_parent(top_fd, parts, create=False):
 
 def walk(top_fd, keep, limit=None, nested=False):
     """Файлы и ссылки на диске копии, где keep(rel): свой обход от корня — звенья открыты O_NOFOLLOW, по ссылкам не
-    идёт, .git (в любом регистре) не обходит, вложенные копии .claude/worktrees/* — только с nested. Refused — записей
-    больше limit."""
-    found, todo, seen, limit = [], [""], 0, limit or WALK_MAX
+    идёт, .git (в любом регистре) не обходит. Вложенные копии .claude/worktrees/* — только с nested и только звенья,
+    которые могут подойти под шаблоны (into_nested). Предел limit — по найденным (keep), а не по всем файлам: тысячи
+    файлов кода не обрывают обход. Refused (атрибут found — найденное до обрыва) — найденных больше limit."""
+    found, todo, limit = [], [""], limit or WALK_MAX
     while todo:
         pre = todo.pop()
         try:
@@ -233,17 +234,27 @@ def walk(top_fd, keep, limit=None, nested=False):
                 items = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
         finally:
             os.close(fd)
-        seen += len(items)
-        if seen > limit:
-            raise Refused(f"в копии больше {limit} файлов — обход защищённых путей не уложился, приведи руками")
         for name, is_dir in items:
             rel = pre + name
             if not is_dir:
                 if keep(rel):
                     found.append(rel)
-            elif fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED):
+            elif fold(name) != ".git" and (into_nested(rel) if nested else fold(rel) + "/" != NESTED):
                 todo.append(rel + "/")
+        if len(found) > limit:
+            e = Refused(f"в копии под защищёнными путями больше {limit} файлов — обход не уложился, приведи руками")
+            e.found = sorted(found)
+            raise e
     return sorted(found)
+
+
+def into_nested(rel):
+    """Папка rel во вложенной копии (после последнего .claude/worktrees/<имя>/): идти только в корень копии и в её
+    .claude и .husky — под шаблоны песочницы подходят только они (и .mcp.json в корне копии); вне вложенных — везде."""
+    parts = [fold(x) for x in rel.split("/")]
+    last = max((i for i in range(len(parts) - 1) if parts[i:i + 2] == [".claude", "worktrees"]), default=None)
+    tail = parts[last + 2:] if last is not None else None
+    return tail is None or len(tail) <= 1 or tail[1] in (".claude", ".husky")
 
 
 def ignored(d, rels):

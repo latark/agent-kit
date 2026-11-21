@@ -34,11 +34,15 @@ git — без GIT_*, глобальный конфиг /dev/null, core.hooksPat
     записью, новое под ними (и настройки, и хуки: их до прохода не было) удаляется. Рабочее дерево git при откате не
     пишет: checkout-index записал бы вне песочницы путь из индекса окна, который сверка не узнала (регистр, вложенная
     копия). Код, который поменяло неудачное слияние, проход не трогает: его список — в итоге, вернёт роль в своей
-    песочнице (git status, git checkout -- <пути>).
+    песочнице (git status, git checkout -- <пути>; новые неотслеживаемые — тоже в списке).
+  - Предел обхода (WALK_MAX) — по защищённым путям, а не по всем файлам; во вложенных копиях обходятся только их
+    корень, .claude и .husky. Обход при откате или сверке оборвался — найденное новое под защищёнными путями всё равно
+    удаляется, а отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу проверить хуки и настройки.
   - После своей записи — `update-index -- <пути>`, чья запись индекса равна записанной (restat): иначе устаревший stat
     (другой размер) не даст роли `git merge --abort`.
 """
 import errno
+import fnmatch
 import os
 import secrets
 import stat
@@ -307,11 +311,72 @@ def put(top, rel, st):
         C.write_file(top, rel, st[1], st[2])
 
 
+def deep_walk(d, plan, bad):
+    """Свой обход защищённых путей (и во вложенных копиях); оборвался (предел) — строка в bad, а пути — найденное до
+    обрыва и всё в точных местах хуков и настроек (hot_paths, без предела)."""
+    try:
+        return C.walk(d.top, lambda r: C.deep(r, plan["pats"]), nested=True)
+    except C.Refused as e:
+        bad.append(f"обход не закончен ({e})")
+        return sorted(set(getattr(e, "found", [])) | set(hot_paths(d.top)))
+
+
+def _ls(top, rel):
+    """Записи папки rel копии без перехода по ссылкам → [(имя, папка ли)]; нет, ссылка в звене — []."""
+    try:
+        fd = C._open_parent(top, (rel + "/x").split("/")) if rel else os.dup(top)
+    except OSError:
+        return []
+    try:
+        with os.scandir(fd) as it:
+            return [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+    except OSError:
+        return []
+    finally:
+        os.close(fd)
+
+
+def _all_under(top, rel):
+    """Все файлы и ссылки под папкой rel без предела (её открыть без ссылок не вышло — [])."""
+    try:
+        fd = C._open_parent(top, (rel + "/x").split("/"))
+    except OSError:
+        return []
+    try:
+        return [f"{rel}/{x}" for x in C.walk(fd, lambda r: True, limit=1 << 62)]
+    finally:
+        os.close(fd)
+
+
+def hot_paths(top):
+    """Без предела — точные места того, что исполняется вне песочницы: .claude/hooks, .claude/settings*.json, .mcp.json,
+    .husky в корне копии и в корнях вложенных копий .claude/worktrees/* (имена — без регистра, fold)."""
+    roots, out = [""], []
+    for cl, _ in [x for x in _ls(top, "") if x[1] and C.fold(x[0]) == ".claude"]:
+        for wt, _ in [x for x in _ls(top, cl) if x[1] and C.fold(x[0]) == "worktrees"]:
+            roots += [f"{cl}/{wt}/{n}/" for n, is_dir in _ls(top, f"{cl}/{wt}") if is_dir]
+    for root in roots:
+        for name, is_dir in _ls(top, root.rstrip("/")):
+            low = C.fold(name)
+            if low == ".mcp.json" and not is_dir:
+                out.append(root + name)
+            elif low == ".husky" and is_dir:
+                out += _all_under(top, root + name)
+            elif low == ".claude" and is_dir:
+                for sub, sub_dir in _ls(top, root + name):
+                    if not sub_dir and fnmatch.fnmatchcase(C.fold(sub), "settings*.json"):
+                        out.append(f"{root}{name}/{sub}")
+                    elif sub_dir and C.fold(sub) == "hooks":
+                        out += _all_under(top, f"{root}{name}/{sub}")
+    return out
+
+
 def to_snapshot(d, plan):
     """Защищённые пути и убранные файлы — байт в байт к снимку своей записью: нового под защищёнными путями (и
-    настроек, и хуков — их до прохода не было) — удалить, бывшее — вернуть → отказы."""
+    настроек, и хуков — их до прохода не было) — удалить, бывшее — вернуть → отказы. Обход оборвался — найденное новое
+    всё равно удаляется, а отказ громкий."""
     snap, bad = plan["snap"], []
-    for rel in sorted(set(C.walk(d.top, lambda r: C.deep(r, plan["pats"]), nested=True)) - set(snap)):
+    for rel in sorted(set(deep_walk(d, plan, bad)) - set(snap)):
         try:
             C.delete_file(d.top, rel)
         except OSError as e:
@@ -381,12 +446,18 @@ def git_back(d, plan):
     return notes
 
 
+def untracked(d):
+    """Неотслеживаемые не игнорируемые файлы копии (только чтение)."""
+    return _lines(C._run(d, "ls-files", "-o", "--exclude-standard", "-z", timeout=300).stdout)
+
+
 def left_behind(d, plan):
-    """Незащищённые пути, где HEAD и база различаются, а диск уже не равен HEAD (их записал git merge); убранные
-    неотслеживаемые возвращает снимок."""
+    """Незащищённые пути, где HEAD и база различаются (или новые неотслеживаемые), а диск уже не равен HEAD — их
+    записал git merge; убранные неотслеживаемые возвращает снимок."""
     head, theirs, left = plan["head"], plan["theirs"], []
-    for rel in sorted((set(head) | set(theirs)) - set(plan["drop"])):
-        if head.get(rel) == theirs.get(rel) or C.deep(rel, plan["pats"]):
+    new = set(untracked(d)) - set(plan["untracked"])   # и файлы только из чужого дерева (ref сдвинут во время merge)
+    for rel in sorted((set(head) | set(theirs) | new) - set(plan["drop"])):
+        if (rel not in new and head.get(rel) == theirs.get(rel)) or C.deep(rel, plan["pats"]):
             continue
         try:
             if not C.same(head.get(rel), C.disk_state(d.top, rel, len(plan["head_sha"]))):
@@ -404,8 +475,9 @@ def rollback(d, plan, why):
     bad = to_snapshot(d, plan)
     if not why_repo:
         C._run(d, "update-index", "-q", "--refresh", timeout=300)
-    tail = ("; защищённые пути не возвращены: " + "; ".join(bad)) if bad else \
-        "; защищённые пути возвращены к снимку до прохода"
+    tail = (f"; защищённые пути НЕ возвращены: {'; '.join(bad)} — владельцу: проверь .claude/hooks, "
+            f".claude/settings*.json, .mcp.json и .husky в {d} (и во вложенных копиях): там может остаться чужой хук"
+            if bad else "; защищённые пути возвращены к снимку до прохода")
     raise C.Refused(f"{why} — слияние отменено" + "".join(f"; {x}" for x in notes) + tail)
 
 
@@ -432,7 +504,7 @@ def exact(d, base, plan):
     """После своей записи: под защищёнными путями ровно база, плюс бывшее до прохода не из базы (игнорируемое) — как в
     снимке; новое — удалить → (сделано, отказы)."""
     theirs, snap, done, bad = plan["theirs"], plan["snap"], [], []
-    for rel in C.walk(d.top, lambda r: C.deep(r, plan["pats"]), nested=True):
+    for rel in deep_walk(d, plan, bad):
         if rel in theirs:
             continue
         try:
@@ -506,7 +578,7 @@ def merge(d):
         plan = {"head_sha": head_sha, "head": head, "theirs": theirs, "drop": drop, "pats": pats,
                 "branch": ref.stdout.decode().strip() if ref.returncode == 0 else None,
                 "rels": sorted(r for r in set(theirs) | set(head) if C.protected(r, pats)),
-                "snap": snapshot(d, pats, drop)}
+                "snap": snapshot(d, pats, drop), "untracked": untracked(d)}
         git_merge(d, base, plan)
         return after_merge(d, base, plan, out)
     finally:
