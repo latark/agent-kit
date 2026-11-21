@@ -88,7 +88,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (lib/supabase_migrate.py, metis-1051); база — SUPABASE_DB_URL; окну
                                         направления мимо песочницы, одной командой в строке (guard
                                         supabase-migrate-cmd, metis-1295)
-  pantheon outside test|serve|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
+  pantheon outside test|serve|claude-sync|login|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; сам тесты после «принять»

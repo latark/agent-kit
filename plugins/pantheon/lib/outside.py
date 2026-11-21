@@ -10,19 +10,17 @@
                                          test/check package.json, иначе pytest; --script — скрипт package.json;
                                          --app ИМЯ (только с --script) — скрипт приложения монорепо или папки внутри корня, как у serve (metis-1293)
                                          файлы из .print-out/ (PDF) после --script — в STATE/outside/runs/<ID>/, путь в status (metis-1262)
-                                         Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
-                                         новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
-                                         Заявка с --sha и обычная на одном SHA и папке не сцеплены: у --sha своя копия
-                                         (pin), у обычной — дерево папки; каждая получает свой ID (metis-0796)
+                                         Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт — новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
+                                         Заявка с --sha и обычная на одном SHA и папке не сцеплены: у --sha своя копия (pin), у обычной — дерево папки; каждая получает свой ID (metis-0796)
   pantheon outside test --sha SHA [--script ИМЯ] [--wait С]
                                          та же проверка на коммите SHA (7–40 знаков, есть в клоне) в своей копии, а не
                                          в этой папке: ветку PR не переключить в worktree окна, если .claude/ проекта
-                                         отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA
+                                         отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA.
+                                         Застряли файлы .claude/ после checkout/merge (EPERM) — claude-sync ниже
   pantheon outside test [--sha SHA] --affected [--base REF] [--wait С]
                                          узкий набор (metis-0734): run-tests.py из .pantheon-verify с `--affected --base
                                          <merge-base REF и коммита>` (REF — по умолчанию origin/main, вершина берётся
-                                         при заявке). Запись tests — с этой командой, files и map: шлюз guard на
-                                         запасном пути засчитывает её только PR вне ядра защит. История копии
+                                         при заявке). Запись tests — с этой командой, files и map: шлюз guard на запасном пути засчитывает её только PR вне ядра защит. История копии
                                          подменена (shallow, info/grafts, refs/replace) — гонится полный набор
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--env ИМЯ=значение]... [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
@@ -30,6 +28,8 @@
                                          --app ИМЯ — приложение монорепо, --app ПАПКА — папка внутри корня без монорепо (metis-0790);
                                          --env ИМЯ=значение (можно несколько, ≤ 20) — флаг в окружение сервера (metis-1277): имя
                                          только NEXT_PUBLIC_[A-Z0-9_]+, значение — печатный ASCII до 200 знаков без секретов
+  pantheon outside claude-sync [--wait С] защищённые пути копии (.claude/skills|commands|agents|hooks, settings*.json,
+                                         .mcp.json) — к HEAD, если он равен ветке по умолчанию origin (lib/claude_sync.py)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    снять свою заявку и дождаться итога (20 с): сервер гаснет раньше срока,
                                          тест в очереди своего окна снимается сразу (итог stopped только в своей
@@ -318,7 +318,7 @@ def split_env_args(args):
 
 
 APP_RE = re.compile(r"\.|@?[A-Za-z0-9][A-Za-z0-9._-]{0,80}(/[A-Za-z0-9][A-Za-z0-9._-]{0,80})?")
-KINDS = ("test", "serve")
+KINDS = ("test", "serve", "claude-sync")   # claude-sync — lib/claude_sync.py (metis-1327), проход серверов
 FINAL = ("done", "failed", "serving", "stopped")
 DENY_PORTS = (9222,) + tuple(range(9333, 9340)) + (6152, 6153)   # браузеры с входами и местный прокси
 # порты владельца: 3000 (next по умолчанию), 3100–3199 (разработчики в своих worktree), 3200–3299 (показ владельцу)
@@ -390,7 +390,7 @@ LIBPQ_BINS = ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ [--app ИМЯ]] [--affected [--base REF]] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--env ИМЯ=значение]... [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--quick|--serve] | key OWNER/REPO ИМЯ | "
-         "login ID [--app ИМЯ] [--wait С] | auth URL [--wait С]")
+         "login ID [--app ИМЯ] [--wait С] | auth URL [--wait С] | claude-sync [--wait С]")
 
 
 def set_core(mod):
@@ -398,7 +398,7 @@ def set_core(mod):
     P = mod
 
 
-_SUBS = {}
+_SUBS, _SUB_FILES = {}, {"claude-sync": "claude_sync.py"}   # не outside_<имя>.py (metis-1327)
 
 
 def sub_mod(name):
@@ -408,7 +408,7 @@ def sub_mod(name):
     if name not in _SUBS:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            f"pantheon_outside_{name}", os.path.join(os.path.dirname(os.path.abspath(__file__)), f"outside_{name}.py"))
+            f"pantheon_outside_{name}", os.path.join(os.path.dirname(os.path.abspath(__file__)), _SUB_FILES.get(name, f"outside_{name}.py")))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         mod.set_core(P, P.outside_mod())
@@ -3156,8 +3156,8 @@ def prune(t=None):
 # --- заявки -------------------------------------------------------------------------------------------------------
 
 def _req_kind(req):
-    """Чей проход берёт заявку: serve — проход серверов, всё прочее (test, битые, чужие виды) — проход тестов."""
-    return "serve" if isinstance(req, dict) and req.get("kind") == "serve" else "test"
+    """Чей проход берёт заявку: serve и claude-sync — проход серверов, всё прочее (test, битые) — проход тестов."""
+    return "serve" if isinstance(req, dict) and req.get("kind") in ("serve", "claude-sync") else "test"
 
 
 def _parse(text):
@@ -3308,7 +3308,7 @@ def check_request(req, rid):
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("id") != rid:
         return "заявка не в формате (v1, id = имя файла)"
     if req.get("kind") not in KINDS:
-        return f"вид заявки «{req.get('kind')}» — только test или serve"
+        return f"вид заявки «{req.get('kind')}» — только test, serve или claude-sync"
     if not isinstance(req.get("dir"), str) or not os.path.isabs(req["dir"]):
         return "в заявке нет папки"
     s = req.get("script")
@@ -3375,8 +3375,8 @@ def handle(qdir, window, rid, req, defer=None):
     if d is None:
         log_event(id=rid, kind="refused", window=window, why=roots)
         return save_result(qdir, rid, {"state": "failed", "kind": req["kind"], "why": roots})
-    if req["kind"] == "serve":
-        return run_serve(rid, d, req, window, qdir)
+    if req["kind"] in ("serve", "claude-sync"):   # claude-sync — защищённые пути копии к проверенной версии (metis-1327)
+        return (run_serve if req["kind"] == "serve" else sub_mod("claude-sync").run)(rid, d, req, window, qdir)
     if req.get("pin"):   # test --sha (metis-0779): своя копия на коммите, а не HEAD папки
         return run_test_at(rid, d, req, window, qdir, registry(None) or roots, defer=defer)
     res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
@@ -4619,12 +4619,12 @@ def main(rest):
     sub = rest[0] if rest else ""
     if sub == "key":
         return cmd_key(rest[1:])
+    if sub in ("login", "auth", "secret", "claude-sync"):
+        return getattr(sub_mod(sub), "cmd_" + sub.replace("-", "_"))(rest[1:])
     if sub in KINDS:
         return cmd_request(sub, rest[1:])
     if sub == "status":
         return cmd_status(rest[1:])
-    if sub in ("login", "auth", "secret"):
-        return getattr(sub_mod(sub), "cmd_" + sub)(rest[1:])
     if sub == "stop":
         return cmd_stop(rest[1:])
     if sub == "run" and len(rest) == 1:
