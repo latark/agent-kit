@@ -172,6 +172,13 @@ check("защищены навык, команда, агент, хук, наст
 check("не защищены README, .claude/other, вложенные копии .claude/worktrees/*",
       not any(C.protected(p) for p in ("README.md", ".claude/other.md", ".claude/worktrees/x/.claude/skills/a",
                                        "src/settings.json", "../.mcp.json")))
+check("регистр и нормализация Unicode — та же защита (APFS и песочница их не различают)",
+      all(C.protected(p) for p in (".Claude/Settings.json", ".mcp.JSON", ".claude/Hooks/x.sh", "a/.HUSKY/h"))
+      and C.fold("e\u0301") == C.fold("\u00c9") and not C.protected(".Claude/Worktrees/x/.claude/settings.json"))
+check("odd: защищено не буква в букву или во вложенной копии — да; буква в букву и код — нет",
+      all(C.odd(p) for p in (".claude/Settings.local.json", ".mcp.JSON", ".claude/worktrees/y/.claude/settings.json",
+                             ".Claude/worktrees/y/.mcp.json"))
+      and not any(C.odd(p) for p in (".claude/settings.json", "app/.mcp.json", "README.md", ".claude/worktrees/y/a")))
 check("удалять можно только навыки, команды и агентов",
       all(C.deletable(p) for p in (".claude/skills/x/SKILL.md", ".claude/commands/c.md", "a/.claude/agents/x.md")))
 check("настройки, .mcp.json, хуки, .husky и настройки внутри навыка — не удаляются",
@@ -336,9 +343,10 @@ def untracked():
 
 
 def back_to_m1():
-    if mh():
-        git(WT, "merge", "--abort")
-    git(WT, "reset", "-q", "--hard", M1)
+    git(WT, "reset", "-q", "--hard", M1)   # и MERGE_*; код, оставленный откатом (его возвращает роль), — убрать
+    for rel in ("newfile.txt", "link.txt"):
+        if os.path.lexists(os.path.join(WT, rel)):
+            os.unlink(os.path.join(WT, rel))
 
 
 # --- ветка уже на базе — сливать нечего ---------------------------------------------------------------------------
@@ -526,14 +534,17 @@ back_to_m1()
 SETTINGS = read(WT, ".claude/settings.local.json")
 
 
-def window_commit():
-    """Коммит окна C поверх HEAD: свой settings.local.json и хук — во временном индексе, не трогая индекс копии."""
+WINDOW = {".claude/settings.local.json": "{\"evil\": 1}\n", ".claude/hooks/x.sh": "echo evil\n"}
+
+
+def window_commit(files=WINDOW):
+    """Коммит окна поверх HEAD: свои файлы (по умолчанию settings.local.json и хук) — во временном индексе."""
     env = dict(os.environ, GIT_INDEX_FILE=os.path.join(ROOT, "window.index"), GIT_AUTHOR_NAME="окно",
                GIT_AUTHOR_EMAIL="w@localhost", GIT_COMMITTER_NAME="окно", GIT_COMMITTER_EMAIL="w@localhost")
     run = lambda *a, data=None: subprocess.run(["git", "-C", WT, *a], input=data, env=env, capture_output=True,   # noqa: E731
                                                text=True, check=True).stdout.strip()
     run("read-tree", "HEAD")
-    for rel, text in ((".claude/settings.local.json", "{\"evil\": 1}\n"), (".claude/hooks/x.sh", "echo evil\n")):
+    for rel, text in files.items():
         run("update-index", "--add", "--cacheinfo", f"100644,{run('hash-object', '-w', '--stdin', data=text)},{rel}")
     return run("commit-tree", run("write-tree"), "-p", "HEAD", "-m", "окно")
 
@@ -559,6 +570,12 @@ back_to_m1()
 def gm_extra(d, base, plan):
     git_merge(d, base, plan)
     put(WT, ".claude/hooks/y.sh", "echo late\n")   # появился под защищёнными путями во время слияния
+    put(WT, ".mcp.JSON", "{}\n")                    # и в другом регистре — для APFS и песочницы это .mcp.json
+    put(WT, ".claude/worktrees/y/.claude/settings.json", "{}\n")   # и во вложенной копии
+
+
+def nested():   # файлы под .claude/worktrees копии (папки после удаления файлов остаются)
+    return [f for _, _, fs in os.walk(os.path.join(WT, ".claude", "worktrees")) for f in fs]
 
 
 M.git_merge = gm_extra
@@ -566,6 +583,7 @@ res = handle(merge=True)
 M.git_merge = git_merge
 check("--merge: успех, а под защищёнными путями лишний файл — удалён, игнорируемое до прохода на месте",
       res.get("state") == "done" and mh() and not os.path.lexists(os.path.join(WT, ".claude/hooks/y.sh"))
+      and ".mcp.JSON" not in os.listdir(WT) and not nested()
       and read(WT, ".claude/settings.local.json") == SETTINGS
       and any(".claude/hooks/y.sh: удалён" in x for x in res.get("synced") or []), res)
 back_to_m1()
@@ -614,6 +632,76 @@ put(GITDIR, "commondir", CDIR)
 check("--merge: и без сверки конфиг и атрибуты — из проверенного common (GIT_COMMON_DIR): фильтр окна не запущен",
       res.get("state") == "done" and (read(GITDIR, "MERGE_HEAD") or "").strip() == TIP and not os.path.exists(MARK2),
       res)
+back_to_m1()
+
+KEEP = []
+for swap, name in (((".git", "gitdir: " + ROOT + "\n"), ".git-файл подменён"),
+                   (("commondir", None), "commondir стал ссылкой")):
+    def gm_broken(d, base, plan, swap=swap):
+        git_merge(d, base, plan)
+        put(WT, ".claude/hooks/x.sh", "echo evil\n")
+        put(WT, ".claude/settings.local.json", "{\"evil\": 1}\n")
+        put(WT, ".claude/worktrees/y/.claude/hooks/z.sh", "echo evil\n")
+        path = os.path.join(WT if swap[0] == ".git" else GITDIR, swap[0])
+        KEEP.append((path, read(*os.path.split(path))))
+        os.unlink(path)
+        if swap[1]:
+            put(*os.path.split(path), swap[1])
+        else:
+            os.symlink(os.path.join(CLONE, ".git"), path)
+    KEEP.clear()
+    put(WT, ".claude/worktrees/y/.claude/settings.json", "{\"own\": 1}\n")   # своё вложенной копии — в снимке
+    M.git_merge = gm_broken
+    res = handle(merge=True)
+    M.git_merge = git_merge
+    os.unlink(KEEP[0][0])
+    put(*os.path.split(KEEP[0][0]), KEEP[0][1])
+    own = read(WT, ".claude/worktrees/y/.claude/settings.json")
+    check(f"--merge: {name} во время слияния, repair не смог — ветку и индекс не трогал, снимок восстановлен",
+          res.get("state") == "failed" and "ветку и индекс не трогал" in str(res.get("why"))
+          and not os.path.lexists(os.path.join(WT, ".claude/hooks/x.sh")) and nested() == ["settings.json"]
+          and own == "{\"own\": 1}\n" and read(WT, ".claude/settings.local.json") == SETTINGS
+          and read(WT, ".claude/skills/a/SKILL.md") == "A1\n", res)
+    os.unlink(os.path.join(WT, ".claude/worktrees/y/.claude/settings.json"))
+    back_to_m1()
+
+# --- регистр и вложенные копии: отказ до слияния; откат рабочее дерево через git не пишет --------------------------
+ODD = {".claude/Settings.local.json": "{\"evil\": 1}\n", ".claude/worktrees/y/.claude/settings.json": "{\"e\": 1}\n"}
+for rel, text in ODD.items():
+    for where in ("HEAD", "индекс"):
+        c = window_commit({rel: text})
+        git(WT, "update-ref", "refs/heads/m1", c if where == "HEAD" else M1)
+        git(WT, "read-tree", c)
+        res = handle(merge=True)
+        git(WT, "update-ref", "refs/heads/m1", M1)
+        git(WT, "read-tree", M1)
+        check(f"--merge: {rel} в {where} — отказ до слияния, на диск не записан", refused_with(res, "не буква в букву",
+              rel) and read(WT, ".claude/settings.local.json") == SETTINGS and not nested(), res)
+
+
+ODDC, run_ = window_commit(ODD), C._run
+
+
+def run_plant(d, *args, **kw):
+    """git прочёл под head_sha дерево окна (свободный объект; одни версии git подмену замечают, другие — нет)."""
+    r = run_(d, *args, **kw)
+    if args[:2] == ("read-tree", "--reset"):
+        git(WT, "read-tree", ODDC)
+    return r
+
+
+M.git_merge, C._run = (lambda d, base, plan: (git_merge(d, base, plan), drift())), run_plant
+res = handle(merge=True)
+M.git_merge, C._run = git_merge, run_
+IDX = git(WT, "ls-files")   # индекс отката — дерево окна, а на диск git ничего не записал
+git(WT, "read-tree", M1)
+why = str(res.get("why"))
+check("--merge: откат с подложенным деревом head_sha (регистр, вложенная копия) — git файлов не записал",
+      refused_with(res, "отменено") and read(WT, ".claude/settings.local.json") == SETTINGS
+      and not nested() and git(WT, "rev-parse", "refs/heads/m1") == M1 and ".claude/Settings.local.json" in IDX
+      and ".claude/worktrees/y/.claude/settings.json" in IDX, (res, IDX))
+check("--merge: откат код не трогает — README слияния на месте и в итоге «верни сам»",
+      read(WT, "README.md") == "r2\n" and "верни сам" in why and "README.md" in why and "newfile.txt" in why, why)
 back_to_m1()
 
 # --- звено пути подменено после проверки (ссылка, другая папка) --------------------------------------------------
@@ -685,6 +773,16 @@ check("--merge: конфликт оставлен роли — код 1, MERGE_H
       and "<<<<<<<" in (read(WT, "README.md") or ""), res)
 check("--merge: при конфликте защищённые пути — как на базе", read(WT, ".claude/skills/a/SKILL.md") == "A2\n")
 git(WT, "merge", "--abort")
+
+# --- в базе путь, защищённый не буква в букву, — отказ до слияния ---------------------------------------------------
+put(SEED, "app/.MCP.json", "{}\n")
+git(SEED, "add", "-A")
+git(SEED, "commit", "-q", "-m", "main: регистр")
+git(SEED, "push", "-q", SERVER, "main")
+git(CLONE, "fetch", "-q", "origin")
+res = handle(merge=True)
+check("--merge: в базе app/.MCP.json — отказ до слияния", refused_with(res, "не буква в букву", "app/.MCP.json"), res)
+os.unlink(os.path.join(SEED, "app/.MCP.json"))
 
 # --- свой драйвер в .gitattributes базы -----------------------------------------------------------------------------
 put(SEED, "sub/.gitattributes", "*.txt diff=evil\n")

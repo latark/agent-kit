@@ -43,6 +43,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import unicodedata
 
 P = O = None
 KIND = "claude-sync"
@@ -111,20 +112,47 @@ def patterns():
     return [tuple(p.strip("/").split("/")) for p in P.GRANT_WRITE_DENY]
 
 
-def _match(parts, pat):
-    """Путь parts лежит в шаблоне pat или под ним: «**» — любое число звеньев, «*» — внутри одного звена."""
+def fold(name):
+    """Имя, как его сравнивают APFS и песочница: без регистра и в одной нормализации Unicode (NFD и NFC — одно имя)."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", name).casefold())
+
+
+def _match(parts, pat, exact=False):
+    """Путь parts лежит в шаблоне pat или под ним: «**» — любое число звеньев, «*» — внутри одного звена. Звенья —
+    без учёта регистра и нормализации (fold), exact — буква в букву."""
     if not pat:
         return True
     if pat[0] == "**":
-        return any(_match(parts[i:], pat[1:]) for i in range(len(parts) + 1))
-    return bool(parts) and fnmatch.fnmatchcase(parts[0], pat[0]) and _match(parts[1:], pat[1:])
+        return any(_match(parts[i:], pat[1:], exact) for i in range(len(parts) + 1))
+    if not parts:
+        return False
+    eq = fnmatch.fnmatchcase(parts[0], pat[0]) if exact else fnmatch.fnmatchcase(fold(parts[0]), fold(pat[0]))
+    return eq and _match(parts[1:], pat[1:], exact)
+
+
+def _bad_rel(rel):
+    return not rel or rel.startswith("/") or ".." in rel.split("/")
 
 
 def protected(rel, pats=None):
-    if not rel or rel.startswith(NESTED) or rel.startswith("/") or ".." in rel.split("/"):
+    """Путь под шаблоном песочницы (без регистра и нормализации), кроме вложенных копий .claude/worktrees/*."""
+    if _bad_rel(rel) or fold(rel).startswith(NESTED):
         return False
     parts = rel.split("/")
     return any(_match(parts, p) for p in (pats if pats is not None else patterns()))
+
+
+def deep(rel, pats=None):
+    """Путь под шаблоном песочницы на любой глубине, и во вложенных копиях .claude/worktrees/* — так их видит песочница."""
+    parts = rel.split("/")
+    return not _bad_rel(rel) and any(_match(parts, p) for p in (pats if pats is not None else patterns()))
+
+
+def odd(rel, pats=None):
+    """Защищённый для песочницы путь, который сверка буква в букву не узнаёт: другой регистр или нормализация, вложенная
+    копия .claude/worktrees/* — git записал бы его вне песочницы мимо снимка и сверки с базой."""
+    pats = pats if pats is not None else patterns()
+    return deep(rel, pats) and (fold(rel).startswith(NESTED) or not any(_match(rel.split("/"), p, True) for p in pats))
 
 
 def _soft(pat):
@@ -189,9 +217,10 @@ def _open_parent(top_fd, parts, create=False):
         raise
 
 
-def walk(top_fd, keep, limit=None):
+def walk(top_fd, keep, limit=None, nested=False):
     """Файлы и ссылки на диске копии, где keep(rel): свой обход от корня — звенья открыты O_NOFOLLOW, по ссылкам не
-    идёт, .git и вложенные копии .claude/worktrees/* не обходит. Refused — записей больше limit."""
+    идёт, .git (в любом регистре) не обходит, вложенные копии .claude/worktrees/* — только с nested. Refused — записей
+    больше limit."""
     found, todo, seen, limit = [], [""], 0, limit or WALK_MAX
     while todo:
         pre = todo.pop()
@@ -212,7 +241,7 @@ def walk(top_fd, keep, limit=None):
             if not is_dir:
                 if keep(rel):
                     found.append(rel)
-            elif name != ".git" and rel + "/" != NESTED:
+            elif fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED):
                 todo.append(rel + "/")
     return sorted(found)
 
