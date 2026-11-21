@@ -21,6 +21,19 @@ def test_timeout_retry():
     check("через 10 минут — окно снова, палец сливает", len(b.windows()) == 2 and len(b.merges()) == 1)
 
 
+def test_system_cancel_is_no_answer():
+    """Окно закрыла система (экран заблокирован, сон: LAError.systemCancel −4, appCancel −9) — помощник выходит
+    с кодом 3, как «ответа нет», а не 1 «вы отказали»: 21.11 заявку #531 так сняли за 0 с. Сам LocalAuthentication
+    в тесте не вызвать — проверка по исходнику помощника; путь кода 3 у прохода — test_timeout_retry."""
+    src = open(os.path.join(LIBDIR, "touchid.swift"), encoding="utf-8").read()
+    body = src[src.index("ctx.evaluatePolicy("):]
+    m = re.search(r"case\s+LAError\.systemCancel\.rawValue\s*,\s*LAError\.appCancel\.rawValue\s*:\s*code\s*=\s*(\d+)",
+                  body)
+    check("systemCancel и appCancel → код 3 (ответа нет, повтор позже)", m is not None and m.group(1) == "3",
+          m and m.group(0))
+    check("прочие отказы — по-прежнему код 1", re.search(r"default\s*:\s*code\s*=\s*1", body) is not None)
+
+
 def test_fallback_notification():
     b = Box()
     b.request()
