@@ -5148,6 +5148,8 @@ def reconcile_agents(data, workers=None):
             if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
                 a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
             a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
+        elif alive or in_reg:
+            asks_clear(a)  # metis-1322 Б1: окно ожило — ответ использован, следующий вопрос снова «ждёт вас»
         if not a.get("waitingFor"):
             why = js.get("needs") if a.get("state") == "blocked" else js.get("detail") if a.get("state") == "failed" else None
             if why:
@@ -5182,8 +5184,28 @@ def stale_ask(text):
 def asks_owner(a):
     """Призрак с вопросом владельцу (metis-0651, 0662): процесс умер, а вопрос остался. Поднимает его ответ владельца
     (claude attach), а не wake и не самозапуск — как отказ pantheon start. Флаг asks ставит reconcile_agents: был
-    blocked, не noProcess, есть needs задания или waitingFor из claude agents (detail вопросом не считается)."""
-    return bool(a.get("ghost") and a.get("asks"))
+    blocked, не noProcess, есть needs задания или waitingFor из claude agents (detail вопросом не считается).
+    metis-1322: ваш ответ «Да — запустить|перезапустить <имя>» в окне вопросов — тоже ответ: метка asks-answered/<id>
+    (её пишет только плановый проход по сверенной записи owner-log, watch.word_answer_ghosts) снимает «ждёт вас»."""
+    return bool(a.get("ghost") and a.get("asks")) and not asks_answered(a)
+
+
+ASKS_ANSWERED_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def asks_clear(a):
+    """Снять метку «владелец ответил» (metis-1322, ревью argus Б1): ответ закрывает один подъём. respawn продолжает
+    сессию с тем же id — без снятия её следующий вопрос и новая смерть прошли бы мимо «ждёт вас»."""
+    aid = str(a.get("id") or "")
+    if ASKS_ANSWERED_ID.fullmatch(aid):
+        with contextlib.suppress(OSError):
+            os.unlink(path("asks-answered", aid))
+
+
+def asks_answered(a):
+    """У призрака есть метка «владелец ответил» (metis-1322). id не по шаблону — метки нет: путь из записи не строим."""
+    aid = str(a.get("id") or "")
+    return bool(ASKS_ANSWERED_ID.fullmatch(aid)) and os.path.exists(path("asks-answered", aid))
 
 
 def pid_alive(pid):

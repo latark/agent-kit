@@ -3541,6 +3541,11 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     cap = None if name in P.CAP_FREE else P.night_mod().launch_cap("tick", target=name)  # Гестию потолок не держит (29.10)
     if cap:
         return f"не исполняю: {cap}"
+    asked = word_answer_ghosts(name, agents, qid, ts)
+    if asked:  # замечание к #535: «Да — запустить» поднимает окно, но на его вопрос не отвечает — окно должно это знать
+        text += (" Перед смертью окно спрашивало владельца: " + "; ".join(f"«{q[:160]}»" for _, q in asked)
+                 + " — ответа на это нет (ответ «Да — " + verb + "» только поднял окно): не продолжай по догадке, "
+                 "задай вопрос снова.")
     if verb == "перезапустить":
         try:
             r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", "tick", "--restart",
@@ -3550,6 +3555,8 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
         tail = (r.stderr or r.stdout).strip().splitlines()
         if r.returncode == 0:
             ONESHOT_STARTED.append(name)
+            for aid, _ in asked:
+                P.asks_clear({"id": aid})
         return "перезапущено" if r.returncode == 0 else f"не вышло, код {r.returncode}" + (f": {tail[-1][:160]}" if tail else "")
     if name in ONESHOT_STARTED or name in awake().RESUMED:
         return "уже поднято этим проходом"
@@ -3563,6 +3570,46 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
         ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
         return "поднято"
     return f"не вышло, код {rc}"
+
+
+ASKS_ANSWERED_DAYS = 14
+
+
+def word_answer_ghosts(name, agents, qid, ts):
+    """metis-1322: ваш ответ «Да — запустить|перезапустить <имя>» снимает «ждёт вас» с призраков этого направления,
+    умерших до ответа: метка asks-answered/<id> (P.asks_answered). Без неё призрак с вопросом не поднимали ни wake, ни
+    этот же запуск по ответу (wake_block), ни pantheon start — ответ ложился во входящие, а окно стояло. Метка — на
+    запись claude agents, а не на имя: новый вопрос новой сессии она не снимает; ответ закрывает один подъём — метку
+    снимают успешный подъём (resume_or_start, перезапуск) и запись, ожившая в reconcile_agents (ревью argus Б1: respawn
+    сохраняет id). Не снятые старше ASKS_ANSWERED_DAYS — убираются. → [(id, вопрос)] отмеченных."""
+    try:
+        t_ans = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
+    except (TypeError, ValueError):
+        return []
+    alias = P.name_alias(name)
+    out = []
+    for a in agents or []:
+        aid = str(a.get("id") or "")
+        if not (P.asks_owner(a) and alias.fullmatch(str(a.get("name") or ""))
+                and P.ASKS_ANSWERED_ID.fullmatch(aid)):
+            continue
+        try:
+            born = float(a.get("startedAt")) / 1000
+        except (TypeError, ValueError):
+            born = None
+        if born is None or born > t_ans:  # сессия моложе ответа — её вопрос этим ответом не закрыт
+            continue
+        os.makedirs(P.path("asks-answered"), exist_ok=True)  # STATE: окна туда не пишут — метку роли не подделать
+        P.write_atomic(P.path("asks-answered", aid), f"{name}\t{qid}\t{ts}\n")
+        out.append((aid, " ".join(str(a.get("waitingFor") or "").split())))
+        P.start_log(f"asks-answered\t{name}\t{aid}\tответ [{qid}] {ts}: «ждёт вас» снято")
+    d = P.path("asks-answered")
+    with contextlib.suppress(OSError):
+        for f in os.listdir(d):
+            with contextlib.suppress(OSError):
+                if P.now() - os.stat(os.path.join(d, f)).st_mtime > ASKS_ANSWERED_DAYS * 86400:
+                    os.unlink(os.path.join(d, f))
+    return out
 
 
 def _word_unstop(name):
@@ -3588,7 +3635,18 @@ def unstop(name, why):
 
 def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
     """Остановленная или упавшая сессия направления — продолжить её же (контекст эпика сохраняется, с её именем и
-    окном — P.resume_session); нет такой — новая через pantheon start."""
+    окном — P.resume_session); нет такой — новая через pantheon start. Поднято — метки «владелец ответил» (metis-1322)
+    у призраков этого имени сняты: ответ закрывает один подъём."""
+    rc = _resume_or_start(name, agents, text, origin, only_resume, auto)
+    if rc == 0:
+        alias = P.name_alias(name)
+        for a in agents or []:
+            if a.get("ghost") and alias.fullmatch(str(a.get("name") or "")):
+                P.asks_clear(a)
+    return rc
+
+
+def _resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
     alias = P.name_alias(name)
     old = [a for a in agents if alias.fullmatch(str(a.get("name") or "")) and a.get("state") in ("stopped", "failed")
            and a.get("sessionId")]
