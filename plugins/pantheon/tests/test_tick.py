@@ -637,7 +637,11 @@ def main():
     mw = sm["sandbox"]["filesystem"]["allowWrite"]
     check("песочница: доп. запись — только из policy.toml и только кэши; реестр права не даёт",
           real(".cache/metis") in mw and not any(x.endswith(("/pantheon", "/.ssh")) for x in mw)
-          and ".ssh" not in json.dumps(sa) + json.dumps(sm))
+          # metis-1333 (К2): ~/.ssh законно стоит в denyRead и Read(…) окна — права на запись реестр не даёт:
+          # ни в allowWrite, ни в правилах allow
+          and not any(".ssh" in x for w in (sa, sm) for x in w["sandbox"]["filesystem"]["allowWrite"]
+                      + (w.get("permissions") or {}).get("allow", []))
+          and all(any(x.endswith("/.ssh") for x in w["sandbox"]["filesystem"]["denyRead"]) for w in (sa, sm)))
     zw = sz["sandbox"]["filesystem"]["allowWrite"]
     check("песочница: папки направления — только внутри ~/projects и ~/ai/knowledge, ссылки пропущены",
           zw[0] == real("projects/zz") and real("projects") not in zw and real("pantheon") not in zw
