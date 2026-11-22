@@ -210,7 +210,7 @@ def git_window(cwd, remote="origin"):
     (None, None, причина). run(args) — git с проверенной папкой, без хуков, конфига системы и GIT_* окна."""
     try:
         repo, gitdir, common, wt = _where(cwd)
-        P.wt_own(repo)
+        P.wt_own(repo)  # своя копия, как у pantheon git (мутанты test_gitout держат строку push отдельно)
         _check_repo(common, gitdir, remote, False)
     except (Refuse, P.WtRefuse) as e:
         return None, None, str(e)
@@ -219,7 +219,7 @@ def git_window(cwd, remote="origin"):
     slug = slug[:-4] if slug.endswith(".git") else slug
 
     def run(args):
-        cmd = ["git", "--no-replace-objects", f"--git-dir={gitdir}", f"--work-tree={wt}", *HARD, *NET, *args]
+        cmd = ["git", "--no-replace-objects", "--git-dir=" + gitdir, "--work-tree=" + wt, *HARD, *NET, *args]
         return subprocess.run(cmd, cwd=wt, env=_env(), capture_output=True, text=True)
     return run, slug, None
 
