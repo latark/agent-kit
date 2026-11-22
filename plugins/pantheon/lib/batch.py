@@ -11,8 +11,9 @@ review, а не в done; в stderr — «<id>: неотмечено N», стр�
 `pantheon batch pr` идёт мимо песочницы окна (excludedCommands, BATCH_PR_OUT в pantheon.py, metis-1333): в окне
 Связка закрыта, и gh там без входа. Поэтому git зовётся через git_window (gitout.py): папка git настоящая, репозиторий
 своего направления, в конфиге нет ключей, которыми git исполнил бы код, url origin — только github.com; без хуков и
-GIT_* окна. gh получает `-R <владелец/репозиторий>` из проверенного url origin, а не из папки, и окружение без GH_REPO,
-GH_HOST, GH_CONFIG_DIR и XDG_CONFIG_HOME. Форму строки в окне проверяет guard (правило batch-pr-cmd).
+GIT_* окна; репозиторий origin — из [merge_repos] policy.toml своего направления. gh получает
+`-R <владелец/репозиторий>` из проверенного url origin, а не из папки, окружение без GH_REPO, GH_HOST, GH_CONFIG_DIR и
+XDG_CONFIG_HOME и постоянный PATH (GH_PATH), а не PATH окна. Форму строки в окне проверяет guard (правило batch-pr-cmd).
 Шлюз guard проверяет PR пачки как любой другой: с metis-1050 годится и узкая запись тестов (--affected), полный набор идёт ночью на main.
 Карточка пачки помнит ветку и PR (поля branch и pr, tasks.FIELDS): start пишет branch, pr — branch и pr
 («владелец/репозиторий#N» по ссылке, которую печатает gh). По ним карточка пачки и board-auto показывают PR пачки.
@@ -209,6 +210,7 @@ def _start(sid, cwd, head=None):
 
 
 GH_ENV_DROP = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")  # gh мимо песочницы: репозиторий и вход — не из окна
+GH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"  # gh мимо песочницы — не из PATH окна (как GIT_PATH в gitout)
 
 
 def _pr(sid, tasks, cwd, dry):
@@ -230,6 +232,7 @@ def _pr(sid, tasks, cwd, dry):
         print(title + "\n\n" + body, end="")
         return 0
     env = {k: v for k, v in os.environ.items() if k not in GH_ENV_DROP}
+    env["PATH"] = GH_PATH
     have = subprocess.run(["gh", "pr", "list", "--head", br, "--state", "open", "--json", "number", "--jq", ".[0].number",
                            "-R", repo],
                           cwd=cwd, env=env, capture_output=True, text=True)

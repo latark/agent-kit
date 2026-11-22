@@ -80,11 +80,27 @@ ghlog = os.path.join(tmp, "gh.log")
 openpr = os.path.join(tmp, "open_pr")
 open(os.path.join(bindir, "gh"), "w").write(
     "#!/bin/sh\n"
+    f"printf '%s' \"$PATH\" > '{os.path.join(tmp, 'gh.path')}'\n"
     f"for a in \"$@\"; do printf '%s\\0' \"$a\"; done >> '{ghlog}'; printf '\\001' >> '{ghlog}'\n"
     f"if [ \"$1 $2\" = 'pr list' ]; then cat '{openpr}' 2>/dev/null; exit 0; fi\n"
     "if [ \"$1 $2\" = 'pr edit' ]; then echo https://github.com/x/y/pull/$3; exit 0; fi\n"
     "echo https://github.com/x/y/pull/9\n")
 os.chmod(os.path.join(bindir, "gh"), 0o755)
+
+# metis-1333: gh мимо песочницы ищется по GH_PATH, а не по PATH окна. Копия lib, где GH_PATH — папка поддельного gh;
+# PATH окна (env ниже) другой, и gh.path показывает, какой из них дошёл до gh.
+GH_FIXED = 'GH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"'
+GH_TEST_PATH = f"{bindir}:/usr/bin:/bin"
+_bsrc = open(os.path.join(LIB, "batch.py"), encoding="utf-8").read()
+check("batch.py: GH_PATH — постоянная строка, одна (как GIT_PATH в gitout)", _bsrc.count(GH_FIXED) == 1)
+GHLIB = os.path.join(_ROOT, "ghlib")
+shutil.copytree(LIB, GHLIB, ignore=shutil.ignore_patterns("__pycache__"))
+open(os.path.join(GHLIB, "batch.py"), "w", encoding="utf-8").write(_bsrc.replace(GH_FIXED, f'GH_PATH = "{GH_TEST_PATH}"'))
+RUN_PY = os.path.join(GHLIB, "run.py")
+# [merge_repos] policy.toml: git_window пускает только origin репозитория направления (Д2 argus)
+os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
+open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write(
+    '[merge_repos]\nmetis-pantheon = ["x/y"]\nhermes-alex = ["a/b"]\n')
 
 
 def gh_calls():
@@ -186,6 +202,9 @@ check("pr: сначала gh pr list по ветке, затем create --base m
       and len(create) == 1 and create[0][2:7] == ["--base", "main", "--head", "batch/metis-0900", "--title"], str(calls))
 check("pr: gh получает -R x/y из проверенного url origin (metis-1333), а не из папки",
       bool(create) and create[0][-2:] == ["-R", "x/y"] and calls[0][-2:] == ["-R", "x/y"], str(calls))
+_ghp = open(os.path.join(tmp, "gh.path")).read() if os.path.exists(os.path.join(tmp, "gh.path")) else None
+check("pr: gh получает PATH из GH_PATH, а не PATH окна (откат env[\"PATH\"] = GH_PATH — тест красный)",
+      _ghp == GH_TEST_PATH and env["PATH"] != GH_TEST_PATH, repr(_ghp))
 check("влитая ветка metis-0902-… засчитана: Closes на обе",
       bool(create) and create[0][7].startswith("Пачка metis-0900") and create[0][8] == "--body"
       and "Closes metis-0901, metis-0902" in create[0][9] and "не вошли" not in create[0][9].lower(), str(create))
@@ -269,6 +288,35 @@ r = cli(wt, "batch", "pr", "metis-0900")
 check("pr: ключ core.pager в конфиге → код 2, ключ назван, gh не зван",
       r.returncode == 2 and "core.pager" in r.stderr and not os.path.exists(mark), r.stderr)
 git(repo, "config", "--unset", "core.pager")
+# Д2 argus: origin github.com, но не репозиторий направления из [merge_repos] — отказ до gh
+git(repo, "remote", "set-url", "origin", "https://github.com/evil/other.git")
+r = cli(wt, "batch", "pr", "metis-0900")
+check("pr: origin github.com/evil/other — нет в [merge_repos] → код 2, «merge_repos» в причине, gh не зван",
+      r.returncode == 2 and "merge_repos" in r.stderr and "evil/other" in r.stderr and not os.path.exists(mark), r.stderr)
+git(repo, "remote", "set-url", "origin", "https://github.com/X/Y.git")
+r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
+check("pr: slug сверяется без учёта регистра — X/Y пускается", r.returncode == 0, r.stderr)
+git(repo, "remote", "set-url", "origin", "https://github.com/x/y.git")
+os.makedirs(state, exist_ok=True)
+_doms = os.path.join(state, "domains.json")
+open(_doms, "w").write('{"domains": {"metis-pantheon": ["%s"], "hermes-alex": ["%s"]}}' % (tmp, repo))
+env["PANTHEON_WINDOW"] = "hermes-alex"  # папка repo — направления hermes-alex, а x/y — репозиторий metis-pantheon
+try:
+    r = cli(wt, "batch", "pr", "metis-0900")
+    check("pr в окне hermes-alex: origin x/y — репозиторий другого направления → код 2, направление в причине, gh не зван",
+          r.returncode == 2 and "направления hermes-alex" in r.stderr and not os.path.exists(mark), r.stderr)
+    env["PANTHEON_WINDOW"] = "metis-pantheon"
+    open(_doms, "w").write('{"domains": {"metis-pantheon": ["%s"]}}' % tmp)
+    r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
+    check("pr в окне metis-pantheon: origin x/y своего направления — код 0", r.returncode == 0, r.stderr)
+finally:
+    env.pop("PANTHEON_WINDOW", None)
+    os.remove(_doms)
+os.rename(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), os.path.join(tmp, "policy.off"))
+r = cli(wt, "batch", "pr", "metis-0900")
+check("pr: policy.toml не прочитан → код 2, «policy.toml» в причине, gh не зван",
+      r.returncode == 2 and "policy.toml" in r.stderr and not os.path.exists(mark), r.stderr)
+os.rename(os.path.join(tmp, "policy.off"), os.path.join(tmp, ".claude", "pantheon", "policy.toml"))
 r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
 check("pr --dry-run с проверенным origin — код 0, тело собрано", r.returncode == 0 and "Closes metis-0901" in r.stdout,
       r.stdout + r.stderr)
@@ -307,7 +355,7 @@ check("слит PR пачки: metis-0901 done, metis-0902 открыта (revie
 # metis-1226: start через общую pantheon worktree add; fetch без сети — имеющийся origin/main; песочница — подсказка
 def mutant_lib(old, new):
     d = os.path.join(tmp, "mutlib-" + str(len(os.listdir(tmp))))
-    shutil.copytree(LIB, d, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(GHLIB, d, ignore=shutil.ignore_patterns("__pycache__"))
     f = os.path.join(d, "batch.py")
     src = open(f, encoding="utf-8").read()
     assert src.count(old) == 1, old

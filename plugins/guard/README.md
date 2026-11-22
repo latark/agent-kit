@@ -640,7 +640,12 @@ answer и плановый проход, это скрипты, guard их не 
   pnpm, npm, uv, supabase и curl Связку в песочнице не читают. Флаг trustd оставлен (строка в «Известных дырах»).
 - **batch-pr-cmd (metis-1333).** `pantheon batch pr` идёт мимо песочницы, поэтому guard пускает только строку целиком
   `pantheon batch pr <story-id> [--dry-run]`: цепочки, подстановки, кавычки, присваивания, обёртки и путь к пульту —
-  отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём.
+  отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём. `git_window` пускает только origin из [merge_repos]
+  policy.toml своего направления, а gh зовётся с постоянным PATH (`GH_PATH` в lib/batch.py), не с PATH окна.
+- **review-delta-cmd (metis-1333).** `pantheon review delta` тоже идёт мимо песочницы, поэтому guard пускает только
+  строку целиком `pantheon review delta <владелец/репозиторий> <PR>`: цепочки, подстановки, кавычки, `..`, лишние
+  слова и флаги, присваивания, обёртки и путь к пульту — отказ. Прочий `pantheon review` правило не трогает. Тест —
+  tests/test_review_delta_cmd.py, мутанты в нём.
 - **worktree-cmd (metis-1225, вариант Б владельца 15.11).** Claude Code (2.1.325) в песочнице закрывает запись в
   `.git/worktrees`, кроме worktree своей сессии, а EnterWorktree с `name` окну направления закрыт (worktree-own) —
   `git worktree add|remove` из Bash окна падает EPERM на полпути. Коммитить в копии окно может после EnterWorktree с
