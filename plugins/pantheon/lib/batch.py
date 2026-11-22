@@ -8,6 +8,11 @@ Closes в теле — только задачам пачки, чей номер
 недоделанная задача не должна закрыться вместе с пачкой. Остальные открытые — списком «не вошли», без Closes.
 Задача с неотмеченным пунктом «Готово, когда» или заглушкой (metis-0767) тоже без Closes: слитый PR оставил бы её в
 review, а не в done; в stderr — «<id>: неотмечено N», строка тела «Не целиком, остаются открытыми».
+`pantheon batch pr` идёт мимо песочницы окна (excludedCommands, BATCH_PR_OUT в pantheon.py, metis-1333): в окне
+Связка закрыта, и gh там без входа. Поэтому git зовётся через git_window (gitout.py): папка git настоящая, репозиторий
+своего направления, в конфиге нет ключей, которыми git исполнил бы код, url origin — только github.com; без хуков и
+GIT_* окна. gh получает `-R <владелец/репозиторий>` из проверенного url origin, а не из папки, и окружение без GH_REPO,
+GH_HOST, GH_CONFIG_DIR и XDG_CONFIG_HOME. Форму строки в окне проверяет guard (правило batch-pr-cmd).
 Шлюз guard проверяет PR пачки как любой другой: с metis-1050 годится и узкая запись тестов (--affected), полный набор идёт ночью на main.
 Карточка пачки помнит ветку и PR (поля branch и pr, tasks.FIELDS): start пишет branch, pr — branch и pr
 («владелец/репозиторий#N» по ссылке, которую печатает gh). По ним карточка пачки и board-auto показывают PR пачки.
@@ -57,10 +62,12 @@ PART_ID = re.compile(r"(?<!\w)часть\s+(" + ID_IN.pattern + ")", re.I)
 PART_WORD = re.compile(r"(?<!\w)часть(?!\w)", re.I)
 
 
-def branch_ids(cwd):
+def branch_ids(cwd, git=None):
     """(номера задач в коммитах ветки от origin/main — сообщения и «Merge branch '<id>-…'»; номера, которые хоть один
-    коммит называет «часть <id>» — задача сделана не вся, Closes ей не ставим). None — git не ответил."""
-    r = _git(["log", "--format=%B", "origin/" + BASE + "..HEAD"], cwd)
+    коммит называет «часть <id>» — задача сделана не вся, Closes ей не ставим). None — git не ответил.
+    git — run из git_window (проверенный git мимо песочницы); без него — git папки cwd."""
+    argv = ["log", "--format=%B", "origin/" + BASE + "..HEAD"]
+    r = git(argv) if git else _git(argv, cwd)
     if r.returncode != 0:
         return None
     return set(ID_IN.findall(r.stdout)), set(PART_ID.findall(r.stdout))
@@ -201,13 +208,20 @@ def _start(sid, cwd, head=None):
     return 0
 
 
+GH_ENV_DROP = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")  # gh мимо песочницы: репозиторий и вход — не из окна
+
+
 def _pr(sid, tasks, cwd, dry):
     br = batch_branch(sid)
-    cur = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    git, repo, why = P.git_window(cwd)
+    if git is None:
+        print(f"pantheon batch pr: {why}", file=sys.stderr)
+        return 2
+    cur = git(["rev-parse", "--abbrev-ref", "HEAD"])
     if cur.returncode != 0 or cur.stdout.strip() != br:
         print(f"pantheon batch pr: запускай из копии ветки {br} (сейчас: {cur.stdout.strip() or '?'})", file=sys.stderr)
         return 2
-    found = branch_ids(cwd)
+    found = branch_ids(cwd, git)
     if found is None:
         print(f"pantheon batch pr: git log origin/{BASE}..HEAD не прошёл — Closes не из чего собрать", file=sys.stderr)
         return 1
@@ -215,17 +229,18 @@ def _pr(sid, tasks, cwd, dry):
     if dry:
         print(title + "\n\n" + body, end="")
         return 0
-    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
-    have = subprocess.run(["gh", "pr", "list", "--head", br, "--state", "open", "--json", "number", "--jq", ".[0].number"],
+    env = {k: v for k, v in os.environ.items() if k not in GH_ENV_DROP}
+    have = subprocess.run(["gh", "pr", "list", "--head", br, "--state", "open", "--json", "number", "--jq", ".[0].number",
+                           "-R", repo],
                           cwd=cwd, env=env, capture_output=True, text=True)
     if have.returncode != 0:
         print(f"pantheon batch pr: gh pr list не прошёл: {have.stderr.strip()[:300]}", file=sys.stderr)
         return 1
     num = have.stdout.strip()
     if num.isdigit():
-        argv = ["gh", "pr", "edit", num, "--title", title, "--body", body]
+        argv = ["gh", "pr", "edit", num, "-R", repo, "--title", title, "--body", body]
     else:
-        argv = ["gh", "pr", "create", "--base", BASE, "--head", br, "--title", title, "--body", body]
+        argv = ["gh", "pr", "create", "--base", BASE, "--head", br, "--title", title, "--body", body, "-R", repo]
     r = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
     print(r.stdout, end="")
     if r.returncode != 0:

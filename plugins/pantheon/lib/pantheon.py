@@ -2445,10 +2445,11 @@ SANDBOX_STRICT = 2
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
-# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу. Всё, что не
-# исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и запись в `gh issue` (любые
-# записи в GitHub) не выпускаются; из `gh pr`, `gh issue` и `gh run` — только чтение (`gh run cancel|rerun|delete`
-# падают). Голые формы — отдельно: шаблон «… *» их не покрывает (metis-0533: status и gh issue view|list добавлены)
+# Мимо песочницы: gh — только эти подкоманды; дописать тревогу. В песочнице gh без входа: Связка (KEYCHAIN_DIR в
+# WINDOW_SECRET_DIRS) окну закрыта, токена gh нет, и запись в GitHub отвечает 401 (metis-1333, К1: раньше Связка была
+# открыта, TLS с trustd работал, и gh api из песочницы писал в GitHub). Это и есть отказ (P0-4, metis-0064): `gh api`
+# и запись в `gh issue` не выпускаются; из `gh pr`, `gh issue` и `gh run` — только чтение (`gh run cancel|rerun|delete`
+# без входа падают). Голые формы — отдельно: шаблон «… *» их не покрывает (metis-0533: status и gh issue view|list)
 GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list", "status") for tail in ("", " *")]
 GH_ISSUE_READ = [f"gh issue {c}{tail}" for c in ("view", "list") for tail in ("", " *")]
 GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
@@ -2473,6 +2474,10 @@ WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
 # базе — прямое TCP. Мимо неё только migrate; прочий `pantheon supabase` — в песочнице. Файл, ветку по умолчанию origin
 # и SQL проверяет сама команда (lib/supabase_migrate.py), форму строки без цепочек — guard (supabase-migrate-cmd)
 SUPABASE_MIGRATE_OUT = ["pantheon supabase migrate *"]
+# PR пачки (metis-1333, К1): `pantheon batch pr` зовёт gh pr list|create|edit, а в песочнице gh без входа — мимо неё,
+# как `pantheon merge request`. Папку git и url origin проверяет сама команда (git_window в gitout.py, gh — с -R из
+# url), форму строки без цепочек — guard (batch-pr-cmd). `pantheon batch start` остаётся в песочнице
+BATCH_PR_OUT = ["pantheon batch pr *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -2504,7 +2509,12 @@ OUTSIDE_KEY_DIRS = (os.path.join(STATE, "outside", "env"), os.path.join(STATE, "
 # Ключи демона Claude Code (metis-1026, К2): control.key и roster.json (rvAuth, ptyAuth) дают ввод в PTY любой сессии —
 # строку в owner-log от имени владельца. Окну роли не читать даже при открытом канале; реестр без ключей — снимок планового прохода
 DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")
-WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR)
+# Связка ключей пользователя (metis-1333, К1, план metis-1331 PR-1): в ней токен gh, и gh из песочницы с сетью писал
+# в GitHub. Закрыта всем окнам; gh, которому нужен вход, идёт мимо песочницы узкими командами (GH_PR_WRITE,
+# PANTHEON_MERGE_OUT, BATCH_PR_OUT, REVIEW_GH_OUT в window_rules.py). Проба 22.11: pnpm, npm, uv, supabase и curl Связку
+# в песочнице не читают; git credential-osxkeychain отдаёт пусто — git по https входит мимо песочницы (pantheon git)
+KEYCHAIN_DIR = os.path.join(HOME, "Library", "Keychains")
+WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR, KEYCHAIN_DIR)
 
 
 def _home_form(p):
@@ -3180,7 +3190,10 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             # macOS: доступ к com.apple.trustd — без него gh (Go, Security.framework), запущенный процессом в
             # песочнице (pantheon review accept), падает на x509 OSStatus -26276 (metis-1273, «да» владельца 20.11
             # «А — доступ к trustd»). Настройка Claude Code sandbox.enableWeakerNetworkIsolation; сеть и папки не шире.
-            # Окна без сети (hq, hestia, job-*) флаг снимают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL)
+            # Окна без сети (hq, hestia, job-*) флаг снимают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL).
+            # metis-1333: Связка закрыта, и gh шлюза идёт мимо песочницы (REVIEW_GH_OUT), но флаг оставлен — без него
+            # TLS Go-программ в песочнице (gh без входа на публичное, supabase) падал бы на x509; проба 22.11 снять его
+            # не могла (это настройка окна, а не команды) — проверка без флага отдельной задачей
             "enableWeakerNetworkIsolation": True,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_OUT if ssh else []),
             "filesystem": {
@@ -4609,7 +4622,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                              guard, auto_allow, own_agents=direction)
         if direction:
             data["sandbox"]["excludedCommands"] += (GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
-                                                    + SUPABASE_MIGRATE_OUT)
+                                                    + SUPABASE_MIGRATE_OUT + BATCH_PR_OUT)
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
@@ -4640,9 +4653,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
-            # metis-1279: пакет закрыл песочнице Связку — gh шлюза (review accept|delta) мимо неё (window_rules)
+            # metis-1279, metis-1333: Связка закрыта каждому окну (KEYCHAIN_DIR) — gh шлюза (review accept|delta) мимо
+            # песочницы у всех направлений (window_rules)
             ex = data["sandbox"]["excludedCommands"]
-            ex += WINDOW_RULES.review_gh_out(data["sandbox"].get("filesystem", {}).get("denyRead"), HOME, ex)
+            ex += WINDOW_RULES.review_gh_out(ex)
             pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна

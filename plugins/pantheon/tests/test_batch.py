@@ -144,7 +144,8 @@ check("start повторно → код 1, «уже есть»", r.returncode =
 r = cli(wt, "batch", "start", "metis-0900")
 check("start из копии пачки — тот же репозиторий, «уже есть»", r.returncode == 1 and "уже есть" in r.stderr, r.stderr)
 
-# pr
+# pr — мимо песочницы (metis-1333): url origin только github.com, поэтому origin на время pr — адрес GitHub
+git(repo, "remote", "set-url", "origin", "https://github.com/x/y.git")
 r = cli(repo, "batch", "pr", "metis-0900")
 check("pr не из ветки пачки → код 2, gh не зван", r.returncode == 2 and not gh_calls(), r.stderr)
 r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
@@ -183,6 +184,8 @@ create = [c for c in calls if c[:2] == ["pr", "create"]]
 check("pr: сначала gh pr list по ветке, затем create --base main --head batch/metis-0900",
       r.returncode == 0 and len(calls) == 2 and calls[0][:4] == ["pr", "list", "--head", "batch/metis-0900"]
       and len(create) == 1 and create[0][2:7] == ["--base", "main", "--head", "batch/metis-0900", "--title"], str(calls))
+check("pr: gh получает -R x/y из проверенного url origin (metis-1333), а не из папки",
+      bool(create) and create[0][-2:] == ["-R", "x/y"] and calls[0][-2:] == ["-R", "x/y"], str(calls))
 check("влитая ветка metis-0902-… засчитана: Closes на обе",
       bool(create) and create[0][7].startswith("Пачка metis-0900") and create[0][8] == "--body"
       and "Closes metis-0901, metis-0902" in create[0][9] and "не вошли" not in create[0][9].lower(), str(create))
@@ -199,6 +202,7 @@ calls = gh_calls()
 check("повтор при открытом PR → gh pr edit 17 с новым телом, create нет",
       r.returncode == 0 and any(c[:3] == ["pr", "edit", "17"] and "Closes metis-0901, metis-0902" in c[-1] for c in calls)
       and not any(c[:2] == ["pr", "create"] for c in calls), str(calls))
+check("повтор: gh pr edit 17 -R x/y", any(c[:5] == ["pr", "edit", "17", "-R", "x/y"] for c in calls), str(calls))
 check("повтор: pr пачки — открытый PR 17 (x/y#17)", story_head().get("pr") == "x/y#17", str(story_head()))
 
 # коммит «часть <id>» — задача сделана не вся: Closes ей нет, в теле нет слова «часть» (autoclose снял бы весь PR)
@@ -251,6 +255,24 @@ check("gh вернул ссылку с другим номером PR — код
 open(os.path.join(bindir, "gh"), "w").write("#!/bin/sh\nexit 1\n")
 r = cli(wt, "batch", "pr", "metis-0900")
 check("gh упал — его код, pr пачки не тронуто", r.returncode == 1 and story_head().get("pr") == "x/y#17", r.stderr)
+
+# metis-1333: batch pr идёт мимо песочницы окна — git проверен, как у pantheon git fetch; отказ — код 2 до gh
+mark = os.path.join(tmp, "gh-called")
+open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho x >> '{mark}'\necho https://github.com/x/y/pull/9\n")
+git(repo, "remote", "set-url", "origin", origin)
+r = cli(wt, "batch", "pr", "metis-0900")
+check("pr: url origin — локальный путь → код 2, «github.com» в причине, gh не зван",
+      r.returncode == 2 and "github.com" in r.stderr and not os.path.exists(mark), r.stderr)
+git(repo, "remote", "set-url", "origin", "https://github.com/x/y.git")
+git(repo, "config", "core.pager", "cat")
+r = cli(wt, "batch", "pr", "metis-0900")
+check("pr: ключ core.pager в конфиге → код 2, ключ назван, gh не зван",
+      r.returncode == 2 and "core.pager" in r.stderr and not os.path.exists(mark), r.stderr)
+git(repo, "config", "--unset", "core.pager")
+r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
+check("pr --dry-run с проверенным origin — код 0, тело собрано", r.returncode == 0 and "Closes metis-0901" in r.stdout,
+      r.stdout + r.stderr)
+git(repo, "remote", "set-url", "origin", origin)
 
 # карточка пачки: PR пачки (ссылка, состояние из кэша gh) и ветка
 tk = T.load_tasks(home, T.WORK_TYPES)

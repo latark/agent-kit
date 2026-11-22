@@ -96,31 +96,27 @@ max_delay = 180
 
 
 def keychain_gate(check, tmp, env, load):
-    """metis-1279: окна со Связкой, закрытой пакетом, и без запрета — excludedCommands review accept|delta."""
-    # metis-1279: пакет закрыл песочнице Связку (denyRead ~/Library/Keychains) — gh шлюза (review accept|delta) мимо
-    # неё; пакет с другим запретом и окно без пакета — без этих команд
+    """metis-1333 (К1): у каждого окна с сетью Связка закрыта; gh шлюза и PR пачки — мимо песочницы окнам направлений."""
     gate_out = ["pantheon review accept", "pantheon review accept *", "pantheon review delta", "pantheon review delta *"]
-    packs = os.path.join(tmp, ".claude", "pantheon", "packs")
-    for n, deny in (("metis-pantheon", ["~/Library/Keychains/"]), ("mnemo-brain", ["~/Library/Mail"]),
-                    ("zz", [os.path.join(tmp, "Library", "Keychains", "login.keychain-db")])):
-        os.makedirs(os.path.join(packs, n), exist_ok=True)
-        open(os.path.join(packs, n, "window.json"), "w").write(json.dumps({"sandbox": {"denyRead": deny}}))
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
-    exc = lambda n: load(n)["sandbox"]["excludedCommands"]  # noqa: E731
-    check("окно с закрытой Связкой (пакет, ~ и абсолютный путь): pantheon review accept|delta мимо песочницы, report — "
-          "нет (metis-1279)",
-          all(c in exc(n) for n in ("metis-pantheon", "zz") for c in gate_out)
-          and not any("review report" in c for n in ("metis-pantheon", "zz") for c in exc(n)),
-          [exc(n) for n in ("metis-pantheon", "zz")])
-    check("окна без запрета Связки (другой denyRead, без пакета): review accept|delta остаются в песочнице (metis-1279)",
-          not any(c.startswith("pantheon review") for n in ("mnemo-brain", "athena-shop", "workshop") for c in exc(n)),
-          [exc(n) for n in ("mnemo-brain", "athena-shop")])
-    for n in ("metis-pantheon", "mnemo-brain", "zz"):
-        os.remove(os.path.join(packs, n, "window.json"))
-        os.rmdir(os.path.join(packs, n))
-    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
-    check("пакет убран — review accept|delta снова в песочнице (metis-1279)",
-          not any(c.startswith("pantheon review") for c in exc("metis-pantheon")))
+    names = sorted(f[:-5] for f in os.listdir(os.path.join(env["PANTHEON_STATE"], "settings")) if f.endswith(".json"))
+    sb = {n: load(n).get("sandbox") or {} for n in names}
+    online = [n for n in names if (sb[n].get("network") or {}).get("allowedDomains")]
+    kc = os.path.join(env["HOME"], "Library", "Keychains")
+    no_kc = [n for n in online
+             if not ({kc, os.path.realpath(kc)} & set((sb[n].get("filesystem") or {}).get("denyRead") or []))
+             or "Read(~/Library/Keychains/**)" not in load(n).get("permissions", {}).get("deny", [])]
+    check("у каждого окна с сетью Связка закрыта: denyRead песочницы и правило Read (metis-1333, К1)",
+          not no_kc and {"athena-shop", "metis-pantheon", "workshop", "mnemo-brain"} <= set(online), (online, no_kc))
+    exc = lambda n: sb[n].get("excludedCommands") or []  # noqa: E731
+    dirs = [n for n in ("metis-pantheon", "athena-shop", "mnemo-brain") if n in sb]
+    check("окна направлений (и без пакета): pantheon review accept|delta и batch pr мимо песочницы, report — нет "
+          "(metis-1279, metis-1333)",
+          len(dirs) == 3 and all(c in exc(n) for n in dirs for c in gate_out + ["pantheon batch pr *"])
+          and not any("review report" in c or "batch start" in c for n in dirs for c in exc(n)),
+          [exc(n) for n in dirs])
+    check("мастерская: review accept|delta и batch pr остаются в песочнице (metis-1333)",
+          not any(c.startswith(("pantheon review", "pantheon batch")) for c in exc("workshop")), exc("workshop"))
     kc_probe = f"""
 import json, sys
 sys.path.insert(0, {os.path.dirname(LIB)!r})
