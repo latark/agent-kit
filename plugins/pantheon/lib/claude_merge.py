@@ -40,7 +40,7 @@ git — без GIT_*, глобальный конфиг /dev/null, core.hooksPat
     записи (проверка счёта — до приведения к HEAD). Обход для удаления и сверки — без предела: содержимое он не держит,
     новое удаляет сразу по ходу. Обход линейный (стек открытых fd, ребёнок — от fd родителя), не глубже DEPTH_MAX
     звеньев. Сначала — приоритетные места (hot_dir: корень, первый уровень, корни вложенных копий и их первый
-    уровень — оттуда Claude Code берёт настройки и хуки) без срока, затем полный обход с потолком HANG_MAX; срок
+    уровень — оттуда Claude Code берёт настройки и хуки) с потолком HOT_MAX, затем полный — с HANG_MAX; срок
     PASS_MAX — только у обходов до первой записи и заново после merge; сверх — громкий отказ. Глубже DEPTH_MAX не
     удаляется (отказ со строкой владельцу): сессии идут в корне и на первом уровне, а их места п. 1 закрывает всегда.
     Папку не прочесть (OSError) — отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу по шаблонам
@@ -324,7 +324,8 @@ def deep_walk(d, plan, bad, on_found):
     """Свой полный обход защищённых путей без предела (и во вложенных копиях), on_found — сразу на каждый; папку не
     прочесть, глубже DEPTH_MAX, срок истёк — строка в bad (с ней откат и строка владельцу)."""
     errs, keep = [], (lambda r: C.deep(r, plan["pats"]))
-    C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found, into=C.hot_dir, deadline=False)
+    C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found, into=C.hot_dir,
+           deadline=C.time.monotonic() + C.HOT_MAX)
     C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found,
            deadline=C.time.monotonic() + C.HANG_MAX)
     bad += [f"{WALK_BAD}: {x}" for x in errs]
