@@ -639,14 +639,24 @@ answer и плановый проход, это скрипты, guard их не 
   кэша планового прохода (`autoclose-prs.json`, не старше часа), gh — запасной путь с причиной в выводе. Проба 22.11:
   pnpm, npm, uv, supabase и curl Связку в песочнице не читают. Флаг trustd оставлен (строка в «Известных дырах»).
 - **Ключи в домашней папке закрыты каждому окну (metis-1333, класс К1).** Папкой (`SECRET_HOME_DIRS`): `~/.ssh`,
-  `~/.config/gh`, `~/.codex`, `~/.config/configstore`, `~/.config/rclone`, `~/.gnupg`. Файлом (`WINDOW_SECRET_FILES`):
-  `~/.netrc`, `~/.git-credentials`, `~/.config/git/credentials`, `~/.npmrc`, `~/.zsh_history`, `~/.bash_history`. Оба
-  списка — в `denyRead` песочницы и в правилах Read; у файла правило своей формы `Read(~/.npmrc)`: `Read(~/x/**)`
-  одиночный файл не ловит (`secret_read_rules`). `~/.zshrc` и `~/.claude.json` закрыты только правилом Read
-  (`WINDOW_READ_TOOL_FILES`): из Bash их читают оболочка и `claude`, закрыть песочницей — после живой пробы. В `env`
-  окна `CONTEXT7_API_KEY` и `SSH_AUTH_SOCK` пусты (`WINDOW_SECRET_ENV`), `npm_config_userconfig` — файл в кэше окна.
-  Цена: ssh в песочнице без ключей и known_hosts (сеть git — `pantheon git push|fetch` мимо неё), npm и pnpm без
-  токена частного реестра из `~/.npmrc`. Тест — `secret_class` в tests/test_tick.py.
+  `~/.config/gh`, `~/.codex`, `~/.config/configstore`, `~/.config/rclone`, `~/.gnupg`, `~/.zsh_sessions` (история
+  Terminal). Файлом (`WINDOW_SECRET_FILES`): `~/.netrc`, `~/.git-credentials`, `~/.config/git/credentials`, `~/.npmrc`,
+  `~/.zsh_history`, `~/.bash_history`. Оба списка — в `denyRead` песочницы и в правилах Read; у файла правило своей
+  формы `Read(~/.npmrc)`: `Read(~/x/**)` одиночный файл не ловит (`secret_read_rules`). `~/.zshrc` и `~/.claude.json`
+  закрыты только правилом Read (`WINDOW_READ_TOOL_FILES`): из Bash их читают оболочка и `claude`, закрыть песочницей —
+  после живой пробы. В `env` окна `CONTEXT7_API_KEY` и `SSH_AUTH_SOCK` пусты (`WINDOW_SECRET_ENV`),
+  `npm_config_userconfig` — файл в кэше окна.
+- **Ключи проектов установки закрыты без имён проектов в коде (metis-1333, ревью; `window_secret_extra`).** Правило по
+  форме: каждая папка `~/.config/*-dev` (ключи dev-стендов), найденная при сборке окон; новая закрывается ближайшей
+  сборкой — `--if-changed` следит и за `~/.config`. Свой список — `[window_secrets] paths` в
+  `~/.claude/pantheon/policy.toml`: «~/…» или абсолютный путь, без «..», не корень и не домашняя папка. Папке — правило
+  `/**`, файлу — своя форма, пути без файла на диске — обе. Негодная запись — строка в stderr сборки, остальное
+  собирается. Вход Codex роли (`~/.local/state/pantheon/codex-dev`, auth.json) не закрыт: `pantheon exec codex` идёт в
+  Bash окна, и Codex сам читает и обновляет вход. Закрыть его можно, только вынеся запуск Codex из окна.
+  Цена обоих пунктов: ssh в песочнице без ключей и known_hosts (сеть git — `pantheon git push|fetch` мимо неё), npm и
+  pnpm без токена частного реестра из `~/.npmrc`. MCP context7 в окне работает без ключа: заголовок берёт
+  `${CONTEXT7_API_KEY:-}` из env, а окно его опустошает, поэтому действуют лимиты бесплатного доступа. Тесты —
+  `secret_class` и `secret_extra` в tests/test_tick.py.
 - **batch-pr-cmd (metis-1333).** `pantheon batch pr` идёт мимо песочницы, поэтому guard пускает только строку целиком
   `pantheon batch pr <story-id> [--dry-run]`: цепочки, подстановки, кавычки, присваивания, обёртки и путь к пульту —
   отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём. `git_window` пускает только origin из [merge_repos]

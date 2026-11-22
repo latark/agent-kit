@@ -95,7 +95,8 @@ max_delay = 180
 '''
 
 
-SECRET_DIRS = (".ssh", ".config/gh", ".codex", ".config/configstore", ".config/rclone", ".gnupg")  # К2 К3 К6 К7 К8 К14
+SECRET_DIRS = (".ssh", ".config/gh", ".codex", ".config/configstore", ".config/rclone", ".gnupg",  # К2 К3 К6 К7 К8 К14
+               ".zsh_sessions")  # история Terminal (ревью metis-1333, Б)
 SECRET_FILES = (".netrc", ".git-credentials", ".config/git/credentials", ".npmrc",  # К4 К5 К9
                 ".zsh_history", ".bash_history")
 READ_TOOL_FILES = (".zshrc", ".claude.json")  # К11 К12: только Read, Grep, Glob
@@ -121,7 +122,7 @@ def secret_class(check, env, load, names, sb):
             miss.append("npm_config_userconfig")
         if miss:
             bad[n] = miss
-    check("каждое окно: ~/.ssh, gh, codex, configstore, rclone, gnupg — папкой; .netrc, .git-credentials, "
+    check("каждое окно: ~/.ssh, gh, codex, configstore, rclone, gnupg, .zsh_sessions — папкой; .netrc, .git-credentials, "
           ".npmrc, история оболочки — файлом (Read(~/f), без /**); .zshrc и .claude.json — правилом Read; "
           "CONTEXT7_API_KEY и SSH_AUTH_SOCK пусты, npmrc — свой (metis-1333, К2–К14)",
           not bad and len(names) >= 4, bad)
@@ -143,6 +144,57 @@ print(json.dumps(p.secret_read_rules()))
           and "Read(~/.ssh/**)" in rules and "Read(~/.ssh)" not in rules, (rules, got.stderr[-300:]))
 
 
+def secret_extra(check, env, load):
+    """metis-1333 (ревью): ключи проектов без имени в коде — папки ~/.config/*-dev по форме и [window_secrets] paths
+    policy.toml установки; каждому окну, и песочницей, и правилом Read своей формы (папка «/**», файл — сам путь)."""
+    h = env["HOME"]
+    pol = os.path.join(h, ".claude", "pantheon", "policy.toml")
+    before = open(pol).read() if os.path.exists(pol) else None
+    for d in (".config/demo-dev", ".config/demo-tool", ".config/demo-adminvps", "keys"):
+        os.makedirs(os.path.join(h, d), exist_ok=True)
+    open(os.path.join(h, ".config", "demo-dev-note"), "w").write("x")  # файл с формой имени — не папка, не берётся
+    open(os.path.join(h, "keys", "one.txt"), "w").write("x")
+    os.makedirs(os.path.dirname(pol), exist_ok=True)
+    open(pol, "a").write('\n[window_secrets]\npaths = ["~/.config/demo-adminvps", "~/keys/one.txt", "~/gone-key", '
+                         '"rel/path", "~/a/../b", "~", "/", 7]\n')
+    try:
+        r = subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True)
+        names = sorted(f[:-5] for f in os.listdir(os.path.join(env["PANTHEON_STATE"], "settings")) if f.endswith(".json"))
+        names = [n for n in names if "sandbox" in load(n)]
+        bad = {}
+        for n in names:
+            dr = set(load(n)["sandbox"]["filesystem"].get("denyRead") or [])
+            rules = set(load(n).get("permissions", {}).get("deny", []))
+            miss = [d for d in (".config/demo-dev", ".config/demo-adminvps")
+                    if os.path.join(h, d) not in dr or f"Read(~/{d}/**)" not in rules or f"Read(~/{d})" in rules]
+            miss += [] if (os.path.join(h, "keys/one.txt") in dr and "Read(~/keys/one.txt)" in rules
+                           and "Read(~/keys/one.txt/**)" not in rules) else ["keys/one.txt"]
+            miss += [] if (os.path.join(h, "gone-key") in dr and {"Read(~/gone-key)", "Read(~/gone-key/**)"} <= rules) \
+                else ["gone-key"]
+            miss += [x for x in (".config/demo-tool", ".config/demo-dev-note", "rel/path", "b", "a/../b")
+                     if os.path.join(h, x) in dr or f"Read(~/{x})" in rules or f"Read(~/{x}/**)" in rules]
+            miss += [x for x in ("/", h) if x in dr]
+            miss += [] if len(dr) == len(load(n)["sandbox"]["filesystem"]["denyRead"]) else ["дубли denyRead"]
+            if miss:
+                bad[n] = miss
+        check("каждое окно: ~/.config/*-dev по форме и [window_secrets] paths — папка «/**», файл своей формой, "
+              "пути без файла — обеими; соседние папки, относительные, «..», корень и HOME не берутся (metis-1333)",
+              r.returncode == 0 and not bad and len(names) >= 4, (bad, r.stderr[-400:]))
+        check("[window_secrets]: негодные записи названы в stderr сборки, сборка не упала",
+              r.returncode == 0 and "[window_secrets] paths: не взято" in r.stderr
+              and all(x in r.stderr for x in ("'rel/path'", "'~/a/../b'", "'~'", "'/'", ", 7")),
+              r.stderr[-400:])
+    finally:
+        if before is None:
+            os.remove(pol)
+        else:
+            open(pol, "w").write(before)
+        for d in (".config/demo-dev", ".config/demo-tool", ".config/demo-adminvps", "keys"):
+            _shutil.rmtree(os.path.join(h, d), True)
+        os.remove(os.path.join(h, ".config", "demo-dev-note"))
+        subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
+
+
 def keychain_gate(check, tmp, env, load):
     """metis-1333 (К1): у каждого окна с сетью Связка закрыта; gh шлюза и PR пачки — мимо песочницы окнам направлений."""
     gate_out = ["pantheon review accept", "pantheon review accept *", "pantheon review delta", "pantheon review delta *"]
@@ -158,6 +210,7 @@ def keychain_gate(check, tmp, env, load):
           not no_kc and {"athena-shop", "metis-pantheon", "workshop", "mnemo-brain"} <= set(online), (online, no_kc))
     # окна с песочницей — как у проверки trustd выше: файл окна без раздела sandbox ролей не запускает
     secret_class(check, env, load, [n for n in names if "sandbox" in load(n)], sb)
+    secret_extra(check, env, load)
     exc = lambda n: sb[n].get("excludedCommands") or []  # noqa: E731
     dirs = [n for n in ("metis-pantheon", "athena-shop", "mnemo-brain") if n in sb]
     check("окна направлений (и без пакета): pantheon review accept|delta и batch pr мимо песочницы, report — нет "

@@ -94,3 +94,9 @@ keychain_prefixes = []
 [auto_rules]
 metis-pantheon = ["mailkeeper-read", "uv-sync"]
 hermes-site = ["git-remote"]
+
+# Ключи проектов этой установки, закрытые каждому окну роли (metis-1333): песочницей и правилами Read. Папки
+# ~/.config/*-dev закрыты и без списка (правило по форме). Пути — «~/…» или абсолютные, без «..»; папке — «/**»,
+# файлу — свой путь. Негодную запись `pantheon domains build` называет в stderr и пропускает.
+[window_secrets]
+paths = ["~/.config/example-keys", "~/keys/backup.age"]
