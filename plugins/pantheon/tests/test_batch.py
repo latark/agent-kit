@@ -100,7 +100,7 @@ RUN_PY = os.path.join(GHLIB, "run.py")
 # [merge_repos] policy.toml: git_window пускает только origin репозитория направления (Д2 argus)
 os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
 open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write(
-    '[merge_repos]\nmetis-pantheon = ["x/y"]\nhermes-alex = ["a/b"]\n')
+    '[merge_repos]\nmetis-pantheon = ["x/y"]\ndemo-other = ["a/b"]\n')
 
 
 def gh_calls():
@@ -299,12 +299,12 @@ check("pr: slug сверяется без учёта регистра — X/Y п
 git(repo, "remote", "set-url", "origin", "https://github.com/x/y.git")
 os.makedirs(state, exist_ok=True)
 _doms = os.path.join(state, "domains.json")
-open(_doms, "w").write('{"domains": {"metis-pantheon": ["%s"], "hermes-alex": ["%s"]}}' % (tmp, repo))
-env["PANTHEON_WINDOW"] = "hermes-alex"  # папка repo — направления hermes-alex, а x/y — репозиторий metis-pantheon
+open(_doms, "w").write('{"domains": {"metis-pantheon": ["%s"], "demo-other": ["%s"]}}' % (tmp, repo))
+env["PANTHEON_WINDOW"] = "demo-other"  # папка repo — направления demo-other, а x/y — репозиторий metis-pantheon
 try:
     r = cli(wt, "batch", "pr", "metis-0900")
-    check("pr в окне hermes-alex: origin x/y — репозиторий другого направления → код 2, направление в причине, gh не зван",
-          r.returncode == 2 and "направления hermes-alex" in r.stderr and not os.path.exists(mark), r.stderr)
+    check("pr в окне demo-other: origin x/y — репозиторий другого направления → код 2, направление в причине, gh не зван",
+          r.returncode == 2 and "направления demo-other" in r.stderr and not os.path.exists(mark), r.stderr)
     env["PANTHEON_WINDOW"] = "metis-pantheon"
     open(_doms, "w").write('{"domains": {"metis-pantheon": ["%s"]}}' % tmp)
     r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
