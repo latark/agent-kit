@@ -26,7 +26,6 @@ worktree окна .claude/worktrees/agent-x на ветке feat. После «�
 Плюс привязка в outside.py: вид claude-sync идёт проходу серверов, check_request его принимает, лишний флаг — код 2.
 """
 import atexit
-import hashlib
 import json
 import os
 import shutil
@@ -39,6 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from _py311 import PY311, mkroot  # pantheon.py — только на Python 3.11+
 import _claude_git as H  # noqa: E402
+from _claude_git import digest, git, mv, put, read  # noqa: E402
 
 if sys.version_info < (3, 11):
     os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)] + sys.argv[1:])
@@ -68,33 +68,6 @@ def check(name, cond, extra=""):
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f"  [{extra}]"))
     if not cond:
         FAILS.append(name)
-
-
-def git(d, *args):
-    r = subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
-                        "-c", "init.defaultBranch=main", *args], capture_output=True, text=True)
-    assert r.returncode == 0, (args, r.stderr)
-    return r.stdout.strip()
-
-
-def put(d, rel, text):
-    p = os.path.join(d, rel)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w") as fh:
-        fh.write(text)
-
-
-def read(d, rel):
-    try:
-        with open(os.path.join(d, rel)) as fh:
-            return fh.read()
-    except OSError:
-        return None
-
-
-def digest(p):
-    with open(p, "rb") as fh:
-        return hashlib.sha256(fh.read()).hexdigest()
 
 
 # --- сервер, клон реестра и worktree окна --------------------------------------------------------------------------
@@ -654,6 +627,7 @@ back_to_m1()
 
 # --- обход полный (вложенные копии, подпапки любой глубины), без предела; предел — только у снимка, до записи -----
 SUBS, GONE = ".claude/worktrees/q/sub/.claude/settings.json", ".claude/worktrees/q/.mcp.json"
+DEEP = ".claude/skills/deep/" + "d/" * 70 + "SKILL.md"   # глубже DEPTH_MAX: обход не удалит, индекс в откате — да
 EVIL = {"app/.claude/settings.json": "{}\n", ".claude/skills/a/SKILL.md": "E\n"}
 
 
@@ -666,11 +640,13 @@ def gm_deep(d, base, plan, shift, lock):
     put(WT, GONE, "{}\n")
     git(WT, "add", "-f", SUBS, GONE)   # ort слил правку базы в путь, куда дерево HEAD «переименовало» настройки
     os.unlink(os.path.join(WT, GONE))   # и путь, который есть только в индексе
-    for rel in (".claude/skills/lock/x.md", ".claude/skills/deep/" + "d/" * 70 + "SKILL.md")[:2 if lock == 1 else 0]:
+    for rel in (".claude/skills/lock/x.md", DEEP)[:2 if lock == 1 else 0]:
         put(WT, rel, "x\n")   # 1: папка без прав и цепочка глубже DEPTH_MAX с навыком внизу; 2: потолок обхода истёк
+    _ = lock == 1 and git(WT, "add", "-f", DEEP)
     for rel in (".claude/hooks/x.sh", ".mcp.json", "app/.mcp.json", ".claude/settings.json")[:lock and (1 if lock == 1 else 4)]:
-        put(WT, rel, "{\"evil\": 1}\n")   # злые настройки корня и первого уровня — приоритетный обход без срока
-    _ = lock and (os.chmod(os.path.join(WT, ".claude/skills/lock"), 0) if lock == 1 else setattr(C, "HANG_MAX" if lock == 2 else "HOT_MAX", -1))
+        put(WT, rel, "{\"evil\": 1}\n")   # злые настройки корня и первого уровня; 3: и мусор в .claude/junk — их убирает spots
+    _ = lock == 3 and [put(WT, f".claude/junk/d{i}/f.md", "x\n") for i in range(300)]
+    _ = lock and (os.chmod(os.path.join(WT, ".claude/skills/lock"), 0) if lock == 1 else [setattr(C, k, -1) for k in ("HANG_MAX", "HOT_MAX")[:1 if lock == 2 else 2]])
     _ = shift and drift()
 
 
@@ -687,7 +663,7 @@ walk_max, C.WALK_MAX, deep_walk = C.WALK_MAX, 25, M.deep_walk
 for shift, lock, blind, fail, words in (
         (0, 0, 0, (), ()), (0, 0, 1, (), ()), (1, 0, 0, ("ls-files", "-o"), ("возвращены к снимку", "ls-files -o не прошёл")),
         (0, 0, 0, ("ls-files", "-z"), ("индекс после слияния не сверен",)),
-        (1, 1, 0, (), ("НЕ возвращены", "не открыта", "глубже 64", "владельцу", "/* и глубже")),
+        (1, 1, 0, (), ("НЕ возвращены", "не открыта", "глубже 64", "владельцу", "/* и глубже", "проход не удаляет")),
         (1, 2, 0, (), ("срок обхода истёк", "НЕ возвращены", "владельцу")), (1, 3, 0, (), ("срок обхода истёк", "НЕ возвращены", "владельцу"))):
     M.git_merge = lambda d, base, plan, a=shift, b=lock: gm_deep(d, base, plan, a, b)
     M.deep_walk = (lambda d, plan, bad, on_found: None) if blind else deep_walk   # вторая защита: пути индекса — и без обхода
@@ -696,13 +672,27 @@ for shift, lock, blind, fail, words in (
     M.git_merge, M.deep_walk, C._run, took, C.HANG_MAX, C.HOT_MAX = git_merge, deep_walk, run_, time.monotonic() - t0, 600, 600
     _ = lock == 1 and os.chmod(os.path.join(WT, ".claude/skills/lock"), 0o755)
     left = [r for r in (SUBS, "app/.claude/settings.json", ".claude/skills/zz/f0.md", ".claude/hooks/x.sh", ".mcp.json",
-                        "app/.mcp.json")[:1 if blind else 0 if lock == 3 else 6] if os.path.lexists(os.path.join(WT, r))] + (
-        ["долго"] if took > 30 else []) + (["settings.json"] if read(WT, ".claude/settings.json") != s0 and lock != 3 else [])
+                        "app/.mcp.json", DEEP)[:1 if blind else 7] if os.path.lexists(os.path.join(WT, r)) and not (lock == 3 and "zz" in r)] + (
+        ["долго"] if took > 30 else []) + (["settings.json"] if read(WT, ".claude/settings.json") != s0 else [])
     check(f"--merge: {SUBS} (правка базы), app/.claude, 40 навыков {(shift, lock, blind, fail)} — новых нет, {words}",
           not left and (refused_with(res, "отменено", *words) and read(WT, ".claude/skills/a/SKILL.md") == "A1\n"
                         if words else res.get("state") == "done"), (left, res))
-    for rel in ("app", ".claude/skills/zz", ".claude/skills/lock", ".claude/skills/deep"):
+    for rel in ("app", ".claude/skills/zz", ".claude/skills/lock", ".claude/skills/deep", ".claude/junk"):
         shutil.rmtree(os.path.join(WT, rel), True)
+    back_to_m1()
+WHY = {"merge": "оборвался", "read-tree": "git read-tree не прошёл", "-z": "после слияния сбой", "-o": "список кода не"}
+for step in WHY:   # git убит по таймауту (Refused из _run) после записи хука — откат и снимок всё равно; -o — второй вызов
+    def boom(d, *a, s=step, seen=[], **kw):   # noqa: B006 — счёт вызовов -o одного случая
+        seen.append(s in a)
+        if (s in a and (s != "-z" or mh()) and (s != "-o" or seen.count(True) > 1)) or (s in ("read-tree", "-o") and "merge" in a):
+            _ = s in a and put(WT, ".claude/hooks/t.sh", "x\n")
+            raise C.Refused(f"git {a[0]} не запустился (TimeoutExpired)")
+        return run_(d, *a, **kw)
+    C._run, s0 = boom, read(WT, ".claude/settings.json")
+    res, C._run = handle(merge=True), run_
+    check(f"--merge: {step} убит по таймауту после записи хука — хука нет, снимок возвращён, итог громкий",
+          not os.path.lexists(os.path.join(WT, ".claude/hooks/t.sh")) and read(WT, ".claude/settings.json") == s0
+          and refused_with(res, "отменено", WHY[step], "возвращены к снимку"), res)
     back_to_m1()
 for i in range(30):   # во вложенной копии: sync их не считает (protected), снимок — считает
     put(WT, f".claude/worktrees/q/.claude/skills/zz/f{i}.md", "x\n")
@@ -717,11 +707,6 @@ back_to_m1()
 # --- звено пути подменено после проверки (ссылка, другая папка) --------------------------------------------------
 Base = C.Base
 WTS = os.path.join(CLONE, ".claude", "worktrees")
-
-
-def mv(*pairs):   # переименования (src, dst); dst None — пустая папка src, src None — rmdir dst
-    for a, b in pairs:
-        os.mkdir(a) if b is None else os.rmdir(b) if a is None else os.rename(a, b)
 
 
 link_parent = lambda: (mv((WTS, WTS + ".real")), os.symlink(WTS + ".real", WTS))   # noqa: E731

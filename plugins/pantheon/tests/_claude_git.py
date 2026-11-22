@@ -1,4 +1,5 @@
 """Помощники test_claude_sync.py: подложенные объекты клона и коммит окна во временном индексе (metis-1327)."""
+import hashlib
 import os
 import subprocess
 import zlib
@@ -40,3 +41,35 @@ def window_commit(wt, index, files):
     for rel, text in files.items():
         run("update-index", "--add", "--cacheinfo", f"100644,{run('hash-object', '-w', '--stdin', data=text)},{rel}")
     return run("commit-tree", run("write-tree"), "-p", "HEAD", "-m", "окно")
+
+
+def git(d, *args):
+    r = subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                        "-c", "init.defaultBranch=main", *args], capture_output=True, text=True)
+    assert r.returncode == 0, (args, r.stderr)
+    return r.stdout.strip()
+
+
+def put(d, rel, text):
+    p = os.path.join(d, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as fh:
+        fh.write(text)
+
+
+def read(d, rel):
+    try:
+        with open(os.path.join(d, rel)) as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def digest(p):
+    with open(p, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def mv(*pairs):   # переименования (src, dst); dst None — пустая папка src, src None — rmdir dst
+    for a, b in pairs:
+        os.mkdir(a) if b is None else os.rmdir(b) if a is None else os.rename(a, b)

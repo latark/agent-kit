@@ -146,11 +146,12 @@ C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.appe
 C.DEADLINE, C.time.monotonic = None, mono
 check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found", errs == ["срок обхода истёк"]
       and seen, (errs, seen))
-check("hot_dir: корень, первый уровень, корни вложенных копий и их первый уровень — и их .claude, .husky; код — нет",
+check("hot_dir: корень, первый уровень, корни вложенных копий и их первый уровень — .husky и папки шаблонов .claude",
       all(C.hot_dir(p) for p in ("app", ".claude", ".claude/skills/a/b", "app/.Claude/hooks", ".husky/x", ".claude/worktrees",
-                                 ".claude/worktrees/y", ".claude/worktrees/y/sub", ".claude/worktrees/y/sub/.claude/x"))
+                                 ".claude/worktrees/y", ".claude/worktrees/y/sub", ".claude/worktrees/y/sub/.claude/hooks/x",
+                                 ".claude/agents", "app/.claude/commands/a"))
       and not any(C.hot_dir(p) for p in ("src/x", "app/src", ".claude/worktrees/y/src/x", ".claude/worktrees/y/a/b/.claude",
-                                         "app/.claude/worktrees/y")))
+                                         "app/.claude/worktrees/y", ".claude/junk", "app/.claude/junk/a/b")))
 C.DEADLINE, errs = 0, []   # срок истёк — приоритетный обход (deadline=False) идёт, полный — нет
 got = C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, into=C.hot_dir, deadline=False)
 C.DEADLINE = None

@@ -63,6 +63,7 @@ DEPTH_MAX = 64   # звеньев папок в обходе: вложенная
 PASS_MAX = 120   # срок обходов до первой записи (run) и после git merge, с (монотонные часы)
 HANG_MAX = 600   # потолок одного обхода отката и сверки — только от зависания: они линейны по числу записей
 HOT_MAX = 600   # потолок приоритетного обхода (hot_dir): миллион папок первого уровня не вешает дорожку serve
+SPOT_MAX = 600   # потолок шага точных мест (claude_merge.spots) — до hot_dir, свой: HOT_MAX его не обрывает
 DEADLINE = None
 NO_LIMIT = float("inf")   # обход для удаления и сверки: содержимое не держит, предела не нужно
 
@@ -87,6 +88,10 @@ def sm():
 
 class Refused(Exception):
     """Отказ всей заявке: причина — в итог."""
+
+
+class Undone(Refused):
+    """Отказ после отката --merge (claude_merge.rollback уже прошёл) — второй раз его не откатывают."""
 
 
 def _run(d, *args, data=None, timeout=60):
@@ -290,15 +295,16 @@ def set_deadline(sec):
     DEADLINE = time.monotonic() + sec
 
 
-def hot_dir(rel):
+def hot_dir(rel, pats=None):
     """Папка, откуда Claude Code берёт настройки и хуки: корень, папки первого уровня (ROOT_LEVELS), корни вложенных
-    копий .claude/worktrees/* и их первый уровень — и под ними .claude и .husky (кроме самих .claude/worktrees)."""
+    копий .claude/worktrees/* и их первый уровень — и под ними .husky целиком, а в .claude — только папки из шаблонов
+    песочницы (skills, commands, agents, hooks…), не мусор в .claude/<x>/ и не сами .claude/worktrees."""
     p = [fold(x) for x in rel.split("/")]
-    for i in range(len(p) + 1):
-        if len(p[:i]) <= 1 or (p[:2] == [".claude", "worktrees"] and i <= 4):
-            if i == len(p) or (p[i] in (".claude", ".husky") and p[i:i + 2] != [".claude", "worktrees"]):
-                return True
-    return False
+    inner = {fold(q[i + 1]) for q in (pats if pats is not None else patterns()) for i in range(len(q) - 1)
+             if fold(q[i]) == ".claude"} - {"worktrees"}
+    roots = (0, 1) + ((3, 4) if p[:2] == [".claude", "worktrees"] else ())
+    return any(len(p) <= r or p[r] == ".husky" or (p[r] == ".claude" and (len(p) == r + 1 or p[r + 1] in inner))
+               for r in roots)
 
 
 def _walk_err(errors, line):

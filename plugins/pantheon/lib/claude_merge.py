@@ -40,7 +40,8 @@ git — без GIT_*, глобальный конфиг /dev/null, core.hooksPat
     записи (проверка счёта — до приведения к HEAD). Обход для удаления и сверки — без предела: содержимое он не держит,
     новое удаляет сразу по ходу. Обход линейный (стек открытых fd, ребёнок — от fd родителя), не глубже DEPTH_MAX
     звеньев. Сначала — приоритетные места (hot_dir: корень, первый уровень, корни вложенных копий и их первый
-    уровень — оттуда Claude Code берёт настройки и хуки) с потолком HOT_MAX, затем полный — с HANG_MAX; срок
+    уровень; в .claude — только папки шаблонов) с потолком HOT_MAX, затем полный — с HANG_MAX; ещё раньше — шаг
+    точных мест (spots: .claude/settings*.json, .mcp.json, файлы .claude/hooks/ и .husky/ прямым lstat) с SPOT_MAX; срок
     PASS_MAX — только у обходов до первой записи и заново после merge; сверх — громкий отказ. Глубже DEPTH_MAX не
     удаляется (отказ со строкой владельцу): сессии идут в корне и на первом уровне, а их места п. 1 закрывает всегда.
     Папку не прочесть (OSError) — отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу по шаблонам
@@ -67,6 +68,7 @@ MERGE_CFG = ("-c", "rerere.enabled=false", "-c", "merge.verifySignatures=false",
              "-c", "user.name=pantheon-outside", "-c", "user.email=outside@localhost")
 LINK = "120000"
 WALK_BAD = "обход не закончен"
+SPOT_DIRS = ("hooks", ".husky")   # точные места-папки: их файлы — прямо в шаге spots, без обхода
 SNAP_MAX = 64 << 20   # снимок защищённых путей в памяти — до 64 МБ
 
 
@@ -320,12 +322,55 @@ def put(top, rel, st):
         C.write_file(top, rel, st[1], st[2])
 
 
+def _names(top, rel, dirs):
+    """Имена в папке rel (без ссылок по пути): папки (dirs) или не папки; нет папки или не прочесть — пусто."""
+    try:
+        pfd = C._open_parent(top, [x for x in rel.split("/") if x] + ["x"])
+    except OSError:
+        return []
+    try:
+        with os.scandir(pfd) as it:
+            return [e.name for e in it if e.is_dir(follow_symlinks=False) == dirs and C.fold(e.name) != ".git"]
+    except OSError:
+        return []
+    finally:
+        os.close(pfd)
+
+
+def spots(d, plan, on_found, errs):
+    """Шаг до обхода: прямые lstat точных мест из шаблонов песочницы (.claude/settings*.json, .mcp.json, файлы
+    .claude/hooks/ и .husky/) в корне, на первом уровне и в корнях .claude/worktrees/* — мусор в .claude/<x>/ его не
+    тянет. Имя в другом регистре, чем в снимке или базе, — не трогает (его приведёт обход по настоящему имени)."""
+    pats, end = plan["pats"], C.time.monotonic() + C.SPOT_MAX
+    known = set(plan["snap"]) | set(plan["theirs"])
+    folded = {C.fold(k) for k in known}
+    tails = sorted({q[1:] if q[0] == "**" else q for q in pats} - {()}, key=len)
+    tails = [t for t in tails if len(t) <= 2 and ".git" not in [C.fold(x) for x in t] and "*" not in "".join(t)]
+    roots = [""] + [f"{n}/" for n in _names(d.top, "", True)] + [
+        f"{C.NESTED}{n}/" for n in _names(d.top, C.NESTED.rstrip("/"), True)]
+    for root in roots:
+        if C._expired(end):
+            return C._walk_err(errs, "срок шага точных мест истёк")
+        for t in tails:
+            rel = root + "/".join(t)
+            files = [rel] + ([f"{rel}/{n}" for n in _names(d.top, rel, False)] if C.fold(t[-1]) in SPOT_DIRS else [])
+            for f in files:
+                try:
+                    st = grab(d.top, f) if (f in known or C.fold(f) not in folded) and C.deep(f, pats) else None
+                except OSError as e:
+                    C._walk_err(errs, f"{f}: не прочитан ({type(e).__name__})")
+                    continue
+                _ = st and st[0] in ("file", "link") and on_found(f)
+
+
 def deep_walk(d, plan, bad, on_found):
-    """Свой полный обход защищённых путей без предела (и во вложенных копиях), on_found — сразу на каждый; папку не
-    прочесть, глубже DEPTH_MAX, срок истёк — строка в bad (с ней откат и строка владельцу)."""
+    """Точные места (spots), затем приоритетные папки (hot_dir) и весь обход защищённых путей без предела (и во
+    вложенных копиях), on_found — сразу на каждый; папку не прочесть, глубже DEPTH_MAX, срок истёк — строка в bad
+    (с ней откат и строка владельцу)."""
     errs, keep = [], (lambda r: C.deep(r, plan["pats"]))
-    C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found, into=C.hot_dir,
-           deadline=C.time.monotonic() + C.HOT_MAX)
+    spots(d, plan, on_found, errs)
+    C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found,
+           into=lambda r: C.hot_dir(r, plan["pats"]), deadline=C.time.monotonic() + C.HOT_MAX)
     C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found,
            deadline=C.time.monotonic() + C.HANG_MAX)
     bad += [f"{WALK_BAD}: {x}" for x in errs]
@@ -336,12 +381,13 @@ def owner_hint(d, pats):
     kinds = sorted({"/".join(p[1:] if p[0] == "**" else p) for p in pats})
     levels = ", ".join(f"{d}{lv}" for lv in C.P.ROOT_LEVELS)
     return (f"владельцу: проверь в {levels} и глубже (и во вложенных копиях .claude/worktrees/*) пути "
-            + ", ".join(kinds) + " — там может остаться чужой хук")
+            + ", ".join(kinds) + f" — там может остаться чужой хук; глубже {C.DEPTH_MAX} звеньев проход не удаляет")
 
 
-def to_snapshot(d, plan):
+def to_snapshot(d, plan, idx=()):
     """Защищённые пути и убранные файлы — байт в байт к снимку своей записью: новое под защищёнными путями (и
-    настройки, и хуки — их до прохода не было) удаляется сразу, по ходу обхода, бывшее — возвращается → отказы."""
+    настройки, и хуки — их до прохода не было) удаляется сразу, по ходу обхода, и пути индекса idx (index_deep до
+    git_back: и глубже DEPTH_MAX) — тоже, бывшее — возвращается → отказы."""
     snap, bad = plan["snap"], []
 
     def drop_new(rel):
@@ -351,6 +397,8 @@ def to_snapshot(d, plan):
             except OSError as e:
                 bad.append(f"{rel}: не удалён ({type(e).__name__})")
     deep_walk(d, plan, bad, drop_new)
+    for rel in idx:
+        _ = grab(d.top, rel) is not None and drop_new(rel)
     for rel, st in sorted(snap.items()):
         try:
             if grab(d.top, rel) != st:
@@ -401,20 +449,28 @@ def git_back(d, plan):
     steps = ([("symbolic-ref", "HEAD", plan["branch"]), ("update-ref", "-m", "claude-sync: откат", plan["branch"], sha)]
              if plan["branch"] else [("update-ref", "--no-deref", "HEAD", sha)]) + [("read-tree", "--reset", sha)]
     for step in steps:
-        r = C._run(d, *step, timeout=300)
-        if r.returncode != 0:
+        r = _try(notes, f"git {step[0]}", lambda s=step: C._run(d, *s, timeout=300))
+        if r is not None and r.returncode != 0:
             notes.append(f"git {step[0]} не прошёл (код {r.returncode})")
     for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"):
-        if os.path.lexists(os.path.join(d.gitdir, name)):
-            os.unlink(os.path.join(d.gitdir, name))
-    if _rev(d) != sha:
+        _try(notes, name, lambda n=name: os.path.lexists(os.path.join(d.gitdir, n)) and os.unlink(os.path.join(d.gitdir, n)))
+    if _try(notes, "git rev-parse", lambda: _rev(d)) != sha:
         notes.append(f"HEAD не вернулся на {sha[:12]}")
     notes += plan["notes"]
-    left = left_behind(d, plan, notes)
+    left = _try(notes, "список кода", lambda: left_behind(d, plan, notes)) or []
     if left:
         notes.append(f"код, который поменяло слияние, проход не трогал ({len(left)}) — верни сам: git status, "
                      "git checkout -- <пути>, новые файлы удали: " + ", ".join(left[:20]) + (" …" if len(left) > 20 else ""))
     return notes
+
+
+def _try(notes, what, step):
+    """Шаг отката: любой сбой — строкой в notes, а откат идёт дальше (снимок возвращается всегда) → итог шага или None."""
+    try:
+        return step()
+    except Exception as e:   # откат не прерывается: к снимку защищённые пути вернёт to_snapshot
+        notes.append(f"{what} не прошёл ({type(e).__name__}: {str(e)[:200]})")
+        return None
 
 
 def untracked(d, notes):
@@ -444,13 +500,18 @@ def left_behind(d, plan, notes):
 def rollback(d, plan, why):
     """Откат без git merge --abort: копия, ветка и индекс — к head_sha (если копия не подменена), защищённые пути —
     к снимку своей записью → Refused с честной причиной."""
-    why_repo = repair(d)
-    notes = [why_repo] if why_repo else git_back(d, plan)
-    bad = to_snapshot(d, plan)
+    pre = []
+    why_repo = _try(pre, "проверка копии", lambda: repair(d))
+    idx = _try(pre, "индекс", lambda: index_deep(d, plan, pre)) or []   # до git_back: read-tree --reset его сотрёт
+    notes = pre + ([why_repo] if why_repo else git_back(d, plan))   # git_back сам не бросает: каждый шаг — в _try
+    try:
+        bad = to_snapshot(d, plan, idx)
+    except Exception as e:   # сбой возврата к снимку — тоже громко, а не мимо итога
+        bad = [f"возврат к снимку оборвался ({type(e).__name__}: {str(e)[:200]})"]
     if not why_repo:
-        C._run(d, "update-index", "-q", "--refresh", timeout=300)
+        _try(notes, "git update-index", lambda: C._run(d, "update-index", "-q", "--refresh", timeout=300))
     tail = (f"; защищённые пути НЕ возвращены: {'; '.join(bad)} — {owner_hint(d, plan['pats'])}" if bad else "; защищённые пути возвращены к снимку до прохода")
-    raise C.Refused(f"{why} — слияние отменено" + "".join(f"; {x}" for x in notes) + tail)
+    raise C.Undone(f"{why} — слияние отменено" + "".join(f"; {x}" for x in dict.fromkeys(notes)) + tail)
 
 
 # --- слияние ------------------------------------------------------------------------------------------------------
@@ -460,11 +521,14 @@ def git_merge(d, base, plan):
     C.check_repo(d)
     if _rev(d) != plan["head_sha"]:
         raise C.Refused("HEAD копии сдвинулся после проверки — повтори claude-sync --merge")
-    for rel in plan["drop"]:
-        C.delete_file(d.top, rel)
-    r = C._run(d, *MERGE_CFG, "merge", "--no-ff", "--no-commit", "--no-overwrite-ignore", "--no-autostash",
-               "--no-verify", "--no-edit", "--no-stat", "-s", "ort", "-X", "no-renames",
-               "-m", f"Merge {base.name} {base.tip[:12]} (claude-sync --merge)", base.tip, timeout=600)
+    try:   # любой сбой с первой записи (Refused по таймауту git, OSError, прочее) — откат к снимку, итог громкий
+        for rel in plan["drop"]:
+            C.delete_file(d.top, rel)
+        r = C._run(d, *MERGE_CFG, "merge", "--no-ff", "--no-commit", "--no-overwrite-ignore", "--no-autostash",
+                   "--no-verify", "--no-edit", "--no-stat", "-s", "ort", "-X", "no-renames",
+                   "-m", f"Merge {base.name} {base.tip[:12]} (claude-sync --merge)", base.tip, timeout=600)
+    except Exception as e:   # см. выше
+        rollback(d, plan, f"git merge оборвался ({type(e).__name__}: {str(e)[:200]})")
     if os.path.lexists(os.path.join(d.gitdir, "MERGE_HEAD")):
         C.set_deadline(C.PASS_MAX)   # срок — заново после merge
         return
@@ -504,7 +568,7 @@ def exact(d, base, plan):
 def index_deep(d, plan, bad):
     """Вторая защита после merge: пути индекса копии, защищённые для песочницы (deep: и не буква в букву, и во
     вложенных копиях) — их сверяет exact, даже если обход их не нашёл; git не прошёл — строка в bad (откат)."""
-    r = C._run(d, "ls-files", "-z", timeout=300)
+    r = C._run(d, "ls-files", "-z", timeout=300)   # Refused (таймаут) — откат: after_merge, в rollback — _try
     if r.returncode != 0:
         bad.append(f"git ls-files не прошёл (код {r.returncode}) — индекс после слияния не сверен")
         return []
@@ -572,6 +636,11 @@ def merge(d):
                 "snap": snapshot(d, pats, drop), "notes": []}
         plan["untracked"] = untracked(d, plan["notes"])
         git_merge(d, base, plan)
-        return after_merge(d, base, plan, out)
+        try:
+            return after_merge(d, base, plan, out)
+        except C.Undone:
+            raise
+        except Exception as e:   # сбой после merge (таймаут git, OSError) — тоже откат к снимку
+            rollback(d, plan, f"после слияния сбой ({type(e).__name__}: {str(e)[:200]})")
     finally:
         base.close()
