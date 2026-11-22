@@ -638,9 +638,23 @@ answer и плановый проход, это скрипты, guard их не 
   получает `-R` из этого url, форму строки держит правило batch-pr-cmd). `pantheon task overlap` берёт открытые PR из
   кэша планового прохода (`autoclose-prs.json`, не старше часа), gh — запасной путь с причиной в выводе. Проба 22.11:
   pnpm, npm, uv, supabase и curl Связку в песочнице не читают. Флаг trustd оставлен (строка в «Известных дырах»).
+- **Ключи в домашней папке закрыты каждому окну (metis-1333, класс К1).** Папкой (`SECRET_HOME_DIRS`): `~/.ssh`,
+  `~/.config/gh`, `~/.codex`, `~/.config/configstore`, `~/.config/rclone`, `~/.gnupg`. Файлом (`WINDOW_SECRET_FILES`):
+  `~/.netrc`, `~/.git-credentials`, `~/.config/git/credentials`, `~/.npmrc`, `~/.zsh_history`, `~/.bash_history`. Оба
+  списка — в `denyRead` песочницы и в правилах Read; у файла правило своей формы `Read(~/.npmrc)`: `Read(~/x/**)`
+  одиночный файл не ловит (`secret_read_rules`). `~/.zshrc` и `~/.claude.json` закрыты только правилом Read
+  (`WINDOW_READ_TOOL_FILES`): из Bash их читают оболочка и `claude`, закрыть песочницей — после живой пробы. В `env`
+  окна `CONTEXT7_API_KEY` и `SSH_AUTH_SOCK` пусты (`WINDOW_SECRET_ENV`), `npm_config_userconfig` — файл в кэше окна.
+  Цена: ssh в песочнице без ключей и known_hosts (сеть git — `pantheon git push|fetch` мимо неё), npm и pnpm без
+  токена частного реестра из `~/.npmrc`. Тест — `secret_class` в tests/test_tick.py.
 - **batch-pr-cmd (metis-1333).** `pantheon batch pr` идёт мимо песочницы, поэтому guard пускает только строку целиком
   `pantheon batch pr <story-id> [--dry-run]`: цепочки, подстановки, кавычки, присваивания, обёртки и путь к пульту —
-  отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём.
+  отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём. `git_window` пускает только origin из [merge_repos]
+  policy.toml своего направления, а gh зовётся с постоянным PATH (`GH_PATH` в lib/batch.py), не с PATH окна.
+- **review-delta-cmd (metis-1333).** `pantheon review delta` тоже идёт мимо песочницы, поэтому guard пускает только
+  строку целиком `pantheon review delta <владелец/репозиторий> <PR>`: цепочки, подстановки, кавычки, `..`, лишние
+  слова и флаги, присваивания, обёртки и путь к пульту — отказ. Прочий `pantheon review` правило не трогает. Тест —
+  tests/test_review_delta_cmd.py, мутанты в нём.
 - **worktree-cmd (metis-1225, вариант Б владельца 15.11).** Claude Code (2.1.325) в песочнице закрывает запись в
   `.git/worktrees`, кроме worktree своей сессии, а EnterWorktree с `name` окну направления закрыт (worktree-own) —
   `git worktree add|remove` из Bash окна падает EPERM на полпути. Коммитить в копии окно может после EnterWorktree с
