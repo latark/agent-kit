@@ -35,14 +35,17 @@ git — без GIT_*, глобальный конфиг /dev/null, core.hooksPat
     пишет: checkout-index записал бы вне песочницы путь из индекса окна, который сверка не узнала (регистр, вложенная
     копия). Код, который поменяло неудачное слияние, проход не трогает: его список — в итоге, вернёт роль в своей
     песочнице (git status, git checkout -- <пути>; новые неотслеживаемые — тоже в списке).
-  - Предел обхода (WALK_MAX) — по защищённым путям, а не по всем файлам; во вложенных копиях обходятся только их
-    корень, .claude и .husky. Обход при откате или сверке оборвался — найденное новое под защищёнными путями всё равно
-    удаляется, а отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу проверить хуки и настройки.
+  - Обход — всегда полный: везде, в подпапках любой глубины и во вложенных копиях целиком. Предел WALK_MAX (по
+    защищённым путям, не по всем файлам) — только у снимка, который держит содержимое; упёрся — отказ до первой
+    записи (проверка счёта — до приведения к HEAD). Обход для удаления и сверки — без предела: содержимое он не держит.
+    Папку не прочесть (OSError) — отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу по шаблонам
+    песочницы.
+  - Вторая защита после merge: пути индекса копии (ls-files), защищённые для песочницы, которых нет ни в базе, ни в
+    снимке, удаляются с диска; не вышло — откат.
   - После своей записи — `update-index -- <пути>`, чья запись индекса равна записанной (restat): иначе устаревший stat
     (другой размер) не даст роли `git merge --abort`.
 """
 import errno
-import fnmatch
 import os
 import secrets
 import stat
@@ -312,63 +315,19 @@ def put(top, rel, st):
 
 
 def deep_walk(d, plan, bad):
-    """Свой обход защищённых путей (и во вложенных копиях); оборвался (предел) — строка в bad, а пути — найденное до
-    обрыва и всё в точных местах хуков и настроек (hot_paths, без предела)."""
-    try:
-        return C.walk(d.top, lambda r: C.deep(r, plan["pats"]), nested=True)
-    except C.Refused as e:
-        bad.append(f"обход не закончен ({e})")
-        return sorted(set(getattr(e, "found", [])) | set(hot_paths(d.top)))
+    """Свой полный обход защищённых путей без предела (и во вложенных копиях); папку не прочесть — строка в bad."""
+    errs = []
+    found = C.walk(d.top, lambda r: C.deep(r, plan["pats"]), limit=C.NO_LIMIT, nested=True, errors=errs)
+    bad += [f"обход не закончен: {x}" for x in errs]
+    return found
 
 
-def _ls(top, rel):
-    """Записи папки rel копии без перехода по ссылкам → [(имя, папка ли)]; нет, ссылка в звене — []."""
-    try:
-        fd = C._open_parent(top, (rel + "/x").split("/")) if rel else os.dup(top)
-    except OSError:
-        return []
-    try:
-        with os.scandir(fd) as it:
-            return [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
-    except OSError:
-        return []
-    finally:
-        os.close(fd)
-
-
-def _all_under(top, rel):
-    """Все файлы и ссылки под папкой rel без предела (её открыть без ссылок не вышло — [])."""
-    try:
-        fd = C._open_parent(top, (rel + "/x").split("/"))
-    except OSError:
-        return []
-    try:
-        return [f"{rel}/{x}" for x in C.walk(fd, lambda r: True, limit=1 << 62)]
-    finally:
-        os.close(fd)
-
-
-def hot_paths(top):
-    """Без предела — точные места того, что исполняется вне песочницы: .claude/hooks, .claude/settings*.json, .mcp.json,
-    .husky в корне копии и в корнях вложенных копий .claude/worktrees/* (имена — без регистра, fold)."""
-    roots, out = [""], []
-    for cl, _ in [x for x in _ls(top, "") if x[1] and C.fold(x[0]) == ".claude"]:
-        for wt, _ in [x for x in _ls(top, cl) if x[1] and C.fold(x[0]) == "worktrees"]:
-            roots += [f"{cl}/{wt}/{n}/" for n, is_dir in _ls(top, f"{cl}/{wt}") if is_dir]
-    for root in roots:
-        for name, is_dir in _ls(top, root.rstrip("/")):
-            low = C.fold(name)
-            if low == ".mcp.json" and not is_dir:
-                out.append(root + name)
-            elif low == ".husky" and is_dir:
-                out += _all_under(top, root + name)
-            elif low == ".claude" and is_dir:
-                for sub, sub_dir in _ls(top, root + name):
-                    if not sub_dir and fnmatch.fnmatchcase(C.fold(sub), "settings*.json"):
-                        out.append(f"{root}{name}/{sub}")
-                    elif sub_dir and C.fold(sub) == "hooks":
-                        out += _all_under(top, f"{root}{name}/{sub}")
-    return out
+def owner_hint(d, pats):
+    """Строка владельцу из шаблонов песочницы (GRANT_WRITE_DENY) и уровней корня (ROOT_LEVELS), а не свой список."""
+    kinds = sorted({"/".join(p[1:] if p[0] == "**" else p) for p in pats})
+    levels = ", ".join(f"{d}{lv}" for lv in C.P.ROOT_LEVELS)
+    return (f"владельцу: проверь в {levels} и глубже (и во вложенных копиях .claude/worktrees/*) пути "
+            + ", ".join(kinds) + " — там может остаться чужой хук")
 
 
 def to_snapshot(d, plan):
@@ -439,23 +398,27 @@ def git_back(d, plan):
             os.unlink(os.path.join(d.gitdir, name))
     if _rev(d) != sha:
         notes.append(f"HEAD не вернулся на {sha[:12]}")
-    left = left_behind(d, plan)
+    notes += plan["notes"]
+    left = left_behind(d, plan, notes)
     if left:
         notes.append(f"код, который поменяло слияние, проход не трогал ({len(left)}) — верни сам: git status, "
                      "git checkout -- <пути>, новые файлы удали: " + ", ".join(left[:20]) + (" …" if len(left) > 20 else ""))
     return notes
 
 
-def untracked(d):
-    """Неотслеживаемые не игнорируемые файлы копии (только чтение)."""
-    return _lines(C._run(d, "ls-files", "-o", "--exclude-standard", "-z", timeout=300).stdout)
+def untracked(d, notes):
+    """Неотслеживаемые не игнорируемые файлы копии (только чтение); git не прошёл — строка в notes."""
+    r = C._run(d, "ls-files", "-o", "--exclude-standard", "-z", timeout=300)
+    if r.returncode != 0:
+        notes.append(f"git ls-files -o не прошёл (код {r.returncode}) — список новых файлов неполный")
+    return _lines(r.stdout)
 
 
-def left_behind(d, plan):
+def left_behind(d, plan, notes):
     """Незащищённые пути, где HEAD и база различаются (или новые неотслеживаемые), а диск уже не равен HEAD — их
     записал git merge; убранные неотслеживаемые возвращает снимок."""
     head, theirs, left = plan["head"], plan["theirs"], []
-    new = set(untracked(d)) - set(plan["untracked"])   # и файлы только из чужого дерева (ref сдвинут во время merge)
+    new = set(untracked(d, notes)) - set(plan["untracked"])   # и файлы только из чужого дерева (ref сдвинут во время merge)
     for rel in sorted((set(head) | set(theirs) | new) - set(plan["drop"])):
         if (rel not in new and head.get(rel) == theirs.get(rel)) or C.deep(rel, plan["pats"]):
             continue
@@ -475,9 +438,7 @@ def rollback(d, plan, why):
     bad = to_snapshot(d, plan)
     if not why_repo:
         C._run(d, "update-index", "-q", "--refresh", timeout=300)
-    tail = (f"; защищённые пути НЕ возвращены: {'; '.join(bad)} — владельцу: проверь .claude/hooks, "
-            f".claude/settings*.json, .mcp.json и .husky в {d} (и во вложенных копиях): там может остаться чужой хук"
-            if bad else "; защищённые пути возвращены к снимку до прохода")
+    tail = (f"; защищённые пути НЕ возвращены: {'; '.join(bad)} — {owner_hint(d, plan['pats'])}" if bad else "; защищённые пути возвращены к снимку до прохода")
     raise C.Refused(f"{why} — слияние отменено" + "".join(f"; {x}" for x in notes) + tail)
 
 
@@ -504,11 +465,13 @@ def exact(d, base, plan):
     """После своей записи: под защищёнными путями ровно база, плюс бывшее до прохода не из базы (игнорируемое) — как в
     снимке; новое — удалить → (сделано, отказы)."""
     theirs, snap, done, bad = plan["theirs"], plan["snap"], [], []
-    for rel in deep_walk(d, plan, bad):
+    for rel in sorted(set(deep_walk(d, plan, bad)) | set(index_deep(d, plan, bad))):
         if rel in theirs:
             continue
         try:
             if rel not in snap:
+                if grab(d.top, rel) is None:
+                    continue   # путь индекса, которого на диске нет
                 C.delete_file(d.top, rel)
                 done.append(f"{rel}: удалён — появился во время слияния, его нет ни на базе, ни до прохода")
             elif grab(d.top, rel) != snap[rel]:
@@ -520,6 +483,16 @@ def exact(d, base, plan):
         if rel in theirs and not C.same(theirs[rel], C.disk_state(d.top, rel, len(base.tip))):
             bad.append(f"{rel}: не равен базе")
     return done, bad
+
+
+def index_deep(d, plan, bad):
+    """Вторая защита после merge: пути индекса копии, защищённые для песочницы (deep: и не буква в букву, и во
+    вложенных копиях) — их сверяет exact, даже если обход их не нашёл; git не прошёл — строка в bad (откат)."""
+    r = C._run(d, "ls-files", "-z", timeout=300)
+    if r.returncode != 0:
+        bad.append(f"git ls-files не прошёл (код {r.returncode}) — индекс после слияния не сверен")
+        return []
+    return [rel for rel in _lines(r.stdout) if C.deep(rel, plan["pats"])]
 
 
 def after_merge(d, base, plan, out):
@@ -570,6 +543,7 @@ def merge(d):
                             "слияние не даст их проверить: " + ", ".join(mine[:20]))
         check_attrs(d, head, theirs, base)
         drop = untracked_overwrites(d.top, head, theirs)
+        C.walk(d.top, lambda r: C.deep(r, pats), nested=True)   # предел снимка (WALK_MAX) — до первой записи
         out = C.sync(d, base, skip=set(theirs) - set(head))
         if out["refused"]:
             raise C.Refused("защищённые пути не приведены к HEAD: " + "; ".join(out["refused"]))
@@ -578,7 +552,8 @@ def merge(d):
         plan = {"head_sha": head_sha, "head": head, "theirs": theirs, "drop": drop, "pats": pats,
                 "branch": ref.stdout.decode().strip() if ref.returncode == 0 else None,
                 "rels": sorted(r for r in set(theirs) | set(head) if C.protected(r, pats)),
-                "snap": snapshot(d, pats, drop), "untracked": untracked(d)}
+                "snap": snapshot(d, pats, drop), "notes": []}
+        plan["untracked"] = untracked(d, plan["notes"])
         git_merge(d, base, plan)
         return after_merge(d, base, plan, out)
     finally:

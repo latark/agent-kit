@@ -37,6 +37,7 @@ import zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from _py311 import PY311, mkroot  # pantheon.py — только на Python 3.11+
+import _claude_git as H  # noqa: E402
 
 if sys.version_info < (3, 11):
     os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)] + sys.argv[1:])
@@ -379,29 +380,8 @@ check("sync: файлов больше WALK_MAX — отказ всей заяв
 OBJS = os.path.join(CLONE, ".git", "objects")
 
 
-def plant(sha, kind, body):
-    """Свободный объект под чужим SHA (git хеш при чтении не сверяет, свободный перекрывает pack) → (путь, старое)."""
-    p = os.path.join(OBJS, sha[:2], sha[2:])
-    old = None
-    if os.path.exists(p):
-        with open(p, "rb") as fh:
-            old = fh.read()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p + ".t", "wb") as fh:
-        fh.write(zlib.compress(b"%s %d\0" % (kind, len(body)) + body))
-    os.replace(p + ".t", p)
-    return p, old
-
-
-def unplant(po):
-    p, old = po
-    if old is None:
-        os.unlink(p)
-        return
-    with open(p + ".t", "wb") as fh:
-        fh.write(old)
-    os.replace(p + ".t", p)
-
+plant = lambda sha, kind, body: H.plant(OBJS, sha, kind, body)   # noqa: E731
+unplant = H.unplant
 
 raw = subprocess.run(["git", "-C", WT, "cat-file", "commit", TIP], capture_output=True, check=True).stdout
 po = plant(TIP, b"commit", b"".join(x for x in raw.splitlines(True) if not x.startswith(b"parent ")))
@@ -513,15 +493,7 @@ WINDOW = {".claude/settings.local.json": "{\"evil\": 1}\n", ".claude/hooks/x.sh"
 
 
 def window_commit(files=WINDOW):
-    """Коммит окна поверх HEAD: свои файлы (по умолчанию settings.local.json и хук) — во временном индексе."""
-    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(ROOT, "window.index"), GIT_AUTHOR_NAME="окно",
-               GIT_AUTHOR_EMAIL="w@localhost", GIT_COMMITTER_NAME="окно", GIT_COMMITTER_EMAIL="w@localhost")
-    run = lambda *a, data=None: subprocess.run(["git", "-C", WT, *a], input=data, env=env, capture_output=True,   # noqa: E731
-                                               text=True, check=True).stdout.strip()
-    run("read-tree", "HEAD")
-    for rel, text in files.items():
-        run("update-index", "--add", "--cacheinfo", f"100644,{run('hash-object', '-w', '--stdin', data=text)},{rel}")
-    return run("commit-tree", run("write-tree"), "-p", "HEAD", "-m", "окно")
+    return H.window_commit(WT, os.path.join(ROOT, "window.index"), files)
 
 
 def gm_ref(d, base, plan):
@@ -679,54 +651,77 @@ check("--merge: откат код не трогает — README слияния 
       read(WT, "README.md") == "r2\n" and "верни сам" in why and "README.md" in why and "newfile.txt" in why, why)
 back_to_m1()
 
-# --- предел обхода при откате: лишний код его не съедает, защищённых больше предела — громкий отказ ----------------
-def gm_many(d, base, plan, rel, shift):
+# --- обход полный (вложенные копии, подпапки любой глубины), без предела; предел — только у снимка, до записи -----
+SUBS, GONE = ".claude/worktrees/q/sub/.claude/settings.json", ".claude/worktrees/q/.mcp.json"
+EVIL = {"app/.claude/settings.json": "{}\n", ".claude/skills/a/SKILL.md": "E\n"}
+
+
+def gm_deep(d, base, plan, shift, lock):
     git_merge(d, base, plan)
-    for i in range(40):
-        put(WT, rel.format(i), "x\n")
-    put(WT, ".claude/hooks/x.sh", "echo evil\n")
+    for rel, text in [(f".claude/skills/zz/f{i}.md", "x\n") for i in range(40)] + [(SUBS, "{\"h\": 1}\n")] + [*EVIL.items()]:
+        put(WT, rel, text)
+    put(WT, GONE, "{}\n")
+    git(WT, "add", "-f", SUBS, GONE)   # ort слил правку базы в путь, куда дерево HEAD «переименовало» настройки
+    os.unlink(os.path.join(WT, GONE))   # и путь, который есть только в индексе
+    if lock:
+        put(WT, ".claude/skills/lock/x.md", "x\n")
+        os.chmod(os.path.join(WT, ".claude/skills/lock"), 0)
     if shift:
         drift()
 
 
-walk_max, C.WALK_MAX = C.WALK_MAX, 25
-for rel, shift, words in (("junk/f{}.txt", 1, ("возвращены к снимку", "junk/f0.txt")),
-                          (".claude/skills/zz/f{}.md", 1, ("НЕ возвращены", "владельцу")),
-                          (".claude/hooks/z{}.sh", 0, ("не только база", "обход не закончен"))):
-    M.git_merge = lambda d, base, plan, rel=rel, shift=shift: gm_many(d, base, plan, rel, shift)
+def run_fail(fail, hits):   # git с кодом 128 на fail: ls-files -o — только первый вызов (план), ls-files -z — после merge
+    def run(d, *a, **kw):
+        if a[:2] == fail and (fail[1] == "-z" and mh() or fail[1] == "-o" and not hits):
+            hits.append(a)
+            return subprocess.CompletedProcess(a, 128, b"", b"")
+        return run_(d, *a, **kw)
+    return run
+
+
+walk_max, C.WALK_MAX, deep_walk = C.WALK_MAX, 25, M.deep_walk
+for shift, lock, blind, fail, words in (
+        (0, 0, 0, (), ()), (0, 0, 1, (), ()), (1, 0, 0, ("ls-files", "-o"), ("возвращены к снимку", "ls-files -o не прошёл")),
+        (0, 0, 0, ("ls-files", "-z"), ("индекс после слияния не сверен",)),
+        (1, 1, 0, (), ("НЕ возвращены", "не открыта", "владельцу", ".claude/hooks", "/* и глубже"))):
+    M.git_merge = lambda d, base, plan, a=shift, b=lock: gm_deep(d, base, plan, a, b)
+    M.deep_walk = (lambda d, plan, bad: []) if blind else deep_walk   # вторая защита: пути индекса — и без обхода
+    C._run = run_fail(fail, [])
     res = handle(merge=True)
-    M.git_merge = git_merge
-    hooks = os.listdir(os.path.join(WT, ".claude", "hooks"))
-    check(f"--merge: откат ({'сдвиг ref' if shift else 'обход сверки оборван'}), 40 × {rel} и хук — хука нет, снимок "
-          f"на месте, в итоге {words}", refused_with(res, "отменено", *words) and hooks == ["h.sh"]
-          and read(WT, ".claude/settings.local.json") == SETTINGS, (hooks, res))
-    shutil.rmtree(os.path.join(WT, "junk"), True)
+    M.git_merge, M.deep_walk, C._run = git_merge, deep_walk, run_
+    if lock:
+        os.chmod(os.path.join(WT, ".claude/skills/lock"), 0o755)
+    left = [r for r in (SUBS, "app/.claude/settings.json", ".claude/skills/zz/f0.md")[:1 if blind else 3]
+            if os.path.lexists(os.path.join(WT, r))]
+    check(f"--merge: {SUBS} (правка базы), app/.claude, 40 навыков {(shift, lock, blind, fail)} — новых нет, {words}",
+          not left and (refused_with(res, "отменено", *words) and read(WT, ".claude/skills/a/SKILL.md") == "A1\n"
+                        if words else res.get("state") == "done"), (left, res))
+    for rel in ("app", ".claude/skills/zz", ".claude/skills/lock"):
+        shutil.rmtree(os.path.join(WT, rel), True)
     back_to_m1()
+for i in range(30):   # во вложенной копии: sync их не считает (protected), снимок — считает
+    put(WT, f".claude/worktrees/q/.claude/skills/zz/f{i}.md", "x\n")
+put(WT, ".claude/skills/a/SKILL.md", "X\n")   # sync привёл бы к HEAD — но предел снимка проверен до первой записи
+res = handle(merge=True)
+check("--merge: снимок на пределе — отказ до слияния, диск не тронут", refused_with(res, "больше 25")
+      and "отменено" not in str(res.get("why")) and read(WT, ".claude/skills/a/SKILL.md") == "X\n", res)
+shutil.rmtree(os.path.join(WT, ".claude/worktrees/q"), True)
 C.WALK_MAX = walk_max
+back_to_m1()
 
 # --- звено пути подменено после проверки (ссылка, другая папка) --------------------------------------------------
 Base = C.Base
 WTS = os.path.join(CLONE, ".claude", "worktrees")
 
 
-def link_parent():
-    os.rename(WTS, WTS + ".real")
-    os.symlink(WTS + ".real", WTS)
+def mv(*pairs):   # переименования (src, dst); dst None — пустая папка src, src None — rmdir dst
+    for a, b in pairs:
+        os.mkdir(a) if b is None else os.rmdir(b) if a is None else os.rename(a, b)
 
 
-def unlink_parent():
-    os.unlink(WTS)
-    os.rename(WTS + ".real", WTS)
-
-
-def other_dir():
-    os.rename(WT, WT + ".moved")
-    os.mkdir(WT)
-
-
-def back_dir():
-    os.rmdir(WT)
-    os.rename(WT + ".moved", WT)
+link_parent = lambda: (mv((WTS, WTS + ".real")), os.symlink(WTS + ".real", WTS))   # noqa: E731
+unlink_parent = lambda: (os.unlink(WTS), mv((WTS + ".real", WTS)))   # noqa: E731
+other_dir, back_dir = (lambda: mv((WT, WT + ".moved"), (WT, None))), (lambda: mv((None, WT), (WT + ".moved", WT)))
 
 
 for swap, undo, word, name in ((link_parent, unlink_parent, "подменено", "звено пути стало ссылкой"),

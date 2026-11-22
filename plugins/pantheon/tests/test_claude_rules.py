@@ -78,26 +78,21 @@ check("свой драйвер в атрибутах найден, встрое�
       M.bad_attrs("# c\n* merge=evil\n*.py diff=python\n*.bin -diff binary\n[attr]m filter=lfs\nx merge=union", "f")
       == ["f: merge=evil", "f: filter=lfs"], M.bad_attrs("* merge=evil\n[attr]m filter=lfs", "f"))
 
-# --- обход: предел по найденным, вложенные копии — только звенья под шаблоны --------------------------------------
-check("into_nested: корень копии, её .claude и .husky — да; код и node_modules вложенной копии — нет",
-      all(C.into_nested(p) for p in ("src", ".claude/worktrees", ".claude/worktrees/y", ".claude/worktrees/y/.claude/a",
-                                     ".Claude/Worktrees/y/.HUSKY", ".claude/worktrees/y/.claude/worktrees/z"))
-      and not any(C.into_nested(p) for p in (".claude/worktrees/y/node_modules", ".claude/worktrees/y/app",
-                                             ".claude/worktrees/y/.claude/worktrees/z/src")))
+# --- обход: предел по найденным, вложенные копии и подпапки — целиком; папку не прочесть — громко ---------------------
 TOP = os.path.join(ROOT, "copy")
+FOUND = [".claude/hooks/h.sh", ".claude/worktrees/y/.mcp.json", ".claude/worktrees/q/sub/.claude/settings.json",
+         ".claude/worktrees/y/app.git/hooks/x", ".claude/worktrees/y/node_modules/m/.mcp.json", "app/.mcp.json",
+         "a/b/c/.claude/skills/s/SKILL.md"]
 for i in range(50):
     put(f"src/f{i}.txt")
-    put(f".claude/worktrees/y/node_modules/m{i}/.mcp.json")
-for rel in (".claude/hooks/h.sh", ".claude/worktrees/y/.mcp.json", ".claude/worktrees/y/.claude/settings.json",
-            "app/.mcp.json"):
+    put(f".claude/worktrees/y/node_modules/m/f{i}.js")
+for rel in FOUND:
     put(rel)
 top = os.open(TOP, os.O_RDONLY | os.O_DIRECTORY)
 deep = lambda r: C.deep(r)   # noqa: E731
-got = C.walk(top, deep, limit=5, nested=True)
-check("walk: 50 файлов кода и node_modules вложенной копии предел 5 не обрывают; найдено своё",
-      got == sorted([".claude/hooks/h.sh", ".claude/worktrees/y/.mcp.json", ".claude/worktrees/y/.claude/settings.json",
-                     "app/.mcp.json"]), got)
-check("walk без nested: вложенные копии не обходит", C.walk(top, deep, limit=5) == [".claude/hooks/h.sh", "app/.mcp.json"])
+got = C.walk(top, deep, limit=len(FOUND), nested=True)
+check("walk: 100 файлов кода предел не обрывают; вложенные копии и подпапки любой глубины — целиком", got == sorted(FOUND), got)
+check("walk без nested: вложенные копии не обходит", C.walk(top, deep) == sorted(f for f in FOUND if ".claude/worktrees" not in f))
 for i in range(10):
     put(f".claude/hooks/x{i}.sh")
 try:
@@ -105,18 +100,20 @@ try:
     err = None
 except C.Refused as e:
     err = e
-check("walk: защищённых больше предела — Refused, найденное до обрыва — в found",
-      err is not None and "больше 5" in str(err) and len(getattr(err, "found", [])) > 5, err)
-os.close(top)
-TOP = os.path.join(ROOT, "hot")   # обход оборвался — точные места хуков и настроек без предела
-HOT = [".Claude/Hooks/a/b.sh", ".Claude/Settings.local.json", ".Claude/worktrees/y/.claude/hooks/z.sh",
-       ".Claude/worktrees/y/.mcp.json", ".HUSKY/pre-commit", ".mcp.JSON"]
-for rel in HOT + [".Claude/skills/x.md", ".Claude/worktrees/y/src/.mcp.json", "src/.mcp.json", ".Claude/other.json"]:
-    put(rel)
-top = os.open(TOP, os.O_RDONLY | os.O_DIRECTORY)
-got = sorted(M.hot_paths(top))
-check("hot_paths: хуки, settings*.json, .mcp.json, .husky в корне и во вложенных копиях — без регистра; код — нет",
-      got == sorted(HOT), got)
+check("walk: защищённых больше предела — Refused", err is not None and "больше 5" in str(err), err)
+check("walk: NO_LIMIT — без предела", len(C.walk(top, deep, limit=C.NO_LIMIT, nested=True)) == len(FOUND) + 10)
+os.chmod(os.path.join(TOP, "a/b"), 0)
+errs = []
+got = C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs)
+try:
+    C.walk(top, deep, nested=True)
+    err = None
+except C.Refused as e:
+    err = e
+os.chmod(os.path.join(TOP, "a/b"), 0o755)
+check("walk: папку не открыть — с errors строка и обход дальше, без errors — Refused",
+      errs == ["a/b/: не открыта (PermissionError)"] and ".claude/hooks/h.sh" in got and err is not None
+      and "не открыта" in str(err), (errs, err))
 os.close(top)
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} проверок")

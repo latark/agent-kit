@@ -59,6 +59,7 @@ FILE_MODES = {"100644": 0o644, "100755": 0o755}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 SOFT = ("skills", "commands", "agents")   # удаление — только здесь: пропажа файла снимает возможность, не защиту
 WALK_MAX = 300000
+NO_LIMIT = float("inf")   # обход для удаления и сверки: содержимое не держит, предела не нужно
 
 def set_core(core, outside):
     global P, O
@@ -217,21 +218,27 @@ def _open_parent(top_fd, parts, create=False):
         raise
 
 
-def walk(top_fd, keep, limit=None, nested=False):
+def walk(top_fd, keep, limit=None, nested=False, errors=None):
     """Файлы и ссылки на диске копии, где keep(rel): свой обход от корня — звенья открыты O_NOFOLLOW, по ссылкам не
-    идёт, .git (в любом регистре) не обходит. Вложенные копии .claude/worktrees/* — только с nested и только звенья,
-    которые могут подойти под шаблоны (into_nested). Предел limit — по найденным (keep), а не по всем файлам: тысячи
-    файлов кода не обрывают обход. Refused (атрибут found — найденное до обрыва) — найденных больше limit."""
+    идёт, .git (в любом регистре) не обходит. Вложенные копии .claude/worktrees/* — только с nested, и тогда целиком.
+    Предел limit (None — WALK_MAX, NO_LIMIT — без предела) — по найденным (keep), а не по всем файлам: тысячи файлов
+    кода не обрывают обход. Refused — найденных больше limit или папку не прочесть; с errors — тогда строка туда и
+    обход дальше."""
     found, todo, limit = [], [""], limit or WALK_MAX
     while todo:
         pre = todo.pop()
         try:
             fd = _open_parent(top_fd, (pre + "x").split("/")) if pre else os.dup(top_fd)
-        except OSError:
-            continue   # звено сменилось на ссылку или пропало по ходу обхода — не идём
+        except OSError as e:   # звено сменилось на ссылку или пропало по ходу обхода — не идём; иное — громко
+            if e.errno not in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+                _walk_err(errors, f"{pre}: не открыта ({type(e).__name__})")
+            continue
         try:
             with os.scandir(fd) as it:
                 items = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+        except OSError as e:
+            _walk_err(errors, f"{pre or '.'}: не прочитана ({type(e).__name__})")
+            continue
         finally:
             os.close(fd)
         for name, is_dir in items:
@@ -239,22 +246,17 @@ def walk(top_fd, keep, limit=None, nested=False):
             if not is_dir:
                 if keep(rel):
                     found.append(rel)
-            elif fold(name) != ".git" and (into_nested(rel) if nested else fold(rel) + "/" != NESTED):
+            elif fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED):
                 todo.append(rel + "/")
         if len(found) > limit:
-            e = Refused(f"в копии под защищёнными путями больше {limit} файлов — обход не уложился, приведи руками")
-            e.found = sorted(found)
-            raise e
+            raise Refused(f"в копии под защищёнными путями больше {limit} файлов — обход не уложился, приведи руками")
     return sorted(found)
 
 
-def into_nested(rel):
-    """Папка rel во вложенной копии (после последнего .claude/worktrees/<имя>/): идти только в корень копии и в её
-    .claude и .husky — под шаблоны песочницы подходят только они (и .mcp.json в корне копии); вне вложенных — везде."""
-    parts = [fold(x) for x in rel.split("/")]
-    last = max((i for i in range(len(parts) - 1) if parts[i:i + 2] == [".claude", "worktrees"]), default=None)
-    tail = parts[last + 2:] if last is not None else None
-    return tail is None or len(tail) <= 1 or tail[1] in (".claude", ".husky")
+def _walk_err(errors, line):
+    if errors is None:
+        raise Refused(f"{line} — обход не закончен, приведи руками")
+    errors.append(line)
 
 
 def ignored(d, rels):
