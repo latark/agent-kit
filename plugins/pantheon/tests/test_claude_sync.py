@@ -642,8 +642,8 @@ def gm_deep(d, base, plan, shift, lock):
     os.unlink(os.path.join(WT, GONE))   # и путь, который есть только в индексе
     for rel in (".claude/skills/lock/x.md", DEEP)[:2 if lock == 1 else 0]:
         put(WT, rel, "x\n")   # 1: папка без прав и цепочка глубже DEPTH_MAX с навыком внизу; 2: потолок обхода истёк
-    _ = lock == 1 and git(WT, "add", "-f", DEEP)
-    for rel in (".claude/hooks/x.sh", ".mcp.json", "app/.mcp.json", ".claude/settings.json")[:lock and (1 if lock == 1 else 4)]:
+    _ = lock == 1 and git(WT, "add", "-f", DEEP, ".claude/skills/lock/x.md")   # путь индекса под папкой 000
+    for rel in (".claude/hooks/x.sh", ".mcp.json", "app/.mcp.json", ".claude/settings.json")[:lock and 4]:
         put(WT, rel, "{\"evil\": 1}\n")   # злые настройки корня и первого уровня; 3: и мусор в .claude/junk — их убирает spots
     _ = lock == 3 and [put(WT, f".claude/junk/d{i}/f.md", "x\n") for i in range(300)]
     _ = lock and (os.chmod(os.path.join(WT, ".claude/skills/lock"), 0) if lock == 1 else [setattr(C, k, -1) for k in ("HANG_MAX", "HOT_MAX")[:1 if lock == 2 else 2]])
@@ -663,14 +663,16 @@ walk_max, C.WALK_MAX, deep_walk = C.WALK_MAX, 25, M.deep_walk
 for shift, lock, blind, fail, words in (
         (0, 0, 0, (), ()), (0, 0, 1, (), ()), (1, 0, 0, ("ls-files", "-o"), ("возвращены к снимку", "ls-files -o не прошёл")),
         (0, 0, 0, ("ls-files", "-z"), ("индекс после слияния не сверен",)),
-        (1, 1, 0, (), ("НЕ возвращены", "не открыта", "глубже 64", "владельцу", "/* и глубже", "проход не удаляет")),
+        (1, 1, 0, (), ("НЕ возвращены", "не открыта", "глубже 64", "владельцу", "/* и глубже", "проход не удаляет", "lock/x.md: не прочитан")),
         (1, 2, 0, (), ("срок обхода истёк", "НЕ возвращены", "владельцу")), (1, 3, 0, (), ("срок обхода истёк", "НЕ возвращены", "владельцу"))):
     M.git_merge = lambda d, base, plan, a=shift, b=lock: gm_deep(d, base, plan, a, b)
     M.deep_walk = (lambda d, plan, bad, on_found: None) if blind else deep_walk   # вторая защита: пути индекса — и без обхода
     C._run, t0, s0 = run_fail(fail, []), time.monotonic(), read(WT, ".claude/settings.json")
-    res = handle(merge=True)
+    try:
+        res = handle(merge=True)
+    finally:
+        _ = lock == 1 and os.chmod(os.path.join(WT, ".claude/skills/lock"), 0o755)
     M.git_merge, M.deep_walk, C._run, took, C.HANG_MAX, C.HOT_MAX = git_merge, deep_walk, run_, time.monotonic() - t0, 600, 600
-    _ = lock == 1 and os.chmod(os.path.join(WT, ".claude/skills/lock"), 0o755)
     left = [r for r in (SUBS, "app/.claude/settings.json", ".claude/skills/zz/f0.md", ".claude/hooks/x.sh", ".mcp.json",
                         "app/.mcp.json", DEEP)[:1 if blind else 7] if os.path.lexists(os.path.join(WT, r)) and not (lock == 3 and "zz" in r)] + (
         ["долго"] if took > 30 else []) + (["settings.json"] if read(WT, ".claude/settings.json") != s0 else [])

@@ -398,7 +398,10 @@ def to_snapshot(d, plan, idx=()):
                 bad.append(f"{rel}: не удалён ({type(e).__name__})")
     deep_walk(d, plan, bad, drop_new)
     for rel in idx:
-        _ = grab(d.top, rel) is not None and drop_new(rel)
+        try:
+            _ = grab(d.top, rel) is not None and drop_new(rel)
+        except OSError as e:
+            bad.append(f"{rel}: не прочитан ({type(e).__name__})")
     for rel, st in sorted(snap.items()):
         try:
             if grab(d.top, rel) != st:
