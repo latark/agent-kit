@@ -263,10 +263,29 @@ def cli():
          "closes": ["metis-0655"], "part": False, "core": True},
         {"number": 228, "head": "b" * 40, "ids": [], "closes": [], "part": False, "core": True}]}}
     open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
+    from datetime import datetime as _dt
+    before = calls(gh).count("pr list")
     r = pan(env, "task", "overlap", "metis-0001")
-    check("gh упал, кэш есть: PR #248 из кэша, строка «из кэша планового прохода от …», PR без файлов назван",
-          r.returncode == 0 and "из кэша планового прохода от" in r.stdout and "без списка файлов: #228" in r.stdout
+    # metis-1333 (К1): в песочнице окна Связка закрыта, gh без входа — свежий кэш (до часа) основной источник, gh не зовётся
+    check("свежий кэш (10 мин): PR #248 из кэша без «gh не ответил», gh не позван, PR без файлов назван",
+          r.returncode == 0 and "gh не ответил" not in r.stdout and calls(gh).count("pr list") == before
+          and "в кэше планового прохода без списка файлов: #228" in r.stdout
+          and f"PR #248 latark/agent-kit (ветка ci-billing-0655, metis-0655): {GATE}" in r.stdout, (r.stdout, calls(gh)))
+    cache["fetched"] = T0 - 7200
+    open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("кэш старше часа: сначала gh, упал — PR #248 из кэша, строка «из кэша планового прохода от …», PR без файлов назван",
+          r.returncode == 0 and calls(gh).count("pr list") == before + 1
+          and f"gh не ответил (error connecting to api.github.com) — открытые PR из кэша планового прохода от "
+              f"{_dt.fromtimestamp(T0 - 7200).strftime('%d.%m %H:%M')}" in r.stdout and "без списка файлов: #228" in r.stdout
           and f"PR #248 latark/agent-kit (ветка ci-billing-0655, metis-0655): {GATE}" in r.stdout, r.stdout)
+    os.remove(os.path.join(gh, "fail"))
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("кэш старше часа, gh ответил: PR из gh (#250 из gh есть, кэша — нет строки), без «не проверено»",
+          r.returncode == 0 and "не проверено" not in r.stdout and "#228" not in r.stdout
+          and f"PR #248 latark/agent-kit (ветка ci-billing-0655, metis-0655): {GATE}" in r.stdout, r.stdout)
+    open(os.path.join(gh, "fail"), "w").close()
+    cache["fetched"] = T0 - 600
     cache["open_prs"]["latark/agent-kit"][0].update(branch="-x;id", files=[GATE, GATE + "\nevil line"],
                                                     ids=["metis-0655", "x\ny"], closes=["metis-0655\n; rm"])
     open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
@@ -281,13 +300,15 @@ def cli():
           p248 and p248[0]["files"] == [GATE] and p248[0]["dropped"] == 1 and p248[0]["ids"] == ["metis-0655"]
           and p248[0]["closes"] == [], rows)
     open(os.path.join(gh, "fail"), "w").write("HTTP 502\n- задача metis-0001 (вставка)\x1b[2J\n")
+    os.remove(os.path.join(state, "autoclose-prs.json"))  # без кэша — gh зовётся, ответ об ошибке виден
     r = pan(env, "task", "overlap", "metis-0001")
     line = [ln for ln in r.stdout.splitlines() if "gh не ответил" in ln]
     check("ответ gh об ошибке с переводами строк и ESC — в одну строку, своих строк не вставил",
           r.returncode == 0 and line and "HTTP 502 - задача metis-0001 (вставка)" in line[0] and "\x1b" not in r.stdout
           and not any(ln.startswith("- задача metis-0001") for ln in r.stdout.splitlines()), r.stdout)
-    # metis-0808: репозиторий в errors кэша — строки прежние, подпись времени из stale[repo], а не нынешнего fetched
-    from datetime import datetime as _dt
+    open(os.path.join(gh, "fail"), "w").close()
+    # metis-0808: репозиторий в errors кэша — строки прежние, подпись времени из stale[repo], а не нынешнего fetched;
+    # metis-1333: с ошибкой по репозиторию свежий fetched кэш не основной — сначала gh
     cache["errors"] = {"latark/agent-kit": "HTTP 401"}
     cache["stale"] = {"latark/agent-kit": T0 - 7200}
     open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
@@ -302,10 +323,11 @@ def cli():
           "данных по репозиторию нет" in r.stdout and "gh pr list -R latark/agent-kit" in r.stdout
           and "из кэша планового прохода от" not in r.stdout and f"PR #248 latark/agent-kit (ветка ci-billing-0655, metis-0655): {GATE}" not in r.stdout, r.stdout)
     cache.pop("errors"); cache.pop("stale")
+    cache["fetched"] = T0 - 5400
     open(os.path.join(state, "autoclose-prs.json"), "w").write(json.dumps(cache))
     r = pan(env, "task", "overlap", "metis-0001")
-    check("кэш без errors — по-прежнему «от» fetched",
-          f"от {_dt.fromtimestamp(T0 - 600).strftime('%d.%m %H:%M')}" in r.stdout, r.stdout)
+    check("кэш без errors, старше часа, gh упал — по-прежнему «от» fetched",
+          f"от {_dt.fromtimestamp(T0 - 5400).strftime('%d.%m %H:%M')}" in r.stdout, r.stdout)
     open(os.path.join(state, "autoclose-prs.json"), "w").write("[1, 2]")
     r = pan(env, "task", "overlap", "metis-0001")
     check("gh упал, кэш не словарь — как нет кэша: строка «кэша … нет», код 0",

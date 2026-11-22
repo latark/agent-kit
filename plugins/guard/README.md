@@ -40,6 +40,8 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill, EnterWorktree) и 
 - **Код из несмёрженного коммита** — Touch ID и плановый проход исполняют его (metis-0902).
 - **Прогоны outside** — профиль sandbox-exec не закрывает чтение личного, сеть открыта (metis-0914).
 - **Запись `.claude/agents` и хуков скриптом** — мимо guard (metis-0883, metis-0996).
+- **trustd в окнах с сетью** — `enableWeakerNetworkIsolation` пускает trustd наружу мимо прокси (AIA, OCSP, CRL).
+  Снять флаг проба metis-1333 не смогла: TLS программ на Go в песочнице без него не проверен.
 
 ### Остатки — что guard не держит и так задумано
 
@@ -626,11 +628,19 @@ answer и плановый проход, это скрипты, guard их не 
   `--no-mask` и любой другой флаг, префикс присваивания (`PATH=… sessync find`), `env`, `bash -c`, `;`, `&`, `|`,
   перенаправления, подстановки, глобы (`* ? [ ] { } ~ ^ # !`), перевод строки, путь к команде. Иначе хвост команды или
   раскрытое оболочкой ушли бы мимо песочницы вместе с `find`. Другим окнам `sessync find` мимо песочницы не выпущен.
-- **gh шлюза при закрытой Связке (metis-1279, «А — да» владельца 20.11).** Если после вливания пакета у окна
-  направления в `sandbox.filesystem.denyRead` есть `~/Library/Keychains` (любая форма пути, её предок или путь внутри),
-  gh в песочнице не читает токен (HTTP 401). Такому окну мимо песочницы выпущены `pantheon review accept` и
-  `pantheon review delta` (голые и с `*`; `REVIEW_GH_OUT` и `keychain_denied` в lib/window_rules.py) — только они из
-  `review` зовут gh. Токен остаётся в Связке, проверки шлюза и запись вердикта хуком — те же; окна без запрета не меняются.
+- **Связка закрыта каждому окну (metis-1333, дыра К1; план metis-1331, PR-1).** В `sandbox.filesystem.denyRead` и
+  правилах Read каждого окна — `~/Library/Keychains` (`KEYCHAIN_DIR` в `WINDOW_SECRET_DIRS` pantheon.py). Раньше Связка
+  была открыта песочнице с сетью, и `gh api` из неё писал в GitHub с токеном владельца; теперь gh в песочнице без входа
+  (HTTP 401). Мимо песочницы — только узкие команды: чтение gh (`SANDBOX_EXCLUDED`), запись PR окнам направлений
+  (`GH_PR_WRITE`), `pantheon merge request|cancel`, `pantheon review accept` и `pantheon review delta` (голые и с `*`,
+  `REVIEW_GH_OUT` в lib/window_rules.py — теперь всем окнам направлений, а не только с запретом от пакета, как с
+  metis-1279) и `pantheon batch pr` (`BATCH_PR_OUT`: папку git и url origin проверяет `git_window` в lib/gitout.py, gh
+  получает `-R` из этого url, форму строки держит правило batch-pr-cmd). `pantheon task overlap` берёт открытые PR из
+  кэша планового прохода (`autoclose-prs.json`, не старше часа), gh — запасной путь с причиной в выводе. Проба 22.11:
+  pnpm, npm, uv, supabase и curl Связку в песочнице не читают. Флаг trustd оставлен (строка в «Известных дырах»).
+- **batch-pr-cmd (metis-1333).** `pantheon batch pr` идёт мимо песочницы, поэтому guard пускает только строку целиком
+  `pantheon batch pr <story-id> [--dry-run]`: цепочки, подстановки, кавычки, присваивания, обёртки и путь к пульту —
+  отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём.
 - **worktree-cmd (metis-1225, вариант Б владельца 15.11).** Claude Code (2.1.325) в песочнице закрывает запись в
   `.git/worktrees`, кроме worktree своей сессии, а EnterWorktree с `name` окну направления закрыт (worktree-own) —
   `git worktree add|remove` из Bash окна падает EPERM на полпути. Коммитить в копии окно может после EnterWorktree с
