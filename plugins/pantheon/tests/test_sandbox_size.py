@@ -134,7 +134,8 @@ def main():
     print(f"     denyRead {len(fs2['denyRead'])} путей, deny {len(hq2['permissions']['deny'])}, {size} байт")
     check("5600 папок в /tmp/claude-<uid>: denyRead и правила Read штаба те же, что при 50 (не O(n))",
           r.returncode == 0 and fs2["denyRead"] == fs["denyRead"]
-          and hq2["permissions"]["deny"] == hq1["permissions"]["deny"] and len(fs2["denyRead"]) < 80)
+          and hq2["permissions"]["deny"] == hq1["permissions"]["deny"]
+          and len(fs2["denyRead"]) < 93)  # metis-1333: +13 секретов окна (было < 80)
 
     sa2 = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
     dw = sa2["sandbox"]["filesystem"]["denyWrite"]
@@ -248,10 +249,12 @@ def main():
     # metis-0894: личные папки — me, Self, Areas, People (PERSONAL), два ключа git-crypt и owner-log: 7 путей, каждый
     # в двух видах («~/…» и настоящий путь, _deny_forms) = 14; плюс 4 шаблона notifier и 4 служебные папки окон.
     # Было 16, стало 22: рост — по два запрета на каждый новый личный путь, размножения нет (дублей нет).
-    # Порог 30 — запас на пару путей; десятки и сотни записей — это уже раздувание
+    # metis-1333 (К1): +13 секретов каждому окну — Связка, 6 папок (SECRET_HOME_DIRS) и 6 файлов
+    # (WINDOW_SECRET_FILES); корень теста — настоящий путь, поэтому у каждого одна форма: 22 → 35.
+    # Порог 43 — тот же запас на пару путей; десятки и сотни записей — это уже раздувание
     dr = sa["sandbox"]["filesystem"]["denyRead"]
     check("окно направления: allowRead нет, запретов чтения — единицы (координаторы не раздуваются)",
-          "allowRead" not in sa["sandbox"]["filesystem"] and len(dr) < 30)
+          "allowRead" not in sa["sandbox"]["filesystem"] and len(dr) < 43)
     check("окно направления: в denyRead нет дублей, личные me/Self/Areas/People закрыты («~/…» и настоящий путь)",
           len(dr) == len(set(dr)) and all(f"~/ai/knowledge/{x}" in dr and os.path.realpath(os.path.join(tmp, "ai/knowledge", x)) in dr
                                           for x in ("me", "Self", "Areas", "People")))

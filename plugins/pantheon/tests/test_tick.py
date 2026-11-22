@@ -156,7 +156,8 @@ def keychain_gate(check, tmp, env, load):
              or "Read(~/Library/Keychains/**)" not in load(n).get("permissions", {}).get("deny", [])]
     check("у каждого окна с сетью Связка закрыта: denyRead песочницы и правило Read (metis-1333, К1)",
           not no_kc and {"athena-shop", "metis-pantheon", "workshop", "mnemo-brain"} <= set(online), (online, no_kc))
-    secret_class(check, env, load, names, sb)
+    # окна с песочницей — как у проверки trustd выше: файл окна без раздела sandbox ролей не запускает
+    secret_class(check, env, load, [n for n in names if "sandbox" in load(n)], sb)
     exc = lambda n: sb[n].get("excludedCommands") or []  # noqa: E731
     dirs = [n for n in ("metis-pantheon", "athena-shop", "mnemo-brain") if n in sb]
     check("окна направлений (и без пакета): pantheon review accept|delta и batch pr мимо песочницы, report — нет "
