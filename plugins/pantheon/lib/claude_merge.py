@@ -39,7 +39,10 @@ git — без GIT_*, глобальный конфиг /dev/null, core.hooksPat
     защищённым путям, не по всем файлам) — только у снимка, который держит содержимое; упёрся — отказ до первой
     записи (проверка счёта — до приведения к HEAD). Обход для удаления и сверки — без предела: содержимое он не держит,
     новое удаляет сразу по ходу. Обход линейный (стек открытых fd, ребёнок — от fd родителя), не глубже DEPTH_MAX
-    звеньев; срок всего прохода — PASS_MAX по монотонным часам, откату — ещё ROLLBACK_GRACE; сверх — громкий отказ.
+    звеньев. Сначала — приоритетные места (hot_dir: корень, первый уровень, корни вложенных копий и их первый
+    уровень — оттуда Claude Code берёт настройки и хуки) без срока, затем полный обход с потолком HANG_MAX; срок
+    PASS_MAX — только у обходов до первой записи и заново после merge; сверх — громкий отказ. Глубже DEPTH_MAX не
+    удаляется (отказ со строкой владельцу): сессии идут в корне и на первом уровне, а их места п. 1 закрывает всегда.
     Папку не прочесть (OSError) — отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу по шаблонам
     песочницы.
   - Вторая защита после merge: пути индекса копии (ls-files), защищённые для песочницы, которых нет ни в базе, ни в
@@ -64,7 +67,6 @@ MERGE_CFG = ("-c", "rerere.enabled=false", "-c", "merge.verifySignatures=false",
              "-c", "user.name=pantheon-outside", "-c", "user.email=outside@localhost")
 LINK = "120000"
 WALK_BAD = "обход не закончен"
-ROLLBACK_GRACE = 60   # откату — свой срок обхода, даже если проход свой истратил
 SNAP_MAX = 64 << 20   # снимок защищённых путей в памяти — до 64 МБ
 
 
@@ -321,8 +323,10 @@ def put(top, rel, st):
 def deep_walk(d, plan, bad, on_found):
     """Свой полный обход защищённых путей без предела (и во вложенных копиях), on_found — сразу на каждый; папку не
     прочесть, глубже DEPTH_MAX, срок истёк — строка в bad (с ней откат и строка владельцу)."""
-    errs = []
-    C.walk(d.top, lambda r: C.deep(r, plan["pats"]), limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found)
+    errs, keep = [], (lambda r: C.deep(r, plan["pats"]))
+    C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found, into=C.hot_dir, deadline=False)
+    C.walk(d.top, keep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found,
+           deadline=C.time.monotonic() + C.HANG_MAX)
     bad += [f"{WALK_BAD}: {x}" for x in errs]
 
 
@@ -439,7 +443,6 @@ def left_behind(d, plan, notes):
 def rollback(d, plan, why):
     """Откат без git merge --abort: копия, ветка и индекс — к head_sha (если копия не подменена), защищённые пути —
     к снимку своей записью → Refused с честной причиной."""
-    C.grace(ROLLBACK_GRACE)
     why_repo = repair(d)
     notes = [why_repo] if why_repo else git_back(d, plan)
     bad = to_snapshot(d, plan)
@@ -462,6 +465,7 @@ def git_merge(d, base, plan):
                "--no-verify", "--no-edit", "--no-stat", "-s", "ort", "-X", "no-renames",
                "-m", f"Merge {base.name} {base.tip[:12]} (claude-sync --merge)", base.tip, timeout=600)
     if os.path.lexists(os.path.join(d.gitdir, "MERGE_HEAD")):
+        C.set_deadline(C.PASS_MAX)   # срок — заново после merge
         return
     tail = os.fsdecode(r.stderr or b"").strip().splitlines()
     rollback(d, plan, "git merge ничего не слил (Already up to date), MERGE_HEAD нет" if r.returncode == 0 else

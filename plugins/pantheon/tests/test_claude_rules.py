@@ -144,8 +144,18 @@ C.time.monotonic = lambda: ticks.__setitem__(0, ticks[0] + 1) or ticks[0]
 C.DEADLINE = 40
 C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.append)
 C.DEADLINE, C.time.monotonic = None, mono
-check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found", errs == [f"срок прохода ({C.PASS_MAX} с) истёк"]
+check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found", errs == ["срок обхода истёк"]
       and seen, (errs, seen))
+check("hot_dir: корень, первый уровень, корни вложенных копий и их первый уровень — и их .claude, .husky; код — нет",
+      all(C.hot_dir(p) for p in ("app", ".claude", ".claude/skills/a/b", "app/.Claude/hooks", ".husky/x", ".claude/worktrees",
+                                 ".claude/worktrees/y", ".claude/worktrees/y/sub", ".claude/worktrees/y/sub/.claude/x"))
+      and not any(C.hot_dir(p) for p in ("src/x", "app/src", ".claude/worktrees/y/src/x", ".claude/worktrees/y/a/b/.claude",
+                                         "app/.claude/worktrees/y")))
+C.DEADLINE, errs = 0, []   # срок истёк — приоритетный обход (deadline=False) идёт, полный — нет
+got = C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, into=C.hot_dir, deadline=False)
+C.DEADLINE = None
+check("walk: приоритетный обход — без срока, только hot_dir", errs == [] and ".claude/hooks/h.sh" in got and "app/.mcp.json"
+      in got and not any(x.startswith(("chain/", ".claude/worktrees/y/node_modules")) for x in got), got)
 os.close(top)
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} проверок")

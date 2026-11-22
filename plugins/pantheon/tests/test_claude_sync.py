@@ -658,19 +658,20 @@ EVIL = {"app/.claude/settings.json": "{}\n", ".claude/skills/a/SKILL.md": "E\n"}
 
 
 def gm_deep(d, base, plan, shift, lock):
+    assert C.DEADLINE > time.monotonic() and not setattr(C, "DEADLINE", 0), "run не поставил срок до первой записи"
     git_merge(d, base, plan)
+    assert C.DEADLINE > time.monotonic(), "срок не начат заново после git merge"
     for rel, text in [(f".claude/skills/zz/f{i}.md", "x\n") for i in range(40)] + [(SUBS, "{\"h\": 1}\n")] + [*EVIL.items()]:
         put(WT, rel, text)
     put(WT, GONE, "{}\n")
     git(WT, "add", "-f", SUBS, GONE)   # ort слил правку базы в путь, куда дерево HEAD «переименовало» настройки
     os.unlink(os.path.join(WT, GONE))   # и путь, который есть только в индексе
     for rel in (".claude/skills/lock/x.md", ".claude/skills/deep/" + "d/" * 70 + "SKILL.md")[:2 if lock == 1 else 0]:
-        put(WT, rel, "x\n")   # 1: папка без прав и цепочка глубже DEPTH_MAX с навыком внизу; 2: срок прохода истёк
-    if lock:
-        put(WT, ".claude/hooks/x.sh", "x\n")
-        _ = os.chmod(os.path.join(WT, ".claude/skills/lock"), 0) if lock == 1 else setattr(C, "DEADLINE", C.DEADLINE - C.PASS_MAX - 1)
-    if shift:
-        drift()
+        put(WT, rel, "x\n")   # 1: папка без прав и цепочка глубже DEPTH_MAX с навыком внизу; 2: потолок обхода истёк
+    for rel in (".claude/hooks/x.sh", ".mcp.json", "app/.mcp.json", ".claude/settings.json")[:lock and (1 if lock == 1 else 4)]:
+        put(WT, rel, "{\"evil\": 1}\n")   # злые настройки корня и первого уровня — приоритетный обход без срока
+    _ = lock and (os.chmod(os.path.join(WT, ".claude/skills/lock"), 0) if lock == 1 else setattr(C, "HANG_MAX", -1))
+    _ = shift and drift()
 
 
 def run_fail(fail, hits):   # git с кодом 128 на fail: ls-files -o — только первый вызов (план), ls-files -z — после merge
@@ -687,16 +688,16 @@ for shift, lock, blind, fail, words in (
         (0, 0, 0, (), ()), (0, 0, 1, (), ()), (1, 0, 0, ("ls-files", "-o"), ("возвращены к снимку", "ls-files -o не прошёл")),
         (0, 0, 0, ("ls-files", "-z"), ("индекс после слияния не сверен",)),
         (1, 1, 0, (), ("НЕ возвращены", "не открыта", "глубже 64", "владельцу", "/* и глубже")),
-        (0, 2, 0, (), ("срок прохода", "владельцу", "возвращены к снимку"))):
+        (1, 2, 0, (), ("срок обхода истёк", "НЕ возвращены", "владельцу"))):
     M.git_merge = lambda d, base, plan, a=shift, b=lock: gm_deep(d, base, plan, a, b)
     M.deep_walk = (lambda d, plan, bad, on_found: None) if blind else deep_walk   # вторая защита: пути индекса — и без обхода
-    C._run, t0 = run_fail(fail, []), time.monotonic()
+    C._run, t0, s0 = run_fail(fail, []), time.monotonic(), read(WT, ".claude/settings.json")
     res = handle(merge=True)
-    M.git_merge, M.deep_walk, C._run, took = git_merge, deep_walk, run_, time.monotonic() - t0
-    if lock == 1:
-        os.chmod(os.path.join(WT, ".claude/skills/lock"), 0o755)
-    left = [r for r in (SUBS, "app/.claude/settings.json", ".claude/skills/zz/f0.md", ".claude/hooks/x.sh")[:1 if blind else 4]
-            if os.path.lexists(os.path.join(WT, r))] + (["долго"] if took > 30 else [])
+    M.git_merge, M.deep_walk, C._run, took, C.HANG_MAX = git_merge, deep_walk, run_, time.monotonic() - t0, 600
+    _ = lock == 1 and os.chmod(os.path.join(WT, ".claude/skills/lock"), 0o755)
+    left = [r for r in (SUBS, "app/.claude/settings.json", ".claude/skills/zz/f0.md", ".claude/hooks/x.sh", ".mcp.json",
+                        "app/.mcp.json")[:1 if blind else 6] if os.path.lexists(os.path.join(WT, r))] + (
+        ["долго"] if took > 30 else []) + (["settings.json"] if read(WT, ".claude/settings.json") != s0 else [])
     check(f"--merge: {SUBS} (правка базы), app/.claude, 40 навыков {(shift, lock, blind, fail)} — новых нет, {words}",
           not left and (refused_with(res, "отменено", *words) and read(WT, ".claude/skills/a/SKILL.md") == "A1\n"
                         if words else res.get("state") == "done"), (left, res))

@@ -60,7 +60,8 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 SOFT = ("skills", "commands", "agents")   # удаление — только здесь: пропажа файла снимает возможность, не защиту
 WALK_MAX = 300000
 DEPTH_MAX = 64   # звеньев папок в обходе: вложенная копия и .claude — меньше 20
-PASS_MAX = 120   # срок всего прохода claude-sync, с (монотонные часы; обход его сверяет)
+PASS_MAX = 120   # срок обходов до первой записи (run) и после git merge, с (монотонные часы)
+HANG_MAX = 600   # потолок одного обхода отката и сверки — только от зависания: они линейны по числу записей
 DEADLINE = None
 NO_LIMIT = float("inf")   # обход для удаления и сверки: содержимое не держит, предела не нужно
 
@@ -221,17 +222,18 @@ def _open_parent(top_fd, parts, create=False):
         raise
 
 
-def walk(top_fd, keep, limit=None, nested=False, errors=None, on_found=None):
+def walk(top_fd, keep, limit=None, nested=False, errors=None, on_found=None, into=None, deadline=None):
     """Файлы и ссылки на диске копии, где keep(rel) (и on_found(rel) — сразу, по ходу): обход стеком открытых папок —
     ребёнок открыт от fd родителя O_NOFOLLOW (линейно по числу записей), по ссылкам не идёт, .git (в любом регистре)
     не обходит. Вложенные копии .claude/worktrees/* — только с nested, и тогда целиком. Предел limit (None — WALK_MAX,
     NO_LIMIT — без предела) — по найденным, а не по всем файлам. Отказ (Refused; с errors — строка туда, и обход дальше
-    или, при сроке, стоп): найденных больше limit, папку не прочесть, глубже DEPTH_MAX звеньев, истёк срок прохода."""
+    или, при сроке, стоп): найденных больше limit, папку не прочесть, глубже DEPTH_MAX звеньев, истёк срок (deadline
+    по монотонным часам; None — срок до первой записи DEADLINE, False — без срока). into(rel) — идти ли в папку rel."""
     found, limit, stack = [], limit or WALK_MAX, [[os.dup(top_fd), "", None]]
     try:
         while stack:
-            if DEADLINE is not None and time.monotonic() > DEADLINE:
-                _walk_err(errors, f"срок прохода ({PASS_MAX} с) истёк")
+            if _expired(DEADLINE if deadline is None else deadline):
+                _walk_err(errors, "срок обхода истёк")
                 break
             top = stack[-1]
             if top[2] is None:
@@ -247,7 +249,7 @@ def walk(top_fd, keep, limit=None, nested=False, errors=None, on_found=None):
                 if len(found) > limit:
                     raise Refused(f"в копии под защищёнными путями больше {limit} файлов — обход не уложился, "
                                   "приведи руками")
-            elif is_dir and fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED):
+            elif is_dir and fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED) and (not into or into(rel)):
                 _descend(stack, name, rel, errors)
     finally:
         for fd, _, _ in stack:
@@ -277,11 +279,25 @@ def _descend(stack, name, rel, errors):
             _walk_err(errors, f"{rel}/: не открыта ({type(e).__name__})")
 
 
-def grace(sec):
-    """Откату — свой срок обхода: не меньше sec от сейчас (проход мог свой истратить); вне прохода срока нет."""
+def _expired(deadline):
+    return deadline not in (None, False) and time.monotonic() > deadline
+
+
+def set_deadline(sec):
+    """Срок обходов до первой записи — sec от сейчас (run — с начала, git_merge — заново после merge)."""
     global DEADLINE
-    if DEADLINE is not None:
-        DEADLINE = max(DEADLINE, time.monotonic() + sec)
+    DEADLINE = time.monotonic() + sec
+
+
+def hot_dir(rel):
+    """Папка, откуда Claude Code берёт настройки и хуки: корень, папки первого уровня (ROOT_LEVELS), корни вложенных
+    копий .claude/worktrees/* и их первый уровень — и под ними .claude и .husky (кроме самих .claude/worktrees)."""
+    p = [fold(x) for x in rel.split("/")]
+    for i in range(len(p) + 1):
+        if len(p[:i]) <= 1 or (p[:2] == [".claude", "worktrees"] and i <= 4):
+            if i == len(p) or (p[i] in (".claude", ".husky") and p[i:i + 2] != [".claude", "worktrees"]):
+                return True
+    return False
 
 
 def _walk_err(errors, line):
@@ -633,7 +649,8 @@ def _note(out, merging):
 def run(rid, d, req, window, qdir):
     """Заявка claude-sync прохода серверов (handle в outside.py, папка уже проверена resolve_dir) → итог."""
     global DEADLINE
-    merging, DEADLINE = req.get("merge") is True, time.monotonic() + PASS_MAX
+    merging = req.get("merge") is True
+    set_deadline(PASS_MAX)
     try:
         d.top = open_top(str(d))
     except OSError as e:
