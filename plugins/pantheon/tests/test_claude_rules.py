@@ -13,6 +13,7 @@ import atexit
 import os
 import shutil
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -114,6 +115,37 @@ os.chmod(os.path.join(TOP, "a/b"), 0o755)
 check("walk: папку не открыть — с errors строка и обход дальше, без errors — Refused",
       errs == ["a/b/: не открыта (PermissionError)"] and ".claude/hooks/h.sh" in got and err is not None
       and "не открыта" in str(err), (errs, err))
+for n in (60, 70):   # цепочка папок: линейно и с пределом глубины
+    put("chain/" + "c/" * n + ".mcp.json")
+t0 = time.monotonic()
+errs, got = [], C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=[])
+took = time.monotonic() - t0
+check("walk: цепочка в 60 звеньев — быстрее 1 с, найдено внизу", took < 1 and "chain/" + "c/" * 60 + ".mcp.json" in got, took)
+C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs)
+try:
+    C.walk(top, deep, nested=True)
+    err = None
+except C.Refused as e:
+    err = e
+check("walk: глубже DEPTH_MAX — с errors строка, без errors — Refused", errs == ["chain/" + "c/" * 64 + ": глубже 64 звеньев"]
+      and err is not None and "глубже 64" in str(err), (errs, err))
+errs, bad_fd = [], os.open(TOP, os.O_RDONLY | os.O_DIRECTORY)
+os.close(bad_fd)   # папка открыта, а прочесть нельзя (EBADF) — как сбой чтения после открытия
+items = list(C._items([bad_fd, "x/", None], errs))
+try:
+    C._items([bad_fd, "x/", None], None)
+    err = None
+except C.Refused as e:
+    err = e
+check("walk: папку не прочесть — с errors строка и пусто, без errors — Refused",
+      items == [] and errs == ["x/: не прочитана (OSError)"] and err is not None and "не прочитана" in str(err), (errs, err))
+mono, ticks, seen, errs = C.time.monotonic, [0], [], []
+C.time.monotonic = lambda: ticks.__setitem__(0, ticks[0] + 1) or ticks[0]
+C.DEADLINE = 40
+C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.append)
+C.DEADLINE, C.time.monotonic = None, mono
+check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found", errs == [f"срок прохода ({C.PASS_MAX} с) истёк"]
+      and seen, (errs, seen))
 os.close(top)
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} проверок")

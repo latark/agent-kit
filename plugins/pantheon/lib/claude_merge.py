@@ -37,7 +37,9 @@ git — без GIT_*, глобальный конфиг /dev/null, core.hooksPat
     песочнице (git status, git checkout -- <пути>; новые неотслеживаемые — тоже в списке).
   - Обход — всегда полный: везде, в подпапках любой глубины и во вложенных копиях целиком. Предел WALK_MAX (по
     защищённым путям, не по всем файлам) — только у снимка, который держит содержимое; упёрся — отказ до первой
-    записи (проверка счёта — до приведения к HEAD). Обход для удаления и сверки — без предела: содержимое он не держит.
+    записи (проверка счёта — до приведения к HEAD). Обход для удаления и сверки — без предела: содержимое он не держит,
+    новое удаляет сразу по ходу. Обход линейный (стек открытых fd, ребёнок — от fd родителя), не глубже DEPTH_MAX
+    звеньев; срок всего прохода — PASS_MAX по монотонным часам, откату — ещё ROLLBACK_GRACE; сверх — громкий отказ.
     Папку не прочесть (OSError) — отказ громкий: «защищённые пути НЕ возвращены» и строка владельцу по шаблонам
     песочницы.
   - Вторая защита после merge: пути индекса копии (ls-files), защищённые для песочницы, которых нет ни в базе, ни в
@@ -61,6 +63,8 @@ BUILTIN = {"merge": {"text", "binary", "union"}, "filter": set(),
 MERGE_CFG = ("-c", "rerere.enabled=false", "-c", "merge.verifySignatures=false",
              "-c", "user.name=pantheon-outside", "-c", "user.email=outside@localhost")
 LINK = "120000"
+WALK_BAD = "обход не закончен"
+ROLLBACK_GRACE = 60   # откату — свой срок обхода, даже если проход свой истратил
 SNAP_MAX = 64 << 20   # снимок защищённых путей в памяти — до 64 МБ
 
 
@@ -314,12 +318,12 @@ def put(top, rel, st):
         C.write_file(top, rel, st[1], st[2])
 
 
-def deep_walk(d, plan, bad):
-    """Свой полный обход защищённых путей без предела (и во вложенных копиях); папку не прочесть — строка в bad."""
+def deep_walk(d, plan, bad, on_found):
+    """Свой полный обход защищённых путей без предела (и во вложенных копиях), on_found — сразу на каждый; папку не
+    прочесть, глубже DEPTH_MAX, срок истёк — строка в bad (с ней откат и строка владельцу)."""
     errs = []
-    found = C.walk(d.top, lambda r: C.deep(r, plan["pats"]), limit=C.NO_LIMIT, nested=True, errors=errs)
-    bad += [f"обход не закончен: {x}" for x in errs]
-    return found
+    C.walk(d.top, lambda r: C.deep(r, plan["pats"]), limit=C.NO_LIMIT, nested=True, errors=errs, on_found=on_found)
+    bad += [f"{WALK_BAD}: {x}" for x in errs]
 
 
 def owner_hint(d, pats):
@@ -331,15 +335,17 @@ def owner_hint(d, pats):
 
 
 def to_snapshot(d, plan):
-    """Защищённые пути и убранные файлы — байт в байт к снимку своей записью: нового под защищёнными путями (и
-    настроек, и хуков — их до прохода не было) — удалить, бывшее — вернуть → отказы. Обход оборвался — найденное новое
-    всё равно удаляется, а отказ громкий."""
+    """Защищённые пути и убранные файлы — байт в байт к снимку своей записью: новое под защищёнными путями (и
+    настройки, и хуки — их до прохода не было) удаляется сразу, по ходу обхода, бывшее — возвращается → отказы."""
     snap, bad = plan["snap"], []
-    for rel in sorted(set(deep_walk(d, plan, bad)) - set(snap)):
-        try:
-            C.delete_file(d.top, rel)
-        except OSError as e:
-            bad.append(f"{rel}: не удалён ({type(e).__name__})")
+
+    def drop_new(rel):
+        if rel not in snap:
+            try:
+                C.delete_file(d.top, rel)
+            except OSError as e:
+                bad.append(f"{rel}: не удалён ({type(e).__name__})")
+    deep_walk(d, plan, bad, drop_new)
     for rel, st in sorted(snap.items()):
         try:
             if grab(d.top, rel) != st:
@@ -433,6 +439,7 @@ def left_behind(d, plan, notes):
 def rollback(d, plan, why):
     """Откат без git merge --abort: копия, ветка и индекс — к head_sha (если копия не подменена), защищённые пути —
     к снимку своей записью → Refused с честной причиной."""
+    C.grace(ROLLBACK_GRACE)
     why_repo = repair(d)
     notes = [why_repo] if why_repo else git_back(d, plan)
     bad = to_snapshot(d, plan)
@@ -463,15 +470,16 @@ def git_merge(d, base, plan):
 
 def exact(d, base, plan):
     """После своей записи: под защищёнными путями ровно база, плюс бывшее до прохода не из базы (игнорируемое) — как в
-    снимке; новое — удалить → (сделано, отказы)."""
+    снимке; новое — удалить сразу, по ходу обхода, и пути индекса — тоже → (сделано, отказы)."""
     theirs, snap, done, bad = plan["theirs"], plan["snap"], [], []
-    for rel in sorted(set(deep_walk(d, plan, bad)) | set(index_deep(d, plan, bad))):
+
+    def fix(rel):
         if rel in theirs:
-            continue
+            return
         try:
             if rel not in snap:
                 if grab(d.top, rel) is None:
-                    continue   # путь индекса, которого на диске нет
+                    return   # путь индекса, которого на диске нет
                 C.delete_file(d.top, rel)
                 done.append(f"{rel}: удалён — появился во время слияния, его нет ни на базе, ни до прохода")
             elif grab(d.top, rel) != snap[rel]:
@@ -479,6 +487,9 @@ def exact(d, base, plan):
                 done.append(f"{rel}: возвращён к снимку до прохода")
         except OSError as e:
             bad.append(f"{rel}: не приведён ({type(e).__name__})")
+    deep_walk(d, plan, bad, fix)
+    for rel in index_deep(d, plan, bad):
+        fix(rel)
     for rel in plan["rels"]:
         if rel in theirs and not C.same(theirs[rel], C.disk_state(d.top, rel, len(base.tip))):
             bad.append(f"{rel}: не равен базе")
@@ -508,7 +519,8 @@ def after_merge(d, base, plan, out):
         rollback(d, plan, "после слияния защищённые пути не привести к базе: " + "; ".join(bad))
     more, bad = exact(d, base, plan)
     if bad:
-        rollback(d, plan, "после слияния под защищёнными путями не только база: " + "; ".join(bad))
+        rollback(d, plan, "после слияния под защищёнными путями не только база: " + "; ".join(bad)
+                 + (f" — {owner_hint(d, pats=plan['pats'])}" if any(x.startswith(WALK_BAD) for x in bad) else ""))
     conflicts = sorted({p.split("\t", 1)[-1] for p in _lines(C._out(d, "ls-files", "-u", "-z"))})
     out.update(conflicts=conflicts, merged=f"{base.name} {base.tip[:12]}")
     out["synced"] += [f"{rel}: удалён (неотслеживаемый, равен {base.name})" for rel in plan["drop"]]

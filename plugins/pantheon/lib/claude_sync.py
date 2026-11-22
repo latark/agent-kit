@@ -59,6 +59,9 @@ FILE_MODES = {"100644": 0o644, "100755": 0o755}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 SOFT = ("skills", "commands", "agents")   # удаление — только здесь: пропажа файла снимает возможность, не защиту
 WALK_MAX = 300000
+DEPTH_MAX = 64   # звеньев папок в обходе: вложенная копия и .claude — меньше 20
+PASS_MAX = 120   # срок всего прохода claude-sync, с (монотонные часы; обход его сверяет)
+DEADLINE = None
 NO_LIMIT = float("inf")   # обход для удаления и сверки: содержимое не держит, предела не нужно
 
 def set_core(core, outside):
@@ -218,39 +221,67 @@ def _open_parent(top_fd, parts, create=False):
         raise
 
 
-def walk(top_fd, keep, limit=None, nested=False, errors=None):
-    """Файлы и ссылки на диске копии, где keep(rel): свой обход от корня — звенья открыты O_NOFOLLOW, по ссылкам не
-    идёт, .git (в любом регистре) не обходит. Вложенные копии .claude/worktrees/* — только с nested, и тогда целиком.
-    Предел limit (None — WALK_MAX, NO_LIMIT — без предела) — по найденным (keep), а не по всем файлам: тысячи файлов
-    кода не обрывают обход. Refused — найденных больше limit или папку не прочесть; с errors — тогда строка туда и
-    обход дальше."""
-    found, todo, limit = [], [""], limit or WALK_MAX
-    while todo:
-        pre = todo.pop()
-        try:
-            fd = _open_parent(top_fd, (pre + "x").split("/")) if pre else os.dup(top_fd)
-        except OSError as e:   # звено сменилось на ссылку или пропало по ходу обхода — не идём; иное — громко
-            if e.errno not in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
-                _walk_err(errors, f"{pre}: не открыта ({type(e).__name__})")
-            continue
-        try:
-            with os.scandir(fd) as it:
-                items = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
-        except OSError as e:
-            _walk_err(errors, f"{pre or '.'}: не прочитана ({type(e).__name__})")
-            continue
-        finally:
+def walk(top_fd, keep, limit=None, nested=False, errors=None, on_found=None):
+    """Файлы и ссылки на диске копии, где keep(rel) (и on_found(rel) — сразу, по ходу): обход стеком открытых папок —
+    ребёнок открыт от fd родителя O_NOFOLLOW (линейно по числу записей), по ссылкам не идёт, .git (в любом регистре)
+    не обходит. Вложенные копии .claude/worktrees/* — только с nested, и тогда целиком. Предел limit (None — WALK_MAX,
+    NO_LIMIT — без предела) — по найденным, а не по всем файлам. Отказ (Refused; с errors — строка туда, и обход дальше
+    или, при сроке, стоп): найденных больше limit, папку не прочесть, глубже DEPTH_MAX звеньев, истёк срок прохода."""
+    found, limit, stack = [], limit or WALK_MAX, [[os.dup(top_fd), "", None]]
+    try:
+        while stack:
+            if DEADLINE is not None and time.monotonic() > DEADLINE:
+                _walk_err(errors, f"срок прохода ({PASS_MAX} с) истёк")
+                break
+            top = stack[-1]
+            if top[2] is None:
+                top[2] = _items(top, errors)
+            name, is_dir = next(top[2], (None, None))
+            if name is None:
+                os.close(stack.pop()[0])
+                continue
+            rel = top[1] + name
+            if not is_dir and keep(rel):
+                found.append(rel)
+                _ = on_found and on_found(rel)
+                if len(found) > limit:
+                    raise Refused(f"в копии под защищёнными путями больше {limit} файлов — обход не уложился, "
+                                  "приведи руками")
+            elif is_dir and fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED):
+                _descend(stack, name, rel, errors)
+    finally:
+        for fd, _, _ in stack:
             os.close(fd)
-        for name, is_dir in items:
-            rel = pre + name
-            if not is_dir:
-                if keep(rel):
-                    found.append(rel)
-            elif fold(name) != ".git" and (nested or fold(rel) + "/" != NESTED):
-                todo.append(rel + "/")
-        if len(found) > limit:
-            raise Refused(f"в копии под защищёнными путями больше {limit} файлов — обход не уложился, приведи руками")
     return sorted(found)
+
+
+def _items(top, errors):
+    """Записи открытой папки [fd, rel, _] → итератор (имя, папка ли); не прочесть — отказ или строка в errors."""
+    try:
+        with os.scandir(top[0]) as it:
+            return iter([(e.name, e.is_dir(follow_symlinks=False)) for e in it])
+    except OSError as e:
+        _walk_err(errors, f"{top[1] or '.'}: не прочитана ({type(e).__name__})")
+        return iter(())
+
+
+def _descend(stack, name, rel, errors):
+    """Папку name — от fd родителя (вершина стека) без ссылок на стек; глубже DEPTH_MAX — отказ или строка."""
+    if len(stack) > DEPTH_MAX:
+        _walk_err(errors, f"{rel}/: глубже {DEPTH_MAX} звеньев")
+        return
+    try:
+        stack.append([os.open(name, DIR_FLAGS, dir_fd=stack[-1][0]), rel + "/", None])
+    except OSError as e:   # звено сменилось на ссылку или пропало по ходу обхода — не идём; иное — громко
+        if e.errno not in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+            _walk_err(errors, f"{rel}/: не открыта ({type(e).__name__})")
+
+
+def grace(sec):
+    """Откату — свой срок обхода: не меньше sec от сейчас (проход мог свой истратить); вне прохода срока нет."""
+    global DEADLINE
+    if DEADLINE is not None:
+        DEADLINE = max(DEADLINE, time.monotonic() + sec)
 
 
 def _walk_err(errors, line):
@@ -601,7 +632,8 @@ def _note(out, merging):
 
 def run(rid, d, req, window, qdir):
     """Заявка claude-sync прохода серверов (handle в outside.py, папка уже проверена resolve_dir) → итог."""
-    merging = req.get("merge") is True
+    global DEADLINE
+    merging, DEADLINE = req.get("merge") is True, time.monotonic() + PASS_MAX
     try:
         d.top = open_top(str(d))
     except OSError as e:
@@ -616,6 +648,7 @@ def run(rid, d, req, window, qdir):
         O.log_event(id=rid, kind=KIND, window=window, dir=d, ok=False, why=why, merge=merging)
         return O.save_result(qdir, rid, {"state": "failed", "kind": KIND, "dir": d, "why": why})
     finally:
+        DEADLINE = None
         if d.top is not None:
             os.close(d.top)
     code = 1 if out["refused"] or out.get("conflicts") else 0
