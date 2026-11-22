@@ -95,6 +95,54 @@ max_delay = 180
 '''
 
 
+SECRET_DIRS = (".ssh", ".config/gh", ".codex", ".config/configstore", ".config/rclone", ".gnupg")  # К2 К3 К6 К7 К8 К14
+SECRET_FILES = (".netrc", ".git-credentials", ".config/git/credentials", ".npmrc",  # К4 К5 К9
+                ".zsh_history", ".bash_history")
+READ_TOOL_FILES = (".zshrc", ".claude.json")  # К11 К12: только Read, Grep, Glob
+
+
+def secret_class(check, env, load, names, sb):
+    """metis-1333, класс К1: каждое окно — папки ключей и файлы ключей закрыты и песочницей, и правилом Read.
+
+    Файл закрывается своей формой: `Read(~/.npmrc)`, а не `Read(~/.npmrc/**)` — та одиночный файл не ловит."""
+    h = env["HOME"]
+    bad = {}
+    for n in names:
+        deny_read = set((sb[n].get("filesystem") or {}).get("denyRead") or [])
+        rules = set(load(n).get("permissions", {}).get("deny", []))
+        e = load(n).get("env") or {}
+        miss = [d for d in SECRET_DIRS if os.path.join(h, d) not in deny_read or f"Read(~/{d}/**)" not in rules]
+        miss += [f for f in SECRET_FILES if os.path.join(h, f) not in deny_read or f"Read(~/{f})" not in rules
+                 or f"Read(~/{f}/**)" in rules]
+        miss += [f for f in READ_TOOL_FILES if f"Read(~/{f})" not in rules or os.path.join(h, f) in deny_read]
+        miss += [k for k in ("CONTEXT7_API_KEY", "SSH_AUTH_SOCK") if e.get(k) != ""]
+        npmrc = e.get("npm_config_userconfig") or ""
+        if not npmrc or npmrc.startswith(h + os.sep + ".npmrc"):
+            miss.append("npm_config_userconfig")
+        if miss:
+            bad[n] = miss
+    check("каждое окно: ~/.ssh, gh, codex, configstore, rclone, gnupg — папкой; .netrc, .git-credentials, "
+          ".npmrc, история оболочки — файлом (Read(~/f), без /**); .zshrc и .claude.json — правилом Read; "
+          "CONTEXT7_API_KEY и SSH_AUTH_SOCK пусты, npmrc — свой (metis-1333, К2–К14)",
+          not bad and len(names) >= 4, bad)
+    probe = f"""
+import json, sys
+sys.path.insert(0, {os.path.dirname(LIB)!r})
+import pantheon as p
+print(json.dumps(p.secret_read_rules()))
+"""
+    got = subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True)
+    try:
+        rules = json.loads(got.stdout)
+    except ValueError:
+        rules = []
+    files = [r for r in rules if not r.endswith("/**)")]
+    check("secret_read_rules: у файла форма без /** — и в ~/-виде, и в абсолютном (metis-1333)",
+          "Read(~/.npmrc)" in files and "Read(~/.zsh_history)" in files
+          and any(r.startswith("Read(//") and r.endswith("/.netrc)") for r in files)
+          and "Read(~/.ssh/**)" in rules and "Read(~/.ssh)" not in rules, (rules, got.stderr[-300:]))
+
+
 def keychain_gate(check, tmp, env, load):
     """metis-1333 (К1): у каждого окна с сетью Связка закрыта; gh шлюза и PR пачки — мимо песочницы окнам направлений."""
     gate_out = ["pantheon review accept", "pantheon review accept *", "pantheon review delta", "pantheon review delta *"]
@@ -108,6 +156,7 @@ def keychain_gate(check, tmp, env, load):
              or "Read(~/Library/Keychains/**)" not in load(n).get("permissions", {}).get("deny", [])]
     check("у каждого окна с сетью Связка закрыта: denyRead песочницы и правило Read (metis-1333, К1)",
           not no_kc and {"athena-shop", "metis-pantheon", "workshop", "mnemo-brain"} <= set(online), (online, no_kc))
+    secret_class(check, env, load, names, sb)
     exc = lambda n: sb[n].get("excludedCommands") or []  # noqa: E731
     dirs = [n for n in ("metis-pantheon", "athena-shop", "mnemo-brain") if n in sb]
     check("окна направлений (и без пакета): pantheon review accept|delta и batch pr мимо песочницы, report — нет "

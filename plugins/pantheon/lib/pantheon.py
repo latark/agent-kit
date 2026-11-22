@@ -2496,7 +2496,8 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("",
 # Голого git мимо песочницы нет (metis-0972, вариант А владельца 20.11): git исполнял бы хуки, fsmonitor, sshCommand и
 # конфиг папки окна (gitfile, commondir, include) вне её. Мимо песочницы — только обёртка `pantheon git push|fetch`
 # (gitout.py: настоящая папка git, конфиг без опасных ключей, remote — github.com, хуков нет), голый git push|fetch
-# окна guard отказывает (правило git-out)
+# окна guard отказывает (правило git-out). С metis-1333 (К2, К13) ~/.ssh и SSH_AUTH_SOCK окну закрыты: ssh в песочнице
+# теперь не видит ни ключей, ни known_hosts — сеть git только через эту обёртку
 GIT_OUT = ["pantheon git push", "pantheon git push *", "pantheon git fetch", "pantheon git fetch *"]
 COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
@@ -2514,7 +2515,22 @@ DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")
 # PANTHEON_MERGE_OUT, BATCH_PR_OUT, REVIEW_GH_OUT в window_rules.py). Проба 22.11: pnpm, npm, uv, supabase и curl Связку
 # в песочнице не читают; git credential-osxkeychain отдаёт пусто — git по https входит мимо песочницы (pantheon git)
 KEYCHAIN_DIR = os.path.join(HOME, "Library", "Keychains")
-WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR, KEYCHAIN_DIR)
+# Прочие секреты владельца вне Связки (metis-1333, таблица К модели угроз argus 22.11):
+# окну с сетью их нечем унести, если окно их не читает. Папки (К2 ~/.ssh: ключ без пароля = push в любой repo через
+# github.com:22 — ssh в песочнице и так не входит, `pantheon git push|fetch` идёт мимо неё; К3 gh; К6 ~/.codex — у
+# codex-dev свой CODEX_HOME в STATE; К7 firebase; К8 rclone; К14 gnupg) — правилом «папка/**»
+SECRET_HOME_DIRS = (".ssh", ".config/gh", ".codex", ".config/configstore", ".config/rclone", ".gnupg")
+WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR, KEYCHAIN_DIR,
+                      *(os.path.join(HOME, d) for d in SECRET_HOME_DIRS))
+# Секретные файлы (К4 netrc и помощники git, К5 токен реестра в ~/.npmrc, К9 история оболочки): правило «x/**» файл не
+# закрывает, поэтому у файла своя форма — сам путь и в denyRead, и в Read(…)
+WINDOW_SECRET_FILES = tuple(os.path.join(HOME, f) for f in (
+    ".netrc", ".git-credentials", ".config/git/credentials", ".npmrc", ".zsh_history", ".bash_history"))
+# Только инструментам Read, Grep, Glob (К11, К12): ~/.zshrc и ~/.claude.json хранят ключ context7, но Bash окна их
+# читает сам — снимок оболочки (PATH, alias) и `claude …` из песочницы; denyRead — после живой пробы
+WINDOW_READ_TOOL_FILES = tuple(os.path.join(HOME, f) for f in (".zshrc", ".claude.json"))
+# Переменные с ключами — окну пустыми (К10 ключ context7 из ~/.zshrc; К13 агент ssh — ключ без пароля, агент не нужен)
+WINDOW_SECRET_ENV = ("CONTEXT7_API_KEY", "SSH_AUTH_SOCK")
 
 
 def _home_form(p):
@@ -3017,6 +3033,18 @@ def _under(p, top):
     return p == top or p.startswith(top.rstrip("/") + "/")
 
 
+def _read_rule(x, tail):
+    return f"Read({x}{tail})" if x.startswith("~") else f"Read(/{x}{tail})"
+
+
+def secret_read_rules():
+    """Правила Read для секретов окна (metis-1333): папке — «x/**», файлу — сам путь (правило «x/**» файл не закрывает);
+    каждое — и «~/…», и настоящим путём «//…»."""
+    dirs = [_read_rule(x, "/**") for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS])]
+    files = [_read_rule(x, "") for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_FILES + WINDOW_READ_TOOL_FILES])]
+    return dirs + files
+
+
 def _deny_forms(paths):
     """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
     out = []
@@ -3182,6 +3210,9 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "NEXT_TELEMETRY_DISABLED": "1",
             "TURBO_TELEMETRY_DISABLED": "1",
             "DO_NOT_TRACK": "1",
+            # ~/.npmrc окну закрыт (WINDOW_SECRET_FILES, К5): npm и pnpm берут пустой npmrc кэша окна, а не падают
+            "npm_config_userconfig": os.path.join(cache, "npmrc"),
+            **{k: "" for k in WINDOW_SECRET_ENV},
         },
         "sandbox": {
             "enabled": True,
@@ -3199,13 +3230,13 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms(list(WINDOW_SECRET_DIRS)),
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms(list(WINDOW_SECRET_DIRS))
+                            + _deny_forms(list(WINDOW_SECRET_FILES)),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
-        # пароль демона CDP и ключи outside — и инструментам Read, Grep, Glob (песочница держит только Bash)
-        "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
-                                 for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS])]},
+        # пароль демона CDP, ключи outside и прочие секреты — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        "permissions": {"deny": secret_read_rules()},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
