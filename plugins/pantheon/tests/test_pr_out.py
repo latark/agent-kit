@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""pantheon pr create|edit|comment|ready (metis-1334, план metis-1331 PR-2a): gh pr мимо песочницы окна, проверки Д2 —
+"""pantheon pr create|edit|comment|ready (metis-1334, план metis-1331 PR-2a), close|reopen|update-branch (metis-1335,
+PR-2b): gh pr мимо песочницы окна, проверки Д2 —
 в самой команде (lib/pr_out.py). Каждая проверка — случай здесь, и у каждой встроенный мутант: копия lib с выключенной
 проверкой пускает опасную форму до gh — тест краснеет на откате.
 
@@ -200,7 +201,8 @@ try:
     # 3. до подкоманды — ничего
     case("флаг до подкоманды", ["-R", "x/y", "comment", "5", "-b", "x"])
     case("неизвестная подкоманда merge", ["merge", "5"])
-    case("close — не в этом PR (PR-2b)", ["close", "5"])
+    case("неизвестная подкоманда update (есть только update-branch)", ["update", "5"])
+    case("неизвестная подкоманда review", ["review", "5", "--approve"])
     # 5. позиционный — номер PR или ветка
     pos_mut = ('            if "://" in a or "#" in a or ".." in a or not SEL.fullmatch(a):\n', "            if False:\n")
     case("адрес PR позиционным", ["comment", "https://github.com/evil/x/pull/1", "-b", "x"], mut=pos_mut, why="адрес")
@@ -276,7 +278,52 @@ try:
     case("edit без номера на main", ["edit", "-t", "x"], why="базовая")
     r = cli("comment", "5", "-b", "x")
     check("comment по номеру с main — можно (номер — не ветка)", r.returncode == 0 and gh_args() is not None, r.stderr)
+    for sub in ("close", "reopen", "update-branch"):  # metis-1335: без номера на main — ветка PR базовая
+        case(f"{sub} без номера на main", [sub], mut=br_mut, why="базовая")
+    r = cli("close", "5")
+    check("close по номеру с main — можно", r.returncode == 0 and gh_args() == ["pr", "close", "5", "--repo=x/y"],
+          f"{gh_args()} {r.stderr}")
     git(repo, "switch", "-q", "1334-x")
+
+    # metis-1335 (план metis-1331 PR-2b): close, reopen, update-branch — по образцу create/edit
+    r = cli("close", "5", "-c", "дубль #6")
+    check("close: -c — это --comment (своя таблица коротких флагов), код 0",
+          r.returncode == 0 and gh_args() == ["pr", "close", "5", "--comment=дубль #6", "--repo=x/y"],
+          f"{gh_args()} {r.stderr}")
+    m = mutant("            short = SHORT_SUB.get(sub, SHORT)\n", "            short = SHORT\n")
+    r = cli("close", "5", "-c", "дубль #6", lib=m)
+    check("мутант убит: без SHORT_SUB -c у close не узнан — отказ до gh", refused(r), r.stderr)
+    r = cli("reopen", "1334-x", "--comment=снова")
+    check("reopen по ветке с --comment=… — код 0",
+          r.returncode == 0 and gh_args() == ["pr", "reopen", "1334-x", "--comment=снова", "--repo=x/y"],
+          f"{gh_args()} {r.stderr}")
+    m = mutant('"--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer", "--comment"}',
+               '"--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer"}')
+    r = cli("reopen", "1334-x", "--comment=снова", lib=m)
+    check("мутант убит: --comment не в VALUE — «--comment=…» отказ (булев флаг со значением)", refused(r), r.stderr)
+    r = cli("update-branch", "5", "--rebase", "-R", "x/y")
+    check("update-branch с --rebase и своим -R — код 0",
+          r.returncode == 0 and gh_args() == ["pr", "update-branch", "5", "--rebase", "--repo=x/y"],
+          f"{gh_args()} {r.stderr}")
+    r = cli("update-branch")
+    check("update-branch по текущей ветке (не базовой) — код 0",
+          r.returncode == 0 and gh_args() == ["pr", "update-branch", "--repo=x/y"], f"{gh_args()} {r.stderr}")
+    case("close -d (--delete-branch — удаление ветки необратимо)", ["close", "5", "-d"], mut=flag_mut,
+         why="--delete-branch")
+    case("close --delete-branch", ["close", "5", "--delete-branch"], mut=flag_mut, why="--delete-branch")
+    case("close --body (не из таблицы close)", ["close", "5", "--body", "x"], mut=flag_mut, why="не из таблицы")
+    case("close -b (короткий флаг create)", ["close", "5", "-b", "x"], why="-b")
+    case("update-branch --comment", ["update-branch", "5", "--comment", "x"], mut=flag_mut, why="не из таблицы")
+    case("update-branch -c", ["update-branch", "5", "-c", "x"], why="-c")
+    case("reopen -d", ["reopen", "5", "-d"], why="-d")
+    case("close -R чужой", ["close", "5", "-R", "evil/x"], why="только в репозитории origin")
+    case("close по ветке main", ["close", "main"], mut=br_mut, why="базовая")
+    case("reopen по ветке master", ["reopen", "master"], mut=br_mut, why="базовая")
+    case("update-branch: адрес PR позиционным", ["update-branch", "https://github.com/evil/x/pull/1"], mut=pos_mut,
+         why="адрес")
+    case("close: два позиционных", ["close", "5", "6"], why="лишние")
+    case("close в окне mnemo-brain", ["close", "5"], env={"PANTHEON_WINDOW": "mnemo-brain"}, mut=pers_mut, why="личным")
+    case("close с GH_REPO в окружении", ["close", "5"], env={"GH_REPO": "evil/x"}, why="GH_REPO")
 finally:
     shutil.rmtree(W, ignore_errors=True)
     if not OUT.startswith(W + os.sep):

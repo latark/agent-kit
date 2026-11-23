@@ -81,8 +81,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
-  pantheon pr create|edit|comment|ready [<N|ветка>] [флаги gh]   свой PR окна мимо песочницы (lib/pr_out.py,
-                                        metis-1334): репозиторий — origin своей папки, ветка не базовая, текст — из
+  pantheon pr create|edit|comment|ready|close|reopen|update-branch [<N|ветка>] [флаги gh]   свой PR окна мимо
+                                        песочницы (lib/pr_out.py, metis-1334, 1335): репозиторий — origin своей папки, ветка не базовая, текст — из
                                         временной папки или своей копии; одной командой в строке (guard pr-cmd)
   pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
                                         в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
@@ -2460,11 +2460,12 @@ GH_ISSUE_READ = [f"gh issue {c}{tail}" for c in ("view", "list") for tail in (""
 GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
 SANDBOX_EXCLUDED = GH_PR_READ + GH_ISSUE_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
                                  "pantheon alert *", "pantheon consent *", "pantheon saved *"]
-# PR создают и правят (заголовок, описание, метки — `gh pr edit`, metis-0247) лиды, сливает координатор или лид —
-# только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской — нет. metis-0533: ещё
-# `gh pr comment` (ответ ревью в PR) и `gh pr ready` (снять черновик) — без произвольного кода; текст — через
-# --body-file. `gh pr close|reopen|review`, запись в `gh issue`, `gh api`, `gh auth token`, `gh extension` — в песочнице
-GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment *", "gh pr ready *"]
+# Сливает координатор или лид — только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской
+# — нет. Голые `gh pr create|edit|comment|ready` (metis-0247, 0533) мимо песочницы больше не идут (metis-1335, план
+# metis-1331 PR-2b): PR окно создаёт, правит, закрывает, открывает снова и обновляет от base через `pantheon pr …`
+# (PR_OUT, lib/pr_out.py — проверки внутри команды). `gh pr review`, запись в `gh issue`, `gh api`, `gh auth token`,
+# `gh extension` — в песочнице
+GH_PR_WRITE = ["gh pr merge *"]
 # заявка на слияние по Touch ID (metis-1197) — тоже только окнам направлений, мимо песочницы: в ней gh pr view изнутри
 # pantheon падает (TLS Go), и очередь merge-queue в STATE окну на запись закрыта. Кто подаёт и на какой repo, судит
 # guard (pantheon-acl) и сам `pantheon merge request` ([merge_repos] metis-pantheon); сливает только плановый проход

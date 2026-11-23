@@ -164,9 +164,9 @@ def pure():
                  "pantheon git fetch origin && git switch -c metis-0001 origin/main",
                  "pantheon task set metis-0001 status=todo depends_on=metis-0009,metis-0655",
                  "pantheon git fetch origin && git switch -c metis-0001 origin/ci-billing-0655",
-                 "gh pr create -R latark/agent-kit --base ci-billing-0655",
+                 "pantheon pr create --base ci-billing-0655 --title … --body-file …  (репозиторий — origin папки, latark/agent-kit)",
                  "argus — только дельта своего PR: git diff origin/ci-billing-0655...HEAD",
-                 "после слияния #248 (--merge): gh pr edit <свой N> -R latark/agent-kit --base main — head тот же",
+                 "после слияния #248 (--merge): pantheon pr edit <свой N> --base main — head тот же",
                  "конфликт с main — git merge origin/main, не rebase",
                  "#248 слит squash или rebase — «принять» на новый head не переносится",
                  "Без открытого PR: metis-0002, metis-0003 — очередь: pantheon task set metis-0001 status=todo "

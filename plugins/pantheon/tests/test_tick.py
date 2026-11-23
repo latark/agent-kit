@@ -588,7 +588,7 @@ def main():
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     check("песочница: репозиторий с SSH-remote убран → у мастерской сетевого git снова нет",
           not any(x.startswith("git ") for x in load("workshop")["sandbox"]["excludedCommands"]))
-    pr_write = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment *", "gh pr ready *"]
+    pr_write = ["gh pr merge *"]  # metis-1335: create|edit|comment|ready — только `pantheon pr …` (PR_OUT)
     reads = ["gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr diff", "gh pr diff *",
              "gh pr list", "gh pr list *", "gh pr status", "gh pr status *"]
     issue_reads = ["gh issue view", "gh issue view *", "gh issue list", "gh issue list *"]
@@ -606,17 +606,20 @@ def main():
           "«gh run *» падают в песочнице",
           all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("gh run")) == sorted(run_reads)
               for w in (sa, sm, sn, sz, sw)))
-    check("gh pr create/edit/merge/comment/ready мимо песочницы — только в окнах направлений; у мастерской нет "
-          "(metis-0247, metis-0533)",
+    check("gh pr merge мимо песочницы — только в окнах направлений; у мастерской нет; голых create/edit/comment/ready "
+          "нет ни у кого из них (metis-0247, metis-0533, metis-1335)",
           all(all(c in w["sandbox"]["excludedCommands"] for c in pr_write) for w in (sa, sm, sn, sz))
           and not any(x.startswith(("gh pr create", "gh pr edit", "gh pr merge", "gh pr comment", "gh pr ready"))
-                      for x in sw["sandbox"]["excludedCommands"]))
-    # metis-0247, metis-0533: весь gh мимо песочницы окна направления — ровно этот список. gh api, запись в gh issue,
-    # gh pr close|reopen|review, gh run cancel, gh auth token, gh extension, «gh *» и «gh pr *» в него не попадают и в
+                      for x in sw["sandbox"]["excludedCommands"])
+          and not any(x.startswith(("gh pr create", "gh pr edit", "gh pr comment", "gh pr ready", "gh pr close",
+                                    "gh pr reopen", "gh pr update-branch"))
+                      for w in (sa, sm, sn, sz) for x in w["sandbox"]["excludedCommands"]))
+    # metis-0247, metis-0533, metis-1335: весь gh мимо песочницы окна направления — ровно этот список. gh api, запись в
+    # gh issue, голые gh pr create|edit|comment|ready|close|reopen|update-branch (они — через pantheon pr), gh pr review, gh run cancel, gh auth token, gh extension, «gh *» и «gh pr *» в него не попадают и в
     # песочнице падают (TLS Go, x509 -26276)
     coord_gh = sorted(reads + issue_reads + run_reads + ["gh repo view *", "gh auth status"] + pr_write)
-    check("окно координатора: gh мимо песочницы — ровно чтение и create/edit/merge/comment/ready; gh api и прочий gh — "
-          "нет (metis-0247, metis-0533)",
+    check("окно координатора: gh мимо песочницы — ровно чтение и merge; gh api и прочий gh — нет (metis-0247, "
+          "metis-0533, metis-1335)",
           all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.split()[0] == "gh") == coord_gh
               for w in (sa, sm, sn, sz)))
     # metis-1197: заявка на слияние — мимо песочницы только в окнах направлений (в ней gh из pantheon падает, TLS Go,
@@ -659,15 +662,19 @@ def main():
           and not any(excluded_by(c, sw["sandbox"]["excludedCommands"]) for c in sb_ok),
           [x for x in sa["sandbox"]["excludedCommands"] if "supabase" in x])
     exc = sa["sandbox"]["excludedCommands"]
-    ok_forms = ["gh pr create --title t --body-file b.md", "gh pr edit 5 --body-file b.md",
-                "gh pr comment 5 --body-file b.md", "gh pr ready 5", "gh pr status", "gh pr view 5 --json state",
+    ok_forms = ["pantheon pr create --title t --body-file b.md", "pantheon pr edit 5 --body-file b.md",
+                "pantheon pr comment 5 --body-file b.md", "pantheon pr ready 5", "pantheon pr close 5",
+                "pantheon pr reopen 5", "pantheon pr update-branch 5", "gh pr status", "gh pr view 5 --json state",
                 "gh issue view 7", "gh issue list --state open"]
     bad_forms = ["gh api -X DELETE repos/o/r/refs/heads/x", "gh api repos/o/r/issues", "gh auth token",
                  "gh extension install o/ext", "gh issue create --title t", "gh issue comment 7 --body x",
                  "gh issue close 7", "gh pr close 5", "gh pr reopen 5", "gh pr review 5 --approve", "gh pr checkout 5",
                  "gh pr", "gh pr comment", "gh run cancel 1", "gh alias set x 'api -X DELETE'",
                  "gh -R o/r pr comment 5", "gh config set editor x", "gh secret list", "gh release delete v1",
-                 "gh repo delete o/r", "gh pr-comment 5", "gh prx comment 5"]
+                 "gh repo delete o/r", "gh pr-comment 5", "gh prx comment 5",
+                 # metis-1335: голая запись в PR — в песочнице, мимо неё только pantheon pr
+                 "gh pr create --title t --body-file b.md", "gh pr edit 5 --body-file b.md",
+                 "gh pr comment 5 --body-file b.md", "gh pr ready 5", "gh pr update-branch 5"]
     check("gh мимо песочницы (metis-0533): нужные ролям формы проходят",
           all(excluded_by(c, exc) for c in ok_forms))
     check("gh мимо песочницы (metis-0533): опасные соседи (gh api -X DELETE, auth token, extension, запись в issue, "

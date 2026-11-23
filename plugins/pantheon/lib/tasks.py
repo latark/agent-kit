@@ -1557,9 +1557,9 @@ def overlap_text(tid, head, cross_tasks, cross_prs, notes=()):
             lines.append(f"      пока ждёт: pantheon task set {tid} status=todo depends_on={dep(closes[0])}")
         lines += [f"  Б — ветка от ветки (stacked PR): начать от ветки PR #{n}, свой PR — с базой его ветки.",
                   f"      pantheon git fetch origin && git switch -c {tid} origin/{br}",
-                  f"      gh pr create -R {repo} --base {br} --title … --body-file …",
+                  f"      pantheon pr create --base {br} --title … --body-file …  (репозиторий — origin папки, {repo})",
                   f"      argus — только дельта своего PR: git diff origin/{br}...HEAD",
-                  f"      после слияния #{n} (--merge): gh pr edit <свой N> -R {repo} --base main — head тот же, записи "
+                  f"      после слияния #{n} (--merge): pantheon pr edit <свой N> --base main — head тот же, записи "
                   "шлюза в силе; конфликт с main — git merge origin/main, не rebase",
                   f"      #{n} слит squash или rebase — «принять» на новый head не переносится: узкий круг argus на ту же дельту"]
     bare = [oid for oid, _, _, _ in cross_tasks if not by_task.get(oid)]
