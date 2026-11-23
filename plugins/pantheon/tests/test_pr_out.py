@@ -11,12 +11,29 @@ import subprocess
 import sys
 import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+from _py311 import PY311, mkroot  # CLI pantheon — только на Python 3.11+
 
-# корень — не в /tmp: /tmp — разрешённая папка --body-file, а файл «снаружи» должен быть снаружи (на Linux mkdtemp
-# даёт /tmp, берём /var/tmp; на macOS — /var/folders)
-_base = "/var/tmp" if os.path.realpath(tempfile.gettempdir()).startswith(("/tmp", "/private/tmp")) else None
-W = os.path.realpath(tempfile.mkdtemp(prefix="pr-out-test-", dir=_base))
+_TMP = ("/tmp", "/private/tmp")
+# корень — mkroot (AGENTS.md «Как проверять»): в окне роли песочница режет `.git/hooks` вне своего TMPDIR. Первым —
+# /var/tmp, если tempdir в /tmp (Linux); в окне корень ляжет в /tmp/claude-<uid>
+_base = "/var/tmp" if os.path.realpath(tempfile.gettempdir()).startswith(_TMP) else None
+W = os.path.realpath(mkroot("pr-out-test-", first=_base))
+
+
+def _outside_root():
+    """Папка файла «снаружи»: не в /tmp — /tmp разрешена --body-file. Только простой файл, git не нужен: годится и
+    PANTHEON_TMP окна (кэш окна), где `.git/hooks` закрыт. Ни одной — отказ последней строкой."""
+    for b in (W, _base, os.environ.get("PANTHEON_TMP"), tempfile.gettempdir()):
+        if b and os.path.isdir(b) and not os.path.realpath(b).startswith(_TMP):
+            try:
+                return os.path.realpath(tempfile.mkdtemp(prefix="pr-out-outside-", dir=b))
+            except OSError:
+                continue
+    shutil.rmtree(W, ignore_errors=True)
+    sys.exit("test_pr_out: нет папки вне /tmp для файла «снаружи» — задай PANTHEON_TMP или TMPDIR вне /tmp")
+
+
+OUT = _outside_root()
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 results = []
 
@@ -57,7 +74,7 @@ try:
     git(repo, "switch", "-q", "-c", "1334-x")
     tbody = os.path.join(tmpd, "b.md")
     open(tbody, "w").write("тело из временной папки\n")
-    outside = os.path.join(W, "outside.md")
+    outside = os.path.join(OUT, "outside.md")
     open(outside, "w").write("снаружи\n")
 
     # поддельный gh: аргументы через NUL в gh.log, окружение — в gh.env; код выхода из файла gh.code (если есть)
@@ -248,6 +265,8 @@ try:
     git(repo, "switch", "-q", "1334-x")
 finally:
     shutil.rmtree(W, ignore_errors=True)
+    if not OUT.startswith(W + os.sep):
+        shutil.rmtree(OUT, ignore_errors=True)
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if results and all(results) else 1)
